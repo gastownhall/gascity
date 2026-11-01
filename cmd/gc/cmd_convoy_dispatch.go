@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/spf13/cobra"
@@ -381,13 +382,29 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 }
 
 // validateDispatchSessionProviderConfig checks, once when a control
-// dispatcher starts, that the city's session provider can be constructed, so a
+// dispatcher starts, that the city's session provider config is valid, so a
 // broken [session] config fails the dispatcher at startup with a clear error
-// instead of surfacing only when a retry first recycles a session. It builds the
-// provider from config alone, without the session snapshot the recycle path
-// reads, so it costs no bd call.
+// instead of surfacing only when a retry first recycles a session. A marked K8s
+// worker validates static settings without constructing a client: its Pod has no
+// Kubernetes credentials, and live provider construction belongs to the controller.
 func validateDispatchSessionProviderConfig(cfg *config.City, cityPath string) error {
 	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
+	if isK8sManagedWorker(ctx.providerName) {
+		if _, err := runtimeRegistryForCity(cfg); err != nil {
+			return fmt.Errorf("control dispatcher: session provider config is invalid: %w", err)
+		}
+		if err := sessionk8s.ValidateStaticConfig(sessionk8s.PodSecurityConfig{
+			RunAsUser:  ctx.sc.K8s.RunAsUser,
+			RunAsGroup: ctx.sc.K8s.RunAsGroup,
+			FSGroup:    ctx.sc.K8s.FSGroup,
+		}); err != nil {
+			return fmt.Errorf("control dispatcher: session provider config is invalid: %w", err)
+		}
+		if err := config.ValidateK8sSecretProjection(cfg, "control dispatcher"); err != nil {
+			return fmt.Errorf("control dispatcher: session provider config is invalid: %w", err)
+		}
+		return nil
+	}
 	sp, err := newSessionProviderFromContext(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("control dispatcher: session provider config is invalid (retry session recycling would fail): constructing session provider: %w", err)
@@ -396,6 +413,16 @@ func validateDispatchSessionProviderConfig(cfg *config.City, cityPath string) er
 		return fmt.Errorf("control dispatcher: session provider config is invalid: no provider for %q", ctx.providerName)
 	}
 	return nil
+}
+
+// isK8sManagedWorker identifies only agent Pods created by the Kubernetes
+// provider. GC_SESSION_ID alone also marks local managed sessions and cannot
+// distinguish the worker's missing Kubernetes-credential boundary.
+func isK8sManagedWorker(providerName string) bool {
+	if strings.TrimSpace(os.Getenv("GC_SESSION_ID")) == "" || os.Getenv(config.K8sWorkerPodMarkerEnv) != "true" {
+		return false
+	}
+	return providerName == "k8s" || providerName == "hybrid"
 }
 
 // recycleDispatchSubjectSession returns the RecycleSession hook for a retry

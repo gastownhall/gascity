@@ -12,44 +12,54 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-// stageFiles copies overlay, copy_files, and rig workdir into the pod
-// via the init container, then signals it to exit. Copies extract in place, so
-// a failed copy is returned before that signal: the pod may hold a partial
-// tree, and the caller deletes it. A workdir or copy_files source that cannot
-// be stat'ed is skipped silently, whatever the error (absent, permission
-// denied, symlink loop), and so is a workdir that is not a directory. An
-// overlay dir is skipped only when absent; any other stat error, or a
-// non-directory, fails staging.
-func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Config, ctrlCity string, warn io.Writer) error {
+// stageFiles copies overlay, copy_files, and rig workdir into the pod via the
+// init container, then signals it to exit. Copies extract in place, so a
+// failed copy is returned before that signal: the pod may hold a partial tree,
+// and the caller deletes it. The result is true only when a real non-city
+// workdir directory completed its dedicated streamed copy. A workdir or
+// copy_files source that cannot be stat'ed is skipped silently, whatever the
+// error (absent, permission denied, symlink loop), and so is a workdir that is
+// not a directory. An overlay dir is skipped only when absent; any other stat
+// error, or a non-directory, fails staging.
+func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Config, ctrlCity string, warn io.Writer) (bool, error) {
 	// Wait for init container to be running (up to 60s).
 	if err := waitForInitContainer(ctx, ops, podName, 60*time.Second); err != nil {
-		return err
+		return false, err
 	}
 
 	// Wait for exec endpoint to be ready. The kubelet reports Running
 	// before the CRI exec handler is set up, so we poll a trivial command.
 	if err := waitForExecReady(ctx, ops, podName, 120*time.Second); err != nil {
-		return err
+		return false, err
 	}
 
-	// Copy rig work_dir into the pod.
-	podWorkDir := "/workspace"
-	if ctrlCity != "" && cfg.WorkDir != "" && cfg.WorkDir != ctrlCity {
-		if rel, ok := strings.CutPrefix(cfg.WorkDir, ctrlCity+"/"); ok {
-			podWorkDir = "/workspace/" + rel
-		}
+	// Copy the workdir to the same normalized pod path used by the pod spec
+	// and agent command. Keep the staged-copy result for City template skips.
+	workDirCity := strings.TrimSpace(ctrlCity)
+	if workDirCity == "" {
+		workDirCity = controllerCityPath(cfg.Env)
 	}
-	if cfg.WorkDir != "" && cfg.WorkDir != ctrlCity {
-		if err := copyDirToPod(ctx, ops, podName, "stage", cfg.WorkDir, podWorkDir); err != nil {
-			return fmt.Errorf("staging workdir %s to %s: %w", cfg.WorkDir, podWorkDir, err)
+	podWorkDir := projectedPodWorkDirForCity(workDirCity, cfg.WorkDir)
+	workDirStaged := false
+	workDirIsCityRoot := workDirCity != "" && filepath.Clean(cfg.WorkDir) == filepath.Clean(workDirCity)
+	if cfg.WorkDir != "" && !workDirIsCityRoot {
+		copied, err := copyDirToPodInternal(ctx, ops, podName, "stage", cfg.WorkDir, podWorkDir, "")
+		if err != nil {
+			return false, fmt.Errorf("staging workdir %s to %s: %w", cfg.WorkDir, podWorkDir, err)
 		}
+		workDirStaged = copied
+	}
+
+	if err := stageScopedStoreFiles(ctx, ops, podName, cfg, ctrlCity, podWorkDir); err != nil {
+		return false, err
 	}
 
 	if err := stageProviderOverlaysToPod(ctx, ops, podName, cfg, podWorkDir, warn); err != nil {
-		return err
+		return false, err
 	}
 
 	// Copy each copy_files entry.
@@ -59,7 +69,7 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 			dst = "/workspace/" + entry.RelDst
 		}
 		if err := copyToPod(ctx, ops, podName, "stage", entry.Src, dst); err != nil {
-			return fmt.Errorf("staging copy_file %s → %s: %w", entry.Src, dst, err)
+			return false, fmt.Errorf("staging copy_file %s → %s: %w", entry.Src, dst, err)
 		}
 	}
 
@@ -72,7 +82,37 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 	// Signal init container to exit.
 	_, err := ops.execInPod(ctx, podName, "stage",
 		[]string{"touch", "/workspace/.gc-ready"}, nil)
-	return err
+	if err != nil {
+		return false, err
+	}
+	return workDirStaged, nil
+}
+
+// relativeCityWorkDir returns the normalized city-relative path only when
+// workDir is a strict descendant of ctrlCity. Cleaning before filepath.Rel
+// avoids treating shared-prefix siblings as nested city paths.
+func relativeCityWorkDir(ctrlCity, workDir string) (string, bool) {
+	if ctrlCity == "" || workDir == "" {
+		return "", false
+	}
+	rel, err := filepath.Rel(filepath.Clean(ctrlCity), filepath.Clean(workDir))
+	if err != nil || rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return rel, true
+}
+
+// cityTemplateSkipRel authorizes omission only after the dedicated workdir
+// copy completed. The city template must retain the path for skipped sources.
+func cityTemplateSkipRel(workDirStaged bool, ctrlCity, workDir string) string {
+	if !workDirStaged {
+		return ""
+	}
+	rel, ok := relativeCityWorkDir(ctrlCity, workDir)
+	if !ok {
+		return ""
+	}
+	return rel
 }
 
 func stageProviderOverlaysToPod(ctx context.Context, ops k8sOps, podName string, cfg runtime.Config, podWorkDir string, warn io.Writer) error {
@@ -200,9 +240,27 @@ func waitForExecReady(ctx context.Context, ops k8sOps, podName string, timeout t
 
 // copyDirToPod copies a local directory into the pod via tar-based exec.
 func copyDirToPod(ctx context.Context, ops k8sOps, podName, container, srcDir, dstDir string) error {
+	_, err := copyDirToPodInternal(ctx, ops, podName, container, srcDir, dstDir, "")
+	return err
+}
+
+// copyDirToPodSkipping copies a local directory into the pod while omitting the
+// exact normalized relative subtree skipRel from the streamed archive.
+func copyDirToPodSkipping(ctx context.Context, ops k8sOps, podName, container, srcDir, dstDir, skipRel string) error {
+	_, err := copyDirToPodInternal(ctx, ops, podName, container, srcDir, dstDir, skipRel)
+	return err
+}
+
+// copyDirToPodInternal reports copied=true only when srcDir was a directory
+// and the streamed copy was acknowledged by the pod.
+func copyDirToPodInternal(ctx context.Context, ops k8sOps, podName, container, srcDir, dstDir, skipRel string) (bool, error) {
+	normalizedSkipRel, err := validateSkipRel(skipRel)
+	if err != nil {
+		return false, err
+	}
 	info, err := os.Stat(srcDir)
 	if err != nil || !info.IsDir() {
-		return nil // skip silently if not a directory
+		return false, nil // skip silently if not a directory
 	}
 
 	// Create destination directory in the pod.
@@ -213,7 +271,7 @@ func copyDirToPod(ctx context.Context, ops k8sOps, podName, container, srcDir, d
 	// tar extractor so the archive is never held in memory.
 	err = streamArchive(
 		func(w io.Writer, entriesComplete func()) error {
-			if err := tarDirWithWalkComplete(srcDir, w, entriesComplete); err != nil {
+			if err := tarDirSkippingWithWalkComplete(srcDir, normalizedSkipRel, w, entriesComplete); err != nil {
 				return fmt.Errorf("creating tar of %s: %w", srcDir, err)
 			}
 			return nil
@@ -229,9 +287,20 @@ func copyDirToPod(ctx context.Context, ops k8sOps, podName, container, srcDir, d
 			return nil
 		})
 	if err != nil {
-		return fmt.Errorf("copying directory %s to pod %s:%s: %w", srcDir, podName, dstDir, err)
+		return false, fmt.Errorf("copying directory %s to pod %s:%s: %w", srcDir, podName, dstDir, err)
 	}
-	return nil
+	return true, nil
+}
+
+func validateSkipRel(skipRel string) (string, error) {
+	if skipRel == "" {
+		return "", nil
+	}
+	cleaned := filepath.Clean(skipRel)
+	if filepath.IsAbs(skipRel) || filepath.VolumeName(skipRel) != "" || cleaned != skipRel || cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("invalid relative subtree %q", skipRel)
+	}
+	return cleaned, nil
 }
 
 var (
@@ -290,6 +359,32 @@ func streamArchive(produce func(io.Writer, func()) error, consume func(io.Reader
 }
 
 // copyToPod copies a single file or directory to the pod.
+// stageScopedStoreFiles copies a hosted store's identity files into the pod when
+// they would not otherwise arrive. A session's work directory can sit outside its
+// store root, such as a managed worktree, and gc init never copies nested .beads
+// state, yet startup verifies these files at the store root.
+func stageScopedStoreFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Config, ctrlCity, podWorkDir string) error {
+	storeRoot := strings.TrimSpace(cfg.Env["GC_STORE_ROOT"])
+	if storeRoot == "" || strings.TrimSpace(cfg.Env["GC_BEADS_PROJECT_ID"]) == "" {
+		return nil
+	}
+	storeRoot = filepath.Clean(storeRoot)
+	if storeRoot == filepath.Clean(ctrlCity) || storeRoot == filepath.Clean(cfg.WorkDir) {
+		return nil
+	}
+	podStoreRoot := projectedPodStoreRoot(cfg, podWorkDir)
+	for _, rel := range []string{
+		filepath.Join(".beads", "metadata.json"),
+		contract.ProjectIdentityPath(""),
+		filepath.Join(".beads", "config.yaml"),
+	} {
+		if err := copyToPod(ctx, ops, podName, "stage", filepath.Join(storeRoot, rel), filepath.Join(podStoreRoot, rel)); err != nil {
+			return fmt.Errorf("staging store file %s: %w", rel, err)
+		}
+	}
+	return nil
+}
+
 func copyToPod(ctx context.Context, ops k8sOps, podName, container, src, dst string) error {
 	info, err := os.Stat(src)
 	if err != nil {
@@ -323,8 +418,16 @@ func tarDir(dir string, w io.Writer) error {
 }
 
 func tarDirWithWalkComplete(dir string, w io.Writer, onComplete func()) error {
+	return tarDirSkippingWithWalkComplete(dir, "", w, onComplete)
+}
+
+func tarDirSkippingWithWalkComplete(dir, skipRel string, w io.Writer, onComplete func()) error {
+	normalizedSkipRel, err := validateSkipRel(skipRel)
+	if err != nil {
+		return err
+	}
 	tw := tar.NewWriter(w)
-	if err := walkTar(dir, tw); err != nil {
+	if err := walkTarSkipping(dir, tw, normalizedSkipRel); err != nil {
 		return err
 	}
 	if onComplete != nil {
@@ -333,7 +436,7 @@ func tarDirWithWalkComplete(dir string, w io.Writer, onComplete func()) error {
 	return tw.Close()
 }
 
-func walkTar(dir string, tw *tar.Writer) error {
+func walkTarSkipping(dir string, tw *tar.Writer, skipRel string) error {
 	return filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -344,6 +447,12 @@ func walkTar(dir string, tw *tar.Writer) error {
 			return err
 		}
 		if rel == "." {
+			return nil
+		}
+		if skipRel != "" && rel == skipRel {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 

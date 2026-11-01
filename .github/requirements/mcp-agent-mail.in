@@ -2,26 +2,24 @@
 # publishes current wheel/sdist assets.
 mcp-agent-mail @ https://github.com/Dicklesworthstone/mcp_agent_mail/archive/32783f6848bd63c425c4b5004cee3350016635fb.tar.gz
 
-# Security floor: GitPython < 3.1.59 has multiple HIGH-severity command
-# injection and path traversal advisories reported by the image gate, plus
-# CVE-2026-78676 (CRITICAL, remote code execution); < 3.1.60 adds
-# CVE-2026-87817 (HIGH, remote code execution) and CVE-2026-87819 (HIGH,
-# regular-expression denial of service); <= 3.1.61 adds GHSA-59cr-6r3x-644w
-# (MEDIUM, submodule update path traversal writes outside the repository).
-# Pinning the floor ensures the resolver picks the patched version even if
-# mcp-agent-mail's transitive constraint allows older.
+# Security floor: GitPython 3.2.0 fixes four HIGH findings present through
+# 3.1.62: GHSA-23mf-xhv8-69c2, GHSA-f9j4-qggq-h239, GHSA-m64x-33q8-m5h7, and
+# GHSA-w8jc-g24h-crhw. Pin the reviewed 3.2.1 wheel exactly.
 #
-# Ceiling: GitPython 3.2 validates paths on every index read, which makes
-# mcp-agent-mail's archive commits 1.5-2.9x slower. Under a 400-message burst,
-# 3.2.1 delivered 293-322 against about 395 on 3.1.x; the rest timed out on the
-# archive lock (review of #8307,
+# Performance: the original #8307 image evidence measured GitPython 3.2.1
+# archive commits 1.5-2.9x slower, with 293-322 of 400 messages delivered vs
+# about 395 on 3.1.x. A bounded memoization layer now wraps GitPython 3.2.1's
+# unchanged path validator. The image scan differentially checks the wrapper
+# and compares three alternating-order 400-message application trials against
+# 3.1.62, requiring full delivery and limiting median wall/commit-p95 ratios.
+# Do not remove either gate or broaden the dependency range without repeating
+# that evidence (review of #8307:
 # https://github.com/gastownhall/gascity/pull/8307#pullrequestreview-5645840708).
-# 3.2.1 is the only fix for GHSA-83vg-56qc-22m7 / CVE-2026-114145 (HIGH,
-# create_submodule clones before validating the submodule path). There is no
-# 3.1.x backport, but mcp-agent-mail never creates or updates submodules, so the
-# advisory is unreachable and is waived in .trivyignore.yaml for this release.
-# Lift the ceiling once a GitPython release fixes the commit-latency regression.
-gitpython>=3.1.62,<3.2
+#
+# GitPython 3.2.1 also fixes CVE-2026-114145 / GHSA-83vg-56qc-22m7. The mail
+# image therefore needs no GitPython vulnerability waiver; the bounded cache
+# exists only to retain the validated version's archive performance.
+gitpython==3.2.1
 
 # Security floor: CVE-2026-69244 affects aiohttp < 3.14.3; GHSA-494j-54xm-rwp3,
 # GHSA-5wr8-gcqf-gqf3, GHSA-2g87-pp6c-29x5, GHSA-9xw5-w5jj-pvcg,
@@ -82,10 +80,14 @@ idna>=3.15
 litellm>=1.106.3
 
 # Security floor: CVE-2026-49852 (HIGH, HS256/HS384/HS512 verify accepts an
-# empty/nil HMAC key — cross-language sibling of CVE-2026-45363) in joserfc
-# < 1.6.8. joserfc arrives transitively via authlib; pin the floor until
-# authlib's transitive constraint carries the patched version itself.
-joserfc>=1.6.8
+# empty/nil HMAC key — cross-language sibling of CVE-2026-45363) affects
+# joserfc < 1.6.8; CVE-2026-119283 (HIGH, unbounded JWE recipient decrypts)
+# affects < 1.7.5; and CVE-2026-119284 (MEDIUM, oversized compact JWS data is
+# copied before rejection) affects < 1.7.6. joserfc arrives transitively via
+# authlib. Pin the floor at 1.7.7, the latest reviewed release, until authlib's
+# transitive constraint carries it. The mail JWT decoder compatibility smoke
+# runs against the image in container-scan.yml.
+joserfc>=1.7.7
 
 # Security floor: CVE-2026-52869 + CVE-2026-52870 (HIGH, fixed 1.27.2 — HTTP
 # transports serve session requests without verifying the authenticated

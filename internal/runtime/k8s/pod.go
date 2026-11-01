@@ -1,11 +1,16 @@
 package k8s
 
 import (
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"maps"
+	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -13,6 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -27,6 +33,12 @@ const (
 	// "ws" EmptyDir mount point for staged pods and the image WORKDIR for
 	// prebaked ones — so it is what the pod spec's WorkingDir may safely name.
 	podWorkspaceRoot = "/workspace"
+
+	// Linux limits the size of one execve argument to 128 KiB. Keep encoded
+	// command chunks well below that limit while allowing the full prompt payload
+	// to retain the existing shared prompt-resolution threshold.
+	agentCommandChunkSize = 32 * 1024
+	agentCommandArg0      = "gc-agent-command"
 )
 
 func controllerCityPath(cfgEnv map[string]string) string {
@@ -52,38 +64,143 @@ func remapControllerPathToPod(val, ctrlCity string) string {
 	return val
 }
 
+func remapRigRootToPod(val, ctrlCity string) string {
+	val = strings.TrimSpace(val)
+	ctrlCity = strings.TrimSpace(ctrlCity)
+	if val == "" || ctrlCity == "" {
+		return val
+	}
+	if !filepath.IsAbs(ctrlCity) {
+		if abs, err := filepath.Abs(ctrlCity); err == nil {
+			ctrlCity = abs
+		}
+	}
+	if !filepath.IsAbs(val) {
+		val = filepath.Join(ctrlCity, val)
+	}
+	val, err := filepath.Abs(val)
+	if err != nil {
+		return val
+	}
+	ctrlCity = filepath.Clean(ctrlCity)
+	val = filepath.Clean(val)
+	rel, err := filepath.Rel(ctrlCity, val)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return val
+	}
+	return filepath.Clean(filepath.Join(podWorkspaceRoot, rel))
+}
+
 // projectedPodWorkDir maps the controller-side WorkDir onto its pod-side path.
 // For a pool or workflow worker this is a per-bead directory
 // (<rig>/<beadID>-<slug>) that does not exist until the entrypoint creates it.
 func projectedPodWorkDir(cfg runtime.Config) string {
+	return projectedPodWorkDirForCity(controllerCityPath(cfg.Env), cfg.WorkDir)
+}
+
+func projectedPodWorkDirForCity(ctrlCity, workDir string) string {
 	podWorkDir := podWorkspaceRoot
-	ctrlCity := controllerCityPath(cfg.Env)
-	if ctrlCity != "" && cfg.WorkDir != "" && cfg.WorkDir != ctrlCity {
-		if rel, ok := strings.CutPrefix(cfg.WorkDir, ctrlCity+"/"); ok {
-			podWorkDir = podWorkspaceRoot + "/" + rel
-		}
+	ctrlCity = strings.TrimSpace(ctrlCity)
+	if ctrlCity == "" || workDir == "" {
+		return podWorkDir
+	}
+	cityRoot, err := filepath.Abs(ctrlCity)
+	if err != nil {
+		return podWorkDir
+	}
+	if !filepath.IsAbs(workDir) {
+		workDir = filepath.Join(cityRoot, workDir)
+	}
+	workDir, err = filepath.Abs(workDir)
+	if err != nil {
+		return podWorkDir
+	}
+	rel, err := filepath.Rel(filepath.Clean(cityRoot), filepath.Clean(workDir))
+	if err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		podWorkDir = filepath.Join(podWorkspaceRoot, rel)
 	}
 	return podWorkDir
 }
 
-// agentCommandB64 resolves the agent command, remaps controller-side city path
-// references to the pod-side /workspace, and returns its base64 form. Shared by
-// buildPod (the pod entrypoint) and Relaunch (respawn over execInPod) so the
-// entrypoint launch and a relaunch produce a byte-identical command.
+// agentCommandB64 resolves the agent command and its configured startup prompt,
+// remaps controller-side city path references to the pod-side /workspace, and
+// returns its base64 form. PromptSuffix is already shell-quoted by the shared
+// prompt-delivery resolver; it is empty for nudge-mode and oversized fallback.
+// Shared by buildPod (the pod entrypoint) and Relaunch (respawn over execInPod)
+// so the entrypoint launch and a relaunch produce a byte-identical command.
 func agentCommandB64(cfg runtime.Config) string {
 	cmd := cfg.Command
 	if cmd == "" {
 		cmd = "/bin/bash"
 	}
+	if cfg.PromptSuffix != "" {
+		if cfg.PromptFlag != "" {
+			cmd += " " + cfg.PromptFlag + " " + cfg.PromptSuffix
+		} else {
+			cmd += " " + cfg.PromptSuffix
+		}
+	}
 	// The controller expands {{.ConfigDir}} templates using its own city path
-	// (e.g. /city/packs/...) but pods have files at /workspace/....
+	// (e.g. /city/packs/...) but pods have files at /workspace/.... Apply this
+	// after adding the prompt so path references in either part are remapped.
 	if ctrlCity := controllerCityPath(cfg.Env); ctrlCity != "" {
 		cmd = strings.ReplaceAll(cmd, ctrlCity, "/workspace")
 	}
 	return base64.StdEncoding.EncodeToString([]byte(cmd))
 }
 
-// buildRespawnCommand builds the in-pod shell command that respawns the agent in
+func agentCommandChunks(cfg runtime.Config) []string {
+	encoded := agentCommandB64(cfg)
+	chunks := make([]string, 0, (len(encoded)+agentCommandChunkSize-1)/agentCommandChunkSize)
+	for len(encoded) > 0 {
+		chunkLen := agentCommandChunkSize
+		if len(encoded) < chunkLen {
+			chunkLen = len(encoded)
+		}
+		chunks = append(chunks, encoded[:chunkLen])
+		encoded = encoded[chunkLen:]
+	}
+	return chunks
+}
+
+// agentCommandShellArgs puts the command chunks after the shell's $0 argument.
+// The static script can therefore reconstruct the payload from "$@" without
+// embedding a long encoded string or the decoded command in shell source.
+func agentCommandShellArgs(script string, cfg runtime.Config) []string {
+	args := []string{script, agentCommandArg0}
+	return append(args, agentCommandChunks(cfg)...)
+}
+
+// buildAgentLaunchCommand builds the static shell transport shared by Start and
+// Relaunch. Dynamic-user launches stream the encoded command through stdin to a
+// static su -c script; the inner script decodes it before passing the command
+// to tmux as one quoted argument. suExports carries the main-container's
+// remote-stage identity through a login shell; Relaunch relies on the durable
+// record it writes before respawn. tmuxCommand is fixed by the caller.
+func buildAgentLaunchCommand(cfg runtime.Config, tmuxCommand string, keepAlive bool, suExports string) string {
+	keepAliveSuffix := ""
+	if keepAlive {
+		keepAliveSuffix = " && sleep infinity"
+	}
+
+	if user := cfg.Env["LINUX_USERNAME"]; user != "" {
+		userScript := fmt.Sprintf(
+			`%sCMD=$(base64 -d) && cd %s && %s "$CMD"%s`,
+			suExports, shellquote.Quote(projectedPodWorkDir(cfg)), tmuxCommand, keepAliveSuffix,
+		)
+		return fmt.Sprintf(
+			`printf '%%s' "$@" | su - %s -c %s`,
+			shellquote.Quote(user), shellquote.Quote(userScript),
+		)
+	}
+
+	return fmt.Sprintf(
+		`CMD=$(printf '%%s' "$@" | base64 -d) && %s "$CMD"%s`,
+		tmuxCommand, keepAliveSuffix,
+	)
+}
+
+// buildRespawnCommand builds the in-pod shell argv that respawns the agent in
 // the existing tmux "main" session (respawn-pane -k), reusing the warm pod. When
 // LINUX_USERNAME is set the entrypoint runs tmux under `su - <user>`, so the
 // respawn is wrapped in the same su to reach that user's tmux socket.
@@ -93,18 +210,10 @@ func agentCommandB64(cfg runtime.Config) string {
 // environment. The server got the remote-stage variables when the entrypoint
 // started it (suRemoteStageExports for LINUX_USERNAME), and Relaunch writes the
 // on-disk record before respawning, which covers a pod created without them.
-func buildRespawnCommand(cfg runtime.Config) string {
-	cmdB64 := agentCommandB64(cfg)
-	if user := cfg.Env["LINUX_USERNAME"]; user != "" {
-		return fmt.Sprintf(
-			`CMD=$(echo '%s' | base64 -d) && su - %s -c "cd %s && tmux respawn-pane -k -t %s \"$CMD\""`,
-			cmdB64, user, projectedPodWorkDir(cfg), tmuxSession,
-		)
-	}
-	return fmt.Sprintf(
-		`CMD=$(echo '%s' | base64 -d) && tmux respawn-pane -k -t %s "$CMD"`,
-		cmdB64, tmuxSession,
-	)
+func buildRespawnCommand(cfg runtime.Config) []string {
+	script := buildAgentLaunchCommand(cfg, fmt.Sprintf("tmux respawn-pane -k -t %s", tmuxSession), false, "")
+	args := []string{"sh", "-c"}
+	return append(args, agentCommandShellArgs(script, cfg)...)
 }
 
 func projectedPodStoreRoot(cfg runtime.Config, podWorkDir string) string {
@@ -211,10 +320,48 @@ func projectedPodDoltEnv(cfgEnv map[string]string, managedHost, managedPort stri
 	return projected, nil
 }
 
+// validateProjectedHostedStoreIdentity fails before pod creation when a
+// projected hosted endpoint lacks the exact identity for its store scope.
+// prefix is empty for the selected store and "GC_K8S_CITY_" for gc init.
+func validateProjectedHostedStoreIdentity(cfgEnv map[string]string, prefix, managedHost, managedPort string) (map[string]string, error) {
+	hostKey, portKey := "GC_DOLT_HOST", "GC_DOLT_PORT"
+	managedLocalKey := "GC_DOLT_MANAGED_LOCAL"
+	projectKey, issuePrefixKey, databaseKey, rootKey := "GC_BEADS_PROJECT_ID", "GC_BEADS_PREFIX", "GC_DOLT_DATABASE", "GC_STORE_ROOT"
+	if prefix != "" {
+		hostKey, portKey = prefix+"DOLT_HOST", prefix+"DOLT_PORT"
+		managedLocalKey = prefix + "DOLT_MANAGED_LOCAL"
+		projectKey, issuePrefixKey, databaseKey, rootKey = prefix+"BEADS_PROJECT_ID", prefix+"BEADS_PREFIX", prefix+"DOLT_DATABASE", prefix+"STORE_ROOT"
+	}
+	projected, err := projectedPodDoltEnv(map[string]string{
+		"GC_DOLT_HOST":          cfgEnv[hostKey],
+		"GC_DOLT_PORT":          cfgEnv[portKey],
+		"GC_DOLT_MANAGED_LOCAL": cfgEnv[managedLocalKey],
+	}, managedHost, managedPort)
+	if err != nil {
+		return nil, err
+	}
+	if len(projected) == 0 {
+		return projected, nil
+	}
+	for _, key := range []string{projectKey, issuePrefixKey, databaseKey, rootKey} {
+		if strings.TrimSpace(cfgEnv[key]) == "" {
+			return nil, fmt.Errorf("hosted Dolt session is missing scoped store identity %s", key)
+		}
+	}
+	port, err := strconv.Atoi(projected["GC_DOLT_PORT"])
+	if err != nil || port < 1 || port > 65535 {
+		return nil, fmt.Errorf("invalid projected GC_DOLT_PORT %q", projected["GC_DOLT_PORT"])
+	}
+	return projected, nil
+}
+
 // buildPod creates a pod manifest compatible with gc-session-k8s.
 // Same labels, annotations, container names, volumes, and tmux-inside-pod
 // pattern so mixed-mode migration works.
 func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error) {
+	if err := validateSecretProjection(p.secretEnv, p.secretMounts); err != nil {
+		return nil, err
+	}
 	podName := SanitizeName(name)
 	label := SanitizeLabel(name)
 	agentName := cfg.Env["GC_ALIAS"]
@@ -230,11 +377,22 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	// Controller resolves dirs relative to its city path; pods use /workspace.
 	podWorkDir := projectedPodWorkDir(cfg)
 	ctrlCity := controllerCityPath(cfg.Env)
-
-	// Build the agent command (base64-encoded to avoid quoting issues) — shared
-	// with the relaunch path so the entrypoint and a respawn launch identically.
-	cmdB64 := agentCommandB64(cfg)
-
+	if _, err := resolvePodHostedDoltIdentity(cfg.Env, "", p.managedServiceHost, p.managedServicePort); err != nil {
+		return nil, fmt.Errorf("scoped store identity: %w", err)
+	}
+	if !p.prebaked {
+		if _, err := resolvePodHostedDoltIdentity(cfg.Env, "GC_K8S_CITY_", p.managedServiceHost, p.managedServicePort); err != nil {
+			return nil, fmt.Errorf("city store identity: %w", err)
+		}
+	}
+	rigProjectionMarker := ""
+	if strings.TrimSpace(cfg.Env["GC_RIG"]) != "" {
+		var nonce [16]byte
+		if _, err := rand.Read(nonce[:]); err != nil {
+			return nil, fmt.Errorf("creating rig projection readiness marker: %w", err)
+		}
+		rigProjectionMarker = "/tmp/gc-rig-projection-ready-" + hex.EncodeToString(nonce[:])
+	}
 	// Pod entrypoint: wait for workspace ready → pre_start → tmux → keepalive.
 	// Each pre_start command is base64-encoded and decoded at runtime to prevent
 	// shell metacharacter injection from user-supplied commands.
@@ -252,6 +410,9 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	// as root (see securityContext below), creates the user, sets up workspace
 	// ownership, then drops privileges via su for the tmux session.
 	linuxUsername := cfg.Env["LINUX_USERNAME"]
+	if linuxUsername != "" && hasConfiguredPodIdentity(p.podSecurity) {
+		return nil, fmt.Errorf("LINUX_USERNAME cannot be combined with explicit Kubernetes pod identity (session.k8s.run_as_user/run_as_group/fs_group or GC_K8S_RUN_AS_USER/GC_K8S_RUN_AS_GROUP/GC_K8S_FS_GROUP)")
+	}
 	var userSetup string
 	if linuxUsername != "" {
 		userSetup = fmt.Sprintf(
@@ -268,7 +429,10 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	credCopy := `mkdir -p $HOME/.claude && cp -rL /tmp/claude-secret/. $HOME/.claude/ 2>/dev/null; git config --global --add safe.directory '*' 2>/dev/null; `
 	wsWait := ""
 	if !p.prebaked {
-		wsWait = `while [ ! -f /workspace/.gc-workspace-ready ]; do sleep 0.5; done; `
+		wsWait += `while [ ! -f /workspace/.gc-workspace-ready ]; do sleep 0.5; done; `
+	}
+	if rigProjectionMarker != "" {
+		wsWait += fmt.Sprintf("while [ ! -f %s ]; do sleep 0.5; done; ", shellquote.Quote(rigProjectionMarker))
 	}
 
 	// The pod spec's WorkingDir names the workspace root, because the kubelet
@@ -283,40 +447,36 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	enterWorkDir := fmt.Sprintf("mkdir -p %s && cd %s && ",
 		shellquote.Quote(podWorkDir), shellquote.Quote(podWorkDir))
 
-	var tmuxCmd string
+	// The launch script stays static; the command arrives in bounded positional
+	// chunks after its $0 argument and is reconstructed at runtime.
+	entrypointPrefix := credCopy + wsWait + enterWorkDir + preStartCmds
 	if linuxUsername != "" {
-		// Run tmux session as the dynamic user via su. userSetup already created
-		// and chowned podWorkDir as root; enterWorkDir is idempotent and is what
-		// puts pre_start in the right directory.
-		// su - is a login shell and clears the environment, so the
-		// remote-stage variables the pod spec sets would not reach the agent
-		// (nor the tmux server, whose environment every pane inherits). They
-		// are exported again inside the su command (suRemoteStageExports).
-		tmuxCmd = fmt.Sprintf(
-			"%s%s%s%s%sCMD=$(echo '%s' | base64 -d) && "+
-				`su - %s -c "%scd %s && tmux new-session -d -s %s \"$CMD\" && sleep infinity"`,
-			userSetup, credCopy, wsWait, enterWorkDir, preStartCmds, cmdB64,
-			linuxUsername, suRemoteStageExports(p.cityName, ctrlCity), podWorkDir, tmuxSession,
-		)
-	} else {
-		tmuxCmd = fmt.Sprintf(
-			"%s%s%s%sCMD=$(echo '%s' | base64 -d) && tmux new-session -d -s %s \"$CMD\" && sleep infinity",
-			credCopy, wsWait, enterWorkDir, preStartCmds, cmdB64, tmuxSession,
-		)
+		// Run tmux as the dynamic user via su. userSetup already created and
+		// chowned podWorkDir as root; enterWorkDir is idempotent and keeps
+		// pre_start in the same directory as the historical path. su - clears
+		// the pod environment, so re-export the remote-stage identity inside
+		// the login-shell command before starting tmux.
+		entrypointPrefix = userSetup + entrypointPrefix
 	}
+	tmuxCmd := entrypointPrefix + buildAgentLaunchCommand(
+		cfg,
+		fmt.Sprintf("tmux new-session -d -s %s", tmuxSession),
+		true,
+		suRemoteStageExports(p.cityName, ctrlCity),
+	)
 
 	// Build environment, remapping K8s-specific vars.
-	env, err := buildPodEnv(cfg.Env, podWorkDir, p.managedServiceHost, p.managedServicePort)
+	env, err := buildPodEnvWithSecretEnv(cfg.Env, podWorkDir, p.managedServiceHost, p.managedServicePort, p.secretEnv)
 	if err != nil {
 		return nil, err
 	}
 	// The pod's processes are a remote stage of the controller's city from
-	// the container's first instruction (S5-A): gc honors these from process
-	// start, so no gc command started from the pod's environment, the agent's
-	// first one included (also under LINUX_USERNAME, where su - clears the
-	// environment and the launch re-exports them), can run storage genesis
-	// before the on-disk record exists.
+	// the container's first instruction (S5-A); keep this alongside the rig
+	// projection gate so neither feature weakens the other's startup contract.
 	env = append(env, remoteStageEnv(p.cityName, controllerCityPath(cfg.Env))...)
+	if rigProjectionMarker != "" {
+		env = append(env, corev1.EnvVar{Name: "GC_RIG_PROJECTION_MARKER", Value: rigProjectionMarker})
+	}
 
 	// Build volume mounts for the main container.
 	// When prebaked, skip the ws EmptyDir — it would shadow baked image content.
@@ -332,17 +492,28 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 		})
 	}
 
-	mainVolMounts = append(mainVolMounts, corev1.VolumeMount{
-		Name: "claude-config", MountPath: "/tmp/claude-secret", ReadOnly: true,
-	})
-	volumes = append(volumes, corev1.Volume{
-		Name: "claude-config", VolumeSource: corev1.VolumeSource{
-			Secret: &corev1.SecretVolumeSource{
-				SecretName: "claude-credentials",
-				Optional:   boolPtr(true),
+	secretMounts := p.secretMounts
+	defaultSecretMounts := len(secretMounts) == 0
+	if len(secretMounts) == 0 {
+		secretMounts = []runtime.K8sSecretMount{{Secret: "claude-credentials", MountPath: "/tmp/claude-secret"}}
+	}
+	for i, projection := range secretMounts {
+		volumeName := fmt.Sprintf("gc-secret-%d", i)
+		if defaultSecretMounts {
+			volumeName = "claude-config"
+		}
+		mainVolMounts = append(mainVolMounts, corev1.VolumeMount{
+			Name: volumeName, MountPath: projection.MountPath, ReadOnly: true,
+		})
+		volumes = append(volumes, corev1.Volume{
+			Name: volumeName, VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: projection.Secret,
+					Optional:   boolPtr(true),
+				},
 			},
-		},
-	})
+		})
+	}
 
 	// If GC_CITY differs from work_dir, add a city volume (not needed when prebaked).
 	if !p.prebaked && ctrlCity != "" && ctrlCity != cfg.WorkDir {
@@ -375,6 +546,7 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 			},
 		},
 		Spec: corev1.PodSpec{
+			SecurityContext:    agentPodSecurityContext(p.podSecurity, linuxUsername == ""),
 			ServiceAccountName: p.serviceAccount,
 			RestartPolicy:      corev1.RestartPolicyNever,
 			Containers: []corev1.Container{{
@@ -390,7 +562,7 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 				// itself, as the agent user, so it comes out owned correctly.
 				WorkingDir:      podWorkspaceRoot,
 				Command:         []string{"/bin/sh", "-c"},
-				Args:            []string{tmuxCmd},
+				Args:            agentCommandShellArgs(tmuxCmd, cfg),
 				Env:             env,
 				Stdin:           true,
 				TTY:             true,
@@ -426,6 +598,7 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 			ImagePullPolicy: corev1.PullIfNotPresent,
 			Command:         []string{"sh", "-c", "while [ ! -f /workspace/.gc-ready ]; do sleep 0.5; done"},
 			VolumeMounts:    initVolMounts,
+			SecurityContext: restrictedAgentSecurityContext(),
 		}}
 	}
 
@@ -446,13 +619,13 @@ func cloneTolerations(in []corev1.Toleration) []corev1.Toleration {
 	return out
 }
 
-// agentSecurityContext returns a container security context.
-// When a dynamic linux username is configured, the container starts as root
-// (UID 0) so it can create the user at runtime before dropping privileges.
-// When no dynamic user is set, returns nil (uses Dockerfile default: gcagent).
+// agentSecurityContext returns a container security context. The normal path
+// runs as the image's numeric non-root fallback or an optional pod identity
+// and satisfies Restricted Pod Security. The legacy LINUX_USERNAME path still
+// starts as root so it can create the account and hand off to su.
 func agentSecurityContext(linuxUsername string) *corev1.SecurityContext {
 	if linuxUsername == "" {
-		return nil
+		return restrictedAgentSecurityContext()
 	}
 	var rootUID int64
 	return &corev1.SecurityContext{
@@ -460,25 +633,82 @@ func agentSecurityContext(linuxUsername string) *corev1.SecurityContext {
 	}
 }
 
+func restrictedAgentSecurityContext() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		RunAsNonRoot:             boolPtr(true),
+		AllowPrivilegeEscalation: boolPtr(false),
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+		},
+	}
+}
+
+func agentPodSecurityContext(config PodSecurityConfig, restricted bool) *corev1.PodSecurityContext {
+	security := &corev1.PodSecurityContext{
+		RunAsUser:  cloneInt64Ptr(config.RunAsUser),
+		RunAsGroup: cloneInt64Ptr(config.RunAsGroup),
+		FSGroup:    cloneInt64Ptr(config.FSGroup),
+		SeccompProfile: &corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeRuntimeDefault,
+		},
+	}
+	if restricted {
+		security.RunAsNonRoot = boolPtr(true)
+		// The image's HOME and prebaked workspace are group-writable by GID 0.
+		// Keep an explicitly requested nonzero primary GID while adding GID 0
+		// as a supplementary group so those image paths remain writable.
+		if config.RunAsGroup != nil && *config.RunAsGroup != 0 {
+			security.SupplementalGroups = []int64{0}
+		}
+	}
+	if !restricted && security.RunAsUser == nil && security.RunAsGroup == nil && security.FSGroup == nil {
+		return nil
+	}
+	return security
+}
+
+func hasConfiguredPodIdentity(config PodSecurityConfig) bool {
+	return config.RunAsUser != nil || config.RunAsGroup != nil || config.FSGroup != nil
+}
+
+func cloneInt64Ptr(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
 // buildPodEnv creates the env var list for the agent container.
 // Removes controller-only vars, strips deprecated K8s compatibility inputs,
 // and remaps pod-visible ones.
 func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, managedServicePort string) ([]corev1.EnvVar, error) {
+	return buildPodEnvWithSecretEnv(cfgEnv, podWorkDir, managedServiceHost, managedServicePort, nil)
+}
+
+func buildPodEnvWithSecretEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, managedServicePort string, secretEnv []runtime.K8sSecretEnv) ([]corev1.EnvVar, error) {
 	// Start with cfg.Env, removing controller-only vars.
 	// Auth creds (GC_DOLT_USER, GC_DOLT_PASSWORD, BEADS_DOLT_*_USER/PASSWORD) intentionally pass through.
 	// GC_DOLT_MANAGED_LOCAL marks a controller-local target, which
 	// projectedPodDoltEnv rewrites to the in-cluster service.
 	skip := map[string]bool{
-		"GC_BEADS":               true,
-		"GC_SESSION":             true,
-		"GC_EVENTS":              true,
-		"GC_K8S_DOLT_HOST":       true,
-		"GC_K8S_DOLT_PORT":       true,
-		"GC_DOLT_HOST":           true,
-		"GC_DOLT_PORT":           true,
-		"GC_DOLT_MANAGED_LOCAL":  true,
-		"BEADS_DOLT_SERVER_HOST": true,
-		"BEADS_DOLT_SERVER_PORT": true,
+		"GC_BEADS":                   true,
+		"GC_RIG_PROJECTION_MARKER":   true,
+		config.K8sWorkerPodMarkerEnv: true,
+		"GC_SESSION":                 true,
+		"GC_EVENTS":                  true,
+		"GC_K8S_DOLT_HOST":           true,
+		"GC_K8S_DOLT_PORT":           true,
+		"GC_DOLT_HOST":               true,
+		"GC_DOLT_PORT":               true,
+		"GC_DOLT_MANAGED_LOCAL":      true,
+		"BEADS_DOLT_SERVER_HOST":     true,
+		"BEADS_DOLT_SERVER_PORT":     true,
+	}
+	for key := range cfgEnv {
+		if strings.HasPrefix(key, "GC_K8S_CITY_") {
+			skip[key] = true
+		}
 	}
 
 	ctrlCity := controllerCityPath(cfgEnv)
@@ -501,7 +731,9 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, manag
 			val = podRuntimeDir
 		case "GC_CONTROL_DISPATCHER_TRACE_DEFAULT", "GC_PACK_STATE_DIR":
 			val = projectControllerRuntimePathToPod(val, ctrlCity, ctrlRuntimeDir, podRuntimeDir)
-		case "GC_STORE_ROOT", "GC_RIG_ROOT", "BEADS_DIR", "GT_ROOT", "GC_PACK_DIR":
+		case "GC_RIG_ROOT":
+			val = remapRigRootToPod(val, ctrlCity)
+		case "GC_STORE_ROOT", "GC_BEADS_SCOPE_ROOT", "BEADS_DIR", "GT_ROOT", "GC_PACK_DIR":
 			val = remapControllerPathToPod(val, ctrlCity)
 		}
 		env = append(env, corev1.EnvVar{Name: k, Value: val})
@@ -532,19 +764,74 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, manag
 		env = append(env, corev1.EnvVar{Name: "CLAUDE_CONFIG_DIR", Value: "/home/gcagent/.claude"})
 	}
 
-	// Inject GITHUB_TOKEN from optional K8s secret for git push in pods.
-	env = append(env, corev1.EnvVar{
-		Name: "GITHUB_TOKEN",
-		ValueFrom: &corev1.EnvVarSource{
-			SecretKeyRef: &corev1.SecretKeySelector{
-				LocalObjectReference: corev1.LocalObjectReference{Name: "git-credentials"},
-				Key:                  "token",
-				Optional:             boolPtr(true),
+	if len(secretEnv) == 0 {
+		secretEnv = []runtime.K8sSecretEnv{{Name: "GITHUB_TOKEN", Secret: "git-credentials", Key: "token"}}
+	}
+	for _, projection := range secretEnv {
+		env = append(env, corev1.EnvVar{
+			Name: projection.Name,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: projection.Secret},
+					Key:                  projection.Key,
+					Optional:             boolPtr(true),
+				},
 			},
-		},
-	})
+		})
+	}
+
+	// This marker is generated only by the controller-owned Kubernetes
+	// provider. It distinguishes agent Pods from local managed sessions.
+	env = append(env, corev1.EnvVar{Name: config.K8sWorkerPodMarkerEnv, Value: "true"})
 
 	return env, nil
+}
+
+var secretProjectionEnvName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+func validateSecretProjection(secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount) error {
+	seenEnv := make(map[string]struct{}, len(secretEnv))
+	for i, projection := range secretEnv {
+		if strings.TrimSpace(projection.Name) == "" || strings.TrimSpace(projection.Secret) == "" || strings.TrimSpace(projection.Key) == "" {
+			return fmt.Errorf("k8s secret_env[%d] requires non-blank name, secret, and key", i)
+		}
+		if !secretProjectionEnvName.MatchString(projection.Name) {
+			return fmt.Errorf("k8s secret_env[%d].name %q is not a valid environment variable name", i, projection.Name)
+		}
+		if projection.Name == config.K8sWorkerPodMarkerEnv {
+			return fmt.Errorf("k8s secret_env[%d].name %q is reserved for the Kubernetes worker marker", i, projection.Name)
+		}
+		if _, exists := seenEnv[projection.Name]; exists {
+			return fmt.Errorf("k8s secret_env[%d].name %q is duplicated", i, projection.Name)
+		}
+		seenEnv[projection.Name] = struct{}{}
+	}
+	seenMount := make(map[string]struct{}, len(secretMounts))
+	for i, projection := range secretMounts {
+		if strings.TrimSpace(projection.Secret) == "" || strings.TrimSpace(projection.MountPath) == "" {
+			return fmt.Errorf("k8s secret_mounts[%d] requires non-blank secret and mount_path", i)
+		}
+		if !path.IsAbs(projection.MountPath) {
+			return fmt.Errorf("k8s secret_mounts[%d].mount_path %q must be absolute", i, projection.MountPath)
+		}
+		if _, exists := seenMount[projection.MountPath]; exists {
+			return fmt.Errorf("k8s secret_mounts[%d].mount_path %q is duplicated", i, projection.MountPath)
+		}
+		seenMount[projection.MountPath] = struct{}{}
+	}
+	return nil
+}
+
+func podEnvValue(pod *corev1.Pod, name string) string {
+	if pod == nil || len(pod.Spec.Containers) == 0 {
+		return ""
+	}
+	for _, env := range pod.Spec.Containers[0].Env {
+		if env.Name == name {
+			return env.Value
+		}
+	}
+	return ""
 }
 
 // needsStaging returns true if the session config requires file staging
@@ -610,21 +897,13 @@ func buildResources(p *Provider) (corev1.ResourceRequirements, error) {
 
 func boolPtr(b bool) *bool { return &b }
 
-// suRemoteStageExports re-exports the remote-stage environment inside a
-// `su - <user> -c "..."` command string, or returns "" without a controller
-// city. su - starts a login shell with a cleared environment, so without this
-// the agent run as LINUX_USERNAME (and its tmux server) would not carry the
-// variables that mark it a remote stage from its first instruction.
-//
-// The string is embedded inside the double-quoted -c argument of an outer sh,
-// so values are passed base64-encoded and decoded by the inner shell: the
-// outer shell sees only \$, \" and base64 characters, and the inner shell
-// gets each value verbatim whatever characters it contains.
+// suRemoteStageExports returns shell statements that restore the remote-stage
+// variables inside the login-shell command passed to `su - <user> -c`. Values
+// are quoted as shell data so spaces and metacharacters remain unchanged.
 func suRemoteStageExports(cityName, ctrlCity string) string {
 	var out strings.Builder
 	for _, e := range remoteStageEnv(cityName, ctrlCity) {
-		b64 := base64.StdEncoding.EncodeToString([]byte(e.Value))
-		fmt.Fprintf(&out, `export %s=\"\$(echo '%s' | base64 -d)\"; `, e.Name, b64)
+		fmt.Fprintf(&out, "export %s=%s; ", e.Name, shellquote.Quote(e.Value))
 	}
 	return out.String()
 }

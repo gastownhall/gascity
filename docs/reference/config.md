@@ -531,18 +531,42 @@ Import defines a named import of another pack.
 
 ## K8sConfig
 
-K8sConfig holds native K8s session provider settings.
+K8sConfig holds native K8s session provider settings; identity fields run_as_user, run_as_group, and fs_group cannot be combined with LINUX_USERNAME, including through GC_K8S_* environment overrides.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `namespace` | string |  | `gc` | Namespace is the K8s namespace for agent pods. Default: "gc". |
 | `image` | string |  |  | Image is the container image for agents. |
 | `context` | string |  |  | Context is the kubectl/kubeconfig context. Default: current. |
+| `run_as_user` | integer |  |  | RunAsUser is an optional numeric UID for generated agent pods. When unset, Kubernetes admission may assign a UID; otherwise the image's numeric non-root fallback is used. Gas City does not allocate UIDs. |
+| `run_as_group` | integer |  |  | RunAsGroup is an optional primary GID for generated agent pods. When unset, the image or cluster policy supplies the group identity. For a nonzero value, generated pods also join supplementary group 0 so image-layer HOME and prebaked workspace paths remain writable without changing the primary GID. |
+| `fs_group` | integer |  |  | FSGroup is an optional supplemental filesystem GID. It lets kubelet make mounted workspace volumes writable by the pod's non-root identity. |
 | `cpu_request` | string |  | `500m` | CPURequest is the pod CPU request. Default: "500m". |
 | `mem_request` | string |  | `1Gi` | MemRequest is the pod memory request. Default: "1Gi". |
 | `cpu_limit` | string |  | `2` | CPULimit is the pod CPU limit. Default: "2". |
 | `mem_limit` | string |  | `4Gi` | MemLimit is the pod memory limit. Default: "4Gi". |
 | `prebaked` | boolean |  |  | Prebaked skips init container staging and EmptyDir volumes when true. Use with images built by `gc build-image` that have city content baked in. |
+| `secret_env` | []K8sSecretEnv |  |  | SecretEnv projects Kubernetes Secret keys into named container env vars. A non-empty list replaces the default GITHUB_TOKEN projection. |
+| `secret_mounts` | []K8sSecretMount |  |  | SecretMounts mounts Kubernetes Secrets read-only into the agent container. A non-empty list replaces the default claude-credentials mount. |
+
+## K8sSecretEnv
+
+K8sSecretEnv describes a Secret key projected into a container environment variable.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | **yes** |  |  |
+| `secret` | string | **yes** |  |  |
+| `key` | string | **yes** |  |  |
+
+## K8sSecretMount
+
+K8sSecretMount describes a Secret mounted read-only into an agent container.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `secret` | string | **yes** |  |  |
+| `mount_path` | string | **yes** |  |  |
 
 ## LocalDoctorCheck
 

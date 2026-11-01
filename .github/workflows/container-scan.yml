@@ -12,6 +12,12 @@ on:
       - ".github/requirements/mcp-agent-mail.txt"
       - ".github/scripts/install-*.sh"
       - ".github/scripts/mcp-mail-filelock-exit-regression.py"
+      - ".github/scripts/mcp-mail-gitpython-path-cache.py"
+      - ".github/scripts/mcp-mail-gitpython-path-cache-test.py"
+      - ".github/scripts/mcp-mail-archive-burst.py"
+      - ".github/scripts/mcp-mail-archive-burst-ci.py"
+      - ".github/scripts/mcp-mail-jwt-compatibility.py"
+      - ".github/scripts/patch-mcp-mail-jwt-audience.py"
       - ".github/workflows/container-scan.yml"
       - "contrib/beads-scripts/gc-beads-br"
       - "contrib/events-scripts/gc-events-k8s"
@@ -37,6 +43,12 @@ on:
       - ".github/requirements/mcp-agent-mail.txt"
       - ".github/scripts/install-*.sh"
       - ".github/scripts/mcp-mail-filelock-exit-regression.py"
+      - ".github/scripts/mcp-mail-gitpython-path-cache.py"
+      - ".github/scripts/mcp-mail-gitpython-path-cache-test.py"
+      - ".github/scripts/mcp-mail-archive-burst.py"
+      - ".github/scripts/mcp-mail-archive-burst-ci.py"
+      - ".github/scripts/mcp-mail-jwt-compatibility.py"
+      - ".github/scripts/patch-mcp-mail-jwt-audience.py"
       - ".github/workflows/container-scan.yml"
       - "contrib/beads-scripts/gc-beads-br"
       - "contrib/events-scripts/gc-events-k8s"
@@ -59,7 +71,9 @@ env:
 jobs:
   runner-policy:
     name: Runner policy
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    # FINAL-01's fork-owned custody dispatch must use a runner attached to the
+    # fork; Blacksmith labels are available only to the canonical repository.
+    runs-on: ${{ github.repository == 'chris-sanders/gascity' && 'ubuntu-latest' || 'blacksmith-2vcpu-ubuntu-2404' }}
     outputs:
       use_blacksmith: ${{ steps.policy.outputs.use_blacksmith }}
       reason: ${{ steps.policy.outputs.reason }}
@@ -81,7 +95,7 @@ jobs:
   dockerfile-config:
     name: Dockerfile config
     needs: runner-policy
-    runs-on: ${{ needs.runner-policy.outputs.runner_8vcpu }}
+    runs-on: ${{ github.repository == 'chris-sanders/gascity' && 'ubuntu-latest' || needs.runner-policy.outputs.runner_8vcpu }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -144,7 +158,7 @@ jobs:
   image-vulnerabilities:
     name: Image vulnerabilities
     needs: runner-policy
-    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+    runs-on: ${{ github.repository == 'chris-sanders/gascity' && 'ubuntu-latest' || needs.runner-policy.outputs.runner_32vcpu }}
     timeout-minutes: 45
     permissions:
       contents: read
@@ -196,7 +210,9 @@ jobs:
         run: |
           set -euo pipefail
           . ./deps.env
+          source_label="https://github.com/${GITHUB_REPOSITORY}"
           docker build \
+            --label "org.opencontainers.image.source=${source_label}" \
             -f contrib/k8s/Dockerfile.base \
             --build-arg DOLT_VERSION="$DOLT_VERSION" \
             -t "gc-agent-base:${IMAGE_TAG}" \
@@ -204,6 +220,7 @@ jobs:
           docker tag "gc-agent-base:${IMAGE_TAG}" gc-agent-base:latest
 
           docker build \
+            --label "org.opencontainers.image.source=${source_label}" \
             -f contrib/k8s/Dockerfile.agent \
             --build-arg BASE_IMAGE=gc-agent-base:latest \
             -t "gc-agent:${IMAGE_TAG}" \
@@ -211,12 +228,14 @@ jobs:
           docker tag "gc-agent:${IMAGE_TAG}" gc-agent:latest
 
           docker build \
+            --label "org.opencontainers.image.source=${source_label}" \
             -f contrib/k8s/Dockerfile.controller \
             --build-arg BASE=gc-agent:latest \
             -t "gc-controller:${IMAGE_TAG}" \
             .
 
           docker build \
+            --label "org.opencontainers.image.source=${source_label}" \
             -f contrib/k8s/Dockerfile.mail \
             -t "gc-mcp-mail:${IMAGE_TAG}" \
             .
@@ -279,6 +298,41 @@ jobs:
           done
           exit "$overall_rc"
 
+      - name: Download verified GitPython 3.1.62 comparison wheel
+        if: ${{ !cancelled() && steps.build-images.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            https://files.pythonhosted.org/packages/d6/0b/29d7965215f8ef830a7ca1f42997fe13e5693d85e9edb18f938d063ef5f2/gitpython-3.1.62-py3-none-any.whl \
+            -o "${RUNNER_TEMP}/gitpython-3.1.62-py3-none-any.whl"
+          printf '%s  %s\n' \
+            7002251225e10e29d2e1f49e6532613fe5d5d9f0b6f1f02997a52b38fe56899e \
+            "${RUNNER_TEMP}/gitpython-3.1.62-py3-none-any.whl" | sha256sum -c -
+
+      - name: Check MCP mail GitPython path cache against the official validator
+        if: ${{ !cancelled() && steps.build-images.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --entrypoint python3 \
+            -v "${GITHUB_WORKSPACE}/.github/scripts/mcp-mail-gitpython-path-cache-test.py:/tmp/mcp-mail-gitpython-path-cache-test.py:ro" \
+            "gc-mcp-mail:${IMAGE_TAG}" \
+            /tmp/mcp-mail-gitpython-path-cache-test.py
+
+      - name: Check MCP mail archive performance against GitPython 3.1.62
+        if: ${{ !cancelled() && steps.build-images.outcome == 'success' }}
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/gascity-mail-samples"
+          chmod 2770 "${RUNNER_TEMP}/gascity-mail-samples"
+          python3 .github/scripts/mcp-mail-archive-burst-ci.py \
+            --image "gc-mcp-mail:${IMAGE_TAG}" \
+            --baseline-wheel "${RUNNER_TEMP}/gitpython-3.1.62-py3-none-any.whl" \
+            --burst-script "${GITHUB_WORKSPACE}/.github/scripts/mcp-mail-archive-burst.py" \
+            --samples-dir "${RUNNER_TEMP}/gascity-mail-samples"
+
       - name: Check MCP mail image database survives filelock exit
         # filelock 4.x truncated the mail database at exit by writing through a
         # lock fd that mcp-agent-mail's emergency cleanup had closed and SQLite
@@ -292,6 +346,68 @@ jobs:
             -v "${GITHUB_WORKSPACE}/.github/scripts/mcp-mail-filelock-exit-regression.py:/tmp/mcp-mail-filelock-exit-regression.py:ro" \
             "gc-mcp-mail:${IMAGE_TAG}" \
             /tmp/mcp-mail-filelock-exit-regression.py
+
+      - name: Check MCP mail image JWT compatibility
+        if: ${{ !cancelled() && steps.build-images.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --entrypoint python3 \
+            -v "${GITHUB_WORKSPACE}/.github/scripts/mcp-mail-jwt-compatibility.py:/tmp/mcp-mail-jwt-compatibility.py:ro" \
+            "gc-mcp-mail:${IMAGE_TAG}" \
+            /tmp/mcp-mail-jwt-compatibility.py
+
+      - name: Export exact-source images for custody
+        id: export-custody
+        if: ${{ github.event_name == 'workflow_dispatch' && success() }}
+        run: |
+          set -euo pipefail
+          custody_dir="${RUNNER_TEMP}/c14-image-custody"
+          mkdir -p "$custody_dir"
+          images=(
+            "gc-agent-base:${IMAGE_TAG}"
+            "gc-agent:${IMAGE_TAG}"
+            "gc-controller:${IMAGE_TAG}"
+            "gc-mcp-mail:${IMAGE_TAG}"
+          )
+          docker image save "${images[@]}" | gzip -1 > "$custody_dir/images.tar.gz"
+          image_records="$(
+            for image in "${images[@]}"; do
+              docker image inspect --format '{{.Id}}' "$image" | \
+                jq -R --arg local_ref "$image" '{local_ref: $local_ref, image_id: .}'
+            done | jq -s .
+          )"
+          jq -n \
+            --arg source_sha "$GITHUB_SHA" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg ref "$GITHUB_REF" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg source_label "https://github.com/${GITHUB_REPOSITORY}" \
+            --argjson images "$image_records" \
+            '{source_sha: $source_sha, repository: $repository, ref: $ref,
+              run_id: $run_id, run_attempt: $run_attempt,
+              source_label: $source_label, images: $images}' \
+            > "$custody_dir/scan-receipt.json"
+
+      - name: Upload exact-source images for custody
+        if: ${{ steps.export-custody.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: c14-verified-images-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/c14-image-custody/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+
+      - name: Upload MCP mail performance diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mcp-mail-performance-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gascity-mail-samples/
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Upload base image SARIF
         if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
@@ -328,3 +444,120 @@ jobs:
           name: trivy-image-results
           path: trivy-results/
           retention-days: 5
+
+  # FINAL-01 fork-only scaffolding; remove or port before proposing this
+  # workflow to upstream because the repository and branch guard are private.
+  publish-c14-image-custody:
+    name: Publish verified C14 images to GHCR
+    needs: [runner-policy, dockerfile-config, image-vulnerabilities]
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' &&
+        github.repository == 'chris-sanders/gascity' &&
+        github.ref == 'refs/heads/codex/gascity-final01-c14-7472f-20261101'
+      }}
+    runs-on: ${{ github.repository == 'chris-sanders/gascity' && 'ubuntu-latest' || needs.runner-policy.outputs.runner_8vcpu }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download verified scan images
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: c14-verified-images-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/c14-image-custody/
+
+      - name: Verify source receipt and load scanned images
+        env:
+          CUSTODY_DIR: ${{ runner.temp }}/c14-image-custody
+        run: |
+          set -euo pipefail
+          receipt="$CUSTODY_DIR/scan-receipt.json"
+          jq -e \
+            --arg sha "$GITHUB_SHA" \
+            --arg repo "$GITHUB_REPOSITORY" \
+            --arg ref "$GITHUB_REF" \
+            '.source_sha == $sha and .repository == $repo and .ref == $ref and
+             (.images | length) == 4' \
+            "$receipt" >/dev/null
+          docker image load --input "$CUSTODY_DIR/images.tar.gz"
+          while IFS=$'\t' read -r local_ref expected_id; do
+            actual_id="$(docker image inspect --format '{{.Id}}' "$local_ref")"
+            test "$actual_id" = "$expected_id"
+            actual_source="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' "$local_ref")"
+            expected_source="$(jq -r '.source_label' "$receipt")"
+            test "$actual_source" = "$expected_source"
+          done < <(jq -r '.images[] | [.local_ref, .image_id] | @tsv' "$receipt")
+
+      - name: Authenticate to GHCR and publish scanned image digests
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CUSTODY_DIR: ${{ runner.temp }}/c14-image-custody
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          registry_tag="${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          receipt="$CUSTODY_DIR/scan-receipt.json"
+          published_receipt="$CUSTODY_DIR/published-receipt.json"
+          jq '. + {published_images: []}' "$receipt" > "$published_receipt"
+          printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io \
+            --username "$GITHUB_ACTOR" --password-stdin
+
+          while IFS=$'\t' read -r local_ref image_id image_name; do
+            source_label="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' "$local_ref")"
+            test "$source_label" = "https://github.com/${GITHUB_REPOSITORY}"
+            package="ghcr.io/${owner}/gascity-c14-${image_name}"
+            tagged_ref="${package}:${registry_tag}"
+            docker tag "$local_ref" "$tagged_ref"
+            push_log="$CUSTODY_DIR/${image_name}.push.log"
+            docker push "$tagged_ref" 2>&1 | tee "$push_log"
+            digest="$(grep -Eo 'digest: sha256:[0-9a-f]{64}' "$push_log" | tail -n 1 | cut -d' ' -f2)"
+            if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "failed to read the GHCR manifest digest for ${image_name}" >&2
+              exit 1
+            fi
+            jq \
+              --arg local_ref "$local_ref" \
+              --arg image_id "$image_id" \
+              --arg package "$package" \
+              --arg tag "$tagged_ref" \
+              --arg digest "$digest" \
+              '.published_images += [{local_ref: $local_ref, image_id: $image_id,
+                package: $package, tag: $tag, digest: $digest,
+                digest_ref: ($package + "@" + $digest)}]' \
+              "$published_receipt" > "$published_receipt.tmp"
+            mv "$published_receipt.tmp" "$published_receipt"
+          done < <(jq -r '.images[] | [.local_ref, .image_id,
+            (.local_ref | split(":")[0])] | @tsv' "$receipt")
+
+          # Remove both local tags before the anonymous pull, then compare the
+          # pulled image config ID with the image ID that passed the scan.
+          while IFS=$'\t' read -r local_ref tagged_ref; do
+            docker image rm "$tagged_ref" "$local_ref"
+          done < <(jq -r '.published_images[] | [.local_ref, .tag] | @tsv' \
+            "$published_receipt")
+
+          # Use a fresh empty Docker credential directory for remote pulls. The
+          # registry must allow anonymous access to every content digest.
+          export DOCKER_CONFIG="$(mktemp -d)"
+          while IFS=$'\t' read -r package digest expected_id; do
+            docker pull "${package}@${digest}"
+            pulled_id="$(docker image inspect --format '{{.Id}}' "${package}@${digest}")"
+            test "$pulled_id" = "$expected_id"
+          done < <(jq -r '.published_images[] | [.package, .digest, .image_id] | @tsv' \
+            "$published_receipt")
+
+          jq '.published_images |= map(. + {anonymous_pull: "passed"})' \
+            "$published_receipt" > "$published_receipt.tmp"
+          mv "$published_receipt.tmp" "$published_receipt"
+          cat "$published_receipt" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Retain GHCR custody receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: c14-ghcr-custody-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/c14-image-custody/
+          if-no-files-found: warn
+          retention-days: 90

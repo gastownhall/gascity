@@ -28,6 +28,12 @@ var ErrSessionExists = errors.New("session already exists")
 // Callers should back off and retry rather than treating it as a failure.
 var ErrSessionInitializing = errors.New("session is initializing")
 
+// ErrExistingSessionInitializing is the narrower form of ErrSessionInitializing
+// returned when Start found infrastructure that already existed before the
+// attempt (for example, a young Kubernetes pod). Callers that minted identity
+// before Start can use it to restore the identity still carried by that pod.
+var ErrExistingSessionInitializing = errors.New("existing session is initializing")
+
 // ErrInteractionUnsupported reports that a provider does not implement the
 // structured pending/respond interaction capability for the requested session.
 var ErrInteractionUnsupported = errors.New("session interaction is unsupported")
@@ -1453,6 +1459,19 @@ type Config struct {
 	// fingerprint: capture is applied at the leaf, and arming or healing it
 	// never restarts the agent.
 	ProgramStatus ProgramStatusArm
+}
+
+// K8sSecretEnv projects a Kubernetes Secret key into a pod environment variable.
+type K8sSecretEnv struct {
+	Name   string
+	Secret string
+	Key    string
+}
+
+// K8sSecretMount projects a Kubernetes Secret into a pod filesystem path.
+type K8sSecretMount struct {
+	Secret    string
+	MountPath string
 }
 
 // OverlayProviderNames returns the effective provider overlay slots to stage for

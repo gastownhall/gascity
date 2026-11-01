@@ -158,7 +158,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	root := repoRoot(t)
 	input := readFile(t, root, ".github/requirements/mcp-agent-mail.in")
 	for _, want := range []string{
-		"gitpython>=3.1.62,<3.2",
+		"gitpython==3.2.1",
 		"aiohttp>=3.14.4",
 		"anyio>=4.14.2",
 		"pillow>=13.0.0",
@@ -169,6 +169,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"filelock>=3.29.0,<4",
 		"opentelemetry-api>=1.45.1",
 		"dnspython>=2.9.0",
+		"joserfc>=1.7.7",
 	} {
 		if !strings.Contains(input, want) {
 			t.Errorf("mcp-agent-mail input requirements missing security floor %q", want)
@@ -188,7 +189,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 
 	lock := readFile(t, root, ".github/requirements/mcp-agent-mail.txt")
 	for _, want := range []string{
-		"gitpython==3.1.62 \\",
+		"gitpython==3.2.1 \\",
 		"aiohttp==3.14.4 \\",
 		"anyio==4.14.2 \\",
 		"cryptography==50.0.0 \\",
@@ -204,6 +205,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"opentelemetry-api==1.45.1 \\",
 		"authlib==1.9.1 \\",
 		"dnspython==2.9.0 \\",
+		"joserfc==1.7.7 \\",
 		// Lock-only CVE bumps: no input floor, so this pin is their only guard.
 		"bleach==6.4.0 \\",
 		"h2==4.4.1 \\",
@@ -223,6 +225,13 @@ const mcpMailLockPath = ".github/requirements/mcp-agent-mail.txt"
 // mcpMailFilelockExitRegression is the script that reproduces filelock 4.x
 // truncating the mail database at interpreter exit.
 const mcpMailFilelockExitRegression = ".github/scripts/mcp-mail-filelock-exit-regression.py"
+
+// mcpMailJWTCompatibility is the image-level smoke for the optional JWT auth
+// path in mcp-agent-mail.
+const mcpMailJWTCompatibility = ".github/scripts/mcp-mail-jwt-compatibility.py"
+
+// mcpMailJWTAudiencePatch repairs the pinned service's configured-audience call.
+const mcpMailJWTAudiencePatch = ".github/scripts/patch-mcp-mail-jwt-audience.py"
 
 // lockPinnedVersion returns the version the hashed lock pins for dist, matching
 // the "name==version \" line uv writes. Names compare case-insensitively.
@@ -258,30 +267,254 @@ func releaseLine(t *testing.T, version string, n int) []int {
 	return line
 }
 
-// TestMCPMailImageHoldsFilelockAndGitPythonOnSafeLines keeps the two packages
-// #8307 moved off their safe release lines from drifting back. The deep review of
-// #8307 (https://github.com/gastownhall/gascity/pull/8307#pullrequestreview-5645840708)
-// found that:
-//   - filelock 4.x can truncate the mail SQLite database at shutdown. mcp-agent-mail's
-//     emergency cleanup (storage.cleanup_leaked_lockfile_fds) closes lock fds behind
-//     filelock's back, and 4.x's exit-time release writes "filelock/released\n" through
-//     the reused fd. mcp-mail-filelock-exit-regression.py reproduces it, and the container
-//     scan runs that script in the image.
-//   - GitPython 3.2 makes archive commits 1.5-2.9x slower. Bursts of mail then time out
-//     on the archive lock: 293-322 of 400 messages delivered, against about 395 on 3.1.x.
-//
-// The advisories the newer lines fix are unreachable here. Each is waived for the
-// pinned release in .trivyignore.yaml (TestTrivyIgnoreMCPMailWaiversNameTheLockedRelease).
-// Lift a ceiling only once the newer line has fixed its regression, and run the
-// script against the new lock when you do.
-func TestMCPMailImageHoldsFilelockAndGitPythonOnSafeLines(t *testing.T) {
+// TestMCPMailImagePinsValidatedGitPythonCacheAndFilelock keeps the filelock
+// database-survival rule and makes the GitPython exception conditional on the
+// exact reviewed release, a validator-parity test, and an actual mail-burst
+// comparison. GitPython 3.2 without that cache previously slowed archive
+// commits 1.5-2.9x and lost mail under a 400-message burst.
+func TestMCPMailImagePinsValidatedGitPythonCacheAndFilelock(t *testing.T) {
+	root := repoRoot(t)
 	lock := readFile(t, repoRoot(t), mcpMailLockPath)
 
 	if filelock := lockPinnedVersion(t, lock, "filelock"); releaseLine(t, filelock, 1)[0] >= 4 {
 		t.Errorf("%s pins filelock %s; filelock 4.x truncates the mail database through a reused fd at exit, so keep it below 4", mcpMailLockPath, filelock)
 	}
-	if gitpython := lockPinnedVersion(t, lock, "gitpython"); !slices.Equal(releaseLine(t, gitpython, 2), []int{3, 1}) {
-		t.Errorf("%s pins GitPython %s; GitPython 3.2 slows archive commits enough to drop mail under bursts, so keep it on 3.1.x", mcpMailLockPath, gitpython)
+	if gitpython := lockPinnedVersion(t, lock, "gitpython"); gitpython != "3.2.1" {
+		t.Errorf("%s pins GitPython %s; only 3.2.1 has been reviewed with the bounded archive-path cache", mcpMailLockPath, gitpython)
+	}
+
+	cache := readFile(t, root, ".github/scripts/mcp-mail-gitpython-path-cache.py")
+	for _, want := range []string{
+		`_EXPECTED_GITPYTHON = "3.2.1"`,
+		"@lru_cache(maxsize=8192)",
+		"return _ORIGINAL(path, mode)",
+		"os.name",
+		"type(path) is str and len(path) <= 256",
+		"type(mode) is int",
+	} {
+		if !strings.Contains(cache, want) {
+			t.Errorf("GitPython cache missing safety invariant %q", want)
+		}
+	}
+
+	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.mail")
+	for _, want := range []string{
+		"COPY .github/scripts/mcp-mail-gitpython-path-cache.py /opt/gc-mail-python/sitecustomize.py",
+		"ENV PYTHONPATH=/opt/gc-mail-python",
+	} {
+		if !strings.Contains(dockerfile, want) {
+			t.Errorf("mail Dockerfile missing GitPython path cache wiring %q", want)
+		}
+	}
+
+	for _, script := range []string{
+		".github/scripts/mcp-mail-gitpython-path-cache-test.py",
+		".github/scripts/mcp-mail-archive-burst.py",
+		".github/scripts/mcp-mail-archive-burst-ci.py",
+	} {
+		if got := strings.Count(readFile(t, root, ".github/workflows/container-scan.yml"), `- "`+script+`"`); got != 2 {
+			t.Errorf("container-scan.yml lists %s in %d path filters, want 2 (push and pull_request)", script, got)
+		}
+	}
+}
+
+func TestContainerScanRunsMCPMailGitPythonPathCacheAndBurstGate(t *testing.T) {
+	root := repoRoot(t)
+	workflow := readFile(t, root, ".github/workflows/container-scan.yml")
+	for _, check := range []struct {
+		name  string
+		wants []string
+	}{
+		{
+			name: "Check MCP mail GitPython path cache against the official validator",
+			wants: []string{
+				"docker run --rm",
+				"--entrypoint python3",
+				"${GITHUB_WORKSPACE}/.github/scripts/mcp-mail-gitpython-path-cache-test.py:/tmp/mcp-mail-gitpython-path-cache-test.py:ro",
+				`"gc-mcp-mail:${IMAGE_TAG}"`,
+				"/tmp/mcp-mail-gitpython-path-cache-test.py",
+			},
+		},
+		{
+			name: "Check MCP mail archive performance against GitPython 3.1.62",
+			wants: []string{
+				"python3 .github/scripts/mcp-mail-archive-burst-ci.py",
+				"--baseline-wheel",
+				"--burst-script",
+			},
+		},
+	} {
+		stepStart := strings.Index(workflow, "- name: "+check.name)
+		if stepStart < 0 {
+			t.Errorf("container-scan.yml has no step %q", check.name)
+			continue
+		}
+		step := workflow[stepStart:]
+		if next := strings.Index(step[1:], "\n      - name: "); next >= 0 {
+			step = step[:next+1]
+		}
+		for _, want := range check.wants {
+			if !strings.Contains(step, want) {
+				t.Errorf("container scan step %q is missing %q", check.name, want)
+			}
+		}
+		if strings.Contains(step, "continue-on-error") || strings.Contains(step, "|| true") {
+			t.Errorf("container scan step %q must fail on a cache or performance regression", check.name)
+		}
+	}
+
+	burstGate := readFile(t, root, ".github/scripts/mcp-mail-archive-burst-ci.py")
+	for _, want := range []string{
+		"limit = 1.25",
+		"MAIL_ARCHIVE_PERFORMANCE PASS",
+	} {
+		if !strings.Contains(burstGate, want) {
+			t.Errorf("mail burst gate missing delivery/performance condition %q", want)
+		}
+	}
+	burst := readFile(t, root, ".github/scripts/mcp-mail-archive-burst.py")
+	for _, want := range []string{
+		"\"success\": len(responses)",
+		"\"unique_inbox_ids\": len({row.get(\"id\") for row in inbox_rows})",
+		"\"archive_wait_over_60s\": sum(value > 60 for value in archive_waits)",
+	} {
+		if !strings.Contains(burst, want) {
+			t.Errorf("mail burst workload missing delivery/performance measurement %q", want)
+		}
+	}
+}
+
+func TestContainerScanRetainsMCPMailBurstDiagnostics(t *testing.T) {
+	root := repoRoot(t)
+	workflow := readFile(t, root, ".github/workflows/container-scan.yml")
+	burstGate := readFile(t, root, ".github/scripts/mcp-mail-archive-burst-ci.py")
+	burst := readFile(t, root, ".github/scripts/mcp-mail-archive-burst.py")
+
+	for _, want := range []string{
+		`["docker", "image", "inspect"`,
+		"--group-add",
+		"--samples-dir",
+		"PATCHED_CONTROL_MEDIAN_RATIOS",
+		"limit = 1.25",
+	} {
+		if !strings.Contains(burstGate, want) {
+			t.Errorf("MCP mail burst gate missing diagnostic or acceptance invariant %q", want)
+		}
+	}
+	for _, want := range []string{
+		`current_phase.set("send")`,
+		`current_phase.set("inbox_fetch")`,
+		"storage._CommitRequest.__init__ = tagged_request_init",
+		"storage._CommitQueue._process_batch = tagged_process_batch",
+		"app._instrument_tool = tagged_instrument_tool",
+		`instrument_method(IndexFile, "add", "git_index_add")`,
+		`instrument_method(IndexFile, "commit", "git_index_commit")`,
+		`"send_commit_count"`,
+		`"send_commit_p95"`,
+		`"sample_counts_by_operation_phase"`,
+		`"summary_sha256"`,
+		`"samples": raw_samples`,
+	} {
+		if !strings.Contains(burst, want) {
+			t.Errorf("MCP mail burst workload missing raw diagnostic %q", want)
+		}
+	}
+
+	stepStart := strings.Index(workflow, "- name: Upload MCP mail performance diagnostics")
+	if stepStart < 0 {
+		t.Fatal("container-scan.yml has no raw MCP mail performance artifact upload")
+	}
+	step := workflow[stepStart:]
+	if next := strings.Index(step[1:], "\n      - name: "); next >= 0 {
+		step = step[:next+1]
+	}
+	for _, want := range []string{
+		"if: ${{ always() }}",
+		"actions/upload-artifact@",
+		"mcp-mail-performance-${{ github.sha }}-${{ github.run_attempt }}",
+		"${{ runner.temp }}/gascity-mail-samples/",
+		"retention-days: 30",
+	} {
+		if !strings.Contains(step, want) {
+			t.Errorf("MCP mail diagnostics upload is missing %q", want)
+		}
+	}
+	if !strings.Contains(workflow, `chmod 2770 "${RUNNER_TEMP}/gascity-mail-samples"`) {
+		t.Fatal("container-scan.yml does not grant the non-root image process access to the diagnostic artifact directory")
+	}
+}
+
+// FINAL-01 fork-only guard; remove with the custody publisher before upstreaming.
+func TestContainerScanPublishesOnlyVerifiedC14ImageCustody(t *testing.T) {
+	workflow := readFile(t, repoRoot(t), ".github/workflows/container-scan.yml")
+	imageJobStart := strings.Index(workflow, "  image-vulnerabilities:")
+	publishJobStart := strings.Index(workflow, "  publish-c14-image-custody:")
+	if imageJobStart < 0 || publishJobStart < imageJobStart {
+		t.Fatal("container-scan.yml is missing its image scan or C14 custody job")
+	}
+	imageJob := workflow[imageJobStart:publishJobStart]
+	publishJob := workflow[publishJobStart:]
+	if strings.Contains(imageJob, "packages: write") {
+		t.Fatal("the scanner/build job must not receive package write permission")
+	}
+	for _, want := range []string{
+		"if: ${{ github.event_name == 'workflow_dispatch' && success() }}",
+		"docker image save",
+		"c14-verified-images-${{ github.sha }}-${{ github.run_attempt }}",
+		"org.opencontainers.image.source",
+		"compression-level: 0",
+	} {
+		if !strings.Contains(imageJob, want) {
+			t.Errorf("image scan job is missing exact-source custody export guard %q", want)
+		}
+	}
+	for _, want := range []string{
+		"needs: [runner-policy, dockerfile-config, image-vulnerabilities]",
+		"github.event_name == 'workflow_dispatch'",
+		"github.repository == 'chris-sanders/gascity'",
+		"github.ref == 'refs/heads/codex/gascity-final01-c14-7472f-20261101'",
+		"packages: write",
+		"c14-verified-images-${{ github.sha }}-${{ github.run_attempt }}",
+		"docker push",
+		"digest_ref",
+		"docker image rm \"$tagged_ref\" \"$local_ref\"",
+		"docker pull \"${package}@${digest}\"",
+		"pulled_id=",
+		"test \"$pulled_id\" = \"$expected_id\"",
+		"anonymous_pull: \"passed\"",
+	} {
+		if !strings.Contains(publishJob, want) {
+			t.Errorf("C14 image custody job is missing %q", want)
+		}
+	}
+}
+
+// TestContainerScanForkDispatchUsesGitHubHostedRunners keeps the FINAL-01
+// fork-only workflow_dispatch path schedulable where Blacksmith runners are
+// not attached. Canonical upstream runs must continue using the selected
+// Blacksmith runners.
+func TestContainerScanForkDispatchUsesGitHubHostedRunners(t *testing.T) {
+	workflow := readFile(t, repoRoot(t), ".github/workflows/container-scan.yml")
+	for _, want := range []struct {
+		runsOn string
+		count  int
+	}{
+		{
+			runsOn: "runs-on: ${{ github.repository == 'chris-sanders/gascity' && 'ubuntu-latest' || 'blacksmith-2vcpu-ubuntu-2404' }}",
+			count:  1,
+		},
+		{
+			runsOn: "runs-on: ${{ github.repository == 'chris-sanders/gascity' && 'ubuntu-latest' || needs.runner-policy.outputs.runner_8vcpu }}",
+			count:  2,
+		},
+		{
+			runsOn: "runs-on: ${{ github.repository == 'chris-sanders/gascity' && 'ubuntu-latest' || needs.runner-policy.outputs.runner_32vcpu }}",
+			count:  1,
+		},
+	} {
+		if got := strings.Count(workflow, want.runsOn); got != want.count {
+			t.Errorf("container-scan.yml has %d occurrences of %q, want %d", got, want.runsOn, want.count)
+		}
 	}
 }
 
@@ -327,18 +560,77 @@ func TestContainerScanRunsMCPMailFilelockExitRegression(t *testing.T) {
 	}
 }
 
+func TestContainerScanRunsMCPMailJWTCompatibility(t *testing.T) {
+	root := repoRoot(t)
+	script := readFile(t, root, mcpMailJWTCompatibility)
+	for _, want := range []string{
+		"SecurityAndRateLimitMiddleware",
+		"_decode_jwt",
+		"HS256",
+		"RS256",
+		"wrong configured issuer",
+		"wrong configured audience",
+		"missing a configured audience",
+		"aud list",
+		"alg=none",
+		"HS384",
+		"joserfc",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("%s no longer exercises %q; it must cover the image's JWT decoder and configured claim checks", mcpMailJWTCompatibility, want)
+		}
+	}
+	patch := readFile(t, root, mcpMailJWTAudiencePatch)
+	for _, want := range []string{
+		"claims_options",
+		`"aud": {"essential": True, "values": [audience]}`,
+	} {
+		if !strings.Contains(patch, want) {
+			t.Errorf("%s no longer applies the strict configured-audience patch %q", mcpMailJWTAudiencePatch, want)
+		}
+	}
+
+	workflow := readFile(t, root, ".github/workflows/container-scan.yml")
+	stepStart := strings.Index(workflow, "- name: Check MCP mail image JWT compatibility")
+	if stepStart < 0 {
+		t.Fatal(".github/workflows/container-scan.yml has no step running the MCP mail JWT compatibility smoke")
+	}
+	step := workflow[stepStart:]
+	if next := strings.Index(step[1:], "\n      - name: "); next >= 0 {
+		step = step[:next+1]
+	}
+	for _, want := range []string{
+		"docker run --rm",
+		"--entrypoint python3",
+		"/" + mcpMailJWTCompatibility + ":/tmp/mcp-mail-jwt-compatibility.py:ro",
+		`"gc-mcp-mail:${IMAGE_TAG}"`,
+		"/tmp/mcp-mail-jwt-compatibility.py",
+	} {
+		if !strings.Contains(step, want) {
+			t.Errorf("MCP mail JWT smoke step missing %q", want)
+		}
+	}
+	if strings.Contains(step, "continue-on-error") || strings.Contains(step, "|| true") {
+		t.Error("MCP mail JWT smoke step must fail the job on a compatibility regression")
+	}
+	if got := strings.Count(workflow, `- "`+mcpMailJWTCompatibility+`"`); got != 2 {
+		t.Errorf("container-scan.yml lists %s in %d path filters, want 2 (push and pull_request)", mcpMailJWTCompatibility, got)
+	}
+	if got := strings.Count(workflow, `- "`+mcpMailJWTAudiencePatch+`"`); got != 2 {
+		t.Errorf("container-scan.yml lists %s in %d path filters, want 2 (push and pull_request)", mcpMailJWTAudiencePatch, got)
+	}
+}
+
 // mcpMailSitePackages is where Dockerfile.mail's pip install puts the lock's
 // packages, and the path prefix Trivy reports for them.
 const mcpMailSitePackages = "usr/local/lib/python3.12/site-packages/"
 
 // reviewedMCPMailWaivers maps each Python-package waiver for the gc-mcp-mail
 // image to the distribution it covers. Both advisories are fixed only on the
-// lines TestMCPMailImageHoldsFilelockAndGitPythonOnSafeLines keeps the image
-// off, and neither is reachable from the image; each statement in
-// .trivyignore.yaml gives the reasoning.
+// line TestMCPMailImagePinsValidatedGitPythonCacheAndFilelock keeps the image
+// off, and its statement in .trivyignore.yaml gives the reasoning.
 var reviewedMCPMailWaivers = map[string]string{
-	"CVE-2026-112940": "filelock",  // GHSA-v4x8-3wr5-3wq8, ReadWriteLock only
-	"CVE-2026-114145": "gitpython", // GHSA-83vg-56qc-22m7, submodule clone only
+	"CVE-2026-112940": "filelock", // GHSA-v4x8-3wr5-3wq8, ReadWriteLock only
 }
 
 // TestTrivyIgnoreMCPMailWaiversNameTheLockedRelease holds every gc-mcp-mail
