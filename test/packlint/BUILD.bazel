@@ -10,6 +10,7 @@ go_test(
         "managed_prompt_hook_timeout_test.go",
         "no_dolt_3307_fallback_test.go",
         "testenv_import_test.go",
+        "worktree_path_anchor_test.go",
     ],
     data = glob(
         ["**"],
