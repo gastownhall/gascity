@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -899,6 +900,58 @@ func TestHasExactKeyedLookup(t *testing.T) {
 	} {
 		if got := HasExactKeyedLookup(provider); got != want {
 			t.Errorf("HasExactKeyedLookup(%q) = %v, want %v", provider, got, want)
+		}
+	}
+}
+
+// TestKeyedProbeRoots pins the roots a keyed probe searches: a claude-family
+// probe searches the roots exactly as given, and an empty list — like every
+// other family — means the defaults rather than nothing.
+func TestKeyedProbeRoots(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", "")
+	defaults := sessionlog.DefaultSearchPaths()
+	roots := []string{"/observed"}
+	for _, c := range []struct {
+		provider string
+		roots    []string
+		want     []string
+	}{
+		{"claude", roots, roots},
+		{"claude-max", roots, roots},
+		{"claude", nil, defaults},
+		{"pi", roots, defaults},
+		{"kimi", roots, defaults},
+	} {
+		if got := KeyedProbeRoots(c.roots, c.provider); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("KeyedProbeRoots(%v, %q) = %v, want %v", c.roots, c.provider, got, c.want)
+		}
+	}
+}
+
+// TestClaudeConfigProjectsRoot pins the projects root an absolute
+// CLAUDE_CONFIG_DIR adds to a keyed probe: only a trimmed absolute dir names
+// one; a missing, blank, relative or ~ value adds nothing, because the
+// provider resolves those against its own working dir and home, which a probe
+// cannot reproduce.
+func TestClaudeConfigProjectsRoot(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		env  map[string]string
+		want string
+		ok   bool
+	}{
+		{name: "absolute dir", env: map[string]string{"CLAUDE_CONFIG_DIR": "/cfg/claude"}, want: "/cfg/claude/projects", ok: true},
+		{name: "padded absolute dir", env: map[string]string{"CLAUDE_CONFIG_DIR": "  /cfg/claude  "}, want: "/cfg/claude/projects", ok: true},
+		{name: "missing value", env: map[string]string{}, want: "", ok: false},
+		{name: "nil env", env: nil, want: "", ok: false},
+		{name: "blank value", env: map[string]string{"CLAUDE_CONFIG_DIR": "  "}, want: "", ok: false},
+		{name: "relative dir", env: map[string]string{"CLAUDE_CONFIG_DIR": "cfg/claude"}, want: "", ok: false},
+		{name: "home-relative dir", env: map[string]string{"CLAUDE_CONFIG_DIR": "~/.claude-alt"}, want: "", ok: false},
+	} {
+		got, ok := ClaudeConfigProjectsRoot(c.env)
+		if got != c.want || ok != c.ok {
+			t.Errorf("%s: ClaudeConfigProjectsRoot(%v) = (%q, %v), want (%q, %v)", c.name, c.env, got, ok, c.want, c.ok)
 		}
 	}
 }

@@ -26,9 +26,10 @@ type rotatedKeyFixture struct {
 	specCommand  string // handle-spec command override; "" is none
 	providerKind string // stamped provider_kind metadata; "" is none
 	freshKey     string
-	state        string // "" is asleep
-	probeRoot    string // when non-empty, the only root the launch probe searches
-	startedHash  string // committed started_config_hash; "" leaves it empty
+	state        string            // "" is asleep
+	probeRoot    string            // when non-empty, the only root the launch probe searches
+	startedHash  string            // committed started_config_hash; "" leaves it empty
+	env          map[string]string // handle-spec (launch) env; nil is none
 }
 
 // applyRestartHandoff rotates the row's session key to freshKey the way a
@@ -108,6 +109,7 @@ func newRotatedKeyHandle(t *testing.T, fx rotatedKeyFixture) (*SessionHandle, *b
 	spec := SessionSpec{
 		ID:       info.ID,
 		Template: "worker",
+		Env:      fx.env,
 		Command:  fx.specCommand,
 		Provider: fx.provider,
 		Resume: sessionpkg.ProviderResume{
@@ -267,6 +269,77 @@ func mapsEqual(a, b map[string]string) bool {
 		}
 	}
 	return true
+}
+
+// TestStartCommandRotatedKeyClaudeConfigDir pins the roots the rotated-key
+// probe searches when the launch env names a CLAUDE_CONFIG_DIR: an absolute
+// dir's projects root joins the probe roots, so a transcript kept only there
+// still resumes, while a relative or ~ dir adds no root — the provider
+// resolves those against its own working dir and home, which the probe cannot
+// reproduce — so a transcript kept only under them still reads absent and the
+// start switches to the session-id launch.
+func TestStartCommandRotatedKeyClaudeConfigDir(t *testing.T) {
+	const freshKey = "k-rotated-2"
+	tests := []struct {
+		name       string
+		configDir  func(root string) string
+		transcript bool
+		wantFlag   string
+	}{
+		{
+			name:       "absolute dir with the transcript",
+			configDir:  func(root string) string { return filepath.Join(root, "claude") },
+			transcript: true,
+			wantFlag:   "--resume",
+		},
+		{
+			name:      "absolute dir without the transcript",
+			configDir: func(root string) string { return filepath.Join(root, "claude") },
+			wantFlag:  "--session-id",
+		},
+		{
+			name:       "relative dir adds no root",
+			configDir:  func(string) string { return "rel/claude" },
+			transcript: true,
+			wantFlag:   "--session-id",
+		},
+		{
+			name:       "home-relative dir adds no root",
+			configDir:  func(string) string { return "~/.claude-alt" },
+			transcript: true,
+			wantFlag:   "--session-id",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			t.Chdir(root)
+			configDir := tt.configDir(root)
+			// HOME is pinned to an empty temp dir by newRotatedKeyHandle.
+			home := os.Getenv("HOME")
+			handle, _, info := newRotatedKeyHandle(t, rotatedKeyFixture{
+				freshKey:  freshKey,
+				probeRoot: t.TempDir(),
+				env:       map[string]string{"CLAUDE_CONFIG_DIR": "  " + configDir + "  "},
+			})
+			if tt.transcript {
+				transcriptDir := configDir
+				if after, ok := strings.CutPrefix(configDir, "~"); ok {
+					transcriptDir = filepath.Join(home, after)
+				}
+				writeKeyedTranscript(t, filepath.Join(transcriptDir, "projects"), info.WorkDir, freshKey)
+			}
+
+			got, err := handle.startCommand(info.ID)
+			if err != nil {
+				t.Fatalf("startCommand: %v", err)
+			}
+			want := "claude " + tt.wantFlag + " " + freshKey
+			if got != want {
+				t.Fatalf("startCommand() = %q, want %q", got, want)
+			}
+		})
+	}
 }
 
 // TestSessionHandleAttachAfterRestartHandoffStartsWithSessionID runs the
