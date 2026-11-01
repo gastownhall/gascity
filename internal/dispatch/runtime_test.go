@@ -12884,3 +12884,33 @@ func TestProcessWorkflowFinalizeClosesSourceChainPastUnblockedWorkOutcomes(t *te
 		})
 	}
 }
+
+func TestProcessWorkflowFinalizeDoesNotResolveStoresAboveBlockedSource(t *testing.T) {
+	t.Parallel()
+
+	f := newSourceChainFinalizeFixture(t)
+	stampSourceChainLaunch(t, f, "mol-do-work", "closed", map[string]string{
+		"gc.outcome":      "pass",
+		"gc.work_outcome": beadmeta.WorkOutcomeBlocked,
+	})
+	var resolved []string
+	resolver := func(ref string) (beads.Store, error) {
+		resolved = append(resolved, ref)
+		if ref == "city:test" {
+			return nil, errors.New("city store unavailable")
+		}
+		return f.resolver(ref)
+	}
+
+	result, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{
+		ResolveStoreRef: resolver,
+	})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+
+	assertWorkflowPassedClosed(t, f, result)
+	if slices.Contains(resolved, "city:test") {
+		t.Fatalf("resolver asked for %v; the store above a blocked source must never be resolved", resolved)
+	}
+}
