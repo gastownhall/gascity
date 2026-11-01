@@ -2357,12 +2357,14 @@ var sessionPeekAPIClient = func(cityPath string) (*api.Client, string) {
 // routeSessionPeek dispatches `session peek` to the supervisor API when a
 // controller is up; otherwise falls back to the local runtime provider.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
-// The API path passes the raw target to the server which resolves aliases;
-// fallback resolves locally via resolveSessionIDWithConfig.
+// The API path asks the server for gc session peek's own contract
+// (Client.PeekSession), so it resolves, peeks and refuses what the local
+// path does, with the same message; fallback resolves locally via
+// resolveSessionIDWithConfig.
 func routeSessionPeek(_, target string, lines int, c *api.Client, nilReason string, jsonOutput bool, stdout, stderr io.Writer) int {
 	const cmdName = "session peek"
 	if c != nil {
-		cr, err := c.GetSession(target, true, lines)
+		cr, err := c.PeekSession(target, lines)
 		if err == nil {
 			logRoute(stderr, cmdName, "api", "")
 			return renderSessionPeekFromAPI(cr, target, lines, jsonOutput, stdout, stderr)
