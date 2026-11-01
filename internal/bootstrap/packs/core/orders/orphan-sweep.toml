@@ -7,7 +7,10 @@
 # A claim whose assignee this city cannot vouch for (`gc agent is-foreign`:
 # not in its roster and no session record of its own answers to it, e.g.
 # another city's agent on a shared rig store) is never reset; each run that
-# keeps one names it and declares a partial outcome (order.skipped).
+# keeps one names it and declares a partial outcome (order.skipped). A local
+# claim kept because its holder could not be verified dead, its bead could not
+# be re-read, or its conditional release failed is also declared as a partial
+# outcome scope naming the bead and why.
 # Claims are read per scope with `gc bd list` and once more with
 # `gc ready --status in_progress`, which also covers class bindings (a split
 # city's graph steps) and the wisp plane; a federated read that fails is

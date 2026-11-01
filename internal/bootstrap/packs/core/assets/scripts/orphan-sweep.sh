@@ -270,6 +270,11 @@ live_session_match() {
 }
 
 CURRENT_BEAD_JSON=""
+# Session-record reads (comma-joined) the claim being judged could not
+# perform -- each candidate whose failed read classified as unverifiable,
+# plus "(unparseable)" for a response jq could not parse -- named in the skip
+# reason the sweep declares for the claim.
+SESSION_PROBE_UNREADABLE=""
 
 first_bead_jq='if type == "array" then .[0] else . end'
 
@@ -446,6 +451,7 @@ session_bead_shows_live_assignment() {
     local terminal_session_ids=""
     local probe_failed=0
 
+    SESSION_PROBE_UNREADABLE=""
     stamped_name=$(printf '%s\n' "$work_json" | jq -r "$first_bead_jq | .metadata[\"gc.session_name\"] // empty" 2>/dev/null) || stamped_name=""
 
     while IFS= read -r session_id; do
@@ -454,11 +460,13 @@ session_bead_shows_live_assignment() {
         if ! session_json=$(gc bd show "$session_id" --json 2>/dev/null); then
             if session_probe_failure_is_unverifiable "$session_id" "$assignee"; then
                 probe_failed=1
+                SESSION_PROBE_UNREADABLE="${SESSION_PROBE_UNREADABLE:+$SESSION_PROBE_UNREADABLE, }$session_id"
             fi
             continue
         fi
         if ! live_match=$(session_live_match "$assignee" "$session_id" "$session_json"); then
             probe_failed=1
+            SESSION_PROBE_UNREADABLE="${SESSION_PROBE_UNREADABLE:+$SESSION_PROBE_UNREADABLE, }(unparseable)"
             continue
         fi
         if [ -n "$live_match" ]; then
@@ -475,9 +483,11 @@ session_bead_shows_live_assignment() {
         if ! session_json=$(gc bd show "$stamped_name" --json 2>/dev/null); then
             if session_probe_failure_is_unverifiable "$stamped_name" "$assignee"; then
                 probe_failed=1
+                SESSION_PROBE_UNREADABLE="${SESSION_PROBE_UNREADABLE:+$SESSION_PROBE_UNREADABLE, }$stamped_name"
             fi
         elif ! live_match=$(session_live_match "$assignee" "$stamped_name" "$session_json"); then
             probe_failed=1
+            SESSION_PROBE_UNREADABLE="${SESSION_PROBE_UNREADABLE:+$SESSION_PROBE_UNREADABLE, }(unparseable)"
         elif [ -n "$live_match" ]; then
             return 0
         fi
@@ -773,6 +783,7 @@ while IFS=$'\t' read -r bead_id assignee; do
         recheck_status=$?
         if [ "$recheck_status" != "2" ]; then
             UNVERIFIABLE=$((UNVERIFIABLE + 1))
+            order_outcome_scope_skipped "$bead_id" "work bead could not be re-read as still in_progress under $assignee"
         fi
         continue
     fi
@@ -782,6 +793,7 @@ while IFS=$'\t' read -r bead_id assignee; do
         session_status=$?
         if [ "$session_status" = "2" ]; then
             UNVERIFIABLE=$((UNVERIFIABLE + 1))
+            order_outcome_scope_skipped "$bead_id" "holder $assignee is not verifiably dead; could not read ${SESSION_PROBE_UNREADABLE:-its session records}"
             continue
         fi
     fi
@@ -791,6 +803,7 @@ while IFS=$'\t' read -r bead_id assignee; do
         reset_status=$?
         if [ "$reset_status" != "2" ]; then
             UNVERIFIABLE=$((UNVERIFIABLE + 1))
+            order_outcome_scope_skipped "$bead_id" "conditional release under $assignee failed"
         fi
     fi
 done < <([ -z "$UNRECOGNIZED_ROWS" ] || printf '%s\n' "$UNRECOGNIZED_ROWS")
@@ -823,6 +836,18 @@ if [ "$PROTECTED" -gt 0 ]; then
         PROTECTED_DETAIL="$PROTECTED_DETAIL
 orphan-sweep: foreign-identity gate budget of ${GATE_BUDGET_SECONDS}s exhausted; $GATE_BUDGET_SKIPPED identities not asked this pass"
     fi
+fi
+
+# Declare local skips through the same contract: a local claim left in place
+# because its bead could not be re-read, its holder could not be verified
+# dead, or its conditional release failed is a scope naming the bead and the
+# check that failed, and the run is a partial outcome -- other claims may
+# have run. The controller logs an exit-0 exec order's output nowhere
+# (#4543); the declaration is what makes the skip visible as an
+# order.skipped event. Benign races (a bead closed or reassigned since
+# listing, a release that lost its race) stay uncounted and undeclared.
+if [ "$UNVERIFIABLE" -gt 0 ]; then
+    order_outcome_set partial "skipped $UNVERIFIABLE unverifiable claim(s) left in place: the holder could not be verified dead or released; each scope names the bead and why"
 fi
 
 if [ "$ORPHANED" -gt 0 ] || [ "$UNVERIFIABLE" -gt 0 ] || [ "$PROTECTED" -gt 0 ]; then
@@ -858,10 +883,11 @@ misidentified live session -- inspect via gc bd show <id> --json." \
     fi
 fi
 
-# Declare protected claims as a partial outcome: the controller logs an exit-0
-# run's output nowhere, but turns this declaration into a typed order.skipped
-# event naming each protected identity (order_outcome.sh). A no-op when nothing
-# was protected or when run by hand without GC_ORDER_OUTCOME_FILE.
+# Declare protected claims and local skips as a partial outcome: the controller
+# logs an exit-0 run's output nowhere, but turns this declaration into a typed
+# order.skipped event naming each protected identity and each locally skipped
+# bead (order_outcome.sh). A no-op when nothing was protected or skipped, or
+# when run by hand without GC_ORDER_OUTCOME_FILE.
 order_outcome_write
 
 # Loud-fail: the summary has been printed above, so a non-zero exit now
