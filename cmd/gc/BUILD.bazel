@@ -1101,6 +1101,7 @@ go_test(
         "build_desired_state_parked_test.go",
         "build_desired_state_pool_info_immutability_test.go",
         "build_desired_state_session_stamp_test.go",
+        "build_desired_state_restart_handoff_repro_test.go",
         "build_desired_state_test.go",
         "build_desired_state_trigger_bind_test.go",
         "build_desired_state_warm_crossstore_test.go",
