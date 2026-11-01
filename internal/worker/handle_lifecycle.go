@@ -820,7 +820,7 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	if resumeCommand := strings.TrimSpace(h.session.Resume.ResumeCommand); resumeCommand != "" {
 		resumeInfo.ResumeCommand = resumeCommand
 	}
-	if h.unlaunchedSessionKey(info) {
+	if h.unlaunchedSessionKey(info, pr.Metadata) {
 		return startWithSessionID(firstNonEmpty(h.session.Command, info.Command, h.session.Provider, info.Provider), h.session.Resume.SessionIDFlag, info.SessionKey)
 	}
 	return sessionpkg.BuildResumeCommand(resumeInfo), nil
@@ -830,13 +830,17 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 // conversation no provider has started, so a start must open it under the
 // session-id flag rather than resume it: a restart handoff rotates the key
 // on a row whose previous start already stamped creation_complete_at, so
-// firstProviderSessionStart no longer sees a first start. The key reads
-// unlaunched when the keyed-transcript probe, the one the reconciler's start
-// runs, finds no transcript for it in the roots this launch reads, under the
-// work dir it launches in. A provider the probe cannot read, or a launch
+// firstProviderSessionStart no longer sees a first start. The row must have
+// no committed start (started_config_hash empty: every key rotation clears
+// it), and the keyed-transcript probe, the one the reconciler's start runs,
+// must find no transcript for the key in the roots this launch reads, under
+// the work dir it launches in. A provider the probe cannot read, or a launch
 // without a work dir, keeps the resume.
-func (h *SessionHandle) unlaunchedSessionKey(info sessionpkg.Info) bool {
+func (h *SessionHandle) unlaunchedSessionKey(info sessionpkg.Info, metadata map[string]string) bool {
 	if h.session.Resume.SessionIDFlag == "" || strings.TrimSpace(info.SessionKey) == "" {
+		return false
+	}
+	if strings.TrimSpace(metadata["started_config_hash"]) != "" {
 		return false
 	}
 	hints := h.runtimeHints()

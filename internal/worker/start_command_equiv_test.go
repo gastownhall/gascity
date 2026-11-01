@@ -198,8 +198,8 @@ func TestStartCommandStaleResumeKey(t *testing.T) {
 			if err := store.SetMetadata(info.ID, "provider", tt.provider); err != nil {
 				t.Fatalf("SetMetadata(provider): %v", err)
 			}
-			if err := store.SetMetadata(info.ID, "started_config_hash", "hash-abc"); err != nil {
-				t.Fatalf("SetMetadata(started_config_hash): %v", err)
+			if err := store.SetMetadata(info.ID, "creation_complete_at", "2026-01-01T00:00:00Z"); err != nil {
+				t.Fatalf("SetMetadata(creation_complete_at): %v", err)
 			}
 			if tt.transcript {
 				dir := filepath.Join(root, sessionlog.ProjectSlug(info.WorkDir))
@@ -258,8 +258,8 @@ func TestStartCommandClaudeConfigDir(t *testing.T) {
 			if err := store.SetMetadata(info.ID, "provider", "claude"); err != nil {
 				t.Fatalf("SetMetadata(provider): %v", err)
 			}
-			if err := store.SetMetadata(info.ID, "started_config_hash", "hash-abc"); err != nil {
-				t.Fatalf("SetMetadata(started_config_hash): %v", err)
+			if err := store.SetMetadata(info.ID, "creation_complete_at", "2026-01-01T00:00:00Z"); err != nil {
+				t.Fatalf("SetMetadata(creation_complete_at): %v", err)
 			}
 			if tt.transcript {
 				dir := filepath.Join(configDir, "projects", sessionlog.ProjectSlug(info.WorkDir))

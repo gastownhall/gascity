@@ -151,6 +151,11 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			want:          resumeStart,
 		},
 		{
+			name: "AC-3 committed start without a transcript resumes",
+			meta: map[string]string{"started_config_hash": "hash-abc"},
+			want: resumeStart,
+		},
+		{
 			name: "empty work dir in hints and row is not probeable and resumes",
 			spec: func(spec *SessionSpec, _ string) {
 				spec.WorkDir = ""
