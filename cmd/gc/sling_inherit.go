@@ -9,7 +9,9 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sling"
 )
 
 // slingCallerIdentityEnv names the calling session the way the default
@@ -39,15 +41,37 @@ type slingInheritSources struct {
 	stores []slingInheritReader
 }
 
+// slingClaimStores opens the stores a session's claims and their run roots can
+// live in: the relocated graph binding first, then the city and rig stores.
+// skipped lists every candidate store that did not open.
+type slingClaimStores func() (stores []sling.SourceWorkflowStore, skipped []sourceWorkflowStoreSkip, err error)
+
+// slingClaimStoresFor turns openViews, the opener of a local sling's own
+// source-workflow stores, into its claim stores: the relocated graph binding
+// first, then the city and rig stores that opened. The singleton scan over the
+// same stores tolerates one that did not open; this opener hands every such
+// store on, because a claim in it could name another run.
+func slingClaimStoresFor(cfg *config.City, cityPath, cityName string, openViews func() ([]convoyStoreView, []sourceWorkflowStoreSkip, error)) slingClaimStores {
+	return func() ([]sling.SourceWorkflowStore, []sourceWorkflowStoreSkip, error) {
+		views, skipped, err := openViews()
+		if err != nil {
+			return nil, skipped, err
+		}
+		stores, err := sourceWorkflowStoresFromViews(cfg, cityPath, cityName, views)
+		return stores, skipped, err
+	}
+}
+
 // inheritSlingInitiator gives a local `gc sling` run from inside a session the
 // gc.initiator of the run that session is working on, so follow-up work an agent
 // launches stays attributed to whoever launched the original run. It never
 // overrides an initiator already on opts and is a no-op outside a session.
-// Exactly one distinct initiator across the caller's claimed runs is inherited;
-// several stamp nothing and leave a one-line warning on stderr. The stores it
-// reads are the sling's own source-workflow stores (deps.SourceWorkflowStores):
-// the relocated graph binding first, then the city and rig stores.
-func inheritSlingInitiator(opts *slingOpts, deps slingDeps, getenv func(string) string, stderr io.Writer) {
+// It inherits only when every run the caller has claimed carries the same
+// initiator. Otherwise it stamps nothing and leaves a one-line warning on
+// stderr: when the runs carry different initiators, when one carries an
+// initiator and another none, when a read fails, and when a claim store did
+// not open. claimStores opens the stores it reads (slingClaimStoresFor).
+func inheritSlingInitiator(opts *slingOpts, claimStores slingClaimStores, getenv func(string) string, stderr io.Writer) {
 	if strings.TrimSpace(opts.Initiator) != "" {
 		return
 	}
@@ -61,19 +85,34 @@ func inheritSlingInitiator(opts *slingOpts, deps slingDeps, getenv func(string) 
 			src.identities = append(src.identities, v)
 		}
 	}
-	if deps.SourceWorkflowStores == nil {
+	if claimStores == nil {
 		warnSlingInitiatorNotInherited(stderr, "no claim stores are available")
 		return
 	}
-	stores, err := deps.SourceWorkflowStores()
+	stores, skipped, err := claimStores()
 	if err != nil {
 		warnSlingInitiatorNotInherited(stderr, fmt.Sprintf("opening the claim stores: %v", err))
+		return
+	}
+	if len(skipped) > 0 {
+		warnSlingInitiatorNotInherited(stderr, slingClaimStoreSkipsReason(skipped))
 		return
 	}
 	for _, s := range stores {
 		src.stores = append(src.stores, s.Store)
 	}
 	opts.Initiator = resolveInheritedInitiator(src, stderr)
+}
+
+// slingClaimStoreSkipsReason says why inheritance read nothing when some claim
+// stores did not open: the claims in them are invisible, and one could name a
+// run whose initiator contradicts the claims that are visible.
+func slingClaimStoreSkipsReason(skipped []sourceWorkflowStoreSkip) string {
+	parts := make([]string, 0, len(skipped))
+	for _, skip := range skipped {
+		parts = append(parts, fmt.Sprintf("%s (%v)", skip.path, skip.err))
+	}
+	return fmt.Sprintf("%d claim store(s) did not open, and a claim there could name another run: %s", len(skipped), strings.Join(parts, "; "))
 }
 
 // slingSessionCurrentClaim reads the session bead's current_claim_bead_id
@@ -102,12 +141,61 @@ type slingInheritClaim struct {
 	home slingInheritReader
 }
 
-// resolveInheritedInitiator collects the caller's claims — the session's open
-// current claim plus every in_progress bead assigned to one of its identities —
-// resolves each to its run root with beadmeta.ResolveRunID, and returns the
-// single distinct gc.initiator those roots carry. It returns "" when none
-// carries one, and "" with a warning when they disagree or a read fails.
+// resolveInheritedInitiator collects the caller's claims, resolves each to its
+// run root, and returns the gc.initiator those roots carry when they all carry
+// the same one. It returns "" when none carries one, and "" with a warning when
+// a read fails or the roots disagree. A root that carries no initiator
+// disagrees with one that does: the session may be doing that run's work, so it
+// inherits no other run's initiator over it.
 func resolveInheritedInitiator(src slingInheritSources, stderr io.Writer) string {
+	claims, err := collectSlingInheritClaims(src)
+	if err != nil {
+		warnSlingInitiatorNotInherited(stderr, err.Error())
+		return ""
+	}
+	rootsByInitiator := map[string][]string{}
+	var unattributed []string
+	for _, c := range claims {
+		rootID, root, err := slingInheritRunRoot(src.stores, c)
+		if err != nil {
+			warnSlingInitiatorNotInherited(stderr, err.Error())
+			return ""
+		}
+		initiator := strings.TrimSpace(root.Metadata[beadmeta.InitiatorMetadataKey])
+		if initiator == "" {
+			if !containsString(unattributed, rootID) {
+				unattributed = append(unattributed, rootID)
+			}
+			continue
+		}
+		if !containsString(rootsByInitiator[initiator], rootID) {
+			rootsByInitiator[initiator] = append(rootsByInitiator[initiator], rootID)
+		}
+	}
+	switch {
+	case len(rootsByInitiator) == 0:
+		return ""
+	case len(rootsByInitiator) == 1 && len(unattributed) == 0:
+		for initiator := range rootsByInitiator {
+			return initiator
+		}
+	}
+	parts := make([]string, 0, len(rootsByInitiator)+1)
+	for initiator, roots := range rootsByInitiator {
+		parts = append(parts, fmt.Sprintf("%s=%s", strings.Join(roots, ","), initiator))
+	}
+	sort.Strings(parts)
+	if len(unattributed) > 0 {
+		parts = append(parts, strings.Join(unattributed, ",")+"=(none)")
+	}
+	warnSlingInitiatorNotInherited(stderr, "the session's claimed runs have different initiators ("+strings.Join(parts, "; ")+")")
+	return ""
+}
+
+// collectSlingInheritClaims returns the caller's claims, each with the store it
+// was read from: the session's open current claim, then every in_progress bead
+// assigned to one of its identities in each claim store.
+func collectSlingInheritClaims(src slingInheritSources) ([]slingInheritClaim, error) {
 	var claims []slingInheritClaim
 	seen := map[string]bool{}
 	add := func(b beads.Bead, home slingInheritReader) {
@@ -120,76 +208,53 @@ func resolveInheritedInitiator(src slingInheritSources, stderr io.Writer) string
 	if src.currentClaim != nil {
 		id, err := src.currentClaim()
 		if err != nil {
-			warnSlingInitiatorNotInherited(stderr, fmt.Sprintf("reading the session's current claim: %v", err))
-			return ""
+			return nil, fmt.Errorf("reading the session's current claim: %w", err)
 		}
 		if id != "" {
 			b, home, found, err := getSlingInheritBead(src.stores, nil, id)
 			if err != nil {
-				warnSlingInitiatorNotInherited(stderr, err.Error())
-				return ""
+				return nil, err
 			}
 			if found && b.Status != "closed" {
 				add(b, home)
 			}
 		}
 	}
-	if len(src.identities) > 0 {
-		for _, store := range src.stores {
-			// FederatedReadTier on every leg: a relocated class store answers at
-			// exactly the queried tier, so the zero value would drop its
-			// ephemeral claims while the policy-wrapped legs still return theirs.
-			listed, err := store.List(beads.ListQuery{Status: "in_progress", Assignees: src.identities, TierMode: beads.FederatedReadTier})
-			if err != nil {
-				warnSlingInitiatorNotInherited(stderr, fmt.Sprintf("listing the session's claims: %v", err))
-				return ""
-			}
-			for _, b := range listed {
-				add(b, store)
-			}
+	if len(src.identities) == 0 {
+		return claims, nil
+	}
+	for _, store := range src.stores {
+		// FederatedReadTier on every leg: a relocated class store answers at
+		// exactly the queried tier, so the zero value would drop its ephemeral
+		// claims while the policy-wrapped legs still return theirs.
+		listed, err := store.List(beads.ListQuery{Status: "in_progress", Assignees: src.identities, TierMode: beads.FederatedReadTier})
+		if err != nil {
+			return nil, fmt.Errorf("listing the session's claims: %w", err)
+		}
+		for _, b := range listed {
+			add(b, store)
 		}
 	}
+	return claims, nil
+}
 
-	rootsByInitiator := map[string][]string{}
-	for _, c := range claims {
-		rootID := beadmeta.ResolveRunID(c.bead.Metadata, c.bead.ID, "")
-		root := c.bead
-		if rootID != c.bead.ID {
-			var found bool
-			var err error
-			root, _, found, err = getSlingInheritBead(src.stores, c.home, rootID)
-			if err != nil {
-				warnSlingInitiatorNotInherited(stderr, err.Error())
-				return ""
-			}
-			if !found {
-				warnSlingInitiatorNotInherited(stderr, fmt.Sprintf("run root %s of claim %s was not found", rootID, c.bead.ID))
-				return ""
-			}
-		}
-		initiator := strings.TrimSpace(root.Metadata[beadmeta.InitiatorMetadataKey])
-		if initiator == "" {
-			continue
-		}
-		if !containsString(rootsByInitiator[initiator], rootID) {
-			rootsByInitiator[initiator] = append(rootsByInitiator[initiator], rootID)
-		}
+// slingInheritRunRoot resolves claim c to its run root with
+// beadmeta.ResolveRunID: c itself when it names no run, else the root read
+// from c's own store first, then from each claim store. A root that no store
+// holds is an error, like a failed read.
+func slingInheritRunRoot(stores []slingInheritReader, c slingInheritClaim) (string, beads.Bead, error) {
+	rootID := beadmeta.ResolveRunID(c.bead.Metadata, c.bead.ID, "")
+	if rootID == c.bead.ID {
+		return rootID, c.bead, nil
 	}
-	switch len(rootsByInitiator) {
-	case 0:
-		return ""
-	case 1:
-		for initiator := range rootsByInitiator {
-			return initiator
-		}
+	root, _, found, err := getSlingInheritBead(stores, c.home, rootID)
+	if err != nil {
+		return "", beads.Bead{}, err
 	}
-	parts := make([]string, 0, len(rootsByInitiator))
-	for initiator, roots := range rootsByInitiator {
-		parts = append(parts, fmt.Sprintf("%s=%s", strings.Join(roots, ","), initiator))
+	if !found {
+		return "", beads.Bead{}, fmt.Errorf("run root %s of claim %s was not found", rootID, c.bead.ID)
 	}
-	sort.Strings(parts)
-	warnSlingInitiatorNotInherited(stderr, "the session's claimed runs have different initiators ("+strings.Join(parts, "; ")+")")
-	return ""
+	return rootID, root, nil
 }
 
 // getSlingInheritBead reads id from home first, then from each store in order,

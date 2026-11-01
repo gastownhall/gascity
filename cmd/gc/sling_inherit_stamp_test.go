@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sling"
 )
 
@@ -33,8 +35,8 @@ func inheritStampStore(t *testing.T) (store *beads.MemStore, workID string) {
 	return store, work.ID
 }
 
-// inheritStampDeps wires deps whose claim stores are store itself, the way
-// cmdSlingWithJSON wires deps.SourceWorkflowStores to the sling's own stores.
+// inheritStampDeps wires deps whose source-workflow stores are store itself,
+// the stores cmdSlingWithJSON also opens as the claim stores.
 func inheritStampDeps(cfg *config.City, store beads.Store) (slingDeps, *bytes.Buffer, *bytes.Buffer) {
 	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	deps.Store = store
@@ -44,13 +46,18 @@ func inheritStampDeps(cfg *config.City, store beads.Store) (slingDeps, *bytes.Bu
 	return deps, stdout, stderr
 }
 
-// inheritInSession runs inheritSlingInitiator as the calling session and
-// requires it to pick up alice without a warning.
+// inheritInSession runs inheritSlingInitiator as the calling session, over
+// deps' source-workflow stores as its claim stores, and requires it to pick up
+// alice without a warning.
 func inheritInSession(t *testing.T, opts *slingOpts, deps slingDeps) {
 	t.Helper()
 	var stderr bytes.Buffer
 	env := slingInheritEnv(map[string]string{"GC_SESSION_NAME": inheritStampCaller})
-	inheritSlingInitiator(opts, deps, env, &stderr)
+	claimStores := func() ([]sling.SourceWorkflowStore, []sourceWorkflowStoreSkip, error) {
+		stores, err := deps.SourceWorkflowStores()
+		return stores, nil, err
+	}
+	inheritSlingInitiator(opts, claimStores, env, &stderr)
 	if opts.Initiator != "alice" || stderr.Len() != 0 {
 		t.Fatalf("inherited Initiator = %q, stderr = %q; want alice and no warning", opts.Initiator, stderr.String())
 	}
@@ -110,4 +117,80 @@ func TestInSessionSlingStampsInheritedInitiatorOnWorkflowRoot(t *testing.T) {
 	// graph.v2 --on routes the workflow root, not the source bead, so the
 	// root is where the inherited stamp must land.
 	requireStoredInitiator(t, store, roots[0].ID, "alice")
+}
+
+// inheritCmdSlingRigBeads is the rig ledger the cmdSling tests start from: a
+// poured molecule launched by initiator, its source bead claimed by claimant,
+// and the open bead the tests sling.
+func inheritCmdSlingRigBeads(initiator, claimant string) []beads.Bead {
+	return []beads.Bead{
+		{ID: "fo-multi-work", Title: "multi-target work bead", Type: "task", Status: "open", Metadata: map[string]string{}},
+		{ID: "fo-run", Title: "run root", Type: "molecule", Status: "open", Metadata: map[string]string{beadmeta.InitiatorMetadataKey: initiator}},
+		{ID: "fo-claim", Title: "claimed source", Type: "task", Status: "in_progress", Assignee: claimant, Metadata: map[string]string{beadmeta.MoleculeIDMetadataKey: "fo-run"}},
+	}
+}
+
+// cmdSlingFromSession runs `gc sling <beadID>` through cmdSling with env set
+// as the calling session's, and requires it to route without an inheritance
+// warning.
+func cmdSlingFromSession(t *testing.T, env map[string]string, beadID string) {
+	t.Helper()
+	for k, v := range env {
+		t.Setenv(k, v)
+	}
+	var stdout, stderr bytes.Buffer
+	code := cmdSling(
+		[]string{beadID},
+		false, false, false,
+		"", nil, "",
+		true, false, false, "",
+		false, false, false,
+		"", "",
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("cmdSling returned %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "not inheriting") {
+		t.Fatalf("stderr = %q, want no inheritance warning", stderr.String())
+	}
+}
+
+// TestCmdSlingFromSessionStampsInheritedInitiator drives `gc sling` itself
+// from inside a session that has claimed carol's run under its name: the
+// local path runs inheritance, so the bead it routes is stamped carol.
+func TestCmdSlingFromSessionStampsInheritedInitiator(t *testing.T) {
+	cityDir, rigDir := setupCmdSlingMultiDefaultTargetsFixture(t, []string{"foundations/worker-a"})
+	writeTestFileStoreBeads(t, rigDir, inheritCmdSlingRigBeads("carol", "foundations/worker-b"))
+
+	cmdSlingFromSession(t, map[string]string{"GC_SESSION_NAME": "foundations/worker-b"}, "fo-multi-work")
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("open rig store: %v", err)
+	}
+	requireStoredInitiator(t, rigStore, "fo-multi-work", "carol")
+}
+
+// TestCmdSlingFromSessionInheritsThroughCurrentClaim drives `gc sling` from a
+// session whose claim is assigned to an identity the session does not carry,
+// so only the session bead's current_claim_bead_id, read through the session
+// front door, leads to dave's run.
+func TestCmdSlingFromSessionInheritsThroughCurrentClaim(t *testing.T) {
+	cityDir, rigDir := setupCmdSlingMultiDefaultTargetsFixture(t, []string{"foundations/worker-a"})
+	writeTestFileStoreBeads(t, rigDir, inheritCmdSlingRigBeads("dave", "pool-seat-7"))
+	writeTestFileStoreBeads(t, cityDir, []beads.Bead{{
+		ID:       "gc-sess-1",
+		Title:    "worker session",
+		Type:     session.BeadType,
+		Status:   "open",
+		Labels:   []string{session.LabelSession},
+		Metadata: map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: "fo-claim"},
+	}})
+
+	cmdSlingFromSession(t, map[string]string{"GC_SESSION_ID": "gc-sess-1"}, "fo-multi-work")
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("open rig store: %v", err)
+	}
+	requireStoredInitiator(t, rigStore, "fo-multi-work", "dave")
 }
