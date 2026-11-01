@@ -398,6 +398,10 @@ func TestRenderSupervisorLaunchdTemplate(t *testing.T) {
 		"<string>sk-openai-123</string>",
 		"<key>GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL</key>",
 		"<string>1</string>",
+		"<key>ProcessType</key>",
+		"<string>Interactive</string>",
+		"<key>ExitTimeOut</key>",
+		"<integer>60</integer>",
 	} {
 		if !strings.Contains(content, check) {
 			t.Fatalf("launchd template missing %q", check)
