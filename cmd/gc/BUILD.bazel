@@ -2350,7 +2350,7 @@ go_test(
             "@bd_bin_v1_3_2//:bd",
             "@dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt",
         ],
-        "//conditions:default": [],
+        "//conditions:default": ["@dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt"],
     }),
     embed = [":gc_lib"],
     # The integration build (GC_FAST_UNIT=0, .bazelrc test:integration) runs
@@ -2365,7 +2365,12 @@ go_test(
             "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_2//:bd) $(rootpath @dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt)",
             "GC_TEST_WRITE_MINT_BIN": "$(rootpath //cmd/gc-write-mint)",
         },
-        "//conditions:default": {},
+        # The unit build's tests that probe dolt by name (gc init's dependency
+        # check against doltversion.ManagedMin) get the pinned release first
+        # on PATH too, not whatever dolt the executing worker host carries.
+        "//conditions:default": {
+            "GC_TEST_TOOL_PATHS": "$(rootpath @dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt)",
+        },
     }),
     # No single test runs long (the longest ~13 s); the slowest shard follows
     # the shard count. At 15 the unit lane's slowest shard ran 40-67 s after
