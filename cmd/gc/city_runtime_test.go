@@ -8983,3 +8983,40 @@ func TestCityRuntimeReloadKeepsWispGCCadence(t *testing.T) {
 		})
 	}
 }
+
+func TestCityRuntimeReloadWispGCIntervalCountsFromLastRun(t *testing.T) {
+	for _, tc := range []struct {
+		interval  string
+		want      time.Duration
+		notDueAt  time.Duration
+		dueAt     time.Duration
+		ttl       string
+		wantTTL   time.Duration
+		mailTTL   string
+		wantMail  time.Duration
+		mailBlock string
+	}{
+		{interval: "15m", want: 15 * time.Minute, notDueAt: 10 * time.Minute, dueAt: 15 * time.Minute, ttl: "12h", wantTTL: 12 * time.Hour, mailTTL: "72h", wantMail: 72 * time.Hour},
+		{interval: "2h", want: 2 * time.Hour, notDueAt: time.Hour, dueAt: 2 * time.Hour, ttl: "48h", wantTTL: 48 * time.Hour, mailTTL: "96h", wantMail: 96 * time.Hour},
+	} {
+		t.Run(tc.interval, func(t *testing.T) {
+			cr, tomlPath := newWispGCReloadRuntime(t, "\n[daemon]\nwisp_gc_interval = \"1h\"\nwisp_ttl = \"24h\"\n\n[mail]\nretention_ttl = \"168h\"\n")
+			lastRun := time.Now()
+			prev := stampWispGCLastRun(t, cr, lastRun)
+
+			applyWispGCReload(t, cr, tomlPath, "\n[daemon]\nwisp_gc_interval = \""+tc.interval+"\"\nwisp_ttl = \""+tc.ttl+"\"\n\n[mail]\nretention_ttl = \""+tc.mailTTL+"\"\n")
+
+			next := rebuiltWispGC(t, cr, prev)
+			if next.interval != tc.want || next.ttl != tc.wantTTL || next.mailRetentionTTL != tc.wantMail {
+				t.Fatalf("rebuilt interval/ttl/mailRetentionTTL = %v/%v/%v, want %v/%v/%v",
+					next.interval, next.ttl, next.mailRetentionTTL, tc.want, tc.wantTTL, tc.wantMail)
+			}
+			if cr.wg.shouldRun(lastRun.Add(tc.notDueAt)) {
+				t.Fatalf("wisp GC due %v after its last run on a %s interval; want the new interval counted from the last run", tc.notDueAt, tc.interval)
+			}
+			if !cr.wg.shouldRun(lastRun.Add(tc.dueAt)) {
+				t.Fatalf("wisp GC not due %v after its last run on a %s interval", tc.dueAt, tc.interval)
+			}
+		})
+	}
+}
