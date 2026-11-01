@@ -1,10 +1,10 @@
 # Detect beads stuck in a recovery loop (crash loop indicator).
 #
 # When the same bead gets reset to pool multiple times, a polecat is
-# likely crash-looping on that specific work. The script counts
-# bead.updated events where status transitions to open with assignee
-# cleared (the recovery signature) and escalates when the count for
-# any single bead exceeds the threshold.
+# likely crash-looping on that specific work. Each sweep the script reads
+# open, unassigned beads in every store (gc ready --status open), counts
+# those carrying recovery or rejection metadata (the recovery signature)
+# and escalates when the count for any single bead reaches the threshold.
 [order]
 description = "Detect beads repeatedly bouncing back to pool (spawn storm)"
 trigger = "cooldown"

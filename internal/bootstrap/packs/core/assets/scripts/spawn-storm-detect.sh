@@ -41,8 +41,30 @@ fi
 
 # Step 1: Find beads that were recently reset to pool.
 # Look for open beads that have been updated (recovery resets them to open + unassigned).
-OPEN_BEADS=$(gc bd list --status=open --assignee="" --json --limit=0 2>/dev/null) || exit 0
-if [ -z "$OPEN_BEADS" ] || [ "$OPEN_BEADS" = "[]" ]; then
+# Read through gc ready, not gc bd list. gc bd list answers from one store (the
+# city store, for this city-scoped order) and bd leaves the wisp plane out of a
+# plain list, so a bead reset in a rig store, in the graph store a split city
+# keeps workflow steps in, or on the wisp plane was never counted. gc ready
+# --status open reads the city store, every rig store that is not suspended and
+# every [storage.classes] binding, across both storage tiers, and fails on a
+# store it cannot read. So does this sweep, before it touches the ledger: an
+# exit 0 would read as "no storms", and the controller logs an exec order's
+# output only on a non-zero exit. --unassigned keeps beads being worked out of
+# the count.
+READ_ERR=$(mktemp)
+trap 'rm -f "$READ_ERR"' EXIT
+READ_RC=0
+OPEN_BEADS=$(gc ready --status open --unassigned --json 2>"$READ_ERR") || READ_RC=$?
+if [ "$READ_RC" -ne 0 ]; then
+    WHY=$(<"$READ_ERR")
+    echo "spawn-storm-detect: gc ready --status open failed (exit $READ_RC): ${WHY//$'\n'/ }" >&2
+    exit 1
+fi
+if ! jq -e 'type == "array"' <<<"$OPEN_BEADS" >/dev/null 2>&1; then
+    echo "spawn-storm-detect: gc ready --status open did not answer a JSON array: ${OPEN_BEADS:0:200}" >&2
+    exit 1
+fi
+if [ "$OPEN_BEADS" = "[]" ]; then
     exit 0
 fi
 
@@ -51,8 +73,10 @@ COUNTS=$(cat "$LEDGER")
 
 # Step 3: For each open unassigned bead, check if it has rejection metadata
 # (indicates it was returned for rework or recovered by a work-health patrol).
+# An empty string is not a rejection: jq reads "" as not null, so a key left
+# set to "" would count on every sweep.
 STORMS=0
-RESET_IDS=$(echo "$OPEN_BEADS" | jq -r '.[] | select(.metadata.rejection_reason != null or .metadata.recovered != null) | .id' 2>/dev/null)
+RESET_IDS=$(echo "$OPEN_BEADS" | jq -r '.[] | select((.metadata.rejection_reason // "") != "" or (.metadata.recovered // "") != "") | .id' 2>/dev/null)
 while IFS= read -r bead_id; do
     [ -z "$bead_id" ] && continue
 
@@ -100,9 +124,16 @@ done <<< "$RESET_IDS"
 # Step 4: Prune closed beads from ledger.
 # Only check beads actually tracked in the ledger (avoids expensive full scan
 # of all closed beads via gc bd list --status=closed --limit=0).
+# Bead-id prefixes of suspended rigs. A suspended rig is left cold: any bd read
+# restarts its retired proxy, so its beads keep their counts until it resumes.
+SUSPENDED_PREFIXES=$(gc rig list --json 2>/dev/null \
+    | jq -r '(.rigs // [])[] | select(.hq != true and .suspended == true) | .prefix' 2>/dev/null) || SUSPENDED_PREFIXES=""
 TRACKED_IDS=$(echo "$COUNTS" | jq -r 'keys[]' 2>/dev/null) || true
 while IFS= read -r tid; do
     [ -z "$tid" ] && continue
+    if [ -n "$SUSPENDED_PREFIXES" ] && grep -qxF "${tid%%-*}" <<<"$SUSPENDED_PREFIXES"; then
+        continue
+    fi
     # stdout only: gc writes diagnostics to stderr (scope disclosure, doctor
     # warnings), and merging them into the JSON makes every jq parse fail and
     # every bead read as "unknown", so nothing is ever pruned. The error path
