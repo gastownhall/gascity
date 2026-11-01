@@ -2274,8 +2274,11 @@ func startupRateLimitScreenDetected(
 // postStartDeathPane is the last pane output of a resume launch the post-start
 // liveness check found dead, redacted against the launch's secrets as the
 // runtime's own startup-failure capture is. A provider that refused the resume
-// says so there. The peek is held to postStartObservationBound; one that fails
+// says so there. The peek and the redaction are held to
+// postStartObservationBound together: the guarded env snapshot the pane is
+// scrubbed against waits out a native store open in flight. A read that fails
 // or does not answer reads empty, so the death counts instead of resetting.
+// A pane whose scrub has not finished is never returned unredacted.
 func postStartDeathPane(
 	ctx context.Context,
 	item preparedStart,
@@ -2290,12 +2293,16 @@ func postStartDeathPane(
 	ctx, cancel := context.WithTimeout(ctx, postStartObservationBound)
 	defer cancel()
 	pane, err := observeSessionBounded(ctx, cityPath, item.candidate.name(), func() (string, error) {
-		return workerSessionTargetPeekWithConfig(cityPath, store, sp, cfg, item.candidate.name(), rateLimitPeekLines, item.cfg.ProcessNames)
+		pane, err := workerSessionTargetPeekWithConfig(cityPath, store, sp, cfg, item.candidate.name(), rateLimitPeekLines, item.cfg.ProcessNames)
+		if err != nil {
+			return "", err
+		}
+		return runtime.RedactSecrets(pane, runtime.SetupCommandSecrets(processEnvSnapshotExcludingNativeDoltOpen(), item.cfg.Env)), nil
 	})
 	if err != nil {
 		return ""
 	}
-	return runtime.RedactSecrets(pane, runtime.SetupCommandSecrets(processEnvSnapshotExcludingNativeDoltOpen(), item.cfg.Env))
+	return pane
 }
 
 func enqueuePreparedStartWaveForCity(
