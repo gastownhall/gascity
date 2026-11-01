@@ -144,6 +144,11 @@ func TestClassifyIdlePane(t *testing.T) {
 		{"busy", []string{"❯ ", busyPane}, false, nil},
 		{"idle", []string{"❯ "}, true, nil},
 		{"indeterminate", strings.Split(indeterminatePane, "\n"), false, runtime.ErrIdleIndeterminate},
+		{"menu", []string{
+			"You've hit your session limit · resets 8:40am",
+			"❯\u00a01. Stop and wait for limit to reset",
+			"  2. Upgrade",
+		}, false, runtime.ErrIdleIndeterminate},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			idle, err := ClassifyIdlePane(tc.lines, DefaultReadyPromptPrefix)

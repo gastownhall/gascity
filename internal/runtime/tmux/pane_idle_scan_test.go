@@ -8,8 +8,8 @@ import "testing"
 // footer, and NBSP or a boxed prompt must still match.
 // Kills: a scan that ignores the busy indicator, stops at the last non-blank
 // line, applies a default for a blank prefix, drops the NBSP / box-border
-// normalization, or reads a transcript line ending in a gerund and "…" as
-// Claude's spinner row.
+// normalization, reads a transcript line ending in a gerund and "…" as
+// Claude's spinner row, or reads a numbered menu's cursor row as the composer.
 func TestPaneShowsIdlePrompt(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -37,5 +37,22 @@ func TestPaneShowsIdlePrompt(t *testing.T) {
 				t.Errorf("PaneShowsIdlePrompt(%q, %q) = %v, want %v", tt.lines, tt.prefix, got, tt.want)
 			}
 		})
+	}
+}
+
+// A numbered menu whose selected row carries the prompt glyph (codex's
+// folder-trust dialog) is waiting for an answer, not an idle composer: a nudge
+// typed now lands in the dialog, and codex's leading Escape quits it.
+func TestPaneShowsIdlePromptMenuCursorRowIsNotIdle(t *testing.T) {
+	lines := []string{
+		"  Trust this folder? Codex can read, edit, and run files here.",
+		"",
+		"› 1. Trust and continue",
+		"  2. Quit",
+		"",
+		"  enter continue · esc quit",
+	}
+	if PaneShowsIdlePrompt(lines, "› ") {
+		t.Errorf("PaneShowsIdlePrompt(%q, %q) = true, want false: a numbered menu's cursor row is not a ready prompt", lines, "› ")
 	}
 }

@@ -5323,8 +5323,20 @@ func (t *Tmux) WaitForShellReady(session string, timeout time.Duration) error {
 // NBSP after its ❯ prompt character while the default ReadyPromptPrefix
 // uses a regular space. See https://github.com/steveyegge/gastown/issues/1387.
 func matchesPromptPrefix(line, readyPromptPrefix string) bool {
+	_, ok := promptLineRest(line, readyPromptPrefix)
+	return ok
+}
+
+// promptLineRest is matchesPromptPrefix's test with the matched line's
+// payload: it reports whether line matches the ready-prompt prefix and
+// returns the text after the prefix (empty when the line is exactly the
+// glyph, a bare composer). The normalization is shared — NBSP (U+00A0)
+// becomes a regular space so matching works regardless of which whitespace
+// the agent draws, and a leading box border is stripped because some TUIs
+// (grok) render the composer as "│ ❯ …" rather than "❯ …".
+func promptLineRest(line, readyPromptPrefix string) (string, bool) {
 	if readyPromptPrefix == "" {
-		return false
+		return "", false
 	}
 	trimmed := strings.TrimSpace(line)
 	// Normalize NBSP (U+00A0) → regular space so that prompt matching
@@ -5337,11 +5349,14 @@ func matchesPromptPrefix(line, readyPromptPrefix string) bool {
 	// too so the prompt glyph after the border is detected — otherwise readiness
 	// and idle detection never match and queued prompt delivery is never released.
 	for _, cand := range []string{trimmed, stripLeadingBoxBorder(trimmed)} {
-		if strings.HasPrefix(cand, normalizedPrefix) || (prefix != "" && cand == prefix) {
-			return true
+		if rest, ok := strings.CutPrefix(cand, normalizedPrefix); ok {
+			return rest, true
+		}
+		if prefix != "" && cand == prefix {
+			return "", true
 		}
 	}
-	return false
+	return "", false
 }
 
 // stripLeadingBoxBorder removes a leading vertical box-drawing character
@@ -5355,6 +5370,90 @@ func stripLeadingBoxBorder(s string) string {
 		return strings.TrimLeft(string(r[1:]), " \t")
 	}
 	return s
+}
+
+// paneShowsReadyPrompt reports whether a pane capture shows a live composer
+// for promptPrefix: the bottom-most prefix-matching line decides — this
+// package's definition of the live composer (paneShowsStagedDraft,
+// paneShowsRunningTurn); earlier matches are transcript echoes of past
+// turns. A numbered menu's cursor row — the selected option carrying the
+// prompt glyph, as codex draws its startup and trust dialogs — is not a
+// composer but a pending choice: keys typed into it are menu input, and
+// Enter picks the highlighted option. The dialog layer applies the same
+// numbered-row rule with isNumberedMenuRow (internal/runtime/dialog.go).
+func paneShowsReadyPrompt(lines []string, promptPrefix string) bool {
+	for i := len(lines) - 1; i >= 0; i-- {
+		if _, ok := promptLineRest(lines[i], promptPrefix); !ok {
+			continue
+		}
+		return !isMenuCursorRow(lines, i, promptPrefix)
+	}
+	return false
+}
+
+// isMenuCursorRow reports whether lines[i], a prefix-matching line, is the
+// selected row of a numbered option menu: the text after the prompt prefix
+// is option N's label ("N. …"), and the nearest non-blank line above or
+// below carries option N-1 or N+1. Unselected option rows carry no prompt
+// glyph, so that neighbor is what identifies the row as a menu; a composer
+// draft that merely starts with "1. " has no such neighbor and still reads
+// as a prompt.
+func isMenuCursorRow(lines []string, i int, promptPrefix string) bool {
+	rest, ok := promptLineRest(lines[i], promptPrefix)
+	if !ok {
+		return false
+	}
+	n, ok := menuOptionNumber(rest)
+	if !ok {
+		return false
+	}
+	for _, j := range []int{nearestNonBlankLine(lines, i-1, -1), nearestNonBlankLine(lines, i+1, 1)} {
+		if j < 0 {
+			continue
+		}
+		if m, ok := menuOptionNumber(normalizedPaneLine(lines[j])); ok && (m == n-1 || m == n+1) {
+			return true
+		}
+	}
+	return false
+}
+
+// nearestNonBlankLine returns the index of the nearest non-blank line from
+// start, walking by step (-1 upwards, +1 downwards), or -1 when the edge of
+// the capture comes first.
+func nearestNonBlankLine(lines []string, start, step int) int {
+	for j := start; j >= 0 && j < len(lines); j += step {
+		if strings.TrimSpace(lines[j]) != "" {
+			return j
+		}
+	}
+	return -1
+}
+
+// normalizedPaneLine applies the prompt scan's normalization to a line
+// without matching a prefix: surrounding whitespace trimmed, NBSP normalized
+// to a space, leading box border stripped.
+func normalizedPaneLine(line string) string {
+	return stripLeadingBoxBorder(strings.ReplaceAll(strings.TrimSpace(line), "\u00a0", " "))
+}
+
+// menuOptionNumber reports whether s starts with a numbered menu option
+// label — a run of ASCII digits followed by ". " — and returns its number.
+// Anything else (no digits, no ". " after them, or a digit run too large to
+// be a label) is not an option.
+func menuOptionNumber(s string) (int, bool) {
+	digits := 0
+	for digits < len(s) && s[digits] >= '0' && s[digits] <= '9' {
+		digits++
+	}
+	if digits == 0 || digits+1 >= len(s) || s[digits] != '.' || s[digits+1] != ' ' {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s[:digits])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // WaitForRuntimeReady polls until the agent runtime's ready prompt appears in
@@ -5512,9 +5611,11 @@ func (t *Tmux) snapshotPaneIdleWithPrefix(session, promptPrefix string) (bool, e
 // ClassifyIdlePane classifies captured pane lines the way every pane-scanning
 // idle check does: a busy-indicator string anywhere in lines is the busy
 // reading, (false, nil); a ready prompt (PaneShowsIdlePrompt) is idle,
-// (true, nil); anything else returns [runtime.ErrIdleIndeterminate], since a
-// pane showing neither is not evidence of work. The tmux idle wait and its
-// exec twin both classify each capture through it.
+// (true, nil); anything else — including a numbered menu's cursor row, a
+// pending choice rather than a composer — returns
+// [runtime.ErrIdleIndeterminate], since a pane showing neither is not
+// evidence of work. The tmux idle wait and its exec twin both classify each
+// capture through it.
 func ClassifyIdlePane(lines []string, promptPrefix string) (bool, error) {
 	if paneContainsBusyIndicator(lines) {
 		return false, nil
@@ -5531,12 +5632,17 @@ func ClassifyIdlePane(lines []string, promptPrefix string) (bool, error) {
 // callers resolve the prefix first (DefaultReadyPromptPrefix when the session
 // configures none).
 //
+// The bottom-most prompt line decides (see paneShowsReadyPrompt): earlier
+// matches are transcript echoes of past turns, and a numbered menu's cursor
+// row — the selected option carrying the prompt glyph — is a pending choice,
+// not a composer. Keys typed into it are menu input, and Enter picks the
+// highlighted option; the dialog layer's isNumberedMenuRow
+// (internal/runtime/dialog.go) applies the same numbered-row rule.
+//
 // Runtimes that run the agent in a tmux session inside a remote box capture
 // the pane over their own connection (PromptObservationLines lines) and apply
 // this same scan, so their idle boundary matches local tmux exactly.
 func PaneShowsIdlePrompt(lines []string, promptPrefix string) bool {
-	prefix := strings.TrimSpace(promptPrefix)
-
 	// Check for active processing indicator in the status bar.
 	// Claude Code shows "esc to interrupt" while processing — if present,
 	// the agent is busy regardless of whether the prompt is visible.
@@ -5558,19 +5664,10 @@ func PaneShowsIdlePrompt(lines []string, promptPrefix string) bool {
 		return false
 	}
 
-	// Scan captured lines for the prompt prefix.
-	// Claude Code renders a status bar below the prompt line,
-	// so the prompt may not be the last non-empty line.
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		if matchesPromptPrefix(trimmed, promptPrefix) || (prefix != "" && trimmed == prefix) {
-			return true
-		}
-	}
-	return false
+	// The bottom-most prompt line is the live composer (Claude Code renders
+	// a status bar below the prompt line, so it need not be the last
+	// non-empty line); a numbered menu's cursor row is not one.
+	return paneShowsReadyPrompt(lines, promptPrefix)
 }
 
 // SnapshotIdle reports whether the named session is at an idle interactive
