@@ -727,6 +727,64 @@ func TestCodexSubmitResendsWhileTheDraftWaits(t *testing.T) {
 	if recorded, aborted, _ := pane.snapshot(); aborted != 0 || !slices.Equal(recorded, []string{codexTurnMarker}) {
 		t.Fatalf("recorded %q, aborted %d; want the message once and no abort", recorded, aborted)
 	}
+	t.Run("NudgePane retries a failed submit with the commit key alone", checkNudgePaneRetriesWithTheCommitKeyAlone)
+}
+
+// failFirstEnterPane is a codexTurnPane whose tmux refuses the first Enter it is
+// sent: the send-keys returns an error and the key never reaches the pane.
+type failFirstEnterPane struct {
+	*codexTurnPane
+	faultMu sync.Mutex
+	failed  bool
+}
+
+func (p *failFirstEnterPane) execute(args []string) (string, error) {
+	if tmuxSubcommand(args) == "send-keys" && args[len(args)-1] == "Enter" {
+		p.faultMu.Lock()
+		first := !p.failed
+		p.failed = true
+		p.faultMu.Unlock()
+		if first {
+			return "", errors.New("send-keys Enter: tmux refused the key")
+		}
+	}
+	return p.codexTurnPane.execute(args)
+}
+
+func (p *failFirstEnterPane) executeCtx(_ context.Context, args []string) (string, error) {
+	return p.execute(args)
+}
+
+// checkNudgePaneRetriesWithTheCommitKeyAlone pins NudgePane's own submit retry
+// (ga-oqhooe), which NudgeSession's confirm loop does not run: the first attempt
+// sends codex's whole Escape+Enter sequence, and when tmux refuses that
+// attempt's Enter, the retry sends the commit key alone rather than a second
+// Escape+Enter pair that can fuse into Alt+Enter.
+func checkNudgePaneRetriesWithTheCommitKeyAlone(t *testing.T) {
+	const session = "codex-nudge-pane-retry"
+	// The bubble creates this pane's nudge lock channel; drop it so nothing
+	// outside the bubble ever touches it.
+	t.Cleanup(func() { sessionNudgeLocks.Delete(session) })
+	var pane *failFirstEnterPane
+	var err error
+	synctest.Test(t, func(t *testing.T) {
+		pane = &failFirstEnterPane{codexTurnPane: newCodexTurnPane(t, session)}
+		tm := &Tmux{cfg: DefaultConfig(), exec: pane}
+		err = tm.NudgePane(session, codexTurnMarker)
+		// Let the turn the submit started play out on the bubble's clock (no
+		// wall time passes), then cancel what is left of it.
+		<-time.After(time.Minute)
+		pane.stop()
+	})
+	if err != nil {
+		t.Fatalf("NudgePane = %v, want nil", err)
+	}
+	if got, want := pane.keysPressed(), []string{"Escape", "Enter"}; !slices.Equal(got, want) {
+		t.Fatalf("keys = %q, want %q: the first attempt's Escape, then the retry's Enter alone", got, want)
+	}
+	if recorded, aborted, _ := pane.snapshot(); aborted != 0 || !slices.Equal(recorded, []string{codexTurnMarker}) {
+		t.Fatalf("recorded %q, aborted %d; want the message once and no abort", recorded, aborted)
+	}
 }
 
 // The rollout reading behind the Codex delivery verdict, on the rows the live
