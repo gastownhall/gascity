@@ -274,7 +274,7 @@ func classifyExecExit(op string, code int, msg string, strict bool, base error) 
 // exit 2 from it is a failure rather than the forward-compatible no-op.
 func exitTwoIsFailure(op string) bool {
 	switch op {
-	case "start", "provision", "is-attached", "observe", "kill-object":
+	case "start", "provision", "is-attached", "observe", "inventory", "kill-object":
 		return true
 	default:
 		return false
@@ -285,7 +285,7 @@ func exitTwoIsFailure(op string) bool {
 // exit 2 is therefore a failure rather than the unknown-op no-op.
 func strictWhenReady(op string) bool {
 	switch op {
-	case "stop", "get-meta", "set-meta", "remove-meta", "list-running":
+	case "stop", "get-meta", "set-meta", "remove-meta":
 		return true
 	default:
 		return false
@@ -293,18 +293,16 @@ func strictWhenReady(op string) bool {
 }
 
 // strictExitTwo is a v2-ready script's exit 2 from op: a stop that stopped
-// nothing ([runtime.ErrStopUnsupported]), a metadata op with no store
-// ([runtime.ErrMetaUnsupported]), or a listing that listed nothing
-// ([runtime.ErrListUnsupported]). (is-running needs no entry: its exit 2
-// already reads as no answer.)
+// nothing ([runtime.ErrStopUnsupported]) or a metadata op with no store
+// ([runtime.ErrMetaUnsupported]). (is-running needs no entry: its exit 2
+// already reads as no answer. A v2-ready listing is `inventory`, whose
+// exit 2 is a failure like any other.)
 func strictExitTwo(op string, base error) error {
 	switch op {
 	case "stop":
 		return fmt.Errorf("%w: %w", runtime.ErrStopUnsupported, base)
 	case "get-meta", "set-meta", "remove-meta":
 		return fmt.Errorf("%w: %w", runtime.ErrMetaUnsupported, base)
-	case "list-running":
-		return fmt.Errorf("%w: %w", runtime.ErrListUnsupported, base)
 	default:
 		return base
 	}
@@ -979,7 +977,11 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 
 // ListRunning returns sessions matching a prefix: script list-running <prefix>
 // Returns one name per stdout line. Empty stdout → empty slice (not nil).
+// A v2-ready pack lists through `inventory` instead (listInventory).
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
+	if p.v2Ready() {
+		return p.listInventory(prefix)
+	}
 	out, err := p.run(nil, "list-running", prefix)
 	if err != nil {
 		return nil, err
@@ -1092,6 +1094,9 @@ var (
 	_ runtime.IdentityObserver          = (*Provider)(nil)
 	_ runtime.SessionObjectKiller       = (*Provider)(nil)
 	_ runtime.V2ReadinessReporter       = (*Provider)(nil)
+	_ runtime.InventoryProvider         = (*Provider)(nil)
+	_ runtime.InventoryGate             = (*Provider)(nil)
+	_ runtime.ListingAttestation        = (*Provider)(nil)
 )
 
 // Exec runs argv inside the session via the RPP `exec` op and implements

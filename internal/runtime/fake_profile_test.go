@@ -53,6 +53,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"InteractionProvider":             reflect.TypeFor[runtime.InteractionProvider](),
 	"InterruptBoundaryWaitProvider":   reflect.TypeFor[runtime.InterruptBoundaryWaitProvider](),
 	"InterruptedTurnResetProvider":    reflect.TypeFor[runtime.InterruptedTurnResetProvider](),
+	"InventoryGate":                   reflect.TypeFor[runtime.InventoryGate](),
 	"InventoryProvider":               reflect.TypeFor[runtime.InventoryProvider](),
 	"KeyedNudgeProvider":              reflect.TypeFor[runtime.KeyedNudgeProvider](),
 	"ListingAttestation":              reflect.TypeFor[runtime.ListingAttestation](),
@@ -202,7 +203,8 @@ func execV2Pack(t *testing.T) string {
 // answer from a fixed trait (sleep capability, fresh reads, an identity
 // sidecar, a transport, an idle-proof budget, a turn-interrupt mode, input
 // fencing, response fencing, local transcripts, a steer mode, observable
-// identity, v2 readiness), or no backend checked.
+// identity, v2 readiness, an available inventory, an attested listing), or
+// no backend checked.
 func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 	backends := productionBackends(t)
 	for p := runtime.ProfileTmux; p <= runtime.ProfileExecV2; p++ {
@@ -227,7 +229,7 @@ func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 // traits are p's answers to the optional interfaces that report a backend's
 // fixed traits, "-" for one it does not implement.
 func traits(p runtime.Provider) string {
-	out := []string{"-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"}
+	out := []string{"-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"}
 	if s, ok := p.(runtime.SleepCapabilityProvider); ok {
 		out[0] = string(s.SleepCapability("s"))
 	}
@@ -264,6 +266,12 @@ func traits(p runtime.Provider) string {
 	if f, ok := p.(runtime.V2ReadinessReporter); ok {
 		missing, err := f.V2Readiness()
 		out[11] = fmt.Sprintf("%v/%v", missing, err)
+	}
+	if f, ok := p.(runtime.InventoryGate); ok {
+		out[12] = strconv.FormatBool(f.InventoryAvailable())
+	}
+	if f, ok := p.(runtime.ListingAttestation); ok {
+		out[13] = strconv.FormatBool(f.ListRunningComplete())
 	}
 	return strings.Join(out, " ")
 }
@@ -614,5 +622,36 @@ func TestExecV2ProfileObservesACorpsesIdentity(t *testing.T) {
 	}
 	if _, err := runtime.NewFakeProfile(runtime.ProfileExec, b).(runtime.IdentityObserver).ObserveIdentity("dead"); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
 		t.Errorf("exec profile, not v2-ready: %v, want ErrRuntimeUnavailable", err)
+	}
+}
+
+// gatedInventory is a full fake whose inventory is gated as available.
+type gatedInventory struct {
+	runtime.FullFake
+	available bool
+}
+
+func (g gatedInventory) InventoryAvailable() bool { return g.available }
+
+// Kills an InventoryFor that offers an inventory its provider gated off
+// (a script that is not v2-ready), or withholds an ungated one (tmux).
+func TestInventoryFor(t *testing.T) {
+	full := runtime.FullFake{Fake: runtime.NewFake()}
+	for name, tc := range map[string]struct {
+		p    runtime.Provider
+		want bool
+	}{
+		"no inventory":    {runtime.NewFake(), false},
+		"ungated":         {full, true},
+		"gated off":       {gatedInventory{full, false}, false},
+		"gated on":        {gatedInventory{full, true}, true},
+		"exec profile":    {runtime.NewFakeProfile(runtime.ProfileExec, full), false},
+		"exec v2 profile": {runtime.NewFakeProfile(runtime.ProfileExecV2, full), true},
+		"tmux profile":    {runtime.NewFakeProfile(runtime.ProfileTmux, full), true},
+		"nil":             {nil, false},
+	} {
+		if inv, ok := runtime.InventoryFor(tc.p); ok != tc.want || ok != (inv != nil) {
+			t.Errorf("%s: InventoryFor = %v, %v; want %v", name, inv, ok, tc.want)
+		}
 	}
 }
