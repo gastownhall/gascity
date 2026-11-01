@@ -3069,3 +3069,47 @@ func TestWispGC_ReapResolvesRootsLive(t *testing.T) {
 		t.Fatalf("reaped %d; a step of a root the store has reopened was deleted on the cache's word", reaped)
 	}
 }
+
+func TestWispGC_ReloadKeepsLastRun(t *testing.T) {
+	lastRun := time.Now()
+	root := beads.Bead{ID: "gcg-root-1", UpdatedAt: lastRun}
+	prev := &memoryWispGC{interval: time.Hour, ttl: time.Hour, mailRetentionTTL: time.Hour, lastRun: lastRun, cityName: "old"}
+	prev.notes.noteRefusal("graph", root, lastRun, "held")
+	next := &memoryWispGC{interval: time.Hour, ttl: 24 * time.Hour, mailRetentionTTL: 48 * time.Hour, cityName: "test-city"}
+
+	got := carryWispGCState(prev, next)
+
+	m, ok := got.(*memoryWispGC)
+	if !ok || m != next {
+		t.Fatalf("carryWispGCState returned %#v, want the rebuilt tracker", got)
+	}
+	if !m.lastRun.Equal(lastRun) {
+		t.Fatalf("lastRun = %v, want carried %v", m.lastRun, lastRun)
+	}
+	if m.interval != time.Hour || m.ttl != 24*time.Hour || m.mailRetentionTTL != 48*time.Hour || m.cityName != "test-city" {
+		t.Fatalf("config fields = %v/%v/%v/%q, want the rebuilt tracker's 1h/24h/48h/%q",
+			m.interval, m.ttl, m.mailRetentionTTL, m.cityName, "test-city")
+	}
+	if m.shouldRun(lastRun.Add(10 * time.Minute)) {
+		t.Fatal("rebuilt tracker due 10m after the carried last run on a 1h interval")
+	}
+	if !m.shouldRun(lastRun.Add(time.Hour)) {
+		t.Fatal("rebuilt tracker not due 1h after the carried last run")
+	}
+	if _, held := m.notes.remembered("graph", root, lastRun.Add(time.Second)); held {
+		t.Fatal("rebuilt tracker remembers the old tracker's refusal; notes must not carry across a reload")
+	}
+
+	t.Run("startup reload carries a zero lastRun", func(t *testing.T) {
+		got := carryWispGCState(newWispGC(time.Hour, time.Hour, 0), newWispGC(time.Hour, time.Hour, 0))
+		if !got.shouldRun(time.Now()) {
+			t.Fatal("tracker that never ran is not due after a reload; want it due on its first tick")
+		}
+	})
+	t.Run("other tracker type", func(t *testing.T) {
+		next := newWispGC(time.Hour, time.Hour, 0)
+		if got := carryWispGCState(fixedWispGC{}, next); got != next || !got.shouldRun(time.Now()) {
+			t.Fatalf("carryWispGCState(fixedWispGC, next) = %#v, want next unchanged", got)
+		}
+	})
+}
