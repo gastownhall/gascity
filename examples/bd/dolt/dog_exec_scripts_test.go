@@ -634,6 +634,84 @@ set_hash() {
   [ -n "$hash_state_file" ] || return 0
   printf '%%s\n' "$1" > "$hash_state_file"
 }
+# pin_no_false_quarantine_concurrent_writer: a writer commits after
+# flatten_head (this fixture's flatten commit is always compactcommit),
+# advancing HEAD to writercommit at the first pinned read and creating
+# writer_new_table. Pinned post-flatten reads must still return the
+# preflight baseline so compact succeeds; the same queries without the pin
+# (including live table enumeration) return drifted values as a regression
+# trap if a future change drops the pin.
+if [ "$mode" = "pin_no_false_quarantine_concurrent_writer" ] && { [ "$(current_head)" = "compactcommit" ] || [ "$(current_head)" = "writercommit" ]; }; then
+  case "$query" in
+    *"SELECT COUNT(*) FROM"*"AS OF 'compactcommit'"*)
+      set_head writercommit
+      print_cell 10
+      exit 0
+      ;;
+    *"TABLES AS OF 'compactcommit'"*)
+      print_cell beads
+      exit 0
+      ;;
+    *"TABLES AS OF"*|*"information_schema.tables"*)
+      print_cells beads writer_new_table
+      exit 0
+      ;;
+    *"beads/compactcommit"*"SELECT DOLT_HASHOF_TABLE('beads')"*)
+      print_cell hash-beads-before
+      exit 0
+      ;;
+    *"beads/compactcommit"*"SELECT DOLT_HASHOF_DB('HEAD')"*)
+      print_cell hash-before
+      exit 0
+      ;;
+    *"SELECT COUNT(*) FROM"*"beads"*)
+      print_cell 11
+      exit 0
+      ;;
+    *"DOLT_HASHOF_TABLE('beads')"*)
+      print_cell hash-beads-after-writer
+      exit 0
+      ;;
+    *"DOLT_HASHOF_DB"*)
+      print_cell hash-after-writer
+      exit 0
+      ;;
+  esac
+fi
+# pin_view_in_committed_table_list: bd's views (ready_issues) and dolt_*
+# names are listed by SHOW TABLES AS OF but never by user_tables, so
+# preflight never records them. The pinned post-flatten table list must
+# exclude them or every compaction quarantines on "appeared after pre-flight
+# snapshot". The FULL ... WHERE Table_type = 'BASE TABLE' form models Dolt
+# applying the type filter itself; the dolt_* row still reaches the caller.
+if [ "$mode" = "pin_view_in_committed_table_list" ]; then
+  case "$query" in
+    *"SHOW FULL TABLES AS OF"*"BASE TABLE"*)
+      printf '+-----------------+------------+\n'
+      printf '| Tables_in_beads | Table_type |\n'
+      printf '+-----------------+------------+\n'
+      printf '| beads | BASE TABLE |\n'
+      printf '| dolt_schemas | BASE TABLE |\n'
+      printf '+-----------------+------------+\n'
+      exit 0
+      ;;
+    *"SHOW TABLES AS OF"*)
+      print_cells beads dolt_schemas ready_issues
+      exit 0
+      ;;
+  esac
+fi
+# pin_real_drift_at_flatten_head_quarantines: genuine same-row-count
+# hash drift inside the flatten's own committed revision. Pinning must
+# not mask it; row count falls through to the default 10.
+if [ "$mode" = "pin_real_drift_at_flatten_head_quarantines" ] && [ "$(current_head)" = "compactcommit" ]; then
+  case "$query" in
+    *"beads/compactcommit"*"SELECT DOLT_HASHOF_TABLE('beads')"*)
+      print_cell hash-beads-genuinely-drifted
+      exit 0
+      ;;
+  esac
+fi
 case "$query" in
   *"FROM dolt_log ORDER BY date DESC LIMIT 1"*)
     # Legacy date-ordered "HEAD" probe. A future-dated (clock-skewed) commit
@@ -1183,13 +1261,13 @@ case "$query" in
     set_head ignorecommit
     exit 0
     ;;
-  *"SHOW TABLES AS OF"*|*"information_schema.tables"*)
+  *"SHOW TABLES AS OF"*|*"SHOW FULL TABLES AS OF"*|*"information_schema.tables"*)
     # ignored_table_* modes model the production hq incident: "wisps" is a
     # dolt_ignore'd working-set-only table — visible in information_schema
     # but absent from every commit root, so SHOW TABLES AS OF omits it.
     if [ "$mode" = "ignored_table_drift" ] || [ "$mode" = "ignored_table_db_hash_drift" ]; then
       case "$query" in
-        *"SHOW TABLES AS OF"*)
+        *"SHOW TABLES AS OF"*|*"SHOW FULL TABLES AS OF"*)
           print_cell beads
           ;;
         *)
@@ -1213,7 +1291,7 @@ case "$query" in
     case "$mode" in
       first_commit_probe_table_db_hash_drift|first_commit_table_nonadditive_diff|first_commit_table_diff_probe_failure|absorbed_ws_plus_first_commit_drift)
         case "$query" in
-          *"SHOW TABLES AS OF"*)
+          *"SHOW TABLES AS OF"*|*"SHOW FULL TABLES AS OF"*)
             print_cell beads
             ;;
           *)

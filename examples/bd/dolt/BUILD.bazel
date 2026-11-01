@@ -106,6 +106,7 @@ go_test(
         "compact_history_protection_test.go",
         "compact_no_sync_test.go",
         "compact_notify_cadence_test.go",
+        "compact_pins_flatten_revision_test.go",
         "compact_real_dolt_callbound_test.go",
         "compact_real_dolt_test.go",
         "compact_rig_endpoint_real_dolt_test.go",
