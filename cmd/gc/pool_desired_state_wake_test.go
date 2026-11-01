@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -276,6 +277,91 @@ func TestComputePoolDesiredStates_FreshWakeSkipsAsleepResume(t *testing.T) {
 						t.Errorf("fresh-wake agent resumed stale asleep session %s: %#v", sessionID, r)
 					}
 				}
+			}
+		})
+	}
+}
+
+// TestComputePoolDesiredStates_FreshWakeSkipsBlockedAssignedStep verifies the
+// companion gap to #4849 above (gastownhall/gascity#8172): a wake_mode="fresh"
+// agent's asleep owner session must not spawn a new session for an assigned
+// step that is open only because the orphan-release pass
+// (appendOpenRoutedWorkUnique) surfaced it, never because it passed a
+// readiness gate (collectAssignedWorkBeadsWithStores' ReadyAssigned).
+//
+// Before the fix, computePoolDesiredStatesAt's fresh+asleep branch planned a
+// wake-known-identity request from Status alone, with no regard for whether
+// the bead's own dependency had actually cleared. A continuation step
+// preassigned to a builder's session, waiting on a review step on another
+// pool, would spawn a fresh session every reconcile tick while its owner
+// slept — and that session, unable to claim a step blocked and assigned to
+// another session, drained itself about a minute later, only to be respawned
+// on the next tick.
+//
+// The table pins both sides: readyAssigned=false must produce no request at
+// all (not even a doomed resume of the stale asleep session — the owner's own
+// eventual fresh wake handles it once the blocker clears); readyAssigned=true
+// for the identical open+asleep+fresh shape must still produce the legitimate
+// wake-known-identity request from the existing #4849 guard, proving the new
+// gate is additive, not a blanket suppression of that tier.
+func TestComputePoolDesiredStates_FreshWakeSkipsBlockedAssignedStep(t *testing.T) {
+	const sessionID = "sess-owner"
+	cases := []struct {
+		name         string
+		readyAssign  bool
+		wantRequests int
+		wantTier     string
+	}{
+		{
+			name:         "blocked step not ready-assigned produces no request",
+			readyAssign:  false,
+			wantRequests: 0,
+		},
+		{
+			name:         "ready-assigned open step still produces wake-known-identity",
+			readyAssign:  true,
+			wantRequests: 1,
+			wantTier:     "wake-known-identity",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// minSess=0: the default min_active_sessions floor, so no
+			// unrelated min-fill request can mask what this test is
+			// actually checking.
+			agent := poolAgent("claude", "", intPtr(5), 0)
+			agent.WakeMode = "fresh"
+			cfg := &config.City{Agents: []config.Agent{agent}}
+			sessions := []beads.Bead{poolSessionBeadWithState(sessionID, "asleep", "")}
+			// Status "open", not "in_progress": a blocked continuation step
+			// surfaced only by the orphan-release pass looks exactly like
+			// this on the collapsed-status cache tier.
+			work := []beads.Bead{workBead("w1", "claude", sessionID, "open", 2)}
+			storeRefs := []string{""}
+			readyAssigned := map[storeScopedBeadKey]bool{}
+			if tc.readyAssign {
+				readyAssigned[storeScopedBeadKey{StoreRef: "", ID: "w1"}] = true
+			}
+
+			result := computePoolDesiredStatesAt(cfg, work, storeRefs, readyAssigned, sessionInfosFromBeads(sessions), nil, nil, time.Time{}, nil)
+
+			total := 0
+			var reqs []SessionRequest
+			for _, ds := range result {
+				total += len(ds.Requests)
+				reqs = append(reqs, ds.Requests...)
+			}
+			if total != tc.wantRequests {
+				t.Fatalf("requests = %d, want %d: %#v", total, tc.wantRequests, result)
+			}
+			if tc.wantRequests == 0 {
+				return
+			}
+			if reqs[0].Tier != tc.wantTier {
+				t.Errorf("tier = %q, want %q", reqs[0].Tier, tc.wantTier)
+			}
+			if reqs[0].WorkBeadID != "w1" {
+				t.Errorf("WorkBeadID = %q, want w1", reqs[0].WorkBeadID)
 			}
 		})
 	}

@@ -233,7 +233,7 @@ func legacyAllocation(t *testing.T, c diffCity) allocOutcome {
 	// compute over the build's result (city_runtime.go, POOL-063).
 	open := snap.OpenInfos()
 	work := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, store, open, result.AssignedWorkBeads, result.AssignedWorkStoreRefs)
-	counts := retainScaleCheckPartialPoolDesired(cfg, PoolDesiredCounts(computePoolDesiredStatesParkedAt(cfg, work, open, result.ScaleCheckCounts, nil, diffNow,
+	counts := retainScaleCheckPartialPoolDesired(cfg, PoolDesiredCounts(computePoolDesiredStatesParkedAt(cfg, work, nil, nil, open, result.ScaleCheckCounts, nil, diffNow,
 		parkSeatsForResult(cfg, open, result, diffNow), nil)),
 		snap, effectivePoolPartialRetentionTemplates(result))
 	if counts == nil {

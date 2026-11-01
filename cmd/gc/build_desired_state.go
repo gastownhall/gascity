@@ -794,6 +794,8 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 		poolDesiredStates := computePoolDesiredStatesParkedAt(
 			cfg,
 			poolWorkBeads,
+			nil,
+			nil,
 			sessionBeads.OpenInfos(),
 			scaleCheckCounts,
 			scaleCheckDemandByTemplate,
