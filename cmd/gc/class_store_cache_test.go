@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -17,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 // openBindingEngineForTest opens a SQLite engine the way the built-in binding
@@ -955,5 +958,117 @@ func TestControllerBindingCacheIsSharedByEveryClass(t *testing.T) {
 	}
 	if len(routes.caches) != 1 {
 		t.Fatalf("routes track %d caches, want 1", len(routes.caches))
+	}
+}
+
+// TestBindingCacheReconcileStaysQuietAfterTheControllersOwnWrites pins the
+// split-city binding flood (ga-ylpbsy.67). On a city whose infrastructure
+// classes live in a SQLite binding, every re-scan of the binding cache
+// re-announced nearly every open row: ~14k bead.updated per ~2-minute pass,
+// each carrying the same is_blocked verdict as the last, against a backing
+// nothing had changed.
+//
+// The loop runs through the controller's own wiring. Order dispatch closes each
+// run's tracking row with orders.Store.CloseRuns, a CloseAll, which keeps the
+// closed row but drops its dependency entry. The row has no edges, so its
+// bead.closed comes back through the bead-event watcher with no dependencies
+// key, applied to the binding cache as a snapshot. Read as "this row's edges
+// are unknown", it cleared the cache's store-wide dependency coverage and wiped
+// every cached ready verdict; the next re-scan re-stamped all of them and
+// announced each as an update. Orders close a tracking row every few seconds,
+// so the cache never converged.
+//
+// Everything below goes through the production path: the engine is opened as
+// the sqlite-beads provider opens it, the cache is withControllerCache's, the
+// close is order dispatch's, every event the cache records is fed back through
+// applyBeadEventToStores, and the passes are the cache's own reconcile. Kills:
+// an echo of the controller's own write that costs untouched rows their
+// verdict, and a re-scan that reports an update for a row whose backing row did
+// not change.
+func TestBindingCacheReconcileStaysQuietAfterTheControllersOwnWrites(t *testing.T) {
+	engine := openBindingEngineForTest(t)
+	root := bindingGraphRoot(t, engine)
+	create := func(b beads.Bead) beads.Bead {
+		t.Helper()
+		created, err := engine.Create(b)
+		if err != nil {
+			t.Fatalf("Create %q: %v", b.Title, err)
+		}
+		return created
+	}
+	// Rows nothing writes to after the cache primes: a blocked step, its
+	// blocker, and mail as the binding holds it. No re-scan may report them.
+	blocker := create(bindingGraphRow("blocker", root))
+	step := create(bindingGraphRow("step", root))
+	if err := engine.DepAdd(step.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	untouched := []string{root, blocker.ID, step.ID}
+	for i := 0; i < 12; i++ {
+		session := fmt.Sprintf("gcg-session-%032d", i)
+		mail := create(beads.Bead{
+			Title:     "context cycle",
+			Type:      "message",
+			Assignee:  session,
+			From:      "rig--worker-1-pool",
+			Ephemeral: true,
+			Labels:    []string{fmt.Sprintf("thread:thread-%012d", i), "gc:auto-handoff", "gc:archive-after-inject", "priority:1"},
+			Metadata:  map[string]string{"mail.from_display": "rig--worker-1-pool", "mail.from_session_id": session},
+		})
+		untouched = append(untouched, mail.ID)
+	}
+	// Rows the controller writes between two passes: an order run's tracking
+	// row, and a step that finishes.
+	tracking := create(beads.Bead{
+		Title:     "order:pr-merge-queue",
+		Type:      "task",
+		Labels:    []string{"order-run:pr-merge-queue", "order-tracking"},
+		NoHistory: true,
+	})
+	finished := create(bindingGraphRow("finished step", root))
+
+	cs, ep := newCachedSplitControllerState(context.Background(), t, splitClassRoutes(engine), beads.NewMemStore())
+	cache := bindingCacheOf(t, cs)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	cursor := len(ep.Events)
+	cache.ReconcileNowForTest()
+	feedBackBeadEvents(cs, ep, &cursor)
+	cache.ReconcileNowForTest()
+	if n := feedBackBeadEvents(cs, ep, &cursor); n != 0 {
+		t.Fatalf("an idle binding cache emitted %d bead events on its second re-scan, want 0", n)
+	}
+
+	// The controller's own writes between two passes, each echo fed back as
+	// the watcher delivers it.
+	if _, err := orders.NewStore(cs.OrdersBeadStore()).CloseRuns(context.Background(), []string{tracking.ID}, completedOrderTrackingCloseReason); err != nil {
+		t.Fatalf("closing the order run's tracking row: %v", err)
+	}
+	feedBackBeadEvents(cs, ep, &cursor)
+	store := cs.GraphBeadStore().Store
+	if err := store.Close(finished.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	feedBackBeadEvents(cs, ep, &cursor)
+
+	before := cache.Stats().Updates
+	cache.ReconcileNowForTest()
+	var reannounced []string
+	for _, evt := range ep.Events[cursor:] {
+		if evt.Type == events.BeadUpdated && slices.Contains(untouched, evt.Subject) {
+			reannounced = append(reannounced, evt.Subject)
+		}
+	}
+	if updates := cache.Stats().Updates - before; len(reannounced) > 0 || updates != 0 {
+		t.Fatalf("the re-scan after the controller's own writes reported %d updates and re-announced %d of %d rows whose backing rows did not change: %v",
+			updates, len(reannounced), len(untouched), reannounced)
+	}
+	ready, err := beads.HandlesFor(cache).Cached.Ready()
+	if err != nil {
+		t.Fatalf("cached Ready: %v", err)
+	}
+	if containsBeadID(ready, step.ID) {
+		t.Fatalf("cached Ready offers %s, which its open blocker holds back", step.ID)
 	}
 }
