@@ -181,6 +181,18 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 	if check.Idempotent {
 		decision, probeErr := onFormulaNeedsAttachment(opts, querier, deps)
 		switch {
+		case decision.Parked != "":
+			// ci-9cb: the bead is parked by a brake. Idempotency is preserved
+			// deliberately — no re-attach, no burn — but the requested formula
+			// attach being dropped must be VISIBLE, or the operator reads a
+			// silent no-op. Say which brake holds it and how to proceed.
+			parkedFormula := opts.OnFormula
+			if parkedFormula == "" {
+				parkedFormula = a.EffectiveDefaultSlingFormula()
+			}
+			result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf(
+				"bead %s is parked (%s); --on %s stayed an idempotent no-op — lift the brake (undefer / clear halt_reason) or route explicitly before re-pouring",
+				opts.BeadOrFormula, decision.Parked, parkedFormula))
 		case decision.Conflict != nil && decision.ConflictSourceUnassigned:
 			// An unassigned source keeps the attach path's burn-and-attach
 			// semantics: nobody is working the live attachment, so the new
@@ -305,6 +317,27 @@ type attachmentDecision struct {
 	// attaches the new formula; an assigned one fails with it.
 	Conflict                 *MoleculeAttachedError
 	ConflictSourceUnassigned bool
+	// Parked names the brake the bead carries (deferred status, or a
+	// non-blank halt_reason stamp): the attach override must NOT fire, the
+	// burn-and-attach conflict path must NOT burn, and idempotency is
+	// deliberately preserved so a witness/formula parking survives any later
+	// sling. The caller surfaces the reason as a bead warning. Only
+	// meaningful when NeedsAttach and Conflict are both zero (ci-9cb).
+	Parked string
+}
+
+// parkedBrake reports whether a bead carries an explicit hold the sling must
+// honor: bd's deferred status (parked for a later actor) or a non-blank
+// halt_reason stamp written by the mol-polecat-work STOP arms and by witness
+// brakes. Returns the reason for the warning line when parked.
+func parkedBrake(b *beads.Bead) (bool, string) {
+	if strings.TrimSpace(b.Status) == "deferred" {
+		return true, "status=deferred"
+	}
+	if h := strings.TrimSpace(b.Metadata[beadmeta.HaltReasonMetadataKey]); h != "" {
+		return true, "halt_reason=" + h
+	}
+	return false, ""
 }
 
 // conflictingOnFormulaAttachment reports a live attachment that an explicit
@@ -353,6 +386,20 @@ func onFormulaNeedsAttachment(opts SlingOpts, querier BeadQuerier, deps SlingDep
 	// as well as an explicit --on.
 	if !usesFormulaBackedRoute(opts) {
 		return attachmentDecision{}, nil
+	}
+	// ci-9cb: a bead PARKED by a brake — deferred, or carrying a non-blank
+	// halt_reason — is held on purpose. Neither the routed-raw override nor
+	// the burn-and-attach conflict path may fire on it: those are exactly the
+	// re-pour loop that re-wrapped halted roots in synthetic convoys and
+	// cleared their halt stamps during the mint window. The veto runs before
+	// the attachment probe so a parked bead with a live molecule is not
+	// burned either. Lifting the brake (undefer / clear halt_reason) restores
+	// the prior override behavior; gc.routed_to=human remains honored by the
+	// idempotency check upstream exactly as before.
+	if bead, ok := BeadFromGetters(opts.BeadOrFormula, querier, deps.Store); ok {
+		if parked, why := parkedBrake(&bead); parked {
+			return attachmentDecision{Parked: why}, nil
+		}
 	}
 	live, err := findBlockingAttachment(querier, opts.BeadOrFormula, deps.attachmentScope())
 	if live != nil {

@@ -315,7 +315,12 @@ func bdReadyPoolDemandMigrationShell(limitFlag string, topo QueryTopology) strin
 }
 
 func poolDemandMigrationFilterJQ(limit int) string {
-	filter := `[.[] | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.WorkflowExpandedMetadataKey) + ` != "true"))]`
+	// The halt veto rides the legacy tier too (ci-9cb): a run_target-stamped
+	// root whose canonical route was cleared can still be parked by a
+	// witness brake, and the tier must not serve it. Keep the Go mirror in
+	// demand_serve_agreement_test.legacyWorkflowTierServes and the pinned
+	// program string in lockstep with this clause.
+	filter := `[.[] | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.WorkflowExpandedMetadataKey) + ` != "true") and ((` + jqMeta(beadmeta.HaltReasonMetadataKey) + ` | gsub("^\\s+|\\s+$"; "")) == ""))]`
 	if limit > 0 {
 		filter += ` | .[:` + strconv.Itoa(limit) + `]`
 	}
@@ -568,7 +573,12 @@ func poolDemandCountShell(target string, topo QueryTopology) string {
 func executableWorkflowTopologyJQ() string {
 	kind := `(` + jqMeta(beadmeta.KindMetadataKey) + ` | gsub("^\\s+|\\s+$"; ""))`
 	expanded := `(` + jqMeta(beadmeta.WorkflowExpandedMetadataKey) + ` | gsub("^\\s+|\\s+$"; ""))`
-	clauses := make([]string, 0, len(beadmeta.WorkflowTopologyKinds))
+	// ci-9cb: a bead parked by a brake (non-blank halt_reason) is held on
+	// purpose. It must never read as pool demand (controller count form)
+	// nor be served on the worker claim line — the two share this predicate
+	// so spawn and claim stay in agreement.
+	haltBlank := `((` + jqMeta(beadmeta.HaltReasonMetadataKey) + ` | gsub("^\\s+|\\s+$"; "")) == "")`
+	clauses := make([]string, 0, len(beadmeta.WorkflowTopologyKinds)+1)
 	for _, topologyKind := range beadmeta.WorkflowTopologyKinds {
 		clause := fmt.Sprintf(`%s != %q`, kind, topologyKind)
 		if topologyKind == beadmeta.KindWorkflow {
@@ -576,6 +586,7 @@ func executableWorkflowTopologyJQ() string {
 		}
 		clauses = append(clauses, clause)
 	}
+	clauses = append(clauses, haltBlank)
 	return `select(` + strings.Join(clauses, ` and `) + `)`
 }
 

@@ -4493,6 +4493,13 @@ func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
 	if workflowTopologyIsNonExecutable(candidate.Metadata[beadmeta.KindMetadataKey], candidate.Metadata[beadmeta.WorkflowExpandedMetadataKey]) {
 		return false
 	}
+	// A bead parked by a brake (non-blank halt_reason) is not claimable,
+	// matching the demand-side and generated-filter vetoes (ci-9cb). The
+	// witness brake vocabulary was routed_to=human only because halt_reason
+	// was unmodeled; now the halt stamp itself is honored everywhere.
+	if strings.TrimSpace(candidate.Metadata[beadmeta.HaltReasonMetadataKey]) != "" {
+		return false
+	}
 	if len(routeTargets) == 0 {
 		return false
 	}

@@ -1755,6 +1755,14 @@ func filterUnreadyHookCandidates(output string, now time.Time) string {
 		if strings.TrimSpace(assignee) == "" && workflowTopologyIsNonExecutable(kind, expanded) {
 			continue
 		}
+		// ci-9cb: a non-blank halt_reason is the brake stamp the formulas'
+		// STOP arms and witness deferrals write. An UNASSIGNED halted row is
+		// parked on purpose — never offer it as fresh worker work (assigned
+		// halted beads stay visible for the owner's continuation, matching
+		// the demand side, which excludes assigned rows anyway).
+		if halt, _ := metadata[beadmeta.HaltReasonMetadataKey].(string); strings.TrimSpace(assignee) == "" && strings.TrimSpace(halt) != "" {
+			continue
+		}
 		filtered = append(filtered, obj)
 	}
 	reencoded, err := json.Marshal(filtered)

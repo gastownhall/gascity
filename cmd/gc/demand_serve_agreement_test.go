@@ -120,6 +120,42 @@ func agreementRows() []agreementRow {
 			wantServable: false,
 		},
 		{
+			// ci-9cb, the gk-hueo7 shape: a workflow root parked by a witness
+			// brake keeps gc.routed_to=<pool> until a human re-routes it. The
+			// halt_reason stamp alone must take it out of pool demand — it
+			// counted forever before, and each count re-armed the pour that
+			// cleared the brake again.
+			name: "halted workflow root still routed to the pool",
+			bead: beads.Bead{ID: "a-halt-root", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:      beadmeta.KindWorkflow,
+				beadmeta.RoutedToMetadataKey:  agreementTemplate,
+				beadmeta.HaltReasonMetadataKey: "not_polecat_routable",
+			}},
+			wantServable: false,
+		},
+		{
+			// The legacy-tier twin: route cleared, run_target names the pool,
+			// brake still stamped — the veto must ride this tier too.
+			name: "halted run_target-only root",
+			bead: beads.Bead{ID: "a-halt-legacy", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:       beadmeta.KindWorkflow,
+				beadmeta.RunTargetMetadataKey:  agreementTemplate,
+				beadmeta.HaltReasonMetadataKey: "content_gate_error",
+			}},
+			wantServable: false,
+		},
+		{
+			// Discriminating row for the halt COMPARISON: a blank (or
+			// whitespace-only) halt_reason is not a brake — clearing the stamp
+			// by writing "" must return the row to demand.
+			name: "cleared halt stamp with explicit worker route",
+			bead: beads.Bead{ID: "a-halt-blank", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.RoutedToMetadataKey:  agreementTemplate,
+				beadmeta.HaltReasonMetadataKey: " ",
+			}},
+			wantServable: true,
+		},
+		{
 			name: "routed epic",
 			bead: beads.Bead{
 				ID: "a-7", Status: "open", Type: "epic",
@@ -595,6 +631,10 @@ func legacyWorkflowTierServes(bead beads.Bead, matches func(beads.Bead) bool) bo
 	if strings.TrimSpace(bead.Metadata[beadmeta.WorkflowExpandedMetadataKey]) == "true" {
 		return false
 	}
+	// Mirrors the halt veto in poolDemandMigrationFilterJQ (ci-9cb).
+	if strings.TrimSpace(bead.Metadata[beadmeta.HaltReasonMetadataKey]) != "" {
+		return false
+	}
 	return strings.TrimSpace(bead.Metadata[beadmeta.RoutedToMetadataKey]) == ""
 }
 
@@ -631,7 +671,9 @@ func assertLegacyTierFilterUnchanged(t *testing.T, query string) {
 	// poolDemandFirstRowFunctionScript, brackets and limit slice included. The
 	// query is compared with the sh -c single-quote escaping undone, so the pin
 	// holds the jq PROGRAM rather than the quoting of the shell wrapper around it.
-	const wantFilter = `jq '[.[] | select(((.metadata["gc.routed_to"] // "") == "") and ((.metadata["gc.workflow_expanded"] // "") != "true"))] | .[:1]'`
+	// ci-9cb added the halt veto: a run_target-only root parked by a
+	// witness brake (non-blank halt_reason) must not ride the legacy tier.
+	const wantFilter = `jq '[.[] | select(((.metadata["gc.routed_to"] // "") == "") and ((.metadata["gc.workflow_expanded"] // "") != "true") and (((.metadata["halt_reason"] // "") | gsub("^\\s+|\\s+$"; "")) == ""))] | .[:1]'`
 	if !strings.Contains(unescapeShellSingleQuotes(query), wantFilter) {
 		t.Fatalf("the legacy workflow tier's post-filter is no longer exactly\n  %s\nso the Go mirror in legacyWorkflowTierServes is unpinned. Re-derive the mirror against the new filter, then update this pin.\nGenerated query:\n%s", wantFilter, query)
 	}
