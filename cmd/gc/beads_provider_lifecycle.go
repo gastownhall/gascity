@@ -729,13 +729,11 @@ func providerOwnedScopeCustomTypesEnv(cityPath, dir string) (map[string]string, 
 }
 
 // embeddedScopeCustomTypesEnv builds registerScopeCustomTypes' env for a scope
-// gc does not serve from its own Dolt — one whose metadata.json records
-// embedded Dolt, or one bd bound directly to a server gc does not run:
-// doctor's custom-types store projection, the one `gc doctor --fix` registers
-// under, which aims bd at the scope's own .beads and the scope's own binding
-// (every server selector cleared for an embedded scope), plus the workspace's
+// whose metadata.json records embedded Dolt: doctor's custom-types store
+// projection, the one `gc doctor --fix` registers under, which aims bd at the
+// scope's own .beads with every server selector cleared, plus the workspace's
 // pinned BD_BIN and export suppression. The provider projection would hand bd
-// the city's server endpoint, which neither scope serves from.
+// the city's server endpoint, which an embedded scope never serves from.
 func embeddedScopeCustomTypesEnv(cityPath, dir string) (map[string]string, error) {
 	base, err := doctor.CustomTypesStoreEnv(cityPath, dir)
 	if err != nil {
@@ -1012,15 +1010,6 @@ func initAndHookDirResolvingDatabase(cityPath, dir, prefix string, bootStore *ci
 	if skipsManagedDolt, err := scopeSkipsManagedDoltForInit(cityPath, dir); err != nil {
 		return err
 	} else if skipsManagedDolt {
-		// A store bd bound to a server gc does not run still takes gc's bead
-		// types, as an embedded one does: through bd, at the store's own
-		// binding, never by editing bd's files. A complete storage binding
-		// gets hooks only.
-		if bdOwnedDirect, err := scopeIsBdOwnedDirectExternal(cityPath, dir); err != nil {
-			return err
-		} else if bdOwnedDirect {
-			registerScopeCustomTypes(cityPath, dir, embeddedScopeCustomTypesEnv)
-		}
 		if err := installBeadHooks(dir, cityPath); err != nil {
 			return fmt.Errorf("install hooks at %s: %w", dir, err)
 		}
@@ -3242,17 +3231,7 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 	if err != nil {
 		return fmt.Errorf("classifying city provider ownership: %w", err)
 	}
-	// A city bd bound to a server it was pointed at keeps bd's config.yaml and
-	// bd's own port file, as a provider-owned city does: gc's endpoint keys
-	// there are the claim scopeIsBdOwnedDirectExternal reads.
-	cityBdOwnedDirect := false
-	if !cityProviderOwned {
-		cityBdOwnedDirect, err = scopeIsBdOwnedDirectExternal(cityPath, cityPath)
-		if err != nil {
-			return fmt.Errorf("classifying city store binding: %w", err)
-		}
-	}
-	cityUsesBd := !cityProviderOwned && !cityBdOwnedDirect && scopeUsesManagedBdStoreContract(cityPath, cityPath)
+	cityUsesBd := !cityProviderOwned && scopeUsesManagedBdStoreContract(cityPath, cityPath)
 	cityHasCompleteStorageBinding := false
 	if cityUsesBd {
 		completeBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath))
@@ -3261,6 +3240,20 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 		}
 		cityHasCompleteStorageBinding = completeBinding
 	}
+	// A city bd bound to a server it was pointed at keeps bd's config.yaml and
+	// bd's own port file, as a provider-owned city does: gc's endpoint keys
+	// there are the claim scopeIsBdOwnedDirectExternal reads. A complete
+	// storage binding decides first, as it does for a rig below: one that
+	// still carries bd's legacy host and port must keep the skip that leaves
+	// the city's inheriting rigs alone.
+	cityBdOwnedDirect := false
+	if !cityProviderOwned && !cityHasCompleteStorageBinding {
+		cityBdOwnedDirect, err = scopeIsBdOwnedDirectExternal(cityPath, cityPath)
+		if err != nil {
+			return fmt.Errorf("classifying city store binding: %w", err)
+		}
+	}
+	cityUsesBd = cityUsesBd && !cityBdOwnedDirect
 	anyRigUsesBd := false
 	for _, rig := range rigs {
 		if strings.TrimSpace(rig.Path) == "" {

@@ -57,6 +57,26 @@ func TestScopeCarriesBdOwnedDirectBinding(t *testing.T) {
 			config: func(t *testing.T, scopeRoot string) { writeBdTemplateConfig(t, fs, scopeRoot, "gc") },
 			want:   true,
 		},
+		// The record settles a loopback binding only. A hosted binding is bd's
+		// even on a port both of gc's records name: 3307 is gc's legacy default
+		// and a common Dolt port, so a record must never claim a hosted store.
+		"hosted binding on gc's recorded managed port is bd's": {
+			metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"server",` +
+				`"dolt_server_host":"db.example","dolt_server_port":3307,"dolt_database":"hosted"}`,
+			config: func(t *testing.T, scopeRoot string) {
+				writeBdTemplateConfig(t, fs, scopeRoot, "gc")
+				dir := filepath.Join(scopeRoot, ".gc", "runtime", "packs", "dolt")
+				if err := fs.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				for _, name := range []string{"dolt-state.json", "dolt-provider-state.json"} {
+					if err := fs.WriteFile(filepath.Join(dir, name), []byte(`{"running":true,"pid":1,"port":3307}`), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+			want: true,
+		},
 		"socket binding names this host": {
 			metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"server",` +
 				`"dolt_server_socket":"/var/run/dolt.sock","dolt_database":"hosted"}`,

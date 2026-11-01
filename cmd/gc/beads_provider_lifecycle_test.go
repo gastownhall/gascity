@@ -3345,38 +3345,52 @@ dolt.auto-start: true
 	}
 }
 
+// TestSyncConfiguredDoltPortFilesSkipsInheritedRigForCompleteCityStorageBinding
+// covers a city on an opaque storage binding, including one that still carries
+// bd's legacy host and port, hosted or on loopback with no gc record: the sync
+// leaves the city's inheriting rigs alone either way.
 func TestSyncConfiguredDoltPortFilesSkipsInheritedRigForCompleteCityStorageBinding(t *testing.T) {
-	cityDir := t.TempDir()
-	rigDir := filepath.Join(t.TempDir(), "frontend")
-	for _, dir := range []string{cityDir, rigDir} {
-		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	cityMetadata := []byte(`{"backend":"dolt","storage_endpoint":"opaque-remote","storage_database":"work"}`)
-	if err := os.WriteFile(scopeMetadataJSONPath(cityDir), cityMetadata, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	rigConfig := []byte(`issue_prefix: frontend
+	const completeBinding = `"backend":"dolt","storage_endpoint":"opaque-remote","storage_database":"work"`
+	for name, cityMetadata := range map[string]string{
+		"no legacy host and port": `{` + completeBinding + `}`,
+		"legacy hosted host and port": `{` + completeBinding +
+			`,"dolt_mode":"server","dolt_server_host":"db.example","dolt_server_port":4406}`,
+		"legacy loopback host and port with no gc record": `{` + completeBinding +
+			`,"dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_port":17333}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			rigDir := filepath.Join(t.TempDir(), "frontend")
+			for _, dir := range []string{cityDir, rigDir} {
+				if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(scopeMetadataJSONPath(cityDir), []byte(cityMetadata), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			rigConfig := []byte(`issue_prefix: frontend
 gc.endpoint_origin: inherited_city
 gc.endpoint_status: verified
 dolt.auto-start: false
 `)
-	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), rigConfig, 0o644); err != nil {
-		t.Fatal(err)
-	}
+			if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), rigConfig, 0o644); err != nil {
+				t.Fatal(err)
+			}
 
-	if err := syncConfiguredDoltPortFiles(cityDir, config.DoltConfig{}, "gc", []config.Rig{{Name: "frontend", Path: rigDir}}, io.Discard); err != nil {
-		t.Fatalf("syncConfiguredDoltPortFiles: %v", err)
-	}
-	if got := mustReadFile(t, scopeMetadataJSONPath(cityDir)); string(got) != string(cityMetadata) {
-		t.Fatalf("city metadata changed:\n got %s\nwant %s", got, cityMetadata)
-	}
-	if got := mustReadFile(t, filepath.Join(rigDir, ".beads", "config.yaml")); string(got) != string(rigConfig) {
-		t.Fatalf("inherited rig config changed:\n got %s\nwant %s", got, rigConfig)
-	}
-	if _, err := os.Stat(filepath.Join(rigDir, ".beads", "dolt-server.port")); !os.IsNotExist(err) {
-		t.Fatalf("inherited rig port file should remain absent, stat err = %v", err)
+			if err := syncConfiguredDoltPortFiles(cityDir, config.DoltConfig{}, "gc", []config.Rig{{Name: "frontend", Path: rigDir}}, io.Discard); err != nil {
+				t.Fatalf("syncConfiguredDoltPortFiles: %v", err)
+			}
+			if got := mustReadFile(t, scopeMetadataJSONPath(cityDir)); string(got) != cityMetadata {
+				t.Fatalf("city metadata changed:\n got %s\nwant %s", got, cityMetadata)
+			}
+			if got := mustReadFile(t, filepath.Join(rigDir, ".beads", "config.yaml")); string(got) != string(rigConfig) {
+				t.Fatalf("inherited rig config changed:\n got %s\nwant %s", got, rigConfig)
+			}
+			if _, err := os.Stat(filepath.Join(rigDir, ".beads", "dolt-server.port")); !os.IsNotExist(err) {
+				t.Fatalf("inherited rig port file should remain absent, stat err = %v", err)
+			}
+		})
 	}
 }
 

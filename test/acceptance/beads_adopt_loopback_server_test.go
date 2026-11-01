@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +35,9 @@ const (
 	loopbackAdoptDatabase = "hv"
 	loopbackAdoptCityDB   = "hq"
 	loopbackAdoptBdInit   = 3 * time.Minute
+
+	// loopbackAdoptTypesCheck is the adopted rig's custom-types doctor check.
+	loopbackAdoptTypesCheck = "custom-types:" + loopbackAdoptRigName
 )
 
 // loopbackAdoptStoreFiles are the bd-owned files under a store's .beads that gc
@@ -196,22 +200,49 @@ func (a *loopbackServerAdoption) assertRigListsBead(t *testing.T, id, when strin
 	}
 }
 
+// registerRigTypes runs the one-shot repair doctor names for the rig's
+// custom-types check. gc writes no bead types into a store it does not serve,
+// on adopt or on start, so the operator registers them, through bd at the
+// store's own binding, which leaves bd's files as found.
+func (a *loopbackServerAdoption) registerRigTypes(t *testing.T) {
+	t.Helper()
+	if out, err := a.run.GC("doctor", "--fix", "--check", loopbackAdoptTypesCheck); err != nil {
+		t.Fatalf("gc doctor --fix --check %s: %v\n%s", loopbackAdoptTypesCheck, err, out)
+	}
+	a.assertStoreFilesAsFound(t, "after gc doctor --fix")
+}
+
 // assertDoctorReportsNoRigFailure requires that no doctor check about the
-// adopted rig is an error.
+// adopted rig is an error: neither a check named for the rig nor the
+// city-wide dolt-drift check, which names a rig only in its details and must
+// say nothing about one gc does not serve.
 func (a *loopbackServerAdoption) assertDoctorReportsNoRigFailure(t *testing.T) {
 	t.Helper()
 	out, _ := a.run.GC("doctor", "--json")
 	var report doctorReport
 	lastJSONLine(t, out, &report)
+	sawDrift := false
 	for _, r := range report.Results {
+		if r.Name == "dolt-drift" {
+			sawDrift = true
+			details := strings.Join(r.Details, "\n")
+			if r.Status == "error" || strings.Contains(details, strconv.Quote(loopbackAdoptRigName)) {
+				t.Errorf("gc doctor: dolt-drift = %s: %s\n%s", r.Status, r.Message, details)
+			}
+			continue
+		}
 		if r.Status == "error" && strings.Contains(r.Name, loopbackAdoptRigName) {
 			t.Errorf("gc doctor: %s = error: %s", r.Name, r.Message)
 		}
 	}
+	if !sawDrift {
+		t.Errorf("gc doctor reported no dolt-drift result:\n%s", out)
+	}
 }
 
 // exercise is the shared sequence: adopt, write and read through the bd front
-// door, stop and start, remove and re-adopt, doctor.
+// door, stop and start, remove and re-adopt, then doctor's custom-types repair
+// and a doctor run.
 func (a *loopbackServerAdoption) exercise(t *testing.T) {
 	t.Helper()
 	a.adopt(t, "adopt")
@@ -231,6 +262,7 @@ func (a *loopbackServerAdoption) exercise(t *testing.T) {
 	}
 	a.adopt(t, "re-adopt")
 	a.assertRigListsBead(t, id, "after re-adopt")
+	a.registerRigTypes(t)
 	a.assertDoctorReportsNoRigFailure(t)
 }
 
