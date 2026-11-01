@@ -704,8 +704,6 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 		// kubectl-only stdlib CVEs, fixed in Go 1.26.6.
 		"CVE-2026-33818": true, "CVE-2026-56853": true, "CVE-2026-56858": true,
 		"CVE-2026-56859": true, "CVE-2026-56860": true, "CVE-2026-56862": true,
-		// Current kubectl-only findings are rejected on every rebuilt tool too.
-		"CVE-2026-78667": true, "CVE-2026-78669": true, "CVE-2026-97031": true,
 	}
 	// Waivers that survive, checked as present so an entry cannot be dropped without
 	// a deliberate edit here, and as the only rebuilt-path entries allowed, so the set
