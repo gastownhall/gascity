@@ -1348,6 +1348,12 @@ calls = 5
 tagged = true
 
 [[count]]
+path = "examples/bd/dolt/docs_recovery_bd_flags_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "examples/bd/dolt/doctor_test.go"
 resource = "subprocess"
 calls = 1
