@@ -6,8 +6,42 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/extmsg"
 )
+
+// TestExtMsgClientUsesSupervisorForSupervisorManagedCity pins the routing
+// choice without opening a loopback listener: conversation bindings have no
+// local fallback, so a supervisor-managed city without a standalone [api]
+// port must resolve to the supervisor client.
+func TestExtMsgClientUsesSupervisorForSupervisorManagedCity(t *testing.T) {
+	cityPath := writeCityStatusTestCity(t)
+	t.Setenv("GC_CITY", cityPath)
+	t.Setenv("GC_CITY_URL", "")
+	t.Setenv("GC_CITY_CONTEXT", "")
+	t.Setenv("GC_NO_API", "")
+
+	sentinel := api.NewCityScopedClient("http://supervisor.sentinel:1", "test-city")
+	origAlive, origSup := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
+	t.Cleanup(func() {
+		apiRouteControllerAliveHook = origAlive
+		apiRouteSupervisorClientHook = origSup
+	})
+	apiRouteControllerAliveHook = func(string) int { return 4242 }
+	apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
+
+	var stderr bytes.Buffer
+	c, gotCity, ok := extMsgClient("bind", &stderr)
+	if !ok {
+		t.Fatalf("extMsgClient ok = false, want true; stderr=%s", stderr.String())
+	}
+	if c != sentinel {
+		t.Fatalf("extMsgClient client = %p, want supervisor sentinel %p", c, sentinel)
+	}
+	if gotCity == "" {
+		t.Fatal("extMsgClient city path is empty")
+	}
+}
 
 func TestCmdExtMsgBindRejectsInvalidTargetFlags(t *testing.T) {
 	tests := []struct {
