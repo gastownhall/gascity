@@ -13,6 +13,8 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/guard"
+	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
 )
 
 // TestControlDispatchBuildsNoSessionProviderUnlessARetryRecycles pins
@@ -318,6 +320,40 @@ func TestK8sSessionProviderConstructionStillRequiresClientConfig(t *testing.T) {
 	_, err := k8sProviderFromSession(config.K8sConfig{}, "test-city")
 	if err == nil || !strings.Contains(err.Error(), "building K8s config") {
 		t.Fatalf("K8s provider construction error = %v, want missing client config", err)
+	}
+}
+
+func TestK8sWorkerResolvesClientFreeSessionProvider(t *testing.T) {
+	clearGCEnv(t)
+	clearKubernetesClientConfigForDispatchTest(t)
+	t.Setenv("GC_SESSION_ID", "de-wisp-test")
+	t.Setenv("GC_SESSION_NAME", "own")
+	t.Setenv(config.K8sWorkerPodMarkerEnv, "true")
+
+	cfg := &config.City{}
+	cfg.Session.Provider = "k8s"
+	sp, err := resolveWorkerSpec(cfg, runtime.WorkerSpec{Runtime: "k8s"}, cfg.Session, "test-city", t.TempDir())
+	if err != nil {
+		t.Fatalf("resolveWorkerSpec in a marked worker without API credentials: %v", err)
+	}
+	if _, ok := sp.(*sessionk8s.WorkerProvider); !ok {
+		t.Fatalf("provider = %T, want *k8s.WorkerProvider", sp)
+	}
+	if err := sp.Stop("own"); !errors.Is(err, guard.ErrControllerOwnedRuntime) {
+		t.Fatalf("worker Stop error = %v, want ErrControllerOwnedRuntime", err)
+	}
+}
+
+func TestUnmarkedK8sProviderResolutionStillRequiresClientConfig(t *testing.T) {
+	clearGCEnv(t)
+	clearKubernetesClientConfigForDispatchTest(t)
+	t.Setenv("GC_SESSION_ID", "de-wisp-test")
+
+	cfg := &config.City{}
+	cfg.Session.Provider = "k8s"
+	_, err := resolveWorkerSpec(cfg, runtime.WorkerSpec{Runtime: "k8s"}, cfg.Session, "test-city", t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "building K8s config") {
+		t.Fatalf("unmarked K8s resolution error = %v, want missing client config", err)
 	}
 }
 

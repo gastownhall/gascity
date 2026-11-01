@@ -187,6 +187,11 @@ func resolveWorkerSpec(cfg *config.City, spec runtime.WorkerSpec, sc config.Sess
 	if onWorkerSite(cityPath) {
 		return guard.New(), nil
 	}
+	// A generated agent Pod holds no Kubernetes credentials. Its provider acts
+	// only on the Pod's own session metadata; the controller owns the rest.
+	if isK8sManagedWorker(spec.Runtime) {
+		return sessionk8s.NewWorkerProvider(), nil
+	}
 	reg, err := runtimeRegistryForCity(cfg)
 	if err != nil {
 		return nil, err
