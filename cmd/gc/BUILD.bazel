@@ -1461,6 +1461,7 @@ go_test(
         "dispatch_session_provider_lazy_test.go",
         "disposition_heartbeat_test.go",
         "disposition_read_ratchet_test.go",
+        "doctor_archive_export_rows_test.go",
         "doctor_backlog_depth_ready_error_test.go",
         "doctor_backlog_depth_test.go",
         "doctor_bd_read_memo_test.go",

@@ -1,6 +1,9 @@
 package main
 
 import (
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,26 +28,56 @@ import (
 // git working tree, one directory per database, and is not reaped. Reading the
 // checked-out file is enough — no git invocation, so a doctor run stays cheap
 // and cannot hang on a repo lock.
-func archiveExportRowsFor(cityPath string) func(rigPath string) (int, bool) {
-	return func(rigPath string) (int, bool) {
-		db, ok, err := contract.ReadDoltDatabase(fsys.OSFS{}, rigPath)
-		if err != nil || !ok || strings.TrimSpace(db) == "" {
-			return 0, false
+func archiveExportRowsFor(cityPath string) func(rigPath string) (int, bool, error) {
+	return func(rigPath string) (int, bool, error) {
+		metadataPath := scopeMetadataJSONPath(rigPath)
+		db, ok, err := contract.ReadDoltDatabase(fsys.OSFS{}, metadataPath)
+		if err != nil {
+			return 0, false, fmt.Errorf("reading the rig's database name from %s: %w", metadataPath, err)
 		}
-		for _, repo := range jsonlArchiveRepoCandidates(os.Getenv, cityPath) {
-			// Per-database directory first, then the flattened mirror the export
-			// script also writes; either is a valid record that the rig held rows.
-			for _, candidate := range []string{
-				filepath.Join(repo, db, "issues.jsonl"),
-				filepath.Join(repo, db+".jsonl"),
-			} {
-				if n, err := doctor.CountJSONLLines(candidate); err == nil && n > 0 {
-					return n, true
-				}
+		if !ok || strings.TrimSpace(db) == "" {
+			return 0, false, nil
+		}
+		repo := activeJSONLArchiveRepo(os.Getenv, cityPath)
+		if repo == "" {
+			return 0, false, nil
+		}
+		// The per-database directory first, then the flattened mirror the
+		// export script also writes. The first file that exists is the
+		// evidence, read or not: falling through to the other on a read error
+		// would hide the error.
+		for _, candidate := range []string{
+			filepath.Join(repo, db, "issues.jsonl"),
+			filepath.Join(repo, db+".jsonl"),
+		} {
+			n, err := doctor.CountJSONLLines(candidate)
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
 			}
+			if err != nil {
+				return 0, false, fmt.Errorf("reading %s: %w", candidate, err)
+			}
+			return n, true, nil
 		}
-		return 0, false
+		return 0, false, nil
 	}
+}
+
+// activeJSONLArchiveRepo returns the archive repo the core pack's
+// jsonl-export script writes to, or "" when there is none yet: the
+// GC_JSONL_ARCHIVE_REPO override if set, otherwise the first candidate that is
+// a git repository. Only that repo is evidence. A stale legacy archive beside
+// the current one must not supply rows the exporter no longer writes.
+func activeJSONLArchiveRepo(getenv func(string) string, cityPath string) string {
+	if override := strings.TrimSpace(getenv("GC_JSONL_ARCHIVE_REPO")); override != "" {
+		return override
+	}
+	for _, dir := range jsonlArchiveRepoCandidates(getenv, cityPath) {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir
+		}
+	}
+	return ""
 }
 
 // jsonlArchiveRepoCandidates mirrors the archive-repo precedence in the core

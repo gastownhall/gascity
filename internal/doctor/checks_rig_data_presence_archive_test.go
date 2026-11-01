@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,7 +40,7 @@ func archiveTestRig(t *testing.T) (*RigDataPresenceCheck, string) {
 // shape (803 exported rows, 0 live) would not have fired.
 func TestRigDataPresenceUsesArchivedExportWhenLocalIsReaped(t *testing.T) {
 	c, _ := archiveTestRig(t) // empty live store, no local export
-	c.WithArchiveExportRows(func(string) (int, bool) { return 803, true })
+	c.WithArchiveExportRows(func(string) (int, bool, error) { return 803, true, nil })
 
 	r := c.Run(nil)
 	if r.Status != StatusError || r.Severity != SeverityBlocking {
@@ -59,7 +60,7 @@ func TestRigDataPresenceUsesArchivedExportWhenLocalIsReaped(t *testing.T) {
 // and must not gate dispatch.
 func TestRigDataPresenceFreshRigStillSkipsWithoutAnyExport(t *testing.T) {
 	c, _ := archiveTestRig(t)
-	c.WithArchiveExportRows(func(string) (int, bool) { return 0, false })
+	c.WithArchiveExportRows(func(string) (int, bool, error) { return 0, false, nil })
 
 	r := c.Run(nil)
 	if r.Status != StatusOK {
@@ -77,9 +78,9 @@ func TestRigDataPresenceLocalExportWinsOverArchive(t *testing.T) {
 		[]byte("{\"id\":\"a\"}\n{\"id\":\"b\"}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	c.WithArchiveExportRows(func(string) (int, bool) {
+	c.WithArchiveExportRows(func(string) (int, bool, error) {
 		t.Error("archive lookup must not be consulted when a local export exists")
-		return 803, true
+		return 803, true, nil
 	})
 
 	r := c.Run(nil)
@@ -98,4 +99,82 @@ func TestRigDataPresenceNilArchiveLookupKeepsOldBehaviour(t *testing.T) {
 	if r.Status != StatusOK {
 		t.Fatalf("with no archive oracle an empty store and no local export must still pass; got status=%v msg=%q", r.Status, r.Message)
 	}
+}
+
+// writeLocalExport replaces the rig's local issues.jsonl with content.
+func writeLocalExport(t *testing.T, rigDir, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "issues.jsonl"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRigDataPresenceCountsOnlyIssueRecords: the export counts issue records
+// the way jsonl-export's count_jsonl_rows does. An archive holding only
+// memory records, or a legacy empty {} snapshot, is no evidence the rig held
+// issues, so an empty store beside it is a fresh rig, not data loss.
+func TestRigDataPresenceCountsOnlyIssueRecords(t *testing.T) {
+	for name, content := range map[string]string{
+		"memory-only": "{\"_type\":\"memory\",\"key\":\"a\"}\n{\"_type\":\"memory\",\"key\":\"b\"}\n",
+		"legacy {}":   "{}\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, rigDir := archiveTestRig(t)
+			writeLocalExport(t, rigDir, content)
+			r := c.Run(nil)
+			if r.Status != StatusOK {
+				t.Fatalf("export with no issue records must not block an empty store; got status=%v msg=%q", r.Status, r.Message)
+			}
+		})
+	}
+}
+
+// TestRigDataPresenceLegacyRowsSnapshotBlocks: a legacy `dolt sql -r json`
+// snapshot is a single {"rows":[...]} object; its rows are the history.
+func TestRigDataPresenceLegacyRowsSnapshotBlocks(t *testing.T) {
+	c, rigDir := archiveTestRig(t)
+	writeLocalExport(t, rigDir, "{\"rows\":[{\"id\":\"a\"},{\"id\":\"b\"},{\"id\":\"c\"}]}\n")
+	r := c.Run(nil)
+	if r.Status != StatusError || r.Severity != SeverityBlocking {
+		t.Fatalf("empty store beside a 3-row legacy snapshot must block; got status=%v severity=%v msg=%q", r.Status, r.Severity, r.Message)
+	}
+	if !strings.Contains(r.Message, "has 3 rows") {
+		t.Errorf("message should report the 3 legacy rows; got %q", r.Message)
+	}
+}
+
+// TestCountJSONLLinesHasNoLineLengthLimit: a bufio.Scanner stops at 64 KiB
+// with ErrTooLong, which read as "no history". A long record must still count.
+func TestCountJSONLLinesHasNoLineLengthLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.jsonl")
+	long := "{\"id\":\"a\",\"description\":\"" + strings.Repeat("x", 100<<10) + "\"}\n{\"id\":\"b\"}\n"
+	if err := os.WriteFile(path, []byte(long), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	n, err := CountJSONLLines(path)
+	if err != nil || n != 2 {
+		t.Fatalf("CountJSONLLines = %d, %v; want 2, nil", n, err)
+	}
+}
+
+// TestRigDataPresenceUnreadableExportIsAdvisory: an export that exists but
+// cannot be read is not "no history". Reading it that way passed an emptied
+// rig as a fresh one.
+func TestRigDataPresenceUnreadableExportIsAdvisory(t *testing.T) {
+	t.Run("local", func(t *testing.T) {
+		c, rigDir := archiveTestRig(t)
+		writeLocalExport(t, rigDir, "{\"id\":\"a\"}\n{not json\n")
+		r := c.Run(nil)
+		if r.Status != StatusWarning || r.Severity != SeverityAdvisory || !strings.Contains(r.Message, "cannot read issues.jsonl") {
+			t.Fatalf("unreadable local export must be advisory; got status=%v severity=%v msg=%q", r.Status, r.Severity, r.Message)
+		}
+	})
+	t.Run("archive", func(t *testing.T) {
+		c, _ := archiveTestRig(t)
+		c.WithArchiveExportRows(func(string) (int, bool, error) { return 0, false, errors.New("permission denied") })
+		r := c.Run(nil)
+		if r.Status != StatusWarning || r.Severity != SeverityAdvisory || !strings.Contains(r.Message, "cannot read the archived export") {
+			t.Fatalf("unreadable archive must be advisory; got status=%v severity=%v msg=%q", r.Status, r.Severity, r.Message)
+		}
+	})
 }
