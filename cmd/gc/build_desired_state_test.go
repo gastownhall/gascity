@@ -10262,6 +10262,126 @@ func TestSelectOrCreatePoolSessionBead_SkipsDrained(t *testing.T) {
 	}
 }
 
+// TestSelectOrPlanPoolSessionBead_PersistentSingletonReusesFreeableAsleepHolder
+// pins the allocation result a helper-level reuse predicate cannot establish
+// (gastownhall/gascity#8364): a persistent canonical singleton pool
+// (max_active_sessions=1, no namepool) whose sole session went to sleep with
+// a freeable reason (city-stop, e.g. after gc stop). Before the fix,
+// reusablePoolSessionInfo skipped the asleep holder and
+// claimFreshPoolSlotInfo's canonical branch fail-closed every tick on that
+// same open row — errPoolSessionNameUnavailable, "canonical pool template ...
+// is held by session" — so the pool started no worker until an operator
+// closed the bead by hand. Selection must return the holder itself (the
+// ordinary wake path retires the sleep), slot 0, and no create plan. The
+// anonymous-request hold filters (wait_hold, future held_until/
+// quarantined_until) keep the row excluded from reuse for that request;
+// selection then fails closed on the canonical holder instead of minting a
+// duplicate identity.
+func TestSelectOrPlanPoolSessionBead_PersistentSingletonReusesFreeableAsleepHolder(t *testing.T) {
+	t.Parallel()
+
+	decisionTime := time.Date(2026, 11, 1, 17, 0, 0, 0, time.UTC)
+
+	build := func(t *testing.T, extraMeta map[string]string) (*agentBuildParams, *config.Agent, beads.Bead) {
+		t.Helper()
+		store := beads.NewMemStore()
+		meta := map[string]string{
+			"template":       "repo/worker",
+			"agent_name":     "repo/worker",
+			"alias":          "repo/worker",
+			"session_name":   "repo--worker",
+			"pool_managed":   "true",
+			"session_origin": "ephemeral",
+			"state":          "asleep",
+			"sleep_reason":   "city-stop",
+		}
+		for k, v := range extraMeta {
+			meta[k] = v
+		}
+		holder, err := store.Create(beads.Bead{
+			Title:    "repo/worker",
+			Type:     sessionBeadType,
+			Labels:   []string{sessionBeadLabel},
+			Metadata: meta,
+		})
+		if err != nil {
+			t.Fatalf("create holder bead: %v", err)
+		}
+		cfg := &config.City{Agents: []config.Agent{{
+			Dir:               "repo",
+			Name:              "worker",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+		}}}
+		bp := &agentBuildParams{
+			city:         cfg,
+			beadStore:    store,
+			sessionBeads: newSessionBeadSnapshot([]beads.Bead{holder}),
+			agents:       cfg.Agents,
+		}
+		return bp, &cfg.Agents[0], holder
+	}
+
+	request := SessionRequest{Template: "repo/worker", Tier: "new"}
+
+	t.Run("reuses freeable asleep holder", func(t *testing.T) {
+		t.Parallel()
+		bp, cfgAgent, holder := build(t, nil)
+		info, slot, plan, err := selectOrPlanPoolSessionBead(
+			bp,
+			cfgAgent,
+			"repo/worker",
+			nil,
+			request,
+			decisionTime,
+			map[string]bool{},
+			map[int]bool{},
+		)
+		if err != nil {
+			t.Fatalf("selectOrPlanPoolSessionBead: %v", err)
+		}
+		if plan != nil {
+			t.Fatalf("selectOrPlanPoolSessionBead returned create plan %+v; want reuse of the asleep holder", plan)
+		}
+		if info.ID != holder.ID {
+			t.Fatalf("selected bead %q, want the asleep canonical holder %q", info.ID, holder.ID)
+		}
+		if slot != 0 {
+			t.Fatalf("canonical singleton slot = %d, want 0", slot)
+		}
+	})
+
+	holdFilters := []struct {
+		name string
+		meta map[string]string
+	}{
+		{"wait_hold", map[string]string{"wait_hold": "step-1"}},
+		{"held_until future", map[string]string{"held_until": decisionTime.Add(time.Hour).Format(time.RFC3339)}},
+		{"quarantined_until future", map[string]string{"quarantined_until": decisionTime.Add(time.Hour).Format(time.RFC3339)}},
+	}
+	for _, tc := range holdFilters {
+		t.Run(tc.name+" keeps holder excluded", func(t *testing.T) {
+			t.Parallel()
+			bp, cfgAgent, holder := build(t, tc.meta)
+			_, _, _, err := selectOrPlanPoolSessionBead(
+				bp,
+				cfgAgent,
+				"repo/worker",
+				nil,
+				request,
+				decisionTime,
+				map[string]bool{},
+				map[int]bool{},
+			)
+			if !errors.Is(err, errPoolSessionNameUnavailable) {
+				t.Fatalf("selectOrPlanPoolSessionBead error = %v; want errPoolSessionNameUnavailable "+
+					"(holder %s still owns the canonical identity: excluded from reuse for this request, "+
+					"never duplicated)", err, holder.ID)
+			}
+		})
+	}
+}
+
 func TestSelectOrCreatePoolSessionBead_PrefersConcreteAgentSlotOverStalePoolMetadata(t *testing.T) {
 	store := beads.NewMemStore()
 	poisoned, err := store.Create(beads.Bead{
