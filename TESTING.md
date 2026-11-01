@@ -2458,6 +2458,28 @@ if !guard.HasSession(session) { ... }
 - `RequireTmux(t)` — skips test if tmux not installed
 - `KillAllTestSessions(t)` — package-level sweep for TestMain
 
+#### Processes that outlive a killed test binary
+
+`t.Cleanup` and TestMain defers never run when `go test -timeout`
+panics or a gate kills the test binary. Some processes are detached on
+purpose and survive a process-group kill: bd starts its `db-proxy-child`
+with Setsid, and the `dolt sql-server` that child supervises lives in
+the same new session. Suites that
+start real bd or dolt call `dolttest.ArmOwnerReaper()` first in
+TestMain:
+
+- Every descendant inherits `GC_TEST_PROCESS_OWNER=<pid>.<starttime>`.
+- A watchdog (the test binary re-executed in its own session) holds a
+  pipe to the run. It sees EOF when the binary exits for any reason,
+  SIGKILL included. It then reaps every process carrying the run's token
+  and removes the directories registered with
+  `dolttest.RemoveOnOwnerExit`.
+- At startup, the reaper also kills marked processes whose owner is
+  already dead.
+
+tmux servers are never reaped this way. They stay under the
+socket-scoped tmuxtest sweeps above.
+
 ### 5. Coordination tests (`cmd/gc/lifecycle_coordination_test.go`)
 
 Test that components are **called in the right order**. Conformance tests

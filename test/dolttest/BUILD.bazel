@@ -2,20 +2,41 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "dolttest",
-    srcs = ["dolttest.go"],
+    srcs = [
+        "dolttest.go",
+        "owner.go",
+        "owner_linux.go",
+        "owner_other.go",
+    ],
     importpath = "github.com/gastownhall/gascity/test/dolttest",
     visibility = ["//visibility:public"],
-    deps = ["//internal/doltorphan"],
+    deps = [
+        "//internal/doltorphan",
+        "//internal/pidutil",
+    ] + select({
+        "@rules_go//go/platform:android": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:linux": [
+            "@org_golang_x_sys//unix",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 go_test(
     name = "dolttest_test",
     srcs = [
         "dolttest_test.go",
+        "main_test.go",
+        "owner_test.go",
         "testenv_import_test.go",
     ],
     embed = [":dolttest"],
-    deps = ["//internal/testenv"],
+    deps = [
+        "//internal/pidutil",
+        "//internal/testenv",
+    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
