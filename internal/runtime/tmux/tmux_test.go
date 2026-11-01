@@ -77,6 +77,24 @@ func (e *noServerPreflightExecutor) executeCtx(ctx context.Context, args []strin
 	return realExecutor{}.executeCtx(ctx, args)
 }
 
+// probeRecordingExecutor delegates every operation to real tmux and records
+// the result of each has-session preflight probe.
+type probeRecordingExecutor struct {
+	probeErrs []error
+}
+
+func (e *probeRecordingExecutor) execute(args []string) (string, error) {
+	return realExecutor{}.execute(args)
+}
+
+func (e *probeRecordingExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
+	out, err := realExecutor{}.executeCtx(ctx, args)
+	if slices.Contains(args, "="+probeSessionName) {
+		e.probeErrs = append(e.probeErrs, err)
+	}
+	return out, err
+}
+
 func TestAttachSessionNoStartServerDoesNotSelfRebindAfterProbe(t *testing.T) {
 	t.Run("missing-socket-after-preflight", func(t *testing.T) {
 		if !hasTmux() {
@@ -407,6 +425,81 @@ func TestNewSessionNoServerProbeDoesNotClobberLiveNamedSocket(t *testing.T) {
 		}
 		if !os.SameFile(beforeSocket, afterSocket) {
 			t.Fatalf("socket inode changed: before=%s after=%s", socketInode(beforeSocket), socketInode(afterSocket))
+		}
+	})
+
+	t.Run("sibling-start-after-no-server-probe-attaches", func(t *testing.T) {
+		// The sibling starts a whole tmux server inside the preflight budget.
+		prev := newSessionProbeTimeout
+		newSessionProbeTimeout = 10 * time.Second
+		t.Cleanup(func() { newSessionProbeTimeout = prev })
+
+		sibling := newTmux(newSocketName("sibling"))
+		socketPath := namedSocketPath(sibling.cfg.SocketName)
+		t.Cleanup(func() {
+			_ = sibling.KillServer()
+			_ = os.Remove(socketPath)
+		})
+		if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("remove prior socket %q: %v", socketPath, err)
+		}
+
+		siblingSession := fmt.Sprintf("gc-sibling-first-%d", time.Now().UnixNano())
+		started := fmt.Sprintf("gc-sibling-second-%d", time.Now().UnixNano())
+		guarded := NewProviderWithConfig(sibling.cfg)
+		probes := &probeRecordingExecutor{}
+		guarded.Tmux().exec = probes
+		var (
+			serverPID     string
+			siblingSocket os.FileInfo
+			observations  int
+		)
+		guarded.Tmux().serverSocketObserver = func(ctx context.Context, path string) error {
+			observations++
+			if len(probes.probeErrs) != 1 || !errors.Is(probes.probeErrs[0], ErrNoServer) {
+				t.Fatalf("preflight before observation = %v, want one genuine ErrNoServer", probes.probeErrs)
+			}
+			if err := sibling.NewSession(siblingSession, ""); err != nil {
+				t.Fatalf("sibling start: %v", err)
+			}
+			var err error
+			if serverPID, err = sibling.run("display-message", "-p", "#{pid}"); err != nil {
+				t.Fatalf("read sibling server #{pid}: %v", err)
+			}
+			if siblingSocket, err = os.Lstat(socketPath); err != nil {
+				t.Fatalf("lstat sibling socket %q: %v", socketPath, err)
+			}
+			return observeNamedSocket(ctx, path)
+		}
+
+		if err := guarded.Start(context.Background(), started, runtimepkg.Config{Command: "sleep 600"}); err != nil {
+			t.Fatalf("Provider.Start after a sibling bound the socket: %v (probes=%v)", err, probes.probeErrs)
+		}
+		if observations != 1 {
+			t.Fatalf("socket observations = %d, want 1", observations)
+		}
+		if len(probes.probeErrs) != 2 || !errors.Is(probes.probeErrs[1], ErrSessionNotFound) {
+			t.Fatalf("preflight probes = %v, want genuine no-server then a server answer", probes.probeErrs)
+		}
+		for _, session := range []string{siblingSession, started} {
+			has, err := sibling.HasSession(session)
+			if err != nil || !has {
+				t.Fatalf("session %q present = %t, err = %v", session, has, err)
+			}
+		}
+		afterPID, err := sibling.run("display-message", "-p", "#{pid}")
+		if err != nil {
+			t.Fatalf("read server #{pid} after start: %v", err)
+		}
+		if afterPID != serverPID {
+			t.Fatalf("server pid after start = %q, want sibling's %q", afterPID, serverPID)
+		}
+		afterSocket, err := os.Lstat(socketPath)
+		if err != nil {
+			t.Fatalf("lstat socket after start: %v", err)
+		}
+		if !os.SameFile(siblingSocket, afterSocket) {
+			t.Fatalf("socket inode changed: before=%s after=%s", socketInode(siblingSocket), socketInode(afterSocket))
 		}
 	})
 
