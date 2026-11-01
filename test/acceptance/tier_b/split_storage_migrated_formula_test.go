@@ -381,7 +381,10 @@ func newSplitE2ECity(t *testing.T, bdPath, doltPath string, bornSplit bool, preB
 	// helpers.NewEnv only prepends the binary's directory to PATH, so a binary
 	// not named gc (gc-a2, say) left the worker's `gc hook`/`gc bd` calls and
 	// the sessions resolving whatever `gc` sat beside it — a different build.
-	env := splitBinaryEnv(t, helpers.TopologyEnv(t, base, root, bdPath, doltPath), gcBin, filepath.Join(root, "gc-bin"))
+	// Every city here is split at some point, and gc bd on a split city
+	// forwards only to bd's own binary, never the topology's tool-home
+	// wrapper (see WithRealBD).
+	env := splitBinaryEnv(t, helpers.TopologyEnv(t, base, root, bdPath, doltPath).WithRealBD(bdPath), gcBin, filepath.Join(root, "gc-bin"))
 	preEnv := env
 	if preBin != "" {
 		// The pre-cutover binary keeps the isolated HOME too. v1.5.0-rc1
@@ -819,6 +822,9 @@ func (c *splitE2ECity) finishAndAssert(root string) {
 		c.dumpDiagnostics(root)
 		c.t.Fatalf("formula re-dispatch after the cutover:\n  %s", strings.Join(v, "\n  "))
 	}
+	if untrusted := c.events().bdUntrusted; len(untrusted) > 0 {
+		c.t.Fatalf("gc would not run this split city's bd, so it refused every forwarded gc bd (gate-sweep's included):\n  %s", strings.Join(untrusted, "\n  "))
+	}
 	wl := c.workerLog()
 	if len(wl.closed) != splitWorkerSteps {
 		c.dumpDiagnostics(root)
@@ -888,14 +894,21 @@ type splitEventSummary struct {
 	started           map[string]int
 	startedAfterClose map[string]int
 	stepDefined       []splitEvent
+	// bdUntrusted summarizes the events saying gc would not run the city's
+	// bd, one line per event type: the controller's start finding
+	// (gc_bd.uninventoried) and each gc bd refused for that reason.
+	bdUntrusted []string
 }
 
 type splitEvent struct {
 	Seq     int64  `json:"seq"`
 	Type    string `json:"type"`
 	Subject string `json:"subject"`
+	Message string `json:"message"`
 	RunID   string `json:"run_id"`
 	StepID  string `json:"step_id"`
+	// Payload is decoded only where a check needs it: its shape is per type.
+	Payload json.RawMessage `json:"payload"`
 }
 
 // events reads the city's event log in sequence order.
@@ -922,6 +935,7 @@ func (c *splitE2ECity) events() splitEventSummary {
 	}
 	sort.SliceStable(all, func(i, j int) bool { return all[i].Seq < all[j].Seq })
 	closed := map[string]bool{}
+	var untrusted splitEventTally
 	for _, e := range all {
 		s.counts[e.Type]++
 		switch e.Type {
@@ -936,9 +950,45 @@ func (c *splitE2ECity) events() splitEventSummary {
 			if closed[e.Subject] {
 				s.startedAfterClose[e.Subject]++
 			}
+		case "gc_bd.uninventoried":
+			untrusted.note(e)
+		case "gc_bd.refused":
+			var refusal struct {
+				Kind string `json:"kind"`
+			}
+			if json.Unmarshal(e.Payload, &refusal) == nil && refusal.Kind == "bd-uninventoried" {
+				untrusted.note(e)
+			}
 		}
 	}
+	s.bdUntrusted = untrusted.lines()
 	return s
+}
+
+// splitEventTally counts events by type and keeps each type's first message.
+type splitEventTally struct {
+	order []string
+	count map[string]int
+	first map[string]string
+}
+
+func (t *splitEventTally) note(e splitEvent) {
+	if t.count == nil {
+		t.count, t.first = map[string]int{}, map[string]string{}
+	}
+	if t.count[e.Type] == 0 {
+		t.order = append(t.order, e.Type)
+		t.first[e.Type] = e.Message
+	}
+	t.count[e.Type]++
+}
+
+func (t *splitEventTally) lines() []string {
+	out := make([]string, 0, len(t.order))
+	for _, typ := range t.order {
+		out = append(out, fmt.Sprintf("%s x%d, first: %s", typ, t.count[typ], t.first[typ]))
+	}
+	return out
 }
 
 // stepsOf returns the step bead ids the controller defined for root.
@@ -1301,9 +1351,9 @@ func (b splitShownBead) hasDep(on, typ string) bool {
 // show reads one bead through gc bd and fails the test if it is unreadable.
 func (c *splitE2ECity) show(id string) splitShownBead {
 	c.t.Helper()
-	out, err := c.city.GCStdout("bd", "show", id, "--json")
+	out, errOut, err := helpers.RunGCStreams(c.city.Env, c.city.Dir, "bd", "show", id, "--json")
 	if err != nil {
-		c.t.Fatalf("gc bd show %s --json: %v\n%s", id, err, out)
+		c.t.Fatalf("gc bd show %s --json: %v\nstdout:\n%s\nstderr:\n%s", id, err, out, errOut)
 	}
 	payload := strings.TrimSpace(out)
 	if i := strings.IndexAny(payload, "[{"); i >= 0 {

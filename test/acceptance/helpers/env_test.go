@@ -342,3 +342,70 @@ func TestVerifyPathGCRefusesAPathWhoseGCIsNotTheBinaryUnderTest(t *testing.T) {
 		})
 	}
 }
+
+// A split city's gc bd forwards only to bd's own Go binary, so WithRealBD must
+// put that binary ahead of the tool-home wrapper both as BD_BIN and on PATH.
+func TestWithRealBDLeadsPathAndPinsBDBin(t *testing.T) {
+	bd := filepath.Join(t.TempDir(), "bd-real")
+	if err := os.WriteFile(bd, []byte("binary"), 0o755); err != nil { //nolint:gosec // stands in for an executable
+		t.Fatal(err)
+	}
+	env := NewEnv("", t.TempDir(), t.TempDir()).WithRealBD(bd)
+
+	if got := env.Get("BD_BIN"); got != bd {
+		t.Fatalf("BD_BIN = %q, want %q", got, bd)
+	}
+	first := filepath.SplitList(env.Get("PATH"))[0]
+	target, err := filepath.EvalSymlinks(filepath.Join(first, "bd"))
+	if err != nil {
+		t.Fatalf("PATH's first entry %s holds no bd: %v", first, err)
+	}
+	want, err := filepath.EvalSymlinks(bd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target != want {
+		t.Fatalf("the first bd on PATH resolves to %s, want %s", target, want)
+	}
+	entries, err := os.ReadDir(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("PATH's first entry %s holds %d entries, want only the bd link (anything else would shadow host tools)", first, len(entries))
+	}
+}
+
+// An unwrapped bd resolves user-level state under gc's HOME, so WithRealBD
+// refuses an Env whose gc HOME is anything but NewEnv's isolated one — the
+// operator's own (WithHostHome) above all.
+func TestWithRealBDRefusesAHomeThatIsNotTheIsolatedOne(t *testing.T) {
+	env := NewEnv("", t.TempDir(), t.TempDir()).With("HOME", t.TempDir())
+	defer func() {
+		if recover() == nil {
+			t.Fatal("WithRealBD accepted an Env whose gc HOME is not NewEnv's isolated home")
+		}
+	}()
+	env.WithRealBD(filepath.Join(t.TempDir(), "bd"))
+}
+
+func TestWithRealBDRefusesARelativePath(t *testing.T) {
+	env := NewEnv("", t.TempDir(), t.TempDir())
+	defer func() {
+		if recover() == nil {
+			t.Fatal("WithRealBD accepted a relative bd path, which gc ignores as BD_BIN")
+		}
+	}()
+	env.WithRealBD("bin/bd")
+}
+
+// gc carries its environment into a bd the tool-home wrapper does not re-home
+// (WithRealBD, a raw BD_BIN), so NewEnv pins both of the wrapper's bd switches.
+func TestNewEnvPinsTheWrapperBdSwitches(t *testing.T) {
+	env := NewEnv("", t.TempDir(), t.TempDir())
+	for key, want := range map[string]string{bdSharedServerConfigEnv: "false", bdDisableMetricsEnv: "1"} {
+		if got := env.Get(key); got != want {
+			t.Errorf("NewEnv() %s = %q, want %q", key, got, want)
+		}
+	}
+}
