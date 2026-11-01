@@ -5445,7 +5445,11 @@ func stripLeadingBoxBorder(s string) string {
 }
 
 // WaitForRuntimeReady polls until the agent runtime's ready prompt appears in
-// the pane. Falls back to a fixed delay when prompt detection is unavailable.
+// the pane. The bottom-most prompt-prefixed line decides (see
+// paneShowsReadyPrompt): a numbered menu whose cursor row carries the prompt
+// glyph, such as a startup trust dialog, is a pending choice and keeps the
+// wait polling. Falls back to a fixed delay when prompt detection is
+// unavailable.
 func (t *Tmux) WaitForRuntimeReady(ctx context.Context, session string, rc *RuntimeConfig, timeout time.Duration) error {
 	if rc == nil || rc.Tmux == nil {
 		return nil
@@ -5496,11 +5500,8 @@ func (t *Tmux) WaitForRuntimeReady(ctx context.Context, session string, rc *Runt
 			}
 			continue
 		}
-		// Look for runtime prompt indicator at start of line
-		for _, line := range lines {
-			if matchesPromptPrefix(line, rc.Tmux.ReadyPromptPrefix) {
-				return nil
-			}
+		if paneShowsReadyPrompt(lines, rc.Tmux.ReadyPromptPrefix) {
+			return nil
 		}
 		select {
 		case <-ctx.Done():
