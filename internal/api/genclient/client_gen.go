@@ -2107,6 +2107,18 @@ type AdapterEventPayload struct {
 	Provider  string `json:"provider"`
 }
 
+// AgentClaimsPayload defines model for AgentClaimsPayload.
+type AgentClaimsPayload struct {
+	Action   *string    `json:"action,omitempty"`
+	Cause    *string    `json:"cause,omitempty"`
+	Episode  string     `json:"episode"`
+	Provider string     `json:"provider"`
+	Seats    *int64     `json:"seats,omitempty"`
+	Since    time.Time  `json:"since"`
+	Template string     `json:"template"`
+	Until    *time.Time `json:"until,omitempty"`
+}
+
 // AgentCreateInputBody defines model for AgentCreateInputBody.
 type AgentCreateInputBody struct {
 	// Dir Working directory (rig name).
@@ -7638,6 +7650,38 @@ type TypedEventStreamEnvelope struct {
 	union json.RawMessage
 }
 
+// TypedEventStreamEnvelopeAgentClaimsResumed defines model for TypedEventStreamEnvelopeAgentClaimsResumed.
+type TypedEventStreamEnvelopeAgentClaimsResumed struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          AgentClaimsPayload       `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeAgentClaimsStalled defines model for TypedEventStreamEnvelopeAgentClaimsStalled.
+type TypedEventStreamEnvelopeAgentClaimsStalled struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          AgentClaimsPayload       `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeBackendCredentialResolved defines model for TypedEventStreamEnvelopeBackendCredentialResolved.
 type TypedEventStreamEnvelopeBackendCredentialResolved struct {
 	Actor            string                           `json:"actor"`
@@ -9641,6 +9685,40 @@ type TypedEventStreamEnvelopeWorkerOperation struct {
 // TypedTaggedEventStreamEnvelope Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.
 type TypedTaggedEventStreamEnvelope struct {
 	union json.RawMessage
+}
+
+// TypedTaggedEventStreamEnvelopeAgentClaimsResumed defines model for TypedTaggedEventStreamEnvelopeAgentClaimsResumed.
+type TypedTaggedEventStreamEnvelopeAgentClaimsResumed struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          AgentClaimsPayload       `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeAgentClaimsStalled defines model for TypedTaggedEventStreamEnvelopeAgentClaimsStalled.
+type TypedTaggedEventStreamEnvelopeAgentClaimsStalled struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          AgentClaimsPayload       `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeBackendCredentialResolved defines model for TypedTaggedEventStreamEnvelopeBackendCredentialResolved.
@@ -13617,6 +13695,32 @@ func (t *EventPayload) MergeAdapterEventPayload(v AdapterEventPayload) error {
 	return err
 }
 
+// AsAgentClaimsPayload returns the union data inside the EventPayload as a AgentClaimsPayload
+func (t EventPayload) AsAgentClaimsPayload() (AgentClaimsPayload, error) {
+	var body AgentClaimsPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromAgentClaimsPayload overwrites any union data inside the EventPayload as the provided AgentClaimsPayload
+func (t *EventPayload) FromAgentClaimsPayload(v AgentClaimsPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeAgentClaimsPayload performs a merge with any union data inside the EventPayload, using the provided AgentClaimsPayload
+func (t *EventPayload) MergeAgentClaimsPayload(v AgentClaimsPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsBackendCredentialResolvedPayload returns the union data inside the EventPayload as a BackendCredentialResolvedPayload
 func (t EventPayload) AsBackendCredentialResolvedPayload() (BackendCredentialResolvedPayload, error) {
 	var body BackendCredentialResolvedPayload
@@ -17190,6 +17294,62 @@ func (t *SessionTranscriptGetResponse) UnmarshalJSON(b []byte) error {
 	return err
 }
 
+// AsTypedEventStreamEnvelopeAgentClaimsResumed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeAgentClaimsResumed
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeAgentClaimsResumed() (TypedEventStreamEnvelopeAgentClaimsResumed, error) {
+	var body TypedEventStreamEnvelopeAgentClaimsResumed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeAgentClaimsResumed overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeAgentClaimsResumed
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeAgentClaimsResumed(v TypedEventStreamEnvelopeAgentClaimsResumed) error {
+	v.Type = "agent.claims_resumed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeAgentClaimsResumed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeAgentClaimsResumed
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeAgentClaimsResumed(v TypedEventStreamEnvelopeAgentClaimsResumed) error {
+	v.Type = "agent.claims_resumed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeAgentClaimsStalled returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeAgentClaimsStalled
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeAgentClaimsStalled() (TypedEventStreamEnvelopeAgentClaimsStalled, error) {
+	var body TypedEventStreamEnvelopeAgentClaimsStalled
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeAgentClaimsStalled overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeAgentClaimsStalled
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeAgentClaimsStalled(v TypedEventStreamEnvelopeAgentClaimsStalled) error {
+	v.Type = "agent.claims_stalled"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeAgentClaimsStalled performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeAgentClaimsStalled
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeAgentClaimsStalled(v TypedEventStreamEnvelopeAgentClaimsStalled) error {
+	v.Type = "agent.claims_stalled"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeBackendCredentialResolved returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBackendCredentialResolved
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBackendCredentialResolved() (TypedEventStreamEnvelopeBackendCredentialResolved, error) {
 	var body TypedEventStreamEnvelopeBackendCredentialResolved
@@ -20706,6 +20866,10 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 	switch discriminator {
 	case "TypedEventStreamEnvelopeCustom":
 		return t.AsTypedEventStreamEnvelopeCustom()
+	case "agent.claims_resumed":
+		return t.AsTypedEventStreamEnvelopeAgentClaimsResumed()
+	case "agent.claims_stalled":
+		return t.AsTypedEventStreamEnvelopeAgentClaimsStalled()
 	case "backend.credential_resolved":
 		return t.AsTypedEventStreamEnvelopeBackendCredentialResolved()
 	case "bead.claim_failed":
@@ -20966,6 +21130,62 @@ func (t TypedEventStreamEnvelope) MarshalJSON() ([]byte, error) {
 
 func (t *TypedEventStreamEnvelope) UnmarshalJSON(b []byte) error {
 	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeAgentClaimsResumed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeAgentClaimsResumed
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeAgentClaimsResumed() (TypedTaggedEventStreamEnvelopeAgentClaimsResumed, error) {
+	var body TypedTaggedEventStreamEnvelopeAgentClaimsResumed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeAgentClaimsResumed overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeAgentClaimsResumed
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeAgentClaimsResumed(v TypedTaggedEventStreamEnvelopeAgentClaimsResumed) error {
+	v.Type = "agent.claims_resumed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeAgentClaimsResumed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeAgentClaimsResumed
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeAgentClaimsResumed(v TypedTaggedEventStreamEnvelopeAgentClaimsResumed) error {
+	v.Type = "agent.claims_resumed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeAgentClaimsStalled returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeAgentClaimsStalled
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeAgentClaimsStalled() (TypedTaggedEventStreamEnvelopeAgentClaimsStalled, error) {
+	var body TypedTaggedEventStreamEnvelopeAgentClaimsStalled
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeAgentClaimsStalled overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeAgentClaimsStalled
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeAgentClaimsStalled(v TypedTaggedEventStreamEnvelopeAgentClaimsStalled) error {
+	v.Type = "agent.claims_stalled"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeAgentClaimsStalled performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeAgentClaimsStalled
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeAgentClaimsStalled(v TypedTaggedEventStreamEnvelopeAgentClaimsStalled) error {
+	v.Type = "agent.claims_stalled"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
 	return err
 }
 
@@ -24485,6 +24705,10 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 	switch discriminator {
 	case "TypedTaggedEventStreamEnvelopeCustom":
 		return t.AsTypedTaggedEventStreamEnvelopeCustom()
+	case "agent.claims_resumed":
+		return t.AsTypedTaggedEventStreamEnvelopeAgentClaimsResumed()
+	case "agent.claims_stalled":
+		return t.AsTypedTaggedEventStreamEnvelopeAgentClaimsStalled()
 	case "backend.credential_resolved":
 		return t.AsTypedTaggedEventStreamEnvelopeBackendCredentialResolved()
 	case "bead.claim_failed":

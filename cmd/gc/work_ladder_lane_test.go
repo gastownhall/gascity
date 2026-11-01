@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -706,6 +707,15 @@ func TestWorkLadderRecyclesAnUnclaimedTrigger(t *testing.T) {
 		if call.Method == "Nudge" && call.Message != "configured claim nudge" {
 			t.Fatalf("trigger nudge %q, want the configured one", call.Message)
 		}
+	}
+	// The never-claimed trigger is escalated once, with the second nudge
+	// (4m30s), long before the recycle and before a seat idle-drains.
+	if got := escalations(c); !reflect.DeepEqual(got, []string{workladder.AlertTriggerUnanswered}) {
+		t.Fatalf("escalations %v, want one %s", got, workladder.AlertTriggerUnanswered)
+	}
+	esc := c.events(events.WorkEscalated)[0]
+	if esc.Subject != b.ID || len(c.nudgedAt) < 2 || c.nudgedAt[1] != halfPast(4) {
+		t.Fatalf("escalation about %s, nudges %v; want it about the trigger %s, beside the second nudge at %v", esc.Subject, c.nudgedAt, b.ID, halfPast(4))
 	}
 }
 

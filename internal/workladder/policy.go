@@ -13,7 +13,12 @@ const (
 	DefaultRecycleRepost = 30 * time.Minute
 	DefaultMaxRecycles   = 1
 
-	DefaultTriggerThreshold      = 3 // trigger/assigned: then recycle (keep nudging at Cap)
+	DefaultTriggerThreshold = 3 // trigger/assigned: then recycle (keep nudging at Cap)
+	// DefaultTriggerAlertThreshold is the counted nudges a trigger gets
+	// before its next due pass raises AlertTriggerUnanswered (once), ahead
+	// of its recycle: a seat that took a nudge about the work it was spawned
+	// for and still has not claimed it a Base later is not slow to start.
+	DefaultTriggerAlertThreshold = 1
 	DefaultContinuationThreshold = 6 // continuation/assigned: then alert (keep nudging at Cap)
 	DefaultClaimedThreshold      = 3 // claim/claimed: then release
 	DefaultStartedThreshold      = 6 // claim/started: then recycle, or escalate
@@ -26,12 +31,14 @@ const (
 )
 
 // DefaultPolicy is OD7's: grace 90s, base 3m doubling to a 60m cap and then
-// hourly forever, a 10m cap while the provider is degraded, R = 1; and the
-// rate-limit episode's: 2 refusals in a row open one, confirmed after 10m
-// by a refusal of a nudge delivered since, one fresh restart per seat per
-// hour and per provider per 30m, and closed stale 70m after its newest
-// answered refusal ended (an older refusal answers nothing), so a step
-// waiting on a person, nudged hourly, keeps its episode standing.
+// hourly forever, a 10m cap while the provider is degraded, R = 1, a trigger
+// escalated with its second counted nudge (4m30s in) and recycled with its
+// fourth (22m30s); and the rate-limit episode's: 2 refusals in a row open
+// one, confirmed after 10m by a refusal of a nudge delivered since, one fresh
+// restart per seat per hour and per provider per 30m, and closed stale 70m
+// after its newest answered refusal ended (an older refusal answers
+// nothing), so a step waiting on a person, nudged hourly, keeps its episode
+// standing.
 func DefaultPolicy() Policy {
 	return Policy{
 		Grace:         DefaultGrace,
@@ -46,6 +53,7 @@ func DefaultPolicy() Policy {
 			KindClaim:        {RungClaimed: DefaultClaimedThreshold, RungStarted: DefaultStartedThreshold},
 		},
 		MaxRecycles:             DefaultMaxRecycles,
+		TriggerAlert:            DefaultTriggerAlertThreshold,
 		RateLimitThreshold:      DefaultRateLimitThreshold,
 		FreshConfirm:            DefaultPausedCap,
 		SeatFreshGap:            DefaultCap,
@@ -80,6 +88,9 @@ func (p Policy) withDefaults() Policy {
 	}
 	if p.MaxRecycles < 0 {
 		p.MaxRecycles = 0
+	}
+	if p.TriggerAlert <= 0 {
+		p.TriggerAlert = d.TriggerAlert
 	}
 	if p.RateLimitThreshold <= 0 {
 		p.RateLimitThreshold = d.RateLimitThreshold

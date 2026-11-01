@@ -21,7 +21,9 @@ import (
 // a new generation, a rung rise and a progress reset clear it. Work whose
 // seat waits on a person (Work.AwaitsHuman) is only ever nudged, a Cap after
 // its wait began and a Cap apart after that, and its pending release is
-// dropped: the wait's start and its end each begin a new episode.
+// dropped: the wait's start and its end each begin a new episode. A trigger
+// still unclaimed when it is due after TriggerAlert counted nudges raises
+// AlertTriggerUnanswered, once per entry, ahead of its recycle.
 //
 // Before acting, on a pass that may act on the seat, the seat's rate-limit
 // episode takes its step (rateLimit): it opens on an answered refusal, paces
@@ -150,11 +152,19 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 			}
 		case e.AwaitsHuman || e.Rung == RungEscalated || e.Attempts < t: // a wait on a person is only ever nudged
 			if !nudged {
+				if e.Kind == KindTrigger && !e.AwaitsHuman && !e.Escalated && e.Attempts >= p.TriggerAlert {
+					e.Escalated = true
+					d.Actions = append(d.Actions, Alert{Key: e.Key, Reason: AlertTriggerUnanswered})
+				}
 				nudge(false)
 			}
 		case e.Kind == KindTrigger:
 			if nudged {
 				continue
+			}
+			if !e.Escalated { // a cell from before the trigger alert, or a TriggerAlert at or past the threshold
+				e.Escalated = true
+				d.Actions = append(d.Actions, Alert{Key: e.Key, Reason: AlertTriggerUnanswered})
 			}
 			if e.RecycleAt.IsZero() || now.Sub(e.RecycleAt) >= p.RecycleRepost {
 				e.RecycleAt, d.Next.RecycledGen = now, obs.Gen

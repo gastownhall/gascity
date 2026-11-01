@@ -187,6 +187,10 @@ type CityRuntime struct {
 	// journal feed as the delta lanes; created on first use.
 	claimLoop     *claimLoopGuard
 	claimLoopOnce sync.Once
+	// claimStall is the claims-stall guard (claim_stall_guard.go), fed by the
+	// same journal feed; created on first use.
+	claimStall     *claimStallGuard
+	claimStallOnce sync.Once
 
 	// ordersLane runs order dispatch off the tick (orders_lane.go). It owns
 	// od, retiredOrderDispatchers, the order-set bookkeeping and the watchdog
@@ -5475,6 +5479,7 @@ func (cr *CityRuntime) forceStopRequested() bool {
 func (cr *CityRuntime) adoptConfigRevision(rev string) {
 	if rev != cr.configRev {
 		cr.claimLoopGuardOf().configChanged()
+		cr.claimStallGuardOf().configure(cr.cfg)
 	}
 	cr.configRev = rev
 }

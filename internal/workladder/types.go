@@ -209,6 +209,9 @@ type Policy struct {
 	RecycleRepost time.Duration // a trigger's recycle request is reposted no sooner
 	Threshold     map[Kind]map[Rung]int
 	MaxRecycles   int // R: recycles of a started claim per seat
+	// TriggerAlert is the counted nudges a trigger gets before the due
+	// pass that raises AlertTriggerUnanswered (once per entry).
+	TriggerAlert int
 
 	// RateLimitThreshold is how many turns in a row the provider must
 	// refuse with a rate limit before the refusals open an episode.
@@ -288,6 +291,13 @@ func (RateLimitMove) isAction() {}
 
 // Alert reasons.
 const (
+	// AlertTriggerUnanswered: the seat took a nudge about the trigger it
+	// was spawned for and still has not claimed it a Base later. It is
+	// raised once per entry, with the nudge that follows, before the
+	// trigger's recycle and before a seat idle-drains: a template whose
+	// seats raise it in a row is not claiming its work (the controller's
+	// claims-stall guard counts it).
+	AlertTriggerUnanswered      = "trigger_unanswered"
 	AlertContinuationUnanswered = "continuation_unanswered"
 	AlertStartedUnanswered      = "started_unanswered"
 	AlertStartedRecycled        = "started_recycled"

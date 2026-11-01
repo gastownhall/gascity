@@ -70,6 +70,45 @@
         ],
         "type": "object"
       },
+      "AgentClaimsPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "cause": {
+            "type": "string"
+          },
+          "episode": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "seats": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "since": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "template": {
+            "type": "string"
+          },
+          "until": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "template",
+          "provider",
+          "episode",
+          "since"
+        ],
+        "type": "object"
+      },
       "AgentCreateInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -3356,6 +3395,9 @@
         "oneOf": [
           {
             "$ref": "#/components/schemas/AdapterEventPayload"
+          },
+          {
+            "$ref": "#/components/schemas/AgentClaimsPayload"
           },
           {
             "$ref": "#/components/schemas/BackendCredentialResolvedPayload"
@@ -14698,6 +14740,8 @@
         "description": "Discriminated union of city event stream envelopes. Each variant constrains the envelope type and payload schema together.",
         "discriminator": {
           "mapping": {
+            "agent.claims_resumed": "#/components/schemas/TypedEventStreamEnvelopeAgentClaimsResumed",
+            "agent.claims_stalled": "#/components/schemas/TypedEventStreamEnvelopeAgentClaimsStalled",
             "backend.credential_resolved": "#/components/schemas/TypedEventStreamEnvelopeBackendCredentialResolved",
             "bead.claim_failed": "#/components/schemas/TypedEventStreamEnvelopeBeadClaimFailed",
             "bead.claim_loop_held": "#/components/schemas/TypedEventStreamEnvelopeBeadClaimLoopHeld",
@@ -14826,6 +14870,12 @@
           "propertyName": "type"
         },
         "oneOf": [
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeAgentClaimsResumed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeAgentClaimsStalled"
+          },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBackendCredentialResolved"
           },
@@ -15203,6 +15253,120 @@
           }
         ],
         "title": "Typed city event stream envelope"
+      },
+      "TypedEventStreamEnvelopeAgentClaimsResumed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/AgentClaimsPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "agent.claims_resumed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope agent.claims_resumed",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeAgentClaimsStalled": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/AgentClaimsPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "agent.claims_stalled",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope agent.claims_stalled",
+        "type": "object"
       },
       "TypedEventStreamEnvelopeBackendCredentialResolved": {
         "additionalProperties": false,
@@ -16706,6 +16870,8 @@
                 "bead.claim_released",
                 "bead.claim_failed",
                 "bead.claim_loop_held",
+                "agent.claims_stalled",
+                "agent.claims_resumed",
                 "hook.claim.reclaimed_stale",
                 "bead.dead_assignee_reopened",
                 "execution.work_associated",
@@ -22458,6 +22624,8 @@
         "description": "Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.",
         "discriminator": {
           "mapping": {
+            "agent.claims_resumed": "#/components/schemas/TypedTaggedEventStreamEnvelopeAgentClaimsResumed",
+            "agent.claims_stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeAgentClaimsStalled",
             "backend.credential_resolved": "#/components/schemas/TypedTaggedEventStreamEnvelopeBackendCredentialResolved",
             "bead.claim_failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClaimFailed",
             "bead.claim_loop_held": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClaimLoopHeld",
@@ -22586,6 +22754,12 @@
           "propertyName": "type"
         },
         "oneOf": [
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeAgentClaimsResumed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeAgentClaimsStalled"
+          },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBackendCredentialResolved"
           },
@@ -22963,6 +23137,128 @@
           }
         ],
         "title": "Typed supervisor event stream envelope"
+      },
+      "TypedTaggedEventStreamEnvelopeAgentClaimsResumed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/AgentClaimsPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "agent.claims_resumed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope agent.claims_resumed",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeAgentClaimsStalled": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/AgentClaimsPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "agent.claims_stalled",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope agent.claims_stalled",
+        "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeBackendCredentialResolved": {
         "additionalProperties": false,
@@ -24569,6 +24865,8 @@
                 "bead.claim_released",
                 "bead.claim_failed",
                 "bead.claim_loop_held",
+                "agent.claims_stalled",
+                "agent.claims_resumed",
                 "hook.claim.reclaimed_stale",
                 "bead.dead_assignee_reopened",
                 "execution.work_associated",
