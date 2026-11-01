@@ -2811,7 +2811,7 @@ func realPathForContainment(target string) (string, error) {
 // so a concurrent config edit cannot interleave with Provision's
 // read-modify-append of city.toml, and the runtime reload cannot read the rig's
 // half-written files.
-func (cs *controllerState) CreateRig(r config.Rig) error {
+func (cs *controllerState) CreateRig(r config.Rig, adopt bool) error {
 	rigPath := strings.TrimSpace(r.Path)
 	if rigPath == "" {
 		return fmt.Errorf("%w: rig path is required", configedit.ErrValidation)
@@ -2834,7 +2834,10 @@ func (cs *controllerState) CreateRig(r config.Rig) error {
 			return fmt.Errorf("%w: external rig path must be a directory: %s", configedit.ErrValidation, r.Path)
 		}
 	}
-	_, err := cs.provisionRigLocked(r, nil)
+	_, err := cs.provisionRigLocked(r, adopt, nil)
+	if errors.Is(err, rig.ErrAdoptionRequired) {
+		return fmt.Errorf("%w: %w", configedit.ErrValidation, err)
+	}
 	return err
 }
 
@@ -2930,7 +2933,7 @@ func (cs *controllerState) ProvisionRigFromGit(ctx context.Context, r config.Rig
 	// Provision under the guard. The freshly-cloned dir exists (with .git), so
 	// rig.Provision flows it through the git-detect / fresh-add path — git_url
 	// never enters ProvisionRequest, so nothing here can regress the sync path.
-	provisioned, err := cs.provisionRigLocked(r, onStep)
+	provisioned, err := cs.provisionRigLocked(r, false, onStep)
 	if err != nil {
 		return config.Rig{}, err
 	}
@@ -3185,7 +3188,7 @@ func (cs *controllerState) sweepOrphanRigProvisions(ctx context.Context) error {
 // resolved absolute. onStep, when non-nil, wires rig.Deps.OnStep so the caller can
 // project provisioning progress onto events; nil onStep produces the exact
 // git-blind behavior CreateRig has always had. It returns the provisioned rig.
-func (cs *controllerState) provisionRigLocked(r config.Rig, onStep func(step, detail string, warn bool)) (config.Rig, error) {
+func (cs *controllerState) provisionRigLocked(r config.Rig, adopt bool, onStep func(step, detail string, warn bool)) (config.Rig, error) {
 	// Duplicate-name guard preserving the API's 409-on-existing-name contract.
 	// Without it, Provision's re-add semantics would make same-name+same-path an
 	// idempotent success and same-name+different-path a plain 500. Config-level
@@ -3203,7 +3206,7 @@ func (cs *controllerState) provisionRigLocked(r config.Rig, onStep func(step, de
 	if err := cs.withConfigTransaction(func() error {
 		return cs.mutateAndPokeLocked(func() error {
 			var err error
-			provisionedRig, err = cs.provisionRigWrite(r, depOnStep)
+			provisionedRig, err = cs.provisionRigWrite(r, adopt, depOnStep)
 			return err
 		})
 	}); err != nil {
@@ -3248,7 +3251,7 @@ func rigConfigHasRigNamed(cfg *config.City, name string) bool {
 // mutateAndPokeLocked still commits the rig that was written to disk —
 // returning it would make mutateAndPokeLocked treat the committed rig as
 // "nothing committed" and split-brain disk vs controller.
-func (cs *controllerState) provisionRigWrite(r config.Rig, depOnStep func(rig.ProvisionStep)) (config.Rig, error) {
+func (cs *controllerState) provisionRigWrite(r config.Rig, adopt bool, depOnStep func(rig.ProvisionStep)) (config.Rig, error) {
 	// Load the raw for-edit config (NOT cs.cfg, which is composed/expanded):
 	// writing city.toml from the composed snapshot would bake expansions into the
 	// file.
@@ -3277,6 +3280,7 @@ func (cs *controllerState) provisionRigWrite(r config.Rig, depOnStep func(rig.Pr
 
 	resultRig, res, err := rig.Provision(cs.rigProvisionDeps(editCfg, r, depOnStep), rig.ProvisionRequest{
 		Name:          r.Name,
+		Adopt:         adopt,
 		Path:          r.Path,
 		Prefix:        r.Prefix,
 		DefaultBranch: r.DefaultBranch,

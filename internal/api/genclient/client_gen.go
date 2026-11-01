@@ -4703,6 +4703,9 @@ type RigActionBody struct {
 
 // RigCreateBody defines model for RigCreateBody.
 type RigCreateBody struct {
+	// Adopt Register an existing Beads queue in place, preserving its namespace and history. Cannot be combined with git_url.
+	Adopt *bool `json:"adopt,omitempty"`
+
 	// DefaultBranch Mainline branch (e.g. main, master). Auto-detected when omitted.
 	DefaultBranch *string `json:"default_branch,omitempty"`
 
@@ -4712,10 +4715,10 @@ type RigCreateBody struct {
 	// Name Rig name.
 	Name string `json:"name"`
 
-	// Path Filesystem path (server-derived for git_url clones).
+	// Path Existing project directory; use an absolute path outside the city. Clone destinations are city-contained.
 	Path *string `json:"path,omitempty"`
 
-	// Prefix Session name prefix.
+	// Prefix Beads issue namespace prefix; inferred from an adopted queue when omitted.
 	Prefix *string `json:"prefix,omitempty"`
 
 	// RequestId Client-supplied idempotency key; reuse across retries.

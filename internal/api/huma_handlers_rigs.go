@@ -129,6 +129,9 @@ func (s *Server) humaHandleRigCreate(ctx context.Context, input *RigCreateInput)
 	}
 
 	body := input.Body
+	if body.Adopt && strings.TrimSpace(body.GitURL) != "" {
+		return nil, huma.Error422UnprocessableEntity("adopt registers an existing queue and cannot be combined with git_url")
+	}
 	if strings.TrimSpace(body.GitURL) == "" {
 		// Sync create: idempotent via the Idempotency-Key header. Cache the whole
 		// 201 union body and replay it verbatim on a same-key repeat, mirroring
@@ -155,7 +158,7 @@ func (s *Server) rigCreateSync(sm StateMutator, body RigCreateBody) (*RigCreateO
 		Prefix:        body.Prefix,
 		DefaultBranch: body.DefaultBranch,
 	}
-	if err := sm.CreateRig(rig); err != nil {
+	if err := sm.CreateRig(rig, body.Adopt); err != nil {
 		return nil, mutationError(err)
 	}
 	out := &RigCreateOutput{Status: http.StatusCreated}

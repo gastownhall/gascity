@@ -413,8 +413,8 @@ type StateMutator interface {
 	// DeleteAgent removes an agent from city.toml.
 	DeleteAgent(name string) error
 
-	// CreateRig adds a new rig to city.toml.
-	CreateRig(r config.Rig) error
+	// CreateRig registers a rig; adopt preserves an existing Beads queue.
+	CreateRig(r config.Rig, adopt bool) error
 
 	// ProvisionRigFromGit clones gitURL into the rig's working tree and
 	// provisions the rig, reusing CreateRig's config-write handshake under the

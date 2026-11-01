@@ -8056,6 +8056,10 @@
       "RigCreateBody": {
         "additionalProperties": false,
         "properties": {
+          "adopt": {
+            "description": "Register an existing Beads queue in place, preserving its namespace and history. Cannot be combined with git_url.",
+            "type": "boolean"
+          },
           "default_branch": {
             "description": "Mainline branch (e.g. main, master). Auto-detected when omitted.",
             "type": "string"
@@ -8070,11 +8074,11 @@
             "type": "string"
           },
           "path": {
-            "description": "Filesystem path (server-derived for git_url clones).",
+            "description": "Existing project directory; use an absolute path outside the city. Clone destinations are city-contained.",
             "type": "string"
           },
           "prefix": {
-            "description": "Session name prefix.",
+            "description": "Beads issue namespace prefix; inferred from an adopted queue when omitted.",
             "type": "string"
           },
           "request_id": {

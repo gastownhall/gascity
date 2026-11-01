@@ -893,7 +893,7 @@ func TestControllerStateCreateRigPokesReconciler(t *testing.T) {
 	cs.pokeCh = make(chan struct{}, 1)
 	cs.configDirty = &atomic.Bool{}
 
-	if err := cs.CreateRig(config.Rig{Name: "rig1", Path: filepath.Join(cityDir, "rig1")}); err != nil {
+	if err := cs.CreateRig(config.Rig{Name: "rig1", Path: filepath.Join(cityDir, "rig1")}, false); err != nil {
 		t.Fatalf("CreateRig: %v", err)
 	}
 
@@ -934,7 +934,7 @@ func TestControllerStateCreateRigRejectsDuplicateName(t *testing.T) {
 	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 
 	firstPath := filepath.Join(cityDir, "rig1")
-	if err := cs.CreateRig(config.Rig{Name: "rig1", Path: firstPath}); err != nil {
+	if err := cs.CreateRig(config.Rig{Name: "rig1", Path: firstPath}, false); err != nil {
 		t.Fatalf("first CreateRig: %v", err)
 	}
 	// The first create must have refreshed cs.cfg so the pre-lock name guard is
@@ -944,11 +944,11 @@ func TestControllerStateCreateRigRejectsDuplicateName(t *testing.T) {
 	}
 
 	// Same name, same path.
-	if err := cs.CreateRig(config.Rig{Name: "rig1", Path: firstPath}); !errors.Is(err, configedit.ErrAlreadyExists) {
+	if err := cs.CreateRig(config.Rig{Name: "rig1", Path: firstPath}, false); !errors.Is(err, configedit.ErrAlreadyExists) {
 		t.Fatalf("duplicate CreateRig (same path) err = %v, want ErrAlreadyExists", err)
 	}
 	// Same name, different path — the guard keys on name, not path.
-	if err := cs.CreateRig(config.Rig{Name: "rig1", Path: filepath.Join(cityDir, "rig1-alt")}); !errors.Is(err, configedit.ErrAlreadyExists) {
+	if err := cs.CreateRig(config.Rig{Name: "rig1", Path: filepath.Join(cityDir, "rig1-alt")}, false); !errors.Is(err, configedit.ErrAlreadyExists) {
 		t.Fatalf("duplicate CreateRig (different path) err = %v, want ErrAlreadyExists", err)
 	}
 
@@ -980,7 +980,7 @@ func TestControllerStateCreateRigDetectsDefaultBranch(t *testing.T) {
 	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 
 	rigDir := newRepoWithOriginHeadAt(t, filepath.Join(cityDir, "rig1"), "master")
-	if err := cs.CreateRig(config.Rig{Name: "rig1", Path: rigDir}); err != nil {
+	if err := cs.CreateRig(config.Rig{Name: "rig1", Path: rigDir}, false); err != nil {
 		t.Fatalf("CreateRig: %v", err)
 	}
 
@@ -1011,7 +1011,7 @@ func TestControllerStateCreateRigRejectsOutOfCityPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, p := range []string{filepath.Join(t.TempDir(), "escape"), "../escape", externalFile} {
-		if err := cs.CreateRig(config.Rig{Name: "evil", Path: p}); !errors.Is(err, configedit.ErrValidation) {
+		if err := cs.CreateRig(config.Rig{Name: "evil", Path: p}, false); !errors.Is(err, configedit.ErrValidation) {
 			t.Errorf("CreateRig(path=%q) err = %v, want ErrValidation", p, err)
 		}
 	}
@@ -1049,7 +1049,7 @@ func TestControllerStateCreateRigDetectsDefaultBranchForRelativePath(t *testing.
 	}
 	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 
-	if err := cs.CreateRig(config.Rig{Name: "rig1", Path: "rig"}); err != nil {
+	if err := cs.CreateRig(config.Rig{Name: "rig1", Path: "rig"}, false); err != nil {
 		t.Fatalf("CreateRig: %v", err)
 	}
 
@@ -1086,7 +1086,7 @@ func TestControllerStateCreateRigInitializesStoreBeforePublishing(t *testing.T) 
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatalf("mkdir rig: %v", err)
 	}
-	if err := cs.CreateRig(config.Rig{Name: "alpha", Path: rigDir, Prefix: "al"}); err != nil {
+	if err := cs.CreateRig(config.Rig{Name: "alpha", Path: rigDir, Prefix: "al"}, false); err != nil {
 		t.Fatalf("CreateRig: %v", err)
 	}
 
@@ -1126,7 +1126,7 @@ func TestControllerStateMutationRollsBackWhenRefreshFails(t *testing.T) {
 
 	// In-city path so containment passes and the refresh-failure path (the thing
 	// this test exercises) is actually reached, not short-circuited.
-	err := cs.CreateRig(config.Rig{Name: "rig1", Path: filepath.Join(cityDir, "rig1")})
+	err := cs.CreateRig(config.Rig{Name: "rig1", Path: filepath.Join(cityDir, "rig1")}, false)
 	if err == nil {
 		t.Fatal("CreateRig should fail when refreshing the updated snapshot fails")
 	}
@@ -3420,7 +3420,7 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 		{
 			name: "create rig",
 			mutate: func(cs *controllerState) error {
-				return cs.CreateRig(config.Rig{Name: "rig2", Path: filepath.Join(cs.cityPath, "rig2"), Prefix: "r2"})
+				return cs.CreateRig(config.Rig{Name: "rig2", Path: filepath.Join(cs.cityPath, "rig2"), Prefix: "r2"}, false)
 			},
 			verify: func(t *testing.T, cfg *config.City, _ string) {
 				t.Helper()
@@ -5085,7 +5085,7 @@ func TestControllerStateConfigTransactionTakesPublicationLockBeforeEditorLock(t 
 			// check, after the transaction has taken its locks.
 			name: "rig provisioning",
 			run: func(cs *controllerState) error {
-				_, err := cs.provisionRigLocked(config.Rig{Name: "rig1", Path: filepath.Join(cs.cityPath, "rig1")}, nil)
+				_, err := cs.provisionRigLocked(config.Rig{Name: "rig1", Path: filepath.Join(cs.cityPath, "rig1")}, false, nil)
 				return err
 			},
 			wantErr: configedit.ErrAlreadyExists,
@@ -5594,7 +5594,7 @@ func TestControllerStateCreateRigRegistersExistingExternalDirectoryInPlace(t *te
 		t.Fatal(err)
 	}
 	cs := newControllerState(context.Background(), &config.City{Workspace: config.Workspace{Name: "city1"}}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
-	if err := cs.CreateRig(config.Rig{Name: "existing", Path: projectDir}); err != nil {
+	if err := cs.CreateRig(config.Rig{Name: "existing", Path: projectDir}, false); err != nil {
 		t.Fatalf("register existing external project: %v", err)
 	}
 	cfg := cs.Config()
@@ -5607,5 +5607,43 @@ func TestControllerStateCreateRigRegistersExistingExternalDirectoryInPlace(t *te
 	}
 	if _, err := os.Stat(filepath.Join(cityDir, "rigs", "existing")); !os.IsNotExist(err) {
 		t.Fatalf("registration created a second project inside the city: %v", err)
+	}
+}
+
+func TestControllerStateCreateRigAdoptsExternalQueueNamespace(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "city1"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	projectDir := t.TempDir()
+	queueDir := filepath.Join(projectDir, ".beads")
+	if err := os.MkdirAll(queueDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{"metadata.json": "{}", "config.yaml": "issue-prefix: kept\n", "history.sentinel": "preserve existing history"} {
+		if err := os.WriteFile(filepath.Join(queueDir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cs := newControllerState(context.Background(), &config.City{Workspace: config.Workspace{Name: "city1"}}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	if err := cs.CreateRig(config.Rig{Name: "different-name", Path: projectDir}, false); !errors.Is(err, configedit.ErrValidation) {
+		t.Fatalf("existing queue without explicit adoption must be a client validation error: %v", err)
+	}
+	if len(cs.Config().Rigs) != 0 {
+		t.Fatal("refused adoption registered the rig")
+	}
+	if err := cs.CreateRig(config.Rig{Name: "different-name", Path: projectDir}, true); err != nil {
+		t.Fatal(err)
+	}
+	cfg := cs.Config()
+	if len(cfg.Rigs) != 1 || cfg.Rigs[0].Prefix != "kept" || cfg.Rigs[0].Path != projectDir {
+		t.Fatalf("adopted rig = %+v", cfg.Rigs)
+	}
+	if data, err := os.ReadFile(filepath.Join(queueDir, "history.sentinel")); err != nil || string(data) != "preserve existing history" {
+		t.Fatalf("queue history changed: %q, %v", data, err)
 	}
 }

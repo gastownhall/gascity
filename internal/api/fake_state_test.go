@@ -293,7 +293,8 @@ func (f *fakeState) RawConfig() *config.City {
 // fakeMutatorState extends fakeState with StateMutator for testing mutations.
 type fakeMutatorState struct {
 	*fakeState
-	suspended map[string]bool
+	suspended    map[string]bool
+	lastRigAdopt bool
 
 	// serializeMu + serializeCalls make fakeMutatorState a ConfigWriteSerializer
 	// so pack handler tests exercise the real per-city write-lock seam and can
@@ -456,7 +457,8 @@ func (f *fakeMutatorState) DeleteAgent(name string) error {
 	return fmt.Errorf("%w: agent %q", configedit.ErrNotFound, name)
 }
 
-func (f *fakeMutatorState) CreateRig(r config.Rig) error {
+func (f *fakeMutatorState) CreateRig(r config.Rig, adopt bool) error {
+	f.lastRigAdopt = adopt
 	f.cfg.Rigs = append(f.cfg.Rigs, r)
 	return nil
 }

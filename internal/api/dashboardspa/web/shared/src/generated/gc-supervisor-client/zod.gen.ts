@@ -1759,6 +1759,7 @@ export const zRigActionBody = z.object({
 });
 
 export const zRigCreateBody = z.object({
+    adopt: z.boolean().optional(),
     default_branch: z.string().optional(),
     git_url: z.string().optional(),
     name: z.string().min(1),

@@ -165,11 +165,12 @@ func validateRigName(name string) error {
 // spurious 409 body-mismatch.
 type RigCreateBody struct {
 	Name          string `json:"name" doc:"Rig name." minLength:"1"`
-	Path          string `json:"path,omitempty" doc:"Filesystem path (server-derived for git_url clones)."`
-	Prefix        string `json:"prefix,omitempty" doc:"Session name prefix."`
+	Path          string `json:"path,omitempty" doc:"Existing project directory; use an absolute path outside the city. Clone destinations are city-contained."`
+	Prefix        string `json:"prefix,omitempty" doc:"Beads issue namespace prefix; inferred from an adopted queue when omitted."`
 	DefaultBranch string `json:"default_branch,omitempty" doc:"Mainline branch (e.g. main, master). Auto-detected when omitted."`
 	GitURL        string `json:"git_url,omitempty" doc:"Git URL to clone (triggers async provisioning)."`
 	RequestID     string `json:"request_id,omitempty" doc:"Client-supplied idempotency key; reuse across retries."`
+	Adopt         bool   `json:"adopt,omitempty" doc:"Register an existing Beads queue in place, preserving its namespace and history. Cannot be combined with git_url."`
 }
 
 // rigCreateDigest returns hex(sha256(json.Marshal(body with RequestID

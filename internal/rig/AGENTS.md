@@ -13,3 +13,8 @@ that disagrees with the stored namespace must be rejected.
 A preview lookup must not start a provider or open a writable store. Preserve
 explicit-prefix mismatch and city-prefix collision checks; an unreadable or
 empty namespace is an error, never a reason to use the requested prefix.
+
+Return ErrAdoptionRequired when registration encounters an existing queue
+without explicit adoption, before all mutations. API adapters classify this
+as a client validation refusal and offer adoption; never suggest deleting an
+existing queue to complete registration.

@@ -111,7 +111,7 @@ func assertRigAddArtifactsIdentical(t *testing.T, cityToml string, wantPacksLock
 		t.Fatalf("load city B config: %v", err)
 	}
 	cs := newControllerState(context.Background(), cfgB, runtime.NewFake(), events.NewFake(), "parity-city", cityB)
-	if err := cs.CreateRig(config.Rig{Name: "repo", Path: rigB}); err != nil {
+	if err := cs.CreateRig(config.Rig{Name: "repo", Path: rigB}, false); err != nil {
 		t.Fatalf("API CreateRig: %v", err)
 	}
 

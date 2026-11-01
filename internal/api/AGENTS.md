@@ -653,3 +653,8 @@ and contents. An absent external destination or a relative path escaping the
 city is rejected before provisioning. Keep city containment for managed clones,
 provision manifests and physical teardown; registration grants no ownership of
 an external directory's creation or deletion.
+
+The rig-create `adopt` field forwards to native `rig.ProvisionRequest.Adopt`.
+Infer and validate the existing namespace before any writes, preserve queue
+history, and refuse `adopt` with `git_url` before clone admission. Append new
+RigCreateBody fields with omitempty so deployed request digests remain stable.

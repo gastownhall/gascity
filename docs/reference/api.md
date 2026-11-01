@@ -110,6 +110,10 @@ Register a repository where it already lives with
 
 Use an absolute path to an existing directory outside the city. Gas City
 registers it in place and applies the city's default rig configuration.
+For a project that already has a Beads queue, include `"adopt":true`. Gas City
+preserves its issue namespace and history using the same adoption path as
+`gc rig add --adopt`. Leave `prefix` unset to use the existing namespace.
+
 Relative paths resolve inside the city. New clone destinations and their
 cleanup remain inside the city.
 

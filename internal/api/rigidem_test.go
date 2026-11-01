@@ -44,6 +44,12 @@ func TestRigIdemDigestGolden(t *testing.T) {
 			hex:  "8908428e9370d6fd02f9c9e9cd78ad01c881ccce238b7695b1495eae843af6ed",
 		},
 		{
+			name: "explicit queue adoption",
+			body: RigCreateBody{Name: "api", Path: "/srv/api", Adopt: true},
+			json: `{"name":"api","path":"/srv/api","adopt":true}`,
+			hex:  "1964cb159c0545387f9f9c06579570484dd302eb440fdca67a24f3e87e2a347d",
+		},
+		{
 			name: "unicode + percent-encoded name",
 			body: RigCreateBody{Name: "café-%20", Path: "/srv/x"},
 			json: `{"name":"café-%20","path":"/srv/x"}`,

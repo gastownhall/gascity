@@ -3351,6 +3351,10 @@ export type RigActionBody = {
 
 export type RigCreateBody = {
     /**
+     * Register an existing Beads queue in place, preserving its namespace and history. Cannot be combined with git_url.
+     */
+    adopt?: boolean;
+    /**
      * Mainline branch (e.g. main, master). Auto-detected when omitted.
      */
     default_branch?: string;
@@ -3363,11 +3367,11 @@ export type RigCreateBody = {
      */
     name: string;
     /**
-     * Filesystem path (server-derived for git_url clones).
+     * Existing project directory; use an absolute path outside the city. Clone destinations are city-contained.
      */
     path?: string;
     /**
-     * Session name prefix.
+     * Beads issue namespace prefix; inferred from an adopted queue when omitted.
      */
     prefix?: string;
     /**
