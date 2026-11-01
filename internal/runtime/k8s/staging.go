@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -52,6 +53,11 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 		}
 		workDirStaged = copied
 	}
+
+	if err := stageScopedStoreFiles(ctx, ops, podName, cfg, ctrlCity, podWorkDir); err != nil {
+		return false, err
+	}
+
 	if err := stageProviderOverlaysToPod(ctx, ops, podName, cfg, podWorkDir, warn); err != nil {
 		return false, err
 	}
@@ -353,6 +359,32 @@ func streamArchive(produce func(io.Writer, func()) error, consume func(io.Reader
 }
 
 // copyToPod copies a single file or directory to the pod.
+// stageScopedStoreFiles copies a hosted store's identity files into the pod when
+// they would not otherwise arrive. A session's work directory can sit outside its
+// store root, such as a managed worktree, and gc init never copies nested .beads
+// state, yet startup verifies these files at the store root.
+func stageScopedStoreFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Config, ctrlCity, podWorkDir string) error {
+	storeRoot := strings.TrimSpace(cfg.Env["GC_STORE_ROOT"])
+	if storeRoot == "" || strings.TrimSpace(cfg.Env["GC_BEADS_PROJECT_ID"]) == "" {
+		return nil
+	}
+	storeRoot = filepath.Clean(storeRoot)
+	if storeRoot == filepath.Clean(ctrlCity) || storeRoot == filepath.Clean(cfg.WorkDir) {
+		return nil
+	}
+	podStoreRoot := projectedPodStoreRoot(cfg, podWorkDir)
+	for _, rel := range []string{
+		filepath.Join(".beads", "metadata.json"),
+		contract.ProjectIdentityPath(""),
+		filepath.Join(".beads", "config.yaml"),
+	} {
+		if err := copyToPod(ctx, ops, podName, "stage", filepath.Join(storeRoot, rel), filepath.Join(podStoreRoot, rel)); err != nil {
+			return fmt.Errorf("staging store file %s: %w", rel, err)
+		}
+	}
+	return nil
+}
+
 func copyToPod(ctx context.Context, ops k8sOps, podName, container, src, dst string) error {
 	info, err := os.Stat(src)
 	if err != nil {
