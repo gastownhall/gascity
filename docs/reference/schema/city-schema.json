@@ -1321,7 +1321,7 @@
             "$ref": "#/$defs/ModelPricing"
           },
           "type": "array",
-          "description": "Pricing holds per-model cost rate overrides keyed by (provider, model).\nCity-level entries override pack-level entries which override the\ndefaults shipped with the pricing package. See internal/pricing for the\nestimation seam introduced by issue #1255 (1d)."
+          "description": "Pricing holds per-model cost rate overrides keyed by (provider, model).\nCity-level entries override pack-level entries which override the\ndefaults shipped with the pricing package. See internal/pricing for the\nestimation seam introduced by issue #1255 (1d). The provider is the\ntranscript family and the model the provider-facing id usage facts\ncarry, e.g. [[pricing]] provider = \"grok\", model = \"grok-4.7\"."
         }
       },
       "additionalProperties": false,
@@ -2054,11 +2054,11 @@
       "properties": {
         "provider": {
           "type": "string",
-          "description": "Provider is the LLM provider label (e.g. \"claude\", \"codex\", \"gemini\")."
+          "description": "Provider is the LLM provider label (e.g. \"claude\", \"codex\", \"grok\")."
         },
         "model": {
           "type": "string",
-          "description": "Model is the provider-specific model identifier (e.g. \"claude-opus-4-8\")."
+          "description": "Model is the provider-specific model identifier (e.g. \"claude-opus-4-8\",\nor \"grok-4.7\" with provider = \"grok\")."
         },
         "tier": {
           "$ref": "#/$defs/Tier",

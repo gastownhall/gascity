@@ -48,7 +48,7 @@ City is the top-level configuration for a Gas City instance.
 | `github` | GitHubConfig |  |  | GitHub configures GitHub-facing repository monitors. |
 | `extmsg` | ExtMsgConfig |  |  | ExtMsg configures the external-messaging fabric (default routes for inbound conversations with no binding). |
 | `agent_defaults` | AgentDefaults |  |  | AgentDefaults provides root city defaults for agents that don't override them (canonical TOML key: agent_defaults). Pack-local defaults use the same table shape in pack.toml. The runtime currently applies provider, default_sling_formula, and append_fragments; the attachment-list fields remain tombstones, and the other fields are parsed/composed but not yet inherited automatically. |
-| `pricing` | []ModelPricing |  |  | Pricing holds per-model cost rate overrides keyed by (provider, model). City-level entries override pack-level entries which override the defaults shipped with the pricing package. See internal/pricing for the estimation seam introduced by issue #1255 (1d). |
+| `pricing` | []ModelPricing |  |  | Pricing holds per-model cost rate overrides keyed by (provider, model). City-level entries override pack-level entries which override the defaults shipped with the pricing package. See internal/pricing for the estimation seam introduced by issue #1255 (1d). The provider is the transcript family and the model the provider-facing id usage facts carry, e.g. [[pricing]] provider = "grok", model = "grok-4.7". |
 
 ## ACPSessionConfig
 
@@ -579,8 +579,8 @@ ModelPricing is a complete pricing entry for a (Provider, Model) pair.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `provider` | string | **yes** |  | Provider is the LLM provider label (e.g. "claude", "codex", "gemini"). |
-| `model` | string | **yes** |  | Model is the provider-specific model identifier (e.g. "claude-opus-4-8"). |
+| `provider` | string | **yes** |  | Provider is the LLM provider label (e.g. "claude", "codex", "grok"). |
+| `model` | string | **yes** |  | Model is the provider-specific model identifier (e.g. "claude-opus-4-8", or "grok-4.7" with provider = "grok"). |
 | `tier` | Tier | **yes** |  | Tier holds the per-token-type rates. |
 | `last_verified` | string | **yes** |  | LastVerified is the date these rates were confirmed (YYYY-MM-DD). |
 
