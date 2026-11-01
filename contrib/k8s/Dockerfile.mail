@@ -50,10 +50,19 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY .github/requirements/mcp-agent-mail.txt /tmp/requirements-mcp-agent-mail.txt
+# The pinned service passes an audience to Authlib's zero-argument
+# validate_aud method. Route the configured audience through claims_options,
+# which keeps Authlib's standard audience validation active.
+COPY .github/scripts/patch-mcp-mail-jwt-audience.py /tmp/patch-mcp-mail-jwt-audience.py
+COPY .github/scripts/mcp-mail-gitpython-path-cache.py /opt/gc-mail-python/sitecustomize.py
 RUN python -m pip install --no-cache-dir --require-hashes \
     --no-deps \
     -r /tmp/requirements-mcp-agent-mail.txt \
-    && rm -f /tmp/requirements-mcp-agent-mail.txt
+    && python /tmp/patch-mcp-mail-jwt-audience.py \
+    && rm -f /tmp/requirements-mcp-agent-mail.txt /tmp/patch-mcp-mail-jwt-audience.py
+
+# The cache is version-gated and runs only in this image's Python process.
+ENV PYTHONPATH=/opt/gc-mail-python
 
 EXPOSE 8765
 
@@ -65,6 +74,9 @@ WORKDIR /var/lib/mcp-mail
 USER mcp-mail
 
 # Health endpoint: GET /health/liveness
+# This probe intentionally uses the image's Python runtime, which imports
+# /opt/gc-mail-python/sitecustomize and GitPython before making the HTTP check.
+# Keep its startup cost within the three-second healthcheck timeout.
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
   CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8765/health/liveness')"
 
