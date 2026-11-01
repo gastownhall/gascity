@@ -1869,6 +1869,9 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 	// WRITE leaf of the proxied split store. They must be the same store, or a
 	// demotion would silently change which store is doing the writing.
 	openBd := func() (beads.Store, error) {
+		// The bd runners gate every call on the city's admission caps; seed
+		// them from cfg so the first call does not reload the config.
+		seedBdAdmissionForCity(runtimeCityPath, cfg)
 		if err := requireBdBinaryForCity(runtimeCityPath); err != nil {
 			return nil, err
 		}
