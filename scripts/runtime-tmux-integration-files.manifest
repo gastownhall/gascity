@@ -4,6 +4,7 @@
 # A new //go:build integration test file with tests needs one line here, in
 # sorted position; scripts/runtime_tmux_lane_test.go fails until it is added.
 adapter_test.go
+contracts_integration_test.go
 dialog_feedback_survey_integration_test.go
 dialog_model_switch_integration_test.go
 empty_server_liveness_integration_test.go

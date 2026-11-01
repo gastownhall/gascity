@@ -13,6 +13,7 @@ import (
 // row joins this map in the change that removes it from programStatusPending.
 var programStatusChecks = map[RequirementCode]func(t *testing.T, profile Profile) Result{
 	RequirementProgramStatusSurfaces: checkProgramStatusSurfaces,
+	RequirementProgramStatusPhase:    checkProgramStatusPhase,
 }
 
 // providerDataProgramStatus returns the program-status declaration gc's
@@ -110,7 +111,7 @@ func TestProgramStatusGate(t *testing.T) {
 	declaration := ProgramStatusDeclaration{Declared: true, App: "agent", Relay: true}
 	declared := undeclared
 	declared.ProgramStatus.ProgramStatusDeclaration = declaration
-	code := RequirementProgramStatusPhase
+	code := RequirementProgramStatusPendingKindOnly
 
 	for name, c := range map[string]struct {
 		profile        Profile
@@ -129,8 +130,11 @@ func TestProgramStatusGate(t *testing.T) {
 		t.Fatalf("undeclared: %+v run=%t, want unsupported", r, run)
 	}
 	r, run := ProgramStatusGate(declared, code, declaration)
-	if run || r.Status != ResultUnsupported || r.Evidence["pending_slice"] != "ga-f4ovjm.16" {
-		t.Fatalf("declared, row pending: %+v run=%t, want unsupported naming ga-f4ovjm.16", r, run)
+	if run || r.Status != ResultUnsupported || r.Evidence["pending_slice"] != "ga-f4ovjm.22" {
+		t.Fatalf("declared, row pending: %+v run=%t, want unsupported naming ga-f4ovjm.22", r, run)
+	}
+	if r, run := ProgramStatusGate(declared, RequirementProgramStatusPhase, declaration); !run || r.Status != "" {
+		t.Fatalf("declared, WC-PSTAT-002 landed: %+v run=%t, want the row run", r, run)
 	}
 
 	slice := programStatusPending[code]

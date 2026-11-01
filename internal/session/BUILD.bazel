@@ -51,6 +51,7 @@ go_library(
         "pending_create_lease.go",
         "persisted_response.go",
         "poller_key.go",
+        "program_status_shadow.go",
         "provider_resolution.go",
         "resolve.go",
         "restart_request.go",

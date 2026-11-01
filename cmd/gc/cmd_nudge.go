@@ -2622,7 +2622,17 @@ func stampLastNudgeDeliveredAt(sessFront *session.Store, sessionID string, t tim
 	_ = sessFront.SetMarker(sessionID, session.MetadataLastNudgeDeliveredAt, t.UTC().Format(time.RFC3339))
 }
 
+// Under the program-status shadow switch the verdict is recorded beside the
+// record's hold (queued_delivery); the verdict returned is today's alone.
 func pollerSessionIdleEnough(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) bool {
+	deliver := pollerSessionQuietEnough(target, sp, quiescence, obs)
+	shadowHold(sp, target.sessionName, target.sessionID, target.providerFamily(),
+		runtime.ProgramPointQueuedDelivery, !deliver, time.Now(), runtime.ProgramHoldVerdict)
+	return deliver
+}
+
+// pollerSessionQuietEnough is pollerSessionIdleEnough's verdict.
+func pollerSessionQuietEnough(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) bool {
 	if quiescence <= 0 {
 		return true
 	}

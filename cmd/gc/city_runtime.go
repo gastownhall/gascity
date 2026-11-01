@@ -268,6 +268,15 @@ type CityRuntime struct {
 	// reload, like asyncStartLimiter.
 	capacityGuard *endpointCapacityGuard
 
+	// startDeferrals remembers which never-started pending creates the last
+	// main-tick start-executor run deferred at a start gate, built on first
+	// use by ensureStartDeferralMemo. It is process-local and survives config
+	// reload; a restart forgets it. The main tick is the only writer: it
+	// replaces the whole record on every completed run. The stale-session
+	// reaper only reads it. The control-dispatcher tick and cmd_start's
+	// one-shot reconcile neither read nor write it.
+	startDeferrals *startDeferralMemo
+
 	// strandedAlerts raises session.stranded_claims across ticks
 	// (work_release.go); built on first use (strandedClaimAlerter).
 	strandedAlerts     *strandedClaimAlerts
@@ -3457,6 +3466,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		withMaxSessionAgeTracker(cr.mat),
 		withAssignedWorkDeferTracker(cr.adt),
 		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
+		withStartDeferralMemo(cr.ensureStartDeferralMemo()),
 		withOnDeathGate(cr.onDeathGate()),
 		withPrepareBudget(defaultStartPrepareBudget),
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
@@ -3883,9 +3893,9 @@ func (cr *CityRuntime) ensureAsyncStartLimiter() *asyncStartLimiter {
 }
 
 // reapStaleSessionBeads reaps stale creating session beads, keeping rows the
-// endpoint capacity breaker holds.
+// endpoint capacity breaker or the start-deferral memo holds.
 func (cr *CityRuntime) reapStaleSessionBeads(sw *SeatWork) int {
-	return reapStaleSessionBeads(cr.cityPath, cr.sessionsBeadStore().Store, sw, cr.sp, cr.sessionDrains, endpointHoldForRows(cr.cfg, cr.ensureEndpointCapacityGuard()), clock.Real{}, cr.stderr)
+	return reapStaleSessionBeads(cr.cityPath, cr.sessionsBeadStore().Store, sw, cr.sp, cr.sessionDrains, pendingCreateHold(endpointHoldForRows(cr.cfg, cr.ensureEndpointCapacityGuard()), cr.ensureStartDeferralMemo(), clock.Real{}), clock.Real{}, cr.stderr)
 }
 
 // ensureEndpointCapacityGuard returns the city's endpoint capacity guard,
@@ -3896,6 +3906,22 @@ func (cr *CityRuntime) ensureEndpointCapacityGuard() *endpointCapacityGuard {
 		cr.capacityGuard = newEndpointCapacityGuard(clock.Real{}.Now)
 	}
 	return cr.capacityGuard
+}
+
+// ensureStartDeferralMemo returns the city's start-deferral memo, building it
+// on first use. The main tick records into it (every start-gate site in the
+// executor that meets the criterion on startDeferralMemo does, and so would a
+// later gate that meets it) and the stale-session reaper reads it. The
+// control-dispatcher tick must not be handed it: a completed executor run
+// replaces the committed and seen sets, so a run over the control-dispatcher
+// rows alone would erase the pool creates the main tick deferred. The memo is
+// installed only on a run over the city's complete open-session snapshot (see
+// startDeferralMemo.startOptions).
+func (cr *CityRuntime) ensureStartDeferralMemo() *startDeferralMemo {
+	if cr.startDeferrals == nil {
+		cr.startDeferrals = newStartDeferralMemo()
+	}
+	return cr.startDeferrals
 }
 
 func (cr *CityRuntime) requestAsyncStartFollowUpTick() {
@@ -4325,6 +4351,11 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		// The dispatcher's starts hit the same endpoints; without the guard
 		// this path would bypass the capacity breaker.
 		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
+		// No start-deferral memo: this run covers the control-dispatcher
+		// rows only, and a completed run would replace the main tick's
+		// record of deferred pool creates. The cost is that a
+		// control-dispatcher create waiting on a start gate is not kept past
+		// its lease; it rolls back as it did before the memo.
 		withOnDeathGate(cr.onDeathGate()),
 		withPrepareBudget(defaultStartPrepareBudget),
 	)
