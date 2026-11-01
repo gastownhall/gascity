@@ -711,10 +711,14 @@ func (t *Tmux) probeServerAlive() error {
 		}
 		// A sibling may have started a server on this socket after the first
 		// probe. Re-probe once within the same deadline; only a server answer
-		// proves the socket is live and responsive.
-		_, reprobeErr := t.runCtx(ctx, "has-session", "-t", "="+probeSessionName)
-		if reprobeErr == nil || errors.Is(reprobeErr, ErrSessionNotFound) || errors.Is(reprobeErr, ErrNoCurrentTarget) {
-			return nil
+		// proves the socket is live and responsive. An exhausted budget
+		// refuses without a second request.
+		reprobeErr := ctx.Err()
+		if reprobeErr == nil {
+			_, reprobeErr = t.runCtx(ctx, "has-session", "-t", "="+probeSessionName)
+			if reprobeErr == nil || errors.Is(reprobeErr, ErrSessionNotFound) || errors.Is(reprobeErr, ErrNoCurrentTarget) {
+				return nil
+			}
 		}
 		// Do not wrap ErrNoServer here: callers such as EnsureSessionFresh
 		// must not retry a guarded no-server result as an ordinary absence.
