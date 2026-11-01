@@ -673,6 +673,10 @@ func wrapError(err error, stderr string, args []string) error {
 //     server answered and is alive with zero sessions, so new-session attaches
 //     rather than unlinking and rebinding.
 //   - nil when ErrNoServer is corroborated by a safely absent or stale socket.
+//   - nil when ErrNoServer disagrees with the socket observation (a sibling
+//     concurrent start bound the socket between the two samples) and exactly
+//     one identical re-probe, inside the same deadline, gets a positive
+//     server answer.
 //   - ErrServerDegraded when the probe times out or returns any other error,
 //     indicating the server is in a state where new-session would risk
 //     clobbering. Callers MUST surface this and refuse to proceed.
@@ -701,6 +705,16 @@ func (t *Tmux) probeServerAlive() error {
 		path := namedSocketPath(t.cfg.SocketName)
 		observationErr := t.observeServerSocket(ctx, path)
 		if observationErr == nil {
+			return nil
+		}
+		// The protocol sample and the filesystem sample can describe
+		// different moments: a sibling concurrent start can bind the socket
+		// after the probe said no-server but before the observation saw a
+		// live socket. Reconcile with exactly one identical request; only a
+		// server that answers — success, session not found, or no current
+		// target — proves new-session will attach rather than clobber.
+		_, reprobeErr := t.runCtx(ctx, "has-session", "-t", "="+probeSessionName)
+		if reprobeErr == nil || errors.Is(reprobeErr, ErrSessionNotFound) || errors.Is(reprobeErr, ErrNoCurrentTarget) {
 			return nil
 		}
 		// Do not wrap ErrNoServer here: callers such as EnsureSessionFresh

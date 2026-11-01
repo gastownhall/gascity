@@ -91,8 +91,8 @@ func TestNewSessionErrNoServerRefusesObservedLiveNamedSocket(t *testing.T) {
 			if observerCalls != 1 {
 				t.Fatalf("observer calls = %d, want 1", observerCalls)
 			}
-			if len(fe.calls) != 1 || !firstArgsContainHasSession(fe.calls[0]) {
-				t.Fatalf("calls = %#v, want exactly the preflight has-session probe", fe.calls)
+			if len(fe.calls) != 2 || !firstArgsContainHasSession(fe.calls[0]) || !firstArgsContainHasSession(fe.calls[1]) {
+				t.Fatalf("calls = %#v, want the preflight has-session probe issued twice (initial + re-probe)", fe.calls)
 			}
 		})
 	}
@@ -149,8 +149,8 @@ func TestNewSessionErrNoServerUnknownObservationFailsClosed(t *testing.T) {
 		if errors.Is(err, ErrNoServer) {
 			t.Fatalf("err = %v, must not wrap ErrNoServer", err)
 		}
-		if len(fe.calls) != 1 {
-			t.Fatalf("calls = %#v, want only the preflight probe", fe.calls)
+		if len(fe.calls) != 2 {
+			t.Fatalf("calls = %#v, want the preflight probe issued twice (initial + re-probe)", fe.calls)
 		}
 	})
 
@@ -271,6 +271,111 @@ func TestNewSessionErrNoServerUnknownObservationFailsClosed(t *testing.T) {
 		close(release)
 		<-finished
 	})
+}
+
+// TestNewSessionReproesNoServerWhenSocketTurnsOutLive forces the concurrent
+// first-start interleaving from PR #7840: the has-session probe runs before a
+// sibling new-session binds the named socket (no-server), the sibling's server
+// binds before the filesystem observation (live-unix-socket), and the server is
+// healthy. A re-probe would get a positive server answer, so creation must
+// proceed instead of failing with ErrServerDegraded.
+func TestNewSessionReproesNoServerWhenSocketTurnsOutLive(t *testing.T) {
+	fe := probeAssertSet(
+		[]string{"", "", "%1", ""},
+		[]error{ErrNoServer, ErrSessionNotFound, nil, nil},
+	)
+	tm := &Tmux{
+		cfg:  Config{SocketName: "gc-race"},
+		exec: fe,
+		serverSocketObserver: func(_ context.Context, path string) error {
+			return fmt.Errorf("path=%s inode=97 peer_pid=4242 reason=live-unix-socket", path)
+		},
+	}
+	if err := tm.NewSession("gc-loser", ""); err != nil {
+		t.Fatalf("NewSession on a healthy server that bound mid-probe: %v (calls=%#v)", err, fe.calls)
+	}
+}
+
+// TestNewSessionErrNoServerReprobeAnsweredAllowsCreation covers the reconciled
+// interleaving: the first preflight reports no-server, the socket observation
+// then cannot establish safe absence (a sibling start bound the socket between
+// the two samples), and one identical re-probe gets a positive server answer.
+// Every create variant must proceed after exactly two identical preflight
+// requests and one observation. The identity-changed observation proves the
+// gate is the protocol answer, never string-matching the observation.
+func TestNewSessionErrNoServerReprobeAnsweredAllowsCreation(t *testing.T) {
+	answers := []struct {
+		name string
+		err  error
+	}{
+		{name: "success"},
+		{name: "session-not-found", err: ErrSessionNotFound},
+		{name: "no-current-target", err: ErrNoCurrentTarget},
+	}
+	variants := []struct {
+		name string
+		call func(*Tmux) error
+	}{
+		{name: "NewSession", call: func(tm *Tmux) error {
+			return tm.NewSession("gc-answered", "")
+		}},
+		{name: "NewSessionWithCommand", call: func(tm *Tmux) error {
+			return tm.NewSessionWithCommand("gc-answered", "", "true")
+		}},
+		{name: "NewSessionWithCommandAndEnv", call: func(tm *Tmux) error {
+			return tm.NewSessionWithCommandAndEnv("gc-answered", "", "true", map[string]string{"X": "1"})
+		}},
+	}
+	observations := []struct {
+		name string
+		err  error
+	}{
+		{name: "live-unix-socket", err: fmt.Errorf("path=/tmux/gc-answered inode=97 peer_pid=4242 reason=live-unix-socket")},
+		{name: "identity-changed", err: fmt.Errorf("path=/tmux/gc-answered inode=97 peer_pid=unknown dial=connection refused post_inode=98 reason=socket-identity-changed-or-dial-failed")},
+	}
+	for _, observation := range observations {
+		for _, answer := range answers {
+			for _, variant := range variants {
+				t.Run(observation.name+"/"+answer.name+"/"+variant.name, func(t *testing.T) {
+					confineStagedFiles(t)
+					socketName := "gc-answered"
+					fe := probeAssertSet(
+						[]string{"", "", "%1", ""},
+						[]error{ErrNoServer, answer.err, nil, nil},
+					)
+					observerCalls := 0
+					tm := &Tmux{
+						cfg:  Config{SocketName: socketName},
+						exec: fe,
+						serverSocketObserver: func(context.Context, string) error {
+							observerCalls++
+							return observation.err
+						},
+					}
+
+					if err := variant.call(tm); err != nil {
+						t.Fatalf("%s after an answered re-probe: %v (calls=%#v)", variant.name, err, fe.calls)
+					}
+					if observerCalls != 1 {
+						t.Fatalf("observer calls = %d, want 1", observerCalls)
+					}
+					wantProbe := []string{"-u", "-L", socketName, "has-session", "-t", "=" + probeSessionName}
+					if len(fe.calls) < 3 {
+						t.Fatalf("calls = %#v, want two preflight probes then new-session", fe.calls)
+					}
+					for i := 0; i < 2; i++ {
+						if !reflect.DeepEqual(fe.calls[i], wantProbe) {
+							t.Fatalf("preflight call %d = %#v, want %#v", i, fe.calls[i], wantProbe)
+						}
+					}
+					create := strings.Join(fe.calls[2], " ")
+					if !strings.Contains(create, "new-session") && !strings.Contains(create, "source-file") {
+						t.Fatalf("call after the re-probe = %#v, want the create call", fe.calls[2])
+					}
+				})
+			}
+		}
+	}
 }
 
 type socketModeFileInfo struct{ os.FileInfo }
