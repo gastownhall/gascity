@@ -386,7 +386,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 	storeScopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
 	sessionRigRoot := rigRoot
-	if strings.TrimSpace(p.sessionProvider) == "k8s" {
+	// Any session that can land in a pod needs the store identity pods verify.
+	podSession := sessionProviderUsesK8sPods(effectiveSessionProvider(cfgAgent.Session, p.sessionProvider))
+	if podSession {
 		if samePath(storeScopeRoot, p.cityPath) {
 			sessionRigRoot = ""
 		} else {
@@ -400,7 +402,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	for key, value := range sessionBackendEnv {
 		agentEnv[key] = value
 	}
-	if strings.TrimSpace(p.sessionProvider) == "k8s" {
+	if podSession {
 		storeIdentityEnv, err := k8sSessionStoreIdentityEnv(p.cityPath, storeScopeRoot, p.city, sessionBackendEnv)
 		if err != nil {
 			return TemplateParams{}, fmt.Errorf("agent %q: resolving Kubernetes store identity: %w", qualifiedName, err)
@@ -433,6 +435,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		}
 		agentEnv["GC_K8S_CITY_DOLT_HOST"] = cityHost
 		agentEnv["GC_K8S_CITY_DOLT_PORT"] = cityPort
+		agentEnv["GC_K8S_CITY_DOLT_MANAGED_LOCAL"] = strings.TrimSpace(cityBackendEnv["GC_DOLT_MANAGED_LOCAL"])
 	}
 	if rigName != "" {
 		agentEnv["GC_RIG"] = rigName
@@ -440,7 +443,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		agentEnv["BEADS_DIR"] = filepath.Join(rigRoot, ".beads")
 		agentEnv["GC_BEADS_SCOPE_ROOT"] = rigRoot
 	}
-	if strings.TrimSpace(p.sessionProvider) == "k8s" {
+	if podSession {
 		agentEnv["GC_BEADS_SCOPE_ROOT"] = storeScopeRoot
 		agentEnv["GC_STORE_ROOT"] = storeScopeRoot
 		agentEnv["BEADS_DIR"] = filepath.Join(storeScopeRoot, ".beads")
@@ -1133,3 +1136,9 @@ func prependStartupPromptToNudge(prompt, nudge string) string {
 }
 
 const startupPromptNudgeSeparator = "\n\n---\n\n"
+
+// sessionProviderUsesK8sPods reports whether a session provider can run sessions
+// in generated Kubernetes pods.
+func sessionProviderUsesK8sPods(provider string) bool {
+	return provider == "k8s" || provider == "hybrid"
+}

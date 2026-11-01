@@ -1761,6 +1761,9 @@ func TestInitBeadsInPodPatchesWithheldManagedLocalTargetToAlias(t *testing.T) {
 	fake := newFakeK8sOps()
 	env := runtimetest.WithheldManagedDoltEnv()
 	env["GC_BEADS_PREFIX"] = "demo"
+	env["GC_BEADS_PROJECT_ID"] = "project-demo"
+	env["GC_DOLT_DATABASE"] = "bd_demo"
+	env["GC_STORE_ROOT"] = "/workspace/demo-repo"
 	cfg := runtime.Config{Env: env}
 	if err := initBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, "/workspace/demo-repo", podManagedDoltHost, podManagedDoltPort); err != nil {
 		t.Fatalf("initBeadsInPod: %v", err)
@@ -2766,7 +2769,7 @@ func TestInitCityInPodSanitizesHostedRigEnvironmentForNonHostedCity(t *testing.T
 	if len(gcInitCmd) == 0 {
 		t.Fatal("gc init command was not issued")
 	}
-	if got, want := gcInitCmd[2], `exec env -i PATH="$PATH" HOME="$HOME" GC_DOLT=skip "$0" "$@"`; got != want {
+	if got, want := gcInitCmd[2], `exec env -i PATH="$PATH" HOME="$HOME" GC_DOLT=skip GC_REMOTE_STAGE_CONTROLLER="$GC_REMOTE_STAGE_CONTROLLER" GC_REMOTE_STAGE_CITY="$GC_REMOTE_STAGE_CITY" "$0" "$@"`; got != want {
 		t.Fatalf("gc init launcher = %q, want minimal environment launcher %q", got, want)
 	}
 	joined := strings.Join(gcInitCmd, " ")

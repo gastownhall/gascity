@@ -584,7 +584,10 @@ func k8sSessionStoreIdentityEnv(cityPath, scopeRoot string, cfg *config.City, ba
 	if port == "" {
 		port = strings.TrimSpace(backendEnv["BEADS_DOLT_SERVER_PORT"])
 	}
-	if host == "" && port == "" {
+	// A withheld managed-local target has no endpoint here but still projects a
+	// hosted endpoint into the pod, so it needs the same store identity.
+	managedLocal := strings.TrimSpace(backendEnv["GC_DOLT_MANAGED_LOCAL"]) == "1"
+	if host == "" && port == "" && !managedLocal {
 		return identity, nil
 	}
 	if host != "" && port == "" {

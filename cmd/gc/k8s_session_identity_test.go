@@ -41,6 +41,16 @@ func TestK8SSessionStoreIdentityUsesSelectedScope(t *testing.T) {
 	writeHostedK8SScope(t, rigPath, "frontend-project", "fe", "bd_frontend_project", "frontend.dolt.example", 4407, "explicit")
 	cfg := &config.City{Rigs: []config.Rig{{Name: "frontend", Path: rigPath, Prefix: "fe"}}}
 
+	t.Run("Withheld managed-local target still resolves identity", func(t *testing.T) {
+		got, err := k8sSessionStoreIdentityEnv(cityPath, cityPath, cfg, map[string]string{"GC_DOLT_MANAGED_LOCAL": "1"})
+		if err != nil {
+			t.Fatalf("managed-local identity: %v", err)
+		}
+		if got["GC_BEADS_PROJECT_ID"] != "hq-project" || got["GC_DOLT_DATABASE"] != "bd_hq_project" || got["GC_BEADS_PREFIX"] != "hq" {
+			t.Fatalf("managed-local identity = %#v, want the HQ store identity", got)
+		}
+	})
+
 	t.Run("City scope", func(t *testing.T) {
 		got, err := k8sSessionStoreIdentityEnv(cityPath, cityPath, cfg, map[string]string{
 			"GC_DOLT_HOST": "hq.dolt.example", "GC_DOLT_PORT": "4406",
@@ -104,6 +114,22 @@ func TestResolveTemplateCarriesSelectedAndCityK8SIdentities(t *testing.T) {
 			beadNames: make(map[string]string), stderr: io.Discard, sessionProvider: "k8s",
 		}
 	}
+
+	t.Run("hybrid city provider receives pod store identity", func(t *testing.T) {
+		agent := &config.Agent{Name: "mayor", Scope: "city", Provider: "test"}
+		p := params()
+		p.sessionProvider = "hybrid"
+		tp, err := resolveTemplate(p, agent, agent.QualifiedName(), nil)
+		if err != nil {
+			t.Fatalf("resolveTemplate: %v", err)
+		}
+		if got := tp.Env["GC_BEADS_PROJECT_ID"]; got != "hq-project" {
+			t.Errorf("GC_BEADS_PROJECT_ID = %q, want hq-project", got)
+		}
+		if got := tp.Env["GC_K8S_CITY_BEADS_PROJECT_ID"]; got != "hq-project" {
+			t.Errorf("GC_K8S_CITY_BEADS_PROJECT_ID = %q, want hq-project", got)
+		}
+	})
 
 	t.Run("HQ worker receives HQ identity", func(t *testing.T) {
 		agent := &config.Agent{Name: "mayor", Scope: "city", Provider: "test"}

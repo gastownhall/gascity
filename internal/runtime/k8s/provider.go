@@ -1041,11 +1041,13 @@ func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity, skipRel s
 	// validation requires the controller-owned project identity.
 	// exec inherits the agent container's selected-scope environment, which may
 	// describe a hosted rig store rather than the HQ City being initialized.
-	// Keep only the runtime environment needed to find gc and its home config;
-	// HQ hosted identity is supplied below through explicit init flags.
+	// Keep only the runtime environment needed to find gc and its home config,
+	// plus the remote-stage identity that fences storage genesis before the
+	// on-disk record exists; HQ hosted identity is supplied below through
+	// explicit init flags.
 	args := []string{
 		"sh", "-c",
-		`exec env -i PATH="$PATH" HOME="$HOME" GC_DOLT=skip "$0" "$@"`,
+		`exec env -i PATH="$PATH" HOME="$HOME" GC_DOLT=skip GC_REMOTE_STAGE_CONTROLLER="$GC_REMOTE_STAGE_CONTROLLER" GC_REMOTE_STAGE_CITY="$GC_REMOTE_STAGE_CITY" "$0" "$@"`,
 		"gc", "init", "--from", "/tmp/city-src", "/workspace",
 	}
 	if identity != nil {
