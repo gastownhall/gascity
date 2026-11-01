@@ -57,11 +57,11 @@ func testTmux() *Tmux {
 	return NewTmuxWithConfig(cfg)
 }
 
-// noServerPreflightExecutor makes only the first has-session preflight report
+// noServerPreflightExecutor makes every has-session preflight report
 // ErrNoServer, then delegates every other operation to real tmux. It models a
-// stale protocol observation while retaining the real socket boundary.
+// persistently wrong protocol answer while retaining the real socket boundary.
 type noServerPreflightExecutor struct {
-	used bool
+	probes int
 }
 
 func (e *noServerPreflightExecutor) execute(args []string) (string, error) {
@@ -69,8 +69,8 @@ func (e *noServerPreflightExecutor) execute(args []string) (string, error) {
 }
 
 func (e *noServerPreflightExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
-	if !e.used && firstArgsContainHasSession(args) {
-		e.used = true
+	if firstArgsContainHasSession(args) && slices.Contains(args, "="+probeSessionName) {
+		e.probes++
 		return "", ErrNoServer
 	}
 	return realExecutor{}.executeCtx(ctx, args)
@@ -352,7 +352,8 @@ func TestNewSessionNoServerProbeDoesNotClobberLiveNamedSocket(t *testing.T) {
 		}
 
 		guarded := NewProviderWithConfig(tm.cfg)
-		guarded.Tmux().exec = &noServerPreflightExecutor{}
+		preflight := &noServerPreflightExecutor{}
+		guarded.Tmux().exec = preflight
 		err = guarded.Start(context.Background(), original, runtimepkg.Config{
 			Command: "sleep 600",
 			Env:     map[string]string{"GC_INSTANCE_TOKEN": instanceToken},
@@ -372,6 +373,9 @@ func TestNewSessionNoServerProbeDoesNotClobberLiveNamedSocket(t *testing.T) {
 			if !strings.Contains(err.Error(), want) {
 				t.Fatalf("Provider.Start error = %q, want %q", err, want)
 			}
+		}
+		if preflight.probes != 2 {
+			t.Fatalf("preflight probes = %d, want the probe and its re-probe", preflight.probes)
 		}
 
 		hasOriginal, err := tm.HasSession(original)

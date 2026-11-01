@@ -91,8 +91,9 @@ func TestNewSessionErrNoServerRefusesObservedLiveNamedSocket(t *testing.T) {
 			if observerCalls != 1 {
 				t.Fatalf("observer calls = %d, want 1", observerCalls)
 			}
-			if len(fe.calls) != 1 || !firstArgsContainHasSession(fe.calls[0]) {
-				t.Fatalf("calls = %#v, want exactly the preflight has-session probe", fe.calls)
+			want := [][]string{preflightArgs(socketName), preflightArgs(socketName)}
+			if !reflect.DeepEqual(fe.calls, want) {
+				t.Fatalf("calls = %#v, want exactly the preflight probe and its re-probe", fe.calls)
 			}
 		})
 	}
@@ -149,8 +150,9 @@ func TestNewSessionErrNoServerUnknownObservationFailsClosed(t *testing.T) {
 		if errors.Is(err, ErrNoServer) {
 			t.Fatalf("err = %v, must not wrap ErrNoServer", err)
 		}
-		if len(fe.calls) != 1 {
-			t.Fatalf("calls = %#v, want only the preflight probe", fe.calls)
+		want := [][]string{preflightArgs("gc-test"), preflightArgs("gc-test")}
+		if !reflect.DeepEqual(fe.calls, want) {
+			t.Fatalf("calls = %#v, want only the preflight probe and its re-probe", fe.calls)
 		}
 	})
 
@@ -693,5 +695,111 @@ func TestProbeServerAliveBailsFastOnHang(t *testing.T) {
 	}
 	if elapsed > 2*time.Second {
 		t.Fatalf("probe took %s, want < 2s (timeout should be ~100ms)", elapsed)
+	}
+}
+
+// newSessionVariants names the three NewSession entry points, which share the
+// probeServerAlive preflight.
+var newSessionVariants = []struct {
+	name string
+	call func(*Tmux) error
+}{
+	{name: "NewSession", call: func(tm *Tmux) error {
+		return tm.NewSession("gc-reprobe", "")
+	}},
+	{name: "NewSessionWithCommand", call: func(tm *Tmux) error {
+		return tm.NewSessionWithCommand("gc-reprobe", "", "true")
+	}},
+	{name: "NewSessionWithCommandAndEnv", call: func(tm *Tmux) error {
+		return tm.NewSessionWithCommandAndEnv("gc-reprobe", "", "true", map[string]string{"X": "1"})
+	}},
+}
+
+// preflightArgs is the exact argv of the has-session preflight for socketName.
+func preflightArgs(socketName string) []string {
+	return []string{"-u", "-L", socketName, "has-session", "-t", "=" + probeSessionName}
+}
+
+// TestNewSessionReprobesNoServerWhenSocketTurnsOutLive forces the concurrent
+// first-start interleaving from PR #7840: the has-session probe runs before a
+// sibling new-session binds the named socket (no-server), the sibling's server
+// binds before the filesystem observation (live-unix-socket), and the server is
+// healthy. A re-probe gets a positive server answer, so creation must proceed
+// instead of failing with ErrServerDegraded.
+func TestNewSessionReprobesNoServerWhenSocketTurnsOutLive(t *testing.T) {
+	fe := probeAssertSet(
+		[]string{"", "", "%1", ""},
+		[]error{ErrNoServer, ErrSessionNotFound, nil, nil},
+	)
+	tm := &Tmux{
+		cfg:  Config{SocketName: "gc-race"},
+		exec: fe,
+		serverSocketObserver: func(_ context.Context, path string) error {
+			return fmt.Errorf("path=%s inode=97 peer_pid=4242 reason=live-unix-socket", path)
+		},
+	}
+	if err := tm.NewSession("gc-loser", ""); err != nil {
+		t.Fatalf("NewSession on a healthy server that bound mid-probe: %v (calls=%#v)", err, fe.calls)
+	}
+}
+
+func TestNewSessionErrNoServerReprobeAnsweredAllowsCreation(t *testing.T) {
+	answers := []struct {
+		name string
+		err  error
+	}{
+		{name: "success"},
+		{name: "session-not-found", err: ErrSessionNotFound},
+		{name: "no-current-target", err: ErrNoCurrentTarget},
+	}
+	observations := []struct {
+		name string
+		err  error
+	}{
+		{name: "live-socket", err: errors.New("path=/x inode=97 peer_pid=4242 reason=live-unix-socket")},
+		{name: "identity-changed", err: errors.New("path=/x inode=97 peer_pid=unknown dial=refused post_inode=98 reason=socket-identity-changed-or-dial-failed")},
+	}
+	for _, variant := range newSessionVariants {
+		for _, answer := range answers {
+			for _, observation := range observations {
+				t.Run(variant.name+"/"+answer.name+"/"+observation.name, func(t *testing.T) {
+					const socketName = "gc-reprobe"
+					fe := probeAssertSet(
+						[]string{"", "", "%1", "", ""},
+						[]error{ErrNoServer, answer.err, nil, nil, nil},
+					)
+					observerCalls := 0
+					tm := &Tmux{
+						cfg:  Config{SocketName: socketName},
+						exec: fe,
+						serverSocketObserver: func(context.Context, string) error {
+							observerCalls++
+							return observation.err
+						},
+					}
+
+					if err := variant.call(tm); err != nil {
+						t.Fatalf("%s: %v (calls=%#v)", variant.name, err, fe.calls)
+					}
+					if observerCalls != 1 {
+						t.Fatalf("observer calls = %d, want 1", observerCalls)
+					}
+					if len(fe.calls) < 3 {
+						t.Fatalf("calls = %#v, want two preflights then new-session", fe.calls)
+					}
+					want := preflightArgs(socketName)
+					for i := 0; i < 2; i++ {
+						if !reflect.DeepEqual(fe.calls[i], want) {
+							t.Fatalf("preflight %d = %#v, want %#v", i, fe.calls[i], want)
+						}
+					}
+					// The env variant sources a staged command file that
+					// runs new-session through start-server.
+					if create := fe.calls[2][3]; create != "new-session" && create != "start-server" {
+						t.Fatalf("third call = %#v, want session creation", fe.calls[2])
+					}
+				})
+			}
+		}
 	}
 }
