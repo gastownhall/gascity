@@ -96,6 +96,18 @@ func TestWaitForIdleBusyReadingIsObserved(t *testing.T) {
 	}
 }
 
+// A pane parked on a numbered menu (the session-limit chooser) is waiting for
+// a choice, not idle: its cursor row matches the ready prefix, but keys
+// delivered now land in the menu. The wait must time out as unobserved
+// rather than report an idle composer.
+func TestWaitForIdleMenuIsNotIdle(t *testing.T) {
+	tm := scriptedTmux(scriptedCapture{out: "You've hit your session limit · resets 8:40am\n❯\u00a01. Stop and wait for limit to reset\n  2. Upgrade"})
+	err := tm.WaitForIdle(context.Background(), "w", 500*time.Millisecond)
+	if !errors.Is(err, ErrIdleTimeout) || !errors.Is(err, runtime.ErrWaitUnobserved) {
+		t.Fatalf("WaitForIdle = %v, want ErrIdleTimeout wrapping ErrWaitUnobserved", err)
+	}
+}
+
 // A rollout that cannot be read, or whose turn activity cannot be told, never
 // showed a running turn.
 func TestCodexInterruptBoundaryUnreadableRolloutIsUnobserved(t *testing.T) {
