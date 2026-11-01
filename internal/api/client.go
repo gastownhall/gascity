@@ -1915,6 +1915,12 @@ func apiErrorFromResponse(status int, pd *genclient.ErrorModel) error {
 		if strings.HasPrefix(detail, "maintenance_disabled") {
 			return &MaintenanceDisabledError{}
 		}
+		if IsCityStartingDetail(detail) {
+			// Deliberately not a serverError: the read paths would treat that
+			// as fallbackable and silently read a store that is still coming
+			// up. Surface the wait message instead.
+			return fmt.Errorf("API error: %s", strings.TrimPrefix(strings.TrimSpace(detail), cityStartingDetailPrefix))
+		}
 	}
 	if status == http.StatusConflict && strings.HasPrefix(detail, "maintenance-in-progress") {
 		startedAt := extractMaintenanceStartedAt(detail)

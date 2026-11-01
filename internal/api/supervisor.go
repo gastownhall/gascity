@@ -476,6 +476,10 @@ func (sm *SupervisorMux) serveCityRequest(w http.ResponseWriter, r *http.Request
 	state := sm.resolver.CityState(cityName)
 	if state == nil {
 		sm.dropCityServer(cityName)
+		if c, ok := sm.startingCity(cityName); ok {
+			writeCityStarting(w, cityName, c.Status)
+			return
+		}
 		problemCityNotFound.writeTo(w)
 		return
 	}

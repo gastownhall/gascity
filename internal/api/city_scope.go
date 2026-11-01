@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -58,22 +60,62 @@ func IsCityNotFoundOrNotRunningDetail(detail string) bool {
 	return strings.HasPrefix(strings.TrimSpace(detail), cityNotFoundOrNotRunningDetailPrefix)
 }
 
-// CityStartingDetail returns the 503 detail used when a city-scoped route
-// targets a city the supervisor knows is still starting.
-func CityStartingDetail(_, _ string) string {
-	return ""
+const cityStartingDetailPrefix = "city_starting: "
+
+// cityStartingRetryAfterSeconds is the Retry-After hint sent with a
+// starting-city 503: long enough not to hammer the supervisor, short enough
+// that a human retry lands soon after the next startup phase.
+const cityStartingRetryAfterSeconds = 5
+
+// CityStartingDetail returns the stable 503 detail used when a city-scoped
+// route targets a city the supervisor knows is still starting. status is the
+// supervisor's startup phase for the city, e.g. "adopting_sessions".
+func CityStartingDetail(name, status string) string {
+	return fmt.Sprintf("%s%s is still starting (status=%s); retry shortly", cityStartingDetailPrefix, name, status)
 }
 
-// IsCityStartingDetail reports whether detail is the 503 payload used for
-// city-scoped requests when the target city is known but still starting.
-func IsCityStartingDetail(_ string) bool {
-	return false
+// IsCityStartingDetail reports whether detail is the stable 503 payload used
+// for city-scoped requests when the target city is known but still starting.
+// It is false for the 404 detail matched by IsCityNotFoundOrNotRunningDetail.
+func IsCityStartingDetail(detail string) bool {
+	return strings.HasPrefix(strings.TrimSpace(detail), cityStartingDetailPrefix)
+}
+
+// startingCity reports the supervisor's view of name when the city is known
+// and still starting: not running, no startup error, and a startup status
+// other than init_failed. A known-but-stopped city (empty status) and an
+// init-failed city are not starting.
+func (sm *SupervisorMux) startingCity(name string) (CityInfo, bool) {
+	for _, c := range sm.resolver.ListCities() {
+		if c.Name != name {
+			continue
+		}
+		if !c.Running && c.Error == "" && c.Status != "" && c.Status != "init_failed" {
+			return c, true
+		}
+		return CityInfo{}, false
+	}
+	return CityInfo{}, false
+}
+
+// cityUnavailableError is the error for a city-scoped request whose city has
+// no running Server: 503 with Retry-After while the city is still starting,
+// 404 for a city that is unknown, stopped or failed to initialize.
+func (sm *SupervisorMux) cityUnavailableError(name string) error {
+	if c, ok := sm.startingCity(name); ok {
+		return huma.ErrorWithHeaders(
+			apierr.ServiceUnavailable.Msg(CityStartingDetail(name, c.Status)),
+			http.Header{"Retry-After": []string{strconv.Itoa(cityStartingRetryAfterSeconds)}},
+		)
+	}
+	return apierr.CityNotFound.Msg(CityNotFoundOrNotRunningDetail(name))
 }
 
 // bindCity wraps a per-city handler method expression as a Huma
 // handler registered on the supervisor API. The returned function
 // resolves the per-city Server for input.GetCityName() and delegates.
-// Returns 404 Problem Details when the named city is not running.
+// Returns 503 (with Retry-After) while the named city is starting and 404
+// Problem Details when it is not running.
 func bindCity[I any, O any](
 	sm *SupervisorMux,
 	fn func(*Server, context.Context, *I) (*O, error),
@@ -86,7 +128,7 @@ func bindCity[I any, O any](
 		name := named.GetCityName()
 		srv := sm.resolveCityServer(name)
 		if srv == nil {
-			return nil, apierr.CityNotFound.Msg(CityNotFoundOrNotRunningDetail(name))
+			return nil, sm.cityUnavailableError(name)
 		}
 		return fn(srv, ctx, input)
 	}
@@ -249,7 +291,8 @@ func cityRegister[I any, O any](sm *SupervisorMux, op huma.Operation,
 // sseCityPrecheck wraps an SSE precheck method on Server with
 // per-request city resolution. registerSSE runs the precheck before
 // committing response headers, so a missing city translates into a
-// 404 Problem Details on the wire.
+// 404 (or 503 with Retry-After while the city is starting) Problem Details
+// on the wire.
 func sseCityPrecheck[I any](sm *SupervisorMux,
 	fn func(*Server, context.Context, *I) error,
 ) func(context.Context, *I) error {
@@ -257,7 +300,7 @@ func sseCityPrecheck[I any](sm *SupervisorMux,
 		name := cityScopeName(input)
 		srv := sm.resolveCityServer(name)
 		if srv == nil {
-			return apierr.CityNotFound.Msg(CityNotFoundOrNotRunningDetail(name))
+			return sm.cityUnavailableError(name)
 		}
 		return fn(srv, ctx, input)
 	}
@@ -307,7 +350,7 @@ func cityScopeName[I any](input *I) string {
 
 // resolveCityServer looks up (or constructs + caches) the per-city
 // Server for the named city. Returns nil when the city is not known
-// or not running; callers should translate nil into a 404.
+// or not running; callers should translate nil via cityUnavailableError.
 func (sm *SupervisorMux) resolveCityServer(name string) *Server {
 	state := sm.resolver.CityState(name)
 	if state == nil {

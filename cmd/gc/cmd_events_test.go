@@ -2034,3 +2034,18 @@ func TestDoEventsWatchReplayDrainsAfterSeq(t *testing.T) {
 		}
 	}
 }
+
+func TestShouldUseLocalCityEventsFallbackForStartingCity(t *testing.T) {
+	scope := eventsAPIScope{cityName: "mc-city", cityPath: t.TempDir()}
+	starting := &eventsAPIError{
+		statusCode: http.StatusServiceUnavailable,
+		detail:     gcapi.CityStartingDetail("mc-city", "adopting_sessions"),
+	}
+	if !shouldUseLocalCityEventsFallback(scope, starting) {
+		t.Errorf("a starting city should still fall back to the local event log")
+	}
+	other503 := &eventsAPIError{statusCode: http.StatusServiceUnavailable, detail: "cache_not_live: warming"}
+	if shouldUseLocalCityEventsFallback(scope, other503) {
+		t.Errorf("an unrelated 503 must not fall back to the local event log")
+	}
+}

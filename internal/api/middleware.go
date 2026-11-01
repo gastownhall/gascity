@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"log"
 	"net"
 	"net/http"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +32,23 @@ func (p problemBody) writeTo(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/problem+json; charset=utf-8")
 	w.WriteHeader(p.status)
 	_, _ = w.Write(p.body)
+}
+
+// writeCityStarting answers a mux-level request for a city that is known but
+// still starting: 503 with Retry-After and a detail naming the startup status,
+// the dynamic counterpart of the static 404 problemCityNotFound.
+func writeCityStarting(w http.ResponseWriter, name, status string) {
+	body, err := json.Marshal(struct {
+		Status int    `json:"status"`
+		Title  string `json:"title"`
+		Detail string `json:"detail"`
+	}{http.StatusServiceUnavailable, "Service Unavailable", CityStartingDetail(name, status)})
+	if err != nil {
+		problemInternalServerError.writeTo(w)
+		return
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(cityStartingRetryAfterSeconds))
+	problemBody{status: http.StatusServiceUnavailable, body: body}.writeTo(w)
 }
 
 var (

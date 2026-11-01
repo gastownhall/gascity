@@ -807,10 +807,15 @@ func shouldUseLocalCityEventsFallback(scope eventsAPIScope, apiErr error) bool {
 	}
 	var problem *eventsAPIError
 	if errors.As(apiErr, &problem) {
-		if problem.statusCode != http.StatusNotFound {
-			return false
+		switch problem.statusCode {
+		case http.StatusNotFound:
+			return gcapi.IsCityNotFoundOrNotRunningDetail(problem.detail)
+		case http.StatusServiceUnavailable:
+			// A city that is still starting has no API yet either; its
+			// on-disk event log is readable, as it was when this answered 404.
+			return gcapi.IsCityStartingDetail(problem.detail)
 		}
-		return gcapi.IsCityNotFoundOrNotRunningDetail(problem.detail)
+		return false
 	}
 	if scope.explicitAPI && scope.localSupervisorAPI {
 		var transport *eventsAPITransportError
