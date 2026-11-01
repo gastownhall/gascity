@@ -164,6 +164,10 @@ type selectionEntry struct {
 	// rule 4; the awake set's explicit-wake desire): the row is never Sleep
 	// or Drain, and no finalize closes it.
 	WakeHonored bool
+	// Park is the row's park verdict (parkSeats): a pool seat asleep on its
+	// own stop holding only blocked pre-assigned work, which A21 holds
+	// without the stranded branch until its bound (ga-ylpbsy.16).
+	Park parkVerdict
 }
 
 // rowBasis is the row incarnation the pass saw.
@@ -225,6 +229,11 @@ type bindingTarget struct {
 	// when set, must be verified by the session key before it applies.
 	WorkDir      string
 	WorktreeSpec *worktree.Spec
+	// KeptWorkDir is the recorded work dir Patch keeps over WorkDir for a
+	// parked seat's resume (parkedWorkDirKept), which the PreWake verifies
+	// still hosts the resume (parkedWorkDirUsable) and otherwise binds
+	// WorkDir instead.
+	KeptWorkDir string
 	// Patch is computePoolTriggerBindingPatch against the pass's row: what
 	// the start effect's PreWake folds (v5 S1).
 	Patch session.MetadataPatch
