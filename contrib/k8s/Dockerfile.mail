@@ -50,10 +50,15 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY .github/requirements/mcp-agent-mail.txt /tmp/requirements-mcp-agent-mail.txt
+# The pinned service passes an audience to Authlib's zero-argument
+# validate_aud method. Route the configured audience through claims_options,
+# which keeps Authlib's standard audience validation active.
+COPY .github/scripts/patch-mcp-mail-jwt-audience.py /tmp/patch-mcp-mail-jwt-audience.py
 RUN python -m pip install --no-cache-dir --require-hashes \
     --no-deps \
     -r /tmp/requirements-mcp-agent-mail.txt \
-    && rm -f /tmp/requirements-mcp-agent-mail.txt
+    && python /tmp/patch-mcp-mail-jwt-audience.py \
+    && rm -f /tmp/requirements-mcp-agent-mail.txt /tmp/patch-mcp-mail-jwt-audience.py
 
 EXPOSE 8765
 
