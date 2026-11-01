@@ -621,7 +621,9 @@ gated step to it: the step stays blocked until the gate bead is closed. The
 declared `type` is stamped verbatim on the gate bead as `gc.gate_type`
 metadata. The core pack's human-gate orders mail the addressee of a `human`
 gate when it is created and re-nudge it while it stays open; close it with
-`gc bd close <id>`. `waits_for` records a `gate:<value>` label on the cooked
+`gc bd close <id>`. The gate bead is created with the rest of the recipe at
+instantiation, so the addressee can be asked before the gated step's `needs`
+finish. `waits_for` records a `gate:<value>` label on the cooked
 step bead and compiles a `waits-for` dependency edge on the spawner step,
 treated as readiness-blocking. Other gate types and the `waits_for` mode
 distinction have no runtime consumer (section 4).

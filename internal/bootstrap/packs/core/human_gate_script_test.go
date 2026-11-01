@@ -1,11 +1,15 @@
 package core
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 // The on-disk copies of the two human-gate orders' scripts. These tests run
@@ -28,7 +32,12 @@ var humanGateEnvKeys = map[string]struct{}{
 	"GC_STALE_GATE_THRESHOLD":        {},
 	"GC_STALE_GATE_RENUDGE_INTERVAL": {},
 	"GC_STALE_GATE_STATE_RETENTION":  {},
+	orders.ExecOutcomeFileEnv:        {},
 }
+
+// readyFailure is what the fake gc ready prints to stderr when it fails: the
+// federated read refuses the whole listing when one store is unreadable.
+const readyFailure = `rig "frontend" store: dolt: connection refused`
 
 // humanGateFake describes what the fake gc answers. Each field is the stdout
 // of one gc call shape; an empty field answers with nothing.
@@ -36,7 +45,7 @@ type humanGateFake struct {
 	events    string            // gc events --type bead.created ...
 	gateList  string            // gc bd gate list [--rig r] --limit 0 --json
 	ready     string            // gc ready --status open --metadata-field ... --json
-	readyFail bool              // gc ready exits non-zero
+	readyFail bool              // gc ready prints readyFailure to stderr and exits 1
 	shows     map[string]string // gc bd show <id> ... --json, keyed by id
 }
 
@@ -58,15 +67,15 @@ func (f humanGateFake) install(t *testing.T) string {
 	for id, row := range f.shows {
 		write("show-"+id, row)
 	}
-	readyExit := "0"
+	readyAnswer := `cat "$D/ready"`
 	if f.readyFail {
-		readyExit = "1"
+		readyAnswer = `echo '` + readyFailure + `' >&2; exit 1`
 	}
 	return `D='` + dir + `'
 case "$1" in
 events) cat "$D/events" ;;
 rig) cat "$D/rigs" ;;
-ready) cat "$D/ready"; exit ` + readyExit + ` ;;
+ready) ` + readyAnswer + ` ;;
 mail) exit 0 ;;
 bd)
     case "$2" in
@@ -122,6 +131,47 @@ func runHumanGateScript(t *testing.T, script, binDir, stateDir string, extraEnv 
 		t.Fatalf("%s failed: %v\n%s", script, err, out)
 	}
 	return out
+}
+
+// emptyOutcomeFile creates the empty per-run outcome file the controller hands
+// an exec order, and returns its path.
+func emptyOutcomeFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "outcome.json")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatalf("create outcome file: %v", err)
+	}
+	return path
+}
+
+// readOutcome decodes the outcome file the way the controller does; declared
+// is false when the run wrote nothing.
+func readOutcome(t *testing.T, path string) (outcome orders.ExecOutcome, declared bool) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read outcome file: %v", err)
+	}
+	outcome, declared, err = orders.DecodeExecOutcome(data)
+	if err != nil {
+		t.Fatalf("the controller cannot decode the declared outcome %q: %v", data, err)
+	}
+	return outcome, declared
+}
+
+// readRenudgeState returns the re-nudge sweep's cadence state: the time each
+// gate was last re-nudged, keyed by gate id.
+func readRenudgeState(t *testing.T, stateDir string) map[string]string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(stateDir, "renudge-stale-human-gates-state.json"))
+	if err != nil {
+		t.Fatalf("read re-nudge state: %v", err)
+	}
+	state := map[string]string{}
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatalf("decode re-nudge state %q: %v", data, err)
+	}
+	return state
 }
 
 const gateCreatedEvent = `{"type":"bead.created","payload":{"bead":{"id":"gcg-1","issue_type":"gate"}}}` + "\n"
@@ -221,14 +271,21 @@ const (
 // scope lists, so they come from `gc ready --status open` filtered on the
 // stamp. Their re-fetch carries no --rig, because gc bd resolves the owning
 // store from the id and refuses a --rig pin for a bead the binding holds.
+//
+// gc ready refuses the whole read when one store is unreadable, so a failed or
+// unreadable answer is not "no formula gates": the run must say so on stderr
+// and declare the enumeration as a skipped scope (a partial outcome the
+// controller records as order.skipped), while the bd gates it did list are
+// still re-nudged and recorded.
 func TestRenudgeStaleHumanGatesCoversFormulaGates(t *testing.T) {
 	requireJQ(t)
 	cases := []struct {
-		name      string
-		fake      humanGateFake
-		env       []string        // extra script environment for this case
-		wantTo    map[string]bool // gate ids that must be re-nudged exactly once
-		wantShows []string        // exact `gc bd show` invocations expected
+		name        string
+		fake        humanGateFake
+		env         []string        // extra script environment for this case
+		wantTo      map[string]bool // gate ids that must be re-nudged exactly once
+		wantShows   []string        // exact `gc bd show` invocations expected
+		wantSkipped string          // declared reason the formula gates were not swept; "" declares nothing
 	}{
 		{
 			name: "formula gate listed only by gc ready",
@@ -263,13 +320,24 @@ func TestRenudgeStaleHumanGatesCoversFormulaGates(t *testing.T) {
 			wantTo: map[string]bool{"ga-7": true},
 		},
 		{
-			name: "gc ready failure still sweeps bd gates",
+			name: "gc ready failure is declared and bd gates are still swept",
 			fake: humanGateFake{
 				gateList:  `[` + bdHumanGateRow + `]`,
 				readyFail: true,
 				shows:     map[string]string{"ga-7": `[` + bdHumanGateRow + `]`},
 			},
-			wantTo: map[string]bool{"ga-7": true},
+			wantTo:      map[string]bool{"ga-7": true},
+			wantSkipped: "gc ready --status open failed (exit 1): " + readyFailure,
+		},
+		{
+			name: "gc ready answer that is not a JSON array is declared",
+			fake: humanGateFake{
+				gateList: `[` + bdHumanGateRow + `]`,
+				ready:    `{"rows":[` + formulaHumanGateRow + `]}`,
+				shows:    map[string]string{"ga-7": `[` + bdHumanGateRow + `]`},
+			},
+			wantTo:      map[string]bool{"ga-7": true},
+			wantSkipped: "gc ready --status open answered without a readable JSON array",
 		},
 		{
 			name: "formula timer gate re-fetched is dropped",
@@ -286,9 +354,36 @@ func TestRenudgeStaleHumanGatesCoversFormulaGates(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			binDir, logPath := fakeGCBin(t, tc.fake.install(t))
 			stateDir := t.TempDir()
+			outcomePath := emptyOutcomeFile(t)
 
-			runHumanGateScript(t, renudgeHumanGateScriptPath, binDir, stateDir,
-				append([]string{"GC_STALE_GATE_THRESHOLD=0s"}, tc.env...)...)
+			out := runHumanGateScript(t, renudgeHumanGateScriptPath, binDir, stateDir,
+				append([]string{"GC_STALE_GATE_THRESHOLD=0s", orders.ExecOutcomeFileEnv + "=" + outcomePath}, tc.env...)...)
+
+			outcome, declared := readOutcome(t, outcomePath)
+			if tc.wantSkipped == "" {
+				if declared {
+					t.Errorf("a sweep that read every enumeration must declare nothing, got %+v", outcome)
+				}
+			} else {
+				want := orders.ExecOutcome{
+					Outcome: orders.ExecOutcomePartial,
+					Reason:  "some scopes or steps did not run",
+					Scopes:  []orders.ExecOutcomeScope{{Scope: "formula gates (gc ready)", Reason: tc.wantSkipped}},
+				}
+				if !declared || !reflect.DeepEqual(outcome, want) {
+					t.Errorf("declared outcome = %+v (declared %v), want %+v", outcome, declared, want)
+				}
+				wantLine := "renudge-stale-human-gates: " + tc.wantSkipped + "; formula gates were not swept (will retry next sweep)"
+				if !strings.Contains(out, wantLine) {
+					t.Errorf("output must say the formula gates were not swept (%q), got:\n%s", wantLine, out)
+				}
+			}
+			state := readRenudgeState(t, stateDir)
+			for id := range tc.wantTo {
+				if state[id] == "" {
+					t.Errorf("state does not record the reminder to %s, so the next sweep would repeat it: %v", id, state)
+				}
+			}
 
 			calls := gcLog(t, logPath)
 			const wantReady = "gc ready --status open --metadata-field gc.gate_type=human --json"

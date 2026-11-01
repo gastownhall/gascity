@@ -721,8 +721,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `await_type`. On a split city the re-nudge sweep now finds these gates in
   the class binding, and both orders' hint now reads `gc bd close <id>`,
   which a split city serves for a binding-held gate (`gc bd gate resolve` is
-  refused there). Gates created before this change carry no stamp and stay
-  unannounced; close or re-pour them.
+  refused there). A formula gate is created, and announced, when the formula
+  is instantiated, which can be before the gated step's `needs` finish. When
+  the re-nudge sweep cannot list formula gates (one store is unreadable), it
+  says so and records the run as partial (`order.skipped`) instead of reading
+  the failure as no gates. Gates created before this change carry no stamp and
+  stay unannounced; close or re-pour them.
 
 - **The core orphan-sweep order judges claims on graph steps in a
   split-storage city.** On a city whose `[storage.classes]` serves the graph

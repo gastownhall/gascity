@@ -42,6 +42,12 @@
 # controller log (stderr) and is NOT recorded, so the next sweep retries it. It
 # never silently evaporates.
 #
+# A formula-gate enumeration that fails is not read as "no formula gates":
+# `gc ready` refuses the whole read when one store is unreadable, so the run
+# says so on stderr and declares the enumeration as a skipped scope, a typed
+# partial outcome the controller records as order.skipped (order_outcome.sh).
+# The bd gates are still re-nudged and recorded, and the next sweep reads again.
+#
 # Dedup / cadence: per-gate last-re-nudge state lives in
 # $GC_PACK_STATE_DIR/renudge-stale-human-gates-state.json (city- and
 # pack-scoped). An entry is refreshed on every successful re-nudge, so a live
@@ -64,6 +70,8 @@ set -euo pipefail
 __SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/_bd_trace.sh" "renudge-stale-human-gates"
+# shellcheck disable=SC1091
+. "$__SCRIPT_DIR/order_outcome.sh"
 
 # jq is a hard dependency: it decodes the gate list and the re-fetched gate
 # record. Without it every re-nudge would be silently skipped. Fail loud.
@@ -130,6 +138,9 @@ NOW_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # pseudo-rig that `gc --rig <cityName>` cannot resolve), matching orphan-sweep.
 SCOPES_FILE="$(mktemp "$PACK_STATE_DIR/.renudge-scopes.XXXXXX")"
 trap 'rm -f "$SCOPES_FILE"' EXIT
+# gc ready's stderr, kept for the diagnostic when enumeration 2 fails.
+READY_ERR_FILE="$(mktemp "$PACK_STATE_DIR/.renudge-ready-err.XXXXXX")"
+trap 'rm -f "$SCOPES_FILE" "$READY_ERR_FILE"' EXIT
 printf '\n' > "$SCOPES_FILE" # HQ scope: an empty line
 RIGS_JSON="$(gc rig list --json 2>/dev/null || true)"
 if [ -n "$RIGS_JSON" ]; then
@@ -266,10 +277,36 @@ done < "$SCOPES_FILE"
 # bd scope can see them. The re-fetch takes no --rig: gc bd resolves the
 # owning store from the id, and a --rig pin is refused for a bead the
 # binding holds.
-FORMULA_GATES="$(gc ready --status open --metadata-field "gc.gate_type=human" --json 2>/dev/null \
-    | jq -r '(if type == "array" then . else [] end)[]
-             | select(.issue_type == "gate")
-             | "\(.id)\t\((.created_at // "") | sub("\\.[0-9]+"; ""))"' 2>/dev/null)" || FORMULA_GATES=""
+#
+# read_formula_gates sets FORMULA_GATES to one "<id>\t<created_at>" line per
+# gate gc ready lists. gc ready fails the whole read on a store it cannot read
+# rather than answer short, so a failed read, or an answer that is not the
+# JSON array gc ready always prints, sets FORMULA_GATES_ERROR instead.
+FORMULA_GATES=""
+FORMULA_GATES_ERROR=""
+read_formula_gates() {
+    local listing why
+    local rc=0
+    listing="$(gc ready --status open --metadata-field "gc.gate_type=human" --json 2>"$READY_ERR_FILE")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        why="$(cat "$READY_ERR_FILE")" || why=""
+        FORMULA_GATES_ERROR="gc ready --status open failed (exit $rc): $(printf '%s' "$why" | tr '\t\n' '  ')"
+        return 1
+    fi
+    if ! printf '%s' "$listing" | jq -e 'type == "array"' >/dev/null 2>&1 ||
+        ! FORMULA_GATES="$(printf '%s' "$listing" | jq -r '.[]
+            | select(.issue_type == "gate")
+            | "\(.id)\t\((.created_at // "") | sub("\\.[0-9]+"; ""))"' 2>/dev/null)"; then
+        FORMULA_GATES=""
+        FORMULA_GATES_ERROR="gc ready --status open answered without a readable JSON array"
+        return 1
+    fi
+}
+
+if ! read_formula_gates; then
+    echo "renudge-stale-human-gates: $FORMULA_GATES_ERROR; formula gates were not swept (will retry next sweep)" >&2
+    order_outcome_scope_skipped "formula gates (gc ready)" "$FORMULA_GATES_ERROR"
+fi
 while IFS="$(printf '\t')" read -r gate_id created_at; do
     [ -n "$gate_id" ] || continue
     renudge_gate "$gate_id" "$created_at"
@@ -283,6 +320,7 @@ STATE="$(echo "$STATE" | jq --argjson keep "$RETENTION_S" \
     'with_entries(select((now - (.value | fromdateiso8601)) <= $keep))')" || true
 
 write_state
+order_outcome_write
 
 if [ "$RENUDGED" -gt 0 ]; then
     echo "renudge-stale-human-gates: re-notified $RENUDGED stale human gate addressee(s)"
