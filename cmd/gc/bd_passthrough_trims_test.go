@@ -154,16 +154,17 @@ func TestGcBdPassthroughRunsNoFullConfigLoad(t *testing.T) {
 			return []string{"--city", cityDir}
 		}},
 		{"bd-level --rig", false, 0, func(*testing.T, string) []string { return []string{"--rig", "frontend"} }},
-		// The registry scans decide the city, so their load stays (it runs
-		// the one cold pass); it must run inside the invocation scope, so the
-		// passthrough's own load is a memo hit and nothing composes twice.
-		{"registered rig cwd", false, 1, func(t *testing.T, cityDir string) []string {
+		// The registry scans decide the city. Since the sys-s3pd fix they
+		// read cfg.Rigs without a readiness pass, so no pass runs there;
+		// the passthrough's own load is a memo hit and nothing composes
+		// twice.
+		{"registered rig cwd", false, 0, func(t *testing.T, cityDir string) []string {
 			registerBdTrimsCity(t, cityDir)
 			t.Setenv("GC_CITY_PATH", "")
 			setCwd(t, filepath.Join(cityDir, "frontend"))
 			return nil
 		}},
-		{"GC_RIG only", false, 1, func(t *testing.T, cityDir string) []string {
+		{"GC_RIG only", false, 0, func(t *testing.T, cityDir string) []string {
 			registerBdTrimsCity(t, cityDir)
 			t.Setenv("GC_CITY_PATH", "")
 			t.Setenv("GC_RIG", "frontend")
