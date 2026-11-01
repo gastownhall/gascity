@@ -475,6 +475,71 @@ func TestReusablePoolSessionInfo_PersistentRestartHandoffIsReusable(t *testing.T
 	}
 }
 
+// TestReusablePoolSessionInfo_PersistentAsleepNotRestartHandoffNotReusable
+// keeps every other asleep persistent-pool row out of reuse: only a committed
+// restart handoff with no sleep reason since, holding no work, is taken back.
+func TestReusablePoolSessionInfo_PersistentAsleepNotRestartHandoffNotReusable(t *testing.T) {
+	t.Parallel()
+
+	template := "repo/worker"
+	persistentAgent := &config.Agent{Name: "worker", Dir: "repo"}
+	now := time.Date(2026, 10, 30, 5, 0, 0, 0, time.UTC)
+	handedOff := restartHandedOffPoolInfo(t, template, now)
+
+	plainAsleep := session.Info{
+		ID:                  "session-plain-asleep",
+		Template:            template,
+		SessionNameMetadata: "repo--worker-1-pool",
+		PoolManaged:         true,
+		PoolSlot:            "1",
+		MetadataState:       "asleep",
+	}
+
+	resetNoCommit := handedOff
+	resetNoCommit.ResetCommittedAt = ""
+
+	resetBadCommit := handedOff
+	resetBadCommit.ResetCommittedAt = "not-a-time"
+
+	freshWakeDrain := plainAsleep.ApplyPatch(session.CompleteDrainPatch(now, string(session.SleepReasonIdle), true))
+	if freshWakeDrain.ContinuationResetPending != "true" || freshWakeDrain.SleepReason == "" ||
+		freshWakeDrain.SleptAt == "" || freshWakeDrain.ResetCommittedAt != "" {
+		t.Fatalf("fixture: fresh-wake drain = %+v, want reset pending, a sleep reason and slept_at, no reset_committed_at", freshWakeDrain)
+	}
+
+	sleptAfterHandoff := handedOff
+	sleptAfterHandoff.SleepReason = "idle"
+	sleptAfterHandoff.SleptAt = now.Add(time.Minute).Format(time.RFC3339)
+
+	cases := []struct {
+		name string
+		bp   *agentBuildParams
+		info session.Info
+		used map[string]bool
+	}{
+		{name: "asleep without reset markers", bp: &agentBuildParams{}, info: plainAsleep},
+		{name: "reset pending without reset_committed_at", bp: &agentBuildParams{}, info: resetNoCommit},
+		{name: "reset pending with non-RFC3339 reset_committed_at", bp: &agentBuildParams{}, info: resetBadCommit},
+		{name: "fresh-wake drain sleep", bp: &agentBuildParams{}, info: freshWakeDrain},
+		{name: "handoff then sleep reason stamped", bp: &agentBuildParams{}, info: sleptAfterHandoff},
+		{
+			name: "handoff holding open assigned work",
+			bp: &agentBuildParams{assignedWorkBeads: []beads.Bead{{
+				ID:       "work-in-progress",
+				Status:   "in_progress",
+				Assignee: handedOff.Alias,
+			}}},
+			info: handedOff,
+		},
+		{name: "handoff already used", bp: &agentBuildParams{}, info: handedOff, used: map[string]bool{handedOff.ID: true}},
+	}
+	for _, tc := range cases {
+		if got := reusablePoolSessionInfo(tc.bp, persistentAgent, template, tc.info, tc.used); got {
+			t.Errorf("reusablePoolSessionInfo(persistent, %s) = true; want false", tc.name)
+		}
+	}
+}
+
 func createRoutedReadyBeadForReplacement(t *testing.T, store beads.Store, template, title string) beads.Bead {
 	t.Helper()
 	b, err := store.Create(beads.Bead{
