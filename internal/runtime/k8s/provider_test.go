@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -17,9 +19,13 @@ import (
 
 	execerr "k8s.io/client-go/util/exec"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
 	"github.com/gastownhall/gascity/internal/shellquote"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 func TestProviderImplementsInterface(_ *testing.T) {
@@ -295,6 +301,92 @@ func TestIsRunning(t *testing.T) {
 
 	if p.IsRunning("gc-test-agent") {
 		t.Error("IsRunning returned true for session with dead tmux")
+	}
+}
+
+func TestObserveLivenessWithErrorDistinguishesTransportFailureAndZombie(t *testing.T) {
+	t.Run("transport failure is unknown", func(t *testing.T) {
+		fake := newFakeK8sOps()
+		p := newProviderWithOps(fake)
+		addRunningPod(fake, "worker", "worker")
+		fake.setExecResult("worker", []string{"tmux", "has-session", "-t", "main"}, "", errors.New("exec transport failed"))
+		obs, err := p.ObserveLivenessWithError("worker", []string{"codex"})
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("ObserveLivenessWithError error = %v, want ErrRuntimeUnavailable", err)
+		}
+		if obs.Running || obs.Alive {
+			t.Fatalf("observation = %+v, want unknown zero state", obs)
+		}
+	})
+
+	t.Run("running tmux with dead agent is zombie", func(t *testing.T) {
+		fake := newFakeK8sOps()
+		p := newProviderWithOps(fake)
+		addRunningPod(fake, "worker", "worker")
+		fake.setExecResult("worker", []string{"tmux", "has-session", "-t", "main"}, "", nil)
+		fake.setExecResult("worker", []string{"pgrep", "-f", "codex"}, "", execerr.CodeExitError{Err: errors.New("no process"), Code: 1})
+		obs, err := p.ObserveLivenessWithError("worker", []string{"codex"})
+		if err != nil || !obs.Running || obs.Alive {
+			t.Fatalf("ObserveLivenessWithError = (%+v, %v), want running zombie", obs, err)
+		}
+	})
+}
+
+func TestGetMetaReadsIdentityFromPodEnvironment(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	addRunningPod(fake, "worker", "worker")
+	fake.pods["worker"].Spec.Containers = []corev1.Container{{
+		Name: "agent",
+		Env: []corev1.EnvVar{
+			{Name: "GC_SESSION_ID", Value: "session-1"},
+			{Name: "GC_INSTANCE_TOKEN", Value: "token-1"},
+			{Name: "GC_RUNTIME_EPOCH", Value: "7"},
+		},
+	}}
+	for key, want := range map[string]string{
+		"GC_SESSION_ID": "session-1", "GC_INSTANCE_TOKEN": "token-1", "GC_RUNTIME_EPOCH": "7",
+	} {
+		got, err := p.GetMeta("worker", key)
+		if err != nil || got != want {
+			t.Errorf("GetMeta(%s) = (%q, %v), want (%q, nil)", key, got, err, want)
+		}
+	}
+	for _, call := range fake.calls {
+		if call.method == "execInPod" {
+			t.Fatal("identity metadata read used tmux exec instead of the pod environment")
+		}
+	}
+}
+
+func TestGetMetaUsesTheServingPodForIdentity(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	addRunningPod(fake, "worker", "worker")
+	fake.pods["worker"].Spec.Containers = []corev1.Container{{Name: "agent", Env: []corev1.EnvVar{{Name: "GC_INSTANCE_TOKEN", Value: "live-token"}}}}
+
+	terminating := fake.pods["worker"].DeepCopy()
+	terminating.Name = "worker-terminating"
+	deleting := metav1.Now()
+	terminating.DeletionTimestamp = &deleting
+	terminating.Spec.Containers = []corev1.Container{{Name: "agent", Env: []corev1.EnvVar{{Name: "GC_INSTANCE_TOKEN", Value: "stale-token"}}}}
+	fake.pods[terminating.Name] = terminating
+	addFailedPod(fake, "worker-failed", "worker")
+	fake.pods["worker-failed"].Spec.Containers = []corev1.Container{{Name: "agent", Env: []corev1.EnvVar{{Name: "GC_INSTANCE_TOKEN", Value: "failed-token"}}}}
+
+	got, err := p.GetMeta("worker", "GC_INSTANCE_TOKEN")
+	if err != nil || got != "live-token" {
+		t.Fatalf("GetMeta serving pod identity = (%q, %v), want live-token", got, err)
+	}
+
+	obs, err := p.ObserveLivenessWithError("worker", nil)
+	if err != nil || !obs.Running || !obs.Alive {
+		t.Fatalf("ObserveLivenessWithError = (%+v, %v), want the serving pod", obs, err)
+	}
+	for _, call := range fake.calls {
+		if call.method == "execInPod" && call.pod != "worker" {
+			t.Errorf("liveness exec used pod %q, want worker", call.pod)
+		}
 	}
 }
 
@@ -972,6 +1064,9 @@ func TestStartTreatsYoungPodWithDeadTmuxAsInitializing(t *testing.T) {
 	if !errors.Is(err, runtime.ErrSessionInitializing) {
 		t.Errorf("error = %v, want ErrSessionInitializing", err)
 	}
+	if !errors.Is(err, runtime.ErrExistingSessionInitializing) {
+		t.Errorf("error = %v, want ErrExistingSessionInitializing", err)
+	}
 
 	// Must NOT have deleted the pod — it's still initializing.
 	for _, c := range fake.calls {
@@ -1150,6 +1245,14 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 		"GC_RIG_ROOT":                         "/host/city/rig",
 		"GC_STORE_ROOT":                       "/host/city/rig",
 		"GC_BEADS_SCOPE_ROOT":                 "/host/city/rig",
+		"GC_BEADS_PROJECT_ID":                 "rig-project",
+		"GC_BEADS_PREFIX":                     "fe",
+		"GC_DOLT_DATABASE":                    "bd_rig_project",
+		"GC_K8S_CITY_BEADS_PROJECT_ID":        "hq-project",
+		"GC_K8S_CITY_BEADS_PREFIX":            "hq",
+		"GC_K8S_CITY_DOLT_DATABASE":           "bd_hq_project",
+		"GC_K8S_CITY_DOLT_HOST":               "hq.dolt.example",
+		"GC_K8S_CITY_DOLT_PORT":               "4406",
 		"BEADS_DIR":                           "/host/city/rig/.beads",
 		"GT_ROOT":                             "/host/city",
 		"GC_CITY_RUNTIME_DIR":                 "/host/city/.gc/runtime",
@@ -1157,6 +1260,7 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 		"GC_PACK_STATE_DIR":                   "/host/city/.gc/runtime/packs/rlm",
 		"GC_PACK_DIR":                         "/host/city/packs/maintenance",
 		"GC_SESSION":                          "exec:gc-session-k8s",
+		"GC_K8S_WORKER_POD":                   "spoofed",
 		"GC_BEADS":                            "exec:something",
 		"GC_EVENTS":                           "exec:other",
 		"GC_DOLT_HOST":                        "",
@@ -1177,8 +1281,15 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 	env := mustBuildPodEnv(t, cfgEnv, "/workspace/rig", podManagedDoltHost, podManagedDoltPort)
 
 	envMap := map[string]string{}
+	workerMarkerCount := 0
 	for _, e := range env {
 		envMap[e.Name] = e.Value
+		if e.Name == "GC_K8S_WORKER_POD" {
+			workerMarkerCount++
+		}
+	}
+	if workerMarkerCount != 1 || envMap["GC_K8S_WORKER_POD"] != "true" {
+		t.Fatalf("generated Kubernetes worker marker = (%d, %q), want (1, true)", workerMarkerCount, envMap["GC_K8S_WORKER_POD"])
 	}
 
 	// GC_CITY should be remapped to /workspace.
@@ -1210,6 +1321,17 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 	// BEADS_DIR should be remapped from controller city path to /workspace.
 	if envMap["BEADS_DIR"] != "/workspace/rig/.beads" {
 		t.Errorf("BEADS_DIR = %q, want /workspace/rig/.beads", envMap["BEADS_DIR"])
+	}
+	if envMap["GC_BEADS_PROJECT_ID"] != "rig-project" || envMap["GC_BEADS_PREFIX"] != "fe" {
+		t.Errorf("worker store identity = %q/%q, want rig-project/fe", envMap["GC_BEADS_PROJECT_ID"], envMap["GC_BEADS_PREFIX"])
+	}
+	if envMap["GC_DOLT_DATABASE"] != "bd_rig_project" {
+		t.Errorf("worker Dolt database = %q, want selected rig database bd_rig_project", envMap["GC_DOLT_DATABASE"])
+	}
+	for _, key := range []string{"GC_K8S_CITY_BEADS_PROJECT_ID", "GC_K8S_CITY_BEADS_PREFIX", "GC_K8S_CITY_DOLT_DATABASE", "GC_K8S_CITY_DOLT_HOST", "GC_K8S_CITY_DOLT_PORT"} {
+		if _, ok := envMap[key]; ok {
+			t.Errorf("controller-only identity projection %s leaked into worker env", key)
+		}
 	}
 
 	// GT_ROOT should be remapped from controller city path to /workspace.
@@ -1280,6 +1402,19 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 	// GC_TMUX_SESSION should be added.
 	if envMap["GC_TMUX_SESSION"] != "main" {
 		t.Errorf("GC_TMUX_SESSION = %q, want main", envMap["GC_TMUX_SESSION"])
+	}
+}
+
+func TestResolvePodHostedDoltIdentityFailsClosedWhenMissing(t *testing.T) {
+	_, err := resolvePodHostedDoltIdentity(map[string]string{
+		"GC_DOLT_HOST":     "hosted.dolt.example",
+		"GC_DOLT_PORT":     "4406",
+		"GC_DOLT_DATABASE": "bd_project",
+		"GC_BEADS_PREFIX":  "pr",
+		"GC_STORE_ROOT":    "/city",
+	}, "", podManagedDoltHost, podManagedDoltPort)
+	if err == nil || !strings.Contains(err.Error(), "missing scoped store identity GC_BEADS_PROJECT_ID") {
+		t.Fatalf("resolvePodHostedDoltIdentity error = %v, want missing project identity", err)
 	}
 }
 
@@ -1741,11 +1876,13 @@ func TestInitBeadsInPodUsesProjectedStoreRootAndPrefix(t *testing.T) {
 	cfg := runtime.Config{
 		WorkDir: "/host/city/rigs/frontend",
 		Env: map[string]string{
-			"GC_CITY":         "/host/city",
-			"GC_STORE_ROOT":   "/host/city/custom-scope",
-			"GC_BEADS_PREFIX": "cs",
-			"GC_DOLT_HOST":    "canonical-dolt.example.com",
-			"GC_DOLT_PORT":    "3308",
+			"GC_CITY":             "/host/city",
+			"GC_STORE_ROOT":       "/host/city/custom-scope",
+			"GC_BEADS_PROJECT_ID": "project-cs",
+			"GC_BEADS_PREFIX":     "cs",
+			"GC_DOLT_DATABASE":    "bd_project_cs",
+			"GC_DOLT_HOST":        "canonical-dolt.example.com",
+			"GC_DOLT_PORT":        "3308",
 		},
 	}
 	podWorkDir := projectedPodWorkDir(cfg)
@@ -1768,15 +1905,15 @@ func TestInitBeadsInPodUsesProjectedStoreRootAndPrefix(t *testing.T) {
 			continue
 		}
 		if strings.Contains(script, wrongWorkDirB64) {
-			t.Fatalf("repair script used pod workdir instead of projected store root: %s", script)
+			t.Fatalf("scoped Beads check used pod workdir instead of projected store root: %s", script)
 		}
-		if !strings.Contains(script, "m.pop('project_id'") {
-			t.Fatalf("repair script did not strip project_id: %s", script)
+		if !strings.Contains(script, `grep -Fqx "id = \"$PROJECT_ID\"" `+shellquote.Quote(contract.ProjectIdentityPath(""))) {
+			t.Fatalf("scoped Beads check did not verify project identity: %s", script)
 		}
 		found = true
 	}
 	if !found {
-		t.Fatal("initBeadsInPod did not use projected store root and prefix")
+		t.Fatal("initBeadsInPod did not check the projected store root and prefix")
 	}
 }
 
@@ -1789,6 +1926,9 @@ func TestInitBeadsInPodPatchesWithheldManagedLocalTargetToAlias(t *testing.T) {
 	fake := newFakeK8sOps()
 	env := runtimetest.WithheldManagedDoltEnv()
 	env["GC_BEADS_PREFIX"] = "demo"
+	env["GC_BEADS_PROJECT_ID"] = "project-demo"
+	env["GC_DOLT_DATABASE"] = "bd_demo"
+	env["GC_STORE_ROOT"] = "/workspace/demo-repo"
 	cfg := runtime.Config{Env: env}
 	if err := initBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, "/workspace/demo-repo", podManagedDoltHost, podManagedDoltPort); err != nil {
 		t.Fatalf("initBeadsInPod: %v", err)
@@ -1897,11 +2037,19 @@ func TestVerifyBeadsInPodRejectsHostOnlyProjectedTarget(t *testing.T) {
 	}
 }
 
-func TestStartUsesPodBeadsRepairScript(t *testing.T) {
+func TestStartFailsClosedWhenHostedBeadsFilesAreMissing(t *testing.T) {
 	fake := newFakeK8sOps()
 	p := newProviderWithOps(fake)
 	p.prebaked = true
 	p.postStartSettle = 0
+	var scopedBeadsScript string
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 3 && cmd[0] == "sh" && cmd[1] == "-c" && strings.Contains(cmd[2], "hosted Dolt scoped beads files are incomplete") {
+			scopedBeadsScript = cmd[2]
+			return "", errors.New("hosted Dolt scoped beads files are incomplete")
+		}
+		return "", nil
+	}
 
 	fake.setExecResult("gc-test-agent",
 		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
@@ -1910,45 +2058,41 @@ func TestStartUsesPodBeadsRepairScript(t *testing.T) {
 		Command: "claude --settings .gc/settings.json",
 		WorkDir: "/city/rig",
 		Env: map[string]string{
-			"GC_AGENT":        "rig/polecat",
-			"GC_CITY":         "/city",
-			"GC_STORE_ROOT":   "/city/custom-scope",
-			"GC_BEADS_PREFIX": "cs",
-			"GC_DOLT_PORT":    "31364",
+			"GC_AGENT":            "rig/polecat",
+			"GC_CITY":             "/city",
+			"GC_STORE_ROOT":       "/city/custom-scope",
+			"GC_BEADS_PROJECT_ID": "project-cs",
+			"GC_BEADS_PREFIX":     "cs",
+			"GC_DOLT_DATABASE":    "bd_project_cs",
+			"GC_DOLT_PORT":        "31364",
 		},
 	}
-	if err := p.Start(context.Background(), "gc-test-agent", cfg); err != nil {
-		t.Fatalf("Start: %v", err)
+	if err := p.Start(context.Background(), "gc-test-agent", cfg); err == nil ||
+		!strings.Contains(err.Error(), "initializing scoped beads") ||
+		!strings.Contains(err.Error(), "hosted Dolt scoped beads files are incomplete") {
+		t.Fatalf("Start error = %v, want missing hosted scoped beads files error", err)
 	}
 
-	foundRepair := false
-	for _, c := range fake.calls {
-		if c.method != "execInPod" || len(c.cmd) < 3 {
-			continue
-		}
-		if c.cmd[0] != "sh" || c.cmd[1] != "-c" {
-			continue
-		}
-		script := c.cmd[2]
-		if containsStr(script, "bd init --server") && containsStr(script, "m.pop('project_id'") {
-			foundRepair = true
-			break
-		}
+	if scopedBeadsScript == "" {
+		t.Fatal("Start did not run the hosted scoped Beads file check")
 	}
-	if !foundRepair {
-		t.Fatal("Start did not invoke the pod .beads repair/bootstrap script")
+	if strings.Contains(scopedBeadsScript, "bd init --server") || strings.Contains(scopedBeadsScript, "mkdir -p .beads") {
+		t.Fatalf("missing hosted files must fail closed without mutating Beads state:\n%s", scopedBeadsScript)
+	}
+	if !strings.Contains(scopedBeadsScript, "hosted Dolt scoped beads files are incomplete") {
+		t.Fatalf("hosted missing-files error is absent from script:\n%s", scopedBeadsScript)
 	}
 }
 
-func TestStartWarnsWhenInitBeadsInPodFails(t *testing.T) {
+func TestStartFailsWhenInitBeadsInPodFails(t *testing.T) {
 	fake := newFakeK8sOps()
 	p := newProviderWithOps(fake)
 	p.prebaked = true
 	p.postStartSettle = 0
 
 	fake.execFunc = func(_ string, cmd []string) (string, error) {
-		if len(cmd) >= 3 && cmd[0] == "sh" && cmd[1] == "-c" && containsStr(cmd[2], "bd init --server") {
-			return "", errors.New("missing canonical beads")
+		if len(cmd) >= 3 && cmd[0] == "sh" && cmd[1] == "-c" && containsStr(cmd[2], "hosted Dolt scoped beads files are incomplete") {
+			return "", errors.New("hosted Dolt scoped beads files are incomplete")
 		}
 		return "", nil
 	}
@@ -1959,30 +2103,74 @@ func TestStartWarnsWhenInitBeadsInPodFails(t *testing.T) {
 		Command: "claude --settings .gc/settings.json",
 		WorkDir: "/city/rig",
 		Env: map[string]string{
-			"GC_AGENT":     "rig/polecat",
-			"GC_CITY":      "/city",
-			"GC_DOLT_PORT": "31364",
+			"GC_AGENT":            "rig/polecat",
+			"GC_CITY":             "/city",
+			"GC_STORE_ROOT":       "/city/rig",
+			"GC_BEADS_PROJECT_ID": "project-cs",
+			"GC_BEADS_PREFIX":     "cs",
+			"GC_DOLT_DATABASE":    "bd_project_cs",
+			"GC_DOLT_PORT":        "31364",
 		},
 	}
-	if err := p.Start(context.Background(), "gc-test-agent", cfg); err != nil {
-		t.Fatalf("Start should warn and continue when pod beads repair fails: %v", err)
+	if err := p.Start(context.Background(), "gc-test-agent", cfg); err == nil || !strings.Contains(err.Error(), "initializing scoped beads") {
+		t.Fatalf("Start error = %v, want scoped beads initialization failure", err)
 	}
 }
 
-// TestInitBeadsInPodBdInitSetsBEADSDIR verifies that the pod bootstrap bd init
-// sets BEADS_DIR so bd does not create a .git/ as a side effect in the pod
-// workspace. Regression for #399.
-func TestInitBeadsInPodBdInitSetsBEADSDIR(t *testing.T) {
+func TestStartDoesNotReleaseWorkspaceWhenCityInitFails(t *testing.T) {
 	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.prebaked = false
+	p.postStartSettle = 0
+	cityPath := t.TempDir()
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 2 && containsStr(strings.Join(cmd, " "), "gc init") {
+			return "", errors.New("hosted identity required")
+		}
+		return "", nil
+	}
 	cfg := runtime.Config{
+		Command: "claude",
+		WorkDir: cityPath,
 		Env: map[string]string{
-			"GC_DOLT_HOST":    podManagedDoltHost,
-			"GC_DOLT_PORT":    podManagedDoltPort,
-			"GC_BEADS_PREFIX": "demo",
+			"GC_AGENT": "mayor",
+			"GC_CITY":  cityPath,
 		},
 	}
-	if err := initBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, "/workspace/demo-repo", podManagedDoltHost, podManagedDoltPort); err != nil {
-		t.Fatalf("initBeadsInPod: %v", err)
+	if err := p.Start(context.Background(), "gc-test-agent", cfg); err == nil || !strings.Contains(err.Error(), "initializing City in pod") {
+		t.Fatalf("Start error = %v, want City initialization failure", err)
+	}
+	for _, call := range fake.calls {
+		if call.method == "execInPod" && strings.Join(call.cmd, " ") == "touch /workspace/.gc-workspace-ready" {
+			t.Fatal("workspace-ready marker was written after City initialization failed")
+		}
+		if call.method == "execInPod" && strings.Contains(strings.Join(call.cmd, " "), "tmux has-session") {
+			t.Fatal("tmux was probed after City initialization failed")
+		}
+	}
+}
+
+func TestInitBeadsInPodMissingFilesFailClosed(t *testing.T) {
+	fake := newFakeK8sOps()
+	missingFilesErr := errors.New("hosted Dolt scoped beads files are incomplete")
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 3 && cmd[0] == "sh" && cmd[1] == "-c" && strings.Contains(cmd[2], "hosted Dolt scoped beads files are incomplete") {
+			return "", missingFilesErr
+		}
+		return "", nil
+	}
+	cfg := runtime.Config{
+		Env: map[string]string{
+			"GC_STORE_ROOT":       "/city/demo-repo",
+			"GC_BEADS_PROJECT_ID": "project-demo",
+			"GC_BEADS_PREFIX":     "demo",
+			"GC_DOLT_DATABASE":    "bd_project_demo",
+			"GC_DOLT_HOST":        podManagedDoltHost,
+			"GC_DOLT_PORT":        podManagedDoltPort,
+		},
+	}
+	if err := initBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, "/workspace/demo-repo", podManagedDoltHost, podManagedDoltPort); !errors.Is(err, missingFilesErr) {
+		t.Fatalf("initBeadsInPod error = %v, want missing hosted scoped beads files", err)
 	}
 	var script string
 	for _, c := range fake.calls {
@@ -1994,24 +2182,34 @@ func TestInitBeadsInPodBdInitSetsBEADSDIR(t *testing.T) {
 	if script == "" {
 		t.Fatal("no sh -c exec call found")
 	}
-	want := `BEADS_DIR="$WD/.beads" bd init --server`
-	if !strings.Contains(script, want) {
-		t.Errorf("bd init invocation missing BEADS_DIR env prefix: %q not found in script:\n%s", want, script)
+	if strings.Contains(script, "bd init --server") || strings.Contains(script, "mkdir -p .beads") || strings.Contains(script, "yes |") {
+		t.Errorf("missing hosted files must not initialize the store or create Beads files:\n%s", script)
+	}
+	if !strings.Contains(script, "hosted Dolt scoped beads files are incomplete") {
+		t.Errorf("missing hosted-files error absent from check script:\n%s", script)
+	}
+	missingFilesCheck := strings.Index(script, "test -f .beads/metadata.json")
+	if bdAccess := strings.Index(script, "bd config get issue_prefix"); missingFilesCheck < 0 || bdAccess < 0 || missingFilesCheck > bdAccess {
+		t.Errorf("missing-files guard must fail before accessing the hosted Beads store:\n%s", script)
+	}
+	metadataWrite := strings.Index(script, `json.dump(m,open('.beads/metadata.json','w')`)
+	if metadataWrite < 0 || missingFilesCheck > metadataWrite {
+		t.Errorf("missing-files guard must precede the pod-local metadata update:\n%s", script)
 	}
 }
 
-// TestInitBeadsInPodStripsProjectIDFromMetadata verifies that the metadata
-// patch removes the controller's project_id so the agent pod's bd does not
-// fail with PROJECT IDENTITY MISMATCH against the in-cluster Dolt server.
-// The staged .beads/metadata.json carries the controller's project_id, which
-// is wrong for the pod and must be dropped so bd rediscovers it.
-func TestInitBeadsInPodStripsProjectIDFromMetadata(t *testing.T) {
+// TestInitBeadsInPodPreservesAndVerifiesProjectID prevents stripping canonical
+// identity and silently allowing bd to attach to a different hosted store.
+func TestInitBeadsInPodPreservesAndVerifiesProjectID(t *testing.T) {
 	fake := newFakeK8sOps()
 	cfg := runtime.Config{
 		Env: map[string]string{
-			"GC_DOLT_HOST":    podManagedDoltHost,
-			"GC_DOLT_PORT":    podManagedDoltPort,
-			"GC_BEADS_PREFIX": "demo",
+			"GC_STORE_ROOT":       "/city/demo-repo",
+			"GC_BEADS_PROJECT_ID": "project-demo",
+			"GC_BEADS_PREFIX":     "demo",
+			"GC_DOLT_DATABASE":    "bd_project_demo",
+			"GC_DOLT_HOST":        podManagedDoltHost,
+			"GC_DOLT_PORT":        podManagedDoltPort,
 		},
 	}
 
@@ -2030,12 +2228,18 @@ func TestInitBeadsInPodStripsProjectIDFromMetadata(t *testing.T) {
 		t.Fatal("no sh -c exec call found")
 	}
 
-	// Both the argv and stdin python3 fallback paths must drop project_id
-	// after merging the patch into the staged metadata.
-	want := "m.pop('project_id', None)"
-	count := strings.Count(script, want)
-	if count < 2 {
-		t.Errorf("expected %q to appear in both python3 patch invocations (>=2 times), got %d\nscript:\n%s", want, count, script)
+	for _, want := range []string{
+		`grep -Fqx "id = \"$PROJECT_ID\"" ` + shellquote.Quote(contract.ProjectIdentityPath("")),
+		`m.get("dolt_database", "")).strip() == sys.argv[2]`,
+		`m.get("project_id", "")).strip() == sys.argv[3]`,
+		`[ "$GOT_PREFIX" = "$PREFIX" ]`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("scoped identity verification missing %q in script:\n%s", want, script)
+		}
+	}
+	if strings.Contains(script, "m.pop('project_id'") {
+		t.Errorf("identity patch must preserve project_id:\n%s", script)
 	}
 	if strings.Contains(script, "<<<") {
 		t.Errorf("metadata patch script must be POSIX sh compatible; found bash here-string in:\n%s", script)
@@ -2081,6 +2285,403 @@ func TestStartSkipsStagingWhenPrebaked(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestStartProjectsRigStateAfterCityInitAndBeforeReadyMarker(t *testing.T) {
+	cfg := rigProjectionTestFixture(t)
+	isCityInit := func(cmd []string) bool {
+		if len(cmd) >= 5 && cmd[0] == "sh" && cmd[1] == "-c" && cmd[3] == "gc" && cmd[4] == "init" {
+			return true
+		}
+		return len(cmd) >= 4 && cmd[0] == "env" && cmd[2] == "gc" && cmd[3] == "init"
+	}
+	statePath := citylayout.SuspensionStateFile(cfg.Env["GC_CITY"])
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, []byte(`{"city":{"suspended":false},"rigs":{"gascity":{"suspended":false}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := newFakeK8sOps()
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 4 && cmd[0] == "sh" && strings.Contains(cmd[2], "__GC_SITE_BINDING_MISSING__") {
+			return siteBindingReadOutput("__GC_SITE_BINDING_MISSING__"), nil
+		}
+		if len(cmd) >= 3 && cmd[0] == "sh" && strings.Contains(cmd[2], "tar xf -") {
+			return "gc-stage-ok", nil
+		}
+		if isCityInit(cmd) {
+			if err := os.WriteFile(statePath, []byte(`{"city":{"suspended":true},"rigs":{"gascity":{"suspended":true}}}`), 0o600); err != nil {
+				return "", err
+			}
+		}
+		return "", nil
+	}
+	p := newProviderWithOps(&drainingArchiveOps{fakeK8sOps: fake})
+	if err := p.Start(context.Background(), "rig-agent", cfg); err != nil {
+		t.Fatalf("Start rig session: %v", err)
+	}
+	initAt := findExecCall(fake.calls, func(cmd []string) bool {
+		return isCityInit(cmd)
+	})
+	projectionAt := findExecCall(fake.calls, func(cmd []string) bool {
+		return len(cmd) >= 4 && cmd[0] == "sh" && cmd[3] == "gc-rig-projection"
+	})
+	readyAt := findExecCall(fake.calls, func(cmd []string) bool {
+		return len(cmd) >= 2 && cmd[0] == "touch" && strings.Contains(cmd[1], ".gc-workspace-ready")
+	})
+	rigReadyAt := findExecCall(fake.calls, func(cmd []string) bool {
+		return len(cmd) >= 2 && cmd[0] == "touch" && strings.Contains(cmd[1], "gc-rig-projection-ready-")
+	})
+	if initAt < 0 || projectionAt <= initAt || readyAt <= projectionAt || rigReadyAt <= projectionAt {
+		t.Fatalf("call order init=%d projection=%d workspace-ready=%d rig-ready=%d; want init < projection < both markers; calls=%#v", initAt, projectionAt, readyAt, rigReadyAt, fake.calls)
+	}
+	projectedState, err := base64.StdEncoding.DecodeString(fake.calls[projectionAt].cmd[5])
+	if err != nil {
+		t.Fatalf("decode projected suspension state: %v", err)
+	}
+	var state suspensionstate.State
+	if err := json.Unmarshal(projectedState, &state); err != nil {
+		t.Fatalf("decode projected suspension state JSON: %v", err)
+	}
+	if got := state.City.Suspended; got == nil || !*got {
+		t.Errorf("projected city suspension = %v, want latest true state", got)
+	}
+	if got := state.Rigs["gascity"].Suspended; got == nil || !*got {
+		t.Errorf("projected rig suspension = %v, want latest true state", got)
+	}
+}
+
+func TestStartProjectsRigStateBeforePrebakedEntrypoint(t *testing.T) {
+	cfg := rigProjectionTestFixture(t)
+	fake := newFakeK8sOps()
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 4 && cmd[0] == "sh" && strings.Contains(cmd[2], "__GC_SITE_BINDING_MISSING__") {
+			return siteBindingReadOutput("__GC_SITE_BINDING_MISSING__"), nil
+		}
+		return "", nil
+	}
+	p := newProviderWithOps(fake)
+	p.prebaked = true
+	if err := p.Start(context.Background(), "rig-agent", cfg); err != nil {
+		t.Fatalf("Start prebaked rig session: %v", err)
+	}
+
+	pod := fake.pods[SanitizeName("rig-agent")]
+	if pod == nil || len(pod.Spec.Containers) == 0 || len(pod.Spec.Containers[0].Args) == 0 {
+		t.Fatal("fake did not retain the rig-scoped prebaked pod entrypoint")
+	}
+	entrypoint := pod.Spec.Containers[0].Args[0]
+	if !strings.Contains(entrypoint, "gc-rig-projection-ready-") || strings.Contains(entrypoint, ".gc-workspace-ready") {
+		t.Fatalf("rig-scoped prebaked entrypoint should wait on its unique projection marker only: %s", entrypoint)
+	}
+	projectionAt := findExecCall(fake.calls, func(cmd []string) bool {
+		return len(cmd) >= 4 && cmd[0] == "sh" && cmd[3] == "gc-rig-projection"
+	})
+	readyAt := findExecCall(fake.calls, func(cmd []string) bool {
+		return len(cmd) >= 2 && cmd[0] == "touch" && strings.Contains(cmd[1], "gc-rig-projection-ready-")
+	})
+	if projectionAt < 0 || readyAt <= projectionAt {
+		t.Fatalf("call order projection=%d ready=%d; want projection before ready marker", projectionAt, readyAt)
+	}
+	for _, call := range fake.calls {
+		if len(call.cmd) >= 4 && call.cmd[0] == "env" && call.cmd[2] == "gc" && call.cmd[3] == "init" {
+			t.Fatal("prebaked Start must not run gc init")
+		}
+	}
+}
+
+func TestStartPrebakedRigProjectionWaitsForDynamicUser(t *testing.T) {
+	cfg := rigProjectionTestFixture(t)
+	cfg.Env["LINUX_USERNAME"] = "gcuser"
+	fake := newFakeK8sOps()
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 4 && cmd[0] == "sh" && strings.Contains(cmd[2], "__GC_SITE_BINDING_MISSING__") {
+			return siteBindingReadOutput("__GC_SITE_BINDING_MISSING__"), nil
+		}
+		return "", nil
+	}
+	p := newProviderWithOps(fake)
+	p.prebaked = true
+	if err := p.Start(context.Background(), "rig-agent", cfg); err != nil {
+		t.Fatalf("Start prebaked rig session with dynamic user: %v", err)
+	}
+
+	pod := fake.pods[SanitizeName("rig-agent")]
+	if pod == nil || len(pod.Spec.Containers) == 0 || len(pod.Spec.Containers[0].Args) == 0 {
+		t.Fatal("fake did not retain the rig-scoped prebaked pod entrypoint")
+	}
+	entrypoint := pod.Spec.Containers[0].Args[0]
+	userSetupAt := strings.Index(entrypoint, `useradd -m -s /bin/bash "gcuser"`)
+	markerWaitAt := strings.Index(entrypoint, "gc-rig-projection-ready-")
+	if userSetupAt < 0 || markerWaitAt <= userSetupAt {
+		t.Fatalf("prebaked entrypoint must create the dynamic user before waiting for projection: %s", entrypoint)
+	}
+
+	projectionAt := findExecCall(fake.calls, func(cmd []string) bool {
+		return len(cmd) >= 4 && cmd[0] == "sh" && cmd[3] == "gc-rig-projection"
+	})
+	if projectionAt < 0 {
+		t.Fatalf("Start did not apply rig projection; calls=%#v", fake.calls)
+	}
+	projectionScript := fake.calls[projectionAt].cmd[2]
+	userWaitAt := strings.Index(projectionScript, `until id "$5"`)
+	chownAt := strings.Index(projectionScript, `chown "$5"`)
+	if userWaitAt < 0 || chownAt <= userWaitAt || !strings.Contains(projectionScript, `[ "$attempts" -ge 30 ]`) {
+		t.Fatalf("projection must wait for the dynamic user before chown with a bounded retry: %s", projectionScript)
+	}
+	if got := fake.calls[projectionAt].cmd[8]; got != "gcuser" {
+		t.Fatalf("projection dynamic user = %q, want gcuser", got)
+	}
+}
+
+func TestRelaunchProjectsRigStateBeforeRespawn(t *testing.T) {
+	cfg := rigProjectionTestFixture(t)
+	fake := newFakeK8sOps()
+	name := "rig-agent"
+	podName := SanitizeName(name)
+	fake.pods[podName] = &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Labels: map[string]string{"gc-session": SanitizeLabel(name)}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "agent", Env: []corev1.EnvVar{
+			{Name: "GC_RIG", Value: "gascity"},
+			{Name: "GC_RIG_ROOT", Value: "/workspace/rigs/gascity"},
+		}}}},
+	}
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 4 && cmd[0] == "sh" && strings.Contains(cmd[2], "__GC_SITE_BINDING_MISSING__") {
+			return siteBindingReadOutput("__GC_SITE_BINDING_MISSING__"), nil
+		}
+		return "", nil
+	}
+	p := newProviderWithOps(fake)
+	if err := p.Relaunch(context.Background(), name, cfg); err != nil {
+		t.Fatalf("Relaunch rig session: %v", err)
+	}
+	projectionAt := findExecCall(fake.calls, func(cmd []string) bool {
+		return len(cmd) >= 4 && cmd[0] == "sh" && cmd[3] == "gc-rig-projection"
+	})
+	respawnAt := findExecCall(fake.calls, func(cmd []string) bool {
+		return len(cmd) >= 3 && cmd[0] == "sh" && strings.Contains(cmd[2], "respawn-pane -k")
+	})
+	if projectionAt < 0 || respawnAt <= projectionAt {
+		t.Fatalf("call order projection=%d respawn=%d; want projection before respawn", projectionAt, respawnAt)
+	}
+}
+
+func TestRelaunchRejectsStaleRigPodEnvironment(t *testing.T) {
+	cfg := rigProjectionTestFixture(t)
+	fake := newFakeK8sOps()
+	name := "rig-agent"
+	podName := SanitizeName(name)
+	fake.pods[podName] = &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Labels: map[string]string{"gc-session": SanitizeLabel(name)}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "agent", Env: []corev1.EnvVar{
+			{Name: "GC_RIG", Value: "gascity"},
+			{Name: "GC_RIG_ROOT", Value: "/workspace/rigs/old"},
+		}}}},
+	}
+	fake.setExecResult(podName, []string{"tmux", "has-session", "-t", "main"}, "", nil)
+	p := newProviderWithOps(fake)
+	err := p.Relaunch(context.Background(), name, cfg)
+	if !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("Relaunch error = %v, want ErrSessionNotFound for stale rig env", err)
+	}
+	for _, call := range fake.calls {
+		if len(call.cmd) >= 3 && call.cmd[0] == "sh" && strings.Contains(call.cmd[2], "respawn-pane -k") {
+			t.Fatalf("Relaunch respawned a pod with stale rig env: %#v", fake.calls)
+		}
+	}
+}
+
+func TestStartChecksLivePodBeforeRigProjection(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	addRunningPod(fake, "rig-agent", "rig-agent")
+	fake.setExecResult("rig-agent", []string{"tmux", "has-session", "-t", "main"}, "", nil)
+	cfg := rigProjectionTestFixture(t)
+	cfg.Env["GC_RIG_ROOT"] = "/different/path"
+	err := p.Start(context.Background(), "rig-agent", cfg)
+	if !errors.Is(err, runtime.ErrSessionExists) {
+		t.Fatalf("Start error = %v, want ErrSessionExists despite invalid unused projection", err)
+	}
+	for _, call := range fake.calls {
+		if call.method == "createPod" || call.method == "deletePod" {
+			t.Fatalf("Start changed an existing live Pod: %#v", fake.calls)
+		}
+	}
+}
+
+func TestStartRigProjectionFailuresDoNotCreateOrLeakPod(t *testing.T) {
+	t.Run("build failure creates no pod", func(t *testing.T) {
+		cfg := rigProjectionTestFixture(t)
+		cfg.Env["GC_RIG_ROOT"] = "/outside/city"
+		fake := newFakeK8sOps()
+		p := newProviderWithOps(fake)
+		if err := p.Start(context.Background(), "rig-agent", cfg); err == nil {
+			t.Fatal("Start succeeded with an unmapped rig root")
+		}
+		for _, call := range fake.calls {
+			if call.method == "createPod" {
+				t.Fatalf("build failure created a pod: %#v", fake.calls)
+			}
+		}
+	})
+
+	t.Run("apply failure deletes created pod", func(t *testing.T) {
+		cfg := rigProjectionTestFixture(t)
+		fake := newFakeK8sOps()
+		fake.execFunc = func(_ string, cmd []string) (string, error) {
+			if len(cmd) >= 4 && cmd[0] == "sh" && strings.Contains(cmd[2], "__GC_SITE_BINDING_MISSING__") {
+				return siteBindingReadOutput("[[rig]\nname = \"gascity\"\npath = ["), nil
+			}
+			return "", nil
+		}
+		p := newProviderWithOps(fake)
+		p.prebaked = true
+		if err := p.Start(context.Background(), "rig-agent", cfg); err == nil {
+			t.Fatal("Start succeeded with malformed pod site TOML")
+		}
+		created, deleted := false, false
+		for _, call := range fake.calls {
+			created = created || call.method == "createPod"
+			deleted = deleted || call.method == "deletePod"
+		}
+		if !created || !deleted {
+			t.Fatalf("projection failure cleanup: created=%v deleted=%v calls=%#v", created, deleted, fake.calls)
+		}
+	})
+
+	t.Run("projection marker failure deletes created pod", func(t *testing.T) {
+		cfg := rigProjectionTestFixture(t)
+		fake := newFakeK8sOps()
+		fake.execFunc = func(_ string, cmd []string) (string, error) {
+			if len(cmd) >= 4 && cmd[0] == "sh" && strings.Contains(cmd[2], "__GC_SITE_BINDING_MISSING__") {
+				return siteBindingReadOutput("__GC_SITE_BINDING_MISSING__"), nil
+			}
+			if len(cmd) >= 2 && cmd[0] == "touch" && strings.Contains(cmd[1], "gc-rig-projection-ready-") {
+				return "", errors.New("marker write failed")
+			}
+			return "", nil
+		}
+		p := newProviderWithOps(fake)
+		p.prebaked = true
+		if err := p.Start(context.Background(), "rig-agent", cfg); err == nil || !strings.Contains(err.Error(), "marking rig projection ready") {
+			t.Fatalf("Start error = %v, want strict projection-marker failure", err)
+		}
+		deleted := false
+		for _, call := range fake.calls {
+			deleted = deleted || call.method == "deletePod"
+		}
+		if !deleted {
+			t.Fatalf("failed projection marker did not clean up Pod: %#v", fake.calls)
+		}
+	})
+}
+
+func TestRelaunchRigProjectionFailuresDoNotRespawn(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		badRoot   bool
+		readError error
+		readData  string
+	}{
+		{name: "build", badRoot: true},
+		{name: "read", readError: errors.New("permission denied")},
+		{name: "malformed TOML", readData: "[[rig]\nname = \"gascity\"\npath = ["},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := rigProjectionTestFixture(t)
+			if tc.badRoot {
+				cfg.Env["GC_RIG_ROOT"] = "/outside/city"
+			}
+			fake := newFakeK8sOps()
+			name := "rig-agent"
+			podName := SanitizeName(name)
+			fake.pods[podName] = &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: podName, Labels: map[string]string{"gc-session": SanitizeLabel(name)}},
+				Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "agent", Env: []corev1.EnvVar{
+					{Name: "GC_RIG", Value: "gascity"},
+					{Name: "GC_RIG_ROOT", Value: "/workspace/rigs/gascity"},
+				}}}},
+			}
+			fake.execFunc = func(_ string, cmd []string) (string, error) {
+				if len(cmd) >= 4 && cmd[0] == "sh" && strings.Contains(cmd[2], "__GC_SITE_BINDING_MISSING__") {
+					if tc.readError != nil {
+						return "", tc.readError
+					}
+					return siteBindingReadOutput(tc.readData), nil
+				}
+				return "", nil
+			}
+			p := newProviderWithOps(fake)
+			err := p.Relaunch(context.Background(), name, cfg)
+			if !errors.Is(err, runtime.ErrSessionNotFound) {
+				t.Fatalf("Relaunch error = %v, want ErrSessionNotFound", err)
+			}
+			for _, call := range fake.calls {
+				if len(call.cmd) >= 3 && call.cmd[0] == "sh" && strings.Contains(call.cmd[2], "respawn-pane -k") {
+					t.Fatalf("Relaunch issued respawn after projection failure: %#v", fake.calls)
+				}
+			}
+		})
+	}
+}
+
+func rigProjectionTestFixture(t *testing.T) runtime.Config {
+	t.Helper()
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, "rigs", "gascity"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[[rigs]]
+name = "gascity"
+path = "rigs/gascity"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return runtime.Config{
+		Command: "codex",
+		WorkDir: cityPath,
+		Env: map[string]string{
+			"GC_AGENT":    "gascity/codex",
+			"GC_CITY":     cityPath,
+			"GC_RIG":      "gascity",
+			"GC_RIG_ROOT": filepath.Join(cityPath, "rigs", "gascity"),
+		},
+	}
+}
+
+func siteBindingReadOutput(data string) string {
+	return config.SiteBindingPath(podWorkspaceRoot) + "\n" + data
+}
+
+func siteBindingReadOutputAt(path, data string) string {
+	return path + "\n" + data
+}
+
+func findExecCall(calls []fakeCall, match func([]string) bool) int {
+	for i, call := range calls {
+		if call.method == "execInPod" && match(call.cmd) {
+			return i
+		}
+	}
+	return -1
+}
+
+type drainingArchiveOps struct {
+	*fakeK8sOps
+}
+
+func (o *drainingArchiveOps) execInPod(ctx context.Context, pod, container string, cmd []string, stdin io.Reader) (string, error) {
+	if stdin != nil && len(cmd) >= 3 && cmd[0] == "sh" && strings.Contains(cmd[2], "tar xf -") {
+		if _, err := io.Copy(io.Discard, stdin); err != nil {
+			return "", err
+		}
+	}
+	return o.fakeK8sOps.execInPod(ctx, pod, container, cmd, nil)
 }
 
 func TestStartDetectsImmediateSessionDeath(t *testing.T) {
@@ -2288,6 +2889,8 @@ func TestStartHonorsCancellationDuringPostStartSettle(t *testing.T) {
 		Env:          map[string]string{"GC_AGENT": "deacon", "GC_CITY": "/workspace"},
 		ProcessNames: []string{"claude"},
 	}
+	acceptDialogs := false
+	cfg.AcceptStartupDialogs = &acceptDialogs
 
 	started := time.Now()
 	err := p.Start(ctx, "gc-test-agent", cfg)
@@ -2376,6 +2979,342 @@ func TestStartSkipsNudgeWhenEmpty(t *testing.T) {
 			c.cmd[0] == "tmux" && c.cmd[1] == "send-keys" && c.cmd[4] == "-l" {
 			t.Error("Start sent nudge text when Nudge was empty")
 		}
+	}
+}
+
+// k8sCodex0156TrustDialog is the pane fixture from
+// internal/runtime/dialog_trust_selection_test.go.
+const k8sCodex0156TrustDialog = `› Ask Codex to do anything
+
+  Folder access
+  /Users/u/src/project
+
+  Trust this folder? Codex can read, edit, and run files here, subject to your
+  permission settings. Folder settings can run code automatically, even
+  without a model request. Continue only if you trust these files. Your trust
+  decision will be saved.
+
+› 1. Trust and continue
+  2. Quit
+
+  enter continue · esc quit`
+
+const k8sCodexComposer = `OpenAI Codex (v0.156.0)
+› Ask Codex to do anything`
+
+func k8sCodex0156TrustDialogQuitSelected() string {
+	return strings.Replace(k8sCodex0156TrustDialog,
+		"› 1. Trust and continue\n  2. Quit",
+		"  1. Trust and continue\n› 2. Quit", 1)
+}
+
+func newStartupDialogTestProvider(fake *fakeK8sOps) *Provider {
+	p := newProviderWithOps(fake)
+	p.prebaked = true
+	p.postStartSettle = 0
+	p.startupDialogTimeout = 2 * time.Second
+	return p
+}
+
+func startupDialogTestConfig() runtime.Config {
+	return runtime.Config{Command: "codex", ProcessNames: []string{"codex"}}
+}
+
+func isStartupDialogCapture(c fakeCall) bool {
+	return c.method == "execInPod" && len(c.cmd) > 1 && c.cmd[0] == "tmux" && c.cmd[1] == "capture-pane"
+}
+
+func startupDialogTmuxCalls(fake *fakeK8sOps) []fakeCall {
+	var calls []fakeCall
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) > 1 && c.cmd[0] == "tmux" {
+			calls = append(calls, c)
+		}
+	}
+	return calls
+}
+
+func isStartupDialogSendKeys(c fakeCall, keys ...string) bool {
+	if c.method != "execInPod" || len(c.cmd) < 4 || c.cmd[0] != "tmux" || c.cmd[1] != "send-keys" || c.cmd[2] != "-t" || c.cmd[3] != tmuxSession {
+		return false
+	}
+	if len(c.cmd) != 4+len(keys) {
+		return false
+	}
+	for i, key := range keys {
+		if c.cmd[4+i] != key {
+			return false
+		}
+	}
+	return true
+}
+
+func TestStartAcceptsCodex0156TrustDialogBeforeNudge(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newStartupDialogTestProvider(fake)
+	cfg := startupDialogTestConfig()
+	cfg.Nudge = "Check your assigned work."
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) > 1 && cmd[0] == "tmux" && cmd[1] == "capture-pane" {
+			return k8sCodex0156TrustDialog, nil
+		}
+		return "", nil
+	}
+
+	if err := p.Start(context.Background(), "gc-test-agent", cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	calls := startupDialogTmuxCalls(fake)
+	enterIndex, nudgeIndex, bareEnterCount := -1, -1, 0
+	for i, c := range calls {
+		if isStartupDialogSendKeys(c, "Enter") {
+			bareEnterCount++
+			if enterIndex < 0 {
+				enterIndex = i
+			}
+		}
+		if len(c.cmd) > 4 && c.cmd[1] == "send-keys" && c.cmd[4] == "-l" && strings.Join(c.cmd[5:], " ") == cfg.Nudge {
+			nudgeIndex = i
+		}
+	}
+	if bareEnterCount != 2 {
+		t.Fatalf("bare Enter count = %d, want dialog confirmation and nudge submit; calls=%v", bareEnterCount, calls)
+	}
+	if enterIndex < 0 || nudgeIndex < 0 || enterIndex >= nudgeIndex {
+		t.Fatalf("dialog Enter index = %d, nudge index = %d; want dialog confirmation before nudge; calls=%v", enterIndex, nudgeIndex, calls)
+	}
+}
+
+func TestStartMovesCodex0156QuitSelectionBeforeEnter(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newStartupDialogTestProvider(fake)
+	pane := k8sCodex0156TrustDialogQuitSelected()
+	var captureFrames, enterFrames []string
+	var paneAfterUp string
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) > 1 && cmd[0] == "tmux" && cmd[1] == "capture-pane" {
+			captureFrames = append(captureFrames, pane)
+			if paneAfterUp == "after-up-pending" {
+				paneAfterUp = pane
+			}
+			return pane, nil
+		}
+		if len(cmd) > 4 && cmd[0] == "tmux" && cmd[1] == "send-keys" {
+			if cmd[4] == "Up" {
+				pane = k8sCodex0156TrustDialog
+				paneAfterUp = "after-up-pending"
+			}
+			if cmd[4] == "Enter" {
+				enterFrames = append(enterFrames, pane)
+			}
+		}
+		return "", nil
+	}
+
+	if err := p.Start(context.Background(), "gc-test-agent", startupDialogTestConfig()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if len(enterFrames) != 1 || !strings.Contains(enterFrames[0], "› 1. Trust and continue") || strings.Contains(enterFrames[0], "› 2. Quit") {
+		t.Fatalf("Enter pane frames = %q, want exactly one frame with Trust selected", enterFrames)
+	}
+	if !strings.Contains(paneAfterUp, "› 1. Trust and continue") {
+		t.Fatalf("first pane read after Up = %q, want Trust selected", paneAfterUp)
+	}
+	if len(captureFrames) == 0 || !strings.Contains(captureFrames[0], "› 2. Quit") {
+		t.Fatalf("initial capture frames = %q, want Quit selected", captureFrames)
+	}
+
+	calls := startupDialogTmuxCalls(fake)
+	upIndex, freshReadIndex, enterIndex := -1, -1, -1
+	for i, c := range calls {
+		if isStartupDialogSendKeys(c, "Up") && upIndex < 0 {
+			upIndex = i
+			continue
+		}
+		if upIndex >= 0 && freshReadIndex < 0 && isStartupDialogCapture(c) {
+			freshReadIndex = i
+			continue
+		}
+		if isStartupDialogSendKeys(c, "Enter") && enterIndex < 0 {
+			enterIndex = i
+		}
+	}
+	if upIndex < 0 || freshReadIndex <= upIndex || enterIndex <= freshReadIndex {
+		t.Fatalf("action indices Up=%d fresh capture=%d Enter=%d; want Up, fresh pane read, then Enter; calls=%v", upIndex, freshReadIndex, enterIndex, calls)
+	}
+}
+
+func TestStartAcceptsCodexTrustAfterBlankPane(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newStartupDialogTestProvider(fake)
+	captureCount := 0
+	var captureFrames []string
+	var currentPane, enterPane string
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) > 1 && cmd[0] == "tmux" && cmd[1] == "capture-pane" {
+			captureCount++
+			if captureCount == 1 {
+				currentPane = ""
+			} else {
+				currentPane = k8sCodex0156TrustDialog
+			}
+			captureFrames = append(captureFrames, currentPane)
+			return currentPane, nil
+		}
+		if isStartupDialogSendKeys(fakeCall{method: "execInPod", cmd: cmd}, "Enter") {
+			enterPane = currentPane
+		}
+		return "", nil
+	}
+
+	if err := p.Start(context.Background(), "gc-test-agent", startupDialogTestConfig()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if len(captureFrames) < 2 || captureFrames[0] != "" || !strings.Contains(captureFrames[1], "Trust this folder?") {
+		t.Fatalf("capture frames = %q, want blank pane then delayed trust dialog", captureFrames)
+	}
+	if !strings.Contains(enterPane, "› 1. Trust and continue") {
+		t.Fatalf("Enter pane = %q, want Trust selected", enterPane)
+	}
+}
+
+func TestStartAcceptsCodexTrustDrawnAfterComposer(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newStartupDialogTestProvider(fake)
+	captureCount := 0
+	composerCaptureCount, firstComposerCaptureCount := 0, 0
+	firstTrustCaptureCount, trustCaptureCount, answeredTrustCount := 0, 0, 0
+	var currentPane string
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) > 1 && cmd[0] == "tmux" && cmd[1] == "capture-pane" {
+			captureCount++
+			// The ordered startup-dialog pass currently has ten phases, followed
+			// by the watch's first read. Keep the composer on those eleven reads
+			// so this test exercises a trust dialog drawn by the late-startup watch.
+			if captureCount <= 11 {
+				currentPane = k8sCodexComposer
+				if firstComposerCaptureCount == 0 {
+					firstComposerCaptureCount = captureCount
+				}
+				composerCaptureCount++
+			} else {
+				currentPane = k8sCodex0156TrustDialog
+				if firstTrustCaptureCount == 0 {
+					firstTrustCaptureCount = captureCount
+				}
+				trustCaptureCount++
+			}
+			return currentPane, nil
+		}
+		if isStartupDialogSendKeys(fakeCall{method: "execInPod", cmd: cmd}, "Enter") &&
+			strings.Contains(currentPane, "Trust this folder?") &&
+			strings.Contains(currentPane, "› 1. Trust and continue") &&
+			!strings.Contains(currentPane, "› 2. Quit") {
+			answeredTrustCount++
+		}
+		return "", nil
+	}
+
+	if err := p.Start(context.Background(), "gc-test-agent", startupDialogTestConfig()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if composerCaptureCount == 0 || firstComposerCaptureCount == 0 || firstTrustCaptureCount == 0 || trustCaptureCount == 0 || composerCaptureCount+trustCaptureCount != captureCount {
+		t.Fatalf("composer captures=%d first composer capture=%d first trust capture=%d trust captures=%d after %d captures; want both panes captured", composerCaptureCount, firstComposerCaptureCount, firstTrustCaptureCount, trustCaptureCount, captureCount)
+	}
+	if answeredTrustCount != 1 {
+		t.Fatalf("trust Enter count = %d, want exactly one bare Enter while Trust and continue is selected", answeredTrustCount)
+	}
+	if firstComposerCaptureCount >= firstTrustCaptureCount {
+		t.Fatalf("composer was not captured before trust appeared: first composer capture=%d first trust capture=%d", firstComposerCaptureCount, firstTrustCaptureCount)
+	}
+}
+
+func TestStartDoesNotInspectDialogsWhenExplicitlyDisabled(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newStartupDialogTestProvider(fake)
+	cfg := startupDialogTestConfig()
+	accept := false
+	cfg.AcceptStartupDialogs = &accept
+
+	if err := p.Start(context.Background(), "gc-test-agent", cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	for _, c := range startupDialogTmuxCalls(fake) {
+		if isStartupDialogCapture(c) || len(c.cmd) > 1 && c.cmd[1] == "send-keys" {
+			t.Fatalf("startup dialog interaction with explicit false: %v", c.cmd)
+		}
+	}
+}
+
+func TestStartDoesNotInspectDialogsWithNilAndNoHints(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newStartupDialogTestProvider(fake)
+	cfg := runtime.Config{Command: "codex"}
+
+	if err := p.Start(context.Background(), "gc-test-agent", cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	for _, c := range startupDialogTmuxCalls(fake) {
+		if isStartupDialogCapture(c) || len(c.cmd) > 1 && c.cmd[1] == "send-keys" {
+			t.Fatalf("startup dialog interaction with nil and no hints: %v", c.cmd)
+		}
+	}
+}
+
+func TestStartCleansUpWhenStartupDialogHandlingIsCanceled(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newStartupDialogTestProvider(fake)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stderr strings.Builder
+	p.stderr = &stderr
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) > 1 && cmd[0] == "tmux" && cmd[1] == "capture-pane" {
+			cancel()
+		}
+		return "", nil
+	}
+
+	err := p.Start(ctx, "gc-test-agent", startupDialogTestConfig())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start error = %v, want context.Canceled", err)
+	}
+	if _, exists := fake.pods["gc-test-agent"]; exists {
+		t.Fatal("pod remains after startup dialog cancellation; want cleanup")
+	}
+	var deleted bool
+	for _, c := range fake.calls {
+		if c.method == "deletePod" && c.pod == "gc-test-agent" {
+			deleted = true
+			break
+		}
+	}
+	if !deleted {
+		t.Fatal("Start did not delete the pod after startup dialog cancellation")
+	}
+	if !strings.Contains(stderr.String(), "gc: warning: accepting startup dialogs") {
+		t.Fatalf("warning output = %q, want startup dialog warning", stderr.String())
+	}
+}
+
+func TestStartWarnsAndContinuesWhenStartupDialogReadFails(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newStartupDialogTestProvider(fake)
+	var stderr strings.Builder
+	p.stderr = &stderr
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) > 1 && cmd[0] == "tmux" && cmd[1] == "capture-pane" {
+			return "", errors.New("pane capture failed")
+		}
+		return "", nil
+	}
+
+	if err := p.Start(context.Background(), "gc-test-agent", startupDialogTestConfig()); err != nil {
+		t.Fatalf("Start should continue after a non-cancellation dialog error: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "gc: warning: accepting startup dialogs") || !strings.Contains(stderr.String(), "pane capture failed") {
+		t.Fatalf("warning output = %q, want dialog warning with underlying error", stderr.String())
 	}
 }
 
@@ -2599,7 +3538,7 @@ func TestBuildPodServiceAccount(t *testing.T) {
 func TestInitCityInPodSkipsDolt(t *testing.T) {
 	fake := newFakeK8sOps()
 
-	err := initCityInPod(context.Background(), fake, "gc-mayor", "/city", "")
+	err := initCityInPod(context.Background(), fake, "gc-mayor", "/city", "", nil)
 	if err != nil {
 		t.Fatalf("initCityInPod: %v", err)
 	}
@@ -2625,15 +3564,8 @@ func TestInitCityInPodSkipsDolt(t *testing.T) {
 		t.Fatal("gc init command not found in exec calls")
 	}
 
-	hasSkip := false
-	for _, arg := range gcInitCmd {
-		if arg == "GC_DOLT=skip" {
-			hasSkip = true
-			break
-		}
-	}
-	if !hasSkip {
-		t.Errorf("gc init should run with GC_DOLT=skip; got cmd=%v", gcInitCmd)
+	if !strings.Contains(strings.Join(gcInitCmd, " "), `env -i PATH="$PATH" HOME="$HOME" GC_DOLT=skip`) {
+		t.Errorf("gc init should run with a minimal environment and GC_DOLT=skip; got cmd=%v", gcInitCmd)
 	}
 
 	// Pod-local init only scaffolds a session filesystem; it must not register
@@ -2659,6 +3591,405 @@ func TestInitCityInPodSkipsDolt(t *testing.T) {
 		if arg == "--remote-stage" {
 			t.Errorf("gc init in the pod must not carry --remote-stage (old images refuse unknown flags); got cmd=%v", gcInitCmd)
 		}
+	}
+}
+
+func TestInitCityInPodUsesCanonicalHQHostedIdentity(t *testing.T) {
+	fake := newFakeK8sOps()
+	identity := &podHostedDoltIdentity{
+		ProjectID: "hq-project",
+		Prefix:    "hq",
+		Database:  "bd_hq_project",
+		Host:      "hq.dolt.example",
+		Port:      "4406",
+	}
+	if err := initCityInPod(context.Background(), fake, "gc-mayor", "/city", "", identity); err != nil {
+		t.Fatalf("initCityInPod: %v", err)
+	}
+	for _, call := range fake.calls {
+		if call.method != "execInPod" {
+			continue
+		}
+		for _, arg := range call.cmd {
+			if arg != "gc" {
+				continue
+			}
+			joined := strings.Join(call.cmd, " ")
+			for _, want := range []string{"--dolt-host hq.dolt.example", "--dolt-port 4406", "--dolt-database bd_hq_project", "--dolt-project-id hq-project"} {
+				if !strings.Contains(joined, want) {
+					t.Errorf("gc init command %v missing %q", call.cmd, want)
+				}
+			}
+			return
+		}
+	}
+	t.Fatal("gc init command was not issued")
+}
+
+func TestInitCityInPodSanitizesHostedRigEnvironmentForNonHostedCity(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.postStartSettle = 0
+	cityPath := t.TempDir()
+	var gcInitCmd []string
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) == 6 && cmd[0] == "sh" && cmd[5] == archiveExtractAck {
+			return archiveExtractAck, nil
+		}
+		if len(cmd) >= 4 && cmd[0] == "sh" && cmd[1] == "-c" && cmd[3] == "gc" {
+			gcInitCmd = append([]string(nil), cmd...)
+		}
+		return "", nil
+	}
+
+	cfg := runtime.Config{
+		Command: "claude",
+		WorkDir: cityPath,
+		Env: map[string]string{
+			"GC_AGENT":                   "rig/polecat",
+			"GC_CITY":                    cityPath,
+			"GC_STORE_ROOT":              cityPath,
+			"GC_BEADS_PROJECT_ID":        "rig-project",
+			"GC_BEADS_PREFIX":            "rg",
+			"GC_DOLT_DATABASE":           "bd_rig_project",
+			"GC_DOLT_HOST":               "rig.dolt.example",
+			"GC_DOLT_PORT":               "3307",
+			"GC_DOLT_USER":               "rig-user",
+			"GC_DOLT_PASSWORD":           "rig-password",
+			"GC_BEADS_TRANSPORT":         "direct",
+			"GC_BEADS_TARGET":            "external",
+			"BEADS_DOLT_SERVER_HOST":     "rig.dolt.example",
+			"BEADS_DOLT_SERVER_PORT":     "3307",
+			"BEADS_DOLT_SERVER_DATABASE": "bd_rig_project",
+			"BEADS_DOLT_SERVER_MODE":     "direct",
+			"BEADS_DOLT_SERVER_TLS":      "true",
+			"BEADS_DOLT_SERVER_SOCKET":   "/tmp/rig-dolt.sock",
+			"BEADS_DOLT_SERVER_USER":     "rig-user",
+			"BEADS_DOLT_SERVER_PASSWORD": "rig-password",
+			"BEADS_DOLT_PASSWORD":        "rig-password",
+		},
+	}
+	if err := p.Start(context.Background(), "gc-rig-worker", cfg); err != nil {
+		t.Fatalf("Start hosted rig worker with non-hosted City: %v", err)
+	}
+	if len(gcInitCmd) == 0 {
+		t.Fatal("gc init command was not issued")
+	}
+	if got, want := gcInitCmd[2], `exec env -i PATH="$PATH" HOME="$HOME" GC_DOLT=skip GC_REMOTE_STAGE_CONTROLLER="$GC_REMOTE_STAGE_CONTROLLER" GC_REMOTE_STAGE_CITY="$GC_REMOTE_STAGE_CITY" "$0" "$@"`; got != want {
+		t.Fatalf("gc init launcher = %q, want minimal environment launcher %q", got, want)
+	}
+	joined := strings.Join(gcInitCmd, " ")
+	for _, forbidden := range []string{
+		"GC_DOLT_HOST=", "GC_DOLT_PORT=", "GC_DOLT_USER=", "GC_DOLT_PASSWORD=", "GC_DOLT_DATABASE=",
+		"GC_BEADS_PROJECT_ID=", "GC_BEADS_PREFIX=", "GC_BEADS_TRANSPORT=", "GC_BEADS_TARGET=",
+		"BEADS_DOLT_SERVER_HOST=", "BEADS_DOLT_SERVER_PORT=", "BEADS_DOLT_SERVER_DATABASE=",
+		"BEADS_DOLT_SERVER_MODE=", "BEADS_DOLT_SERVER_TLS=", "BEADS_DOLT_SERVER_SOCKET=",
+		"BEADS_DOLT_SERVER_USER=", "BEADS_DOLT_SERVER_PASSWORD=", "BEADS_DOLT_PASSWORD=",
+		"rig-project", "bd_rig_project", "rig.dolt.example", "rig-user", "rig-password", "/tmp/rig-dolt.sock",
+		"--dolt-host", "--dolt-port", "--dolt-database", "--dolt-project-id",
+	} {
+		if strings.Contains(joined, forbidden) {
+			t.Errorf("non-hosted City gc init unexpectedly received rig identity %q: %v", forbidden, gcInitCmd)
+		}
+	}
+}
+
+func TestBuildPodRigProjectionUsesPodPathAndEffectiveSuspension(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+suspended_on_start = true
+
+[[rigs]]
+name = "gascity"
+path = "rigs/gascity"
+suspended_on_start = true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc", "runtime"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// An explicit resume overrides the authored suspended_on_start default.
+	if err := os.WriteFile(filepath.Join(cityPath, ".gc", "runtime", "suspension-state.json"), []byte(`{"city":{"suspended":false},"rigs":{"gascity":{"suspended":false},"other":{"suspended":true}},"agents":{"gascity/codex":{"suspended":true}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	projection, err := buildPodRigProjection(cityPath, runtime.Config{Env: map[string]string{
+		"GC_CITY":     cityPath,
+		"GC_RIG":      "gascity",
+		"GC_RIG_ROOT": filepath.Join(cityPath, "rigs", "gascity"),
+	}})
+	if err != nil {
+		t.Fatalf("buildPodRigProjection: %v", err)
+	}
+	if projection == nil {
+		t.Fatal("projection = nil, want rig projection")
+	}
+	if got, want := projection.binding.Path, "/workspace/rigs/gascity"; got != want {
+		t.Errorf("projected rig path = %q, want %q", got, want)
+	}
+	if suspensionstate.EffectiveCitySuspended(projection.suspension, true) {
+		t.Error("effective city suspension = true, want explicit resume state to override suspended_on_start")
+	}
+	if suspensionstate.EffectiveRigSuspended(projection.suspension, "gascity", true) {
+		t.Error("effective rig suspension = true, want explicit resume state to override suspended_on_start")
+	}
+	if got := projection.suspension.City.Suspended; got == nil || *got {
+		t.Errorf("projected city suspension override = %v, want explicit false", got)
+	}
+	if got := projection.suspension.Rigs["gascity"].Suspended; got == nil || *got {
+		t.Errorf("projected suspension override = %v, want explicit false", got)
+	}
+	if got := projection.suspension.Rigs["other"].Suspended; got == nil || !*got {
+		t.Errorf("other rig suspension = %v, want preserved true", got)
+	}
+	if got := projection.suspension.Agents["gascity/codex"].Suspended; got == nil || !*got {
+		t.Errorf("reserved agent suspension = %v, want preserved true", got)
+	}
+}
+
+func TestBuildPodRigProjectionKeepsSuspendedOnStartDefaults(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+suspended_on_start = true
+
+[[rigs]]
+name = "gascity"
+path = "rigs/gascity"
+suspended_on_start = true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	projection, err := buildPodRigProjection(cityPath, runtime.Config{Env: map[string]string{
+		"GC_CITY":     cityPath,
+		"GC_RIG":      "gascity",
+		"GC_RIG_ROOT": filepath.Join(cityPath, "rigs", "gascity"),
+	}})
+	if err != nil {
+		t.Fatalf("buildPodRigProjection: %v", err)
+	}
+	if got := projection.suspension.City.Suspended; got == nil || !*got {
+		t.Errorf("city suspension = %v, want explicit true from suspended_on_start", got)
+	}
+	if got := projection.suspension.Rigs["gascity"].Suspended; got == nil || !*got {
+		t.Errorf("rig suspension = %v, want explicit true from suspended_on_start", got)
+	}
+}
+
+func TestRefreshPodRigSuspensionSnapshotUsesLatestState(t *testing.T) {
+	cityPath := t.TempDir()
+	statePath := citylayout.SuspensionStateFile(cityPath)
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, []byte(`{"city":{"suspended":true},"rigs":{"gascity":{"suspended":true},"other":{"suspended":true}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	projection := &podRigProjection{
+		binding:              config.RigSiteBinding{Name: "gascity", Path: "/workspace/rigs/gascity"},
+		suspension:           suspensionstate.State{},
+		citySuspendedOnStart: false,
+		rigSuspendedOnStart:  false,
+	}
+	if err := refreshPodRigSuspensionSnapshot(cityPath, projection); err != nil {
+		t.Fatalf("refreshPodRigSuspensionSnapshot: %v", err)
+	}
+	if got := projection.suspension.City.Suspended; got == nil || !*got {
+		t.Errorf("refreshed city suspension = %v, want true", got)
+	}
+	if got := projection.suspension.Rigs["gascity"].Suspended; got == nil || !*got {
+		t.Errorf("refreshed rig suspension = %v, want true", got)
+	}
+	if got := projection.suspension.Rigs["other"].Suspended; got == nil || !*got {
+		t.Errorf("other rig suspension = %v, want preserved true", got)
+	}
+}
+
+func TestBuildPodRigProjectionUsesSchema2AbsoluteSiteBinding(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, "rigs", "gascity"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[[rigs]]
+name = "gascity"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte(`[pack]
+name = "city"
+schema = 2
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".gc", "site.toml"), []byte(fmt.Sprintf(`[[rig]]
+name = "gascity"
+path = %q
+`, filepath.Join(cityPath, "rigs", "gascity"))), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := runtime.Config{WorkDir: filepath.Join(cityPath, "rigs", "gascity"), Env: map[string]string{
+		"GC_CITY":     cityPath + "/",
+		"GC_RIG":      "gascity",
+		"GC_RIG_ROOT": filepath.Join(cityPath, "rigs", ".", "gascity"),
+	}}
+	projection, err := buildPodRigProjection(controllerCityPath(cfg.Env), cfg)
+	if err != nil {
+		t.Fatalf("buildPodRigProjection from schema-2 site binding: %v", err)
+	}
+	if got := projection.binding.Path; got != "/workspace/rigs/gascity" {
+		t.Fatalf("projected path = %q, want /workspace/rigs/gascity", got)
+	}
+	pod, err := buildPod("rig-agent", cfg, newProviderWithOps(newFakeK8sOps()))
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+	if got := projectedPodWorkDir(cfg); got != "/workspace/rigs/gascity" {
+		t.Fatalf("projected workdir = %q, want normalized /workspace path", got)
+	}
+	if got := podEnvValue(pod, "GC_RIG_ROOT"); got != "/workspace/rigs/gascity" {
+		t.Fatalf("pod GC_RIG_ROOT = %q, want normalized /workspace path", got)
+	}
+}
+
+func TestBuildPodRigProjectionRejectsUnpairedRigEnvironment(t *testing.T) {
+	for _, env := range []map[string]string{
+		{"GC_RIG": "gascity"},
+		{"GC_RIG_ROOT": "/city/rigs/gascity"},
+	} {
+		if _, err := buildPodRigProjection("/city", runtime.Config{Env: env}); err == nil || !strings.Contains(err.Error(), "requires both GC_RIG and GC_RIG_ROOT") {
+			t.Errorf("buildPodRigProjection(%v) error = %v, want paired environment error", env, err)
+		}
+	}
+}
+
+func TestBuildPodRigProjectionRejectsUnmappedRigPath(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[[rigs]]
+name = "gascity"
+path = "../outside"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := buildPodRigProjection(cityPath, runtime.Config{Env: map[string]string{
+		"GC_CITY":     cityPath,
+		"GC_RIG":      "gascity",
+		"GC_RIG_ROOT": filepath.Join(cityPath, "..", "outside"),
+	}})
+	if err == nil || !strings.Contains(err.Error(), "outside controller City") {
+		t.Fatalf("buildPodRigProjection error = %v, want unmapped rig path error", err)
+	}
+}
+
+func TestBuildPodRigProjectionRejectsGCPathThatDoesNotMatchConfiguredRig(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[[rigs]]
+name = "gascity"
+path = "rigs/gascity"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := buildPodRigProjection(cityPath, runtime.Config{Env: map[string]string{
+		"GC_CITY":     cityPath,
+		"GC_RIG":      "gascity",
+		"GC_RIG_ROOT": filepath.Join(cityPath, "rigs", "..", "other"),
+	}})
+	if err == nil || !strings.Contains(err.Error(), "does not match configured path") {
+		t.Fatalf("buildPodRigProjection error = %v, want GC_RIG_ROOT/configured path mismatch", err)
+	}
+}
+
+func TestApplyPodRigProjectionReplacesOnlyRelevantBindingAndState(t *testing.T) {
+	projection := &podRigProjection{
+		binding:       config.RigSiteBinding{Name: "gascity", Path: "/workspace/rigs/gascity"},
+		linuxUsername: "gcuser",
+		suspension: suspensionstate.State{
+			City: suspensionstate.Override{Suspended: boolPtr(false)},
+			Rigs: map[string]suspensionstate.Override{
+				"gascity": {Suspended: boolPtr(false)},
+			},
+		},
+	}
+	fake := newFakeK8sOps()
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 4 && cmd[0] == "sh" && strings.Contains(cmd[2], "__GC_SITE_BINDING_MISSING__") {
+			return siteBindingReadOutputAt("/workspace/.gc/site-target.toml", "workspace_name = \"workspace\"\nworkspace_prefix = \"ws\"\n[[rig]]\nname = \"old\"\npath = \"/workspace/rigs/old\"\ncustom = \"keep\"\n"), nil
+		}
+		return "", nil
+	}
+
+	if err := applyPodRigProjection(context.Background(), fake, "pod", projection); err != nil {
+		t.Fatalf("applyPodRigProjection: %v", err)
+	}
+	if len(fake.calls) != 2 {
+		t.Fatalf("exec calls = %d, want site read and atomic projection write", len(fake.calls))
+	}
+	write := fake.calls[1]
+	if write.method != "execInPod" || len(write.cmd) < 9 || write.cmd[0] != "sh" {
+		t.Fatalf("projection write command = %#v", write)
+	}
+	if got := write.cmd[6]; got != "/workspace/.gc/site-target.toml" {
+		t.Errorf("projection write target = %q, want resolved symlink target", got)
+	}
+	if got := write.cmd[8]; got != "gcuser" || !strings.Contains(write.cmd[2], `chown "$5"`) {
+		t.Errorf("projection writer should restore dynamic-user ownership; argv=%#v", write.cmd)
+	}
+	siteData, err := base64.StdEncoding.DecodeString(write.cmd[4])
+	if err != nil {
+		t.Fatalf("decode projected site binding: %v", err)
+	}
+	if !strings.Contains(string(siteData), `workspace_name = "workspace"`) || !strings.Contains(string(siteData), `workspace_prefix = "ws"`) || !strings.Contains(string(siteData), `name = "gascity"`) || !strings.Contains(string(siteData), `path = "/workspace/rigs/gascity"`) || !strings.Contains(string(siteData), `name = "old"`) || !strings.Contains(string(siteData), `custom = "keep"`) {
+		t.Fatalf("projected site binding did not preserve workspace identity and other rig data:\n%s", siteData)
+	}
+	stateData, err := base64.StdEncoding.DecodeString(write.cmd[5])
+	if err != nil {
+		t.Fatalf("decode projected suspension state: %v", err)
+	}
+	var state suspensionstate.State
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("decode projected suspension state JSON: %v", err)
+	}
+	if got := state.Rigs["gascity"].Suspended; got == nil || *got {
+		t.Fatalf("projected rig suspension = %v, want explicit false", got)
+	}
+	if got := state.City.Suspended; got == nil || *got {
+		t.Fatalf("projected city suspension = %v, want explicit false", got)
+	}
+	if len(state.Rigs) != 1 {
+		t.Fatalf("projected rig states = %#v, want only selected rig", state.Rigs)
+	}
+}
+
+func TestApplyPodRigProjectionCreatesMissingSiteBinding(t *testing.T) {
+	projection := &podRigProjection{
+		binding: config.RigSiteBinding{Name: "gascity", Path: "/workspace/rigs/gascity"},
+		suspension: suspensionstate.State{Rigs: map[string]suspensionstate.Override{
+			"gascity": {Suspended: boolPtr(false)},
+		}},
+	}
+	fake := newFakeK8sOps()
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 4 && cmd[0] == "sh" && strings.Contains(cmd[2], "__GC_SITE_BINDING_MISSING__") {
+			return siteBindingReadOutput("__GC_SITE_BINDING_MISSING__"), nil
+		}
+		return "", nil
+	}
+	if err := applyPodRigProjection(context.Background(), fake, "pod", projection); err != nil {
+		t.Fatalf("applyPodRigProjection with missing site.toml: %v", err)
+	}
+	if len(fake.calls) != 2 {
+		t.Fatalf("exec calls = %d, want site read and projection write", len(fake.calls))
+	}
+	write := fake.calls[1].cmd
+	siteData, err := base64.StdEncoding.DecodeString(write[4])
+	if err != nil {
+		t.Fatalf("decode projected site binding: %v", err)
+	}
+	if !strings.Contains(string(siteData), `name = "gascity"`) || !strings.Contains(string(siteData), `path = "/workspace/rigs/gascity"`) {
+		t.Fatalf("missing site binding did not produce selected rig binding:\n%s", siteData)
 	}
 }
 
@@ -2693,7 +4024,7 @@ func TestInitCityInPodRemovesPartialCopyAfterUploadFailure(t *testing.T) {
 	uploadErr := errors.New("pod upload failed")
 	ops := &cleanupCaptureOps{fakeK8sOps: newFakeK8sOps(), cancel: cancel, uploadErr: uploadErr}
 
-	err := initCityInPod(ctx, ops, "gc-mayor", t.TempDir(), "")
+	err := initCityInPod(ctx, ops, "gc-mayor", t.TempDir(), "", nil)
 	if !errors.Is(err, uploadErr) {
 		t.Fatalf("initCityInPod error = %v, want %v", err, uploadErr)
 	}

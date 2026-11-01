@@ -244,6 +244,33 @@ func TestStageFilesStagesKiroPackOverlayAtPodWorkDirForRigWorkDir(t *testing.T) 
 	}
 }
 
+func TestStageFilesUsesNormalizedPodWorkDirForRigWorkDir(t *testing.T) {
+	cityRoot := t.TempDir()
+	workDir := filepath.Join(cityRoot, "rigs", "team")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", workDir, err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "task.txt"), []byte("rig payload"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	cfg := runtime.Config{
+		WorkDir: cityRoot + "/rigs/./team",
+		Env:     map[string]string{"GC_CITY": cityRoot + "/"},
+	}
+	ops := newCapturingStageOps()
+	if staged, err := stageFiles(context.Background(), ops, "gc-rig", cfg, cityRoot+"/", io.Discard); err != nil {
+		t.Fatalf("stageFiles: %v", err)
+	} else if !staged {
+		t.Fatal("stageFiles did not report the copied rig workdir")
+	}
+	if got := ops.files["/workspace/rigs/team/task.txt"]; got != "rig payload" {
+		t.Fatalf("staged rig file = %q, want payload at normalized pod workdir", got)
+	}
+	if _, ok := ops.files["/workspace/task.txt"]; ok {
+		t.Fatal("rig workdir payload was staged at workspace root instead of normalized rig path")
+	}
+}
+
 func TestStageFilesUsesConcreteProviderOverlayName(t *testing.T) {
 	workDir := t.TempDir()
 	packOverlay := t.TempDir()
@@ -528,7 +555,7 @@ func TestInitCityInPodSkipsSuccessfullyStagedNestedWorkDir(t *testing.T) {
 	}
 
 	cityOps := newCapturingStageOps()
-	if err := initCityInPod(context.Background(), cityOps, "pod", city, skipRel); err != nil {
+	if err := initCityInPod(context.Background(), cityOps, "pod", city, skipRel, nil); err != nil {
 		t.Fatalf("initCityInPod: %v", err)
 	}
 	for _, skipped := range []string{"/tmp/city-src/rigs/team/active.txt", "/tmp/city-src/rigs/team/nested/task.txt"} {
@@ -569,7 +596,7 @@ func TestInitCityInPodKeepsUnstagedWorkDirInTemplate(t *testing.T) {
 	}
 
 	cityOps := newCapturingStageOps()
-	if err := initCityInPod(context.Background(), cityOps, "pod", city, skipRel); err != nil {
+	if err := initCityInPod(context.Background(), cityOps, "pod", city, skipRel, nil); err != nil {
 		t.Fatalf("initCityInPod: %v", err)
 	}
 	if got := cityOps.files["/tmp/city-src/rigs/team"]; got != "unstaged workdir" {
