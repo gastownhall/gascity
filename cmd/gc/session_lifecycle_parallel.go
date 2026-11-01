@@ -2860,10 +2860,7 @@ var staleResumeKeyProbe = func(searchPaths []string, provider, workDir, sessionK
 // its own default roots: [daemon] observe_paths are Claude roots, and pi
 // walks every root it is given recursively.
 func keyedProbeRoots(searchPaths []string, provider string) []string {
-	if len(searchPaths) == 0 || !strings.Contains(strings.ToLower(strings.TrimSpace(provider)), "claude") {
-		return worker.DefaultSearchPaths()
-	}
-	return searchPaths
+	return workertranscript.KeyedProbeRoots(searchPaths, provider)
 }
 
 // launchTranscriptRoots is the roots a keyed probe searches for a launch of

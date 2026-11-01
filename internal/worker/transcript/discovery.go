@@ -199,6 +199,19 @@ func ProviderHasKeyedTranscript(provider string) bool {
 	return strings.Contains(strings.ToLower(strings.TrimSpace(provider)), "claude")
 }
 
+// KeyedProbeRoots is the roots a keyed probe of provider searches. A
+// claude-family probe searches the roots exactly as given, adding no default
+// of its own, so an empty list means the defaults rather than nothing. Every
+// other family probes the defaults alone, on top of which its reader adds
+// its own default roots: observed roots are Claude roots, and pi walks every
+// root it is given recursively.
+func KeyedProbeRoots(searchPaths []string, provider string) []string {
+	if len(searchPaths) == 0 || !strings.Contains(strings.ToLower(strings.TrimSpace(provider)), "claude") {
+		return sessionlog.DefaultSearchPaths()
+	}
+	return searchPaths
+}
+
 // DiscoverScopedPath resolves a transcript for families whose on-disk layout is
 // keyed by the session's own identity — name, bead id and conversation epoch —
 // rather than by any provider session id gc holds.

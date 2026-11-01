@@ -820,19 +820,36 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	if resumeCommand := strings.TrimSpace(h.session.Resume.ResumeCommand); resumeCommand != "" {
 		resumeInfo.ResumeCommand = resumeCommand
 	}
-	isClaude := strings.Contains(strings.ToLower(strings.TrimSpace(resumeInfo.Provider)), "claude")
-	probePaths := h.searchPaths
-	if len(probePaths) == 0 || !isClaude {
-		probePaths = DefaultSearchPaths()
-	}
-	if dir := strings.TrimSpace(h.session.Env["CLAUDE_CONFIG_DIR"]); isClaude && filepath.IsAbs(dir) {
-		probePaths = MergeSearchPaths(append(append([]string(nil), probePaths...), filepath.Join(dir, "projects")))
-	}
-	present, probeable := workertranscript.HasKeyedTranscript(probePaths, resumeInfo.Provider, resumeInfo.WorkDir, resumeInfo.SessionKey)
-	if probeable && !present && h.session.Resume.SessionIDFlag != "" {
+	if h.unlaunchedSessionKey(info) {
 		return startCommandWithSessionID(resumeInfo, h.session)
 	}
 	return sessionpkg.BuildResumeCommand(resumeInfo), nil
+}
+
+// unlaunchedSessionKey reports whether info's session key names a conversation
+// the provider never created, so a start must create it under the key with the
+// session-id flag rather than resume it: a restart handoff rotates the key onto
+// a row whose creation_complete_at keeps it off the first-start path. It holds
+// when the handle has a session-id flag and the keyed-transcript probe, over
+// the roots and work dir this launch reads, finds no transcript for the key. A
+// provider the probe cannot read keeps the resume.
+func (h *SessionHandle) unlaunchedSessionKey(info sessionpkg.Info) bool {
+	key := strings.TrimSpace(info.SessionKey)
+	if h.session.Resume.SessionIDFlag == "" || key == "" {
+		return false
+	}
+	hints := h.runtimeHints()
+	workDir := strings.TrimSpace(hints.WorkDir)
+	if workDir == "" {
+		workDir = info.WorkDir
+	}
+	provider := h.historyProvider(info)
+	launchRoots := h.adapter.SearchPaths
+	if dir := strings.TrimSpace(h.session.Env["CLAUDE_CONFIG_DIR"]); filepath.IsAbs(dir) {
+		launchRoots = sessionlog.MergeSearchPaths(append(append([]string(nil), launchRoots...), filepath.Join(dir, "projects")))
+	}
+	present, probeable := workertranscript.HasKeyedTranscript(workertranscript.KeyedProbeRoots(launchRoots, provider), provider, workDir, key)
+	return probeable && !present
 }
 
 func startCommandWithSessionID(info sessionpkg.Info, spec SessionSpec) (string, error) {
