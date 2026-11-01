@@ -1177,7 +1177,24 @@ func (m *Manager) liveAgent(sessName string, processNames []string) bool {
 	return err == nil && live.Running && live.Alive
 }
 
-func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id string, inc Incarnation, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+// StartRuntimeWitness is the session layer's evidence for how a runtime-only
+// start resolved. A caller can distinguish its own Provider.Start attempt
+// from an IsRunning reuse without inferring that fact from provider metadata.
+type StartRuntimeWitness uint8
+
+const (
+	// StartRuntimeWitnessUnknown means the start returned before its reuse or
+	// provider-start decision was made.
+	StartRuntimeWitnessUnknown StartRuntimeWitness = iota
+	// StartRuntimeWitnessReused means the locked IsRunning check found a runtime
+	// and Provider.Start was not called.
+	StartRuntimeWitnessReused
+	// StartRuntimeWitnessProviderStart means Provider.Start was attempted,
+	// whether or not the provider returned an error.
+	StartRuntimeWitnessProviderStart
+)
+
+func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id string, inc Incarnation, b beads.Bead, sessName, resumeCommand string, hints runtime.Config, witness *StartRuntimeWitness) error {
 	// It runs under its caller's lease (by.Lease) and takes none: without
 	// one it refuses rather than start outside the lease.
 	if by.Lease == nil {
@@ -1196,6 +1213,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 	transport, _ := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
 	if m.sp.IsRunning(sessName) {
+		*witness = StartRuntimeWitnessReused
 		return nil
 	}
 	if resumeCommand == "" {
@@ -1237,6 +1255,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 		}
 		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 	}
+	*witness = StartRuntimeWitnessProviderStart
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		switch {
 		// A capacity refusal says nothing about the resume key; it takes the
@@ -1666,16 +1685,28 @@ func (m *Manager) Start(ctx context.Context, by Actor, id, resumeCommand string,
 // incarnation the caller's PreWake minted under that lease
 // (MintIncarnation).
 func (m *Manager) StartRuntimeOnly(ctx context.Context, by Actor, id string, inc Incarnation, resumeCommand string, hints runtime.Config) error {
+	_, err := m.StartRuntimeOnlyWithWitness(ctx, by, id, inc, resumeCommand, hints)
+	return err
+}
+
+// StartRuntimeOnlyWithWitness is StartRuntimeOnly and reports how its
+// session-layer start decision resolved. Reused means the locked IsRunning
+// check found an existing runtime and Provider.Start was not called;
+// ProviderStart means Provider.Start was attempted, even if it returned an
+// error. Unknown means the method returned before either decision.
+func (m *Manager) StartRuntimeOnlyWithWitness(ctx context.Context, by Actor, id string, inc Incarnation, resumeCommand string, hints runtime.Config) (StartRuntimeWitness, error) {
+	witness := StartRuntimeWitnessUnknown
 	if err := m.checkStarter(by); err != nil {
-		return err
+		return witness, err
 	}
-	return withSessionMutationLock(id, func() error {
+	err := withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		return m.ensureRunningRuntimeOnly(ctx, by, id, inc, b, sessName, resumeCommand, hints)
+		return m.ensureRunningRuntimeOnly(ctx, by, id, inc, b, sessName, resumeCommand, hints, &witness)
 	})
+	return witness, err
 }
 
 // Send starts or resumes the session as its actor may, then nudges the

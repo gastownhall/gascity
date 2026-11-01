@@ -91,6 +91,48 @@ evidence from tests, source, an issue, or a commit.
   allocation. Keep the fresh read and write inside that lock; provider calls
   and retired-session cleanup stay outside. This is an in-process fence, not
   protection against arbitrary external bead writers.
+- A bounded pre-PreWake liveness result can be unanswered while the old runtime
+  is still alive. Preserve that marker even without a persisted row or PreWake
+  undo, so a later no-start result remains store-only; without the PreWake
+  snapshot there is no T1 state to restore. Positive attribution (reuse,
+  existing-initializing or collision) keeps its full prior-identity restore on
+  legacy stores without conditional writes, guarded by `HeldAt`, `HoldsMeta`
+  and the attempted/current input-fence comparisons. Only the new T1 restore,
+  after unanswered pre-PreWake liveness and an unavailable start-boundary
+  result with an Unknown witness, requires a conditional-write-backed runtime
+  lease on the write. If that conditional writer is unavailable, restore the
+  lifecycle fields and clear the in-flight marker while retaining the minted
+  identity. The held runtime-name lease excludes another supported starter
+  from creating a runtime with the minted identity before a strict T1 restore.
+  Roll back only this attempt's restart marker for completed store-only or
+  unanswered results and safe T1 restores, and only while the reset generation
+  captured with the attempt is still current. Preserve newer restart and
+  progress observations. Apply the local undo even when the row is closed or
+  the runtime-name lease moved; the lease fences only the persisted delta
+  write, which removes this marker and conditionally restores `last_restart`.
+  Skip that write on a closed row, moved lease or newer reset generation, and
+  keep the local undo; log unexpected store failures and exhausted
+  conditional-write retries when the undo patch was still needed. A positive
+  current-identity match blocks T1 restoration even if an earlier read matched
+  T1. Cancellation after preparation but before sync start or async enqueue
+  uses the store-only never-launched cleanup for each prepared item, undoing
+  its breaker delta and PreWake state without provider calls; release its async
+  slot and tracker entry there too. `abandoned`
+  means the wave stopped waiting for a result (or did not launch it); caller
+  cancellation does not relabel a completed result the wave received. A
+  launched call the wave stopped waiting for before it completed may have
+  reached Provider.Start, so retain its attempted identity and breaker entry.
+- A planner start takes its runtime-name lease before preparation. Its caller
+  must size the lease for the preparation allowance plus the full start-wave
+  deadline. The planner reserves the default 60-second preparation allowance
+  (or a larger explicit budget) once across batches of at most three starts;
+  its cumulative meter defers later candidates but does not interrupt the
+  candidate currently being prepared, whose liveness and identity probes have
+  their own three-second bounds;
+  the lease TTL also includes the wave slack and compensates for
+  `SafeUntil`'s clock-skew subtraction so the normal runtime-lease margin
+  remains after that bounded window. Keep `RuntimeLeaseTTL`'s generic
+  startup-window semantics unchanged.
 - The mutation lock's acquire can be timed. `WithSessionMutationLockContext`
   tries the lock first, then waits no longer than its context; a wait that
   ends with the lock still held returns `ErrSessionMutationBusy` (wrapping the

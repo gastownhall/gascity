@@ -36,26 +36,34 @@ func (h *SessionHandle) Start(ctx context.Context, by sessionpkg.Actor) (err err
 // materialize provider-specific runtime config but should still delegate the
 // provider-specific runtime bring-up through the worker boundary.
 func (h *SessionHandle) StartResolved(ctx context.Context, by sessionpkg.Actor, inc sessionpkg.Incarnation, startCommand string, hints runtime.Config) (err error) {
+	_, err = h.StartResolvedWithWitness(ctx, by, inc, startCommand, hints)
+	return err
+}
+
+// StartResolvedWithWitness is StartResolved and reports the session layer's
+// evidence for whether it reused an existing runtime or attempted
+// Provider.Start.
+func (h *SessionHandle) StartResolvedWithWitness(ctx context.Context, by sessionpkg.Actor, inc sessionpkg.Incarnation, startCommand string, hints runtime.Config) (witness sessionpkg.StartRuntimeWitness, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationStartResolved)
 	defer func() { event.finish(err) }()
 
 	id, err := h.ensureSessionID()
 	if err != nil {
-		return err
+		return witness, err
 	}
 	command := strings.TrimSpace(startCommand)
 	if command == "" {
 		command, err = h.startCommand(id)
 		if err != nil {
-			return err
+			return witness, err
 		}
 	}
 	startHints := hints
 	if strings.TrimSpace(startHints.Command) == "" {
 		startHints = h.runtimeHints()
 	}
-	err = h.manager.StartRuntimeOnly(ctx, by, id, inc, command, startHints)
-	return err
+	witness, err = h.manager.StartRuntimeOnlyWithWitness(ctx, by, id, inc, command, startHints)
+	return witness, err
 }
 
 // Attach ensures the worker runtime is live and then attaches the caller's
