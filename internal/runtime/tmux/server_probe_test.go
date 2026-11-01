@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -91,8 +92,8 @@ func TestNewSessionErrNoServerRefusesObservedLiveNamedSocket(t *testing.T) {
 			if observerCalls != 1 {
 				t.Fatalf("observer calls = %d, want 1", observerCalls)
 			}
-			if len(fe.calls) != 1 || !firstArgsContainHasSession(fe.calls[0]) {
-				t.Fatalf("calls = %#v, want exactly the preflight has-session probe", fe.calls)
+			if len(fe.calls) != 2 || !firstArgsContainHasSession(fe.calls[0]) || !reflect.DeepEqual(fe.calls[1], fe.calls[0]) {
+				t.Fatalf("calls = %#v, want exactly the preflight has-session probe and its re-probe", fe.calls)
 			}
 		})
 	}
@@ -149,8 +150,8 @@ func TestNewSessionErrNoServerUnknownObservationFailsClosed(t *testing.T) {
 		if errors.Is(err, ErrNoServer) {
 			t.Fatalf("err = %v, must not wrap ErrNoServer", err)
 		}
-		if len(fe.calls) != 1 {
-			t.Fatalf("calls = %#v, want only the preflight probe", fe.calls)
+		if len(fe.calls) != 2 || !firstArgsContainHasSession(fe.calls[0]) || !reflect.DeepEqual(fe.calls[1], fe.calls[0]) {
+			t.Fatalf("calls = %#v, want only the preflight probe and its re-probe", fe.calls)
 		}
 	})
 
@@ -271,6 +272,90 @@ func TestNewSessionErrNoServerUnknownObservationFailsClosed(t *testing.T) {
 		close(release)
 		<-finished
 	})
+}
+
+// newSessionVariants covers every NewSession entry point that runs the
+// preflight probe before creating.
+var newSessionVariants = []struct {
+	name string
+	call func(*Tmux) error
+}{
+	{name: "NewSession", call: func(tm *Tmux) error {
+		return tm.NewSession("gc-reprobe", "")
+	}},
+	{name: "NewSessionWithCommand", call: func(tm *Tmux) error {
+		return tm.NewSessionWithCommand("gc-reprobe", "", "true")
+	}},
+	{name: "NewSessionWithCommandAndEnv", call: func(tm *Tmux) error {
+		return tm.NewSessionWithCommandAndEnv("gc-reprobe", "", "true", map[string]string{"X": "1"})
+	}},
+}
+
+// isCreateCall reports whether args create a session: a direct new-session,
+// or the start-server + source-file script NewSessionWithCommandAndEnv runs.
+func isCreateCall(args []string) bool {
+	return slices.Contains(args, "new-session") || slices.Contains(args, "source-file")
+}
+
+// TestNewSessionErrNoServerReprobeAnsweredAllowsCreation forces the
+// concurrent first-start interleaving: the preflight reports no-server, a
+// sibling's server binds the named socket before the observation, and the
+// single re-probe gets a server answer, so creation proceeds.
+func TestNewSessionErrNoServerReprobeAnsweredAllowsCreation(t *testing.T) {
+	observations := []struct {
+		name string
+		err  error
+	}{
+		{name: "live-unix-socket", err: errors.New("path=/s inode=97 peer_pid=4242 reason=live-unix-socket")},
+		{name: "socket-identity-changed", err: errors.New("path=/s reason=socket-identity-changed")},
+	}
+	answers := []struct {
+		name string
+		err  error
+	}{
+		{name: "success"},
+		{name: "session-not-found", err: ErrSessionNotFound},
+		{name: "no-current-target", err: ErrNoCurrentTarget},
+	}
+	probe := []string{"-u", "-L", "gc-race", "has-session", "-t", "=" + probeSessionName}
+	for _, variant := range newSessionVariants {
+		for _, answer := range answers {
+			for _, observation := range observations {
+				t.Run(variant.name+"/"+answer.name+"/"+observation.name, func(t *testing.T) {
+					fe := probeAssertSet(
+						[]string{"", "", "%1", ""},
+						[]error{ErrNoServer, answer.err, nil, nil},
+					)
+					observerCalls := 0
+					tm := &Tmux{
+						cfg:  Config{SocketName: "gc-race"},
+						exec: fe,
+						serverSocketObserver: func(context.Context, string) error {
+							observerCalls++
+							return observation.err
+						},
+					}
+					if err := variant.call(tm); err != nil {
+						t.Fatalf("%s on a server that answered the re-probe: %v (calls=%#v)", variant.name, err, fe.calls)
+					}
+					if observerCalls != 1 {
+						t.Fatalf("observer calls = %d, want 1", observerCalls)
+					}
+					if len(fe.calls) < 3 {
+						t.Fatalf("calls = %#v, want two preflight probes then new-session", fe.calls)
+					}
+					for i := range 2 {
+						if !reflect.DeepEqual(fe.calls[i], probe) {
+							t.Fatalf("preflight call %d = %#v, want %#v", i, fe.calls[i], probe)
+						}
+					}
+					if !isCreateCall(fe.calls[2]) {
+						t.Fatalf("call after preflight = %#v, want session creation", fe.calls[2])
+					}
+				})
+			}
+		}
+	}
 }
 
 type socketModeFileInfo struct{ os.FileInfo }

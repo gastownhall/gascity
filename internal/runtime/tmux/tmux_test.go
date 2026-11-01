@@ -57,11 +57,12 @@ func testTmux() *Tmux {
 	return NewTmuxWithConfig(cfg)
 }
 
-// noServerPreflightExecutor makes only the first has-session preflight report
+// noServerPreflightExecutor makes every has-session preflight probe report
 // ErrNoServer, then delegates every other operation to real tmux. It models a
-// stale protocol observation while retaining the real socket boundary.
+// persistently failing protocol answer while retaining the real socket
+// boundary.
 type noServerPreflightExecutor struct {
-	used bool
+	probes int
 }
 
 func (e *noServerPreflightExecutor) execute(args []string) (string, error) {
@@ -69,8 +70,8 @@ func (e *noServerPreflightExecutor) execute(args []string) (string, error) {
 }
 
 func (e *noServerPreflightExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
-	if !e.used && firstArgsContainHasSession(args) {
-		e.used = true
+	if slices.Contains(args, "="+probeSessionName) {
+		e.probes++
 		return "", ErrNoServer
 	}
 	return realExecutor{}.executeCtx(ctx, args)
