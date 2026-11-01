@@ -1165,11 +1165,33 @@ func SweepReadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int,
 	if err != nil {
 		return 0, nil, err
 	}
+	live := beads.HandlesFor(store.Store).Live
 	for _, b := range candidates {
 		if limit > 0 && closed >= limit {
 			break
 		}
 		if b.Status != "open" {
+			continue
+		}
+		// The candidate list above can answer from the CachingStore's stale
+		// view. A message the user just un-read inside the cache window must
+		// not be closed on the strength of that stale read:true snapshot —
+		// re-verify against the live store immediately before the close,
+		// mirroring PurgeReadMessageWisps's re-verify for the same race. A
+		// stale/no-longer-eligible candidate is skipped without consuming
+		// the close limit.
+		current, err := live.Get(b.ID)
+		if errors.Is(err, beads.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			closeErrs = append(closeErrs, fmt.Errorf("mail %s: live re-verify before close: %w", b.ID, err))
+			continue
+		}
+		if current.Status != "open" {
+			continue
+		}
+		if !hasLabel(current.Labels, "read") {
 			continue
 		}
 		if err := store.SetMetadata(b.ID, "close_reason", closeReason); err != nil {
