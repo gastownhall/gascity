@@ -83,9 +83,12 @@ litellm>=1.106.3
 
 # Security floor: CVE-2026-49852 (HIGH, HS256/HS384/HS512 verify accepts an
 # empty/nil HMAC key — cross-language sibling of CVE-2026-45363) in joserfc
-# < 1.6.8. joserfc arrives transitively via authlib; pin the floor until
-# authlib's transitive constraint carries the patched version itself.
-joserfc>=1.6.8
+# < 1.6.8, and GHSA-jpxq-7h8p-2q76 / CVE-2026-119283 (HIGH, an unbounded JWE
+# General JSON recipients array exhausts CPU in repeated private-key
+# decryption) in joserfc < 1.7.5. joserfc arrives transitively via authlib
+# (joserfc>=1.6.8) and fastmcp-slim (joserfc>=1.1.0); pin the floor until
+# their transitive constraints carry the patched version themselves.
+joserfc>=1.7.5
 
 # Security floor: CVE-2026-52869 + CVE-2026-52870 (HIGH, fixed 1.27.2 — HTTP
 # transports serve session requests without verifying the authenticated

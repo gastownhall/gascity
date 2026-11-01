@@ -169,6 +169,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"filelock>=3.29.0,<4",
 		"opentelemetry-api>=1.45.1",
 		"dnspython>=2.9.0",
+		"joserfc>=1.7.5",
 	} {
 		if !strings.Contains(input, want) {
 			t.Errorf("mcp-agent-mail input requirements missing security floor %q", want)
@@ -198,6 +199,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"urllib3==2.8.0 \\",
 		"fsspec==2026.6.0 \\",
 		"litellm==1.106.3 \\",
+		"joserfc==1.7.7 \\",
 		"fastmcp==3.4.10 \\",
 		"fastmcp-slim==3.4.10 \\",
 		"filelock==3.29.0 \\",
