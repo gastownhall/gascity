@@ -2890,6 +2890,12 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "test/acceptance/beads_adopt_loopback_server_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "test/acceptance/beads_cli_contract_port_file_test.go"
 resource = "subprocess"
 calls = 1
