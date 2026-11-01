@@ -362,7 +362,8 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 // store access in its identity/target resolver family is session-class: session-ID
 // resolution, the gc:session enumeration behind named-target matching, and mailbox
 // identity. The five roots — resolveMailTargetsForCommand,
-// resolveDefaultMailTargetsForCommand, resolveRawMailTargetForStorelessProvider,
+// resolveDefaultMailTargetAndIdentityForCommand (behind
+// resolveDefaultMailTargetsForCommand), resolveRawMailTargetForStorelessProvider,
 // cmdMailSendJSON, cmdMailReplyJSON — derive cliSessionStore(store, cfg, cityPath) and
 // hand it down; the whole resolver family therefore names its parameter sessStore and
 // does NO routing of its own, so a relocation is applied exactly once per command.

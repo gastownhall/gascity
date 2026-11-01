@@ -7158,6 +7158,9 @@ type StatusAgentDetail struct {
 	// Scope city or rig.
 	Scope string `json:"scope"`
 
+	// SessionId Bead ID of the session the row's runtime session resolved to. Omitted when no open session bead records that runtime session (always while the city is suspended, when no bead store is read).
+	SessionId *string `json:"session_id,omitempty"`
+
 	// SessionName tmux session name CLI drain-ops key on.
 	SessionName *string `json:"session_name,omitempty"`
 

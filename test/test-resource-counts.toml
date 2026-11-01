@@ -1172,6 +1172,11 @@ resource = "cwd"
 calls = 6
 
 [[count]]
+path = "cmd/gc/route_equivalence_rigstatus_mail_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
 path = "cmd/gc/runtime_lease_crossproc_test.go"
 resource = "subprocess"
 calls = 1

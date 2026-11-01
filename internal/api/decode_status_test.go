@@ -166,3 +166,24 @@ func TestStatusViewFromGen_PartialMissingField(t *testing.T) {
 		t.Error("Expanded should default to false")
 	}
 }
+
+// TestStatusViewFromGenMapsSessionID pins that the optional session_id on
+// /status agent rows reaches the CLI view, and that an absent one decodes to
+// the empty string (#8453).
+func TestStatusViewFromGenMapsSessionID(t *testing.T) {
+	id := "gc-42"
+	details := []genclient.StatusAgentDetail{
+		{Name: "worker", QualifiedName: "frontend/worker", Scope: "rig", SessionId: &id},
+		{Name: "helper", QualifiedName: "frontend/helper", Scope: "rig"},
+	}
+	got := statusViewFromGen(&genclient.StatusBody{AgentDetails: &details})
+	if len(got.Agents) != 2 {
+		t.Fatalf("Agents = %+v, want 2 rows", got.Agents)
+	}
+	if got.Agents[0].SessionID != id {
+		t.Fatalf("Agents[0].SessionID = %q, want %q", got.Agents[0].SessionID, id)
+	}
+	if got.Agents[1].SessionID != "" {
+		t.Fatalf("Agents[1].SessionID = %q, want empty", got.Agents[1].SessionID)
+	}
+}

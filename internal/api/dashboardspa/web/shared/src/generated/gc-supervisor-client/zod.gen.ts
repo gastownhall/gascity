@@ -3514,6 +3514,7 @@ export const zStatusAgentDetail = z.object({
     running: z.boolean(),
     scale_label: z.string().optional(),
     scope: z.string(),
+    session_id: z.string().optional(),
     session_name: z.string().optional(),
     suspended: z.boolean()
 });

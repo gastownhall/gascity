@@ -144,7 +144,10 @@ var rigStatusAPIClient = func(cityPath string) (*api.Client, string) {
 
 // routeRigStatus dispatches `gc rig status <name>` to the supervisor API
 // when a controller is up; otherwise falls back to the local observation
-// path. Emits exactly one route=... log line per exit path (GC_DEBUG).
+// path. Both routes print the same contract: the CLI's own city identity, the
+// rig's own suspension, configured agent names, and observed liveness and
+// session ids (from the server on the API route). Emits exactly one
+// route=... log line per exit path (GC_DEBUG).
 func routeRigStatus(
 	cityPath, cityName string,
 	rig config.Rig,
@@ -165,7 +168,7 @@ func routeRigStatus(
 		cr, err := c.GetStatus()
 		if err == nil {
 			logRoute(stderr, cmdName, "api", "")
-			return renderRigStatusFromAPI(cr, rig, dops, jsonOutput, stdout, stderr)
+			return renderRigStatusFromAPI(cr, cityPath, cityName, rig, rigAgents, dops, jsonOutput, stdout, stderr)
 		}
 		if !api.ShouldFallbackForRead(c, err) {
 			logRoute(stderr, cmdName, "api", "error")
@@ -179,44 +182,34 @@ func routeRigStatus(
 	return doRigStatusWithStoreAndSnapshot(sp, dops, rig, rigAgents, cityPath, cityName, sessionTemplate, cfg, store, statusSnapshot, jsonOutput, stdout, stderr)
 }
 
-// renderRigStatusFromAPI filters the supervisor's StatusView by rig name
-// and renders the same text output the fallback path produces. Pool
-// expansion, scale labels, and drain-state rendering all live in
-// agentStatusLineWithPartial, so this function only needs to emit header lines
-// ("<rig>:", "Path:", "Suspended:") and dispatch to agentStatusLineWithPartial
-// for each agent row.
-func renderRigStatusFromAPI(cr api.CachedRead[api.StatusView], rig config.Rig, dops drainOps, jsonOutput bool, stdout, stderr io.Writer) int {
-	suspStr := "no"
-	serverSuspended := rig.Suspended
-	for _, r := range cr.Body.Rigs {
-		if r.Name == rig.Name {
-			serverSuspended = r.Suspended
-			break
-		}
-	}
-	if serverSuspended {
-		suspStr = "yes"
+// renderRigStatusFromAPI renders the supervisor's StatusView rows for one
+// rig in the local route's contract. The envelope (city identity, rig
+// suspension) comes from the CLI's own config and suspension state; the
+// rows carry server-observed liveness and session ids, named by their
+// configured agent. Text output emits the header lines ("<rig>:", "Path:",
+// "Suspended:") and dispatches each row to agentStatusLineWithPartial.
+func renderRigStatusFromAPI(cr api.CachedRead[api.StatusView], cityPath, cityName string, rig config.Rig, rigAgents []config.Agent, dops drainOps, jsonOutput bool, stdout, stderr io.Writer) int {
+	rigSuspended, err := loadRigStatusSuspension(cityPath, rig)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc rig status: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
 	if jsonOutput {
-		result := RigStatusJSON{
-			SchemaVersion: "1",
-			CityPath:      cr.Body.CityPath,
-			CityName:      cr.Body.CityName,
-			Rig: RigStatusRig{
-				Name:          rig.Name,
-				Path:          rig.Path,
-				Prefix:        rig.EffectivePrefix(),
-				DefaultBranch: rig.EffectiveDefaultBranch(),
-				Suspended:     serverSuspended,
-				Beads:         rigBeadsStatus(fsys.OSFS{}, rig.Path),
-			},
+		nameByQualifiedName := make(map[string]string, len(rigAgents))
+		for _, a := range rigAgents {
+			nameByQualifiedName[a.QualifiedName()] = a.Name
 		}
+		result := newRigStatusJSON(cityPath, cityName, rig, rigSuspended)
 		for _, a := range cr.Body.Agents {
 			if !rigStatusAgentBelongsToRig(a, rig.Name) {
 				continue
 			}
-			result.Agents = append(result.Agents, rigStatusAgentJSONFromAPI(a, dops))
+			name, ok := nameByQualifiedName[a.GroupName]
+			if !ok {
+				name = a.Name
+			}
+			result.Agents = append(result.Agents, newRigStatusAgent(name, a.QualifiedName, a.SessionName, a.SessionID, a.Running, a.Suspended || rigSuspended, dops))
 		}
 		if err := writeCLIJSONLine(stdout, result); err != nil {
 			fmt.Fprintf(stderr, "gc rig status: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -225,16 +218,12 @@ func renderRigStatusFromAPI(cr api.CachedRead[api.StatusView], rig config.Rig, d
 		return 0
 	}
 
-	fmt.Fprintf(stdout, "%s:\n", rig.Name)              //nolint:errcheck // best-effort stdout
-	fmt.Fprintf(stdout, "  Path:       %s\n", rig.Path) //nolint:errcheck // best-effort stdout
-	fmt.Fprintf(stdout, "  Suspended:  %s\n", suspStr)  //nolint:errcheck // best-effort stdout
-	fmt.Fprintf(stdout, "  Agents:\n")                  //nolint:errcheck // best-effort stdout
-
+	writeRigStatusHeader(stdout, rig, rigSuspended)
 	for _, a := range cr.Body.Agents {
 		if !rigStatusAgentBelongsToRig(a, rig.Name) {
 			continue
 		}
-		status := agentStatusLineWithPartial(a.Running, dops, a.SessionName, a.Suspended, cr.Body.Partial)
+		status := agentStatusLineWithPartial(a.Running, dops, a.SessionName, a.Suspended || rigSuspended, cr.Body.Partial)
 		fmt.Fprintf(stdout, "    %-12s%s\n", a.QualifiedName, status) //nolint:errcheck // best-effort stdout
 	}
 	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
@@ -251,30 +240,80 @@ func rigStatusAgentBelongsToRig(a api.StatusAgentView, rigName string) bool {
 	return len(a.QualifiedName) > len(prefix) && a.QualifiedName[:len(prefix)] == prefix
 }
 
-func rigStatusAgentJSONFromAPI(a api.StatusAgentView, dops drainOps) RigStatusAgent {
+// loadRigStatusSuspension reports the rig's own effective suspension: the
+// suspension state file, else the rig's suspended_on_start.
+func loadRigStatusSuspension(cityPath string, rig config.Rig) (bool, error) {
+	st, err := loadSuspensionState(fsys.OSFS{}, cityPath)
+	if err != nil {
+		return false, fmt.Errorf("loading suspension state: %w", err)
+	}
+	return suspensionstate.EffectiveRigSuspended(st, rig.Name, rig.EffectiveSuspendedOnStart()), nil
+}
+
+// newRigStatusJSON builds the "gc rig status --json" envelope shared by both
+// routes. Agents is never nil, so a rig with no agents prints [].
+func newRigStatusJSON(cityPath, cityName string, rig config.Rig, rigSuspended bool) RigStatusJSON {
+	return RigStatusJSON{
+		SchemaVersion: "1",
+		CityPath:      cityPath,
+		CityName:      cityName,
+		Rig: RigStatusRig{
+			Name:          rig.Name,
+			Path:          rig.Path,
+			Prefix:        rig.EffectivePrefix(),
+			DefaultBranch: rig.EffectiveDefaultBranch(),
+			Suspended:     rigSuspended,
+			Beads:         rigBeadsStatus(fsys.OSFS{}, rig.Path),
+		},
+		Agents: []RigStatusAgent{},
+	}
+}
+
+// newRigStatusAgent derives one agent row, including its draining flag and
+// status word, identically on both routes.
+func newRigStatusAgent(name, qualifiedName, runtimeSessionName, sessionID string, running, suspended bool, dops drainOps) RigStatusAgent {
 	draining := false
-	if a.Running {
-		draining, _ = dops.isDraining(a.SessionName)
+	if running {
+		draining, _ = dops.isDraining(runtimeSessionName)
 	}
 	status := "stopped"
-	if a.Running {
+	if running {
 		status = "running"
 		if draining {
 			status = "draining"
 		}
 	}
-	if a.Suspended && !a.Running {
+	if suspended && !running {
 		status = "suspended"
 	}
 	return RigStatusAgent{
-		Name:               a.Name,
-		QualifiedName:      a.QualifiedName,
-		RuntimeSessionName: a.SessionName,
-		Running:            a.Running,
-		Suspended:          a.Suspended,
+		Name:               name,
+		QualifiedName:      qualifiedName,
+		RuntimeSessionName: runtimeSessionName,
+		SessionID:          sessionID,
+		Running:            running,
+		Suspended:          suspended,
 		Draining:           draining,
 		Status:             status,
 	}
+}
+
+// rigStatusAgentSuspended is the local route's suspension for one row: the
+// agent's own config, its rig's effective suspension, or an observed or
+// session-recorded suspension.
+func rigStatusAgentSuspended(agentSuspended, rigSuspended bool, obs worker.LiveObservation, target statusObservationTarget) bool {
+	return agentSuspended || rigSuspended || obs.Suspended || target.suspended
+}
+
+func writeRigStatusHeader(stdout io.Writer, rig config.Rig, rigSuspended bool) {
+	suspStr := "no"
+	if rigSuspended {
+		suspStr = "yes"
+	}
+	fmt.Fprintf(stdout, "%s:\n", rig.Name)              //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "  Path:       %s\n", rig.Path) //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "  Suspended:  %s\n", suspStr)  //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "  Agents:\n")                  //nolint:errcheck // best-effort stdout
 }
 
 func doRigStatusWithStoreAndSnapshot(
@@ -290,39 +329,28 @@ func doRigStatusWithStoreAndSnapshot(
 	stdout, stderr io.Writer,
 ) int {
 	registerStatusProviderACPRoutes(sp, statusSnapshot, cityName, cfg)
-	suspState, err := loadSuspensionState(fsys.OSFS{}, cityPath)
+	rigSuspended, err := loadRigStatusSuspension(cityPath, rig)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc rig status: loading suspension state: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc rig status: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	if jsonOutput {
-		return renderRigStatusJSON(sp, dops, rig, agents, cityPath, cityName, sessionTemplate, cfg, store, statusSnapshot, suspState, stdout, stderr)
+		return renderRigStatusJSON(sp, dops, rig, agents, cityPath, cityName, sessionTemplate, cfg, store, statusSnapshot, rigSuspended, stdout, stderr)
 	}
 
-	suspStr := "no"
-	if suspensionstate.EffectiveRigSuspended(suspState, rig.Name, rig.EffectiveSuspendedOnStart()) {
-		suspStr = "yes"
-	}
-
-	fmt.Fprintf(stdout, "%s:\n", rig.Name)              //nolint:errcheck // best-effort stdout
-	fmt.Fprintf(stdout, "  Path:       %s\n", rig.Path) //nolint:errcheck // best-effort stdout
-	fmt.Fprintf(stdout, "  Suspended:  %s\n", suspStr)  //nolint:errcheck // best-effort stdout
-	fmt.Fprintf(stdout, "  Agents:\n")                  //nolint:errcheck // best-effort stdout
-
+	writeRigStatusHeader(stdout, rig, rigSuspended)
 	for _, a := range agents {
 		sp0 := scaleParamsFor(&a)
-		if !a.SupportsInstanceExpansion() {
-			target := statusObservationTargetForIdentity(statusSnapshot, cityName, a.QualifiedName(), sessionTemplate)
+		identities := []string{a.QualifiedName()}
+		if a.SupportsInstanceExpansion() {
+			identities = discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, sessionTemplate, sp)
+		}
+		for _, identity := range identities {
+			target := statusObservationTargetForIdentity(statusSnapshot, cityName, identity, sessionTemplate)
 			obs := observeSessionTargetWithWarning("gc rig status", cityPath, store, sp, cfg, target, stderr)
-			status := agentStatusLineWithPartial(obs.Running, dops, target.runtimeSessionName, a.Suspended || obs.Suspended, statusProviderPartial(sp))
-			fmt.Fprintf(stdout, "    %-12s%s\n", a.QualifiedName(), status) //nolint:errcheck // best-effort stdout
-		} else {
-			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, sessionTemplate, sp) {
-				target := statusObservationTargetForIdentity(statusSnapshot, cityName, qualifiedInstance, sessionTemplate)
-				obs := observeSessionTargetWithWarning("gc rig status", cityPath, store, sp, cfg, target, stderr)
-				status := agentStatusLineWithPartial(obs.Running, dops, target.runtimeSessionName, a.Suspended || obs.Suspended, statusProviderPartial(sp))
-				fmt.Fprintf(stdout, "    %-12s%s\n", qualifiedInstance, status) //nolint:errcheck // best-effort stdout
-			}
+			suspended := rigStatusAgentSuspended(a.Suspended, rigSuspended, obs, target)
+			status := agentStatusLineWithPartial(obs.Running, dops, target.runtimeSessionName, suspended, statusProviderPartial(sp))
+			fmt.Fprintf(stdout, "    %-12s%s\n", identity, status) //nolint:errcheck // best-effort stdout
 		}
 	}
 	return 0
@@ -337,34 +365,21 @@ func renderRigStatusJSON(
 	cfg *config.City,
 	store beads.Store,
 	statusSnapshot *sessionBeadSnapshot,
-	suspState suspensionstate.State,
+	rigSuspended bool,
 	stdout, stderr io.Writer,
 ) int {
-	result := RigStatusJSON{
-		SchemaVersion: "1",
-		CityPath:      cityPath,
-		CityName:      cityName,
-		Rig: RigStatusRig{
-			Name:          rig.Name,
-			Path:          rig.Path,
-			Prefix:        rig.EffectivePrefix(),
-			DefaultBranch: rig.EffectiveDefaultBranch(),
-			Suspended:     suspensionstate.EffectiveRigSuspended(suspState, rig.Name, rig.EffectiveSuspendedOnStart()),
-			Beads:         rigBeadsStatus(fsys.OSFS{}, rig.Path),
-		},
-	}
+	result := newRigStatusJSON(cityPath, cityName, rig, rigSuspended)
 	for _, a := range agents {
 		sp0 := scaleParamsFor(&a)
-		if !a.SupportsInstanceExpansion() {
-			target := statusObservationTargetForIdentity(statusSnapshot, cityName, a.QualifiedName(), sessionTemplate)
-			obs := observeSessionTargetWithWarning("gc rig status", cityPath, store, sp, cfg, target, stderr)
-			result.Agents = append(result.Agents, rigStatusAgentJSON(a.Name, a.QualifiedName(), target, obs, dops, a.Suspended))
-			continue
+		identities := []string{a.QualifiedName()}
+		if a.SupportsInstanceExpansion() {
+			identities = discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, sessionTemplate, sp)
 		}
-		for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, sessionTemplate, sp) {
-			target := statusObservationTargetForIdentity(statusSnapshot, cityName, qualifiedInstance, sessionTemplate)
+		for _, identity := range identities {
+			target := statusObservationTargetForIdentity(statusSnapshot, cityName, identity, sessionTemplate)
 			obs := observeSessionTargetWithWarning("gc rig status", cityPath, store, sp, cfg, target, stderr)
-			result.Agents = append(result.Agents, rigStatusAgentJSON(a.Name, qualifiedInstance, target, obs, dops, a.Suspended))
+			suspended := rigStatusAgentSuspended(a.Suspended, rigSuspended, obs, target)
+			result.Agents = append(result.Agents, newRigStatusAgent(a.Name, identity, target.runtimeSessionName, target.sessionID, obs.Running, suspended, dops))
 		}
 	}
 	if err := writeCLIJSONLine(stdout, result); err != nil {
@@ -372,34 +387,6 @@ func renderRigStatusJSON(
 		return 1
 	}
 	return 0
-}
-
-func rigStatusAgentJSON(name, qualifiedName string, target statusObservationTarget, obs worker.LiveObservation, dops drainOps, agentSuspended bool) RigStatusAgent {
-	suspended := agentSuspended || obs.Suspended || target.suspended
-	draining := false
-	if obs.Running {
-		draining, _ = dops.isDraining(target.runtimeSessionName)
-	}
-	status := "stopped"
-	if obs.Running {
-		status = "running"
-		if draining {
-			status = "draining"
-		}
-	}
-	if suspended && !obs.Running {
-		status = "suspended"
-	}
-	return RigStatusAgent{
-		Name:               name,
-		QualifiedName:      qualifiedName,
-		RuntimeSessionName: target.runtimeSessionName,
-		SessionID:          target.sessionID,
-		Running:            obs.Running,
-		Suspended:          suspended,
-		Draining:           draining,
-		Status:             status,
-	}
 }
 
 // agentStatusLineWithPartial returns a human-readable status string for an
