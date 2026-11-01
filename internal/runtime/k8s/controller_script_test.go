@@ -257,6 +257,29 @@ func TestControllerScriptDeployRunsAsBakedGcagentUIDWithWritableHome(t *testing.
 	}
 }
 
+func TestControllerScriptDeployPassesOptionalAgentPodIdentity(t *testing.T) {
+	clearDoltAndCityEnv(t)
+	result := runControllerScriptDeploy(t, controllerScriptDeployOptions{
+		Env: map[string]string{
+			"GC_K8S_RUN_AS_USER":  "23456",
+			"GC_K8S_RUN_AS_GROUP": "0",
+			"GC_K8S_FS_GROUP":     "34567",
+		},
+	})
+	if result.err != nil {
+		t.Fatalf("gc-controller-k8s deploy error = %v\noutput:\n%s", result.err, result.output)
+	}
+	for name, want := range map[string]string{
+		"GC_K8S_RUN_AS_USER":  "23456",
+		"GC_K8S_RUN_AS_GROUP": "0",
+		"GC_K8S_FS_GROUP":     "34567",
+	} {
+		if got := result.manifestEnv[name]; got != want {
+			t.Errorf("controller env %s = %q, want %q", name, got, want)
+		}
+	}
+}
+
 type controllerScriptDeployOptions struct {
 	Env               map[string]string
 	CityToml          string

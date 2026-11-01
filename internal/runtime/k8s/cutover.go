@@ -26,13 +26,25 @@ var (
 
 // NewSeamBacked constructs a k8s provider served through the seams.
 func NewSeamBacked() (runtime.Provider, error) {
-	return NewSeamBackedWithSecretProjection(nil, nil)
+	return NewSeamBackedWithConfig(nil, nil, PodSecurityConfig{})
 }
 
 // NewSeamBackedWithSecretProjection constructs a seam-backed K8s provider with
 // the city's configured Secret projections.
 func NewSeamBackedWithSecretProjection(secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount) (runtime.Provider, error) {
-	raw, err := NewProviderWithSecretProjection(secretEnv, secretMounts)
+	return NewSeamBackedWithConfig(secretEnv, secretMounts, PodSecurityConfig{})
+}
+
+// NewSeamBackedWithSecurityConfig constructs a K8s provider with optional
+// pod-level UID, GID, and fsGroup values from the city session config.
+func NewSeamBackedWithSecurityConfig(config PodSecurityConfig) (runtime.Provider, error) {
+	return NewSeamBackedWithConfig(nil, nil, config)
+}
+
+// NewSeamBackedWithConfig constructs a seam-backed K8s provider with the city's
+// configured Secret projections and optional pod identity values.
+func NewSeamBackedWithConfig(secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount, config PodSecurityConfig) (runtime.Provider, error) {
+	raw, err := newProviderWithConfig(secretEnv, secretMounts, config)
 	if err != nil {
 		return nil, err
 	}
