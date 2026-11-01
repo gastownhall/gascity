@@ -230,11 +230,18 @@ func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, templ
 		// exit and remints the identity in place. Persistent pools keep
 		// today's behavior (a genuine crash gets a fresh identity rather than
 		// resuming a possibly-corrupt conversation); their freeable rows are
-		// closed by the reconciler's pool-slot close instead.
-		if cfgAgent.Lifecycle != config.AgentLifecycleOneShot || !isPoolSessionSlotFreeableInfo(info, bp.now()) {
+		// closed by the reconciler's pool-slot close instead. A committed
+		// restart handoff (restartHandoff: the continuation reset committed
+		// and the row asleep with no sleep reason — the restart is no sleep)
+		// is neither a crash nor a sleep: its reset-pending wake starts a
+		// fresh conversation, so every lifecycle takes the row back under the
+		// same identity instead of stalling the pool on the runtime name it
+		// holds until the session sweep closes it.
+		if !restartHandedOffInfo(info) &&
+			(cfgAgent.Lifecycle != config.AgentLifecycleOneShot || !isPoolSessionSlotFreeableInfo(info, bp.now())) {
 			return false
 		}
-		// A one_shot exit that still holds an open/in-progress assigned work
+		// An asleep row that still holds an open/in-progress assigned work
 		// bead under any of its identities is not a clean exit: the bounded
 		// unit of work never finished, so waking/reusing it here hands the
 		// step no real execution turn — the reused session drains and lands
@@ -245,7 +252,10 @@ func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, templ
 		// wider by-any-identity match (including actor alias) because
 		// claimed work is commonly assigned under GC_ALIAS/BEADS_ACTOR, not
 		// necessarily the raw SessionNameMetadata the narrower
-		// sessionBeadHasAssignedWorkInfo check below matches.
+		// sessionBeadHasAssignedWorkInfo check below matches. A restart
+		// handoff still holding work is served by its own resume request
+		// (the resume tier above bypasses this predicate), so only rows with
+		// no work under any identity are taken back here.
 		if sessionBeadHasAssignedWorkByAnyIdentityInfo(bp.assignedWorkBeads, info) {
 			return false
 		}
@@ -263,6 +273,19 @@ func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, templ
 		return false
 	}
 	return resolvedSessionTemplateInfo(info, reuseTemplateConfig(bp)) == template
+}
+
+// restartHandedOffInfo reports whether info is a restart handoff still
+// waiting for its fresh start: RestartRequestPatch committed the reset (it is
+// the only writer of reset_committed_at, which CommitStartedPatch clears on
+// the start) and no sleep reason has been stamped since. A stale slept_at
+// alone does not disqualify: the restart handoff neither writes nor clears
+// slept_at, so a previously-slept row that later restarts still carries one.
+func restartHandedOffInfo(info session.Info) bool {
+	if _, _, ok := resetPendingCommittedAtInfo(info); !ok {
+		return false
+	}
+	return strings.TrimSpace(info.SleepReason) == ""
 }
 
 // reusablePoolSessionInfos is the session.Info sibling of reusablePoolSessionBeads.
