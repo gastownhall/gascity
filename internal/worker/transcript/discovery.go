@@ -2,6 +2,7 @@
 package transcript
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -210,6 +211,19 @@ func KeyedProbeRoots(searchPaths []string, provider string) []string {
 		return sessionlog.DefaultSearchPaths()
 	}
 	return searchPaths
+}
+
+// ClaudeConfigProjectsRoot returns the transcript root a launch with env
+// reads when env names an absolute CLAUDE_CONFIG_DIR: that dir's projects.
+// A relative or ~ value is resolved by the provider against its own working
+// dir and home, which a probe cannot reproduce, so it, like an unset or empty
+// value, reports false.
+func ClaudeConfigProjectsRoot(env map[string]string) (string, bool) {
+	dir := strings.TrimSpace(env["CLAUDE_CONFIG_DIR"])
+	if !filepath.IsAbs(dir) {
+		return "", false
+	}
+	return filepath.Join(dir, "projects"), true
 }
 
 // DiscoverScopedPath resolves a transcript for families whose on-disk layout is

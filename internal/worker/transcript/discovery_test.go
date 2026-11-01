@@ -924,3 +924,27 @@ func TestKeyedProbeRoots(t *testing.T) {
 		}
 	}
 }
+
+func TestClaudeConfigProjectsRoot(t *testing.T) {
+	abs := filepath.Join(t.TempDir(), "claude")
+	for _, c := range []struct {
+		name   string
+		env    map[string]string
+		want   string
+		wantOK bool
+	}{
+		{"absolute", map[string]string{"CLAUDE_CONFIG_DIR": abs}, filepath.Join(abs, "projects"), true},
+		{"whitespace padded", map[string]string{"CLAUDE_CONFIG_DIR": "  " + abs + "\t"}, filepath.Join(abs, "projects"), true},
+		{"unset", nil, "", false},
+		{"empty", map[string]string{"CLAUDE_CONFIG_DIR": "  "}, "", false},
+		{"relative", map[string]string{"CLAUDE_CONFIG_DIR": "rel/claude"}, "", false},
+		{"home relative", map[string]string{"CLAUDE_CONFIG_DIR": "~/.claude-alt"}, "", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := ClaudeConfigProjectsRoot(c.env)
+			if got != c.want || ok != c.wantOK {
+				t.Fatalf("ClaudeConfigProjectsRoot(%v) = (%q, %v), want (%q, %v)", c.env, got, ok, c.want, c.wantOK)
+			}
+		})
+	}
+}

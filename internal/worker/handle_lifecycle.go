@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -849,8 +848,8 @@ func (h *SessionHandle) unlaunchedSessionKey(info sessionpkg.Info, metadata map[
 	}
 	provider := h.historyProvider(info)
 	launchRoots := h.adapter.SearchPaths
-	if dir := strings.TrimSpace(h.session.Env["CLAUDE_CONFIG_DIR"]); filepath.IsAbs(dir) {
-		launchRoots = sessionlog.MergeSearchPaths(append(append([]string(nil), launchRoots...), filepath.Join(dir, "projects")))
+	if root, ok := workertranscript.ClaudeConfigProjectsRoot(hints.Env); ok {
+		launchRoots = sessionlog.MergeSearchPaths(append(append([]string(nil), launchRoots...), root))
 	}
 	present, probeable := workertranscript.HasKeyedTranscript(workertranscript.KeyedProbeRoots(launchRoots, provider), provider, workDir, key)
 	return probeable && !present

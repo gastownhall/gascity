@@ -283,3 +283,78 @@ func TestSessionHandleAttachAfterRestartHandoffStartsWithSessionID(t *testing.T)
 		t.Fatalf("attach start command = %q, want --session-id %s and no --resume", last.Config.Command, rotatedKey)
 	}
 }
+
+func TestStartCommandRotatedKeyClaudeConfigDir(t *testing.T) {
+	tests := []struct {
+		name string
+		// configDir is the CLAUDE_CONFIG_DIR value given the cwd and HOME.
+		configDir func(cwd, home string) string
+		// hintsEnv sets the value in the handle's runtime hints instead of its
+		// session env.
+		hintsEnv   bool
+		transcript bool
+		want       string
+	}{
+		{
+			name:       "absolute dir with the transcript resumes",
+			configDir:  func(cwd, _ string) string { return filepath.Join(cwd, "claude") },
+			transcript: true,
+			want:       "claude --resume " + rotatedKey,
+		},
+		{
+			name:       "absolute dir in the runtime hints env resumes",
+			configDir:  func(cwd, _ string) string { return filepath.Join(cwd, "claude") },
+			hintsEnv:   true,
+			transcript: true,
+			want:       "claude --resume " + rotatedKey,
+		},
+		{
+			name:      "absolute dir without the transcript starts with the session id",
+			configDir: func(cwd, _ string) string { return filepath.Join(cwd, "claude") },
+			want:      "claude --session-id " + rotatedKey,
+		},
+		{
+			name:       "relative dir adds no root",
+			configDir:  func(string, string) string { return filepath.Join("rel", "claude") },
+			transcript: true,
+			want:       "claude --session-id " + rotatedKey,
+		},
+		{
+			name:       "home-relative dir adds no root",
+			configDir:  func(string, string) string { return "~/.claude-alt" },
+			transcript: true,
+			want:       "claude --session-id " + rotatedKey,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newRotatedKeyFixture(t, "claude")
+			cwd := t.TempDir()
+			t.Chdir(cwd)
+			home, err := os.UserHomeDir()
+			if err != nil {
+				t.Fatalf("UserHomeDir: %v", err)
+			}
+			configDir := tt.configDir(cwd, home)
+			env := map[string]string{"CLAUDE_CONFIG_DIR": "  " + configDir + "  "}
+			if tt.hintsEnv {
+				f.spec.Hints.Env = env
+			} else {
+				f.spec.Env = env
+			}
+			if tt.transcript {
+				onDisk := strings.Replace(configDir, "~", home, 1)
+				writeClaudeTranscript(t, filepath.Join(onDisk, "projects"), f.beadWorkDir, rotatedKey)
+			}
+
+			got, err := f.handle(t).startCommand(f.id)
+			if err != nil {
+				t.Fatalf("startCommand: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("startCommand() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
