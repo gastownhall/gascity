@@ -480,6 +480,86 @@ func TestReconcileSessionBeads_MinActiveCityStopWakeBypassesInteractiveSleepSupp
 	}
 }
 
+func TestReconcileSessionBeads_ExplicitWakeCityStopBypassesInteractiveSleepSuppression(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{
+		SessionSleep: config.SessionSleepConfig{
+			InteractiveResume: "60s",
+		},
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "worker",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	stale := env.clk.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+		"state":                      "asleep",
+		"sleep_reason":               "city-stop",
+		"detached_at":                stale,
+		"last_woke_at":               stale,
+		"wake_request":               string(sessionpkg.WakeCauseExplicit),
+	})
+
+	woken := env.reconcileWithPoolDesired([]beads.Bead{session}, map[string]int{})
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1; stderr=%s", woken, env.stderr.String())
+	}
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatal("on-demand named session should start for explicit wake after city-stop")
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got.Metadata["config_wake_suppressed"] == "true" {
+		t.Fatal("explicit city-stop wake was suppressed by interactive sleep policy")
+	}
+}
+
+func TestReconcileSessionBeads_ResetOfAsleepCityStopStartsSession(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{
+		SessionSleep: config.SessionSleepConfig{
+			InteractiveResume: "60s",
+		},
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "worker",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	stale := env.clk.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+		"state":                      "asleep",
+		"sleep_reason":               "city-stop",
+		"detached_at":                stale,
+		"last_woke_at":               stale,
+		"restart_requested":          "true",
+		"continuation_reset_pending": "true",
+	})
+
+	woken := env.reconcileWithPoolDesired([]beads.Bead{session}, map[string]int{})
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1; stderr=%s", woken, env.stderr.String())
+	}
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatal("on-demand named session should start for reset after city-stop")
+	}
+}
+
 func TestReconcileSessionBeads_AssignedWorkWithReadyWaitOverridesNonInteractiveSleepPolicy(t *testing.T) {
 	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{

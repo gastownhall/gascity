@@ -3727,6 +3727,23 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				if hasCapability && newSessionKey == "" {
 					batch["session_key"] = ""
 				}
+				if !runtimeRunning && sessionpkg.SleepReason(strings.TrimSpace(infoByID[id].SleepReason)) == sessionpkg.SleepReasonCityStop {
+					// City-stop is a shutdown hold, not "no demand": a reset
+					// of an already-dead city-stop seat must start on this
+					// tick's fall-through, but its stale detach metadata
+					// would otherwise leave it parked under the idle window.
+					// Release the hold and stamp an explicit wake in the
+					// same handoff write. reset_committed_at stays out of
+					// the fold below, so an idle-asleep on_demand reset
+					// still honors #2345.
+					now := clk.Now().UTC()
+					for key, value := range sessionpkg.ClearWakeBlockersPatch(sessionpkg.State(strings.TrimSpace(infoByID[id].MetadataState)), infoByID[id].SleepReason, now) {
+						batch[key] = value
+					}
+					for key, value := range sessionpkg.RequestExplicitWakePatch(string(sessionpkg.WakeCauseExplicit), now) {
+						batch[key] = value
+					}
+				}
 				if runtimeRunning {
 					// Only when this branch actually killed something: the
 					// already-dead fall-through below (the "Runtime was

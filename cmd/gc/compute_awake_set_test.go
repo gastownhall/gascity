@@ -607,6 +607,29 @@ func TestNamedOnDemand_ExplicitWakeWakesWithoutDemand(t *testing.T) {
 	assertReason(t, result, "hello-world--refinery", "explicit-wake")
 }
 
+func TestNamedOnDemand_ExplicitWakeNotResleptByIdleSuppression(t *testing.T) {
+	// City-stop leaves IdleSince at the detach time. Without an explicit-wake
+	// exemption, the on_demand default idle window immediately flips the
+	// operator-approved wake back to idle-sleep.
+	result := computeAwakeSetChecked(t, AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
+		NamedSessions: []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:            "mc-1",
+			SessionName:   "hello-world--refinery",
+			Template:      "hello-world/refinery",
+			State:         "asleep",
+			SleepReason:   "city-stop",
+			ExplicitWake:  true,
+			NamedIdentity: "hello-world/refinery",
+			IdleSince:     now.Add(-24 * time.Hour),
+		}},
+		Now: now,
+	})
+	assertAwake(t, result, "hello-world--refinery")
+	assertReason(t, result, "hello-world--refinery", "explicit-wake")
+}
+
 func TestNamedOnDemand_WorkDone_StaysAwakeUntilIdle(t *testing.T) {
 	// On-demand session with work done: still running, no demand.
 	// Stays awake via on-demand:running override — drains only after
