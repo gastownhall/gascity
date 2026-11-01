@@ -61,6 +61,8 @@ def run_arm(variant, trial, order):
         "docker",
         "run",
         "--rm",
+        "--group-add",
+        str(os.getgid()),
         "--cpus",
         "2",
         "--memory",

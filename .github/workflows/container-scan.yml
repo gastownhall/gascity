@@ -322,6 +322,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "${RUNNER_TEMP}/gascity-mail-samples"
+          chmod 2770 "${RUNNER_TEMP}/gascity-mail-samples"
           python3 .github/scripts/mcp-mail-archive-burst-ci.py \
             --image "gc-mcp-mail:${IMAGE_TAG}" \
             --baseline-wheel "${RUNNER_TEMP}/gitpython-3.1.62-py3-none-any.whl" \

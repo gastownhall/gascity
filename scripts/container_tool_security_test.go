@@ -388,7 +388,8 @@ func TestContainerScanRetainsMCPMailBurstDiagnostics(t *testing.T) {
 	burst := readFile(t, root, ".github/scripts/mcp-mail-archive-burst.py")
 
 	for _, want := range []string{
-		"docker image inspect",
+		`["docker", "image", "inspect"`,
+		"--group-add",
 		"--samples-dir",
 		"PATCHED_CONTROL_MEDIAN_RATIOS",
 		"limit = 1.25",
@@ -434,6 +435,9 @@ func TestContainerScanRetainsMCPMailBurstDiagnostics(t *testing.T) {
 		if !strings.Contains(step, want) {
 			t.Errorf("MCP mail diagnostics upload is missing %q", want)
 		}
+	}
+	if !strings.Contains(workflow, `chmod 2770 "${RUNNER_TEMP}/gascity-mail-samples"`) {
+		t.Fatal("container-scan.yml does not grant the non-root image process access to the diagnostic artifact directory")
 	}
 }
 
