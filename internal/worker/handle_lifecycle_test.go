@@ -156,6 +156,17 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			want: resumeStart,
 		},
 		{
+			name:     "AC-4 provider the probe cannot read resumes",
+			provider: "legacy-provider",
+			want:     resumeStart,
+		},
+		{
+			name:     "AC-4 the stored provider kind the probe cannot read resumes",
+			provider: "claude-proxy",
+			meta:     map[string]string{"provider_kind": "legacy-provider"},
+			want:     resumeStart,
+		},
+		{
 			name: "empty work dir in hints and row is not probeable and resumes",
 			spec: func(spec *SessionSpec, _ string) {
 				spec.WorkDir = ""
