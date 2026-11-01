@@ -501,7 +501,7 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 		}
 	}
 	programStatusArm, providerEnv := sessionProgramStatus(configuredProgramStatusMode(s.state.Config()), resolved, transport)
-	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), providerEnv)
+	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), s.state.CityName(), configuredWorkspaceSessionEnv(s.state.Config()), providerEnv)
 	hints := sessionCreateHints(resolved, sessionEnv, mcpServers, programStatusArm)
 	// Route the named-session create through the worker.Handle boundary
 	// (worker-boundary migration) rather than calling session.Manager directly.
