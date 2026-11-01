@@ -29,6 +29,7 @@ import (
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // selectiveErrStore wraps a beads.Store and injects Create errors for selected
@@ -925,6 +926,37 @@ func TestSlingJSONWarningsSuspendedRig(t *testing.T) {
 	warnings := slingJSONWarnings(sling.SlingResult{SuspendedRig: "myrig"})
 	if !slices.Contains(warnings, "rig_suspended") {
 		t.Errorf("warnings = %v, want to contain rig_suspended", warnings)
+	}
+}
+
+const citySuspendedWarning = "warning: city is suspended — bead routed but no worker will spawn until 'gc resume'"
+
+func TestDoSlingWarnsCitySuspendedByRuntimeState(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.CityPath = t.TempDir()
+	suspended := true
+	if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, deps.CityPath, &suspended); err != nil {
+		t.Fatalf("SetCitySuspended: %v", err)
+	}
+	code := doSling(testOpts(a, "my-1"), deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0 (still routes); stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), citySuspendedWarning) {
+		t.Errorf("stderr = %q, want city suspended warning %q", stderr.String(), citySuspendedWarning)
+	}
+	assertStoreRoutedTo(t, deps.Store, "my-1", "worker")
+}
+
+func TestSlingJSONWarningsCitySuspended(t *testing.T) {
+	warnings := slingJSONWarnings(sling.SlingResult{CitySuspended: true})
+	if !slices.Contains(warnings, "city_suspended") {
+		t.Errorf("warnings = %v, want to contain city_suspended", warnings)
 	}
 }
 
@@ -9616,5 +9648,185 @@ func TestAttachedRootOnlyWispIsNotEphemeralOnABd105City(t *testing.T) {
 	}
 	if !foundEphemeral {
 		t.Fatalf("standalone root-only wisp is not ephemeral on a bd-1.0.5 city: %+v", rows)
+	}
+}
+
+func TestDoSlingWarnsCitySuspendedOnStart(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city", SuspendedOnStart: true}}
+	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.CityPath = t.TempDir()
+	code := doSling(testOpts(a, "my-1"), deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0 (still routes); stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), citySuspendedWarning) {
+		t.Errorf("stderr = %q, want city suspended warning %q", stderr.String(), citySuspendedWarning)
+	}
+	assertStoreRoutedTo(t, deps.Store, "my-1", "worker")
+}
+
+func TestDoSlingWarnsRigSuspendedByRuntimeState(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig"}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.CityPath = t.TempDir()
+	// Rig-scoped agents read their rig's store; match it so the
+	// cross-store route guard does not trip before the rig check.
+	deps.StoreRef = "rig:myrig"
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, deps.CityPath, "myrig", &suspended); err != nil {
+		t.Fatalf("SetRigSuspended: %v", err)
+	}
+	code := doSling(testOpts(a, "my-1"), deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0 (still routes); stderr = %q", code, stderr.String())
+	}
+	want := `rig "myrig" is suspended — bead routed but no worker will spawn until 'gc rig resume myrig'`
+	if !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want suspended-rig warning %q", stderr.String(), want)
+	}
+	assertStoreRoutedTo(t, deps.Store, "my-1", "myrig/polecat")
+}
+
+func TestDoSlingRuntimeResumeOverridesAuthoredSuspend(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city", Suspended: true},
+		Rigs:      []config.Rig{{Name: "myrig", Suspended: true}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.CityPath = t.TempDir()
+	// Rig-scoped agents read their rig's store; match it so the
+	// cross-store route guard does not trip before the rig check.
+	deps.StoreRef = "rig:myrig"
+	resumed := false
+	if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, deps.CityPath, &resumed); err != nil {
+		t.Fatalf("SetCitySuspended: %v", err)
+	}
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, deps.CityPath, "myrig", &resumed); err != nil {
+		t.Fatalf("SetRigSuspended: %v", err)
+	}
+	code := doSling(testOpts(a, "my-1"), deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "suspended") {
+		t.Errorf("stderr = %q, want no suspension warning after an explicit runtime resume", stderr.String())
+	}
+	assertStoreRoutedTo(t, deps.Store, "my-1", "myrig/polecat")
+}
+
+func TestDoSlingWarnsPathBoundAgentInSuspendedRig(t *testing.T) {
+	runner := newFakeRunner()
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "repos", "myrig")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig", Path: rigPath, SuspendedOnStart: true}},
+	}
+	a := config.Agent{Name: "polecat", Dir: rigPath, MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.CityPath = cityPath
+	deps.StoreRef = "rig:myrig"
+	code := doSling(testOpts(a, "my-1"), deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0 (still routes); stderr = %q", code, stderr.String())
+	}
+	want := `rig "myrig" is suspended — bead routed but no worker will spawn until 'gc rig resume myrig'`
+	if !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want suspended-rig warning %q", stderr.String(), want)
+	}
+}
+
+func TestDoSlingForceSuppressesEffectiveSuspensionWarnings(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig"}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1), Suspended: true}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.CityPath = t.TempDir()
+	// Rig-scoped agents read their rig's store; match it so the
+	// cross-store route guard does not trip before the rig check.
+	deps.StoreRef = "rig:myrig"
+	suspended := true
+	if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, deps.CityPath, &suspended); err != nil {
+		t.Fatalf("SetCitySuspended: %v", err)
+	}
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, deps.CityPath, "myrig", &suspended); err != nil {
+		t.Fatalf("SetRigSuspended: %v", err)
+	}
+	opts := testOpts(a, "my-1")
+	opts.Force = true
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "suspended") {
+		t.Errorf("stderr = %q, want no suspension warning with --force", stderr.String())
+	}
+	assertStoreRoutedTo(t, deps.Store, "my-1", "myrig/polecat")
+}
+
+// TestDoSlingBatchWarnsCitySuspendedOnFormulaAndConvoy runs gc sling's own
+// path (doSlingBatch, then Sling.Dispatch) into a suspended city for a
+// --formula launch and a convoy. Each builds a result of its own, and each
+// must still print the city warning.
+func TestDoSlingBatchWarnsCitySuspendedOnFormulaAndConvoy(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		target     string
+		isFormula  bool
+		wantStdout string
+	}{
+		{name: "formula", target: "code-review", isFormula: true, wantStdout: "formula"},
+		{name: "convoy", target: "CVY-1", wantStdout: "Slung 1/1 children"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := newFakeRunner()
+			cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+			a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
+			q := newFakeChildQuerier()
+			q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
+			q.childrenOf["CVY-1"] = []beads.Bead{{ID: "BL-1", Status: "open"}}
+
+			deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+			deps.CityPath = t.TempDir()
+			suspended := true
+			if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, deps.CityPath, &suspended); err != nil {
+				t.Fatalf("SetCitySuspended: %v", err)
+			}
+			opts := testOpts(a, tc.target)
+			opts.IsFormula = tc.isFormula
+			code := doSlingBatch(opts, deps, q, stdout, stderr)
+
+			if code != 0 {
+				t.Fatalf("doSlingBatch returned %d, want 0 (still launches); stderr = %q", code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), tc.wantStdout) {
+				t.Errorf("stdout = %q, want %q from the %s path", stdout.String(), tc.wantStdout, tc.name)
+			}
+			if !strings.Contains(stderr.String(), citySuspendedWarning) {
+				t.Errorf("stderr = %q, want city suspended warning %q", stderr.String(), citySuspendedWarning)
+			}
+		})
 	}
 }
