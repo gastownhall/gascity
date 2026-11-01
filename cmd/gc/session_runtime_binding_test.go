@@ -16,12 +16,12 @@ import (
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
-func bindingPatch(thread, project string) sessionpkg.MetadataPatch {
-	return sessionpkg.MetadataPatch{sessionpkg.MetadataRuntimeThreadID: thread, sessionpkg.MetadataRuntimeProjectID: project}
+func bindingPatch() sessionpkg.MetadataPatch {
+	return sessionpkg.MetadataPatch{sessionpkg.MetadataRuntimeThreadID: "thread-1", sessionpkg.MetadataRuntimeProjectID: "project-1"}
 }
 
 func TestStartCommitPatchRecordsTheRuntimeBinding(t *testing.T) {
-	prepared := preparedStart{runtimeBinding: bindingPatch("thread-1", "project-1")}
+	prepared := preparedStart{runtimeBinding: bindingPatch()}
 	patch := startCommitPatch(&prepared, sessionpkg.Info{}, time.Now())
 	if patch[sessionpkg.MetadataRuntimeThreadID] != "thread-1" || patch[sessionpkg.MetadataRuntimeProjectID] != "project-1" {
 		t.Fatalf("start commit patch = %v, want the runtime thread and project", patch)
@@ -33,12 +33,16 @@ func TestStartedRuntimeBinding(t *testing.T) {
 	fake.Bindings = map[string]runtime.SessionBinding{"worker": {ThreadID: "thread-1", ProjectID: "project-1"}}
 	sp := runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: fake})
 	city := t.TempDir()
-	if got := startedRuntimeBinding(context.Background(), city, sp, "worker"); !maps.Equal(got, bindingPatch("thread-1", "project-1")) {
+	if got := startedRuntimeBinding(context.Background(), city, sp, "worker"); !maps.Equal(got, bindingPatch()) {
 		t.Fatalf("startedRuntimeBinding = %v, want thread-1/project-1", got)
 	}
-	// No thread bound: the start stands, and clears any previous thread.
-	if got := startedRuntimeBinding(context.Background(), city, sp, "other"); !maps.Equal(got, bindingPatch("", "")) {
-		t.Fatalf("startedRuntimeBinding(unbound) = %v, want both keys cleared", got)
+	// Nothing bound: the start stands, and clears any previous thread and pane.
+	cleared := sessionpkg.MetadataPatch{
+		sessionpkg.MetadataRuntimeThreadID: "", sessionpkg.MetadataRuntimeProjectID: "",
+		sessionpkg.MetadataRuntimePaneID: "", sessionpkg.MetadataRuntimePanePID: "",
+	}
+	if got := startedRuntimeBinding(context.Background(), city, sp, "other"); !maps.Equal(got, cleared) {
+		t.Fatalf("startedRuntimeBinding(unbound) = %v, want every binding key cleared", got)
 	}
 	if got := startedRuntimeBinding(context.Background(), city, runtime.NewFake(), "worker"); len(got) != 0 {
 		t.Fatalf("startedRuntimeBinding(provider without bindings) = %v, want nothing", got)
@@ -56,7 +60,7 @@ func TestRunPreparedStartCandidateReadsTheRuntimeBinding(t *testing.T) {
 	if result.err != nil {
 		t.Fatalf("start: %v", result.err)
 	}
-	if got := result.prepared.runtimeBinding; !maps.Equal(got, bindingPatch("thread-1", "project-1")) {
+	if got := result.prepared.runtimeBinding; !maps.Equal(got, bindingPatch()) {
 		t.Fatalf("prepared runtime binding = %v, want thread-1/project-1", got)
 	}
 }
@@ -83,6 +87,19 @@ func TestLaunchCommitsTheRuntimeBinding(t *testing.T) {
 	}
 	if k.meta(sessionpkg.MetadataRuntimeThreadID) != "thread-1" || k.meta(sessionpkg.MetadataRuntimeProjectID) != "project-1" {
 		t.Fatalf("row thread %q project %q, want thread-1 project-1", k.meta(sessionpkg.MetadataRuntimeThreadID), k.meta(sessionpkg.MetadataRuntimeProjectID))
+	}
+}
+
+// The v2 launch stamps the pane its start spawned into on the row it commits,
+// so a pane pid from the host journal names the owning session.
+func TestLaunchCommitsThePaneIdentity(t *testing.T) {
+	k, leaf := launchKit(t, "asleep")
+	k.p.Runtime = &boundLaunchLeaf{startHookLeaf: leaf, binding: runtime.SessionBinding{PaneID: "%7", PanePID: "48213"}}
+	if s := k.runKind(); s.Outcome != settledLanded {
+		t.Fatalf("settlement %+v, want landed", s)
+	}
+	if k.meta(sessionpkg.MetadataRuntimePaneID) != "%7" || k.meta(sessionpkg.MetadataRuntimePanePID) != "48213" {
+		t.Fatalf("row pane %q pid %q, want %%7 pid 48213", k.meta(sessionpkg.MetadataRuntimePaneID), k.meta(sessionpkg.MetadataRuntimePanePID))
 	}
 }
 
@@ -156,5 +173,24 @@ func TestRecoverRunningPendingCreateRecordsTheRuntimeBinding(t *testing.T) {
 	}
 	if got.Metadata[sessionpkg.MetadataRuntimeThreadID] != "thread-1" || got.Metadata[sessionpkg.MetadataRuntimeProjectID] != "project-1" {
 		t.Fatalf("row binding = %q, %q; want thread-1, project-1", got.Metadata[sessionpkg.MetadataRuntimeThreadID], got.Metadata[sessionpkg.MetadataRuntimeProjectID])
+	}
+}
+
+// The session.woke message names the pane the start spawned into, so the pane
+// of an earlier incarnation still joins to its session after a restart
+// replaced the record's current pane; a start with no pane says nothing.
+func TestWokePaneMessageNamesThePaneOfTheStart(t *testing.T) {
+	pane := sessionpkg.MetadataPatch{sessionpkg.MetadataRuntimePaneID: "%7", sessionpkg.MetadataRuntimePanePID: "48213"}
+	if got, want := wokePaneMessage(pane), "pane %7 pid 48213"; got != want {
+		t.Fatalf("wokePaneMessage(pane) = %q, want %q", got, want)
+	}
+	for name, binding := range map[string]sessionpkg.MetadataPatch{
+		"no binding":  nil,
+		"thread only": bindingPatch(),
+		"cleared":     {sessionpkg.MetadataRuntimePaneID: "", sessionpkg.MetadataRuntimePanePID: ""},
+	} {
+		if got := wokePaneMessage(binding); got != "" {
+			t.Fatalf("wokePaneMessage(%s) = %q, want empty", name, got)
+		}
 	}
 }

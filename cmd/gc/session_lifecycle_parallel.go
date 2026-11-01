@@ -3269,6 +3269,7 @@ func commitStartResultTraced(
 		Type:      events.SessionWoke,
 		Actor:     "gc",
 		Subject:   tp.DisplayName(),
+		Message:   wokePaneMessage(result.prepared.runtimeBinding),
 		SessionID: info.ID,
 	})
 	telemetry.RecordAgentStart(context.Background(), name, tp.DisplayName(), nil)

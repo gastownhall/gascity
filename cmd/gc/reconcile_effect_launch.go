@@ -356,6 +356,7 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 	// The commit lands on a runtime alive with the PreWake token whatever the
 	// Start returned (commitStep), so the binding is read whatever it returned.
 	prepared.runtimeBinding = startedRuntimeBinding(ctx, prepared.cfg.Env["GC_CITY_PATH"], leaf, name)
+	woke.Message = wokePaneMessage(prepared.runtimeBinding) // read by the onExit above, after the effect settles
 	in.ticket.verdict = verdictInconclusive
 	switch {
 	case runtime.IsProviderCapacity(out.err):

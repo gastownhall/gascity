@@ -61,6 +61,7 @@ var (
 	_ runtime.DeadRuntimeSessionChecker     = (*Provider)(nil)
 	_ runtime.EnvironmentBatchProvider      = (*Provider)(nil)
 	_ runtime.ImmediateNudgeProvider        = (*Provider)(nil)
+	_ runtime.SessionBindingProvider        = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
 	_ runtime.InputClearProvider            = (*Provider)(nil)
@@ -1433,6 +1434,33 @@ func (p *Provider) Attach(name string) error {
 		return fmt.Errorf("checking tmux server before attach: %w", err)
 	}
 	return cmd.Run()
+}
+
+// SessionBinding reports the pane the named tmux session runs in: its
+// server-scoped pane id and its process id, the number the host's journal
+// names ("tmux child pane <pid> launched by process <pid>"). It returns
+// [runtime.ErrSessionNotFound] when the session is absent and an error, never
+// a guess, when the session does not have exactly one well-formed pane.
+func (p *Provider) SessionBinding(name string) (runtime.SessionBinding, error) {
+	if err := validateSessionName(name); err != nil {
+		return runtime.SessionBinding{}, err
+	}
+	out, err := p.tm.run("list-panes", "-t", sessionTarget(name), "-F", "#{pane_id} #{pane_pid}")
+	if err != nil {
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			return runtime.SessionBinding{}, fmt.Errorf("%w: %w: %s", runtime.ErrSessionNotFound, err, name)
+		}
+		return runtime.SessionBinding{}, fmt.Errorf("listing panes of %q: %w", name, err)
+	}
+	rows := strings.Split(strings.TrimSpace(out), "\n")
+	if len(rows) != 1 {
+		return runtime.SessionBinding{}, fmt.Errorf("session %q has %d pane rows, want exactly one", name, len(rows))
+	}
+	fields := strings.Fields(rows[0])
+	if len(fields) != 2 || !paneIDRe.MatchString(fields[0]) || !decimalRe.MatchString(fields[1]) || strings.Trim(fields[1], "0") == "" {
+		return runtime.SessionBinding{}, fmt.Errorf("session %q pane row %q is not a pane id and pid", name, rows[0])
+	}
+	return runtime.SessionBinding{PaneID: fields[0], PanePID: fields[1]}, nil
 }
 
 // Tmux returns the underlying [Tmux] instance for advanced operations

@@ -13,6 +13,7 @@ import (
 var (
 	sessionObjectIDRe = regexp.MustCompile(`^\$[0-9]+$`)
 	decimalRe         = regexp.MustCompile(`^[0-9]+$`)
+	paneIDRe          = regexp.MustCompile(`^%[0-9]+$`)
 )
 
 // validSessionObjectID reports whether id is a tmux #{session_id} ("$3").

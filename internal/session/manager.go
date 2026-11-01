@@ -82,6 +82,19 @@ const (
 	MetadataRuntimeProjectID = "runtime_project_id"
 )
 
+// MetadataRuntimePaneID and MetadataRuntimePanePID record, for a runtime that
+// hosts the session in a terminal pane ([runtime.SessionBinding]), the pane id
+// (server-scoped) and the pane's process id the session was spawned into, as of
+// the last confirmed start whose binding read succeeded. The pane pid is the
+// join key to a host journal line such as "tmux child pane <pid> launched by
+// process <pid>"; look the session up with
+// `bd list --metadata-field runtime_pane_pid=<pid>`. Empty values mean no pane
+// was bound; a restart replaces them with the new incarnation's pane.
+const (
+	MetadataRuntimePaneID  = "runtime_pane_id"
+	MetadataRuntimePanePID = "runtime_pane_pid"
+)
+
 // Info holds the user-facing details of a chat session.
 type Info struct {
 	ID string

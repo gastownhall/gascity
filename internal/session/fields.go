@@ -516,11 +516,11 @@ var registry = slices.Concat([]Field{
 	same(ClassAdvisory, false, sites(op("internal/session/waits.go", "StampWaitLookupCapMetadata")),
 		"wait_lookup_capped_at", "wait_lookup_capped_label", "wait_lookup_capped_limit", "wait_lookup_capped_source"),
 	same(ClassAdvisory, false, sites(legacyCommit), "awake_started_at", PrimedAtMetadataKey, PromptHashMetadataKey),
-	// The thread a runtime hosts the session in (runtime.SessionBinding):
-	// recorded at each confirmed start (create, resume, pending-create
-	// recovery), read by no decision.
+	// The thread and pane a runtime hosts the session in
+	// (runtime.SessionBinding): recorded at each confirmed start (create,
+	// resume, pending-create recovery), read by no decision.
 	same(ClassAdvisory, false, sites(legacyCommit, op(srcManager, "Manager.confirmStartedRuntimeMetadata"), opRestartConfirm, op("internal/session/resume_user_hold.go", "Manager.consumeUserHold")),
-		MetadataRuntimeThreadID, MetadataRuntimeProjectID),
+		MetadataRuntimeThreadID, MetadataRuntimeProjectID, MetadataRuntimePaneID, MetadataRuntimePanePID),
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/session_wake.go", "freshWakeResetPriorValues")), PrimingAttemptedAtMetadataKey),
 	same(ClassAdvisory, false, sites(legacyCreate), "synced_at", "startup_kickoff_state", "startup_kickoff_started_at", "startup_kickoff_attempts"),
 	same(ClassAdvisory, false, sites(legacy(srcBeads, "startupKickoffReopenMetadata")), "startup_kickoff_last_nudge_at"),

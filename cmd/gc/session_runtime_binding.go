@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -28,4 +29,17 @@ func startedRuntimeBinding(ctx context.Context, cityPath string, sp runtime.Prov
 		return sessionpkg.MetadataPatch{}
 	}
 	return patch
+}
+
+// wokePaneMessage names the pane a started session was spawned into, for the
+// message of its session.woke event: the record holds only the current
+// incarnation's pane, so the event is what lets an operator join the pane of
+// an earlier incarnation (a pane pid in the host journal) to the session. It
+// is empty when the start recorded no pane.
+func wokePaneMessage(binding sessionpkg.MetadataPatch) string {
+	paneID, panePID := binding[sessionpkg.MetadataRuntimePaneID], binding[sessionpkg.MetadataRuntimePanePID]
+	if paneID == "" {
+		return ""
+	}
+	return fmt.Sprintf("pane %s pid %s", paneID, panePID)
 }

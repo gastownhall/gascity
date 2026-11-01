@@ -120,6 +120,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 			RelaunchProvider:              b,
 			ServerDeathConfirmer:          b,
 			ServerLifecycleProvider:       b,
+			SessionBindingProvider:        b,
 			SessionObjectKiller:           b,
 			SessionRosterProvider:         b,
 			TurnRunningProvider:           b,
@@ -229,6 +230,7 @@ type (
 		RelaunchProvider
 		ServerDeathConfirmer
 		ServerLifecycleProvider
+		SessionBindingProvider
 		SessionObjectKiller
 		SessionRosterProvider
 		TurnRunningProvider

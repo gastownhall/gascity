@@ -452,14 +452,14 @@ func CommitStartedPatch(input CommitStartedPatchInput) MetadataPatch {
 	return patch
 }
 
-// RuntimeBindingPatch reads the thread sp hosts the session name in and
-// returns the patch that records it on the session row. A runtime that is
-// not a [runtime.SessionBindingProvider], or that does not host name in a
-// thread (a zero binding), writes nothing. When no thread is
-// bound ([runtime.ErrSessionNotFound]), the patch clears both keys, so the
-// row never names a previous incarnation's thread as current. Any other read
-// error writes nothing and is returned: the keys then stay as of the last
-// successful read.
+// RuntimeBindingPatch reads the thread and pane sp hosts the session name in
+// and returns the patch that records them on the session row. A runtime that
+// is not a [runtime.SessionBindingProvider], or that hosts name in neither a
+// thread nor a pane (a binding with no ThreadID and no PaneID), writes
+// nothing. When nothing is bound ([runtime.ErrSessionNotFound]), the patch
+// clears every binding key, so the row never names a previous incarnation's
+// thread or pane as current. Any other read error writes nothing and is
+// returned: the keys then stay as of the last successful read.
 func RuntimeBindingPatch(sp runtime.Provider, name string) (MetadataPatch, error) {
 	bp, ok := sp.(runtime.SessionBindingProvider)
 	if !ok {
@@ -471,13 +471,19 @@ func RuntimeBindingPatch(sp runtime.Provider, name string) (MetadataPatch, error
 		binding = runtime.SessionBinding{}
 	case err != nil:
 		return MetadataPatch{}, fmt.Errorf("reading the runtime binding of %q: %w", name, err)
-	case binding.ThreadID == "":
+	case binding.ThreadID == "" && binding.PaneID == "":
 		return MetadataPatch{}, nil
 	}
-	return MetadataPatch{
-		MetadataRuntimeThreadID:  binding.ThreadID,
-		MetadataRuntimeProjectID: binding.ProjectID,
-	}, nil
+	patch := MetadataPatch{}
+	if binding.ThreadID != "" || binding.PaneID == "" {
+		patch[MetadataRuntimeThreadID] = binding.ThreadID
+		patch[MetadataRuntimeProjectID] = binding.ProjectID
+	}
+	if binding.PaneID != "" || binding.ThreadID == "" {
+		patch[MetadataRuntimePaneID] = binding.PaneID
+		patch[MetadataRuntimePanePID] = binding.PanePID
+	}
+	return patch, nil
 }
 
 // BeginDrainPatch transitions a live session into draining.
