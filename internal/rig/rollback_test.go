@@ -1,9 +1,11 @@
 package rig
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -200,5 +202,128 @@ func TestSnapshotTopologyFilesPreservesSymlinkedPacksLock(t *testing.T) {
 	}
 	if string(got) != "schema = 1\n" {
 		t.Fatalf("packs.lock target not restored, got %q", got)
+	}
+}
+
+// statFailingFS fails every Stat of path.
+type statFailingFS struct {
+	fsys.FS
+	path string
+}
+
+func (f statFailingFS) Stat(name string) (os.FileInfo, error) {
+	if name == f.path {
+		return nil, &os.PathError{Op: "stat", Path: name, Err: syscall.EIO}
+	}
+	return f.FS.Stat(name)
+}
+
+// ga-hfly3b.45: a Stat failure after a successful read is returned, not read
+// as the 0644 default that would widen a 0600 file on restore.
+func TestSnapshotOptionalFileReturnsStatError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("issue_prefix: x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SnapshotOptionalFile(statFailingFS{FS: fsys.OSFS{}, path: path}, path); !errors.Is(err, syscall.EIO) {
+		t.Fatalf("SnapshotOptionalFile error = %v, want the Stat failure", err)
+	}
+}
+
+// ga-hfly3b.45: restoring a file whose bytes and mode did not change leaves it
+// in place, so a hard link to it still shares it.
+func TestRestoreSnapshotsLeavesUnchangedFileInPlace(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("issue_prefix: x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "config.yaml.link")
+	if err := os.Link(path, link); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := SnapshotOptionalFile(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreSnapshots(fsys.OSFS{}, []FileSnapshot{snap}); err != nil {
+		t.Fatal(err)
+	}
+	pathInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	linkInfo, err := os.Stat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(pathInfo, linkInfo) {
+		t.Errorf("a no-op restore replaced %s; the hard link %s is detached", path, link)
+	}
+}
+
+// A file whose bytes match but whose mode changed gets its mode back.
+func TestRestoreSnapshotsRepairsModeOnlyChange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("issue_prefix: x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := SnapshotOptionalFile(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreSnapshots(fsys.OSFS{}, []FileSnapshot{snap}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("mode after restore = %v, want 0600", got)
+	}
+}
+
+// ga-hfly3b.44: a directory snapshot restores only the directory's mode, and a
+// directory that is gone has nothing to restore.
+func TestRestoreSnapshotsRestoresDirMode(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := dirModeSnapshot(dir, info)
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreSnapshots(fsys.OSFS{}, []FileSnapshot{snap}); err != nil {
+		t.Fatal(err)
+	}
+	if info, err = os.Stat(dir); err != nil {
+		t.Fatal(err)
+	} else if got := info.Mode().Perm(); got != 0o755 {
+		t.Errorf("dir mode after restore = %v, want 0755", got)
+	}
+	if !info.IsDir() {
+		t.Fatalf("%s is no longer a directory", dir)
+	}
+
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreSnapshots(fsys.OSFS{}, []FileSnapshot{snap}); err != nil {
+		t.Fatalf("restoring the mode of a gone directory = %v, want a no-op", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("restoring a gone directory's mode recreated it (stat err = %v)", err)
 	}
 }
