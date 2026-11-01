@@ -2274,6 +2274,7 @@ go_test(
         "wisp_gc_workarm_split_test.go",
         "wisp_step_api_test.go",
         "wisp_step_inject_prewake_test.go",
+        "wisp_step_inject_ready_test.go",
         "wisp_step_inject_test.go",
         "wisp_step_routed_bridge_test.go",
         "wisp_step_single_read_test.go",
