@@ -67,6 +67,13 @@ func readPublishedDoltRuntimeStateHint(cityPath string) (doltRuntimeState, bool,
 }
 
 func managedDoltLifecycleOwned(cityPath string) (bool, error) {
+	// A scope whose .beads redirects to another store owns no managed Dolt. This
+	// answers quietly so inspection paths stay quiet; the missing-city.toml case
+	// and the loud refusal live in admitManagedDoltStart, which gates
+	// the paths that would start or recover a server.
+	if managedDoltRedirectRefusal(cityPath) != nil {
+		return false, nil
+	}
 	// The journal alone is not the classification. A city migrated in place by
 	// `gc beads city migrate-proxied`, or cloned from a proxied one, carries bd's
 	// proxied binding and no journal record at all — the migration deliberately

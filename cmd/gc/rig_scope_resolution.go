@@ -44,11 +44,7 @@ func rigFromRedirectedBeadsDir(cfg *config.City, cityPath, dir string) (config.R
 			break
 		}
 		redirectPath := filepath.Join(current, ".beads", "redirect")
-		redirectTarget, err := os.ReadFile(redirectPath)
-		if err != nil {
-			continue
-		}
-		targetBeadsDir := normalizePathForCompare(strings.TrimSpace(string(redirectTarget)))
+		targetBeadsDir := beadsRedirectTarget(filepath.Join(current, ".beads"))
 		if targetBeadsDir == "" {
 			continue
 		}
@@ -72,6 +68,24 @@ func rigFromRedirectedBeadsDir(cfg *config.City, cityPath, dir string) (config.R
 		return config.Rig{}, false, fmt.Errorf("cwd redirect %s points outside declared city rigs", redirectPath)
 	}
 	return config.Rig{}, false, nil
+}
+
+// beadsRedirectTarget returns the normalized .beads directory that
+// beadsDir/redirect names, or "" when there is no redirect file or it is empty.
+// A relative target is taken relative to beadsDir, as bd reads it.
+func beadsRedirectTarget(beadsDir string) string {
+	data, err := os.ReadFile(filepath.Join(beadsDir, "redirect"))
+	if err != nil {
+		return ""
+	}
+	target := strings.TrimSpace(string(data))
+	if target == "" {
+		return ""
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(beadsDir, target)
+	}
+	return normalizePathForCompare(target)
 }
 
 func pathWithinScope(path, scopeRoot string) bool {
