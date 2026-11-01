@@ -126,3 +126,11 @@ Full CI closure retained: 15 lines; /var/tmp/deploy-ga-s907y58.e185f7g9/ci-requi
 
 Full CI accounting retained: 35 lines; /var/tmp/deploy-ga-s907y58.e185f7g9/ci-required/accounting.json; SHA256 c15c1210549ed107cbc19c1c0508dbc5393ed4764ebe0040c3e5759a1a8a56ab.
 
+ICU loader provenance (confirmed at intake and rechecked before publication):
+
+```text
+GATE_ICU74 lib=libicui18n.so.74 file="/usr/local/lib64/icu74-compat/libicui18n.so.74.2" sha256=d90d62f0d7b6c6fbc279ae5e433cc7004aa47cdb106a71a02350099f8df9ae51 recorded=yes
+GATE_ICU74 lib=libicuuc.so.74 file="/usr/local/lib64/icu74-compat/libicuuc.so.74.2" sha256=33499dd97a5393926b32e0b535f5340f7dae14b35e59025b572e6bd9ad48a2ae recorded=yes
+GATE_ICU74 lib=libicudata.so.74 file="/usr/local/lib64/icu74-compat/libicudata.so.74.2" sha256=c891c5fdb45e3cf756b728abe256be7af1bfc97f00ca2f2fac450c96c09bd4b7 recorded=yes
+GATE_ICU74 verdict=OK provenance=recorded sonames="libicui18n.so.74 libicuuc.so.74 libicudata.so.74"
+```
