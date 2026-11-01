@@ -13274,6 +13274,31 @@ func TestOrphanSweepReleasesHookClaimOfClosedPoolSession(t *testing.T) {
 	}
 }
 
+// TestOrphanSweepKeepsUnresolvableStampedSessionNameUnverifiable keeps the
+// fail-closed side of #7686: a stamped gc.session_name that is not the runtime
+// name of a session bead the sweep read back terminal (a named session, an
+// aliased pool, a route-time prediction) still has to be read, and a failed
+// read leaves the claim in place even though gc.session_id reads closed.
+func TestOrphanSweepKeepsUnresolvableStampedSessionNameUnverifiable(t *testing.T) {
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{hookClaim("ga-hook-named", "gc-d34d1", "gastown__named-worker", nil)},
+		nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d1", Status: "closed", IssueType: "session"}},
+		nil, nil)
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if run.released("ga-hook-named") {
+		t.Fatalf("claim with an unreadable stamped session name was released\n%s", run.context())
+	}
+	if !strings.Contains(run.log, "bd show gastown__named-worker --json") {
+		t.Fatalf("unresolvable stamped session name was never read\n%s", run.context())
+	}
+	if !strings.Contains(run.out, "orphan-sweep: reset 0 orphaned beads, skipped 1 unverifiable") {
+		t.Fatalf("unexpected orphan-sweep output:\n%s", run.out)
+	}
+}
+
 // TestJsonlExportFirstRunArchivePathCreatedBeforeTheRename covers the window
 // between the first run's "archive path absent" check and its rename of the
 // staging repo into place: another exporter (or anything else) can create
