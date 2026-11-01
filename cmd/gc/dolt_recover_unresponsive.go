@@ -47,6 +47,8 @@ func readManagedDoltTimestamp(path string) (time.Time, bool) {
 	return when, true
 }
 
+// writeManagedDoltTimestamp atomically persists when at path, creating its
+// directory.
 func writeManagedDoltTimestamp(path string, when time.Time) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -54,11 +56,32 @@ func writeManagedDoltTimestamp(path string, when time.Time) error {
 	return fsys.WriteFileAtomic(fsys.OSFS{}, path, []byte(when.UTC().Format(time.RFC3339Nano)+"\n"), 0o600)
 }
 
+// removeManagedDoltTimestamp deletes the timestamp at path; a missing file is
+// not an error.
 func removeManagedDoltTimestamp(path string) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil
+}
+
+// clearManagedDoltUnresponsiveSince ends any recorded unresponsive streak for
+// cityPath. Callers that have just seen the server answer use it so a stall
+// that cleared by itself is not counted into a later, unrelated one. A failure
+// is reported on stderr and otherwise ignored: the record then only makes the
+// next recover act sooner, which is the pre-window behavior.
+func clearManagedDoltUnresponsiveSince(cityPath string) {
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		return
+	}
+	clearManagedDoltUnresponsiveSinceAt(managedDoltUnresponsiveSincePath(layout))
+}
+
+func clearManagedDoltUnresponsiveSinceAt(sincePath string) {
+	if err := removeManagedDoltTimestamp(sincePath); err != nil {
+		fmt.Fprintf(os.Stderr, "gc recover-managed: clear %s: %v\n", sincePath, err) //nolint:errcheck
+	}
 }
 
 // recentManagedDoltRecover reports whether a recover started within cooldown
@@ -69,7 +92,8 @@ func recentManagedDoltRecover(cityPath string, now time.Time, cooldown time.Dura
 		return false
 	}
 	last, ok := readManagedDoltTimestamp(managedDoltRecoverLastPath(layout))
-	return ok && now.Sub(last) < cooldown
+	// A record from the future (clock stepped back) cannot be a recent recover.
+	return ok && !last.After(now) && now.Sub(last) < cooldown
 }
 
 // recordManagedDoltRecover persists the start of a recover for
@@ -130,7 +154,7 @@ func managedDoltRecoverCaller() string {
 // recover decided about the managed Dolt and why. A log that cannot be
 // written falls back to stderr so the decision is never silent.
 func logManagedDoltRecoverDecision(layout managedDoltRuntimeLayout, decision, reason string, pid int, port string, probeErr error, unresponsiveFor time.Duration, now time.Time) {
-	line := fmt.Sprintf("%s gc recover-managed: decision=%s reason=%s pid=%d port=%s probe_error=%q unresponsive_for=%s caller=%s\n",
+	line := fmt.Sprintf("%s gc recover-managed: decision=%s reason=%s pid=%d port=%s probe_error=%q unresponsive_for=%s caller=%q\n",
 		now.UTC().Format(time.RFC3339), decision, reason, pid, strings.TrimSpace(port), fmt.Sprint(probeErr), unresponsiveFor.Round(time.Second), managedDoltRecoverCaller())
 	f, err := os.OpenFile(layout.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err == nil {
@@ -146,8 +170,9 @@ func logManagedDoltRecoverDecision(layout managedDoltRuntimeLayout, decision, re
 
 // managedDoltRecoverUnresponsiveGate decides whether a failed query probe may
 // proceed to stopping the managed Dolt. It returns the reason to stop and how
-// long the server has been unresponsive, or an error when the stop must be deferred because the server is alive, listening,
-// and has not been unresponsive for the whole window.
+// long the server has been unresponsive, or an error when the stop must be
+// deferred because the server is alive, listening, and has not been
+// unresponsive for the whole window.
 func managedDoltRecoverUnresponsiveGate(cityPath, host, port string, layout managedDoltRuntimeLayout, ops managedDoltRecoveryOps, probeErr error, report *managedDoltRecoverReport) (string, time.Duration, error) {
 	if ops.unresponsiveRestartAfter <= 0 || ops.classifyUnresponsive == nil {
 		return "probe-failed", 0, nil
@@ -156,9 +181,7 @@ func managedDoltRecoverUnresponsiveGate(cityPath, host, port string, layout mana
 	sincePath := managedDoltUnresponsiveSincePath(layout)
 	pid, live := ops.classifyUnresponsive(cityPath, host, port)
 	if !live {
-		if err := removeManagedDoltTimestamp(sincePath); err != nil {
-			fmt.Fprintf(os.Stderr, "gc recover-managed: clear %s: %v\n", sincePath, err) //nolint:errcheck
-		}
+		clearManagedDoltUnresponsiveSinceAt(sincePath)
 		return "probe-failed-not-live", 0, nil
 	}
 	since, recorded := readManagedDoltTimestamp(sincePath)
@@ -173,9 +196,7 @@ func managedDoltRecoverUnresponsiveGate(cityPath, host, port string, layout mana
 	}
 	elapsed := now.Sub(since)
 	if elapsed >= ops.unresponsiveRestartAfter {
-		if err := removeManagedDoltTimestamp(sincePath); err != nil {
-			fmt.Fprintf(os.Stderr, "gc recover-managed: clear %s: %v\n", sincePath, err) //nolint:errcheck
-		}
+		clearManagedDoltUnresponsiveSinceAt(sincePath)
 		return "unresponsive-window-elapsed", elapsed, nil
 	}
 	report.HadPID = true

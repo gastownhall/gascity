@@ -2505,6 +2505,9 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 				}
 			}
 		} else if providerUsesBdStoreContract(provider) {
+			// The server answers: an unresponsive streak recorded by an
+			// earlier deferred recover is over.
+			clearManagedDoltUnresponsiveSince(cityPath)
 			deps := healthyManagedRuntimePublicationDeps{
 				currentPort:     currentManagedDoltPort,
 				lifecycleOwned:  managedDoltLifecycleOwned,

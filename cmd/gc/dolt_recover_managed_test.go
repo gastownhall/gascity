@@ -917,7 +917,7 @@ func TestRecoverManagedDolt_DefersStopWhileLiveServerUnresponsive(t *testing.T) 
 		t.Fatalf("first-unresponsive state = %v (present=%v), want %v", got, ok, h.now)
 	}
 	logged := h.log(t)
-	for _, want := range []string{"defer", "pid=4242", "port=3306", "query probe timed out", "unresponsive_for=", "caller=order:beads-health"} {
+	for _, want := range []string{"defer", "pid=4242", "port=3306", "query probe timed out", "unresponsive_for=", `caller="order:beads-health"`} {
 		if !strings.Contains(logged, want) {
 			t.Errorf("dolt.log missing %q; got:\n%s", want, logged)
 		}
@@ -1082,7 +1082,7 @@ func TestRecoverManagedDolt_StopLogsReasonToDoltLog(t *testing.T) {
 		t.Fatalf("recover: %v", err)
 	}
 	logged := h.log(t)
-	for _, want := range []string{"stop", "port=3306", "connection refused", "caller=order:beads-health"} {
+	for _, want := range []string{"stop", "port=3306", "connection refused", `caller="order:beads-health"`} {
 		if !strings.Contains(logged, want) {
 			t.Errorf("dolt.log missing %q; got:\n%s", want, logged)
 		}

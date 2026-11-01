@@ -112,6 +112,7 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 			if err := admitLegacyManagedDoltLifecycle(cityPath); err != nil {
 				return report, err
 			}
+			clearManagedDoltUnresponsiveSinceAt(managedDoltUnresponsiveSincePath(layout))
 			if err := ops.publish(cityPath); err != nil {
 				return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
 			}
@@ -139,6 +140,7 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 			observePort = alternatePort
 		}
 		if ready := observeExistingManagedDoltForRecovery(cityPath, host, observePort, user, recoverManagedDoltExistingObserveTimeout(timeout), &report); ready && recoverManagedDoltShouldReuseExisting(report.Port, port) {
+			clearManagedDoltUnresponsiveSinceAt(managedDoltUnresponsiveSincePath(layout))
 			if err := ops.publish(cityPath); err != nil {
 				return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
 			}
