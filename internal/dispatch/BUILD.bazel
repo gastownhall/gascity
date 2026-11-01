@@ -52,6 +52,7 @@ go_test(
         "drain_conditional_test.go",
         "drain_test.go",
         "fanout_membership_test.go",
+        "finalize_blocked_source_repro_test.go",
         "finalize_quarantined_root_test.go",
         "finalize_query_timeout_tier_repro_test.go",
         "main_test.go",

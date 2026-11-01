@@ -12782,3 +12782,66 @@ func TestProcessWorkflowFinalizeStopsSourceChainAtClosedBlockedSource(t *testing
 		}
 	}
 }
+
+func TestProcessWorkflowFinalizeClosesOpenBlockedSourceAndStopsChain(t *testing.T) {
+	t.Parallel()
+
+	for _, formula := range []string{"mol-do-work", "mol-polecat-report"} {
+		t.Run(formula, func(t *testing.T) {
+			t.Parallel()
+
+			f := newSourceChainFinalizeFixture(t)
+			stampSourceChainLaunch(t, f, formula, "open", map[string]string{
+				"gc.work_outcome": beadmeta.WorkOutcomeBlocked,
+			})
+
+			result, trace := finalizeSourceChainFixture(t, f)
+
+			assertWorkflowPassedClosed(t, f, result)
+			assertBlockedSourceClosed(t, f)
+			assertSourceChainParentHeld(t, f)
+			if want := "stop reason=blocked_source source=" + f.rigLaunch.ID; !strings.Contains(trace, want) {
+				t.Fatalf("trace missing %q:\n%s", want, trace)
+			}
+		})
+	}
+
+	t.Run("live sibling workflow keeps precedence", func(t *testing.T) {
+		t.Parallel()
+
+		f := newSourceChainFinalizeFixture(t)
+		stampSourceChainLaunch(t, f, "mol-do-work", "open", map[string]string{
+			"gc.work_outcome": beadmeta.WorkOutcomeBlocked,
+		})
+		sibling := mustCreateWorkflowBead(t, f.rigStore, beads.Bead{
+			Title: "second live workflow",
+			Type:  "task",
+			Metadata: map[string]string{
+				"gc.kind":             "workflow",
+				"gc.formula_contract": "graph.v2",
+				"gc.source_bead_id":   f.rigLaunch.ID,
+				"gc.source_store_ref": "rig:test",
+			},
+		})
+
+		result, trace := finalizeSourceChainFixture(t, f)
+
+		assertWorkflowPassedClosed(t, f, result)
+		source, err := f.rigStore.Get(f.rigLaunch.ID)
+		if err != nil {
+			t.Fatalf("get rig launch: %v", err)
+		}
+		if source.Status != "open" {
+			t.Fatalf("rig launch status = %q, want open while %s is live", source.Status, sibling.ID)
+		}
+		assertSourceChainParentHeld(t, f)
+		for _, want := range []string{"stop reason=live_child_workflow source=" + f.rigLaunch.ID, "live_roots=" + sibling.ID} {
+			if !strings.Contains(trace, want) {
+				t.Fatalf("trace missing %q:\n%s", want, trace)
+			}
+		}
+		if strings.Contains(trace, "reason=blocked_source") {
+			t.Fatalf("trace has blocked_source stop; live child workflow must take precedence:\n%s", trace)
+		}
+	})
+}
