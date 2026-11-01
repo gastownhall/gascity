@@ -242,6 +242,7 @@ func (h *RuntimeHandle) State(context.Context) (State, error) {
 		state.Phase = PhaseStopped
 		return state, nil
 	}
+	state.Program = ProgramStatusOf(h.provider, h.sessionName)
 	pending, err := h.Pending(context.Background())
 	if err != nil {
 		return State{}, err
@@ -249,6 +250,10 @@ func (h *RuntimeHandle) State(context.Context) (State, error) {
 	if pending != nil {
 		state.Phase = PhaseBlocked
 		state.Pending = pending
+		return state, nil
+	}
+	if phase, decided := ProgramPhase(state.Program); decided {
+		state.Phase = phase
 		return state, nil
 	}
 	state.Phase = PhaseReady

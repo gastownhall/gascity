@@ -648,6 +648,14 @@
           "activity": {
             "type": "string"
           },
+          "activity_source": {
+            "description": "Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.",
+            "enum": [
+              "program",
+              "transcript"
+            ],
+            "type": "string"
+          },
           "available": {
             "type": "boolean"
           },
@@ -688,6 +696,10 @@
             "$ref": "#/components/schemas/PoolLimits",
             "description": "Configured session limits of the agent (or of its pool)."
           },
+          "program_status": {
+            "$ref": "#/components/schemas/SessionProgramStatus",
+            "description": "The agent session program's own status report (OSC 7501), present while the city's program_status switch is shadow or on and the reading is valid. Absent means the status is unknown, never idle."
+          },
           "provider": {
             "type": "string"
           },
@@ -701,6 +713,7 @@
             "$ref": "#/components/schemas/SessionInfo"
           },
           "state": {
+            "description": "Agent state: suspended, quarantined, stopped, working, waiting, idle, blocked or error. blocked and error come only from the session program's own status report, under the city's program_status switch on.",
             "type": "string"
           },
           "suspended": {
@@ -8735,7 +8748,7 @@
         "additionalProperties": false,
         "properties": {
           "activity": {
-            "description": "Session activity state: 'idle' or 'in-turn'.",
+            "description": "Session activity state: 'idle' or 'in-turn', derived from the transcript under every program_status switch. The session program's own status arrives in the program_status frame.",
             "examples": [
               "idle"
             ],
@@ -9280,6 +9293,73 @@
         ],
         "type": "object"
       },
+      "SessionProgramStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "app": {
+            "description": "The program's self-reported name.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "What a blocked program waits for, when it says. Only with state blocked.",
+            "enum": [
+              "permission",
+              "question",
+              "auth"
+            ],
+            "type": "string"
+          },
+          "progress": {
+            "description": "Percent complete the program reports, only with working or blocked.",
+            "format": "int64",
+            "maximum": 100,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "quiet_since": {
+            "description": "When the program last left working or blocked for an input boundary; absent if it never has in this capture.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "since": {
+            "description": "When the program entered state, by the capture host's clock.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "state": {
+            "description": "The state the program reports. done and error are input boundaries like idle (error is a failed turn with the program alive); blocked is waiting on the user.",
+            "enum": [
+              "idle",
+              "working",
+              "done",
+              "blocked",
+              "error"
+            ],
+            "type": "string"
+          },
+          "working_children": {
+            "description": "Child tasks the program reports as working.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "state",
+          "since",
+          "working_children"
+        ],
+        "type": "object"
+      },
+      "SessionProgramStatusEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "program_status": {
+            "$ref": "#/components/schemas/SessionProgramStatus",
+            "description": "The session program's current status; absent when it is unknown (never read as idle)."
+          }
+        },
+        "type": "object"
+      },
       "SessionRawMessageFrame": {
         "description": "Provider-native transcript frame. Gas City forwards the exact JSON the provider wrote to its session log, so the shape is provider-specific and can be any JSON value. The producing provider is identified by the Provider field on the enclosing envelope; consumers dispatch per-provider frame parsing keyed by that identifier.",
         "title": "Session raw transcript frame"
@@ -9394,6 +9474,14 @@
           "activity": {
             "type": "string"
           },
+          "activity_source": {
+            "description": "Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.",
+            "enum": [
+              "program",
+              "transcript"
+            ],
+            "type": "string"
+          },
           "agent_kind": {
             "type": "string"
           },
@@ -9452,6 +9540,10 @@
           },
           "pool": {
             "type": "string"
+          },
+          "program_status": {
+            "$ref": "#/components/schemas/SessionProgramStatus",
+            "description": "The session program's own status report (OSC 7501), present while the city's program_status switch is shadow or on and the reading is valid. Absent means the status is unknown, never idle."
           },
           "provider": {
             "type": "string"
@@ -9582,7 +9674,7 @@
         "type": "object"
       },
       "SessionStreamCommonEvent": {
-        "description": "Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, and keepalive heartbeats. The concrete variant is identified by the SSE event name.",
+        "description": "Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, program-status changes, and keepalive heartbeats. The concrete variant is identified by the SSE event name.",
         "oneOf": [
           {
             "$ref": "#/components/schemas/SessionActivityEvent"
@@ -9592,6 +9684,9 @@
           },
           {
             "$ref": "#/components/schemas/SessionPendingClearedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/SessionProgramStatusEvent"
           },
           {
             "$ref": "#/components/schemas/HeartbeatEvent"
@@ -53622,7 +53717,7 @@
     },
     "/v0/city/{cityName}/session/{id}/stream": {
       "get": {
-        "description": "Server-Sent Events stream of session transcript updates. Streams turns (conversation format), raw messages (JSONL format), or structured messages based on the format query parameter. Emits activity and pending events for tool approval prompts.",
+        "description": "Server-Sent Events stream of session transcript updates. Streams turns (conversation format), raw messages (JSONL format), or structured messages based on the format query parameter. Emits activity and pending events for tool approval prompts, and a program_status event when the session program's own reported status changes (only while the city's program_status switch is shadow or on; a frame without program_status means the status became unknown).",
         "operationId": "stream-session",
         "parameters": [
           {
@@ -53829,6 +53924,32 @@
                           "event"
                         ],
                         "title": "Event pending_cleared",
+                        "type": "object"
+                      },
+                      {
+                        "properties": {
+                          "data": {
+                            "$ref": "#/components/schemas/SessionProgramStatusEvent"
+                          },
+                          "event": {
+                            "const": "program_status",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event resume cursor.",
+                            "type": "string"
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data",
+                          "event"
+                        ],
+                        "title": "Event program_status",
                         "type": "object"
                       },
                       {
