@@ -528,7 +528,7 @@ func TestInitCityInPodSkipsSuccessfullyStagedNestedWorkDir(t *testing.T) {
 	}
 
 	cityOps := newCapturingStageOps()
-	if err := initCityInPod(context.Background(), cityOps, "pod", city, skipRel); err != nil {
+	if err := initCityInPod(context.Background(), cityOps, "pod", city, skipRel, nil); err != nil {
 		t.Fatalf("initCityInPod: %v", err)
 	}
 	for _, skipped := range []string{"/tmp/city-src/rigs/team/active.txt", "/tmp/city-src/rigs/team/nested/task.txt"} {
@@ -569,7 +569,7 @@ func TestInitCityInPodKeepsUnstagedWorkDirInTemplate(t *testing.T) {
 	}
 
 	cityOps := newCapturingStageOps()
-	if err := initCityInPod(context.Background(), cityOps, "pod", city, skipRel); err != nil {
+	if err := initCityInPod(context.Background(), cityOps, "pod", city, skipRel, nil); err != nil {
 		t.Fatalf("initCityInPod: %v", err)
 	}
 	if got := cityOps.files["/tmp/city-src/rigs/team"]; got != "unstaged workdir" {

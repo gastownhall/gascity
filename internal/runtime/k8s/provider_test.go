@@ -17,6 +17,7 @@ import (
 
 	execerr "k8s.io/client-go/util/exec"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -1150,6 +1151,14 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 		"GC_RIG_ROOT":                         "/host/city/rig",
 		"GC_STORE_ROOT":                       "/host/city/rig",
 		"GC_BEADS_SCOPE_ROOT":                 "/host/city/rig",
+		"GC_BEADS_PROJECT_ID":                 "rig-project",
+		"GC_BEADS_PREFIX":                     "fe",
+		"GC_DOLT_DATABASE":                    "bd_rig_project",
+		"GC_K8S_CITY_BEADS_PROJECT_ID":        "hq-project",
+		"GC_K8S_CITY_BEADS_PREFIX":            "hq",
+		"GC_K8S_CITY_DOLT_DATABASE":           "bd_hq_project",
+		"GC_K8S_CITY_DOLT_HOST":               "hq.dolt.example",
+		"GC_K8S_CITY_DOLT_PORT":               "4406",
 		"BEADS_DIR":                           "/host/city/rig/.beads",
 		"GT_ROOT":                             "/host/city",
 		"GC_CITY_RUNTIME_DIR":                 "/host/city/.gc/runtime",
@@ -1210,6 +1219,17 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 	// BEADS_DIR should be remapped from controller city path to /workspace.
 	if envMap["BEADS_DIR"] != "/workspace/rig/.beads" {
 		t.Errorf("BEADS_DIR = %q, want /workspace/rig/.beads", envMap["BEADS_DIR"])
+	}
+	if envMap["GC_BEADS_PROJECT_ID"] != "rig-project" || envMap["GC_BEADS_PREFIX"] != "fe" {
+		t.Errorf("worker store identity = %q/%q, want rig-project/fe", envMap["GC_BEADS_PROJECT_ID"], envMap["GC_BEADS_PREFIX"])
+	}
+	if envMap["GC_DOLT_DATABASE"] != "bd_rig_project" {
+		t.Errorf("worker Dolt database = %q, want selected rig database bd_rig_project", envMap["GC_DOLT_DATABASE"])
+	}
+	for _, key := range []string{"GC_K8S_CITY_BEADS_PROJECT_ID", "GC_K8S_CITY_BEADS_PREFIX", "GC_K8S_CITY_DOLT_DATABASE", "GC_K8S_CITY_DOLT_HOST", "GC_K8S_CITY_DOLT_PORT"} {
+		if _, ok := envMap[key]; ok {
+			t.Errorf("controller-only identity projection %s leaked into worker env", key)
+		}
 	}
 
 	// GT_ROOT should be remapped from controller city path to /workspace.
@@ -1280,6 +1300,19 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 	// GC_TMUX_SESSION should be added.
 	if envMap["GC_TMUX_SESSION"] != "main" {
 		t.Errorf("GC_TMUX_SESSION = %q, want main", envMap["GC_TMUX_SESSION"])
+	}
+}
+
+func TestResolvePodHostedDoltIdentityFailsClosedWhenMissing(t *testing.T) {
+	_, err := resolvePodHostedDoltIdentity(map[string]string{
+		"GC_DOLT_HOST":     "hosted.dolt.example",
+		"GC_DOLT_PORT":     "4406",
+		"GC_DOLT_DATABASE": "bd_project",
+		"GC_BEADS_PREFIX":  "pr",
+		"GC_STORE_ROOT":    "/city",
+	}, "", podManagedDoltHost, podManagedDoltPort)
+	if err == nil || !strings.Contains(err.Error(), "missing scoped store identity GC_BEADS_PROJECT_ID") {
+		t.Fatalf("resolvePodHostedDoltIdentity error = %v, want missing project identity", err)
 	}
 }
 
@@ -1741,11 +1774,13 @@ func TestInitBeadsInPodUsesProjectedStoreRootAndPrefix(t *testing.T) {
 	cfg := runtime.Config{
 		WorkDir: "/host/city/rigs/frontend",
 		Env: map[string]string{
-			"GC_CITY":         "/host/city",
-			"GC_STORE_ROOT":   "/host/city/custom-scope",
-			"GC_BEADS_PREFIX": "cs",
-			"GC_DOLT_HOST":    "canonical-dolt.example.com",
-			"GC_DOLT_PORT":    "3308",
+			"GC_CITY":             "/host/city",
+			"GC_STORE_ROOT":       "/host/city/custom-scope",
+			"GC_BEADS_PROJECT_ID": "project-cs",
+			"GC_BEADS_PREFIX":     "cs",
+			"GC_DOLT_DATABASE":    "bd_project_cs",
+			"GC_DOLT_HOST":        "canonical-dolt.example.com",
+			"GC_DOLT_PORT":        "3308",
 		},
 	}
 	podWorkDir := projectedPodWorkDir(cfg)
@@ -1768,15 +1803,15 @@ func TestInitBeadsInPodUsesProjectedStoreRootAndPrefix(t *testing.T) {
 			continue
 		}
 		if strings.Contains(script, wrongWorkDirB64) {
-			t.Fatalf("repair script used pod workdir instead of projected store root: %s", script)
+			t.Fatalf("scoped Beads check used pod workdir instead of projected store root: %s", script)
 		}
-		if !strings.Contains(script, "m.pop('project_id'") {
-			t.Fatalf("repair script did not strip project_id: %s", script)
+		if !strings.Contains(script, `grep -Fqx "id = \"$PROJECT_ID\"" `+shellquote.Quote(contract.ProjectIdentityPath(""))) {
+			t.Fatalf("scoped Beads check did not verify project identity: %s", script)
 		}
 		found = true
 	}
 	if !found {
-		t.Fatal("initBeadsInPod did not use projected store root and prefix")
+		t.Fatal("initBeadsInPod did not check the projected store root and prefix")
 	}
 }
 
@@ -1897,11 +1932,19 @@ func TestVerifyBeadsInPodRejectsHostOnlyProjectedTarget(t *testing.T) {
 	}
 }
 
-func TestStartUsesPodBeadsRepairScript(t *testing.T) {
+func TestStartFailsClosedWhenHostedBeadsFilesAreMissing(t *testing.T) {
 	fake := newFakeK8sOps()
 	p := newProviderWithOps(fake)
 	p.prebaked = true
 	p.postStartSettle = 0
+	var scopedBeadsScript string
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 3 && cmd[0] == "sh" && cmd[1] == "-c" && strings.Contains(cmd[2], "hosted Dolt scoped beads files are incomplete") {
+			scopedBeadsScript = cmd[2]
+			return "", errors.New("hosted Dolt scoped beads files are incomplete")
+		}
+		return "", nil
+	}
 
 	fake.setExecResult("gc-test-agent",
 		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
@@ -1910,45 +1953,41 @@ func TestStartUsesPodBeadsRepairScript(t *testing.T) {
 		Command: "claude --settings .gc/settings.json",
 		WorkDir: "/city/rig",
 		Env: map[string]string{
-			"GC_AGENT":        "rig/polecat",
-			"GC_CITY":         "/city",
-			"GC_STORE_ROOT":   "/city/custom-scope",
-			"GC_BEADS_PREFIX": "cs",
-			"GC_DOLT_PORT":    "31364",
+			"GC_AGENT":            "rig/polecat",
+			"GC_CITY":             "/city",
+			"GC_STORE_ROOT":       "/city/custom-scope",
+			"GC_BEADS_PROJECT_ID": "project-cs",
+			"GC_BEADS_PREFIX":     "cs",
+			"GC_DOLT_DATABASE":    "bd_project_cs",
+			"GC_DOLT_PORT":        "31364",
 		},
 	}
-	if err := p.Start(context.Background(), "gc-test-agent", cfg); err != nil {
-		t.Fatalf("Start: %v", err)
+	if err := p.Start(context.Background(), "gc-test-agent", cfg); err == nil ||
+		!strings.Contains(err.Error(), "initializing scoped beads") ||
+		!strings.Contains(err.Error(), "hosted Dolt scoped beads files are incomplete") {
+		t.Fatalf("Start error = %v, want missing hosted scoped beads files error", err)
 	}
 
-	foundRepair := false
-	for _, c := range fake.calls {
-		if c.method != "execInPod" || len(c.cmd) < 3 {
-			continue
-		}
-		if c.cmd[0] != "sh" || c.cmd[1] != "-c" {
-			continue
-		}
-		script := c.cmd[2]
-		if containsStr(script, "bd init --server") && containsStr(script, "m.pop('project_id'") {
-			foundRepair = true
-			break
-		}
+	if scopedBeadsScript == "" {
+		t.Fatal("Start did not run the hosted scoped Beads file check")
 	}
-	if !foundRepair {
-		t.Fatal("Start did not invoke the pod .beads repair/bootstrap script")
+	if strings.Contains(scopedBeadsScript, "bd init --server") || strings.Contains(scopedBeadsScript, "mkdir -p .beads") {
+		t.Fatalf("missing hosted files must fail closed without mutating Beads state:\n%s", scopedBeadsScript)
+	}
+	if !strings.Contains(scopedBeadsScript, "hosted Dolt scoped beads files are incomplete") {
+		t.Fatalf("hosted missing-files error is absent from script:\n%s", scopedBeadsScript)
 	}
 }
 
-func TestStartWarnsWhenInitBeadsInPodFails(t *testing.T) {
+func TestStartFailsWhenInitBeadsInPodFails(t *testing.T) {
 	fake := newFakeK8sOps()
 	p := newProviderWithOps(fake)
 	p.prebaked = true
 	p.postStartSettle = 0
 
 	fake.execFunc = func(_ string, cmd []string) (string, error) {
-		if len(cmd) >= 3 && cmd[0] == "sh" && cmd[1] == "-c" && containsStr(cmd[2], "bd init --server") {
-			return "", errors.New("missing canonical beads")
+		if len(cmd) >= 3 && cmd[0] == "sh" && cmd[1] == "-c" && containsStr(cmd[2], "hosted Dolt scoped beads files are incomplete") {
+			return "", errors.New("hosted Dolt scoped beads files are incomplete")
 		}
 		return "", nil
 	}
@@ -1959,30 +1998,74 @@ func TestStartWarnsWhenInitBeadsInPodFails(t *testing.T) {
 		Command: "claude --settings .gc/settings.json",
 		WorkDir: "/city/rig",
 		Env: map[string]string{
-			"GC_AGENT":     "rig/polecat",
-			"GC_CITY":      "/city",
-			"GC_DOLT_PORT": "31364",
+			"GC_AGENT":            "rig/polecat",
+			"GC_CITY":             "/city",
+			"GC_STORE_ROOT":       "/city/rig",
+			"GC_BEADS_PROJECT_ID": "project-cs",
+			"GC_BEADS_PREFIX":     "cs",
+			"GC_DOLT_DATABASE":    "bd_project_cs",
+			"GC_DOLT_PORT":        "31364",
 		},
 	}
-	if err := p.Start(context.Background(), "gc-test-agent", cfg); err != nil {
-		t.Fatalf("Start should warn and continue when pod beads repair fails: %v", err)
+	if err := p.Start(context.Background(), "gc-test-agent", cfg); err == nil || !strings.Contains(err.Error(), "initializing scoped beads") {
+		t.Fatalf("Start error = %v, want scoped beads initialization failure", err)
 	}
 }
 
-// TestInitBeadsInPodBdInitSetsBEADSDIR verifies that the pod bootstrap bd init
-// sets BEADS_DIR so bd does not create a .git/ as a side effect in the pod
-// workspace. Regression for #399.
-func TestInitBeadsInPodBdInitSetsBEADSDIR(t *testing.T) {
+func TestStartDoesNotReleaseWorkspaceWhenCityInitFails(t *testing.T) {
 	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.prebaked = false
+	p.postStartSettle = 0
+	cityPath := t.TempDir()
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 2 && containsStr(strings.Join(cmd, " "), "gc init") {
+			return "", errors.New("hosted identity required")
+		}
+		return "", nil
+	}
 	cfg := runtime.Config{
+		Command: "claude",
+		WorkDir: cityPath,
 		Env: map[string]string{
-			"GC_DOLT_HOST":    podManagedDoltHost,
-			"GC_DOLT_PORT":    podManagedDoltPort,
-			"GC_BEADS_PREFIX": "demo",
+			"GC_AGENT": "mayor",
+			"GC_CITY":  cityPath,
 		},
 	}
-	if err := initBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, "/workspace/demo-repo", podManagedDoltHost, podManagedDoltPort); err != nil {
-		t.Fatalf("initBeadsInPod: %v", err)
+	if err := p.Start(context.Background(), "gc-test-agent", cfg); err == nil || !strings.Contains(err.Error(), "initializing City in pod") {
+		t.Fatalf("Start error = %v, want City initialization failure", err)
+	}
+	for _, call := range fake.calls {
+		if call.method == "execInPod" && strings.Join(call.cmd, " ") == "touch /workspace/.gc-workspace-ready" {
+			t.Fatal("workspace-ready marker was written after City initialization failed")
+		}
+		if call.method == "execInPod" && strings.Contains(strings.Join(call.cmd, " "), "tmux has-session") {
+			t.Fatal("tmux was probed after City initialization failed")
+		}
+	}
+}
+
+func TestInitBeadsInPodMissingFilesFailClosed(t *testing.T) {
+	fake := newFakeK8sOps()
+	missingFilesErr := errors.New("hosted Dolt scoped beads files are incomplete")
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 3 && cmd[0] == "sh" && cmd[1] == "-c" && strings.Contains(cmd[2], "hosted Dolt scoped beads files are incomplete") {
+			return "", missingFilesErr
+		}
+		return "", nil
+	}
+	cfg := runtime.Config{
+		Env: map[string]string{
+			"GC_STORE_ROOT":       "/city/demo-repo",
+			"GC_BEADS_PROJECT_ID": "project-demo",
+			"GC_BEADS_PREFIX":     "demo",
+			"GC_DOLT_DATABASE":    "bd_project_demo",
+			"GC_DOLT_HOST":        podManagedDoltHost,
+			"GC_DOLT_PORT":        podManagedDoltPort,
+		},
+	}
+	if err := initBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, "/workspace/demo-repo", podManagedDoltHost, podManagedDoltPort); !errors.Is(err, missingFilesErr) {
+		t.Fatalf("initBeadsInPod error = %v, want missing hosted scoped beads files", err)
 	}
 	var script string
 	for _, c := range fake.calls {
@@ -1994,24 +2077,34 @@ func TestInitBeadsInPodBdInitSetsBEADSDIR(t *testing.T) {
 	if script == "" {
 		t.Fatal("no sh -c exec call found")
 	}
-	want := `BEADS_DIR="$WD/.beads" bd init --server`
-	if !strings.Contains(script, want) {
-		t.Errorf("bd init invocation missing BEADS_DIR env prefix: %q not found in script:\n%s", want, script)
+	if strings.Contains(script, "bd init --server") || strings.Contains(script, "mkdir -p .beads") || strings.Contains(script, "yes |") {
+		t.Errorf("missing hosted files must not initialize the store or create Beads files:\n%s", script)
+	}
+	if !strings.Contains(script, "hosted Dolt scoped beads files are incomplete") {
+		t.Errorf("missing hosted-files error absent from check script:\n%s", script)
+	}
+	missingFilesCheck := strings.Index(script, "test -f .beads/metadata.json")
+	if bdAccess := strings.Index(script, "bd config get issue_prefix"); missingFilesCheck < 0 || bdAccess < 0 || missingFilesCheck > bdAccess {
+		t.Errorf("missing-files guard must fail before accessing the hosted Beads store:\n%s", script)
+	}
+	metadataWrite := strings.Index(script, `json.dump(m,open('.beads/metadata.json','w')`)
+	if metadataWrite < 0 || missingFilesCheck > metadataWrite {
+		t.Errorf("missing-files guard must precede the pod-local metadata update:\n%s", script)
 	}
 }
 
-// TestInitBeadsInPodStripsProjectIDFromMetadata verifies that the metadata
-// patch removes the controller's project_id so the agent pod's bd does not
-// fail with PROJECT IDENTITY MISMATCH against the in-cluster Dolt server.
-// The staged .beads/metadata.json carries the controller's project_id, which
-// is wrong for the pod and must be dropped so bd rediscovers it.
-func TestInitBeadsInPodStripsProjectIDFromMetadata(t *testing.T) {
+// TestInitBeadsInPodPreservesAndVerifiesProjectID prevents stripping canonical
+// identity and silently allowing bd to attach to a different hosted store.
+func TestInitBeadsInPodPreservesAndVerifiesProjectID(t *testing.T) {
 	fake := newFakeK8sOps()
 	cfg := runtime.Config{
 		Env: map[string]string{
-			"GC_DOLT_HOST":    podManagedDoltHost,
-			"GC_DOLT_PORT":    podManagedDoltPort,
-			"GC_BEADS_PREFIX": "demo",
+			"GC_STORE_ROOT":       "/city/demo-repo",
+			"GC_BEADS_PROJECT_ID": "project-demo",
+			"GC_BEADS_PREFIX":     "demo",
+			"GC_DOLT_DATABASE":    "bd_project_demo",
+			"GC_DOLT_HOST":        podManagedDoltHost,
+			"GC_DOLT_PORT":        podManagedDoltPort,
 		},
 	}
 
@@ -2030,12 +2123,18 @@ func TestInitBeadsInPodStripsProjectIDFromMetadata(t *testing.T) {
 		t.Fatal("no sh -c exec call found")
 	}
 
-	// Both the argv and stdin python3 fallback paths must drop project_id
-	// after merging the patch into the staged metadata.
-	want := "m.pop('project_id', None)"
-	count := strings.Count(script, want)
-	if count < 2 {
-		t.Errorf("expected %q to appear in both python3 patch invocations (>=2 times), got %d\nscript:\n%s", want, count, script)
+	for _, want := range []string{
+		`grep -Fqx "id = \"$PROJECT_ID\"" ` + shellquote.Quote(contract.ProjectIdentityPath("")),
+		`m.get("dolt_database", "")).strip() == sys.argv[2]`,
+		`m.get("project_id", "")).strip() == sys.argv[3]`,
+		`[ "$GOT_PREFIX" = "$PREFIX" ]`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("scoped identity verification missing %q in script:\n%s", want, script)
+		}
+	}
+	if strings.Contains(script, "m.pop('project_id'") {
+		t.Errorf("identity patch must preserve project_id:\n%s", script)
 	}
 	if strings.Contains(script, "<<<") {
 		t.Errorf("metadata patch script must be POSIX sh compatible; found bash here-string in:\n%s", script)
@@ -2599,7 +2698,7 @@ func TestBuildPodServiceAccount(t *testing.T) {
 func TestInitCityInPodSkipsDolt(t *testing.T) {
 	fake := newFakeK8sOps()
 
-	err := initCityInPod(context.Background(), fake, "gc-mayor", "/city", "")
+	err := initCityInPod(context.Background(), fake, "gc-mayor", "/city", "", nil)
 	if err != nil {
 		t.Fatalf("initCityInPod: %v", err)
 	}
@@ -2625,15 +2724,8 @@ func TestInitCityInPodSkipsDolt(t *testing.T) {
 		t.Fatal("gc init command not found in exec calls")
 	}
 
-	hasSkip := false
-	for _, arg := range gcInitCmd {
-		if arg == "GC_DOLT=skip" {
-			hasSkip = true
-			break
-		}
-	}
-	if !hasSkip {
-		t.Errorf("gc init should run with GC_DOLT=skip; got cmd=%v", gcInitCmd)
+	if !strings.Contains(strings.Join(gcInitCmd, " "), `env -i PATH="$PATH" HOME="$HOME" GC_DOLT=skip`) {
+		t.Errorf("gc init should run with a minimal environment and GC_DOLT=skip; got cmd=%v", gcInitCmd)
 	}
 
 	// Pod-local init only scaffolds a session filesystem; it must not register
@@ -2650,6 +2742,106 @@ func TestInitCityInPodSkipsDolt(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("gc init should run with %s; got cmd=%v", flag, gcInitCmd)
+		}
+	}
+}
+
+func TestInitCityInPodUsesCanonicalHQHostedIdentity(t *testing.T) {
+	fake := newFakeK8sOps()
+	identity := &podHostedDoltIdentity{
+		ProjectID: "hq-project",
+		Prefix:    "hq",
+		Database:  "bd_hq_project",
+		Host:      "hq.dolt.example",
+		Port:      "4406",
+	}
+	if err := initCityInPod(context.Background(), fake, "gc-mayor", "/city", "", identity); err != nil {
+		t.Fatalf("initCityInPod: %v", err)
+	}
+	for _, call := range fake.calls {
+		if call.method != "execInPod" {
+			continue
+		}
+		for _, arg := range call.cmd {
+			if arg != "gc" {
+				continue
+			}
+			joined := strings.Join(call.cmd, " ")
+			for _, want := range []string{"--dolt-host hq.dolt.example", "--dolt-port 4406", "--dolt-database bd_hq_project", "--dolt-project-id hq-project"} {
+				if !strings.Contains(joined, want) {
+					t.Errorf("gc init command %v missing %q", call.cmd, want)
+				}
+			}
+			return
+		}
+	}
+	t.Fatal("gc init command was not issued")
+}
+
+func TestInitCityInPodSanitizesHostedRigEnvironmentForNonHostedCity(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.postStartSettle = 0
+	cityPath := t.TempDir()
+	var gcInitCmd []string
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) == 6 && cmd[0] == "sh" && cmd[5] == archiveExtractAck {
+			return archiveExtractAck, nil
+		}
+		if len(cmd) >= 4 && cmd[0] == "sh" && cmd[1] == "-c" && cmd[3] == "gc" {
+			gcInitCmd = append([]string(nil), cmd...)
+		}
+		return "", nil
+	}
+
+	cfg := runtime.Config{
+		Command: "claude",
+		WorkDir: cityPath,
+		Env: map[string]string{
+			"GC_AGENT":                   "rig/polecat",
+			"GC_CITY":                    cityPath,
+			"GC_STORE_ROOT":              cityPath,
+			"GC_BEADS_PROJECT_ID":        "rig-project",
+			"GC_BEADS_PREFIX":            "rg",
+			"GC_DOLT_DATABASE":           "bd_rig_project",
+			"GC_DOLT_HOST":               "rig.dolt.example",
+			"GC_DOLT_PORT":               "3307",
+			"GC_DOLT_USER":               "rig-user",
+			"GC_DOLT_PASSWORD":           "rig-password",
+			"GC_BEADS_TRANSPORT":         "direct",
+			"GC_BEADS_TARGET":            "external",
+			"BEADS_DOLT_SERVER_HOST":     "rig.dolt.example",
+			"BEADS_DOLT_SERVER_PORT":     "3307",
+			"BEADS_DOLT_SERVER_DATABASE": "bd_rig_project",
+			"BEADS_DOLT_SERVER_MODE":     "direct",
+			"BEADS_DOLT_SERVER_TLS":      "true",
+			"BEADS_DOLT_SERVER_SOCKET":   "/tmp/rig-dolt.sock",
+			"BEADS_DOLT_SERVER_USER":     "rig-user",
+			"BEADS_DOLT_SERVER_PASSWORD": "rig-password",
+			"BEADS_DOLT_PASSWORD":        "rig-password",
+		},
+	}
+	if err := p.Start(context.Background(), "gc-rig-worker", cfg); err != nil {
+		t.Fatalf("Start hosted rig worker with non-hosted City: %v", err)
+	}
+	if len(gcInitCmd) == 0 {
+		t.Fatal("gc init command was not issued")
+	}
+	if got, want := gcInitCmd[2], `exec env -i PATH="$PATH" HOME="$HOME" GC_DOLT=skip "$0" "$@"`; got != want {
+		t.Fatalf("gc init launcher = %q, want minimal environment launcher %q", got, want)
+	}
+	joined := strings.Join(gcInitCmd, " ")
+	for _, forbidden := range []string{
+		"GC_DOLT_HOST=", "GC_DOLT_PORT=", "GC_DOLT_USER=", "GC_DOLT_PASSWORD=", "GC_DOLT_DATABASE=",
+		"GC_BEADS_PROJECT_ID=", "GC_BEADS_PREFIX=", "GC_BEADS_TRANSPORT=", "GC_BEADS_TARGET=",
+		"BEADS_DOLT_SERVER_HOST=", "BEADS_DOLT_SERVER_PORT=", "BEADS_DOLT_SERVER_DATABASE=",
+		"BEADS_DOLT_SERVER_MODE=", "BEADS_DOLT_SERVER_TLS=", "BEADS_DOLT_SERVER_SOCKET=",
+		"BEADS_DOLT_SERVER_USER=", "BEADS_DOLT_SERVER_PASSWORD=", "BEADS_DOLT_PASSWORD=",
+		"rig-project", "bd_rig_project", "rig.dolt.example", "rig-user", "rig-password", "/tmp/rig-dolt.sock",
+		"--dolt-host", "--dolt-port", "--dolt-database", "--dolt-project-id",
+	} {
+		if strings.Contains(joined, forbidden) {
+			t.Errorf("non-hosted City gc init unexpectedly received rig identity %q: %v", forbidden, gcInitCmd)
 		}
 	}
 }
@@ -2685,7 +2877,7 @@ func TestInitCityInPodRemovesPartialCopyAfterUploadFailure(t *testing.T) {
 	uploadErr := errors.New("pod upload failed")
 	ops := &cleanupCaptureOps{fakeK8sOps: newFakeK8sOps(), cancel: cancel, uploadErr: uploadErr}
 
-	err := initCityInPod(ctx, ops, "gc-mayor", t.TempDir(), "")
+	err := initCityInPod(ctx, ops, "gc-mayor", t.TempDir(), "", nil)
 	if !errors.Is(err, uploadErr) {
 		t.Fatalf("initCityInPod error = %v, want %v", err, uploadErr)
 	}
