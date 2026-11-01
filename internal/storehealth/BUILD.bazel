@@ -2,7 +2,11 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "storehealth",
-    srcs = ["storehealth.go"],
+    srcs = [
+        "patrol.go",
+        "quarantine.go",
+        "storehealth.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/storehealth",
     visibility = ["//:__subpackages__"],
     deps = [
@@ -15,6 +19,8 @@ go_library(
 go_test(
     name = "storehealth_test",
     srcs = [
+        "patrol_test.go",
+        "quarantine_test.go",
         "storehealth_test.go",
         "testenv_import_test.go",
     ],
