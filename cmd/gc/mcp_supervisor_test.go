@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 )
 
 func writeMCPSource(t *testing.T, path string, body string) {
@@ -121,6 +122,243 @@ command = "uvx"
 	}
 	if !strings.Contains(err.Error(), "MCP target conflict") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	// Neither agent is implicit, so the conflict is not the agent-local
+	// shape and the error names no cause.
+	assertNoAgentLocalConflictCause(t, cityPath, cfg, err, filepath.Dir(agentLocal))
+}
+
+// A city template that expands {{.AgentName}} gives two explicit city-root
+// agents different payloads; with no agent-local directory, both gc start and
+// mcp-shared-target report the conflict without naming an mcp/ directory.
+func TestBuildStage1MCPTargetsTemplateConflictNamesNoAgentLocalCause(t *testing.T) {
+	cityPath := t.TempDir()
+	writeMCPSource(t, filepath.Join(cityPath, "mcp", "notes.template.toml"), `
+name = "notes"
+command = "uvx"
+args = ["{{.AgentName}}"]
+`)
+
+	cfg := &config.City{
+		PackMCPDir: filepath.Join(cityPath, "mcp"),
+		Session:    config.SessionConfig{Provider: "tmux"},
+		Providers:  builtinProviderAliasesForTest("claude"),
+		Agents: []config.Agent{
+			{Name: "mayor", Scope: "city", Provider: "claude"},
+			{Name: "deputy", Scope: "city", Provider: "claude"},
+		},
+	}
+
+	_, err := buildStage1MCPTargets(cityPath, cfg, stubLookPath, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "MCP target conflict") {
+		t.Fatalf("buildStage1MCPTargets err = %v, want MCP target conflict", err)
+	}
+	assertNoAgentLocalConflictCause(t, cityPath, cfg, err, filepath.Join(cityPath, "mcp"))
+}
+
+// assertNoAgentLocalConflictCause checks that a stage-1 conflict error and
+// the mcp-shared-target details report the conflict without an agent-local
+// cause sentence or the named mcp/ directory.
+func assertNoAgentLocalConflictCause(t *testing.T, cityPath string, cfg *config.City, startErr error, mcpDir string) {
+	t.Helper()
+	if strings.Contains(startErr.Error(), mcpDir) || strings.Contains(startErr.Error(), "agent-local") {
+		t.Fatalf("buildStage1MCPTargets err = %v, want no agent-local cause", startErr)
+	}
+	result := newMCPSharedTargetDoctorCheck(cityPath, cfg, stubLookPath).Run(&doctor.CheckContext{CityPath: cityPath})
+	if result.Status != doctor.StatusError {
+		t.Fatalf("mcp-shared-target = %v (%s), want error: gc start refuses this city (%v)", result.Status, result.Message, startErr)
+	}
+	for _, detail := range result.Details {
+		if strings.Contains(detail, mcpDir) || strings.Contains(detail, "agent-local") {
+			t.Fatalf("mcp-shared-target details = %#v, want no agent-local cause", result.Details)
+		}
+	}
+}
+
+// An agent-local mcp/ catalog conflicts with the implicit agent gc adds for
+// the same provider at the city root; the error names the directory and the
+// implicit agent, not only the two projection hashes.
+func TestBuildStage1MCPTargetsNamesAgentLocalCauseAgainstImplicitAgent(t *testing.T) {
+	cityPath := t.TempDir()
+	agentLocal := filepath.Join(cityPath, "agents", "mayor", "mcp", "notes.toml")
+	writeMCPSource(t, agentLocal, `
+name = "notes"
+command = "uvx"
+`)
+
+	implicit := config.Agent{Name: "claude", Provider: "claude", Implicit: true}
+	cfg := &config.City{
+		Session:   config.SessionConfig{Provider: "tmux"},
+		Providers: map[string]config.ProviderSpec{"claude": {Command: "echo", PromptMode: "none"}},
+		Agents: []config.Agent{
+			{Name: "mayor", Scope: "city", Provider: "claude", MCPDir: filepath.Dir(agentLocal)},
+			implicit,
+		},
+	}
+
+	_, err := buildStage1MCPTargets(cityPath, cfg, stubLookPath, io.Discard)
+	if err == nil {
+		t.Fatal("expected MCP target conflict, got nil")
+	}
+	for _, want := range []string{"MCP target conflict at", filepath.Dir(agentLocal), mcpAgentLabel(&implicit)} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want it to contain %q", err, want)
+		}
+	}
+}
+
+// Config appends the implicit agents after every configured agent, so an
+// explicit peer can diverge from an agent-local catalog before the implicit
+// agent is reached. gc start still names the agent-local cause, as
+// mcp-shared-target does.
+func TestBuildStage1MCPTargetsNamesAgentLocalCauseBehindExplicitPeer(t *testing.T) {
+	cityPath := t.TempDir()
+	agentLocal := filepath.Join(cityPath, "agents", "mayor", "mcp", "notes.toml")
+	writeMCPSource(t, agentLocal, `
+name = "notes"
+command = "uvx"
+`)
+
+	implicit := config.Agent{Name: "claude", Provider: "claude", Implicit: true}
+	cfg := &config.City{
+		Session:   config.SessionConfig{Provider: "tmux"},
+		Providers: map[string]config.ProviderSpec{"claude": {Command: "echo", PromptMode: "none"}},
+		Agents: []config.Agent{
+			{Name: "mayor", Scope: "city", Provider: "claude", MCPDir: filepath.Dir(agentLocal)},
+			{Name: "deputy", Scope: "city", Provider: "claude"},
+			implicit,
+		},
+	}
+
+	assertAgentLocalConflictCause(t, cityPath, cfg, filepath.Dir(agentLocal), mcpAgentLabel(&implicit))
+}
+
+// An explicit peer with its own mcp/ catalog projects a third payload, so the
+// agent-local cause lies between payloads other than a target's first two:
+// deputy's catalog diverges from mayor's first, then from the implicit
+// agent's.
+func TestBuildStage1MCPTargetsNamesAgentLocalCauseBehindThirdPayload(t *testing.T) {
+	cityPath := t.TempDir()
+	deputyMCP := filepath.Join(cityPath, "agents", "deputy", "mcp")
+	mayorMCP := filepath.Join(cityPath, "agents", "mayor", "mcp")
+	writeMCPSource(t, filepath.Join(deputyMCP, "notes.toml"), "name = \"notes\"\ncommand = \"uvx\"\nargs = [\"deputy-notes\"]\n")
+	writeMCPSource(t, filepath.Join(mayorMCP, "notes.toml"), "name = \"notes\"\ncommand = \"uvx\"\nargs = [\"mayor-notes\"]\n")
+
+	implicit := config.Agent{Name: "claude", Provider: "claude", Implicit: true}
+	cfg := &config.City{
+		Session:   config.SessionConfig{Provider: "tmux"},
+		Providers: map[string]config.ProviderSpec{"claude": {Command: "echo", PromptMode: "none"}},
+		Agents: []config.Agent{
+			{Name: "deputy", Scope: "city", Provider: "claude", MCPDir: deputyMCP},
+			{Name: "mayor", Scope: "city", Provider: "claude", MCPDir: mayorMCP},
+			implicit,
+		},
+	}
+
+	assertAgentLocalConflictCause(t, cityPath, cfg, deputyMCP, mcpAgentLabel(&implicit))
+}
+
+// The agent-local cause offers the agent its own work_dir only where stage 2
+// delivers MCP to that work_dir: a subprocess session cannot receive it there,
+// so the cause offers the shared mcp/ directory alone.
+func TestBuildStage1MCPTargetsAgentLocalCauseOffersWorkDirWhereStage2Delivers(t *testing.T) {
+	for _, tt := range []struct {
+		session string
+		workDir bool
+	}{
+		{session: "tmux", workDir: true},
+		{session: "subprocess"},
+	} {
+		t.Run(tt.session, func(t *testing.T) {
+			cityPath := t.TempDir()
+			agentLocal := filepath.Join(cityPath, "agents", "mayor", "mcp")
+			writeMCPSource(t, filepath.Join(agentLocal, "notes.toml"), "name = \"notes\"\ncommand = \"uvx\"\n")
+
+			implicit := config.Agent{Name: "claude", Provider: "claude", Implicit: true}
+			cfg := &config.City{
+				Session:   config.SessionConfig{Provider: tt.session},
+				Providers: map[string]config.ProviderSpec{"claude": {Command: "echo", PromptMode: "none"}},
+				Agents: []config.Agent{
+					{Name: "mayor", Scope: "city", Provider: "claude", MCPDir: agentLocal},
+					implicit,
+				},
+			}
+
+			reports := assertAgentLocalConflictCause(t, cityPath, cfg, agentLocal, mcpAgentLabel(&implicit), "an mcp/ directory both receive")
+			for _, report := range reports {
+				if got := strings.Contains(report, `give "mayor" its own work_dir`); got != tt.workDir {
+					t.Fatalf("report %q offers the work_dir remedy: %v, want %v", report, got, tt.workDir)
+				}
+			}
+		})
+	}
+}
+
+// assertAgentLocalConflictCause checks that gc start refuses cfg with an MCP
+// target conflict and that mcp-shared-target reports it as its one conflict,
+// both naming each of wants. It returns the start error and the doctor detail.
+func assertAgentLocalConflictCause(t *testing.T, cityPath string, cfg *config.City, wants ...string) []string {
+	t.Helper()
+	_, err := buildStage1MCPTargets(cityPath, cfg, stubLookPath, io.Discard)
+	if err == nil {
+		t.Fatal("buildStage1MCPTargets: expected MCP target conflict, got nil")
+	}
+	result := newMCPSharedTargetDoctorCheck(cityPath, cfg, stubLookPath).Run(&doctor.CheckContext{CityPath: cityPath})
+	if result.Status != doctor.StatusError || len(result.Details) != 1 {
+		t.Fatalf("mcp-shared-target = %v, details %#v, want one conflict", result.Status, result.Details)
+	}
+	reports := []string{err.Error(), result.Details[0]}
+	for _, report := range reports {
+		for _, want := range wants {
+			if !strings.Contains(report, want) {
+				t.Fatalf("report %q, want it to contain %q", report, want)
+			}
+		}
+	}
+	return reports
+}
+
+// When an agent's own mcp/ directory contributes no server, that directory
+// is not the cause of its conflict with the implicit agent. Here the cause
+// is a city template that expands {{.AgentName}}. gc start and
+// mcp-shared-target name no mcp/ directory, whether the agent has none or an
+// empty one.
+func TestBuildStage1MCPTargetsImplicitTemplateConflictNamesNoAgentLocalCause(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		emptyDir bool
+	}{
+		{name: "no agent-local directory"},
+		{name: "empty agent-local directory", emptyDir: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			writeMCPSource(t, filepath.Join(cityPath, "mcp", "notes.template.toml"), `
+name = "notes"
+command = "uvx"
+args = ["{{.AgentName}}"]
+`)
+			mayor := config.Agent{Name: "mayor", Scope: "city", Provider: "claude"}
+			agentLocal := filepath.Join(cityPath, "agents", "mayor", "mcp")
+			if tt.emptyDir {
+				if err := os.MkdirAll(agentLocal, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				mayor.MCPDir = agentLocal
+			}
+			cfg := &config.City{
+				PackMCPDir: filepath.Join(cityPath, "mcp"),
+				Session:    config.SessionConfig{Provider: "tmux"},
+				Providers:  map[string]config.ProviderSpec{"claude": {Command: "echo", PromptMode: "none"}},
+				Agents:     []config.Agent{mayor, {Name: "claude", Provider: "claude", Implicit: true}},
+			}
+
+			_, err := buildStage1MCPTargets(cityPath, cfg, stubLookPath, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), "MCP target conflict") {
+				t.Fatalf("buildStage1MCPTargets err = %v, want MCP target conflict", err)
+			}
+			assertNoAgentLocalConflictCause(t, cityPath, cfg, err, agentLocal)
+		})
 	}
 }
 

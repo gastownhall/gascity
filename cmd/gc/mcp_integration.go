@@ -290,17 +290,31 @@ func heldStage1MCPKey(cityPath string, cfg *config.City, agent *config.Agent, pa
 	return managedKey(kind, scopeRoot), true
 }
 
+// claimsStage1MCPTarget reports whether a resolved view claims a stage-1
+// target, the provider-native file at its scope root: an agent with a
+// provider or servers claims it even when its catalog is empty, so every
+// claimant of one target must project the same payload.
+func claimsStage1MCPTarget(view resolvedMCPProjection) bool {
+	return view.Delivery == "stage1" && (view.Projection.Provider != "" || len(view.Catalog.Servers) > 0)
+}
+
 // collectStage1MCPTargets resolves every stage-1 agent's MCP target, and the
 // targets of the agents it skips. With pathOnly, agents' work dirs are
 // resolved without being created, for a plan that must write nothing.
+//
+// Every agent that claims one target must project the same payload. Targets
+// are compared once every agent is resolved, so an agent that fails to
+// resolve is reported before any conflict, and a conflict's error can name
+// a cause that only a later claimant shows: config appends the implicit
+// agents after every configured agent.
 func collectStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.LookPathFunc, stderr io.Writer, pathOnly bool) (stage1MCPTargets, error) {
 	if cfg == nil {
 		return stage1MCPTargets{}, nil
 	}
-	byKey := make(map[string]mcpTargetSpec)
 	var (
-		skips mcpSkipGroups
-		held  []string
+		claims mcpTargetClaims
+		skips  mcpSkipGroups
+		held   []string
 	)
 	blocked := make(map[string]string)
 	for i := range cfg.Agents {
@@ -324,53 +338,182 @@ func collectStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.
 		// Shared-layer servers the provider cannot receive are already out
 		// of view.Projection; say which agents start without them.
 		skips.add(mcpAgentLabel(agent), view.Skipped)
-		if view.Delivery != "stage1" {
-			continue
+		if claimsStage1MCPTarget(view) {
+			claims.add(view.Projection.Provider+"|"+view.Projection.Target, view)
 		}
-		if view.Projection.Provider == "" && len(view.Catalog.Servers) == 0 {
-			continue
-		}
-		key := view.Projection.Provider + "|" + view.Projection.Target
-		existing, ok := byKey[key]
-		if ok {
-			if existing.Projection.Hash() != view.Projection.Hash() {
-				return stage1MCPTargets{}, fmt.Errorf(
-					"MCP target conflict at %s (%s): %s projects %s but %s projects %s",
-					view.Projection.Target,
-					view.Projection.Provider,
-					strings.Join(existing.Agents, ", "),
-					existing.Projection.Hash(),
-					agent.QualifiedName(),
-					view.Projection.Hash(),
-				)
-			}
-			existing.Agents = append(existing.Agents, agent.QualifiedName())
-			sort.Strings(existing.Agents)
-			byKey[key] = existing
-			continue
-		}
-		byKey[key] = mcpTargetSpec{
-			Root:       view.ScopeRoot,
-			Projection: view.Projection,
-			Agents:     []string{agent.QualifiedName()},
-		}
+	}
+	if claims.conflict != nil {
+		return stage1MCPTargets{}, claims.conflict.stage1Error(cfg.Session.Provider)
 	}
 
 	cityName := loadedCityName(cfg, cityPath)
 	for _, line := range append(skips.lines(), groupBlockedAgents(blocked)...) {
 		warnStage1MCPOnce(cityPath, cityName, line, stderr)
 	}
+	return stage1MCPTargets{targets: claims.stage1Targets(), held: held}, nil
+}
 
-	keys := make([]string, 0, len(byKey))
-	for key := range byKey {
-		keys = append(keys, key)
+// mcpTargetClaims groups the agents that claim each provider-native MCP
+// target, by a key of provider and target, and keeps the first target, in
+// agent order, that two agents claim with different payloads.
+type mcpTargetClaims struct {
+	byKey    map[string]*mcpTargetClaim
+	conflict *mcpTargetClaim
+}
+
+// mcpTargetClaim is the agents that claim one target, grouped by the hash of
+// the payload each projects. hashes lists them in the order agents first
+// projected them, so more than one hash is a conflict.
+type mcpTargetClaim struct {
+	hashes []string
+	views  map[string][]resolvedMCPProjection
+}
+
+// add records view's agent as a claimant of the target at key.
+func (c *mcpTargetClaims) add(key string, view resolvedMCPProjection) {
+	claim := c.byKey[key]
+	if claim == nil {
+		if c.byKey == nil {
+			c.byKey = make(map[string]*mcpTargetClaim)
+		}
+		claim = &mcpTargetClaim{views: make(map[string][]resolvedMCPProjection)}
+		c.byKey[key] = claim
 	}
-	sort.Strings(keys)
+	hash := view.Projection.Hash()
+	if _, ok := claim.views[hash]; !ok {
+		claim.hashes = append(claim.hashes, hash)
+	}
+	claim.views[hash] = append(claim.views[hash], view)
+	if c.conflict == nil && len(claim.hashes) > 1 {
+		c.conflict = claim
+	}
+}
+
+// stage1Targets returns one target spec per key, in key order: the first
+// claimant's scope root and projection, and every claimant's name. Every
+// claimant projects that payload unless the claims hold a conflict.
+func (c *mcpTargetClaims) stage1Targets() []mcpTargetSpec {
+	keys := sortedMapKeys(c.byKey)
 	out := make([]mcpTargetSpec, 0, len(keys))
 	for _, key := range keys {
-		out = append(out, byKey[key])
+		claim := c.byKey[key]
+		first := claim.first()
+		out = append(out, mcpTargetSpec{
+			Root:       first.ScopeRoot,
+			Projection: first.Projection,
+			Agents:     claim.agents(claim.hashes...),
+		})
 	}
-	return stage1MCPTargets{targets: out, held: held}, nil
+	return out
+}
+
+// first returns the target's first claimant.
+func (c *mcpTargetClaim) first() resolvedMCPProjection {
+	return c.views[c.hashes[0]][0]
+}
+
+// agents returns the sorted qualified names of the claimants that project
+// one of hashes.
+func (c *mcpTargetClaim) agents(hashes ...string) []string {
+	var names []string
+	for _, hash := range hashes {
+		for _, view := range c.views[hash] {
+			names = append(names, view.Agent.QualifiedName())
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// stage1Error is gc start's error for a conflicting target: the claimants of
+// its first two payloads and, when two claimants have that shape, the
+// agent-local cause (agentLocalCause) for a city of sessionProvider.
+func (c *mcpTargetClaim) stage1Error(sessionProvider string) error {
+	target := c.first().Projection
+	msg := fmt.Sprintf(
+		"MCP target conflict at %s (%s): %s projects %s but %s projects %s",
+		target.Target,
+		target.Provider,
+		strings.Join(c.agents(c.hashes[0]), ", "),
+		c.hashes[0],
+		strings.Join(c.agents(c.hashes[1]), ", "),
+		c.hashes[1],
+	)
+	if cause := c.agentLocalCause(sessionProvider); cause != "" {
+		msg += "; " + cause
+	}
+	return errors.New(msg)
+}
+
+// agentLocalCause returns the agent-local cause (mcpAgentLocalConflictCause)
+// of the first two claimants with different payloads that have that shape,
+// or "".
+func (c *mcpTargetClaim) agentLocalCause(sessionProvider string) string {
+	for i, hash := range c.hashes {
+		for _, other := range c.hashes[i+1:] {
+			if cause := mcpAgentLocalConflictCauseAmong(c.views[hash], c.views[other], sessionProvider); cause != "" {
+				return cause
+			}
+		}
+	}
+	return ""
+}
+
+// mcpAgentLocalConflictCause names the agent-local mcp/ directory behind a
+// conflict between two stage-1 claimants of one target, their scope root,
+// that project different payloads, when one is the implicit agent gc adds for
+// a provider and the other has servers from its own mcp/ directory (MCPDir),
+// which the implicit agent never receives. Any other pair returns "". The
+// remedy offers the agent its own work_dir only where a session of
+// sessionProvider receives MCP there, at stage 2.
+func mcpAgentLocalConflictCause(a, b resolvedMCPProjection, sessionProvider string) string {
+	if a.Agent == nil || b.Agent == nil || a.Agent.Implicit == b.Agent.Implicit ||
+		a.Delivery != "stage1" || b.Delivery != "stage1" {
+		return ""
+	}
+	local, implicit := a, b
+	if a.Agent.Implicit {
+		local, implicit = b, a
+	}
+	if !hasAgentLocalMCPServers(local.Catalog) {
+		return ""
+	}
+	name := mcpAgentLabel(local.Agent)
+	remedy := "move its servers to an mcp/ directory both receive: the city's mcp/, or for a rig root, a pack the rig imports"
+	if isStage2EligibleSession(sessionProvider, local.Agent) {
+		remedy = fmt.Sprintf("give %s its own work_dir, or %s", name, remedy)
+	}
+	return fmt.Sprintf(
+		"%s defines an agent-local MCP catalog at %s that diverges from %s — %s",
+		name,
+		local.Agent.MCPDir,
+		mcpAgentLabel(implicit.Agent),
+		remedy,
+	)
+}
+
+// mcpAgentLocalConflictCauseAmong returns the first agent-local conflict
+// cause between a claimant of one payload and a claimant of the other.
+func mcpAgentLocalConflictCauseAmong(left, right []resolvedMCPProjection, sessionProvider string) string {
+	for _, a := range left {
+		for _, b := range right {
+			if cause := mcpAgentLocalConflictCause(a, b, sessionProvider); cause != "" {
+				return cause
+			}
+		}
+	}
+	return ""
+}
+
+// hasAgentLocalMCPServers reports whether catalog holds a server from its
+// agent's own mcp/ directory.
+func hasAgentLocalMCPServers(catalog materialize.MCPCatalog) bool {
+	for _, server := range catalog.Servers {
+		if server.Layer == materialize.MCPLayerAgent {
+			return true
+		}
+	}
+	return false
 }
 
 func runStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.LookPathFunc, stderr io.Writer) error {
