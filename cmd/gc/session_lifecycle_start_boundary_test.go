@@ -208,7 +208,7 @@ func (p *staleIdentityStartProvider) Start(ctx context.Context, name string, cfg
 		"GC_INSTANCE_TOKEN": p.token,
 		"GC_RUNTIME_EPOCH":  p.generation,
 	} {
-		if err := p.Fake.SetMeta(name, key, value); err != nil {
+		if err := p.SetMeta(name, key, value); err != nil {
 			return err
 		}
 	}
@@ -1204,7 +1204,7 @@ func TestExecutePlannedStartsDoesNotCountRepeatedWedgedPreWakeAsRestarts(t *test
 		"GC_INSTANCE_TOKEN": candidate.info.InstanceToken,
 		"GC_RUNTIME_EPOCH":  candidate.info.Generation,
 	} {
-		if err := sp.Fake.SetMeta(candidate.name(), key, value); err != nil {
+		if err := sp.SetMeta(candidate.name(), key, value); err != nil {
 			t.Fatalf("setting runtime identity %s: %v", key, err)
 		}
 	}
@@ -1241,7 +1241,7 @@ func TestExecutePlannedStartsDoesNotCountRepeatedWedgedPreWakeAsRestarts(t *test
 			t.Fatalf("attempt %d did not restore T1: token=%q generation=%q, want (%q,%q)", attempt, meta["instance_token"], meta["generation"], prior["instance_token"], prior["generation"])
 		}
 	}
-	providerCallsBefore := sp.Fake.SnapshotCalls()
+	providerCallsBefore := sp.SnapshotCalls()
 	finished := make(chan struct{})
 	var woken int
 	go func() {
@@ -1263,7 +1263,7 @@ func TestExecutePlannedStartsDoesNotCountRepeatedWedgedPreWakeAsRestarts(t *test
 	if got := sp.probeCount(candidate.name()); got != 1 {
 		t.Fatalf("provider liveness probes = %d, want only the genuinely wedged preflight probe across repeated attempts", got)
 	}
-	assertNoProviderMutationCalls(t, sp.Fake.SnapshotCalls()[len(providerCallsBefore):], candidate.name())
+	assertNoProviderMutationCalls(t, sp.SnapshotCalls()[len(providerCallsBefore):], candidate.name())
 	if starts := sp.CountCalls("Start", candidate.name()); starts != 1 {
 		t.Fatalf("provider Start calls = %d, want only the pre-existing runtime start across repeated attempts", starts)
 	}
@@ -1280,7 +1280,7 @@ func TestExecutePlannedStartsDoesNotCountRepeatedWedgedPreWakeAsRestarts(t *test
 	if deferred["instance_token"] != "row-token" {
 		t.Fatalf("deferred instance_token = %q, want prior token T1 (row-token)", deferred["instance_token"])
 	}
-	if !sp.Fake.IsRunning(candidate.name()) {
+	if !sp.IsRunning(candidate.name()) {
 		t.Fatal("the existing runtime stopped during the deferred start")
 	}
 	if !strings.Contains(env.stderr.String(), string(TraceOutcomeDeferred)) {
@@ -1307,7 +1307,7 @@ func TestExecutePlannedStartsDoesNotCountRepeatedWedgedPreWakeAsRestarts(t *test
 	if got.InstanceToken != prior["instance_token"] || got.Generation != prior["generation"] || got.ContinuationEpoch != prior["continuation_epoch"] {
 		t.Fatalf("retry identity = (%q,%q,%q), want prior fence (%q,%q,%q)", got.InstanceToken, got.Generation, got.ContinuationEpoch, prior["instance_token"], prior["generation"], prior["continuation_epoch"])
 	}
-	runtimeToken, err := sp.Fake.GetMeta(candidate.name(), "GC_INSTANCE_TOKEN")
+	runtimeToken, err := sp.GetMeta(candidate.name(), "GC_INSTANCE_TOKEN")
 	if err != nil || runtimeToken != got.InstanceToken {
 		t.Fatalf("retry runtime token = %q (err %v), session token = %q", runtimeToken, err, got.InstanceToken)
 	}
