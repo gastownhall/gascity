@@ -142,7 +142,16 @@ append_hq_scope() {
         rm -f "$bead_fetch_tmp" "$federated_tmp"
         return 1
     }
-    cat "$bead_fetch_tmp" "$federated_tmp" >>"$TMP"
+    # Tag each staged row with the scope that read it so the summary can
+    # attribute a reset to the store that holds the bead: "hq" here, the rig
+    # name in append_rig_scope, and "federated" for rows only the federated
+    # read returned (it names no store). Fall back to the raw rows if the
+    # annotation cannot parse -- the summary then reports an unknown scope
+    # rather than losing the bead.
+    jq -c 'map(. + {rig: "hq"})' "$bead_fetch_tmp" >>"$TMP" 2>/dev/null \
+        || cat "$bead_fetch_tmp" >>"$TMP"
+    jq -c 'map(. + {rig: "federated"})' "$federated_tmp" >>"$TMP" 2>/dev/null \
+        || cat "$federated_tmp" >>"$TMP"
     rm -f "$bead_fetch_tmp" "$federated_tmp"
 }
 
@@ -159,7 +168,8 @@ append_rig_scope() {
         rm -f "$bead_fetch_tmp"
         return 1
     }
-    cat "$bead_fetch_tmp" >>"$TMP"
+    jq -c --arg rig "$rig" 'map(. + {rig: $rig})' "$bead_fetch_tmp" >>"$TMP" 2>/dev/null \
+        || cat "$bead_fetch_tmp" >>"$TMP"
     rm -f "$bead_fetch_tmp"
 }
 
@@ -415,9 +425,21 @@ reset_orphan_if_current() {
     reset_state=$(printf '%s\n' "$reset_output" | awk 'NF { print $1; exit }')
     case "$reset_state" in
         released)
-            if ! gc bd update "$bead_id" --append-notes "orphan-sweep: reset from assignee $expected_assignee -- no live session matched" >/dev/null 2>&1; then
-                echo "orphan-sweep: failed to record cause note on $bead_id" >&2
-            fi
+            # The cause note is the bead-side triage record the summary mail
+            # points at. Under Dolt load the append can fail transiently, so
+            # retry before giving up; on persistent failure record the bead in
+            # $NOTE_FAILED so the summary discloses it instead of letting the
+            # mail claim a note that is not there.
+            local attempt
+            for attempt in 1 2 3; do
+                if gc bd update "$bead_id" --append-notes "orphan-sweep: reset from assignee $expected_assignee -- no live session matched" >/dev/null 2>&1; then
+                    return 0
+                fi
+                if [ "$attempt" -lt 3 ]; then
+                    sleep 1
+                fi
+            done
+            NOTE_FAILED="${NOTE_FAILED}${NOTE_FAILED:+, }${bead_id}"
             return 0
             ;;
         skipped) return 2 ;;
@@ -637,6 +659,23 @@ protected_claims_json() {
     ' <<<"$PROTECTED_ROWS"
 }
 
+# bead_scope names the scope(s) whose read staged a bead (the "rig" tag the
+# scope reads add), for the reset summary. It reads every staged row, not the
+# deduplicated IN_PROGRESS, so a bead the federated read staged first is still
+# attributed to the store scope that also listed it; "federated" is reported
+# only when no store scope did. It is looked up by id rather than carried in the
+# claim rows: an assignee is read off a bead another city may have written, so a
+# tab or newline in it would shift any column placed after it.
+bead_scope() {
+    local scope
+    scope=$(jq -r -s --arg id "$1" '
+        [add // [] | .[] | select(.id == $id) | .rig // "unknown"] | unique as $all
+        | ($all - ["federated", "unknown"]) as $stores
+        | (if ($stores | length) > 0 then $stores else $all end) | join("/")
+    ' "$TMP" 2>/dev/null) || scope=""
+    printf '%s' "${scope:-unknown}"
+}
+
 # The claims to consider, one "<bead>\t<assignee>" row each: those whose
 # holder neither the roster nor a live session recognizes. Each claim is
 # classified once, here; a recognized holder's claim is never released, so it
@@ -677,6 +716,12 @@ ORPHANED=0
 UNVERIFIABLE=0
 # Count of undeliverable summaries. Load-bearing for the exit code below.
 FAILED=0
+# Triage ledger for the summary: one "<id> (<scope>)" entry per reset,
+# comma-joined.
+RESET_LEDGER=""
+# Beads whose cause-note append kept failing after retries. The summary must
+# disclose these -- the mail otherwise claims every reset bead carries a note.
+NOTE_FAILED=""
 # Process substitution (not a pipe) keeps the loop body in the parent
 # shell so $ORPHANED survives for the summary message below.
 while IFS=$'\t' read -r bead_id assignee; do
@@ -705,6 +750,7 @@ while IFS=$'\t' read -r bead_id assignee; do
     fi
     if reset_orphan_if_current "$bead_id" "$assignee"; then
         ORPHANED=$((ORPHANED + 1))
+        RESET_LEDGER="${RESET_LEDGER}${RESET_LEDGER:+, }${bead_id} ($(bead_scope "$bead_id"))"
     else
         reset_status=$?
         if [ "$reset_status" != "2" ]; then
@@ -745,17 +791,28 @@ fi
 
 if [ "$ORPHANED" -gt 0 ] || [ "$UNVERIFIABLE" -gt 0 ] || [ "$PROTECTED" -gt 0 ]; then
     SUMMARY="orphan-sweep: reset $ORPHANED orphaned beads"
+    if [ -n "$RESET_LEDGER" ]; then
+        SUMMARY="$SUMMARY: $RESET_LEDGER"
+    fi
     if [ "$UNVERIFIABLE" -gt 0 ]; then
         SUMMARY="$SUMMARY, skipped $UNVERIFIABLE unverifiable"
     fi
     if [ "$PROTECTED" -gt 0 ]; then
         SUMMARY="$SUMMARY, protected $PROTECTED foreign/unknown claims"
     fi
+    if [ -n "$NOTE_FAILED" ]; then
+        SUMMARY="$SUMMARY; note append failed: $NOTE_FAILED"
+    fi
     echo "$SUMMARY"
     if [ -n "$PROTECTED_DETAIL" ]; then
         echo "$PROTECTED_DETAIL"
     fi
     if [ "$ORPHANED" -gt 0 ]; then
+        if [ -n "$NOTE_FAILED" ]; then
+            CAUSE_NOTE_LINE="WARNING: the cause-note append failed (after retries) for: $NOTE_FAILED. Those beads carry NO cause note -- inspect their history directly."
+        else
+            CAUSE_NOTE_LINE="Each reset bead now carries a one-line cause note (see its history)."
+        fi
         if ! gc mail send "$ESCALATION_TARGET" \
             -s "orphan-sweep: reset $ORPHANED orphaned beads" \
             -m "$SUMMARY${PROTECTED_DETAIL:+
@@ -764,8 +821,8 @@ $PROTECTED_DETAIL}
 orphan-sweep resets in-progress beads whose assignee has no live session or
 known agent, and only once gc agent is-foreign vouches for the assignee as
 this city's own; claims it cannot vouch for are kept, and any kept this pass
-are listed above. Each reset bead now carries a one-line cause note (see its
-history). Repeated resets of the same bead may indicate a stuck or
+are listed above. $CAUSE_NOTE_LINE
+Repeated resets of the same bead may indicate a stuck or
 misidentified live session -- inspect via gc bd show <id> --json." \
             2>/dev/null; then
             # Do not swallow an undeliverable summary — a vanished escalation
