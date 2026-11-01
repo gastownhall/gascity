@@ -40,10 +40,12 @@ type convoyGetResponse struct {
 
 // convoyCheckResponse is the response for GET /v0/convoy/{id}/check.
 type convoyCheckResponse struct {
-	ConvoyID string `json:"convoy_id" doc:"Convoy ID."`
-	Total    int    `json:"total" doc:"Total child bead count."`
-	Closed   int    `json:"closed" doc:"Closed child bead count."`
-	Complete bool   `json:"complete" doc:"True when all child beads are closed and total > 0."`
+	ConvoyID       string   `json:"convoy_id" doc:"Convoy ID."`
+	Total          int      `json:"total" doc:"Total child bead count."`
+	Closed         int      `json:"closed" doc:"Closed child bead count."`
+	Complete       bool     `json:"complete" doc:"True when all child beads are closed and total > 0."`
+	ChildIDs       []string `json:"child_ids,omitempty" doc:"IDs of the child beads counted in total, in membership order (created_at, then id); a dangling track appears as the id it names. Omitted when total is 0."`
+	DanglingTracks int      `json:"dangling_tracks,omitempty" doc:"Child beads counted in total whose tracks dependency names a bead that cannot be resolved. Omitted when 0."`
 }
 
 // workflowDeleteResponse is the response for DELETE /v0/workflow/{workflow_id}.
@@ -444,10 +446,15 @@ func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInpu
 		}
 
 		total := len(children)
-		closed := 0
+		closed, dangling := 0, 0
+		childIDs := make([]string, 0, len(children))
 		for _, c := range children {
+			childIDs = append(childIDs, c.ID)
 			if convoycore.IsTerminalStatus(c.Status) {
 				closed++
+			}
+			if convoycore.IsUnresolvedTrackedItem(c) {
+				dangling++
 			}
 		}
 
@@ -456,10 +463,12 @@ func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInpu
 			Index:     index,
 			CacheAgeS: cacheAgeSeconds(cityStore),
 			Body: convoyCheckResponse{
-				ConvoyID: id,
-				Total:    total,
-				Closed:   closed,
-				Complete: complete,
+				ConvoyID:       id,
+				Total:          total,
+				Closed:         closed,
+				Complete:       complete,
+				ChildIDs:       childIDs,
+				DanglingTracks: dangling,
 			},
 		}, nil
 	}

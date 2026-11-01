@@ -4,6 +4,9 @@
 package convoy
 
 import (
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -75,4 +78,12 @@ func GetConvoyFields(b beads.Bead) ConvoyFields {
 		}
 	}
 	return fields
+}
+
+// IsSynthetic reports whether convoy is system-minted glue rather than a
+// convoy someone created: graph.v2's single-item input convoy and the
+// drain-unit convoy, both stamped gc.synthetic=true. A busy city mints one per
+// formula launch, so convoy listings leave them out unless asked.
+func IsSynthetic(convoy beads.Bead) bool {
+	return strings.TrimSpace(convoy.Metadata[beadmeta.SyntheticMetadataKey]) == "true"
 }

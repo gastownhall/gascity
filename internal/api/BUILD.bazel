@@ -139,6 +139,7 @@ go_library(
         "pack_source_policy.go",
         "pagination.go",
         "partial_errors.go",
+        "partial_list_error.go",
         "pending_interactions.go",
         "principal.go",
         "program_status.go",

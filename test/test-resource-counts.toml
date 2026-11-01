@@ -239,7 +239,7 @@ calls = 1
 [[count]]
 path = "cmd/gc/cmd_convoy_test.go"
 resource = "http_test_server"
-calls = 8
+calls = 10
 
 [[count]]
 path = "cmd/gc/cmd_doctor_test.go"
@@ -1172,6 +1172,11 @@ resource = "cwd"
 calls = 6
 
 [[count]]
+path = "cmd/gc/route_equivalence_convoy_test.go"
+resource = "http_test_server"
+calls = 2
+
+[[count]]
 path = "cmd/gc/runtime_lease_crossproc_test.go"
 resource = "subprocess"
 calls = 1
@@ -1572,7 +1577,7 @@ calls = 6
 [[count]]
 path = "internal/api/client_test.go"
 resource = "http_test_server"
-calls = 67
+calls = 70
 
 [[count]]
 path = "internal/api/client_waits_test.go"

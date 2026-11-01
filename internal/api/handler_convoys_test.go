@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 )
 
 func TestConvoyCreateAndGet(t *testing.T) {
@@ -448,5 +450,76 @@ func requireAPINoTracksDep(t *testing.T, store beads.Store, convoyID, itemID str
 		if dep.IssueID == convoyID && dep.DependsOnID == itemID && dep.Type == "tracks" {
 			t.Fatalf("unexpected tracks dep %s -> %s; deps=%v", convoyID, itemID, deps)
 		}
+	}
+}
+
+// TestConvoyCheckReportsChildIDsAndDanglingTracks pins the member ids and the
+// dangling-track count /convoy/{id}/check carries, so gc convoy list on the
+// API route prints child_ids and progress.dangling_tracks the way the local
+// route does — without a second read per convoy. The ids are the members
+// total counts, in membership order, a dangling track listed by the id it
+// names; an empty convoy leaves both fields out.
+func TestConvoyCheckReportsChildIDsAndDanglingTracks(t *testing.T) {
+	state := newFakeMutatorState(t)
+	h := newTestCityHandler(t, state)
+
+	store := state.stores["myrig"]
+	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+	legacy, _ := store.Create(beads.Bead{Title: "legacy child", ParentID: convoy.ID})
+	tracked, _ := store.Create(beads.Bead{Title: "tracked child"})
+	if err := store.DepAdd(convoy.ID, tracked.ID, "tracks"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DepAdd(convoy.ID, "gc-missing", "tracks"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(legacy.ID); err != nil {
+		t.Fatal(err)
+	}
+	empty, _ := store.Create(beads.Bead{Title: "empty", Type: "convoy"})
+
+	members, err := convoycore.Members(store, convoy.ID, true)
+	if err != nil {
+		t.Fatalf("Members: %v", err)
+	}
+	wantIDs := make([]string, 0, len(members))
+	for _, m := range members {
+		wantIDs = append(wantIDs, m.ID)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/convoy/")+convoy.ID+"/check", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("check: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Total          int      `json:"total"`
+		Closed         int      `json:"closed"`
+		ChildIDs       []string `json:"child_ids"`
+		DanglingTracks int      `json:"dangling_tracks"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode check: %v", err)
+	}
+	if got.Total != 3 || got.Closed != 1 {
+		t.Fatalf("total/closed = %d/%d, want 3/1", got.Total, got.Closed)
+	}
+	if !slices.Equal(got.ChildIDs, wantIDs) {
+		t.Errorf("child_ids = %v, want %v (the members total counts, in membership order)", got.ChildIDs, wantIDs)
+	}
+	if !slices.Contains(got.ChildIDs, "gc-missing") {
+		t.Errorf("child_ids = %v, want the dangling track's id listed", got.ChildIDs)
+	}
+	if got.DanglingTracks != 1 {
+		t.Errorf("dangling_tracks = %d, want 1", got.DanglingTracks)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/convoy/")+empty.ID+"/check", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("check empty: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); strings.Contains(body, "child_ids") || strings.Contains(body, "dangling_tracks") {
+		t.Errorf("empty convoy check = %s, want child_ids and dangling_tracks left out", body)
 	}
 }

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/api/genclient"
@@ -158,7 +159,7 @@ func TestConvoyCheckFromGen_Valid(t *testing.T) {
 
 func TestConvoyCheckFromGen_Empty(t *testing.T) {
 	got := convoyCheckFromGen(nil)
-	if got != (ConvoyCheckView{}) {
+	if !reflect.DeepEqual(got, ConvoyCheckView{}) {
 		t.Errorf("got = %+v, want zero-value", got)
 	}
 }
@@ -177,5 +178,27 @@ func TestConvoyCheckFromGen_PartialMissingFields(t *testing.T) {
 	}
 	if got.Total != 3 || got.Closed != 1 {
 		t.Errorf("got = %+v, want {Total:3, Closed:1}", got)
+	}
+}
+
+// TestConvoyCheckFromGenCarriesChildIDsAndDanglingTracks pins that the /check
+// decoder keeps the member ids and dangling-track count a current server
+// reports, copies the ids rather than aliasing the wire slice, and leaves both
+// zero when the server leaves them out.
+func TestConvoyCheckFromGenCarriesChildIDsAndDanglingTracks(t *testing.T) {
+	ids := []string{"a", "b"}
+	dangling := int64(1)
+	got := convoyCheckFromGen(&genclient.ConvoyCheckResponse{ConvoyId: "c", Total: 2, ChildIds: &ids, DanglingTracks: &dangling})
+	if !reflect.DeepEqual(got.ChildIDs, []string{"a", "b"}) || got.DanglingTracks != 1 {
+		t.Fatalf("got ChildIDs = %v, DanglingTracks = %d; want [a b], 1", got.ChildIDs, got.DanglingTracks)
+	}
+	ids[0] = "mutated"
+	if got.ChildIDs[0] != "a" {
+		t.Errorf("ChildIDs aliases the wire slice: %v", got.ChildIDs)
+	}
+
+	old := convoyCheckFromGen(&genclient.ConvoyCheckResponse{ConvoyId: "c", Total: 2})
+	if old.ChildIDs != nil || old.DanglingTracks != 0 {
+		t.Errorf("server without the fields: ChildIDs = %v, DanglingTracks = %d; want nil, 0", old.ChildIDs, old.DanglingTracks)
 	}
 }

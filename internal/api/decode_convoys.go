@@ -28,6 +28,12 @@ type ConvoyCheckView struct {
 	Total    int
 	Closed   int
 	Complete bool
+	// ChildIDs are the IDs of the members Total counts, in membership order.
+	// A server that predates child_ids leaves it nil even when Total > 0.
+	ChildIDs []string
+	// DanglingTracks counts the members whose tracks dependency names a bead
+	// that cannot be resolved.
+	DanglingTracks int
 }
 
 // beadFromGen translates one genclient.Bead into the internal beads.Bead used
@@ -144,10 +150,17 @@ func convoyCheckFromGen(g *genclient.ConvoyCheckResponse) ConvoyCheckView {
 	if g == nil {
 		return ConvoyCheckView{}
 	}
-	return ConvoyCheckView{
+	out := ConvoyCheckView{
 		ConvoyID: g.ConvoyId,
 		Total:    int(g.Total),
 		Closed:   int(g.Closed),
 		Complete: g.Complete,
 	}
+	if g.ChildIds != nil {
+		out.ChildIDs = append([]string(nil), *g.ChildIds...)
+	}
+	if g.DanglingTracks != nil {
+		out.DanglingTracks = int(*g.DanglingTracks)
+	}
+	return out
 }
