@@ -62,7 +62,9 @@ type Section struct {
 	// ReadAuthVerifyKey / ReadAuthRequired require a signed read grant on every
 	// read (GET/HEAD) of an already-registered city (the per-city routes under
 	// /v0/city/{cityName}); supervisor-scope reads (/v0/cities, /health) stay
-	// open. See config.APIConfig for the key format and full semantics.
+	// open. See config.APIConfig for the key format and full semantics. Both
+	// are read only at startup: `gc supervisor reload` swaps write-auth keys
+	// but leaves the read-auth keys as they were.
 	ReadAuthVerifyKey string `toml:"read_auth_verify_key,omitempty"`
 	ReadAuthRequired  bool   `toml:"read_auth_required,omitempty"`
 }

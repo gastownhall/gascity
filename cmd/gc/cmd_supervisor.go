@@ -309,6 +309,9 @@ func supervisorSocketPath() string {
 // constructs its own path), this binds to the exact path provided.
 type reconcileRequest struct {
 	done chan struct{}
+	// writeAuthKeys, set only by the reload-report socket verb, receives the
+	// reload's write-auth key outcome (see reportWriteAuthKeys).
+	writeAuthKeys chan writeAuthKeyReload
 }
 
 type supervisorShutdownMode int32
@@ -337,32 +340,6 @@ const supervisorEphemeralPortWarningThreshold = 32768
 var supervisorShutdownSettleDelay = 50 * time.Millisecond
 
 var supervisorSignalNotify = signal.Notify
-
-// reloadSupervisorWriteAuthKeys re-reads supervisor.toml and swaps the
-// write-auth verifying keys installed on apiMux for its write_auth_verify_key
-// entries, so enrolling, rotating, or revoking a grant key needs no supervisor
-// restart. Any failure (unreadable config, malformed keys, write-auth off at
-// startup, or a GC_CITY_WRITE_PUBKEY override) is logged and keeps the current
-// keys. A supervisor that has write-auth off and no key configured reloads
-// silently. Other supervisor.toml changes still require a restart.
-func reloadSupervisorWriteAuthKeys(apiMux *api.SupervisorMux, stderr io.Writer) {
-	cfg, err := supervisorLoadConfig(supervisor.ConfigPath())
-	if err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: reload: write-auth keys unchanged: config: %v\n", err) //nolint:errcheck // best-effort stderr
-		return
-	}
-	configKey := cfg.Supervisor.WriteAuthVerifyKey
-	added, removed, err := api.ReloadWriteAuthKeys(apiMux, configKey)
-	switch {
-	case errors.Is(err, api.ErrWriteAuthNotEnabled) && strings.TrimSpace(configKey) == "":
-		return
-	case err != nil:
-		fmt.Fprintf(stderr, "gc supervisor: reload: write-auth keys unchanged: %v\n", err) //nolint:errcheck // best-effort stderr
-	default:
-		fmt.Fprintf(stderr, "gc supervisor: reload: write-auth keys reloaded: %d added %v, %d removed %v\n", //nolint:errcheck // best-effort stderr
-			len(added), added, len(removed), removed)
-	}
-}
 
 // supervisorLoadConfig follows the package's test-double convention; tests
 // that replace it must not run in parallel.
@@ -708,7 +685,9 @@ func startSupervisorSocket(sockPath string, requestShutdown func(supervisorShutd
 
 // handleSupervisorConn reads from a connection and dispatches commands.
 // Supported: "stop" (shutdown), "ping" (liveness check, returns PID),
-// "reload" (trigger immediate reconciliation of all cities).
+// "reload" (trigger immediate reconciliation of all cities), and
+// "reload-report" (the same reload, answered with a JSON report that includes
+// the write-auth key outcome; see supervisorReloadReportCommand).
 //
 // For "stop", the handler first sends "ok\n" (backward compatible ACK),
 // then — if the client keeps the connection open — blocks until shutdown
@@ -771,6 +750,8 @@ func handleSupervisorConn(conn net.Conn, requestShutdown func(supervisorShutdown
 			case <-time.After(supervisorReloadWaitTimeout):
 				conn.Write([]byte("timeout\n")) //nolint:errcheck
 			}
+		case supervisorReloadReportCommand:
+			handleSupervisorReloadReport(conn, reconcileCh)
 		}
 	}
 }
@@ -1225,10 +1206,18 @@ func newSupervisorReloadCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Send a reload signal to the running supervisor, causing it to
 immediately re-read the registry and reconcile all cities. Use this
 after killing a child process to force the supervisor to detect the
-change and restart it without waiting for the next patrol tick.`,
+change and restart it without waiting for the next patrol tick.
+
+The reload also re-reads write_auth_verify_key from supervisor.toml and
+swaps the write-auth verifying keys in place, so a key can be enrolled,
+rotated, or revoked without a restart. The command prints the key ids
+the reload added, removed, or replaced, and exits 1 when the supervisor
+refused the new key list and kept the current keys. Other
+supervisor.toml settings, read_auth_verify_key included, take effect
+only when the supervisor restarts.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if reloadSupervisorJSON(stdout, stderr, jsonOut) != 0 {
+			if reloadSupervisorReport(stdout, stderr, jsonOut) != 0 {
 				return errExit
 			}
 			return nil
@@ -1259,24 +1248,11 @@ func reloadSupervisorJSON(stdout, stderr io.Writer, jsonOut bool) int {
 	conn.SetReadDeadline(time.Now().Add(supervisorReloadWaitTimeout + 5*time.Second)) //nolint:errcheck
 	buf := make([]byte, 64)
 	n, _ := conn.Read(buf)
-	resp := strings.TrimSpace(string(buf[:n]))
-	switch resp {
-	case "ok":
-		if jsonOut {
-			return writeLifecycleActionJSONOrExit(stdout, stderr, "gc supervisor reload", lifecycleActionJSON{
-				Command: "supervisor reload",
-				Action:  "reload",
-				Message: "Reconciliation triggered.",
-			})
-		}
-		fmt.Fprintln(stdout, "Reconciliation triggered.") //nolint:errcheck
-		return 0
-	case "busy":
-		fmt.Fprintln(stderr, "gc supervisor reload: reconcile queue is busy; try again shortly") //nolint:errcheck
-		return 1
-	case "timeout":
-		fmt.Fprintln(stderr, "gc supervisor reload: reconcile did not finish before timeout") //nolint:errcheck
-		return 1
+	// The bare verb replies with the outcome alone; it carries no write-auth
+	// key report.
+	switch outcome := supervisorReloadOutcome(strings.TrimSpace(string(buf[:n]))); outcome {
+	case supervisorReloadOK, supervisorReloadBusy, supervisorReloadTimeout:
+		return writeSupervisorReloadReply(stdout, stderr, jsonOut, supervisorReloadReply{Outcome: outcome})
 	}
 	fmt.Fprintln(stderr, "gc supervisor reload: supervisor not responding (may be shutting down); try 'gc supervisor start'") //nolint:errcheck
 	return 1
@@ -1825,9 +1801,10 @@ func runSupervisor(stdout, stderr io.Writer) int {
 			// not emit RELOADING.
 			notifySdState(stderr, sdnotify.Reloading)
 			// Rotate write-auth verifying keys from the current
-			// supervisor.toml. Only the key set changes; cities and their
+			// supervisor.toml and hand the outcome to a reporting client
+			// before reconciling. Only the key set changes; cities and their
 			// sessions are untouched.
-			reloadSupervisorWriteAuthKeys(apiMux, stderr)
+			req.reportWriteAuthKeys(reloadSupervisorWriteAuthKeys(apiMux, stderr))
 			safeReconcile()
 			// Also poke all running cities so they immediately reconcile
 			// their agents (e.g. after a child process was killed).

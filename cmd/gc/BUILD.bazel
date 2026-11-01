@@ -256,6 +256,7 @@ go_library(
         "cmd_supervisor_city.go",
         "cmd_supervisor_lifecycle.go",
         "cmd_supervisor_stale_services.go",
+        "cmd_supervisor_writeauth_reload.go",
         "cmd_suspend.go",
         "cmd_version.go",
         "cmd_wait.go",

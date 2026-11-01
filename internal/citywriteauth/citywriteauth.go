@@ -9,7 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"sort"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -168,30 +168,62 @@ func New(opts Options) (*Verifier, error) {
 	return v, nil
 }
 
-// SetKeys atomically replaces the verifying key set. It validates and copies
-// keys under the same rules as [New] (at least one key, non-empty kids, 32-byte
-// ed25519 public keys); on any error the current key set is left untouched.
-// Grants signed by a kid that is no longer present fail with ErrUnknownKey from
-// the next Verify call on. The replay guard and epoch floor are unaffected, so
-// a jti consumed before the swap stays consumed after it.
-func (v *Verifier) SetKeys(keys map[string]ed25519.PublicKey) error {
-	copied, err := copyKeys(keys)
-	if err != nil {
-		return err
-	}
-	v.keys.Store(&copied)
-	return nil
+// KeyChange reports how [Verifier.SetKeys] changed the verifying key set. Each
+// list holds kids in sorted order.
+type KeyChange struct {
+	// Added lists kids that were not in the previous key set.
+	Added []string
+	// Removed lists kids no longer in the key set; grants they signed now fail
+	// with ErrUnknownKey.
+	Removed []string
+	// Replaced lists kids kept under a different public key; grants signed by
+	// the previous key now fail signature verification.
+	Replaced []string
 }
 
-// KeyIDs returns the kids of the current verifying key set, sorted.
-func (v *Verifier) KeyIDs() []string {
-	keys := *v.keys.Load()
-	ids := make([]string, 0, len(keys))
-	for kid := range keys {
-		ids = append(ids, kid)
+// Empty reports whether the swap left the key set as it was.
+func (c KeyChange) Empty() bool {
+	return len(c.Added) == 0 && len(c.Removed) == 0 && len(c.Replaced) == 0
+}
+
+// SetKeys atomically replaces the verifying key set and reports how it changed
+// relative to the set it replaced. It validates and copies keys under the same
+// rules as [New] (at least one key, non-empty kids, 32-byte ed25519 public
+// keys); on any error the current key set is left untouched. Grants signed by
+// a removed kid fail with ErrUnknownKey, and grants signed by the previous key
+// of a replaced kid fail signature verification, from the next Verify call on.
+// The replay guard and epoch floor are unaffected, so a jti consumed before
+// the swap stays consumed after it.
+func (v *Verifier) SetKeys(keys map[string]ed25519.PublicKey) (KeyChange, error) {
+	copied, err := copyKeys(keys)
+	if err != nil {
+		return KeyChange{}, err
 	}
-	sort.Strings(ids)
-	return ids
+	return diffKeys(*v.keys.Swap(&copied), copied), nil
+}
+
+// diffKeys reports the kids added, removed, and replaced going from before to
+// after.
+func diffKeys(before, after map[string]ed25519.PublicKey) KeyChange {
+	var c KeyChange
+	for kid, pub := range after {
+		prev, ok := before[kid]
+		switch {
+		case !ok:
+			c.Added = append(c.Added, kid)
+		case !prev.Equal(pub):
+			c.Replaced = append(c.Replaced, kid)
+		}
+	}
+	for kid := range before {
+		if _, ok := after[kid]; !ok {
+			c.Removed = append(c.Removed, kid)
+		}
+	}
+	slices.Sort(c.Added)
+	slices.Sort(c.Removed)
+	slices.Sort(c.Replaced)
+	return c
 }
 
 // copyKeys validates a verifying key set and returns a deep copy of it.
