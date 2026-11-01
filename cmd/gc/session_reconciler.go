@@ -3949,7 +3949,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		driftRestartedInPlace := false
 		// Config drift: if alive and config changed, drain for restart.
 		// Live-only drift: re-apply session_live without restart.
-		if alive {
+		// Both drift checks hash tp, so they run only on a desired session.
+		// The one undesired row that reaches here is a preserved named
+		// session whose template did not resolve this tick (preserveErr
+		// above): its tp is zero, and hashing that would read as drift and
+		// restart or reset a session whose config never changed.
+		if alive && desired {
 			template := tp.TemplateName
 			if template == "" {
 				template = normalizedSessionTemplateInfo(infoByID[id], cfg)
@@ -3960,7 +3965,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// to avoid false-positive drains. Fixes #127.
 			storedHash := infoByID[id].StartedConfigHash
 			if template != "" && storedHash != "" {
-				cfgAgent := findAgentByTemplate(cfg, template)
+				cfgAgent := findSessionAgentByTemplate(cfg, template)
 				if cfgAgent != nil {
 					agentCfg := sessionCoreConfigForHashInfo(tp, infoByID[id])
 					currentHash := runtime.CoreFingerprint(agentCfg)
@@ -4291,14 +4296,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		infoAsleepDrift := infoByID[id]
 		skipAsleepDriftRepair := driftRestartedInPlace ||
 			pendingResumePreservingNamedRestartInfo(infoAsleepDrift, clk, startupTimeout)
-		if !alive && isNamedSessionInfo(infoByID[id]) && !skipAsleepDriftRepair {
+		if !alive && desired && isNamedSessionInfo(infoByID[id]) && !skipAsleepDriftRepair {
 			template := tp.TemplateName
 			if template == "" {
 				template = normalizedSessionTemplateInfo(infoByID[id], cfg)
 			}
 			storedHash := infoByID[id].StartedConfigHash
 			if template != "" && storedHash != "" {
-				if cfgAgent := findAgentByTemplate(cfg, template); cfgAgent != nil {
+				if cfgAgent := findSessionAgentByTemplate(cfg, template); cfgAgent != nil {
 					agentCfg := sessionCoreConfigForHashInfo(tp, infoByID[id])
 					currentHash := runtime.CoreFingerprint(agentCfg)
 					if storedHash != currentHash {
@@ -6676,7 +6681,7 @@ func sessionConfigDriftKey(info sessionpkg.Info, cfg *config.City, tp TemplatePa
 	if template == "" || storedHash == "" {
 		return ""
 	}
-	if findAgentByTemplate(cfg, template) == nil {
+	if findSessionAgentByTemplate(cfg, template) == nil {
 		return ""
 	}
 	agentCfg := sessionCoreConfigForHashInfo(tp, info)
