@@ -1391,13 +1391,18 @@ func newHybridProvider(sc config.SessionConfig, cityName, cityPath string) (runt
 
 func k8sProviderFromSession(cfg config.K8sConfig, cityName string) (runtime.Provider, error) {
 	secretEnv, secretMounts := k8sSecretProjectionFromConfig(cfg)
-	return newSeamBackedK8sProvider(secretEnv, secretMounts, sessionk8s.WithCityName(cityName))
+	return newSeamBackedK8sProvider(sessionk8s.PodSecurityConfig{
+		RunAsUser:  cfg.RunAsUser,
+		RunAsGroup: cfg.RunAsGroup,
+		FSGroup:    cfg.FSGroup,
+	}, secretEnv, secretMounts, sessionk8s.WithCityName(cityName))
 }
 
 // newSeamBackedK8sProvider keeps provider construction behind the same narrow
-// seam for builtin and hybrid routing, and lets wiring tests verify the exact
-// projections passed to the K8s provider without creating a cluster client.
-var newSeamBackedK8sProvider = sessionk8s.NewSeamBackedWithSecretProjection
+// seam for builtin and hybrid routing, and lets wiring tests verify pod
+// security, Secret projections, and provider options without creating a cluster
+// client.
+var newSeamBackedK8sProvider = sessionk8s.NewSeamBackedWithConfig
 
 func k8sSecretProjectionFromConfig(cfg config.K8sConfig) ([]runtime.K8sSecretEnv, []runtime.K8sSecretMount) {
 	secretEnv := make([]runtime.K8sSecretEnv, 0, len(cfg.SecretEnv))
