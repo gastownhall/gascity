@@ -135,6 +135,7 @@ go_test(
         "disposition_store_test.go",
         "disposition_test.go",
         "enrich_and_twins_test.go",
+        "ensure_running_unconfirmed_test.go",
         "facts_test.go",
         "fields_guard_test.go",
         "fields_test.go",
