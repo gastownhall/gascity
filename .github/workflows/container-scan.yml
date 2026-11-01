@@ -12,6 +12,10 @@ on:
       - ".github/requirements/mcp-agent-mail.txt"
       - ".github/scripts/install-*.sh"
       - ".github/scripts/mcp-mail-filelock-exit-regression.py"
+      - ".github/scripts/mcp-mail-gitpython-path-cache.py"
+      - ".github/scripts/mcp-mail-gitpython-path-cache-test.py"
+      - ".github/scripts/mcp-mail-archive-burst.py"
+      - ".github/scripts/mcp-mail-archive-burst-ci.py"
       - ".github/scripts/mcp-mail-jwt-compatibility.py"
       - ".github/workflows/container-scan.yml"
       - "contrib/beads-scripts/gc-beads-br"
@@ -38,6 +42,10 @@ on:
       - ".github/requirements/mcp-agent-mail.txt"
       - ".github/scripts/install-*.sh"
       - ".github/scripts/mcp-mail-filelock-exit-regression.py"
+      - ".github/scripts/mcp-mail-gitpython-path-cache.py"
+      - ".github/scripts/mcp-mail-gitpython-path-cache-test.py"
+      - ".github/scripts/mcp-mail-archive-burst.py"
+      - ".github/scripts/mcp-mail-archive-burst-ci.py"
       - ".github/scripts/mcp-mail-jwt-compatibility.py"
       - ".github/workflows/container-scan.yml"
       - "contrib/beads-scripts/gc-beads-br"
@@ -280,6 +288,36 @@ jobs:
             fi
           done
           exit "$overall_rc"
+
+      - name: Download verified GitPython 3.1.62 comparison wheel
+        if: ${{ !cancelled() && steps.build-images.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            https://files.pythonhosted.org/packages/d6/0b/29d7965215f8ef830a7ca1f42997fe13e5693d85e9edb18f938d063ef5f2/gitpython-3.1.62-py3-none-any.whl \
+            -o "${RUNNER_TEMP}/gitpython-3.1.62-py3-none-any.whl"
+          printf '%s  %s\n' \
+            7002251225e10e29d2e1f49e6532613fe5d5d9f0b6f1f02997a52b38fe56899e \
+            "${RUNNER_TEMP}/gitpython-3.1.62-py3-none-any.whl" | sha256sum -c -
+
+      - name: Check MCP mail GitPython path cache against the official validator
+        if: ${{ !cancelled() && steps.build-images.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --entrypoint python3 \
+            -v "${GITHUB_WORKSPACE}/.github/scripts/mcp-mail-gitpython-path-cache-test.py:/tmp/mcp-mail-gitpython-path-cache-test.py:ro" \
+            "gc-mcp-mail:${IMAGE_TAG}" \
+            /tmp/mcp-mail-gitpython-path-cache-test.py
+
+      - name: Check MCP mail archive performance against GitPython 3.1.62
+        if: ${{ !cancelled() && steps.build-images.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/mcp-mail-archive-burst-ci.py \
+            --image "gc-mcp-mail:${IMAGE_TAG}" \
+            --baseline-wheel "${RUNNER_TEMP}/gitpython-3.1.62-py3-none-any.whl" \
+            --burst-script "${GITHUB_WORKSPACE}/.github/scripts/mcp-mail-archive-burst.py"
 
       - name: Check MCP mail image database survives filelock exit
         # filelock 4.x truncated the mail database at exit by writing through a
