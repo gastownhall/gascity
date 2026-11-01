@@ -1051,7 +1051,7 @@ type busySnapshot struct{ *runtime.Fake }
 
 func (busySnapshot) SnapshotIdle(string) (bool, error) { return false, nil }
 
-// A busy-readable provider's busy indicator vetoes a stale activity clock.
+// A busy snapshot reading vetoes a stale activity clock.
 func TestWorkLadderHonorsTheBusySnapshot(t *testing.T) {
 	c := newLadderCity(t)
 	c.claim("a long turn")

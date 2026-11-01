@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -228,7 +229,7 @@ func (r *runner) stop(ctx context.Context, name string) {
 // so the runtime can gate the capability in its handshake and the stateless stop
 // op can re-read it without persistence.
 func (r *runner) opEnv() []string {
-	env := os.Environ()
+	env := execenv.Environ()
 	if r.transcriptsSrc != "" {
 		env = append(env, transcriptsSrcEnv+"="+r.transcriptsSrc)
 	}

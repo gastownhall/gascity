@@ -46,11 +46,12 @@ INTEGRATION_SOLO_TESTS = {
     # and the incapable store start once the baselines are learned.
     "conversationlane_x12_test": "TestX12.*",  # 198-201 s
     "conversationlane_x2_cli_test": "TestX2CLIKillMatrix",  # 14 cells, 8 at a time: 121-142 s
-    # X8, and beside it W5's work ladder on the lane on real tmux
+    # X8, and beside it the cells on real tmux: W5's work ladder on the lane
     # (ladder_lane_test.go, which waits out the ladder's 90 s grace before
-    # its first notice): both parallel, so the pair takes X8's time and adds
-    # no action to the integration-packages lane.
-    "conversationlane_x8_ladder_test": "TestX8OrderAcrossLaneHostRestart|TestWorkLadderLaneNoticeEndToEnd",  # 143 s
+    # its first notice) and boundary prompts held through a busy Claude turn
+    # (busy_turn_lane_test.go, a 60 s turn): all parallel, so they take X8's
+    # time and add no action to the integration-packages lane.
+    "conversationlane_x8_ladder_test": "TestX8OrderAcrossLaneHostRestart|TestWorkLadderLaneNoticeEndToEnd|TestBoundaryPromptsWaitOutABusyClaudeTurn",  # 143 s
 }
 
 # The X2 host matrix by store arm, eight cities each: the "" target runs the
@@ -68,6 +69,7 @@ go_test(
     srcs = [
         "api_lane_test.go",
         "bddolt_gating_test.go",
+        "busy_turn_lane_test.go",
         "harness_bddolt_test.go",
         "harness_test.go",
         "inline_pass_test.go",
@@ -94,6 +96,7 @@ go_test(
     data = select({
         "//:gotags_integration": [
             "//cmd/gc:gc_testhooks",
+            "//test/conversationlane/fakeclaude",
             "//test/conversationlane/fakeruntime",
             "@bd_bin_v1_3_2//:bd",
             "@dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt",
@@ -104,6 +107,7 @@ go_test(
         "//:gotags_integration": {
             "GC_LANE_BD_BIN": "$(rootpath @bd_bin_v1_3_2//:bd)",
             "GC_LANE_DOLT_BIN": "$(rootpath @dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt)",
+            "GC_LANE_FAKE_CLAUDE": "$(rootpath //test/conversationlane/fakeclaude)",
             "GC_LANE_FAKE_RUNTIME": "$(rootpath //test/conversationlane/fakeruntime)",
             "GC_LANE_GC_BIN": "$(rootpath //cmd/gc:gc_testhooks)",
         },

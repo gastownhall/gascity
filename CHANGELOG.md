@@ -733,6 +733,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `worktree.Verify` still checks against the on-disk provenance; work-ledger,
   rig-store and cross-rig rows keep the strict store comparison (ga-8tpvb).
 
+- **A pool session no longer claims routed work bound to another session's
+  managed worktree.** When several ready beads for one pool each carried a
+  managed worktree (`gc.work_dir` with complete gc worktree ownership
+  metadata), the controller started a session inside each bead's worktree,
+  but `gc hook --claim` handed each session the first unassigned bead in the
+  routed window, so work ran in one checkout and on one branch while the bead
+  named another. The fresh-claim tier now skips, for a pool session, any
+  unassigned bead whose managed worktree is a different directory than the
+  session's own; that bead is left to the session started inside it. A pool
+  session running inside a managed worktree also leaves unassigned work that
+  names no managed worktree, which would otherwise run on another bead's
+  checkout and branch; the controller starts a session in the pool's own
+  directory for it, and a session already there takes it, even when that
+  directory is inside a managed worktree. Plain `gc hook` leaves the same
+  beads out of that session's listing and, like the claim, moves on to a
+  later store when a store holds only such beads, so a prompt that lists work
+  and then claims it by id cannot take them either. When these checks leave
+  a session nothing to claim from any store, `gc hook --claim` names each
+  such bead on stderr. A worktree probe that cannot tell (git timed out, or a
+  provenance record that cannot be read) is named on stderr by both commands
+  and counts as no managed worktree. A user-created session row from before
+  manual sessions were marked as such counts as manual here, as it does for
+  the controller. Named, manual and session-less claimants and assigned work
+  claim as before.
+
+- **Pool demand across stores names work in the order sessions claim it.**
+  In a city whose routed work spans more than one bead store, the
+  controller listed pool demand store by store, while `gc hook --claim`
+  reads the merged stores in the canonical ready order (priority, then
+  creation time, then id) through a bounded window. A new session could be
+  started for a bead its window served last or not at all. Demand is now
+  named in the same canonical order, so the session started for a bead finds
+  it at the head of its window. Single-store cities are unaffected.
+
 - **The core pack no longer ships the `wisp-compact` order, which never
   selected a wisp.** The order's script picked its targets from `gc bd list
   --json --all -n 0`, but every bd release gc supports (1.3.0 and later) omits
@@ -747,6 +781,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[mail]` retention covers read mail; and the controller wisp GC (`[daemon]
   wisp_gc_interval` and `wisp_ttl`) collects expired wisps, including on
   split-storage cities, where `gc bd` refuses the script's writes. (#4937)
+
+- **Sessions no longer inherit a native store open's temporary environment.**
+  While gc opens a native Dolt store it briefly rewrites its own process
+  environment: it clears the `BEADS_*` and `BD_*` variables and sets the
+  store's server, database and git-author variables. A session started in
+  that window (subprocess, acp, tmux and herdr setup commands, runtime
+  capability ops, and the nudge and submit pollers) copied those values for
+  its whole life. A rig worker could then read the city's database name on
+  the rig's server, see no work, and stall while demand kept rising; it
+  also lost `BD_BIN` and ran with `GIT_AUTHOR_NAME=gc`. These spawns now read
+  the process environment under the same lock the open holds, so a session
+  start waits for an in-flight open to restore the environment first.
 
 - **`gc prime --strict` fails on a `prompt_template` that does not render.**
   A `.template.md` (or `.md.tmpl`) prompt_template that failed to parse or

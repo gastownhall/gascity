@@ -261,6 +261,12 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ForkFlag:      "--fork-session",
 		PrintArgs:     []string{"-p"},
 		TitleModel:    "haiku",
+		// Claude Code (2.1.295+, verified on 2.1.311) reports OSC 7501 only
+		// after the terminal answers its support probe, which tmux never
+		// does, so capture runs it under the probe-answering relay.
+		ProgramStatusProtocol: "osc7501",
+		ProgramStatusApp:      "claude-code",
+		ProgramStatusRelay:    true,
 		// Config-facing names map to current CLI values: Claude Code rejects the
 		// legacy "auto-edit"/"full-auto" it used to accept (GH#4602).
 		PermissionModes: map[string]string{
@@ -337,6 +343,10 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ResumeStyle:       "subcommand",
 		PrintArgs:         []string{"exec"},
 		TitleModel:        "o4-mini",
+		// Codex (verified on 0.165.0) reports OSC 7501 unprompted, so the
+		// pane-output tap alone captures it.
+		ProgramStatusProtocol: "osc7501",
+		ProgramStatusApp:      "codex",
 		PermissionModes: map[string]string{
 			"suggest":      "--ask-for-approval on-request --sandbox read-only",
 			"auto-edit":    "--sandbox workspace-write --ask-for-approval never",
@@ -1000,6 +1010,7 @@ func cloneBuiltinProviderSpec(spec BuiltinProviderSpec) BuiltinProviderSpec {
 	spec.PrintArgs = cloneStrings(spec.PrintArgs)
 	spec.OptionsSchema = cloneBuiltinOptions(spec.OptionsSchema)
 	spec.ACPArgs = cloneStrings(spec.ACPArgs)
+	spec.ProgramStatusEnv = cloneStringMap(spec.ProgramStatusEnv)
 	return spec
 }
 
