@@ -28,6 +28,7 @@ type rotatedKeyFixture struct {
 	freshKey     string
 	state        string // "" is asleep
 	probeRoot    string // when non-empty, the only root the launch probe searches
+	startedHash  string // committed started_config_hash; "" leaves it empty
 }
 
 // applyRestartHandoff rotates the row's session key to freshKey the way a
@@ -93,6 +94,11 @@ func newRotatedKeyHandle(t *testing.T, fx rotatedKeyFixture) (*SessionHandle, *b
 		t.Fatalf("CreateSession(BeadOnly): %v", err)
 	}
 	applyRestartHandoff(t, store, info.ID, fx.freshKey, fx.state)
+	if fx.startedHash != "" {
+		if err := store.SetMetadata(info.ID, "started_config_hash", fx.startedHash); err != nil {
+			t.Fatalf("SetMetadata(started_config_hash): %v", err)
+		}
+	}
 	if fx.providerKind != "" {
 		if err := store.SetMetadata(info.ID, "provider_kind", fx.providerKind); err != nil {
 			t.Fatalf("SetMetadata(provider_kind): %v", err)
@@ -166,6 +172,17 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			name:        "transcript present for the rotated key",
 			fx:          rotatedKeyFixture{freshKey: freshKey},
 			transcript:  true,
+			wantCommand: "claude",
+			wantFlag:    "--resume",
+		},
+		{
+			// A committed conversation (a started_config_hash beside the key)
+			// keeps the resume even without a findable transcript: only the
+			// reconciler's stale-resume clear may reset a committed key, and a
+			// transcript outside every probe root is not evidence the
+			// conversation is gone.
+			name:        "committed conversation without a transcript",
+			fx:          rotatedKeyFixture{freshKey: freshKey, startedHash: "hash-abc"},
 			wantCommand: "claude",
 			wantFlag:    "--resume",
 		},

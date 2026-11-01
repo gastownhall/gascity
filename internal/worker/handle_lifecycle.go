@@ -819,7 +819,7 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	if resumeCommand := strings.TrimSpace(h.session.Resume.ResumeCommand); resumeCommand != "" {
 		resumeInfo.ResumeCommand = resumeCommand
 	}
-	if h.unlaunchedSessionKey(resumeInfo) {
+	if h.unlaunchedSessionKey(pr, resumeInfo) {
 		return startCommandWithSessionID(resumeInfo, h.session)
 	}
 	return sessionpkg.BuildResumeCommand(resumeInfo), nil
@@ -828,14 +828,21 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 // unlaunchedSessionKey reports whether resumeInfo's session key names a
 // conversation the provider never started, so the resume the start would
 // build reattaches to nothing: the provider exits at once and the pane stays
-// blank. The probe is the one the reconciler's own start applies — the roots
-// a keyed probe of this provider searches (the handle's launch roots, plus
-// the projects root an absolute CLAUDE_CONFIG_DIR in the launch env names),
-// the provider transcript reads dispatch on (historyProvider: kind over
-// name), and the launch's work dir. A provider whose keyed transcripts
-// cannot be probed, or a transcript the probe finds, keeps the resume path.
-func (h *SessionHandle) unlaunchedSessionKey(resumeInfo sessionpkg.Info) bool {
+// blank. It holds only for a row with no committed conversation — an empty
+// started_config_hash, the state every key rotation clears and only the
+// reconciler's commit writes back — with a session-id flag and key set; a
+// committed key is the stale-resume clear's to reset, never a start's. The
+// probe is the one the reconciler's own start applies — the roots a keyed
+// probe of this provider searches (the handle's launch roots, plus the
+// projects root an absolute CLAUDE_CONFIG_DIR in the launch env names), the
+// provider transcript reads dispatch on (historyProvider: kind over name),
+// and the launch's work dir. A provider whose keyed transcripts cannot be
+// probed, or a transcript the probe finds, keeps the resume path.
+func (h *SessionHandle) unlaunchedSessionKey(pr sessionpkg.PersistedResponse, resumeInfo sessionpkg.Info) bool {
 	if h.session.Resume.SessionIDFlag == "" || strings.TrimSpace(resumeInfo.SessionKey) == "" {
+		return false
+	}
+	if strings.TrimSpace(pr.Metadata["started_config_hash"]) != "" {
 		return false
 	}
 	hints := h.runtimeHints()
