@@ -121,11 +121,14 @@ func (c *conversationLanesDoctorCheck) defaultKinds(ctx *doctor.CheckContext, r 
 	if r.Status != doctor.StatusOK {
 		return nil, true
 	}
+	// The explicit list's refusal text names remedies for a listed kind;
+	// with none listed, the remedy is the split legacy-delivery names.
 	why := "the sessions store is not SQLite"
-	if capErr != nil {
-		why = capErr.Error()
+	var incapable *laneStoreIncapableError
+	if errors.As(capErr, &incapable) {
+		why = fmt.Sprintf("its sessions class is bound to %s, which cannot apply guarded batches", incapable.binding)
 	}
-	r.Message = fmt.Sprintf("conversation lanes are off by default here (%s); this city keeps legacy delivery until its storage is split", why)
+	r.Message = fmt.Sprintf("conversation lanes are off by default here (%s); this city keeps legacy delivery until its storage is split (%s)", why, legacyDeliverySplitRemedy)
 	return nil, true
 }
 

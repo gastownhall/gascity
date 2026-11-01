@@ -3,18 +3,21 @@ package main
 // gc nudge status and gc nudge drop over conversation-lane ops (OJ-21 21a,
 // DES-OJ21 §9). A message, notice or wait nudge the lane delivers is an op,
 // not a queue item, so the two commands read and cancel ops beside the queue
-// while both exist. An op shows in the command's schema-v1 item shape: its id
-// is the op id, agent the target's queue key, source the producer's
-// principal, message the payload, deliver_after its not-before (else its
-// creation), expires_at its start-by, attempts its attempt count, and
-// claimed_at and lease_until its lease's. A submitted or accepted op is
-// pending, an executing or settling one in flight, and a lane op closed
-// failed or skipped within the last hour is dead, its dead_at the close.
+// while both exist. Only message ops are nudges: an interrupt or respond op
+// on the same conversation is neither listed nor dropped. An op shows in the
+// command's schema-v1 item shape: its id is the op id, agent the target's
+// queue key, source the producer's principal, message the payload,
+// deliver_after its not-before (else its creation), expires_at its
+// start-by, attempts its attempt count, and claimed_at and lease_until its
+// lease's. A submitted or accepted op is pending, an executing or settling
+// one in flight, and a lane op closed failed or skipped within the last hour
+// is dead, its dead_at the close.
 
 import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -72,20 +75,22 @@ func openLaneNudgeStore(cityPath string, cfg *config.City) (s laneNudgeStore, ok
 	return laneNudgeStore{st: st, close: closeStore}, true, nil
 }
 
-// laneNudgeItems lists target's lane ops as gc nudge status items at now:
-// its open lane ops, pending or in flight, and those closed failed or
+// laneNudgeItems lists target's lane message ops as gc nudge status items at
+// now: its open ones, pending or in flight, and those closed failed or
 // skipped within laneNudgeDeadWindow, dead. A target with no session id has
-// none.
+// none. err names what it could not read, and the items are the rest: open
+// rows that do not decode, which it leaves out as the lane host quarantines
+// them, or the closed ops, whose failed read still lists the open ones.
 func laneNudgeItems(st *opjournal.Store, target nudgeTarget, now time.Time) (pending, inFlight, dead []queuedNudge, err error) {
 	if target.sessionID == "" {
 		return nil, nil, nil, nil
 	}
-	open, err := st.ListOpen(target.sessionID)
+	open, quarantined, err := st.ListOpenTolerant(target.sessionID)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	for _, op := range open {
-		if op.Executor != opjournal.ExecutorLane {
+		if !laneNudgeOp(op) {
 			continue
 		}
 		item := laneNudgeItem(op, target)
@@ -96,14 +101,15 @@ func laneNudgeItems(st *opjournal.Store, target nudgeTarget, now time.Time) (pen
 			pending = append(pending, item)
 		}
 	}
+	unread := laneNudgeQuarantined(quarantined)
 	closed, err := st.RecentClosed(target.sessionID, laneNudgeHistoryRows)
 	if err != nil {
-		return nil, nil, nil, err
+		return pending, inFlight, nil, errors.Join(unread, fmt.Errorf("dead ops not listed: %w", err))
 	}
 	for _, op := range closed {
 		arm, _ := op.Outcome.Effective()
 		at := op.ClosedAt()
-		if (arm != opjournal.ArmFailed && arm != opjournal.ArmSkipped) || at.Before(now.Add(-laneNudgeDeadWindow)) {
+		if !laneNudgeOp(op) || (arm != opjournal.ArmFailed && arm != opjournal.ArmSkipped) || at.Before(now.Add(-laneNudgeDeadWindow)) {
 			continue
 		}
 		item := laneNudgeItem(op, target)
@@ -111,7 +117,27 @@ func laneNudgeItems(st *opjournal.Store, target nudgeTarget, now time.Time) (pen
 		item.LastError = laneNudgeOutcomeText(op.Outcome)
 		dead = append(dead, item)
 	}
-	return pending, inFlight, dead, nil
+	return pending, inFlight, dead, unread
+}
+
+// laneNudgeOp reports whether op is a nudge gc nudge status lists and gc
+// nudge drop cancels: a message the conversation lane delivers.
+func laneNudgeOp(op opjournal.Op) bool {
+	return op.Executor == opjournal.ExecutorLane && op.Kind == opjournal.KindMessage
+}
+
+// laneNudgeQuarantined is the error naming the open op rows a tolerant read
+// set aside, nil for none.
+func laneNudgeQuarantined(rows []opjournal.QuarantinedRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	ids := make([]string, len(rows))
+	for i, row := range rows {
+		ids[i] = row.ID
+	}
+	return fmt.Errorf("%d open op row(s) this gc cannot decode are not listed (the lane host quarantines them): %s: %w",
+		len(rows), strings.Join(ids, ", "), rows[0].Err)
 }
 
 // laneNudgeItem is op in gc nudge status's item shape.
@@ -160,10 +186,11 @@ func laneNudgeOutcomeText(o opjournal.Outcome) string {
 	return string(arm) + ": " + reason
 }
 
-// laneNudgeDrop cancels lane op id as gc nudge drop does: an op that had not
-// started closes canceled (dropped), and an executing one records the
-// cancel (cancel_requested), both ok. found is false when id names no lane
-// op, which leaves the id to the queue's answer.
+// laneNudgeDrop cancels lane message op id as gc nudge drop does: an op that
+// had not started closes canceled (dropped), and an executing one records
+// the cancel (cancel_requested), both ok; a settling one is too late to
+// cancel. found is false when id names no lane message op, which leaves the
+// id to the queue's answer.
 func laneNudgeDrop(st *opjournal.Store, id string) (res nudgeDropResult, found bool, err error) {
 	op, err := st.Get(id)
 	switch {
@@ -171,7 +198,7 @@ func laneNudgeDrop(st *opjournal.Store, id string) (res nudgeDropResult, found b
 		return nudgeDropResult{}, false, nil
 	case err != nil:
 		return nudgeDropResult{}, false, err
-	case op.Executor != opjournal.ExecutorLane:
+	case !laneNudgeOp(op):
 		return nudgeDropResult{}, false, nil
 	}
 	result, _, err := st.Cancel(id, laneNudgeDropPrincipal, "gc nudge drop")
@@ -183,40 +210,36 @@ func laneNudgeDrop(st *opjournal.Store, id string) (res nudgeDropResult, found b
 		return nudgeDropResult{ID: id, OK: true, Outcome: "dropped"}, true, nil
 	case opjournal.CancelRequested:
 		return nudgeDropResult{ID: id, OK: true, Outcome: "cancel_requested"}, true, nil
+	case opjournal.CancelAlreadyDecided:
+		return nudgeDropResult{ID: id, OK: false, Error: "too late to cancel: its delivery is being settled"}, true, nil
 	default:
 		return nudgeDropResult{ID: id, OK: false, Error: "already closed"}, true, nil
 	}
 }
 
 // laneNudgeStatusItems is laneNudgeItems over the city's op store for gc
-// nudge status. A store that does not open, or a read that fails, is warned
-// of on stderr and lists no lane op: the queue's items still print.
-func laneNudgeStatusItems(target nudgeTarget, now time.Time, stderr io.Writer) (pending, inFlight, dead []queuedNudge) {
+// nudge status. A store that cannot host lanes holds no lane op. err names
+// what could not be read, the city's store or op store not opening
+// included, and the items are the rest, for gc nudge status to fail on.
+func laneNudgeStatusItems(target nudgeTarget, now time.Time) (pending, inFlight, dead []queuedNudge, err error) {
 	if target.sessionID == "" {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	ls, ok, err := openLaneNudgeStore(target.cityPath, target.cfg)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc nudge status: warning: conversation-lane ops not listed: %v\n", err) //nolint:errcheck // best-effort stderr
-		return nil, nil, nil
-	}
-	if !ok {
-		return nil, nil, nil
+	if err != nil || !ok {
+		return nil, nil, nil, err
 	}
 	defer ls.close()
-	pending, inFlight, dead, err = laneNudgeItems(ls.st, target, now)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc nudge status: warning: conversation-lane ops not listed: %v\n", err) //nolint:errcheck // best-effort stderr
-		return nil, nil, nil
-	}
-	return pending, inFlight, dead
+	return laneNudgeItems(ls.st, target, now)
 }
 
 // dropLaneNudges cancels, as gc nudge drop, each of ids that is no queued
 // nudge (statuses) and is shaped like an op id, and returns the result of
-// each one that names a lane op. It opens the city's op store only when
-// such an id is given; a store that cannot host lanes holds none.
-func dropLaneNudges(cityPath string, ids []string, statuses map[string]nudgeDropStatus) (map[string]nudgeDropResult, error) {
+// each one that names a lane message op or could not be canceled: a failure
+// is that id's own failed result, so every id is reported and the queue's
+// drops still run. It opens the city's op store only when such an id is
+// given; a store that cannot host lanes holds none.
+func dropLaneNudges(cityPath string, ids []string, statuses map[string]nudgeDropStatus) map[string]nudgeDropResult {
 	var candidates []string
 	for _, id := range ids {
 		if _, queued := statuses[id]; !queued && opjournal.IsOpID(id) {
@@ -224,26 +247,35 @@ func dropLaneNudges(cityPath string, ids []string, statuses map[string]nudgeDrop
 		}
 	}
 	if len(candidates) == 0 {
-		return nil, nil
+		return nil
+	}
+	out := make(map[string]nudgeDropResult, len(candidates))
+	failAll := func(err error) map[string]nudgeDropResult {
+		for _, id := range candidates {
+			out[id] = nudgeDropResult{ID: id, OK: false, Error: err.Error()}
+		}
+		return out
 	}
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
-		return nil, fmt.Errorf("loading the city config: %w", err)
+		return failAll(fmt.Errorf("loading the city config: %w", err))
 	}
 	ls, ok, err := openLaneNudgeStore(cityPath, cfg)
-	if err != nil || !ok {
-		return nil, err
+	switch {
+	case err != nil:
+		return failAll(err)
+	case !ok:
+		return nil
 	}
 	defer ls.close()
-	out := make(map[string]nudgeDropResult, len(candidates))
 	for _, id := range candidates {
 		res, found, err := laneNudgeDrop(ls.st, id)
-		if err != nil {
-			return nil, err
-		}
-		if found {
+		switch {
+		case err != nil:
+			out[id] = nudgeDropResult{ID: id, OK: false, Error: err.Error()}
+		case found:
 			out[id] = res
 		}
 	}
-	return out, nil
+	return out
 }
