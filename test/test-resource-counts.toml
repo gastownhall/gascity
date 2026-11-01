@@ -2904,7 +2904,7 @@ tagged = true
 [[count]]
 path = "test/acceptance/beads_proxied_default_test.go"
 resource = "subprocess"
-calls = 4
+calls = 5
 tagged = true
 
 [[count]]
