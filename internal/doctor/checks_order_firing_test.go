@@ -799,6 +799,38 @@ func TestOrderFiringCurrent_InapplicableOrderIsReportedNotStale(t *testing.T) {
 	}
 }
 
+// The patrol allowance is read from the city config the check already holds,
+// not hard-coded: with patrol_interval = "1m" a 1m cooldown last fired 2m50s
+// ago is on cadence (effective period 2m, overdue at 3m). A hard-coded 30s
+// allowance would flag 2m50s.
+func TestOrderFiringCurrent_ReadsPatrolIntervalFromCityConfig(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		age  time.Duration
+		want CheckStatus
+	}{
+		{"2m50s is on cadence", 2*time.Minute + 50*time.Second, StatusOK},
+		{"3m is overdue", 3 * time.Minute, StatusWarning},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath, cfg := orderFiringTestCity(t)
+			cfg.Daemon.PatrolInterval = "1m"
+			writeOrderFiringTestOrder(t, cityPath, "paced-cooldown", "cooldown", "1m")
+			writeOrderFiringTestEvents(t, cityPath,
+				events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+				events.Event{Type: events.OrderFired, Subject: "paced-cooldown", Ts: now.Add(-tt.age)},
+			)
+
+			result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+			if result.Status != tt.want {
+				t.Fatalf("status = %v, want %v; msg = %s; details = %v", result.Status, tt.want, result.Message, result.Details)
+			}
+		})
+	}
+}
+
 // classifyOrderFiring paces a fired order's thresholds on the effective
 // period — expected interval plus patrol interval — because the orders lane
 // evaluates gates only during passes up to one patrol interval apart, so a
