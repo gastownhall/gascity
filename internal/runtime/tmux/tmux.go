@@ -717,9 +717,10 @@ func (t *Tmux) probeServerAlive() error {
 		if reprobeErr == nil || errors.Is(reprobeErr, ErrSessionNotFound) || errors.Is(reprobeErr, ErrNoCurrentTarget) {
 			return nil
 		}
-		// Do not wrap ErrNoServer here: callers such as EnsureSessionFresh
-		// must not retry a guarded no-server result as an ordinary absence.
-		return fmt.Errorf("%w: protocol=no-server path=%s observation=%w", ErrServerDegraded, path, observationErr)
+		// Do not wrap ErrNoServer here (reprobeErr is rendered as text for
+		// the same reason): callers such as EnsureSessionFresh must not retry
+		// a guarded no-server result as an ordinary absence.
+		return fmt.Errorf("%w: protocol=no-server path=%s observation=%w reprobe=%s", ErrServerDegraded, path, observationErr, reprobeErr.Error())
 	}
 	// Timeout, fork failure, or any other unrecognized error: server is in
 	// an indeterminate state. Refuse to proceed rather than let tmux silently

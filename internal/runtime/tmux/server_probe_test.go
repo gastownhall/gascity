@@ -378,6 +378,73 @@ func TestNewSessionErrNoServerReprobeAnsweredAllowsCreation(t *testing.T) {
 	}
 }
 
+// TestNewSessionErrNoServerReprobeWithoutAnswerFailsClosed pins the guarded
+// refusal: when the single re-probe gets no positive server answer —
+// persistent no-server, a canceled or expired context, or any other executor
+// failure — creation is refused with ErrServerDegraded, the re-probe result
+// rides along in the diagnostic (rendered %v, never wrapped, so persistent
+// no-server cannot be mistaken for ordinary absence), and new-session never
+// runs.
+func TestNewSessionErrNoServerReprobeWithoutAnswerFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		reprobeErr error
+	}{
+		{name: "persistent no-server", reprobeErr: ErrNoServer},
+		{name: "context canceled", reprobeErr: context.Canceled},
+		{name: "context deadline exceeded", reprobeErr: context.DeadlineExceeded},
+		{name: "executor failure", reprobeErr: errors.New("tmux has-session: fork failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fe := probeAssertSet(
+				[]string{"", ""},
+				[]error{ErrNoServer, tc.reprobeErr},
+			)
+			observerCalls := 0
+			tm := &Tmux{
+				cfg:  Config{SocketName: "gc-test"},
+				exec: fe,
+				serverSocketObserver: func(context.Context, string) error {
+					observerCalls++
+					return fmt.Errorf("path=/tmux/gc-test inode=97 peer_pid=4242 reason=live-unix-socket")
+				},
+			}
+
+			err := tm.NewSession("gc-fail-closed", "")
+			if !errors.Is(err, ErrServerDegraded) {
+				t.Fatalf("err = %v, want ErrServerDegraded", err)
+			}
+			if errors.Is(err, ErrNoServer) {
+				t.Fatalf("err = %v, must not wrap ErrNoServer", err)
+			}
+			for _, want := range []string{
+				"protocol=no-server",
+				"reason=live-unix-socket",
+				"reprobe=",
+			} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("err = %q, want %q", err, want)
+				}
+			}
+			if !strings.Contains(err.Error(), tc.reprobeErr.Error()) {
+				t.Fatalf("err = %q, want the re-probe result %q", err, tc.reprobeErr)
+			}
+			if observerCalls != 1 {
+				t.Fatalf("observer calls = %d, want 1", observerCalls)
+			}
+			wantProbe := []string{"-u", "-L", "gc-test", "has-session", "-t", "=" + probeSessionName}
+			if len(fe.calls) != 2 {
+				t.Fatalf("calls = %#v, want exactly two preflight probes", fe.calls)
+			}
+			for i := 0; i < 2; i++ {
+				if !reflect.DeepEqual(fe.calls[i], wantProbe) {
+					t.Fatalf("preflight call %d = %#v, want %#v", i, fe.calls[i], wantProbe)
+				}
+			}
+		})
+	}
+}
+
 type socketModeFileInfo struct{ os.FileInfo }
 
 func (info socketModeFileInfo) Mode() os.FileMode { return info.FileInfo.Mode() | os.ModeSocket }
