@@ -15,9 +15,11 @@ import (
 // credentialApplyProcedure is the single statement of what changing a
 // credential requires. Help text, the report footer and the docs page all read
 // from here so they cannot drift apart.
-const credentialApplyProcedure = `Changing a credential does not apply itself. A credential change moves no
-config fingerprint, so no agent restarts on its own, and the supervisor
-resolves session environment from its own environment, fixed when it exec'd.
+const credentialApplyProcedure = `Changing a credential does not apply itself. The supervisor resolves session
+environment from its own environment, fixed when it exec'd, so nothing changes
+until it re-execs. After that, a credential declared in provider env moves the
+agents' fingerprint and they relaunch; one injected by a selected [upstreams]
+entry does not, so cycle those agents yourself.
 Applying a new value means: write it where the supervisor reads it, regenerate
 the service file so the supervisor re-execs with it, then cycle the agents.
 Until the supervisor re-execs, every running session keeps the old credential.`
@@ -276,9 +278,10 @@ reaches the same path. "gc restart" only cycles agents.
 
 Do NOT reach for "gc supervisor stop" and "gc supervisor start" here.
 "gc supervisor start" does not regenerate the service file and does not merge
-%s; it launches a supervisor detached from the service manager carrying the
-CALLING SHELL's environment, which is how a rotation ends up serving the old
-value or a blank one.
+%s; it either starts the already-installed service with its old,
+un-regenerated environment (macOS) or launches a detached supervisor carrying
+the calling shell's environment, which is how a rotation ends up serving the
+old value or a blank one.
 
 Two conditions this command cannot check for you:
 

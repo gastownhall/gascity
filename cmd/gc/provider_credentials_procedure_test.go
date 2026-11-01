@@ -123,10 +123,15 @@ func TestSupervisorInstallAppliesTheSecretsFileCredential(t *testing.T) {
 // shell had — the old value, or nothing.
 func TestSupervisorStartDoesNotApplyTheSecretsFileCredential(t *testing.T) {
 	newSupervisorApplyTestEnv(t)
-	// A harness that overrides HOME (Bazel, CI sandboxes) trips the bare-start
-	// HOME guard before the child is ever built. The test's GC_HOME is a
-	// throwaway, which is exactly the isolated run that guard admits.
+	// The bare-start path is what this guards, so the run is pinned to it: a
+	// throwaway HOME (with the isolated-home opt-in the bare-start HOME guard
+	// admits) and linux, so a workstation's installed launchd plist is never
+	// read or started.
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv(supervisorIsolatedHomeEnv, "1")
+	oldGOOS := supervisorRuntimeGOOS
+	supervisorRuntimeGOOS = "linux"
+	t.Cleanup(func() { supervisorRuntimeGOOS = oldGOOS })
 
 	oldAlive := supervisorAliveHook
 	supervisorAliveHook = func() int { return 4242 }
@@ -169,14 +174,15 @@ func TestSupervisorStartDoesNotApplyTheSecretsFileCredential(t *testing.T) {
 		}
 	}
 
-	// What it carries instead is this process's own environment. gc appends
-	// its product-metrics opt-out for the child, so the check is containment,
-	// not equality.
+	// What it carries instead is this process's own environment, as the fork
+	// shapes it (supervisorForkEnv drops session-scoped keys and pins the
+	// preserve-sessions marker). gc appends its product-metrics opt-out for the
+	// child, so the check is containment, not equality.
 	got := make(map[string]bool, len(launched.Env))
 	for _, kv := range launched.Env {
 		got[kv] = true
 	}
-	for _, kv := range os.Environ() {
+	for _, kv := range supervisorForkEnv(os.Environ()) {
 		if !got[kv] {
 			t.Fatalf("gc supervisor start dropped %q from the calling shell's environment; the procedure states it carries that environment, which is why it cannot apply a credential the shell does not hold", kv)
 		}
