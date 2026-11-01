@@ -13422,6 +13422,29 @@ func TestOrphanSweepComposesGateAndLocalSkipOutcomes(t *testing.T) {
 	}
 }
 
+// TestOrphanSweepDeclaresNothingForBenignReleaseRace: a conditional release
+// that finds the claim already moved (`release-if-current` prints skipped) is
+// a benign race, not a skip: it is neither counted nor declared.
+func TestOrphanSweepDeclaresNothingForBenignReleaseRace(t *testing.T) {
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{hookClaim("ga-hook-raced", "gc-d34d6", "gastown__polecat-gc-d34d6", nil)},
+		nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d6", Status: "closed", IssueType: "session"}},
+		nil, map[string]string{"ORPHAN_SWEEP_RELEASE_OUTPUT": "skipped"})
+	if run.err != nil {
+		t.Fatalf("orphan-sweep exited non-zero on a benign release race: %v\n%s", run.err, run.context())
+	}
+	if !strings.Contains(run.log, "bd release-if-current ga-hook-raced gc-d34d6\n") {
+		t.Fatalf("conditional release was never attempted\n%s", run.context())
+	}
+	if strings.Contains(run.out, "unverifiable") {
+		t.Fatalf("benign release race counted as unverifiable:\n%s", run.out)
+	}
+	if outcome, ok := run.outcome(t); ok {
+		t.Fatalf("a benign release race declared outcome %+v", outcome)
+	}
+}
+
 // TestJsonlExportFirstRunArchivePathCreatedBeforeTheRename covers the window
 // between the first run's "archive path absent" check and its rename of the
 // staging repo into place: another exporter (or anything else) can create
