@@ -644,3 +644,12 @@ published: expose unavailable answer capability and preserve the message guard,
 rather than reporting a dead runtime. Stop cancels the native question widget
 without choosing any answer. Provider callback and installed-binary qualification
 must accompany tests built from completed transcript records.
+
+## Rig registration paths
+
+An explicit absolute path may register an existing external project directory
+in place through the same rig provisioner as `gc rig add`. Preserve its path
+and contents. An absent external destination or a relative path escaping the
+city is rejected before provisioning. Keep city containment for managed clones,
+provision manifests and physical teardown; registration grants no ownership of
+an external directory's creation or deletion.

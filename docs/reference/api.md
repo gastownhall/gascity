@@ -99,6 +99,20 @@ Creation returns `202` after scaffolding and registration. Follow the returned
 `request_id` on the supervisor event stream for startup completion or a
 `request.failed` event; acceptance alone does not mean the city is ready.
 
+## Register an existing project
+
+Register a repository where it already lives with
+`POST /v0/city/{cityName}/rigs`:
+
+```json
+{"name":"project","path":"/home/agent/projects/project"}
+```
+
+Use an absolute path to an existing directory outside the city. Gas City
+registers it in place and applies the city's default rig configuration.
+Relative paths resolve inside the city. New clone destinations and their
+cleanup remain inside the city.
+
 ## Agent counts
 
 Several endpoints report an agent count, and each counts something different:

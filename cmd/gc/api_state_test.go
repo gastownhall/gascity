@@ -993,11 +993,9 @@ func TestControllerStateCreateRigDetectsDefaultBranch(t *testing.T) {
 	}
 }
 
-// TestControllerStateCreateRigRejectsOutOfCityPath pins the sync-path city-root
-// containment: the API rig-create is a server-side MkdirAll + store write, so an
-// absolute out-of-city path or a "../"-escaping path must be refused (with
-// ErrValidation → 4xx) before any filesystem side effect. The local CLI reaches
-// rig.Provision directly and is intentionally not constrained this way.
+// TestControllerStateCreateRigRejectsOutOfCityPath refuses implicit creation
+// outside the city and relative escapes before any filesystem side effect.
+// Explicit absolute paths to existing directories register in place.
 func TestControllerStateCreateRigRejectsOutOfCityPath(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
@@ -1008,7 +1006,11 @@ func TestControllerStateCreateRigRejectsOutOfCityPath(t *testing.T) {
 	}
 	cs := newControllerState(context.Background(), &config.City{Workspace: config.Workspace{Name: "city1"}}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 
-	for _, p := range []string{filepath.Join(t.TempDir(), "escape"), "../escape"} {
+	externalFile := filepath.Join(t.TempDir(), "existing-file")
+	if err := os.WriteFile(externalFile, []byte("preserve me"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{filepath.Join(t.TempDir(), "escape"), "../escape", externalFile} {
 		if err := cs.CreateRig(config.Rig{Name: "evil", Path: p}); !errors.Is(err, configedit.ErrValidation) {
 			t.Errorf("CreateRig(path=%q) err = %v, want ErrValidation", p, err)
 		}
@@ -5571,5 +5573,39 @@ func TestQuiescentCityDefersEveryCloseToTheSweep(t *testing.T) {
 				t.Fatal("the close is not owed to the sweep")
 			}
 		})
+	}
+}
+
+// Existing repositories are registered where they already live. Registration
+// does not take ownership of the containing projects directory.
+func TestControllerStateCreateRigRegistersExistingExternalDirectoryInPlace(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	projectDir := filepath.Join(t.TempDir(), "projects", "existing")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(projectDir, "existing.py")
+	if err := os.WriteFile(source, []byte("print('existing source')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cs := newControllerState(context.Background(), &config.City{Workspace: config.Workspace{Name: "city1"}}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	if err := cs.CreateRig(config.Rig{Name: "existing", Path: projectDir}); err != nil {
+		t.Fatalf("register existing external project: %v", err)
+	}
+	cfg := cs.Config()
+	if cfg == nil || len(cfg.Rigs) != 1 || cfg.Rigs[0].Path != projectDir {
+		t.Fatalf("existing path was not retained: %+v", cfg)
+	}
+	got, err := os.ReadFile(source)
+	if err != nil || string(got) != "print('existing source')\n" {
+		t.Fatalf("existing source changed: %q, %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(cityDir, "rigs", "existing")); !os.IsNotExist(err) {
+		t.Fatalf("registration created a second project inside the city: %v", err)
 	}
 }

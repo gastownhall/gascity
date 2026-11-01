@@ -2725,21 +2725,12 @@ func (cs *controllerState) DeleteAgent(name string) error {
 	})
 }
 
-// assertRigPathWithinCity rejects a resolved rig working-tree path that escapes
-// the city root. It guards EVERY HTTP rig-create entry — the sync path
-// (controllerState.CreateRig) and the async git_url path (ProvisionRigFromGit) —
-// plus the physical teardown (TeardownPartialRig): a remote API caller must not
-// steer the server's MkdirAll+store-write (rig.Provision creates an absent path
-// and writes .beads/.gitignore/.env into it) or the clone/RemoveAll outside the
-// city via a "../" or absolute path. It mirrors the configedit path-containment
-// precedent.
-//
-// It is deliberately NOT applied to internal/rig.Provision itself or the cmd/gc
-// CLI wrapper: local `gc rig add <arbitrary/abs/path>` reaches rig.Provision
-// directly (never through this method) and legitimately registers rigs anywhere,
-// staying byte-identical. The error wraps configedit.ErrValidation so the async
-// failure mapper renders invalid_request and the sync mapper renders a 4xx rather
-// than a 500.
+// assertRigPathWithinCity contains managed rig creation, cloning and physical
+// teardown under the city root. Registering an existing external project is a
+// separate operation: CreateRig accepts an explicit absolute directory without
+// taking ownership of its creation or deletion. Relative registration paths
+// must still remain within the city. Errors wrap configedit.ErrValidation so
+// both API projections refuse invalid paths before filesystem mutations.
 // The two passes are separate functions so each can be pinned on its own: a
 // test that only ever calls assertRigPathWithinCity cannot tell which pass
 // rejected, so a pass could rot to a no-op without reddening anything (ga-qe7qm).
@@ -2828,15 +2819,20 @@ func (cs *controllerState) CreateRig(r config.Rig) error {
 	// Resolve against the city dir, never the daemon CWD, so a same-named rig
 	// in the controller's working directory can never win.
 	r.Path = resolveStoreScopeRoot(cs.cityPath, rigPath)
-	// City-root containment: the API rig-create must not write a rig outside the
-	// city sandbox. rig.Provision MkdirAll's an absent path and writes a beads
-	// store, .gitignore, and .beads/.env into it, so an uncontained client path
-	// (../-escaping or absolute) is a server-side dir-create + file-plant primitive
-	// outside the city — the same one the async git_url path guards against. The
-	// local CLI `gc rig add <arbitrary/abs path>` reaches rig.Provision directly,
-	// not through this method, so it stays uncontained by design.
 	if err := assertRigPathWithinCity(cs.cityPath, r.Path); err != nil {
-		return err
+		// An explicit absolute path registers an existing project in place,
+		// matching gc rig add. Never create an external destination implicitly:
+		// clone rollback and cleanup must own only their city-contained paths.
+		if !filepath.IsAbs(rigPath) {
+			return err
+		}
+		info, statErr := os.Stat(r.Path)
+		if statErr != nil {
+			return fmt.Errorf("%w: external rig path must be an existing directory: %s: %w", configedit.ErrValidation, r.Path, statErr)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("%w: external rig path must be a directory: %s", configedit.ErrValidation, r.Path)
+		}
 	}
 	_, err := cs.provisionRigLocked(r, nil)
 	return err
