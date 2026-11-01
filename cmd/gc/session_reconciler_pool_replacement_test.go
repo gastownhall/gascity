@@ -469,6 +469,74 @@ func TestReusablePoolSessionInfo_PersistentSingletonAsleepFreeableIsReusable(t *
 			}
 		})
 	}
+
+	// Every existing reuse guard must keep excluding the row even though the
+	// singleton shape is now wake-reusable.
+	decisionTime := time.Date(2026, 11, 1, 17, 0, 0, 0, time.UTC)
+	guards := []struct {
+		name   string
+		mutate func(*session.Info)
+		work   []beads.Bead
+		used   map[string]bool
+		want   bool
+	}{
+		{name: "deliberate user-hold", mutate: func(i *session.Info) { i.SleepReason = "user-hold" }},
+		{name: "quarantine hold", mutate: func(i *session.Info) { i.SleepReason = "quarantine" }},
+		{name: "unknown reason", mutate: func(i *session.Info) { i.SleepReason = "rate_limit" }},
+		{name: "empty reason without slept_at", mutate: func(i *session.Info) { i.SleepReason = "" }},
+		{
+			name: "pending kill fence",
+			mutate: func(i *session.Info) {
+				i.SleepReason = "killed"
+				i.StateReason = session.KillPendingReason
+				i.SleptAt = decisionTime.Format(time.RFC3339)
+			},
+		},
+		{name: "operator disposition keeps slot", mutate: func(i *session.Info) { i.SleepIntent = string(session.SleepReasonUserHold) }},
+		{name: "closed bead", mutate: func(i *session.Info) { i.Closed = true }},
+		{name: "drained", mutate: func(i *session.Info) { i.MetadataState = "drained" }},
+		{name: "draining", mutate: func(i *session.Info) { i.MetadataState = "draining" }},
+		{name: "failed-create row", mutate: func(i *session.Info) { i.MetadataState = string(session.StateFailedCreate) }},
+		{name: "template mismatch", mutate: func(i *session.Info) { i.Template = "rig/other" }},
+		{name: "used id", used: map[string]bool{base.ID: true}},
+		{
+			name: "open assigned work under alias",
+			work: []beads.Bead{{ID: "work-open", Status: "open", Assignee: template}},
+		},
+		{
+			name: "in-progress assigned work under session_name",
+			work: []beads.Bead{{ID: "work-run", Status: "in_progress", Assignee: base.SessionNameMetadata}},
+		},
+		{
+			name:   "in-progress assigned work under alias history",
+			mutate: func(i *session.Info) { i.AliasHistory = []string{"rig/worker-retired"} },
+			work:   []beads.Bead{{ID: "work-old", Status: "in_progress", Assignee: "rig/worker-retired"}},
+		},
+		{
+			name: "closed assigned work control",
+			work: []beads.Bead{{ID: "work-done", Status: "closed", Assignee: template}},
+			want: true,
+		},
+	}
+	for _, tc := range guards {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			info := base
+			info.SleepReason = "idle"
+			if tc.mutate != nil {
+				tc.mutate(&info)
+			}
+			used := map[string]bool{}
+			for id := range tc.used {
+				used[id] = true
+			}
+			bp := &agentBuildParams{assignedWorkBeads: tc.work, decisionTime: decisionTime}
+			if got := reusablePoolSessionInfo(bp, cfgAgent, template, info, used); got != tc.want {
+				t.Fatalf("reusablePoolSessionInfo(persistent singleton, asleep, guard %q) = %v; want %v",
+					tc.name, got, tc.want)
+			}
+		})
+	}
 }
 
 func createRoutedReadyBeadForReplacement(t *testing.T, store beads.Store, template, title string) beads.Bead {
