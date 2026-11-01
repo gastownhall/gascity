@@ -169,6 +169,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"filelock>=3.29.0,<4",
 		"opentelemetry-api>=1.45.1",
 		"dnspython>=2.9.0",
+		"joserfc>=1.7.5",
 	} {
 		if !strings.Contains(input, want) {
 			t.Errorf("mcp-agent-mail input requirements missing security floor %q", want)
@@ -198,6 +199,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"urllib3==2.8.0 \\",
 		"fsspec==2026.6.0 \\",
 		"litellm==1.106.3 \\",
+		"joserfc==1.7.7 \\",
 		"fastmcp==3.4.10 \\",
 		"fastmcp-slim==3.4.10 \\",
 		"filelock==3.29.0 \\",
@@ -332,13 +334,33 @@ func TestContainerScanRunsMCPMailFilelockExitRegression(t *testing.T) {
 const mcpMailSitePackages = "usr/local/lib/python3.12/site-packages/"
 
 // reviewedMCPMailWaivers maps each Python-package waiver for the gc-mcp-mail
-// image to the distribution it covers. Both advisories are fixed only on the
+// image to the distribution it covers. Every advisory is fixed only on the
 // lines TestMCPMailImageHoldsFilelockAndGitPythonOnSafeLines keeps the image
-// off, and neither is reachable from the image; each statement in
-// .trivyignore.yaml gives the reasoning.
+// off. All but the deployment-scoped ones (mcpMailDeploymentScopedWaivers) are
+// unreachable from the image; each statement in .trivyignore.yaml gives the
+// reasoning.
 var reviewedMCPMailWaivers = map[string]string{
-	"CVE-2026-112940": "filelock",  // GHSA-v4x8-3wr5-3wq8, ReadWriteLock only
-	"CVE-2026-114145": "gitpython", // GHSA-83vg-56qc-22m7, submodule clone only
+	"CVE-2026-112940":     "filelock",  // GHSA-v4x8-3wr5-3wq8, ReadWriteLock only
+	"CVE-2026-114145":     "gitpython", // GHSA-83vg-56qc-22m7, submodule clone only
+	"GHSA-23mf-xhv8-69c2": "gitpython", // Head.checkout only
+	"GHSA-f9j4-qggq-h239": "gitpython", // Remote.pull only
+	"GHSA-w8jc-g24h-crhw": "gitpython", // Git.ls_remote, Repo.merge_base, IndexFile.move only
+	"GHSA-m64x-33q8-m5h7": "gitpython", // reachable; deployment-scoped, see below
+}
+
+// mcpMailDeploymentPath is the shipped manifest that runs the gc-mcp-mail image.
+const mcpMailDeploymentPath = "contrib/k8s/mcp-mail-deployment.yaml"
+
+// mcpMailDeploymentScopedWaivers names the mail waivers whose advisory IS
+// reachable from mcp-agent-mail and is accepted only because of how
+// mcpMailDeploymentPath runs the image. GHSA-m64x-33q8-m5h7's regex DoS runs
+// whenever mcp-agent-mail reads a commit, and _latest_git_activity reads
+// commits from the client-supplied workspace path; the manifest mounts no
+// workspace repos, so no foreign commit is visible in the pod. Each statement
+// must name the manifest, and TestMCPMailDeploymentMountsNoWorkspaceRepos holds
+// the manifest to that premise.
+var mcpMailDeploymentScopedWaivers = map[string]bool{
+	"GHSA-m64x-33q8-m5h7": true,
 }
 
 // TestTrivyIgnoreMCPMailWaiversNameTheLockedRelease holds every gc-mcp-mail
@@ -373,6 +395,9 @@ func TestTrivyIgnoreMCPMailWaiversNameTheLockedRelease(t *testing.T) {
 			if len(v.Paths) != 1 || len(v.Purls) != 0 {
 				t.Errorf("%s waives the mail package together with paths %q and purls %q; scope it to the one dist-info path", v.ID, v.Paths, v.Purls)
 			}
+			if mcpMailDeploymentScopedWaivers[v.ID] && !strings.Contains(v.Statement, mcpMailDeploymentPath) {
+				t.Errorf("%s is reachable from mcp-agent-mail and waived only for the shipped deployment; its statement must name %s, the premise it rests on", v.ID, mcpMailDeploymentPath)
+			}
 			found[v.ID] = true
 		}
 	}
@@ -380,6 +405,144 @@ func TestTrivyIgnoreMCPMailWaiversNameTheLockedRelease(t *testing.T) {
 		if !found[id] {
 			t.Errorf(".trivyignore.yaml must waive %s for the locked %s dist-info path while the lock stays on the line that carries it", id, dist)
 		}
+	}
+}
+
+// mcpMailDeploymentMounts is the complete set of volume mounts the shipped
+// gc-mcp-mail deployment may carry: the mail store and scratch space, keyed by
+// volume name with the mount path each must use.
+var mcpMailDeploymentMounts = map[string]string{
+	"mail-data": "/var/lib/mcp-mail",
+	"tmp":       "/tmp",
+}
+
+// mcpMailDeployment is the part of mcpMailDeploymentPath the workspace guard reads.
+type mcpMailDeployment struct {
+	Spec struct {
+		Template struct {
+			Spec struct {
+				Containers     []mcpMailContainer `yaml:"containers"`
+				InitContainers []mcpMailContainer `yaml:"initContainers"`
+				Volumes        []struct {
+					Name     string         `yaml:"name"`
+					HostPath map[string]any `yaml:"hostPath"`
+				} `yaml:"volumes"`
+			} `yaml:"spec"`
+		} `yaml:"template"`
+	} `yaml:"spec"`
+}
+
+type mcpMailContainer struct {
+	Name            string `yaml:"name"`
+	SecurityContext struct {
+		ReadOnlyRootFilesystem bool `yaml:"readOnlyRootFilesystem"`
+	} `yaml:"securityContext"`
+	VolumeMounts []struct {
+		Name      string `yaml:"name"`
+		MountPath string `yaml:"mountPath"`
+	} `yaml:"volumeMounts"`
+}
+
+// mcpMailDeploymentWorkspaceExposures reports every way a parsed deployment
+// could put a git repository the mail server did not write where
+// mcp-agent-mail's _latest_git_activity can open it: a mount beyond
+// mcpMailDeploymentMounts, a volume beyond them, a hostPath volume, or a
+// writable root filesystem.
+func mcpMailDeploymentWorkspaceExposures(dep mcpMailDeployment) []string {
+	var found []string
+	pod := dep.Spec.Template.Spec
+	if len(pod.Containers) == 0 {
+		found = append(found, "the deployment declares no containers")
+	}
+	for _, c := range append(slices.Clone(pod.Containers), pod.InitContainers...) {
+		if !c.SecurityContext.ReadOnlyRootFilesystem {
+			found = append(found, fmt.Sprintf("container %q does not set readOnlyRootFilesystem: true", c.Name))
+		}
+		for _, m := range c.VolumeMounts {
+			if want, ok := mcpMailDeploymentMounts[m.Name]; !ok || m.MountPath != want {
+				found = append(found, fmt.Sprintf("container %q mounts volume %q at %q", c.Name, m.Name, m.MountPath))
+			}
+		}
+	}
+	for _, v := range pod.Volumes {
+		if _, ok := mcpMailDeploymentMounts[v.Name]; !ok {
+			found = append(found, fmt.Sprintf("volume %q is not one of the reviewed mail volumes", v.Name))
+		}
+		if v.HostPath != nil {
+			found = append(found, fmt.Sprintf("volume %q is a hostPath volume", v.Name))
+		}
+	}
+	return found
+}
+
+// TestMCPMailDeploymentMountsNoWorkspaceRepos enforces the premise of the
+// deployment-scoped mail waivers (mcpMailDeploymentScopedWaivers). GitPython
+// 3.1.62's parse_actor_and_date backtracks quadratically on a crafted commit,
+// and mcp-agent-mail reads commits from the client-supplied workspace path, so
+// the image is exposed as soon as the pod can see a repository it did not write.
+// The shipped manifest mounts only the mail store and /tmp on a read-only root.
+// A change that mounts anything else must revisit those waivers first.
+func TestMCPMailDeploymentMountsNoWorkspaceRepos(t *testing.T) {
+	var dep mcpMailDeployment
+	if err := yaml.Unmarshal([]byte(readFile(t, repoRoot(t), mcpMailDeploymentPath)), &dep); err != nil {
+		t.Fatalf("parsing %s: %v", mcpMailDeploymentPath, err)
+	}
+	for _, f := range mcpMailDeploymentWorkspaceExposures(dep) {
+		t.Errorf("%s: %s; the deployment-scoped GitPython waivers in .trivyignore.yaml assume the pod sees no workspace repos, so revisit them before changing this", mcpMailDeploymentPath, f)
+	}
+}
+
+// TestMCPMailDeploymentGuardFlagsWorkspaceExposures drives the deployment guard
+// with a manifest that breaks the premise every way it can, because the shipped
+// manifest alone cannot show the guard catches anything.
+func TestMCPMailDeploymentGuardFlagsWorkspaceExposures(t *testing.T) {
+	const manifest = `
+spec:
+  template:
+    spec:
+      initContainers:
+      - name: seed
+        securityContext:
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+      containers:
+      - name: mcp-mail
+        securityContext:
+          readOnlyRootFilesystem: false
+        volumeMounts:
+        - name: mail-data
+          mountPath: /var/lib/mcp-mail
+        - name: tmp
+          mountPath: /srv
+      volumes:
+      - name: mail-data
+        hostPath:
+          path: /home/agent/repo
+      - name: tmp
+        emptyDir: {}
+      - name: workspace
+        emptyDir: {}
+`
+	var dep mcpMailDeployment
+	if err := yaml.Unmarshal([]byte(manifest), &dep); err != nil {
+		t.Fatalf("parsing test manifest: %v", err)
+	}
+	found := mcpMailDeploymentWorkspaceExposures(dep)
+	for _, want := range []string{
+		`container "mcp-mail" does not set readOnlyRootFilesystem: true`,
+		`container "seed" mounts volume "workspace" at "/workspace"`,
+		`container "mcp-mail" mounts volume "tmp" at "/srv"`,
+		`volume "mail-data" is a hostPath volume`,
+		`volume "workspace" is not one of the reviewed mail volumes`,
+	} {
+		if !slices.Contains(found, want) {
+			t.Errorf("mcpMailDeploymentWorkspaceExposures() did not report %q; got %q", want, found)
+		}
+	}
+	if len(found) != 5 {
+		t.Errorf("mcpMailDeploymentWorkspaceExposures() = %q, want exactly the five exposures", found)
 	}
 }
 

@@ -20,6 +20,12 @@ mcp-agent-mail @ https://github.com/Dicklesworthstone/mcp_agent_mail/archive/327
 # create_submodule clones before validating the submodule path). There is no
 # 3.1.x backport, but mcp-agent-mail never creates or updates submodules, so the
 # advisory is unreachable and is waived in .trivyignore.yaml for this release.
+# 3.2.0 is likewise the only fix for GHSA-23mf-xhv8-69c2 (Head.checkout),
+# GHSA-f9j4-qggq-h239 (Remote.pull) and GHSA-w8jc-g24h-crhw (Git.ls_remote,
+# Repo.merge_base, IndexFile.move), none of which mcp-agent-mail calls, and for
+# GHSA-m64x-33q8-m5h7 (parse_actor_and_date regex DoS), which IS reachable and is
+# waived only for the shipped contrib/k8s/mcp-mail-deployment.yaml, which mounts
+# no workspace repos. All four are waived in .trivyignore.yaml for this release.
 # Lift the ceiling once a GitPython release fixes the commit-latency regression.
 gitpython>=3.1.62,<3.2
 
@@ -83,9 +89,12 @@ litellm>=1.106.3
 
 # Security floor: CVE-2026-49852 (HIGH, HS256/HS384/HS512 verify accepts an
 # empty/nil HMAC key — cross-language sibling of CVE-2026-45363) in joserfc
-# < 1.6.8. joserfc arrives transitively via authlib; pin the floor until
-# authlib's transitive constraint carries the patched version itself.
-joserfc>=1.6.8
+# < 1.6.8, and GHSA-jpxq-7h8p-2q76 / CVE-2026-119283 (HIGH, an unbounded JWE
+# General JSON recipients array exhausts CPU in repeated private-key
+# decryption) in joserfc < 1.7.5. joserfc arrives transitively via authlib
+# (joserfc>=1.6.8) and fastmcp-slim (joserfc>=1.1.0); pin the floor until
+# their transitive constraints carry the patched version themselves.
+joserfc>=1.7.5
 
 # Security floor: CVE-2026-52869 + CVE-2026-52870 (HIGH, fixed 1.27.2 — HTTP
 # transports serve session requests without verifying the authenticated
