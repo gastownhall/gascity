@@ -10,7 +10,9 @@ import (
 // PaneShowsIdlePrompt is the scan both local tmux (snapshotPaneIdleWithPrefix)
 // and remote tmux-in-box runtimes apply to a captured pane, so a busy
 // indicator must win over a visible prompt, the prompt may sit above a status
-// footer, and NBSP or a boxed prompt must still match.
+// footer, and NBSP or a boxed prompt must still match. The bottom-most prompt
+// line decides; a numbered menu's cursor row there is not idle (see
+// TestMenuCursorRowIsNotAReadyPrompt).
 // Kills: a scan that ignores the busy indicator, stops at the last non-blank
 // line, applies a default for a blank prefix, drops the NBSP / box-border
 // normalization, or reads a transcript line ending in a gerund and "…" as
@@ -66,5 +68,37 @@ func TestPaneShowsIdlePromptMenuCursorRowIsNotIdle(t *testing.T) {
 	}
 	if idle, err := ClassifyIdlePane(lines, "› "); idle || !errors.Is(err, runtime.ErrIdleIndeterminate) {
 		t.Errorf("ClassifyIdlePane(%q, %q) = (%v, %v), want (false, ErrIdleIndeterminate)", lines, "› ", idle, err)
+	}
+}
+
+// Codex echoes past user turns with its prompt glyph, so a menu drawn under
+// transcript is not the only prompt-prefixed line on screen. The bottom-most
+// prompt line is the live one; an echoed turn above the menu is history.
+// Kills: a scan that skips the menu row and keeps looking, which finds the
+// echoed turn and reads the dialog as idle.
+func TestPaneShowsIdlePromptMenuBelowEchoedTurnIsNotIdle(t *testing.T) {
+	tests := []struct {
+		name  string
+		lines []string
+	}{
+		{"folder trust below echoed turn", append([]string{"› Commit the staged API change", ""}, codexFolderTrustMenu...)},
+		{"model switch below echoed turn", []string{
+			"› fix the flaky test",
+			"",
+			"  Approaching rate limits. Switch to gpt-5.4-mini for lower credit usage?",
+			"",
+			"› 1. Switch to gpt-5.4-mini",
+			"  2. Keep current model",
+			"  3. Keep current model (never show again)",
+			"",
+			"  Press enter to confirm or esc to go back",
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if PaneShowsIdlePrompt(tt.lines, "› ") {
+				t.Errorf("PaneShowsIdlePrompt(%q, %q) = true, want false: the bottom-most prompt line is a menu cursor row", tt.lines, "› ")
+			}
+		})
 	}
 }
