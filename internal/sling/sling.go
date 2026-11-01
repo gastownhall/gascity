@@ -230,6 +230,7 @@ type SlingResult struct {
 	// Structured warnings (callers decide how to display).
 	AgentSuspended bool     // target agent is suspended
 	SuspendedRig   string   // non-empty: name of the target's rig, which is suspended
+	SuspendedCity  bool     // true if the whole city is effectively suspended
 	PoolEmpty      bool     // pool max=0
 	AutoBurned     []string // IDs of auto-burned stale molecules
 	MetadataErrors []string // non-fatal metadata write failures

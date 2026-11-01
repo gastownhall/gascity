@@ -845,6 +845,9 @@ func printSlingWarnings(result sling.SlingResult, stderr io.Writer) {
 	if result.SuspendedRig != "" {
 		fmt.Fprintf(stderr, "warning: rig %q is suspended — bead routed but no worker will spawn until 'gc rig resume %s'\n", result.SuspendedRig, result.SuspendedRig) //nolint:errcheck
 	}
+	if result.SuspendedCity {
+		fmt.Fprintln(stderr, "warning: city is suspended — bead routed but no worker will spawn until 'gc resume'") //nolint:errcheck
+	}
 	if result.PoolEmpty {
 		fmt.Fprintf(stderr, "warning: session config %q has max_active_sessions=0 — bead routed but no sessions can claim it\n", result.Target) //nolint:errcheck
 	}
@@ -1203,6 +1206,9 @@ func slingJSONWarnings(result sling.SlingResult) []string {
 	}
 	if result.SuspendedRig != "" {
 		warnings = append(warnings, "rig_suspended")
+	}
+	if result.SuspendedCity {
+		warnings = append(warnings, "city_suspended")
 	}
 	if result.PoolEmpty {
 		warnings = append(warnings, "pool_empty")
