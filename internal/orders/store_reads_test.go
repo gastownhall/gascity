@@ -479,6 +479,23 @@ func TestStaleNotClosedRunsListsEveryNotClosedStatusAtOrBeforeCutoff(t *testing.
 	}
 }
 
+// TestSweepReadersOverAZeroHandleListNothing pins the sweep readers' answer
+// over a store-less handle: no runs and no error. StaleNotClosedRuns' guard is
+// what keeps its live-handle fallback from listing through a nil store.
+func TestSweepReadersOverAZeroHandleListNothing(t *testing.T) {
+	st := NewStore(beads.OrdersStore{})
+	cutoff := time.Now()
+	for name, read := range map[string]func() ([]OrderRun, error){
+		"StaleOpenRuns":      func() ([]OrderRun, error) { return st.StaleOpenRuns(cutoff) },
+		"StaleNotClosedRuns": func() ([]OrderRun, error) { return st.StaleNotClosedRuns(cutoff) },
+		"OrphanedOpenRuns":   st.OrphanedOpenRuns,
+	} {
+		if runs, err := read(); runs != nil || err != nil {
+			t.Errorf("%s over a zero handle = (%v, %v), want (nil, nil)", name, runs, err)
+		}
+	}
+}
+
 // TestOrphanedOpenRunsExcludesTriggerEnvFailed proves the pre-dispatch
 // trigger-env-failure markers are excluded from the orphaned sweep read.
 func TestOrphanedOpenRunsExcludesTriggerEnvFailed(t *testing.T) {

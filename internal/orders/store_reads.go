@@ -161,9 +161,13 @@ func (s *Store) OpenRuns() ([]OrderRun, error) {
 // title), matching the sweep's "when no order filter is set, close every stale
 // tracking bead" behavior.
 func (s *Store) StaleOpenRuns(cutoff time.Time) ([]OrderRun, error) {
+	store := s.store.Store
+	if store == nil {
+		return nil, nil
+	}
 	// Open first: a claim moves a bead forward to in_progress, so a bead
 	// claimed between the two reads is read twice rather than missed.
-	return s.staleRuns(cutoff, "open", "in_progress")
+	return staleRuns(beads.HandlesFor(store).Live, cutoff, "open", "in_progress")
 }
 
 // StaleNotClosedRuns lists every not-closed tracking bead whose CreatedAt is at
@@ -181,17 +185,38 @@ func (s *Store) StaleOpenRuns(cutoff time.Time) ([]OrderRun, error) {
 // decodes the retained closed tracking history for it, as it already does when
 // gc order sweep-tracking reads that history to prune it.
 func (s *Store) StaleNotClosedRuns(cutoff time.Time) ([]OrderRun, error) {
-	return s.staleRuns(cutoff, everyNotClosed)
+	live, ok := s.liveHandle()
+	if !ok {
+		return nil, nil
+	}
+	return staleRuns(live, cutoff, everyNotClosed)
+}
+
+// liveHandle is the LIVE read handle over s's store, reached without
+// unwrapping the typed class handle (the storeclass lint lets that debt only
+// shrink, so StaleOpenRuns and OrphanedOpenRuns keep their baselined unwrap).
+// It answers what beads.HandlesFor answers on the unwrapped store: beads.As
+// sees through the class handle to a store with its own Handles (a
+// CachingStore, a policy store), and any other store, such as a wrapper that
+// only embeds Store (the stale sweep labels each leg that way), is read
+// through HandlesFor's logical wrapper over the handle, which forwards to the
+// store. The answers differ only for a store that is itself a class handle,
+// which As also sees through. ok is false for a zero handle.
+func (s *Store) liveHandle() (beads.LiveReader, bool) {
+	if s.store == (beads.OrdersStore{}) {
+		return nil, false
+	}
+	if p, ok := beads.As[interface{ Handles() beads.StoreHandles }](s.store); ok {
+		return p.Handles().Live, true
+	}
+	return beads.HandlesFor(s.store).Live, true
 }
 
 // staleRuns is the stale readers' shared body: the tracking beads in statuses
-// whose CreatedAt is at or before cutoff, oldest-first. A bead with no
-// CreatedAt is never stale.
-func (s *Store) staleRuns(cutoff time.Time, statuses ...string) ([]OrderRun, error) {
-	if s.store.Store == nil {
-		return nil, nil
-	}
-	all, err := s.sweepTrackingBeads(statuses...)
+// whose CreatedAt is at or before cutoff, oldest-first, read through live. A
+// bead with no CreatedAt is never stale.
+func staleRuns(live beads.LiveReader, cutoff time.Time, statuses ...string) ([]OrderRun, error) {
+	all, err := sweepTrackingBeads(live, statuses...)
 	if err != nil {
 		return nil, err
 	}
@@ -217,10 +242,11 @@ func (s *Store) staleRuns(cutoff time.Time, statuses ...string) ([]OrderRun, err
 // caller closes the returned runs via CloseRuns. Names are best-effort (the
 // sweep closes by ID and does not resolve names).
 func (s *Store) OrphanedOpenRuns() ([]OrderRun, error) {
-	if s.store.Store == nil {
+	store := s.store.Store
+	if store == nil {
 		return nil, nil
 	}
-	all, err := s.sweepTrackingBeads(everyNotClosed)
+	all, err := sweepTrackingBeads(beads.HandlesFor(store).Live, everyNotClosed)
 	if err != nil {
 		return nil, err
 	}
@@ -239,14 +265,13 @@ func (s *Store) OrphanedOpenRuns() ([]OrderRun, error) {
 // is not closed, whatever its status.
 const everyNotClosed = ""
 
-// sweepTrackingBeads is the sweep readers' shared LIVE read: the tracking beads
-// in each of statuses, one query per status across both tiers. A bead two
-// queries both read is listed once, and the list is oldest-first so the
-// caller's close budget drains the oldest jam rather than letting newer beads
-// starve it. No query carries a backing limit: callers post-filter before
-// applying their close budget.
-func (s *Store) sweepTrackingBeads(statuses ...string) ([]beads.Bead, error) {
-	live := beads.HandlesFor(s.store.Store).Live
+// sweepTrackingBeads is the sweep readers' shared LIVE read through live: the
+// tracking beads in each of statuses, one query per status across both tiers.
+// A bead two queries both read is listed once, and the list is oldest-first so
+// the caller's close budget drains the oldest jam rather than letting newer
+// beads starve it. No query carries a backing limit: callers post-filter
+// before applying their close budget.
+func sweepTrackingBeads(live beads.LiveReader, statuses ...string) ([]beads.Bead, error) {
 	var out []beads.Bead
 	seen := make(map[string]bool)
 	for _, status := range statuses {
