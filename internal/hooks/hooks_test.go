@@ -169,6 +169,15 @@ func TestInstallClaude(t *testing.T) {
 	if !ok {
 		t.Fatal("expected /city/.gc/settings.json to be written")
 	}
+	for _, event := range []string{"PreToolUse", "PostToolUse", "PostToolUseFailure"} {
+		entries := claudeHookEntries(t, runtimeData, event)
+		if len(entries) != 1 || entries[0].Matcher != "AskUserQuestion" {
+			t.Fatalf("native question observation needs exactly one managed %s callback: %+v", event, entries)
+		}
+		if !strings.Contains(claudeHookCommand(t, runtimeData, event), managedGCBinInvocation+" internal observe-claude-question") {
+			t.Fatalf("%s callback must use the launching binary", event)
+		}
+	}
 	s := string(runtimeData)
 	if !strings.Contains(s, "SessionStart") {
 		t.Error("claude settings should contain SessionStart hook")
@@ -2888,5 +2897,81 @@ func TestInstallClaudePinsLegacyManagedCommandsWithoutChangingCustomHooks(t *tes
 	}
 	if string(fs.Files["/city/.gc/settings.json"]) != before {
 		t.Fatal("managed hook pinning is not idempotent")
+	}
+}
+
+func TestInstallClaudeAddsQuestionObservationPreservingCustomHooks(t *testing.T) {
+	fs := fsys.NewFake()
+	// Actual pre-observation managed bytes, not derived from the new template.
+	legacy := []byte(`{
+  "skipDangerousModePermissionPrompt": true,
+  "enableAllProjectMcpServers": true,
+  "editorMode": "normal",
+  "awaySummaryEnabled": false,
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart \"${GC_BIN:-gc}\" prime --hook --hook-format codex"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && \"${GC_BIN:-gc}\" handoff --auto \"context cycle\""
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && \"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject"
+          },
+          {
+            "type": "command",
+            "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && \"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject"
+          }
+        ]
+      }
+    ]
+  }
+}
+`)
+	var settings map[string]any
+	if err := json.Unmarshal(legacy, &settings); err != nil {
+		t.Fatal(err)
+	}
+	settings["hooks"].(map[string]any)["PreToolUse"] = []any{map[string]any{
+		"matcher": "Bash", "hooks": []any{map[string]any{"type": "command", "command": "echo keep custom"}},
+	}}
+	data, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.Files["/city/.gc/settings.json"] = data
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatal(err)
+	}
+	first := string(fs.Files["/city/.gc/settings.json"])
+	if strings.Count(first, "internal observe-claude-question") != 3 || !strings.Contains(first, "echo keep custom") {
+		t.Fatal("upgrade lost native question observation or custom hook")
+	}
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatal(err)
+	}
+	if string(fs.Files["/city/.gc/settings.json"]) != first {
+		t.Fatal("question observation upgrade is not idempotent")
 	}
 }

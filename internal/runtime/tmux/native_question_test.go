@@ -476,3 +476,97 @@ func TestNativeClaudeUnflushedQuestionRemainsVisibleAndGuarded(t *testing.T) {
 	}
 	requireNoKeys(t, ex.calls, false)
 }
+
+func projectedClaudeQuestion() claudeQuestionProjection {
+	var projection claudeQuestionProjection
+	_ = json.Unmarshal([]byte(`{"version":1,"session_id":"native-session","prompt_id":"prompt-first","tool_use_id":"toolu_first","questions":[{"header":"Mascot","question":"Which animal should be the test mascot?","options":[{"label":"Otter"},{"label":"Owl"}]}]}`), &projection)
+	return projection
+}
+
+func TestNativeClaudePreToolQuestionBindsBeforeAssistantRecord(t *testing.T) {
+	tm, ex := questionTmux(nativeClaudeQuestion)
+	tm.claudeQuestionTranscript = func(string) (string, error) {
+		return `{"type":"user","sessionId":"native-session","promptId":"prompt-first","message":{"content":"ask a native question"}}` + "\n", nil
+	}
+	tm.claudeQuestionProjections = func(string) ([]claudeQuestionProjection, error) {
+		return []claudeQuestionProjection{projectedClaudeQuestion()}, nil
+	}
+	pending, err := tm.Pending("q")
+	if err != nil || pending == nil || pending.Metadata["answer_action"] != "answer" || pending.Metadata["free_text"] != "true" {
+		t.Fatalf("native pre-tool invocation must bind an unflushed question: %+v,%v", pending, err)
+	}
+	requireNoKeys(t, ex.calls, false)
+}
+
+func TestNativeClaudeProjectionRejectsStaleOrAmbiguousInvocation(t *testing.T) {
+	for _, scenario := range []string{"wrong prompt", "wrong session", "completed", "ambiguous", "new unidentified prompt"} {
+		t.Run(scenario, func(t *testing.T) {
+			tm, ex := questionTmux(nativeClaudeQuestion)
+			projection := projectedClaudeQuestion()
+			tail := `{"type":"user","sessionId":"native-session","promptId":"prompt-first","message":{"content":"ask a native question"}}` + "\n"
+			switch scenario {
+			case "wrong prompt":
+				projection.PromptID = "previous-prompt"
+			case "wrong session":
+				projection.SessionID = "previous-session"
+			case "completed":
+				tail += `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_first","content":"answered"}]}}` + "\n"
+			case "new unidentified prompt":
+				tail += `{"type":"user","message":{"content":"a new prompt with no native identity"}}` + "\n"
+			}
+			projections := []claudeQuestionProjection{projection}
+			if scenario == "ambiguous" {
+				other := projection
+				other.ToolUseID = "toolu_other"
+				projections = append(projections, other)
+			}
+			tm.claudeQuestionTranscript = func(string) (string, error) { return tail, nil }
+			tm.claudeQuestionProjections = func(string) ([]claudeQuestionProjection, error) { return projections, nil }
+			pending, err := tm.Pending("q")
+			if err != nil || pending == nil || pending.Metadata["answer_action"] != "" || pending.Metadata["answer_unavailable"] == "" {
+				t.Fatalf("unproven invocation must stay visible but unanswerable: %+v,%v", pending, err)
+			}
+			requireNoKeys(t, ex.calls, false)
+		})
+	}
+}
+
+func TestNativeClaudePromptIdentityPreventsReusedToolIDAnswer(t *testing.T) {
+	tm, ex := questionTmux(nativeClaudeQuestion)
+	projection := projectedClaudeQuestion()
+	tm.claudeQuestionTranscript = func(string) (string, error) {
+		return `{"type":"user","sessionId":"native-session","promptId":"` + projection.PromptID + `","message":{"content":"ask"}}` + "\n", nil
+	}
+	tm.claudeQuestionProjections = func(string) ([]claudeQuestionProjection, error) { return []claudeQuestionProjection{projection}, nil }
+	first, err := tm.Pending("q")
+	if err != nil || first == nil {
+		t.Fatalf("first=%+v,%v", first, err)
+	}
+	projection.PromptID = "prompt-next"
+	second, err := tm.Pending("q")
+	if err != nil || second == nil {
+		t.Fatalf("second=%+v,%v", second, err)
+	}
+	if first.RequestID == second.RequestID {
+		t.Fatal("same tool ID in a different native prompt revived the old request")
+	}
+	if err := tm.Respond("q", runtime.InteractionResponse{RequestID: first.RequestID, Action: "answer", Text: "Owl"}); !errors.Is(err, runtime.ErrInteractionGone) {
+		t.Fatalf("old request=%v", err)
+	}
+	requireNoKeys(t, ex.calls, false)
+}
+
+func TestNativeClaudeNewPromptRetiresUnfinishedTranscriptInvocation(t *testing.T) {
+	tm, ex := questionTmux(nativeClaudeQuestion)
+	tm.claudeQuestionTranscript = func(string) (string, error) {
+		return `{"type":"user","sessionId":"native-session","promptId":"old","message":{"content":"ask"}}` + "\n" +
+			`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_old","name":"AskUserQuestion","input":{"questions":[{"header":"Mascot","question":"Which animal should be the test mascot?","options":[{"label":"Otter"},{"label":"Owl"}]}]}}]}}` + "\n" +
+			`{"type":"user","sessionId":"native-session","promptId":"new","message":{"content":"ask again"}}` + "\n", nil
+	}
+	tm.claudeQuestionProjections = func(string) ([]claudeQuestionProjection, error) { return nil, nil }
+	pending, err := tm.Pending("q")
+	if err != nil || pending == nil || pending.Metadata["answer_action"] != "" {
+		t.Fatalf("old prompt revived an unfinished invocation: %+v,%v", pending, err)
+	}
+	requireNoKeys(t, ex.calls, false)
+}

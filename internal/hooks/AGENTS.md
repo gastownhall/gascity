@@ -8,3 +8,13 @@ Upgrade only exact known managed command shapes. Preserve user wrappers,
 additional arguments, chained commands and custom hook events. Keep upgrades
 idempotent and avoid duplicate hook execution. Legacy regression fixtures must
 retain actual old bytes instead of deriving old commands from today's template.
+
+## Native question observation
+
+Record native session, prompt and tool-invocation IDs before displaying a managed
+Claude question. Fence observation writes and cleanup to the launching pane's
+incarnation; each invocation owns its own option. A late callback may clear only
+its own invocation. Keep projections bounded and disposable: native transcripts
+and terminal state remain authoritative. Refuse stale, completed or ambiguous
+bindings and retain the ordinary-message accidental-answer guard. Qualification
+must include real request-bound choice/free-text replies through the supervisor.

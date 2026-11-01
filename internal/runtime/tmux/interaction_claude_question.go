@@ -26,26 +26,23 @@ func (t *Tmux) bindClaudeQuestion(target string, q *parsedQuestion) error {
 	if tail == "" {
 		return nil
 	}
-	type question struct {
-		Header   string `json:"header"`
-		Question string `json:"question"`
-		Options  []struct {
-			Label string `json:"label"`
-		} `json:"options"`
-		MultiSelect bool `json:"multiSelect"`
-	}
+	type question = claudeQuestion
 	type call struct {
 		ID        string
 		Questions []question
 	}
 	var pending []call
+	completed := map[string]bool{}
+	latestSession, latestPrompt := "", ""
 	for _, line := range strings.Split(tail, "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
 		var row struct {
-			Type    string `json:"type"`
-			Message struct {
+			Type      string `json:"type"`
+			SessionID string `json:"sessionId"`
+			PromptID  string `json:"promptId"`
+			Message   struct {
 				Content json.RawMessage `json:"content"`
 			} `json:"message"`
 		}
@@ -53,6 +50,10 @@ func (t *Tmux) bindClaudeQuestion(target string, q *parsedQuestion) error {
 			return fmt.Errorf("%w: native Claude question record is incomplete", runtime.ErrRuntimeUnavailable)
 		}
 		content := strings.TrimSpace(string(row.Message.Content))
+		if row.Type == "user" && !strings.HasPrefix(content, "[") {
+			pending = nil // A new native prompt retires unfinished prior-turn invocations.
+			latestSession, latestPrompt = row.SessionID, row.PromptID
+		}
 		if !strings.HasPrefix(content, "[") {
 			continue
 		} // Plain user text cannot name a tool interaction.
@@ -69,11 +70,14 @@ func (t *Tmux) bindClaudeQuestion(target string, q *parsedQuestion) error {
 			return fmt.Errorf("%w: native Claude question content is incomplete", runtime.ErrRuntimeUnavailable)
 		}
 
+		toolResult := false
 		for _, item := range items {
 			if row.Type == "assistant" && item.Type == "tool_use" && item.Name == "AskUserQuestion" && item.ID != "" {
 				pending = append(pending, call{item.ID, item.Input.Questions})
 			}
 			if row.Type == "user" && item.Type == "tool_result" && item.ToolUseID != "" {
+				toolResult = true
+				completed[item.ToolUseID] = true
 				keep := pending[:0]
 				for _, c := range pending {
 					if c.ID != item.ToolUseID {
@@ -82,6 +86,34 @@ func (t *Tmux) bindClaudeQuestion(target string, q *parsedQuestion) error {
 				}
 				pending = keep
 			}
+		}
+		if row.Type == "user" && !toolResult {
+			pending = nil
+		}
+		if row.Type == "user" && (!toolResult || row.PromptID != "") {
+			latestSession, latestPrompt = row.SessionID, row.PromptID
+		}
+	}
+	if latestSession != "" && latestPrompt != "" {
+		read := t.claudeQuestionProjections
+		if read == nil {
+			read = t.readClaudeQuestionProjections
+		}
+		projections, err := read(target)
+		if err != nil {
+			return err
+		}
+		seen := map[string]bool{}
+		for _, c := range pending {
+			seen[c.ID] = true
+		}
+		for _, projection := range projections {
+			if projection.Version != 1 || projection.SessionID != latestSession || projection.PromptID != latestPrompt ||
+				projection.ToolUseID == "" || completed[projection.ToolUseID] || seen[projection.ToolUseID] {
+				continue
+			}
+			pending = append(pending, call{projection.ToolUseID, projection.Questions})
+			seen[projection.ToolUseID] = true
 		}
 	}
 	match := ""
@@ -97,7 +129,7 @@ func (t *Tmux) bindClaudeQuestion(target string, q *parsedQuestion) error {
 			if match != "" {
 				return fmt.Errorf("%w: native Claude question is ambiguous", runtime.ErrRuntimeUnavailable)
 			}
-			match = fmt.Sprintf("tmux-question-%s-%d", c.ID, index)
+			match = fmt.Sprintf("tmux-question-%s-%s-%s-%d", latestSession, latestPrompt, c.ID, index)
 			q.Question = native.Question
 		}
 	}
