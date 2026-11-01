@@ -327,6 +327,10 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 		if err != nil {
 			return State{}, err
 		}
+		// Under the program-status shadow switch, the phase this view
+		// settles on is recorded beside the record (observation); the
+		// phase returned is this view's alone.
+		defer func() { h.manager.RecordObservationShadow(info, observationVerdict(state.Phase)) }()
 		if pending != nil {
 			state.Phase = PhaseBlocked
 			state.Pending = pending
@@ -907,5 +911,21 @@ func submitIntent(intent DeliveryIntent) sessionpkg.SubmitIntent {
 		return sessionpkg.SubmitIntentInterruptNow
 	default:
 		return sessionpkg.SubmitIntentDefault
+	}
+}
+
+// observationVerdict is the shadow observation token for a phase this view
+// settled on for a live session: Busy is busy, Blocked pending, and Ready
+// idle; any other phase reads indeterminate.
+func observationVerdict(phase Phase) runtime.ProgramVerdict {
+	switch phase {
+	case PhaseBusy:
+		return runtime.ProgramVerdictBusy
+	case PhaseBlocked:
+		return runtime.ProgramVerdictPending
+	case PhaseReady:
+		return runtime.ProgramVerdictIdle
+	default:
+		return runtime.ProgramVerdictIndeterminate
 	}
 }

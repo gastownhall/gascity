@@ -281,20 +281,31 @@ func TestRelayBinaryEndsAsItsProgramEnded(t *testing.T) {
 	}
 }
 
-// Signals sent to the relay reach the program; the relay outlives them to
-// report the program's end.
+// Signals sent to the relay reach the program, which says so and then ends
+// by the signal; the relay outlives them to report the program's end. A
+// relay that died of the signal itself, never forwarding it, would end the
+// same way, but its program would not have spoken.
 func TestRelayBinaryForwardsSignalsToProgram(t *testing.T) {
-	emit := emitter(t)
-	for _, sig := range []syscall.Signal{syscall.SIGTERM, syscall.SIGHUP, syscall.SIGINT} {
-		t.Run(sig.String(), func(t *testing.T) {
-			r := runRelayOnPane(t, emitterArgv(emit, "raw 5245414459", "hang")...) // READY
+	for _, tc := range []struct {
+		sig  syscall.Signal
+		name string // the signal's name to trap and kill(1)
+	}{{syscall.SIGTERM, "TERM"}, {syscall.SIGHUP, "HUP"}, {syscall.SIGINT, "INT"}} {
+		t.Run(tc.sig.String(), func(t *testing.T) {
+			got := "got-" + tc.name
+			// The signal, sent to the program's group, ends the sleep; the
+			// trap then speaks and execs kill(1), whose exec reset the trap,
+			// to end the program by the same signal.
+			script := "trap 'echo " + got + "; exec /bin/kill -s " + tc.name + " $$' " + tc.name + "; echo READY; while :; do sleep 1; done"
+			r := runRelayOnPane(t, "/bin/sh", "-c", script)
 			r.waitFor("READY")
-			if err := r.cmd.Process.Signal(sig); err != nil {
+			if err := r.cmd.Process.Signal(tc.sig); err != nil {
 				t.Fatal(err)
 			}
-			// The emitter ends by the signal it received.
-			if ws := r.wait(); !ws.Signaled() || ws.Signal() != sig {
-				t.Fatalf("relay ended %#x, want the program's death by %v", ws, sig)
+			if ws := r.wait(); !ws.Signaled() || ws.Signal() != tc.sig {
+				t.Fatalf("relay ended %#x, want the program's death by %v", ws, tc.sig)
+			}
+			if out := r.drained(); !bytes.Contains(out, []byte(got)) {
+				t.Fatalf("pane got %q, want the program's %q: the signal never reached it", out, got)
 			}
 		})
 	}

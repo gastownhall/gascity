@@ -440,7 +440,10 @@ func (p poolExecutionBackstop) escalatesNext(s beads.Bead, attempts int, last ti
 // storms. The snapshot is taken only once activity is stale, so a session still
 // producing output costs no pane capture.
 func (p poolExecutionBackstop) quietHold(s beads.Bead, sessName string) string {
-	return sessionQuietHold(p.sp, s, sessName, p.now, snapshotHoldFor)
+	hold := sessionQuietHold(p.sp, s, sessName, p.now, snapshotHoldFor)
+	shadowHold(p.sp, sessName, s.ID, sessionpkg.ProviderFamilyFromMetadata(s.Metadata, ""),
+		runtime.ProgramPointExecutionBackstop, hold != "", p.now, runtime.ProgramHoldVerdict)
+	return hold
 }
 
 // sessionQuietHold is quietHold for any backstop: the hold that keeps sp's
