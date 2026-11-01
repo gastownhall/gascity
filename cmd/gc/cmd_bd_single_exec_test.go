@@ -391,3 +391,201 @@ func TestGcBdPassthroughLoadsCityConfigOnce(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveBdScopeTargetRoutesReleaseIfCurrentByItsBead pins the store gc's
+// own `release-if-current <issue-id> <assignee>` runs in: the issue's, named by
+// the issue id's prefix, with no existence probe. The second argument is the
+// expected assignee, an identity rather than a subject. On a city whose rigs
+// keep their own stores it is often a session bead id with the city's prefix,
+// and that session bead exists in the city store, so a probe that took it as a
+// candidate sent the release of a rig bead to the city store.
+func TestResolveBdScopeTargetRoutesReleaseIfCurrentByItsBead(t *testing.T) {
+	origProbe := bdBeadExists
+	t.Cleanup(func() { bdBeadExists = origProbe })
+	probes := 0
+	bdBeadExists = func(string, *config.City, execStoreTarget, string) bool {
+		probes++
+		return true
+	}
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo", Prefix: "demo"},
+		Rigs:      []config.Rig{{Name: "frontend", Path: "frontend", Prefix: "fe"}},
+	}
+	for _, tc := range []struct {
+		name     string
+		cwd      string
+		gcRig    string
+		args     []string
+		wantKind string
+	}{
+		{"rig bead held by a city session, city cwd", cityDir, "", []string{"release-if-current", "fe-abc", "demo-wisp-8ft"}, "rig"},
+		{"rig bead held by a city session, rig cwd", rigDir, "", []string{"release-if-current", "fe-abc", "demo-wisp-8ft"}, "rig"},
+		{"rig bead held by a city session, GC_RIG", cityDir, "frontend", []string{"release-if-current", "fe-abc", "demo-session-0123456789abcdef"}, "rig"},
+		{"city bead held by a rig-prefixed id, rig cwd", rigDir, "", []string{"release-if-current", "demo-abc", "fe-wisp-xyz"}, "city"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setCwd(t, tc.cwd)
+			t.Setenv("GC_RIG", tc.gcRig)
+			probes = 0
+			got, err := resolveBdScopeTarget(cfg, cityDir, "", tc.args, false, io.Discard)
+			if err != nil {
+				t.Fatalf("resolveBdScopeTarget(%v) error = %v", tc.args, err)
+			}
+			if got.ScopeKind != tc.wantKind || probes != 0 {
+				t.Fatalf("resolveBdScopeTarget(%v) = %+v after %d probes, want kind %q and no probe (the issue id's prefix names its store)", tc.args, got, probes, tc.wantKind)
+			}
+		})
+	}
+}
+
+// TestResolveBdScopeTargetNeverProbesReleaseIfCurrentsAssignee pins the probe
+// chain's half of the same rule. Where the prefix alone cannot answer (here the
+// city and a rig carry the same prefix), the existence probes ask about the
+// issue id only. The holder's session bead exists in the city store, so a probe
+// of the assignee would answer "city" for a bead the rig holds.
+func TestResolveBdScopeTargetNeverProbesReleaseIfCurrentsAssignee(t *testing.T) {
+	origProbe := bdBeadExists
+	t.Cleanup(func() { bdBeadExists = origProbe })
+	var probed []string
+	bdBeadExists = func(_ string, _ *config.City, target execStoreTarget, id string) bool {
+		probed = append(probed, target.ScopeKind+":"+id)
+		return (target.ScopeKind == "city" && id == "demo-wisp-8ft") || (target.ScopeKind == "rig" && id == "demo-abc")
+	}
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, "alpha"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setCwd(t, cityDir)
+	t.Setenv("GC_RIG", "")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo", Prefix: "demo"},
+		Rigs:      []config.Rig{{Name: "alpha", Path: "alpha", Prefix: "demo"}},
+	}
+	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"release-if-current", "demo-abc", "demo-wisp-8ft"}, false, io.Discard)
+	if err != nil {
+		t.Fatalf("resolveBdScopeTarget() error = %v", err)
+	}
+	if got.ScopeKind != "rig" || got.RigName != "alpha" {
+		t.Fatalf("scope = %+v after probes %q, want rig alpha, the store that holds demo-abc", got, probed)
+	}
+	for _, p := range probed {
+		if strings.HasSuffix(p, ":demo-wisp-8ft") {
+			t.Fatalf("probes = %q: the assignee was probed as a bead id", probed)
+		}
+	}
+}
+
+// releaseRouteFakeBd is a bd that answers per store, told apart by the
+// BEADS_DIR gc pins for each scope: the rig store holds the work bead fe-abc,
+// in progress and held by demo-wisp-8ft; the city store holds that holder's
+// (closed) session bead and no fe-abc. Every invocation is logged as
+// "<store>|<argv>".
+const releaseRouteFakeBd = `#!/bin/sh
+case "$1" in version) echo 'bd version 1.3.2 (test)'; exit 0 ;; esac
+store=city
+case "${BEADS_DIR}" in */frontend/.beads) store=rig ;; esac
+printf '%s|%s\n' "$store" "$*" >> "${BD_CALL_LOG}"
+case " $* " in
+  *" fe-abc "*)
+    if [ "$store" = rig ]; then
+      case "$1" in
+        show) echo '[{"id":"fe-abc","title":"t","status":"in_progress","assignee":"demo-wisp-8ft","issue_type":"task"}]'; exit 0 ;;
+        update)
+          case " $* " in *" --if-assignee demo-wisp-8ft "*) exit 0 ;; esac
+          echo 'precondition failed: assignee mismatch' >&2; exit 13 ;;
+      esac
+    fi
+    case "$1" in
+      show) echo 'Issue fe-abc not found' >&2; exit 1 ;;
+      update) echo 'Error resolving fe-abc: no issue found matching "fe-abc"' >&2; exit 1 ;;
+    esac ;;
+  *" demo-wisp-8ft "*)
+    if [ "$store" = city ] && [ "$1" = show ]; then
+      echo '[{"id":"demo-wisp-8ft","title":"s","status":"closed","issue_type":"session"}]'; exit 0
+    fi
+    echo 'Issue demo-wisp-8ft not found' >&2; exit 1 ;;
+esac
+case "$1" in query|list) echo '[]' ;; esac
+exit 0
+`
+
+// newReleaseRouteTestCity is newSingleExecTestCity with releaseRouteFakeBd
+// first on PATH. It returns the call log path.
+func newReleaseRouteTestCity(t *testing.T) string {
+	t.Helper()
+	log := newSingleExecTestCity(t)
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(releaseRouteFakeBd), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return log
+}
+
+// TestGcBdReleaseIfCurrentReleasesARigBeadHeldByACitySession is the orphan
+// sweep's release end to end: an unscoped `gc bd release-if-current` of a rig
+// bead whose dead holder is a session bead in the city store. It must release
+// the claim in the rig store; it used to run against the city store, which
+// holds no such bead, and print "skipped" with exit 0, which the sweep reads as
+// "someone else holds it" and keeps the dead claim forever.
+func TestGcBdReleaseIfCurrentReleasesARigBeadHeldByACitySession(t *testing.T) {
+	log := newReleaseRouteTestCity(t)
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"release-if-current", "fe-abc", "demo-wisp-8ft"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd(release-if-current) = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "released" {
+		t.Fatalf("stdout = %q, want released; bd calls = %q", stdout.String(), singleExecBdCalls(t, log))
+	}
+	var released bool
+	for _, call := range singleExecBdCalls(t, log) {
+		if strings.HasPrefix(call, "city|update fe-abc") {
+			t.Fatalf("the release ran against the city store: %q", call)
+		}
+		if strings.HasPrefix(call, "rig|update fe-abc --if-assignee demo-wisp-8ft") {
+			released = true
+		}
+	}
+	if !released {
+		t.Fatalf("no conditional release reached the rig store; bd calls = %q", singleExecBdCalls(t, log))
+	}
+}
+
+// TestGcBdReleaseIfCurrentRefusesABeadTheStoreDoesNotHold pins the verdict's
+// honesty: "skipped" means the store holds the bead and someone else does now.
+// A release against a store that holds no such bead is an error, as `gc bd
+// show` and `gc bd update` of that id are, never "skipped" with exit 0.
+func TestGcBdReleaseIfCurrentRefusesABeadTheStoreDoesNotHold(t *testing.T) {
+	newReleaseRouteTestCity(t)
+	cityDir := os.Getenv("GC_CITY_PATH")
+	var stdout, stderr bytes.Buffer
+	got := doBd([]string{"--city", cityDir, "release-if-current", "fe-abc", "demo-wisp-8ft"}, &stdout, &stderr)
+	if got != 1 {
+		t.Fatalf("doBd(--city release-if-current <rig bead>) = %d, want 1; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+	}
+	if out := strings.TrimSpace(stdout.String()); out != "" {
+		t.Fatalf("stdout = %q, want nothing: no verdict for a bead the store does not hold", out)
+	}
+	if !strings.Contains(stderr.String(), `"fe-abc"`) || !strings.Contains(stderr.String(), "the city store") {
+		t.Fatalf("stderr = %q, want it to name the bead and the store that does not hold it", stderr.String())
+	}
+}
+
+// TestGcBdReleaseIfCurrentSkipsAClaimSomeoneElseHolds is the other half: a bead
+// the store holds under a different assignee is the CAS miss, "skipped" with
+// exit 0, as before.
+func TestGcBdReleaseIfCurrentSkipsAClaimSomeoneElseHolds(t *testing.T) {
+	newReleaseRouteTestCity(t)
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"release-if-current", "fe-abc", "worker-9"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd(release-if-current) = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "skipped" {
+		t.Fatalf("stdout = %q, want skipped", stdout.String())
+	}
+}
