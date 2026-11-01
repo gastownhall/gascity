@@ -620,8 +620,32 @@ supervisor's environment, where they take precedence over the per-workspace
 Apply the change by regenerating the service file:
 
 ```bash
-gc supervisor install  # rewrites the service file; restarts on change
+gc supervisor install    # regenerate the service file and re-exec with it
 ```
+
+That is the whole apply step. When the rendered service file differs, install
+rewrites it, unloads the service and loads it again, which re-execs the
+supervisor under the service manager with the merged environment. `gc start`
+reaches the same path.
+
+<Warning>
+Do not reach for `gc supervisor stop` followed by `gc supervisor start`.
+`gc supervisor start` does not regenerate the service file and does not merge
+the secrets file: it either starts the already-installed service with its old,
+un-regenerated environment (macOS) or launches a detached supervisor carrying
+the calling shell's environment, and it refuses outright when one is already
+running. Using it here is how a rotation ends up serving the old value
+or a blank one.
+</Warning>
+
+One case to watch on macOS: when the rendered plist is byte-identical to the
+installed one and a supervisor is already alive, install reports
+`Installed launchd service` and exits 0 **without** re-execing. Nothing
+changed, so nothing was applied.
+
+The other way an install declines is not silent: a service file naming a
+different `gc` binary makes install exit 1 and tell you to pass `--force`, so
+it cannot be mistaken for a change that took.
 
 ## A Custom Environment Variable Doesn't Reach Agent Sessions
 
@@ -669,6 +693,54 @@ MY_CUSTOM_VAR = "/path/to/thing"
 # or, to read it from whatever the supervisor's own environment holds:
 MY_CUSTOM_VAR = "$MY_CUSTOM_VAR"
 ```
+
+## Rotating a Provider API Key
+
+Symptom: an upstream key was rotated and you need the fleet on the new one,
+but it is not obvious which variable to change — a provider's credential is
+usually reached through two indirections.
+
+Use `gc provider credentials <provider>` to resolve it. The command reads the
+provider's `upstream_env` binding to find which env var carries the credential
+(`api_key` and `auth_token`; never `base_url`), resolves that name the way
+session start does, and follows the value's `$VAR` reference to the variable
+that actually holds the secret:
+
+```bash
+gc provider credentials zai
+```
+
+It is read-only, and it reports what would stop a change from taking effect:
+
+- a source variable the supervisor does not forward into its service
+  environment, which is dropped when the service file is regenerated — the
+  fleet then starts with a **blank** credential, not the old one;
+- a later config layer that overrides the credential for particular agents.
+  Session start merges `[workspace.env]` < provider < agent `env` and injects
+  the selected `[upstreams.<name>]` serving env last, so an agent that selects
+  an upstream reads a different variable than the provider names;
+- a malformed line in the secrets file, which the supervisor skips while
+  loading the rest of the file, so a credential written on it never arrives.
+
+Then change the value at its source and apply it with the procedure in
+[Provider Credentials Dropped When the Supervisor Starts](#provider-credentials-dropped-when-the-supervisor-starts),
+followed by `gc restart` to cycle the agents.
+
+<Warning>
+Changing a credential does not apply itself. The supervisor resolves session
+environment from its own environment, fixed when it exec'd, so nothing changes
+until it re-execs. After that, a credential declared in provider env moves the
+agents' fingerprint and they relaunch; one injected by a selected [upstreams]
+entry does not, so cycle those agents yourself.
+Until the supervisor re-execs, every running session keeps the old credential.
+`gc restart` cycles agents only — `gc supervisor install` is what re-execs the
+supervisor.
+</Warning>
+
+One hazard the command cannot check for you: a value exported in the shell
+that regenerates the service file wins over the secrets file, which fills only
+names that shell left unset. If that shell exports the variable, the file entry
+is ignored and nothing changes.
 
 ## Supervisor Log Written Twice (journald + supervisor.log)
 

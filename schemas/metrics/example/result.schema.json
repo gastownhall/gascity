@@ -224,7 +224,8 @@
               "agent-is-foreign",
               "storage-vouch-bd",
               "storage-remote-stage-mark",
-              "storage-remote-stage-unmark"
+              "storage-remote-stage-unmark",
+              "provider-credentials"
             ]
           },
           "event_id": {
