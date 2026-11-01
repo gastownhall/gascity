@@ -1758,10 +1758,13 @@ type SessionConfig struct {
 	// replaces it.
 	ClaimHolderStallTimeout string `toml:"claim_holder_stall_timeout,omitempty"`
 	// Socket specifies the tmux socket name for per-city isolation.
-	// When set, all tmux commands use "tmux -L <socket>" to connect to
-	// a dedicated server. When empty, defaults to the city name
-	// (workspace.name) — giving every city its own tmux server
-	// automatically. Set explicitly to override.
+	// When set, tmux commands connect to a dedicated server: "tmux -L
+	// <socket>" normally, or "tmux -S <path>" with the path pinned from
+	// $TMUX when gc runs in a pane of that same server, so a pane whose
+	// TMUX_TMPDIR differs from the controller's still reaches the server
+	// hosting it. When empty, defaults to the city name (workspace.name) —
+	// giving every city its own tmux server automatically. Set explicitly
+	// to override.
 	Socket string `toml:"socket,omitempty"`
 	// RemoteMatch is a substring pattern for the hybrid provider to route
 	// sessions to the remote (K8s) backend. Sessions whose names contain

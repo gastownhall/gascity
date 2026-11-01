@@ -801,10 +801,11 @@ func recordDrainAckAssignedWorkEvent(
 //     drained correctly. The open/claimable arm
 //     (firstOpenClaimableAssignedWorkBeadForReachableStore) walks the seat's
 //     OpenAssignedTo rows (status=open) and suppresses a row ONLY when it is
-//     provably non-claimable: deferred (fresh bead-local defer_until), or blocked
-//     confirmed against LIVE deps — never on bd's denormalized is_blocked
-//     projection, which can read stale-true and would otherwise silence a strand
-//     whose deps are actually met, and which production reads do not carry at all.
+//     provably non-claimable: deferred (a fresh bead-local defer_until, or bd's
+//     deferred status), or blocked confirmed against LIVE deps — never on bd's
+//     denormalized is_blocked projection, which can read stale-true and would
+//     otherwise silence a strand whose deps are actually met, and which
+//     production reads do not carry at all.
 //     It does NOT borrow the beads.Ready projection, whose
 //     type/label exclusions (step, molecule, gate, gc:order-tracking, …) encode
 //     "not pull-claimable", not "not stranded" — so an OPEN step or other
@@ -1565,6 +1566,13 @@ func pendingCreateLeaseActive(i sessionpkg.Info, inFlight, neverStartedExpired, 
 // window still handles corrupt/unparseable last_woke_at metadata and generic
 // creating-state cleanup, while never-started creates need enough time to sit
 // behind a busy pool start queue.
+//
+// A never-started create waiting only on a start gate (a site that declines a
+// ready candidate independent of its own state, refuses it nothing and writes
+// no bead; see startDeferralMemo) is kept past this lease by startDeferralMemo, up
+// to startDeferralHoldCeiling. The memo is in-memory and read by the
+// reconciler and the reaper; a reader that sees only the bead (gc session wake)
+// still judges the row by this lease alone, and a restart forgets the memo.
 const pendingCreateNeverStartedTimeout = 10 * time.Minute
 
 // wakeUndesiredGrace is how long a live session woken recently is spared the
@@ -1682,10 +1690,7 @@ func pendingCreateNeverStartedLeaseExpiredAt(i sessionpkg.Info, now time.Time) b
 	if strings.TrimSpace(i.LastWokeAt) != "" {
 		return false
 	}
-	anchor := i.CreatedAt
-	if started, ok := parseRFC3339Metadata(i.PendingCreateStartedAt); ok {
-		anchor = started
-	}
+	anchor := pendingCreateLeaseAnchor(i)
 	if anchor.IsZero() {
 		return true
 	}
@@ -2026,6 +2031,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 	}
 	capacityGuard := reconcileOpts.capacityGuard
+	deferralMemo := reconcileOpts.deferralMemo
 	effectiveStartOptions := startOptions
 	if !storeQueryPartial && reconcileOpts.workDirResolver == nil && len(assignedWorkBeads) > 0 {
 		effectiveStartOptions = append(append([]startExecutionOption(nil), startOptions...), withTaskWorkDirResolver(newAssignedTaskWorkDirResolver(cityPath, assignedWorkBeads)))
@@ -2105,6 +2111,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	for i := range orderedRows {
 		orderedInfos[i] = orderedRows[i].Info
 	}
+	// The start executor's memo record is this snapshot's never-started creates:
+	// a create the snapshot lacks was never offered a start (see
+	// startDeferralMemo).
+	effectiveStartOptions = append(append([]startExecutionOption(nil), effectiveStartOptions...), deferralMemo.startOptions(storeQueryPartial, orderedInfos)...)
 	// tick owns the coherent typed snapshot for this tick and is the single front
 	// door for folding a mutation onto it (see reconcileTick). Every forward-pass
 	// write below routes its infoByID fold through tick.apply / tick.applyResult /
@@ -2122,6 +2132,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	tick := newReconcileTick(orderedInfos)
 	healAlive := &healAliveConfirmer{sp: sp}
 	infoByID := tick.infoByID
+	// The tick's park verdicts (ga-ylpbsy.16, withParkedSeats): pool seats
+	// asleep on their own stop holding only blocked pre-assigned work, which
+	// the pool-free branch holds instead of stranding.
+	parked := reconcileOpts.parkedSeats
 	orderedIDs := tick.orderedIDs
 
 	phaseStart = time.Now()
@@ -3123,7 +3137,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// infoPostZombie stays byte-identical throughout. Guarded by
 		// TestReconcileSessionBeads_ZombieTerminalErrorReflectedOnSnapshot.
 		infoPostZombie := infoByID[id]
-		if alive && shouldRollbackPendingCreateInfo(infoPostZombie) {
+		// A row its start committed active is no pending create, whatever its
+		// claim says: the rollback's fence refuses it (rollbackable), so a
+		// rollback decided here never lands, and deferring or holding one
+		// would skip the row's drain-ack, idle and drift handling on every
+		// tick. Its claim is the residue of a commit that stopped part way,
+		// which the pass clears below: recoverRunningPendingCreate does, or a
+		// drain-ack's stop-pending mark. Until then heal leaves the row
+		// active, so a clear that waits for the runtime lease keeps the row
+		// out of this rollback on the next tick too.
+		if alive && shouldRollbackPendingCreateInfo(infoPostZombie) && rollbackable(infoPostZombie) {
 			identity := readPendingCreateIdentity(infoPostZombie, name, sp)
 			switch identity.attribution() {
 			case pendingCreateRuntimeForeign:
@@ -3235,6 +3258,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							"state":    st.State.String(),
 						})
 					}
+				} else {
+					expired, capacityHeld = deferralMemo.holdPendingCreate(infoPostZombie, expired, capacityHeld, clk, stderr, trace, tp.TemplateName, name)
 				}
 			}
 			if expired {
@@ -4316,6 +4341,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 		}
 
+		// The lifecycle trackers below key a session's settings by the runtime
+		// name they were registered under: for a configured named session that
+		// a requalification renamed in place, its named session's runtime name,
+		// not the bare form's it keeps running under (lifecycleSessionNameInfo).
+		lifecycleName := lifecycleSessionNameInfo(infoByID[id], cfg, cityName, name)
+
 		// Preemptive max session age: restart sessions whose wall-clock age
 		// exceeds the agent's max_session_age threshold. Motivation: provider
 		// SDKs that cache credentials at session start (e.g., Claude Code via
@@ -4333,7 +4364,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		if maxAgeTr != nil && alive {
 			creationCompleteAt, hasAnchor := parseRFC3339Metadata(infoByID[id].CreationCompleteAt)
 			facts := sessionpkg.TimerFacts{
-				Triggered: hasAnchor && maxAgeTr.shouldRestart(name, tp.TemplateName, creationCompleteAt, clk.Now()),
+				Triggered: hasAnchor && maxAgeTr.shouldRestart(lifecycleName, tp.TemplateName, creationCompleteAt, clk.Now()),
 			}
 			if facts.Triggered {
 				facts.Blocker = maxSessionAgeBlockerInfo(infoByID[id], clk.Now())
@@ -4433,7 +4464,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 		if it != nil && alive {
 			facts := sessionpkg.TimerFacts{
-				Triggered: it.checkIdle(name, tp.TemplateName, infoByID[id].Provider, infoByID[id].Transport, sp, clk.Now()),
+				Triggered: it.checkIdleUnder(name, lifecycleName, tp.TemplateName, infoByID[id].Provider, infoByID[id].Transport, sp, clk.Now()),
 			}
 			if facts.Triggered {
 				facts.Blocker = lifecycleTimerBlockerInfo(infoByID[id], clk.Now())
@@ -4492,11 +4523,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if assignedWorkDeferTr != nil {
 				if dec.Action == sessionpkg.TimerActionDefer && dec.TraceReason == string(TraceReasonAssignedWork) {
 					anchorBeadID := strings.TrimSpace(infoByID[id].CurrentlyProcessingBeadID)
-					if assignedWorkDeferTr.recordDefer(name, tp.TemplateName, anchorBeadID) {
+					if assignedWorkDeferTr.recordDefer(lifecycleName, tp.TemplateName, anchorBeadID) {
 						dec = sessionpkg.DecideAssignedWorkExhausted()
 					}
 				} else {
-					assignedWorkDeferTr.reset(name)
+					assignedWorkDeferTr.reset(lifecycleName)
 				}
 			}
 			switch dec.Action {
@@ -5179,7 +5210,22 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				hasAssignedWork = true
 			}
 		}
+		// A seat parked on pre-assigned blocked work (ga-ylpbsy.16) is not
+		// stranded: no diagnostic, no repair. The assigned-work wake restarts
+		// it once its work is ready; past its bound it strands as below. The
+		// park ends any stranding episode an earlier tick began (a full
+		// pool's fallback): its marker clears, as an alive tick's does, so a
+		// later fallback ages a fresh one.
+		parkedSeat, parkAccepted := false, false
 		if poolFreeable && hasAssignedWork && !killedSeat {
+			parkedSeat, parkAccepted = holdsParkedSeat(sw, infoByID[target.info.ID], parked[target.info.ID], clk.Now().UTC(), stderr)
+		}
+		if parkAccepted {
+			if fold := clearStrandedEventMarker(store, infoByID[target.info.ID], snapshot, stderr); fold != nil {
+				tick.apply(target.info.ID, fold)
+			}
+		}
+		if poolFreeable && hasAssignedWork && !killedSeat && !parkedSeat {
 			// The runtime is gone but the session bead still owns
 			// in_progress work — almost always a CLI process that
 			// exited or hung without going through the clean drain
@@ -5199,8 +5245,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// reclaim it, then close the session bead to free the slot. The
 			// storeQueryPartial gate ensures a transient store miss can never clear
 			// a live claim. The confirmation window tracks CONTINUOUS non-liveness:
-			// clearStrandedEventMarker (invoked on every alive tick, above) drops
-			// the marker the instant the session is seen alive again, so a worker
+			// clearStrandedEventMarker (invoked on every alive tick and every
+			// accepted park, above) drops the marker the instant the session is
+			// seen alive again or parks, so a worker
 			// that stranded, was respawned on this same bead, and recovered must
 			// re-age a FRESH marker here — a recovered-then-drained worker cannot
 			// fire the repair on the first episode's stale timestamp. Reuses
@@ -5710,9 +5757,9 @@ func firstOpenClaimableAssignedWorkBeadForReachableStore(sw *SeatWork, info sess
 // also answers with) names WHY a row is not claimable, and each cause gets the
 // treatment its evidence deserves:
 //
-//   - deferred — defer_until and bd's indefinite deferral are fresh bead-local
-//     fields, never stale, so this is PROOF: no worker could have claimed the row
-//     and draining past it was correct pull.
+//   - deferred — a future defer_until and bd's deferred status (dated or not)
+//     are fresh bead-local fields, never stale, so this is PROOF: no worker
+//     could have claimed the row and draining past it was correct pull.
 //   - held — a canonical dispatch hold label (beadmeta.HasDispatchHold) is a
 //     fresh bead-local field too, and the hook refuses to serve a held row on
 //     every path, so this is PROOF as well: draining past it was correct pull.
@@ -6020,7 +6067,8 @@ func emitSessionStrandedDiagnostic(
 }
 
 // clearStrandedEventMarker drops the stranded_event_emitted_at marker whenever
-// the session is observed ALIVE again. This is the clear-on-recovery half of the
+// the session is observed ALIVE again, or parks on pre-assigned blocked work
+// (ga-ylpbsy.16). This is the clear-on-recovery half of the
 // confirmation-window contract: strandedEventEmittedKey tracks CONTINUOUS
 // non-liveness, NOT a one-shot "ever stranded this generation" flag.
 //
@@ -6038,7 +6086,11 @@ func emitSessionStrandedDiagnostic(
 // FRESH marker: emitSessionStrandedDiagnostic re-emits per episode (restoring
 // per-episode observability) and the repair must re-confirm non-liveness across
 // a new window before it acts. alive ⟹ runtime is up ⟹ not stranded, so the
-// clear is always safe here.
+// clear is always safe here. A parked seat is not stranded either: its runtime
+// stopped by its own choice and its work cannot run yet, so a seat a full
+// pool's fallback stranded, then parked again, must not carry that episode's
+// aged marker into the next fallback, where the repair would release its pin
+// at once.
 //
 // Returns the metadata patch it applied so the reconciler folds it onto the
 // infoByID snapshot (write-returns-Info), or nil when there was nothing to clear
@@ -7161,8 +7213,10 @@ func launchIdleProbes(
 			continue
 		}
 		go func(beadID, sessionName string, probe *idleProbeState) {
-			err := wp.WaitForIdle(ctx, sessionName, idleSleepProbeTimeoutFor(sp, sessionName))
-			dt.finishIdleProbe(beadID, probe, err == nil, clk.Now().UTC())
+			idle := runtime.ShadowIdleProof(ctx, sp, sessionName, func(ctx context.Context) bool {
+				return wp.WaitForIdle(ctx, sessionName, idleSleepProbeTimeoutFor(sp, sessionName)) == nil
+			})
+			dt.finishIdleProbe(beadID, probe, idle, clk.Now().UTC())
 		}(target.info.ID, name, probe)
 	}
 }

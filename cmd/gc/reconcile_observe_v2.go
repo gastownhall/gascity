@@ -41,6 +41,10 @@ const (
 	alertEffectDeadline = "effect-deadline"        // an effect settled at its deadline
 	alertUnknownState   = "unknown-state"          // a state legacy does not know was written (I-legacy broke)
 	alertHealRefused    = "heal-refused"           // an A6 heal refused until its backoff reached the cap
+	// alertWorktreeRefused: the allocation refuses a pool work item whose
+	// worktree evidence it found unusable (C6.5(a)); no create effect ever
+	// sees the request, so this alert is all that reports the starved item.
+	alertWorktreeRefused = "worktree-refused"
 )
 
 // healRefusalsBeforeAlert is how many backed-off refusals in a row an A6 heal
@@ -54,6 +58,7 @@ type passObserver struct {
 	gateAlerted     bool
 	duplicates      map[string]bool   // the last pass's named-duplicate alerts
 	unknown         map[rowKey]string // rows alerted for an unknown state, with it
+	worktreeRefused map[string]string // work items alerted for unusable worktree evidence, with the alert
 	lastKey         string
 	lastEmit        time.Time
 	identity        identityObserver // arm A3's alerts (reconcile_observe_identity.go)
@@ -186,6 +191,28 @@ func (p *planner) observeWorld(w *World, duplicates []string, c *passCounts) {
 		}
 	}
 	p.obs.duplicates = dups
+}
+
+// observeWorktreeRefusals alerts once on each work item the allocation
+// refused for unusable worktree evidence (allocTraceRecord.WorkBeadID), for
+// as long as the refusal lasts: a changed pool or cause alerts again, and an
+// item the pass no longer refuses is forgotten, so a relapse alerts again.
+func (p *planner) observeWorktreeRefusals(trace []allocTraceRecord) {
+	refused := make(map[string]string)
+	for _, r := range trace {
+		if r.WorkBeadID == "" {
+			continue
+		}
+		if _, seen := refused[r.WorkBeadID]; seen {
+			continue
+		}
+		msg := fmt.Sprintf("work bead %s gets no %q session while its worktree evidence is unusable: %s", r.WorkBeadID, r.Template, r.Detail)
+		refused[r.WorkBeadID] = msg
+		if p.obs.worktreeRefused[r.WorkBeadID] != msg {
+			p.alert(alertWorktreeRefused, r.WorkBeadID, msg)
+		}
+	}
+	p.obs.worktreeRefused = refused
 }
 
 // escalateStop is D6's stop-outstanding alert for row, whose signaled stop
