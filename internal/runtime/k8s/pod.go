@@ -18,6 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -675,17 +676,18 @@ func buildPodEnvWithSecretEnv(cfgEnv map[string]string, podWorkDir, managedServi
 	// GC_DOLT_MANAGED_LOCAL marks a controller-local target, which
 	// projectedPodDoltEnv rewrites to the in-cluster service.
 	skip := map[string]bool{
-		"GC_BEADS":                 true,
-		"GC_RIG_PROJECTION_MARKER": true,
-		"GC_SESSION":               true,
-		"GC_EVENTS":                true,
-		"GC_K8S_DOLT_HOST":         true,
-		"GC_K8S_DOLT_PORT":         true,
-		"GC_DOLT_HOST":             true,
-		"GC_DOLT_PORT":             true,
-		"GC_DOLT_MANAGED_LOCAL":    true,
-		"BEADS_DOLT_SERVER_HOST":   true,
-		"BEADS_DOLT_SERVER_PORT":   true,
+		"GC_BEADS":                   true,
+		"GC_RIG_PROJECTION_MARKER":   true,
+		config.K8sWorkerPodMarkerEnv: true,
+		"GC_SESSION":                 true,
+		"GC_EVENTS":                  true,
+		"GC_K8S_DOLT_HOST":           true,
+		"GC_K8S_DOLT_PORT":           true,
+		"GC_DOLT_HOST":               true,
+		"GC_DOLT_PORT":               true,
+		"GC_DOLT_MANAGED_LOCAL":      true,
+		"BEADS_DOLT_SERVER_HOST":     true,
+		"BEADS_DOLT_SERVER_PORT":     true,
 	}
 	for key := range cfgEnv {
 		if strings.HasPrefix(key, "GC_K8S_CITY_") {
@@ -762,6 +764,10 @@ func buildPodEnvWithSecretEnv(cfgEnv map[string]string, podWorkDir, managedServi
 		})
 	}
 
+	// This marker is generated only by the controller-owned Kubernetes
+	// provider. It distinguishes agent Pods from local managed sessions.
+	env = append(env, corev1.EnvVar{Name: config.K8sWorkerPodMarkerEnv, Value: "true"})
+
 	return env, nil
 }
 
@@ -775,6 +781,9 @@ func validateSecretProjection(secretEnv []runtime.K8sSecretEnv, secretMounts []r
 		}
 		if !secretProjectionEnvName.MatchString(projection.Name) {
 			return fmt.Errorf("k8s secret_env[%d].name %q is not a valid environment variable name", i, projection.Name)
+		}
+		if projection.Name == config.K8sWorkerPodMarkerEnv {
+			return fmt.Errorf("k8s secret_env[%d].name %q is reserved for the Kubernetes worker marker", i, projection.Name)
 		}
 		if _, exists := seenEnv[projection.Name]; exists {
 			return fmt.Errorf("k8s secret_env[%d].name %q is duplicated", i, projection.Name)
