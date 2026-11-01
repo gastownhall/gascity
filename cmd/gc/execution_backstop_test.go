@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/pkg/eventexport"
 )
 
@@ -813,10 +814,23 @@ func TestExecutionBackstopReEscalatesForANewIncarnation(t *testing.T) {
 		t.Fatalf("first tick of a new incarnation: drains %v, marker token %q count %q; want no drain and a fresh observation for incarnation-2",
 			f.drained, f.sessionMeta(t, executionClaimNudgeTokenKey), f.sessionMeta(t, executionClaimNudgeCountKey))
 	}
+	for _, key := range []string{executionClaimNudgeStalledKey, executionClaimNudgeStalledTokenKey} {
+		if got := f.sessionMeta(t, key); got != "" {
+			t.Fatalf("%s after the fresh window = %q, want the old incarnation's latch cleared", key, got)
+		}
+	}
+
+	// The new incarnation gets its own nudges, then escalates once.
 	for i := 0; i < idleClaimNudgeMaxAttempts; i++ {
 		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
 		f.idleFor(t, 10*time.Minute)
 		f.tick(t)
+	}
+	if got := f.nudgeCount(); got != 2*idleClaimNudgeMaxAttempts {
+		t.Fatalf("delivered nudges = %d, want %d per incarnation; stdout=%s", got, idleClaimNudgeMaxAttempts, f.stdout.String())
+	}
+	if len(f.drained) != 1 {
+		t.Fatalf("drain requests before the new incarnation spent its attempts = %v, want still 1", f.drained)
 	}
 	f.now = f.now.Add(idleClaimNudgeBackoff)
 	f.idleFor(t, 10*time.Minute)
@@ -841,6 +855,9 @@ func TestExecutionBackstopReEscalatesForANewIncarnation(t *testing.T) {
 	}
 	if len(f.drained) != 2 {
 		t.Fatalf("drain requests after further ticks on the new incarnation = %v, want still 2", f.drained)
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeStalledTokenKey); got != "incarnation-2" {
+		t.Fatalf("latch token after further ticks = %q, want the new incarnation's latch to hold", got)
 	}
 }
 
@@ -1593,5 +1610,110 @@ func TestExecutionBackstopNeverDrainsAStartedSeatWhoseStampDidNotPersist(t *test
 	}
 	if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, executionHoldExecuting+" ") {
 		t.Fatalf("hold breadcrumb = %q, want %s", got, executionHoldExecuting)
+	}
+}
+
+// TestExecutionBackstopTheLastNudgeGetsItsFullBackoff: the last nudge is
+// answered on the same terms as the earlier ones. The engine reports the cap
+// as soon as the last attempt is reserved, but a tick inside that attempt's
+// backoff does not drain the seat, so a seat that answers later in the
+// backoff, by running its claim hook, is held by the hook's work_started
+// entry instead of being drained before its answer lands.
+func TestExecutionBackstopTheLastNudgeGetsItsFullBackoff(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.setSessionMeta(t, map[string]string{"instance_token": "incarnation-1", "generation": "1"})
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	for i := 0; i < idleClaimNudgeMaxAttempts; i++ {
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+	}
+	nudgedAt := f.now
+
+	// Quiet, well inside the last nudge's backoff.
+	f.now = nudgedAt.Add(20 * time.Second)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests inside the last nudge's backoff = %v, want none; stdout=%s", f.drained, f.stdout.String())
+	}
+
+	// The seat answers at +30 s: its hook records the claim as started at the
+	// row's generation (work_started is CASOnly, so seed it by a CAS).
+	raw := fmt.Sprintf(`{"v":1,"claims":[{"store":"","bead":%q,"gen":1,"at":%q,"via":"adopt"}]}`,
+		f.work.ID, nudgedAt.Add(30*time.Second).UTC().Format(time.RFC3339))
+	if ok, err := f.store.(*beads.MemStore).CompareAndSetMetadataKey(f.session.ID, sessionpkg.WorkStartedKey, "", raw); err != nil || !ok {
+		t.Fatalf("seeding %s: ok=%v err=%v", sessionpkg.WorkStartedKey, ok, err)
+	}
+	f.now = nudgedAt.Add(idleClaimNudgeGrace)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimStartedKey); got != "incarnation-1|"+f.work.ID {
+		t.Fatalf("%s after a late answer to the last nudge = %q, want the seat stamped started", executionClaimStartedKey, got)
+	}
+	f.now = nudgedAt.Add(idleClaimNudgeBackoff)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 0 || f.stalledEvents() != 0 {
+		t.Fatalf("after the last nudge was answered: drains %v, step_stalled %d; want neither", f.drained, f.stalledEvents())
+	}
+	if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, executionHoldExecuting+" ") {
+		t.Fatalf("hold breadcrumb = %q, want %s", got, executionHoldExecuting)
+	}
+}
+
+// TestExecutionBackstopANewClaimStartsWithoutTheOldLatch: the escalation latch
+// belongs to the window it escalated. A seat whose escalated claim is released
+// and that takes another before any pass sees it with no claim starts a fresh
+// window for the new claim, which escalates on its own spent attempts. A latch
+// carried into that window would hold the new claim's escalation for the rest
+// of executionStalledLatchRetryAfter.
+func TestExecutionBackstopANewClaimStartsWithoutTheOldLatch(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.setInstanceToken(t, "incarnation-1")
+	driveToEscalation(t, f)
+
+	closed := "closed"
+	if err := f.store.Update(f.work.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatalf("closing the escalated claim: %v", err)
+	}
+	next, err := f.store.Create(beads.Bead{
+		Title:    "next claimed step",
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "root-2"},
+	})
+	if err != nil {
+		t.Fatalf("seeding the next work bead: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := f.store.Update(next.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &f.sessName}); err != nil {
+		t.Fatalf("claiming the next work bead: %v", err)
+	}
+
+	f.now = f.now.Add(time.Minute)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != next.ID {
+		t.Fatalf("marker after the new claim = %q, want a fresh window for %s", got, next.ID)
+	}
+	for _, key := range []string{executionClaimNudgeStalledKey, executionClaimNudgeStalledTokenKey} {
+		if got := f.sessionMeta(t, key); got != "" {
+			t.Fatalf("%s after the fresh window = %q, want the old claim's latch cleared", key, got)
+		}
+	}
+	for i := 0; i < idleClaimNudgeMaxAttempts; i++ {
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+	}
+	f.now = f.now.Add(idleClaimNudgeBackoff)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 2 {
+		t.Fatalf("drain requests once the new claim spent its attempts = %v, want a second escalation; stdout=%s", f.drained, f.stdout.String())
+	}
+	if got := f.stalledEvents(); got != 2 {
+		t.Fatalf("execution.step_stalled events = %d, want one per escalated claim", got)
 	}
 }

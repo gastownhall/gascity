@@ -81,6 +81,13 @@ package main
 // can lose it, and a latch that outlives its drain would otherwise silence the
 // backstop for the rest of the seat's life.
 //
+// The last nudge gets the same backoff as the earlier ones before the drain:
+// a seat that answers it runs its claim hook, whose work_started entry is the
+// execution evidence that vetoes the drain, and that answer needs the time
+// the earlier nudges had to land. A fresh window, whether for a new claim or
+// a new incarnation, clears any escalation latch: the latch belongs to the
+// window it escalated.
+//
 // # Holds are named
 //
 // Every hold leaves a breadcrumb on the session bead (executionClaimHoldKey), so
@@ -652,8 +659,20 @@ func (p poolExecutionBackstop) markStarted(s *beads.Bead, beadID string) bool {
 	return true
 }
 
+// observe starts a fresh window for target. It clears any escalation latch:
+// the latch belongs to the window it escalated, and a new window (a new claim,
+// or a new incarnation) has escalated nothing yet.
 func (p poolExecutionBackstop) observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer) {
-	writeExecutionClaimMarker(store, s, target, 0, now, stdout)
+	writeSessionMetadata(store, s, map[string]string{
+		executionClaimNudgeWorkKey:         target.ID,
+		executionClaimNudgeRootKey:         target.RootID,
+		executionClaimNudgeStoreRefKey:     target.StoreRef,
+		executionClaimNudgeCountKey:        "0",
+		executionClaimNudgeAtKey:           now.UTC().Format(time.RFC3339),
+		executionClaimNudgeTokenKey:        strings.TrimSpace(s.Metadata["instance_token"]),
+		executionClaimNudgeStalledKey:      "",
+		executionClaimNudgeStalledTokenKey: "",
+	}, executionClaimNudgeLabel, stdout)
 }
 
 func (p poolExecutionBackstop) reserve(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer) bool {
@@ -720,11 +739,23 @@ func stalledLatchHolds(s *beads.Bead, atKey, tokenKey string, now time.Time) boo
 
 // exhausted turns a spent attempt budget into one observable fact and one drain
 // request, latched so both happen exactly once per claim and incarnation
-// however many ticks the session survives. A latch from an earlier incarnation,
-// or one old enough that its drain must have been lost, escalates again; the
-// re-written latch restarts both bounds.
+// however many ticks the session survives. A latch from an earlier incarnation
+// never reaches here, because state starts that incarnation a fresh window and
+// observe clears the latch; stalledLatchHolds still declines it, so a latch is
+// never honored for an incarnation it did not escalate. A latch old enough
+// that its drain must have been lost escalates again, and the re-written latch
+// restarts the bound.
 func (p poolExecutionBackstop) exhausted(store beads.Store, s *beads.Bead, stdout io.Writer) {
 	if p.stalledLatchHolds(s) {
+		return
+	}
+	// The last nudge gets the same backoff as the earlier ones before it
+	// counts as unanswered: the engine reports the cap as soon as it is
+	// reserved, and a seat that answers it later in the backoff runs its claim
+	// hook, whose work_started entry vetoes the drain on the tick that reads
+	// it (workStartedAtGen, escalatesNext).
+	if atoiOr0(s.Metadata[executionClaimNudgeCountKey]) >= 1 &&
+		p.now.Sub(parseRFC3339OrZero(s.Metadata[executionClaimNudgeAtKey])) < idleClaimNudgeBackoff {
 		return
 	}
 	beadID := strings.TrimSpace(s.Metadata[executionClaimNudgeWorkKey])
