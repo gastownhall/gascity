@@ -821,3 +821,63 @@ func TestFormatOrderFiringDuration(t *testing.T) {
 		}
 	}
 }
+
+// A fired order's thresholds scale its effective period, the expected
+// interval plus one patrol interval: overdue from 1.5x, stale from 3x. A
+// non-positive patrol never shrinks the period below the expected interval.
+func TestClassifyOrderFiringThresholdsIncludePatrolInterval(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	started := now.Add(-48 * time.Hour)
+	cooldown := orders.Order{Name: "minute-cooldown", Trigger: "cooldown", Interval: "1m"}
+	cron := orders.Order{Name: "minute-cron", Trigger: "cron", Schedule: "* * * * *"}
+	fourHourCron := orders.Order{Name: "four-hour-cron", Trigger: "cron", Schedule: "0 */4 * * *"}
+	const (
+		ok      = ""
+		overdue = " (overdue)"
+		stale   = " (CRITICAL: stale)"
+	)
+	for _, tc := range []struct {
+		order    orders.Order
+		expected time.Duration
+		patrol   time.Duration
+		age      time.Duration
+		want     string
+	}{
+		{order: cooldown, expected: time.Minute, patrol: 30 * time.Second, age: 2*time.Minute + 14*time.Second, want: ok},
+		{order: cooldown, expected: time.Minute, patrol: 30 * time.Second, age: 2*time.Minute + 15*time.Second, want: overdue},
+		{order: cooldown, expected: time.Minute, patrol: 30 * time.Second, age: 4*time.Minute + 29*time.Second, want: overdue},
+		{order: cooldown, expected: time.Minute, patrol: 30 * time.Second, age: 4*time.Minute + 30*time.Second, want: stale},
+		{order: cron, expected: time.Minute, patrol: 30 * time.Second, age: 2*time.Minute + 14*time.Second, want: ok},
+		{order: cron, expected: time.Minute, patrol: 30 * time.Second, age: 2*time.Minute + 15*time.Second, want: overdue},
+		{order: cron, expected: time.Minute, patrol: 30 * time.Second, age: 4*time.Minute + 29*time.Second, want: overdue},
+		{order: cron, expected: time.Minute, patrol: 30 * time.Second, age: 4*time.Minute + 30*time.Second, want: stale},
+		{order: fourHourCron, expected: 4 * time.Hour, patrol: 30 * time.Second, age: 6*time.Hour + 44*time.Second, want: ok},
+		{order: fourHourCron, expected: 4 * time.Hour, patrol: 30 * time.Second, age: 6*time.Hour + 45*time.Second, want: overdue},
+		{order: fourHourCron, expected: 4 * time.Hour, patrol: 30 * time.Second, age: 12*time.Hour + time.Minute + 29*time.Second, want: overdue},
+		{order: fourHourCron, expected: 4 * time.Hour, patrol: 30 * time.Second, age: 12*time.Hour + time.Minute + 30*time.Second, want: stale},
+		{order: cooldown, expected: time.Minute, patrol: 0, age: 89 * time.Second, want: ok},
+		{order: cooldown, expected: time.Minute, patrol: 0, age: 90 * time.Second, want: overdue},
+		{order: cooldown, expected: time.Minute, patrol: 0, age: 179 * time.Second, want: overdue},
+		{order: cooldown, expected: time.Minute, patrol: 0, age: 180 * time.Second, want: stale},
+		{order: cooldown, expected: time.Minute, patrol: -5 * time.Second, age: 89 * time.Second, want: ok},
+		{order: cooldown, expected: time.Minute, patrol: -5 * time.Second, age: 90 * time.Second, want: overdue},
+		{order: cooldown, expected: time.Minute, patrol: -5 * time.Second, age: 179 * time.Second, want: overdue},
+		{order: cooldown, expected: time.Minute, patrol: -5 * time.Second, age: 180 * time.Second, want: stale},
+	} {
+		name := fmt.Sprintf("%s/E=%v/P=%v/age=%v", tc.order.Name, tc.expected, tc.patrol, tc.age)
+		t.Run(name, func(t *testing.T) {
+			status, severity, detail := classifyOrderFiring(tc.order, now, tc.expected, tc.patrol, now.Add(-tc.age), started)
+			wantStatus := map[string]CheckStatus{ok: StatusOK, overdue: StatusWarning, stale: StatusError}[tc.want]
+			if status != wantStatus {
+				t.Fatalf("status = %v, want %v; detail = %q", status, wantStatus, detail)
+			}
+			if severity != SeverityBlocking {
+				t.Fatalf("severity = %v, want blocking; detail = %q", severity, detail)
+			}
+			wantSuffix := fmt.Sprintf("expected every %s%s", formatOrderFiringDuration(tc.expected), tc.want)
+			if !strings.HasSuffix(detail, wantSuffix) {
+				t.Fatalf("detail = %q, want suffix %q", detail, wantSuffix)
+			}
+		})
+	}
+}
