@@ -729,11 +729,13 @@ func providerOwnedScopeCustomTypesEnv(cityPath, dir string) (map[string]string, 
 }
 
 // embeddedScopeCustomTypesEnv builds registerScopeCustomTypes' env for a scope
-// whose metadata.json records embedded Dolt: doctor's custom-types store
-// projection, the one `gc doctor --fix` registers under, which aims bd at the
-// scope's own .beads with every server selector cleared, plus the workspace's
+// gc does not serve from its own Dolt — one whose metadata.json records
+// embedded Dolt, or one bd bound directly to a server gc does not run:
+// doctor's custom-types store projection, the one `gc doctor --fix` registers
+// under, which aims bd at the scope's own .beads and the scope's own binding
+// (every server selector cleared for an embedded scope), plus the workspace's
 // pinned BD_BIN and export suppression. The provider projection would hand bd
-// the city's server endpoint, which an embedded scope never serves from.
+// the city's server endpoint, which neither scope serves from.
 func embeddedScopeCustomTypesEnv(cityPath, dir string) (map[string]string, error) {
 	base, err := doctor.CustomTypesStoreEnv(cityPath, dir)
 	if err != nil {
@@ -1010,6 +1012,15 @@ func initAndHookDirResolvingDatabase(cityPath, dir, prefix string, bootStore *ci
 	if skipsManagedDolt, err := scopeSkipsManagedDoltForInit(cityPath, dir); err != nil {
 		return err
 	} else if skipsManagedDolt {
+		// A store bd bound to a server gc does not run still takes gc's bead
+		// types, as an embedded one does: through bd, at the store's own
+		// binding, never by editing bd's files. A complete storage binding
+		// gets hooks only.
+		if bdOwnedDirect, err := scopeIsBdOwnedDirectExternal(cityPath, dir); err != nil {
+			return err
+		} else if bdOwnedDirect {
+			registerScopeCustomTypes(cityPath, dir, embeddedScopeCustomTypesEnv)
+		}
 		if err := installBeadHooks(dir, cityPath); err != nil {
 			return fmt.Errorf("install hooks at %s: %w", dir, err)
 		}

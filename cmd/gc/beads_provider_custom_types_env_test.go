@@ -353,3 +353,60 @@ func TestInitAndHookDirNeverWritesCustomTypesToABoundScope(t *testing.T) {
 		}
 	}
 }
+
+// A store bd bound to a dolt sql-server gc does not run takes gc's bead types
+// through bd, at the store's own binding: BEADS_DIR names the rig's .beads and
+// the server selectors name the endpoint bd recorded in its metadata.json,
+// never the city's. The provider's init op never runs, and bd's files stay as
+// found.
+func TestInitRegistersTypesThroughBdAtABdOwnedScopesBinding(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	city := normalizePathForCompare(t.TempDir())
+	marker := filepath.Join(city, "bd-calls")
+	stub := filepath.Join(city, "pinned-bd")
+	script := "#!/bin/sh\nprintf '%s|BEADS_DIR=%s|PORT=%s|HOST=%s\\n' \"$*\" \"$BEADS_DIR\" \"${BEADS_DOLT_SERVER_PORT-unset}\" \"${BEADS_DOLT_SERVER_HOST-unset}\" >> " + marker + "\n" +
+		"case \"$1 $2\" in\n  'config get') printf '{\"key\":\"types.custom\",\"value\":\"\"}\\n' ;;\n  'types --json') printf '{\"core_types\":[]}\\n' ;;\nesac\nexit 0\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	providerCalls := filepath.Join(city, "provider-calls")
+	provider := filepath.Join(city, "gc-beads-bd")
+	if err := os.WriteFile(provider, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+providerCalls+"\nif [ \"$1\" = init ]; then exit 1; fi\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rig := filepath.Join(city, "rigs", "hv")
+	cityToml := "[workspace]\nname = \"bdowned\"\n\n[workspace.env]\nBD_BIN = \"" + stub + "\"\n\n[beads]\nprovider = \"exec:" + provider + "\"\n\n[[rigs]]\nname = \"webapp\"\npath = \"" + rig + "\"\nprefix = \"hv\"\n"
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeBdOwnedDirectExternalRig(t, rig, "hv", "127.0.0.1", 17333)
+	metaBefore, _ := os.ReadFile(filepath.Join(rig, ".beads", "metadata.json"))
+	cfgBefore, _ := os.ReadFile(filepath.Join(rig, ".beads", "config.yaml"))
+
+	if err := initAndHookDir(city, rig, "hv"); err != nil {
+		t.Fatalf("initAndHookDir(bd-owned rig): %v", err)
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("bd was never invoked for the bd-owned rig: %v", err)
+	}
+	calls := string(data)
+	beadsDir := filepath.Join(rig, ".beads")
+	for _, want := range []string{
+		"config get --json types.custom|BEADS_DIR=" + beadsDir + "|PORT=17333|HOST=127.0.0.1",
+		"types --json|BEADS_DIR=" + beadsDir + "|PORT=17333|HOST=127.0.0.1",
+		"config set types.custom ",
+	} {
+		if !strings.Contains(calls, want) {
+			t.Errorf("bd calls = %q, want one containing %q", calls, want)
+		}
+	}
+	if pc, _ := os.ReadFile(providerCalls); strings.Contains(string(pc), "init") {
+		t.Fatalf("provider init op ran for a store gc does not serve; calls:\n%s", pc)
+	}
+	metaAfter, _ := os.ReadFile(filepath.Join(rig, ".beads", "metadata.json"))
+	cfgAfter, _ := os.ReadFile(filepath.Join(rig, ".beads", "config.yaml"))
+	if string(metaAfter) != string(metaBefore) || string(cfgAfter) != string(cfgBefore) {
+		t.Fatalf("init rewrote bd's files:\nmetadata %q -> %q\nconfig %q -> %q", metaBefore, metaAfter, cfgBefore, cfgAfter)
+	}
+}

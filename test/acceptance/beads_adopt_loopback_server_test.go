@@ -11,8 +11,8 @@
 // record for the city names its port; neither city here has one.
 //
 // Each test drives the real gc, bd and dolt through the front doors: adopt,
-// the bd front door into the rig, stop and start, and remove and re-adopt.
-// bd's own files must stay byte-identical throughout.
+// the bd front door into the rig, stop and start, remove and re-adopt, and
+// doctor. bd's own files must stay byte-identical throughout.
 package acceptance_test
 
 import (
@@ -196,8 +196,22 @@ func (a *loopbackServerAdoption) assertRigListsBead(t *testing.T, id, when strin
 	}
 }
 
+// assertDoctorReportsNoRigFailure requires that no doctor check about the
+// adopted rig is an error.
+func (a *loopbackServerAdoption) assertDoctorReportsNoRigFailure(t *testing.T) {
+	t.Helper()
+	out, _ := a.run.GC("doctor", "--json")
+	var report doctorReport
+	lastJSONLine(t, out, &report)
+	for _, r := range report.Results {
+		if r.Status == "error" && strings.Contains(r.Name, loopbackAdoptRigName) {
+			t.Errorf("gc doctor: %s = error: %s", r.Name, r.Message)
+		}
+	}
+}
+
 // exercise is the shared sequence: adopt, write and read through the bd front
-// door, stop and start, remove and re-adopt.
+// door, stop and start, remove and re-adopt, doctor.
 func (a *loopbackServerAdoption) exercise(t *testing.T) {
 	t.Helper()
 	a.adopt(t, "adopt")
@@ -217,6 +231,7 @@ func (a *loopbackServerAdoption) exercise(t *testing.T) {
 	}
 	a.adopt(t, "re-adopt")
 	a.assertRigListsBead(t, id, "after re-adopt")
+	a.assertDoctorReportsNoRigFailure(t)
 }
 
 // TestBeadsAdoptLoopbackServerStoreDirectExternalCity adopts the store into a

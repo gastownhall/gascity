@@ -724,11 +724,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `dolt-provider-state.json`); a record gc cannot parse is an error naming
   the file. The boot port sync (and the publication and `gc rig add` paths
   that share it) no longer stamps endpoint keys into, writes, or removes the
-  port file of a bd-owned store, hosted or loopback; and `gc doctor`'s
+  port file of a bd-owned store, hosted or loopback; `gc doctor`'s
   `dolt-drift` check no longer reports such a store's own port file as
-  drift. A store an earlier gc already stamped needs a one-time repair:
-  restore its pre-adopt `.beads/config.yaml` (or drop the `gc.*` keys adopt
-  appended), then adopt again.
+  drift; and gc registers its bead types in such a store through bd at the
+  store's own binding, as it does for an embedded store. A store an earlier
+  gc already stamped needs a one-time repair: restore its pre-adopt
+  `.beads/config.yaml` (or drop the `gc.*` keys adopt appended), then adopt
+  again.
 
 - **The core orphan-sweep order judges claims on graph steps in a
   split-storage city.** On a city whose `[storage.classes]` serves the graph
