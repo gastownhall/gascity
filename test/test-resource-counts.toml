@@ -2032,6 +2032,11 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "internal/doctor/repro_orphaned_pack_script_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
 path = "internal/events/events_test.go"
 resource = "fixed_sleep"
 calls = 2
