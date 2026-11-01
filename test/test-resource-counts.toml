@@ -1567,12 +1567,12 @@ calls = 4
 [[count]]
 path = "internal/api/client_sling_test.go"
 resource = "http_test_server"
-calls = 3
+calls = 6
 
 [[count]]
 path = "internal/api/client_test.go"
 resource = "http_test_server"
-calls = 66
+calls = 67
 
 [[count]]
 path = "internal/api/client_waits_test.go"

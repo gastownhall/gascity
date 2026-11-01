@@ -695,3 +695,92 @@ func TestProbeServerAliveBailsFastOnHang(t *testing.T) {
 		t.Fatalf("probe took %s, want < 2s (timeout should be ~100ms)", elapsed)
 	}
 }
+
+// When $TMUX pins this provider's named socket, every observation of the
+// server socket must use the pinned path, never the path tmux would resolve
+// from the caller's TMUX_TMPDIR (issue #8116).
+func pinnedSocketTestEnv(t *testing.T) (pinned string) {
+	t.Helper()
+	uid := os.Getuid()
+	pinned = fmt.Sprintf("/run/user/%d/tmux-%d/bright-lights", uid, uid)
+	t.Setenv("TMUX", pinned+",4242,0")
+	t.Setenv("TMUX_TMPDIR", t.TempDir())
+	return pinned
+}
+
+func TestServerSocketPathFollowsPinnedServer(t *testing.T) {
+	pinned := pinnedSocketTestEnv(t)
+	tm := &Tmux{cfg: Config{SocketName: "bright-lights"}}
+	if got := tm.serverSocketPath(); got != pinned {
+		t.Fatalf("serverSocketPath() = %q, want %q", got, pinned)
+	}
+}
+
+func TestProbeServerAliveObservesPinnedSocket(t *testing.T) {
+	pinned := pinnedSocketTestEnv(t)
+	fe := &fakeExecutor{err: ErrNoServer}
+	tm := &Tmux{
+		cfg:  Config{SocketName: "bright-lights"},
+		exec: fe,
+		serverSocketObserver: func(_ context.Context, gotPath string) error {
+			if gotPath != pinned {
+				t.Errorf("observer path = %q, want %q", gotPath, pinned)
+			}
+			return fmt.Errorf("live socket path=%s inode=97 peer_pid=4242", gotPath)
+		},
+	}
+	err := tm.probeServerAlive()
+	if !errors.Is(err, ErrServerDegraded) {
+		t.Fatalf("probeServerAlive: err = %v, want ErrServerDegraded", err)
+	}
+	if !strings.Contains(err.Error(), "path="+pinned) {
+		t.Fatalf("err = %q, want it to name the pinned path", err)
+	}
+}
+
+func TestCaptureNamedSocketWitnessUsesPinnedSocket(t *testing.T) {
+	pinned := pinnedSocketTestEnv(t)
+	fixture := filepath.Join(t.TempDir(), "socket-fixture")
+	if err := os.WriteFile(fixture, []byte("fixture"), 0o600); err != nil {
+		t.Fatalf("write socket fixture: %v", err)
+	}
+	node, err := os.Lstat(fixture)
+	if err != nil {
+		t.Fatalf("lstat socket fixture: %v", err)
+	}
+	fe := &fakeExecutor{out: "4242"}
+	tm := &Tmux{cfg: Config{SocketName: "bright-lights"}, exec: fe}
+	var observed []string
+	tm.namedSocketLstat = func(_ context.Context, gotPath string) (namedSocketObservation, error) {
+		observed = append(observed, gotPath)
+		return namedSocketObservation{node: node, isSocket: true}, nil
+	}
+	witness, err := tm.captureNamedSocketWitness(context.Background())
+	if err != nil {
+		t.Fatalf("captureNamedSocketWitness: %v", err)
+	}
+	if witness.canonicalPath != pinned {
+		t.Errorf("witness path = %q, want %q", witness.canonicalPath, pinned)
+	}
+	for i, got := range observed {
+		if got != pinned {
+			t.Errorf("lstat path %d = %q, want %q", i, got, pinned)
+		}
+	}
+	want := []string{"-u", "-N", "-S", pinned, "display-message", "-p", "#{pid}"}
+	if len(fe.calls) != 1 || !reflect.DeepEqual(fe.calls[0], want) {
+		t.Errorf("display-message args = %v, want %v", fe.calls, want)
+	}
+}
+
+func TestAttachArgsFallBackToPinnedSocket(t *testing.T) {
+	pinned := pinnedSocketTestEnv(t)
+	tm := &Tmux{cfg: Config{SocketName: "bright-lights"}}
+	want := []string{"-u", "-N", "-S", pinned, "attach-session", "-t", "gc-target"}
+	if got := tm.attachCommandArgs("gc-target", namedSocketWitness{}); !reflect.DeepEqual(got, want) {
+		t.Errorf("attachCommandArgs() = %v, want %v", got, want)
+	}
+	if got := tm.hiddenAttachCommandArgsForWitness("gc-target", namedSocketWitness{}); !reflect.DeepEqual(got, want) {
+		t.Errorf("hiddenAttachCommandArgsForWitness() = %v, want %v", got, want)
+	}
+}

@@ -3361,15 +3361,21 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 	// duplicate shell-outs). Resume tier from cross-referenced assigned
 	// work beads + new tier from scale_check + min fill.
 	poolDesired := result.PoolDesiredCounts
+	// parked is the pass's park verdicts for the reconciler's hold below.
+	// When this tick decides the pool counts, the hold reads the verdicts the
+	// counts were decided with, not a second set decided later over the
+	// post-sweep rows.
+	var parked parkedSeats
 	if poolDesired == nil {
 		phaseStart = time.Now()
 		openInfos := sessionBeads.OpenInfos()
 		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cr.cfg, cr.cityPath, store, openInfos, assignedWorkBeads, assignedWorkStoreRefs)
 		poolDecisionTime := time.Now()
+		parked = parkSeatsForResult(cr.cfg, openInfos, result, poolDecisionTime.UTC())
 		poolDesired = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
-			PoolDesiredCounts(ComputePoolDesiredStatesTracedAt(
-				cr.cfg, poolWorkBeads, openInfos, result.ScaleCheckCounts, poolDecisionTime, trace)),
+			PoolDesiredCounts(computePoolDesiredStatesParkedAt(
+				cr.cfg, poolWorkBeads, openInfos, result.ScaleCheckCounts, nil, poolDecisionTime, parked, trace)),
 			sessionBeads,
 			effectivePoolPartialRetentionTemplates(result),
 		)
@@ -3457,6 +3463,11 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 	})
 	phaseStart = time.Now()
 	warmClaimTriggers := cr.newWarmClaimTriggerResolver(rigStores)
+	// Counts from the demand snapshot were decided in its refresh, so the
+	// hold decides its own verdicts over this tick's rows.
+	if result.PoolDesiredCounts != nil {
+		parked = parkSeatsForResult(cr.cfg, openInfos, result, time.Now().UTC())
+	}
 	reconcileStartOptions := []startExecutionOption{
 		withAsyncStartExecution(),
 		withAsyncStartFollowUp(cr.requestAsyncStartFollowUpTick),
@@ -3470,6 +3481,9 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		withOnDeathGate(cr.onDeathGate()),
 		withPrepareBudget(defaultStartPrepareBudget),
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
+		// The park verdicts over the build's whole assigned-work read (not the
+		// wake-filtered view), as the pool counts above decide them.
+		withParkedSeats(parked),
 		// The legs this tick read the surviving assigned work through. The
 		// orphan-close tie-break releases a held claim through its own leg
 		// instead of re-deriving a work ledger from gc.routed_to, which on a
@@ -4307,10 +4321,13 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	openInfos := filterSessionInfosByName(updated, reconcileNames)
 	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(filteredCfg, cr.cityPath, cr.cityBeadStore(), openInfos, wfcResult.AssignedWorkBeads, wfcResult.AssignedWorkStoreRefs)
 	poolDecisionTime := time.Now()
+	// The pass's park verdicts, decided once: the pool counts and the
+	// reconciler's hold read the same set.
+	parked := parkSeatsForResult(filteredCfg, openInfos, wfcResult, poolDecisionTime.UTC())
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		filteredCfg,
-		PoolDesiredCounts(ComputePoolDesiredStatesAt(
-			filteredCfg, poolWorkBeads, openInfos, wfcResult.ScaleCheckCounts, poolDecisionTime)),
+		PoolDesiredCounts(computePoolDesiredStatesParkedAt(
+			filteredCfg, poolWorkBeads, openInfos, wfcResult.ScaleCheckCounts, nil, poolDecisionTime, parked, nil)),
 		filteredSnap,
 		effectivePoolPartialRetentionTemplates(wfcResult),
 	)
@@ -4358,6 +4375,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		// its lease; it rolls back as it did before the memo.
 		withOnDeathGate(cr.onDeathGate()),
 		withPrepareBudget(defaultStartPrepareBudget),
+		withParkedSeats(parked),
 	)
 	cr.requestDeferredDrainFollowUpTick()
 }
@@ -4730,8 +4748,9 @@ func (cr *CityRuntime) loadDemandSnapshot(
 		poolDecisionTime := time.Now()
 		result.PoolDesiredCounts = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
-			PoolDesiredCounts(ComputePoolDesiredStatesTracedAt(
-				cr.cfg, poolWorkBeads, openSessionInfos, result.ScaleCheckCounts, poolDecisionTime, trace)),
+			PoolDesiredCounts(computePoolDesiredStatesParkedAt(
+				cr.cfg, poolWorkBeads, openSessionInfos, result.ScaleCheckCounts, nil, poolDecisionTime,
+				parkSeatsForResult(cr.cfg, openSessionInfos, result, poolDecisionTime.UTC()), trace)),
 			sessionBeads,
 			effectivePoolPartialRetentionTemplates(result),
 		)
