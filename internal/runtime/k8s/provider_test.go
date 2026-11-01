@@ -1925,7 +1925,10 @@ func TestInitBeadsInPodUsesProjectedStoreRootAndPrefix(t *testing.T) {
 func TestInitBeadsInPodPatchesWithheldManagedLocalTargetToAlias(t *testing.T) {
 	fake := newFakeK8sOps()
 	env := runtimetest.WithheldManagedDoltEnv()
+	env["GC_BEADS_PROJECT_ID"] = "project-demo"
 	env["GC_BEADS_PREFIX"] = "demo"
+	env["GC_DOLT_DATABASE"] = "bd_demo"
+	env["GC_STORE_ROOT"] = "/workspace/demo-repo"
 	cfg := runtime.Config{Env: env}
 	if err := initBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, "/workspace/demo-repo", podManagedDoltHost, podManagedDoltPort); err != nil {
 		t.Fatalf("initBeadsInPod: %v", err)
@@ -3645,9 +3648,7 @@ func TestStartProjectsRigStateAfterCityInitAndBeforeReadyMarker(t *testing.T) {
 	if err := p.Start(context.Background(), "rig-agent", cfg); err != nil {
 		t.Fatalf("Start rig session: %v", err)
 	}
-	initAt := findExecCall(fake.calls, func(cmd []string) bool {
-		return isWrappedCityInitCall(cmd)
-	})
+	initAt := findExecCall(fake.calls, isWrappedCityInitCall)
 	projectionAt := findExecCall(fake.calls, func(cmd []string) bool {
 		return len(cmd) >= 4 && cmd[0] == "sh" && cmd[3] == "gc-rig-projection"
 	})

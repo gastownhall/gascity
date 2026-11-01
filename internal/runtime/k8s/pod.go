@@ -318,14 +318,17 @@ func projectedPodDoltEnv(cfgEnv map[string]string, managedHost, managedPort stri
 // prefix is empty for the selected store and "GC_K8S_CITY_" for gc init.
 func validateProjectedHostedStoreIdentity(cfgEnv map[string]string, prefix, managedHost, managedPort string) (map[string]string, error) {
 	hostKey, portKey := "GC_DOLT_HOST", "GC_DOLT_PORT"
+	managedLocalKey := "GC_DOLT_MANAGED_LOCAL"
 	projectKey, issuePrefixKey, databaseKey, rootKey := "GC_BEADS_PROJECT_ID", "GC_BEADS_PREFIX", "GC_DOLT_DATABASE", "GC_STORE_ROOT"
 	if prefix != "" {
 		hostKey, portKey = prefix+"DOLT_HOST", prefix+"DOLT_PORT"
+		managedLocalKey = prefix + "DOLT_MANAGED_LOCAL"
 		projectKey, issuePrefixKey, databaseKey, rootKey = prefix+"BEADS_PROJECT_ID", prefix+"BEADS_PREFIX", prefix+"DOLT_DATABASE", prefix+"STORE_ROOT"
 	}
 	projected, err := projectedPodDoltEnv(map[string]string{
-		"GC_DOLT_HOST": cfgEnv[hostKey],
-		"GC_DOLT_PORT": cfgEnv[portKey],
+		"GC_DOLT_HOST":          cfgEnv[hostKey],
+		"GC_DOLT_PORT":          cfgEnv[portKey],
+		"GC_DOLT_MANAGED_LOCAL": cfgEnv[managedLocalKey],
 	}, managedHost, managedPort)
 	if err != nil {
 		return nil, err
