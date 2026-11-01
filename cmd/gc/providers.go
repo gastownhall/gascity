@@ -92,17 +92,30 @@ func tmuxConfigFromSession(sc config.SessionConfig, cityName, cityPath string) s
 	if cityPath != "" {
 		runtimeDir = citylayout.RuntimePath(cityPath)
 	}
+	// Every city's leaf gets the shadow sink; the leaf hands it out only
+	// while its live switch is shadow (a reload publishes the switch to a
+	// leaf it keeps), so off and on record nothing.
+	var comparisons runtime.ProgramStatusComparisonSink
+	var followUps func() bool
+	var work func() func()
+	if cityPath != "" {
+		comparisons = programStatusShadowSink(cityPath)
+		followUps, work = programShadowFollowUps, programShadowBeginWork
+	}
 	return sessiontmux.Config{
-		SetupTimeout:       sc.SetupTimeoutDuration(),
-		SetupMaxTimeout:    sc.SetupMaxTimeoutDuration(),
-		NudgeReadyTimeout:  sc.NudgeReadyTimeoutDuration(),
-		NudgeRetryInterval: sc.NudgeRetryIntervalDuration(),
-		NudgeLockTimeout:   sc.NudgeLockTimeoutDuration(),
-		DebounceMs:         sc.DebounceMsOrDefault(),
-		DisplayMs:          sc.DisplayMsOrDefault(),
-		SocketName:         socketName,
-		RuntimeDir:         runtimeDir,
-		ProgramStatus:      sc.ProgramStatusMode(),
+		ComparisonSink:      comparisons,
+		ComparisonFollowUps: followUps,
+		ComparisonWork:      work,
+		SetupTimeout:        sc.SetupTimeoutDuration(),
+		SetupMaxTimeout:     sc.SetupMaxTimeoutDuration(),
+		NudgeReadyTimeout:   sc.NudgeReadyTimeoutDuration(),
+		NudgeRetryInterval:  sc.NudgeRetryIntervalDuration(),
+		NudgeLockTimeout:    sc.NudgeLockTimeoutDuration(),
+		DebounceMs:          sc.DebounceMsOrDefault(),
+		DisplayMs:           sc.DisplayMsOrDefault(),
+		SocketName:          socketName,
+		RuntimeDir:          runtimeDir,
+		ProgramStatus:       sc.ProgramStatusMode(),
 	}
 }
 

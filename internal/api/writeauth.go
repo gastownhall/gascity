@@ -251,13 +251,16 @@ func writeAuthMiddleware(v *citywriteauth.Verifier, readOnly bool, next http.Han
 			City:      city,
 			ReqDigest: citywriteauth.ReqDigest(r.Method, r.URL.Path, r.URL.RawQuery, body),
 		}
-		if _, err := v.Verify(token, expect); err != nil {
+		g, err := v.Verify(token, expect)
+		if err != nil {
 			// Deliberately generic to the client (no verification oracle); the
 			// specific reason is for server-side audit, not the response.
 			problemWriteAuthRejected.writeTo(w)
 			return
 		}
-		next.ServeHTTP(w, r)
+		// The signature authenticates the kid, so downstream handlers may
+		// record it as who made this mutation (VerifiedPrincipal).
+		next.ServeHTTP(w, r.WithContext(withVerifiedPrincipal(r.Context(), g.Kid)))
 	})
 }
 

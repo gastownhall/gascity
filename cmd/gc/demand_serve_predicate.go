@@ -167,7 +167,8 @@ const (
 	// projection that reads explicitly false, which is bd's own answer, computed
 	// through the ready-projection enrichment's `bd sql`/`bd blocked` door.
 	demandRowClaimable demandRowClaimability = "claimable"
-	// demandRowDeferred: defer_until, or bd's indefinite deferral, gates the row
+	// demandRowDeferred: a future defer_until, or bd's deferred status (dated or
+	// not, until the store wakes the row), gates the row
 	// (beads.IsDeferred). Both are FRESH bead-local fields — never stale — so this
 	// is proof that no worker could have claimed the row.
 	demandRowDeferred demandRowClaimability = "deferred"
