@@ -3681,6 +3681,19 @@ func (cr *CityRuntime) recordReconcileTraceInputs(
 		if desiredCounts[template] == 0 && poolDesired[template] == 0 && openCounts[template] == 0 {
 			status = TraceEvaluationSkipped
 			reason = TraceReasonNoDemand
+			// work_requested=true here means the pool had real demand that
+			// was refused, not absent — reporting no_demand would be false
+			// (gascity#8013). Use the specific cap RecordCapRejectionReason
+			// already captured this tick when known; otherwise fall back to
+			// an honest "unknown" rather than guessing or repeating the false
+			// no_demand label.
+			if traceWorkRequested[template] {
+				if capReason, ok := trace.CapRejectionReason(template); ok {
+					reason = capReason
+				} else {
+					reason = TraceReasonUnknown
+				}
+			}
 		}
 		trace.RecordTemplateSummary(template, "", status, reason, map[string]any{
 			"desired_count":  desiredCounts[template],
