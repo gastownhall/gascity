@@ -64,6 +64,40 @@ func (s beadsRouteBrokenStore) List(beads.ListQuery) ([]beads.Bead, error) { ret
 
 func (s beadsRouteBrokenStore) Get(string) (beads.Bead, error) { return beads.Bead{}, s.err }
 
+// beadsRouteReadinessStore models the server's CachingStore readiness
+// projection: over the default bd and native-Dolt backends, a primed cache
+// stamps is_blocked (true or false) on every open row, while a direct store
+// read never carries it. Wrapping only the controller's stores makes that
+// cache-only value visible to the equivalence checks.
+type beadsRouteReadinessStore struct {
+	beads.Store
+}
+
+func (s beadsRouteReadinessStore) project(b beads.Bead) beads.Bead {
+	if b.Status == "closed" {
+		return b
+	}
+	blocked := len(b.Needs) > 0
+	b.IsBlocked = &blocked
+	return b
+}
+
+func (s beadsRouteReadinessStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	rows, err := s.Store.List(q)
+	for i := range rows {
+		rows[i] = s.project(rows[i])
+	}
+	return rows, err
+}
+
+func (s beadsRouteReadinessStore) Get(id string) (beads.Bead, error) {
+	b, err := s.Store.Get(id)
+	if err != nil {
+		return b, err
+	}
+	return s.project(b), nil
+}
+
 func newBeadsRouteCity(t *testing.T, fault beadsRouteFault) *beadsRouteCity {
 	t.Helper()
 	clearGCEnv(t)
@@ -108,13 +142,12 @@ func newBeadsRouteCity(t *testing.T, fault beadsRouteFault) *beadsRouteCity {
 		return got.ID
 	}
 	priority := 1
-	blocked := true
 	c.plainID = create(cityPath, beads.Bead{
 		Title: "plain city bead", Priority: &priority, Labels: []string{"route-eq"},
 		Metadata: beads.StringMap{"k": "v"}, Assignee: "worker-1", Description: "described",
 	})
 	blockerID := create(cityPath, beads.Bead{Title: "blocker"})
-	c.blockedID = create(cityPath, beads.Bead{Title: "blocked bead", Needs: []string{blockerID}, IsBlocked: &blocked})
+	c.blockedID = create(cityPath, beads.Bead{Title: "blocked bead", Needs: []string{blockerID}})
 	c.noHistoryID = create(cityPath, beads.Bead{Title: "no-history bead", NoHistory: true})
 	c.closedID = create(cityPath, beads.Bead{Title: "closed bead"})
 	cityStore, err := openScopeLocalFileStoreForCity(cityPath, cityPath)
@@ -162,6 +195,12 @@ func newBeadsRouteCity(t *testing.T, fault beadsRouteFault) *beadsRouteCity {
 		t.Fatalf("load cfg: %v", err)
 	}
 	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), charCityName, cityPath)
+	cs.mu.Lock()
+	cs.cityBeadStore = beadsRouteReadinessStore{Store: cs.cityBeadStore}
+	for name, store := range cs.beadStores {
+		cs.beadStores[name] = beadsRouteReadinessStore{Store: store}
+	}
+	cs.mu.Unlock()
 	c.h = &charHarness{cityPath: cityPath, cs: cs}
 	c.lanes = c.h.lanes(t)
 	return c
@@ -276,7 +315,7 @@ func TestBeadsListRouteEquivalence(t *testing.T) {
 		check   func(t *testing.T, localOut string)
 	}{
 		{"json", "json", beadFilters{}, func(t *testing.T, out string) {
-			for _, want := range []string{`"no_history": true`, `"is_blocked": true`, `"hq-`, `"al-`, `"om-`} {
+			for _, want := range []string{`"no_history": true`, `"hq-`, `"al-`, `"om-`} {
 				if !strings.Contains(out, want) {
 					t.Fatalf("local JSON lacks %s (fixture did not seed what it claims):\n%s", want, out)
 				}
@@ -354,9 +393,6 @@ func TestBeadsShowRouteEquivalence(t *testing.T) {
 				}
 			})
 		}
-	}
-	if out := c.show(local, c.blockedID, "json").stdout; !strings.Contains(out, `"is_blocked": true`) {
-		t.Fatalf("blocked bead lacks is_blocked:\n%s", out)
 	}
 	if out := c.show(local, c.noHistoryID, "json").stdout; !strings.Contains(out, `"no_history": true`) {
 		t.Fatalf("no-history bead lacks no_history:\n%s", out)

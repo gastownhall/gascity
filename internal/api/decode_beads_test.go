@@ -158,7 +158,8 @@ func TestBeadFromGenPtr_Valid(t *testing.T) {
 // JSON-visible beads.Bead field, so a bead the supervisor serves prints the same
 // document as the direct store read. The reflect guard fails the test when a new
 // field is added to beads.Bead without being set here (and so without being
-// proven to survive the decode).
+// proven to survive the decode). The one exception is IsBlocked, which is set in
+// the fixture and must NOT survive the decode.
 func TestBeadFromGenRoundTripsEveryBeadJSONField(t *testing.T) {
 	priority := 2
 	blocked := true
@@ -197,13 +198,25 @@ func TestBeadFromGenRoundTripsEveryBeadJSONField(t *testing.T) {
 			t.Fatalf("fixture leaves JSON field %s zero; set it so the round trip covers it", f.Name)
 		}
 	}
-	wantJSON, err := json.Marshal(want)
+	wireJSON, err := json.Marshal(want)
 	if err != nil {
 		t.Fatalf("marshal fixture: %v", err)
 	}
 	var g genclient.Bead
-	if err := json.Unmarshal(wantJSON, &g); err != nil {
+	if err := json.Unmarshal(wireJSON, &g); err != nil {
 		t.Fatalf("unmarshal into genclient.Bead: %v", err)
+	}
+	if g.IsBlocked == nil {
+		t.Fatal("fixture is_blocked did not reach the wire; the drop below proves nothing")
+	}
+	// is_blocked is a cache-only readiness value: the server's CachingStore
+	// stamps it on open rows over the bd and native-Dolt backends, but no
+	// direct store read carries it, so decoding it would make a local city's
+	// output differ by route (#8453).
+	want.IsBlocked = nil
+	wantJSON, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal expected bead: %v", err)
 	}
 	gotJSON, err := json.Marshal(beadFromGen(g))
 	if err != nil {
