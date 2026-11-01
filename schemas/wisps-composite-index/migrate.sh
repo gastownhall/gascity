@@ -33,6 +33,7 @@ if [ "$rows" -gt 0 ]; then
     verify_index_definition "$indexes"
     info "index $INDEX_NAME already exists on wisps($INDEX_COLUMNS)"
 else
+    ensure_pre_rows
     dolt_sql -q "
         USE \`$DOLT_DB\`;
         CREATE INDEX $INDEX_NAME ON wisps(issue_type, status, assignee);
@@ -48,6 +49,7 @@ if [ "$rows" -gt 0 ]; then
     verify_status_index_definition "$indexes"
     info "index $STATUS_INDEX_NAME already exists on wisps($STATUS_INDEX_COLUMNS)"
 else
+    ensure_pre_rows
     dolt_sql -q "
         USE \`$DOLT_DB\`;
         CREATE INDEX $STATUS_INDEX_NAME ON wisps(status);
@@ -63,6 +65,7 @@ if [ "$rows" -gt 0 ]; then
     verify_defer_until_index_definition "$indexes"
     info "index $DEFER_UNTIL_INDEX_NAME already exists on wisps($DEFER_UNTIL_INDEX_COLUMNS)"
 else
+    ensure_pre_rows
     dolt_sql -q "
         USE \`$DOLT_DB\`;
         CREATE INDEX $DEFER_UNTIL_INDEX_NAME ON wisps(defer_until);
@@ -78,5 +81,6 @@ if [ "$changed" = false ]; then
     exit 0
 fi
 
+assert_rows_not_decreased "$PRE_ROWS"
 commit_schema_change "schema: add wisps planner indexes" >/dev/null
 info "created and committed missing wisps indexes"

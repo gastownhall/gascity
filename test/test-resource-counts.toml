@@ -1531,7 +1531,7 @@ tagged = true
 [[count]]
 path = "examples/gastown/maintenance_scripts_test.go"
 resource = "subprocess"
-calls = 91
+calls = 94
 
 [[count]]
 path = "examples/gastown/tmux_theme_script_test.go"
