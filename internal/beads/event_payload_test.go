@@ -142,7 +142,7 @@ func TestDecodeBeadEventPayloadPreservesStatusBasedDeferral(t *testing.T) {
 		t.Fatal("status-based indefinite deferral was not preserved")
 	}
 
-	past := time.Now().Add(-time.Minute).Format(time.RFC3339Nano)
+	past := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
 	expired, ok := DecodeBeadEventPayload([]byte(`{"id":"gcg-expired","status":"deferred","issue_type":"task","defer_until":"` + past + `"}`))
 	if !ok {
 		t.Fatal("expired deferred decode returned ok=false")
@@ -150,8 +150,33 @@ func TestDecodeBeadEventPayloadPreservesStatusBasedDeferral(t *testing.T) {
 	if expired.Status != "open" {
 		t.Fatalf("expired Status = %q, want normalized open", expired.Status)
 	}
-	if IsDeferred(expired, time.Now()) {
-		t.Fatal("expired time-bound deferral remained deferred")
+	// bd's deferred status is a deferral in its own right: an elapsed
+	// defer_until only says when bd's own sweep may lift it, so the row
+	// stays deferred until the store itself records the wake (#6207).
+	if !expired.IndefinitelyDeferred {
+		t.Fatal("elapsed time-bound deferral lost its status-based deferral marker")
+	}
+	if !IsDeferred(expired, time.Now()) {
+		t.Fatal("elapsed time-bound deferral read as ready; bd still records status=deferred")
+	}
+	// The encoder must restore the store's real status on the wire so a
+	// round trip carries the deferral, date and all.
+	encoded, err := EncodeBeadEventPayload(expired)
+	if err != nil {
+		t.Fatalf("EncodeBeadEventPayload: %v", err)
+	}
+	var wire struct {
+		Status     string     `json:"status"`
+		DeferUntil *time.Time `json:"defer_until"`
+	}
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		t.Fatalf("decode encoded payload: %v", err)
+	}
+	if wire.Status != "deferred" {
+		t.Fatalf("round-trip wire status = %q, want bd's deferred", wire.Status)
+	}
+	if wire.DeferUntil == nil {
+		t.Fatal("round-trip wire lost defer_until")
 	}
 }
 

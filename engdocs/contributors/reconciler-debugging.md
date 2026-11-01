@@ -85,6 +85,12 @@ on the old `Stopped drain-acked session` stdout line. Use `.gc/events.jsonl`
 and the trace `operation` records as the durable signal, with stdout/stderr as
 supporting diagnostics only.
 
+Under the v2 reconciler, a pool work item refused because its worktree
+evidence (`gc.work_dir` / `gc.worktree_*`) is unusable does not show in the
+template trace. Look for a `reconciler.alert` of kind `worktree-refused`
+whose subject is the work bead in `.gc/events.jsonl`, or the matching
+`v2 planner: alert worktree-refused:` line on controller stderr.
+
 ## Rig-Scoped Convergence Rollback
 
 Before rolling back a release that has created rig-scoped convergence loops,
