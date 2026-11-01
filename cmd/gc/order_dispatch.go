@@ -2127,7 +2127,7 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 // source pack has exactly one binding in the order's scope: a pack imported
 // under two bindings is discovered once, so its orders have no single one.
 func orderFormulaVars(cfg *config.City, a orders.Order, args map[string]string) map[string]string {
-	vars := make(map[string]string, len(args)+8)
+	vars := make(map[string]string, len(args))
 	for k, v := range args {
 		vars[k] = v
 	}
