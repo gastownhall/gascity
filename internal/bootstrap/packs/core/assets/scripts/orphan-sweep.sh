@@ -846,8 +846,16 @@ fi
 # (#4543); the declaration is what makes the skip visible as an
 # order.skipped event. Benign races (a bead closed or reassigned since
 # listing, a release that lost its race) stay uncounted and undeclared.
+# When the gate already declared (protected claims), its declaration stands:
+# order_outcome_set replaces the reason, so the local skips are appended to
+# the gate's text instead of overwriting it, and one partial carries both.
 if [ "$UNVERIFIABLE" -gt 0 ]; then
-    order_outcome_set partial "skipped $UNVERIFIABLE unverifiable claim(s) left in place: the holder could not be verified dead or released; each scope names the bead and why"
+    local_skips="skipped $UNVERIFIABLE unverifiable claim(s) left in place: the holder could not be verified dead or released; each scope names the bead and why"
+    if [ -n "$ORDER_OUTCOME_KIND" ]; then
+        order_outcome_set partial "$ORDER_OUTCOME_REASON; $local_skips"
+    else
+        order_outcome_set partial "$local_skips"
+    fi
 fi
 
 if [ "$ORPHANED" -gt 0 ] || [ "$UNVERIFIABLE" -gt 0 ] || [ "$PROTECTED" -gt 0 ]; then

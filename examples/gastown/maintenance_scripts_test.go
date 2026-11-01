@@ -13433,6 +13433,59 @@ func TestOrphanSweepDeclaresLocalSkipsAsPartialScopes(t *testing.T) {
 	}
 }
 
+// TestOrphanSweepComposesGateAndLocalSkipOutcomes keeps one declaration for a
+// pass that both protected claims behind the foreign-identity gate and left a
+// local claim in place: a single partial outcome carries the identity scope
+// with the gate's reason text unchanged and the bead-id scope for the local
+// skip, and the top-level reason states both counts. Calling
+// order_outcome_set again with only the local text would replace the gate's
+// declaration, so the composition must keep it.
+func TestOrphanSweepComposesGateAndLocalSkipOutcomes(t *testing.T) {
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{
+			inProgress("ga-foreign", "project/dalinar"),
+			hookClaim("ga-legacy-hint", "gc-d34d3", "gastown__polecat-gc-d34d3",
+				map[string]string{"gc.session_bead_id": "gc-legacy9"}),
+		},
+		nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d3", Status: "closed", IssueType: "session"}},
+		[]string{"project/dalinar"},
+		nil)
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if want := "orphan-sweep: reset 0 orphaned beads, skipped 1 unverifiable, protected 1 foreign/unknown claims"; !strings.Contains(run.out, want) {
+		t.Fatalf("output missing %q:\n%s", want, run.out)
+	}
+	outcome, ok := run.outcome(t)
+	if !ok || outcome.Outcome != "partial" {
+		t.Fatalf("outcome = %+v (written %v), want partial\n%s", outcome, ok, run.context())
+	}
+	if len(outcome.Scopes) != 2 {
+		t.Fatalf("outcome scopes = %+v, want the identity scope and the bead-id scope", outcome.Scopes)
+	}
+	gateScope, beadScope := false, false
+	for _, scope := range outcome.Scopes {
+		switch scope.Scope {
+		case "project/dalinar":
+			gateScope = strings.Contains(scope.Reason, "absent_from_roster")
+		case "ga-legacy-hint":
+			beadScope = strings.Contains(scope.Reason, "gc-d34d3") && strings.Contains(scope.Reason, "gc-legacy9")
+		}
+	}
+	if !gateScope {
+		t.Fatalf("no scope for project/dalinar with the gate's reason text: %+v", outcome.Scopes)
+	}
+	if !beadScope {
+		t.Fatalf("no scope for ga-legacy-hint naming the assignee and the unreadable candidate: %+v", outcome.Scopes)
+	}
+	for _, want := range []string{"protected 1 claim", "skipped 1 unverifiable"} {
+		if !strings.Contains(outcome.Reason, want) {
+			t.Fatalf("outcome reason %q, want it to state both counts (%q)", outcome.Reason, want)
+		}
+	}
+}
+
 // TestJsonlExportFirstRunArchivePathCreatedBeforeTheRename covers the window
 // between the first run's "archive path absent" check and its rename of the
 // staging repo into place: another exporter (or anything else) can create
