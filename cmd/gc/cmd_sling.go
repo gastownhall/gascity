@@ -341,7 +341,7 @@ func applySlingInlineBead(cfg *config.City, beadOrFormula string, isFormula, dry
 	}
 	inlineText = previewInlineText
 	if createInlineBead {
-		created, err := store.Create(beads.Bead{Title: finalBead, Description: stdinDescription, Type: "task"})
+		created, err := store.Create(beads.Bead{Title: finalBead, Description: stdinDescription, Type: slingInlineBeadType})
 		if err != nil {
 			return finalBead, false, "bead_create_failed", fmt.Sprintf("gc sling: creating bead: %v", err)
 		}
@@ -2392,6 +2392,20 @@ func looksLikeBeadIDSuffix(baseSuffix string) bool {
 	return false
 }
 
+// slingInlineBeadType is the bead type gc sling creates from inline text.
+const slingInlineBeadType = "task"
+
+// refuseMultiLineInlineText rejects inline text spanning more than one line.
+// Multi-line inline text is never a legitimate bead title — it's almost always
+// a caller bug (e.g. a newline-joined list of bead IDs passed as one sling
+// argument instead of iterated one-per-call).
+func refuseMultiLineInlineText(text string) error {
+	if lines := strings.Count(text, "\n") + 1; lines > 1 {
+		return fmt.Errorf("inline text argument spans %d lines; refusing to create a bead from it — pass a single bead ID, iterate over a list (one ID per gc sling), or use --stdin for multi-line bead text", lines)
+	}
+	return nil
+}
+
 func resolveInlineBeadAction(cfg *config.City, beadOrFormula string, dryRun bool, store beads.Store) (createInlineBead, previewInlineText bool, err error) {
 	// Fast path: heuristics already classify this as a bead ID.
 	if !looksLikeInlineText(cfg, beadOrFormula) {
@@ -2403,8 +2417,8 @@ func resolveInlineBeadAction(cfg *config.City, beadOrFormula string, dryRun bool
 	// than silently fabricating a bead whose title is the whole blob; this
 	// applies to both the real and dry-run paths so a dry-run preview can't
 	// promise a bead that would never be created.
-	if lines := strings.Count(beadOrFormula, "\n") + 1; lines > 1 {
-		return false, false, fmt.Errorf("inline text argument spans %d lines; refusing to create a bead from it — pass a single bead ID, iterate over a list (one ID per gc sling), or use --stdin for multi-line bead text", lines)
+	if err := refuseMultiLineInlineText(beadOrFormula); err != nil {
+		return false, false, err
 	}
 	// Store probe: covers IDs that pass the shape pre-check but fail the
 	// heuristic (e.g. descriptive multi-dash IDs like "fo-spawn-storm").

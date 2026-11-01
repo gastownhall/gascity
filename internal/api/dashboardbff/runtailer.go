@@ -544,13 +544,23 @@ func (t *cityRunTailer) foldNext(proj *runproj.Projector, st *tailState) {
 // (session.updated / .woke / .stopped / .crashed / …).
 const sessionEventPrefix = "session."
 
+// sessionObservationEvents are session.* events that observe a session
+// without changing it: they move no session link, so they never refresh the
+// sessions enrichment. The program-status shadow records a comparison at
+// every decision point, often several a second city-wide; refreshing on each
+// would drop the sessions cache on every tail poll.
+var sessionObservationEvents = map[string]bool{
+	events.SessionProgramStatusShadow: true,
+}
+
 // containsSessionEvent reports whether any freshly-folded event is a session
 // lifecycle event. Such events do not change the bead fold, so build() ignores
 // them, but they change the live session enrichment the detail projection layers
 // on — the reason foldNext refreshes sessions and wakes the detail stream.
+// Observation-only session events (sessionObservationEvents) do not count.
 func containsSessionEvent(fresh []events.Event) bool {
 	for i := range fresh {
-		if strings.HasPrefix(fresh[i].Type, sessionEventPrefix) {
+		if strings.HasPrefix(fresh[i].Type, sessionEventPrefix) && !sessionObservationEvents[fresh[i].Type] {
 			return true
 		}
 	}

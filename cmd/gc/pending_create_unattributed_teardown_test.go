@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/runtime/hybrid"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // These tests pin the pending-create teardown of a manual session's runtime
@@ -83,14 +84,29 @@ func reconcileTeardownTick(t *testing.T, env *reconcilerTestEnv, sp runtime.Prov
 	if err != nil {
 		t.Fatal(err)
 	}
+	return reconcileTeardownTickOver(t, env, sp, cur)
+}
+
+// reconcileTeardownTickOver runs one reconciler tick on sp over snapshot,
+// which may be older than the store's row, and returns the row as stored
+// after the tick.
+func reconcileTeardownTickOver(t *testing.T, env *reconcilerTestEnv, sp runtime.Provider, snapshot beads.Bead) beads.Bead {
+	t.Helper()
+	return reconcileTeardownTickDraining(t, env, sp, nil, snapshot)
+}
+
+// reconcileTeardownTickDraining is reconcileTeardownTickOver with the tick's
+// drain operations, so a case can hand the row a drain-ack.
+func reconcileTeardownTickDraining(t *testing.T, env *reconcilerTestEnv, sp runtime.Provider, dops drainOps, snapshot beads.Bead) beads.Bead {
+	t.Helper()
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
 	reconcileSessionBeadsTraced(
-		context.Background(), env.city, []beads.Bead{cur}, env.desiredState, cfgNames, env.cfg, sp,
-		env.store, nil, nil, nil, nil, env.dt, map[string]int{"worker": 1}, false, nil, "",
+		context.Background(), env.city, []beads.Bead{snapshot}, env.desiredState, cfgNames, env.cfg, sp,
+		env.store, dops, nil, nil, nil, env.dt, map[string]int{"worker": 1}, false, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr, newPoolDesiredStateTestTrace("worker"),
 		env.startOptions...,
 	)
-	got, err := env.store.Get(id)
+	got, err := env.store.Get(snapshot.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,6 +235,162 @@ func TestPendingCreateRollback_TearsDownManualRowsUnattributedRuntime(t *testing
 				}
 			})
 		}
+	}
+}
+
+// TestPendingCreateRollback_PoolRowCommittedAfterSnapshotKeepsItsRuntime: a
+// tick whose snapshot still reads a bead-scoped pool row as a claimed pending
+// create past its in-flight window, after the row's start committed it
+// active and released the name's flock, reads the start's unstamped box as
+// another session's and rolls the row back. The teardown before the rollback
+// must decide from the committed row, not the snapshot: it leaves the box
+// running and the row active (#7751: a 1-2 min exec/k8s start torn down after
+// it succeeded).
+//
+// Kills: a pool teardown that stops from the tick's snapshot.
+func TestPendingCreateRollback_PoolRowCommittedAfterSnapshotKeepsItsRuntime(t *testing.T) {
+	env, session, name := newRestartedPendingCreate(t, rowPool)
+	stale, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := env.clk.Now().UTC()
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                     string(sessionpkg.StateActive),
+		"state_reason":              "creation_complete",
+		"creation_complete_at":      now.Format(time.RFC3339),
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
+		"instance_token":            "test-token-2",
+		"generation":                "2",
+		"last_woke_at":              now.Add(-2 * time.Minute).Format(time.RFC3339),
+	})
+
+	got := reconcileTeardownTickOver(t, env, execProfile(env.sp), stale)
+
+	if n := countCalls(env.sp, "Stop"); n != 0 || !env.sp.IsRunning(name) {
+		t.Fatalf("Stop called %d times, running=%v; want the committed start's box left running; stderr=%s", n, env.sp.IsRunning(name), env.stderr.String())
+	}
+	if got.Status == "closed" || got.Metadata["state"] != string(sessionpkg.StateActive) {
+		t.Fatalf("status=%s state=%q, want the row open and active; stderr=%s", got.Status, got.Metadata["state"], env.stderr.String())
+	}
+	if strings.Contains(env.stderr.String(), "rolling back pending create") {
+		t.Fatalf("the committed row was rolled back; stderr=%s", env.stderr.String())
+	}
+}
+
+// TestPendingCreateRollback_ActiveRowIsNotRolledBack: a row whose start
+// committed it active with its pending_create_claim still set (a commit
+// written key by key that stopped part way) is no pending create any more:
+// the rollback's fence refuses an active row, so no rollback of it lands. A
+// tick that reads its unstamped box as another session's must not send it to
+// the rollback, whose teardown holds it there on every tick, ahead of its
+// drain-ack, idle and drift handling. With no drain-ack the tick clears the
+// stale claim, confirming the start (state_reason=creation_complete, which
+// the post-create demand floor reads), and leaves the box running; a
+// drain-ack is honored as for any active row.
+//
+// Kills: an alive pending-create rollback not gated on the row's own
+// rollback fence (rollbackable); a claim clear that leaves the start
+// unconfirmed.
+func TestPendingCreateRollback_ActiveRowIsNotRolledBack(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		class teardownRowClass
+		acked bool
+	}{
+		{name: "pool", class: rowPool},
+		{name: "pool drain-acked", class: rowPool, acked: true},
+		{name: "manual", class: rowManual},
+		{name: "manual drain-acked", class: rowManual, acked: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, session, name := newRestartedPendingCreate(t, tc.class)
+			env.setSessionMetadata(&session, map[string]string{"state": string(sessionpkg.StateActive)})
+			var dops drainOps
+			if tc.acked {
+				acks := newFakeDrainOps()
+				if err := acks.setDrainAck(name); err != nil {
+					t.Fatal(err)
+				}
+				dops = acks
+			}
+			cur, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			got := reconcileTeardownTickDraining(t, env, execProfile(env.sp), dops, cur)
+			waitAsyncStopsForTest(t, env.stops)
+
+			stderr := env.stderr.String()
+			if strings.Contains(stderr, "rolling back pending create") || strings.Contains(stderr, "pending-create rollback not applied") {
+				t.Fatalf("the active row was sent to the pending-create rollback; stderr=%s", stderr)
+			}
+			if got.Status == "closed" || got.Metadata["pending_create_claim"] != "" {
+				t.Fatalf("status=%s claim=%q, want the row open with its stale claim cleared; stderr=%s", got.Status, got.Metadata["pending_create_claim"], stderr)
+			}
+			stops, running, state := countCalls(env.sp, "Stop"), env.sp.IsRunning(name), got.Metadata["state"]
+			if !tc.acked {
+				if stops != 0 || !running || state != string(sessionpkg.StateActive) || got.Metadata["state_reason"] != "creation_complete" {
+					t.Fatalf("stops=%d running=%v state=%q state_reason=%q, want the row confirmed active with its box left running; stderr=%s",
+						stops, running, state, got.Metadata["state_reason"], stderr)
+				}
+				return
+			}
+			if stops != 1 || running || state != string(sessionpkg.StateDraining) {
+				t.Fatalf("stops=%d running=%v state=%q, want the drain-ack honored: the row draining and its box stopped once; stderr=%s", stops, running, state, stderr)
+			}
+		})
+	}
+}
+
+// TestPendingCreateRollback_ActiveRowStaysActiveUntilItsClaimClears: clearing
+// the stale claim of an active row is a start's commit
+// (recoverRunningPendingCreate), so it waits while another holder has the
+// runtime lease. The tick that waits must leave the row active. Heal projects
+// awake onto a live row, and an awake row that still holds its claim is a
+// pending create: the next tick's rollback would stop the row's own box and
+// close the row failed-create. Once the lease is free, the claim is cleared,
+// the start is confirmed, and the box keeps running.
+//
+// Kills: a heal that relabels a claimed active row awake before its claim is
+// cleared.
+func TestPendingCreateRollback_ActiveRowStaysActiveUntilItsClaimClears(t *testing.T) {
+	for _, class := range []teardownRowClass{rowPool, rowManual} {
+		t.Run(string(class), func(t *testing.T) {
+			env, session, name := newRestartedPendingCreate(t, class)
+			env.setSessionMetadata(&session, map[string]string{"state": string(sessionpkg.StateActive)})
+			sp := execProfile(env.sp)
+			_, release, err := tryRuntimeLease(nil, env.city, name, "", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(release)
+
+			got := reconcileTeardownTick(t, env, sp, session.ID)
+			if got.Status == "closed" || got.Metadata["pending_create_claim"] != "true" || got.Metadata["state"] != string(sessionpkg.StateActive) {
+				t.Fatalf("tick 1: status=%s state=%q claim=%q, want the row active, its claim clear waiting for the lease holder; stderr=%s",
+					got.Status, got.Metadata["state"], got.Metadata["pending_create_claim"], env.stderr.String())
+			}
+			release()
+			env.clk.Advance(30 * time.Second)
+
+			got = reconcileTeardownTick(t, env, sp, session.ID)
+			waitAsyncStopsForTest(t, env.stops)
+			stderr := env.stderr.String()
+			if strings.Contains(stderr, "rolling back pending create") {
+				t.Fatalf("tick 2: the active row was rolled back; stderr=%s", stderr)
+			}
+			if got.Status == "closed" || got.Metadata["pending_create_claim"] != "" ||
+				got.Metadata["state"] != string(sessionpkg.StateActive) || got.Metadata["state_reason"] != "creation_complete" {
+				t.Fatalf("tick 2: status=%s state=%q state_reason=%q claim=%q, want the row confirmed active with its stale claim cleared; stderr=%s",
+					got.Status, got.Metadata["state"], got.Metadata["state_reason"], got.Metadata["pending_create_claim"], stderr)
+			}
+			if stops, running := countCalls(env.sp, "Stop"), env.sp.IsRunning(name); stops != 0 || !running {
+				t.Fatalf("tick 2: stops=%d running=%v, want the row's box left running; stderr=%s", stops, running, stderr)
+			}
+		})
 	}
 }
 

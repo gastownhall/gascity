@@ -1482,6 +1482,7 @@ func configureSupervisorRuntime() {
 // and runs until canceled.
 func runSupervisor(stdout, stderr io.Writer) int {
 	configureSupervisorRuntime()
+	markProgramShadowLongLived()
 
 	if pid := supervisorAlive(); pid != 0 {
 		fmt.Fprintf(stderr, "gc supervisor: supervisor already running (PID %d)\n", pid) //nolint:errcheck
