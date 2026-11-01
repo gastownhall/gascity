@@ -5355,6 +5355,22 @@ func promptLineRest(line, readyPromptPrefix string) (rest string, ok bool) {
 	return "", false
 }
 
+// paneShowsReadyPrompt reports whether the live composer in lines is a ready
+// prompt. The live composer is the LAST line matching promptPrefix (as in
+// paneShowsStagedDraft): agents echo past user turns with the same glyph, so
+// earlier prompt lines are transcript. The prompt need not be the last
+// non-empty line, since TUIs draw a status footer below it. When that line is
+// a numbered menu's cursor row (isMenuCursorRow) the pane is waiting for a
+// choice, so this reports false, as it does with no prompt line on screen.
+func paneShowsReadyPrompt(lines []string, promptPrefix string) bool {
+	for i := len(lines) - 1; i >= 0; i-- {
+		if matchesPromptPrefix(lines[i], promptPrefix) {
+			return !isMenuCursorRow(lines, i, promptPrefix)
+		}
+	}
+	return false
+}
+
 // isMenuCursorRow reports whether lines[i], a line matching promptPrefix, is
 // the selected row of a numbered option menu ("› 1. Trust and continue"):
 // TUIs mark the highlighted option with their prompt glyph, so the row matches
@@ -5556,8 +5572,9 @@ func (t *Tmux) snapshotPaneIdleWithPrefix(session, promptPrefix string) (bool, e
 // ClassifyIdlePane classifies captured pane lines the way every pane-scanning
 // idle check does: a busy-indicator string anywhere in lines is the busy
 // reading, (false, nil); a ready prompt (PaneShowsIdlePrompt) is idle,
-// (true, nil); anything else returns [runtime.ErrIdleIndeterminate], since a
-// pane showing neither is not evidence of work. The tmux idle wait and its
+// (true, nil); anything else, including a numbered menu waiting for a choice,
+// returns [runtime.ErrIdleIndeterminate], since a pane showing neither is not
+// evidence of work. The tmux idle wait and its
 // exec twin both classify each capture through it.
 func ClassifyIdlePane(lines []string, promptPrefix string) (bool, error) {
 	if paneContainsBusyIndicator(lines) {
@@ -5571,16 +5588,16 @@ func ClassifyIdlePane(lines []string, promptPrefix string) (bool, error) {
 
 // PaneShowsIdlePrompt is the pure scan behind tmux idle detection: it reports
 // whether captured pane lines show promptPrefix with no active-processing
-// indicator. It does not substitute a default for a blank promptPrefix;
-// callers resolve the prefix first (DefaultReadyPromptPrefix when the session
-// configures none).
+// indicator. The bottom-most prompt-prefixed line decides (see
+// paneShowsReadyPrompt): a numbered menu's cursor row there is a pending
+// choice, not an idle composer. It does not substitute a default for a blank
+// promptPrefix; callers resolve the prefix first (DefaultReadyPromptPrefix
+// when the session configures none).
 //
 // Runtimes that run the agent in a tmux session inside a remote box capture
 // the pane over their own connection (PromptObservationLines lines) and apply
 // this same scan, so their idle boundary matches local tmux exactly.
 func PaneShowsIdlePrompt(lines []string, promptPrefix string) bool {
-	prefix := strings.TrimSpace(promptPrefix)
-
 	// Check for active processing indicator in the status bar.
 	// Claude Code shows "esc to interrupt" while processing — if present,
 	// the agent is busy regardless of whether the prompt is visible.
@@ -5602,22 +5619,7 @@ func PaneShowsIdlePrompt(lines []string, promptPrefix string) bool {
 		return false
 	}
 
-	// Scan captured lines for the prompt prefix.
-	// Claude Code renders a status bar below the prompt line,
-	// so the prompt may not be the last non-empty line.
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		if isMenuCursorRow(lines, i, promptPrefix) {
-			continue
-		}
-		if matchesPromptPrefix(trimmed, promptPrefix) || (prefix != "" && trimmed == prefix) {
-			return true
-		}
-	}
-	return false
+	return paneShowsReadyPrompt(lines, promptPrefix)
 }
 
 // SnapshotIdle reports whether the named session is at an idle interactive
