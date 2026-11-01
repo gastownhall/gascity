@@ -144,9 +144,9 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 	tests := []struct {
 		name string
 		fx   rotatedKeyFixture
-		// transcriptRoot writes freshKey's transcript under this root before
-		// the command is built; "" leaves the key without one.
-		transcriptRoot string
+		// transcript writes freshKey's keyed transcript under the probe root
+		// before the command is built, the file a live conversation leaves.
+		transcript bool
 		// wantCommand and wantFlag build the expected command around
 		// freshKey; wantFlag "" expects the bare command (no conversation
 		// flag at all).
@@ -158,6 +158,16 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			fx:          rotatedKeyFixture{freshKey: freshKey},
 			wantCommand: "claude",
 			wantFlag:    "--session-id",
+		},
+		{
+			// A transcript the probe finds is a conversation the resume
+			// reattaches to: the exact base resume command, BuildResumeCommand
+			// flag style.
+			name:        "transcript present for the rotated key",
+			fx:          rotatedKeyFixture{freshKey: freshKey},
+			transcript:  true,
+			wantCommand: "claude",
+			wantFlag:    "--resume",
 		},
 		{
 			name:        "creating row with a stale creation_complete_at",
@@ -197,8 +207,8 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			}
 			handle, store, info := newRotatedKeyHandle(t, tt.fx)
 			workDir := info.WorkDir
-			if tt.transcriptRoot != "" {
-				writeKeyedTranscript(t, tt.transcriptRoot, workDir, freshKey)
+			if tt.transcript {
+				writeKeyedTranscript(t, tt.fx.probeRoot, workDir, freshKey)
 			}
 			before := beadMetadata(t, store, info.ID)
 
