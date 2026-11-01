@@ -348,7 +348,7 @@ func TestLegacyProtectedRebindClaimLeavesWorkBoundElsewhere(t *testing.T) {
 		StoreRefs:     map[string]string{"gc-b": "rig:r1"},
 		WorktreeSpecs: map[string]*worktree.Spec{"gc-b": &specB},
 	}}
-	states := ComputePoolDesiredStatesWithDemandTracedAt(cfg, nil, snapshot.OpenInfos(), map[string]int{"worker": 1}, demand, now, nil)
+	states := computePoolDesiredStatesAt(cfg, nil, snapshot.OpenInfos(), map[string]int{"worker": 1}, demand, now, nil)
 	if len(states) != 1 || len(states[0].Requests) != 1 || states[0].Requests[0].SessionBeadID != seat.ID {
 		t.Fatalf("desired states = %#v; want one protected request for %s", states, seat.ID)
 	}
