@@ -782,6 +782,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wisp_gc_interval` and `wisp_ttl`) collects expired wisps, including on
   split-storage cities, where `gc bd` refuses the script's writes. (#4937)
 
+- **The v2 reconciler alerts when it refuses a work item for unusable
+  worktree evidence.** A ready pool work item whose `gc.work_dir` /
+  `gc.worktree_*` metadata is incomplete or conflicting, or names another
+  bead or store, gets no session. Under v2, the default reconciler, the pool
+  refused it on every pass and reported nothing, so the item starved
+  silently while the legacy reconciler printed a skip line every tick. v2 now
+  alerts once per work item and cause while the refusal lasts: a
+  `v2 planner: alert worktree-refused: ...` line on controller stderr naming
+  the work bead, the pool and the problem, a `reconciler.alert` event whose
+  subject is the work bead, and a `worktree-refused` count in the
+  `reconcile.pass` record's `alerts`. A refusal while a failed worktree
+  verification backs off is not re-alerted; the create attempt already
+  logged it.
+
 - **Sessions no longer inherit a native store open's temporary environment.**
   While gc opens a native Dolt store it briefly rewrites its own process
   environment: it clears the `BEADS_*` and `BD_*` variables and sets the

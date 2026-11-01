@@ -310,10 +310,16 @@ type planReservation struct {
 }
 
 // allocTraceRecord is one decision the pass refused or skipped, so
-// starvation is visible (C2.2): a plan gate's refusal consumes nothing.
+// starvation is visible (C2.2): a plan gate's refusal consumes nothing. A
+// request the pass refuses because it found the request's worktree evidence
+// unusable also names its work item (WorkBeadID) and why (Detail): no create
+// effect ever sees that request, so the planner alerts on the record
+// (observeWorktreeRefusals).
 type allocTraceRecord struct {
-	Template string
-	Instance string
-	Key      rowKey
-	Reason   string
+	Template   string
+	Instance   string
+	Key        rowKey
+	Reason     string
+	WorkBeadID string
+	Detail     string
 }
