@@ -1555,6 +1555,11 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "internal/api/city_starting_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
 path = "internal/api/client_extmsg_test.go"
 resource = "http_test_server"
 calls = 3
