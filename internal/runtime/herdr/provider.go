@@ -559,23 +559,37 @@ func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[stri
 // closePane never issued ⇒ panes piled up across witness sleep cycles.
 //
 // A session herdr answers it does not have (no agent, no live bound pane, or a
-// pane gone before its close) is stopped: nil. A herdr that cannot answer —
-// the pane lookup or the close fails at the transport — is an error, and the
-// sidecar is kept so a retried Stop still finds the pane (RUNTIME-CONTRACT-003:
-// runtime.StopForCleanup propagates it rather than certify the session gone).
+// pane gone before its close) is stopped: nil. So is a session whose pane could
+// not be reached because the herdr server is confirmed dead
+// (serverConfirmedDead): its panes died with it, and dropping the sidecar
+// keeps a restarted server's recycled pane id from resolving to this session.
+// Otherwise a herdr that cannot answer (the pane lookup, an exited agent's
+// reap or the close fails) is an error, and the sidecar is kept so a retried
+// Stop still finds the pane (RUNTIME-CONTRACT-003: runtime.StopForCleanup
+// propagates it rather than certify the session gone).
 func (p *Provider) Stop(name string) error {
 	ctx := context.Background()
-	pid, err := p.paneID(ctx, name)
-	if err != nil {
-		return fmt.Errorf("herdr: stopping %q: resolving its pane: %w", name, err)
-	}
-	if pid != "" {
-		if err := p.c.closePane(ctx, pid); err != nil && !paneGone(err) {
-			return fmt.Errorf("herdr: stopping %q: closing pane %s: %w", name, pid, err)
-		}
+	if err := p.closeSessionPane(ctx, name); err != nil && !p.c.serverConfirmedDead(ctx) {
+		return fmt.Errorf("herdr: stopping %q: %w", name, err)
 	}
 	if err := p.clearMeta(name); err != nil {
 		return fmt.Errorf("herdr: stopping %q: clearing its metadata: %w", name, err)
+	}
+	return nil
+}
+
+// closeSessionPane resolves name's pane and closes it. No pane, or a pane herdr
+// answers is gone by the close, is nil.
+func (p *Provider) closeSessionPane(ctx context.Context, name string) error {
+	pid, err := p.paneID(ctx, name)
+	if err != nil {
+		return fmt.Errorf("resolving its pane: %w", err)
+	}
+	if pid == "" {
+		return nil
+	}
+	if err := p.c.closePane(ctx, pid); err != nil && !paneGone(err) {
+		return fmt.Errorf("closing pane %s: %w", pid, err)
 	}
 	return nil
 }

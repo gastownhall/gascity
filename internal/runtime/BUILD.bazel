@@ -51,6 +51,7 @@ go_library(
         "turn_events_merge.go",
         "turn_fence.go",
         "turn_identity.go",
+        "unix_listener.go",
         "worker.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime",
@@ -123,6 +124,7 @@ go_test(
         "turn_events_merge_test.go",
         "turn_identity_test.go",
         "turn_interrupt_test.go",
+        "unix_listener_test.go",
     ],
     data = glob(
         ["**"],

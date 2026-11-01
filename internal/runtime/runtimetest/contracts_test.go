@@ -78,9 +78,33 @@ func TestCheckStopGoneSession(t *testing.T) {
 	}
 }
 
+// A dead server hosts no session, so teardown absorbs whatever Stop answers
+// for it short of a failure: nil, or a gone answer StopForCleanup takes.
+func TestCheckStopDeadServer(t *testing.T) {
+	cases := []struct {
+		name    string
+		stopErr error
+		wantOK  bool
+	}{
+		{"nil for a dead server", nil, true},
+		{"gone answer absorbed", fmt.Errorf("backend: %w", runtime.ErrSessionNotFound), true},
+		{"failure that wedges teardown", fmt.Errorf("backend stop: %w", errTransport), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkStopDeadServer(stopAnswerProvider{Provider: runtime.NewFake(), err: tc.stopErr})
+			if (err == nil) != tc.wantOK {
+				t.Errorf("checkStopDeadServer(Stop=%v) = %v, want ok=%v", tc.stopErr, err, tc.wantOK)
+			}
+		})
+	}
+}
+
 func TestCheckIdleWait(t *testing.T) {
 	observedTimeout := fmt.Errorf("not idle: %w", context.DeadlineExceeded)
 	unobservedTimeout := fmt.Errorf("not idle: %w: %w", context.DeadlineExceeded, runtime.ErrWaitUnobserved)
+	unavailable := fmt.Errorf("waiting: %w: %w", runtime.ErrRuntimeUnavailable, errTransport)
+	canceled := fmt.Errorf("waiting: %w", context.Canceled)
 	const timeout = 10 * time.Millisecond
 
 	cases := []struct {
@@ -92,6 +116,8 @@ func TestCheckIdleWait(t *testing.T) {
 		{"busy: timeout alone", checkIdleWaitBusy, idleAnswerProvider{runtime.NewFake(), observedTimeout}, true},
 		{"busy: swallowed timeout", checkIdleWaitBusy, idleAnswerProvider{runtime.NewFake(), nil}, false},
 		{"busy: claims unobserved", checkIdleWaitBusy, idleAnswerProvider{runtime.NewFake(), unobservedTimeout}, false},
+		{"busy: reported unavailable", checkIdleWaitBusy, idleAnswerProvider{runtime.NewFake(), unavailable}, false},
+		{"busy: reported canceled", checkIdleWaitBusy, idleAnswerProvider{runtime.NewFake(), canceled}, false},
 		{"unobserved: wraps sentinel", checkIdleWaitUnobserved, idleAnswerProvider{runtime.NewFake(), unobservedTimeout}, true},
 		{"unobserved: timeout alone", checkIdleWaitUnobserved, idleAnswerProvider{runtime.NewFake(), observedTimeout}, false},
 		{"unobserved: swallowed timeout", checkIdleWaitUnobserved, idleAnswerProvider{runtime.NewFake(), nil}, false},

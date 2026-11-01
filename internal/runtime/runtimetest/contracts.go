@@ -26,15 +26,21 @@ const idleWaitBoundSlack = 3 * time.Second
 
 // StopFixtures supplies providers for the RUNTIME-CONTRACT-003 cases: Stop is
 // nil for a session a responsive provider does not have, and an error when the
-// provider cannot observe its inventory at all. A nil field skips its cases,
-// so a provider whose test environment cannot build that state opts out.
+// provider cannot observe its inventory at all, while teardown absorbs a
+// server confirmed dead. A nil field skips its cases, so a provider whose test
+// environment cannot build that state opts out.
 type StopFixtures struct {
 	// Responsive returns a provider whose backend answers and holds no
 	// session named contractSessionName.
 	Responsive func(t *testing.T) runtime.Provider
 	// Unreachable returns a provider whose backend cannot be observed at
-	// all (its transport fails), so it cannot tell whether a session exists.
+	// all (its transport fails) while its server may still be alive, so it
+	// cannot tell whether a session exists.
 	Unreachable func(t *testing.T) runtime.Provider
+	// DeadServer returns a provider whose server is confirmed dead: its
+	// socket is gone and nothing listens where it was bound, so it hosts no
+	// session at all.
+	DeadServer func(t *testing.T) runtime.Provider
 }
 
 // IdleWaitFixtures supplies sessions for the RUNTIME-CONTRACT-016 cases of a
@@ -54,9 +60,10 @@ type IdleWaitFixtures struct {
 }
 
 // RunStopContractTests runs the RUNTIME-CONTRACT-003 cases: a missing session
-// on a responsive provider stops cleanly, and an unreachable provider reports
-// the failure rather than certifying absence, so [runtime.StopForCleanup]
-// propagates it.
+// on a responsive provider stops cleanly; an unreachable provider reports the
+// failure rather than certifying absence, so [runtime.StopForCleanup]
+// propagates it; and with the server confirmed dead the same teardown
+// succeeds, so it never wedges on a session that cannot exist.
 func RunStopContractTests(t *testing.T, f StopFixtures) {
 	t.Helper()
 
@@ -74,6 +81,15 @@ func RunStopContractTests(t *testing.T, f StopFixtures) {
 			t.Skip("no unreachable-provider fixture")
 		}
 		if err := checkStopUnreachable(f.Unreachable(t)); err != nil {
+			t.Error(err)
+		}
+	})
+
+	t.Run("StopContract_DeadServerIsAbsorbedByCleanup", func(t *testing.T) {
+		if f.DeadServer == nil {
+			t.Skip("no dead-server fixture")
+		}
+		if err := checkStopDeadServer(f.DeadServer(t)); err != nil {
 			t.Error(err)
 		}
 	})
@@ -103,6 +119,16 @@ func checkStopUnreachable(sp runtime.Provider) error {
 	}
 	if err := runtime.StopForCleanup(sp, contractSessionName); err == nil {
 		return errors.New("runtime contract 003: StopForCleanup on an unreachable runtime = nil, want the Stop failure propagated")
+	}
+	return nil
+}
+
+// checkStopDeadServer reports how sp breaks RUNTIME-CONTRACT-003 when its
+// server is confirmed dead, or nil when it keeps the contract. Stop itself may
+// report the missing server (tmux does); teardown must absorb it.
+func checkStopDeadServer(sp runtime.Provider) error {
+	if err := runtime.StopForCleanup(sp, contractSessionName); err != nil {
+		return fmt.Errorf("runtime contract 003: StopForCleanup with the server confirmed dead = %w, want nil: a dead server hosts no session", err)
 	}
 	return nil
 }
@@ -180,11 +206,13 @@ func checkIdleWaitBusy(sp runtime.Provider, name string, timeout time.Duration) 
 	if boundErr != nil {
 		return boundErr
 	}
-	if waitErr == nil {
+	switch {
+	case waitErr == nil:
 		return fmt.Errorf("runtime contract 016: WaitForIdle(%q) on a session that stays busy = nil, want a timeout error", name)
-	}
-	if errors.Is(waitErr, runtime.ErrWaitUnobserved) {
-		return fmt.Errorf("runtime contract 016: WaitForIdle(%q) on a session read busy = %w, want the timeout alone, not runtime.ErrWaitUnobserved", name, waitErr)
+	case errors.Is(waitErr, runtime.ErrWaitUnobserved), errors.Is(waitErr, runtime.ErrRuntimeUnavailable):
+		return fmt.Errorf("runtime contract 016: WaitForIdle(%q) on a session read busy = %w, want the timeout alone: a restart decider reads runtime.ErrWaitUnobserved and runtime.ErrRuntimeUnavailable as no running turn", name, waitErr)
+	case errors.Is(waitErr, context.Canceled):
+		return fmt.Errorf("runtime contract 016: WaitForIdle(%q) on a session read busy = %w, want a timeout: nothing canceled the wait", name, waitErr)
 	}
 	return nil
 }

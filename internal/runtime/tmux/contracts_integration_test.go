@@ -14,11 +14,19 @@ import (
 
 var tmuxContractSession int64
 
+// tmuxContractProvider builds a provider with the conformance configuration
+// on socket.
+func tmuxContractProvider(socket string) runtime.Provider {
+	cfg := tmuxConformanceConfig()
+	cfg.SocketName = socket
+	return NewSeamBackedWithConfig(cfg)
+}
+
 // startTmuxContractSession starts a session running command on the
 // conformance socket, stopped at cleanup, and returns its provider and name.
 func startTmuxContractSession(t *testing.T, command string) (runtime.Provider, string) {
 	t.Helper()
-	p := NewSeamBackedWithConfig(tmuxConformanceConfig())
+	p := tmuxContractProvider(testSocketName)
 	name := fmt.Sprintf("gc-test-contract-%d", atomic.AddInt64(&tmuxContractSession, 1))
 	if err := p.Start(context.Background(), name, runtime.Config{Command: command, WorkDir: t.TempDir()}); err != nil {
 		t.Fatalf("Start(%s): %v", name, err)
@@ -31,8 +39,9 @@ func startTmuxContractSession(t *testing.T, command string) (runtime.Provider, s
 	return p, name
 }
 
-// TestTmuxStopContract runs the RUNTIME-CONTRACT-003 missing-session case
-// against real tmux with a running server (a sentinel session holds it up).
+// TestTmuxStopContract runs the RUNTIME-CONTRACT-003 cases against real tmux:
+// the missing-session case with a running server (a sentinel session holds it
+// up), and the dead-server case on a private socket no server ever bound.
 // tmux's unreachable case is its missing-server answer, which
 // runtime.StopForCleanup absorbs by design once the server is confirmed dead,
 // so it has no Unreachable fixture here.
@@ -41,6 +50,9 @@ func TestTmuxStopContract(t *testing.T) {
 		Responsive: func(t *testing.T) runtime.Provider {
 			p, _ := startTmuxContractSession(t, "sleep 300")
 			return p
+		},
+		DeadServer: func(*testing.T) runtime.Provider {
+			return tmuxContractProvider(privateSocketName("dead"))
 		},
 	})
 }

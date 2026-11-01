@@ -90,14 +90,22 @@ func idleWaitStatusReserve(timeout time.Duration) time.Duration {
 // an error wrapping context.DeadlineExceeded, and runtime.ErrWaitUnobserved as
 // well unless the agent was read busy (RUNTIME-CONTRACT-016). A herdr that
 // cannot answer returns an error wrapping runtime.ErrRuntimeUnavailable, and a
-// canceled ctx returns its error.
+// canceled ctx returns its error, also when it was canceled during the status
+// read that follows a timeout.
 func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	outcome, err := p.waitForIdleVerdict(waitCtx, name, timeout-idleWaitStatusReserve(timeout))
+	err := p.waitForIdleWithin(waitCtx, name, timeout)
 	if cerr := ctx.Err(); cerr != nil {
 		return cerr
 	}
+	return err
+}
+
+// waitForIdleWithin is WaitForIdle's verdict under waitCtx, the caller's
+// context bounded by timeout.
+func (p *Provider) waitForIdleWithin(waitCtx context.Context, name string, timeout time.Duration) error {
+	outcome, err := p.waitForIdleVerdict(waitCtx, name, timeout-idleWaitStatusReserve(timeout))
 	switch {
 	case outcome == idleWaitReached, outcome == idleWaitNoAgent:
 		return nil
