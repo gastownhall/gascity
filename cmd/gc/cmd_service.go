@@ -144,8 +144,20 @@ func cmdServiceRestart(name string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc service restart: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	client := serviceRestartClient(cityPath, cfg)
+	client, reason := serviceRestartClient(cityPath, cfg)
+	return doServiceRestart(client, reason, name, stdout, stderr)
+}
+
+// doServiceRestart posts the restart through client, or reports why no client
+// resolved: reason "grant-required" when the supervisor requires a city write
+// grant this client cannot mint, anything else when no controller serves the
+// city.
+func doServiceRestart(client *api.Client, reason, name string, stdout, stderr io.Writer) int {
 	if client == nil {
+		if reason == "grant-required" {
+			fmt.Fprintf(stderr, "gc service restart: the supervisor requires a signed city write grant (%s), which gc cannot attach to this command yet\n", reason) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		fmt.Fprintln(stderr, "gc service restart: controller is not running") //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -157,8 +169,17 @@ func cmdServiceRestart(name string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func serviceRestartClient(cityPath string, cfg *config.City) *api.Client {
-	if controllerAlive(cityPath) != 0 && cfg.API.Port > 0 {
+// serviceRestartClient resolves the API client `gc service restart` posts
+// through: the [api] port of a live controller that does not identify as
+// supervisor-hosted, else the supervisor-managed client. A supervisor-hosted
+// city skips its [api] port, which the supervisor ignores. A supervisor that
+// requires city write grants (supervisorRequiresCityWriteGrants) yields (nil,
+// "grant-required"): this client mints no grant, so the supervisor would
+// refuse the restart with a 401. With no client the reason is
+// "controller-down".
+func serviceRestartClient(cityPath string, cfg *config.City) (*api.Client, string) {
+	identity := apiRouteControllerIdentityHook(cityPath)
+	if identity.PID != 0 && identity.HostingMode != controllerHostingSupervisor && cfg.API.Port > 0 {
 		bind := cfg.API.BindOrDefault()
 		switch bind {
 		case "0.0.0.0":
@@ -167,12 +188,15 @@ func serviceRestartClient(cityPath string, cfg *config.City) *api.Client {
 			bind = "::1"
 		}
 		baseURL := fmt.Sprintf("http://%s", net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port)))
-		return api.NewCityScopedClient(baseURL, standaloneControllerCityName(cfg, cityPath))
+		return api.NewCityScopedClient(baseURL, standaloneControllerCityName(cfg, cityPath)), ""
 	}
-	if client := supervisorCityAPIClient(cityPath); client != nil {
-		return client
+	if client := apiRouteSupervisorClientHook(cityPath); client != nil {
+		if apiRouteSupervisorWriteGrantsHook() {
+			return nil, "grant-required"
+		}
+		return client, ""
 	}
-	return nil
+	return nil, "controller-down"
 }
 
 func doServiceList(cityPath string, cfg *config.City, reader serviceStatusReader, jsonOutput bool, stdout, stderr io.Writer) int {
