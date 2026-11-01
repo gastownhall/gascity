@@ -80,6 +80,20 @@ func TestWaitForIdleIndeterminateReadingsAreUnobserved(t *testing.T) {
 	}
 }
 
+// claudeSessionLimitMenu is Claude's session-limit chooser: the selected option
+// carries the default prompt glyph, followed by an NBSP.
+const claudeSessionLimitMenu = "  You've hit your session limit\n\n❯\u00a01. Stop and wait for limit to reset\n  2. Upgrade\n"
+
+// A pane parked on a numbered menu is waiting for an answer: its cursor row is
+// no idle boundary, so the wait times out without having observed a turn.
+func TestWaitForIdleMenuIsNotIdle(t *testing.T) {
+	tm := scriptedTmux(scriptedCapture{out: claudeSessionLimitMenu})
+	err := tm.WaitForIdle(context.Background(), "w", 500*time.Millisecond)
+	if !errors.Is(err, ErrIdleTimeout) || !errors.Is(err, runtime.ErrWaitUnobserved) {
+		t.Fatalf("WaitForIdle = %v, want ErrIdleTimeout wrapping ErrWaitUnobserved", err)
+	}
+}
+
 // One busy reading makes the timeout an observed one, even when later reads
 // fail.
 func TestWaitForIdleBusyReadingIsObserved(t *testing.T) {
@@ -144,6 +158,7 @@ func TestClassifyIdlePane(t *testing.T) {
 		{"busy", []string{"❯ ", busyPane}, false, nil},
 		{"idle", []string{"❯ "}, true, nil},
 		{"indeterminate", strings.Split(indeterminatePane, "\n"), false, runtime.ErrIdleIndeterminate},
+		{"menu", strings.Split(claudeSessionLimitMenu, "\n"), false, runtime.ErrIdleIndeterminate},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			idle, err := ClassifyIdlePane(tc.lines, DefaultReadyPromptPrefix)
