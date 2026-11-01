@@ -218,13 +218,13 @@ func waveTestStart(name string) preparedStart {
 }
 
 // runWaveBounded runs the wave on its own goroutine and fails the test, rather
-// than hanging the test binary, if it has not returned within limit.
-func runWaveBounded(ctx context.Context, t *testing.T, limit time.Duration, items []preparedStart, sp *wedgedLivenessProvider, startupTimeout time.Duration, maxParallel int) ([]startResult, time.Duration) {
+// than hanging the test binary, if it has not returned within ten seconds.
+func runWaveBounded(ctx context.Context, t *testing.T, items []preparedStart, sp *wedgedLivenessProvider, startupTimeout time.Duration, maxParallel int) ([]startResult, time.Duration) {
 	t.Helper()
-	return runStartWaveBounded(ctx, t, limit, sp.city, items, sp, startupTimeout, maxParallel)
+	return runStartWaveBounded(ctx, t, sp.city, items, sp, startupTimeout, maxParallel)
 }
 
-func runStartWaveBounded(ctx context.Context, t *testing.T, limit time.Duration, city string, items []preparedStart, sp runtime.Provider, startupTimeout time.Duration, maxParallel int) ([]startResult, time.Duration) {
+func runStartWaveBounded(ctx context.Context, t *testing.T, city string, items []preparedStart, sp runtime.Provider, startupTimeout time.Duration, maxParallel int) ([]startResult, time.Duration) {
 	t.Helper()
 	type waveReturn struct {
 		results []startResult
@@ -239,8 +239,8 @@ func runStartWaveBounded(ctx context.Context, t *testing.T, limit time.Duration,
 	select {
 	case got := <-ch:
 		return got.results, got.elapsed
-	case <-time.After(limit):
-		t.Fatalf("the wave had not returned after %v: its collector waits on a start nothing can cancel", limit)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the wave had not returned after 10s: its collector waits on a start nothing can cancel")
 		return nil, 0
 	}
 }
@@ -251,11 +251,11 @@ func TestExecutePreparedStartWave_StartupTimeoutCanRetryWithFreshWaveContext(t *
 	items := []preparedStart{waveTestStart("retry")}
 	const startupTimeout = 50 * time.Millisecond
 
-	first, _ := runStartWaveBounded(context.Background(), t, 10*time.Second, t.TempDir(), items, sp, startupTimeout, 1)
+	first, _ := runStartWaveBounded(context.Background(), t, t.TempDir(), items, sp, startupTimeout, 1)
 	if len(first) != 1 || first[0].outcome != TraceOutcomeDeadlineExceeded || !errors.Is(first[0].err, context.DeadlineExceeded) {
 		t.Fatalf("first wave result = %#v, want a startup timeout that can be retried", first)
 	}
-	second, _ := runStartWaveBounded(context.Background(), t, 10*time.Second, t.TempDir(), items, sp, startupTimeout, 1)
+	second, _ := runStartWaveBounded(context.Background(), t, t.TempDir(), items, sp, startupTimeout, 1)
 	if len(second) != 1 {
 		t.Fatalf("second wave results = %d, want 1", len(second))
 	}
@@ -301,7 +301,7 @@ func TestExecutePreparedStartWave_WedgedStartIsAbandonedAtTheWaveDeadline(t *tes
 	items := []preparedStart{waveTestStart("healthy"), waveTestStart("wedged")}
 
 	const startupTimeout = 200 * time.Millisecond
-	results, elapsed := runWaveBounded(context.Background(), t, 10*time.Second, items, sp, startupTimeout, 2)
+	results, elapsed := runWaveBounded(context.Background(), t, items, sp, startupTimeout, 2)
 
 	if want := startupTimeout + waveDeadlineSlack; elapsed < want {
 		t.Fatalf("wave returned after %v, before its deadline %v", elapsed, want)
@@ -323,7 +323,7 @@ func TestExecutePreparedStartWave_WedgedStartIsAbandonedAtTheWaveDeadline(t *tes
 func TestExecutePreparedStartWave_AbandonedProbeDoesNotReachStartAfterTheDeadline(t *testing.T) {
 	setWaveDeadlineSlack(t, 50*time.Millisecond)
 	sp := newWedgedLivenessProvider(t, "wedged")
-	results, _ := runWaveBounded(context.Background(), t, 10*time.Second, []preparedStart{waveTestStart("wedged")}, sp, 100*time.Millisecond, 1)
+	results, _ := runWaveBounded(context.Background(), t, []preparedStart{waveTestStart("wedged")}, sp, 100*time.Millisecond, 1)
 	requireAbandoned(t, results[0], "wedged", true)
 
 	sp.unblock()
@@ -333,7 +333,7 @@ func TestExecutePreparedStartWave_AbandonedProbeDoesNotReachStartAfterTheDeadlin
 	}
 
 	requireAbandoned(t, results[0], "wedged", true)
-	retry, _ := runStartWaveBounded(context.Background(), t, 10*time.Second, t.TempDir(), []preparedStart{waveTestStart("wedged")}, sp, 100*time.Millisecond, 1)
+	retry, _ := runStartWaveBounded(context.Background(), t, t.TempDir(), []preparedStart{waveTestStart("wedged")}, sp, 100*time.Millisecond, 1)
 	if len(retry) != 1 {
 		t.Fatalf("retry results = %d, want 1", len(retry))
 	}
@@ -360,7 +360,7 @@ func TestExecutePreparedStartWave_CtxEndsTheWaitBeforeTheDeadline(t *testing.T) 
 		waitStartGoroutinesAtMost(t, 1)
 		cancel()
 	}()
-	results, elapsed := runWaveBounded(ctx, t, 10*time.Second, items, sp, time.Minute, 2)
+	results, elapsed := runWaveBounded(ctx, t, items, sp, time.Minute, 2)
 
 	if elapsed > 10*time.Second {
 		t.Fatalf("wave returned after %v, want promptly after the ctx ended", elapsed)
@@ -387,7 +387,7 @@ func TestExecutePreparedStartWave_CanceledContextPreservesCompletedUnansweredLiv
 		cancel()
 	}()
 
-	results, _ := runWaveBounded(ctx, t, 10*time.Second, []preparedStart{waveTestStart("wedged")}, sp, time.Minute, 1)
+	results, _ := runWaveBounded(ctx, t, []preparedStart{waveTestStart("wedged")}, sp, time.Minute, 1)
 	if len(results) != 1 {
 		t.Fatalf("got %d results, want 1", len(results))
 	}
@@ -533,7 +533,7 @@ func TestExecutePreparedStartWave_LaunchLoopBlockedOnTheSemaphoreIsAbandoned(t *
 	second.preWakeUndo.written = sessionpkg.MetadataPatch{"last_woke_at": "second-attempt"}
 	items := []preparedStart{first, second}
 
-	results, _ := runWaveBounded(context.Background(), t, 10*time.Second, items, sp, 200*time.Millisecond, 1)
+	results, _ := runWaveBounded(context.Background(), t, items, sp, 200*time.Millisecond, 1)
 
 	if len(results) != 2 {
 		t.Fatalf("got %d results, want 2", len(results))
@@ -562,7 +562,7 @@ func TestExecutePreparedStartWave_HealthyWaveIsUnchangedByTheDeadline(t *testing
 			sp := newWedgedLivenessProvider(t)
 			items := []preparedStart{waveTestStart("a"), waveTestStart("b"), waveTestStart("c")}
 
-			results, _ := runWaveBounded(context.Background(), t, 10*time.Second, items, sp, startupTimeout, 2)
+			results, _ := runWaveBounded(context.Background(), t, items, sp, startupTimeout, 2)
 
 			if len(results) != 3 {
 				t.Fatalf("got %d results, want 3", len(results))
@@ -662,7 +662,7 @@ func TestExecutePlannedStartsCanceledBeforeLaunchRestoresUnansweredPreWakeT1(t *
 			sp.city = env.city
 			env.sp = sp.Fake
 			startIdentityRuntime(t, env, candidate)
-			if !sp.Fake.IsRunning(candidate.name()) {
+			if !sp.IsRunning(candidate.name()) {
 				t.Fatalf("T1 runtime %q did not start before the planner was canceled", candidate.name())
 			}
 			prior := mustGetBead(t, env.store, bead.ID).Metadata
@@ -675,7 +675,7 @@ func TestExecutePlannedStartsCanceledBeforeLaunchRestoresUnansweredPreWakeT1(t *
 			cb := breakerAt(30*time.Minute, maxRestarts)
 			setSessionCircuitBreakerForTest(t, cb)
 
-			providerCallsBefore := sp.Fake.SnapshotCalls()
+			providerCallsBefore := sp.SnapshotCalls()
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			options := []startExecutionOption{
@@ -717,7 +717,7 @@ func TestExecutePlannedStartsCanceledBeforeLaunchRestoresUnansweredPreWakeT1(t *
 			if probes := sp.probeCount(candidate.name()); probes != 1 {
 				t.Fatalf("pre-PreWake provider probes = %d, want the single genuinely wedged probe", probes)
 			}
-			callsAfter := sp.Fake.SnapshotCalls()
+			callsAfter := sp.SnapshotCalls()
 			assertNoProviderMutationCalls(t, callsAfter[len(providerCallsBefore):], candidate.name())
 			for _, call := range callsAfter[len(providerCallsBefore):] {
 				if call.Name == candidate.name() && call.Method == "Start" {
@@ -727,7 +727,7 @@ func TestExecutePlannedStartsCanceledBeforeLaunchRestoresUnansweredPreWakeT1(t *
 			if starts := sp.CountCalls("Start", candidate.name()); starts != 1 {
 				t.Fatalf("Provider.Start calls = %d, want only the pre-existing T1 runtime", starts)
 			}
-			if !sp.Fake.IsRunning(candidate.name()) {
+			if !sp.IsRunning(candidate.name()) {
 				t.Fatalf("pre-existing T1 runtime %q was stopped during cancellation cleanup", candidate.name())
 			}
 
