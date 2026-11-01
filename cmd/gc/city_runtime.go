@@ -268,6 +268,15 @@ type CityRuntime struct {
 	// reload, like asyncStartLimiter.
 	capacityGuard *endpointCapacityGuard
 
+	// startDeferrals remembers which never-started pending creates the last
+	// main-tick start-executor run deferred at a start gate, built on first
+	// use by ensureStartDeferralMemo. It is process-local and survives config
+	// reload; a restart forgets it. The main tick is the only writer: it
+	// replaces the whole record on every completed run. The stale-session
+	// reaper only reads it. The control-dispatcher tick and cmd_start's
+	// one-shot reconcile neither read nor write it.
+	startDeferrals *startDeferralMemo
+
 	// strandedAlerts raises session.stranded_claims across ticks
 	// (work_release.go); built on first use (strandedClaimAlerter).
 	strandedAlerts     *strandedClaimAlerts
@@ -406,6 +415,9 @@ type CityRuntimeParams struct {
 	// reload's pending-restart warning judges admission the same way; nil has
 	// no developer override.
 	ReconcilerLookupEnv func(string) (string, bool)
+	// ReconcilerV2FellBack reports that the latch was a default v2 the boot
+	// probe demoted to legacy (applyV2DefaultBootFallback).
+	ReconcilerV2FellBack bool
 	// Wake is the controller wiring's wake, which the socket and the API
 	// state already use; nil builds a legacy one over PokeCh and
 	// ControlDispatcherCh.
@@ -550,7 +562,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		configRev:               p.ConfigRev,
 		configDirty:             configDirty,
 		configDebounce:          p.ConfigDebounce,
-		reconcilerDrift:         reconcilerModeDrift{running: p.ReconcilerMode, lookupEnv: p.ReconcilerLookupEnv},
+		reconcilerDrift:         reconcilerModeDrift{running: p.ReconcilerMode, lookupEnv: p.ReconcilerLookupEnv, fellBack: p.ReconcilerV2FellBack},
 		cfg:                     p.Cfg,
 		sp:                      p.SP,
 		publishedRev:            p.ConfigRev,
@@ -3349,15 +3361,21 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 	// duplicate shell-outs). Resume tier from cross-referenced assigned
 	// work beads + new tier from scale_check + min fill.
 	poolDesired := result.PoolDesiredCounts
+	// parked is the pass's park verdicts for the reconciler's hold below.
+	// When this tick decides the pool counts, the hold reads the verdicts the
+	// counts were decided with, not a second set decided later over the
+	// post-sweep rows.
+	var parked parkedSeats
 	if poolDesired == nil {
 		phaseStart = time.Now()
 		openInfos := sessionBeads.OpenInfos()
 		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cr.cfg, cr.cityPath, store, openInfos, assignedWorkBeads, assignedWorkStoreRefs)
 		poolDecisionTime := time.Now()
+		parked = parkSeatsForResult(cr.cfg, openInfos, result, poolDecisionTime.UTC())
 		poolDesired = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
-			PoolDesiredCounts(ComputePoolDesiredStatesTracedAt(
-				cr.cfg, poolWorkBeads, openInfos, result.ScaleCheckCounts, poolDecisionTime, trace)),
+			PoolDesiredCounts(computePoolDesiredStatesParkedAt(
+				cr.cfg, poolWorkBeads, openInfos, result.ScaleCheckCounts, nil, poolDecisionTime, parked, trace)),
 			sessionBeads,
 			effectivePoolPartialRetentionTemplates(result),
 		)
@@ -3445,6 +3463,11 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 	})
 	phaseStart = time.Now()
 	warmClaimTriggers := cr.newWarmClaimTriggerResolver(rigStores)
+	// Counts from the demand snapshot were decided in its refresh, so the
+	// hold decides its own verdicts over this tick's rows.
+	if result.PoolDesiredCounts != nil {
+		parked = parkSeatsForResult(cr.cfg, openInfos, result, time.Now().UTC())
+	}
 	reconcileStartOptions := []startExecutionOption{
 		withAsyncStartExecution(),
 		withAsyncStartFollowUp(cr.requestAsyncStartFollowUpTick),
@@ -3454,9 +3477,13 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		withMaxSessionAgeTracker(cr.mat),
 		withAssignedWorkDeferTracker(cr.adt),
 		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
+		withStartDeferralMemo(cr.ensureStartDeferralMemo()),
 		withOnDeathGate(cr.onDeathGate()),
 		withPrepareBudget(defaultStartPrepareBudget),
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
+		// The park verdicts over the build's whole assigned-work read (not the
+		// wake-filtered view), as the pool counts above decide them.
+		withParkedSeats(parked),
 		// The legs this tick read the surviving assigned work through. The
 		// orphan-close tie-break releases a held claim through its own leg
 		// instead of re-deriving a work ledger from gc.routed_to, which on a
@@ -3880,9 +3907,9 @@ func (cr *CityRuntime) ensureAsyncStartLimiter() *asyncStartLimiter {
 }
 
 // reapStaleSessionBeads reaps stale creating session beads, keeping rows the
-// endpoint capacity breaker holds.
+// endpoint capacity breaker or the start-deferral memo holds.
 func (cr *CityRuntime) reapStaleSessionBeads(sw *SeatWork) int {
-	return reapStaleSessionBeads(cr.cityPath, cr.sessionsBeadStore().Store, sw, cr.sp, cr.sessionDrains, endpointHoldForRows(cr.cfg, cr.ensureEndpointCapacityGuard()), clock.Real{}, cr.stderr)
+	return reapStaleSessionBeads(cr.cityPath, cr.sessionsBeadStore().Store, sw, cr.sp, cr.sessionDrains, pendingCreateHold(endpointHoldForRows(cr.cfg, cr.ensureEndpointCapacityGuard()), cr.ensureStartDeferralMemo(), clock.Real{}), clock.Real{}, cr.stderr)
 }
 
 // ensureEndpointCapacityGuard returns the city's endpoint capacity guard,
@@ -3893,6 +3920,22 @@ func (cr *CityRuntime) ensureEndpointCapacityGuard() *endpointCapacityGuard {
 		cr.capacityGuard = newEndpointCapacityGuard(clock.Real{}.Now)
 	}
 	return cr.capacityGuard
+}
+
+// ensureStartDeferralMemo returns the city's start-deferral memo, building it
+// on first use. The main tick records into it (every start-gate site in the
+// executor that meets the criterion on startDeferralMemo does, and so would a
+// later gate that meets it) and the stale-session reaper reads it. The
+// control-dispatcher tick must not be handed it: a completed executor run
+// replaces the committed and seen sets, so a run over the control-dispatcher
+// rows alone would erase the pool creates the main tick deferred. The memo is
+// installed only on a run over the city's complete open-session snapshot (see
+// startDeferralMemo.startOptions).
+func (cr *CityRuntime) ensureStartDeferralMemo() *startDeferralMemo {
+	if cr.startDeferrals == nil {
+		cr.startDeferrals = newStartDeferralMemo()
+	}
+	return cr.startDeferrals
 }
 
 func (cr *CityRuntime) requestAsyncStartFollowUpTick() {
@@ -4278,10 +4321,13 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	openInfos := filterSessionInfosByName(updated, reconcileNames)
 	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(filteredCfg, cr.cityPath, cr.cityBeadStore(), openInfos, wfcResult.AssignedWorkBeads, wfcResult.AssignedWorkStoreRefs)
 	poolDecisionTime := time.Now()
+	// The pass's park verdicts, decided once: the pool counts and the
+	// reconciler's hold read the same set.
+	parked := parkSeatsForResult(filteredCfg, openInfos, wfcResult, poolDecisionTime.UTC())
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		filteredCfg,
-		PoolDesiredCounts(ComputePoolDesiredStatesAt(
-			filteredCfg, poolWorkBeads, openInfos, wfcResult.ScaleCheckCounts, poolDecisionTime)),
+		PoolDesiredCounts(computePoolDesiredStatesParkedAt(
+			filteredCfg, poolWorkBeads, openInfos, wfcResult.ScaleCheckCounts, nil, poolDecisionTime, parked, nil)),
 		filteredSnap,
 		effectivePoolPartialRetentionTemplates(wfcResult),
 	)
@@ -4322,8 +4368,14 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		// The dispatcher's starts hit the same endpoints; without the guard
 		// this path would bypass the capacity breaker.
 		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
+		// No start-deferral memo: this run covers the control-dispatcher
+		// rows only, and a completed run would replace the main tick's
+		// record of deferred pool creates. The cost is that a
+		// control-dispatcher create waiting on a start gate is not kept past
+		// its lease; it rolls back as it did before the memo.
 		withOnDeathGate(cr.onDeathGate()),
 		withPrepareBudget(defaultStartPrepareBudget),
+		withParkedSeats(parked),
 	)
 	cr.requestDeferredDrainFollowUpTick()
 }
@@ -4696,8 +4748,9 @@ func (cr *CityRuntime) loadDemandSnapshot(
 		poolDecisionTime := time.Now()
 		result.PoolDesiredCounts = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
-			PoolDesiredCounts(ComputePoolDesiredStatesTracedAt(
-				cr.cfg, poolWorkBeads, openSessionInfos, result.ScaleCheckCounts, poolDecisionTime, trace)),
+			PoolDesiredCounts(computePoolDesiredStatesParkedAt(
+				cr.cfg, poolWorkBeads, openSessionInfos, result.ScaleCheckCounts, nil, poolDecisionTime,
+				parkSeatsForResult(cr.cfg, openSessionInfos, result, poolDecisionTime.UTC()), trace)),
 			sessionBeads,
 			effectivePoolPartialRetentionTemplates(result),
 		)

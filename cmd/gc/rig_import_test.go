@@ -97,9 +97,9 @@ func newRigImportFixture(t *testing.T, rigs ...config.Rig) *rigImportFixture {
 		return prevOpen(storePath, cityPath)
 	}
 	t.Cleanup(func() { openStorageScopeStore = prevOpen })
-	prevOthers := rigImportOtherCities
-	rigImportOtherCities = func(string) ([]string, error) { return f.otherCities, nil }
-	t.Cleanup(func() { rigImportOtherCities = prevOthers })
+	prevOthers := storeSharerCities
+	storeSharerCities = func(string) ([]string, error) { return f.otherCities, nil }
+	t.Cleanup(func() { storeSharerCities = prevOthers })
 	prevHash := rigImportHashConfigOpener
 	rigImportHashConfigOpener = func(_ string, _ *config.City, rig config.Rig) (rigHashLengthConfig, error) {
 		conf := f.hashConf[rig.Name]
@@ -1123,11 +1123,11 @@ func TestNoCensusRecordsASharedRigStoreClean(t *testing.T) {
 			name: "same Dolt database in another city",
 			share: func(t *testing.T, f *rigImportFixture) {
 				registerOtherCity(t, f, filepath.Join(t.TempDir(), "elsewhere"))
-				prev := rigImportScopeDoltTarget
-				rigImportScopeDoltTarget = func(string, string) rigDoltIdentity {
-					return rigDoltIdentity{Database: "packs", Endpoint: "loopback:3399"}
+				prev := storeDoltIdentityOf
+				storeDoltIdentityOf = func(string, string) storeDoltIdentity {
+					return storeDoltIdentity{Database: "packs", Endpoint: "loopback:3399"}
 				}
-				t.Cleanup(func() { rigImportScopeDoltTarget = prev })
+				t.Cleanup(func() { storeDoltIdentityOf = prev })
 			},
 			why: "Dolt database packs at loopback:3399 is also city",
 		},
@@ -1140,7 +1140,7 @@ func TestNoCensusRecordsASharedRigStoreClean(t *testing.T) {
 				}
 				f.otherCities = append(f.otherCities, other)
 			},
-			why: "cannot be ruled out as sharing the rig store",
+			why: "cannot be ruled out as sharing the store",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

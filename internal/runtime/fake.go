@@ -128,9 +128,27 @@ type Fake struct {
 	// ProgramCaptureHealErrors fail a FullFake's HealProgramCapture by
 	// session name.
 	ProgramCaptureHealErrors map[string]error
+	// ProgramShadowSink is the comparison sink a FullFake hands out as a
+	// shadowing leaf ([ProgramStatusShadowProvider]); nil, as under a switch
+	// that is not shadow, records nothing.
+	ProgramShadowSink ProgramStatusComparisonSink
 	// programArms counts the captures HealProgramCapture armed, naming each
 	// one's nonce.
 	programArms int
+	// ScreenTurnRunning makes a FullFake's screen show a turn in progress by
+	// session name, as a pane whose busy indicator is drawn does: TurnRunning
+	// answers true and SnapshotIdle false. An absent entry shows no turn.
+	ScreenTurnRunning map[string]bool
+	// ScreenReadErrors fail a FullFake's TurnRunning by session name, as a
+	// screen that cannot be captured does.
+	ScreenReadErrors map[string]error
+	// PaneActivity is the activity a FullFake's FreshActivity reads by
+	// session name, the session's own clock where it has moved past the
+	// Activity that GetLastActivity serves, as a pane that drew after the
+	// tmux fleet snapshot was taken has. An absent entry reads Activity.
+	PaneActivity map[string]time.Time
+	// PaneActivityErrors fail a FullFake's FreshActivity by session name.
+	PaneActivityErrors map[string]error
 }
 
 var (

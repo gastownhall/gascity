@@ -39,6 +39,7 @@ go_test(
         "claude_text_test.go",
         "client_test.go",
         "conformance_test.go",
+        "contracts_test.go",
         "dial_bound_test.go",
         "effectiveworkdir_test.go",
         "errorcode_test.go",

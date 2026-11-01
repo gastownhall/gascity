@@ -229,6 +229,11 @@ type executionClaim struct {
 	// graph step, the session that holds it, and its kind
 	// (executionLifecycleCandidate).
 	StepID, SessionID, SessionName, Kind string
+	// AwaitingHuman is the claimed bead's gc.awaiting_human, read off this
+	// claim's own bead and never another store's with its ID: the session
+	// that asked a person about it and waits on their decision
+	// (beadmeta.AwaitsHuman).
+	AwaitingHuman string
 }
 
 // executionLifecycleCandidate reports whether claim can carry a step_started
@@ -266,13 +271,14 @@ func newExecutionClaimSnapshot(work []beads.Bead, stores []beads.Store, storeRef
 			continue
 		}
 		claim := executionClaim{
-			BeadID:      wb.ID,
-			RootID:      strings.TrimSpace(wb.Metadata[beadmeta.RootBeadIDMetadataKey]),
-			Assignee:    assignee,
-			StepID:      strings.TrimSpace(wb.Metadata[beadmeta.StepIDMetadataKey]),
-			SessionID:   strings.TrimSpace(wb.Metadata[beadmeta.SessionIDMetadataKey]),
-			SessionName: strings.TrimSpace(wb.Metadata[beadmeta.SessionNameMetadataKey]),
-			Kind:        strings.TrimSpace(wb.Metadata[beadmeta.KindMetadataKey]),
+			BeadID:        wb.ID,
+			RootID:        strings.TrimSpace(wb.Metadata[beadmeta.RootBeadIDMetadataKey]),
+			Assignee:      assignee,
+			StepID:        strings.TrimSpace(wb.Metadata[beadmeta.StepIDMetadataKey]),
+			SessionID:     strings.TrimSpace(wb.Metadata[beadmeta.SessionIDMetadataKey]),
+			SessionName:   strings.TrimSpace(wb.Metadata[beadmeta.SessionNameMetadataKey]),
+			Kind:          strings.TrimSpace(wb.Metadata[beadmeta.KindMetadataKey]),
+			AwaitingHuman: strings.TrimSpace(wb.Metadata[beadmeta.AwaitingHumanMetadataKey]),
 		}
 		if i < len(storeRefs) {
 			claim.StoreRef = claimStoreRef(storeRefs[i])
@@ -434,7 +440,10 @@ func (p poolExecutionBackstop) escalatesNext(s beads.Bead, attempts int, last ti
 // storms. The snapshot is taken only once activity is stale, so a session still
 // producing output costs no pane capture.
 func (p poolExecutionBackstop) quietHold(s beads.Bead, sessName string) string {
-	return sessionQuietHold(p.sp, s, sessName, p.now, snapshotHoldFor)
+	hold := sessionQuietHold(p.sp, s, sessName, p.now, snapshotHoldFor)
+	shadowHold(p.sp, sessName, s.ID, sessionpkg.ProviderFamilyFromMetadata(s.Metadata, ""),
+		runtime.ProgramPointExecutionBackstop, hold != "", p.now, runtime.ProgramHoldVerdict)
+	return hold
 }
 
 // sessionQuietHold is quietHold for any backstop: the hold that keeps sp's

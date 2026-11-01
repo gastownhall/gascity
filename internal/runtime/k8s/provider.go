@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -50,6 +51,7 @@ type Provider struct {
 	memLimit           string
 	serviceAccount     string              // pod service account name (GC_K8S_SERVICE_ACCOUNT)
 	prebaked           bool                // skip staging + init container for prebaked images
+	cityName           string              // the controller's city name, for the pod's remote-stage record
 	nodeSelector       map[string]string   // GC_K8S_NODE_SELECTOR (JSON)
 	tolerations        []corev1.Toleration // GC_K8S_TOLERATIONS (JSON)
 	affinity           *corev1.Affinity    // GC_K8S_AFFINITY (JSON)
@@ -257,7 +259,24 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 				fmt.Fprintf(p.stderr, "gc: warning: initCityInPod for %s: %v\n", podName, err) //nolint:errcheck
 			}
 		}
+	}
 
+	// Record the pod as a remote stage of the controller's city, staged and
+	// prebaked alike (S5-A): on a split city its infrastructure-class
+	// commands then refuse instead of creating a pod-local empty binding. A
+	// direct write, so it works whatever gc the pod image carries. The pod
+	// spec's remote-stage environment already covers the processes started
+	// from it (remoteStageEnv); the record is the durable copy, and the only
+	// cover for a process started with a cleared environment. Failing to write it fails the start: a pod that cannot be
+	// marked is not one this controller hands work to.
+	if ctrlCity != "" {
+		if err := writeRemoteStageInPod(ctx, p.ops, podName, p.cityName, ctrlCity); err != nil {
+			cleanup("remote stage record")
+			return fmt.Errorf("recording pod %q as a remote stage of city %s (%s): %w; the pod was removed rather than run unmarked", podName, remoteStageCityName(p.cityName, ctrlCity), ctrlCity, err)
+		}
+	}
+
+	if !p.prebaked {
 		// Signal entrypoint to proceed.
 		if _, err := p.ops.execInPod(ctx, podName, "agent",
 			[]string{"touch", "/workspace/.gc-workspace-ready"}, nil); err != nil {
@@ -365,8 +384,10 @@ func (p *Provider) runPodPostLaunchSetup(ctx context.Context, podName string, cf
 // it does NOT recreate the pod here). Staging, city/beads init, and PreStart are
 // NOT re-run here (k8s treats PreStart as provision-half); env is provision-half
 // too (set in the pod spec at create time, not re-injected — respawn-pane carries
-// no env). NOTE: tmux diverges — as of the relaunch pre_start fix it re-runs
-// PreStart on Relaunch (launch-half), while k8s and ssh intentionally do not.
+// no env). The remote-stage record is the exception: it is written again before
+// the respawn, so a warm pod an older provider created is marked too. NOTE: tmux
+// diverges — as of the relaunch pre_start fix it re-runs PreStart on Relaunch
+// (launch-half), while k8s and ssh intentionally do not.
 //
 // CAVEAT (unverified on a real cluster — see the B3 design doc): for
 // LINUX_USERNAME pods the entrypoint runs tmux under `su - <user>`, so the
@@ -386,6 +407,17 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 	if _, err := p.ops.execInPod(ctx, podName, "agent",
 		[]string{"tmux", "has-session", "-t", tmuxSession}, nil); err != nil {
 		return fmt.Errorf("%w: session %q (pod %s has no live tmux session)", runtime.ErrSessionNotFound, name, podName)
+	}
+
+	// Record the warm pod as a remote stage before the agent respawns, as
+	// Start does before its ready sentinel (S5-A): a pod an older provider
+	// created carries neither the record nor the pod-spec environment, and
+	// the respawned agent must not run unmarked. A failed write fails the
+	// relaunch rather than respawning into an unmarked pod.
+	if ctrlCity := cfg.Env["GC_CITY"]; ctrlCity != "" {
+		if err := writeRemoteStageInPod(ctx, p.ops, podName, p.cityName, ctrlCity); err != nil {
+			return fmt.Errorf("k8s relaunch %q: recording pod %q as a remote stage of city %s (%s): %w; the agent was not respawned", name, podName, remoteStageCityName(p.cityName, ctrlCity), ctrlCity, err)
+		}
 	}
 
 	// Respawn the agent in the warm "main" session.
@@ -1067,6 +1099,57 @@ func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity string) er
 		return err
 	}
 	return nil
+}
+
+// remoteStageRecordPath is where a pod's remote-stage record lives: gc reads
+// <city>/.gc/remote-stage.toml, and the pod's city root is /workspace in
+// both staged and prebaked pods.
+const remoteStageRecordPath = podWorkspaceRoot + "/.gc/remote-stage.toml"
+
+// The remote-stage environment cmd/gc's remote_stage.go honors from process
+// start. Keep the names in step with cmd/gc (remoteStageControllerEnv,
+// remoteStageCityEnv).
+const (
+	remoteStageControllerEnv = "GC_REMOTE_STAGE_CONTROLLER"
+	remoteStageCityEnv       = "GC_REMOTE_STAGE_CITY"
+)
+
+// remoteStageCityName is the controller's city name, else its path's base.
+func remoteStageCityName(cityName, ctrlCity string) string {
+	if strings.TrimSpace(cityName) == "" {
+		return filepath.Base(ctrlCity)
+	}
+	return cityName
+}
+
+// remoteStageEnv marks the processes started from a pod's environment as a
+// remote stage of ctrlCity, or nothing without a controller city: the
+// entrypoint, the agent and its tmux server (re-exported through su for
+// LINUX_USERNAME pods: suRemoteStageExports), and kubectl exec'd commands. A
+// process started with a deliberately cleared environment relies on the
+// on-disk record.
+func remoteStageEnv(cityName, ctrlCity string) []corev1.EnvVar {
+	if strings.TrimSpace(ctrlCity) == "" {
+		return nil
+	}
+	return []corev1.EnvVar{
+		{Name: remoteStageControllerEnv, Value: ctrlCity},
+		{Name: remoteStageCityEnv, Value: remoteStageCityName(cityName, ctrlCity)},
+	}
+}
+
+// remoteStageRecord renders the record cmd/gc's remote_stage.go reads.
+func remoteStageRecord(cityName, ctrlCity string, now time.Time) string {
+	cityName = remoteStageCityName(cityName, ctrlCity)
+	return fmt.Sprintf("controller_city = %q\ncontroller_path = %q\nstaged_at = %q\n", cityName, ctrlCity, now.UTC().Format(time.RFC3339))
+}
+
+// writeRemoteStageInPod writes the pod's remote-stage record with a plain
+// shell write (temp file, then rename), independent of the pod's gc version.
+func writeRemoteStageInPod(ctx context.Context, ops k8sOps, podName, cityName, ctrlCity string) error {
+	script := "mkdir -p " + podWorkspaceRoot + "/.gc && cat > " + remoteStageRecordPath + ".tmp && mv -f " + remoteStageRecordPath + ".tmp " + remoteStageRecordPath
+	_, err := ops.execInPod(ctx, podName, "agent", []string{"sh", "-c", script}, strings.NewReader(remoteStageRecord(cityName, ctrlCity, time.Now())))
+	return err
 }
 
 // initBeadsInPod ensures the pod workspace has usable .beads state. It keeps

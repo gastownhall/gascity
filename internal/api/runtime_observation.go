@@ -63,7 +63,11 @@ func (h providerSessionResponseHandle) State(context.Context) (worker.State, err
 		state.Phase = worker.PhaseStopped
 		return state, nil
 	}
+	state.Program = worker.ProgramStatusOf(h.provider, h.sessionName)
 	state.Phase = worker.PhaseReady
+	if phase, decided := worker.ProgramPhase(state.Program); decided {
+		state.Phase = phase
+	}
 	return state, nil
 }
 

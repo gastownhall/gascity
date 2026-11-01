@@ -11,14 +11,15 @@ import (
 
 // Some split-city judges read part of a write from a file the caller names:
 // `batch --file`, `delete --from-file`, `create` and `update --metadata @file`,
-// and `import <file>`. bd opens that path again after gc has judged it, so
-// without a copy bd writes what the path holds then, not what gc judged: a
-// pipe the judge drained (`<(...)`, /dev/stdin) reads empty, and `bd batch`
-// reports "0 operations (no-op)" and exits 0; a file rewritten between the two
-// reads is written unjudged. A judge therefore reads such a file through
-// readJudgedFile, and once it admits the write, bdClassFlipGuard points bd at
-// a private copy of exactly the bytes judged (bdJudgedFiles.pin). import
-// redirects its source itself, because it may hand bd only some of the rows.
+// `create --graph <plan>`, and `import <file>`. bd opens that path again after
+// gc has judged it, so without a copy bd writes what the path holds then, not
+// what gc judged: a pipe the judge drained (`<(...)`, /dev/stdin) reads empty,
+// and `bd batch` reports "0 operations (no-op)" and exits 0; a file rewritten
+// between the two reads is written unjudged. A judge therefore reads such a
+// file through readJudgedFile, and once it admits the write, bdClassFlipGuard
+// points bd at a private copy of exactly the bytes judged (bdJudgedFiles.pin).
+// import redirects its source itself, because it may hand bd only some of
+// the rows.
 
 // bdJudgedFile is one caller-named file a judge read.
 type bdJudgedFile struct {

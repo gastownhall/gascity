@@ -714,9 +714,9 @@ func turnHistoryFromScan(scan sessionlog.TurnScan, observedAt time.Time) (runtim
 
 // runtimeTurnFailure is a transcript's record of a turn's provider error, as
 // a runtime turn failure: the source's own class and status, and whether
-// the source classed it a rate limit.
+// the source classed it a rate limit, and a spent quota.
 func runtimeTurnFailure(f sessionlog.TurnFailure) runtime.TurnFailure {
-	return runtime.TurnFailure{Code: f.Code, HTTPStatus: f.Status, RateLimited: f.RateLimited, Message: f.Message}
+	return runtime.TurnFailure{Code: f.Code, HTTPStatus: f.Status, RateLimited: f.RateLimited, Quota: f.Quota, Message: f.Message}
 }
 
 // turnMillis keeps a source time at millisecond precision, the precision the

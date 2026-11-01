@@ -46,8 +46,11 @@ type Provider struct {
 	// inventoryMalformedLog rate-limits the malformed-inventory log.
 	inventoryMalformedLog malformedInventoryLog
 	// unixListening reports whether a listener is bound to a unix socket
-	// path, for ServerConfirmedDead. Nil selects unixPathListening.
+	// path, for ServerConfirmedDead. Nil selects runtime.UnixPathListening.
 	unixListening func(path string) (bool, error)
+	// heal is program-capture heal's per-pane backoff
+	// (program_capture_heal.go).
+	heal captureHealBackoff
 }
 
 var instanceTokenReader = rand.Reader
@@ -74,6 +77,7 @@ var (
 	_ runtime.SessionObjectKiller           = (*Provider)(nil)
 	_ runtime.FreshLivenessObserver         = (*Provider)(nil)
 	_ runtime.TurnRunningProvider           = (*Provider)(nil)
+	_ runtime.FreshActivityProvider         = (*Provider)(nil)
 )
 
 // NewProvider returns a [Provider] backed by a real tmux installation
@@ -86,12 +90,16 @@ func NewProvider() *Provider {
 func NewProviderWithConfig(cfg Config) *Provider {
 	tm := NewTmuxWithConfig(cfg)
 	ttl := cacheTTLFromEnv()
-	return &Provider{
+	p := &Provider{
 		tm:       tm,
 		cfg:      cfg,
 		cache:    NewStateCache(&tmuxFetcher{tm: tm}, ttl),
 		workDirs: make(map[string]string),
 	}
+	// Shadow reads take tap liveness from the cache's last process table,
+	// never refreshing it.
+	tm.shadow.taps = func() programTaps { return p.cache.observation().state.programTaps() }
+	return p
 }
 
 // Start creates a new detached tmux session and performs a multi-step
@@ -338,6 +346,9 @@ func (p *Provider) Interrupt(name string) error {
 // interrupt is Interrupt under ctx. Inside a fenced operation a missing
 // session or server is reported (paneGuard.gone), never absorbed.
 func (p *Provider) interrupt(ctx context.Context, name string) error {
+	if p.tm.shadowing() {
+		p.tm.shadowNoteInterrupt(name)
+	}
 	if p.tm.isClaudeTarget(name) {
 		handled, err := p.tm.cancelClaudeApproval(ctx, name)
 		if handled {
@@ -1172,11 +1183,19 @@ func (p *Provider) ListRunningComplete() bool { return true }
 
 // RuntimeInventory implements [runtime.InventoryProvider] with one
 // batched pane read. Delegates to [Tmux.listRuntimeInventory], and logs
-// malformed lines (see noteInventoryFaults).
+// malformed lines (see noteInventoryFaults). While the program-status switch
+// is not off, each entry's Program is its agent pane's reading, the tap's
+// liveness taken from the state cache's process table. The switch is read
+// once per pass: rows listed without capture fields are never judged under a
+// switch published while they were read.
 func (p *Provider) RuntimeInventory(ctx context.Context) (map[string]runtime.InventoryEntry, error) {
-	entries, faults, err := p.tm.listRuntimeInventory(ctx)
+	mode := p.tm.programStatusMode()
+	entries, panes, faults, err := p.tm.listRuntimeInventory(ctx, mode != runtime.ProgramStatusOff)
 	if len(faults.lines) > 0 || err == nil {
 		p.noteInventoryFaults(faults)
+	}
+	if err == nil && mode != runtime.ProgramStatusOff && len(entries) > 0 {
+		p.judgeInventoryPrograms(mode, entries, panes)
 	}
 	return entries, err
 }
@@ -1246,6 +1265,15 @@ func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 	if activity, ok := p.cache.SessionActivity(name); ok {
 		return p.tm.discountedActivity(name, activity), nil
 	}
+	return p.tm.GetSessionActivity(name)
+}
+
+// FreshActivity returns the time of the last I/O activity in the named
+// session, read from its own windows now ([Tmux.GetSessionActivity]: one
+// `list-windows`, poke discount applied), never from the fleet snapshot
+// GetLastActivity serves for the snapshot's TTL. It implements
+// [runtime.FreshActivityProvider].
+func (p *Provider) FreshActivity(name string) (time.Time, error) {
 	return p.tm.GetSessionActivity(name)
 }
 
@@ -1474,6 +1502,10 @@ type tmuxStartOps struct {
 	// budget. Nil means the real clock; tests inject a fake so the idle
 	// window is decided by what the command printed, not by host speed.
 	monitorClock execgrace.Clock
+	// programStatus is the session's program-status capture declaration
+	// (runtime.Config.ProgramStatus), armed on the agent pane at create and
+	// respawn. The zero value arms nothing.
+	programStatus runtime.ProgramStatusArm
 }
 
 // newTmuxStartOps builds the startup adapter for one session, deriving the
@@ -1507,6 +1539,7 @@ func newTmuxStartOps(tm *Tmux, runtimeDir string, setupMaxTimeout time.Duration,
 		setupMaxTimeout: setupMaxTimeout,
 		secrets:         runtime.SetupCommandSecrets(cfg.Env),
 		freshStart:      freshStart,
+		programStatus:   cfg.ProgramStatus,
 	}
 }
 
@@ -1526,7 +1559,7 @@ const (
 
 func (o *tmuxStartOps) createSession(name, workDir, command string, env map[string]string) error {
 	if command != "" || len(env) > 0 {
-		return o.tm.NewSessionWithCommandAndEnv(name, workDir, command, env)
+		return o.tm.newSessionWithCommandAndEnv(name, workDir, command, env, o.programStatus)
 	}
 	return o.tm.NewSession(name, workDir)
 }
@@ -1552,7 +1585,7 @@ func (o *tmuxStartOps) respawnAgent(name, workDir, command string, env map[strin
 	// A warm box created before the agent-pane marker (or whose mark failed)
 	// is marked here while it still has only the agent's pane.
 	o.tm.adoptAgentPane(name)
-	if err := o.tm.RespawnPaneWithWorkDir(name, workDir, command); err != nil {
+	if err := o.tm.respawnPaneWithWorkDir(name, workDir, command, o.programStatus); err != nil {
 		return err
 	}
 	// The respawned process inherits the session environment's identity;
@@ -1588,7 +1621,30 @@ func (o *tmuxStartOps) waitForReady(ctx context.Context, name string, rc *Runtim
 	if err != nil {
 		return err
 	}
-	return o.tm.WaitForRuntimeReady(ctx, target, rc, timeout)
+	if !o.tm.shadowing() || rc == nil || rc.Tmux == nil || (rc.Tmux.ReadyPromptPrefix == "" && rc.Tmux.ReadyDelayMs <= 0) {
+		return o.tm.WaitForRuntimeReady(ctx, target, rc, timeout)
+	}
+	err = o.tm.WaitForRuntimeReady(ctx, target, rc, timeout)
+	o.tm.shadowReadiness(name, time.Now(), err)
+	return err
+}
+
+// startupLadderShadower is the start ops' shadow seam for the startup
+// ladder's busy look (startup_ladder); ops that do not implement it record
+// nothing.
+type startupLadderShadower interface {
+	shadowStartupBusy(name string, busy func() (bool, error)) func() (bool, error)
+}
+
+// shadowStartupBusy wraps busy to record each look beside the program's
+// record, against a baseline read now, before the ladder's first send. Off
+// shadow, busy is returned as is.
+func (o *tmuxStartOps) shadowStartupBusy(name string, busy func() (bool, error)) func() (bool, error) {
+	s, ok := o.tm.shadowRead(name)
+	if !ok {
+		return busy
+	}
+	return o.tm.shadowStartupBusy(name, s.Baseline(), busy)
 }
 
 func (o *tmuxStartOps) hasSession(name string) (bool, error) {
@@ -2202,10 +2258,14 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 		return fmt.Errorf("running session_setup: %w", err)
 	}
 	if cfg.Nudge != "" {
+		busy := func() (bool, error) { return ops.paneBusy(name) }
+		if sh, ok := ops.(startupLadderShadower); ok {
+			busy = sh.shadowStartupBusy(name, busy)
+		}
 		if err := sendStartupNudgeWithRetry(ctx,
 			func() error { return ops.sendKeys(name, cfg.Nudge) },
 			func(d time.Duration) { _ = sleepWithContext(ctx, d) },
-			func() (bool, error) { return ops.paneBusy(name) }); err != nil {
+			busy); err != nil {
 			// A resume-mode (or cold-start) session's startup nudge races the
 			// TUI's own boot: readiness detection and the TUI actually being
 			// able to accept input are not the same moment, so a submit

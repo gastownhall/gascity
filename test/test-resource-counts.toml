@@ -1567,12 +1567,12 @@ calls = 4
 [[count]]
 path = "internal/api/client_sling_test.go"
 resource = "http_test_server"
-calls = 3
+calls = 6
 
 [[count]]
 path = "internal/api/client_test.go"
 resource = "http_test_server"
-calls = 66
+calls = 67
 
 [[count]]
 path = "internal/api/client_waits_test.go"
@@ -2520,6 +2520,12 @@ calls = 4
 tagged = true
 
 [[count]]
+path = "internal/runtime/tmux/program_capture_integration_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
 path = "internal/runtime/tmux/server_probe_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -3126,6 +3132,12 @@ tagged = true
 path = "test/conversationlane/bddolt_gating_test.go"
 resource = "subprocess"
 calls = 1
+tagged = true
+
+[[count]]
+path = "test/conversationlane/busy_turn_lane_test.go"
+resource = "fixed_sleep"
+calls = 3
 tagged = true
 
 [[count]]

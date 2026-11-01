@@ -8,6 +8,8 @@ import (
 var (
 	_ ProgramStatusProvider = FullFake{}
 	_ ProgramCaptureHealer  = FullFake{}
+
+	_ ProgramStatusShadowProvider = FullFake{}
 )
 
 // SetProgramPane sets session name's agent-pane row ([Fake.ProgramPanes])
@@ -48,6 +50,28 @@ func (f FullFake) ProgramStatus(name string) (ProgramStatus, error) {
 	return JudgeProgramStatus(f.ProgramPanes[name]), nil
 }
 
+// ProgramStatusShadowSink implements [ProgramStatusShadowProvider]: the
+// fake's [Fake.ProgramShadowSink], nil unless a test set one.
+func (f FullFake) ProgramStatusShadowSink() ProgramStatusComparisonSink {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ProgramShadowSink
+}
+
+// ProgramStatusShadowRead implements [ProgramStatusShadowProvider]: name's
+// agent-pane row judged as [FullFake.ProgramStatus] judges it, recorded as a
+// call of its own so a test tells a fresh read from a ProgramStatus one. ok is
+// false unless a test set a shadow sink and that read would succeed.
+func (f FullFake) ProgramStatusShadowRead(name string) (ProgramStatus, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "ProgramStatusShadowRead", Name: name})
+	if f.ProgramShadowSink == nil || f.programReadableLocked(name) != nil || f.ProgramStatusErrors[name] != nil {
+		return ProgramStatus{}, false
+	}
+	return JudgeProgramStatus(f.ProgramPanes[name]), true
+}
+
 // HealProgramCapture implements [ProgramCaptureHealer] over name's agent-pane
 // row, recording what it did in the call's Value:
 //
@@ -55,7 +79,9 @@ func (f FullFake) ProgramStatus(name string) (ProgramStatus, error) {
 //   - a session without a row, or whose pane is dead, is deferred;
 //   - want declares no capture: the armed pane is disarmed, its tap and
 //     record dropped, and its pipe closed only when the process table shows
-//     its own tap alive, since any other pipe may be foreign;
+//     its own tap alive, since any other pipe may be foreign; while its pipe
+//     is open and its tap's liveness is unknown, it is deferred with its
+//     nonce kept, since the pipe may be its live tap's;
 //   - an armed pane whose pipe is open and tap not gone is unchanged;
 //   - any other open pipe (a foreign reader, or a dead tap's pipe not yet
 //     closed) is deferred: heal never takes a pipe over;
@@ -78,6 +104,7 @@ func (f FullFake) HealProgramCapture(name string, want ProgramStatusArm) (Progra
 	case !want.Capture && !armed:
 		action = ProgramCaptureUnchanged
 	case !ok || row.PaneID == "" || row.PaneDead:
+	case !want.Capture && row.PanePipe && row.TapLiveness == ProgramTapUnknown:
 	case !want.Capture:
 		if row.TapLiveness == ProgramTapAlive {
 			row.PanePipe = false

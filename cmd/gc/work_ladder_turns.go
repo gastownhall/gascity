@@ -1,9 +1,11 @@
 package main
 
-// The work ladder's turn reads (#8132 split C1): what a seat's own turns say
-// about its progress. A turn its provider failed (a rate limit, a Cloudflare
-// 524) is activity, but not progress: workladder.Decide judges progress on a
-// completed turn when the seat's newest turn failed. The reads go through
+// The work ladder's turn reads (#8132 split C1, C3): what a seat's own turns
+// say about its progress and its provider. A turn its provider failed (a rate
+// limit, a Cloudflare 524) is activity, but not progress: workladder.Decide
+// judges progress on a completed turn when the seat's newest turn failed. The
+// newest turns its provider refused with a rate limit drive the seat's
+// rate-limit episode (work_ladder_ratelimit.go). The reads go through
 // the worker boundary (worker.Handle.CurrentTurn), never the transcript
 // directly, and the outcome is the agent CLI's own (sessionlog): this file
 // only reduces it.
@@ -38,12 +40,16 @@ const (
 // ladderTurnReader reads a seat's current and recent turns.
 type ladderTurnReader func(ctx context.Context, row beads.Bead) (runtime.TurnHistory, error)
 
-// ladderTurnReading reduces hist to what the ladder judges progress by, in
-// conversation conv: whether the newest ended turn failed (whatever the
-// cause, with no turn open), and when the newest turn the provider
-// completed ended, anywhere in the recent turns. A turn that ended with no
-// status (a family that records no turn end, an end inferred from an idle
-// boundary) is not a failure.
+// ladderTurnReading reduces hist to what the ladder judges progress and rate
+// limits by, in conversation conv: whether the newest ended turn failed
+// (whatever the cause, with no turn open), and when the newest turn the
+// provider completed ended, anywhere in the recent turns; how many of the
+// newest ended turns in a row the provider refused with a rate limit (none
+// while a turn is open: it has no answer yet), when the newest of them
+// ended, and whether its source classed it a spent quota. A turn that ended
+// with no status (a family that records no turn end, an end inferred from
+// an idle boundary) is not a failure. Every rate-limit fact is the source's
+// own classification (runtime.TurnFailure); no text is read.
 func ladderTurnReading(hist runtime.TurnHistory, conv int64) workladder.TurnReading {
 	r := workladder.TurnReading{Read: true, Conv: conv}
 	for _, t := range hist.Recent {
@@ -52,8 +58,32 @@ func ladderTurnReading(hist runtime.TurnHistory, conv int64) workladder.TurnRead
 			break
 		}
 	}
-	r.LastFailed = !hist.Current.Active() && len(hist.Recent) > 0 && hist.Recent[0].Status == runtime.TurnStatusFailed
+	open := hist.Current.Active()
+	r.LastFailed = !open && len(hist.Recent) > 0 && hist.Recent[0].Status == runtime.TurnStatusFailed
+	if open {
+		return r
+	}
+	for _, t := range hist.Recent {
+		if t.Status != runtime.TurnStatusFailed || !t.Failure.RateLimited {
+			break
+		}
+		r.Refused++
+	}
+	if r.Refused > 0 {
+		r.RefusedAt, r.Quota = hist.Recent[0].EndedAt, hist.Recent[0].Failure.Quota
+	}
 	return r
+}
+
+// ladderRefusal is the failure of hist's newest refused turn, when a reading
+// counts it refused (ladderTurnReading): the source's class, status and text,
+// for the events and alerts that report it to people and packs. Decide never
+// sees it.
+func ladderRefusal(hist runtime.TurnHistory) runtime.TurnFailure {
+	if hist.Current.Active() || len(hist.Recent) == 0 || hist.Recent[0].Status != runtime.TurnStatusFailed || !hist.Recent[0].Failure.RateLimited {
+		return runtime.TurnFailure{}
+	}
+	return hist.Recent[0].Failure
 }
 
 // rowConversation is a row's conversation: its continuation epoch, the
@@ -66,17 +96,21 @@ func rowConversation(meta map[string]string) int64 {
 }
 
 // ladderTurnsKey is what a cached reading was read at: a reading stands
-// while none of it moves.
+// while none of it moves. delivered is the seat's last nudge it took
+// (Record.Delivered): a refusal that answers it may be newer than the
+// reading.
 type ladderTurnsKey struct {
 	gen, conv           int64
-	activity, lastNudge time.Time
+	activity, delivered time.Time
 }
 
-// ladderTurnsEntry is one seat's cached reading.
+// ladderTurnsEntry is one seat's cached reading, with the failure of its
+// newest refused turn (ladderRefusal).
 type ladderTurnsEntry struct {
 	key     ladderTurnsKey
 	readAt  time.Time
 	reading workladder.TurnReading
+	refusal runtime.TurnFailure
 }
 
 // ladderTurns caches each seat's last reading, and the last read failure it
@@ -94,27 +128,27 @@ type ladderTurns struct {
 // stands and it is younger than ladderTurnsMaxAge, else a fresh read through
 // read. A read that fails is no reading, cached the same way, with its
 // error.
-func (c *ladderTurns) read(ctx context.Context, read ladderTurnReader, row beads.Bead, key ladderTurnsKey, now time.Time) (workladder.TurnReading, error) {
+func (c *ladderTurns) read(ctx context.Context, read ladderTurnReader, row beads.Bead, key ladderTurnsKey, now time.Time) (ladderTurnsEntry, error) {
 	c.mu.Lock()
 	cached, ok := c.last[row.ID]
 	c.mu.Unlock()
 	if ok && cached.key == key && now.Sub(cached.readAt) < ladderTurnsMaxAge {
-		return cached.reading, nil
+		return cached, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, ladderTurnReadBound)
 	defer cancel()
 	hist, err := read(ctx, row)
-	var r workladder.TurnReading
+	entry := ladderTurnsEntry{key: key, readAt: now}
 	if err == nil {
-		r = ladderTurnReading(hist, key.conv)
+		entry.reading, entry.refusal = ladderTurnReading(hist, key.conv), ladderRefusal(hist)
 	}
 	c.mu.Lock()
 	if c.last == nil {
 		c.last = make(map[string]ladderTurnsEntry)
 	}
-	c.last[row.ID] = ladderTurnsEntry{key: key, readAt: now, reading: r}
+	c.last[row.ID] = entry
 	c.mu.Unlock()
-	return r, err
+	return entry, err
 }
 
 // firstFailure records that row's turns could not be read in conversation
@@ -153,15 +187,16 @@ func (c *ladderTurns) keep(ids map[string]bool) {
 // turns is the seat's reading on this pass, when the ladder may act on it:
 // a turn source, a running, quiet seat whose gate is open, with work
 // outstanding. Otherwise, and when its turns cannot be read, it is no
-// reading, and the ladder judges progress on the activity clock. A read
-// that fails is logged once per seat, conversation and error, unless the
-// family records no turns at all. lastNudge is the ladder's last nudge to
-// the seat: a reading taken before it is read again.
-func (p *ladderPass) turns(row beads.Bead, rt ladderRuntime, gate workladder.Gate, targets []ladderTarget, lastNudge time.Time) workladder.TurnReading {
+// reading: the ladder judges progress on the activity clock, and no
+// rate-limit episode moves on it. A read that fails is logged once per
+// seat, conversation and error, unless the family records no turns at all.
+// delivered is the seat's last nudge it took (Record.Delivered): a reading
+// taken before it is read again.
+func (p *ladderPass) turns(row beads.Bead, rt ladderRuntime, gate workladder.Gate, targets []ladderTarget, delivered time.Time) ladderTurnsEntry {
 	if p.turnReader == nil || rt.running != workladder.TriTrue || rt.quiet.State != workladder.Quiescent || gate.Held || len(targets) == 0 {
-		return workladder.TurnReading{}
+		return ladderTurnsEntry{}
 	}
-	key := ladderTurnsKey{gen: rowGeneration(row.Metadata), conv: rowConversation(row.Metadata), activity: rt.activity, lastNudge: lastNudge}
+	key := ladderTurnsKey{gen: rowGeneration(row.Metadata), conv: rowConversation(row.Metadata), activity: rt.activity, delivered: delivered}
 	r, err := p.l.ladderTurns.read(p.ctx, p.turnReader, row, key, p.now)
 	if err != nil && !errors.Is(err, runtime.ErrTurnIdentityUnsupported) && p.l.ladderTurns.firstFailure(row.ID, key.conv, err) {
 		fmt.Fprintf(p.l.stderr, "work-ladder: %s: reading its turns: %v; judging its progress on its activity\n", row.ID, err) //nolint:errcheck // best-effort stderr

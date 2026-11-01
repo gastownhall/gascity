@@ -1312,6 +1312,8 @@ cmd/gc/scoped_store.go	scopedBdStoreForCity	raw-result	1
 cmd/gc/scoped_store.go	scopedBdStoreForRig	raw-result	1
 cmd/gc/scoped_store.go	scopedStoreLike	raw-param	1
 cmd/gc/scoped_store.go	scopedStoreLike	raw-result	1
+cmd/gc/seat_parked.go	liveParkedWork	mint	1
+cmd/gc/seat_parked.go	liveParkedWork	raw-field	1
 cmd/gc/seat_work.go	SeatWork.load	raw-param	1
 cmd/gc/seat_work.go	SeatWork.stores	raw-result	1
 cmd/gc/seat_work.go	seatWorkHit	raw-field	1

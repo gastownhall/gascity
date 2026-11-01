@@ -8,6 +8,7 @@ import (
 	"sort"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/programstatus"
 )
 
 // Program-status protocol values for [providers.<p>.program_status] protocol.
@@ -120,7 +121,6 @@ func ProgramStatusArmFor(cfg *City, resolved *ResolvedProvider, transport string
 }
 
 var (
-	programStatusAppPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 	programStatusEnvKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	// programStatusReservedEnvKeyPattern matches the session env gc writes
 	// itself: identity and city anchors (GC_*, GT_ROOT) and the beads scope
@@ -158,8 +158,10 @@ func validateProgramStatusBinding(b ProgramStatusBinding) error {
 	if !slices.Contains(programStatusProtocols, b.Protocol) {
 		return fmt.Errorf("protocol %q is not one of %s, %s", b.Protocol, ProgramStatusProtocolOSC7501, ProgramStatusProtocolNone)
 	}
-	if b.App != "" && !programStatusAppPattern.MatchString(b.App) {
-		return fmt.Errorf("app %q must be letters, digits, '.', '_' or '-'", b.App)
+	// The codec's app name is the one rule: an app the leaf could not arm
+	// must not load and then run unarmed.
+	if b.App != "" && !programstatus.ValidApp(b.App) {
+		return fmt.Errorf("app %q must be at most %d letters, digits, '.', '_', '+' or '-'", b.App, programstatus.MaxApp)
 	}
 	keys := make([]string, 0, len(b.Env))
 	for k := range b.Env {
