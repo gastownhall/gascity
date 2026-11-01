@@ -289,6 +289,11 @@ func (s *Store) Get(id string) (beads.Bead, error) {
 
 // Update modifies fields of an existing bead: script update <id> (stdin: JSON)
 func (s *Store) Update(id string, opts beads.UpdateOpts) error {
+	// The exec protocol's update document has no removal field; a script
+	// would see only the sets and report success with the keys still set.
+	if len(opts.UnsetMetadata) > 0 {
+		return fmt.Errorf("exec beads update %q: %w", id, beads.ErrUnsetMetadataUnsupported)
+	}
 	data, err := marshalUpdate(opts)
 	if err != nil {
 		return fmt.Errorf("exec beads update: marshaling: %w", err)

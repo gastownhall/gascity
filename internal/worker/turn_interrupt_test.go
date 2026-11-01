@@ -1020,7 +1020,9 @@ func startSharedRead[T any](t *testing.T, key string, stale T) {
 
 // The Manager loads the session row again under the session mutation lock:
 // a row closed since the handle's plan read is not found and one that will
-// not load is unknown, nothing sent either way, on either turn source.
+// not load is unknown, nothing sent either way, on either turn source; both
+// say so (session.ErrStopNotSent), so the lane releases the second as
+// nothing sent, never as a runtime that could not answer.
 func TestTurnInterruptRowLoadUnderTheLock(t *testing.T) {
 	sources := []struct {
 		name    string
@@ -1064,8 +1066,8 @@ func TestTurnInterruptRowLoadUnderTheLock(t *testing.T) {
 				s.onLockedLoad(t, func() error { return tc.onLocked(s) })
 				fake.Calls = nil
 				err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: src.turn})
-				if !errors.Is(err, tc.want) {
-					t.Fatalf("Interrupt = %v, want %v", err, tc.want)
+				if !errors.Is(err, tc.want) || !errors.Is(err, sessionpkg.ErrStopNotSent) {
+					t.Fatalf("Interrupt = %v, want %v and session.ErrStopNotSent", err, tc.want)
 				}
 				for _, other := range tc.not {
 					if errors.Is(err, other) {
@@ -1082,15 +1084,19 @@ func TestTurnInterruptRowLoadUnderTheLock(t *testing.T) {
 
 // On a protocol source every failure the runtime's turn fence does not
 // classify is unknown, on both handles: a dispatch error that names no class,
+// which may have reached the runtime (session.ErrInterruptOutcomeUnknown),
 // and a ctx that ended before the dispatch, which sends nothing. On a
 // SessionHandle that ctx ends once the session mutation lock is taken, as it
 // can between the plan read and the dispatch.
 func TestProtocolTurnInterruptUnclassifiedFailureIsUnknown(t *testing.T) {
-	assertUnknown := func(t *testing.T, err error) {
+	assertUnknown := func(t *testing.T, err error, maybeSent bool) {
 		t.Helper()
 		if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnNotEnded) ||
 			errors.Is(err, runtime.ErrTurnNotCurrent) || errors.Is(err, runtime.ErrSessionNotFound) {
 			t.Fatalf("Interrupt = %v, want ErrRuntimeUnavailable alone", err)
+		}
+		if got := errors.Is(err, sessionpkg.ErrInterruptOutcomeUnknown); got != maybeSent {
+			t.Fatalf("Interrupt = %v wraps ErrInterruptOutcomeUnknown %v, want %v", err, got, maybeSent)
 		}
 	}
 	protocolSession := func(t *testing.T) (turnSession, *runtime.Fake) {
@@ -1119,12 +1125,12 @@ func TestProtocolTurnInterruptUnclassifiedFailureIsUnknown(t *testing.T) {
 		t.Run("session handle/"+name, func(t *testing.T) {
 			s, fake := protocolSession(t)
 			fake.InterruptTurnErrors = map[string]error{s.info.SessionName: dispatchErr}
-			assertUnknown(t, s.handle.Interrupt(context.Background(), InterruptRequest{Turn: "acp-1"}))
+			assertUnknown(t, s.handle.Interrupt(context.Background(), InterruptRequest{Turn: "acp-1"}), true)
 		})
 		t.Run("runtime handle/"+name, func(t *testing.T) {
 			h, fake := protocolRuntime(t)
 			fake.InterruptTurnErrors = map[string]error{"turn-worker": dispatchErr}
-			assertUnknown(t, h.Interrupt(context.Background(), InterruptRequest{Turn: "acp-1"}))
+			assertUnknown(t, h.Interrupt(context.Background(), InterruptRequest{Turn: "acp-1"}), true)
 		})
 	}
 	t.Run("session handle/ctx ends under the lock", func(t *testing.T) {
@@ -1132,7 +1138,7 @@ func TestProtocolTurnInterruptUnclassifiedFailureIsUnknown(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		s.onLockedLoad(t, func() error { cancel(); return nil })
-		assertUnknown(t, s.handle.Interrupt(ctx, InterruptRequest{Turn: "acp-1"}))
+		assertUnknown(t, s.handle.Interrupt(ctx, InterruptRequest{Turn: "acp-1"}), false)
 		if got := sentInputs(fake, s.info.SessionName); len(got) != 0 {
 			t.Fatalf("sent %v after ctx ended", got)
 		}
@@ -1141,7 +1147,7 @@ func TestProtocolTurnInterruptUnclassifiedFailureIsUnknown(t *testing.T) {
 		h, fake := protocolRuntime(t)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		assertUnknown(t, h.Interrupt(ctx, InterruptRequest{Turn: "acp-1"}))
+		assertUnknown(t, h.Interrupt(ctx, InterruptRequest{Turn: "acp-1"}), false)
 		if got := sentInputs(fake, "turn-worker"); len(got) != 0 {
 			t.Fatalf("sent %v after ctx ended", got)
 		}
@@ -1197,6 +1203,48 @@ func TestTurnInterruptCheckJoinsNoReadFromBeforeTheLock(t *testing.T) {
 		}
 		if calls := idle.idleCalls(); calls != 2 {
 			t.Fatalf("SnapshotIdle calls = %d, want the check's own 2", calls)
+		}
+	})
+}
+
+// The settle after the keys runs under the session mutation lock too, and
+// its reads are its own as the check's are: a shared read already in
+// flight, which began before the lock and holds the session as it was then,
+// never decides the turn's end nor holds the settle until it answers. Each
+// case keeps such a read in flight for the whole call while the interrupt
+// ends the turn; only reads made under the lock see the end within ctx.
+func TestTurnInterruptSettleJoinsNoReadFromBeforeTheLock(t *testing.T) {
+	t.Run("session reload", func(t *testing.T) {
+		s, fake, _, _, _ := codexSettleSession(t, func(path string, _ *manualTurnClock) {
+			appendTranscript(t, path, codexAborted(codexTurn1, "2026-10-08T02:22:40.000Z")+"\n")
+		})
+		s.onLockedLoad(t, func() error {
+			startSharedRead(t, turnObservationKey("session", s.handle.turnObservationScope(), s.info.ID), s.info)
+			return nil
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.handle.Interrupt(ctx, InterruptRequest{Turn: codexTurn1}); err != nil {
+			t.Fatalf("Interrupt = %v, want nil: the settle's own reads see the turn end", err)
+		}
+		if got := sentInputs(fake, s.info.SessionName); !slices.Equal(got, []string{"SendKeys(Escape)"}) {
+			t.Fatalf("sent %v, want [SendKeys(Escape)]", got)
+		}
+	})
+	t.Run("idle reading", func(t *testing.T) {
+		idle := newIdleScript(idleAnswer{idle: false}, idleAnswer{idle: true}, idleAnswer{idle: true})
+		s := newTurnSession(t, profiled(runtime.ProfileTmux, idle), "claude", "")
+		timing, clock := racingTurnTiming(time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC))
+		s.handle.turns.timing = timing
+		ageTranscript(t, s.writeTranscript(t, "claude", claudePrompt(claudeTurn1, "2026-10-13T05:59:50.123Z")), clock.now().Add(-time.Minute))
+		startSharedRead(t, turnObservationKey("idle", s.handle.turnObservationScope(), s.info.SessionName), idleReading{idle: false, supported: true})
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.handle.Interrupt(ctx, InterruptRequest{Turn: claudeTurn1}); err != nil {
+			t.Fatalf("Interrupt = %v, want nil: the settle's own idle readings end the turn", err)
+		}
+		if calls := idle.idleCalls(); calls != 3 {
+			t.Fatalf("SnapshotIdle calls = %d, want 3 (the check's, then the settle's own two)", calls)
 		}
 	})
 }

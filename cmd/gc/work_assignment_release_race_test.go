@@ -734,6 +734,36 @@ func TestReleaseWorkBead_DoesNotClobberReclaimedAssignee(t *testing.T) {
 	}
 }
 
+// TestReleaseWorkBead_DoesNotClobberReclaimedAssigneeOnTheConditionalPath is
+// the dr-huhn regression on the conditional path, which a store that fences
+// takes under the conditional_writes default (mc-dpo2b). The test above fakes
+// its stale snapshot at the current revision, which a fence cannot see; here
+// the re-claim moves the revision, as a real one does. The release is fenced
+// on the snapshot's revision, so it writes nothing and reports the conflict.
+func TestReleaseWorkBead_DoesNotClobberReclaimedAssigneeOnTheConditionalPath(t *testing.T) {
+	store := beads.NewMemStore()
+	stale := seedClaimedBead(t, store, "retired-session")
+	fresh := "fresh-worker"
+	if err := store.Update(stale.ID, beads.UpdateOpts{Assignee: &fresh}); err != nil {
+		t.Fatalf("re-claim: %v", err)
+	}
+	if err := beads.StampOpenedStore(store, "MemStore", gate.Auto, false, nil, nil); err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+
+	wa := workAssignmentForStore(beads.WorkStore{Store: store})
+	if err := wa.ReleaseWorkBead(stale, ""); err == nil {
+		t.Fatal("ReleaseWorkBead = nil after losing its fence; a caller gating a close on it would close over the bead")
+	}
+	got, err := store.Get(stale.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Assignee != "fresh-worker" || got.Status != "in_progress" {
+		t.Errorf("status=%q assignee=%q, want in_progress/fresh-worker — the fenced release clobbered a re-claim it did not own", got.Status, got.Assignee)
+	}
+}
+
 // TestReleaseWorkBead_ReleasesWhenSnapshotStillCurrent guards the other
 // direction: the no-clobber guard must not block the release it exists to
 // perform. When the snapshot is still accurate the bead is released normally.

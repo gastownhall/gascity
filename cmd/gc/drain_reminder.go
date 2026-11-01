@@ -45,18 +45,22 @@ package main
 // signal HOLDS rather than proceeds — the #312 rule that "we cannot tell" is
 // never "idle".
 //
-// Known bounded exposure: the k8s and ssh providers' GetLastActivity shell
-// `tmux display-message -p '#{session_activity}'` inside the pod, and
-// session-level activity does not advance on pane I/O for a detached session
-// (see Tmux.rawSessionActivity, which queries per-window activity for exactly
-// this reason). A busy k8s agent therefore reads as idle-since-attach and can
-// be nudged mid-turn. The ssh provider has the same exposure for the same
-// reason (internal/runtime/ssh/provider.go reads #{session_activity} and
-// reports CanReportActivity: true). Every other provider is fail-closed. The
-// exposure is capped at drainReminderMaxAttempts informational nudges per drain
-// and is tracked as its own fix rather than papered over here.
+// Known bounded exposure: the maintained exec session scripts for k8s and
+// Docker boxes (contrib/session-scripts/gc-session-k8s,
+// scripts/gc-session-docker) answer get-last-activity from
+// `tmux display-message -p '#{session_activity}'`, and session-level activity
+// does not advance on pane I/O for a detached session (see
+// Tmux.rawSessionActivity, which queries per-window activity for exactly this
+// reason). A busy agent in such a box therefore reads as idle-since-attach and
+// can be nudged mid-turn. (The native k8s and ssh providers read the
+// per-window clock less gc's own keystroke echo, as the local tmux provider
+// does; see runtime.PokeLedger.) The exposure is capped at
+// drainReminderMaxAttempts informational nudges per drain. Fixing it needs the
+// scripts to read the per-window clock and the exec provider to discount its
+// own nudges, not a workaround here.
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -129,6 +133,8 @@ const (
 	drainReminderHoldUnreadable    = "activity_unreadable"
 	drainReminderHoldExhausted     = "attempts_exhausted"
 	drainReminderHoldAckUnknown    = "ack_unreadable"
+	drainReminderHoldContentHeld   = "content_held"
+	drainReminderHoldPending       = "pending_interaction"
 )
 
 // drainReminderLabel prefixes this pass's journal lines so they are greppable
@@ -201,7 +207,12 @@ func maybeRemindDrainingSession(
 		return announceDrainReminderExhausted(store, info, name, due, stdout)
 	}
 
-	if outcome, proceed := drainReminderQuietHold(sp, store, info, name, due.now); !proceed {
+	if drainReminderContentHeld(due) {
+		noteDrainReminderHold(store, info, drainReminderHoldContentHeld)
+		return drainReminderHeld
+	}
+
+	if outcome, proceed := drainReminderQuietHold(sp, store, info, name, due.now, stdout); !proceed {
 		return outcome
 	}
 
@@ -223,8 +234,8 @@ func remindStopPendingDrain(sp runtime.Provider, store beads.Store, info session
 const drainReminderNoticePurpose = "drain-reminder"
 
 // laneDrainNoticeClass is the drain reminder's notice op as the conversation
-// lane's content class: the one content a draining row admits (I7's
-// exemption, session.GateContentDrainNotice). It matches the policy
+// lane's content class: the one content a draining or stop-requested row
+// admits (I7's exemption, session.GateContentDrainNotice). It matches the policy
 // plannerNoticeRequest gives every planner notice, from this purpose's
 // principal.
 var laneDrainNoticeClass = opjournal.ContentClass{
@@ -462,13 +473,25 @@ func settleLastDrainReminder(store beads.Store, info sessions.Info, name string,
 	return failed, true
 }
 
+// drainReminderContentHeld reports whether due's row, as loaded, holds its
+// conversation's content (session.ContentHeldInfo; SESSION-RUNTIME-027). The
+// reminder is content that hold keeps: the lane holds its notice until its
+// start_by, and a direct nudge would type past the hold. So a held row is not
+// reminded and no attempt is spent; the budget, and the drain-ack escalation
+// it paces (drainRemindersSpent), wait for the hold to clear. The gate runs
+// after the exhaustion check, so a budget spent before the hold is still
+// announced.
+func drainReminderContentHeld(due drainReminderDue) bool {
+	return sessions.ContentHeldInfo(sessionInfoFromBead(due.row))
+}
+
 // drainReminderQuietHold runs the liveness and quiet gates that can still stop a
 // due reminder before delivery: the stop finally took, a human is at the pane,
 // or the activity signal is unreadable or too recent (an agent in the middle of
 // a turn is answering its own drain; an unreadable signal is not evidence it is
 // not). proceed is false when one of those holds, carrying the outcome to return.
 // An attachment probe that cannot tell holds under its own reason.
-func drainReminderQuietHold(sp runtime.Provider, store beads.Store, info sessions.Info, name string, now time.Time) (drainReminderOutcome, bool) {
+func drainReminderQuietHold(sp runtime.Provider, store beads.Store, info sessions.Info, name string, now time.Time, stdout io.Writer) (drainReminderOutcome, bool) {
 	if !sp.IsRunning(name) {
 		return drainReminderSkipped, false // the stop took after all; the finalizer owns it
 	}
@@ -488,6 +511,20 @@ func drainReminderQuietHold(sp runtime.Provider, store beads.Store, info session
 		noteDrainReminderHold(store, info, drainReminderHoldBusy)
 		return drainReminderHeld, false
 	}
+	// A reminder typed into an open dialog (a permission prompt or an
+	// AskUserQuestion question) would answer it, and a refused attempt still
+	// spends budget, so hold before the marker is written.
+	blocked := pendingInteractionBlocked(sp, name)
+	shadowHold(sp, name, info.ID, sessions.ProviderFamilyFromInfo(info, ""),
+		runtime.ProgramPointDrainReminder, blocked, now, runtime.ProgramBlockedHoldVerdict)
+	if blocked {
+		if noteDrainReminderHold(store, info, drainReminderHoldPending) {
+			fmt.Fprintf(stdout, //nolint:errcheck // best-effort
+				"%s: holding the drain reminder for %s: it is waiting on a dialog that is answered in the terminal\n",
+				drainReminderLabel, name)
+		}
+		return drainReminderHeld, false
+	}
 	return drainReminderDelivered, true
 }
 
@@ -497,8 +534,8 @@ func drainReminderQuietHold(sp runtime.Provider, store beads.Store, info session
 // can type into the session, the reminder is a planner notice op
 // (proposeDrainReminderNotice) that the lane delivers at the session's
 // boundary: the lane's content gate admits the drain reminder's notice into
-// a draining row (session.GateContentDrainNotice), and nothing else. A row
-// the gate holds the notice from for a reason other than draining (an idle
+// a draining or stop-requested row (session.GateContentDrainNotice), and
+// nothing else. A row the gate holds the notice from for another reason (an idle
 // drain's latch, which the drain-ack stop-pending mark keeps, reads
 // stop_pending) is nudged directly, as it is with the lane off: a notice
 // there would only wait out its start_by.
@@ -508,7 +545,12 @@ func drainReminderQuietHold(sp runtime.Provider, store beads.Store, info session
 // never replay an unbounded stream. A nudge error still spends the attempt
 // (the write-ahead is what bounds the loop, and unwinding it would let a
 // permanently input-dead pane re-send forever) and records that nothing
-// ARRIVED, so the escalation reports what actually happened.
+// ARRIVED, so the escalation reports what actually happened. The exception
+// is a deferral (drainReminderDeferralHold): the runtime submitted nothing
+// because the session was running a turn its submit keys would have
+// interrupted, or was waiting on a pending interaction its text would have
+// answered, so nothing was attempted and the marker is restored to what it
+// held, under the busy or pending hold.
 func deliverDrainReminder(sp runtime.Provider, store beads.Store, info sessions.Info, name string, due drainReminderDue, stdout io.Writer) drainReminderOutcome {
 	failed := due.failed
 	journalPrior := func() {}
@@ -532,8 +574,14 @@ func deliverDrainReminder(sp runtime.Provider, store beads.Store, info sessions.
 	if !writeDrainReminderMarker(store, info, due.row, due.drainID, due.attempts+1, failed, due.attempts+1, due.now, stdout) {
 		return drainReminderSkipped
 	}
+	err := nudgeDrainReminder(sp, name, info)
+	if hold := drainReminderDeferralHold(err); hold != "" {
+		writeDrainReminderMarker(store, info, due.row, due.drainID, due.attempts, due.failed, due.settled, due.last, stdout)
+		noteDrainReminderHold(store, info, hold)
+		return drainReminderHeld
+	}
 	journalPrior()
-	if err := nudgeDrainReminder(sp, name, info); err != nil {
+	if err != nil {
 		// A nil return is not proof of delivery: the seam adapter answers nil when
 		// it cannot attach, so some failures are invisible here and counted as
 		// delivered. That is the best knowledge available at this boundary, and it
@@ -551,6 +599,21 @@ func deliverDrainReminder(sp runtime.Provider, store beads.Store, info sessions.
 	return drainReminderDelivered
 }
 
+// drainReminderDeferralHold is the hold a reminder delivery's err puts the
+// row under when the runtime submitted nothing and the attempt is not
+// spent, or "": a session running a turn its submit keys would interrupt
+// (runtime.ErrSessionBusy), or one waiting on a pending interaction its
+// text would answer, which opened after the hold's own look.
+func drainReminderDeferralHold(err error) string {
+	switch {
+	case errors.Is(err, runtime.ErrSessionBusy):
+		return drainReminderHoldBusy
+	case nudgeRefusedBehindPendingInteraction(err):
+		return drainReminderHoldPending
+	}
+	return ""
+}
+
 // nudgeDrainReminder types the reminder into the session directly: with
 // [ops] authoritative empty, without a lane host for the sessions store, or
 // for a session no lane can type into.
@@ -561,9 +624,12 @@ func nudgeDrainReminder(sp runtime.Provider, name string, info sessions.Info) er
 // drainReminderNoticeBlock is why the lane's content gate would hold the
 // drain reminder's notice from due's row now, or "": the gate the lane
 // executor asks (session.ContentGate for GateContentDrainNotice), over the
-// row as loaded, whose runtime the quiet hold has just seen running.
+// row as loaded, whose runtime the quiet hold has just seen running. The
+// drain notice passes a stop request as it passes draining (I7's
+// exemption), so no reading of the row's stop request could change the
+// answer: the reminder reads none and asks with the zero StopRequest.
 func drainReminderNoticeBlock(due drainReminderDue) string {
-	return sessions.ContentGate(sessionInfoFromBead(due.row), true, due.now, sessions.GateContentDrainNotice)
+	return sessions.ContentGate(sessionInfoFromBead(due.row), sessions.StopRequest{}, true, due.now, sessions.GateContentDrainNotice)
 }
 
 // drainReminderNotice is attempt of due's reminder as a planner notice: keyed

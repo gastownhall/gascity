@@ -1308,10 +1308,27 @@ func (p *Provider) rpcCallOnceCtx(ctx context.Context, method string, params map
 	if len(failures) > 1 {
 		lastErr = fmt.Errorf("all T3 WebSocket candidates failed: %s", strings.Join(failures, "; "))
 	}
+	// The failures above are text, so ctx's error survives only if named here.
+	if ctxErr := ctxEndErr(ctx); ctxErr != nil && !errors.Is(lastErr, ctxErr) {
+		lastErr = fmt.Errorf("%w: %w", ctxErr, lastErr)
+	}
 	if written {
 		return nil, fmt.Errorf("%w: %w", errRPCWrittenUnanswered, lastErr)
 	}
 	return nil, lastErr
+}
+
+// ctxEndErr is ctx.Err(), or context.DeadlineExceeded once ctx's deadline has
+// passed before its timer has run: a socket deadline taken from ctx.Deadline()
+// fires in that gap, and ctx.Err() is still nil there.
+func ctxEndErr(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return nil
 }
 
 // readRPCAnswer reads conn, for up to 30 s or until ctx's deadline, until T3
@@ -2018,6 +2035,17 @@ func buildThreadEnv(env map[string]string) map[string]string {
 		threadEnv["BEADS_DOLT_SERVER_MODE"] = "1"
 	}
 	delete(threadEnv, "BEADS_DOLT_SHARED_SERVER")
+	// Forward the controller's shared-server opt-out, never an opt-in. A
+	// session whose managed port gc withheld (gastownhall/gascity#1656) has no
+	// env port to outrank a HOME-level dolt.shared-server: true, so without the
+	// pin the thread's bd would use the host-wide shared server instead of the
+	// managed one the scope's .beads/dolt-server.port mirror tracks.
+	for _, key := range []string{"BEADS_DOLT_SHARED_SERVER", "BD_DOLT_SHARED_SERVER"} {
+		value := strings.TrimSpace(env[key])
+		if on, err := strconv.ParseBool(value); err == nil && !on {
+			threadEnv[key] = value
+		}
+	}
 	return threadEnv
 }
 

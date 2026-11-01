@@ -154,6 +154,20 @@ func findOpenSessionBeadBySessionName(store beads.Store, sessionName string) (be
 	return beads.Bead{}, false, nil
 }
 
+// sessionStateMayBeRunning reports whether a row in state may hold a running
+// provider process: "" (read as active), active, awake, creating or draining.
+// Such a process may have minted its own conversation id, which only its
+// SessionStart hook reports, so a session_key minted for the row now would
+// name a transcript that does not exist and make the hook's set-once capture
+// drop the real one; the row gets its key at its next start instead.
+func sessionStateMayBeRunning(state string) bool {
+	switch session.State(strings.TrimSpace(state)) {
+	case "", session.StateActive, session.StateAwake, session.StateCreating, session.StateDraining:
+		return true
+	}
+	return false
+}
+
 func syncSessionCachedState(sessionName string, existing beads.Bead, exists bool, sp runtime.Provider) string {
 	if exists {
 		switch session.State(strings.TrimSpace(existing.Metadata["state"])) {
@@ -963,13 +977,18 @@ func sessionAssignmentIdentifiers(sessionBead beads.Bead) []string {
 }
 
 // sessionAssignmentIdentifiersForConfig extends the persisted session-bead
-// identifiers with the session's stable alias (stableAssignmentAliasForConfig)
-// and with the configured named-session identity when a recovered bead is
-// missing identity metadata. Keep these additions aligned with
-// sessionAssigneeMatches and compute_awake_bridge's AwakeSessionBead.Alias and
+// identifiers with the session's stable alias (stableAssignmentAliasForConfig),
+// with the bare identity a requalified named session was renamed in place from
+// (requalifiedPriorIdentityOfBead) and its named session's runtime name while
+// the row keeps the bare form's (requalifiedSpecRuntimeName), and with the
+// configured named-session identity when a recovered bead is missing identity
+// metadata. Keep these additions aligned with sessionAssigneeMatches and
+// compute_awake_bridge's AwakeSessionBead.Alias,
+// AwakeSessionBead.RequalifiedFrom, AwakeSessionBead.RequalifiedRuntimeName and
 // AwakeNamedSession fields.
 func sessionAssignmentIdentifiersForConfig(sessionBead beads.Bead, cfg *config.City) []string {
-	raw := append(sessionAssignmentIdentifierRaw(sessionBead), stableAssignmentAliasForConfig(sessionBead, cfg))
+	raw := append(sessionAssignmentIdentifierRaw(sessionBead), stableAssignmentAliasForConfig(sessionBead, cfg), requalifiedPriorIdentityOfBead(sessionBead, cfg),
+		requalifiedSpecRuntimeName(sessionBead, cfg, config.EffectiveCityName(cfg, "")))
 	if cfg == nil ||
 		strings.TrimSpace(sessionBead.Metadata[namedSessionMetadataKey]) != "true" ||
 		strings.TrimSpace(sessionBead.Metadata[namedSessionIdentityMetadata]) != "" {
@@ -1016,7 +1035,8 @@ func sessionAssignmentIdentifierRaw(sessionBead beads.Bead) []string {
 // SessionNameMetadata, Template) instead of cracking the raw bead, staying
 // byte-identical to the raw form (TestSessionClassifierInfoEquivalence pins it).
 func sessionAssignmentIdentifiersForConfigInfo(info session.Info, cfg *config.City) []string {
-	raw := append(sessionAssignmentIdentifierRawInfo(info), stableAssignmentAliasForConfigInfo(info, cfg))
+	raw := append(sessionAssignmentIdentifierRawInfo(info), stableAssignmentAliasForConfigInfo(info, cfg), requalifiedPriorIdentityInfo(info, cfg),
+		requalifiedSpecRuntimeNameInfo(info, cfg, config.EffectiveCityName(cfg, "")))
 	if cfg == nil ||
 		!info.ConfiguredNamedSession ||
 		strings.TrimSpace(info.ConfiguredNamedIdentity) != "" {
@@ -1554,8 +1574,9 @@ func unclaimWorkAssignedToRetiredSessionInfo(
 // episode's stranded_event_emitted_at marker (stamped by
 // emitSessionStrandedDiagnostic) before the reconciler will REPAIR — not merely
 // diagnose — a stranded pool worker. The marker tracks CONTINUOUS non-liveness:
-// clearStrandedEventMarker drops it on any alive observation, so the window
-// re-arms from zero each time the session recovers. A single not-alive
+// clearStrandedEventMarker drops it on any alive observation, and when the seat
+// parks on pre-assigned blocked work (ga-ylpbsy.16), so the window re-arms from
+// zero each time the session recovers or parks. A single not-alive
 // observation, or a worker that recovered and re-stranded, is never acted on
 // until the NEW episode persists across the window, so a transient
 // runtime-liveness glitch (or a recovered-then-cleanly-drained worker whose
@@ -1582,15 +1603,17 @@ const strandedRepairCloseReason = "stranded-repair"
 // !target.alive) with a non-degraded store read (!storeQueryPartial), and it
 // acts only once the CURRENT stranding episode's stranded_event_emitted_at
 // marker has aged past strandedRepairConfirmGrace. Because clearStrandedEventMarker
-// drops that marker on every alive observation, the marker cannot outlive the
-// episode that stamped it: a worker that stranded, was respawned on this same
+// drops that marker on every alive observation, and when the seat parks
+// (ga-ylpbsy.16), the marker cannot outlive the episode that stamped it: a seat
+// a full pool's fallback stranded that parks again starts a brand-new marker on
+// its next fallback, and a worker that stranded, was respawned on this same
 // session bead, and recovered starts a brand-new marker if it re-strands, so a
 // recovered-then-cleanly-drained worker (whose own bd close may be mid-flight
 // during the brief poolFreeable && hasAssignedWork window) can never be repaired
 // on a stale first-episode timestamp. An absent marker means no confirmed
 // stranding episode is in progress (the diagnostic early-returned — no recorder,
 // the work passed the detached-probe liveness filter, or the session recovered
-// and cleared it), so the repair defers.
+// or parked and cleared it), so the repair defers.
 //
 // The unassign step must land before the close: unclaimWorkAssignedToRetiredSessionInfo
 // reports how many releases failed via unclaimResult. If any failed, the session
@@ -1901,7 +1924,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				continue
 			}
 			beadSessionName := strings.TrimSpace(b.Metadata["session_name"])
-			if beadSessionName == spec.SessionName {
+			if beadSessionName == spec.SessionName || keepsRequalifiedRuntimeName(b, cfg, cityName) {
 				continue
 			}
 			// Canonical-singleton pool step-aside carve-out (ga-vixyn5.1): a
@@ -2201,8 +2224,14 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 
 		if isConfiguredNamed && (!isNamedSessionBead(b) || namedSessionIdentity(b) != tp.ConfiguredNamedIdentity) && !canRebindConfiguredNamedSession(b, tp.ConfiguredNamedIdentity, sn, tp.TemplateName) {
-			fmt.Fprintf(stderr, "session beads: configured named session %q conflicts with live bead %s\n", tp.ConfiguredNamedIdentity, b.ID) //nolint:errcheck
-			continue
+			// A row still stamped with the identity's prior (bare) form is
+			// this same named session awaiting its in-place rename, not a
+			// foreign claimant; the refresh below renames it
+			// (gastownhall/gascity#5957).
+			if spec, ok := findNamedSessionSpec(cfg, cityName, tp.ConfiguredNamedIdentity); !ok || !session.NamedSessionIdentityIsPriorForm(spec, namedSessionIdentity(b)) {
+				fmt.Fprintf(stderr, "session beads: configured named session %q conflicts with live bead %s\n", tp.ConfiguredNamedIdentity, b.ID) //nolint:errcheck
+				continue
+			}
 		}
 
 		// Record existing open bead in index.
@@ -2256,7 +2285,10 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			}
 		}
 		needsAliasSync := b.Metadata["alias"] != managedAlias
-		if b.Metadata["pool_slot"] == "" {
+		// Configured named sessions never carry a pool slot (cleared above).
+		// Backfilling here would re-derive one from a numeric name suffix
+		// (deputy-2 -> 2) and flap the bead against that clear every tick.
+		if !isConfiguredNamed && b.Metadata["pool_slot"] == "" {
 			queuePoolSlotMeta := queueMeta
 			if needsAliasSync && isManagedPool && isPoolInstance {
 				queuePoolSlotMeta = queueAliasGuardedMeta
@@ -2318,9 +2350,11 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		if b.Metadata["wake_mode"] != tp.WakeMode {
 			queueMeta("wake_mode", tp.WakeMode)
 		}
-		// Backfill session_key for beads created before this fix.
+		// Backfill session_key for beads created before this fix, but not
+		// under a process that may be running and own its id.
 		if b.Metadata["session_key"] == "" &&
-			tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
+			tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" &&
+			!sessionStateMayBeRunning(state) {
 			if key, err := session.GenerateSessionKey(); err == nil {
 				queueMeta("session_key", key)
 			}
@@ -2548,20 +2582,33 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if isNamedSessionBead(b) {
 				identity := namedSessionIdentity(b)
 				if identity != "" && (cfg == nil || config.FindNamedSession(cfg, identity) == nil) {
-					if retireRemovedConfiguredNamedSessionBead(cityPath, store, sw, sp, b, now, stderr) {
-						if idx, ok := indexBySessionName[sn]; ok {
-							openBeads[idx].Status = "open"
-							if openBeads[idx].Metadata == nil {
-								openBeads[idx].Metadata = map[string]string{}
-							}
-							fold := session.RetireNamedSessionPatch(now, "removed-configured-named-session", identity)
-							maps.Copy(fold, session.Cell(openBeads[idx].Metadata, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now).Fold())
-							for k, v := range fold {
-								openBeads[idx].Metadata[k] = v
+					// An identity that still matches two configured named
+					// sessions (a bare leaf two bindings claim) resolves to
+					// neither (gastownhall/gascity#5957): keep the row out of
+					// the retire path and let the work-gated orphan handling
+					// below decide — a live row with open assigned work stays.
+					if candidates := config.NamedSessionBareCandidates(cfg, identity); len(candidates) >= 2 {
+						names := make([]string, len(candidates))
+						for i, c := range candidates {
+							names[i] = c.QualifiedName()
+						}
+						fmt.Fprintf(stderr, "session beads: keeping %s: named identity %q matches %d configured named sessions (%s)\n", b.ID, identity, len(candidates), strings.Join(names, ", ")) //nolint:errcheck
+					} else {
+						if retireRemovedConfiguredNamedSessionBead(cityPath, store, sw, sp, b, now, stderr) {
+							if idx, ok := indexBySessionName[sn]; ok {
+								openBeads[idx].Status = "open"
+								if openBeads[idx].Metadata == nil {
+									openBeads[idx].Metadata = map[string]string{}
+								}
+								fold := session.RetireNamedSessionPatch(now, "removed-configured-named-session", identity)
+								maps.Copy(fold, session.Cell(openBeads[idx].Metadata, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now).Fold())
+								for k, v := range fold {
+									openBeads[idx].Metadata[k] = v
+								}
 							}
 						}
+						continue
 					}
-					continue
 				}
 			}
 			if preserveConfiguredNamedSessionBead(b, cfg, cityName) {
@@ -2720,17 +2767,19 @@ func syncQualifiedTemplate(tp TemplateParams) string {
 	return tp.TemplateName
 }
 
-// queueAliasChangeDriftRebaseline moves a started pool session's config-drift
-// baseline onto its post-rename config. A pool alias change re-renders the
-// alias-derived pre_start, which would otherwise trip the reconciler's
-// CoreFingerprint drift check and drain the session. Unstarted sessions (no
+// queueAliasChangeDriftRebaseline moves a started session's config-drift
+// baseline onto its post-rename config — pool and named sessions alike. An
+// alias change re-renders the alias-derived pre_start, which would otherwise
+// trip the reconciler's CoreFingerprint drift check and drain the session;
+// a named session requalified in place (gastownhall/gascity#5957) renames
+// its alias the same way. Unstarted sessions (no
 // started_config_hash) are skipped — the start path baselines them.
 // See gastownhall/gascity#2234.
 func queueAliasChangeDriftRebaseline(sessFront *session.Store, b beads.Bead, tp TemplateParams, queueMeta func(key, value string), stderr io.Writer) {
 	if strings.TrimSpace(b.Metadata["started_config_hash"]) == "" {
 		return
 	}
-	// Rare alias-CHANGE lane (only when a started pool session's alias is renamed):
+	// Rare alias-CHANGE lane (only when a started session's alias is renamed):
 	// re-read the session through the front door for its typed Info. The Get contract
 	// (ErrSessionNotFound / "loading session %q" wrap / non-IsSessionBeadOrRepairable
 	// rejection) is bridged as a best-effort skip — a vanished or damaged bead simply
@@ -3115,9 +3164,10 @@ func reapStaleSessionBeads(
 			continue
 		}
 		pendingCreate := info.PendingCreateClaim
-		// A never-started row held by its endpoint's capacity breaker is
-		// queued demand, not a phantom; the breaker's hold outlasts the lease
-		// windows below (endpointCapacityGuard.HoldsPendingCreate).
+		// A never-started row held by its endpoint's capacity breaker, or by a
+		// start-gate deferral, is queued demand, not a phantom; the hold
+		// outlasts the lease windows below (endpointCapacityGuard.HoldsPendingCreate,
+		// startDeferralMemo.Holds).
 		if strings.TrimSpace(info.LastWokeAt) == "" && holdsPendingCreate != nil && holdsPendingCreate(info) {
 			continue
 		}
@@ -4227,8 +4277,9 @@ func closeBeadPreservingAssignees(store beads.Store, sw *SeatWork, expected sess
 	// writes nothing and reports false, and the next tick decides again. Every
 	// other store makes the same checks on one read, then keeps the single Tx
 	// with the metadata ordered first. There the metadata may land while the
-	// Close fails; the helper then reports failure and the reconciler re-runs
-	// the close next tick, so no bead is durably left half-closed.
+	// Close fails or never runs; the helper then reports failure and the open
+	// row carries the close code as its state. The reconciler finishes that
+	// interrupted close on a later tick (finishInterruptedClose).
 	if commitLegacyClose(sessionFrontDoor(store), expected, session.ClosePatch(now, reason), now, stderr, "session") != session.CommitLanded {
 		return false
 	}

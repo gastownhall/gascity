@@ -13,13 +13,18 @@ package main
 // The observer runs only while its conversation's worker does, and it keeps
 // that worker serving while observations are pending (DES-O1 §7.1): the
 // watch's first update, a turn the cells show running while the session's
-// runtime runs, a turn the lane's own content take is expected to start, and
-// an update that could not be folded and waits for its retry. The worker starts the watch only after a pass that
+// runtime runs, a turn the lane's own content take or deliver-now unit is
+// expected to start, and an update that could not be folded and waits for
+// its retry. The worker starts the watch only after a pass that
 // succeeded and found lane work, or with a kind listed in
 // [ops] authoritative, so with the list empty a conversation with no lane op
 // gets no observer. A new worker's observer rebuilds its tracking from the
 // row's cells plus the source's Recent window (X11 §8); a turn that left the
-// window meanwhile ends unobserved.
+// window meanwhile ends unobserved. A source that keeps no record of its
+// normal ends (T3 V1) reading idle with no later turn has its running turn's
+// end inferred (laneInfersIdleEnds), but only when this watch saw the turn
+// run (sawRunning): after a restart, a successor worker or a park the same
+// shape is a gap.
 
 import (
 	"context"
@@ -367,13 +372,13 @@ func (e laneTurnExpect) metBy(obs opjournal.TurnObservation, next opjournal.Turn
 	return met
 }
 
-// expect records that a content take whose pass began at from ran an effect,
-// whose turn the observer waits for (DES-O1 §7.7): the worker keeps serving
-// until a read made from from shows a turn the take could have started
-// running or journaled (laneTurnExpect.started), or for laneTurnExpectFor
-// after the pass returned, now. A turn the cells already named is no such
-// turn, nor one the source started before from, so an earlier turn's end read
-// after the take does not end the wait.
+// expect records that a content take, or a deliver-now unit, whose pass began
+// at from ran an effect, whose turn the observer waits for (DES-O1 §7.7): the
+// worker keeps serving until a read made from from shows a turn the take could
+// have started running or journaled (laneTurnExpect.started), or for
+// laneTurnExpectFor after the pass returned, now. A turn the cells already
+// named is no such turn, nor one the source started before from, so an
+// earlier turn's end read after the take does not end the wait.
 func (o *laneTurnObserver) expect(from time.Time) {
 	o.expected = laneTurnExpect{From: from, Until: o.deps.now().Add(laneTurnExpectFor), Blind: !o.folded}
 	if o.folded {
@@ -473,12 +478,13 @@ func (o *laneTurnObserver) timerFired(ctx context.Context) {
 }
 
 // setInterrupting names the interrupt gc runs on a turn, so the fold
-// credits that turn's end to the op (X11 §5.4). The interrupt executor
-// (OJ-15) calls it before the effect and never clears it: the observer keeps
-// the ref until it folds that turn's end or a newer ref replaces it; a ref
-// whose turn no later fold names credits nothing. A ref without both an op
-// and a turn names nothing and changes nothing. A ref lost with its worker is recovered from the op rows
-// (laneTurnDeps.credits).
+// credits that turn's end to the op (X11 §5.4). No executor calls it yet
+// (ga-6plx6a): the interrupt executor (OJ-15) keeps its ref for its own
+// retries (laneInterrupts), and the fold credits an op from the op rows
+// (laneTurnDeps.credits). The observer keeps a ref it is given until it
+// folds that turn's end or a newer ref replaces it; a ref whose turn no
+// later fold names credits nothing. A ref without both an op and a turn
+// names nothing and changes nothing.
 func (o *laneTurnObserver) setInterrupting(ref opjournal.InterruptRef) {
 	if ref.Op == "" || ref.Turn == "" {
 		return
@@ -692,7 +698,8 @@ func (o *laneTurnObserver) writeOnce(ctx context.Context, rows laneTurnRows, g l
 	prev := row.Turn
 	now := o.deps.now()
 	obs, cut := laneTurnObservationOf(o.conv, g, prev, hist, now)
-	obs.Caps = laneTurnCapsStamp(laneEffectiveTurnCaps(o.declared(), prev, g.Gen))
+	caps := laneEffectiveTurnCaps(o.declared(), prev, g.Gen)
+	obs.Caps, obs.InferIdleEnds = laneTurnCapsStamp(caps), laneInfersIdleEnds(caps) && o.sawRunning(prev)
 	ref, err := o.creditFor(prev, obs)
 	if err != nil {
 		return false, err
@@ -775,7 +782,9 @@ func (o *laneTurnObserver) creditFor(prev opjournal.TurnCells, obs opjournal.Tur
 // laneTurnCreditCandidates are the turns whose end the fold of obs over prev
 // may credit to a gc interrupt: ended turns of Recent the fold has not
 // journaled, newer than the cells' anchor or running in the cells, whose
-// source records a cancel or whose end is inferred (FoldTurn's reasons).
+// source records a cancel or whose end is inferred (FoldTurn's reasons),
+// and the running turn whose end the fold infers at idle, which obs infers
+// only when the watch saw that turn run (sawRunning).
 func laneTurnCreditCandidates(prev opjournal.TurnCells, obs opjournal.TurnObservation) []string {
 	if prev.Generation != obs.Generation {
 		prev = opjournal.TurnCells{}
@@ -803,7 +812,32 @@ func laneTurnCreditCandidates(prev opjournal.TurnCells, obs opjournal.TurnObserv
 			out = append(out, e.ID)
 		}
 	}
+	if turn := obs.InferredIdleEnd(prev); turn != "" {
+		out = append(out, turn)
+	}
 	return out
+}
+
+// sawRunning reports whether a fold of this watch left the cells showing
+// prev's running turn running, so the watch itself saw that turn run. Only
+// then may the fold infer its end at idle (laneInfersIdleEnds) or credit
+// that end to an interrupt; a watch that never saw it run (a restart, a
+// successor worker, a park) ends it unobserved, a gap (X11 §8).
+func (o *laneTurnObserver) sawRunning(prev opjournal.TurnCells) bool {
+	return o.folded && prev.State == opjournal.TurnStateRunning && o.cells.State == opjournal.TurnStateRunning &&
+		o.cells.Generation == prev.Generation && o.cells.ID == prev.ID
+}
+
+// laneInfersIdleEnds is the capability half of the fold's idle-end
+// inference (opjournal.TurnObservation.InferIdleEnds): it reports whether
+// the source's capabilities let a running turn it shows neither current nor
+// in Recent at the idle boundary be read as a normal end, which holds for a
+// protocol source whose End is inferred, as T3 V1, which keeps no record of
+// the ends it clears. The fold infers only when sawRunning also holds. A
+// transcript source's inferred ends reach Recent through the worker's idle
+// overlay, so a turn missing there is a gap.
+func laneInfersIdleEnds(caps worker.TurnCapabilities) bool {
+	return caps.Source == worker.TurnSourceProtocol && caps.Normalized().End == runtime.TurnEndInferred
 }
 
 // noteWrite counts a batch that landed.

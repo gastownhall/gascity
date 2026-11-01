@@ -30,6 +30,9 @@ func TestExecutionBackstopReadsTheWorkStartedCell(t *testing.T) {
 	cell := func(store, bead string, gen int) string {
 		return fmt.Sprintf(`{"v":1,"claims":[{"store":%q,"bead":%q,"gen":%d,"at":%q,"via":"claim"}]}`, store, bead, gen, at)
 	}
+	resident := func(store, bead string, gen int) string {
+		return fmt.Sprintf(`{"v":1,"claims":[{"store":%q,"bead":%q,"gen":%d,"at":%q,"via":"claim","resident":true}]}`, store, bead, gen, at)
+	}
 	for _, tc := range []struct {
 		name    string
 		gen     string // the row's generation
@@ -38,6 +41,10 @@ func TestExecutionBackstopReadsTheWorkStartedCell(t *testing.T) {
 		// notGraph strips the claim's graph-step stamps, so it is no
 		// lifecycle candidate and no step_started of it could ever exist.
 		notGraph bool
+		// census is the claim's AssignedWorkStoreRef; "" is the gascity rig's
+		// bare name. bindingCensusRef is a graph step resident in the
+		// relocated binding, which the snapshot keys city (claimStoreRef).
+		census string
 	}{
 		{name: "an entry at the row's generation", gen: "2", cell: func(b string) string { return cell(storeRef, b, 2) }, started: true},
 		{name: "an entry the hook could not resolve a store for", gen: "2", cell: func(b string) string { return cell("", b, 2) }, started: true},
@@ -51,7 +58,20 @@ func TestExecutionBackstopReadsTheWorkStartedCell(t *testing.T) {
 		{name: "an older entry for the claim behind a current one for another", gen: "2", cell: func(b string) string {
 			return fmt.Sprintf(`{"v":1,"claims":[{"store":%q,"bead":"ga-other","gen":2,"at":%q,"via":"claim"},{"store":%q,"bead":%q,"gen":1,"at":%q,"via":"claim"}]}`, storeRef, at, storeRef, b, at)
 		}},
-		{name: "an entry in another store", gen: "2", cell: func(b string) string { return cell("rig:other", b, 2) }},
+		// A resident entry's store is exact: another store is another claim.
+		{name: "a resident entry in another store", gen: "2", cell: func(b string) string { return resident("rig:other", b, 2) }},
+		// An unmarked entry is an older hook's, which spelled the claim by
+		// the leg it ran in: at the row's generation it names the bead in any
+		// store (ga-ylpbsy.41).
+		{name: "an unmarked entry in another store at the row's generation", gen: "2", cell: func(b string) string { return cell("rig:other", b, 2) }, started: true},
+		{name: "an unmarked entry in another store at an older generation", gen: "2", cell: func(b string) string { return cell("rig:other", b, 1) }},
+		// The live 8d6r4 shape: a rig seat's graph step, resident in the
+		// binding (claim keyed city), its entry spelled by the rig leg.
+		{name: "a binding claim's leg spelling at the row's generation", gen: "2", census: bindingCensusRef, cell: func(b string) string { return cell("rig:gascity", b, 2) }, started: true},
+		{name: "a binding claim's leg spelling at an older generation", gen: "2", census: bindingCensusRef, cell: func(b string) string { return cell("rig:gascity", b, 1) }},
+		{name: "a binding claim's residence", gen: "2", census: bindingCensusRef, cell: func(b string) string { return resident("city", b, 2) }, started: true},
+		{name: "a binding claim's residence at an older generation", gen: "2", census: bindingCensusRef, cell: func(b string) string { return resident("city", b, 1) }},
+		{name: "a binding claim, a resident entry in the rig", gen: "2", census: bindingCensusRef, cell: func(b string) string { return resident("rig:gascity", b, 2) }},
 		{name: "an entry for another bead", gen: "2", cell: func(string) string { return cell(storeRef, "ga-other", 2) }},
 		{name: "an undecodable cell", gen: "2", cell: func(string) string { return `{"v":1,"claims":[` }},
 		{name: "a cell of an unknown version", gen: "2", cell: func(b string) string { return strings.Replace(cell(storeRef, b, 2), `"v":1`, `"v":2`, 1) }},
@@ -62,6 +82,9 @@ func TestExecutionBackstopReadsTheWorkStartedCell(t *testing.T) {
 			f := newExecutionBackstopFixture(t)
 			f.cfg.Agents[0].Nudge = "" // the maintainer-city pool templates, verbatim
 			f.workStoreRef = "gascity" // AssignedWorkStoreRefs' bare rig name
+			if tc.census != "" {
+				f.workStoreRef = tc.census
+			}
 			if tc.notGraph {
 				if err := f.store.SetMetadataBatch(f.work.ID, map[string]string{
 					beadmeta.RootBeadIDMetadataKey: "", beadmeta.StepIDMetadataKey: "",

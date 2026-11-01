@@ -15,6 +15,8 @@ import (
 
 	beadslib "github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/issueops"
+
+	"github.com/gastownhall/gascity/internal/execenv"
 )
 
 const nativeDoltStoreActor = "gascity"
@@ -26,7 +28,12 @@ const nativeDoltStoreActor = "gascity"
 
 var (
 	nativeDoltOpenBestAvailable = beadslib.OpenBestAvailable
-	nativeDoltOpenEnvMu         sync.Mutex
+	// nativeDoltOpenEnvMu is the process-wide execenv.ProcessEnvLock, not a
+	// lock of this package's own: every open window projects BEADS_* variables
+	// into the process env under it, and the session runtimes build child
+	// environments through execenv.Environ under the same lock, so a session
+	// spawned during an open never inherits the open's projection.
+	nativeDoltOpenEnvMu         = &execenv.ProcessEnvLock
 	errNativeIssueMetadataParse = ErrMetadataParse
 )
 
@@ -76,9 +83,7 @@ func nativeGraphApplyDeadline(plan *GraphApplyPlan) time.Duration {
 // ProcessEnvSnapshotExcludingNativeDoltOpen returns a process environment
 // snapshot after any in-flight native Dolt open has restored scoped BEADS_* env.
 func ProcessEnvSnapshotExcludingNativeDoltOpen() []string {
-	nativeDoltOpenEnvMu.Lock()
-	defer nativeDoltOpenEnvMu.Unlock()
-	return os.Environ()
+	return execenv.Environ()
 }
 
 // AmbientNativeDoltOpenEnv returns the ambient process-env value for key, read
@@ -1801,6 +1806,13 @@ func (s *NativeDoltStore) updateThroughBatch(ctx context.Context, storage beadsl
 // issue patch. Metadata keys merge rather than replace, matching the
 // read-modify-write the storage-layer path performed.
 func nativeIssuePatchFromUpdateOpts(opts UpdateOpts) (issueops.IssuePatch, error) {
+	// Every native write door builds its patch here, so this one refusal
+	// covers Update, the batch Tx and the guarded paths. issueops can express
+	// a removal (MetadataPatch.Unset), but not every wire door publishes it
+	// yet; refusing is the fail-closed answer until one that does is pinned.
+	if err := refuseUnsetMetadata("native dolt update", opts); err != nil {
+		return issueops.IssuePatch{}, err
+	}
 	var patch issueops.IssuePatch
 	if opts.Title != nil {
 		patch.Title = issueops.Field[string]{Set: true, Value: *opts.Title}
@@ -2826,6 +2838,9 @@ func (t *nativeDoltTx) Create(b Bead) (Bead, error) {
 }
 
 func (t *nativeDoltTx) Update(id string, opts UpdateOpts) error {
+	if err := refuseUnsetMetadata("native dolt transaction update "+id, opts); err != nil {
+		return err
+	}
 	if err := t.store.applyUpdateInTx(t.ctx, t.tx, id, opts); err != nil {
 		return nativeStoreError(id, err)
 	}
@@ -3388,7 +3403,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 	if err != nil {
 		return Bead{}, fmt.Errorf("parsing metadata for bead %q: %w: %w", issue.ID, errNativeIssueMetadataParse, err)
 	}
-	status, indefinitelyDeferred := normalizedBdReadState(string(issue.Status), issue.DeferUntil)
+	status, indefinitelyDeferred := normalizedBdReadState(string(issue.Status))
 	b := Bead{
 		ID:                   issue.ID,
 		Title:                issue.Title,
@@ -3406,6 +3421,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		DeferUntil:           cloneTimePtr(issue.DeferUntil),
 		CloseReason:          bdCloseReason(status, issue.CloseReason),
 		IndefinitelyDeferred: indefinitelyDeferred,
+		SourceStatus:         string(issue.Status),
 		Revision:             issue.RowVersion,
 	}
 	for _, dep := range issue.Dependencies {

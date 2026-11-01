@@ -60,6 +60,7 @@ go_test(
         "//internal/bazeltest",
         "//internal/beads/contract",
         "//internal/runtime",
+        "//internal/runtime/runtimetest",
         "//internal/shellquote",
         "//internal/testenv",
         "@io_k8s_api//core/v1:core",

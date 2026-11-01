@@ -287,7 +287,7 @@ func TestHookWorkQueryPrimaryStoreIsTheScopedStore(t *testing.T) {
 			overrides["GC_AGENT"] = tc.agentForQuery
 			workDir := agentCommandDir(cityDir, &a, cfg.Rigs)
 			queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
-			full := hookWorkQueryStores(cityDir, cfg, &a, tc.agentForQuery, workDir, queryEnv, overrides)
+			full := hookWorkQueryStores(cityDir, cfg, &a, tc.agentForQuery, workDir, queryEnv, overrides, nil)
 
 			var builds atomic.Int64
 			prev := hookStoreQueryEnv

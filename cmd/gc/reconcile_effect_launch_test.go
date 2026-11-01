@@ -325,6 +325,7 @@ func TestStartEffectFreshKeyNotClearedOrReminted(t *testing.T) {
 		fresh bool // a fresh key, not the row's
 	}{
 		{"no key", nil, true},
+		{"a started row the live-row guard left keyless", []string{"started_config_hash", "h-1", "continuation_epoch", "5"}, true}, // #5439
 		{"a committed key whose transcript is gone", []string{"session_key", "stale", "started_config_hash", "h-1"}, true},
 		{"an allocated key", []string{"session_key", "allocated", "continuation_epoch", "5"}, false},
 	} {
@@ -469,6 +470,41 @@ func TestPreWakeFoldsVerifiedBinding(t *testing.T) {
 	}
 }
 
+// Kills a parked resume's kept work dir applied unverified at the PreWake:
+// a kept dir that still hosts the resume stays the row's work dir and the
+// launch's, and one that is gone binds the derived dir instead.
+func TestPreWakeVerifiesAParkedResumesKeptWorkDir(t *testing.T) {
+	derived := filepath.Join(t.TempDir(), "worker-1")
+	for _, gone := range []bool{false, true} {
+		kept := t.TempDir()
+		k, leaf := launchKit(t, "asleep", beadmeta.WorkDirMetadataKey, kept, beadmeta.LegacyWorkDirMetadataKey, kept)
+		if gone {
+			if err := os.RemoveAll(kept); err != nil {
+				t.Fatal(err)
+			}
+		}
+		k.p.Alloc.Snapshot.Entries[k.it.Key] = &selectionEntry{Binding: &bindingTarget{WorkDir: derived, KeptWorkDir: kept, Patch: session.MetadataPatch{beadmeta.TriggerBeadIDMetadataKey: "w-1"}}}
+		want := kept
+		if gone {
+			want = derived
+		}
+		if s := k.runKind(); s.Outcome != settledLanded || len(leaf.cfgs) != 1 {
+			t.Fatalf("gone=%v: settlement %+v, want one launch", gone, s)
+		}
+		for _, key := range []string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
+			if got := k.meta(key); got != want {
+				t.Errorf("gone=%v: row %s %q, want %q", gone, key, got, want)
+			}
+		}
+		if got := leaf.cfgs[0].WorkDir; got != want {
+			t.Errorf("gone=%v: launched in %q, want %q", gone, got, want)
+		}
+		if got := k.meta(beadmeta.TriggerBeadIDMetadataKey); got != "w-1" {
+			t.Errorf("gone=%v: trigger %q, want the binding's w-1", gone, got)
+		}
+	}
+}
+
 // Kills a concrete-pool work_dir repair left to prepare, which fails after
 // PreWake on every attempt (the generation climbs): the PreWake CAS carries
 // it, and the launch starts in the concrete dir.
@@ -537,6 +573,28 @@ func TestACPLaunchRoutesBeforeStart(t *testing.T) {
 	tmux, leaf := launchKit(t, "asleep")
 	if s := tmux.runKind(); s.Outcome != settledLanded || len(leaf.routed) != 0 {
 		t.Fatalf("a non-ACP template: settlement %+v, routes %v; want landed with nothing routed to ACP", s, leaf.routed)
+	}
+}
+
+// Kills a recorded ACP session launched on the default backend: a row whose
+// recorded transport is ACP, under a template that now resolves the CLI
+// transport, starts the template's ACP launch (templateParamsForSession)
+// routed to ACP before the Start, with no route seeded for it.
+func TestRecordedACPLaunchRoutesBeforeStart(t *testing.T) {
+	k, leaf := launchKit(t, "asleep", "transport", "acp")
+	row := k.p.World.Census.Rows[k.it.Key]
+	tp := TemplateParams{TemplateName: "worker", Command: "opencode -m acme/model-x", ACPLaunch: &TemplateACPLaunch{Command: "opencode acp"}}
+	k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
+	leaf.onStart = func(context.Context) {
+		if len(leaf.routed) == 0 || leaf.routed[0] != "s-gc-1" {
+			t.Errorf("routes at Start = %v, want s-gc-1 routed to ACP", leaf.routed)
+		}
+	}
+	if s := k.runKind(); s.Outcome != settledLanded {
+		t.Fatalf("settlement %+v, want landed", s)
+	}
+	if len(leaf.cfgs) != 1 || leaf.cfgs[0].Command != "opencode acp" {
+		t.Fatalf("started %+v, want one start of the ACP launch %q", leaf.cfgs, "opencode acp")
 	}
 }
 

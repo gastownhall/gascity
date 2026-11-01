@@ -97,12 +97,7 @@ var laneFailpointHooksEnabled = clock.TestHooksEnabled
 // laneFailpointKill ends the process at a failpoint: SIGKILL to itself, then
 // it blocks so nothing more runs if the signal is late. A seam for unit
 // tests.
-var laneFailpointKill = func() {
-	if p, err := os.FindProcess(os.Getpid()); err == nil {
-		_ = p.Kill()
-	}
-	select {}
-}
+var laneFailpointKill = killSelfAtFailpoint
 
 // laneFailpointNotice is where the one-time notice goes; a seam for tests.
 var laneFailpointNotice io.Writer = os.Stderr
@@ -132,7 +127,7 @@ func (s *laneFailpoints) load() (laneFailpoint, bool) {
 			return
 		}
 		note := func(msg string) {
-			fmt.Fprintf(laneFailpointNotice, "gc: WARNING: %s=%q: %s\n", laneFailpointEnv, raw, msg) //nolint:errcheck // best-effort notice
+			failpointNotice(laneFailpointNotice, laneFailpointEnv, raw, msg)
 		}
 		if !laneFailpointHooksEnabled() {
 			note("ignored: this gc binary is not built with test hooks (test-only knob)")

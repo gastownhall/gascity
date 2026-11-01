@@ -28,7 +28,9 @@ import (
 //
 // For a suspended rig the skips live where each periodic reader picks its
 // stores (rig caches, demand, order tracking, completions, convergence, the
-// maintenance orders, the convoy check). For a suspended city with no running
+// maintenance orders, the convoy check, and by-id store resolution, whose
+// uniqueness probe serves autoclose, execution-fact emission and the convoy
+// commands). For a suspended city with no running
 // session the tick stops before its first phase, the order lane and the
 // completions sweep stand down, and every cache pauses its reconcile
 // (controllerState.beadsQuiescent).

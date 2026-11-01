@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
@@ -179,6 +180,31 @@ func TestTurnHistoryFromScan(t *testing.T) {
 		}
 		if got.Recent[0].Status != runtime.TurnStatusFailed || got.Recent[1].Status != "" || !got.Recent[0].StartedAt.Equal(ms) {
 			t.Fatalf("recent = %+v", got.Recent)
+		}
+	})
+	t.Run("a failed turn keeps the error its source recorded", func(t *testing.T) {
+		cooling := sessionlog.TurnFailure{Code: "rate_limit", Status: 429, RateLimited: true, Message: "API Error: Request rejected (429) · pool cooling for another 3d 16h"}
+		overloaded := sessionlog.TurnFailure{Code: "server_error", Status: 529, Message: "API Error: overloaded"}
+		spent := sessionlog.TurnFailure{Code: "usage_limit_exceeded", RateLimited: true, Quota: true, Message: "You've hit your usage limit."}
+		got, err := turnHistoryFromScan(sessionlog.TurnScan{Recent: []sessionlog.ScannedTurn{
+			{ID: "spent", StartedAt: at, EndedAt: at, Status: sessionlog.TurnStatusFailed, Failure: spent},
+			{ID: "refused", StartedAt: at, EndedAt: at, Status: sessionlog.TurnStatusFailed, Failure: cooling},
+			{ID: "overloaded", StartedAt: at, EndedAt: at, Status: sessionlog.TurnStatusFailed, Failure: overloaded},
+			{ID: "done", StartedAt: at, EndedAt: at, Status: sessionlog.TurnStatusCompleted},
+		}}, observed)
+		if err != nil {
+			t.Fatalf("turnHistoryFromScan: %v", err)
+		}
+		want := []runtime.TurnFailure{
+			{Code: "usage_limit_exceeded", RateLimited: true, Quota: true, Message: spent.Message},
+			{Code: "rate_limit", HTTPStatus: 429, RateLimited: true, Message: cooling.Message},
+			{Code: "server_error", HTTPStatus: 529, Message: overloaded.Message},
+			{},
+		}
+		for i, w := range want {
+			if got.Recent[i].Failure != w {
+				t.Errorf("recent[%d].Failure = %+v, want %+v", i, got.Recent[i].Failure, w)
+			}
 		}
 	})
 	t.Run("turns recorded without ids are not identity, even with none open", func(t *testing.T) {
@@ -450,6 +476,111 @@ func TestCurrentTurnConcurrentOverlaysShareOneSnapshot(t *testing.T) {
 	}
 }
 
+// Kills a FreshTurn that joins a read in flight (TurnHandle.FreshTurn): a
+// shared read a watch started before the running turn did holds the session
+// as it was then, and would aim an interrupt at the turn before. Each case
+// keeps such a read in flight for the whole test. CurrentTurn, which shares
+// it, goes unanswered, or leaves the turn open on the busy reading it holds;
+// FreshTurn makes its own reads and sees the session as it is.
+func TestFreshTurnJoinsNoReadInFlight(t *testing.T) {
+	stale := runtime.TurnHistory{Current: runtime.TurnState{TurnID: "acp-1"}, ObservedAt: time.Now()}
+	running := runtime.TurnHistory{Current: runtime.TurnState{TurnID: "acp-2"}, ObservedAt: time.Now()}
+	protocol := []struct {
+		name string
+		// handle builds the handle on fake and returns the key of its
+		// shared history read.
+		handle func(t *testing.T, fake *runtime.Fake) (TurnHandle, string)
+	}{
+		{"session handle", func(t *testing.T, fake *runtime.Fake) (TurnHandle, string) {
+			s := newTurnSession(t, profiled(runtime.ProfileACP, runtime.FullFake{Fake: fake}), "claude", "")
+			fake.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{s.info.SessionName: {fullTurnCaps}}
+			fake.TurnHistoryScripts = map[string][]runtime.TurnHistory{s.info.SessionName: {running}}
+			return s.handle, turnObservationKey("history", s.handle.turnObservationScope(), s.info.SessionName)
+		}},
+		{"runtime handle", func(t *testing.T, fake *runtime.Fake) (TurnHandle, string) {
+			h := newTurnRuntimeHandle(t, runtime.NewFakeProfile(runtime.ProfileACP, runtime.FullFake{Fake: fake}))
+			fake.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{"turn-worker": {fullTurnCaps}}
+			fake.TurnHistoryScripts = map[string][]runtime.TurnHistory{"turn-worker": {running}}
+			city, err := sessionpkg.NewCityDir(h.cityPath)
+			return h, turnObservationKey("history", turnCityScope(city, err, h.provider), "turn-worker")
+		}},
+	}
+	for _, tc := range protocol {
+		t.Run(tc.name+"/protocol history", func(t *testing.T) {
+			h, key := tc.handle(t, runtime.NewFake())
+			startSharedRead(t, key, stale)
+			joined, cancelJoined := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancelJoined()
+			if got, err := h.CurrentTurn(joined); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("CurrentTurn beside the read in flight = %+v, %v; want it to join that read and go unanswered", got, err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			got, err := h.FreshTurn(ctx)
+			if err != nil || got.Current.TurnID != "acp-2" {
+				t.Fatalf("FreshTurn beside the read in flight = %+v, %v; want acp-2 from a read of its own", got, err)
+			}
+		})
+	}
+	t.Run("session handle/idle overlay", func(t *testing.T) {
+		idle := newIdleScript(idleAnswer{idle: true})
+		s := quietOpenClaudeTurn(t, idle)
+		startSharedRead(t, turnObservationKey("idle", s.handle.turnObservationScope(), s.info.SessionName), idleReading{idle: false, supported: true})
+		joined, cancelJoined := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancelJoined()
+		if got, err := s.handle.CurrentTurn(joined); err != nil || got.Current.TurnID != claudeTurn1 {
+			t.Fatalf("CurrentTurn beside the reading in flight = %+v, %v; want the turn left open", got, err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		got, err := s.handle.FreshTurn(ctx)
+		if err != nil || got.Current.Active() || len(got.Recent) != 1 || !got.Recent[0].Inferred {
+			t.Fatalf("FreshTurn beside the reading in flight = %+v, %v; want the turn ended, inferred from readings of its own", got, err)
+		}
+		if calls := idle.idleCalls(); calls != 2 {
+			t.Fatalf("SnapshotIdle calls = %d, want FreshTurn's own 2", calls)
+		}
+	})
+}
+
+// Kills a FreshTurn whose session load ignores ctx: a store that stalls
+// would hold the read, and the key of every caller that bounds it, until the
+// store answers. FreshTurn returns unavailable as ctx ends; another made
+// while the stalled load is still out is refused at once
+// (ErrObservationOutstanding), never joining it nor waiting on the store.
+func TestFreshTurnBoundsItsSessionLoad(t *testing.T) {
+	s := newTurnSession(t, profiled(runtime.ProfileACP, runtime.FullFake{Fake: runtime.NewFake()}), "claude", "")
+	store := newStallingTurnStore(t, s.store)
+	s.handle.manager = sessionpkg.NewManagerWithOptions(store, s.sp, sessionpkg.WithCityPath(t.TempDir()))
+	store.stall(s.info.ID)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.handle.FreshTurn(ctx)
+		done <- err
+	}()
+	store.awaitStalled(t)
+	select {
+	case err := <-done:
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("FreshTurn over a stalled store = %v, want unavailable at its deadline", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("FreshTurn over a stalled store did not return when its ctx ended")
+	}
+	again, cancelAgain := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelAgain()
+	started := time.Now()
+	_, err := s.handle.FreshTurn(again)
+	if !errors.Is(err, ErrObservationOutstanding) || !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("FreshTurn while the stalled load is out = %v, want ErrObservationOutstanding", err)
+	}
+	if waited := time.Since(started); waited > time.Second {
+		t.Fatalf("FreshTurn while the stalled load is out waited %v, want it refused at once", waited)
+	}
+}
+
 // Kills an idle reading that outlives its caller: a wedged SnapshotIdle
 // returns the read at the caller's deadline, the turn left open.
 func TestCurrentTurnWedgedSnapshotReturnsAtTheDeadline(t *testing.T) {
@@ -579,6 +710,61 @@ func TestCurrentTurnIdleOverlay(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A Claude CLI that stops at a rate-limit refusal, idle or dead, never records
+// its turn's end, so the idle overlay infers it, and the transcript tells how
+// the turn ended (sessionlog.TurnScan.Stopped): failed on the refusal, at the
+// refusal's own time, not the observer's. A handle that infers the end later,
+// with no end of its own to reuse (the work ladder reads through a new handle
+// every pass), reports the same end, so a refusal never reads as newer than a
+// nudge that followed it. A busy reading leaves the turn open: the agent may
+// be retrying. A turn that recovered from its error ends inferred as ever,
+// with no status.
+func TestCurrentTurnIdleOverlayEndsATurnStoppedAtAnErrorFailed(t *testing.T) {
+	const (
+		startedAt = "2026-10-13T05:59:50.123Z"
+		refusedAt = "2026-10-13T05:59:51.456Z"
+		cooling   = "API Error: Request rejected (429) · pool cooling for another 3d 16h"
+	)
+	session := func(t *testing.T, idle idleScript, lines ...string) (turnSession, *manualTurnClock) {
+		t.Helper()
+		clock := newManualTurnClock(time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC))
+		s := newTurnSession(t, profiled(runtime.ProfileTmux, idle), "claude", "")
+		s.handle.turns.timing = clock.timing()
+		path := s.writeTranscript(t, "claude", lines...)
+		ageTranscript(t, path, clock.now().Add(-time.Minute))
+		return s, clock
+	}
+	t.Run("stopped at a refusal", func(t *testing.T) {
+		idle := newIdleScript(idleAnswer{idle: true})
+		s, clock := session(t, idle, claudePrompt(claudeTurn1, startedAt), claudeAPIError(refusedAt, "rate_limit", 429, cooling))
+		want := runtime.TurnHistory{Recent: []runtime.EndedTurn{{
+			TurnID: claudeTurn1, StartedAt: mustTurnTime(t, startedAt), EndedAt: mustTurnTime(t, refusedAt),
+			Status: runtime.TurnStatusFailed, Inferred: true,
+			Failure: runtime.TurnFailure{Code: "rate_limit", HTTPStatus: 429, RateLimited: true, Message: cooling},
+		}}}
+		assertCurrentTurn(t, s.handle, clock.now(), func(*testing.T) runtime.TurnHistory { return want }, nil)
+		if calls := idle.idleCalls(); calls != 2 {
+			t.Fatalf("SnapshotIdle calls = %d, want the overlay's two readings", calls)
+		}
+		clock.advance(time.Hour)
+		s.handle.turns.inferred = inferredTurnEnd{} // a handle that never inferred it
+		assertCurrentTurn(t, s.handle, clock.now(), func(*testing.T) runtime.TurnHistory { return want }, nil)
+	})
+	t.Run("retrying", func(t *testing.T) {
+		s, clock := session(t, newIdleScript(idleAnswer{idle: false}), claudePrompt(claudeTurn1, startedAt), claudeAPIError(refusedAt, "rate_limit", 429, cooling))
+		assertCurrentTurn(t, s.handle, clock.now(), func(t *testing.T) runtime.TurnHistory {
+			return runtime.TurnHistory{Current: runtime.TurnState{TurnID: claudeTurn1}, CurrentStart: mustTurnTime(t, startedAt)}
+		}, nil)
+	})
+	t.Run("recovered from its error", func(t *testing.T) {
+		s, clock := session(t, newIdleScript(idleAnswer{idle: true}),
+			claudePrompt(claudeTurn1, startedAt), claudeAPIError(refusedAt, "server_error", 529, "API Error: overloaded"), claudeReply("2026-10-13T05:59:52.000Z"))
+		assertCurrentTurn(t, s.handle, clock.now(), func(t *testing.T) runtime.TurnHistory {
+			return runtime.TurnHistory{Recent: []runtime.EndedTurn{{TurnID: claudeTurn1, StartedAt: mustTurnTime(t, startedAt), EndedAt: clock.now(), Inferred: true}}}
+		}, nil)
+	})
 }
 
 // Kills an inferred end later than the observation that reports it: the

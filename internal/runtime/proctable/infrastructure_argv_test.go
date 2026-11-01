@@ -9,7 +9,58 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
+	"github.com/gastownhall/gascity/internal/runtime/programstatus"
 )
+
+func TestIsProgramStatusRelayArgv(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		argv []string
+		want bool
+	}{
+		{name: "relay", argv: []string{"/opt/gc/bin/gc-osc7501", "relay", "--", "/bin/sh", "-c", "claude"}, want: true},
+		{name: "bare name", argv: []string{"gc-osc7501", "relay"}, want: true},
+		{name: "tap", argv: []string{"gc-osc7501", "tap", "-t", "%1", "-n", "r"}, want: false},
+		{name: "other binary", argv: []string{"/bin/relay", "relay"}, want: false},
+		{name: "verb only as a later argument", argv: []string{"sh", "-c", "gc-osc7501 relay"}, want: false},
+		{name: "bare argv0", argv: []string{"gc-osc7501"}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsProgramStatusRelayArgv(tc.argv); got != tc.want {
+				t.Fatalf("IsProgramStatusRelayArgv(%q) = %v, want %v", tc.argv, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsProgramStatusTapArgv(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		argv []string
+		want bool
+	}{
+		{name: "tap", argv: []string{"/opt/gc/bin/gc-osc7501", "tap", "-t", "%3", "-n", "r", "-x", "/usr/bin/tmux", "-S", "/tmp/s"}, want: true},
+		{name: "bare name", argv: []string{"gc-osc7501", "tap"}, want: true},
+		{name: "relay", argv: []string{"gc-osc7501", "relay", "--", "/bin/sh", "-c", "claude"}, want: false},
+		{name: "other binary", argv: []string{"/usr/bin/tap", "tap"}, want: false},
+		{name: "verb only as a later argument", argv: []string{"sh", "-c", "exec gc-osc7501 tap -t %3"}, want: false},
+		{name: "bare argv0", argv: []string{"gc-osc7501"}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsProgramStatusTapArgv(tc.argv); got != tc.want {
+				t.Fatalf("IsProgramStatusTapArgv(%q) = %v, want %v", tc.argv, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestProgramStatusCompanionNameMatchesProgramStatus pins the duplicated
+// companion name to the one gc arms with.
+func TestProgramStatusCompanionNameMatchesProgramStatus(t *testing.T) {
+	if ProgramStatusCompanionName != programstatus.CompanionName {
+		t.Fatalf("ProgramStatusCompanionName = %q, want programstatus.CompanionName %q", ProgramStatusCompanionName, programstatus.CompanionName)
+	}
+}
 
 func TestIsCityInfrastructureArgv(t *testing.T) {
 	for _, tc := range []struct {

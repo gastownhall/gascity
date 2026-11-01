@@ -358,7 +358,7 @@ func TestReadyIsNotFailedByADarkSuspendedRig(t *testing.T) {
 		t.Fatalf("suspending %s: %v", readyBrokenRigName, err)
 	}
 	var stdout, stderr bytes.Buffer
-	if code := cmdReady(readywork.Query{}, &stdout, &stderr); code != 0 {
+	if code := cmdReady(readyFlags{}, &stdout, &stderr); code != 0 {
 		t.Fatalf("gc ready = %d with only the suspended rig dark; stderr=%s", code, stderr.String())
 	}
 	if openFailure := "rig " + strconv.Quote(readyBrokenRigName) + " store:"; strings.Contains(stderr.String(), openFailure) {
@@ -386,7 +386,7 @@ func TestReadyRefusesAnUnreadableSuspensionState(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdReady(readywork.Query{}, &stdout, &stderr); code == 0 {
+	if code := cmdReady(readyFlags{}, &stdout, &stderr); code == 0 {
 		t.Fatalf("gc ready exited 0 over an unreadable suspension state; stdout=%s", stdout.String())
 	}
 	if stdout.Len() != 0 {
@@ -422,7 +422,7 @@ func TestReadyComposesTheCityConfigOncePerInvocation(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	before := composedCityConfigLoads.Load()
-	if code := cmdReady(readywork.Query{}, &stdout, &stderr); code != 0 {
+	if code := cmdReady(readyFlags{}, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdReady = %d; stderr=%s", code, stderr.String())
 	}
 	if grew := composedCityConfigLoads.Load() - before; grew != 1 {

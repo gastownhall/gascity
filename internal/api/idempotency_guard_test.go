@@ -23,6 +23,7 @@ import (
 // TestCreateEndpointsAreTriagedForIdempotency.
 var requireIdempotency = map[string]bool{
 	"create-bead":             true,
+	"create-session":          true,
 	"send-mail":               true,
 	"create-agent":            true,
 	"create-provider":         true,
@@ -48,9 +49,9 @@ var requireIdempotency = map[string]bool{
 // yet wired for Idempotency-Key (audit P0 #4, slices S2+). It is a reviewed
 // TODO list, not an exemption: when a slice wires one of these, MOVE it to
 // requireIdempotency — the test enforces the move so the lists stay honest.
-var pendingIdempotency = map[string]bool{
-	"create-session": true, // 202; raw+Huma split, deferred (S4)
-}
+// Empty now that create-session is wired; keep it for the next create that
+// lands before its key does.
+var pendingIdempotency = map[string]bool{}
 
 // exemptFromIdempotency lists POST operations that are NOT resource creates and
 // are not required to take an Idempotency-Key: actions on an existing resource

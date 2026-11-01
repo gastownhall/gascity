@@ -41,7 +41,12 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor). A rerun
 with the same --key of a reset that rolled back replays it only when it names
 the session by its ID: the rollback released the alias, and once the
 replacement the controller creates holds it, a rerun by the alias resets that
-session.`,
+session.
+
+A --key may not start with handoff: or request-restart:, where gc handoff and
+gc runtime request-restart keep the keys of the restart ops they record. Such
+a key is invalid: under ops.lifecycle = "require" the reset is refused, and
+under "auto" it runs unrecorded with a warning.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdSessionReset(args, key, stdout, stderr, jsonOutput) != 0 {

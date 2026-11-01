@@ -213,3 +213,31 @@ func TestFindOpenCodeSessionFileMatchesExportDirectory(t *testing.T) {
 		t.Fatalf("FindOpenCodeSessionFile() = %q, want %q", got, newPath)
 	}
 }
+
+// findOpenCodeSessionFileIn used to compare cleanOpenCodeWorkDir(export
+// directory) against the work dir by raw string inequality, so on macOS a real
+// work dir that resolves through the /var alias never matched the physical
+// /private/var path the adapter records. Reproduced here on Linux with a
+// manufactured symlink so the fix is verified without a macOS runner. Sibling
+// of TestFindZCodeSessionFileByScopeResolvesSymlinkedWorkDir.
+func TestFindOpenCodeSessionFileResolvesSymlinkedWorkDir(t *testing.T) {
+	root := t.TempDir()
+	physical := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "workdir-alias")
+	if err := os.Symlink(physical, alias); err != nil {
+		t.Skipf("symlinks not supported on this filesystem: %v", err)
+	}
+
+	// The export records the physical, symlink-resolved directory...
+	path := filepath.Join(root, "sess_wanted.json")
+	body := `{"info":{"id":"sess_wanted","directory":"` + filepath.ToSlash(physical) + `"},"messages":[]}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+
+	// ...but the caller (a session bead's work_dir, unresolved) passes the
+	// alias -- exactly the /var vs /private/var shape.
+	if got := FindOpenCodeSessionFile([]string{root}, alias); got != path {
+		t.Fatalf("FindOpenCodeSessionFile() = %q, want %q (symlinked work dir must resolve to the same export as its physical target)", got, path)
+	}
+}

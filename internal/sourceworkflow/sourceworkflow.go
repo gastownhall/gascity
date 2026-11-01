@@ -67,6 +67,25 @@ const WorkflowSpecSidecarClosedReason = "workflow cleanup: generated spec sideca
 // validator; gc.outcome carries the semantic.
 const WorkflowSkippedCloseReason = "workflow cleanup: subtree bead force-closed via skip directive"
 
+// RunCanceledCloseReason is the close_reason POST /runs/{id}/cancel stamps on
+// every open bead of the run's workflow subtrees it winds down, distinguishing
+// an operator cancel from a skip-directive teardown. It lives here, beside the
+// other subtree-close reasons, so a reader that must tell a controller close
+// from an operator close (dispatch's cross-store gates) can name it.
+const RunCanceledCloseReason = "run canceled via POST /runs/{id}/cancel"
+
+// HookSkipDoneWorkflowCloseReason is the close_reason `gc hook --claim`
+// stamps on every open bead under a workflow root (by gc.root_bead_id) whose
+// input convoy work is already terminal (cmd/gc skipDoneWorkflow, which keeps
+// its own copy; a cmd/gc test pins that the two agree).
+const HookSkipDoneWorkflowCloseReason = "hook --claim: input convoy work already terminal; nothing to do"
+
+// StaleOrderWispCloseReason is the close_reason the order-tracking sweep
+// stamps on every bead of a stale order wisp subtree it closes (cmd/gc
+// closeStaleOrderWispIDs, which keeps its own copy; a cmd/gc test pins that
+// the two agree).
+const StaleOrderWispCloseReason = "order-tracking sweep: stale order wisp subtree exceeded retention window"
+
 // IsWorkflowRoot reports whether a bead is a source-workflow root. It must
 // stay in sync with sling.IsWorkflowAttachment: roots may be marked via the
 // legacy gc.kind=workflow label, via gc.formula_contract=graph.v2, or both.
@@ -517,6 +536,78 @@ func ListWorkflowBeads(store beads.Store, rootID string) ([]beads.Bead, error) {
 	slices.SortFunc(out, func(a, b beads.Bead) int {
 		return strings.Compare(a.ID, b.ID)
 	})
+	return out, nil
+}
+
+// maxNestedDrainDepth bounds WorkflowTree. Real drain nesting is a handful of
+// levels deep, so a deeper chain is a corrupt or cyclic link.
+const maxNestedDrainDepth = 16
+
+// WorkflowTreeNode is one workflow of a run tree: its root and the members
+// ListWorkflowBeads read for it, the root included.
+type WorkflowTreeNode struct {
+	Root    beads.Bead
+	Members []beads.Bead
+}
+
+// WorkflowTree returns the workflow rooted at rootID together with every drain
+// item workflow nested under it at any depth, closed ones included, each with
+// its members, deepest first and rootID's own workflow last. A drain item
+// workflow is a root of its own: its steps carry ITS id in gc.root_bead_id, so
+// ListWorkflowBeads(rootID) never reaches them. Its only link to the parent is
+// gc.drain_control_id, naming a drain control that is a member of the parent
+// workflow. Deepest-first is the order a terminal sweep must close them in, so
+// an interrupted sweep leaves the outer levels open for its retry to find. The
+// members are the walk's own reads, so a caller that needs them (to find the
+// work in progress, say) reads each workflow once.
+func WorkflowTree(store beads.Store, rootID string) ([]WorkflowTreeNode, error) {
+	rootID = strings.TrimSpace(rootID)
+	if store == nil || rootID == "" {
+		return nil, nil
+	}
+	reader := beads.HandlesFor(store).Live
+	var out []WorkflowTreeNode
+	seen := map[string]bool{rootID: true}
+	var walk func(id string, depth int) error
+	walk = func(id string, depth int) error {
+		members, err := ListWorkflowBeads(store, id)
+		if err != nil {
+			return err
+		}
+		node := WorkflowTreeNode{Members: members}
+		for _, member := range members {
+			if member.ID == id {
+				node.Root = member
+			}
+			if depth >= maxNestedDrainDepth || member.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindDrain {
+				continue
+			}
+			items, err := reader.List(beads.ListQuery{
+				IncludeClosed: true,
+				Metadata:      map[string]string{beadmeta.DrainControlIDMetadataKey: member.ID},
+			})
+			if err != nil {
+				return err
+			}
+			slices.SortFunc(items, func(a, b beads.Bead) int { return strings.Compare(a.ID, b.ID) })
+			for _, item := range items {
+				// The unit convoys a drain creates carry the same link; only
+				// workflow roots are nested runs.
+				if !IsWorkflowRoot(item) || seen[item.ID] {
+					continue
+				}
+				seen[item.ID] = true
+				if err := walk(item.ID, depth+1); err != nil {
+					return err
+				}
+			}
+		}
+		out = append(out, node)
+		return nil
+	}
+	if err := walk(rootID, 0); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 

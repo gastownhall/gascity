@@ -20,7 +20,6 @@ go_library(
         "assets/scripts/reaper.sh",
         "assets/scripts/renudge-stale-human-gates.sh",
         "assets/scripts/spawn-storm-detect.sh",
-        "assets/scripts/wisp-compact.sh",
         "doctor/check-binaries/doctor.toml",
         "doctor/check-binaries/run.sh",
         "formulas/mol-do-work.toml",
@@ -45,7 +44,6 @@ go_library(
         "orders/reaper.toml",
         "orders/renudge-stale-human-gates.toml",
         "orders/spawn-storm-detect.toml",
-        "orders/wisp-compact.toml",
         "overlay/per-provider/antigravity/.agents/hooks.json",
         "overlay/per-provider/codex/.codex/hooks.json",
         "overlay/per-provider/copilot/.github/copilot-instructions.md",
@@ -85,6 +83,7 @@ go_test(
         "pack_assets_test.go",
         "pack_formulas_test.go",
         "pack_orders_test.go",
+        "pack_prompt_bead_ids_test.go",
         "testenv_import_test.go",
     ],
     data = glob(
@@ -95,6 +94,7 @@ go_test(
     ],
     embed = [":core"],
     deps = [
+        "//examples/bd",
         "//internal/orders",
         "//internal/testenv",
         "@com_github_burntsushi_toml//:toml",

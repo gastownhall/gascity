@@ -81,7 +81,7 @@ func (cr *CityRuntime) legacySessionEntry(site string) bool {
 	}
 	cr.legacySessionEntries.Add(1)
 	if _, logged := cr.legacySessionEntryLogged.LoadOrStore(site, true); !logged {
-		fmt.Fprintf(cr.stderr, "%s: refused legacy session reconciler entry %q: this controller runs session_reconciler=v2\n", cr.logPrefix, site) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(cr.stderr, "%s: refused legacy session reconciler entry %q: this controller runs the v2 session reconciler\n", cr.logPrefix, site) //nolint:errcheck // best-effort stderr
 	}
 	return true
 }

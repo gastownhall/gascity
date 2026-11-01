@@ -60,6 +60,13 @@ type Options struct {
 	// the intended assignee in metadata for later activation.
 	DeferAssignees bool
 
+	// RootMetadata is written onto the root bead only, atomically with its
+	// creation, after the formula's own root metadata so the caller's value
+	// wins. Sling uses it for server-owned facts about the launch (such as
+	// who initiated it) that must be present before any worker can claim
+	// the work.
+	RootMetadata map[string]string
+
 	nativeStepTopologyPrepared bool
 	stampAttachRootID          bool
 }
@@ -295,21 +302,19 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 		return nil, fmt.Errorf("attach bead %s: %w", attachBeadID, err)
 	}
 
-	// Resolve the sub-DAG's workflow root through the canonical run chain
-	// (workflow_id -> molecule_id -> gc.root_bead_id -> the parent's own id),
-	// not gc.root_bead_id alone. A wisp/source bead grafted mid-workflow carries
-	// the true top root in workflow_id/molecule_id (written by sling) but no
-	// gc.root_bead_id of its own; the old fallback ignored those keys and rooted
-	// the whole sub-DAG at the parent's own id, stamping a WRONG gc.root_bead_id
-	// onto the attempt container, scope-check, and every child. Downstream
-	// reconciliation then enumerated siblings via
-	// beads.DirectMembers(<wrong root>) and burned ralph attempts
-	// (maintainer-city incident gcg-wisp-y785sz). A genuine top-level head
-	// with no run chain still self-roots via its own id (ResolveRunID's
-	// selfID fallback).
-	rootBeadID := beadmeta.ResolveRunID(parentBead.Metadata, attachBeadID, "")
+	// Resolve the sub-DAG's workflow root from the keys that name a container of
+	// the parent (workflow_id -> gc.root_bead_id -> the parent's own id). A
+	// wisp/source bead grafted mid-workflow carries the true top root in
+	// workflow_id but no gc.root_bead_id of its own; ignoring workflow_id would
+	// root the sub-DAG at the parent and stamp a wrong gc.root_bead_id on every
+	// child, burning ralph attempts (maintainer-city incident gcg-wisp-y785sz).
+	// molecule_id is deliberately not consulted: sling writes it on a source bead
+	// as a forward pointer to that bead's own v1 attachment, never to a container
+	// of it, so nesting there would adopt an unrelated molecule (ga-crz5ege). A
+	// genuine top-level head with no container key self-roots via its own id.
+	rootBeadID := beadmeta.ResolveNestingRootID(parentBead.Metadata, attachBeadID)
 
-	// A resolved run-chain root may point at a molecule that has since fully
+	// A resolved container root may point at a molecule that has since fully
 	// closed (e.g. re-attaching a content bead to a fresh formula after its
 	// prior review round-trip closed cleanly) -- a dead pointer, not a live
 	// upstream workflow to honor. Only a still-open chain root is trusted;
@@ -983,6 +988,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 				b.Metadata[beadmeta.WorkflowExpandedMetadataKey] = "true"
 			}
 			stampFormulaVars(vars, &b)
+			b.Metadata = withRootMetadata(b.Metadata, opts.RootMetadata)
 		} else {
 			// graph.v2 workflows and their retry/Ralph attempt sub-recipes
 			// use step beads as independently routable actionable work, not
@@ -1637,6 +1643,22 @@ func stampFormulaVars(vars map[string]string, b *beads.Bead) {
 	}
 }
 
+// withRootMetadata returns meta with every entry of rootMeta set on it,
+// allocating meta when it is nil. Both root-creation paths (per-bead create
+// and graph-apply) share it so Options.RootMetadata lands identically.
+func withRootMetadata(meta, rootMeta map[string]string) map[string]string {
+	if len(rootMeta) == 0 {
+		return meta
+	}
+	if meta == nil {
+		meta = make(map[string]string, len(rootMeta))
+	}
+	for k, v := range rootMeta {
+		meta[k] = v
+	}
+	return meta
+}
+
 // substituteLabels applies variable substitution to each label.
 func substituteLabels(labels []string, vars map[string]string) []string {
 	if len(labels) == 0 {
@@ -1667,16 +1689,7 @@ func clonePriority(v *int) *int {
 // applyVarDefaults merges formula variable defaults with caller-provided
 // vars. Caller values take precedence over defaults.
 func applyVarDefaults(vars map[string]string, defs map[string]*formula.VarDef) map[string]string {
-	result := make(map[string]string)
-	for name, def := range defs {
-		if def != nil && def.Default != nil {
-			result[name] = *def.Default
-		}
-	}
-	for k, v := range vars {
-		result[k] = v
-	}
-	return result
+	return formula.ApplyVarDefaults(defs, vars)
 }
 
 // ValidateRecipeRuntimeVars validates runtime variables for a compiled recipe.
@@ -1914,4 +1927,33 @@ func existingLogicalBeadIDIndex(store beads.Store, rootID string) (map[string]st
 		}
 	}
 	return index, nil
+}
+
+// RecipeClass returns the coordination class of the beads instantiating recipe
+// produces, which decides the store its molecule belongs in.
+//
+// Instantiate materializes a recipe as one atomic plan, so the plan is
+// classified wholesale, as coordclass.ClassifyGraphPlan does: a single
+// graph-marked step makes the whole molecule graph class, which keeps its
+// intra-plan edges inside one store. Steps a RootOnly recipe never creates are
+// skipped, matching Instantiate's own RootOnly cut. A graph.v2 workflow or a
+// root-only wisp is graph class; a v1 POURED recipe (a molecule container plus
+// plain steps) is work class and belongs on the work ledger.
+func RecipeClass(recipe *formula.Recipe) coordclass.Class {
+	if recipe == nil {
+		return coordclass.ClassWork
+	}
+	for i, step := range recipe.Steps {
+		if recipe.RootOnly && i > 0 {
+			break
+		}
+		stepType := step.Type
+		if stepType == "" {
+			stepType = "task"
+		}
+		if coordclass.Classify(beads.Bead{Type: stepType, Labels: step.Labels, Metadata: step.Metadata}) == coordclass.ClassGraph {
+			return coordclass.ClassGraph
+		}
+	}
+	return coordclass.ClassWork
 }

@@ -25,10 +25,13 @@ var (
 )
 
 // NewSeamBacked constructs a k8s provider served through the seams.
-func NewSeamBacked() (runtime.Provider, error) {
+func NewSeamBacked(opts ...Option) (runtime.Provider, error) {
 	raw, err := NewProvider()
 	if err != nil {
 		return nil, err
+	}
+	for _, opt := range opts {
+		opt(raw)
 	}
 	rt, tp := raw.Seams()
 	return &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: raw}, nil
@@ -49,4 +52,13 @@ func (s *seamBackedProvider) Relaunch(ctx context.Context, name string, cfg runt
 // through; the seams route ListRunning to the same raw listing.
 func (s *seamBackedProvider) ListRunningComplete() bool {
 	return s.raw.ListRunningComplete()
+}
+
+// Option configures a provider NewSeamBacked builds.
+type Option func(*Provider)
+
+// WithCityName names the controller's city: the name goes into each pod's
+// remote-stage record.
+func WithCityName(cityName string) Option {
+	return func(p *Provider) { p.cityName = cityName }
 }

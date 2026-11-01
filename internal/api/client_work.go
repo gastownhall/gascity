@@ -127,7 +127,11 @@ func readyBeadFromGen(g genclient.ReadyBead) readywork.ReadyBead {
 	if g.BlockedBy != nil {
 		row.BlockedBy = make([]readywork.ReadyBeadBlocker, 0, len(*g.BlockedBy))
 		for _, b := range *g.BlockedBy {
-			row.BlockedBy = append(row.BlockedBy, readywork.ReadyBeadBlocker{ID: b.Id, Status: b.Status})
+			blocker := readywork.ReadyBeadBlocker{ID: b.Id, Status: b.Status}
+			if b.Reason != nil {
+				blocker.Reason = *b.Reason
+			}
+			row.BlockedBy = append(row.BlockedBy, blocker)
 		}
 	}
 	return row

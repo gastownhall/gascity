@@ -132,6 +132,13 @@ const (
 	WorkReleased          = "work.released"
 	WorkReleaseUnfinished = "work.release_unfinished"
 	WorkEscalated         = "work.escalated"
+	// WorkRateLimited is one move of a seat's rate-limit episode
+	// (internal/workladder): its provider refusing its turns with a rate
+	// limit, as the agent's own transcript classifies them. Subject carries
+	// the session ID, SessionID the seat; the payload is
+	// WorkRateLimitedPayload. It reports facts for a pack's provider policy
+	// and for people; the SDK draws no conclusion about the provider from it.
+	WorkRateLimited = "work.rate_limited"
 	// BeadDeadAssigneeReopened fires when the reconciler reopens a routed work
 	// bead whose assignee resolves to no open session bead — the owning session
 	// closed/retired while the bead stayed assigned, leaving it open+routed but
@@ -207,7 +214,10 @@ const (
 	// bead after its runtime has exited — i.e., the worker process is
 	// gone but the bead's assignee/state still references it. Surfaces
 	// the reconciler-detected leak so pack-level subscribers can decide
-	// whether to clear-assignee-and-respawn or escalate.
+	// whether to clear-assignee-and-respawn or escalate. A pool seat parked
+	// on pre-assigned blocked work (cmd/gc/seat_parked.go) does not fire it;
+	// one that stops parking (past its bound, or crowded out of a full
+	// slot-bounded pool) fires it though its work is an open, unstarted pin.
 	SessionStranded = "session.stranded"
 	// SessionPoolSlotRetiredAtDrainDeadline fires when the reconciler force-
 	// retires a pool-managed session bead that entered drain and never
@@ -289,6 +299,13 @@ const (
 	// first, which is correct pull, not a defect) and divergence (the row is
 	// still open, unassigned and route-matching, so the readers disagreed).
 	SessionDemandClaimDivergence = "session.demand_claim_divergence"
+	// SessionProgramStatusShadow fires, only while the city's [session]
+	// program_status switch is shadow, at a decision point that reads the
+	// screen today: it records today's reading beside what the program's own
+	// OSC 7501 record would decide. It is a diagnostics comparison and never
+	// influences the decision it reports on. Continuously evaluated points
+	// record only when their reading changes. Closed tokens only.
+	SessionProgramStatusShadow = "session.program_status_shadow"
 	// SessionColdStartTimeout fires when a pool session's first runtime spawn
 	// (a pending create) exceeds the start deadline and is rolled back. It is
 	// per-session: it fires whenever a fresh spawn times out, including a warm
@@ -394,6 +411,12 @@ const (
 	RequestResultSessionSubmit  = "request.result.session.submit"
 	RequestResultRigCreate      = "request.result.rig.create"
 	RequestFailed               = "request.failed"
+	// RequestAccepted records that the API accepted an async session request
+	// (session create, message or submit) and returned its 202. It is the
+	// durable marker the request-outcome lookup reads to tell an accepted
+	// request from an unknown id; it is not an outcome. The terminal outcome
+	// is a request.result.* or request.failed event with the same request_id.
+	RequestAccepted = "request.accepted"
 
 	// RigProvisionProgress reports one provisioning step of a server-side
 	// rig add (clone, beads-init, packs, config, routes). Non-terminal;
@@ -586,6 +609,16 @@ const (
 	StorageBindingUnconverged   = "storage.binding.unconverged"
 	StorageBindingUncheckable   = "storage.binding.uncheckable"
 	StorageBindingNotConfigured = "storage.binding.not_configured"
+
+	// StorageRigImport is published once per rig by `gc storage migrate
+	// --from-rigs`: what the import did for that rig (imported, clean,
+	// nothing to import, refused, failed).
+	StorageRigImport = "storage.rig_import"
+	// StorageRigResidue is published by the controller's one asynchronous
+	// census at boot for each rig that holds infrastructure rows the city
+	// binding should hold: a rig awaiting import, a clear left pending, or
+	// rows written to the rig after its import.
+	StorageRigResidue = "storage.rig_residue"
 )
 
 // IsJournalDerived reports whether eventType is one the controller derives
@@ -616,6 +649,7 @@ var KnownEventTypes = []string{
 	SessionDrainFenceUnavailable,
 	WorkStartedUnrecorded,
 	SessionDemandClaimDivergence,
+	SessionProgramStatusShadow,
 	SessionColdStartTimeout,
 	SessionConversationReset,
 	SessionPending, SessionPendingCleared,
@@ -628,7 +662,7 @@ var KnownEventTypes = []string{
 	ExecutionWorkAssociated, ExecutionRunAnchored, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
 	ExecutionClaimWindowExpired,
 	ExecutionStepStalled,
-	WorkNudged, WorkNudgeFailed, WorkRecycleRequested, WorkReleased, WorkReleaseUnfinished, WorkEscalated,
+	WorkNudged, WorkNudgeFailed, WorkRecycleRequested, WorkReleased, WorkReleaseUnfinished, WorkEscalated, WorkRateLimited,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
 	ConvoyCreated, ConvoyClosed,
@@ -640,7 +674,7 @@ var KnownEventTypes = []string{
 	RequestResultCityCreate, RequestResultCityUnregister,
 	RequestResultSessionCreate, RequestResultSessionMessage,
 	RequestResultSessionSubmit, RequestResultRigCreate, RequestFailed,
-	RigProvisionProgress,
+	RequestAccepted, RigProvisionProgress,
 	CityCreated, CityUnregisterRequested,
 	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed, OrderSkipped, OrderInapplicable,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
@@ -662,6 +696,7 @@ var KnownEventTypes = []string{
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
 	StorageBindingNotConfigured,
+	StorageRigImport, StorageRigResidue,
 	// ProviderHealthGateAlert and ReconcilerAlert are intentionally omitted
 	// from KnownEventTypes. Each is emitted by the reconciler but its typed
 	// SSE payload is not yet registered in internal/api (the payload registration lives in a
@@ -761,6 +796,13 @@ type TailProvider interface {
 // fakes, exec scripts) need not implement it.
 type InFlightProvider interface {
 	ListInFlight(filter Filter) ([]Event, error)
+}
+
+// InFlightContextProvider is an optional extension for providers whose
+// in-flight-aware read ([InFlightProvider]) can stop when ctx is done, so a
+// read whose caller has gone does not run to the end of a long history.
+type InFlightContextProvider interface {
+	ListInFlightContext(ctx context.Context, filter Filter) ([]Event, error)
 }
 
 // Watcher yields events one at a time. Created by [Provider.Watch].

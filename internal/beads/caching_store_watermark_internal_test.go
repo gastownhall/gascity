@@ -1736,6 +1736,15 @@ func clearWriteFence(t *testing.T, backing *casBackingStore, cache *CachingStore
 	if _, err := cache.Get(id); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
+	if lagged {
+		// That refetch replaced the lagged row with the written one, a change
+		// a read stamps (fenceReadInstallLocked); a refetch that finds the
+		// row unchanged clears the stamp.
+		markDirtyForTest(cache, id)
+		if _, err := cache.Get(id); err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+	}
 	cache.mu.RLock()
 	_, beadSeq := cache.beadSeq[id]
 	cache.mu.RUnlock()

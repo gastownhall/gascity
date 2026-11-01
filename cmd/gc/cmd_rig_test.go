@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1296,6 +1298,127 @@ func TestDoRigResume(t *testing.T) {
 	if suspensionstate.EffectiveRigSuspended(st, "frontend", cfg.Rigs[0].SuspendedOnStart) {
 		t.Error("explicit resume in runtime state must beat suspended_on_start=true")
 	}
+}
+
+// A supervisor-managed city has a controller socket but no standalone API
+// port. Both direct state changes must reload the store's refresh gate.
+func TestCmdRigSuspensionDirectPathReloadsController(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		suspended bool
+		run       func([]string, io.Writer, io.Writer) int
+	}{
+		{"resume", true, cmdRigResume},
+		{"suspend", false, cmdRigSuspend},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := setupRegisteredRigFixture(t, true, tc.suspended)
+			setCwd(t, fx.workDir)
+			reloadReqCh := make(chan reloadControlRequest, 1)
+			reloadReplyCh := make(chan reloadControlReply, 1)
+			oldSend := sendReloadControlRequestHook
+			t.Cleanup(func() {
+				reloadReplyCh <- reloadControlReply{Outcome: reloadOutcomeFailed}
+				sendReloadControlRequestHook = oldSend
+			})
+			sendReloadControlRequestHook = func(cityPath string, req reloadControlRequest) (reloadControlReply, error) {
+				if cityPath != fx.cityPath {
+					return reloadControlReply{}, fmt.Errorf("reload city = %q, want %q", cityPath, fx.cityPath)
+				}
+				reloadReqCh <- req
+				return <-reloadReplyCh, nil
+			}
+
+			var stdout, stderr bytes.Buffer
+			result := make(chan int, 1)
+			go func() { result <- tc.run(nil, &stdout, &stderr) }()
+			var req reloadControlRequest
+			select {
+			case req = <-reloadReqCh:
+			case <-time.After(5 * time.Second):
+				t.Fatal("direct rig change did not request a reload")
+			}
+			if !req.Wait || req.Timeout != "5m" {
+				t.Fatal("direct rig change requested an asynchronous reload")
+			}
+			select {
+			case <-result:
+				t.Fatal("rig command returned before reload completion")
+			default:
+			}
+			reloadReplyCh <- reloadControlReply{Outcome: reloadOutcomeApplied}
+			select {
+			case code := <-result:
+				if code != 0 {
+					t.Fatalf("gc rig %s = %d; stderr=%q", tc.name, code, stderr.String())
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("rig command did not return after reload completion")
+			}
+		})
+	}
+}
+
+func TestDirectRigSuspensionRejectsUnconfirmedReload(t *testing.T) {
+	cityPath := t.TempDir()
+	oldSend := sendReloadControlRequestHook
+	t.Cleanup(func() { sendReloadControlRequestHook = oldSend })
+	sendReloadControlRequestHook = func(string, reloadControlRequest) (reloadControlReply, error) {
+		return reloadControlReply{Outcome: reloadOutcomeFailed, Error: "store reload failed"}, nil
+	}
+	var stderr bytes.Buffer
+	if code := finishDirectRigSuspension(cityPath, "resume", 0, &stderr); code != 1 {
+		t.Fatalf("finishDirectRigSuspension = %d, want failure; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "run gc reload") {
+		t.Fatalf("stderr = %q, want recovery instruction", stderr.String())
+	}
+}
+
+func TestFinishDirectRigSuspensionOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		reply      reloadControlReply
+		err        error
+		want       int
+		wantStderr string
+	}{
+		{name: "missing socket", err: controllerCommandError{op: "connecting to controller", err: fmt.Errorf("%w (is the controller running?)", &net.OpError{Op: "dial", Net: "unix", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ENOENT}}), unavailable: true}, want: 0},
+		{name: "stale socket", err: controllerCommandError{op: "connecting to controller", err: syscall.ECONNREFUSED, unavailable: true}, want: 0},
+		{name: "permission denied", err: controllerCommandError{op: "connecting to controller", err: syscall.EACCES, unavailable: true}, want: 1, wantStderr: "run gc reload"},
+		{name: "dial timeout", err: controllerCommandError{op: "connecting to controller", err: os.ErrDeadlineExceeded, unavailable: true}, want: 1, wantStderr: "run gc reload"},
+		{name: "unresponsive", err: controllerCommandError{op: "reading response", err: io.ErrUnexpectedEOF, unresponsive: true}, want: 1, wantStderr: "run gc reload"},
+		{name: "no change", reply: reloadControlReply{Outcome: reloadOutcomeNoChange}, want: 0},
+		{name: "busy", reply: reloadControlReply{Outcome: reloadOutcomeBusy}, want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldSend := sendReloadControlRequestHook
+			t.Cleanup(func() { sendReloadControlRequestHook = oldSend })
+			sendReloadControlRequestHook = func(string, reloadControlRequest) (reloadControlReply, error) {
+				return tc.reply, tc.err
+			}
+			var stderr bytes.Buffer
+			if code := finishDirectRigSuspension(t.TempDir(), "resume", 0, &stderr); code != tc.want {
+				t.Fatalf("finishDirectRigSuspension = %d, want %d; stderr=%q", code, tc.want, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tc.wantStderr)
+			}
+		})
+	}
+
+	t.Run("failed mutation skips reload", func(t *testing.T) {
+		oldSend := sendReloadControlRequestHook
+		t.Cleanup(func() { sendReloadControlRequestHook = oldSend })
+		sendReloadControlRequestHook = func(string, reloadControlRequest) (reloadControlReply, error) {
+			t.Error("failed direct mutation sent a controller reload")
+			return reloadControlReply{Outcome: reloadOutcomeApplied}, nil
+		}
+		var stderr bytes.Buffer
+		if code := finishDirectRigSuspension(t.TempDir(), "suspend", 1, &stderr); code != 1 {
+			t.Fatalf("finishDirectRigSuspension = %d, want 1; stderr=%q", code, stderr.String())
+		}
+	})
 }
 
 func TestDoRigResumeNotFound(t *testing.T) {
@@ -2849,13 +2972,13 @@ func TestDoRigAdd_AdoptRejectsEmptyConfigYaml(t *testing.T) {
 	}
 }
 
-func TestDoRigAdd_AdoptWithoutPrefixMismatch(t *testing.T) {
-	cityPath := t.TempDir()
+// adoptXRStore lays out an adoptable rig "mismatch-rig" (which derives a
+// prefix other than its store's) whose config.yaml records prefix "xr".
+func adoptXRStore(t *testing.T) (cityPath, rigPath string) {
+	t.Helper()
+	cityPath = t.TempDir()
 	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
-
-	// Create rig whose directory basename ("mismatch-rig") derives a prefix
-	// ("mismatchrig") that differs from config.yaml's prefix ("xr").
-	rigPath := filepath.Join(t.TempDir(), "mismatch-rig")
+	rigPath = filepath.Join(t.TempDir(), "mismatch-rig")
 	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -2863,17 +2986,38 @@ func TestDoRigAdd_AdoptWithoutPrefixMismatch(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "metadata.json"), []byte(meta), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	configYaml := "issue_prefix: xr\n"
-	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte(configYaml), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte("issue_prefix: xr\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_BEADS", "file")
+	return cityPath, rigPath
+}
 
-	// No --prefix: derived prefix from basename "mismatch-rig" won't match "xr".
+// TestDoRigAdd_AdoptWithoutPrefixTakesTheStoresPrefix: with no --prefix, an
+// adopted rig takes its store's prefix rather than one derived from its name.
+func TestDoRigAdd_AdoptWithoutPrefixTakesTheStoresPrefix(t *testing.T) {
+	cityPath, rigPath := adoptXRStore(t)
+
 	var stdout, stderr bytes.Buffer
 	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd --adopt returned %d, stderr: %s", code, stderr.String())
+	}
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `prefix = "xr"`) {
+		t.Errorf("city.toml does not pin the adopted store's prefix:\n%s", data)
+	}
+}
+
+func TestDoRigAdd_AdoptExplicitPrefixMismatchRefused(t *testing.T) {
+	cityPath, rigPath := adoptXRStore(t)
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "zz", "", false, true, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("expected prefix mismatch failure, got code %d, stdout: %s", code, stdout.String())
 	}
@@ -2994,6 +3138,85 @@ func TestDoRigAdd_AdoptWithBdContractProvider_NonAdoptControlInvokesInit(t *test
 	}
 	if len(initCalls) == 0 {
 		t.Fatalf("control: non-adopt rig add invoked initAndHookDir 0 times; stub not wired in? stderr=%s", stderr.String())
+	}
+}
+
+// An --adopt whose provider init op fails must leave the adopted store as it
+// found it: the init path canonicalizes the store's metadata.json and
+// config.yaml before the op runs, and a city that never registered the rig
+// must not leave those rewrites behind.
+func TestDoRigAdd_AdoptFailedInitLeavesStoreFilesAsFound(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	cityTOMLBefore, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const initErrText = "managed Dolt server unreachable while inspecting existing store 'ar'"
+	provider := filepath.Join(cityPath, "gc-beads-bd")
+	script := "#!/bin/sh\nif [ \"$1\" = init ]; then echo \"" + initErrText + "\" >&2; exit 1; fi\nexit 0\n"
+	if err := os.WriteFile(provider, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+provider)
+	t.Setenv("GC_DOLT", "")
+
+	origEnsure := initDirIfReadyEnsureBeadsProvider
+	origWait := initDirIfReadyWaitForManagedDolt
+	t.Cleanup(func() {
+		initDirIfReadyEnsureBeadsProvider = origEnsure
+		initDirIfReadyWaitForManagedDolt = origWait
+	})
+	initDirIfReadyEnsureBeadsProvider = func(string) error { return nil }
+	initDirIfReadyWaitForManagedDolt = func(string, time.Duration) error { return nil }
+
+	rigPath := filepath.Join(t.TempDir(), "adopted-rig")
+	beads := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(beads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// bd creates both files 0600.
+	before := map[string]string{
+		"metadata.json": `{"backend":"dolt","database":"dolt","dolt_database":"ar","dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_port":21658}`,
+		"config.yaml":   "# bd template\nissue-prefix: \"ar\"\n",
+	}
+	for name, data := range before {
+		if err := os.WriteFile(filepath.Join(beads, name), []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "ar", "", false, true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doRigAdd = %d, want 1 (stdout=%q stderr=%q)", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), initErrText) {
+		t.Errorf("stderr = %q, want the init failure %q", stderr.String(), initErrText)
+	}
+	for name, want := range before {
+		path := filepath.Join(beads, name)
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != want {
+			t.Errorf("%s after failed adopt:\n%s\nwant:\n%s", name, got, want)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Errorf("%s mode after failed adopt = %v, want 0600", name, perm)
+		}
+	}
+	cityTOMLAfter, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(cityTOMLAfter) != string(cityTOMLBefore) {
+		t.Errorf("city.toml changed by a failed adopt:\n%s\nwant:\n%s", cityTOMLAfter, cityTOMLBefore)
 	}
 }
 
@@ -3423,4 +3646,197 @@ func TestRigAddRollbackRestoresThroughCityTomlSymlink(t *testing.T) {
 		t.Fatalf("restoreSnapshots: %v", err)
 	}
 	assertCityTomlSymlinkRestored(t, link, target, symlinkedCityTomlOriginal)
+}
+
+// installAdoptPrefixFakeBd puts a fake `bd` first on PATH that records its
+// argv, working directory and BEADS_DIR (one per line) to the returned log and
+// answers `config get --json issue_prefix` with prefix "hv". exitCode != 0
+// makes it fail instead.
+func installAdoptPrefixFakeBd(t *testing.T, exitCode int) string {
+	t.Helper()
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	script := fmt.Sprintf(`#!/bin/sh
+{
+  echo "argv=$*"
+  echo "cwd=$(pwd -P)"
+  echo "beads_dir=$BEADS_DIR"
+} >> %q
+if [ %d -ne 0 ]; then
+  echo "bd: no beads database found" >&2
+  exit %d
+fi
+echo '{"key":"issue_prefix","schema_version":1,"value":"hv"}'
+`, logPath, exitCode, exitCode)
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_BIN", "")
+	return logPath
+}
+
+func readAdoptPrefixFakeBdLog(t *testing.T, logPath string) string {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return ""
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+// writeAdoptPrefixStore lays out a bd-init store at rigPath: metadata.json
+// with the given body and config.yaml as bd's commented template.
+func writeAdoptPrefixStore(t *testing.T, rigPath, metadata string) {
+	t.Helper()
+	beadsDir := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("# Beads configuration\n# issue-prefix: \"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReadAdoptedStoreIssuePrefixAsksBdReadonly(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	rigPath := filepath.Join(t.TempDir(), "webapp")
+	writeAdoptPrefixStore(t, rigPath, `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"hv"}`)
+	logPath := installAdoptPrefixFakeBd(t, 0)
+
+	prefix, err := readAdoptedStoreIssuePrefix(cityPath, rigPath)
+	if err != nil {
+		t.Fatalf("readAdoptedStoreIssuePrefix: %v", err)
+	}
+	if prefix != "hv" {
+		t.Fatalf("prefix = %q, want hv", prefix)
+	}
+	resolvedRig, err := filepath.EvalSymlinks(rigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := readAdoptPrefixFakeBdLog(t, logPath)
+	for _, want := range []string{
+		"argv=--readonly config get --json issue_prefix\n",
+		"cwd=" + resolvedRig + "\n",
+		"beads_dir=" + filepath.Join(rigPath, ".beads") + "\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("bd invocation log missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestReadAdoptedStoreIssuePrefixRefusesAStorelessProxiedClone(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	rigPath := filepath.Join(t.TempDir(), "webapp")
+	writeAdoptPrefixStore(t, rigPath, `{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hv"}`)
+	logPath := installAdoptPrefixFakeBd(t, 0)
+
+	_, err := readAdoptedStoreIssuePrefix(cityPath, rigPath)
+	if err == nil || !strings.Contains(err.Error(), "proxied-server") {
+		t.Fatalf("err = %v, want a refusal naming proxied-server", err)
+	}
+	if got := readAdoptPrefixFakeBdLog(t, logPath); got != "" {
+		t.Errorf("bd ran against a storeless proxied clone:\n%s", got)
+	}
+	if _, statErr := os.Stat(filepath.Join(rigPath, ".beads", "dolt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("a store appeared under the proxied clone (stat err = %v)", statErr)
+	}
+}
+
+func TestReadAdoptedStoreIssuePrefixReadsAProxiedStoreThroughBd(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	rigPath := filepath.Join(t.TempDir(), "webapp")
+	writeAdoptPrefixStore(t, rigPath, `{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hv"}`)
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := installAdoptPrefixFakeBd(t, 0)
+
+	prefix, err := readAdoptedStoreIssuePrefix(cityPath, rigPath)
+	if err != nil {
+		t.Fatalf("readAdoptedStoreIssuePrefix: %v", err)
+	}
+	if prefix != "hv" {
+		t.Fatalf("prefix = %q, want hv", prefix)
+	}
+	got := readAdoptPrefixFakeBdLog(t, logPath)
+	if !strings.Contains(got, "argv=config get --json issue_prefix\n") {
+		t.Errorf("bd was not asked for the prefix without --readonly (bd refuses --readonly through its proxy):\n%s", got)
+	}
+}
+
+func TestReadAdoptedStoreIssuePrefixSkipsMetadataWithoutBackend(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	rigPath := filepath.Join(t.TempDir(), "webapp")
+	writeAdoptPrefixStore(t, rigPath, `{"name":"webapp"}`)
+	logPath := installAdoptPrefixFakeBd(t, 0)
+
+	prefix, err := readAdoptedStoreIssuePrefix(cityPath, rigPath)
+	if err != nil || prefix != "" {
+		t.Fatalf("readAdoptedStoreIssuePrefix = (%q, %v), want (\"\", nil)", prefix, err)
+	}
+	if got := readAdoptPrefixFakeBdLog(t, logPath); got != "" {
+		t.Errorf("bd ran for metadata that names no backend:\n%s", got)
+	}
+}
+
+func TestReadAdoptedStoreIssuePrefixSurfacesBdFailure(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	rigPath := filepath.Join(t.TempDir(), "webapp")
+	writeAdoptPrefixStore(t, rigPath, `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"hv"}`)
+	installAdoptPrefixFakeBd(t, 1)
+
+	_, err := readAdoptedStoreIssuePrefix(cityPath, rigPath)
+	if err == nil || !strings.Contains(err.Error(), "issue_prefix") {
+		t.Fatalf("err = %v, want a wrapped bd failure naming issue_prefix", err)
+	}
+}
+
+func TestDoRigAdd_AdoptBdInitStoreWithoutConfigYamlPrefix(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	rigPath := filepath.Join(t.TempDir(), "webapp")
+	writeAdoptPrefixStore(t, rigPath, `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"hv"}`)
+
+	orig := rigAdoptStorePrefix
+	t.Cleanup(func() { rigAdoptStorePrefix = orig })
+	var asked []string
+	rigAdoptStorePrefix = func(_, p string) (string, error) {
+		asked = append(asked, p)
+		return "hv", nil
+	}
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd --adopt returned %d, stderr: %s", code, stderr.String())
+	}
+	if len(asked) != 1 {
+		t.Errorf("store prefix asked %d times, want once: %v", len(asked), asked)
+	}
+	if !strings.Contains(stdout.String(), "Prefix: hv") {
+		t.Errorf("output does not announce the store's prefix: %s", stdout.String())
+	}
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `prefix = "hv"`) {
+		t.Errorf("city.toml does not pin the store's prefix:\n%s", data)
+	}
 }

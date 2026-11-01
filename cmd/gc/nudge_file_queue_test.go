@@ -16,8 +16,8 @@ import (
 // the store a caller passes and the one every self-opening verb (enqueue,
 // claim, list, ack, release, record-failure, Maintain) opens. The second leg
 // passes the zero store, so those verbs open their own, as the facades do for
-// a caller that holds none; Rollback and WithdrawQueuedWaitNudges then touch no
-// shadow (TestFileNudgeQueueZeroStoreRollbackAndWithdrawOpenNoStore), which no
+// a caller that holds none; WithdrawQueuedWaitNudges then touches no shadow
+// (TestFileNudgeQueueZeroStoreRollbackPaysAndWithdrawOpensNoStore), which no
 // case of the suite observes.
 // It replaces a package seam, so it is serial.
 func TestFileNudgeQueueConformance(t *testing.T) {
@@ -64,15 +64,16 @@ func TestFileNudgeQueueConformance(t *testing.T) {
 	}
 }
 
-// TestFileNudgeQueueZeroStoreRollbackAndWithdrawOpenNoStore pins what
-// openNudgeQueue documents for the zero store: Rollback and
-// WithdrawQueuedWaitNudges reach shadows only through a caller-passed store, so
-// with the zero store they open none and leave the retired item's shadow open.
-// Every deployed caller passes the store it holds; the facades that open one
-// for them would open it twice if these verbs opened their own (the
+// TestFileNudgeQueueZeroStoreRollbackPaysAndWithdrawOpensNoStore pins what
+// openNudgeQueue documents for the zero store. Rollback's dead letter owes its
+// shadow a failed record, which Rollback pays after the queue lock like every
+// verb whose commit owes one (ga-fsp5w9), opening a store of its own for it.
+// WithdrawQueuedWaitNudges reaches shadows only through a caller-passed store,
+// so with the zero store it opens none and leaves the withdrawn item's shadow
+// open: the facades that open one for it would open it twice (the
 // withdraw_deferred golden's "withdraw with no store" step). It replaces a
 // package seam, so it is serial.
-func TestFileNudgeQueueZeroStoreRollbackAndWithdrawOpenNoStore(t *testing.T) {
+func TestFileNudgeQueueZeroStoreRollbackPaysAndWithdrawOpensNoStore(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	city := t.TempDir()
 	mem := beads.NewMemStore()
@@ -103,16 +104,21 @@ func TestFileNudgeQueueZeroStoreRollbackAndWithdrawOpenNoStore(t *testing.T) {
 	if err := q.Rollback(roll, "managed wake failed"); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
+	if opens != before+1 {
+		t.Errorf("Rollback with the zero store opened %d stores, want one to pay its debt", opens-before)
+	}
+	if _, open, err := shadows.Find(roll.ID); err != nil || open {
+		t.Errorf("shadow %s after a zero-store rollback: open=%v err=%v, want it closed", roll.ID, open, err)
+	}
+	before = opens
 	if err := q.WithdrawQueuedWaitNudges([]string{wait.ID}); err != nil {
 		t.Fatalf("WithdrawQueuedWaitNudges: %v", err)
 	}
 	if opens != before {
-		t.Errorf("Rollback and WithdrawQueuedWaitNudges with the zero store opened %d stores, want none", opens-before)
+		t.Errorf("WithdrawQueuedWaitNudges with the zero store opened %d stores, want none", opens-before)
 	}
-	for _, id := range []string{roll.ID, wait.ID} {
-		if _, open, err := shadows.Find(id); err != nil || !open {
-			t.Errorf("shadow %s after a zero-store retire: open=%v err=%v, want it left open", id, open, err)
-		}
+	if _, open, err := shadows.Find(wait.ID); err != nil || !open {
+		t.Errorf("shadow %s after a zero-store withdraw: open=%v err=%v, want it left open", wait.ID, open, err)
 	}
 	pending, inFlight, dead, err := q.ListForAgent("alpha", now)
 	if err != nil {

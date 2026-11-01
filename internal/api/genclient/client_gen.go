@@ -18,6 +18,24 @@ import (
 	"github.com/oapi-codegen/runtime"
 )
 
+// Defines values for AgentResponseActivitySource.
+const (
+	AgentResponseActivitySourceProgram    AgentResponseActivitySource = "program"
+	AgentResponseActivitySourceTranscript AgentResponseActivitySource = "transcript"
+)
+
+// Valid indicates whether the value is a known member of the AgentResponseActivitySource enum.
+func (e AgentResponseActivitySource) Valid() bool {
+	switch e {
+	case AgentResponseActivitySourceProgram:
+		return true
+	case AgentResponseActivitySourceTranscript:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for BeadGraphResponseMembership.
 const (
 	DirectRootIdParentClosure              BeadGraphResponseMembership = "direct-root-id+parent-closure"
@@ -461,22 +479,22 @@ func (e ConversationOpProposeResultStatus) Valid() bool {
 
 // Defines values for ConversationOpResultTurnLink.
 const (
-	Ambiguous  ConversationOpResultTurnLink = "ambiguous"
-	Correlated ConversationOpResultTurnLink = "correlated"
-	Exact      ConversationOpResultTurnLink = "exact"
-	None       ConversationOpResultTurnLink = "none"
+	ConversationOpResultTurnLinkAmbiguous  ConversationOpResultTurnLink = "ambiguous"
+	ConversationOpResultTurnLinkCorrelated ConversationOpResultTurnLink = "correlated"
+	ConversationOpResultTurnLinkExact      ConversationOpResultTurnLink = "exact"
+	ConversationOpResultTurnLinkNone       ConversationOpResultTurnLink = "none"
 )
 
 // Valid indicates whether the value is a known member of the ConversationOpResultTurnLink enum.
 func (e ConversationOpResultTurnLink) Valid() bool {
 	switch e {
-	case Ambiguous:
+	case ConversationOpResultTurnLinkAmbiguous:
 		return true
-	case Correlated:
+	case ConversationOpResultTurnLinkCorrelated:
 		return true
-	case Exact:
+	case ConversationOpResultTurnLinkExact:
 		return true
-	case None:
+	case ConversationOpResultTurnLinkNone:
 		return true
 	default:
 		return false
@@ -606,30 +624,96 @@ func (e OpsRecordingDegradedPayloadSurface) Valid() bool {
 	}
 }
 
+// Defines values for RequestAcceptedPayloadOperation.
+const (
+	RequestAcceptedPayloadOperationSessionCreate  RequestAcceptedPayloadOperation = "session.create"
+	RequestAcceptedPayloadOperationSessionMessage RequestAcceptedPayloadOperation = "session.message"
+	RequestAcceptedPayloadOperationSessionSubmit  RequestAcceptedPayloadOperation = "session.submit"
+)
+
+// Valid indicates whether the value is a known member of the RequestAcceptedPayloadOperation enum.
+func (e RequestAcceptedPayloadOperation) Valid() bool {
+	switch e {
+	case RequestAcceptedPayloadOperationSessionCreate:
+		return true
+	case RequestAcceptedPayloadOperationSessionMessage:
+		return true
+	case RequestAcceptedPayloadOperationSessionSubmit:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for RequestFailedPayloadOperation.
 const (
-	CityCreate     RequestFailedPayloadOperation = "city.create"
-	CityUnregister RequestFailedPayloadOperation = "city.unregister"
-	RigCreate      RequestFailedPayloadOperation = "rig.create"
-	SessionCreate  RequestFailedPayloadOperation = "session.create"
-	SessionMessage RequestFailedPayloadOperation = "session.message"
-	SessionSubmit  RequestFailedPayloadOperation = "session.submit"
+	RequestFailedPayloadOperationCityCreate     RequestFailedPayloadOperation = "city.create"
+	RequestFailedPayloadOperationCityUnregister RequestFailedPayloadOperation = "city.unregister"
+	RequestFailedPayloadOperationRigCreate      RequestFailedPayloadOperation = "rig.create"
+	RequestFailedPayloadOperationSessionCreate  RequestFailedPayloadOperation = "session.create"
+	RequestFailedPayloadOperationSessionMessage RequestFailedPayloadOperation = "session.message"
+	RequestFailedPayloadOperationSessionSubmit  RequestFailedPayloadOperation = "session.submit"
 )
 
 // Valid indicates whether the value is a known member of the RequestFailedPayloadOperation enum.
 func (e RequestFailedPayloadOperation) Valid() bool {
 	switch e {
-	case CityCreate:
+	case RequestFailedPayloadOperationCityCreate:
 		return true
-	case CityUnregister:
+	case RequestFailedPayloadOperationCityUnregister:
 		return true
-	case RigCreate:
+	case RequestFailedPayloadOperationRigCreate:
 		return true
+	case RequestFailedPayloadOperationSessionCreate:
+		return true
+	case RequestFailedPayloadOperationSessionMessage:
+		return true
+	case RequestFailedPayloadOperationSessionSubmit:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RequestOutcomeOperation.
+const (
+	SessionCreate  RequestOutcomeOperation = "session.create"
+	SessionMessage RequestOutcomeOperation = "session.message"
+	SessionSubmit  RequestOutcomeOperation = "session.submit"
+)
+
+// Valid indicates whether the value is a known member of the RequestOutcomeOperation enum.
+func (e RequestOutcomeOperation) Valid() bool {
+	switch e {
 	case SessionCreate:
 		return true
 	case SessionMessage:
 		return true
 	case SessionSubmit:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RequestOutcomeState.
+const (
+	RequestOutcomeStateFailed         RequestOutcomeState = "failed"
+	RequestOutcomeStateOutcomeUnknown RequestOutcomeState = "outcome_unknown"
+	RequestOutcomeStatePending        RequestOutcomeState = "pending"
+	RequestOutcomeStateSucceeded      RequestOutcomeState = "succeeded"
+)
+
+// Valid indicates whether the value is a known member of the RequestOutcomeState enum.
+func (e RequestOutcomeState) Valid() bool {
+	switch e {
+	case RequestOutcomeStateFailed:
+		return true
+	case RequestOutcomeStateOutcomeUnknown:
+		return true
+	case RequestOutcomeStatePending:
+		return true
+	case RequestOutcomeStateSucceeded:
 		return true
 	default:
 		return false
@@ -759,6 +843,327 @@ func (e SessionPendingClearedPayloadReason) Valid() bool {
 	case Resolved:
 		return true
 	case SessionGone:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionProgramStatusKind.
+const (
+	SessionProgramStatusKindAuth       SessionProgramStatusKind = "auth"
+	SessionProgramStatusKindPermission SessionProgramStatusKind = "permission"
+	SessionProgramStatusKindQuestion   SessionProgramStatusKind = "question"
+)
+
+// Valid indicates whether the value is a known member of the SessionProgramStatusKind enum.
+func (e SessionProgramStatusKind) Valid() bool {
+	switch e {
+	case SessionProgramStatusKindAuth:
+		return true
+	case SessionProgramStatusKindPermission:
+		return true
+	case SessionProgramStatusKindQuestion:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionProgramStatusState.
+const (
+	SessionProgramStatusStateBlocked SessionProgramStatusState = "blocked"
+	SessionProgramStatusStateDone    SessionProgramStatusState = "done"
+	SessionProgramStatusStateError   SessionProgramStatusState = "error"
+	SessionProgramStatusStateIdle    SessionProgramStatusState = "idle"
+	SessionProgramStatusStateWorking SessionProgramStatusState = "working"
+)
+
+// Valid indicates whether the value is a known member of the SessionProgramStatusState enum.
+func (e SessionProgramStatusState) Valid() bool {
+	switch e {
+	case SessionProgramStatusStateBlocked:
+		return true
+	case SessionProgramStatusStateDone:
+		return true
+	case SessionProgramStatusStateError:
+		return true
+	case SessionProgramStatusStateIdle:
+		return true
+	case SessionProgramStatusStateWorking:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionProgramStatusShadowPayloadKind.
+const (
+	SessionProgramStatusShadowPayloadKindAuth       SessionProgramStatusShadowPayloadKind = "auth"
+	SessionProgramStatusShadowPayloadKindPermission SessionProgramStatusShadowPayloadKind = "permission"
+	SessionProgramStatusShadowPayloadKindQuestion   SessionProgramStatusShadowPayloadKind = "question"
+)
+
+// Valid indicates whether the value is a known member of the SessionProgramStatusShadowPayloadKind enum.
+func (e SessionProgramStatusShadowPayloadKind) Valid() bool {
+	switch e {
+	case SessionProgramStatusShadowPayloadKindAuth:
+		return true
+	case SessionProgramStatusShadowPayloadKindPermission:
+		return true
+	case SessionProgramStatusShadowPayloadKindQuestion:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionProgramStatusShadowPayloadPoint.
+const (
+	ClaimNudgeHold    SessionProgramStatusShadowPayloadPoint = "claim_nudge_hold"
+	DrainReminder     SessionProgramStatusShadowPayloadPoint = "drain_reminder"
+	EscapeResend      SessionProgramStatusShadowPayloadPoint = "escape_resend"
+	ExecutionBackstop SessionProgramStatusShadowPayloadPoint = "execution_backstop"
+	InterruptSettle   SessionProgramStatusShadowPayloadPoint = "interrupt_settle"
+	Observation       SessionProgramStatusShadowPayloadPoint = "observation"
+	Pending           SessionProgramStatusShadowPayloadPoint = "pending"
+	ProvedIdle        SessionProgramStatusShadowPayloadPoint = "proved_idle"
+	QueuedDelivery    SessionProgramStatusShadowPayloadPoint = "queued_delivery"
+	Readiness         SessionProgramStatusShadowPayloadPoint = "readiness"
+	StartupLadder     SessionProgramStatusShadowPayloadPoint = "startup_ladder"
+	SubmitConfirm     SessionProgramStatusShadowPayloadPoint = "submit_confirm"
+	TypingGate        SessionProgramStatusShadowPayloadPoint = "typing_gate"
+	WaitForIdle       SessionProgramStatusShadowPayloadPoint = "wait_for_idle"
+	WaitIdlePreread   SessionProgramStatusShadowPayloadPoint = "wait_idle_preread"
+	WorkLadder        SessionProgramStatusShadowPayloadPoint = "work_ladder"
+)
+
+// Valid indicates whether the value is a known member of the SessionProgramStatusShadowPayloadPoint enum.
+func (e SessionProgramStatusShadowPayloadPoint) Valid() bool {
+	switch e {
+	case ClaimNudgeHold:
+		return true
+	case DrainReminder:
+		return true
+	case EscapeResend:
+		return true
+	case ExecutionBackstop:
+		return true
+	case InterruptSettle:
+		return true
+	case Observation:
+		return true
+	case Pending:
+		return true
+	case ProvedIdle:
+		return true
+	case QueuedDelivery:
+		return true
+	case Readiness:
+		return true
+	case StartupLadder:
+		return true
+	case SubmitConfirm:
+		return true
+	case TypingGate:
+		return true
+	case WaitForIdle:
+		return true
+	case WaitIdlePreread:
+		return true
+	case WorkLadder:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionProgramStatusShadowPayloadProgram.
+const (
+	SessionProgramStatusShadowPayloadProgramBusy          SessionProgramStatusShadowPayloadProgram = "busy"
+	SessionProgramStatusShadowPayloadProgramConfirmed     SessionProgramStatusShadowPayloadProgram = "confirmed"
+	SessionProgramStatusShadowPayloadProgramHold          SessionProgramStatusShadowPayloadProgram = "hold"
+	SessionProgramStatusShadowPayloadProgramIdle          SessionProgramStatusShadowPayloadProgram = "idle"
+	SessionProgramStatusShadowPayloadProgramIndeterminate SessionProgramStatusShadowPayloadProgram = "indeterminate"
+	SessionProgramStatusShadowPayloadProgramNoHold        SessionProgramStatusShadowPayloadProgram = "no_hold"
+	SessionProgramStatusShadowPayloadProgramNoResend      SessionProgramStatusShadowPayloadProgram = "no_resend"
+	SessionProgramStatusShadowPayloadProgramNone          SessionProgramStatusShadowPayloadProgram = "none"
+	SessionProgramStatusShadowPayloadProgramNotReady      SessionProgramStatusShadowPayloadProgram = "not_ready"
+	SessionProgramStatusShadowPayloadProgramPending       SessionProgramStatusShadowPayloadProgram = "pending"
+	SessionProgramStatusShadowPayloadProgramReady         SessionProgramStatusShadowPayloadProgram = "ready"
+	SessionProgramStatusShadowPayloadProgramResend        SessionProgramStatusShadowPayloadProgram = "resend"
+	SessionProgramStatusShadowPayloadProgramSettled       SessionProgramStatusShadowPayloadProgram = "settled"
+	SessionProgramStatusShadowPayloadProgramUnconfirmed   SessionProgramStatusShadowPayloadProgram = "unconfirmed"
+	SessionProgramStatusShadowPayloadProgramUnsettled     SessionProgramStatusShadowPayloadProgram = "unsettled"
+)
+
+// Valid indicates whether the value is a known member of the SessionProgramStatusShadowPayloadProgram enum.
+func (e SessionProgramStatusShadowPayloadProgram) Valid() bool {
+	switch e {
+	case SessionProgramStatusShadowPayloadProgramBusy:
+		return true
+	case SessionProgramStatusShadowPayloadProgramConfirmed:
+		return true
+	case SessionProgramStatusShadowPayloadProgramHold:
+		return true
+	case SessionProgramStatusShadowPayloadProgramIdle:
+		return true
+	case SessionProgramStatusShadowPayloadProgramIndeterminate:
+		return true
+	case SessionProgramStatusShadowPayloadProgramNoHold:
+		return true
+	case SessionProgramStatusShadowPayloadProgramNoResend:
+		return true
+	case SessionProgramStatusShadowPayloadProgramNone:
+		return true
+	case SessionProgramStatusShadowPayloadProgramNotReady:
+		return true
+	case SessionProgramStatusShadowPayloadProgramPending:
+		return true
+	case SessionProgramStatusShadowPayloadProgramReady:
+		return true
+	case SessionProgramStatusShadowPayloadProgramResend:
+		return true
+	case SessionProgramStatusShadowPayloadProgramSettled:
+		return true
+	case SessionProgramStatusShadowPayloadProgramUnconfirmed:
+		return true
+	case SessionProgramStatusShadowPayloadProgramUnsettled:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionProgramStatusShadowPayloadScrape.
+const (
+	SessionProgramStatusShadowPayloadScrapeBusy          SessionProgramStatusShadowPayloadScrape = "busy"
+	SessionProgramStatusShadowPayloadScrapeConfirmed     SessionProgramStatusShadowPayloadScrape = "confirmed"
+	SessionProgramStatusShadowPayloadScrapeHold          SessionProgramStatusShadowPayloadScrape = "hold"
+	SessionProgramStatusShadowPayloadScrapeIdle          SessionProgramStatusShadowPayloadScrape = "idle"
+	SessionProgramStatusShadowPayloadScrapeIndeterminate SessionProgramStatusShadowPayloadScrape = "indeterminate"
+	SessionProgramStatusShadowPayloadScrapeNoHold        SessionProgramStatusShadowPayloadScrape = "no_hold"
+	SessionProgramStatusShadowPayloadScrapeNoResend      SessionProgramStatusShadowPayloadScrape = "no_resend"
+	SessionProgramStatusShadowPayloadScrapeNone          SessionProgramStatusShadowPayloadScrape = "none"
+	SessionProgramStatusShadowPayloadScrapeNotReady      SessionProgramStatusShadowPayloadScrape = "not_ready"
+	SessionProgramStatusShadowPayloadScrapePending       SessionProgramStatusShadowPayloadScrape = "pending"
+	SessionProgramStatusShadowPayloadScrapeReady         SessionProgramStatusShadowPayloadScrape = "ready"
+	SessionProgramStatusShadowPayloadScrapeResend        SessionProgramStatusShadowPayloadScrape = "resend"
+	SessionProgramStatusShadowPayloadScrapeSettled       SessionProgramStatusShadowPayloadScrape = "settled"
+	SessionProgramStatusShadowPayloadScrapeUnconfirmed   SessionProgramStatusShadowPayloadScrape = "unconfirmed"
+	SessionProgramStatusShadowPayloadScrapeUnsettled     SessionProgramStatusShadowPayloadScrape = "unsettled"
+)
+
+// Valid indicates whether the value is a known member of the SessionProgramStatusShadowPayloadScrape enum.
+func (e SessionProgramStatusShadowPayloadScrape) Valid() bool {
+	switch e {
+	case SessionProgramStatusShadowPayloadScrapeBusy:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeConfirmed:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeHold:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeIdle:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeIndeterminate:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeNoHold:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeNoResend:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeNone:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeNotReady:
+		return true
+	case SessionProgramStatusShadowPayloadScrapePending:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeReady:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeResend:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeSettled:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeUnconfirmed:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeUnsettled:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionProgramStatusShadowPayloadState.
+const (
+	SessionProgramStatusShadowPayloadStateBlocked SessionProgramStatusShadowPayloadState = "blocked"
+	SessionProgramStatusShadowPayloadStateDone    SessionProgramStatusShadowPayloadState = "done"
+	SessionProgramStatusShadowPayloadStateError   SessionProgramStatusShadowPayloadState = "error"
+	SessionProgramStatusShadowPayloadStateIdle    SessionProgramStatusShadowPayloadState = "idle"
+	SessionProgramStatusShadowPayloadStateWorking SessionProgramStatusShadowPayloadState = "working"
+)
+
+// Valid indicates whether the value is a known member of the SessionProgramStatusShadowPayloadState enum.
+func (e SessionProgramStatusShadowPayloadState) Valid() bool {
+	switch e {
+	case SessionProgramStatusShadowPayloadStateBlocked:
+		return true
+	case SessionProgramStatusShadowPayloadStateDone:
+		return true
+	case SessionProgramStatusShadowPayloadStateError:
+		return true
+	case SessionProgramStatusShadowPayloadStateIdle:
+		return true
+	case SessionProgramStatusShadowPayloadStateWorking:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionProgramStatusShadowPayloadValidity.
+const (
+	Cleared    SessionProgramStatusShadowPayloadValidity = "cleared"
+	Exited     SessionProgramStatusShadowPayloadValidity = "exited"
+	NotArmed   SessionProgramStatusShadowPayloadValidity = "not_armed"
+	ReaderLost SessionProgramStatusShadowPayloadValidity = "reader_lost"
+	Silent     SessionProgramStatusShadowPayloadValidity = "silent"
+	Unread     SessionProgramStatusShadowPayloadValidity = "unread"
+	Valid      SessionProgramStatusShadowPayloadValidity = "valid"
+)
+
+// Valid indicates whether the value is a known member of the SessionProgramStatusShadowPayloadValidity enum.
+func (e SessionProgramStatusShadowPayloadValidity) Valid() bool {
+	switch e {
+	case Cleared:
+		return true
+	case Exited:
+		return true
+	case NotArmed:
+		return true
+	case ReaderLost:
+		return true
+	case Silent:
+		return true
+	case Unread:
+		return true
+	case Valid:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionResponseActivitySource.
+const (
+	SessionResponseActivitySourceProgram    SessionResponseActivitySource = "program"
+	SessionResponseActivitySourceTranscript SessionResponseActivitySource = "transcript"
+)
+
+// Valid indicates whether the value is a known member of the SessionResponseActivitySource enum.
+func (e SessionResponseActivitySource) Valid() bool {
+	switch e {
+	case SessionResponseActivitySourceProgram:
+		return true
+	case SessionResponseActivitySourceTranscript:
 		return true
 	default:
 		return false
@@ -1026,6 +1431,156 @@ func (e SessionTranscriptRawResponseFormat) Valid() bool {
 	}
 }
 
+// Defines values for SessionTurnCapabilitiesEnd.
+const (
+	SessionTurnCapabilitiesEndBoundary SessionTurnCapabilitiesEnd = "boundary"
+	SessionTurnCapabilitiesEndInferred SessionTurnCapabilitiesEnd = "inferred"
+	SessionTurnCapabilitiesEndNone     SessionTurnCapabilitiesEnd = "none"
+	SessionTurnCapabilitiesEndRecorded SessionTurnCapabilitiesEnd = "recorded"
+)
+
+// Valid indicates whether the value is a known member of the SessionTurnCapabilitiesEnd enum.
+func (e SessionTurnCapabilitiesEnd) Valid() bool {
+	switch e {
+	case SessionTurnCapabilitiesEndBoundary:
+		return true
+	case SessionTurnCapabilitiesEndInferred:
+		return true
+	case SessionTurnCapabilitiesEndNone:
+		return true
+	case SessionTurnCapabilitiesEndRecorded:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionTurnCapabilitiesFence.
+const (
+	SessionTurnCapabilitiesFenceAtomic  SessionTurnCapabilitiesFence = "atomic"
+	SessionTurnCapabilitiesFenceChecked SessionTurnCapabilitiesFence = "checked"
+	SessionTurnCapabilitiesFenceNone    SessionTurnCapabilitiesFence = "none"
+)
+
+// Valid indicates whether the value is a known member of the SessionTurnCapabilitiesFence enum.
+func (e SessionTurnCapabilitiesFence) Valid() bool {
+	switch e {
+	case SessionTurnCapabilitiesFenceAtomic:
+		return true
+	case SessionTurnCapabilitiesFenceChecked:
+		return true
+	case SessionTurnCapabilitiesFenceNone:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionTurnCapabilitiesInterrupt.
+const (
+	SessionTurnCapabilitiesInterruptKeystroke   SessionTurnCapabilitiesInterrupt = "keystroke"
+	SessionTurnCapabilitiesInterruptProtocol    SessionTurnCapabilitiesInterrupt = "protocol"
+	SessionTurnCapabilitiesInterruptUnsupported SessionTurnCapabilitiesInterrupt = "unsupported"
+)
+
+// Valid indicates whether the value is a known member of the SessionTurnCapabilitiesInterrupt enum.
+func (e SessionTurnCapabilitiesInterrupt) Valid() bool {
+	switch e {
+	case SessionTurnCapabilitiesInterruptKeystroke:
+		return true
+	case SessionTurnCapabilitiesInterruptProtocol:
+		return true
+	case SessionTurnCapabilitiesInterruptUnsupported:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionTurnCapabilitiesLink.
+const (
+	SessionTurnCapabilitiesLinkCorrelated SessionTurnCapabilitiesLink = "correlated"
+	SessionTurnCapabilitiesLinkExact      SessionTurnCapabilitiesLink = "exact"
+	SessionTurnCapabilitiesLinkNone       SessionTurnCapabilitiesLink = "none"
+)
+
+// Valid indicates whether the value is a known member of the SessionTurnCapabilitiesLink enum.
+func (e SessionTurnCapabilitiesLink) Valid() bool {
+	switch e {
+	case SessionTurnCapabilitiesLinkCorrelated:
+		return true
+	case SessionTurnCapabilitiesLinkExact:
+		return true
+	case SessionTurnCapabilitiesLinkNone:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionTurnCapabilitiesStart.
+const (
+	SessionTurnCapabilitiesStartBoundary SessionTurnCapabilitiesStart = "boundary"
+	SessionTurnCapabilitiesStartNone     SessionTurnCapabilitiesStart = "none"
+	SessionTurnCapabilitiesStartRecorded SessionTurnCapabilitiesStart = "recorded"
+)
+
+// Valid indicates whether the value is a known member of the SessionTurnCapabilitiesStart enum.
+func (e SessionTurnCapabilitiesStart) Valid() bool {
+	switch e {
+	case SessionTurnCapabilitiesStartBoundary:
+		return true
+	case SessionTurnCapabilitiesStartNone:
+		return true
+	case SessionTurnCapabilitiesStartRecorded:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionTurnResponseObservation.
+const (
+	SessionTurnResponseObservationObserved    SessionTurnResponseObservation = "observed"
+	SessionTurnResponseObservationUnavailable SessionTurnResponseObservation = "unavailable"
+	SessionTurnResponseObservationUnsupported SessionTurnResponseObservation = "unsupported"
+)
+
+// Valid indicates whether the value is a known member of the SessionTurnResponseObservation enum.
+func (e SessionTurnResponseObservation) Valid() bool {
+	switch e {
+	case SessionTurnResponseObservationObserved:
+		return true
+	case SessionTurnResponseObservationUnavailable:
+		return true
+	case SessionTurnResponseObservationUnsupported:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionTurnResponseSource.
+const (
+	SessionTurnResponseSourceNone       SessionTurnResponseSource = "none"
+	SessionTurnResponseSourceProtocol   SessionTurnResponseSource = "protocol"
+	SessionTurnResponseSourceTranscript SessionTurnResponseSource = "transcript"
+)
+
+// Valid indicates whether the value is a known member of the SessionTurnResponseSource enum.
+func (e SessionTurnResponseSource) Valid() bool {
+	switch e {
+	case SessionTurnResponseSourceNone:
+		return true
+	case SessionTurnResponseSourceProtocol:
+		return true
+	case SessionTurnResponseSourceTranscript:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for SlingChildOutcomeOutcome.
 const (
 	Failed  SlingChildOutcomeOutcome = "failed"
@@ -1196,16 +1751,16 @@ func (e SubmitIntent) Valid() bool {
 
 // Defines values for SupervisorRequestPayloadPhase.
 const (
-	SupervisorRequestPayloadPhaseComplete SupervisorRequestPayloadPhase = "complete"
-	SupervisorRequestPayloadPhaseStart    SupervisorRequestPayloadPhase = "start"
+	Complete SupervisorRequestPayloadPhase = "complete"
+	Start    SupervisorRequestPayloadPhase = "start"
 )
 
 // Valid indicates whether the value is a known member of the SupervisorRequestPayloadPhase enum.
 func (e SupervisorRequestPayloadPhase) Valid() bool {
 	switch e {
-	case SupervisorRequestPayloadPhaseComplete:
+	case Complete:
 		return true
-	case SupervisorRequestPayloadPhaseStart:
+	case Start:
 		return true
 	default:
 		return false
@@ -1334,16 +1889,16 @@ func (e TranscriptProvenance) Valid() bool {
 
 // Defines values for UsageBodySource.
 const (
-	UsageBodySourceLocalEstimate UsageBodySource = "local_estimate"
-	UsageBodySourceUnavailable   UsageBodySource = "unavailable"
+	LocalEstimate UsageBodySource = "local_estimate"
+	Unavailable   UsageBodySource = "unavailable"
 )
 
 // Valid indicates whether the value is a known member of the UsageBodySource enum.
 func (e UsageBodySource) Valid() bool {
 	switch e {
-	case UsageBodySourceLocalEstimate:
+	case LocalEstimate:
 		return true
-	case UsageBodySourceUnavailable:
+	case Unavailable:
 		return true
 	default:
 		return false
@@ -1505,22 +2060,22 @@ func (e GetV0CityByCityNameWorkReadyParamsSort) Valid() bool {
 
 // Defines values for GetV0CityByCityNameWorkReadyParamsStatus.
 const (
-	Blocked    GetV0CityByCityNameWorkReadyParamsStatus = "blocked"
-	Closed     GetV0CityByCityNameWorkReadyParamsStatus = "closed"
-	InProgress GetV0CityByCityNameWorkReadyParamsStatus = "in_progress"
-	Open       GetV0CityByCityNameWorkReadyParamsStatus = "open"
+	GetV0CityByCityNameWorkReadyParamsStatusBlocked    GetV0CityByCityNameWorkReadyParamsStatus = "blocked"
+	GetV0CityByCityNameWorkReadyParamsStatusClosed     GetV0CityByCityNameWorkReadyParamsStatus = "closed"
+	GetV0CityByCityNameWorkReadyParamsStatusInProgress GetV0CityByCityNameWorkReadyParamsStatus = "in_progress"
+	GetV0CityByCityNameWorkReadyParamsStatusOpen       GetV0CityByCityNameWorkReadyParamsStatus = "open"
 )
 
 // Valid indicates whether the value is a known member of the GetV0CityByCityNameWorkReadyParamsStatus enum.
 func (e GetV0CityByCityNameWorkReadyParamsStatus) Valid() bool {
 	switch e {
-	case Blocked:
+	case GetV0CityByCityNameWorkReadyParamsStatusBlocked:
 		return true
-	case Closed:
+	case GetV0CityByCityNameWorkReadyParamsStatusClosed:
 		return true
-	case InProgress:
+	case GetV0CityByCityNameWorkReadyParamsStatusInProgress:
 		return true
-	case Open:
+	case GetV0CityByCityNameWorkReadyParamsStatusOpen:
 		return true
 	default:
 		return false
@@ -1680,30 +2235,39 @@ type AgentPatchSetInputBody struct {
 
 // AgentResponse defines model for AgentResponse.
 type AgentResponse struct {
-	ActiveBead    *string `json:"active_bead,omitempty"`
-	Activity      *string `json:"activity,omitempty"`
-	Available     bool    `json:"available"`
-	ContextPct    *int64  `json:"context_pct,omitempty"`
-	ContextWindow *int64  `json:"context_window,omitempty"`
-	Description   *string `json:"description,omitempty"`
-	DisplayName   *string `json:"display_name,omitempty"`
-	LastOutput    *string `json:"last_output,omitempty"`
-	Model         *string `json:"model,omitempty"`
-	Name          string  `json:"name"`
-	Pack          *string `json:"pack,omitempty"`
-	PackDerived   bool    `json:"pack_derived"`
+	ActiveBead *string `json:"active_bead,omitempty"`
+	Activity   *string `json:"activity,omitempty"`
+
+	// ActivitySource Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.
+	ActivitySource *AgentResponseActivitySource `json:"activity_source,omitempty"`
+	Available      bool                         `json:"available"`
+	ContextPct     *int64                       `json:"context_pct,omitempty"`
+	ContextWindow  *int64                       `json:"context_window,omitempty"`
+	Description    *string                      `json:"description,omitempty"`
+	DisplayName    *string                      `json:"display_name,omitempty"`
+	LastOutput     *string                      `json:"last_output,omitempty"`
+	Model          *string                      `json:"model,omitempty"`
+	Name           string                       `json:"name"`
+	Pack           *string                      `json:"pack,omitempty"`
+	PackDerived    bool                         `json:"pack_derived"`
 
 	// Pool Qualified name of the configured pool this row belongs to. Equals name on the row for an on-demand pool that has no live session.
-	Pool              *string      `json:"pool,omitempty"`
-	PoolLimits        *PoolLimits  `json:"pool_limits,omitempty"`
-	Provider          *string      `json:"provider,omitempty"`
-	Rig               *string      `json:"rig,omitempty"`
-	Running           bool         `json:"running"`
-	Session           *SessionInfo `json:"session,omitempty"`
-	State             string       `json:"state"`
-	Suspended         bool         `json:"suspended"`
-	UnavailableReason *string      `json:"unavailable_reason,omitempty"`
+	Pool          *string               `json:"pool,omitempty"`
+	PoolLimits    *PoolLimits           `json:"pool_limits,omitempty"`
+	ProgramStatus *SessionProgramStatus `json:"program_status,omitempty"`
+	Provider      *string               `json:"provider,omitempty"`
+	Rig           *string               `json:"rig,omitempty"`
+	Running       bool                  `json:"running"`
+	Session       *SessionInfo          `json:"session,omitempty"`
+
+	// State Agent state: suspended, quarantined, stopped, working, waiting, idle, blocked or error. blocked and error come only from the session program's own status report, under the city's program_status switch on.
+	State             string  `json:"state"`
+	Suspended         bool    `json:"suspended"`
+	UnavailableReason *string `json:"unavailable_reason,omitempty"`
 }
+
+// AgentResponseActivitySource Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.
+type AgentResponseActivitySource string
 
 // AgentUpdateInputBody defines model for AgentUpdateInputBody.
 type AgentUpdateInputBody struct {
@@ -1760,7 +2324,7 @@ type AnnotatedProviderResponse struct {
 
 // AsyncAcceptedBody defines model for AsyncAcceptedBody.
 type AsyncAcceptedBody struct {
-	// EventCursor City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty.
+	// EventCursor City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog, and to /v0/city/{cityName}/request/{requestId} to read its outcome. A value of 0 means the event log was empty.
 	EventCursor string `json:"event_cursor"`
 
 	// IdempotencyKey The Idempotency-Key the request was recorded under: the client's, or one the server minted when the request carried none. Retry with it to get this request's outcome instead of a second delivery.
@@ -2524,11 +3088,11 @@ type ConversationOpResult struct {
 	// CoalescedInto The operation this one was delivered with, when coalesced.
 	CoalescedInto *string `json:"coalesced_into,omitempty"`
 
-	// ContextEpoch Context epoch the operation ran in.
+	// ContextEpoch Context epoch the operation ran in, or, for one skipped{stale} unrun, the epoch that fenced it off.
 	ContextEpoch *int64                  `json:"context_epoch,omitempty"`
 	Delivery     *ConversationOpDelivery `json:"delivery,omitempty"`
 
-	// Generation Session generation the operation ran in.
+	// Generation Session generation the operation ran in, or, for one skipped{stale} unrun because its session moved on, the generation that fenced it off.
 	Generation *int64 `json:"generation,omitempty"`
 
 	// Turn The turn the operation ran in or was linked to; empty when the link is none.
@@ -4343,8 +4907,9 @@ type ReadyBead struct {
 
 // ReadyBeadBlocker defines model for ReadyBeadBlocker.
 type ReadyBeadBlocker struct {
-	Id     string `json:"id"`
-	Status string `json:"status"`
+	Id     string  `json:"id"`
+	Reason *string `json:"reason,omitempty"`
+	Status string  `json:"status"`
 }
 
 // ReadyBeadDep defines model for ReadyBeadDep.
@@ -4368,6 +4933,18 @@ type Record struct {
 	SourcePid  *int64             `json:"source_pid,omitempty"`
 }
 
+// RequestAcceptedPayload defines model for RequestAcceptedPayload.
+type RequestAcceptedPayload struct {
+	// Operation Which operation was accepted.
+	Operation RequestAcceptedPayloadOperation `json:"operation"`
+
+	// RequestId Correlation ID from the 202 response.
+	RequestId string `json:"request_id"`
+}
+
+// RequestAcceptedPayloadOperation Which operation was accepted.
+type RequestAcceptedPayloadOperation string
+
 // RequestFailedPayload defines model for RequestFailedPayload.
 type RequestFailedPayload struct {
 	// ErrorCode Machine-readable error code.
@@ -4389,6 +4966,27 @@ type RequestFailedPayload struct {
 
 // RequestFailedPayloadOperation Which operation failed.
 type RequestFailedPayloadOperation string
+
+// RequestOutcome defines model for RequestOutcome.
+type RequestOutcome struct {
+	// Event Discriminated union of city event stream envelopes. Each variant constrains the envelope type and payload schema together.
+	Event *TypedEventStreamEnvelope `json:"event,omitempty"`
+
+	// Operation The operation that was accepted.
+	Operation RequestOutcomeOperation `json:"operation"`
+
+	// RequestId The request_id from the 202 response.
+	RequestId string `json:"request_id"`
+
+	// State pending: the request is still running, or its terminal event is held until the city event log takes it. succeeded: its request.result.* event was recorded; event carries it. failed: its request.failed event was recorded; event carries it. outcome_unknown: the server that accepted the request stopped (or lost the terminal event) before recording an outcome, so the operation may or may not have taken effect; inspect the target resource before retrying.
+	State RequestOutcomeState `json:"state"`
+}
+
+// RequestOutcomeOperation The operation that was accepted.
+type RequestOutcomeOperation string
+
+// RequestOutcomeState pending: the request is still running, or its terminal event is held until the city event log takes it. succeeded: its request.result.* event was recorded; event carries it. failed: its request.failed event was recorded; event carries it. outcome_unknown: the server that accepted the request stopped (or lost the terminal event) before recording an outcome, so the operation may or may not have taken effect; inspect the target resource before retrying.
+type RequestOutcomeState string
 
 // RigActionBody defines model for RigActionBody.
 type RigActionBody struct {
@@ -4588,10 +5186,25 @@ type Run struct {
 	UpdatedAt *string `json:"updated_at,omitempty"`
 }
 
+// RunCancelInterruptFailure defines model for RunCancelInterruptFailure.
+type RunCancelInterruptFailure struct {
+	// Error Why the interrupt failed.
+	Error string `json:"error"`
+
+	// Session Session ID, or the step assignee when it could not be resolved to a session.
+	Session string `json:"session"`
+}
+
 // RunCancelOutputBody defines model for RunCancelOutputBody.
 type RunCancelOutputBody struct {
-	// Closed Count of the run's beads closed by the cancel.
+	// Closed Count of the run's beads closed by the cancel. Closing is the durable part of a cancel: no closed bead is claimed again.
 	Closed int64 `json:"closed"`
+
+	// InterruptFailures Holders of an in-progress step the cancel closed whose current turn could not be interrupted. The cancel is durable regardless; stop or suspend these sessions directly.
+	InterruptFailures *[]RunCancelInterruptFailure `json:"interrupt_failures,omitempty"`
+
+	// Interrupted IDs of the sessions whose current turn was interrupted because they held an in-progress step the cancel closed. Interrupting ends the agent's turn, the same as POST /session/{id}/stop; for Codex it also closes the session's background terminals. It does not verify that every process the step started has exited, and it cannot undo effects the step already made, such as a push or a call to a remote service. The sessions are not killed; they stay up to serve other work.
+	Interrupted *[]string `json:"interrupted,omitempty"`
 
 	// RunId The canceled run.
 	RunId string `json:"run_id"`
@@ -4733,7 +5346,7 @@ type ServiceRestartOutputBody struct {
 
 // SessionActivityEvent defines model for SessionActivityEvent.
 type SessionActivityEvent struct {
-	// Activity Session activity state: 'idle' or 'in-turn'.
+	// Activity Session activity state: 'idle' or 'in-turn', derived from the transcript under every program_status switch. The session program's own status arrives in the program_status frame.
 	Activity string `json:"activity"`
 }
 
@@ -4870,7 +5483,7 @@ type SessionMessageInputBody struct {
 	// Message Message text to send.
 	Message string `json:"message"`
 
-	// Resume Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will.
+	// Resume Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will. When the conversation lane delivers messages (message listed in [ops] authoritative) it starts nothing here: it consumes an operator's hold placed before the message and records the session's wake, and the controller starts the session as it does for any queued message, or the result's will_start says why it will not; resending the request under the idempotency_key of its 202 consumes such a hold too.
 	Resume *bool `json:"resume,omitempty"`
 }
 
@@ -4890,7 +5503,7 @@ type SessionMessageSucceededPayload struct {
 	// WillNotStartReason Why the controller will not start the session for a queued message, with the remedy.
 	WillNotStartReason *string `json:"will_not_start_reason,omitempty"`
 
-	// WillStart Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now.
+	// WillStart Present when the message was queued because the session is not running or is held: whether the controller will start it to deliver the message. False means it will not; will_not_start_reason says why, with the remedy. When the conversation lane delivers messages it is read as the request's settle window ends, and resume: true does not start a session the controller will not start.
 	WillStart *bool `json:"will_start,omitempty"`
 }
 
@@ -4987,6 +5600,107 @@ type SessionPoolSlotRetiredAtDrainDeadlinePayload struct {
 	Template *string `json:"template,omitempty"`
 }
 
+// SessionProgramStatus defines model for SessionProgramStatus.
+type SessionProgramStatus struct {
+	// App The program's self-reported name.
+	App *string `json:"app,omitempty"`
+
+	// Kind What a blocked program waits for, when it says. Only with state blocked.
+	Kind *SessionProgramStatusKind `json:"kind,omitempty"`
+
+	// Progress Percent complete the program reports, only with working or blocked.
+	Progress *int64 `json:"progress,omitempty"`
+
+	// QuietSince When the program last left working or blocked for an input boundary; absent if it never has in this capture.
+	QuietSince *time.Time `json:"quiet_since,omitempty"`
+
+	// Since When the program entered state, by the capture host's clock.
+	Since time.Time `json:"since"`
+
+	// State The state the program reports. done and error are input boundaries like idle (error is a failed turn with the program alive); blocked is waiting on the user.
+	State SessionProgramStatusState `json:"state"`
+
+	// WorkingChildren Child tasks the program reports as working.
+	WorkingChildren int64 `json:"working_children"`
+}
+
+// SessionProgramStatusKind What a blocked program waits for, when it says. Only with state blocked.
+type SessionProgramStatusKind string
+
+// SessionProgramStatusState The state the program reports. done and error are input boundaries like idle (error is a failed turn with the program alive); blocked is waiting on the user.
+type SessionProgramStatusState string
+
+// SessionProgramStatusEvent defines model for SessionProgramStatusEvent.
+type SessionProgramStatusEvent struct {
+	ProgramStatus *SessionProgramStatus `json:"program_status,omitempty"`
+}
+
+// SessionProgramStatusShadowPayload defines model for SessionProgramStatusShadowPayload.
+type SessionProgramStatusShadowPayload struct {
+	// Agree Whether the two readings agree.
+	Agree bool `json:"agree"`
+
+	// Dropped Comparisons this process dropped since its last recorded one.
+	Dropped *int64 `json:"dropped,omitempty"`
+
+	// Family The session's provider family (resolved built-in ancestor).
+	Family *string `json:"family,omitempty"`
+
+	// HoldLive Whether a hold derived from the record is still within its bound.
+	HoldLive bool `json:"hold_live"`
+
+	// Kind The blocked state's kind.
+	Kind *SessionProgramStatusShadowPayloadKind `json:"kind,omitempty"`
+
+	// LatencyMs Program signal minus scrape signal, in milliseconds (timed points only).
+	LatencyMs *int64 `json:"latency_ms,omitempty"`
+
+	// Point The decision point.
+	Point SessionProgramStatusShadowPayloadPoint `json:"point"`
+
+	// Program What the program-status record would decide.
+	Program SessionProgramStatusShadowPayloadProgram `json:"program"`
+
+	// ReaderVerified Whether the process table confirmed the capture reader.
+	ReaderVerified bool `json:"reader_verified"`
+
+	// RecordAgeMs How long the record's root has been in its state, in milliseconds.
+	RecordAgeMs int64 `json:"record_age_ms"`
+
+	// Scrape Today's screen reading, which decided.
+	Scrape SessionProgramStatusShadowPayloadScrape `json:"scrape"`
+
+	// SessionId The session's bead id, when the decision point knows it.
+	SessionId *string `json:"session_id,omitempty"`
+
+	// State The record's root state (valid readings only).
+	State *SessionProgramStatusShadowPayloadState `json:"state,omitempty"`
+
+	// Timed Whether latency_ms was measured.
+	Timed *bool `json:"timed,omitempty"`
+
+	// Validity The record reading's validity.
+	Validity SessionProgramStatusShadowPayloadValidity `json:"validity"`
+}
+
+// SessionProgramStatusShadowPayloadKind The blocked state's kind.
+type SessionProgramStatusShadowPayloadKind string
+
+// SessionProgramStatusShadowPayloadPoint The decision point.
+type SessionProgramStatusShadowPayloadPoint string
+
+// SessionProgramStatusShadowPayloadProgram What the program-status record would decide.
+type SessionProgramStatusShadowPayloadProgram string
+
+// SessionProgramStatusShadowPayloadScrape Today's screen reading, which decided.
+type SessionProgramStatusShadowPayloadScrape string
+
+// SessionProgramStatusShadowPayloadState The record's root state (valid readings only).
+type SessionProgramStatusShadowPayloadState string
+
+// SessionProgramStatusShadowPayloadValidity The record reading's validity.
+type SessionProgramStatusShadowPayloadValidity string
+
 // SessionRawMessageFrame Provider-native transcript frame. Gas City forwards the exact JSON the provider wrote to its session log, so the shape is provider-specific and can be any JSON value. The producing provider is identified by the Provider field on the enclosing envelope; consumers dispatch per-provider frame parsing keyed by that identifier.
 type SessionRawMessageFrame = interface{}
 
@@ -5037,28 +5751,34 @@ type SessionRespondOutputBody struct {
 
 // SessionResponse defines model for SessionResponse.
 type SessionResponse struct {
-	ActiveBead             *string                 `json:"active_bead,omitempty"`
-	Activity               *string                 `json:"activity,omitempty"`
-	AgentKind              *string                 `json:"agent_kind,omitempty"`
-	Alias                  *string                 `json:"alias,omitempty"`
-	Attached               bool                    `json:"attached"`
-	ConfiguredNamedSession *bool                   `json:"configured_named_session,omitempty"`
-	ContextPct             *int64                  `json:"context_pct,omitempty"`
-	ContextWindow          *int64                  `json:"context_window,omitempty"`
-	CreatedAt              string                  `json:"created_at"`
-	DisplayName            *string                 `json:"display_name,omitempty"`
-	Id                     string                  `json:"id"`
-	Kind                   *string                 `json:"kind,omitempty"`
-	LastActive             *string                 `json:"last_active,omitempty"`
-	LastNudgeDeliveredAt   *string                 `json:"last_nudge_delivered_at,omitempty"`
-	LastOutput             *string                 `json:"last_output,omitempty"`
-	Metadata               *map[string]string      `json:"metadata,omitempty"`
-	Model                  *string                 `json:"model,omitempty"`
-	Options                *map[string]string      `json:"options,omitempty"`
-	Pool                   *string                 `json:"pool,omitempty"`
-	Provider               string                  `json:"provider"`
-	Reason                 *string                 `json:"reason,omitempty"`
-	Rig                    *string                 `json:"rig,omitempty"`
+	ActiveBead *string `json:"active_bead,omitempty"`
+	Activity   *string `json:"activity,omitempty"`
+
+	// ActivitySource Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.
+	ActivitySource         *SessionResponseActivitySource `json:"activity_source,omitempty"`
+	AgentKind              *string                        `json:"agent_kind,omitempty"`
+	Alias                  *string                        `json:"alias,omitempty"`
+	Attached               bool                           `json:"attached"`
+	ConfiguredNamedSession *bool                          `json:"configured_named_session,omitempty"`
+	ContextPct             *int64                         `json:"context_pct,omitempty"`
+	ContextWindow          *int64                         `json:"context_window,omitempty"`
+	CreatedAt              string                         `json:"created_at"`
+	DisplayName            *string                        `json:"display_name,omitempty"`
+	Id                     string                         `json:"id"`
+	Kind                   *string                        `json:"kind,omitempty"`
+	LastActive             *string                        `json:"last_active,omitempty"`
+	LastNudgeDeliveredAt   *string                        `json:"last_nudge_delivered_at,omitempty"`
+	LastOutput             *string                        `json:"last_output,omitempty"`
+	Metadata               *map[string]string             `json:"metadata,omitempty"`
+	Model                  *string                        `json:"model,omitempty"`
+	Options                *map[string]string             `json:"options,omitempty"`
+	Pool                   *string                        `json:"pool,omitempty"`
+	ProgramStatus          *SessionProgramStatus          `json:"program_status,omitempty"`
+	Provider               string                         `json:"provider"`
+	Reason                 *string                        `json:"reason,omitempty"`
+	Rig                    *string                        `json:"rig,omitempty"`
+
+	// Running Whether the session's runtime was live when this response was built, in any open state. It observes the runtime, not the agent: on tmux it is true while the session has a pane whose process has not exited, so a pane still running a launch wrapper or shell before the agent starts reads true, and a pane kept by remain-on-exit after its process exited reads false. GET /session/{id} and GET /sessions read the same probe, which tmux serves from a fleet snapshot refreshed at most every 2 s. Point-in-time: a session in a transitional state (creating, start-pending, draining) can start or stop its process right after; a client confirming quiescence should re-read after its last transition settles.
 	Running                bool                    `json:"running"`
 	SessionName            string                  `json:"session_name"`
 	State                  string                  `json:"state"`
@@ -5068,6 +5788,9 @@ type SessionResponse struct {
 	Turn                   *SessionTurn            `json:"turn,omitempty"`
 	WorkDir                *string                 `json:"work_dir,omitempty"`
 }
+
+// SessionResponseActivitySource Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.
+type SessionResponseActivitySource string
 
 // SessionStopBody defines model for SessionStopBody.
 type SessionStopBody struct {
@@ -5109,7 +5832,7 @@ type SessionStrandedPayload struct {
 	WorkBeadIds *[]string `json:"work_bead_ids,omitempty"`
 }
 
-// SessionStreamCommonEvent Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
+// SessionStreamCommonEvent Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, program-status changes, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
 type SessionStreamCommonEvent struct {
 	union json.RawMessage
 }
@@ -5958,7 +6681,7 @@ type SessionSubmitInputBody struct {
 	// Message Message text to submit.
 	Message string `json:"message"`
 
-	// Resume Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will.
+	// Resume Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will. When the conversation lane delivers messages (message listed in [ops] authoritative) it starts nothing here: it consumes an operator's hold placed before the message and records the session's wake, and the controller starts the session as it does for any queued message, or the result's will_start says why it will not; resending the request under the idempotency_key of its 202 consumes such a hold too.
 	Resume *bool `json:"resume,omitempty"`
 }
 
@@ -5979,7 +6702,7 @@ type SessionSubmitInterruptOutcome string
 
 // SessionSubmitSucceededPayload defines model for SessionSubmitSucceededPayload.
 type SessionSubmitSucceededPayload struct {
-	// Intent Resolved submit intent (default, follow_up, interrupt_now).
+	// Intent Resolved submit intent (default, follow_up, interrupt_now). When the conversation lane delivers messages a follow_up resolves to default: the lane delivers both at the session's boundary.
 	Intent    string                  `json:"intent"`
 	Interrupt *SessionSubmitInterrupt `json:"interrupt,omitempty"`
 	Op        *ConversationOp         `json:"op,omitempty"`
@@ -5996,7 +6719,7 @@ type SessionSubmitSucceededPayload struct {
 	// WillNotStartReason Why the controller will not start the session for a queued message, with the remedy.
 	WillNotStartReason *string `json:"will_not_start_reason,omitempty"`
 
-	// WillStart Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now.
+	// WillStart Present when the message was queued because the session is not running or is held: whether the controller will start it to deliver the message. False means it will not; will_not_start_reason says why, with the remedy. When the conversation lane delivers messages it is read as the request's settle window ends, and resume: true does not start a session the controller will not start.
 	WillStart *bool `json:"will_start,omitempty"`
 }
 
@@ -6101,6 +6824,99 @@ type SessionTurnCapPair struct {
 	// Value Capability value.
 	Value string `json:"value"`
 }
+
+// SessionTurnCapabilities defines model for SessionTurnCapabilities.
+type SessionTurnCapabilities struct {
+	// End How turn ends are known: recorded means every end carries its id and how it ended; inferred means some ends are inferred from the session going idle.
+	End SessionTurnCapabilitiesEnd `json:"end"`
+
+	// Fence How an interrupt could be confined to a named turn: atomic means the runtime refuses to interrupt a turn that is not current; checked means the turn is re-read just before an untargeted interrupt, so a turn starting in between can still be hit; none means an interrupt cannot be aimed at a turn.
+	Fence SessionTurnCapabilitiesFence `json:"fence"`
+
+	// Interrupt How the runtime interrupts the session's turn. unsupported forces fence none.
+	Interrupt SessionTurnCapabilitiesInterrupt `json:"interrupt"`
+
+	// Link How a delivery is tied to the turn it started: exact means the runtime names it; correlated means it is matched by observation.
+	Link SessionTurnCapabilitiesLink `json:"link"`
+
+	// Lossless Every turn since the last read can be recovered from the next one.
+	Lossless bool `json:"lossless"`
+
+	// Start How turn starts are known: recorded means every start carries its turn id.
+	Start SessionTurnCapabilitiesStart `json:"start"`
+}
+
+// SessionTurnCapabilitiesEnd How turn ends are known: recorded means every end carries its id and how it ended; inferred means some ends are inferred from the session going idle.
+type SessionTurnCapabilitiesEnd string
+
+// SessionTurnCapabilitiesFence How an interrupt could be confined to a named turn: atomic means the runtime refuses to interrupt a turn that is not current; checked means the turn is re-read just before an untargeted interrupt, so a turn starting in between can still be hit; none means an interrupt cannot be aimed at a turn.
+type SessionTurnCapabilitiesFence string
+
+// SessionTurnCapabilitiesInterrupt How the runtime interrupts the session's turn. unsupported forces fence none.
+type SessionTurnCapabilitiesInterrupt string
+
+// SessionTurnCapabilitiesLink How a delivery is tied to the turn it started: exact means the runtime names it; correlated means it is matched by observation.
+type SessionTurnCapabilitiesLink string
+
+// SessionTurnCapabilitiesStart How turn starts are known: recorded means every start carries its turn id.
+type SessionTurnCapabilitiesStart string
+
+// SessionTurnCurrent defines model for SessionTurnCurrent.
+type SessionTurnCurrent struct {
+	// Id The turn's id, as the source records it. Opaque; compare for equality only.
+	Id string `json:"id"`
+
+	// StartedAt When the turn started, at the source's precision; absent when unknown.
+	StartedAt *time.Time `json:"started_at,omitempty"`
+}
+
+// SessionTurnEnded defines model for SessionTurnEnded.
+type SessionTurnEnded struct {
+	// EndedAt When the turn ended: the source's time, or, for an inferred end, the server's when the read inferred it; absent when unknown. Each read infers an end anew, so an inferred end's time can differ between reads, and a read that cannot confirm the session idle reports that turn current again.
+	EndedAt *time.Time `json:"ended_at,omitempty"`
+
+	// Id The turn's id, as the source records it. Opaque; compare for equality only.
+	Id string `json:"id"`
+
+	// Inferred The end was inferred from the session going idle, not recorded.
+	Inferred bool `json:"inferred"`
+
+	// StartedAt When the turn started, at the source's precision; absent when unknown.
+	StartedAt *time.Time `json:"started_at,omitempty"`
+
+	// Status How the turn ended: completed, cancelled or failed (the runtime's spelling); absent when the source closed it only because a newer turn started.
+	Status *string `json:"status,omitempty"`
+}
+
+// SessionTurnResponse defines model for SessionTurnResponse.
+type SessionTurnResponse struct {
+	Capabilities SessionTurnCapabilities `json:"capabilities"`
+	Current      *SessionTurnCurrent     `json:"current,omitempty"`
+
+	// Detail Why the observation is not observed.
+	Detail *string `json:"detail,omitempty"`
+
+	// Observation What this read saw. observed: current and recent are this read's answer, and an absent current means no turn is running. unavailable: the source exists but could not be read now (a transcript not written yet, no conversation key yet, a runtime that did not answer); the session's turns are unknown, not idle, so retry. unsupported: the session's turns cannot be identified (no source, or a transcript that records turns without ids).
+	Observation SessionTurnResponseObservation `json:"observation"`
+
+	// ObservedAt When the read was made, on the server's clock. Present only when observed.
+	ObservedAt *time.Time `json:"observed_at,omitempty"`
+
+	// Recent Turns that ended, newest first. A transcript source reports at most 8 from a bounded window, so a turn that ends between two reads can fall out of it unless capabilities.lossless is true.
+	Recent *[]SessionTurnEnded `json:"recent,omitempty"`
+
+	// SessionId The resolved session id.
+	SessionId string `json:"session_id"`
+
+	// Source Where the session's turns are read from: protocol (the runtime observes turns itself), transcript (the provider's transcript of the session's own conversation, on this host), or none (the session's turns cannot be identified here). Fixed for the session's generation.
+	Source SessionTurnResponseSource `json:"source"`
+}
+
+// SessionTurnResponseObservation What this read saw. observed: current and recent are this read's answer, and an absent current means no turn is running. unavailable: the source exists but could not be read now (a transcript not written yet, no conversation key yet, a runtime that did not answer); the session's turns are unknown, not idle, so retry. unsupported: the session's turns cannot be identified (no source, or a transcript that records turns without ids).
+type SessionTurnResponseObservation string
+
+// SessionTurnResponseSource Where the session's turns are read from: protocol (the runtime observes turns itself), transcript (the provider's transcript of the session's own conversation, on this host), or none (the session's turns cannot be identified here). Fixed for the session's generation.
+type SessionTurnResponseSource string
 
 // SessionUnknownStatePayload defines model for SessionUnknownStatePayload.
 type SessionUnknownStatePayload struct {
@@ -6587,6 +7403,17 @@ type StorageBindingOutcomePayload struct {
 	LostCrossEdges *[]string `json:"lost_cross_edges,omitempty"`
 	Outcome        string    `json:"outcome"`
 	ProvenBeads    int64     `json:"proven_beads"`
+}
+
+// StorageRigPayload defines model for StorageRigPayload.
+type StorageRigPayload struct {
+	Beads   int64   `json:"beads"`
+	Binding string  `json:"binding"`
+	Cleared *int64  `json:"cleared,omitempty"`
+	Detail  *string `json:"detail,omitempty"`
+	Gates   *int64  `json:"gates,omitempty"`
+	Outcome string  `json:"outcome"`
+	Rig     string  `json:"rig"`
 }
 
 // StoreDiskCriticalPayload defines model for StoreDiskCriticalPayload.
@@ -7899,6 +8726,22 @@ type TypedEventStreamEnvelopeProviderSwapped struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeRequestAccepted defines model for TypedEventStreamEnvelopeRequestAccepted.
+type TypedEventStreamEnvelopeRequestAccepted struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          RequestAcceptedPayload   `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeRequestFailed defines model for TypedEventStreamEnvelopeRequestFailed.
 type TypedEventStreamEnvelopeRequestFailed struct {
 	Actor            string                   `json:"actor"`
@@ -8235,6 +9078,22 @@ type TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline struct {
 	Workflow         *WorkflowEventProjection                     `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionProgramStatusShadow defines model for TypedEventStreamEnvelopeSessionProgramStatusShadow.
+type TypedEventStreamEnvelopeSessionProgramStatusShadow struct {
+	Actor            string                            `json:"actor"`
+	DependsOnStepIds *[]string                         `json:"depends_on_step_ids,omitempty"`
+	Message          *string                           `json:"message,omitempty"`
+	Payload          SessionProgramStatusShadowPayload `json:"payload"`
+	RunId            *string                           `json:"run_id,omitempty"`
+	Seq              int64                             `json:"seq"`
+	SessionId        *string                           `json:"session_id,omitempty"`
+	StepId           *string                           `json:"step_id,omitempty"`
+	Subject          *string                           `json:"subject,omitempty"`
+	Ts               time.Time                         `json:"ts"`
+	Type             string                            `json:"type"`
+	Workflow         *WorkflowEventProjection          `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionQuarantined defines model for TypedEventStreamEnvelopeSessionQuarantined.
 type TypedEventStreamEnvelopeSessionQuarantined struct {
 	Actor            string                   `json:"actor"`
@@ -8507,6 +9366,38 @@ type TypedEventStreamEnvelopeStorageBindingUnconverged struct {
 	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeStorageRigImport defines model for TypedEventStreamEnvelopeStorageRigImport.
+type TypedEventStreamEnvelopeStorageRigImport struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          StorageRigPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeStorageRigResidue defines model for TypedEventStreamEnvelopeStorageRigResidue.
+type TypedEventStreamEnvelopeStorageRigResidue struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          StorageRigPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick defines model for TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick.
 type TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick struct {
 	Actor            string                                 `json:"actor"`
@@ -8641,6 +9532,22 @@ type TypedEventStreamEnvelopeWorkNudged struct {
 	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
 	Message          *string                  `json:"message,omitempty"`
 	Payload          WorkLadderPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeWorkRateLimited defines model for TypedEventStreamEnvelopeWorkRateLimited.
+type TypedEventStreamEnvelopeWorkRateLimited struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          WorkRateLimitedPayload   `json:"payload"`
 	RunId            *string                  `json:"run_id,omitempty"`
 	Seq              int64                    `json:"seq"`
 	SessionId        *string                  `json:"session_id,omitempty"`
@@ -9892,6 +10799,23 @@ type TypedTaggedEventStreamEnvelopeProviderSwapped struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedTaggedEventStreamEnvelopeRequestAccepted defines model for TypedTaggedEventStreamEnvelopeRequestAccepted.
+type TypedTaggedEventStreamEnvelopeRequestAccepted struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          RequestAcceptedPayload   `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelopeRequestFailed defines model for TypedTaggedEventStreamEnvelopeRequestFailed.
 type TypedTaggedEventStreamEnvelopeRequestFailed struct {
 	Actor            string                   `json:"actor"`
@@ -10249,6 +11173,23 @@ type TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline struct 
 	Workflow         *WorkflowEventProjection                     `json:"workflow,omitempty"`
 }
 
+// TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow defines model for TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow.
+type TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow struct {
+	Actor            string                            `json:"actor"`
+	City             string                            `json:"city"`
+	DependsOnStepIds *[]string                         `json:"depends_on_step_ids,omitempty"`
+	Message          *string                           `json:"message,omitempty"`
+	Payload          SessionProgramStatusShadowPayload `json:"payload"`
+	RunId            *string                           `json:"run_id,omitempty"`
+	Seq              int64                             `json:"seq"`
+	SessionId        *string                           `json:"session_id,omitempty"`
+	StepId           *string                           `json:"step_id,omitempty"`
+	Subject          *string                           `json:"subject,omitempty"`
+	Ts               time.Time                         `json:"ts"`
+	Type             string                            `json:"type"`
+	Workflow         *WorkflowEventProjection          `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelopeSessionQuarantined defines model for TypedTaggedEventStreamEnvelopeSessionQuarantined.
 type TypedTaggedEventStreamEnvelopeSessionQuarantined struct {
 	Actor            string                   `json:"actor"`
@@ -10538,6 +11479,40 @@ type TypedTaggedEventStreamEnvelopeStorageBindingUnconverged struct {
 	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
 }
 
+// TypedTaggedEventStreamEnvelopeStorageRigImport defines model for TypedTaggedEventStreamEnvelopeStorageRigImport.
+type TypedTaggedEventStreamEnvelopeStorageRigImport struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          StorageRigPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeStorageRigResidue defines model for TypedTaggedEventStreamEnvelopeStorageRigResidue.
+type TypedTaggedEventStreamEnvelopeStorageRigResidue struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          StorageRigPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick defines model for TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick.
 type TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick struct {
 	Actor            string                                 `json:"actor"`
@@ -10681,6 +11656,23 @@ type TypedTaggedEventStreamEnvelopeWorkNudged struct {
 	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
 	Message          *string                  `json:"message,omitempty"`
 	Payload          WorkLadderPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeWorkRateLimited defines model for TypedTaggedEventStreamEnvelopeWorkRateLimited.
+type TypedTaggedEventStreamEnvelopeWorkRateLimited struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          WorkRateLimitedPayload   `json:"payload"`
 	RunId            *string                  `json:"run_id,omitempty"`
 	Seq              int64                    `json:"seq"`
 	SessionId        *string                  `json:"session_id,omitempty"`
@@ -11016,12 +12008,34 @@ type WorkLadderPayload struct {
 	Generation  int64   `json:"generation"`
 	Kind        *string `json:"kind,omitempty"`
 	Paused      *bool   `json:"paused,omitempty"`
+	Provider    *string `json:"provider,omitempty"`
 	Reason      *string `json:"reason,omitempty"`
 	Rung        *string `json:"rung,omitempty"`
 	SessionId   string  `json:"session_id"`
 	SessionName *string `json:"session_name,omitempty"`
 	StoreRef    *string `json:"store_ref,omitempty"`
 	Template    *string `json:"template,omitempty"`
+}
+
+// WorkRateLimitedPayload defines model for WorkRateLimitedPayload.
+type WorkRateLimitedPayload struct {
+	Alerted      *bool      `json:"alerted,omitempty"`
+	Cause        *string    `json:"cause,omitempty"`
+	Claims       *[]string  `json:"claims,omitempty"`
+	Conversation int64      `json:"conversation"`
+	ErrorCode    *string    `json:"error_code,omitempty"`
+	ErrorText    *string    `json:"error_text,omitempty"`
+	FreshAt      *time.Time `json:"fresh_at,omitempty"`
+	Generation   int64      `json:"generation"`
+	HttpStatus   *int64     `json:"http_status,omitempty"`
+	Provider     *string    `json:"provider,omitempty"`
+	Refused      *int64     `json:"refused,omitempty"`
+	RefusedAt    *time.Time `json:"refused_at,omitempty"`
+	SessionId    string     `json:"session_id"`
+	SessionName  *string    `json:"session_name,omitempty"`
+	Since        time.Time  `json:"since"`
+	Template     *string    `json:"template,omitempty"`
+	Transition   string     `json:"transition"`
 }
 
 // WorkReadyBody defines model for WorkReadyBody.
@@ -11939,6 +12953,12 @@ type GetV0CityByCityNameReadinessParams struct {
 	Fresh *bool `form:"fresh,omitempty" json:"fresh,omitempty"`
 }
 
+// GetRequestOutcomeParams defines parameters for GetRequestOutcome.
+type GetRequestOutcomeParams struct {
+	// AfterSeq The event_cursor from the same 202 response. The request's request.accepted marker and terminal event both follow it, so the lookup reads only the events after it.
+	AfterSeq string `form:"after_seq" json:"after_seq"`
+}
+
 // DeleteV0CityByCityNameRigByNameParams defines parameters for DeleteV0CityByCityNameRigByName.
 type DeleteV0CityByCityNameRigByNameParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
@@ -12037,6 +13057,9 @@ type PostV0CityByCityNameSessionByIdCloseParams struct {
 
 // PostV0CityByCityNameSessionByIdKillParams defines parameters for PostV0CityByCityNameSessionByIdKill.
 type PostV0CityByCityNameSessionByIdKillParams struct {
+	// Force Kill even when the session has live background subagents, or past a hung holder of its runtime lease whose record expired, as gc session kill --force does.
+	Force *bool `form:"force,omitempty" json:"force,omitempty"`
+
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
 
@@ -12207,6 +13230,9 @@ type GetV0CityByCityNameSessionsParams struct {
 type CreateSessionParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // PostV0CityByCityNameSlingParams defines parameters for PostV0CityByCityNameSling.
@@ -13527,6 +14553,32 @@ func (t *EventPayload) MergeRecord(v Record) error {
 	return err
 }
 
+// AsRequestAcceptedPayload returns the union data inside the EventPayload as a RequestAcceptedPayload
+func (t EventPayload) AsRequestAcceptedPayload() (RequestAcceptedPayload, error) {
+	var body RequestAcceptedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromRequestAcceptedPayload overwrites any union data inside the EventPayload as the provided RequestAcceptedPayload
+func (t *EventPayload) FromRequestAcceptedPayload(v RequestAcceptedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeRequestAcceptedPayload performs a merge with any union data inside the EventPayload, using the provided RequestAcceptedPayload
+func (t *EventPayload) MergeRequestAcceptedPayload(v RequestAcceptedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsRequestFailedPayload returns the union data inside the EventPayload as a RequestFailedPayload
 func (t EventPayload) AsRequestFailedPayload() (RequestFailedPayload, error) {
 	var body RequestFailedPayload
@@ -13839,6 +14891,32 @@ func (t *EventPayload) MergeSessionPoolSlotRetiredAtDrainDeadlinePayload(v Sessi
 	return err
 }
 
+// AsSessionProgramStatusShadowPayload returns the union data inside the EventPayload as a SessionProgramStatusShadowPayload
+func (t EventPayload) AsSessionProgramStatusShadowPayload() (SessionProgramStatusShadowPayload, error) {
+	var body SessionProgramStatusShadowPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionProgramStatusShadowPayload overwrites any union data inside the EventPayload as the provided SessionProgramStatusShadowPayload
+func (t *EventPayload) FromSessionProgramStatusShadowPayload(v SessionProgramStatusShadowPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionProgramStatusShadowPayload performs a merge with any union data inside the EventPayload, using the provided SessionProgramStatusShadowPayload
+func (t *EventPayload) MergeSessionProgramStatusShadowPayload(v SessionProgramStatusShadowPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsSessionResetStalledPayload returns the union data inside the EventPayload as a SessionResetStalledPayload
 func (t EventPayload) AsSessionResetStalledPayload() (SessionResetStalledPayload, error) {
 	var body SessionResetStalledPayload
@@ -14011,6 +15089,32 @@ func (t *EventPayload) FromStorageBindingOutcomePayload(v StorageBindingOutcomeP
 
 // MergeStorageBindingOutcomePayload performs a merge with any union data inside the EventPayload, using the provided StorageBindingOutcomePayload
 func (t *EventPayload) MergeStorageBindingOutcomePayload(v StorageBindingOutcomePayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsStorageRigPayload returns the union data inside the EventPayload as a StorageRigPayload
+func (t EventPayload) AsStorageRigPayload() (StorageRigPayload, error) {
+	var body StorageRigPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromStorageRigPayload overwrites any union data inside the EventPayload as the provided StorageRigPayload
+func (t *EventPayload) FromStorageRigPayload(v StorageRigPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeStorageRigPayload performs a merge with any union data inside the EventPayload, using the provided StorageRigPayload
+func (t *EventPayload) MergeStorageRigPayload(v StorageRigPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -14333,6 +15437,32 @@ func (t *EventPayload) MergeWorkLadderPayload(v WorkLadderPayload) error {
 	return err
 }
 
+// AsWorkRateLimitedPayload returns the union data inside the EventPayload as a WorkRateLimitedPayload
+func (t EventPayload) AsWorkRateLimitedPayload() (WorkRateLimitedPayload, error) {
+	var body WorkRateLimitedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromWorkRateLimitedPayload overwrites any union data inside the EventPayload as the provided WorkRateLimitedPayload
+func (t *EventPayload) FromWorkRateLimitedPayload(v WorkRateLimitedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeWorkRateLimitedPayload performs a merge with any union data inside the EventPayload, using the provided WorkRateLimitedPayload
+func (t *EventPayload) MergeWorkRateLimitedPayload(v WorkRateLimitedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsWorkerOperationEventPayload returns the union data inside the EventPayload as a WorkerOperationEventPayload
 func (t EventPayload) AsWorkerOperationEventPayload() (WorkerOperationEventPayload, error) {
 	var body WorkerOperationEventPayload
@@ -14437,6 +15567,32 @@ func (t *SessionStreamCommonEvent) FromSessionPendingClearedEvent(v SessionPendi
 
 // MergeSessionPendingClearedEvent performs a merge with any union data inside the SessionStreamCommonEvent, using the provided SessionPendingClearedEvent
 func (t *SessionStreamCommonEvent) MergeSessionPendingClearedEvent(v SessionPendingClearedEvent) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionProgramStatusEvent returns the union data inside the SessionStreamCommonEvent as a SessionProgramStatusEvent
+func (t SessionStreamCommonEvent) AsSessionProgramStatusEvent() (SessionProgramStatusEvent, error) {
+	var body SessionProgramStatusEvent
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionProgramStatusEvent overwrites any union data inside the SessionStreamCommonEvent as the provided SessionProgramStatusEvent
+func (t *SessionStreamCommonEvent) FromSessionProgramStatusEvent(v SessionProgramStatusEvent) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionProgramStatusEvent performs a merge with any union data inside the SessionStreamCommonEvent, using the provided SessionProgramStatusEvent
+func (t *SessionStreamCommonEvent) MergeSessionProgramStatusEvent(v SessionProgramStatusEvent) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -17910,6 +19066,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeProviderSwapped(
 	return err
 }
 
+// AsTypedEventStreamEnvelopeRequestAccepted returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeRequestAccepted
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeRequestAccepted() (TypedEventStreamEnvelopeRequestAccepted, error) {
+	var body TypedEventStreamEnvelopeRequestAccepted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeRequestAccepted overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeRequestAccepted
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeRequestAccepted(v TypedEventStreamEnvelopeRequestAccepted) error {
+	v.Type = "request.accepted"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeRequestAccepted performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeRequestAccepted
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRequestAccepted(v TypedEventStreamEnvelopeRequestAccepted) error {
+	v.Type = "request.accepted"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeRequestFailed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeRequestFailed
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeRequestFailed() (TypedEventStreamEnvelopeRequestFailed, error) {
 	var body TypedEventStreamEnvelopeRequestFailed
@@ -18498,6 +19682,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionPoolSlotR
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionProgramStatusShadow returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionProgramStatusShadow
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionProgramStatusShadow() (TypedEventStreamEnvelopeSessionProgramStatusShadow, error) {
+	var body TypedEventStreamEnvelopeSessionProgramStatusShadow
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionProgramStatusShadow overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionProgramStatusShadow
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionProgramStatusShadow(v TypedEventStreamEnvelopeSessionProgramStatusShadow) error {
+	v.Type = "session.program_status_shadow"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionProgramStatusShadow performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionProgramStatusShadow
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionProgramStatusShadow(v TypedEventStreamEnvelopeSessionProgramStatusShadow) error {
+	v.Type = "session.program_status_shadow"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionQuarantined returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionQuarantined
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionQuarantined() (TypedEventStreamEnvelopeSessionQuarantined, error) {
 	var body TypedEventStreamEnvelopeSessionQuarantined
@@ -18974,6 +20186,62 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeStorageBindingUn
 	return err
 }
 
+// AsTypedEventStreamEnvelopeStorageRigImport returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeStorageRigImport
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeStorageRigImport() (TypedEventStreamEnvelopeStorageRigImport, error) {
+	var body TypedEventStreamEnvelopeStorageRigImport
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeStorageRigImport overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeStorageRigImport
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeStorageRigImport(v TypedEventStreamEnvelopeStorageRigImport) error {
+	v.Type = "storage.rig_import"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeStorageRigImport performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeStorageRigImport
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeStorageRigImport(v TypedEventStreamEnvelopeStorageRigImport) error {
+	v.Type = "storage.rig_import"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeStorageRigResidue returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeStorageRigResidue
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeStorageRigResidue() (TypedEventStreamEnvelopeStorageRigResidue, error) {
+	var body TypedEventStreamEnvelopeStorageRigResidue
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeStorageRigResidue overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeStorageRigResidue
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeStorageRigResidue(v TypedEventStreamEnvelopeStorageRigResidue) error {
+	v.Type = "storage.rig_residue"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeStorageRigResidue performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeStorageRigResidue
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeStorageRigResidue(v TypedEventStreamEnvelopeStorageRigResidue) error {
+	v.Type = "storage.rig_residue"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick() (TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick, error) {
 	var body TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick
@@ -19216,6 +20484,34 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeWorkNudged(v Type
 // MergeTypedEventStreamEnvelopeWorkNudged performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeWorkNudged
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeWorkNudged(v TypedEventStreamEnvelopeWorkNudged) error {
 	v.Type = "work.nudged"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeWorkRateLimited returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeWorkRateLimited
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeWorkRateLimited() (TypedEventStreamEnvelopeWorkRateLimited, error) {
+	var body TypedEventStreamEnvelopeWorkRateLimited
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeWorkRateLimited overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeWorkRateLimited
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeWorkRateLimited(v TypedEventStreamEnvelopeWorkRateLimited) error {
+	v.Type = "work.rate_limited"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeWorkRateLimited performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeWorkRateLimited
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeWorkRateLimited(v TypedEventStreamEnvelopeWorkRateLimited) error {
+	v.Type = "work.rate_limited"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -19544,6 +20840,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeProjectIdentityStamped()
 	case "provider.swapped":
 		return t.AsTypedEventStreamEnvelopeProviderSwapped()
+	case "request.accepted":
+		return t.AsTypedEventStreamEnvelopeRequestAccepted()
 	case "request.failed":
 		return t.AsTypedEventStreamEnvelopeRequestFailed()
 	case "request.result.city.create":
@@ -19586,6 +20884,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionPendingCleared()
 	case "session.pool_slot_retired_at_drain_deadline":
 		return t.AsTypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline()
+	case "session.program_status_shadow":
+		return t.AsTypedEventStreamEnvelopeSessionProgramStatusShadow()
 	case "session.quarantined":
 		return t.AsTypedEventStreamEnvelopeSessionQuarantined()
 	case "session.reset_stalled":
@@ -19620,6 +20920,10 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeStorageBindingUncheckable()
 	case "storage.binding.unconverged":
 		return t.AsTypedEventStreamEnvelopeStorageBindingUnconverged()
+	case "storage.rig_import":
+		return t.AsTypedEventStreamEnvelopeStorageRigImport()
+	case "storage.rig_residue":
+		return t.AsTypedEventStreamEnvelopeStorageRigResidue()
 	case "supervisor.fs_pressure.skipped_tick":
 		return t.AsTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick()
 	case "supervisor.request":
@@ -19638,6 +20942,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeWorkNudgeFailed()
 	case "work.nudged":
 		return t.AsTypedEventStreamEnvelopeWorkNudged()
+	case "work.rate_limited":
+		return t.AsTypedEventStreamEnvelopeWorkRateLimited()
 	case "work.recycle_requested":
 		return t.AsTypedEventStreamEnvelopeWorkRecycleRequested()
 	case "work.release_unfinished":
@@ -21539,6 +22845,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeProv
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeRequestAccepted returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeRequestAccepted
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeRequestAccepted() (TypedTaggedEventStreamEnvelopeRequestAccepted, error) {
+	var body TypedTaggedEventStreamEnvelopeRequestAccepted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeRequestAccepted overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeRequestAccepted
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeRequestAccepted(v TypedTaggedEventStreamEnvelopeRequestAccepted) error {
+	v.Type = "request.accepted"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeRequestAccepted performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeRequestAccepted
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRequestAccepted(v TypedTaggedEventStreamEnvelopeRequestAccepted) error {
+	v.Type = "request.accepted"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeRequestFailed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeRequestFailed
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeRequestFailed() (TypedTaggedEventStreamEnvelopeRequestFailed, error) {
 	var body TypedTaggedEventStreamEnvelopeRequestFailed
@@ -22127,6 +23461,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionProgramStatusShadow returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionProgramStatusShadow() (TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionProgramStatusShadow overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionProgramStatusShadow(v TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow) error {
+	v.Type = "session.program_status_shadow"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionProgramStatusShadow performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionProgramStatusShadow(v TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow) error {
+	v.Type = "session.program_status_shadow"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionQuarantined returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionQuarantined
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionQuarantined() (TypedTaggedEventStreamEnvelopeSessionQuarantined, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionQuarantined
@@ -22603,6 +23965,62 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeStor
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeStorageRigImport returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeStorageRigImport
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeStorageRigImport() (TypedTaggedEventStreamEnvelopeStorageRigImport, error) {
+	var body TypedTaggedEventStreamEnvelopeStorageRigImport
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeStorageRigImport overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeStorageRigImport
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeStorageRigImport(v TypedTaggedEventStreamEnvelopeStorageRigImport) error {
+	v.Type = "storage.rig_import"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeStorageRigImport performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeStorageRigImport
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeStorageRigImport(v TypedTaggedEventStreamEnvelopeStorageRigImport) error {
+	v.Type = "storage.rig_import"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeStorageRigResidue returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeStorageRigResidue
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeStorageRigResidue() (TypedTaggedEventStreamEnvelopeStorageRigResidue, error) {
+	var body TypedTaggedEventStreamEnvelopeStorageRigResidue
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeStorageRigResidue overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeStorageRigResidue
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeStorageRigResidue(v TypedTaggedEventStreamEnvelopeStorageRigResidue) error {
+	v.Type = "storage.rig_residue"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeStorageRigResidue performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeStorageRigResidue
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeStorageRigResidue(v TypedTaggedEventStreamEnvelopeStorageRigResidue) error {
+	v.Type = "storage.rig_residue"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick() (TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick, error) {
 	var body TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick
@@ -22845,6 +24263,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeWorkN
 // MergeTypedTaggedEventStreamEnvelopeWorkNudged performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeWorkNudged
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeWorkNudged(v TypedTaggedEventStreamEnvelopeWorkNudged) error {
 	v.Type = "work.nudged"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeWorkRateLimited returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeWorkRateLimited
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeWorkRateLimited() (TypedTaggedEventStreamEnvelopeWorkRateLimited, error) {
+	var body TypedTaggedEventStreamEnvelopeWorkRateLimited
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeWorkRateLimited overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeWorkRateLimited
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeWorkRateLimited(v TypedTaggedEventStreamEnvelopeWorkRateLimited) error {
+	v.Type = "work.rate_limited"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeWorkRateLimited performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeWorkRateLimited
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeWorkRateLimited(v TypedTaggedEventStreamEnvelopeWorkRateLimited) error {
+	v.Type = "work.rate_limited"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -23173,6 +24619,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeProjectIdentityStamped()
 	case "provider.swapped":
 		return t.AsTypedTaggedEventStreamEnvelopeProviderSwapped()
+	case "request.accepted":
+		return t.AsTypedTaggedEventStreamEnvelopeRequestAccepted()
 	case "request.failed":
 		return t.AsTypedTaggedEventStreamEnvelopeRequestFailed()
 	case "request.result.city.create":
@@ -23215,6 +24663,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionPendingCleared()
 	case "session.pool_slot_retired_at_drain_deadline":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline()
+	case "session.program_status_shadow":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionProgramStatusShadow()
 	case "session.quarantined":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionQuarantined()
 	case "session.reset_stalled":
@@ -23249,6 +24699,10 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeStorageBindingUncheckable()
 	case "storage.binding.unconverged":
 		return t.AsTypedTaggedEventStreamEnvelopeStorageBindingUnconverged()
+	case "storage.rig_import":
+		return t.AsTypedTaggedEventStreamEnvelopeStorageRigImport()
+	case "storage.rig_residue":
+		return t.AsTypedTaggedEventStreamEnvelopeStorageRigResidue()
 	case "supervisor.fs_pressure.skipped_tick":
 		return t.AsTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick()
 	case "supervisor.request":
@@ -23267,6 +24721,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeWorkNudgeFailed()
 	case "work.nudged":
 		return t.AsTypedTaggedEventStreamEnvelopeWorkNudged()
+	case "work.rate_limited":
+		return t.AsTypedTaggedEventStreamEnvelopeWorkRateLimited()
 	case "work.recycle_requested":
 		return t.AsTypedTaggedEventStreamEnvelopeWorkRecycleRequested()
 	case "work.release_unfinished":
@@ -23790,6 +25246,9 @@ type ClientInterface interface {
 	// GetV0CityByCityNameReadiness request
 	GetV0CityByCityNameReadiness(ctx context.Context, cityName string, params *GetV0CityByCityNameReadinessParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetRequestOutcome request
+	GetRequestOutcome(ctx context.Context, cityName string, requestId string, params *GetRequestOutcomeParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// DeleteV0CityByCityNameRigByName request
 	DeleteV0CityByCityNameRigByName(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameRigByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -23919,6 +25378,9 @@ type ClientInterface interface {
 
 	// GetV0CityByCityNameSessionByIdTranscript request
 	GetV0CityByCityNameSessionByIdTranscript(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameSessionByIdTranscriptParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetV0CityByCityNameSessionByIdTurn request
+	GetV0CityByCityNameSessionByIdTurn(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameSessionByIdUnpin request
 	PostV0CityByCityNameSessionByIdUnpin(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdUnpinParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -25815,6 +27277,18 @@ func (c *Client) GetV0CityByCityNameReadiness(ctx context.Context, cityName stri
 	return c.Client.Do(req)
 }
 
+func (c *Client) GetRequestOutcome(ctx context.Context, cityName string, requestId string, params *GetRequestOutcomeParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetRequestOutcomeRequest(c.Server, cityName, requestId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) DeleteV0CityByCityNameRigByName(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameRigByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewDeleteV0CityByCityNameRigByNameRequest(c.Server, cityName, name, params)
 	if err != nil {
@@ -26369,6 +27843,18 @@ func (c *Client) PostV0CityByCityNameSessionByIdSuspend(ctx context.Context, cit
 
 func (c *Client) GetV0CityByCityNameSessionByIdTranscript(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameSessionByIdTranscriptParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameSessionByIdTranscriptRequest(c.Server, cityName, id, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameSessionByIdTurn(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameSessionByIdTurnRequest(c.Server, cityName, id)
 	if err != nil {
 		return nil, err
 	}
@@ -34139,6 +35625,65 @@ func NewGetV0CityByCityNameReadinessRequest(server string, cityName string, para
 	return req, nil
 }
 
+// NewGetRequestOutcomeRequest generates requests for GetRequestOutcome
+func NewGetRequestOutcomeRequest(server string, cityName string, requestId string, params *GetRequestOutcomeParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "requestId", requestId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/request/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithOptions("form", false, "after_seq", params.AfterSeq, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewDeleteV0CityByCityNameRigByNameRequest generates requests for DeleteV0CityByCityNameRigByName
 func NewDeleteV0CityByCityNameRigByNameRequest(server string, cityName string, name string, params *DeleteV0CityByCityNameRigByNameParams) (*http.Request, error) {
 	var err error
@@ -35267,6 +36812,28 @@ func NewPostV0CityByCityNameSessionByIdKillRequest(server string, cityName strin
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Force != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "force", *params.Force, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("POST", queryURL.String(), nil)
@@ -36450,6 +38017,47 @@ func NewGetV0CityByCityNameSessionByIdTranscriptRequest(server string, cityName 
 	return req, nil
 }
 
+// NewGetV0CityByCityNameSessionByIdTurnRequest generates requests for GetV0CityByCityNameSessionByIdTurn
+func NewGetV0CityByCityNameSessionByIdTurnRequest(server string, cityName string, id string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/session/%s/turn", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewPostV0CityByCityNameSessionByIdUnpinRequest generates requests for PostV0CityByCityNameSessionByIdUnpin
 func NewPostV0CityByCityNameSessionByIdUnpinRequest(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdUnpinParams) (*http.Request, error) {
 	var err error
@@ -36743,6 +38351,17 @@ func NewCreateSessionRequestWithBody(server string, cityName string, params *Cre
 		}
 
 		req.Header.Set("X-GC-Request", headerParam0)
+
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
 
 	}
 
@@ -38299,6 +39918,9 @@ type ClientWithResponsesInterface interface {
 	// GetV0CityByCityNameReadinessWithResponse request
 	GetV0CityByCityNameReadinessWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameReadinessParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameReadinessResponse, error)
 
+	// GetRequestOutcomeWithResponse request
+	GetRequestOutcomeWithResponse(ctx context.Context, cityName string, requestId string, params *GetRequestOutcomeParams, reqEditors ...RequestEditorFn) (*GetRequestOutcomeResponse, error)
+
 	// DeleteV0CityByCityNameRigByNameWithResponse request
 	DeleteV0CityByCityNameRigByNameWithResponse(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameRigByNameParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameRigByNameResponse, error)
 
@@ -38428,6 +40050,9 @@ type ClientWithResponsesInterface interface {
 
 	// GetV0CityByCityNameSessionByIdTranscriptWithResponse request
 	GetV0CityByCityNameSessionByIdTranscriptWithResponse(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameSessionByIdTranscriptParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameSessionByIdTranscriptResponse, error)
+
+	// GetV0CityByCityNameSessionByIdTurnWithResponse request
+	GetV0CityByCityNameSessionByIdTurnWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameSessionByIdTurnResponse, error)
 
 	// PostV0CityByCityNameSessionByIdUnpinWithResponse request
 	PostV0CityByCityNameSessionByIdUnpinWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdUnpinParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdUnpinResponse, error)
@@ -41722,6 +43347,32 @@ func (r GetV0CityByCityNameReadinessResponse) StatusCode() int {
 	return 0
 }
 
+type GetRequestOutcomeResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *RequestOutcome
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetRequestOutcomeResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetRequestOutcomeResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type DeleteV0CityByCityNameRigByNameResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -42716,6 +44367,33 @@ func (r GetV0CityByCityNameSessionByIdTranscriptResponse) StatusCode() int {
 	return 0
 }
 
+type GetV0CityByCityNameSessionByIdTurnResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *SessionTurnResponse
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameSessionByIdTurnResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameSessionByIdTurnResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type PostV0CityByCityNameSessionByIdUnpinResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -42811,6 +44489,7 @@ type CreateSessionResponse struct {
 	ApplicationproblemJSON401 *ErrorModel
 	ApplicationproblemJSON403 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
 	ApplicationproblemJSON503 *ErrorModel
@@ -44530,6 +46209,15 @@ func (c *ClientWithResponses) GetV0CityByCityNameReadinessWithResponse(ctx conte
 	return ParseGetV0CityByCityNameReadinessResponse(rsp)
 }
 
+// GetRequestOutcomeWithResponse request returning *GetRequestOutcomeResponse
+func (c *ClientWithResponses) GetRequestOutcomeWithResponse(ctx context.Context, cityName string, requestId string, params *GetRequestOutcomeParams, reqEditors ...RequestEditorFn) (*GetRequestOutcomeResponse, error) {
+	rsp, err := c.GetRequestOutcome(ctx, cityName, requestId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetRequestOutcomeResponse(rsp)
+}
+
 // DeleteV0CityByCityNameRigByNameWithResponse request returning *DeleteV0CityByCityNameRigByNameResponse
 func (c *ClientWithResponses) DeleteV0CityByCityNameRigByNameWithResponse(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameRigByNameParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameRigByNameResponse, error) {
 	rsp, err := c.DeleteV0CityByCityNameRigByName(ctx, cityName, name, params, reqEditors...)
@@ -44940,6 +46628,15 @@ func (c *ClientWithResponses) GetV0CityByCityNameSessionByIdTranscriptWithRespon
 		return nil, err
 	}
 	return ParseGetV0CityByCityNameSessionByIdTranscriptResponse(rsp)
+}
+
+// GetV0CityByCityNameSessionByIdTurnWithResponse request returning *GetV0CityByCityNameSessionByIdTurnResponse
+func (c *ClientWithResponses) GetV0CityByCityNameSessionByIdTurnWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameSessionByIdTurnResponse, error) {
+	rsp, err := c.GetV0CityByCityNameSessionByIdTurn(ctx, cityName, id, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameSessionByIdTurnResponse(rsp)
 }
 
 // PostV0CityByCityNameSessionByIdUnpinWithResponse request returning *PostV0CityByCityNameSessionByIdUnpinResponse
@@ -52526,6 +54223,60 @@ func ParseGetV0CityByCityNameReadinessResponse(rsp *http.Response) (*GetV0CityBy
 	return response, nil
 }
 
+// ParseGetRequestOutcomeResponse parses an HTTP response from a GetRequestOutcomeWithResponse call
+func ParseGetRequestOutcomeResponse(rsp *http.Response) (*GetRequestOutcomeResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetRequestOutcomeResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RequestOutcome
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseDeleteV0CityByCityNameRigByNameResponse parses an HTTP response from a DeleteV0CityByCityNameRigByNameWithResponse call
 func ParseDeleteV0CityByCityNameRigByNameResponse(rsp *http.Response) (*DeleteV0CityByCityNameRigByNameResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -54876,6 +56627,67 @@ func ParseGetV0CityByCityNameSessionByIdTranscriptResponse(rsp *http.Response) (
 	return response, nil
 }
 
+// ParseGetV0CityByCityNameSessionByIdTurnResponse parses an HTTP response from a GetV0CityByCityNameSessionByIdTurnWithResponse call
+func ParseGetV0CityByCityNameSessionByIdTurnResponse(rsp *http.Response) (*GetV0CityByCityNameSessionByIdTurnResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameSessionByIdTurnResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SessionTurnResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParsePostV0CityByCityNameSessionByIdUnpinResponse parses an HTTP response from a PostV0CityByCityNameSessionByIdUnpinWithResponse call
 func ParsePostV0CityByCityNameSessionByIdUnpinResponse(rsp *http.Response) (*PostV0CityByCityNameSessionByIdUnpinResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -55149,6 +56961,13 @@ func ParseCreateSessionResponse(rsp *http.Response) (*CreateSessionResponse, err
 			return nil, err
 		}
 		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest ErrorModel

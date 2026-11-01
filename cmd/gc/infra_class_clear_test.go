@@ -16,7 +16,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
@@ -61,7 +60,7 @@ func TestMigratedCityStopsServingAClosedStepFromTheWorkCopy(t *testing.T) {
 	}
 
 	var out, errb bytes.Buffer
-	if rc := cmdReady(readywork.Query{}, &out, &errb); rc != 0 {
+	if rc := cmdReady(readyFlags{}, &out, &errb); rc != 0 {
 		t.Fatalf("gc ready exited %d: %s", rc, errb.String())
 	}
 	var rows []map[string]any
@@ -570,6 +569,13 @@ func TestCrossStoreEdgesADoltStoreCannotKeepAreAnnouncedAndRecorded(t *testing.T
 // store's copies are cleared, pointing every class back at work (or deleting
 // [storage]) would start the city with no infrastructure state. Boot refuses
 // and names the restore.
+//
+// The fixture is a city migrated by an EARLIER build (v1.5.0/v1.5.1): the test
+// helper migrates the way those builds' `gc storage migrate` did, writing no
+// served-binding note. The last assertion — the revert proceeds once the
+// operator removes the cleared note — holds only for such a city. A city this
+// build migrated carries the served-binding note as well, and its revert is
+// also held until that note is removed (TestRevertOfACityThisBuildMigrated).
 func TestRevertingToTheWorkBindingAfterAClearRefusesBoot(t *testing.T) {
 	cityPath := t.TempDir()
 	source := stubInfraMigrationSource(t)
@@ -596,10 +602,11 @@ func TestRevertingToTheWorkBindingAfterAClearRefusesBoot(t *testing.T) {
 		}
 	}
 
+	// Earlier-build cities only: no served-binding note to hold the revert.
 	if err := os.Remove(infraClearedNotePath(cityPath)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := storageBootGate(cityPath, allWork, "gc start", nil, &bytes.Buffer{}); err != nil {
-		t.Fatalf("after the operator's attestation the revert still refuses: %v", err)
+		t.Fatalf("after the operator's attestation the revert of an earlier-build city still refuses: %v", err)
 	}
 }

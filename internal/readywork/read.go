@@ -3,6 +3,7 @@ package readywork
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/fanout"
@@ -74,12 +75,91 @@ func ReadContext(ctx context.Context, legs []Leg, q Query) ([]ReadyBead, error) 
 	if err != nil {
 		return nil, err
 	}
-	items, owners, err := readCandidates(ctx, legs, c)
+	return readCompiled(ctx, legs, c, false)
+}
+
+// ReadUntilUnblocked is ReadContext for an in_progress answer ended at its first
+// unblocked row, one with no blocker that is not closed: the gated rows ahead of
+// it, then it. It is `gc ready --until-unblocked`, the crash-recovery tier's
+// read, which resumes the first row of its window it can serve and needs
+// nothing past it.
+//
+// Blockers are resolved in answer order and only as far as the cut, so a row
+// past it whose blockers cannot be resolved does not fail the read. A row at or
+// ahead of the cut still does: the cut cannot be placed past a row whose
+// blockers are unknown, since that row may be the one to resume. A window with
+// no unblocked row is answered whole.
+//
+// The cut is not a parameter of GET /work/ready. The controller answers the
+// whole window with every row resolved, and the CLI ends that answer with
+// CutUntilUnblocked, which is this read's answer whenever every row of the
+// window resolves. When one past the cut does not, the controller's read fails
+// and the CLI reads in-process, through this.
+func ReadUntilUnblocked(ctx context.Context, legs []Leg, q Query) ([]ReadyBead, error) {
+	c, err := compileUntilUnblocked(q)
+	if err != nil {
+		return nil, err
+	}
+	return readCompiled(ctx, legs, c, true)
+}
+
+// ValidateUntilUnblocked reports whether q is a query ReadUntilUnblocked can
+// cut, without reading anything.
+func ValidateUntilUnblocked(q Query) error {
+	_, err := compileUntilUnblocked(q)
+	return err
+}
+
+// compileUntilUnblocked compiles q and refuses every arm but in_progress, whose
+// rows alone carry their blockers: anywhere else the cut would be a flag that
+// looks honored and selects nothing.
+func compileUntilUnblocked(q Query) (compiled, error) {
+	c, err := compile(q)
+	if err != nil {
+		return compiled{}, err
+	}
+	if c.status != StatusInProgress {
+		return compiled{}, fmt.Errorf("--until-unblocked needs --status %s, the one status whose rows carry their blockers", StatusInProgress)
+	}
+	return c, nil
+}
+
+// CutUntilUnblocked ends rows, an in_progress answer whose every row carries its
+// blockers, at its first unblocked row: the cut ReadUntilUnblocked makes,
+// applied to an answer that resolved every row.
+func CutUntilUnblocked(rows []ReadyBead) []ReadyBead {
+	for i, row := range rows {
+		if !hasOpenBlocker(row.BlockedBy) {
+			return rows[:i+1]
+		}
+	}
+	return rows
+}
+
+// readCompiled answers the compiled query c over legs, ending an in_progress
+// answer at its first unblocked row when untilUnblocked is set.
+func readCompiled(ctx context.Context, legs []Leg, c compiled, untilUnblocked bool) ([]ReadyBead, error) {
+	cs := newCrossStore(legs)
+	items, owners, err := readCandidates(ctx, legs, c, cs)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, ctxErr
 	}
 	if err != nil {
 		return nil, err
+	}
+	if c.status == "" {
+		// On a split city the ready arm re-judges cross-store blockers
+		// (crossstore.go): it adds the rows a store strands behind an absent
+		// blocker, then withholds every row a blocker still holds. Elsewhere
+		// cs is nil and this is the stores' own answer.
+		items, err = readyAnswer(ctx, cs, c, items, owners)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		if err != nil {
+			return nil, err
+		}
+		return toReadyBeads(items, nil), nil
 	}
 	items = c.filter(items)
 	c.order(items)
@@ -87,11 +167,16 @@ func ReadContext(ctx context.Context, legs []Leg, q Query) ([]ReadyBead, error) 
 		items = items[:c.query.Limit]
 	}
 	// Enrich AFTER the bound, so the dependency reads are paid only for the rows
-	// actually emitted. The crash-recovery tier asks for --limit=1, which makes
-	// this one dependency read on the one row that matters.
+	// actually emitted. The crash-recovery tier asks for --limit=20
+	// --until-unblocked and serves the first of those rows its gate passes, so
+	// its rows are resolved only as far as that one (blockedByUntilUnblocked).
 	var blockers map[string][]ReadyBeadBlocker
 	if c.status == StatusInProgress {
-		blockers, err = blockedByForRows(ctx, items, legs, owners)
+		if untilUnblocked {
+			items, blockers, err = blockedByUntilUnblocked(ctx, cs, items, legs, owners)
+		} else {
+			blockers, err = blockedByForRows(ctx, cs, items, legs, owners)
+		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
 		}
@@ -100,6 +185,21 @@ func ReadContext(ctx context.Context, legs []Leg, q Query) ([]ReadyBead, error) 
 		}
 	}
 	return toReadyBeads(items, blockers), nil
+}
+
+// readyAnswer turns the ready arm's merged candidates into its answer: the
+// stranded rows added, the predicates applied, the order imposed, the bound
+// applied after the cross-store gate. A bounded read already sized each leg's
+// cut past the rows the gate holds (boundedRead), and every verdict is
+// memoized, so the gate here re-reads nothing it has judged.
+func readyAnswer(ctx context.Context, cs *crossStore, c compiled, items []beads.Bead, owners map[string]int) ([]beads.Bead, error) {
+	items, err := cs.addStranded(ctx, readyReadQuery(c), items, owners)
+	if err != nil {
+		return nil, err
+	}
+	items = c.filter(items)
+	c.order(items)
+	return cs.gate(ctx, owners, items, c.query.Limit)
 }
 
 // readCandidates reads the merged candidate set from the legs, and which leg
@@ -121,10 +221,10 @@ func ReadContext(ctx context.Context, legs []Leg, q Query) ([]ReadyBead, error) 
 // recorded at MERGE time rather than re-probed afterwards: the merge is
 // first-leg-wins, and a co-resident bead that is open in one leg and in_progress
 // in another would resolve to the wrong store under a fresh probe.
-func readCandidates(ctx context.Context, legs []Leg, c compiled) ([]beads.Bead, map[string]int, error) {
+func readCandidates(ctx context.Context, legs []Leg, c compiled, cs *crossStore) ([]beads.Bead, map[string]int, error) {
 	switch c.status {
 	case "":
-		return readReadyCandidates(ctx, legs, c)
+		return readReadyCandidates(ctx, legs, c, cs)
 	case StatusOpen:
 		return readOpenStatusCandidates(ctx, legs)
 	case StatusInProgress:
@@ -158,7 +258,8 @@ func readCandidates(ctx context.Context, legs []Leg, c compiled) ([]beads.Bead, 
 // "open" and filtered out there too. They were invisible to all four --status
 // legs, which the workflows pack uses as its exhaustive root inventory, so an
 // invisible root could be slung a duplicate child workflow. The native store
-// already answers open as "exclude closed and in_progress"; reading every
+// already answers a non-Live open as "exclude closed and in_progress" (a Live
+// open there is bd's raw one, nativeListPushesRawOpen); reading every
 // non-closed row and keeping the mapped "open" ones gives the bd-backed store the
 // same answer without widening ListQuery{Status: "open"} for the controller
 // callers whose readiness gates rely on bd's narrower status (ga-3mv5d3).
@@ -288,7 +389,64 @@ func merge(results []legResult) ([]beads.Bead, map[string]int) {
 // bead as unblocked is what re-serves work no worker can advance; the federation
 // is fail-loud for the same reason. A read whose turn comes after ctx has ended
 // is not made, and fails its row with ctx's error.
-func blockedByForRows(ctx context.Context, items []beads.Bead, legs []Leg, owners map[string]int) (map[string][]ReadyBeadBlocker, error) {
+func blockedByForRows(ctx context.Context, cs *crossStore, items []beads.Bead, legs []Leg, owners map[string]int) (map[string][]ReadyBeadBlocker, error) {
+	blockers, failed := resolveBlockers(ctx, cs, items, legs, owners)
+	// Report the failure of the first row, in answer order, whose enrichment
+	// failed: the row the sequential walk would have stopped at.
+	for _, item := range items {
+		if err, bad := failed[item.ID]; bad {
+			return nil, err
+		}
+	}
+	return blockers, nil
+}
+
+// blockedByUntilUnblocked is blockedByForRows for an answer cut at its first
+// unblocked row (ReadUntilUnblocked): it returns the rows through that one, and
+// their blockers.
+//
+// The rows are resolved in answer order, a batch of LegFanOut at a time, which
+// keeps the concurrency of the full walk while a window whose first row is
+// unblocked costs one batch. A row whose enrichment failed fails the read when
+// the walk reaches it, because the cut cannot be placed past a row whose
+// blockers are unknown. A failure past the cut, in the cut's own batch, is
+// never consulted, and no later batch is read.
+func blockedByUntilUnblocked(ctx context.Context, cs *crossStore, items []beads.Bead, legs []Leg, owners map[string]int) ([]beads.Bead, map[string][]ReadyBeadBlocker, error) {
+	out := make(map[string][]ReadyBeadBlocker)
+	for start := 0; start < len(items); start += LegFanOut {
+		batch := items[start:min(start+LegFanOut, len(items))]
+		blockers, failed := resolveBlockers(ctx, cs, batch, legs, owners)
+		for i, item := range batch {
+			if err, bad := failed[item.ID]; bad {
+				return nil, nil, err
+			}
+			if rowBlockers := blockers[item.ID]; len(rowBlockers) > 0 {
+				out[item.ID] = rowBlockers
+			}
+			if !hasOpenBlocker(blockers[item.ID]) {
+				return items[:start+i+1], out, nil
+			}
+		}
+	}
+	return items, out, nil
+}
+
+// hasOpenBlocker reports whether any of blockers is not closed: the serve
+// gate's reading of blocked_by, where every status but closed blocks
+// (internal/config openBlockerCountJQ).
+func hasOpenBlocker(blockers []ReadyBeadBlocker) bool {
+	for _, blocker := range blockers {
+		if !strings.EqualFold(blocker.Status, StatusClosed) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveBlockers reads the blockers of every row of items through the leg that
+// served it, as blockedByForRows describes, and returns each row's blockers
+// (only rows that have any) and each failed row's error.
+func resolveBlockers(ctx context.Context, cs *crossStore, items []beads.Bead, legs []Leg, owners map[string]int) (map[string][]ReadyBeadBlocker, map[string]error) {
 	if len(owners) == 0 || len(items) == 0 {
 		return nil, nil
 	}
@@ -307,30 +465,21 @@ func blockedByForRows(ctx context.Context, items []beads.Bead, legs []Leg, owner
 	perLeg := make([]legBlockers, len(legOrder))
 	fanout.Bounded(len(legOrder), LegFanOut, func(i int) {
 		idx := legOrder[i]
-		perLeg[i] = readLegBlockers(ctx, legs[idx], byLeg[idx])
+		perLeg[i] = readLegBlockers(ctx, cs, legs, idx, byLeg[idx])
 	})
-	// Report the failure of the first row, in answer order, whose enrichment
-	// failed: the row the sequential walk would have stopped at.
 	failed := make(map[string]error)
+	out := make(map[string][]ReadyBeadBlocker, len(items))
 	for _, lb := range perLeg {
 		for id, err := range lb.errs {
 			failed[id] = err
 		}
-	}
-	out := make(map[string][]ReadyBeadBlocker, len(items))
-	for _, item := range items {
-		if err, bad := failed[item.ID]; bad {
-			return nil, err
-		}
-	}
-	for _, lb := range perLeg {
 		for id, blockers := range lb.blockers {
 			if len(blockers) > 0 {
 				out[id] = blockers
 			}
 		}
 	}
-	return out, nil
+	return out, failed
 }
 
 // legBlockers is one leg's enrichment: each row's blockers, or the error that
@@ -340,13 +489,23 @@ type legBlockers struct {
 	errs     map[string]error
 }
 
-// readLegBlockers resolves the blockers of ids, every one of them served by leg.
+// readLegBlockers resolves the blockers of ids, every one of them served by
+// legs[own].
 //
 // Each row's edges are read with the same per-row DepList the sequential walk
-// used, so every row's blockers come back in the order that read returns them;
-// the rows and then the distinct blocking targets are read concurrently, at most
-// LegFanOut at a time.
-func readLegBlockers(ctx context.Context, leg Leg, ids []string) legBlockers {
+// used, so every row's blockers come back in the order that read returns them.
+// The distinct targets are then read by id from the serving leg in one call
+// (blockerStatuses, crossstore.go); on a split city every target is read
+// from every leg, one call each, judged from every copy as the ready arm
+// judges it, and reported with the status of the copy that holds it and a
+// reason. A target no store holds is reported as BlockerUnresolved, and one
+// whose every unreleased copy is closed blocked as BlockerClosedBlocked; every
+// blocked_by reader treats both as gated: such a blocker blocks its row, and
+// never fails the tier. An "external:<rig>:<capability>" target names no bead
+// and is omitted, as bd omits it. A blocker READ that fails still fails the
+// answer.
+func readLegBlockers(ctx context.Context, cs *crossStore, legs []Leg, own int, ids []string) legBlockers {
+	leg := legs[own]
 	out := legBlockers{blockers: make(map[string][]ReadyBeadBlocker, len(ids)), errs: make(map[string]error)}
 	live := beads.HandlesFor(leg.Store).Live
 	deps := make([][]beads.Dep, len(ids))
@@ -357,33 +516,22 @@ func readLegBlockers(ctx context.Context, leg Leg, ids []string) legBlockers {
 		}
 		deps[i], depErrs[i] = live.DepList(ids[i], "down")
 	})
-	// Collect every distinct blocking target, in first-seen order.
 	var targets []string
-	byTarget := make(map[string]int)
+	seen := make(map[string]bool)
 	for i, id := range ids {
 		if depErrs[i] != nil {
 			out.errs[id] = fmt.Errorf("%s store: listing dependencies of %q: %w", leg.Label, id, depErrs[i])
 			continue
 		}
 		for _, dep := range deps[i] {
-			if !beads.IsReadyBlockingDependencyType(dep.Type) {
+			if !beads.IsReadyBlockingDependencyType(dep.Type) || seen[dep.DependsOnID] {
 				continue
 			}
-			if _, seen := byTarget[dep.DependsOnID]; seen {
-				continue
-			}
-			byTarget[dep.DependsOnID] = len(targets)
+			seen[dep.DependsOnID] = true
 			targets = append(targets, dep.DependsOnID)
 		}
 	}
-	got := make([]beads.Bead, len(targets))
-	getErrs := make([]error, len(targets))
-	fanout.Bounded(len(targets), LegFanOut, func(i int) {
-		if getErrs[i] = ctx.Err(); getErrs[i] != nil {
-			return
-		}
-		got[i], getErrs[i] = live.Get(targets[i])
-	})
+	verdicts, verr := blockerStatuses(ctx, cs, legs, own, targets)
 	for i, id := range ids {
 		if depErrs[i] != nil {
 			continue
@@ -393,17 +541,18 @@ func readLegBlockers(ctx context.Context, leg Leg, ids []string) legBlockers {
 			if !beads.IsReadyBlockingDependencyType(dep.Type) {
 				continue
 			}
-			t := byTarget[dep.DependsOnID]
-			if getErrs[t] != nil {
-				// A blocking edge whose target this leg cannot resolve is a
-				// cross-store dependency, which the split topology forbids (strict
-				// residence), so it is a real fault, not an absence: treating it as
-				// "no blocker" would serve a gated bead.
-				out.errs[id] = fmt.Errorf("%s store: resolving blocker %q of %q: %w", leg.Label, dep.DependsOnID, id, getErrs[t])
+			if verr != nil {
+				out.errs[id] = fmt.Errorf("%s store: resolving blocker %q of %q: %w", leg.Label, dep.DependsOnID, id, verr)
 				blockers = nil
 				break
 			}
-			blockers = append(blockers, ReadyBeadBlocker{ID: got[t].ID, Status: got[t].Status})
+			v, ok := verdicts[dep.DependsOnID]
+			if !ok {
+				// Not a blocker of this row (blockerStatuses): a capability
+				// ref, or on a city with no binding one bd never blocks on.
+				continue
+			}
+			blockers = append(blockers, ReadyBeadBlocker{ID: dep.DependsOnID, Status: v.status, Reason: v.reason})
 		}
 		if _, failed := out.errs[id]; !failed {
 			out.blockers[id] = blockers

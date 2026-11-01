@@ -967,10 +967,20 @@ func provenanceFilePath(worktreePath string) (string, error) {
 }
 
 func readProvenance(worktreePath string) (Provenance, error) {
-	path, err := provenanceFilePath(worktreePath)
+	gitDir, err := git.New(worktreePath).GitDir()
 	if err != nil {
 		return Provenance{}, err
 	}
+	return ReadProvenanceAt(gitDir)
+}
+
+// ReadProvenanceAt reads the provenance a completed Ensure published in a
+// worktree's private git directory, gitDir (what `git rev-parse
+// --absolute-git-dir` names from inside the worktree). It does not verify the
+// record against a spec; Verify does. An error wrapping fs.ErrNotExist means no
+// Ensure published one there: the directory is not a managed worktree.
+func ReadProvenanceAt(gitDir string) (Provenance, error) {
+	path := filepath.Join(gitDir, provenanceFilename)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Provenance{}, fmt.Errorf("reading %q: %w", path, err)

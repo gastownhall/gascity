@@ -20,6 +20,7 @@ var (
 	RigNotFound         = Register(ProblemType{Code: "rig-not-found", Status: http.StatusNotFound, Title: "Rig Not Found"})
 	SessionNotFound     = Register(ProblemType{Code: "session-not-found", Status: http.StatusNotFound, Title: "Session Not Found"})
 	WaitNotFound        = Register(ProblemType{Code: "wait-not-found", Status: http.StatusNotFound, Title: "Wait Not Found"})
+	RequestNotFound     = Register(ProblemType{Code: "request-not-found", Status: http.StatusNotFound, Title: "Request Not Found"})
 	AgentNotFound       = Register(ProblemType{Code: "agent-not-found", Status: http.StatusNotFound, Title: "Agent Not Found"})
 	ProviderNotFound    = Register(ProblemType{Code: "provider-not-found", Status: http.StatusNotFound, Title: "Provider Not Found"})
 	ConvoyNotFound      = Register(ProblemType{Code: "convoy-not-found", Status: http.StatusNotFound, Title: "Convoy Not Found"})
@@ -101,8 +102,9 @@ var (
 	IdempotencyMismatch = Register(ProblemType{Code: "idempotency-mismatch", Status: http.StatusUnprocessableEntity, Title: "Idempotency Key Body Mismatch"})
 	// InvalidIdempotencyKey is an Idempotency-Key the operation journal
 	// cannot record under (empty after trimming, over 512 bytes, control
-	// characters, leading or trailing space). Only an ops gate in require
-	// refuses it; auto runs such a request unrecorded.
+	// characters, leading or trailing space, or a /reset or /respond key in
+	// a reserved namespace: legacyop.ErrReservedKey). Only an ops gate in
+	// require refuses it; auto runs such a request unrecorded.
 	InvalidIdempotencyKey = Register(ProblemType{Code: "invalid-idempotency-key", Status: http.StatusUnprocessableEntity, Title: "Invalid Idempotency Key"})
 
 	// Operation journal (DES-O0API D12): refusals of an ops gate in require,
@@ -132,11 +134,6 @@ var (
 	// not list: the conversation lane would never execute it, and a proposal
 	// is never silently shadowed. Nothing was written.
 	KindNotEnabled = Register(ProblemType{Code: "kind-not-enabled", Status: http.StatusConflict, Title: "Operation Kind Not Enabled"})
-	// WhenNotSupported refuses a message proposal whose delivery mode
-	// (policy.message.when) this build's conversation lane does not lower to
-	// a delivery: the lane would park the op until it expires. Nothing was
-	// written.
-	WhenNotSupported = Register(ProblemType{Code: "when-not-supported", Status: http.StatusConflict, Title: "Delivery Mode Not Supported"})
 	// OpKeyReuse refuses a proposal whose client key already names another
 	// request from the same principal on the same session. The first
 	// request wins; errors[0] carries the existing op id at location op_id.

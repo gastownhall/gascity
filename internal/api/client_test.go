@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -421,6 +422,52 @@ func TestClientQualifiedAgentName(t *testing.T) {
 	// unescaped so the server's ServeMux routes to the qualified variant.
 	if gotPath != "/v0/city/alpha/agent/myrig/worker/suspend" {
 		t.Errorf("path = %q, want /v0/city/alpha/agent/myrig/worker/suspend", gotPath)
+	}
+}
+
+// GetAgent reads an unqualified name from /agent/{base} and a rig-qualified one
+// from /agent/{dir}/{base}, maps the agent's name and rig, and surfaces the
+// server's not-found detail as an error.
+func TestClientGetAgent(t *testing.T) {
+	var gotPaths []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPaths = append(gotPaths, r.Method+" "+r.URL.Path)
+		switch r.URL.Path {
+		case "/v0/city/alpha/agent/overseer":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"name":"overseer","available":true,"running":true,"suspended":false,"pack_derived":false,"state":"idle"}`))
+		case "/v0/city/alpha/agent/myrig/worker":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"name":"myrig/worker","rig":"myrig","available":true,"running":false,"suspended":false,"pack_derived":false,"state":"stopped"}`))
+		default:
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"title":"Agent Not Found","status":404,"detail":"agent myrig/nope not found"}`))
+		}
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	city, err := c.GetAgent("overseer")
+	if err != nil {
+		t.Fatalf("GetAgent(overseer): %v", err)
+	}
+	if city != (AgentView{Name: "overseer"}) {
+		t.Errorf("city agent = %+v, want name overseer and no rig", city)
+	}
+	rig, err := c.GetAgent("myrig/worker")
+	if err != nil {
+		t.Fatalf("GetAgent(myrig/worker): %v", err)
+	}
+	if rig != (AgentView{Name: "myrig/worker", Rig: "myrig"}) {
+		t.Errorf("rig agent = %+v, want myrig/worker in rig myrig", rig)
+	}
+	if _, err := c.GetAgent("myrig/nope"); err == nil || err.Error() != "API error: agent myrig/nope not found" {
+		t.Errorf("GetAgent(myrig/nope) error = %v, want the server's not-found detail", err)
+	}
+	want := []string{"GET /v0/city/alpha/agent/overseer", "GET /v0/city/alpha/agent/myrig/worker", "GET /v0/city/alpha/agent/myrig/nope"}
+	if !slices.Equal(gotPaths, want) {
+		t.Errorf("requests = %q, want %q", gotPaths, want)
 	}
 }
 

@@ -206,6 +206,7 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 		}
 		if why, _ := wakeWillNotStart(woken, wakeVerdictDeps{
 			cfg: deps.cfg, cityPath: deps.cityPath, sessFront: sessFront, sp: deps.sp, work: cityWorkLegOf(beads.WorkStore{Store: deps.store}), rigStores: rigStores,
+			runsV2: func() bool { return deps.cityResolved && cityRunsV2(deps.cityPath, deps.cfg) },
 		}, deps.now()); why != "" {
 			fmt.Fprintf(stderr, "gc session wake: wake recorded for session %s, but it will not start: %s\n", id, why) //nolint:errcheck
 			rejectStuck = true

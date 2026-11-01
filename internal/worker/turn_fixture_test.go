@@ -36,7 +36,7 @@ const (
 
 var (
 	fullTurnCaps = runtime.TurnCapabilities{Start: runtime.TurnStartRecorded, End: runtime.TurnEndRecorded, Fence: runtime.TurnFenceAtomic, Link: runtime.TurnLinkExact, Lossless: true}
-	v1TurnCaps   = runtime.TurnCapabilities{Start: runtime.TurnStartRecorded, End: runtime.TurnEndRecorded, Fence: runtime.TurnFenceChecked, Link: runtime.TurnLinkCorrelated}
+	v1TurnCaps   = runtime.TurnCapabilities{Start: runtime.TurnStartRecorded, End: runtime.TurnEndInferred, Fence: runtime.TurnFenceChecked, Link: runtime.TurnLinkCorrelated}
 )
 
 func mustTurnTime(t *testing.T, raw string) time.Time {
@@ -61,6 +61,16 @@ func claudePromptWithoutID(ts string) string {
 
 func claudeReply(ts string) string {
 	return fmt.Sprintf(`{"type":"assistant","isSidechain":false,"timestamp":%q,"message":{"role":"assistant","content":[{"type":"text","text":"a reply"}],"stop_reason":"end_turn"}}`, ts)
+}
+
+// claudeAPIError is an API error entry as Claude Code writes it: its error
+// class, its HTTP status (0: none recorded) and its text.
+func claudeAPIError(ts, class string, status int, text string) string {
+	var statusField string
+	if status != 0 {
+		statusField = fmt.Sprintf(`,"apiErrorStatus":%d`, status)
+	}
+	return fmt.Sprintf(`{"type":"assistant","isSidechain":false,"timestamp":%q,"isApiErrorMessage":true,"error":%q%s,"message":{"role":"assistant","content":[{"type":"text","text":%q}]}}`, ts, class, statusField, text)
 }
 
 func claudeTurnDuration(ts string) string {
@@ -436,7 +446,8 @@ func assertTurnHistory(t *testing.T, got, want runtime.TurnHistory) {
 	}
 	for i := range want.Recent {
 		g, w := got.Recent[i], want.Recent[i]
-		if g.TurnID != w.TurnID || !g.StartedAt.Equal(w.StartedAt) || !g.EndedAt.Equal(w.EndedAt) || g.Status != w.Status || g.Inferred != w.Inferred {
+		if g.TurnID != w.TurnID || !g.StartedAt.Equal(w.StartedAt) || !g.EndedAt.Equal(w.EndedAt) || g.Status != w.Status || g.Inferred != w.Inferred ||
+			g.Failure != w.Failure {
 			t.Fatalf("Recent[%d] = %+v, want %+v", i, g, w)
 		}
 	}

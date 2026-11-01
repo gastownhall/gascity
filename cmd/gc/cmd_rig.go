@@ -1,15 +1,19 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -120,7 +124,9 @@ Use --start-suspended to add the rig in a suspended state (dormant-by-default).
 The rig's agents won't spawn until explicitly resumed with "gc rig resume".
 
 Use --adopt to register a directory that already has a fully initialized
-.beads/ directory (must include both metadata.json and config.yaml).
+.beads/ directory (must include metadata.json). The rig takes the store's own
+issue prefix, from .beads/config.yaml or, when that records none (as bd init
+leaves it), from the store; --prefix, if given, must match.
 For managed-Dolt rigs, runs an idempotent config sync (registers types.custom
 and other config into the DB, never destructively reinitializes). The git repo
 check remains informational.`,
@@ -232,7 +238,7 @@ check remains informational.`,
 	}
 	cmd.Flags().StringArrayVar(&includes, "include", nil, "pack to import into the rig: a source, a pack name, or <binding>=<source> (repeatable)")
 	cmd.Flags().StringVar(&nameFlag, "name", "", "rig name (default: directory basename, or git URL basename for --git-url)")
-	cmd.Flags().StringVar(&prefixFlag, "prefix", "", "bead ID prefix (default: derived from name)")
+	cmd.Flags().StringVar(&prefixFlag, "prefix", "", "bead ID prefix (default: derived from name; with --adopt, the store's)")
 	cmd.Flags().StringVar(&defaultBranchFlag, "default-branch", "", "mainline branch (default: auto-detect from a remote HEAD — origin preferred — or the current branch)")
 	cmd.Flags().BoolVar(&startSuspended, "start-suspended", false, "add rig in suspended state (dormant-by-default)")
 	cmd.Flags().BoolVar(&adoptFlag, "adopt", false, "adopt existing .beads/ directory (skip init)")
@@ -340,7 +346,6 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 	if name == "" {
 		name = filepath.Base(rigPath)
 	}
-
 	deps := rig.Deps{
 		FS:           fs,
 		CityPath:     cityPath,
@@ -357,7 +362,10 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		NormalizeScopes: func(cp string, c *config.City) error {
 			return normalizeCanonicalBdScopeFiles(cp, c, io.Discard)
 		},
-		PrepareAdopt:  prepareRigAdoptProviderState,
+		PrepareAdopt: prepareRigAdoptProviderState,
+		ReadStorePrefix: func(p string) (string, error) {
+			return rigAdoptStorePrefix(cityPath, p)
+		},
 		StoreContract: cityUsesBdStoreContract,
 		DoltSkip:      gcDoltSkip,
 		PostProvision: func(pc rig.ProvisionContext) error {
@@ -434,8 +442,53 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 	} else if !provisioned.Deferred {
 		// An adopted store may predate migration 0059's fix (beads#7037).
 		rigAddRepairBlockedFlags(cityPath, reloaded, r.Name, stderr)
+		recordNewRigClean(cityPath, reloaded, r, stderr)
+	} else {
+		recordNewRigClean(cityPath, reloaded, r, stderr)
 	}
 	return r, 0
+}
+
+// recordNewRigClean writes the S4 clean record for a rig `gc rig add` just
+// added, adopted or re-added on a split city whose binding has converged,
+// when a census of its store finds no infrastructure row (recordCensusClean):
+// the record `gc storage migrate --from-rigs` writes for such a rig, so its
+// readers need no relic leg (rigGraphRelicFree) and it never holds the deploy
+// gate. A store that holds an infrastructure row (pre-split history, an
+// adopted store's rows) stays awaiting import. So, with a warning, does one
+// the census cannot read, one another registered city also uses or that
+// cannot be ruled out as one, and one whose record cannot be written. A
+// single-store city, or one whose binding has not converged, writes nothing:
+// the controller's boot census records a rig added before then.
+func recordNewRigClean(cityPath string, cfg *config.City, r config.Rig, stderr io.Writer) {
+	if cfg == nil || !rigNameIsFileSafe(r.Name) || strings.TrimSpace(r.Path) == "" {
+		return
+	}
+	target, ok, err := resolveInfraBindingTarget(cityPath, cfg)
+	if err != nil || !ok {
+		return
+	}
+	// Only beside a converged binding: the records live at its root, and a
+	// city that has not cut over yet must not acquire files there.
+	if state, err := readInfraConvergenceState(target); err != nil || state != infraConvergenceMarked {
+		return
+	}
+	// A scope with no store on disk holds no row; opening it would only
+	// create (or start a server for) the store being asked about.
+	row := rigCensusRow{Rig: r.Name, State: rigCensusAwaiting}
+	if !rigScopeHasNoStore(cityPath, r) {
+		row = censusRig(cityPath, loadedCityName(cfg, cityPath), cfg, target, r, false)
+	}
+	if _, err := recordCensusClean(cityPath, target, r, &row, "gc rig add"); err != nil {
+		fmt.Fprintf(stderr, "gc rig add: warning: recording rig %s clean for the split store: %v (run `%s` to record it)\n", r.Name, err, rigImportInstruction(r.Name)) //nolint:errcheck // best-effort stderr
+		return
+	}
+	switch {
+	case row.Err != nil:
+		fmt.Fprintf(stderr, "gc rig add: warning: rig %s stays awaiting import: its store could not be censused (%v); the controller's next boot census tries again\n", r.Name, row.Err) //nolint:errcheck // best-effort stderr
+	case row.State == rigCensusAwaiting && row.Why != "":
+		fmt.Fprintf(stderr, "gc rig add: warning: rig %s stays awaiting import, not recorded clean: %s\n", r.Name, row.Why) //nolint:errcheck // best-effort stderr
+	}
 }
 
 // The following one-line aliases keep cmd/gc test files compiling against the
@@ -551,6 +604,66 @@ func prepareRigAdoptProviderState(cityPath, rigPath string) error {
 		return nil
 	}
 	return ensurePersistedScopeLocalFileStore(rigPath)
+}
+
+// rigAdoptStorePrefix is the --adopt store-prefix reader rig.Deps wires in.
+// It is a var so tests can stand in for bd.
+var rigAdoptStorePrefix = readAdoptedStoreIssuePrefix
+
+// readAdoptedStoreIssuePrefix asks bd for the issue_prefix the store at rigPath
+// records in its own config table. bd keeps a store's prefix there and leaves
+// .beads/config.yaml a commented template, so this is how --adopt learns the
+// prefix of a store bd created. Metadata that names no backend is not a bd
+// store this can ask, and reports ("", nil) without running bd.
+//
+// bd is aimed at the rig's store the same way gc registers types.custom on the
+// two kinds of scope: a proxied-server scope through the provider's projection
+// (bd refuses --readonly through its proxy), after refusing a clone whose store
+// is missing, because any bd command there would create an empty one; every
+// other scope through doctor's store projection with --readonly, so on those
+// nothing is started, migrated or written before adoption is decided. The
+// proxied read is an ordinary bd command: it may start the workspace's proxy
+// and run bd's version-bump maintenance even when the adopt is then refused.
+func readAdoptedStoreIssuePrefix(cityPath, rigPath string) (string, error) {
+	metaPath := filepath.Join(rigPath, ".beads", "metadata.json")
+	backend, ok, err := contract.ReadMetadataBackend(fsys.OSFS{}, metaPath)
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", metaPath, err)
+	}
+	if !ok {
+		return "", nil
+	}
+	mode, _, err := contract.ReadDoltMode(fsys.OSFS{}, metaPath)
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", metaPath, err)
+	}
+
+	var env map[string]string
+	args := []string{"--readonly", "config", "get", "--json", "issue_prefix"}
+	if contract.IsProxiedDoltMode(backend, mode) {
+		if err := validateProviderOwnedProxiedScopeStore(cityPath, rigPath); err != nil {
+			return "", err
+		}
+		env, err = providerOwnedScopeCustomTypesEnv(cityPath, rigPath)
+		args = args[1:]
+	} else {
+		env, err = embeddedScopeCustomTypesEnv(cityPath, rigPath)
+	}
+	if err != nil {
+		return "", fmt.Errorf("preparing bd environment for %s: %w", rigPath, err)
+	}
+
+	out, err := beads.ExecCommandRunnerWithEnv(env)(rigPath, "bd", args...)
+	if err != nil {
+		return "", fmt.Errorf("bd config get issue_prefix in %s: %w", rigPath, err)
+	}
+	var row struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(out, &row); err != nil {
+		return "", fmt.Errorf("parsing bd config get issue_prefix output in %s: %w", rigPath, err)
+	}
+	return strings.TrimSpace(row.Value), nil
 }
 
 // findEnclosingRig returns the rig whose path is a prefix of dir. It does
@@ -1009,7 +1122,31 @@ func cmdRigSuspend(args []string, stdout, stderr io.Writer) int {
 		}
 		// Connection error — fall through to direct mutation.
 	}
-	return doRigSuspend(fsys.OSFS{}, cityPath, rigName, stdout, stderr)
+	return finishDirectRigSuspension(cityPath, "suspend", doRigSuspend(fsys.OSFS{}, cityPath, rigName, stdout, stderr), stderr)
+}
+
+// Direct writes bypass the API's mutateAndPoke path. Reload the running
+// controller so its rig store picks up the changed background-refresh gate.
+func finishDirectRigSuspension(cityPath, action string, code int, stderr io.Writer) int {
+	if code != 0 {
+		return code
+	}
+	// A running controller must finish reloading before new work can use the
+	// rig's refreshed store.
+	reply, err := sendReloadControlRequestHook(cityPath, reloadControlRequest{Wait: true, Timeout: "5m"})
+	// No controller listening (no socket, or a stale socket that refuses
+	// connections). A later controller start reads the saved state.
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED) {
+		return 0
+	}
+	if err == nil && reply.Outcome != reloadOutcomeApplied && reply.Outcome != reloadOutcomeNoChange {
+		err = fmt.Errorf("controller reload did not complete: outcome=%q error=%q message=%q", reply.Outcome, reply.Error, reply.Message)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "gc rig %s: state saved but controller reload failed: %v; run gc reload\n", action, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return 0
 }
 
 // doRigSuspend records rig suspension in the runtime state file.
@@ -1122,7 +1259,7 @@ func cmdRigResume(args []string, stdout, stderr io.Writer) int {
 		}
 		// Connection error — fall through to direct mutation.
 	}
-	return doRigResume(fsys.OSFS{}, cityPath, rigName, stdout, stderr)
+	return finishDirectRigSuspension(cityPath, "resume", doRigResume(fsys.OSFS{}, cityPath, rigName, stdout, stderr), stderr)
 }
 
 // doRigResume removes rig suspension from the runtime state file.
@@ -1214,52 +1351,11 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Find and remove the rig from config.
-	found := false
-	filtered := cfg.Rigs[:0]
-	for _, r := range cfg.Rigs {
-		if r.Name == rigName {
-			found = true
-			continue
-		}
-		filtered = append(filtered, r)
-	}
-	if !found {
+	// Remove the rig and every block that would dangle without it (#3666).
+	if !cfg.RemoveRig(rigName) {
 		fmt.Fprintln(stderr, rigNotFoundMsg("gc rig remove", rigName, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cfg.Rigs = filtered
-
-	// Drop config blocks that reference the removed rig; left dangling they
-	// break a later load of the city (#3666). The three [[patches.*]] kinds and
-	// a [[github.pr_monitor]] hard-fail config.LoadWithIncludes once their
-	// now-absent rig can no longer be resolved (ApplyPatches "not found in
-	// merged config" / ValidateGitHubPRMonitors "rig is not declared"); an
-	// [[orders.overrides]] instead dangles at order-scan time. The issue named
-	// [[patches.agent]] and [[orders.overrides]]; the rest fail the same way on
-	// rig removal, so sweep them all.
-	cfg.Patches.Agents = slices.DeleteFunc(cfg.Patches.Agents,
-		func(p config.AgentPatch) bool { return p.Dir == rigName || p.Rig == rigName })
-	cfg.Patches.NamedSessions = slices.DeleteFunc(cfg.Patches.NamedSessions,
-		func(p config.NamedSessionPatch) bool { return p.Dir == rigName })
-	cfg.Patches.Rigs = slices.DeleteFunc(cfg.Patches.Rigs,
-		func(p config.RigPatch) bool { return p.Name == rigName })
-	// Capture rig-scoped PR monitor names before deleting them so we can also
-	// drop any [[patches.github_pr_monitor]] that targets them by name —
-	// otherwise the patch dangles and ApplyPatches fails ("github pr monitor
-	// %q not found in merged config") on the next compose, the same #3666 class.
-	removedMonitors := map[string]bool{}
-	for _, m := range cfg.GitHub.PRMonitors {
-		if m.Rig == rigName {
-			removedMonitors[m.Name] = true
-		}
-	}
-	cfg.GitHub.PRMonitors = slices.DeleteFunc(cfg.GitHub.PRMonitors,
-		func(m config.GitHubPRMonitor) bool { return m.Rig == rigName })
-	cfg.Patches.GitHubPRMonitors = slices.DeleteFunc(cfg.Patches.GitHubPRMonitors,
-		func(p config.GitHubPRMonitorPatch) bool { return removedMonitors[p.Name] })
-	cfg.Orders.Overrides = slices.DeleteFunc(cfg.Orders.Overrides,
-		func(o config.OrderOverride) bool { return o.Rig == rigName })
 
 	// Detach before changing city.toml. If its write fails, the configured rig
 	// still resolves through the durable path record and retrying removal can
@@ -1268,8 +1364,7 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc rig remove: retiring provider scope ownership: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	// Write updated config.
-	if err := config.WriteCityAndRigSiteBindingsForEditRemovingRigs(fsys.OSFS{}, tomlPath, cfg, rigName); err != nil {
+	if err := writeRigRemoval(tomlPath, cfg, rigName, stderr); err != nil {
 		fmt.Fprintf(stderr, "gc rig remove: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1284,6 +1379,20 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 	_ = reloadControllerConfig(cityPath)
 	fmt.Fprintf(stdout, "Removed rig '%s'\n", rigName) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+// writeRigRemoval writes cfg, from which rigName was just removed, to
+// city.toml and .gc/site.toml. It deletes the rig's blocks from city.toml in
+// place so the file's comments survive (#7899), and falls back to rewriting
+// the whole file, which drops them, only when that edit cannot be proven; it
+// says so on stderr when it does.
+func writeRigRemoval(tomlPath string, cfg *config.City, rigName string, stderr io.Writer) error {
+	err := config.RemoveRigAndWriteSiteBindingsForEdit(fsys.OSFS{}, tomlPath, cfg, rigName)
+	if !errors.Is(err, config.ErrSurgicalRigRemoveUnsupported) {
+		return err
+	}
+	fmt.Fprintf(stderr, "gc rig remove: warning: %v; rewriting city.toml in full instead, which drops its comments\n", err) //nolint:errcheck // best-effort stderr
+	return config.WriteCityAndRigSiteBindingsForEditRemovingRigs(fsys.OSFS{}, tomlPath, cfg, rigName)
 }
 
 // writeBeadsEnvGTRoot writes or updates GT_ROOT in <rigPath>/.beads/.env.

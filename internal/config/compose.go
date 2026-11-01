@@ -882,6 +882,9 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	if err := validateOpsModes(root.Ops); err != nil {
 		return nil, nil, err
 	}
+	if err := validateProgramStatus(root); err != nil {
+		return nil, nil, err
+	}
 
 	// Capture revision inputs after all config and pack discovery so callers
 	// can compare the loaded snapshot to future reloads without re-reading
@@ -1220,13 +1223,30 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		}
 	}
 	if fragMeta.IsDefined("session") {
+		// Preserve the program_status rollout gate unless the fragment sets
+		// it, as [beads] and [daemon] preserve theirs: a fragment defining any
+		// other [session] key would otherwise reset an explicit shadow or on
+		// to the off default. A fragment that sets it, "off" included, wins.
+		programStatus := base.Session.ProgramStatus
 		base.Session = fragment.Session
+		if !fragMeta.IsDefined("session", "program_status") {
+			base.Session.ProgramStatus = programStatus
+		}
 	}
 	if fragMeta.IsDefined("mail") {
 		base.Mail = fragment.Mail
 	}
-	if fragMeta.IsDefined("events") {
-		base.Events = fragment.Events
+	// [events] merges per key: a fragment that sets only [events.mirror]
+	// keeps the base's provider and [events.rotation], and the reverse. A
+	// table the fragment defines replaces the base's whole table.
+	if fragMeta.IsDefined("events", "provider") {
+		base.Events.Provider = fragment.Events.Provider
+	}
+	if fragMeta.IsDefined("events", "rotation") {
+		base.Events.Rotation = fragment.Events.Rotation
+	}
+	if fragMeta.IsDefined("events", "mirror") {
+		base.Events.Mirror = fragment.Events.Mirror
 	}
 	if fragMeta.IsDefined("usage") {
 		base.Usage = fragment.Usage
@@ -1514,6 +1534,51 @@ func deepMergeProvider(base, frag ProviderSpec, name string, fragMeta toml.MetaD
 				}
 				bf.apply()
 			}
+		}
+	}
+
+	// program_status merges per sub-field, and its env per key, so a fragment
+	// can set one part of the declaration without dropping the others.
+	if fragMeta.IsDefined("providers", name, "program_status") {
+		bindingFields := []scalarField{
+			{
+				"protocol",
+				func() bool { return base.ProgramStatus.Protocol != "" },
+				func() { result.ProgramStatus.Protocol = frag.ProgramStatus.Protocol },
+			},
+			{
+				"app",
+				func() bool { return base.ProgramStatus.App != "" },
+				func() { result.ProgramStatus.App = frag.ProgramStatus.App },
+			},
+			{
+				"relay",
+				func() bool { return base.ProgramStatus.Relay != nil },
+				func() { result.ProgramStatus.Relay = cloneBoolPtr(frag.ProgramStatus.Relay) },
+			},
+		}
+		for _, bf := range bindingFields {
+			if fragMeta.IsDefined("providers", name, "program_status", bf.key) {
+				if bf.hasBase() {
+					prov.Warnings = append(prov.Warnings,
+						fmt.Sprintf("provider %q.program_status.%s redefined by %q", name, bf.key, fragPath))
+				}
+				bf.apply()
+			}
+		}
+		if fragMeta.IsDefined("providers", name, "program_status", "env") {
+			merged := make(map[string]string, len(base.ProgramStatus.Env)+len(frag.ProgramStatus.Env))
+			for k, v := range base.ProgramStatus.Env {
+				merged[k] = v
+			}
+			for k, v := range frag.ProgramStatus.Env {
+				if _, exists := base.ProgramStatus.Env[k]; exists {
+					prov.Warnings = append(prov.Warnings,
+						fmt.Sprintf("provider %q.program_status.env.%s redefined by %q", name, k, fragPath))
+				}
+				merged[k] = v
+			}
+			result.ProgramStatus.Env = merged
 		}
 	}
 

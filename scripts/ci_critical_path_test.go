@@ -270,12 +270,15 @@ func TestCmdGCProcessTimingEnvCrossesMakeIsolation(t *testing.T) {
 }
 
 func TestPRTestJobsInstallOnlyRuntimeDependencies(t *testing.T) {
-	wf := readCriticalPathWorkflow(t, "ci.yml")
+	wf := readCriticalPathWorkflow(t, advisoryProbesWorkflowFile)
 
 	for _, jobName := range []string{
 		"contract-radar-bd-head",
 	} {
-		job := wf.Jobs[jobName]
+		job, ok := wf.Jobs[jobName]
+		if !ok {
+			t.Fatalf("%s has no %s job", advisoryProbesWorkflowFile, jobName)
+		}
 		for _, step := range job.Steps {
 			if !strings.Contains(step.Uses, "setup-gascity-ubuntu") {
 				continue
@@ -288,16 +291,19 @@ func TestPRTestJobsInstallOnlyRuntimeDependencies(t *testing.T) {
 }
 
 func TestAcceptanceJobsUseOnlyTheirHermeticProviderSetup(t *testing.T) {
-	wf := readCriticalPathWorkflow(t, "ci.yml")
+	probes := readCriticalPathWorkflow(t, advisoryProbesWorkflowFile)
 
 	// The prev/current bd contract cells run under Bazel
 	// (scripts/bd_contract_pins_test.go); the advisory bd main HEAD radar is
-	// the one contract job left in ci.yml.
+	// the one contract job left in a workflow, advisory-probes.yml.
 	providerSetupMarker := map[string]string{
 		"contract-radar-bd-head": "go -C \"$src\" build",
 	}
 	for _, jobName := range []string{"contract-radar-bd-head"} {
-		job := wf.Jobs[jobName]
+		job, ok := probes.Jobs[jobName]
+		if !ok {
+			t.Fatalf("%s has no %s job", advisoryProbesWorkflowFile, jobName)
+		}
 		var hasSetupGo bool
 		providerSetupIndex := -1
 		acceptanceIndex := -1
@@ -334,17 +340,14 @@ func TestAcceptanceJobsUseOnlyTheirHermeticProviderSetup(t *testing.T) {
 	// Tier A runs under Bazel only: bazel.yml's acceptance lane
 	// (//test/acceptance:acceptance_test and :acceptance_solo_tests) and its
 	// untagged helpers in the unit lane.
-	for jobName, job := range wf.Jobs {
-		for _, step := range job.Steps {
-			if strings.Contains(step.Run, "test-acceptance") {
-				t.Errorf("ci.yml %s step %q runs %q; Tier A is bazel.yml's acceptance lane", jobName, step.Name, strings.TrimSpace(step.Run))
+	for _, file := range []string{"ci.yml", advisoryProbesWorkflowFile} {
+		for jobName, job := range readCriticalPathWorkflow(t, file).Jobs {
+			for _, step := range job.Steps {
+				if strings.Contains(step.Run, "test-acceptance") {
+					t.Errorf("%s %s step %q runs %q; Tier A is bazel.yml's acceptance lane", file, jobName, step.Name, strings.TrimSpace(step.Run))
+				}
 			}
 		}
-	}
-
-	check := wf.Jobs["check"]
-	if slices.Contains(check.Needs, "contract-radar-bd-head") {
-		t.Errorf("Check needs = %v: bd main HEAD radar must remain advisory", check.Needs)
 	}
 }
 
@@ -477,16 +480,8 @@ func TestMacRegressionGateCentralizesTierRouting(t *testing.T) {
 	if !strings.Contains(filterStep.Uses, "dorny/paths-filter") {
 		t.Errorf("gate filter step uses = %q, want dorny/paths-filter (same tool review-formulas.yml uses)", filterStep.Uses)
 	}
-	wantFilterEntries := []string{"cmd/gc/**", "internal/pathutil/**", "internal/fsys/**", ".github/actions/setup-gascity-macos/**"}
-	filterValue := filterStep.With["filters"]
-	for _, entry := range wantFilterEntries {
-		if !strings.Contains(filterValue, "'"+entry+"'") {
-			t.Errorf("gate filter mac_sensitive list missing %q; want exactly %v", entry, wantFilterEntries)
-		}
-	}
-	if gotEntries := regexp.MustCompile(`(?m)^\s*-\s*'[^']*'\s*$`).FindAllString(filterValue, -1); len(gotEntries) != len(wantFilterEntries) {
-		t.Errorf("gate filter mac_sensitive has %d path entries, want exactly %d (%v) — no broader glob than the paths that actually touch gc/cmd or fsys/pathutil behavior, or the macOS setup action every mac job runs", len(gotEntries), len(wantFilterEntries), wantFilterEntries)
-	}
+	// The filter's classification (docs-only or not) is pinned by
+	// TestMacRegressionGateClassifiesDocsOnlyDiffs.
 	if !hasDecide {
 		t.Fatal("gate job has no routing-decision step (id: gate)")
 	}
@@ -497,7 +492,6 @@ func TestMacRegressionGateCentralizesTierRouting(t *testing.T) {
 		"PR_HEAD_REPO": "${{ github.event.pull_request.head.repo.full_name }}",
 		"PR_DRAFT":     "${{ github.event.pull_request.draft }}",
 		"NEEDS_LABEL":  "${{ contains(github.event.pull_request.labels.*.name, 'needs-mac') }}",
-		"PATH_HIT":     "${{ steps.filter.outputs.mac_sensitive }}",
 	}
 	for name, want := range wantDecideEnv {
 		if got := decideStep.Env[name]; got != want {
@@ -656,15 +650,16 @@ func TestMacRegressionHeaderCommentDescribesCentralizedGate(t *testing.T) {
 
 // TestLintAndVetRunAsNogoInBazel pins where lint and vet gate: nogo
 // (//tools/nogo) validates every Go compile in bazel.yml's lanes, so no ci.yml
-// job runs golangci-lint or go vet a second time.
+// or advisory-probes.yml job runs golangci-lint or go vet a second time.
 func TestLintAndVetRunAsNogoInBazel(t *testing.T) {
-	wf := readCriticalPathWorkflow(t, "ci.yml")
-	for jobName, job := range wf.Jobs {
-		for _, step := range job.Steps {
-			run := step.Run
-			for _, legacy := range []string{"make lint", "make vet", "golangci-lint", "go vet"} {
-				if strings.Contains(run, legacy) {
-					t.Errorf("ci.yml %s step %q runs %q; lint and vet are nogo in the Bazel build", jobName, step.Name, legacy)
+	for _, file := range []string{"ci.yml", advisoryProbesWorkflowFile} {
+		for jobName, job := range readCriticalPathWorkflow(t, file).Jobs {
+			for _, step := range job.Steps {
+				run := step.Run
+				for _, legacy := range []string{"make lint", "make vet", "golangci-lint", "go vet"} {
+					if strings.Contains(run, legacy) {
+						t.Errorf("%s %s step %q runs %q; lint and vet are nogo in the Bazel build", file, jobName, step.Name, legacy)
+					}
 				}
 			}
 		}
@@ -721,38 +716,46 @@ func TestCheckAndCIRequiredFanInTheGatingJobs(t *testing.T) {
 
 // TestCIWorkflowRunsNoBazelCoveredSuite: every build and test of this tree
 // runs under Bazel (bazel.yml's lanes, bazel-nightly.yml). ci.yml keeps
-// only the jobs rbe-west cannot run -- the Windows credential-provider
-// tests (no Windows workers) and the live upstream probes -- plus routing
-// and the two required fan-ins. A new job here needs a reason it cannot be
-// a Bazel target.
+// only the gating jobs rbe-west cannot run -- the Windows credential-provider
+// tests (no Windows workers) and the pack gate's live registry checks --
+// plus routing and the two required fan-ins; advisory-probes.yml holds the
+// advisory live probes of upstream HEADs and their routing. A new job in
+// either needs a reason it cannot be a Bazel target.
 func TestCIWorkflowRunsNoBazelCoveredSuite(t *testing.T) {
-	wf := readCriticalPathWorkflow(t, "ci.yml")
-	want := []string{
-		"runner-policy", "changes", // routing
-		"credential-provider-windows",                     // no Windows workers
-		"pack-gate", "mcp-mail", "contract-radar-bd-head", // live upstream probes
-		"check", "ci-required", // required fan-ins
-	}
-	got := slices.Sorted(maps.Keys(wf.Jobs))
-	if !slices.Equal(got, slices.Sorted(slices.Values(want))) {
-		t.Errorf("ci.yml jobs = %v, want %v", got, slices.Sorted(slices.Values(want)))
-	}
-	for jobName, job := range wf.Jobs {
-		for _, step := range job.Steps {
-			for _, covered := range []string{
-				"test-acceptance",        // bazel.yml acceptance lane
-				"test-cover",             // bazel-nightly.yml coverage -> Codecov
-				"test-integration-shard", // integration-packages/-smoke lanes, nightly integration
-				"openapi-breaking",       // //cmd/openapi-breaking:openapi-breaking_test
-				"goreleaser",             // //:goreleaser_check_test
-			} {
-				if strings.Contains(step.Run, covered) || strings.Contains(step.Uses, covered) {
-					t.Errorf("ci.yml %s step %q runs %q, which Bazel covers", jobName, step.Name, covered)
+	for file, want := range map[string][]string{
+		"ci.yml": {
+			"runner-policy", "changes", // routing
+			"credential-provider-windows", // no Windows workers
+			"pack-gate",                   // live registry and pin provenance
+			"check", "ci-required",        // required fan-ins
+		},
+		advisoryProbesWorkflowFile: {
+			"route",                              // routing
+			"contract-radar-bd-head", "mcp-mail", // advisory live upstream probes
+		},
+	} {
+		wf := readCriticalPathWorkflow(t, file)
+		got := slices.Sorted(maps.Keys(wf.Jobs))
+		if !slices.Equal(got, slices.Sorted(slices.Values(want))) {
+			t.Errorf("%s jobs = %v, want %v", file, got, slices.Sorted(slices.Values(want)))
+		}
+		for jobName, job := range wf.Jobs {
+			for _, step := range job.Steps {
+				for _, covered := range []string{
+					"test-acceptance",        // bazel.yml acceptance lane
+					"test-cover",             // bazel-nightly.yml coverage -> Codecov
+					"test-integration-shard", // integration-packages/-smoke lanes, nightly integration
+					"openapi-breaking",       // //cmd/openapi-breaking:openapi-breaking_test
+					"goreleaser",             // //:goreleaser_check_test
+				} {
+					if strings.Contains(step.Run, covered) || strings.Contains(step.Uses, covered) {
+						t.Errorf("%s %s step %q runs %q, which Bazel covers", file, jobName, step.Name, covered)
+					}
 				}
 			}
 		}
 	}
-	runner := wf.Jobs["credential-provider-windows"].RunsOn
+	runner := readCriticalPathWorkflow(t, "ci.yml").Jobs["credential-provider-windows"].RunsOn
 	if runner != "${{ needs.runner-policy.outputs.runner_windows }}" {
 		t.Errorf("credential-provider-windows runs-on = %q, want runner_policy.py's Blacksmith Windows runner", runner)
 	}

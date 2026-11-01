@@ -3,9 +3,11 @@ package k8s
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -535,10 +538,19 @@ func TestGetLastActivity(t *testing.T) {
 
 	addRunningPod(fake, "gc-test-agent", "gc-test-agent")
 
-	// Configure fake to return epoch timestamp.
+	// Detached tmux advances #{window_activity} on pane output but pins
+	// #{session_activity} at creation/attach time, so the output clock is the
+	// one GetLastActivity must read: the newest window's, as the local tmux
+	// provider reads it, not just the current window's.
+	fake.setExecResult("gc-test-agent",
+		[]string{"tmux", "list-windows", "-t", "main", "-F", "#{window_activity}"},
+		"1709200000\n1709300000\n", nil)
+	fake.setExecResult("gc-test-agent",
+		[]string{"tmux", "display-message", "-t", "main", "-p", "#{window_activity}"},
+		"1709200000\n", nil)
 	fake.setExecResult("gc-test-agent",
 		[]string{"tmux", "display-message", "-t", "main", "-p", "#{session_activity}"},
-		"1709300000\n", nil)
+		"1600000000\n", nil)
 
 	activity, err := p.GetLastActivity("gc-test-agent")
 	if err != nil {
@@ -556,6 +568,141 @@ func TestGetLastActivity(t *testing.T) {
 	}
 	if !activity.IsZero() {
 		t.Errorf("expected zero time, got %v", activity)
+	}
+}
+
+// pokedPod is a running pod whose in-pod tmux reports an activity clock that
+// gc's own keystrokes advance, as tmux counts them as window activity: every
+// send-keys moves it to the pod's time, which runs skew off the provider's
+// clock (now). sendErr fails the send-keys whose last argument it names, after
+// the keystrokes reached the pane; refuse makes tmux reject every send-keys: a
+// non-zero exit, with nothing typed.
+type pokedPod struct {
+	activity, now time.Time
+	skew          time.Duration
+	sendErr       map[string]error
+	refuse        bool
+}
+
+func newPokedPod(t *testing.T, genuine time.Time, skew time.Duration) (*Provider, *pokedPod) {
+	t.Helper()
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	addRunningPod(fake, "gc-test-agent", "gc-test-agent")
+	pod := &pokedPod{activity: genuine, now: genuine.Add(5 * time.Hour), skew: skew}
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) < 2 || cmd[0] != "tmux" {
+			return "", nil
+		}
+		switch cmd[1] {
+		case "list-windows":
+			return strconv.FormatInt(pod.activity.Unix(), 10) + "\n", nil
+		case "send-keys":
+			if pod.refuse {
+				return "", execerr.CodeExitError{Err: errors.New("can't find pane"), Code: 1}
+			}
+			pod.activity = pod.now.Add(pod.skew)
+			return "", pod.sendErr[cmd[len(cmd)-1]]
+		}
+		return "", nil
+	}
+	p.now = func() time.Time { return pod.now }
+	return p, pod
+}
+
+// TestPokeEchoIsDiscountedFromLastActivity: a nudge or keys advance
+// #{window_activity} with their own keystroke echo even when the agent never
+// answers. GetLastActivity counts the echo while the agent may still reply,
+// reverts to the activity before the poke once the grace passes unanswered,
+// so a nudged but silent agent does not look perpetually active (#3049,
+// #4187), and keeps the agent's real output that follows. The pod's clock is
+// not the provider's: with it ahead or behind, the echo is still matched and
+// a reply 10s after the poke is still the agent's own.
+func TestPokeEchoIsDiscountedFromLastActivity(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		poke func(*Provider) error
+	}{
+		{"Nudge", func(p *Provider) error { return p.Nudge("gc-test-agent", runtime.TextContent("wake up")) }},
+		{"SendKeys", func(p *Provider) error { return p.SendKeys("gc-test-agent", "Enter") }},
+	} {
+		for _, skew := range []time.Duration{0, -10 * time.Second, 10 * time.Second} {
+			t.Run(tc.name+" pod clock "+skew.String(), func(t *testing.T) {
+				genuine := time.Unix(1709300000, 0) // the agent's last real output
+				p, pod := newPokedPod(t, genuine, skew)
+				if err := tc.poke(p); err != nil {
+					t.Fatalf("poke: %v", err)
+				}
+				poked, echo := pod.now, pod.activity
+
+				if got, _ := p.GetLastActivity("gc-test-agent"); !got.Equal(echo) {
+					t.Errorf("inside the grace window LastActivity = %v, want the echo %v", got, echo)
+				}
+				pod.now = poked.Add(runtime.PokeGrace + time.Second)
+				if got, _ := p.GetLastActivity("gc-test-agent"); !got.Equal(genuine) {
+					t.Errorf("unanswered poke after the grace: LastActivity = %v, want the genuine %v", got, genuine)
+				}
+				pod.activity = echo.Add(10 * time.Second) // the agent answers
+				pod.now = poked.Add(time.Minute)
+				if got, _ := p.GetLastActivity("gc-test-agent"); !got.Equal(pod.activity) {
+					t.Errorf("after the agent answered LastActivity = %v, want its output %v", got, pod.activity)
+				}
+			})
+		}
+	}
+}
+
+// TestUndeliveredNudgeIsNotDiscounted: a nudge whose submit never lands
+// reports the failure and records no poke, so its echo is not discounted:
+// only input gc delivered is gc's to take back.
+func TestUndeliveredNudgeIsNotDiscounted(t *testing.T) {
+	p, pod := newPokedPod(t, time.Unix(1709300000, 0), 0)
+	pod.sendErr = map[string]error{"Enter": errors.New("stream error: broken pipe")}
+	if err := p.Nudge("gc-test-agent", runtime.TextContent("wake up")); err == nil {
+		t.Fatal("Nudge: want the failed submit reported, got nil")
+	}
+	echo := pod.now
+
+	pod.now = echo.Add(runtime.PokeGrace + time.Second)
+	if got, _ := p.GetLastActivity("gc-test-agent"); !got.Equal(echo) {
+		t.Errorf("LastActivity = %v, want the raw clock %v: an undelivered nudge records no poke", got, echo)
+	}
+}
+
+// TestPokeThatTypedNothingKeepsBaseline: a nudge with no text, keys with
+// none, or a send-keys tmux refuses types nothing into the pane, so it must
+// not cost an earlier unanswered poke its genuine baseline: once the grace
+// passes, LastActivity is still the activity from before the first poke.
+func TestPokeThatTypedNothingKeepsBaseline(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		poke func(*Provider, *pokedPod) error
+	}{
+		{"empty Nudge", func(p *Provider, _ *pokedPod) error {
+			return p.Nudge("gc-test-agent", runtime.TextContent(""))
+		}},
+		{"no keys", func(p *Provider, _ *pokedPod) error { return p.SendKeys("gc-test-agent") }},
+		{"refused send-keys", func(p *Provider, pod *pokedPod) error {
+			pod.refuse = true
+			return p.SendKeys("gc-test-agent", "Enter")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			genuine := time.Unix(1709300000, 0) // the agent's last real output
+			p, pod := newPokedPod(t, genuine, 0)
+			if err := p.Nudge("gc-test-agent", runtime.TextContent("wake up")); err != nil {
+				t.Fatalf("Nudge: %v", err)
+			}
+			pod.now = pod.now.Add(time.Minute) // far past that nudge's echo window
+			if err := tc.poke(p, pod); err != nil {
+				t.Fatalf("poke: %v", err)
+			}
+
+			pod.now = pod.now.Add(runtime.PokeGrace + time.Second)
+			if got, _ := p.GetLastActivity("gc-test-agent"); !got.Equal(genuine) {
+				t.Errorf("LastActivity = %v, want the genuine %v from before the first poke", got, genuine)
+			}
+		})
 	}
 }
 
@@ -1189,6 +1336,55 @@ func TestBuildPodEnvProjectsManagedLocalDoltTarget(t *testing.T) {
 	}
 }
 
+// TestBuildPodEnvProjectsWithheldManagedLocalDoltTarget pins the pod half of
+// the gastownhall/gascity#1656 withhold. A managed-direct session whose
+// controller-local port gc withheld, so host-local bd follows the scope's
+// .beads/dolt-server.port mirror, carries neither host nor port, only the
+// managed-local marker. A pod cannot read the controller's mirror, so it must
+// still reach the in-cluster managed service exactly as the port-only shape
+// does, and the controller-side marker must stay out of the pod.
+func TestBuildPodEnvProjectsWithheldManagedLocalDoltTarget(t *testing.T) {
+	cfgEnv := runtimetest.WithheldManagedDoltEnv()
+	cfgEnv["GC_AGENT"] = "worker"
+
+	env := mustBuildPodEnv(t, cfgEnv, "/workspace", podManagedDoltHost, podManagedDoltPort)
+	envMap := map[string]string{}
+	for _, e := range env {
+		envMap[e.Name] = e.Value
+	}
+
+	for key, want := range map[string]string{
+		"GC_DOLT_HOST":           podManagedDoltHost,
+		"GC_DOLT_PORT":           podManagedDoltPort,
+		"BEADS_DOLT_SERVER_HOST": podManagedDoltHost,
+		"BEADS_DOLT_SERVER_PORT": podManagedDoltPort,
+	} {
+		if got := envMap[key]; got != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
+		}
+	}
+	if got, ok := envMap["GC_DOLT_MANAGED_LOCAL"]; ok {
+		t.Fatalf("GC_DOLT_MANAGED_LOCAL = %q reached the pod; the pod's target is the in-cluster service, not a controller-local server", got)
+	}
+}
+
+// TestBuildPodEnvOmitsDoltForEmptyTargetWithoutManagedLocalMarker guards the
+// other side of that marker: empty host and port without GC_DOLT_MANAGED_LOCAL
+// is a scope without Dolt or a failed resolution, which leaves the same empty
+// keys, and must project nothing rather than the managed alias.
+func TestBuildPodEnvOmitsDoltForEmptyTargetWithoutManagedLocalMarker(t *testing.T) {
+	cfgEnv := runtimetest.WithheldManagedDoltEnv()
+	cfgEnv["GC_AGENT"] = "worker"
+	cfgEnv["GC_DOLT_MANAGED_LOCAL"] = ""
+
+	for _, e := range mustBuildPodEnv(t, cfgEnv, "/workspace", podManagedDoltHost, podManagedDoltPort) {
+		switch e.Name {
+		case "GC_DOLT_HOST", "GC_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT":
+			t.Fatalf("%s = %q projected for a session env without a Dolt target", e.Name, e.Value)
+		}
+	}
+}
+
 func TestBuildPodEnvRejectsHostOnlyProjectedTarget(t *testing.T) {
 	_, err := buildPodEnv(map[string]string{
 		"GC_AGENT":     "worker",
@@ -1554,6 +1750,40 @@ func TestInitBeadsInPodUsesProjectedStoreRootAndPrefix(t *testing.T) {
 	if !found {
 		t.Fatal("initBeadsInPod did not check the projected store root and prefix")
 	}
+}
+
+// TestInitBeadsInPodPatchesWithheldManagedLocalTargetToAlias pins the pod's
+// .beads/metadata.json repair for a withheld managed-direct session
+// (gastownhall/gascity#1656): the session carries no port, but its target is
+// still the managed server, so the metadata must be patched onto the
+// in-cluster service instead of the repair returning before it runs.
+func TestInitBeadsInPodPatchesWithheldManagedLocalTargetToAlias(t *testing.T) {
+	fake := newFakeK8sOps()
+	env := runtimetest.WithheldManagedDoltEnv()
+	env["GC_BEADS_PREFIX"] = "demo"
+	cfg := runtime.Config{Env: env}
+	if err := initBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, "/workspace/demo-repo", podManagedDoltHost, podManagedDoltPort); err != nil {
+		t.Fatalf("initBeadsInPod: %v", err)
+	}
+
+	portNum, err := strconv.Atoi(podManagedDoltPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	patch, err := json.Marshal(map[string]any{
+		"dolt_server_host": podManagedDoltHost,
+		"dolt_server_port": portNum,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPatchB64 := base64.StdEncoding.EncodeToString(patch)
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) >= 3 && c.cmd[0] == "sh" && c.cmd[1] == "-c" && strings.Contains(c.cmd[2], wantPatchB64) {
+			return
+		}
+	}
+	t.Fatalf("initBeadsInPod did not patch .beads/metadata.json onto %s:%s; calls=%v", podManagedDoltHost, podManagedDoltPort, fake.calls)
 }
 
 func TestVerifyBeadsInPodChecksCanonicalFiles(t *testing.T) {
@@ -2279,6 +2509,43 @@ func TestProvider_RelaunchSuWrapsForLinuxUsername(t *testing.T) {
 	}
 }
 
+// A pane's pipe-pane survives respawn-pane -k, and `pipe-pane -o` toggles (it
+// closes an existing pipe). Relaunch re-runs the post-launch setup, so every
+// pipe-pane it issues must (re)open the pane log rather than toggle it, or
+// alternate relaunches would silently turn diagnostic logging off.
+func TestProvider_RelaunchKeepsPaneLogPipeOn(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	addRunningPod(fake, "s", "s")
+	hasSessionAlive(fake, "s")
+
+	for i := 0; i < 2; i++ {
+		if err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent"}); err != nil {
+			t.Fatalf("Relaunch #%d: %v", i+1, err)
+		}
+	}
+
+	var pipes [][]string
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) > 1 && c.cmd[0] == "tmux" && c.cmd[1] == "pipe-pane" {
+			pipes = append(pipes, c.cmd)
+		}
+	}
+	if len(pipes) != 2 {
+		t.Fatalf("pipe-pane calls = %d (%v), want one per Relaunch", len(pipes), pipes)
+	}
+	for _, cmd := range pipes {
+		for _, arg := range cmd {
+			if arg == "-o" {
+				t.Errorf("pipe-pane cmd = %q uses -o, which toggles the pipe off on an already-piped pane", cmd)
+			}
+		}
+		if got := cmd[len(cmd)-1]; got != "cat >> /tmp/agent-output.log" {
+			t.Errorf("pipe-pane shell command = %q, want append to /tmp/agent-output.log", got)
+		}
+	}
+}
+
 // --- Test helpers ---
 
 func addRunningPod(fake *fakeK8sOps, name, sessionLabel string) { //nolint:unparam // name varies in future tests
@@ -2406,6 +2673,14 @@ func TestInitCityInPodSkipsDolt(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("gc init should run with %s; got cmd=%v", flag, gcInitCmd)
+		}
+	}
+
+	// The pod's own gc never gets --remote-stage: an older pod image does
+	// not know the flag, and the record is written directly instead.
+	for _, arg := range gcInitCmd {
+		if arg == "--remote-stage" {
+			t.Errorf("gc init in the pod must not carry --remote-stage (old images refuse unknown flags); got cmd=%v", gcInitCmd)
 		}
 	}
 }
@@ -2551,5 +2826,164 @@ func TestInitCityInPodRemovesPartialCopyAfterUploadFailure(t *testing.T) {
 	last := ops.calls[len(ops.calls)-1]
 	if last.method != "execInPod" || strings.Join(last.cmd, " ") != "rm -rf /tmp/city-src" {
 		t.Fatalf("last pod command = %v, want partial-copy cleanup", last.cmd)
+	}
+}
+
+// remoteStageWrite finds the direct remote-stage write among the fake's calls.
+func remoteStageWrite(fake *fakeK8sOps) (fakeCall, bool) {
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) == 3 && c.cmd[0] == "sh" && strings.Contains(c.cmd[2], remoteStageRecordPath) {
+			return c, true
+		}
+	}
+	return fakeCall{}, false
+}
+
+// TestStartRecordsTheRemoteStageInBothModes (S5-A): staged and prebaked pods
+// alike get .gc/remote-stage.toml, written by a direct exec that works with
+// any pod gc version, naming the controller's city and path.
+func TestStartRecordsTheRemoteStageInBothModes(t *testing.T) {
+	for _, prebaked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("prebaked=%v", prebaked), func(t *testing.T) {
+			fake := newFakeK8sOps()
+			p := newProviderWithOps(fake)
+			p.prebaked = prebaked
+			p.cityName = "bright-lights"
+			p.postStartSettle = 0
+			fake.setExecResult("gc-test-agent", []string{"tmux", "has-session", "-t", "main"}, "", nil)
+			cfg := runtime.Config{
+				Command: "claude",
+				WorkDir: "/city",
+				Env:     map[string]string{"GC_AGENT": "rig/polecat", "GC_CITY": "/city"},
+			}
+			if err := p.Start(context.Background(), "gc-test-agent", cfg); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			call, ok := remoteStageWrite(fake)
+			if !ok {
+				t.Fatalf("no remote-stage write among %d calls", len(fake.calls))
+			}
+			for _, want := range []string{`controller_city = "bright-lights"`, `controller_path = "/city"`, "staged_at = "} {
+				if !strings.Contains(call.stdin, want) {
+					t.Errorf("record %q lacks %q", call.stdin, want)
+				}
+			}
+			if strings.Contains(call.stdin, "/tmp/city-src") {
+				t.Errorf("record names the staging copy: %q", call.stdin)
+			}
+			// The pod spec marks every process a remote stage from its
+			// start, which is what closes the prebaked window: the agent can
+			// start before the record lands, but never without the env.
+			env := map[string]string{}
+			for _, pod := range fake.pods {
+				for _, e := range pod.Spec.Containers[0].Env {
+					env[e.Name] = e.Value
+				}
+			}
+			if env[remoteStageControllerEnv] != "/city" || env[remoteStageCityEnv] != "bright-lights" {
+				t.Errorf("pod env %s=%q %s=%q, want /city and bright-lights", remoteStageControllerEnv, env[remoteStageControllerEnv], remoteStageCityEnv, env[remoteStageCityEnv])
+			}
+		})
+	}
+}
+
+// TestStartFailsClosedWhenTheRemoteStageRecordFails: a pod that cannot be
+// marked is deleted and the start fails, in both modes.
+func TestStartFailsClosedWhenTheRemoteStageRecordFails(t *testing.T) {
+	for _, prebaked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("prebaked=%v", prebaked), func(t *testing.T) {
+			fake := newFakeK8sOps()
+			p := newProviderWithOps(fake)
+			p.prebaked = prebaked
+			p.postStartSettle = 0
+			fake.execFunc = func(_ string, cmd []string) (string, error) {
+				if len(cmd) == 3 && cmd[0] == "sh" && strings.Contains(cmd[2], remoteStageRecordPath) {
+					return "", errors.New("read-only file system")
+				}
+				return "", nil
+			}
+			cfg := runtime.Config{Command: "claude", WorkDir: "/city", Env: map[string]string{"GC_AGENT": "mayor", "GC_CITY": "/city"}}
+			err := p.Start(context.Background(), "gc-test-agent", cfg)
+			if err == nil || !strings.Contains(err.Error(), "remote stage") || !strings.Contains(err.Error(), "read-only file system") {
+				t.Fatalf("Start with an unwritable record = %v, want a remote-stage failure", err)
+			}
+			deleted := false
+			for _, c := range fake.calls {
+				if c.method == "deletePod" {
+					deleted = true
+				}
+				if c.method == "execInPod" && len(c.cmd) >= 2 && c.cmd[0] == "touch" && containsStr(c.cmd[1], ".gc-workspace-ready") {
+					t.Error("the ready sentinel was touched on a pod that could not be marked")
+				}
+			}
+			if !deleted {
+				t.Error("the unmarked pod was not deleted")
+			}
+		})
+	}
+}
+
+// TestRelaunchRecordsTheRemoteStageBeforeRespawning (S5-A): a warm pod an
+// older provider created carries neither the record nor the pod-spec
+// environment, and a respawned pane takes the tmux server's environment, not
+// the respawn command's. So Relaunch writes the record, naming the
+// controller's city and path, before it respawns the agent.
+func TestRelaunchRecordsTheRemoteStageBeforeRespawning(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.cityName = "bright-lights"
+	addRunningPod(fake, "s", "s")
+	hasSessionAlive(fake, "s")
+
+	cfg := runtime.Config{Command: "agent", Env: map[string]string{"GC_CITY": "/city", "LINUX_USERNAME": "dev"}}
+	if err := p.Relaunch(context.Background(), "s", cfg); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	record, respawn := -1, -1
+	for i, c := range fake.calls {
+		if c.method != "execInPod" {
+			continue
+		}
+		joined := strings.Join(c.cmd, " ")
+		if record < 0 && strings.Contains(joined, remoteStageRecordPath) {
+			record = i
+		}
+		if respawn < 0 && strings.Contains(joined, "respawn-pane") {
+			respawn = i
+		}
+	}
+	if record < 0 {
+		t.Fatalf("Relaunch wrote no remote-stage record among %d calls", len(fake.calls))
+	}
+	if respawn < 0 || record > respawn {
+		t.Fatalf("remote-stage record at call %d, respawn at call %d; the record must land before the agent respawns", record, respawn)
+	}
+	call, _ := remoteStageWrite(fake)
+	for _, want := range []string{`controller_city = "bright-lights"`, `controller_path = "/city"`} {
+		if !strings.Contains(call.stdin, want) {
+			t.Errorf("record %q lacks %q", call.stdin, want)
+		}
+	}
+}
+
+// TestRelaunchFailsClosedWhenTheRemoteStageRecordFails: a warm pod that
+// cannot be marked is not respawned into, and the error says why.
+func TestRelaunchFailsClosedWhenTheRemoteStageRecordFails(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	addRunningPod(fake, "s", "s")
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) == 3 && cmd[0] == "sh" && strings.Contains(cmd[2], remoteStageRecordPath) {
+			return "", errors.New("read-only file system")
+		}
+		return "", nil
+	}
+
+	err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent", Env: map[string]string{"GC_CITY": "/city"}})
+	if err == nil || !strings.Contains(err.Error(), "remote stage") || !strings.Contains(err.Error(), "read-only file system") {
+		t.Fatalf("Relaunch with an unwritable record = %v, want a remote-stage failure", err)
+	}
+	if findExecCmd(fake, "respawn-pane") != nil {
+		t.Error("the agent was respawned into a pod that could not be marked")
 	}
 }

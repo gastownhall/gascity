@@ -21,7 +21,7 @@ import (
 // The output is a bare JSON array in bd's row shape, because it is a drop-in for
 // the `bd ready --json` the default work_query builds; see readywork.ReadyBead.
 func newReadyCmd(stdout, stderr io.Writer) *cobra.Command {
-	var opts readywork.Query
+	var flags readyFlags
 	var jsonOut bool
 	var includeEphemeral bool
 	cmd := &cobra.Command{
@@ -34,7 +34,8 @@ roots, step beads and control beads live.
 It is the in-process, city-wide drop-in for the single-store "bd ready" work
 query, so workers and the control plane see graph-class work instead of an
 authoritative-looking short answer. On a city that relocates no coordination
-class it reads the one store, unchanged.
+class there is no graph store to add: it reads the city store and the rig
+stores.
 
 The flags mirror the "bd ready" contract the default work_query builds:
   gc ready --metadata-field "gc.routed_to=$target" --unassigned \
@@ -47,6 +48,12 @@ Rows are emitted in canonical ready order (priority, created_at, id) unless
 read is the true top-N of the merged set rather than the top-N of whichever
 store answered first.
 
+The rows of --status in_progress carry their blockers (blocked_by), and a row
+whose blockers cannot be resolved fails the read. --until-unblocked ends that
+answer at its first unblocked row, the one a crash-recovery read resumes, and
+resolves no row past it, so a later row's unresolvable blocker does not fail
+the read.
+
 Every leg is read across both storage tiers, so the wisp/ephemeral rows an
 orchestration step runs as are claimable work here whether or not
 --include-ephemeral is passed.
@@ -58,26 +65,53 @@ does; their work comes back when the rig is resumed. The city store and a
 relocated graph store are always read.
 
 When the city's controller is running, it answers the query from the stores it
-already holds open (GET /v0/city/{cityName}/work/ready), reading every store
-live, never from a cache, so the answer is the one this command would compute
-itself, without opening a store. That holds only while the controller's config
-is current, so it refuses while a config change is pending or being applied,
-and after a failed reload until one succeeds; a [storage] change fails every
-reload until it is reverted or the city restarts. The controller learns of an
-edit to the config files from its config watcher and answers under the config
-it holds until then. If the controller is not running, refuses, or does not
-answer within 10s, this command reads the stores itself. GC_NO_API=1 forces
-the local read.`,
+already holds open (GET /v0/city/{cityName}/work/ready), with the reader this
+command runs, reading every store live, never from a cache. It reads the rigs
+of the config the controller has loaded: a rig added, removed or rebound in the
+city's config takes effect in its answer at the controller's next config
+reload. It refuses while a config reload or an API config write is in
+progress, and after a failed reload until one succeeds; a [storage] change
+fails every reload until it is reverted or the city restarts. If the
+controller is not running, refuses, or does not answer within 10s, this command
+loads the config and reads the stores itself. GC_NO_API=1 forces the local
+read.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdReady(opts, stdout, stderr) != 0 {
+			if cmdReady(flags, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
-	registerReadyFlags(cmd, &opts, &includeEphemeral, &jsonOut)
+	registerReadyFlags(cmd, &flags, &includeEphemeral, &jsonOut)
 	return cmd
+}
+
+// readyFlags is the `gc ready` flag surface: the reader's query, which is also
+// the query GET /v0/city/{cityName}/work/ready takes, and untilUnblocked, the
+// cut --until-unblocked makes of an in_progress answer
+// (readywork.ReadUntilUnblocked). The cut is not part of the query because the
+// endpoint does not take it: on that route the command cuts the controller's
+// whole answer itself.
+type readyFlags struct {
+	query          readywork.Query
+	untilUnblocked bool
+}
+
+// validate checks every flag without reading anything.
+func (f readyFlags) validate() error {
+	if f.untilUnblocked {
+		return readywork.ValidateUntilUnblocked(f.query)
+	}
+	return f.query.Validate()
+}
+
+// read answers the flags in-process over legs.
+func (f readyFlags) read(legs []readywork.Leg) ([]readywork.ReadyBead, error) {
+	if f.untilUnblocked {
+		return readywork.ReadUntilUnblocked(context.Background(), legs, f.query)
+	}
+	return readywork.Read(legs, f.query)
 }
 
 // registerReadyFlags binds the `gc ready` flag surface onto cmd.
@@ -88,7 +122,8 @@ the local read.`,
 // query, parses it here, and runs the real filterReadyBeads over a row corpus.
 // A test that re-declared these flags would be testing its own copy of the
 // contract, which is the drift this whole lane exists to remove.
-func registerReadyFlags(cmd *cobra.Command, opts *readywork.Query, includeEphemeral, jsonOut *bool) {
+func registerReadyFlags(cmd *cobra.Command, flags *readyFlags, includeEphemeral, jsonOut *bool) {
+	opts := &flags.query
 	cmd.Flags().StringVar(&opts.Assignee, "assignee", "", "only work assigned to exactly this identity")
 	cmd.Flags().BoolVar(&opts.Unassigned, "unassigned", false, "only unassigned work")
 	cmd.Flags().StringArrayVar(&opts.MetadataFields, "metadata-field", nil, "require metadata \"key=value\", or bare \"key\" for any non-empty value (repeatable)")
@@ -105,17 +140,18 @@ func registerReadyFlags(cmd *cobra.Command, opts *readywork.Query, includeEpheme
 	// quietly narrows (ga-8lyxc).
 	cmd.Flags().BoolVar(includeEphemeral, "include-ephemeral", false, "accept --include-ephemeral for bd-ready parity (every leg already spans the wisp tier)")
 	cmd.Flags().StringVar(&opts.Status, "status", "", "list beads in this status instead of ready work: open|in_progress|blocked|closed")
+	cmd.Flags().BoolVar(&flags.untilUnblocked, "until-unblocked", false, "with --status in_progress, end the answer at its first unblocked row, resolving no row past it")
 	// --json is accepted for parity with `bd ready --json`, which the generated
 	// work_query carries verbatim. The payload is a JSON array either way; the
 	// flag exists so the query does not have to be rewritten to drop it.
 	cmd.Flags().BoolVar(jsonOut, "json", true, "accept --json for bd-ready parity (output is always a JSON array)")
 }
 
-func cmdReady(opts readywork.Query, stdout, stderr io.Writer) int {
+func cmdReady(flags readyFlags, stdout, stderr io.Writer) int {
 	// Every flag is validated before anything is resolved, loaded or opened: a
 	// malformed query must not cost a city-wide federated read to be told it was
 	// malformed.
-	if err := opts.Validate(); err != nil {
+	if err := flags.validate(); err != nil {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -133,7 +169,14 @@ func cmdReady(opts readywork.Query, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if rows, ok := readyThroughController(cityPath, opts, stderr); ok {
+	if rows, ok := readyThroughController(cityPath, flags.query, stderr); ok {
+		if flags.untilUnblocked {
+			// The controller answers the whole window with every row resolved, and
+			// its cut is the in-process read's answer. A row past the cut that cannot
+			// be resolved fails the controller's read instead, and the in-process
+			// read below answers.
+			rows = readywork.CutUntilUnblocked(rows)
+		}
 		if err := writeJSON(stdout, rows); err != nil {
 			fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -163,7 +206,7 @@ func cmdReady(opts readywork.Query, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	rows, err := readywork.Read(legs, opts)
+	rows, err := flags.read(legs)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -192,18 +235,20 @@ var readyAPITimeout = 10 * time.Second
 var readyAPIClient = supervisorFallthroughAPIClient
 
 // readyThroughController asks the controller holding this city's stores open
-// (GET /v0/city/{cityName}/work/ready) for the answer, which is the in-process
-// reader's answer over the controller's stores: same rows, same order, same
-// fields, read live (see controllerState.ReadyWork). The process then opens no
-// store at all.
+// (GET /v0/city/{cityName}/work/ready) for the answer. That answer is the
+// in-process reader's over the config the controller has published and the
+// stores it holds: the same rows in the same order with the same fields, read
+// live (see controllerState.ReadyWork). The process then opens no store at all.
+// It is not a fresh read of the config on disk: a rig added, removed or rebound
+// there takes effect in the controller's answer at its next config reload, and
+// in the in-process read at once.
 //
 // It answers false on ANY failure, and the caller reads in-process exactly as it
 // always has: no controller, a controller from before the endpoint existed, a
-// refused request (a config that is not current), a store the controller could
-// not read, a transport error or a timeout. The controller answers only while
-// its config is current, an edit on disk counting once its config watcher has
-// seen it, and then its answer is only a faster route to the same rows, so the
-// slower route is always the safe one. GC_NO_API forces it.
+// refused request (a reload or API config write in progress, or a failed
+// reload), a store the controller could not read, a transport error or a
+// timeout. That read is the one `gc ready` made before the endpoint existed, so
+// falling back to it is always safe. GC_NO_API forces it.
 func readyThroughController(cityPath string, q readywork.Query, stderr io.Writer) ([]readywork.ReadyBead, bool) {
 	client, reason := readyAPIClient(cityPath)
 	if client == nil {

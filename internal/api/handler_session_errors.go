@@ -6,6 +6,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // turnInterruptUnsupportedCode is the error code for
@@ -48,6 +49,8 @@ func writeSessionManagerError(w http.ResponseWriter, err error) {
 		// Not retryable as is: the kept conversation's resume failed, and the
 		// message names the explicit reset that starts the session fresh.
 		writeError(w, http.StatusConflict, "conversation_retained", err.Error())
+	case errors.As(err, new(*worker.LiveSubagentsError)):
+		writeError(w, http.StatusConflict, "live_subagents", err.Error())
 	case errors.Is(err, session.ErrSessionClosed), errors.Is(err, session.ErrResumeRequired), errors.Is(err, session.ErrSessionKillPending):
 		writeError(w, http.StatusConflict, "conflict", err.Error())
 	case errors.Is(err, session.ErrSessionInactive):

@@ -66,6 +66,7 @@ go_test(
         "codex_batch_test.go",
         "codex_history_usage_test.go",
         "codex_reader_test.go",
+        "codex_turn_error_test.go",
         "codex_usage_test.go",
         "context_opus5_ra_jbbv0_test.go",
         "context_test.go",

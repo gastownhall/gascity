@@ -27,21 +27,14 @@ type conversationLanesDoctorCheck struct {
 	sessions func(beads.Store) beads.Store
 	// query asks the city's controller for its lane host's status.
 	query func(cityPath string) (conversationLaneStatus, error)
-	// lookupEnv is the environment the reconciler mode latches with.
-	lookupEnv func(string) (string, bool)
 }
-
-// laneMessageUnderV2Warning is the check's warning when message is listed
-// under the v2 reconciler (ga-f35wnp, V2-18).
-const laneMessageUnderV2Warning = `message is listed under session_reconciler = "v2": the content gate cannot see a stop v2 requests before its drain begins (V2-18), so content can start a turn in a session v2 is about to drain`
 
 func newConversationLanesDoctorCheck(cityPath string, cfg *config.City) *conversationLanesDoctorCheck {
 	return &conversationLanesDoctorCheck{
-		cfg:       cfg,
-		open:      func() (beads.Store, error) { return openCityStoreAtWithConfig(cityPath, cfg) },
-		sessions:  func(store beads.Store) beads.Store { return cliSessionStore(store, cfg, cityPath) },
-		query:     queryConversationLaneStatus,
-		lookupEnv: reconcilerModeLookupEnv,
+		cfg:      cfg,
+		open:     func() (beads.Store, error) { return openCityStoreAtWithConfig(cityPath, cfg) },
+		sessions: func(store beads.Store) beads.Store { return cliSessionStore(store, cfg, cityPath) },
+		query:    queryConversationLaneStatus,
 	}
 }
 
@@ -65,38 +58,8 @@ func (*conversationLanesDoctorCheck) Fix(_ *doctor.CheckContext) error { return 
 // city), or it refused to start the host; a Warning when the controller does
 // not answer, waits for its sessions store, runs another list than
 // city.toml's, has quarantined op rows, or failed its last pass or anything
-// since its last good one; else OK with the last pass's age. Whatever the
-// state, message listed under the v2 reconciler adds an advisory warning
-// (laneMessageUnderV2Warning).
+// since its last good one; else OK with the last pass's age.
 func (c *conversationLanesDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
-	r := c.run(ctx)
-	if !c.messageUnderV2() {
-		return r
-	}
-	if r.Status == doctor.StatusOK {
-		r.Status = doctor.StatusWarning
-		r.Severity = doctor.SeverityAdvisory
-		r.FixHint = "remove message from [ops] authoritative, or run the legacy reconciler"
-	}
-	r.Message += "; " + laneMessageUnderV2Warning
-	return r
-}
-
-// messageUnderV2 reports whether [ops] authoritative lists message while the
-// city latches the v2 reconciler.
-func (c *conversationLanesDoctorCheck) messageUnderV2() bool {
-	if !cliLaneExecutesMessage(c.cfg) {
-		return false
-	}
-	lookup := c.lookupEnv
-	if lookup == nil {
-		lookup = reconcilerModeLookupEnv
-	}
-	mode, err := latchReconcilerMode(c.cfg, lookup)
-	return err == nil && mode == reconcilerV2
-}
-
-func (c *conversationLanesDoctorCheck) run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	r := &doctor.CheckResult{Name: c.Name(), Status: doctor.StatusOK}
 	var kinds []string
 	if c.cfg != nil {
@@ -199,7 +162,7 @@ func reportLaneService(r *doctor.CheckResult, listed string, kinds []string, st 
 		warnings = append(warnings, fmt.Sprintf("the controller runs [ops] authoritative = [%s] until its next start", strings.Join(st.Kinds, ", ")))
 	}
 	if st.Quarantined > 0 {
-		warnings = append(warnings, fmt.Sprintf("%d op row(s) this gc cannot decode are quarantined, which a newer gc may have written", st.Quarantined))
+		warnings = append(warnings, fmt.Sprintf("%d op row(s) this gc cannot decode are quarantined: a newer gc wrote them, or they are not valid to this one", st.Quarantined))
 		r.Details = append(r.Details, st.QuarantinedIDs...)
 	}
 	if st.LastError != "" {
@@ -216,7 +179,7 @@ func reportLaneService(r *doctor.CheckResult, listed string, kinds []string, st 
 		r.Status = doctor.StatusWarning
 		r.Severity = doctor.SeverityAdvisory
 		r.Message = fmt.Sprintf("conversation lanes on (%s), %s: %s", listed, pass, strings.Join(warnings, "; "))
-		r.FixHint = "see the details and the controller log; upgrade this gc if a newer gc wrote the rows it cannot decode; restart the controller to apply a changed list"
+		r.FixHint = "see the details and the controller log; inspect the rows this gc cannot decode, and upgrade it if a newer gc wrote them; restart the controller to apply a changed list"
 		return
 	}
 	r.Message = fmt.Sprintf("conversation lanes on (%s): %s, %d conversation(s) in service", listed, pass, st.Workers)

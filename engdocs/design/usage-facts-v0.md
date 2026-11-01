@@ -65,17 +65,17 @@ the session bead misattributes every later run to the first. Resolve
 4. plain work bead → its own id
 5. manual chat (no work bead) → `session.Info.ID`
 
-v0 ships a **resolved-value** form of this. `gc hook --claim` resolves the run id
-from the just-claimed work bead (the order above) and writes it onto the session
-bead as `gc.current_run_id`, updated on **every** claim so a reused pool session
-follows its current run instead of staying frozen on its first. A per-operation
-reader then reads `gc.current_run_id` straight off the already-loaded session bead
-— no extra `GetWithBead`. The tradeoff: a resolved id, unlike a `gc.active_work_bead`
-*pointer*, cannot be re-resolved back to the acting work bead, so per-work-bead
-`step_id` attribution (`UsageFact.StepID`) is **not** preserved by this form; the
-pointer (resolve at `operation_events.go:136` via `GetWithBead`, `manager.go:1356`)
-stays the future option if `step_id` segmentation is wanted (open question 1). The
-session bead is a *current-pointer*, never a frozen id.
+v0 leaves `run_id` as above and does not write it onto the session bead. Formula
+attribution is a separate, best-effort label, `UsageFact.FormulaName`, resolved at
+record time from the controller-stamped pointer: the session's
+`currently_processing_bead_id` (`session.CurrentBeadIDKey`), else
+`gc.trigger_bead_id`. The pointer means "the last bead the controller stamped",
+not "the current bead", and it survives that bead's close. The resolver reads the
+acting bead, follows it to its run root, and takes the root's `gc.formula_name`.
+Compute facts and plain non-formula work carry an empty name. The idle tail and a
+batch that spans a bead switch are credited to the formula behind the pointer at
+record time, so batch-level over-attribution to the later bead is possible and
+accepted as best-effort.
 
 ## Emission seams
 
@@ -149,7 +149,9 @@ dropped by request, and `gc costs` shows nothing local. Aggregating
 `WorkerOperation` payloads over `events.jsonl` (so cost insight works regardless
 of the configured sink) remains a future option; it depends only on the
 `WorkerOperation` payload's `CostUSDEstimate` landing (today "always absent"),
-**not** on the OTel instruments.
+**not** on the OTel instruments. `gc costs --by-formula` instead groups model
+usage by each fact's formula name (`-` for unattributed) and omits wall-seconds,
+which compute facts cannot attribute to a formula.
 
 ## Honest limits
 
@@ -162,10 +164,10 @@ rollup, else cost sums silently omit unpriced models.
 ## Decisions
 
 - `run_id` is **layered, resolved per-operation** from the acting work bead
-  (graph → poured → nested → self → session-id for manual chat). v0 records the
-  resolved id on the session bead as `gc.current_run_id` at claim time (updated on
-  every claim, never frozen); a `gc.active_work_bead` pointer that would also keep
-  `step_id` stays a future option (run-identity section; open question 1).
+  (graph → poured → nested → self → session-id for manual chat), and is unchanged
+  by formula attribution. The formula name is a separate best-effort label
+  resolved at record time from the controller-stamped
+  `currently_processing_bead_id` pointer (run-identity section; open question 1).
 - Usage attaches to the **event-log** path (`WorkerOperation` payload) + the
   `Sink`, **not** OTel metric labels (which are cardinality-bounded by design).
 - Sink injection is the proven **`exec:<script>`** seam; the `usage.Sink`
@@ -188,18 +190,15 @@ above. Each keeps cost insight as decision-support (lossy by construction, per
 *Honest limits*) while avoiding larger changes the open questions below have not
 yet settled.
 
-- **Run identity is recorded per-run at claim; the reader is the remaining gap.**
-  `gc hook --claim` writes the resolved run id onto the session bead as
-  `gc.current_run_id` on every claim (`cmd/gc/cmd_hook_claim.go`), so a reused pool
-  session is stamped with its current run, not its first, and the key is declared
-  in `KnownMetadataKeys`. This value form intentionally drops per-work-bead
-  (`step_id`) attribution; a `gc.active_work_bead` pointer remains the future option
-  for it. The consumer side is staged behind the writer: `ResolveRunID` still
-  resolves per-operation off the session bead's own run chain (`workflow_id ||
-  molecule_id || gc.root_bead_id-or-self || bead id || session id`) and does **not**
-  yet read `gc.current_run_id`, so cost facts still roll up per-session until a
-  reader that consumes the recorded value lands (tracked as follow-up ga-2m8abf;
-  see open question 1).
+- **Run identity is per-operation; formula attribution is a separate label.**
+  `ResolveRunID` resolves `run_id` per-operation off the session bead's run chain
+  (`workflow_id || molecule_id || gc.root_bead_id-or-self || bead id || session
+  id`), so cost facts roll up per-session unless the session carries a work run.
+  `UsageFact.FormulaName` is resolved at record time from the session's
+  `currently_processing_bead_id` pointer (else `gc.trigger_bead_id`) and is empty
+  when the session has no acting bead, the bead is gone, or its run root was not
+  compiled from a formula. Per-work-bead (`step_id`) attribution stays a future
+  option (open question 1).
 - **Compute facts emit from a reconcile scan, not a transactional outbox.** The
   reconcile tick scans the open session-bead snapshot it already loaded, emits a
   fact for any bead in a terminal state lacking its

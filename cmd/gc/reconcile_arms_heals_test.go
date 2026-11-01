@@ -382,12 +382,28 @@ func TestAsleepHealPatchMatchesLegacy(t *testing.T) {
 	keeps := map[session.SleepReason]bool{
 		session.SleepReasonIdle: true, session.SleepReasonIdleTimeout: true, session.SleepReasonNoWakeReason: true,
 		session.SleepReasonConfigDrift: true, session.SleepReasonDrained: true, session.SleepReasonCityStop: true,
-		session.SleepReasonUserHold: true, session.SleepReasonWaitHold: true, session.SleepReasonRateLimit: true,
+		session.SleepReasonKilled: true, session.SleepReasonUserHold: true, session.SleepReasonWaitHold: true, session.SleepReasonRateLimit: true,
 		session.SleepReasonRuntimeMissing: true,
 	}
 	for _, reason := range reasons {
 		if got := session.SleepReasonKeepsContinuation(string(reason)); got != keeps[reason] {
 			t.Errorf("SleepReasonKeepsContinuation(%q) = %v, want %v", reason, got, keeps[reason])
+		}
+	}
+}
+
+// Kills the v2 dead-runtime heal discarding the conversation of a row an
+// operator killed (#7308): a killed active or creating row keeps its
+// continuation and heals to a bare asleep.
+func TestAsleepHealPatchKeepsKilledContinuation(t *testing.T) {
+	for _, state := range []string{"creating", "active"} {
+		info := session.Info{
+			ID: "gc-1", MetadataState: state, SleepReason: string(session.SleepReasonKilled),
+			SessionKey: "resume-key", StartedConfigHash: "config-hash", CreatedAt: gatherNow.Add(-time.Hour),
+		}
+		want := session.MetadataPatch{"state": string(session.StateAsleep)}
+		if got := asleepHealPatch(info); !maps.Equal(got, want) {
+			t.Errorf("%s: patch %v, want %v", state, got, want)
 		}
 	}
 }
@@ -570,6 +586,19 @@ func awakeHealCases(t *testing.T, state string) {
 			}
 		})
 	}
+}
+
+// parkedClearCase is a pool seat parked on pre-assigned blocked work
+// (ga-ylpbsy.16) that still carries the marker a stranded pass left: A21
+// proposes the parked clear, a fresh heal.
+func parkedClearCase(t *testing.T) *healCase {
+	t.Helper()
+	slept := gatherNow.Add(-time.Hour)
+	c := newHealCase(t, livenessGone, desireSleep, "pool_managed", "true", "pool_slot", "1", "state", "asleep", "sleep_reason", "idle",
+		"slept_at", slept.UTC().Format(time.RFC3339), strandedEventEmittedKey, rowAt(-time.Hour))
+	e := c.a.Snapshot.Entries[c.k]
+	e.Template, e.Park = "worker", parkVerdict{Eligible: true, Parked: true, Until: slept.Add(parkedWorkMaxHold)}
+	return c
 }
 
 // ownRuntimeCase is a row whose runtime the inventory reads alive at
@@ -928,6 +957,7 @@ func TestNoArmActsOnACensusOnlyRow(t *testing.T) {
 		{"A19 drain void", decideDrainVoid + drainSuspended, func(t *testing.T) *healCase {
 			return newHealCase(t, livenessAlive, desireWake, append([]string{"state", "active"}, intentAt(drainSuspended, "3")...)...)
 		}},
+		{"A21 parked clear", decideParkedClear, parkedClearCase},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := tc.row(t)

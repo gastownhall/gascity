@@ -180,7 +180,7 @@ func TestNudgeSessionReportsARefusedReSendUnconfirmed(t *testing.T) {
 	dropText := func(context.Context, string, string, time.Duration) error { return nil }
 
 	err := tm.nudgeSession(context.Background(), pane.sessionName, "run the tests", dropText,
-		func(string) bool { return false }, func(string) []string { return []string{"Enter"} }, look)
+		func(string) bool { return false }, func(string) []string { return []string{"Enter"} }, look, false)
 	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) || !errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed) {
 		t.Fatalf("nudgeSession = %v, want ErrNudgeSubmitUnconfirmed, a runtime.ErrNudgeDeliveryUnconfirmed", err)
 	}

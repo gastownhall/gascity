@@ -194,7 +194,7 @@ func TestSessionControlOpsConcurrentSameKeyStopIsBusy(t *testing.T) {
 
 	firstDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() { firstDone <- e.post(t, "/session/"+info.ID+"/stop", "stop-1", "") }()
-	<-blocking.entered
+	requireProviderEntered(t, blocking.entered, firstDone)
 
 	e.rebuild(t)
 	busy := e.post(t, "/session/"+info.ID+"/stop", "stop-1", "")
@@ -311,6 +311,29 @@ func TestSessionControlOpsKillOfAnInactiveSessionReplays(t *testing.T) {
 	wantStatus(t, "replay", replay, http.StatusOK)
 	if r := decodeCommandAnswer(t, replay); !r.Replayed || r.Op == nil || r.Op.ID != a.Op.ID || r.ID != info.ID {
 		t.Fatalf("replay = %+v", r)
+	}
+}
+
+// A kill of a configured named session whose runtime is already gone counts
+// as done, as gc session kill's does, and closes skipped{not_needed}, as an
+// unnamed session's kill does.
+func TestSessionControlOpsKillOfAnInactiveNamedSessionSkips(t *testing.T) {
+	e := newControlOpsEnv(t, "off", "auto")
+	e.fs.sessionProvider = runtime.FullFake{Fake: e.fs.sp}
+	info := e.session(t, "Gone named")
+	if err := e.store.SetMetadata(info.ID, session.NamedSessionIdentityMetadata, "helper"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.fs.sp.Stop(info.SessionName); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.store.SetMetadata(info.ID, "state", "asleep"); err != nil {
+		t.Fatal(err)
+	}
+	rec := e.post(t, "/session/"+info.ID+"/kill", "kill-1", "")
+	wantStatus(t, "kill", rec, http.StatusOK)
+	if a := decodeCommandAnswer(t, rec); a.Op == nil || a.Op.Outcome == nil || a.Op.Outcome.Arm != string(opjournal.ArmSkipped) || a.Op.Outcome.Reason != opjournal.ReasonNotNeeded {
+		t.Fatalf("kill op = %+v, want it closed skipped{not_needed}", a.Op)
 	}
 }
 
@@ -441,7 +464,7 @@ func TestSessionControlOpsReplayOfAFailedOpIsOpAlreadyFailed(t *testing.T) {
 }
 
 // protocolStopEnv is an opsEnv, ops.control auto, whose session runs on a protocol runtime that
-// records turns, as t3bridge does.
+// records its turns' starts and ends.
 func protocolStopEnv(t *testing.T) (*opsEnv, session.Info) {
 	t.Helper()
 	return protocolStopEnvMode(t, "auto")
@@ -1729,7 +1752,7 @@ func TestSessionControlOpsConcurrentRespondsAnswerOnlyTheirInteraction(t *testin
 
 	firstDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() { firstDone <- e.post(t, "/session/"+info.ID+"/respond", "click-1", `{"action":"approve"}`) }()
-	<-blocking.entered
+	requireProviderEntered(t, blocking.entered, firstDone)
 	recorded := make(chan struct{})
 	e.store.set(func(s *opsTestStore) { s.onOpCreate = func() { close(recorded) } })
 	secondDone := make(chan *httptest.ResponseRecorder, 1)
@@ -1768,7 +1791,7 @@ var syncEndpoints = []syncEndpoint{
 	{path: "/stop", kind: opjournal.KindInterrupt, code: http.StatusOK, sessionScoped: true, policy: interruptOpPolicy},
 	{
 		path: "/respond", body: `{"request_id":"req-1","action":"approve"}`, kind: opjournal.KindRespond, code: http.StatusAccepted, sessionScoped: true,
-		payload: `{"action":"approve","text":""}`, interaction: "req-1",
+		payload: `{"action":"approve","text":""}`, interaction: "req-1", policy: respondOpPolicy,
 	},
 	{path: "/kill", kind: opjournal.KindKill, code: http.StatusOK, sessionScoped: true},
 	{path: "/suspend", kind: opjournal.KindSuspend, code: http.StatusOK},
@@ -1897,12 +1920,13 @@ func TestSessionControlOpsAdoptedKillOfAMovedSessionIsRefused(t *testing.T) {
 	}
 }
 
-// reopenAtFenceStore reopens closed session id, and starts a new run of it, at
-// the kill fence's first read of the row: a reopen and a start that land
-// between a recorded kill's generation check and its fence. The start takes
-// the session's runtime lease, as every start does; startErr is the lease's
+// reopenAtKillStore reopens closed session id, and starts a new run of it, at
+// the kill's first read of the row (session.Manager.Kill: the operator kill
+// of a closed row runs no fence): a reopen and a start that land between a
+// recorded kill's generation check and its kill. The start takes the
+// session's runtime lease, as every start does; startErr is the lease's
 // answer, and a start the lease refuses does nothing.
-type reopenAtFenceStore struct {
+type reopenAtKillStore struct {
 	*opsTestStore
 	id, city, name string
 	sp             *runtime.Fake
@@ -1910,14 +1934,14 @@ type reopenAtFenceStore struct {
 	startErr       error
 }
 
-func (s *reopenAtFenceStore) Get(id string) (beads.Bead, error) {
-	if id == s.id && callStackHas("session.(*Manager).KillFencedReport") && s.fired.CompareAndSwap(false, true) {
+func (s *reopenAtKillStore) Get(id string) (beads.Bead, error) {
+	if id == s.id && callStackHasFunc("session.(*Manager).Kill") && s.fired.CompareAndSwap(false, true) {
 		s.startErr = s.reopenAndStart()
 	}
 	return s.opsTestStore.Get(id)
 }
 
-func (s *reopenAtFenceStore) reopenAndStart() error {
+func (s *reopenAtKillStore) reopenAndStart() error {
 	if err := s.Reopen(s.id); err != nil {
 		return err
 	}
@@ -1937,7 +1961,7 @@ func (s *reopenAtFenceStore) reopenAndStart() error {
 }
 
 // A recorded kill of a closed row holds the session's runtime lease from its
-// generation check through the fence, as on an open row: a reopen and a start
+// generation check through the kill, as on an open row: a reopen and a start
 // that land in between find the lease held, so the start waits out the kill
 // instead of making a run the kill then stops.
 func TestSessionControlOpsKillOfAClosedRowHoldsTheLease(t *testing.T) {
@@ -1950,17 +1974,17 @@ func TestSessionControlOpsKillOfAClosedRowHoldsTheLease(t *testing.T) {
 	if err := e.store.Close(info.ID); err != nil {
 		t.Fatal(err)
 	}
-	reopening := &reopenAtFenceStore{opsTestStore: e.store, id: info.ID, city: e.fs.cityPath, name: info.SessionName, sp: e.fs.sp}
+	reopening := &reopenAtKillStore{opsTestStore: e.store, id: info.ID, city: e.fs.cityPath, name: info.SessionName, sp: e.fs.sp}
 	e.fs.cityBeadStore = reopening
 	e.restart(t)
 	starts := e.fs.sp.CountCalls("Start", info.SessionName)
 	rec := e.post(t, "/session/"+info.ID+"/kill", "kill-1", "")
 	wantStatus(t, "kill", rec, http.StatusOK)
 	if !reopening.fired.Load() {
-		t.Fatal("the fence never read the row")
+		t.Fatal("the kill never read the row")
 	}
 	if !errors.Is(reopening.startErr, session.ErrRuntimeLeaseBusy) {
-		t.Fatalf("the start between the generation check and the fence: %v; want the runtime lease busy, held by the kill", reopening.startErr)
+		t.Fatalf("the start between the generation check and the kill: %v; want the runtime lease busy, held by the kill", reopening.startErr)
 	}
 	if got := e.fs.sp.CountCalls("Start", info.SessionName); got != starts || e.fs.sp.IsRunning(info.SessionName) {
 		t.Fatalf("a run started under the kill: %d Start calls, running %v", got-starts, e.fs.sp.IsRunning(info.SessionName))
@@ -2038,6 +2062,50 @@ func TestSessionControlOpsRequireNamedStopRefusesAnInvalidKey(t *testing.T) {
 	}
 }
 
+// A /reset Idempotency-Key in an in-session restart request's key namespace
+// (handoff:, request-restart:) is invalid: gc handoff and gc runtime
+// request-restart keep their keys there for the same restart{fresh} request,
+// so a reset key that spells one would name that request's op under the
+// operator principal and replay it, resetting nothing. require refuses it 422
+// invalid_idempotency_key with no effect; auto resets unrecorded, beside the
+// op the key spells.
+func TestSessionResetRefusesARestartRequestsKeyNamespace(t *testing.T) {
+	for _, key := range []string{legacyop.KeyNamespaceHandoff + "k1", legacyop.KeyNamespaceRequestRestart + "k1"} {
+		for _, mode := range []string{"require", "auto"} {
+			t.Run(key+"/"+mode, func(t *testing.T) {
+				e := newControlOpsEnv(t, "off", mode)
+				info := e.session(t, "Reserved key")
+				spelled := e.seedSyncOp(t, info.ID, opjournal.KindRestart, key, opjournal.Scope{}, resetSessionPolicy, "", legacyop.ExecutorCLI, time.Now())
+				done := opjournal.Outcome{Arm: opjournal.ArmSucceeded, Result: opjournal.Result{Via: legacyop.ViaLegacy}}
+				if _, err := e.opStore(t).Close(spelled.ID, done, string(legacyop.ExecutorCLI)); err != nil {
+					t.Fatal(err)
+				}
+				before := metadataOf(t, e.store, info.ID)
+				rec := e.post(t, "/session/"+info.ID+"/reset", key, "")
+				if mode == "require" {
+					if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "invalid_idempotency_key") {
+						t.Fatalf("status %d: %s, want 422 invalid_idempotency_key", rec.Code, rec.Body.String())
+					}
+					if after := metadataOf(t, e.store, info.ID); !maps.Equal(before, after) {
+						t.Fatalf("the refused reset changed the session row: %v -> %v", before, after)
+					}
+				} else {
+					wantStatus(t, "reset", rec, http.StatusOK)
+					if a := decodeCommandAnswer(t, rec); a.Replayed || a.Op != nil || a.IdempotencyKey != "" {
+						t.Fatalf("answer = %+v, want the reset run unrecorded", a)
+					}
+					if md := metadataOf(t, e.store, info.ID); md["restart_requested"] != "true" || md["continuation_reset_pending"] != "true" {
+						t.Fatalf("session row = %v, want the fresh restart requested", md)
+					}
+				}
+				if n := len(e.opRows(t)); n != 1 {
+					t.Fatalf("op rows = %d, want only the op the key spells", n)
+				}
+			})
+		}
+	}
+}
+
 // A named stop is turn-scoped in every mode: in off, and in an auto that
 // could not record it (I8 keeps the request's own turn), it sends the one
 // turn-scoped interrupt and never the session-scoped one.
@@ -2086,6 +2154,23 @@ func (s *frameFailingStore) Get(id string) (beads.Bead, error) {
 		return beads.Bead{}, s.err
 	}
 	return s.opsTestStore.Get(id)
+}
+
+// callStackHasFunc reports whether a caller is the function whose name ends
+// in fn: unlike callStackHas, "session.(*Manager).Kill" names Kill alone, not
+// KillFencedReport or KillRuntimeGone.
+func callStackHasFunc(fn string) bool {
+	pcs := make([]uintptr, 64)
+	frames := goruntime.CallersFrames(pcs[:goruntime.Callers(2, pcs)])
+	for {
+		f, more := frames.Next()
+		if strings.HasSuffix(f.Function, fn) {
+			return true
+		}
+		if !more {
+			return false
+		}
+	}
 }
 
 // callStackHas reports whether a caller's function name contains frame.
@@ -2362,6 +2447,58 @@ func TestSessionControlOpsAdoptedKillOfAMovedSessionTouchesNothing(t *testing.T)
 			if got := e.fs.sp.CountCalls("Stop", info.SessionName); got != stops {
 				t.Fatalf("Stop calls = %d, want %d: the refused kill stopped the runtime", got, stops)
 			}
+		})
+	}
+}
+
+// An op a crash left open before its legacy effect ran (X12's K1: the row is
+// durable, nothing answered, nothing acted) is adopted by a same-key retry in
+// a new API process, and the adopted retry runs the legacy command: the
+// session is suspended, woken or reset, not only the op closed succeeded at
+// attempt 1.
+func TestSessionControlOpsAdoptedLifecycleCommandReExecutes(t *testing.T) {
+	for _, tc := range []struct {
+		path      string
+		kind      opjournal.Kind
+		policy    opjournal.Policy
+		suspended bool
+		acted     func(t *testing.T, stops int, md map[string]string)
+	}{
+		{"/suspend", opjournal.KindSuspend, opjournal.Policy{}, false, func(t *testing.T, stops int, md map[string]string) {
+			if md["state"] != "suspended" || stops != 1 {
+				t.Fatalf("state %q, %d Stop calls; want suspended by one Stop", md["state"], stops)
+			}
+		}},
+		{"/wake", opjournal.KindWake, opjournal.Policy{}, true, func(t *testing.T, _ int, md map[string]string) {
+			if md["state"] == "suspended" || md["wake_request"] != "explicit" || md["wake_requested_at"] == "" {
+				t.Fatalf("state %q wake_request %q at %q; want the explicit wake recorded", md["state"], md["wake_request"], md["wake_requested_at"])
+			}
+		}},
+		{"/reset", opjournal.KindRestart, resetSessionPolicy, false, func(t *testing.T, _ int, md map[string]string) {
+			if md["restart_requested"] != "true" || md["continuation_reset_pending"] != "true" {
+				t.Fatalf("restart_requested %q continuation_reset_pending %q; want the fresh restart requested", md["restart_requested"], md["continuation_reset_pending"])
+			}
+		}},
+	} {
+		t.Run(strings.TrimPrefix(tc.path, "/"), func(t *testing.T) {
+			e := newControlOpsEnv(t, "off", "auto")
+			info := e.session(t, "Adopted "+tc.path)
+			if tc.suspended {
+				wantStatus(t, "fixture suspend", e.post(t, "/session/"+info.ID+"/suspend", "", ""), http.StatusOK)
+			}
+			stops := e.fs.sp.CountCalls("Stop", info.SessionName)
+			op := e.seedSyncOp(t, info.ID, tc.kind, "k-1", opjournal.Scope{}, tc.policy, "", legacyop.ExecutorAPI, time.Now())
+			e.restart(t)
+			rec := e.post(t, "/session/"+info.ID+tc.path, "k-1", "")
+			wantStatus(t, "adopting retry", rec, http.StatusOK)
+			if a := decodeCommandAnswer(t, rec); a.Replayed {
+				t.Fatalf("adopting retry answered a replay: %+v", a)
+			}
+			got, err := e.opStore(t).Get(op.ID)
+			if err != nil || got.Status != opjournal.StatusClosed || got.Attempt != 1 || got.Outcome.Arm != opjournal.ArmSucceeded {
+				t.Fatalf("adopted op = %+v, %v; want closed succeeded at attempt 1", got, err)
+			}
+			tc.acted(t, e.fs.sp.CountCalls("Stop", info.SessionName)-stops, metadataOf(t, e.store, info.ID))
 		})
 	}
 }

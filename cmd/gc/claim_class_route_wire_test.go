@@ -41,7 +41,8 @@ type wireMissStorage struct {
 }
 
 func (s *wireMissStorage) IssueClaimer() (issueops.Claimer, error) { return wireMissClaimer{s}, nil }
-func (s *wireMissStorage) IssueReader() (issueops.Reader, error)   { return wireMissReader{s: s}, nil }
+
+func (s *wireMissStorage) IssueReader() (issueops.Reader, error) { return wireMissReader{s: s}, nil }
 
 type wireMissClaimer struct{ s *wireMissStorage }
 
@@ -165,5 +166,53 @@ func TestClassRoutedClaimTakesAnInfraBindingWispOverABdSubprocessWorkLeg(t *test
 	}
 	if want := []string{claimCmd, showCmd, wispQueryCmd}; !slices.Equal(ran, want) {
 		t.Fatalf("bd ran %q, want the claim, then one settling read of the same leg %q", ran, want)
+	}
+}
+
+// TestClassRoutedClaimKeepsAWorkLegStatusRefusalAsALostClaim pins the split-city
+// path for a bead the work store holds whose status changed after the reader
+// served it (here it was closed). bd refuses the claim as not claimable; that is
+// the work store's answer about a row it holds, so the claim is lost there and
+// the binding is never probed or written.
+func TestClassRoutedClaimKeepsAWorkLegStatusRefusalAsALostClaim(t *testing.T) {
+	const id = "ga-closedrace"
+	class := newClaimRouteClassStore(t)
+
+	claimCmd := "update " + id + " --claim --json"
+	showCmd := "show --json " + id
+	replies := map[string]struct{ out, err string }{
+		claimCmd: {err: "exit status 1: Error updating " + id + ": issue not claimable: status closed\n" +
+			`{"error":"1 of 1 issues failed to update","failed":[{"id":"` + id + `","error":"updating issue: issue not claimable: status closed"}],"schema_version":1}`},
+		showCmd: {out: `[{"id":"` + id + `","title":"work","status":"closed","issue_type":"task","created_at":"2026-10-31T00:00:00Z","metadata":{"gc.routed_to":"worker"}}]`},
+	}
+	var ran []string
+	originalRunner := hookClaimCommandRunnerWithEnvContext
+	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+	hookClaimCommandRunnerWithEnvContext = func(context.Context, map[string]string) beads.CommandRunner {
+		return func(_, name string, args ...string) ([]byte, error) {
+			cmd := strings.Join(args, " ")
+			ran = append(ran, cmd)
+			reply, ok := replies[cmd]
+			if name != "bd" || !ok {
+				t.Errorf("unexpected command: %s %s", name, cmd)
+				return nil, fmt.Errorf("unexpected command: %s %s", name, cmd)
+			}
+			if reply.err != "" {
+				return []byte(reply.out), errors.New(reply.err)
+			}
+			return []byte(reply.out), nil
+		}
+	}
+
+	ops := classRoutedHookClaimOps(hookClaimOps{Claim: hookClaimWithBdStore, ReadWorkMeta: hookReadClaimedBeadWithBdStore}, newClaimRouteFor(t, class))
+	_, ok, err := ops.Claim(context.Background(), t.TempDir(), nil, id, "worker-1")
+	if err != nil || ok {
+		t.Fatalf("claim of %s = (ok=%v err=%v), want a lost claim (ok=false, nil error)", id, ok, err)
+	}
+	if _, err := class.Get(id); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("binding Get(%s) err = %v, want ErrNotFound: a work-leg refusal must not reach the binding", id, err)
+	}
+	if want := []string{claimCmd, showCmd}; !slices.Equal(ran, want) {
+		t.Fatalf("bd ran %q, want the claim and one read of the same leg %q", ran, want)
 	}
 }

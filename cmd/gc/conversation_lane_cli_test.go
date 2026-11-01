@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -48,16 +49,26 @@ func newCLILaneCityOver(t *testing.T, store beads.Store, opts ...laneFixtureOpt)
 	f := newLaneFixtureOver(t, store, opts...)
 	f.cfg.Ops.Authoritative = []string{string(opjournal.KindMessage)}
 	c := &cliLaneCity{laneFixture: f, env: map[string]string{}, ringReply: "ok"}
-	oldClock, oldLookup, oldRing := cliOpClock, cliOpLookupEnv, cliLaneRing
-	t.Cleanup(func() { cliOpClock, cliOpLookupEnv, cliLaneRing = oldClock, oldLookup, oldRing })
+	oldClock, oldLookup, oldRing, oldOpen := cliOpClock, cliOpLookupEnv, cliLaneRing, openNudgeWorkStore
+	t.Cleanup(func() {
+		cliOpClock, cliOpLookupEnv, cliLaneRing, openNudgeWorkStore = oldClock, oldLookup, oldRing, oldOpen
+	})
+	// The legacy path queues a nudge through the city's nudges store. The
+	// fixture's city is a bare directory, so the real opener resolves the
+	// default bd provider and starts a dolt sql-server that outlives the test.
+	// Every nudge store opened from here is the fixture's own (lane tests run
+	// serially, as the seam requires).
+	openNudgeWorkStore = func(string, string) (beads.Store, error) { return store, nil }
 	cliOpClock = f.clk
 	cliOpLookupEnv = func(k string) (string, bool) { v, ok := c.env[k]; return v, ok }
+	// No controller answers by default: the mode is unknown.
+	setLaneControllerMode(t, reconcilerLegacy, false)
 	cliLaneRing = func(_, conv, opID string) (string, error) {
 		c.rings = append(c.rings, conv+":"+opID)
 		c.events = append(c.events, "ring")
 		return c.ringReply, c.ringErr
 	}
-	_, info := f.view(t)
+	info := f.rowInfo(t)
 	c.target = resolveNudgeTargetFromSessionInfo(f.dir, f.cfg, info)
 	return c
 }
@@ -123,13 +134,11 @@ func TestCLILaneNudgePolicy(t *testing.T) {
 // With message listed, a nudge is one lane op: no legacy op, no queue item,
 // whatever ops.content says.
 func TestSessionNudgeLaneWritesOneLaneOp(t *testing.T) {
-	for _, gate := range []string{"", "auto", "require"} {
+	for _, gate := range []string{"off", "auto", "require"} {
 		for _, mode := range []nudgeDeliveryMode{nudgeDeliveryWaitIdle, nudgeDeliveryImmediate, nudgeDeliveryQueue} {
 			t.Run(gate+"/"+string(mode), func(t *testing.T) {
 				c := newCLILaneCity(t)
-				if gate != "" {
-					c.env["GC_OPS_CONTENT"] = gate
-				}
+				c.env["GC_OPS_CONTENT"] = gate
 				code, stdout, stderr := c.nudge(mode, "", true, cliLaneTestMessage)
 				if code != 0 {
 					t.Fatalf("nudge = %d; stderr=%s", code, stderr)
@@ -176,21 +185,19 @@ func TestSessionNudgeLaneWritesOneLaneOp(t *testing.T) {
 // With the list empty, the nudge takes OJ-5's path: a legacy op under auto,
 // none with the gate off, and no lane op either way.
 func TestSessionNudgeListEmptyKeepsOJ5Path(t *testing.T) {
-	for _, gate := range []string{"", "auto"} {
+	for _, gate := range []string{"off", "auto"} {
 		t.Run("gate="+gate, func(t *testing.T) {
 			c := newCLILaneCity(t)
 			c.cfg.Ops.Authoritative = nil
 			c.target = resolveNudgeTargetFromSessionInfo(c.dir, c.cfg, c.targetInfo(t))
-			if gate != "" {
-				c.env["GC_OPS_CONTENT"] = gate
-			}
+			c.env["GC_OPS_CONTENT"] = gate
 			code, stdout, stderr := c.nudge(nudgeDeliveryImmediate, "", false, cliLaneTestMessage)
 			if code != 0 || stdout != "Nudged "+c.target.agentKey()+"\n" {
 				t.Fatalf("nudge = %d, stdout %q; stderr=%s", code, stdout, stderr)
 			}
 			ops := c.ops(t)
 			switch gate {
-			case "":
+			case "off":
 				if len(ops) != 0 {
 					t.Fatalf("op rows %+v, want none with the gate off", ops)
 				}
@@ -208,7 +215,7 @@ func TestSessionNudgeListEmptyKeepsOJ5Path(t *testing.T) {
 
 func (c *cliLaneCity) targetInfo(t *testing.T) session.Info {
 	t.Helper()
-	_, info := c.view(t)
+	info := c.rowInfo(t)
 	return info
 }
 
@@ -221,16 +228,30 @@ func TestSessionNudgeLaneRoutesUnservedSessionsLegacy(t *testing.T) {
 		prevPoller := startNudgePoller
 		startNudgePoller = func(_, _, _ string) error { return nil }
 		t.Cleanup(func() { startNudgePoller = prevPoller })
+		asks := setLaneControllerMode(t, reconcilerLegacy, false)
 		if code, _, stderr := c.nudge(nudgeDeliveryQueue, "", false, cliLaneTestMessage); code != 0 {
 			t.Fatalf("nudge = %d; stderr=%s", code, stderr)
+		}
+		if len(asks.cities) != 0 {
+			t.Fatalf("the legacy path asked the controller's mode %d times, want none", len(asks.cities))
 		}
 		for _, op := range c.ops(t) {
 			if op.Executor == opjournal.ExecutorLane {
 				t.Fatalf("lane op %+v for an unserved protocol runtime", op)
 			}
 		}
-		if c.queuedItems(t) != 1 {
-			t.Fatal("the legacy path did not queue the nudge")
+		pending, _, _, err := listQueuedNudgesForTarget(c.dir, c.target, time.Now().Add(time.Hour))
+		if err != nil {
+			t.Fatalf("listing queued nudges: %v", err)
+		}
+		if len(pending) != 1 {
+			t.Fatalf("the legacy path queued %d nudges, want 1", len(pending))
+		}
+		// The queue's shadow bead lands in the fixture's store, never in a
+		// store a real provider would open (and start a server for).
+		shadow, open, err := nudgeShadows(beads.NudgesStore{Store: c.store}).Find(pending[0].ID)
+		if err != nil || !open || shadow.BeadID != pending[0].BeadID {
+			t.Fatalf("queued nudge %s's shadow in the fixture store = %+v (open %v, err %v), want bead %q", pending[0].ID, shadow, open, err, pending[0].BeadID)
 		}
 	})
 	t.Run("no session row", func(t *testing.T) {
@@ -351,13 +372,90 @@ func TestSessionNudgeLaneBusyIsQueued(t *testing.T) {
 	}
 }
 
-// Queue mode proposes and rings: no pass, no runtime call, no note.
+// A session v2 asked to stop at its generation leaves the op queued for the
+// controller (V2-18) while the controller's latched mode is v2 or unknown:
+// the CLI holds no latch, so its inline pass reads the request by the mode
+// the controller answers, live when none answers, and defers the content to
+// the lane host.
+func TestSessionNudgeLaneStopRequestedIsQueued(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		mode  reconcilerMode
+		known bool
+	}{
+		{"latched v2", reconcilerV2, true},
+		// The real query answers an unknown mode as legacy, not known.
+		{"mode unknown", reconcilerLegacy, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testSessionNudgeLaneStopRequestedIsQueued(t, tc.mode, tc.known)
+		})
+	}
+}
+
+func testSessionNudgeLaneStopRequestedIsQueued(t *testing.T, mode reconcilerMode, known bool) {
+	t.Helper()
+	c := newCLILaneCity(t, laneStopRequestedAt(1))
+	asks := setLaneControllerMode(t, mode, known)
+	code, stdout, stderr := c.nudge(nudgeDeliveryWaitIdle, "", false, cliLaneTestMessage)
+	if code != 0 {
+		t.Fatalf("nudge = %d; stderr=%s", code, stderr)
+	}
+	if !slices.Equal(asks.cities, []string{c.target.cityPath}) || !slices.Equal(asks.legs, []time.Duration{cliReconcilerModeLeg}) {
+		t.Fatalf("mode asks %+v; want one for the target's city %s with legs of %s", asks, c.target.cityPath, cliReconcilerModeLeg)
+	}
+	if noted := strings.Contains(stderr, "stop request is honored because the controller's session reconciler is unknown"); noted == known {
+		t.Fatalf("stderr %q: unknown-mode note %v, want %v", stderr, noted, !known)
+	}
+	if len(c.nudges()) != 0 {
+		t.Fatalf("deliveries %+v into a session v2 asked to stop", c.nudges())
+	}
+	want := "Queued nudge for " + c.target.agentKey() + " in the conversation lane (the session cannot take input now: stop_requested; the controller delivers it once that clears)\n"
+	if stdout != want {
+		t.Fatalf("stdout %q, want %q", stdout, want)
+	}
+	op := c.only(t)
+	if op.Status != opjournal.StatusSubmitted || len(c.rings) != 1 || c.rings[0] != c.id+":"+op.ID {
+		t.Fatalf("op %s, rings %v; want submitted and one ring for it", op.Status, c.rings)
+	}
+}
+
+// A controller that latched legacy, as after a rollback, makes the CLI read
+// a stale v2 stop request as residue at once (V2-18): the inline pass
+// delivers, as legacy will never carry the request out.
+func TestSessionNudgeLaneStopResidueUnderLatchedLegacyDelivers(t *testing.T) {
+	c := newCLILaneCity(t, laneStopRequestedAt(1))
+	asks := setLaneControllerMode(t, reconcilerLegacy, true)
+	code, stdout, stderr := c.nudge(nudgeDeliveryWaitIdle, "", false, cliLaneTestMessage)
+	if code != 0 {
+		t.Fatalf("nudge = %d; stderr=%s", code, stderr)
+	}
+	if !slices.Equal(asks.cities, []string{c.target.cityPath}) {
+		t.Fatalf("mode asks %v; want one for the target's city %s", asks.cities, c.target.cityPath)
+	}
+	if nudges := c.nudges(); len(nudges) != 1 || nudges[0].Message != cliLaneTestMessage {
+		t.Fatalf("deliveries %+v, want the message verbatim once", nudges)
+	}
+	if op := c.only(t); op.Outcome.Arm != opjournal.ArmSucceeded || op.Outcome.Result.Via != laneViaLive {
+		t.Fatalf("op %+v, want succeeded via live", op)
+	}
+	if stdout != "Nudged "+c.target.agentKey()+"\n" {
+		t.Fatalf("stdout %q", stdout)
+	}
+}
+
+// Queue mode proposes and rings: no pass, no runtime call, no note, and no
+// ask for the controller's mode, which only a pass reads by.
 func TestSessionNudgeLaneQueueModeRunsNoPass(t *testing.T) {
 	c := newCLILaneCity(t)
+	asks := setLaneControllerMode(t, reconcilerLegacy, false)
 	calls := len(c.sp.Calls)
 	code, stdout, stderr := c.nudge(nudgeDeliveryQueue, "", false, cliLaneTestMessage)
 	if code != 0 {
 		t.Fatalf("nudge = %d; stderr=%s", code, stderr)
+	}
+	if len(asks.cities) != 0 {
+		t.Fatalf("queue mode asked the controller's mode %d times, want none", len(asks.cities))
 	}
 	if n := len(c.sp.Calls); n != calls {
 		t.Fatalf("queue mode made %d runtime calls: %+v", n-calls, c.sp.Calls[calls:])
@@ -924,7 +1022,7 @@ func TestCLILaneQueuedNote(t *testing.T) {
 	}{
 		{name: "busy", op: ifNeeded, res: wait(opjournal.WaitBusy), want: " (the session is mid-turn; the controller delivers it at the next idle boundary)"},
 		{name: "boundary unknown", op: ifNeeded, res: wait(opjournal.WaitBoundaryUnknown), want: " (the session is mid-turn; the controller delivers it at the next idle boundary)"},
-		{name: "pending interaction", op: ifNeeded, res: wait(opjournal.WaitPendingInteraction), want: " (the session is waiting on a permission prompt; the controller delivers it after the prompt is answered)"},
+		{name: "pending interaction", op: ifNeeded, res: wait(opjournal.WaitPendingInteraction), want: " (the session is waiting on a permission prompt or a question; the controller delivers it after that is answered)"},
 		{name: "not running, if_needed", op: ifNeeded, res: wait(opjournal.WaitNotRunning), want: " (the session is not running; the controller wakes it to deliver the nudge)"},
 		{name: "dormant, if_needed", op: ifNeeded, res: wait(opjournal.WaitDormant), want: " (the session is not running; the controller wakes it to deliver the nudge)"},
 		{name: "not running, live_only", op: liveOnly, res: wait(opjournal.WaitNotRunning), want: " (the session is not running; the nudge is delivered the next time it runs)"},
@@ -955,7 +1053,7 @@ func TestSessionNudgeLaneQueuedNotesFromThePass(t *testing.T) {
 		c := newCLILaneCity(t)
 		c.sp.SetPendingInteraction(c.name, &runtime.PendingInteraction{RequestID: "req-1", Kind: "approval"})
 		code, stdout, stderr := c.nudge(nudgeDeliveryWaitIdle, "", false, cliLaneTestMessage)
-		if code != 0 || !strings.Contains(stdout, "(the session is waiting on a permission prompt;") {
+		if code != 0 || !strings.Contains(stdout, "(the session is waiting on a permission prompt or a question;") {
 			t.Fatalf("nudge = %d, stdout %q; stderr %q", code, stdout, stderr)
 		}
 	})

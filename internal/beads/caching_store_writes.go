@@ -596,14 +596,16 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 	refreshed := make([]refreshedBead, 0, len(ids))
 	var refreshErr error
 	refreshFailed := make(map[string]struct{})
-	for _, id := range ids {
-		fresh, getErr := c.backing.Get(id)
-		if getErr != nil {
+	// One batched read for the whole close where the backing has one, not a
+	// `bd show` per closed bead.
+	for i, read := range c.readBackingRows(ids) {
+		id := ids[i]
+		if read.err != nil {
 			refreshFailed[id] = struct{}{}
-			refreshErr = errors.Join(refreshErr, fmt.Errorf("refresh bead after close-all %s: %w", id, getErr))
+			refreshErr = errors.Join(refreshErr, fmt.Errorf("refresh bead after close-all %s: %w", id, read.err))
 			continue
 		}
-		refreshed = append(refreshed, refreshedBead{id: id, bead: fresh})
+		refreshed = append(refreshed, refreshedBead{id: id, bead: read.bead})
 	}
 
 	notifications := make([]cacheNotification, 0, len(refreshed))
@@ -803,10 +805,32 @@ func (c *CachingStore) Tx(commitMsg string, fn func(Tx) error) error {
 		tx.backing = backingTx
 		return fn(tx)
 	}); err != nil {
+		// A backing without atomic rollback may have committed some or all of
+		// the Tx's writes before failing, and an ErrWriteUnconfirmed answer
+		// committed at least one. Fence the touched rows so the next read
+		// asks the backing rather than serving the pre-Tx row: a caller
+		// re-reading to learn the outcome must see what landed.
+		if !StoreSupportsAtomicTx(c.backing) || errors.Is(err, ErrWriteUnconfirmed) {
+			c.fenceTxTouchedBeads(tx.ids)
+		}
 		return err
 	}
 	c.refreshTxTouchedBeads(tx.ids, tx.closed, startSeq)
 	return nil
+}
+
+// fenceTxTouchedBeads marks the rows a failed Tx touched dirty, as a failed
+// SetMetadataBatch does, until an ordinary read installs backing truth.
+func (c *CachingStore) fenceTxTouchedBeads(ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	c.mu.Lock()
+	for _, id := range ids {
+		c.noteMutationLocked(id)
+		c.markDirtyLocked(id)
+	}
+	c.mu.Unlock()
 }
 
 // AtomicTx reports whether Tx is atomic, which for the caching store is exactly
@@ -1102,7 +1126,7 @@ func (c *CachingStore) DepRemove(issueID, dependsOnID string) error {
 func (c *CachingStore) Delete(id string) error {
 	_, endWrite := c.beginLocalWrite(id)
 	defer endWrite()
-	deleted, haveDeleted := c.snapshotBeadBeforeDelete(id)
+	deleted := c.snapshotBeadBeforeDelete(id)
 	if err := c.backing.Delete(id); err != nil {
 		return err
 	}
@@ -1114,9 +1138,7 @@ func (c *CachingStore) Delete(id string) error {
 	c.markFreshLocked(c.clockNow())
 	c.updateStatsLocked()
 	c.mu.Unlock()
-	if haveDeleted {
-		c.notifyChange(ChangeLocal, "bead.deleted", deleted)
-	}
+	c.notifyChange(ChangeLocal, "bead.deleted", deleted)
 	return nil
 }
 
@@ -1155,20 +1177,18 @@ func (c *CachingStore) DeleteBatch(ids []string) error {
 	// Snapshot bead.deleted payloads from the cache only. Unlike Delete, which
 	// reads each snapshot from the backing store, forwarding N backing Get calls
 	// here would reintroduce the per-bead subprocess storm this batch path exists
-	// to remove; a bead absent from the cache is still evicted but emits no
-	// event. In practice the wisp GC lists the closure just before deleting it,
-	// so members are warm in the cache.
+	// to remove. A bead the cache does not hold (a closed row, a restarted
+	// process, an evicted entry) still gets its event, as an id-only tombstone
+	// (deleteSnapshotLocked), and an id listed twice gets one event.
 	deleted := make(map[string]struct{}, len(ids))
 	c.mu.RLock()
 	events := make([]Bead, 0, len(ids))
 	for _, id := range ids {
-		if id == "" {
+		if _, seen := deleted[id]; seen || id == "" {
 			continue
 		}
 		deleted[id] = struct{}{}
-		if b, ok := c.beads[id]; ok {
-			events = append(events, cloneBead(b))
-		}
+		events = append(events, c.deleteSnapshotLocked(id))
 	}
 	c.mu.RUnlock()
 
@@ -1205,11 +1225,13 @@ func (c *CachingStore) evictBatchDeletedLocked(deleted map[string]struct{}) {
 // reconcilePartialBatchDelete handles a backing DeleteBatch error. A
 // chunk-committing backend (BdStore) can durably remove earlier chunks before a
 // later chunk fails, reporting the removed ids via *BatchDeleteError. This
-// evicts exactly those committed ids and fires their bead.deleted events so a
-// mid-batch failure never leaves a deleted bead present-but-stale in the cache,
-// while the uncommitted ids stay resident because the backing did not remove
-// them. The original error is always returned so the caller still sees the
-// failure; a backing that reports no committed ids leaves the cache untouched.
+// evicts exactly those committed ids and fires their bead.deleted events (from
+// events, which holds one per requested id, cached or not) so a mid-batch
+// failure never leaves a deleted bead present-but-stale in the cache or
+// unannounced, while the uncommitted ids stay resident because the backing did
+// not remove them. The original error is always returned so the caller still
+// sees the failure; a backing that reports no committed ids leaves the cache
+// untouched.
 func (c *CachingStore) reconcilePartialBatchDelete(err error, events []Bead) error {
 	var batchErr *BatchDeleteError
 	if !errors.As(err, &batchErr) || len(batchErr.Committed) == 0 {
@@ -1302,16 +1324,34 @@ func (c *CachingStore) dropIncomingEdgesToDeletedLocked(deleted map[string]struc
 	}
 }
 
-func (c *CachingStore) snapshotBeadBeforeDelete(id string) (Bead, bool) {
+// snapshotBeadBeforeDelete returns the bead.deleted payload for id, read while
+// the row still exists: the backing row, else what the cache holds
+// (deleteSnapshotLocked). A failed or missed read must not cost the event: the
+// caller announces every delete the backing commits.
+func (c *CachingStore) snapshotBeadBeforeDelete(id string) Bead {
 	deleted, err := c.backing.Get(id)
-	if err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return Bead{}, false
-		}
-		c.recordProblem("snapshot bead before delete", fmt.Errorf("%s: %w", id, err))
-		return Bead{}, false
+	if err == nil {
+		return deleted
 	}
-	return deleted, true
+	if !errors.Is(err, ErrNotFound) {
+		c.recordProblem("snapshot bead before delete", fmt.Errorf("%s: %w", id, err))
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.deleteSnapshotLocked(id)
+}
+
+// deleteSnapshotLocked returns the bead.deleted payload the cache can give for
+// id without a backing read: its cached row, else an id-only tombstone. The id
+// is what a delete needs — the run projection and the caches drop the row by
+// it — and a delete announced by nothing is never repaired: the projection
+// replays the retained event log on every restart and keeps a row no
+// bead.deleted named (gastownhall/gascity#5934). Caller must hold c.mu.
+func (c *CachingStore) deleteSnapshotLocked(id string) Bead {
+	if b, ok := c.beads[id]; ok {
+		return cloneBead(b)
+	}
+	return Bead{ID: id}
 }
 
 func applyUpdateOptsToBead(bead Bead, opts UpdateOpts) Bead {
@@ -1344,6 +1384,9 @@ func applyUpdateOptsToBead(bead Bead, opts UpdateOpts) Bead {
 			bead.Metadata[key] = value
 		}
 	}
+	// After the sets, as every backing applies them: a key named in both is
+	// absent from the row the backing now holds, so it must be absent here.
+	unsetMetadataKeys(bead.Metadata, opts.UnsetMetadata)
 	if len(opts.Labels) > 0 || len(opts.RemoveLabels) > 0 {
 		remove := make(map[string]struct{}, len(opts.RemoveLabels))
 		for _, label := range opts.RemoveLabels {

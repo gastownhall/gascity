@@ -1236,6 +1236,11 @@ func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
 			b.Metadata[k] = v
 		}
 	}
+	// Removing the key from the map is an exact unset, not an empty value:
+	// upsertBeadTx deletes every metadata row of the bead and re-inserts only
+	// the keys b.Metadata still carries. An absent key leaves the row
+	// unchanged, which rewriteBead commits as a no-op.
+	unsetMetadataKeys(b.Metadata, opts.UnsetMetadata)
 	if len(opts.Labels) > 0 {
 		b.Labels = append(b.Labels, opts.Labels...)
 	}
@@ -1719,11 +1724,19 @@ func (s *SQLiteStore) readyRows(ctx context.Context, q ReadyQuery) ([]Bead, erro
 // excluded labels) and then sorts into the canonical ready order, so a
 // source-side LIMIT would cut the wrong prefix.
 func sqliteReadySQL(q ReadyQuery, projection string) (string, []any) {
+	return sqliteReadyCandidateSQL(q, projection, "NOT "+sqliteReadyBlockerExists("b.id"))
+}
+
+// sqliteReadyCandidateSQL is sqliteReadySQL with the blocking clause supplied:
+// Ready negates sqliteReadyBlockerExists, and ReadyBlockedByAbsent selects the
+// rows an absent target blocks (sqliteAbsentBlockerExists). Every other filter
+// is the same, so the two cannot disagree about what a ready candidate is.
+func sqliteReadyCandidateSQL(q ReadyQuery, projection, blocking string) (string, []any) {
 	args := []any{}
 	where := []string{
 		"b.status='open'",
 		`b.issue_type NOT IN ('merge-request','gate','molecule','step','message','session','agent','role','rig')`,
-		"NOT " + sqliteReadyBlockerExists("b.id"),
+		blocking,
 	}
 	switch q.TierMode {
 	case TierWisps:
