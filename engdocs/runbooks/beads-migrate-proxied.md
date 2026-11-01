@@ -213,8 +213,14 @@ database per rig.
   `dolt.mode: server` in `config.yaml` shadowing `metadata.json`. Any canonical
   write clears it now; rerunning `gc beads city migrate-proxied` is the
   supported way to force one.
-- **Going back.** There is no supported reverse migration on rc.2. Restore the
-  city from backup.
+- **Going back.** There is no supported way back to the legacy GC-managed
+  server: restore the city from backup.
+  `bd migrate from-proxied-server-to-server` does not take a scope there; it
+  moves one store onto a server bd runs itself. `gc rig add --adopt` prints it
+  only to rename a proxied-server store's prefix, followed by
+  `bd migrate from-server-to-proxied-server`, and never for a shared-root rig:
+  its `bd dolt stop` would stop the city's proxy, and bd would refuse the
+  rename against the city's proxied workspace.
 
 ## Residue
 

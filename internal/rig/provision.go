@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // Provision runs the full rig-add provisioning against the injected deps.
@@ -236,7 +237,7 @@ func planRigMutation(deps Deps, req ProvisionRequest, rigPath, resolvedDefaultBr
 	if req.Adopt {
 		adopted = readAdoptedStorePrefix(deps, rigPath)
 	}
-	prefix, err := resolveRigPrefix(cfg, req, name, reAdd, existingRig, adopted.prefix)
+	prefix, err := resolveRigPrefix(deps, req, name, reAdd, existingRig, adopted)
 	if err != nil {
 		return rigMutationPlan{}, err
 	}
@@ -272,7 +273,7 @@ func planRigMutation(deps Deps, req ProvisionRequest, rigPath, resolvedDefaultBr
 		tomlPath := filepath.Join(deps.CityPath, "city.toml")
 		var refusal error
 		if !reAdd && adoptsStoreOwnPrefix(req, adopted.prefix, prefix) {
-			refusal = config.ReservedPrefixSplitRefusalForAdopt(deps.FS, tomlPath, nextCfg, name, adoptedStorePrefixRemedy(rigPath))
+			refusal = config.ReservedPrefixSplitRefusalForAdopt(deps.FS, tomlPath, nextCfg, name, adoptedStorePrefixRemedy(rigPath, adopted, "this city reserves that namespace"))
 		} else {
 			refusal = config.ReservedPrefixSplitRefusalForEdit(deps.FS, tomlPath, nextCfg)
 		}
@@ -326,15 +327,16 @@ func detectRigReAdd(cfg *config.City, name, cityPath, rigPath string) (reAdd, ne
 // --adopt, or one derived from the name — and,
 // for a fresh add, rejects a prefix that collides with HQ or another rig
 // (rigPrefixCollision).
-func resolveRigPrefix(cfg *config.City, req ProvisionRequest, name string, reAdd bool, existingRig *config.Rig, adoptedPrefix string) (string, error) {
+func resolveRigPrefix(deps Deps, req ProvisionRequest, name string, reAdd bool, existingRig *config.Rig, adopted adoptedStorePrefix) (string, error) {
+	cfg := deps.Cfg
 	var prefix string
 	switch {
 	case reAdd:
 		prefix = existingRig.EffectivePrefix()
 	case req.Prefix != "":
 		prefix = strings.ToLower(req.Prefix)
-	case req.Adopt && adoptedPrefix != "":
-		prefix = adoptedPrefix
+	case req.Adopt && adopted.prefix != "":
+		prefix = adopted.prefix
 	default:
 		prefix = config.DeriveBeadsPrefix(name)
 	}
@@ -342,27 +344,73 @@ func resolveRigPrefix(cfg *config.City, req ProvisionRequest, name string, reAdd
 	if !reAdd {
 		prefixKey := strings.ToLower(prefix)
 		if prefixKey == strings.ToLower(config.EffectiveHQPrefix(cfg)) {
-			return "", rigPrefixCollision(req, name, prefixKey, "HQ", adoptedPrefix)
+			return "", rigPrefixCollision(req, name, prefixKey, prefixHolder{name: "HQ", dir: deps.CityPath}, adopted)
 		}
 		for _, rg := range cfg.Rigs {
 			if prefixKey == strings.ToLower(rg.EffectivePrefix()) {
-				return "", rigPrefixCollision(req, name, prefixKey, rg.Name, adoptedPrefix)
+				return "", rigPrefixCollision(req, name, prefixKey, prefixHolder{name: rg.Name, dir: configuredRigDir(deps.CityPath, rg.Path), rig: true}, adopted)
 			}
 		}
 	}
 	return prefix, nil
 }
 
-// rigPrefixCollision is the refusal for a fresh add whose prefix collides with
-// other (HQ or a rig's name). An --adopt whose prefix is its store's own cannot
-// take another one, since --prefix must match the store, so its remedy is the
-// store's (adoptedStorePrefixRemedy); any other add keeps the byte-identical CLI
-// text that asks for a different --prefix.
-func rigPrefixCollision(req ProvisionRequest, name, prefix, other, adoptedPrefix string) error {
-	if adoptsStoreOwnPrefix(req, adoptedPrefix, prefix) {
-		return fmt.Errorf("rig %q: prefix %q collides with %s; %s", name, prefix, other, adoptedStorePrefixRemedy(req.Path))
+// prefixHolder is the scope already holding the prefix an add collides with:
+// HQ, whose store is in the city directory, or the rig named name (rig set).
+// dir is the directory its store is in, "" when city.toml records no path for
+// the rig.
+type prefixHolder struct {
+	name string
+	dir  string
+	rig  bool
+}
+
+// keepsStoreIn reports whether h's store is the one in dir, however either
+// path spells it: a symlink to the city directory, or to a registered rig's,
+// names the same store.
+func (h prefixHolder) keepsStoreIn(dir string) bool {
+	return h.dir != "" && pathutil.SamePath(h.dir, dir)
+}
+
+// label names h in a sentence: HQ, or rig "<name>".
+func (h prefixHolder) label() string {
+	if h.rig {
+		return fmt.Sprintf("rig %q", h.name)
 	}
-	return fmt.Errorf("rig %q: prefix %q collides with %s. Use --prefix to specify a different prefix.", name, prefix, other) //nolint:revive,staticcheck // byte-identical rig-add collision text (trailing period)
+	return h.name
+}
+
+// configuredRigDir is the directory a rig's city.toml path names, a relative
+// one taken from the city directory as detectRigReAdd does; "" when city.toml
+// records no path.
+func configuredRigDir(cityPath, path string) string {
+	switch {
+	case strings.TrimSpace(path) == "":
+		return ""
+	case filepath.IsAbs(path):
+		return path
+	default:
+		return filepath.Join(cityPath, path)
+	}
+}
+
+// rigPrefixCollision is the refusal for a fresh add whose prefix collides with
+// holder's. An --adopt whose prefix is its store's own cannot take another one,
+// since --prefix must match the store, so its remedy is the store's
+// (adoptedStorePrefixRemedy), unless that store is holder's own: it is in the
+// city already, and renaming its prefix would break holder. Any other add
+// keeps the byte-identical CLI text that asks for a different --prefix.
+func rigPrefixCollision(req ProvisionRequest, name, prefix string, holder prefixHolder, adopted adoptedStorePrefix) error {
+	switch {
+	case !adoptsStoreOwnPrefix(req, adopted.prefix, prefix):
+		return fmt.Errorf("rig %q: prefix %q collides with %s. Use --prefix to specify a different prefix.", name, prefix, holder.name) //nolint:revive,staticcheck // byte-identical rig-add collision text (trailing period)
+	case !holder.keepsStoreIn(req.Path):
+		return fmt.Errorf("rig %q: prefix %q collides with %s; %s", name, prefix, holder.name, adoptedStorePrefixRemedy(req.Path, adopted, holder.label()+" holds that prefix"))
+	case holder.rig:
+		return fmt.Errorf("rig %q: --adopt: the store at %s is already registered as rig %q", name, req.Path, holder.name)
+	default:
+		return fmt.Errorf("rig %q: --adopt: the store at %s is the city's own HQ store; it cannot also be registered as a rig", name, req.Path)
+	}
 }
 
 // adoptsStoreOwnPrefix reports whether an add registers an existing store under
@@ -373,9 +421,16 @@ func adoptsStoreOwnPrefix(req ProvisionRequest, adoptedPrefix, prefix string) bo
 }
 
 // adoptedStorePrefixRemedy is the remedy a refusal of an adopted store's own
-// prefix names: change the prefix in the store, not in gc.
-func adoptedStorePrefixRemedy(rigPath string) string {
-	return fmt.Sprintf("an adopted rig keeps its store's own prefix, so change the issue prefix the store at %s records before adopting it", rigPath)
+// prefix names: gc pins an adopted rig to that prefix, so it has to change in
+// the store (renameStorePrefix). When bd cannot rename it there, the remedy
+// says so (cannotRename) and that the store cannot be adopted while blocker
+// (what stands in the prefix's way) holds. It then names no config.yaml edit:
+// that alone would adopt the store while its beads keep the old prefix.
+func adoptedStorePrefixRemedy(rigPath string, adopted adoptedStorePrefix, blocker string) string {
+	if adopted.mode.stuck != "" {
+		return fmt.Sprintf("an adopted rig keeps its store's own prefix, and %s, so that store cannot be adopted while %s", adopted.mode.cannotRename("the proxied-server store at "+rigPath), blocker)
+	}
+	return "an adopted rig keeps its store's own prefix, so rename that prefix in the store before adopting it: " + renameStorePrefix(rigPath, newPrefixPlaceholder, adopted.inConfigYAML, adopted.mode)
 }
 
 // buildNextRigConfig materializes the config to write. A re-add that needs a
