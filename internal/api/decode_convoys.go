@@ -50,6 +50,13 @@ func beadFromGen(g genclient.Bead) beads.Bead {
 	if g.Ephemeral != nil {
 		out.Ephemeral = *g.Ephemeral
 	}
+	if g.NoHistory != nil {
+		out.NoHistory = *g.NoHistory
+	}
+	if g.IsBlocked != nil {
+		blocked := *g.IsBlocked
+		out.IsBlocked = &blocked
+	}
 	if g.Priority != nil {
 		p := int(*g.Priority)
 		out.Priority = &p
