@@ -611,7 +611,11 @@ func k8sSessionStoreIdentityEnv(cityPath, scopeRoot string, cfg *config.City, ba
 	}
 	if metadataID, ok, err := readMetadataProjectID(metadataPath); err != nil {
 		return nil, fmt.Errorf("hosted Dolt scope %q metadata project identity: %w", scopeRoot, err)
-	} else if ok && metadataID != projectID {
+	} else if !ok {
+		// Pod startup requires this mirror; fail here with the repair, not by
+		// provisioning a pod that can never pass.
+		return nil, fmt.Errorf("hosted Dolt scope %q metadata %q is missing project_id; set it to %q", scopeRoot, metadataPath, projectID)
+	} else if metadataID != projectID {
 		return nil, fmt.Errorf("hosted Dolt scope %q has inconsistent project identity at %q: identity=%q metadata.json=%q", scopeRoot, contract.ProjectIdentityPath(scopeRoot), projectID, metadataID)
 	}
 	prefix := strings.TrimSpace(issuePrefixForScope(scopeRoot, cityPath, cfg))
