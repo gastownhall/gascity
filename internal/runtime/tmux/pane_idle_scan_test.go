@@ -30,6 +30,8 @@ func TestPaneShowsIdlePrompt(t *testing.T) {
 		{"no prompt", []string{"building...", "still going"}, DefaultReadyPromptPrefix, false},
 		{"empty pane", nil, DefaultReadyPromptPrefix, false},
 		{"blank prefix is not defaulted", []string{"❯ "}, "", false},
+		{"menu below echoed turn", []string{"› Commit the staged API change", "", "› 1. Trust and continue", "  2. Quit"}, "› ", false},
+		{"model-switch modal below echoed turn", []string{"› fix the flaky test", "", "Approaching rate limits", "› 1. Switch to gpt-5.4-mini", "  2. Keep current model"}, "› ", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
