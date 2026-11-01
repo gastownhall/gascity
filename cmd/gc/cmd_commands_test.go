@@ -2080,6 +2080,16 @@ func TestPackLeafScopeAfterLeafNeverSilentlyRetargets(t *testing.T) {
 		t.Fatal(err)
 	}
 	registerRigBindingForResolution(t, os.Getenv("GC_HOME"), cityB, "city-b", targetRig, targetRigDir)
+	localRig := "local-rig"
+	localRigDir := filepath.Join(t.TempDir(), localRig)
+	if err := os.MkdirAll(localRigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	registerRigBindingForResolution(t, os.Getenv("GC_HOME"), cityA, "city-a", localRig, localRigDir)
+	// Registering a city rewrites its pack.toml; restore the pack under test.
+	if err := os.WriteFile(filepath.Join(cityA, "pack.toml"), []byte("[pack]\nname = \"backstage\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	oldWD, err := os.Getwd()
 	if err != nil {
@@ -2100,6 +2110,10 @@ func TestPackLeafScopeAfterLeafNeverSilentlyRetargets(t *testing.T) {
 		{name: "other city after payload", args: []string{"backstage", "hello", "payload", "--city", cityB}},
 		{name: "rig of other city", args: []string{"backstage", "hello", "--rig=" + targetRig}},
 		{name: "empty city", args: []string{"backstage", "hello", "--city="}},
+		{name: "empty rig", args: []string{"backstage", "hello", "--rig", ""}},
+		{name: "rig that does not resolve", args: []string{"backstage", "hello", "--rig=missing-rig"}},
+		{name: "valued true help beside other city", args: []string{"backstage", "hello", "--help=true", "--city", cityB}},
+		{name: "malformed help beside unresolved rig", args: []string{"backstage", "hello", "-h=maybe", "--rig=missing-rig"}},
 		{name: "same city then other city", args: []string{"backstage", "hello", "--city", cityA, "--city", cityB}},
 	}
 	for _, test := range refused {
@@ -2128,17 +2142,77 @@ func TestPackLeafScopeAfterLeafNeverSilentlyRetargets(t *testing.T) {
 		})
 	}
 
-	t.Run("same city runs", func(t *testing.T) {
-		args := []string{"backstage", "hello", "--city", cityA, "payload"}
-		want := "city-a-hello args:<--city><" + cityA + "><payload>\n"
+	passed := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "same city runs",
+			args: []string{"backstage", "hello", "--city", cityA, "payload"},
+			want: "city-a-hello args:<--city><" + cityA + "><payload>\n",
+		},
+		{
+			name: "rig of the bound city reaches the script unchanged",
+			args: []string{"backstage", "hello", "--rig=" + localRig, "payload"},
+			want: "city-a-hello args:<--rig=" + localRig + "><payload>\n",
+		},
+	}
+	for _, test := range passed {
+		t.Run(test.name, func(t *testing.T) {
+			for _, scenario := range []string{"eager", "lazy"} {
+				var stdout, stderr bytes.Buffer
+				code := runPackCommandScenario(t, scenario, test.args, &stdout, &stderr)
+				if code != 0 || stdout.String() != test.want || stderr.String() != "" {
+					t.Fatalf("%s dispatch = exit %d stdout=%q stderr=%q, want exit 0 stdout=%q stderr empty", scenario, code, stdout.String(), stderr.String(), test.want)
+				}
+			}
+		})
+	}
+
+	t.Run("help beside other city is not refused", func(t *testing.T) {
 		for _, scenario := range []string{"eager", "lazy"} {
 			var stdout, stderr bytes.Buffer
-			code := runPackCommandScenario(t, scenario, args, &stdout, &stderr)
-			if code != 0 || stdout.String() != want || stderr.String() != "" {
-				t.Fatalf("%s dispatch = exit %d stdout=%q stderr=%q, want exit 0 stdout=%q stderr empty", scenario, code, stdout.String(), stderr.String(), want)
+			code := runPackCommandScenario(t, scenario, []string{"backstage", "hello", "--help", "--city", cityB}, &stdout, &stderr)
+			if code != 0 || strings.Contains(stderr.String(), "not supported after") || strings.Contains(stdout.String(), "city-a-hello args:") {
+				t.Fatalf("%s help dispatch = exit %d stdout=%q stderr=%q, want help output without a scope refusal or script run", scenario, code, stdout.String(), stderr.String())
 			}
 		}
 	})
+}
+
+// TestCoreCommandCityFlagStillSelectsCity guards that core commands, unlike
+// pack leaves, parse --city themselves: gc suspend --city <target> run from
+// inside another city suspends the target and leaves the ambient city alone.
+func TestCoreCommandCityFlagStillSelectsCity(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+	t.Setenv("GC_RIG", "")
+	ambient := newRealCityDir(t, "ambient")
+	target := newRealCityDir(t, "target")
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(ambient); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+	t.Setenv("GC_CITY_PATH", ambient)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"suspend", "--city", target}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc suspend --city %s = exit %d, stderr: %s", target, code, stderr.String())
+	}
+	state := filepath.Join(".gc", "runtime", "suspension-state.json")
+	if _, err := os.Stat(filepath.Join(target, state)); err != nil {
+		t.Fatalf("target city was not suspended: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(ambient, state)); err == nil {
+		t.Fatalf("ambient city %s was suspended instead of the named city", ambient)
+	}
 }
 
 func TestE1EagerLazyControlDifferentialMatrix(t *testing.T) {
@@ -2226,33 +2300,33 @@ func TestE1LazyExplicitScopeBeforeLeafWinsOutsideAmbientCity(t *testing.T) {
 	}{
 		{
 			name: "city separate root scope",
-			args: []string{"backstage", "--city", cityB, "hello", "--city", cityA, "payload"},
-			want: "selected-hello args:<--city><" + cityA + "><payload>\n",
+			args: []string{"backstage", "--city", cityB, "hello", "--city", cityB, "payload"},
+			want: "selected-hello args:<--city><" + cityB + "><payload>\n",
 		},
 		{
 			name: "city equals root scope",
-			args: []string{"backstage", "--city=" + cityB, "hello", "--city=" + cityA, "payload"},
-			want: "selected-hello args:<--city=" + cityA + "><payload>\n",
+			args: []string{"backstage", "--city=" + cityB, "hello", "--city=" + cityB, "payload"},
+			want: "selected-hello args:<--city=" + cityB + "><payload>\n",
 		},
 		{
 			name: "repeated pre-leaf city remains last wins",
-			args: []string{"backstage", "--city", cityA, "--city=" + cityB, "hello", "--city", cityA, "payload"},
-			want: "selected-hello args:<--city><" + cityA + "><payload>\n",
+			args: []string{"backstage", "--city", cityA, "--city=" + cityB, "hello", "--city", cityB, "payload"},
+			want: "selected-hello args:<--city><" + cityB + "><payload>\n",
 		},
 		{
 			name: "false help preserves later child city",
-			args: []string{"backstage", "--help=false", "--city", cityB, "hello", "--city", cityA, "payload"},
-			want: "selected-hello args:<--city><" + cityA + "><payload>\n",
+			args: []string{"backstage", "--help=false", "--city", cityB, "hello", "--city", cityB, "payload"},
+			want: "selected-hello args:<--city><" + cityB + "><payload>\n",
 		},
 		{
 			name: "rig separate root scope",
-			args: []string{"backstage", "--rig", targetRig, "hello", "--rig", "child-rig", "payload"},
-			want: "selected-hello args:<--rig><child-rig><payload>\n",
+			args: []string{"backstage", "--rig", targetRig, "hello", "--rig", targetRig, "payload"},
+			want: "selected-hello args:<--rig><" + targetRig + "><payload>\n",
 		},
 		{
 			name: "rig equals root scope",
-			args: []string{"backstage", "--rig=" + targetRig, "hello", "--rig=child-rig", "payload"},
-			want: "selected-hello args:<--rig=child-rig><payload>\n",
+			args: []string{"backstage", "--rig=" + targetRig, "hello", "--rig=" + targetRig, "payload"},
+			want: "selected-hello args:<--rig=" + targetRig + "><payload>\n",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -2263,6 +2337,16 @@ func TestE1LazyExplicitScopeBeforeLeafWinsOutsideAmbientCity(t *testing.T) {
 			}
 		})
 	}
+
+	// A later scope that names a different city than the pre-leaf one is
+	// refused rather than ignored.
+	t.Run("later city other than the pre-leaf city is refused", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runPackCommandScenario(t, "lazy", []string{"backstage", "--city", cityB, "hello", "--city", cityA, "payload"}, &stdout, &stderr)
+		if code == 0 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "not supported after") {
+			t.Fatalf("later other-city scope: code=%d stdout=%q stderr=%q, want refusal", code, stdout.String(), stderr.String())
+		}
+	})
 }
 
 func TestE1ScopeTopologyCycleFailsClosed(t *testing.T) {
@@ -2418,7 +2502,11 @@ func TestE1InheritedCitySelectsScopedJSONSchema(t *testing.T) {
 	}
 }
 
-func TestE1ScopeLookingArgsAfterLeafPassThrough(t *testing.T) {
+// TestE1ScopeLookingArgsAfterLeafOwnership pins who owns a --city or --rig after
+// a pack leaf: gc reads it as a scope selector, so a token that names the
+// leaf's own city reaches the script unchanged and any other token is refused
+// before the script runs. Everything after a literal "--" belongs to the script.
+func TestE1ScopeLookingArgsAfterLeafOwnership(t *testing.T) {
 	cityA := setupPackExitCity(t)
 	cityB := setupPackExitCity(t)
 	script := "#!/bin/sh\nprintf 'args:'\nfor arg in \"$@\"; do printf '<%s>' \"$arg\"; done\nprintf '\\n'\n"
@@ -2439,27 +2527,28 @@ func TestE1ScopeLookingArgsAfterLeafPassThrough(t *testing.T) {
 	tests := []struct {
 		name string
 		args []string
-		want string
+		want string // script output; empty means the leaf must refuse
 	}{
 		{
-			name: "city separate value",
-			args: []string{"backstage", "hello", "--city", cityB},
-			want: "args:<--city><" + cityB + ">\n",
+			name: "city separate value names the leaf city",
+			args: []string{"backstage", "hello", "--city", cityA},
+			want: "args:<--city><" + cityA + ">\n",
 		},
 		{
-			name: "rig equals value",
+			name: "city separate value names another city",
+			args: []string{"backstage", "hello", "--city", cityB},
+		},
+		{
+			name: "rig equals value that does not resolve",
 			args: []string{"backstage", "hello", "--rig=child-rig"},
-			want: "args:<--rig=child-rig>\n",
 		},
 		{
 			name: "empty city equals value",
 			args: []string{"backstage", "hello", "--city="},
-			want: "args:<--city=>\n",
 		},
 		{
 			name: "empty rig separate value",
 			args: []string{"backstage", "hello", "--rig", ""},
-			want: "args:<--rig><>\n",
 		},
 		{
 			name: "after terminator",
@@ -2469,7 +2558,6 @@ func TestE1ScopeLookingArgsAfterLeafPassThrough(t *testing.T) {
 		{
 			name: "valued true help and city after selected leaf",
 			args: []string{"backstage", "hello", "--help=true", "--city", cityB},
-			want: "args:<--help=true><--city><" + cityB + ">\n",
 		},
 		{
 			name: "valued true help and city after terminator",
@@ -2481,8 +2569,14 @@ func TestE1ScopeLookingArgsAfterLeafPassThrough(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code := run(test.args, &stdout, &stderr)
+			if test.want == "" {
+				if code == 0 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "not supported after") {
+					t.Fatalf("scope after leaf was not refused: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+				}
+				return
+			}
 			if code != 0 || stdout.String() != test.want || stderr.Len() != 0 {
-				t.Fatalf("scope-looking child args were consumed: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+				t.Fatalf("child args were consumed: code=%d stdout=%q stderr=%q want=%q", code, stdout.String(), stderr.String(), test.want)
 			}
 		})
 	}

@@ -632,6 +632,15 @@ A command runs with the invoking environment plus these variables:
 | `GC_PACK_STATE_DIR` | The pack's state directory for this city. |
 | `GC_SUPERVISOR_URL` | Base URL of the supervisor API serving the city, such as `http://127.0.0.1:8372`. City routes are under `$GC_SUPERVISOR_URL/v0/city/<name>/`, where `<name>` is the name the city is registered under (normally `GC_CITY_NAME`). Set only when the city is registered with a supervisor whose API address is plain `http` on loopback, the address `gc` itself uses; otherwise unset. An inherited value is never passed through. |
 
+**Scope flags.** `--city` and `--rig` are reserved for `gc`. A `--city` or `--rig`
+after the command words must name the command's own city, or a rig of it, and
+then reaches the script unchanged. Any other value, including an empty one, makes
+`gc` print an error and exit 1 without running the script, because the command
+is already bound to its city. To target another city, put the flag before the
+pack binding (`gc --city <dir> <binding> ...`) or `cd` to that city. Everything
+after a literal `--` belongs to the script, and `--help` is never refused. A
+command that needs a flag of its own picks another name.
+
 > **Compatibility:** Legacy `pack.toml` `[[commands]]` entries remain loader
 > compatibility for existing packs. New packs should use `commands/<path>/`.
 
