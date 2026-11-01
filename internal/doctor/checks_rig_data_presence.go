@@ -2,8 +2,11 @@ package doctor
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -40,17 +43,18 @@ type RigDataPresenceCheck struct {
 	countRows func(rigPath string) (int, error)
 	fs        fsys.FS
 	// archiveExportRows reports the row count of the rig's durable archived
-	// export, and whether one was found. Injected rather than resolved here: the
+	// export, whether one was found, and an error when an archive exists but
+	// cannot be read. Injected rather than resolved here: the
 	// archive lives under a pack-owned layout with its own precedence rules, and
 	// this package should not learn where a pack keeps its state. Nil disables
 	// the fallback, leaving the local-export behavior unchanged.
-	archiveExportRows func(rigPath string) (int, bool)
+	archiveExportRows func(rigPath string) (int, bool, error)
 }
 
 // WithArchiveExportRows injects the durable archived-export oracle used when a
 // rig's local .beads/issues.jsonl is absent. See the call site in Run for why
 // the local file cannot be relied on for gc-managed scopes.
-func (c *RigDataPresenceCheck) WithArchiveExportRows(fn func(rigPath string) (int, bool)) *RigDataPresenceCheck {
+func (c *RigDataPresenceCheck) WithArchiveExportRows(fn func(rigPath string) (int, bool, error)) *RigDataPresenceCheck {
 	c.archiveExportRows = fn
 	return c
 }
@@ -115,6 +119,11 @@ func (c *RigDataPresenceCheck) Run(_ *CheckContext) *CheckResult {
 	// created rig. Read the export count first and gate the blocking signals on
 	// it.
 	jsonlLines, jsonlErr := CountJSONLLines(filepath.Join(rigPath, ".beads", "issues.jsonl"))
+	if jsonlErr != nil && !errors.Is(jsonlErr, fs.ErrNotExist) {
+		// An export that exists but cannot be read is not "no history": reading
+		// it that way would pass an emptied rig as a fresh one.
+		return exportUnreadable(r, c.rig.Name, "issues.jsonl", jsonlErr)
+	}
 	haveExportHistory := jsonlErr == nil && jsonlLines > 0
 	evidence := "issues.jsonl"
 
@@ -130,7 +139,11 @@ func (c *RigDataPresenceCheck) Run(_ *CheckContext) *CheckResult {
 	// is not reaped. Only consulted when the local file yields nothing, so a
 	// present local export still wins as the more current signal.
 	if !haveExportHistory && c.archiveExportRows != nil {
-		if archived, ok := c.archiveExportRows(rigPath); ok && archived > 0 {
+		archived, ok, err := c.archiveExportRows(rigPath)
+		if err != nil {
+			return exportUnreadable(r, c.rig.Name, "the archived export", err)
+		}
+		if ok && archived > 0 {
 			jsonlLines, haveExportHistory, evidence = archived, true, "archived export"
 		}
 	}
@@ -175,11 +188,16 @@ func (c *RigDataPresenceCheck) Run(_ *CheckContext) *CheckResult {
 	return r
 }
 
-// CountJSONLLines counts non-empty lines in a JSONL file. Exported so a caller
-// supplying an alternative export source (see WithArchiveExportRows) counts
-// rows exactly as this check does — two counters with different notions of a
-// row would make the live-vs-export comparison meaningless.
-// Returns (0, os.ErrNotExist) when the file is absent — callers treat that as "no signal".
+// CountJSONLLines counts the issue records in a bd JSONL export, the way the
+// core pack's jsonl-export count_jsonl_rows does: every JSON object whose
+// _type is absent or "issue" (memory records are not issues), and, for a
+// legacy `dolt sql -r json` snapshot holding a single {"rows":[...]} or {}
+// object, the length of rows. Exported so a caller supplying an alternative
+// export source (see WithArchiveExportRows) counts rows exactly as this check
+// does — two counters with different notions of a row would make the
+// live-vs-export comparison meaningless. Records are decoded as a stream, so
+// no line length limit applies.
+// Returns (0, fs.ErrNotExist) when the file is absent — callers treat that as "no signal".
 func CountJSONLLines(path string) (int, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -189,14 +207,53 @@ func CountJSONLLines(path string) (int, error) {
 		return 0, err
 	}
 	defer f.Close() //nolint:errcheck
-	count := 0
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		if line := sc.Text(); line != "" {
+	dec := json.NewDecoder(bufio.NewReader(f))
+	count, values := 0, 0
+	var first json.RawMessage
+	for {
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			return 0, err
+		}
+		values++
+		if values == 1 {
+			first = raw
+		}
+		var rec struct {
+			Type string `json:"_type"`
+		}
+		if !bytes.Equal(raw, []byte("null")) && json.Unmarshal(raw, &rec) == nil &&
+			(rec.Type == "" || rec.Type == "issue") {
 			count++
 		}
 	}
-	return count, sc.Err()
+	if values == 1 {
+		var legacy map[string]json.RawMessage
+		if json.Unmarshal(first, &legacy) == nil {
+			if rowsRaw, ok := legacy["rows"]; ok {
+				var rows []json.RawMessage
+				if err := json.Unmarshal(rowsRaw, &rows); err != nil {
+					return 0, err
+				}
+				return len(rows), nil
+			}
+			if len(legacy) == 0 {
+				return 0, nil
+			}
+		}
+	}
+	return count, nil
+}
+
+// exportUnreadable is the advisory result for an export that exists but
+// cannot be read.
+func exportUnreadable(r *CheckResult, rig, what string, err error) *CheckResult {
+	r.Status = StatusWarning
+	r.Severity = SeverityAdvisory
+	r.Message = fmt.Sprintf("rig %s: cannot read %s for data-presence check: %v", rig, what, err)
+	return r
 }
 
 func dataPresenceFixHint() string {

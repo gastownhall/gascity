@@ -97,13 +97,10 @@ func (c *jsonlArchiveDoctorCheck) resolveStateFile() string {
 // none of them is a repository the primary is still returned, so the check
 // reports against the path the script would create.
 func (c *jsonlArchiveDoctorCheck) resolveArchiveRepo() string {
-	candidates := jsonlArchiveRepoCandidates(c.env, c.cityPath)
-	for _, dir := range candidates {
-		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
-			return dir
-		}
+	if repo := activeJSONLArchiveRepo(c.env, c.cityPath); repo != "" {
+		return repo
 	}
-	return candidates[0]
+	return jsonlArchiveRepoCandidates(c.env, c.cityPath)[0]
 }
 
 func (c *jsonlArchiveDoctorCheck) readState(path string) (jsonlArchiveState, bool, error) {
