@@ -178,7 +178,7 @@ export type AgentResponse = {
     active_bead?: string;
     activity?: string;
     /**
-     * Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present.
+     * Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.
      */
     activity_source?: 'program' | 'transcript';
     available: boolean;
@@ -3775,7 +3775,7 @@ export type ServiceRestartOutputBody = {
 
 export type SessionActivityEvent = {
     /**
-     * Session activity state: 'idle' or 'in-turn'.
+     * Session activity state: 'idle' or 'in-turn', derived from the transcript under every program_status switch. The session program's own status arrives in the program_status frame.
      */
     activity: string;
 };
@@ -4195,7 +4195,7 @@ export type SessionResponse = {
     active_bead?: string;
     activity?: string;
     /**
-     * Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present.
+     * Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.
      */
     activity_source?: 'program' | 'transcript';
     agent_kind?: string;

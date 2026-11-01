@@ -1044,7 +1044,7 @@ func (s *Server) streamSessionTranscriptLogRawHuma(ctx context.Context, send sse
 	sentIDs := make(map[string]struct{})
 	currentActivity := historySnapshotActivity(initial)
 
-	programFrames := s.newProgramStatusFrames(ctx, info)
+	programFrames := s.newProgramStatusFrames(info)
 	emitProgramStatus := func() {
 		if frame, changed := programFrames.next(); changed {
 			seq++
@@ -1214,7 +1214,7 @@ func (s *Server) streamSessionTranscriptLogHuma(ctx context.Context, send sse.Se
 	var lastActivity string
 	sentIDs := make(map[string]struct{})
 
-	programFrames := s.newProgramStatusFrames(ctx, info)
+	programFrames := s.newProgramStatusFrames(info)
 	emitProgramStatus := func() {
 		if frame, changed := programFrames.next(); changed {
 			seq++
@@ -1353,7 +1353,7 @@ func (s *Server) streamSessionTranscriptLogStructuredHuma(ctx context.Context, s
 	lastProgress := time.Now()
 	currentActivity := historySnapshotActivity(initial)
 
-	programFrames := s.newProgramStatusFrames(ctx, info)
+	programFrames := s.newProgramStatusFrames(info)
 	emitProgramStatus := func() {
 		if frame, changed := programFrames.next(); changed {
 			_ = send(StringIDMessage{Data: frame})
@@ -1534,7 +1534,7 @@ func (s *Server) streamSessionPeekRawHuma(ctx context.Context, send sse.Sender, 
 	var lastOutput string
 	var seq int
 
-	programFrames := s.newProgramStatusFrames(ctx, info)
+	programFrames := s.newProgramStatusFrames(info)
 	emitProgramStatus := func() {
 		if frame, changed := programFrames.next(); changed {
 			seq++
@@ -1632,7 +1632,7 @@ func (s *Server) streamSessionPeekStructuredHuma(ctx context.Context, send Strin
 	var lastPendingKey string
 	currentResumeToken := resumeToken
 
-	programFrames := s.newProgramStatusFrames(ctx, info)
+	programFrames := s.newProgramStatusFrames(info)
 	emitProgramStatus := func() {
 		if frame, changed := programFrames.next(); changed {
 			_ = send(StringIDMessage{Data: frame})
@@ -1749,7 +1749,7 @@ func (s *Server) streamSessionPeekHuma(ctx context.Context, send sse.Sender, inf
 	var lastOutput string
 	var seq int
 
-	programFrames := s.newProgramStatusFrames(ctx, info)
+	programFrames := s.newProgramStatusFrames(info)
 	emitProgramStatus := func() {
 		if frame, changed := programFrames.next(); changed {
 			seq++

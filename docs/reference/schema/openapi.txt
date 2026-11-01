@@ -649,7 +649,7 @@
             "type": "string"
           },
           "activity_source": {
-            "description": "Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present.",
+            "description": "Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.",
             "enum": [
               "program",
               "transcript"
@@ -8748,7 +8748,7 @@
         "additionalProperties": false,
         "properties": {
           "activity": {
-            "description": "Session activity state: 'idle' or 'in-turn'.",
+            "description": "Session activity state: 'idle' or 'in-turn', derived from the transcript under every program_status switch. The session program's own status arrives in the program_status frame.",
             "examples": [
               "idle"
             ],
@@ -9475,7 +9475,7 @@
             "type": "string"
           },
           "activity_source": {
-            "description": "Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present.",
+            "description": "Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.",
             "enum": [
               "program",
               "transcript"

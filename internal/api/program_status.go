@@ -1,11 +1,12 @@
 package api
 
 import (
-	"context"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // Activity sources a session or agent response names for its activity field.
@@ -46,10 +47,12 @@ type SessionProgramStatusEvent struct {
 }
 
 // programStatusView projects a judged reading onto the wire: nil unless the
-// reading is valid. Counters, the nonce and the probe and error annotations
-// stay internal.
+// reading is valid and its times have a JSON form, which a forged record's
+// need not have: one such row would otherwise fail every list response it
+// is in. Counters, the nonce and the probe and error annotations stay
+// internal.
 func programStatusView(ps runtime.ProgramStatus) *SessionProgramStatus {
-	if !ps.Valid() {
+	if !ps.Valid() || !wireTime(ps.Since) || !wireTime(ps.QuietSince) {
 		return nil
 	}
 	view := &SessionProgramStatus{
@@ -70,6 +73,16 @@ func programStatusView(ps runtime.ProgramStatus) *SessionProgramStatus {
 		view.QuietSince = &quiet
 	}
 	return view
+}
+
+// wireTime reports whether t has a JSON form: zero, or a time in years 0
+// through 9999, the range time.Time.MarshalJSON writes.
+func wireTime(t time.Time) bool {
+	if t.IsZero() {
+		return true
+	}
+	y := t.UTC().Year()
+	return y >= 0 && y <= 9999
 }
 
 // programActivity is the activity a valid reading reports: in-turn while the
@@ -117,15 +130,17 @@ type programStatusFrames struct {
 }
 
 // newProgramStatusFrames tracks the program-status view of info's runtime
-// session for one stream. A server without a state has no runtime to read:
-// its status stays unknown.
-func (s *Server) newProgramStatusFrames(ctx context.Context, info session.Info) *programStatusFrames {
-	var sp runtime.Provider
-	if s.state != nil {
-		sp = s.state.SessionProvider()
+// session for one stream. Each poll reads under the config published at that
+// moment, so a reload that turns the switch off takes effect mid-stream. A
+// server without a state has no runtime to read: its status stays unknown.
+func (s *Server) newProgramStatusFrames(info session.Info) *programStatusFrames {
+	if s.state == nil {
+		return &programStatusFrames{read: func() *SessionProgramStatus { return nil }}
 	}
+	sp := s.state.SessionProvider()
 	return &programStatusFrames{read: func() *SessionProgramStatus {
-		return programStatusView(runtimeProgramStatus(ctx, sp, info.SessionName, info.Provider))
+		published := configuredProgramStatusMode(s.state.Config())
+		return programStatusView(programStatusUnder(published, sp, info.SessionName))
 	}}
 }
 
@@ -164,18 +179,24 @@ func sameTimePtr(a, b *time.Time) bool {
 	return a.Equal(*b)
 }
 
-// runtimeProgramStatus reads runtime session sessionName's program status
-// through the provider-backed worker state handle the session responses use,
-// which tmux serves from its shared state cache. A stopped or unreadable
-// session reads Unread.
-func runtimeProgramStatus(ctx context.Context, sp runtime.Provider, sessionName, providerName string) runtime.ProgramStatus {
-	handle := newProviderSessionResponseHandle(sp, sessionName, providerName)
-	if handle == nil {
+// programStatusUnder reads runtime session sessionName's judged program
+// status from the backend serving it (worker.ProgramStatusOf), capped at
+// published, the [session] program_status switch of the config the API
+// serves: under off nothing is read, and under shadow no reading decides. A
+// leaf reads under the switch the controller last set on it, which trails a
+// reload's publication; the cap makes a reload to off hide every reading at
+// once. No liveness probe precedes the read: a stopped or missing session
+// reads Unread or exited, which no response shows, and a backend without the
+// capability is answered Unread without being asked. tmux, the one backend
+// that takes readings, serves them from its state cache.
+func programStatusUnder(published runtime.ProgramStatusMode, sp runtime.Provider, sessionName string) runtime.ProgramStatus {
+	sessionName = strings.TrimSpace(sessionName)
+	if (published != runtime.ProgramStatusShadow && published != runtime.ProgramStatusOn) || sp == nil || sessionName == "" {
 		return runtime.ProgramStatus{}
 	}
-	state, err := handle.State(ctx)
-	if err != nil {
-		return runtime.ProgramStatus{}
+	ps := worker.ProgramStatusOf(sp, sessionName)
+	if published == runtime.ProgramStatusShadow && ps.Mode == runtime.ProgramStatusOn {
+		ps.Mode = runtime.ProgramStatusShadow
 	}
-	return state.Program
+	return ps
 }

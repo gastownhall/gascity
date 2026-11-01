@@ -78,7 +78,6 @@ go_test(
         "//internal/testenv",
         "//internal/testutil",
         "//internal/worker",
-        "//internal/worker/builtin",
         "//internal/worker/fake",
         "@io_opentelemetry_go_otel//:otel",
         "@io_opentelemetry_go_otel_sdk_metric//:metric",

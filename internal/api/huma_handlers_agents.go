@@ -301,7 +301,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 			quarantined := s.state.IsQuarantined(sessionName)
 			var program runtime.ProgramStatus
 			if running {
-				program = runtimeProgramStatus(ctx, sp, sessionName, provider)
+				program = programStatusUnder(configuredProgramStatusMode(cfg), sp, sessionName)
 			}
 			resp.State = computeAgentState(suspended, quarantined, effectiveRunning, resp.ActiveBead, lastActivity, program)
 
@@ -452,7 +452,7 @@ func (s *Server) agentByName(ctx context.Context, name string) (*IndexOutput[age
 	quarantined := s.state.IsQuarantined(sessionName)
 	var program runtime.ProgramStatus
 	if running {
-		program = runtimeProgramStatus(ctx, sp, sessionName, provider)
+		program = programStatusUnder(configuredProgramStatusMode(cfg), sp, sessionName)
 	}
 	resp.State = computeAgentState(suspended, quarantined, effectiveRunning, resp.ActiveBead, lastActivity, program)
 

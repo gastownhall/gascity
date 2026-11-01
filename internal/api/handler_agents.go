@@ -75,7 +75,7 @@ type agentResponse struct {
 	Activity string `json:"activity,omitempty"`
 	// ActivitySource names where Activity came from. Set only while
 	// ProgramStatus is shown.
-	ActivitySource string `json:"activity_source,omitempty" enum:"program,transcript" doc:"Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present."`
+	ActivitySource string `json:"activity_source,omitempty" enum:"program,transcript" doc:"Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report."`
 	// ProgramStatus is the agent session program's own status report;
 	// absent means unknown, never idle.
 	ProgramStatus *SessionProgramStatus `json:"program_status,omitempty" doc:"The agent session program's own status report (OSC 7501), present while the city's program_status switch is shadow or on and the reading is valid. Absent means the status is unknown, never idle."`

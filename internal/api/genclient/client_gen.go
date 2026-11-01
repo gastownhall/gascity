@@ -1983,7 +1983,7 @@ type AgentResponse struct {
 	ActiveBead *string `json:"active_bead,omitempty"`
 	Activity   *string `json:"activity,omitempty"`
 
-	// ActivitySource Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present.
+	// ActivitySource Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.
 	ActivitySource *AgentResponseActivitySource `json:"activity_source,omitempty"`
 	Available      bool                         `json:"available"`
 	ContextPct     *int64                       `json:"context_pct,omitempty"`
@@ -2011,7 +2011,7 @@ type AgentResponse struct {
 	UnavailableReason *string `json:"unavailable_reason,omitempty"`
 }
 
-// AgentResponseActivitySource Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present.
+// AgentResponseActivitySource Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.
 type AgentResponseActivitySource string
 
 // AgentUpdateInputBody defines model for AgentUpdateInputBody.
@@ -5091,7 +5091,7 @@ type ServiceRestartOutputBody struct {
 
 // SessionActivityEvent defines model for SessionActivityEvent.
 type SessionActivityEvent struct {
-	// Activity Session activity state: 'idle' or 'in-turn'.
+	// Activity Session activity state: 'idle' or 'in-turn', derived from the transcript under every program_status switch. The session program's own status arrives in the program_status frame.
 	Activity string `json:"activity"`
 }
 
@@ -5433,7 +5433,7 @@ type SessionResponse struct {
 	ActiveBead *string `json:"active_bead,omitempty"`
 	Activity   *string `json:"activity,omitempty"`
 
-	// ActivitySource Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present.
+	// ActivitySource Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.
 	ActivitySource         *SessionResponseActivitySource `json:"activity_source,omitempty"`
 	AgentKind              *string                        `json:"agent_kind,omitempty"`
 	Alias                  *string                        `json:"alias,omitempty"`
@@ -5468,7 +5468,7 @@ type SessionResponse struct {
 	WorkDir                *string                 `json:"work_dir,omitempty"`
 }
 
-// SessionResponseActivitySource Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present.
+// SessionResponseActivitySource Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.
 type SessionResponseActivitySource string
 
 // SessionStopBody defines model for SessionStopBody.
