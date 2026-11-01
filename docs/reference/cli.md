@@ -3719,9 +3719,11 @@ supervisor does not forward into its service environment, a later config layer
 that overrides the credential for particular agents, and whether this city's
 supervisor reads the machine-local secrets file at all.
 
-Changing a credential does not apply itself. A credential change moves no
-config fingerprint, so no agent restarts on its own, and the supervisor
-resolves session environment from its own environment, fixed when it exec'd.
+Changing a credential does not apply itself. The supervisor resolves session
+environment from its own environment, fixed when it exec'd, so nothing changes
+until it re-execs. After that, a credential declared in provider env moves the
+agents' fingerprint and they relaunch; one injected by a selected [upstreams]
+entry does not, so cycle those agents yourself.
 Applying a new value means: write it where the supervisor reads it, regenerate
 the service file so the supervisor re-execs with it, then cycle the agents.
 Until the supervisor re-execs, every running session keeps the old credential.

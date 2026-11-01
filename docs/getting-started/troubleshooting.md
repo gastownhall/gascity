@@ -631,9 +631,10 @@ reaches the same path.
 <Warning>
 Do not reach for `gc supervisor stop` followed by `gc supervisor start`.
 `gc supervisor start` does not regenerate the service file and does not merge
-the secrets file: it launches a supervisor detached from the service manager
-carrying the calling shell's environment, and it refuses outright when one is
-already running. Using it here is how a rotation ends up serving the old value
+the secrets file: it either starts the already-installed service with its old,
+un-regenerated environment (macOS) or launches a detached supervisor carrying
+the calling shell's environment, and it refuses outright when one is already
+running. Using it here is how a rotation ends up serving the old value
 or a blank one.
 </Warning>
 
@@ -726,9 +727,11 @@ Then change the value at its source and apply it with the procedure in
 followed by `gc restart` to cycle the agents.
 
 <Warning>
-Changing a credential does not apply itself. A credential change moves no
-config fingerprint, so no agent restarts on its own, and the supervisor
-resolves session environment from its own environment, fixed when it exec'd.
+Changing a credential does not apply itself. The supervisor resolves session
+environment from its own environment, fixed when it exec'd, so nothing changes
+until it re-execs. After that, a credential declared in provider env moves the
+agents' fingerprint and they relaunch; one injected by a selected [upstreams]
+entry does not, so cycle those agents yourself.
 Until the supervisor re-execs, every running session keeps the old credential.
 `gc restart` cycles agents only — `gc supervisor install` is what re-execs the
 supervisor.
