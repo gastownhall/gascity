@@ -60,6 +60,13 @@ type Options struct {
 	// the intended assignee in metadata for later activation.
 	DeferAssignees bool
 
+	// RootMetadata is written onto the root bead only, atomically with its
+	// creation, after the formula's own root metadata so the caller's value
+	// wins. Sling uses it for server-owned facts about the launch (such as
+	// who initiated it) that must be present before any worker can claim
+	// the work.
+	RootMetadata map[string]string
+
 	nativeStepTopologyPrepared bool
 	stampAttachRootID          bool
 }
@@ -981,6 +988,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 				b.Metadata[beadmeta.WorkflowExpandedMetadataKey] = "true"
 			}
 			stampFormulaVars(vars, &b)
+			b.Metadata = withRootMetadata(b.Metadata, opts.RootMetadata)
 		} else {
 			// graph.v2 workflows and their retry/Ralph attempt sub-recipes
 			// use step beads as independently routable actionable work, not
@@ -1633,6 +1641,22 @@ func stampFormulaVars(vars map[string]string, b *beads.Bead) {
 			b.Metadata[formulaVarMetadataPrefix+k] = v
 		}
 	}
+}
+
+// withRootMetadata returns meta with every entry of rootMeta set on it,
+// allocating meta when it is nil. Both root-creation paths (per-bead create
+// and graph-apply) share it so Options.RootMetadata lands identically.
+func withRootMetadata(meta, rootMeta map[string]string) map[string]string {
+	if len(rootMeta) == 0 {
+		return meta
+	}
+	if meta == nil {
+		meta = make(map[string]string, len(rootMeta))
+	}
+	for k, v := range rootMeta {
+		meta[k] = v
+	}
+	return meta
 }
 
 // substituteLabels applies variable substitution to each label.
