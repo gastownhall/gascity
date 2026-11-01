@@ -1,6 +1,11 @@
 package tmux
 
-import "testing"
+import (
+	"errors"
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/runtime"
+)
 
 // PaneShowsIdlePrompt is the scan both local tmux (snapshotPaneIdleWithPrefix)
 // and remote tmux-in-box runtimes apply to a captured pane, so a busy
@@ -37,5 +42,29 @@ func TestPaneShowsIdlePrompt(t *testing.T) {
 				t.Errorf("PaneShowsIdlePrompt(%q, %q) = %v, want %v", tt.lines, tt.prefix, got, tt.want)
 			}
 		})
+	}
+}
+
+// codexFolderTrustMenu is codex-cli 0.157's folder-trust dialog: the selected
+// option carries codex's prompt glyph, the other options do not.
+var codexFolderTrustMenu = []string{
+	"  Trust this folder? Codex can read, edit, and run files here.",
+	"",
+	"› 1. Trust and continue",
+	"  2. Quit",
+	"",
+	"  enter continue · esc quit",
+}
+
+// A numbered menu whose selected row carries the prompt glyph (codex's
+// folder-trust dialog) is waiting for an answer, not an idle composer: a nudge
+// typed now lands in the dialog, and codex's leading Escape quits it.
+func TestPaneShowsIdlePromptMenuCursorRowIsNotIdle(t *testing.T) {
+	lines := codexFolderTrustMenu
+	if PaneShowsIdlePrompt(lines, "› ") {
+		t.Errorf("PaneShowsIdlePrompt(%q, %q) = true, want false: a numbered menu's cursor row is not a ready prompt", lines, "› ")
+	}
+	if idle, err := ClassifyIdlePane(lines, "› "); idle || !errors.Is(err, runtime.ErrIdleIndeterminate) {
+		t.Errorf("ClassifyIdlePane(%q, %q) = (%v, %v), want (false, ErrIdleIndeterminate)", lines, "› ", idle, err)
 	}
 }

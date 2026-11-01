@@ -5323,8 +5323,16 @@ func (t *Tmux) WaitForShellReady(session string, timeout time.Duration) error {
 // NBSP after its ❯ prompt character while the default ReadyPromptPrefix
 // uses a regular space. See https://github.com/steveyegge/gastown/issues/1387.
 func matchesPromptPrefix(line, readyPromptPrefix string) bool {
+	_, ok := promptLineRest(line, readyPromptPrefix)
+	return ok
+}
+
+// promptLineRest is the normalization behind matchesPromptPrefix: ok reports
+// whether line matches readyPromptPrefix, and rest is the text after the
+// prefix ("" for a bare prompt glyph).
+func promptLineRest(line, readyPromptPrefix string) (rest string, ok bool) {
 	if readyPromptPrefix == "" {
-		return false
+		return "", false
 	}
 	trimmed := strings.TrimSpace(line)
 	// Normalize NBSP (U+00A0) → regular space so that prompt matching
@@ -5337,11 +5345,47 @@ func matchesPromptPrefix(line, readyPromptPrefix string) bool {
 	// too so the prompt glyph after the border is detected — otherwise readiness
 	// and idle detection never match and queued prompt delivery is never released.
 	for _, cand := range []string{trimmed, stripLeadingBoxBorder(trimmed)} {
-		if strings.HasPrefix(cand, normalizedPrefix) || (prefix != "" && cand == prefix) {
-			return true
+		if strings.HasPrefix(cand, normalizedPrefix) {
+			return cand[len(normalizedPrefix):], true
+		}
+		if prefix != "" && cand == prefix {
+			return "", true
 		}
 	}
-	return false
+	return "", false
+}
+
+// isMenuCursorRow reports whether lines[i], a line matching promptPrefix, is
+// the selected row of a numbered option menu ("› 1. Trust and continue"):
+// TUIs mark the highlighted option with their prompt glyph, so the row matches
+// the ready prefix although the pane is waiting for a choice. Keys typed into
+// it are menu input, and Enter picks the highlighted option. The dialog layer
+// applies the same rule to its prompt scan (runtime.isNumberedMenuRow).
+func isMenuCursorRow(lines []string, i int, promptPrefix string) bool {
+	rest, ok := promptLineRest(lines[i], promptPrefix)
+	if !ok {
+		return false
+	}
+	_, ok = menuOptionNumber(rest)
+	return ok
+}
+
+// menuOptionNumber parses a numbered menu label at the start of s: a run of
+// ASCII digits followed by ". ". It reports false for anything else,
+// including a number too large for an int.
+func menuOptionNumber(s string) (int, bool) {
+	digits := 0
+	for digits < len(s) && s[digits] >= '0' && s[digits] <= '9' {
+		digits++
+	}
+	if digits == 0 || !strings.HasPrefix(s[digits:], ". ") {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s[:digits])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // stripLeadingBoxBorder removes a leading vertical box-drawing character
@@ -5561,9 +5605,12 @@ func PaneShowsIdlePrompt(lines []string, promptPrefix string) bool {
 	// Scan captured lines for the prompt prefix.
 	// Claude Code renders a status bar below the prompt line,
 	// so the prompt may not be the last non-empty line.
-	for _, line := range lines {
+	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
+			continue
+		}
+		if isMenuCursorRow(lines, i, promptPrefix) {
 			continue
 		}
 		if matchesPromptPrefix(trimmed, promptPrefix) || (prefix != "" && trimmed == prefix) {
