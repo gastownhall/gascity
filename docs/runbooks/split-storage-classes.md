@@ -468,9 +468,12 @@ gc serves its own `release-if-current` itself.
   a string value, but a JSON null reads as empty to the bd CLI and as the text
   `null` to a native Dolt store, and `gc.root_bead_id` set to `null` is a
   graph marker. A write is refused when either reading moves the bead out of
-  the classes its store holds, and an import row the two readings place in
-  different classes is refused even with `--skip-infra`. Write such a key as a
-  string, leave it out, or clear it with `update --unset-metadata`.
+  the classes its store holds. An import row is kept when its store holds the
+  row's class under both readings, and is handled like any row of a class the
+  store does not hold (refused, or left out with `--skip-infra`) when it holds
+  neither; a row its store holds under one reading only is refused, even with
+  `--skip-infra`. Write such a key as a string, leave it out, or clear it with
+  `update --unset-metadata`.
 - `label propagate`: a class-marker label is refused.
 - `import`: rows of a class the store does not hold are refused, or left out
   with `--skip-infra`. gc reads the file the way bd's import does: a line
