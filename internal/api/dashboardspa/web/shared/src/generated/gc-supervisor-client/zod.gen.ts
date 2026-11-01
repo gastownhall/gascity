@@ -205,7 +205,14 @@ export const zCityCreateRequest = z.object({
     ]).optional(),
     dir: z.string().min(1),
     provider: z.string().min(1).optional(),
-    start_command: z.string().optional()
+    start_command: z.string().optional(),
+    template: z.enum([
+        'minimal',
+        'gastown',
+        'gascity',
+        'custom',
+        'empty'
+    ]).optional().default('gascity')
 });
 
 export const zCityCreateSucceededPayload = z.object({

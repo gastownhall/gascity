@@ -630,3 +630,11 @@ before any legacy/lane op admission. Keep the existing op keys, payload digest
 and replay rules. Native question IDs include provider invocation identity;
 clients discover answer/text support from pending metadata instead of inferring
 it from `kind`. Provider logs and terminal input remain runtime-adapter concerns.
+
+## Initial factory selection
+
+City creation passes `template` into `cityinit.InitRequest.ConfigName`; the
+shared domain defaults it to Gas City and validates before scaffolding. The
+provider field remains the default coding-provider choice. Preserve custom
+commands when choosing a factory and refuse providers on providerless templates.
+Valid template choices are discoverable in OpenAPI and match native `gc init`.

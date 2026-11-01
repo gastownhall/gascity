@@ -1513,6 +1513,18 @@
           "start_command": {
             "description": "Custom workspace start command for the city's default session template. Mutually exclusive with provider.",
             "type": "string"
+          },
+          "template": {
+            "default": "gascity",
+            "description": "Initial factory template, matching gc init --template. Defaults to gascity. custom and empty create providerless cities; they cannot be combined with provider or start_command.",
+            "enum": [
+              "minimal",
+              "gastown",
+              "gascity",
+              "custom",
+              "empty"
+            ],
+            "type": "string"
           }
         },
         "required": [

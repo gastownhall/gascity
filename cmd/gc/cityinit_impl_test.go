@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/cityinit"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
@@ -415,5 +416,84 @@ func TestCityInitServiceUnregisterMissingCity(t *testing.T) {
 	_, err = mustNewCityInitService(t).Unregister(context.Background(), cityinit.UnregisterRequest{})
 	if !errors.Is(err, cityinit.ErrNotRegistered) {
 		t.Fatalf("Unregister blank error = %v, want ErrNotRegistered", err)
+	}
+}
+
+func TestCityInitServiceTemplateProducesNativeConfiguration(t *testing.T) {
+	oldReload := reloadSupervisorNoWaitHook
+	reloadSupervisorNoWaitHook = func() error { return nil }
+	t.Cleanup(func() { reloadSupervisorNoWaitHook = oldReload })
+	for _, template := range []string{"", "gascity", "minimal"} {
+		t.Run(template, func(t *testing.T) {
+			t.Setenv("GC_HOME", t.TempDir())
+			dir := filepath.Join(t.TempDir(), "api-template-city")
+			_, err := mustNewCityInitService(t).Scaffold(context.Background(), cityinit.InitRequest{Dir: dir, Provider: "codex", ConfigName: template})
+			if err != nil {
+				t.Fatal(err)
+			}
+			load := func(name string) *config.City {
+				t.Helper()
+				raw, err := os.ReadFile(filepath.Join(dir, name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				cfg, err := config.Parse(raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return cfg
+			}
+			city, pack := load("city.toml"), load("pack.toml")
+			wantGC := template != "minimal"
+			_, hasGC := pack.Imports["gc"]
+			_, hasRoles := city.Defaults.Rig.Imports["gc"]
+			if hasGC != wantGC || hasRoles != wantGC {
+				t.Errorf("template=%q gascity import=%v rig roles=%v want %v", template, hasGC, hasRoles, wantGC)
+			}
+			if city.Workspace.Provider != "codex" {
+				t.Errorf("provider=%q want codex", city.Workspace.Provider)
+			}
+			found := false
+			for _, named := range pack.NamedSessions {
+				found = found || named.Template == "mayor"
+			}
+			if !found {
+				t.Errorf("missing normal named session: %+v", pack.NamedSessions)
+			}
+		})
+	}
+}
+
+func TestCityInitServiceTemplatePreservesCustomCommand(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	oldReload := reloadSupervisorNoWaitHook
+	reloadSupervisorNoWaitHook = func() error { return nil }
+	t.Cleanup(func() { reloadSupervisorNoWaitHook = oldReload })
+	dir := filepath.Join(t.TempDir(), "custom-command-city")
+	_, err := mustNewCityInitService(t).Scaffold(context.Background(), cityinit.InitRequest{Dir: dir, ConfigName: "gascity", StartCommand: "native-agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Workspace.StartCommand != "native-agent" || cfg.Workspace.Provider != "" {
+		t.Fatalf("custom launch lost: %+v", cfg.Workspace)
+	}
+	data, err = os.ReadFile(filepath.Join(dir, "pack.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pack, err := config.Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := pack.Imports["gc"]; !ok {
+		t.Fatal("custom command lost selected factory pack")
 	}
 }

@@ -78,6 +78,33 @@ func (e CityCreateRequestBootstrapProfile) Valid() bool {
 	}
 }
 
+// Defines values for CityCreateRequestTemplate.
+const (
+	Custom  CityCreateRequestTemplate = "custom"
+	Empty   CityCreateRequestTemplate = "empty"
+	Gascity CityCreateRequestTemplate = "gascity"
+	Gastown CityCreateRequestTemplate = "gastown"
+	Minimal CityCreateRequestTemplate = "minimal"
+)
+
+// Valid indicates whether the value is a known member of the CityCreateRequestTemplate enum.
+func (e CityCreateRequestTemplate) Valid() bool {
+	switch e {
+	case Custom:
+		return true
+	case Empty:
+		return true
+	case Gascity:
+		return true
+	case Gastown:
+		return true
+	case Minimal:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ConversationFactKind.
 const (
 	InteractionRaised   ConversationFactKind = "interaction.raised"
@@ -2237,10 +2264,16 @@ type CityCreateRequest struct {
 
 	// StartCommand Custom workspace start command for the city's default session template. Mutually exclusive with provider.
 	StartCommand *string `json:"start_command,omitempty"`
+
+	// Template Initial factory template, matching gc init --template. Defaults to gascity. custom and empty create providerless cities; they cannot be combined with provider or start_command.
+	Template *CityCreateRequestTemplate `json:"template,omitempty"`
 }
 
 // CityCreateRequestBootstrapProfile Optional bootstrap profile.
 type CityCreateRequestBootstrapProfile string
+
+// CityCreateRequestTemplate Initial factory template, matching gc init --template. Defaults to gascity. custom and empty create providerless cities; they cannot be combined with provider or start_command.
+type CityCreateRequestTemplate string
 
 // CityCreateSucceededPayload defines model for CityCreateSucceededPayload.
 type CityCreateSucceededPayload struct {

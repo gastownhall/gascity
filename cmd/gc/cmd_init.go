@@ -76,7 +76,7 @@ type initPackConfig struct {
 
 var initConventionDirs = cityinit.InitConventionDirs()
 
-const defaultInitTemplate = "gascity"
+const defaultInitTemplate = cityinit.DefaultTemplate
 
 // wizardConfig carries the results of the interactive init wizard (or defaults
 // for non-interactive paths). doInit uses it to decide which config to write.
@@ -765,19 +765,11 @@ func normalizeInitProviders(values []string, skipProviderReadiness bool) ([]stri
 }
 
 func normalizeInitTemplate(template string, supplied bool) (string, error) {
-	template = strings.TrimSpace(template)
-	if template == "" {
+	normalized, err := cityinit.NormalizeTemplate(template)
+	if err != nil && !supplied {
 		return defaultInitTemplate, nil
 	}
-	switch template {
-	case "minimal", "gastown", "gascity", "custom", "empty":
-		return template, nil
-	default:
-		if supplied {
-			return "", fmt.Errorf("unknown template %q (expected one of: minimal, gastown, gascity, custom, empty)", template)
-		}
-		return defaultInitTemplate, nil
-	}
+	return normalized, err
 }
 
 func stringInSlice(value string, items []string) bool {
@@ -1455,6 +1447,10 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 			cfg = config.GascityBeginnerCityWithProviders(cityName, defaultProvider, providers)
 		} else {
 			cfg = config.GascityCityWithProviders(cityName, defaultProvider, providers)
+			// Custom launch commands inherit the same factory pack and rig roles.
+			if wiz.startCommand != "" {
+				cfg.Workspace.StartCommand = wiz.startCommand
+			}
 		}
 	case defaultProvider != "" || len(providers) > 0:
 		cfg = config.WizardCityWithProviders(cityName, defaultProvider, providers)

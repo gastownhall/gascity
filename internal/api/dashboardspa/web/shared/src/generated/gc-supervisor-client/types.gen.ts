@@ -559,6 +559,10 @@ export type CityCreateRequest = {
      * Custom workspace start command for the city's default session template. Mutually exclusive with provider.
      */
     start_command?: string;
+    /**
+     * Initial factory template, matching gc init --template. Defaults to gascity. custom and empty create providerless cities; they cannot be combined with provider or start_command.
+     */
+    template?: 'minimal' | 'gastown' | 'gascity' | 'custom' | 'empty';
 };
 
 export type CityCreateSucceededPayload = {

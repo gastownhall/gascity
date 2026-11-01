@@ -476,3 +476,43 @@ func TestServiceScaffoldRollbackUsesInternalManagedPaths(t *testing.T) {
 		t.Fatalf("keep file = %q/%v, want preserved", string(data), readErr)
 	}
 }
+
+func TestServiceTemplateDefaultAndValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name, template, provider, command, want string
+		invalid                                 bool
+	}{
+		{name: "default", provider: "codex", want: "gascity"},
+		{name: "explicit", template: "gascity", provider: "codex", want: "gascity"},
+		{name: "minimal", template: "minimal", provider: "codex", want: "minimal"},
+		{name: "custom command", command: "native-agent", want: "gascity"},
+		{name: "empty", template: "empty", want: "empty"},
+		{name: "custom", template: "custom", want: "custom"},
+		{name: "unknown", template: "typo", provider: "codex", invalid: true},
+		{name: "provider on empty", template: "empty", provider: "codex", invalid: true},
+		{name: "command on custom", template: "custom", command: "native-agent", invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			svc := mustNewService(t, ServiceDeps{FS: fsys.OSScaffoldFS{}, Initializer: &mockInitializer{scaffoldFn: func(_ context.Context, req InitRequest) error {
+				calls++
+				if req.ConfigName != tc.want {
+					t.Errorf("template=%q want %q", req.ConfigName, tc.want)
+				}
+				return nil
+			}}})
+			dir := filepath.Join(t.TempDir(), "new-city")
+			_, err := svc.Init(context.Background(), InitRequest{Dir: dir, ConfigName: tc.template, Provider: tc.provider, StartCommand: tc.command})
+			if tc.invalid {
+				if err == nil || calls != 0 {
+					t.Fatalf("invalid template/config reached scaffold: calls=%d err=%v", calls, err)
+				}
+				if _, err := os.Stat(dir); !os.IsNotExist(err) {
+					t.Fatalf("invalid init created directory: %v", err)
+				}
+			} else if err != nil || calls != 1 {
+				t.Fatalf("Init calls=%d err=%v", calls, err)
+			}
+		})
+	}
+}

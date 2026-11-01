@@ -248,8 +248,13 @@ func TestDoInitBeginnerUsesDefaultPackWithoutIdleModelDemand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if city.Workspace.MaxActiveSessions == nil || *city.Workspace.MaxActiveSessions != 2 {
-		t.Fatalf("missing bounded session budget: %+v", city.Workspace.MaxActiveSessions)
+	normal := config.GascityCityWithProviders("guided", "claude", []string{"claude"})
+	gotCapacity, wantCapacity := city.Workspace.MaxActiveSessions, normal.Workspace.MaxActiveSessions
+	if (gotCapacity == nil) != (wantCapacity == nil) || (gotCapacity != nil && wantCapacity != nil && *gotCapacity != *wantCapacity) {
+		t.Fatalf("beginner changed normal capacity: got %v want %v", gotCapacity, wantCapacity)
+	}
+	if city.Workspace.Provider != normal.Workspace.Provider {
+		t.Fatalf("beginner changed provider: got %q want %q", city.Workspace.Provider, normal.Workspace.Provider)
 	}
 	if len(city.Orders.Skip) != 1 || city.Orders.Skip[0] != "mol-dog-stale-db" {
 		t.Fatalf("background model maintenance enabled: %+v", city.Orders)

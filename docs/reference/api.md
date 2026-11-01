@@ -4,8 +4,8 @@ description: The typed HTTP + SSE control plane exposed by the `gc` supervisor.
 ---
 
 The `gc` supervisor exposes a single, typed HTTP control plane
-described by an OpenAPI 3.1 document. Everything the CLI does, any
-third-party client can do too — there is no hidden surface.
+described by an OpenAPI 3.1 document. Clients use it to create cities,
+submit work, control sessions and observe progress.
 
 See also: [The six primitives](/getting-started/how-gas-city-works) — the canonical model this
 API projects over.
@@ -79,6 +79,25 @@ The spec is the full reference. A brief summary of the surfaces:
   `GET /v0/city/{cityName}/events/stream` at city scope.
 - **Config & packs.** Per-city config and pack metadata under
   `/v0/city/{cityName}/config` and `/v0/city/{cityName}/packs`.
+
+## Create a city
+
+`POST /v0/city` accepts the same initial `template` choice as `gc init`.
+Omit it to use Gas City, including its default rig roles. `provider` selects
+the coding provider; a client does not need to edit the created city files.
+
+```json
+{"dir":"/home/you/cities/my-city","template":"gascity","provider":"claude"}
+```
+
+Use `minimal` for a smaller initial configuration. `custom` and `empty` create
+providerless cities, so omit both `provider` and `start_command` for those
+choices. A custom `start_command` replaces `provider` and keeps the selected
+factory configuration. The running OpenAPI document lists valid choices.
+
+Creation returns `202` after scaffolding and registration. Follow the returned
+`request_id` on the supervisor event stream for startup completion or a
+`request.failed` event; acceptance alone does not mean the city is ready.
 
 ## Agent counts
 

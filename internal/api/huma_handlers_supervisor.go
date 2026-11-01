@@ -78,6 +78,7 @@ type SupervisorProviderReadinessOutput struct {
 
 // cityCreateRequest is the body for POST /v0/city.
 type cityCreateRequest struct {
+	Template         string `json:"template,omitempty" default:"gascity" enum:"minimal,gastown,gascity,custom,empty" doc:"Initial factory template, matching gc init --template. Defaults to gascity. custom and empty create providerless cities; they cannot be combined with provider or start_command."`
 	Dir              string `json:"dir" minLength:"1" doc:"Directory to create the city in. Absolute or relative to $HOME."`
 	Provider         string `json:"provider,omitempty" minLength:"1" doc:"Provider name for the city's default session template. Mutually exclusive with start_command."`
 	StartCommand     string `json:"start_command,omitempty" doc:"Custom workspace start command for the city's default session template. Mutually exclusive with provider."`
@@ -438,6 +439,7 @@ func (sm *SupervisorMux) scaffoldCityOnce(ctx context.Context, body cityCreateRe
 
 	result, scaffoldErr := sm.initializer.Scaffold(ctx, cityinit.InitRequest{
 		Dir:                   dir,
+		ConfigName:            body.Template,
 		Provider:              body.Provider,
 		StartCommand:          body.StartCommand,
 		BootstrapProfile:      body.BootstrapProfile,
@@ -449,6 +451,7 @@ func (sm *SupervisorMux) scaffoldCityOnce(ctx context.Context, body cityCreateRe
 		sm.clearPendingCityRequestID(dir, pendingStored)
 		return zero, apierr.ConflictWrongState.Msg("conflict: city already initialized at " + dir)
 	case errors.Is(scaffoldErr, cityinit.ErrInvalidDirectory),
+		errors.Is(scaffoldErr, cityinit.ErrInvalidTemplate),
 		errors.Is(scaffoldErr, cityinit.ErrInvalidProvider),
 		errors.Is(scaffoldErr, cityinit.ErrInvalidBootstrapProfile):
 		sm.clearPendingCityRequestID(dir, pendingStored)

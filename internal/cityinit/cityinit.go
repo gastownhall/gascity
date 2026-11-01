@@ -14,6 +14,7 @@ package cityinit
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Typed sentinel errors. Both projections map them to their own
@@ -35,6 +36,9 @@ var (
 	// ErrInvalidProvider indicates an unknown builtin provider. The
 	// HTTP API maps this to 422 Unprocessable Entity.
 	ErrInvalidProvider = errors.New("invalid provider")
+
+	// ErrInvalidTemplate indicates an unknown initial factory template.
+	ErrInvalidTemplate = errors.New("invalid city template")
 
 	// ErrInvalidBootstrapProfile indicates an unrecognized
 	// bootstrap_profile value.
@@ -95,8 +99,8 @@ type InitRequest struct {
 	Dir string
 
 	// Provider is the builtin provider key ("claude", "codex",
-	// "gemini", ...) for the city's default workspace. Empty iff
-	// StartCommand is set.
+	// "gemini", ...) for the city's default workspace. Empty for a
+	// providerless template or when StartCommand is set.
 	Provider string
 
 	// StartCommand is an opt-in custom workspace provider command.
@@ -121,9 +125,8 @@ type InitRequest struct {
 	// ConfigName selects the scaffold template: one of "minimal",
 	// "gastown", "gascity", "custom", or "empty" (a bare, providerless
 	// city a controller boots with only the core infra pack, for the
-	// front-door pack API to populate later). An empty value is
-	// normalized to "tutorial". The CLI wizard resolves this; the HTTP
-	// API always leaves it empty.
+	// front-door pack API to populate later). Empty defaults to DefaultTemplate.
+	// Both the CLI wizard and HTTP API expose this same template choice.
 	ConfigName string
 }
 
@@ -172,4 +175,21 @@ type UnregisterResult struct {
 	// ReloadWarning is non-empty when the supervisor reload after
 	// unregister succeeded but returned a best-effort error.
 	ReloadWarning string
+}
+
+// DefaultTemplate is the initial factory selected when no template is supplied.
+const DefaultTemplate = "gascity"
+
+// NormalizeTemplate resolves the shared CLI/API factory template selection.
+func NormalizeTemplate(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return DefaultTemplate, nil
+	}
+	switch name {
+	case "minimal", "gastown", "gascity", "custom", "empty":
+		return name, nil
+	default:
+		return "", fmt.Errorf("%w: unknown template %q (expected one of: minimal, gastown, gascity, custom, empty)", ErrInvalidTemplate, name)
+	}
 }
