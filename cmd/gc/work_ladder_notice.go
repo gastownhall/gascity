@@ -24,7 +24,8 @@ package main
 // the entry is held and the seat's nudge slot taken, so the seat has at most
 // one ladder notice open, and attempt n+1 waits until attempt n is settled.
 // Each pass reads the marked op live and folds its fate back into the cell by
-// CAS (workladder.SettleNotice): delivered counts and ends the refusals;
+// CAS (workladder.SettleNotice): delivered counts, ends the refusals and
+// moves the seat's Delivered to the start of the attempt that delivered it;
 // failed, perhaps after reaching the seat, counts; canceled or skipped is
 // withdrawn, re-counted as paused. One never delivered in its window
 // (expired_before_start, open past its start_by with no attempt that may
@@ -112,6 +113,8 @@ func (r *ladderRoute) unreadable() bool { return r != nil && r.err != nil }
 // the op was scoped to (zero when it could not be read). undelivered marks a
 // fate of NoticeFailed for a notice that never reached the seat in its
 // window, whose cause the pass has yet to classify (classifyUndelivered).
+// deliveredAt is when a delivered notice reached the seat
+// (ladderNoticeDeliveredAt); zero for every other fate.
 type ladderNoticeResult struct {
 	op          string
 	pending     bool
@@ -119,6 +122,7 @@ type ladderNoticeResult struct {
 	reason      string
 	gen         int64
 	undelivered bool
+	deliveredAt time.Time
 }
 
 // ladderSettled is a fate a commit folded into the cell: the entry as it
@@ -290,6 +294,7 @@ func ladderNoticeFate(op opjournal.Op, err error, m workladder.NoticeMark, now t
 		arm, reason := op.Outcome.Effective()
 		switch arm {
 		case opjournal.ArmSucceeded:
+			r.deliveredAt = ladderNoticeDeliveredAt(op, m)
 			return settled(workladder.NoticeDelivered, "")
 		case opjournal.ArmCanceled:
 			why := "canceled by " + op.Cancel.By
@@ -320,6 +325,23 @@ func ladderNoticeFate(op opjournal.Op, err error, m workladder.NoticeMark, now t
 		return undelivered("notice past its start_by undelivered")
 	}
 	return unsettled("waiting for a boundary")
+}
+
+// ladderNoticeDeliveredAt is when op, a notice the lane delivered, reached
+// the seat, as tight a lower bound as its record gives: the start of the
+// attempt that delivered it (its last executing transition), else the
+// transition that closed it, else the mark's reservation m. A refusal that
+// ends after it answers the notice; one that ends before it cannot.
+func ladderNoticeDeliveredAt(op opjournal.Op, m workladder.NoticeMark) time.Time {
+	for i := len(op.Transitions) - 1; i >= 0; i-- {
+		if op.Transitions[i].Status == opjournal.StatusExecuting && !op.Transitions[i].At.IsZero() {
+			return op.Transitions[i].At
+		}
+	}
+	if n := len(op.Transitions); n > 0 && !op.Transitions[n-1].At.IsZero() {
+		return op.Transitions[n-1].At
+	}
+	return m.At
 }
 
 // withdrawGate is the gate the held-gate withdraw (noticeOutcomes) acts on:
@@ -444,9 +466,7 @@ func foldLadderNotices(r workladder.Record, outs []ladderNoticeResult) (workladd
 			continue
 		}
 		m, attempt := r.Entries[i].Notice, r.Entries[i].Attempts
-		// The fold reads no delivery time yet, so the seat's Delivered
-		// stays as it is (a zero time moves nothing).
-		next, alert, ok := workladder.SettleNotice(r, o.op, o.fate, time.Time{})
+		next, alert, ok := workladder.SettleNotice(r, o.op, o.fate, o.deliveredAt)
 		if !ok {
 			continue
 		}
