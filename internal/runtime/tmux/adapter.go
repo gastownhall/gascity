@@ -1484,6 +1484,10 @@ type tmuxStartOps struct {
 	// budget. Nil means the real clock; tests inject a fake so the idle
 	// window is decided by what the command printed, not by host speed.
 	monitorClock execgrace.Clock
+	// programStatus is the session's program-status capture declaration
+	// (runtime.Config.ProgramStatus), armed on the agent pane at create and
+	// respawn. The zero value arms nothing.
+	programStatus runtime.ProgramStatusArm
 }
 
 // newTmuxStartOps builds the startup adapter for one session, deriving the
@@ -1517,6 +1521,7 @@ func newTmuxStartOps(tm *Tmux, runtimeDir string, setupMaxTimeout time.Duration,
 		setupMaxTimeout: setupMaxTimeout,
 		secrets:         runtime.SetupCommandSecrets(cfg.Env),
 		freshStart:      freshStart,
+		programStatus:   cfg.ProgramStatus,
 	}
 }
 
@@ -1536,7 +1541,7 @@ const (
 
 func (o *tmuxStartOps) createSession(name, workDir, command string, env map[string]string) error {
 	if command != "" || len(env) > 0 {
-		return o.tm.NewSessionWithCommandAndEnv(name, workDir, command, env)
+		return o.tm.newSessionWithCommandAndEnv(name, workDir, command, env, o.programStatus)
 	}
 	return o.tm.NewSession(name, workDir)
 }
@@ -1562,7 +1567,7 @@ func (o *tmuxStartOps) respawnAgent(name, workDir, command string, env map[strin
 	// A warm box created before the agent-pane marker (or whose mark failed)
 	// is marked here while it still has only the agent's pane.
 	o.tm.adoptAgentPane(name)
-	if err := o.tm.RespawnPaneWithWorkDir(name, workDir, command); err != nil {
+	if err := o.tm.respawnPaneWithWorkDir(name, workDir, command, o.programStatus); err != nil {
 		return err
 	}
 	// The respawned process inherits the session environment's identity;

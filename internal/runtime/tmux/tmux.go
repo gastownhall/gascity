@@ -180,6 +180,14 @@ type Config struct {
 	// literal. Empty disables the durable capture, so ad-hoc invocations
 	// and tests run unchanged.
 	RuntimeDir string
+	// ProgramStatusBin is the gc-osc7501 companion that program-status
+	// capture arms with. Empty resolves it at each arm: next to the running
+	// executable, else on PATH. Tests set it to the binary they built.
+	ProgramStatusBin string
+	// ProgramStatus is the city's [session] program_status switch, the mode
+	// every program-status reading is taken under. Off (or empty) reads
+	// nothing: the read formats stay today's and every reading is Unread.
+	ProgramStatus runtime.ProgramStatusMode
 }
 
 // DefaultConfig returns a Config with the original hardcoded values.
@@ -420,23 +428,25 @@ func newTmuxCommand(ctx context.Context, args []string, stdout, stderr *bytes.Bu
 }
 
 func (realExecutor) execute(args []string) (string, error) {
-	var stdout, stderr bytes.Buffer
-	cmd := newTmuxCommand(context.Background(), args, &stdout, &stderr)
-	err := cmd.Run()
-	if err != nil {
-		return "", wrapError(err, stderr.String(), args)
-	}
-	return strings.TrimSpace(stdout.String()), nil
+	return realExecutor{}.executeCtx(context.Background(), args)
 }
 
+// executeCtx runs one tmux invocation. On failure it returns no output; output
+// printed before the failure (a command list's earlier commands) travels in
+// the error as a *tmuxOutputError.
 func (realExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
 	var stdout, stderr bytes.Buffer
 	cmd := newTmuxCommand(ctx, args, &stdout, &stderr)
 	err := cmd.Run()
+	out := strings.TrimSpace(stdout.String())
 	if err != nil {
-		return "", wrapError(err, stderr.String(), args)
+		err = wrapError(err, stderr.String(), args)
+		if out != "" {
+			err = &tmuxOutputError{Stdout: out, Err: err}
+		}
+		return "", err
 	}
-	return strings.TrimSpace(stdout.String()), nil
+	return out, nil
 }
 
 // Tmux wraps tmux operations.
@@ -458,6 +468,10 @@ type Tmux struct {
 	// agentSlice wraps pane commands in a transient systemd user scope when
 	// GC_AGENT_SLICE is set (see AgentSliceEnv in agent_slice.go).
 	agentSlice agentSliceWrapper
+
+	// capture is the program-status capture capability gate (see
+	// program_capture.go).
+	capture captureGate
 
 	// serverSocketObserver observes the server socket only after tmux reports
 	// ErrNoServer, during the new-session preflight or a liveness observation
@@ -859,6 +873,18 @@ func (t *Tmux) markSessionEnvRemoved(session string, keys []string) error {
 // private file instead — see [Tmux.runNewSession]. The session environment tmux
 // ends up holding is identical either way.
 func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env map[string]string) error {
+	return t.newSessionWithCommandAndEnv(name, workDir, command, env, runtime.ProgramStatusArm{})
+}
+
+// newSessionWithCommandAndEnv is NewSessionWithCommandAndEnv arming the
+// session's program-status capture as arm declares (see program_capture.go).
+// The zero arm, and an arm the capability gate refuses, create exactly as
+// NewSessionWithCommandAndEnv always has. An armed create runs one command
+// list: new-session, then the pane's nonce and tap. When a later command of
+// that list fails the session still exists (its pane id was printed): it is
+// marked, fenced and has its credentials withheld as any other, the arm
+// failure is logged, and create succeeds; heal re-arms the pane.
+func (t *Tmux) newSessionWithCommandAndEnv(name, workDir, command string, env map[string]string, arm runtime.ProgramStatusArm) error {
 	if err := validateSessionName(name); err != nil {
 		return err
 	}
@@ -868,6 +894,7 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	if err := t.probeServerAlive(); err != nil {
 		return err
 	}
+	plan := t.planCapture(arm)
 	args := []string{"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name}
 	if workDir != "" {
 		args = append(args, "-c", workDir)
@@ -888,17 +915,28 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	// For vars that need unsetting, prefix the command with env -u flags. The
 	// pane's shell would otherwise inherit them from the tmux server's global
 	// environment, which holds whatever the controller exported when the server
-	// started. This prefix is a property of THIS command only.
+	// started. This prefix is a property of THIS command only. It sits
+	// outside the relay, so the relay never holds a withheld value its
+	// child could read.
 	var err error
-	command, err = withEnvUnsetPrefix(command, unsetKeys)
+	command, err = withEnvUnsetPrefix(plan.wrapRelay(command), unsetKeys)
 	if err != nil {
 		return err
 	}
 	// Add the command as the last argument
 	args = append(args, t.wrapPaneCommand(command))
-	pane, err := t.runNewSession(args, env)
+	cmds := [][]string{args}
+	if plan != nil {
+		cmds = append(cmds, plan.armCommands(paneTarget(name), false)...)
+	}
+	pane, err := t.runNewSession(cmds, env)
 	if err != nil {
-		return err
+		created := firstLine(outputBeforeError(err))
+		if plan == nil || !wellFormedTmuxID(created, '%') {
+			return err
+		}
+		_, _ = fmt.Fprintf(captureWarningOut, "warning: session %q: arming program-status capture: %v\n", name, err)
+		pane = created
 	}
 	t.markAgentPane(name, pane)
 	t.publishInputFence(name, pane, env)
@@ -1304,10 +1342,22 @@ func buildProcessKillPlan(rootPID int, records []proctable.ProcessRecord, exclud
 	// owned group, members outside that tree are its init/subreaper-adopted tail.
 	// Order each orphan tree deepest-first and resolve disconnected/cyclic
 	// components by PID.
-	if root.PGID == root.PID {
+	//
+	// The same proof holds for every captured descendant that leads its own
+	// group: the program-status relay runs its program in a session and group
+	// of its own (as any setsid'd child does), and that group's
+	// reparented members are the program's, never the pane leader's. An
+	// excluded descendant's group stays as preserved as its leader.
+	owned := make(map[int]bool)
+	for pid := range visited {
+		if record := byPID[pid]; record.PGID == pid && (pid == rootPID || !exclude[pid]) {
+			owned[pid] = true
+		}
+	}
+	if len(owned) > 0 {
 		extra := make(map[int]bool)
 		for pid, record := range byPID {
-			if !visited[pid] && record.PGID == root.PGID && record.PPID > 0 {
+			if !visited[pid] && owned[record.PGID] && record.PPID > 0 {
 				extra[pid] = true
 			}
 		}
@@ -6012,9 +6062,51 @@ func (t *Tmux) SetMailClickBinding(_ string) error {
 // (agentPaneTarget), never the active pane: "=name:" would kill whichever pane
 // a human left focused and leave the old agent running.
 func (t *Tmux) RespawnPaneWithWorkDir(pane, workDir, command string) error {
+	return t.respawnPaneWithWorkDir(pane, workDir, command, runtime.ProgramStatusArm{})
+}
+
+// respawnPaneWithWorkDir is RespawnPaneWithWorkDir re-arming the pane's
+// program-status capture as arm declares (see program_capture.go). The zero
+// arm, and an arm the capability gate refuses, respawn exactly as
+// RespawnPaneWithWorkDir always has. An armed respawn runs one list
+// (respawnPaneList): respawn-pane, its marker, a new nonce, the previous
+// incarnation's record unset, and pipe-pane -O replacing the previous tap,
+// which reads EOF after its nonce is gone, so its last write cannot land.
+// The previous pipe is never closed ahead of the respawn: pipe-pane fails on
+// an exited pane, which would refuse to respawn a dead agent. A list that
+// fails after the marker printed respawned the pane: the arm failure is
+// logged and the respawn succeeds; heal re-arms the pane. While the
+// program-status switch is not off, an unarmed respawn (undeclared, or the
+// gate refused) runs the same list with the capture removed after the
+// marker (disarmCommands), so an earlier incarnation's tap can never vouch
+// for the new program.
+func (t *Tmux) respawnPaneWithWorkDir(pane, workDir, command string, arm runtime.ProgramStatusArm) error {
 	target, err := t.agentPaneTarget(pane)
 	if err != nil {
 		return err
+	}
+	if plan := t.planCapture(arm); plan != nil {
+		followErr, err := t.runRespawnList(target, workDir, t.wrapPaneCommand(plan.wrapRelay(command)), plan.armCommands(target, true))
+		if err != nil {
+			return err
+		}
+		if followErr != nil {
+			_, _ = fmt.Fprintf(captureWarningOut, "warning: pane %s: re-arming program-status capture: %v\n", target, followErr)
+		}
+		return nil
+	}
+	if t.programStatusMode() != runtime.ProgramStatusOff {
+		// An unarmed respawn under a live switch: the previous incarnation's
+		// tap must not publish the new program under its nonce, so the
+		// capture is removed in the same list, after the respawn ran.
+		followErr, err := t.runRespawnList(target, workDir, t.wrapPaneCommand(command), disarmCommands(target))
+		if err != nil {
+			return err
+		}
+		if followErr != nil {
+			_, _ = fmt.Fprintf(captureWarningOut, "warning: pane %s: removing program-status capture: %v\n", target, followErr)
+		}
+		return nil
 	}
 	args := []string{"respawn-pane", "-k", "-t", target}
 	if workDir != "" {
