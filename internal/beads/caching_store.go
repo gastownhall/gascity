@@ -2145,6 +2145,18 @@ func (c *CachingStore) rowAnswersEdges(b Bead) bool {
 }
 
 func (c *CachingStore) fetchDepsForBeads(beadMap map[string]Bead) (map[string][]Dep, bool, error) {
+	// An empty snapshot has no edges to know: dependency coverage over zero
+	// beads is vacuously complete. Without this, a proxied BdStore scope whose
+	// ledger is empty (or has not yet grown a row carrying blocking edges) can
+	// never latch the inline-deps witness, depsComplete stays false for the
+	// life of the process, and cachedReadyCompleteOnly declines every
+	// deadline-sensitive ready read with "bead cache unavailable" — the
+	// ready-projection half of gastownhall/gascity#7546, measured on a scope
+	// whose correct ready projection is the empty set. The witness stays
+	// authoritative for every non-empty snapshot.
+	if len(beadMap) == 0 {
+		return map[string][]Dep{}, true, nil
+	}
 	ids := beadIDs(beadMap)
 	if backing, ok := c.backing.(cacheDependencySnapshotStore); ok {
 		return backing.dependencySnapshotForCache(ids)
