@@ -24,6 +24,7 @@ const (
 var (
 	managedDoltProcDir         = "/proc"
 	managedDoltUnixSocketTable = "/proc/net/unix"
+	managedDoltSocketGlob      = "/tmp/dolt*.sock"
 )
 
 func preflightManagedDoltCleanup(_ string) error {
@@ -74,7 +75,7 @@ func staleManagedDoltSocketPaths() []string {
 		seen[path] = struct{}{}
 		paths = append(paths, path)
 	}
-	matches, _ := filepath.Glob("/tmp/dolt*.sock")
+	matches, _ := filepath.Glob(managedDoltSocketGlob)
 	for _, match := range matches {
 		add(match)
 	}
