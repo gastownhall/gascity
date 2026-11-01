@@ -82,8 +82,11 @@ func TestRecoverManagedDoltRefusesProviderOwnedScopesBeforeLifecycleOps(t *testi
 			wantBlocked: true,
 		},
 		{
-			name:        "legacy absent journal remains admitted",
-			setup:       func(*testing.T, string) {},
+			name: "legacy absent journal remains admitted",
+			setup: func(t *testing.T, city string) {
+				t.Helper()
+				writeMinimalCityToml(t, city)
+			},
 			wantBlocked: false,
 		},
 	} {
@@ -413,6 +416,7 @@ func TestRecoverManagedDoltProcessWithOps(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cityPath := t.TempDir()
+			writeMinimalCityToml(t, cityPath)
 			var gotOps []string
 			ops := managedDoltRecoveryOps{
 				queryProbe: func(host, port, user string) error {
@@ -597,6 +601,7 @@ func TestRecoverManagedDoltObservedRebindPossible(t *testing.T) {
 
 func TestRecoverManagedDoltObservedPortUsesAlternatePublishedState(t *testing.T) {
 	cityPath := t.TempDir()
+	writeMinimalCityToml(t, cityPath)
 	if err := writeDoltRuntimeStateFile(providerManagedDoltStatePath(cityPath), doltRuntimeState{
 		Running: true,
 		PID:     1234,
@@ -620,6 +625,7 @@ func TestRecoverManagedDoltObservedPortUsesAlternatePublishedState(t *testing.T)
 func setupRecoveryTestCity(t *testing.T) string {
 	t.Helper()
 	cityPath := t.TempDir()
+	writeMinimalCityToml(t, cityPath)
 	packStateDir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt")
 	if err := os.MkdirAll(packStateDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)

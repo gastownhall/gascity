@@ -75,14 +75,24 @@ func TestRedirectingWorktreeDoesNotOwnAManagedDoltStore(t *testing.T) {
 			worktree, realBeads)
 	}
 
-	err = admitLegacyManagedDoltLifecycle(worktree)
+	err = admitManagedDoltStart(worktree)
 	if err == nil {
-		t.Fatalf("admitLegacyManagedDoltLifecycle(%q) = nil, want a refusal naming the redirect", worktree)
+		t.Fatalf("admitManagedDoltStart(%q) = nil, want a refusal naming the redirect", worktree)
 	}
 	for _, want := range []string{normalizePathForCompare(worktree), realBeads} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal %q does not name %q", err, want)
 		}
+	}
+}
+
+// The refusal is on starting, not on looking: a stray server already started in
+// such a scope (the 12-day pid in the sighting) must stay inspectable and
+// stoppable, which run through the plain admission.
+func TestRedirectingWorktreeStaysInspectableAndStoppable(t *testing.T) {
+	worktree, _ := writeRedirectingWorktree(t)
+	if err := admitLegacyManagedDoltLifecycle(worktree); err != nil {
+		t.Fatalf("admitLegacyManagedDoltLifecycle(%q) = %v, want nil so inspect/stop still run", worktree, err)
 	}
 }
 
@@ -114,17 +124,9 @@ func TestStrayRuntimeRootWithoutCityTomlDoesNotOwnAManagedDoltStore(t *testing.T
 		t.Fatal(err)
 	}
 
-	owned, err := managedDoltLifecycleOwned(stray)
-	if err != nil {
-		t.Fatalf("managedDoltLifecycleOwned(%q): %v", stray, err)
-	}
-	if owned {
-		t.Errorf("managedDoltLifecycleOwned(%q) = true with no city.toml; gc must not start a managed Dolt without an affirmative city.toml", stray)
-	}
-
-	err = admitLegacyManagedDoltLifecycle(stray)
+	err := admitManagedDoltStart(stray)
 	if err == nil {
-		t.Fatalf("admitLegacyManagedDoltLifecycle(%q) = nil, want a refusal naming the missing city.toml", stray)
+		t.Fatalf("admitManagedDoltStart(%q) = nil, want a refusal naming the missing city.toml", stray)
 	}
 	if !strings.Contains(err.Error(), "city.toml") {
 		t.Errorf("refusal %q does not name the missing city.toml", err)
@@ -151,8 +153,8 @@ func TestManagedDoltPreconditionsLeaveRealCitiesAlone(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(city, ".beads"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := admitLegacyManagedDoltLifecycle(city); err != nil {
-			t.Fatalf("admitLegacyManagedDoltLifecycle(real city) = %v, want nil", err)
+		if err := admitManagedDoltStart(city); err != nil {
+			t.Fatalf("admitManagedDoltStart(real city) = %v, want nil", err)
 		}
 	})
 	t.Run("redirect names the scope's own .beads", func(t *testing.T) {
@@ -167,8 +169,8 @@ func TestManagedDoltPreconditionsLeaveRealCitiesAlone(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(beads, "redirect"), []byte(beads+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if err := admitLegacyManagedDoltLifecycle(city); err != nil {
-			t.Fatalf("admitLegacyManagedDoltLifecycle(self-redirect) = %v, want nil", err)
+		if err := admitManagedDoltStart(city); err != nil {
+			t.Fatalf("admitManagedDoltStart(self-redirect) = %v, want nil", err)
 		}
 	})
 }

@@ -73,7 +73,7 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 	}
 	// Refuse before opening or waiting on the legacy lock: that wait probes a
 	// listener and can publish state while a provider-owned scope is pending.
-	if err := admitLegacyManagedDoltLifecycle(cityPath); err != nil {
+	if err := admitManagedDoltStart(cityPath); err != nil {
 		return managedDoltRecoverReport{}, err
 	}
 
@@ -97,7 +97,7 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 			return report, waitErr
 		}
 		if observed {
-			if err := admitLegacyManagedDoltLifecycle(cityPath); err != nil {
+			if err := admitManagedDoltStart(cityPath); err != nil {
 				return report, err
 			}
 			if err := ops.publish(cityPath); err != nil {
@@ -113,7 +113,7 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 	}
 	defer releaseManagedDoltLifecycleLock(lockFile)
 	lockFile = nil
-	if err := admitLegacyManagedDoltLifecycle(cityPath); err != nil {
+	if err := admitManagedDoltStart(cityPath); err != nil {
 		return report, err
 	}
 

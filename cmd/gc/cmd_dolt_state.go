@@ -434,7 +434,7 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if guardErr := admitLegacyManagedDoltLifecycle(cityPath); guardErr != nil {
+			if guardErr := admitManagedDoltStart(cityPath); guardErr != nil {
 				fmt.Fprintf(stderr, "gc dolt-state start-managed: %v\n", guardErr) //nolint:errcheck
 				return errExit
 			}
@@ -453,7 +453,7 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 				return errExit
 			}
 			defer releaseManagedDoltLifecycleLock(lock)
-			if guardErr := admitLegacyManagedDoltLifecycle(cityPath); guardErr != nil {
+			if guardErr := admitManagedDoltStart(cityPath); guardErr != nil {
 				fmt.Fprintf(stderr, "gc dolt-state start-managed: %v\n", guardErr) //nolint:errcheck
 				return errExit
 			}

@@ -3,7 +3,57 @@ package main
 import (
 	"fmt"
 	"path/filepath"
+
+	"github.com/gastownhall/gascity/internal/citylayout"
 )
+
+// managedDoltScopeRefusal reports why cityPath cannot own a managed Dolt
+// lifecycle, or nil when nothing about its shape rules one out. Starting a
+// supervised server is heavyweight (a port, a data dir, a long-lived process),
+// so it needs affirmative proof the scope owns its store, not merely the
+// absence of a reason to refuse:
+//
+//   - A literal city.toml at cityPath. findCity's legacy runtime-root branch
+//     also claims a source directory that leaked a .gc/, which is not a city.
+//   - No .beads/redirect to a different .beads. A git worktree of the city repo
+//     carries city.toml and a redirect to the real store; bd follows the
+//     redirect and the managed-dolt layout does not, so a server started there
+//     serves an empty store nothing reads.
+func managedDoltScopeRefusal(cityPath string) error {
+	cityPath = normalizePathForCompare(cityPath)
+	if !citylayout.HasCityConfig(cityPath) {
+		return fmt.Errorf("managed Dolt refused for %s: no %s at this path, so it is not a city that owns a store (give it a %s, or run against the city that does)",
+			cityPath, citylayout.CityConfigFile, citylayout.CityConfigFile)
+	}
+	return managedDoltRedirectRefusal(cityPath)
+}
+
+// managedDoltRedirectRefusal reports a .beads/redirect at cityPath that names a
+// different .beads, or nil. It is the part of managedDoltScopeRefusal that is
+// safe to ask on inspection paths: a redirect is positive evidence the store
+// lives elsewhere, where a missing city.toml is only the absence of evidence.
+func managedDoltRedirectRefusal(cityPath string) error {
+	cityPath = normalizePathForCompare(cityPath)
+	beadsDir := filepath.Join(cityPath, ".beads")
+	target := beadsRedirectTarget(beadsDir)
+	if target != "" && !samePath(target, beadsDir) {
+		return fmt.Errorf("managed Dolt refused for %s: its .beads is a redirect to %s, so the store lives there and not here (run against that store's city)",
+			cityPath, target)
+	}
+	return nil
+}
+
+// admitManagedDoltStart is the gate for operations that start or recover a
+// managed server. On top of admitLegacyManagedDoltLifecycle it requires the
+// scope to be able to own a store at all (managedDoltScopeRefusal). Inspection,
+// probe, wait and stop stay on the plain admission, so a server that was
+// already started in a scope that cannot own it can still be found and stopped.
+func admitManagedDoltStart(cityPath string) error {
+	if err := admitLegacyManagedDoltLifecycle(cityPath); err != nil {
+		return err
+	}
+	return managedDoltScopeRefusal(cityPath)
+}
 
 // admitLegacyManagedDoltLifecycle rejects a legacy GC lifecycle operation
 // when a durable provider or handoff record owns the city's Dolt scope.
