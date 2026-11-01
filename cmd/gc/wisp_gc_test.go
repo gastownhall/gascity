@@ -3113,3 +3113,66 @@ func TestWispGC_ReloadKeepsLastRun(t *testing.T) {
 		}
 	})
 }
+
+func TestWispGC_SessionPurgeCursorSurvivesReload(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		rebuild func(prev wispGC) wispGC
+		want    string
+	}{
+		{name: "carried", rebuild: func(prev wispGC) wispGC {
+			return carryWispGCState(prev, newWispGC(time.Minute, 24*time.Hour, 0))
+		}, want: "[0 1 1]"},
+		{name: "bare rebuild starves", rebuild: func(wispGC) wispGC {
+			return newWispGC(time.Minute, 24*time.Hour, 0)
+		}, want: "[0 0 0]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_INFRA_SESSION_PURGE_AGE", "")
+			now := time.Now()
+			base := now.Add(-60 * 24 * time.Hour)
+			ledger := openSessionPurgeSQLiteStore(t)
+			// Three child-holding sessions are the oldest candidates, then two
+			// purgeable ones.
+			for i := 0; i < 3; i++ {
+				parent := fmt.Sprintf("gcg-session-held-%d", i)
+				mustCreateSessionPurgeBead(t, ledger, closedSessionPurgeBead(parent, "session", base.Add(time.Duration(i)*time.Minute)))
+				child := closedSessionPurgeBead(fmt.Sprintf("gcg-held-child-%d", i), "task", base)
+				child.ParentID = parent
+				mustCreateSessionPurgeBead(t, ledger, child)
+			}
+			mustCreateSessionPurgeBead(t, ledger, closedSessionPurgeBead("gcg-session-free-0", "session", base.Add(10*time.Minute)))
+			mustCreateSessionPurgeBead(t, ledger, closedSessionPurgeBead("gcg-session-free-1", "session", base.Add(11*time.Minute)))
+
+			prevScan := wispGCSessionPurgeScanCap
+			wispGCSessionPurgeScanCap = 2
+			t.Cleanup(func() { wispGCSessionPurgeScanCap = prevScan })
+
+			wg := newWispGC(time.Minute, 24*time.Hour, 0)
+			sessionLedger := beads.SessionStore{Store: ledger}
+			graph := beads.GraphStore{Store: ledger}
+			var total []int
+			for pass := 0; pass < 3; pass++ {
+				if pass > 0 {
+					wg = tc.rebuild(wg)
+				}
+				purged, err := wg.runGC(nil, graph, sessionLedger, beads.MailStore{}, now)
+				if err != nil {
+					t.Fatalf("pass %d runGC: %v", pass, err)
+				}
+				total = append(total, purged)
+			}
+			if fmt.Sprint(total) != tc.want {
+				t.Fatalf("purged per pass with a reload between passes = %v, want %s", total, tc.want)
+			}
+			if tc.want == "[0 0 0]" {
+				return
+			}
+			for _, id := range []string{"gcg-session-free-0", "gcg-session-free-1"} {
+				if _, err := ledger.Get(id); !errors.Is(err, beads.ErrNotFound) {
+					t.Fatalf("Get %s = %v, want ErrNotFound", id, err)
+				}
+			}
+		})
+	}
+}
