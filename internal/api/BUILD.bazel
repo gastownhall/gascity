@@ -423,6 +423,7 @@ go_test(
         "huma_handlers_work_test.go",
         "huma_sse_test.go",
         "huma_test.go",
+        "huma_types_events_test.go",
         "huma_validation_test.go",
         "idempotency_endpoints_test.go",
         "idempotency_guard_test.go",
