@@ -2828,6 +2828,11 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "scripts/makefile_go_list_guard_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
 path = "scripts/makefile_install_test.go"
 resource = "subprocess"
 calls = 1
