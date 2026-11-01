@@ -105,7 +105,7 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 		}
 	}
 	if shouldGuardCrossRig(opts) {
-		if err := CrossRigRouteError(opts.BeadOrFormula, a, deps.Cfg); err != nil {
+		if err := crossRigRefusal(opts, deps, opts.BeadOrFormula, a); err != nil {
 			return result, err
 		}
 	}
@@ -278,6 +278,19 @@ func shouldCheckDepCycle(opts SlingOpts) bool {
 
 func shouldGuardCrossRig(opts SlingOpts) bool {
 	return !opts.IsFormula && !opts.Force && !opts.DryRun
+}
+
+// crossRigRefusal is CrossRigRouteError with ForceRefused set when the same
+// sling with --force would stop at the cross-store check instead, so the
+// refusal only offers --force where it routes the bead.
+func crossRigRefusal(opts SlingOpts, deps SlingDeps, beadID string, a config.Agent) *CrossRigError {
+	err := CrossRigRouteError(beadID, a, deps.Cfg)
+	if err == nil {
+		return nil
+	}
+	err.ForceRefused = shouldValidateBuiltInRouteStoreReachable(opts, deps) &&
+		validateBuiltInRouteStoreReachable(deps, beadID, a) != nil
+	return err
 }
 
 func shouldCheckBeadState(opts SlingOpts) bool {
@@ -2058,7 +2071,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 
 	// Cross-rig guard on container.
 	if !opts.Force && !opts.DryRun {
-		if err := CrossRigRouteError(b.ID, a, deps.Cfg); err != nil {
+		if err := crossRigRefusal(opts, deps, b.ID, a); err != nil {
 			return SlingResult{}, err
 		}
 	}

@@ -792,14 +792,23 @@ type CrossRigError struct {
 	BeadPrefix string
 	Target     string
 	RigPrefix  string
+	// ForceRefused reports that --force would not route the bead either:
+	// the target cannot read the store the bead lives in, so the cross-store
+	// check refuses the forced sling. The message then leaves --force out of
+	// its remedies.
+	ForceRefused bool
 }
 
 // Error returns the cross-rig routing diagnostic.
 func (e *CrossRigError) Error() string {
+	remedy := "Re-file the bead in that rig, pick a city-scope target, or pass --force to override."
+	if e.ForceRefused {
+		remedy = "Re-file the bead in that rig or pick a city-scope target; --force does not " +
+			"override this one, because the target cannot read the bead's store."
+	}
 	return fmt.Sprintf("gc sling: refusing cross-rig route: bead %s (prefix %q) "+
-		"does not belong to %s (rig prefix %q); nothing was routed. Re-file the "+
-		"bead in that rig, pick a city-scope target, or pass --force to override.",
-		e.BeadID, e.BeadPrefix, e.Target, e.RigPrefix)
+		"does not belong to %s (rig prefix %q); nothing was routed. %s",
+		e.BeadID, e.BeadPrefix, e.Target, e.RigPrefix, remedy)
 }
 
 // CrossRigRouteError returns a typed cross-rig error when routing is unsafe.
