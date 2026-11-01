@@ -64,3 +64,37 @@ func TestExplainAgentOmitsUnsetLifecycleTimeoutKeys(t *testing.T) {
 		}
 	}
 }
+
+// An agent the standby record moved takes its provider from that record, not
+// from its own config file, which names another: explain says so, with the
+// provider it stands in for and the standby the agent declares.
+func TestExplainAgentAttributesAStandbyMove(t *testing.T) {
+	const source = "/city/city.toml"
+	agent := config.Agent{Name: "review-codex", Provider: "codex-astra", StandbyProvider: "codex-astra", StandbyFor: "cursor-grok"}
+	prov := config.Provenance{Root: source, Agents: map[string]string{agent.QualifiedName(): source}}
+
+	var buf bytes.Buffer
+	explainAgent(&buf, &agent, &prov)
+	lines := map[string]string{}
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if key, _, ok := strings.Cut(strings.TrimSpace(line), " "); ok {
+			lines[key] = line
+		}
+	}
+	for key, want := range map[string]string{
+		"provider":         "# standby.toml",
+		"standby_for":      "cursor-grok",
+		"standby_provider": "# city.toml",
+	} {
+		if !strings.Contains(lines[key], want) {
+			t.Errorf("explain %s row %q, want %q; got:\n%s", key, lines[key], want, buf.String())
+		}
+	}
+
+	agent.Provider, agent.StandbyFor = "cursor-grok", ""
+	buf.Reset()
+	explainAgent(&buf, &agent, &prov)
+	if out := buf.String(); strings.Contains(out, "standby.toml") || strings.Contains(out, "standby_for") {
+		t.Errorf("explain of an agent on its own provider names the standby record; got:\n%s", out)
+	}
+}

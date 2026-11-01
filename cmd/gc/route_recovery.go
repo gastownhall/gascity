@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"slices"
 	"strings"
 	"time"
@@ -101,10 +102,19 @@ func (cr *CityRuntime) claimStallGuardOf() *claimStallGuard {
 				cr.rec.Record(e)
 			}
 		}
-		cr.claimStall = newClaimStallGuard(record, cr.stderr).withStandbyRecord(fsys.OSFS{}, cr.cityPath)
+		cr.claimStall = newClaimStallGuard(record, cr.stderr).withStandbyRecord(fsys.OSFS{}, cr.cityPath).withLaunchCheck(cr.standbyLaunchCheck)
 		cr.claimStall.configure(cr.cfg, cr.runsV2())
 	})
 	return cr.claimStall
+}
+
+// standbyLaunchCheck is the v2 planner's transport gate (its gather memo
+// refuses every seat of a template that fails it) on a as cfg composes it,
+// under the session provider the runtime runs now: the claims-stall guard
+// moves an agent only to a standby that passes.
+func (cr *CityRuntime) standbyLaunchCheck(cfg *config.City, a *config.Agent) error {
+	_, sp := cr.serviceProviderSnapshot()
+	return validateAgentSessionTransport(&cfg.Workspace, cfg.Providers, exec.LookPath, sp, a, a.QualifiedName())
 }
 
 // routeRecoveryEventProvider is the journal the delta feed tails, or nil when

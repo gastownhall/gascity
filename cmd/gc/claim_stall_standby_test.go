@@ -10,9 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 const (
@@ -804,4 +806,235 @@ func TestClaimStallGuardRecordsAMoveBeforeReleasingIt(t *testing.T) {
 	if engaged := h.ofType(events.AgentStandbyEngaged); len(engaged) != 1 {
 		t.Fatalf("engaged %v, want the move recorded before any early release", engaged)
 	}
+}
+
+// A reused seat's later claims prove its provider too: a session that takes a
+// second bead of work is as much evidence that the city works as a fresh
+// seat's first claim, whether its session bead or the work bead says so first.
+// A notification that only repeats a claim the guard has seen (the seat's
+// session bead updated for another reason) is no new claim.
+func TestClaimStallGuardAReusedSeatsClaimProvesItsProvider(t *testing.T) {
+	// trip trips the template while another provider's seat, which claimed
+	// before the streak began, does what between says after the first failure.
+	trip := func(h *standbyHarness, between func(other stallSeat, claimedAt time.Time)) events.AgentClaimsPayload {
+		h.t.Helper()
+		other := h.spawn(otherTemplate, "other-step-1")
+		h.claim(other)
+		claimedAt := h.now
+		h.advance(time.Minute)
+		h.demand[stallTemplate] = []string{"step-1", "step-2", "step-3"}
+		h.overdueSeat("step-1")
+		between(other, claimedAt)
+		h.overdueSeat("step-2")
+		h.overdueSeat("step-3")
+		return h.lastStall()
+	}
+	t.Run("a second claim in its session bead", func(t *testing.T) {
+		h := newStandbyHarness(t)
+		p := trip(h, func(other stallSeat, _ time.Time) {
+			other.trigger = "other-step-2"
+			h.claim(other)
+		})
+		if p.Action != events.AgentClaimsStandby {
+			t.Fatalf("stall %+v, want a move: the reused seat's new claim proves the city works; log: %s", p, h.stderr.String())
+		}
+	})
+	t.Run("a second work bead taken", func(t *testing.T) {
+		h := newStandbyHarness(t)
+		p := trip(h, func(other stallSeat, _ time.Time) {
+			h.demand[otherTemplate] = []string{"other-step-2"}
+			h.pass(otherTemplate)
+			h.workEvent(events.BeadUpdated, "other-step-2", "in_progress", other.id)
+		})
+		if p.Action != events.AgentClaimsStandby {
+			t.Fatalf("stall %+v, want a move: the reused seat's new claim proves the city works; log: %s", p, h.stderr.String())
+		}
+	})
+	t.Run("the same claim again", func(t *testing.T) {
+		h := newStandbyHarness(t)
+		p := trip(h, func(other stallSeat, claimedAt time.Time) {
+			cell := fmt.Sprintf(`{"v":1,"claims":[{"store":"city","bead":%q,"gen":2,"at":%q,"via":"claim"}]}`, other.trigger, claimedAt.UTC().Format(time.RFC3339Nano))
+			h.seatEvent(events.BeadUpdated, other.id, other.template, other.created, map[string]string{
+				beadmeta.TriggerBeadIDMetadataKey: other.trigger, "state": "asleep", session.WorkStartedKey: cell,
+			})
+		})
+		if p.Action != events.AgentClaimsHeld || !strings.Contains(h.stderr.String(), "no seat on another provider claimed") {
+			t.Fatalf("stall %+v, want it held: a repeated claim is no evidence; log: %s", p, h.stderr.String())
+		}
+	})
+}
+
+// A standby that turned red ended its move, and the probe that followed on
+// the own provider failed: the template is held, the hold doubling as any
+// failed probe's does, and no move is announced (the reconciler would start no
+// seat on the red standby, and the next tick would drop the move and admit
+// another probe at once). The stall keeps its standby: once the record no
+// longer marks the standby unhealthy, the next failed probe moves it there.
+func TestClaimStallGuardAFailedProbeHoldsWhileItsStandbyIsRed(t *testing.T) {
+	h := newStandbyHarness(t)
+	h.tripOnOwn()
+	episode := h.lastStall().Episode
+	h.tick(nil)
+	red := healthSnapshot(t, map[string]string{standbyProvider: "unhealthy"})
+	if !h.tick(red) {
+		t.Fatal("the move stood on a red standby")
+	}
+	if got := h.pass(stallTemplate); len(got) != 1 {
+		t.Fatalf("demand %v back on the own provider, want one probe", got)
+	}
+	h.overdueSeat("step-1")
+	p := h.lastStall()
+	if p.Action != events.AgentClaimsHeld || p.Cause != events.AgentClaimsCauseProbe || p.Episode != episode || p.Until == nil || p.Until.Sub(h.now) != claimStallHold(2) {
+		t.Fatalf("probe stall %+v, want %s held %v: its standby is red; log: %s", p, episode, claimStallHold(2), h.stderr.String())
+	}
+	if h.tick(red) {
+		t.Fatal("a move to the red standby was written")
+	}
+	if got := h.pass(stallTemplate); len(got) != 0 {
+		t.Fatalf("demand %v after the failed probe, want it held, not probed again at once", got)
+	}
+	moves := 0
+	for _, e := range h.stalls() {
+		if stallPayload(t, e).Action == events.AgentClaimsStandby {
+			moves++
+		}
+	}
+	if moves != 1 {
+		t.Fatalf("%d stall alerts announce a move, want the trip's only", moves)
+	}
+
+	h.advance(claimStallHold(2))
+	h.tick(nil)
+	if got := h.pass(stallTemplate); len(got) != 1 {
+		t.Fatalf("demand %v when the hold ran out, want one probe", got)
+	}
+	h.overdueSeat("step-1")
+	if p := h.lastStall(); p.Action != events.AgentClaimsStandby || p.Episode != episode || p.Engagements != 2 {
+		t.Fatalf("probe stall %+v, want move 2 of %s: the standby is healthy again", p, episode)
+	}
+	if !h.tick(nil) {
+		t.Fatal("the move to the recovered standby was not written")
+	}
+}
+
+// A stall held at its trip because its standby was red has the provider's
+// evidence all the same: once the standby recovers, a failed probe moves it.
+func TestClaimStallGuardMovesAStallHeldForItsRedStandbyOnceItRecovers(t *testing.T) {
+	h := newStandbyHarness(t)
+	h.tick(healthSnapshot(t, map[string]string{standbyProvider: "unhealthy"}))
+	h.tripOnOwn()
+	p := h.lastStall()
+	if p.Action != events.AgentClaimsHeld {
+		t.Fatalf("stall %+v, want held: the standby is red", p)
+	}
+	h.advance(p.Until.Sub(h.now))
+	h.tick(nil)
+	if got := h.pass(stallTemplate); len(got) != 1 {
+		t.Fatalf("demand %v when the hold ran out, want one probe", got)
+	}
+	h.overdueSeat("step-1")
+	if p := h.lastStall(); p.Action != events.AgentClaimsStandby || p.Engagements != 1 {
+		t.Fatalf("probe stall %+v, want the first move: the standby recovered", p)
+	}
+}
+
+// A move chosen while the standby was healthy, whose standby the next tick
+// finds red before it is written, was never made: nothing is written or
+// announced as engaged, the template is held as a failed probe holds it (no
+// probe at once, as releasing a made move would admit), and the move is not
+// counted, so the first move made later is move 1.
+func TestClaimStallGuardTakesBackAMoveItsStandbyTurnedRedFor(t *testing.T) {
+	h := newStandbyHarness(t)
+	h.tripOnOwn()
+	episode := h.lastStall().Episode
+	if h.tick(healthSnapshot(t, map[string]string{standbyProvider: "unhealthy"})) {
+		t.Fatal("a move to a standby that turned red was written")
+	}
+	if n := len(h.ofType(events.AgentStandbyEngaged)) + len(h.ofType(events.AgentStandbyReleased)); n != 0 {
+		t.Fatalf("%d standby records for a move never made", n)
+	}
+	p := h.lastStall()
+	if p.Action != events.AgentClaimsHeld || p.Episode != episode || p.Until == nil || !p.Until.After(h.now) {
+		t.Fatalf("stall %+v, want the move taken back and %s held", p, episode)
+	}
+	if got := h.pass(stallTemplate); len(got) != 0 {
+		t.Fatalf("demand %v, want it held, not probed at once", got)
+	}
+	h.advance(p.Until.Sub(h.now))
+	h.tick(nil)
+	if got := h.pass(stallTemplate); len(got) != 1 {
+		t.Fatalf("demand %v when the hold ran out, want one probe", got)
+	}
+	h.overdueSeat("step-1")
+	if p := h.lastStall(); p.Action != events.AgentClaimsStandby || p.Episode != episode || p.Engagements != 1 {
+		t.Fatalf("probe stall %+v, want move 1 of %s", p, episode)
+	}
+}
+
+// standbyLaunchCheck is the v2 planner's transport check on a host whose PATH
+// lacks the commands named.
+func standbyLaunchCheck(missing ...string) func(*config.City, *config.Agent) error {
+	lookPath := func(bin string) (string, error) {
+		for _, m := range missing {
+			if bin == m {
+				return "", fmt.Errorf("%s: not on PATH", bin)
+			}
+		}
+		return "/usr/bin/" + bin, nil
+	}
+	return func(cfg *config.City, a *config.Agent) error {
+		return validateAgentSessionTransport(&cfg.Workspace, cfg.Providers, lookPath, nil, a, a.QualifiedName())
+	}
+}
+
+// A standby the reconciler's own transport check refuses (its command is not
+// on this host's PATH) is never moved to: the v2 planner would refuse every
+// seat of the moved template, and the lane would sit seatless and unseen for
+// the whole hold. The stall is held and says why, the provider-health record
+// moves it nowhere either, and a move the record holds ends when its standby
+// stops passing.
+func TestClaimStallGuardMovesOnlyToAStandbyItsSeatsCanStartOn(t *testing.T) {
+	t.Run("a standby that passes", func(t *testing.T) {
+		h := newStandbyHarness(t)
+		h.guard.withLaunchCheck(standbyLaunchCheck())
+		h.reconfigure()
+		h.tripOnOwn()
+		if p := h.lastStall(); p.Action != events.AgentClaimsStandby {
+			t.Fatalf("stall %+v, want a move to the standby the check passes; log: %s", p, h.stderr.String())
+		}
+	})
+	t.Run("held, not moved", func(t *testing.T) {
+		h := newStandbyHarness(t)
+		h.guard.withLaunchCheck(standbyLaunchCheck("codex"))
+		h.reconfigure()
+		h.tripOnOwn()
+		if p := h.lastStall(); p.Action != events.AgentClaimsHeld {
+			t.Fatalf("stall %+v, want held: the standby cannot start its seats", p)
+		}
+		if !strings.Contains(h.stderr.String(), "provider not found in PATH") {
+			t.Fatalf("stderr %q, want the reason named", h.stderr.String())
+		}
+		if h.tick(nil) {
+			t.Fatal("a held stall was recorded as a move")
+		}
+		if h.tick(healthSnapshot(t, map[string]string{stallProvider: "unhealthy"})) {
+			t.Fatal("the provider-health record moved the agent to a standby its seats cannot start on")
+		}
+	})
+	t.Run("a move ends when its standby stops passing", func(t *testing.T) {
+		h := newStandbyHarness(t)
+		h.tripOnOwn()
+		h.tick(nil)
+		h.guard.withLaunchCheck(standbyLaunchCheck("codex"))
+		h.reconfigure() // the standby's command left PATH
+		if !h.tick(nil) {
+			t.Fatal("the record kept a move to a standby its seats cannot start on")
+		}
+		if rec := h.record(); len(rec.Agents) != 0 {
+			t.Fatalf("record %+v, want the move dropped", rec)
+		}
+		if got := h.pass(stallTemplate); len(got) != 1 {
+			t.Fatalf("demand %v back on the own provider, want one probe", got)
+		}
+	})
 }

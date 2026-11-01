@@ -585,7 +585,16 @@ func explainAgent(w io.Writer, a *config.Agent, prov *config.Provenance) {
 		explainField(w, "session", a.Session, source)
 	}
 	if a.Provider != "" {
-		explainField(w, "provider", a.Provider, source)
+		if a.StandbyFor != "" {
+			// The standby record moved the agent off its own provider.
+			explainField(w, "provider", a.Provider, config.StandbyPath(filepath.Dir(prov.Root)))
+			explainField(w, "standby_for", a.StandbyFor, source)
+		} else {
+			explainField(w, "provider", a.Provider, source)
+		}
+	}
+	if a.StandbyProvider != "" {
+		explainField(w, "standby_provider", a.StandbyProvider, source)
 	}
 	if a.StartCommand != "" {
 		explainField(w, "start_command", a.StartCommand, source)

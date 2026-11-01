@@ -185,6 +185,13 @@ func TestStandbyRecordUnreadableIsAWarning(t *testing.T) {
 // not have the reload refused.
 func TestStandbyUsable(t *testing.T) {
 	ws := &Workspace{Provider: "w"}
+	providers := map[string]ProviderSpec{
+		"a":       {Command: "a-agent"},
+		"b":       {Command: "b-agent"},
+		"w":       {Command: "w-agent"},
+		"acp":     {Command: "acp-agent", SupportsACP: boolPtr(true)},
+		"acp-too": {Command: "acp-too-agent", SupportsACP: boolPtr(true)},
+	}
 	cases := []struct {
 		name string
 		a    Agent
@@ -197,9 +204,13 @@ func TestStandbyUsable(t *testing.T) {
 		{"usable off the workspace's provider", Agent{StandbyProvider: "b"}, ""},
 		{"start_command", Agent{StartCommand: "run", StandbyProvider: "b"}, "start_command"},
 		{"own process_names", Agent{Provider: "a", StandbyProvider: "b", ProcessNames: []string{"a-agent"}}, "process_names"},
+		// The v2 planner refuses every seat of an ACP agent whose provider
+		// cannot speak ACP: a move there would leave the agent seatless.
+		{"an ACP agent's standby without ACP", Agent{Provider: "acp", Session: "acp", StandbyProvider: "b"}, "ACP"},
+		{"an ACP agent's standby with ACP", Agent{Provider: "acp", Session: "acp", StandbyProvider: "acp-too"}, ""},
 	}
 	for _, tc := range cases {
-		got := StandbyUsable(&tc.a, ws)
+		got := StandbyUsable(&tc.a, ws, providers)
 		if (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {
 			t.Errorf("%s: StandbyUsable = %q, want %q", tc.name, got, tc.want)
 		}
@@ -221,6 +232,39 @@ func TestStandbyUsable(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("warnings %v, want the inert standby reported", prov.Warnings)
+	}
+}
+
+// A session = "acp" agent whose standby cannot speak ACP is never moved: the
+// load says so, and a recorded move is ignored rather than composed into an
+// agent the reconciler would start no seat for.
+func TestStandbyACPAgentNeedsAnACPStandby(t *testing.T) {
+	city := strings.Replace(standbyCity, "[[agent]]\nname = \"review-codex\"\nprovider = \"cursor-grok\"\n",
+		"[providers.cursor-acp]\ncommand = \"cursor-acp\"\nsupports_acp = true\n\n[[agent]]\nname = \"review-codex\"\nprovider = \"cursor-acp\"\nsession = \"acp\"\n", 1)
+	fs := standbyFS(t, city)
+	if err := WriteStandby(fs, "/city", StandbyFile{Agents: []StandbyEntry{standbyEntry("codex-astra", "cursor-acp")}}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if a := agentNamed(t, cfg, "review-codex"); a.Provider != "cursor-acp" || a.StandbyFor != "" {
+		t.Fatalf("agent %+v, want the move to a standby without ACP ignored", a)
+	}
+	var inert, ignored bool
+	for _, w := range prov.Warnings {
+		if !strings.Contains(w, "ACP") {
+			continue
+		}
+		if !IsStandbyWarning(w) {
+			t.Fatalf("warning %q is not classified as a standby warning: strict mode would refuse the config", w)
+		}
+		inert = inert || strings.Contains(w, "never moved to standby_provider")
+		ignored = ignored || strings.Contains(w, "recorded move is ignored")
+	}
+	if !inert || !ignored {
+		t.Fatalf("warnings %v, want the inert standby and the ignored move reported", prov.Warnings)
 	}
 }
 

@@ -148,12 +148,24 @@ func AgentOwnProvider(a *Agent, workspace *Workspace) string {
 	return ""
 }
 
+// OnStandby is a as the standby record moves it: on its standby_provider, in
+// place of its own provider (StandbyFor). An agent already moved is returned
+// as it is.
+func OnStandby(a Agent, workspace *Workspace) Agent {
+	a.StandbyFor = AgentOwnProvider(&a, workspace)
+	a.Provider = strings.TrimSpace(a.StandbyProvider)
+	return a
+}
+
 // StandbyUsable reports why an agent's standby cannot be used, or "" when it
 // can: a provider other than its own, on an agent that runs a provider and
 // leaves the process names to it (an agent's own process_names would name the
 // own provider's process on the standby too, and its seats there would read
-// dead).
-func StandbyUsable(a *Agent, workspace *Workspace) string {
+// dead), whose session transport the standby can carry by its configuration
+// (providers, the composed catalog). Whether its command is on the PATH, and
+// the session provider can carry the transport, are the controller's to ask
+// at the move.
+func StandbyUsable(a *Agent, workspace *Workspace, providers map[string]ProviderSpec) string {
 	switch {
 	case a == nil || strings.TrimSpace(a.StandbyProvider) == "":
 		return "no standby_provider"
@@ -163,6 +175,23 @@ func StandbyUsable(a *Agent, workspace *Workspace) string {
 		return "standby_provider is the agent's own provider"
 	case len(a.ProcessNames) > 0:
 		return "an agent that sets its own process_names cannot change provider"
+	}
+	return standbyTransportRefusal(a, workspace, providers)
+}
+
+// standbyTransportRefusal is why the standby cannot carry the session
+// transport the agent's seats would use on it, by configuration alone, or "":
+// a session = "acp" agent needs a standby that supports ACP, or the
+// reconciler refuses every seat of the moved agent. A standby the catalog
+// lacks is the catalog check's to report.
+func standbyTransportRefusal(a *Agent, workspace *Workspace, providers map[string]ProviderSpec) string {
+	moved := OnStandby(*a, workspace)
+	resolved, err := ResolveProvider(&moved, workspace, providers, func(name string) (string, error) { return name, nil })
+	if err != nil {
+		return ""
+	}
+	if ResolveSessionCreateTransport(moved.Session, resolved) == SessionTransportACP && !resolved.SupportsACP {
+		return fmt.Sprintf("standby_provider %q does not support the ACP transport of the agent's sessions", moved.Provider)
 	}
 	return ""
 }
@@ -194,12 +223,11 @@ func applyStandby(cfg *City, f StandbyFile, source string) []string {
 				source, e.Name, own, a.StandbyProvider, e.Provider, e.Replaced))
 			continue
 		}
-		if why := StandbyUsable(a, &cfg.Workspace); why != "" {
+		if why := StandbyUsable(a, &cfg.Workspace, cfg.Providers); why != "" {
 			warnings = append(warnings, fmt.Sprintf("%s"+standbyWarningMarker+"agent %q: %s; its recorded move is ignored", source, e.Name, why))
 			continue
 		}
-		a.StandbyFor = own
-		a.Provider = strings.TrimSpace(a.StandbyProvider)
+		*a = OnStandby(*a, &cfg.Workspace)
 	}
 	return warnings
 }

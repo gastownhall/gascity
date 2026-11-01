@@ -45,7 +45,7 @@ func ValidateSemantics(cfg *City, source string) []string {
 		if a.StandbyProvider == "" {
 			continue
 		}
-		if why := StandbyUsable(a, &cfg.Workspace); why != "" {
+		if why := StandbyUsable(a, &cfg.Workspace, cfg.Providers); why != "" {
 			warnings = append(warnings, fmt.Sprintf(
 				"%s"+standbyWarningMarker+"agent %q: %s; the agent is never moved to standby_provider %q",
 				source, a.QualifiedName(), why, a.StandbyProvider))
