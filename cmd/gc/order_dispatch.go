@@ -980,14 +980,20 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 		return last, err
 	}
 	cursorFn := orders.CursorAcross(orderFrontDoorsForStores(storesForGate))
+	eventCursorUnavailable := false
 	if a.Trigger == "event" {
 		cursor, err := bdCursorAcrossStores(a.ScopedName(), storesForGate...)
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: reading event cursor for %s: %v", a.ScopedName(), err)
 			return false
 		}
-		cursorFn = func(string) uint64 {
-			return cursor
+		bounded, ok := boundEventCursorToHead(a.ScopedName(), cursor, m.ep)
+		if !ok {
+			eventCursorUnavailable = true
+		} else {
+			cursorFn = func(string) uint64 {
+				return bounded
+			}
 		}
 	}
 	triggerOpts := cand.triggerOpts
@@ -1014,9 +1020,12 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 	// A condition order's verdict was already computed by the parallel pass;
 	// re-running it here would fork the check a second time.
 	var result orders.TriggerResult
-	if cand.conditionResult != nil {
+	switch {
+	case eventCursorUnavailable:
+		result = orders.TriggerResult{Due: false, Reason: "event: log head unavailable, skipping tick"}
+	case cand.conditionResult != nil:
 		result = *cand.conditionResult
-	} else {
+	default:
 		result = orders.CheckTriggerWithOptions(a, now, lastRunFn, m.ep, cursorFn, triggerOpts)
 	}
 	if lastRunErr != nil {
