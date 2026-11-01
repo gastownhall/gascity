@@ -1382,6 +1382,7 @@ go_test(
         "config_invocation_memo_test.go",
         "context_inject_test.go",
         "continuation_nudge_test.go",
+        "control_dispatch_config_exit_check_test.go",
         "control_dispatch_graph_store_test.go",
         "control_dispatch_unlaunchable_check_test.go",
         "control_dispatcher_scope_gap_event_test.go",

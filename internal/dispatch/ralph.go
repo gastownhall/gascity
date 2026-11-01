@@ -11,11 +11,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -29,8 +32,9 @@ import (
 // green PR (maintainer-city incident: 3 attempts burned in one outage). The
 // bound guarantees a gate that launches but never yields a verdict (a
 // perpetual timeout, exit 75 forever) still terminates the workflow instead of
-// pending forever; an unlaunchable script never reaches this budget and is
-// held open on the drift-pending lane instead (see runRalphCheck).
+// pending forever; an unlaunchable script, or one that exits 78 to say it
+// cannot run in this environment, never reaches this budget and is held open
+// on the drift-pending lane instead (see runRalphCheck).
 //
 // Which outcomes charge the budget differs by lane, because GateError means
 // different things there. The kind=check lane (processRalphCheck) charges
@@ -416,7 +420,76 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 		ArtifactDir: artifactDir,
 	}, timeout, 0)
 	opts.tracef("ralph check-done bead=%s outcome=%s dur=%s", bead.ID, result.Outcome, result.Duration)
+	if convergence.IsGateConfigError(result) {
+		// The script ran and declared (exit 78, EX_CONFIG) that it cannot run
+		// in this environment: no verdict exists and none will appear by
+		// re-running until an operator fixes the machine or city config. Like
+		// an unlaunchable script, this must neither burn an attempt nor spend
+		// the infrastructure budget nor close the step, so it takes the same
+		// drift-pending hold: dependents stay blocked, gc.control_pending_*
+		// explains it, control.stalled fires once after the budget, and the
+		// next sweep after the fix resumes the loop. Returning before the
+		// result is persisted keeps the pending budget intact across sweeps.
+		// The reason is fixed text plus the first stderr line so a verbatim
+		// repeat is recognized as such by the cmd-layer bookkeeping.
+		opts.tracef("ralph check-config-error bead=%s exit=%d stderr=%q (held open)",
+			bead.ID, convergence.GateConfigExitCode, traceClipString(result.Stderr, traceCheckOutputCap))
+		return convergence.GateResult{}, fmt.Errorf("%w: %s: check exited %d (EX_CONFIG): %s (the step stays open until the check's environment is fixed)",
+			ErrControlDriftPending, bead.ID, convergence.GateConfigExitCode, gateConfigReason(result.Stderr))
+	}
 	return result, nil
+}
+
+// gateConfigReasonCap bounds the stderr excerpt carried in a configuration
+// hold's reason. The reason is stored in gc.control_pending_reason and compared
+// verbatim across sweeps, so it must be short and stable.
+const gateConfigReasonCap = 256
+
+// gateConfigReasonClipMarker is appended when the excerpt was cut.
+const gateConfigReasonClipMarker = "...[clipped]"
+
+// gateConfigReasonEmpty is the reason when the script printed nothing usable.
+const gateConfigReasonEmpty = "(no stderr from the check)"
+
+// gateConfigReason returns the first non-blank line of a check script's
+// stderr, made safe for the hold reason, or a fixed placeholder when the
+// script printed nothing usable.
+//
+// The reason travels further than a trace line: it is written to
+// gc.control_pending_reason, compared verbatim across sweeps to detect a
+// repeat, and carried in the control.stalled event. So the excerpt is made
+// valid UTF-8 (a store or event encoder that coerces invalid bytes would make
+// the stored value differ from the recomputed one and defeat repeat
+// detection), redacted of any controller secret the script happened to echo
+// (events are an outbound channel), then has its control characters replaced
+// by spaces (a NUL cannot be passed to bd as an argument; redaction runs
+// first because a tab between a key and its value is part of the pattern it
+// matches), and is clipped on a rune boundary.
+func gateConfigReason(stderr string) string {
+	for line := range strings.SplitSeq(stderr, "\n") {
+		line = strings.ToValidUTF8(line, "\uFFFD")
+		line = execenv.RedactText(line, os.Environ())
+		line = strings.ToValidUTF8(line, "\uFFFD")
+		line = strings.Map(func(r rune) rune {
+			if unicode.IsControl(r) {
+				return ' '
+			}
+			return r
+		}, line)
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if len(line) <= gateConfigReasonCap {
+			return line
+		}
+		limit := gateConfigReasonCap
+		for limit > 0 && !utf8.ValidString(line[:limit]) {
+			limit--
+		}
+		return strings.TrimSpace(line[:limit]) + gateConfigReasonClipMarker
+	}
+	return gateConfigReasonEmpty
 }
 
 // ralphCheckHistoricalFormulaRoots preserves the trust decision made when a
