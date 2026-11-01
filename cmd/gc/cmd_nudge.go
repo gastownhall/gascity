@@ -124,7 +124,7 @@ var errNudgeManualDrop error = nudgeManualDropCause{}
 var (
 	// Test seams for cmd_nudge_test.go. Tests that replace these package
 	// variables must stay serial; do not use t.Parallel in those tests.
-	nudgeCityUsesManagedReconciler           = cityUsesManagedReconciler
+	nudgeCityUsesManagedReconciler           = nudgeSessionStartOwnedByReconciler
 	nudgePokeController                      = enqueueController
 	nudgeObserveTarget                       = workerObserveNudgeTarget
 	nudgePollDeliverQueued                   = tryDeliverQueuedNudgesByPoller
@@ -1676,6 +1676,25 @@ func nudgeObservationBusy(obs worker.LiveObservation) bool {
 	return time.Since(*obs.LastActivity) < defaultNudgePollQuiescence
 }
 
+// nudgeSessionStartOwnedByReconciler is nudgeCityUsesManagedReconciler's
+// production wiring: whether a controller, not this process, starts sessions
+// in cityPath (sessionStartOwnedByReconciler), so a nudge to one that is not
+// running is queued with a wake for that controller instead of starting the
+// session here from this process's environment, including while the
+// supervisor of a registered city is down. A registry that cannot be read or
+// parsed is never read as "unregistered": the warning goes to
+// nudgeWarningWriter and the start is left to a controller.
+func nudgeSessionStartOwnedByReconciler(cityPath string) bool {
+	owned, err := sessionStartOwnedByReconciler(cityPath)
+	if err != nil {
+		if nudgeWarningWriter != nil {
+			fmt.Fprintf(nudgeWarningWriter, "gc nudge: warning: %v; leaving the session's start to the city's controller\n", err) //nolint:errcheck // best-effort warning
+		}
+		return true
+	}
+	return owned
+}
+
 func canRequestManagedNudgeWake(target nudgeTarget, store beads.Store) bool {
 	return store != nil &&
 		strings.TrimSpace(target.cityPath) != "" &&
@@ -2244,7 +2263,7 @@ func resolveNudgeTargetAfter(identifier string, preferHookIdentity bool, before 
 			return nudgeTarget{}, err
 		}
 	}
-	return resolveNudgeTargetInStore(cityPath, cfg, store, identifier, preferHookIdentity)
+	return resolveNudgeTargetInStore(cityPath, cfg, store, identifier, preferHookIdentity, resolveLoadCityConfigWarningWriter(warningWriter...))
 }
 
 // errMessageOpRefused is a message verb's require refusal that its preflight
@@ -2292,8 +2311,9 @@ func messageOpPreflight(cityPath string, cfg *config.City, store beads.NudgesSto
 // city, config and nudges store the caller already holds. A zero store resolves
 // nothing and reports identifier as not found, so a caller that must tell an
 // unopened store from a missing session opens the store itself and checks the
-// open error first.
-func resolveNudgeTargetInStore(cityPath string, cfg *config.City, store beads.NudgesStore, identifier string, preferHookIdentity bool) (nudgeTarget, error) {
+// open error first. stderr receives the report of a configured named session
+// the resolution materialized for the reconciler to start; nil discards it.
+func resolveNudgeTargetInStore(cityPath string, cfg *config.City, store beads.NudgesStore, identifier string, preferHookIdentity bool, stderr io.Writer) (nudgeTarget, error) {
 	if store.Store != nil {
 		// Named-session materialization is a session WRITE, and the follow-up Get
 		// reads the session bead; both route through the session-class store
@@ -2311,7 +2331,7 @@ func resolveNudgeTargetInStore(cityPath string, cfg *config.City, store beads.Nu
 				return resolveNudgeTargetFromSessionInfo(cityPath, cfg, identity.info), nil
 			}
 		}
-		sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessStore, identifier)
+		sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessStore, identifier, stderr)
 		if err == nil {
 			info, getErr := sessionFrontDoor(sessStore).Get(sessionID)
 			if getErr != nil {

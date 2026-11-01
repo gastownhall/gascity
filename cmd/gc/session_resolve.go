@@ -35,6 +35,10 @@ type namedSessionResolveOptions struct {
 	// configured named row before it is reopened; an error leaves the row
 	// closed and is the resolution's.
 	beforeReopen func(id string) error
+	// stderr, when materializing, receives the materializer's report of a
+	// session start it left to the reconciler (noteDeferredSessionStart); nil
+	// discards it, for a caller that reports the start itself.
+	stderr io.Writer
 }
 
 const templateTargetPrefix = "template:"
@@ -84,7 +88,7 @@ func resolveConfiguredNamedSessionID(
 	if !opts.materialize {
 		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	id, err := ensureSessionIDForTemplateWithOptions(cityPath, cfg, store, spec.Identity, io.Discard, ensureSessionForTemplateOptions{
+	id, err := ensureSessionIDForTemplateWithOptions(cityPath, cfg, store, spec.Identity, opts.stderr, ensureSessionForTemplateOptions{
 		materializeMetadata: opts.materializeMetadata,
 	})
 	return id, true, err
@@ -98,8 +102,11 @@ func resolveSessionIDAllowClosedWithConfig(cityPath string, cfg *config.City, st
 	return resolveSessionIDWithOptions(cityPath, cfg, store, identifier, namedSessionResolveOptions{allowClosed: true})
 }
 
-func resolveSessionIDMaterializingNamed(cityPath string, cfg *config.City, store beads.Store, identifier string) (string, error) {
-	return resolveSessionIDWithOptions(cityPath, cfg, store, identifier, namedSessionResolveOptions{materialize: true})
+// resolveSessionIDMaterializingNamed resolves identifier, materializing a
+// configured named session that has no row yet. stderr receives the
+// materializer's report of a start it left to the reconciler; nil discards it.
+func resolveSessionIDMaterializingNamed(cityPath string, cfg *config.City, store beads.Store, identifier string, stderr io.Writer) (string, error) {
+	return resolveSessionIDWithOptions(cityPath, cfg, store, identifier, namedSessionResolveOptions{materialize: true, stderr: stderr})
 }
 
 // resolveSessionIDMaterializingNamedBeforeReopen is
