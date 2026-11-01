@@ -229,6 +229,8 @@ var builtinAuthorship = map[string]Authorship{
 	BeadClaimLoopHeld:     AuthorController, // the controller's claim-loop guard (cmd/gc/claim_loop_guard.go)
 	AgentClaimsStalled:    AuthorController, // the controller's claims-stall guard (cmd/gc/claim_stall_guard.go)
 	AgentClaimsResumed:    AuthorController,
+	AgentStandbyEngaged:   AuthorController,
+	AgentStandbyReleased:  AuthorController,
 
 	// Controller: the controller, the city, orders, async requests and the
 	// API server's integrations. city.* by D13; gc suspend, gc resume and gc

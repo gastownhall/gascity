@@ -47,6 +47,11 @@ func MissingProviderReferences(cfg *City) []ProviderReference {
 			Agent:    agent.QualifiedName(),
 			Provider: agent.Provider,
 		})
+		add(ProviderReference{
+			Kind:     "agent_standby",
+			Agent:    agent.QualifiedName(),
+			Provider: agent.StandbyProvider,
+		})
 	}
 
 	sort.Slice(refs, func(i, j int) bool {
@@ -100,6 +105,8 @@ func providerReferenceLabel(ref ProviderReference) string {
 		return fmt.Sprintf("workspace.provider %q", ref.Provider)
 	case "agent":
 		return fmt.Sprintf("agent %q: provider %q", ref.Agent, ref.Provider)
+	case "agent_standby":
+		return fmt.Sprintf("agent %q: standby_provider %q", ref.Agent, ref.Provider)
 	default:
 		return fmt.Sprintf("%s provider %q", ref.Kind, ref.Provider)
 	}

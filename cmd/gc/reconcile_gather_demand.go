@@ -101,7 +101,7 @@ func gatherDemand(env demandGatherEnv, reads demandReads) (v demandView, err err
 		c.DefaultCounts, c.DefaultDemand = claimLoopGuardFor(env.CityPath).withhold(c.DefaultCounts, c.DefaultDemand)
 		// Nor is the work of a template whose seats stopped claiming
 		// (claim_stall_guard.go).
-		c.DefaultCounts, c.DefaultDemand = claimStallGuardFor(env.CityPath).withhold(c.DefaultCounts, c.DefaultDemand)
+		c.DefaultCounts, c.DefaultDemand = claimStallGuardFor(env.CityPath).withholdUnder(env.Cfg, c.DefaultCounts, c.DefaultDemand)
 		for _, probeErr := range errs {
 			fmt.Fprintf(stderr, "gatherDemand: %v (counts above may be a partial of one demand source)\n", probeErr) //nolint:errcheck
 		}

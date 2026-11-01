@@ -39,6 +39,19 @@ func ValidateSemantics(cfg *City, source string) []string {
 		}
 	}
 
+	// A standby the agent cannot use is inert: say why.
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if a.StandbyProvider == "" {
+			continue
+		}
+		if why := StandbyUsable(a, &cfg.Workspace); why != "" {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: agent %q: %s; the agent is never moved to standby_provider %q",
+				source, a.QualifiedName(), why, a.StandbyProvider))
+		}
+	}
+
 	// Check workspace default provider.
 	if p := cfg.Workspace.Provider; p != "" {
 		if !knownProviders[p] {

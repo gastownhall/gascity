@@ -63,6 +63,8 @@ type AgentPatch struct {
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// StandbyProvider overrides Agent.StandbyProvider (see that field).
+	StandbyProvider *string `toml:"standby_provider,omitempty" json:"StandbyProvider,omitempty"`
 	// ContextAdvisory overrides context-pressure guidance for this agent.
 	ContextAdvisory *ContextAdvisory `toml:"context_advisory,omitempty" json:"ContextAdvisory,omitempty"`
 	// Upstream overrides the model-serving endpoint selection (Phase C).
@@ -561,6 +563,9 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	}
 	if p.Provider != nil {
 		a.Provider = *p.Provider
+	}
+	if p.StandbyProvider != nil {
+		a.StandbyProvider = *p.StandbyProvider
 	}
 	if p.ContextAdvisory != nil {
 		a.ContextAdvisory = cloneContextAdvisory(p.ContextAdvisory)

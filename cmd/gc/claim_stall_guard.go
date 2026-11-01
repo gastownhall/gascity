@@ -40,15 +40,39 @@ package main
 //     When the hold runs out, one probe seat is admitted; a probe that fails
 //     doubles the hold, up to claimStallHoldMax, and raises the alert again in
 //     the same episode.
-//   - Resume: a claim by any counted seat of the template ends the episode,
-//     lifts the hold and records agent.claims_resumed.
+//   - Standby: a template whose config declares a usable standby_provider is
+//     moved onto it instead of being held, when the stall is on its own
+//     provider, the v2 session reconciler runs (only v2 keeps a busy seat
+//     alive across a provider move), and the evidence is the provider's: the
+//     failed seats waited on at least two beads of work, and a seat on some
+//     other provider claimed meanwhile (so the city itself works). The move
+//     is recorded in .gc/runtime/standby.toml, which every gc process
+//     composes with city.toml, and the config reloads: new seats start on the
+//     standby, idle seats of the own provider are replaced, busy ones finish.
+//     agent.standby_engaged records it. A pack that classifies provider
+//     errors moves it too, by marking the own provider unhealthy in
+//     provider-health.json. The standby's own failures count only after
+//     claimStallStandbyGrace, so its cold start is not a stall.
+//   - Probe: a move lasts claimStallStandbyHold, doubling with each move in
+//     the same episode up to claimStallStandbyHoldMax, and ends early when a
+//     seat of another template claims on the own provider. A move the
+//     provider-health record made ends when the record stops marking the own
+//     provider unhealthy instead, and no move ends while it does (the
+//     reconciler would start no probe seat there). Then the template returns
+//     to its own provider (agent.standby_released) and one probe seat is
+//     admitted there: a claim ends the episode; a failure moves it back.
+//   - Resume: a claim by any counted seat of the template on the provider that
+//     stalled ends the episode, lifts the hold and records
+//     agent.claims_resumed.
 //
 // It holds no judgment: the thresholds are constants, the comparisons are
-// counts and times, and it never touches a bead; only the controller's spawn
-// count changes. It draws no conclusion about a provider: a pack that
-// classifies provider errors says so through provider-health.json. Its state is
-// in memory: a controller restart forgets it, and the guard re-learns after
-// claimStallTrip more seats fail. Like the claim-loop guard, it withholds only
+// counts and times, the standby is configuration, and it never touches a
+// bead; only the controller's spawn count and the standby record change. It
+// draws no conclusion about a provider from error text: a pack that classifies
+// provider errors says so through provider-health.json. Its state is in memory
+// but for the standby record, which a restarted controller resumes from: a
+// restart otherwise forgets it, and the guard re-learns after claimStallTrip
+// more seats fail. Like the claim-loop guard, it withholds only
 // default routed-work demand: a custom scale_check is a number with no beads
 // behind it. Named sessions and seats no demand spawned are never counted.
 
@@ -67,6 +91,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workladder"
 )
@@ -102,6 +127,20 @@ const (
 	// claimStallForgetAfter drops a seat the journal has said nothing about
 	// for this long.
 	claimStallForgetAfter = 6 * time.Hour
+	// claimStallStandbyHold is a standby move's first hold; each further
+	// move in the same episode doubles it, up to claimStallStandbyHoldMax.
+	// An outage of a provider pool lasts hours: the doubling keeps the
+	// probes of a dead own provider to a few.
+	claimStallStandbyHold    = 30 * time.Minute
+	claimStallStandbyHoldMax = 4 * time.Hour
+	// claimStallStandbyGrace is how long after a move the standby's seats'
+	// failures do not count: a provider woken cold for a burst of seats can
+	// take minutes to claim the first.
+	claimStallStandbyGrace = 15 * time.Minute
+	// claimStallStandbyEvidence is how many distinct beads of work the
+	// failing seats must have waited on before the stall is moved to a
+	// standby: one bead failing for every seat may be that bead.
+	claimStallStandbyEvidence = 2
 )
 
 // claimStallSessionMarker is how a session bead's notification payload spells
@@ -126,10 +165,16 @@ type claimStallSeat struct {
 type claimStallTemplate struct {
 	provider string    // the provider its seats run on now ("" when unknown)
 	epoch    time.Time // when that provider took effect; zero: since the guard began
-	streak   []time.Time
+	streak   []claimStallFailure
 	waiting  map[string]struct{} // its routed demand: the last pass's, less what has left the open state since
 	// episodes are the open stalls, by the provider that stalled.
 	episodes map[string]*claimStallEpisode
+}
+
+// claimStallFailure is one failed seat in a streak.
+type claimStallFailure struct {
+	at      time.Time
+	trigger string
 }
 
 // claimStallEpisode is one stall, from its trip to the claim that ends it.
@@ -142,6 +187,32 @@ type claimStallEpisode struct {
 	until    time.Time // withheld until this time
 	probing  bool      // a probe was admitted and has not reported
 	probeAt  time.Time // when; only seats created since are its outcome
+	// action is what the guard did: held, or moved to the standby.
+	action string
+	// engagements counts the standby moves in the episode.
+	engagements int
+}
+
+// claimStallLane is one template's providers in the composed config.
+type claimStallLane struct {
+	own     string // the provider its config names
+	current string // the provider its seats start on now: the standby while moved
+	standby string // its standby_provider, when it can be used
+}
+
+// claimStallMove is a standby move the guard wants recorded.
+type claimStallMove struct {
+	provider    string // the standby
+	replaced    string // the template's own provider
+	since       time.Time
+	until       time.Time
+	engagements int
+	episode     string
+	reason      string
+	// cause is what made the move: failed seats (seats, probe) or the
+	// pack's provider-health record (provider_health). A move the record
+	// made ends when the record no longer marks the own provider unhealthy.
+	cause string
 }
 
 // claimStallGuard is one city's guard. Its methods are safe for concurrent
@@ -152,9 +223,26 @@ type claimStallGuard struct {
 	now       func() time.Time
 	record    func(events.Event)
 	stderr    io.Writer
-	providers map[string]string // template → the provider its seats run on now
+	lanes     map[string]claimStallLane // template → its providers in the config
 	templates map[string]*claimStallTemplate
 	seats     map[string]*claimStallSeat
+	// standbyAllowed: the v2 session reconciler runs, which keeps a busy
+	// seat alive across a provider move (legacy judges a seat's liveness
+	// by the current config's process names).
+	standbyAllowed bool
+	// moves are the standby moves the guard wants, and recorded the ones
+	// .gc/runtime/standby.toml holds; syncStandby writes the one to the
+	// other. fs and cityPath reach the record; a nil fs keeps no record.
+	moves    map[string]*claimStallMove
+	recorded map[string]config.StandbyEntry
+	// dropped is why each move dropped since the last sync ended.
+	dropped  map[string]string
+	restored bool
+	fs       fsys.FS
+	cityPath string
+	// lastClaim is each provider's newest claim by a counted seat: evidence
+	// that a provider, or the city, works.
+	lastClaim map[string]time.Time
 	// waitedBy is the routed demand's reverse index: a waiting bead → the
 	// templates whose demand lists it.
 	waitedBy map[string]map[string]struct{}
@@ -176,70 +264,161 @@ func newClaimStallGuard(record func(events.Event), stderr io.Writer) *claimStall
 		now:       time.Now,
 		record:    record,
 		stderr:    stderr,
-		providers: map[string]string{},
+		lanes:     map[string]claimStallLane{},
 		templates: map[string]*claimStallTemplate{},
 		seats:     map[string]*claimStallSeat{},
 		waitedBy:  map[string]map[string]struct{}{},
 		left:      map[string]time.Time{},
+		moves:     map[string]*claimStallMove{},
+		recorded:  map[string]config.StandbyEntry{},
+		dropped:   map[string]string{},
+		lastClaim: map[string]time.Time{},
 	}
 }
 
-// claimStallProviders is each agent template's provider in cfg, by qualified
-// name: the agent's own, else the workspace default for an agent that runs a
-// provider at all ("" for a start_command agent).
-func claimStallProviders(cfg *config.City) map[string]string {
-	out := map[string]string{}
+// withStandbyRecord points the guard at a city's standby record.
+func (g *claimStallGuard) withStandbyRecord(fs fsys.FS, cityPath string) *claimStallGuard {
+	g.fs, g.cityPath = fs, cityPath
+	return g
+}
+
+// claimStallLanes is each agent template's providers in cfg, by qualified
+// name: the one its seats start on now, its own (the workspace default for an
+// agent that names none and runs a provider at all, "" for a start_command
+// agent), and its standby when it can use one.
+func claimStallLanes(cfg *config.City) map[string]claimStallLane {
+	out := map[string]claimStallLane{}
 	if cfg == nil {
 		return out
 	}
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
-		provider := strings.TrimSpace(a.Provider)
-		if provider == "" && strings.TrimSpace(a.StartCommand) == "" {
-			provider = strings.TrimSpace(cfg.Workspace.Provider)
-		}
-		out[a.QualifiedName()] = provider
+		out[a.QualifiedName()] = claimStallLaneOf(a, &cfg.Workspace)
 	}
 	return out
 }
 
-// configure adopts cfg's templates. A template that moved to another provider
-// starts a new epoch on it: the move may have been the fix, so its stall ends
-// (agent.claims_resumed, cause config_changed) and its streak is dropped. A
-// template gone from the config is forgotten.
-func (g *claimStallGuard) configure(cfg *config.City) {
+// claimStallLaneOf is one agent's lane.
+func claimStallLaneOf(a *config.Agent, workspace *config.Workspace) claimStallLane {
+	lane := claimStallLane{current: claimStallCurrentProvider(a, workspace), own: config.AgentOwnProvider(a, workspace)}
+	if config.StandbyUsable(a, workspace) == "" {
+		lane.standby = strings.TrimSpace(a.StandbyProvider)
+	}
+	return lane
+}
+
+// claimStallCurrentProvider is the provider a's seats start on now: its
+// provider (the standby while the record moves it), else the workspace's,
+// for an agent that runs a provider at all.
+func claimStallCurrentProvider(a *config.Agent, workspace *config.Workspace) string {
+	if strings.TrimSpace(a.StartCommand) != "" {
+		return ""
+	}
+	if p := strings.TrimSpace(a.Provider); p != "" {
+		return p
+	}
+	return strings.TrimSpace(workspace.Provider)
+}
+
+// configure adopts cfg's templates; standbyAllowed says whether the v2
+// session reconciler runs. A template whose own provider changed, or that
+// left the config, was changed by a person: the change may have been the fix,
+// so its stalls end (agent.claims_resumed, cause config_changed) and its move,
+// if any, is dropped. So is a recorded move cfg no longer applies (a person
+// deleted it from the record, or changed the agent under it): the template
+// returns to its own provider for a probe. A template whose seats start on
+// another provider now (the standby record moved it, or put it back) starts a
+// new epoch there: its streak is dropped and seats created before count for
+// nothing, but its episodes stand. The first call also resumes the moves the
+// standby record holds, so a restarted controller keeps them.
+func (g *claimStallGuard) configure(cfg *config.City, standbyAllowed bool) {
 	if g == nil {
 		return
 	}
-	providers := claimStallProviders(cfg)
+	lanes := claimStallLanes(cfg)
 	now := g.now()
 	var alerts []events.Event
 	g.mu.Lock()
-	g.providers = providers
+	previous := g.lanes
+	g.lanes, g.standbyAllowed = lanes, standbyAllowed
 	for name, t := range g.templates {
-		provider, ok := providers[name]
-		if ok && provider == t.provider {
+		lane, ok := lanes[name]
+		if !ok || lane.own != previous[name].own {
+			for _, ep := range t.episodes {
+				fmt.Fprintf(g.stderr, "claims-stall guard: %s's stall on %s ends with a config change\n", name, claimStallProviderLabel(ep.provider)) //nolint:errcheck // best-effort stderr
+				alerts = append(alerts, g.resumedEvent(name, ep, events.AgentClaimsCauseConfigChanged, now))
+			}
+			t.episodes = nil
+			g.dropMoveLocked(name, events.AgentClaimsCauseConfigChanged, now)
+			if !ok {
+				delete(g.templates, name)
+				continue
+			}
+		}
+		if lane.current != t.provider {
+			t.provider, t.epoch, t.streak = lane.current, now, nil
+		}
+	}
+	for _, name := range g.sortedMoveNamesLocked() {
+		m := g.moves[name]
+		lane := lanes[name]
+		r, recorded := g.recorded[name]
+		switch {
+		case !standbyAllowed || lane.standby != m.provider || lane.own != m.replaced:
+			fmt.Fprintf(g.stderr, "claims-stall guard: %s's move to %s ends with a config change\n", name, m.provider) //nolint:errcheck // best-effort stderr
+		case recorded && r.Since.Equal(m.since) && lane.current != m.provider:
+			fmt.Fprintf(g.stderr, "claims-stall guard: %s's move to %s is no longer in the config; it returns to %s\n", name, m.provider, m.replaced) //nolint:errcheck // best-effort stderr
+		default:
 			continue
 		}
-		for _, ep := range t.episodes {
-			fmt.Fprintf(g.stderr, "claims-stall guard: %s's stall on %s ends with a config change\n", name, claimStallProviderLabel(ep.provider)) //nolint:errcheck // best-effort stderr
-			alerts = append(alerts, g.resumedEvent(name, ep, events.AgentClaimsCauseConfigChanged, now))
-		}
-		if !ok {
-			delete(g.templates, name)
-			continue
-		}
-		t.provider, t.epoch, t.streak, t.episodes = provider, now, nil, nil
+		g.dropMoveLocked(name, events.AgentClaimsCauseConfigChanged, now)
+	}
+	if !g.restored {
+		g.restored = true
+		g.restoreLocked()
 	}
 	g.mu.Unlock()
 	g.emit(alerts)
+}
+
+// restoreLocked resumes the moves the standby record holds that still match
+// the config, each with its episode, so a restarted controller probes the own
+// provider when the hold it recorded runs out. Caller holds g.mu.
+func (g *claimStallGuard) restoreLocked() {
+	if g.fs == nil {
+		return
+	}
+	f, _, err := config.LoadStandby(g.fs, g.cityPath)
+	if err != nil {
+		fmt.Fprintf(g.stderr, "claims-stall guard: %v; resuming no standby move\n", err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	for _, e := range f.Agents {
+		g.recorded[e.Name] = e
+		lane, ok := g.lanes[e.Name]
+		if !ok || !g.standbyAllowed || lane.standby != e.Provider || lane.own != e.Replaced {
+			continue // syncStandby drops it from the record
+		}
+		g.moves[e.Name] = &claimStallMove{provider: e.Provider, replaced: e.Replaced, since: e.Since, until: e.Until, engagements: e.Engagements, episode: e.Episode, reason: e.Reason, cause: e.Cause}
+		t := g.templateFor(e.Name)
+		t.provider, t.epoch = lane.current, e.Since // seats from before the move are the own provider's
+		if t.episodes == nil {
+			t.episodes = map[string]*claimStallEpisode{}
+		}
+		id := e.Episode
+		if id == "" {
+			id = claimStallEpisodeID(e.Name, e.Replaced, e.Since)
+		}
+		t.episodes[e.Replaced] = &claimStallEpisode{id: id, provider: e.Replaced, since: e.Since, holds: 1, until: e.Until, action: events.AgentClaimsStandby, engagements: e.Engagements}
+		fmt.Fprintf(g.stderr, "claims-stall guard: %s stays on its standby %s until %s (from the standby record)\n", e.Name, e.Provider, e.Until.UTC().Format(time.RFC3339)) //nolint:errcheck // best-effort stderr
+	}
 }
 
 // templateFor is name's state, created on first use. Caller holds g.mu.
 func (g *claimStallGuard) templateFor(name string) *claimStallTemplate {
 	t := g.templates[name]
 	if t == nil {
-		t = &claimStallTemplate{provider: g.providers[name]}
+		t = &claimStallTemplate{provider: g.lanes[name].current}
 		g.templates[name] = t
 	}
 	return t
@@ -460,12 +639,22 @@ func (g *claimStallGuard) failedLocked(seat *claimStallSeat, at time.Time) []eve
 		return nil
 	}
 	seat.settled = true
+	if m := g.moves[seat.template]; m != nil && t.provider == m.provider && at.Before(m.since.Add(claimStallStandbyGrace)) {
+		return nil // the standby's cold start, not a verdict on it
+	}
 	if ep := t.stalled(); ep != nil {
 		ep.failures++
 		if !ep.probing || seat.created.IsZero() || seat.created.Before(ep.probeAt) {
 			return nil // a seat already running when the hold began; it neither lengthens the hold nor ends it
 		}
 		ep.probing = false
+		if ep.action == events.AgentClaimsStandby && g.engageableLocked(seat.template) {
+			fmt.Fprintf(g.stderr, "claims-stall guard: the probe seat of %s on %s failed to claim too (%d seats in all); moving it back to its standby\n", //nolint:errcheck // best-effort stderr
+				seat.template, claimStallProviderLabel(ep.provider), ep.failures)
+			g.engageLocked(seat.template, ep, at, events.AgentClaimsCauseProbe, fmt.Sprintf("its probe seat on %s failed to claim", claimStallProviderLabel(ep.provider)))
+			return []events.Event{g.stalledEvent(seat.template, ep, events.AgentClaimsCauseProbe, ep.failures, at)}
+		}
+		ep.action = events.AgentClaimsHeld
 		ep.holds++
 		ep.until = claimStallLater(at, g.now()).Add(claimStallHold(ep.holds))
 		fmt.Fprintf(g.stderr, "claims-stall guard: the probe seat of %s on %s failed to claim too (%d seats in all); holding its routed demand until %s\n", //nolint:errcheck // best-effort stderr
@@ -476,11 +665,11 @@ func (g *claimStallGuard) failedLocked(seat *claimStallSeat, at time.Time) []eve
 	// out of order: the window is the newest failure's.
 	newest := at
 	for _, f := range t.streak {
-		newest = claimStallLater(newest, f)
+		newest = claimStallLater(newest, f.at)
 	}
 	streak := t.streak[:0]
-	for _, f := range append(t.streak, at) {
-		if newest.Sub(f) <= claimStallWindow {
+	for _, f := range append(t.streak, claimStallFailure{at: at, trigger: seat.trigger}) {
+		if newest.Sub(f.at) <= claimStallWindow {
 			streak = append(streak, f)
 		}
 	}
@@ -491,15 +680,19 @@ func (g *claimStallGuard) failedLocked(seat *claimStallSeat, at time.Time) []eve
 	}
 	// The failures arrive about in time order, not exactly (an overdue
 	// seat's is dated at its deadline): the span is the streak's range.
-	first, last := t.streak[0], t.streak[0]
+	first, last := t.streak[0].at, t.streak[0].at
+	triggers := map[string]struct{}{}
 	for _, f := range t.streak {
-		first, last = claimStallEarlier(first, f), claimStallLater(last, f)
+		first, last = claimStallEarlier(first, f.at), claimStallLater(last, f.at)
+		if f.trigger != "" {
+			triggers[f.trigger] = struct{}{}
+		}
 	}
 	if last.Sub(first) < claimStallMinSpan {
 		return nil
 	}
 	t.streak = nil
-	return g.tripLocked(seat.template, t, n, first, at)
+	return g.tripLocked(seat.template, t, n, len(triggers), first, at)
 }
 
 func claimStallEarlier(a, b time.Time) time.Time {
@@ -516,9 +709,11 @@ func claimStallLater(a, b time.Time) time.Time {
 	return a
 }
 
-// tripLocked opens template's episode on its current provider and holds its
-// routed demand. Caller holds g.mu.
-func (g *claimStallGuard) tripLocked(template string, t *claimStallTemplate, seats int, since, at time.Time) []events.Event {
+// tripLocked opens template's episode on its current provider and moves the
+// template to its standby when it can and the evidence is the provider's
+// (canEngageLocked), or else holds its routed demand. beads is how many
+// distinct beads of work the failed seats waited on. Caller holds g.mu.
+func (g *claimStallGuard) tripLocked(template string, t *claimStallTemplate, seats, beads int, since, at time.Time) []events.Event {
 	ep := &claimStallEpisode{
 		id:       claimStallEpisodeID(template, t.provider, since),
 		provider: t.provider,
@@ -526,14 +721,112 @@ func (g *claimStallGuard) tripLocked(template string, t *claimStallTemplate, sea
 		failures: seats,
 		holds:    1,
 		until:    claimStallLater(at, g.now()).Add(claimStallHold(1)),
+		action:   events.AgentClaimsHeld,
 	}
 	if t.episodes == nil {
 		t.episodes = map[string]*claimStallEpisode{}
 	}
 	t.episodes[t.provider] = ep
-	fmt.Fprintf(g.stderr, "claims-stall guard: %s on %s: %d seats in a row failed to claim the work routed to them since %s; holding its routed demand until %s\n", //nolint:errcheck // best-effort stderr
-		template, claimStallProviderLabel(t.provider), seats, since.UTC().Format(time.RFC3339), ep.until.UTC().Format(time.RFC3339))
+	why := g.canEngageLocked(template, t, beads, since)
+	if why == "" {
+		g.engageLocked(template, ep, at, events.AgentClaimsCauseSeats, fmt.Sprintf("%d seats in a row failed to claim on %s", seats, claimStallProviderLabel(t.provider)))
+		fmt.Fprintf(g.stderr, "claims-stall guard: %s on %s: %d seats in a row failed to claim the work routed to them since %s; moving it to its standby %s until %s\n", //nolint:errcheck // best-effort stderr
+			template, claimStallProviderLabel(t.provider), seats, since.UTC().Format(time.RFC3339), g.moves[template].provider, ep.until.UTC().Format(time.RFC3339))
+		return []events.Event{g.stalledEvent(template, ep, events.AgentClaimsCauseSeats, seats, at)}
+	}
+	fmt.Fprintf(g.stderr, "claims-stall guard: %s on %s: %d seats in a row failed to claim the work routed to them since %s; holding its routed demand until %s (no standby: %s)\n", //nolint:errcheck // best-effort stderr
+		template, claimStallProviderLabel(t.provider), seats, since.UTC().Format(time.RFC3339), ep.until.UTC().Format(time.RFC3339), why)
 	return []events.Event{g.stalledEvent(template, ep, events.AgentClaimsCauseSeats, seats, at)}
+}
+
+// canEngageLocked is why template's stall on its current provider is held
+// rather than moved to a standby, or "" when it is moved: the template has a
+// usable standby and the v2 reconciler runs (engageableLocked), the stall is
+// on its own provider, and the evidence is that provider's: the failed seats
+// waited on at least claimStallStandbyEvidence beads of work (one bead
+// failing for every seat may be that bead), and a seat on some other provider
+// claimed since the streak began (no claim anywhere may be the city failing,
+// which a standby does not fix). Caller holds g.mu.
+func (g *claimStallGuard) canEngageLocked(template string, t *claimStallTemplate, beads int, since time.Time) string {
+	lane := g.lanes[template]
+	switch {
+	case lane.standby == "":
+		return "it has no usable standby_provider"
+	case !g.standbyAllowed:
+		return "a standby move needs the v2 session reconciler"
+	case t.provider != lane.own:
+		return "it already runs on its standby"
+	case beads < claimStallStandbyEvidence:
+		return fmt.Sprintf("its seats waited on %d bead(s) of work only", beads)
+	case !g.otherProviderClaimedLocked(lane.own, since):
+		return "no seat on another provider claimed meanwhile"
+	}
+	return ""
+}
+
+// engageableLocked reports whether template may be moved to its standby at
+// all. Caller holds g.mu.
+func (g *claimStallGuard) engageableLocked(template string) bool {
+	lane := g.lanes[template]
+	return lane.standby != "" && g.standbyAllowed
+}
+
+// otherProviderClaimedLocked reports whether a seat on a provider other than
+// provider claimed at or after since. Caller holds g.mu.
+func (g *claimStallGuard) otherProviderClaimedLocked(provider string, since time.Time) bool {
+	for p, at := range g.lastClaim {
+		if p != provider && !at.Before(since) {
+			return true
+		}
+	}
+	return false
+}
+
+// engageLocked moves template to its standby for ep: the move's hold doubles
+// with each move in the episode. While the template still starts seats on
+// the stalled provider (until the reload), its demand stays held. Caller
+// holds g.mu.
+func (g *claimStallGuard) engageLocked(template string, ep *claimStallEpisode, at time.Time, cause, reason string) {
+	lane := g.lanes[template]
+	from := claimStallLater(at, g.now()) // a failure may be dated in the past; the move is made now
+	if t := g.templates[template]; t != nil && lane.standby != lane.own {
+		delete(t.episodes, lane.standby) // a stall of the standby itself, from an earlier move, is over
+	}
+	ep.engagements++
+	ep.action = events.AgentClaimsStandby
+	ep.until = from.Add(claimStallStandbyHoldFor(ep.engagements))
+	ep.probing = false
+	g.moves[template] = &claimStallMove{
+		provider: lane.standby, replaced: lane.own, since: from, until: ep.until,
+		engagements: ep.engagements, episode: ep.id, reason: reason, cause: cause,
+	}
+}
+
+// dropMoveLocked drops template's move, for cause: when its episode still
+// stands, the template returns to its own provider and one probe seat is
+// admitted there at once. Caller holds g.mu.
+func (g *claimStallGuard) dropMoveLocked(template, cause string, now time.Time) {
+	m := g.moves[template]
+	if m == nil {
+		return
+	}
+	delete(g.moves, template)
+	g.dropped[template] = cause
+	if t := g.templates[template]; t != nil {
+		if ep := t.episodes[m.replaced]; ep != nil {
+			ep.until, ep.probing = now, false
+		}
+	}
+}
+
+// claimStallStandbyHoldFor is how long the n-th standby move of an episode
+// lasts.
+func claimStallStandbyHoldFor(n int) time.Duration {
+	hold := claimStallStandbyHold
+	for i := 1; i < n && hold < claimStallStandbyHoldMax; i++ {
+		hold *= 2
+	}
+	return min(hold, claimStallStandbyHoldMax)
 }
 
 // claimedLocked counts seat's claim, made at claimedAt: one newer than the
@@ -551,19 +844,27 @@ func (g *claimStallGuard) claimedLocked(seat *claimStallSeat, claimedAt time.Tim
 		return nil
 	}
 	if len(t.streak) > 0 {
-		first := t.streak[0]
+		first := t.streak[0].at
 		for _, f := range t.streak {
-			first = claimStallEarlier(first, f)
+			first = claimStallEarlier(first, f.at)
 		}
 		if !claimedAt.Before(first) {
 			t.streak = nil
 		}
+	}
+	if t.provider != "" {
+		g.lastClaim[t.provider] = claimStallLater(g.lastClaim[t.provider], claimedAt)
 	}
 	ep := t.stalled()
 	if ep == nil || claimedAt.Before(ep.since) {
 		return nil
 	}
 	delete(t.episodes, t.provider)
+	if m := g.moves[seat.template]; m != nil && ep.provider == m.replaced {
+		// The own provider claims again: the stall is over, and so is the
+		// move. A stall of the standby ending changes neither.
+		g.dropMoveLocked(seat.template, events.AgentClaimsCauseClaimed, g.now())
+	}
 	fmt.Fprintf(g.stderr, "claims-stall guard: %s claims its work again on %s; its routed demand counts again\n", seat.template, claimStallProviderLabel(ep.provider)) //nolint:errcheck // best-effort stderr
 	return []events.Event{g.resumedEvent(seat.template, ep, events.AgentClaimsCauseClaimed, claimedAt)}
 }
@@ -590,32 +891,66 @@ func claimStallProviderLabel(provider string) string {
 	return provider
 }
 
-// stalledEvent is the agent.claims_stalled alert for ep.
+// stalledEvent is the agent.claims_stalled alert for ep. Caller holds g.mu.
 func (g *claimStallGuard) stalledEvent(template string, ep *claimStallEpisode, cause string, seats int, at time.Time) events.Event {
 	until := ep.until.UTC()
-	payload, _ := json.Marshal(events.AgentClaimsPayload{ //nolint:errchkjson // a struct of strings, ints and times always marshals
+	p := events.AgentClaimsPayload{
 		Template: template,
 		Provider: ep.provider,
 		Episode:  ep.id,
-		Action:   events.AgentClaimsHeld,
+		Action:   ep.action,
 		Cause:    cause,
 		Seats:    seats,
 		Since:    ep.since.UTC(),
 		Until:    &until,
-	})
-	what := fmt.Sprintf("%d of its seats in a row failed to claim the work routed to them while it waited", seats)
-	if cause == events.AgentClaimsCauseProbe {
-		what = fmt.Sprintf("its probe seat failed to claim too (%d seats in all)", seats)
 	}
+	var what string
+	switch cause {
+	case events.AgentClaimsCauseProbe:
+		what = fmt.Sprintf("its probe seat failed to claim too (%d seats in all)", seats)
+	case events.AgentClaimsCauseProviderHealth:
+		what = "the provider-health record marks it unhealthy"
+	default:
+		what = fmt.Sprintf("%d of its seats in a row failed to claim the work routed to them while it waited", seats)
+	}
+	did := fmt.Sprintf("No new seats are spawned for its routed work until %s, then one probe seat; a claim ends the stall (a custom scale_check count is not withheld).", until.Format(time.RFC3339))
+	if m := g.moves[template]; ep.action == events.AgentClaimsStandby && m != nil {
+		p.Standby, p.Engagements = m.provider, ep.engagements
+		did = fmt.Sprintf("Its new seats start on its standby %s (move %d of this stall) until %s, when one probe seat goes back to %s; a claim there ends the stall. Recorded in %s.",
+			m.provider, ep.engagements, until.Format(time.RFC3339), claimStallProviderLabel(ep.provider), config.StandbyPath(g.cityPath))
+	}
+	payload, _ := json.Marshal(p) //nolint:errchkjson // a struct of strings, ints and times always marshals
 	return events.Event{
 		Type:    events.AgentClaimsStalled,
 		Ts:      claimStallLater(at, g.now()).UTC(),
 		Actor:   "controller",
 		Subject: template,
-		Message: fmt.Sprintf("Agent %s stopped claiming its work on %s: %s (since %s). No new seats are spawned for its routed work until %s, then one probe seat; a claim ends the stall (a custom scale_check count is not withheld).",
-			template, claimStallProviderLabel(ep.provider), what, ep.since.UTC().Format(time.RFC3339), until.Format(time.RFC3339)),
+		Message: fmt.Sprintf("Agent %s stopped claiming its work on %s: %s (since %s). %s",
+			template, claimStallProviderLabel(ep.provider), what, ep.since.UTC().Format(time.RFC3339), did),
 		Payload: payload,
 	}
+}
+
+// standbyEvent is the agent.standby_engaged or agent.standby_released record
+// of a move.
+func standbyEvent(typ, template string, m config.StandbyEntry, cause string, at time.Time) events.Event {
+	until := m.Until.UTC()
+	payload, _ := json.Marshal(events.AgentClaimsPayload{ //nolint:errchkjson // a struct of strings, ints and times always marshals
+		Template:    template,
+		Provider:    m.Replaced,
+		Episode:     m.Episode,
+		Action:      events.AgentClaimsStandby,
+		Cause:       cause,
+		Standby:     m.Provider,
+		Engagements: m.Engagements,
+		Since:       m.Since.UTC(),
+		Until:       &until,
+	})
+	msg := fmt.Sprintf("Agent %s now starts its seats on its standby %s in place of %s, until %s (%s).", template, m.Provider, m.Replaced, until.Format(time.RFC3339), m.Reason)
+	if typ == events.AgentStandbyReleased {
+		msg = fmt.Sprintf("Agent %s starts its seats on its own provider %s again (it ran on %s from %s): %s.", template, m.Replaced, m.Provider, m.Since.UTC().Format(time.RFC3339), cause)
+	}
+	return events.Event{Type: typ, Ts: at.UTC(), Actor: "controller", Subject: template, Message: msg, Payload: payload}
 }
 
 // resumedEvent is the agent.claims_resumed record that ends ep, by a claim or
@@ -659,16 +994,27 @@ func (g *claimStallGuard) sweep(now time.Time) {
 	}
 }
 
-// withhold records each template's default routed demand, counts the seats
-// that have been awake past the claim deadline without claiming it, and
-// removes the demand of every held template from one pass: all of it while
-// the hold stands, all but one bead (the probe) when the hold runs out. It
-// never edits its arguments; with nothing held it returns them unchanged.
+// withhold is withholdUnder with no config to check against.
 func (g *claimStallGuard) withhold(counts map[string]int, demand map[string]scaleCheckDemand) (map[string]int, map[string]scaleCheckDemand) {
+	return g.withholdUnder(nil, counts, demand)
+}
+
+// withholdUnder records each template's default routed demand, counts the
+// seats that have been awake past the claim deadline without claiming it, and
+// removes the demand of every held template from one pass: all of it while
+// the hold stands, all but one bead (the probe) when the hold runs out. cfg is
+// the config the pass launches seats under: a template the guard is managing
+// (a stall or a standby move) whose provider there differs from the guard's
+// is mid-reload (the guard adopted a config the pass has not, or the other
+// way round), and spawns nothing until both agree, so no seat starts on a
+// provider the guard does not count it under. It never edits its arguments;
+// with nothing held it returns them unchanged.
+func (g *claimStallGuard) withholdUnder(cfg *config.City, counts map[string]int, demand map[string]scaleCheckDemand) (map[string]int, map[string]scaleCheckDemand) {
 	if g == nil {
 		return counts, demand
 	}
 	now := g.now()
+	passProviders := claimStallPassProviders(cfg, demand)
 	g.mu.Lock()
 	g.sweep(now)
 	g.recordDemandLocked(counts, demand)
@@ -680,15 +1026,22 @@ func (g *claimStallGuard) withhold(counts map[string]int, demand map[string]scal
 		if t == nil {
 			continue
 		}
-		ep := t.stalled()
-		if ep == nil {
-			continue
-		}
 		entry := demand[name]
 		if len(entry.WorkBeadIDs) == 0 {
 			continue // nothing to spawn for: a probe admitted now would be spent on nothing
 		}
-		keep := g.admittedLocked(name, ep, now)
+		_, recorded := g.recorded[name]
+		managed := len(t.episodes) > 0 || g.moves[name] != nil || recorded
+		passProvider, known := passProviders[name]
+		var keep int
+		switch ep := t.stalled(); {
+		case managed && known && passProvider != t.provider:
+			keep = 0
+		case ep != nil:
+			keep = g.admittedLocked(name, ep, now)
+		default:
+			continue
+		}
 		if keep >= len(entry.WorkBeadIDs) {
 			continue
 		}
@@ -711,6 +1064,27 @@ func (g *claimStallGuard) withhold(counts map[string]int, demand map[string]scal
 		return counts, demand
 	}
 	return outCounts, outDemand
+}
+
+// claimStallPassProviders is the provider each template in demand starts its
+// seats on under cfg; nil when there is no cfg to say.
+func claimStallPassProviders(cfg *config.City, demand map[string]scaleCheckDemand) map[string]string {
+	if cfg == nil || len(demand) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(demand))
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if name := a.QualifiedName(); hasDemandEntry(demand, name) {
+			out[name] = claimStallCurrentProvider(a, &cfg.Workspace)
+		}
+	}
+	return out
+}
+
+func hasDemandEntry(demand map[string]scaleCheckDemand, name string) bool {
+	_, ok := demand[name]
+	return ok
 }
 
 // recordDemandLocked replaces the waiting work of every template this pass
@@ -798,6 +1172,179 @@ func (g *claimStallGuard) admittedLocked(template string, ep *claimStallEpisode,
 	ep.until = now.Add(claimStallProbeGrace)
 	fmt.Fprintf(g.stderr, "claims-stall guard: admitting one probe seat for %s on %s\n", template, claimStallProviderLabel(ep.provider)) //nolint:errcheck // best-effort stderr
 	return 1
+}
+
+// syncStandby is the tick's step for the standby record, before the config
+// reload: it moves a template whose own provider the provider-health record
+// marks unhealthy onto its standby, ends each move whose hold ran out or
+// whose own provider another template's seat proved by claiming, writes the
+// record when the moves the guard wants differ from it, and records
+// agent.standby_engaged and agent.standby_released for the difference. It
+// reports whether the record changed, so the caller reloads the config.
+func (g *claimStallGuard) syncStandby(health *providerHealthSnapshot) (bool, error) {
+	if g == nil {
+		return false, nil
+	}
+	now := g.now()
+	var alerts []events.Event
+	g.mu.Lock()
+	g.rereadRecordLocked(now)
+	for _, name := range g.sortedLaneNamesLocked() {
+		lane := g.lanes[name]
+		if g.moves[name] != nil || !g.engageableLocked(name) || lane.current != lane.own {
+			continue
+		}
+		if healthy, present := health.check(lane.own); !present || healthy {
+			continue
+		}
+		if healthy, present := health.check(lane.standby); present && !healthy {
+			continue // the standby is no better
+		}
+		t := g.templateFor(name)
+		if len(t.waiting) == 0 {
+			continue // an idle lane has nothing to move for: it moves when work waits
+		}
+		ep := t.episodes[lane.own]
+		if ep == nil {
+			ep = &claimStallEpisode{id: claimStallEpisodeID(name, lane.own, now), provider: lane.own, since: now, holds: 1}
+			if t.episodes == nil {
+				t.episodes = map[string]*claimStallEpisode{}
+			}
+			t.episodes[lane.own] = ep
+		}
+		g.engageLocked(name, ep, now, events.AgentClaimsCauseProviderHealth, fmt.Sprintf("the provider-health record marks %s unhealthy", lane.own))
+		alerts = append(alerts, g.stalledEvent(name, ep, events.AgentClaimsCauseProviderHealth, ep.failures, now))
+	}
+	for _, name := range g.sortedMoveNamesLocked() {
+		m := g.moves[name]
+		healthy, present := health.check(m.replaced)
+		switch {
+		case present && !healthy:
+			// The pack still marks the own provider unhealthy, and the
+			// reconciler would start no probe seat on it: the move stands.
+		case m.cause == events.AgentClaimsCauseProviderHealth:
+			g.dropMoveLocked(name, events.AgentClaimsCauseProviderHealth, now)
+		case !now.Before(m.until):
+			g.dropMoveLocked(name, events.AgentClaimsCauseHoldEnded, now)
+		case m.engagements <= 1 && g.lastClaim[m.replaced].After(m.since):
+			// Another agent's seat claimed on the own provider: the outage
+			// may be over. Only for a first move: once a probe has failed,
+			// the failure was this agent's, whatever its neighbors do.
+			g.dropMoveLocked(name, events.AgentClaimsCauseClaimed, now)
+		}
+	}
+	want := map[string]config.StandbyEntry{}
+	for name, m := range g.moves {
+		want[name] = config.StandbyEntry{Name: name, Provider: m.provider, Replaced: m.replaced, Since: m.since.UTC(), Until: m.until.UTC(), Engagements: m.engagements, Episode: m.episode, Cause: m.cause, Reason: m.reason}
+	}
+	changed := len(want) != len(g.recorded)
+	for name, e := range want {
+		if r, ok := g.recorded[name]; !ok || !reflectStandbyEntryEqual(r, e) {
+			changed = true
+		}
+	}
+	if !changed || g.fs == nil {
+		g.mu.Unlock()
+		g.emit(alerts)
+		return false, nil
+	}
+	f := config.StandbyFile{}
+	for _, e := range want {
+		f.Agents = append(f.Agents, e)
+	}
+	if err := config.WriteStandby(g.fs, g.cityPath, f); err != nil {
+		g.mu.Unlock()
+		g.emit(alerts)
+		return false, err
+	}
+	for _, name := range sortedStandbyNames(want, g.recorded) {
+		e, engaged := want[name]
+		r, was := g.recorded[name]
+		switch {
+		case engaged && (!was || r.Provider != e.Provider || !r.Since.Equal(e.Since)):
+			fmt.Fprintf(g.stderr, "claims-stall guard: %s now runs on its standby %s in place of %s until %s\n", name, e.Provider, e.Replaced, e.Until.Format(time.RFC3339)) //nolint:errcheck // best-effort stderr
+			alerts = append(alerts, standbyEvent(events.AgentStandbyEngaged, name, e, "", now))
+		case !engaged && was:
+			cause := g.dropped[name]
+			if cause == "" {
+				cause = events.AgentClaimsCauseConfigChanged // the record named a move the config never allowed
+			}
+			fmt.Fprintf(g.stderr, "claims-stall guard: %s returns to its own provider %s (%s)\n", name, r.Replaced, cause) //nolint:errcheck // best-effort stderr
+			alerts = append(alerts, standbyEvent(events.AgentStandbyReleased, name, r, cause, now))
+		}
+	}
+	g.recorded = want
+	clear(g.dropped)
+	g.mu.Unlock()
+	g.emit(alerts)
+	return true, nil
+}
+
+// rereadRecordLocked ends each move whose entry a person deleted from the
+// standby record (or deleted the record): the template returns to its own
+// provider for a probe, and the next write does not bring the entry back.
+// A record that cannot be read changes nothing. Caller holds g.mu.
+func (g *claimStallGuard) rereadRecordLocked(now time.Time) {
+	if g.fs == nil || len(g.recorded) == 0 {
+		return
+	}
+	f, _, err := config.LoadStandby(g.fs, g.cityPath)
+	if err != nil {
+		return
+	}
+	onDisk := make(map[string]bool, len(f.Agents))
+	for _, e := range f.Agents {
+		onDisk[e.Name] = true
+	}
+	for _, name := range sortedStandbyNames(g.recorded, nil) {
+		if !onDisk[name] && g.moves[name] != nil {
+			fmt.Fprintf(g.stderr, "claims-stall guard: %s's move was deleted from the standby record; it returns to its own provider\n", name) //nolint:errcheck // best-effort stderr
+			g.dropMoveLocked(name, events.AgentClaimsCauseConfigChanged, now)
+		}
+	}
+}
+
+// sortedMoveNamesLocked is the moved templates in order. Caller holds g.mu.
+func (g *claimStallGuard) sortedMoveNamesLocked() []string {
+	names := make([]string, 0, len(g.moves))
+	for name := range g.moves {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func reflectStandbyEntryEqual(a, b config.StandbyEntry) bool {
+	return a.Name == b.Name && a.Provider == b.Provider && a.Replaced == b.Replaced && a.Since.Equal(b.Since) &&
+		a.Until.Equal(b.Until) && a.Engagements == b.Engagements && a.Episode == b.Episode && a.Cause == b.Cause && a.Reason == b.Reason
+}
+
+// sortedStandbyNames is every template either set names, in order.
+func sortedStandbyNames(a, b map[string]config.StandbyEntry) []string {
+	seen := map[string]struct{}{}
+	for name := range a {
+		seen[name] = struct{}{}
+	}
+	for name := range b {
+		seen[name] = struct{}{}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// sortedLaneNamesLocked is the configured templates in order. Caller holds
+// g.mu.
+func (g *claimStallGuard) sortedLaneNamesLocked() []string {
+	names := make([]string, 0, len(g.lanes))
+	for name := range g.lanes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // claimStallGuards maps a normalized city path to its controller's guard, as

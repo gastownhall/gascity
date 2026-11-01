@@ -33,10 +33,12 @@ export type AdapterEventPayload = {
 export type AgentClaimsPayload = {
     action?: string;
     cause?: string;
+    engagements?: number;
     episode: string;
     provider: string;
     seats?: number;
     since: string;
+    standby?: string;
     template: string;
     until?: string;
 };
@@ -136,6 +138,7 @@ export type AgentPatch = {
     Skills: Array<string> | null;
     SkillsAppend: Array<string> | null;
     SleepAfterIdle: string | null;
+    StandbyProvider?: string;
     StartCommand: string | null;
     Suspended: boolean | null;
     TmuxAlias: string | null;
@@ -6553,6 +6556,10 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeAgentClaimsResumed) | ({
     type: 'agent.claims_stalled';
 } & TypedEventStreamEnvelopeAgentClaimsStalled) | ({
+    type: 'agent.standby_engaged';
+} & TypedEventStreamEnvelopeAgentStandbyEngaged) | ({
+    type: 'agent.standby_released';
+} & TypedEventStreamEnvelopeAgentStandbyReleased) | ({
     type: 'backend.credential_resolved';
 } & TypedEventStreamEnvelopeBackendCredentialResolved) | ({
     type: 'bead.claim_failed';
@@ -6837,6 +6844,42 @@ export type TypedEventStreamEnvelopeAgentClaimsStalled = {
     subject?: string;
     ts: string;
     type: 'agent.claims_stalled';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope agent.standby_engaged
+ */
+export type TypedEventStreamEnvelopeAgentStandbyEngaged = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: AgentClaimsPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'agent.standby_engaged';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope agent.standby_released
+ */
+export type TypedEventStreamEnvelopeAgentStandbyReleased = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: AgentClaimsPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'agent.standby_released';
     workflow?: WorkflowEventProjection;
 };
 
@@ -9100,6 +9143,10 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeAgentClaimsResumed) | ({
     type: 'agent.claims_stalled';
 } & TypedTaggedEventStreamEnvelopeAgentClaimsStalled) | ({
+    type: 'agent.standby_engaged';
+} & TypedTaggedEventStreamEnvelopeAgentStandbyEngaged) | ({
+    type: 'agent.standby_released';
+} & TypedTaggedEventStreamEnvelopeAgentStandbyReleased) | ({
     type: 'backend.credential_resolved';
 } & TypedTaggedEventStreamEnvelopeBackendCredentialResolved) | ({
     type: 'bead.claim_failed';
@@ -9386,6 +9433,44 @@ export type TypedTaggedEventStreamEnvelopeAgentClaimsStalled = {
     subject?: string;
     ts: string;
     type: 'agent.claims_stalled';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope agent.standby_engaged
+ */
+export type TypedTaggedEventStreamEnvelopeAgentStandbyEngaged = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: AgentClaimsPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'agent.standby_engaged';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope agent.standby_released
+ */
+export type TypedTaggedEventStreamEnvelopeAgentStandbyReleased = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: AgentClaimsPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'agent.standby_released';
     workflow?: WorkflowEventProjection;
 };
 

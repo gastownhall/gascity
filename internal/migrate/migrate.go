@@ -66,6 +66,7 @@ type agentFile struct {
 	Nudge                  string                  `toml:"nudge,omitempty"`
 	Session                string                  `toml:"session,omitempty"`
 	Provider               string                  `toml:"provider,omitempty"`
+	StandbyProvider        string                  `toml:"standby_provider,omitempty"`
 	ContextAdvisory        *config.ContextAdvisory `toml:"context_advisory,omitempty"`
 	Upstream               string                  `toml:"upstream,omitempty"`
 	StartCommand           string                  `toml:"start_command,omitempty"`
@@ -924,6 +925,7 @@ func agentConfigFromAgent(agent config.Agent) agentFile {
 		Nudge:                  agent.Nudge,
 		Session:                agent.Session,
 		Provider:               agent.Provider,
+		StandbyProvider:        agent.StandbyProvider,
 		ContextAdvisory:        agent.ContextAdvisory,
 		Upstream:               agent.Upstream,
 		StartCommand:           agent.StartCommand,

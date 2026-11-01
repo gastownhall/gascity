@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -100,8 +101,8 @@ func (cr *CityRuntime) claimStallGuardOf() *claimStallGuard {
 				cr.rec.Record(e)
 			}
 		}
-		cr.claimStall = newClaimStallGuard(record, cr.stderr)
-		cr.claimStall.configure(cr.cfg)
+		cr.claimStall = newClaimStallGuard(record, cr.stderr).withStandbyRecord(fsys.OSFS{}, cr.cityPath)
+		cr.claimStall.configure(cr.cfg, cr.runsV2())
 	})
 	return cr.claimStall
 }

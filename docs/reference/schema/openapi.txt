@@ -79,6 +79,10 @@
           "cause": {
             "type": "string"
           },
+          "engagements": {
+            "format": "int64",
+            "type": "integer"
+          },
           "episode": {
             "type": "string"
           },
@@ -91,6 +95,9 @@
           },
           "since": {
             "format": "date-time",
+            "type": "string"
+          },
+          "standby": {
             "type": "string"
           },
           "template": {
@@ -541,6 +548,9 @@
               "string",
               "null"
             ]
+          },
+          "StandbyProvider": {
+            "type": "string"
           },
           "StartCommand": {
             "type": [
@@ -14742,6 +14752,8 @@
           "mapping": {
             "agent.claims_resumed": "#/components/schemas/TypedEventStreamEnvelopeAgentClaimsResumed",
             "agent.claims_stalled": "#/components/schemas/TypedEventStreamEnvelopeAgentClaimsStalled",
+            "agent.standby_engaged": "#/components/schemas/TypedEventStreamEnvelopeAgentStandbyEngaged",
+            "agent.standby_released": "#/components/schemas/TypedEventStreamEnvelopeAgentStandbyReleased",
             "backend.credential_resolved": "#/components/schemas/TypedEventStreamEnvelopeBackendCredentialResolved",
             "bead.claim_failed": "#/components/schemas/TypedEventStreamEnvelopeBeadClaimFailed",
             "bead.claim_loop_held": "#/components/schemas/TypedEventStreamEnvelopeBeadClaimLoopHeld",
@@ -14875,6 +14887,12 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeAgentClaimsStalled"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeAgentStandbyEngaged"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeAgentStandbyReleased"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBackendCredentialResolved"
@@ -15366,6 +15384,120 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope agent.claims_stalled",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeAgentStandbyEngaged": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/AgentClaimsPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "agent.standby_engaged",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope agent.standby_engaged",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeAgentStandbyReleased": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/AgentClaimsPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "agent.standby_released",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope agent.standby_released",
         "type": "object"
       },
       "TypedEventStreamEnvelopeBackendCredentialResolved": {
@@ -16872,6 +17004,8 @@
                 "bead.claim_loop_held",
                 "agent.claims_stalled",
                 "agent.claims_resumed",
+                "agent.standby_engaged",
+                "agent.standby_released",
                 "hook.claim.reclaimed_stale",
                 "bead.dead_assignee_reopened",
                 "execution.work_associated",
@@ -22626,6 +22760,8 @@
           "mapping": {
             "agent.claims_resumed": "#/components/schemas/TypedTaggedEventStreamEnvelopeAgentClaimsResumed",
             "agent.claims_stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeAgentClaimsStalled",
+            "agent.standby_engaged": "#/components/schemas/TypedTaggedEventStreamEnvelopeAgentStandbyEngaged",
+            "agent.standby_released": "#/components/schemas/TypedTaggedEventStreamEnvelopeAgentStandbyReleased",
             "backend.credential_resolved": "#/components/schemas/TypedTaggedEventStreamEnvelopeBackendCredentialResolved",
             "bead.claim_failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClaimFailed",
             "bead.claim_loop_held": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClaimLoopHeld",
@@ -22759,6 +22895,12 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeAgentClaimsStalled"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeAgentStandbyEngaged"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeAgentStandbyReleased"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBackendCredentialResolved"
@@ -23258,6 +23400,128 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope agent.claims_stalled",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeAgentStandbyEngaged": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/AgentClaimsPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "agent.standby_engaged",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope agent.standby_engaged",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeAgentStandbyReleased": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/AgentClaimsPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "agent.standby_released",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope agent.standby_released",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeBackendCredentialResolved": {
@@ -24867,6 +25131,8 @@
                 "bead.claim_loop_held",
                 "agent.claims_stalled",
                 "agent.claims_resumed",
+                "agent.standby_engaged",
+                "agent.standby_released",
                 "hook.claim.reclaimed_stale",
                 "bead.dead_assignee_reopened",
                 "execution.work_associated",

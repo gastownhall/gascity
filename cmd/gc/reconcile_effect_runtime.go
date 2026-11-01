@@ -109,9 +109,19 @@ func hopsQuiet(ctx context.Context, sp runtime.Provider, name string, processNam
 	return true
 }
 
-// processNamesFor is row's template's process names, by which a read tells a
-// zombie (its agent dead) from a live runtime; none when unresolved.
+// processNamesFor is the process names by which a read of row's runtime
+// tells a zombie (its agent dead) from a live runtime: the names this
+// incarnation was launched with (its GT_PROCESS_NAMES, as the inventory lane
+// read them and probes by), else its template's; none when unresolved. A
+// runtime launched before a config change moved its template to another
+// provider runs the old provider's agent, which the template's names would
+// read dead.
 func processNamesFor(w *World, row session.Info) []string {
+	if w.Obs != nil {
+		if obs, ok := w.Obs.ByName[strings.TrimSpace(row.SessionName)]; ok && len(obs.Identity.ProcessNames) > 0 && compareIdentity(row, obs.Identity) == identityCurrent {
+			return obs.Identity.ProcessNames
+		}
+	}
 	if res, ok := w.Templates.lookup(row); ok {
 		return res.TP.Hints.ProcessNames
 	}

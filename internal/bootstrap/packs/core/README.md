@@ -163,7 +163,8 @@ Entries older than the retention window are pruned on each run.
 **Why.** The controller's claims-stall guard notices when an agent
 template's seats stop claiming the routed work they were spawned for: a
 provider out of usage, an expired account, a CLI that never reads its prompt.
-It holds the template's spawns back and records `agent.claims_stalled`; a seat
+It holds the template's spawns back (or, for an agent that declares a
+`standby_provider`, moves it there) and records `agent.claims_stalled`; a seat
 that claims again records `agent.claims_resumed`. Events alone reach only the
 event log. On 2026-10-31 a review lane stood dead for ten hours while ~1,400
 seats came and went, and nobody was told.

@@ -576,6 +576,7 @@ func tickPhaseNames(phases []tickPhase) []string {
 func TestCityRuntimeTickLegacyPhaseSequenceUnchanged(t *testing.T) {
 	want := []string{
 		"reconcile_pool_deaths",
+		"claims_stall_standby",
 		"config_reload",
 		"fs_pressure_gate",
 		"managed_dolt_preflight",
@@ -799,6 +800,7 @@ func transcriptMetaStarted(cr *CityRuntime) bool {
 func TestCityRuntimeTickV2RunsMaintenancePhasesOnly(t *testing.T) {
 	assertLinesEqual(t, "v2 tick phases", taggedPhaseNames(maintenancePhases(legacyTickPhases)), []string{
 		"reconcile_pool_deaths",
+		"claims_stall_standby",
 		"config_reload",
 		"fs_pressure_gate",
 		"managed_dolt_preflight",

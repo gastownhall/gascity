@@ -220,6 +220,14 @@ func SuspensionStateFile(cityRoot string) string {
 	return RuntimePath(cityRoot, "runtime", "suspension-state.json")
 }
 
+// StandbyFile returns the path to the record of the agents the controller
+// has moved onto their standby provider (config.StandbyFile). Every gc
+// process composes it with city.toml; like the suspension state, it is this
+// clone's runtime state and is never committed.
+func StandbyFile(cityRoot string) string {
+	return RuntimePath(cityRoot, "runtime", "standby.toml")
+}
+
 // CityRuntimeEnv returns city runtime env vars rooted at the canonical runtime
 // directory for cityRoot.
 func CityRuntimeEnv(cityRoot string) []string {

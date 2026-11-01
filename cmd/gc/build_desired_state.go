@@ -753,7 +753,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 			collected.DefaultCounts, collected.DefaultDemand = claimLoopGuardFor(cityPath).withhold(collected.DefaultCounts, collected.DefaultDemand)
 			// Nor is the work of a template whose seats stopped claiming
 			// (claim_stall_guard.go).
-			collected.DefaultCounts, collected.DefaultDemand = claimStallGuardFor(cityPath).withhold(collected.DefaultCounts, collected.DefaultDemand)
+			collected.DefaultCounts, collected.DefaultDemand = claimStallGuardFor(cityPath).withholdUnder(cfg, collected.DefaultCounts, collected.DefaultDemand)
 			recordDemandSubPhase(trace, "demand_snapshot.default_scale_demand", subPhaseStart, map[string]any{
 				"targets": len(targets.defaultScaleTargets),
 			})
