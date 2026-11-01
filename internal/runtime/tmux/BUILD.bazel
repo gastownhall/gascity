@@ -82,6 +82,7 @@ go_test(
         "codex_submit_turn_test.go",
         "codex_turn_running_test.go",
         "composer_clear_test.go",
+        "contracts_integration_test.go",
         "copymode_cancel_test.go",
         "dialog_feedback_survey_integration_test.go",
         "dialog_feedback_survey_test.go",
