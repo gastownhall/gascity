@@ -138,6 +138,12 @@ type DesiredStateResult struct {
 	// ContinuationClaimQueryPartial preserves existing pacing markers when an
 	// exact candidate/root read was incomplete or internally contradictory.
 	ContinuationClaimQueryPartial bool
+	// RetiredPoolSeats holds, by session bead ID, the pool seats legacy
+	// realization retired to free a slot of a full pool
+	// (poolSeatsElsewhere.freeSlot). The session overlay leaves them out of
+	// the desired set, the refresh's overlay included, so the reconciler
+	// drains and closes them.
+	RetiredPoolSeats map[string]bool
 	// StoreQueryPartial is true when one or more bead store work queries
 	// failed. When set, the reconciler must NOT drain sessions based on the
 	// incomplete desired state — a transient failure would cause running
@@ -952,6 +958,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 		PoolScaleCheckPartialTemplates:     poolScaleCheckPartialTemplates,
 		PoolPartialRetentionTemplates:      poolPartialRetentionTemplates,
 		NamedScaleCheckPartialTemplates:    namedScaleCheckPartialTemplates,
+		RetiredPoolSeats:                   bp.retiredPoolSeats,
 		AssignedWorkBeads:                  assignedWorkBeads,
 		AssignedWorkStores:                 assignedWorkStores,
 		AssignedWorkStoreRefs:              assignedWorkStoreRefs,
@@ -1770,6 +1777,7 @@ func refreshDesiredStateWithSessionBeads(
 	bp.sessionSnapshotCompletenessKnown = true
 	bp.sessionSnapshotComplete = false
 	bp.sessionOccupancyInfos = sessionOccupancyInfosForRefresh(result, sessionBeads)
+	bp.retiredPoolSeats = result.RetiredPoolSeats
 	applySessionBeadDesiredOverlay(bp, cfg, refreshed.State, buildSuspendedRigPathsForCity(cfg, cityPath), effectivePoolPartialRetentionTemplates(result), result.NamedScaleCheckPartialTemplates, stderr)
 	return refreshed
 }
@@ -3555,7 +3563,7 @@ func discoverSessionBeadsWithRoots(
 		if v.root {
 			roots[v.template] = true
 		}
-		if !v.include {
+		if !v.include || bp.retiredPoolSeats[info.ID] {
 			continue
 		}
 		sn, template, cfgAgent := info.SessionNameMetadata, v.template, v.agent
@@ -4040,6 +4048,7 @@ func realizePoolDesiredSessionsAt(
 	segmentStart := bp.realizeNow()
 	used := make(map[string]bool)
 	usedSlots := make(map[int]bool)
+	seatsElsewhere := newPoolSeatsElsewhere(bp, cfgAgent, qualifiedName)
 
 	// Phase A (serial, fast): select an existing session bead to reuse OR
 	// reserve an (alias, slot) for a fresh create. Mutates used/usedSlots
@@ -4066,9 +4075,11 @@ func realizePoolDesiredSessionsAt(
 					prefer = &candidate
 				}
 			}
-			sessionInfo, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, qualifiedName, prefer, request, poolDecisionTime, used, usedSlots)
+			sessionInfo, slot, plan, err := seatsElsewhere.selectOrPlan(prefer, request, poolDecisionTime, used, usedSlots)
 			if err != nil {
 				switch {
+				case errors.Is(err, errPoolSeatRunsElsewhere):
+					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (retrying next tick)\n", qualifiedName, err) //nolint:errcheck
 				case errors.Is(err, errPoolSessionCreateBudgetExhausted):
 					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (fresh create deferred)\n", qualifiedName, err) //nolint:errcheck
 				case errors.Is(err, errPoolSessionCreatePartial):
@@ -4378,7 +4389,7 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	if info.ID == "" {
 		return info, nil
 	}
-	workDir, err := verifiedPoolTriggerWorkDir(bp, cfgAgent, qualifiedName, request)
+	workDir, err := poolTriggerBindWorkDir(bp, cfgAgent, qualifiedName, info, request)
 	if err != nil {
 		return info, err
 	}
@@ -5317,39 +5328,56 @@ func selectOrPlanPoolSessionBead(
 	used map[string]bool,
 	usedSlots map[int]bool,
 ) (session.Info, int, *poolSessionCreatePlan, error) {
+	return selectOrPlanPoolSessionBeadAvoiding(bp, cfgAgent, template, preferred, request, decisionTime, used, usedSlots, nil)
+}
+
+// selectOrPlanPoolSessionBeadAvoiding is selectOrPlanPoolSessionBead that
+// passes over the live seats in elsewhere, by session ID: seats running
+// outside the directory the controller places the request's work in
+// (poolSeatsElsewhere.forRequest). Re-pointing one would not restart it, and
+// its claim leaves work bound to another managed worktree, so the work goes to
+// a fresh session in its own directory. When none can start, work bound to a
+// managed worktree waits (poolSeatRunsElsewhereError), and in a full pool a
+// seat retires so that one can (poolSeatsElsewhere.freeSlot); work bound to
+// none goes to the first seat passed over, whose claim may still take it.
+// Legacy realization alone computes elsewhere: the v2 allocator binds no live
+// row.
+func selectOrPlanPoolSessionBeadAvoiding(
+	bp *agentBuildParams,
+	cfgAgent *config.Agent,
+	template string,
+	preferred *session.Info,
+	request SessionRequest,
+	decisionTime time.Time,
+	used map[string]bool,
+	usedSlots map[int]bool,
+	elsewhere map[string]poolSeatElsewhere,
+) (session.Info, int, *poolSessionCreatePlan, error) {
 	if cfgAgent == nil {
 		cfgAgent = findAgentByTemplate(&config.City{Agents: bp.agents}, template)
 	}
 	if cfgAgent == nil {
 		return session.Info{}, 0, nil, fmt.Errorf("pool template %q has no configured agent", template)
 	}
+	var passed *poolSeatPassedOver
 	// Resume tier: reuse the session that has in-progress work assigned.
 	if preferred != nil && preferred.ID != "" && !used[preferred.ID] && !isFailedCreateSessionInfo(*preferred) {
-		preserveAboveCapacity := poolRequestResumesAssignedWorkInfo(
-			request,
-			bp.assignedWorkBeads,
-			*preferred,
-		)
-		slot := claimPreferredPoolSlotWithConfigInfo(
-			bp.city,
-			cfgAgent,
-			*preferred,
-			preserveAboveCapacity,
-			usedSlots,
-		)
-		if slot == 0 && !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
-			return session.Info{}, 0, nil, fmt.Errorf("pool session %s concrete slot already claimed", preferred.ID)
+		at, runsElsewhere := elsewhere[preferred.ID]
+		if !runsElsewhere {
+			return selectPreferredPoolSessionInfo(bp, cfgAgent, *preferred, request, usedSlots)
 		}
-		if isManualSessionInfoForAgent(*preferred, cfgAgent) {
-			return *preferred, slot, nil, nil
-		}
-		info, err := normalizeNonExpandingPoolSessionInfoForSelection(bp, cfgAgent, *preferred)
-		return info, slot, nil, err
+		passed = &poolSeatPassedOver{info: *preferred, at: at, preferred: true}
 	}
 	if canonical, ok := findReusableCanonicalNonExpandingPoolSessionInfoForRequest(bp, cfgAgent, template, request, decisionTime, used); ok {
-		slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, canonical, usedSlots)
-		info, err := normalizeNonExpandingPoolSessionInfoForSelection(bp, cfgAgent, canonical)
-		return info, slot, nil, err
+		at, runsElsewhere := elsewhere[canonical.ID]
+		if !runsElsewhere {
+			slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, canonical, usedSlots)
+			info, err := normalizeNonExpandingPoolSessionInfoForSelection(bp, cfgAgent, canonical)
+			return info, slot, nil, err
+		}
+		if passed == nil {
+			passed = &poolSeatPassedOver{info: canonical, at: at}
+		}
 	}
 	// Reuse an existing active/creating session bead. Skip drained and
 	// closed. Asleep is skipped too, with one carve-out: a
@@ -5359,6 +5387,12 @@ func selectOrPlanPoolSessionBead(
 	// asleep beads; an earlier version of this comment claimed it did.
 	for _, candidate := range reusablePoolSessionInfosForRequest(bp, cfgAgent, template, request, decisionTime, used) {
 		if desiredName := strings.TrimSpace(candidate.SessionNameMetadata); desiredName != "" {
+			if at, runsElsewhere := elsewhere[candidate.ID]; runsElsewhere {
+				if passed == nil {
+					passed = &poolSeatPassedOver{info: candidate, at: at}
+				}
+				continue
+			}
 			slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, candidate, usedSlots)
 			if slot == 0 && !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 				continue
@@ -5367,23 +5401,79 @@ func selectOrPlanPoolSessionBead(
 			return info, slot, nil, err
 		}
 	}
+	plan, err := planFreshPoolSessionBead(bp, cfgAgent, template, request, usedSlots)
+	if err == nil || passed == nil {
+		return session.Info{}, 0, plan, err
+	}
+	if passed.at.Managed {
+		return session.Info{}, 0, nil, &poolSeatRunsElsewhereError{seat: passed.info, at: passed.at, workID: request.WorkBeadID, cause: err}
+	}
+	if passed.preferred {
+		return selectPreferredPoolSessionInfo(bp, cfgAgent, passed.info, request, usedSlots)
+	}
+	slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, passed.info, usedSlots)
+	if slot == 0 && !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		return session.Info{}, 0, nil, err
+	}
+	info, normErr := normalizeNonExpandingPoolSessionInfoForSelection(bp, cfgAgent, passed.info)
+	return info, slot, nil, normErr
+}
+
+// poolSeatPassedOver is a live seat selectOrPlanPoolSessionBeadAvoiding passed
+// over because it runs elsewhere; preferred reports that it was the session
+// the request names.
+type poolSeatPassedOver struct {
+	info      session.Info
+	at        poolSeatElsewhere
+	preferred bool
+}
+
+// selectPreferredPoolSessionInfo selects the session a request names
+// (SessionBeadID) in its concrete slot, which a resume of work assigned to it
+// keeps even above capacity.
+func selectPreferredPoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, preferred session.Info, request SessionRequest, usedSlots map[int]bool) (session.Info, int, *poolSessionCreatePlan, error) {
+	preserveAboveCapacity := poolRequestResumesAssignedWorkInfo(
+		request,
+		bp.assignedWorkBeads,
+		preferred,
+	)
+	slot := claimPreferredPoolSlotWithConfigInfo(
+		bp.city,
+		cfgAgent,
+		preferred,
+		preserveAboveCapacity,
+		usedSlots,
+	)
+	if slot == 0 && !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		return session.Info{}, 0, nil, fmt.Errorf("pool session %s concrete slot already claimed", preferred.ID)
+	}
+	if isManualSessionInfoForAgent(preferred, cfgAgent) {
+		return preferred, slot, nil, nil
+	}
+	info, err := normalizeNonExpandingPoolSessionInfoForSelection(bp, cfgAgent, preferred)
+	return info, slot, nil, err
+}
+
+// planFreshPoolSessionBead reserves a fresh slot for request and returns the
+// create plan, or the reason no fresh session can start this tick.
+func planFreshPoolSessionBead(bp *agentBuildParams, cfgAgent *config.Agent, template string, request SessionRequest, usedSlots map[int]bool) (*poolSessionCreatePlan, error) {
 	if !bp.hasCompleteSessionSnapshot() {
-		return session.Info{}, 0, nil, errPoolSessionCreatePartial
+		return nil, errPoolSessionCreatePartial
 	}
 	slot, err := claimFreshPoolSlotInfo(bp, cfgAgent, usedSlots)
 	if err != nil {
-		return session.Info{}, 0, nil, err
+		return nil, err
 	}
 	_, qualifiedInstance, poolSlot := poolDesiredRequestIdentity(cfgAgent, slot)
 	metadata, err := poolTriggerMetadata(bp, cfgAgent, qualifiedInstance, request)
 	if err != nil {
 		delete(usedSlots, slot)
-		return session.Info{}, 0, nil, err
+		return nil, err
 	}
 
 	if bp.poolScaleCheckPartialTemplates[template] {
 		delete(usedSlots, slot)
-		return session.Info{}, 0, nil, errPoolSessionCreatePartial
+		return nil, errPoolSessionCreatePartial
 	}
 
 	// Provider-health gate: refuse new creates when the registry reports this
@@ -5400,12 +5490,12 @@ func selectOrPlanPoolSessionBead(
 	}
 	if healthy, present := bp.providerHealthSnapshot.check(provName); present && !healthy {
 		delete(usedSlots, slot)
-		return session.Info{}, 0, nil, errPoolSessionCreateProviderRed
+		return nil, errPoolSessionCreateProviderRed
 	}
 
 	if !bp.tryClaimPoolSessionCreate(template) {
 		delete(usedSlots, slot)
-		return session.Info{}, 0, nil, errPoolSessionCreateBudgetExhausted
+		return nil, errPoolSessionCreateBudgetExhausted
 	}
 
 	plan := &poolSessionCreatePlan{
@@ -5418,7 +5508,7 @@ func selectOrPlanPoolSessionBead(
 		spec := *request.WorktreeSpec
 		plan.worktreeSpec = &spec
 	}
-	return session.Info{}, 0, plan, nil
+	return plan, nil
 }
 
 // freshPoolSlotUpperBound returns the highest concrete numbered slot a fresh
@@ -5561,6 +5651,11 @@ func poolAliasCollisionFromInfos(infos []session.Info, alias string) error {
 	return nil
 }
 
+// errPoolSessionNoFreeSlot reports that every concrete slot a pool can hold
+// is taken, so a fresh session waits for one to free. claimFreshPoolSlotInfo
+// returns it wrapped with errPoolSessionNameUnavailable.
+var errPoolSessionNoFreeSlot = errors.New("no free concrete slot")
+
 // claimFreshPoolSlotInfo selects the lowest free in-cap concrete slot for a
 // fresh pool row. Snapshot holders contribute to a local occupied union only:
 // adding them to the shared request-order usedSlots map would let an anonymous
@@ -5593,7 +5688,7 @@ func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSl
 			if slot, ok := bp.realizeMemo.claimFreshSlot(held, usedSlots, upper, unlimited); ok {
 				return slot, nil
 			}
-			return 0, fmt.Errorf("%w: pool template %q has no free concrete slot", errPoolSessionNameUnavailable, cfgAgent.QualifiedName())
+			return 0, fmt.Errorf("%w: pool template %q has %w", errPoolSessionNameUnavailable, cfgAgent.QualifiedName(), errPoolSessionNoFreeSlot)
 		}
 	}
 	occupied := make(map[int]bool, len(usedSlots))
@@ -5625,7 +5720,7 @@ func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSl
 		usedSlots[slot] = true
 		return slot, nil
 	}
-	return 0, fmt.Errorf("%w: pool template %q has no free concrete slot", errPoolSessionNameUnavailable, cfgAgent.QualifiedName())
+	return 0, fmt.Errorf("%w: pool template %q has %w", errPoolSessionNameUnavailable, cfgAgent.QualifiedName(), errPoolSessionNoFreeSlot)
 }
 
 func poolTriggerMetadata(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) (map[string]string, error) {
