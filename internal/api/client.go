@@ -1417,6 +1417,57 @@ func (c *Client) postAgentAction(name, action string) error {
 	return checkMutation(resp, err)
 }
 
+// AgentView is the CLI-facing identity of a configured agent: the name the
+// server resolved and the rig it is scoped to (empty for a city-scoped agent).
+type AgentView struct {
+	Name string
+	Rig  string
+}
+
+// GetAgent resolves an agent or pool instance by name via
+// GET /v0/city/{city}/agent/{base}, or /agent/{dir}/{base} for a rig-qualified
+// name. The server resolves the name with the lookup its sling handler uses
+// for a target, so an unknown name is an error here as it is there.
+func (c *Client) GetAgent(name string) (AgentView, error) {
+	if err := c.requireCityScope(); err != nil {
+		return AgentView{}, err
+	}
+	if dir, base, ok := strings.Cut(name, "/"); ok {
+		resp, err := c.cw.GetV0CityByCityNameAgentByDirByBaseWithResponse(context.Background(), c.cityName, dir, base)
+		if err != nil {
+			return AgentView{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+		}
+		if resp == nil {
+			return AgentView{}, &connError{err: fmt.Errorf("nil response")}
+		}
+		return agentViewFromResponse(resp.StatusCode(), pdOf(resp), resp.JSON200)
+	}
+	resp, err := c.cw.GetV0CityByCityNameAgentByBaseWithResponse(context.Background(), c.cityName, name)
+	if err != nil {
+		return AgentView{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return AgentView{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	return agentViewFromResponse(resp.StatusCode(), pdOf(resp), resp.JSON200)
+}
+
+// agentViewFromResponse maps an agent GET response, from either route, into
+// an AgentView.
+func agentViewFromResponse(status int, pd *genclient.ErrorModel, body *genclient.AgentResponse) (AgentView, error) {
+	if err := apiErrorFromResponse(status, pd); err != nil {
+		return AgentView{}, err
+	}
+	if body == nil {
+		return AgentView{}, fmt.Errorf("API returned %d with no body", status)
+	}
+	view := AgentView{Name: body.Name}
+	if body.Rig != nil {
+		view.Rig = *body.Rig
+	}
+	return view, nil
+}
+
 // SuspendRig suspends a rig via POST /v0/rig/{name}/suspend.
 func (c *Client) SuspendRig(name string) error { return c.postRigAction(name, "suspend") }
 
