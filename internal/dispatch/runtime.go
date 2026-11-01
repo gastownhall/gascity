@@ -2317,11 +2317,47 @@ func terminalAbortScopeFailureMember(store beads.Store, rootID, finalizerID stri
 		if candidate.ID == finalizerID {
 			continue
 		}
-		if terminalAbortScopeFailure(candidate) {
+		if terminalAbortScopeFailure(candidate) && !supersededRalphBodyMember(candidate, all) {
 			return candidate, true, nil
 		}
 	}
 	return beads.Bead{}, false, nil
+}
+
+// supersededRalphBodyMember reports whether bead is a ralph body member
+// (gc.ralph_step_id + gc.attempt) whose owning ralph control closed
+// gc.outcome=pass: a later iteration of its loop succeeded, so its own failure
+// must not fail the workflow at finalize. The owner is the control of the
+// innermost loop in the member's step ref, which is the ref up to its last
+// ".iteration.<attempt>" segment, matched against a control's gc.step_ref by
+// equality or dotted suffix (iteration-1 refs are short, the control's is
+// full). Zero or several matching controls, or an owner that is not closed
+// with gc.outcome=pass, leave the member terminal.
+func supersededRalphBodyMember(bead beads.Bead, members []beads.Bead) bool {
+	attempt := strings.TrimSpace(bead.Metadata[beadmeta.AttemptMetadataKey])
+	if strings.TrimSpace(bead.Metadata[beadmeta.RalphStepIDMetadataKey]) == "" || attempt == "" {
+		return false
+	}
+	stepRef := strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey])
+	cut := strings.LastIndex(stepRef+".", ".iteration."+attempt+".")
+	if cut <= 0 {
+		return false
+	}
+	loopRef := stepRef[:cut]
+	var owner beads.Bead
+	matches := 0
+	for _, member := range members {
+		if member.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindRalph {
+			continue
+		}
+		ref := member.Metadata[beadmeta.StepRefMetadataKey]
+		if ref == loopRef || strings.HasSuffix(ref, "."+loopRef) {
+			owner = member
+			matches++
+		}
+	}
+	return matches == 1 && owner.Status == "closed" &&
+		strings.TrimSpace(owner.Metadata[beadmeta.OutcomeMetadataKey]) == beadmeta.OutcomePass
 }
 
 func terminalAbortScopeFailure(bead beads.Bead) bool {
@@ -2343,6 +2379,9 @@ func terminalAbortScopeFailure(bead beads.Bead) bool {
 	// bead ran; its own failure must not outvote a passing later iteration at
 	// finalize (#4008). The logical bead's own final disposition is the
 	// authoritative signal. A genuinely terminal, non-superseded hard failure
-	// still returns true.
+	// still returns true. A ralph body member carries no gc.logical_bead_id; it
+	// is superseded when its owning ralph control passed, which needs the
+	// workflow's other beads, so terminalAbortScopeFailureMember checks it
+	// (supersededRalphBodyMember).
 	return !isRetryAttemptSubject(bead)
 }
