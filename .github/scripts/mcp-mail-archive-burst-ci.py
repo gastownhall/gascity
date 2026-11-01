@@ -17,6 +17,8 @@ args = parser.parse_args()
 if not args.baseline_wheel.is_file() or not args.burst_script.is_file():
     raise SystemExit("baseline wheel and burst script must exist")
 
+baseline_wheel_in_container = f"/tmp/{args.baseline_wheel.name}"
+
 
 def run_arm(variant, trial):
     name = f"{variant}-{trial}"
@@ -42,14 +44,14 @@ def run_arm(variant, trial):
     elif variant == "baseline":
         command = common + [
             "-v",
-            f"{args.baseline_wheel}:/tmp/gitpython-3.1.62.whl:ro",
+            f"{args.baseline_wheel}:{baseline_wheel_in_container}:ro",
             "--entrypoint",
             "/bin/sh",
             args.image,
             "-c",
             "set -eu; "
             "python3 -m pip install --no-deps --no-cache-dir "
-            "--target /tmp/gitpython-baseline /tmp/gitpython-3.1.62.whl; "
+            f"--target /tmp/gitpython-baseline {baseline_wheel_in_container}; "
             "mkdir -p /tmp/gitpython-no-cache; "
             ": > /tmp/gitpython-no-cache/sitecustomize.py; "
             "PYTHONPATH=/tmp/gitpython-no-cache:/tmp/gitpython-baseline "
