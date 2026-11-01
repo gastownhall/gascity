@@ -8,6 +8,7 @@ go_test(
         "docsync_test.go",
         "dolt_recovery_docs_test.go",
         "provider_env_docs_test.go",
+        "route_query_runbook_test.go",
         "testenv_import_test.go",
     ],
     data = glob(
