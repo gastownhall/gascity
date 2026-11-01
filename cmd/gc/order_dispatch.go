@@ -2118,6 +2118,82 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 	}
 }
 
+// orderFormulaVars returns the vars an order's formula is invoked with. It
+// gives a formula order the invocation context a targeted sling gives its
+// formula (sling.BuildSlingFormulaVars): the dispatch args win, then the
+// order rig's formula_vars, then the routing vars rig_name, binding_name and
+// binding_prefix. The formula's own defaults apply last, in
+// prepareOrderWispRecipe. The binding vars are set only when the order's
+// source pack has exactly one binding in the order's scope: a pack imported
+// under two bindings is discovered once, so its orders have no single one.
+func orderFormulaVars(cfg *config.City, a orders.Order, args map[string]string) map[string]string {
+	vars := make(map[string]string, len(args)+8)
+	for k, v := range args {
+		vars[k] = v
+	}
+	if cfg == nil {
+		return vars
+	}
+	setDefault := func(key, value string) {
+		if _, explicit := vars[key]; !explicit {
+			vars[key] = value
+		}
+	}
+	if a.Rig != "" {
+		for i := range cfg.Rigs {
+			if cfg.Rigs[i].Name != a.Rig {
+				continue
+			}
+			for k, v := range cfg.Rigs[i].FormulaVars {
+				setDefault(k, v)
+			}
+			break
+		}
+	}
+	setDefault("rig_name", a.Rig)
+	if binding, ok := orderSourceBinding(cfg, a); ok {
+		prefix := ""
+		if binding != "" {
+			prefix = binding + "."
+		}
+		setDefault("binding_name", binding)
+		setDefault("binding_prefix", prefix)
+	}
+	return vars
+}
+
+// orderSourceBinding returns the import binding of the pack that declared the
+// order, resolved the way qualifyOrderPool resolves a bare pool: agents of the
+// order's scope (its rig, then the city) whose source is the order's pack,
+// exact source first, then the two-component tail match. It reports false
+// when no agent names the pack or when the pack has more than one binding.
+func orderSourceBinding(cfg *config.City, a orders.Order) (string, bool) {
+	hint := orderPoolSourceDirHint(a)
+	if cfg == nil || hint == "" {
+		return "", false
+	}
+	dirs := []string{a.Rig}
+	if a.Rig != "" {
+		dirs = append(dirs, "")
+	}
+	for _, dir := range dirs {
+		for _, match := range []func(config.Agent, string) bool{agentSourceDirEqualsOrderHint, agentMatchesOrderSourceHint} {
+			bindings := sourceBindingsMatchingOrderHint(cfg, dir, hint, match)
+			switch len(bindings) {
+			case 0:
+				continue
+			case 1:
+				for binding := range bindings {
+					return binding, true
+				}
+			default:
+				return "", false
+			}
+		}
+	}
+	return "", false
+}
+
 // prepareOrderWispRecipe compiles an order's formula into a recipe and returns
 // the resolved invocation vars alongside it. The caller must thread those vars
 // into molecule.Instantiate; without them every {{var}} referencing a
@@ -2516,6 +2592,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		}
 	}
 
+	vars = orderFormulaVars(m.cfg, a, vars)
 	searchPaths := orderFormulaSearchPaths(m.cfg, a)
 	recipe, effectiveVars, err := prepareOrderWispRecipe(ctx, store, a, searchPaths, vars)
 	if err != nil {

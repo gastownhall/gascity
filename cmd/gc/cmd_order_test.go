@@ -4579,3 +4579,77 @@ prefix = "ct"
 		t.Fatalf("%s status = %q, want closed — stale-close must run alongside retention", openID, got.Status)
 	}
 }
+
+func TestOrderRunGraphWorkflowBindingPrefixTarget(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	cityDir := t.TempDir()
+	writeOrderRoutingVarsCity(t, cityDir, []string{"ops"})
+	writeFile(t, filepath.Join(cityDir, "city.toml"), "\n[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n\n[[agent]]\nname = \"control-dispatcher\"\nmax_active_sessions = 1\n")
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	_, aa := findScannedOrder(t, cityDir, cfg, "sweep")
+	store := beads.NewMemStore()
+	var stdout, stderr bytes.Buffer
+	code := doOrderRunWithJSON(aa, "sweep", "", cityDir, beads.OrdersStore{Store: store}, nil, false, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRunWithJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	all, err := store.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range all {
+		if b.Title == "Sweep" {
+			if got := b.Metadata["gc.routed_to"]; got != "ops.worker" {
+				t.Fatalf("step gc.routed_to = %q, want ops.worker", got)
+			}
+			return
+		}
+	}
+	t.Fatalf("step bead %q not poured; stdout=%s", "Sweep", stdout.String())
+}
+
+func TestOrderRunRigOrderAppliesRigFormulaVars(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		vars map[string]string
+		want string
+	}{
+		{name: "rig formula_vars beat formula default", want: "Run rig-cmd in frontend"},
+		{name: "var flag wins", vars: map[string]string{"cmd": "arg-cmd"}, want: "Run arg-cmd in frontend"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(cityDir, "frontend"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, filepath.Join(cityDir, "city.toml"), `
+[workspace]
+name = "test-city"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+
+[rigs.formula_vars]
+cmd = "rig-cmd"
+
+[[agent]]
+name = "worker"
+dir = "frontend"
+`)
+			formulaDir := t.TempDir()
+			writeRigSweepFormula(t, formulaDir, "Run {{cmd}} in {{rig_name}}")
+			aa := []orders.Order{{Name: "rig-sweep", Rig: "frontend", Formula: "rig-sweep", Trigger: "manual", FormulaLayer: formulaDir}}
+			store := beads.NewMemStore()
+			var stdout, stderr bytes.Buffer
+			code := doOrderRunWithJSON(aa, "rig-sweep", "frontend", cityDir, beads.OrdersStore{Store: store}, nil, false, tc.vars, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("doOrderRunWithJSON = %d, want 0; stderr: %s", code, stderr.String())
+			}
+			requireBeadTitled(t, store, tc.want)
+		})
+	}
+}
