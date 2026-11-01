@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -35,6 +36,9 @@ import (
 type hookCity struct {
 	path string
 	cfg  *config.City
+	// invokedAt is when the invocation started, the start of its claim window
+	// (hookClaimOps.InvokedAt). Zero leaves applyDefaults to stamp it.
+	invokedAt time.Time
 
 	mu    sync.Mutex
 	front *session.Store
@@ -83,6 +87,7 @@ func (h *hookCity) recorder() events.Recorder {
 // seam is left to its default (hookClaimOps.applyDefaults).
 func (h *hookCity) claimOps() hookClaimOps {
 	var ops hookClaimOps
+	ops.InvokedAt = h.invokedAt
 	ops.DrainPending = func(sessionID string) (bool, error) {
 		return sessionDrainPendingVia(h.sessionFront, sessionID)
 	}
