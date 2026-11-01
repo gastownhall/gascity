@@ -302,6 +302,7 @@ go_test(
         "cache_liveness_test.go",
         "cache_read_model_tier_test.go",
         "capability_through_handles_test.go",
+        "city_starting_test.go",
         "class_store_test.go",
         "client_extmsg_test.go",
         "client_remote_test.go",

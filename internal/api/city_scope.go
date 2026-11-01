@@ -58,6 +58,18 @@ func IsCityNotFoundOrNotRunningDetail(detail string) bool {
 	return strings.HasPrefix(strings.TrimSpace(detail), cityNotFoundOrNotRunningDetailPrefix)
 }
 
+// CityStartingDetail returns the 503 detail used when a city-scoped route
+// targets a city the supervisor knows is still starting.
+func CityStartingDetail(_, _ string) string {
+	return ""
+}
+
+// IsCityStartingDetail reports whether detail is the 503 payload used for
+// city-scoped requests when the target city is known but still starting.
+func IsCityStartingDetail(_ string) bool {
+	return false
+}
+
 // bindCity wraps a per-city handler method expression as a Huma
 // handler registered on the supervisor API. The returned function
 // resolves the per-city Server for input.GetCityName() and delegates.
