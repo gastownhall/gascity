@@ -12470,10 +12470,11 @@ func TestOrphanSweepKeepsForeignClaimsOnSharedRigAndReleasesDeadLocal(t *testing
 // orphanSweepGateRow is one in-progress work bead, or one session bead served
 // by `bd show`, in an orphanSweepSharedRigFakeGC fixture.
 type orphanSweepGateRow struct {
-	ID        string `json:"id"`
-	Status    string `json:"status"`
-	Assignee  string `json:"assignee,omitempty"`
-	IssueType string `json:"issue_type,omitempty"`
+	ID        string            `json:"id"`
+	Status    string            `json:"status"`
+	Assignee  string            `json:"assignee,omitempty"`
+	IssueType string            `json:"issue_type,omitempty"`
+	Metadata  map[string]string `json:"metadata,omitempty"`
 }
 
 // orphanSweepGateRun is one orphanSweepSharedRigFakeGC sweep's results.
@@ -12568,6 +12569,17 @@ func runOrphanSweepGateFixture(t *testing.T, hq, shared, sessionBeads []orphanSw
 
 func inProgress(id, assignee string) orphanSweepGateRow {
 	return orphanSweepGateRow{ID: id, Status: "in_progress", Assignee: assignee}
+}
+
+// hookClaim is an in-progress work bead claimed through `gc hook`, which
+// stamps the claimant's session bead id as gc.session_id and its runtime name
+// as gc.session_name; extra adds further metadata such as legacy hints.
+func hookClaim(beadID, sessionID, sessionName string, extra map[string]string) orphanSweepGateRow {
+	metadata := map[string]string{"gc.session_id": sessionID, "gc.session_name": sessionName}
+	for k, v := range extra {
+		metadata[k] = v
+	}
+	return orphanSweepGateRow{ID: beadID, Status: "in_progress", Assignee: sessionID, Metadata: metadata}
 }
 
 // TestOrphanSweepProtectsHQClaimsItCannotVouchFor applies the gate in HQ, this
@@ -13155,6 +13167,110 @@ func TestOrphanSweepReadsAZeroPaddedGateBudgetInBaseTen(t *testing.T) {
 	}
 	if !run.released("sh-local-dead") {
 		t.Fatalf("dead local claim was not released under an 8s budget\n%s", run.context())
+	}
+}
+
+// TestOrphanSweepReleasesHookClaimOfClosedPoolSession is the
+// gastownhall/gascity#7686 regression: a pool claim stamps gc.session_name with
+// the runtime name "<template>-<session bead id>", which is never a bead id.
+// Once the claim's own session bead reads back terminal, that name adds no
+// evidence: the sweep must not probe it as a bead id, and must release the
+// claim.
+func TestOrphanSweepReleasesHookClaimOfClosedPoolSession(t *testing.T) {
+	const (
+		beadID      = "ga-hook-dead"
+		sessionID   = "gc-d34d1"
+		sessionName = "gastown__polecat-gc-d34d1"
+	)
+	cases := []struct {
+		name         string
+		sessionName  string
+		session      orphanSweepGateRow
+		extraBeads   []orphanSweepGateRow
+		wantReleased bool
+	}{
+		{
+			name:         "closed session bead",
+			sessionName:  sessionName,
+			session:      orphanSweepGateRow{ID: sessionID, Status: "closed", IssueType: "session"},
+			wantReleased: true,
+		},
+		{
+			name:         "open session bead in closed state",
+			sessionName:  sessionName,
+			session:      orphanSweepGateRow{ID: sessionID, Status: "open", IssueType: "session", Metadata: map[string]string{"state": "closed"}},
+			wantReleased: true,
+		},
+		{
+			name:         "open session bead in orphaned state",
+			sessionName:  sessionName,
+			session:      orphanSweepGateRow{ID: sessionID, Status: "open", IssueType: "session", Metadata: map[string]string{"state": "orphaned"}},
+			wantReleased: true,
+		},
+		{
+			name:         "open session bead in failed-create state",
+			sessionName:  sessionName,
+			session:      orphanSweepGateRow{ID: sessionID, Status: "open", IssueType: "session", Metadata: map[string]string{"state": "failed-create"}},
+			wantReleased: true,
+		},
+		{
+			name:         "open session bead marked closed",
+			sessionName:  sessionName,
+			session:      orphanSweepGateRow{ID: sessionID, Status: "open", IssueType: "session", Metadata: map[string]string{"closed": "true"}},
+			wantReleased: true,
+		},
+		{
+			name:         "stamped name is also a closed non-session bead",
+			sessionName:  sessionName,
+			session:      orphanSweepGateRow{ID: sessionID, Status: "closed", IssueType: "session"},
+			extraBeads:   []orphanSweepGateRow{{ID: sessionName, Status: "closed", IssueType: "task"}},
+			wantReleased: true,
+		},
+		{
+			name:         "stamped name equals the assignee",
+			sessionName:  sessionID,
+			session:      orphanSweepGateRow{ID: sessionID, Status: "closed", IssueType: "session"},
+			wantReleased: true,
+		},
+		{
+			name:         "active session bead",
+			sessionName:  sessionName,
+			session:      orphanSweepGateRow{ID: sessionID, Status: "open", IssueType: "session", Metadata: map[string]string{"state": "active"}},
+			wantReleased: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			run := runOrphanSweepGateFixture(t,
+				[]orphanSweepGateRow{hookClaim(beadID, sessionID, tc.sessionName, nil)},
+				nil,
+				append([]orphanSweepGateRow{tc.session}, tc.extraBeads...),
+				nil, nil)
+			if run.err != nil {
+				t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+			}
+			if strings.Contains(run.out, "unverifiable") {
+				t.Fatalf("hook claim counted as unverifiable:\n%s", run.context())
+			}
+			if !tc.wantReleased {
+				if run.released(beadID) {
+					t.Fatalf("claim held by a live session was released\n%s", run.context())
+				}
+				if outcome, ok := run.outcome(t); ok {
+					t.Fatalf("a sweep that kept a live claim declared outcome %+v", outcome)
+				}
+				return
+			}
+			if !strings.Contains(run.log, "bd release-if-current "+beadID+" "+sessionID+"\n") {
+				t.Fatalf("claim whose session bead reads terminal was not released\n%s", run.context())
+			}
+			if !strings.Contains(run.out, "orphan-sweep: reset 1 orphaned beads") {
+				t.Fatalf("unexpected orphan-sweep output:\n%s", run.out)
+			}
+			if tc.sessionName != sessionID && strings.Contains(run.log, "bd show "+tc.sessionName+" --json") {
+				t.Fatalf("stamped runtime name %q was probed as a bead id\n%s", tc.sessionName, run.context())
+			}
+		})
 	}
 }
 
