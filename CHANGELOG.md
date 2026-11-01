@@ -712,8 +712,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Split cities seat a released graph step on the next controller pass
-  again.** On a city whose `[storage.classes]` serves the graph class from a
+- **Split cities seat a released graph step on the next controller pass.**
+  On a city whose `[storage.classes]` serves the graph class from a
   binding, the v2 reconciler read the binding's ready work only from the
   external-reads lane's recording, which refreshes about every 20 seconds at
   the 15-second patrol, so a step released by a blocker in the binding waited

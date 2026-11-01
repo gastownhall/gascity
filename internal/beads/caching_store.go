@@ -1113,13 +1113,18 @@ func (c *CachingStore) readyPredicateCanAnswerLocked(deps []Dep) bool {
 }
 
 // readyEdgesJudgeableLocked is readyPredicateCanAnswerLocked for a reader
-// that trusts the cache row by row (ReadyJudgmentContext): the
-// dependency-derived predicate reproduces a lost verdict when every
-// ready-blocking edge lands on a resident row and no edge is parent-child, the
-// one non-blocking edge a backend's verdict reads (bd propagates blocked-ness
-// down it). No backend's verdict reads any other non-blocking edge (tracks,
-// relates-to), so such an edge leaves the row judgeable. Caller must hold
-// c.mu.
+// that trusts the cache row by row (ReadyJudgmentContext). The
+// dependency-derived predicate reads a row's direct ready-blocking edges, as
+// the Ready of a store that strands absent targets does (SQLite, the
+// in-memory stores), so for such a store it reproduces a lost verdict exactly
+// when every ready-blocking edge lands on a resident row: a non-blocking edge
+// (tracks, relates-to, parent-child) is read by none of them, and the
+// controller judges rows this way only on such a store's cache. bd's verdict
+// reads more than the predicate models: it propagates blocked-ness down
+// parent-child edges, judges a waits-for edge by the target's children rather
+// than the target, and counts a pinned target as satisfied. A parent-child
+// edge keeps the row unjudged; over a bd backing the rest is the same
+// approximation readyPredicateCanAnswerLocked makes. Caller must hold c.mu.
 func (c *CachingStore) readyEdgesJudgeableLocked(deps []Dep) bool {
 	for _, dep := range deps {
 		if dep.Type == "parent-child" {
