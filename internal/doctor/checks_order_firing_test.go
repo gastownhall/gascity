@@ -798,3 +798,26 @@ func TestOrderFiringCurrent_InapplicableOrderIsReportedNotStale(t *testing.T) {
 		t.Fatalf("details = %v, want the order reported inapplicable", result.Details)
 	}
 }
+
+func TestFormatOrderFiringDuration(t *testing.T) {
+	for _, tc := range []struct {
+		d    time.Duration
+		want string
+	}{
+		{d: 0, want: "0s"},
+		{d: 30 * time.Second, want: "30s"},
+		{d: 60 * time.Second, want: "60s"},
+		{d: 75 * time.Second, want: "75s"},
+		{d: 119 * time.Second, want: "119s"},
+		{d: time.Minute + 59*time.Second + 400*time.Millisecond, want: "119s"},
+		{d: time.Minute + 59*time.Second + 600*time.Millisecond, want: "2m"},
+		{d: 2 * time.Minute, want: "2m"},
+		{d: 2*time.Minute + 29*time.Second, want: "2m"},
+		{d: 90 * time.Minute, want: "90m"},
+		{d: 4 * time.Hour, want: "4h"},
+	} {
+		if got := formatOrderFiringDuration(tc.d); got != tc.want {
+			t.Errorf("formatOrderFiringDuration(%v) = %q, want %q", tc.d, got, tc.want)
+		}
+	}
+}
