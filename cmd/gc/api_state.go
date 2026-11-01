@@ -226,7 +226,8 @@ type controllerState struct {
 	rolloutDriftSig string
 	// rolloutLogf, when non-nil, receives noteRolloutDrift's transition lines
 	// (tests capture it); nil falls back to os.Stderr via rolloutWarnf.
-	rolloutLogf func(format string, args ...any)
+	rolloutLogf     func(format string, args ...any)
+	armingReadiness map[string]error
 }
 
 var controllerStateInitRigDirIfReady = initDirIfReady
@@ -379,6 +380,7 @@ func newControllerStateWithRoutes(
 		cs.extmsgSvc = newCityExtMsgServices(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, ep)
 	}
 	cs.preflightConditionalWrites()
+	cs.recordArmingReadiness()
 	cs.storeMetadataSignature = storeMetadataSignature(cityPath, cfg)
 	return cs
 }

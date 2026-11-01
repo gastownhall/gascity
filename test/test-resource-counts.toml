@@ -42,6 +42,11 @@ calls = 1
 tagged = true
 
 [[count]]
+path = "cmd/gc/api_state_arming_test.go"
+resource = "environment"
+calls = 1
+
+[[count]]
 path = "cmd/gc/api_state_test.go"
 resource = "fixed_sleep"
 calls = 2
