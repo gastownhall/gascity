@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -81,13 +82,16 @@ func NewProviderForCity(script, cityName, cityPath string) *Provider {
 	return p
 }
 
-// scopeToCity sets the city env on cmd for a provider built for a city;
-// otherwise cmd inherits gc's environment unchanged.
-func (p *Provider) scopeToCity(cmd *exec.Cmd) {
+// cityEnv returns the env an op of a provider built for a city runs with:
+// gc's environment, read through execenv.Environ, plus the city. It is nil
+// otherwise, so the op inherits gc's environment unchanged. Read it before
+// arming the op's deadline: execenv.Environ waits out an in-flight native
+// store open, and that wait is not the op's.
+func (p *Provider) cityEnv() []string {
 	if !p.citySet {
-		return
+		return nil
 	}
-	cmd.Env = append(os.Environ(), "GC_EXEC_CITY_NAME="+p.cityName, "GC_EXEC_CITY_PATH="+p.cityPath)
+	return append(execenv.Environ(), "GC_EXEC_CITY_NAME="+p.cityName, "GC_EXEC_CITY_PATH="+p.cityPath)
 }
 
 // run executes the script with the given args using the default timeout.
@@ -116,11 +120,12 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 // cap). Output past the cap is discarded and fails the op, without echoing
 // any of it.
 func (p *Provider) runCapped(parent context.Context, dur time.Duration, limit int, stdinData []byte, args ...string) (string, error) {
+	env := p.cityEnv()
 	ctx, cancel := context.WithTimeout(parent, dur)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, p.script, args...)
-	p.scopeToCity(cmd)
+	cmd.Env = env
 	// Run the adapter in its own process group with TERM-then-kill
 	// cancellation (execgrace.Apply) so cooperative cancellation reaches a
 	// foreground child (e.g. a readiness sleep in the adapter), not just the
@@ -325,7 +330,7 @@ func isStartCollision(errMsg string) bool {
 // runWithTTY executes the script with the terminal inherited (for Attach).
 func (p *Provider) runWithTTY(args ...string) error {
 	cmd := exec.Command(p.script, args...)
-	p.scopeToCity(cmd)
+	cmd.Env = p.cityEnv()
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -576,9 +581,10 @@ func (p *Provider) startStartupWatch(
 	name string,
 	firstEventTimeout time.Duration,
 ) (<-chan string, func() error, bool, error) {
+	env := p.cityEnv()
 	watchCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(watchCtx, p.script, "watch-startup", name)
-	p.scopeToCity(cmd)
+	cmd.Env = env
 	// Startup watchers are short-lived probes; tear them down quickly once the
 	// dialog helper is finished so Start cannot stall behind a sleeping wrapper.
 	cmd.WaitDelay = 250 * time.Millisecond
@@ -1107,11 +1113,12 @@ var (
 // (tmux send-keys / capture-pane / …) do not need it.
 func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte, int, error) {
 	command := shellQuote(argv)
+	env := p.cityEnv()
 	cmdCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(cmdCtx, p.script, "exec", name)
-	p.scopeToCity(cmd)
+	cmd.Env = env
 	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
