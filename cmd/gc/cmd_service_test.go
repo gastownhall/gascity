@@ -180,58 +180,152 @@ func TestDoServiceDoctorJSON(t *testing.T) {
 	}
 }
 
+// serviceRestartGrantRefusal is the refusal `gc service restart` prints for a
+// supervisor that requires a city write grant. It names no remote --context:
+// the command does not accept one yet.
+const serviceRestartGrantRefusal = "gc service restart: the supervisor requires a signed city write grant (grant-required), which gc cannot attach to this command yet\n"
+
 // TestServiceRestartClientGrantGatedSupervisor proves `gc service restart`
-// never posts to a supervisor that requires city grants: that client mints
-// no grant, so the restart would be refused with a 401. With grants required
-// the resolver returns (nil, "grant-required") and the command fails without
-// an HTTP call; without them it routes to the supervisor-managed client.
+// never posts to a supervisor that requires city write grants: that client
+// mints no grant, so the restart would be refused with a 401. Such a
+// supervisor yields (nil, "grant-required") and the command fails without an
+// HTTP call; one that requires no grants, or only read grants (its read gate
+// passes the restart's POST through), gets the supervisor-managed client. A
+// supervisor-hosted city never takes its [api] port, which the supervisor
+// ignores; a standalone controller, or one predating identify, does.
 func TestServiceRestartClientGrantGatedSupervisor(t *testing.T) {
-	origSup, origGrants := apiRouteSupervisorClientHook, apiRouteSupervisorGrantsHook
+	origIdentity, origSup := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook
+	origGrants, origWriteGrants := apiRouteSupervisorGrantsHook, apiRouteSupervisorWriteGrantsHook
 	t.Cleanup(func() {
+		apiRouteControllerIdentityHook = origIdentity
 		apiRouteSupervisorClientHook = origSup
 		apiRouteSupervisorGrantsHook = origGrants
+		apiRouteSupervisorWriteGrantsHook = origWriteGrants
 	})
 	supervisor := api.NewCityScopedClient("http://supervisor.sentinel:1", "t")
-	apiRouteSupervisorClientHook = func(string) *api.Client { return supervisor }
-	cfg := &config.City{}
-	dir := t.TempDir()
+	// The restart is a mutation, so only the write-grant requirement decides
+	// it; the read-or-write requirement is apiClient's.
+	apiRouteSupervisorGrantsHook = func() bool {
+		t.Errorf("read-or-write grant requirement consulted for the restart mutation")
+		return true
+	}
+	var (
+		supervisorHosted = controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}
+		standalone       = controllerIdentityReply{PID: 4242, HostingMode: controllerHostingStandalone}
+		legacy           = controllerIdentityReply{PID: 4242}
+	)
+	cases := []struct {
+		name     string
+		identity controllerIdentityReply
+		apiPort  int
+		// noSupervisor makes the supervisor-managed client unavailable.
+		noSupervisor bool
+		writeGrants  bool
+		readAuthOnly bool
+		want         string // "supervisor", "api-port" or "" (nil)
+		wantReason   string
+	}{
+		{name: "write-grants-required", identity: supervisorHosted, writeGrants: true, wantReason: "grant-required"},
+		{name: "write-grants-required-with-api-port", identity: supervisorHosted, apiPort: 9443, writeGrants: true, wantReason: "grant-required"},
+		{name: "no-controller-write-grants-required", writeGrants: true, wantReason: "grant-required"},
+		{name: "grants-not-required", identity: supervisorHosted, want: "supervisor"},
+		{name: "supervisor-hosted-with-api-port-uses-supervisor", identity: supervisorHosted, apiPort: 9443, want: "supervisor"},
+		{name: "read-grants-only", identity: supervisorHosted, readAuthOnly: true, want: "supervisor"},
+		{name: "standalone-with-api-port", identity: standalone, apiPort: 8080, writeGrants: true, want: "api-port"},
+		{name: "unknown-hosting-with-api-port", identity: legacy, apiPort: 8080, writeGrants: true, want: "api-port"},
+		{name: "no-supervisor-client", identity: supervisorHosted, noSupervisor: true, writeGrants: true, wantReason: "controller-down"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			apiRouteControllerIdentityHook = func(string) controllerIdentityReply { return tc.identity }
+			apiRouteSupervisorClientHook = func(string) *api.Client {
+				if tc.want == "api-port" {
+					t.Errorf("supervisor client resolved for a controller that serves its own [api] port")
+				}
+				if tc.noSupervisor {
+					return nil
+				}
+				return supervisor
+			}
+			apiRouteSupervisorWriteGrantsHook = func() bool { return tc.writeGrants }
+			if tc.readAuthOnly {
+				useReadAuthOnlySupervisor(t)
+			}
+			cfg := &config.City{}
+			cfg.API.Port = tc.apiPort
+			client, reason := serviceRestartClient(t.TempDir(), cfg)
+			switch tc.want {
+			case "supervisor":
+				if client != supervisor {
+					t.Fatalf("serviceRestartClient client = %p, want supervisor %p", client, supervisor)
+				}
+			case "api-port":
+				if client == nil || client == supervisor {
+					t.Fatalf("serviceRestartClient client = %p, want the [api] port %d client", client, tc.apiPort)
+				}
+			default:
+				if client != nil {
+					t.Fatalf("serviceRestartClient client = %p, want nil", client)
+				}
+			}
+			if reason != tc.wantReason {
+				t.Fatalf("serviceRestartClient reason = %q, want %q", reason, tc.wantReason)
+			}
+		})
+	}
+}
 
-	t.Run("grants-required", func(t *testing.T) {
-		apiRouteSupervisorGrantsHook = func() bool { return true }
-		client, reason := serviceRestartClient(dir, cfg)
-		if client != nil || reason != "grant-required" {
-			t.Fatalf("serviceRestartClient = (%p, %q), want (nil, \"grant-required\")", client, reason)
-		}
-		var stdout, stderr bytes.Buffer
-		if code := doServiceRestart(client, reason, "web", &stdout, &stderr); code != 1 {
-			t.Fatalf("exit = %d, want 1", code)
-		}
-		if !strings.Contains(stderr.String(), "requires a signed city grant") {
-			t.Errorf("stderr missing grant-required explanation:\n%s", stderr.String())
-		}
-	})
+// TestDoServiceRestartRefusals verifies a restart with no client names why: a
+// supervisor that requires a city write grant, or no controller at all.
+func TestDoServiceRestartRefusals(t *testing.T) {
+	cases := []struct {
+		reason string
+		want   string
+	}{
+		{reason: "grant-required", want: serviceRestartGrantRefusal},
+		{reason: "controller-down", want: "gc service restart: controller is not running\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.reason, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := doServiceRestart(nil, tc.reason, "web", &stdout, &stderr); code != 1 {
+				t.Fatalf("exit = %d, want 1", code)
+			}
+			if stderr.String() != tc.want {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tc.want)
+			}
+		})
+	}
+}
 
-	t.Run("grants-not-required", func(t *testing.T) {
-		apiRouteSupervisorGrantsHook = func() bool { return false }
-		client, reason := serviceRestartClient(dir, cfg)
-		if client != supervisor || reason != "" {
-			t.Fatalf("serviceRestartClient = (%p, %q), want (supervisor %p, \"\")", client, reason, supervisor)
-		}
+// TestCmdServiceRestartGrantGatedSupervisor pins `gc service restart` to
+// serviceRestartClient's write-grant check: for a supervisor-hosted city whose
+// supervisor requires city write grants, the command exits 1 with the grant
+// refusal and makes no HTTP call, though city.toml sets an [api] port.
+func TestCmdServiceRestartGrantGatedSupervisor(t *testing.T) {
+	origIdentity, origSup := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook
+	origGrants, origWriteGrants := apiRouteSupervisorGrantsHook, apiRouteSupervisorWriteGrantsHook
+	t.Cleanup(func() {
+		apiRouteControllerIdentityHook = origIdentity
+		apiRouteSupervisorClientHook = origSup
+		apiRouteSupervisorGrantsHook = origGrants
+		apiRouteSupervisorWriteGrantsHook = origWriteGrants
 	})
+	apiRouteControllerIdentityHook = func(string) controllerIdentityReply {
+		return controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}
+	}
+	apiRouteSupervisorClientHook = func(string) *api.Client {
+		return api.NewCityScopedClient("http://supervisor.sentinel:1", "t")
+	}
+	apiRouteSupervisorGrantsHook = func() bool { return true }
+	apiRouteSupervisorWriteGrantsHook = func() bool { return true }
+	t.Setenv("GC_CITY", writeCityTOMLForRoute(t, t.TempDir(), "[workspace]\nname = \"t\"\n\n[api]\nport = 9443\n"))
 
-	t.Run("no-supervisor-client", func(t *testing.T) {
-		apiRouteSupervisorClientHook = func(string) *api.Client { return nil }
-		apiRouteSupervisorGrantsHook = func() bool { return true }
-		client, reason := serviceRestartClient(dir, cfg)
-		if client != nil || reason != "controller-down" {
-			t.Fatalf("serviceRestartClient = (%p, %q), want (nil, \"controller-down\")", client, reason)
-		}
-		var stdout, stderr bytes.Buffer
-		if code := doServiceRestart(client, reason, "web", &stdout, &stderr); code != 1 {
-			t.Fatalf("exit = %d, want 1", code)
-		}
-		if !strings.Contains(stderr.String(), "controller is not running") {
-			t.Errorf("stderr = %q, want controller is not running", stderr.String())
-		}
-	})
+	var stdout, stderr bytes.Buffer
+	if code := cmdServiceRestart("web", &stdout, &stderr); code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), serviceRestartGrantRefusal) {
+		t.Errorf("stderr missing the grant-required refusal %q:\n%s", serviceRestartGrantRefusal, stderr.String())
+	}
 }

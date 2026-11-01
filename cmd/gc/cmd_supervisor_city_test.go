@@ -93,24 +93,25 @@ func TestEnsureNoStandaloneControllerLeavesHeldLockHostingUnknown(t *testing.T) 
 }
 
 // TestSupervisorRequiresCityGrants reads the supervisor's city grant
-// requirement from supervisor.toml the way the supervisor installs its auth
+// requirements from supervisor.toml the way the supervisor installs its auth
 // gates: a write-auth or read-auth verify key, or a required flag, gates the
-// per-city routes; a blank key, an unverified write plane and an unreadable
-// file do not. (#5262)
+// per-city routes, and only the write-auth settings gate a mutation; a blank
+// key, an unverified write plane and an unreadable file gate nothing. (#5262)
 func TestSupervisorRequiresCityGrants(t *testing.T) {
 	cases := []struct {
-		name string
-		toml string
-		want bool
+		name      string
+		toml      string
+		want      bool
+		wantWrite bool
 	}{
-		{name: "no-auth", toml: "[supervisor]\nport = 8372\n", want: false},
-		{name: "write-auth-verify-key", toml: "[supervisor]\nwrite_auth_verify_key = \"k1:AAAA\"\n", want: true},
-		{name: "write-auth-required", toml: "[supervisor]\nwrite_auth_required = true\n", want: true},
-		{name: "read-auth-verify-key", toml: "[supervisor]\nread_auth_verify_key = \"k1:AAAA\"\n", want: true},
-		{name: "read-auth-required", toml: "[supervisor]\nread_auth_required = true\n", want: true},
-		{name: "blank-verify-keys", toml: "[supervisor]\nwrite_auth_verify_key = \"  \"\nread_auth_verify_key = \"\"\n", want: false},
-		{name: "unverified-write-plane", toml: "[supervisor]\nbind = \"0.0.0.0\"\nallow_mutations = true\nwrite_auth_allow_unverified = true\n", want: false},
-		{name: "unreadable", toml: "[supervisor\nwrite_auth_required = true\n", want: false},
+		{name: "no-auth", toml: "[supervisor]\nport = 8372\n", want: false, wantWrite: false},
+		{name: "write-auth-verify-key", toml: "[supervisor]\nwrite_auth_verify_key = \"k1:AAAA\"\n", want: true, wantWrite: true},
+		{name: "write-auth-required", toml: "[supervisor]\nwrite_auth_required = true\n", want: true, wantWrite: true},
+		{name: "read-auth-verify-key", toml: "[supervisor]\nread_auth_verify_key = \"k1:AAAA\"\n", want: true, wantWrite: false},
+		{name: "read-auth-required", toml: "[supervisor]\nread_auth_required = true\n", want: true, wantWrite: false},
+		{name: "blank-verify-keys", toml: "[supervisor]\nwrite_auth_verify_key = \"  \"\nread_auth_verify_key = \"\"\n", want: false, wantWrite: false},
+		{name: "unverified-write-plane", toml: "[supervisor]\nbind = \"0.0.0.0\"\nallow_mutations = true\nwrite_auth_allow_unverified = true\n", want: false, wantWrite: false},
+		{name: "unreadable", toml: "[supervisor\nwrite_auth_required = true\n", want: false, wantWrite: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -121,8 +122,29 @@ func TestSupervisorRequiresCityGrants(t *testing.T) {
 			if got := supervisorRequiresCityGrants(); got != tc.want {
 				t.Fatalf("supervisorRequiresCityGrants() = %v, want %v for supervisor.toml:\n%s", got, tc.want, tc.toml)
 			}
+			if got := supervisorRequiresCityWriteGrants(); got != tc.wantWrite {
+				t.Fatalf("supervisorRequiresCityWriteGrants() = %v, want %v for supervisor.toml:\n%s", got, tc.wantWrite, tc.toml)
+			}
 		})
 	}
+}
+
+// useReadAuthOnlySupervisor points GC_HOME at a supervisor.toml that requires
+// grants only on reads, and puts the real grant predicates behind the routing
+// hooks until the test ends, so a resolver reads that supervisor as gc does.
+func useReadAuthOnlySupervisor(t *testing.T) {
+	t.Helper()
+	t.Setenv("GC_HOME", t.TempDir())
+	const toml = "[supervisor]\nread_auth_verify_key = \"k1:AAAA\"\nread_auth_required = true\n"
+	if err := os.WriteFile(supervisor.ConfigPath(), []byte(toml), 0o644); err != nil {
+		t.Fatalf("writing supervisor.toml: %v", err)
+	}
+	prevGrants, prevWriteGrants := apiRouteSupervisorGrantsHook, apiRouteSupervisorWriteGrantsHook
+	apiRouteSupervisorGrantsHook = supervisorRequiresCityGrants
+	apiRouteSupervisorWriteGrantsHook = supervisorRequiresCityWriteGrants
+	t.Cleanup(func() {
+		apiRouteSupervisorGrantsHook, apiRouteSupervisorWriteGrantsHook = prevGrants, prevWriteGrants
+	})
 }
 
 func TestRegisterCityWithSupervisorDoesNotMislabelLegacyController(t *testing.T) {

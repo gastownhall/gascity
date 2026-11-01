@@ -393,32 +393,41 @@ func TestRouteMaintenanceStatus_JSONOutput(t *testing.T) {
 
 // TestMaintenanceDoltGCAPIClientGrantGatedSupervisor proves `gc maintenance
 // dolt-gc` never dials a supervisor-hosted city's supervisor that requires
-// city grants: that client mints no grant, so the trigger would be refused
-// with a 401 no caller falls back from. The resolver returns (nil,
+// city write grants: that client mints no grant, so the trigger would be
+// refused with a 401 no caller falls back from. The resolver returns (nil,
 // "grant-required") without resolving the supervisor client, and the
 // command reports the refusal without an HTTP call. A supervisor that
-// requires no grants, and a live controller predating identify, still route
-// to the supervisor-managed client, as `gc maintenance status` does.
+// requires no grants, or only read grants (its read gate passes the
+// trigger's POST through), and a live controller predating identify, still
+// route to the supervisor-managed client, as `gc maintenance status` does.
 func TestMaintenanceDoltGCAPIClientGrantGatedSupervisor(t *testing.T) {
 	sentinel := api.NewClient("http://supervisor.sentinel:1")
-	origIdentity, origSup, origGrants := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook, apiRouteSupervisorGrantsHook
+	origIdentity, origSup := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook
+	origGrants, origWriteGrants := apiRouteSupervisorGrantsHook, apiRouteSupervisorWriteGrantsHook
 	t.Cleanup(func() {
 		apiRouteControllerIdentityHook = origIdentity
 		apiRouteSupervisorClientHook = origSup
 		apiRouteSupervisorGrantsHook = origGrants
+		apiRouteSupervisorWriteGrantsHook = origWriteGrants
 	})
 	supervisorHosted := func(string) controllerIdentityReply {
 		return controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}
 	}
+	// The trigger is a mutation, so only the write-grant requirement decides
+	// it; the read-or-write requirement is apiClient's.
+	apiRouteSupervisorGrantsHook = func() bool {
+		t.Errorf("read-or-write grant requirement consulted for the dolt-gc mutation")
+		return true
+	}
 
-	t.Run("grants-required-skips-supervisor", func(t *testing.T) {
+	t.Run("write-grants-required-skips-supervisor", func(t *testing.T) {
 		t.Setenv("GC_NO_API", "")
 		apiRouteControllerIdentityHook = supervisorHosted
 		apiRouteSupervisorClientHook = func(string) *api.Client {
-			t.Errorf("supervisor client resolved for a supervisor that requires city grants")
+			t.Errorf("supervisor client resolved for a supervisor that requires city write grants")
 			return sentinel
 		}
-		apiRouteSupervisorGrantsHook = func() bool { return true }
+		apiRouteSupervisorWriteGrantsHook = func() bool { return true }
 		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
 		c, reason := maintenanceDoltGCAPIClient(dir)
 		if c != nil || reason != "grant-required" {
@@ -430,7 +439,7 @@ func TestMaintenanceDoltGCAPIClientGrantGatedSupervisor(t *testing.T) {
 		t.Setenv("GC_NO_API", "")
 		apiRouteControllerIdentityHook = supervisorHosted
 		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
-		apiRouteSupervisorGrantsHook = func() bool { return false }
+		apiRouteSupervisorWriteGrantsHook = func() bool { return false }
 		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
 		c, reason := maintenanceDoltGCAPIClient(dir)
 		if c != sentinel || reason != "" {
@@ -438,12 +447,38 @@ func TestMaintenanceDoltGCAPIClientGrantGatedSupervisor(t *testing.T) {
 		}
 	})
 
+	t.Run("read-grants-only-routes-to-supervisor", func(t *testing.T) {
+		t.Setenv("GC_NO_API", "")
+		apiRouteControllerIdentityHook = supervisorHosted
+		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
+		useReadAuthOnlySupervisor(t)
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+		c, reason := maintenanceDoltGCAPIClient(dir)
+		if c != sentinel || reason != "" {
+			t.Fatalf("maintenanceDoltGCAPIClient = (%p, %q), want (supervisor sentinel %p, \"\") for a supervisor that gates only reads", c, reason, sentinel)
+		}
+	})
+
+	t.Run("read-grants-only-supervisor-unavailable-is-controller-down", func(t *testing.T) {
+		// With no supervisor-managed client, a supervisor that gates only
+		// reads is not the reason the trigger cannot run.
+		t.Setenv("GC_NO_API", "")
+		apiRouteControllerIdentityHook = supervisorHosted
+		apiRouteSupervisorClientHook = func(string) *api.Client { return nil }
+		useReadAuthOnlySupervisor(t)
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+		c, reason := maintenanceDoltGCAPIClient(dir)
+		if c != nil || reason != "controller-down" {
+			t.Fatalf("maintenanceDoltGCAPIClient = (%p, %q), want (nil, \"controller-down\")", c, reason)
+		}
+	})
+
 	t.Run("unknown-hosting-no-api-port-routes-to-supervisor", func(t *testing.T) {
 		t.Setenv("GC_NO_API", "")
 		apiRouteControllerIdentityHook = func(string) controllerIdentityReply { return controllerIdentityReply{PID: 4242} }
 		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
-		apiRouteSupervisorGrantsHook = func() bool {
-			t.Errorf("grant requirement consulted for a controller of unknown hosting mode")
+		apiRouteSupervisorWriteGrantsHook = func() bool {
+			t.Errorf("write-grant requirement consulted for a controller of unknown hosting mode")
 			return true
 		}
 		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
@@ -459,13 +494,18 @@ func TestMaintenanceDoltGCAPIClientGrantGatedSupervisor(t *testing.T) {
 		t.Setenv("GC_NO_API", "")
 		apiRouteControllerIdentityHook = supervisorHosted
 		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
-		apiRouteSupervisorGrantsHook = func() bool { return true }
+		apiRouteSupervisorWriteGrantsHook = func() bool { return true }
 		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
 		if c, _ := maintenanceAPIClient(dir); c != sentinel {
 			t.Fatalf("maintenanceAPIClient = %p, want supervisor sentinel %p", c, sentinel)
 		}
 	})
 }
+
+// maintenanceDoltGCGrantRefusal is the refusal `gc maintenance dolt-gc` prints
+// for a supervisor that requires a city write grant. It names no remote
+// --context: the command does not accept one yet.
+const maintenanceDoltGCGrantRefusal = "gc maintenance dolt-gc: the supervisor requires a signed city write grant (grant-required), which gc cannot attach to this command yet\n"
 
 // TestRouteMaintenanceDoltGC_GrantRequired verifies the grant-required
 // refusal names the cause instead of reporting the supervisor as down.
@@ -477,10 +517,45 @@ func TestRouteMaintenanceDoltGC_GrantRequired(t *testing.T) {
 		t.Fatalf("exit = %d, want 2; stderr=%q", code, stderr.String())
 	}
 	assertMaintenanceRouteLog(t, stderr.String(), "fallback", "grant-required")
-	if !strings.Contains(stderr.String(), "requires a signed city grant") {
-		t.Errorf("stderr missing grant-required explanation:\n%s", stderr.String())
+	if !strings.Contains(stderr.String(), maintenanceDoltGCGrantRefusal) {
+		t.Errorf("stderr missing the grant-required refusal %q:\n%s", maintenanceDoltGCGrantRefusal, stderr.String())
 	}
 	if strings.Contains(stderr.String(), "not running") {
 		t.Errorf("stderr reports the supervisor as not running for a grant refusal:\n%s", stderr.String())
+	}
+}
+
+// TestCmdMaintenanceDoltGCGrantGatedSupervisor pins `gc maintenance dolt-gc`
+// to maintenanceDoltGCAPIClient: for a supervisor-hosted city whose
+// supervisor requires city write grants, the command exits 2 with the grant
+// refusal without resolving the supervisor client, where maintenanceAPIClient
+// would resolve it and send the grantless trigger.
+func TestCmdMaintenanceDoltGCGrantGatedSupervisor(t *testing.T) {
+	origIdentity, origSup := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook
+	origGrants, origWriteGrants := apiRouteSupervisorGrantsHook, apiRouteSupervisorWriteGrantsHook
+	t.Cleanup(func() {
+		apiRouteControllerIdentityHook = origIdentity
+		apiRouteSupervisorClientHook = origSup
+		apiRouteSupervisorGrantsHook = origGrants
+		apiRouteSupervisorWriteGrantsHook = origWriteGrants
+	})
+	t.Setenv("GC_NO_API", "")
+	apiRouteControllerIdentityHook = func(string) controllerIdentityReply {
+		return controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}
+	}
+	apiRouteSupervisorClientHook = func(string) *api.Client {
+		t.Errorf("supervisor client resolved for a supervisor that requires city write grants")
+		return nil
+	}
+	apiRouteSupervisorGrantsHook = func() bool { return true }
+	apiRouteSupervisorWriteGrantsHook = func() bool { return true }
+	t.Setenv("GC_CITY", writeCityTOMLForRoute(t, t.TempDir(), "[workspace]\nname = \"t\"\n"))
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdMaintenanceDoltGC(false, false, &stdout, &stderr); code != 2 {
+		t.Fatalf("exit = %d, want 2; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), maintenanceDoltGCGrantRefusal) {
+		t.Errorf("stderr missing the grant-required refusal %q:\n%s", maintenanceDoltGCGrantRefusal, stderr.String())
 	}
 }

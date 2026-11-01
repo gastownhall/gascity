@@ -83,8 +83,8 @@ func cmdMaintenanceDoltGC(wait, jsonOut bool, stdout, stderr io.Writer) int {
 	return routeMaintenanceDoltGC(c, reason, wait, jsonOut, stdout, stderr)
 }
 
-// maintenanceAPIClient resolves the supervisor API client for the
-// maintenance subcommands, or returns (nil, reason) when routing isn't
+// maintenanceAPIClient resolves the supervisor API client for
+// `gc maintenance status`, or returns (nil, reason) when routing isn't
 // available. Indirected through a var so tests inject a client pointed at
 // httptest.Server or force a specific fallback reason without spinning up
 // a real controller.
@@ -94,14 +94,16 @@ func cmdMaintenanceDoltGC(wait, jsonOut bool, stdout, stderr io.Writer) int {
 // city omits a standalone [api] port (the supervisor serves the API on its
 // own port via city-scoped routes), so apiClient alone returns nil even
 // though the controller socket is alive; route to the supervisor-managed
-// client directly rather than reporting controller-down.
+// client directly rather than reporting controller-down. The `gc maintenance
+// dolt-gc` trigger resolves through maintenanceDoltGCAPIClient instead, which
+// does not send a supervisor that requires write grants a grantless mutation.
 var maintenanceAPIClient = supervisorFallthroughAPIClient
 
 // maintenanceDoltGCAPIClient resolves the supervisor API client for
 // `gc maintenance dolt-gc`. It routes like maintenanceAPIClient, except that a
-// supervisor-hosted city whose supervisor requires city grants gets (nil,
-// "grant-required"): this client mints no grant, so the trigger would be
-// refused with a 401. Indirected through a var for tests.
+// supervisor-hosted city whose supervisor requires city write grants gets
+// (nil, "grant-required"): this client mints no grant, so the trigger would
+// be refused with a 401. Indirected through a var for tests.
 var maintenanceDoltGCAPIClient = supervisorFallthroughMutationAPIClient
 
 // routeMaintenanceStatus dispatches `gc maintenance status` to the
@@ -138,13 +140,14 @@ func routeMaintenanceStatus(c *api.Client, nilReason string, jsonOut bool, stdou
 // routeMaintenanceDoltGC dispatches `gc maintenance dolt-gc` to the
 // supervisor API. Exit codes match the bead spec: 0 on success/accepted,
 // 1 on --wait failure, 2 when the supervisor is unreachable or requires a
-// city grant this client cannot mint, 3 on 409 (run already in progress).
+// city write grant this client cannot mint, 3 on 409 (run already in
+// progress).
 func routeMaintenanceDoltGC(c *api.Client, nilReason string, wait, jsonOut bool, stdout, stderr io.Writer) int {
 	const cmdName = "maintenance dolt-gc"
 	if c == nil {
 		logRoute(stderr, cmdName, "fallback", nilReason)
 		if nilReason == "grant-required" {
-			fmt.Fprintf(stderr, "gc maintenance dolt-gc: the supervisor requires a signed city grant (%s); run it through a city context with a grant command\n", nilReason) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc maintenance dolt-gc: the supervisor requires a signed city write grant (%s), which gc cannot attach to this command yet\n", nilReason) //nolint:errcheck // best-effort stderr
 			return 2
 		}
 		fmt.Fprintf(stderr, "gc maintenance dolt-gc: supervisor not running (%s)\n", nilReason) //nolint:errcheck // best-effort stderr
