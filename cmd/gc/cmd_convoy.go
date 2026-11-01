@@ -1631,11 +1631,11 @@ func doConvoyTargetJSON(store beads.Store, args []string, jsonOut bool, stdout, 
 func newConvoyAddCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
-		Use:   "add <convoy-id> <issue-id>",
-		Short: "Add an issue to a convoy",
-		Long: `Link an existing issue bead to a convoy.
+		Use:   "add <convoy-id> <bead-ids...>",
+		Short: "Add one or more issues to a convoy",
+		Long: `Link one or more existing issue beads to a convoy.
 
-Adds a tracks dependency from the convoy to the issue, making it appear
+Adds a tracks dependency from the convoy to each issue, making it appear
 in the convoy's progress tracking without changing the issue parent.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -1682,11 +1682,11 @@ func doConvoyAdd(store beads.Store, args []string, stdout, stderr io.Writer) int
 
 func doConvoyAddJSON(store beads.Store, args []string, jsonOut bool, stdout, stderr io.Writer) int {
 	if len(args) < 2 {
-		fmt.Fprintln(stderr, "gc convoy add: usage: gc convoy add <convoy-id> <issue-id>") //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "gc convoy add: usage: gc convoy add <convoy-id> <bead-ids...>") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	convoyID := args[0]
-	issueID := args[1]
+	issueIDs := args[1:]
 
 	convoy, err := store.Get(convoyID)
 	if err != nil {
@@ -1698,20 +1698,30 @@ func doConvoyAddJSON(store beads.Store, args []string, jsonOut bool, stdout, std
 		return 1
 	}
 
-	if _, err := store.Get(issueID); err != nil {
-		fmt.Fprintf(stderr, "gc convoy add: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
+	// Mirrors doConvoyCreateWithOptionsJSON's loop: every id given is
+	// validated and tracked in turn, stopping on the first error, so a
+	// multi-id call either fully succeeds or fails loudly instead of
+	// silently dropping everything after the first id (GH#8422).
+	for _, issueID := range issueIDs {
+		if _, err := store.Get(issueID); err != nil {
+			fmt.Fprintf(stderr, "gc convoy add: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 
-	if err := convoycore.TrackItem(store, convoyID, issueID); err != nil {
-		fmt.Fprintf(stderr, "gc convoy add: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		if err := convoycore.TrackItem(store, convoyID, issueID); err != nil {
+			fmt.Fprintf(stderr, "gc convoy add: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	if jsonOut {
-		return writeCLIJSONLineOrExit(stdout, stderr, "gc convoy add", convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.add", Action: "add", ConvoyID: convoyID, IssueIDs: []string{issueID}})
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc convoy add", convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.add", Action: "add", ConvoyID: convoyID, IssueIDs: issueIDs})
 	}
-	fmt.Fprintf(stdout, "Added %s to convoy %s\n", issueID, convoyID) //nolint:errcheck // best-effort stdout
+	if len(issueIDs) == 1 {
+		fmt.Fprintf(stdout, "Added %s to convoy %s\n", issueIDs[0], convoyID) //nolint:errcheck // best-effort stdout
+	} else {
+		fmt.Fprintf(stdout, "Added %d issue(s) to convoy %s\n", len(issueIDs), convoyID) //nolint:errcheck // best-effort stdout
+	}
 	return 0
 }
 
