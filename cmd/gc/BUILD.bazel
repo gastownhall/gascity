@@ -1313,6 +1313,7 @@ go_test(
         "cmd_runtime_workdir_export_test.go",
         "cmd_service_test.go",
         "cmd_session_attach_resume_test.go",
+        "cmd_session_close_named_identity_preserve_test.go",
         "cmd_session_close_release_test.go",
         "cmd_session_kill_fence_test.go",
         "cmd_session_kill_fresh_read_test.go",
