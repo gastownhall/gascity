@@ -3,12 +3,13 @@ package main
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/sling"
 )
 
 // slingInheritEnv returns a getenv over vars, the env seam inheritSlingInitiator
@@ -177,7 +178,7 @@ func TestResolveInheritedInitiator(t *testing.T) {
 			wantNoStderr: true,
 		},
 		{
-			name: "a root without an initiator does not conflict",
+			name: "a claimed run without an initiator conflicts with an attributed one",
 			build: func(t *testing.T, work, _ beads.Store) string {
 				stamped := inheritRootWithInitiator(t, work, "alice")
 				bare := inheritRootWithInitiator(t, work, "")
@@ -185,8 +186,19 @@ func TestResolveInheritedInitiator(t *testing.T) {
 				inheritClaimFor(t, work, session, beadmeta.RootBeadIDMetadataKey, bare.ID, nil)
 				return ""
 			},
-			want:         "alice",
-			wantNoStderr: true,
+			want:       "",
+			wantStderr: []string{"gc.initiator", "alice", "=(none)"},
+		},
+		{
+			name: "a current claim on an unattributed run conflicts with an older attributed claim",
+			build: func(t *testing.T, work, _ beads.Store) string {
+				stamped := inheritRootWithInitiator(t, work, "alice")
+				inheritClaimFor(t, work, session, beadmeta.RootBeadIDMetadataKey, stamped.ID, nil)
+				bare := inheritRootWithInitiator(t, work, "")
+				return inheritClaimFor(t, work, session, beadmeta.RootBeadIDMetadataKey, bare.ID, nil).ID
+			},
+			want:       "",
+			wantStderr: []string{"gc.initiator", "alice", "=(none)"},
 		},
 		{
 			name: "conflicting claims warn and stamp nothing",
@@ -337,9 +349,9 @@ func TestInheritSlingInitiator_Gates(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			opts := tc.opts
 			var stderr bytes.Buffer
-			// Empty deps have no claim stores, so a run past the gate would
-			// warn: a silent, unchanged result proves the gate held.
-			inheritSlingInitiator(&opts, slingDeps{}, slingInheritEnv(tc.env), &stderr)
+			// With no claim-store opener a run past the gate would warn: a
+			// silent, unchanged result proves the gate held.
+			inheritSlingInitiator(&opts, nil, slingInheritEnv(tc.env), &stderr)
 			if opts.Initiator != tc.want {
 				t.Fatalf("Initiator = %q, want %q", opts.Initiator, tc.want)
 			}
@@ -350,18 +362,35 @@ func TestInheritSlingInitiator_Gates(t *testing.T) {
 	}
 }
 
-// TestInheritSlingInitiator_CityStores drives the production source wiring over
-// an on-disk city with a rig: claims in the rig and city stores, assigned to the
-// session's id and name, resolve to the run root's gc.initiator for both a
-// formula sling and a plain bead sling, and claims on two initiators stamp
-// nothing.
-func TestInheritSlingInitiator_CityStores(t *testing.T) {
-	cityDir, rigDir := setupCmdSlingMultiDefaultTargetsFixture(t, nil)
+// inheritCityStoresFixture is an on-disk city with a rig, and its claim stores
+// opened the way cmdSlingWithJSON opens them.
+func inheritCityStoresFixture(t *testing.T) (cityDir, rigDir string, claimStores slingClaimStores) {
+	t.Helper()
+	cityDir, rigDir = setupCmdSlingMultiDefaultTargetsFixture(t, nil)
 	cfg, _, err := loadSlingCityConfig(cityDir)
 	if err != nil {
 		t.Fatalf("loadSlingCityConfig: %v", err)
 	}
 	resolveRigPaths(cityDir, cfg.Rigs)
+	openViews := func() ([]convoyStoreView, []sourceWorkflowStoreSkip, error) {
+		return openSourceWorkflowStoresWithProvider(cfg, cityDir, "", func(scopeRoot string) string {
+			return authoritativeBeadsProviderForScope(scopeRoot, cityDir)
+		}, func(dir string) (beads.Store, error) {
+			return openAuthoritativeStoreAtForCity(dir, cityDir)
+		})
+	}
+	return cityDir, rigDir, slingClaimStoresFor(cfg, cityDir, loadedCityName(cfg, cityDir), openViews)
+}
+
+// TestInheritSlingInitiator_CityStores drives the production claim-store wiring
+// over an on-disk city with a rig: claims in the rig and city stores, assigned
+// to the session's id and name, resolve to the run root's gc.initiator for both
+// a formula sling and a plain bead sling, and claims on two initiators stamp
+// nothing. The claims are sources of poured molecules (molecule_id), which a
+// split city keeps in its scope stores, as it keeps graph step claims in the
+// binding.
+func TestInheritSlingInitiator_CityStores(t *testing.T) {
+	cityDir, rigDir, claimStores := inheritCityStoresFixture(t)
 	rigStore, err := openStoreAtForCity(rigDir, cityDir)
 	if err != nil {
 		t.Fatalf("open rig store: %v", err)
@@ -370,20 +399,8 @@ func TestInheritSlingInitiator_CityStores(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open city store: %v", err)
 	}
-	// deps carries the same source-workflow store opener cmdSlingWithJSON wires.
-	deps := slingDeps{SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
-		views, _, err := openSourceWorkflowStoresWithProvider(cfg, cityDir, "", func(scopeRoot string) string {
-			return authoritativeBeadsProviderForScope(scopeRoot, cityDir)
-		}, func(dir string) (beads.Store, error) {
-			return openAuthoritativeStoreAtForCity(dir, cityDir)
-		})
-		if err != nil {
-			return nil, err
-		}
-		return sourceWorkflowStoresFromViews(cfg, cityDir, loadedCityName(cfg, cityDir), views)
-	}}
 	root := inheritRootWithInitiator(t, rigStore, "alice")
-	inheritClaimFor(t, rigStore, "foundations/worker-a", beadmeta.RootBeadIDMetadataKey, root.ID, nil)
+	inheritClaimFor(t, rigStore, "foundations/worker-a", beadmeta.MoleculeIDMetadataKey, root.ID, nil)
 	env := slingInheritEnv(map[string]string{"GC_SESSION_ID": "gc-no-such-session", "GC_SESSION_NAME": "foundations/worker-a"})
 
 	for _, opts := range []slingOpts{
@@ -391,7 +408,7 @@ func TestInheritSlingInitiator_CityStores(t *testing.T) {
 		{BeadOrFormula: "fo-multi-work"},
 	} {
 		var stderr bytes.Buffer
-		inheritSlingInitiator(&opts, deps, env, &stderr)
+		inheritSlingInitiator(&opts, claimStores, env, &stderr)
 		if opts.Initiator != "alice" {
 			t.Fatalf("%s: Initiator = %q, want alice; stderr=%q", opts.BeadOrFormula, opts.Initiator, stderr.String())
 		}
@@ -401,10 +418,10 @@ func TestInheritSlingInitiator_CityStores(t *testing.T) {
 	}
 
 	other := inheritRootWithInitiator(t, cityStore, "bob")
-	inheritClaimFor(t, cityStore, "gc-no-such-session", beadmeta.RootBeadIDMetadataKey, other.ID, nil)
+	inheritClaimFor(t, cityStore, "gc-no-such-session", beadmeta.MoleculeIDMetadataKey, other.ID, nil)
 	opts := slingOpts{BeadOrFormula: "fo-multi-work"}
 	var stderr bytes.Buffer
-	inheritSlingInitiator(&opts, deps, env, &stderr)
+	inheritSlingInitiator(&opts, claimStores, env, &stderr)
 	if opts.Initiator != "" {
 		t.Fatalf("conflicting claims: Initiator = %q, want none", opts.Initiator)
 	}
@@ -412,5 +429,45 @@ func TestInheritSlingInitiator_CityStores(t *testing.T) {
 		if !strings.Contains(stderr.String(), w) {
 			t.Fatalf("stderr = %q, want root %s named", stderr.String(), w)
 		}
+	}
+}
+
+// TestInheritSlingInitiator_UnopenedClaimStoreStampsNothing proves a claim
+// store that does not open disables inheritance with a warning naming it, even
+// though every claim in the stores that did open agrees: the claims in the
+// unopened store are invisible, and one could name another run.
+func TestInheritSlingInitiator_UnopenedClaimStoreStampsNothing(t *testing.T) {
+	cityDir, rigDir, claimStores := inheritCityStoresFixture(t)
+	cityStore, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("open city store: %v", err)
+	}
+	root := inheritRootWithInitiator(t, cityStore, "alice")
+	inheritClaimFor(t, cityStore, "foundations/worker-a", beadmeta.MoleculeIDMetadataKey, root.ID, nil)
+	env := slingInheritEnv(map[string]string{"GC_SESSION_NAME": "foundations/worker-a"})
+
+	opts := slingOpts{BeadOrFormula: "mol-deploy", IsFormula: true}
+	var stderr bytes.Buffer
+	inheritSlingInitiator(&opts, claimStores, env, &stderr)
+	if opts.Initiator != "alice" || stderr.Len() != 0 {
+		t.Fatalf("with every store open: Initiator = %q, stderr = %q; want alice and no warning", opts.Initiator, stderr.String())
+	}
+
+	if err := os.WriteFile(filepath.Join(rigDir, ".gc", "beads.json"), []byte("not json\n"), 0o644); err != nil {
+		t.Fatalf("corrupting the rig store: %v", err)
+	}
+	opts = slingOpts{BeadOrFormula: "mol-deploy", IsFormula: true}
+	stderr.Reset()
+	inheritSlingInitiator(&opts, claimStores, env, &stderr)
+	if opts.Initiator != "" {
+		t.Fatalf("with the rig store unopened: Initiator = %q, want none", opts.Initiator)
+	}
+	for _, w := range []string{"gc.initiator", "did not open", rigDir} {
+		if !strings.Contains(stderr.String(), w) {
+			t.Fatalf("stderr = %q, want it to mention %q", stderr.String(), w)
+		}
+	}
+	if n := strings.Count(stderr.String(), "\n"); n != 1 {
+		t.Fatalf("stderr has %d lines, want a single warning line: %q", n, stderr.String())
 	}
 }

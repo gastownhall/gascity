@@ -506,6 +506,17 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		}
 	}
 	sourceWorkflowScanWarnings := make(map[string]struct{})
+	// openSourceWorkflowViews opens every candidate source-workflow store
+	// through its authoritative provider. It tolerates a store that fails to
+	// open: the views that opened come back, and each store that did not is
+	// listed as a skip for its caller to judge.
+	openSourceWorkflowViews := func() ([]convoyStoreView, []sourceWorkflowStoreSkip, error) {
+		return openSourceWorkflowStoresWithProvider(cfg, cityPath, "", func(scopeRoot string) string {
+			return authoritativeBeadsProviderForScope(scopeRoot, cityPath)
+		}, func(dir string) (beads.Store, error) {
+			return openAuthoritativeStoreAtForCity(dir, cityPath)
+		})
+	}
 	var eventRecorder events.Recorder
 	if !dryRun {
 		eventRecorder = openCityRecorderAt(cityPath, stderr)
@@ -522,11 +533,7 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		ExecutionWorkStore: executionEmitStore(store, cityPath),
 		StoreRef:           storeRef,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
-			stores, skips, err := openSourceWorkflowStoresWithProvider(cfg, cityPath, "", func(scopeRoot string) string {
-				return authoritativeBeadsProviderForScope(scopeRoot, cityPath)
-			}, func(dir string) (beads.Store, error) {
-				return openAuthoritativeStoreAtForCity(dir, cityPath)
-			})
+			stores, skips, err := openSourceWorkflowViews()
 			unscannedSkips, selectedRecovered := unscannedSourceWorkflowStoreSkips(cfg, cityPath, storeRef, skips)
 			if err != nil && !selectedRecovered {
 				return nil, err
@@ -553,7 +560,7 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		},
 	}
 
-	inheritSlingInitiator(&opts, deps, os.Getenv, stderr)
+	inheritSlingInitiator(&opts, slingClaimStoresFor(cfg, cityPath, cityName, openSourceWorkflowViews), os.Getenv, stderr)
 	return doSlingBatchWithJSON(opts, deps, store, jsonOutput, humanStdout, stdout, stderr)
 }
 
