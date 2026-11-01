@@ -90,6 +90,9 @@ async def check_jwt_compatibility() -> None:
     bad_audience = dict(claims, aud="other-api")
     if await strict_middleware._decode_jwt(token("HS256", bad_audience, hmac_key)) is not None:
         raise AssertionError("token with wrong configured audience was accepted")
+    expired_claims = dict(claims, exp=now - 60)
+    if await strict_middleware._decode_jwt(token("HS256", expired_claims, hmac_key)) is not None:
+        raise AssertionError("expired HS256 token was accepted")
 
     # Exercise the service's JWKS fetch and RS256 verification path locally.
     private_jwk = JsonWebKey.generate_key("RSA", 2048, is_private=True).as_dict(is_private=True)
@@ -106,17 +109,44 @@ async def check_jwt_compatibility() -> None:
     try:
         port = server.sockets[0].getsockname()[1]
         jwks_middleware = middleware(
-            algorithms=["RS256"], jwks_url=f"http://127.0.0.1:{port}/jwks"
+            algorithms=["RS256"],
+            jwks_url=f"http://127.0.0.1:{port}/jwks",
+            issuer="https://issuer.example.test",
+            audience="mail-api",
         )
         rs_token = token(
             "RS256",
-            {"sub": "smoke-user", "role": "reader", "exp": now + 60},
+            {**claims, "sub": "smoke-user", "role": "reader"},
             private_jwk,
             kid="mail-smoke-key",
         )
         rs_decoded = await jwks_middleware._decode_jwt(rs_token)
         if rs_decoded is None or rs_decoded.get("role") != "reader":
             raise AssertionError("valid JWKS-backed RS256 role token was rejected")
+        bad_rs_issuer = token(
+            "RS256",
+            {**claims, "iss": "https://wrong.example.test"},
+            private_jwk,
+            kid="mail-smoke-key",
+        )
+        if await jwks_middleware._decode_jwt(bad_rs_issuer) is not None:
+            raise AssertionError("JWKS-backed token with wrong configured issuer was accepted")
+        bad_rs_audience = token(
+            "RS256",
+            {**claims, "aud": "other-api"},
+            private_jwk,
+            kid="mail-smoke-key",
+        )
+        if await jwks_middleware._decode_jwt(bad_rs_audience) is not None:
+            raise AssertionError("JWKS-backed token with wrong configured audience was accepted")
+        expired_rs_token = token(
+            "RS256",
+            {**expired_claims, "sub": "smoke-user", "role": "reader"},
+            private_jwk,
+            kid="mail-smoke-key",
+        )
+        if await jwks_middleware._decode_jwt(expired_rs_token) is not None:
+            raise AssertionError("expired JWKS-backed RS256 token was accepted")
     finally:
         server.close()
         await server.wait_closed()
