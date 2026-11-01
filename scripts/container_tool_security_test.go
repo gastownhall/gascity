@@ -381,6 +381,102 @@ func TestContainerScanRunsMCPMailGitPythonPathCacheAndBurstGate(t *testing.T) {
 	}
 }
 
+func TestContainerScanRetainsMCPMailBurstDiagnostics(t *testing.T) {
+	root := repoRoot(t)
+	workflow := readFile(t, root, ".github/workflows/container-scan.yml")
+	burstGate := readFile(t, root, ".github/scripts/mcp-mail-archive-burst-ci.py")
+	burst := readFile(t, root, ".github/scripts/mcp-mail-archive-burst.py")
+
+	for _, want := range []string{
+		"docker image inspect",
+		"--samples-dir",
+		"PATCHED_CONTROL_MEDIAN_RATIOS",
+		"limit = 1.25",
+	} {
+		if !strings.Contains(burstGate, want) {
+			t.Errorf("MCP mail burst gate missing diagnostic or acceptance invariant %q", want)
+		}
+	}
+	for _, want := range []string{
+		`current_phase.set("send")`,
+		`current_phase.set("inbox_fetch")`,
+		"storage._CommitRequest.__init__ = tagged_request_init",
+		"storage._CommitQueue._process_batch = tagged_process_batch",
+		"app._instrument_tool = tagged_instrument_tool",
+		`instrument_method(IndexFile, "add", "git_index_add")`,
+		`instrument_method(IndexFile, "commit", "git_index_commit")`,
+		`"send_commit_count"`,
+		`"send_commit_p95"`,
+		`"sample_counts_by_operation_phase"`,
+		`"summary_sha256"`,
+		`"samples": raw_samples`,
+	} {
+		if !strings.Contains(burst, want) {
+			t.Errorf("MCP mail burst workload missing raw diagnostic %q", want)
+		}
+	}
+
+	stepStart := strings.Index(workflow, "- name: Upload MCP mail performance diagnostics")
+	if stepStart < 0 {
+		t.Fatal("container-scan.yml has no raw MCP mail performance artifact upload")
+	}
+	step := workflow[stepStart:]
+	if next := strings.Index(step[1:], "\n      - name: "); next >= 0 {
+		step = step[:next+1]
+	}
+	for _, want := range []string{
+		"if: ${{ always() }}",
+		"actions/upload-artifact@",
+		"mcp-mail-performance-${{ github.sha }}-${{ github.run_attempt }}",
+		"${{ runner.temp }}/gascity-mail-samples/",
+		"retention-days: 30",
+	} {
+		if !strings.Contains(step, want) {
+			t.Errorf("MCP mail diagnostics upload is missing %q", want)
+		}
+	}
+}
+
+func TestContainerScanPublishesOnlyVerifiedC14ImageCustody(t *testing.T) {
+	workflow := readFile(t, repoRoot(t), ".github/workflows/container-scan.yml")
+	imageJobStart := strings.Index(workflow, "  image-vulnerabilities:")
+	publishJobStart := strings.Index(workflow, "  publish-c14-image-custody:")
+	if imageJobStart < 0 || publishJobStart < imageJobStart {
+		t.Fatal("container-scan.yml is missing its image scan or C14 custody job")
+	}
+	imageJob := workflow[imageJobStart:publishJobStart]
+	publishJob := workflow[publishJobStart:]
+	if strings.Contains(imageJob, "packages: write") {
+		t.Fatal("the scanner/build job must not receive package write permission")
+	}
+	for _, want := range []string{
+		"if: ${{ github.event_name == 'workflow_dispatch' && success() }}",
+		"docker image save",
+		"c14-verified-images-${{ github.sha }}",
+		"org.opencontainers.image.source",
+	} {
+		if !strings.Contains(imageJob, want) {
+			t.Errorf("image scan job is missing exact-source custody export guard %q", want)
+		}
+	}
+	for _, want := range []string{
+		"needs: [runner-policy, dockerfile-config, image-vulnerabilities]",
+		"github.event_name == 'workflow_dispatch'",
+		"github.repository == 'chris-sanders/gascity'",
+		"github.ref == 'refs/heads/codex/gascity-final01-c14-7472f-20261101'",
+		"packages: write",
+		"c14-verified-images-${{ github.sha }}",
+		"docker push",
+		"digest_ref",
+		"docker pull \"${package}@${digest}\"",
+		"anonymous_pull: \"passed\"",
+	} {
+		if !strings.Contains(publishJob, want) {
+			t.Errorf("C14 image custody job is missing %q", want)
+		}
+	}
+}
+
 // TestContainerScanRunsMCPMailFilelockExitRegression keeps the filelock exit
 // regression running against the built gc-mcp-mail image. A text pin can say
 // which filelock the lock names; only this run shows that the image's actual
