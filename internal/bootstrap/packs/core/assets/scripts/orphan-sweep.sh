@@ -358,7 +358,8 @@ session_probe_failure_is_unverifiable() {
 
 # probe_session_candidate reads one candidate session bead id. It returns 0
 # when the bead is a live session answering to the assignee, 2 when the read
-# is unverifiable, and 1 otherwise. A candidate that reads back as its own
+# is unverifiable, 3 when the bead it read could not be parsed, and 1
+# otherwise. A candidate that reads back as its own
 # terminal session bead is appended to PROBE_TERMINAL_SESSIONS.
 PROBE_TERMINAL_SESSIONS=""
 probe_session_candidate() {
@@ -394,7 +395,7 @@ probe_session_candidate() {
         )
         | .id // empty
     " 2>/dev/null); then
-        return 2
+        return 3
     fi
     if [ -n "$live_match" ]; then
         return 0
@@ -422,6 +423,14 @@ probe_session_candidate() {
 # that repeats a candidate, or that is the runtime name of a session bead the
 # sweep read back terminal, adds no evidence; any other name is probed, since
 # a legacy pool seat's session bead id can be its runtime name.
+# SESSION_PROBE_UNREADABLE names the candidates that left the holder
+# unverifiable.
+SESSION_PROBE_UNREADABLE=""
+record_unreadable_probe() {
+    local what="$1"
+    SESSION_PROBE_UNREADABLE="${SESSION_PROBE_UNREADABLE:+$SESSION_PROBE_UNREADABLE, }$what"
+}
+
 session_bead_shows_live_assignment() {
     local assignee="$1"
     local work_json="$2"
@@ -433,6 +442,7 @@ session_bead_shows_live_assignment() {
     local rc
 
     PROBE_TERMINAL_SESSIONS=""
+    SESSION_PROBE_UNREADABLE=""
     while IFS= read -r session_id; do
         [ -n "$session_id" ] || continue
         probed="${probed}${session_id}"$'\n'
@@ -440,7 +450,8 @@ session_bead_shows_live_assignment() {
         probe_session_candidate "$session_id" "$assignee" || rc=$?
         case "$rc" in
             0) return 0 ;;
-            2) probe_failed=1 ;;
+            2) probe_failed=1 && record_unreadable_probe "$session_id" ;;
+            3) probe_failed=1 && record_unreadable_probe "$session_id (unparseable)" ;;
         esac
     done < <(session_bead_candidates "$assignee" "$work_json")
 
@@ -458,7 +469,8 @@ session_bead_shows_live_assignment() {
             probe_session_candidate "$stamped_name" "$assignee" || rc=$?
             case "$rc" in
                 0) return 0 ;;
-                2) probe_failed=1 ;;
+                2) probe_failed=1 && record_unreadable_probe "$stamped_name" ;;
+                3) probe_failed=1 && record_unreadable_probe "$stamped_name (unparseable)" ;;
             esac
         fi
     fi
@@ -753,6 +765,7 @@ while IFS=$'\t' read -r bead_id assignee; do
         recheck_status=$?
         if [ "$recheck_status" != "2" ]; then
             UNVERIFIABLE=$((UNVERIFIABLE + 1))
+            order_outcome_scope_skipped "$bead_id" "work bead could not be re-read as still in_progress under $assignee; claim left in place"
         fi
         continue
     fi
@@ -762,6 +775,7 @@ while IFS=$'\t' read -r bead_id assignee; do
         session_status=$?
         if [ "$session_status" = "2" ]; then
             UNVERIFIABLE=$((UNVERIFIABLE + 1))
+            order_outcome_scope_skipped "$bead_id" "holder $assignee is not verifiably dead: could not read ${SESSION_PROBE_UNREADABLE:-its session records}; claim left in place"
             continue
         fi
     fi
@@ -771,6 +785,7 @@ while IFS=$'\t' read -r bead_id assignee; do
         reset_status=$?
         if [ "$reset_status" != "2" ]; then
             UNVERIFIABLE=$((UNVERIFIABLE + 1))
+            order_outcome_scope_skipped "$bead_id" "conditional release under $assignee failed; claim left in place"
         fi
     fi
 done < <([ -z "$UNRECOGNIZED_ROWS" ] || printf '%s\n' "$UNRECOGNIZED_ROWS")
@@ -803,6 +818,10 @@ if [ "$PROTECTED" -gt 0 ]; then
         PROTECTED_DETAIL="$PROTECTED_DETAIL
 orphan-sweep: foreign-identity gate budget of ${GATE_BUDGET_SECONDS}s exhausted; $GATE_BUDGET_SKIPPED identities not asked this pass"
     fi
+fi
+
+if [ "$UNVERIFIABLE" -gt 0 ]; then
+    order_outcome_set partial "left $UNVERIFIABLE local claim(s) in place: the holder could not be verified dead or the claim could not be released; each scope names the bead and why"
 fi
 
 if [ "$ORPHANED" -gt 0 ] || [ "$UNVERIFIABLE" -gt 0 ] || [ "$PROTECTED" -gt 0 ]; then
@@ -838,10 +857,12 @@ misidentified live session -- inspect via gc bd show <id> --json." \
     fi
 fi
 
-# Declare protected claims as a partial outcome: the controller logs an exit-0
-# run's output nowhere, but turns this declaration into a typed order.skipped
-# event naming each protected identity (order_outcome.sh). A no-op when nothing
-# was protected or when run by hand without GC_ORDER_OUTCOME_FILE.
+# Declare protected claims and local claims left in place as a partial
+# outcome: the controller logs an exit-0 run's output nowhere, but turns this
+# declaration into a typed order.skipped event naming each protected identity
+# and each local claim left in place (order_outcome.sh). A no-op when nothing
+# was protected or left in place, or when run by hand without
+# GC_ORDER_OUTCOME_FILE.
 order_outcome_write
 
 # Loud-fail: the summary has been printed above, so a non-zero exit now
