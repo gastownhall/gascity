@@ -1220,3 +1220,164 @@ func TestRuntimeLeaseHeldAt(t *testing.T) {
 		t.Fatal("a nil lease reads held")
 	}
 }
+
+// countingLeaseStore counts the store calls made while armed. It hides
+// conditional writes, so every record write is a plain call it sees.
+type countingLeaseStore struct {
+	beads.Store
+	armed atomic.Bool
+	calls atomic.Int32
+}
+
+func (s *countingLeaseStore) note() {
+	if s.armed.Load() {
+		s.calls.Add(1)
+	}
+}
+
+func (s *countingLeaseStore) Get(id string) (beads.Bead, error) { s.note(); return s.Store.Get(id) }
+func (s *countingLeaseStore) Update(id string, opts beads.UpdateOpts) error {
+	s.note()
+	return s.Store.Update(id, opts)
+}
+
+func (s *countingLeaseStore) SetMetadata(id, k, v string) error {
+	s.note()
+	return s.Store.SetMetadata(id, k, v)
+}
+
+func (s *countingLeaseStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.note()
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+func (s *countingLeaseStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.note()
+	return s.Store.List(q)
+}
+
+// TestRuntimeLeaseAbandon (ga-hlod480): Abandon drops the name's flock and
+// nothing else. It makes no store call, reads included, leaves the row's
+// record and the lock file's body as they were, ends the watchers with
+// ErrRuntimeLeaseReleased, and shares its once with Release, so whichever
+// drop comes first wins and the other is a no-op. Kills an Abandon that
+// clears the record (a store call and a changed row), one that keeps the
+// flock, one that leaves a watcher running, and one that lets a later Release
+// clear the record it was told to leave.
+func TestRuntimeLeaseAbandon(t *testing.T) {
+	onHost(t, "host-a")
+	city := t.TempDir()
+	counting := &countingLeaseStore{Store: beads.NewMemStore()}
+	f := leaseFixtureOver(t, counting)
+	l, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	watched, cancel, err := l.Watch(context.Background(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	before := f.meta(t)
+	body, err := os.ReadFile(l.lock.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	counting.armed.Store(true)
+	l.Abandon()
+	counting.armed.Store(false)
+	if n := counting.calls.Load(); n != 0 {
+		t.Fatalf("Abandon made %d store calls, want 0", n)
+	}
+	if !errors.Is(context.Cause(watched), ErrRuntimeLeaseReleased) {
+		t.Fatalf("watcher after Abandon = %v, want ErrRuntimeLeaseReleased", context.Cause(watched))
+	}
+	after := f.meta(t)
+	if fmt.Sprint(before) != fmt.Sprint(after) || after[RuntimeLeaseHolderKey] == "" {
+		t.Fatalf("record after Abandon = %v, want %v unchanged", after, before)
+	}
+	if got, err := os.ReadFile(l.lock.Name()); err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("lock file body after Abandon = %q, %v; want %q", got, err, body)
+	}
+
+	// The flock is free at once for a second in-process acquirer, which finds
+	// the record the abandoned lease left (its holder is this live process).
+	flockOnly, err := TryRuntimeLease(nil, RuntimeLeaseRequest{City: city, Name: "s-lease"})
+	if err != nil {
+		t.Fatalf("flock after Abandon: %v, want it free", err)
+	}
+	flockOnly.Release()
+
+	// A later Release is a no-op: it does not clear the record Abandon left.
+	l.Release()
+	if err := l.ReleaseChecked(); err != nil {
+		t.Fatalf("ReleaseChecked after Abandon = %v, want nil", err)
+	}
+	if got := f.meta(t); fmt.Sprint(got) != fmt.Sprint(before) {
+		t.Fatalf("record after Abandon then Release = %v, want %v", got, before)
+	}
+	l.Abandon() // idempotent
+}
+
+// TestRuntimeLeaseAbandonAfterReleaseIsANoOp: the first drop wins. A lease
+// released has cleared its record and freed its flock; an Abandon after it
+// touches neither, and a nil lease abandons nothing.
+func TestRuntimeLeaseAbandonAfterReleaseIsANoOp(t *testing.T) {
+	onHost(t, "host-a")
+	city := t.TempDir()
+	f := newLeaseFixture(t)
+	l, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Release()
+	cleared := f.meta(t)
+	next, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Abandon() // must not drop next's flock: it is a different lease
+	if _, err := TryRuntimeLease(nil, RuntimeLeaseRequest{City: city, Name: "s-lease"}); !errors.Is(err, ErrRuntimeLeaseBusy) {
+		t.Fatalf("an Abandon of a released lease freed another holder's flock: %v", err)
+	}
+	next.Release()
+	if cleared[RuntimeLeaseHolderKey] != "" {
+		t.Fatalf("record after Release = %v", cleared)
+	}
+	var nilLease *RuntimeLease
+	nilLease.Abandon()
+}
+
+// TestRuntimeLeaseAbandonedRecordHoldsButTheFlockIsFree: after Abandon the
+// record still satisfies HoldsMeta (the released flag is not part of it), so
+// the abandon hand-off, not the lease, must keep a late commit out. The dead
+// holder proof frees the name for the next acquirer without waiting for
+// expiry.
+func TestRuntimeLeaseAbandonedRecordHoldsButTheFlockIsFree(t *testing.T) {
+	if runtimeLeaseBootID() == "" {
+		t.Skip("no boot ID on this platform")
+	}
+	onHost(t, "host-a")
+	city := t.TempDir()
+	f := newLeaseFixture(t)
+	l, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Abandon()
+	if !l.HoldsMeta(f.meta(t)) {
+		t.Fatal("HoldsMeta after Abandon = false; the record is left to lapse and still names this lease")
+	}
+	// A contender in this process: the flock is free, and the record names a
+	// holder whose flock the proof finds gone, so the name is takeable at once
+	// at the next epoch, not at record expiry.
+	next, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatalf("takeover of an abandoned lease: %v, want the name takeable at once", err)
+	}
+	if next.Epoch() != l.Epoch()+1 {
+		t.Fatalf("takeover epoch = %d, want %d", next.Epoch(), l.Epoch()+1)
+	}
+	next.Release()
+}
