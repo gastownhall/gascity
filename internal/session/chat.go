@@ -2043,6 +2043,14 @@ func (m *Manager) PendingByName(sessName string) (*runtime.PendingInteraction, b
 	return pending, true, nil
 }
 
+// ProgramStatusByName reads the judged OSC 7501 program status of the runtime
+// session sessName from the backend serving it (runtime.ReadProgramStatus):
+// an Unread reading when that backend takes no such reading, otherwise the
+// backend's reading and error unchanged. It is observation only.
+func (m *Manager) ProgramStatusByName(sessName string) (runtime.ProgramStatus, error) {
+	return runtime.ReadProgramStatus(m.sp, sessName)
+}
+
 // Respond resolves the current pending interaction for a session.
 func (m *Manager) Respond(id string, response runtime.InteractionResponse) error {
 	return m.respond(id, response, func(ip runtime.InteractionProvider, sessName string, response runtime.InteractionResponse) error {

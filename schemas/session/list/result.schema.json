@@ -258,6 +258,53 @@
               },
               "last_output": {
                 "type": "string"
+              },
+              "program_status": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "The session program's own status report (OSC 7501), present while the city's program_status switch is shadow or on and the reading is valid. Absent means unknown, never idle.",
+                "required": [
+                  "state",
+                  "since",
+                  "working_children"
+                ],
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "idle",
+                      "working",
+                      "done",
+                      "blocked",
+                      "error"
+                    ]
+                  },
+                  "kind": {
+                    "enum": [
+                      "permission",
+                      "question",
+                      "auth"
+                    ]
+                  },
+                  "app": {
+                    "type": "string"
+                  },
+                  "progress": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "since": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "quiet_since": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "working_children": {
+                    "type": "integer"
+                  }
+                }
               }
             }
           }

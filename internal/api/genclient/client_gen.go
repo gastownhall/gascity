@@ -18,6 +18,24 @@ import (
 	"github.com/oapi-codegen/runtime"
 )
 
+// Defines values for AgentResponseActivitySource.
+const (
+	AgentResponseActivitySourceProgram    AgentResponseActivitySource = "program"
+	AgentResponseActivitySourceTranscript AgentResponseActivitySource = "transcript"
+)
+
+// Valid indicates whether the value is a known member of the AgentResponseActivitySource enum.
+func (e AgentResponseActivitySource) Valid() bool {
+	switch e {
+	case AgentResponseActivitySourceProgram:
+		return true
+	case AgentResponseActivitySourceTranscript:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for BeadGraphResponseMembership.
 const (
 	DirectRootIdParentClosure              BeadGraphResponseMembership = "direct-root-id+parent-closure"
@@ -831,21 +849,69 @@ func (e SessionPendingClearedPayloadReason) Valid() bool {
 	}
 }
 
+// Defines values for SessionProgramStatusKind.
+const (
+	SessionProgramStatusKindAuth       SessionProgramStatusKind = "auth"
+	SessionProgramStatusKindPermission SessionProgramStatusKind = "permission"
+	SessionProgramStatusKindQuestion   SessionProgramStatusKind = "question"
+)
+
+// Valid indicates whether the value is a known member of the SessionProgramStatusKind enum.
+func (e SessionProgramStatusKind) Valid() bool {
+	switch e {
+	case SessionProgramStatusKindAuth:
+		return true
+	case SessionProgramStatusKindPermission:
+		return true
+	case SessionProgramStatusKindQuestion:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionProgramStatusState.
+const (
+	SessionProgramStatusStateBlocked SessionProgramStatusState = "blocked"
+	SessionProgramStatusStateDone    SessionProgramStatusState = "done"
+	SessionProgramStatusStateError   SessionProgramStatusState = "error"
+	SessionProgramStatusStateIdle    SessionProgramStatusState = "idle"
+	SessionProgramStatusStateWorking SessionProgramStatusState = "working"
+)
+
+// Valid indicates whether the value is a known member of the SessionProgramStatusState enum.
+func (e SessionProgramStatusState) Valid() bool {
+	switch e {
+	case SessionProgramStatusStateBlocked:
+		return true
+	case SessionProgramStatusStateDone:
+		return true
+	case SessionProgramStatusStateError:
+		return true
+	case SessionProgramStatusStateIdle:
+		return true
+	case SessionProgramStatusStateWorking:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for SessionProgramStatusShadowPayloadKind.
 const (
-	Auth       SessionProgramStatusShadowPayloadKind = "auth"
-	Permission SessionProgramStatusShadowPayloadKind = "permission"
-	Question   SessionProgramStatusShadowPayloadKind = "question"
+	SessionProgramStatusShadowPayloadKindAuth       SessionProgramStatusShadowPayloadKind = "auth"
+	SessionProgramStatusShadowPayloadKindPermission SessionProgramStatusShadowPayloadKind = "permission"
+	SessionProgramStatusShadowPayloadKindQuestion   SessionProgramStatusShadowPayloadKind = "question"
 )
 
 // Valid indicates whether the value is a known member of the SessionProgramStatusShadowPayloadKind enum.
 func (e SessionProgramStatusShadowPayloadKind) Valid() bool {
 	switch e {
-	case Auth:
+	case SessionProgramStatusShadowPayloadKindAuth:
 		return true
-	case Permission:
+	case SessionProgramStatusShadowPayloadKindPermission:
 		return true
-	case Question:
+	case SessionProgramStatusShadowPayloadKindQuestion:
 		return true
 	default:
 		return false
@@ -854,58 +920,58 @@ func (e SessionProgramStatusShadowPayloadKind) Valid() bool {
 
 // Defines values for SessionProgramStatusShadowPayloadPoint.
 const (
-	SessionProgramStatusShadowPayloadPointClaimNudgeHold    SessionProgramStatusShadowPayloadPoint = "claim_nudge_hold"
-	SessionProgramStatusShadowPayloadPointDrainReminder     SessionProgramStatusShadowPayloadPoint = "drain_reminder"
-	SessionProgramStatusShadowPayloadPointEscapeResend      SessionProgramStatusShadowPayloadPoint = "escape_resend"
-	SessionProgramStatusShadowPayloadPointExecutionBackstop SessionProgramStatusShadowPayloadPoint = "execution_backstop"
-	SessionProgramStatusShadowPayloadPointInterruptSettle   SessionProgramStatusShadowPayloadPoint = "interrupt_settle"
-	SessionProgramStatusShadowPayloadPointObservation       SessionProgramStatusShadowPayloadPoint = "observation"
-	SessionProgramStatusShadowPayloadPointPending           SessionProgramStatusShadowPayloadPoint = "pending"
-	SessionProgramStatusShadowPayloadPointProvedIdle        SessionProgramStatusShadowPayloadPoint = "proved_idle"
-	SessionProgramStatusShadowPayloadPointQueuedDelivery    SessionProgramStatusShadowPayloadPoint = "queued_delivery"
-	SessionProgramStatusShadowPayloadPointReadiness         SessionProgramStatusShadowPayloadPoint = "readiness"
-	SessionProgramStatusShadowPayloadPointStartupLadder     SessionProgramStatusShadowPayloadPoint = "startup_ladder"
-	SessionProgramStatusShadowPayloadPointSubmitConfirm     SessionProgramStatusShadowPayloadPoint = "submit_confirm"
-	SessionProgramStatusShadowPayloadPointTypingGate        SessionProgramStatusShadowPayloadPoint = "typing_gate"
-	SessionProgramStatusShadowPayloadPointWaitForIdle       SessionProgramStatusShadowPayloadPoint = "wait_for_idle"
-	SessionProgramStatusShadowPayloadPointWaitIdlePreread   SessionProgramStatusShadowPayloadPoint = "wait_idle_preread"
-	SessionProgramStatusShadowPayloadPointWorkLadder        SessionProgramStatusShadowPayloadPoint = "work_ladder"
+	ClaimNudgeHold    SessionProgramStatusShadowPayloadPoint = "claim_nudge_hold"
+	DrainReminder     SessionProgramStatusShadowPayloadPoint = "drain_reminder"
+	EscapeResend      SessionProgramStatusShadowPayloadPoint = "escape_resend"
+	ExecutionBackstop SessionProgramStatusShadowPayloadPoint = "execution_backstop"
+	InterruptSettle   SessionProgramStatusShadowPayloadPoint = "interrupt_settle"
+	Observation       SessionProgramStatusShadowPayloadPoint = "observation"
+	Pending           SessionProgramStatusShadowPayloadPoint = "pending"
+	ProvedIdle        SessionProgramStatusShadowPayloadPoint = "proved_idle"
+	QueuedDelivery    SessionProgramStatusShadowPayloadPoint = "queued_delivery"
+	Readiness         SessionProgramStatusShadowPayloadPoint = "readiness"
+	StartupLadder     SessionProgramStatusShadowPayloadPoint = "startup_ladder"
+	SubmitConfirm     SessionProgramStatusShadowPayloadPoint = "submit_confirm"
+	TypingGate        SessionProgramStatusShadowPayloadPoint = "typing_gate"
+	WaitForIdle       SessionProgramStatusShadowPayloadPoint = "wait_for_idle"
+	WaitIdlePreread   SessionProgramStatusShadowPayloadPoint = "wait_idle_preread"
+	WorkLadder        SessionProgramStatusShadowPayloadPoint = "work_ladder"
 )
 
 // Valid indicates whether the value is a known member of the SessionProgramStatusShadowPayloadPoint enum.
 func (e SessionProgramStatusShadowPayloadPoint) Valid() bool {
 	switch e {
-	case SessionProgramStatusShadowPayloadPointClaimNudgeHold:
+	case ClaimNudgeHold:
 		return true
-	case SessionProgramStatusShadowPayloadPointDrainReminder:
+	case DrainReminder:
 		return true
-	case SessionProgramStatusShadowPayloadPointEscapeResend:
+	case EscapeResend:
 		return true
-	case SessionProgramStatusShadowPayloadPointExecutionBackstop:
+	case ExecutionBackstop:
 		return true
-	case SessionProgramStatusShadowPayloadPointInterruptSettle:
+	case InterruptSettle:
 		return true
-	case SessionProgramStatusShadowPayloadPointObservation:
+	case Observation:
 		return true
-	case SessionProgramStatusShadowPayloadPointPending:
+	case Pending:
 		return true
-	case SessionProgramStatusShadowPayloadPointProvedIdle:
+	case ProvedIdle:
 		return true
-	case SessionProgramStatusShadowPayloadPointQueuedDelivery:
+	case QueuedDelivery:
 		return true
-	case SessionProgramStatusShadowPayloadPointReadiness:
+	case Readiness:
 		return true
-	case SessionProgramStatusShadowPayloadPointStartupLadder:
+	case StartupLadder:
 		return true
-	case SessionProgramStatusShadowPayloadPointSubmitConfirm:
+	case SubmitConfirm:
 		return true
-	case SessionProgramStatusShadowPayloadPointTypingGate:
+	case TypingGate:
 		return true
-	case SessionProgramStatusShadowPayloadPointWaitForIdle:
+	case WaitForIdle:
 		return true
-	case SessionProgramStatusShadowPayloadPointWaitIdlePreread:
+	case WaitIdlePreread:
 		return true
-	case SessionProgramStatusShadowPayloadPointWorkLadder:
+	case WorkLadder:
 		return true
 	default:
 		return false
@@ -1080,6 +1146,24 @@ func (e SessionProgramStatusShadowPayloadValidity) Valid() bool {
 	case Unread:
 		return true
 	case Valid:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionResponseActivitySource.
+const (
+	SessionResponseActivitySourceProgram    SessionResponseActivitySource = "program"
+	SessionResponseActivitySourceTranscript SessionResponseActivitySource = "transcript"
+)
+
+// Valid indicates whether the value is a known member of the SessionResponseActivitySource enum.
+func (e SessionResponseActivitySource) Valid() bool {
+	switch e {
+	case SessionResponseActivitySourceProgram:
+		return true
+	case SessionResponseActivitySourceTranscript:
 		return true
 	default:
 		return false
@@ -2151,30 +2235,39 @@ type AgentPatchSetInputBody struct {
 
 // AgentResponse defines model for AgentResponse.
 type AgentResponse struct {
-	ActiveBead    *string `json:"active_bead,omitempty"`
-	Activity      *string `json:"activity,omitempty"`
-	Available     bool    `json:"available"`
-	ContextPct    *int64  `json:"context_pct,omitempty"`
-	ContextWindow *int64  `json:"context_window,omitempty"`
-	Description   *string `json:"description,omitempty"`
-	DisplayName   *string `json:"display_name,omitempty"`
-	LastOutput    *string `json:"last_output,omitempty"`
-	Model         *string `json:"model,omitempty"`
-	Name          string  `json:"name"`
-	Pack          *string `json:"pack,omitempty"`
-	PackDerived   bool    `json:"pack_derived"`
+	ActiveBead *string `json:"active_bead,omitempty"`
+	Activity   *string `json:"activity,omitempty"`
+
+	// ActivitySource Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.
+	ActivitySource *AgentResponseActivitySource `json:"activity_source,omitempty"`
+	Available      bool                         `json:"available"`
+	ContextPct     *int64                       `json:"context_pct,omitempty"`
+	ContextWindow  *int64                       `json:"context_window,omitempty"`
+	Description    *string                      `json:"description,omitempty"`
+	DisplayName    *string                      `json:"display_name,omitempty"`
+	LastOutput     *string                      `json:"last_output,omitempty"`
+	Model          *string                      `json:"model,omitempty"`
+	Name           string                       `json:"name"`
+	Pack           *string                      `json:"pack,omitempty"`
+	PackDerived    bool                         `json:"pack_derived"`
 
 	// Pool Qualified name of the configured pool this row belongs to. Equals name on the row for an on-demand pool that has no live session.
-	Pool              *string      `json:"pool,omitempty"`
-	PoolLimits        *PoolLimits  `json:"pool_limits,omitempty"`
-	Provider          *string      `json:"provider,omitempty"`
-	Rig               *string      `json:"rig,omitempty"`
-	Running           bool         `json:"running"`
-	Session           *SessionInfo `json:"session,omitempty"`
-	State             string       `json:"state"`
-	Suspended         bool         `json:"suspended"`
-	UnavailableReason *string      `json:"unavailable_reason,omitempty"`
+	Pool          *string               `json:"pool,omitempty"`
+	PoolLimits    *PoolLimits           `json:"pool_limits,omitempty"`
+	ProgramStatus *SessionProgramStatus `json:"program_status,omitempty"`
+	Provider      *string               `json:"provider,omitempty"`
+	Rig           *string               `json:"rig,omitempty"`
+	Running       bool                  `json:"running"`
+	Session       *SessionInfo          `json:"session,omitempty"`
+
+	// State Agent state: suspended, quarantined, stopped, working, waiting, idle, blocked or error. blocked and error come only from the session program's own status report, under the city's program_status switch on.
+	State             string  `json:"state"`
+	Suspended         bool    `json:"suspended"`
+	UnavailableReason *string `json:"unavailable_reason,omitempty"`
 }
+
+// AgentResponseActivitySource Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.
+type AgentResponseActivitySource string
 
 // AgentUpdateInputBody defines model for AgentUpdateInputBody.
 type AgentUpdateInputBody struct {
@@ -5253,7 +5346,7 @@ type ServiceRestartOutputBody struct {
 
 // SessionActivityEvent defines model for SessionActivityEvent.
 type SessionActivityEvent struct {
-	// Activity Session activity state: 'idle' or 'in-turn'.
+	// Activity Session activity state: 'idle' or 'in-turn', derived from the transcript under every program_status switch. The session program's own status arrives in the program_status frame.
 	Activity string `json:"activity"`
 }
 
@@ -5507,6 +5600,41 @@ type SessionPoolSlotRetiredAtDrainDeadlinePayload struct {
 	Template *string `json:"template,omitempty"`
 }
 
+// SessionProgramStatus defines model for SessionProgramStatus.
+type SessionProgramStatus struct {
+	// App The program's self-reported name.
+	App *string `json:"app,omitempty"`
+
+	// Kind What a blocked program waits for, when it says. Only with state blocked.
+	Kind *SessionProgramStatusKind `json:"kind,omitempty"`
+
+	// Progress Percent complete the program reports, only with working or blocked.
+	Progress *int64 `json:"progress,omitempty"`
+
+	// QuietSince When the program last left working or blocked for an input boundary; absent if it never has in this capture.
+	QuietSince *time.Time `json:"quiet_since,omitempty"`
+
+	// Since When the program entered state, by the capture host's clock.
+	Since time.Time `json:"since"`
+
+	// State The state the program reports. done and error are input boundaries like idle (error is a failed turn with the program alive); blocked is waiting on the user.
+	State SessionProgramStatusState `json:"state"`
+
+	// WorkingChildren Child tasks the program reports as working.
+	WorkingChildren int64 `json:"working_children"`
+}
+
+// SessionProgramStatusKind What a blocked program waits for, when it says. Only with state blocked.
+type SessionProgramStatusKind string
+
+// SessionProgramStatusState The state the program reports. done and error are input boundaries like idle (error is a failed turn with the program alive); blocked is waiting on the user.
+type SessionProgramStatusState string
+
+// SessionProgramStatusEvent defines model for SessionProgramStatusEvent.
+type SessionProgramStatusEvent struct {
+	ProgramStatus *SessionProgramStatus `json:"program_status,omitempty"`
+}
+
 // SessionProgramStatusShadowPayload defines model for SessionProgramStatusShadowPayload.
 type SessionProgramStatusShadowPayload struct {
 	// Agree Whether the two readings agree.
@@ -5623,28 +5751,32 @@ type SessionRespondOutputBody struct {
 
 // SessionResponse defines model for SessionResponse.
 type SessionResponse struct {
-	ActiveBead             *string            `json:"active_bead,omitempty"`
-	Activity               *string            `json:"activity,omitempty"`
-	AgentKind              *string            `json:"agent_kind,omitempty"`
-	Alias                  *string            `json:"alias,omitempty"`
-	Attached               bool               `json:"attached"`
-	ConfiguredNamedSession *bool              `json:"configured_named_session,omitempty"`
-	ContextPct             *int64             `json:"context_pct,omitempty"`
-	ContextWindow          *int64             `json:"context_window,omitempty"`
-	CreatedAt              string             `json:"created_at"`
-	DisplayName            *string            `json:"display_name,omitempty"`
-	Id                     string             `json:"id"`
-	Kind                   *string            `json:"kind,omitempty"`
-	LastActive             *string            `json:"last_active,omitempty"`
-	LastNudgeDeliveredAt   *string            `json:"last_nudge_delivered_at,omitempty"`
-	LastOutput             *string            `json:"last_output,omitempty"`
-	Metadata               *map[string]string `json:"metadata,omitempty"`
-	Model                  *string            `json:"model,omitempty"`
-	Options                *map[string]string `json:"options,omitempty"`
-	Pool                   *string            `json:"pool,omitempty"`
-	Provider               string             `json:"provider"`
-	Reason                 *string            `json:"reason,omitempty"`
-	Rig                    *string            `json:"rig,omitempty"`
+	ActiveBead *string `json:"active_bead,omitempty"`
+	Activity   *string `json:"activity,omitempty"`
+
+	// ActivitySource Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.
+	ActivitySource         *SessionResponseActivitySource `json:"activity_source,omitempty"`
+	AgentKind              *string                        `json:"agent_kind,omitempty"`
+	Alias                  *string                        `json:"alias,omitempty"`
+	Attached               bool                           `json:"attached"`
+	ConfiguredNamedSession *bool                          `json:"configured_named_session,omitempty"`
+	ContextPct             *int64                         `json:"context_pct,omitempty"`
+	ContextWindow          *int64                         `json:"context_window,omitempty"`
+	CreatedAt              string                         `json:"created_at"`
+	DisplayName            *string                        `json:"display_name,omitempty"`
+	Id                     string                         `json:"id"`
+	Kind                   *string                        `json:"kind,omitempty"`
+	LastActive             *string                        `json:"last_active,omitempty"`
+	LastNudgeDeliveredAt   *string                        `json:"last_nudge_delivered_at,omitempty"`
+	LastOutput             *string                        `json:"last_output,omitempty"`
+	Metadata               *map[string]string             `json:"metadata,omitempty"`
+	Model                  *string                        `json:"model,omitempty"`
+	Options                *map[string]string             `json:"options,omitempty"`
+	Pool                   *string                        `json:"pool,omitempty"`
+	ProgramStatus          *SessionProgramStatus          `json:"program_status,omitempty"`
+	Provider               string                         `json:"provider"`
+	Reason                 *string                        `json:"reason,omitempty"`
+	Rig                    *string                        `json:"rig,omitempty"`
 
 	// Running Whether the session's runtime was live when this response was built, in any open state. It observes the runtime, not the agent: on tmux it is true while the session has a pane whose process has not exited, so a pane still running a launch wrapper or shell before the agent starts reads true, and a pane kept by remain-on-exit after its process exited reads false. GET /session/{id} and GET /sessions read the same probe, which tmux serves from a fleet snapshot refreshed at most every 2 s. Point-in-time: a session in a transitional state (creating, start-pending, draining) can start or stop its process right after; a client confirming quiescence should re-read after its last transition settles.
 	Running                bool                    `json:"running"`
@@ -5656,6 +5788,9 @@ type SessionResponse struct {
 	Turn                   *SessionTurn            `json:"turn,omitempty"`
 	WorkDir                *string                 `json:"work_dir,omitempty"`
 }
+
+// SessionResponseActivitySource Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.
+type SessionResponseActivitySource string
 
 // SessionStopBody defines model for SessionStopBody.
 type SessionStopBody struct {
@@ -5697,7 +5832,7 @@ type SessionStrandedPayload struct {
 	WorkBeadIds *[]string `json:"work_bead_ids,omitempty"`
 }
 
-// SessionStreamCommonEvent Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
+// SessionStreamCommonEvent Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, program-status changes, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
 type SessionStreamCommonEvent struct {
 	union json.RawMessage
 }
@@ -15432,6 +15567,32 @@ func (t *SessionStreamCommonEvent) FromSessionPendingClearedEvent(v SessionPendi
 
 // MergeSessionPendingClearedEvent performs a merge with any union data inside the SessionStreamCommonEvent, using the provided SessionPendingClearedEvent
 func (t *SessionStreamCommonEvent) MergeSessionPendingClearedEvent(v SessionPendingClearedEvent) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionProgramStatusEvent returns the union data inside the SessionStreamCommonEvent as a SessionProgramStatusEvent
+func (t SessionStreamCommonEvent) AsSessionProgramStatusEvent() (SessionProgramStatusEvent, error) {
+	var body SessionProgramStatusEvent
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionProgramStatusEvent overwrites any union data inside the SessionStreamCommonEvent as the provided SessionProgramStatusEvent
+func (t *SessionStreamCommonEvent) FromSessionProgramStatusEvent(v SessionProgramStatusEvent) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionProgramStatusEvent performs a merge with any union data inside the SessionStreamCommonEvent, using the provided SessionProgramStatusEvent
+func (t *SessionStreamCommonEvent) MergeSessionProgramStatusEvent(v SessionProgramStatusEvent) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err

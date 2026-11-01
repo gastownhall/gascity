@@ -52,6 +52,7 @@ go_library(
         "turn_events_merge.go",
         "turn_fence.go",
         "turn_identity.go",
+        "unix_listener.go",
         "worker.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime",
@@ -76,6 +77,7 @@ go_test(
         "dialog_trust_selection_test.go",
         "envsecret_test.go",
         "fake_conformance_test.go",
+        "fake_contracts_test.go",
         "fake_profile_test.go",
         "fake_program_status_test.go",
         "fake_test.go",
@@ -124,6 +126,7 @@ go_test(
         "turn_events_merge_test.go",
         "turn_identity_test.go",
         "turn_interrupt_test.go",
+        "unix_listener_test.go",
     ],
     data = glob(
         ["**"],
