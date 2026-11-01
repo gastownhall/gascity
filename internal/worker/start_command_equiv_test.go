@@ -194,7 +194,10 @@ func TestStartCommandStaleResumeKey(t *testing.T) {
 				sessionpkg.ProviderResume{ResumeFlag: "--resume", SessionIDFlag: "--session-id"},
 				"mycmd",
 			)
-			handle.searchPaths = []string{root}
+			handle.adapter.SearchPaths = []string{root}
+			if err := store.SetMetadata(info.ID, "provider", tt.provider); err != nil {
+				t.Fatalf("SetMetadata(provider): %v", err)
+			}
 			if err := store.SetMetadata(info.ID, "started_config_hash", "hash-abc"); err != nil {
 				t.Fatalf("SetMetadata(started_config_hash): %v", err)
 			}
@@ -251,7 +254,10 @@ func TestStartCommandClaudeConfigDir(t *testing.T) {
 				sessionpkg.ProviderResume{ResumeFlag: "--resume", SessionIDFlag: "--session-id"},
 				"mycmd",
 			)
-			handle.searchPaths = []string{t.TempDir()}
+			handle.adapter.SearchPaths = []string{t.TempDir()}
+			if err := store.SetMetadata(info.ID, "provider", "claude"); err != nil {
+				t.Fatalf("SetMetadata(provider): %v", err)
+			}
 			if err := store.SetMetadata(info.ID, "started_config_hash", "hash-abc"); err != nil {
 				t.Fatalf("SetMetadata(started_config_hash): %v", err)
 			}
@@ -278,9 +284,9 @@ func TestStartCommandClaudeConfigDir(t *testing.T) {
 }
 
 func TestStartCommandWithSessionIDRequiresCommand(t *testing.T) {
-	_, err := startCommandWithSessionID(sessionpkg.Info{}, SessionSpec{})
+	_, err := startWithSessionID("  ", "--session-id", "key")
 	want := "worker handle configuration is invalid: command is required to start session"
 	if err == nil || err.Error() != want {
-		t.Fatalf("startCommandWithSessionID() error = %v, want %q", err, want)
+		t.Fatalf("startWithSessionID() error = %v, want %q", err, want)
 	}
 }
