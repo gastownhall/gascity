@@ -24,8 +24,9 @@
 # re-reading an event is harmless, its incident is already recorded.
 #
 # Loud-fail: a send that fails exits non-zero, which is what makes the
-# controller log the order's output, and is retried by the next run while the
-# event is inside the lookback.
+# controller log the order's output. It is sent again by the next run that
+# still finds the event inside the lookback: the next matching event (a probe
+# alert, the resumption) runs the order.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail

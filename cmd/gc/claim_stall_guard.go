@@ -22,7 +22,8 @@ package main
 //   - it has been awake claimStallDeadline without claiming; or
 //   - its session bead closes unclaimed after being awake that long.
 //     A seat CLAIMED when its session bead carries a work_started claim or a
-//     work bead it was waiting on moves to in_progress under its session id.
+//     work bead it was waiting on moves to in_progress under its session id;
+//     only a claim newer than the failures it would answer counts as one.
 //     Which work waits is the template's default routed demand at the last
 //     pass, less every bead the journal has since shown leave the open state.
 //   - Scope: a template, on the provider its seats run on now. A config change
@@ -31,8 +32,8 @@ package main
 //     resumed by the change.
 //   - Trip: claimStallTrip seat failures in a row with no claim between,
 //     within claimStallWindow, the first and the last at least
-//     claimStallMinSpan apart (one tick's burst of failed creates is one
-//     event, not a dead provider).
+//     claimStallMinSpan apart: one tick's burst of failed creates cannot trip
+//     a stall by itself, only failures that go on.
 //   - Hold: the template's default routed-work demand stops counting, so no
 //     seat is spawned for it, and agent.claims_stalled names the template, its
 //     provider and the hold's end for the operator (the core pack mails it).
@@ -335,8 +336,8 @@ func (g *claimStallGuard) observeSeat(b beads.Bead, closed bool, at time.Time) [
 		}
 	}
 	var alerts []events.Event
-	if claimStallClaimed(b.Metadata[session.WorkStartedKey]) {
-		alerts = append(alerts, g.claimedLocked(seat, at)...)
+	if claimedAt, claimed := claimStallNewestClaim(b.Metadata[session.WorkStartedKey]); claimed {
+		alerts = append(alerts, g.claimedLocked(seat, claimedAt)...)
 	}
 	if closed && !seat.closed {
 		seat.closed = true
@@ -378,27 +379,38 @@ func (g *claimStallGuard) observeWork(evt events.Event) []events.Event {
 	if b.Status != "in_progress" {
 		return nil
 	}
-	seat := g.seats[strings.TrimSpace(firstNonEmpty(b.Metadata[beadmeta.SessionIDMetadataKey], evt.SessionID))]
+	// The claim's first write sets the assignee to the seat's session id;
+	// gc.session_id follows in a second write.
+	seat := g.seats[strings.TrimSpace(firstNonEmpty(b.Metadata[beadmeta.SessionIDMetadataKey], evt.SessionID, b.Assignee))]
 	if seat == nil {
 		return nil
 	}
 	return g.claimedLocked(seat, g.eventTime(evt))
 }
 
-// claimStallClaimed reports whether a work_started cell names a claim. An
-// unreadable cell names none: the guard's fail-safe is to keep counting, and
-// a claim always rewrites the cell.
-func claimStallClaimed(raw string) bool {
+// claimStallNewestClaim is when the newest claim a work_started cell names
+// was handed to a turn, and whether it names one. The cell keeps a row's
+// claims across its restarts, so a seat first seen after a controller restart
+// can carry claims from long before: only the claim's own time says whether
+// it answers a failure. An unreadable cell names none: the guard's fail-safe is
+// to keep counting, and a claim always rewrites the cell.
+func claimStallNewestClaim(raw string) (time.Time, bool) {
 	if strings.TrimSpace(raw) == "" {
-		return false
+		return time.Time{}, false
 	}
 	cell, err := session.DecodeWorkStarted(raw)
-	return err == nil && len(cell.Claims) > 0
+	if err != nil || len(cell.Claims) == 0 {
+		return time.Time{}, false
+	}
+	var newest time.Time
+	for _, c := range cell.Claims {
+		newest = claimStallLater(newest, c.At)
+	}
+	return newest, true
 }
 
-// observeUnanswered folds the work ladder's escalation of a seat's trigger.
-// The ladder re-read the trigger live before it nudged, so the trigger is
-// known to wait.
+// observeUnanswered folds the work ladder's escalation of a seat's trigger:
+// a failure while the trigger still waits as the template's routed demand.
 func (g *claimStallGuard) observeUnanswered(sessionID, template, trigger string, at time.Time) []events.Event {
 	sessionID, template = strings.TrimSpace(sessionID), strings.TrimSpace(template)
 	if sessionID == "" || template == "" {
@@ -412,7 +424,7 @@ func (g *claimStallGuard) observeUnanswered(sessionID, template, trigger string,
 	if seat.trigger == "" {
 		seat.trigger = strings.TrimSpace(trigger)
 	}
-	if seat.claimed {
+	if seat.claimed || !g.templateFor(template).waits(seat.trigger) {
 		return nil
 	}
 	return g.failedLocked(seat, at)
@@ -447,18 +459,23 @@ func (g *claimStallGuard) failedLocked(seat *claimStallSeat, at time.Time) []eve
 		}
 		ep.probing = false
 		ep.holds++
-		ep.until = at.Add(claimStallHold(ep.holds))
+		ep.until = claimStallLater(at, g.now()).Add(claimStallHold(ep.holds))
 		fmt.Fprintf(g.stderr, "claims-stall guard: the probe seat of %s on %s failed to claim too (%d seats in all); holding its routed demand until %s\n", //nolint:errcheck // best-effort stderr
 			seat.template, claimStallProviderLabel(ep.provider), ep.failures, ep.until.UTC().Format(time.RFC3339))
 		return []events.Event{g.stalledEvent(seat.template, ep, events.AgentClaimsCauseProbe, ep.failures, at)}
 	}
-	streak := t.streak[:0]
+	// An overdue seat's failure is dated at its deadline, so failures arrive
+	// out of order: the window is the newest failure's.
+	newest := at
 	for _, f := range t.streak {
-		if at.Sub(f) <= claimStallWindow {
+		newest = claimStallLater(newest, f)
+	}
+	streak := t.streak[:0]
+	for _, f := range append(t.streak, at) {
+		if newest.Sub(f) <= claimStallWindow {
 			streak = append(streak, f)
 		}
 	}
-	streak = append(streak, at)
 	t.streak = streak
 	n := len(t.streak)
 	if n < claimStallTrip {
@@ -500,7 +517,7 @@ func (g *claimStallGuard) tripLocked(template string, t *claimStallTemplate, sea
 		since:    since,
 		failures: seats,
 		holds:    1,
-		until:    at.Add(claimStallHold(1)),
+		until:    claimStallLater(at, g.now()).Add(claimStallHold(1)),
 	}
 	if t.episodes == nil {
 		t.episodes = map[string]*claimStallEpisode{}
@@ -511,25 +528,36 @@ func (g *claimStallGuard) tripLocked(template string, t *claimStallTemplate, sea
 	return []events.Event{g.stalledEvent(template, ep, events.AgentClaimsCauseSeats, seats, at)}
 }
 
-// claimedLocked counts seat's claim: it ends the streak and, on the provider
-// that stalled, the episode. Caller holds g.mu.
-func (g *claimStallGuard) claimedLocked(seat *claimStallSeat, at time.Time) []events.Event {
+// claimedLocked counts seat's claim, made at claimedAt: one newer than the
+// streak's first failure ends the streak, and one newer than the stall's
+// start ends the stall on the provider that stalled. An older claim (a seat
+// first seen after a controller restart, carrying claims from before) only
+// settles the seat. Caller holds g.mu.
+func (g *claimStallGuard) claimedLocked(seat *claimStallSeat, claimedAt time.Time) []events.Event {
 	if seat.claimed {
 		return nil
 	}
 	seat.claimed, seat.settled = true, true
 	t := g.templateFor(seat.template)
-	if !t.counts(seat) {
+	if !t.counts(seat) || claimedAt.IsZero() {
 		return nil
 	}
-	t.streak = nil
+	if len(t.streak) > 0 {
+		first := t.streak[0]
+		for _, f := range t.streak {
+			first = claimStallEarlier(first, f)
+		}
+		if !claimedAt.Before(first) {
+			t.streak = nil
+		}
+	}
 	ep := t.stalled()
-	if ep == nil {
+	if ep == nil || claimedAt.Before(ep.since) {
 		return nil
 	}
 	delete(t.episodes, t.provider)
 	fmt.Fprintf(g.stderr, "claims-stall guard: %s claims its work again on %s; its routed demand counts again\n", seat.template, claimStallProviderLabel(ep.provider)) //nolint:errcheck // best-effort stderr
-	return []events.Event{g.resumedEvent(seat.template, ep, events.AgentClaimsCauseClaimed, at)}
+	return []events.Event{g.resumedEvent(seat.template, ep, events.AgentClaimsCauseClaimed, claimedAt)}
 }
 
 // claimStallHold is how long the holds-th hold of an episode lasts.
@@ -635,7 +663,7 @@ func (g *claimStallGuard) withhold(counts map[string]int, demand map[string]scal
 	now := g.now()
 	g.mu.Lock()
 	g.sweep(now)
-	g.recordDemandLocked(demand)
+	g.recordDemandLocked(counts, demand)
 	alerts := g.overdueLocked(now)
 	var outCounts map[string]int
 	var outDemand map[string]scaleCheckDemand
@@ -649,6 +677,9 @@ func (g *claimStallGuard) withhold(counts map[string]int, demand map[string]scal
 			continue
 		}
 		entry := demand[name]
+		if len(entry.WorkBeadIDs) == 0 {
+			continue // nothing to spawn for: a probe admitted now would be spent on nothing
+		}
 		keep := g.admittedLocked(name, ep, now)
 		if keep >= len(entry.WorkBeadIDs) {
 			continue
@@ -674,23 +705,34 @@ func (g *claimStallGuard) withhold(counts map[string]int, demand map[string]scal
 	return outCounts, outDemand
 }
 
-// recordDemandLocked replaces every template's waiting work with this pass's
-// default routed demand, less the beads the journal showed leave the open
-// state since the snapshot was read, and the reverse index with it. Caller
-// holds g.mu.
-func (g *claimStallGuard) recordDemandLocked(demand map[string]scaleCheckDemand) {
-	for _, t := range g.templates {
-		t.waiting = nil
+// recordDemandLocked replaces the waiting work of every template this pass
+// probed (a key of counts) with its default routed demand, less the beads the
+// journal showed leave the open state since the snapshot was read, and
+// rebuilds the reverse index. A template the pass did not probe keeps its
+// waiting work: a pass that builds one template's demand (the control
+// dispatcher's) says nothing about the others. Caller holds g.mu.
+func (g *claimStallGuard) recordDemandLocked(counts map[string]int, demand map[string]scaleCheckDemand) {
+	probed := make(map[string]struct{}, len(counts)+len(demand))
+	for name := range counts {
+		probed[name] = struct{}{}
 	}
-	clear(g.waitedBy)
-	for name, entry := range demand {
+	for name := range demand {
+		probed[name] = struct{}{}
+	}
+	for name := range probed {
 		t := g.templateFor(name)
+		entry := demand[name]
 		t.waiting = make(map[string]struct{}, len(entry.WorkBeadIDs))
 		for _, id := range entry.WorkBeadIDs {
 			if _, gone := g.left[id]; gone {
 				continue
 			}
 			t.waiting[id] = struct{}{}
+		}
+	}
+	clear(g.waitedBy)
+	for name, t := range g.templates {
+		for id := range t.waiting {
 			by := g.waitedBy[id]
 			if by == nil {
 				by = map[string]struct{}{}

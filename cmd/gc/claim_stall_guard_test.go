@@ -176,7 +176,13 @@ func (h *claimStallHarness) ofType(typ string) []events.Event {
 // it: its status and, once claimed, the claiming session.
 func (h *claimStallHarness) workEvent(typ, id, status, sessionID string) {
 	h.t.Helper()
-	b := beads.Bead{ID: id, Title: id, Status: status, Type: "task", Metadata: map[string]string{}}
+	h.workEventBead(typ, beads.Bead{ID: id, Title: id, Status: status, Type: "task", Metadata: map[string]string{}}, sessionID)
+}
+
+// workEventBead feeds one notification about b, with the claiming session
+// in gc.session_id when sessionID is set.
+func (h *claimStallHarness) workEventBead(typ string, b beads.Bead, sessionID string) {
+	h.t.Helper()
 	if sessionID != "" {
 		b.Metadata[beadmeta.SessionIDMetadataKey] = sessionID
 	}
@@ -184,7 +190,7 @@ func (h *claimStallHarness) workEvent(typ, id, status, sessionID string) {
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	h.guard.observe(events.Event{Type: typ, Ts: h.now, Subject: id, SessionID: sessionID, Payload: payload})
+	h.guard.observe(events.Event{Type: typ, Ts: h.now, Subject: b.ID, SessionID: sessionID, Payload: payload})
 }
 
 func stallPayload(t *testing.T, e events.Event) events.AgentClaimsPayload {
@@ -236,8 +242,8 @@ func TestClaimStallGuardTripsWhenSeatsInARowNeverClaim(t *testing.T) {
 	}
 }
 
-// A burst of failed creates in one tick (a restart, a runtime hiccup) is one
-// event: it trips nothing until failures spread over claimStallMinSpan.
+// A burst of failed creates in one tick (a restart, a runtime hiccup) cannot
+// trip a stall by itself: only failures that go on claimStallMinSpan later do.
 func TestClaimStallGuardABurstIsOneEvent(t *testing.T) {
 	h := newClaimStallHarness(t)
 	h.demand[stallTemplate] = []string{"step-1"}
@@ -334,14 +340,20 @@ func TestClaimStallGuardNeutralSeats(t *testing.T) {
 	}
 }
 
-// The work ladder's trigger escalation is a failure on its own: the ladder
-// re-read the trigger live before it nudged.
+// The work ladder's trigger escalation is a failure on its own while the
+// trigger waits; an escalation about work that no longer waits is not.
 func TestClaimStallGuardCountsTheLaddersEscalation(t *testing.T) {
 	h := newClaimStallHarness(t)
+	h.demand[stallTemplate] = []string{"step-1", "step-2", "step-3"}
+	h.pass(stallTemplate)
+	h.escalate(h.spawn(stallTemplate, "step-9")) // step-9 does not wait
 	for i := 1; i <= claimStallTrip; i++ {
 		s := h.spawn(stallTemplate, fmt.Sprintf("step-%d", i))
 		h.advance(5 * time.Minute)
 		h.escalate(s)
+		if i < claimStallTrip && len(h.stalls()) != 0 {
+			t.Fatalf("stalled after %d waiting escalation(s): the one about work that does not wait counted", i)
+		}
 	}
 	if len(h.stalls()) != 1 {
 		t.Fatalf("stalls = %d, want one from %d escalations", len(h.stalls()), claimStallTrip)
@@ -536,5 +548,114 @@ func TestClaimStallGuardStreakWindow(t *testing.T) {
 	h.overdueSeat("step-1")
 	if len(h.stalls()) != 1 {
 		t.Fatalf("stalls = %d, want one at the third failure within the window", len(h.stalls()))
+	}
+}
+
+// A demand pass that builds one template's demand (the legacy control
+// dispatcher's) says nothing about the others: their waiting work stands, and
+// a seat's failure after it still counts.
+func TestClaimStallGuardAPartialPassKeepsOtherTemplatesWaiting(t *testing.T) {
+	h := newClaimStallHarness(t)
+	h.demand[stallTemplate] = []string{"step-1", "step-2", "step-3"}
+	h.pass(stallTemplate)
+	partial := func() {
+		h.guard.withhold(map[string]int{"core.control-dispatcher": 1}, map[string]scaleCheckDemand{"core.control-dispatcher": {Count: 1, WorkBeadIDs: []string{"ctl-1"}}})
+	}
+	for _, trigger := range []string{"step-1", "step-2", "step-3"} {
+		s := h.spawn(stallTemplate, trigger)
+		partial()
+		h.close(s, "failed-create", time.Time{})
+		h.advance(time.Minute)
+	}
+	if len(h.stalls()) != 1 {
+		t.Fatalf("stalls = %d: a control-dispatcher-only pass erased the template's waiting work", len(h.stalls()))
+	}
+}
+
+// A seat first seen already holding a claim made before the stall (after a
+// controller restart the journal re-announces live seats) neither resets the
+// streak nor ends the stall: only a claim newer than the failures answers
+// them.
+func TestClaimStallGuardAnOldClaimAnswersNothing(t *testing.T) {
+	h := newClaimStallHarness(t)
+	h.demand[stallTemplate] = []string{"step-1", "step-2", "step-3", "step-4"}
+	old := stallSeat{id: "gcg-session-old", template: stallTemplate, trigger: "step-0", created: h.now.Add(-2 * time.Hour)}
+	oldClaim := fmt.Sprintf(`{"v":1,"claims":[{"store":"city","bead":"step-0","gen":2,"at":%q,"via":"claim"}]}`, h.now.Add(-time.Hour).Format(time.RFC3339Nano))
+	h.overdueSeat("step-1")
+	h.seatEvent(events.BeadUpdated, old.id, old.template, old.created, map[string]string{beadmeta.TriggerBeadIDMetadataKey: "step-0", "state": "awake", session.WorkStartedKey: oldClaim})
+	h.overdueSeat("step-2")
+	h.overdueSeat("step-3")
+	if len(h.stalls()) != 1 {
+		t.Fatalf("stalls = %d: an hour-old claim reset the streak", len(h.stalls()))
+	}
+	again := stallSeat{id: "gcg-session-old-2", template: stallTemplate, trigger: "step-0", created: h.now.Add(-2 * time.Hour)}
+	h.seatEvent(events.BeadUpdated, again.id, again.template, again.created, map[string]string{beadmeta.TriggerBeadIDMetadataKey: "step-0", "state": "awake", session.WorkStartedKey: oldClaim})
+	if resumed := h.ofType(events.AgentClaimsResumed); len(resumed) != 0 {
+		t.Fatalf("resumed %v: a claim from before the stall ended it", resumed)
+	}
+	if got := h.pass(stallTemplate); len(got) != 0 {
+		t.Fatalf("demand %v: the hold was lifted by an old claim", got)
+	}
+}
+
+// A claim's first write sets the bead's assignee to the seat's session id;
+// gc.session_id follows in a second write. The first already counts.
+func TestClaimStallGuardAnAssigneeClaimCounts(t *testing.T) {
+	h := newClaimStallHarness(t)
+	h.demand[stallTemplate] = []string{"step-1", "step-2", "step-3", "step-4"}
+	for _, trigger := range []string{"step-1", "step-2", "step-3"} {
+		h.overdueSeat(trigger)
+	}
+	h.advance(claimStallHoldBase)
+	h.pass(stallTemplate)
+	probe := h.spawn(stallTemplate, "step-4")
+	h.advance(30 * time.Second)
+	h.wake(probe)
+	h.workEventBead(events.BeadUpdated, beads.Bead{ID: "step-4", Title: "step-4", Status: "in_progress", Type: "task", Assignee: probe.id, Metadata: map[string]string{}}, "")
+	if resumed := h.ofType(events.AgentClaimsResumed); len(resumed) != 1 {
+		t.Fatalf("resumed %v, want the assignee write to count as the probe's claim", resumed)
+	}
+}
+
+// A failure dated in the past (an overdue seat's is dated at its deadline;
+// a legacy demand snapshot is reused for minutes) holds from now: the alert
+// never names a hold already over.
+func TestClaimStallGuardHoldsFromNow(t *testing.T) {
+	h := newClaimStallHarness(t)
+	h.demand[stallTemplate] = []string{"step-1", "step-2", "step-3"}
+	var seats []stallSeat
+	for _, trigger := range h.demand[stallTemplate] {
+		s := h.spawn(stallTemplate, trigger)
+		h.advance(time.Minute)
+		h.wake(s)
+		seats = append(seats, s)
+	}
+	h.pass(stallTemplate)
+	h.advance(claimStallDeadline + claimStallHoldBase)
+	h.pass(stallTemplate) // the first pass after the deadlines, long after them
+	stalls := h.stalls()
+	if len(stalls) != 1 {
+		t.Fatalf("stalls = %d, want one", len(stalls))
+	}
+	if p := stallPayload(t, stalls[0]); p.Until == nil || !p.Until.After(h.now) {
+		t.Fatalf("stall %+v at %v: the hold was already over when it was raised", p, h.now)
+	}
+	_ = seats
+}
+
+// A held template whose demand this pass is empty (the claim-loop guard
+// withheld its one bead) spends no probe on it.
+func TestClaimStallGuardSpendsNoProbeOnNothing(t *testing.T) {
+	h := newClaimStallHarness(t)
+	h.demand[stallTemplate] = []string{"step-1", "step-2", "step-3"}
+	for _, trigger := range []string{"step-1", "step-2", "step-3"} {
+		h.overdueSeat(trigger)
+	}
+	h.advance(claimStallHoldBase)
+	h.demand[stallTemplate] = nil
+	h.guard.withhold(map[string]int{stallTemplate: 0}, map[string]scaleCheckDemand{stallTemplate: {}})
+	h.demand[stallTemplate] = []string{"step-1"}
+	if got := h.pass(stallTemplate); len(got) != 1 {
+		t.Fatalf("demand %v, want the probe admitted when there is work for it", got)
 	}
 }

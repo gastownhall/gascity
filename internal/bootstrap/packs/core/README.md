@@ -163,8 +163,7 @@ Entries older than the retention window are pruned on each run.
 **Why.** The controller's claims-stall guard notices when an agent
 template's seats stop claiming the routed work they were spawned for: a
 provider out of usage, an expired account, a CLI that never reads its prompt.
-It holds the template's spawns back (or, for an agent that declares a
-`standby_provider`, moves it there) and records `agent.claims_stalled`; a seat
+It holds the template's spawns back and records `agent.claims_stalled`; a seat
 that claims again records `agent.claims_resumed`. Events alone reach only the
 event log. On 2026-10-31 a review lane stood dead for ten hours while ~1,400
 seats came and went, and nobody was told.
@@ -180,8 +179,9 @@ which reads both event types over a lookback window and mails through
   that is already over is reported by its resumption alone.
 
 **Loud-fail.** An undeliverable mail exits non-zero, so the controller logs
-the order's output, and the next run retries while the event is inside the
-lookback.
+the order's output. It is sent again by the next run that still finds the
+event inside the lookback: the next matching event (a probe alert, the
+resumption) runs the order.
 
 **Configuration** (all optional):
 

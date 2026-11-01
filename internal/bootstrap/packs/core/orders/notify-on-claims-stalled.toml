@@ -1,10 +1,9 @@
 # notify-on-claims-stalled mails the escalation recipient when the
 # controller's claims-stall guard finds an agent template whose seats stopped
 # claiming the work routed to them (agent.claims_stalled): several seats in a
-# row failed to start, or woke and never claimed while the work waited, or
-# were refused on a spent usage quota. The guard has already held the
-# template's spawns back (and, where the agent declares a standby provider,
-# moved it there); this order is how a person hears of it. Without it the
+# row failed to start, or woke and never claimed while the work waited. The
+# guard has already held the template's spawns back; this order is how a
+# person hears of it. Without it the
 # alert reaches only the event log: on 2026-10-31 a review lane stood dead for
 # ten hours while ~1,400 seats came and went and nobody was told.
 #
