@@ -13433,6 +13433,29 @@ func TestOrphanSweepComposesGateAndLocalSkipOutcomes(t *testing.T) {
 	}
 }
 
+// TestOrphanSweepDeclaresNothingForBenignReleaseRace keeps a lost
+// release-if-current race (the claim moved on since the sweep read it) silent:
+// nothing was left behind, so there is nothing to declare.
+func TestOrphanSweepDeclaresNothingForBenignReleaseRace(t *testing.T) {
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{hookClaim("ga-hook-dead", "gc-d34d6", "gastown__polecat-gc-d34d6", nil)},
+		nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d6", Status: "closed", IssueType: "session"}},
+		nil, map[string]string{"ORPHAN_SWEEP_RELEASE_OUTPUT": "skipped"})
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if !run.released("ga-hook-dead") {
+		t.Fatalf("the sweep never attempted the conditional release\n%s", run.context())
+	}
+	if strings.Contains(run.out, "unverifiable") {
+		t.Fatalf("a lost release race was counted as unverifiable:\n%s", run.out)
+	}
+	if outcome, ok := run.outcome(t); ok {
+		t.Fatalf("a lost release race declared outcome %+v", outcome)
+	}
+}
+
 // TestJsonlExportFirstRunArchivePathCreatedBeforeTheRename covers the window
 // between the first run's "archive path absent" check and its rename of the
 // staging repo into place: another exporter (or anything else) can create
