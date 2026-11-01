@@ -824,10 +824,14 @@ func nonNegativeDuration(d time.Duration) time.Duration {
 }
 
 func formatOrderFiringDuration(d time.Duration) string {
-	d = d.Round(time.Minute)
-	if d == 0 {
-		return "0s"
+	// Sub-two-minute durations keep their seconds: the patrol-paced
+	// thresholds land between whole minutes, and rounding 30s or 75s to "1m"
+	// hides exactly the evidence that explains them (ga-or367d).
+	d = d.Round(time.Second)
+	if d < 2*time.Minute {
+		return fmt.Sprintf("%ds", int(d/time.Second))
 	}
+	d = d.Round(time.Minute)
 	if d%time.Hour == 0 {
 		return fmt.Sprintf("%dh", int(d/time.Hour))
 	}

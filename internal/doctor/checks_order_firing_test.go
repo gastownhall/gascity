@@ -831,6 +831,33 @@ func TestOrderFiringCurrent_ReadsPatrolIntervalFromCityConfig(t *testing.T) {
 	}
 }
 
+// Sub-two-minute durations print as whole seconds: rounding 30s or 75s to
+// "1m" hides exactly the evidence that explains a patrol-paced threshold
+// (ga-or367d). Two minutes and up keep the whole-minute / whole-hour form.
+func TestFormatOrderFiringDuration(t *testing.T) {
+	tests := []struct {
+		d    time.Duration
+		want string
+	}{
+		{0, "0s"},
+		{30 * time.Second, "30s"},
+		{60 * time.Second, "60s"},
+		{75 * time.Second, "75s"},
+		{119 * time.Second, "119s"},
+		{time.Minute + 59*time.Second + 400*time.Millisecond, "119s"},
+		{time.Minute + 59*time.Second + 600*time.Millisecond, "2m"},
+		{2 * time.Minute, "2m"},
+		{2*time.Minute + 29*time.Second, "2m"},
+		{90 * time.Minute, "90m"},
+		{4 * time.Hour, "4h"},
+	}
+	for _, tt := range tests {
+		if got := formatOrderFiringDuration(tt.d); got != tt.want {
+			t.Errorf("formatOrderFiringDuration(%s) = %q, want %q", tt.d, got, tt.want)
+		}
+	}
+}
+
 // eventEvidenceSuffices must share classifyOrderFiring's overdue line, so
 // the event-log shortcut — inline and through the prefetch pass — can never
 // skip the authoritative order-run lookup for an order the classifier would
