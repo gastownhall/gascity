@@ -461,6 +461,7 @@ func TestRuntimeRegistryACPConfigCarriesCancelTimeout(t *testing.T) {
 		t.Errorf("config.DefaultACPCancelTimeout = %v, want sessionacp.DefaultCancelTimeout (%v): the documented default must match the provider's own", config.DefaultACPCancelTimeout, sessionacp.DefaultCancelTimeout)
 	}
 }
+
 func TestK8sSecretProjectionReachesBuiltinAndHybridProviders(t *testing.T) {
 	oldConstructor := newSeamBackedK8sProvider
 	t.Cleanup(func() { newSeamBackedK8sProvider = oldConstructor })
