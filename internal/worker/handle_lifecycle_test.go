@@ -265,3 +265,87 @@ func TestSessionHandleAttachAfterRestartHandoffStartsWithSessionID(t *testing.T)
 		t.Fatalf("second start command = %q, want --session-id %s and no --resume", got, rotated)
 	}
 }
+
+// TestStartCommandRotatedKeyClaudeConfigDir pins the probe root an absolute
+// CLAUDE_CONFIG_DIR in the launch env adds: a conversation kept under that
+// dir's projects reads present (resume), and one kept only under a relative
+// or ~ dir the provider resolves itself adds no root, so it reads absent
+// (fresh start under the stored key).
+func TestStartCommandRotatedKeyClaudeConfigDir(t *testing.T) {
+	tests := []struct {
+		name        string
+		configDir   func(t *testing.T) string
+		transcript  bool
+		wantSession bool
+	}{
+		{
+			name:        "absolute dir with the transcript resumes",
+			configDir:   func(t *testing.T) string { return filepath.Join(t.TempDir(), "claude") },
+			transcript:  true,
+			wantSession: false,
+		},
+		{
+			name:        "absolute dir without the transcript starts fresh",
+			configDir:   func(t *testing.T) string { return filepath.Join(t.TempDir(), "claude") },
+			wantSession: true,
+		},
+		{
+			name:        "relative dir adds no root",
+			configDir:   func(*testing.T) string { return "rel/claude" },
+			transcript:  true,
+			wantSession: true,
+		},
+		{
+			name:        "tilde dir adds no root",
+			configDir:   func(*testing.T) string { return "~/.claude-alt" },
+			transcript:  true,
+			wantSession: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := SessionSpec{
+				Template: "worker",
+				Title:    "Probe",
+				Command:  "claude",
+				Provider: "claude",
+				Resume: sessionpkg.ProviderResume{
+					ResumeFlag:    "--resume",
+					ResumeStyle:   "flag",
+					SessionIDFlag: "--session-id",
+				},
+			}
+			handle, _, info, key := newRotatedKeyHandle(t, spec, []string{t.TempDir()})
+
+			configDir := tt.configDir(t)
+			handle.session.Env = map[string]string{"CLAUDE_CONFIG_DIR": configDir}
+			if tt.transcript {
+				// The transcript sits where the provider would resolve the
+				// dir: verbatim for an absolute or relative value, against
+				// home for a ~ value.
+				root := configDir
+				if strings.HasPrefix(configDir, "~") {
+					home, err := os.UserHomeDir()
+					if err != nil {
+						t.Fatalf("UserHomeDir: %v", err)
+					}
+					root = filepath.Join(home, strings.TrimPrefix(configDir, "~"))
+				}
+				writeKeyedTranscript(t, filepath.Join(root, "projects"), info.WorkDir, key)
+			}
+
+			got, err := handle.startCommand(info.ID)
+			if err != nil {
+				t.Fatalf("startCommand: %v", err)
+			}
+			want := "claude --resume " + key
+			if tt.wantSession {
+				want = "claude --session-id " + key
+			}
+			if got != want {
+				t.Fatalf("startCommand() = %q, want %q", got, want)
+			}
+		})
+	}
+}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -838,7 +837,7 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 // file may be gone for reasons a restart must not read as "never started"
 // (cleanup, a move between hosts), and only a hash no start ever wrote says
 // the key itself is new. The probe follows the launch: the adapter's search
-// roots (plus the projects of an absolute CLAUDE_CONFIG_DIR in the session
+// roots (plus the projects of an absolute CLAUDE_CONFIG_DIR in the launch
 // env), the history provider's family, and the runtime hints' work dir with
 // the row's as fallback. A provider whose family the probe cannot read, or a
 // row without a work dir, keeps the resume.
@@ -856,8 +855,8 @@ func (h *SessionHandle) unlaunchedSessionKey(info sessionpkg.Info, pr sessionpkg
 	}
 	provider := h.historyProvider(info)
 	launchRoots := append([]string(nil), h.adapter.SearchPaths...)
-	if dir := strings.TrimSpace(h.session.Env["CLAUDE_CONFIG_DIR"]); filepath.IsAbs(dir) {
-		launchRoots = MergeSearchPaths(append(launchRoots, filepath.Join(dir, "projects")))
+	if root, ok := workertranscript.ClaudeConfigProjectsRoot(hints.Env); ok {
+		launchRoots = MergeSearchPaths(append(launchRoots, root))
 	}
 	present, probeable := workertranscript.HasKeyedTranscript(workertranscript.KeyedProbeRoots(launchRoots, provider), provider, workDir, info.SessionKey)
 	return probeable && !present

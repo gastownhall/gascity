@@ -2,6 +2,7 @@
 package transcript
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -19,6 +20,18 @@ func KeyedProbeRoots(searchPaths []string, provider string) []string {
 		return sessionlog.DefaultSearchPaths()
 	}
 	return searchPaths
+}
+
+// ClaudeConfigProjectsRoot is the projects root an absolute CLAUDE_CONFIG_DIR
+// in env adds to a claude-family probe — <dir>/projects — and whether env
+// names one at all. A relative or ~ value adds no root: the provider resolves
+// it against its own working dir and home, which a probe cannot reproduce.
+func ClaudeConfigProjectsRoot(env map[string]string) (string, bool) {
+	dir := strings.TrimSpace(env["CLAUDE_CONFIG_DIR"])
+	if !filepath.IsAbs(dir) {
+		return "", false
+	}
+	return filepath.Join(dir, "projects"), true
 }
 
 // SupportsIDLookup reports whether the provider family exposes a stable
