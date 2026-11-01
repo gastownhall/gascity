@@ -1489,9 +1489,10 @@ type tmuxStartOps struct {
 	// runSetupCommand replaces its fixed wall-clock deadline with
 	// "no output for `timeout`" (idle) plus this absolute ceiling.
 	setupMaxTimeout time.Duration
-	// secrets are the session's credential values, redacted out of every
-	// pane capture and crash artifact this startup produces. Built by
-	// newTmuxStartOps; a zero value simply redacts nothing.
+	// secrets are the session env's credential values. Every pane capture
+	// and crash artifact this startup produces is redacted against them and
+	// the inherited environment's (paneSecrets). Built by newTmuxStartOps; a
+	// zero value adds nothing.
 	secrets []string
 	// freshStart marks a session this startup created from nothing, so a
 	// partially-delivered startup prompt can be discarded outright. Relaunch
@@ -1537,7 +1538,7 @@ func newTmuxStartOps(tm *Tmux, runtimeDir string, setupMaxTimeout time.Duration,
 		tm:              tm,
 		runtimeDir:      runtimeDir,
 		setupMaxTimeout: setupMaxTimeout,
-		secrets:         runtime.SetupCommandSecrets(cfg.Env),
+		secrets:         runtime.SecretEnvValues(cfg.Env),
 		freshStart:      freshStart,
 		programStatus:   cfg.ProgramStatus,
 	}
@@ -1666,7 +1667,18 @@ func (o *tmuxStartOps) capturePane(name string, lines int) (string, error) {
 		return "", err
 	}
 	content, err := o.tm.CapturePaneJoined(target, lines)
-	return runtime.RedactSecrets(content, o.secrets), err
+	return runtime.RedactSecrets(content, o.paneSecrets()), err
+}
+
+// paneSecrets is the value set a pane capture or crash artifact is redacted
+// against: the session env's secrets, and those of the environment the pane
+// inherited from its tmux server, of which this process's ambient environment
+// is the closest view gc has. That half is read when it is needed, through
+// execenv.Environ, so a native store open in flight cannot hide an ambient
+// credential from the scrub. Only a start that died captures its pane, so the
+// wait the read can take is never on a successful start's path.
+func (o *tmuxStartOps) paneSecrets() []string {
+	return append(runtime.SetupCommandSecrets(execenv.Environ(), nil), o.secrets...)
 }
 
 // paneDeadInfo returns the dead pane's exit status and terminating signal.
@@ -1691,7 +1703,7 @@ func (o *tmuxStartOps) recordStartCrash(name, paneContent, status, signal string
 	if o.runtimeDir == "" {
 		return ""
 	}
-	paneContent = runtime.RedactSecrets(paneContent, o.secrets)
+	paneContent = runtime.RedactSecrets(paneContent, o.paneSecrets())
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "session: %s\n", name)
@@ -1897,7 +1909,7 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 		if ctxErr := context.Cause(runCtx); ctxErr != nil && runCtx.Err() != nil {
 			err = fmt.Errorf("%w: %w", ctxErr, err)
 		}
-		return setupCommandFailure(err, stdout, stderr, runtime.SetupCommandSecrets(env))
+		return setupCommandFailure(err, stdout, stderr, runtime.SetupCommandSecrets(baseEnv, env))
 	}
 	return nil
 }

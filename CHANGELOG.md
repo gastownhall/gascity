@@ -782,6 +782,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wisp_gc_interval` and `wisp_ttl`) collects expired wisps, including on
   split-storage cities, where `gc bd` refuses the script's writes. (#4937)
 
+- **A failed setup command no longer leaks a credential a native store open
+  was hiding, and tmux liveness checks no longer wait for a native store
+  open.** A `pre_start` or `session_setup` command that failed while gc was
+  opening a native Dolt store had its output scrubbed against the environment
+  as the open had rewritten it, so a credential the command inherited and
+  echoed, such as `BEADS_DOLT_PASSWORD`, could land in the error, the event
+  log and bead notes. The scrub now uses the environment the command started
+  with. Separately, the tmux runtime's process snapshot waited for an
+  in-flight native open before it ran `ps`, which held every session liveness
+  check on a stale cache for the whole open; it no longer waits.
+
 - **The v2 reconciler alerts when it refuses a work item for unusable
   worktree evidence.** A ready pool work item whose `gc.work_dir` /
   `gc.worktree_*` metadata is incomplete or conflicting, or names another
@@ -798,8 +809,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Sessions no longer inherit a native store open's temporary environment.**
   While gc opens a native Dolt store it briefly rewrites its own process
-  environment: it clears the `BEADS_*` and `BD_*` variables and sets the
-  store's server, database and git-author variables. A session started in
+  environment: it sets the store's `BEADS_*` connection variables and
+  unsets the ones the store leaves empty (a hosted or proxied-native open
+  clears every other `BEADS_*` variable too, and a proxied-native open every
+  `BD_*` variable, and sets the git author). A session started in
   that window (subprocess, acp, tmux and herdr setup commands, runtime
   capability ops, and the nudge and submit pollers) copied those values for
   its whole life. A rig worker could then read the city's database name on

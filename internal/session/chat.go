@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/promptsafe"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -313,7 +314,9 @@ const exitedSessionPeekLines = 80
 // into.
 func (m *Manager) exitedAfterStart(sessName string, env map[string]string) error {
 	pane, err := m.sp.Peek(sessName, exitedSessionPeekLines)
-	pane = strings.TrimSpace(runtime.RedactSecrets(pane, runtime.SetupCommandSecrets(env)))
+	// Failure path only, under the per-session lock: execenv.Environ may wait
+	// out a native store open so the scrub sees the ambient credentials.
+	pane = strings.TrimSpace(runtime.RedactSecrets(pane, runtime.SetupCommandSecrets(execenv.Environ(), env)))
 	switch {
 	case err != nil:
 		return fmt.Errorf("%w: session %q exited after it started; reading its last pane output: %s", runtime.ErrSessionDiedDuringStartup, sessName, err.Error())

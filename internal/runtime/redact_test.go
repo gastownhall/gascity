@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -43,21 +44,22 @@ func TestSecretEnvValuesFollowsTheAllowList(t *testing.T) {
 //
 // Every name in the set is pinned, not a sample. Dropping one is a silent
 // diagnostics regression, not a build failure, so nothing else would catch it.
-func TestProcessSecretEnvValuesSkipsPOSIXNames(t *testing.T) {
+func TestInheritedSecretEnvValuesSkipsPOSIXNames(t *testing.T) {
 	inert := map[string]string{}
+	var environ []string
 	for name := range envRedactionInert {
 		// Distinct, above the substitution floor, and shaped like the paths
 		// these actually hold.
 		value := "/inert/" + strings.ToLower(name) + "/value"
-		t.Setenv(name, value)
+		environ = append(environ, name+"="+value)
 		inert[value] = name
 	}
 	if len(inert) != len(envRedactionInert) {
 		t.Fatalf("built %d probe values for %d names", len(inert), len(envRedactionInert))
 	}
-	t.Setenv("ANTHROPIC_AUTH_TOKEN", sentinel)
+	environ = append(environ, "ANTHROPIC_AUTH_TOKEN="+sentinel)
 
-	got := processSecretEnvValues()
+	got := inheritedSecretEnvValues(environ)
 	found := false
 	for _, v := range got {
 		if name, ok := inert[v]; ok {
@@ -260,15 +262,14 @@ func TestCommandOutputTailRetainsAJWTLengthCredential(t *testing.T) {
 }
 
 // TestSetupCommandSecretsCoversBothEnvironments pins that the set spans the
-// session env the caller assembled AND this process's own. Every setup-command
-// runner builds its child env as os.Environ() plus the overlay, so a command
-// echoing either half — `set -x` traces every expansion — must be scrubbed
-// against both.
+// session env the caller assembled AND the environment the command inherited.
+// Every setup-command runner builds its child env as that inherited base plus
+// the overlay, so a command echoing either half — `set -x` traces every
+// expansion — must be scrubbed against both.
 func TestSetupCommandSecretsCoversBothEnvironments(t *testing.T) {
 	const inherited = "inherited-NOT-A-REAL-CREDENTIAL"
-	t.Setenv("ANTHROPIC_AUTH_TOKEN", inherited)
 
-	got := SetupCommandSecrets(map[string]string{"GH_TOKEN": sentinel})
+	got := SetupCommandSecrets([]string{"ANTHROPIC_AUTH_TOKEN=" + inherited}, map[string]string{"GH_TOKEN": sentinel})
 	var sawSession, sawInherited bool
 	for _, v := range got {
 		switch v {
@@ -282,7 +283,26 @@ func TestSetupCommandSecretsCoversBothEnvironments(t *testing.T) {
 		t.Error("the session env credential is missing from the secret set")
 	}
 	if !sawInherited {
-		t.Error("the inherited process credential is missing from the secret set")
+		t.Error("the inherited credential is missing from the secret set")
+	}
+}
+
+// TestSetupCommandSecretsReadsTheEnvTheCommandInherited pins that the inherited
+// half comes from the environment the caller hands in, not from this process's
+// environment when the scrub runs. A native beads store open rewrites the
+// process environment for its whole window, so a read taken then can lack a
+// credential the command inherited before the open began.
+func TestSetupCommandSecretsReadsTheEnvTheCommandInherited(t *testing.T) {
+	const inherited = "inherited-NOT-A-REAL-CREDENTIAL-withheld"
+	const current = "current-NOT-A-REAL-CREDENTIAL-projected"
+	t.Setenv("BEADS_DOLT_PASSWORD", current)
+
+	got := SetupCommandSecrets([]string{"BEADS_DOLT_PASSWORD=" + inherited}, nil)
+	if !slices.Contains(got, inherited) {
+		t.Errorf("SetupCommandSecrets = %q, want the credential the command inherited", got)
+	}
+	if slices.Contains(got, current) {
+		t.Errorf("SetupCommandSecrets = %q read this process's environment, which the command never inherited", got)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -551,49 +552,70 @@ func TestRunPreparedStartCandidateFailureHelpersShareOneBudget(t *testing.T) {
 // (postStartDeathPane) shares the post-start bound, but that check has already
 // answered: a read that does not answer reads empty, the start fails on the
 // death instead of deferring, and the death counts toward the resume backstop
-// even though the unread pane holds the provider's refusal.
+// even though the unread pane holds the provider's refusal. The read waits on
+// the peek, then on the guarded env snapshot the pane is scrubbed against,
+// which a native store open in flight holds for its whole window; the bound
+// covers both.
 func TestRunPreparedStartCandidateBoundsTheDeadResumePaneRead(t *testing.T) {
-	workDir := t.TempDir()
-	synctest.Test(t, func(t *testing.T) {
-		clk := &clock.Fake{Time: time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)}
-		store, bead, item := committedManualPostStartItem(t, clk, workDir)
-		sp := newPostStartProvider()
-		sp.SetPeekOutput("worker", "> claude --resume resume-key\nNo conversation found with session ID: resume-key")
-		sp.hangPeek.Store(true)
-		defer sp.release()
-		// The resume exits after Start: the liveness check finds it gone.
-		exited := func(_ context.Context, name string) bool { return sp.Stop(name) == nil }
+	for _, wait := range []struct {
+		name string
+		// wedge makes the wait under test hang until sp is released.
+		wedge func(t *testing.T, sp *postStartProvider)
+	}{
+		{name: "pane peek", wedge: func(_ *testing.T, sp *postStartProvider) { sp.hangPeek.Store(true) }},
+		{name: "guarded env snapshot", wedge: func(t *testing.T, sp *postStartProvider) {
+			prev := processEnvSnapshotExcludingNativeDoltOpen
+			processEnvSnapshotExcludingNativeDoltOpen = func() []string {
+				sp.hang("guarded env snapshot")
+				return prev()
+			}
+			t.Cleanup(func() { processEnvSnapshotExcludingNativeDoltOpen = prev })
+		}},
+	} {
+		t.Run(wait.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			synctest.Test(t, func(t *testing.T) {
+				clk := &clock.Fake{Time: time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)}
+				store, bead, item := committedManualPostStartItem(t, clk, workDir)
+				sp := newPostStartProvider()
+				sp.SetPeekOutput("worker", "> claude --resume resume-key\nNo conversation found with session ID: resume-key")
+				wait.wedge(t, sp)
+				defer sp.release()
+				// The resume exits after Start: the liveness check finds it gone.
+				exited := func(_ context.Context, name string) bool { return sp.Stop(name) == nil }
 
-		result, elapsed := runPostStartAttemptWith(context.Background(), t, item, sp, store, postStartTimeout, exited)
+				result, elapsed := runPostStartAttemptWith(context.Background(), t, item, sp, store, postStartTimeout, exited)
 
-		if got := sp.hangs.Load(); got != 1 {
-			t.Fatalf("%d provider calls hung, want exactly the dead resume's pane read: the scenario no longer reaches it", got)
-		}
-		if elapsed > postStartBound {
-			t.Fatalf("the attempt took %v, want it back within the %v bound", elapsed, postStartBound)
-		}
-		if !result.diedDuringStartup || result.outcome != TraceOutcomeProviderError || result.err == nil || errors.Is(result.err, runtime.ErrRuntimeUnavailable) {
-			t.Fatalf("result = (died=%v, outcome=%q, err=%v), want the death reported as a provider error: the liveness check answered, so the start does not defer", result.diedDuringStartup, result.outcome, result.err)
-		}
-		if result.diedPane != "" {
-			t.Fatalf("dead pane = %q, want empty: a pane read that does not answer reads empty", result.diedPane)
-		}
+				if got := sp.hangs.Load(); got != 1 {
+					t.Fatalf("%d calls hung (%s), want exactly the dead resume's %s: the scenario no longer reaches it", got, sp.hungIn(), wait.name)
+				}
+				if elapsed > postStartBound {
+					t.Fatalf("the attempt took %v, want it back within the %v bound", elapsed, postStartBound)
+				}
+				if !result.diedDuringStartup || result.outcome != TraceOutcomeProviderError || result.err == nil || errors.Is(result.err, runtime.ErrRuntimeUnavailable) {
+					t.Fatalf("result = (died=%v, outcome=%q, err=%v), want the death reported as a provider error: the liveness check answered, so the start does not defer", result.diedDuringStartup, result.outcome, result.err)
+				}
+				if result.diedPane != "" {
+					t.Fatalf("dead pane = %q, want empty: a pane read that does not answer reads empty", result.diedPane)
+				}
 
-		rec := events.NewFake()
-		commitStartFailure(result, sessionFrontDoor(store), clk, rec, 0, ioDiscard{}, nil)
-		got := mustGetBead(t, store, bead.ID)
-		if got.Metadata["session_key"] != "resume-key" || got.Metadata["wake_attempts"] != "1" || got.Metadata["resume_failures"] != "1" {
-			t.Fatalf("session_key=%q wake_attempts=%q resume_failures=%q, want the conversation kept and the death counted once toward the resume backstop", got.Metadata["session_key"], got.Metadata["wake_attempts"], got.Metadata["resume_failures"])
-		}
-		if n := resumeFailedEvents(t, rec.Events); n != 0 {
-			t.Fatalf("recorded %d resume-failed resets, want none: the refusal was never read", n)
-		}
+				rec := events.NewFake()
+				commitStartFailure(result, sessionFrontDoor(store), clk, rec, 0, ioDiscard{}, nil)
+				got := mustGetBead(t, store, bead.ID)
+				if got.Metadata["session_key"] != "resume-key" || got.Metadata["wake_attempts"] != "1" || got.Metadata["resume_failures"] != "1" {
+					t.Fatalf("session_key=%q wake_attempts=%q resume_failures=%q, want the conversation kept and the death counted once toward the resume backstop", got.Metadata["session_key"], got.Metadata["wake_attempts"], got.Metadata["resume_failures"])
+				}
+				if n := resumeFailedEvents(t, rec.Events); n != 0 {
+					t.Fatalf("recorded %d resume-failed resets, want none: the refusal never reached the resume backstop", n)
+				}
 
-		// The abandoned read returns late. Nothing is waiting for it.
-		settled := mustGetBead(t, store, bead.ID)
-		releaseAndSettle(t, sp)
-		requireBeadUnchanged(t, store, settled)
-	})
+				// The abandoned read returns late. Nothing is waiting for it.
+				settled := mustGetBead(t, store, bead.ID)
+				releaseAndSettle(t, sp)
+				requireBeadUnchanged(t, store, settled)
+			})
+		})
+	}
 }
 
 // A wedged session is retried every reconcile tick. Without a cap each tick
@@ -748,4 +770,31 @@ func TestEnqueuePreparedStartWaveReleasesItsSlotWhenAPostStartObservationHangs(t
 		}
 		requireBeadUnchanged(t, store, settled)
 	})
+}
+
+// A resume launch's dead pane is scrubbed against the guarded process-env
+// snapshot, not a bare read: a native store open in flight withholds ambient
+// BEADS_* variables process-wide, so a bare read taken then lacks a credential
+// the pane inherited and echoed.
+func TestPostStartDeathPaneScrubsTheGuardedEnvSnapshot(t *testing.T) {
+	const ambient = "ambient-NOT-A-REAL-CREDENTIAL-post-start"
+	// The process env as an open's window leaves it: the variable withheld.
+	t.Setenv("BEADS_DOLT_PASSWORD", "")
+	prev := processEnvSnapshotExcludingNativeDoltOpen
+	processEnvSnapshotExcludingNativeDoltOpen = func() []string {
+		return append(prev(), "BEADS_DOLT_PASSWORD="+ambient)
+	}
+	t.Cleanup(func() { processEnvSnapshotExcludingNativeDoltOpen = prev })
+
+	env := newReconcilerTestEnv(t)
+	session := env.createSessionBead("worker", "worker")
+	env.sp.SetPeekOutput("worker", "+ curl -u gc:"+ambient+"\ncurl: (22) 401\n")
+	item := preparedStart{candidate: startCandidate{info: env.sessionInfo(session.ID)}, resumed: true}
+	pane := postStartDeathPane(context.Background(), item, env.city, env.sp, env.store, &config.City{})
+	if !strings.Contains(pane, "curl: (22) 401") {
+		t.Fatalf("dead pane %q lost its diagnostic, so this proves nothing", pane)
+	}
+	if strings.Contains(pane, ambient) {
+		t.Errorf("dead pane %q carries the ambient credential the guarded snapshot holds", pane)
+	}
 }

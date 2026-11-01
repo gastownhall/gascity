@@ -52,7 +52,8 @@ func RunSetupCommand(ctx context.Context, command string, env map[string]string,
 	if workDir := strings.TrimSpace(env["GC_DIR"]); workDir != "" {
 		c.Dir = workDir
 	}
-	c.Env = os.Environ()
+	baseEnv := os.Environ()
+	c.Env = baseEnv
 	for k, v := range env {
 		c.Env = append(c.Env, k+"="+v)
 	}
@@ -74,7 +75,7 @@ func RunSetupCommand(ctx context.Context, command string, env map[string]string,
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			err = fmt.Errorf("%w: %w", ctxErr, err)
 		}
-		return setupCommandFailure(err, stdout, stderr, SetupCommandSecrets(env))
+		return setupCommandFailure(err, stdout, stderr, SetupCommandSecrets(baseEnv, env))
 	}
 	return nil
 }

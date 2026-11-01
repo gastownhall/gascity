@@ -23,7 +23,11 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":runtimecapability"],
-    deps = ["//internal/testenv"],
+    deps = [
+        "//internal/execenv",
+        "//internal/testenv",
+        "//internal/testutil",
+    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

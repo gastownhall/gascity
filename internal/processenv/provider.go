@@ -95,7 +95,8 @@ var providerCredentialEnvKeys = map[string]bool{
 // returns is an overlay on an environment the child already inherits, not the
 // whole environment. A tmux pane starts from the tmux server's global env, which
 // holds whatever the controller exported when the server started; the
-// subprocess and ACP runtimes exec with os.Environ() plus the overlay appended.
+// subprocess and ACP runtimes exec with execenv.Environ() plus the overlay
+// appended.
 // On every one of those paths, declining to re-export a key leaves the
 // controller's value visible to the child. Only an explicit KEY="" overrides it
 // — and on tmux an empty value is stronger than it looks, because the adapter
