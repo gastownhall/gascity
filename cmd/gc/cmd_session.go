@@ -1031,7 +1031,15 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	sessions := catalog.ListFromInfos(sessionBeads.OpenInfos(), stateFilter, templateFilter)
+	infos, err := sessionListInfos(sessionFrontDoor(sessStore), sessionBeads, stateFilter)
+	if err != nil {
+		if jsonOutput {
+			return writeJSONError(stdout, stderr, "session_list_failed", fmt.Sprintf("gc session list: %v", err), 1)
+		}
+		fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	sessions := catalog.ListFromInfos(infos, stateFilter, templateFilter)
 	sortSessionsCreatedDesc(sessions)
 
 	if jsonOutput {
@@ -1097,6 +1105,22 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 	}
 	_ = w.Flush() //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+// sessionListInfos returns the sessions the local read lists before
+// filtering: the open snapshot, or, when the state filter asks for closed
+// sessions (session.StateFilterIncludesClosed), the full history including
+// closed beads, read once for this request as the API does. A partial read
+// is an error.
+func sessionListInfos(front *session.Store, snapshot *sessionBeadSnapshot, stateFilter string) ([]session.Info, error) {
+	if !session.StateFilterIncludesClosed(stateFilter) {
+		return snapshot.OpenInfos(), nil
+	}
+	infos, err := front.ListAll(session.ListAllOptions{IncludeClosed: true, Sort: beads.SortCreatedDesc})
+	if err != nil {
+		return nil, fmt.Errorf("listing sessions including closed history: %w", err)
+	}
+	return infos, nil
 }
 
 // sessionListJSONRow is one `gc session list --json` row. Both routes print

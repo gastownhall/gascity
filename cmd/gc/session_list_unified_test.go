@@ -193,3 +193,64 @@ func TestRenderSessionListFromAPIPrintsLocalContract(t *testing.T) {
 		}
 	}
 }
+
+// TestSessionListLocalReadListsClosedHistory pins that the local read lists
+// closed sessions when the state filter asks for them, as the API does
+// (#8209): --state closed returns the closed row with state "closed" and
+// closed true, --state all returns every row, and the default stays open-only.
+func TestSessionListLocalReadListsClosedHistory(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedCityRoutingEnv(t)
+	cityDir := writeSessionListTestCity(t)
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	seedSessionListBead(t, store, "asleep", map[string]string{
+		"session_name": "asleep-worker", "template": "worker", "state": "asleep",
+	})
+	seedSessionListBead(t, store, "suspended", map[string]string{
+		"session_name": "suspended-worker", "template": "worker", "state": "suspended",
+	})
+	closedID := seedSessionListBead(t, store, "closed", map[string]string{
+		"session_name": "closed-worker", "template": "worker", "state": "asleep", "agent_name": "worker",
+	})
+	if err := store.Close(closedID); err != nil {
+		t.Fatalf("store.Close(%s): %v", closedID, err)
+	}
+
+	closed := runSessionListFallbackJSON(t, "closed")
+	rows := sessionListRows(t, closed)
+	if len(rows) != 1 || rows[0]["id"] != closedID {
+		t.Fatalf("--state closed rows = %v, want exactly %s", rows, closedID)
+	}
+	if rows[0]["state"] != "closed" || rows[0]["closed"] != true {
+		t.Errorf("closed row state/closed = %#v/%#v, want \"closed\"/true", rows[0]["state"], rows[0]["closed"])
+	}
+	if rows[0]["last_active"] != "" {
+		t.Errorf("closed row last_active = %#v, want \"\"", rows[0]["last_active"])
+	}
+	summary, _ := closed["summary"].(map[string]any)
+	if summary["total"] != float64(1) || summary["closed"] != float64(1) {
+		t.Errorf("--state closed summary = %v, want total 1 closed 1", summary)
+	}
+
+	all := runSessionListFallbackJSON(t, "all")
+	if got := len(sessionListRows(t, all)); got != 3 {
+		t.Errorf("--state all rows = %d, want 3", got)
+	}
+	allSummary, _ := all["summary"].(map[string]any)
+	if allSummary["total"] != float64(3) || allSummary["closed"] != float64(1) || allSummary["suspended"] != float64(1) {
+		t.Errorf("--state all summary = %v, want total 3 suspended 1 closed 1", allSummary)
+	}
+
+	def := runSessionListFallbackJSON(t, "")
+	for _, row := range sessionListRows(t, def) {
+		if row["id"] == closedID {
+			t.Errorf("the default filter listed the closed row: %v", row)
+		}
+	}
+	if got := len(sessionListRows(t, def)); got != 2 {
+		t.Errorf("default rows = %d, want 2 open rows", got)
+	}
+}
