@@ -38,6 +38,7 @@ go_test(
         "//internal/runtime/exec:bazel_go_test_srcs",
         "//internal/runtime/ssh:bazel_go_test_srcs",
         "//internal/runtime/subprocess:bazel_go_test_srcs",
+        "//internal/runtime/t3bridge:bazel_go_test_srcs",
         "//internal/runtime/tmux:bazel_go_test_srcs",
         "@go_sdk//:srcs",
     ],
