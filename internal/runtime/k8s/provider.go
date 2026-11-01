@@ -57,6 +57,7 @@ type Provider struct {
 	memLimit             string
 	serviceAccount       string              // pod service account name (GC_K8S_SERVICE_ACCOUNT)
 	prebaked             bool                // skip staging + init container for prebaked images
+	cityName             string              // the controller's city name, for the pod's remote-stage record
 	podSecurity          PodSecurityConfig   // optional pod-level UID/GID/fsGroup
 	nodeSelector         map[string]string   // GC_K8S_NODE_SELECTOR (JSON)
 	tolerations          []corev1.Toleration // GC_K8S_TOLERATIONS (JSON)
@@ -105,26 +106,24 @@ type schedulingFields struct {
 // Uses rest.InClusterConfig() when running in a pod, falls back to
 // clientcmd.BuildConfigFromFlags() for local development.
 func NewProvider() (*Provider, error) {
-	return NewProviderWithConfig(nil, nil, PodSecurityConfig{})
+	return newProviderWithConfig(PodSecurityConfig{}, nil, nil)
 }
 
 // NewProviderWithSecretProjection creates a provider with optional,
 // configuration-backed Kubernetes Secret projections. Existing GC_K8S_*
 // environment settings retain their normal behavior.
 func NewProviderWithSecretProjection(secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount) (*Provider, error) {
-	return NewProviderWithConfig(secretEnv, secretMounts, PodSecurityConfig{})
+	return newProviderWithConfig(PodSecurityConfig{}, secretEnv, secretMounts)
 }
 
 // NewProviderWithSecurityConfig creates a K8s session provider using optional
 // pod identity values from config. GC_K8S_RUN_AS_USER, GC_K8S_RUN_AS_GROUP,
 // and GC_K8S_FS_GROUP override their corresponding config values when set.
 func NewProviderWithSecurityConfig(config PodSecurityConfig) (*Provider, error) {
-	return NewProviderWithConfig(nil, nil, config)
+	return newProviderWithConfig(config, nil, nil)
 }
 
-// NewProviderWithConfig creates a K8s session provider with Secret projections
-// and optional pod identity values from config.
-func NewProviderWithConfig(secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount, config PodSecurityConfig) (*Provider, error) {
+func newProviderWithConfig(config PodSecurityConfig, secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount) (*Provider, error) {
 	podSecurity, err := resolvePodSecurityConfig(config)
 	if err != nil {
 		return nil, err
@@ -232,22 +231,6 @@ func resolvePodID(envName, configName string, configured *int64, envValue string
 	return &resolved, nil
 }
 
-// ValidateStaticConfig checks provider settings that do not need Kubernetes
-// credentials or a live API client. A managed worker dispatcher uses it before
-// deferring client construction to the controller.
-func ValidateStaticConfig(config PodSecurityConfig) error {
-	if _, err := resolvePodSecurityConfig(config); err != nil {
-		return err
-	}
-	if _, _, err := managedServiceAlias(); err != nil {
-		return err
-	}
-	if _, err := parseSchedulingEnv(); err != nil {
-		return err
-	}
-	return nil
-}
-
 func parseSchedulingEnv() (schedulingFields, error) {
 	var scheduling schedulingFields
 	if v := os.Getenv("GC_K8S_NODE_SELECTOR"); v != "" {
@@ -291,10 +274,10 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if p.image == "" {
 		return fmt.Errorf("starting session %q: GC_K8S_IMAGE is required", name)
 	}
+	ctrlCity := controllerCityPath(cfg.Env)
 	if _, err := resolvePodHostedDoltIdentity(cfg.Env, "", p.managedServiceHost, p.managedServicePort); err != nil {
 		return fmt.Errorf("resolving scoped store identity for session %q: %w", name, err)
 	}
-	ctrlCity := controllerCityPath(cfg.Env)
 	var cityIdentity *podHostedDoltIdentity
 	if !p.prebaked && ctrlCity != "" {
 		identity, err := resolvePodHostedDoltIdentity(cfg.Env, "GC_K8S_CITY_", p.managedServiceHost, p.managedServicePort)
@@ -306,7 +289,8 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	podName := SanitizeName(name)
 	label := SanitizeLabel(name)
 
-	// Check for existing pod (any phase).
+	// Check for an existing pod first so rig-projection errors cannot mask a live
+	// session's normal ErrSessionExists or ErrSessionInitializing result.
 	existing, err := p.ops.listPods(ctx, "gc-session="+label, "")
 	haveExisting := err == nil && len(existing) > 0
 	if haveExisting {
@@ -337,15 +321,16 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 			// Stale pod — tmux definitively dead and past grace period, recreate.
 		}
 	}
-	// Don't let projection/config errors mask a healthy live Pod's normal
-	// ErrSessionExists or ErrSessionInitializing result. Build before deleting
-	// any stale Pod so a bad projection never destroys it.
-	rigProjection, err := buildPodRigProjection(controllerCityPath(cfg.Env), cfg)
+
+	// Validate rig projection before deleting a stale pod. Hosted identity
+	// validation above retains the #8158 fail-closed startup boundary.
+	rigProjection, err := buildPodRigProjection(ctrlCity, cfg)
 	if err != nil {
 		return fmt.Errorf("preparing rig state for session %q: %w", name, err)
 	}
+
 	if haveExisting {
-		// Clean up existing pod.
+		// Clean up existing pod only after all projection and identity checks pass.
 		_ = p.ops.deletePod(ctx, existing[0].Name, 5)
 		_ = waitForDeletion(ctx, p.ops, existing[0].Name, 30*time.Second)
 	}
@@ -369,16 +354,13 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	workDirStaged := false
-	if !p.prebaked {
-		// Stage files via init container if needed.
-		if needsStaging(cfg, ctrlCity) {
-			staged, err := stageFiles(ctx, p.ops, podName, cfg, ctrlCity, p.stderr)
-			if err != nil {
-				cleanup("staging failed")
-				return fmt.Errorf("staging files for session %q: %w", name, err)
-			}
-			workDirStaged = staged
+	if !p.prebaked && needsStaging(cfg, ctrlCity) {
+		staged, err := stageFiles(ctx, p.ops, podName, cfg, ctrlCity, p.stderr)
+		if err != nil {
+			cleanup("staging failed")
+			return fmt.Errorf("staging files for session %q: %w", name, err)
 		}
+		workDirStaged = staged
 	}
 
 	// Wait for main container to be running.
@@ -388,11 +370,19 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	if !p.prebaked && ctrlCity != "" {
-		// Initialize the City using its controller-owned hosted identity.
+		// Initialize the city with its canonical hosted-store identity.
 		skipRel := cityTemplateSkipRel(workDirStaged, ctrlCity, cfg.WorkDir)
 		if err := initCityInPod(ctx, p.ops, podName, ctrlCity, skipRel, cityIdentity); err != nil {
 			cleanup("City initialization failed")
 			return fmt.Errorf("initializing City in pod for session %q: %w", name, err)
+		}
+	}
+
+	// Record the remote stage before releasing the workspace to pre_start.
+	if ctrlCity != "" {
+		if err := writeRemoteStageInPod(ctx, p.ops, podName, p.cityName, ctrlCity); err != nil {
+			cleanup("remote stage record")
+			return fmt.Errorf("recording pod %q as a remote stage of city %s (%s): %w; the pod was removed rather than run unmarked", podName, remoteStageCityName(p.cityName, ctrlCity), ctrlCity, err)
 		}
 	}
 
@@ -416,8 +406,9 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	if !p.prebaked {
-		if _, err := p.ops.execInPod(ctx, podName, "agent",
-			[]string{"touch", "/workspace/.gc-workspace-ready"}, nil); err != nil {
+		// Entry point must remain blocked until City, hosted scope, and rig state
+		// have all been initialized and verified.
+		if _, err := p.ops.execInPod(ctx, podName, "agent", []string{"touch", "/workspace/.gc-workspace-ready"}, nil); err != nil {
 			cleanup("workspace readiness signal failed")
 			return fmt.Errorf("signaling workspace ready for session %q: %w", name, err)
 		}
@@ -545,11 +536,9 @@ func (p *Provider) runPodPostLaunchSetup(ctx context.Context, podName string, cf
 // The pod must be Running with a live tmux "main" session and matching rig
 // environment, else [runtime.ErrSessionNotFound]. Rig projection failures also
 // wrap that error so the reconciler can provision a fresh Pod. Staging,
-// city/beads init, and PreStart are NOT re-run here (k8s treats PreStart as
-// provision-half); env is provision-half too (set in the pod spec at create
-// time, not re-injected — respawn-pane carries no env). NOTE: tmux diverges — as
-// of the relaunch pre_start fix it re-runs PreStart on Relaunch (launch-half),
-// while k8s and ssh intentionally do not.
+// city/beads init, and PreStart are not re-run on Relaunch; the remote-stage
+// record is rewritten before respawn so an older warm pod is marked too. NOTE:
+// tmux re-runs PreStart on Relaunch, while k8s and ssh intentionally do not.
 //
 // CAVEAT (unverified on a real cluster — see the B3 design doc): for
 // LINUX_USERNAME pods the entrypoint runs tmux under `su - <user>`, so the
@@ -579,6 +568,17 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 		}
 		if err := applyPodRigProjection(ctx, p.ops, podName, projection); err != nil {
 			return fmt.Errorf("projecting rig state for session %q: %w: %w", name, runtime.ErrSessionNotFound, err)
+		}
+	}
+
+	// Record the warm pod as a remote stage before the agent respawns, as
+	// Start does before its ready sentinel (S5-A): a pod an older provider
+	// created carries neither the record nor the pod-spec environment, and
+	// the respawned agent must not run unmarked. A failed write fails the
+	// relaunch rather than respawning into an unmarked pod.
+	if ctrlCity := controllerCityPath(cfg.Env); ctrlCity != "" {
+		if err := writeRemoteStageInPod(ctx, p.ops, podName, p.cityName, ctrlCity); err != nil {
+			return fmt.Errorf("k8s relaunch %q: recording pod %q as a remote stage of city %s (%s): %w; the agent was not respawned", name, podName, remoteStageCityName(p.cityName, ctrlCity), ctrlCity, err)
 		}
 	}
 
@@ -1315,6 +1315,57 @@ func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity, skipRel s
 		return err
 	}
 	return nil
+}
+
+// remoteStageRecordPath is where a pod's remote-stage record lives: gc reads
+// <city>/.gc/remote-stage.toml, and the pod's city root is /workspace in
+// both staged and prebaked pods.
+const remoteStageRecordPath = podWorkspaceRoot + "/.gc/remote-stage.toml"
+
+// The remote-stage environment cmd/gc's remote_stage.go honors from process
+// start. Keep the names in step with cmd/gc (remoteStageControllerEnv,
+// remoteStageCityEnv).
+const (
+	remoteStageControllerEnv = "GC_REMOTE_STAGE_CONTROLLER"
+	remoteStageCityEnv       = "GC_REMOTE_STAGE_CITY"
+)
+
+// remoteStageCityName is the controller's city name, else its path's base.
+func remoteStageCityName(cityName, ctrlCity string) string {
+	if strings.TrimSpace(cityName) == "" {
+		return filepath.Base(ctrlCity)
+	}
+	return cityName
+}
+
+// remoteStageEnv marks the processes started from a pod's environment as a
+// remote stage of ctrlCity, or nothing without a controller city: the
+// entrypoint, the agent and its tmux server (re-exported through su for
+// LINUX_USERNAME pods: suRemoteStageExports), and kubectl exec'd commands. A
+// process started with a deliberately cleared environment relies on the
+// on-disk record.
+func remoteStageEnv(cityName, ctrlCity string) []corev1.EnvVar {
+	if strings.TrimSpace(ctrlCity) == "" {
+		return nil
+	}
+	return []corev1.EnvVar{
+		{Name: remoteStageControllerEnv, Value: ctrlCity},
+		{Name: remoteStageCityEnv, Value: remoteStageCityName(cityName, ctrlCity)},
+	}
+}
+
+// remoteStageRecord renders the record cmd/gc's remote_stage.go reads.
+func remoteStageRecord(cityName, ctrlCity string, now time.Time) string {
+	cityName = remoteStageCityName(cityName, ctrlCity)
+	return fmt.Sprintf("controller_city = %q\ncontroller_path = %q\nstaged_at = %q\n", cityName, ctrlCity, now.UTC().Format(time.RFC3339))
+}
+
+// writeRemoteStageInPod writes the pod's remote-stage record with a plain
+// shell write (temp file, then rename), independent of the pod's gc version.
+func writeRemoteStageInPod(ctx context.Context, ops k8sOps, podName, cityName, ctrlCity string) error {
+	script := "mkdir -p " + podWorkspaceRoot + "/.gc && cat > " + remoteStageRecordPath + ".tmp && mv -f " + remoteStageRecordPath + ".tmp " + remoteStageRecordPath
+	_, err := ops.execInPod(ctx, podName, "agent", []string{"sh", "-c", script}, strings.NewReader(remoteStageRecord(cityName, ctrlCity, time.Now())))
+	return err
 }
 
 type podRigProjection struct {

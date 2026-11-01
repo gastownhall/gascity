@@ -157,7 +157,12 @@ func doctorReconcilerMode(cfg *config.City, lookupEnv func(string) (string, bool
 // last reason). It never re-latches: the running mode is fixed until the
 // controller restarts.
 type reconcilerModeDrift struct {
-	running   reconcilerMode
+	running reconcilerMode
+	// fellBack is set when this controller runs legacy because its default
+	// v2 failed the boot probe (reconcile_boot_fallback.go): an unset key
+	// that resolves to the v2 default is then not a pending restart, since
+	// the next start probes and falls back again until the refusal is fixed.
+	fellBack  bool
 	lookupEnv func(string) (string, bool) // what the controller latched with; nil has no override
 	reported  string                      // the on-disk value last reported; "" while in sync
 }
@@ -182,6 +187,14 @@ func (d *reconcilerModeDrift) observe(cfg *config.City) string {
 	if err == nil && r.Mode == d.running {
 		d.reported = ""
 		return ""
+	}
+	if err == nil && d.fellBack && r.Reason == reconcilerDefaultV2 && d.running == reconcilerLegacy {
+		const fallbackNote = "fallback"
+		if d.reported == fallbackNote {
+			return ""
+		}
+		d.reported = fallbackNote
+		return "session_reconciler on disk is unset, which resolves to the v2 default; this controller runs legacy because v2's boot check refused this city at start (gc doctor names why). A restart probes again and runs v2 only once that refusal is repaired"
 	}
 	mode, _, ok := cfg.Daemon.SessionReconcilerMode()
 	var onDisk string
@@ -266,6 +279,15 @@ func (c *sessionReconcilerDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 	default:
 		r.Status = doctor.StatusOK
 		r.Message = "session reconciler: " + res.String()
+	}
+	// The O6 safety net's finding: the last default-v2 boot fell back to
+	// legacy over a refusal (reconcile_boot_fallback.go).
+	if err == nil && res.Reason == reconcilerDefaultV2 && ctx != nil && ctx.CityPath != "" {
+		if rec, ok := readReconcilerV2FallbackRecord(ctx.CityPath); ok {
+			r.Status = doctor.StatusWarning
+			r.Message += fmt.Sprintf("; the last boot (%s) FELL BACK TO LEGACY because v2 would refuse it: %s", rec.At, rec.Refusal)
+			r.FixHint = `repair what the refusal names so the default v2 boots, or set session_reconciler = "legacy" to keep legacy`
+		}
 	}
 	if ignored := v2IgnoredSettings(c.cfg); mode == reconcilerV2 && len(ignored) > 0 {
 		r.Status = doctor.StatusWarning

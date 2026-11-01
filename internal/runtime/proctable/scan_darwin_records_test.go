@@ -162,6 +162,34 @@ func TestScanRecordsBySessionIDLooksThroughProgramStatusRelay(t *testing.T) {
 	}
 }
 
+// No tap is a root, as on Linux
+// (TestScanWithRootNeverReportsProgramStatusTapAsRoot): a tap carries its tmux
+// server's environment, which a server founded inside an agent session
+// (#5392's topology) takes from that session, so a tap read as a root would be
+// that session's to kill.
+func TestScanRecordsBySessionIDNeverReportsProgramStatusTapAsRoot(t *testing.T) {
+	records := psSnapshot(t,
+		"    1     0 /sbin/launchd",
+		"  700     1 tmux: server GC_SESSION_ID=ga-founder",
+		"  701   700 claude GC_SESSION_ID=ga-founder", // the founding session's own pane program
+		"  702   700 /opt/gc/bin/gc-osc7501 tap -t %3 -n rAnd0m -x /usr/local/bin/tmux -S /private/tmp/tmux-501/city GC_SESSION_ID=ga-founder",
+		"  703     1 /opt/gc/bin/gc-osc7501 tap -t %4 -n 0ther -x /usr/local/bin/tmux -S /private/tmp/tmux-501/city GC_SESSION_ID=ga-founder",
+	)
+
+	got := scanRecordsBySessionID(records, "ga-founder")
+	if len(got) != 1 || got[0].PID != 701 {
+		t.Fatalf("scanRecordsBySessionID = %+v, want only the founding session's program pid 701", got)
+	}
+	if orphans := orphanCandidates(scanRecordsBySessionID(records, ""), 0); len(orphans) != 0 {
+		t.Fatalf("orphan candidates %+v, want none: an orphaned tap is no session's runtime", orphans)
+	}
+	for pid, want := range map[int]bool{701: true, 702: false, 703: false} {
+		if got := isRecordScanRoot(records, records[pid]); got != want {
+			t.Errorf("isRecordScanRoot(%d) = %v, want %v", pid, got, want)
+		}
+	}
+}
+
 // An orphaned relay (its tmux server gone) leaves its program as the orphan
 // the sweep must find: the program reads as reparented to launchd, as on
 // Linux (TestOrphanCandidateScanLooksThroughOrphanedRelay).

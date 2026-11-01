@@ -426,3 +426,35 @@ func TestProviderSpecFromWorkerCarriesProgramStatus(t *testing.T) {
 		t.Fatalf("undeclared builtin produced binding %+v", undeclared.ProgramStatus)
 	}
 }
+
+// Kills a builtin declaration config would reject from a city, one whose
+// protocol literal drifts from ProgramStatusProtocolOSC7501 (the builtin
+// package duplicates it), and a declared builtin whose forced env or app does
+// not reach an armed session.
+func TestBuiltinProgramStatusBindingsValidate(t *testing.T) {
+	declared := 0
+	for name, spec := range BuiltinProviders() {
+		b := spec.ProgramStatus
+		if err := validateProgramStatusBinding(b); err != nil {
+			t.Errorf("builtin %s: %v", name, err)
+		}
+		if b.Protocol == "" {
+			continue
+		}
+		if !b.Declared() {
+			t.Errorf("builtin %s: protocol %q does not declare", name, b.Protocol)
+			continue
+		}
+		declared++
+		arm, env := b.Arm(runtime.ProgramStatusShadow, false)
+		if !arm.Capture || arm.App != b.App {
+			t.Errorf("builtin %s: shadow arm = %+v, want capture of app %q", name, arm, b.App)
+		}
+		if !maps.Equal(env, b.Env) {
+			t.Errorf("builtin %s: armed env = %v, want %v", name, env, b.Env)
+		}
+	}
+	if declared == 0 {
+		t.Fatal("no builtin declares program status")
+	}
+}

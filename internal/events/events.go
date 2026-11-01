@@ -132,6 +132,13 @@ const (
 	WorkReleased          = "work.released"
 	WorkReleaseUnfinished = "work.release_unfinished"
 	WorkEscalated         = "work.escalated"
+	// WorkRateLimited is one move of a seat's rate-limit episode
+	// (internal/workladder): its provider refusing its turns with a rate
+	// limit, as the agent's own transcript classifies them. Subject carries
+	// the session ID, SessionID the seat; the payload is
+	// WorkRateLimitedPayload. It reports facts for a pack's provider policy
+	// and for people; the SDK draws no conclusion about the provider from it.
+	WorkRateLimited = "work.rate_limited"
 	// BeadDeadAssigneeReopened fires when the reconciler reopens a routed work
 	// bead whose assignee resolves to no open session bead — the owning session
 	// closed/retired while the bead stayed assigned, leaving it open+routed but
@@ -644,7 +651,7 @@ var KnownEventTypes = []string{
 	ExecutionWorkAssociated, ExecutionRunAnchored, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
 	ExecutionClaimWindowExpired,
 	ExecutionStepStalled,
-	WorkNudged, WorkNudgeFailed, WorkRecycleRequested, WorkReleased, WorkReleaseUnfinished, WorkEscalated,
+	WorkNudged, WorkNudgeFailed, WorkRecycleRequested, WorkReleased, WorkReleaseUnfinished, WorkEscalated, WorkRateLimited,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
 	ConvoyCreated, ConvoyClosed,

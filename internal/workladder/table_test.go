@@ -46,6 +46,8 @@ func TestDecisionTable(t *testing.T) {
 		{"claim/started, >= 6, recycles 0 < R", ent(KindClaim, RungStarted, 6, nil), nil},
 		{"claim/started, >= 6, recycles 1 = R", ent(KindClaim, RungStarted, 6, func(e *Entry) { e.Recycles = 1 }), nil},
 		{"claim/escalated", ent(KindClaim, RungEscalated, 9, func(e *Entry) { e.Recycles, e.Escalated = 1, true }), nil},
+		{"claim/claimed, attempts >= 3, its seat waits on a person", ent(KindClaim, RungClaimed, 3, func(e *Entry) { e.AwaitsHuman = true }), nil},
+		{"claim/started, >= 6, recycles 0 < R, its seat waits on a person", ent(KindClaim, RungStarted, 6, func(e *Entry) { e.AwaitsHuman = true }), nil},
 		{"claim/started, attempts < 6, its notice pending", ent(KindClaim, RungStarted, 5, func(e *Entry) { e.Notice = NoticeMark{Op: "op", At: now} }), nil},
 		{"claim/claimed, attempts >= 3, its notice pending", ent(KindClaim, RungClaimed, 3, func(e *Entry) { e.Notice = NoticeMark{Op: "op", At: now} }), nil},
 		{"claim/started, attempts < 6, another's notice pending", ent(KindClaim, RungStarted, 5, nil), pendingOther(now)},
@@ -80,7 +82,7 @@ func TestDecisionTable(t *testing.T) {
 	for _, r := range rows {
 		fmt.Fprintf(&b, "| %s |", r.name)
 		for _, c := range cols {
-			o := quiet(now, 1, Work{Key: r.e.Key, Kind: r.e.Kind})
+			o := quiet(now, 1, Work{Key: r.e.Key, Kind: r.e.Kind, AwaitsHuman: r.e.AwaitsHuman})
 			if r.e.Rung >= RungStarted {
 				o.Started[r.e.Key] = SrcAgent
 			}
@@ -235,6 +237,7 @@ func rateLimitTable(b *strings.Builder, now time.Time) {
 		{"answered, attached", with(answered, func(o *Observation) { o.RestartHold = RestartHoldAttached })},
 		{"answered, another seat on the provider restarted 10m ago", with(answered, func(o *Observation) { o.ProviderFreshAt = now.Add(-10 * time.Minute) })},
 		{"answered, a claim unread", with(answered, func(o *Observation) { o.Hold = map[ClaimKey]bool{key("x"): true} })},
+		{"answered, the seat's work not all listed", with(answered, func(o *Observation) { o.Partial = true })},
 		{"answered, no nudge delivered since it opened", func(r *Record, o *Observation) {
 			if !r.RateLimit.Since.IsZero() {
 				r.Delivered = minTime(r.Delivered, r.RateLimit.Since.Add(-time.Minute))
@@ -243,15 +246,18 @@ func rateLimitTable(b *strings.Builder, now time.Time) {
 		}},
 		{"refused x1", refused(1, now.Add(-time.Minute))},
 		{"refused x2 before the delivery", refused(2, delivered.Add(-time.Minute))},
-		{"refused x2 61m ago, past the evidence bound", func(r *Record, o *Observation) {
-			r.Delivered = now.Add(-65 * time.Minute)
-			refused(2, now.Add(-61*time.Minute))(r, o)
+		{"refused x2 71m ago, past the evidence bound", func(r *Record, o *Observation) {
+			r.Delivered = now.Add(-75 * time.Minute)
+			refused(2, now.Add(-71*time.Minute))(r, o)
 		}},
 		{"served 1m ago", func(_ *Record, o *Observation) {
 			o.Turns = TurnReading{Read: true, Conv: o.Conv, ServedAt: now.Add(-time.Minute)}
 		}},
-		{"no answer for 61m", func(r *Record, _ *Observation) {
+		{"no answer for 61m, within the evidence bound", func(r *Record, _ *Observation) {
 			r.RateLimit.Checked = minTime(r.RateLimit.Checked, now.Add(-61*time.Minute))
+		}},
+		{"no answer for 71m", func(r *Record, _ *Observation) {
+			r.RateLimit.Checked = minTime(r.RateLimit.Checked, now.Add(-71*time.Minute))
 		}},
 		{"conversation changed", func(_ *Record, o *Observation) { o.Conv++ }},
 		{"busy, answered", with(answered, func(o *Observation) { o.Quiet = Quiet{State: NotQuiet} })},

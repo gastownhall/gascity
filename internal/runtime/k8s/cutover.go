@@ -26,31 +26,38 @@ var (
 )
 
 // NewSeamBacked constructs a k8s provider served through the seams.
-func NewSeamBacked() (runtime.Provider, error) {
-	return NewSeamBackedWithConfig(nil, nil, PodSecurityConfig{})
+func NewSeamBacked(opts ...Option) (runtime.Provider, error) {
+	return NewSeamBackedWithConfig(PodSecurityConfig{}, nil, nil, opts...)
 }
 
 // NewSeamBackedWithSecretProjection constructs a seam-backed K8s provider with
 // the city's configured Secret projections.
-func NewSeamBackedWithSecretProjection(secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount) (runtime.Provider, error) {
-	return NewSeamBackedWithConfig(secretEnv, secretMounts, PodSecurityConfig{})
+func NewSeamBackedWithSecretProjection(secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount, opts ...Option) (runtime.Provider, error) {
+	return NewSeamBackedWithConfig(PodSecurityConfig{}, secretEnv, secretMounts, opts...)
 }
 
 // NewSeamBackedWithSecurityConfig constructs a K8s provider with optional
 // pod-level UID, GID, and fsGroup values from the city session config.
 func NewSeamBackedWithSecurityConfig(config PodSecurityConfig) (runtime.Provider, error) {
-	return NewSeamBackedWithConfig(nil, nil, config)
+	return NewSeamBackedWithConfig(config, nil, nil)
 }
 
-// NewSeamBackedWithConfig constructs a seam-backed K8s provider with the city's
-// configured Secret projections and optional pod identity values.
-func NewSeamBackedWithConfig(secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount, config PodSecurityConfig) (runtime.Provider, error) {
-	raw, err := NewProviderWithConfig(secretEnv, secretMounts, config)
+// NewSeamBackedWithConfig constructs a seam-backed K8s provider with optional
+// pod identity values, Secret projections, and provider options.
+func NewSeamBackedWithConfig(config PodSecurityConfig, secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount, opts ...Option) (runtime.Provider, error) {
+	raw, err := newProviderWithConfig(config, secretEnv, secretMounts)
 	if err != nil {
 		return nil, err
 	}
+	return seamBacked(raw, opts...), nil
+}
+
+func seamBacked(raw *Provider, opts ...Option) runtime.Provider {
+	for _, opt := range opts {
+		opt(raw)
+	}
 	rt, tp := raw.Seams()
-	return &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: raw}, nil
+	return &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: raw}
 }
 
 // ObserveLivenessWithError preserves Kubernetes probe uncertainty across the
@@ -76,4 +83,13 @@ func (s *seamBackedProvider) Relaunch(ctx context.Context, name string, cfg runt
 // through; the seams route ListRunning to the same raw listing.
 func (s *seamBackedProvider) ListRunningComplete() bool {
 	return s.raw.ListRunningComplete()
+}
+
+// Option configures a provider built by a seam-backed K8s constructor.
+type Option func(*Provider)
+
+// WithCityName names the controller's city: the name goes into each pod's
+// remote-stage record.
+func WithCityName(cityName string) Option {
+	return func(p *Provider) { p.cityName = cityName }
 }

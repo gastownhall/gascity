@@ -370,6 +370,14 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 		return nil, nil
 	}
 
+	// A remote stage of a split city never resolves, opens or creates a
+	// binding of its own (remote_stage.go): its infrastructure classes are
+	// the controller's, and genesis here would serve them from an empty
+	// pod-local store.
+	if err := remoteStageStorageRefusal(cityPath); err != nil {
+		return nil, fmt.Errorf("%s: %w", logPrefix, err)
+	}
+
 	target, ok, err := resolveInfraBindingTarget(cityPath, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", logPrefix, err)
@@ -782,6 +790,7 @@ var storageBindingEventTypes = map[infraMigrationOutcome]string{
 	infraMigrationBornSplitBlocked: events.StorageBindingUnconverged,
 	infraMigrationGenesisBlocked:   events.StorageBindingUnconverged,
 	infraMigrationRetained:         events.StorageBindingUnconverged,
+	infraMigrationIdentityMismatch: events.StorageBindingUnconverged,
 	infraMigrationUncheckable:      events.StorageBindingUncheckable,
 }
 

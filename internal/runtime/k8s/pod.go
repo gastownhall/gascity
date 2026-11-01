@@ -174,9 +174,10 @@ func agentCommandShellArgs(script string, cfg runtime.Config) []string {
 // buildAgentLaunchCommand builds the static shell transport shared by Start and
 // Relaunch. Dynamic-user launches stream the encoded command through stdin to a
 // static su -c script; the inner script decodes it before passing the command
-// to tmux as one quoted argument. tmuxCommand is a fixed command selected by
-// the caller.
-func buildAgentLaunchCommand(cfg runtime.Config, tmuxCommand string, keepAlive bool) string {
+// to tmux as one quoted argument. suExports carries the main-container's
+// remote-stage identity through a login shell; Relaunch relies on the durable
+// record it writes before respawn. tmuxCommand is fixed by the caller.
+func buildAgentLaunchCommand(cfg runtime.Config, tmuxCommand string, keepAlive bool, suExports string) string {
 	keepAliveSuffix := ""
 	if keepAlive {
 		keepAliveSuffix = " && sleep infinity"
@@ -184,8 +185,8 @@ func buildAgentLaunchCommand(cfg runtime.Config, tmuxCommand string, keepAlive b
 
 	if user := cfg.Env["LINUX_USERNAME"]; user != "" {
 		userScript := fmt.Sprintf(
-			`CMD=$(base64 -d) && cd %s && %s "$CMD"%s`,
-			shellquote.Quote(projectedPodWorkDir(cfg)), tmuxCommand, keepAliveSuffix,
+			`%sCMD=$(base64 -d) && cd %s && %s "$CMD"%s`,
+			suExports, shellquote.Quote(projectedPodWorkDir(cfg)), tmuxCommand, keepAliveSuffix,
 		)
 		return fmt.Sprintf(
 			`printf '%%s' "$@" | su - %s -c %s`,
@@ -203,8 +204,14 @@ func buildAgentLaunchCommand(cfg runtime.Config, tmuxCommand string, keepAlive b
 // the existing tmux "main" session (respawn-pane -k), reusing the warm pod. When
 // LINUX_USERNAME is set the entrypoint runs tmux under `su - <user>`, so the
 // respawn is wrapped in the same su to reach that user's tmux socket.
+//
+// The respawned agent's environment is the tmux server's, not this command's:
+// respawn-pane starts the pane from the server's global and session
+// environment. The server got the remote-stage variables when the entrypoint
+// started it (suRemoteStageExports for LINUX_USERNAME), and Relaunch writes the
+// on-disk record before respawning, which covers a pod created without them.
 func buildRespawnCommand(cfg runtime.Config) []string {
-	script := buildAgentLaunchCommand(cfg, fmt.Sprintf("tmux respawn-pane -k -t %s", tmuxSession), false)
+	script := buildAgentLaunchCommand(cfg, fmt.Sprintf("tmux respawn-pane -k -t %s", tmuxSession), false, "")
 	args := []string{"sh", "-c"}
 	return append(args, agentCommandShellArgs(script, cfg)...)
 }
@@ -386,7 +393,6 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 		}
 		rigProjectionMarker = "/tmp/gc-rig-projection-ready-" + hex.EncodeToString(nonce[:])
 	}
-
 	// Pod entrypoint: wait for workspace ready → pre_start → tmux → keepalive.
 	// Each pre_start command is base64-encoded and decoded at runtime to prevent
 	// shell metacharacter injection from user-supplied commands.
@@ -447,13 +453,16 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	if linuxUsername != "" {
 		// Run tmux as the dynamic user via su. userSetup already created and
 		// chowned podWorkDir as root; enterWorkDir is idempotent and keeps
-		// pre_start in the same directory as the historical path.
+		// pre_start in the same directory as the historical path. su - clears
+		// the pod environment, so re-export the remote-stage identity inside
+		// the login-shell command before starting tmux.
 		entrypointPrefix = userSetup + entrypointPrefix
 	}
 	tmuxCmd := entrypointPrefix + buildAgentLaunchCommand(
 		cfg,
 		fmt.Sprintf("tmux new-session -d -s %s", tmuxSession),
 		true,
+		suRemoteStageExports(p.cityName, ctrlCity),
 	)
 
 	// Build environment, remapping K8s-specific vars.
@@ -461,6 +470,10 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	if err != nil {
 		return nil, err
 	}
+	// The pod's processes are a remote stage of the controller's city from
+	// the container's first instruction (S5-A); keep this alongside the rig
+	// projection gate so neither feature weakens the other's startup contract.
+	env = append(env, remoteStageEnv(p.cityName, controllerCityPath(cfg.Env))...)
 	if rigProjectionMarker != "" {
 		env = append(env, corev1.EnvVar{Name: "GC_RIG_PROJECTION_MARKER", Value: rigProjectionMarker})
 	}
@@ -883,3 +896,14 @@ func buildResources(p *Provider) (corev1.ResourceRequirements, error) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// suRemoteStageExports returns shell statements that restore the remote-stage
+// variables inside the login-shell command passed to `su - <user> -c`. Values
+// are quoted as shell data so spaces and metacharacters remain unchanged.
+func suRemoteStageExports(cityName, ctrlCity string) string {
+	var out strings.Builder
+	for _, e := range remoteStageEnv(cityName, ctrlCity) {
+		fmt.Fprintf(&out, "export %s=%s; ", e.Name, shellquote.Quote(e.Value))
+	}
+	return out.String()
+}

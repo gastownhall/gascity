@@ -544,6 +544,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The work ladder only nudges a step, hourly, while its seat waits on a
+  person.** With `[daemon] work_ladder` on (the default), a claimed step whose
+  metadata `gc.awaiting_human` names the session holding it (the seat asked a
+  person and waits on their decision, such as an approval asked by mail) is
+  nudged an hour after the ladder sees the wait and hourly after that, however
+  long the person takes: no recycle, no release, and none of the
+  `work.escalated` alerts its pacing would raise (`started_recycled`,
+  `started_unanswered`, `release_unfinished`). Nudges the seat cannot take
+  still count toward `nudge_refused`, and a release already in flight that
+  raced the step's start still raises `release_raced_start`. The hourly nudge
+  takes up an answer whose turn died before the seat could clear the key. The
+  ladder checks the key in the planner's snapshot (on the claim's own bead,
+  never another store's bead with the same ID) and again in every live
+  re-read before it acts (a nudge, a release, pacing carried under an
+  incomplete snapshot): a wait written after the snapshot holds the step until
+  a snapshot shows it. Once the seat clears the key, the ladder takes the step
+  up on a fresh grace. The key names the seat, not the step: a step released
+  and re-claimed by another seat is paced as usual. Pack formulas write and
+  clear the key; gc only reads it.
+
+- **The work ladder restarts a rate-limited seat on a fresh conversation, once
+  per episode, and reports every move as `work.rate_limited`.** With
+  `[daemon] work_ladder` on, a seat whose provider refused its last two turns
+  with a rate limit (as the agent CLI's own transcript classifies them: HTTP
+  429, Claude Code's `rate_limit`, Codex's `usage_limit_exceeded`), the newer
+  ending after a nudge the seat took, opens a rate-limit episode, kept on the
+  seat's `work_ladder` cell. While it stands the seat is paced as on a
+  degraded provider: nudges every 10 minutes that count toward nothing (a
+  step waiting on a person keeps its hourly nudge), and no drain, release or
+  escalation. Once a nudge the seat took after the episode opened is refused
+  too, at least 10 minutes after the first refusal, the seat is restarted in
+  place on a fresh conversation (`gc session reset`'s request), keeping its
+  claims. The restart waits while another seat on the same provider was
+  restarted fresh in the last 30 minutes, a claim cannot be re-read, or the
+  planner's snapshot of the work is incomplete (the work it lacks may be
+  waiting on a person), and while a person is attached to the seat or its
+  work awaits a person; it lands once nothing holds it. If the fresh
+  conversation is refused too, the refusal is a spent usage quota, or the
+  seat was restarted fresh within the hour, the seat is not restarted again
+  and stays paced until the provider serves it. An episode raises one
+  `work.escalated` alert at most, naming the provider and quoting its
+  refusal: for the first of those outcomes, or for a restart a person holds
+  (at once) or a block holds (after 70 minutes). Every move (`opened`,
+  `restarted`, `held`, `exhausted`, `closed`) is a typed `work.rate_limited`
+  event carrying the provider, the conversation, the CLI's error class and
+  text, and the seat's started claims, so a pack can decide whether a pool is
+  refusing every seat and hold the provider through `provider-health.json`,
+  which pauses its seats and their respawns. Every `work.*` event now names
+  the seat's provider. Seats whose turns cannot be read are judged on their
+  activity alone, as before. Cells written by the per-claim-flag builds decode
+  as they stand; their flags drop on the first rewrite.
+
 - **`[events.mirror]` writes a copy of the city's event log outside `.gc`**
   for a log shipper that may not enter `.gc` (which gc keeps at `0700`). The
   city's controller tails `.gc/events.jsonl` and appends every event line to

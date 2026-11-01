@@ -2525,6 +2525,7 @@ gc init --template gascity --default-provider claude \
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--adopt-store` | bool |  | initialize even though the directory already holds a .gc/store binding (a previous city's infrastructure state); without it gc init refuses |
 | `--allow-supervisor-mismatch` | bool |  | register the city even when the running supervisor is a different gc installation than this binary |
 | `--beads-target` | string |  | beads target selector: local or external (or GC_BEADS_TARGET); give with --beads-transport. Default local. external requires --dolt-host, --dolt-port and --dolt-database (or GC_DOLT_HOST/GC_DOLT_PORT/GC_DOLT_DATABASE); bd resolves the project_id itself, so --dolt-project-id is not needed with a selector |
 | `--beads-transport` | string |  | beads transport selector: direct or proxied (or GC_BEADS_TRANSPORT); give with --beads-target. Default proxied: bd owns the Dolt process, any bd read restarts it, and gc stop stops it. direct is the escape hatch and is also bd-owned (bd init --server), not the legacy gc-managed server. Every init requires bd &gt;= 1.3.0, selector or not, including the legacy --dolt-host alias |
@@ -2542,6 +2543,7 @@ gc init --template gascity --default-provider claude \
 | `--no-start` | bool |  | initialize files and imports without registering or starting the city |
 | `--preserve-existing` | bool |  | keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them |
 | `--providers` | stringArray |  | readiness-aware providers to write to city.toml (repeatable or comma-separated) |
+| `--remote-stage` | string |  | with --from and --no-start: record this directory as a remote stage (a K8S pod or SSH host) of the controller city at this path; its infrastructure-class commands then refuse instead of creating a local binding |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
 | `--template` | string |  | non-interactive template to write: minimal, gastown, gascity, custom, or empty |
 | `--yes` | bool |  | bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail) |
@@ -5157,6 +5159,7 @@ gc storage
 | [gc storage migrate](#gc-storage-migrate) | Migrate this city's infrastructure classes onto their configured binding |
 | [gc storage preflight](#gc-storage-preflight) | Report what the migration would refuse, without migrating (read-only) |
 | [gc storage recover-stranded](#gc-storage-recover-stranded) | Copy stranded infrastructure beads from the work store into the converged binding |
+| [gc storage remote-stage](#gc-storage-remote-stage) | Mark or unmark this directory as a remote stage of a controller's city |
 | [gc storage repair-sequence](#gc-storage-repair-sequence) | Inspect or raise a SQLite bead store's id-sequence floor |
 | [gc storage status](#gc-storage-status) | Report this city's storage-class layout (read-only) |
 | [gc storage vouch-bd](#gc-storage-vouch-bd) | Walk a scope's bd and, if it matches a pinned gc bd inventory, vouch for it |
@@ -5217,6 +5220,7 @@ gc storage migrate [flags]
 |------|------|---------|-------------|
 | `--abandon-rig-store` | bool |  | with --from-rigs --rig X, record X's clear complete without its store, once the binding is proven to hold every row X's import recorded (for a rig store that is permanently gone) |
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
+| `--force` | stringArray |  | attest a named hazard (repeatable): remote-runtime (remote sessions refuse infrastructure-class commands until worker-site transport exists, and no remote host writes them to the work store) or shared-store:&lt;identity&gt; (this city is the single writer of a work store other registered cities also use). A bare --force refuses |
 | `--from-backup` | bool |  | re-copy a binding whose database is gone from the retained-source backup |
 | `--from-rigs` | bool |  | import each rig's graph and infrastructure beads into the city binding |
 | `--from-work` | bool |  | migrate the infrastructure classes out of this city's work store |
@@ -5225,13 +5229,20 @@ gc storage migrate [flags]
 ## gc storage preflight
 
 Run every check gc storage migrate --from-work runs and report what it
-finds — without copying anything, creating anything, taking the migration guard,
-or publishing any event.
+finds — without copying anything, creating anything, taking the migration guard
+or any controller lock, or publishing any event.
 
 This is for deciding whether the window you are about to take will be spent
-migrating or spent reading a refusal. It runs against a LIVE city: a controller
-serving this city is reported by PID rather than refused, because stopping it is
-the next thing you were going to do anyway.
+migrating or spent reading a refusal. It runs against a LIVE city, so what
+stopping the city ends is reported rather than refused, because stopping it is
+the next thing you were going to do anyway: a controller serving this city (by
+PID), the city's registration with the supervisor, its running sessions, and,
+under a shared-store attestation, the other cities on the store, whose
+controller locks the migration takes.
+
+Pass the --force attestations you will pass to the migration. What they
+lift there is lifted here, and the command this prints for the window carries
+them.
 
 It resolves its destination from [storage.classes], so it has nothing to check
 until that section names a binding. On a city with no infrastructure split it
@@ -5246,8 +5257,12 @@ One condition is never checked here, because no process can check it:
 --fleet-stopped attests that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own.
 
 ```
-gc storage preflight
+gc storage preflight [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--force` | stringArray |  | attest a named hazard (repeatable): remote-runtime (remote sessions refuse infrastructure-class commands until worker-site transport exists, and no remote host writes them to the work store) or shared-store:&lt;identity&gt; (this city is the single writer of a work store other registered cities also use). A bare --force refuses |
 
 ## gc storage recover-stranded
 
@@ -5328,12 +5343,51 @@ gc storage recover-stranded [flags]
 | `--expect-count` | int | `-1` | with --confirm-purge: the number of rows the dry run listed; the delete refuses when the count differs (required) |
 | `--expect-digest` | string |  | with --confirm-purge: the selection digest the dry run printed; the delete refuses when the selection differs (required) |
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
+| `--force` | stringArray |  | attest a named hazard (repeatable): remote-runtime (remote sessions refuse infrastructure-class commands until worker-site transport exists, and no remote host writes them to the work store) or shared-store:&lt;identity&gt; (this city is the single writer of a work store other registered cities also use). A bare --force refuses |
 | `--from-work` | bool |  | recover the stranded infrastructure beads out of this city's work store |
 | `--move` | stringSlice |  | for a work-store row the manifest lists by id alone and the binding no longer holds: copy it into the binding as it is (required for a row that is not closed; a closed one is moved by default) (repeatable, comma-separated) |
 | `--purge-type` | string |  | instead of copying, back up and then DELETE every stranded work-store row of this type (only "message"): the rows the containment check calls stranded that are also message-class; --dry-run lists them |
 | `--record-carried` | stringSlice |  | for a work-store row the manifest lists by id alone and the binding no longer holds: record it as the bead the copy carried, so the clear deletes its work-store row (the backup keeps it); accepted for closed rows too (repeatable, comma-separated) |
 | `--replace-binding-row` | stringSlice |  | for a work-store row whose id the binding holds for a different bead: back up and remove the binding's row, then copy the work-store row in under the id (repeatable, comma-separated) |
 | `--restore-purge` | string |  | put the rows of this purge backup (infra.purged-stranded-&lt;time&gt;.jsonl) back into the work store with their edges; they are stranded again afterwards |
+
+## gc storage remote-stage
+
+A remote stage is a copy of a city on a host that runs sessions for a
+controller elsewhere (a K8S pod, an SSH host). On a remote stage of a split
+city every infrastructure class refuses, naming the controller's city, and no
+local binding is ever created. K8S pods are marked automatically; mark an SSH
+host's city directory with this command.
+
+```
+gc storage remote-stage
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc storage remote-stage mark](#gc-storage-remote-stage-mark) | Record this directory as a remote stage of the controller's city |
+| [gc storage remote-stage unmark](#gc-storage-remote-stage-unmark) | Remove this directory's remote-stage record |
+
+## gc storage remote-stage mark
+
+Record this directory as a remote stage of the controller's city
+
+```
+gc storage remote-stage mark [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--controller` | string |  | the controller's city path |
+| `--name` | string |  | the controller's city name (default: this city's workspace name) |
+
+## gc storage remote-stage unmark
+
+Remove this directory's remote-stage record
+
+```
+gc storage remote-stage unmark
+```
 
 ## gc storage repair-sequence
 

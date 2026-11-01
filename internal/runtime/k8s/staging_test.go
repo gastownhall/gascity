@@ -258,12 +258,10 @@ func TestStageFilesUsesNormalizedPodWorkDirForRigWorkDir(t *testing.T) {
 		Env:     map[string]string{"GC_CITY": cityRoot + "/"},
 	}
 	ops := newCapturingStageOps()
-	staged, err := stageFiles(context.Background(), ops, "gc-rig", cfg, cityRoot+"/", io.Discard)
-	if err != nil {
+	if staged, err := stageFiles(context.Background(), ops, "gc-rig", cfg, cityRoot+"/", io.Discard); err != nil {
 		t.Fatalf("stageFiles: %v", err)
-	}
-	if !staged {
-		t.Fatal("stageFiles did not report the rig workdir as staged")
+	} else if !staged {
+		t.Fatal("stageFiles did not report the copied rig workdir")
 	}
 	if got := ops.files["/workspace/rigs/team/task.txt"]; got != "rig payload" {
 		t.Fatalf("staged rig file = %q, want payload at normalized pod workdir", got)

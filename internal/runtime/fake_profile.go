@@ -65,6 +65,8 @@ type ProfileBackend interface {
 	LivenessObserver
 	LivenessObserverWithError
 	ProcessTableScanner
+	ProgramCaptureHealer
+	ProgramStatusProvider
 	RelaunchProvider
 	ServerDeathConfirmer
 	ServerLifecycleProvider
@@ -86,7 +88,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	core, timed := profileProvider{b, profileCapabilities[p]}, sleepTrait{SessionSleepCapabilityTimedOnly}
 	switch p {
 	case ProfileTmux:
-		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}, localTranscriptTrait{}, steerTrait{SteerKeystroke}}
+		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}, localTranscriptTrait{}, steerTrait{SteerKeystroke}}
 	case ProfileACP:
 		return acpProfile{core, b, b, b, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}, localTranscriptTrait{}}
 	case ProfileSubprocess:
@@ -182,6 +184,8 @@ type (
 		LivenessObserver
 		LivenessObserverWithError
 		ProcessTableScanner
+		ProgramCaptureHealer
+		ProgramStatusProvider
 		RelaunchProvider
 		ServerDeathConfirmer
 		ServerLifecycleProvider

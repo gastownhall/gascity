@@ -1,8 +1,10 @@
 package workertest
 
 import (
+	"encoding/hex"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // ProgramStatusDeclaration is a program-status declaration as gc arms it:
@@ -43,6 +45,69 @@ type ProgramStatusEmission struct {
 // an emitter raw step's hex: the bytes a probe-gated program writes before
 // it reports.
 const osc7501ProbeBELHex = "1b5d373530313b3f07"
+
+// osc7501TmuxPassthroughStep is an emitter raw step writing the OSC 7501
+// report body wrapped in a tmux DCS passthrough (ESC P tmux; ... ESC \, each
+// inner ESC doubled), the form a program that targets tmux directly writes.
+func osc7501TmuxPassthroughStep(body string) string {
+	seq := "\x1bPtmux;\x1b\x1b]7501;" + body + "\x1b\x1b\\\x1b\\"
+	return "raw " + hex.EncodeToString([]byte(seq))
+}
+
+// Profile IDs of families whose program status is held to the WC-PSTAT rows
+// but that have no phase-1 transcript fixtures and no canonical worker
+// profile identity.
+const (
+	ProfileOmpTmuxCLI  ProfileID = "omp/tmux-cli"  // Oh My Pi
+	ProfileGrokTmuxCLI ProfileID = "grok/tmux-cli" // Grok Build
+)
+
+// ProgramStatusProfiles returns the profiles held to the WC-PSTAT rows:
+// every phase-1 profile, then the families that declare program status
+// without phase-1 transcript fixtures.
+func ProgramStatusProfiles() []Profile {
+	return append(Phase1Profiles(),
+		// omp reports on any TTY without a probe while its
+		// terminal.programStatus setting is on (the default). Recorded under
+		// gc's tmux against a local mock API: ST-terminated reports.
+		Profile{
+			ID:       ProfileOmpTmuxCLI,
+			Provider: "omp/tmux-cli",
+			ProgramStatus: ProgramStatusExpectation{
+				ProgramStatusDeclaration: ProgramStatusDeclaration{Declared: true, App: "omp"},
+				Verified:                 "omp 18.14.1",
+				Emission: ProgramStatusEmission{
+					FirstReport: []string{"report state=idle:app=omp"},
+					TurnStart:   []string{"report state=working:app=omp"},
+					TurnEnd:     []string{"report state=done:app=omp"},
+				},
+			},
+		},
+		// grok sends no probe inside tmux; its declared REX_SESSION=1 turns
+		// reports on there, written wrapped in tmux DCS passthrough. Recorded
+		// under gc's tmux with that env against a local mock API.
+		Profile{
+			ID:       ProfileGrokTmuxCLI,
+			Provider: "grok/tmux-cli",
+			ProgramStatus: ProgramStatusExpectation{
+				ProgramStatusDeclaration: ProgramStatusDeclaration{Declared: true, App: "grok-build"},
+				Verified:                 "grok 1.0.70",
+				Emission: ProgramStatusEmission{
+					FirstReport: []string{osc7501TmuxPassthroughStep("state=idle:app=grok-build")},
+					TurnStart:   []string{osc7501TmuxPassthroughStep("state=working:app=grok-build:msg=UmVzcG9uZGluZw==")},
+					TurnEnd:     []string{osc7501TmuxPassthroughStep("state=done:app=grok-build:msg=VHVybiBjb21wbGV0ZSBpbiAzLjFzLg==")},
+				},
+			},
+		},
+	)
+}
+
+// ProfileFamily returns the provider family a profile runs: its Provider up
+// to the first "/".
+func ProfileFamily(profile Profile) string {
+	family, _, _ := strings.Cut(profile.Provider, "/")
+	return family
+}
 
 // programStatusPending names, for each WC-PSTAT row whose worker behavior
 // has not landed, the slice that lands it. A row leaves this map in the

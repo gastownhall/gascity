@@ -37,10 +37,14 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 	}
 
 	// Copy the workdir to the same normalized pod path used by the pod spec
-	// and agent command.
-	podWorkDir := projectedPodWorkDirForCity(ctrlCity, cfg.WorkDir)
+	// and agent command. Keep the staged-copy result for City template skips.
+	workDirCity := strings.TrimSpace(ctrlCity)
+	if workDirCity == "" {
+		workDirCity = controllerCityPath(cfg.Env)
+	}
+	podWorkDir := projectedPodWorkDirForCity(workDirCity, cfg.WorkDir)
 	workDirStaged := false
-	workDirIsCityRoot := ctrlCity != "" && filepath.Clean(cfg.WorkDir) == filepath.Clean(ctrlCity)
+	workDirIsCityRoot := workDirCity != "" && filepath.Clean(cfg.WorkDir) == filepath.Clean(workDirCity)
 	if cfg.WorkDir != "" && !workDirIsCityRoot {
 		copied, err := copyDirToPodInternal(ctx, ops, podName, "stage", cfg.WorkDir, podWorkDir, "")
 		if err != nil {
@@ -48,7 +52,6 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 		}
 		workDirStaged = copied
 	}
-
 	if err := stageProviderOverlaysToPod(ctx, ops, podName, cfg, podWorkDir, warn); err != nil {
 		return false, err
 	}
@@ -101,10 +104,6 @@ func cityTemplateSkipRel(workDirStaged bool, ctrlCity, workDir string) string {
 	}
 	rel, ok := relativeCityWorkDir(ctrlCity, workDir)
 	if !ok {
-		return ""
-	}
-	projectedWorkDir := projectedPodWorkDirForCity(ctrlCity, workDir)
-	if filepath.Clean(filepath.Join(podWorkspaceRoot, rel)) != filepath.Clean(projectedWorkDir) {
 		return ""
 	}
 	return rel
