@@ -30,11 +30,25 @@ func NewSeamBacked(opts ...Option) (runtime.Provider, error) {
 	if err != nil {
 		return nil, err
 	}
+	return seamBacked(raw, opts...), nil
+}
+
+// NewSeamBackedWithSecretProjection constructs a seam-backed K8s provider with
+// the city's configured Secret projections.
+func NewSeamBackedWithSecretProjection(secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount, opts ...Option) (runtime.Provider, error) {
+	raw, err := NewProviderWithSecretProjection(secretEnv, secretMounts)
+	if err != nil {
+		return nil, err
+	}
+	return seamBacked(raw, opts...), nil
+}
+
+func seamBacked(raw *Provider, opts ...Option) runtime.Provider {
 	for _, opt := range opts {
 		opt(raw)
 	}
 	rt, tp := raw.Seams()
-	return &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: raw}, nil
+	return &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: raw}
 }
 
 // SleepCapability passes through to the underlying provider (non-seam).
@@ -54,7 +68,7 @@ func (s *seamBackedProvider) ListRunningComplete() bool {
 	return s.raw.ListRunningComplete()
 }
 
-// Option configures a provider NewSeamBacked builds.
+// Option configures a provider built by NewSeamBacked or NewSeamBackedWithSecretProjection.
 type Option func(*Provider)
 
 // WithCityName names the controller's city: the name goes into each pod's
