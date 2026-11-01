@@ -1077,6 +1077,31 @@ func TestProcessAliveWrappedPane(t *testing.T) {
 	if !pane.processAlive(proctable.ProcessNameSet([]string{"claude"}), snapshot) {
 		t.Fatal("processAlive = false for systemd-run pane with claude child, want true (descendant fallback)")
 	}
+
+	for _, tt := range []struct {
+		name string
+		args string
+		want bool
+	}{
+		{name: "Nix wrapper preserves public argv0", args: "/nix/store/gascity/bin/gc convoy control --serve", want: true},
+		{name: "direct hidden executable loses public argv0", args: "/nix/store/gascity/bin/.gc-wrapped convoy control --serve", want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			const command = "/nix/store/gascity/bin/.gc-wrapped"
+			names := processNameSet([]string{"gc"})
+			snapshot := newProcessSnapshot([]processRuntimeState{
+				{PID: "100", PPID: "1", Command: "sh", Args: "sh"},
+				{PID: "101", PPID: "100", Command: command, Args: tt.args},
+			})
+			pane := paneRuntimeState{Command: "sh", PID: "100"}
+			if got := pane.processAlive(names, snapshot); got != tt.want {
+				t.Errorf("processAlive = %v, want %v", got, tt.want)
+			}
+			if got := processMatchesNameSet(command, tt.args, names); got != tt.want {
+				t.Errorf("processMatchesNameSet = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 // The fleet snapshot must carry attachment and window activity alongside
