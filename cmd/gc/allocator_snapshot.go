@@ -179,6 +179,10 @@ type assignedWorkView struct {
 	BeadID             string
 	Claimed            bool
 	RequiresFreshCycle bool
+	// WorkflowRoot is the molecule the anchor belongs to (awakeWorkflowRoot),
+	// carried so the current-bead stamp writes both cells, matching the v1
+	// reconciler's recordCurrentBeadIDOnWake.
+	WorkflowRoot string
 }
 
 // floorView marks a min_active_sessions floor member (C2.6).

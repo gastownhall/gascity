@@ -500,7 +500,7 @@ func TestCurrentBeadStampedOnAliveWakeRow(t *testing.T) {
 			if !tc.stamp {
 				return
 			}
-			legacy := recordCurrentBeadIDOnWake(c.w.Census.Rows[c.k].Info, sessionFrontDoor(beads.NewMemStoreFrom(0, []beads.Bead{sessionRow(c.k.ID, meta...)}, nil)), tc.work.BeadID, io.Discard)
+			legacy := recordCurrentBeadIDOnWake(c.w.Census.Rows[c.k].Info, sessionFrontDoor(beads.NewMemStoreFrom(0, []beads.Bead{sessionRow(c.k.ID, meta...)}, nil)), tc.work.BeadID, tc.work.WorkflowRoot, io.Discard)
 			if it.Kind != intentRowHeal || !maps.Equal(it.folded(), legacy) {
 				t.Fatalf("intent (%q, %v), want a row heal of legacy's %v", it.Kind, it.folded(), legacy)
 			}
@@ -827,7 +827,7 @@ func TestA6ItemsFoldIntoOneCAS(t *testing.T) {
 	tracked[c.k.ID] = resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Effective: "5m", Capability: runtime.SessionSleepCapabilityFull}
 	c.w.SleepPolicies = tracked
 	c.a.Snapshot.Entries[c.k].AssignedWork = &assignedWorkView{BeadID: "ga-7"}
-	want := session.MetadataPatch{"wake_attempts": "0", "detached_at": rowAt(0), strandedEventEmittedKey: "", session.CurrentBeadIDKey: "ga-7"}
+	want := session.MetadataPatch{"wake_attempts": "0", "detached_at": rowAt(0), strandedEventEmittedKey: "", session.CurrentBeadIDKey: "ga-7", session.CurrentWorkflowRootKey: ""}
 	it, s := c.run(t, nil, nil)
 	if it.Kind != intentRowHeal || it.Reason != decideStabilityClear || !maps.Equal(it.folded(), want) || s.Outcome != settledLanded {
 		t.Fatalf("intent (%q, %q, %v), settlement %+v, want the stability clear carrying %v", it.Kind, it.Reason, it.folded(), s, want)
