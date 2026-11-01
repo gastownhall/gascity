@@ -18,10 +18,11 @@ type seamBackedProvider struct {
 }
 
 var (
-	_ runtime.Provider                = (*seamBackedProvider)(nil)
-	_ runtime.SleepCapabilityProvider = (*seamBackedProvider)(nil)
-	_ runtime.RelaunchProvider        = (*seamBackedProvider)(nil)
-	_ runtime.ListingAttestation      = (*seamBackedProvider)(nil)
+	_ runtime.Provider                  = (*seamBackedProvider)(nil)
+	_ runtime.LivenessObserverWithError = (*seamBackedProvider)(nil)
+	_ runtime.SleepCapabilityProvider   = (*seamBackedProvider)(nil)
+	_ runtime.RelaunchProvider          = (*seamBackedProvider)(nil)
+	_ runtime.ListingAttestation        = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked constructs a k8s provider served through the seams.
@@ -50,6 +51,14 @@ func NewSeamBackedWithConfig(secretEnv []runtime.K8sSecretEnv, secretMounts []ru
 	}
 	rt, tp := raw.Seams()
 	return &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: raw}, nil
+}
+
+// ObserveLivenessWithError preserves Kubernetes probe uncertainty across the
+// production seam wrapper. The generic seam adapter only has boolean
+// IsRunning/ProcessAlive methods, which would turn a transient exec failure
+// into a false zombie observation.
+func (s *seamBackedProvider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	return s.raw.ObserveLivenessWithError(name, processNames)
 }
 
 // SleepCapability passes through to the underlying provider (non-seam).
