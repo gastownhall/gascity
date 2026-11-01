@@ -903,3 +903,31 @@ func TestOrderFiringCurrent_SubMinuteCooldownWithinPatrolTickIsOK(t *testing.T) 
 		t.Fatalf("details = %v, want [%q]", result.Details, want)
 	}
 }
+
+// The patrol allowance comes from the city's [daemon] patrol_interval, not a
+// hard-coded 30s: with a 1m patrol a 1m cooldown's overdue line is 3m.
+func TestOrderFiringCurrent_ReadsPatrolIntervalFromCityConfig(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		age        time.Duration
+		wantStatus CheckStatus
+	}{
+		{age: 2*time.Minute + 50*time.Second, wantStatus: StatusOK},
+		{age: 3 * time.Minute, wantStatus: StatusWarning},
+	} {
+		t.Run(tc.age.String(), func(t *testing.T) {
+			cityPath, cfg := orderFiringTestCity(t)
+			cfg.Daemon.PatrolInterval = "1m"
+			writeOrderFiringTestOrder(t, cityPath, "minute-cooldown", "cooldown", "1m")
+			writeOrderFiringTestEvents(t, cityPath,
+				events.Event{Type: events.ControllerStarted, Ts: now.Add(-3 * time.Hour)},
+				events.Event{Type: events.OrderFired, Subject: "minute-cooldown", Ts: now.Add(-tc.age)},
+			)
+
+			result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+			if result.Status != tc.wantStatus {
+				t.Fatalf("status = %v, want %v; msg = %s; details = %v", result.Status, tc.wantStatus, result.Message, result.Details)
+			}
+		})
+	}
+}
