@@ -301,7 +301,7 @@ func beadsToHookBeads(items []beads.Bead) []hookBead {
 func controlReadyFallbackReady(dir, cityPath string, env map[string]string, includeEphemeral bool) ([]beads.Bead, error) {
 	binding, relocated := controlGraphBinding(cityPath, dir)
 	if !relocated {
-		return controlReadyScopeShellReady(dir, env, includeEphemeral)
+		return controlReadyScopeShellReady(dir, cityPath, env, includeEphemeral)
 	}
 	graphRows, err := controlReadyLegReady(dir, binding, includeEphemeral)
 	if err != nil {
@@ -310,7 +310,7 @@ func controlReadyFallbackReady(dir, cityPath string, env map[string]string, incl
 	if !controlGraphRelicLeg(cityPath, dir) {
 		return graphRows, nil
 	}
-	scoped, err := controlReadyScopeShellReady(dir, env, includeEphemeral)
+	scoped, err := controlReadyScopeShellReady(dir, cityPath, env, includeEphemeral)
 	if err != nil {
 		return nil, err
 	}
@@ -343,9 +343,18 @@ func mergeControlReadyLegs(legs ...[]beads.Bead) []beads.Bead {
 }
 
 // controlReadyScopeShellReady is the scope leg: the batched ready scan taken by
-// shelling `bd` in the scope directory, exactly as it always was.
-func controlReadyScopeShellReady(dir string, env map[string]string, includeEphemeral bool) ([]beads.Bead, error) {
-	query := fmt.Sprintf("bd --readonly --sandbox ready --json --exclude-type=%s --limit=%d", controlReadyExcludeType, controlReadyFallbackLimit)
+// shelling `bd` in the scope directory.
+//
+// A proxied-server scope is read without --readonly: bd refuses strict
+// readonly on that backend by design (proxy.readonly.unsupported), and the
+// proxy owns its read-only policy, so the flag would fail every scan in that
+// scope (#7358). `bd ready` is a read either way.
+func controlReadyScopeShellReady(dir, cityPath string, env map[string]string, includeEphemeral bool) ([]beads.Bead, error) {
+	flags := "--readonly --sandbox"
+	if scopeUsesProxiedDoltMode(cityPath, dir) {
+		flags = "--sandbox"
+	}
+	query := fmt.Sprintf("bd %s ready --json --exclude-type=%s --limit=%d", flags, controlReadyExcludeType, controlReadyFallbackLimit)
 	if includeEphemeral {
 		query += " --include-ephemeral"
 	}
