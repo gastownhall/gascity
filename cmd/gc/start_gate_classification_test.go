@@ -61,12 +61,15 @@ var startOutcomeClassification = map[string]startOutcomeClass{
 	"deferred_by_async_start_limit": {records: true},
 	"deferred_by_prepare_budget":    {records: true},
 
-	"blocked_on_dependencies":       {reason: "clause (a): the candidate's own dependencies are not alive"},
-	"deferred_by_on_death_hook":     {reason: "clause (a): its own runtime name's on_death hook is pending"},
-	"deferred_by_runtime_lease":     {reason: "clause (a): its own runtime name is leased by another holder"},
-	"deferred_by_endpoint_capacity": {reason: "own hold: endpointCapacityGuard.HoldsPendingCreate already keeps the row"},
-	"user_held":                     {reason: "clause (a): the session's own state, held by the user"},
-	"context_canceled":              {reason: "the cancel rule: a canceled run commits nothing"},
+	"blocked_on_dependencies":            {reason: "clause (a): the candidate's own dependencies are not alive"},
+	"deferred_by_on_death_hook":          {reason: "clause (a): its own runtime name's on_death hook is pending"},
+	"deferred_by_runtime_lease":          {reason: "clause (a): its own runtime name is leased by another holder"},
+	"deferred_by_endpoint_capacity":      {reason: "own hold: endpointCapacityGuard.HoldsPendingCreate already keeps the row"},
+	"user_held":                          {reason: "clause (a): the session's own state, held by the user"},
+	"context_canceled":                   {reason: "the cancel rule: a canceled run commits nothing"},
+	"abandoned_at_wave":                  {reason: "lifecycle result after gate admission: wave abandonment is not an admission gate and may commit lifecycle cleanup"},
+	"start_boundary_liveness_unanswered": {reason: "lifecycle result after gate admission: an unanswered runtime observation may commit a store-only deferral"},
+	"start_store_only":                   {reason: "lifecycle result after gate admission: an unverifiable pre-start observation may commit store-only lifecycle state"},
 
 	// Post-attempt: the candidate was offered a start and the attempt ran.
 	"async_start_drift_rolled_back": {reason: "post-attempt: an async start that ran and was rolled back on drift"},

@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -313,6 +314,168 @@ func TestSessionCircuitBreaker_RecordRestartDoesNotMutateOpenEntry(t *testing.T)
 	}
 	if after.RestartCount != before.RestartCount {
 		t.Fatalf("restart count changed from %d to %d while open", before.RestartCount, after.RestartCount)
+	}
+}
+
+func TestSessionCircuitBreaker_UndoRestartPreservesConcurrentEntryChanges(t *testing.T) {
+	t0 := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	cb := breakerAt(time.Hour, 5)
+	const id = "rig-a/session-a"
+	cb.RecordRestart(id, t0)
+	attemptAt := t0.Add(time.Minute)
+	snapshot := cb.entrySnapshot(id)
+	cb.RecordRestart(id, attemptAt)
+	cb.RecordProgress(id, t0.Add(2*time.Minute))
+	cb.ObserveProgressSignature(id, "assigned-work", t0.Add(3*time.Minute))
+	cb.ObserveProgressSignature(id, "assigned-work-updated", t0.Add(4*time.Minute))
+	laterRestart := t0.Add(5 * time.Minute)
+	cb.RecordRestart(id, laterRestart)
+
+	cb.restoreEntrySnapshot(nil, nil, "", id, snapshot, attemptAt, nil)
+
+	got := cb.Snapshot(t0.Add(6 * time.Minute))
+	if len(got) != 1 || got[0].RestartCount != 2 || !got[0].LastRestart.Equal(laterRestart) || !got[0].LastProgress.Equal(t0.Add(4*time.Minute)) {
+		t.Fatalf("entry after undo = %+v, want only the attempt removed with newer restart/progress preserved", got)
+	}
+	cb.mu.Lock()
+	entry := cloneCircuitBreakerEntry(cb.entries[id])
+	cb.mu.Unlock()
+	if entry == nil || entry.progressSig != "assigned-work-updated" || !entry.lastObserved.Equal(t0.Add(4*time.Minute)) {
+		t.Fatalf("progress observation after undo = %+v, want the latest signature and observation preserved", entry)
+	}
+}
+
+func TestSessionCircuitBreaker_UndoRestartSkipsWhenResetGenerationAdvanced(t *testing.T) {
+	t0 := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	cb := breakerAt(time.Hour, 5)
+	const id = "rig-a/session-a"
+	cb.RecordRestart(id, t0)
+	attemptAt := t0.Add(time.Minute)
+	snapshot := cb.entrySnapshot(id)
+	cb.RecordRestart(id, attemptAt)
+	generation := cb.Reset(id)
+
+	cb.restoreEntrySnapshot(nil, nil, "", id, snapshot, attemptAt, nil)
+
+	got, err := cb.metadata(id, t0.Add(2*time.Minute))
+	if err != nil {
+		t.Fatalf("metadata after reset: %v", err)
+	}
+	restarts, err := parseCircuitTimeList(got[sessionCircuitRestartsMetadata])
+	if err != nil || len(restarts) != 0 {
+		t.Fatalf("restart history after reset and undo = %d (err %v), want empty without resurrecting pre-reset history", len(restarts), err)
+	}
+	if gotGeneration := got[sessionCircuitResetGenerationMetadata]; gotGeneration != "1" {
+		t.Fatalf("reset generation = %q, want advanced generation 1 (Reset returned %d)", gotGeneration, generation)
+	}
+}
+
+func TestSessionCircuitBreakerUndoPatchPreservesPersistedNewerState(t *testing.T) {
+	t0 := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	attemptAt := t0.Add(time.Minute)
+	newerRestart := t0.Add(2 * time.Minute)
+	snapshot := sessionCircuitBreakerEntrySnapshot{
+		entry:           &circuitBreakerEntry{lastRestart: t0},
+		existed:         true,
+		resetGeneration: 4,
+	}
+	metadata := map[string]string{
+		sessionCircuitStateMetadata:             circuitClosed.String(),
+		sessionCircuitRestartsMetadata:          "[\"2026-04-01T12:00:00Z\",\"2026-04-01T12:01:00Z\",\"2026-04-01T12:02:00Z\"]",
+		sessionCircuitLastRestartMetadata:       formatCircuitTime(newerRestart),
+		sessionCircuitLastProgressMetadata:      formatCircuitTime(newerRestart),
+		sessionCircuitLastObservedMetadata:      formatCircuitTime(newerRestart),
+		sessionCircuitProgressSignatureMetadata: "new-progress",
+		sessionCircuitResetGenerationMetadata:   "4",
+	}
+	patch, changed, err := circuitBreakerRestartUndoPatch(metadata, snapshot, attemptAt)
+	if err != nil || !changed {
+		t.Fatalf("undo patch changed=%v err=%v, want a delta patch", changed, err)
+	}
+	if len(patch) != 1 || patch[sessionCircuitRestartsMetadata] != "[\"2026-04-01T12:00:00Z\",\"2026-04-01T12:02:00Z\"]" {
+		t.Fatalf("undo patch = %#v, want only the restart list with this attempt removed", patch)
+	}
+	if _, ok := patch[sessionCircuitLastRestartMetadata]; ok {
+		t.Fatalf("undo patch rewrites newer last_restart: %#v", patch)
+	}
+	for _, key := range []string{sessionCircuitLastProgressMetadata, sessionCircuitLastObservedMetadata, sessionCircuitProgressSignatureMetadata, sessionCircuitResetGenerationMetadata} {
+		if _, ok := patch[key]; ok {
+			t.Fatalf("undo patch rewrites concurrent %s: %#v", key, patch)
+		}
+	}
+
+	metadata[sessionCircuitLastRestartMetadata] = formatCircuitTime(attemptAt)
+	patch, changed, err = circuitBreakerRestartUndoPatch(metadata, snapshot, attemptAt)
+	if err != nil || !changed || patch[sessionCircuitLastRestartMetadata] != formatCircuitTime(t0) {
+		t.Fatalf("undo patch for current last_restart = %#v changed=%v err=%v; want prior timestamp restored", patch, changed, err)
+	}
+
+	metadata[sessionCircuitResetGenerationMetadata] = "5"
+	if patch, changed, err = circuitBreakerRestartUndoPatch(metadata, snapshot, attemptAt); err != nil || changed || patch != nil {
+		t.Fatalf("undo patch after reset-generation movement = %#v changed=%v err=%v; want no row update", patch, changed, err)
+	}
+}
+
+type breakerUndoCASStore struct {
+	beads.Store
+	beads.ConditionalWriter
+	undoCASAttempts int
+}
+
+func (s *breakerUndoCASStore) ConditionalWritesModeSource() beads.Store { return s.Store }
+
+func (s *breakerUndoCASStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	if _, undo := opts.Metadata[sessionCircuitRestartsMetadata]; undo {
+		s.undoCASAttempts++
+		return &beads.PreconditionFailedError{Expected: revision, Current: revision + 1}
+	}
+	return s.ConditionalWriter.UpdateIfMatch(id, revision, opts)
+}
+
+func TestSessionCircuitBreakerUndoLogsExhaustedPersistedCASAfterKeepingMemoryUndo(t *testing.T) {
+	city := t.TempDir()
+	mem := beads.NewMemStore()
+	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, false, nil, nil); err != nil {
+		t.Fatalf("stamping conditional-write mode: %v", err)
+	}
+	manager := newSessionManagerWithConfig(city, mem, runtime.NewFake(), nil)
+	info, err := manager.CreateSession(context.Background(), sessionpkg.CreateOptions{
+		BeadOnly: true, Template: "worker", Title: "Worker", Command: "codex", WorkDir: t.TempDir(), Provider: "codex",
+	})
+	if err != nil {
+		t.Fatalf("creating session row: %v", err)
+	}
+	store := &breakerUndoCASStore{Store: mem, ConditionalWriter: mem}
+	front := sessionFrontDoor(store)
+	lease, release, err := tryRuntimeLease(store, city, info.SessionName, info.ID, sessionpkg.RuntimeLeaseTTL(time.Minute))
+	if err != nil {
+		t.Fatalf("taking runtime lease: %v", err)
+	}
+	defer release()
+
+	identity := "worker/worker"
+	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	cb := breakerAt(time.Hour, 5)
+	_, before, recorded, err := recordSessionCircuitBreakerRestart(front, info.ID, cb, identity, now)
+	if err != nil || !recorded {
+		t.Fatalf("recording breaker restart = recorded %v, err %v; want one restart", recorded, err)
+	}
+	var stderr bytes.Buffer
+	cb.restoreEntrySnapshot(front, lease, info.ID, identity, before, now, &stderr)
+
+	if snapshots := cb.Snapshot(now); len(snapshots) != 0 {
+		t.Fatalf("in-memory breaker after exhausted persisted undo = %+v, want the attempt removed", snapshots)
+	}
+	persisted, err := front.CircuitState(info.ID)
+	if err != nil {
+		t.Fatalf("reading persisted breaker state: %v", err)
+	}
+	restarts, err := parseCircuitTimeList(persisted.Restarts)
+	if err != nil || len(restarts) != 1 {
+		t.Fatalf("persisted restart count = %d (err %v), want the still-stored attempt", len(restarts), err)
+	}
+	if store.undoCASAttempts != 3 || !strings.Contains(stderr.String(), "conditional undo remained contended after 3 attempts") {
+		t.Fatalf("CAS attempts = %d, stderr = %q; want exhausted persisted undo to be observable", store.undoCASAttempts, stderr.String())
 	}
 }
 
@@ -1018,6 +1181,14 @@ func TestReconciler_CircuitClosedAllowsSpawn(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected session-a in snapshot, got %+v", snap)
+	}
+	persisted, err := sessionFrontDoor(env.store).CircuitState(b.ID)
+	if err != nil {
+		t.Fatalf("reading persisted restart history: %v", err)
+	}
+	restarts, err := parseCircuitTimeList(persisted.Restarts)
+	if err != nil || len(restarts) != 1 {
+		t.Fatalf("persisted restart count after Provider.Start = %d (err %v), want 1", len(restarts), err)
 	}
 }
 

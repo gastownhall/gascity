@@ -31,6 +31,16 @@ const postStartObservationBound = 10 * time.Second
 // unknown, so the start defers instead of rolling the create back.
 const startFailureProbeBudget = 10 * time.Second
 
+// startAttributionProbeContext gives one attribution pass a shared budget.
+// Nested observations may retain their own shorter bounds, but retries in the
+// same pass cannot each restart the full timeout.
+func startAttributionProbeContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(ctx, startFailureProbeBudget)
+}
+
 // postStartObservationKey names what ObserveBounded keeps at one in-flight
 // observation: one session in one city. The city is part of it because two
 // cities run sessions of the same name, and one city's wedged runtime must not
@@ -88,6 +98,11 @@ func observeRuntimeProviderLivenessBounded(ctx context.Context, cityPath string,
 // unverifiable like any other failed read, so the attribution comes out
 // unknown unless the reads that did answer already decide it.
 func readPendingCreateIdentityBounded(ctx context.Context, cityPath string, info sessionpkg.Info, sessionName string, sp runtime.Provider) pendingCreateIdentity {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, postStartObservationBound)
+	defer cancel()
 	return readPendingCreateIdentityVia(info, sp, func(key string) (string, error) {
 		return observeSessionBounded(ctx, cityPath, sessionName, func() (string, error) {
 			return sp.GetMeta(sessionName, key)

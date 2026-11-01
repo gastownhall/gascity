@@ -50,7 +50,10 @@ type RuntimeHandle struct {
 	cityPath     string
 }
 
-var _ Handle = (*RuntimeHandle)(nil)
+var (
+	_ Handle                     = (*RuntimeHandle)(nil)
+	_ StartResolvedWitnessHandle = (*RuntimeHandle)(nil)
+)
 
 // NewRuntimeHandle constructs a worker handle for a runtime-only session.
 func NewRuntimeHandle(cfg RuntimeHandleConfig) (*RuntimeHandle, error) {
@@ -91,11 +94,18 @@ func (h *RuntimeHandle) Start(ctx context.Context, _ sessionpkg.Actor) (err erro
 // command. It has no session row, so it has no incarnation to run under: the
 // legacy bead-less start (§3.3 S8), allowlisted until legacy is deleted.
 func (h *RuntimeHandle) StartResolved(ctx context.Context, by sessionpkg.Actor, _ sessionpkg.Incarnation, startCommand string, cfg runtime.Config) (err error) {
+	_, err = h.StartResolvedWithWitness(ctx, by, sessionpkg.Incarnation{}, startCommand, cfg)
+	return err
+}
+
+// StartResolvedWithWitness is StartResolved and reports whether this handle
+// reused an existing runtime or attempted Provider.Start.
+func (h *RuntimeHandle) StartResolvedWithWitness(ctx context.Context, by sessionpkg.Actor, _ sessionpkg.Incarnation, startCommand string, cfg runtime.Config) (witness sessionpkg.StartRuntimeWitness, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationStartResolved)
 	defer func() { event.finish(err) }()
 
 	if h.provider.IsRunning(h.sessionName) {
-		return nil
+		return sessionpkg.StartRuntimeWitnessReused, nil
 	}
 	startCfg := cfg
 	if strings.TrimSpace(startCfg.Command) == "" {
@@ -103,18 +113,19 @@ func (h *RuntimeHandle) StartResolved(ctx context.Context, by sessionpkg.Actor, 
 	}
 	if strings.TrimSpace(startCfg.Command) == "" {
 		err = fmt.Errorf("%w: start requires a runtime command", ErrOperationUnsupported)
-		return err
+		return witness, err
 	}
 	if err = by.CheckStarts(); err != nil {
-		return err
+		return witness, err
 	}
 	release, err := sessionpkg.LeaseRuntimeName(ctx, by, h.sessionName)
 	if err != nil {
-		return err
+		return witness, err
 	}
 	defer release()
+	witness = sessionpkg.StartRuntimeWitnessProviderStart
 	err = h.provider.Start(ctx, h.sessionName, startCfg)
-	return err
+	return witness, err
 }
 
 // stopUnderLease stops the runtime under the name's flock (by's lease mode).
