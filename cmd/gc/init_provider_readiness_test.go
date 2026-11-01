@@ -151,6 +151,188 @@ func TestMaybePrintWizardProviderGuidanceNeedsAuth(t *testing.T) {
 	}
 }
 
+func TestProviderReadinessProbeNameOrdinaryAliasFallsBackToBuiltinAncestor(t *testing.T) {
+	cfg := config.DefaultCity("alias-city")
+	cfg.Providers = map[string]config.ProviderSpec{
+		"claude-fast": {Base: strPtr("builtin:claude")},
+	}
+	if err := config.BuildResolvedProviderCache(&cfg); err != nil {
+		t.Fatalf("BuildResolvedProviderCache: %v", err)
+	}
+
+	if got := providerReadinessProbeName("claude-fast", &cfg); got != "claude" {
+		t.Fatalf("providerReadinessProbeName(%q) = %q, want %q", "claude-fast", got, "claude")
+	}
+}
+
+func TestProviderReadinessProbeNameRespectsCommandOverride(t *testing.T) {
+	cfg := config.DefaultCity("kiro-city")
+	cfg.Providers = map[string]config.ProviderSpec{
+		"kiro": {
+			Base:    strPtr("builtin:claude"),
+			Command: "kiro-cli",
+		},
+	}
+	if err := config.BuildResolvedProviderCache(&cfg); err != nil {
+		t.Fatalf("BuildResolvedProviderCache: %v", err)
+	}
+
+	if got := providerReadinessProbeName("kiro", &cfg); got != "" {
+		t.Fatalf("providerReadinessProbeName(%q) = %q, want empty: a command override to a non-probeable CLI must not fall back to the builtin ancestor", "kiro", got)
+	}
+}
+
+func TestProviderReadinessProbeNameCanonicalNameCommandOverrideNotMisattributed(t *testing.T) {
+	cfg := config.DefaultCity("kiro-as-claude-city")
+	cfg.Providers = map[string]config.ProviderSpec{
+		"claude": {
+			Base:    strPtr("builtin:claude"),
+			Command: "kiro-cli",
+		},
+	}
+	if err := config.BuildResolvedProviderCache(&cfg); err != nil {
+		t.Fatalf("BuildResolvedProviderCache: %v", err)
+	}
+
+	if got := providerReadinessProbeName("claude", &cfg); got != "" {
+		t.Fatalf("providerReadinessProbeName(%q) = %q, want empty: a canonical provider name whose command is overridden to a non-probeable CLI must not be probed under its own name", "claude", got)
+	}
+}
+
+// TestProviderReadinessProbeNameFollowsEffectiveLaunchBinary pins attribution
+// to the binary a provider's resolved chain actually launches. A provider
+// that merely carries a probe-supported name, or inherits from a provider
+// that does, is not that CLI when its effective command is something else.
+func TestProviderReadinessProbeNameFollowsEffectiveLaunchBinary(t *testing.T) {
+	tests := []struct {
+		name       string
+		providers  map[string]config.ProviderSpec
+		ref        string
+		want       string
+		skipCache  bool
+		wantReason string
+	}{
+		{
+			name:       "builtin alias",
+			providers:  map[string]config.ProviderSpec{"claude-fast": {Base: strPtr("builtin:claude")}},
+			ref:        "claude-fast",
+			want:       "claude",
+			wantReason: "an alias whose command comes from the built-in is that built-in's CLI",
+		},
+		{
+			name:       "canonical name with explicit builtin base",
+			providers:  map[string]config.ProviderSpec{"claude": {Base: strPtr("builtin:claude")}},
+			ref:        "claude",
+			want:       "claude",
+			wantReason: "a canonical entry that still launches the built-in command stays probed",
+		},
+		{
+			name:       "canonical name without a declared base",
+			providers:  map[string]config.ProviderSpec{"claude": {DisplayName: "Claude"}},
+			ref:        "claude",
+			want:       "claude",
+			wantReason: "a canonical entry with no command inherits the built-in it shadows",
+		},
+		{
+			name:       "builtin whose binary differs from its probe name",
+			providers:  map[string]config.ProviderSpec{"agy-fast": {Base: strPtr("builtin:antigravity")}},
+			ref:        "agy-fast",
+			want:       "antigravity",
+			wantReason: "the antigravity built-in launches agy but is probed as antigravity",
+		},
+		{
+			name:       "explicit known builtin command",
+			providers:  map[string]config.ProviderSpec{"work-claude": {Command: "claude"}},
+			ref:        "work-claude",
+			want:       "claude",
+			wantReason: "an explicit command naming a probe-supported CLI is that CLI",
+		},
+		{
+			name:       "path override to a known builtin",
+			providers:  map[string]config.ProviderSpec{"pinned": {Base: strPtr("builtin:claude"), Command: "/opt/tools/claude"}},
+			ref:        "pinned",
+			want:       "claude",
+			wantReason: "a path to a probe-supported CLI is attributed by its file name",
+		},
+		{
+			name:       "single word override",
+			providers:  map[string]config.ProviderSpec{"claude": {Base: strPtr("builtin:claude"), Command: "kiro-cli"}},
+			ref:        "claude",
+			want:       "",
+			wantReason: "a canonical name overriding its command to another CLI is not that CLI",
+		},
+		{
+			name:       "multiword override on the canonical name",
+			providers:  map[string]config.ProviderSpec{"claude": {Command: "kiro-cli chat"}},
+			ref:        "claude",
+			want:       "",
+			wantReason: "a multiword command is attributed by its first token, not by the provider name",
+		},
+		{
+			name: "command inherited from a custom ancestor",
+			providers: map[string]config.ProviderSpec{
+				"kiro-wrapper": {Base: strPtr("builtin:claude"), Command: "kiro-cli"},
+				"claude":       {Base: strPtr("provider:kiro-wrapper")},
+			},
+			ref:        "claude",
+			want:       "",
+			wantReason: "a canonical name inheriting a non-probeable command from a custom ancestor is not that CLI",
+		},
+		{
+			name: "multiword command inherited from a custom ancestor",
+			providers: map[string]config.ProviderSpec{
+				"kiro-wrapper": {Base: strPtr("builtin:claude"), Command: "kiro-cli chat"},
+				"claude":       {Base: strPtr("provider:kiro-wrapper")},
+			},
+			ref:        "claude",
+			want:       "",
+			wantReason: "an inherited multiword command is attributed by its first token",
+		},
+		{
+			name: "leaf inheriting a probeable command through a custom ancestor",
+			providers: map[string]config.ProviderSpec{
+				"team-claude": {Base: strPtr("builtin:claude")},
+				"claude-fast": {Base: strPtr("provider:team-claude")},
+			},
+			ref:        "claude-fast",
+			want:       "claude",
+			wantReason: "an alias chain that reaches the built-in command stays probed",
+		},
+		{
+			name:       "unrecognized custom command",
+			providers:  map[string]config.ProviderSpec{"mine": {Command: "my-agent"}},
+			ref:        "mine",
+			want:       "",
+			wantReason: "a standalone provider with no probe is not probed",
+		},
+		{
+			name:       "resolved cache not built",
+			providers:  map[string]config.ProviderSpec{"claude": {Command: "kiro-cli chat"}},
+			ref:        "claude",
+			want:       "",
+			skipCache:  true,
+			wantReason: "attribution resolves the chain itself when the cache is absent",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.DefaultCity("probe-name-city")
+			cfg.Providers = tt.providers
+			if !tt.skipCache {
+				if err := config.BuildResolvedProviderCache(&cfg); err != nil {
+					t.Fatalf("BuildResolvedProviderCache: %v", err)
+				}
+				if _, ok := cfg.ResolvedProviders[tt.ref]; !ok {
+					t.Fatalf("resolved cache has no entry for %q; the fixture must reach the resolver", tt.ref)
+				}
+			}
+			if got := providerReadinessProbeName(tt.ref, &cfg); got != tt.want {
+				t.Fatalf("providerReadinessProbeName(%q) = %q, want %q: %s", tt.ref, got, tt.want, tt.wantReason)
+			}
+		})
+	}
+}
+
 func TestProviderStatusFixHintIncludesClaudeOAuthToken(t *testing.T) {
 	got := providerStatusFixHint("claude", api.ProbeStatusInvalidConfiguration)
 	for _, want := range []string{"`claude.ai`", "`oauth_token`", "`firstParty`"} {

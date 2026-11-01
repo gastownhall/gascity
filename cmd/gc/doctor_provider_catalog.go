@@ -209,3 +209,113 @@ func appendBuiltinProviderAliases(cityPath string, providers []string) error {
 	}
 	return os.WriteFile(tomlPath, append(data, []byte(b.String())...), 0o644)
 }
+
+// providerLocalAuthCheck reports providers this city is configured to use whose
+// local CLI is installed but not logged in.
+//
+// The readiness probe already computes this exact condition
+// (api.ProbeStatusNeedsAuth, "<cli> is installed but not logged in"), but until
+// now only `gc init` consumed it. providerCatalogReadinessAdvisoryCheck probes
+// every provider and then skips anything that is not ProbeStatusConfigured, so a
+// logged-out CLI fell straight through the one command an operator runs to ask
+// "is this city healthy?".
+//
+// That silence is expensive: an agent whose provider CLI cannot authenticate
+// still spawns, still holds a live pane, and still reports its session active --
+// it simply never claims work. Nothing else in doctor distinguishes that from an
+// idle-but-healthy lane.
+//
+// Scope is deliberately narrow. Only providers with an explicit [providers.*]
+// entry are reported, so a city that never uses a locally installed CLI is not
+// nagged about it. An entry counts whether it names a canonical provider
+// directly or is an alias resolving to one through a base chain (e.g.
+// [providers.claude-fast] base = "builtin:claude").
+type providerLocalAuthCheck struct {
+	cityPath string
+}
+
+func newProviderLocalAuthCheck(cityPath string) *providerLocalAuthCheck {
+	return &providerLocalAuthCheck{cityPath: cityPath}
+}
+
+func (c *providerLocalAuthCheck) Name() string { return "provider-local-auth" }
+
+func (c *providerLocalAuthCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+	// A logged-out provider is reported as StatusWarning, which doctor only
+	// counts in Report.Warned; it never contributes to BlockingFailed. The
+	// severity is still declared advisory up front because SeverityBlocking is
+	// CheckSeverity's zero value, so this check stays non-gating if a path is
+	// ever changed to report StatusError.
+	r := &doctor.CheckResult{Name: c.Name(), Severity: doctor.SeverityAdvisory}
+	cfg, err := loadCityConfigAllowMissingProviderReferences(c.cityPath)
+	if err != nil {
+		r.Status = doctor.StatusOK
+		r.Message = "local provider auth advisory skipped until expanded config loads"
+		return r
+	}
+	names := api.ProviderReadinessNames()
+	items, err := initProbeProvidersReadiness(context.Background(), names, true)
+	if err != nil {
+		r.Status = doctor.StatusWarning
+		r.Message = fmt.Sprintf("could not probe local provider readiness: %v", err)
+		return r
+	}
+	configuredProbeNames := explicitProviderProbeNames(cfg)
+	var details []string
+	var hints []string
+	seenHint := map[string]bool{}
+	for _, name := range names {
+		item, ok := items[name]
+		if !ok || item.Status != api.ProbeStatusNeedsAuth {
+			continue
+		}
+		if !configuredProbeNames[name] {
+			continue
+		}
+		displayName := strings.TrimSpace(item.DisplayName)
+		if displayName == "" {
+			displayName = name
+		}
+		detail := strings.TrimSpace(item.Detail)
+		if detail == "" {
+			detail = "installed but not logged in"
+		}
+		details = append(details, fmt.Sprintf("%s: %s", displayName, detail))
+		if hint := providerStatusFixHint(name, api.ProbeStatusNeedsAuth); hint != "" && !seenHint[hint] {
+			seenHint[hint] = true
+			hints = append(hints, hint)
+		}
+	}
+	if len(details) == 0 {
+		r.Status = doctor.StatusOK
+		r.Message = "configured local providers are logged in"
+		return r
+	}
+	r.Status = doctor.StatusWarning
+	r.Message = fmt.Sprintf("%d configured local provider(s) not logged in", len(details))
+	r.Details = details
+	r.FixHint = strings.Join(hints, "; ")
+	return r
+}
+
+func (c *providerLocalAuthCheck) CanFix() bool { return false }
+
+func (c *providerLocalAuthCheck) Fix(_ *doctor.CheckContext) error { return nil }
+
+func (c *providerLocalAuthCheck) WarmupEligible() bool { return false }
+
+// explicitProviderProbeNames resolves every [providers.*] entry this city
+// declares -- canonical names and aliases alike -- to the readiness probe
+// name it maps to, reusing the same alias resolution `gc init` relies on. A
+// configured alias such as [providers.claude-fast] base = "builtin:claude"
+// resolves to "claude", the same probe name a direct [providers.claude]
+// entry would use, so both count as explicit.
+func explicitProviderProbeNames(cfg *config.City) map[string]bool {
+	probeNames := make(map[string]bool, len(cfg.Providers))
+	for ref := range cfg.Providers {
+		if probeName := providerReadinessProbeName(ref, cfg); probeName != "" {
+			probeNames[probeName] = true
+		}
+	}
+	return probeNames
+}
