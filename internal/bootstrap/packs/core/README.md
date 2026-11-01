@@ -24,6 +24,8 @@ none requires per-city configuration.
 | **`cascade-nudge-on-blocker-close`** | **event `bead.closed`** | **Nudge dependents' assignees or routed targets when a blocker bead closes** |
 | **`notify-on-human-gate-creation`** | **event `bead.created`** | **Mail + nudge the addressee when a human gate bead is created** |
 | **`renudge-stale-human-gates`** | **cooldown 5m** | **Re-mail + re-nudge the addressee of a human gate left open past a staleness threshold** |
+| **`notify-on-claims-stalled`** | **event `agent.claims_stalled`** | **Mail the escalation recipient when an agent's seats stop claiming their work (once per stall episode)** |
+| **`notify-on-claims-resumed`** | **event `agent.claims_resumed`** | **Resolve that incident and mail a short note when the agent claims its work again** |
 
 The **event-driven nudge orders** are documented in detail below.
 
@@ -155,6 +157,38 @@ Entries older than the retention window are pruned on each run.
 | -------- | ------- | ------- |
 | `GC_CASCADE_NUDGE_LOOKBACK` | `5m` | Event lookback window |
 | `GC_CASCADE_NUDGE_RETENTION` | `1h` | Dedup-entry retention (Ns/Nm/Nh) |
+
+## `notify-on-claims-stalled` and `notify-on-claims-resumed`
+
+**Why.** The controller's claims-stall guard notices when an agent
+template's seats stop claiming the routed work they were spawned for: a
+provider out of usage, an expired account, a CLI that never reads its prompt.
+It holds the template's spawns back (or, for an agent that declares a
+`standby_provider`, moves it there) and records `agent.claims_stalled`; a seat
+that claims again records `agent.claims_resumed`. Events alone reach only the
+event log. On 2026-10-31 a review lane stood dead for ten hours while ~1,400
+seats came and went, and nobody was told.
+
+**Event contract.** Both orders run `assets/scripts/notify-claims-stall.sh`,
+which reads both event types over a lookback window and mails through
+`escalate.sh` to `$GC_ESCALATION_RECIPIENT` (default `human`):
+
+- a stall mails once per episode: the incident key and fingerprint are the
+  episode the guard names, so its probe alerts are not mailed again
+  (`escalate.sh` reminds once a day while the stall stands);
+- a resumption resolves that incident and mails one short note; an episode
+  that is already over is reported by its resumption alone.
+
+**Loud-fail.** An undeliverable mail exits non-zero, so the controller logs
+the order's output, and the next run retries while the event is inside the
+lookback.
+
+**Configuration** (all optional):
+
+| Variable | Default | Meaning |
+| -------- | ------- | ------- |
+| `GC_NOTIFY_CLAIMS_STALL_LOOKBACK` | `15m` | Event lookback window |
+| `GC_ESCALATION_RECIPIENT` | `human` | Who is mailed |
 
 ## Dependencies
 

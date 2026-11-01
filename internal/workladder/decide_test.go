@@ -446,8 +446,44 @@ func TestDecideDue(t *testing.T) {
 			want: []Action{Nudge{Key: key("x"), Kind: KindClaim, Rung: RungClaimed, Attempt: 3, Paused: true}},
 		},
 		{
-			name: "trigger at threshold: recycle, keep nudging",
-			e:    due(Entry{Key: key("x"), Kind: KindTrigger, Rung: RungAssigned, Attempts: 3}),
+			name: "trigger's first due: a nudge, no alert",
+			e:    due(Entry{Key: key("x"), Kind: KindTrigger, Rung: RungAssigned}),
+			want: []Action{Nudge{Key: key("x"), Kind: KindTrigger, Rung: RungAssigned, Attempt: 1}},
+			check: func(t *testing.T, e Entry, _ Decision) {
+				if e.Escalated {
+					t.Error("escalated on the first nudge")
+				}
+			},
+		},
+		{
+			name: "trigger unanswered a base after its first nudge: alert once, keep nudging",
+			e:    due(Entry{Key: key("x"), Kind: KindTrigger, Rung: RungAssigned, Attempts: 1}),
+			want: []Action{Alert{Key: key("x"), Reason: AlertTriggerUnanswered}, Nudge{Key: key("x"), Kind: KindTrigger, Rung: RungAssigned, Attempt: 2}},
+			check: func(t *testing.T, e Entry, _ Decision) {
+				if !e.Escalated || e.Attempts != 2 || !e.RecycleAt.IsZero() {
+					t.Errorf("entry %+v, want escalated, counted, not recycled", e)
+				}
+			},
+		},
+		{
+			name: "trigger already alerted: just nudge",
+			e:    due(Entry{Key: key("x"), Kind: KindTrigger, Rung: RungAssigned, Attempts: 2, Escalated: true}),
+			want: []Action{Nudge{Key: key("x"), Kind: KindTrigger, Rung: RungAssigned, Attempt: 3}},
+		},
+		{
+			name: "degraded trigger: a paused nudge, never alerted",
+			e:    due(Entry{Key: key("x"), Kind: KindTrigger, Rung: RungAssigned, Attempts: 1}),
+			obs:  func(o Observation) Observation { o.Provider.Degraded = true; return o },
+			want: []Action{Nudge{Key: key("x"), Kind: KindTrigger, Rung: RungAssigned, Attempt: 1, Paused: true}},
+			check: func(t *testing.T, e Entry, _ Decision) {
+				if e.Escalated {
+					t.Error("escalated while degraded")
+				}
+			},
+		},
+		{
+			name: "trigger at threshold, alerted: recycle, keep nudging",
+			e:    due(Entry{Key: key("x"), Kind: KindTrigger, Rung: RungAssigned, Attempts: 3, Escalated: true}),
 			want: []Action{Recycle{Key: key("x")}, Nudge{Key: key("x"), Kind: KindTrigger, Rung: RungAssigned, Attempt: 4}},
 			check: func(t *testing.T, e Entry, _ Decision) {
 				if !e.RecycleAt.Equal(now) {
@@ -456,9 +492,21 @@ func TestDecideDue(t *testing.T) {
 			},
 		},
 		{
+			// A cell written before the trigger alert existed reaches the
+			// recycle without it: the recycle raises it, once.
+			name: "trigger at threshold, never alerted: alert, recycle, keep nudging",
+			e:    due(Entry{Key: key("x"), Kind: KindTrigger, Rung: RungAssigned, Attempts: 3}),
+			want: []Action{Alert{Key: key("x"), Reason: AlertTriggerUnanswered}, Recycle{Key: key("x")}, Nudge{Key: key("x"), Kind: KindTrigger, Rung: RungAssigned, Attempt: 4}},
+			check: func(t *testing.T, e Entry, _ Decision) {
+				if !e.Escalated || !e.RecycleAt.Equal(now) {
+					t.Errorf("entry %+v", e)
+				}
+			},
+		},
+		{
 			name: "trigger: no repost within RecycleRepost",
 			e: func() Entry {
-				e := due(Entry{Key: key("x"), Kind: KindTrigger, Rung: RungAssigned, Attempts: 4})
+				e := due(Entry{Key: key("x"), Kind: KindTrigger, Rung: RungAssigned, Attempts: 4, Escalated: true})
 				e.RecycleAt = now.Add(-29 * time.Minute)
 				return e
 			}(),
@@ -467,7 +515,7 @@ func TestDecideDue(t *testing.T) {
 		{
 			name: "trigger: repost after RecycleRepost",
 			e: func() Entry {
-				e := due(Entry{Key: key("x"), Kind: KindTrigger, Rung: RungAssigned, Attempts: 4})
+				e := due(Entry{Key: key("x"), Kind: KindTrigger, Rung: RungAssigned, Attempts: 4, Escalated: true})
 				e.RecycleAt = now.Add(-30 * time.Minute)
 				return e
 			}(),
@@ -720,6 +768,54 @@ func TestDecideWedgeSchedule(t *testing.T) {
 		{m(334, 30), "nudge"},
 		{m(394, 30), "nudge"},
 		{m(454, 30), "nudge"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("schedule:\n got %v\nwant %v", got, want)
+	}
+}
+
+// A trigger the seat never claims, replayed on a quiet seat: the nudges come
+// at grace, +3, +6 and +12 minutes, the recycle with the fourth, then hourly.
+// The escalation comes once, with the second nudge (4m30s): a seat that took
+// a nudge and still has not claimed a base later is not slow to start, and on
+// 2026-10-31 a seat like it was idle-drained at ~10.6 minutes, so a
+// never-claimed seat reported only at its 22m30s recycle was never reported at
+// all (formula-overhead-audit-6 §6.1).
+func TestDecideTriggerSchedule(t *testing.T) {
+	type ev struct {
+		at   time.Duration
+		what string
+	}
+	var got []ev
+	r := Record{}
+	for now := t0; now.Before(t0.Add(2 * time.Hour)); now = now.Add(30 * time.Second) {
+		d := Decide(r, quiet(now, 1, Work{Key: key("t"), Kind: KindTrigger}), p)
+		for _, a := range effects(d) {
+			switch a := a.(type) {
+			case Nudge:
+				got = append(got, ev{now.Sub(t0), "nudge"})
+			case Recycle:
+				got = append(got, ev{now.Sub(t0), "recycle"})
+			case Alert:
+				got = append(got, ev{now.Sub(t0), a.Reason})
+			default:
+				t.Fatalf("unexpected %#v", a)
+			}
+		}
+		r = d.Next
+	}
+	m := func(mins, secs int) time.Duration {
+		return time.Duration(mins)*time.Minute + time.Duration(secs)*time.Second
+	}
+	want := []ev{
+		{m(1, 30), "nudge"},
+		{m(4, 30), AlertTriggerUnanswered},
+		{m(4, 30), "nudge"},
+		{m(10, 30), "nudge"},
+		{m(22, 30), "recycle"},
+		{m(22, 30), "nudge"},
+		{m(82, 30), "recycle"},
+		{m(82, 30), "nudge"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("schedule:\n got %v\nwant %v", got, want)

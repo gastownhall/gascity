@@ -72,6 +72,20 @@ const (
 	// demand again when it changes, when the city config changes, or for one
 	// probe seat each time the hold's backoff runs out.
 	BeadClaimLoopHeld = "bead.claim_loop_held"
+	// AgentClaimsStalled fires when the controller's claims-stall guard
+	// (cmd/gc/claim_stall_guard.go) finds an agent template's seats no longer
+	// claiming the work routed to them on the provider they run: several seats
+	// in a row failed to start, were escalated by the work ladder for an
+	// unanswered trigger, or stayed unclaimed past the claim deadline while
+	// their trigger waited. It is an operator alert (the core pack's
+	// notify-on-claims-stalled order mails it); the payload says what the
+	// guard did about it and until when, and it is raised again, in the same
+	// episode, each time a probe seat fails.
+	AgentClaimsStalled = "agent.claims_stalled"
+	// AgentClaimsResumed fires when a stall the guard found ends: a seat on
+	// the stalled provider claimed its work, or a config change moved the
+	// template off it. Any hold on the template's demand is lifted.
+	AgentClaimsResumed = "agent.claims_resumed"
 	// HookClaimReclaimedStale fires when gc hook --claim (ga-7rj87d), opted in
 	// via config.Agent.AutoReclaimStaleClaims, recovers a route-matched
 	// candidate whose only claim blocker was another worker's stale (lease-
@@ -657,6 +671,7 @@ var KnownEventTypes = []string{
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected, BeadClaimReleased,
 	BeadClaimFailed, BeadClaimLoopHeld,
+	AgentClaimsStalled, AgentClaimsResumed,
 	HookClaimReclaimedStale,
 	BeadDeadAssigneeReopened,
 	ExecutionWorkAssociated, ExecutionRunAnchored, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
