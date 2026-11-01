@@ -42,7 +42,9 @@ func TestProviderScopeOwnershipPersistsOnlyPendingIntent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "proxied") || strings.Contains(string(data), "local") {
+	// Match the intent's JSON keys, not its values: scope_path is a temp dir,
+	// and a temp dir path can contain "local" (for example ~/.local/...).
+	if strings.Contains(string(data), `"transport"`) || strings.Contains(string(data), `"target"`) {
 		t.Fatalf("ready ownership journal persisted topology: %s", data)
 	}
 }
