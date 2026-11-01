@@ -55,6 +55,7 @@ go_test(
         "bdstore_assignee_fanout_test.go",
         "bdstore_batch_test.go",
         "bdstore_blocked_repair_test.go",
+        "bdstore_claim_integration_test.go",
         "bdstore_conditional_integration_bridge_test.go",
         "bdstore_conditional_integration_test.go",
         "bdstore_conditional_internal_test.go",

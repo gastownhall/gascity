@@ -573,7 +573,9 @@ func TestPreassignHookContinuationGroupSkipsHeldSiblings(t *testing.T) {
 // the work query read it (here it was closed). The refusal wrote nothing and
 // nothing is left for this session to resolve, so it is a lost claim: the
 // routed tier must drain a healthy no_work without recording a claim failure,
-// and the assigned tier must not fail the whole hook.
+// and the assigned tier must not fail the whole hook. A candidate dropped
+// before its claim drains the same way, so the row also pins that the refused
+// claim and its one settling read ran.
 func TestDoHookClaimTreatsBdNotClaimableRefusalAsALostClaim(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -586,8 +588,10 @@ func TestDoHookClaimTreatsBdNotClaimableRefusalAsALostClaim(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			originalRunner := hookClaimCommandRunnerWithEnvContext
 			t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+			var ran []string
 			hookClaimCommandRunnerWithEnvContext = func(context.Context, map[string]string) beads.CommandRunner {
 				return func(_ string, name string, args ...string) ([]byte, error) {
+					ran = append(ran, name+" "+strings.Join(args, " "))
 					switch {
 					case name == "bd" && reflect.DeepEqual(args, []string{"update", "work-1", "--claim", "--json"}):
 						return nil, errors.New("exit status 1: Error updating work-1: issue not claimable: status closed\n" +
@@ -638,6 +642,9 @@ func TestDoHookClaimTreatsBdNotClaimableRefusalAsALostClaim(t *testing.T) {
 			}
 			if strings.Contains(stderr.String(), "skipping") {
 				t.Fatalf("stderr reports a skipped claim for a lost one: %s", stderr.String())
+			}
+			if want := []string{"bd update work-1 --claim --json", "bd show --json work-1"}; !reflect.DeepEqual(ran, want) {
+				t.Fatalf("bd ran %q, want the refused claim, then one read naming the holder %q", ran, want)
 			}
 		})
 	}
