@@ -48,6 +48,9 @@ type Provider struct {
 	// unixListening reports whether a listener is bound to a unix socket
 	// path, for ServerConfirmedDead. Nil selects unixPathListening.
 	unixListening func(path string) (bool, error)
+	// heal is program-capture heal's per-pane backoff
+	// (program_capture_heal.go).
+	heal captureHealBackoff
 }
 
 var instanceTokenReader = rand.Reader
@@ -1173,11 +1176,16 @@ func (p *Provider) ListRunningComplete() bool { return true }
 
 // RuntimeInventory implements [runtime.InventoryProvider] with one
 // batched pane read. Delegates to [Tmux.listRuntimeInventory], and logs
-// malformed lines (see noteInventoryFaults).
+// malformed lines (see noteInventoryFaults). While the program-status switch
+// is not off, each entry's Program is its agent pane's reading, the tap's
+// liveness taken from the state cache's process table.
 func (p *Provider) RuntimeInventory(ctx context.Context) (map[string]runtime.InventoryEntry, error) {
-	entries, faults, err := p.tm.listRuntimeInventory(ctx)
+	entries, panes, faults, err := p.tm.listRuntimeInventory(ctx)
 	if len(faults.lines) > 0 || err == nil {
 		p.noteInventoryFaults(faults)
+	}
+	if mode := p.tm.programStatusMode(); err == nil && mode != runtime.ProgramStatusOff && len(entries) > 0 {
+		p.judgeInventoryPrograms(mode, entries, panes)
 	}
 	return entries, err
 }

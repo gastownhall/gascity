@@ -32,9 +32,12 @@ import (
 // unarmed, its capture still armed. The relay runs the provider's command
 // with the shell tmux would have run it with.
 //
-// Nothing here runs for an undeclared session, which is every session while
-// the [session] program_status switch is off: those keep today's tmux
-// command lines byte for byte.
+// Nothing is armed for an undeclared session, which is every session while
+// the [session] program_status switch is off. Its create keeps today's tmux
+// command line byte for byte. Its respawn also removes the capture an armed
+// incarnation left on the pane (see Tmux.respawnPaneWithWorkDir); while the
+// switch is off only a capture bound to the pane is removed, so a pane never
+// armed is left exactly as it was.
 
 // The pane options of program-status capture. gc writes the nonce; only the
 // tap writes the record, guarded by the nonce.
@@ -127,9 +130,8 @@ func (t *Tmux) planCapture(arm runtime.ProgramStatusArm) *capturePlan {
 		t.warnCaptureOnce(fmt.Sprintf("program-status app %q is not a codec app name; capture not armed", arm.App))
 		return nil
 	}
-	capability, err := t.captureCapability()
-	if err != nil {
-		t.warnCaptureOnce(fmt.Sprintf("program-status capture not armed: %v", err))
+	capability, ok := t.passCaptureGate()
+	if !ok {
 		return nil
 	}
 	r, err := newCaptureRand()
@@ -168,6 +170,25 @@ func (t *Tmux) paneShell(defaultShell string) string {
 		return "/bin/sh"
 	}
 	return defaultShell
+}
+
+// passCaptureGate runs the capability gate, logging a failure once per
+// cause. Arming and reading share it: while it fails nothing is armed and
+// every reading is Unread.
+func (t *Tmux) passCaptureGate() (captureCapability, bool) {
+	capability, err := t.captureCapability()
+	if err != nil {
+		t.warnCaptureOnce(fmt.Sprintf("program-status capture unavailable: %v", err))
+		return captureCapability{}, false
+	}
+	return capability, true
+}
+
+// captureGatePassed reports whether the capability gate passes (see
+// passCaptureGate).
+func (t *Tmux) captureGatePassed() bool {
+	_, ok := t.passCaptureGate()
+	return ok
 }
 
 // warnCaptureOnce logs msg the first time this Tmux sees it.
@@ -395,15 +416,42 @@ func disarmCommands(target string) [][]string {
 	}
 }
 
-// programStatusMode is the program-status switch this Tmux runs under:
-// shadow or on, and off for anything else.
+// paneArmedFormat is true for a pane bearing a tap nonce bound to its own
+// pane id ("<rand>.<pane_id>"), the nonce an arm sets. A value inherited from
+// window, session or global scope names another pane, as the read side's
+// nonce compare tells apart.
+const paneArmedFormat = "#{m:*.#{pane_id},#{" + programTapOption + "}}"
+
+// disarmIfArmedCommands is disarmCommands run only when target bears a nonce
+// bound to it (paneArmedFormat), in one if-shell -F: a pane never armed is
+// left exactly as it was, a pipe of its own included.
+func disarmIfArmedCommands(target string) [][]string {
+	return [][]string{{"if-shell", "-F", "-t", target, paneArmedFormat, tmuxCommandLines(disarmCommands(target))}}
+}
+
+// programStatusMode is the program-status switch this Tmux runs and reads
+// under: shadow or on, and off for anything else. It is the mode
+// SetProgramStatusMode last published, else Config.ProgramStatus.
 func (t *Tmux) programStatusMode() runtime.ProgramStatusMode {
-	switch mode := t.cfg.ProgramStatus; mode {
+	mode := t.cfg.ProgramStatus
+	if live := t.programStatus.Load(); live != nil {
+		mode = *live
+	}
+	switch mode {
 	case runtime.ProgramStatusShadow, runtime.ProgramStatusOn:
 		return mode
 	default:
 		return runtime.ProgramStatusOff
 	}
+}
+
+// SetProgramStatusMode publishes the city's program-status switch to this
+// Tmux in place of Config.ProgramStatus, so a config reload reaches a tmux
+// the controller keeps serving its sessions, without rebuilding it: arming,
+// the read formats and every reading follow at their next use. Safe for
+// concurrent use.
+func (t *Tmux) SetProgramStatusMode(mode runtime.ProgramStatusMode) {
+	t.programStatus.Store(&mode)
 }
 
 // tmuxArgvList joins commands into one tmux argv, separated by bare ";"
@@ -452,7 +500,8 @@ const respawnMarkerFormat = "#{pane_id}"
 // respawnPaneList is the one respawn command list: respawn-pane -k on target,
 // a display-message marker proving it ran, then follow. Every command that
 // must reach the new process before tmux reads its output goes in follow
-// (capture's re-arm today; an identity-changing relaunch's input fence).
+// (capture's re-arm or removal today; an identity-changing relaunch's input
+// fence).
 func respawnPaneList(target, workDir, command string, follow [][]string) [][]string {
 	respawn := []string{"respawn-pane", "-k", "-t", target}
 	if workDir != "" {
