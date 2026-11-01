@@ -729,6 +729,13 @@ var transientNeedles = []transientNeedle{
 	// processWorkflowFinalize's outcome read, whose wrapper is "resolving
 	// workflow outcome" (gastownhall/gascity#5729).
 	{needle: "timed out after", tier: TierAvailability},
+	// bd cancels its root context only on SIGINT/SIGTERM/SIGHUP, so this text
+	// means a stop cut a bd command short — typically a drain signaling the
+	// dispatcher's children before the dispatcher itself. A command that never
+	// finished never answered, which is Tier A wherever it is raised (the same
+	// reasoning as "timed out after"); the control kinds are level-triggered,
+	// so a canceled write re-enters like any other ambiguous write here.
+	{needle: "context canceled", tier: TierAvailability},
 }
 
 // ClassifyControllerError is the dispatch/store transient classifier for
@@ -743,6 +750,11 @@ func ClassifyControllerError(err error) ControllerErrorTier {
 		return TierNone
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
+		return TierAvailability
+	}
+	// The typed twin of the "context canceled" needle: a source-workflow lock
+	// wait cut short by the dispatcher's stop signal returns ctx.Err() itself.
+	if errors.Is(err, context.Canceled) {
 		return TierAvailability
 	}
 	if errors.Is(err, errTransientControllerBoundary) {

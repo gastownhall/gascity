@@ -131,6 +131,12 @@ func TestClassifyControllerErrorTiers(t *testing.T) {
 		{name: "dolt server unreachable", err: errors.New("begin read tx: dolt server unreachable"), want: TierAvailability},
 		{name: "workflow root close blocked", err: closeBlockedErr("gsp-p68ch6", "gsp-yl7fpr"), want: TierSemantic},
 		{name: "scope body close blocked", err: closeBlockedErr("pl-pujtf", "pl-mmneh"), want: TierSemantic},
+		// A stop cuts a bd command short (bd cancels its root context only on
+		// signals): the store never answered, so it is Tier A like a timeout.
+		{name: "stop-canceled finalizer outcome read", err: errors.New("gc-1: resolving workflow outcome: bd list both tiers: bd query: bd query (wisps): exit status 1: search count wisps: context canceled"), want: TierAvailability},
+		{name: "wrapped context canceled", err: fmt.Errorf("gc-1: closing source bead chain: %w", context.Canceled), want: TierAvailability},
+		{name: "typed canceled without the text", err: canceledLockWaitErr{}, want: TierAvailability},
+		{name: "operator canceled is not a canceled read", err: errors.New("workflow gc-1 canceled by operator"), want: TierNone},
 		{name: "non work query sigterm", err: errors.New("starting provider: exit status 143: Terminated"), want: TierNone},
 		{name: "bad step spec", err: errors.New("deserializing step spec: invalid character 'n'"), want: TierNone},
 		// Availability dominates: a refusal read off a store that is also
@@ -152,6 +158,13 @@ func TestClassifyControllerErrorTiers(t *testing.T) {
 		})
 	}
 }
+
+// canceledLockWaitErr wraps context.Canceled behind text that does not say
+// "context canceled", so only the typed check can classify it.
+type canceledLockWaitErr struct{}
+
+func (canceledLockWaitErr) Error() string { return "source workflow lock abandoned" }
+func (canceledLockWaitErr) Unwrap() error { return context.Canceled }
 
 func newSemanticControlBead(t *testing.T, store beads.Store) beads.Bead {
 	t.Helper()

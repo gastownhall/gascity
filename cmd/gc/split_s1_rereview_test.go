@@ -47,6 +47,7 @@ func TestIsTransientStoreFaultIsStoreIOOnly(t *testing.T) {
 		{"EMFILE", fmt.Errorf("open: %w", syscall.EMFILE), true},
 		{"EAGAIN", fmt.Errorf("read: %w", syscall.EAGAIN), true},
 		{"context deadline", fmt.Errorf("listing: %w", context.DeadlineExceeded), true},
+		{"context canceled", fmt.Errorf("listing: %w", context.Canceled), true},
 		{"store unavailable", fmt.Errorf("x: %w", beads.ErrStoreUnavailable), true},
 		{"ECONNREFUSED", fmt.Errorf("dial: %w", syscall.ECONNREFUSED), true},
 		{"EHOSTUNREACH", fmt.Errorf("dial: %w", syscall.EHOSTUNREACH), true},
@@ -98,6 +99,7 @@ func TestHookAndGateShareTheNoAnswerVocabulary(t *testing.T) {
 		"cannot reach bd serve at https://bd.example: EOF",
 		"Error 2013: lost connection to MySQL server during query",
 		"bd list: signal: killed",
+		"Error: failed to list ready issues: context canceled",
 	} {
 		err := errors.New(msg)
 		if !workQueryStoreUnavailable(err) {
