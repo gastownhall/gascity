@@ -47,6 +47,7 @@ type Provider struct {
 	serviceAccount     string              // pod service account name (GC_K8S_SERVICE_ACCOUNT)
 	prebaked           bool                // skip staging + init container for prebaked images
 	cityName           string              // the controller's city name, for the pod's remote-stage record
+	podSecurity        PodSecurityConfig   // optional pod-level UID/GID/fsGroup
 	nodeSelector       map[string]string   // GC_K8S_NODE_SELECTOR (JSON)
 	tolerations        []corev1.Toleration // GC_K8S_TOLERATIONS (JSON)
 	affinity           *corev1.Affinity    // GC_K8S_AFFINITY (JSON)
@@ -57,6 +58,15 @@ type Provider struct {
 	stderr             io.Writer          // warning output (default os.Stderr)
 	pokes              runtime.PokeLedger // gc's own input, discounted from GetLastActivity
 	now                func() time.Time   // the poke ledger's clock; nil is time.Now
+}
+
+// PodSecurityConfig supplies optional numeric identities for generated agent
+// pods. Unset fields are left to the image or Kubernetes admission policy.
+// Gas City does not allocate UIDs.
+type PodSecurityConfig struct {
+	RunAsUser  *int64
+	RunAsGroup *int64
+	FSGroup    *int64
 }
 
 type schedulingFields struct {
@@ -74,6 +84,7 @@ type schedulingFields struct {
 //   - GC_K8S_SERVICE_ACCOUNT — pod service account name (default: namespace default)
 //   - GC_K8S_CPU_REQUEST, GC_K8S_MEM_REQUEST — resource requests
 //   - GC_K8S_CPU_LIMIT, GC_K8S_MEM_LIMIT — resource limits
+//   - GC_K8S_RUN_AS_USER, GC_K8S_RUN_AS_GROUP, GC_K8S_FS_GROUP — optional pod identity overrides
 //
 // The in-cluster Dolt service alias defaults to the provider defaults
 // (dolt.gc.svc.cluster.local:3307). Pods receive projected GC_DOLT_* env;
@@ -83,13 +94,30 @@ type schedulingFields struct {
 // Uses rest.InClusterConfig() when running in a pod, falls back to
 // clientcmd.BuildConfigFromFlags() for local development.
 func NewProvider() (*Provider, error) {
-	return NewProviderWithSecretProjection(nil, nil)
+	return NewProviderWithConfig(PodSecurityConfig{}, nil, nil)
 }
 
 // NewProviderWithSecretProjection creates a provider with optional,
 // configuration-backed Kubernetes Secret projections. Existing GC_K8S_*
 // environment settings retain their normal behavior.
 func NewProviderWithSecretProjection(secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount) (*Provider, error) {
+	return NewProviderWithConfig(PodSecurityConfig{}, secretEnv, secretMounts)
+}
+
+// NewProviderWithSecurityConfig creates a K8s session provider using optional
+// pod identity values from config. GC_K8S_RUN_AS_USER, GC_K8S_RUN_AS_GROUP,
+// and GC_K8S_FS_GROUP override their corresponding config values when set.
+func NewProviderWithSecurityConfig(config PodSecurityConfig) (*Provider, error) {
+	return NewProviderWithConfig(config, nil, nil)
+}
+
+// NewProviderWithConfig creates a provider with optional pod identity and
+// Secret projections.
+func NewProviderWithConfig(config PodSecurityConfig, secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount) (*Provider, error) {
+	podSecurity, err := resolvePodSecurityConfig(config)
+	if err != nil {
+		return nil, err
+	}
 	namespace := envOrDefault("GC_K8S_NAMESPACE", "gc")
 	image := os.Getenv("GC_K8S_IMAGE")
 	k8sContext := os.Getenv("GC_K8S_CONTEXT")
@@ -131,6 +159,7 @@ func NewProviderWithSecretProjection(secretEnv []runtime.K8sSecretEnv, secretMou
 		memLimit:           envOrDefault("GC_K8S_MEM_LIMIT", "4Gi"),
 		serviceAccount:     os.Getenv("GC_K8S_SERVICE_ACCOUNT"),
 		prebaked:           os.Getenv("GC_K8S_PREBAKED") == "true",
+		podSecurity:        podSecurity,
 		postStartSettle:    3 * time.Second,
 		stderr:             os.Stderr,
 		nodeSelector:       scheduling.nodeSelector,
@@ -140,6 +169,55 @@ func NewProviderWithSecretProjection(secretEnv []runtime.K8sSecretEnv, secretMou
 		secretEnv:          append([]runtime.K8sSecretEnv(nil), secretEnv...),
 		secretMounts:       append([]runtime.K8sSecretMount(nil), secretMounts...),
 	}, nil
+}
+
+func resolvePodSecurityConfig(config PodSecurityConfig) (PodSecurityConfig, error) {
+	runAsUser, err := resolvePodID(
+		"GC_K8S_RUN_AS_USER", "session.k8s.run_as_user", config.RunAsUser,
+		os.Getenv("GC_K8S_RUN_AS_USER"), 1,
+	)
+	if err != nil {
+		return PodSecurityConfig{}, err
+	}
+	runAsGroup, err := resolvePodID(
+		"GC_K8S_RUN_AS_GROUP", "session.k8s.run_as_group", config.RunAsGroup,
+		os.Getenv("GC_K8S_RUN_AS_GROUP"), 0,
+	)
+	if err != nil {
+		return PodSecurityConfig{}, err
+	}
+	fsGroup, err := resolvePodID(
+		"GC_K8S_FS_GROUP", "session.k8s.fs_group", config.FSGroup,
+		os.Getenv("GC_K8S_FS_GROUP"), 0,
+	)
+	if err != nil {
+		return PodSecurityConfig{}, err
+	}
+	return PodSecurityConfig{RunAsUser: runAsUser, RunAsGroup: runAsGroup, FSGroup: fsGroup}, nil
+}
+
+func resolvePodID(envName, configName string, configured *int64, envValue string, minimum int64) (*int64, error) {
+	value := configured
+	source := configName
+	if raw := strings.TrimSpace(envValue); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parsing %s %q as an integer: %w", envName, raw, err)
+		}
+		value = &parsed
+		source = envName
+	}
+	if value == nil {
+		return nil, nil
+	}
+	if *value < minimum {
+		if minimum == 1 {
+			return nil, fmt.Errorf("%s must be greater than zero", source)
+		}
+		return nil, fmt.Errorf("%s must not be negative", source)
+	}
+	resolved := *value
+	return &resolved, nil
 }
 
 func parseSchedulingEnv() (schedulingFields, error) {

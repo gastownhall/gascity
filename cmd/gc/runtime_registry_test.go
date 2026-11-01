@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionacp "github.com/gastownhall/gascity/internal/runtime/acp"
+	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -61,6 +62,19 @@ func TestRuntimeRegistryRegistersAllBuiltinNames(t *testing.T) {
 		if !r.Has(name) {
 			t.Errorf("builtin runtime %q not registered", name)
 		}
+	}
+}
+
+func TestRuntimeRegistryK8sPassesPodIdentityConfig(t *testing.T) {
+	t.Setenv("GC_K8S_RUN_AS_USER", "")
+	t.Setenv("GC_K8S_RUN_AS_GROUP", "")
+	t.Setenv("GC_K8S_FS_GROUP", "")
+	rootUID := int64(0)
+	_, err := newSessionProviderForCityByName(nil, "k8s", config.SessionConfig{
+		K8s: config.K8sConfig{RunAsUser: &rootUID},
+	}, "city", t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "session.k8s.run_as_user must be greater than zero") {
+		t.Fatalf("K8s provider config error = %v, want configured non-root UID validation before client setup", err)
 	}
 }
 
@@ -453,8 +467,9 @@ func TestK8sSecretProjectionReachesBuiltinAndHybridProviders(t *testing.T) {
 
 	wantEnv := []runtime.K8sSecretEnv{{Name: "SERVICE_TOKEN", Secret: "service-auth", Key: "token"}}
 	wantMounts := []runtime.K8sSecretMount{{Secret: "service-files", MountPath: "/run/service"}}
+	wantUser, wantGroup, wantFSGroup := int64(1234), int64(2345), int64(3456)
 	var calls int
-	newSeamBackedK8sProvider = func(env []runtime.K8sSecretEnv, mounts []runtime.K8sSecretMount, cityName string) (runtime.Provider, error) {
+	newSeamBackedK8sProvider = func(security sessionk8s.PodSecurityConfig, env []runtime.K8sSecretEnv, mounts []runtime.K8sSecretMount, cityName string) (runtime.Provider, error) {
 		calls++
 		if cityName != "city" {
 			t.Errorf("K8s constructor call %d city name = %q, want city", calls, cityName)
@@ -465,12 +480,16 @@ func TestK8sSecretProjectionReachesBuiltinAndHybridProviders(t *testing.T) {
 		if len(mounts) != len(wantMounts) || mounts[0] != wantMounts[0] {
 			t.Errorf("K8s constructor call %d secret mounts = %#v, want %#v", calls, mounts, wantMounts)
 		}
+		if security.RunAsUser == nil || *security.RunAsUser != wantUser || security.RunAsGroup == nil || *security.RunAsGroup != wantGroup || security.FSGroup == nil || *security.FSGroup != wantFSGroup {
+			t.Errorf("K8s constructor call %d pod security = %+v, want runAsUser=%d runAsGroup=%d fsGroup=%d", calls, security, wantUser, wantGroup, wantFSGroup)
+		}
 		return runtime.NewFake(), nil
 	}
 
 	sc := config.SessionConfig{RemoteMatch: "remote", K8s: config.K8sConfig{
 		SecretEnv:    []config.K8sSecretEnv{{Name: "SERVICE_TOKEN", Secret: "service-auth", Key: "token"}},
 		SecretMounts: []config.K8sSecretMount{{Secret: "service-files", MountPath: "/run/service"}},
+		RunAsUser:    &wantUser, RunAsGroup: &wantGroup, FSGroup: &wantFSGroup,
 	}}
 
 	if _, err := buildRuntimeRegistry().New("k8s", sc, "city", t.TempDir()); err != nil {

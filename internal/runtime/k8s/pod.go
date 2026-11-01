@@ -257,6 +257,9 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	// as root (see securityContext below), creates the user, sets up workspace
 	// ownership, then drops privileges via su for the tmux session.
 	linuxUsername := cfg.Env["LINUX_USERNAME"]
+	if linuxUsername != "" && hasConfiguredPodIdentity(p.podSecurity) {
+		return nil, fmt.Errorf("LINUX_USERNAME cannot be combined with explicit Kubernetes pod identity (session.k8s.run_as_user/run_as_group/fs_group or GC_K8S_RUN_AS_USER/GC_K8S_RUN_AS_GROUP/GC_K8S_FS_GROUP)")
+	}
 	var userSetup string
 	if linuxUsername != "" {
 		userSetup = fmt.Sprintf(
@@ -391,6 +394,7 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 			},
 		},
 		Spec: corev1.PodSpec{
+			SecurityContext:    agentPodSecurityContext(p.podSecurity, linuxUsername == ""),
 			ServiceAccountName: p.serviceAccount,
 			RestartPolicy:      corev1.RestartPolicyNever,
 			Containers: []corev1.Container{{
@@ -442,6 +446,7 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 			ImagePullPolicy: corev1.PullIfNotPresent,
 			Command:         []string{"sh", "-c", "while [ ! -f /workspace/.gc-ready ]; do sleep 0.5; done"},
 			VolumeMounts:    initVolMounts,
+			SecurityContext: restrictedAgentSecurityContext(),
 		}}
 	}
 
@@ -462,18 +467,64 @@ func cloneTolerations(in []corev1.Toleration) []corev1.Toleration {
 	return out
 }
 
-// agentSecurityContext returns a container security context.
-// When a dynamic linux username is configured, the container starts as root
-// (UID 0) so it can create the user at runtime before dropping privileges.
-// When no dynamic user is set, returns nil (uses Dockerfile default: gcagent).
+// agentSecurityContext returns a container security context. The normal path
+// runs as the image's numeric non-root fallback or an optional pod identity
+// and satisfies Restricted Pod Security. The legacy LINUX_USERNAME path still
+// starts as root so it can create the account and hand off to su.
 func agentSecurityContext(linuxUsername string) *corev1.SecurityContext {
 	if linuxUsername == "" {
-		return nil
+		return restrictedAgentSecurityContext()
 	}
 	var rootUID int64
 	return &corev1.SecurityContext{
 		RunAsUser: &rootUID,
 	}
+}
+
+func restrictedAgentSecurityContext() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		RunAsNonRoot:             boolPtr(true),
+		AllowPrivilegeEscalation: boolPtr(false),
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+		},
+	}
+}
+
+func agentPodSecurityContext(config PodSecurityConfig, restricted bool) *corev1.PodSecurityContext {
+	security := &corev1.PodSecurityContext{
+		RunAsUser:  cloneInt64Ptr(config.RunAsUser),
+		RunAsGroup: cloneInt64Ptr(config.RunAsGroup),
+		FSGroup:    cloneInt64Ptr(config.FSGroup),
+		SeccompProfile: &corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeRuntimeDefault,
+		},
+	}
+	if restricted {
+		security.RunAsNonRoot = boolPtr(true)
+		// The image's HOME and prebaked workspace are group-writable by GID 0.
+		// Keep an explicitly requested nonzero primary GID while adding GID 0
+		// as a supplementary group so those image paths remain writable.
+		if config.RunAsGroup != nil && *config.RunAsGroup != 0 {
+			security.SupplementalGroups = []int64{0}
+		}
+	}
+	if !restricted && security.RunAsUser == nil && security.RunAsGroup == nil && security.FSGroup == nil {
+		return nil
+	}
+	return security
+}
+
+func hasConfiguredPodIdentity(config PodSecurityConfig) bool {
+	return config.RunAsUser != nil || config.RunAsGroup != nil || config.FSGroup != nil
+}
+
+func cloneInt64Ptr(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 // buildPodEnv creates the env var list for the agent container.
