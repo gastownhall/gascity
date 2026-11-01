@@ -228,6 +228,24 @@ func doctorOrderFiringCurrentLastRunFunc(cityPath string, cfg *config.City, stde
 	}
 }
 
+// doctorOrderOutcomeRecentRunsFunc lists an order's newest persisted runs for
+// order-outcome-healthy, from the same shared order-history stores
+// doctorOrderFiringCurrentLastRunFunc reads, so the two checks pay for one store
+// resolution per scope per run.
+func doctorOrderOutcomeRecentRunsFunc(cityPath string, cfg *config.City, stderr io.Writer) doctor.OrderOutcomeRecentRunsFunc {
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	resolveStores := cachedOrderHistoryStoresResolver(cityPath, cfg, stderr)
+	return func(order orders.Order, limit int) ([]orders.OrderRun, error) {
+		stores, err := resolveStores(order)
+		if err != nil {
+			return nil, err
+		}
+		return orders.RecentRunsAcross(orderFrontDoorsForTypedStores(stores))(order.ScopedName(), limit)
+	}
+}
+
 // doctorScopeBdBinary resolves the bd executable a doctor check must run for
 // one scope, through the same resolver every other gc bd call uses: the
 // city.toml `[workspace.env] BD_BIN` pin first, then PATH.
@@ -345,7 +363,9 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			doctor.WithOrderFiringCurrentInapplicableFunc(func(a orders.Order) (string, bool) {
 				return orderInapplicableBackend(cityPath, cfg, a)
 			})))
-		register(doctor.NewOrderOutcomeHealthyCheck(cfg, cityPath))
+		registerCityStoreCheck(doctor.NewOrderOutcomeHealthyCheck(cfg, cityPath,
+			doctor.WithOrderOutcomeRecentRunsFunc(
+				storeGate.OrderRecentRuns(cityPath, cfg, doctorOrderOutcomeRecentRunsFunc(cityPath, cfg, opts.Stderr)))))
 		register(newCodexHooksDriftCheck(cityPath, codexHookWorkDirs(cityPath, cfg)))
 		register(doctor.NewRigPackCoverageCheck(cfg, cityPath))
 		register(newPackRuntimesDoctorCheck(cfg))

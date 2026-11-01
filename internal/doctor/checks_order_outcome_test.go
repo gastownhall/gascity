@@ -268,7 +268,7 @@ func TestNearControllerStartWithNoStarts(t *testing.T) {
 func TestClassifyOrderOutcomeFlagsAtThreshold(t *testing.T) {
 	order := orders.Order{Name: "refresh-family-clones", Rig: "st"}
 
-	status, detail := classifyOrderOutcome(order, 3, 3, "exit status 128", true, 0)
+	status, detail := classifyOrderOutcome(order, 3, 3, "exit status 128", true, 0, false)
 
 	if status != StatusWarning {
 		t.Fatalf("status = %v, want StatusWarning", status)
@@ -284,7 +284,7 @@ func TestClassifyOrderOutcomeFlagsAtThreshold(t *testing.T) {
 func TestClassifyOrderOutcomeAllowsUnderThreshold(t *testing.T) {
 	order := orders.Order{Name: "dolt-remotes-patrol"}
 
-	status, detail := classifyOrderOutcome(order, 2, 3, "exit status 1", true, 0)
+	status, detail := classifyOrderOutcome(order, 2, 3, "exit status 1", true, 0, false)
 
 	if status != StatusOK {
 		t.Fatalf("status = %v, want StatusOK for a streak under threshold", status)
@@ -297,7 +297,7 @@ func TestClassifyOrderOutcomeAllowsUnderThreshold(t *testing.T) {
 func TestClassifyOrderOutcomeHealthyOrder(t *testing.T) {
 	order := orders.Order{Name: "gate-sweep"}
 
-	status, detail := classifyOrderOutcome(order, 0, 3, "", true, 0)
+	status, detail := classifyOrderOutcome(order, 0, 3, "", true, 0, false)
 
 	if status != StatusOK {
 		t.Fatalf("status = %v, want StatusOK", status)
@@ -310,7 +310,7 @@ func TestClassifyOrderOutcomeHealthyOrder(t *testing.T) {
 func TestClassifyOrderOutcomeNoOutcomesYet(t *testing.T) {
 	order := orders.Order{Name: "brand-new-order"}
 
-	status, detail := classifyOrderOutcome(order, 0, 3, "", false, 0)
+	status, detail := classifyOrderOutcome(order, 0, 3, "", false, 0, false)
 
 	if status != StatusOK {
 		t.Fatalf("status = %v, want StatusOK — order-firing-current owns the never-fired case", status)
@@ -323,7 +323,7 @@ func TestClassifyOrderOutcomeNoOutcomesYet(t *testing.T) {
 func TestClassifyOrderOutcomeOmitsEmptyMessage(t *testing.T) {
 	order := orders.Order{Name: "some-order"}
 
-	_, detail := classifyOrderOutcome(order, 3, 3, "", true, 0)
+	_, detail := classifyOrderOutcome(order, 3, 3, "", true, 0, false)
 
 	if strings.Contains(detail, `""`) {
 		t.Fatalf("detail = %q, want no empty-quote artifact when the message is blank", detail)
@@ -338,7 +338,7 @@ func TestClassifyOrderOutcomeReportsGraceWindowSkipsInsteadOfSuccess(t *testing.
 	// after a restart.
 	order := orders.Order{Name: "dolt-health"}
 
-	status, detail := classifyOrderOutcome(order, 0, 3, "", true, 10)
+	status, detail := classifyOrderOutcome(order, 0, 3, "", true, 10, false)
 
 	if status != StatusOK {
 		t.Fatalf("status = %v, want StatusOK — this suppresses the alarm as intended", status)

@@ -302,29 +302,30 @@ func TestLastRunAndCursorKeepAHardBackingErrorThroughACache(t *testing.T) {
 	}
 }
 
-func createDigestRun(t *testing.T, store beads.Store, labels ...string) beads.Bead {
-	t.Helper()
-	b, err := store.Create(beads.Bead{
-		Title:  "order:digest",
-		Status: "closed",
-		Labels: append([]string{"order-run:digest", "order-tracking"}, labels...),
-	})
-	if err != nil {
-		t.Fatal(err)
+// digestRunBead is a closed digest run stamped at a fixed CreatedAt, so a test
+// orders runs across stores without waiting for the clock to tick.
+func digestRunBead(id string, at time.Time, labels ...string) beads.Bead {
+	return beads.Bead{
+		ID:        id,
+		Title:     "order:digest",
+		Status:    "closed",
+		Labels:    append([]string{"order-run:digest", "order-tracking"}, labels...),
+		CreatedAt: at,
+		UpdatedAt: at,
 	}
-	time.Sleep(2 * time.Millisecond)
-	return b
 }
 
 // TestRecentRunsAcrossMergesNewestFirstAndTruncates proves the federated read
 // interleaves each front door's runs by CreatedAt descending and cuts the merged
 // list to limit, so a rig-scoped order's history is not hidden behind the city's.
 func TestRecentRunsAcrossMergesNewestFirstAndTruncates(t *testing.T) {
-	cityBacking, rigBacking := beads.NewMemStore(), beads.NewMemStore()
-	oldest := createDigestRun(t, cityBacking)
-	second := createDigestRun(t, rigBacking)
-	third := createDigestRun(t, cityBacking)
-	newest := createDigestRun(t, rigBacking, "wisp-failed")
+	base := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	oldest := digestRunBead("gc-1", base)
+	second := digestRunBead("gc-2", base.Add(time.Minute))
+	third := digestRunBead("gc-3", base.Add(2*time.Minute))
+	newest := digestRunBead("gc-4", base.Add(3*time.Minute), "wisp-failed")
+	cityBacking := beads.NewMemStoreFrom(0, []beads.Bead{oldest, third}, nil)
+	rigBacking := beads.NewMemStoreFrom(0, []beads.Bead{second, newest}, nil)
 
 	across := RecentRunsAcross([]*Store{ordersStoreOver(cityBacking), nil, ordersStoreOver(rigBacking)})
 
@@ -374,8 +375,7 @@ func TestRecentRunsAcrossReturnsNothingWithoutRuns(t *testing.T) {
 // walk reach a wrong verdict.
 func TestRecentRunsAcrossPropagatesStoreError(t *testing.T) {
 	wantErr := errors.New("tier unavailable")
-	healthy := beads.NewMemStore()
-	createDigestRun(t, healthy)
+	healthy := beads.NewMemStoreFrom(0, []beads.Bead{digestRunBead("gc-1", time.Now())}, nil)
 	broken := &rowsErrorStore{MemStore: beads.NewMemStore(), err: wantErr}
 
 	got, err := RecentRunsAcross([]*Store{ordersStoreOver(healthy), ordersStoreOver(broken)})("digest", 5)

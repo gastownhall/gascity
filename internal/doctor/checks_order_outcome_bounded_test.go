@@ -293,7 +293,6 @@ func TestOrderOutcomeHealthy_FallbackFansOutBoundedConcurrently(t *testing.T) {
 		case <-overlap:
 		case <-time.After(2 * time.Second):
 		}
-		time.Sleep(5 * time.Millisecond)
 		inflight.Add(-1)
 		return []orders.OrderRun{outcomeRunOK(order.ScopedName(), time.Now())}, nil
 	}
