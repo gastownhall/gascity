@@ -136,7 +136,9 @@ cmd_gc_integration_tests=(
   TestControllerDiscoversAddedCronOrderWithoutRestart
   TestGcBdBurnAndWispGCJudgesReadRealBd
   TestGcBdBurnJudgeCoversAProxiedServerCascade
+  TestGcBdCreateGraphJudgeFactsRealBd
   TestGcBdMolWispRootOnlyMintsOneWorkBead
+  TestGcBdSplitJudgesMetadataAsTheStoresReadItBack
   TestInitializingARealEmbeddedRigLetsItCreateGcTypedBeads
   TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind
   TestManagedBeadsNativeCLICompatibility

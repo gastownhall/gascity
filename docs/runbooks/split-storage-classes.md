@@ -385,9 +385,18 @@ gc serves its own `release-if-current` itself.
   including a `--metadata @file`, which gc reads, and the labels bd copies
   from a `--parent` (unless `--no-inherit-labels`). bd copies the labels of
   the parent its own store holds, so a parent that store's read does not find
-  exactly is refused. An `--id` inside a class
-  binding's reserved namespace is refused. `create --graph` is refused: a
-  graph plan mints a bead per node and no shipped workflow uses it.
+  exactly is refused. An `--id` inside a class binding's reserved namespace
+  is refused, and so is an `--id` the class binding holds: `gc storage
+  migrate` keeps a moved bead's id and clears the work store's copy, so bd
+  would mint that id again while every by-id `gc` command answers from the
+  binding's bead. `create --graph`: gc reads the
+  plan (relative to the directory bd runs in) and judges it node by node, a
+  dry run exactly like the live call. Each node's type, labels and metadata
+  are classified as bd writes them (bd never copies a parent's labels onto a
+  graph node, and writes over each `metadata_refs` key the id of the node it
+  names: that node's `id`, or the id bd mints for it); a node `id` refused for
+  `--id` above, a field outside bd's graph-plan schema, and a plan gc cannot
+  read are refused.
 - `delete` (positionals and `--from-file`): every id must name exactly one
   bead of the work store (bd would delete whatever bead a short id
   prefixes). Refused when a class-binding bead depends on one of the beads,
@@ -401,6 +410,15 @@ gc serves its own `release-if-current` itself.
   judged against the bead its id resolves to. If the id resolves to no bead,
   to a different bead (a short or partial id), or cannot be read, a write that
   touches type, labels or metadata is refused.
+- Metadata (`create` and `update --metadata`, `update --set-metadata`, the
+  nodes of a `create --graph` plan, the rows of an `import`) is classified as
+  each of the city's stores reads it back once bd has stored it. They agree on
+  a string value, but a JSON null reads as empty to the bd CLI and as the text
+  `null` to a native Dolt store, and `gc.root_bead_id` set to `null` is a
+  graph marker. A write is refused when either reading moves the bead out of
+  the classes its store holds, and an import row the two readings place in
+  different classes is refused even with `--skip-infra`. Write such a key as a
+  string, leave it out, or clear it with `update --unset-metadata`.
 - `label propagate`: a class-marker label is refused.
 - `import`: rows of a class the store does not hold are refused, or left out
   with `--skip-infra`. gc reads the file the way bd's import does: a line
@@ -448,12 +466,13 @@ gc serves its own `release-if-current` itself.
   and leave the edge dangling.
 - `batch`: every `create` line is classified.
 - A file gc judges (`batch --file`, `delete --from-file`, a `--metadata @file`,
-  the `import` source) is copied to a private temporary file once judged, and
-  bd is pointed at the copy, which is removed when `gc bd` returns. bd writes
-  exactly what gc judged: a file rewritten after gc read it changes nothing.
-  A pipe (`<(...)`, `/dev/stdin`) given to `batch --file`, `delete
-  --from-file` or `import` is drained by gc's read, and bd gets the drained
-  bytes. bd names the copy, not your file, in what it prints.
+  a `create --graph` plan, the `import` source) is copied to a private
+  temporary file once judged, and bd is pointed at the copy, which is removed
+  when `gc bd` returns. bd writes exactly what gc judged: a file rewritten
+  after gc read it changes nothing. A pipe (`<(...)`, `/dev/stdin`) given to
+  `batch --file`, `delete --from-file`, `create --graph` or `import` is
+  drained by gc's read, and bd gets the drained bytes. bd names the copy, not
+  your file, in what it prints.
 - `sql`: only a single plain read is allowed: no comments, no Dolt procedures,
   no backtick-quoted Dolt names.
 - `config set` and `config unset`: only `types.custom`, `types.infra`,
@@ -466,7 +485,12 @@ gc serves its own `release-if-current` itself.
 - **No edge ever crosses stores.** `dep add` (positionals, `--blocked-by`,
   `--depends-on`), `dep relate`, `link`, `duplicate` (`--of`), `supersede`
   (`--with`), `gate create` (`--blocks`), `create`/`q`/`update --parent`, `create --deps` and
-  `--waits-for`, the `dep add` lines of a `batch`, and the dependencies of an
+  `--waits-for`, the id-named endpoints of a `create --graph` plan (a node's
+  `parent_id` when it names no parent key, a `deps` target that is not a plan
+  key, and an edge's `from_id`, `to_id`, `spawner_id` and `thread_id`; an id
+  that is a node's own `id` names that node of the plan, and bd writes the
+  others exactly as spelled, so one with leading or trailing whitespace is
+  refused), the `dep add` lines of a `batch`, and the dependencies of an
   `import` must each name beads of the city's work stores that no class
   binding holds. Each endpoint is read in the work store its id prefix names,
   so a dependency between a rig's bead and the city's (or another rig's) is
