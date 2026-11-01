@@ -37,6 +37,10 @@ bazel_dep(name = "rules_cc", version = "0.2.17")
 bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_python", version = "1.7.0")
 
+# target_compatible_with for tests of the linux-x86_64 toolchain. Same
+# version the rest of the module graph already resolves.
+bazel_dep(name = "platforms", version = "1.1.0")
+
 # The dashboard SPA (internal/api/dashboardspa/web) builds and tests under
 # rules_js: a pinned Node.js toolchain, every npm package fetched by Bazel
 # from the committed pnpm-lock.yaml (integrity-pinned, so remote workers
@@ -149,6 +153,29 @@ llvm_dist(
         # `bazel coverage` links cgo binaries with -fprofile-instr-generate,
         # which pulls in compiler-rt's profile runtime (~170KB).
         "lib/clang/22/lib/x86_64-unknown-linux-gnu/libclang_rt.profile.a",
+    ],
+    # bin/lld (ld.lld, ld64.lld, wasm-ld) NEEDs libxml2.so.2, for COFF
+    # manifest merging no build here does, yet the loader resolves it at
+    # every start. Ubuntu 26.04 ships only libxml2.so.16, so every link failed
+    # there. lib/, lld's RUNPATH ($ORIGIN/../lib), gets noble's libxml2.so.2
+    # and the ICU 74 it NEEDs (the sysroot's pin), and lld's DT_RUNPATH
+    # becomes DT_RPATH so the loader finds that ICU there too. The bundled
+    # libraries are not action inputs: remote workers use their own
+    # (tools/rbe/worker-env.txt has both). lld differs from the release by
+    # that one tag byte, the same on every host, so link action keys stay
+    # host-independent.
+    # //third_party/cc_toolchain:llvm_dist_runtime_libs_test checks that
+    # every library the binaries load is a stable host soname or bundled.
+    rpath_members = ["bin/lld"],
+    runtime_deb_urls = NOBLE_DEB_URLS,
+    runtime_debs = {
+        "pool/main/i/icu/libicu74_74.2-1ubuntu3.1_amd64.deb": "c9a70989678660eed9a1e904c74fa043da8bec8e2036856fc16e31ced79b04f8",
+        "pool/main/libx/libxml2/libxml2_2.9.14+dfsg-1.3ubuntu3.9_amd64.deb": "6e578bc383096718c9eea8a76a3edfacfea06e525e1aa7a187ee41906436d94e",
+    },
+    runtime_libs = [
+        "libicudata.so.74",
+        "libicuuc.so.74",
+        "libxml2.so.2",
     ],
     # LLVM-22.1.8-Linux-X64.tar.xz (sha256 df0e1ecf...0006384), sliced to the
     # members above by tools/cc_toolchain/repack_llvm.sh: 149 MB instead of
