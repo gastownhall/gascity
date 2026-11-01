@@ -270,6 +270,15 @@ live_session_match() {
 }
 
 CURRENT_BEAD_JSON=""
+# Candidates whose failed reads left the current claim's holder unverifiable,
+# named in the claim's skip declaration. Reset for every claim.
+SESSION_PROBE_UNREADABLE=""
+
+# record_probe_unreadable remembers one candidate whose failed read left the
+# holder's liveness unverifiable, for the skip declaration's reason.
+record_probe_unreadable() {
+    SESSION_PROBE_UNREADABLE="${SESSION_PROBE_UNREADABLE}${SESSION_PROBE_UNREADABLE:+, }$1"
+}
 
 first_bead_jq='if type == "array" then .[0] else . end'
 
@@ -430,12 +439,14 @@ session_bead_shows_live_assignment() {
         if ! session_json=$(gc bd show "$session_id" --json 2>/dev/null); then
             if session_probe_failure_is_unverifiable "$session_id" "$assignee"; then
                 probe_failed=1
+                record_probe_unreadable "$session_id"
             fi
             continue
         fi
         # Any live session bead at a probed candidate preserves the work.
         if ! live_match=$(session_bead_live_match "$session_json" "$assignee" "$session_id"); then
             probe_failed=1
+            record_probe_unreadable "(unparseable)"
             continue
         fi
         if [ -n "$live_match" ]; then
@@ -479,9 +490,11 @@ session_bead_shows_live_assignment() {
             if ! session_json=$(gc bd show "$stamped_name" --json 2>/dev/null); then
                 if session_probe_failure_is_unverifiable "$stamped_name" "$assignee"; then
                     probe_failed=1
+                    record_probe_unreadable "$stamped_name"
                 fi
             elif ! live_match=$(session_bead_live_match "$session_json" "$assignee" "$stamped_name"); then
                 probe_failed=1
+                record_probe_unreadable "(unparseable)"
             elif [ -n "$live_match" ]; then
                 return 0
             fi
@@ -778,15 +791,18 @@ while IFS=$'\t' read -r bead_id assignee; do
         recheck_status=$?
         if [ "$recheck_status" != "2" ]; then
             UNVERIFIABLE=$((UNVERIFIABLE + 1))
+            order_outcome_scope_skipped "$bead_id" "bead $bead_id could not be re-read as still in_progress under $assignee"
         fi
         continue
     fi
+    SESSION_PROBE_UNREADABLE=""
     if session_bead_shows_live_assignment "$assignee" "$CURRENT_BEAD_JSON"; then
         continue
     else
         session_status=$?
         if [ "$session_status" = "2" ]; then
             UNVERIFIABLE=$((UNVERIFIABLE + 1))
+            order_outcome_scope_skipped "$bead_id" "holder $assignee is not verifiably dead; could not read ${SESSION_PROBE_UNREADABLE:-any session record for it}"
             continue
         fi
     fi
@@ -796,6 +812,7 @@ while IFS=$'\t' read -r bead_id assignee; do
         reset_status=$?
         if [ "$reset_status" != "2" ]; then
             UNVERIFIABLE=$((UNVERIFIABLE + 1))
+            order_outcome_scope_skipped "$bead_id" "conditional release of $bead_id under $assignee failed"
         fi
     fi
 done < <([ -z "$UNRECOGNIZED_ROWS" ] || printf '%s\n' "$UNRECOGNIZED_ROWS")
