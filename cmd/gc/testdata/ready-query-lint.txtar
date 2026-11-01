@@ -1,0 +1,43 @@
+# T-A8: warnings identify the owner while preserving validation success.
+cd $WORK/city
+exec gc config show --validate
+stdout 'Config valid\.'
+stderr 'warning:.*worker.*work_query'
+stderr 'gc bd.*ready'
+
+# The operator can still inspect the authored query verbatim.
+exec gc config show
+stdout 'gc bd ready --label needs-tests --json'
+
+# An unrelated validation failure retains its failing exit status.
+cp $WORK/invalid-city $WORK/city/city.toml
+! exec gc config show --validate
+stderr 'broken'
+
+-- city/.gc/.keep --
+-- city/pack.toml --
+[pack]
+name = "lint-city"
+schema = 2
+-- city/city.toml --
+[workspace]
+
+[storage.classes]
+work = "work"
+graph = "infra"
+sessions = "infra"
+messaging = "infra"
+orders = "infra"
+nudges = "infra"
+
+[storage.bindings.infra]
+provider = "sqlite-beads"
+path = ".gc/store"
+-- city/agents/worker/agent.toml --
+max_active_sessions = 2
+work_query = 'gc bd ready --label needs-tests --json'
+-- invalid-city --
+[workspace]
+
+[[rigs]]
+name = 'broken'

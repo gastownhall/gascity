@@ -7,6 +7,7 @@ go_test(
         "connected_clients_test.go",
         "docsync_test.go",
         "provider_env_docs_test.go",
+        "route_query_runbook_test.go",
         "testenv_import_test.go",
     ],
     data = glob(

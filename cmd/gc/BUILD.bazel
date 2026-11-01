@@ -1196,6 +1196,7 @@ go_test(
         "cmd_config_chain_annotations_test.go",
         "cmd_config_explain_idle_test.go",
         "cmd_config_explain_provider_test.go",
+        "cmd_config_ready_query_lint_test.go",
         "cmd_config_test.go",
         "cmd_config_validation_test.go",
         "cmd_context_test.go",
