@@ -295,6 +295,7 @@ go_test(
         "branch_resolver_test.go",
         "cache_liveness_test.go",
         "cache_read_model_tier_test.go",
+        "city_starting_test.go",
         "class_store_test.go",
         "client_extmsg_test.go",
         "client_remote_test.go",

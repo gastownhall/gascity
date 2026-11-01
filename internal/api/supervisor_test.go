@@ -299,7 +299,7 @@ func TestSupervisorGetCityServerConcurrentCallsReturnCanonicalServer(t *testing.
 	}
 }
 
-func TestSupervisorCityScopedRoute404sUntilCityRunning(t *testing.T) {
+func TestSupervisorCityScopedRoute503sWhileCityStarting(t *testing.T) {
 	resolver := &fakeCityResolver{
 		cities: map[string]*fakeState{},
 		listed: []CityInfo{{
@@ -315,11 +315,14 @@ func TestSupervisorCityScopedRoute404sUntilCityRunning(t *testing.T) {
 	rec := httptest.NewRecorder()
 	sm.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), CityNotFoundOrNotRunningDetail("bright-lights")) {
-		t.Fatalf("body missing not-running detail: %s", rec.Body.String())
+	if rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("missing Retry-After header; body: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), CityStartingDetail("bright-lights", "starting_agents")) {
+		t.Fatalf("body missing starting detail: %s", rec.Body.String())
 	}
 }
 
