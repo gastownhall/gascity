@@ -210,6 +210,30 @@ func TestGcBdSplitCreateGraphStaticRefusalAsksTheBindingNothing(t *testing.T) {
 	}
 }
 
+// TestGcBdSplitGraphPlanSchemaMatchesEveryPinnedInventory: the fields the
+// judge has vetted (bdGraph*Fields) are exactly the graph-plan schema of every
+// pinned bd build, as inventorygen dumped it from bd's own plan types. A new
+// bd build whose schema differs fails here when it is inventoried, so each
+// new or dropped field is vetted before the build is pinned.
+func TestGcBdSplitGraphPlanSchemaMatchesEveryPinnedInventory(t *testing.T) {
+	for _, inv := range bdflags.Inventories() {
+		for _, c := range []struct {
+			level      string
+			got, known []string
+		}{
+			{"plan", inv.GraphPlan.Plan, bdGraphPlanFields},
+			{"node", inv.GraphPlan.Node, bdGraphNodeFields},
+			{"edge", inv.GraphPlan.Edge, bdGraphEdgeFields},
+			{"dep", inv.GraphPlan.Dep, bdGraphDepFields},
+		} {
+			got, known := slices.Sorted(slices.Values(c.got)), slices.Sorted(slices.Values(c.known))
+			if !slices.Equal(got, known) {
+				t.Errorf("%s: bd's graph-plan %s fields are %q, the judge has vetted %q; vet each difference in judgeBdCreateGraph and update bdGraph*Fields", inv.Name, c.level, got, known)
+			}
+		}
+	}
+}
+
 // TestGcBdSplitCreateGraphUnreadablePlan: gc cannot judge a plan it cannot
 // read, so it refuses rather than forwarding it unjudged.
 func TestGcBdSplitCreateGraphUnreadablePlan(t *testing.T) {
