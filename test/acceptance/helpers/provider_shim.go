@@ -41,7 +41,23 @@ func StageIdleProviderBinary(binDir, name string) error {
 
 	dst := filepath.Join(binDir, name)
 	_ = os.Remove(dst)
-	const script = "#!/bin/sh\nexec sleep 3600\n"
+	// This is a local lifecycle double, never an inference credential proof.
+	script := "#!/bin/sh\n"
+	switch name {
+	case "claude":
+		script += `if [ "$*" = "auth status --json" ]; then
+ printf '%s\n' '{"loggedIn":true,"authMethod":"acceptance-fixture","apiProvider":"fixture"}'
+ exit 0
+fi
+`
+	case "codex":
+		script += `if [ "$*" = "login status" ]; then
+ printf '%s\n' 'Logged in using acceptance lifecycle fixture'
+ exit 0
+fi
+`
+	}
+	script += "exec sleep 3600\n"
 	return os.WriteFile(dst, []byte(script), 0o755)
 }
 

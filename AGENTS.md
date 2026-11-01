@@ -32,6 +32,7 @@ next to that code; read the matching file before changing it.
 | `internal/runtime/acp/` | `internal/runtime/acp/AGENTS.md` |
 | Session creation or lifecycle from `cmd/gc` or `internal/api` | `internal/worker/AGENTS.md` |
 | `internal/cliauth/`, `gc login`, `gc whoami` | `internal/cliauth/AGENTS.md` |
+| Runtime | `internal/providerreadiness/AGENTS.md` |
 | `scripts/`, test runners, or git hooks | `scripts/AGENTS.md` |
 | Any test | `TESTING.md` |
 | Anything under `docs/` | `.claude/skills/gascity-docs/SKILL.md` |

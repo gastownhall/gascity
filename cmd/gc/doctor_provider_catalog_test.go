@@ -63,8 +63,8 @@ base = "builtin:codex"
 		t.Fatal(err)
 	}
 
-	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, providers []string, fresh bool) (map[string]api.ReadinessItem, error) {
+	oldProbe := doctorProbeCatalogReadiness
+	doctorProbeCatalogReadiness = func(_ context.Context, providers []string, fresh bool) (map[string]api.ReadinessItem, error) {
 		if !fresh {
 			t.Fatal("readiness advisory must use fresh probes")
 		}
@@ -80,7 +80,7 @@ base = "builtin:codex"
 		out["codex"] = api.ReadinessItem{Name: "codex", DisplayName: "Codex", Status: api.ProbeStatusConfigured}
 		return out, nil
 	}
-	t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
+	t.Cleanup(func() { doctorProbeCatalogReadiness = oldProbe })
 
 	result := newProviderCatalogReadinessAdvisoryCheck(cityDir).Run(&doctor.CheckContext{CityPath: cityDir})
 	if result.Status != doctor.StatusWarning {
@@ -105,7 +105,8 @@ base = "builtin:claude"
 	}
 	oldProbe := initProbeProvidersReadiness
 	t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
-	initProbeProvidersReadiness = func(_ context.Context, names []string, fresh bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(_ context.Context, targets []initProviderTarget, fresh bool) (map[string]api.ReadinessItem, error) {
+		names := runtimeProbeNamesForTest(targets)
 		if !fresh {
 			t.Fatal("doctor must probe current authentication")
 		}

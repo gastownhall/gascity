@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strings"
@@ -19,10 +20,11 @@ import (
 	"github.com/gastownhall/gascity/internal/deps"
 	"github.com/gastownhall/gascity/internal/doltversion"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/providerreadiness"
 )
 
 var (
-	initProbeProvidersReadiness = api.ProbeProviders
+	initProbeProvidersReadiness = probeResolvedProviderReadiness
 	errInitProviderPreflight    = errors.New("provider readiness preflight failed")
 	errDoltConfigKeyMissing     = errors.New("dolt config key missing")
 )
@@ -39,6 +41,7 @@ type initProviderTarget struct {
 	RefName     string
 	ProbeName   string
 	DisplayName string
+	Runtime     providerreadiness.Target
 }
 
 func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOptions) int {
@@ -157,7 +160,9 @@ func maybePrintWizardProviderGuidance(wiz wizardConfig, stdout io.Writer) {
 	if !api.SupportsProviderReadiness(wiz.provider) {
 		return
 	}
-	items, err := initProbeProvidersReadiness(context.Background(), []string{wiz.provider}, false)
+	spec := config.BuiltinProviders()[wiz.provider]
+	target := initProviderTarget{RefName: wiz.provider, ProbeName: wiz.provider, DisplayName: spec.DisplayName, Runtime: providerreadiness.Target{Family: wiz.provider, Command: spec.Command, Args: spec.Args, Env: providerProcessPassthroughEnv()}}
+	items, err := initProbeProvidersReadiness(context.Background(), []initProviderTarget{target}, false)
 	if err != nil {
 		return
 	}
@@ -223,8 +228,7 @@ func runInitProviderPreflightForConfig(cityPath string, cfg *config.City, stdout
 		return nil
 	}
 
-	probeNames := uniqueProbeNames(targets)
-	items, err := initProbeProvidersReadiness(context.Background(), probeNames, true)
+	items, err := initProbeProvidersReadiness(context.Background(), targets, true)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: city created, but startup is blocked by provider readiness\n", commandName) //nolint:errcheck // best-effort stderr
 		fmt.Fprintf(stderr, "%s: checking provider readiness: %v\n", commandName, err)                       //nolint:errcheck // best-effort stderr
@@ -232,11 +236,21 @@ func runInitProviderPreflightForConfig(cityPath string, cfg *config.City, stdout
 		return errInitProviderPreflight
 	}
 
+	if items == nil {
+		items = make(map[string]api.ReadinessItem)
+	}
 	var blockers []initProviderTarget
 	for _, target := range targets {
 		item, ok := items[target.ProbeName]
-		if !ok || item.Status == api.ProbeStatusConfigured {
+		if ok && item.Status == api.ProbeStatusConfigured {
 			continue
+		}
+		if ok && item.Status == providerreadiness.Unverified {
+			fmt.Fprintf(stdout, "Note: %s: %s\n", target.DisplayName, item.Detail) //nolint:errcheck // best-effort guidance
+			continue
+		}
+		if !ok {
+			items[target.ProbeName] = api.ReadinessItem{Status: api.ProbeStatusProbeError, Detail: "provider returned no readiness verdict"}
 		}
 		blockers = append(blockers, target)
 	}
@@ -248,12 +262,9 @@ func runInitProviderPreflightForConfig(cityPath string, cfg *config.City, stdout
 	fmt.Fprintln(stderr, "")                                                                             //nolint:errcheck // best-effort stderr
 	fmt.Fprintln(stderr, "Referenced providers not ready:")                                              //nolint:errcheck // best-effort stderr
 	for _, blocker := range blockers {
-		item := items[blocker.ProbeName]
-		fmt.Fprintf(stderr, "- %s: %s\n", blocker.DisplayName, providerStatusSummary(item.Status)) //nolint:errcheck // best-effort stderr
-		if fix := providerStatusFixHint(blocker.ProbeName, item.Status); fix != "" {
-			fmt.Fprintf(stderr, "  Fix: %s\n", fix) //nolint:errcheck // best-effort stderr
-		}
+		fmt.Fprintf(stderr, "- %s\n", formatProviderReadinessFailure(blocker, items[blocker.ProbeName])) //nolint:errcheck // best-effort stderr
 	}
+
 	fmt.Fprintln(stderr, "")                                                                          //nolint:errcheck // best-effort stderr
 	fmt.Fprintf(stderr, "Next: cd %s && gc start\n", shellQuotePath(cityPath))                        //nolint:errcheck // best-effort stderr
 	fmt.Fprintf(stderr, "Override: gc init --skip-provider-readiness %s\n", shellQuotePath(cityPath)) //nolint:errcheck // best-effort stderr
@@ -288,75 +299,95 @@ func loadInitProviderPreflightConfig(cityPath string) (*config.City, error) {
 	return rawCfg, nil
 }
 
+// collectInitProviderTargets resolves the same provider and environment layers
+// used by worker launch. Different agent credential contexts are checked separately.
 func collectInitProviderTargets(cfg *config.City) ([]initProviderTarget, []string, error) {
-	builtins := config.BuiltinProviders()
-	providerRefs := explicitProviderRefs(cfg)
-	targets := make([]initProviderTarget, 0, len(providerRefs))
-	var warnings []string
-	seenTargets := make(map[string]struct{}, len(providerRefs))
-	seenWarnings := make(map[string]struct{}, len(providerRefs))
-	for _, ref := range providerRefs {
-		if _, err := config.ResolveProvider(&config.Agent{Provider: ref}, &cfg.Workspace, cfg.Providers, initLookPath); err != nil {
-			return nil, nil, fmt.Errorf("provider %q: %w", ref, err)
-		}
-
-		displayName := ref
-		if spec, ok := cfg.Providers[ref]; ok && strings.TrimSpace(spec.DisplayName) != "" {
-			displayName = strings.TrimSpace(spec.DisplayName)
-		} else if spec, ok := builtins[ref]; ok && strings.TrimSpace(spec.DisplayName) != "" {
-			displayName = strings.TrimSpace(spec.DisplayName)
-		}
-
-		probeName := providerReadinessProbeName(ref, cfg)
-		if probeName == "" {
-			if _, ok := seenWarnings[ref]; ok {
-				continue
-			}
-			seenWarnings[ref] = struct{}{}
-			warnings = append(warnings,
-				fmt.Sprintf("Note: %s is referenced, but Gas City cannot verify its login state automatically yet.", displayName))
-			continue
-		}
-
-		key := ref + "\x00" + probeName
-		if _, ok := seenTargets[key]; ok {
-			continue
-		}
-		seenTargets[key] = struct{}{}
-		targets = append(targets, initProviderTarget{
-			RefName:     ref,
-			ProbeName:   probeName,
-			DisplayName: displayName,
-		})
+	if cfg == nil {
+		return nil, nil, nil
 	}
-	sort.Slice(targets, func(i, j int) bool { return targets[i].DisplayName < targets[j].DisplayName })
+	var targets []initProviderTarget
+	var warnings []string
+	seenWarnings := map[string]bool{}
+	counts := map[string]int{}
+	builtins := config.BuiltinProviders()
+	add := func(agent config.Agent) error {
+		if agent.StartCommand != "" {
+			return nil
+		}
+		ref := agent.Provider
+		if ref == "" {
+			ref = cfg.Workspace.Provider
+		}
+		if ref == "" {
+			return nil
+		}
+		resolved, err := config.ResolveProvider(&agent, &cfg.Workspace, cfg.Providers, initLookPath)
+		if err != nil {
+			return fmt.Errorf("provider %q: %w", ref, err)
+		}
+		display := ref
+		if value := strings.TrimSpace(cfg.Providers[ref].DisplayName); value != "" {
+			display = value
+		} else if value := strings.TrimSpace(builtins[ref].DisplayName); value != "" {
+			display = value
+		}
+		family := resolved.BuiltinAncestor
+		if family != "claude" && family != "codex" {
+			if !seenWarnings[ref] {
+				warnings = append(warnings, fmt.Sprintf("Note: %s is referenced, but Gas City cannot verify its login state automatically yet.", display))
+				seenWarnings[ref] = true
+			}
+			return nil
+		}
+		target := initProviderTarget{RefName: ref, DisplayName: display, Runtime: providerreadiness.Target{Family: family, Command: resolved.Command, Args: resolved.Args, Env: resolvedWorkerSessionEnvWithConfig("", cfg, resolved)}}
+		for _, prior := range targets {
+			if prior.RefName == ref && reflect.DeepEqual(prior.Runtime, target.Runtime) {
+				return nil
+			}
+		}
+		counts[ref]++
+		target.ProbeName = ref
+		if counts[ref] > 1 {
+			target.ProbeName = fmt.Sprintf("%s#%d", ref, counts[ref])
+		}
+		if agent.Name != "" {
+			target.DisplayName = fmt.Sprintf("%s (%s)", display, agent.QualifiedName())
+		}
+		targets = append(targets, target)
+		return nil
+	}
+	explicitAgents := 0
+	for _, agent := range cfg.Agents {
+		// Synthesized provider templates advertise availability. Their ambient
+		// credentials are not the launch context of a configured worker.
+		if agent.Implicit {
+			continue
+		}
+		explicitAgents++
+		if err := add(agent); err != nil {
+			return nil, nil, err
+		}
+	}
+	if explicitAgents == 0 && cfg.Workspace.Provider != "" && cfg.Workspace.StartCommand == "" {
+		if err := add(config.Agent{}); err != nil {
+			return nil, nil, err
+		}
+	}
+	sort.Slice(targets, func(i, j int) bool { return targets[i].ProbeName < targets[j].ProbeName })
 	sort.Strings(warnings)
 	return targets, warnings, nil
 }
 
-func explicitProviderRefs(cfg *config.City) []string {
-	seen := make(map[string]struct{})
-	var refs []string
-	if name := strings.TrimSpace(cfg.Workspace.Provider); name != "" {
-		seen[name] = struct{}{}
-		refs = append(refs, name)
+func probeResolvedProviderReadiness(ctx context.Context, targets []initProviderTarget, _ bool) (map[string]api.ReadinessItem, error) {
+	items := make(map[string]api.ReadinessItem, len(targets))
+	for _, target := range targets {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		result := providerreadiness.Probe(ctx, target.Runtime)
+		items[target.ProbeName] = api.ReadinessItem{Name: target.ProbeName, Kind: api.ProbeKindProvider, DisplayName: target.DisplayName, Status: result.Status, Detail: result.Detail}
 	}
-	for _, agent := range cfg.Agents {
-		if agent.StartCommand != "" {
-			continue
-		}
-		name := strings.TrimSpace(agent.Provider)
-		if name == "" {
-			continue
-		}
-		if _, ok := seen[name]; ok {
-			continue
-		}
-		seen[name] = struct{}{}
-		refs = append(refs, name)
-	}
-	sort.Strings(refs)
-	return refs
+	return items, nil
 }
 
 func seedDeferredManagedBeadsBeforeProviderReadiness(cityPath string, cfg *config.City) error {
@@ -391,28 +422,6 @@ func seedDeferredManagedBeadsBeforeProviderReadiness(cityPath string, cfg *confi
 	return nil
 }
 
-func providerReadinessProbeName(ref string, cfg *config.City) string {
-	if api.SupportsProviderReadiness(ref) {
-		return ref
-	}
-	spec, ok := cfg.Providers[ref]
-	if !ok {
-		return ""
-	}
-	candidate := strings.TrimSpace(spec.PathCheck)
-	if candidate == "" {
-		command := strings.TrimSpace(spec.Command)
-		if command != "" && !strings.ContainsAny(command, " \t") {
-			candidate = command
-		}
-	}
-	candidate = filepath.Base(candidate)
-	if api.SupportsProviderReadiness(candidate) {
-		return candidate
-	}
-	return ""
-}
-
 func providerStatusSummary(status string) string {
 	switch status {
 	case api.ProbeStatusNeedsAuth:
@@ -428,38 +437,42 @@ func providerStatusSummary(status string) string {
 	}
 }
 
-func providerStatusFixHint(probeName, status string) string {
+func providerStatusFixHint(probeName, status, command string) string {
+	if command == "" {
+		command = probeName
+	}
+	command = shellQuotePath(command)
 	switch probeName {
 	case "claude":
 		switch status {
 		case api.ProbeStatusNeedsAuth:
-			return "run `claude auth login`, or run `claude setup-token` and export `CLAUDE_CODE_OAUTH_TOKEN` for headless environments"
+			return fmt.Sprintf("run `%s auth login`, or run `%s setup-token` and export `CLAUDE_CODE_OAUTH_TOKEN` for headless environments", command, command)
 		case api.ProbeStatusNotInstalled:
 			return "install Claude Code"
 		case api.ProbeStatusInvalidConfiguration:
-			return "use first-party Claude Code login (`claude.ai` or `oauth_token` / `firstParty`)"
+			return "check the configured Claude credentials or cloud-provider setup; preserve the supported login mode"
 		case api.ProbeStatusProbeError:
-			return "run `claude auth status --json` and fix the local Claude setup"
+			return fmt.Sprintf("run `%s auth status --json` and fix the local Claude setup", command)
 		}
 	case "codex":
 		switch status {
 		case api.ProbeStatusNeedsAuth:
-			return "sign in to Codex CLI with ChatGPT auth"
+			return fmt.Sprintf("run `%s login` or configure supported API-key login using this runtime's CODEX_HOME", command)
 		case api.ProbeStatusNotInstalled:
 			return "install Codex CLI"
 		case api.ProbeStatusInvalidConfiguration:
-			return "switch Codex CLI to ChatGPT auth; API-key mode is not supported here"
+			return "check the configured Codex CLI credentials and provider configuration"
 		case api.ProbeStatusProbeError:
-			return "check ~/.codex/auth.json and the local Codex installation"
+			return fmt.Sprintf("run `%s login status` using this runtime's CODEX_HOME", command)
 		}
 	case "gemini":
 		switch status {
 		case api.ProbeStatusNeedsAuth:
-			return "sign in to Gemini CLI with personal OAuth"
+			return "check the configured Gemini CLI credentials"
 		case api.ProbeStatusNotInstalled:
 			return "install Gemini CLI"
 		case api.ProbeStatusInvalidConfiguration:
-			return "use Gemini CLI personal OAuth; API-key and ADC modes are not supported here"
+			return "check the configured Gemini CLI credentials or cloud-provider setup"
 		case api.ProbeStatusProbeError:
 			return "check ~/.gemini/settings.json and oauth_creds.json"
 		}
@@ -474,20 +487,6 @@ func providerStatusFixHint(probeName, status string) string {
 		}
 	}
 	return ""
-}
-
-func uniqueProbeNames(targets []initProviderTarget) []string {
-	seen := make(map[string]struct{}, len(targets))
-	var names []string
-	for _, target := range targets {
-		if _, ok := seen[target.ProbeName]; ok {
-			continue
-		}
-		seen[target.ProbeName] = struct{}{}
-		names = append(names, target.ProbeName)
-	}
-	sort.Strings(names)
-	return names
 }
 
 func shellQuotePath(path string) string {
@@ -1002,4 +1001,34 @@ func parseDepVersionLine(line string) string {
 		}
 	}
 	return ""
+}
+
+// builtinInitProviderTargets is for pre-scaffold selection. Expanded city checks
+// resolve their configured providers instead of using these builtin defaults.
+func builtinInitProviderTargets(names []string) []initProviderTarget {
+	builtins := config.BuiltinProviders()
+	targets := make([]initProviderTarget, 0, len(names))
+	for _, name := range names {
+		spec := builtins[name]
+		display := spec.DisplayName
+		if display == "" {
+			display = name
+		}
+		targets = append(targets, initProviderTarget{RefName: name, ProbeName: name, DisplayName: display, Runtime: providerreadiness.Target{Family: name, Command: spec.Command, Args: spec.Args, Env: resolvedWorkerSessionEnvWithConfig("", nil, &config.ResolvedProvider{Env: spec.Env})}})
+	}
+	return targets
+}
+
+// formatProviderReadinessFailure is shared by fresh and resumed setup. It names
+// the exact executable but never prints the credential environment or native output.
+func formatProviderReadinessFailure(target initProviderTarget, item api.ReadinessItem) string {
+	text := fmt.Sprintf("%s [%s]: %s", target.DisplayName, target.RefName, providerStatusSummary(item.Status))
+	if item.Detail != "" {
+		text += "\n  " + item.Detail
+	}
+	text += fmt.Sprintf("\n  Runtime command: %q", target.Runtime.Command)
+	if hint := providerStatusFixHint(target.Runtime.Family, item.Status, target.Runtime.Command); hint != "" {
+		text += "\n  Fix (using this runtime's configured environment): " + hint
+	}
+	return text
 }

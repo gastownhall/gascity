@@ -85,6 +85,15 @@ func (c *CheckContext) Canceled() bool {
 	}
 }
 
+// Context returns a subprocess context tied to this check's timeout. The caller
+// must call cancel even when the runner supplied no timeout channel.
+func (c *CheckContext) Context() (context.Context, context.CancelFunc) {
+	if c == nil {
+		return contextFromDone(nil)
+	}
+	return contextFromDone(c.Done)
+}
+
 // contextFromDone derives a context.Context that is canceled when done
 // closes, so a check that shells out can tie its subprocess's lifetime (via
 // exec.CommandContext) to the doctor runner's abandon signal instead of
@@ -99,6 +108,12 @@ func contextFromDone(done <-chan struct{}) (context.Context, context.CancelFunc)
 	ctx, cancel := context.WithCancel(context.Background())
 	if done == nil {
 		return ctx, cancel
+	}
+	select {
+	case <-done:
+		cancel()
+		return ctx, cancel
+	default:
 	}
 	go func() {
 		select {

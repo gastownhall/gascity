@@ -124,7 +124,7 @@ base = "builtin:claude"
 
 func TestMaybePrintWizardProviderGuidanceNeedsAuth(t *testing.T) {
 	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, _ []string, fresh bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(_ context.Context, _ []initProviderTarget, fresh bool) (map[string]api.ReadinessItem, error) {
 		if fresh {
 			t.Fatal("wizard guidance should use cached probe mode")
 		}
@@ -151,9 +151,9 @@ func TestMaybePrintWizardProviderGuidanceNeedsAuth(t *testing.T) {
 	}
 }
 
-func TestProviderStatusFixHintIncludesClaudeOAuthToken(t *testing.T) {
-	got := providerStatusFixHint("claude", api.ProbeStatusInvalidConfiguration)
-	for _, want := range []string{"`claude.ai`", "`oauth_token`", "`firstParty`"} {
+func TestProviderStatusFixHintPreservesSupportedClaudeModes(t *testing.T) {
+	got := providerStatusFixHint("claude", api.ProbeStatusInvalidConfiguration, "claude")
+	for _, want := range []string{"configured Claude credentials", "cloud-provider setup", "supported login mode"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("providerStatusFixHint = %q, want %s", got, want)
 		}
@@ -161,7 +161,7 @@ func TestProviderStatusFixHintIncludesClaudeOAuthToken(t *testing.T) {
 }
 
 func TestProviderStatusFixHintIncludesClaudeSetupTokenForNeedsAuth(t *testing.T) {
-	got := providerStatusFixHint("claude", api.ProbeStatusNeedsAuth)
+	got := providerStatusFixHint("claude", api.ProbeStatusNeedsAuth, "claude")
 	for _, want := range []string{"`claude auth login`", "`claude setup-token`", "`CLAUDE_CODE_OAUTH_TOKEN`"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("providerStatusFixHint = %q, want %s", got, want)
@@ -186,7 +186,7 @@ func TestFinalizeInitBlocksProviderReadinessBeforeSupervisorRegistration(t *test
 	}
 
 	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, _ []string, fresh bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(_ context.Context, _ []initProviderTarget, fresh bool) (map[string]api.ReadinessItem, error) {
 		if !fresh {
 			t.Fatal("finalizeInit should force a fresh readiness probe")
 		}
@@ -263,7 +263,8 @@ func TestFinalizeInitWarnsForUnprobeableCustomProviderAndContinues(t *testing.T)
 	}
 
 	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, providers []string, _ bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(_ context.Context, targets []initProviderTarget, _ bool) (map[string]api.ReadinessItem, error) {
+		providers := runtimeProbeNamesForTest(targets)
 		t.Fatalf("unexpected readiness probe for unprobeable provider: %v", providers)
 		return nil, nil
 	}
@@ -320,7 +321,8 @@ func TestFinalizeInitFetchesRemotePacksBeforeProviderReadiness(t *testing.T) {
 
 	probeCalls := 0
 	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, providers []string, fresh bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(_ context.Context, targets []initProviderTarget, fresh bool) (map[string]api.ReadinessItem, error) {
+		providers := runtimeProbeNamesForTest(targets)
 		probeCalls++
 		if !fresh {
 			t.Fatal("finalizeInit should force a fresh readiness probe")
@@ -411,7 +413,8 @@ name = "bright-lights"
 
 	probeCalls := 0
 	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, providers []string, fresh bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(_ context.Context, targets []initProviderTarget, fresh bool) (map[string]api.ReadinessItem, error) {
+		providers := runtimeProbeNamesForTest(targets)
 		probeCalls++
 		if !fresh {
 			t.Fatal("finalizeInit should force a fresh readiness probe")
@@ -678,7 +681,7 @@ base = "builtin:claude"
 			}
 			probeCalled := false
 			oldProbe := initProbeProvidersReadiness
-			initProbeProvidersReadiness = func(context.Context, []string, bool) (map[string]api.ReadinessItem, error) {
+			initProbeProvidersReadiness = func(context.Context, []initProviderTarget, bool) (map[string]api.ReadinessItem, error) {
 				probeCalled = true
 				return nil, errors.New("provider unavailable")
 			}
@@ -843,7 +846,7 @@ func TestFinalizeInitWithoutProgressSkipsStepCounter(t *testing.T) {
 	}
 
 	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, _ []string, fresh bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(_ context.Context, _ []initProviderTarget, fresh bool) (map[string]api.ReadinessItem, error) {
 		if !fresh {
 			t.Fatal("finalizeInit should force a fresh readiness probe")
 		}
@@ -903,7 +906,8 @@ func TestCmdInitResumesFinalizeForExistingCity(t *testing.T) {
 	}
 
 	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, providers []string, fresh bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(_ context.Context, targets []initProviderTarget, fresh bool) (map[string]api.ReadinessItem, error) {
+		providers := runtimeProbeNamesForTest(targets)
 		if !fresh {
 			t.Fatal("cmdInit resume should force a fresh readiness probe")
 		}
@@ -991,7 +995,7 @@ func TestCmdInitSkipProviderReadinessBypassesBlockedProvider(t *testing.T) {
 
 	probeCalled := false
 	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, _ []string, _ bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(_ context.Context, _ []initProviderTarget, _ bool) (map[string]api.ReadinessItem, error) {
 		probeCalled = true
 		return map[string]api.ReadinessItem{
 			"claude": {
@@ -1709,7 +1713,7 @@ func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlock(t *testing
 	}
 
 	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, _ []string, fresh bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(_ context.Context, _ []initProviderTarget, fresh bool) (map[string]api.ReadinessItem, error) {
 		if !fresh {
 			t.Fatal("finalizeInit should force a fresh readiness probe")
 		}
@@ -1779,7 +1783,7 @@ func TestFinalizeInitBlocksManagedBdWhenDoltIdentityMissing(t *testing.T) {
 	}
 
 	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(context.Context, []string, bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(context.Context, []initProviderTarget, bool) (map[string]api.ReadinessItem, error) {
 		t.Fatal("provider readiness should not run before Dolt identity is configured")
 		return nil, nil
 	}
@@ -2241,7 +2245,7 @@ func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlockWithoutSkip
 	}
 
 	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, _ []string, fresh bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(_ context.Context, _ []initProviderTarget, fresh bool) (map[string]api.ReadinessItem, error) {
 		if !fresh {
 			t.Fatal("finalizeInit should force a fresh readiness probe")
 		}
@@ -2319,7 +2323,7 @@ func TestFinalizeInitDoesNotRunBdProviderBeforeProviderReadinessBlock(t *testing
 	}
 
 	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, _ []string, fresh bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(_ context.Context, _ []initProviderTarget, fresh bool) (map[string]api.ReadinessItem, error) {
 		if !fresh {
 			t.Fatal("finalizeInit should force a fresh readiness probe")
 		}

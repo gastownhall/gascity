@@ -1,0 +1,13 @@
+# Provider runtime readiness
+
+Inspect the provider's resolved family, executable and launch environment.
+Provider names are user aliases; infer protocols from explicit inheritance.
+Use only local status commands and bounded, cancellable subprocesses. No probe
+starts a model conversation or changes credentials. Return a missing credential
+verdict only when the native CLI says so. Unknown protocols or wrapper/config
+arguments remain explicitly unverified, with a real-task verification hint.
+
+Local configuration is distinct from successful remote inference. Accept the
+native CLI's supported login modes equally; subscription-specific onboarding
+policy belongs to its own projection. Never return or log native credential
+output, environment values or tokens in diagnostic details.

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/providerreadiness"
 )
 
 type providerCatalogDoctorCheck struct {
@@ -68,6 +68,8 @@ func (c *providerCatalogDoctorCheck) Fix(_ *doctor.CheckContext) error {
 
 func (c *providerCatalogDoctorCheck) WarmupEligible() bool { return false }
 
+var doctorProbeCatalogReadiness = api.ProbeProviders
+
 type providerCatalogReadinessAdvisoryCheck struct {
 	cityPath string
 }
@@ -80,40 +82,50 @@ func (c *providerCatalogReadinessAdvisoryCheck) Name() string {
 	return "provider-catalog-local-readiness"
 }
 
-func (c *providerCatalogReadinessAdvisoryCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+func (c *providerCatalogReadinessAdvisoryCheck) Run(checkCtx *doctor.CheckContext) *doctor.CheckResult {
 	r := &doctor.CheckResult{Name: c.Name()}
+	ctx, cancel := checkCtx.Context()
+	defer cancel()
+	if ctx.Err() != nil {
+		r.Status = doctor.StatusError
+		r.Message = "provider readiness check canceled"
+		return r
+	}
 	cfg, err := loadCityConfigAllowMissingProviderReferences(c.cityPath)
 	if err != nil {
 		r.Status = doctor.StatusOK
 		r.Message = "local provider advisory skipped until expanded config loads"
 		return r
 	}
-	names := api.ProviderReadinessNames()
-	items, err := initProbeProvidersReadiness(context.Background(), names, true)
+	targets, notes, err := collectInitProviderTargets(cfg)
 	if err != nil {
-		r.Status = doctor.StatusWarning
-		r.Message = fmt.Sprintf("could not probe local provider readiness: %v", err)
-		r.Severity = doctor.SeverityAdvisory
+		r.Status = doctor.StatusError
+		r.Message = fmt.Sprintf("could not resolve selected provider: %v", err)
+		r.FixHint = "fix the selected provider configuration and rerun gc doctor"
 		return r
 	}
-	// Catalog discovery is advisory; failure of a provider this city actually
-	// references is not. Reuse onboarding probe identity without starting a
-	// billable model turn, and keep unselected local CLIs out of this gate.
+	items, err := initProbeProvidersReadiness(ctx, targets, true)
+	if err != nil {
+		r.Status = doctor.StatusError
+		r.Message = fmt.Sprintf("could not verify selected provider readiness: %v", err)
+		r.FixHint = "restore the configured provider and rerun gc doctor"
+		return r
+	}
 	var unavailable []string
-	for _, ref := range explicitProviderRefs(cfg) {
-		probeName := providerReadinessProbeName(ref, cfg)
-		if probeName == "" {
-			continue
-		}
-		item, ok := items[probeName]
+	for _, target := range targets {
+		item, ok := items[target.ProbeName]
 		if ok && item.Status == api.ProbeStatusConfigured {
 			continue
 		}
-		status := item.Status
-		if !ok {
-			status = api.ProbeStatusProbeError
+		if ok && item.Status == providerreadiness.Unverified {
+			notes = append(notes, fmt.Sprintf("%s: %s", target.DisplayName, item.Detail))
+			continue
 		}
-		detail := fmt.Sprintf("%s %s", ref, providerStatusSummary(status))
+		if !ok {
+			item.Status = api.ProbeStatusProbeError
+			item.Detail = "provider returned no readiness verdict"
+		}
+		detail := fmt.Sprintf("%s [%s] %s (command %q)", target.DisplayName, target.RefName, providerStatusSummary(item.Status), target.Runtime.Command)
 		if item.Detail != "" {
 			detail += ": " + item.Detail
 		}
@@ -124,34 +136,41 @@ func (c *providerCatalogReadinessAdvisoryCheck) Run(_ *doctor.CheckContext) *doc
 		r.Severity = doctor.SeverityBlocking
 		r.Message = fmt.Sprintf("%d selected provider(s) not ready", len(unavailable))
 		r.Details = unavailable
-		r.FixHint = "restore the listed provider executable, configuration or login, then rerun gc doctor"
+		r.FixHint = "restore the listed configured provider executable, configuration or login, then rerun gc doctor"
 		return r
 	}
-	var missing []string
-	for _, name := range names {
-		item, ok := items[name]
-		if !ok || item.Status != api.ProbeStatusConfigured {
-			continue
+	// Discovering other local providers is advisory. Its onboarding policy is
+	// not the readiness contract of an explicitly configured city runtime.
+	names := api.ProviderReadinessNames()
+	catalog, catalogErr := doctorProbeCatalogReadiness(ctx, names, true)
+	if catalogErr != nil {
+		notes = append(notes, fmt.Sprintf("could not discover other local providers: %v", catalogErr))
+	} else {
+		for _, name := range names {
+			item, ok := catalog[name]
+			if !ok || item.Status != api.ProbeStatusConfigured {
+				continue
+			}
+			if _, explicit := cfg.Providers[name]; explicit {
+				continue
+			}
+			display := strings.TrimSpace(item.DisplayName)
+			if display == "" {
+				display = name
+			}
+			notes = append(notes, fmt.Sprintf("%s is configured locally but not listed in [providers.%s]", display, name))
 		}
-		if _, explicit := cfg.Providers[name]; explicit {
-			continue
-		}
-		displayName := strings.TrimSpace(item.DisplayName)
-		if displayName == "" {
-			displayName = name
-		}
-		missing = append(missing, fmt.Sprintf("%s is configured locally but not listed in [providers.%s]", displayName, name))
 	}
-	if len(missing) == 0 {
-		r.Status = doctor.StatusOK
-		r.Message = "configured local providers are explicit"
+	if len(notes) > 0 {
+		r.Status = doctor.StatusWarning
+		r.Severity = doctor.SeverityAdvisory
+		r.Message = "local provider configuration needs review"
+		r.Details = notes
+		r.FixHint = "verify unprobed providers with a real task; add aliases for other local CLIs this city should use"
 		return r
 	}
-	r.Status = doctor.StatusWarning
-	r.Severity = doctor.SeverityAdvisory
-	r.Message = fmt.Sprintf("%d configured local provider(s) not explicit", len(missing))
-	r.Details = missing
-	r.FixHint = "add provider aliases for local CLIs you want this city to use"
+	r.Status = doctor.StatusOK
+	r.Message = "selected providers are locally configured; other configured local providers are explicit"
 	return r
 }
 

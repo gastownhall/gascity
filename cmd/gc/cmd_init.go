@@ -238,7 +238,7 @@ type wizardProviderChoice struct {
 
 func configuredWizardProviderChoices(ctx context.Context) ([]wizardProviderChoice, error) {
 	names := api.ProviderReadinessNames()
-	items, err := initProbeProvidersReadiness(ctx, names, true)
+	items, err := wizardProbeProviderChoices(ctx, names, true)
 	if err != nil {
 		return nil, fmt.Errorf("checking provider readiness: %w", err)
 	}
@@ -788,22 +788,26 @@ func preflightInitSelectedProviders(wiz wizardConfig, skip bool) error {
 	if skip || len(providers) == 0 {
 		return nil
 	}
-	items, err := initProbeProvidersReadiness(context.Background(), providers, true)
+	targets := builtinInitProviderTargets(providers)
+	items, err := initProbeProvidersReadiness(context.Background(), targets, true)
 	if err != nil {
 		return fmt.Errorf("checking provider readiness: %w", err)
 	}
 	var blockers []string
-	for _, provider := range providers {
-		item, ok := items[provider]
-		if !ok || item.Status == api.ProbeStatusConfigured {
+	for _, target := range targets {
+		item, ok := items[target.ProbeName]
+		if ok && (item.Status == api.ProbeStatusConfigured || item.Status == "unverified") {
 			continue
 		}
-		blockers = append(blockers, fmt.Sprintf("%s: %s", item.DisplayName, providerStatusSummary(item.Status)))
+		if !ok {
+			item = api.ReadinessItem{DisplayName: target.DisplayName, Status: api.ProbeStatusProbeError}
+		}
+		blockers = append(blockers, formatProviderReadinessFailure(target, item))
 	}
 	if len(blockers) == 0 {
 		return nil
 	}
-	return fmt.Errorf("provider readiness preflight failed: %s", strings.Join(blockers, "; "))
+	return fmt.Errorf("provider readiness preflight failed: %s", strings.Join(blockers, "\n"))
 }
 
 func normalizeBootstrapProfile(profile string) (string, error) {
@@ -2370,4 +2374,35 @@ func restoreLegacyWorkspaceIdentity(fs fsys.FS, cityTomlPath string, cfg *config
 		return fmt.Errorf("write %q: %w", cityTomlPath, err)
 	}
 	return nil
+}
+
+// Wizard discovery retains provider-specific discovery for CLIs without a native
+// status protocol. Claude and Codex discovery uses the same runtime protocol as
+// selected-provider preflight, so API-key users are selectable too.
+var wizardProbeProviderChoices = func(ctx context.Context, names []string, fresh bool) (map[string]api.ReadinessItem, error) {
+	var native, other []string
+	for _, name := range names {
+		if name == "claude" || name == "codex" {
+			native = append(native, name)
+		} else {
+			other = append(other, name)
+		}
+	}
+	items, err := initProbeProvidersReadiness(ctx, builtinInitProviderTargets(native), fresh)
+	if err != nil {
+		return nil, err
+	}
+	if items == nil {
+		items = make(map[string]api.ReadinessItem)
+	}
+	if len(other) > 0 {
+		discovered, err := api.ProbeProviders(ctx, other, fresh)
+		if err != nil {
+			return nil, err
+		}
+		for name, item := range discovered {
+			items[name] = item
+		}
+	}
+	return items, nil
 }
