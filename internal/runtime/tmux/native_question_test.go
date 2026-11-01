@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -90,11 +91,12 @@ func TestNativeQuestionRefusesUnboundOrStaleAnswers(t *testing.T) {
 
 type nativeAnswerExecutor struct {
 	paneExecutor
-	literal        []string
-	keys           []string
-	paste          string
-	codex          bool
-	advanceOnPaste bool
+	literal            []string
+	keys               []string
+	paste              string
+	codex              bool
+	advanceOnPaste     bool
+	claudeDigitsSubmit bool
 }
 
 func (e *nativeAnswerExecutor) execute(args []string) (string, error) {
@@ -142,6 +144,36 @@ func (e *nativeAnswerExecutor) execute(args []string) (string, error) {
 				e.pane = strings.ReplaceAll(e.pane, "Type something.", "Fox")
 			}
 		}
+		if !e.codex && slices.Contains(args, "-l") && text == "2" && e.claudeDigitsSubmit {
+			e.pane = "● Answer received.\n❯ "
+		}
+		if !e.codex && (text == "Down" || text == "Up") {
+			e.keys = append(e.keys, text)
+			question := parseAskUserQuestion(strings.Split(e.pane, "\n"))
+			if question != nil {
+				index := slices.Index(question.Numbers, question.FocusedNumber)
+				if text == "Down" {
+					index++
+				} else {
+					index--
+				}
+				if index >= 0 && index < len(question.Numbers) {
+					rows := strings.Split(e.pane, "\n")
+					for i, line := range rows {
+						m := askUserQuestionOptionRe.FindStringSubmatch(strings.TrimSpace(line))
+						if m == nil {
+							continue
+						}
+						marker := "  "
+						if m[2] == fmt.Sprint(question.Numbers[index]) {
+							marker = "❯ "
+						}
+						rows[i] = marker + m[2] + ". " + m[3]
+					}
+					e.pane = strings.Join(rows, "\n")
+				}
+			}
+		}
 		if text == "Enter" {
 			e.keys = append(e.keys, text)
 			e.pane = "● Answer received.\n❯ "
@@ -166,7 +198,7 @@ func TestNativeQuestionChoiceUsesItsOwnMenu(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(ex.literal, []string{"2"}) || !slices.Equal(ex.keys, []string{"Enter"}) {
+	if len(ex.literal) != 0 || !slices.Equal(ex.keys, []string{"Down", "Enter"}) {
 		t.Fatalf("literal=%q keys=%q; must select Owl once without typing into the next prompt", ex.literal, ex.keys)
 	}
 }
@@ -202,7 +234,7 @@ func TestNativeQuestionFreeTextUsesEditor(t *testing.T) {
 	if err := tm.Respond("q", runtime.InteractionResponse{RequestID: p.RequestID, Action: "answer", Text: "Fox"}); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(ex.literal, []string{"3", "Fox"}) || !slices.Equal(ex.keys, []string{"Enter"}) {
+	if !slices.Equal(ex.literal, []string{"Fox"}) || !slices.Equal(ex.keys, []string{"Down", "Down", "Enter"}) {
 		t.Fatalf("literal=%q keys=%q", ex.literal, ex.keys)
 	}
 }
@@ -402,7 +434,7 @@ func TestNativeQuestionChangedWhilePastingIsNotSubmitted(t *testing.T) {
 	if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: "answer", Text: "Fox"}); !errors.Is(err, runtime.ErrInteractionGone) {
 		t.Fatalf("changed question must refuse submit: %v", err)
 	}
-	if len(ex.keys) != 0 {
+	if slices.Contains(ex.keys, "Enter") {
 		t.Fatalf("submitted Enter after question disappeared: %q", ex.keys)
 	}
 }
@@ -423,7 +455,7 @@ func TestNativeQuestionAnswerKeysStayUnderIncarnationFence(t *testing.T) {
 				return nativeClaudeQuestion
 			}
 			m.onEvent = func(_ *fenceModel, event string) {
-				focused = focused || event == "text:2"
+				focused = focused || event == "key:Down"
 				answered = answered || event == "key:Enter"
 			}
 			if respawn {
@@ -446,10 +478,10 @@ func TestNativeQuestionAnswerKeysStayUnderIncarnationFence(t *testing.T) {
 			}
 			if respawn {
 				var miss *runtime.FenceMismatchError
-				if !errors.As(err, &miss) || !slices.Equal(events, []string{"text:2"}) {
+				if !errors.As(err, &miss) || !slices.Equal(events, []string{"key:Down"}) {
 					t.Fatalf("respawn error=%v events=%q", err, events)
 				}
-			} else if err != nil || !slices.Equal(events, []string{"text:2", "key:Enter"}) {
+			} else if err != nil || !slices.Equal(events, []string{"key:Down", "key:Enter"}) {
 				t.Fatalf("answer error=%v events=%q", err, events)
 			}
 		})
@@ -569,4 +601,22 @@ func TestNativeClaudeNewPromptRetiresUnfinishedTranscriptInvocation(t *testing.T
 		t.Fatalf("old prompt revived an unfinished invocation: %+v,%v", pending, err)
 	}
 	requireNoKeys(t, ex.calls, false)
+}
+
+// Claude2.1.308 accepts authored choices immediately on a numeric shortcut.
+// Focus navigation must not report a completed native answer as stale.
+func TestNativeClaudeChoiceDoesNotUseAutoSubmittingDigit(t *testing.T) {
+	ex := &nativeAnswerExecutor{paneExecutor: paneExecutor{pane: nativeClaudeQuestion, inMode: "0"}, claudeDigitsSubmit: true}
+	tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+	installNativeClaudeRecord(t, tm, nativeClaudeQuestion)
+	pending, err := tm.Pending("q")
+	if err != nil || pending == nil {
+		t.Fatalf("pending=%+v,%v", pending, err)
+	}
+	if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: "answer", Text: "Owl"}); err != nil {
+		t.Fatalf("authored answer was delivered but reported stale: %v", err)
+	}
+	if slices.Contains(ex.literal, "2") || !slices.Equal(ex.keys, []string{"Down", "Enter"}) {
+		t.Fatalf("must focus and confirm before one submit: literal=%q keys=%q", ex.literal, ex.keys)
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -406,12 +407,17 @@ func (t *Tmux) respondQuestion(ctx context.Context, target string, q *parsedQues
 		return fmt.Errorf("%w: answer cannot be selected with one key", runtime.ErrInteractionActionUnavailable)
 	}
 	t.cancelCopyModeIfParked(inputCtx(ctx), target)
-	if _, err := t.runCtx(inputCtx(ctx), "send-keys", "-t", target, "-l", strconv.Itoa(number)); err != nil {
-		return fmt.Errorf("sending question answer: %w", err)
+	if q.Provider == "codex" {
+		if _, err := t.runCtx(inputCtx(ctx), "send-keys", "-t", target, "-l", strconv.Itoa(number)); err != nil {
+			return fmt.Errorf("sending question answer: %w", err)
+		}
+	} else if err := t.focusClaudeQuestionRow(ctx, target, q, number); err != nil {
+		return err
 	}
 	if q.Provider != "codex" || freeText {
-		// Claude digits focus, while Codex digits submit predefined choices.
-		// Confirm the selected row before the one Enter that can answer anything.
+		// Both CLIs can submit authored choices on a digit. Claude uses
+		// navigation so the final native identity/focus check precedes its
+		// only submit; Codex's text-editor shortcut does not submit.
 		if err := t.waitQuestionFocus(ctx, target, q, number); err != nil {
 			return err
 		}
@@ -446,6 +452,30 @@ func (t *Tmux) respondQuestion(ctx context.Context, target string, q *parsedQues
 		}
 	}
 	return fmt.Errorf("question did not clear within %s of the answer", respondVerifyTimeout)
+}
+
+// focusClaudeQuestionRow navigates without answering. Numeric shortcuts in
+// Claude2.1.308 submit authored choices immediately, before a focus check can
+// prove which invocation received them.
+func (t *Tmux) focusClaudeQuestionRow(ctx context.Context, target string, q *parsedQuestion, number int) error {
+	current, wanted := slices.Index(q.Numbers, q.FocusedNumber), slices.Index(q.Numbers, number)
+	if current < 0 || wanted < 0 {
+		return fmt.Errorf("%w: native question focus is unknown", runtime.ErrInteractionActionUnavailable)
+	}
+	for current != wanted {
+		key, step := "Down", 1
+		if current > wanted {
+			key, step = "Up", -1
+		}
+		if _, err := t.runCtx(inputCtx(ctx), "send-keys", "-t", target, key); err != nil {
+			return fmt.Errorf("focusing native question answer: %w", err)
+		}
+		current += step
+		if err := t.waitQuestionFocus(ctx, target, q, q.Numbers[current]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (t *Tmux) waitQuestionFocus(ctx context.Context, target string, q *parsedQuestion, number int) error {
