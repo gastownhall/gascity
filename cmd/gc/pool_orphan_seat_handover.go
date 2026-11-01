@@ -55,8 +55,8 @@ var seatRowReadErrors = struct {
 type seatHandover struct {
 	cfg           *config.City
 	cityPath      string
-	leading       beads.Store
-	sessionStore  beads.Store
+	claimRefs     func() []string // the city's claim refs, read when the seat index is built
+	sessionStore  beads.SessionStore
 	openSessions  []session.Info
 	storeRefAware bool
 	seats         map[string][]seatSuccessor // by seat identity, built on first use
@@ -84,11 +84,11 @@ type seatPredecessor struct {
 	unreadable string
 }
 
-func newSeatHandover(cityPath string, cfg *config.City, leading beads.Store, sessionStore beads.Store, openSessionInfos []session.Info, storeRefAware bool) *seatHandover {
+func newSeatHandover(cityPath string, cfg *config.City, claimRefs func() []string, sessionStore beads.SessionStore, openSessionInfos []session.Info, storeRefAware bool) *seatHandover {
 	return &seatHandover{
 		cfg:           cfg,
 		cityPath:      cityPath,
-		leading:       leading,
+		claimRefs:     claimRefs,
 		sessionStore:  sessionStore,
 		openSessions:  openSessionInfos,
 		storeRefAware: storeRefAware,
@@ -161,7 +161,7 @@ func (h *seatHandover) predecessor(assignee string) seatPredecessor {
 }
 
 func (h *seatHandover) lookupPredecessor(assignee string) seatPredecessor {
-	if h.sessionStore == nil || assignee == "" {
+	if h.sessionStore == (beads.SessionStore{}) || assignee == "" {
 		return seatPredecessor{}
 	}
 	sb, err := h.sessionStore.Get(assignee)
@@ -267,7 +267,7 @@ func (h *seatHandover) seatIndex() map[string][]seatSuccessor {
 	h.seats = make(map[string][]seatSuccessor)
 	var claimRefs []string
 	if h.storeRefAware {
-		claimRefs = assignedWorkClaimRefs(h.cityPath, h.cfg, h.leading)
+		claimRefs = h.claimRefs()
 	}
 	for _, info := range h.openSessions {
 		if info.Closed || info.State == session.StateArchived || info.State == session.StateDraining || session.LifecycleIdentityReleasedInfo(info) {

@@ -726,7 +726,7 @@ func TestSeatHandOverCountsOnlyALandedWrite(t *testing.T) {
 	if err := store.Update(snapshot.ID, beads.UpdateOpts{Assignee: stringPtr(newer)}); err != nil {
 		t.Fatalf("land the newer claim: %v", err)
 	}
-	seats := newSeatHandover("", seatHandoverCity(), store, store, sessionInfosFromBeads([]beads.Bead{successor}), false)
+	seats := newSeatHandover("", seatHandoverCity(), nil, beads.SessionStore{Store: store}, sessionInfosFromBeads([]beads.Bead{successor}), false)
 
 	if why := seats.handOver(seatWorkHit{store: store, bead: snapshot}, ""); why != keptMoved {
 		t.Fatalf("hand-over of a moved claim kept it for %q, want %q", why, keptMoved)
@@ -960,7 +960,7 @@ func TestSeatHandOverKeepsClaimWhenPredecessorCurrentClaimCannotBeCleared(t *tes
 	}
 	successor := createSeatSessionRow(t, store, "successor", seatRowMeta("awake", nil))
 	unwritable := currentClaimWriteErrorStore{Store: store, failID: pred.ID}
-	seats := newSeatHandover("", cfg, store, unwritable, sessionInfosFromBeads([]beads.Bead{successor}), false)
+	seats := newSeatHandover("", cfg, nil, beads.SessionStore{Store: unwritable}, sessionInfosFromBeads([]beads.Bead{successor}), false)
 
 	if why := seats.handOver(seatWorkHit{store: store, bead: work}, ""); !strings.Contains(why, "clearing current claim on closed session "+pred.ID) {
 		t.Fatalf("hand-over kept the claim for %q, want the failed clear of %s", why, pred.ID)

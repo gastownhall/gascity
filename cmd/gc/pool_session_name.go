@@ -292,7 +292,7 @@ func releaseOrphanedPoolAssignments(
 	var released []releasedPoolAssignment
 	claimGate := newForeignClaimGate(cfg, sessionStore)
 	defer claimGate.log()
-	seats := newSeatHandover(cityPath, cfg, store, sessionStore.Store, openSessionInfos, storeRefAware)
+	seats := newSeatHandover(cityPath, cfg, func() []string { return assignedWorkClaimRefs(cityPath, cfg, store) }, sessionStore, openSessionInfos, storeRefAware)
 	for i, wb := range assignedWorkBeads {
 		if wb.Status != "open" && wb.Status != "in_progress" {
 			continue
