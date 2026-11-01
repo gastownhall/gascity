@@ -1170,7 +1170,7 @@ export const postV0CityByCityNameSessionByIdStop = <ThrowOnError extends boolean
 /**
  * Stream session output in real time
  *
- * Server-Sent Events stream of session transcript updates. Streams turns (conversation format), raw messages (JSONL format), or structured messages based on the format query parameter. Emits activity and pending events for tool approval prompts.
+ * Server-Sent Events stream of session transcript updates. Streams turns (conversation format), raw messages (JSONL format), or structured messages based on the format query parameter. Emits activity and pending events for tool approval prompts, and a program_status event when the session program's own reported status changes (only while the city's program_status switch is shadow or on; a frame without program_status means the status became unknown).
  */
 export const streamSession = <ThrowOnError extends boolean = false>(options: Options<StreamSessionData, ThrowOnError, StreamSessionResponse>) => (options.client ?? client).sse.get<StreamSessionResponses, StreamSessionErrors, ThrowOnError>({ url: '/v0/city/{cityName}/session/{id}/stream', ...options });
 

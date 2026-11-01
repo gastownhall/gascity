@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -856,8 +857,20 @@ func renderSessionListFromAPI(cr api.CachedRead[[]SessionView], jsonOutput bool,
 		return 0
 	}
 
+	// The STATUS column (the session program's own report) appears only when
+	// the API reports one for some session: with the city's program_status
+	// switch off the table is unchanged.
+	withStatus := false
+	for _, s := range cr.Body {
+		withStatus = withStatus || s.ProgramStatus != nil
+	}
+	header := []string{"ID", "TEMPLATE", "STATE", "REASON", "TARGET", "TITLE", "WORKDIR", "AGE", "LAST ACTIVE"}
+	if withStatus {
+		header = slices.Insert(header, 3, "STATUS")
+	}
 	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tTEMPLATE\tSTATE\tREASON\tTARGET\tTITLE\tWORKDIR\tAGE\tLAST ACTIVE") //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(w, strings.Join(header, "\t")) //nolint:errcheck // best-effort stdout
+	now := time.Now()
 	for _, s := range cr.Body {
 		state := s.State
 		if state == "" {
@@ -867,12 +880,11 @@ func renderSessionListFromAPI(cr api.CachedRead[[]SessionView], jsonOutput bool,
 		if reason == "" {
 			reason = "-"
 		}
-		target := sessionViewTarget(s)
-		title := sessionViewTitle(s)
-		workDir := sessionViewWorkDir(s)
-		age := sessionViewAge(s.CreatedAt)
-		lastActive := sessionViewLastActive(s.LastActive)
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Template, state, reason, target, title, workDir, age, lastActive) //nolint:errcheck // best-effort stdout
+		row := []string{s.ID, s.Template, state, reason, sessionViewTarget(s), sessionViewTitle(s), sessionViewWorkDir(s), sessionViewAge(s.CreatedAt), sessionViewLastActive(s.LastActive)}
+		if withStatus {
+			row = slices.Insert(row, 3, sessionViewProgramStatus(s.ProgramStatus, now))
+		}
+		fmt.Fprintln(w, strings.Join(row, "\t")) //nolint:errcheck // best-effort stdout
 	}
 	_ = w.Flush() //nolint:errcheck // best-effort stdout
 
@@ -960,6 +972,24 @@ func sessionViewLastActive(lastActive string) string {
 		return "-"
 	}
 	return formatDuration(time.Since(t)) + " ago"
+}
+
+// sessionViewProgramStatus formats the STATUS column: the state the session
+// program reports, its blocked kind after a colon, and how long it has been
+// in that state ("working 3m", "blocked:permission 12s"). An absent status is
+// unknown and renders as "-", never as idle.
+func sessionViewProgramStatus(ps *api.SessionProgramStatus, now time.Time) string {
+	if ps == nil {
+		return "-"
+	}
+	status := ps.State
+	if ps.Kind != "" {
+		status += ":" + ps.Kind
+	}
+	if ps.Since.IsZero() {
+		return status
+	}
+	return status + " " + formatDuration(max(now.Sub(ps.Since), 0))
 }
 
 // cmdSessionList is the CLI entry point for "gc session list". It routes

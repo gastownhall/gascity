@@ -113,12 +113,10 @@ func ProfileFamily(profile Profile) string {
 // has not landed, the slice that lands it. A row leaves this map in the
 // change that lands its behavior and registers its check.
 var programStatusPending = map[RequirementCode]string{
-	RequirementProgramStatusPhase:              "ga-f4ovjm.16",
 	RequirementProgramStatusPendingKindOnly:    "ga-f4ovjm.22",
 	RequirementProgramStatusQueueBehindBlocked: "ga-f4ovjm.22",
 	RequirementProgramStatusImmediateRefused:   "ga-f4ovjm.22",
 	RequirementProgramStatusReadiness:          "ga-f4ovjm.23",
-	RequirementProgramStatusShadowIdentical:    "ga-f4ovjm.17",
 	RequirementProgramStatusTranscriptTurn:     "ga-f4ovjm.24",
 }
 
