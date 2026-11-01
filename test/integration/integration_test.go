@@ -1463,6 +1463,49 @@ func filterEnv(env []string, name string) []string {
 	return result
 }
 
+// integrationAgentSessionEnv lists the variables gc exports into an agent
+// session's own environment beyond the city/rig/agent identity ones
+// buildIntegrationEnv already drops by name: the session's identity and
+// incarnation, how its startup prompt was delivered, and what triggered its
+// spawn. A suite run from inside such a session inherits them, and
+// passthroughEnv forwards every GC_* var into the sessions of the cities the
+// suite starts. A leaked GC_PROVIDER or GC_READY_PROMPT_PREFIX makes those
+// sessions wait on a startup nudge that is never confirmed, so a harness city's
+// first start takes ~25s and tests that act on it meanwhile hit "session is
+// starting". Deliberately not listed: GC_KILLGUARD_DIR and the other vars the
+// host sets as safety guards for the whole process tree.
+var integrationAgentSessionEnv = map[string]bool{
+	"GC_ALIAS":                    true,
+	"GC_CONTINUATION_EPOCH":       true,
+	"GC_INSTANCE_TOKEN":           true,
+	"GC_PROVIDER":                 true,
+	"GC_READY_PROMPT_PREFIX":      true,
+	"GC_RUNTIME_EPOCH":            true,
+	"GC_SESSION_ID":               true,
+	"GC_SESSION_ORIGIN":           true,
+	"GC_SPAWN_ORIGIN":             true,
+	"GC_STARTUP_PROMPT_DELIVERED": true,
+}
+
+// integrationAgentSessionEnvPrefix covers the GC_TRIGGER_* family (the bead and
+// store a demand-spawned session was started for), which grows with the
+// trigger kinds rather than being a fixed set.
+const integrationAgentSessionEnvPrefix = "GC_TRIGGER_"
+
+// filterAgentSessionEnv returns env without the agent-session variables named
+// by integrationAgentSessionEnv and integrationAgentSessionEnvPrefix.
+func filterAgentSessionEnv(env []string) []string {
+	result := make([]string, 0, len(env))
+	for _, e := range env {
+		name, _, _ := strings.Cut(e, "=")
+		if integrationAgentSessionEnv[name] || strings.HasPrefix(name, integrationAgentSessionEnvPrefix) {
+			continue
+		}
+		result = append(result, e)
+	}
+	return result
+}
+
 // integrationEnv is the env of the suite's shared GC_HOME, testGCHome; TestMain
 // checks that one for a leaked platform supervisor unit after m.Run.
 func integrationEnv() []string {
@@ -1535,6 +1578,7 @@ func buildIntegrationEnv(gcHome, runtimeDir string, useDolt bool) []string {
 	env = filterEnv(env, integrationDoltBinaryEnv)
 	env = filterEnv(env, "BEADS_DOLT_AUTO_START")
 	env = filterEnv(env, "GC_DOLT_INIT_LOCK_DIR")
+	env = filterAgentSessionEnv(env)
 	if !useDolt {
 		env = append(env, "GC_DOLT=skip")
 	}
@@ -2185,7 +2229,11 @@ func reserveLoopbackPort() (int, error) {
 	return testutil.ReserveLoopbackPort()
 }
 
-func TestIntegrationEnvForIsolatesHome(t *testing.T) {
+// useTempIntegrationEnvGlobals points the package globals buildIntegrationEnv
+// reads at throwaway locations for the duration of t, so a test can build an
+// integration env without TestMain's real gc, bd and dolt binaries.
+func useTempIntegrationEnvGlobals(t *testing.T) {
+	t.Helper()
 	oldGCHome, oldRuntimeDir := testGCHome, testRuntimeDir
 	oldGCBinary, oldBDBinary, oldRealBDBinary := gcBinary, bdBinary, realBDBinary
 	oldToolBinDir, oldDoltBinary := integrationToolBinDir, doltBinary
@@ -2206,6 +2254,10 @@ func TestIntegrationEnvForIsolatesHome(t *testing.T) {
 	realBDBinary = "/usr/bin/bd"
 	doltBinary = "/usr/bin/dolt"
 	integrationToolBinDir = filepath.Join(t.TempDir(), "bin")
+}
+
+func TestIntegrationEnvForIsolatesHome(t *testing.T) {
+	useTempIntegrationEnvGlobals(t)
 
 	t.Setenv("HOME", "/host/home")
 	t.Setenv("BEADS_DIR", "/host/beads")
@@ -2311,6 +2363,54 @@ func TestIntegrationEnvForIsolatesHome(t *testing.T) {
 	} {
 		if _, ok := got[key]; ok {
 			t.Fatalf("%s leaked into integration env: %v", key, got[key])
+		}
+	}
+}
+
+// A test run from inside a gc agent session inherits that session's own
+// identity, startup-delivery and trigger vars. passthroughEnv forwards every
+// GC_* var to the sessions of the cities the suite starts, so a leaked
+// GC_PROVIDER makes a harness city's tmux sessions wait on a startup nudge that
+// is never confirmed; the city's first start then takes ~25s, and a test's
+// `gc session kill` is refused with "session is starting".
+func TestIntegrationEnvStripsAgentSessionVars(t *testing.T) {
+	useTempIntegrationEnvGlobals(t)
+
+	leaked := []string{
+		"GC_PROVIDER",
+		"GC_READY_PROMPT_PREFIX",
+		"GC_STARTUP_PROMPT_DELIVERED",
+		"GC_TRIGGER_BEAD_ID",
+		"GC_TRIGGER_WORK_BEAD_ID",
+		"GC_TRIGGER_WORK_STORE_REF",
+		"GC_TRIGGER_BEAD_STORE_REF",
+		"GC_INSTANCE_TOKEN",
+		"GC_RUNTIME_EPOCH",
+		"GC_CONTINUATION_EPOCH",
+		"GC_SESSION_ORIGIN",
+		"GC_SPAWN_ORIGIN",
+		"GC_SESSION_ID",
+		"GC_ALIAS",
+	}
+	for _, key := range leaked {
+		t.Setenv(key, "agent-session-"+strings.ToLower(key))
+	}
+	// A safety var the host sets for the whole tree is not session state and
+	// must keep reaching the suite's children.
+	t.Setenv("GC_KILLGUARD_DIR", "/host/killguard")
+
+	for name, env := range map[string][]string{
+		"integrationEnv":     integrationEnv(),
+		"integrationEnvDolt": integrationEnvDolt(),
+	} {
+		got := parseEnvList(env)
+		for _, key := range leaked {
+			if v, ok := got[key]; ok {
+				t.Errorf("%s: agent-session %s=%q leaked into integration env", name, key, v)
+			}
+		}
+		if got["GC_KILLGUARD_DIR"] != "/host/killguard" {
+			t.Errorf("%s: GC_KILLGUARD_DIR = %q, want it passed through unchanged", name, got["GC_KILLGUARD_DIR"])
 		}
 	}
 }
