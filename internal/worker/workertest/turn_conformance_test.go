@@ -202,6 +202,38 @@ func TestTurnHandleConformanceFailedTurn(t *testing.T) {
 	}
 }
 
+// A transcript whose newest turn ended failed on a provider error, with no
+// turn after it, reads as that turn failed and no turn open, whatever the
+// error: the work ladder takes up a step whose seat waits on a person only on
+// such a reading (the turn the person's answer started died), so a failed
+// turn must never read as a turn still open or as one completed.
+func TestTurnHandleConformanceNewestTurnFailed(t *testing.T) {
+	const prompt = `{"type":"user","isSidechain":false,"timestamp":"2026-10-13T05:00:00.123Z","message":{"role":"user","content":"a prompt"},"promptId":"7f3e9a10-1111-4aaa-8000-000000000001","origin":"user","promptSource":"prompt"}`
+	const ended = `{"type":"system","subtype":"turn_duration","isSidechain":false,"timestamp":"2026-10-13T05:00:01.010Z"}`
+	for name, apiError := range map[string]string{
+		"a rate limit": `{"type":"assistant","isSidechain":false,"timestamp":"2026-10-13T05:00:01.000Z","isApiErrorMessage":true,"error":"rate_limit","apiErrorStatus":429,"message":{"role":"assistant","content":[{"type":"text","text":"API Error: Request rejected (429)"}]}}`,
+		"an overload":  `{"type":"assistant","isSidechain":false,"timestamp":"2026-10-13T05:00:01.000Z","isApiErrorMessage":true,"error":"server_error","apiErrorStatus":529,"message":{"role":"assistant","content":[{"type":"text","text":"API Error: overloaded"}]}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := turnConformanceSession(t, runtime.NewFakeProfile(runtime.ProfileTmux, runtime.FullFake{Fake: runtime.NewFake()}), nil, []string{prompt, apiError, ended})
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := CheckTurnHandle(ctx, h); err != nil {
+				t.Fatal(err)
+			}
+			for read, f := range map[string]func(context.Context) (runtime.TurnHistory, error){"CurrentTurn": h.CurrentTurn, "FreshTurn": h.FreshTurn} {
+				hist, err := f(ctx)
+				if err != nil {
+					t.Fatalf("%s: %v", read, err)
+				}
+				if hist.Current.Active() || len(hist.Recent) != 1 || hist.Recent[0].Status != runtime.TurnStatusFailed {
+					t.Fatalf("%s = %+v, want no turn open and the newest ended turn failed", read, hist)
+				}
+			}
+		})
+	}
+}
+
 // checkTurnRead rejects a failure on a turn that did not fail, a rate limit
 // with neither the source's class nor HTTP 429 (read from the text), and a
 // spent quota that is not a rate limit.

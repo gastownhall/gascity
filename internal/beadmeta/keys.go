@@ -48,16 +48,20 @@ const (
 	// AwaitingHumanMetadataKey, on a claimed work bead, names the session
 	// (its ID) whose claim asked a person and is waiting on their decision:
 	// an approval asked by mail. While the key names the seat holding the
-	// claim (AwaitsHuman), the work ladder only nudges it, an hour after the
-	// ask and hourly after that: it never recycles or releases it, and raises
-	// none of the escalations its pacing would (started_recycled,
-	// started_unanswered, release_unfinished). A nudge the seat cannot take
-	// still counts toward nudge_refused, and a release already in flight that
-	// raced the claim's start still raises release_raced_start. The asking
-	// agent writes it with its request and clears it when it works the step
-	// again: the wait ends in a turn of the seat (or when the claim closes),
-	// and the hourly nudge is what takes up an answer whose turn died before
-	// it could clear the key. It names its seat, not the step: a claim
+	// claim (AwaitsHuman), the work ladder never recycles or releases it, and
+	// raises none of the escalations its pacing would (started_recycled,
+	// started_unanswered, release_unfinished). It nudges it only when the
+	// seat's own turns show the newest ended turn failed (the turn the
+	// answer started died), or cannot be read: an hour after the ask or
+	// after its last nudge, at once when that is already past. While they
+	// show the newest ended turn completed, or a turn open, it leaves the
+	// claim alone, however long the person takes. A nudge the seat cannot
+	// take still counts toward nudge_refused, and a release already in flight
+	// that raced the claim's start still raises release_raced_start. The
+	// asking agent writes it with its request and clears it when it works
+	// the step again: the wait ends in a turn of the seat (or when the claim
+	// closes), and that nudge is what takes up an answer whose turn died
+	// before it could clear the key. It names its seat, not the step: a claim
 	// released and taken by another seat is that seat's work, whatever the
 	// key still says, and no dispatch path reads it.
 	AwaitingHumanMetadataKey  = "gc.awaiting_human"
