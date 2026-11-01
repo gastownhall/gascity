@@ -1897,6 +1897,7 @@ type AgentPatch struct {
 	AssignedWorkDeferLimit  *int64             `json:"AssignedWorkDeferLimit"`
 	Attach                  *bool              `json:"Attach"`
 	AutoReclaimStaleClaims  *bool              `json:"AutoReclaimStaleClaims"`
+	ColdWake                *bool              `json:"ColdWake"`
 	ContextAdvisory         *ContextAdvisory   `json:"ContextAdvisory,omitempty"`
 	DefaultSlingFormula     *string            `json:"DefaultSlingFormula"`
 	DependsOn               *[]string          `json:"DependsOn"`
