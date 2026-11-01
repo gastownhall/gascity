@@ -601,11 +601,11 @@ type fakeProbeConnector struct {
 	// server whose LIKE folds case, as MySQL's does.
 	recasedColumns map[string]string
 	likeFoldsCase  bool
-	// head is what DOLT_HASHOF('HEAD') answers on the main-lane existence
-	// statement; "" means the fixture default, fakeProbeHead.
+	// head is what DOLT_HASHOF('HEAD') answers; "" means the fixture default,
+	// fakeProbeHead.
 	head string
-	// headErr is what the main-lane existence statement fails with when the
-	// server cannot answer DOLT_HASHOF('HEAD').
+	// headErr is what the HEAD statement fails with when the server cannot
+	// answer DOLT_HASHOF('HEAD').
 	headErr error
 	// dials counts every Connect call, failed ones included.
 	dials  atomic.Int64
@@ -678,18 +678,10 @@ func (c *fakeProbeConn) Ping(context.Context) error { return c.connector.pingErr
 // whole statement surface readCursors uses.
 func (c *fakeProbeConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	c.connector.record(query, args)
-	if c.connector.queryErr != nil && query != cursorExistsQuery && query != cursorExistsWithHeadQuery {
+	if c.connector.queryErr != nil && query != tablesQuery && query != headQuery {
 		return nil, c.connector.queryErr
 	}
-	if query == cursorExistsQuery || query == cursorExistsWithHeadQuery {
-		table := namedArg(args, 0)
-		exists := int64(1)
-		if c.connector.absentTables[table] {
-			exists = 0
-		}
-		if query == cursorExistsQuery {
-			return &fakeProbeRows{value: exists}, nil
-		}
+	if query == headQuery {
 		if c.connector.headErr != nil {
 			return nil, c.connector.headErr
 		}
@@ -697,7 +689,18 @@ func (c *fakeProbeConn) QueryContext(_ context.Context, query string, args []dri
 		if head == "" {
 			head = fakeProbeHead
 		}
-		return &fakeProbeRows{value: exists, extra: []driver.Value{head}}, nil
+		return &fakeColumnRows{column: "DOLT_HASHOF('HEAD')", values: []string{head}}, nil
+	}
+	if query == tablesQuery {
+		// SHOW TABLES lists every table the database carries: each one the
+		// probe could ask about, less the fixture's absent ones.
+		var listed []string
+		for _, table := range c.connector.knownTables() {
+			if !c.connector.absentTables[table] {
+				listed = append(listed, table)
+			}
+		}
+		return &fakeColumnRows{column: "Tables_in_fixture", values: listed}, nil
 	}
 	if strings.HasPrefix(strings.ToUpper(query), "SHOW COLUMNS FROM ") {
 		// SHOW COLUMNS names its table in the statement and fails on an absent
@@ -729,6 +732,16 @@ func (c *fakeProbeConn) QueryContext(_ context.Context, query string, args []dri
 		return nil, errors.New("proxyendpoint: the probe fixture has no answer for " + query)
 	}
 	return &fakeProbeRows{value: value}, nil
+}
+
+// knownTables is every table name a probe session can ask about.
+func (c *fakeProbeConnector) knownTables() []string {
+	tables := []string{cursorTableMain, cursorTableIgnored, IgnoredSentinelColumnTable}
+	tables = append(tables, ignoredSentinelTables...)
+	for _, floored := range ignoredSentinelFlooredTables {
+		tables = append(tables, floored.Table)
+	}
+	return tables
 }
 
 // namedArg renders the nth bound argument, or "" when it is absent.
@@ -806,6 +819,27 @@ const fakeProbeHead = "fakehead0000000000000000000000000"
 // fakeProbeRows is one row: an integer column, which is the shape of every
 // answer the probe reads, plus whatever extra columns the statement carries
 // (the main-lane existence statement carries HEAD).
+// fakeColumnRows is a one-column result: SHOW TABLES' table names, or the one
+// HEAD hash.
+type fakeColumnRows struct {
+	column string
+	values []string
+	next   int
+}
+
+func (r *fakeColumnRows) Columns() []string { return []string{r.column} }
+
+func (r *fakeColumnRows) Close() error { return nil }
+
+func (r *fakeColumnRows) Next(dest []driver.Value) error {
+	if r.next >= len(r.values) {
+		return io.EOF
+	}
+	dest[0] = []byte(r.values[r.next])
+	r.next++
+	return nil
+}
+
 type fakeProbeRows struct {
 	value int64
 	extra []driver.Value
