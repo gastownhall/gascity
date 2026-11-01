@@ -138,6 +138,19 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			want: "claude --dangerously-skip-permissions --session-id " + rotatedKey,
 		},
 		{
+			name:          "AC-2 transcript present resumes",
+			transcriptDir: func(beadWorkDir, _ string) string { return beadWorkDir },
+			want:          resumeStart,
+		},
+		{
+			name: "AC-2 transcript under the launch work dir from the hints resumes",
+			spec: func(spec *SessionSpec, otherWorkDir string) {
+				spec.Hints.WorkDir = otherWorkDir
+			},
+			transcriptDir: func(_, otherWorkDir string) string { return otherWorkDir },
+			want:          resumeStart,
+		},
+		{
 			name: "empty work dir in hints and row is not probeable and resumes",
 			spec: func(spec *SessionSpec, _ string) {
 				spec.WorkDir = ""
