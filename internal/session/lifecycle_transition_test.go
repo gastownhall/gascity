@@ -59,6 +59,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"generation":                 "3",
 				"wake_request":               "",
 				"wake_requested_at":          "",
+				DrainAckStrandedAtKey:        "",
 			},
 		},
 		{
@@ -84,6 +85,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"generation":                 "4",
 				"wake_request":               "",
 				"wake_requested_at":          "",
+				DrainAckStrandedAtKey:        "",
 				"session_key":                "",
 				"started_config_hash":        "",
 				"started_live_hash":          "",
