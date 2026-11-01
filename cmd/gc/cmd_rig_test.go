@@ -2914,11 +2914,14 @@ func TestDoRigAdd_AdoptNonGitDirSucceeds(t *testing.T) {
 	}
 }
 
-func TestDoRigAdd_AdoptRequiresConfigYaml(t *testing.T) {
+// TestDoRigAdd_AdoptRefusesBackendlessMetadataWithoutConfigYamlPrefix pins the
+// refusal when neither source can name the prefix: metadata.json names no
+// backend, so there is no bd store to ask, and there is no config.yaml.
+func TestDoRigAdd_AdoptRefusesBackendlessMetadataWithoutConfigYamlPrefix(t *testing.T) {
 	cityPath := t.TempDir()
 	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
 
-	// Create rig with metadata.json but no config.yaml.
+	// Create rig with backend-less metadata.json and no config.yaml.
 	rigPath := filepath.Join(t.TempDir(), "no-config-rig")
 	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
@@ -3753,26 +3756,51 @@ func TestReadAdoptedStoreIssuePrefixRefusesAStorelessProxiedClone(t *testing.T) 
 	}
 }
 
+// A proxied store is read through bd wherever bd roots it, including the
+// re-clone of a rig gc beads city migrate-proxied pointed at the city's root:
+// no sidecar, a dolt_data_dir naming that root, and gc rig remove's ready path
+// record.
 func TestReadAdoptedStoreIssuePrefixReadsAProxiedStoreThroughBd(t *testing.T) {
-	cityPath := t.TempDir()
-	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
-	rigPath := filepath.Join(t.TempDir(), "webapp")
-	writeAdoptPrefixStore(t, rigPath, `{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hv"}`)
-	if err := os.MkdirAll(filepath.Join(rigPath, ".beads", "dolt"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	logPath := installAdoptPrefixFakeBd(t, 0)
+	for _, tc := range []struct {
+		name   string
+		layout func(t *testing.T, cityPath, rigPath string)
+	}{
+		{
+			name: "in its own .beads/dolt",
+			layout: func(t *testing.T, _, rigPath string) {
+				if err := os.MkdirAll(filepath.Join(rigPath, ".beads", "dolt"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "at its dolt_data_dir, behind a ready path record",
+			layout: func(t *testing.T, cityPath, rigPath string) {
+				standAdoptPrefixScopeOn(t, rigPath, adoptPrefixCityRoot(t, cityPath, "hv"), "hv", false)
+				journalAdoptPrefixScope(t, cityPath, rigPath, true)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+			rigPath := filepath.Join(t.TempDir(), "webapp")
+			writeAdoptPrefixStore(t, rigPath, `{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hv"}`)
+			tc.layout(t, cityPath, rigPath)
+			logPath := installAdoptPrefixFakeBd(t, 0)
 
-	prefix, err := readAdoptedStoreIssuePrefix(cityPath, rigPath)
-	if err != nil {
-		t.Fatalf("readAdoptedStoreIssuePrefix: %v", err)
-	}
-	if prefix != "hv" {
-		t.Fatalf("prefix = %q, want hv", prefix)
-	}
-	got := readAdoptPrefixFakeBdLog(t, logPath)
-	if !strings.Contains(got, "argv=config get --json issue_prefix\n") {
-		t.Errorf("bd was not asked for the prefix without --readonly (bd refuses --readonly through its proxy):\n%s", got)
+			prefix, err := readAdoptedStoreIssuePrefix(cityPath, rigPath)
+			if err != nil {
+				t.Fatalf("readAdoptedStoreIssuePrefix: %v", err)
+			}
+			if prefix != "hv" {
+				t.Fatalf("prefix = %q, want hv", prefix)
+			}
+			got := readAdoptPrefixFakeBdLog(t, logPath)
+			if !strings.Contains(got, "argv=config get --json issue_prefix\n") {
+				t.Errorf("bd was not asked for the prefix without --readonly (bd refuses --readonly through its proxy):\n%s", got)
+			}
+		})
 	}
 }
 
@@ -3838,5 +3866,373 @@ func TestDoRigAdd_AdoptBdInitStoreWithoutConfigYamlPrefix(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `prefix = "hv"`) {
 		t.Errorf("city.toml does not pin the store's prefix:\n%s", data)
+	}
+}
+
+// journalAdoptPrefixScope records a gc journal entry for a local proxied scope:
+// pending, as a failed fresh add leaves it, or ready, as gc rig remove leaves
+// its path: record behind.
+func journalAdoptPrefixScope(t *testing.T, cityPath, rigPath string, ready bool) {
+	t.Helper()
+	if err := persistProviderScopeOwnership(cityPath, rigPath, providerScopeIntent{Transport: "proxied", Target: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	if ready {
+		if err := markProviderScopeOwnershipReady(cityPath, rigPath); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// assertNoStoreUnder fails when a Dolt store appeared under a refused scope.
+func assertNoStoreUnder(t *testing.T, rigPath string) {
+	t.Helper()
+	if _, statErr := os.Stat(filepath.Join(rigPath, ".beads", "dolt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("a store appeared under the refused scope (stat err = %v)", statErr)
+	}
+}
+
+// adoptPrefixCityRoot lays out the city's Dolt root at <city>/.beads/dolt, a
+// Dolt repository holding database other and the given databases: the root a
+// rig gc beads city migrate-proxied pointed at it stands on. It returns the
+// root.
+func adoptPrefixCityRoot(t *testing.T, cityPath string, databases ...string) string {
+	t.Helper()
+	root := filepath.Join(cityPath, ".beads", "dolt")
+	dirs := []string{filepath.Join(root, ".dolt"), filepath.Join(root, "other", ".dolt")}
+	for _, database := range databases {
+		dirs = append(dirs, filepath.Join(root, database, ".dolt"))
+	}
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+// standAdoptPrefixScopeOn points the proxied-server store at rigPath, which
+// pins database ("" for none, which bd opens as its default), at the Dolt root
+// root the way gc beads city migrate-proxied does: a dolt_data_dir relative to
+// the rig's .beads, which a clone keeps, and, when withSidecar is set, the
+// absolute root_path bd's migration writes into the gitignored client-info
+// sidecar, which a clone loses.
+func standAdoptPrefixScopeOn(t *testing.T, rigPath, root, database string, withSidecar bool) {
+	t.Helper()
+	beadsDir := filepath.Join(rigPath, ".beads")
+	rel, err := filepath.Rel(beadsDir, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := map[string]string{"backend": "dolt", "dolt_mode": "proxied-server", "dolt_data_dir": filepath.ToSlash(rel)}
+	if database != "" {
+		meta["dolt_database"] = database
+	}
+	metadata, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !withSidecar {
+		return
+	}
+	sidecar := fmt.Sprintf(`{"root_path":%q,"idle_timeout":1800000000000}`, root)
+	if err := os.WriteFile(filepath.Join(beadsDir, "proxied_server_client_info.json"), []byte(sidecar), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A journal record does not make a store: the read refuses a storeless
+// proxied scope whatever gc recorded for it, before bd can create an empty one.
+func TestReadAdoptedStoreIssuePrefixRefusesAStorelessJournaledProxiedScope(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		ready bool
+	}{
+		{name: "pending record from a failed fresh add"},
+		{name: "ready path record left by gc rig remove", ready: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+			rigPath := filepath.Join(t.TempDir(), "webapp")
+			writeAdoptPrefixStore(t, rigPath, `{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hv"}`)
+			journalAdoptPrefixScope(t, cityPath, rigPath, tc.ready)
+			logPath := installAdoptPrefixFakeBd(t, 0)
+
+			_, err := readAdoptedStoreIssuePrefix(cityPath, rigPath)
+			if err == nil || !strings.Contains(err.Error(), "proxied-server") {
+				t.Errorf("err = %v, want a refusal naming proxied-server", err)
+			}
+			if got := readAdoptPrefixFakeBdLog(t, logPath); got != "" {
+				t.Errorf("bd ran against a storeless journaled proxied scope:\n%s", got)
+			}
+			assertNoStoreUnder(t, rigPath)
+		})
+	}
+}
+
+// The adopt's pre-init hook refuses a storeless proxied scope, journaled or
+// not: when .beads/config.yaml records the prefix the store is never read, so
+// this is the guard that keeps init from creating an empty store. A scope
+// standing on a Dolt root outside its .beads is storeless when that root does
+// not hold its database: the city's root exists whenever the city does, and
+// bd would create the database empty in it.
+func TestPrepareRigAdoptProviderStateRefusesAStorelessProxiedScope(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		journaled, ready bool
+		// layout points the scope at a Dolt root and returns the directory
+		// the refusal must leave absent; nil keeps the store's default
+		// place, <rig>/.beads/dolt.
+		layout func(t *testing.T, cityPath, rigPath string) string
+	}{
+		{name: "un-journaled"},
+		{name: "pending record", journaled: true},
+		{name: "ready path record", journaled: true, ready: true},
+		{
+			name: "dolt_data_dir naming a missing directory",
+			layout: func(t *testing.T, cityPath, rigPath string) string {
+				root := filepath.Join(cityPath, ".beads", "dolt")
+				standAdoptPrefixScopeOn(t, rigPath, root, "hv", false)
+				return root
+			},
+		},
+		{
+			name: "dolt_data_dir naming the city's root, which does not hold its database",
+			layout: func(t *testing.T, cityPath, rigPath string) string {
+				root := adoptPrefixCityRoot(t, cityPath)
+				standAdoptPrefixScopeOn(t, rigPath, root, "hv", false)
+				return filepath.Join(root, "hv")
+			},
+		},
+		{
+			name:      "dolt_data_dir naming the city's root, which does not hold its database, behind a ready path record",
+			journaled: true,
+			ready:     true,
+			layout: func(t *testing.T, cityPath, rigPath string) string {
+				root := adoptPrefixCityRoot(t, cityPath)
+				standAdoptPrefixScopeOn(t, rigPath, root, "hv", false)
+				return filepath.Join(root, "hv")
+			},
+		},
+		{
+			name: "sidecar root_path naming the city's root, which does not hold its database",
+			layout: func(t *testing.T, cityPath, rigPath string) string {
+				root := adoptPrefixCityRoot(t, cityPath)
+				standAdoptPrefixScopeOn(t, rigPath, root, "hv", true)
+				return filepath.Join(root, "hv")
+			},
+		},
+		{
+			name: "dolt_data_dir naming the city's root, which does not hold bd's default database",
+			layout: func(t *testing.T, cityPath, rigPath string) string {
+				root := adoptPrefixCityRoot(t, cityPath, "hv")
+				standAdoptPrefixScopeOn(t, rigPath, root, "", false)
+				return filepath.Join(root, "beads")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+			rigPath := filepath.Join(t.TempDir(), "webapp")
+			writeAdoptPrefixStore(t, rigPath, `{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hv"}`)
+			absent := filepath.Join(rigPath, ".beads", "dolt")
+			if tc.layout != nil {
+				absent = tc.layout(t, cityPath, rigPath)
+			}
+			if tc.journaled {
+				journalAdoptPrefixScope(t, cityPath, rigPath, tc.ready)
+			}
+
+			err := prepareRigAdoptProviderState(cityPath, rigPath)
+			if err == nil || !strings.Contains(err.Error(), "proxied-server") || !strings.Contains(err.Error(), absent) {
+				t.Fatalf("prepareRigAdoptProviderState err = %v, want a refusal naming proxied-server and %s", err, absent)
+			}
+			assertNoStoreUnder(t, rigPath)
+			if _, statErr := os.Stat(absent); !errors.Is(statErr, os.ErrNotExist) {
+				t.Errorf("the refusal left %s behind (stat err = %v)", absent, statErr)
+			}
+		})
+	}
+}
+
+// A proxied scope's store is wherever bd roots it: under the sidecar's
+// root_path, else at metadata.json's dolt_data_dir, else in .beads/dolt. A rig
+// gc beads city migrate-proxied pointed at the city's root keeps its
+// dolt_data_dir through a re-clone, which drops the gitignored sidecar, so its
+// adopt passes, behind gc rig remove's ready path record too.
+func TestPrepareRigAdoptProviderStatePassesScopesWithAStore(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		metadata  string
+		journaled bool
+		layout    func(t *testing.T, cityPath, rigPath string)
+	}{
+		{name: "embedded", metadata: `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"hv"}`},
+		{
+			name:     "proxied with its store",
+			metadata: `{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hv"}`,
+			layout: func(t *testing.T, _, rigPath string) {
+				if err := os.MkdirAll(filepath.Join(rigPath, ".beads", "dolt"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:     "proxied to an external upstream",
+			metadata: `{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hv"}`,
+			layout: func(t *testing.T, _, rigPath string) {
+				sidecar := `{"external":{"host":"127.0.0.1","port":3307}}`
+				if err := os.WriteFile(filepath.Join(rigPath, ".beads", "proxied_server_client_info.json"), []byte(sidecar), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:     "proxied with its store at its dolt_data_dir",
+			metadata: `{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hv"}`,
+			layout: func(t *testing.T, cityPath, rigPath string) {
+				standAdoptPrefixScopeOn(t, rigPath, adoptPrefixCityRoot(t, cityPath, "hv"), "hv", false)
+			},
+		},
+		{
+			name:      "proxied with its store at its dolt_data_dir, behind a ready path record",
+			metadata:  `{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hv"}`,
+			journaled: true,
+			layout: func(t *testing.T, cityPath, rigPath string) {
+				standAdoptPrefixScopeOn(t, rigPath, adoptPrefixCityRoot(t, cityPath, "hv"), "hv", false)
+			},
+		},
+		{
+			name:     "proxied with its store under the sidecar's root_path",
+			metadata: `{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hv"}`,
+			layout: func(t *testing.T, cityPath, rigPath string) {
+				standAdoptPrefixScopeOn(t, rigPath, adoptPrefixCityRoot(t, cityPath, "hv"), "hv", true)
+			},
+		},
+		{
+			name:     "proxied with bd's default database at its dolt_data_dir",
+			metadata: `{"backend":"dolt","dolt_mode":"proxied-server"}`,
+			layout: func(t *testing.T, cityPath, rigPath string) {
+				standAdoptPrefixScopeOn(t, rigPath, adoptPrefixCityRoot(t, cityPath, "beads"), "", false)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+			rigPath := filepath.Join(t.TempDir(), "webapp")
+			writeAdoptPrefixStore(t, rigPath, tc.metadata)
+			if tc.layout != nil {
+				tc.layout(t, cityPath, rigPath)
+			}
+			if tc.journaled {
+				journalAdoptPrefixScope(t, cityPath, rigPath, true)
+			}
+			t.Setenv("GC_BEADS", "")
+			if err := prepareRigAdoptProviderState(cityPath, rigPath); err != nil {
+				t.Fatalf("prepareRigAdoptProviderState: %v", err)
+			}
+		})
+	}
+}
+
+// On a file-provider city with scoped roots the hook still lays down the
+// adopted scope's local file store.
+func TestPrepareRigAdoptProviderStateStillPreparesTheFileStore(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	if err := ensureScopedFileStoreLayout(cityPath); err != nil {
+		t.Fatal(err)
+	}
+	rigPath := filepath.Join(t.TempDir(), "webapp")
+	writeAdoptPrefixStore(t, rigPath, `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"hv"}`)
+	t.Setenv("GC_BEADS", "file")
+
+	if err := prepareRigAdoptProviderState(cityPath, rigPath); err != nil {
+		t.Fatalf("prepareRigAdoptProviderState: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rigPath, ".gc", "beads.json")); err != nil {
+		t.Errorf("the adopted scope's file store was not prepared: %v", err)
+	}
+}
+
+// The guard's other callers keep the journal exemption: a pending scope has no
+// store yet while gc drives its initialization.
+func TestValidateProviderOwnedProxiedScopeStoreKeepsTheJournalExemption(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	rigPath := filepath.Join(t.TempDir(), "webapp")
+	writeAdoptPrefixStore(t, rigPath, `{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hv"}`)
+	journalAdoptPrefixScope(t, cityPath, rigPath, false)
+
+	if err := validateProviderOwnedProxiedScopeStore(cityPath, rigPath); err != nil {
+		t.Fatalf("validateProviderOwnedProxiedScopeStore refused a pending journaled scope: %v", err)
+	}
+}
+
+// The re-clone of a removed rig: gc rig remove left a ready path: record, the
+// gitignored store did not come along, and config.yaml records the prefix so
+// the store is never read. The adopt must refuse before init, which would
+// otherwise create an empty store and register the rig on it.
+func TestDoRigAdd_AdoptRefusesAStorelessProxiedScopeWithAConfigYamlPrefix(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	cityTOMLBefore, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+filepath.Join(cityPath, "gc-beads-bd"))
+	t.Setenv("GC_DOLT", "")
+
+	origEnsure := initDirIfReadyEnsureBeadsProvider
+	origInit := initDirIfReadyInitAndHookDir
+	origWait := initDirIfReadyWaitForManagedDolt
+	t.Cleanup(func() {
+		initDirIfReadyEnsureBeadsProvider = origEnsure
+		initDirIfReadyInitAndHookDir = origInit
+		initDirIfReadyWaitForManagedDolt = origWait
+	})
+	initDirIfReadyEnsureBeadsProvider = func(_ string) error { return nil }
+	initDirIfReadyWaitForManagedDolt = func(_ string, _ time.Duration) error { return nil }
+	var initCalls []string
+	initDirIfReadyInitAndHookDir = func(_, dir, _ string) error {
+		initCalls = append(initCalls, dir)
+		return nil
+	}
+	logPath := installAdoptPrefixFakeBd(t, 0)
+
+	rigPath := filepath.Join(t.TempDir(), "webapp")
+	writeAdoptPrefixStore(t, rigPath, `{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hv"}`)
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte("issue_prefix: hv\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	journalAdoptPrefixScope(t, cityPath, rigPath, true)
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doRigAdd --adopt on a storeless proxied scope returned %d, stdout: %s", code, stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "proxied-server") {
+		t.Errorf("refusal does not name proxied-server: %s", stderr.String())
+	}
+	if len(initCalls) != 0 {
+		t.Errorf("store init ran on a storeless proxied scope: %v", initCalls)
+	}
+	if got := readAdoptPrefixFakeBdLog(t, logPath); got != "" {
+		t.Errorf("bd ran against a storeless proxied scope:\n%s", got)
+	}
+	assertNoStoreUnder(t, rigPath)
+	cityTOMLAfter, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(cityTOMLAfter) != string(cityTOMLBefore) {
+		t.Errorf("a refused adopt rewrote city.toml:\n%s", cityTOMLAfter)
 	}
 }

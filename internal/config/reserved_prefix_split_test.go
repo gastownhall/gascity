@@ -210,3 +210,74 @@ func TestReservedPrefixSplitRefusalForNewCityNamesTheRename(t *testing.T) {
 		t.Errorf("refusal names a file of the city being created: %v", err)
 	}
 }
+
+// An adopt (gc rig add --adopt) cannot give the adopted rig another prefix in
+// city.toml, so only that rig's problem names the caller's remedy; every other
+// collision keeps its existing-city fix.
+func TestReservedPrefixSplitRefusalForAdoptNamesTheRemedyForThatRigOnly(t *testing.T) {
+	dir := t.TempDir()
+	tomlPath := filepath.Join(dir, "city.toml")
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"gas-city-gateway\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	next := splitCityNamed("gas-city-gateway",
+		Rig{Name: "gas-city-ops", Path: "/tmp/ops"},
+		Rig{Name: "adopted", Path: "/tmp/adopted", Prefix: "gcs"},
+	)
+	reserved := "gcn-x"
+	next.Patches.Rigs = []RigPatch{{Name: "other", Prefix: &reserved}}
+	const fix = "change the store's prefix"
+
+	err := ReservedPrefixSplitRefusalForAdopt(fsys.OSFS{}, tomlPath, next, "adopted", fix)
+	if err == nil {
+		t.Fatal("no refusal")
+	}
+	for _, want := range []string{
+		`rig "adopted" bead prefix "gcs" is in the reserved "gcs" namespace; ` + fix,
+		`rig "gas-city-ops" bead prefix "gco" is in the reserved "gco" namespace; set an explicit prefix: prefix = "<prefix>" on that [[rigs]] entry`,
+		`workspace_prefix = "<prefix>" in .gc/site.toml`,
+		`sets bead prefix "gcn-x", in the reserved "gcn" namespace; choose another prefix`,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not contain %q", err, want)
+		}
+	}
+}
+
+func TestReservedPrefixSplitRefusalForAdoptReadsFragmentStorage(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "storage.toml"), []byte(`
+[storage.classes]
+work = "work"
+graph = "infra"
+sessions = "infra"
+messaging = "infra"
+orders = "infra"
+nudges = "infra"
+
+[storage.bindings.infra]
+provider = "sqlite-beads"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tomlPath := filepath.Join(dir, "city.toml")
+	if err := os.WriteFile(tomlPath, []byte("include = [\"storage.toml\"]\n[workspace]\nname = \"my-city\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	next := &City{Include: []string{"storage.toml"}, Workspace: Workspace{Name: "my-city"}, Rigs: []Rig{{Name: "adopted", Path: "/tmp/x", Prefix: "gco"}}}
+	const fix = "change the store's prefix"
+	if err := ReservedPrefixSplitRefusalForAdopt(fsys.OSFS{}, tomlPath, next, "adopted", fix); err == nil || !strings.Contains(err.Error(), "gco") || !strings.Contains(err.Error(), fix) {
+		t.Errorf("ForAdopt with fragment [storage] = %v, want the gco refusal naming %q", err, fix)
+	}
+}
+
+func TestReservedPrefixSplitRefusalForAdoptLeavesSingleStoreCitiesAlone(t *testing.T) {
+	tomlPath := filepath.Join(t.TempDir(), "city.toml")
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"my-city\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	next := &City{Workspace: Workspace{Name: "my-city"}, Rigs: []Rig{{Name: "adopted", Path: "/tmp/x", Prefix: "gco"}}}
+	if err := ReservedPrefixSplitRefusalForAdopt(fsys.OSFS{}, tomlPath, next, "adopted", "fix"); err != nil {
+		t.Errorf("a single-store city was refused: %v", err)
+	}
+}

@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
@@ -627,11 +628,10 @@ func makeCityLookLegacyManaged(t *testing.T, env *helpers.Env, bdPath, cityRoot 
 		t.Fatal(err)
 	}
 	// No issue_prefix: `bd init` leaves it commented out in its template (the
-	// same fact TestBeadsProxiedDefaultRig/adopt-un-journaled hand-writes
-	// around), and gc's own canonicalisation supplies it on the next lifecycle
-	// command. What the fixture has to state is the part gc reads as "this
-	// city's Dolt is mine": the managed-city endpoint origin and direct server
-	// mode.
+	// fact TestBeadsProxiedDefaultRig's adopt subtests rely on), and gc's own
+	// canonicalisation supplies it on the next lifecycle command. What the
+	// fixture has to state is the part gc reads as "this city's Dolt is mine":
+	// the managed-city endpoint origin and direct server mode.
 	legacyConfig := "gc.endpoint_origin: managed_city\n" +
 		"gc.endpoint_status: verified\n" +
 		"dolt.mode: server\n" +
@@ -955,9 +955,10 @@ func TestBeadsProxiedDefaultNativeLane(t *testing.T) {
 
 // TestBeadsProxiedDefaultRig proves the bd front door and a rig on a proxied
 // city: the rig inherits the proxied default, doctor stays green with it, and
-// an un-journaled bd workspace is adopted while a store-less clone is refused.
+// un-journaled bd workspaces (proxied and embedded) are adopted under their
+// stores' own prefixes while a store-less clone is refused.
 func TestBeadsProxiedDefaultRig(t *testing.T) {
-	p := newProxiedDefaultCity(t, "testrig", "adopted-rig")
+	p := newProxiedDefaultCity(t, "testrig", "adopted-rig", "embedded-rig")
 	rigDir := p.rigs["testrig"]
 	p.initDefault(t)
 
@@ -1006,12 +1007,15 @@ func TestBeadsProxiedDefaultRig(t *testing.T) {
 		})
 
 		// A workspace that already holds a beads store is an adoption, which gc
-		// makes explicit rather than inferring.
-		owned, addErr := helpers.RunGC(env, cityRoot, "rig", "add", "--adopt", "--prefix", "adopt", adopted)
+		// makes explicit rather than inferring. No --prefix: bd keeps the
+		// prefix only in the store, and the adopted rig takes it from there.
+		assertConfigYAMLRecordsNoPrefix(t, adopted)
+		owned, addErr := helpers.RunGC(env, cityRoot, "rig", "add", "--adopt", adopted)
 		if addErr != nil {
 			t.Fatalf("gc rig add --adopt on a bd-initialised proxied workspace: %v\n%s", addErr, owned)
 		}
 		assertProxiedScope(t, proxiedNeverIdleEnv(env.Clone()), adopted, "adopted rig")
+		p.assertAdoptedUnderStorePrefix(t, "adopted-rig", "adopt")
 
 		// The clone shape: metadata says proxied-server, but bd's store is
 		// gitignored and never came along. gc must refuse rather than let bd
@@ -1043,6 +1047,77 @@ func TestBeadsProxiedDefaultRig(t *testing.T) {
 			t.Error("the refused clone had a store created under it anyway")
 		}
 	})
+
+	t.Run("adopt-embedded-without-prefix", func(t *testing.T) {
+		// bd's default store is embedded Dolt, and like the proxied one it
+		// records its prefix only in the database. gc reads it with a
+		// read-only bd command against the store itself.
+		dir := p.rigs["embedded-rig"]
+		initCmd := exec.Command(p.bdPath, "init", "-p", "emb", "--quiet", "--skip-hooks", "--skip-agents", "--non-interactive", dir) //nolint:gosec // resolved test binary
+		initCmd.Dir = dir
+		initCmd.Env = p.env.ToolList()
+		if out, err := initCmd.CombinedOutput(); err != nil {
+			t.Fatalf("bd init: %v\n%s", err, out)
+		}
+		var metadata proxiedBeadsMetadata
+		readJSONFile(t, filepath.Join(dir, ".beads", "metadata.json"), &metadata)
+		if !strings.EqualFold(metadata.DoltMode, "embedded") {
+			t.Fatalf("bd init made a %q store, want bd's embedded default", metadata.DoltMode)
+		}
+		assertConfigYAMLRecordsNoPrefix(t, dir)
+		if out, err := helpers.RunGC(p.env, p.cityRoot, "rig", "add", "--adopt", dir); err != nil {
+			t.Fatalf("gc rig add --adopt on a bd-initialised embedded workspace: %v\n%s", err, out)
+		}
+		p.assertAdoptedUnderStorePrefix(t, "embedded-rig", "emb")
+	})
+}
+
+// assertConfigYAMLRecordsNoPrefix fails unless the scope's .beads/config.yaml
+// leaves issue_prefix unset, as bd init does: the adopt below must then learn
+// the prefix from the store.
+func assertConfigYAMLRecordsNoPrefix(t *testing.T, scopeRoot string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(scopeRoot, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		key := strings.TrimSpace(line)
+		if strings.HasPrefix(key, "issue_prefix:") || strings.HasPrefix(key, "issue-prefix:") {
+			t.Fatalf("%s/.beads/config.yaml records the prefix (%q); the adopt would not read the store", scopeRoot, key)
+		}
+	}
+}
+
+// assertAdoptedUnderStorePrefix asserts an adopt that named no --prefix
+// pinned the store's own prefix on the rig's city.toml entry, and that gc
+// mints the rig's beads under it.
+func (p *proxiedDefaultCity) assertAdoptedUnderStorePrefix(t *testing.T, rigName, prefix string) {
+	t.Helper()
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(p.cityRoot, "city.toml"))
+	if err != nil {
+		t.Fatalf("loading city.toml: %v", err)
+	}
+	pinned := ""
+	for _, r := range cfg.Rigs {
+		if r.Name == rigName {
+			pinned = r.Prefix
+		}
+	}
+	if pinned != prefix {
+		t.Fatalf("city.toml pins rig %s prefix %q, want the store's %q", rigName, pinned, prefix)
+	}
+	out, err := p.city.GCStdout("bd", "--rig", rigName, "create", "adopted rig bead", "--json")
+	if err != nil {
+		t.Fatalf("gc bd --rig %s create: %v\n%s", rigName, err, out)
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	lastJSONLine(t, out, &created)
+	if !strings.HasPrefix(created.ID, prefix+"-") {
+		t.Errorf("gc minted %q in rig %s, want an id under the store's prefix %q", created.ID, rigName, prefix)
+	}
 }
 
 // TestBeadsProxiedDefaultStart proves a supervisor start of a proxied city
