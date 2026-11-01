@@ -80,6 +80,7 @@ go_test(
         "cascade_nudge_script_test.go",
         "cross_rig_deps_script_test.go",
         "escalate_script_test.go",
+        "nudge_on_route_script_test.go",
         "pack_assets_test.go",
         "pack_formulas_test.go",
         "pack_orders_test.go",
