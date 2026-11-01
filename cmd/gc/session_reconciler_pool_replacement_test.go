@@ -341,9 +341,12 @@ func TestReusablePoolSessionInfo_OneShotAsleepFreeableIsReusable(t *testing.T) {
 			"want false — a deliberately held sleep must still block reuse")
 	}
 
-	// Control: a persistent (non-one_shot) pool keeps today's behavior — an
-	// asleep session is never reused, even when freeable, so a genuine crash
-	// gets a fresh identity instead of resuming a possibly-corrupt conversation.
+	// Control: a persistent multi-identity pool (uncapped here) keeps today's
+	// behavior — its asleep sessions are never reused, even when freeable, so
+	// a genuine crash gets a fresh identity instead of resuming a
+	// possibly-corrupt conversation. A persistent canonical singleton is the
+	// exception (no alternative identity to mint) — see
+	// TestReusablePoolSessionInfo_PersistentSingletonAsleepFreeableIsReusable.
 	persistentAgent := &config.Agent{Name: "claude-sonnet-one-shot", Dir: "fable-nomad"}
 	if got := reusablePoolSessionInfo(bp, persistentAgent, template, asleepFreeable, nil); got {
 		t.Fatalf("reusablePoolSessionInfo(persistent, asleep, sleep_reason=idle) = true; " +
@@ -404,6 +407,67 @@ func TestReusablePoolSessionInfo_OneShotAsleepFreeableWithOpenAssignedWorkNotReu
 			"want false — an asleep one_shot exit that still holds in-progress assigned work must fall "+
 			"through to fresh-identity creation, not be wake-reused (session %s)",
 			asleepFreeableWithWork.ID)
+	}
+}
+
+// TestReusablePoolSessionInfo_PersistentSingletonAsleepFreeableIsReusable is
+// the persistent-singleton sibling of the one_shot carve-out above
+// (gastownhall/gascity#8364): a persistent pool with max_active_sessions=1
+// has exactly one identity — the canonical singleton name. When its only
+// session goes to sleep with a freeable reason (idle, city-stop, ...),
+// reusablePoolSessionInfo skipped the asleep bead, but
+// claimFreshPoolSlotInfo's canonical branch still counted that same open bead
+// as the canonical name holder, so every tick's fresh create failed closed
+// (errPoolSessionNameUnavailable) and the pool started no worker until an
+// operator ran `gc session close`.
+//
+// A freeable-asleep canonical singleton row is therefore a reuse candidate —
+// it is woken — exactly as a one_shot exit is. The existing guards stay in
+// force: see the guard table and pool-shape variants in the same test.
+func TestReusablePoolSessionInfo_PersistentSingletonAsleepFreeableIsReusable(t *testing.T) {
+	t.Parallel()
+
+	template := "rig/worker"
+	cfgAgent := &config.Agent{Name: "worker", Dir: "rig", MaxActiveSessions: intPtr(1)}
+	if !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		t.Fatal("precondition: max=1 without a namepool must use the canonical singleton pool identity")
+	}
+
+	base := session.Info{
+		ID:                  "session-asleep-freeable",
+		Template:            template,
+		SessionNameMetadata: "rig--worker",
+		AgentName:           template,
+		Alias:               template,
+		PoolManaged:         true,
+		MetadataState:       "asleep",
+	}
+
+	positive := []struct {
+		name    string
+		reason  string
+		sleptAt string
+	}{
+		{name: "idle", reason: "idle"},
+		{name: "city-stop", reason: "city-stop"},
+		{name: "runtime-missing", reason: "runtime-missing"},
+		{name: "empty reason with slept_at", reason: "", sleptAt: "2026-11-01T17:00:00Z"},
+	}
+	for _, tc := range positive {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			info := base
+			info.ID = "session-asleep-" + tc.name
+			info.SleepReason = tc.reason
+			info.SleptAt = tc.sleptAt
+			bp := &agentBuildParams{}
+			if got := reusablePoolSessionInfo(bp, cfgAgent, template, info, nil); !got {
+				t.Fatalf("reusablePoolSessionInfo(persistent singleton, asleep, sleep_reason=%q, slept_at=%q) = false; "+
+					"want true — the asleep row still holds the pool's only canonical identity, so skipping "+
+					"reuse stalls the fresh create too (gastownhall/gascity#8364)",
+					tc.reason, tc.sleptAt)
+			}
+		})
 	}
 }
 

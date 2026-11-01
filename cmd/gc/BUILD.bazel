@@ -1940,6 +1940,7 @@ go_test(
         "remote_gate_test.go",
         "remote_stage_test.go",
         "remote_target_test.go",
+        "repro_ga_mtklxf_test.go",
         "repro_ga_rble9w_test.go",
         "requalify_stability_test.go",
         "requalify_v2_test.go",

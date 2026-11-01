@@ -5352,11 +5352,14 @@ func selectOrPlanPoolSessionBead(
 		return info, slot, nil, err
 	}
 	// Reuse an existing active/creating session bead. Skip drained and
-	// closed. Asleep is skipped too, with one carve-out: a
-	// lifecycle=one_shot session whose sleep reason is freeable and which
-	// holds no assigned work is reused through the wake path — see
-	// reusablePoolSessionInfo. Nothing in the reconciler closes orphaned
-	// asleep beads; an earlier version of this comment claimed it did.
+	// closed. Asleep is skipped too, with two carve-outs: a
+	// lifecycle=one_shot session and a persistent canonical singleton (the
+	// canonical name is the pool's only identity, so the skipped row also
+	// fail-closes the fresh create — gastownhall/gascity#8364), each with a
+	// freeable sleep reason and no assigned work, reused through the wake
+	// path — see reusablePoolSessionInfo. Nothing in the reconciler closes
+	// orphaned asleep beads; an earlier version of this comment claimed it
+	// did.
 	for _, candidate := range reusablePoolSessionInfosForRequest(bp, cfgAgent, template, request, decisionTime, used) {
 		if desiredName := strings.TrimSpace(candidate.SessionNameMetadata); desiredName != "" {
 			slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, candidate, usedSlots)
