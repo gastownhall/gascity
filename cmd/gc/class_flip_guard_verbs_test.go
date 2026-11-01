@@ -354,9 +354,12 @@ func TestGcBdImportSkipInfraWritesAWorkOnlyCopy(t *testing.T) {
 		}
 		var copyPath string
 		for _, a := range g.args {
-			if i := strings.Index(a, "gc-bd-import-work-"); i >= 0 {
+			if strings.Contains(a, "/gc-bd-judged-") {
 				copyPath = strings.TrimPrefix(a, "--input=")
 			}
+		}
+		if filepath.Base(copyPath) != "a.jsonl" {
+			t.Fatalf("%v: the work-only copy %q does not keep the archive's name", argv, copyPath)
 		}
 		data, err := os.ReadFile(copyPath)
 		if err != nil {
@@ -367,8 +370,8 @@ func TestGcBdImportSkipInfraWritesAWorkOnlyCopy(t *testing.T) {
 			t.Fatalf("%v: work-only copy = %q", argv, got)
 		}
 		g.cleanup()
-		if _, err := os.Stat(copyPath); !os.IsNotExist(err) {
-			t.Errorf("%v: the work-only copy outlived the command", argv)
+		if _, err := os.Stat(filepath.Dir(copyPath)); !os.IsNotExist(err) {
+			t.Errorf("%v: the work-only copy's directory outlived the command", argv)
 		}
 	}
 
