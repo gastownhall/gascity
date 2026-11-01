@@ -813,8 +813,14 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 				return fmt.Errorf("custom sling_query requires a runner")
 			}
 			slingCmd, _ := sling.BuildSlingCommandForAgent("sling_query", agentCfg.EffectiveSlingQuery(), req.BeadID, r.deps.CityPath, r.deps.CityName, agentCfg, r.deps.Cfg.Rigs)
-			_, err := r.deps.Runner(req.WorkDir, slingCmd, req.Env)
-			return err
+			out, err := r.deps.Runner(req.WorkDir, slingCmd, req.Env)
+			if err != nil {
+				if trimmed := strings.TrimSpace(out); trimmed != "" {
+					return fmt.Errorf("%w\n%s", err, trimmed)
+				}
+				return err
+			}
+			return nil
 		}
 	}
 	// The core names the store that holds the bead when it is not the work
