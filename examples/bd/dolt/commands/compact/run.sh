@@ -2250,6 +2250,7 @@ write_quarantine_marker() {
   write_compact_marker "$quarantine_dir" "$db" "$reason" \
     "flatten_preflight_head=${head:-}" \
     "flatten_pre_reset_head=${head_before_reset:-}" \
+    "flatten_preflight_at=${preflight_at:-}" \
     "flatten_head=${flatten_head:-}" \
     "flatten_post_verify_head=${post_verify_head:-}" \
     "preflight_db_value_hash=${preflight_hash:-}" \
@@ -3034,6 +3035,7 @@ flatten_database() {
   final_verify_head=""
   preflight_hash=""
   postflight_hash=""
+  preflight_at=""
   writer_race_detected=0
   preflight_excluded_tables=""
 
@@ -3506,6 +3508,11 @@ flatten_database() {
     fi
     if [ "$current_head" = "$head" ]; then
       preflight_succeeded=true
+      # HEAD held across the whole gather, so this is the moment the preflight
+      # read is confirmed. The preflight commit is unreachable once the flatten
+      # lands; the marker keeps this time for readers that need to bound writes
+      # made at or after the preflight.
+      preflight_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
       break
     fi
 

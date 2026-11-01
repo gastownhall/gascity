@@ -3726,6 +3726,37 @@ func TestCompactScriptQuarantinesSameRowCountWriterBeforeFullGC(t *testing.T) {
 	)
 }
 
+// The quarantine marker stamps the UTC time of the successful preflight read.
+// The preflight and pre-reset commits are unreachable once the flatten lands,
+// so a reader that inspects writes as of flatten_head at or after the
+// preflight can only get that time from this field.
+func TestCompactScriptQuarantineMarkerStampsPreflightTime(t *testing.T) {
+	for _, mode := range []string{"same_row_count_writer", "db_hash_empty_after_flatten"} {
+		t.Run(mode, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			before := time.Now().UTC().Truncate(time.Second)
+			out, err := fixture.run(t, mode, "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+			after := time.Now().UTC()
+			if err == nil {
+				t.Fatalf("compact succeeded despite quarantine trigger %s:\n%s", mode, out)
+			}
+			marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+			raw := compactMarkerValue(t, marker, "flatten_preflight_at")
+			preflightAt, err := time.Parse("2006-01-02T15:04:05Z", raw)
+			if err != nil {
+				t.Fatalf("flatten_preflight_at=%q is not a UTC YYYY-MM-DDTHH:MM:SSZ timestamp: %v", raw, err)
+			}
+			if preflightAt.Before(before) || preflightAt.After(after) {
+				t.Fatalf("flatten_preflight_at=%s outside the run window [%s, %s]", raw, before.Format(time.RFC3339), after.Format(time.RFC3339))
+			}
+			createdAt := compactMarkerValue(t, marker, "created_at")
+			if raw > createdAt {
+				t.Fatalf("flatten_preflight_at=%s is later than marker created_at=%s", raw, createdAt)
+			}
+		})
+	}
+}
+
 func TestCompactScriptFailsOnEmptyPreflightValueHash(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "db_hash_empty", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
