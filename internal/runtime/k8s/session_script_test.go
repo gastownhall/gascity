@@ -451,13 +451,20 @@ func runScriptCommand(env []string, stdin io.Reader, name string, args ...string
 	return cmd.CombinedOutput()
 }
 
-// runUnderEnvClearingSu runs a pod's complete shell argv with a fake su
-// (which, like `su -`, clears the environment), tmux (which records the
-// environment its server would start with) and sleep. It returns what tmux
-// saw.
+// runUnderEnvClearingSu runs the pod command's su launch segment with a fake
+// su (which, like `su -`, clears the environment), tmux (which records the
+// environment its server would start with) and sleep. It skips the container
+// setup prefix, which creates users and waits for the projected workspace and
+// is provided by the real pod environment rather than this shell-level test.
+// It returns what tmux saw.
 func runUnderEnvClearingSu(t *testing.T, command []string, podEnv map[string]string) string {
 	t.Helper()
-	if len(command) < 3 || !strings.Contains(command[0], "su - ") {
+	if len(command) < 3 {
+		t.Fatalf("no dynamic-user agent launch in %#v", command)
+	}
+	const launchPrefix = `printf '%s' "$@" | su - `
+	at := strings.Index(command[0], launchPrefix)
+	if at < 0 {
 		t.Fatalf("no dynamic-user agent launch in %#v", command)
 	}
 	dir := t.TempDir()
@@ -476,7 +483,8 @@ func runUnderEnvClearingSu(t *testing.T, command []string, podEnv map[string]str
 	for k, v := range podEnv {
 		env = append(env, k+"="+v)
 	}
-	if out, err := runScriptCommand(env, nil, "/bin/sh", append([]string{"-c"}, command...)...); err != nil {
+	args := append([]string{"-c", command[0][at:]}, command[1:]...)
+	if out, err := runScriptCommand(env, nil, "/bin/sh", args...); err != nil {
 		t.Fatalf("running the launch: %v\n%s", err, out)
 	}
 	got, err := os.ReadFile(envOut)
