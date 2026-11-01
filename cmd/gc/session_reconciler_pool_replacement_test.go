@@ -537,6 +537,33 @@ func TestReusablePoolSessionInfo_PersistentSingletonAsleepFreeableIsReusable(t *
 			}
 		})
 	}
+
+	// Pool-shape variants: only the canonical singleton and one_shot shapes
+	// wake-reuse a freeable asleep row. Every other persistent shape keeps
+	// today's exclusion.
+	shapes := []struct {
+		name  string
+		agent *config.Agent
+		want  bool
+	}{
+		{"persistent max=3", &config.Agent{Name: "worker", Dir: "rig", MaxActiveSessions: intPtr(3)}, false},
+		{"persistent uncapped", &config.Agent{Name: "worker", Dir: "rig"}, false},
+		{"persistent max=1 with namepool", &config.Agent{Name: "worker", Dir: "rig", MaxActiveSessions: intPtr(1), NamepoolNames: []string{"ann", "bob"}}, false},
+		{"one_shot control", &config.Agent{Name: "worker", Dir: "rig", Lifecycle: config.AgentLifecycleOneShot}, true},
+	}
+	for _, tc := range shapes {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			info := base
+			info.ID = "session-shape-" + tc.name
+			info.SleepReason = "idle"
+			bp := &agentBuildParams{}
+			if got := reusablePoolSessionInfo(bp, tc.agent, template, info, nil); got != tc.want {
+				t.Fatalf("reusablePoolSessionInfo(%s, asleep, sleep_reason=idle) = %v; want %v",
+					tc.name, got, tc.want)
+			}
+		})
+	}
 }
 
 func createRoutedReadyBeadForReplacement(t *testing.T, store beads.Store, template, title string) beads.Bead {
