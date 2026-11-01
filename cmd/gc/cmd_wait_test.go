@@ -4969,9 +4969,10 @@ func TestPrepareWaitWakeState_KeepsWaitRegisteredDuringPendingReset(t *testing.T
 // reminder of a wait registered while a fresh restart was pending: it is meant
 // for the conversation that restart starts, so the dispatcher holds it while
 // the outgoing incarnation is live with the restart in flight (requested, or
-// committed by the handoff) and enqueues it once after the start. A reset
-// marker with no restart behind it holds nothing: no start is coming, so the
-// reminder goes to the live conversation as before.
+// committed by the handoff) and enqueues it once after the start, fenced on
+// the epoch the start opened under the attempt's id. A reset marker with no
+// restart behind it holds nothing: no start is coming, so the reminder goes
+// to the live conversation as before.
 func TestDispatchReadyWaitNudges_HoldsWaitRegisteredDuringPendingReset(t *testing.T) {
 	// Manager.RequestFreshRestart's markers.
 	requested := map[string]string{"restart_requested": "true", "continuation_reset_pending": "true"}
@@ -4997,10 +4998,7 @@ func TestDispatchReadyWaitNudges_HoldsWaitRegisteredDuringPendingReset(t *testin
 		t.Run(tc.name, func(t *testing.T) {
 			setWaitTestFileBeads(t)
 			dir := t.TempDir()
-			store, err := openCityStoreAt(dir)
-			if err != nil {
-				t.Fatalf("openCityStoreAt: %v", err)
-			}
+			store := beads.NewMemStore()
 			sessionMeta := map[string]string{
 				"session_name":       "worker",
 				"agent_name":         "worker",
@@ -5067,10 +5065,14 @@ func TestDispatchReadyWaitNudges_HoldsWaitRegisteredDuringPendingReset(t *testin
 			}
 
 			dispatch("before the start")
-			if got := queued("before the start"); len(got) != tc.wantBeforeStart {
+			got := queued("before the start")
+			if len(got) != tc.wantBeforeStart {
 				t.Fatalf("before the start: queued %d nudges, want %d", len(got), tc.wantBeforeStart)
 			}
 			if tc.wantBeforeStart != 0 {
+				if got[0].ContinuationEpoch != "2" {
+					t.Fatalf("before the start: queued nudge epoch = %q, want the live conversation's, 2", got[0].ContinuationEpoch)
+				}
 				return
 			}
 
@@ -5089,12 +5091,15 @@ func TestDispatchReadyWaitNudges_HoldsWaitRegisteredDuringPendingReset(t *testin
 			}
 			dispatch("after the start")
 			dispatch("after the start, second pass")
-			got := queued("after the start")
+			got = queued("after the start")
 			if len(got) != 1 {
 				t.Fatalf("after the start: queued %d nudges, want 1", len(got))
 			}
 			if want := "wait-" + waitBead.ID + "-2-1"; got[0].ID != want {
 				t.Fatalf("after the start: queued nudge id = %q, want %q", got[0].ID, want)
+			}
+			if got[0].ContinuationEpoch != "3" {
+				t.Fatalf("after the start: queued nudge epoch = %q, want the conversation the reset opened, 3", got[0].ContinuationEpoch)
 			}
 		})
 	}

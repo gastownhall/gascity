@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1114,5 +1115,115 @@ func TestWaitPrepareRetainsAWaitWhoseNoticeReadFails(t *testing.T) {
 	}
 	if n := strings.Count(logs.String(), "wait "+wait.ID+": finalizing from nudge "+op.ID); n != 1 {
 		t.Fatalf("logged the failure %d times, want once: %q", n, logs.String())
+	}
+}
+
+// startConsumingTheReset is a start of f's session that consumes its pending
+// fresh restart and opens epoch under incarnation token: the row as the
+// controller's PreWake leaves it, the request cleared and the state active,
+// and the runtime restarted under it, idle long enough for the quiescence
+// rule.
+func startConsumingTheReset(t *testing.T, f *laneFixture, epoch int, token string) {
+	t.Helper()
+	p := sessionpkg.PreWakePatch(sessionpkg.PreWakePatchInput{Generation: epoch, InstanceToken: token, ContinuationEpoch: epoch, Now: time.Now().UTC()})
+	p["restart_requested"] = ""
+	p["state"] = string(sessionpkg.StateActive)
+	if err := sessionFrontDoor(f.store).ApplyPatch(f.id, p); err != nil {
+		t.Fatalf("starting the session at epoch %d: %v", epoch, err)
+	}
+	if err := f.sp.Stop(f.name); err != nil {
+		t.Fatalf("stopping the fake runtime: %v", err)
+	}
+	e := strconv.Itoa(epoch)
+	env := map[string]string{runtime.RuntimeEpochEnv: e, runtime.ContinuationEpochEnv: e, runtime.InstanceTokenEnv: token}
+	if err := f.sp.Start(context.Background(), f.name, runtime.Config{Env: env}); err != nil {
+		t.Fatalf("starting the fake runtime: %v", err)
+	}
+	f.sp.SetActivity(f.name, time.Now().Add(-time.Minute))
+	f.token = token
+}
+
+// A wait registered while a fresh restart is pending belongs to the
+// conversation the restart opens (SESSION-RECON-022). Its reminder is held
+// while the outgoing conversation runs with the restart in flight. Once the
+// start opens epoch 2, the reminder's notice keeps the attempt's key but is
+// scoped to epoch 2, so the lane delivers it there and the wait closes. A
+// second reset into epoch 3 before the lane delivers it still fences the
+// notice off, and the wait is canceled continuation-stale.
+func TestWaitRegisteredDuringPendingResetNoticesTheConversationTheResetOpens(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		secondReset bool
+		arm         opjournal.Arm
+		nudges      int
+		state       string
+		lastError   string
+	}{
+		{name: "delivered after the start", arm: opjournal.ArmSucceeded, nudges: 1, state: waitStateClosed},
+		{name: "fenced off by a second reset", secondReset: true, arm: opjournal.ArmSkipped, state: waitStateCanceled, lastError: "continuation-stale"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLaneFixture(t, func(meta map[string]string) {
+				meta["restart_requested"] = "true"
+				meta["continuation_reset_pending"] = "true"
+			})
+			newNoticeLaneHost(t, f, "message")
+			st := f.laneStore(t)
+			dep, err := f.store.Create(beads.Bead{Title: "dependency", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			wait, err := sessionFrontDoor(f.store).CreateWait(sessionpkg.WaitSpec{
+				SessionID: f.id, Kind: "deps", DepIDs: []string{dep.ID}, DepMode: "all",
+				Note: "Pick up the next step.", Now: time.Now().UTC(),
+			})
+			if err != nil {
+				t.Fatalf("CreateWait: %v", err)
+			}
+			if wait.RegisteredEpoch != "1" || !wait.RegisteredResetPending {
+				t.Fatalf("wait registered at epoch %q, reset pending %v; want epoch 1 with the reset pending", wait.RegisteredEpoch, wait.RegisteredResetPending)
+			}
+			if err := f.store.Close(dep.ID); err != nil {
+				t.Fatal(err)
+			}
+			if ready := prepareWaits(t, f); !ready[f.id] {
+				t.Fatalf("before the start: ready-wait set = %v, want the session in it", ready)
+			}
+			dispatchWaits(t, f)
+			if open := f.openOps(t); len(open) != 0 {
+				t.Fatalf("before the start: open ops = %+v, want the reminder held", open)
+			}
+
+			startConsumingTheReset(t, f, 2, "tok-2")
+			if ready := prepareWaits(t, f); !ready[f.id] {
+				t.Fatalf("after the start: ready-wait set = %v, want the wait still ready", ready)
+			}
+			dispatchWaits(t, f)
+			op := waitNotice(t, f, st, wait)
+			if op.Scope != (opjournal.Scope{Kind: opjournal.ScopeContext, Epoch: 2}) {
+				t.Fatalf("notice scope = %+v, want the context epoch the reset opened, 2", op.Scope)
+			}
+			if tc.secondReset {
+				startConsumingTheReset(t, f, 3, "tok-3")
+			}
+			if _, err := f.pass(context.Background(), t, f.lane(t, st), st, nil); err != nil {
+				t.Fatalf("lane pass: %v", err)
+			}
+			if got := f.get(t, st, op.ID); got.Status != opjournal.StatusClosed || got.Outcome.Arm != tc.arm {
+				t.Fatalf("notice = %s %+v, want closed %s", got.Status, got.Outcome, tc.arm)
+			}
+			if n := len(f.nudges()); n != tc.nudges {
+				t.Fatalf("runtime received %d nudges, want %d", n, tc.nudges)
+			}
+			if ready := prepareWaits(t, f); ready[f.id] {
+				t.Fatalf("ready-wait set = %v, want the session out of it", ready)
+			}
+			if got := waitNow(t, f, wait); got.State != tc.state {
+				t.Fatalf("wait state = %s, want %s", got.State, tc.state)
+			}
+			if got := waitLastError(t, f, wait); got != tc.lastError {
+				t.Fatalf("wait last_error = %q, want %q", got, tc.lastError)
+			}
+		})
 	}
 }

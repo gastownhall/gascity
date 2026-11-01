@@ -777,6 +777,34 @@ func TestWaitInfoContinuationStale(t *testing.T) {
 	}
 }
 
+func TestWaitInfoDeliveryEpoch(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		registered   string
+		flagged      bool
+		sessionEpoch string
+		want         string
+	}{
+		{name: "unflagged/at-registered-epoch", registered: "2", sessionEpoch: "2", want: "2"},
+		{name: "unflagged/stale", registered: "2", sessionEpoch: "3", want: "2"},
+		{name: "flagged/at-registered-epoch", registered: "2", flagged: true, sessionEpoch: "2", want: "2"},
+		{name: "flagged/at-next-epoch", registered: "2", flagged: true, sessionEpoch: "3", want: "3"},
+		{name: "flagged/two-epochs-on", registered: "2", flagged: true, sessionEpoch: "4", want: "2"},
+		{name: "flagged/epoch-before", registered: "2", flagged: true, sessionEpoch: "1", want: "2"},
+		{name: "flagged/non-numeric-session", registered: "2", flagged: true, sessionEpoch: "x", want: "2"},
+		{name: "flagged/empty-session", registered: "2", flagged: true, want: "2"},
+		{name: "flagged/empty-registered", flagged: true, sessionEpoch: "3", want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := WaitInfo{RegisteredEpoch: tc.registered, RegisteredResetPending: tc.flagged}
+			if got := w.DeliveryEpoch(Info{ContinuationEpoch: tc.sessionEpoch}); got != tc.want {
+				t.Fatalf("DeliveryEpoch(registered=%q flagged=%v, session=%q) = %q, want %q",
+					tc.registered, tc.flagged, tc.sessionEpoch, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestWaitInfoHeldForPendingReset(t *testing.T) {
 	const committedAt = "2026-10-24T16:07:00Z"
 	for _, tc := range []struct {
