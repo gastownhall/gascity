@@ -88,14 +88,17 @@ EVENTS="$(gc events --type bead.updated --since "$LOOKBACK" 2>/dev/null)" || exi
 # Reduce to unique "<bead_id>\t<routed_to>" pairs. Only events that actually
 # carry a non-empty gc.routed_to target are considered.
 #
-# The bead.updated payload is flat — .payload.id and .payload.metadata — not
-# the nested .payload.bead.{id,metadata} an earlier schema exposed. The nested
-# paths match nothing against the current event shape, so every routed bead was
-# silently dropped and no nudge was ever delivered.
+# A bead.updated payload takes two wire shapes: `gc events` serves the typed API
+# envelope, where the bead is nested under .payload.bead, while the raw bead
+# snapshot stored in .gc/events.jsonl is flat (.payload.id, .payload.metadata).
+# The shape has flipped before, and a selector that reads only one of them
+# matches nothing against the other, so every routed bead is silently dropped
+# and no nudge is ever delivered. Accept both: (.payload.bead // .payload).
 PAIRS="$(printf '%s\n' "$EVENTS" \
-    | jq -r 'select(.payload.metadata."gc.routed_to" != null
-                    and .payload.metadata."gc.routed_to" != "")
-             | [.payload.id, .payload.metadata."gc.routed_to"] | @tsv' 2>/dev/null \
+    | jq -r '(.payload.bead // .payload) as $b
+             | select($b.metadata."gc.routed_to" != null
+                      and $b.metadata."gc.routed_to" != "")
+             | [$b.id, $b.metadata."gc.routed_to"] | @tsv' 2>/dev/null \
     | sort -u)" || PAIRS=""
 [ -n "$PAIRS" ] || exit 0
 
