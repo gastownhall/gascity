@@ -648,6 +648,14 @@
           "activity": {
             "type": "string"
           },
+          "activity_source": {
+            "description": "Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.",
+            "enum": [
+              "program",
+              "transcript"
+            ],
+            "type": "string"
+          },
           "available": {
             "type": "boolean"
           },
@@ -688,6 +696,10 @@
             "$ref": "#/components/schemas/PoolLimits",
             "description": "Configured session limits of the agent (or of its pool)."
           },
+          "program_status": {
+            "$ref": "#/components/schemas/SessionProgramStatus",
+            "description": "The agent session program's own status report (OSC 7501), present while the city's program_status switch is shadow or on and the reading is valid. Absent means the status is unknown, never idle."
+          },
           "provider": {
             "type": "string"
           },
@@ -701,6 +713,7 @@
             "$ref": "#/components/schemas/SessionInfo"
           },
           "state": {
+            "description": "Agent state: suspended, quarantined, stopped, working, waiting, idle, blocked or error. blocked and error come only from the session program's own status report, under the city's program_status switch on.",
             "type": "string"
           },
           "suspended": {
@@ -3490,6 +3503,9 @@
           },
           {
             "$ref": "#/components/schemas/SessionPoolSlotRetiredAtDrainDeadlinePayload"
+          },
+          {
+            "$ref": "#/components/schemas/SessionProgramStatusShadowPayload"
           },
           {
             "$ref": "#/components/schemas/SessionResetStalledPayload"
@@ -8735,7 +8751,7 @@
         "additionalProperties": false,
         "properties": {
           "activity": {
-            "description": "Session activity state: 'idle' or 'in-turn'.",
+            "description": "Session activity state: 'idle' or 'in-turn', derived from the transcript under every program_status switch. The session program's own status arrives in the program_status frame.",
             "examples": [
               "idle"
             ],
@@ -9280,6 +9296,225 @@
         ],
         "type": "object"
       },
+      "SessionProgramStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "app": {
+            "description": "The program's self-reported name.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "What a blocked program waits for, when it says. Only with state blocked.",
+            "enum": [
+              "permission",
+              "question",
+              "auth"
+            ],
+            "type": "string"
+          },
+          "progress": {
+            "description": "Percent complete the program reports, only with working or blocked.",
+            "format": "int64",
+            "maximum": 100,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "quiet_since": {
+            "description": "When the program last left working or blocked for an input boundary; absent if it never has in this capture.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "since": {
+            "description": "When the program entered state, by the capture host's clock.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "state": {
+            "description": "The state the program reports. done and error are input boundaries like idle (error is a failed turn with the program alive); blocked is waiting on the user.",
+            "enum": [
+              "idle",
+              "working",
+              "done",
+              "blocked",
+              "error"
+            ],
+            "type": "string"
+          },
+          "working_children": {
+            "description": "Child tasks the program reports as working.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "state",
+          "since",
+          "working_children"
+        ],
+        "type": "object"
+      },
+      "SessionProgramStatusEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "program_status": {
+            "$ref": "#/components/schemas/SessionProgramStatus",
+            "description": "The session program's current status; absent when it is unknown (never read as idle)."
+          }
+        },
+        "type": "object"
+      },
+      "SessionProgramStatusShadowPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "agree": {
+            "description": "Whether the two readings agree.",
+            "type": "boolean"
+          },
+          "dropped": {
+            "description": "Comparisons this process dropped since its last recorded one.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "family": {
+            "description": "The session's provider family (resolved built-in ancestor).",
+            "type": "string"
+          },
+          "hold_live": {
+            "description": "Whether a hold derived from the record is still within its bound.",
+            "type": "boolean"
+          },
+          "kind": {
+            "description": "The blocked state's kind.",
+            "enum": [
+              "permission",
+              "question",
+              "auth"
+            ],
+            "type": "string"
+          },
+          "latency_ms": {
+            "description": "Program signal minus scrape signal, in milliseconds (timed points only).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "point": {
+            "description": "The decision point.",
+            "enum": [
+              "wait_for_idle",
+              "typing_gate",
+              "submit_confirm",
+              "escape_resend",
+              "readiness",
+              "startup_ladder",
+              "interrupt_settle",
+              "pending",
+              "wait_idle_preread",
+              "execution_backstop",
+              "claim_nudge_hold",
+              "work_ladder",
+              "proved_idle",
+              "queued_delivery",
+              "drain_reminder",
+              "observation"
+            ],
+            "type": "string"
+          },
+          "program": {
+            "description": "What the program-status record would decide.",
+            "enum": [
+              "idle",
+              "busy",
+              "indeterminate",
+              "pending",
+              "confirmed",
+              "unconfirmed",
+              "ready",
+              "not_ready",
+              "settled",
+              "unsettled",
+              "hold",
+              "no_hold",
+              "resend",
+              "no_resend",
+              "none"
+            ],
+            "type": "string"
+          },
+          "reader_verified": {
+            "description": "Whether the process table confirmed the capture reader.",
+            "type": "boolean"
+          },
+          "record_age_ms": {
+            "description": "How long the record's root has been in its state, in milliseconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "scrape": {
+            "description": "Today's screen reading, which decided.",
+            "enum": [
+              "idle",
+              "busy",
+              "indeterminate",
+              "pending",
+              "confirmed",
+              "unconfirmed",
+              "ready",
+              "not_ready",
+              "settled",
+              "unsettled",
+              "hold",
+              "no_hold",
+              "resend",
+              "no_resend",
+              "none"
+            ],
+            "type": "string"
+          },
+          "session_id": {
+            "description": "The session's bead id, when the decision point knows it.",
+            "type": "string"
+          },
+          "state": {
+            "description": "The record's root state (valid readings only).",
+            "enum": [
+              "idle",
+              "working",
+              "done",
+              "blocked",
+              "error"
+            ],
+            "type": "string"
+          },
+          "timed": {
+            "description": "Whether latency_ms was measured.",
+            "type": "boolean"
+          },
+          "validity": {
+            "description": "The record reading's validity.",
+            "enum": [
+              "unread",
+              "valid",
+              "not_armed",
+              "silent",
+              "cleared",
+              "reader_lost",
+              "exited"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "point",
+          "scrape",
+          "program",
+          "agree",
+          "validity",
+          "hold_live",
+          "record_age_ms",
+          "reader_verified"
+        ],
+        "type": "object"
+      },
       "SessionRawMessageFrame": {
         "description": "Provider-native transcript frame. Gas City forwards the exact JSON the provider wrote to its session log, so the shape is provider-specific and can be any JSON value. The producing provider is identified by the Provider field on the enclosing envelope; consumers dispatch per-provider frame parsing keyed by that identifier.",
         "title": "Session raw transcript frame"
@@ -9394,6 +9629,14 @@
           "activity": {
             "type": "string"
           },
+          "activity_source": {
+            "description": "Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.",
+            "enum": [
+              "program",
+              "transcript"
+            ],
+            "type": "string"
+          },
           "agent_kind": {
             "type": "string"
           },
@@ -9452,6 +9695,10 @@
           },
           "pool": {
             "type": "string"
+          },
+          "program_status": {
+            "$ref": "#/components/schemas/SessionProgramStatus",
+            "description": "The session program's own status report (OSC 7501), present while the city's program_status switch is shadow or on and the reading is valid. Absent means the status is unknown, never idle."
           },
           "provider": {
             "type": "string"
@@ -9582,7 +9829,7 @@
         "type": "object"
       },
       "SessionStreamCommonEvent": {
-        "description": "Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, and keepalive heartbeats. The concrete variant is identified by the SSE event name.",
+        "description": "Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, program-status changes, and keepalive heartbeats. The concrete variant is identified by the SSE event name.",
         "oneOf": [
           {
             "$ref": "#/components/schemas/SessionActivityEvent"
@@ -9592,6 +9839,9 @@
           },
           {
             "$ref": "#/components/schemas/SessionPendingClearedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/SessionProgramStatusEvent"
           },
           {
             "$ref": "#/components/schemas/HeartbeatEvent"
@@ -14537,6 +14787,7 @@
             "session.pending": "#/components/schemas/TypedEventStreamEnvelopeSessionPending",
             "session.pending_cleared": "#/components/schemas/TypedEventStreamEnvelopeSessionPendingCleared",
             "session.pool_slot_retired_at_drain_deadline": "#/components/schemas/TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline",
+            "session.program_status_shadow": "#/components/schemas/TypedEventStreamEnvelopeSessionProgramStatusShadow",
             "session.quarantined": "#/components/schemas/TypedEventStreamEnvelopeSessionQuarantined",
             "session.reset_stalled": "#/components/schemas/TypedEventStreamEnvelopeSessionResetStalled",
             "session.stopped": "#/components/schemas/TypedEventStreamEnvelopeSessionStopped",
@@ -14841,6 +15092,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionProgramStatusShadow"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionQuarantined"
@@ -16437,6 +16691,7 @@
                 "session.drain_fence_unavailable",
                 "work.started_unrecorded",
                 "session.demand_claim_divergence",
+                "session.program_status_shadow",
                 "session.cold_start_timeout",
                 "session.conversation_reset",
                 "session.pending",
@@ -20204,6 +20459,63 @@
         "title": "TypedEventStreamEnvelope session.pool_slot_retired_at_drain_deadline",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionProgramStatusShadow": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionProgramStatusShadowPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.program_status_shadow",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.program_status_shadow",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionQuarantined": {
         "additionalProperties": false,
         "properties": {
@@ -22235,6 +22547,7 @@
             "session.pending": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPending",
             "session.pending_cleared": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPendingCleared",
             "session.pool_slot_retired_at_drain_deadline": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline",
+            "session.program_status_shadow": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow",
             "session.quarantined": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionQuarantined",
             "session.reset_stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionResetStalled",
             "session.stopped": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStopped",
@@ -22539,6 +22852,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionQuarantined"
@@ -24238,6 +24554,7 @@
                 "session.drain_fence_unavailable",
                 "work.started_unrecorded",
                 "session.demand_claim_divergence",
+                "session.program_status_shadow",
                 "session.cold_start_timeout",
                 "session.conversation_reset",
                 "session.pending",
@@ -28260,6 +28577,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.pool_slot_retired_at_drain_deadline",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionProgramStatusShadowPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.program_status_shadow",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.program_status_shadow",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionQuarantined": {
@@ -53622,7 +54000,7 @@
     },
     "/v0/city/{cityName}/session/{id}/stream": {
       "get": {
-        "description": "Server-Sent Events stream of session transcript updates. Streams turns (conversation format), raw messages (JSONL format), or structured messages based on the format query parameter. Emits activity and pending events for tool approval prompts.",
+        "description": "Server-Sent Events stream of session transcript updates. Streams turns (conversation format), raw messages (JSONL format), or structured messages based on the format query parameter. Emits activity and pending events for tool approval prompts, and a program_status event when the session program's own reported status changes (only while the city's program_status switch is shadow or on; a frame without program_status means the status became unknown).",
         "operationId": "stream-session",
         "parameters": [
           {
@@ -53829,6 +54207,32 @@
                           "event"
                         ],
                         "title": "Event pending_cleared",
+                        "type": "object"
+                      },
+                      {
+                        "properties": {
+                          "data": {
+                            "$ref": "#/components/schemas/SessionProgramStatusEvent"
+                          },
+                          "event": {
+                            "const": "program_status",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event resume cursor.",
+                            "type": "string"
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data",
+                          "event"
+                        ],
+                        "title": "Event program_status",
                         "type": "object"
                       },
                       {

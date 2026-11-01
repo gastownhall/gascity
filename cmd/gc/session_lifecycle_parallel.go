@@ -506,6 +506,12 @@ type startExecutionOptions struct {
 	// capacityGuard gates starts per serving endpoint. Nil leaves every
 	// endpoint unguarded (legacy failure accounting).
 	capacityGuard *endpointCapacityGuard
+	// deferralMemo records the never-started creates this run deferred at a
+	// start gate. Nil records nothing.
+	deferralMemo *startDeferralMemo
+	// deferralSeen is the never-started pending creates the run's planning
+	// snapshot contained. Nil publishes nothing to the memo.
+	deferralSeen map[string]struct{}
 	// onDeathGate holds names whose on_death hook is queued or running;
 	// their starts wait. Nil holds nothing.
 	onDeathGate *onDeathGate
@@ -5531,10 +5537,21 @@ func executePlannedStartsTraced(
 	trace *sessionReconcilerTraceCycle,
 	options ...startExecutionOption,
 ) int {
-	if len(candidates) == 0 {
+	if ctx != nil && ctx.Err() != nil {
 		return 0
 	}
-	if ctx != nil && ctx.Err() != nil {
+	startOpts := startExecutionOptions{}
+	for _, apply := range options {
+		if apply != nil {
+			apply(&startOpts)
+		}
+	}
+	// The run's start-gate deferrals publish when it ends, unless its context
+	// was canceled: a canceled run did not offer every candidate a start. A run
+	// with no candidates still publishes, so the memo drops a drained backlog.
+	deferrals := startOpts.deferralMemo.beginPass(startOpts.deferralSeen)
+	defer deferrals.finish(ctx)
+	if len(candidates) == 0 {
 		return 0
 	}
 	// Session front door constructed once from the same store and threaded to
@@ -5544,12 +5561,6 @@ func executePlannedStartsTraced(
 	var sessFront *sessionpkg.Store
 	if store != nil {
 		sessFront = sessionFrontDoor(store)
-	}
-	startOpts := startExecutionOptions{}
-	for _, apply := range options {
-		if apply != nil {
-			apply(&startOpts)
-		}
 	}
 	stabilityWaiter := resolveStartStabilityWaiter(startOpts.stabilityWaiter)
 	sessionStaleKeyDetectionWaiter := startOpts.sessionStaleKeyDetectionWaiter
@@ -5619,6 +5630,7 @@ func executePlannedStartsTraced(
 		if wakeCount >= maxWakes {
 			for _, candidate := range waveCandidates {
 				logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "deferred_by_wake_budget", time.Time{}, time.Time{}, nil)
+				deferrals.noteGateDeferred(candidate.info.ID)
 			}
 			continue
 		}
@@ -5647,6 +5659,7 @@ func executePlannedStartsTraced(
 			if wakeCount >= maxWakes {
 				for _, candidate := range ready[offset:] {
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "deferred_by_wake_budget", time.Time{}, time.Time{}, nil)
+					deferrals.noteGateDeferred(candidate.info.ID)
 				}
 				break
 			}
@@ -5677,6 +5690,7 @@ func executePlannedStartsTraced(
 				// A planner call that has spent its prepare budget defers the
 				// rest before any slot, lease, ticket, breaker accounting or write.
 				if prepareSpend.deferIfSpent(stderr, trace, wave, candidate, cfg) {
+					deferrals.noteGateDeferred(candidate.info.ID)
 					continue
 				}
 				var release func()
@@ -5694,6 +5708,7 @@ func executePlannedStartsTraced(
 					if !reserved {
 						done()
 						logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), outcome, time.Time{}, time.Time{}, nil)
+						deferrals.noteStartOutcome(outcome, candidate.info.ID)
 						continue
 					}
 				}

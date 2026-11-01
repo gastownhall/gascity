@@ -3135,9 +3135,10 @@ func reapStaleSessionBeads(
 			continue
 		}
 		pendingCreate := info.PendingCreateClaim
-		// A never-started row held by its endpoint's capacity breaker is
-		// queued demand, not a phantom; the breaker's hold outlasts the lease
-		// windows below (endpointCapacityGuard.HoldsPendingCreate).
+		// A never-started row held by its endpoint's capacity breaker, or by a
+		// start-gate deferral, is queued demand, not a phantom; the hold
+		// outlasts the lease windows below (endpointCapacityGuard.HoldsPendingCreate,
+		// startDeferralMemo.Holds).
 		if strings.TrimSpace(info.LastWokeAt) == "" && holdsPendingCreate != nil && holdsPendingCreate(info) {
 			continue
 		}

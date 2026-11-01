@@ -1455,6 +1455,7 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, by Actor, id strin
 	if !ok {
 		return false, nil
 	}
+	m.shadowWaitIdlePreread(b, sessName)
 	if m.idleBoundaryOutOfReach(sessName) {
 		return false, nil
 	}
@@ -1484,6 +1485,7 @@ func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Be
 	if !ok {
 		return false, nil
 	}
+	m.shadowWaitIdlePreread(b, sessName)
 	if m.idleBoundaryOutOfReach(sessName) {
 		return false, nil
 	}
@@ -2070,6 +2072,14 @@ func (m *Manager) PendingByName(sessName string) (*runtime.PendingInteraction, b
 		return nil, true, fmt.Errorf("getting pending interaction: %w", err)
 	}
 	return pending, true, nil
+}
+
+// ProgramStatusByName reads the judged OSC 7501 program status of the runtime
+// session sessName from the backend serving it (runtime.ReadProgramStatus):
+// an Unread reading when that backend takes no such reading, otherwise the
+// backend's reading and error unchanged. It is observation only.
+func (m *Manager) ProgramStatusByName(sessName string) (runtime.ProgramStatus, error) {
+	return runtime.ReadProgramStatus(m.sp, sessName)
 }
 
 // Respond resolves the current pending interaction for a session.

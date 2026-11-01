@@ -47,6 +47,8 @@ go_test(
         "phase2_transcript_helpers_test.go",
         "phase3_conformance_test.go",
         "program_status_conformance_test.go",
+        "program_status_phase_test.go",
+        "program_status_shadow_test.go",
         "program_status_surfaces_test.go",
         "report_test.go",
         "structured_conformance_test.go",
