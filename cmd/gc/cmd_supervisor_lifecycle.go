@@ -1719,6 +1719,10 @@ func buildSupervisorServiceData() (*supervisorServiceData, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Child commands must use the same gc as ExecStart, even when an older
+	// user installation exists. Keep expanded provider tool paths after it.
+	servicePath := searchpath.Expand(homeDir, goruntime.GOOS, os.Getenv("PATH"))
+	servicePath = searchpath.Dedupe(append([]string{filepath.Dir(gcPath)}, servicePath...))
 	return &supervisorServiceData{
 		GCPath:            gcPath,
 		LogPath:           supervisorLogPath(),
@@ -1726,7 +1730,7 @@ func buildSupervisorServiceData() (*supervisorServiceData, error) {
 		XDGRuntimeDir:     xdgRuntimeDir,
 		LaunchdLabel:      supervisorLaunchdLabel(),
 		SafeName:          sanitizeServiceName(filepath.Base(home)),
-		Path:              searchpath.ExpandPath(homeDir, goruntime.GOOS, os.Getenv("PATH")),
+		Path:              strings.Join(servicePath, string(os.PathListSeparator)),
 		ExtraEnv:          extraEnv,
 		PortInUseExitCode: supervisorExitCodePortInUse,
 	}, nil

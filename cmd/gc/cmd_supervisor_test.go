@@ -1230,6 +1230,12 @@ func TestBuildSupervisorServiceDataExpandsUserManagedPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildSupervisorServiceData: %v", err)
 	}
+	// The service must keep its selected gc ahead of a stale ~/.local/bin/gc.
+	// Exec orders and agent commands commonly invoke gc through PATH.
+	parts := filepath.SplitList(data.Path)
+	if len(parts) == 0 || parts[0] != filepath.Dir(data.GCPath) {
+		t.Fatalf("service PATH %q selects user installs before the service binary %q", data.Path, data.GCPath)
+	}
 	if !slices.Contains(filepath.SplitList(data.Path), nvmBin) {
 		t.Fatalf("buildSupervisorServiceData PATH %q missing nvm bin %q", data.Path, nvmBin)
 	}
