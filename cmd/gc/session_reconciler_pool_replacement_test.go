@@ -433,3 +433,60 @@ func setPoolSessionActive(t *testing.T, store beads.Store, id string) {
 		}
 	}
 }
+
+// restartHandedOffPoolInfo builds a persistent pool row the way the restart
+// handoff leaves it: an awake row folded through restartHandoff, so drift in
+// the handoff's patch shows up here as a fixture failure.
+func restartHandedOffPoolInfo(t *testing.T, template string, now time.Time) session.Info {
+	t.Helper()
+	awake := session.Info{
+		ID:                  "session-restart-handoff",
+		Template:            template,
+		SessionNameMetadata: "fable-nomad--worker-1-pool",
+		Alias:               "fable-nomad/worker-1",
+		PoolManaged:         true,
+		PoolSlot:            "1",
+		MetadataState:       "awake",
+	}
+	handedOff := awake.ApplyPatch(restartHandoff("", true, finalizeFacts{Now: now}))
+	if handedOff.MetadataState != "asleep" ||
+		handedOff.ContinuationResetPending != "true" ||
+		handedOff.ResetCommittedAt != now.UTC().Format(time.RFC3339) ||
+		handedOff.SleepReason != "" {
+		t.Fatalf("restartHandoff fixture = state %q, continuation_reset_pending %q, reset_committed_at %q, sleep_reason %q; "+
+			"want asleep, true, %q, empty",
+			handedOff.MetadataState, handedOff.ContinuationResetPending, handedOff.ResetCommittedAt, handedOff.SleepReason,
+			now.UTC().Format(time.RFC3339))
+	}
+	return handedOff
+}
+
+// TestReusablePoolSessionInfo_PersistentRestartHandoffIsReusable: a pool row
+// stopped by a restart request is neither a crash nor a sleep. Its
+// reset-pending wake starts a fresh conversation, so the floor must be able to
+// take the row back instead of stalling on the canonical name it still holds.
+func TestReusablePoolSessionInfo_PersistentRestartHandoffIsReusable(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 30, 5, 0, 0, 0, time.UTC)
+	template := "fable-nomad/worker"
+	handedOff := restartHandedOffPoolInfo(t, template, now)
+
+	persistentAgent := &config.Agent{Name: "worker", Dir: "fable-nomad"}
+	if !reusablePoolSessionInfo(&agentBuildParams{}, persistentAgent, template, handedOff, nil) {
+		t.Fatalf("reusablePoolSessionInfo(persistent, restart handoff) = false; want true — " +
+			"a committed restart handoff with no sleep reason must be reusable or the pool stalls " +
+			"on its own runtime name until the session sweep")
+	}
+
+	oneShotAgent := &config.Agent{Name: "worker", Dir: "fable-nomad", Lifecycle: config.AgentLifecycleOneShot}
+	if !reusablePoolSessionInfo(&agentBuildParams{}, oneShotAgent, template, handedOff, nil) {
+		t.Fatalf("reusablePoolSessionInfo(one_shot, restart handoff) = false; want true")
+	}
+	bp := &agentBuildParams{
+		assignedWorkBeads: []beads.Bead{{ID: "work-1", Status: "in_progress", Assignee: handedOff.Alias}},
+	}
+	if reusablePoolSessionInfo(bp, oneShotAgent, template, handedOff, nil) {
+		t.Fatalf("reusablePoolSessionInfo(one_shot, restart handoff, work under its alias) = true; want false")
+	}
+}
