@@ -692,7 +692,7 @@ func TestLatestOrderFiredAt_RecentEventSkipsLastRun(t *testing.T) {
 		},
 	}
 
-	got, err := check.latestOrderFiredAt(evts, order, expected, now)
+	got, err := check.latestOrderFiredAt(evts, order, expected, 30*time.Second, now)
 	if err != nil {
 		t.Fatalf("latestOrderFiredAt returned error: %v", err)
 	}
@@ -723,7 +723,7 @@ func TestLatestOrderFiredAt_StaleEventConsultsLastRun(t *testing.T) {
 		},
 	}
 
-	got, err := check.latestOrderFiredAt(evts, order, expected, now)
+	got, err := check.latestOrderFiredAt(evts, order, expected, 30*time.Second, now)
 	if err != nil {
 		t.Fatalf("latestOrderFiredAt returned error: %v", err)
 	}
@@ -829,6 +829,77 @@ func TestOrderFiringCurrent_ReadsPatrolIntervalFromCityConfig(t *testing.T) {
 			}
 		})
 	}
+}
+
+// eventEvidenceSuffices must share classifyOrderFiring's overdue line, so
+// the event-log shortcut — inline and through the prefetch pass — can never
+// skip the authoritative order-run lookup for an order the classifier would
+// flag, and never pays the lookup for one it would call OK (ga-or367d).
+func TestEventEvidenceSufficesMatchesOverdueLine(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	controllerStarted := now.Add(-24 * time.Hour)
+
+	t.Run("predicate matches the classifier", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			expected time.Duration
+			patrol   time.Duration
+		}{
+			{"1m order 30s patrol", time.Minute, 30 * time.Second},
+			{"30s order 15s patrol", 30 * time.Second, 15 * time.Second},
+			{"4h order 30s patrol", 4 * time.Hour, 30 * time.Second},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				line := orderFiringOverdueAfter(tc.expected, tc.patrol)
+				order := orders.Order{Name: "paced-order", Trigger: "cooldown"}
+				for _, offset := range []time.Duration{-time.Second, 0, time.Second} {
+					age := line + offset
+					latest := now.Add(-age)
+					status, _, _ := classifyOrderFiring(order, now, tc.expected, tc.patrol, latest, controllerStarted)
+					if want := status == StatusOK; eventEvidenceSuffices(latest, tc.expected, tc.patrol, now) != want {
+						t.Errorf("age %s (overdue after %s): eventEvidenceSuffices disagrees with classifier status %v", age, line, status)
+					}
+				}
+			})
+		}
+		if eventEvidenceSuffices(time.Time{}, time.Minute, 30*time.Second, now) {
+			t.Errorf("a zero latest event must never suffice; the order-run lookup is required")
+		}
+	})
+
+	t.Run("skips the order-run lookup inside the line", func(t *testing.T) {
+		for _, tc := range []struct {
+			name       string
+			eventAge   time.Duration
+			wantCalled bool
+			want       CheckStatus
+		}{
+			{"2m event needs no lookup", 2 * time.Minute, false, StatusOK},
+			{"2m15s event needs the lookup", 2*time.Minute + 15*time.Second, true, StatusWarning},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				cityPath, cfg := orderFiringTestCity(t)
+				writeOrderFiringTestOrder(t, cityPath, "paced-cooldown", "cooldown", "1m")
+				writeOrderFiringTestEvents(t, cityPath,
+					events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+					events.Event{Type: events.OrderFired, Subject: "paced-cooldown", Ts: now.Add(-tc.eventAge)},
+				)
+				calls := 0
+				check := NewOrderFiringCurrentCheck(cfg, cityPath, WithOrderFiringCurrentLastRunFunc(func(orders.Order) (time.Time, error) {
+					calls++
+					return time.Time{}, nil
+				}))
+				check.clock = func() time.Time { return now }
+				result := check.Run(&CheckContext{CityPath: cityPath})
+				if (calls > 0) != tc.wantCalled {
+					t.Fatalf("order-run lookups = %d, want called = %v; details = %v", calls, tc.wantCalled, result.Details)
+				}
+				if result.Status != tc.want {
+					t.Fatalf("status = %v, want %v; msg = %s; details = %v", result.Status, tc.want, result.Message, result.Details)
+				}
+			})
+		}
+	})
 }
 
 // classifyOrderFiring paces a fired order's thresholds on the effective

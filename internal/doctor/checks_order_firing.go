@@ -227,7 +227,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 	// parallel. The pre-pass shares the cron-interval cache with the loop, so
 	// the expected intervals — and therefore which orders need a lookup — are
 	// identical to what the loop derives for itself.
-	lastRunFor := c.prefetchedLastRunFunc(c.pendingLastRunOrders(allOrders, firedEvents, suspendedRigs, cronIntervals, now))
+	lastRunFor := c.prefetchedLastRunFunc(c.pendingLastRunOrders(allOrders, firedEvents, suspendedRigs, cronIntervals, patrol, now))
 
 	for _, order := range allOrders {
 		if order.Trigger != "cron" && order.Trigger != "cooldown" {
@@ -247,7 +247,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 			blockingErrors++
 			continue
 		}
-		lastFired, err := c.latestOrderFiredAtUsing(lastRunFor, firedEvents, order, expected, now)
+		lastFired, err := c.latestOrderFiredAtUsing(lastRunFor, firedEvents, order, expected, patrol, now)
 		if err != nil {
 			worst = worseStatus(worst, StatusError)
 			result.Details = append(result.Details, fmt.Sprintf("%s: cannot read order history: %v", orderDisplayName(order), err))
@@ -597,19 +597,21 @@ func (c *OrderFiringCurrentCheck) latestControllerStartedAt(eventPath string) (t
 	return archived.Ts, nil
 }
 
-func (c *OrderFiringCurrentCheck) latestOrderFiredAt(evts []events.Event, order orders.Order, expected time.Duration, now time.Time) (time.Time, error) {
-	return c.latestOrderFiredAtUsing(c.lastRun, evts, order, expected, now)
+func (c *OrderFiringCurrentCheck) latestOrderFiredAt(evts []events.Event, order orders.Order, expected, patrol time.Duration, now time.Time) (time.Time, error) {
+	return c.latestOrderFiredAtUsing(c.lastRun, evts, order, expected, patrol, now)
 }
 
 // latestOrderFiredAtUsing is latestOrderFiredAt against a caller-supplied
 // order-run resolver, so the classification loop can read prefetched results
-// instead of issuing each store round-trip inline.
-func (c *OrderFiringCurrentCheck) latestOrderFiredAtUsing(lastRun OrderFiringCurrentLastRunFunc, evts []events.Event, order orders.Order, expected time.Duration, now time.Time) (time.Time, error) {
+// instead of issuing each store round-trip inline. Its event-log shortcut
+// shares the classifier's overdue line, so it skips the resolver exactly for
+// the orders classifyOrderFiring would call current.
+func (c *OrderFiringCurrentCheck) latestOrderFiredAtUsing(lastRun OrderFiringCurrentLastRunFunc, evts []events.Event, order orders.Order, expected, patrol time.Duration, now time.Time) (time.Time, error) {
 	latest := latestOrderFiredAt(evts, order.ScopedName())
 	if lastRun == nil {
 		return latest, nil
 	}
-	if !eventEvidenceSuffices(latest, expected, now) {
+	if !eventEvidenceSuffices(latest, expected, patrol, now) {
 		runAt, err := lastRun(order)
 		if err != nil {
 			return time.Time{}, err
@@ -622,11 +624,14 @@ func (c *OrderFiringCurrentCheck) latestOrderFiredAtUsing(lastRun OrderFiringCur
 }
 
 // eventEvidenceSuffices reports whether the event log alone answers "is this
-// order current". Anything else needs the authoritative order-run lookup: the
-// event log can lag, and a stale event must not be reported as a real outage
-// without confirmation.
-func eventEvidenceSuffices(latest time.Time, expected time.Duration, now time.Time) bool {
-	return !latest.IsZero() && now.Sub(latest) < expected+expected/2
+// order current". It shares the classifier's overdue line
+// (orderFiringOverdueAfter), so evidence suffices exactly when
+// classifyOrderFiring would call that age OK and the shortcut can never skip
+// the authoritative order-run lookup for an order the classifier would flag.
+// Anything else needs that lookup: the event log can lag, and a stale event
+// must not be reported as a real outage without confirmation.
+func eventEvidenceSuffices(latest time.Time, expected, patrol time.Duration, now time.Time) bool {
+	return !latest.IsZero() && now.Sub(latest) < orderFiringOverdueAfter(expected, patrol)
 }
 
 // pendingLastRunOrders returns the monitored orders the event log cannot
@@ -635,7 +640,7 @@ func eventEvidenceSuffices(latest time.Time, expected time.Duration, now time.Ti
 // orders need an authoritative lookup. Orders whose expected interval cannot be
 // computed are skipped: the loop reports that as its own error without ever
 // reaching the lookup.
-func (c *OrderFiringCurrentCheck) pendingLastRunOrders(allOrders []orders.Order, firedEvents []events.Event, suspendedRigs map[string]bool, cronIntervals map[string]time.Duration, now time.Time) []orders.Order {
+func (c *OrderFiringCurrentCheck) pendingLastRunOrders(allOrders []orders.Order, firedEvents []events.Event, suspendedRigs map[string]bool, cronIntervals map[string]time.Duration, patrol time.Duration, now time.Time) []orders.Order {
 	if c.lastRun == nil {
 		return nil
 	}
@@ -651,7 +656,7 @@ func (c *OrderFiringCurrentCheck) pendingLastRunOrders(allOrders []orders.Order,
 		if err != nil {
 			continue
 		}
-		if eventEvidenceSuffices(latestOrderFiredAt(firedEvents, order.ScopedName()), expected, now) {
+		if eventEvidenceSuffices(latestOrderFiredAt(firedEvents, order.ScopedName()), expected, patrol, now) {
 			continue
 		}
 		pending = append(pending, order)
