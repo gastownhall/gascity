@@ -2027,3 +2027,51 @@ func TestDrainBeadPagesHardPageCap(t *testing.T) {
 		t.Fatalf("requests = %d, want 3 (page cap bounds the loop)", n)
 	}
 }
+
+// TestClientListConvoysPartialAnswerIsAnError pins that a /convoys page the
+// server marks partial (a store it aggregates failed) fails ListConvoys rather
+// than returning the other stores' convoys as the whole list, on the first
+// page or a later one, and that the failure is not a local-fallback condition:
+// gc convoy list then exits 1, the way a failed store read does locally.
+func TestClientListConvoysPartialAnswerIsAnError(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		partialPage int
+	}{
+		{name: "first page", partialPage: 0},
+		{name: "later page", partialPage: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var page atomic.Int32
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				n := int(page.Add(1)) - 1
+				body := map[string]any{
+					"items": []map[string]any{{"id": fmt.Sprintf("gc-%d", n+1), "title": "c", "issue_type": "convoy", "status": "open"}},
+					"total": 2,
+				}
+				if n == 0 {
+					body["next_cursor"] = "page-2"
+				}
+				if n == tc.partialPage {
+					body["partial"] = true
+					body["partial_errors"] = []string{"rig beta: store unreachable"}
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(body)
+			}))
+			defer ts.Close()
+
+			c := NewCityScopedClient(ts.URL, "alpha")
+			got, err := c.ListConvoys()
+			if err == nil {
+				t.Fatalf("ListConvoys = %d convoys, nil error; want the partial answer to fail", len(got.Body))
+			}
+			if !strings.Contains(err.Error(), "rig beta: store unreachable") {
+				t.Errorf("err = %v, want the server's partial_errors named", err)
+			}
+			if ShouldFallbackForRead(c, err) {
+				t.Errorf("ShouldFallbackForRead(%v) = true, want false: a partial answer fails the read, it does not reroute it", err)
+			}
+		})
+	}
+}

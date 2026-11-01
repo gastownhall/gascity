@@ -960,7 +960,8 @@ func (c *Client) ListRigs() (CachedRead[[]RigView], error) {
 // server's default page (100) with nothing marking the rest as missing. The
 // CachedRead.AgeSeconds field carries the supervisor CachingStore age from the
 // first page's X-GC-Cache-Age-S response header so callers can surface
-// _cache_age_s on --json output and a staleness banner on human output.
+// _cache_age_s on --json output and a staleness banner on human output. A page
+// the server marks partial stops the drain with an error (convoysPage).
 func (c *Client) ListConvoys() (CachedRead[[]beads.Bead], error) {
 	if err := c.requireCityScope(); err != nil {
 		return CachedRead[[]beads.Bead]{}, err
@@ -969,7 +970,9 @@ func (c *Client) ListConvoys() (CachedRead[[]beads.Bead], error) {
 }
 
 // convoysPage is the GET /v0/city/{cityName}/convoys page fetcher for
-// drainBeadPages.
+// drainBeadPages. A page the server marks partial (a store it aggregates
+// failed) is a *partialListError: a convoy list missing a store's convoys is
+// not the list, so the drain stops instead of returning the survivors.
 func (c *Client) convoysPage(cursor string, limit int64) (beadListPage, error) {
 	params := &genclient.GetV0CityByCityNameConvoysParams{Limit: &limit}
 	if cursor != "" {
@@ -983,6 +986,9 @@ func (c *Client) convoysPage(cursor string, limit int64) (beadListPage, error) {
 		return beadListPage{}, &connError{err: fmt.Errorf("nil response")}
 	}
 	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
+		return beadListPage{}, err
+	}
+	if err := partialListErrorOf(resp.JSON200); err != nil {
 		return beadListPage{}, err
 	}
 	return beadListPage{
