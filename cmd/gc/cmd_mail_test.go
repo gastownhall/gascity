@@ -4976,6 +4976,33 @@ func TestRouteMailCountPartialStoreSlowJSONReturnsError(t *testing.T) {
 	}
 }
 
+// GET /v0/mail returns one page of the inbox; total is the whole unread
+// set. `gc mail check` must print total, not the length of the page.
+func TestRouteMailCheckPrintsTotalNotPageLength(t *testing.T) {
+	cityPath := writeMailTestCity(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"items": []map[string]any{
+				{"id": "msg-1", "from": "alice", "to": "mayor", "subject": "hi", "body": "hello", "created_at": "2026-04-23T10:00:00Z", "read": false},
+			},
+			"total":       150,
+			"next_cursor": "next",
+		})
+	}))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	code := routeMailCheck(cityPath, []string{"mayor"}, false, "", c, "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if want := "150 unread message(s) for mayor"; !strings.Contains(stdout.String(), want) {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	}
+}
+
 func TestRouteMailCheckInjectStoreSlowEmitsDegradedNotice(t *testing.T) {
 	cityPath := writeMailTestCity(t)
 	t.Setenv("GC_DEBUG", "1")

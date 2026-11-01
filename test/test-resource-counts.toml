@@ -319,7 +319,7 @@ calls = 12
 [[count]]
 path = "cmd/gc/cmd_mail_test.go"
 resource = "http_test_server"
-calls = 16
+calls = 17
 
 [[count]]
 path = "cmd/gc/cmd_maintenance_test.go"
