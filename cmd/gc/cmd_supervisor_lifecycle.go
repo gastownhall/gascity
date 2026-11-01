@@ -1116,15 +1116,17 @@ func ensureSupervisorRunning(stdout, stderr io.Writer) int {
 		return 1
 	}
 	if msg, blocked := platformSupervisorHomeOverrideError(); blocked {
+		// The override only blocks installing or starting a platform unit;
+		// a supervisor that is already running needs neither.
+		if supervisorAliveHook() != 0 {
+			return 0
+		}
 		if !supervisorIsolatedHome() {
 			fmt.Fprintf(stderr, "gc supervisor start: %s\n", msg) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		// An isolated run gets a bare supervisor: a platform unit would
 		// run under the real HOME, not the one this run isolates.
-		if supervisorAliveHook() != 0 {
-			return 0
-		}
 		return startBareSupervisor(stdout, stderr, false, true)
 	}
 	// Always regenerate the service file so upgrades pick up template

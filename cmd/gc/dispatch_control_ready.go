@@ -430,11 +430,11 @@ func controlReadyLegReady(dir string, binding beads.Store, includeEphemeral bool
 // dispatches against -- controlReadyLegSources applies the routing rule
 // controlBeadLedger resolves against -- so the queue and the mutation are the
 // same set. They must not diverge. A queue drawn from the work store while the
-// dispatch closes the binding's copy re-offers the same id every tick --
-// ProcessControl no-ops on the already-closed copy, and drainWorkflowServeWork
-// counts a no-op as progress -- so the drain loop never returns; and the beads
-// the dispatch CREATES (fanout fragments, retry attempts, drain units) would
-// land in a ledger the scan never reads, stalling the workflow at its first hop.
+// dispatch closes the binding's copy re-offers the same id every sweep --
+// ProcessControl no-ops on the already-closed copy, so drainWorkflowServeWork
+// pays a full dispatch on every sweep to skip it; and the beads the dispatch
+// CREATES (fanout fragments, retry attempts, drain units) would land in a
+// ledger the scan never reads, stalling the workflow at its first hop.
 func controlReadyLegsReady(dir, cityPath string, cfg *config.City) (ready []beads.Bead, ok bool, err error) {
 	sources, owned, err := controlReadyLegSourcesFn(dir, cityPath, cfg)
 	if err != nil {

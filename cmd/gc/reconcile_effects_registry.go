@@ -121,5 +121,5 @@ var effectSpecs = map[string]effectSpec{
 	intentMarkerClear:     {class: capProbing, needs: needs{Runtime: true, Lease: true}, caps: capProviderStart, sections: markerClearSections},                                                            // A13's pinned skip (mc-nm6yt)
 	intentBaseline:        {class: capRowWrites, sections: baselineSections},                                                                                                                               // A8 (C7c)
 	intentRowHeal:         {class: capRowWrites, sections: rowWriteSections},                                                                                                                               // A6
-	intentRowHealFresh:    {class: capProbing, needs: needs{Runtime: true}, sections: healSections},                                                                                                        // A6
+	intentRowHealFresh:    {class: capProbing, needs: needs{Runtime: true}, sections: healSections},                                                                                                        // A6; A21's parked clear
 }

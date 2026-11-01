@@ -117,7 +117,6 @@ var programStatusPending = map[RequirementCode]string{
 	RequirementProgramStatusQueueBehindBlocked: "ga-f4ovjm.22",
 	RequirementProgramStatusImmediateRefused:   "ga-f4ovjm.22",
 	RequirementProgramStatusReadiness:          "ga-f4ovjm.23",
-	RequirementProgramStatusShadowIdentical:    "ga-f4ovjm.17",
 	RequirementProgramStatusTranscriptTurn:     "ga-f4ovjm.24",
 }
 

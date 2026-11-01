@@ -1217,6 +1217,15 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, observed b
 			target = string(sessionpkg.StateStartPending)
 		}
 	}
+	// A live row its start committed active keeps that state while the
+	// start's pending_create_claim is still set (a commit written key by key
+	// that stopped part way), until recoverRunningPendingCreate clears it.
+	// Awake would make the row a pending create again (CanRollback treats
+	// awake as advisory): if that clear has to wait for the runtime lease,
+	// the next tick would roll the row back, stopping its own live box.
+	if alive && info.PendingCreateClaim && sessionpkg.State(strings.TrimSpace(info.MetadataState)) == sessionpkg.StateActive {
+		target = info.MetadataState
+	}
 	stalePendingCreateRollback := false
 	if !alive && strings.TrimSpace(info.MetadataState) == "failed-create" {
 		if info.PendingCreateClaim && pendingCreateLeaseActiveInfo(info, clk, 0) {

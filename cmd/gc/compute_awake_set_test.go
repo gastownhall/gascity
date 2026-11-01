@@ -167,6 +167,104 @@ func TestNamedAlways_MissingConfiguredIdentityIgnoredForUnrelatedTemplate(t *tes
 	assertAsleep(t, result, "hello-world--refinery")
 }
 
+// TestNamedAlways_RequalifiedBareRowWakesAsTheNamedSession pins the #5957
+// requalification fallback: after a top-level named session is requalified to
+// dir/binding form, its live bead still carries the prior bare identity and
+// session name, and neither matches the qualified identity or runtime name.
+// The bead is the session's runtime — awake under its own session name, with
+// no entry minted under the qualified runtime name.
+func TestNamedAlways_RequalifiedBareRowWakesAsTheNamedSession(t *testing.T) {
+	result := computeAwakeSetChecked(t, AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "contentbuild/lane.golden-hon"}},
+		NamedSessions: []AwakeNamedSession{{
+			Identity:     "contentbuild/lane.golden-hon",
+			Template:     "contentbuild/lane.golden-hon",
+			Mode:         "always",
+			RuntimeName:  "contentbuild--lane__golden-hon",
+			BareIdentity: "golden-hon",
+		}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:                     "mc-1",
+			SessionName:            "golden-hon",
+			Template:               "golden-hon", // the pre-adopt template; requalification is what changed it
+			State:                  "asleep",
+			NamedIdentity:          "golden-hon",
+			ConfiguredNamedSession: true,
+		}},
+		Now: now,
+	})
+	assertAwake(t, result, "golden-hon")
+	assertReason(t, result, "golden-hon", "named-always")
+	if _, ok := result["contentbuild--lane__golden-hon"]; ok {
+		t.Errorf("an entry was added for %q beside the live bare row", "contentbuild--lane__golden-hon")
+	}
+}
+
+// TestNamedAlways_AmbiguousLeafDoesNotResolveTheBareRow is the #5957
+// ambiguity guard: when the bare leaf maps to two configured named sessions,
+// the bridge leaves BareIdentity empty on both entries and the bare bead is
+// resolved by neither — the config, not the awake set, decides uniqueness.
+func TestNamedAlways_AmbiguousLeafDoesNotResolveTheBareRow(t *testing.T) {
+	result := computeAwakeSetChecked(t, AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "contentbuild/lane.golden-hon"}, {QualifiedName: "contentbuild/ops.golden-hon"}},
+		NamedSessions: []AwakeNamedSession{
+			{Identity: "contentbuild/lane.golden-hon", Template: "contentbuild/lane.golden-hon", Mode: "always", RuntimeName: "contentbuild--lane__golden-hon"},
+			{Identity: "contentbuild/ops.golden-hon", Template: "contentbuild/ops.golden-hon", Mode: "always", RuntimeName: "contentbuild--ops__golden-hon"},
+		},
+		SessionBeads: []AwakeSessionBead{{
+			ID:                     "mc-1",
+			SessionName:            "golden-hon",
+			Template:               "golden-hon",
+			State:                  "asleep",
+			NamedIdentity:          "golden-hon",
+			ConfiguredNamedSession: true,
+		}},
+		Now: now,
+	})
+	assertAsleep(t, result, "golden-hon")
+}
+
+// TestNamedOnDemand_RequalifiedRowBareClaimVetoesIdleSleep pins the #5957
+// ownership half: a row renamed in place still owns the work claimed under the
+// bare identity it was renamed from (RequalifiedFrom). A blocked in_progress
+// claim under that form keeps the running on_demand seat out of idle sleep —
+// the veto a claim under the qualified identity gets — even under a
+// session_template that keeps session_name off the bare form. A born-qualified
+// row never claims the bare form, so the same claim does not hold it.
+func TestNamedOnDemand_RequalifiedRowBareClaimVetoesIdleSleep(t *testing.T) {
+	idleSince := now.Add(-(defaultOnDemandIdleTimeout + time.Minute))
+	input := func(requalifiedFrom string) AwakeInput {
+		return AwakeInput{
+			Agents: []AwakeAgent{{QualifiedName: "contentbuild/lane.golden-hon"}},
+			NamedSessions: []AwakeNamedSession{{
+				Identity:     "contentbuild/lane.golden-hon",
+				Template:     "contentbuild/lane.golden-hon",
+				Mode:         "on_demand",
+				RuntimeName:  "test-city-contentbuild--lane__golden-hon",
+				BareIdentity: "golden-hon",
+			}},
+			SessionBeads: []AwakeSessionBead{{
+				ID:                     "mc-1",
+				SessionName:            "test-city-golden-hon",
+				Template:               "contentbuild/lane.golden-hon",
+				State:                  "active",
+				NamedIdentity:          "contentbuild/lane.golden-hon",
+				Alias:                  "contentbuild/lane.golden-hon",
+				RequalifiedFrom:        requalifiedFrom,
+				ConfiguredNamedSession: true,
+				IdleSince:              idleSince,
+			}},
+			WorkBeads:       []AwakeWorkBead{{ID: "hw-1", Assignee: "golden-hon", Status: "in_progress", Blocked: true}},
+			RunningSessions: map[string]bool{"test-city-golden-hon": true},
+			Now:             now,
+		}
+	}
+	renamed := computeAwakeSetChecked(t, input("golden-hon"))
+	assertAwake(t, renamed, "test-city-golden-hon")
+	assertReason(t, renamed, "test-city-golden-hon", "on-demand:running")
+	assertAsleep(t, computeAwakeSetChecked(t, input("")), "test-city-golden-hon")
+}
+
 func TestNamedOnDemand_MissingConfiguredIdentityAssignedWorkVetoesIdleSleep(t *testing.T) {
 	idleSince := now.Add(-(defaultOnDemandIdleTimeout + time.Minute))
 	result := computeAwakeSetChecked(t, AwakeInput{
