@@ -20,6 +20,14 @@ env:
   GC_TEST_NO_SLICE: "1"
 
 jobs:
+  beginner_qualification:
+    name: Installed beginner journey
+    permissions:
+      contents: read
+    uses: ./.github/workflows/beginner-qualification.yml
+    secrets:
+      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+
   # Reuse the shared CI graph so RC inherits new parity checks automatically.
   ci_parity:
     name: CI parity
@@ -423,6 +431,7 @@ jobs:
     if: ${{ always() }}
     runs-on: blacksmith-2vcpu-ubuntu-2404
     needs:
+      - beginner_qualification
       - ci_parity
       - probes_parity
       - bazel_parity

@@ -156,6 +156,7 @@ go_test(
         "precommit_contract_test.go",
         "pull_request_target_checkout_test.go",
         "push_ownership_guard_test.go",
+        "qualify_beginner_test.go",
         "rbe_fork_pool_test.go",
         "rbe_worker_env_base_policy_test.go",
         "rbe_worker_env_drift_test.go",

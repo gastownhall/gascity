@@ -13,6 +13,14 @@ env:
   BD_VERSION: "v1.3.4"
 
 jobs:
+  beginner_qualification:
+    name: Installed beginner journey
+    permissions:
+      contents: read
+    uses: ./.github/workflows/beginner-qualification.yml
+    secrets:
+      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+
   tier-b:
     name: Tier B acceptance tests
     runs-on: ubuntu-latest

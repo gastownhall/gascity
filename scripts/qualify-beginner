@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+"""Qualify the installed beginner journey on a disposable authenticated host.
+
+Uses the selected binary, its embedded pack, and the published instructions.
+Never seeds progress or approvals. Retains evidence/data on failure; stops only
+the isolated profile it started. Provider HOME/credentials are caller-managed.
+"""
+from __future__ import annotations
+import argparse, atexit, datetime, hashlib, json, math, os, pathlib, re, socket
+import signal, subprocess, sys, time, urllib.request
+
+p = argparse.ArgumentParser(description=__doc__)
+p.add_argument('--gc', type=pathlib.Path, required=True, help='Exact candidate gc binary; companion must be beside it')
+p.add_argument('--work-dir', type=pathlib.Path, required=True, help='New directory on a disposable test host; retained after the run')
+p.add_argument('--port', type=int, required=True, help='Unused loopback supervisor port')
+p.add_argument('--expected-commit', required=True, help='Full commit stamped into the candidate; checked before submitting work')
+p.add_argument('--provider', choices=['claude', 'codex'], default='claude')
+p.add_argument('--docs-root', type=pathlib.Path, default=pathlib.Path(__file__).resolve().parents[1]/'docs')
+a = p.parse_args()
+root = a.work_dir.expanduser().absolute()
+if root.exists() or root.is_symlink(): p.error('work-dir must not exist; preserve existing data')
+binary = a.gc.expanduser().resolve()
+if not binary.is_file() or not os.access(binary, os.X_OK): p.error('candidate gc binary is unavailable')
+companion = binary.with_name('gc-osc7501')
+if not companion.is_file() or not os.access(companion, os.X_OK): p.error('candidate companion gc-osc7501 is unavailable')
+if not re.fullmatch(r'[0-9a-f]{40}', a.expected_commit): p.error('expected-commit must be a full lowercase commit ID')
+if not 0 < a.port < 65536: p.error('supervisor port is unavailable: invalid port')
+try:
+    with socket.socket() as probe: probe.bind(('127.0.0.1', a.port))
+except OSError as exc: p.error('supervisor port is unavailable: '+str(exc))
+
+# Check exact published command lines, not substring matches that could miss a
+# changed flag. Parameters selecting provider/city are supplied by this runner.
+required = {
+    'getting-started/quickstart.md': ['gc init --experience beginner --default-provider claude ~/bright-lights', 'gc gc tutorial start', 'gc gc tutorial status', 'gc status', 'gc stop', 'gc start'],
+    'tutorials/02-agents.md': ['gc gc tutorial start --lesson api'],
+    'tutorials/05-formulas.md': ['gc --rig practice formula list', 'gc --rig practice formula show quick-start', 'gc gc tutorial start --lesson client', 'gc gc tutorial status --lesson client'],
+}
+instructions = {}
+for name, commands in required.items():
+    path = a.docs_root/name
+    if not path.is_file(): p.error('published instructions unavailable: '+name)
+    text = path.read_text()
+    lines = [line.strip() for block in re.findall(r'```(?:bash|shell)\n(.*?)\n```', text, re.S) for line in block.splitlines()]
+    if any(command not in lines for command in commands): p.error('published commands changed; reconcile qualification with '+name)
+    instructions[name] = hashlib.sha256(text.encode()).hexdigest()
+order_doc = (a.docs_root/'tutorials/07-orders.md').read_text()
+order_blocks = [block for block in re.findall(r'```(?:bash|shell)\n(.*?)\n```', order_doc, re.S) if "cat > orders/practice-check.toml <<'ORDER'" in block]
+if len(order_blocks) != 1: p.error('published manual-order exercise is missing or ambiguous')
+instructions['tutorials/07-orders.md'] = hashlib.sha256(order_doc.encode()).hexdigest()
+
+root.mkdir(parents=True)
+city = root/'bright-lights'; profile = root/'gc-home'; profile.mkdir()
+out = root/'evidence'; out.mkdir()
+(profile/'supervisor.toml').write_text('[supervisor]\nport = '+str(a.port)+'\nbind = "127.0.0.1"\nallow_mutations = true\n')
+env = {key:value for key,value in os.environ.items() if not key.startswith('GC_')}
+env.update(GC_HOME=str(profile), GC_ISOLATED='1', GC_BIN=str(binary))
+env['PATH'] = str(binary.parent)+':'+str(pathlib.Path.home()/'.local/bin')+':/opt/homebrew/bin:/usr/local/bin:'+env.get('PATH','')
+base = 'http://127.0.0.1:'+str(a.port)
+start = {'commit':a.expected_commit, 'city':str(city), 'gc_home':str(profile), 'port':a.port}
+a.pause_lesson = 'api'
+owned_pid = None
+cleanup_ok = None
+def cleanup():
+    global cleanup_ok
+    if cleanup_ok is not None: return cleanup_ok
+    if owned_pid is None: return False
+    cleanup_ok = True
+    check = subprocess.run([str(binary),'supervisor','status','--json'],cwd=root,env=env,capture_output=True,text=True,timeout=30)
+    if check.returncode or json.loads(check.stdout).get('pid') != owned_pid:
+        print('Cleanup ownership changed; isolated profile retained for inspection.',file=sys.stderr)
+        cleanup_ok = False
+        return False
+    for label, args in [('stop-city',['stop']),('stop-supervisor',['supervisor','stop','--wait'])]:
+        r = subprocess.run([str(binary),*args],cwd=city,env=env,capture_output=True,text=True,timeout=240)
+        (out/(label+'.stdout')).write_text(r.stdout); (out/(label+'.stderr')).write_text(r.stderr)
+        if r.returncode:
+            cleanup_ok = False
+            print(label+' failed; retain profile/evidence for inspection.',file=sys.stderr)
+    return cleanup_ok
+atexit.register(cleanup)
+signal.signal(signal.SIGTERM, lambda number, frame: sys.exit(128+number))
+
+def cmd(label, args, cwd=city, timeout=120):
+    began = time.monotonic()
+    stdout_path, stderr_path = out/(label+'.stdout'), out/(label+'.stderr')
+    with stdout_path.open('w') as stdout, stderr_path.open('w') as stderr:
+        process = subprocess.Popen([str(binary), *map(str,args)],cwd=cwd,env=env,text=True,stdout=stdout,stderr=stderr)
+        try:
+            while True:
+                try:
+                    code = process.wait(timeout=min(30,max(0.01,timeout-(time.monotonic()-began))))
+                    break
+                except subprocess.TimeoutExpired:
+                    elapsed = time.monotonic()-began
+                    if elapsed >= timeout: raise TimeoutError(label+' exceeded '+str(timeout)+'seconds; evidence retained')
+                    print(label+': pending '+str(int(elapsed))+'seconds',flush=True)
+        except BaseException:
+            if process.poll() is None: process.kill()
+            process.wait()
+            raise
+    stdout, stderr = stdout_path.read_text(), stderr_path.read_text()
+    if code: raise RuntimeError(label+' exit='+str(code)+'\n'+stdout+'\n'+stderr)
+    return stdout
+
+def health():
+    with urllib.request.urlopen(base+"/health", timeout=15) as r:
+        return json.load(r)
+def bead(label, bid):
+    rows = json.loads(cmd(label,["--rig","practice","bd","show",bid,"--json"]))
+    assert len(rows) == 1, rows
+    return rows[0]
+lessons = []
+def wait_delivery(name, source, root, pause=False):
+    began = time.monotonic()
+    paused = False
+    last = ""
+    while time.monotonic()-began < 1200:
+        s = bead(name+"-source", source)
+        w = bead(name+"-workflow", root)
+        record = json.loads(w.get("metadata",{}).get("gc.delivery.record","{}"))
+        state = (s["status"],w["status"],record.get("review_status"),record.get("output_sha"),record.get("cleanup_complete"))
+        if str(state) != last or int(time.monotonic()-began)%30 < 6:
+            print(name+" elapsed="+str(int(time.monotonic()-began))+"s state="+str(state),flush=True)
+            last = str(state)
+        if pause and not paused and record.get("attempt_id") and record.get("worktree") and pathlib.Path(record["worktree"]).exists():
+            saved = {k:record[k] for k in ("base_sha","worktree","attempt_id")}
+            before = health()
+            cmd(name+"-pause",["stop"],timeout=240)
+            cmd(name+"-resume",["start"],timeout=240)
+            after = health()
+            assert after["build_id"] == before["build_id"] and after["uptime_sec"] >= before["uptime_sec"], (before,after)
+            current = json.loads(bead(name+"-after-resume",root)["metadata"]["gc.delivery.record"])
+            assert all(current[k] == value for k,value in saved.items()), (saved,current)
+            paused = True
+            (out/(name+"-pause-continuity.json")).write_text(json.dumps({"source":source,"workflow":root,"preserved":saved,"health_before":before,"health_after":after},indent=2)+"\n")
+        with (out/'progress.ndjson').open('a') as stream:
+            stream.write(json.dumps({'lesson':name,'elapsed_s':time.monotonic()-began,'source':s,'workflow':w})+'\n')
+        if s['status'] == 'closed':
+            assert record.get('integrated_sha') and record.get('cleanup_complete') is True,'source closed before integration/cleanup'
+            assert record.get('review_status') == 'approved' and all(record.get(key)==record['integrated_sha'] for key in ('output_sha','reviewed_sha','tested_sha')),'source closed without exact verified integration'
+        if w["status"] == "closed" and w.get("metadata",{}).get("gc.outcome") != "pass":
+            raise RuntimeError(name+" workflow failed; retained source="+source+" workflow="+root)
+        if s["status"] == "closed" and w["status"] == "closed":
+            assert record["review_status"] == "approved"
+            sha = record["integrated_sha"]
+            assert all(record[k] == sha for k in ("output_sha","reviewed_sha","tested_sha"))
+            assert record["cleanup_complete"] is True and not pathlib.Path(record["worktree"]).exists()
+            if lessons:
+                assert any(d["id"] == lessons[-1]["source"] for d in s.get("dependencies",[])), s
+                assert record["predecessor_sha"] == lessons[-1]["record"]["integrated_sha"], record
+            if pause:
+                assert paused, "delivery finished before pause: interruption case is unqualified"
+            lessons.append({"lesson":name,"source":source,"workflow":root,"record":record,"source_created_at":s.get("created_at"),"source_closed_at":s.get("closed_at")})
+            cmd(name+"-verified-status",["gc","tutorial","status","--lesson",name])
+            return
+        time.sleep(5)
+    raise TimeoutError(name+" did not complete; retained source="+source+" workflow="+root)
+def start_lesson(name, request="start"):
+    text = cmd(name+"-"+request,["gc","tutorial","start","--lesson",name],timeout=480)
+    source = re.search(r"Source task: ([\w-]+);",text).group(1)
+    attached = re.search(r"(?:Attached workflow|Existing workflow:) ([\w-]+)",text)
+    root = attached.group(1) if attached else bead(name+"-existing-source",source).get("metadata",{}).get("gc.delivery.workflow_root")
+    assert root, "existing lesson has not recorded its workflow root yet"
+    return source, root
+
+print('[1/9] Initialize using the documented beginner choice',flush=True)
+cmd('init',['init','--experience','beginner','--default-provider',a.provider,city],cwd=root,timeout=480)
+status = json.loads(cmd('supervisor-identity',['supervisor','status','--json'],cwd=root))
+assert status['running'] and status.get('pid'),status
+owned_pid = status['pid']
+actual = health()
+assert actual['build_id'] == a.expected_commit,actual
+start.update(pid=owned_pid, health=actual, binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(), companion_sha256=hashlib.sha256(companion.read_bytes()).hexdigest(), instructions=instructions, runner_sha256=hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest())
+(out/'started.json').write_text(json.dumps(start,indent=2)+'\n')
+
+print('[2/9] Deliver greeting and preserve an immediate retry',flush=True)
+greeting = start_lesson('greeting')
+retry = start_lesson('greeting', 'retry')
+assert retry == greeting,'immediate retry changed native source/workflow'
+(out/'greeting-retry-identity.json').write_text(json.dumps({'first':greeting,'retry':retry},indent=2)+'\n')
+wait_delivery('greeting',*greeting)
+print("[3/9] Use existing workers for dependent API task",flush=True)
+cmd("agents",["agent","list"])
+api_source,api_root = start_lesson("api")
+print("[4/9] Observe and pause/resume persistent API work",flush=True)
+cmd("api-status",["status"])
+cmd("api-sessions",["session","list"])
+wait_delivery("api",api_source,api_root,pause=a.pause_lesson=="api")
+print("[5/9] Inspect actual execution events and source evidence",flush=True)
+cmd("communication-events",["events","--type","execution.step_completed","--since","1h"])
+print("[6/9] Deliver a client of the accepted API",flush=True)
+cmd("formulas",["--rig","practice","formula","list"])
+cmd("quick-start-formula",["--rig","practice","formula","show","quick-start"])
+client_source,client_root = start_lesson("client")
+wait_delivery("client",client_source,client_root,pause=a.pause_lesson=="client")
+print("[7/9] Inspect dependency and execute combined deliverable",flush=True)
+cmd("all-work",["--rig","practice","bd","list","--all"])
+cmd("client-dependency",["--rig","practice","bd","dep","list",client_source])
+repo = city/"projects/practice"
+def check(label,argv):
+    r = subprocess.run(argv,cwd=repo,env=env,text=True,capture_output=True,timeout=60)
+    (out/(label+".stdout")).write_text(r.stdout)
+    (out/(label+".stderr")).write_text(r.stderr)
+    assert r.returncode == 0, (label,r.stdout,r.stderr)
+    return r.stdout
+check("final-tests",["python3","-m","unittest","discover","-s","tests","-v"])
+assert json.loads(check("client-ada",["python3","client.py","Ada"])) == {"name":"Ada","message":"Hello, Ada!"}
+assert json.loads(check("client-world",["python3","client.py"])) == {"name":"world","message":"Hello, world!"}
+check("final-log",["git","log","--oneline","-5"])
+assert not check("final-git-status",["git","status","--porcelain"])
+print("Run the documented token-free manual order",flush=True)
+cmd("orders",["order","list"])
+order_script = out/'published-manual-order.sh'
+order_script.write_text(order_blocks[0]+'\n')
+r = subprocess.run(['/bin/bash',str(order_script)],cwd=city,env=env,capture_output=True,text=True,timeout=240)
+(out/'manual-order.stdout').write_text(r.stdout);(out/'manual-order.stderr').write_text(r.stderr)
+assert r.returncode == 0,(r.stdout,r.stderr)
+
+print('[8/9] Observe a finite idle interval without stopping workers first',flush=True)
+def active_models():
+    with urllib.request.urlopen(base+'/v0/city/'+city.name+'/sessions',timeout=20) as response:
+        sessions = json.load(response)
+    assert not sessions.get('partial'),sessions
+    return [row for row in sessions['items'] if row.get('provider') and row.get('running')]
+settle = time.monotonic()
+while active_models():
+    if time.monotonic()-settle >= 120: raise TimeoutError('model workers did not become idle within120seconds')
+    print('Waiting for native worker drain, '+str(int(time.monotonic()-settle))+'s',flush=True)
+    time.sleep(5)
+idle_began = datetime.datetime.now(datetime.timezone.utc)
+idle_clock = time.monotonic(); samples = []
+while True:
+    observed = health()
+    assert observed['build_id'] == a.expected_commit,observed
+    assert not active_models(),'model activity during idle observation'
+    elapsed = time.monotonic()-idle_clock
+    samples.append({'elapsed_s':elapsed,'active_model_sessions':0,'supervisor_uptime_s':observed['uptime_sec']})
+    (out/'idle-samples.json').write_text(json.dumps(samples,indent=2)+'\n')
+    print('Idle '+str(int(elapsed))+'/300seconds, zero running model sessions',flush=True)
+    if elapsed >= 300: break
+    time.sleep(min(30,300-elapsed))
+event_text = cmd('idle-events',['events','--since',str(math.ceil(time.monotonic()-idle_clock)+5)+'s'])
+def event_time(raw):
+    raw = re.sub(r'\.(\d+)(?=Z|[+-]\d\d:\d\d$)',lambda m:'.'+(m.group(1)+'000000')[:6],raw)
+    return datetime.datetime.fromisoformat(raw.replace('Z','+00:00'))
+events = [json.loads(line) for line in event_text.splitlines() if line.strip()]
+assert not [row for row in events if row['type']=='session.woke' and event_time(row['ts'])>=idle_began],'model wake during idle observation'
+idle_result = {'duration_s':time.monotonic()-idle_clock,'samples':len(samples),'model_wakes':0,'scope':'GC city running model sessions and native wake events; host-global provider processes are not measured'}
+with urllib.request.urlopen(base+'/v0/city/'+city.name+'/usage',timeout=30) as response:
+    usage = json.load(response)
+(out/'native-usage.json').write_text(json.dumps(usage,indent=2)+'\n')
+assert usage.get('available') and usage.get('recording') and not usage.get('partial'), 'native usage evidence unavailable or partial'
+assert cleanup(),'isolated profile cleanup failed; inspect retained evidence'
+
+(out/'result.json').write_text(json.dumps({'status':'PASS','commit':a.expected_commit,'provider':a.provider,'city':str(city),'identity':start,'lessons':lessons,'idle':idle_result,'provider_usage':usage,'limits':'Primary published journey only. Optional follow-ons and failure matrix are separate. Finite idle observation.'},indent=2)+'\n')
+print('[9/9] BEGINNER_QUALIFICATION_PASS '+str(out),flush=True)

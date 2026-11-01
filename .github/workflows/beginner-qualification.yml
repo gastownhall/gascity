@@ -1,0 +1,91 @@
+name: Installed beginner qualification
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Exact source ref to qualify; empty uses the caller commit
+        type: string
+        default: ""
+    secrets:
+      OLLAMA_API_KEY:
+        required: true
+    outputs:
+      commit:
+        description: Immutable commit qualified by the installed journey
+        value: ${{ jobs.journey.outputs.commit }}
+
+permissions:
+  contents: read
+
+jobs:
+  journey:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      commit: ${{ steps.build.outputs.commit }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read the tested dependency pins
+        id: deps
+        shell: bash
+        run: |
+          set -euo pipefail
+          source deps.env
+          printf 'bd=%s\ndolt=%s\n' "$BD_VERSION" "$DOLT_VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ steps.deps.outputs.dolt }}
+          bd-version: ${{ steps.deps.outputs.bd }}
+
+      - name: Build the exact installed candidate and companion
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse HEAD)"
+          mkdir -p "$RUNNER_TEMP/beginner-bin"
+          CGO_ENABLED=0 go build -trimpath -buildvcs=false \
+            -ldflags "-X main.commit=$commit -X main.version=qualification-$commit" \
+            -o "$RUNNER_TEMP/beginner-bin/gc" ./cmd/gc
+          CGO_ENABLED=0 go build -trimpath -buildvcs=false \
+            -o "$RUNNER_TEMP/beginner-bin/gc-osc7501" ./cmd/gc-osc7501
+          printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
+
+      - name: Follow the published beginner journey
+        shell: bash
+        env:
+          ANTHROPIC_BASE_URL: https://ollama.com
+          ANTHROPIC_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.OLLAMA_API_KEY }}
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_HAIKU_MODEL }}
+          ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SONNET_MODEL }}
+          ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_OPUS_MODEL }}
+          CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SUBAGENT_MODEL }}
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+          EXPECTED_COMMIT: ${{ steps.build.outputs.commit }}
+        run: |
+          set -euo pipefail
+          test -n "$ANTHROPIC_API_KEY" || { echo "Missing OLLAMA_API_KEY" >&2; exit 1; }
+          for name in ANTHROPIC_DEFAULT_HAIKU_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL CLAUDE_CODE_SUBAGENT_MODEL; do
+            test -n "${!name}" || { echo "Missing model variable: $name" >&2; exit 1; }
+          done
+          scripts/qualify-beginner \
+            --gc "$RUNNER_TEMP/beginner-bin/gc" \
+            --expected-commit "$EXPECTED_COMMIT" \
+            --work-dir "$RUNNER_TEMP/beginner-qualification" --port 18503
+
+      - name: Retain qualification evidence including failures
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: installed-beginner-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/beginner-qualification/evidence/
+          if-no-files-found: warn
+          retention-days: 14
