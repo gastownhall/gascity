@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -900,5 +901,54 @@ func TestHasExactKeyedLookup(t *testing.T) {
 		if got := HasExactKeyedLookup(provider); got != want {
 			t.Errorf("HasExactKeyedLookup(%q) = %v, want %v", provider, got, want)
 		}
+	}
+}
+
+func TestKeyedProbeRoots(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	defaults := sessionlog.DefaultSearchPaths()
+	given := []string{t.TempDir()}
+	tests := []struct {
+		name        string
+		searchPaths []string
+		provider    string
+		want        []string
+	}{
+		{name: "no roots give the defaults", provider: "claude", want: defaults},
+		{name: "claude keeps the given roots", searchPaths: given, provider: "claude", want: given},
+		{name: "claude profile keeps the given roots", searchPaths: given, provider: "claude/tmux-cli", want: given},
+		{name: "other provider gives the defaults", searchPaths: given, provider: "kimi", want: defaults},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := KeyedProbeRoots(tt.searchPaths, tt.provider); !slices.Equal(got, tt.want) {
+				t.Fatalf("KeyedProbeRoots(%v, %q) = %v, want %v", tt.searchPaths, tt.provider, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClaudeConfigProjectsRoot(t *testing.T) {
+	dir := t.TempDir()
+	tests := []struct {
+		name   string
+		env    map[string]string
+		want   string
+		wantOK bool
+	}{
+		{name: "absolute", env: map[string]string{"CLAUDE_CONFIG_DIR": dir}, want: filepath.Join(dir, "projects"), wantOK: true},
+		{name: "whitespace padded", env: map[string]string{"CLAUDE_CONFIG_DIR": "  " + dir + "\t"}, want: filepath.Join(dir, "projects"), wantOK: true},
+		{name: "unset", env: nil},
+		{name: "empty", env: map[string]string{"CLAUDE_CONFIG_DIR": "  "}},
+		{name: "relative", env: map[string]string{"CLAUDE_CONFIG_DIR": "rel/claude"}},
+		{name: "home relative", env: map[string]string{"CLAUDE_CONFIG_DIR": "~/.claude-alt"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := ClaudeConfigProjectsRoot(tt.env)
+			if got != tt.want || ok != tt.wantOK {
+				t.Fatalf("ClaudeConfigProjectsRoot(%v) = (%q, %v), want (%q, %v)", tt.env, got, ok, tt.want, tt.wantOK)
+			}
+		})
 	}
 }

@@ -2,6 +2,7 @@
 package transcript
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -180,6 +181,29 @@ func HasKeyedTranscript(searchPaths []string, provider, workDir, sessionKey stri
 		return false, false
 	}
 	return DiscoverKeyedPath(searchPaths, provider, workDir, sessionKey) != "", true
+}
+
+// KeyedProbeRoots returns the roots a keyed-transcript probe for provider
+// searches: searchPaths for a claude-family provider, whose keyed
+// transcripts the configured roots hold, and the default roots for any other
+// provider or when searchPaths is empty.
+func KeyedProbeRoots(searchPaths []string, provider string) []string {
+	if len(searchPaths) == 0 || !strings.Contains(strings.ToLower(strings.TrimSpace(provider)), "claude") {
+		return sessionlog.DefaultSearchPaths()
+	}
+	return searchPaths
+}
+
+// ClaudeConfigProjectsRoot returns <dir>/projects, the transcript root of an
+// absolute CLAUDE_CONFIG_DIR in env. An unset, relative or ~ value reports
+// false: the provider resolves it against its own working dir and home,
+// which a probe cannot reproduce.
+func ClaudeConfigProjectsRoot(env map[string]string) (string, bool) {
+	dir := strings.TrimSpace(env["CLAUDE_CONFIG_DIR"])
+	if !filepath.IsAbs(dir) {
+		return "", false
+	}
+	return filepath.Join(dir, "projects"), true
 }
 
 // ProviderHasKeyedTranscript reports whether the provider family can use keyed

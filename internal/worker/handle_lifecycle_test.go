@@ -279,3 +279,63 @@ func beadMetadata(t *testing.T, store *beads.MemStore, id string) map[string]str
 	}
 	return maps.Clone(bead.Metadata)
 }
+
+func TestStartCommandRotatedKeyClaudeConfigDir(t *testing.T) {
+	sessionIDStart := "claude --session-id " + rotatedKey
+	resumeStart := "claude --resume " + rotatedKey
+	tests := []struct {
+		name string
+		// configDir is the CLAUDE_CONFIG_DIR value for a temp base dir.
+		configDir func(base string) string
+		// inHints sets the value in the runtime hints' env, not the session env.
+		inHints    bool
+		transcript bool
+		want       string
+	}{
+		{name: "AC-5 absolute dir holding the transcript resumes", configDir: filepath.Clean, transcript: true, want: resumeStart},
+		{name: "AC-5 absolute dir without the transcript starts with the session-id flag", configDir: filepath.Clean, want: sessionIDStart},
+		{name: "AC-5 absolute dir from the hints env resumes", configDir: filepath.Clean, inHints: true, transcript: true, want: resumeStart},
+		{name: "relative dir adds no root", configDir: func(string) string { return "rel/claude" }, transcript: true, want: sessionIDStart},
+		{name: "home-relative dir adds no root", configDir: func(string) string { return "~/.claude-alt" }, transcript: true, want: sessionIDStart},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := t.TempDir()
+			t.Chdir(base)
+			configDir := tt.configDir(filepath.Join(base, "claude-config"))
+			env := map[string]string{"CLAUDE_CONFIG_DIR": "  " + configDir + "  "}
+			beadWorkDir := t.TempDir()
+			spec := SessionSpec{
+				Template: "worker",
+				Command:  "claude",
+				Provider: "claude",
+				WorkDir:  beadWorkDir,
+				Resume:   rotatedKeyResume,
+			}
+			if tt.inHints {
+				spec.Hints.Env = env
+			} else {
+				spec.Env = env
+			}
+			fx := newRotatedKeyFixture(t, spec, "claude", beadWorkDir)
+			if tt.transcript {
+				projects := filepath.Join(configDir, "projects")
+				if home := os.Getenv("HOME"); strings.HasPrefix(configDir, "~/") {
+					projects = filepath.Join(home, strings.TrimPrefix(configDir, "~/"), "projects")
+				} else if !filepath.IsAbs(configDir) {
+					projects = filepath.Join(base, configDir, "projects")
+				}
+				writeKeyedTranscript(t, projects, beadWorkDir, rotatedKey)
+			}
+
+			got, err := fx.handle.startCommand(fx.id)
+			if err != nil {
+				t.Fatalf("startCommand: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("startCommand() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
