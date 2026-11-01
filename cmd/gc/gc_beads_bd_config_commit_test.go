@@ -71,6 +71,7 @@ func configCommitHarness(t *testing.T, key, value string) string {
 		"is_remote",
 		"connect_host",
 		"sleep_ms",
+		"dolt_client",
 		"server_sql",
 		"is_retryable_error",
 		"server_sql_retry",
@@ -259,7 +260,7 @@ func customTypesHarness(t *testing.T, body string) string {
 	harness.WriteString("DOLT_PASSWORD=\"${GC_DOLT_PASSWORD:-}\"\n")
 	harness.WriteString("DOLT_PORT=\"${GC_DOLT_PORT:-3307}\"\n")
 	for _, fn := range []string{
-		"die", "is_remote", "connect_host", "sleep_ms", "server_sql",
+		"die", "is_remote", "connect_host", "sleep_ms", "dolt_client", "server_sql",
 		"is_retryable_error", "server_sql_retry", "valid_sql_name",
 		"valid_custom_types_value", "validate_bd_runtime_config_value",
 		"commit_bd_runtime_config", "ensure_bd_runtime_custom_types",
