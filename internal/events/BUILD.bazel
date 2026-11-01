@@ -16,6 +16,7 @@ go_library(
         "order_payloads.go",
         "payload.go",
         "payloads.go",
+        "program_status_payloads.go",
         "query.go",
         "reader.go",
         "reader_context.go",
@@ -85,6 +86,7 @@ go_test(
         "testenv_import_test.go",
         "type_naming_test.go",
         "watch_backfill_test.go",
+        "work_payloads_test.go",
     ],
     # The authorship test parses events.go.
     data = ["events.go"],

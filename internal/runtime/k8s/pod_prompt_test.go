@@ -316,7 +316,7 @@ printf '%s' "$last" > "$TMUX_COMMAND_FILE"
 		{name: "Relaunch", tmuxCommand: "tmux respawn-pane -k -t main"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			script := buildAgentLaunchCommand(cfg, tc.tmuxCommand, false)
+			script := buildAgentLaunchCommand(cfg, tc.tmuxCommand, false, "")
 			shellArgs := agentCommandShellArgs(script, cfg)
 			cmd := exec.Command("/bin/sh", append([]string{"-c"}, shellArgs...)...)
 			cmd.Env = []string{

@@ -97,6 +97,9 @@ type parityFixture struct {
 	Acks []string
 	// StartErr fails each copy's first provider Start (S3's abandon).
 	StartErr error
+	// Deps seeds the city leg's dependencies in both copies: a blocks dep
+	// keeps its IssueID not ready while its DependsOnID is open.
+	Deps []beads.Dep
 	// Panes is each row's pane output, by row ID, as a peek reads it.
 	Panes   map[string]string
 	Explain map[string]string
@@ -229,6 +232,10 @@ var parityFindings = map[string]parityEntry{
 	},
 	"drain-env-clears": {
 		"C6b2 (A4, v5 D5; owner to add a §12.2 row)", "legacy signals and finalizes a drain through the runtime's drain env (SetMeta GC_DRAIN_ACK, then RemoveMeta GC_DRAIN and GC_DRAIN_ACK, also on a runtime already gone); v2's acks and signal are row-bound (D1, D5), so its stop verb writes and removes no drain env",
+		nil,
+	},
+	"overlay-pool-display-name": {
+		"POOL-059 (the session overlay; v2's overlay step)", "legacy names a pool row the session overlay keeps by its session name (resolveDiscoveredSessionTemplate's InstanceName for an ephemeral row); v2 by its qualified instance (the overlay's QualifiedInstance), so that row's start records session.woke under another subject. §12.2 does not list it",
 		nil,
 	},
 
@@ -539,7 +546,7 @@ func newLegacyWorld(t testing.TB, f parityFixture, cityPath string, rows []beads
 	sim := &simProvider{Fake: runtime.NewFake(), rts: make(map[string]*simRuntime), changed: make(map[string]uint64), now: clk.Now}
 	f.place(sim)
 	w := &legacyWorld{
-		cfg: f.city(), cityPath: cityPath, store: beads.NewMemStoreFrom(0, rows, nil), sp: twinProvider{sim},
+		cfg: f.city(), cityPath: cityPath, store: beads.NewMemStoreFrom(0, rows, f.Deps), sp: twinProvider{sim},
 		clk: clk, rec: &memRecorder{}, dt: newDrainTracker(),
 	}
 	w.dops = newDrainOps(w.sp)
@@ -632,7 +639,8 @@ func (w *legacyWorld) tick(t *testing.T, reconcile bool) {
 	poolDesired := result.PoolDesiredCounts
 	if poolDesired == nil {
 		work := filterAssignedWorkBeadsForPoolDemand(cfg, w.cityPath, w.store, open, assigned, refs)
-		poolDesired = retainScaleCheckPartialPoolDesired(cfg, PoolDesiredCounts(ComputePoolDesiredStatesAt(cfg, work, open, result.ScaleCheckCounts, now)),
+		poolDesired = retainScaleCheckPartialPoolDesired(cfg, PoolDesiredCounts(computePoolDesiredStatesParkedAt(cfg, work, open, result.ScaleCheckCounts, nil, now,
+			parkSeatsForResult(cfg, open, result, now.UTC()), nil)),
 			updated, effectivePoolPartialRetentionTemplates(result))
 	}
 	if poolDesired == nil {
@@ -659,6 +667,7 @@ func (w *legacyWorld) tick(t *testing.T, reconcile bool) {
 		result.snapshotQueryPartial(), map[string]bool{}, cfg.Workspace.Name, w.it, w.clk, w.rec, cfg.Session.StartupTimeoutDuration(), cfg.Daemon.DriftDrainTimeoutDuration(),
 		io.Discard, io.Discard,
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awake, awakeRefs)), withAssignedWorkStores(awakeStores),
+		withParkedSeats(parkSeatsForResult(cfg, open, result, now.UTC())),
 		withAsyncDrainAckStopTracker(&w.stops), withAssignedWorkDeferTracker(w.adt),
 		withStartStabilityWaiter(immediateStartStabilityWaiter), withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter))
 	for _, gate := range gates {
@@ -839,7 +848,7 @@ func newV2World(t *testing.T, f parityFixture, cityPath string, rows, rig []bead
 	s := newSim(t, 1, simOpts{rows: func(s *sim) ([]beads.Bead, []beads.Bead) {
 		f.place(s.sp)
 		return cloneDiffBeads(rows), cloneDiffBeads(rig)
-	}, arms: arms})
+	}, deps: f.Deps, arms: arms})
 	s.lag, s.env.CityPath = false, cityPath
 	sp := twinProvider{s.sp}
 	cfg := f.city()
@@ -1094,6 +1103,26 @@ func parityFixtures() []parityFixture {
 		cfg.Agents[0].MinActiveSessions = intPtr(1)
 		return cfg
 	}
+	// cityCapOne is the worker city capped at one session city-wide, with
+	// further agents; readyPinBehind is gc-1's ready P3 pin (its blocker gb-1
+	// closed) behind gc-2's claimed P2 work, routed to live.
+	cityCapOne := func(agents ...string) func() *config.City {
+		return func() *config.City {
+			cfg := workerCity(3)
+			cfg.Workspace.MaxActiveSessions = intPtr(1)
+			for _, name := range agents {
+				cfg.Agents = append(cfg.Agents, config.Agent{Name: name, StartCommand: "true", MaxActiveSessions: intPtr(3)})
+			}
+			return cfg
+		}
+	}
+	readyPinBehind := func(live string) []parityRow {
+		return []parityRow{
+			{ID: "gw-2", Title: "gw-2", Type: "task", Status: "in_progress", Assignee: "gc-2", Priority: intPtr(2), Metadata: map[string]string{"gc.routed_to": live}},
+			{ID: "gb-1", Title: "gb-1", Type: "task", Status: "closed"},
+			{ID: "gp-1", Title: "gp-1", Type: "task", Status: "open", Assignee: "gc-1", Priority: intPtr(3), Metadata: map[string]string{"gc.routed_to": "worker"}},
+		}
+	}
 	drifted := runtime.FingerprintVersion + ":drifted"
 	// driftDrained is legacy finishing the drift drain in its ticks (the
 	// signal, the stop, the drained seat's retirement and its replacement),
@@ -1194,6 +1223,94 @@ func parityFixtures() []parityFixture {
 		{
 			Name: "a stranded row past its confirmation window is repaired", Behaviors: []string{"SESS-625"},
 			Rows: []parityRow{awake("last_woke_at", at(-2*time.Hour), "quarantined_until", at(time.Hour), "stranded_event_emitted_at", at(-time.Hour))}, Work: assigned,
+			Explain: map[string]string{"row:gc-1:*policy": "sleep-policy-keys"},
+		},
+		{
+			// A seat asleep on its own drain holding only a pre-assigned pin
+			// that is blocked is parked, not stranded (ga-ylpbsy.16): both
+			// copies keep it open and unmarked, the pin on it, with no
+			// session.stranded and no repair.
+			Name: "a seat asleep on its drain holding only a blocked pin stays parked", Behaviors: []string{"SESS-624", "SESS-625"},
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1", "sleep_reason", "idle", "slept_at", at(-time.Hour), "last_woke_at", at(-2*time.Hour), "session_key", "conversation-1")},
+			Work: []parityRow{
+				{ID: "gb-1", Title: "gb-1", Type: "task", Status: "open"},
+				{ID: "gp-1", Title: "gp-1", Type: "task", Status: "open", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			},
+			Deps:    []beads.Dep{{IssueID: "gp-1", DependsOnID: "gb-1", Type: "blocks"}},
+			Explain: map[string]string{"row:gc-1:*policy": "sleep-policy-keys"},
+		},
+		{
+			// The same seat past its bound strands, as before.
+			Name: "a parked seat past its bound strands", Behaviors: []string{"SESS-624"},
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1", "sleep_reason", "idle", "slept_at", at(-parkedWorkMaxHold-time.Hour), "last_woke_at", at(-parkedWorkMaxHold-2*time.Hour))},
+			Work: []parityRow{
+				{ID: "gb-1", Title: "gb-1", Type: "task", Status: "open"},
+				{ID: "gp-1", Title: "gp-1", Type: "task", Status: "open", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			},
+			Deps:    []beads.Dep{{IssueID: "gp-1", DependsOnID: "gb-1", Type: "blocks"}},
+			Explain: map[string]string{"row:gc-1:*policy": "sleep-policy-keys"},
+		},
+		{
+			// Once the pin is ready the same seat wakes in place (the
+			// assigned-work wake, resume tier), for the pin.
+			Name: "a parked seat whose pin is ready wakes in place", Behaviors: []string{"SESS-624"},
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1", "sleep_reason", "idle", "slept_at", at(-time.Hour), "last_woke_at", at(-2*time.Hour))},
+			Work: []parityRow{
+				{ID: "gb-1", Title: "gb-1", Type: "task", Status: "closed"},
+				{ID: "gp-1", Title: "gp-1", Type: "task", Status: "open", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			},
+			Deps:    []beads.Dep{{IssueID: "gp-1", DependsOnID: "gb-1", Type: "blocks"}},
+			Explain: started("gc-1", "s-gc-1", "worker-1", nil),
+		},
+		{
+			// A parked seat whose pin turns ready at a full city cap competes
+			// for its one slot with a live seat by bead priority, and its P3
+			// pin loses to the live seat's P2 work. The live seat is of its own
+			// template, which the pass still selects, so the overlay keeps the
+			// seat: both copies wake it for its pin, past the cap.
+			Name: "a parked seat whose ready pin loses a full city cap to its own template still wakes", Behaviors: []string{"SESS-624"},
+			City: cityCapOne(),
+			Rows: []parityRow{
+				poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1", "sleep_reason", "idle", "slept_at", at(-time.Hour), "last_woke_at", at(-2*time.Hour)),
+				poolRow("gc-2", "worker", 2, "awake", "instance_token", "tok-gc-2", "last_woke_at", at(-time.Hour)),
+			},
+			Work:     readyPinBehind("worker"),
+			Deps:     []beads.Dep{{IssueID: "gp-1", DependsOnID: "gb-1", Type: "blocks"}},
+			Runtimes: []simRuntime{{id: "gc-2", epoch: "1", token: "tok-gc-2"}},
+			Explain: started("gc-1", "s-gc-1", "worker-1", map[string]string{
+				"row:gc-2:*policy":               "sleep-policy-keys",
+				"event:session.woke s-gc-1 []":   "overlay-pool-display-name",
+				"event:session.woke worker-1 []": "overlay-pool-display-name",
+			}),
+		},
+		{
+			// The same contest lost to a live seat of another template: the
+			// pass selects no row of the parked seat's template, so nothing
+			// selects the seat, and both copies close it as an orphan and
+			// return its pin to the pool (SESS-082).
+			Name: "a parked seat whose ready pin loses a full city cap to another template closes as an orphan", Behaviors: []string{"SESS-081", "SESS-082"},
+			City: cityCapOne("other"),
+			Rows: []parityRow{
+				poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1", "sleep_reason", "idle", "slept_at", at(-time.Hour), "last_woke_at", at(-2*time.Hour)),
+				poolRow("gc-2", "other", 1, "awake", "instance_token", "tok-gc-2", "last_woke_at", at(-time.Hour)),
+			},
+			Work:     readyPinBehind("other"),
+			Deps:     []beads.Dep{{IssueID: "gp-1", DependsOnID: "gb-1", Type: "blocks"}},
+			Runtimes: []simRuntime{{id: "gc-2", epoch: "1", token: "tok-gc-2"}},
+			Explain:  map[string]string{"row:gc-2:*policy": "sleep-policy-keys"},
+		},
+		{
+			// A seat an earlier pass stranded (a full pool's fallback) that
+			// parks again, its marker long aged: the park ends that
+			// stranding episode, so both copies clear the marker, as an
+			// alive row's does, with no event and no repair.
+			Name: "a parked seat a pass stranded clears its marker", Behaviors: []string{"SESS-603", "SESS-624"},
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1", "sleep_reason", "idle", "slept_at", at(-time.Hour), "last_woke_at", at(-2*time.Hour), "session_key", "conversation-1", "stranded_event_emitted_at", at(-time.Hour))},
+			Work: []parityRow{
+				{ID: "gb-1", Title: "gb-1", Type: "task", Status: "open"},
+				{ID: "gp-1", Title: "gp-1", Type: "task", Status: "open", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			},
+			Deps:    []beads.Dep{{IssueID: "gp-1", DependsOnID: "gb-1", Type: "blocks"}},
 			Explain: map[string]string{"row:gc-1:*policy": "sleep-policy-keys"},
 		},
 		{

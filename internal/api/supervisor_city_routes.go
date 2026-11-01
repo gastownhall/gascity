@@ -20,6 +20,7 @@ func sessionStreamEventMap() map[string]any {
 		"activity":        SessionActivityEvent{},
 		"pending":         runtime.PendingInteraction{},
 		"pending_cleared": SessionPendingClearedEvent{},
+		"program_status":  SessionProgramStatusEvent{},
 		"heartbeat":       HeartbeatEvent{},
 	}
 }
@@ -529,7 +530,10 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Description: "Server-Sent Events stream of session transcript updates. " +
 			"Streams turns (conversation format), raw messages (JSONL format), or structured messages " +
 			"based on the format query parameter. Emits activity and pending events " +
-			"for tool approval prompts.",
+			"for tool approval prompts, and a program_status event when the session " +
+			"program's own reported status changes (only while the city's " +
+			"program_status switch is shadow or on; a frame without program_status " +
+			"means the status became unknown).",
 		Responses: sseResponseHeaders("GC-Session-State", "GC-Session-Status"),
 	}, sessionStreamEventMap(),
 		sseCityPrecheck(sm, (*Server).checkSessionStream),

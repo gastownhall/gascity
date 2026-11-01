@@ -148,10 +148,14 @@ func TestCoreMaintenanceExecAssets(t *testing.T) {
 		// Retired with the move to bd verbs: the maintenance orders no
 		// longer resolve a Dolt port of their own.
 		"assets/scripts/dolt-target.sh",
+		// Retired because bd list hides the wisps plane, so the order never
+		// selected a wisp; reaper and the controller wisp GC own that work.
+		"orders/wisp-compact.toml",
+		"assets/scripts/wisp-compact.sh",
 	}
 	for _, path := range retired {
 		if _, err := fs.Stat(PackFS, path); err == nil {
-			t.Fatalf("core pack must not carry retired Dog maintenance asset %s", path)
+			t.Fatalf("core pack must not carry retired maintenance asset %s", path)
 		}
 	}
 }

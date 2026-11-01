@@ -24,6 +24,18 @@ resource = "test_target"
 calls = 38
 
 [[count]]
+path = "cmd/gc-osc7501/e2e_test.go"
+resource = "subprocess"
+calls = 3
+tagged = true
+
+[[count]]
+path = "cmd/gc-osc7501/relay_e2e_test.go"
+resource = "subprocess"
+calls = 3
+tagged = true
+
+[[count]]
 path = "cmd/gc-write-mint/e2e_test.go"
 resource = "subprocess"
 calls = 1
@@ -1519,7 +1531,7 @@ tagged = true
 [[count]]
 path = "examples/gastown/maintenance_scripts_test.go"
 resource = "subprocess"
-calls = 93
+calls = 91
 
 [[count]]
 path = "examples/gastown/tmux_theme_script_test.go"
@@ -1555,12 +1567,12 @@ calls = 4
 [[count]]
 path = "internal/api/client_sling_test.go"
 resource = "http_test_server"
-calls = 3
+calls = 6
 
 [[count]]
 path = "internal/api/client_test.go"
 resource = "http_test_server"
-calls = 66
+calls = 67
 
 [[count]]
 path = "internal/api/client_waits_test.go"
@@ -2370,6 +2382,11 @@ resource = "listener_helper"
 calls = 1
 
 [[count]]
+path = "internal/runtime/runtimetest/osc7501emitter/main_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "internal/runtime/ssh/process_alive_script_test.go"
 resource = "subprocess"
 calls = 1
@@ -2438,6 +2455,11 @@ resource = "subprocess"
 calls = 2
 
 [[count]]
+path = "internal/runtime/tmux/busy_trust_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "internal/runtime/tmux/dialog_feedback_survey_integration_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -2501,6 +2523,12 @@ tagged = true
 path = "internal/runtime/tmux/nudge_submit_key_sequence_integration_test.go"
 resource = "fixed_sleep"
 calls = 4
+tagged = true
+
+[[count]]
+path = "internal/runtime/tmux/program_capture_integration_test.go"
+resource = "subprocess"
+calls = 2
 tagged = true
 
 [[count]]
@@ -3110,6 +3138,12 @@ tagged = true
 path = "test/conversationlane/bddolt_gating_test.go"
 resource = "subprocess"
 calls = 1
+tagged = true
+
+[[count]]
+path = "test/conversationlane/busy_turn_lane_test.go"
+resource = "fixed_sleep"
+calls = 3
 tagged = true
 
 [[count]]

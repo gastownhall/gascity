@@ -1498,7 +1498,7 @@
             "on",
             "off"
           ],
-          "description": "WorkLadder selects how the v2 reconciler paces outstanding work on pool\nseats. \"on\" (default) runs the work-progress ladder: nudges back off from\n3 to 60 minutes and never stop, a started claim is recycled at most once\nand then escalated, and an unstarted claim is released after its third\nunanswered nudge (a nudge the seat could not take, such as one held at\na permission prompt, does not count). \"off\" runs the three backstops it\nreplaced (idle-claim, continuation, execution) instead: the rollback.\nRead on every pass, so a config reload applies. Legacy ignores it.",
+          "description": "WorkLadder selects how the v2 reconciler paces outstanding work on pool\nseats. \"on\" (default) runs the work-progress ladder: nudges back off from\n3 to 60 minutes and never stop, a started claim is recycled at most once\nand then escalated, and an unstarted claim is released after its third\nunanswered nudge (a nudge the seat could not take, such as one held at\na permission prompt, does not count). A claim whose metadata\ngc.awaiting_human names its seat (the seat asked a person and waits on\ntheir decision) is nudged only hourly, and never recycled or released.\nA seat whose provider refuses its turns with a rate limit (two in a\nrow, as its own transcript records them, the newest after a nudge it\ntook) is paced as on a degraded provider, and once a nudge it took\nsince is refused too, 10 minutes or more after the first refusal, it\nis restarted on a fresh conversation once, keeping its claims, at most\none seat per provider per 30 minutes and once per seat per hour. While\na person is attached or its work awaits a person, the restart waits and\none alert says so. If the fresh conversation is refused too (or the\nrefusal is a spent usage quota), one alert names the provider and the\nseat stays paced until its provider serves it. Every move is a\nwork.rate_limited event, on which a pack may hold the provider through\nprovider-health.json. Seats whose turns cannot be read are judged on\ntheir activity alone. \"off\" runs the three backstops it replaced\n(idle-claim, continuation, execution) instead: the rollback. Read on\nevery pass, so a config reload applies. Legacy ignores it.",
           "default": "on"
         },
         "auto_restart_on_drift": {
@@ -2427,6 +2427,36 @@
       "type": "object",
       "description": "PoolOverride modifies legacy [pool] fields that map to session scaling."
     },
+    "ProgramStatusBinding": {
+      "properties": {
+        "protocol": {
+          "type": "string",
+          "enum": [
+            "osc7501",
+            "none"
+          ],
+          "description": "Protocol declares the status protocol: \"osc7501\" declares, \"none\"\nexplicitly undeclares an inherited declaration, and \"\" inherits."
+        },
+        "app": {
+          "type": "string",
+          "description": "App is the program name the capture reader accepts reports from; reports\nnaming another program are dropped. Empty accepts any program name."
+        },
+        "relay": {
+          "type": "boolean",
+          "description": "Relay wraps the agent in the probe-answering relay, for programs that\nonly report after their support probe is answered. Unset inherits."
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Env is forced into the session environment when capture is armed (for\nexample PI_PROGRAM_STATUS = \"1\"). It is not part of the launch\nfingerprint, so changing it does not relaunch running agents: keys gc\nsets itself (GC_*, BEADS_*, BD_*, GT_ROOT) are rejected. Keys merge per\nlayer; an empty value withholds the variable."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ProgramStatusBinding is a provider's program-status declaration: whether its program reports state over OSC 7501 and how gc captures those reports."
+    },
     "ProviderOption": {
       "properties": {
         "key": {
@@ -2707,6 +2737,10 @@
         "upstream_env": {
           "$ref": "#/$defs/UpstreamEnvBinding",
           "description": "UpstreamEnv is this harness's serving-env contract (Phase C — the Upstream\naxis): the env-var NAMES this CLI reads for the model-serving base URL and\ncredential. It lets the resolver render an abstract [upstreams.\u003cname\u003e] onto\nthe right names for this harness, so an upstream preset is portable across\nharnesses (claude → ANTHROPIC_*, codex → OPENAI_*)."
+        },
+        "program_status": {
+          "$ref": "#/$defs/ProgramStatusBinding",
+          "description": "ProgramStatus declares whether this harness's program reports its own\nstate over the OSC 7501 Program Status Protocol and how gc captures the\nreports. Inert unless [session] program_status is \"shadow\" or \"on\"."
         },
         "print_args": {
           "items": {
@@ -3059,11 +3093,21 @@
         },
         "socket": {
           "type": "string",
-          "description": "Socket specifies the tmux socket name for per-city isolation.\nWhen set, all tmux commands use \"tmux -L \u003csocket\u003e\" to connect to\na dedicated server. When empty, defaults to the city name\n(workspace.name) — giving every city its own tmux server\nautomatically. Set explicitly to override."
+          "description": "Socket specifies the tmux socket name for per-city isolation.\nWhen set, tmux commands connect to a dedicated server: \"tmux -L\n\u003csocket\u003e\" normally, or \"tmux -S \u003cpath\u003e\" with the path pinned from\n$TMUX when gc runs in a pane of that same server, so a pane whose\nTMUX_TMPDIR differs from the controller's still reaches the server\nhosting it. When empty, defaults to the city name (workspace.name) —\ngiving every city its own tmux server automatically. Set explicitly\nto override."
         },
         "remote_match": {
           "type": "string",
           "description": "RemoteMatch is a substring pattern for the hybrid provider to route\nsessions to the remote (K8s) backend. Sessions whose names contain\nthis pattern go to K8s; all others stay local (tmux).\nOverridden by the GC_HYBRID_REMOTE_MATCH env var if set."
+        },
+        "program_status": {
+          "type": "string",
+          "enum": [
+            "off",
+            "shadow",
+            "on"
+          ],
+          "description": "ProgramStatus is the city switch for OSC 7501 program status. \"off\"\n(the default) changes nothing. \"shadow\" arms capture on declared\nproviders ([providers.\u003cp\u003e.program_status]) and compares readings\nwithout changing any decision. \"on\" lets valid readings decide.",
+          "default": "off"
         }
       },
       "additionalProperties": false,

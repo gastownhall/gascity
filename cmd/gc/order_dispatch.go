@@ -176,12 +176,18 @@ func shellExecRunner(ctx context.Context, command, dir string, env []string) ([]
 	var cleanupOnce sync.Once
 	startedPGID := 0
 	canceled := false
+	var escapedGroups []int
+	var escapedErr error
 	cleanupProcess := func() error {
 		cleanupOnce.Do(func() {
 			cleanupMu.Lock()
 			pgid := startedPGID
+			escaped := escapedGroups
+			snapErr := escapedErr
 			cleanupMu.Unlock()
-			err := cancelShellExecProcessGroup(cmd, pgid)
+			escapedDone := make(chan error, 1)
+			go func() { escapedDone <- terminateProcessGroups(escaped, shellExecSignalGrace) }()
+			err := errors.Join(cancelShellExecProcessGroup(cmd, pgid), <-escapedDone, snapErr)
 			cleanupMu.Lock()
 			cleanupErr = err
 			cleanupMu.Unlock()
@@ -191,8 +197,16 @@ func shellExecRunner(ctx context.Context, command, dir string, env []string) ([]
 		return cleanupErr
 	}
 	cmd.Cancel = func() error {
+		// Collect the groups the shell's descendants started before anything
+		// is signaled and they are reparented away from it. os/exec cancels
+		// before it reaps the shell, so its PID still names it, unless the
+		// shell's own exit races the context: its children have then already
+		// been reparented, and the walk finds none.
+		escaped, snapErr := snapshotEscapedOrderGroups(cmd)
 		cleanupMu.Lock()
 		canceled = true
+		escapedGroups = escaped
+		escapedErr = snapErr
 		cleanupMu.Unlock()
 		_ = cleanupProcess()
 		return nil
@@ -242,8 +256,14 @@ func cancelShellExecProcessGroup(cmd *exec.Cmd, pgid int) error {
 	return processgroup.TerminateCommand(cmd, pgid, shellExecSignalGrace, processgroup.Options{})
 }
 
+// mergeOrderExecEnv builds an exec order's environment from the dispatcher's
+// environ. It drops runtime store keys and secrets (mergeRuntimeEnv) and the
+// session-scoped identity of whichever seat started the dispatcher
+// (withoutSessionIdentityEnv), so the order acts for the city rather than for
+// that seat. Keys set explicitly in env (the curated controller env,
+// [order.env], and dispatch vars) replace any inherited value.
 func mergeOrderExecEnv(environ, env []string) []string {
-	out := mergeRuntimeEnv(environ, nil)
+	out := withoutSessionIdentityEnv(mergeRuntimeEnv(environ, nil))
 	for _, entry := range env {
 		key, _, ok := strings.Cut(entry, "=")
 		if ok {

@@ -92,7 +92,8 @@ func admitTicket(_ context.Context, c txCaps, in launchRow) (*startTicket, error
 	return st, nil
 }
 
-// preWakeFold is what the PreWake's Probe read or minted.
+// preWakeFold is what the PreWake's Probe read or minted. notResumed is why
+// the binding re-derived the work dir a parked seat's resume kept.
 type preWakeFold struct {
 	token, key string
 	bind       session.MetadataPatch
@@ -100,6 +101,7 @@ type preWakeFold struct {
 	repair     session.MetadataPatch
 	reset      session.MetadataPatch
 	transcript sessTranscriptState
+	notResumed error
 }
 
 // verifyWorktree is worktree.Verify; a test injects its own.
@@ -107,8 +109,10 @@ var verifyWorktree = worktree.Verify
 
 // foldPreWake is the PreWake's Probe on the expected row, which the premise
 // holds the fresh one to: the binding's worktree verified (POOL-055, #34),
-// the concrete-pool repair, the key's transcript probed in the launch's work
-// dir (S-1), and a fresh token and key.
+// the recorded work dir a parked seat's resume keeps verified
+// (parkedWorkDirUsable; one that cannot host the resume is re-derived), the
+// concrete-pool repair, the key's transcript probed in the launch's work dir
+// (S-1), and a fresh token and key.
 func foldPreWake(_ context.Context, r effectReads, v txView) (preWakeFold, error) {
 	ticket, err := callResult[*startTicket](v)
 	if err != nil {
@@ -121,6 +125,11 @@ func foldPreWake(_ context.Context, r effectReads, v txView) (preWakeFold, error
 	}
 	if e := v.Alloc.Snapshot.Entries[v.It.Key]; e != nil && e.Binding != nil {
 		f.bind = maps.Clone(e.Binding.Patch)
+		if kept := e.Binding.KeptWorkDir; kept != "" {
+			if err := parkedWorkDirUsable(v.World.Env.Cfg, v.World.CityPath, ticket.launch.agent, kept, e.Binding.WorkDir); err != nil {
+				f.bind, f.notResumed = withRederivedWorkDir(f.bind, v.Row, e.Binding.WorkDir), err
+			}
+		}
 		if spec := e.Binding.WorktreeSpec; spec != nil {
 			report, err := verifyWorktree(*spec)
 			f.work = &workVerdict{BeadID: spec.BeadID, Fingerprint: specFingerprint(*spec), Refused: err != nil}
@@ -161,6 +170,7 @@ type launchPass struct {
 	ticket     *startTicket
 	undo       preWakeUndo // what the PreWake wrote, for a capacity refusal's restore (S3)
 	relaunched bool        // the PreWake found the row creating (#7570)
+	notResumed error       // why the PreWake re-derived a parked resume's kept work dir
 }
 
 // preWakeStep is the PreWake's Decide: the ticket admitted, START-012's
@@ -213,7 +223,7 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 		next = foldInfo(next, session.MetadataPatch{"session_key": f.key})
 	}
 	launch := launchRow{w: v.World, row: next, tp: boundTemplate(tp, next), agent: ticket.launch.agent}
-	pass := launchPass{launchRow: launch, bound: foldInfo(base, f.bind), transcript: transcript, ticket: ticket, undo: preWakeUndoOf(v, foldClass(patch, class), len(f.reset) > 0)}
+	pass := launchPass{launchRow: launch, bound: foldInfo(base, f.bind), transcript: transcript, ticket: ticket, undo: preWakeUndoOf(v, foldClass(patch, class), len(f.reset) > 0), notResumed: f.notResumed}
 	pass.undo.token, pass.relaunched = f.token, creating(v.Row)
 	facts := effectFacts{Work: f.work}
 	if heal := v.It.Heal; heal != nil && heal.Reason == decideDeadRuntimeHeal && heal.Event != nil { // the death's record, its write folded into this one
@@ -311,6 +321,9 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 		in.tp, in.agent = res.TP, res.Agent
 	case res.Err != nil && c.start.stderr != nil:
 		fmt.Fprintf(c.start.stderr, "v2 start %s: resolving its template at launch: %v; launching the pass's\n", in.row.ID, res.Err) //nolint:errcheck // best-effort stderr
+	}
+	if in.notResumed != nil && c.start.stderr != nil {
+		fmt.Fprintf(c.start.stderr, "v2 start %s: not resuming in its recorded work dir: %v; starting fresh in the derived one\n", in.row.ID, in.notResumed) //nolint:errcheck // best-effort stderr
 	}
 	// session.woke once the commit has landed, as legacy records it after
 	// its commit: at the effect's end, whether or not afterCommit ran.
