@@ -724,6 +724,9 @@ func startBareSupervisor(stdout, stderr io.Writer, jsonOut, joinRunning bool) in
 			return code
 		}
 	}
+	if refuseForkedSupervisorTmuxSocketDirMove(supervisorRuntimeGOOS, stderr) {
+		return 1
+	}
 
 	logPath := supervisorLogPath()
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
@@ -1612,16 +1615,7 @@ func doSupervisorInstall(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-
-	switch goruntime.GOOS {
-	case "darwin":
-		return installSupervisorLaunchd(data, stdout, stderr)
-	case "linux":
-		return installSupervisorSystemd(data, stdout, stderr)
-	default:
-		fmt.Fprintf(stderr, "gc supervisor install: not supported on %s\n", goruntime.GOOS) //nolint:errcheck // best-effort stderr
-		return 1
-	}
+	return installSupervisorService(goruntime.GOOS, data, stdout, stderr)
 }
 
 func newSupervisorUninstallCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -1716,6 +1710,10 @@ func buildSupervisorServiceData() (*supervisorServiceData, error) {
 	if supervisor.UsesIsolatedGCHomeOverride() {
 		xdgRuntimeDir = ""
 	}
+	extraEnv, err := withRecordedTmuxTmpdir(supervisorServiceExtraEnv())
+	if err != nil {
+		return nil, err
+	}
 	return &supervisorServiceData{
 		GCPath:            gcPath,
 		LogPath:           supervisorLogPath(),
@@ -1724,7 +1722,7 @@ func buildSupervisorServiceData() (*supervisorServiceData, error) {
 		LaunchdLabel:      supervisorLaunchdLabel(),
 		SafeName:          sanitizeServiceName(filepath.Base(home)),
 		Path:              searchpath.ExpandPath(homeDir, goruntime.GOOS, os.Getenv("PATH")),
-		ExtraEnv:          supervisorServiceExtraEnv(),
+		ExtraEnv:          extraEnv,
 		PortInUseExitCode: supervisorExitCodePortInUse,
 	}, nil
 }
@@ -1832,6 +1830,7 @@ var supervisorServiceEnvKeys = map[string]bool{
 	"LC_CTYPE":                                 true,
 	"LOGNAME":                                  true,
 	"SHELL":                                    true,
+	"TMUX_TMPDIR":                              true,
 	"USER":                                     true,
 	"XDG_CONFIG_HOME":                          true,
 	"XDG_STATE_HOME":                           true,
@@ -2265,12 +2264,19 @@ type plistValue struct {
 }
 
 func launchdSupervisorHome(data []byte) (string, bool) {
+	gcHome, ok := launchdPlistEnvValue(data, "GC_HOME")
+	if !ok || gcHome == "" {
+		return "", false
+	}
+	return filepath.Clean(gcHome), true
+}
+
+// launchdPlistEnvValue is the value the plist data holds sets key to in its
+// EnvironmentVariables, and whether it sets key there.
+func launchdPlistEnvValue(data []byte, key string) (string, bool) {
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	for {
 		tok, err := dec.Token()
-		if errors.Is(err, io.EOF) {
-			return "", false
-		}
 		if err != nil {
 			return "", false
 		}
@@ -2282,15 +2288,8 @@ func launchdSupervisorHome(data []byte) (string, bool) {
 		if err != nil {
 			return "", false
 		}
-		env, ok := root["EnvironmentVariables"]
-		if !ok || env.dict == nil {
-			return "", false
-		}
-		gcHome, ok := env.dict["GC_HOME"]
-		if !ok || gcHome.text == "" {
-			return "", false
-		}
-		return filepath.Clean(gcHome.text), true
+		value, ok := root["EnvironmentVariables"].dict[key]
+		return value.text, ok
 	}
 }
 
@@ -2364,17 +2363,28 @@ func skipXMLElement(dec *xml.Decoder) error {
 }
 
 func systemdSupervisorHome(data []byte) (string, bool) {
+	gcHome, ok := systemdUnitEnvValue(data, "GC_HOME")
+	if !ok {
+		return "", false
+	}
+	return filepath.Clean(gcHome), true
+}
+
+// systemdUnitEnvValue is the value the first Environment= line of the unit
+// data holds sets key to, unquoted as gc writes it (systemdEnv), and whether
+// a line sets key.
+func systemdUnitEnvValue(data []byte, key string) (string, bool) {
+	prefix := "Environment=" + key + "="
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if !strings.HasPrefix(line, "Environment=GC_HOME=") {
+		value, ok := strings.CutPrefix(strings.TrimSpace(scanner.Text()), prefix)
+		if !ok {
 			continue
 		}
-		value := strings.TrimPrefix(line, "Environment=GC_HOME=")
 		if unquoted, err := strconv.Unquote(value); err == nil {
-			return filepath.Clean(unquoted), true
+			return unquoted, true
 		}
-		return filepath.Clean(value), true
+		return value, true
 	}
 	return "", false
 }

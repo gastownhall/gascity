@@ -678,6 +678,17 @@ resource = "http_test_server"
 calls = 1
 
 [[count]]
+path = "cmd/gc/detached_probe_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
+path = "cmd/gc/detached_probe_tmux_integration_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
 path = "cmd/gc/dolt_data_dir_lock_linux_test.go"
 resource = "subprocess"
 calls = 1
@@ -1261,6 +1272,11 @@ calls = 1
 path = "cmd/gc/supervisor_systemd_delegate_test.go"
 resource = "http_test_server"
 calls = 3
+
+[[count]]
+path = "cmd/gc/supervisor_tmux_sockets_test.go"
+resource = "net_listen"
+calls = 1
 
 [[count]]
 path = "cmd/gc/telemetry_lifecycle_metrics_test.go"
@@ -2141,6 +2157,12 @@ resource = "subprocess"
 calls = 2
 
 [[count]]
+path = "internal/pidutil/environ_darwin_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "internal/pidutil/pidutil_test.go"
 resource = "fixed_sleep"
 calls = 2
@@ -2534,6 +2556,17 @@ calls = 1
 path = "internal/runtime/tmux/session_env_file_integration_test.go"
 resource = "fixed_sleep"
 calls = 1
+tagged = true
+
+[[count]]
+path = "internal/runtime/tmux/session_probe_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
+path = "internal/runtime/tmux/socket_path_integration_test.go"
+resource = "subprocess"
+calls = 5
 tagged = true
 
 [[count]]

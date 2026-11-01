@@ -464,30 +464,15 @@ func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, er
 	running, listErr := p.ListRunning("")
 	if listErr != nil {
 		// Fail CLOSED: without the live-session list we cannot prove which
-		// scanned roots are gc-tracked. Marking them all tracked (the previous
-		// behavior) told killExistingOrphans to skip every one, so an escaped
-		// old process for this exact session survived alongside its
-		// replacement. Leave IsTracked=false instead: the caller then targets
-		// the same-session, same-city roots the /proc scan surfaced, and only
-		// starts once they are confirmed dead.
-		//
-		// TRADE-OFF (gascity D1 / MEDIUM-2): when listErr is a *transient*
-		// tmux-list hiccup rather than a truly-gone server, a still-live
-		// session's root can land here untracked and be targeted for kill —
-		// the same tmux machinery backs ensureRunning's !IsRunning gate, so a
-		// blip flips both. We accept this over the alternative (a survivor
-		// racing the replacement for the same work bead, causing duplicate bd
-		// closes), because the survivor bug is silent and corrupts work state
-		// while a wrongful kill is loud and self-heals on the next reconcile.
-		// Two mitigations bound the blast radius: (1) KillByPID confirms death
-		// by PID + /proc start-time identity (pidutil.AliveWithStartTime), so a
-		// genuinely-live root is never misreported as dead — if it resists the
-		// kill it surfaces a real "not confirmed dead" error; and (2) that
-		// error propagates through killExistingOrphans to every gated Start,
-		// which then refuses rather than racing. Independently re-deriving
-		// "is this the current live session" here would require the very
-		// ListRunning that just failed, so it is intentionally not attempted.
-		return found, errors.Join(scanErr, fmt.Errorf("tmux list running: %w", listErr))
+		// scanned roots are gc-tracked, so none is marked tracked. Marking
+		// them all tracked would tell killExistingOrphans to skip every one,
+		// and an escaped old process for this exact session would survive
+		// alongside its replacement. A pane of this provider's socket that
+		// the failed listing cannot show is still marked LiveUnlisted
+		// (markLiveUnlisted), so killExistingOrphans refuses the start on it
+		// rather than killing it; the other roots are terminated, and
+		// KillByPID confirms their death by PID and start-time identity.
+		return found, errors.Join(scanErr, fmt.Errorf("tmux list running: %w", listErr), p.markLiveUnlisted(found))
 	}
 
 	// A session whose GC_SESSION_ID cannot be read may track any root, so the
@@ -511,7 +496,62 @@ func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, er
 			found[i].ProviderName = name
 		}
 	}
-	return found, errors.Join(append([]error{scanErr}, metaErrs...)...)
+	return found, errors.Join(append([]error{scanErr, p.markLiveUnlisted(found)}, metaErrs...)...)
+}
+
+// markLiveUnlisted sets LiveUnlisted on each untracked root whose parent is
+// tmux, unless the root's TMUX variable proves that parent is a server bound
+// to another socket. tmux sets TMUX to "<socket path>,<server pid>,<session
+// index>" in every pane it spawns, so a pane names its own server. A pane of
+// this provider's socket name, in any socket directory (one under another
+// TMUX_TMPDIR, which this process cannot reach), is set, and so is a root
+// whose TMUX is absent, malformed, names another server pid or cannot be
+// read: nothing then proves it is not this provider's. A pane of a server an
+// agent started on a socket of its own is not set, so a start terminates it
+// as an orphan. It returns the errors of the reads, each one root's own
+// (proctable.EntryError): a root it cannot read leaves the scan's tracking
+// standing.
+func (p *Provider) markLiveUnlisted(found []runtime.LiveRuntime) error {
+	socketName := p.tm.socketLabel()
+	var errs []error
+	for i := range found {
+		root := &found[i]
+		if root.IsTracked || !root.ParentIsProviderInfrastructure {
+			continue
+		}
+		value, err := proctable.ProcessEnvValue(root.PID, "TMUX")
+		if err != nil {
+			errs = append(errs, &proctable.EntryError{PID: root.PID, Err: fmt.Errorf("tmux: reading TMUX for PID %d: %w", root.PID, err)})
+		}
+		root.LiveUnlisted = err != nil || !paneOfOtherSocket(value, root.PPID, socketName)
+	}
+	return errors.Join(errs...)
+}
+
+// paneOfOtherSocket reports whether tmuxEnv, a pane's TMUX variable, proves
+// the pane's parent ppid is a tmux server bound to a socket other than the
+// -L socket socketName: it names ppid as its server, and an absolute socket
+// path that is not socketName in a tmux-<uid> directory.
+func paneOfOtherSocket(tmuxEnv string, ppid int, socketName string) bool {
+	// The socket path may hold a comma itself, so the fields are cut from
+	// the right.
+	end := strings.LastIndexByte(tmuxEnv, ',')
+	if end < 0 {
+		return false
+	}
+	sep := strings.LastIndexByte(tmuxEnv[:end], ',')
+	if sep < 0 {
+		return false
+	}
+	path, serverPID := tmuxEnv[:sep], tmuxEnv[sep+1:end]
+	if !filepath.IsAbs(path) {
+		return false
+	}
+	if pid, err := strconv.Atoi(serverPID); err != nil || pid != ppid {
+		return false
+	}
+	tail := string(filepath.Separator) + filepath.Join(fmt.Sprintf("tmux-%d", os.Getuid()), socketName)
+	return !strings.HasSuffix(filepath.Clean(path), tail)
 }
 
 // TerminateRuntime implements [runtime.ProcessTableScanner].

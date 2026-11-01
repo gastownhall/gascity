@@ -173,9 +173,21 @@ are not in the desired set:
 Work beads may carry `gc.detached` when a controller/operator path has
 deliberately detached tmux-backed work from its owning session and still needs
 the controller to distinguish "live elsewhere" from "orphaned or stranded."
-The value is `tmux:<socket>:<session>`, where `<socket>` is the tmux socket name
-passed to `tmux -L` and `<session>` is the tmux session target passed to
-`has-session -t`.
+The value is `tmux:<socket>:<session>`, where `<socket>` is a tmux `-L` socket
+name or an absolute socket path and `<session>` is the exact tmux session name.
+The probe resolves a socket name to the path tmux itself binds in the
+controller's environment (`tmux.SocketPath`: `$TMUX_TMPDIR` with symlinks
+resolved, a relative value from the controller's working directory, falling
+back to `/tmp` when it is unset, empty or does not resolve;
+a `TMUX_TMPDIR` that resolves to a file is kept, as tmux keeps it and fails
+there, so nothing answers; `TMPDIR` is ignored), then runs
+`tmux -S <path> list-sessions` and matches the session name exactly. A server
+tmux started under a different `TMUX_TMPDIR` is therefore not visible to the
+probe. When no server answers at the probe's own path, that reads as an error,
+never as dead. When a server for the same socket name answers there without
+the session, the probe attests dead even though the session may still run
+under the other `TMUX_TMPDIR`, so a producer must start detached work in the
+controller's `TMUX_TMPDIR`.
 
 This field is controller-owned work metadata, not user role behavior. The only
 valid producer is code that has just created or adopted detached tmux-backed
@@ -184,18 +196,51 @@ consumer-side protection and tests for the metadata but no in-repo producer;
 follow-up bead `ga-a3oya` tracks wiring the first producer or retiring the
 metadata if it is no longer needed.
 
-Consumers treat the field conservatively:
-- Alive probe: preserve the assignment and suppress stranded diagnostics for
-  that work.
+Consumers treat the field conservatively — only an attested death is
+destructive:
+- Alive probe: hold the work. The orphan releases and the stranded repair keep
+  the assignment, and the stranded diagnostic does not list the work.
 - Dead probe: clear `gc.detached` and let normal orphan/stranded handling
-  proceed.
-- Probe error or timeout: orphan release waits for three consecutive probe
-  failures before releasing, while stranded diagnostics emit immediately and
-  preserve `gc.detached`.
+  proceed. Only a server that answered without the session, or a socket that
+  refuses connections on a stable inode, is dead.
+- Probe error or timeout: nothing was observed, so the work is held as an alive
+  probe holds it, on every tick until a probe attests alive or dead — there is
+  no error-count strike release — and the hold is logged rate-throttled per
+  bead. Neither the legacy stranded diagnostic nor a pool slot's close counts
+  such work stranded: both leave it out of `session.stranded`, and the slot's
+  other work is still stranded. When nothing else on the slot is stranded,
+  neither records the event nor stamps `stranded_event_emitted_at` (the close
+  refuses that attempt). The marker is what lets the stranded repair release
+  a slot's work once its confirmation window passes.
 
-Orphan release clears `gc.detached` in the same store update that reopens the
-work. If the release update fails, the detached guard remains on the work bead
-for the next controller tick.
+The stranded repair probes each claim carrying `gc.detached` again before it
+releases it. A claim it holds stays assigned, and the repair leaves the pool
+slot open with it rather than close the slot over work that may still run; it
+retries each pass.
+
+Every release clears `gc.detached` in the same store update that reopens the
+work. That includes the releases that give work back without probing it: the
+close cascade, the retired-session sweep, the execution-stalled stop, the work
+ladder, and the killed-seat and drain-ack releases. Left on reopened work, the
+probe would ride into the work's next claim, and once its socket is gone the
+next orphan or stranded pass would hold that claim for good. If the release
+update fails, the detached guard remains on the work bead for the next
+controller tick.
+
+A deliberate shutdown releases the claim. After `kill-server`, which `gc stop`
+runs once it has stopped the city's sessions, tmux leaves the server's socket
+file in place and it refuses connections, so the next probe attests dead.
+After the last session's exit, a server Gas City configured keeps running (it
+sets `exit-empty off`) and answers `list-sessions` without that session, so
+the next probe attests dead by the name's absence. The unobservable state
+comes from a socket that is gone or out of reach: a socket file that no longer
+exists (a tmpfs `/tmp` cleared at reboot, a temp-file cleaner, a removed
+`TMUX_TMPDIR`), a `TMUX_TMPDIR` that resolves to a file, a server that accepts
+the connection but does not answer, or a server under another `TMUX_TMPDIR`.
+Such a claim holds until a probe attests alive or dead. Killing the named tmux
+session does not release it, because the probe never reaches that server, so a
+held `gc.detached` clears only by an operator writing the metadata key's empty
+value.
 
 **Dependency-aware bounded parallel starts** (Phase 1b): The bead-driven
 session reconciler plans starts serially, groups them into dependency

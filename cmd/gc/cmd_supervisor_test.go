@@ -542,6 +542,32 @@ func TestBuildSupervisorServiceDataDoesNotPersistLogTeeByDefault(t *testing.T) {
 	}
 }
 
+// AC-8: the installed supervisor keeps the TMUX_TMPDIR its operator's tmux
+// servers run under, so the socket paths it probes are theirs; TMPDIR, which
+// tmux ignores, is not persisted.
+func TestBuildSupervisorServiceDataPersistsTMUXTMPDIRNotTMPDIR(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("GC_SUPERVISOR_ENV", "")
+	tmuxTmpDir := filepath.Join(homeDir, "tmux-sockets")
+	t.Setenv("TMUX_TMPDIR", tmuxTmpDir)
+	t.Setenv("TMPDIR", filepath.Join(homeDir, "scratch"))
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	if got["TMUX_TMPDIR"] != tmuxTmpDir {
+		t.Fatalf("ExtraEnv[TMUX_TMPDIR] = %q, want %q (all env: %#v)", got["TMUX_TMPDIR"], tmuxTmpDir, got)
+	}
+	if v, ok := got["TMPDIR"]; ok {
+		t.Fatalf("ExtraEnv[TMPDIR] = %q, want omitted (all env: %#v)", v, got)
+	}
+}
+
 // TestBuildSupervisorServiceDataPersistsLogTeeViaSupervisorEnvOptIn pins the
 // documented persistence escape hatch: GC_SUPERVISOR_ENV=GC_SUPERVISOR_LOG_TEE
 // carries the tee opt-out into generated launchd and systemd service files,

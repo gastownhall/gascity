@@ -38,8 +38,8 @@ import (
 //     - with work found on a pool slot, a stranded marker that has aged
 //     unclaims its work on every leg (SESS-625), and the close lands only if
 //     no release failed; with no marker, the effect stamps one and records
-//     session.stranded (SESS-624), unless every claim's detached probe still
-//     reports alive;
+//     session.stranded (SESS-624), unless its detached probe holds every
+//     claim (it reports alive, or observed nothing: error or timeout);
 //     - a pool slot eligible to park whose live read finds only parked work
 //     neither stamps nor repairs (ga-ylpbsy.16): it clears a marker an
 //     earlier pass left, and does not close.
@@ -63,8 +63,9 @@ import (
 // Close refusal causes; a fresh read's are readRuntime's.
 const (
 	causeLivePane      = "live-pane"          // the fresh read shows a live pane: not stopped
-	causeStranded      = "stranded-unstamped" // work on an unmarked pool slot whose detached probes all report alive
+	causeStranded      = "stranded-unstamped" // work on an unmarked pool slot whose every claim its detached probe holds, or whose read the Probe's bound cut short
 	causeReleaseFailed = "release-failed"     // the stranded repair's release failed on a claim or a leg
+	causeDetachedHeld  = "detached-held"      // the stranded repair kept a claim whose detached probe did not attest its runtime dead
 	causeParked        = "parked"             // a pool slot whose live work is only pre-assigned, unstarted, blocked pins (ga-ylpbsy.16)
 	causeParkUnread    = "park-unread"        // a pool slot eligible to park whose live work read failed: no stamp, no repair
 )
@@ -187,13 +188,14 @@ func killCorpse(ctx context.Context, _ txCaps, k corpseKill) (corpseKilled, erro
 }
 
 // strandedWork is the stranded branch's probe: the unmarked pool slot's
-// assigned work through the read-only legs, filtered by legacy's detached
-// probes (filterDetachedStrandedDiagnosticWork, without its metadata clear:
-// the legs refuse writes, and the release clears it). Not searched, the
-// branch refuses: no stamp rests on a probe that did not answer.
+// assigned work through the read-only legs, filtered by its detached probes
+// (as filterDetachedStrandedDiagnosticWork, without its metadata clear: the
+// legs refuse writes, and the release clears it). Not searched, or with every
+// claim held, the branch refuses: no stamp rests on a read that did not
+// answer, and none on work that may still run.
 type strandedWork struct {
 	ids      []string
-	alive    bool // every claim read reports a detached probe alive
+	held     bool // every claim read is held: its detached probe does not attest it dead
 	searched bool
 	// parked: the close is eligible to park (closeSpec.ParkEligible), and
 	// the live read found only open pins the seat never started, none
@@ -212,9 +214,12 @@ type strandedWork struct {
 // park only this read finds leaves a young marker in place until it ages,
 // where one the allocation finds clears it at once (decideParkedClear). The
 // detached probes run concurrently after the read, each on its own bound
-// (detachedProbeDefaultTimeout) apart from the read's; a probe that times out
-// reads not alive, as legacy's does. One the Probe's own bound cut short
-// leaves the work unsearched, so this attempt refuses.
+// (detachedProbeDefaultTimeout) apart from the read's. Only work whose probe
+// attests dead, or that carries none, is stranded: a claim whose probe
+// reports it alive or observed nothing (error or timeout) may still run, so
+// it is held out on its own, and the slot's other work is still stranded.
+// The Probe's own bound cutting the read short leaves the work unsearched, so
+// this attempt refuses.
 func strandedProbe(ctx context.Context, r effectReads, v txView) (strandedWork, error) {
 	c := v.It.Closing
 	unmarked := strings.TrimSpace(v.Row.StrandedEventEmittedAt) == ""
@@ -230,14 +235,15 @@ func strandedProbe(ctx context.Context, r effectReads, v txView) (strandedWork, 
 			return out, nil
 		}
 	}
-	alive := make([]bool, len(work))
+	status := make([]detachedProbeStatus, len(work))
 	var wg sync.WaitGroup
 	for i, item := range work {
+		status[i] = detachedProbeDead
 		if spec := strings.TrimSpace(item.bead.Metadata[detachedProbeMetadataKey]); spec != "" {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				alive[i] = probeDetachedWork(context.WithoutCancel(ctx), spec).Status == detachedProbeAlive
+				status[i] = probeDetachedWork(context.WithoutCancel(ctx), spec).Status
 			}()
 		}
 	}
@@ -247,11 +253,11 @@ func strandedProbe(ctx context.Context, r effectReads, v txView) (strandedWork, 
 	}
 	out.searched = true
 	for i, item := range work {
-		if !alive[i] {
+		if status[i] == detachedProbeDead {
 			out.ids = append(out.ids, item.bead.ID)
 		}
 	}
-	out.alive = err == nil && len(work) > 0 && len(out.ids) == 0
+	out.held = err == nil && len(work) > 0 && len(out.ids) == 0
 	return out, nil
 }
 
@@ -303,7 +309,7 @@ func closeWorkStep(v txView, stranded strandedWork, _ error) txStep {
 	case c.Kind == closePoolSlot && c.Repair:
 		return release(releaseStrandedRepair)
 	case c.Kind == closePoolSlot && strings.TrimSpace(v.Row.StrandedEventEmittedAt) == "":
-		if !stranded.searched || stranded.alive {
+		if !stranded.searched || stranded.held {
 			return txStep{Refuse: causeStranded}
 		}
 		at := v.World.Now.UTC()
@@ -350,6 +356,10 @@ func closeStep(v txView, strandedOnly bool, _ error) txStep {
 		step.Refuse = cause
 	case c.Repair && rel.why == releaseStrandedRepair && (relErr != nil || len(rel.out.Failed) > 0):
 		step.Refuse, step.Err = causeReleaseFailed, relErr
+	case c.Repair && rel.why == releaseStrandedRepair && rel.out.HeldDetached() > 0:
+		// Work that may still run stays assigned, so the slot stays open
+		// with it; the repair retries each pass.
+		step.Refuse = causeDetachedHeld
 	case c.Repair && rel.why == releaseStrandedRepair:
 		step.Terminal = session.ClosePatch(v.World.Now, strandedRepairCloseReason)
 	default:
