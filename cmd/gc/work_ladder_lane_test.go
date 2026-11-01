@@ -289,6 +289,35 @@ func TestWorkLadderReleasesAnUnstartedClaim(t *testing.T) {
 	}
 }
 
+// gascity#8152. A one_shot agent's seat executes by running its process,
+// not by answering a prompt: process exit, crash recovery and idle_timeout
+// already own it, so the ladder must not govern it at all — same claim,
+// same quiet window as TestWorkLadderReleasesAnUnstartedClaim (which does
+// get nudged three times then released), but this seat's agent is
+// configured one_shot and must see none of it.
+func TestWorkLadderExcludesOneShotLifecycleSeat(t *testing.T) {
+	c := newLadderCity(t)
+	c.env.Cfg.Agents[0].Lifecycle = config.AgentLifecycleOneShot
+	id := c.claim("never started, one-shot script")
+	c.run(30*time.Minute, 30*time.Second, nil)
+	if len(c.nudgedAt) != 0 {
+		t.Fatalf("nudges at %v, want none: a one_shot seat is not the ladder's", c.nudgedAt)
+	}
+	b, _ := c.work.Get(id)
+	if b.Status != "in_progress" || b.Assignee != c.seat {
+		t.Fatalf("claim %q assignee %q, want untouched (still held by the seat)", b.Status, b.Assignee)
+	}
+	if rel := c.events(events.WorkReleased); len(rel) != 0 {
+		t.Fatalf("work.released = %+v, want none", rel)
+	}
+	if meta := c.row().Metadata[session.WorkLadderKey]; meta != "" {
+		t.Fatalf("work_ladder cell = %q, want unwritten: the row was never governed", meta)
+	}
+	if len(c.posted) != 0 {
+		t.Fatalf("posted %+v, want no recycles", c.posted)
+	}
+}
+
 // agentRaceStore is a session store whose first CAS on row runs agent first: the
 // agent's own write lands between the ladder's read and its CAS.
 type agentRaceStore struct {
