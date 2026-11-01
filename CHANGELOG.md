@@ -712,6 +712,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Adopting or restarting with a bd store bound to a loopback Dolt server
+  gc does not run works.** A store `bd init --server --external` bound to a
+  dolt sql-server on `127.0.0.1`/`localhost`/`::1` was classified as gc's own
+  managed server by its host spelling alone: `gc rig add --adopt` ran gc's
+  init op over it and failed (`managed Dolt server unreachable while
+  inspecting existing store`), and in a city on that server the
+  `gc.endpoint_origin` stamp made every later `gc start` fail. A loopback
+  binding is now gc's only when its port is one gc's managed-Dolt runtime
+  record for the city names (`.gc/runtime/packs/dolt/dolt-state.json` or
+  `dolt-provider-state.json`); a record gc cannot parse is an error naming
+  the file. The boot port sync (and the publication and `gc rig add` paths
+  that share it) no longer stamps endpoint keys into, writes, or removes the
+  port file of a bd-owned store, hosted or loopback; and `gc doctor`'s
+  `dolt-drift` check no longer reports such a store's own port file as
+  drift. Like every store gc does not serve, such a store does not get gc's
+  bead types on start: after adopting one, run
+  `gc doctor --fix --check custom-types:<rig>` once. A store an earlier gc
+  already stamped needs a one-time repair: restore its pre-adopt
+  `.beads/config.yaml` (or drop the `gc.*` keys adopt appended), then adopt
+  again.
+
 - **The core orphan-sweep order judges claims on graph steps in a
   split-storage city.** On a city whose `[storage.classes]` serves the graph
   class from a binding, `gc bd list` answers from a work store only, so the

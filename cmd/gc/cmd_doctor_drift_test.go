@@ -418,3 +418,23 @@ func TestRigLocalDoltPIDFromSQLServerInfoMissingFile(t *testing.T) {
 		t.Errorf("pidAliveNow = true, want false when file absent")
 	}
 }
+
+// Doctor's dolt-drift check must not report a bd-owned direct-external rig's
+// own port file as drift from gc's managed port: its --fix (the boot sync)
+// leaves such a rig alone once the sync skips bd-owned scopes, so the report
+// could never clear.
+func TestDoltDriftLeavesABdOwnedRigsOwnPortFileAlone(t *testing.T) {
+	cityDir, rigDir, managedPort, cfg := managedCityDriftFixture(t, "fe")
+	t.Setenv("GC_BEADS", "bd")
+	writeBdOwnedDirectExternalRig(t, rigDir, "r", "db.example", 4406)
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "dolt-server.port"), []byte("4406\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := scopeIsBdOwnedDirectExternal(cityDir, rigDir); err != nil || !got {
+		t.Fatalf("precondition: scopeIsBdOwnedDirectExternal = %v, %v; want true", got, err)
+	}
+	r := newDoltDriftCheck(cityDir, cfg).Run(&doctor.CheckContext{CityPath: cityDir})
+	if r.Status != doctor.StatusOK {
+		t.Fatalf("dolt-drift on a bd-owned rig (managed port %s): status=%v message=%q details=%v", managedPort, r.Status, r.Message, r.Details)
+	}
+}

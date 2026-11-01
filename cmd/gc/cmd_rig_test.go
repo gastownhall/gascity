@@ -3175,6 +3175,9 @@ func TestDoRigAdd_AdoptFailedInitLeavesStoreFilesAsFound(t *testing.T) {
 	if err := os.MkdirAll(beads, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// The store names the port gc recorded for this city's own managed Dolt,
+	// so gc claims it and runs its init op over it.
+	writeDoltRuntimePublicationFixtureOnPort(t, cityPath, managedDoltStatePath(cityPath), 21658)
 	// bd creates both files 0600.
 	before := map[string]string{
 		"metadata.json": `{"backend":"dolt","database":"dolt","dolt_database":"ar","dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_port":21658}`,
@@ -3838,5 +3841,63 @@ func TestDoRigAdd_AdoptBdInitStoreWithoutConfigYamlPrefix(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `prefix = "hv"`) {
 		t.Errorf("city.toml does not pin the store's prefix:\n%s", data)
+	}
+}
+
+// A store bd initialized with --server --external against a dolt sql-server
+// the operator runs on this machine is not gc's to initialize. Adopt registers
+// it and leaves bd's files as found.
+func TestAdoptLoopbackBdServerStoreLeavesItsFilesAlone(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	calls := filepath.Join(cityPath, "provider-calls")
+	provider := filepath.Join(cityPath, "gc-beads-bd")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + calls + "\nif [ \"$1\" = init ]; then echo 'init must not run' >&2; exit 1; fi\nexit 0\n"
+	if err := os.WriteFile(provider, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+provider)
+	t.Setenv("GC_DOLT", "")
+
+	origEnsure := initDirIfReadyEnsureBeadsProvider
+	origWait := initDirIfReadyWaitForManagedDolt
+	t.Cleanup(func() {
+		initDirIfReadyEnsureBeadsProvider = origEnsure
+		initDirIfReadyWaitForManagedDolt = origWait
+	})
+	initDirIfReadyEnsureBeadsProvider = func(string) error { return nil }
+	initDirIfReadyWaitForManagedDolt = func(string, time.Duration) error { return nil }
+
+	rigPath := filepath.Join(t.TempDir(), "adopted-rig")
+	beads := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(beads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	before := map[string]string{
+		"metadata.json":    `{"backend":"dolt","database":"dolt","dolt_database":"ar","dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_port":21658}`,
+		"config.yaml":      "# bd template\nissue-prefix: \"ar\"\n",
+		"dolt-server.port": "21658\n",
+	}
+	for name, data := range before {
+		if err := os.WriteFile(filepath.Join(beads, name), []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "ar", "", false, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("doRigAdd = %d, want 0 (stdout=%q stderr=%q)", code, stdout.String(), stderr.String())
+	}
+	if data, _ := os.ReadFile(calls); strings.Contains(string(data), "init") {
+		t.Fatalf("provider init op ran for a store gc does not serve; calls:\n%s", data)
+	}
+	for name, want := range before {
+		got, err := os.ReadFile(filepath.Join(beads, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != want {
+			t.Errorf("%s after adopt:\n%s\nwant:\n%s", name, got, want)
+		}
 	}
 }

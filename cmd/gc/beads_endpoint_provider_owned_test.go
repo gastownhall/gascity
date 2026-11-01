@@ -407,10 +407,12 @@ func writeCityTOMLForBdProvider(t *testing.T, cityPath string) {
 	}
 }
 
-// TestScopeIsBdOwnedDirectExternal pins the predicate's evidence order. Its
-// only discriminator between "bd's upstream" and "gc's own managed server" is
-// the host recorded in bd's binding, compared against managedCityHost(), which
-// reads GC_DOLT_HOST from the live environment. A gc-managed scope initialized
+// TestScopeIsBdOwnedDirectExternal pins the predicate's evidence order. For a
+// non-loopback binding its discriminator between "bd's upstream" and "gc's own
+// managed server" is the host recorded in bd's binding, compared against
+// managedCityHost(), which reads GC_DOLT_HOST from the live environment (a
+// loopback binding is settled by gc's runtime record for the city; see
+// TestLoopbackBindingOnGCsRecordedPortIsGCs). A gc-managed scope initialized
 // under a non-loopback GC_DOLT_HOST records that host verbatim, so a later boot
 // with the variable unset compares unequal and the scope reads as bd-owned: gc
 // stops canonicalising it and stops raising its Dolt, and the beads stay
@@ -532,6 +534,259 @@ func writeDoltRuntimePublicationFixture(t *testing.T, cityPath, statePath string
 		Running: true,
 		PID:     os.Getpid(),
 		Port:    3307,
+		DataDir: filepath.Join(cityPath, ".beads", "dolt"),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile(%s): %v", statePath, err)
+	}
+}
+
+const bdOwnedLoopbackPort = 17333
+
+func writeProxiedLocalCityForBdOwnedRig(t *testing.T, city string) {
+	t.Helper()
+	writeCityTOMLForBdProvider(t, city)
+	writeBdOwnedProxiedScope(t, city, "hq")
+	if err := os.WriteFile(filepath.Join(city, ".beads", "config.yaml"), []byte("issue_prefix: gc\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	journalCityScopeOwnership(t, city, city, providerScopeIntent{Transport: "proxied", Target: "local"})
+}
+
+func writeDirectExternalCityOnLoopback(t *testing.T, city, rigPath string) {
+	t.Helper()
+	toml := fmt.Sprintf("[workspace]\nname = \"fixture\"\n\n[beads]\nprovider = \"bd\"\n\n[[rigs]]\nname = \"webapp\"\npath = %q\nprefix = \"hv\"\n", rigPath)
+	if err := os.MkdirAll(filepath.Join(city, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(toml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	meta := fmt.Sprintf(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_port":%d,"dolt_database":"hq"}`+"\n", bdOwnedLoopbackPort)
+	if err := os.WriteFile(filepath.Join(city, ".beads", "metadata.json"), []byte(meta), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(city, ".beads", "config.yaml"), []byte("issue_prefix: gc\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	journalCityScopeOwnership(t, city, city, providerScopeIntent{Transport: "direct", Target: "external"})
+}
+
+// A store bd initialized with `--server --external` against a dolt sql-server
+// the operator runs on this machine records a loopback binding. In a proxied
+// city gc runs no Dolt of its own, so that binding cannot be a stale record of
+// gc's server.
+func TestLoopbackBdOwnedRigInAProxiedCity(t *testing.T) {
+	city := normalizePathForCompare(t.TempDir())
+	writeProxiedLocalCityForBdOwnedRig(t, city)
+	rig := filepath.Join(city, "rigs", "hv")
+	writeBdOwnedDirectExternalRig(t, rig, "hv", "127.0.0.1", bdOwnedLoopbackPort)
+
+	got, err := scopeIsBdOwnedDirectExternal(city, rig)
+	if err != nil {
+		t.Fatalf("scopeIsBdOwnedDirectExternal: %v", err)
+	}
+	if !got {
+		t.Fatalf("a loopback bd-owned direct-external rig in a proxied city classified as gc-managed")
+	}
+}
+
+// The non-regression half: a loopback binding naming the port gc recorded for
+// the city's own managed Dolt is gc's, even when the rig's database is not in
+// the data dir under that exact name.
+func TestLoopbackBindingOnGCsRecordedPortIsGCs(t *testing.T) {
+	city, rigs := newLegacyManagedCityFixture(t, "fe")
+	rig := rigs["fe"]
+	seedCityDatabaseDir(t, city, "hq")
+	writeDoltRuntimePublicationFixture(t, city, managedDoltStatePath(city)) // port 3307
+	writeBdOwnedDirectExternalRig(t, rig, "fe", "127.0.0.1", 3307)
+
+	got, err := scopeIsBdOwnedDirectExternal(city, rig)
+	if err != nil {
+		t.Fatalf("scopeIsBdOwnedDirectExternal: %v", err)
+	}
+	if got {
+		t.Fatalf("a loopback binding on gc's recorded managed port classified as bd-owned")
+	}
+}
+
+// Boot normalization's port-mirror sync must not stamp gc's endpoint keys into
+// a rig bd owns, even one whose host is not loopback: here a hosted bd-owned
+// rig on a legacy gc-managed city.
+func TestBootSyncKeepsAHostedBdOwnedRigConfig(t *testing.T) {
+	city, rigs := newLegacyManagedCityFixture(t, "fe")
+	rig := rigs["fe"]
+	writeBdOwnedDirectExternalRig(t, rig, "fe", "db.example", 4406)
+	seedCityDatabaseDir(t, city, "hq")
+	writeDoltRuntimePublicationFixture(t, city, managedDoltStatePath(city))
+	cfg, err := loadCityConfig(city, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := normalizeCanonicalBdScopeFiles(city, cfg); err != nil {
+		t.Fatalf("normalizeCanonicalBdScopeFiles: %v", err)
+	}
+	assertScopeConfigCarriesNoGCEndpointOrigin(t, rig)
+	if _, err := os.Stat(filepath.Join(rig, ".beads", "dolt-server.port")); err == nil {
+		t.Fatalf("boot sync wrote a managed port mirror into a bd-owned rig")
+	}
+}
+
+// A city bound directly to an external dolt sql-server on this host
+// (provider-owned direct/external), adopting a store bd initialized on the same
+// server.
+func TestBootSyncKeepsALoopbackBdOwnedRigOnADirectExternalCity(t *testing.T) {
+	city := normalizePathForCompare(t.TempDir())
+	rig := filepath.Join(city, "rigs", "hv")
+	writeDirectExternalCityOnLoopback(t, city, rig)
+	writeBdOwnedDirectExternalRig(t, rig, "hv", "127.0.0.1", bdOwnedLoopbackPort)
+	t.Setenv("GC_BEADS", "bd")
+
+	if got, err := scopeIsBdOwnedDirectExternal(city, rig); err != nil || !got {
+		t.Fatalf("scopeIsBdOwnedDirectExternal = %v, %v; want true", got, err)
+	}
+	cfg, err := loadCityConfig(city, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := normalizeCanonicalBdScopeFiles(city, cfg); err != nil {
+		t.Fatalf("normalizeCanonicalBdScopeFiles: %v", err)
+	}
+	assertScopeConfigCarriesNoGCEndpointOrigin(t, rig)
+	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, city, rig)
+	if err != nil {
+		t.Fatalf("ResolveDoltConnectionTarget: %v", err)
+	}
+	if target.Host != "127.0.0.1" || target.Port != fmt.Sprint(bdOwnedLoopbackPort) || target.Database != "hv" {
+		t.Fatalf("rig target = %+v, want 127.0.0.1:%d/hv", target, bdOwnedLoopbackPort)
+	}
+}
+
+// The boot sync's city arm over an un-journaled bd-owned direct-external city
+// must neither stamp gc's endpoint keys nor touch bd's own port file.
+func TestBootSyncKeepsAnUnjournaledBdOwnedCity(t *testing.T) {
+	for name, tc := range map[string]struct {
+		host    string
+		port    int
+		withRig bool
+	}{
+		"hosted":            {host: "db.example", port: 4406},
+		"loopback":          {host: "127.0.0.1", port: 17333},
+		"hosted, with rig":  {host: "db.example", port: 4406, withRig: true},
+		"loopback with rig": {host: "127.0.0.1", port: 17333, withRig: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			city := normalizePathForCompare(t.TempDir())
+			t.Setenv("GC_BEADS", "bd")
+			if err := os.MkdirAll(filepath.Join(city, ".beads"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			toml := "[workspace]\nname = \"fixture\"\n\n[beads]\nprovider = \"bd\"\n"
+			if tc.withRig {
+				rig := filepath.Join(city, "fe")
+				writeLegacyManagedScope(t, rig, "fe", "fe", "inherited_city")
+				toml += fmt.Sprintf("\n[[rigs]]\nname = \"fe\"\npath = %q\nprefix = \"fe\"\n", rig)
+			}
+			if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(toml), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			meta := fmt.Sprintf(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_server_host":%q,"dolt_server_port":%d,"dolt_database":"hq"}`+"\n", tc.host, tc.port)
+			if err := os.WriteFile(filepath.Join(city, ".beads", "metadata.json"), []byte(meta), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(city, ".beads", "config.yaml"), []byte("issue_prefix: gc\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			portFile := filepath.Join(city, ".beads", "dolt-server.port")
+			if err := os.WriteFile(portFile, []byte(fmt.Sprintf("%d\n", tc.port)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := scopeIsBdOwnedDirectExternal(city, city); err != nil || !got {
+				t.Fatalf("scopeIsBdOwnedDirectExternal(city) = %v, %v; want true", got, err)
+			}
+
+			cfg, err := loadCityConfig(city, &bytes.Buffer{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := normalizeCanonicalBdScopeFiles(city, cfg); err != nil {
+				t.Fatalf("normalizeCanonicalBdScopeFiles: %v", err)
+			}
+			assertScopeConfigCarriesNoGCEndpointOrigin(t, city)
+			data, err := os.ReadFile(portFile)
+			if err != nil {
+				t.Fatalf("boot sync removed bd's own port file: %v", err)
+			}
+			if strings.TrimSpace(string(data)) != fmt.Sprint(tc.port) {
+				t.Fatalf("boot sync rewrote bd's own port file to %q", strings.TrimSpace(string(data)))
+			}
+		})
+	}
+}
+
+// The default proxied city adopting a store bd bound to a loopback server
+// the operator runs: the boot sync must leave bd's config.yaml and port file.
+func TestBootSyncKeepsALoopbackBdOwnedRigInAProxiedCity(t *testing.T) {
+	city := normalizePathForCompare(t.TempDir())
+	rig := filepath.Join(city, "rigs", "hv")
+	toml := fmt.Sprintf("[workspace]\nname = \"fixture\"\n\n[beads]\nprovider = \"bd\"\n\n[[rigs]]\nname = \"webapp\"\npath = %q\nprefix = \"hv\"\n", rig)
+	writeBdOwnedProxiedScope(t, city, "hq")
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(toml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(city, ".beads", "config.yaml"), []byte("issue_prefix: gc\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	journalCityScopeOwnership(t, city, city, providerScopeIntent{Transport: "proxied", Target: "local"})
+	writeBdOwnedDirectExternalRig(t, rig, "hv", "127.0.0.1", bdOwnedLoopbackPort)
+	portFile := filepath.Join(rig, ".beads", "dolt-server.port")
+	if err := os.WriteFile(portFile, []byte(fmt.Sprintf("%d\n", bdOwnedLoopbackPort)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "bd")
+	cfg, err := loadCityConfig(city, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := normalizeCanonicalBdScopeFiles(city, cfg); err != nil {
+		t.Fatalf("normalizeCanonicalBdScopeFiles: %v", err)
+	}
+	assertScopeConfigCarriesNoGCEndpointOrigin(t, rig)
+	if _, err := os.Stat(portFile); err != nil {
+		t.Fatalf("boot sync removed bd's own rig port file: %v", err)
+	}
+}
+
+// A legacy gc-managed city whose managed Dolt is recorded on 3307, adopting a
+// store bd bound to an operator-run loopback server on another port.
+func TestLoopbackRigOnAnUnrecordedPortOfALegacyCityIsBds(t *testing.T) {
+	city, rigs := newLegacyManagedCityFixture(t, "fe")
+	rig := rigs["fe"]
+	seedCityDatabaseDir(t, city, "hq")
+	writeDoltRuntimePublicationFixture(t, city, managedDoltStatePath(city)) // port 3307
+	writeBdOwnedDirectExternalRig(t, rig, "fe", "127.0.0.1", bdOwnedLoopbackPort)
+
+	got, err := scopeIsBdOwnedDirectExternal(city, rig)
+	if err != nil {
+		t.Fatalf("scopeIsBdOwnedDirectExternal: %v", err)
+	}
+	if !got {
+		t.Fatalf("a loopback rig on a port gc never recorded classified as gc-managed")
+	}
+	cfg, err := loadCityConfig(city, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := normalizeCanonicalBdScopeFiles(city, cfg); err != nil {
+		t.Fatalf("normalizeCanonicalBdScopeFiles: %v", err)
+	}
+	assertScopeConfigCarriesNoGCEndpointOrigin(t, rig)
+}
+
+func writeDoltRuntimePublicationFixtureOnPort(t *testing.T, cityPath, statePath string, port int) {
+	t.Helper()
+	if err := writeDoltRuntimeStateFile(statePath, doltRuntimeState{
+		Running: false,
+		Port:    port,
 		DataDir: filepath.Join(cityPath, ".beads", "dolt"),
 	}); err != nil {
 		t.Fatalf("writeDoltRuntimeStateFile(%s): %v", statePath, err)
