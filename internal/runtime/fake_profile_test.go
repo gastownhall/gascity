@@ -3,6 +3,7 @@ package runtime_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -43,6 +44,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"FencedInteractionProvider":       reflect.TypeFor[runtime.FencedInteractionProvider](),
 	"FreshActivityProvider":           reflect.TypeFor[runtime.FreshActivityProvider](),
 	"FreshLivenessObserver":           reflect.TypeFor[runtime.FreshLivenessObserver](),
+	"IdentityObserver":                reflect.TypeFor[runtime.IdentityObserver](),
 	"IdentitySidecarProvider":         reflect.TypeFor[runtime.IdentitySidecarProvider](),
 	"IdleProbeBudgetProvider":         reflect.TypeFor[runtime.IdleProbeBudgetProvider](),
 	"IdleSnapshotProvider":            reflect.TypeFor[runtime.IdleSnapshotProvider](),
@@ -79,6 +81,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"TurnObservationProvider":         reflect.TypeFor[runtime.TurnObservationProvider](),
 	"TurnRunningProvider":             reflect.TypeFor[runtime.TurnRunningProvider](),
 	"UnattendedSessionStopper":        reflect.TypeFor[runtime.UnattendedSessionStopper](),
+	"V2ReadinessReporter":             reflect.TypeFor[runtime.V2ReadinessReporter](),
 }
 
 // notOptional are the package's exported interfaces that are not optional
@@ -167,6 +170,7 @@ current-context: c
 		runtime.ProfileHerdr:      herdr.New("city", t.TempDir(), t.TempDir(), 0, 0),
 		runtime.ProfileK8s:        kube,
 		runtime.ProfileExec:       exec.NewSeamBacked(execConnectionPack(t)),
+		runtime.ProfileExecV2:     exec.NewSeamBacked(execV2Pack(t)),
 		runtime.ProfileSSH:        ssh.NewSeamBacked(ep),
 		runtime.ProfileT3Bridge:   t3bridge.NewSeamBacked(),
 	}
@@ -185,15 +189,27 @@ func execConnectionPack(t *testing.T) string {
 	return script
 }
 
+// execV2Pack is execConnectionPack declaring observe.v1 and
+// report-attachment too: v2-ready.
+func execV2Pack(t *testing.T) string {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "pack")
+	body := "#!/bin/sh\n[ \"$1\" = protocol ] && echo '{\"version\":0,\"capabilities\":[\"proc.exec\",\"input-fence\",\"observe.v1\",\"report-attachment\"]}'\nexit 0\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
 // Kills a profile that drifts from its backend: one optional interface more
 // or fewer than the provider production builds, other capabilities, another
 // answer from a fixed trait (sleep capability, fresh reads, an identity
 // sidecar, a transport, an idle-proof budget, a turn-interrupt mode, input
-// fencing, response fencing, local transcripts, a steer mode), or no
-// backend checked.
+// fencing, response fencing, local transcripts, a steer mode, observable
+// identity, v2 readiness), or no backend checked.
 func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 	backends := productionBackends(t)
-	for p := runtime.ProfileTmux; p <= runtime.ProfileT3Bridge; p++ {
+	for p := runtime.ProfileTmux; p <= runtime.ProfileExecV2; p++ {
 		backend, ok := backends[p]
 		if !ok {
 			t.Errorf("profile %d: no production backend to match", p)
@@ -215,7 +231,7 @@ func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 // traits are p's answers to the optional interfaces that report a backend's
 // fixed traits, "-" for one it does not implement.
 func traits(p runtime.Provider) string {
-	out := []string{"-", "-", "-", "-", "-", "-", "-", "-", "-", "-"}
+	out := []string{"-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"}
 	if s, ok := p.(runtime.SleepCapabilityProvider); ok {
 		out[0] = string(s.SleepCapability("s"))
 	}
@@ -245,6 +261,13 @@ func traits(p runtime.Provider) string {
 	}
 	if f, ok := p.(runtime.FencedInteractionProvider); ok {
 		out[9] = string(f.ResponseFencing("s"))
+	}
+	if f, ok := p.(runtime.IdentityObserver); ok {
+		out[10] = strconv.FormatBool(f.IdentityObservable())
+	}
+	if f, ok := p.(runtime.V2ReadinessReporter); ok {
+		missing, err := f.V2Readiness()
+		out[11] = fmt.Sprintf("%v/%v", missing, err)
 	}
 	return strings.Join(out, " ")
 }
@@ -625,4 +648,48 @@ func (b *profileBackgroundStopSpy) StopBackgroundWork(ctx context.Context, name 
 	b.ctx, b.name = ctx, name
 	b.calls++
 	return b.result
+}
+
+// corpseBackend is a full fake whose liveness read reports corpses.
+type corpseBackend struct {
+	runtime.FullFake
+	corpses map[string]bool
+	err     error
+}
+
+func (b corpseBackend) ObserveLivenessWithError(name string, pn []string) (runtime.Liveness, error) {
+	if b.err != nil {
+		return runtime.Liveness{}, b.err
+	}
+	if b.corpses[name] {
+		return runtime.Liveness{Corpse: true, ObjectID: "c", ObjectCreated: "t"}, nil
+	}
+	return b.FullFake.ObserveLivenessWithError(name, pn)
+}
+
+// Kills a v2 exec profile whose identity read disagrees with the exec
+// provider's: a dead box (a corpse its backend still lists) answers its
+// identity, an absent name ErrSessionNotFound, and a failed read
+// ErrRuntimeUnavailable; the profile that is not v2-ready reads none.
+func TestExecV2ProfileObservesACorpsesIdentity(t *testing.T) {
+	f := runtime.NewFake()
+	if err := f.SetMeta("dead", "GC_SESSION_ID", "gc-1"); err != nil {
+		t.Fatal(err)
+	}
+	b := corpseBackend{FullFake: runtime.FullFake{Fake: f}, corpses: map[string]bool{"dead": true}}
+	obs := runtime.NewFakeProfile(runtime.ProfileExecV2, b).(runtime.IdentityObserver)
+	if id, err := obs.ObserveIdentity("dead"); err != nil || id["GC_SESSION_ID"] != "gc-1" {
+		t.Errorf("corpse: %v, %v; want its identity", id, err)
+	}
+	if _, err := obs.ObserveIdentity("gone"); !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Errorf("absent: %v, want ErrSessionNotFound", err)
+	}
+	failing := b
+	failing.err = errors.New("backend down")
+	if _, err := runtime.NewFakeProfile(runtime.ProfileExecV2, failing).(runtime.IdentityObserver).ObserveIdentity("dead"); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Errorf("failed read: %v, want ErrRuntimeUnavailable", err)
+	}
+	if _, err := runtime.NewFakeProfile(runtime.ProfileExec, b).(runtime.IdentityObserver).ObserveIdentity("dead"); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Errorf("exec profile, not v2-ready: %v, want ErrRuntimeUnavailable", err)
+	}
 }

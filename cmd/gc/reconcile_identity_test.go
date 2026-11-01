@@ -267,33 +267,86 @@ func TestOwnsNameIdentityOnly(t *testing.T) {
 
 // TestIdentityReadableLeaves pins the leaves whose identity is read, so
 // Ownerless can arise only on a backend that seeds identity before it lists
-// the name (v5 X3): tmux, acp and subprocess (LL3). Every other leaf reads
-// not Known.
+// the name (v5 X3): tmux, acp and subprocess (LL3), and a v2-ready exec
+// pack. Every other leaf reads not Known. It also pins the leaves whose
+// GetMeta reads that identity (metaIdentityReadable), which the legacy
+// pending-create attribution reads it through: the same leaves but the exec
+// pack, whose `get-meta` need not serve what `observe` reports.
 //
-// Kills: a known leaf type made identity-readable without revisiting X3.
+// Kills: a known leaf type made identity-readable without revisiting X3; a
+// v2-ready exec pack read as vouching for identity through GetMeta, which
+// leaves a manual row's unstamped box running when the row closes.
 //
 // auto and hybrid are never leaves (ResolveBackend and inventoryLeaves walk
 // through them), but they forward the batched env read, so they are pinned
 // unreadable by their runtime.Router guard.
 func TestIdentityReadableLeaves(t *testing.T) {
 	for name, tc := range map[string]struct {
-		leaf runtime.Provider
-		want bool
+		leaf       runtime.Provider
+		want, meta bool
 	}{
-		"tmux":       {(*tmux.Provider)(nil), true},
-		"acp":        {(*acp.Provider)(nil), true},
-		"subprocess": {(*subprocess.Provider)(nil), true},
-		"auto":       {(*auto.Provider)(nil), false},
-		"exec":       {(*exec.Provider)(nil), false},
-		"herdr":      {(*herdr.Provider)(nil), false},
-		"hybrid":     {(*hybrid.Provider)(nil), false},
-		"k8s":        {(*k8s.Provider)(nil), false},
-		"ssh":        {(*ssh.Provider)(nil), false},
-		"t3bridge":   {(*t3bridge.Provider)(nil), false},
+		"tmux":       {(*tmux.Provider)(nil), true, true},
+		"acp":        {(*acp.Provider)(nil), true, true},
+		"subprocess": {(*subprocess.Provider)(nil), true, true},
+		"auto":       {(*auto.Provider)(nil), false, false},
+		"exec":       {(*exec.Provider)(nil), false, false},
+		"herdr":      {(*herdr.Provider)(nil), false, false},
+		"hybrid":     {(*hybrid.Provider)(nil), false, false},
+		"k8s":        {(*k8s.Provider)(nil), false, false},
+		"ssh":        {(*ssh.Provider)(nil), false, false},
+		"t3bridge":   {(*t3bridge.Provider)(nil), false, false},
+		// exec observes identity only once its handshake is v2-ready, whose
+		// protocol seeds identity before it reports a name (X3).
+		"exec profile":    {runtime.NewFakeProfile(runtime.ProfileExec, runtime.FullFake{Fake: runtime.NewFake()}), false, false},
+		"exec v2 profile": {runtime.NewFakeProfile(runtime.ProfileExecV2, runtime.FullFake{Fake: runtime.NewFake()}), true, false},
 	} {
 		if got := identityReadable(tc.leaf); got != tc.want {
 			t.Errorf("identityReadable(%s) = %v, want %v", name, got, tc.want)
 		}
+		if got := metaIdentityReadable(tc.leaf); got != tc.meta {
+			t.Errorf("metaIdentityReadable(%s) = %v, want %v", name, got, tc.meta)
+		}
+	}
+}
+
+// identityObserverLeaf observes identity as a v2-ready exec pack does, and
+// counts its reads.
+type identityObserverLeaf struct {
+	*runtime.Fake
+	ids   map[string]string
+	err   error
+	reads int
+}
+
+func (*identityObserverLeaf) IdentityObservable() bool { return true }
+
+func (l *identityObserverLeaf) ObserveIdentity(string) (map[string]string, error) {
+	l.reads++
+	return l.ids, l.err
+}
+
+// Kills (PAR-EXEC §13.5 4): an observed identity read twice, as a sidecar
+// is, or a read that could not tell (identity null, unknown) taken as a
+// known empty identity, which reads a starting box as ownerless.
+func TestReadIdentityEnvObservesOnce(t *testing.T) {
+	leaf := &identityObserverLeaf{Fake: runtime.NewFake(), ids: map[string]string{"GC_SESSION_ID": "gc-1", "GC_RUNTIME_EPOCH": "2", "GC_INSTANCE_TOKEN": " tok-1 ", "GT_PROCESS_NAMES": "claude, node"}}
+	id := readIdentityEnv(leaf, "s")
+	want := runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "2", Token: "tok-1", ProcessNames: []string{"claude", "node"}}
+	if id.Known != want.Known || id.SessionID != want.SessionID || id.Epoch != want.Epoch || id.Token != want.Token || strings.Join(id.ProcessNames, ",") != "claude,node" {
+		t.Fatalf("readIdentityEnv = %+v, want %+v", id, want)
+	}
+	if leaf.reads != 1 || len(leaf.Calls) != 0 {
+		t.Fatalf("%d observes and calls %v, want one observe and no GetMeta", leaf.reads, leaf.Calls)
+	}
+	for _, err := range []error{runtime.ErrRuntimeUnavailable, runtime.ErrSessionNotFound} {
+		leaf := &identityObserverLeaf{Fake: runtime.NewFake(), ids: map[string]string{}, err: err}
+		if id := readIdentityEnv(leaf, "s"); id.Known {
+			t.Errorf("ObserveIdentity %v: identity %+v, want not Known", err, id)
+		}
+	}
+	empty := &identityObserverLeaf{Fake: runtime.NewFake(), ids: map[string]string{}}
+	if id := readIdentityEnv(empty, "s"); !id.Known || id.SessionID != "" {
+		t.Errorf("a box with no gc identity: %+v, want Known and empty (ownerless)", id)
 	}
 }
 

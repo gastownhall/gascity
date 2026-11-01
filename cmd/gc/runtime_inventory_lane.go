@@ -770,19 +770,46 @@ func (l *runtimeInventoryLane) readIdentities(ctx context.Context, attrs map[str
 	return reads, backlog
 }
 
-// identityReadable reports whether leaf's identity env is cheap and local to
-// read: a batched environment read (tmux), or a local sidecar (acp,
+// identityReadable reports whether leaf's identity env is cheap to read in
+// one answer: a batched environment read (tmux), one fresh identity read
+// (runtime.IdentityObserver: a v2-ready exec pack, whose protocol seeds
+// identity before it reports the name, v5 X3), or a local sidecar (acp,
 // subprocess). Other leaves' GetMeta reaches a pod, a host or a script, so
 // their identity is never read, and stays unknown. A composite
 // ([runtime.Router]) is never a leaf: it forwards the batched read to a leaf
-// it routes to, so it is not identity-readable itself.
+// it routes to, so it is not identity-readable itself. A caller that reads
+// identity through GetMeta asks metaIdentityReadable instead.
 func identityReadable(leaf runtime.Provider) bool {
+	if metaIdentityReadable(leaf) {
+		return true
+	}
+	if _, ok := leaf.(runtime.Router); ok {
+		return false
+	}
+	observer, ok := leaf.(runtime.IdentityObserver)
+	return ok && observer.IdentityObservable()
+}
+
+// metaIdentityReadable is identityReadable without the fresh identity read:
+// a leaf whose GetMeta reads the identity env its start stamped before the
+// name is visible, from a batched environment (tmux) or a local sidecar
+// (acp, subprocess). A v2-ready exec pack is not one: `observe` reports the
+// identity its box was started with, but nothing requires its `get-meta` to
+// serve those keys, so a GetMeta read (readPendingCreateIdentity) can find
+// the pack's own box unstamped.
+func metaIdentityReadable(leaf runtime.Provider) bool {
 	if _, ok := leaf.(runtime.Router); ok {
 		return false
 	}
 	if _, ok := leaf.(runtime.EnvironmentBatchProvider); ok {
 		return true
 	}
+	return localSidecar(leaf)
+}
+
+// localSidecar reports a leaf whose GetMeta reads a local sidecar (acp,
+// subprocess).
+func localSidecar(leaf runtime.Provider) bool {
 	sidecar, ok := leaf.(runtime.IdentitySidecarProvider)
 	return ok && sidecar.LocalIdentitySidecar()
 }
@@ -853,9 +880,11 @@ func readRuntimeIdentity(ctx context.Context, leaf runtime.Provider, name string
 }
 
 // readIdentityEnv reads name's identity env from leaf: one GetAllEnvironment
-// where the leaf batches it (tmux), otherwise GetMeta per key on a local
-// sidecar (acp, subprocess). Any error, or a leaf whose identity is not
-// readable, leaves the identity unknown.
+// where the leaf batches it (tmux), one ObserveIdentity where the leaf
+// observes it (a v2-ready exec pack; a single fresh answer, so it is read
+// once), otherwise GetMeta per key on a local sidecar (acp, subprocess). Any
+// error, or a leaf whose identity is not readable, leaves the identity
+// unknown.
 //
 // A sidecar is one file per key, re-seeded by clearing every key and then
 // writing each. Its keys are read twice, and only two equal reads count: a
@@ -871,6 +900,14 @@ func readIdentityEnv(leaf runtime.Provider, name string) runtimeIdentity {
 	var v [len(identityEnvKeys)]string
 	if batch, ok := leaf.(runtime.EnvironmentBatchProvider); ok {
 		vars, err := batch.GetAllEnvironment(name)
+		if err != nil {
+			return runtimeIdentity{}
+		}
+		for i, key := range identityEnvKeys {
+			v[i] = strings.TrimSpace(vars[key])
+		}
+	} else if observer, ok := leaf.(runtime.IdentityObserver); ok && observer.IdentityObservable() {
+		vars, err := observer.ObserveIdentity(name)
 		if err != nil {
 			return runtimeIdentity{}
 		}
@@ -948,10 +985,11 @@ func probeProcesses(ctx context.Context, attrs map[string]InventoryAttrs, hosts 
 }
 
 // readSidecarRestartMarkers is the restart marker's GetMeta fallback
-// (CONTRACT v5.10q C7a-2b): a name on a leaf whose identity is cheap to
-// read (identityReadable: a local sidecar, acp or subprocess) and which has
-// no batched inventory to carry the marker has GC_RESTART_REQUESTED read
-// through GetMeta every pass. At
+// (CONTRACT v5.10q C7a-2b): a name on a leaf whose GetMeta reads a local
+// sidecar (acp, subprocess) and which has no batched inventory to carry the
+// marker has GC_RESTART_REQUESTED read through GetMeta every pass. Any other
+// leaf's GetMeta reaches a script, a pod or a host, and is never read here
+// per name per pass. At
 // most concurrency run at a time within ctx, each on its own goroutine; an
 // error, a panic or a read past ctx leaves the marker unread, which A13 reads
 // as not requested.
@@ -962,7 +1000,7 @@ func readSidecarRestartMarkers(ctx context.Context, attrs map[string]InventoryAt
 		if _, batched := leaf.(runtime.InventoryProvider); batched {
 			continue
 		}
-		if identityReadable(leaf) {
+		if localSidecar(leaf) {
 			names = append(names, name)
 		}
 	}

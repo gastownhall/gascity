@@ -513,3 +513,44 @@ esac
 		t.Errorf("launchAgent ran %q, want the agent launched", readCalls(t, calls))
 	}
 }
+
+// Kills a start into a box that was already up which, when only the startup
+// dialogs fail, restores the fence the start cleared: the new incarnation's
+// fence was published, so the old one must not go back on the pane.
+func TestExecStartKeepsTheNewFenceWhenTheDialogsFail(t *testing.T) {
+	old := runtime.InputFence{Generation: 1, Epoch: 1, Token: "old"}
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	script := writeScript(t, dir, `
+case "$1" in
+  protocol) echo '{"version":0,"capabilities":["proc.exec","input-fence"]}' ;;
+  is-running) echo true ;;
+  exec)
+    cmd=$(cat)
+    echo "$cmd" >> `+calls+`
+    case "$cmd" in
+      *display-message*) echo '`+old.Digest()+`.%1|%1|4242' ;;
+    esac
+    ;;
+  watch-startup) echo 'not an event' ;;
+  start) cat > /dev/null ;;
+  stop) ;;
+  *) exit 2 ;;
+esac
+`)
+	env := map[string]string{runtime.RuntimeEpochEnv: "2", runtime.ContinuationEpochEnv: "3", runtime.InstanceTokenEnv: "tok"}
+	if err := NewProvider(script).Start(context.Background(), "s", runtime.Config{Env: env, EmitsPermissionWarning: true}); err == nil {
+		t.Fatalf("Start with the dialogs failing = nil, want an error; ran %q", readCalls(t, calls))
+	}
+	got := readCalls(t, calls)
+	published := false
+	for _, c := range got {
+		published = published || strings.HasPrefix(c, "'tmux' 'set-option' '-p' '-F'")
+		if strings.Contains(c, "'if-shell'") && strings.Contains(c, old.Digest()) {
+			t.Fatalf("Start ran %q: the old fence was restored after the new one was published", got)
+		}
+	}
+	if !published {
+		t.Fatalf("Start ran %q, want the new fence published before the dialogs", got)
+	}
+}

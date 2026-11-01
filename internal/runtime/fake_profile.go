@@ -28,11 +28,14 @@ const (
 	ProfileExec
 	ProfileSSH
 	ProfileT3Bridge
+	// ProfileExecV2 is ProfileExec for a pack whose handshake also declares
+	// observe.v1 and report-attachment: v2-ready.
+	ProfileExecV2
 )
 
 // String is the profile's runtime selection name.
 func (p Profile) String() string {
-	return [...]string{"tmux", "acp", "subprocess", "herdr", "k8s", "exec", "ssh", "t3bridge"}[p]
+	return [...]string{"tmux", "acp", "subprocess", "herdr", "k8s", "exec", "ssh", "t3bridge", "exec"}[p]
 }
 
 // ProfileBackend is every optional interface a profiled backend implements
@@ -136,8 +139,8 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 		return herdrProfile{core, b, b, b, b, b, localTranscriptTrait{}}
 	case ProfileK8s:
 		return k8sProfile{core, b, b, timed}
-	case ProfileExec:
-		return execProfile{core, b, b, b, b, b, timed, probeBudgetTrait{}}
+	case ProfileExec, ProfileExecV2:
+		return execProfile{core, b, b, b, b, b, timed, probeBudgetTrait{}, execObserveTrait{core, b, p == ProfileExecV2}}
 	case ProfileSSH:
 		return sshProfile{core, b, b, b, timed}
 	case ProfileT3Bridge:
@@ -180,7 +183,7 @@ func (transportTrait) SupportsTransport(transport string) bool { return transpor
 // has none. exec's come from its script's handshake: the profile is a pack
 // declaring the exec connection and input fencing (proc.exec, input-fence)
 // alone, which reports none of these and fences input atomically through
-// the tmux carrier.
+// the tmux carrier; exec v2 adds observe.v1 and report-attachment.
 var profileCapabilities = map[Profile]ProviderCapabilities{
 	ProfileTmux:     {CanReportAttachment: true, CanReportActivity: true},
 	ProfileACP:      {CanReportActivity: true},
@@ -188,6 +191,7 @@ var profileCapabilities = map[Profile]ProviderCapabilities{
 	ProfileK8s:      {CanReportActivity: true},
 	ProfileSSH:      {CanReportActivity: true, CanAttachTTY: true},
 	ProfileT3Bridge: {CanReportActivity: true},
+	ProfileExecV2:   {CanReportAttachment: true},
 }
 
 // profileProvider is a backend's Provider surface with its capabilities.
@@ -291,6 +295,7 @@ type (
 		RelaunchProvider
 		sleepTrait
 		probeBudgetTrait
+		execObserveTrait
 	}
 	sshProfile struct {
 		Provider
@@ -339,6 +344,76 @@ var t3bridgeTurnCapabilities = TurnCapabilities{
 // static row; TurnHistory stays forwarded to the backend.
 func (t3bridgeProfile) TurnCapabilities(string) TurnCapabilities {
 	return t3bridgeTurnCapabilities
+}
+
+// execObserveTrait is exec's observe.v1 surface, gated as the exec provider
+// gates it on its handshake. Ready (ProfileExecV2), the reads and kills are
+// the backend's, and the identity is its GetMeta of the identity keys for a
+// name its liveness read shows present, a corpse included, as exec's
+// `observe` reports a dead box's identity.
+// Otherwise (ProfileExec) liveness is the IsRunning and ProcessAlive read
+// with a nil error, nothing reads fresh or observes identity, nothing is
+// killed, and readiness names both missing capabilities.
+type execObserveTrait struct {
+	core  Provider
+	b     ProfileBackend
+	ready bool
+}
+
+func (t execObserveTrait) ObserveLivenessWithError(name string, processNames []string) (Liveness, error) {
+	if !t.ready {
+		return ObserveLiveness(struct{ Provider }{t.core}, name, processNames), nil
+	}
+	return t.b.ObserveLivenessWithError(name, processNames)
+}
+
+func (t execObserveTrait) LivenessReadsFresh() bool { return t.ready }
+
+func (t execObserveTrait) IdentityObservable() bool { return t.ready }
+
+func (t execObserveTrait) ObserveIdentity(name string) (map[string]string, error) {
+	if !t.ready {
+		return nil, ErrRuntimeUnavailable
+	}
+	lv, err := t.b.ObserveLivenessWithError(name, nil)
+	if err != nil {
+		return nil, errors.Join(ErrRuntimeUnavailable, err)
+	}
+	if !lv.Present() {
+		return nil, ErrSessionNotFound
+	}
+	id := map[string]string{}
+	for _, key := range []string{"GC_SESSION_ID", "GC_RUNTIME_EPOCH", "GC_INSTANCE_TOKEN", "GT_PROCESS_NAMES"} {
+		v, err := t.b.GetMeta(name, key)
+		if err != nil {
+			return nil, errors.Join(ErrRuntimeUnavailable, err)
+		}
+		if v != "" {
+			id[key] = v
+		}
+	}
+	return id, nil
+}
+
+func (t execObserveTrait) KillCorpseObject(name, objectID, created string) (SessionObjectKillResult, error) {
+	if !t.ready {
+		return SessionObjectNotKilled, ErrSessionObjectKillUnsupported
+	}
+	return t.b.KillCorpseObject(name, objectID, created)
+}
+
+func (t execObserveTrait) KillZombieObject(name, objectID, created, panePID string) (SessionObjectKillResult, error) {
+	if !t.ready {
+		return SessionObjectNotKilled, ErrSessionObjectKillUnsupported
+	}
+	return t.b.KillZombieObject(name, objectID, created, panePID)
+}
+
+func (t execObserveTrait) V2Readiness() ([]string, error) {
+	if t.ready {
+		return nil, nil
+	}
+	return []string{ProtocolCapabilityObserveV1, ProtocolCapabilityReportAttachment}, nil
 }
 
 // FullFake is a [Fake] implementing every [ProfileBackend] interface, the

@@ -213,6 +213,32 @@ func TestFenceTerminalNoReportUsesQuietWindowNotBoolAttach(t *testing.T) {
 	}
 }
 
+// Kills (PAR-EXEC F1, §13.5 8): attachLeg's no-terminal tier granted to a
+// leaf with an error-bearing read that does not read fresh: an exec pack
+// that is not v2-ready reports no attachment but may hold a terminal, so it
+// is terminal-no-report, never passed. A v2-ready exec pack is a reporter.
+func TestFenceExecAttachTier(t *testing.T) {
+	now := time.Now()
+	leaf, f := fakeProfile(runtime.ProfileExec)
+	startRuntime(t, f, "rt_a", ours("a"))
+	if _, ok := leaf.(runtime.LivenessObserverWithError); !ok {
+		t.Fatal("the exec profile has no error-bearing read; this test pins nothing")
+	}
+	if reason, _ := attachLeg(context.Background(), leaf, "rt_a", false, now); reason != fenceTerminalNotQuiet {
+		t.Fatalf("exec, not v2-ready: L3 %q, want terminal-no-report's defer", reason)
+	}
+	ready, rf := fakeProfile(runtime.ProfileExecV2)
+	startRuntime(t, rf, "rt_a", ours("a"))
+	rf.SetAttached("rt_a", true)
+	if reason, _ := attachLeg(context.Background(), ready, "rt_a", false, now); reason != fenceAttached {
+		t.Fatalf("exec v2, attached: L3 %q, want the reporter's hold", reason)
+	}
+	rf.SetAttached("rt_a", false)
+	if reason, _ := attachLeg(context.Background(), ready, "rt_a", false, now); reason != "" {
+		t.Fatalf("exec v2, detached: L3 %q, want pass", reason)
+	}
+}
+
 // Kills: an attach probe error read as detached on a reporter backend.
 func TestFenceReporterAttachErrorHolds(t *testing.T) {
 	leaf := newFenceLeaf(runtime.ProfileTmux)

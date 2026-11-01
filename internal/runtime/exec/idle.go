@@ -328,17 +328,30 @@ func paneLines(out string) []string {
 // via `script is-attached <name>`, separating "no client" from "could not
 // tell", and implements [runtime.AttachmentObserverWithError]. A pack that did
 // not declare report-attachment answers (false, nil) without running an op.
-// An op failure, meaning any non-zero exit including 2, wraps
-// [runtime.ErrRuntimeUnavailable], which callers gating a destructive action
-// treat as attached. A pack reports a session that does not exist by printing
-// "false" and exiting 0.
+// An op failure, meaning any non-zero exit including 2, or an answer other
+// than exactly `true` or `false`, wraps [runtime.ErrRuntimeUnavailable],
+// which callers gating a destructive action treat as attached. A pack
+// reports a session that does not exist by printing "false" and exiting 0.
+// On a v2-ready pack the op runs under probeOpTimeout, inside v2's fence
+// bound.
 func (p *Provider) IsAttachedWithError(name string) (bool, error) {
 	if !p.handshakeCapability(runtime.ProtocolCapabilityReportAttachment) {
 		return false, nil
 	}
-	out, err := p.run(nil, "is-attached", name)
+	timeout := p.timeout
+	if p.v2Ready() {
+		timeout = probeOpTimeout
+	}
+	out, err := p.runWithTimeout(timeout, nil, "is-attached", name)
 	if err != nil {
 		return false, fmt.Errorf("%w: %w", runtime.ErrRuntimeUnavailable, err)
 	}
-	return strings.TrimSpace(out) == "true", nil
+	switch strings.TrimSpace(out) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%w: exec provider %s is-attached %s: answer is neither true nor false (%d bytes)", runtime.ErrRuntimeUnavailable, p.script, name, len(out))
+	}
 }
