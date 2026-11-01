@@ -105,6 +105,11 @@ type demandView struct {
 	AssignedStoreRefs []string
 	ReadyAssigned     map[storeScopedBeadKey]bool
 	StorePartial      bool
+	// HeldWork is legacy's held-work read (collectHeldWork): every assigned
+	// open or in-progress bead the held-work keep counts, ready or not, routed
+	// or not. HeldWorkPartial marks a leg it could not read.
+	HeldWork        []beads.Bead
+	HeldWorkPartial bool
 	// Collected is the rest of the demand pass's collection. The pass fills
 	// its custom counts from ScaleCheck and projects its routed rows.
 	Collected collectedDemand

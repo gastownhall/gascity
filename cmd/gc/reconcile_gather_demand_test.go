@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"io"
 	"reflect"
 	"slices"
@@ -10,8 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // legacyCollectedDemandView is legacy's demand pass (buildDesiredState's
@@ -25,6 +28,9 @@ func legacyCollectedDemandView(env demandGatherEnv) demandView {
 	var v demandView
 	v.AssignedWork, v.AssignedStores, v.AssignedStoreRefs, v.ReadyAssigned, v.StorePartial = collectAssignedWorkBeadsWithStores(
 		env.CityPath, cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths, env.Sessions, newReadyDemandCache())
+	// The held-work read, which legacy's keep makes through its SeatWork
+	// instead (TestHeldWorkMatchesLegacySeatWork).
+	v.HeldWork, v.HeldWorkPartial = collectHeldWork(env, legacyDemandReads{})
 	routed, _, routedRefs, routedPartial := collectOpenUnassignedRoutedWork(
 		env.CityPath, cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths, io.Discard, nil, nil)
 	demandCache := newReadyDemandCache()
@@ -55,6 +61,7 @@ func legacyCollectedDemandView(env demandGatherEnv) demandView {
 // demand's work bead IDs: cached Lists come back in map order.
 func sortedDemandView(v demandView) demandView {
 	v.AssignedWork, v.AssignedStoreRefs, v.AssignedStores = sortedAlignedRows(v.AssignedWork, v.AssignedStoreRefs, v.AssignedStores)
+	slices.SortFunc(v.HeldWork, func(a, b beads.Bead) int { return cmp.Compare(a.ID, b.ID) })
 	v.Collected.UnassignedRouted, v.Collected.UnassignedRoutedRefs, _ = sortedAlignedRows(v.Collected.UnassignedRouted, v.Collected.UnassignedRoutedRefs, nil)
 	for template, d := range v.Collected.DefaultDemand {
 		d.WorkBeadIDs = slices.Sorted(slices.Values(d.WorkBeadIDs))
@@ -138,8 +145,8 @@ func TestGatherDemandMatchesLegacyCollectors(t *testing.T) {
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("gathered view differs from legacy's collectors\n got  %+v\n want %+v", got, want)
 			}
-			if len(want.AssignedWork) == 0 || len(want.Collected.UnassignedRouted) == 0 || !want.Collected.DefaultProbed || len(want.WakeClaimRefs) == 0 {
-				t.Fatalf("fixture: legacy view lacks assigned work, routed work, a default probe or claim refs: %+v", want)
+			if len(want.AssignedWork) == 0 || len(want.HeldWork) == 0 || len(want.Collected.UnassignedRouted) == 0 || !want.Collected.DefaultProbed || len(want.WakeClaimRefs) == 0 {
+				t.Fatalf("fixture: legacy view lacks assigned work, held work, routed work, a default probe or claim refs: %+v", want)
 			}
 		})
 	}
@@ -326,4 +333,109 @@ func TestGatherDemandSurvivesCollectorPanic(t *testing.T) {
 			t.Errorf("stderr = %q, want the panic value and its stack", stderr.String())
 		}
 	})
+}
+
+// heldWorkFixture is a city leg and a rig leg with every shape of assigned
+// work the held-work keep must or must not count, for gc-1, gc-2 and gc-9;
+// parked is how the city leg's backing records its status-parked row, gw-10.
+func heldWorkFixture(parked beads.Bead) (city, rig []beads.Bead, deps []beads.Dep) {
+	routed := map[string]string{beadmeta.RoutedToMetadataKey: "worker"}
+	bead := func(id, typ, status, assignee string, meta map[string]string, labels ...string) beads.Bead {
+		return beads.Bead{ID: id, Title: id, Type: typ, Status: status, Assignee: assignee, Metadata: meta, Labels: labels}
+	}
+	parked.ID, parked.Title, parked.Type, parked.Assignee = "gw-10", "gw-10", "task", "gc-1"
+	city = []beads.Bead{
+		bead("gw-0", "task", "in_progress", "gc-9", nil),                                // held: the blocker
+		bead("gw-1", "task", "open", "gc-1", routed),                                    // held: routed, blocked
+		bead("gw-2", "task", "open", "gc-1", nil),                                       // held: unrouted, blocked
+		bead("gw-3", "task", "open", "gc-2", nil),                                       // held: unrouted, ready
+		bead("gw-4", "task", "in_progress", "gc-2", routed, beadmeta.HoldExternalLabel), // held: in progress, parked on a hold
+		bead("gw-5", "task", "open", "gc-1", routed, beadmeta.HoldExternalLabel),        // not: open, parked on a hold
+		bead("gw-6", "message", "open", "gc-1", routed),                                 // not: mail
+		bead("gw-7", session.BeadType, "open", "gc-1", nil),                             // not: a session bead
+		bead("gw-8", "task", "closed", "gc-1", routed),                                  // not: closed
+		bead("gw-9", "task", "open", "", routed),                                        // not: unassigned
+		parked,                                                                          // not: status-parked
+	}
+	deps = []beads.Dep{{IssueID: "gw-1", DependsOnID: "gw-0", Type: "blocks"}, {IssueID: "gw-2", DependsOnID: "gw-0", Type: "blocks"}}
+	return city, []beads.Bead{bead("rw-1", "task", "open", "gc-2", nil)}, deps // held: on the rig leg
+}
+
+// Kills a held-work read that is not legacy's. Over the same city and rig
+// legs, collectHeldWork carries exactly the beads legacy's held-work query
+// (heldWorkQuery, sessionHoldsAssignedWork's, over the tick's SeatWork) finds
+// for the fixture's assignees: routed or not, ready or blocked, open or in
+// progress, in progress while parked on a hold; never mail, a session bead,
+// open work parked on a dispatch hold, or status-parked, closed or unassigned
+// work. It reads through the external-reads lane's reads on a bd-shaped leg,
+// whose cache folds the parked row into "open", and through a v2 pass's reads
+// on an exact leg.
+func TestHeldWorkMatchesLegacySeatWork(t *testing.T) {
+	want := []string{"gw-0", "gw-1", "gw-2", "gw-3", "gw-4", "rw-1"}
+	for _, leg := range []struct {
+		name   string
+		parked beads.Bead
+		wrap   func(*demandBacking) beads.Store
+		reads  demandReads
+	}{
+		{"lane reads, bd-shaped leg", beads.Bead{Status: "open", SourceStatus: "blocked"}, func(b *demandBacking) beads.Store { return rawOpenPushdownStore{Store: b} }, legacyDemandReads{}},
+		{"v2 reads, exact leg", beads.Bead{Status: "blocked"}, func(b *demandBacking) beads.Store { return exactDemandBacking{b} }, newV2DemandReads(time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC), nil)},
+	} {
+		t.Run(leg.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Rigs:      []config.Rig{{Name: "rig-a", Path: t.TempDir()}},
+				Agents:    []config.Agent{poolAgent("worker", "", intPtr(5), 0)},
+			}
+			newLeg := func(seq int, rows []beads.Bead, deps []beads.Dep) *beads.CachingStore {
+				cache := beads.NewCachingStoreForTest(leg.wrap(&demandBacking{Store: beads.NewMemStoreFrom(seq, rows, deps)}), nil)
+				if err := cache.Prime(context.Background()); err != nil {
+					t.Fatalf("prime: %v", err)
+				}
+				return cache
+			}
+			cityRows, rigRows, deps := heldWorkFixture(leg.parked)
+			city, rigs := newLeg(0, cityRows, deps), map[string]beads.Store{"rig-a": newLeg(100, rigRows, nil)}
+			if cached, err := city.List(beads.ListQuery{Status: leg.parked.Status, AllowScan: true}); err != nil || !slices.Contains(ids(cached), "gw-10") {
+				t.Fatalf("premise: the cache holds no %s gw-10 (%v): %v", leg.parked.Status, err, ids(cached))
+			}
+
+			rows, partial := collectHeldWork(demandGatherEnv{CityPath: cityPath, Cfg: cfg, CityStore: city, RigStores: rigs}, leg.reads)
+			got := slices.Sorted(slices.Values(ids(rows)))
+			hits, err := testSeatWork(cityPath, cfg, city, rigs).match(heldWorkQuery(ReleaseScope{ids: []string{"gc-1", "gc-2", "gc-9"}}), false)
+			if err != nil {
+				t.Fatalf("legacy held-work query: %v", err)
+			}
+			var legacy []string
+			for _, hit := range hits {
+				legacy = append(legacy, hit.bead.ID)
+			}
+			slices.Sort(legacy)
+			if partial || !slices.Equal(got, want) || !slices.Equal(legacy, want) {
+				t.Fatalf("held work %v (partial %t), legacy's held-work query %v, want both %v", got, partial, legacy, want)
+			}
+		})
+	}
+}
+
+// Kills a held-work read that fails open. A leg whose list fails or panics
+// makes the read partial, which keeps every eligible seat; the readable leg's
+// work is still carried.
+func TestHeldWorkReadFailsClosed(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "repo", Path: "/repo"}},
+		Agents:    []config.Agent{poolAgent("worker", "", intPtr(5), 0)},
+	}
+	city := beads.NewMemStoreFrom(0, []beads.Bead{workBead("gc-a1", "worker", "worker-1", "in_progress", 2)}, nil)
+	for name, rig := range map[string]beads.Store{
+		"failing leg":   failingListStore{Store: beads.NewMemStoreFrom(100, nil, nil)},
+		"panicking leg": panickingLegStore{Store: beads.NewMemStoreFrom(100, nil, nil), panicOnList: true},
+	} {
+		rows, partial := collectHeldWork(demandGatherEnv{CityPath: t.TempDir(), Cfg: cfg, CityStore: city, RigStores: map[string]beads.Store{"repo": rig}}, legacyDemandReads{})
+		if got := ids(rows); !partial || !slices.Equal(got, []string{"gc-a1"}) {
+			t.Errorf("%s: held work %v (partial %t), want the city leg's gc-a1, partial", name, got, partial)
+		}
+	}
 }

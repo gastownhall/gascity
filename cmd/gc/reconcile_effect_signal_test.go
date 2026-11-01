@@ -692,17 +692,16 @@ func TestSignalReReadsWorkLive(t *testing.T) {
 	}
 }
 
-// TestNoWakeSignalCountsOnlyAwakeWork (v5.10a B: DRAIN-005's awake work).
-// Kills a signal L5 that counts open work the seat cannot be served
-// (blocked), which legacy's read and A19's lens (workKeepsNoWakeRow) both
-// ignore, so the request would stand refused forever: the signal lands.
-func TestNoWakeSignalCountsOnlyAwakeWork(t *testing.T) {
-	blocked := func(store beads.Store, it intent) {
+// blockedWorkAfterPass is work assigned to the row after the pass's reads, in
+// status, that waits on an open blocker, so no ready read finds it.
+func blockedWorkAfterPass(t *testing.T, status string) func(beads.Store, intent) {
+	return func(store beads.Store, it intent) {
+		t.Helper()
 		blocker, err := store.Create(beads.Bead{Title: "blocker", Type: "task", Status: "open"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		w, err := store.Create(beads.Bead{Title: "w", Type: "task", Status: "open", Assignee: it.Key.ID})
+		w, err := store.Create(beads.Bead{Title: "w", Type: "task", Status: status, Assignee: it.Key.ID})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -710,9 +709,79 @@ func TestNoWakeSignalCountsOnlyAwakeWork(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	s, got := runSignal(t, intentBegunAt(reasonNoWake, time.Minute), signalWorkCases[0].entry, intentSignalFresh, blocked)
+}
+
+// TestNoWakeSignalCountsOnlyAwakeWork (v5.10a B: DRAIN-005's awake work).
+// Kills a signal L5 that counts open work the seat cannot be served
+// (blocked), which legacy's read and A19's lens (workKeepsNoWakeRow) both
+// ignore, so the request would stand refused forever: on a seat the
+// held-work keep does not cover (not pool-managed), the signal lands.
+func TestNoWakeSignalCountsOnlyAwakeWork(t *testing.T) {
+	s, got := runSignal(t, intentBegunAt(reasonNoWake, time.Minute), signalWorkCases[0].entry, intentSignalFresh, blockedWorkAfterPass(t, "open"))
 	if s.Outcome != settledLanded || !isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
 		t.Fatalf("blocked open work only: %+v, want the signal landed", s)
+	}
+}
+
+// heldWorkSignalCases are the timer drains whose signal, on a pool seat the
+// held-work keep covers, reads the work the seat holds (intent.HeldWork),
+// each with its entry.
+var heldWorkSignalCases = []struct {
+	reason string
+	entry  func(*selectionEntry)
+}{
+	{reasonNoWake, func(e *selectionEntry) { e.Desired = desireSleep }},
+	{drainIdle, func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reasonIdleSleep }},
+}
+
+// heldSeatBegunAt is a controller half of reason on a pool seat of the
+// configured agent, which the held-work keep covers.
+func heldSeatBegunAt(reason string) []string {
+	return append(intentBegunAt(reason, time.Minute), "pool_managed", "true")
+}
+
+// TestTimerSignalReadsHeldWorkLive (the held-work keep at the signal;
+// legacy's held-work cancel of the controller's own ack). Kills an idle or
+// no-wake-reason signal that trusts the pass's held-work read: work a pool
+// seat holds with no wake reason to run it (blocked open or in-progress
+// work), assigned after the pass, refuses has-work and writes nothing, so
+// the request stands for A19's held-work cancel. With no work, or on a seat
+// the keep does not cover (not pool-managed), the signal lands.
+func TestTimerSignalReadsHeldWorkLive(t *testing.T) {
+	for _, c := range heldWorkSignalCases {
+		for _, status := range []string{"open", "in_progress"} {
+			s, got := runSignal(t, heldSeatBegunAt(c.reason), c.entry, intentSignalFresh, blockedWorkAfterPass(t, status))
+			row := censusRowOf(t, got)
+			if s.Outcome != settledRefused || s.Cause != causeHasWork || isDrainAckStopPendingInfo(row.Info) {
+				t.Fatalf("%s, blocked %s work held since the pass: %+v, want refused %q and no signal", c.reason, status, s, causeHasWork)
+			}
+			if req, ok := activeStop(row); !ok || req.Phase != stopRequested {
+				t.Fatalf("%s, blocked %s work: activeStop after the refusal = %+v, %v; want still requested", c.reason, status, req, ok)
+			}
+		}
+		if s, got := runSignal(t, heldSeatBegunAt(c.reason), c.entry, intentSignalFresh, nil); s.Outcome != settledLanded || !isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
+			t.Fatalf("%s, pool seat holding nothing: %+v, want the signal landed", c.reason, s)
+		}
+		if s, got := runSignal(t, intentBegunAt(c.reason, time.Minute), c.entry, intentSignalFresh, blockedWorkAfterPass(t, "open")); s.Outcome != settledLanded || !isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
+			t.Fatalf("%s, blocked work on a seat the keep does not cover: %+v, want the signal landed", c.reason, s)
+		}
+	}
+}
+
+// TestTimerSignalHeldWorkReadErrorCountsAsWork (the held-work keep fails
+// closed). Kills an idle signal of a pool seat that reads a failed held-work
+// read as no work: it refuses has-work.
+func TestTimerSignalHeldWorkReadErrorCountsAsWork(t *testing.T) {
+	c := heldWorkSignalCases[1]
+	p, it, store, _ := admittedBeginOn(t, heldSeatBegunAt(c.reason), c.entry)
+	if it.Kind != intentSignalFresh || !it.HeldWork {
+		t.Fatalf("decided %+v, want the fresh signal reading held work", it)
+	}
+	p.reads.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, failingReads{store}, nil)
+	s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+	got, _ := store.Get(it.Key.ID)
+	if s.Outcome != settledRefused || s.Cause != causeHasWork || isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
+		t.Fatalf("idle, held-work read failed: %+v, want refused %q and no signal", s, causeHasWork)
 	}
 }
 
@@ -798,9 +867,11 @@ func TestSignalWorkReadErrorCountsAsWork(t *testing.T) {
 }
 
 // TestSignalIdleAndAckReadNoWork (v5.10a B: idle unchanged; D2's ack row).
-// Kills an L5 read on an idle signal or an ack's: a claim after the pass
-// leaves both to land, and neither kind's needs read L5; nor does A4's stop
-// of a signaled no-wake-reason or orphaned request.
+// Kills an L5 read on an idle signal of a seat the held-work keep does not
+// cover, or on an ack's: a claim after the pass leaves both to land, and
+// neither kind's needs read L5; nor does A4's stop of a signaled
+// no-wake-reason or orphaned request. An idle signal of a seat the keep
+// covers reads it (TestTimerSignalReadsHeldWorkLive).
 func TestSignalIdleAndAckReadNoWork(t *testing.T) {
 	sleep := func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reasonIdleSleep }
 	if s, got := runSignal(t, intentBegunAt(drainIdle, time.Minute), sleep, intentSignalFresh, claimAfterPass(t)); s.Outcome != settledLanded || !isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
@@ -823,10 +894,13 @@ func TestSignalIdleAndAckReadNoWork(t *testing.T) {
 			t.Errorf("%s %s reads L5: %+v", it.Kind, it.Reason, n)
 		}
 	}
+	reads := []intent{{Kind: intentSignalFresh, Reason: decideDrainSignal + drainIdle, HeldWork: true}}
 	for _, c := range signalWorkCases {
-		it := intent{Kind: c.kind, Reason: decideDrainSignal + c.reason}
+		reads = append(reads, intent{Kind: c.kind, Reason: decideDrainSignal + c.reason})
+	}
+	for _, it := range reads {
 		if n := effectSpecs[it.Kind].needsOf(&World{}, it); n.Legs&legWork == 0 {
-			t.Errorf("%s %s reads no L5: %+v", it.Kind, it.Reason, n)
+			t.Errorf("%s %s (held work %t) reads no L5: %+v", it.Kind, it.Reason, it.HeldWork, n)
 		}
 	}
 }

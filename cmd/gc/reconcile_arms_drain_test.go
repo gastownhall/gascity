@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
@@ -762,6 +763,436 @@ func TestFloorAckOverATokenlessCorpseIsSignaled(t *testing.T) {
 			it := hc.decide()
 			if !strings.HasPrefix(it.Reason, c.want) || c.want == decideDrainSignal && (it.Kind != intentSignalAck || it.Patch["state"] != string(session.StateDraining)) {
 				t.Fatalf("decideRow = (%q, %q) %v, want reason %q", it.Kind, it.Reason, it.Patch, c.want)
+			}
+		})
+	}
+}
+
+// heldSeat makes gc-1 a pool seat of the configured pool agent worker.
+var heldSeat = []string{"pool_managed", "true"}
+
+// poolSeatCity configures worker as a pool agent, which the held-work keep's
+// eligibility (liveClaimVetoApplies) reads.
+func poolSeatCity(w *World) {
+	w.Env = &reconcileEnv{Cfg: &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}}
+}
+
+// blockedOpenWork gives gc-1 open work the allocation does not count awake:
+// it is blocked.
+func blockedOpenWork(w *World) {
+	w.Demand.AssignedWork = []beads.Bead{{ID: "gw-1", Status: "open", Assignee: "gc-1"}}
+}
+
+// storePartial is a pass whose assigned-work read failed on a leg.
+func storePartial(w *World) { w.Demand.StorePartial = true }
+
+// heldWork puts rows in the pass's held-work read (collectHeldWork) alone.
+func heldWork(rows ...beads.Bead) func(*World) {
+	return func(w *World) { w.Demand.HeldWork = rows }
+}
+
+var (
+	// heldOpen is blocked open work held by gc-1, unrouted: the demand read
+	// does not carry it.
+	heldOpen = heldWork(beads.Bead{ID: "gw-1", Status: "open", Assignee: "gc-1"})
+	// heldInProgress is blocked in-progress work held by gc-1.
+	heldInProgress = heldWork(beads.Bead{ID: "gw-1", Status: "in_progress", Assignee: "gc-1"})
+)
+
+// heldWorkPartial is a pass whose held-work read failed on a leg.
+func heldWorkPartial(w *World) { w.Demand.HeldWorkPartial = true }
+
+// TestWorkKeepsNoWakeRowUnchangedForBlockedOpen. Pins that the held-work
+// keep sits beside DRAIN-046's mirror rather than in it: blocked open work
+// does not make workKeepsNoWakeRow true; awake work and blocked in-progress
+// work still do.
+func TestWorkKeepsNoWakeRowUnchangedForBlockedOpen(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		entry *selectionEntry
+		world func(*World)
+		want  bool
+	}{
+		{"blocked open work", &selectionEntry{}, func(w *World) { blockedOpenWork(w); heldOpen(w) }, false},
+		{"awake work", &selectionEntry{AssignedWork: &assignedWorkView{BeadID: "gw-1"}}, func(*World) {}, true},
+		{"blocked in-progress work", &selectionEntry{}, blockedClaim, true},
+	} {
+		w := &World{}
+		poolSeatCity(w)
+		c.world(w)
+		r := &rowFacts{w: w, k: rowKeyOf("gc-1"), row: censusRowOf(t, drainRow(heldSeat...)), found: true, entry: c.entry}
+		if got := workKeepsNoWakeRow(r); got != c.want {
+			t.Errorf("%s: workKeepsNoWakeRow = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestDrainBeginKeepsPoolSeatHoldingBlockedWork (AC-4). Kills a timer drain
+// (no-wake-reason, idle) begun on a pool seat holding assigned work it has no
+// wake reason to run yet, or over a partial held-work read: A20 keeps the
+// row, clearing a leftover idle-stop-pending mark first.
+func TestDrainBeginKeepsPoolSeatHoldingBlockedWork(t *testing.T) {
+	noWake := func(e *selectionEntry) { e.Desired = desireSleep }
+	idle := func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reasonIdleSleep }
+	for _, c := range []struct {
+		name  string
+		meta  []string
+		entry func(*selectionEntry)
+		work  func(*World)
+		clear bool
+	}{
+		{"no-wake-reason, blocked open", heldSeat, noWake, heldOpen, false},
+		{"idle, blocked open", heldSeat, idle, heldOpen, false},
+		{"idle, blocked in-progress", heldSeat, idle, heldInProgress, false},
+		{"no-wake-reason, partial read", heldSeat, noWake, heldWorkPartial, false},
+		{"idle, partial read", heldSeat, idle, heldWorkPartial, false},
+		{"idle-stop-pending, blocked open", slices.Concat(heldSeat, []string{"sleep_intent", sleepIntentIdle}), noWake, heldOpen, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			it, _ := decideDrain(t, c.meta, c.entry, poolSeatCity, c.work)
+			if c.clear {
+				if w := it.folded(); it.Kind != intentRowHeal || it.Reason != decideIdleStopClear || len(w) != 1 || w["sleep_intent"] != "" {
+					t.Fatalf("%+v, want the sleep_intent clear alone", it)
+				}
+				return
+			}
+			if it.Kind != "" || it.Reason != decideDrainWorkKept {
+				t.Fatalf("%+v, want the row kept for its work", it)
+			}
+		})
+	}
+}
+
+// TestDrainVoidCancelCancelsRequestedTimerDrainOnHeldWork (AC-4). Kills a
+// requested timer drain that stands once a pool seat holds assigned work it
+// has no wake reason to run yet: A19 cancels it, as legacy's held-work keep
+// does.
+func TestDrainVoidCancelCancelsRequestedTimerDrainOnHeldWork(t *testing.T) {
+	noWake := func(e *selectionEntry) { e.Desired = desireSleep }
+	idle := func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reasonIdleSleep }
+	for _, c := range []struct {
+		name   string
+		reason string
+		entry  func(*selectionEntry)
+		work   func(*World)
+	}{
+		{"no-wake-reason, blocked open", reasonNoWake, noWake, heldOpen},
+		{"idle, blocked open", drainIdle, idle, heldOpen},
+		{"idle, blocked in-progress", drainIdle, idle, heldInProgress},
+		{"idle, partial read", drainIdle, idle, heldWorkPartial},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			it, _ := decideDrain(t, slices.Concat(heldSeat, intentAt(c.reason, "3")), c.entry, poolSeatCity, c.work)
+			if it.Kind != intentDrainCancel || it.Reason != decideDrainCancel+c.reason {
+				t.Fatalf("%+v, want the %s request canceled", it, c.reason)
+			}
+		})
+	}
+}
+
+// TestSeatHoldsWork (AC-5). Pins the held-work keep's reach: a live-claim
+// veto eligible pool seat holding work in the pass's held-work read assigned
+// to its scope, or a pass whose held-work read was partial; never a named
+// row, a suspended or removed agent, a suspended city, another identity's
+// work, work only the demand read carries (status-parked work or mail, which
+// the held-work read leaves out), or a row under an explicit sleep intent.
+func TestSeatHoldsWork(t *testing.T) {
+	assignedTo := func(assignee string) func(*World) {
+		return heldWork(beads.Bead{ID: "gw-1", Status: "open", Assignee: assignee})
+	}
+	none := func(*World) {}
+	for _, c := range []struct {
+		name  string
+		meta  []string
+		world func(*World)
+		want  bool
+	}{
+		{"blocked open work", heldSeat, heldOpen, true},
+		{"blocked in-progress work", heldSeat, heldInProgress, true},
+		{"partial held-work read", heldSeat, heldWorkPartial, true},
+		{"idle-stop-pending", slices.Concat(heldSeat, []string{"sleep_intent", sleepIntentIdle}), heldOpen, true},
+		{"no work", heldSeat, none, false},
+		{"work only the demand read carries", heldSeat, blockedOpenWork, false},
+		{"partial demand read only", heldSeat, storePartial, false},
+		{"another seat's work", heldSeat, assignedTo("gc-9"), false},
+		{"work assigned only to the pool route name", heldSeat, assignedTo("worker"), false},
+		{"named row", slices.Concat(heldSeat, []string{namedSessionMetadataKey, "true"}), heldOpen, false},
+		{"not pool-managed", nil, heldOpen, false},
+		{"user-hold intent", slices.Concat(heldSeat, []string{"sleep_intent", "user-hold"}), heldOpen, false},
+		{"wait-hold intent", slices.Concat(heldSeat, []string{"sleep_intent", "wait-hold"}), heldOpen, false},
+		{"an intent no cell writes", slices.Concat(heldSeat, []string{"sleep_intent", "nap"}), heldOpen, false},
+		{"agent suspended", heldSeat, func(w *World) { heldOpen(w); w.Env.Cfg.Agents[0].Suspended = true }, false},
+		{"agent removed", heldSeat, func(w *World) {
+			heldOpen(w)
+			w.Env.Cfg.Agents = []config.Agent{allocPoolAgent("other", 3)}
+		}, false},
+		{"city suspended", heldSeat, func(w *World) { heldOpen(w); w.CitySuspended = true }, false},
+	} {
+		w := &World{}
+		poolSeatCity(w)
+		c.world(w)
+		r := &rowFacts{w: w, k: rowKeyOf("gc-1"), row: censusRowOf(t, drainRow(c.meta...)), found: true, entry: &selectionEntry{}}
+		if got := r.seatHoldsWork(); got != c.want {
+			t.Errorf("%s: seatHoldsWork = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestSignalReadsHeldWorkOnHeldWorkSeats (the held-work keep at the signal).
+// Kills an idle or no-wake-reason signal that leaves the work a seat holds
+// to the pass's read: A20 marks the signal of a pool seat the keep covers,
+// holding nothing as the pass read it, to read the seat's held work live
+// (HeldWork); the signal of a seat the keep does not cover, and an orphaned
+// one, are not marked.
+func TestSignalReadsHeldWorkOnHeldWorkSeats(t *testing.T) {
+	noWake := func(e *selectionEntry) { e.Desired = desireSleep }
+	idle := func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reasonIdleSleep }
+	none := func(*World) {}
+	for _, c := range []struct {
+		name   string
+		reason string
+		meta   []string
+		entry  func(*selectionEntry)
+		world  func(*World)
+		want   bool
+	}{
+		{"no-wake-reason, pool seat", reasonNoWake, heldSeat, noWake, none, true},
+		{"idle, pool seat", drainIdle, heldSeat, idle, none, true},
+		{"idle, pool seat with idle-stop-pending", drainIdle, slices.Concat(heldSeat, []string{"sleep_intent", sleepIntentIdle}), idle, none, true},
+		{"idle, not pool-managed", drainIdle, nil, idle, none, false},
+		{"idle, named row", drainIdle, slices.Concat(heldSeat, []string{namedSessionMetadataKey, "true"}), idle, none, false},
+		{"idle, agent suspended", drainIdle, heldSeat, idle, func(w *World) { w.Env.Cfg.Agents[0].Suspended = true }, false},
+		{"no-wake-reason, city suspended", reasonNoWake, heldSeat, noWake, func(w *World) { w.CitySuspended = true }, false},
+		{"orphaned, pool seat", drainOrphaned, heldSeat, undesired(drainOrphaned), none, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			it, _ := decideDrain(t, slices.Concat(c.meta, intentAt(c.reason, "3")), c.entry, poolSeatCity, c.world)
+			if (it.Kind != intentSignal && it.Kind != intentSignalFresh) || it.Reason != decideDrainSignal+c.reason {
+				t.Fatalf("%+v, want the %s signal", it, c.reason)
+			}
+			if it.HeldWork != c.want {
+				t.Fatalf("signal %+v reads held work %t, want %t", it, it.HeldWork, c.want)
+			}
+		})
+	}
+}
+
+// TestDrainBeginStillBeginsWithoutHeldWork (AC-5). Kills a held-work keep
+// that outgrows its reach: A20 still begins the no-wake-reason or idle drain
+// when the seat's held-work read has nothing assigned to it, and when the
+// agent is suspended or removed or the city is suspended.
+func TestDrainBeginStillBeginsWithoutHeldWork(t *testing.T) {
+	noWake := func(e *selectionEntry) { e.Desired = desireSleep }
+	idle := func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reasonIdleSleep }
+	assignedTo := func(assignee string) func(*World) {
+		return heldWork(beads.Bead{ID: "gw-1", Status: "open", Assignee: assignee})
+	}
+	idleProvable := func(w *World) {
+		w.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-1": {Class: config.SessionSleepNonInteractive}}
+	}
+	for _, timer := range []struct {
+		name  string
+		entry func(*selectionEntry)
+		world func(*World)
+	}{{"no-wake-reason", noWake, func(*World) {}}, {"idle", idle, idleProvable}} {
+		for _, c := range []struct {
+			name  string
+			world func(*World)
+		}{
+			{"no work", func(*World) {}},
+			{"work only the demand read carries", blockedOpenWork},
+			{"another seat's work", assignedTo("gc-9")},
+			{"work assigned only to the pool route name", assignedTo("worker")},
+			{"agent suspended", func(w *World) { heldOpen(w); w.Env.Cfg.Agents[0].Suspended = true }},
+			{"agent removed", func(w *World) {
+				heldOpen(w)
+				w.Env.Cfg.Agents = []config.Agent{allocPoolAgent("other", 3)}
+			}},
+			{"city suspended", func(w *World) { heldOpen(w); w.CitySuspended = true }},
+		} {
+			t.Run(timer.name+", "+c.name, func(t *testing.T) {
+				it, _ := decideDrain(t, heldSeat, timer.entry, poolSeatCity, timer.world, c.world)
+				if it.Kind != intentDrainBegin && it.Kind != intentDrainBeginFresh {
+					t.Fatalf("%+v, want the timer drain to begin", it)
+				}
+			})
+		}
+	}
+}
+
+// TestDrainBeginIgnoresHeldWorkOnNamedRow (AC-5). Kills a held-work keep
+// that reaches a named session: its no-wake-reason drain still begins.
+func TestDrainBeginIgnoresHeldWorkOnNamedRow(t *testing.T) {
+	noWake := func(e *selectionEntry) { e.Desired = desireSleep }
+	it, _ := decideDrain(t, slices.Concat(heldSeat, []string{namedSessionMetadataKey, "true"}), noWake, poolSeatCity, heldOpen)
+	if (it.Kind != intentDrainBegin && it.Kind != intentDrainBeginFresh) || it.Reason != decideDrainBegin+reasonNoWake {
+		t.Fatalf("%+v, want the no-wake-reason begin", it)
+	}
+}
+
+// gatheredWork runs the pass's demand gather (gatherDemand) over a city store
+// holding work, which waits on gw-0, in progress on another seat, so the arms
+// read the demand and held-work reads the collectors produce for it, not rows
+// a test put on the world. The reads are the external-reads lane's, which a
+// lane-fed leg's v2 reads serve.
+func gatheredWork(t *testing.T, work beads.Bead) func(*World) {
+	return func(w *World) {
+		t.Helper()
+		blocker := beads.Bead{ID: "gw-0", Title: "gw-0", Type: "task", Status: "in_progress", Assignee: "gc-9"}
+		store := beads.NewMemStoreFrom(0, []beads.Bead{blocker, work}, []beads.Dep{{IssueID: work.ID, DependsOnID: blocker.ID, Type: "blocks"}})
+		v, err := gatherDemand(demandGatherEnv{CityName: "test-city", CityPath: t.TempDir(), Cfg: w.Env.Cfg, CityStore: store}, legacyDemandReads{})
+		if err != nil {
+			t.Fatalf("gatherDemand: %v", err)
+		}
+		w.Demand = v
+	}
+}
+
+// gatheredHeldWorkCase is one bead a gathered pass gives gc-1, and whether
+// the held-work keep counts it.
+type gatheredHeldWorkCase struct {
+	name string
+	work beads.Bead
+	held bool
+}
+
+// gatheredHeldWorkCases are gc-1's work shapes through the real gather: the
+// demand read carries routed blocked open work, and not unrouted; it carries
+// mail and open work parked on a dispatch hold, which legacy's keep does not
+// count.
+func gatheredHeldWorkCases() []gatheredHeldWorkCase {
+	bead := func(status, typ string, routed bool, labels ...string) beads.Bead {
+		b := beads.Bead{ID: "gw-1", Title: "gw-1", Type: typ, Status: status, Assignee: "gc-1", Labels: labels}
+		if routed {
+			b.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: "worker"}
+		}
+		return b
+	}
+	return []gatheredHeldWorkCase{
+		{"routed blocked open work", bead("open", "task", true), true},
+		{"unrouted blocked open work", bead("open", "task", false), true},
+		{"blocked in-progress work parked on a hold", bead("in_progress", "task", true, beadmeta.HoldExternalLabel), true},
+		{"routed open mail", bead("open", "message", true), false},
+		{"routed open work parked on a hold", bead("open", "task", true, beadmeta.HoldExternalLabel), false},
+	}
+}
+
+// TestDrainBeginReadsGatheredHeldWork (AC-4). Kills a held-work keep that
+// reads the demand read: through the real gather, A20 keeps a pool seat
+// whose blocked work the demand read does not carry (unrouted) as well as
+// one whose work it does, and begins the timer drain when the seat's only
+// work is mail or open work parked on a dispatch hold.
+func TestDrainBeginReadsGatheredHeldWork(t *testing.T) {
+	idleProvable := func(w *World) {
+		w.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-1": {Class: config.SessionSleepNonInteractive}}
+	}
+	for _, timer := range []struct {
+		reason string
+		entry  func(*selectionEntry)
+		world  func(*World)
+	}{
+		{reasonNoWake, func(e *selectionEntry) { e.Desired = desireSleep }, func(*World) {}},
+		{drainIdle, func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reasonIdleSleep }, idleProvable},
+	} {
+		for _, c := range gatheredHeldWorkCases() {
+			t.Run(timer.reason+", "+c.name, func(t *testing.T) {
+				it, _ := decideDrain(t, heldSeat, timer.entry, poolSeatCity, timer.world, gatheredWork(t, c.work))
+				switch {
+				case c.held && (it.Kind != "" || it.Reason != decideDrainWorkKept):
+					t.Fatalf("%+v, want the row kept for its work", it)
+				case !c.held && ((it.Kind != intentDrainBegin && it.Kind != intentDrainBeginFresh) || it.Reason != decideDrainBegin+timer.reason):
+					t.Fatalf("%+v, want the %s drain to begin", it, timer.reason)
+				}
+			})
+		}
+	}
+}
+
+// TestDrainVoidCancelReadsGatheredHeldWork (AC-4). Kills a held-work cancel
+// that reads the demand read: through the real gather, A19 cancels a
+// requested idle drain on a pool seat whose blocked work the demand read does
+// not carry (unrouted) as well as one whose work it does, and leaves it to
+// its signal when the seat's only work is mail or open work parked on a
+// dispatch hold.
+func TestDrainVoidCancelReadsGatheredHeldWork(t *testing.T) {
+	idle := func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reasonIdleSleep }
+	for _, c := range gatheredHeldWorkCases() {
+		t.Run(c.name, func(t *testing.T) {
+			it, _ := decideDrain(t, slices.Concat(heldSeat, intentAt(drainIdle, "3")), idle, poolSeatCity, gatheredWork(t, c.work))
+			canceled := it.Kind == intentDrainCancel && it.Reason == decideDrainCancel+drainIdle
+			signaled := it.Kind == intentSignal || it.Kind == intentSignalFresh
+			if canceled != c.held || signaled == c.held {
+				t.Fatalf("%+v, want canceled=%v, else signaled", it, c.held)
+			}
+		})
+	}
+}
+
+// TestHeldWorkDarkLegKeepsSeatAsLegacy (AC-5). Kills a held-work keep that
+// fails closed narrower than legacy's. A seat's work may live on any leg, so
+// every seat reads every leg, whatever its agent's scope (workLegsFromCensus):
+// with one rig leg dark, a pool seat that holds nothing on the legs that
+// answered is still unknown. Legacy's held-work question
+// (sessionHoldsAssignedWork, over the tick's SeatWork of the same legs)
+// reports it held, with the leg's error; through the real gather, v2 keeps it
+// from its timer drains (A20) and cancels its requested idle drain (A19). The
+// same failure makes the pass's demand read partial (StorePartial), whose
+// retain already keeps every row. With the leg readable, legacy reports
+// nothing held and v2 begins and signals.
+func TestHeldWorkDarkLegKeepsSeatAsLegacy(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "repo", Path: t.TempDir()}},
+		Agents:    []config.Agent{allocPoolAgent("worker", 3)},
+	}
+	// gc-1 holds nothing on the city leg; another seat's work is there.
+	city := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "gw-1", Title: "gw-1", Type: "task", Status: "open", Assignee: "gc-9"}}, nil)
+	noWake := func(e *selectionEntry) { e.Desired = desireSleep }
+	idle := func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reasonIdleSleep }
+	idleProvable := func(w *World) {
+		w.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-1": {Class: config.SessionSleepNonInteractive}}
+	}
+	for _, leg := range []struct {
+		name string
+		rig  beads.Store
+		dark bool
+	}{
+		{"failing rig leg", failingListStore{Store: beads.NewMemStoreFrom(100, nil, nil)}, true},
+		{"panicking rig leg", panickingLegStore{Store: beads.NewMemStoreFrom(100, nil, nil), panicOnList: true}, true},
+		{"readable rig leg", beads.NewMemStoreFrom(100, nil, nil), false},
+	} {
+		t.Run(leg.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			rigs := map[string]beads.Store{"repo": leg.rig}
+			held, _, err := sessionHoldsAssignedWork(testSeatWork(cityPath, cfg, city, rigs), censusRowOf(t, drainRow(heldSeat...)).Info)
+			if held != leg.dark || (err != nil) != leg.dark {
+				t.Fatalf("legacy's held-work read = held %t (%v), want held %t", held, err, leg.dark)
+			}
+			v, err := gatherDemand(demandGatherEnv{CityName: "test-city", CityPath: cityPath, Cfg: cfg, CityStore: city, RigStores: rigs}, legacyDemandReads{})
+			if err != nil {
+				t.Fatalf("gatherDemand: %v", err)
+			}
+			if v.HeldWorkPartial != leg.dark || v.StorePartial != leg.dark {
+				t.Fatalf("held-work read partial %t, demand read partial %t, want both %t", v.HeldWorkPartial, v.StorePartial, leg.dark)
+			}
+			gathered := func(w *World) { w.Env, w.Demand = &reconcileEnv{Cfg: cfg}, v }
+			for _, timer := range []struct {
+				reason string
+				entry  func(*selectionEntry)
+				world  func(*World)
+			}{{reasonNoWake, noWake, func(*World) {}}, {drainIdle, idle, idleProvable}} {
+				it, _ := decideDrain(t, heldSeat, timer.entry, gathered, timer.world)
+				kept := it.Kind == "" && it.Reason == decideDrainWorkKept
+				begun := (it.Kind == intentDrainBegin || it.Kind == intentDrainBeginFresh) && it.Reason == decideDrainBegin+timer.reason
+				if kept != leg.dark || begun == leg.dark {
+					t.Fatalf("%s: %+v, want kept=%v, else the drain begun", timer.reason, it, leg.dark)
+				}
+			}
+			it, _ := decideDrain(t, slices.Concat(heldSeat, intentAt(drainIdle, "3")), idle, gathered)
+			canceled := it.Kind == intentDrainCancel && it.Reason == decideDrainCancel+drainIdle
+			signaled := it.Kind == intentSignal || it.Kind == intentSignalFresh
+			if canceled != leg.dark || signaled == leg.dark {
+				t.Fatalf("requested idle drain: %+v, want canceled=%v, else signaled", it, leg.dark)
 			}
 		})
 	}
