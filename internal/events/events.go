@@ -511,6 +511,34 @@ const (
 	StoreDiskWarn     = "gc.store.disk_warn"
 	StoreDiskCritical = "gc.store.disk_critical"
 
+	// Store-health events. Payloads and the degradation classes live in
+	// storehealth_payloads.go.
+	//
+	// StoreDegraded fires when the store health patrol trips a scope after
+	// a confirmed two-probe divergence (or a persistent write-path
+	// rejection). Its payload carries the degradation class, so subscribers
+	// can tell a wedged transport from a backend fault.
+	StoreDegraded = "store.degraded"
+	// StoreRecovered fires when a previously degraded scope's routed probe
+	// passes again.
+	StoreRecovered = "store.recovered"
+	// StoreProbeFailed fires for a single failed patrol probe before the
+	// consecutive-failure threshold is reached. It is the per-cycle
+	// forensic breadcrumb, not the degradation decision.
+	StoreProbeFailed = "store.probe_failed"
+	// BreakerStateChanged fires on every resilience breaker state
+	// transition (closed, open, half-open).
+	BreakerStateChanged = "breaker.state_changed"
+	// ControllerTickCompleted is the controller heartbeat, emitted once per
+	// completed reconcile tick. The stream is unsampled, so it is both a
+	// tick-age and slow-tick signal and a sound basis for tick-period
+	// arithmetic. One event per tick is patrol-cadence volume, not a hot
+	// path.
+	ControllerTickCompleted = "controller.tick_completed"
+	// DoctorAlert fires when a supervisor-cadence doctor check evaluates
+	// to red.
+	DoctorAlert = "doctor.alert"
+
 	// BackendCredentialResolved records that a credential for a storage
 	// backend was resolved for one scope. The payload names the backend,
 	// the scope and the resolution tier that supplied the value; it MUST
@@ -688,6 +716,9 @@ var KnownEventTypes = []string{
 	EventsRotated,
 	StoreMaintenanceDone, StoreMaintenanceFailed,
 	StoreDiskWarn, StoreDiskCritical,
+	StoreDegraded, StoreRecovered, StoreProbeFailed,
+	BreakerStateChanged,
+	ControllerTickCompleted, DoctorAlert,
 	BackendCredentialResolved,
 	EmergencySignaled, EmergencyAcked,
 	BeadsConditionalWritesDegraded, BeadsBlockedRecomputed,

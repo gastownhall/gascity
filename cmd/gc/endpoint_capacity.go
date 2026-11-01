@@ -116,23 +116,6 @@ const capacityEndpointForgetAfter = 10 * time.Minute
 // without a new refusal.
 const capacityValveMemory = time.Hour
 
-// breakerStateChangedEventType is the event emitted on every capacity
-// breaker transition. Its payload is breakerStateChangedPayload. Like
-// events.ProviderHealthGateAlert it is not in events.KnownEventTypes yet, so
-// subscribers receive it through the custom-event envelope.
-const breakerStateChangedEventType = "breaker.state_changed"
-
-// breakerStateChangedPayload is the breaker.state_changed payload. Its shape
-// matches events.BreakerStateChangedPayload from gastownhall/gascity#5953.
-type breakerStateChangedPayload struct {
-	Scope     string `json:"scope"`
-	OpClass   string `json:"op_class"`
-	From      string `json:"from"`
-	To        string `json:"to"`
-	Failures  int    `json:"failures,omitempty"`
-	BackoffMs int64  `json:"backoff_ms,omitempty"`
-}
-
 // startVerdict is what a start attempt says about its endpoint's capacity.
 type startVerdict int
 
@@ -570,7 +553,7 @@ func (g *endpointCapacityGuard) flush(rec events.Recorder, stderr io.Writer) {
 		if rec == nil {
 			continue
 		}
-		payload, err := json.Marshal(breakerStateChangedPayload{
+		payload, err := json.Marshal(events.BreakerStateChangedPayload{
 			Scope:     t.Scope,
 			OpClass:   t.OpClass,
 			From:      t.From.String(),
@@ -582,7 +565,7 @@ func (g *endpointCapacityGuard) flush(rec events.Recorder, stderr io.Writer) {
 			continue
 		}
 		rec.Record(events.Event{
-			Type:    breakerStateChangedEventType,
+			Type:    events.BreakerStateChanged,
 			Ts:      t.At.UTC(),
 			Actor:   "gc",
 			Subject: t.Scope,

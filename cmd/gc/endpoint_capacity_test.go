@@ -1140,14 +1140,14 @@ func TestEndpointCapacity_PerTickRecordAndTransitionEvent(t *testing.T) {
 		t.Fatalf("endpoint record fields = %v", tick.Fields)
 	}
 
-	evs, err := e.events.List(events.Filter{Type: breakerStateChangedEventType})
+	evs, err := e.events.List(events.Filter{Type: events.BreakerStateChanged})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(evs) != 1 {
 		t.Fatalf("breaker.state_changed events = %d, want 1", len(evs))
 	}
-	var payload breakerStateChangedPayload
+	var payload events.BreakerStateChangedPayload
 	if err := json.Unmarshal(evs[0].Payload, &payload); err != nil {
 		t.Fatal(err)
 	}

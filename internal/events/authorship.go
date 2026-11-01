@@ -278,6 +278,12 @@ var builtinAuthorship = map[string]Authorship{
 	StoreMaintenanceFailed:          AuthorController,
 	StoreDiskWarn:                   AuthorController,
 	StoreDiskCritical:               AuthorController,
+	StoreDegraded:                   AuthorController,
+	StoreRecovered:                  AuthorController,
+	StoreProbeFailed:                AuthorController,
+	BreakerStateChanged:             AuthorController, // the reconciler's capacity breakers (cmd/gc/endpoint_capacity.go)
+	ControllerTickCompleted:         AuthorController,
+	DoctorAlert:                     AuthorController,
 	ProjectIdentityStamped:          AuthorController,
 	StorageBindingConverged:         AuthorController,
 	StorageBindingGenesis:           AuthorController,
