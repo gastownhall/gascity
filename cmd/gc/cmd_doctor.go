@@ -325,7 +325,17 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		// the purge and prune help and the types.retained setting, as the
 		// core reaper does before it purges.
 		registerCityStoreCheck(newOpsRecordingDoctorCheck(cityPath, cfg, opts.RolloutFlags, opts.RolloutResolveErr, storeGate.Skipped))
-		registerCityStoreCheck(newConversationLanesDoctorCheck(cityPath, cfg))
+		lanesCheck := newConversationLanesDoctorCheck(cityPath, cfg)
+		registerCityStoreCheck(lanesCheck)
+		// legacy-delivery reports the queue and pollers even when the city
+		// store is skipped, so it probes the sessions store through the gate
+		// rather than being replaced by the gate's stand-in.
+		register(newLegacyDeliveryDoctorCheck(cfg, func() (laneStoreFit, string, error) {
+			if err := storeGate.skipErr(cityPath); err != nil {
+				return laneStoreFitNone, "", err
+			}
+			return lanesCheck.sessionsFit()
+		}))
 		register(doctor.NewConfigRefsCheck(cfg, cityPath))
 		register(doctor.NewStaleLocalPackDirCheck(cfg.Packs, cfg.Imports, cfg.DefaultRigImports, cityPath, cfg.Rigs...))
 		register(doctor.NewPreStartScriptsCheck(cfg))

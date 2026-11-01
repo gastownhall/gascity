@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **SQLite cities deliver messages, interrupts and responds on the
+  conversation lane by default.** With `[ops] authoritative` unset, a city
+  whose sessions store is SQLite with guarded batches (a SQLite storage
+  split) now runs `message`, `interrupt` and `respond` on the controller's
+  lane host, as if all three were listed. `gc session nudge`, `gc session
+  submit`, mail `--notify`, sling `--nudge`, the hook-claim continuation,
+  planner notices, wait nudges and the API's submit, messages, stop and
+  respond routes then write lane ops instead of nudge-queue items. Lanes
+  need a split store: any other city (bd-served, DoltLite, an exec provider,
+  native Dolt, the file provider) keeps legacy delivery, and `gc doctor`'s
+  `legacy-delivery` check says which one a city runs. A city whose sessions
+  store cannot host lanes (bd-served, DoltLite, exec) gets a warning to split
+  its storage (`docs/runbooks/split-storage-classes.md`, `gc storage
+  migrate`); an unsplit native-Dolt city gets a note that splitting moves
+  lane records to SQLite, which is cheaper. To roll a SQLite city back, set
+  `[ops] authoritative = []` and restart the controller; the rollback is
+  warned, and it goes away when legacy delivery is removed. Queue items
+  written before the upgrade still drain through the legacy deliverers. On
+  such a city with the list unset, this release also changes:
+  - **Messages over 16 KiB are refused.** `gc session nudge` and `gc session
+    submit` refuse them, and the API's submit and messages routes and a
+    provider `POST .../sessions` initial message answer 422
+    `payload_too_large`. Earlier releases delivered them on the legacy path.
+  - **Lane delivery semantics apply now.** An `interrupt_now` submit
+    interrupts the running turn and never restarts the session; a Codex
+    default submit waits for the turn boundary; `--delivery immediate`
+    steers into a running turn only where the runtime can steer, and
+    otherwise delivers at the next boundary.
+  - **Queued notices and prompts wait for the controller.** The lane host
+    runs in the controller, so while it is down they are delivered when it
+    returns; the legacy pollers used to deliver them meanwhile.
+  - **Downgrade floor.** This is the first release that runs lanes on these
+    cities, and v1.5.1 has no lane host, so open lane ops stranded by a
+    downgrade are never delivered. Before downgrading, let them drain or
+    drop them (`gc nudge status`, `gc nudge drop`).
+
 - **Run `gc doctor --fix` in each existing gastown or gascity city after you
   install this build.** gc now pins gastown 0.1.12 and gascity 0.1.7 (see
   Changed) and serves only those pins from the packs it embeds. A city still
@@ -639,6 +675,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`gc nudge status` and `gc nudge drop` cover conversation-lane ops.**
+  `gc nudge status` lists a session's open lane messages beside its queue
+  items, pending until the lane takes them and in flight while it delivers,
+  and lane messages that closed failed or skipped in the last hour as dead,
+  in the same schema-v1 JSON; when it cannot read them all it says so and
+  exits 1. `gc nudge drop <op id>` cancels a lane message as the operator:
+  `dropped` before the lane takes it, `cancel_requested` while it is
+  delivered. `gc doctor` gains a `legacy-delivery` check (queue depth,
+  live `gc nudge poll` sidecars, deprecated keys in use), and its
+  `conversation-lanes` check reports the default kinds and why a city keeps
+  legacy delivery.
+
 - **Protocol-mode sessions take lane notices.** A t3bridge session, whose
   runtime records its turn starts, is now served by the conversation lane
   for every notice producer (mail `--notify`, sling `--nudge`, the
@@ -717,6 +765,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path inside a git worktree is still locked to its current commit. Adding a
   pack with `POST /v0/city/{cityName}/packs` and no `version` changes the
   same way. Pass `--version` to choose another constraint.
+
+### Deprecated
+
+- **Legacy delivery.** The nudge queue (`.gc/runtime/nudges/state.json`),
+  its `gc nudge poll` sidecars and the supervisor's nudge dispatcher are
+  removed in a future release: one release after `gc init` creates split
+  cities by default. From then on a city whose sessions store cannot host
+  conversation lanes must split its storage (`gc storage migrate`) before
+  it can start; split now with `docs/runbooks/split-storage-classes.md`.
+  Where the lane runs, the controller warns once at start about each of
+  `[daemon] nudge_dispatcher`, `[session] nudge_poll_interval`, `[ops]
+  content` and `[ops] control` still set, and about `[ops] authoritative =
+  []`. Leave those keys set until legacy delivery is removed: they still
+  govern the legacy deliverers that drain queue items written before the
+  upgrade and serve sessions without a row, and removing `nudge_dispatcher
+  = "supervisor"` now would restart the per-session pollers. `gc nudge
+  drain` without `--inject` is deprecated; the prompt hook's `gc nudge drain
+  --inject` stays.
 
 ### Fixed
 
