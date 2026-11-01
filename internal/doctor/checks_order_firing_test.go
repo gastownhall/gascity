@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -692,7 +693,7 @@ func TestLatestOrderFiredAt_RecentEventSkipsLastRun(t *testing.T) {
 		},
 	}
 
-	got, err := check.latestOrderFiredAt(evts, order, expected, now)
+	got, err := check.latestOrderFiredAt(evts, order, expected, 30*time.Second, now)
 	if err != nil {
 		t.Fatalf("latestOrderFiredAt returned error: %v", err)
 	}
@@ -723,7 +724,7 @@ func TestLatestOrderFiredAt_StaleEventConsultsLastRun(t *testing.T) {
 		},
 	}
 
-	got, err := check.latestOrderFiredAt(evts, order, expected, now)
+	got, err := check.latestOrderFiredAt(evts, order, expected, 30*time.Second, now)
 	if err != nil {
 		t.Fatalf("latestOrderFiredAt returned error: %v", err)
 	}
@@ -929,5 +930,80 @@ func TestOrderFiringCurrent_ReadsPatrolIntervalFromCityConfig(t *testing.T) {
 				t.Fatalf("status = %v, want %v; msg = %s; details = %v", result.Status, tc.wantStatus, result.Message, result.Details)
 			}
 		})
+	}
+}
+
+// The event-log shortcut skips the order-run lookup exactly while the
+// classifier would call the event's age OK, in both the prefetch and the
+// inline path.
+func TestOrderFiringCurrent_EventEvidenceFollowsOverdueLine(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		age        time.Duration
+		wantLookup bool
+		wantStatus CheckStatus
+	}{
+		{age: 2 * time.Minute, wantLookup: false, wantStatus: StatusOK},
+		{age: 2*time.Minute + 15*time.Second, wantLookup: true, wantStatus: StatusWarning},
+	} {
+		t.Run(tc.age.String(), func(t *testing.T) {
+			cityPath, cfg := orderFiringTestCity(t)
+			writeOrderFiringTestOrder(t, cityPath, "minute-cooldown", "cooldown", "1m")
+			writeOrderFiringTestEvents(t, cityPath,
+				events.Event{Type: events.ControllerStarted, Ts: now.Add(-3 * time.Hour)},
+				events.Event{Type: events.OrderFired, Subject: "minute-cooldown", Ts: now.Add(-tc.age)},
+			)
+
+			var mu sync.Mutex
+			lookups := 0
+			check := NewOrderFiringCurrentCheck(cfg, cityPath, WithOrderFiringCurrentLastRunFunc(func(orders.Order) (time.Time, error) {
+				mu.Lock()
+				lookups++
+				mu.Unlock()
+				return time.Time{}, nil
+			}))
+			check.clock = func() time.Time { return now }
+			result := check.Run(&CheckContext{CityPath: cityPath})
+
+			mu.Lock()
+			defer mu.Unlock()
+			if gotLookup := lookups > 0; gotLookup != tc.wantLookup {
+				t.Fatalf("order-run lookups = %d, want lookup consulted = %v", lookups, tc.wantLookup)
+			}
+			if result.Status != tc.wantStatus {
+				t.Fatalf("status = %v, want %v; msg = %s; details = %v", result.Status, tc.wantStatus, result.Message, result.Details)
+			}
+		})
+	}
+}
+
+// eventEvidenceSuffices and classifyOrderFiring share one overdue line, so the
+// event-log shortcut never skips the order-run lookup for an age the
+// classifier would flag.
+func TestEventEvidenceSufficesMatchesOverdueLine(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	started := now.Add(-48 * time.Hour)
+	order := orders.Order{Name: "cooldown", Trigger: "cooldown"}
+	for _, tc := range []struct {
+		expected, patrol, overdueLine time.Duration
+	}{
+		{expected: time.Minute, patrol: 30 * time.Second, overdueLine: 2*time.Minute + 15*time.Second},
+		{expected: 30 * time.Second, patrol: 15 * time.Second, overdueLine: 67*time.Second + 500*time.Millisecond},
+		{expected: 4 * time.Hour, patrol: 30 * time.Second, overdueLine: 6*time.Hour + 45*time.Second},
+	} {
+		for _, age := range []time.Duration{tc.overdueLine - time.Second, tc.overdueLine, tc.overdueLine + time.Second} {
+			latest := now.Add(-age)
+			wantSuffices := age < tc.overdueLine
+			if got := eventEvidenceSuffices(latest, tc.expected, tc.patrol, now); got != wantSuffices {
+				t.Errorf("eventEvidenceSuffices(E=%v, P=%v, age=%v) = %v, want %v", tc.expected, tc.patrol, age, got, wantSuffices)
+			}
+			status, _, detail := classifyOrderFiring(order, now, tc.expected, tc.patrol, latest, started)
+			if classifiedOK := status == StatusOK; classifiedOK != wantSuffices {
+				t.Errorf("classifyOrderFiring(E=%v, P=%v, age=%v) OK = %v, want %v (same line as event evidence); detail = %q", tc.expected, tc.patrol, age, classifiedOK, wantSuffices, detail)
+			}
+		}
+		if eventEvidenceSuffices(time.Time{}, tc.expected, tc.patrol, now) {
+			t.Errorf("eventEvidenceSuffices(zero latest, E=%v, P=%v) = true, want false", tc.expected, tc.patrol)
+		}
 	}
 }
