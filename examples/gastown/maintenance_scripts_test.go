@@ -13299,6 +13299,32 @@ func TestOrphanSweepKeepsUnresolvableStampedSessionNameUnverifiable(t *testing.T
 	}
 }
 
+// TestOrphanSweepKeepsClaimWithUnreadableLegacySessionHint pins that a
+// terminal canonical gc.session_id never overrides an unreadable legacy hint:
+// a stale session_id or gc.session_bead_id that cannot be read still leaves
+// the claim in place, even when gc.session_name is the closed session's own
+// runtime name.
+func TestOrphanSweepKeepsClaimWithUnreadableLegacySessionHint(t *testing.T) {
+	for _, key := range []string{"gc.session_bead_id", "session_id"} {
+		t.Run(key, func(t *testing.T) {
+			run := runOrphanSweepGateFixture(t,
+				[]orphanSweepGateRow{hookClaim("ga-hook-dead", "gc-d34d1", "gastown__polecat-gc-d34d1", map[string]string{key: "gc-legacy9"})},
+				nil,
+				[]orphanSweepGateRow{{ID: "gc-d34d1", Status: "closed", IssueType: "session"}},
+				nil, nil)
+			if run.err != nil {
+				t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+			}
+			if run.released("ga-hook-dead") {
+				t.Fatalf("claim with an unreadable legacy %s hint was released\n%s", key, run.context())
+			}
+			if !strings.Contains(run.out, "orphan-sweep: reset 0 orphaned beads, skipped 1 unverifiable") {
+				t.Fatalf("unexpected orphan-sweep output:\n%s", run.out)
+			}
+		})
+	}
+}
+
 // TestJsonlExportFirstRunArchivePathCreatedBeforeTheRename covers the window
 // between the first run's "archive path absent" check and its rename of the
 // staging repo into place: another exporter (or anything else) can create
