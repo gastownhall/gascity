@@ -942,10 +942,29 @@ func assignedReadyTierCommand(shellVar string, topo QueryTopology) string {
 		workQueryReadFailure(reader) + `; `
 }
 
+// assignedReadyServeGate emits the OPEN assigned-ready tier's serve decision
+// for the row $r already read by assignedReadyTierCommand. `bd ready`
+// excludes blocked candidates by construction but is hold-transparent — the
+// same gas-kg6 defect class as the in_progress tier (gascity#8010): a row
+// parked on a canonical dispatch hold (beadmeta.DispatchHoldLabels) has no
+// blocking dependency, so it was served and the script exited before the
+// routed-pool tier below it ever ran, starving real routed demand behind an
+// unrelated held row. The hold count is read off the row this tier already
+// holds in $r — no extra bd call, matching heldLabelCountJQ's existing
+// in_progress-tier use. Scope (ga-5736js, unchanged): this is the
+// WORK-SERVING decision only; ephemeralAssignedReadyProbeScript and
+// dispatch_control_ready.go's filterReadyByAssignee stay hold-transparent by
+// design and are NOT touched here.
+func assignedReadyServeGate() string {
+	return `nheld=$(printf "%s" "$r" | jq -r ` + shellquote.Quote(heldLabelCountJQ()) + ` 2>/dev/null); ` +
+		`[ -z "$nheld" ] && nheld=0; ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && [ "$nheld" = "0" ] && printf "%s" "$r" && exit 0; `
+}
+
 func standardAssignedReadyWorkQueryScript(topo QueryTopology) string {
 	return identityLoopHead() +
 		assignedReadyTierCommand("id", topo) +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		assignedReadyServeGate() +
 		ephemeralAssignedReadyProbeScript("id", topo) +
 		`done; `
 }
@@ -996,7 +1015,7 @@ func legacyControlAssignedReadyWorkQueryScript(topo QueryTopology) string {
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
 		assignedReadyTierCommand("cand", topo) +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		assignedReadyServeGate() +
 		ephemeralAssignedReadyProbeScript("cand", topo) +
 		`done; ` +
 		`done; `
