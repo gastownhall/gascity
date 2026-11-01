@@ -358,6 +358,63 @@ func TestNewSessionErrNoServerReprobeAnsweredAllowsCreation(t *testing.T) {
 	}
 }
 
+// TestNewSessionErrNoServerReprobeWithoutAnswerFailsClosed pins the
+// socket-clobber guard: when the re-probe after a contradicting socket
+// observation gets no server answer, creation is refused with both the
+// observation and the re-probe result in the diagnostic.
+func TestNewSessionErrNoServerReprobeWithoutAnswerFailsClosed(t *testing.T) {
+	reprobes := []struct {
+		name string
+		err  error
+	}{
+		{name: "persistent-no-server", err: ErrNoServer},
+		{name: "canceled", err: context.Canceled},
+		{name: "deadline-exceeded", err: context.DeadlineExceeded},
+		{name: "executor-failure", err: errors.New("tmux has-session: lost server")},
+	}
+	for _, variant := range newSessionVariants {
+		for _, reprobe := range reprobes {
+			t.Run(variant.name+"/"+reprobe.name, func(t *testing.T) {
+				fe := probeAssertSet(
+					[]string{"", "", "%1", ""},
+					[]error{ErrNoServer, reprobe.err, nil, nil},
+				)
+				observerCalls := 0
+				tm := &Tmux{
+					cfg:  Config{SocketName: "gc-race"},
+					exec: fe,
+					serverSocketObserver: func(context.Context, string) error {
+						observerCalls++
+						return errors.New("inode=97 peer_pid=4242 reason=live-unix-socket")
+					},
+				}
+				err := variant.call(tm)
+				if !errors.Is(err, ErrServerDegraded) {
+					t.Fatalf("err = %v, want ErrServerDegraded", err)
+				}
+				if errors.Is(err, ErrNoServer) {
+					t.Fatalf("err = %v, must not wrap ErrNoServer", err)
+				}
+				for _, want := range []string{
+					"protocol=no-server",
+					"observation=inode=97 peer_pid=4242 reason=live-unix-socket",
+					"reprobe=" + reprobe.err.Error(),
+				} {
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("err = %q, want %q", err, want)
+					}
+				}
+				if observerCalls != 1 {
+					t.Fatalf("observer calls = %d, want 1", observerCalls)
+				}
+				if len(fe.calls) != 2 || !firstArgsContainHasSession(fe.calls[0]) || !reflect.DeepEqual(fe.calls[1], fe.calls[0]) {
+					t.Fatalf("calls = %#v, want the preflight probe and its re-probe only", fe.calls)
+				}
+			})
+		}
+	}
+}
+
 type socketModeFileInfo struct{ os.FileInfo }
 
 func (info socketModeFileInfo) Mode() os.FileMode { return info.FileInfo.Mode() | os.ModeSocket }
