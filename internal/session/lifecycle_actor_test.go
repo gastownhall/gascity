@@ -136,3 +136,14 @@ func TestSyncRuntimeAliasRollsBackOnPartialFailure(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeEnvCarriesNativeProviderSessionIdentity(t *testing.T) {
+	env := RuntimeEnvWithSessionContext(Info{ID: "gc-1", SessionName: "one", SessionKey: "native-provider-id"}, 1, 1, "token")
+	if env["GC_PROVIDER_SESSION_ID"] != "native-provider-id" {
+		t.Fatalf("runtime native identity=%q", env["GC_PROVIDER_SESSION_ID"])
+	}
+	empty := RuntimeEnvWithSessionContext(Info{ID: "gc-2"}, 1, 1, "token")
+	if value, present := empty["GC_PROVIDER_SESSION_ID"]; !present || value != "" {
+		t.Fatalf("empty native identity must clear inherited context: present=%v value=%q", present, value)
+	}
+}

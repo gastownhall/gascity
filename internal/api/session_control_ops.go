@@ -908,6 +908,9 @@ var respondOpPolicy = opjournal.Policy{Guarantee: opjournal.GuaranteeAtLeastOnce
 // (legacyop.ErrReservedKey): auto answers unrecorded and require refuses it,
 // so no op of OJ-4's takes the id of the lane op answering that raising.
 func (s *Server) respondSession(ctx context.Context, target, key string, resp runtime.InteractionResponse) (syncAnswer, error) {
+	if err := session.ValidateInteractionResponse(resp); err != nil {
+		return syncAnswer{}, humaSessionManagerError(err)
+	}
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return syncAnswer{}, apierr.ServiceUnavailable.Msg("no bead store configured")

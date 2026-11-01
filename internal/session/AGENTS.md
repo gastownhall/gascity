@@ -170,3 +170,15 @@ clear, `session.conversation_reset{reason:stale-key}`). While it is kept, the
 resume backstop (a refusal, or the third resume-shaped failure in a row) is
 its only automatic reset, whatever the provider; `gc session reset` is the
 explicit one.
+
+## Native pending questions
+
+Keep ordinary message and nudge delivery held while a provider question owns
+input. Only an explicit `answer` response naming the pending request may answer
+it; `ValidateInteractionResponse` enforces request binding before API op
+admission and in the Manager. Approval shorthand remains unchanged. Runtime
+adapters own native question identity, choices, editor navigation and guarded
+input. The shared start context publishes `GC_PROVIDER_SESSION_ID` from the
+persisted native session key, including an empty value to clear inheritance.
+Preserve response idempotency and incarnation fencing; a changed question or
+unconfirmed editor/draft must receive no submit key.

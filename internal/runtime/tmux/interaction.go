@@ -689,8 +689,9 @@ func (d *approvalDedup) clear(session string) {
 // ---------------------------------------------------------------------------
 
 // Pending checks the tmux pane for an active Claude Code approval prompt,
-// Codex approval overlay or AskUserQuestion dialog (Kind "question", which
-// offers no options: it is answered in the terminal).
+// Codex approval overlay or native question dialog. Question options are the
+// authored choices; metadata reports whether the runtime can bind an answer
+// to the native request. Pending never opens or answers the question editor.
 // Returns nil with no error if nothing is pending.
 func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 	dialog, err := t.dialogInPane(name)
@@ -722,7 +723,8 @@ func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 		return &runtime.PendingInteraction{
 			RequestID: dialog.question.requestID(),
 			Kind:      "question",
-			Prompt:    dialog.question.promptText(),
+			Prompt:    dialog.question.Header + ": " + dialog.question.Question,
+			Options:   dialog.question.answerChoices(),
 			Metadata:  questionMetadata(dialog.question),
 		}, nil
 	}
@@ -804,8 +806,11 @@ func (t *Tmux) checkNoApprovalPromptIn(name, target string) error {
 		return err
 	}
 	if q := dialog.question; q != nil {
-		return fmt.Errorf("%w: session %q is waiting on a question dialog (%s, request %s); it is answered in the terminal (gc session attach %s), not by a message",
-			runtime.ErrPendingInteraction, name, q.promptText(), q.requestID(), name)
+		hint := fmt.Sprintf("it is answered in the terminal (gc session attach %s), not by a message", name)
+		if q.NativeID != "" {
+			hint = fmt.Sprintf("answer its request with respond (action answer) or in the terminal (gc session attach %s), not by a message", name)
+		}
+		return fmt.Errorf("%w: session %q is waiting on a question dialog (%s, request %s); %s", runtime.ErrPendingInteraction, name, q.promptText(), q.requestID(), hint)
 	}
 	approval := dialog.approval
 	if approval == nil {
@@ -849,7 +854,12 @@ func (t *Tmux) cancelClaudeApproval(ctx context.Context, name string) (handled b
 
 // questionMetadata is the metadata a pending question carries.
 func questionMetadata(q *parsedQuestion) map[string]string {
-	metadata := map[string]string{"source": "tmux", "header": q.Header}
+	metadata := map[string]string{"source": "tmux", "header": q.Header, "free_text": strconv.FormatBool(q.textOption() > 0 && q.NativeID != "")}
+	if q.NativeID != "" {
+		metadata["answer_action"] = "answer"
+	} else {
+		metadata["answer_unavailable"] = "native question identity is unavailable; answer in the terminal or start a new session"
+	}
 	if q.Focused != "" {
 		metadata["focused"] = q.Focused
 	}
@@ -878,7 +888,19 @@ func (t *Tmux) dialogInPane(target string) (paneDialog, error) {
 		return paneDialog{}, err
 	}
 	if q := parseAskUserQuestion(strings.Split(strings.ReplaceAll(paneText, "\r", ""), "\n")); q != nil {
+		if err := t.bindClaudeQuestion(resolved, q); err != nil {
+			return paneDialog{}, err
+		}
 		return paneDialog{question: q}, nil
+	}
+	lines := strings.Split(strings.ReplaceAll(paneText, "\r", ""), "\n")
+	if q := codexQuestionPanel(lines); q != nil {
+		q, err = t.codexNativeQuestions(resolved, q, 0)
+		return paneDialog{question: q}, err
+	}
+	if count := codexQuestionCount(lines); count > 0 {
+		q, err := t.codexNativeQuestions(resolved, nil, count)
+		return paneDialog{question: q}, err
 	}
 	approval := parseApprovalPrompt(paneText)
 	if approval == nil || !approval.Codex {
@@ -938,7 +960,7 @@ var (
 )
 
 // Respond sends the appropriate keystroke to the tmux pane to approve or deny
-// a pending tool approval, then verifies the prompt was consumed.
+// a pending tool approval or question, then verifies the prompt was consumed.
 //
 // The prompt is the agent's: every capture and the answer key go to its pane
 // (agentPaneTarget), resolved once for this response.
@@ -972,12 +994,8 @@ func (t *Tmux) respond(ctx context.Context, name string, response runtime.Intera
 	if err != nil {
 		return preVerify(err)
 	}
-	// A question's numbered options are its own, not the fixed approval menu
-	// the keys below encode: refuse before any key, and before the "prompt
-	// already gone" path that would report the open dialog as answered.
 	if dialog.question != nil {
-		return fmt.Errorf("%w: session %q is showing a question dialog (%s); it is answered in the terminal (gc session attach %s)",
-			runtime.ErrInteractionActionUnavailable, name, dialog.question.promptText(), name)
+		return t.respondQuestion(ctx, target, dialog.question, response)
 	}
 	current := dialog.approval
 	if current == nil {

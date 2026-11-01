@@ -1491,6 +1491,9 @@ func PendingInteractionError(pending *runtime.PendingInteraction) error {
 		what += " (request " + pending.RequestID + ")"
 	}
 	if strings.TrimSpace(pending.Kind) == "question" {
+		if pending.Metadata["answer_action"] == "answer" {
+			return fmt.Errorf("%w: %s is waiting for an explicit answer; respond with its request_id, action answer and text before sending a message", ErrPendingInteraction, what)
+		}
 		// A question dialog offers no response verbs: only a person answers
 		// it, in the terminal.
 		return fmt.Errorf("%w: %s is waiting for an answer in the terminal (gc session attach <session>); text sent now would select one of its options", ErrPendingInteraction, what)
@@ -1996,6 +1999,16 @@ func (m *Manager) PendingByName(sessName string) (*runtime.PendingInteraction, b
 	return pending, true, nil
 }
 
+// ValidateInteractionResponse refuses a question answer that does not name the
+// request the operator saw. Approval actions retain their existing shorthand.
+// Projections call this before operation admission; the Manager also enforces it.
+func ValidateInteractionResponse(response runtime.InteractionResponse) error {
+	if response.Action == "answer" && response.RequestID == "" {
+		return fmt.Errorf("%w: a question answer requires request_id", ErrInteractionMismatch)
+	}
+	return nil
+}
+
 // Respond resolves the current pending interaction for a session.
 func (m *Manager) Respond(id string, response runtime.InteractionResponse) error {
 	return m.respond(id, response, func(ip runtime.InteractionProvider, sessName string, response runtime.InteractionResponse) error {
@@ -2020,6 +2033,9 @@ func (m *Manager) RespondFenced(ctx context.Context, id string, fence runtime.In
 
 // respond is Respond with the provider's answer sent by send.
 func (m *Manager) respond(id string, response runtime.InteractionResponse, send func(runtime.InteractionProvider, string, runtime.InteractionResponse) error) error {
+	if err := ValidateInteractionResponse(response); err != nil {
+		return err
+	}
 	return withSessionMutationLock(id, func() error {
 		_, sessName, err := m.sessionBead(id)
 		if err != nil {

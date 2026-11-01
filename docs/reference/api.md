@@ -386,9 +386,29 @@ a question — has a *pending interaction*. `GET /v0/city/{cityName}/pending`
 lists them; `GET /v0/city/{cityName}/session/{id}/pending` returns one in
 full; `POST /v0/city/{cityName}/session/{id}/respond` answers it.
 
-A question dialog (`kind` `question`) offers no `options` and cannot be
-answered through the API: the person answers it in the session's terminal,
-and `POST .../respond` on one returns 409 `invalid_interaction`.
+A native question (`kind: "question"`) includes its full `prompt` and authored
+`options`. When `metadata.answer_action` is `"answer"`, respond with the exact
+`request_id` you read and either a choice label or free text. Free text is
+available when `metadata.free_text` is `"true"`.
+
+```json
+{
+  "request_id": "<request_id from pending>",
+  "action": "answer",
+  "text": "Owl"
+}
+```
+
+Use one `Idempotency-Key` for that answer and retain it when retrying. A missing
+or stale question ID returns 409 `invalid_interaction` without answering the
+current question. Questions can be withdrawn by their provider, so refresh
+pending state after that refusal. Ordinary messages and automated nudges stay
+held; they never act as question answers.
+
+The runtime opens and answers the provider's own question control. Clients use
+the supervisor API rather than reading provider logs or sending terminal keys.
+When `metadata.answer_action` is absent, the current native frame cannot be
+answered through the API; use `gc session attach` to answer in the terminal.
 
 The city event stream (and the supervisor stream, tagged with the city)
 also carries each change as an event, so a client does not have to poll:

@@ -1369,3 +1369,29 @@ func TestRespondOverAStoreWithNoNamespaceKeepsOJ4(t *testing.T) {
 		})
 	}
 }
+
+func TestQuestionAnswerRequiresExplicitRequestBeforeOpAdmission(t *testing.T) {
+	for _, mode := range []string{"off", "auto", "require", "lane"} {
+		t.Run(mode, func(t *testing.T) {
+			var e *opsEnv
+			var info session.Info
+			if mode == "lane" {
+				e, _, info = laneRespondEnv(t, outcome(opjournal.ArmSucceeded, ""))
+			} else {
+				e = newControlOpsEnv(t, mode, "off")
+				info = e.session(t, "question")
+			}
+			e.fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{RequestID: "question-1", Kind: "question", Prompt: "Which animal?", Options: []string{"Otter", "Owl"}})
+			rec := e.post(t, "/session/"+info.ID+"/respond", "unbound-question", `{"action":"answer","text":"Owl"}`)
+			if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "invalid_interaction") {
+				t.Fatalf("unbound question=%d %s", rec.Code, rec.Body.String())
+			}
+			if rows := e.opRows(t); len(rows) != 0 {
+				t.Fatalf("unbound answer admitted %d ops", len(rows))
+			}
+			if n := e.fs.sp.CountCalls("Respond", info.SessionName); n != 0 {
+				t.Fatalf("unbound answer reached runtime %d times", n)
+			}
+		})
+	}
+}

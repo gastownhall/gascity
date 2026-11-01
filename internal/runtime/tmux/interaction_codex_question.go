@@ -1,0 +1,246 @@
+package tmux
+
+import (
+	"encoding/json"
+	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/runtime"
+)
+
+var codexQueuedQuestionCount = regexp.MustCompile(`^[?？] (\d+) questions?$`)
+
+// codexQuestionPanel reads the native async question editor, never an approval
+// menu or conversational bullet list. Pending itself does not open the editor.
+func codexQuestionPanel(lines []string) *parsedQuestion {
+	end := trimBlankTail(lines, len(lines))
+	if end == 0 || !strings.Contains(lines[end-1], "enter submit") || !strings.Contains(lines[end-1], "^] skip") || !strings.Contains(lines[end-1], "main prompt") {
+		return nil
+	}
+	start := -1
+	for i := end - 2; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) == "• Queued follow-up inputs" {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return nil
+	}
+	q := &parsedQuestion{Header: "Codex question", Provider: "codex"}
+	var prompt []string
+	var continuations [][]string
+	for _, line := range lines[start+1 : end-1] {
+		row := strings.TrimSpace(line)
+		if m := approvalOptionRe.FindStringSubmatch(row); m != nil {
+			number, _ := strconv.Atoi(m[2])
+			q.Numbers = append(q.Numbers, number)
+			q.Choices = append(q.Choices, m[3])
+			continuations = append(continuations, nil)
+			if m[1] != "" {
+				q.Focused = m[3]
+				q.FocusedNumber = number
+			}
+		} else if len(q.Choices) > 0 && row != "" {
+			last := len(continuations) - 1
+			continuations[last] = append(continuations[last], row)
+		} else if len(q.Choices) == 0 && row != "" {
+			prompt = append(prompt, row)
+		}
+	}
+	q.Question = strings.Join(prompt, " ")
+	if len(q.Numbers) > 0 {
+		last := len(q.Numbers) - 1
+		q.FreeNumber = q.Numbers[last]
+		if q.Choices[last] != "Other" && q.Choices[last] != "Other (write an answer)" {
+			q.Draft = strings.Join(append([]string{q.Choices[last]}, continuations[last]...), "\n")
+		}
+		q.Choices[last] = "Other"
+	}
+	if q.Question == "" {
+		return nil
+	}
+	return q
+}
+
+func codexQuestionCount(lines []string) int {
+	// A collapsed question indicator must be in the live bottom block and have
+	// its native answer hint. A past panel above a later composer is not live.
+	start := -1
+	for i := len(lines) - 1; i >= 0 && len(lines)-i < 20; i-- {
+		if strings.TrimSpace(lines[i]) == "• Queued follow-up inputs" {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return 0
+	}
+	count := 0
+	hint := false
+	for _, line := range lines[start+1:] {
+		row := strings.TrimSpace(line)
+		if m := codexQueuedQuestionCount.FindStringSubmatch(row); m != nil {
+			count, _ = strconv.Atoi(m[1])
+		}
+		hint = hint || strings.Contains(row, "shift+← to answer")
+	}
+	if !hint {
+		return 0
+	}
+	return count
+}
+
+// codexNativeQuestions reads only the rollout held by this pane's own process
+// tree. Native call IDs distinguish identical questions raised twice. The TUI
+// queue must agree with the recorded requests; disagreement refuses input.
+func (t *Tmux) codexNativeQuestions(target string, visible *parsedQuestion, count int) (*parsedQuestion, error) {
+	path := t.codexRolloutOf(target)
+	if path == "" {
+		return nil, fmt.Errorf("%w: cannot identify the question's native Codex rollout", runtime.ErrRuntimeUnavailable)
+	}
+	tail, err := readQuestionTranscriptTail(path)
+	if err != nil {
+		return nil, err
+	}
+	questions, err := codexQuestionsIn(tail)
+	if err != nil {
+		return nil, err
+	}
+	if visible != nil {
+		var found *parsedQuestion
+		for _, q := range questions {
+			if q.Question == visible.Question && equalQuestionChoices(q.answerChoices(), visible.answerChoices()) {
+				if found != nil {
+					return nil, fmt.Errorf("%w: native Codex question is ambiguous", runtime.ErrRuntimeUnavailable)
+				}
+				found = q
+			}
+		}
+		if found == nil {
+			return nil, fmt.Errorf("%w: question editor has no matching native request", runtime.ErrRuntimeUnavailable)
+		}
+		visible.NativeID = found.NativeID
+		return visible, nil
+	}
+	if count != len(questions) || count == 0 {
+		return nil, fmt.Errorf("%w: Codex queue and native requests disagree", runtime.ErrRuntimeUnavailable)
+	}
+	return questions[0], nil
+}
+
+func equalQuestionChoices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func codexQuestionsIn(tail string) ([]*parsedQuestion, error) {
+	type nativeQuestion struct {
+		Title   string   `json:"title"`
+		Options []string `json:"options"`
+	}
+	var pending []*parsedQuestion
+	for _, line := range strings.Split(tail, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var row struct {
+			Type    string `json:"type"`
+			Payload struct {
+				Type      string `json:"type"`
+				Name      string `json:"name"`
+				CallID    string `json:"call_id"`
+				Arguments string `json:"arguments"`
+				Role      string `json:"role"`
+				Content   []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"payload"`
+		}
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			return nil, fmt.Errorf("%w: native Codex rollout contains an incomplete record", runtime.ErrRuntimeUnavailable)
+		}
+		p := row.Payload
+		if row.Type == "event_msg" && (p.Type == "task_complete" || p.Type == "turn_aborted") {
+			pending = nil
+			continue
+		}
+		if row.Type != "response_item" {
+			continue
+		}
+		if p.Type == "function_call" && (p.Name == "request_user_input_async" || strings.HasSuffix(p.Name, ".request_user_input_async")) && p.CallID != "" {
+			var args struct {
+				Questions []nativeQuestion `json:"questions"`
+			}
+			if err := json.Unmarshal([]byte(p.Arguments), &args); err != nil {
+				return nil, fmt.Errorf("decoding native Codex questions: %w", err)
+			}
+			for index, native := range args.Questions {
+				if native.Title == "" {
+					return nil, fmt.Errorf("%w: native Codex question has no title", runtime.ErrRuntimeUnavailable)
+				}
+				q := &parsedQuestion{Header: "Codex question", Provider: "codex", Collapsed: true, Question: native.Title, NativeID: fmt.Sprintf("tmux-codex-question-%s-%d", p.CallID, index)}
+				for _, option := range native.Options {
+					if len(q.Choices) == 32 {
+						break
+					}
+					if len(option) <= 512 {
+						q.Choices = append(q.Choices, option)
+						q.Numbers = append(q.Numbers, len(q.Choices))
+					}
+				}
+				q.FreeNumber = len(q.Choices) + 1
+				q.Choices = append(q.Choices, "Other")
+				q.Numbers = append(q.Numbers, len(q.Choices))
+				pending = append(pending, q)
+			}
+		}
+		if p.Type == "message" && p.Role == "user" {
+			for _, c := range p.Content {
+				text := strings.TrimSpace(c.Text)
+				const open = "<send_user_message_question_reply>"
+				const closingTag = "</send_user_message_question_reply>"
+				if !strings.HasPrefix(text, open) || !strings.HasSuffix(text, closingTag) {
+					continue
+				}
+				text = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(text, open), closingTag))
+				var replies []struct {
+					QuestionID string `json:"questionItemId"`
+				}
+				if json.Unmarshal([]byte(text), &replies) != nil {
+					continue
+				}
+				for _, reply := range replies {
+					var identity []json.RawMessage
+					if json.Unmarshal([]byte(reply.QuestionID), &identity) != nil || len(identity) != 3 {
+						continue
+					}
+					var tool, call string
+					var index int
+					if json.Unmarshal(identity[0], &tool) != nil || json.Unmarshal(identity[1], &call) != nil || json.Unmarshal(identity[2], &index) != nil || tool != "request_user_input_async" {
+						continue
+					}
+					id := fmt.Sprintf("tmux-codex-question-%s-%d", call, index)
+					keep := pending[:0]
+					for _, q := range pending {
+						if q.NativeID != id {
+							keep = append(keep, q)
+						}
+					}
+					pending = keep
+				}
+			}
+		}
+	}
+	return pending, nil
+}

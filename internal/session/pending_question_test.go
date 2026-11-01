@@ -119,3 +119,14 @@ func TestPendingInteractionErrorWordingIsKindAware(t *testing.T) {
 		t.Errorf("approval refusal %q lost its %q wording", approval.Error(), want)
 	}
 }
+
+func TestQuestionAnswerRequiresExplicitRequest(t *testing.T) {
+	mgr, sp, info := startedQuestionSession(t)
+	err := mgr.Respond(info.ID, runtime.InteractionResponse{Action: "answer", Text: "Owl"})
+	if !errors.Is(err, ErrInteractionMismatch) {
+		t.Fatalf("unbound question answer=%v", err)
+	}
+	if n := sp.CountCalls("Respond", info.SessionName); n != 0 {
+		t.Fatalf("unbound answer reached runtime %d times", n)
+	}
+}

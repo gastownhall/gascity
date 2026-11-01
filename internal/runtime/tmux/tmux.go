@@ -441,13 +441,15 @@ func (realExecutor) executeCtx(ctx context.Context, args []string) (string, erro
 
 // Tmux wraps tmux operations.
 type Tmux struct {
-	cfg                  Config
-	exec                 executor
-	interactionDedup     *approvalDedup
-	interactionDedupOnce sync.Once
-	hiddenAttachMu       sync.Mutex
-	hiddenAttachClients  map[string]*hiddenAttachClient
-	hiddenAttachSeq      atomic.Uint64
+	// claudeQuestionTranscript is an exact native-record reader seam for tests.
+	claudeQuestionTranscript func(string) (string, error)
+	cfg                      Config
+	exec                     executor
+	interactionDedup         *approvalDedup
+	interactionDedupOnce     sync.Once
+	hiddenAttachMu           sync.Mutex
+	hiddenAttachClients      map[string]*hiddenAttachClient
+	hiddenAttachSeq          atomic.Uint64
 
 	// pokeMu guards pokes, which tracks gc's own send-keys per session so
 	// GetSessionActivity can discount activity that is only our poke's echo

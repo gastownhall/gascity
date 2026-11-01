@@ -203,7 +203,7 @@ its op names, even when the request names none, so a respond adopted after
 the agent raised another prompt, or a second click that read the same prompt
 pending, closes `skipped{stale}` rather than approving a prompt nobody saw.
 That holds only as far as request IDs tell prompts apart: where the runtime
-derives them from the prompt's content (tmux hashes the tool and its input),
+derives approval IDs from the prompt's content (tmux approval IDs hash the tool and its input),
 an identical prompt raised again carries the first one's ID and is answered
 too. That is permanent for `/respond`: its op stays keyed by request id, with
 its scope, payload (`respondOpPayload`) and at_least_once policy frozen, so
@@ -618,3 +618,10 @@ and `gc event emit` refuse them (`events.IsJournalDerived`). Both payloads are p
 payload text. The fields `conversationOpRecord` adds to `ConversationOp` are
 set only on the op routes and `op.changed`; a session command's answer keeps
 `conversationOpWire`.
+
+Native question answers use the existing `/respond` contract with `action:
+answer` and a required explicit `request_id`, validated in the session domain
+before any legacy/lane op admission. Keep the existing op keys, payload digest
+and replay rules. Native question IDs include provider invocation identity;
+clients discover answer/text support from pending metadata instead of inferring
+it from `kind`. Provider logs and terminal input remain runtime-adapter concerns.

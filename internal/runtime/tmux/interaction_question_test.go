@@ -82,6 +82,9 @@ type paneExecutor struct {
 
 func (e *paneExecutor) execute(args []string) (string, error) {
 	e.calls = append(e.calls, slices.Clone(args))
+	if slices.Contains(args, "#{pane_pid}") {
+		return "4242", nil
+	}
 	if row, ok := fakeAgentPaneRow(args); ok {
 		return row, nil
 	}
@@ -144,8 +147,8 @@ func TestProviderPendingReportsAskUserQuestionDialog(t *testing.T) {
 	if pending.Kind != "question" {
 		t.Errorf("Kind = %q, want %q", pending.Kind, "question")
 	}
-	if len(pending.Options) != 0 {
-		t.Errorf("Options = %q, want none: Respond offers no verbs for a question", pending.Options)
+	if len(pending.Options) != 3 || pending.Metadata["answer_unavailable"] == "" {
+		t.Errorf("Options=%q metadata=%v; expected the three native choices and terminal-only fallback without native invocation context", pending.Options, pending.Metadata)
 	}
 	if !strings.HasPrefix(pending.RequestID, "tmux-question-") {
 		t.Errorf("RequestID = %q, want the tmux-question- prefix", pending.RequestID)
