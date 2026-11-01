@@ -876,6 +876,31 @@ type InventoryGate interface {
 	InventoryAvailable() bool
 }
 
+// InventoryLister is implemented by providers whose listing is their
+// batched inventory (an exec pack's `inventory`): ListInventory answers
+// ListRunning(prefix), and the inventory of the names it lists, from one
+// read, so a caller wanting both makes one call, under one bound. Read it
+// through [ListInventoryWithAttestation], which serves it only where
+// [InventoryFor] does.
+type InventoryLister interface {
+	ListInventory(prefix string) ([]string, map[string]InventoryEntry, error)
+}
+
+// ListInventoryWithAttestation is [ListRunningWithAttestation], plus the
+// inventory of the listed names when sp serves both from one read
+// ([InventoryLister], gated as [InventoryFor]); otherwise the inventory is
+// nil and the caller reads it separately, if at all.
+func ListInventoryWithAttestation(sp Provider, prefix string) (names []string, inventory map[string]InventoryEntry, attested bool, err error) {
+	lister, ok := sp.(InventoryLister)
+	if _, served := InventoryFor(sp); !ok || !served {
+		names, attested, err = ListRunningWithAttestation(sp, prefix)
+		return names, nil, attested, err
+	}
+	before := ListRunningAttested(sp)
+	names, inventory, err = lister.ListInventory(prefix)
+	return names, inventory, before && ListRunningAttested(sp), err
+}
+
 // InventoryFor returns p's batched inventory when p has one it serves now:
 // an [InventoryProvider] that is not an [InventoryGate] reporting it
 // unavailable. Every caller deciding whether to take a batched inventory

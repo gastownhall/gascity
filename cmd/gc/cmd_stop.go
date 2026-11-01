@@ -534,15 +534,15 @@ func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, fo
 	var recorded, recordedUnknown []string
 	var recordedUnread error
 	if !runtime.ListRunningAttested(sp) {
-		listed, listErr := sp.ListRunning("")
+		listed, attested, listErr := runtime.ListRunningWithAttestation(sp, "")
 		unreachable = listErr != nil
-		if recordedSweepAllowed(sp, listErr) {
+		if recordedSweepAllowed(sp, attested, listErr) {
 			skip := maps.Clone(desired)
 			for _, name := range listed {
 				skip[strings.TrimSpace(name)] = true
 			}
 			var found []string
-			found, recordedUnknown, recordedUnread = storeRecordedSweep(skip, sessionFrontDoor(sessStore), sp, "gc stop", stderr)
+			found, recordedUnknown, recordedUnread = storeRecordedSweep(skip, sessionFrontDoor(sessStore), sp, attested, "gc stop", stderr)
 			recorded = slices.DeleteFunc(found, func(sn string) bool { return slices.Contains(recordedUnknown, sn) })
 			if extendCap != nil && len(recorded) > 0 {
 				extendCap(stopCapExtensionForRecorded(cfg, len(recorded), !stopTargetsAllResolved(recorded, cfg, sessStore)))

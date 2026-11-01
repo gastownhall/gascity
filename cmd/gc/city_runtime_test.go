@@ -8403,7 +8403,7 @@ func TestStopReadsUnlistedSessionsWithOneProbeEach(t *testing.T) {
 		}
 		all := map[string]int{"up-1": 1, "up-2": 1, "down": 1}
 
-		got, err := storeRecordedRunningOutside(nil, sessionFrontDoor(store), sp, "test", io.Discard)
+		got, err := storeRecordedRunningOutside(nil, sessionFrontDoor(store), sp, runtime.ListRunningAttested(sp), "test", io.Discard)
 		if err != nil {
 			t.Fatalf("storeRecordedRunningOutside: %v", err)
 		}
@@ -8698,7 +8698,7 @@ func TestStoreRecordedSweepProbesRowsTogether(t *testing.T) {
 	store := recordedStopTestStore(t, recorded...)
 	sp := newConcurrencyGaugeProvider(runtime.NewFake(), rows)
 
-	if got, err := storeRecordedRunningOutside(nil, sessionFrontDoor(store), sp, "shutdown", io.Discard); err != nil || len(got) != 0 {
+	if got, err := storeRecordedRunningOutside(nil, sessionFrontDoor(store), sp, runtime.ListRunningAttested(sp), "shutdown", io.Discard); err != nil || len(got) != 0 {
 		t.Errorf("storeRecordedRunningOutside = %v, %v, want none (no row is running)", got, err)
 	}
 	if got := sp.probes.Load(); got != int64(rows) {
@@ -8730,7 +8730,7 @@ func TestStoreRecordedSweepSkipsAnAttestedRuntimeWhoseListingOmitsRows(t *testin
 
 	t.Run("sweep", func(t *testing.T) {
 		sp := newProvider(t)
-		if got, err := storeRecordedRunningOutside(nil, sessionFrontDoor(recordedStopTestStore(t, rows...)), sp, "shutdown", io.Discard); err != nil || got != nil {
+		if got, err := storeRecordedRunningOutside(nil, sessionFrontDoor(recordedStopTestStore(t, rows...)), sp, runtime.ListRunningAttested(sp), "shutdown", io.Discard); err != nil || got != nil {
 			t.Errorf("storeRecordedRunningOutside = %v, %v, want nil on an attested runtime", got, err)
 		}
 		if got := sp.probes.Load(); got != 0 {
@@ -8862,4 +8862,34 @@ type probeCountingFake struct {
 func (p *probeCountingFake) IsRunning(name string) bool {
 	p.probes.Add(1)
 	return p.Fake.IsRunning(name)
+}
+
+// Kills (PAR-EXEC MUST-1, shutdown): a shutdown that reads its listing's
+// attestation after the listing. The runtime's attestation turns on while
+// it lists (an exec pack whose handshake recovers mid-call), so its blind
+// listing would read as complete and the city's recorded sessions would
+// never be swept: probe-1 would outlive the stop.
+func TestCityRuntimeShutdownSweepsWhenAttestationTurnsOnDuringTheListing(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{Title: "probe-1", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{"session_name": "probe-1", "template": "probe", "state": "active"}}); err != nil {
+		t.Fatal(err)
+	}
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), "probe-1", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr lockedBuffer
+	cr := &CityRuntime{
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}, Daemon: config.DaemonConfig{ShutdownTimeout: "0s"}},
+		sp:                  newFlippingLeaf(fake),
+		rec:                 events.Discard,
+		standaloneCityStore: store,
+		stdout:              &stdout,
+		stderr:              &stderr,
+	}
+	markOwnedForTest(cr)
+	cr.shutdown()
+	if fake.IsRunning("probe-1") {
+		t.Fatalf("probe-1 survived the shutdown: the blind listing was read as attested; stderr = %q", stderr.String())
+	}
 }

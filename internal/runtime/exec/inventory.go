@@ -9,6 +9,7 @@ import (
 	"io"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -20,7 +21,10 @@ import (
 // its stdout can carry GC_INSTANCE_TOKEN, so no error echoes it.
 
 // inventoryOutputCap is the most stdout one `inventory` answer may print.
-const inventoryOutputCap = 64 << 20
+// An entry with every attribute set is well under 1 KiB, so 8 MiB lists
+// several thousand boxes, far past a city's fleet, while bounding what one
+// misbehaving script makes gc buffer and parse on every pass.
+const inventoryOutputCap = 8 << 20
 
 // inventoryListing is a well-formed `inventory` answer.
 type inventoryListing struct {
@@ -37,8 +41,8 @@ type inventoryListing struct {
 
 // parseInventory reads one `inventory` answer: exactly one object with a
 // boolean `complete` and a `sessions` list. An entry whose name cannot be
-// read (not an object, no name, an empty, non-string or repeated one) fails
-// the whole answer, because completeness can no longer be proven. An entry
+// read (not an object; no name; an empty, non-string or repeated one; one
+// with surrounding whitespace or a control character) fails the whole answer, because completeness can no longer be proven. An entry
 // with a readable name but malformed attributes is listed with them
 // unknown. No error carries the answer's bytes.
 func parseInventory(out []byte) (inventoryListing, error) {
@@ -61,7 +65,7 @@ func parseInventory(out []byte) (inventoryListing, error) {
 	for i, raw := range *w.Sessions {
 		var fields map[string]json.RawMessage
 		var name string
-		if err := json.Unmarshal(raw, &fields); err != nil || fields == nil || json.Unmarshal(fields["name"], &name) != nil || name == "" {
+		if err := json.Unmarshal(raw, &fields); err != nil || fields == nil || json.Unmarshal(fields["name"], &name) != nil || !readableName(name) {
 			return inventoryListing{}, fmt.Errorf("session %d has no readable name", i)
 		}
 		if seen[name] {
@@ -74,6 +78,13 @@ func parseInventory(out []byte) (inventoryListing, error) {
 		}
 	}
 	return l, nil
+}
+
+// readableName reports a session name gc can list: non-empty, with no
+// surrounding whitespace and no control character, so it cannot alias
+// another name once trimmed or printed.
+func readableName(name string) bool {
+	return name != "" && name == strings.TrimSpace(name) && !strings.ContainsFunc(name, unicode.IsControl)
 }
 
 // inventoryEntry maps one listed session's attributes (§4.5). Without a
@@ -90,7 +101,10 @@ func inventoryEntry(fields map[string]json.RawMessage) (runtime.InventoryEntry, 
 	if fields["agent"] != nil && json.Unmarshal(fields["agent"], &agent) != nil {
 		agent = ""
 	}
-	if state != stateRunning && state != stateDead || state == stateDead && agent == agentAlive {
+	if state != stateRunning && state != stateDead {
+		return runtime.InventoryEntry{}, false
+	}
+	if state == stateDead && agent == agentAlive {
 		return runtime.InventoryEntry{}, false
 	}
 	e := runtime.InventoryEntry{Incarnation: object.ID + "@" + object.Created, DeadKnown: true, AllPanesDead: state == stateDead}
@@ -160,23 +174,30 @@ func (p *Provider) ListRunningComplete() bool {
 	return p.v2Ready()
 }
 
-// listInventory is ListRunning on a v2-ready pack: the inventory's names
-// under prefix, a dead box's included, so an attested listing never proves
-// a held name gone. An incomplete inventory returns its names with a
+// ListInventory implements [runtime.InventoryLister]: one `inventory`
+// under the provider's op timeout answers ListRunning(prefix) and the
+// inventory of the names it lists. The names are every listed name under
+// prefix, a dead box's included, so an attested listing never proves a
+// held name gone. An incomplete inventory returns them with a
 // [runtime.PartialListError]; a failed one returns none.
-func (p *Provider) listInventory(prefix string) ([]string, error) {
+func (p *Provider) ListInventory(prefix string) ([]string, map[string]runtime.InventoryEntry, error) {
 	l, err := p.inventory(context.Background())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	names := []string{}
+	entries := make(map[string]runtime.InventoryEntry)
 	for _, name := range l.names {
-		if strings.HasPrefix(name, prefix) {
-			names = append(names, name)
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		names = append(names, name)
+		if e, ok := l.entries[name]; ok {
+			entries[name] = e
 		}
 	}
 	if !l.complete {
-		return names, &runtime.PartialListError{Err: errors.New("exec provider " + p.script + " inventory: the listing is incomplete")}
+		return names, entries, &runtime.PartialListError{Err: errors.New("exec provider " + p.script + " inventory: the listing is incomplete")}
 	}
-	return names, nil
+	return names, entries, nil
 }

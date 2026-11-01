@@ -49,6 +49,7 @@ var (
 	_ runtime.InventoryProvider         = (*seamBackedProvider)(nil)
 	_ runtime.InventoryGate             = (*seamBackedProvider)(nil)
 	_ runtime.ListingAttestation        = (*seamBackedProvider)(nil)
+	_ runtime.InventoryLister           = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked wraps an exec provider for the given script so it is served
@@ -118,6 +119,12 @@ func (s *seamBackedProvider) KillZombieObject(name, objectID, created, panePID s
 // RuntimeInventory passes through to the underlying provider's `inventory`.
 func (s *seamBackedProvider) RuntimeInventory(ctx context.Context) (map[string]runtime.InventoryEntry, error) {
 	return s.raw.RuntimeInventory(ctx)
+}
+
+// ListInventory passes through to the underlying provider's `inventory`; the
+// seams' ListRunning is the same read.
+func (s *seamBackedProvider) ListInventory(prefix string) ([]string, map[string]runtime.InventoryEntry, error) {
+	return s.raw.ListInventory(prefix)
 }
 
 // InventoryAvailable passes through to the underlying provider. Safe on a

@@ -134,6 +134,20 @@ func ListRunningAttested(sp Provider) bool {
 	return ok && a.ListRunningComplete()
 }
 
+// ListRunningWithAttestation lists sp under prefix and reports whether that
+// listing may be read as proof of absence. Attestation is read before the
+// listing and after it, and only both count: a provider's attestation can
+// turn on while it lists (an exec pack whose failed handshake recovers
+// during the call), and the listing it returned is then the unattested one.
+// Attestation never turns off, so the read before is the one that can be
+// stale in the safe direction only. Every caller that reads absence from a
+// listing reads attestation through this, never after its own listing.
+func ListRunningWithAttestation(sp Provider, prefix string) (names []string, attested bool, err error) {
+	before := ListRunningAttested(sp)
+	names, err = sp.ListRunning(prefix)
+	return names, before && ListRunningAttested(sp), err
+}
+
 // BackendListingProvider is an optional capability of composite providers
 // that exposes each backend's ListRunning result separately, so callers can
 // judge each backend's listing on its own (its error, its [PartialListError]

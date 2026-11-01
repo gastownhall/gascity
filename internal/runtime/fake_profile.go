@@ -299,10 +299,10 @@ func (t3bridgeProfile) TurnCapabilities(string) TurnCapabilities {
 }
 
 // execObserveTrait is exec's observe.v1 surface, gated as the exec provider
-// gates it on its handshake: its batched inventory and attested listing too. Ready (ProfileExecV2), the reads and kills are
-// the backend's, and the identity is its GetMeta of the identity keys for a
-// name its liveness read shows present, a corpse included, as exec's
-// `observe` reports a dead box's identity.
+// gates it on its handshake. Ready (ProfileExecV2), the reads, kills,
+// listing and inventory are the backend's, and the identity is its GetMeta
+// of the identity keys for a name its liveness read shows present, a
+// corpse included, as exec's `observe` reports a dead box's identity.
 // Otherwise (ProfileExec) liveness is the IsRunning and ProcessAlive read
 // with a nil error, nothing reads fresh or observes identity, nothing is
 // killed, no inventory is served or listing attested, and readiness names
@@ -325,6 +325,21 @@ func (t execObserveTrait) LivenessReadsFresh() bool { return t.ready }
 func (t execObserveTrait) InventoryAvailable() bool { return t.ready }
 
 func (t execObserveTrait) ListRunningComplete() bool { return t.ready }
+
+func (t execObserveTrait) ListInventory(prefix string) ([]string, map[string]InventoryEntry, error) {
+	if !t.ready {
+		return nil, nil, ErrRuntimeUnavailable
+	}
+	names, err := t.core.ListRunning(prefix)
+	if err != nil && !IsPartialListError(err) {
+		return nil, nil, err
+	}
+	inv, invErr := t.b.RuntimeInventory(context.Background())
+	if invErr != nil {
+		return nil, nil, invErr
+	}
+	return names, inv, err
+}
 
 func (t execObserveTrait) RuntimeInventory(ctx context.Context) (map[string]InventoryEntry, error) {
 	if !t.ready {

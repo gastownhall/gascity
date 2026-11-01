@@ -980,7 +980,8 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 // A v2-ready pack lists through `inventory` instead (listInventory).
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	if p.v2Ready() {
-		return p.listInventory(prefix)
+		names, _, err := p.ListInventory(prefix)
+		return names, err
 	}
 	out, err := p.run(nil, "list-running", prefix)
 	if err != nil {
@@ -1097,6 +1098,7 @@ var (
 	_ runtime.InventoryProvider         = (*Provider)(nil)
 	_ runtime.InventoryGate             = (*Provider)(nil)
 	_ runtime.ListingAttestation        = (*Provider)(nil)
+	_ runtime.InventoryLister           = (*Provider)(nil)
 )
 
 // Exec runs argv inside the session via the RPP `exec` op and implements

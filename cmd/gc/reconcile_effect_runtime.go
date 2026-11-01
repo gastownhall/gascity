@@ -134,15 +134,19 @@ func unlistedElsewhere(ctx context.Context, hop runtime.Provider, name string) b
 		routed = r.RouteFor(name).Label
 	}
 	type listing struct {
-		names []string
-		err   error
+		names    []string
+		attested bool
+		err      error
 	}
 	for _, backend := range b.Backends() {
 		if backend.Label == routed || runtime.FreshReadable(backend.Provider) {
 			continue
 		}
-		l, ok := boundedProbe(ctx, func() listing { n, err := backend.Provider.ListRunning(name); return listing{n, err} })
-		if !ok || l.err != nil || !runtime.ListRunningAttested(backend.Provider) || slices.Contains(l.names, name) {
+		l, ok := boundedProbe(ctx, func() listing {
+			n, attested, err := runtime.ListRunningWithAttestation(backend.Provider, name)
+			return listing{n, attested, err}
+		})
+		if !ok || l.err != nil || !l.attested || slices.Contains(l.names, name) {
 			return false
 		}
 	}

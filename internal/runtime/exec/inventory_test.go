@@ -3,6 +3,8 @@ package exec
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -33,13 +35,15 @@ func TestParseInventory(t *testing.T) {
 	  {"name":"mc-oddstate","state":"zombie",` + invObject + `},
 	  {"name":"mc-noobject","state":"running"},
 	  {"name":"mc-contradiction","state":"dead",` + invObject + `,"agent":"alive"},
-	  {"name":"mc-absent","state":"absent"}
+	  {"name":"mc-absent","state":"absent"},
+	  {"name":"mc-noid","state":"running","object":{"id":"","created":"t0"}},
+	  {"name":"mc-nocreated","state":"running","object":{"id":"c0ffee","created":" "}}
 	]}`
 	got, err := parseInventory([]byte(out))
 	if err != nil {
 		t.Fatalf("parseInventory: %v", err)
 	}
-	wantNames := []string{"mc-live", "mc-zombie", "mc-quiet", "mc-dead", "mc-oddattrs", "mc-oddstate", "mc-noobject", "mc-contradiction", "mc-absent"}
+	wantNames := []string{"mc-live", "mc-zombie", "mc-quiet", "mc-dead", "mc-oddattrs", "mc-oddstate", "mc-noobject", "mc-contradiction", "mc-absent", "mc-noid", "mc-nocreated"}
 	if !got.complete || !slices.Equal(got.names, wantNames) {
 		t.Fatalf("complete=%v names=%v; want complete and every listed name, live, dead or malformed", got.complete, got.names)
 	}
@@ -60,7 +64,7 @@ func TestParseInventory(t *testing.T) {
 			t.Errorf("%s: entry %+v (present %v), want %+v", name, g, ok, w)
 		}
 	}
-	for _, name := range []string{"mc-oddstate", "mc-noobject", "mc-contradiction", "mc-absent"} {
+	for _, name := range []string{"mc-oddstate", "mc-noobject", "mc-contradiction", "mc-absent", "mc-noid", "mc-nocreated"} {
 		if g, ok := got.entries[name]; ok {
 			t.Errorf("%s: entry %+v, want the name listed with unknown attributes (no entry)", name, g)
 		}
@@ -92,6 +96,9 @@ func TestParseInventory(t *testing.T) {
 		"name not a string":    `{"complete":true,"sessions":[{"name":7,"state":"running"}]}`,
 		"name duplicated":      `{"complete":true,"sessions":[{"name":"a","state":"running",` + invObject + `},{"name":"a","state":"dead",` + invObject + `}]}`,
 		"name null":            `{"complete":true,"sessions":[{"name":null,` + invIdentity + `}]}`,
+		"name padded":          `{"complete":true,"sessions":[{"name":" mc-a","state":"running",` + invObject + `}]}`,
+		"name trailing space":  `{"complete":true,"sessions":[{"name":"mc-a\t","state":"running",` + invObject + `}]}`,
+		"name control char":    `{"complete":true,"sessions":[{"name":"mc-\u0007a","state":"running",` + invObject + `}]}`,
 		"entries before error": `{"complete":true,"sessions":[{"name":"a"},{"name":""}]}`,
 	} {
 		if got, err := parseInventory([]byte(in)); err == nil {
@@ -110,7 +117,7 @@ var inventoryOps = map[string]string{
 	"is-running":   `echo true`,
 }
 
-const twoBoxes = `{"complete":true,"sessions":[{"name":"mc-live","state":"running",` + invObject + `},{"name":"mc-dead","state":"dead",` + invObject + `},{"name":"other-x","state":"running",` + invObject + `}]}`
+const twoBoxes = `{"complete":true,"sessions":[{"name":"mc-live","state":"running",` + invObject + `},{"name":"mc-dead","state":"dead",` + invObject + `},{"name":"other-x","state":"running",` + invObject + `},{"name":"zz-mc-3","state":"running",` + invObject + `}]}`
 
 // Kills (§13.5 6, design gap 1): a v2-ready listing taken from
 // list-running (running names only), a dead box left out of the listing
@@ -131,12 +138,12 @@ func TestReadyListRunningIsTheInventory(t *testing.T) {
 	if ran := opsRan(t, dir); slices.Contains(ran, "list-running") || !slices.Contains(ran, "inventory") {
 		t.Errorf("ops %v: want the listing from inventory alone", ran)
 	}
-	if all, err := sp.ListRunning(""); err != nil || len(all) != 3 {
+	if all, err := sp.ListRunning(""); err != nil || len(all) != 4 {
 		t.Errorf("ListRunning(\"\") = %v, %v; want every listed name", all, err)
 	}
-	none, err := sp.ListRunning("zz-")
+	none, err := sp.ListRunning("qq-")
 	if err != nil || none == nil || len(none) != 0 {
-		t.Errorf("ListRunning(zz-) = %#v, %v; want [], nil", none, err)
+		t.Errorf("ListRunning(qq-) = %#v, %v; want [], nil", none, err)
 	}
 
 	writeFile(t, filepath.Join(dir, "inventory"), `{"complete":false,"sessions":[{"name":"mc-live","state":"running",`+invObject+`}]}`)
@@ -185,7 +192,7 @@ func TestRuntimeInventoryThroughTheSeam(t *testing.T) {
 		t.Fatal("InventoryFor(ready seam) offers no inventory")
 	}
 	entries, err := inv.RuntimeInventory(context.Background())
-	if err != nil || len(entries) != 3 || !entries["mc-dead"].AllPanesDead || entries["mc-live"].Incarnation != "c0ffee@t0" {
+	if err != nil || len(entries) != 4 || !entries["mc-dead"].AllPanesDead || entries["mc-live"].Incarnation != "c0ffee@t0" {
 		t.Fatalf("RuntimeInventory = %+v, %v", entries, err)
 	}
 
@@ -195,7 +202,7 @@ func TestRuntimeInventoryThroughTheSeam(t *testing.T) {
 	}
 
 	big, _ := observePack(t, readyHandshake, map[string]string{
-		"inventory": `printf '{"complete":true,"sessions":[],"pad":"'; head -c 70000000 /dev/zero | tr '\0' a; printf '"}'`,
+		"inventory": `printf '{"complete":true,"sessions":[],"pad":"'; head -c 9000000 /dev/zero | tr '\0' a; printf '"}'`,
 	})
 	if got, err := NewSeamBacked(big).(runtime.InventoryProvider).RuntimeInventory(context.Background()); err == nil || strings.Contains(err.Error(), "aaaa") {
 		t.Errorf("oversized inventory = %v, %v; want a failure that echoes nothing", len(got), err)
@@ -214,5 +221,92 @@ func TestRuntimeInventoryThroughTheSeam(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Errorf("RuntimeInventory took %v, want it bounded by ctx", elapsed)
+	}
+}
+
+// Kills an inventory listing that is not one read: the lister answers the
+// names under prefix and exactly their inventory, through the production
+// seam, and an incomplete inventory keeps both with its PartialListError.
+func TestListInventoryThroughTheSeam(t *testing.T) {
+	script, dir := observePack(t, readyHandshake, inventoryOps)
+	writeFile(t, filepath.Join(dir, "inventory"), twoBoxes)
+	lister, ok := NewSeamBacked(script).(runtime.InventoryLister)
+	if !ok {
+		t.Fatal("the seam is no InventoryLister")
+	}
+	names, entries, err := lister.ListInventory("mc-")
+	if err != nil || !slices.Equal(names, []string{"mc-live", "mc-dead"}) || len(entries) != 2 || !entries["mc-dead"].AllPanesDead {
+		t.Fatalf("ListInventory = %v, %+v, %v", names, entries, err)
+	}
+	if n := strings.Count(strings.Join(opsRan(t, dir), " "), "inventory"); n != 1 {
+		t.Fatalf("%d inventory ops, want one read for the names and their inventory", n)
+	}
+	writeFile(t, filepath.Join(dir, "inventory"), `{"complete":false,"sessions":[{"name":"mc-live","state":"running",`+invObject+`}]}`)
+	names, entries, err = lister.ListInventory("mc-")
+	if !runtime.IsPartialListError(err) || !slices.Equal(names, []string{"mc-live"}) || len(entries) != 1 {
+		t.Fatalf("incomplete: ListInventory = %v, %+v, %v", names, entries, err)
+	}
+}
+
+// Kills (R8) a ready listing whose inventory runs past the provider's op
+// timeout: ListRunning has no caller ctx, so that timeout is its only bound.
+func TestReadyListRunningIsBoundedByTheOpTimeout(t *testing.T) {
+	script, _ := observePack(t, readyHandshake, map[string]string{"inventory": `sleep 4 & wait $!; echo '{"complete":true,"sessions":[]}'`})
+	p := NewProvider(script)
+	if _, err := p.V2Readiness(); err != nil {
+		t.Fatal(err)
+	}
+	p.timeout = 500 * time.Millisecond
+	start := time.Now()
+	if names, err := p.ListRunning(""); err == nil {
+		t.Fatalf("ListRunning past the op timeout = %v, nil; want a failure", names)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("ListRunning took %v, want it bounded by the op timeout", elapsed)
+	}
+}
+
+// Kills (MUST-1) an exec listing read as attested because the provider
+// became v2-ready while it listed: a failed handshake is cached, the
+// listing runs list-running (running names only), and the handshake's TTL
+// expires before attestation is read again, so the retry succeeds. The
+// attestation read before the listing keeps it unattested.
+func TestListingAttestationAcrossAHandshakeRecovery(t *testing.T) {
+	dir := t.TempDir()
+	counter, listed := filepath.Join(dir, "protocol-calls"), filepath.Join(dir, "listed")
+	script := writeScript(t, dir, fmt.Sprintf(`
+case "$1" in
+  protocol) echo run >> %q
+            [ "$(grep -c run %q)" -eq 1 ] && { echo down >&2; exit 1; }
+            printf '%%s' '%s' ;;
+  list-running) touch %q; echo mc-live ;;
+  inventory) echo '{"complete":true,"sessions":[]}' ;;
+  *) exit 2 ;;
+esac
+`, counter, counter, readyHandshake, listed))
+	base := time.Unix(1_800_000_000, 0)
+	old := handshakeNow
+	// The clock passes the handshake's TTL while list-running runs.
+	handshakeNow = func() time.Time {
+		if _, err := os.Stat(listed); err == nil {
+			return base.Add(handshakeRetryAfter + time.Second)
+		}
+		return base
+	}
+	t.Cleanup(func() { handshakeNow = old })
+
+	sp := NewSeamBacked(script)
+	if _, err := sp.(runtime.V2ReadinessReporter).V2Readiness(); err == nil {
+		t.Fatal("first handshake succeeded")
+	}
+	names, attested, err := runtime.ListRunningWithAttestation(sp, "")
+	if err != nil || !slices.Equal(names, []string{"mc-live"}) {
+		t.Fatalf("listing = %v, %v; want list-running's", names, err)
+	}
+	if attested {
+		t.Fatal("list-running's listing read as attested after the handshake recovered during it")
+	}
+	if !runtime.ListRunningAttested(sp) {
+		t.Fatal("fixture: the handshake did not recover")
 	}
 }

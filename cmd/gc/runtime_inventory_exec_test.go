@@ -3,14 +3,19 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 )
 
@@ -87,34 +92,32 @@ type gatedSidecar struct{ gatedOff }
 
 func (gatedSidecar) LocalIdentitySidecar() bool { return true }
 
-// Kills (PAR-EXEC §5 item 5): a batched agent-process fact ignored, which
-// costs one observe fork per name per pass. The inventory's known agent is
-// the process fact; probeProcesses probes only the names it left unknown.
+// Kills (PAR-EXEC §5 item 5, SHOULD-1): a batched agent-process fact
+// ignored, which costs one observe fork per name per pass, or taken for a
+// name the lane would not probe: an unattributed box (identity null) whose
+// script reads its agent dead would read as a zombie. probeProcesses
+// answers the names it would probe from the batch, probes the rest, and
+// leaves every other name's fact alone.
 func TestLaneTakesTheBatchedProcessFact(t *testing.T) {
 	backend := newScriptedInventory(map[string]runtime.InventoryEntry{
-		"zombie": {Incarnation: "i1", DeadKnown: true, ProcessKnown: true},
-		"live":   {Incarnation: "i2", DeadKnown: true, ProcessKnown: true, ProcessAlive: true},
-		"quiet":  {Incarnation: "i3", DeadKnown: true},
+		"zombie":       {Incarnation: "i1", DeadKnown: true, ProcessKnown: true},
+		"live":         {Incarnation: "i2", DeadKnown: true, ProcessKnown: true, ProcessAlive: true},
+		"quiet":        {Incarnation: "i3", DeadKnown: true},
+		"unattributed": {Incarnation: "i4", DeadKnown: true, ProcessKnown: true},
 	})
-	for _, name := range []string{"zombie", "live", "quiet"} {
+	for _, name := range []string{"zombie", "live", "quiet", "unattributed"} {
 		if err := backend.Start(context.Background(), name, runtime.Config{}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	leaf := runtime.NewFakeProfile(runtime.ProfileExecV2, backend)
 	l := &runtimeInventoryLane{}
-	names := []string{"live", "quiet", "zombie"}
+	names := []string{"live", "quiet", "unattributed", "zombie"}
 	attrs, hosts, errs := l.enrich(context.Background(), []inventoryBackend{{label: "exec", provider: leaf, names: names}}, []BackendPass{completeBackend("exec", names...)})
 	if len(errs) != 0 {
 		t.Fatal(errs)
 	}
-	for name, want := range map[string][3]bool{"zombie": {true, true, false}, "live": {true, true, true}, "quiet": {false, false, false}} {
-		a := attrs[name]
-		if got := [3]bool{a.ProcessProbed, a.ProcessKnown, a.ProcessAlive}; got != want {
-			t.Errorf("%s: probed/known/alive = %v, want %v", name, got, want)
-		}
-	}
-	for name := range attrs {
+	for _, name := range []string{"zombie", "live", "quiet"} {
 		a := attrs[name]
 		a.Identity = runtimeIdentity{Known: true, ProcessNames: []string{"claude"}}
 		attrs[name] = a
@@ -122,13 +125,21 @@ func TestLaneTakesTheBatchedProcessFact(t *testing.T) {
 	if n := probeProcesses(context.Background(), attrs, hosts, 4); n != 1 {
 		t.Fatalf("probeProcesses probed %d names, want only the one the inventory left unknown", n)
 	}
-	for _, name := range []string{"zombie", "live"} {
+	for name, want := range map[string][3]bool{"zombie": {true, true, false}, "live": {true, true, true}, "unattributed": {false, false, false}} {
+		a := attrs[name]
+		if got := [3]bool{a.ProcessProbed, a.ProcessKnown, a.ProcessAlive}; got != want {
+			t.Errorf("%s: probed/known/alive = %v, want %v", name, got, want)
+		}
+	}
+	for _, name := range []string{"zombie", "live", "unattributed"} {
 		if got := backend.CountCalls("ObserveLivenessWithError", name); got != 0 {
 			t.Errorf("%s: %d liveness probes, want none", name, got)
 		}
 	}
-	if a := attrs["zombie"]; !a.ProcessKnown || a.ProcessAlive {
-		t.Errorf("zombie after the probes = %+v, want the batched dead agent", a)
+	obs := RuntimeObservation{}
+	applyInventoryAttrs(&obs, attrs["unattributed"], obsTestEpoch)
+	if obs.ProcessAlive.Value == ObsNo {
+		t.Fatal("an unattributed box's batched dead agent read as a dead process")
 	}
 }
 
@@ -186,6 +197,7 @@ func TestLaneClassifiesTheExecInventory(t *testing.T) {
 		listed          []string
 	}{
 		{"complete", `echo '{"complete":true,"sessions":[{"name":"mc-dead","state":"dead","object":{"id":"c","created":"t"}}]}'`, OutcomeComplete, []string{"mc-dead"}},
+		{"unprefixed", `echo '{"complete":true,"sessions":[{"name":"other","state":"running","object":{"id":"c","created":"t"}}]}'`, OutcomeComplete, []string{"other"}},
 		{"partial", `echo '{"complete":false,"sessions":[{"name":"mc-a","state":"running","object":{"id":"c","created":"t"}}]}'`, OutcomePartial, []string{"mc-a"}},
 		{"failed", `exit 1`, OutcomeFailed, nil},
 		{"unknown op", `exit 2`, OutcomeFailed, nil},
@@ -197,11 +209,10 @@ func TestLaneClassifiesTheExecInventory(t *testing.T) {
   *) exit 2 ;;
 esac
 `)
-			sp := sessionexec.NewSeamBacked(script)
-			names, err := sp.ListRunning("mc-")
-			b := classifyInventoryBackend(inventoryBackend{label: "exec", provider: sp, names: names, err: err})
+			leaf := listInventoryBackends(sessionexec.NewSeamBacked(script), "exec").leaves[0]
+			b := classifyInventoryBackend(leaf)
 			if b.Outcome != tc.want || !slices.Equal(b.Names, tc.listed) {
-				t.Fatalf("outcome %v names %v (err %v), want %v %v", b.Outcome, b.Names, err, tc.want, tc.listed)
+				t.Fatalf("outcome %v names %v (err %v), want %v %v", b.Outcome, b.Names, leaf.err, tc.want, tc.listed)
 			}
 		})
 	}
@@ -238,5 +249,93 @@ func TestLaneTakesNoBatchedIdentityFromAnUnreadableLeaf(t *testing.T) {
 	leaf.err = errors.New("inventory failed")
 	if attrs, _, errs := l.enrich(context.Background(), []inventoryBackend{{label: "x", provider: leaf, names: []string{"s"}}}, []BackendPass{completeBackend("x", "s")}); len(errs) != 1 || len(attrs) != 0 {
 		t.Fatalf("a failed inventory: attrs %+v, errs %v; want no facts and the error", attrs, errs)
+	}
+}
+
+// flippingLeaf is a leaf whose listing attestation turns on during its
+// first listing, as an exec pack's does when its failed handshake recovers
+// mid-call: that first listing is blind (list-running's, here nothing),
+// and every later one is the complete listing, unless staysBlind keeps
+// every listing blind, so a test sees one site's reading of the first one
+// without a later listing repairing it.
+type flippingLeaf struct {
+	*runtime.Fake
+	on         *atomic.Bool
+	staysBlind bool
+}
+
+func newFlippingLeaf(f *runtime.Fake) flippingLeaf {
+	return flippingLeaf{Fake: f, on: new(atomic.Bool)}
+}
+
+func (f flippingLeaf) ListRunning(prefix string) ([]string, error) {
+	if f.on.Swap(true) && !f.staysBlind {
+		return f.Fake.ListRunning(prefix)
+	}
+	return nil, nil
+}
+
+func (f flippingLeaf) ListRunningComplete() bool { return f.on.Load() }
+
+// Kills (PAR-EXEC MUST-1, lane): a listing classified complete on an
+// attestation read after it, which proves every running name gone.
+func TestLaneListingAttestationIsReadAroundTheListing(t *testing.T) {
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), "s", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	leaf := listInventoryBackends(newFlippingLeaf(fake), "x").leaves[0]
+	if b := classifyInventoryBackend(leaf); b.Outcome == OutcomeComplete || b.Attested {
+		t.Fatalf("a listing taken before the attestation turned on: %+v, want unattested", b)
+	}
+}
+
+// Kills (PAR-EXEC MUST-1, unlistedElsewhere): a fall-through backend's
+// blind listing read as attested absence.
+func TestUnlistedElsewhereReadsAttestationAroundTheListing(t *testing.T) {
+	routed, _ := fakeProfile(runtime.ProfileTmux)
+	other := runtime.NewFake()
+	if err := other.Start(context.Background(), "s", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	hop := auto.New(routed, newFlippingLeaf(other))
+	hop.SeedRoutes(nil)
+	if unlistedElsewhere(context.Background(), hop, "s") {
+		t.Fatal("a blind listing taken before the attestation turned on proved s absent")
+	}
+}
+
+// Kills (PAR-EXEC SHOULD-2): a v2-ready exec leaf read twice per pass. The
+// lane's listing carries its inventory (runtime.InventoryLister), so
+// enrich makes no second `inventory` call, under no second bound.
+func TestLaneReadsTheExecInventoryOncePerPass(t *testing.T) {
+	ops := filepath.Join(t.TempDir(), "ops")
+	script := writeRPPScript(t, `case "$1" in
+  protocol) echo '{"version":0,"capabilities":["observe.v1","report-attachment"]}' ;;
+  inventory) echo inventory >> `+ops+`; echo '{"complete":true,"sessions":[{"name":"mc-a","state":"running","object":{"id":"c","created":"t"},"attached":null,"agent":"alive"}]}' ;;
+  *) exit 2 ;;
+esac
+`)
+	listing := listInventoryBackends(sessionexec.NewSeamBacked(script), "exec")
+	backends := []BackendPass{classifyInventoryBackend(listing.leaves[0])}
+	l := &runtimeInventoryLane{}
+	attrs, _, errs := l.enrich(context.Background(), listing.leaves, backends)
+	if len(errs) != 0 || attrs["mc-a"].Incarnation != "c@t" {
+		t.Fatalf("enrich = %+v, %v; want the listing's inventory", attrs, errs)
+	}
+	data, err := os.ReadFile(ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(data), "inventory"); n != 1 {
+		t.Fatalf("%d inventory calls for one pass, want 1", n)
+	}
+
+	// SHOULD-3: the leaf reports attachment, and its inventory did not
+	// answer it (attached: null): attachment is uncertain, not "no".
+	obs := RuntimeObservation{}
+	applyInventoryAttrs(&obs, attrs["mc-a"], obsTestEpoch)
+	if obs.Attached.Value != ObsUnknown || obs.Attached.Reason == obsReasonUnsupported {
+		t.Fatalf("attached:null on a reporting leaf = %+v, want unknown, not unsupported", obs.Attached)
 	}
 }
