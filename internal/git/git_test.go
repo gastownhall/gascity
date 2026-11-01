@@ -732,6 +732,107 @@ func TestHasStashesResult_ReturnsProbeError(t *testing.T) {
 	}
 }
 
+// TestHasStashesForBranchResult_SiblingWorktreeStashNotAttributed pins
+// gascity#8093: git stash list is repository-wide (refs/stash and its
+// reflog live once per repo, not per linked worktree, confirmed empirically
+// — a stash made in one linked worktree shows up in `git stash list` run
+// from any sibling). A clean worktree with no stash of its own must not be
+// blocked by a sibling's stash.
+func TestHasStashesForBranchResult_SiblingWorktreeStashNotAttributed(t *testing.T) {
+	repo := initTestRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", "f.txt")
+	runGit(t, repo, "commit", "-m", "add f")
+
+	wtA := filepath.Join(filepath.Dir(repo), "wt-a")
+	wtB := filepath.Join(filepath.Dir(repo), "wt-b")
+	runGit(t, repo, "worktree", "add", "-q", wtA, "-b", "branch-a")
+	runGit(t, repo, "worktree", "add", "-q", wtB, "-b", "branch-b")
+
+	// Stash only in A; B stays clean.
+	if err := os.WriteFile(filepath.Join(wtA, "f.txt"), []byte("y"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, wtA, "stash", "push", "-m", "stash from A")
+
+	gB := New(wtB)
+	branchB, err := gB.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch(B): %v", err)
+	}
+	if branchB != "branch-b" {
+		t.Fatalf("CurrentBranch(B) = %q, want branch-b", branchB)
+	}
+	hasStash, err := gB.HasStashesForBranchResult(branchB)
+	if err != nil {
+		t.Fatalf("HasStashesForBranchResult(B): %v", err)
+	}
+	if hasStash {
+		t.Error("HasStashesForBranchResult(branch-b) = true, want false: the stash belongs to sibling worktree A's branch, not B's")
+	}
+
+	// Sanity: the repo-wide HasStashesResult DOES see A's stash from B,
+	// which is exactly the false-positive this method exists to avoid.
+	repoWide, err := gB.HasStashesResult()
+	if err != nil {
+		t.Fatalf("HasStashesResult(B): %v", err)
+	}
+	if !repoWide {
+		t.Fatal("HasStashesResult(B) = false, want true: sanity check that git stash list is repo-wide failed")
+	}
+
+	// A's own branch does have the stash.
+	gA := New(wtA)
+	branchA, err := gA.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch(A): %v", err)
+	}
+	hasStashA, err := gA.HasStashesForBranchResult(branchA)
+	if err != nil {
+		t.Fatalf("HasStashesForBranchResult(A): %v", err)
+	}
+	if !hasStashA {
+		t.Error("HasStashesForBranchResult(branch-a) = false, want true: A's own stash should still be attributed to A")
+	}
+}
+
+// TestHasStashesForBranchResult_PlainStashIsAttributed covers the other
+// message shape git writes: a plain `git stash` (no -m) records "WIP on
+// <branch>: <hash> <summary>" rather than "On <branch>: <message>", and
+// both must parse to the same branch attribution.
+func TestHasStashesForBranchResult_PlainStashIsAttributed(t *testing.T) {
+	repo := initTestRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", "f.txt")
+	runGit(t, repo, "commit", "-m", "add f")
+	if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte("y"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "stash")
+
+	g := New(repo)
+	branch, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	hasStash, err := g.HasStashesForBranchResult(branch)
+	if err != nil {
+		t.Fatalf("HasStashesForBranchResult: %v", err)
+	}
+	if !hasStash {
+		t.Error("HasStashesForBranchResult: a plain `git stash` entry (\"WIP on <branch>:\" form) was not attributed to its own branch")
+	}
+	if hasOther, err := g.HasStashesForBranchResult("some-other-branch"); err != nil {
+		t.Fatalf("HasStashesForBranchResult(other): %v", err)
+	} else if hasOther {
+		t.Error("HasStashesForBranchResult(some-other-branch) = true, want false: the WIP entry must not match an unrelated branch")
+	}
+}
+
 func TestFetch(t *testing.T) {
 	// Create a bare remote and clone it.
 	bare := t.TempDir()

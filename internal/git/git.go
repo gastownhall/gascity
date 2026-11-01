@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -289,6 +290,54 @@ func (g *Git) HasStashesResult() (bool, error) {
 		return false, fmt.Errorf("checking stashes: %w", err)
 	}
 	return strings.TrimSpace(out) != "", nil
+}
+
+// stashEntryBranch regexp extracts the branch name from a stash reflog
+// subject line. Git always writes one of two forms: "WIP on <branch>: ..."
+// for a plain `git stash` (or `push` with no message), or "On <branch>:
+// <message>" when a message was given (`git stash push -m "..."` or `git
+// stash save "..."`).
+var stashEntryBranch = regexp.MustCompile(`^(?:WIP on|On) ([^:]+):`)
+
+// HasStashesForBranchResult reports whether the repository has a stash
+// entry recorded against the given branch. `git stash list` is repository-
+// wide by git's own design — refs/stash and its reflog live once per
+// repository, not per linked worktree, so a stash made in worktree A shows
+// up in `git stash list` run from sibling worktree B even though B has no
+// stashed work of its own (gascity#8093). Git does not record which
+// worktree a stash came from, only which branch was checked out when it was
+// made — and worktrees are 1:1 with branches by git's own worktree-lock
+// rule, so matching the reflog subject's branch against the worktree's own
+// CurrentBranch is the closest attribution git's own data supports. This is
+// not airtight (a stash made before a worktree switched branches, or a
+// branch reused outside its original worktree, won't match), but it is
+// strictly more accurate than treating repo-wide stash presence as this
+// worktree's own, and it fails closed: an entry whose branch can't be
+// parsed, or a probe error, counts as "has a stash" rather than being
+// silently ignored.
+func (g *Git) HasStashesForBranchResult(branch string) (bool, error) {
+	out, err := g.run("stash", "list", "--format=%gs")
+	if err != nil {
+		return false, fmt.Errorf("checking stashes: %w", err)
+	}
+	branch = strings.TrimSpace(branch)
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		m := stashEntryBranch.FindStringSubmatch(line)
+		if m == nil {
+			// An entry we can't attribute to a branch is treated as
+			// belonging to every branch (fail closed): better to hold back
+			// a prune than to silently discard someone's stashed work.
+			return true, nil
+		}
+		if m[1] == branch {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // SubmoduleInit initializes and updates submodules recursively.
