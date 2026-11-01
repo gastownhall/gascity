@@ -595,3 +595,51 @@ func TestResolveTemplateAgentEnvWithholdsOpenCodePermissionDefault(t *testing.T)
 		})
 	}
 }
+
+// staleDemandMarkers seeds the controller's process environment with demand
+// markers a previous trigger left behind. passthroughEnv forwards every
+// non-empty GC_* key, so without a pin they reach the resolved session env.
+func staleDemandMarkers(t *testing.T) {
+	t.Helper()
+	t.Setenv("GC_SPAWN_ORIGIN", "demand")
+	t.Setenv("GC_TRIGGER_BEAD_ID", "w-stale")
+	t.Setenv("GC_TRIGGER_WORK_BEAD_ID", "w-stale")
+	t.Setenv("GC_TRIGGER_BEAD_STORE_REF", "rig:stale")
+	t.Setenv("GC_TRIGGER_WORK_STORE_REF", "rig:stale")
+}
+
+func demandMarkerBuildParams(t *testing.T) *agentBuildParams {
+	t.Helper()
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	return &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+}
+
+// A seat no trigger started must withhold every trigger key: only an explicit
+// empty value makes tmux emit `env -u` (and subprocess drop the inherited
+// entry), so an inherited GC_SPAWN_ORIGIN=demand cannot pass the divergence
+// gate with a blank trigger id.
+func TestResolveTemplatePinsInheritedDemandMarkersEmpty(t *testing.T) {
+	staleDemandMarkers(t)
+	agent := &config.Agent{Name: "worker"}
+
+	tp, err := resolveTemplate(demandMarkerBuildParams(t), agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	for _, k := range triggerEnvKeys {
+		if v, ok := tp.Env[k]; !ok || v != "" {
+			t.Errorf("Env[%s] = %q (present=%v), want present and empty: an inherited demand marker leaked into a no-trigger seat", k, v, ok)
+		}
+	}
+}
