@@ -944,6 +944,13 @@ func finalizeInStore(opts SlingOpts, deps SlingDeps, beadStore beads.Store, bead
 				// tracks dep is additive and does not disturb the epic
 				// rollup.
 				if err := convoycore.TrackItem(deps.Store, convoy.ID, beadID); err != nil {
+					// The convoy was minted for this sling and tracks nothing;
+					// leaving it open would strand a claim-attracting bead
+					// every time linking fails here (mirrors the graph.v2
+					// fix in CreateSingleItemInputConvoy, #4788). Best-effort
+					// close: the tracking error is already recorded above
+					// and sling itself still succeeds (soft failure).
+					_ = deps.Store.Close(convoy.ID) //nolint:errcheck // best-effort cleanup of this sling's own artifact
 					result.MetadataErrors = append(result.MetadataErrors,
 						fmt.Sprintf("linking bead to convoy: %v", err))
 				} else {

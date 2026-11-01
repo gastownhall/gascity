@@ -40,6 +40,7 @@ go_test(
     srcs = [
         "cycle_native_store_test.go",
         "cycle_test.go",
+        "repro_empty_auto_convoy_test.go",
         "sling_attached_hint_test.go",
         "sling_attachment_test.go",
         "sling_child_outcome_test.go",
