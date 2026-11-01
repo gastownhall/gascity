@@ -16,8 +16,10 @@ import (
 //   - pending is an input only as a fresh Yes a session key wrote through
 //     Note, and only for a row whose runtime is alive; the session key's fresh
 //     check before a drain is the fence;
-//   - only unknown liveness, and a stale or unprimed attach on a backend that
-//     reports attach, make a row uncertain.
+//   - only unknown liveness, and a stale, unprimed or unread attach on a
+//     backend that reports attach (unread: its batched read did not answer
+//     it, as an exec inventory's `attached: null` or a tmux
+//     #{session_attached} that does not parse), make a row uncertain.
 //
 // Facts are attributed by the runtime's identity (compareIdentity): a
 // runtime name that several open rows share (enterprise slot-scoped names,

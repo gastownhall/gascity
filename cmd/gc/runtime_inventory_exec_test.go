@@ -339,3 +339,59 @@ esac
 		t.Fatalf("attached:null on a reporting leaf = %+v, want unknown, not unsupported", obs.Attached)
 	}
 }
+
+// Kills (PAR-EXEC round 2): an unread attachment read as "no" on tmux. A
+// tmux inventory whose #{session_attached} does not parse leaves
+// AttachedKnown false; tmux reports attachment, so the row is uncertain.
+func TestTmuxUnparsedAttachReadsUncertain(t *testing.T) {
+	backend := newScriptedInventory(map[string]runtime.InventoryEntry{"s": {Incarnation: "$1@1", DeadKnown: true}})
+	leaf := runtime.NewFakeProfile(runtime.ProfileTmux, backend)
+	l := &runtimeInventoryLane{}
+	attrs, _, errs := l.enrich(context.Background(), []inventoryBackend{{label: "tmux", provider: leaf, names: []string{"s"}}}, []BackendPass{completeBackend("tmux", "s")})
+	if len(errs) != 0 || !attrs["s"].AttachUnread {
+		t.Fatalf("attrs %+v (%v): want the unparsed attachment marked unread", attrs["s"], errs)
+	}
+	obs := RuntimeObservation{}
+	applyInventoryAttrs(&obs, attrs["s"], obsTestEpoch)
+	if obs.Attached.Value != ObsUnknown || obs.Attached.Reason != obsReasonUnread {
+		t.Fatalf("attached = %+v, want unknown (unread)", obs.Attached)
+	}
+}
+
+// unattestedLister lists the names it holds without attesting the listing
+// complete, as an exec pack that is not v2-ready does.
+type unattestedLister struct {
+	*runtime.Fake
+	attested bool
+}
+
+func (u unattestedLister) ListRunningComplete() bool { return u.attested }
+
+// Kills (PAR-EXEC round 2): an on_death re-check that reads an unattested
+// listing's omission as proof the name is gone, and the hook as due. Only
+// an attested omission is absent; an unattested one, or one whose
+// attestation turned on during the listing, is a re-check to retry.
+func TestRevalidateAbsentNeedsAnAttestedListing(t *testing.T) {
+	for name, tc := range map[string]struct {
+		sp      runtime.Provider
+		absent  bool
+		wantErr error
+	}{
+		"attested omission":         {unattestedLister{Fake: runtime.NewFake(), attested: true}, true, nil},
+		"unattested omission":       {unattestedLister{Fake: runtime.NewFake()}, false, errOnDeathRecheckUnattested},
+		"attested during the check": {newFlippingLeaf(runtime.NewFake()), false, errOnDeathRecheckUnattested},
+	} {
+		l := &runtimeInventoryLane{}
+		absent, err := l.revalidateAbsent(context.Background(), tc.sp, "gone")
+		if absent != tc.absent || !errors.Is(err, tc.wantErr) || (tc.wantErr == nil) != (err == nil) {
+			t.Errorf("%s: revalidateAbsent = %v, %v; want %v, %v", name, absent, err, tc.absent, tc.wantErr)
+		}
+	}
+	present := runtime.NewFake()
+	if err := present.Start(context.Background(), "here", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if absent, err := (&runtimeInventoryLane{}).revalidateAbsent(context.Background(), unattestedLister{Fake: present}, "here"); absent || err != nil {
+		t.Errorf("a listed name: revalidateAbsent = %v, %v; want present", absent, err)
+	}
+}

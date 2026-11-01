@@ -431,11 +431,21 @@ var (
 	errOnDeathNoProvider     = errors.New("no session provider")
 	errOnDeathRecheckBusy    = errors.New("an earlier re-check is still outstanding")
 	errOnDeathRecheckTimeout = fmt.Errorf("re-check listing exceeded %s", inventoryListingBound)
+	// errOnDeathRecheckUnattested is an omission by a listing that was not
+	// attested complete: no proof of absence, so the re-check is retried.
+	errOnDeathRecheckUnattested = errors.New("re-check listing omits the name but is not attested complete")
 )
 
 // revalidateAbsent is the fresh exact-name check before a hook: absent only
-// when an error-free listing for the name omits it. A listing that shows the
-// name means present, whatever its error. Like the lane's own listing it is
+// when an error-free listing for the name, attested complete around it
+// (runtime.ListRunningWithAttestation), omits it. A listing that shows the
+// name means present, whatever its error; an unattested omission is
+// errOnDeathRecheckUnattested, which the caller retries like any other
+// failed re-check. The listing is the leaf's that name routes to
+// (runtime.ResolveBackend, as the fences read it), so a composite's other
+// backends, which cannot hold the name, cannot withhold its attestation (a
+// hybrid's unattested remote); when the route is not known, the whole
+// provider's. Like the lane's own listing it is
 // single-flight and bounded (k8s and ssh list without a deadline): a call
 // still outstanding from an earlier re-check, or one that outlives
 // inventoryListingBound or ctx, is an error, and the late result is dropped.
@@ -468,12 +478,19 @@ func (l *runtimeInventoryLane) revalidateAbsent(ctx context.Context, sp runtime.
 			l.listMu.Unlock()
 			done <- res
 		}()
-		names, err := sp.ListRunning(name)
-		if slices.Contains(names, name) {
-			res = result{}
-			return
+		target := sp
+		if leaf, _, known := runtime.ResolveBackend(sp, name); known && leaf != nil {
+			target = leaf
 		}
-		res = result{absent: err == nil, err: err}
+		names, attested, err := runtime.ListRunningWithAttestation(target, name)
+		switch {
+		case slices.Contains(names, name):
+			res = result{}
+		case err == nil && !attested:
+			res = result{err: errOnDeathRecheckUnattested}
+		default:
+			res = result{absent: err == nil, err: err}
+		}
 	}()
 	timer := time.NewTimer(inventoryListingBound)
 	defer timer.Stop()
