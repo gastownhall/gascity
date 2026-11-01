@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -3625,6 +3626,147 @@ func TestRouteRigList_StaleBannerOver30s(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "cache age: 45s") {
 		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
+	}
+}
+
+// writeRigListLagCity writes a city whose city.toml registers frontend and
+// backend; backend starts suspended. The API handlers below play a running
+// controller whose published config has not caught up with that file.
+func writeRigListLagCity(t *testing.T) string {
+	t.Helper()
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "coordinator"
+
+[[rigs]]
+name = "frontend"
+path = "/abs/frontend"
+prefix = "fe"
+
+[[rigs]]
+name = "backend"
+path = "/abs/backend"
+prefix = "be"
+suspended_on_start = true
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return cityPath
+}
+
+// rigListAPIServer serves GET .../rigs with items, the rig rows of a
+// controller's published config.
+func rigListAPIServer(t *testing.T, items ...map[string]any) *api.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/rigs") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("X-GC-Cache-Age-S", "0")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "total": len(items)})
+	}))
+	t.Cleanup(srv.Close)
+	return api.NewCityScopedClient(srv.URL, "test-city")
+}
+
+// rigListNames decodes gc rig list --json output into its non-HQ rig rows, by name.
+func rigListNames(t *testing.T, out []byte) ([]string, map[string]map[string]any) {
+	t.Helper()
+	var doc struct {
+		Rigs []map[string]any `json:"rigs"`
+	}
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("unmarshal rig list: %v\n%s", err, out)
+	}
+	var names []string
+	rows := map[string]map[string]any{}
+	for _, row := range doc.Rigs {
+		if row["hq"] == true {
+			continue
+		}
+		name, _ := row["name"].(string)
+		names = append(names, name)
+		rows[name] = row
+	}
+	return names, rows
+}
+
+// A rig gc rig add just wrote to city.toml is listed before the running
+// controller's next config reload publishes it, as the fallback lists it: the
+// rig set comes from city.toml, the controller adds runtime state for the rigs
+// it has loaded.
+func TestRouteRigList_APIListsARigTheControllerHasNotLoadedYet(t *testing.T) {
+	t.Setenv("GC_DEBUG", "0")
+	cityPath := writeRigListLagCity(t)
+	c := rigListAPIServer(t, map[string]any{"name": "frontend", "path": "/abs/frontend", "prefix": "fe", "suspended": false, "agent_count": 1, "running_count": 1})
+
+	var stdout, stderr bytes.Buffer
+	if code := routeRigList(cityPath, c, "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+	}
+	names, rows := rigListNames(t, stdout.Bytes())
+	if want := []string{"frontend", "backend"}; !slices.Equal(names, want) {
+		t.Fatalf("rigs = %v, want %v (city.toml order); output=%s", names, want, stdout.String())
+	}
+	if rows["frontend"]["running"] != true {
+		t.Errorf("frontend running = %#v, want true from the controller", rows["frontend"]["running"])
+	}
+	backend := rows["backend"]
+	if backend["running"] != false || backend["suspended"] != true || backend["prefix"] != "be" || backend["path"] != "/abs/backend" {
+		t.Errorf("backend row = %#v, want running false, suspended true, prefix be, path /abs/backend", backend)
+	}
+	validateJSONResultSchema(t, []string{"rig", "list"}, stdout.Bytes())
+
+	var fallback bytes.Buffer
+	if code := routeRigList(cityPath, nil, "escape-hatch", true, &fallback, &stderr); code != 0 {
+		t.Fatalf("fallback exit = %d, stderr=%q", code, stderr.String())
+	}
+	if fbNames, _ := rigListNames(t, fallback.Bytes()); !slices.Equal(names, fbNames) {
+		t.Fatalf("API rigs %v, fallback rigs %v: the lanes must list the same rigs", names, fbNames)
+	}
+
+	stdout.Reset()
+	if code := routeRigList(cityPath, c, "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("human exit = %d, stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "backend (suspended):") {
+		t.Fatalf("human output missing the not-yet-loaded rig:\n%s", stdout.String())
+	}
+}
+
+// A rig gc rig remove just dropped from city.toml is no longer listed, though
+// the running controller's published config still holds it until its next
+// reload.
+func TestRouteRigList_APIOmitsARigRemovedFromCityToml(t *testing.T) {
+	t.Setenv("GC_DEBUG", "0")
+	cityPath := writeRigListLagCity(t)
+	c := rigListAPIServer(t,
+		map[string]any{"name": "frontend", "path": "/abs/frontend", "prefix": "fe", "suspended": false, "agent_count": 1, "running_count": 0},
+		map[string]any{"name": "removed", "path": "/abs/removed", "prefix": "rm", "suspended": false, "agent_count": 1, "running_count": 1},
+		map[string]any{"name": "backend", "path": "/abs/backend", "prefix": "be", "suspended": true, "agent_count": 0, "running_count": 0},
+	)
+	for _, jsonOutput := range []bool{true, false} {
+		var stdout, stderr bytes.Buffer
+		if code := routeRigList(cityPath, c, "", jsonOutput, &stdout, &stderr); code != 0 {
+			t.Fatalf("json=%v exit = %d, stderr=%q", jsonOutput, code, stderr.String())
+		}
+		if strings.Contains(stdout.String(), "removed") {
+			t.Fatalf("json=%v: a rig city.toml no longer registers is listed:\n%s", jsonOutput, stdout.String())
+		}
+		if jsonOutput {
+			if names, _ := rigListNames(t, stdout.Bytes()); !slices.Equal(names, []string{"frontend", "backend"}) {
+				t.Fatalf("rigs = %v, want [frontend backend]", names)
+			}
+		}
 	}
 }
 
