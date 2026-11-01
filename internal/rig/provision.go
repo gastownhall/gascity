@@ -115,25 +115,27 @@ func Provision(deps Deps, req ProvisionRequest) (config.Rig, ProvisionResult, er
 	// Step 12: banner + warn lines.
 	emitRigBannerAndWarnings(deps, req, plan, includes, hasGit, rigPath, resolvedDefaultBranch, defaultBranchOverride, defaultBranchRemote, emit)
 
-	// Step 13: beads-store init. Record whether the rig already had a .beads/
-	// first, and snapshot the store it holds: init is the step that writes into
-	// the rig directory, and a failure partway through must neither leave a
-	// store it created behind nor leave a store that was already there (an
-	// --adopt'ed or re-added one) rewritten.
-	beadsStorePreexisting, err := rigBeadsStoreExists(fs, rigPath)
+	// Step 13: beads-store init. Record what the rig's .beads/ held first:
+	// init is the step that writes into the rig directory, and a failure
+	// partway through must leave that directory as the add found it — no store
+	// init created, no store that was already there (an --adopt'ed or
+	// re-added one) rewritten, nothing init added to a directory that held no
+	// store, and the directory's own mode unchanged.
+	beadsDirPreexisting, err := rigBeadsStoreExists(fs, rigPath)
 	if err != nil {
 		return config.Rig{}, result, err
 	}
-	var preexistingStore []FileSnapshot
-	if beadsStorePreexisting {
-		if preexistingStore, err = snapshotPreexistingStore(fs, rigPath); err != nil {
+	var found preexistingBeadsDir
+	if beadsDirPreexisting {
+		if found, err = snapshotPreexistingBeadsDir(fs, rigPath); err != nil {
 			return config.Rig{}, result, err
 		}
 	}
+	preexistingStore := found.store
 	deferred, err := initRigBeadsStore(deps, req, rigPath, plan.prefix, emit)
 	if err != nil {
-		if beadsStorePreexisting {
-			return config.Rig{}, result, restorePreexistingStore(fs, preexistingStore, err)
+		if beadsDirPreexisting {
+			return config.Rig{}, result, found.restoreAfterFailedInit(fs, err)
 		}
 		return config.Rig{}, result, removePartialBeadsStore(fs, rigPath, err)
 	}
@@ -809,8 +811,8 @@ func rigBeadsStoreExists(fs fsys.FS, rigPath string) (bool, error) {
 
 // removePartialBeadsStore deletes the .beads/ a failed store init created and
 // returns the init error for the caller to surface. It is only called for a
-// .beads/ that did not exist before this add (restorePreexistingStore covers a
-// store that did), and it never touches the rig directory itself — that is the
+// .beads/ that did not exist before this add (preexistingBeadsDir covers one
+// that did), and it never touches the rig directory itself — that is the
 // user's repo, not ours to delete.
 //
 // Without this, an init that wrote metadata.json before failing left a
@@ -825,30 +827,115 @@ func removePartialBeadsStore(fs fsys.FS, rigPath string, cause error) error {
 	return cause
 }
 
-// snapshotPreexistingStore snapshots the scope files of the store a rig's
-// .beads/ already holds — one with metadata.json or config.yaml, the markers
-// the fresh-add guard reads — before init touches them. It returns nil when
-// .beads/ is not a directory or holds no store: what init writes there is left
-// in place, as before, and a git_url teardown reads the database init minted
-// from that metadata.json.
-func snapshotPreexistingStore(fs fsys.FS, rigPath string) ([]FileSnapshot, error) {
+// preexistingBeadsDir is the .beads/ directory a rig already had when the add
+// reached store init.
+//
+// A directory that held a store — metadata.json or config.yaml, the markers
+// the fresh-add guard reads — records store: its scope files, then its mode.
+// Every rollback restores them, so the store ends up with the bytes and mode
+// the add found.
+//
+// A directory that held no store (.beads/formulas only, say) records entries,
+// the names at its top level, and mode instead. A failed init removes every
+// entry it added — the markers that would make the retry refuse the directory
+// as an existing store, and any other debris — leaves every entry that was
+// there, and puts the mode back. An init that succeeded leaves a store there,
+// which the guarded write window's rollback keeps, as for a fresh add.
+//
+// Removing the markers after a failed init also removes the metadata.json a
+// git_url teardown would read a database name from. That matches a clone with
+// no .beads/, whose failed init loses the whole directory. Keeping the file
+// would not be safe: the caller can write it before the init op runs, so after
+// a failed init it may name a database this add never created.
+//
+// The zero value (.beads is not a directory) restores nothing.
+type preexistingBeadsDir struct {
+	store   []FileSnapshot
+	path    string
+	entries map[string]bool
+	mode    []FileSnapshot
+}
+
+// snapshotPreexistingBeadsDir records the rig's .beads/ before init touches it.
+func snapshotPreexistingBeadsDir(fs fsys.FS, rigPath string) (preexistingBeadsDir, error) {
 	beadsPath := filepath.Join(rigPath, ".beads")
 	fi, err := fs.Stat(beadsPath)
 	if err != nil {
-		return nil, fmt.Errorf("checking %s: %w", beadsPath, err)
+		return preexistingBeadsDir{}, fmt.Errorf("checking %s: %w", beadsPath, err)
 	}
 	if !fi.IsDir() {
-		return nil, nil
+		return preexistingBeadsDir{}, nil
 	}
+	mode := dirModeSnapshot(beadsPath, fi)
 	holdsStore, err := beadsDirContainsStore(fs, beadsPath)
-	if err != nil || !holdsStore {
-		return nil, err
-	}
-	snapshots, err := snapshotScopeFiles(fs, rigPath)
 	if err != nil {
-		return nil, fmt.Errorf("snapshot canonical files: %w", err)
+		return preexistingBeadsDir{}, err
 	}
-	return snapshots, nil
+	if holdsStore {
+		files, err := snapshotScopeFiles(fs, rigPath)
+		if err != nil {
+			return preexistingBeadsDir{}, fmt.Errorf("snapshot canonical files: %w", err)
+		}
+		// The mode goes last: RestoreSnapshots restores in order, and the
+		// files are written back before a narrower mode is.
+		return preexistingBeadsDir{store: append(files, mode)}, nil
+	}
+	entries, err := fs.ReadDir(beadsPath)
+	if err != nil {
+		return preexistingBeadsDir{}, fmt.Errorf("reading %s: %w", beadsPath, err)
+	}
+	names := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		names[entry.Name()] = true
+	}
+	return preexistingBeadsDir{path: beadsPath, entries: names, mode: []FileSnapshot{mode}}, nil
+}
+
+// restoreAfterFailedInit puts the directory back after store init failed and
+// returns cause for the caller to surface, with "(rollback failed: ...)" when
+// the directory could not be put back. It never removes an entry the
+// directory had before the add.
+func (d preexistingBeadsDir) restoreAfterFailedInit(fs fsys.FS, cause error) error {
+	if d.entries == nil {
+		return restorePreexistingStore(fs, d.store, cause)
+	}
+	var failures []string
+	if err := removeAddedEntries(fs, d.path, d.entries); err != nil {
+		failures = append(failures, err.Error())
+	}
+	if err := RestoreSnapshots(fs, d.mode); err != nil {
+		failures = append(failures, err.Error())
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("%w (rollback failed: %s)", cause, strings.Join(failures, "; "))
+	}
+	return cause
+}
+
+// removeAddedEntries removes every top-level entry of dir whose name is not in
+// keep. A dir that is gone has nothing left to remove.
+func removeAddedEntries(fs fsys.FS, dir string, keep map[string]bool) error {
+	entries, err := fs.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("reading %s: %w", dir, err)
+	}
+	var failures []string
+	for _, entry := range entries {
+		if keep[entry.Name()] {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		if err := fsys.RemoveAll(fs, path); err != nil {
+			failures = append(failures, fmt.Sprintf("removing %s: %v", path, err))
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("%s", strings.Join(failures, "; "))
+	}
+	return nil
 }
 
 // restorePreexistingStore puts back the scope files store init rewrote in a

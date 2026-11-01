@@ -3220,6 +3220,118 @@ func TestDoRigAdd_AdoptFailedInitLeavesStoreFilesAsFound(t *testing.T) {
 	}
 }
 
+// stubFailingInitProvider installs a bd-contract exec provider whose init op
+// runs initPrelude (with $2 the store dir) and then fails with errText.
+func stubFailingInitProvider(t *testing.T, cityPath, initPrelude, errText string) {
+	t.Helper()
+	provider := filepath.Join(cityPath, "gc-beads-bd")
+	script := "#!/bin/sh\nif [ \"$1\" = init ]; then " + initPrelude + "echo \"" + errText + "\" >&2; exit 1; fi\nexit 0\n"
+	if err := os.WriteFile(provider, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+provider)
+	t.Setenv("GC_DOLT", "")
+
+	origEnsure := initDirIfReadyEnsureBeadsProvider
+	origWait := initDirIfReadyWaitForManagedDolt
+	t.Cleanup(func() {
+		initDirIfReadyEnsureBeadsProvider = origEnsure
+		initDirIfReadyWaitForManagedDolt = origWait
+	})
+	initDirIfReadyEnsureBeadsProvider = func(string) error { return nil }
+	initDirIfReadyWaitForManagedDolt = func(string, time.Duration) error { return nil }
+}
+
+// ga-hfly3b.27: a fresh gc rig add over a repo whose .beads/ holds only
+// formulas, whose provider init fails after gc pre-seeded the store markers,
+// leaves .beads/ as it found it, so the retry re-runs init instead of being
+// refused as an existing store.
+func TestDoRigAdd_FailedInitOverNonStoreBeadsDirAllowsRetry(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	const initErrText = "managed Dolt server unreachable while inspecting existing store 'nr'"
+	stubFailingInitProvider(t, cityPath, "", initErrText)
+
+	rigPath := filepath.Join(t.TempDir(), "formula-rig")
+	beads := filepath.Join(rigPath, ".beads")
+	formula := filepath.Join(beads, "formulas", "keep.toml")
+	if err := os.MkdirAll(filepath.Dir(formula), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const formulaBody = "formula = \"keep\"\n"
+	if err := os.WriteFile(formula, []byte(formulaBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		var stdout, stderr bytes.Buffer
+		code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "nr", "", false, false, &stdout, &stderr)
+		if code != 1 || !strings.Contains(stderr.String(), initErrText) {
+			t.Fatalf("add attempt %d = %d (stderr %q), want 1 with the init failure", attempt, code, stderr.String())
+		}
+		if strings.Contains(stderr.String(), "already contains a beads store") {
+			t.Fatalf("add attempt %d refused at the fresh-add guard: %q", attempt, stderr.String())
+		}
+		entries, err := os.ReadDir(beads)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		if got := strings.Join(names, ","); got != "formulas" {
+			t.Errorf(".beads entries after add attempt %d = %s, want formulas", attempt, got)
+		}
+		got, err := os.ReadFile(formula)
+		if err != nil {
+			t.Fatalf("pre-existing .beads content lost after add attempt %d: %v", attempt, err)
+		}
+		if string(got) != formulaBody {
+			t.Errorf("%s after add attempt %d = %q, want %q", formula, attempt, got, formulaBody)
+		}
+	}
+}
+
+// ga-hfly3b.44: an adopt whose provider init narrows .beads/ to 0700 and then
+// fails puts the directory's mode back.
+func TestDoRigAdd_AdoptFailedInitRestoresBeadsDirMode(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	const initErrText = "managed Dolt server unreachable while inspecting existing store 'ar'"
+	stubFailingInitProvider(t, cityPath, "chmod 700 \"$2/.beads\"; ", initErrText)
+
+	rigPath := filepath.Join(t.TempDir(), "adopted-rig")
+	beads := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(beads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(beads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string]string{
+		"metadata.json": `{"backend":"dolt","database":"dolt","dolt_database":"ar","dolt_mode":"server"}`,
+		"config.yaml":   "issue-prefix: \"ar\"\n",
+	} {
+		if err := os.WriteFile(filepath.Join(beads, name), []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "ar", "", false, true, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), initErrText) {
+		t.Fatalf("doRigAdd = %d (stderr %q), want 1 with the init failure", code, stderr.String())
+	}
+	info, err := os.Stat(beads)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o755 {
+		t.Errorf(".beads mode after failed adopt = %v, want 0755", perm)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Six-row read-path routing matrix for `gc rig list` (ADR 0001, ga-h6w).
 // ---------------------------------------------------------------------------
