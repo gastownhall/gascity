@@ -308,10 +308,11 @@ func TestShadowCompareHoldCarriesTheRulesHold(t *testing.T) {
 	var got []runtime.ProgramStatusComparison
 	f.ProgramShadowSink = func(c runtime.ProgramStatusComparison) { got = append(got, c) }
 	runtime.ShadowCompareHold(runtime.FullFake{Fake: f}, "s", "gc-1", "claude", runtime.ProgramPointExecutionBackstop, runtime.ProgramVerdictNoHold, now, runtime.ProgramHoldVerdict)
+	returned := time.Now()
 	if len(got) != 1 || got[0].Program != runtime.ProgramVerdictHold {
 		t.Fatalf("recorded %+v, want one hold", got)
 	}
-	if c := got[0]; !c.HoldActivity.Equal(now.Add(-time.Minute)) || !c.JudgedAt.Equal(now) || !c.HoldLive(now.Add(time.Hour)) {
+	if c := got[0]; !c.HoldActivity.Equal(now.Add(-time.Minute)) || c.JudgedAt.Before(now) || c.JudgedAt.After(returned) || !c.HoldLive(now.Add(time.Hour)) {
 		t.Fatalf("comparison activity %v at %v, hold live %v; want the rule's activity and time, live", c.HoldActivity, c.JudgedAt, c.HoldLive(now.Add(time.Hour)))
 	}
 	if (runtime.ProgramStatusComparison{Status: got[0].Status}).HoldLive(now) {
@@ -326,6 +327,43 @@ func TestShadowCompareHoldCarriesTheRulesHold(t *testing.T) {
 		if c.Method == "GetLastActivity" {
 			t.Fatal("a leaf not shadowing had its activity clock read")
 		}
+	}
+}
+
+// Kills a hold comparison judged at the caller's pass-start clock when the
+// activity it reads is later (finding N1): a hold point passes the time its
+// pass began, the shadow reads the activity clock after it, and HoldLive
+// holds nothing for an activity later than the time it is judged at, so a
+// live working turn whose pane printed after the pass began was recorded as
+// program=no_hold, hold_live=false.
+func TestShadowCompareHoldJudgesAfterItsActivityRead(t *testing.T) {
+	f := runtime.NewFake()
+	if err := f.Start(t.Context(), "s", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	passStart := time.Now().Add(-5 * time.Second)
+	f.Activity = map[string]time.Time{"s": passStart.Add(time.Second)}
+	row := armedRow()
+	row.Mode = runtime.ProgramStatusShadow
+	row.Record.State = runtime.ProgramWorking
+	row.Record.Since = passStart.Add(-30 * time.Second)
+	f.SetProgramPane("s", row)
+	var got []runtime.ProgramStatusComparison
+	f.ProgramShadowSink = func(c runtime.ProgramStatusComparison) { got = append(got, c) }
+	runtime.ShadowCompareHold(runtime.FullFake{Fake: f}, "s", "gc-1", "claude", runtime.ProgramPointWorkLadder, runtime.ProgramVerdictHold, passStart, runtime.ProgramHoldVerdict)
+	returned := time.Now()
+	if len(got) != 1 {
+		t.Fatalf("recorded %d comparisons, want one", len(got))
+	}
+	c := got[0]
+	if c.Program != runtime.ProgramVerdictHold {
+		t.Fatalf("program %q, want hold: a working record 30 s old with activity 1 s after the pass began is a live hold", c.Program)
+	}
+	if !c.HoldLive(returned) {
+		t.Fatalf("hold_live false judged at %v with activity %v", c.JudgedAt, c.HoldActivity)
+	}
+	if c.JudgedAt.Before(c.HoldActivity) || c.JudgedAt.After(returned) {
+		t.Fatalf("judged at %v, want after the activity %v and no later than the call's return %v", c.JudgedAt, c.HoldActivity, returned)
 	}
 }
 

@@ -296,12 +296,17 @@ func ShadowCompare(p Provider, name, sessionID, family string, point ProgramStat
 }
 
 // ShadowCompareHold is [ShadowCompare] for a hold rule judged with the
-// runtime's last activity at now (claim and backstop holds, the ladder,
-// queued delivery, the drain reminder). The activity is read only while the
-// leaf is shadowing, and the comparison carries it with now, so the hold
-// liveness recorded beside the verdict is the one the rule used. An
-// unreadable activity clock judges on the record's own age, which is what a
-// zero activity means to [ProgramStatus.HoldLive].
+// runtime's last activity (claim and backstop holds, the ladder, queued
+// delivery, the drain reminder). The activity is read only while the leaf is
+// shadowing, and the comparison carries it with the time the rule judged at,
+// so the hold liveness recorded beside the verdict is the one the rule used.
+// An unreadable activity clock judges on the record's own age, which is what
+// a zero activity means to [ProgramStatus.HoldLive].
+//
+// The rule judges at the later of now and the clock read after the reading
+// and the activity: a caller passes the time its pass began, and the reading
+// and activity read here can be later than that, which HoldLive would take
+// for a skewed clock and hold nothing.
 func ShadowCompareHold(p Provider, name, sessionID, family string, point ProgramStatusPoint, scrape ProgramVerdict, now time.Time, rule func(s ProgramStatus, lastActivity, now time.Time) ProgramVerdict) {
 	if p == nil || name == "" {
 		return
@@ -314,11 +319,20 @@ func ShadowCompareHold(p Provider, name, sessionID, family string, point Program
 	if err != nil {
 		last = time.Time{}
 	}
+	judged := laterTime(now, time.Now())
 	sink(ProgramStatusComparison{
 		Session: name, SessionID: sessionID, Family: family, Point: point,
-		Scrape: scrape, Program: rule(s, last, now), Status: s,
-		HoldActivity: last, JudgedAt: now,
+		Scrape: scrape, Program: rule(s, last, judged), Status: s,
+		HoldActivity: last, JudgedAt: judged,
 	})
+}
+
+// laterTime returns the later of a and b.
+func laterTime(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
 }
 
 // shadowCallerRecordsKey marks a context whose caller records its own
