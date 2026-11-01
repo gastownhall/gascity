@@ -200,6 +200,34 @@ func TestFreeableExcludesUserHold(t *testing.T) {
 			}
 		}
 	}
+	// A soft-suspended row (no operator hold) is not freeable for its state,
+	// not for a hold.
+	soft := map[string]string{"state": "suspended", "slept_at": now.Add(-time.Hour).Format(time.RFC3339)}
+	if isPoolSessionSlotFreeable(beads.Bead{ID: "s-1", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: soft}, now) ||
+		isPoolSessionSlotFreeableInfo(session.Info{MetadataState: "suspended", SleptAt: soft["slept_at"]}, now) {
+		t.Error("a soft-suspended row is freeable")
+	}
+}
+
+// TestUserHoldDrainReleased: a user-hold drain is released once its row no
+// longer carries the operator's suspend, a soft suspend included; it holds
+// while the user hold stands, and a drain for another reason is never one.
+func TestUserHoldDrainReleased(t *testing.T) {
+	hold := string(session.SleepReasonUserHold)
+	for _, tc := range []struct {
+		reason string
+		info   session.Info
+		want   bool
+	}{
+		{hold, session.Info{SleepIntent: hold}, false},
+		{hold, session.Info{}, true},
+		{hold, session.Info{MetadataState: "suspended"}, true},
+		{"idle", session.Info{}, false},
+	} {
+		if got := userHoldDrainReleased(tc.reason, tc.info); got != tc.want {
+			t.Errorf("userHoldDrainReleased(%q, %+v) = %v, want %v", tc.reason, tc.info, got, tc.want)
+		}
+	}
 }
 
 // assertDrainedUserHold: a completed suspend drain leaves the row asleep

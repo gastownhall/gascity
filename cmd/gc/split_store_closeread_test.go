@@ -80,7 +80,7 @@ func TestCloseRead_LateClaimRefusesTheClose(t *testing.T) {
 			}
 
 			before := c.backing.n()
-			closed := closeSessionBeadIfReachableStoreUnassigned(c.sessions, c.sw, c.seat, "drained", seatWorkNow, io.Discard, false)
+			closed := closeSeat(c.sessions, c.sw, c.seat, closeWhy{reason: "drained", gate: closeGated}, seatWorkNow, io.Discard)
 
 			if want := kind == "none"; closed != want {
 				t.Fatalf("close = %v, want %v", closed, want)
@@ -165,7 +165,7 @@ func TestCloseRead_DrainFinalizeIgnoresTheOwnDrainStep(t *testing.T) {
 	}
 	createWork(t, c.sessions, "in_progress", c.seat.ID, map[string]string{beadmeta.StepRefMetadataKey: "mol-do-work.drain", beadmeta.RootBeadIDMetadataKey: root.ID})
 
-	if !closeSessionBeadIfReachableStoreUnassigned(c.sessions, c.sw, c.seat, "drained", seatWorkNow, io.Discard, true) {
+	if !closeSeat(c.sessions, c.sw, c.seat, closeWhy{reason: "drained", gate: closeGated, keep: notOwnDrainStep}, seatWorkNow, io.Discard) {
 		t.Fatal("the drain-finalize close refused over the seat's own drain step")
 	}
 }
@@ -187,7 +187,7 @@ func TestCloseRead_AnUnreadableLocalLegRefusesTheClose(t *testing.T) {
 	c.rigs["riga"] = assigneeListFails{Store: c.rig}
 	c.readIndex(t)
 
-	if closeSessionBeadIfReachableStoreUnassigned(c.sessions, c.sw, c.seat, "drained", seatWorkNow, io.Discard, false) {
+	if closeSeat(c.sessions, c.sw, c.seat, closeWhy{reason: "drained", gate: closeGated}, seatWorkNow, io.Discard) {
 		t.Fatal("the close went ahead over a local leg the re-read could not read")
 	}
 }

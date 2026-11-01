@@ -31,8 +31,11 @@ const (
 )
 
 // turnFailureConnClosed is the failure message recorded when the agent's
-// stdout reaches EOF while a prompt response is outstanding. EOF alone does
-// not say whether the process exited or only closed its output.
+// stdout reaches EOF, or its read end is closed by exec.Cmd.Wait after the
+// agent exits, while a prompt response is outstanding. The message names the
+// connection, not the process: a read end closed by Wait means the agent
+// exited, but EOF alone does not say whether it exited or only closed its
+// output.
 const turnFailureConnClosed = "agent connection closed before the turn completed"
 
 // turnFailureReadPrefix prefixes the failure message recorded when reading
@@ -41,7 +44,7 @@ const turnFailureConnClosed = "agent connection closed before the turn completed
 const turnFailureReadPrefix = "reading agent output: "
 
 // drainFailure is the turn failure message for a connection drained because
-// of cause (nil means EOF).
+// of cause (nil means EOF or a closed stdout pipe; see readLoopCause).
 func drainFailure(cause error) string {
 	if cause == nil {
 		return turnFailureConnClosed
@@ -150,8 +153,12 @@ func usageCount(raw json.RawMessage) (int64, error) {
 	return int64(value), nil
 }
 
-// turnRecord describes one session/prompt turn. A sessionConn keeps only the
-// running turn and the last finished one; it does not keep a history.
+// turnHistoryLen bounds the finished turns a sessionConn keeps. A reader that
+// polls TurnHistory at least once per turnHistoryLen turns misses none.
+const turnHistoryLen = 8
+
+// turnRecord describes one session/prompt turn. A sessionConn keeps the
+// running turn and the last turnHistoryLen finished ones.
 type turnRecord struct {
 	ID         string // random UUIDv4, unique per turn
 	PromptID   int64  // JSON-RPC id of the session/prompt request
@@ -161,6 +168,8 @@ type turnRecord struct {
 	StopReason string     // set when State is turnCompleted
 	Usage      *turnUsage // set when the agent reported usage
 	Error      string     // set when State is turnFailed
+
+	eventSeq uint64 // turn-event number; 0 when no events were published
 }
 
 // clone returns a copy that shares no memory with r.
@@ -174,6 +183,19 @@ func (r *turnRecord) clone() *turnRecord {
 		out.Usage = &usage
 	}
 	return &out
+}
+
+// turnStatus is how a turn that ended in state with stopReason ended, as both
+// its completed event and TurnHistory report it.
+func turnStatus(state turnState, stopReason string) runtime.TurnStatus {
+	switch {
+	case state == turnFailed:
+		return runtime.TurnStatusFailed
+	case stopReason == acpStopReasonCanceled:
+		return runtime.TurnStatusCancelled
+	default:
+		return runtime.TurnStatusCompleted
+	}
 }
 
 // turnOutcome is how a running turn ended.
@@ -250,10 +272,14 @@ func (sc *sessionConn) startTurnLocked(id int64, now time.Time) {
 		StartedAt: now,
 		State:     turnRunning,
 	}
+	if sc.turnEvents != nil {
+		sc.turnEventsLost += sc.turnEvents.started(sc.currentTurn)
+	}
 }
 
-// endTurnLocked closes the running turn with outcome and makes it the last
-// turn. Caller must hold mu.
+// endTurnLocked closes the running turn with outcome and records it as the
+// newest finished turn, dropping the oldest beyond turnHistoryLen. Caller
+// must hold mu.
 func (sc *sessionConn) endTurnLocked(outcome turnOutcome, now time.Time) {
 	turn := sc.currentTurn
 	if turn == nil {
@@ -265,7 +291,14 @@ func (sc *sessionConn) endTurnLocked(outcome turnOutcome, now time.Time) {
 	turn.StopReason = outcome.stopReason
 	turn.Usage = outcome.usage
 	turn.Error = outcome.err
-	sc.lastTurn = turn
+	if len(sc.recentTurns) == turnHistoryLen {
+		copy(sc.recentTurns, sc.recentTurns[1:])
+		sc.recentTurns = sc.recentTurns[:turnHistoryLen-1]
+	}
+	sc.recentTurns = append(sc.recentTurns, turn)
+	if sc.turnEvents != nil && turn.eventSeq != 0 {
+		sc.turnEventsLost += sc.turnEvents.completed(turn, outcome, now)
+	}
 }
 
 // turns returns copies of the running turn (nil when idle) and the last
@@ -273,7 +306,16 @@ func (sc *sessionConn) endTurnLocked(outcome turnOutcome, now time.Time) {
 func (sc *sessionConn) turns() (current, last *turnRecord) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
-	return sc.currentTurn.clone(), sc.lastTurn.clone()
+	return sc.currentTurn.clone(), sc.lastTurnLocked().clone()
+}
+
+// lastTurnLocked is the newest finished turn, nil before the first ends.
+// Caller must hold mu.
+func (sc *sessionConn) lastTurnLocked() *turnRecord {
+	if len(sc.recentTurns) == 0 {
+		return nil
+	}
+	return sc.recentTurns[len(sc.recentTurns)-1]
 }
 
 // errACPSessionStarting reports an idle query for a session whose handshake
@@ -381,10 +423,13 @@ func (sc *sessionConn) awaitIdle(ctx context.Context, name string, idleCh <-chan
 // response outstanding right now. A session this provider does not own, or
 // whose agent connection has closed, is an error, never idle.
 //
-// The only caller today is the reconciler's content clock, which excludes the
-// ACP transport by construction (idleTrackerContentClockApplies: ACP delivers
-// in-process, with no repainting pane to scan), so this answer is unreachable
-// through that path. It is implemented anyway to keep the optional-interface
+// These callers skip sessions whose recorded transport is ACP: the
+// reconciler's content clock (idleTrackerContentClockApplies: ACP delivers
+// in-process, with no repainting pane to scan), the pool execution
+// backstop's snapshot veto (executionSnapshotVetoApplies: a non-ACP
+// transport), and the wait-idle pre-read (runtime.IdleBoundaryNow, taken
+// only after the ACP delivery path). So this answer is unreachable through
+// them. It is implemented anyway to keep the optional-interface
 // set complete for a provider that can answer it cheaply and correctly — the
 // wrapping seam, auto, and hybrid all forward it, so a future caller that is
 // not gated on transport gets the real answer rather than

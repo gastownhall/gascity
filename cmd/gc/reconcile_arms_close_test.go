@@ -36,7 +36,7 @@ type closeCase struct {
 func newCloseCase(t *testing.T, liveness rowLiveness, desired desire, meta ...string) *closeCase {
 	t.Helper()
 	store := beads.NewAtomicCloseMemStore()
-	if err := beads.StampOpenedStore(store, "MemStore", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(store, "MemStore", gate.Require, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	base := []string{"template", "worker", "session_name", "s-close", "generation", "3", "instance_token", "tok-3", "pool_managed", "true", "pool_slot", "1"}
@@ -109,6 +109,7 @@ func TestArmCloseDecides(t *testing.T) {
 		partial  bool
 		// citySuspended is a city suspend.
 		citySuspended bool
+		suspendCause  string // the row's operator suspend cause (World.OperatorSuspend)
 		want          string // decide reason, "" for none
 		check         func(t *testing.T, it intent)
 	}{
@@ -146,10 +147,12 @@ func TestArmCloseDecides(t *testing.T) {
 		},
 		{name: "an undesired pending create is A10's rollback", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "creating", "pending_create_claim", "true"}},
 		{
-			name: "a failed create", liveness: livenessGone, desired: desireNone, reason: reasonFailedCreate, meta: []string{"state", "failed-create"},
+			name: "a failed create", liveness: livenessGone, desired: desireNone, reason: reasonFailedCreate, meta: []string{"state", "failed-create", "sleep_intent", "idle-stop-pending", "wait_hold", "true"},
 			want: decideCloseFailedCreate, check: func(t *testing.T, it intent) {
-				if !maps.Equal(it.Patch, failedCreateClosePatch(gatherNow)) {
-					t.Errorf("patch %v, want failedCreateClosePatch", it.Patch)
+				want := failedCreateCloseLife(gatherNow)
+				want["sleep_intent"], want["wait_hold"] = "", "" // the Retire cell's clears
+				if !maps.Equal(it.folded(), want) || !it.Class.Has("sleep_intent") {
+					t.Errorf("patch %v, want failedCreateClosePatch's lifecycle with the Retire cell (%v)", it.Patch, want)
 				}
 			},
 		},
@@ -188,12 +191,40 @@ func TestArmCloseDecides(t *testing.T) {
 		},
 		{name: "a user-held slot keeps it", liveness: livenessGone, desired: desireSleep, meta: []string{"state", "asleep", "sleep_reason", "idle", "slept_at", at(-time.Hour), "sleep_intent", "user-hold"}},
 		{name: "a desired floor seat asleep for no wake reason keeps its slot", liveness: livenessGone, desired: desireSleep, meta: []string{"state", "asleep", "sleep_reason", "no-wake-reason", "slept_at", at(-time.Hour)}},
-		{name: "a desired seat asleep for config drift keeps its slot", liveness: livenessGone, desired: desireSleep, meta: []string{"state", "asleep", "sleep_reason", "config-drift", "slept_at", at(-time.Hour)}},
+		{
+			// Unlike no-wake-reason (a genuine warm-standby: zero demand, cheap
+			// re-wake with unchanged config), a config-drifted seat is never
+			// woken in place (that would run stale config), so it must free its
+			// slot for a fresh seat against the current config — otherwise a
+			// pool whose every slot drifts goes dark forever (srvcity sr-sxbc7:
+			// st/support.dispatch dark 17.5h, both slots asleep-for-drift, 59
+			// ready routed steps queued, nothing closed or replaced it).
+			name: "a desired seat asleep for config drift frees its slot (srvcity sr-sxbc7)", liveness: livenessGone, desired: desireSleep, meta: []string{"state", "asleep", "sleep_reason", "config-drift", "slept_at", at(-time.Hour)},
+			want: decideClosePoolSlot, check: func(t *testing.T, it intent) {
+				if it.Patch["state"] != "config-drift" || it.Closing.Repair || it.Closing.Killed {
+					t.Errorf("patch %v closing %+v, want a config-drift close, no repair, not killed", it.Patch, it.Closing)
+				}
+			},
+		},
 		{name: "an undesired pool row under a user hold keeps its slot (§12.2 #27)", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "asleep", "sleep_intent", "user-hold"}},
 		{name: "an undesired pool row under a wait hold keeps its slot", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "asleep", "wait_hold", "w-1"}},
 		{name: "an undesired pool row under a quarantine keeps its slot", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "asleep", "quarantined_until", at(time.Hour)}},
 		{name: "an undesired pool row under a hold timer keeps its slot", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "suspended", "held_until", at(time.Hour)}},
-		{name: "an undesired suspended pool row with no hold closes", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "suspended"}, want: decideCloseOrphan},
+		// Any row, not only a pool row: an orphan close never ends an
+		// operator's hold (the A14 generator's seed 660, mc-i7efm).
+		{name: "an undesired manual row under an operator's suspend is kept", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"pool_managed", "", "pool_slot", "", "session_origin", "manual", "state", "suspended", "sleep_intent", "user-hold", "held_until", at(1000 * time.Hour), "suspended_at", at(-time.Minute)}},
+		{name: "an undesired manual row under a hold timer is kept", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"pool_managed", "", "pool_slot", "", "session_origin", "manual", "state", "asleep", "held_until", at(time.Hour)}},
+		{name: "an undesired manual row under no hold closes", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"pool_managed", "", "pool_slot", "", "session_origin", "manual", "state", "asleep"}, want: decideCloseOrphan},
+		// v5.10s: a non-pool row keeps only an operator's dormancy or a live,
+		// readable hold timer; a wait hold or an unreadable timer closes, as
+		// legacy's orphan close does.
+		{name: "an undesired manual row under a wait hold closes", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"pool_managed", "", "pool_slot", "", "session_origin", "manual", "state", "asleep", "wait_hold", "w-1", "sleep_intent", "wait-hold"}, want: decideCloseOrphan},
+		{name: "an undesired manual row under an unreadable hold timer closes", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"pool_managed", "", "pool_slot", "", "session_origin", "manual", "state", "asleep", "held_until", "not-a-time"}, want: decideCloseOrphan},
+		// M4: a held manual row whose claimed runtime died is kept, so A12
+		// classifies its dead runtime (no orphan close takes it).
+		{name: "an undesired manual row under an operator's suspend with a dead runtime is classified", liveness: livenessDead, desired: desireDrain, drain: drainOrphaned, meta: []string{"pool_managed", "", "pool_slot", "", "session_origin", "manual", "state", "active", "sleep_intent", "user-hold", "suspended_at", at(-time.Hour)}, want: decideZombie},
+		{name: "an undesired soft-suspended pool row heals asleep first (v5.9u)", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "suspended", "suspended_at", at(-time.Minute)}, want: decideSuspendHeal},
+		{name: "and once healed, with its suspended_at left, closes", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "asleep", "suspended_at", at(-time.Minute)}, want: decideCloseOrphan},
 		{
 			name: "a future-dated marker counts as aged (§12.2 #24)", liveness: livenessGone, desired: desireSleep, meta: []string{"state", "asleep", "sleep_reason", "idle", "slept_at", at(-time.Hour), strandedEventEmittedKey, at(time.Hour)},
 			want: decideClosePoolSlot, check: func(t *testing.T, it intent) {
@@ -203,7 +234,9 @@ func TestArmCloseDecides(t *testing.T) {
 			},
 		},
 		{name: "a live runtime", liveness: livenessAlive, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "asleep"}},
-		{name: "a dead row that claims a live runtime is C5c2's", liveness: livenessDead, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "active"}},
+		{name: "a dead row that claims a live runtime closes (MAINT-031, C5c2)", liveness: livenessDead, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "active"}, want: decideCloseOrphan},
+		{name: "a dead row woken inside INC-003's grace waits it out", liveness: livenessDead, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "active", "last_woke_at", at(-time.Minute)}},
+		{name: "an operator-suspended dead row gets no grace", liveness: livenessDead, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "active", "last_woke_at", at(-time.Minute)}, suspendCause: "agent", want: decideCloseOrphan},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newCloseCase(t, tc.liveness, tc.desired, tc.meta...)
@@ -215,6 +248,9 @@ func TestArmCloseDecides(t *testing.T) {
 				c.a.Snapshot.Mode, c.a.Snapshot.Partial.Global = modeSuspended, []string{causeStoreQueryPartial}
 			}
 			c.w.CitySuspended = tc.citySuspended
+			if tc.suspendCause != "" {
+				c.w.OperatorSuspend = map[rowKey]string{c.k: tc.suspendCause}
+			}
 			it := c.decide()
 			if it.Reason != tc.want && (tc.want != "" || it.Kind == intentClose) {
 				t.Fatalf("decideRow = (%q, %q), want %q", it.Kind, it.Reason, tc.want)
@@ -267,6 +303,26 @@ func closeEffectCases(t *testing.T, bare bool) {
 		}
 		if b := c.row(t); b.Status != "closed" || b.Metadata["state"] != "orphaned" || b.Metadata[session.RuntimeLeaseHolderKey] != "" {
 			t.Fatalf("row %s %v, want closed orphaned with its lease cleared", b.Status, b.Metadata)
+		}
+	})
+	t.Run("a failed create closes with its holds cleared (the Retire cell)", func(t *testing.T) {
+		c := mk(t, livenessGone, desireNone, "state", "failed-create", "sleep_intent", "idle-stop-pending", "wait_hold", "true", "quarantined_until", gatherNow.Add(time.Hour).Format(time.RFC3339))
+		c.entry().Reason = reasonFailedCreate
+		if s := c.run(t, gone().tmux()); s.Outcome != settledLanded || !s.Closed {
+			t.Fatalf("settlement %+v, want the close landed", s)
+		}
+		b := c.row(t)
+		if b.Status != "closed" || b.Metadata["sleep_intent"] != "" || b.Metadata["wait_hold"] != "" || b.Metadata["quarantined_until"] != "" {
+			t.Fatalf("row %s %v, want closed with every hold cleared", b.Status, b.Metadata)
+		}
+	})
+	t.Run("a wake or restart request on the row holds no close", func(t *testing.T) {
+		for _, req := range [][]string{{"wake_request", "explicit"}, {"restart_requested", "true"}} {
+			c := mk(t, livenessGone, desireDrain, "state", "asleep", req[0], req[1])
+			c.entry().DrainReason = drainOrphaned
+			if s := c.run(t, gone().tmux()); s.Outcome != settledLanded || !s.Closed {
+				t.Fatalf("%s: settlement %+v, want the close landed", req[0], s)
+			}
 		}
 	})
 	t.Run("work holds the close, with no lease taken", func(t *testing.T) {
@@ -467,12 +523,91 @@ func TestCloseEffectEdges(t *testing.T) {
 			t.Fatalf("kills %d, want none: the read did not pin one object", n)
 		}
 	})
-	t.Run("a corpse on a row that claims a live runtime is not A21's", func(t *testing.T) {
+	t.Run("an undesired row's dead runtime is removed, then the row closes (MAINT-031)", func(t *testing.T) {
 		c := newCloseCase(t, livenessGone, desireDrain, "state", "active")
 		c.entry().DrainReason = drainOrphaned
 		f := corpseRead(c, false, false)
-		if s := c.run(t, f.tmux()); s.Cause != causeRedecided || c.row(t).Status == "closed" || f.Fake.CountCalls("KillCorpseObject", "s-close") != 0 {
-			t.Fatalf("settlement %+v kills %d, want refused redecided with no kill", s, f.Fake.CountCalls("KillCorpseObject", "s-close"))
+		if s := c.run(t, f.tmux()); !s.Closed || f.Fake.CountCalls("KillCorpseObject", "s-close") != 1 {
+			t.Fatalf("settlement %+v kills %d, want the corpse removed and the row closed", s, f.Fake.CountCalls("KillCorpseObject", "s-close"))
+		}
+	})
+	t.Run("an undesired row's zombie is removed by object and recorded stopped, then the row closes", func(t *testing.T) {
+		for _, tc := range []struct {
+			name             string
+			attached, absent bool // absent: the kill finds no zombie (another object)
+			kills, stopped   int
+			closed           bool
+		}{
+			{"removed", false, false, 1, 1, true},
+			{"attached: refuses live-pane, nothing stopped", true, false, 0, 0, false},
+			{"the kill finds no zombie: nothing recorded stopped", false, true, 1, 0, false},
+			{"another row's zombie by the fresh read: never killed", false, false, 0, 0, false},
+		} {
+			c := newCloseCase(t, livenessDead, desireDrain, "state", "active")
+			c.entry().DrainReason = drainOrphaned
+			f := corpseRead(c, tc.attached, false)
+			f.l = runtime.Liveness{Running: true, ObjectID: "$1", ObjectCreated: "1", PanePID: "42"}
+			if err := f.Fake.Start(context.Background(), "s-close", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			f.Fake.Zombies["s-close"] = !tc.absent
+			if tc.kills == 0 && !tc.attached {
+				f.env["GC_SESSION_ID"], f.env["GC_INSTANCE_TOKEN"] = "gc-other", "theirs"
+			}
+			f.read = func() { // the kill removes it
+				if f.Fake.CountCalls("KillZombieObject", "s-close") > 0 && !tc.absent {
+					f.l = runtime.Liveness{}
+				}
+			}
+			s := c.run(t, f.tmux())
+			stopped := 0
+			for _, e := range s.Facts.Events {
+				if e.Type == events.SessionStopped && e.Subject == "worker" && e.SessionID == c.k.ID {
+					stopped++
+				}
+			}
+			if kills := f.Fake.CountCalls("KillZombieObject", "s-close"); kills != tc.kills || stopped != tc.stopped || s.Closed != tc.closed {
+				t.Fatalf("%s: settlement %+v kills %d session.stopped %d, want %d %d closed %v", tc.name, s, kills, stopped, tc.kills, tc.stopped, tc.closed)
+			}
+			if tc.kills == 0 && s.Cause != causeLivePane {
+				t.Fatalf("%s: settlement %+v, want refused live-pane", tc.name, s)
+			}
+		}
+	})
+	t.Run("a dead row inside INC-003's grace requeues at its end", func(t *testing.T) {
+		woke := gatherNow.Add(-time.Minute)
+		c := newCloseCase(t, livenessDead, desireDrain, "state", "active", "last_woke_at", woke.Format(time.RFC3339))
+		c.entry().DrainReason = drainOrphaned
+		if it, next := decideRow(c.w, c.a, c.k); it.Kind == intentClose || !next.Equal(woke.Add(wakeUndesiredGrace)) {
+			t.Fatalf("decideRow = (%q, %v), want no close and a requeue at %v", it.Kind, next, woke.Add(wakeUndesiredGrace))
+		}
+	})
+	t.Run("legacy's exclusions keep a live-claiming row's dead runtime off A21", func(t *testing.T) {
+		for name, meta := range map[string][]string{
+			"named": {"configured_named_session", "true", "configured_named_identity", "worker"},
+			// A wanted seat the start parked: AL1's pool count skips a row
+			// with a terminal error, so it reads Drain (orphaned), and must
+			// never close as orphaned (§12.2 #19).
+			"a wanted seat parked": {"provider_terminal_error", "model_not_found", "sleep_reason", string(session.SleepReasonProviderTerminalError)},
+			"stop requested":       {session.DrainIntentReasonKey, "orphaned", session.DrainIntentAtKey, gatherNow.Format(time.RFC3339), session.DrainIntentIncarnationKey, "3"},
+		} {
+			c := newCloseCase(t, livenessDead, desireDrain, append([]string{"state", "active"}, meta...)...)
+			c.entry().DrainReason = drainOrphaned
+			c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Token: deadToken(c.w.Observed[c.k].Identity)}} // A12 is done with it
+			if it := c.decide(); it.Kind == intentClose {
+				t.Fatalf("%s: decide proposed %q, want no close", name, it.Reason)
+			}
+		}
+		for name, meta := range map[string][]string{
+			"control":                    nil,
+			"a stale terminal mark only": {"provider_terminal_error", "quota_exceeded"}, // nothing clears it: the park is the sleep reason
+		} {
+			c := newCloseCase(t, livenessDead, desireDrain, append([]string{"state", "active"}, meta...)...)
+			c.entry().DrainReason = drainOrphaned
+			c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Token: deadToken(c.w.Observed[c.k].Identity)}}
+			if it := c.decide(); it.Kind != intentClose {
+				t.Fatalf("%s: decide = (%q, %q), want the close", name, it.Kind, it.Reason)
+			}
 		}
 	})
 	t.Run("a live pane refuses live-pane", func(t *testing.T) {
@@ -738,10 +873,63 @@ func TestReadWorkScopeByKind(t *testing.T) {
 	w.Env = &reconcileEnv{Cfg: c.cfg}
 	p := newEffectPass(&w, c.a)
 	row := c.w.Census.Rows[c.k].Info
-	if got := p.readWork(row, intentClose); !got.Free {
+	if got := p.readWork(row, intent{Kind: intentClose}); !got.Free {
 		t.Fatalf("close's L5 = %+v, want free: a prior alias is not the dead seat's", got)
 	}
-	if got := p.readWork(row, intentDrainBegin); got.Free {
+	if got := p.readWork(row, intent{Kind: intentDrainBegin}); got.Free {
 		t.Fatalf("a drain's L5 = %+v, want work: the live seat may hold a prior alias's claim", got)
+	}
+}
+
+// Kills the close re-deciding on another row's zombie (the C5c2 delta
+// review): on the fresh read only the row's own zombie is a dead runtime
+// A21 closes over; another row's is a live pane, so no work branch runs
+// ahead of the live-pane refusal.
+func TestFreshClosableOwnZombieOnly(t *testing.T) {
+	c := newCloseCase(t, livenessDead, desireDrain, "state", "active")
+	c.entry().DrainReason = drainOrphaned
+	row := c.w.Census.Rows[c.k]
+	for name, id := range map[string]runtimeIdentity{
+		"own":     {Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"},
+		"another": {Known: true, SessionID: "gc-other", Epoch: "1", Token: "theirs"},
+	} {
+		r := &rowFacts{w: c.w, k: c.k, row: row, found: true, entry: c.entry(), fresh: &txRuntime{Class: rtZombie, Same: true, Identity: id}}
+		if got := r.freshClosable(); got != (name == "own") {
+			t.Fatalf("%s zombie: freshClosable = %v", name, got)
+		}
+	}
+}
+
+// Kills a failed create closed under its still-leased claim (SESS-058,
+// mc-mcud0): legacy keeps it open while the pending-create lease holds, a
+// start possibly holding it; once the lease expires, or its agent is
+// suspended, A21 closes it, and a lease anchor skewed ahead of the clock
+// (v5.9r) holds nothing.
+func TestFailedCreateHeldWhileLeased(t *testing.T) {
+	ago := func(d time.Duration) string { return gatherNow.Add(d).Format(time.RFC3339) }
+	for _, c := range []struct {
+		name      string
+		meta      []string
+		suspended bool
+		want      string
+	}{
+		{"leased (never started, inside the deadline)", []string{"pending_create_started_at", ago(-time.Minute)}, false, decideFailedCreateLeased},
+		{"leased (a start in flight)", []string{"pending_create_started_at", ago(-11 * time.Minute), "last_woke_at", ago(-10 * time.Second)}, false, decideFailedCreateLeased},
+		{"the lease expired", []string{"pending_create_started_at", ago(-11 * time.Minute)}, false, decideCloseFailedCreate},
+		{"its agent suspended", []string{"pending_create_started_at", ago(-time.Minute)}, true, decideCloseFailedCreate},
+		{"an anchor 6 minutes ahead", []string{"pending_create_started_at", ago(6 * time.Minute)}, false, decideCloseFailedCreate},
+		{"an anchor a year ahead", []string{"pending_create_started_at", ago(365 * 24 * time.Hour)}, false, decideCloseFailedCreate},
+	} {
+		cc := newCloseCase(t, livenessGone, desireNone, append([]string{"state", "failed-create", "pending_create_claim", "true"}, c.meta...)...)
+		cc.entry().Reason = reasonFailedCreate
+		for i := range cc.cfg.Agents {
+			if cc.cfg.Agents[i].Name == "worker" {
+				cc.cfg.Agents[i].Suspended = c.suspended
+			}
+		}
+		cc.w.Env = &reconcileEnv{Cfg: cc.cfg}
+		if it := cc.decide(); it.Reason != c.want || (c.want == decideFailedCreateLeased) != (it.Kind == "") {
+			t.Fatalf("%s: decideRow = (%q, %q), want %q", c.name, it.Kind, it.Reason, c.want)
+		}
 	}
 }

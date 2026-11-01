@@ -17,11 +17,15 @@ import (
 // is unset. The store unions their rows by id and ApplyListQuery then applies
 // the whole query exactly, so a plan only decides how many rows cross from the
 // backend, never which rows the caller receives: every predicate it pushes is
-// exact or a superset of the query's.
+// exact or a superset of the query's. The one exception is a Live "open", which
+// is pushed as bd's raw status (nativeListPushesRawOpen).
 //
 // A plural Assignees set fans out into one request per distinct assignee, each
-// with that assignee pushed, up to nativeListAssigneeFanOutMax. The status and
-// type pushdowns are nativeListRequestFromListQuery's.
+// with that assignee pushed, however many there are: a keyed request reads one
+// assignee's rows, while the one request a plural set would otherwise collapse
+// into carries no assignee and, for a type and status that cannot be pushed
+// (open mail), walks the whole ledger. The status and type pushdowns are
+// nativeListRequestFromListQuery's.
 //
 // A FANNED-OUT PLAN IS SEVERAL SNAPSHOTS. The reader role publishes no read
 // transaction, so each request reads the ledger as of its own arrival: a bead
@@ -38,11 +42,6 @@ import (
 func NativeListPlan(query ListQuery) []issueops.ListRequest {
 	return nativeListPlan(query, nativeListDefaultPushableTypes)
 }
-
-// nativeListAssigneeFanOutMax bounds the plural-assignee fan-out. No hook asks
-// for more than an identity's routes (id, alias, session name and alias
-// history); a larger set stays one request with the assignees applied Go-side.
-const nativeListAssigneeFanOutMax = 8
 
 // nativeListPlan is NativeListPlan over a store's own pushable type set. A nil
 // set pushes no type at all.
@@ -80,9 +79,6 @@ func nativeListFanOutAssignees(query ListQuery) []string {
 		seen[assignee] = true
 		out = append(out, assignee)
 	}
-	if len(out) > nativeListAssigneeFanOutMax {
-		return nil
-	}
 	return out
 }
 
@@ -90,6 +86,48 @@ func nativeListFanOutAssignees(query ListQuery) []string {
 // bd status. mapBdStatus folds every other bd status into gc's "open".
 func nativeListPushableStatus(status string) bool {
 	return status == "in_progress" || status == "closed"
+}
+
+// nativeListPushesRawOpen reports whether query's "open" is pushed to the
+// backing as bd's raw status rather than answered as gc's folded "open".
+//
+// A Live read is a lifecycle gate asking for the backing's own answer, and
+// every other backing gives the RAW status for Live Status:"open": BdStore
+// passes --status=open to bd, while SQLiteStore, DoltliteReadStore and MemStore
+// match the stored status exactly. The callers are written against that
+// answer: the controller's demand reads; the seat-work gates (config-drift
+// deferral, max session age, slot-freeable, the drain-ack close gate); route
+// recovery; and the orphan sweep. To them a blocked or deferred bead is
+// parked, not work (gc-4zb/#4395, EB-42o8/gc-nz5i). Before this, only native
+// cities answered with the folded "open", so every one of those gates counted
+// parked beads as live work. A seat holding only a blocked bead never drained,
+// never took a config change, and was re-offered the bead on every wake.
+//
+// The readers that move or flag a session's work read the same answer, so
+// parked work is left assigned where it is: the retirement reassignments
+// (cmd/gc session_beads.go, internal/api session_resolution.go), the
+// stranded-repair unclaim through SeatWork, and the identity-residue doctor;
+// a seat the close gate lets go with only parked work keeps it too. That is
+// BdStore's behavior, accepted here as parity; ga-7uf6c7 tracks moving parked
+// work as well.
+//
+// A non-Live read keeps the folded answer while CachingStore serves it from
+// the cache: PrimeActive lists without Live, so the cache holds blocked rows
+// as "open". The cache's fallback re-issues the read Live, though, so a cold
+// or degraded cache, more than dirtyOverlayMaxGets dirty rows, or a failed
+// overlay read returns the raw answer (ga-4w9wpf). Count declines the open
+// shape (nativeDoltCountSupported); callers keep the folded answer through the
+// List fallback, or the raw one when that List is Live.
+//
+// CachingStore's Live stale-row sweep (staleLiveCacheIDs) skips a cached row
+// whose SourceStatus is another status, so the parked rows this leaves out
+// cost no read.
+//
+// This is the one plan predicate that is not a superset of the query: it
+// leaves out rows that ApplyListQuery's folded "open" would keep. That is
+// deliberate, and it applies only under Live.
+func nativeListPushesRawOpen(query ListQuery) bool {
+	return query.Live && query.Status == "open"
 }
 
 // nativeTypesInfraConfigKey is the workspace setting naming the types bd treats
@@ -180,9 +218,11 @@ func nativeListTypeRefused(err error) bool {
 // NativeListRequestKeyed reports whether req carries a predicate that narrows
 // the backend's candidate set below the whole ledger. A request without one
 // returns every row of both tiers, closed rows included, and is the full walk
-// the list-request tripwire counts.
+// the list-request tripwire counts. An IDFilter is one: the exact batch read
+// (GetExactBatch) narrows its listing to the ids it reads.
 func NativeListRequestKeyed(req issueops.ListRequest) bool {
-	return req.ParentID != "" ||
+	return req.IDFilter != "" ||
+		req.ParentID != "" ||
 		req.Assignee != "" ||
 		len(req.Labels) > 0 ||
 		len(req.MetadataFields) > 0 ||
@@ -195,7 +235,8 @@ func NativeListRequestKeyed(req issueops.ListRequest) bool {
 type ListRequestStats struct {
 	// Lists is the number of List calls the store served.
 	Lists int64
-	// Requests is the number of backend listing requests those calls issued.
+	// Requests is the number of backend listing requests the store issued: its
+	// List calls' and its exact batch reads' (GetExactBatch).
 	Requests int64
 	// Unkeyed is the number of requests that carried no narrowing predicate
 	// and therefore read the whole ledger.

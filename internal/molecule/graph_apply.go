@@ -254,6 +254,12 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 				}
 				node.MetadataRefs[beadmeta.RootBeadIDMetadataKey] = rootKey
 			}
+			if opts.stampAttachRootID {
+				if node.MetadataRefs == nil {
+					node.MetadataRefs = make(map[string]string, 1)
+				}
+				node.MetadataRefs[beadmeta.AttachRootIDMetadataKey] = rootKey
+			}
 			if logicalStepID, ok := logicalRecipeStepID(step); ok {
 				if node.MetadataRefs == nil {
 					node.MetadataRefs = make(map[string]string, 1)

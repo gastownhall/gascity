@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"testing"
 	"time"
 
@@ -81,6 +82,7 @@ func TestOperatorSuspendHoldsTheRow(t *testing.T) {
 	}{
 		"operator":                    {state: StateActive, suspend: operatorSuspend, held: true},
 		"operator on sweep-suspended": {state: StateSuspended, suspend: operatorSuspend, held: true},
+		"operator on drained":         {state: StateDrained, suspend: operatorSuspend, held: true},
 		"shutdown":                    {state: StateActive, suspend: sweepSuspend},
 		"chat idle":                   {state: StateActive, suspend: idleSuspend},
 		"chat idle on suspended":      {state: StateSuspended, suspend: idleSuspend},
@@ -103,6 +105,33 @@ func TestOperatorSuspendHoldsTheRow(t *testing.T) {
 				got.Metadata["suspended_at"] == now.Format(time.RFC3339)
 			if got.Metadata["held_until"] != "" && !held || held != tc.held || got.Metadata["state"] != string(StateSuspended) {
 				t.Fatalf("state=%q held_until=%q sleep_intent=%q, want suspended held=%v", got.Metadata["state"], got.Metadata["held_until"], got.Metadata["sleep_intent"], tc.held)
+			}
+		})
+	}
+}
+
+// TestOnlyTheOperatorSuspendsADrainedRow: an operator's suspend holds a
+// drained row (TestOperatorSuspendHoldsTheRow), but the shutdown sweep and
+// the idle auto-suspend write no hold, so they leave a drained row to its
+// drain: they still refuse it, and the row stays drained.
+func TestOnlyTheOperatorSuspendsADrainedRow(t *testing.T) {
+	for name, suspend := range map[string]func(m *Manager, id string) error{
+		"shutdown":  sweepSuspend,
+		"chat idle": idleSuspend,
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			mgr := newTestManager(t, store, runtime.NewFake())
+			b := wakeRow(t, store)
+			if err := store.SetMetadata(b.ID, "state", string(StateDrained)); err != nil {
+				t.Fatal(err)
+			}
+			var illegal *IllegalTransitionError
+			if err := suspend(mgr, b.ID); !errors.As(err, &illegal) {
+				t.Fatalf("suspend of a drained row = %v, want an illegal transition", err)
+			}
+			if got := mustGet(t, store, b.ID).Metadata; got["state"] != string(StateDrained) || got["held_until"] != "" {
+				t.Fatalf("state=%q held_until=%q, want the row left drained", got["state"], got["held_until"])
 			}
 		})
 	}
@@ -144,6 +173,9 @@ func TestChatIdleSuspendHoldsNothing(t *testing.T) {
 	if got.Metadata["state"] != string(StateSuspended) || got.Metadata["held_until"] != "" || got.Metadata["sleep_intent"] != "" || got.Metadata["wake_request"] != "" {
 		t.Fatalf("state=%q held_until=%q sleep_intent=%q wake_request=%q, want suspended, unheld, wake cleared",
 			got.Metadata["state"], got.Metadata["held_until"], got.Metadata["sleep_intent"], got.Metadata["wake_request"])
+	}
+	if _, err := time.Parse(time.RFC3339, got.Metadata["suspended_at"]); err != nil {
+		t.Fatalf("suspended_at = %q, want the SuspendSoft cell's stamp", got.Metadata["suspended_at"])
 	}
 	draining := wakeRow(t, store)
 	if err := store.SetMetadata(draining.ID, "state", string(StateDraining)); err != nil {
@@ -279,8 +311,104 @@ func TestApplySleepKeepsTheHolds(t *testing.T) {
 		if got.Metadata["sleep_intent"] != want || got.Metadata["state"] != string(StateAsleep) {
 			t.Errorf("intent %q: after the sleep state=%q sleep_intent=%q, want asleep with %q", intent, got.Metadata["state"], got.Metadata["sleep_intent"], want)
 		}
-		if _, ok := patch["sleep_intent"]; !ok {
+		if !maps.Equal(patch, SleepPatch(now, "idle")) {
 			t.Errorf("intent %q: ApplySleep mutated its input", intent)
+		}
+	}
+}
+
+// TestApplySleepKeepsALateQuarantinesReason (mc-slkxd): legacy's finalize
+// through the Sleep cell keeps the reason of a quarantine in force at its
+// slept_at (quarantine, rate_limit, context-churn); an expired quarantine's
+// reason, or any other, is the finalize's.
+func TestApplySleepKeepsALateQuarantinesReason(t *testing.T) {
+	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		reason string
+		until  time.Duration
+		want   string
+	}{
+		{"quarantine", time.Hour, "quarantine"},
+		{"rate_limit", time.Hour, "rate_limit"},
+		{"context-churn", time.Hour, "context-churn"},
+		{"quarantine", -time.Minute, "idle"},
+		{"idle", time.Hour, "drained"},
+	} {
+		store := beads.NewMemStore()
+		b := wakeRow(t, store)
+		until := now.Add(c.until).Format(time.RFC3339)
+		if err := store.SetMetadataBatch(b.ID, map[string]string{"sleep_reason": c.reason, "quarantined_until": until}); err != nil {
+			t.Fatal(err)
+		}
+		reason := "idle"
+		if c.reason == "idle" {
+			reason = "drained"
+		}
+		patch := SleepPatch(now, reason)
+		if _, err := NewStore(beads.SessionStore{Store: store}).ApplySleep(b.ID, patch); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := store.Get(b.ID)
+		if got.Metadata["sleep_reason"] != c.want || got.Metadata["quarantined_until"] != until || got.Metadata["state"] != string(StateAsleep) {
+			t.Errorf("%s until %s: state=%q sleep_reason=%q quarantined_until=%q, want asleep with %q and the quarantine kept",
+				c.reason, c.until, got.Metadata["state"], got.Metadata["sleep_reason"], got.Metadata["quarantined_until"], c.want)
+		}
+		if !maps.Equal(patch, SleepPatch(now, reason)) {
+			t.Errorf("%s: ApplySleep mutated its input", c.reason)
+		}
+	}
+}
+
+// TestApplySleepQuarantineBoundary (mc-slkxd's q4): a quarantine ending at
+// the finalize's slept_at is over, so the finalize's reason wins; one second
+// later it is in force and keeps its reason. A patch with no slept_at is
+// judged now, never at zero time (which would keep an expired quarantine's
+// reason).
+func TestApplySleepQuarantineBoundary(t *testing.T) {
+	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name  string
+		until time.Time
+		patch MetadataPatch
+		want  string
+	}{
+		{"until == slept_at", now, SleepPatch(now, "idle"), "idle"},
+		{"until one second after slept_at", now.Add(time.Second), SleepPatch(now, "idle"), "quarantine"},
+		{"no slept_at, an expired quarantine", time.Now().Add(-time.Hour), MetadataPatch{"state": string(StateAsleep), "sleep_reason": "idle"}, "idle"},
+	} {
+		store := beads.NewMemStore()
+		b := wakeRow(t, store)
+		if err := store.SetMetadataBatch(b.ID, map[string]string{"sleep_reason": "quarantine", "quarantined_until": c.until.UTC().Format(time.RFC3339)}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := NewStore(beads.SessionStore{Store: store}).ApplySleep(b.ID, c.patch); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := store.Get(b.ID); got.Metadata["sleep_reason"] != c.want {
+			t.Errorf("%s: sleep_reason %q, want %q", c.name, got.Metadata["sleep_reason"], c.want)
+		}
+	}
+}
+
+// TestKeepQuarantineReason pins the helper's cases.
+func TestKeepQuarantineReason(t *testing.T) {
+	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+	live := Disposition{Quarantine: now.Add(time.Hour)}
+	for _, c := range []struct {
+		d      Disposition
+		reason string
+		kept   bool
+	}{
+		{live, "quarantine", true},
+		{live, "rate_limit", true},
+		{live, "context-churn", true},
+		{live, "idle", false},
+		{Disposition{Quarantine: now.Add(-time.Minute)}, "quarantine", false},
+		{Disposition{}, "quarantine", false},
+	} {
+		patch := KeepQuarantineReason(MetadataPatch{"sleep_reason": "idle"}, c.d, c.reason, now)
+		if _, set := patch["sleep_reason"]; set == c.kept {
+			t.Errorf("%+v %q: patch %v, want the row's reason kept %v", c.d, c.reason, patch, c.kept)
 		}
 	}
 }
@@ -419,5 +547,25 @@ func TestSetWaitHoldOnAClosedRow(t *testing.T) {
 	}
 	if after := mustGet(t, mem, b.ID).Metadata; after["wait_hold"] != before["wait_hold"] || after["sleep_intent"] != before["sleep_intent"] {
 		t.Errorf("closed row wait_hold %q -> %q, intent %q -> %q; want no write", before["wait_hold"], after["wait_hold"], before["sleep_intent"], after["sleep_intent"])
+	}
+}
+
+// TestCloseClearsTheHolds: a closed row keeps no hold, intent or stamp: the
+// close's clear is the Retire cell.
+func TestCloseClearsTheHolds(t *testing.T) {
+	store := beads.NewMemStore()
+	mgr := newTestManager(t, store, runtime.NewFake())
+	b := wakeRow(t, store)
+	if err := store.SetMetadataBatch(b.ID, map[string]string{"sleep_intent": "user-hold", "held_until": dispT0.Format(time.RFC3339), "wait_hold": "true", "suspended_at": dispT0.Format(time.RFC3339)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.CloseDetailed(context.Background(), testActor(mgr, ActorOperator), b.ID); err != nil {
+		t.Fatalf("CloseDetailed: %v", err)
+	}
+	m := mustGet(t, store, b.ID).Metadata
+	for _, k := range dispositionKeys {
+		if m[k] != "" {
+			t.Errorf("%s = %q after the close, want cleared", k, m[k])
+		}
 	}
 }

@@ -130,9 +130,36 @@ func TestResolveScopedFromEnvIgnoresAmbientBeadsDoltPassword(t *testing.T) {
 	t.Setenv("BEADS_DOLT_PASSWORD", "operator-secret")
 	t.Setenv("BEADS_CREDENTIALS_FILE", "")
 
-	resolved := ResolveScopedFromEnv(scopeRoot, "fallback-user", map[string]string{})
+	resolved := ResolveScopedFromEnv(scopeRoot, "fallback-user", map[string]string{}, os.Getenv)
 	if resolved.Password != "" {
 		t.Fatalf("Password = %q, want empty without scoped secret", resolved.Password)
+	}
+}
+
+// TestResolveScopedFromEnvReadsAmbientCredentialsFileThroughCaller pins that the
+// scoped resolver takes its ambient BEADS_CREDENTIALS_FILE fallback from the
+// caller's reader rather than os.Getenv: gc builds scope envs while a native
+// open may hold another scope's credentials file in the process env, and passes
+// a reader that sees the restored ambient value instead.
+func TestResolveScopedFromEnvReadsAmbientCredentialsFileThroughCaller(t *testing.T) {
+	scopeRoot := t.TempDir()
+	t.Setenv("GC_DOLT_USER", "")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	t.Setenv("BEADS_DOLT_PASSWORD", "")
+	t.Setenv("BEADS_CREDENTIALS_FILE", writeCredentialsFile(t, "127.0.0.1", 3307, "other-scope-secret"))
+	ambientPath := writeCredentialsFile(t, "127.0.0.1", 3307, "operator-secret")
+
+	resolved := ResolveScopedFromEnv(scopeRoot, "fallback-user", map[string]string{"GC_DOLT_PORT": "3307"}, func(key string) string {
+		if key == "BEADS_CREDENTIALS_FILE" {
+			return ambientPath
+		}
+		return ""
+	})
+	if resolved.CredentialsFileOverride != ambientPath {
+		t.Fatalf("CredentialsFileOverride = %q, want the caller's ambient %q", resolved.CredentialsFileOverride, ambientPath)
+	}
+	if resolved.Password != "operator-secret" {
+		t.Fatalf("Password = %q, want operator-secret from the caller's ambient credentials file", resolved.Password)
 	}
 }
 

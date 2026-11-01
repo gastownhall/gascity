@@ -1777,3 +1777,38 @@ func samePath(a, b string) bool {
 	resolvedB, errB := filepath.EvalSymlinks(b)
 	return errA == nil && errB == nil && resolvedA == resolvedB
 }
+
+func TestCodexSnapshotAndActivityAgreeOnExplicitCompletion(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "rollout.jsonl")
+	lines := []string{
+		`{"type":"session_meta","payload":{"id":"codex-test","cwd":"/test"}}`,
+		`{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Ready"}]}}`,
+		`{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}`,
+	}
+	adapter := SessionLogAdapter{SearchPaths: []string{root}}
+	for _, completed := range []bool{false, true} {
+		n := len(lines) - 1
+		want := TailActivityInTurn
+		if completed {
+			n++
+			want = TailActivityIdle
+		}
+		writeLines(t, path, lines[:n]...)
+		snapshot, err := adapter.LoadHistory(LoadRequest{Provider: "codex/tmux-cli", TranscriptPath: path})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.TailState.Activity != want {
+			t.Fatalf("completed=%v snapshot activity=%q want=%q", completed, snapshot.TailState.Activity, want)
+		}
+		activity, err := adapter.TailActivityForProvider("codex/tmux-cli", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if activity != want {
+			t.Fatalf("completed=%v activity=%q want=%q", completed, activity, want)
+		}
+	}
+}

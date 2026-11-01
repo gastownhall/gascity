@@ -1,6 +1,7 @@
 package main
 
 import (
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -25,17 +26,24 @@ const (
 	intentAdopt           = "adopt"             // S1's adopt: commits a live runtime, never launches
 	intentCreate          = inflightCreate      // C1; a named create may reopen its closed row (C2)
 	intentRekey           = "rekey"             // S4
+	intentLiveApply       = "live-apply"        // A14's RunLive (SESS-565)
+	intentDriftRepair     = "drift-repair"      // A14's asleep named repair (SESS-566/568): a fresh heal of its own kind
+	intentDriftRestart    = "drift-restart"     // A14's named restart in place (SESS-557), on the stop verb
+	intentDriftRelaunch   = "drift-relaunch"    // A14's launch-only relaunch (SESS-556/560), falling back to the restart or the drain
 	intentZombie          = "zombie"            // A12's classification (S5)
 	intentDrainBegin      = "drain-begin"       // D1, D2
 	intentDrainBeginFresh = "drain-begin-fresh" // a begin that reads fresh legs (F4) or re-proves idleness
 	intentSignal          = "signal"            // D2
 	intentSignalFresh     = "signal-fresh"      // a signal that reads fresh legs or revalidates claims
+	intentSignalAck       = "signal-ack"        // A11's: reads the runtime, to void an ack older than it
 	intentDrainCancel     = "drain-cancel"      // A19
 	intentDrainVoid       = "drain-void"        // A19
 	intentStop            = "stop"              // the stop verb with its finalize (D3, D4)
 	intentClose           = "close"             // A21 (C3)
 	intentRollback        = "rollback"          // A10 (C3)
 	intentRowMetadata     = "row-metadata"      // A7 (M1)
+	intentRuntimeAlias    = "runtime-alias"     // A7's runtime alias sync, after its alias write (M1)
+	intentMarkerClear     = "marker-clear"      // A13's pinned skip: clears the runtime's restart marker (SESS-521)
 	intentBaseline        = "baseline"          // A8 (M2)
 	intentRowHeal         = "row-heal"          // A6's heals and markers, and other row writes
 	intentRowHealFresh    = "row-heal-fresh"    // A6's not-alive heals: a fresh read under the name lock first
@@ -98,6 +106,20 @@ const (
 )
 
 // intent is one effect the pass proposes for admission.
+// folded is it's write as a plain patch, for a read of what it writes (a fold
+// onto a row); the write itself carries Class typed.
+func (it intent) folded() session.MetadataPatch { return foldClass(it.Patch, it.Class) }
+
+// foldClass is patch with class's keys, as a plain patch for a read.
+func foldClass(patch session.MetadataPatch, class session.DispositionPatch) session.MetadataPatch {
+	out := maps.Clone(patch)
+	if out == nil {
+		out = session.MetadataPatch{}
+	}
+	maps.Copy(out, class.Fold())
+	return out
+}
+
 type intent struct {
 	Kind     string
 	Key      rowKey      // the row; zero for a create
@@ -112,11 +134,22 @@ type intent struct {
 	// Finalize marks the stop verb proposed for a row whose runtime reads
 	// gone: it confirms and finalizes, and stops nothing (A4, D3).
 	Finalize bool
+	// Finish is the stop verb's finalize builder (D4); nil is
+	// finalizePatch. C7a's restart and idle-timeout, and C6d's idle
+	// respawn, call the verb with their own.
+	Finish stopFinish
 	// Patch is a row write's patch and Event what it records once it lands.
 	// The row-write effect re-decides on the fresh row and writes the
 	// re-decided intent's (R2).
 	Patch session.MetadataPatch
+	// Class is the disposition cells' keys the write carries beside Patch,
+	// decided without a mint (session.Cell); the effect's write mints them
+	// (DispositionPatch.Into).
+	Class session.DispositionPatch
 	Event *events.Event
+	// AliasLock is the city alias lock A7's row-metadata verb takes around
+	// its effect (v5 M1), when its alias work needs one.
+	AliasLock string
 	// Heal is the A6 heal a start carries into its PreWake (startHealed),
 	// written alone when the start is not admitted or refuses before it.
 	Heal *intent
@@ -127,6 +160,22 @@ type intent struct {
 	Kept session.MetadataPatch
 	// Closing is a close's kind and kept assignees (A21).
 	Closing closeSpec
+	// Relaunch marks A10's StaleSelf exit for a configured named row (v5
+	// S7): the rollback stops its own runtime and keeps the row, which A18
+	// relaunches on the same bead.
+	Relaunch bool
+	// Occupant marks an A10 rollback that rests on another runtime under
+	// the row's name: Occupied (another row's) or S7's StaleSelf. The
+	// effect rolls back only while its fresh read still finds one (F1).
+	Occupant bool
+	// Workless marks an A10 rollback decided on a work read that found no
+	// in-progress work assigned to the row's session (#2081): the effect
+	// reads that work again, live (rollbackNeeds), and once that read finds
+	// none either takes a live incarnation of the row's own session that its
+	// fresh read finds as it takes any other StaleSelf or NewerSelf runtime,
+	// since none of that session's work is in flight there. The zero value
+	// holds over one.
+	Workless bool
 	// Rests are the fresh facts the decision rests on, which only a fresh
 	// kind's arm records: its effect reads them and decides again on them.
 	Rests rests
@@ -163,13 +212,16 @@ type admitInput struct {
 
 // admitResult is admit's output: the intents to submit, the rest with their
 // causes, and the planner state for the next pass. NextToken, when a start
-// waited for a token, is when the bucket next holds one: a pass to schedule.
+// waited for a token, is when the bucket next holds one; NextBackoff, when a
+// row backoff deferred an intent, is the earliest such deferral's expiry
+// (CONTRACT v5.10d (b)): each a pass to schedule.
 type admitResult struct {
-	Admitted  []intent
-	Deferred  []intent
-	Bucket    bucketState
-	FairSeed  uint64
-	NextToken time.Time
+	Admitted    []intent
+	Deferred    []intent
+	Bucket      bucketState
+	FairSeed    uint64
+	NextToken   time.Time
+	NextBackoff time.Time
 }
 
 // admission is one admit's working state.
@@ -182,6 +234,9 @@ type admission struct {
 	bucket   bucketState
 	seen     map[rowKey]bool // rows with an intent this pass
 	starved  bool            // a start waited for a token
+	// nextBackoff is the earliest expiry of a row backoff that deferred an
+	// intent.
+	nextBackoff time.Time
 	// inFlight is the city in-flight count, and counted the rows holding a
 	// slot in it.
 	inFlight    int
@@ -253,7 +308,7 @@ func admit(in admitInput, intents []intent) admitResult {
 		}
 		res.Admitted = append(res.Admitted, it)
 	}
-	res.Bucket, res.FairSeed = a.bucket, in.FairSeed
+	res.Bucket, res.FairSeed, res.NextBackoff = a.bucket, in.FairSeed, a.nextBackoff
 	if a.starved {
 		res.NextToken = a.bucket.nextToken(a.capacity, a.interval)
 	}
@@ -326,13 +381,24 @@ func (a *admission) admitOne(it *intent) string {
 		a.seen[it.Key] = true
 	}
 	spec, ok := effectSpecs[it.Kind]
-	backoff := a.in.Backoff[rowBackoffKey(it.Key)]
+	backoff, own := a.in.Backoff[rowBackoffKey(it.Key)], backoffRecord{}
+	if k := settledBackoffKey(it.Kind, it.Reason, it.Key); k != rowBackoffKey(it.Key) {
+		own = a.in.Backoff[k] // a drift kind's or an idle stop's own key holds it alone
+	}
+	var held time.Time // when the row's live backoff records release it
+	if it.Key.ID != "" && !it.finalizesOnly(backoff) && backoff.live(a.in.Now) {
+		held = backoff.Until
+	}
+	if it.Key.ID != "" && own.live(a.in.Now) && own.Until.After(held) {
+		held = own.Until
+	}
 	switch {
 	case !ok:
 		return causeUnknownKind
 	case spec.bootGated && !a.in.BootOpen:
 		return causeBootGate
-	case it.Key.ID != "" && !it.finalizesOnly(backoff) && backoff.live(a.in.Now):
+	case !held.IsZero():
+		a.nextBackoff = earliest(a.nextBackoff, held)
 		return causeRowBackoff
 	case a.in.Paused && (spec.class == capStarts || spec.class == capCreates):
 		return causeSwapPause

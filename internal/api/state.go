@@ -14,6 +14,8 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
@@ -48,6 +50,14 @@ type MaintenanceProvider interface {
 	// is held it returns *supervisor.MaintenanceInProgressError so the
 	// POST handler can translate to 409 Conflict.
 	TriggerNow(ctx context.Context) (supervisor.MaintenanceRun, error)
+}
+
+// NudgeQueue is the part of the city's nudge queue the API writes through:
+// the deferred submit a session cannot take yet, and the withdrawal of a
+// closed or woken session's queued wait nudges.
+type NudgeQueue interface {
+	EnqueueDeferred(nudgequeue.Item) error
+	WithdrawQueuedWaitNudges([]string) error
 }
 
 // State provides read access to controller-managed state.
@@ -139,6 +149,10 @@ type State interface {
 	// nil when no store is available.
 	NudgesBeadStore() beads.NudgesStore
 
+	// NudgeQueue returns the city's nudge queue, through which the API queues
+	// deferred submits and withdraws wait nudges.
+	NudgeQueue() NudgeQueue
+
 	// SessionsBeadStore returns the store backing session-class beads — session
 	// lifecycle (type=session/gc:session) and durable session waits
 	// (type=gate/gc:wait). At the default backend this is the same store as
@@ -227,6 +241,19 @@ type State interface {
 	// Handlers treat nil as "feature disabled" and respond with a typed
 	// 503 so the CLI can print a useful message.
 	MaintenanceLoop() MaintenanceProvider
+
+	// ApplyStartupPrompt returns hints with the startup prompt of the session
+	// described by info delivered for a launch that resumes it: the prompt rides
+	// the post-start nudge and the launch env carries the delivered marker, so
+	// the SessionStart hook adds context without repeating a prompt the provider
+	// cannot inline in full. resolved and transport are the provider and
+	// transport the caller resolved for the launch. Prompt rendering and the
+	// delivery policy live in the controller, not the API, so the hints a worker
+	// factory resumes with cannot drift from the ones the reconciler launches
+	// with. Hints are returned unchanged for a session that is closed, has no
+	// prompt, or runs on a runtime that cannot carry a nudge. A non-nil error
+	// means the prompt cannot be delivered and the launch must not proceed.
+	ApplyStartupPrompt(info session.Info, resolved *config.ResolvedProvider, transport string, hints runtime.Config) (runtime.Config, error)
 }
 
 // AgentUpdate holds optional fields for a partial agent update. Pointer fields
@@ -317,6 +344,15 @@ type RolloutFlagsProvider interface {
 	RolloutFlags() rollout.Flags
 }
 
+// OpsCrashPointsProvider is an optional State capability: the crash-point
+// hook (legacyop.Recorder.CrashPoints) every op recorder of the State's
+// Servers carries. cmd/gc's controllerState answers its GC_OPS_FAILPOINT
+// hook, nil unless a test-hooks gc armed one. A State without it gives its
+// recorders none.
+type OpsCrashPointsProvider interface {
+	OpsCrashPoints() legacyop.CrashPointFunc
+}
+
 // AgentVisibilityWaiter is an optional capability for states whose Config()
 // snapshot may briefly lag a successful agent mutation. Callers that need
 // strict read-after-write semantics for agent target resolution can type-assert
@@ -330,6 +366,18 @@ type AgentVisibilityWaiter interface {
 	// resolves the given qualified agent name, or returns an error if the
 	// projection does not converge before ctx is done.
 	WaitForAgentVisibility(ctx context.Context, qualifiedName string) error
+}
+
+// SessionKillHooks is an optional capability of the State whose process runs
+// the city's controller: the effects of an operator kill (`gc session kill`,
+// the API session kill) that only the controller's process holds. A State
+// without it kills without them.
+type SessionKillHooks interface {
+	// ResetSessionCircuitBreaker clears a configured named session's respawn
+	// circuit breaker, so the controller can revive the killed session.
+	ResetSessionCircuitBreaker(sessionID, identity string) error
+	// RecordSessionKillStop records the kill's stop metric.
+	RecordSessionKillStop(info session.Info)
 }
 
 // StateMutator extends State with write operations for mutation endpoints.

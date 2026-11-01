@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"io"
@@ -39,10 +40,11 @@ import (
 //     no release failed; with no marker, the effect stamps one and records
 //     session.stranded (SESS-624), unless every claim's detached probe still
 //     reports alive.
-//  3. The premise close: L5 must read Free, except for a SESS-080 phantom,
-//     whose work is the configured identity's; a repair, whose release
-//     decided; and an orphaned orphan whose remaining claims no lane serves
-//     (O5, revised). The terminal patch is the re-decided intent's.
+//  3. The premise close, through the shared precondition (closePermitted):
+//     L5 must read Free, except for a SESS-080 phantom, whose work is the
+//     configured identity's; a repair, whose release decided; and an
+//     orphaned orphan whose remaining claims no lane serves (O5, revised).
+//     The terminal patch is the re-decided intent's.
 //  4. After a landed close only, outside every lock (around): legacy's
 //     post-close cascade, best-effort (closeReleases.cascade). A claim no
 //     lane serves stays on the closed row (O5, revised) and raises
@@ -108,40 +110,75 @@ func redecideClose(v txView) (intent, string) {
 	return fresh, causeRedecided
 }
 
-// corpseKill is the corpse the first section's Call removes.
+// corpseKill is the corpse the first section's Call removes, and for a
+// zombie the session.stopped its removal records.
 type corpseKill struct {
-	leaf runtime.Provider
-	name string
-	live runtime.Liveness // the read's latest: its object
-	now  time.Time
+	leaf    runtime.Provider
+	name    string
+	live    runtime.Liveness // the read's latest: its object
+	now     time.Time
+	stopped *events.Event // an undesired row's own zombie (C5c2): pane up, agent dead
 }
 
 func (k corpseKill) found() bool { return k.leaf != nil }
 
 // closeCorpseStep refuses a close A21 no longer decides, and hands the Call
-// a corpse read on one session object across the read.
+// a corpse read on one session object across the read: any corpse (the
+// corpse exception), or the row's own zombie, whose stop it records as
+// legacy's drain records stopping it (its drain-ack stop), with the close's
+// reason. Another row's zombie is left, and the close refuses live-pane.
 func closeCorpseStep(v txView) txStep {
 	if _, cause := redecideClose(v); cause != "" {
 		return txStep{Refuse: cause}
 	}
-	if v.RT.Class != rtCorpse || !v.RT.Same {
+	zombie := v.RT.Class == rtZombie && ownRuntime(compareIdentity(v.Row, v.RT.Identity), v.Row, v.RT.Identity)
+	if v.RT.Class != rtCorpse && !zombie || !v.RT.Same {
 		return txStep{Pass: corpseKill{}}
 	}
-	return txStep{Pass: corpseKill{leaf: v.RT.leaf, name: strings.TrimSpace(v.Row.SessionName), live: v.RT.Again, now: v.Now}}
+	k := corpseKill{leaf: v.RT.leaf, name: strings.TrimSpace(v.Row.SessionName), live: v.RT.Again, now: v.Now}
+	if zombie {
+		template := strings.TrimSpace(v.Row.Template)
+		if v.World.Env != nil {
+			template = cmp.Or(normalizedSessionTemplateInfo(v.Row, v.World.Env.Cfg), template)
+		}
+		k.stopped = &events.Event{
+			Type: events.SessionStopped, Actor: "gc", Subject: template, Message: "dead runtime removed at close", SessionID: v.Row.ID,
+			Payload: api.SessionLifecyclePayloadJSON(v.Row.ID, template, "dead runtime removed"),
+		}
+	}
+	return txStep{Pass: k}
+}
+
+// corpseKilled is how the corpse kill ended: the session.stopped of the
+// zombie it removed, kept as the Call returns (callFacts).
+type corpseKilled struct{ stopped *events.Event }
+
+func (k corpseKilled) facts() effectFacts {
+	if k.stopped == nil {
+		return effectFacts{}
+	}
+	return effectFacts{Events: []events.Event{*k.stopped}}
 }
 
 // killCorpse removes k's corpse when L3 passes, on a leaf that kills by
 // session object; the kill re-checks the object server-side.
-func killCorpse(ctx context.Context, _ txCaps, k corpseKill) (struct{}, error) {
+func killCorpse(ctx context.Context, _ txCaps, k corpseKill) (corpseKilled, error) {
 	killer, ok := k.leaf.(runtime.SessionObjectKiller)
 	if !ok {
-		return struct{}{}, nil
+		return corpseKilled{}, nil
 	}
 	if reason, _ := attachLeg(ctx, k.leaf, k.name, false, k.now); reason != "" {
-		return struct{}{}, nil // an attached corpse stays (v5 D3)
+		return corpseKilled{}, nil // an attached corpse stays (v5 D3); an attached zombie holds the close
 	}
-	_, err := killer.KillCorpseObject(k.name, k.live.ObjectID, k.live.ObjectCreated)
-	return struct{}{}, err
+	if k.stopped == nil {
+		_, err := killer.KillCorpseObject(k.name, k.live.ObjectID, k.live.ObjectCreated)
+		return corpseKilled{}, err
+	}
+	res, err := killer.KillZombieObject(k.name, k.live.ObjectID, k.live.ObjectCreated, k.live.PanePID)
+	if res != runtime.SessionObjectKilled {
+		return corpseKilled{}, err
+	}
+	return corpseKilled{stopped: k.stopped}, err
 }
 
 // strandedWork is the stranded branch's probe: the unmarked pool slot's
@@ -265,6 +302,9 @@ func closeStep(v txView, strandedOnly bool, _ error) txStep {
 	rel, relErr := callResult[closeReleased](v)
 	step := txStep{Facts: effectFacts{Events: rel.events}}
 	fresh, cause := redecideClose(v)
+	if v.RT.Class == rtZombie {
+		cause = causeLivePane // a zombie the first section did not remove: its pane is up
+	}
 	work := v.Fence.Work == nil || !v.Fence.Work.Free
 	switch c := fresh.Closing; {
 	case cause != "":
@@ -273,13 +313,18 @@ func closeStep(v txView, strandedOnly bool, _ error) txStep {
 		step.Refuse, step.Err = causeReleaseFailed, relErr
 	case c.Repair && rel.why == releaseStrandedRepair:
 		step.Terminal = session.ClosePatch(v.World.Now, strandedRepairCloseReason)
-	case work && !c.Phantom && (!c.Orphaned || !strandedOnly):
-		step.Refuse = causeHasWork
-		if v.Fence.Work != nil {
-			step.Err = v.Fence.Work.Err
-		}
 	default:
-		step.Terminal = fresh.Patch
+		// The shared precondition (closePermitted), its work L5's: a phantom's
+		// work is its configured identity's, and an orphaned orphan's unserved
+		// claims do not keep it (O5, revised). A repair needs none: A21 never
+		// decides one on a row KeepsSlot holds, and redecideClose refuses a
+		// suspend that lands after the pass.
+		switch step.Refuse = closePermitted(v.Row, closeGated, work && !c.Phantom && (!c.Orphaned || !strandedOnly)); {
+		case step.Refuse == causeHasWork && v.Fence.Work != nil:
+			step.Err = v.Fence.Work.Err
+		case step.Refuse == "":
+			step.Terminal, step.Class = fresh.Patch, fresh.Class
+		}
 	}
 	return step
 }

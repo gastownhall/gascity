@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -258,7 +259,7 @@ func conformanceReadyFederation(t *testing.T, e splitEnv) {
 	// every leg and counts them, which is what makes "the tick cannot see it"
 	// different from "nothing can".
 	if e.split {
-		report := newRouteRecoveryLane().backstopLeg(planeLeg{label: "city", store: e.work})
+		report := newRouteRecoveryLane().backstopLeg(planeLeg{label: "city", store: e.work, planHasBinding: true})
 		if report.offPlaneRouted == 0 {
 			t.Errorf("the convergence lane reported no off-plane routed work for %s, which the runtime plane just refused; a bead no reader counts is D6 with extra steps", hqWork.ID)
 		}
@@ -382,22 +383,20 @@ func conformanceAssignedWorkCapture(t *testing.T, e splitEnv) {
 // is what made maintainer-city boot-fatal at ~42 strands/hour, and it is #5127's
 // bug class exactly: infrastructure beads born in the work store on a split city.
 //
-// RIG scopes keeping their rig work store is not a symmetry violation. Class
-// routing is CITY-keyed — one graph binding per city, not one per rig — so
-// routing rig scopes to it would merge every rig's loops into a single ledger
-// keyed by nothing, and the scopes would stop being scopes. It is the same
-// city-only rule controlScopeTakesGraphClass already applies to control beads,
-// which are ClassGraph too.
+// Under the S4 placement rule RIG scopes follow the same rule on a split city:
+// a rig's loops are created in the graph binding too, stamped with
+// gc.root_store_ref=rig:<name>, and each scope lists only its own rows, so the
+// scopes stay scopes inside the one binding. Rig stores hold only work.
 //
-// The pour arm is what that asymmetry costs. "Convergence pours a wisp" names
-// the operation, not what the formula compiles to: a v1 POURED formula compiles
-// to a molecule whose every bead is ClassWork, and work does not belong in the
-// infrastructure binding. On a relocated city scope that pour must be REFUSED,
-// because landing it strands work-class beads in the binding and landing it
-// anywhere else orphans children from their parent across a store boundary —
-// neither recoverable by the loop itself. Everywhere the store IS the scope's
-// own work ledger (every rig scope, and the city scope of a single-store city)
-// the identical pour must still succeed, or the fix broke every legacy loop.
+// The pour arm is what the rule costs. "Convergence pours a wisp" names the
+// operation, not what the formula compiles to: a v1 POURED formula compiles to
+// a molecule whose every bead is ClassWork, and work does not belong in the
+// infrastructure binding. On a split city that pour must be REFUSED at every
+// scope, because landing it strands work-class beads in the binding and landing
+// it anywhere else orphans children from their parent across a store boundary
+// — neither recoverable by the loop itself. On a single-store city every scope
+// is served from its own work ledger and the identical pour must still succeed,
+// or the fix broke every legacy loop.
 func conformanceConvergenceResidence(t *testing.T, e splitEnv) {
 	e.cfg.FormulaLayers = config.FormulaLayers{City: []string{convergenceResidenceFormulaDir(t)}}
 	cr := &CityRuntime{
@@ -432,11 +431,15 @@ func conformanceConvergenceResidence(t *testing.T, e splitEnv) {
 		t.Errorf("city scope storePath = %q, want the city root %q — it is the gate command's cwd, not a store locator", city.storePath, e.cityPath)
 	}
 
-	if !sameStorePtr(rigScope.store, e.rig) {
-		t.Errorf("the %q convergence scope is not served from that rig's work store; class routing is city-keyed, so pointing rig scopes at the one graph binding merges every rig's loops into a single ledger", e.rigName)
+	wantRigStore := e.rig
+	if e.split {
+		wantRigStore = e.graphStore()
 	}
-	if rigScope.adapter.relocated {
-		t.Error("rig scope adapter reports relocated=true; a rig scope's store IS its work ledger, so a work-class pour belongs there and must not be refused")
+	if !sameStorePtr(rigScope.store, wantRigStore) {
+		t.Errorf("the %q convergence scope is not served from the store the S4 placement rule names (split=%v): rig loops belong in the graph binding on a split city and in the rig's own store otherwise", e.rigName, e.split)
+	}
+	if rigScope.adapter.relocated != e.split {
+		t.Errorf("rig scope adapter relocated = %v, want %v", rigScope.adapter.relocated, e.split)
 	}
 	if want := resolveStoreScopeRoot(e.cityPath, e.cfg.Rigs[0].Path); rigScope.storePath != want {
 		t.Errorf("rig scope storePath = %q, want the rig root %q", rigScope.storePath, want)
@@ -448,22 +451,26 @@ func conformanceConvergenceResidence(t *testing.T, e splitEnv) {
 	cityRoot := convergenceRootIn(t, city, "city convergence loop")
 	assertConvergenceRootResident(t, e, cityRoot, e.graphStore(), "city")
 	rigRoot := convergenceRootIn(t, rigScope, "rig convergence loop")
-	assertConvergenceRootResident(t, e, rigRoot, e.rig, "rig "+e.rigName)
+	assertConvergenceRootResident(t, e, rigRoot, wantRigStore, "rig "+e.rigName)
 
 	// vapor compiles root-only, so its one bead carries gc.kind=wisp and is graph
 	// class: it belongs wherever the scope is served from, on both topologies.
 	assertConvergencePours(t, city, cityRoot, convergenceVaporFormula, 1, e.graphStore(), "city")
-	assertConvergencePours(t, rigScope, rigRoot, convergenceVaporFormula, 1, e.rig, "rig "+e.rigName)
+	assertConvergencePours(t, rigScope, rigRoot, convergenceVaporFormula, 1, wantRigStore, "rig "+e.rigName)
 
 	// poured compiles to a molecule root plus a child step, every bead ClassWork.
-	// A scope serving its own work ledger must still run it — that is every rig
-	// scope, and the city scope of a single-store city.
-	assertConvergencePours(t, rigScope, rigRoot, convergencePouredFormula, 2, e.rig, "rig "+e.rigName)
+	// On a single-store city every scope serves its own work ledger and must
+	// still run it; on a split city every scope refuses it.
 	if !e.split {
+		assertConvergencePours(t, rigScope, rigRoot, convergencePouredFormula, 2, e.rig, "rig "+e.rigName)
 		assertConvergencePours(t, city, cityRoot, convergencePouredFormula, 2, e.work, "city")
 		return
 	}
 	assertConvergenceRefusesWorkClassPour(t, e, city, cityRoot)
+	assertConvergenceRefusesWorkClassPour(t, e, rigScope, rigRoot)
+	if _, err := e.rig.Get(rigRoot.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("the rig convergence root %s resolves in the rig's work store (err=%v); on a split city a rig store holds only work", rigRoot.ID, err)
+	}
 }
 
 // convergenceRootIn creates a convergence loop root through a scope's own
@@ -542,7 +549,7 @@ func assertConvergenceRefusesWorkClassPour(t *testing.T, e splitEnv, scope *conv
 	beforeClass, beforeWork := countBeads(t, scope.store), countBeads(t, e.work)
 	id, err := scope.adapter.PourWisp(parent.ID, convergencePouredFormula, fmt.Sprintf("converge:%s:iter:2", parent.ID), nil, "")
 	if err == nil {
-		t.Fatalf("the relocated city scope poured work-class formula %q as %s into the graph binding; those beads are exactly the strand the per-boot containment re-check makes boot-fatal", convergencePouredFormula, id)
+		t.Fatalf("the relocated %q scope poured work-class formula %q as %s into the graph binding; those beads are exactly the strand the per-boot containment re-check makes boot-fatal", scope.rig, convergencePouredFormula, id)
 	}
 	if !strings.Contains(err.Error(), "work-class") {
 		t.Errorf("refusal for %q = %v, want a message naming the work-class compile and the remedy", convergencePouredFormula, err)
@@ -811,7 +818,7 @@ func conformanceClaimRouting(t *testing.T, e splitEnv) {
 	fanout := hookWorkQueryStores(e.cityPath, e.cfg, hookAgent,
 		hookAgent.QualifiedName(),
 		agentCommandDir(e.cityPath, hookAgent, e.cfg.Rigs),
-		mergeRuntimeEnv(nil, hookEnv), hookEnv)
+		mergeRuntimeEnv(nil, hookEnv), hookEnv, nil)
 	if want := 1 + len(e.cfg.Rigs); len(fanout) != want {
 		t.Errorf("`gc hook --claim` fans out over %d store(s), want %d (city + %d rig) — a leg appeared or vanished; the class binding is reached through hookClaimOps, never as a leg, because it is not a bd workspace", len(fanout), want, len(e.cfg.Rigs))
 	}
@@ -1134,6 +1141,20 @@ func assertClassRoutedClaimIsReleasable(t *testing.T, e splitEnv) {
 			// A configured "worker" lane the released step routes to.
 			legs := workLegsFromCensus(e.cityPath, servingRigsCity(e.cfg, "worker"), cityWorkLeg{store: e.work}, e.rigStores)
 			unclaimWorkAssignedToRetiredSessionBead(legs, tt.leading, sessionBead, "", io.Discard)
+			if tt.leading == e.work {
+				// This row hands the session bead's store in as the WORK store,
+				// a shape no production caller has any more (gc session close
+				// passes its sessions-class store), so clearing the claim
+				// back-channel reads the session id through the work leaf. The
+				// strict leaf records that; the release below is what this row
+				// asserts, so the read is claimed here.
+				workLeaf, _, _ := unwrapBeadPolicyStore(e.work)
+				for _, v := range splittest.TakeSplitViolations(workLeaf) {
+					if v.ID != sessionBead.ID {
+						t.Errorf("unexpected split violation on the work leaf: %s", v)
+					}
+				}
+			}
 			released, err := e.class.Get(step.ID)
 			if err != nil {
 				t.Fatalf("reading the claimed graph step back from the binding: %v", err)
@@ -2034,7 +2055,7 @@ func conformanceCLIReadyDeadRigLeg(t *testing.T, e splitEnv) {
 	}
 
 	legs := mustReadyLegs(t, loadedCityName(dead.cfg, dead.cityPath), dead.work, dead.rigStores, fixtureGraphLeg(dead))
-	rows, err := readyBeadsForOpts(legs, readyOpts{})
+	rows, err := readywork.Read(legs, readywork.Query{})
 	if err == nil {
 		t.Fatalf("gc ready served %d beads over the same dead %q leg; the API said that read was PARTIAL, and a bare array has nowhere to say so — the CLI's equivalent of Partial 200 is a non-zero exit", len(rows), deadRig)
 	}
@@ -2067,7 +2088,7 @@ func cliReadyIDs(t *testing.T, e splitEnv) []string {
 		e.rigStores,
 		fixtureGraphLeg(e),
 	)
-	rows, err := readyBeadsForOpts(legs, readyOpts{})
+	rows, err := readywork.Read(legs, readywork.Query{})
 	if err != nil {
 		t.Fatalf("gc ready over the fixture stores: %v", err)
 	}
@@ -2228,7 +2249,7 @@ func conformanceFederatedInFlightTier(t *testing.T, e splitEnv, ownerName string
 	}
 
 	legs := mustReadyLegs(t, loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
-	rows, err := readyBeadsForOpts(legs, readyOpts{status: readyStatusInProgress})
+	rows, err := readywork.Read(legs, readywork.Query{Status: readywork.StatusInProgress})
 	if err != nil {
 		t.Fatalf("gc ready --status in_progress over the fixture stores: %v", err)
 	}
@@ -2450,7 +2471,7 @@ func conformanceProjectionCoherence(t *testing.T, e splitEnv) {
 	legs := mustReadyLegs(t, loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
 	readyIDs := func(status string) []string {
 		t.Helper()
-		rows, err := readyBeadsForOpts(legs, readyOpts{status: status, metadataFields: []string{selector}})
+		rows, err := readywork.Read(legs, readywork.Query{Status: status, MetadataFields: []string{selector}})
 		if err != nil {
 			t.Fatalf("the federated reader the refusal steers to failed on --status %q: %v", status, err)
 		}
@@ -2590,8 +2611,10 @@ func conformanceWorkQueryFederation(t *testing.T, e splitEnv) {
 		// fell through would print `[]` and exit 0, which is the same fail-open one
 		// layer up. internal/config's TestFederatedWorkQueryPropagatesADeadLeg
 		// EXECUTES this; the clause is pinned here so the split-topology row cannot
-		// go green on a command that swallows it.
-		if !strings.Contains(cmd, `|| exit $?`) {
+		// go green on a command that swallows it. The work query's clause names the
+		// failed read on stderr before exiting with its status (`exit "$gc_rc"`);
+		// the count-form exits with it directly (`|| exit $?`).
+		if !strings.Contains(cmd, `|| exit $?`) && !strings.Contains(cmd, `exit "$gc_rc"`) {
 			t.Errorf("a split city's %s runs the federated reader without propagating its exit status: %q", name, cmd)
 		}
 	}
@@ -2611,12 +2634,12 @@ func conformanceWorkQueryFederation(t *testing.T, e splitEnv) {
 
 	routed := e.mintWispWith(t, wispOpts{title: "routed graph step", routedTo: e.qualified})
 	legs := mustReadyLegs(t, loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
-	rows, err := readyBeadsForOpts(legs, readyOpts{
-		unassigned:     true,
-		metadataFields: []string{beadmeta.RoutedToMetadataKey + "=" + e.qualified},
-		excludeTypes:   []string{"epic"},
-		sortOrder:      readySortOldest,
-		limit:          20,
+	rows, err := readywork.Read(legs, readywork.Query{
+		Unassigned:     true,
+		MetadataFields: []string{beadmeta.RoutedToMetadataKey + "=" + e.qualified},
+		ExcludeTypes:   []string{"epic"},
+		Sort:           readywork.SortOldest,
+		Limit:          20,
 	})
 	if err != nil {
 		t.Fatalf("the reader the split work_query names failed over healthy stores: %v", err)
@@ -2661,12 +2684,12 @@ func conformanceWorkQueryClaimsWhatItSees(t *testing.T, e splitEnv) {
 	t.Helper()
 
 	routed := e.mintWispWith(t, wispOpts{title: "routed graph step", routedTo: e.qualified})
-	assertFederatedReaderServes(t, e, routed.ID, "routed", readyOpts{
-		unassigned:     true,
-		metadataFields: []string{beadmeta.RoutedToMetadataKey + "=" + e.qualified},
-		excludeTypes:   []string{"epic"},
-		sortOrder:      readySortOldest,
-		limit:          20,
+	assertFederatedReaderServes(t, e, routed.ID, "routed", readywork.Query{
+		Unassigned:     true,
+		MetadataFields: []string{beadmeta.RoutedToMetadataKey + "=" + e.qualified},
+		ExcludeTypes:   []string{"epic"},
+		Sort:           readywork.SortOldest,
+		Limit:          20,
 	})
 	assertClaimEscalatesOffTheWorkStore(t, e, routed.ID, "routed")
 
@@ -2675,10 +2698,10 @@ func conformanceWorkQueryClaimsWhatItSees(t *testing.T, e splitEnv) {
 	// (graphroute.ApplyGraphRouteBinding sets step.Assignee for a non-pool,
 	// non-direct binding, and molecule materialization writes it through).
 	assigned := e.mintWispWith(t, wispOpts{title: "assigned graph step", assignee: e.qualified})
-	assertFederatedReaderServes(t, e, assigned.ID, "assigned", readyOpts{
-		assignee:  e.qualified,
-		sortOrder: readySortOldest,
-		limit:     20,
+	assertFederatedReaderServes(t, e, assigned.ID, "assigned", readywork.Query{
+		Assignee: e.qualified,
+		Sort:     readywork.SortOldest,
+		Limit:    20,
 	})
 	assertClaimEscalatesOffTheWorkStore(t, e, assigned.ID, "assigned")
 
@@ -2691,10 +2714,10 @@ func conformanceWorkQueryClaimsWhatItSees(t *testing.T, e splitEnv) {
 // a restatement of it. It is the "sees" half of every see-and-claim row: a claim
 // assertion on a bead the query never served would prove nothing about the
 // command.
-func assertFederatedReaderServes(t *testing.T, e splitEnv, graphBeadID, tier string, opts readyOpts) {
+func assertFederatedReaderServes(t *testing.T, e splitEnv, graphBeadID, tier string, opts readywork.Query) {
 	t.Helper()
 	legs := mustReadyLegs(t, loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
-	rows, err := readyBeadsForOpts(legs, opts)
+	rows, err := readywork.Read(legs, opts)
 	if err != nil {
 		t.Fatalf("the reader the split work_query's %s tier names failed over healthy stores: %v", tier, err)
 	}

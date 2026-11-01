@@ -504,6 +504,39 @@ func TestDrainRemindersSpentReadsTheDurableBudget(t *testing.T) {
 	}
 }
 
+// A deferral is not an attempt: the runtime typed nothing because the session
+// was running a turn its submit keys would have interrupted
+// (runtime.ErrSessionBusy). The reservation is restored, the row is held as
+// busy, and the next pass delivers reminder 1.
+func TestDrainReminderBusyDeferralSpendsNoAttempt(t *testing.T) {
+	e := newDrainReminderEnv(t)
+	busy := &busyAtDeliveryProvider{Fake: e.sp, busy: true}
+
+	if got := e.remindWith(busy); got != drainReminderHeld {
+		t.Fatalf("outcome = %v, want held for a deferred delivery", got)
+	}
+	if busy.deferred != 1 {
+		t.Fatalf("deferred = %d, want 1", busy.deferred)
+	}
+	if got := e.meta(drainReminderCountKey); got != "0" {
+		t.Errorf("%s = %q, want 0: a deferral spends no attempt", drainReminderCountKey, got)
+	}
+	if got := e.meta(drainReminderFailedKey); got != "0" {
+		t.Errorf("%s = %q, want 0: a deferral is not an undeliverable attempt", drainReminderFailedKey, got)
+	}
+	if got := e.meta(drainReminderHoldKey); got != drainReminderHoldBusy {
+		t.Errorf("%s = %q, want %q", drainReminderHoldKey, got, drainReminderHoldBusy)
+	}
+
+	busy.busy = false
+	if got := e.remindWith(busy); got != drainReminderDelivered {
+		t.Fatalf("outcome = %v, want reminder 1 delivered once the session takes it", got)
+	}
+	if got := e.meta(drainReminderCountKey); got != "1" {
+		t.Errorf("%s = %q, want 1", drainReminderCountKey, got)
+	}
+}
+
 // An attempt that never arrived is not a reminder anybody ignored. The spend is
 // never unwound — a permanently input-dead pane must not re-send forever — but
 // it is recorded separately, so the escalation that follows says what actually

@@ -3,11 +3,13 @@ package main
 import (
 	"io"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/readywork"
 )
 
 // The POOL-DEMAND half of reader agreement (#6019).
@@ -48,20 +50,31 @@ func seedRoutedWork(t *testing.T, store beads.Store, target, title string) beads
 // claim reader's legs.
 func claimableRoutedIDs(t *testing.T, e legAgreementEnv, target string) map[string]bool {
 	t.Helper()
+	out := map[string]bool{}
+	for _, id := range claimOrderedRoutedIDs(t, e, target) {
+		out[id] = true
+	}
+	return out
+}
+
+// claimOrderedRoutedIDs is the order a seat for target is served routed work:
+// `gc ready` over the claim reader's legs, merged in the canonical ready order.
+func claimOrderedRoutedIDs(t *testing.T, e legAgreementEnv, target string) []string {
+	t.Helper()
 	legs, err := readyFederationLegsOverBinding(e.cityName, e.work, e.rigs, e.binding)
 	if err != nil {
 		t.Fatalf("readyFederationLegsOverBinding: %v", err)
 	}
-	rows, err := readyBeadsForOpts(legs, readyOpts{
-		unassigned:     true,
-		metadataFields: []string{beadmeta.RoutedToMetadataKey + "=" + target},
+	rows, err := readywork.Read(legs, readywork.Query{
+		Unassigned:     true,
+		MetadataFields: []string{beadmeta.RoutedToMetadataKey + "=" + target},
 	})
 	if err != nil {
 		t.Fatalf("gc ready over the claim legs: %v", err)
 	}
-	out := map[string]bool{}
+	out := make([]string, 0, len(rows))
 	for _, row := range rows {
-		out[row.ID] = true
+		out = append(out, row.ID)
 	}
 	return out
 }
@@ -290,5 +303,89 @@ func TestPoolScaleCheckRetainedFrozenCopyCountsFirstLegWins(t *testing.T) {
 	}
 	if claimable := claimableRoutedIDs(t, e, "worker"); !claimable["gc-relic-1"] || len(claimable) != 1 {
 		t.Fatalf("claim reader served %v; the probe must agree with it on the relic (both serve the frozen copy until #7074 clears it)", claimable)
+	}
+}
+
+func seedRoutedWorkAtPriority(t *testing.T, store beads.Store, target, title string, priority int) beads.Bead {
+	t.Helper()
+	b, err := store.Create(beads.Bead{
+		Title:    title,
+		Type:     "task",
+		Status:   "open",
+		Priority: &priority,
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: target},
+	})
+	if err != nil {
+		t.Fatalf("seed routed work: %v", err)
+	}
+	return b
+}
+
+// assertPoolDemandOrderMatchesClaim checks that pool demand names routed work
+// in the order the claim reader serves it. New seats are placed for the first
+// demand ids, and a seat's claim window is the head of the claim order, so a
+// demand list in leg order places seats for beads their windows serve last.
+func assertPoolDemandOrderMatchesClaim(t *testing.T, e legAgreementEnv, template string, want []string) {
+	t.Helper()
+	claimOrder := claimOrderedRoutedIDs(t, e, template)
+	if !slices.Equal(claimOrder, want) {
+		t.Fatalf("fixture: claim order = %v, want %v", claimOrder, want)
+	}
+	_, _, demand, _, errs := poolDemandForEnv(t, e)
+	if len(errs) != 0 {
+		t.Fatalf("pool demand probe errors: %v", errs)
+	}
+	if got := demand[template].WorkBeadIDs; !slices.Equal(got, claimOrder) {
+		t.Fatalf("pool demand order = %v, claim order = %v", got, claimOrder)
+	}
+}
+
+func TestPoolScaleCheckDemandOrderMatchesClaimOrderAcrossLegs(t *testing.T) {
+	e := newLegAgreementEnv(t, true)
+	e.cfg.Agents = []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(5)}}
+	ledger := seedRoutedWorkAtPriority(t, e.work, "worker", "work-ledger P2", 2)
+	binding := seedRoutedWorkAtPriority(t, e.binding, "worker", "binding P1", 1)
+	assertPoolDemandOrderMatchesClaim(t, e, "worker", []string{binding.ID, ledger.ID})
+}
+
+func TestRigPoolScaleCheckDemandOrderMatchesClaimOrderAcrossLegs(t *testing.T) {
+	e := newLegAgreementEnv(t, true, "alpha")
+	e.cfg.Agents = []config.Agent{{Name: "worker", Dir: "alpha", StartCommand: "true", MaxActiveSessions: intPtr(5)}}
+	rig := seedRoutedWorkAtPriority(t, e.rigs["alpha"], "alpha/worker", "rig P3", 3)
+	ledger := seedRoutedWorkAtPriority(t, e.work, "alpha/worker", "work-ledger P2", 2)
+	binding := seedRoutedWorkAtPriority(t, e.binding, "alpha/worker", "binding P1", 1)
+	assertPoolDemandOrderMatchesClaim(t, e, "alpha/worker", []string{binding.ID, ledger.ID, rig.ID})
+}
+
+// With one seat to place, the controller places it for the bead the claim
+// window serves first, and carries that bead's own store reference.
+func TestPoolDemandPlacesTheOnlySeatForTheClaimWindowHead(t *testing.T) {
+	e := newLegAgreementEnv(t, true)
+	e.cfg.Agents = []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(1)}}
+	seedRoutedWorkAtPriority(t, e.work, "worker", "work-ledger P2", 2)
+	binding := seedRoutedWorkAtPriority(t, e.binding, "worker", "binding P1", 1)
+	claimOrder := claimOrderedRoutedIDs(t, e, "worker")
+	if len(claimOrder) == 0 || claimOrder[0] != binding.ID {
+		t.Fatalf("fixture: claim order = %v, want %s first", claimOrder, binding.ID)
+	}
+	_, counts, demand, _, errs := poolDemandForEnv(t, e)
+	if len(errs) != 0 {
+		t.Fatalf("pool demand probe errors: %v", errs)
+	}
+	states := ComputePoolDesiredStatesWithDemandTraced(e.cfg, nil, nil, counts, demand, nil)
+	var requests []SessionRequest
+	for _, state := range states {
+		if state.Template == "worker" {
+			requests = state.Requests
+		}
+	}
+	if len(requests) != 1 {
+		t.Fatalf("requests for worker = %+v, want exactly one seat", requests)
+	}
+	if got := requests[0].WorkBeadID; got != binding.ID {
+		t.Fatalf("the only seat is placed for %s, want the claim window head %s", got, binding.ID)
+	}
+	if got, want := requests[0].WorkStoreRef, demand["worker"].StoreRefs[binding.ID]; got == "" || got != want {
+		t.Fatalf("seat store ref = %q, want the binding row's own store ref %q", got, want)
 	}
 }

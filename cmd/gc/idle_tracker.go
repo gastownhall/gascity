@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"sync"
 	"time"
 
@@ -165,18 +166,20 @@ func (m *memoryIdleTracker) checkIdle(sessionName, template, provider, transport
 
 // checkIdleByContent drives the per-session idle-since anchor from a
 // point-in-time pane scan and reports whether the session has been
-// continuously idle longer than timeout. A busy observation resets the anchor;
-// firing clears it so a restarted session re-measures from scratch. An
-// observation error leaves the anchor untouched — a transient read failure
-// must neither reset a long accumulation nor be mistaken for idleness.
+// continuously idle longer than timeout. A busy observation resets the anchor,
+// and so does an indeterminate one (runtime.ErrIdleIndeterminate: no ready
+// prompt on screen), so an anchor never spans a stretch the scan could not read
+// as idle; firing clears it so a restarted session re-measures from scratch.
+// Any other observation error leaves the anchor untouched — a transient read
+// failure must neither reset a long accumulation nor be mistaken for idleness.
 func (m *memoryIdleTracker) checkIdleByContent(sessionName string, snap runtime.IdleSnapshotProvider, timeout time.Duration, now time.Time) bool {
 	idle, err := snap.SnapshotIdle(sessionName)
-	if err != nil {
+	if err != nil && !errors.Is(err, runtime.ErrIdleIndeterminate) {
 		return false
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !idle {
+	if err != nil || !idle {
 		delete(m.idleSince, sessionName)
 		return false
 	}

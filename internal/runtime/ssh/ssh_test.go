@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -22,11 +23,24 @@ type fakeRunner struct {
 	code    int
 	err     error
 	respond func(remoteArgv []string) ([]byte, int, error)
+	// panes answers the agent-pane list-panes lookups ("<mark>\t@W.%P"
+	// rows); empty means one marked agent pane, @1.%1. rawPanes sends the
+	// lookups to respond/out like any other call.
+	panes    string
+	rawPanes bool
 }
 
 func (f *fakeRunner) run(_ context.Context, _ Endpoint, remoteArgv []string, stdin []byte) ([]byte, int, error) {
 	f.calls = append(f.calls, remoteArgv)
 	f.stdins = append(f.stdins, stdin)
+	if !f.rawPanes && isAgentPaneLookup(remoteArgv) {
+		// Answer as tmux does: the format's separator, a space.
+		rows := f.panes
+		if rows == "" {
+			rows = "agent\t@1.%1"
+		}
+		return []byte(strings.ReplaceAll(rows, "\t", " ") + "\n"), 0, nil
+	}
 	if f.respond != nil {
 		return f.respond(remoteArgv)
 	}
@@ -76,10 +90,11 @@ func TestParseEndpoint(t *testing.T) {
 
 func TestSSHArgs_BuildsClientInvocation(t *testing.T) {
 	ep := Endpoint{User: "gcagent", Host: "100.110.9.92", Port: 2222, KeyPath: "/k/id", KnownHostsPath: "/k/known"}
-	got := sshArgs(ep, []string{"tmux", "send-keys", "-t", "main", "-l", "hi there"})
+	got := sshArgs(ep, sshConfigured{connectTimeout: true, serverAlive: true}, []string{"tmux", "send-keys", "-t", "main", "-l", "hi there"})
 	want := []string{
 		"-o", "BatchMode=yes",
 		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "LogLevel=ERROR",
 		"-o", "UserKnownHostsFile=/k/known",
 		"-i", "/k/id",
 		"-p", "2222",
@@ -92,10 +107,11 @@ func TestSSHArgs_BuildsClientInvocation(t *testing.T) {
 }
 
 func TestSSHArgs_MinimalEndpoint(t *testing.T) {
-	got := sshArgs(Endpoint{Host: "box"}, []string{"true"})
+	got := sshArgs(Endpoint{Host: "box"}, sshConfigured{connectTimeout: true, serverAlive: true}, []string{"true"})
 	want := []string{
 		"-o", "BatchMode=yes",
 		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "LogLevel=ERROR",
 		"--", "box", "'true'",
 	}
 	if !slices.Equal(got, want) {
@@ -184,4 +200,10 @@ func TestTmuxCarrierDrivesOverSSH(t *testing.T) {
 			t.Errorf("remote argv[%d] = %v, want %v", i, f.calls[i], want[i])
 		}
 	}
+}
+
+// isAgentPaneLookup matches the provider's agent-pane list-panes calls.
+func isAgentPaneLookup(argv []string) bool {
+	return len(argv) >= 2 && argv[0] == "tmux" && argv[1] == "list-panes" &&
+		argv[len(argv)-1] == agentPaneRowFormat
 }

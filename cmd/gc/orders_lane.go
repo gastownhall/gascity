@@ -188,7 +188,7 @@ func (cr *CityRuntime) runOrdersLanePass(ctx context.Context, cityRoot, reason s
 	}
 
 	phaseStart := time.Now()
-	cr.ensureManagedDoltPublishedForTick()
+	cr.ensureManagedDoltPublishedForTick(ctx)
 	if trace != nil {
 		trace.RecordControllerOperation(TraceSiteControllerTickPhase, TraceReasonRetained, TraceOutcomeComplete,
 			"managed_dolt_preflight", time.Since(phaseStart), nil)

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +24,19 @@ func TestResolvedConditionalWritesMode(t *testing.T) {
 	t.Run("nil config is unset", func(t *testing.T) {
 		if got := resolvedConditionalWritesMode(nil); got != gate.ModeUnset {
 			t.Fatalf("mode = %q, want unset", got)
+		}
+	})
+	t.Run("unset config value resolves auto", func(t *testing.T) {
+		cfg, err := config.Parse([]byte("[workspace]\nname = \"t\"\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := resolvedConditionalWritesMode(cfg); got != gate.Auto {
+			t.Fatalf("mode = %q, want auto (the default since mc-dpo2b)", got)
+		}
+		cfg.Beads.ConditionalWrites = "off"
+		if got := resolvedConditionalWritesMode(cfg); got != gate.Off {
+			t.Fatalf("explicit off: mode = %q, want off", got)
 		}
 	})
 	t.Run("resolved config value threads through", func(t *testing.T) {
@@ -591,7 +605,7 @@ func TestNewControllerStateOpenCityStoreThreadsTheLatchedNativeTransport(t *test
 // TestOpenControlBdStoreThroughFactoryStamps pins the control-dispatcher
 // routing: the raw control-plane bd store must come back factory-stamped
 // (and raw — control paths are deliberately unwrapped), with native
-// selection impossible (no preflight checker is supplied).
+// selection impossible (the control path passes NativeTransportOff).
 func TestOpenControlBdStoreThroughFactoryStamps(t *testing.T) {
 	cfg, err := config.Parse([]byte("[workspace]\nname = \"t\"\n\n[beads]\nconditional_writes = \"require\"\n"))
 	if err != nil {
@@ -618,10 +632,79 @@ func TestOpenControlBdStoreThroughFactoryStamps(t *testing.T) {
 	}
 }
 
+// TestOpenControlStoreAtForCityLogsTheBdStorePinAtDebug pins the control
+// path's logging. Every control-plane open pins the bd store, and the control
+// dispatcher opens a store on every readiness poll and dispatched control
+// bead, so that chosen fallback must not reach the default handler as a WARN
+// native_store_unavailable naming a beads.native_transport the city never
+// set. It still logs at Debug under gate native_transport_off: downgraded,
+// not deleted. The control path passes no Logger, so the record lands on
+// slog.Default, which the test swaps for a recorder (so it cannot run in
+// parallel).
+func TestOpenControlStoreAtForCityLogsTheBdStorePinAtDebug(t *testing.T) {
+	const serverMetadata = `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"demo"}`
+	for _, scope := range []string{"city", "rig"} {
+		t.Run(scope, func(t *testing.T) {
+			clearGCEnv(t)
+			disableManagedDoltRecoveryForTest(t)
+			t.Setenv("GC_BEADS", "bd")
+			cityDir := t.TempDir()
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "demo"},
+				Rigs:      []config.Rig{{Name: "frontend", Path: "rigs/frontend"}},
+			}
+			scopeDir := cityDir
+			if scope == "rig" {
+				scopeDir = filepath.Join(cityDir, "rigs", "frontend")
+			}
+			if err := os.MkdirAll(filepath.Join(scopeDir, ".beads"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(scopeDir, ".beads", "metadata.json"), []byte(serverMetadata), 0o644); err != nil {
+				t.Fatalf("write %s metadata: %v", scope, err)
+			}
+
+			logs := &captureHandler{}
+			prev := slog.Default()
+			slog.SetDefault(slog.New(logs))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
+			store, err := openControlStoreAtForCity(scopeDir, cityDir, cfg)
+			if err != nil {
+				t.Fatalf("openControlStoreAtForCity: %v", err)
+			}
+			if _, ok := store.(*beads.BdStore); !ok {
+				t.Fatalf("store = %T, want the raw control bd store", store)
+			}
+			pinned := 0
+			for _, r := range logs.records {
+				if r.Message != "native_store_unavailable" {
+					continue
+				}
+				gateName := recordFields(r)["gate"].String()
+				if r.Level >= slog.LevelWarn {
+					t.Errorf("control open logged %s native_store_unavailable gate=%s; the control path pins the bd store on every open, so the pin must not warn", r.Level, gateName)
+				}
+				if r.Level == slog.LevelDebug && gateName == "native_transport_off" {
+					pinned++
+				}
+			}
+			if pinned != 1 {
+				t.Fatalf("control open logged %d DEBUG native_store_unavailable gate=native_transport_off records, want 1 (downgraded, not deleted)", pinned)
+			}
+		})
+	}
+}
+
 func TestConditionalWritesDegradedRecorder(t *testing.T) {
 	t.Run("nil recorder yields nil callback", func(t *testing.T) {
 		if cb := conditionalWritesDegradedRecorder(nil, rollout.Flags{}, "rig/r1"); cb != nil {
 			t.Fatal("want nil callback for busless paths")
+		}
+	})
+	t.Run("the builtin default records nothing", func(t *testing.T) {
+		if cb := conditionalWritesDegradedRecorder(events.NewFake(), rollout.ForTest(), "rig/r1"); cb != nil {
+			t.Fatal("want nil callback when auto is only the builtin default")
 		}
 	})
 	t.Run("records the typed event with wire vocabulary", func(t *testing.T) {
@@ -659,17 +742,74 @@ func TestConditionalWritesDegradedRecorder(t *testing.T) {
 // therefore reaches this layer as its %T spelling.
 func TestConditionalWritesEventStoreKind(t *testing.T) {
 	for in, want := range map[string]string{
-		beads.BeadsStoreNameBdStore:         "bd",
-		beads.BeadsStoreNameNativeDoltStore: "native",
-		beads.BeadsStoreNameFileStore:       "file",
-		"MemStore":                          "mem",
-		"CachingStore":                      "caching",
-		"SQLiteStore":                       "sqlite-graph",
-		"*beads.DoltliteReadStore":          "bd",
-		"someFutureStore":                   "someFutureStore",
+		beads.BeadsStoreNameBdStore:             "bd",
+		beads.BeadsStoreNameNativeDoltStore:     "native",
+		beads.BeadsStoreNameLibraryBackendStore: "native",
+		beads.BeadsStoreNameFileStore:           "file",
+		"MemStore":                              "mem",
+		"CachingStore":                          "caching",
+		"SQLiteStore":                           "sqlite-graph",
+		"*beads.DoltliteReadStore":              "bd",
+		"someFutureStore":                       "someFutureStore",
 	} {
 		if got := conditionalWritesEventStoreKind(in); got != want {
 			t.Errorf("conditionalWritesEventStoreKind(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestDefaultConditionalWritesStayQuietOnAnExecStore pins that the builtin
+// default auto treats a store that cannot carry the mode as off. An exec
+// store cannot, and every CLI command opens one per scope, so a city that
+// never set conditional_writes would otherwise log a WARN and record a
+// beads.conditional_writes.degraded event on every command. An explicit
+// "auto" stays loud. The open logs on slog.Default, which the test swaps for
+// a recorder (so it cannot run in parallel).
+func TestDefaultConditionalWritesStayQuietOnAnExecStore(t *testing.T) {
+	for _, tc := range []struct {
+		name, beads string
+		wantLoud    bool
+	}{
+		{name: "unset", beads: "", wantLoud: false},
+		{name: "explicit auto", beads: "conditional_writes = \"auto\"\n", wantLoud: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			cityDir := t.TempDir()
+			toml := "[workspace]\nname = \"t\"\n\n[beads]\nprovider = \"exec:noop.sh\"\n" + tc.beads
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			logs := &captureHandler{}
+			prev := slog.Default()
+			slog.SetDefault(slog.New(logs))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
+			for range 2 {
+				if _, err := openStoreResultAtForCityWithConfig(cityDir, cityDir, nil, gate.ModeUnset, false, false, false, nil); err != nil {
+					t.Fatalf("open: %v", err)
+				}
+			}
+
+			warns := 0
+			for _, r := range logs.records {
+				if r.Message == "conditional_writes degraded at open" && r.Level >= slog.LevelWarn {
+					warns++
+				}
+			}
+			recorded, err := events.ReadFiltered(filepath.Join(cityDir, ".gc", "events.jsonl"), events.Filter{Type: events.BeadsConditionalWritesDegraded})
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("reading events: %v", err)
+			}
+			if tc.wantLoud {
+				if warns != 2 || len(recorded) != 2 {
+					t.Fatalf("explicit auto: %d WARNs and %d degraded events over two opens, want 2 and 2", warns, len(recorded))
+				}
+				return
+			}
+			if warns != 0 || len(recorded) != 0 {
+				t.Fatalf("default auto: %d WARNs and %d degraded events over two opens, want none", warns, len(recorded))
+			}
+		})
 	}
 }

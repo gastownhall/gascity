@@ -53,6 +53,25 @@ const (
 	// always same-subject and same-process, and the payload's reason names which
 	// unwind ran.
 	BeadClaimReleased = "bead.claim_released"
+	// BeadClaimFailed fires when gc hook --claim skips a routed candidate
+	// because the claim write itself failed: not a lost race (that is
+	// BeadClaimRejected) but an error. The seat goes on to its other
+	// candidates and, if none claims, drains claims_errored. The payload names
+	// the seat (template, session, runtime epoch) and the error text. It is
+	// the input of the controller's claim-loop guard
+	// (cmd/gc/claim_loop_guard.go): the same bead failing the same way for
+	// every seat a template spawns is a spawn loop, not a slow claim.
+	BeadClaimFailed = "bead.claim_failed"
+	// BeadClaimLoopHeld fires when the controller's claim-loop guard stops
+	// counting a bead in a template's default routed-work demand, because the
+	// template's seats failed to claim it with the same error enough times in a
+	// row, and again, with the hold's new end, each time a probe seat fails to
+	// claim it. A custom scale_check count is not withheld. It is an operator
+	// alert: the payload names the template, the bead (Subject), the error, the
+	// failure count and when the next probe seat may spawn. The bead counts as
+	// demand again when it changes, when the city config changes, or for one
+	// probe seat each time the hold's backoff runs out.
+	BeadClaimLoopHeld = "bead.claim_loop_held"
 	// HookClaimReclaimedStale fires when gc hook --claim (ga-7rj87d), opted in
 	// via config.Agent.AutoReclaimStaleClaims, recovers a route-matched
 	// candidate whose only claim blocker was another worker's stale (lease-
@@ -94,6 +113,32 @@ const (
 	// LIVENESS fact, not a graph execution fact — nothing about the step's
 	// topology is asserted, and no projector consumes it.
 	ExecutionStepStalled = "execution.step_stalled"
+	// The work-progress ladder's facts (PHASE1-2 §6, the v2 lane step
+	// work-ladder): one seat's pacing of one piece of outstanding work.
+	// Subject carries the work bead, SessionID the seat; the payload is
+	// WorkLadderPayload. WorkNudged and WorkNudgeFailed are a delivered and a
+	// refused nudge (a degraded provider's are marked paused);
+	// WorkRecycleRequested is a recycle posted to the planner (arm A16);
+	// WorkReleased is an unstarted claim given back; WorkReleaseUnfinished
+	// a release that kept the claim (no lane serves its route, no single live
+	// hit) or failed, retried at Cap; WorkEscalated is an alert: a started
+	// claim or a continuation still unanswered, a started claim recycled, a
+	// release that did not finish, or a release that raced a start (an
+	// invariant alarm). They are controller liveness facts, as
+	// execution.step_stalled is.
+	WorkNudged            = "work.nudged"
+	WorkNudgeFailed       = "work.nudge_failed"
+	WorkRecycleRequested  = "work.recycle_requested"
+	WorkReleased          = "work.released"
+	WorkReleaseUnfinished = "work.release_unfinished"
+	WorkEscalated         = "work.escalated"
+	// WorkRateLimited is one move of a seat's rate-limit episode
+	// (internal/workladder): its provider refusing its turns with a rate
+	// limit, as the agent's own transcript classifies them. Subject carries
+	// the session ID, SessionID the seat; the payload is
+	// WorkRateLimitedPayload. It reports facts for a pack's provider policy
+	// and for people; the SDK draws no conclusion about the provider from it.
+	WorkRateLimited = "work.rate_limited"
 	// BeadDeadAssigneeReopened fires when the reconciler reopens a routed work
 	// bead whose assignee resolves to no open session bead — the owning session
 	// closed/retired while the bead stayed assigned, leaving it open+routed but
@@ -234,6 +279,15 @@ const (
 	// agent panes, and nothing off-pane distinguishes "fence acting" from
 	// "fence inert".
 	SessionDrainFenceUnavailable = "session.drain_fence_unavailable"
+	// WorkStartedUnrecorded fires when a claim `gc hook --claim` handed to a
+	// turn is not recorded in the session row's work_started cell: the write
+	// failed (a store error, a CAS lost every attempt, a seat with no instance
+	// token to fence it by) and the claim was delivered anyway, the hook
+	// failing open; or the cell was unreadable and was reset to this claim, so
+	// the claims it held are no longer recorded. The message says which. The
+	// record is the off-pane sign that the work ladder sees those claims as
+	// unstarted, protected from release only by its quiet gate.
+	WorkStartedUnrecorded = "work.started_unrecorded"
 	// SessionDemandClaimDivergence fires when a seat the controller spawned on
 	// DEMAND evidence drains with no work. It is a diagnostics counter for the
 	// agreement invariant between the two readers — the controller's demand read
@@ -242,6 +296,13 @@ const (
 	// first, which is correct pull, not a defect) and divergence (the row is
 	// still open, unassigned and route-matching, so the readers disagreed).
 	SessionDemandClaimDivergence = "session.demand_claim_divergence"
+	// SessionProgramStatusShadow fires, only while the city's [session]
+	// program_status switch is shadow, at a decision point that reads the
+	// screen today: it records today's reading beside what the program's own
+	// OSC 7501 record would decide. It is a diagnostics comparison and never
+	// influences the decision it reports on. Continuously evaluated points
+	// record only when their reading changes. Closed tokens only.
+	SessionProgramStatusShadow = "session.program_status_shadow"
 	// SessionColdStartTimeout fires when a pool session's first runtime spawn
 	// (a pending create) exceeds the start deadline and is rolled back. It is
 	// per-session: it fires whenever a fresh spawn times out, including a warm
@@ -249,6 +310,13 @@ const (
 	// Emitted by the session reconciler's start-result commit path; the
 	// envelope's Subject carries the session name.
 	SessionColdStartTimeout = "session.cold_start_timeout"
+	// SessionConversationReset fires when the reconciler resets a committed
+	// manual conversation, so that its next start is a fresh conversation
+	// rather than a resume. The payload's reason names the cause: stale-key,
+	// the keyed transcript a resume needs is gone. Emitted once per reset by
+	// the start path (legacy prepare, v2 PreWake); the envelope's Subject is
+	// the agent and SessionID the session bead.
+	SessionConversationReset = "session.conversation_reset"
 	// SessionPending fires when a session gains a pending interaction (an
 	// approval prompt or question the session is blocked on) and
 	// SessionPendingCleared fires when that interaction goes away — answered,
@@ -340,6 +408,12 @@ const (
 	RequestResultSessionSubmit  = "request.result.session.submit"
 	RequestResultRigCreate      = "request.result.rig.create"
 	RequestFailed               = "request.failed"
+	// RequestAccepted records that the API accepted an async session request
+	// (session create, message or submit) and returned its 202. It is the
+	// durable marker the request-outcome lookup reads to tell an accepted
+	// request from an unknown id; it is not an outcome. The terminal outcome
+	// is a request.result.* or request.failed event with the same request_id.
+	RequestAccepted = "request.accepted"
 
 	// RigProvisionProgress reports one provisioning step of a server-side
 	// rig add (clone, beads-init, packs, config, routes). Non-terminal;
@@ -364,7 +438,13 @@ const (
 	// that some or all of its work did not run: a bead scope it could not
 	// reach, or a safety gate that held a step back. It accompanies the run's
 	// order.completed so a skip is never read as a clean completion.
-	OrderSkipped                    = "order.skipped"
+	OrderSkipped = "order.skipped"
+	// OrderInapplicable reports that an order declares requires_backend and
+	// its bead scope uses a backend it does not name, so the dispatcher will
+	// not run it there. It is not a failure: the order is reported, not
+	// dispatched. Emitted once per order, scope and backend per controller
+	// boot (see cmd/gc/order_dispatch.go).
+	OrderInapplicable               = "order.inapplicable"
 	ProviderSwapped                 = "provider.swapped"
 	WorkerOperation                 = "worker.operation"
 	ProjectIdentityStamped          = "project.identity.stamped"
@@ -462,6 +542,36 @@ const (
 	// emission is wired in stage 3 — nothing emits it yet.
 	BeadsConditionalWritesDegraded = "beads.conditional_writes.degraded"
 
+	// OpsRecordingDegraded fires when the API or the controller's op
+	// sweeper cannot record or close operation-journal ops under an ops gate
+	// (ops.content, ops.control, ops.lifecycle) that is auto or require: in
+	// auto the request ran unrecorded or its op stayed open, in require it
+	// was refused. Latched by the emitter to at most one event per (gate,
+	// surface, stage, reason) per ten minutes per reporter: one per city per
+	// process for the API, one for the controller's op sweeper (DES-O0API
+	// D13).
+	OpsRecordingDegraded = "ops.recording_degraded"
+
+	// OpChanged fires when an operation-journal op row changes: proposed,
+	// accepted, taken, released, settled, canceled or closed. The payload is
+	// the op as its row reads after the change (DES-O1 D18), without the
+	// message text. The controller derives it once from the row's post-image
+	// in its cache-notification bridge, and journal rows record no bead.*
+	// event: a one-shot CLI's write to one journals nothing and rings the
+	// controller, which refreshes the row through its cache. A write no
+	// controller answers is announced only partly: a running controller's
+	// next reconcile announces a row it finds open and changed, but not the
+	// close of a row it did not hold, and a controller started later
+	// announces nothing for it. No writer may record one itself
+	// (IsJournalDerived). The row is
+	// authoritative: a consumer that reconnects reads a non-terminal op
+	// again with GET .../session/{id}/ops/{op}.
+	OpChanged = "op.changed"
+	// FactRecorded fires when an occurrence fact row is recorded: a session
+	// or turn started or ended, an interaction raised or resolved. It is
+	// derived like OpChanged, once per fact.
+	FactRecorded = "fact.recorded"
+
 	// BeadsBlockedRecomputed fires when gc start runs bd's full is_blocked
 	// recompute over one bd-backed scope as a one-shot upgrade step: the
 	// first start under a bd version the scope has not been repaired with.
@@ -496,7 +606,25 @@ const (
 	StorageBindingUnconverged   = "storage.binding.unconverged"
 	StorageBindingUncheckable   = "storage.binding.uncheckable"
 	StorageBindingNotConfigured = "storage.binding.not_configured"
+
+	// StorageRigImport is published once per rig by `gc storage migrate
+	// --from-rigs`: what the import did for that rig (imported, clean,
+	// nothing to import, refused, failed).
+	StorageRigImport = "storage.rig_import"
+	// StorageRigResidue is published by the controller's one asynchronous
+	// census at boot for each rig that holds infrastructure rows the city
+	// binding should hold: a rig awaiting import, a clear left pending, or
+	// rows written to the rig after its import.
+	StorageRigResidue = "storage.rig_residue"
 )
+
+// IsJournalDerived reports whether eventType is one the controller derives
+// from an operation-journal row's post-image (op.changed, fact.recorded). No
+// writer may author one, whatever its payload: a consumer renders it as the
+// row's state, and only the row can say what that is.
+func IsJournalDerived(eventType string) bool {
+	return eventType == OpChanged || eventType == FactRecorded
+}
 
 // KnownEventTypes lists every event-type constant this package defines.
 // The SSE projection uses this set (via a test) to verify that every
@@ -516,17 +644,22 @@ var KnownEventTypes = []string{
 	SessionResetStalled,
 	SessionWorkQueryFailed,
 	SessionDrainFenceUnavailable,
+	WorkStartedUnrecorded,
 	SessionDemandClaimDivergence,
+	SessionProgramStatusShadow,
 	SessionColdStartTimeout,
+	SessionConversationReset,
 	SessionPending, SessionPendingCleared,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected, BeadClaimReleased,
+	BeadClaimFailed, BeadClaimLoopHeld,
 	HookClaimReclaimedStale,
 	BeadDeadAssigneeReopened,
 	ExecutionWorkAssociated, ExecutionRunAnchored, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
 	ExecutionClaimWindowExpired,
 	ExecutionStepStalled,
+	WorkNudged, WorkNudgeFailed, WorkRecycleRequested, WorkReleased, WorkReleaseUnfinished, WorkEscalated, WorkRateLimited,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
 	ConvoyCreated, ConvoyClosed,
@@ -538,9 +671,9 @@ var KnownEventTypes = []string{
 	RequestResultCityCreate, RequestResultCityUnregister,
 	RequestResultSessionCreate, RequestResultSessionMessage,
 	RequestResultSessionSubmit, RequestResultRigCreate, RequestFailed,
-	RigProvisionProgress,
+	RequestAccepted, RigProvisionProgress,
 	CityCreated, CityUnregisterRequested,
-	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed, OrderSkipped,
+	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed, OrderSkipped, OrderInapplicable,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
 	MoleculeResolved,
 	SupervisorStarted, SupervisorShutdownRequested, SupervisorRequest,
@@ -555,9 +688,12 @@ var KnownEventTypes = []string{
 	BackendCredentialResolved,
 	EmergencySignaled, EmergencyAcked,
 	BeadsConditionalWritesDegraded, BeadsBlockedRecomputed,
+	OpsRecordingDegraded,
+	OpChanged, FactRecorded,
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
 	StorageBindingNotConfigured,
+	StorageRigImport, StorageRigResidue,
 	// ProviderHealthGateAlert and ReconcilerAlert are intentionally omitted
 	// from KnownEventTypes. Each is emitted by the reconciler but its typed
 	// SSE payload is not yet registered in internal/api (the payload registration lives in a
@@ -657,6 +793,13 @@ type TailProvider interface {
 // fakes, exec scripts) need not implement it.
 type InFlightProvider interface {
 	ListInFlight(filter Filter) ([]Event, error)
+}
+
+// InFlightContextProvider is an optional extension for providers whose
+// in-flight-aware read ([InFlightProvider]) can stop when ctx is done, so a
+// read whose caller has gone does not run to the end of a long history.
+type InFlightContextProvider interface {
+	ListInFlightContext(ctx context.Context, filter Filter) ([]Event, error)
 }
 
 // Watcher yields events one at a time. Created by [Provider.Watch].

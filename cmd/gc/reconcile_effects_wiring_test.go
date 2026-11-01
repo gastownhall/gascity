@@ -13,13 +13,13 @@ import (
 // The executor's wiring into the planner runtime (CONTRACT v5 P1, P7; D-14).
 
 // Kills a planner runtime whose executor posts nowhere, a recorder never
-// handed to the planner, and effects that run without the D-14 knob: the
-// executor's settlements reach the planner's queue, bindHost hands over the
-// recorder, and only the skeleton override with the knob submits.
+// handed to the planner, and a planner that does not submit (C9: effects are
+// real): the executor's settlements reach the planner's queue, bindHost
+// hands over the recorder, and the planner submits through the executor.
 func TestPlannerRuntimeWiresTheExecutor(t *testing.T) {
 	rt := newDefaultPlanner(io.Discard)
-	if rt.planner.effects != nil {
-		t.Fatal("effects are on without the D-14 knob")
+	if rt.planner.effects != rt.exec {
+		t.Fatal("the planner does not submit through its executor: effects are not real")
 	}
 	rec := events.NewFake()
 	rt.bindHost(plannerHost{rec: rec})
@@ -34,15 +34,6 @@ func TestPlannerRuntimeWiresTheExecutor(t *testing.T) {
 	rt.exec.stop(time.Now().Add(time.Minute)) // returns once the effect settled
 	if got := rt.planner.settlements.drain(); len(got) != 1 || got[0].Key.ID != "a" {
 		t.Fatalf("planner queue = %+v, want the effect's settlement", got)
-	}
-
-	saved := reconcilerModeLookupEnv
-	t.Cleanup(func() { reconcilerModeLookupEnv = saved })
-	reconcilerModeLookupEnv = func(k string) (string, bool) {
-		return "1", k == v2SkeletonEnv || k == v2EffectsEnv
-	}
-	if rt := newDefaultPlanner(io.Discard); rt.planner.effects != rt.exec {
-		t.Fatal("the knob under the override did not turn effects on")
 	}
 }
 

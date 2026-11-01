@@ -181,12 +181,12 @@ func TestStaleAsyncStartRuntimeAttribution_BeadScopedPoolRow(t *testing.T) {
 				}
 			}
 			sp.GetMetaErrors[name] = tt.errs
-			if got := staleAsyncStartRuntimeAttribution(info, name, sp); got != tt.want {
+			if got := staleAsyncStartRuntimeAttribution(info, name, sp, false); got != tt.want {
 				t.Fatalf("attribution = %d, want %d", got, tt.want)
 			}
 		})
 	}
-	if got := staleAsyncStartRuntimeAttribution(sessionpkg.Info{ID: "gc-1"}, "worker", nil); got != pendingCreateRuntimeForeign {
+	if got := staleAsyncStartRuntimeAttribution(sessionpkg.Info{ID: "gc-1"}, "worker", nil, false); got != pendingCreateRuntimeForeign {
 		t.Fatalf("nil provider attribution = %d, want foreign", got)
 	}
 }

@@ -46,7 +46,7 @@ func contractRigsFamily(t *testing.T, h *contractHarness) {
 	created, err := c.CreateRigWithResponse(ctx, city, &genclient.CreateRigParams{XGCRequest: contractCSRF},
 		genclient.CreateRigJSONRequestBody{Name: "beta", Path: ptr(betaPath), Prefix: ptr("bt")})
 	expectStatus(t, "create rig (path)", created, err, http.StatusCreated)
-	if body := mustJSON(t, "create rig (path)", created.JSON201, created); body.Status != genclient.Created {
+	if body := mustJSON(t, "create rig (path)", created.JSON201, created); body.Status != genclient.RigCreateResponseBodyStatusCreated {
 		t.Fatalf("create rig status = %q", body.Status)
 	}
 	if got := h.getRig(t, "beta"); got.Path != betaPath {

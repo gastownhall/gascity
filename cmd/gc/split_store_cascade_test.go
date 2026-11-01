@@ -86,7 +86,7 @@ func TestSplitStoreCascade_DrainFinalizeReleasesTheOwnDrainStep(t *testing.T) {
 				}
 				step := createWork(t, work, "in_progress", seat.ID, map[string]string{beadmeta.StepRefMetadataKey: "mol-do-work.drain", beadmeta.RootBeadIDMetadataKey: root.ID})
 				info := sessionInfosFromBeads([]beads.Bead{seat})[0]
-				if !closeSessionBeadIfReachableStoreUnassigned(sessions, seatWorkOn(path, cityPath, cfg, sessions, nil, info), info, "drained", seatWorkNow, io.Discard, true) {
+				if !closeSeat(sessions, seatWorkOn(path, cityPath, cfg, sessions, nil, info), info, closeWhy{reason: "drained", gate: closeGated, keep: notOwnDrainStep}, seatWorkNow, io.Discard) {
 					t.Fatal("the drain-finalize close refused over the seat's own drain step")
 				}
 				assertWork(t, work, step.ID, "open", "")

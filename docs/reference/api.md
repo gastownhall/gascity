@@ -19,6 +19,11 @@ API projects over.
 - **<a href="https://raw.githubusercontent.com/gastownhall/gascity/main/docs/reference/schema/events.json" target="_blank" rel="noopener">events.json</a>** —
   the `gc events` JSONL line schema. It references DTO components in
   `openapi.json`, so the API remains the source of truth.
+- **The running supervisor** serves the spec for its own version at
+  `GET /openapi.json` and `GET /openapi.yaml` (OpenAPI 3.1), with OpenAPI 3.0
+  downgrades at `/openapi-3.0.json` and `/openapi-3.0.yaml`, and an interactive
+  reference page at `/docs`. The page's viewer loads from `unpkg.com`, so the
+  browser needs internet access.
 
 ## Endpoint families
 
@@ -34,9 +39,25 @@ The spec is the full reference. A brief summary of the surfaces:
   `GET/PATCH/DELETE` on `/v0/city/{cityName}/agent/{base}` and SSE
   `/v0/city/{cityName}/agent/{base}/output/stream`.
 - **Beads (work units).** CRUD under `/v0/city/{cityName}/beads`,
-  query + hook operations, dependencies, labels.
-- **Sessions.** CRUD under `/v0/city/{cityName}/sessions`, submit,
-  prompt, resume, interaction response, transcript, SSE stream.
+  query + hook operations, dependencies, labels. A generic bead create
+  (`POST /v0/city/{cityName}/beads`) or update (`PATCH
+  /v0/city/{cityName}/bead/{id}` or `POST .../bead/{id}/update`) is
+  refused with 422 and nothing written when it carries a metadata key
+  that is not a valid bead-metadata key or a label that does not read
+  back as itself from one CSV record (a comma, a quote, a newline or a
+  carriage return; bd reads labels as CSV), when it would make a row a
+  session or stop it being one (its type or the `gc:session` label), or
+  when it sets, on a session row, a key the session's disposition decodes
+  (`held_until`, `sleep_intent`, `wait_hold`, `quarantined_until`,
+  `suspended_at`, `state`, `sleep_reason`): only the session verbs
+  (`suspend`, `wake`, `kill`, `gc runtime heartbeat`, `gc session wait`)
+  set those. Each refusal names the offending field in `errors[]`.
+  `gc bd update --set-metadata` on a session bead is an operator escape
+  hatch: it bypasses the disposition and nothing checks it.
+- **Sessions.** CRUD under `/v0/city/{cityName}/sessions`, submit
+  (and its `/messages` alias), wake, suspend, stop, kill, close,
+  interaction response, transcript, SSE stream. An explicit operator
+  resume is `resume: true` on submit or messages.
 - **External messaging.** `POST /v0/city/{cityName}/extmsg/adapters`
   registers a client's callback URL for a provider/account,
   `POST /v0/city/{cityName}/extmsg/inbound` delivers a turn to the
@@ -58,6 +79,18 @@ The spec is the full reference. A brief summary of the surfaces:
   `GET /v0/city/{cityName}/events/stream` at city scope.
 - **Config & packs.** Per-city config and pack metadata under
   `/v0/city/{cityName}/config` and `/v0/city/{cityName}/packs`.
+
+## Agent counts
+
+Several endpoints report an agent count, and each counts something different:
+
+| Endpoint | Field | What it counts |
+|----------|-------|----------------|
+| `GET /v0/city/{cityName}` | `agent_count` | Agent entries in the city's composed config: a rig-scoped agent once per rig, a pool once. |
+| `GET /v0/city/{cityName}/status` | `agents.total`, and `agent_count` (deprecated, the same number) | Agent rows after pool expansion: every slot of a bounded pool (`max_active_sessions` of them), and the running or recorded sessions of an unlimited pool. |
+| `GET /v0/city/{cityName}/agents` | `total` (no `agent_count`) | The rows returned after the `rig`, `pool` and `running` filters: every slot of a bounded pool, and the running sessions of an unlimited pool, or one row under the pool's own name when none is running. |
+| `GET /v0/city/{cityName}/rigs`, `GET /v0/city/{cityName}/rig/{name}` | `agent_count` on each rig | That rig's agent rows: every slot of a bounded pool, and the running sessions of an unlimited pool. |
+| `GET /v0/city/{cityName}/config` | `patches.agent_count` | The `[[patches.agent]]` blocks the config declares, not agents. `/config/defaults` reports no `patches`. |
 
 ## Request and response headers
 
@@ -124,9 +157,9 @@ cannot parse and `415 Unsupported Media Type` for an unsupported content type;
 the `code`/`type` is the constant across those statuses, and the `errors` array
 pinpoints the fields that failed. A few endpoints perform their own additional
 validation and return a code-less `400`/`422` until converted, so treat a
-missing `code` as a legacy path (match on `status`/`detail`). Operations that
-enumerate their error responses (currently the bead and sling endpoints) list
-each status explicitly in the spec; others declare a single catch-all `default`
+missing `code` as a legacy path (match on `status`/`detail`). Most operations
+enumerate their error responses, listing each status explicitly in the spec; a
+few (including the event streams) still declare a single catch-all `default`
 error response. An enumerated list covers the operation's own errors plus the
 always-applied middleware errors (e.g. `403` on mutations); framework-level
 transport statuses may still occur, as with any HTTP API.
@@ -310,6 +343,21 @@ requests.
   `EventStreamEnvelope` JSON object per line.
 - `gc events --seq` in city scope prints the API's `X-GC-Index` value.
 
+#### Snapshot index
+
+City responses that carry `X-GC-Index` report the city event sequence
+captured before the response's state was read, including when the body
+comes from a response cache or an `Idempotency-Key` replay. Resuming the
+city event stream after that value (`after_seq` or `Last-Event-ID`), or
+blocking on it with `?index=`, observes every change made through the
+supervisor that the body does not already reflect. A change the body does
+reflect may be delivered again, so apply events idempotently by `seq`.
+
+A change that another process writes directly to the city's stores is
+reflected once the supervisor applies its event. A response served in
+between can report an index at or past that event without reflecting the
+change.
+
 ### Supervisor Scope
 
 - `GET /v0/events`
@@ -337,6 +385,10 @@ A session that stops to ask a human something — a tool approval prompt or
 a question — has a *pending interaction*. `GET /v0/city/{cityName}/pending`
 lists them; `GET /v0/city/{cityName}/session/{id}/pending` returns one in
 full; `POST /v0/city/{cityName}/session/{id}/respond` answers it.
+
+A question dialog (`kind` `question`) offers no `options` and cannot be
+answered through the API: the person answers it in the session's terminal,
+and `POST .../respond` on one returns 409 `invalid_interaction`.
 
 The city event stream (and the supervisor stream, tagged with the city)
 also carries each change as an event, so a client does not have to poll:

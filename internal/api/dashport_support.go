@@ -19,9 +19,11 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
@@ -261,6 +263,11 @@ func (s *seededState) NudgesBeadStore() beads.NudgesStore {
 	return beads.NudgesStore{Store: s.cityStore}
 }
 
+// NudgeQueue is the city's state.json queue over the seeded city store.
+func (s *seededState) NudgeQueue() NudgeQueue {
+	return nudgequeue.StateFileQueue{CityPath: s.cityPath, Shadows: s.cityStore}
+}
+
 func (s *seededState) SessionsBeadStore() beads.SessionStore {
 	return beads.SessionStore{Store: s.cityStore}
 }
@@ -286,6 +293,12 @@ func (s *seededState) ServiceRegistry() workspacesvc.Registry   { return nil }
 func (s *seededState) ExtMsgServices() *extmsg.Services         { return s.extmsgSvc }
 func (s *seededState) AdapterRegistry() *extmsg.AdapterRegistry { return s.adapterReg }
 func (s *seededState) MaintenanceLoop() MaintenanceProvider     { return nil }
+
+// ApplyStartupPrompt returns hints unchanged: a seeded city renders no startup
+// prompts.
+func (s *seededState) ApplyStartupPrompt(_ session.Info, _ *config.ResolvedProvider, _ string, hints runtime.Config) (runtime.Config, error) {
+	return hints, nil
+}
 
 // RawConfig returns the same snapshot as Config: a seeded city has no separate
 // raw (pre-expansion) config, so provenance reads see the expanded config.

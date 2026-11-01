@@ -219,7 +219,7 @@ jobs:
             end
 
             def install
-              bin.install "gc"
+              bin.install "gc", "gc-osc7501"
             end
 
             def caveats
@@ -239,6 +239,7 @@ jobs:
 
             test do
               assert_match version.to_s, shell_output("#{bin}/gc version")
+              system "#{bin}/gc-osc7501", "version"
             end
           end
           FORMULA

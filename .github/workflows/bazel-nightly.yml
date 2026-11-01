@@ -97,6 +97,10 @@ jobs:
     permissions:
       contents: read
       actions: write
+      # bazel.yml's rbe job lists a pull request's files for the split-strict
+      # lane (it only does so on pull_request; GitHub still validates the
+      # grant at startup).
+      pull-requests: read
       # bazel.yml's repo contents cache seed job requests id-token: write.
       # GitHub validates a called workflow's permissions at startup even for
       # jobs that skip, so the caller must grant it (startup_failure

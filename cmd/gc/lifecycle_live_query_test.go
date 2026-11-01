@@ -184,12 +184,12 @@ func TestSessionHasOpenAssignedWorkForConfig_UsesLiveOpenOwnership(t *testing.T)
 
 	// SeatWork lists live, so the cache's stale ownership does not answer.
 	session := beads.Bead{ID: "sess-1"}
-	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(testSeatWork("", nil, cache, nil), session)
+	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfigInfo(testSeatWork("", nil, cache, nil), sessionInfoFromBead(session))
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForConfig: %v", err)
 	}
 	if hasAssignedWork {
-		t.Fatal("sessionHasOpenAssignedWorkForConfig() = true, want false after external open-work reassignment")
+		t.Fatal("sessionHasOpenAssignedWorkForConfigInfo() = true, want false after external open-work reassignment")
 	}
 }
 

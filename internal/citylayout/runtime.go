@@ -175,9 +175,16 @@ func validateACPTranscriptComponent(label, value string) error {
 	return nil
 }
 
+// sessionNameLocksRoot and gateSlotsRoot are runtime-root-relative
+// subdirectories (see SessionNameLocksDir and GateSlotsDir).
+const (
+	sessionNameLocksRoot = "session-name-locks"
+	gateSlotsRoot        = "gate-slots"
+)
+
 // SessionNameLocksDir returns the canonical root for explicit session-name locks.
 func SessionNameLocksDir(cityRoot string) string {
-	return RuntimePath(cityRoot, "session-name-locks")
+	return RuntimePath(cityRoot, sessionNameLocksRoot)
 }
 
 // GateSlotsDir returns the canonical root for the pre-push gate's
@@ -186,7 +193,7 @@ func SessionNameLocksDir(cityRoot string) string {
 // constant exists so Go tooling can locate the same directory without
 // duplicating the ".gc/gate-slots" literal.
 func GateSlotsDir(cityRoot string) string {
-	return RuntimePath(cityRoot, "gate-slots")
+	return RuntimePath(cityRoot, gateSlotsRoot)
 }
 
 // ServiceStateDir returns the canonical runtime directory for a named service.

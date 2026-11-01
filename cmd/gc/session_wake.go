@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -65,24 +66,55 @@ func preWakeCommit(
 // errPreWakeSuperseded refuses a PreWake whose row moved since it was read.
 var errPreWakeSuperseded = errors.New("pre-wake refused: the session row moved since it was read, or its runtime lease was taken over")
 
-// preWakeCommitUnder is preWakeCommit as a compare-and-swap (NEW-6): the
-// incarnation lands only on a re-read row whose lifecycle facts are still
-// info's and that still records lease, fenced at that read's revision. A
-// moved row writes nothing and returns errPreWakeSuperseded. Without a
-// conditional writer the check is the re-read alone.
+// preWakeCommitUnder is preWakeCommit as the row's incarnation mint
+// (sessions.Store.MintIncarnation, I-MINT): PreWakePatch lands with the new
+// generation and token only on a re-read row whose lifecycle facts,
+// generation and token are still info's and that still records lease, fenced
+// at that read's revision, with g+1 computed from that read. The patch, the
+// continuation reset it consumes and the wake trace are decided on that read
+// too, never on info: a reset marker that a writer outside the in-process
+// mutation lock records or clears after info was read is consumed whole or
+// not at all. A moved or closed row writes nothing and returns
+// errPreWakeSuperseded. Without a conditional writer the check is the re-read
+// alone. It returns the minted incarnation, which the runtime-only start runs
+// under, and the batch it wrote.
 func preWakeCommitUnder(
 	info sessions.Info,
 	sessFront *sessions.Store,
 	clk clock.Clock,
 	lease *sessions.RuntimeLease,
-) (newGen int, token string, fold sessions.MetadataPatch, err error) {
-	return preWakeCommitWith(info, clk, func(batch sessions.MetadataPatch) error {
-		applied, err := sessFront.ApplyPatchIfLifecycleUnchangedUnder(info, batch, lease)
-		if err == nil && !applied {
-			err = errPreWakeSuperseded
-		}
-		return err
+) (inc sessions.Incarnation, fold sessions.MetadataPatch, err error) {
+	name := info.SessionNameMetadata
+	if !sessions.IsSessionNameSyntaxValid(name) {
+		return sessions.Incarnation{}, nil, fmt.Errorf("invalid session_name %q", name)
+	}
+	now := clk.Now()
+	var resetPrior map[string]string
+	freshWake := false
+	inc, err = sessFront.MintIncarnation(context.Background(), lease, sessions.MintRequest{
+		Expect: info,
+		By:     sessions.ActorController,
+		Now:    now,
+		// The mint's generation, token, epoch and last_woke_at win over the
+		// patch's, which are decided on the same read.
+		Patch: func(fresh sessions.Info, _ sessions.Incarnation) sessions.MetadataPatch {
+			_, _, batch, class := preWakePatch(fresh, now, "")
+			fold = class.Into(fresh.ID, batch)
+			resetPrior = freshWakeResetPriorValues(fresh)
+			freshWake = fresh.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(fresh)
+			return fold
+		},
+		FreshContext: shouldBumpContinuationEpoch,
 	})
+	switch {
+	case errors.Is(err, sessions.ErrMintSuperseded) || errors.Is(err, sessions.ErrMintClosed):
+		return sessions.Incarnation{}, nil, fmt.Errorf("pre-wake metadata commit: %w: %w", errPreWakeSuperseded, err)
+	case err != nil:
+		return sessions.Incarnation{}, nil, fmt.Errorf("pre-wake metadata commit: %w", err)
+	}
+	maps.Copy(fold, inc.IdentityPatch())
+	traceFreshWakeMetadataReset(name, resetPrior, fold, freshWake)
+	return inc, fold, nil
 }
 
 func preWakeCommitWith(
@@ -95,7 +127,8 @@ func preWakeCommitWith(
 		return 0, "", nil, fmt.Errorf("invalid session_name %q", name)
 	}
 
-	newGen, token, batch := preWakePatch(info, clk.Now(), sessions.NewInstanceToken())
+	newGen, token, batch, class := preWakePatch(info, clk.Now(), sessions.NewInstanceToken())
+	batch = class.Into(info.ID, batch)
 	freshWake := info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info)
 	if writeErr := write(batch); writeErr != nil {
 		return 0, "", nil, fmt.Errorf("pre-wake metadata commit: %w", writeErr)
@@ -106,9 +139,13 @@ func preWakeCommitWith(
 }
 
 // preWakePatch is the PreWakePatch preWakeCommit writes for info at now with
-// token as the new instance token, and the generation it advances to. The v2
-// start effect decides the same patch in its PreWake CAS (CONTRACT v5 S1).
-func preWakePatch(info sessions.Info, now time.Time, token string) (newGen int, _ string, batch sessions.MetadataPatch) {
+// token as the new instance token, the generation it advances to, and the
+// disposition's PreWake cell (class) beside it: the idle stop's and a wait's
+// intent and a soft suspend go; an operator's suspend refuses it, and the
+// controller never starts that row (errStartUserHeld). The v2 start effect
+// decides the same patch in its PreWake CAS (CONTRACT v5 S1). It mints
+// nothing: the writer puts class in its write.
+func preWakePatch(info sessions.Info, now time.Time, token string) (newGen int, _ string, batch sessions.MetadataPatch, class sessions.DispositionPatch) {
 	gen, _ := strconv.Atoi(info.Generation)
 	newGen = gen + 1
 	continuationEpoch, _ := strconv.Atoi(info.ContinuationEpoch)
@@ -137,7 +174,7 @@ func preWakePatch(info sessions.Info, now time.Time, token string) (newGen int, 
 		// stale-create bound must keep measuring from the episode start.
 		EpisodePendingCreateStartedAt: pendingCreateEpisodeStartedAt(info),
 	})
-	return newGen, token, batch
+	return newGen, token, batch, sessions.CellInfo(info, sessions.ActorController, sessions.DispEvent{Kind: sessions.EvPreWake}, now)
 }
 
 // pendingCreateEpisodeStartedAt returns the pending_create_started_at a wake
@@ -179,6 +216,9 @@ func freshWakeResetPriorValues(info sessions.Info) map[string]string {
 		"primed_at":            info.PrimedAtMetadata,
 		"priming_attempted_at": info.PrimingAttemptedAtMetadata,
 		"prompt_hash":          info.PromptHashMetadata,
+		// The resume backstop's run is cleared with the conversation (mc-bm1af).
+		"resume_failures": info.ResumeFailures,
+		"resume_launch":   info.ResumeLaunch,
 	}
 }
 
@@ -385,6 +425,12 @@ func setReconcilerDrainAckMetadata(sp runtime.Provider, name string, ds *drainSt
 		return err
 	}
 	if err := sp.SetMeta(name, "GC_DRAIN_ACK", "1"); err != nil {
+		if runtime.OnlyMetadataNotMirrored(err) {
+			// An ack that landed is an ack; only the runtime's view of it lags,
+			// and the log reports that.
+			log.Printf("session wake: setting reconciler drain ack metadata GC_DRAIN_ACK for %s: %v", name, err)
+			return nil
+		}
 		_ = clearReconcilerDrainAckMetadata(sp, name)
 		return err
 	}
@@ -408,7 +454,11 @@ func clearReconcilerDrainAckMetadata(sp runtime.Provider, name string) error {
 	} {
 		if err := sp.RemoveMeta(name, key); err != nil {
 			log.Printf("session wake: clearing reconciler drain ack metadata %s for %s: %v", key, name, err)
-			errs = append(errs, fmt.Errorf("removing %s: %w", key, err))
+			// A removal that landed is a removal; only the runtime's view of it
+			// lags, and the log above reports that.
+			if !runtime.OnlyMetadataNotMirrored(err) {
+				errs = append(errs, fmt.Errorf("removing %s: %w", key, err))
+			}
 		}
 	}
 	return errors.Join(errs...)
@@ -681,10 +731,10 @@ func cancelRecoveredDrainForAssignedWorkInfo(info sessions.Info, sp runtime.Prov
 }
 
 // userHoldDrainReleased reports a user-hold drain whose row no longer carries
-// the operator's intent (HoldUser): a resume consumed the hold after the drain
-// began.
-func userHoldDrainReleased(reason string, info sessions.Info, now time.Time) bool {
-	return reason == string(sessions.SleepReasonUserHold) && sessions.HoldsInfo(info, now).In&sessions.HoldUser == 0
+// the operator's suspend (Disposition.KeepsSlot): a resume consumed the hold
+// after the drain began.
+func userHoldDrainReleased(reason string, info sessions.Info) bool {
+	return reason == string(sessions.SleepReasonUserHold) && !sessions.DispositionOfInfo(info).KeepsSlot()
 }
 
 func advanceSessionDrainsWithSessionsTraced(
@@ -742,7 +792,7 @@ func advanceSessionDrainsWithSessionsTraced(
 
 		// An operator's resume consumed the hold this drain was for: cancel
 		// it, so neither its ack nor its completion acts on the resumed row.
-		if userHoldDrainReleased(ds.reason, info, clk.Now()) {
+		if userHoldDrainReleased(ds.reason, info) {
 			dt.clearIdleProbe(id)
 			if ds.ackSet {
 				_ = clearReconcilerDrainAckMetadata(sp, name)

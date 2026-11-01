@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/config"
@@ -35,6 +37,7 @@ const (
 	causeCapacity          = "capacity"
 	causeDiedDuringStartup = "died-during-startup"
 	causeHeldDead          = "held-dead" // ErrSessionExists over a dead runtime; C5a3 recycles
+	causeCommitLost        = "commit-lost"
 )
 
 // errEndpointGate is the admit-ticket Call's refusal: the endpoint admits
@@ -42,13 +45,13 @@ const (
 var errEndpointGate = errors.New("v2 start: the endpoint admits no start now")
 
 // startSections are bringUp's sections.
-var startSections = []section{
-	called(0, probed(prepareAdoption, verbStep(false)), admitTicket),
+var startSections = append(slices.Clone(recycleSections),
+	called(0, probed(prepareAdoption, verbStep(false)), verbCall),
 	called(callStart, probed(foldPreWake, preWakeStep), startLaunch),
-	called(0, section{Premise: premiseOwnToken, Decide: commitStep}, afterStart),
-	called(0, section{Premise: premiseOwnToken, Decide: abandonStep}, stopOwnRuntime),
-	{Premise: premiseClose, Decide: rollbackClose},
-}
+	called(0, section{Premise: premiseOwnToken, Decide: commitStep, Moved: lostCommit}, afterStart),
+	called(0, section{Premise: premiseOwnToken, Decide: abandonStep, Moved: lostCommitEnd}, stopOwnRuntime),
+	section{Premise: premiseClose, Decide: rollbackClose},
+)
 
 // launchRow is the row, template and pass a Launch's Calls act on.
 type launchRow struct {
@@ -133,12 +136,15 @@ func foldPreWake(_ context.Context, r effectReads, v txView) (preWakeFold, error
 			}
 		}
 	}
-	base := foldInfo(v.Row, v.It.Patch) // a dead committed row's heal and accrual (A6 item 4)
-	_, _, patch := preWakePatch(base, v.Now, f.token)
+	base := foldInfo(v.Row, v.It.folded()) // a dead committed row's heal and accrual (A6 item 4)
+	_, _, patch, class := preWakePatch(base, v.Now, f.token)
+	maps.Copy(patch, class.Fold())
 	next := foldInfo(foldInfo(base, patch), f.bind)
 	f.repair = concretePoolWorkDirRepairPatch(startCandidate{info: next, tp: tp}, v.World.CityPath, v.World.Env.Cfg)
 	next = foldInfo(next, f.repair)
-	if f.transcript = transcriptOf(r, v.World, next, tp); f.transcript == sessTranscriptAbsent {
+	// Only a key whose transcript is gone and that staleResumeKeyClears is
+	// reset; an allocated key no start committed yet is kept.
+	if f.transcript = transcriptOf(r, v.World, next, tp); f.transcript == sessTranscriptAbsent && staleResumeKeyClears(next, tp.ResolvedProvider) {
 		f.reset = clearStaleResumeKeyMetadata("", nil) // its patch only
 	}
 	return f, nil
@@ -157,15 +163,8 @@ type launchPass struct {
 	relaunched bool        // the PreWake found the row creating (#7570)
 }
 
-// preWakeHolds are the holds that refuse a PreWake (S1: not held or
-// quarantined). A wait hold does not: the allocation wakes a wait-held row
-// whose wait is ready, and the hold clears only once its nudge reaches the
-// running session (POOL-077/080). Nor does an unparseable timer, which no
-// heal clears.
-const preWakeHolds = session.HoldTimer | session.HoldQuarantine | session.HoldUser | session.HoldSuspended
-
 // preWakeStep is the PreWake's Decide: the ticket admitted, START-012's
-// name, no hold (preWakeHolds) or kill fence, the runtime still absent; then
+// name, no hold (preWakeRefused) or kill fence, the runtime still absent; then
 // PreWakePatch with the binding, the stop request cleared (D1), the repair,
 // the stale-resume clear with its continuation rotation (legacy's
 // commitPendingContinuationReset at the start) and the set-once key fill
@@ -184,35 +183,46 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 		return txStep{Refuse: causeLivenessUnknown, Err: probeErr}
 	case !session.IsSessionNameSyntaxValid(strings.TrimSpace(v.Row.SessionNameMetadata)):
 		return healInstead(v, txStep{Refuse: causeSessionName})
-	case session.HoldsInfo(foldInfo(v.Row, v.It.Patch), v.Now).In&preWakeHoldsFor(v) != 0 || session.IsKillPendingInfo(v.Row, v.Now): // the hold the intent's own patch writes too; TODO(R7): Disposition
+	case healDrifted(v): // the carried timer heal no longer holds on the fresh row: no heal, no start
+		return txStep{Refuse: causeHeld}
+	case preWakeRefused(v) || session.IsKillPendingInfo(v.Row, v.Now): // the hold the intent's own patch writes too
 		return healInstead(v, txStep{Refuse: causeHeld})
 	case v.RT.Class != rtAbsent:
 		return txStep{Refuse: causeRuntimePresent}
 	}
 	tp := ticket.launch.tp
-	base := foldInfo(v.Row, v.It.Patch)
+	base := foldInfo(v.Row, v.It.folded())
 	patch := maps.Clone(v.It.Patch)
 	if patch == nil {
 		patch = session.MetadataPatch{}
 	}
-	_, _, wake := preWakePatch(base, v.Now, f.token)
-	for _, more := range []session.MetadataPatch{wake, f.bind, stopVoidResiduePatch(), f.repair, f.reset} {
+	_, _, wake, wakeClass := preWakePatch(base, v.Now, f.token)
+	for _, more := range []session.MetadataPatch{wake, f.bind, stopEndPatch(), f.repair, f.reset} {
 		maps.Copy(patch, more)
 	}
+	// The heal's cells and then the PreWake cell, minted at the write.
+	class := v.It.Class.With(wakeClass)
 	if len(f.reset) > 0 {
 		epoch, _ := strconv.Atoi(patch["continuation_epoch"])
 		patch["continuation_epoch"], patch["continuation_reset_pending"] = strconv.Itoa(epoch+1), ""
 	}
-	next := foldInfo(v.Row, patch)
+	next := foldInfo(foldInfo(v.Row, patch), class.Fold())
 	transcript := f.transcript
 	if next.SessionKey == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" && f.key != "" {
 		patch["session_key"], transcript = f.key, sessTranscriptAbsent
 		next = foldInfo(next, session.MetadataPatch{"session_key": f.key})
 	}
 	launch := launchRow{w: v.World, row: next, tp: boundTemplate(tp, next), agent: ticket.launch.agent}
-	pass := launchPass{launchRow: launch, bound: foldInfo(base, f.bind), transcript: transcript, ticket: ticket, undo: preWakeUndoOf(v, patch, len(f.reset) > 0)}
+	pass := launchPass{launchRow: launch, bound: foldInfo(base, f.bind), transcript: transcript, ticket: ticket, undo: preWakeUndoOf(v, foldClass(patch, class), len(f.reset) > 0)}
 	pass.undo.token, pass.relaunched = f.token, creating(v.Row)
-	return txStep{Write: patch, Facts: effectFacts{Work: f.work}, Pass: pass}
+	facts := effectFacts{Work: f.work}
+	if heal := v.It.Heal; heal != nil && heal.Reason == decideDeadRuntimeHeal && heal.Event != nil { // the death's record, its write folded into this one
+		facts.Events = append(facts.Events, *heal.Event)
+	}
+	if len(f.reset) > 0 && session.HasStartedManualConversation(base) { // recorded once the PreWake lands
+		facts.Events = append(facts.Events, staleKeyConversationResetEvent(base, tp))
+	}
+	return txStep{Write: patch, Class: class, Facts: facts, Pass: pass}
 }
 
 // preWakeUndoOf is what a failed launch restores (S3) of the PreWake
@@ -234,14 +244,24 @@ func preWakeUndoOf(v txView, patch session.MetadataPatch, staleKey bool) preWake
 	return u
 }
 
-// preWakeHoldsFor is preWakeHolds for v's intent: A17's respawn is not held
-// by the agent heartbeat's hold it respawns through (v5.9i), which the
-// premise holds the fresh row to.
-func preWakeHoldsFor(v txView) session.Hold {
-	if v.It.Reason == decideHeartbeatRespawn {
-		return preWakeHolds &^ session.HoldTimer
+// preWakeRefused reports a hold that refuses v's PreWake (S1: not held or
+// quarantined), over the row as the intent's own patch leaves it: the
+// disposition's RefusesPreWake. A wait does not refuse: the allocation wakes a
+// wait-held row whose wait is ready, and the hold clears only once its nudge
+// reaches the running session (POOL-077/080); nor does an unparseable timer,
+// which no heal clears. A17's respawn is not held by the agent heartbeat's
+// hold it respawns through (v5.9i), which the premise holds the fresh row to.
+func preWakeRefused(v txView) bool {
+	return preWakeRefuses(session.DispositionOfInfo(foldInfo(v.Row, v.It.folded())), v.It.Reason, v.Now)
+}
+
+// preWakeRefuses is the PreWake's hold test over d for a start decided as
+// reason, which A18 also holds on (startIntent, CONTRACT v5.9u).
+func preWakeRefuses(d session.Disposition, reason string, now time.Time) bool {
+	if reason == decideHeartbeatRespawn {
+		return d.RefusesHeartbeatRespawn(now)
 	}
-	return preWakeHolds
+	return d.RefusesPreWake(now)
 }
 
 // triggerEnvKeys are the template env keys a row's trigger stamps
@@ -304,6 +324,9 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 	if err != nil {
 		return startOutcome{prepErr: err, undo: in.undo, relaunched: in.relaunched, tp: in.tp}, nil
 	}
+	// The launch is the prepared template, which keeps a session recorded on
+	// ACP on its ACP launch (templateParamsForSession): route by it.
+	in.tp = prepared.candidate.tp
 	name := strings.TrimSpace(in.row.SessionName)
 	if router, ok := c.start.sp.(interface{ RouteACP(string) }); ok && in.tp.IsACP {
 		router.RouteACP(name)
@@ -317,6 +340,9 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 	startCtx, stop := c.start.clock.WithDeadline(ctx, c.it.Deadline.Add(-startDeadlineSlack-startFailureSlack))
 	out := startOutcome{err: leaf.Start(startCtx, name, prepared.cfg), undo: in.undo, relaunched: in.relaunched, tp: in.tp, prepared: prepared}
 	stop()
+	// The commit lands on a runtime alive with the PreWake token whatever the
+	// Start returned (commitStep), so the binding is read whatever it returned.
+	prepared.runtimeBinding = startedRuntimeBinding(ctx, prepared.cfg.Env["GC_CITY_PATH"], leaf, name)
 	in.ticket.verdict = verdictInconclusive
 	switch {
 	case runtime.IsProviderCapacity(out.err):
@@ -427,7 +453,8 @@ func commitStep(v txView) txStep {
 	case errors.Is(out.err, runtime.ErrSessionInitializing) || errors.Is(out.err, runtime.ErrRuntimeUnavailable):
 		return txStep{Fail: causeStartDeferred, Err: out.err}
 	case runtime.IsProviderCapacity(out.err) && out.paced:
-		return txStep{Write: restorePatch(out.undo, v.Meta), Fail: causeCapacity, Err: out.err}
+		patch, class := restorePatch(out.undo, v.Meta)
+		return txStep{Write: patch, Class: class, Fail: causeCapacity, Err: out.err}
 	case runtime.IsProviderCapacity(out.err): // no ticket, or the poison valve blamed this template: legacy's failure arms, which back off
 		return failStart(v, out, causeStartError, out.err)
 	case died && (v.RT.Class == rtAbsent || v.RT.Class == rtCorpse || v.RT.Class == rtZombie):
@@ -450,6 +477,48 @@ func commitStep(v txView) txStep {
 	return txStep{Write: patch, Last: true, Facts: effectFacts{Noted: noted}, Pass: startEnd{landed: &landedCommit{out: out, name: noted.Name, display: out.tp.DisplayName()}}}
 }
 
+// lostCommit is S2's refused commit (the premise moved: a kill, a close, a
+// token another writer set): it writes nothing and is never retried, and
+// when the fresh read finds a runtime present under the locked name, read on
+// one session object, alive or a zombie, and Current under the token PreWake
+// set, the after-commit Call stops it as the start's own runtime (the
+// own-runtime exception, F2: L1 alone) and confirms it (C8.8), so a row
+// closed mid-start leaves no orphan. The stop targets the name the effect
+// locked, whatever the row's session_name now says; a moved lease is
+// another start's, and refuses.
+func lostCommit(v txView, expect session.Info, moved []string) (txStep, bool) {
+	present := v.RT.Same && (v.RT.Class == rtAlive || v.RT.Class == rtZombie)
+	if slices.Contains(moved, "runtime lease") || !present || compareIdentity(expect, v.RT.Identity) != identityCurrent {
+		return txStep{}, false
+	}
+	stop := ownRuntimeFence(v.RT, expect)
+	return txStep{Pass: startEnd{lost: &teardown{stop: &stop, names: processNamesFor(v.World, expect)}}}, true
+}
+
+// lostCommitEnd settles the lost commit failed, its runtime stopped: the
+// abandon section's, whose premise moved with the commit's.
+func lostCommitEnd(v txView, _ session.Info, _ []string) (txStep, bool) {
+	f, _ := callResult[startFailureRead](v)
+	if f.lost == nil {
+		return txStep{}, false
+	}
+	return lostCommitStep(f), true
+}
+
+// lostCommitStep is the lost commit's settlement: failed, with no accrual,
+// and an error when its stop was not confirmed.
+func lostCommitStep(f startFailureRead) txStep {
+	var err error
+	if !*f.lost {
+		err = errLostCommitUnconfirmed
+	}
+	return txStep{Fail: causeCommitLost, Err: err}
+}
+
+// errLostCommitUnconfirmed: the lost commit's stop was not confirmed; the
+// row's next pass reads what stayed.
+var errLostCommitUnconfirmed = errors.New("v2 start: the lost commit's runtime stop was not confirmed")
+
 // landedCommit is what a landed commit hands the after-commit Call.
 type landedCommit struct {
 	out           startOutcome
@@ -459,8 +528,13 @@ type landedCommit struct {
 // afterStart is the commit section's Call: after a landed commit it clears
 // the #46 episode (a lost clear only delays, v5 §13) and records legacy's
 // start telemetry, and never fails the effect; after a start that did not
-// commit, the failure's reads and #46 accrual (readStartFailure).
+// commit, the failure's reads and #46 accrual (readStartFailure); after a
+// lost commit, its own runtime's stop.
 func afterStart(ctx context.Context, c txCaps, in startEnd) (startFailureRead, error) {
+	if in.lost != nil {
+		_, confirmed := stopFenced(ctx, c.start.sp, *in.lost.stop, in.lost.names, c.start.clock.Now)
+		return startFailureRead{lost: &confirmed}, nil
+	}
 	if in.failed != nil {
 		telemetry.RecordAgentStart(context.Background(), in.failed.name, in.failed.display, in.failed.err)
 		return readStartFailure(ctx, c, *in.failed), nil

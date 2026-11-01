@@ -11,6 +11,7 @@ go_library(
     name = "beadstest",
     srcs = [
         "atomic_close_conformance.go",
+        "class_handles.go",
         "close_notification_conformance.go",
         "conditional_labels_conformance.go",
         "conditional_writer_conformance.go",
@@ -18,8 +19,10 @@ go_library(
         "conformance_skips.go",
         "fake_bd.go",
         "fence_conformance.go",
+        "guarded_batch_conformance.go",
         "metadata_cas_conformance.go",
         "op_recording_store.go",
+        "pinned_id_duplicate_conformance.go",
         "pinned_id_fence_conformance.go",
         "pinned_module.go",
         "ready_parity_conformance.go",
@@ -39,7 +42,9 @@ go_library(
 go_test(
     name = "beadstest_test",
     srcs = [
+        "class_handles_test.go",
         "conformance_skips_test.go",
+        "fake_bd_test.go",
         "op_recording_store_test.go",
         "pinned_module_test.go",
         "recording_store_test.go",

@@ -9,13 +9,26 @@ mcp-agent-mail @ https://github.com/Dicklesworthstone/mcp_agent_mail/archive/327
 # regular-expression denial of service); <= 3.1.61 adds GHSA-59cr-6r3x-644w
 # (MEDIUM, submodule update path traversal writes outside the repository).
 # Pinning the floor ensures the resolver picks the patched version even if
-# mcp-agent-mail's transitive constraint allows older. Drop this line once
-# mcp-agent-mail upstream pins GitPython>=3.1.62 itself.
-gitpython>=3.1.62
+# mcp-agent-mail's transitive constraint allows older.
+#
+# Ceiling: GitPython 3.2 validates paths on every index read, which makes
+# mcp-agent-mail's archive commits 1.5-2.9x slower. Under a 400-message burst,
+# 3.2.1 delivered 293-322 against about 395 on 3.1.x; the rest timed out on the
+# archive lock (review of #8307,
+# https://github.com/gastownhall/gascity/pull/8307#pullrequestreview-5645840708).
+# 3.2.1 is the only fix for GHSA-83vg-56qc-22m7 / CVE-2026-114145 (HIGH,
+# create_submodule clones before validating the submodule path). There is no
+# 3.1.x backport, but mcp-agent-mail never creates or updates submodules, so the
+# advisory is unreachable and is waived in .trivyignore.yaml for this release.
+# Lift the ceiling once a GitPython release fixes the commit-latency regression.
+gitpython>=3.1.62,<3.2
 
-# Security floor: CVE-2026-69244 affects aiohttp < 3.14.3. Keep this explicit
-# until mcp-agent-mail's transitive requirements carry the fixed release.
-aiohttp>=3.14.3
+# Security floor: CVE-2026-69244 affects aiohttp < 3.14.3; GHSA-494j-54xm-rwp3,
+# GHSA-5wr8-gcqf-gqf3, GHSA-2g87-pp6c-29x5, GHSA-9xw5-w5jj-pvcg,
+# GHSA-pqxq-w44r-73xw, GHSA-6cjc-53gc-5rqm, GHSA-gx76-c99x-2c96 and
+# GHSA-f9xw-jh8m-3mwq affect aiohttp < 3.14.4. Keep this explicit until
+# mcp-agent-mail's transitive requirements carry the fixed release.
+aiohttp>=3.14.4
 
 # Security floor: CVE-2026-63374 (CRITICAL, TLSStream IDNA 2003 host name
 # encoding enables host name confusion) in anyio < 4.14.2. anyio arrives
@@ -25,9 +38,14 @@ aiohttp>=3.14.3
 anyio>=4.14.2
 
 # Security floor: Pillow < 12.3.0 has multiple HIGH-severity image parsing
-# vulnerabilities reported by the image gate. Drop this line once transitive
+# vulnerabilities reported by the image gate; Pillow < 13.0.0 adds
+# GHSA-8g5g-8vmr-9782 (CRITICAL), GHSA-c6hw-5grf-ff96, GHSA-462x-pgg6-55fp,
+# GHSA-p4wg-p73j-c528, GHSA-pchr-8j38-3x4p, GHSA-q45j-58j2-45rg,
+# GHSA-vx6w-vv9f-6gvg, GHSA-65qm-jvmh-6pqg and GHSA-58r4-6rv3-gfh8.
+# mcp-agent-mail declares pillow>=10.4.0 and only uses Image.open/convert and
+# WebP save, none of which changed in 13.0. Drop this line once transitive
 # constraints carry the patched version themselves.
-pillow>=12.3.0
+pillow>=13.0.0
 
 # Security floor: urllib3 < 2.7.0 has GHSA-mf9v-mfxr-j63j (HIGH,
 # decompression-bomb safeguards bypassed in parts of the streaming API)
@@ -52,13 +70,16 @@ idna>=3.15
 # Header Injection) in litellm < 1.84.0. CVE-2026-84377 (MEDIUM) affects
 # litellm < 1.88.6 and each line from 1.89 through 1.96 before its patch
 # release (1.89.7, 1.90.7, 1.91.5, 1.92.2, 1.93.2, 1.94.3, 1.95.1, 1.96.2).
-# A bare floor cannot express that, so any litellm move must land on a
-# patched release. Drop once mcp-agent-mail's transitive constraint carries
+# The eMudhra intermediate-CA compromise
+# (https://emudhra.we-have-a-problem.com/) is fixed per line in 1.103.8,
+# 1.104.6, 1.105.4 and 1.106.3, so the floor is 1.106.3.
+# A bare floor cannot express per-line patches, so any litellm move must land
+# on a patched release. Drop once mcp-agent-mail's transitive constraint carries
 # the patched version itself. Before dropping it, move this note next to the
 # litellm lock-pin row in TestMCPMailImagePinsPatchedPythonDependencies
 # (scripts/container_tool_security_test.go). That exact pin, not this
 # floor, is what makes a re-lock onto an unpatched 1.90-1.96 release fail.
-litellm>=1.89.7
+litellm>=1.106.3
 
 # Security floor: CVE-2026-49852 (HIGH, HS256/HS384/HS512 verify accepts an
 # empty/nil HMAC key — cross-language sibling of CVE-2026-45363) in joserfc
@@ -70,10 +91,38 @@ joserfc>=1.6.8
 # transports serve session requests without verifying the authenticated
 # session, and experimental task handlers are reachable by any client) and
 # CVE-2026-59950 (HIGH, fixed 1.28.1 — WebSocket transport lacks Host/Origin
-# validation) in the mcp Python SDK < 1.28.1. mcp arrives transitively via
-# fastmcp-slim (mcp<2.0,>=1.24.0); floor at 1.28.1 to clear all three. Drop
-# once fastmcp-slim's transitive constraint carries the patched version itself.
-mcp>=1.28.1
+# validation) in the mcp Python SDK < 1.28.1, and GHSA-84m7-p3x7-pcfv in
+# mcp < 1.30.0. mcp arrives transitively via fastmcp-slim (mcp<2.0,>=1.24.0);
+# floor at 1.30.0 to clear all four. Drop once fastmcp-slim's transitive
+# constraint carries the patched version itself.
+mcp>=1.30.0
+
+# Security floor: CVE-2026-114605 (HIGH, excessive CPU in
+# dns.name.from_wire_parser) in dnspython < 2.9.0. dnspython arrives via
+# email-validator; drop once its constraint carries the patched release.
+dnspython>=2.9.0
+
+# Ceiling: filelock 4.x can truncate the mail SQLite database at shutdown.
+# mcp-agent-mail's emergency fd cleanup (storage.cleanup_leaked_lockfile_fds)
+# closes leaked lock fds without clearing filelock's per-thread context, so a
+# SQLite connection can reuse the fd number. At exit, 4.x releases every
+# thread's abandoned hold and writes "filelock/released\n" through that fd,
+# leaving an 18-byte file. 3.29.0 never writes through it (review of #8307,
+# https://github.com/gastownhall/gascity/pull/8307#pullrequestreview-5645840708;
+# .github/scripts/mcp-mail-filelock-exit-regression.py reproduces it).
+# filelock arrives via mcp-agent-mail (filelock>=3.16.0) and huggingface-hub
+# (filelock>=3.10.0), neither capped. The only fix for GHSA-v4x8-3wr5-3wq8 /
+# CVE-2026-112940 (HIGH), GHSA-567q-5qvw-pf92 and GHSA-9vhv-jxww-xfm5 (LOW) is
+# 4.2.1. None is reachable here: the HIGH one is in ReadWriteLock, which neither
+# dependent uses, and both LOWs are Windows only. The HIGH one is waived in
+# .trivyignore.yaml for this release. Lift the ceiling once filelock or
+# mcp-agent-mail fixes the fd reuse and the regression script passes on 4.x.
+filelock>=3.29.0,<4
+
+# Security floor: GHSA-xcq7-p3pf-p88h / CVE-2026-114603 (MEDIUM) in
+# opentelemetry-api <= 1.45.0. It arrives via fastmcp-slim; drop once
+# fastmcp-slim's constraint carries the patched release itself.
+opentelemetry-api>=1.45.1
 
 # Authlib and FastMCP security floors live in
 # .github/requirements/mcp-agent-mail.overrides.txt because mcp-agent-mail

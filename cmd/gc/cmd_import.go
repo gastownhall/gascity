@@ -127,21 +127,29 @@ func newImportCmd(stdout, stderr io.Writer) *cobra.Command {
 	return cmd
 }
 
+// credentialHint returns the pack-credential remediation for err — the text
+// printCredentialHint prints after "hint: " — and whether err carries an auth
+// classification from a network git run.
+func credentialHint(err error) (string, bool) {
+	var authErr *gitcred.AuthError
+	if !errors.As(err, &authErr) {
+		return "", false
+	}
+	if authErr.Matched {
+		return fmt.Sprintf("credential rule from %s matched but the remote rejected it; check the token is valid and has contents:read on this repository (gc import credential list)", authErr.RuleOrigin), true
+	}
+	return "this source requires authentication; register a pack credential and retry:\n" +
+		fmt.Sprintf("  gc import credential add %s --helper 'gh auth token'\n", authErr.OrgPrefix) +
+		"  (--token-file, --token-env, and --ssh-key-file are the non-interactive alternatives; see gc import credential add --help)", true
+}
+
 // printCredentialHint appends the pack-credential remediation hint when err
 // carries an auth classification from a network git run. It is deliberately
 // separate from importAddErrorLine's framing (pinned by exact-match tests).
 func printCredentialHint(stderr io.Writer, err error) {
-	var authErr *gitcred.AuthError
-	if !errors.As(err, &authErr) {
-		return
+	if hint, ok := credentialHint(err); ok {
+		fmt.Fprintf(stderr, "hint: %s\n", hint) //nolint:errcheck
 	}
-	if authErr.Matched {
-		fmt.Fprintf(stderr, "hint: credential rule from %s matched but the remote rejected it; check the token is valid and has contents:read on this repository (gc import credential list)\n", authErr.RuleOrigin) //nolint:errcheck
-		return
-	}
-	fmt.Fprintf(stderr, "hint: this source requires authentication; register a pack credential and retry:\n")                                            //nolint:errcheck
-	fmt.Fprintf(stderr, "  gc import credential add %s --helper 'gh auth token'\n", authErr.OrgPrefix)                                                   //nolint:errcheck
-	fmt.Fprintf(stderr, "  (--token-file, --token-env, and --ssh-key-file are the non-interactive alternatives; see gc import credential add --help)\n") //nolint:errcheck
 }
 
 func newImportAddCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -661,6 +669,7 @@ func importSvcDeps() importsvc.Deps {
 
 //nolint:unparam // keep fs injectable for parity with the other import helpers and direct tests.
 func doImportAdd(fs fsys.FS, cityPath, source, nameOverride, versionFlag string, stdout, stderr io.Writer) int {
+	mcpBefore, mcpBeforeErr := loadMCPCapabilityReport(cityPath)
 	res, err := importsvc.AddImportWith(fs, cityPath, source, nameOverride, versionFlag, importSvcDeps())
 	if err != nil {
 		fmt.Fprintln(stderr, importAddErrorLine(source, nameOverride, err)) //nolint:errcheck
@@ -671,7 +680,49 @@ func doImportAdd(fs fsys.FS, cityPath, source, nameOverride, versionFlag string,
 		fmt.Fprintf(stdout, "Locked to registry release %s\n", res.RegistryRelease) //nolint:errcheck
 	}
 	fmt.Fprintf(stdout, "Added import %q from %s\n", res.Name, res.Source) //nolint:errcheck
+	warnImportMCPCapability(cityPath, mcpBefore, mcpBeforeErr, stderr)
 	return 0
+}
+
+// errImportRootNotCity marks an import root that is a pack, not a city: it
+// has no agents to check MCP servers against.
+var errImportRootNotCity = errors.New("import root is not a city")
+
+// loadMCPCapabilityReport checks the city's MCP servers against what its
+// agents' providers can receive (collectMCPCapabilityReport).
+func loadMCPCapabilityReport(cityPath string) (mcpCapabilityReport, error) {
+	if !citylayout.HasCityConfig(cityPath) {
+		return mcpCapabilityReport{}, errImportRootNotCity
+	}
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		return mcpCapabilityReport{}, err
+	}
+	return collectMCPCapabilityReport(cityPath, cfg), nil
+}
+
+// warnImportMCPCapability reports, right after gc import add, what the new
+// import changed for the city's agents: agents that will start without MCP
+// servers it provides because their provider cannot receive them, and agents
+// it keeps from starting. It compares the city before and after the add, so
+// whichever import a server is attributed to, only the new import's effect is
+// reported. It is advisory: the add has already succeeded.
+func warnImportMCPCapability(cityPath string, before mcpCapabilityReport, beforeErr error, stderr io.Writer) {
+	if errors.Is(beforeErr, errImportRootNotCity) {
+		return
+	}
+	after, err := loadMCPCapabilityReport(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc import add: note: could not check the city's MCP servers against its agents: %v\n", err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	if beforeErr != nil {
+		// No baseline: report everything the city's agents now miss.
+		before = mcpCapabilityReport{}
+	}
+	for _, line := range after.since(before).lines() {
+		fmt.Fprintf(stderr, "gc import add: warning: %s\n", line) //nolint:errcheck // best-effort stderr
+	}
 }
 
 // importAddErrorLine frames the `gc import add` exit-1 stderr line. The

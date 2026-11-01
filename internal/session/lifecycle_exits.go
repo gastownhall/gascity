@@ -1,6 +1,7 @@
 package session
 
 import (
+	"maps"
 	"strconv"
 	"time"
 )
@@ -152,6 +153,44 @@ func parseWakeStamp(raw string) (time.Time, bool) {
 type ExitAccrual struct {
 	Patch       MetadataPatch
 	Quarantined bool
+	// Until is a quarantining accrual's quarantined_until, the Quarantine
+	// cell's to write.
+	Until time.Time
+}
+
+// Class is a's class keys over row info: for a quarantining accrual the
+// Quarantine cell's quarantined_until (ExtendQuarantine), else none. It
+// mints nothing.
+func (a ExitAccrual) Class(info Info, now time.Time) DispositionPatch {
+	if !a.Quarantined {
+		return DispositionPatch{}
+	}
+	return ExtendQuarantine(info, a.Until, now)
+}
+
+// ExtendQuarantine is the controller's Quarantine cell over row info to
+// until, a crash, churn or rate-limit quarantine's: it never shortens a
+// quarantine already in force (an operator's longer one), writing the later
+// of the two deadlines (the #7706 review).
+func ExtendQuarantine(info Info, until, now time.Time) DispositionPatch {
+	if live := DispositionOfInfo(info).Quarantine; live.After(now) && live.After(until) {
+		until = live
+	}
+	return CellInfo(info, ActorController, DispEvent{Kind: EvQuarantine, Until: until}, now)
+}
+
+// Over is a's patch over row info: a quarantining accrual during a live
+// quarantine keeps the live quarantine's reason (KeepQuarantineReason;
+// CONTRACT v5.9z), as it keeps its later deadline (Class). Legacy's
+// recordWakeFailure and recordChurn and v2's accruals all write it.
+func (a ExitAccrual) Over(info Info, now time.Time) MetadataPatch {
+	return KeepQuarantineReason(maps.Clone(a.Patch), DispositionOfInfo(info), info.SleepReason, now)
+}
+
+// PatchFor is a's write to row info: its patch over info (Over) with its
+// Class.
+func (a ExitAccrual) PatchFor(info Info, now time.Time) MetadataPatch {
+	return a.Class(info, now).Into(info.ID, a.Over(info, now))
 }
 
 // WakeFailureAccrualPatch builds the write for one more rapid-crash wake
@@ -174,10 +213,10 @@ func exitAccrual(counterKey string, next, threshold int, sleepReason string, unt
 	if next >= threshold {
 		return ExitAccrual{
 			Quarantined: true,
+			Until:       until,
 			Patch: MetadataPatch{
-				counterKey:          count,
-				"quarantined_until": until.UTC().Format(time.RFC3339),
-				"sleep_reason":      sleepReason,
+				counterKey:     count,
+				"sleep_reason": sleepReason,
 			},
 		}
 	}
@@ -193,6 +232,7 @@ func ConversationResetPatch(clearStartedConfigHash bool) MetadataPatch {
 		"session_key":                "",
 		"continuation_reset_pending": "true",
 	}
+	ClearResumeRun(patch) // a new conversation's run starts anew (mc-bm1af)
 	if clearStartedConfigHash {
 		patch["started_config_hash"] = ""
 		// Priming markers share started_config_hash's lifetime (S19 Stage 2): a
@@ -202,13 +242,12 @@ func ConversationResetPatch(clearStartedConfigHash bool) MetadataPatch {
 	return patch
 }
 
-// RateLimitQuarantinePatch backs a session off a provider rate-limit screen
-// until the given time without counting a crash or resetting its
-// conversation metadata.
-func RateLimitQuarantinePatch(until time.Time) MetadataPatch {
+// RateLimitQuarantinePatch is the lifecycle of backing a session off a
+// provider rate-limit screen without counting a crash or resetting its
+// conversation metadata; its quarantined_until is the Quarantine cell's.
+func RateLimitQuarantinePatch() MetadataPatch {
 	return MetadataPatch{
 		"state":                     string(StateAsleep),
-		"quarantined_until":         until.UTC().Format(time.RFC3339),
 		"sleep_reason":              string(SleepReasonRateLimit),
 		"last_woke_at":              "",
 		"pending_create_claim":      "",

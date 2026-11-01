@@ -16,29 +16,29 @@ func TestReconcilerWakeDemandOverridesSleepSuppressionForExplicitAndInteractiveR
 	eval := wakeEvaluation{}
 
 	routed := AwakeDecision{ShouldWake: true, Reason: "routed-demand"}
-	if !wakeDemandOverridesSleepSuppression(routed, eval, interactive, nil, "olivia", false, false) {
+	if !wakeDemandOverridesSleepSuppression(routed, eval, interactive, nil, "olivia", "", false) {
 		t.Fatal("routed demand must override interactive sleep suppression: the holder owns the canonical alias and no standby can serve it")
 	}
-	if wakeDemandOverridesSleepSuppression(routed, eval, interactive, nil, "olivia", true, false) {
+	if wakeDemandOverridesSleepSuppression(routed, eval, interactive, nil, "olivia", "user-hold", false) {
 		t.Fatal("explicit sleep intent should still override routed demand")
 	}
 
 	explicit := AwakeDecision{ShouldWake: true, Reason: "explicit-wake"}
-	if !wakeDemandOverridesSleepSuppression(explicit, eval, interactive, nil, "olivia", false, true) {
+	if !wakeDemandOverridesSleepSuppression(explicit, eval, interactive, nil, "olivia", "", true) {
 		t.Fatal("a durable explicit wake request must override the idle latch")
 	}
 	// The awake set may re-label an explicitly woken named holder (e.g. to
 	// "named-demand"); the durable wake_request still carries the override.
 	relabeled := AwakeDecision{ShouldWake: true, Reason: "named-demand"}
-	if !wakeDemandOverridesSleepSuppression(relabeled, eval, interactive, nil, "olivia", false, true) {
+	if !wakeDemandOverridesSleepSuppression(relabeled, eval, interactive, nil, "olivia", "", true) {
 		t.Fatal("explicit wake must override regardless of the awake-set reason label")
 	}
-	if wakeDemandOverridesSleepSuppression(explicit, eval, interactive, nil, "olivia", true, true) {
+	if wakeDemandOverridesSleepSuppression(explicit, eval, interactive, nil, "olivia", "user-hold", true) {
 		t.Fatal("explicit sleep intent should still win over an explicit wake")
 	}
 
 	scaled := AwakeDecision{ShouldWake: true, Reason: "scaled:demand"}
-	if wakeDemandOverridesSleepSuppression(scaled, eval, interactive, map[string]int{"olivia": 1}, "olivia", false, false) {
+	if wakeDemandOverridesSleepSuppression(scaled, eval, interactive, map[string]int{"olivia": 1}, "olivia", "", false) {
 		t.Fatal("ordinary interactive pool demand should still honor sleep suppression")
 	}
 }
@@ -70,6 +70,35 @@ func TestExplicitWakePendingInfo(t *testing.T) {
 				t.Fatalf("explicitWakePendingInfo(%+v) = %v, want %v", tc.info, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestExplicitWakePendingInfoMatchesSessionRule keeps the reconciler's
+// pending-explicit-wake rule in step with session.ExplicitWakeUnserved, the
+// rule RequestWakeUnlessHeld coalesces on: on every row that is not up
+// (active/awake counts as served, a clause only the reconciler applies) the
+// two agree. A drift would let a sender coalesce onto a wake the reconciler
+// already treats as served, and lose it.
+func TestExplicitWakePendingInfoMatchesSessionRule(t *testing.T) {
+	requests := []string{"", "explicit", " explicit ", "work", "pending-create"}
+	stamps := []string{"", "2026-09-22T20:00:00Z", " 2026-09-22T20:00:00Z ", "2026-09-22T22:00:00Z", " 2026-09-22T22:00:00Z ", "yesterday"}
+	states := []string{"", "asleep", "drained", "suspended", "creating", "active", "awake"}
+	for _, state := range states {
+		for _, request := range requests {
+			for _, requestedAt := range stamps {
+				for _, sleptAt := range stamps {
+					info := sessionpkg.Info{MetadataState: state, WakeRequest: request, WakeRequestedAt: requestedAt, SleptAt: sleptAt}
+					want := sessionpkg.ExplicitWakeUnserved(info)
+					if state == "active" || state == "awake" {
+						want = false
+					}
+					if got := explicitWakePendingInfo(info); got != want {
+						t.Fatalf("explicitWakePendingInfo(state=%q wake_request=%q wake_requested_at=%q slept_at=%q) = %v, want %v (session.ExplicitWakeUnserved and the active/awake clause)",
+							state, request, requestedAt, sleptAt, got, want)
+					}
+				}
+			}
+		}
 	}
 }
 

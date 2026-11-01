@@ -79,6 +79,55 @@ func TestTypedRuntimeSentinelsNeverMatchIsSessionGone(t *testing.T) {
 	}
 }
 
+// emptyJoin is a multi-error with no children: only its own text can decide.
+type emptyJoin struct{ msg string }
+
+func (e emptyJoin) Error() string   { return e.msg }
+func (e emptyJoin) Unwrap() []error { return nil }
+
+// A joined error is gone only when every leaf is. The auto provider's Stop
+// joins a failed default backend with the ACP backend's "session not found";
+// read as gone, that failed kill was taken for a stopped runtime (C8.8).
+func TestIsSessionGoneRequiresEveryJoinedLeafGone(t *testing.T) {
+	failure := errors.New("tmux -u: gate-shim: simulated tmux failure (tmux.c1)")
+	serverGone := errors.New("no tmux server running")
+	notFound := fmt.Errorf("stopping %q: %w", "sky", ErrSessionNotFound)
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "single: sentinel", err: ErrSessionNotFound, want: true},
+		{name: "single: wrapped sentinel", err: notFound, want: true},
+		{name: "single: legacy text", err: errors.New("session sky not running"), want: true},
+		{name: "single: missing server", err: fmt.Errorf("killing session sky: %w", serverGone), want: true},
+		{name: "single: failure", err: failure, want: false},
+		{name: "joined: all gone", err: errors.Join(notFound, serverGone), want: true},
+		{name: "joined: failure first", err: errors.Join(failure, ErrSessionNotFound), want: false},
+		{name: "joined: failure last", err: errors.Join(ErrSessionNotFound, failure), want: false},
+		{name: "joined: auto stop, default kill failed", err: MergeBackendStopErrors(
+			BackendError{Label: "default", Err: failure},
+			BackendError{Label: "acp", Err: ErrSessionNotFound},
+		), want: false},
+		{name: "joined: multi-%w mixed", err: fmt.Errorf("%w; %w", failure, ErrSessionNotFound), want: false},
+		{name: "nested: all gone", err: errors.Join(errors.Join(ErrSessionNotFound, serverGone), notFound), want: true},
+		{name: "nested: inner failure", err: errors.Join(ErrSessionNotFound, errors.Join(serverGone, failure)), want: false},
+		{name: "wrapped join: all gone", err: fmt.Errorf("k8s stop %q: %w", "sky", errors.Join(notFound, serverGone)), want: true},
+		{name: "wrapped join: mixed, wrap text says gone", err: fmt.Errorf("session not found: %w", errors.Join(failure, ErrSessionNotFound)), want: false},
+		{name: "doubly wrapped join: mixed", err: fmt.Errorf("a: %w", fmt.Errorf("b: %w", errors.Join(ErrSessionNotFound, failure))), want: false},
+		{name: "empty join: own text gone", err: emptyJoin{msg: "session not found"}, want: true},
+		{name: "empty join: own text failure", err: emptyJoin{msg: "permission denied"}, want: false},
+		{name: "wrapped empty join: wrap text decides", err: fmt.Errorf("session not found: %w", emptyJoin{msg: "permission denied"}), want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsSessionGone(tc.err); got != tc.want {
+				t.Fatalf("IsSessionGone(%q) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
 // StopForCleanup is the one teardown absorption rule: a Stop error is success
 // only when every leaf of its tree says the session is gone. Anything else — a
 // typed stop refusal, a terminate failure joined with a gone answer, or free

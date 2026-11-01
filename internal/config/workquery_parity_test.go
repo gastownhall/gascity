@@ -105,7 +105,7 @@ func oldEffectiveOnDeath(a *Agent, topo QueryTopology) string {
 		route = a.PoolName
 	}
 	_ = topo
-	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+	ephemeralRead := bdQueryEphemeralInProgressQuietShell() + ` | ` +
 		`jq -r --arg assignee ` + shellquote.Quote(a.QualifiedName()) + ` '.[] | select((.assignee // "") == $assignee) | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' 2>/dev/null; `
 	return `{ ` +
 		`bd list --assignee=` + a.QualifiedName() +
@@ -131,7 +131,7 @@ func oldEffectiveOnBoot(a *Agent, topo QueryTopology) string {
 		template = a.PoolName
 	}
 	_ = topo
-	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+	ephemeralRead := bdQueryEphemeralInProgressQuietShell() + ` | ` +
 		`jq -r --arg template "$template" '.[] | select((.assignee // "") == "") | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == $template) or ((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.RunTargetMetadataKey) + ` == $template) and (` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `"))) | .id' 2>/dev/null; `
 	return `template=` + shellquote.Quote(template) + `; ` +
 		`{ ` +
@@ -354,10 +354,25 @@ func singleQuoteEscaped(s string) string {
 
 // singleStoreReadCount counts the reads in a single-store command that the
 // federation swap replaces: the `bd ready` call sites plus the crash-recovery
-// tier's `bd list --status in_progress`.
+// tier's `bd list --status in_progress`, without that tier's conditional
+// --include-ephemeral fallback read.
 func singleStoreReadCount(command string) int {
 	return strings.Count(command, bdReadyCommand) +
-		strings.Count(command, bdListInProgressCommand)
+		strings.Count(command, bdListInProgressCommand) -
+		singleStoreOnlyInProgressMentions(command)
+}
+
+// inclusiveRecoveryFallbackMarker opens the single-store crash-recovery tier's
+// conditional second read: the --include-ephemeral one-row read it issues only
+// when the plain one-row read returned no row.
+const inclusiveRecoveryFallbackMarker = `if [ -z "$r" ] || [ "$r" = "[]" ]; then r=$(` + bdListInProgressCommand + ` --include-ephemeral `
+
+// singleStoreOnlyInProgressMentions counts the mentions of the in_progress
+// reader that belong to that conditional second read, which the federated reader
+// has no counterpart for: the read itself and the failure clause naming the
+// reader. They are not a read the swap replaces, so they are not counted as one.
+func singleStoreOnlyInProgressMentions(command string) int {
+	return 2 * strings.Count(command, inclusiveRecoveryFallbackMarker)
 }
 
 // renormalizeFederatedCommand maps a federated command back onto the
@@ -400,13 +415,12 @@ func renormalizeFederatedCommand(federated string, single QueryTopology) string 
 			assignedInProgressCandidatesTierCommand(shellVar, fedTopo),
 			assignedInProgressCandidatesTierCommand(shellVar, single))
 	}
+	// Both topologies fail a read the same way; only the reader the failure
+	// clause names differs.
+	federated = replaceFragment(federated,
+		workQueryReadFailure(gcReadyCommand),
+		workQueryReadFailure(bdReadyCommand))
 	federated = strings.ReplaceAll(federated, gcReadyCommand, bdReadyCommand)
-	federated = strings.ReplaceAll(federated, `--json --limit=1) || exit $?`, `--json --limit=1 2>/dev/null)`)
-	// Suffix-matched so one pair covers both the routed tier (no explicit
-	// --sort; the reader's canonical priority order decides) and the
-	// migration fallback (which keeps --sort oldest for its retirement window).
-	federated = strings.ReplaceAll(federated, `--limit=20) || exit $?`, `--limit=20 2>/dev/null)`)
-	federated = strings.ReplaceAll(federated, `--limit=20 2>/dev/null) || exit $?`, `--limit=20 2>/dev/null)`)
 	return federated
 }
 

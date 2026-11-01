@@ -66,6 +66,10 @@ type fenceLeaf struct {
 	*runtime.Fake
 	LivenessErrors map[string]error
 	P              runtime.Provider
+	// OnAttachRead and OnPendingRead, when set, run at each attach error
+	// probe (L3) or pending read (L4), before it answers: an outside write
+	// landing while the fence reads that leg.
+	OnAttachRead, OnPendingRead func(name string)
 }
 
 // newFenceLeaf is a hardened leaf as tmux (a reporter: its attachment probe
@@ -88,6 +92,20 @@ func (r leafReads) ObserveLivenessWithError(name string, pn []string) (runtime.L
 		return runtime.Liveness{}, err
 	}
 	return r.FullFake.ObserveLivenessWithError(name, pn)
+}
+
+func (r leafReads) IsAttachedWithError(name string) (bool, error) {
+	if r.l.OnAttachRead != nil {
+		r.l.OnAttachRead(name)
+	}
+	return r.FullFake.IsAttachedWithError(name)
+}
+
+func (r leafReads) Pending(name string) (*runtime.PendingInteraction, error) {
+	if r.l.OnPendingRead != nil {
+		r.l.OnPendingRead(name)
+	}
+	return r.FullFake.Pending(name)
 }
 
 func (r leafReads) ObserveLivenessSince(name string, pn []string, _ time.Time) (runtime.Liveness, error) {
@@ -181,10 +199,17 @@ func TestFenceTerminalNoReportUsesQuietWindowNotBoolAttach(t *testing.T) {
 		t.Fatalf("escalation class: %+v, want escalate, never proceed", v)
 	}
 
-	k8s, k8sFake := fakeProfile(runtime.ProfileK8s)
-	startRuntime(t, k8sFake, "rt_b", ours("b"))
-	if reason, _ := attachLeg(context.Background(), k8s, "rt_b", false, now); reason != fenceTerminalNotQuiet {
-		t.Fatalf("unhardened leaf with no activity: L3 %q, want terminal-no-report's defer", reason)
+	// k8s is unhardened; ssh is hardened (error-bearing liveness) and stays
+	// terminal-no-report because a human can attach to it (ssh -t).
+	for _, p := range []runtime.Profile{runtime.ProfileK8s, runtime.ProfileSSH} {
+		leaf, fake := fakeProfile(p)
+		startRuntime(t, fake, "rt_b", ours("b"))
+		if reason, escalate := attachLeg(context.Background(), leaf, "rt_b", false, now); reason != fenceTerminalNotQuiet || escalate {
+			t.Fatalf("%s leaf with no activity: L3 %q escalate=%v, want terminal-no-report's defer", p, reason, escalate)
+		}
+		if reason, escalate := attachLeg(context.Background(), leaf, "rt_b", true, now); reason != fenceTerminalNoReport || !escalate {
+			t.Fatalf("%s leaf, escalation class: L3 %q escalate=%v, want terminal-no-report's escalation", p, reason, escalate)
+		}
 	}
 }
 

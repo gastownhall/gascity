@@ -30,6 +30,7 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -1294,6 +1295,33 @@ func doctorScopeHasFileStoreMarker(scopePath string) bool {
 	return err == nil && !info.IsDir()
 }
 
+// scopeNonDoltBackend reports the backend a scope's .beads/metadata.json names
+// when that backend is not Dolt, so a Dolt-only check can answer "not
+// applicable" instead of dialing a server that does not exist. It decides from
+// metadata alone and names no backend: "is Dolt" is contract.IsDoltBackend, the
+// predicate the store factory and the provider lifecycle route on, so every
+// spelling they serve as Dolt ("dolt", "bd", in any case) keeps its dial and
+// any other name is not Dolt. Metadata that names nothing, or cannot be read,
+// stays with the Dolt checks: an unnamed backend is the Dolt default, and an
+// unreadable file must not silence a check that would report it.
+func scopeNonDoltBackend(scopeRoot string) (string, bool) {
+	backend, named, err := contract.ReadMetadataBackend(fsys.OSFS{}, filepath.Join(scopeRoot, ".beads", "metadata.json"))
+	if err != nil || !named || contract.IsDoltBackend(backend) {
+		return "", false
+	}
+	return backend, true
+}
+
+// nonDoltScopeResult is the not-applicable answer for a Dolt-server check on a
+// scope bound to a non-Dolt backend.
+func nonDoltScopeResult(name, backend string) *CheckResult {
+	return &CheckResult{
+		Name:    name,
+		Status:  StatusOK,
+		Message: fmt.Sprintf("not applicable (beads backend %q is not Dolt)", backend),
+	}
+}
+
 // DoltServerCheck verifies the dolt server is running and reachable.
 type DoltServerCheck struct {
 	cityPath string
@@ -1321,6 +1349,9 @@ func (c *DoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.Status = StatusOK
 		r.Message = "not required (bd backend=doltlite)"
 		return r
+	}
+	if backend, ok := scopeNonDoltBackend(c.cityPath); ok {
+		return nonDoltScopeResult(c.Name(), backend)
 	}
 	if pending := pendingScopeInitResult(c.Name(), c.cityPath, c.cityPath); pending != nil {
 		return pending
@@ -1390,6 +1421,9 @@ func (c *RigDoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.Status = StatusOK
 		r.Message = "not required (bd backend=doltlite)"
 		return r
+	}
+	if backend, ok := scopeNonDoltBackend(rigPath); ok {
+		return nonDoltScopeResult(c.Name(), backend)
 	}
 	if pending := pendingScopeInitResult(c.Name(), c.cityPath, rigPath); pending != nil {
 		return pending
@@ -1754,14 +1788,15 @@ type WorktreeCheck struct {
 // Name returns the check identifier.
 func (c *WorktreeCheck) Name() string { return "worktrees" }
 
-// Run walks .gc/worktrees/ and verifies each .git pointer. Per-bead
+// Run walks the configured worktrees root (workdir.WorktreesRoot) and
+// verifies each .git pointer. Per-bead
 // worktrees at <rig>/worktrees/ are a separate population and are
 // covered by RigWorktreesCheck.
 func (c *WorktreeCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	c.broken = nil
 
-	wtRoot := filepath.Join(ctx.CityPath, ".gc", "worktrees")
+	wtRoot := workdir.WorktreesRoot(ctx.CityPath)
 	rigEntries, err := os.ReadDir(wtRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1769,8 +1804,8 @@ func (c *WorktreeCheck) Run(ctx *CheckContext) *CheckResult {
 			// Name the directory. The bare "no worktrees directory"
 			// read as a claim about every worktree on the box, and was
 			// reported green against a rig whose own worktrees/ held
-			// tens of gigabytes. Sibling checks already say ".gc/".
-			r.Message = "no .gc/worktrees directory"
+			// tens of gigabytes.
+			r.Message = fmt.Sprintf("no worktrees directory at %s", wtRoot)
 			return r
 		}
 		r.Status = StatusError
@@ -1802,7 +1837,7 @@ func (c *WorktreeCheck) Run(ctx *CheckContext) *CheckResult {
 	if len(c.broken) == 0 {
 		r.Status = StatusOK
 		if total == 0 {
-			r.Message = "no agent worktrees under .gc/worktrees"
+			r.Message = fmt.Sprintf("no agent worktrees under %s", wtRoot)
 		} else {
 			r.Message = fmt.Sprintf("all %d worktree(s) valid", total)
 		}

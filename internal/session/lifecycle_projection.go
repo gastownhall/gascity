@@ -860,7 +860,9 @@ func shouldResetContinuation(base BaseState, input LifecycleInput, sleepReason s
 
 // SleepReasonKeepsContinuation reports whether a session that slept for
 // reason keeps its continuation when its runtime is found missing: the
-// heal resets session_key and started_config_hash otherwise. This list
+// heal resets session_key and started_config_hash otherwise. "killed" is the
+// gc session kill operator stop (SleepReasonKilled, kill_fence.go): like
+// drained and city-stop it is deliberate and keeps the conversation. This list
 // deliberately diverges from IsDeliberateSleepReason's near-identical list
 // (this one has "runtime-missing" and lacks "failed-create"): that one
 // decides churn suppression, this one decides continuation reset on wake —
@@ -869,8 +871,8 @@ func SleepReasonKeepsContinuation(reason string) bool {
 	switch SleepReason(strings.TrimSpace(reason)) {
 	case SleepReasonIdle, SleepReasonIdleTimeout, SleepReasonNoWakeReason,
 		SleepReasonConfigDrift, SleepReasonDrained, SleepReasonCityStop,
-		SleepReasonUserHold, SleepReasonWaitHold, SleepReasonRateLimit,
-		SleepReasonRuntimeMissing:
+		SleepReasonKilled, SleepReasonUserHold, SleepReasonWaitHold,
+		SleepReasonRateLimit, SleepReasonRuntimeMissing:
 		return true
 	}
 	return false
@@ -955,4 +957,22 @@ func hasWakeCause(causes []WakeCause, cause WakeCause) bool {
 		}
 	}
 	return false
+}
+
+// PreserveConversationOnRuntimeLoss reports whether healing a missing runtime
+// must retain its conversation identity. It does not decide explicit resets.
+func PreserveConversationOnRuntimeLoss(info Info) bool {
+	if info.ConfiguredNamedSession && NamedSessionModeInfo(info) == "always" {
+		return true
+	}
+	// A committed manual conversation survives a lost process. A preallocated
+	// key without a successful start must still follow failed-create recovery.
+	return HasStartedManualConversation(info)
+}
+
+// HasStartedManualConversation identifies a committed interactive conversation.
+// Failure accounting may quarantine it, but must not silently replace it.
+func HasStartedManualConversation(info Info) bool {
+	return isManualSessionInfo(info) && strings.TrimSpace(info.SessionKey) != "" &&
+		strings.TrimSpace(info.StartedConfigHash) != ""
 }

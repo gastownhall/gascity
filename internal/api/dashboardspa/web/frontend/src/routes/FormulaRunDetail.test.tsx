@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FormulaRunDetailPage, runDetailNudgeRefresh } from './FormulaRunDetail';
 import { invalidate, setCached } from '../api/cache';
@@ -804,10 +804,7 @@ describe('runDetailNudgeRefresh (P4 stream-vs-nudge division)', () => {
 
 function renderPage(initialEntry = '/runs/gc-adopt-pr-active', includeRouteControls = false) {
   return render(
-    <MemoryRouter
-      initialEntries={[initialEntry]}
-      future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
-    >
+    <MemoryRouter initialEntries={[initialEntry]}>
       <Routes>
         <Route
           path="/runs/:runId"

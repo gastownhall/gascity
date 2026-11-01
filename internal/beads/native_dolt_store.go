@@ -15,6 +15,8 @@ import (
 
 	beadslib "github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/issueops"
+
+	"github.com/gastownhall/gascity/internal/execenv"
 )
 
 const nativeDoltStoreActor = "gascity"
@@ -26,7 +28,12 @@ const nativeDoltStoreActor = "gascity"
 
 var (
 	nativeDoltOpenBestAvailable = beadslib.OpenBestAvailable
-	nativeDoltOpenEnvMu         sync.Mutex
+	// nativeDoltOpenEnvMu is the process-wide execenv.ProcessEnvLock, not a
+	// lock of this package's own: every open window projects BEADS_* variables
+	// into the process env under it, and the session runtimes build child
+	// environments through execenv.Environ under the same lock, so a session
+	// spawned during an open never inherits the open's projection.
+	nativeDoltOpenEnvMu         = &execenv.ProcessEnvLock
 	errNativeIssueMetadataParse = ErrMetadataParse
 )
 
@@ -76,9 +83,7 @@ func nativeGraphApplyDeadline(plan *GraphApplyPlan) time.Duration {
 // ProcessEnvSnapshotExcludingNativeDoltOpen returns a process environment
 // snapshot after any in-flight native Dolt open has restored scoped BEADS_* env.
 func ProcessEnvSnapshotExcludingNativeDoltOpen() []string {
-	nativeDoltOpenEnvMu.Lock()
-	defer nativeDoltOpenEnvMu.Unlock()
-	return os.Environ()
+	return execenv.Environ()
 }
 
 // AmbientNativeDoltOpenEnv returns the ambient process-env value for key, read
@@ -829,6 +834,13 @@ const (
 // reconcile scan / Get surfaced "begin read tx: dial tcp <old-port>: i/o
 // timeout" after a managed-Dolt rebind instead of recovering.
 func (s *NativeDoltStore) withReadRetry(fn func(context.Context, beadslib.Storage) error) error {
+	return s.withReadRetryContext(context.Background(), fn)
+}
+
+// withReadRetryContext is withReadRetry with the whole chain — reads,
+// reconnects, backoff — also bounded by parent, so a caller's cancellation
+// ends a reconnect in progress instead of waiting out the budget.
+func (s *NativeDoltStore) withReadRetryContext(parent context.Context, fn func(context.Context, beadslib.Storage) error) error {
 	if s == nil {
 		return fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
 	}
@@ -840,7 +852,7 @@ func (s *NativeDoltStore) withReadRetry(fn func(context.Context, beadslib.Storag
 	// (env re-resolution + recovery + reopen), the retried read, and the backoff.
 	// Every step derives its deadline from this ctx and is canceled in-flight
 	// when it expires, so the total cannot stack per-call timeouts past budget.
-	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	ctx, cancel := context.WithTimeout(parent, budget)
 	defer cancel()
 	for {
 		storage, gen, release, err := s.acquireStorageGen()
@@ -1794,6 +1806,13 @@ func (s *NativeDoltStore) updateThroughBatch(ctx context.Context, storage beadsl
 // issue patch. Metadata keys merge rather than replace, matching the
 // read-modify-write the storage-layer path performed.
 func nativeIssuePatchFromUpdateOpts(opts UpdateOpts) (issueops.IssuePatch, error) {
+	// Every native write door builds its patch here, so this one refusal
+	// covers Update, the batch Tx and the guarded paths. issueops can express
+	// a removal (MetadataPatch.Unset), but not every wire door publishes it
+	// yet; refusing is the fail-closed answer until one that does is pinned.
+	if err := refuseUnsetMetadata("native dolt update", opts); err != nil {
+		return issueops.IssuePatch{}, err
+	}
 	var patch issueops.IssuePatch
 	if opts.Title != nil {
 		patch.Title = issueops.Field[string]{Set: true, Value: *opts.Title}
@@ -2069,26 +2088,32 @@ func nativeReleaseRefused(err error) bool {
 // ordinary nativeStoreError not-found translation every other role accessor
 // in this file uses.
 //
-// A WISP ID GETS A NAMED REFUSAL, ErrWispNotClaimable, NOT A BARE ErrNotFound.
-// issueops.Claimer's CAS addresses only the issues table, so the claimer
-// reports a wisp id with the same ErrNotFound sentinel it uses for an id that
-// does not exist anywhere. The two are not the same fact for a caller: "this
-// id is a wisp, no front door serving this role can ever claim it" calls for
-// a different response (log it once and move on) than "this id does not
-// exist" (a caller bug or a stale reference worth surfacing loudly).
+// A WISP ID IS CLAIMED THROUGH THE UPDATE OPERATION WHEN THE STORE CAN, AND
+// OTHERWISE GETS A NAMED REFUSAL, ErrWispNotClaimable, NEVER A BARE
+// ErrNotFound. issueops.Claimer's CAS addresses only the issues table, so the
+// claimer reports a wisp id with the same ErrNotFound sentinel it uses for an
+// id that does not exist anywhere. The two are not the same fact for a
+// caller: "this id is a wisp" is either claimable another way or calls for a
+// different response (log it once and move on) than "this id does not exist"
+// (a caller bug or a stale reference, and the error the hook's claim-time
+// class route escalates on).
 //
 // Telling them apart takes a second read. When the claimer's error resolves
 // to issueops.ErrNotFound, nativeClaimTargetIsWisp asks the reader role for
 // id; unlike the claimer, the reader resolves the wisp table too
 // (issueops.Reader.Get: "A miss — for both the issue and the wisp table — is
-// ErrNotFound"). Claim reports ErrWispNotClaimable only when that read returns
-// a row carrying the wisp-plane marker (Ephemeral or NoHistory). The two reads
-// are not atomic, so the verdict describes the row the second read observed:
-// an ordinary issue created or promoted between them carries no marker and
-// keeps the claimer's ErrNotFound. A miss or a failed read keeps it too, so
-// the disambiguating read never manufactures a wisp refusal. Either way the
-// window is benign: the claim wrote nothing, and the caller's next attempt
-// sees the current row.
+// ErrNotFound"). Only a row carrying the wisp-plane marker (Ephemeral or
+// NoHistory) is a wisp. A miss or a failed read keeps the claimer's
+// ErrNotFound, so the disambiguating read never manufactures a wisp verdict,
+// and an ordinary issue created or promoted between the reads carries no
+// marker and keeps it too: the claim wrote nothing, and the caller's next
+// attempt sees the current row.
+//
+// For a wisp, nativeClaimWisp sends the request BdStore.Claim's `bd update
+// <id> --claim` sends, a bare Lifecycle.Update{Claim: true} (S24-G), which
+// resolves the id on both planes and applies the same eligibility CAS as the
+// claimer. A store that does not serve the lifecycle role, or one that
+// refuses the update by name (*ErrUnsupported), reports ErrWispNotClaimable.
 //
 // THE DISAMBIGUATING READ GOES THROUGH THE storage HANDLE AND ctx CLAIM
 // ALREADY HOLDS, NEVER THROUGH s.Get. Claim still holds s.mu.RLock here
@@ -2133,15 +2158,20 @@ func (s *NativeDoltStore) Claim(id, assignee string) (Bead, bool, error) {
 		}
 		if errors.Is(err, issueops.ErrNotFound) {
 			if nativeClaimTargetIsWisp(ctx, storage, id) {
-				return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, ErrWispNotClaimable)
+				return nativeClaimWisp(ctx, storage, id, assignee)
 			}
 		}
 		return Bead{}, false, nativeStoreError(id, err)
 	}
-	if result.Issue == nil {
+	return nativeClaimedBead(id, result.Issue)
+}
+
+// nativeClaimedBead converts a claim's post-state row into the claimed Bead.
+func nativeClaimedBead(id string, issue *beadslib.Issue) (Bead, bool, error) {
+	if issue == nil {
 		return Bead{}, false, fmt.Errorf("claiming bead %q: claim role returned no issue", id)
 	}
-	bead, err := beadFromNativeIssue(result.Issue)
+	bead, err := beadFromNativeIssue(issue)
 	if err != nil {
 		return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, err)
 	}
@@ -2166,9 +2196,56 @@ func nativeClaimTargetIsWisp(ctx context.Context, storage beadslib.Storage, id s
 	return err == nil && details != nil && (details.Ephemeral || details.NoHistory)
 }
 
+// nativeClaimWisp claims the wisp id for assignee through the update
+// operation, Lifecycle.Update{Claim: true} (see the WISP ID note on Claim).
+//
+// The request is the bare claim, unfenced on the RowVersion Claim's
+// disambiguating read observed. The update's claim is the claimer's own
+// compare-and-set, which re-checks holder and status inside the write
+// transaction, so a fence would add no safety. It would only lose the claim
+// to a harmless concurrent write and, over http, disqualify the request from
+// the beads client's claim-only fallback for a server that predates claim on
+// updateIssue, which would turn that server's refusal into a bare error. A
+// foreign holder or an ineligible status is a lost claim, (false, nil),
+// exactly as the claimer's conflicts are, and a re-claim by the holder is the
+// claimer's idempotent success.
+//
+// A store without the lifecycle role, or an update the store refuses by name
+// (*ErrUnsupported, how the beads client reports a request the server cannot
+// serve, including that fallback's W-ClaimRequest.Wisp refusal), is
+// ErrWispNotClaimable, never a bare error and never ErrNotFound. A not-found
+// from the update (the wisp was deleted after the read) is ErrNotFound.
+//
+// Like the claimer's call in Claim, the update is not wrapped in
+// retryOnNativeDoltSerializationConflict: on a dolt server store, beads
+// replays a serialization-conflicted claim transaction itself (withRetryTx),
+// and each replay re-checks holder and status.
+func nativeClaimWisp(ctx context.Context, storage beadslib.Storage, id, assignee string) (Bead, bool, error) {
+	lifecycle, err := storage.IssueLifecycle()
+	if err != nil {
+		return Bead{}, false, fmt.Errorf("claiming bead %q: %w (%w)", id, ErrWispNotClaimable, err)
+	}
+	if lifecycle == nil {
+		return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, ErrWispNotClaimable)
+	}
+	result, err := lifecycle.Update(ctx, issueops.UpdateRequest{Actor: assignee, IssueID: id, Claim: true})
+	if err != nil {
+		var unsupported *beadslib.ErrUnsupported
+		switch {
+		case nativeClaimConflict(err):
+			return Bead{}, false, nil
+		case errors.As(err, &unsupported):
+			return Bead{}, false, fmt.Errorf("claiming bead %q: %w (%w)", id, ErrWispNotClaimable, err)
+		}
+		return Bead{}, false, nativeStoreError(id, err)
+	}
+	return nativeClaimedBead(id, result.Issue)
+}
+
 // ErrWispNotClaimable names the refusal Claim reports for an id that exists
-// only in the wisp plane: see the WISP ID note on Claim above for why this is
-// distinguished from a bare ErrNotFound.
+// only in the wisp plane and cannot be claimed through the update operation:
+// see the WISP ID note on Claim above for why this is distinguished from a
+// bare ErrNotFound.
 var ErrWispNotClaimable = errors.New("wisp not claimable through this role")
 
 // nativeClaimConflict reports the refusals that mean "this claim was not won"
@@ -2488,42 +2565,17 @@ func (s *NativeDoltStore) Children(parentID string, opts ...QueryOpt) ([]Bead, e
 // WaitForParentProjection blocks until native dependency queries reflect a
 // successful reparent from oldParentID to newParentID for id.
 func (s *NativeDoltStore) WaitForParentProjection(ctx context.Context, id, oldParentID, newParentID string) error {
-	ticker := time.NewTicker(bdParentProjectionPollInterval)
-	defer ticker.Stop()
-
-	var lastErr error
-	for {
-		current, err := s.Get(id)
-		if err == nil {
-			switch current.ParentID {
-			case newParentID:
-				matches, matchErr := s.parentProjectionMatches(id, oldParentID, newParentID)
-				if matchErr == nil && matches {
-					return nil
-				}
-				lastErr = matchErr
-			case oldParentID:
-				lastErr = nil
-			default:
-				return fmt.Errorf("updating bead %q: %w", id, ErrParentProjectionSuperseded)
-			}
-		} else {
-			lastErr = err
-		}
-		select {
-		case <-ctx.Done():
-			if lastErr != nil {
-				return fmt.Errorf("updating bead %q: waiting for parent projection from %q to %q: %w (last check error: %w)", id, oldParentID, newParentID, ctx.Err(), lastErr)
-			}
-			return fmt.Errorf("updating bead %q: waiting for parent projection from %q to %q: %w", id, oldParentID, newParentID, ctx.Err())
-		case <-ticker.C:
-		}
-	}
+	return awaitParentProjection(ctx, parentProjectionReads{get: s.Get, matches: s.parentProjectionMatches}, id, oldParentID, newParentID)
 }
 
-func (s *NativeDoltStore) parentProjectionMatches(id, oldParentID, newParentID string) (bool, error) {
+func (s *NativeDoltStore) parentProjectionMatches(ctx context.Context, id, oldParentID, newParentID string, ephemeral bool) (bool, error) {
+	opts := []QueryOpt{IncludeClosed}
+	if ephemeral {
+		// An ephemeral child lives in the wisp tier, outside the default issues tier.
+		opts = append(opts, WithBothTiers)
+	}
 	if oldParentID != "" {
-		oldChildren, err := s.Children(oldParentID)
+		oldChildren, err := s.Children(oldParentID, opts...)
 		if err != nil {
 			return false, fmt.Errorf("listing old parent %q children: %w", oldParentID, err)
 		}
@@ -2531,8 +2583,11 @@ func (s *NativeDoltStore) parentProjectionMatches(id, oldParentID, newParentID s
 			return false, nil
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return false, fmt.Errorf("%w: %w", errParentProjectionCutShort, err)
+	}
 	if newParentID != "" {
-		newChildren, err := s.Children(newParentID)
+		newChildren, err := s.Children(newParentID, opts...)
 		if err != nil {
 			return false, fmt.Errorf("listing new parent %q children: %w", newParentID, err)
 		}
@@ -2783,6 +2838,9 @@ func (t *nativeDoltTx) Create(b Bead) (Bead, error) {
 }
 
 func (t *nativeDoltTx) Update(id string, opts UpdateOpts) error {
+	if err := refuseUnsetMetadata("native dolt transaction update "+id, opts); err != nil {
+		return err
+	}
 	if err := t.store.applyUpdateInTx(t.ctx, t.tx, id, opts); err != nil {
 		return nativeStoreError(id, err)
 	}
@@ -3363,6 +3421,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		DeferUntil:           cloneTimePtr(issue.DeferUntil),
 		CloseReason:          bdCloseReason(status, issue.CloseReason),
 		IndefinitelyDeferred: indefinitelyDeferred,
+		SourceStatus:         string(issue.Status),
 		Revision:             issue.RowVersion,
 	}
 	for _, dep := range issue.Dependencies {
@@ -3525,11 +3584,25 @@ func nativeIssueFilterFromListQuery(query ListQuery) beadslib.IssueFilter {
 	return filter
 }
 
+// nativeStoreError maps a native door's miss onto gc's own not-found sentinel
+// and passes every other error through unchanged.
+//
+// The typed sentinel is the authority: a role reports a miss as
+// issueops.ErrNotFound on both routes, and over a remote bd serve that is the
+// only form the miss has, because the http client renders its own text ("...
+// answered 404 not_found: no issue or wisp with that id") and keeps the
+// sentinel in the chain. The message match below is for raw doors whose
+// engines spell a miss without the sentinel. Reading only the message left a
+// native door's claim over the wire unclassified (ga-ylpbsy.30). This covers
+// the in-process doors only: `gc hook --claim` claims through a bd
+// subprocess, which no sentinel crosses, and its class route settles such an
+// error by reading the same work leg (cmd/gc claim_class_route.go,
+// legProvedAbsent).
 func nativeStoreError(id string, err error) error {
 	if err == nil || errors.Is(err, ErrNotFound) {
 		return err
 	}
-	if !nativeUpstreamNotFound(err) {
+	if !errors.Is(err, issueops.ErrNotFound) && !nativeUpstreamNotFound(err) {
 		return err
 	}
 	if id == "" {

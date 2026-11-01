@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -53,6 +54,7 @@ const (
 	capEpisode                        // the #46 startup-health episode record (a Call's)
 	capRetire                         // the retired-session cleanup after a close (an around's)
 	capRelease                        // the close's raw work legs, for its release Call and its around's cascade
+	capProviderStop                   // the stop's composite provider and clock (a Call's)
 )
 
 // txCaps is what a body, Probe or Call holds: the handles its spec grants,
@@ -69,10 +71,19 @@ type txCaps struct {
 	reads   effectReads         // capReadStores: read-only, blind writes refused
 	start   startCaps           // capProviderStart
 	episode startupHealthRecord // capEpisode
+	stop    stopCaps            // capProviderStop
 	// by is the controller, as a Call's leasing helper (a Manager start or
 	// stop) is handed it, carrying the effect's lease (callWatched).
 	by      session.Actor
 	release *closeReleases // capRelease
+}
+
+// stopCaps are what the stop verb's Call holds: the composite provider,
+// whose routed leaf the fence's verdict names and through whose hops C8.8
+// confirms, and the clock.
+type stopCaps struct {
+	sp    runtime.Provider
+	clock plannerClock
 }
 
 // startCaps are what the start's Calls hold to admit the endpoint ticket and
@@ -118,6 +129,9 @@ func (p *effectPass) capsFor(it intent, grant caps, latch *writeLatch) txCaps {
 	}
 	if grant&capRelease != 0 {
 		c.release = p.held.release
+	}
+	if grant&capProviderStop != 0 {
+		c.stop = stopCaps{sp: p.Runtime, clock: p.Clock}
 	}
 	return c
 }
@@ -255,6 +269,8 @@ type needs struct {
 	Runtime   bool      // the runtime read fresh each attempt
 	Legs      fenceLegs // legAttach (L3), legPending (L4) on the routed leaf; legWork (L5) live
 	Idle      bool      // the agent proved idle on the routed leaf
+	Activity  bool      // the agent's activity read on the routed leaf (a named drift restart's deferral, the idle stop's proof)
+	Content   bool      // the agent's pane read idle or not on the routed leaf (the content-clock idle stop's proof)
 	Escalates bool      // a C8.5 escalation class: L3 escalates on a terminal-no-report leaf
 	Attempts  int       // CAS rounds per section, each deciding again; 0 is 3
 	// Lease takes the row's runtime lease record, not the name's flock
@@ -262,6 +278,11 @@ type needs struct {
 	// writes the incarnation or the commit. Every section with a Call needs
 	// it (the registry test).
 	Lease bool
+	// LeaseAt, with Lease, takes the record only just before that section
+	// (the name's flock from the start), as legacy's start takes its record
+	// only before PreWake: an effect that ends before it, a deferral, writes
+	// nothing.
+	LeaseAt int
 }
 
 func (s effectSpec) needsOf(w *World, it intent) needs {
@@ -315,8 +336,15 @@ type section struct {
 	//
 	//gc:pure
 	Decide func(v txView) txStep
-	probe  func(ctx context.Context, r effectReads, v txView) (any, error)
-	call   func(ctx context.Context, c txCaps, in any) (any, error)
+	// Moved, when set, decides an attempt whose premise moved, which
+	// otherwise refuses: v5 S2's lost commit. It sees the expected row and
+	// what moved; ok false is the premise's refusal. It never writes: a step
+	// that does fails the effect.
+	//
+	//gc:pure
+	Moved func(v txView, expect session.Info, moved []string) (_ txStep, ok bool)
+	probe func(ctx context.Context, r effectReads, v txView) (any, error)
+	call  func(ctx context.Context, c txCaps, in any) (any, error)
 	// callKind is the Call's kind (called), when it has one.
 	callKind callKind
 	// The kind's own Probe, Decide and Call as given to probed and called,
@@ -358,8 +386,9 @@ const (
 	// registry's FactsAfterStart facts, since the started runtime writes the
 	// keys that exception drops.
 	callStart callKind = iota + 1
-	// callStop stops one: the full premise holds after it, a start's
-	// before it included.
+	// callStop stops one: after it the premise is the registry's
+	// FactsAfterStop site's (the stop verb's finalize, v5 D3), whatever a
+	// start before it ran.
 	callStop
 	// callWork writes work beads (a release), not the runtime: the premise
 	// after it is the one before it.
@@ -399,6 +428,11 @@ func calledWhen[In, Out any](kind callKind, sec section, when func(In) bool, cal
 	return sec
 }
 
+// callFacts is a Call result that carries facts of what the Call did (a
+// stop's session.stopped), merged as the Call returns, so a later section's
+// refusal does not drop them.
+type callFacts interface{ facts() effectFacts }
+
 // callResult is the previous section's Call result and error.
 func callResult[Out any](v txView) (Out, error) {
 	out, _ := v.prev.(Out)
@@ -433,6 +467,20 @@ type txFence struct {
 	Read            fenceLegs // the legs read: one not read holds (fenceDestructive)
 	Work            *txWork
 	Idle            bool // proved idle: WaitForIdle, then no activity since the pass
+	Activity        *activityRead
+	Content         contentState // the pane's fresh snapshot (needs.Content)
+}
+
+// workHeld reports L5 holding: work read on the seat, or a read that failed
+// or was not made (fails closed).
+func (f txFence) workHeld() bool { return f.Work == nil || f.Work.Err != nil || !f.Work.Free }
+
+// activityRead is the routed leaf's activity read: whether it reports
+// activity for the name, and its last.
+type activityRead struct {
+	Reportable bool
+	Last       time.Time
+	Err        error
 }
 
 // txStep is Decide's verdict: refuse or fail (writing nothing), write, or
@@ -444,16 +492,32 @@ type txFence struct {
 // ends the effect: a landed commit's after-commit Call, ahead of the
 // sections only a failure reaches.
 type txStep struct {
-	Write    session.MetadataPatch
-	Terminal session.MetadataPatch // a premiseClose section's close, with this terminal patch; never with Write
-	Refuse   string
-	Fail     string
-	Err      error
-	Done     bool
-	Last     bool
-	Cause    string
-	Facts    effectFacts
-	Pass     any
+	Write session.MetadataPatch
+	// Class is the disposition cells' keys the write carries beside Write (or,
+	// in a premiseClose section, beside Terminal), minted where the section
+	// writes them.
+	Class session.DispositionPatch
+	// Title, Type and the label deltas ride Write's CAS (LL4's
+	// UpdateRowFenced): the row-metadata verb's (M1). A step that sets a
+	// title or labels writes metadata too (its synced_at); a type repair
+	// alone writes none, as legacy's RepairType.
+	Title, Type             *string
+	AddLabels, RemoveLabels []string
+	Terminal                session.MetadataPatch // a premiseClose section's close, with this terminal patch; never with Write
+	Refuse                  string
+	Fail                    string
+	Err                     error
+	Done                    bool
+	Last                    bool
+	Cause                   string
+	Facts                   effectFacts
+	Pass                    any
+}
+
+// writes reports a step that writes the row: metadata, the disposition's
+// cells, a terminal close, its title, type or labels.
+func (s txStep) writes() bool {
+	return len(s.Write) > 0 || s.Class.Len() > 0 || len(s.Terminal) > 0 || s.Title != nil || s.Type != nil || len(s.AddLabels) > 0 || len(s.RemoveLabels) > 0
 }
 
 // effectFacts are what an effect learned or did besides its outcome, merged
@@ -463,21 +527,50 @@ type effectFacts struct {
 	Transition *drainTransition // legacy's drain telemetry
 	Work       *workVerdict     // a worktree verdict for the work item's backoff
 	// Noted is a fresh read that found the row's runtime alive and Current,
-	// which the planner notes in the observation cache (v5 O4).
+	// or (Gone) found nothing under its name, which the planner notes in the
+	// observation cache (v5 O4; v5.10d (a)).
 	Noted *notedRuntime
 	// Quarantined is the agent a landed death accrual quarantined, for
 	// legacy's RecordAgentQuarantine.
 	Quarantined string
+	// IdleKilled is the agent an idle-timeout stop stopped, for legacy's
+	// RecordAgentIdleKill.
+	IdleKilled string
+	// AliasOwed is the row whose landed alias write owes its runtime the
+	// alias (A7's runtime-alias sync, M1).
+	AliasOwed *rowKey
+	// Stopped is a stop the stop verb performed, for legacy's stop metric.
+	Stopped *agentStop
+	// Classified is the (row, runtime token) a classification completed,
+	// which the planner remembers so neither A12 nor the start's recycle
+	// classifies a pair twice (v5 S5, X10).
+	Classified *classifiedRuntime
 }
 
-// notedRuntime is a runtime name a fresh read issued at At found alive.
+// classifiedRuntime is a row's dead runtime, by its runtime token, and the
+// crash its classification found, which the recycle records once its kill
+// lands (a refused kill keeps it for the next attempt, which peeks no more).
+type classifiedRuntime struct {
+	Key   rowKey
+	Token string // deadToken
+	Crash *events.Event
+	// Recycle marks the start's recycle's classification, which A6's
+	// heals do not take (A12's alone, CONTRACT A6).
+	Recycle bool
+}
+
+// notedRuntime is a runtime name a fresh read issued at At found alive, or
+// absent when Gone. An alive note that only Clears is written only over a
+// name the cache reads unlisted (applyFacts: goneNoted).
 type notedRuntime struct {
-	Name string
-	At   time.Time
+	Name   string
+	At     time.Time
+	Gone   bool
+	Clears bool
 }
 
 func (f effectFacts) empty() bool {
-	return len(f.Events) == 0 && f.Transition == nil && f.Work == nil && f.Noted == nil && f.Quarantined == ""
+	return len(f.Events) == 0 && f.Transition == nil && f.Work == nil && f.Noted == nil && f.Quarantined == "" && f.AliasOwed == nil && f.Stopped == nil && f.Classified == nil && f.IdleKilled == ""
 }
 
 func (f *effectFacts) merge(g effectFacts) {
@@ -486,6 +579,10 @@ func (f *effectFacts) merge(g effectFacts) {
 	f.Work = cmp.Or(g.Work, f.Work)
 	f.Noted = cmp.Or(g.Noted, f.Noted)
 	f.Quarantined = cmp.Or(g.Quarantined, f.Quarantined)
+	f.AliasOwed = cmp.Or(g.AliasOwed, f.AliasOwed)
+	f.Stopped = cmp.Or(g.Stopped, f.Stopped)
+	f.Classified = cmp.Or(g.Classified, f.Classified)
+	f.IdleKilled = cmp.Or(g.IdleKilled, f.IdleKilled)
 }
 
 // Transaction causes. A refusal backs the row off (P4).
@@ -564,21 +661,46 @@ func runSpec(ctx context.Context, p *effectPass, it intent, spec effectSpec, c t
 				return settlement{Outcome: settledRefused, Cause: causeNoWriter, Err: err}
 			}
 		}
-		name, lease, cause, err := lockRuntimeName(p.World, row.Info, front, session.RuntimeLeaseTTL(effectBudget(ctx)))
+		ttl := session.RuntimeLeaseTTL(effectBudget(ctx))
+		if t.needs.Lease && t.needs.LeaseAt > 0 {
+			t.recordFront, t.recordTTL, front = front, ttl, nil // the flock now, the record at LeaseAt
+		}
+		name, lease, cause, err := lockRuntimeName(p.World, row.Info, front, ttl)
 		if cause != "" {
 			return settlement{Outcome: settledRefused, Cause: cause, Err: err}
 		}
 		defer lease.Release()
 		t.name, t.lease = name, lease
-		if lease.Epoch() > 0 {
-			// One epoch per effect: it ends by the lease's SafeUntil, compared
-			// as remaining durations, never wall clock to wall clock.
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeoutCause(ctx, time.Until(lease.SafeUntil()), session.ErrRuntimeLeaseExpired)
-			defer cancel()
-		}
+		var cancel context.CancelFunc
+		ctx, cancel = leaseBound(ctx, lease)
+		defer cancel()
 	}
 	return t.run(ctx, spec.sections)
+}
+
+// leaseBound is ctx bounded by lease's record: one epoch per effect ends by
+// the lease's SafeUntil, compared as remaining durations, never wall clock
+// to wall clock. A flock-only lease bounds nothing.
+func leaseBound(ctx context.Context, lease *session.RuntimeLease) (context.Context, context.CancelFunc) {
+	if lease == nil || lease.Epoch() == 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeoutCause(ctx, time.Until(lease.SafeUntil()), session.ErrRuntimeLeaseExpired)
+}
+
+// takeRecord takes the lease record a LeaseAt effect deferred, bounding ctx
+// by it; a refusal is lockRuntimeName's.
+func (t *tx) takeRecord(ctx context.Context) (context.Context, context.CancelFunc, *settlement) {
+	if ctx.Err() != nil { // past its deadline: write no record, as the eager take
+		s := ended(ctx)
+		return ctx, func() {}, &s
+	}
+	req := session.RuntimeLeaseRequest{City: t.p.World.CityPath, Name: t.name, ID: t.view.It.Key.ID, TTL: t.recordTTL}
+	if err := t.lease.TakeRecord(t.recordFront, req); err != nil {
+		return ctx, func() {}, &settlement{Outcome: settledRefused, Cause: leaseRefusal(err), Err: err}
+	}
+	ctx, cancel := leaseBound(ctx, t.lease)
+	return ctx, cancel, nil
 }
 
 // locksName reports an effect that holds its row's runtime name: one that
@@ -602,28 +724,45 @@ func effectBudget(ctx context.Context) time.Duration {
 
 // tx is one transaction across its sections.
 type tx struct {
-	c       txCaps
-	p       *effectPass
-	needs   needs
-	writer  fencedWriter
-	name    string                // the runtime name, when the name lock is held
-	lease   *session.RuntimeLease // the name's lease: its flock, and with needs.Lease the row's record
-	expect  session.Info          // the row the premise expects
-	names   []string              // its template's process names, keyed on the pass's row
-	facts0  session.Facts         // its premise facts
-	basis   rowBasis              // its incarnation and token
-	started bool                  // a callStart ran, and no callStop since
-	landed  bool                  // a section's write landed
-	last    bool                  // the concluded step ends the effect after its Call (txStep.Last)
-	facts   effectFacts
-	pass    any // the concluded step's Pass, to its section's Call
-	view    txView
+	c      txCaps
+	p      *effectPass
+	needs  needs
+	writer fencedWriter
+	name   string                // the runtime name, when the name lock is held
+	lease  *session.RuntimeLease // the name's lease: its flock, and with needs.Lease the row's record
+	// recordFront and recordTTL are a LeaseAt effect's record to take.
+	recordFront *session.Store
+	recordTTL   time.Duration
+	expect      session.Info  // the row the premise expects
+	names       []string      // its template's process names, keyed on the pass's row
+	facts0      session.Facts // its premise facts
+	basis       rowBasis      // its incarnation and token
+	started     bool          // a callStart ran, and no callStop since
+	stopped     bool          // a callStop ran
+	landed      bool          // a section's write landed
+	last        bool          // the concluded step ends the effect after its Call (txStep.Last)
+	facts       effectFacts
+	pass        any // the concluded step's Pass, to its section's Call
+	view        txView
+	// fresh is the latest fresh read, when it found the name absent on
+	// every hop (rtAbsent) or the row's runtime alive and Current; zero once
+	// a later read finds anything else or a Call starts or stops a runtime.
+	// The settlement publishes it (CONTRACT O4, v5.10g).
+	fresh notedRuntime
 }
 
 // run runs the sections, each under the row's mutation lock.
 func (t *tx) run(ctx context.Context, sections []section) settlement {
 	s := settlement{Outcome: settledNoop}
 	for i, sec := range sections {
+		if t.recordFront != nil && i == t.needs.LeaseAt {
+			var cancel context.CancelFunc
+			var refused *settlement
+			if ctx, cancel, refused = t.takeRecord(ctx); refused != nil {
+				return *refused
+			}
+			defer cancel()
+		}
 		t.c.section = i
 		end := false
 		_ = withRowMutationLock(t.view.It.Key.ID, func() error {
@@ -653,11 +792,14 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 			break
 		}
 		t.view.prev, t.view.prevErr = t.callWatched(ctx, sec)
+		if f, ok := t.view.prev.(callFacts); ok { // what the Call did, kept whatever the later sections decide
+			t.facts.merge(f.facts())
+		}
 		switch sec.callKind {
 		case callStart:
-			t.started = true
+			t.started, t.fresh = true, notedRuntime{}
 		case callStop:
-			t.started = false // a stopped runtime writes nothing more
+			t.started, t.stopped, t.fresh = false, true, notedRuntime{} // a stopped runtime writes nothing more
 		}
 		if err := t.c.at(ctx, seamAfterCall); err != nil {
 			s = injected(err)
@@ -670,8 +812,28 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 			break
 		}
 	}
+	t.noteFresh()
 	s.Facts = t.facts
 	return s
+}
+
+// noteFresh publishes the latest fresh read (CONTRACT O4, amended in
+// v5.10g): the planner notes the name gone at the read's issue time, so the
+// next pass reads what this effect read rather than deciding again on an
+// inventory that lags it; or, where the cache reads the name unlisted (an
+// effect's gone note standing), the row's runtime alive and Current, which
+// clears it. Over an inventory that
+// already lists the runtime an alive note is not written: its listing would
+// not be the pass's enrichment, so the row would read its identity unread,
+// and A9 would hold it until the next pass (#7799 review). A
+// note the effect made itself at or after the read (a start's commit)
+// stands; a later inventory pass overrides either.
+func (t *tx) noteFresh() {
+	f := t.fresh
+	if f.At.IsZero() || f.Name == "" || t.facts.Noted != nil && !t.facts.Noted.At.Before(f.At) {
+		return
+	}
+	t.facts.Noted = &f
 }
 
 // section runs sec's attempts; end ends the effect with the settlement.
@@ -687,12 +849,17 @@ func (t *tx) section(ctx context.Context, sec section) (_ settlement, end bool) 
 		var step txStep
 		var ended *settlement
 		var wroteFacts session.Facts
-		wrote, err := t.writer.casRow(t.view.It.Key.ID, func(row session.Info, resp session.PersistedResponse) session.MetadataPatch {
-			if step, ended = t.decide(ctx, sec, row, resp.Metadata); ended != nil {
-				return nil
+		wrote, err := t.writer.casRow(t.view.It.Key.ID, func(row session.Info, resp session.PersistedResponse) session.RowPatch {
+			if step, ended = t.decide(ctx, sec, row, resp.Metadata); ended != nil || len(step.Write) == 0 && step.Class.Len() == 0 && step.Type == nil {
+				return session.RowPatch{}
+			}
+			if step.Class.Len() > 0 {
+				// The cells the deciders moved, minted for this row's write; a
+				// lost attempt unmints (Store.UpdateMetadataFenced).
+				step.Write = step.Class.Into(t.view.It.Key.ID, maps.Clone(step.Write))
 			}
 			wroteFacts = session.FactsOf(step.Write.Apply(resp.Metadata))
-			return step.Write
+			return session.RowPatch{Metadata: step.Write, Title: step.Title, Type: step.Type, AddLabels: step.AddLabels, RemoveLabels: step.RemoveLabels}
 		})
 		switch {
 		case ended != nil:
@@ -701,6 +868,8 @@ func (t *tx) section(ctx context.Context, sec section) (_ settlement, end bool) 
 			continue // a newer write owns the row: read it again
 		case errors.Is(err, errNoConditionalWriter):
 			return settlement{Outcome: settledRefused, Cause: causeNoWriter, Err: err}, true
+		case errors.As(err, new(*beads.ConditionalUpdateFieldUnsupportedError)):
+			return settlement{Outcome: settledRefused, Cause: causeLabelsUnguarded, Err: err}, true
 		case err != nil:
 			return settlement{Outcome: settledFailed, Cause: causeWrite, Err: err}, true
 		case wrote:
@@ -740,6 +909,10 @@ func (t *tx) closeSection(ctx context.Context, sec section) (settlement, bool) {
 			read = true
 			if step, ended = t.decide(ctx, sec, row, resp.Metadata); ended != nil || len(step.Terminal) == 0 {
 				return nil, false
+			}
+			if step.Class.Len() > 0 {
+				// The close's cells, minted for this row's close.
+				step.Terminal = step.Class.Into(t.view.It.Key.ID, maps.Clone(step.Terminal))
 			}
 			return step.Terminal, true
 		})
@@ -802,6 +975,14 @@ func (t *tx) read(ctx context.Context, sec section) (settlement, bool) {
 			return refused(cause), false
 		}
 		t.view.RT = rt
+		switch {
+		case rt.Class == rtAbsent:
+			t.fresh = notedRuntime{Name: t.name, At: t.view.Now, Gone: true}
+		case rt.Alive() && compareIdentity(t.expect, rt.Identity) == identityCurrent:
+			t.fresh = notedRuntime{Name: t.name, At: t.view.Now, Clears: true}
+		default:
+			t.fresh = notedRuntime{}
+		}
 	}
 	if t.needs.Legs != 0 || t.needs.Idle {
 		if cause := t.readFence(ctx); cause != "" {
@@ -842,17 +1023,29 @@ func (t *tx) decide(ctx context.Context, sec section, row session.Info, meta map
 		s := injected(err)
 		return txStep{}, &s
 	}
+	var step txStep
 	if moved := t.premise(sec.Premise, row, meta); len(moved) > 0 {
-		s := refused(causePremise)
-		s.Err = fmt.Errorf("%w: %s", errPremiseMoved, strings.Join(moved, ", "))
-		return txStep{}, &s
+		var ok bool
+		if sec.Moved != nil {
+			step, ok = sec.Moved(v, t.expect, moved)
+		}
+		if !ok {
+			s := refused(causePremise)
+			s.Err = fmt.Errorf("%w: %s", errPremiseMoved, strings.Join(moved, ", "))
+			return txStep{}, &s
+		}
+		if step.writes() || step.Done || step.Last { // nothing lands, nor ends the effect landed, on a row that moved
+			s := settlement{Outcome: settledFailed, Cause: causeStep}
+			return txStep{}, &s
+		}
+	} else {
+		step = sec.Decide(v)
 	}
-	step := sec.Decide(v)
 	var s settlement
 	switch {
 	case step.Refuse != "":
 		s = settlement{Outcome: settledRefused, Cause: step.Refuse, Err: step.Err}
-	case step.Fail != "" && len(step.Write) == 0 && len(step.Terminal) == 0:
+	case step.Fail != "" && len(step.Write) == 0 && step.Class.Len() == 0 && len(step.Terminal) == 0:
 		s = settlement{Outcome: settledFailed, Cause: step.Fail, Err: step.Err}
 	case len(step.Terminal) > 0 && sec.Premise != premiseClose, sec.Premise == premiseClose && len(step.Write) > 0:
 		s = settlement{Outcome: settledFailed, Cause: causeStep}
@@ -860,7 +1053,7 @@ func (t *tx) decide(ctx context.Context, sec section, row session.Info, meta map
 		// Not subsumed by the facts: a row the pass already read under an
 		// honored kill fence has equal facts, and the fence still refuses.
 		s = refused(causePremise)
-	case len(step.Write) == 0 && len(step.Terminal) == 0:
+	case len(step.Write) == 0 && step.Class.Len() == 0 && len(step.Terminal) == 0:
 		return step, nil
 	default:
 		err := t.c.beginWrite(ctx)
@@ -909,6 +1102,8 @@ func (t *tx) premise(rule premiseRule, row session.Info, meta map[string]string)
 			site = session.FactsBaseline
 		case t.started:
 			site = session.FactsAfterStart
+		case t.stopped:
+			site = session.FactsAfterStop
 		}
 		moved = site.Moved(t.compared(fresh), t.compared(t.facts0))
 		if len(moved) == 0 && rowBasisOf(t.view.It.Key, row) != t.basis {

@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -74,20 +75,17 @@ func TestProcessIdentityDistinguishesGoneFromUnreadable(t *testing.T) {
 	}
 }
 
-func TestParseProcStatIdentityCarriesParentGroupAndStart(t *testing.T) {
+func TestParseProcStatCarriesParentGroupSessionAndStart(t *testing.T) {
 	// The suffix begins at field 3 (state), so suffix index 19 is Linux
 	// /proc/<pid>/stat field 22 (starttime); the trailing 0 is field 23.
 	stat := "42 (cmd (worker)) S 11 12 13 0 -1 0 0 0 0 0 0 0 0 0 0 0 1 0 98765 0"
 
-	ppid, pgid, startTime, ok, err := parseProcStatIdentity(stat)
+	got, err := parseProcStat(stat)
 	if err != nil {
-		t.Fatalf("parseProcStatIdentity: %v", err)
+		t.Fatalf("parseProcStat: %v", err)
 	}
-	if !ok {
-		t.Fatal("parseProcStatIdentity reported missing record")
-	}
-	if ppid != 11 || pgid != 12 || startTime != "98765" {
-		t.Fatalf("parseProcStatIdentity = (%d, %d, %q), want (11, 12, %q)", ppid, pgid, startTime, "98765")
+	if want := (procStat{ppid: 11, pgid: 12, sid: 13, startTime: "98765"}); got != want {
+		t.Fatalf("parseProcStat = %+v, want %+v", got, want)
 	}
 }
 
@@ -957,5 +955,110 @@ func TestScanWithRootReportsStartIdentity(t *testing.T) {
 	}
 	if want := boot.Add(123*time.Second + 450*time.Millisecond); !got[0].StartedAt.Equal(want) || got[0].StartIdentity != "12345" {
 		t.Fatalf("StartIdentity=%q StartedAt=%v, want 12345 and %v", got[0].StartIdentity, got[0].StartedAt, want)
+	}
+}
+
+// entryErrorPIDs returns the pid of every [EntryError] in err's tree, in
+// order. Tests assert on it instead of searching the message, which carries
+// the fixture path.
+func entryErrorPIDs(err error) []int {
+	var pids []int
+	switch e := err.(type) { //nolint:errorlint // walks the joined error tree by hand; errors.As finds only the first entry
+	case nil:
+	case *EntryError:
+		pids = append(pids, e.PID)
+	case interface{ Unwrap() []error }:
+		for _, child := range e.Unwrap() {
+			pids = append(pids, entryErrorPIDs(child)...)
+		}
+	case interface{ Unwrap() error }:
+		pids = entryErrorPIDs(e.Unwrap())
+	}
+	return pids
+}
+
+// TestOrphanCandidateScanReadsOnlyReparentedProcesses (mc-ygved): the
+// empty-id scan reports the roots reparented to init or the user subreaper
+// and reads no other process's environment: a non-candidate whose environ
+// cannot be read adds no error, while a candidate's unreadable parent is
+// the entry's error (fail-closed). The id-scoped scan is unchanged.
+func TestOrphanCandidateScanReadsOnlyReparentedProcesses(t *testing.T) {
+	// The fixture path is part of every entry error's message, so one case
+	// roots it at a fixed name that contains the digits of another fixture pid.
+	for _, tc := range []struct{ name, dir string }{
+		{"tempdir", ""},
+		{"path containing 103", "pid103"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), tc.dir)
+			if err := os.MkdirAll(root, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeFakeBootTime(t, root, time.Unix(1700000000, 0))
+			const subreaper = 50
+			buildFakeProcUnder(t, root, subreaper, 1, "systemd", nil)
+			buildFakeProcUnder(t, root, 100, 1, "agent", map[string]string{"GC_SESSION_ID": "gc-init"})
+			buildFakeProcUnder(t, root, 101, subreaper, "agent", map[string]string{"GC_SESSION_ID": "gc-sub"})
+			buildFakeProcUnder(t, root, 200, 300, "tmux: server", nil)
+			buildFakeProcUnder(t, root, 300, 1, "bash", nil)
+			buildFakeProcUnder(t, root, 102, 300, "agent", map[string]string{"GC_SESSION_ID": "gc-paned"}) // its parent (bash) carries no session: a root, but no orphan
+			buildFakeProcUnder(t, root, 103, 300, "agent", map[string]string{"GC_SESSION_ID": "gc-x"})
+			if err := os.Chmod(filepath.Join(root, "103", "environ"), 0); err != nil { // a non-candidate's environ unreadable
+				t.Fatal(err)
+			}
+			buildFakeProcUnder(t, root, 104, 1, "agent", map[string]string{"GC_SESSION_ID": "gc-y"})
+			if err := os.Chmod(filepath.Join(root, "104", "stat"), 0); err != nil { // a process whose parent cannot be read
+				t.Fatal(err)
+			}
+			if os.Geteuid() == 0 {
+				t.Skip("root reads every file; the unreadable fixtures need an unprivileged user")
+			}
+
+			got, err := scanOrphanCandidatesWithRoot(root, subreaper)
+			var ids []string
+			for _, r := range got {
+				ids = append(ids, r.SessionID)
+			}
+			if strings.Join(ids, ",") != "gc-init,gc-sub" {
+				t.Fatalf("orphan candidates %v, want gc-init and gc-sub only", ids)
+			}
+			if pids := entryErrorPIDs(err); !slices.Equal(pids, []int{104}) || HasWholeScanFailure(err) {
+				t.Fatalf("scan error %v has entry errors for pids %v, want only pid 104's unreadable parent, as an entry error", err, pids)
+			}
+			all, _ := scanWithRoot(root, "gc-paned")
+			if len(all) != 1 || all[0].PID != 102 {
+				t.Fatalf("id-scoped scan %+v, want the paned root still found", all)
+			}
+			// ScanBySessionID: the empty id is the orphan scan, a session id the
+			// full one.
+			SetScanRootForTesting(t, root)
+			savedDetect := detectSubreaper
+			detectSubreaper = func(int) int { return subreaper }
+			t.Cleanup(func() { detectSubreaper = savedDetect })
+			public, _ := ScanBySessionID("")
+			var publicIDs []string
+			for _, r := range public {
+				publicIDs = append(publicIDs, r.SessionID)
+			}
+			if strings.Join(publicIDs, ",") != "gc-init,gc-sub" { // the subreaper's orphan included (a systemd --user supervisor)
+				t.Fatalf("ScanBySessionID(\"\") = %v, want gc-init and gc-sub only", publicIDs)
+			}
+			if scoped, _ := ScanBySessionID("gc-paned"); len(scoped) != 1 {
+				t.Fatalf("ScanBySessionID(gc-paned) = %+v, want the paned root", scoped)
+			}
+		})
+	}
+}
+
+// TestOrphanCandidate (mc-ygved): init and the user subreaper are the
+// orphan parents; no subreaper, or any other parent, is not.
+func TestOrphanCandidate(t *testing.T) {
+	for _, tc := range []struct {
+		ppid, subreaper int
+		want            bool
+	}{{1, 0, true}, {1, 50, true}, {50, 50, true}, {50, 0, false}, {77, 50, false}, {0, 0, false}} {
+		if got := OrphanCandidate(tc.ppid, tc.subreaper); got != tc.want {
+			t.Errorf("OrphanCandidate(%d, %d) = %t, want %t", tc.ppid, tc.subreaper, got, tc.want)
+		}
 	}
 }

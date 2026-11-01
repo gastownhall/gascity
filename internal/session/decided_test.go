@@ -1,6 +1,8 @@
 package session
 
 import (
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -107,6 +109,13 @@ func TestDecidedMatch(t *testing.T) {
 		{site: FactsLegacyDrainStop, decided: stopPending, move: map[string]string{"state": string(StateDraining), "state_reason": DrainAckStopPendingReason, "generation": "3"}},
 		{site: FactsLegacyDrainStop, decided: stopPending, move: map[string]string{"state": string(StateDraining), "state_reason": DrainAckStopPendingReason, "instance_token": "tok-2"}},
 		{site: FactsLegacyDrainStop, decided: stopPending, move: map[string]string{"state": string(StateDraining), "state_reason": DrainAckStopPendingReason, "drain_at": "y"}, wantMatch: true},
+
+		// An operator's close refuses only a new incarnation.
+		{site: FactsOpClose, wantMatch: true},
+		{site: FactsOpClose, closeRow: true},
+		{site: FactsOpClose, move: map[string]string{"generation": "3"}},
+		{site: FactsOpClose, move: map[string]string{"instance_token": "tok-2"}},
+		{site: FactsOpClose, move: map[string]string{"state": string(StateAsleep), "wake_request": "1", "sleep_intent": "user-hold"}, wantMatch: true},
 
 		{site: FactsLegacyResetEvict, wantMatch: true},
 		{site: FactsLegacyResetEvict, move: map[string]string{"continuation_reset_pending": ""}},
@@ -263,4 +272,63 @@ func TestCommitResults(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLegacyCloseMatchesClosePremise: the legacy.close site decides exactly
+// as the closePremiseHolds check it replaced (R8b, unwidened): over a grid of
+// a decided row and a fresh one, each moved in up to two keys among the
+// compared ones and a few it ignores, Match and closePremiseHolds agree.
+func TestLegacyCloseMatchesClosePremise(t *testing.T) {
+	values := map[string][]string{
+		"state": {"asleep", "active", "suspended", ""}, "sleep_reason": {"", "idle", "killed"},
+		"continuity_eligible": {"", "true"}, "configured_named_identity": {"", "chat"},
+		"held_until": {"", "2026-10-11T00:00:00Z", "bad"}, "quarantined_until": {"", "2026-10-11T00:00:00Z"},
+		"pending_create_claim": {"", "true"}, "last_woke_at": {"", "2026-10-11T00:00:00Z"},
+		"session_key": {"", "k"}, "started_config_hash": {"", "h"}, "pending_create_started_at": {"", "2026-10-11T00:00:00Z"},
+		"pin_awake": {"", "true"}, "wake_request": {"", "true"}, "generation": {"3", "4"}, "instance_token": {"tok", "tok2"},
+		// Keys neither compares.
+		"sleep_intent": {"", "user-hold"}, "wait_hold": {"", "true"}, "detached_at": {"", "2026-10-11T00:00:00Z"},
+		"restart_requested": {"", "true"},
+	}
+	keys := make([]string, 0, len(values))
+	for k := range values {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	base := map[string]string{"state": "asleep", "generation": "3", "instance_token": "tok"}
+	moved := func(meta map[string]string, kvs ...string) map[string]string {
+		out := maps.Clone(meta)
+		for i := 0; i < len(kvs); i += 2 {
+			out[kvs[i]] = kvs[i+1]
+		}
+		return out
+	}
+	n := 0
+	for i, a := range keys {
+		for _, va := range values[a] {
+			for _, b := range keys[i:] {
+				for _, vb := range values[b] {
+					decided := moved(base, a, va)
+					for _, fresh := range []map[string]string{moved(decided, b, vb), moved(base, b, vb)} {
+						d, f := decidedRow("gc-1", decided), decidedRow("gc-1", fresh)
+						if got, want := Decide(d, FactsLegacyClose).Match(f), closePremiseOracle(d, f); got != want {
+							t.Errorf("decided %v fresh %v: Match = %v, closePremiseHolds = %v", decided, fresh, got, want)
+						}
+						n++
+					}
+				}
+			}
+		}
+	}
+	if n < 1000 {
+		t.Fatalf("%d pairs, want the grid", n)
+	}
+}
+
+// closePremiseOracle is closePremiseHolds as R8b deleted it: the lifecycle
+// facts and the incarnation.
+func closePremiseOracle(decided, open Info) bool {
+	return sameLifecycleFacts(decided, open) &&
+		decided.Generation == open.Generation &&
+		decided.InstanceToken == open.InstanceToken
 }

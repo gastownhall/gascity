@@ -21,6 +21,8 @@ package main
 
 import (
 	"errors"
+	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -49,7 +51,13 @@ type WorkLegs struct {
 	work beads.Store
 	rigs map[string]beads.Store // the serving rigs
 	plan storeref.ResolvedPlan
-	err  error // no leg set: a refused city
+	topo storeref.Topology // the residency topology plan was built from, for by-id reads
+	err  error             // no leg set: a refused city
+	// suspended names the declared, open rigs left out of rigs because they
+	// are suspended (servingRigStores).
+	suspended []string
+	// cityName is the name a "city:<name>" store ref of this city carries.
+	cityName string
 }
 
 // errNoWorkStore: a WorkLegs minted without a city work store, which answers
@@ -67,15 +75,73 @@ func workLegsFromCensus(cityPath string, cfg *config.City, work cityWorkLeg, rig
 	if work.store == nil {
 		return l
 	}
-	l.rigs = servingRigStores(cfg, rigs, buildSuspendedRigPathsForCity(cfg, cityPath))
-	l.plan, l.err = storeref.Plan(storeref.AssignedWork{}, residencyTopologyForCity(cityPath, cfg, work.store, l.rigs))
+	if cfg != nil {
+		l.cityName = loadedCityName(cfg, cityPath)
+	}
+	suspendedPaths := buildSuspendedRigPathsForCity(cfg, cityPath)
+	l.rigs = servingRigStores(cfg, rigs, suspendedPaths)
+	l.suspended = suspendedOpenRigs(cfg, rigs, suspendedPaths)
+	l.topo = residencyTopologyForCity(cityPath, cfg, work.store, l.rigs)
+	l.plan, l.err = storeref.Plan(storeref.AssignedWork{}, l.topo)
 	return l
 }
 
 // workLegs is the controller's leg set for one tick, over the store it
 // registers as the city's work leg (registerResidencyRoutes).
+//
+// It reads the published config snapshot rather than cr.cfg, so the wisp GC's
+// work-arm lane, which runs off the tick, can take its legs from here too.
 func (cr *CityRuntime) workLegs() WorkLegs {
-	return workLegsFromCensus(cr.cityPath, cr.cfg, cityWorkLegOf(cr.cityWorkStore()), cr.rigBeadStores()) // residency:allow — the census frame; workLegsFromCensus plans the legs (storeref.Plan)
+	return workLegsFromCensus(cr.cityPath, cr.serviceConfigSnapshot(), cityWorkLegOf(cr.cityWorkStore()), cr.rigBeadStores()) // residency:allow — the census frame; workLegsFromCensus plans the legs (storeref.Plan)
+}
+
+// suspendedRigs names the open rigs this leg set leaves out because they are
+// suspended.
+func (l WorkLegs) suspendedRigs() []string { return l.suspended }
+
+// storeForRef resolves a source store-ref ("city:<name>", "rig:<name>", a
+// class binding ref) to the leg it names: the city work store for a city or
+// binding ref, the rig's store for a serving rig. A suspended rig reports
+// suspended=true (it is not a leg, and is not read); any other ref, ok=false.
+func (l WorkLegs) storeForRef(ref string) (beads.Store, bool, bool) {
+	ref = strings.TrimSpace(ref)
+	rig, ok := storeref.ScopeRigContext(ref)
+	if !ok {
+		return nil, false, false
+	}
+	if rig == "" {
+		// Only THIS city's ref names the city work store; a class binding
+		// ref ("class:<token>") is city-scoped too, and fails this check.
+		if l.cityName == "" || ref != "city:"+l.cityName {
+			return nil, false, false
+		}
+		return l.work, false, l.work != nil
+	}
+	for _, name := range l.suspended {
+		if name == rig {
+			return nil, true, true
+		}
+	}
+	store, ok := l.rigs[rig]
+	return store, false, ok && store != nil
+}
+
+// suspendedOpenRigs names the declared rigs with an open store that are
+// suspended: the complement of servingRigStores among the open rigs.
+func suspendedOpenRigs(cfg *config.City, rigs map[string]beads.Store, suspendedRigPaths map[string]bool) []string {
+	if cfg == nil || len(rigs) == 0 || len(suspendedRigPaths) == 0 {
+		return nil
+	}
+	var out []string
+	for _, rig := range cfg.Rigs {
+		if !suspendedRigPaths[filepath.Clean(rig.Path)] {
+			continue
+		}
+		if store, ok := rigs[rig.Name]; ok && store != nil {
+			out = append(out, rig.Name)
+		}
+	}
+	return out
 }
 
 // unusable is why l answers nothing: no leg set, or the zero WorkLegs,
@@ -88,10 +154,12 @@ func (l WorkLegs) unusable() error {
 }
 
 // newSeatWork is the controller's read for one tick (or one dispatcher pass),
-// raising session.stranded_claims through the controller's one alerter.
+// raising session.stranded_claims through the controller's one alerter and
+// logging close refusals through its one refusal log.
 func (cr *CityRuntime) newSeatWork() *SeatWork {
 	sw := newSeatWork(cr.workLegs())
 	sw.alerts = cr.strandedClaimAlerter()
+	sw.refusals = &cr.closeRefusals
 	return sw
 }
 
@@ -103,11 +171,16 @@ func (cr *CityRuntime) strandedClaimAlerter() *strandedClaimAlerts {
 
 // each visits every leg's store in plan order.
 func (l WorkLegs) each(visit func(beads.Store)) {
+	l.eachLeg(func(_ string, store beads.Store) { visit(store) })
+}
+
+// eachLeg visits every leg's store ref and store in plan order.
+func (l WorkLegs) eachLeg(visit func(ref string, store beads.Store)) {
 	if l.unusable() != nil {
 		return
 	}
 	storeref.EachLeg(l.plan, func(leg storeref.Leg, _ storeref.Role, _ storeref.ErrPolicy) { // residency:allow — enumerates the plan's own legs
-		visit(leg.Store)
+		visit(string(leg.Ref), leg.Store)
 	})
 }
 
@@ -130,6 +203,45 @@ func (l WorkLegs) readOnly() WorkLegs {
 // workStore is l's city work store, for a by-ID residency topology (the
 // live-claim veto, the confirmed-orphan release), which plans its own legs.
 func (l WorkLegs) workStore() beads.Store { return l.work }
+
+// readLive reads bead id live from the store that owns it by residency
+// (byIDOwnerRowForTopology over l's topology): a relocated class binding
+// before the work ledger, so a stale pre-migration copy co-resident in the
+// ledger never answers, then the serving rigs and the work store. It reads
+// through that store's Live handle, past any cache. No store ref is
+// consulted: a slot's gc.trigger_bead_store_ref names the demand leg, which on
+// a split city is the work ledger even for a step that lives only in the
+// binding (ga-bmfmt, the warm-bind probe's trap). found is false on a clean
+// miss; any other failure is err, which a caller needing proof reads as none.
+func (l WorkLegs) readLive(id string) (beads.Bead, bool, error) {
+	if err := l.unusable(); err != nil {
+		return beads.Bead{}, false, err
+	}
+	if strings.TrimSpace(id) == "" {
+		return beads.Bead{}, false, nil
+	}
+	owner, err := byIDOwnerRowForTopology(l.topo, id)
+	switch {
+	case errors.Is(err, beads.ErrNotFound):
+		return beads.Bead{}, false, nil
+	case err != nil:
+		return beads.Bead{}, false, err
+	case owner.Store == nil:
+		return beads.Bead{}, false, nil
+	}
+	live := beads.HandlesFor(owner.Store).Live
+	if live == nil {
+		return beads.Bead{}, false, nil
+	}
+	b, err := live.Get(id)
+	switch {
+	case errors.Is(err, beads.ErrNotFound):
+		return beads.Bead{}, false, nil
+	case err != nil:
+		return beads.Bead{}, false, err
+	}
+	return b, b.ID == id, nil
+}
 
 // isWork reports whether store is l's city work store.
 func (l WorkLegs) isWork(store beads.Store) bool {
@@ -214,4 +326,24 @@ func refuseScope(info sessionpkg.Info, cfg *config.City) RefuseScope {
 		}
 	}
 	return RefuseScope{ids: drainAckAssigneeIdentities(info, cfg)}
+}
+
+// legsTriggerResolver reads a bead by id from the store that owns it among
+// legs (WorkLegs.readLive: the class binding, the serving rigs, the city work
+// store), for the start path's trigger reads. nil when legs are unusable (a
+// refused city, or no work store), which keeps the sessions-store read.
+func legsTriggerResolver(legs WorkLegs) warmClaimTriggerResolver {
+	if legs.unusable() != nil {
+		return nil
+	}
+	return func(id string) (beads.Bead, error) {
+		b, found, err := legs.readLive(id)
+		switch {
+		case err != nil:
+			return beads.Bead{}, err
+		case !found:
+			return beads.Bead{}, fmt.Errorf("bead %q: %w", id, beads.ErrNotFound)
+		}
+		return b, nil
+	}
 }

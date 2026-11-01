@@ -34,7 +34,7 @@ func admittedHeal(t *testing.T, census, writer beads.Store) (*effectPass, intent
 	w := &World{Now: gatherNow, Census: readCensus(t, gatherNow, censusLegs(rowLeg, census)), Mislabelled: map[rowKey]bool{}}
 	a := &allocDecision{Snapshot: &selectionSnapshot{Entries: map[rowKey]*selectionEntry{}}}
 	it, _ := decideRow(w, a, rowKey{Leg: rowLeg, ID: b.ID})
-	if it.Kind != intentRowHeal || len(it.Patch) == 0 {
+	if it.Kind != intentRowHeal || len(it.folded()) == 0 {
 		t.Fatalf("the fixture admits %+v, want a timer heal with its patch", it)
 	}
 	w.LegStores = map[string]beads.Store{rowLeg: writer}
@@ -98,7 +98,7 @@ func TestRowWriteRefusesWithoutConditionalWriter(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			m := beads.NewMemStore()
 			if c.mode != gate.ModeUnset {
-				if err := beads.StampOpenedStore(m, "MemStore", c.mode, nil, nil); err != nil {
+				if err := beads.StampOpenedStore(m, "MemStore", c.mode, false, nil, nil); err != nil {
 					t.Fatal(err)
 				}
 				m.DisableConditionalWrites = true

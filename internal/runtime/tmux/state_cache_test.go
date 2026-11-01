@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"log"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 
 	gcruntime "github.com/gastownhall/gascity/internal/runtime"
 )
@@ -883,7 +886,7 @@ func TestParseDarwinProcessSnapshotPreservesCommWhenArgv0IsRewritten(t *testing.
 	if process.Args != "2.1.30 --print" {
 		t.Fatalf("Args = %q, want rewritten argv[0] args", process.Args)
 	}
-	if !snapshot.processMatchesNames("102", processNameSet([]string{"claude"})) {
+	if !snapshot.processMatchesNames("102", proctable.ProcessNameSet([]string{"claude"})) {
 		t.Fatal("processMatchesNames(102, claude) = false, want true from comm")
 	}
 }
@@ -911,7 +914,7 @@ func TestParseDarwinProcessSnapshotTraversesThroughEmptyArgsRows(t *testing.T) {
 	if process.Args != "" {
 		t.Fatalf("Args = %q, want empty args", process.Args)
 	}
-	if !snapshot.hasDescendantWithNames("101", processNameSet([]string{"claude"}), 0) {
+	if !snapshot.hasDescendantWithNames("101", proctable.ProcessNameSet([]string{"claude"}), 0) {
 		t.Fatal("hasDescendantWithNames(101, claude) = false, want traversal through empty-args row")
 	}
 }
@@ -927,6 +930,28 @@ func TestProcessSnapshotPSArgsRejectsLinuxSyntaxOnDarwin(t *testing.T) {
 	for _, a := range args {
 		if strings.Contains(a, ":") {
 			t.Fatalf("processSnapshotPSArgs returned %v on darwin; contains Linux-only `:N=` width specifier", args)
+		}
+	}
+}
+
+// ps cuts each line to COLUMNS when stdout is no terminal, and the
+// controller's environment can carry COLUMNS=80 (a nudge poller's shell). The
+// snapshot asks for unlimited width and drops COLUMNS, so a long argv (a
+// tap's nonce follows its companion path) is never cut.
+func TestProcessSnapshotCommandIsWideWithoutColumns(t *testing.T) {
+	t.Setenv("COLUMNS", "80")
+	for _, args := range [][]string{processSnapshotPSArgs(), darwinCommandSnapshotPSArgs()} {
+		cmd := processSnapshotCommand(context.Background(), args)
+		if want := append([]string{"ps", "-ww"}, args...); !slices.Equal(cmd.Args, want) {
+			t.Fatalf("ps argv = %q, want %q", cmd.Args, want)
+		}
+		if cmd.Env == nil {
+			t.Fatal("ps inherits the environment whole, COLUMNS included")
+		}
+		for _, kv := range cmd.Env {
+			if strings.HasPrefix(kv, "COLUMNS=") {
+				t.Fatalf("ps runs with %s", kv)
+			}
 		}
 	}
 }
@@ -1049,7 +1074,7 @@ func TestProcessAliveWrappedPane(t *testing.T) {
 		{PID: "101", PPID: "100", Command: "claude", Args: "claude"},
 	})
 	pane := paneRuntimeState{Command: "systemd-run", PID: "100"}
-	if !pane.processAlive(processNameSet([]string{"claude"}), snapshot) {
+	if !pane.processAlive(proctable.ProcessNameSet([]string{"claude"}), snapshot) {
 		t.Fatal("processAlive = false for systemd-run pane with claude child, want true (descendant fallback)")
 	}
 }

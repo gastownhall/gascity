@@ -2898,6 +2898,24 @@ func TestWorktreeCheckAllValid(t *testing.T) {
 	}
 }
 
+func TestWorktreeCheckUsesConfiguredWorktreesRoot(t *testing.T) {
+	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
+	configuredRoot := filepath.Join(t.TempDir(), "configured-worktrees")
+	t.Setenv("GC_WORKTREES_DIR", configuredRoot)
+	wtDir := filepath.Join(configuredRoot, "myrig", "agent1")
+	if err := os.MkdirAll(wtDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtDir, ".git"), []byte("gitdir: /nonexistent/configured-target\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := (&WorktreeCheck{}).Run(&CheckContext{CityPath: dir})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error from configured root; msg=%s", r.Status, r.Message)
+	}
+}
+
 func TestWorktreeCheckBroken(t *testing.T) {
 	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
 
@@ -4211,24 +4229,24 @@ func TestCompareDoltVersion(t *testing.T) {
 
 func TestDoltVersionCheck_OK(t *testing.T) {
 	c := NewDoltVersionCheck()
-	c.versionOutput = func() (string, error) { return "dolt version 2.1.1\n", nil }
+	c.versionOutput = func() (string, error) { return "dolt version 2.6.1\n", nil }
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
 	}
-	if !strings.Contains(r.Message, "2.1.1") {
+	if !strings.Contains(r.Message, "2.6.1") {
 		t.Errorf("message = %q, want version in message", r.Message)
 	}
 }
 
 func TestDoltVersionCheck_OK_AtMinimum(t *testing.T) {
 	c := NewDoltVersionCheck()
-	c.versionOutput = func() (string, error) { return "dolt version 2.1.0\n", nil }
+	c.versionOutput = func() (string, error) { return "dolt version 2.6.0\n", nil }
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
 	}
-	if !strings.Contains(r.Message, "2.1.0") {
+	if !strings.Contains(r.Message, "2.6.0") {
 		t.Errorf("message = %q, want version in message", r.Message)
 	}
 }
@@ -4246,23 +4264,29 @@ func TestDoltVersionCheck_Error_BelowManagedConfigFloor(t *testing.T) {
 }
 
 func TestDoltVersionCheck_Error_BelowMinimum(t *testing.T) {
-	c := NewDoltVersionCheck()
-	c.versionOutput = func() (string, error) { return "dolt version 2.0.6\n", nil }
-	r := c.Run(&CheckContext{})
-	if r.Status != StatusError {
-		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
-	}
-	if !strings.Contains(r.Message, "below minimum") {
-		t.Errorf("message = %q, want below-minimum text", r.Message)
+	// 2.5.1 is the last release below the 2.6.0 floor, and 2.1.0 the
+	// previous floor: both final releases a managed city may still run.
+	for _, version := range []string{"2.5.1", "2.1.0", "2.0.6"} {
+		t.Run(version, func(t *testing.T) {
+			c := NewDoltVersionCheck()
+			c.versionOutput = func() (string, error) { return "dolt version " + version + "\n", nil }
+			r := c.Run(&CheckContext{})
+			if r.Status != StatusError {
+				t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+			}
+			if !strings.Contains(r.Message, "below minimum 2.6.0") || !strings.Contains(r.Message, version) {
+				t.Errorf("message = %q, want below-minimum text naming %s and 2.6.0", r.Message, version)
+			}
+		})
 	}
 }
 
 func TestDoltVersionCheck_Error_PreReleaseAtFloor(t *testing.T) {
 	cases := []string{
-		"dolt version 2.1.0-rc1\n",
-		"dolt version 2.1.0-rc1+build.5\n",
-		"dolt version 2.1.0-dev.0\n",
-		"dolt version 2.1.1-rc1\n",
+		"dolt version 2.6.0-rc1\n",
+		"dolt version 2.6.0-rc1+build.5\n",
+		"dolt version 2.6.0-dev.0\n",
+		"dolt version 2.6.1-rc1\n",
 	}
 	for _, version := range cases {
 		t.Run(strings.TrimSpace(version), func(t *testing.T) {
@@ -4272,7 +4296,7 @@ func TestDoltVersionCheck_Error_PreReleaseAtFloor(t *testing.T) {
 			if r.Status != StatusError {
 				t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
 			}
-			if !strings.Contains(r.Message, "pre-release") || !strings.Contains(r.Message, "2.1.0") {
+			if !strings.Contains(r.Message, "pre-release") || !strings.Contains(r.Message, "2.6.0") {
 				t.Errorf("message = %q, want pre-release and minimum version text", r.Message)
 			}
 		})
@@ -4441,5 +4465,99 @@ func TestDoltVersionCheck_CanFixFalse(t *testing.T) {
 	c := NewDoltVersionCheck()
 	if c.CanFix() {
 		t.Error("CanFix() = true, want false")
+	}
+}
+
+// nonDoltScopeMetadata is the metadata.json a non-Dolt scope carries: a
+// backend selection only (for a remote backend, `bd connect` pins the server in
+// a per-user sidecar). The name is deliberately not any real backend: the
+// dolt-server checks must decide "not Dolt" without knowing which engine it is.
+const nonDoltScopeMetadata = `{"database":"beads.db","backend":"example-non-dolt"}`
+
+func writeNonDoltScopeMetadata(t *testing.T, scopeRoot string) {
+	t.Helper()
+	writeScopeMetadata(t, scopeRoot, nonDoltScopeMetadata)
+}
+
+func writeScopeMetadata(t *testing.T, scopeRoot, metadata string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(scopeRoot, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scopeRoot, ".beads", "metadata.json"), []byte(metadata), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestDoltServerChecks_EveryDoltSpellingKeepsTheDial pins the not-applicable
+// gate to contract.IsDoltBackend, the predicate the store factory and the
+// provider lifecycle route on. A proxied scope spelled "bd" or "Dolt" is still
+// served by Dolt, so both dolt-server checks must answer it exactly as they
+// answer the canonical "dolt" — never "not applicable", which would report OK
+// over an outage of the server that scope really uses.
+func TestDoltServerChecks_EveryDoltSpellingKeepsTheDial(t *testing.T) {
+	cityDir := setupCity(t, "[workspace]\nname = \"test\"\n\n[beads]\nprovider = \"bd\"\n")
+	rigDir := filepath.Join(cityDir, "rigs", "demo")
+	checks := []Check{
+		NewDoltServerCheck(cityDir, false),
+		NewRigDoltServerCheck(cityDir, config.Rig{Name: "demo", Path: rigDir}, false),
+	}
+	answers := func(backend string) []*CheckResult {
+		metadata := fmt.Sprintf(`{"database":"beads.db","backend":%q,"dolt_mode":"proxied-server"}`, backend)
+		writeScopeMetadata(t, cityDir, metadata)
+		writeScopeMetadata(t, rigDir, metadata)
+		results := make([]*CheckResult, 0, len(checks))
+		for _, check := range checks {
+			results = append(results, check.Run(&CheckContext{}))
+		}
+		return results
+	}
+
+	canonical := answers("dolt")
+	for _, spelling := range []string{"bd", "Dolt", "DOLT"} {
+		for i, got := range answers(spelling) {
+			want := canonical[i]
+			if strings.Contains(got.Message, "not applicable") {
+				t.Errorf("%s on backend %q answered %q; the factory routes that spelling to Dolt", got.Name, spelling, got.Message)
+				continue
+			}
+			if got.Status != want.Status || got.Message != want.Message {
+				t.Errorf("%s on backend %q = (%d, %q), want the canonical dolt answer (%d, %q)", got.Name, spelling, got.Status, got.Message, want.Status, want.Message)
+			}
+		}
+	}
+}
+
+// TestDoltServerCheck_NonDoltCityIsNotApplicable pins the MC shadow finding F3:
+// a city whose scope is bound to a non-Dolt backend has no Dolt server and no
+// dolt-state.json, so the dolt-server check must answer N/A rather than FAIL
+// with "read dolt runtime state".
+func TestDoltServerCheck_NonDoltCityIsNotApplicable(t *testing.T) {
+	dir := setupCity(t, "[workspace]\nname = \"test\"\n\n[beads]\nprovider = \"bd\"\n")
+	writeNonDoltScopeMetadata(t, dir)
+
+	r := NewDoltServerCheck(dir, false).Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK (not applicable); msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "not applicable") || !strings.Contains(r.Message, "example-non-dolt") {
+		t.Fatalf("message = %q, want a not-applicable answer naming the scope's backend", r.Message)
+	}
+}
+
+// TestRigDoltServerCheck_NonDoltRigIsNotApplicable is the rig twin: a rig
+// bound to the same non-Dolt backend has no Dolt endpoint to dial.
+func TestRigDoltServerCheck_NonDoltRigIsNotApplicable(t *testing.T) {
+	cityDir := setupCity(t, "[workspace]\nname = \"test\"\n\n[beads]\nprovider = \"bd\"\n")
+	writeNonDoltScopeMetadata(t, cityDir)
+	rigDir := filepath.Join(cityDir, "rigs", "demo")
+	writeNonDoltScopeMetadata(t, rigDir)
+
+	r := NewRigDoltServerCheck(cityDir, config.Rig{Name: "demo", Path: rigDir}, false).Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK (not applicable); msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "not applicable") {
+		t.Fatalf("message = %q, want a not-applicable answer", r.Message)
 	}
 }

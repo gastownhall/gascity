@@ -7,10 +7,20 @@ import "testing"
 // land in the trace JSONL (site_code/reason_code/outcome_code) — this test is
 // the guard against that class of corruption.
 func TestTraceCodeConstantValues(t *testing.T) {
+	sites := map[TraceSiteCode]string{
+		TraceSiteReconcilerFinishInterruptedClose: "reconciler.session.finish_interrupted_close",
+	}
+	for got, want := range sites {
+		if string(got) != want {
+			t.Errorf("site constant = %q, want %q", string(got), want)
+		}
+	}
+
 	reasons := map[TraceReasonCode]string{
-		TraceReasonMaxSessionAge: "max_session_age",
-		TraceReasonUserHold:      "user_hold",
-		TraceReasonQuarantine:    "quarantine",
+		TraceReasonMaxSessionAge:    "max_session_age",
+		TraceReasonUserHold:         "user_hold",
+		TraceReasonQuarantine:       "quarantine",
+		TraceReasonInterruptedClose: "interrupted_close",
 	}
 	for got, want := range reasons {
 		if string(got) != want {

@@ -94,7 +94,7 @@ func newTestV2Wiring(t *testing.T, cfg *config.City, stderr io.Writer) *controll
 	t.Helper()
 	latch := *cfg
 	latch.Daemon.SessionReconciler = "v2"
-	w, err := newControllerWiring(&latch, overrideEnv("1"), stderr)
+	w, err := newControllerWiring(&latch, noEnv, stderr)
 	if err != nil {
 		t.Fatalf("newControllerWiring: %v", err)
 	}
@@ -192,8 +192,13 @@ func TestCityRuntimeV2StartupSkipsLegacyBootReconcile(t *testing.T) {
 		return DesiredStateResult{}
 	}
 
-	if !cr.startupReconcile(context.Background()) {
-		t.Fatal("the v2 startup step did not complete")
+	// The boot waits for the planner's first pass; bound it, so a pass that
+	// never completes fails here with its record instead of hanging the
+	// package.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if !cr.startupReconcile(ctx) {
+		t.Fatalf("the v2 startup step did not complete (boot %s, last pass %+v)", rt.bootState(), rt.planner.out.record.Load())
 	}
 	if n := cr.legacySessionEntries.Load(); n != 0 {
 		t.Errorf("legacySessionEntries = %d, want 0: the v2 startup step entered a legacy session phase", n)
@@ -613,13 +618,13 @@ func TestCityRuntimeV2PanicInMaintenanceTickLeavesPlannerRunning(t *testing.T) {
 	}
 }
 
-// Kills: a soft reload under a trace-only v2 answered as if drift
-// acceptance ran (a silent zero), or not answered: no effect writes the
-// rows (acceptSoftReload). The reply applies and says acceptance is
+// Kills: a soft reload under a v2 planner without effects answered as if
+// drift acceptance ran (a silent zero), or not answered: no effect writes
+// the rows (acceptSoftReload). The reply applies and says acceptance is
 // unavailable; no session row is rewritten.
 func TestCityRuntimeV2SoftReloadRepliesUnavailable(t *testing.T) {
 	cr, store := newPhaseFixtureRuntime(t, true, false)
-	attachTestV2(t, cr)
+	attachTestV2(t, cr).planner.effects = nil // a planner that submits nothing
 	doneCh := cr.activeReload.doneCh
 
 	runFixtureTick(cr, "reload")
@@ -638,12 +643,13 @@ func TestCityRuntimeV2SoftReloadRepliesUnavailable(t *testing.T) {
 	}
 }
 
-// Kills: any v2 construction under legacy. A legacy wiring, even with the
-// developer override set, builds no planner, prints no banner, and a legacy
-// city runtime installs no inventory hook.
+// Kills: any v2 construction under legacy. An explicit legacy wiring builds
+// no planner and prints nothing (an unset key's fallback warning is pinned by
+// the wiring-log test), and a legacy city runtime installs no inventory hook.
 func TestLegacyRuntimeConstructsNoV2State(t *testing.T) {
 	var stderr bytes.Buffer
-	w, err := newControllerWiring(&config.City{}, overrideEnv("1"), &stderr)
+	cfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: config.SessionReconcilerLegacy}}
+	w, err := newControllerWiring(cfg, noEnv, &stderr)
 	if err != nil {
 		t.Fatalf("newControllerWiring: %v", err)
 	}
@@ -667,39 +673,34 @@ func TestLegacyRuntimeConstructsNoV2State(t *testing.T) {
 	}
 }
 
-func overrideEnv(value string) func(string) (string, bool) {
-	return func(key string) (string, bool) {
-		if key == v2SkeletonEnv {
-			return value, true
-		}
-		return "", false
-	}
-}
+// noEnv is a latch environment with nothing set: the config alone decides.
+func noEnv(string) (string, bool) { return "", false }
 
-// Kills: the developer override honored when absent or not exactly "1", or
-// the refusal skipped (OQ-1); and the planner missing from the wiring. An
-// admitted v2 wiring carries an unstarted planner that is already on the
-// wake, and announces it trace-only.
+// Kills: v2 refused from config alone (C9), a refused v2 admitted, and the
+// planner missing from the wiring. An admitted v2 wiring carries an
+// unstarted planner that is already on the wake, with its executor (effects
+// real), and announces v2; a v2 the latch refuses (a deferred feature)
+// errors.
 func TestNewControllerWiringV2AdmissionGate(t *testing.T) {
-	v2 := &config.City{Workspace: config.Workspace{Name: "gate"}, Daemon: config.DaemonConfig{SessionReconciler: "v2"}}
 	for _, tc := range []struct {
-		name  string
-		env   func(string) (string, bool)
-		admit bool
+		name    string
+		env     func(string) (string, bool)
+		refused bool
 	}{
 		{name: "nil lookup"},
-		{name: "absent", env: func(string) (string, bool) { return "", false }},
-		{name: "zero", env: overrideEnv("0")},
-		{name: "true", env: overrideEnv("true")},
-		{name: "padded", env: overrideEnv(" 1")},
-		{name: "one", env: overrideEnv("1"), admit: true},
+		{name: "empty environment", env: noEnv},
+		{name: "a deferred feature", env: noEnv, refused: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			v2 := &config.City{Workspace: config.Workspace{Name: "gate"}, Daemon: config.DaemonConfig{SessionReconciler: "v2"}}
+			if tc.refused {
+				v2.Agents = []config.Agent{{Name: "worker", DependsOn: []string{"db"}}}
+			}
 			var stderr bytes.Buffer
 			w, err := newControllerWiring(v2, tc.env, &stderr)
-			if !tc.admit {
-				if err == nil || !strings.Contains(err.Error(), "not available in this build") {
-					t.Fatalf("wiring err = %v, want the v2 refusal", err)
+			if tc.refused {
+				if err == nil || !strings.Contains(err.Error(), "is refused") {
+					t.Fatalf("wiring err = %v, want the v2 latch refusal", err)
 				}
 				return
 			}
@@ -709,11 +710,14 @@ func TestNewControllerWiringV2AdmissionGate(t *testing.T) {
 			if w.mode != reconcilerV2 || w.v2 == nil || w.wake.planner != w.v2.planner {
 				t.Fatalf("wiring = mode %v v2 %v, want v2 with its planner on the wake", w.mode, w.v2)
 			}
+			if w.v2.planner.effects == nil {
+				t.Error("the v2 planner has no executor: its passes are trace-only")
+			}
 			if w.v2.started {
 				t.Error("the wiring started the planner")
 			}
-			if !strings.Contains(stderr.String(), "session reconciler: v2 (planner: trace-only)") {
-				t.Errorf("stderr = %q, want the trace-only banner", stderr.String())
+			if !strings.Contains(stderr.String(), "session reconciler: v2 (set by [daemon] session_reconciler)\n") {
+				t.Errorf("stderr = %q, want the v2 banner", stderr.String())
 			}
 		})
 	}
@@ -727,7 +731,7 @@ func TestV2WiringRetainsKeysEnqueuedBeforeTheRuntime(t *testing.T) {
 	cr, _ := newPhaseFixtureRuntime(t, false, false)
 	cfg := *cr.cfg
 	cfg.Daemon.SessionReconciler = "v2"
-	w, err := newControllerWiring(&cfg, overrideEnv("1"), io.Discard)
+	w, err := newControllerWiring(&cfg, noEnv, io.Discard)
 	if err != nil {
 		t.Fatalf("newControllerWiring: %v", err)
 	}
@@ -1063,12 +1067,12 @@ func TestControllerWakeOnBeadEventMarksPlanner(t *testing.T) {
 }
 
 // Kills: gc start running its one-shot reconcile, which calls the legacy
-// session reconciler directly, under a v2 latch. Even with v2 admitted by the
-// developer override, the one-shot refuses before any init.
+// session reconciler directly, under a v2 latch. With v2 admitted, the
+// one-shot refuses before any init.
 func TestStartStandaloneRefusesV2OneShot(t *testing.T) {
-	cityPath, opsLog := newRefusedSessionReconcilerCity(t)
+	cityPath, opsLog := newV2SessionReconcilerCity(t, "")
 	prevEnv := reconcilerModeLookupEnv
-	reconcilerModeLookupEnv = overrideEnv("1")
+	reconcilerModeLookupEnv = noEnv
 	oldDryRun := dryRunMode
 	dryRunMode = false
 	t.Cleanup(func() {
@@ -1086,20 +1090,27 @@ func TestStartStandaloneRefusesV2OneShot(t *testing.T) {
 	assertRefusedCityUntouched(t, cityPath, opsLog)
 }
 
-// Kills: doctor and the reload drift judging admission without the developer
-// override the controller latched with, so they disagree with controller
-// start.
+// Kills: doctor or the reload drift judging admission other than the latch
+// does (C9: from config alone). An admissible v2 is OK in doctor and a
+// pending restart with no refusal; a v2 the latch refuses (a deferred
+// feature) is a doctor error and a drift warning that the next start refuses
+// it.
 func TestSessionReconcilerOverrideFeedsDoctorAndDrift(t *testing.T) {
 	cfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: "v2"}}
-	if r := newSessionReconcilerDoctorCheck(cfg, overrideEnv("1")).Run(&doctor.CheckContext{}); r.Status != doctor.StatusWarning {
-		t.Errorf("doctor with the override = %v (%s), want a warning", r.Status, r.Message)
+	if r := newSessionReconcilerDoctorCheck(cfg, noEnv).Run(&doctor.CheckContext{}); r.Status != doctor.StatusOK || r.Message != "session reconciler: v2 (set by [daemon] session_reconciler)" {
+		t.Errorf("doctor for an admissible v2 = %v (%s), want OK v2", r.Status, r.Message)
 	}
-	if r := newSessionReconcilerDoctorCheck(cfg, nil).Run(&doctor.CheckContext{}); r.Status != doctor.StatusError {
-		t.Errorf("doctor without the override = %v (%s), want an error", r.Status, r.Message)
-	}
-	d := reconcilerModeDrift{lookupEnv: overrideEnv("1")}
+	d := reconcilerModeDrift{lookupEnv: noEnv}
 	if got := d.observe(cfg); !strings.HasPrefix(got, "pending restart: ") || strings.Contains(got, "will refuse it") {
-		t.Errorf("drift with the override = %q, want pending restart without a refusal", got)
+		t.Errorf("drift to an admissible v2 = %q, want pending restart without a refusal", got)
+	}
+	refused := &config.City{Daemon: config.DaemonConfig{SessionReconciler: "v2"}, ChatSessions: config.ChatSessionsConfig{IdleTimeout: "30m"}}
+	if r := newSessionReconcilerDoctorCheck(refused, noEnv).Run(&doctor.CheckContext{}); r.Status != doctor.StatusError {
+		t.Errorf("doctor for a refused v2 = %v (%s), want an error", r.Status, r.Message)
+	}
+	d = reconcilerModeDrift{lookupEnv: noEnv}
+	if got := d.observe(refused); !strings.Contains(got, "will refuse it") {
+		t.Errorf("drift to a refused v2 = %q, want the refusal named", got)
 	}
 }
 
@@ -1120,18 +1131,19 @@ func assertV2WakeWired(t *testing.T, runtimes []*CityRuntime) {
 	}
 }
 
-// admitV2 admits v2 at the composition edges for one test, through the
-// developer override. Its callers must not call t.Parallel().
+// admitV2 isolates the composition edges' latch from the process
+// environment (its GC_SESSION) for one test, so a v2 config latches v2 from
+// config alone. Its callers must not call t.Parallel().
 func admitV2(t *testing.T) {
 	t.Helper()
 	prev := reconcilerModeLookupEnv
-	reconcilerModeLookupEnv = overrideEnv("1")
+	reconcilerModeLookupEnv = noEnv
 	t.Cleanup(func() { reconcilerModeLookupEnv = prev })
 }
 
 // Kills: the supervisor's startOneCity building its city runtime without
-// the wiring's wake and v2 runtime (msup). Admitted by the developer
-// override, the city starts and its runtime and API state share the wiring's
+// the wiring's wake and v2 runtime (msup). Admitted from config, the city
+// starts and its runtime and API state share the wiring's
 // routed wake.
 func TestSupervisorStartOneCityV2SharesTheWiringsWake(t *testing.T) {
 	admitV2(t)
@@ -1295,7 +1307,7 @@ func TestV2HostResolvesTemplates(t *testing.T) {
 // controller latched with the developer override does not warn that a v2
 // edit will be refused at the next start.
 func TestCityRuntimeDriftJudgesWithTheWiringsEnv(t *testing.T) {
-	w, err := newControllerWiring(&config.City{}, overrideEnv("1"), io.Discard)
+	w, err := newControllerWiring(&config.City{}, noEnv, io.Discard)
 	if err != nil {
 		t.Fatalf("newControllerWiring: %v", err)
 	}
@@ -1633,5 +1645,59 @@ func TestV2LaneHoldsTheControllersStrandedAlerter(t *testing.T) {
 	rt.start(context.Background())
 	if lane := rt.lane.Load(); lane == nil || lane.stranded != cr.strandedClaimAlerter() {
 		t.Fatal("the started lane does not hold the controller's alerter")
+	}
+}
+
+// idleExternalReadsLane is an unstarted lane: a wake only sets wantReads
+// and signals wakeCh.
+func idleExternalReadsLane() *externalReadsLane {
+	return newExternalReadsLane(time.Minute, func() (externalReadsEnv, error) { return externalReadsEnv{}, nil }, nil, nil, nil, io.Discard)
+}
+
+// Kills a reload or a poke that marks only the planner dirty (PAR-SC
+// review): the external-reads lane, which runs the custom scale_checks and
+// the bd/PG legs, would wait out its patrol before reading the new config
+// or the poked work. A v2 config reload and a key-less, allocator or
+// control-dispatch enqueue through the wiring's wake each wake the lane; a
+// session key, which concerns one cached row, does not.
+func TestV2ReloadAndEnqueueWakeTheExternalReadsLane(t *testing.T) {
+	cr, _ := newPhaseFixtureRuntime(t, true, false)
+	cr.activeReload.soft = false
+	rt := attachTestV2(t, cr)
+	rt.publishEnv()
+	rt.softReload = func(_ context.Context, intent reloadIntent, r *reloadControlReply) {
+		v2SoftReloadUnavailable(intent, r)
+	}
+	lane := idleExternalReadsLane()
+	rt.lane.Store(lane)
+	runFixtureTick(cr, "reload")
+	if !lane.wantReads.Load() || len(lane.wakeCh) != 1 {
+		t.Fatal("a v2 config reload did not wake the external-reads lane")
+	}
+
+	plain, _ := newPhaseFixtureRuntime(t, false, false)
+	cfg := *plain.cfg
+	cfg.Daemon.SessionReconciler = "v2"
+	w, err := newControllerWiring(&cfg, noEnv, io.Discard)
+	if err != nil {
+		t.Fatalf("newControllerWiring: %v", err)
+	}
+	t.Cleanup(w.v2.stop)
+	for _, c := range []struct {
+		name string
+		keys []reconcilekey.Key
+		wake bool
+	}{
+		{"key-less", nil, true},
+		{"allocator", []reconcilekey.Key{reconcilekey.Allocator()}, true},
+		{"control dispatch", []reconcilekey.Key{reconcilekey.ControlDispatch()}, true},
+		{"session", []reconcilekey.Key{reconcilekey.Session("gc-1")}, false},
+	} {
+		lane = idleExternalReadsLane()
+		w.v2.lane.Store(lane)
+		w.wake.Enqueue(wakeReasonSocket, c.keys...)
+		if woke := lane.wantReads.Load() && len(lane.wakeCh) == 1; woke != c.wake {
+			t.Errorf("%s enqueue: lane woken %t, want %t", c.name, woke, c.wake)
+		}
 	}
 }

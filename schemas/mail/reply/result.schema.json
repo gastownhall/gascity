@@ -26,7 +26,8 @@
     "message": { "$ref": "#/$defs/message" },
     "messages": { "type": "array", "items": { "$ref": "#/$defs/message" } },
     "count": { "type": "integer", "minimum": 1 },
-    "notified": { "type": "boolean" }
+    "notified": { "type": "boolean" },
+    "notify_op_ids": { "type": "array", "items": { "type": "string", "minLength": 1 } }
   },
   "additionalProperties": true
 }

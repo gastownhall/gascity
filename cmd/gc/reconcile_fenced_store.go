@@ -1,9 +1,9 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
@@ -100,7 +100,7 @@ func (w fencedWriter) updateMetadataFenced(id string, attempts int, decide func(
 
 // updateRowFenced is LL4's session.Store.UpdateRowFenced: metadata, title
 // and labels in one UpdateIfMatch.
-func (w fencedWriter) updateRowFenced(id string, attempts int, decide func(session.Info) (session.RowPatch, bool)) (bool, error) {
+func (w fencedWriter) updateRowFenced(id string, attempts int, decide func(session.Info, session.PersistedResponse) (session.RowPatch, bool)) (bool, error) {
 	front, err := w.front()
 	if err != nil {
 		return false, err
@@ -112,11 +112,13 @@ func (w fencedWriter) updateRowFenced(id string, attempts int, decide func(sessi
 // row from the backing through the leg's cache (CachingStore.RefreshRow), so
 // decide never sees a cached copy. A newer write racing the read returns
 // beads.ErrRowRefreshFenced, wrapped.
-func (w fencedWriter) casRow(id string, decide func(session.Info, session.PersistedResponse) session.MetadataPatch) (bool, error) {
+func (w fencedWriter) casRow(id string, decide func(session.Info, session.PersistedResponse) session.RowPatch) (bool, error) {
 	if _, err := w.front(); err != nil {
 		return false, err
 	}
-	return sessionFrontDoor(w.freshStore()).UpdateMetadataFenced(id, 1, decide)
+	return sessionFrontDoor(w.freshStore()).UpdateRowFenced(id, 1, func(row session.Info, resp session.PersistedResponse) (session.RowPatch, bool) {
+		return decide(row, resp), true
+	})
 }
 
 // closeRow is runTx's one close attempt: CloseWithMetadataIfMatch at the
@@ -158,31 +160,13 @@ func (s freshRowStore) Get(id string) (beads.Bead, error) {
 	return b, err
 }
 
-// closePremise is session.Store.Close: the premise close.
-func (w fencedWriter) closePremise(expected session.Info, stateCode string, now time.Time) (bool, error) {
-	front, err := w.closeFront()
-	if err != nil {
-		return false, err
-	}
-	return front.Close(expected, stateCode, now)
-}
-
-// closeWithTerminalPatch is session.Store.CloseWithTerminalPatch.
-func (w fencedWriter) closeWithTerminalPatch(expected session.Info, patch session.MetadataPatch, commitMsg string, now time.Time) (bool, error) {
-	front, err := w.closeFront()
-	if err != nil {
-		return false, err
-	}
-	return front.CloseWithTerminalPatch(expected, patch, commitMsg, now)
-}
-
 // rollbackPendingCreate is session.Store.RollbackPendingCreateAtomically.
 func (w fencedWriter) rollbackPendingCreate(expected session.Info, closePatch, postClosePatch session.MetadataPatch) (closed, postClosed bool, err error) {
 	front, err := w.closeFront()
 	if err != nil {
 		return false, false, err
 	}
-	return front.RollbackPendingCreateAtomically(expected, closePatch, postClosePatch)
+	return front.RollbackPendingCreateAtomically(context.Background(), expected, closePatch, postClosePatch)
 }
 
 // foldInfo is info.ApplyPatch(patch), a pure fold that writes nothing. The
@@ -268,13 +252,19 @@ func (s blindWriteRefusingStore) DepList(id, direction string) ([]beads.Dep, err
 func (blindWriteRefusingStore) Create(beads.Bead) (beads.Bead, error) {
 	return beads.Bead{}, errBlindWriteRefused
 }
+
 func (blindWriteRefusingStore) Update(string, beads.UpdateOpts) error { return errBlindWriteRefused }
-func (blindWriteRefusingStore) Close(string) error                    { return errBlindWriteRefused }
-func (blindWriteRefusingStore) Reopen(string) error                   { return errBlindWriteRefused }
+
+func (blindWriteRefusingStore) Close(string) error { return errBlindWriteRefused }
+
+func (blindWriteRefusingStore) Reopen(string) error { return errBlindWriteRefused }
+
 func (blindWriteRefusingStore) CloseAll([]string, map[string]string) (int, error) {
 	return 0, errBlindWriteRefused
 }
+
 func (blindWriteRefusingStore) SetMetadata(string, string, string) error { return errBlindWriteRefused }
+
 func (blindWriteRefusingStore) SetMetadataBatch(string, map[string]string) error {
 	return errBlindWriteRefused
 }
@@ -282,7 +272,11 @@ func (blindWriteRefusingStore) SetMetadataBatch(string, map[string]string) error
 func (blindWriteRefusingStore) SetLocalString(string, string, string) error {
 	return errBlindWriteRefused
 }
+
 func (blindWriteRefusingStore) Tx(string, func(beads.Tx) error) error { return errBlindWriteRefused }
-func (blindWriteRefusingStore) Delete(string) error                   { return errBlindWriteRefused }
-func (blindWriteRefusingStore) DepAdd(string, string, string) error   { return errBlindWriteRefused }
-func (blindWriteRefusingStore) DepRemove(string, string) error        { return errBlindWriteRefused }
+
+func (blindWriteRefusingStore) Delete(string) error { return errBlindWriteRefused }
+
+func (blindWriteRefusingStore) DepAdd(string, string, string) error { return errBlindWriteRefused }
+
+func (blindWriteRefusingStore) DepRemove(string, string) error { return errBlindWriteRefused }

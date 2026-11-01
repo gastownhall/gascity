@@ -75,9 +75,13 @@ if [ -n "$deps_file" ]; then
     grep '^//internal/' "$deps_file" >&2
     fail "pkg/eventexport must import nothing from internal/ (see above)"
   fi
-elif go list -deps ./pkg/eventexport 2>/dev/null | grep -q 'gastownhall/gascity/internal'; then
-  go list -deps ./pkg/eventexport | grep 'gastownhall/gascity/internal' >&2
-  fail "pkg/eventexport must import nothing from internal/ (see above)"
+else
+  deps="$(go list -deps ./pkg/eventexport)" || fail "go list -deps ./pkg/eventexport failed"
+  internal_deps="$(grep 'gastownhall/gascity/internal' <<<"$deps" || true)"
+  if [ -n "$internal_deps" ]; then
+    printf '%s\n' "$internal_deps" >&2
+    fail "pkg/eventexport must import nothing from internal/ (see above)"
+  fi
 fi
 
 echo "check-eventexport-isolation: OK (brand-free, one source of truth, pkg/eventexport internal-free)"

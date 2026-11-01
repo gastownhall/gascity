@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"maps"
 	"strings"
 	"time"
 
@@ -36,8 +37,31 @@ const (
 )
 
 // adoptSections are the adopt's one section: the verb, which never
-// launches.
-var adoptSections = []section{probed(prepareAdoption, verbStep(true))}
+// launches, and its Call, the adoption's side effects.
+var adoptSections = []section{called(0, probed(prepareAdoption, verbStep(true)), verbCall)}
+
+// verbPass is what the verb section hands its Call: the row a Launch acts
+// on, or the row an adoption committed.
+type verbPass struct {
+	launch, adopted *launchRow
+}
+
+// verbCall is the verb section's Call: a Launch's endpoint ticket
+// (admitTicket), or, once an adoption's commit landed, the side effects a
+// launch installs (plan C5a3): the agent's hooks and its ACP route
+// (installAgentSideEffects), as legacy's tick installs them for every
+// desired agent. Legacy's adoption (recoverRunningPendingCreate) runs no
+// launch tail (dialogs, session_setup, the startup nudge, session_live), and
+// neither does this one.
+func verbCall(ctx context.Context, c txCaps, in verbPass) (*startTicket, error) {
+	switch {
+	case in.launch != nil:
+		return admitTicket(ctx, c, *in.launch)
+	case in.adopted != nil:
+		in.adopted.w.Templates.installSideEffects(in.adopted.agent, in.adopted.tp)
+	}
+	return nil, nil
+}
 
 // prepareAdoption is the verb section's Probe: legacy's prepare of the
 // expected row, read-only, when the fresh read may commit it (a creating
@@ -69,7 +93,7 @@ func transcriptOf(r effectReads, w *World, row session.Info, tp TemplateParams) 
 	if dir == "" {
 		return sessTranscriptUnknown
 	}
-	switch present, probeable := staleResumeKeyProbe(sessionTranscriptProvider(tp.ResolvedProvider, row), dir, sk); {
+	switch present, probeable := staleResumeKeyProbe(launchTranscriptRoots(w.Env.Cfg, tp), sessionTranscriptProvider(tp.ResolvedProvider, row), dir, sk); {
 	case !probeable:
 		return sessTranscriptUnknown
 	case present:
@@ -81,7 +105,7 @@ func transcriptOf(r effectReads, w *World, row session.Info, tp TemplateParams) 
 // launchWorkDir is the work dir prepare launches row in: the task's, the
 // row's, the template's.
 func launchWorkDir(r effectReads, w *World, row session.Info, tp TemplateParams) string {
-	if dir := resolvePreparedTaskWorkDir(startCandidate{info: row, tp: tp}, w.CityPath, w.Env.Cfg, r.city, taskWorkDirs(w)); dir != "" {
+	if dir := resolvePreparedTaskWorkDir(startCandidate{info: row, tp: tp}, w.CityPath, w.Env.Cfg, r.city, taskWorkDirs(w), legsTriggerResolver(r.legs)); dir != "" {
 		return dir
 	}
 	if dir := preparedStartSessionWorkDir(row); dir != "" {
@@ -98,8 +122,14 @@ var errTemplateUnresolved = errors.New("v2 start: the row's template is unresolv
 // work dir resolver over the pass's assigned work: it writes nothing.
 func prepareRow(r effectReads, w *World, row session.Info, tp TemplateParams, transcript sessTranscriptState) (*preparedStart, error) {
 	// The claimed-work probe reads the seat's work through the city work
-	// legs (NEW2-1), never the sessions store.
-	sources := dispatchOptionSources{claimedWork: reachableClaimedWorkProbe(seatWorkFor(r.legs, releaseScope(row, w.Env.Cfg)))}
+	// legs (NEW2-1), never the sessions store. The trigger, its root and its
+	// drain source are read by id through the same legs (legsTriggerResolver),
+	// as legacy's start reads them through withTriggerBeadResolver: r.city is
+	// the sessions store, which on a split city holds none of them.
+	sources := dispatchOptionSources{
+		claimedWork: reachableClaimedWorkProbe(seatWorkFor(r.legs, releaseScope(row, w.Env.Cfg))),
+		trigger:     legsTriggerResolver(r.legs),
+	}
 	prepared, _, err := buildPreparedStartWithTranscript(startCandidate{info: row, tp: tp}, w.CityPath, w.Env.Cfg, r.city, taskWorkDirs(w), sources, &transcript)
 	return prepared, err
 }
@@ -125,7 +155,7 @@ func verbStep(adopt bool) func(txView, *preparedStart, error) txStep {
 		case !ok || res.Err != nil:
 			return healInstead(v, txStep{Refuse: causeTemplate, Err: res.Err})
 		case cause == causeNotPresent && !adopt:
-			return txStep{Pass: launchRow{w: v.World, row: v.Row, tp: res.TP, agent: res.Agent}}
+			return txStep{Pass: verbPass{launch: &launchRow{w: v.World, row: v.Row, tp: res.TP, agent: res.Agent}}}
 		case cause != "":
 			return txStep{Refuse: cause}
 		}
@@ -136,7 +166,9 @@ func verbStep(adopt bool) func(txView, *preparedStart, error) txStep {
 		case prepared == nil:
 			return txStep{Fail: causePrepare, Err: prepErr}
 		}
-		return txStep{Write: startCommit(prepared, v.Row, v.Now), Done: true, Facts: noted}
+		// The adoption's commit, and its side effects once it landed.
+		adopted := &launchRow{w: v.World, row: v.Row, tp: res.TP, agent: res.Agent}
+		return txStep{Write: startCommit(prepared, v.Row, v.Now), Last: true, Facts: noted, Pass: verbPass{adopted: adopted}}
 	}
 }
 
@@ -145,14 +177,34 @@ func verbStep(adopt bool) func(txView, *preparedStart, error) txStep {
 // still finds the runtime absent, on which every such heal rests.
 func healInstead(v txView, refuse txStep) txStep {
 	heal := v.It.Heal
-	if heal == nil || v.RT == nil || v.RT.Class != rtAbsent {
+	if heal == nil || v.RT == nil || v.RT.Class != rtAbsent || healDrifted(v) {
 		return refuse
 	}
-	step := txStep{Write: heal.Patch, Done: true, Cause: refuse.Refuse, Facts: refuse.Facts}
+	patch := heal.Patch
+	if heal.Kind == intentDriftRepair { // the composed repair's cleared key, rotated as its own effect does
+		patch = withRepairKey(patch, v.World, v.Row)
+	}
+	step := txStep{Write: patch, Class: heal.Class, Done: true, Cause: refuse.Refuse, Facts: refuse.Facts}
 	if heal.Event != nil {
 		step.Facts.Events = append(step.Facts.Events, *heal.Event)
 	}
 	return step
+}
+
+// healDrifted reports that the A6 timer heal v's start carries no longer
+// re-derives on v.Row, the fresh read (STALE-READ-ARCH): the timers the pass
+// read expired are not what the row holds now (an agent's heartbeat
+// re-armed its hold). The pass's derivation may only veto (C-lite): the
+// start refuses held and writes no heal, and the next pass decides. Both
+// derivations are at the pass's time, so only the row's move counts.
+func healDrifted(v txView) bool {
+	heal := v.It.Heal
+	if heal == nil || heal.Reason != decideTimerHeal {
+		return false
+	}
+	stalePatch, staleClass, _ := timerHealPatch(v.World.Census.Rows[v.It.Key].Info, v.World.Now)
+	freshPatch, freshClass, _ := timerHealPatch(v.Row, v.World.Now)
+	return !maps.Equal(stalePatch, freshPatch) || !maps.Equal(staleClass.Fold(), freshClass.Fold())
 }
 
 // runtimeCause is S1's table's refusal for row's fresh runtime read rt, ""
@@ -164,15 +216,21 @@ func runtimeCause(row session.Info, rt *txRuntime) string {
 	case rtAbsent:
 		return causeNotPresent
 	case rtCorpse, rtZombie:
-		return causeDead
+		return causeDead // the recycle section's (reconcile_effect_recycle.go); an adopt never recycles
 	}
 	if !rt.Alive() { // unknown, or the session object changed around the identity read
 		return causeLivenessUnknown
 	}
-	switch compareIdentity(row, rt.Identity) {
+	return identityCause(row, rt.Identity)
+}
+
+// identityCause is runtimeCause's refusal for an alive runtime whose
+// identity read is ident: "" when it is Current.
+func identityCause(row session.Info, ident runtimeIdentity) string {
+	switch compareIdentity(row, ident) {
 	case identityCurrent:
 		return ""
-	case identityStaleSelf: // arm A3 re-keys it (X1); a pending create's S7 exit is C5a3's
+	case identityStaleSelf: // arm A3 re-keys it (X1); a pending create's is A10's S7 exit
 		return causeTokenDrift
 	case identityNewerSelf:
 		return causeNewerSelf
@@ -189,6 +247,12 @@ func startCommit(prepared *preparedStart, row session.Info, now time.Time) sessi
 	patch := startCommitPatch(prepared, row, now)
 	if patch["state"] == string(session.StateActive) {
 		patch["state"] = string(session.StateAwake)
+	}
+	// A quarantine that landed after the PreWake does not veto the commit
+	// (S2), which records a live runtime; the commit keeps its keys, and the
+	// row exits by A6's stability clear (§12.2 #57).
+	if session.DispositionOfInfo(row).Quarantine.After(now) {
+		delete(patch, "sleep_reason") // the Quarantine cell's deadline is no commit's to write
 	}
 	return patch
 }

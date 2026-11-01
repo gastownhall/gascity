@@ -321,9 +321,14 @@ func newReconcilerTestEnv(t testing.TB) *reconcilerTestEnv {
 		city:  t.TempDir(),
 		stops: &asyncStartTracker{},
 	}
-	// The drain-ack's async stops finish before the city is removed.
+	// The drain-ack's async stops finish before the city is removed. The wait
+	// is unbounded: each stop ends by its own confirm-dead bound
+	// (drainAckStopConfirmDeadTimeout, bound at queue time), and a wait
+	// shorter than that bound let a stop on an immortal runtime outlive the
+	// test, still holding its runtime lease under the city's .gc, while
+	// TempDir removed the city (mc-y861o).
 	env.startOptions = append(env.startOptions, withAsyncDrainAckStopTracker(env.stops))
-	t.Cleanup(func() { env.stops.wait(5 * time.Second) })
+	t.Cleanup(func() { env.stops.wait(-1) })
 	return env
 }
 
@@ -3520,6 +3525,69 @@ func TestReconcileSessionBeads_AsleepMaxSessionAgePoolBeadFreesSlot(t *testing.T
 	}
 	if got.Status != "closed" {
 		t.Fatalf("status = %q, want closed — asleep-max-session-age pool beads must free their slot via the live-query close gate", got.Status)
+	}
+}
+
+// TestReconcileSessionBeads_AsleepConfigDriftPoolBeadFreesSlot mirrors
+// TestReconcileSessionBeads_AsleepIdlePoolBeadFreesSlot for
+// sleep_reason=config-drift: a pool session drained for a config-drift
+// restart must free its pool slot through the same live-query close gate
+// once it has gone fully asleep, instead of wedging the slot forever. A
+// config-drifted pool session is never woken in place (that would run the
+// agent on stale config — see resetConfiguredNamedSessionForConfigDriftInfo,
+// which only covers named sessions), so without this close a pool whose
+// every slot drifts goes dark indefinitely even with ready routed demand
+// (srvcity sr-sxbc7: st/support.dispatch dark 17.5h, both slots
+// asleep-for-drift, 59 ready steps queued, nothing closed or replaced it).
+func TestReconcileSessionBeads_AsleepConfigDriftPoolBeadFreesSlot(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	env.addDesired("worker", "worker", false) // NOT running
+	session := env.createSessionBead("worker", "worker")
+	// Simulate the post-drain-ack-ghost state: asleep + sleep_reason=config-drift
+	// + pool-managed, but the runtime has exited and no work is assigned.
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                "asleep",
+		"sleep_reason":         string(sessionpkg.SleepReasonConfigDrift),
+		poolManagedMetadataKey: boolMetadata(true),
+	})
+
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		env.city,
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		newFakeDrainOps(),
+		nil,
+		nil, // rigStores
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+		withAsyncDrainAckStopTracker(env.stops),
+	)
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed — asleep-config-drift pool beads must free their slot via the live-query close gate", got.Status)
 	}
 }
 
@@ -8618,6 +8686,55 @@ func TestReconcileSessionBeads_CrashDetection(t *testing.T) {
 	b, _ := env.store.Get(session.ID)
 	if b.Metadata["wake_attempts"] != "1" {
 		t.Errorf("wake_attempts = %q, want %q", b.Metadata["wake_attempts"], "1")
+	}
+}
+
+// Kills a rapid crash whose conversation probe ignores the launch's config
+// dir (mc-bm1af): legacy's tick probes launchTranscriptRoots of the row's
+// template, so a conversation kept under the operator's CLAUDE_CONFIG_DIR,
+// a dir not among the observed roots, survives an unrelated rapid crash.
+func TestReconcileSessionBeads_RapidCrashProbesTheLaunchConfigDir(t *testing.T) {
+	rapidCrashKeepsConfigDirConversation(t, func(tp *TemplateParams, dir string) {
+		tp.OperatorEnv = map[string]string{"CLAUDE_CONFIG_DIR": dir}
+	})
+}
+
+// Kills a rapid crash whose conversation probe ignores a CLAUDE_CONFIG_DIR
+// the launch is only handed (#6677): one passed through from gc's env to
+// tp.Env, not the operator's, is searched too, so a conversation kept there
+// survives an unrelated rapid crash.
+func TestReconcileSessionBeads_RapidCrashProbesThePassedThroughConfigDir(t *testing.T) {
+	rapidCrashKeepsConfigDirConversation(t, func(tp *TemplateParams, dir string) {
+		tp.Env = map[string]string{"CLAUDE_CONFIG_DIR": dir}
+	})
+}
+
+// rapidCrashKeepsConfigDirConversation rapidly crashes a configured named
+// claude row whose k-1 transcript lives only under a config dir that set
+// names on the row's template, and requires the crash recorded with the
+// conversation kept.
+func rapidCrashKeepsConfigDirConversation(t *testing.T, set func(tp *TemplateParams, dir string)) {
+	t.Helper()
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", false)
+	workDir := t.TempDir()
+	root := observedTranscript(t, workDir) // k-1's transcript, under <dir>/projects
+	tp := env.desiredState["worker"]
+	set(&tp, filepath.Dir(root))
+	env.desiredState["worker"] = tp
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"configured_named_session": "true", "configured_named_identity": "worker", "configured_named_mode": "always", // its heal keeps the conversation
+		"provider": "claude", "work_dir": workDir, "session_key": "k-1", "started_config_hash": "h-1",
+		"last_woke_at": env.clk.Now().Add(-5 * time.Second).UTC().Format(time.RFC3339),
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	b, _ := env.store.Get(session.ID)
+	if b.Metadata["wake_attempts"] != "1" || b.Metadata["session_key"] != "k-1" {
+		t.Fatalf("wake_attempts %q session_key %q; want the crash recorded and the conversation kept (stderr %s)", b.Metadata["wake_attempts"], b.Metadata["session_key"], env.stderr.String())
 	}
 }
 

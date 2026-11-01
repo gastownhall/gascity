@@ -1,6 +1,15 @@
 package main
 
-import "testing"
+import (
+	"fmt"
+	"io"
+	"maps"
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/hooks"
+)
 
 func TestIsOperationalScript(t *testing.T) {
 	cases := []struct {
@@ -30,6 +39,97 @@ func TestIsOperationalScript(t *testing.T) {
 	for _, c := range cases {
 		if got := isOperationalScript(c.rel); got != c.want {
 			t.Errorf("isOperationalScript(%q) = %v, want %v", c.rel, got, c.want)
+		}
+	}
+}
+
+// TestAgentTemplateLaunchCommandMatchesResolveTemplate pins the deferred
+// agent-session create baseline to the controller's template command. The API
+// persists config.BuildProviderTemplateLaunchCommand's command before the
+// controller resolves the agent, and the async-start drift check rolls the
+// create back unless resolveTemplate composes the same command (#7453). It
+// covers every builtin provider on each transport it supports, a wrapped Kimi
+// alias, installed agent hooks, and option defaults no flag can render.
+func TestAgentTemplateLaunchCommandMatchesResolveTemplate(t *testing.T) {
+	kimiBase := "builtin:kimi"
+	providers := config.BuiltinProviders()
+	providers["fast-kimi"] = config.ProviderSpec{Base: &kimiBase}
+	providerNames := append(append([]string{}, config.BuiltinProviderOrder()...), "fast-kimi")
+	hookSets := []struct {
+		name  string
+		hooks []string
+	}{
+		{name: "no-hooks"},
+		{name: "all-hooks", hooks: append(hooks.SupportedProviders(), "fast-kimi")},
+	}
+	pinSets := []struct {
+		name string
+		pins map[string]string
+	}{
+		{name: "provider-defaults"},
+		{name: "unrenderable-pins", pins: map[string]string{"bogus": "x", "permission_mode": "not-a-permission-mode", "effort": ""}},
+	}
+	lookPath := func(name string) (string, error) { return "/bin/" + name, nil }
+
+	for _, providerName := range providerNames {
+		probe, err := config.ResolveProvider(&config.Agent{Name: "worker", Provider: providerName}, &config.Workspace{}, providers, lookPath)
+		if err != nil {
+			t.Fatalf("ResolveProvider(%q): %v", providerName, err)
+		}
+		sessions := []string{"", config.SessionTransportTmux}
+		if probe.SupportsACP {
+			sessions = append(sessions, config.SessionTransportACP)
+		}
+		for _, session := range sessions {
+			sessionLabel := session
+			if sessionLabel == "" {
+				sessionLabel = "provider-default"
+			}
+			for _, hookSet := range hookSets {
+				for _, pinSet := range pinSets {
+					t.Run(fmt.Sprintf("%s/%s/%s/%s", providerName, sessionLabel, hookSet.name, pinSet.name), func(t *testing.T) {
+						cityDir := t.TempDir()
+						cfgAgent := &config.Agent{
+							Name:              "worker",
+							Provider:          providerName,
+							Session:           session,
+							InstallAgentHooks: hookSet.hooks,
+							OptionDefaults:    maps.Clone(pinSet.pins),
+						}
+						bp := &agentBuildParams{
+							cityName:   "city",
+							cityPath:   cityDir,
+							workspace:  &config.Workspace{Name: "city"},
+							providers:  providers,
+							lookPath:   lookPath,
+							fs:         fsys.OSFS{},
+							rigs:       []config.Rig{},
+							beaconTime: testBeaconTime,
+							beadNames:  make(map[string]string),
+							stderr:     io.Discard,
+						}
+						// Resolve the template first: it projects Claude's
+						// .gc/settings.json, as a running controller already
+						// has by the time the API accepts a create.
+						tp, err := resolveTemplate(bp, cfgAgent, "worker", nil)
+						if err != nil {
+							t.Fatalf("resolveTemplate: %v", err)
+						}
+						resolved, err := config.ResolveProvider(cfgAgent, bp.workspace, bp.providers, bp.lookPath)
+						if err != nil {
+							t.Fatalf("ResolveProvider: %v", err)
+						}
+						transport := config.ResolveSessionCreateTransport(cfgAgent.Session, resolved)
+						launch, err := config.BuildProviderTemplateLaunchCommand(cityDir, resolved, transport, config.ResolveInstallHooks(cfgAgent, bp.workspace), bp.providers)
+						if err != nil {
+							t.Fatalf("BuildProviderTemplateLaunchCommand: %v", err)
+						}
+						if launch.Command != tp.Command {
+							t.Errorf("deferred-create baseline = %q, want resolveTemplate's command %q", launch.Command, tp.Command)
+						}
+					})
+				}
+			}
 		}
 	}
 }

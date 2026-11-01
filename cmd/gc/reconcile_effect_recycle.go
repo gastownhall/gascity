@@ -1,0 +1,259 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
+)
+
+// The dead row of S1's table (CONTRACT v5 S5; plan C5a3): a bringUp whose
+// fresh read finds a corpse (present, pane dead) or a zombie (running,
+// agent dead) under the row's name classifies the row's own dead runtime
+// from its pane, then removes it by exact session object, before PreWake,
+// and the verb section after it reads the name gone and launches. Identity
+// is read first: the start-recycle exception stops a zombie only when it is
+// the row's own (O2's own-runtime test); a corpse is removed under the
+// corpse exception whoever it was, but classified only when it is the
+// row's own, so no quarantine, terminal mark or crash is attributed to the
+// wrong row. In legacy's order (checkRateLimitStability and the zombie
+// capture):
+//   - a terminal provider error parks the row (SESS-088): no kill, no launch;
+//   - a rate-limit screen of a crash candidate quarantines it 30 minutes
+//     (SESS-530): no kill, no launch, no accrual;
+//   - other output is a crash (SESS-089): session.crashed, recorded once the
+//     kill landed, so a recycle that keeps being refused records none twice;
+//   - no output: the recycle alone.
+//
+// Each completed classification is recorded in the planner's classified set
+// (v5 S5, X10), with the crash it found, so a recycle refused again does not
+// peek again. A peek that fails classifies nothing and refuses
+// (peek-error). The kill keeps L3 (an attached pane refuses, and the start waits for the detach)
+// and re-checks the object server-side (KillCorpseObject, KillZombieObject);
+// a refused kill leaves the runtime, and the verb section's read refuses
+// dead with a row backoff.
+
+// Recycle refusal causes.
+const (
+	causePeekError    = "peek-error"
+	causeAttached     = "attached"
+	causeOperatorPane = "operator-pane" // the kill refused: more than one pane or window, or the pane lives again
+)
+
+// errRecycleAttached: the recycle's L3 found the pane attached.
+var errRecycleAttached = errors.New("v2 start: the dead runtime's pane is attached")
+
+// recycleSections are bringUp's first sections: the classification and the
+// kill, then the death's accounting.
+var recycleSections = []section{
+	calledWhen(callStop, probed(peekDead, recycleStep), deadKill.found, killDead),
+	{Decide: deathStep},
+}
+
+// deadPeek is what the recycle's Probe read of the row's own dead pane, or
+// the classification the planner remembers for it.
+type deadPeek struct {
+	read    bool // the row's own: classified
+	content string
+	known   *classifiedRuntime // classified before (World.Classified): not peeked again
+}
+
+// peekDead peeks the dead runtime's pane when it is the row's own and not
+// classified yet; nothing otherwise. A corpse whose agent pane is gone (an
+// operator's split left as its only, dead, pane) has no screen of the
+// agent's to classify: it reads empty, and the recycle removes it by exact
+// object as before (the #7762 review). A zombie's never does: its live pane
+// may be an operator's, which KillZombieObject would kill, so the peek
+// refuses. The screen counts only when a fresh read after the capture, taken
+// at the wall clock (so no snapshot from before the capture answers it),
+// still finds the session object the classification read, its id and its
+// created time (tmux reuses ids after a server restart); otherwise the peek
+// refuses (errPeekObjectMoved).
+func peekDead(ctx context.Context, _ effectReads, v txView) (deadPeek, error) {
+	if v.RT == nil || v.RT.Class != rtCorpse && v.RT.Class != rtZombie || !ownRuntime(compareIdentity(v.Row, v.RT.Identity), v.Row, v.RT.Identity) {
+		return deadPeek{}, nil
+	}
+	if c, ok := v.World.Classified[v.It.Key]; ok && c.classifies(v.RT.Identity) {
+		return deadPeek{read: true, known: &c}, nil
+	}
+	name := strings.TrimSpace(v.Row.SessionName)
+	content, err := v.RT.leaf.Peek(name, rateLimitPeekLines)
+	switch {
+	case errors.Is(err, runtime.ErrTmuxAgentPaneGone) && v.RT.Class == rtCorpse:
+		return deadPeek{read: true}, ctx.Err()
+	case err != nil:
+		return deadPeek{}, err
+	}
+	if again, ok := freshRead(ctx, v.RT.leaf, name, nil, time.Now()); !ok || again.ObjectID != v.RT.Again.ObjectID || again.ObjectCreated != v.RT.Again.ObjectCreated {
+		return deadPeek{}, errPeekObjectMoved
+	}
+	return deadPeek{read: true, content: content}, ctx.Err()
+}
+
+// errPeekObjectMoved: the session object under the name changed, or could
+// not be read again, between the classification's read and the capture, so
+// the screen may be another object's.
+var errPeekObjectMoved = errors.New("v2 recycle: the session object changed across the peek")
+
+// deadKill is the dead runtime the recycle's Call removes, the crash it
+// records once the kill landed, and whether the death is the row's own to
+// account.
+type deadKill struct {
+	leaf    runtime.Provider
+	name    string
+	zombie  bool
+	live    runtime.Liveness // the read's latest: its object
+	now     time.Time
+	crash   *events.Event
+	account bool
+}
+
+// deadKilled is how the recycle's kill ended.
+type deadKilled struct {
+	killed, blocked, account bool
+}
+
+func (k deadKill) found() bool { return k.leaf != nil }
+
+// recycleStep is the dead row's Decide: nothing for a runtime that is not
+// dead; the classification's patch, or the kill.
+func recycleStep(v txView, peek deadPeek, peekErr error) txStep {
+	if v.RT.Class != rtCorpse && v.RT.Class != rtZombie {
+		return txStep{Pass: deadKill{}}
+	}
+	ident := compareIdentity(v.Row, v.RT.Identity)
+	own := ownRuntime(ident, v.Row, v.RT.Identity)
+	switch {
+	case !v.RT.Same:
+		return txStep{Refuse: causeLivenessUnknown} // the object changed across the read
+	case v.RT.Class == rtZombie && !own:
+		return txStep{Refuse: identityCause(v.Row, v.RT.Identity)}
+	case own && peekErr != nil:
+		return txStep{Refuse: causePeekError, Err: peekErr}
+	}
+	k := deadKill{leaf: v.RT.leaf, name: strings.TrimSpace(v.Row.SessionName), zombie: v.RT.Class == rtZombie, live: v.RT.Again, now: v.Now, account: own}
+	switch {
+	case peek.known != nil: // classified on an earlier attempt: its crash, if any, still waits on the kill
+		k.crash = peek.known.Crash
+		return txStep{Pass: k}
+	case !peek.read:
+		return txStep{Pass: k}
+	}
+	classified := &classifiedRuntime{Key: v.It.Key, Token: deadToken(v.RT.Identity), Recycle: true}
+	facts := effectFacts{Classified: classified}
+	if strings.TrimSpace(peek.content) == "" {
+		return txStep{Pass: k, Facts: facts}
+	}
+	if screen, ok := deadScreen(v, peek.content); ok {
+		if parkedTerminal(v.Row) && screen.patch["sleep_reason"] == string(session.SleepReasonProviderTerminalError) {
+			if strings.TrimSpace(v.Row.WakeRequest) == string(session.WakeCauseExplicit) {
+				return txStep{Pass: k, Facts: facts} // a wake request: the screen it was parked on is recycled for its one launch
+			}
+			return txStep{Done: true, Cause: causeDead, Facts: facts} // already parked
+		}
+		return txStep{Write: screen.patch, Class: screen.class, Done: true, Facts: facts}
+	}
+	if !k.zombie || runtime.ContainsProviderRateLimitScreen(peek.content) {
+		return txStep{Pass: k, Facts: facts} // legacy records a crash for a zombie alone, and never a rate-limit screen's
+	}
+	res, _ := v.World.Templates.lookup(v.Row)
+	k.crash = &events.Event{
+		Type: events.SessionCrashed, Actor: "gc", Subject: res.TP.DisplayName(),
+		Message: truncateCrashPaneOutput(peek.content, crashEventPaneOutputMaxLines),
+		Payload: api.SessionLifecyclePayloadJSON(v.Row.ID, res.TP.TemplateName, "zombie process"),
+	}
+	classified.Crash = k.crash
+	return txStep{Pass: k, Facts: facts}
+}
+
+// deadScreen classifies the row's own dead pane as legacy's zombie capture
+// and checkRateLimitStability do: a terminal provider error parks it
+// whatever its wake; a rate-limit screen quarantines a crash candidate.
+func deadScreen(v txView, content string) (screenWrite, bool) {
+	if reason := runtime.ProviderTerminalErrorReason(content); reason != "" {
+		return screenWrite{patch: providerTerminalErrorPatch(reason, v.Now)}, true
+	}
+	if !runtime.ContainsProviderRateLimitScreen(content) {
+		return screenWrite{}, false
+	}
+	// A drain a request explains (the controller's, or an operator's)
+	// quarantines no screen, as legacy's exit decision (D09). A bare ack,
+	// the agent's own (a dead floor seat's, which A18 restarts in place
+	// with the ack on the row), suppresses only the death's crash and churn
+	// accounting (deadRuntimePatch), not this screen, so the seat is not
+	// relaunched into the limit (§12.2 row 66).
+	req, draining := activeStop(v.World.Census.reread(v.It.Key, v.Row, v.Meta)) // the fresh row's stop keys
+	draining = draining && (req.Reason != "" || req.Operator)
+	facts := session.ExitFacts{LastWokeAt: v.Row.LastWokeAt, Now: v.Now, ScreenAvailable: true, Screen: session.ScreenRateLimit, DrainPending: draining}
+	if cfg := v.World.Env.Cfg; cfg != nil {
+		facts.SubprocessProvider = cfg.Session.Provider == "subprocess"
+	}
+	if session.DecideSessionExit(facts) != session.ExitRateLimitQuarantine {
+		return screenWrite{}, false
+	}
+	patch, class := rateLimitQuarantine(v.Row, v.Now)
+	return screenWrite{patch: patch, class: class}, true
+}
+
+// killDead removes k's dead runtime by exact session object when L3
+// passes, and records its crash once removed; a leaf that kills by no
+// session object removes nothing.
+func killDead(ctx context.Context, c txCaps, k deadKill) (deadKilled, error) {
+	killer, ok := k.leaf.(runtime.SessionObjectKiller)
+	if !ok {
+		return deadKilled{}, nil
+	}
+	if reason, _ := attachLeg(ctx, k.leaf, k.name, false, k.now); reason != "" {
+		return deadKilled{}, errRecycleAttached
+	}
+	var res runtime.SessionObjectKillResult
+	var err error
+	if k.zombie {
+		res, err = killer.KillZombieObject(k.name, k.live.ObjectID, k.live.ObjectCreated, k.live.PanePID)
+	} else {
+		res, err = killer.KillCorpseObject(k.name, k.live.ObjectID, k.live.ObjectCreated)
+	}
+	out := deadKilled{killed: res == runtime.SessionObjectKilled, blocked: res == runtime.SessionObjectLive || res == runtime.SessionObjectChanged, account: k.account}
+	if out.killed && k.crash != nil {
+		if c.start.rec != nil {
+			c.start.rec.Record(*k.crash)
+		}
+		recordAgentCrash(context.Background(), k.crash.Subject, k.crash.Message)
+	}
+	return out, err
+}
+
+// deathStep accounts the row's own death once its dead runtime is removed,
+// as A6's dead-runtime heal does for a runtime that is gone (SESS-531,
+// SESS-537/538): the heal, and a rapid crash's wake failure or churn. A
+// death that accrues ends the effect with its record, so the row restarts
+// the next pass, as legacy's does (and a quarantine holds it); any other
+// rides ahead of the PreWake. An attached pane or a refused kill refuses,
+// and so does a runtime this section's own read finds under the name again
+// (goneNow): the death is accounted only over a name its read proves gone.
+func deathStep(v txView) txStep {
+	out, err := callResult[deadKilled](v)
+	switch {
+	case errors.Is(err, errRecycleAttached):
+		return txStep{Refuse: causeAttached} // the recycle waits for the detach (C8.1)
+	case out.blocked:
+		return txStep{Refuse: causeOperatorPane}
+	case !out.killed || !out.account || !committed(v.Row):
+		return txStep{}
+	case !goneNow(v):
+		return txStep{Refuse: causeRuntimePresent}
+	}
+	w := *v.World
+	w.Now = v.Now
+	patch, class, accrued, ev := deadRuntimePatch(&rowFacts{w: &w, k: v.It.Key, row: v.World.Census.reread(v.It.Key, v.Row, v.Meta), found: true}, true) // the fresh row's stop keys: a drain's death is no crash
+	step := txStep{Write: patch, Class: class, Done: accrued}
+	if ev != nil { // recorded once the write lands
+		step.Facts.Events = append(step.Facts.Events, *ev)
+	}
+	return step
+}

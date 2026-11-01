@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -23,15 +24,40 @@ import (
 // reload) reach pokeCh in both modes: the reload runs on the maintenance tick.
 type controllerWake struct {
 	pokeCh, controlDispatcherCh chan<- struct{}
-	planner                     *planner
+	// mode is the session reconciler the controller latched, set by
+	// newControllerWiring; the controller socket publishes it
+	// (reconcilerModeCommand). A directly-built legacy wake is legacy.
+	mode    reconcilerMode
+	planner *planner
 	// waitDepClosed, set with planner, hears each closed bead's ID (GUAR-010).
 	waitDepClosed func(id string)
+	// wakeReads, set with planner, wakes the external-reads lane on the
+	// enqueues that ask for demand (wakesReads).
+	wakeReads func()
 	// now, when set, is the clock routed enqueues rate-limit their landed
 	// report by; nil is time.Now, whose readings compare on the monotonic
 	// clock, so a wall-clock step neither floods nor silences the report.
 	now        func() time.Time
 	lastLanded atomic.Pointer[time.Time] // the last routed enqueue reported landed
 }
+
+// latchedModeName names the session reconciler the controller latched, for
+// the identify reply: the wiring gives a v2 controller's wake its planner and
+// a legacy one's none (checkReconcilerWiring), so the wake carries the latch.
+// It is "" without a wake.
+func (w *controllerWake) latchedModeName() string {
+	switch {
+	case w == nil:
+		return ""
+	case w.runsV2():
+		return reconcilerV2.String()
+	}
+	return reconcilerLegacy.String()
+}
+
+// runsV2 reports that the wake routes to a v2 planner: its controller latched
+// v2 (checkReconcilerWiring).
+func (w *controllerWake) runsV2() bool { return w != nil && w.planner != nil }
 
 // routedLandedEvery bounds how often a routed enqueue reports that it landed.
 const routedLandedEvery = time.Second
@@ -98,9 +124,23 @@ func (w *controllerWake) Enqueue(reason string, keys ...reconcilekey.Key) bool {
 	}
 	if w.planner != nil {
 		w.planner.markDirty(reason)
+		if w.wakeReads != nil && wakesReads(keys) {
+			w.wakeReads()
+		}
 		return w.reportLanded()
 	}
 	return legacyEnqueue(w.pokeCh, w.controlDispatcherCh, keys...)
+}
+
+// wakesReads reports whether an enqueue of keys asks for demand: key-less
+// (a CLI writer such as gc sling pokes key-less), or an allocator or
+// control-dispatch key. A session key concerns one row, whose reads the
+// cache serves.
+func wakesReads(keys []reconcilekey.Key) bool {
+	return len(keys) == 0 || slices.ContainsFunc(keys, func(k reconcilekey.Key) bool {
+		kind := k.Normalize().Kind
+		return kind == reconcilekey.KindAllocator || kind == reconcilekey.KindControlDispatch
+	})
 }
 
 func (w *controllerWake) reportLanded() bool {

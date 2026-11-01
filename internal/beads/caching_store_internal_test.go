@@ -1630,8 +1630,8 @@ func TestCachingStoreSparseUpdatedEventFallsBackWhenCompleteCoverageIsMissingDep
 	if depsComplete {
 		t.Fatal("depsComplete = true, want incomplete coverage after missing deps invariant break")
 	}
-	if !strings.Contains(lastProblem, "missing deps for "+bead.ID) {
-		t.Fatalf("LastProblem = %q, want missing deps diagnostic for %s", lastProblem, bead.ID)
+	if !strings.Contains(lastProblem, "marked complete but missing deps") {
+		t.Fatalf("LastProblem = %q, want missing deps diagnostic", lastProblem)
 	}
 	if _, ok := cache.CachedReady(); ok {
 		t.Fatal("CachedReady answered from cache after dependency coverage became incomplete")

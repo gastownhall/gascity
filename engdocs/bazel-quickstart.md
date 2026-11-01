@@ -3,9 +3,10 @@
 Bazel is how Gas City is built and tested. CI gates on `bazel test`
 (`.github/workflows/bazel.yml`), and `make test`, `make check`,
 `make test-acceptance` and `make test-integration` run the same commands.
-`go build`/`go test` still work for a quick inner loop on one package, but
-they are not what CI enforces: nogo (lint and vet), formatting,
-generated-artifact drift and the policy guards exist only as Bazel targets.
+`go build`/`go test` still work for a human's quick inner loop on one
+package (agents run tests only with `bazel test`), but they are not what CI
+enforces: nogo (lint and vet), formatting, generated-artifact drift and the
+policy guards exist only as Bazel targets.
 This guide sets Bazel up on your machine; TESTING.md "Building and testing"
 lists the command for every test tier.
 
@@ -89,7 +90,16 @@ certificate, so plain `bazel test` already executes remotely.
 The pre-push hook picks the mode automatically: remote execution when any rc
 file (`.bazelrc.local`, `~/.bazelrc`, `/etc/bazel.bazelrc`) names a remote
 executor and the checkout's `worker-env` pin is main's, the read-only cache
-otherwise.
+otherwise. The cache mode runs misses on this machine, so it needs the
+runtime libraries above: on a Linux x86_64 host whose dynamic loader cannot
+resolve ICU 74 (`libicui18n.so.74`, `libicuuc.so.74`, `libicudata.so.74`),
+`auto` runs the plain-Go suite behind a banner instead, and pre-commit runs
+`make check-docs-go` instead of `make check-docs`. Neither is the Bazel suite
+CI gates on. A remote executor needs nothing from the host loader; otherwise
+make `libicu74` resolvable (a side-by-side install, or a private runtime with
+`bazel --batch`). `GC_PREPUSH_SUITE` and `GC_PRECOMMIT_DOCS` force an engine;
+TESTING.md "Hosts that cannot load the pinned ICU runtime" has the full
+matrix.
 
 ### 3. Verify
 
@@ -121,7 +131,7 @@ works without editing `.bazelrc.local`.
 | iterating on one package's tests | `bazel test //pkg:pkg_test` (remote-cached) |
 | verifying a change before pushing | `make check` (`bazel test //...`) |
 | acceptance or integration behavior changed | the matching `--config=acceptance` / `--config=integration` target |
-| quick compile-and-run of one file, no Bazel server | `go build ./pkg/` or `go test ./pkg -run TestX` (inner loop only; not what CI checks) |
+| quick compile-and-run of one file, no Bazel server (humans) | `go build ./pkg/` or `go test ./pkg -run TestX` (inner loop only; not what CI checks) |
 | offline, or a host Bazel does not serve (macOS) | the `-go` make twins: `make test-go`, `make check-go` |
 | adding a new dependency | `go get` then `make bazel-sync` |
 

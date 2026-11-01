@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "beadmail",
-    srcs = ["beadmail.go"],
+    srcs = [
+        "beadmail.go",
+        "inbox.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/mail/beadmail",
     visibility = ["//:__subpackages__"],
     deps = [
@@ -19,8 +22,10 @@ go_test(
         "beadmail_retention_test.go",
         "beadmail_test.go",
         "conformance_test.go",
+        "consumed_test.go",
         "handoff_archive_test.go",
         "handoff_test.go",
+        "inbox_test.go",
         "testenv_import_test.go",
     ],
     embed = [":beadmail"],

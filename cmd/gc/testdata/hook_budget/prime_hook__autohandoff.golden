@@ -1,0 +1,9 @@
+hookEventName: SessionStart
+header: [test-city] probe-a • <now>
+<system-reminder>
+You have 1 unread message(s).
+
+- tc-2 from probe-a: context cycle
+
+Run 'gc mail read <id>' for full details, or 'gc mail inbox' to see all.
+</system-reminder>

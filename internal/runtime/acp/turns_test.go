@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"os"
 	"reflect"
 	"regexp"
 	"strings"
@@ -340,6 +342,35 @@ func TestReadErrorIsNotAgentExit(t *testing.T) {
 	})
 }
 
+// closedPipeReader is the parent's stdout read end after exec.Cmd.Wait has
+// closed it under the read loop: once the agent exits, Wait closes the pipe,
+// and a Read that loses the race to EOF fails with os.ErrClosed instead.
+type closedPipeReader struct{ err error }
+
+func (r closedPipeReader) Read([]byte) (int, error) { return 0, r.err }
+
+// TestReadLoopClosedPipeIsClosedConnection pins that a stdout pipe closed
+// under the read loop (exec.Cmd.Wait closing it after the agent exits) settles
+// the turn as a closed connection, exactly like EOF, and not as a read failure.
+func TestReadLoopClosedPipeIsClosedConnection(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"os.ErrClosed from a closed os.File pipe", &os.PathError{Op: "read", Path: "|0", Err: os.ErrClosed}},
+		{"io.ErrClosedPipe", io.ErrClosedPipe},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := newSessionConn(nil, nil, nil, 10, nil)
+			sc.setActivePrompt(4)
+			sc.readLoop(closedPipeReader{err: tc.err})
+			if _, last := sc.turns(); last == nil || last.State != turnFailed || last.Error != turnFailureConnClosed {
+				t.Fatalf("last turn = %+v, want failed %q", last, turnFailureConnClosed)
+			}
+		})
+	}
+}
+
 // TestNudgeRefusesDrainedConnection pins that a live agent whose stdout can
 // no longer be read does not get a turn that could never finish, and that the
 // wait for its exit is bounded by Config.StopGrace. StopGrace is the bound the
@@ -367,7 +398,7 @@ func TestNudgeRefusesDrainedConnection(t *testing.T) {
 	if current, _ := sc.turns(); current != nil || sc.isBusy() {
 		t.Fatalf("Nudge opened turn %+v on a drained connection", current)
 	}
-	if sc.setActivePrompt(9) {
+	if _, ok := sc.setActivePrompt(9); ok {
 		t.Fatal("setActivePrompt accepted a prompt on a drained connection")
 	}
 }

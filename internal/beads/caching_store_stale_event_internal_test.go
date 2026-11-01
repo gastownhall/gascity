@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
+	"runtime"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -23,13 +26,8 @@ import (
 var staleEventBackings = []struct {
 	name string
 	open func(t *testing.T) Store
-	// listsRevision reports that the store's listing carries each row's
-	// revision. The native store's does not (beadFromNativeIssueRow), so a
-	// rescan installs its row at revision 0, the absent token, which its
-	// CAS refuses against any written row.
-	listsRevision bool
 }{
-	{"mem", func(*testing.T) Store { return NewMemStore() }, true},
+	{"mem", func(*testing.T) Store { return NewMemStore() }},
 	{"sqlite", func(t *testing.T) Store {
 		s, err := OpenSQLiteStore(t.TempDir())
 		if err != nil {
@@ -37,16 +35,15 @@ var staleEventBackings = []struct {
 		}
 		t.Cleanup(func() { _ = s.(*SQLiteStore).CloseStore() })
 		return s
-	}, true},
-	{"native-dolt", func(*testing.T) Store { return newNativeDoltStoreForTest(newNativeDoltMemStorage()) }, false},
+	}},
+	{"native-dolt", func(*testing.T) Store { return newNativeDoltStoreForTest(newNativeDoltMemStorage()) }},
 }
 
 // staleEventAfterRescan writes held_until=old then =new around the cache, as
 // another process would, lets a rescan install the newer row, and then
 // delivers the older write's event. It returns the cache, the row id and the
-// revision the rescan installed: the newer backing row's, or 0 when the
-// store's listing carries no revision (listsRevision).
-func staleEventAfterRescan(t *testing.T, backing Store, listsRevision bool) (*CachingStore, string, int64) {
+// revision the rescan installed: the newer backing row's.
+func staleEventAfterRescan(t *testing.T, backing Store) (*CachingStore, string, int64) {
 	t.Helper()
 	row, err := backing.Create(Bead{Title: "held"})
 	if err != nil {
@@ -57,9 +54,6 @@ func staleEventAfterRescan(t *testing.T, backing Store, listsRevision bool) (*Ca
 	newer := writeHeldUntil(t, backing, row.ID, "new")
 	cache.ReconcileNowForTest()
 	scanned := newer.Revision
-	if !listsRevision {
-		scanned = 0
-	}
 	cache.mu.RLock()
 	installed := cache.beads[row.ID]
 	_, mutated := cache.beadSeq[row.ID]
@@ -105,7 +99,7 @@ func TestCachingStoreStaleEventAfterRescanKeepsRowAndRevision(t *testing.T) {
 	for _, b := range staleEventBackings {
 		t.Run(b.name, func(t *testing.T) {
 			t.Parallel()
-			cache, id, scanned := staleEventAfterRescan(t, b.open(t), b.listsRevision)
+			cache, id, scanned := staleEventAfterRescan(t, b.open(t))
 			cache.mu.RLock()
 			got := cache.beads[id]
 			_, dirty := cache.dirty[id]
@@ -130,7 +124,7 @@ func TestCachingStoreCASAfterStaleEventRefusesOrDecidesFresh(t *testing.T) {
 		t.Run(b.name, func(t *testing.T) {
 			t.Parallel()
 			backing := b.open(t)
-			cache, id, _ := staleEventAfterRescan(t, backing, b.listsRevision)
+			cache, id, _ := staleEventAfterRescan(t, backing)
 			read, err := cache.Get(id)
 			if err != nil {
 				t.Fatalf("Get: %v", err)
@@ -744,5 +738,416 @@ func TestCachingStoreOneSubprocessCheckInFlight(t *testing.T) {
 	if n := backing.gets.Load(); n != 1 || !dirty || seq <= before || got.Title != "b" {
 		t.Fatalf("backing reads %d; b dirty %v, beadSeq %d (was %d), title %q; want 1, dirty, stamped, b",
 			n, dirty, seq, before, got.Title)
+	}
+}
+
+// An external write the cache learns of by event is verified against a
+// backing read; the installed row is that read, whole, so a CAS decided on the
+// cached row lands on the first try rather than being refused once at the
+// pre-write revision, and the revision is never paired with the pre-write
+// stamp. Kills the event merge keeping the cached revision, and installing the
+// read's revision alone (the merge never takes UpdatedAt).
+func TestCachingStoreVerifiedEventInstallsTheBackingRevision(t *testing.T) {
+	t.Parallel()
+	for _, b := range staleEventBackings {
+		t.Run(b.name, func(t *testing.T) {
+			t.Parallel()
+			backing := b.open(t)
+			row, err := backing.Create(Bead{Title: "held"})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			cache := newConditionalCacheForTest(t, backing)
+			written := writeHeldUntil(t, backing, row.ID, "external")
+			payload, err := EncodeBeadEventPayload(written)
+			if err != nil {
+				t.Fatalf("EncodeBeadEventPayload: %v", err)
+			}
+			cache.ApplyEvent("bead.updated", payload)
+			got, err := cache.Get(row.ID)
+			if err != nil {
+				t.Fatalf("cached Get: %v", err)
+			}
+			if got.Metadata["held_until"] != "external" || got.Revision != written.Revision {
+				t.Fatalf("cached row = held_until %q at revision %d, want %q at the backing's %d",
+					got.Metadata["held_until"], got.Revision, "external", written.Revision)
+			}
+			if !got.UpdatedAt.Equal(written.UpdatedAt) || got.ClaimFence != written.ClaimFence || got.NoHistory != written.NoHistory {
+				t.Fatalf("cached row at the backing's revision %d carries updated_at %s, fence %d, no_history %v; the backing's are %s, %d, %v",
+					got.Revision, got.UpdatedAt, got.ClaimFence, got.NoHistory, written.UpdatedAt, written.ClaimFence, written.NoHistory)
+			}
+			if err := cache.UpdateIfMatch(row.ID, got.Revision, UpdateOpts{Metadata: map[string]string{"held_until": "healed"}}); err != nil {
+				t.Fatalf("CAS at the cached revision: %v", err)
+			}
+		})
+	}
+}
+
+// The safety half of the verified-event install: a verified event that names
+// one field (title) while another write to the row (x) has no event yet
+// merges into a row that is not the backing read. It keeps the cached
+// revision, so a CAS decided on the stale x is refused rather than landing
+// over x's write. Kills dropping the merged-row-equals-read guard.
+func TestCachingStoreVerifiedPartialEventKeepsTheCachedRevision(t *testing.T) {
+	t.Parallel()
+	for _, b := range staleEventBackings {
+		t.Run(b.name, func(t *testing.T) {
+			t.Parallel()
+			backing := b.open(t)
+			row, err := backing.Create(Bead{Title: "t0", Metadata: map[string]string{"x": "0"}})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			cache := newConditionalCacheForTest(t, backing)
+			writeMetadata(t, backing, row.ID, "x", "1") // its event is still in flight
+			title := "t1"
+			if err := backing.Update(row.ID, UpdateOpts{Title: &title}); err != nil {
+				t.Fatalf("Update: %v", err)
+			}
+			payload, err := json.Marshal(map[string]any{"id": row.ID, "title": "t1"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cache.ApplyEvent("bead.updated", payload)
+			got, err := cache.Get(row.ID)
+			if err != nil {
+				t.Fatalf("cached Get: %v", err)
+			}
+			if got.Metadata["x"] != "0" {
+				return // the cache already holds x's write: nothing stale to decide on
+			}
+			err = cache.UpdateIfMatch(row.ID, got.Revision, UpdateOpts{Metadata: map[string]string{"x": "9"}})
+			after, _ := backing.Get(row.ID)
+			if err == nil || after.Metadata["x"] != "1" {
+				t.Fatalf("CAS decided on the cached x=0 at revision %d = %v, backing x now %q; want it refused and x=1 kept",
+					got.Revision, err, after.Metadata["x"])
+			}
+		})
+	}
+}
+
+// The verified-event install is guarded by the merged row equalling the read
+// for more than the stale-field case. A local write that lands between the
+// event's backing read and its install leaves the merged row newer than that
+// read: installing the read would roll this process's own write back, at an
+// older revision. Kills dropping the merged-row-equals-read guard.
+func TestCachingStoreVerifiedEventKeepsALocalWriteFromItsWindow(t *testing.T) {
+	backing := NewMemStore()
+	row, err := backing.Create(Bead{Title: "t0", Metadata: map[string]string{"y": "0"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := newConditionalCacheForTest(t, backing)
+	t1 := "t1"
+	if err := backing.Update(row.ID, UpdateOpts{Title: &t1}); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(map[string]any{"id": row.ID, "title": "t1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ran := false
+	cache.applyEventBeforeCommitForTest = func() {
+		cache.applyEventBeforeCommitForTest = nil
+		ran = true
+		if err := cache.SetMetadata(row.ID, "y", "local"); err != nil {
+			t.Error(err)
+		}
+	}
+	cache.ApplyEvent("bead.updated", payload)
+	if !ran {
+		t.Fatal("the read-to-install window never ran; the test is vacuous")
+	}
+	got, err := cache.Get(row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := backing.Get(row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["y"] != "local" || got.Revision != live.Revision {
+		t.Fatalf("cached y=%q at revision %d, backing y=%q at %d: the cache lost this process's own write",
+			got.Metadata["y"], got.Revision, live.Metadata["y"], live.Revision)
+	}
+}
+
+// Over a backing whose point read omits edges (MemStore), a verified event that
+// carries the row's edges merges them; installing the edge-less read would
+// take the edge set from it, wipe a live blocker, and let Ready list the
+// blocked row. Kills dropping the merged-row-equals-read guard.
+func TestCachingStoreVerifiedEventKeepsEdgesAnEdgelessReadOmits(t *testing.T) {
+	backing := NewMemStore()
+	row, err := backing.Create(Bead{Title: "row"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocker, err := backing.Create(Bead{Title: "blocker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backing.DepAdd(row.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	cache := newConditionalCacheForTest(t, backing)
+	writeMetadata(t, backing, row.ID, "k", "1")
+	payload := json.RawMessage(fmt.Sprintf(`{"id":%q,"metadata":{"k":"1"},"dependencies":[{"issue_id":%q,"depends_on_id":%q,"type":"blocks"}]}`,
+		row.ID, row.ID, blocker.ID))
+	cache.ApplyEvent("bead.updated", payload)
+	cache.mu.RLock()
+	edges := cloneDeps(cache.deps[row.ID])
+	cache.mu.RUnlock()
+	ready, err := cache.Ready(ReadyQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range ready {
+		if b.ID == row.ID {
+			t.Fatalf("Ready lists %s, blocked by %s (cached edges %v)", row.ID, blocker.ID, edges)
+		}
+	}
+	if len(edges) != 1 {
+		t.Fatalf("cached edges %v, want the live blocker kept", edges)
+	}
+}
+
+// historyStore records the row at every revision it writes, so a CAS that
+// landed can be checked against what the backing held at its fence.
+type historyStore struct {
+	*MemStore
+	wmu  sync.Mutex
+	hmu  sync.Mutex
+	hist map[string]map[int64]Bead
+}
+
+func (h *historyStore) record(id string) {
+	b, err := h.Get(id)
+	if err != nil {
+		return
+	}
+	h.hmu.Lock()
+	defer h.hmu.Unlock()
+	if h.hist[id] == nil {
+		h.hist[id] = map[int64]Bead{}
+	}
+	h.hist[id][b.Revision] = cloneBead(b)
+}
+
+func (h *historyStore) at(id string, rev int64) (Bead, bool) {
+	h.hmu.Lock()
+	defer h.hmu.Unlock()
+	b, ok := h.hist[id][rev]
+	return b, ok
+}
+
+func (h *historyStore) Create(b Bead) (Bead, error) {
+	h.wmu.Lock()
+	defer h.wmu.Unlock()
+	out, err := h.MemStore.Create(b)
+	if err == nil {
+		h.record(out.ID)
+	}
+	return out, err
+}
+
+func (h *historyStore) Update(id string, opts UpdateOpts) error {
+	h.wmu.Lock()
+	defer h.wmu.Unlock()
+	err := h.MemStore.Update(id, opts)
+	if err == nil {
+		h.record(id)
+	}
+	return err
+}
+
+func (h *historyStore) SetMetadata(id, k, v string) error {
+	return h.Update(id, UpdateOpts{Metadata: map[string]string{k: v}})
+}
+
+func (h *historyStore) UpdateIfMatch(id string, rev int64, opts UpdateOpts) error {
+	h.wmu.Lock()
+	defer h.wmu.Unlock()
+	err := h.MemStore.UpdateIfMatch(id, rev, opts)
+	if err == nil {
+		h.record(id)
+	}
+	return err
+}
+
+// Bounded stress over the verified-event install: external writers deliver
+// full and partial events, in and out of order; CAS consumers decide on
+// cached rows; a local writer, reconciles and Live refreshes race them. Every
+// CAS that lands must have been decided on the fields the backing held at the
+// fenced revision, and some must land. The local writer touches only its own
+// key: a local Update that overlays its own value on the refetched row is a
+// separate, known gap. The consumers make a fixed number of attempts, and the
+// rest run until they finish, so the operation count, not a deadline, bounds
+// the run.
+func TestCachingStoreCASLandsOnlyOnTheFencedRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("stress")
+	}
+	t.Parallel()
+	const seed, casAttempts = 1, 10000
+	h := &historyStore{MemStore: NewMemStore(), hist: map[string]map[int64]Bead{}}
+	const nrows = 4
+	var ids []string
+	for i := 0; i < nrows; i++ {
+		b, err := h.Create(Bead{Title: fmt.Sprintf("r%d", i), Metadata: map[string]string{"k": "0", "x": "0"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, b.ID)
+	}
+	cache := newConditionalCacheForTest(t, h)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var casOK, violations atomic.Int64
+	var mu sync.Mutex
+	var first []string
+	type pending struct{ payload []byte }
+	queue := make(chan pending, 4096)
+	var wg sync.WaitGroup
+	for w := 0; w < 3; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			r := rand.New(rand.NewSource(seed + int64(w)))
+			for ctx.Err() == nil {
+				id := ids[r.Intn(nrows)]
+				var opts UpdateOpts
+				switch r.Intn(4) {
+				case 0:
+					opts.Metadata = map[string]string{"x": strconv.Itoa(r.Intn(3))}
+				case 1:
+					title := fmt.Sprintf("t%d", r.Intn(3))
+					opts.Title = &title
+				case 2:
+					opts.Metadata = map[string]string{"k": strconv.Itoa(r.Intn(1000))}
+				default:
+					a := []string{"", "w1", "w2"}[r.Intn(3)]
+					opts.Assignee = &a
+				}
+				if err := h.Update(id, opts); err != nil {
+					continue
+				}
+				fresh, err := h.Get(id)
+				if err != nil {
+					continue
+				}
+				var payload []byte
+				if r.Intn(3) == 0 {
+					m := map[string]any{"id": id}
+					switch {
+					case opts.Title != nil:
+						m["title"] = fresh.Title
+					case opts.Assignee != nil:
+						m["assignee"] = fresh.Assignee
+					default:
+						m["metadata"] = map[string]string(fresh.Metadata)
+					}
+					payload, _ = json.Marshal(m)
+				} else {
+					payload, _ = EncodeBeadEventPayload(fresh)
+				}
+				if r.Intn(2) == 0 {
+					cache.ApplyEvent("bead.updated", payload)
+				} else {
+					select {
+					case queue <- pending{payload}:
+					default:
+					}
+				}
+				runtime.Gosched()
+			}
+		}(w)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		r := rand.New(rand.NewSource(seed + 100))
+		var buf []pending
+		for ctx.Err() == nil {
+			select {
+			case p := <-queue:
+				buf = append(buf, p)
+			case <-time.After(200 * time.Microsecond):
+			}
+			if len(buf) > 0 && r.Intn(3) == 0 {
+				i := r.Intn(len(buf))
+				p := buf[i]
+				buf = append(buf[:i], buf[i+1:]...)
+				cache.ApplyEvent("bead.updated", p.payload)
+			}
+		}
+	}()
+	var consumers sync.WaitGroup
+	for c := 0; c < 3; c++ {
+		consumers.Add(1)
+		go func(c int) {
+			defer consumers.Done()
+			r := rand.New(rand.NewSource(seed + 200 + int64(c)))
+			for range casAttempts {
+				id := ids[r.Intn(nrows)]
+				got, err := cache.Get(id)
+				if err != nil {
+					continue
+				}
+				n, _ := strconv.Atoi(got.Metadata["k"])
+				if cache.UpdateIfMatch(id, got.Revision, UpdateOpts{Metadata: map[string]string{"k": strconv.Itoa(n + 1)}}) != nil {
+					continue
+				}
+				casOK.Add(1)
+				held, ok := h.at(id, got.Revision)
+				if !ok {
+					continue
+				}
+				cmp := got
+				cmp.IsBlocked = held.IsBlocked
+				if beadChanged(held, cmp, false) {
+					violations.Add(1)
+					mu.Lock()
+					if len(first) < 5 {
+						first = append(first, fmt.Sprintf("%s rev %d: cached title=%q assignee=%q metadata=%v; held title=%q assignee=%q metadata=%v",
+							id, got.Revision, got.Title, got.Assignee, got.Metadata, held.Title, held.Assignee, held.Metadata))
+					}
+					mu.Unlock()
+				}
+			}
+		}(c)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		r := rand.New(rand.NewSource(seed + 300))
+		for ctx.Err() == nil {
+			_ = cache.SetMetadata(ids[r.Intn(nrows)], "y", strconv.Itoa(r.Intn(1000)))
+			runtime.Gosched()
+		}
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		r := rand.New(rand.NewSource(seed + 400))
+		for ctx.Err() == nil {
+			if r.Intn(3) == 0 {
+				cache.ReconcileNowForTest()
+			} else {
+				_, _ = cache.List(ListQuery{IDs: []string{ids[r.Intn(nrows)]}, Live: true})
+			}
+			runtime.Gosched()
+		}
+	}()
+	consumers.Wait()
+	cancel()
+	wg.Wait()
+	for _, v := range first {
+		t.Log(v)
+	}
+	if n := violations.Load(); n > 0 {
+		t.Errorf("%d of %d CAS landed on fields the backing never held at the fenced revision", n, casOK.Load())
+	}
+	if casOK.Load() == 0 {
+		t.Errorf("none of the %d CAS attempts landed; the stress fenced nothing", 3*casAttempts)
 	}
 }

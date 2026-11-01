@@ -7,7 +7,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-// TestLoadWithIncludesDefaultsConditionalWrites: omitted → default "off".
+// TestLoadWithIncludesDefaultsConditionalWrites: omitted → default "auto" (mc-dpo2b).
 func TestLoadWithIncludesDefaultsConditionalWrites(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
@@ -18,8 +18,8 @@ name = "test"
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if got := cfg.Beads.NormalizedConditionalWrites(); got != "off" {
-		t.Fatalf("NormalizedConditionalWrites = %q, want off when omitted", got)
+	if got := cfg.Beads.NormalizedConditionalWrites(); got != "auto" {
+		t.Fatalf("NormalizedConditionalWrites = %q, want auto when omitted", got)
 	}
 }
 
@@ -104,9 +104,13 @@ conditional_writes = "auto"
 
 // TestConditionalWritesParseAndDefault covers decode and the accessor default.
 func TestConditionalWritesParseAndDefault(t *testing.T) {
-	// zero value / omitted → default "off".
-	if (BeadsConfig{}).NormalizedConditionalWrites() != "off" {
-		t.Fatalf("zero-value accessor = %q, want off", (BeadsConfig{}).NormalizedConditionalWrites())
+	// zero value / omitted → default "auto".
+	if (BeadsConfig{}).NormalizedConditionalWrites() != "auto" {
+		t.Fatalf("zero-value accessor = %q, want auto", (BeadsConfig{}).NormalizedConditionalWrites())
+	}
+	// an explicit "off" stays off.
+	if got := (BeadsConfig{ConditionalWrites: "off"}).NormalizedConditionalWrites(); got != "off" {
+		t.Fatalf("explicit off accessor = %q, want off", got)
 	}
 	// an explicit value decodes.
 	out, err := Parse([]byte("[beads]\nconditional_writes = \"auto\"\n"))
@@ -121,8 +125,8 @@ func TestConditionalWritesParseAndDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if out2.Beads.ConditionalWrites != "" || out2.Beads.NormalizedConditionalWrites() != "off" {
-		t.Fatalf("unset conditional_writes = %q (norm %q), want empty→off", out2.Beads.ConditionalWrites, out2.Beads.NormalizedConditionalWrites())
+	if out2.Beads.ConditionalWrites != "" || out2.Beads.NormalizedConditionalWrites() != "auto" {
+		t.Fatalf("unset conditional_writes = %q (norm %q), want empty→auto", out2.Beads.ConditionalWrites, out2.Beads.NormalizedConditionalWrites())
 	}
 }
 
@@ -261,7 +265,7 @@ func TestGuardedReleaseParseAndValidate(t *testing.T) {
 // (the composed root) validate: an out-of-enum value in each field must fail
 // both paths with that field's own error.
 func TestBeadsModesRejectedOnBothLoadPaths(t *testing.T) {
-	for _, field := range []string{"conditional_writes", "guarded_release", "native_transport"} {
+	for _, field := range []string{"conditional_writes", "guarded_release", "native_transport", "ledger_feed"} {
 		t.Run(field, func(t *testing.T) {
 			layer := "[beads]\n" + field + " = \"requre\"\n"
 			if _, err := Parse([]byte(layer)); err == nil || !strings.Contains(err.Error(), "beads."+field) {
@@ -333,5 +337,66 @@ allow_schema_behind_migrate = false
 	}
 	if cfg.Beads.AllowSchemaBehindMigrateEnabled() {
 		t.Fatalf("AllowSchemaBehindMigrateEnabled = true, want the fragment's false to win")
+	}
+}
+
+// TestLedgerFeedParseAndNormalize covers decode, the off default, and the
+// case- and space-folding accessor for beads.ledger_feed.
+func TestLedgerFeedParseAndNormalize(t *testing.T) {
+	if got := (BeadsConfig{}).NormalizedLedgerFeed(); got != BeadsLedgerFeedOff {
+		t.Fatalf("zero-value accessor = %q, want off", got)
+	}
+	for _, tc := range []struct{ raw, want string }{
+		{"auto", BeadsLedgerFeedAuto},
+		{"AUTO", BeadsLedgerFeedAuto},
+		{" off ", BeadsLedgerFeedOff},
+		{"Off", BeadsLedgerFeedOff},
+	} {
+		out, err := Parse([]byte("[beads]\nledger_feed = \"" + tc.raw + "\"\n"))
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", tc.raw, err)
+		}
+		if got := out.Beads.NormalizedLedgerFeed(); got != tc.want {
+			t.Fatalf("NormalizedLedgerFeed(%q) = %q, want %q", tc.raw, got, tc.want)
+		}
+	}
+}
+
+// TestLedgerFeedRejectsOutOfEnum proves a typo, and gate.ParseMode's third
+// spelling "require", fail both load paths with the field's own error.
+func TestLedgerFeedRejectsOutOfEnum(t *testing.T) {
+	for _, raw := range []string{"require", "bogus"} {
+		t.Run(raw, func(t *testing.T) {
+			layer := "[beads]\nledger_feed = \"" + raw + "\"\n"
+			if _, err := Parse([]byte(layer)); err == nil || !strings.Contains(err.Error(), "beads.ledger_feed") {
+				t.Fatalf("Parse: err = %v, want the beads.ledger_feed error", err)
+			}
+			fs := fsys.NewFake()
+			fs.Files["/city/city.toml"] = []byte("include = [\"fragment.toml\"]\n\n[workspace]\nname = \"test\"\n")
+			fs.Files["/city/fragment.toml"] = []byte(layer)
+			if _, _, err := LoadWithIncludes(fs, "/city/city.toml"); err == nil || !strings.Contains(err.Error(), "beads.ledger_feed") {
+				t.Fatalf("LoadWithIncludes: err = %v, want the beads.ledger_feed error from the fragment", err)
+			}
+		})
+	}
+}
+
+// TestLedgerFeedSurvivesABeadsFragment proves a fragment that defines [beads]
+// without ledger_feed keeps the root's value, and one that sets it wins.
+func TestLedgerFeedSurvivesABeadsFragment(t *testing.T) {
+	for _, tc := range []struct{ fragment, want string }{
+		{"[beads]\nconditional_writes = \"auto\"\n", BeadsLedgerFeedAuto},
+		{"[beads]\nledger_feed = \"off\"\n", BeadsLedgerFeedOff},
+	} {
+		fs := fsys.NewFake()
+		fs.Files["/city/city.toml"] = []byte("include = [\"fragment.toml\"]\n\n[workspace]\nname = \"test\"\n\n[beads]\nledger_feed = \"auto\"\n")
+		fs.Files["/city/fragment.toml"] = []byte(tc.fragment)
+		cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+		if err != nil {
+			t.Fatalf("LoadWithIncludes: %v", err)
+		}
+		if got := cfg.Beads.NormalizedLedgerFeed(); got != tc.want {
+			t.Fatalf("fragment %q: NormalizedLedgerFeed = %q, want %q", tc.fragment, got, tc.want)
+		}
 	}
 }

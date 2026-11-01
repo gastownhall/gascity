@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -104,6 +105,16 @@ func TestFinalizePatchGoldenVsLegacy(t *testing.T) {
 func TestFinalizePatchHonoredWakeNeverCloses(t *testing.T) {
 	if c := finalizePatch(finalizeFacts{CloseIfUnassigned: true, HonoredWake: true}); c.CloseSeat || c.Patch["state"] != "drained" {
 		t.Fatalf("%+v, want drained and no close over an honored wake", c)
+	}
+	// v5.10n: a sleep stamped after the request would read it served
+	// (explicitWakePendingInfo), so neither drain patch stamps slept_at over
+	// an honored wake; without one, both do.
+	for _, work := range []bool{false, true} {
+		honored := finalizePatch(finalizeFacts{Now: time.Unix(1, 0), HasWork: work, HonoredWake: true})
+		plain := finalizePatch(finalizeFacts{Now: time.Unix(1, 0), HasWork: work})
+		if _, stamped := honored.Patch["slept_at"]; stamped || plain.Patch["slept_at"] == "" {
+			t.Fatalf("work %t: honored %v, plain %v; want slept_at only without an honored wake", work, honored.Patch, plain.Patch)
+		}
 	}
 }
 

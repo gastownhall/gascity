@@ -7,8 +7,9 @@ import "testing"
 // indicator must win over a visible prompt, the prompt may sit above a status
 // footer, and NBSP or a boxed prompt must still match.
 // Kills: a scan that ignores the busy indicator, stops at the last non-blank
-// line, applies a default for a blank prefix, or drops the NBSP / box-border
-// normalization.
+// line, applies a default for a blank prefix, drops the NBSP / box-border
+// normalization, or reads a transcript line ending in a gerund and "…" as
+// Claude's spinner row.
 func TestPaneShowsIdlePrompt(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -20,6 +21,8 @@ func TestPaneShowsIdlePrompt(t *testing.T) {
 		{"prompt above status footer", []string{"❯ ", "", "  ⏵⏵ bypass permissions on", ""}, DefaultReadyPromptPrefix, true},
 		{"busy esc to interrupt", []string{"❯ ", "  esc to interrupt  "}, DefaultReadyPromptPrefix, false},
 		{"busy spinner footer", []string{"❯ ", "· Boogieing… (2m 28s · ↓ 10.9k tokens)"}, DefaultReadyPromptPrefix, false},
+		{"busy bare spinner row", []string{"· Tinkering…", "", "❯\u00a0"}, DefaultReadyPromptPrefix, false},
+		{"idle below transcript gerunds", []string{"✻ Worked for 1m 49s", "  1. Fixing… done, see the commit above", "> Investigating… turned up nothing", "❯ Testing…", "────", "❯\u00a0", "────", "  ⏵⏵ bypass permissions on"}, DefaultReadyPromptPrefix, true},
 		{"nbsp after prompt glyph", []string{"❯\u00a0"}, DefaultReadyPromptPrefix, true},
 		{"boxed prompt", []string{"╭──────╮", "│ ❯ ", "╰──────╯"}, DefaultReadyPromptPrefix, true},
 		{"custom prefix matches", []string{"› "}, "› ", true},

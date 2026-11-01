@@ -14,6 +14,7 @@ import (
 // Baseline decide reasons.
 const (
 	decideBaselineVersion    = "baseline:version-artifact" // SESS-551/564/567
+	decideBaselinePrePolicy  = "baseline:pre-policy"       // SESS-551/564/567
 	decideBaselineLive       = "baseline:live-backfill"    // SESS-563
 	decideBaselineSoftReload = "baseline:soft-reload"      // MAINT-025
 )
@@ -22,14 +23,16 @@ const (
 // rebaselined, whatever the liveness, as legacy's silent rebaseline does (no
 // drain, no restart); a missing or empty one never is (the next start commit
 // baselines it), nor is a row the start arms start this pass (the start
-// commits it). Once the core
+// commits it). A v6 hash is one only for config unchanged since
+// (runtime.IsCoreHashArtifact), and its rebaseline moves the core baseline
+// alone, leaving a changed session_live to A14's RunLive. Once the core
 // hash matches, an alive row's empty live hash with no session_live config
-// is backfilled, and a legacy or mismatched one rebaselined, as legacy's
-// alive drift block does. Under an open soft reload for this generation, a
-// desired row's drifted config is accepted (legacy's
-// acceptConfigDriftAcrossSessions), with a config-drift stop request still
-// only requested canceled in the same CAS. The hashes are this
-// generation's template for the row as written (the memo).
+// is backfilled, and a legacy or mismatched one (a v6 one only of the same
+// session_live) rebaselined, as legacy's alive drift block does. Under an
+// open soft reload for this generation, a desired row's drifted config is
+// accepted (legacy's acceptConfigDriftAcrossSessions), with a config-drift
+// stop request still only requested canceled in the same CAS. The hashes
+// are this generation's template for the row as written (the memo).
 func armBaseline(r *rowFacts) (intent, bool) {
 	info, e := r.row.Info, r.entry
 	stored := strings.TrimSpace(info.StartedConfigHash)
@@ -37,25 +40,34 @@ func armBaseline(r *rowFacts) (intent, bool) {
 		return intent{}, false
 	}
 	cfg, core, ok := r.w.coreHash(info)
-	if !ok || r.startsThisPass() {
+	if !ok {
 		return intent{}, false
 	}
+	propose := func(reason string, patch session.MetadataPatch) (intent, bool) { // a row the start arms start this pass is its commit's
+		if r.startsThisPass() {
+			return intent{}, false
+		}
+		return r.heal(intentBaseline, reason, patch)
+	}
 	switch storedLive, live := info.StartedLiveHash, runtime.LiveFingerprint(cfg); {
-	case stored != core && runtime.IsLegacyOrMismatchedVersion(stored): // the rebaseline, below
+	case stored != core && runtime.IsCoreHashArtifact(stored, cfg):
+		if runtime.IsPrePolicyHash(stored) { // the live pair stays, for A14's RunLive
+			return propose(decideBaselinePrePolicy, baselinePatch(cfg, baselinePrePolicy))
+		} // otherwise the rebaseline, below
 	case r.w.owesSoftReload(r.k, e, stored, core):
 		patch := baselinePatch(cfg, baselineSoftReload)
 		if req, ok := activeStop(r.row); ok && req.Reason == drainConfigDrift && req.Phase == stopRequested {
 			maps.Copy(patch, stopCancelPatch())
 		}
-		return r.heal(intentBaseline, r.w.SoftReload.Reason, patch)
+		return propose(r.w.SoftReload.Reason, patch)
 	case stored != core || e.Liveness != livenessAlive || storedLive == live:
 		return intent{}, false
 	case storedLive == "" && len(cfg.SessionLive) == 0:
-		return r.heal(intentBaseline, decideBaselineLive, baselinePatch(cfg, baselineLiveBackfill))
-	case !runtime.IsLegacyOrMismatchedVersion(storedLive):
+		return propose(decideBaselineLive, baselinePatch(cfg, baselineLiveBackfill))
+	case !runtime.IsLiveHashArtifact(storedLive, cfg):
 		return intent{}, false // live drift: A14's RunLive (C7b)
 	} // otherwise a legacy or mismatched live hash: the rebaseline
-	return r.heal(intentBaseline, decideBaselineVersion, baselinePatch(cfg, baselineVersionArtifact))
+	return propose(decideBaselineVersion, baselinePatch(cfg, baselineVersionArtifact))
 }
 
 // coreHash is the row's hash config and core fingerprint under this

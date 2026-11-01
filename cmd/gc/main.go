@@ -51,7 +51,11 @@ func mainExitCode(args []string, stdout, stderr io.Writer) int {
 	if handled, code := privateProductMetricsEntrypoint(args); handled {
 		return code
 	}
-	return run(args, stdout, stderr)
+	code := run(args, stdout, stderr)
+	// A process that recorded program-status shadow comparisons writes the
+	// ones still queued before it exits, bounded so exit never waits long.
+	flushProgramStatusShadow(programShadowFlushTimeout)
+	return code
 }
 
 // errExit is a sentinel error returned by cobra RunE functions to signal
@@ -215,6 +219,9 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 	var observedStdout *countingWriter
 	options.invocationArgs = append([]string(nil), args...)
 	root := newRootCmdWithOptions(execStdout, stderr, options)
+	prevPlaneGateExempt := controlPlaneGateExempt
+	controlPlaneGateExempt = controlPlaneGateExemptFor(root, args)
+	defer func() { controlPlaneGateExempt = prevPlaneGateExempt }()
 	root.SetArgs(args)
 	root.SetOut(execStdout)
 	root.SetErr(stderr)
@@ -239,13 +246,17 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 			return code
 		}
 	}
+	if target, _, findErr := root.Find(args); findErr == nil && invocationStoreMemoEligible(target) {
+		endStoreMemo := beginInvocationStoreMemo()
+		defer endInvocationStoreMemoLogged(endStoreMemo, stderr)
+	}
 	executedCommand, executeErr := root.ExecuteC()
 	lifecycle.attemptFinalOutcome(resolveProductMetricsFinalOutcome(executedCommand, classification))
 	if executeErr != nil {
 		code := commandExitCode(executeErr)
 		if bufferJSONExecution {
 			if len(bytes.TrimSpace(jsonStdout.Bytes())) > 0 {
-				if _, copyErr := io.Copy(stdout, &jsonStdout); copyErr != nil {
+				if copyErr := flushBufferedJSON(stdout, stderr, &jsonStdout); copyErr != nil {
 					return 1
 				}
 			} else {
@@ -257,19 +268,34 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 		return code
 	}
 	if bufferJSONExecution {
-		if _, err := io.Copy(stdout, &jsonStdout); err != nil {
+		if err := flushBufferedJSON(stdout, stderr, &jsonStdout); err != nil {
 			return 1
 		}
 	}
 	return 0
 }
 
+// flushBufferedJSON copies a buffered --json result to stdout. The copy is the
+// only write a full disk or closed descriptor can fail, so a failure is named
+// on stderr rather than leaving the caller an empty file and a bare exit 1.
+func flushBufferedJSON(stdout, stderr io.Writer, buffered *bytes.Buffer) error {
+	if _, err := io.Copy(stdout, buffered); err != nil {
+		fmt.Fprintf(stderr, "gc: writing JSON output: %v\n", err) //nolint:errcheck // best-effort stderr
+		return err
+	}
+	return nil
+}
+
 func commandFailureMessage(err error) string {
 	if err == nil {
 		return "command failed"
 	}
+	// errExit and commandExitError carry only an exit code: the command has
+	// already written its diagnostics to stderr, so point there instead of
+	// echoing "exit N" back as the message.
+	var exitErr *commandExitError
 	msg := strings.TrimSpace(err.Error())
-	if msg == "" || errors.Is(err, errExit) {
+	if msg == "" || errors.Is(err, errExit) || errors.As(err, &exitErr) {
 		return "command failed; see stderr for diagnostics"
 	}
 	return msg
@@ -325,7 +351,7 @@ func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions)
 	root.PersistentFlags().StringVar(&contextFlag, "context", "",
 		"operate the REMOTE city named by this context (~/.gc/contexts.toml)")
 	root.PersistentFlags().StringVar(&cityURLFlag, "city-url", "",
-		"operate a REMOTE city at this base URL (https; requires --city-name)")
+		"operate a REMOTE city at this base URL (https, or http on a loopback host; requires --city-name). A remote target is served by the API, so --json prints the API rendering where a command has two (see gc session list --help)")
 	root.PersistentFlags().StringVar(&cityNameFlag, "city-name", "",
 		"remote city name for --city-url (does not overload --city)")
 	configureJSONSchemaFlag(root)
@@ -516,6 +542,12 @@ var cliStoreCache struct {
 // have a store open. Caches the bead store per cityPath so loops over
 // agents don't open the store repeatedly. Silently falls back to legacy
 // naming if the store is unavailable.
+//
+// The lookup reads session beads, so it goes through the session-class store:
+// on a split city they live only in the binding, and a lookup through the
+// work store missed every one and fell back to the legacy name (gc prime's
+// hook resolved the wrong tmux session). A single-store city gets its one
+// store back.
 func cliSessionName(cityPath, cityName, agentName, sessionTemplate string) string {
 	if strings.TrimSpace(cityPath) == "" {
 		return sessionName(nil, cityName, agentName, sessionTemplate)
@@ -527,6 +559,9 @@ func cliSessionName(cityPath, cityName, agentName, sessionTemplate string) strin
 	}
 	store := cliStoreCache.store
 	cliStoreCache.mu.Unlock()
+	if store != nil {
+		store = cliSessionStore(store, nil, cityPath)
+	}
 	return sessionName(store, cityName, agentName, sessionTemplate)
 }
 
@@ -547,7 +582,34 @@ type contextResolutionMode struct {
 	// around. Eager discovery captures the city it picks into the
 	// pack-command closures the user later runs, so a cheaper-but-different
 	// answer would end up executing pack code against the wrong city.
+	//
+	// It reads the city's plane but never marks the invocation a worker site
+	// (withAdvisoryControlPlane): eager discovery runs before cobra parses
+	// --city, so the city it finds need not be the one the command targets.
 	advisory bool
+	// cityOnly marks an authoritative resolution whose caller reads only
+	// CityPath. It skips the rig decoration (rigFromCwdDir) and nothing else:
+	// every step that decides WHICH city — flags, env, GC_DIR, the registry
+	// scans, walk-up, the remote and sticky tiers — runs exactly as it does
+	// under authoritativeResolution, including blocking on the repo-cache
+	// lock. That last part is why this is not advisory: a command the user
+	// typed must wait for the lock rather than fail on a busy cache.
+	cityOnly bool
+}
+
+// cityOnlyResolution is the mode for a caller that discards RigName.
+var cityOnlyResolution = contextResolutionMode{cityOnly: true}
+
+// resolveCityPathOnly is resolveCity for a caller that never reads the rig.
+// It names the same city resolveCity names, or fails with the same error,
+// including the refusal of a remote target; it only skips the full config
+// load rigFromCwdDir spends on a rig name nobody reads.
+func resolveCityPathOnly() (string, error) {
+	ctx, err := resolveContextMode(cityOnlyResolution)
+	if err != nil {
+		return "", err
+	}
+	return ctx.CityPath, nil
 }
 
 // authoritativeResolution is the mode for anything the user actually typed: it
@@ -560,6 +622,13 @@ type resolvedContext struct {
 	CityPath string        // absolute path to city root (empty when Remote is set)
 	RigName  string        // rig name (empty if not in a rig context)
 	Remote   *remoteTarget // non-nil => a REMOTE city over the control plane; CityPath is empty
+	// Plane is the city's plane: Local, or Worker when it holds
+	// .gc/control-plane.toml. It is authoritative only when the resolution
+	// succeeded without the gate exemption: for an exempt command on a
+	// descriptor gc cannot use it stays the zero value (Local) while every
+	// seam treats the city as a worker site. Readers that decide behavior
+	// use onWorkerSite(CityPath).
+	Plane controlPlane
 }
 
 // resolveCommandContext resolves city+rig context for commands that accept an
@@ -585,7 +654,7 @@ func resolveCommandContext(args []string) (resolvedContext, error) {
 	// name to resolveContextFromPath's upward city walk (which would silently
 	// target an ambient ancestor city).
 	if classifyCityRef(args[0]) == cityRefName {
-		return resolveCityNameContext(args[0], resolveContextFromPath)
+		return withControlPlane(resolveCityNameContext(args[0], resolveContextFromPath))
 	}
 	return resolveContextFromPath(args[0])
 }
@@ -657,6 +726,15 @@ func resolveContextAllowRemote() (resolvedContext, error) {
 }
 
 func resolveContextAllowRemoteMode(mode contextResolutionMode) (resolvedContext, error) {
+	if mode.advisory {
+		return withAdvisoryControlPlane(resolveContextChain(mode))
+	}
+	return withControlPlane(resolveContextChain(mode))
+}
+
+// resolveContextChain is resolveContextAllowRemoteMode's priority chain,
+// before the city's plane is filled in.
+func resolveContextChain(mode contextResolutionMode) (resolvedContext, error) {
 	// Step 0: explicit remote target. A conflict (remote+local or remote+remote)
 	// surfaces here regardless.
 	if target, handled, err := resolveRemoteTarget(); err != nil {
@@ -815,6 +893,12 @@ func resolveCity() (string, error) {
 }
 
 func resolveContextFromPath(path string) (resolvedContext, error) {
+	return withControlPlane(resolveCityContextFromPath(path))
+}
+
+// resolveCityContextFromPath is resolveContextFromPath before the city's
+// plane is filled in.
+func resolveCityContextFromPath(path string) (resolvedContext, error) {
 	abs := normalizePathForCompare(path)
 	// Validate the explicit target directly before scanning the registry for
 	// rig bindings. An unrelated registered city with a broken/stale config
@@ -1116,11 +1200,13 @@ func rigFromCwd(cityPath string, mode contextResolutionMode) string {
 // rigFromCwdDir matches cwd against registered rigs in a city's config.
 //
 // This is pure decoration: it loads the whole city config to produce a rig
-// name, and an advisory resolution's caller only wants the city path. Skipping
-// it there is what keeps discovery off the repo-cache lock entirely, rather
-// than merely making its acquisition non-blocking.
+// name, and an advisory or city-only resolution's caller only wants the city
+// path. Skipping it for advisory is what keeps discovery off the repo-cache
+// lock entirely, rather than merely making its acquisition non-blocking; for
+// city-only it is the full load (and builtin readiness pass) gc bd used to
+// pay for a rig name it then threw away.
 func rigFromCwdDir(cityPath, cwd string, mode contextResolutionMode) string {
-	if mode.advisory {
+	if mode.advisory || mode.cityOnly {
 		return ""
 	}
 	cfg, err := loadCityConfig(cityPath, io.Discard)
@@ -1685,7 +1771,7 @@ func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverr
 var openStoreFactoryForCity = beads.OpenStoreAtForCity
 
 func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative, longLived bool, nativeOverride *beads.NativeTransportMode) (beads.StoreOpenResult, error) {
-	return openStoreResultAtForCityScoped(storePath, cityPath, cfg, modeOverride, haveMode, authoritative, longLived, false, nativeOverride)
+	return openWorkStoreResultAtForCityScoped(storePath, cityPath, cfg, modeOverride, haveMode, authoritative, longLived, false, nativeOverride)
 }
 
 // openOneShotStoreAtForCityWithConfig is openStoreAtForCityWithConfig for a
@@ -1703,11 +1789,25 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 // Nothing enforces that cfg is fresh; the one-shot entry points
 // (openCityStoreAtWithConfig, oneShotRigStoreOpener) are the only callers.
 func openOneShotStoreAtForCityWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
-	result, err := openStoreResultAtForCityScoped(storePath, cityPath, cfg, gate.ModeUnset, false, false, false, true, nil)
+	result, err := openWorkStoreResultAtForCityScoped(storePath, cityPath, cfg, gate.ModeUnset, false, false, false, true, nil)
 	if err != nil {
 		return nil, err
 	}
 	return result.Store, nil
+}
+
+// openWorkStoreResultAtForCityScoped opens a scope store through the shared
+// open body. A one-shot scope store is a WORK store (the city or a rig
+// ledger); under the split-strict test gate it is handed out as the gate's
+// work view (split_strict_seam.go), and unchanged otherwise. A long-lived open
+// is the controller's: it wraps the store in its cache and hands out views at
+// its own accessors, so it gets the raw store here.
+func openWorkStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative, longLived, oneShotConfig bool, nativeOverride *beads.NativeTransportMode) (beads.StoreOpenResult, error) {
+	result, err := openStoreResultAtForCityScoped(storePath, cityPath, cfg, modeOverride, haveMode, authoritative, longLived, oneShotConfig, nativeOverride)
+	if err == nil && !longLived {
+		result.Store = splitStrictWorkView(result.Store)
+	}
+	return result, err
 }
 
 // openStoreResultAtForCityScoped is the shared open body. oneShotConfig
@@ -1724,6 +1824,26 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 	provider := rawBeadsProviderForScope(scopeRoot, runtimeCityPath)
 	if authoritative {
 		provider = authoritativeBeadsProviderForScope(scopeRoot, runtimeCityPath)
+	}
+	// A one-shot invocation with the memo active opens each scope once; see
+	// invocation_store_memo.go. Long-lived opens never take the memo.
+	var memoEntry *invocationStoreEntry
+	if memo := activeInvocationStoreMemo(); memo != nil && !longLived {
+		memoEntry = memo.entry(invocationStoreKey{scopeRoot: scopeRoot, cityPath: runtimeCityPath, provider: provider, authoritative: authoritative})
+		memoEntry.mu.Lock()
+		defer memoEntry.mu.Unlock()
+		if memoEntry.opened {
+			if cfg == nil {
+				cfg = memoEntry.cfg
+			}
+			mode, nativeTransport := storeOpenModes(cfg, modeOverride, haveMode, nativeOverride)
+			if mode == memoEntry.mode && nativeTransport == memoEntry.nativeTransport {
+				return memoEntry.borrow(cfg), nil
+			}
+			// The same scope asked for under a different write discipline is a
+			// different store: open it unmemoized, as without the memo.
+			memoEntry = nil
+		}
 	}
 	if cfg == nil {
 		loaded, err := loadCityConfigForStoreOpen(runtimeCityPath, provider, nativeOverride)
@@ -1744,14 +1864,7 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 				"update provider in city.toml to a supported value such as %q, or remove the setting to use the default",
 			provider, "doltlite")
 	}
-	mode := resolvedConditionalWritesMode(cfg)
-	if haveMode {
-		mode = modeOverride
-	}
-	nativeTransport := resolvedNativeTransportMode(cfg)
-	if nativeOverride != nil {
-		nativeTransport = *nativeOverride
-	}
+	mode, nativeTransport := storeOpenModes(cfg, modeOverride, haveMode, nativeOverride)
 	// One bd opener, used twice: as the factory's fallback store and as the
 	// WRITE leaf of the proxied split store. They must be the same store, or a
 	// demotion would silently change which store is doing the writing.
@@ -1765,14 +1878,15 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 		return openBdStoreAtWithConfig(scopeRoot, runtimeCityPath, cfg, nativeTransport)
 	}
 	result, err := openStoreFactoryForCity(context.Background(), beads.StoreOpenOptions{
-		ScopeRoot:         scopeRoot,
-		CityPath:          runtimeCityPath,
-		Provider:          provider,
-		PreflightChecker:  newBeadsPreflightChecker(runtimeCityPath, provider, cfg),
-		Logger:            slog.Default(),
-		ConditionalWrites: mode,
-		NativeTransport:   nativeTransport,
-		LongLived:         longLived,
+		ScopeRoot:                  scopeRoot,
+		CityPath:                   runtimeCityPath,
+		Provider:                   provider,
+		PreflightChecker:           newBeadsPreflightChecker(runtimeCityPath, provider, cfg),
+		Logger:                     slog.Default(),
+		ConditionalWrites:          mode,
+		ConditionalWritesDefaulted: conditionalWritesOpenDefaulted(cfg, mode),
+		NativeTransport:            nativeTransport,
+		LongLived:                  longLived,
 		OnConditionalWritesDegraded: func() func(beads.ConditionalWritesDegrade) {
 			flags, resolved := resolvedConditionalWritesFlags(cfg)
 			return lazyConditionalWritesDegradeEmitter(
@@ -1843,8 +1957,31 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 	if observeOpenedStore != nil {
 		result.Store = observeOpenedStore(scopeRoot, result.Store)
 	}
+	if memoEntry != nil {
+		memoEntry.opened = true
+		memoEntry.result = result
+		memoEntry.cfg = cfg
+		memoEntry.mode = mode
+		memoEntry.nativeTransport = nativeTransport
+		return memoEntry.borrow(cfg), nil
+	}
 	result.Store = wrapStoreWithBeadPolicies(result.Store, cfg)
 	return result, nil
+}
+
+// storeOpenModes resolves the conditional-writes mode and the native transport
+// a store open runs under: the caller's boot-latched values when it carries
+// them, otherwise cfg's.
+func storeOpenModes(cfg *config.City, modeOverride gate.Mode, haveMode bool, nativeOverride *beads.NativeTransportMode) (gate.Mode, beads.NativeTransportMode) {
+	mode := resolvedConditionalWritesMode(cfg)
+	if haveMode {
+		mode = modeOverride
+	}
+	nativeTransport := resolvedNativeTransportMode(cfg)
+	if nativeOverride != nil {
+		nativeTransport = *nativeOverride
+	}
+	return mode, nativeTransport
 }
 
 // observeOpenedStore is a test seam at the single store-open point. When set,

@@ -46,7 +46,7 @@
         },
         "prompt_template": {
           "type": "string",
-          "description": "PromptTemplate is the path to this agent's prompt template file.\nRelative paths resolve against the city directory."
+          "description": "PromptTemplate is the path to this agent's prompt template file.\nRelative paths resolve against the directory of the file that declares\nthe agent: the city directory for city.toml, the fragment's directory\nfor an included fragment, and the pack directory for an agent a pack\ndeclares — in pack.toml or in agents/\u003cname\u003e/agent.toml alike. Paths\nprefixed with \"//\" resolve against the city root."
         },
         "nudge": {
           "type": "string",
@@ -176,11 +176,11 @@
         },
         "idle_timeout": {
           "type": "string",
-          "description": "IdleTimeout is the maximum time an agent session can be inactive before\nthe controller kills and restarts it. Duration string (e.g., \"15m\", \"1h\").\nEmpty (default) disables idle checking."
+          "description": "IdleTimeout is the maximum time an agent session can be inactive before\nthe controller kills and restarts it. Duration string (e.g., \"15m\", \"1h\").\nEmpty (default) disables idle checking. Not applied to a [[named_session]]\nwith mode = \"always\": the controller keeps that session running."
         },
         "max_session_age": {
           "type": "string",
-          "description": "MaxSessionAge is the maximum wall-clock lifetime of a single runtime\nsession before the controller preemptively restarts it. Duration string\n(e.g., \"5h\"). Empty (default) disables preemptive restarts. The restart\nis idle-gated: sessions with a pending interaction or an in-progress\nassigned work bead are left alone until they settle.\n\nMotivation: provider SDKs that cache credentials at session start (e.g.,\nClaude Code via Bedrock) can wedge when the underlying token expires if\nthe SDK doesn't re-chain providers. Cycling long-running sessions before\nthe token-expiry window prevents that failure mode without requiring\nupstream provider fixes."
+          "description": "MaxSessionAge is the maximum wall-clock lifetime of a single runtime\nsession before the controller preemptively restarts it. Duration string\n(e.g., \"5h\"). Empty (default) disables preemptive restarts. The restart\nis idle-gated: sessions with a pending interaction or an in-progress\nassigned work bead are left alone until they settle. Not applied to a\n[[named_session]] with mode = \"always\".\n\nMotivation: provider SDKs that cache credentials at session start (e.g.,\nClaude Code via Bedrock) can wedge when the underlying token expires if\nthe SDK doesn't re-chain providers. Cycling long-running sessions before\nthe token-expiry window prevents that failure mode without requiring\nupstream provider fixes."
         },
         "max_session_age_jitter": {
           "type": "string",
@@ -1132,6 +1132,36 @@
       "type": "object",
       "description": "PoolOverride modifies legacy [pool] fields that map to session scaling."
     },
+    "ProgramStatusBinding": {
+      "properties": {
+        "protocol": {
+          "type": "string",
+          "enum": [
+            "osc7501",
+            "none"
+          ],
+          "description": "Protocol declares the status protocol: \"osc7501\" declares, \"none\"\nexplicitly undeclares an inherited declaration, and \"\" inherits."
+        },
+        "app": {
+          "type": "string",
+          "description": "App is the program name the capture reader accepts reports from; reports\nnaming another program are dropped. Empty accepts any program name."
+        },
+        "relay": {
+          "type": "boolean",
+          "description": "Relay wraps the agent in the probe-answering relay, for programs that\nonly report after their support probe is answered. Unset inherits."
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Env is forced into the session environment when capture is armed (for\nexample PI_PROGRAM_STATUS = \"1\"). It is not part of the launch\nfingerprint, so changing it does not relaunch running agents: keys gc\nsets itself (GC_*, BEADS_*, BD_*, GT_ROOT) are rejected. Keys merge per\nlayer; an empty value withholds the variable."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ProgramStatusBinding is a provider's program-status declaration: whether its program reports state over OSC 7501 and how gc captures those reports."
+    },
     "ProviderOption": {
       "properties": {
         "key": {
@@ -1322,6 +1352,10 @@
           "$ref": "#/$defs/UpstreamEnvBinding",
           "description": "UpstreamEnv is this harness's serving-env contract (Phase C — the Upstream\naxis): the env-var NAMES this CLI reads for the model-serving base URL and\ncredential. It lets the resolver render an abstract [upstreams.\u003cname\u003e] onto\nthe right names for this harness, so an upstream preset is portable across\nharnesses (claude → ANTHROPIC_*, codex → OPENAI_*)."
         },
+        "program_status": {
+          "$ref": "#/$defs/ProgramStatusBinding",
+          "description": "ProgramStatus declares whether this harness's program reports its own\nstate over the OSC 7501 Program Status Protocol and how gc captures the\nreports. Inert unless [session] program_status is \"shadow\" or \"on\"."
+        },
         "print_args": {
           "items": {
             "type": "string"
@@ -1342,7 +1376,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "ACPArgs overrides Args when the session transport is ACP.\nWhen nil, Args is used for both tmux and ACP transports."
+          "description": "ACPArgs overrides Args when the session transport is ACP.\nWhen nil, Args is used for both tmux and ACP transports. When any layer\nsets acp_args, args and args_append reach only the CLI launch, except\nschema-managed flags such as a curated model, which become option\ndefaults that both launches carry: when a layer more specific than the\nacp_args layer declares args that reach the CLI launch, the CLI\ntransport is the default, and an explicit ACP session that still drops\nargs prints a warning."
         }
       },
       "additionalProperties": false,

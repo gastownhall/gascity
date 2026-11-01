@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 // Start ensures the worker exists and its runtime is live.
@@ -29,10 +31,11 @@ func (h *SessionHandle) Start(ctx context.Context, by sessionpkg.Actor) (err err
 }
 
 // StartResolved starts or resumes the worker using a caller-supplied runtime
-// command and hints. This is a migration bridge for higher layers that already
+// command and hints, under inc, the incarnation the caller minted under
+// by.Lease. This is a migration bridge for higher layers that already
 // materialize provider-specific runtime config but should still delegate the
 // provider-specific runtime bring-up through the worker boundary.
-func (h *SessionHandle) StartResolved(ctx context.Context, by sessionpkg.Actor, startCommand string, hints runtime.Config) (err error) {
+func (h *SessionHandle) StartResolved(ctx context.Context, by sessionpkg.Actor, inc sessionpkg.Incarnation, startCommand string, hints runtime.Config) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationStartResolved)
 	defer func() { event.finish(err) }()
 
@@ -51,7 +54,7 @@ func (h *SessionHandle) StartResolved(ctx context.Context, by sessionpkg.Actor, 
 	if strings.TrimSpace(startHints.Command) == "" {
 		startHints = h.runtimeHints()
 	}
-	err = h.manager.StartRuntimeOnly(ctx, by, id, command, startHints)
+	err = h.manager.StartRuntimeOnly(ctx, by, id, inc, command, startHints)
 	return err
 }
 
@@ -112,6 +115,36 @@ func (h *SessionHandle) Reset(ctx context.Context) (err error) {
 	}
 	err = h.manager.RequestFreshRestart(id)
 	return err
+}
+
+// ResetFenced is Reset for a request made from inside the session: it records
+// the restart only while the session row still records the caller's
+// incarnation, instanceToken being the caller's GC_INSTANCE_TOKEN
+// (session.Manager.RequestFreshRestartFenced). casOnly reports whether the
+// city records only by compare-and-swap (a v2 city); nil allows the checked
+// write. instanceToken is never logged.
+func (h *SessionHandle) ResetFenced(ctx context.Context, instanceToken string, casOnly func() bool) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationReset)
+	defer func() { event.finish(err) }()
+
+	id := h.currentSessionID()
+	if id == "" {
+		err = fmt.Errorf("%w: reset requires an existing bead-backed session", ErrOperationUnsupported)
+		return err
+	}
+	err = h.manager.RequestFreshRestartFenced(id, instanceToken, casOnly)
+	return err
+}
+
+// CheckResetFenced reports ResetFenced's decision on a fresh read of the
+// session row, writing nothing (session.Manager.CheckFreshRestartFenced).
+// instanceToken is never logged.
+func (h *SessionHandle) CheckResetFenced(_ context.Context, instanceToken string, casOnly func() bool) error {
+	id := h.currentSessionID()
+	if id == "" {
+		return fmt.Errorf("%w: reset requires an existing bead-backed session", ErrOperationUnsupported)
+	}
+	return h.manager.CheckFreshRestartFenced(id, instanceToken, casOnly)
 }
 
 // Stop suspends the worker runtime while preserving conversation state.
@@ -181,6 +214,34 @@ func (h *SessionHandle) Kill(ctx context.Context, by sessionpkg.Actor) (err erro
 	}
 	err = h.manager.Kill(ctx, by, id)
 	return err
+}
+
+// KillFenced is Kill under the session kill fence
+// (session.Manager.KillFencedReport), the operator kill `gc session kill`
+// runs: the caller's lease (by.Lease) covers the fence write, the stop and the
+// asleep sync, and the report says whether a fresh read under the lease found
+// the runtime already gone. warn receives the best-effort warnings.
+func (h *SessionHandle) KillFenced(ctx context.Context, by sessionpkg.Actor, warn func(string)) (report sessionpkg.KillReport, err error) {
+	event := h.beginOperationEvent(ctx, workerOperationKill)
+	defer func() { event.finish(err) }()
+
+	id := h.currentSessionID()
+	if id == "" {
+		return report, nil
+	}
+	kill := func(ctx context.Context, by sessionpkg.Actor) error { return h.manager.Kill(ctx, by, id) }
+	report, err = h.manager.KillFencedReport(ctx, by, id, kill, warn)
+	return report, err
+}
+
+// KillRuntimeGone reports KillFenced's "runtime already gone" verdict taken
+// now, without the lease (session.Manager.KillRuntimeGone).
+func (h *SessionHandle) KillRuntimeGone(ctx context.Context) (bool, error) {
+	id := h.currentSessionID()
+	if id == "" {
+		return false, nil
+	}
+	return h.manager.KillRuntimeGone(ctx, id)
 }
 
 // Close permanently ends the worker session.
@@ -261,13 +322,22 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 		state.Pending = pending
 		return state, nil
 	case sessionpkg.StateActive, sessionpkg.StateAwake:
+		state.Program = h.programStatus(info.SessionName)
 		pending, err := h.Pending(ctx)
 		if err != nil {
 			return State{}, err
 		}
+		// Under the program-status shadow switch, the phase this view
+		// settles on is recorded beside the record (observation); the
+		// phase returned is this view's alone.
+		defer func() { h.manager.RecordObservationShadow(info, observationVerdict(state.Phase)) }()
 		if pending != nil {
 			state.Phase = PhaseBlocked
 			state.Pending = pending
+			return state, nil
+		}
+		if phase, decided := ProgramPhase(state.Program); decided {
+			state.Phase = phase
 			return state, nil
 		}
 		state.Phase = PhaseReady
@@ -314,6 +384,17 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 	return state, nil
 }
 
+// programStatus reads runtime session sessionName's judged program status
+// through the session manager; a reading the runtime cannot take is Unread
+// (ProgramStatusOf).
+func (h *SessionHandle) programStatus(sessionName string) runtime.ProgramStatus {
+	ps, err := h.manager.ProgramStatusByName(sessionName)
+	if err != nil {
+		return runtime.ProgramStatus{}
+	}
+	return ps
+}
+
 // Message sends a user turn to the worker.
 func (h *SessionHandle) Message(ctx context.Context, by sessionpkg.Actor, req MessageRequest) (result MessageResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationMessage)
@@ -333,33 +414,195 @@ func (h *SessionHandle) Message(ctx context.Context, by sessionpkg.Actor, req Me
 	if err != nil {
 		return MessageResult{}, err
 	}
+	if _, held, lookErr := heldDelivery(ctx, req.Redelivery, req.DeliveryKey, h.lookupDelivery(id)); lookErr != nil || held {
+		err = lookErr
+		result = MessageResult{Replayed: held}
+		return result, err
+	}
 	resumeCommand, err := h.startCommand(id)
 	if err != nil {
 		return MessageResult{}, err
 	}
+	if req.DeliveryKey != "" {
+		ctx = runtime.WithNudgeDeliveryKey(ctx, req.DeliveryKey)
+	}
 	outcome, err := h.manager.Submit(ctx, by, id, req.Text, resumeCommand, h.runtimeHints(), submitIntent(req.Delivery))
+	if err != nil && req.QueueBehindPending && errors.Is(err, sessionpkg.ErrPendingInteraction) &&
+		!errors.Is(err, sessionpkg.ErrReplacementNotPrepared) {
+		if err = h.manager.QueueSubmit(id, req.Text); err != nil {
+			return MessageResult{}, err
+		}
+		result = MessageResult{Queued: true}
+		return result, nil
+	}
 	if err != nil {
 		return MessageResult{}, err
 	}
-	result = MessageResult{Queued: outcome.Queued, Deferred: outcome.Deferred}
+	result = MessageResult{Queued: outcome.Queued, Deferred: outcome.Deferred, Interrupt: outcome.Interrupt}
 	return result, nil
 }
 
-// Interrupt soft-stops any in-flight worker turn.
-func (h *SessionHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err error) {
+// Interrupt soft-stops the in-flight worker turn: the one req.Turn names, or
+// with no Turn whatever runs. It is InterruptAs with no actor.
+func (h *SessionHandle) Interrupt(ctx context.Context, req InterruptRequest) error {
+	_, err := h.interrupt(ctx, nil, req)
+	return err
+}
+
+// InterruptAs soft-stops the in-flight worker turn for by, as
+// InterruptRequest documents, and reports whether its OnFailure restart
+// replaced the runtime.
+func (h *SessionHandle) InterruptAs(ctx context.Context, by sessionpkg.Actor, req InterruptRequest) (InterruptResult, error) {
+	return h.interrupt(ctx, &by, req)
+}
+
+// interrupt is InterruptAs for by, nil for no actor.
+func (h *SessionHandle) interrupt(ctx context.Context, by *sessionpkg.Actor, req InterruptRequest) (result InterruptResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationInterrupt)
 	defer func() { event.finish(err) }()
 
+	if err = req.validate(by); err != nil {
+		return InterruptResult{}, err
+	}
+	if req.Turn != "" {
+		return h.interruptTurn(ctx, by, req)
+	}
 	id := h.currentSessionID()
 	if id == "" {
+		if !req.Fence.IsZero() {
+			err = h.noRowFenceMiss()
+		}
+		return InterruptResult{}, err
+	}
+	var unfenced bool
+	if req, unfenced, err = h.unfenceable(id, req); err != nil {
+		return InterruptResult{}, err
+	}
+	if unfenced {
+		ctx = runtime.WithInputFence(ctx, runtime.InputFence{})
+	}
+	opts, err := h.stopTurnOptions(ctx, by, id, req)
+	if err != nil {
+		return InterruptResult{}, err
+	}
+	result.Unfenced = unfenced
+	switch {
+	case opts.ForReplacement || opts.Restart != nil:
+		stopCtx := ctx
+		if !req.Fence.IsZero() {
+			stopCtx = runtime.WithInputFence(ctx, req.Fence)
+		}
+		var report sessionpkg.StopTurnReport
+		report, err = h.manager.StopTurnWith(stopCtx, id, opts)
+		result.Restarted = report.Restarted
+	case !req.Fence.IsZero():
+		err = h.manager.StopTurnFenced(ctx, id, req.Fence)
+	default:
+		if _, bounded := ctx.Deadline(); bounded {
+			// A caller with a deadline (the lane's effect budget) waits for
+			// the session mutation lock only until it.
+			err = h.manager.StopTurnIf(ctx, id, nil)
+		} else {
+			err = h.manager.StopTurn(id)
+		}
+	}
+	err = sessionStopResult(id, err)
+	return result, err
+}
+
+// sessionStopResult is err, from session id's session-scoped stop, in the
+// classes InterruptRequest.Turn documents for session scope. A stop that
+// failed before it sent anything for a cause it names no other sentinel for
+// (session.ErrStopNotSent) is runtime.ErrSessionNotFound when its row,
+// loaded under the session mutation lock, was gone, closed or not a session,
+// as a turn read has it (turnRowError), and ErrInterruptNotSent otherwise: a
+// row that would not load, or an actor refused a restart.
+func sessionStopResult(id string, err error) error {
+	switch {
+	case !errors.Is(err, sessionpkg.ErrStopNotSent):
+		return err
+	case TurnSessionGone(err):
+		return fmt.Errorf("interrupting session %s: %w: %w", id, runtime.ErrSessionNotFound, err)
+	}
+	return fmt.Errorf("interrupting session %s: %w: %w", id, ErrInterruptNotSent, err)
+}
+
+// unfenceable is req with its fence dropped, and true, when req allows it
+// (AllowUnfenced) and session id's runtime cannot fence the session; else
+// req as it is. A fencing that cannot be read is an error wrapping
+// ErrInterruptNotSent.
+func (h *SessionHandle) unfenceable(id string, req InterruptRequest) (InterruptRequest, bool, error) {
+	if req.Fence.IsZero() || !req.AllowUnfenced {
+		return req, false, nil
+	}
+	fencing, err := h.manager.InputFencing(id)
+	if err != nil {
+		return req, false, fmt.Errorf("interrupting session %s: reading its input fencing: %w: %w", id, ErrInterruptNotSent, err)
+	}
+	if fencing != runtime.InputFencingNone {
+		return req, false, nil
+	}
+	req.Fence = runtime.InputFence{}
+	return req, true, nil
+}
+
+// stopTurnOptions are the session stop's options for req's policy: a
+// replacement, refused where the session's turn is not replaced by an
+// interrupt (replacementRefusal), and a restart on failure
+// (restartOnFailure). A plain interrupt has none. What it cannot read is an
+// error wrapping ErrInterruptNotSent.
+func (h *SessionHandle) stopTurnOptions(ctx context.Context, by *sessionpkg.Actor, id string, req InterruptRequest) (sessionpkg.StopTurnOptions, error) {
+	var opts sessionpkg.StopTurnOptions
+	if req.ForReplacement {
+		plan, err := h.planTurnsWithin(ctx)
+		if err != nil {
+			return opts, fmt.Errorf("interrupting session %s for a replacement: %w: %w", id, ErrInterruptNotSent, err)
+		}
+		if err := replacementRefusal(plan.caps.Replace, plan.info.SessionName); err != nil {
+			return opts, err
+		}
+		opts.ForReplacement = true
+	}
+	restart, err := h.restartOnFailure(by, id, req.OnFailure)
+	if err != nil {
+		return opts, err
+	}
+	opts.Restart = restart
+	return opts, nil
+}
+
+// restartOnFailure is the session stop's or turn interrupt's restart for an
+// interrupt whose policy is onFailure: for InterruptOnFailureRestart, one by
+// by with session id's start command and hints; for any other policy, none
+// (nil). A start command it cannot read is an error wrapping
+// ErrInterruptNotSent.
+func (h *SessionHandle) restartOnFailure(by *sessionpkg.Actor, id string, onFailure InterruptOnFailure) (*sessionpkg.StopTurnRestart, error) {
+	if onFailure != InterruptOnFailureRestart {
+		return nil, nil
+	}
+	resume, err := h.startCommand(id)
+	if err != nil {
+		return nil, fmt.Errorf("interrupting session %s, restarting it on failure: %w: %w", id, ErrInterruptNotSent, err)
+	}
+	return &sessionpkg.StopTurnRestart{By: *by, ResumeCommand: resume, Hints: h.runtimeHints()}, nil
+}
+
+// replacementRefusal is why an interrupt for a replacement
+// (InterruptRequest.ForReplacement) cannot run on a session whose turn is
+// replaced as replace says, or nil: only an interrupt replaces it there
+// (interrupt or interrupt_reset). A restart replaces it otherwise, and none
+// cannot be replaced at all.
+func replacementRefusal(replace TurnReplace, session string) error {
+	switch replace {
+	case TurnReplaceInterrupt, TurnReplaceInterruptReset:
 		return nil
 	}
-	err = h.manager.StopTurn(id)
-	return err
+	return fmt.Errorf("interrupting %s for a replacement, which it takes as %q: %w", session, replace, sessionpkg.ErrTurnInterruptUnsupported)
 }
 
 // Nudge sends a best-effort redirect message to the worker.
 func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req NudgeRequest) (result NudgeResult, err error) {
+	ctx = nudgeDeliveryContext(ctx, req)
 	event := h.beginOperationEvent(ctx, workerOperationNudge)
 	defer func() {
 		event.payload.Delivered = boolPointer(result.Delivered)
@@ -373,9 +616,27 @@ func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req Nudg
 		err = fmt.Errorf("nudge text is required")
 		return NudgeResult{}, err
 	}
+	// Refuse a malformed fenced request, or one with no session row to
+	// deliver into, before ensureSessionID, which may create a session row.
+	if err = h.fencedNudgeRefusal(req); err != nil {
+		return NudgeResult{}, err
+	}
 	id, err := h.ensureSessionID()
 	if err != nil {
 		return NudgeResult{}, err
+	}
+	ctx, unfenced, err := fencedNudgeContext(ctx, req, func() (runtime.InputFencing, error) { return h.manager.InputFencing(id) })
+	if err != nil {
+		return NudgeResult{}, err
+	}
+	defer func() { result.Unfenced = unfenced && result.Delivered && !result.Replayed }()
+	receipt, held, err := heldDelivery(ctx, req.Redelivery, req.DeliveryKey, h.lookupDelivery(id))
+	if err != nil {
+		return NudgeResult{}, err
+	}
+	if held {
+		result = NudgeResult{Delivered: true, Replayed: true, Receipt: receipt}
+		return result, nil
 	}
 	resumeCommand, err := h.startCommand(id)
 	if err != nil {
@@ -384,7 +645,7 @@ func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req Nudg
 	switch req.Delivery {
 	case "", NudgeDeliveryDefault:
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
-			delivered, err := h.manager.SendLiveOnly(ctx, id, req.Text)
+			delivered, err := h.manager.SendLiveOnly(ctx, id, req.Text, h.runtimeHints().ProcessNames)
 			if err != nil {
 				return NudgeResult{}, err
 			}
@@ -399,7 +660,7 @@ func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req Nudg
 		return result, nil
 	case NudgeDeliveryImmediate:
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
-			delivered, err := h.manager.SendImmediateLiveOnly(ctx, id, req.Text)
+			delivered, err := h.manager.SendImmediateLiveOnly(ctx, id, req.Text, h.runtimeHints().ProcessNames)
 			if err != nil {
 				return NudgeResult{}, err
 			}
@@ -414,7 +675,7 @@ func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req Nudg
 		return result, nil
 	case NudgeDeliveryWaitIdle:
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
-			delivered, err := h.manager.TryWaitIdleNudgeLiveOnly(ctx, id, req.Source, req.Text)
+			delivered, err := h.manager.TryWaitIdleNudgeLiveOnly(ctx, id, req.Source, req.Text, h.runtimeHints().ProcessNames)
 			if err != nil {
 				return NudgeResult{}, err
 			}
@@ -437,10 +698,36 @@ func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req Nudg
 	}
 }
 
-// sentNudgeResult: a held session queued the nudge rather than taking it.
+// lookupDelivery is session id's delivery lookup for heldDelivery.
+func (h *SessionHandle) lookupDelivery(id string) func(context.Context, string) (runtime.DeliveryReceipt, bool, error) {
+	return func(ctx context.Context, key string) (runtime.DeliveryReceipt, bool, error) {
+		return h.manager.LookupDelivery(ctx, id, key)
+	}
+}
+
+// fencedNudgeRefusal is validateFencedNudge's refusal of req, or, for a
+// fenced req to a handle with no session row, a miss finding it absent: no
+// incarnation exists for the fence to name.
+func (h *SessionHandle) fencedNudgeRefusal(req NudgeRequest) error {
+	if err := validateFencedNudge(req); err != nil || req.Fence.IsZero() {
+		return err
+	}
+	if h.currentSessionID() == "" {
+		return h.noRowFenceMiss()
+	}
+	return nil
+}
+
+// noRowFenceMiss is a fenced input's miss on a handle with no session row,
+// named as the caller names the session: by explicit name, alias or template.
+func (h *SessionHandle) noRowFenceMiss() error {
+	return &runtime.FenceMismatchError{Session: firstNonEmpty(h.session.ExplicitName, h.session.Alias, h.session.Template), Found: runtime.FenceFoundAbsent}
+}
+
+// sentNudgeResult: a session that could not take the nudge now queued it.
 func sentNudgeResult(outcome sessionpkg.SubmitOutcome) NudgeResult {
 	if outcome.Queued {
-		return NudgeResult{Undelivered: NudgeQueuedHeld}
+		return NudgeResult{Undelivered: NudgeQueued}
 	}
 	return NudgeResult{Delivered: true}
 }
@@ -515,20 +802,7 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	if firstProviderSessionStart(info.State, pr.Metadata) &&
 		h.session.Resume.SessionIDFlag != "" &&
 		strings.TrimSpace(info.SessionKey) != "" {
-		command := strings.TrimSpace(info.Command)
-		if command == "" {
-			command = strings.TrimSpace(h.session.Command)
-		}
-		if command == "" {
-			command = strings.TrimSpace(info.Provider)
-		}
-		if command == "" {
-			command = strings.TrimSpace(h.session.Provider)
-		}
-		if command == "" {
-			return "", fmt.Errorf("%w: command is required for first start", ErrHandleConfig)
-		}
-		return command + " " + h.session.Resume.SessionIDFlag + " " + info.SessionKey, nil
+		return startCommandWithSessionID(info, h.session)
 	}
 	resumeInfo := info
 	if command := strings.TrimSpace(h.session.Command); command != "" {
@@ -546,7 +820,36 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	if resumeCommand := strings.TrimSpace(h.session.Resume.ResumeCommand); resumeCommand != "" {
 		resumeInfo.ResumeCommand = resumeCommand
 	}
+	isClaude := strings.Contains(strings.ToLower(strings.TrimSpace(resumeInfo.Provider)), "claude")
+	probePaths := h.searchPaths
+	if len(probePaths) == 0 || !isClaude {
+		probePaths = DefaultSearchPaths()
+	}
+	if dir := strings.TrimSpace(h.session.Env["CLAUDE_CONFIG_DIR"]); isClaude && filepath.IsAbs(dir) {
+		probePaths = MergeSearchPaths(append(append([]string(nil), probePaths...), filepath.Join(dir, "projects")))
+	}
+	present, probeable := workertranscript.HasKeyedTranscript(probePaths, resumeInfo.Provider, resumeInfo.WorkDir, resumeInfo.SessionKey)
+	if probeable && !present && h.session.Resume.SessionIDFlag != "" {
+		return startCommandWithSessionID(resumeInfo, h.session)
+	}
 	return sessionpkg.BuildResumeCommand(resumeInfo), nil
+}
+
+func startCommandWithSessionID(info sessionpkg.Info, spec SessionSpec) (string, error) {
+	command := strings.TrimSpace(info.Command)
+	if command == "" {
+		command = strings.TrimSpace(spec.Command)
+	}
+	if command == "" {
+		command = strings.TrimSpace(info.Provider)
+	}
+	if command == "" {
+		command = strings.TrimSpace(spec.Provider)
+	}
+	if command == "" {
+		return "", fmt.Errorf("%w: command is required to start session", ErrHandleConfig)
+	}
+	return command + " " + spec.Resume.SessionIDFlag + " " + info.SessionKey, nil
 }
 
 func firstProviderSessionStart(state sessionpkg.State, metadata map[string]string) bool {
@@ -608,5 +911,21 @@ func submitIntent(intent DeliveryIntent) sessionpkg.SubmitIntent {
 		return sessionpkg.SubmitIntentInterruptNow
 	default:
 		return sessionpkg.SubmitIntentDefault
+	}
+}
+
+// observationVerdict is the shadow observation token for a phase this view
+// settled on for a live session: Busy is busy, Blocked pending, and Ready
+// idle; any other phase reads indeterminate.
+func observationVerdict(phase Phase) runtime.ProgramVerdict {
+	switch phase {
+	case PhaseBusy:
+		return runtime.ProgramVerdictBusy
+	case PhaseBlocked:
+		return runtime.ProgramVerdictPending
+	case PhaseReady:
+		return runtime.ProgramVerdictIdle
+	default:
+		return runtime.ProgramVerdictIndeterminate
 	}
 }

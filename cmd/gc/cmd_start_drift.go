@@ -220,6 +220,12 @@ var restartHelpersHook = defaultRestartHelpers
 // readSupervisorExePathHook lets tests avoid platform-specific /proc lookups.
 var readSupervisorExePathHook = readSupervisorExePath
 
+// readProcExeLinkHook reads the raw /proc/<pid>/exe link target.
+// Overridable for tests.
+var readProcExeLinkHook = func(pid int) (string, error) {
+	return os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
+}
+
 // driftRestartLoopMax / driftRestartLoopWindow define the loop-guard
 // budget: at most 3 supervisor auto-restarts may occur within any
 // 60-second window. Persistence is via driftRestartHistoryPath so the
@@ -513,11 +519,20 @@ func printUnreadableSupervisorRestartError(stderr io.Writer, pid int, exeErr err
 // suffix because the on-disk path is what the auto-restart needs to
 // spawn — the new bytes already live at the un-suffixed path.
 func readSupervisorExePath(pid int) (string, error) {
-	target, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
+	path, _, err := readSupervisorExeLink(pid)
+	return path, err
+}
+
+// readSupervisorExeLink is readSupervisorExePath plus whether the kernel
+// marked the link target " (deleted)": the file the process was started
+// from has since been unlinked or replaced.
+func readSupervisorExeLink(pid int) (string, bool, error) {
+	target, err := readProcExeLinkHook(pid)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	return strings.TrimSuffix(target, " (deleted)"), nil
+	path, deleted := strings.CutSuffix(target, " (deleted)")
+	return path, deleted, nil
 }
 
 // readDaemonAutoRestart loads city.toml's [daemon].auto_restart_on_drift

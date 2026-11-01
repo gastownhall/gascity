@@ -18,10 +18,7 @@ package main
 
 import (
 	"errors"
-	"fmt"
-	"io"
 	"strings"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
@@ -124,26 +121,6 @@ func storeLayer[T any](store beads.Store) (T, bool) {
 func storeBackedBy[T any](store beads.Store) bool {
 	_, ok := storeLayer[T](store)
 	return ok
-}
-
-// closeBeadUnlessLateWork is closeBead for a close a gate decided: it refuses
-// when the close-time re-read finds work the gate's read did not, or cannot
-// read a local leg. keep is the gate's own filter (the drain-finalize gate
-// excludes the seat's own drain step).
-func closeBeadUnlessLateWork(store beads.Store, sw *SeatWork, info sessionpkg.Info, reason string, now time.Time, stderr io.Writer, keep func(beads.Store, beads.Bead) (bool, error)) bool {
-	if stderr == nil {
-		stderr = io.Discard
-	}
-	late, err := lateSeatWork(sw.Legs(), releaseScope(info, sw.Legs().cfg), seatWorkStatuses, keep)
-	switch {
-	case err != nil:
-		fmt.Fprintf(stderr, "session beads: close of %s refused: re-reading its work: %v\n", info.ID, err) //nolint:errcheck
-		return false
-	case len(late) > 0:
-		fmt.Fprintf(stderr, "session beads: close of %s refused: %s was assigned to it since this tick's read\n", info.ID, late[0].bead.ID) //nolint:errcheck
-		return false
-	}
-	return closeBead(store, sw, info, reason, now, stderr)
 }
 
 // appendUniqueSeatWork adds the rows of more that rows does not already hold.

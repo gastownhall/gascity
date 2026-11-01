@@ -12,9 +12,9 @@ import (
 )
 
 // updateLedgerDoc regenerates the TESTING.md checked runtime provider block
-// from the Go ledger when set. Run:
+// from the Go ledger when set. Run, from the repository root:
 //
-//	go test ./internal/testutil/providerledger -run TestCatalogMatchesProductionWiringAndDocumentation -update
+//	GC_TEST_REPO_ROOT="$PWD" bazel run //internal/testutil/providerledger:providerledger_test -- -test.run='^TestCatalogMatchesProductionWiringAndDocumentation$' -update
 var updateLedgerDoc = flag.Bool("update", false, "regenerate the TESTING.md checked runtime provider ledger block from the Go ledger")
 
 func TestValidateRejectsInvalidContractClaims(t *testing.T) {

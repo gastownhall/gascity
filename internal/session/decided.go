@@ -100,10 +100,16 @@ const (
 	CommitClosed
 	// CommitContended refused: the conditional write lost every attempt.
 	CommitContended
+	// CommitKillFenced refused a close: a fresh `gc session kill` fence owns
+	// the row (CommitClose).
+	CommitKillFenced
+	// CommitLeaseLost refused a close: the row no longer records the
+	// closer's lease (CommitClose, CommitUnder).
+	CommitLeaseLost
 )
 
 func (r CommitResult) String() string {
-	if names := []string{"", "landed", "moved", "closed", "contended"}; int(r) < len(names) {
+	if names := []string{"", "landed", "moved", "closed", "contended", "kill-fenced", "lease-lost"}; int(r) < len(names) {
 		return names[r]
 	}
 	return fmt.Sprintf("CommitResult(%d)", r)

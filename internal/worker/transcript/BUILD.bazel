@@ -11,6 +11,7 @@ go_library(
 go_test(
     name = "transcript_test",
     srcs = [
+        "claude_underscore_test.go",
         "discovery_test.go",
         "testenv_import_test.go",
     ],

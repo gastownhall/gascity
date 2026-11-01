@@ -14,7 +14,7 @@ import (
 // sessionStartAutoHandoffInjection fetches and hands to ArchiveInjectedAutoHandoffs.
 func sendInjectableAutoHandoff(t *testing.T, p *Provider, subject string) mail.Message {
 	t.Helper()
-	msg, err := p.SendHandoff(mail.HandoffIntent{
+	msg, _, err := p.SendHandoff(mail.HandoffIntent{
 		From:     "worker",
 		To:       "worker",
 		Subject:  subject,
@@ -73,8 +73,10 @@ func TestArchiveInjectedAutoHandoffMarksReadRetainsAddressable(t *testing.T) {
 	// Acceptance 1: still addressable through the Provider surface (recoverable
 	// via gc mail show / bd show), exactly like retention-swept read mail — not
 	// treated as user-removed.
-	if _, err := p.Get(auto.ID); err != nil {
+	if got, err := p.Get(auto.ID); err != nil {
 		t.Errorf("p.Get(injected auto-handoff) = %v, want addressable", err)
+	} else if !got.Read {
+		t.Errorf("p.Get(injected auto-handoff).Read = false, want it marked read")
 	}
 	if _, err := p.Read(auto.ID); err != nil {
 		t.Errorf("p.Read(injected auto-handoff) = %v, want addressable", err)

@@ -177,7 +177,7 @@ func assertE2c3SessionMaterializationFailures(t *testing.T, cityPath string) {
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents:    []config.Agent{*agentCfg},
 	}
-	if _, err := materializeSessionForAgentConfig(cityPath, cfg, agentStore, agentCfg); err == nil || err.Error() != e2c3ProviderConstructionFailure {
+	if _, err := materializeSessionForAgentConfig(cityPath, cfg, agentStore, agentCfg, io.Discard); err == nil || err.Error() != e2c3ProviderConstructionFailure {
 		t.Fatalf("agent-session materialization error = %v, want %q", err, e2c3ProviderConstructionFailure)
 	}
 	assertE2c3NoSessionBeads(t, agentStore, "agent-session provider failure")

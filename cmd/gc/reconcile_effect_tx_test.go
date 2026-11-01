@@ -123,7 +123,7 @@ func newCloseTxKit(t *testing.T) *txKit {
 
 func newTxKitOn(t *testing.T, m, backing beads.Store) *txKit {
 	t.Helper()
-	if err := beads.StampOpenedStore(m, "MemStore", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(m, "MemStore", gate.Require, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	cache := beads.NewCachingStoreForTest(backing, nil)
@@ -286,7 +286,7 @@ func TestTxCallIsGatedLikeAWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-inCall
-	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 2)
+	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 1)
 	clk.Advance(time.Minute)
 	s := receive(t, posted)
 	close(release) // what it returns carries no facts, so nothing is posted late
@@ -571,6 +571,61 @@ func TestTxReadsTheRuntimeEachAttempt(t *testing.T) {
 	}
 }
 
+// factsCall is a Call result carrying facts (callFacts).
+type factsCall struct{}
+
+func (factsCall) facts() effectFacts {
+	return effectFacts{Events: []events.Event{{Type: events.SessionStopped, Subject: "kept"}}}
+}
+
+// Kills a Call's facts dropped by a later refusal (the C5c2 delta review):
+// facts a Call result carries are merged as it returns, so the next
+// section's refusal keeps them.
+func TestTxCallFactsSurviveALaterRefusal(t *testing.T) {
+	k := newTxKit(t)
+	spec := effectSpec{sections: []section{
+		called(0, section{Decide: func(txView) txStep { return txStep{Pass: struct{}{}} }}, func(context.Context, txCaps, struct{}) (factsCall, error) { return factsCall{}, nil }),
+		{Decide: func(txView) txStep { return txStep{Refuse: "later"} }},
+	}}
+	s := k.run(context.Background(), spec)
+	if s.Cause != "later" || len(s.Facts.Events) != 1 || s.Facts.Events[0].Subject != "kept" {
+		t.Fatalf("settlement %+v, want refused later with the Call's facts kept", s)
+	}
+}
+
+// Kills a Moved hook that may write on a row that moved, or that is not
+// asked (v5 S2's lost commit): a moved premise runs the hook, whose refusal
+// stands, whose write fails the effect with nothing written, and whose
+// "not mine" is the premise's refusal.
+func TestTxMovedHook(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		step  txStep
+		ok    bool
+		cause string
+	}{
+		{"refuses", txStep{Refuse: "mine"}, true, "mine"},
+		{"writes", txStep{Write: session.MetadataPatch{txKeyA: "1"}}, true, causeStep},
+		{"writes a cell", txStep{Class: session.CellInfo(session.Info{}, session.ActorController, session.DispEvent{Kind: session.EvQuarantine, Until: gatherNow.Add(time.Hour)}, gatherNow)}, true, causeStep},
+		{"writes a title", txStep{Title: new(string)}, true, causeStep},
+		{"writes a type", txStep{Type: new(string)}, true, causeStep},
+		{"writes a label", txStep{AddLabels: []string{"x"}}, true, causeStep},
+		{"closes", txStep{Terminal: session.MetadataPatch{"state": "closed"}}, true, causeStep},
+		{"ends the effect", txStep{Done: true}, true, causeStep},
+		{"ends after its Call", txStep{Last: true}, true, causeStep},
+		{"declines", txStep{}, false, causePremise},
+	} {
+		k := newTxKit(t)
+		k.outside("generation", "2")
+		var seen []string
+		sec := section{Decide: mark(txKeyB), Moved: func(_ txView, _ session.Info, moved []string) (txStep, bool) { seen = moved; return c.step, c.ok }}
+		s := k.run(context.Background(), effectSpec{needs: needs{NameLock: true}, sections: []section{sec}})
+		if s.Cause != c.cause || len(seen) == 0 || k.meta(txKeyA) != "" || k.meta(txKeyB) != "" {
+			t.Fatalf("%s: settlement %+v moved %v, want %s with nothing written", c.name, s, seen, c.cause)
+		}
+	}
+}
+
 // Kills a premise that checks too little: a fresh row that moved its
 // incarnation, any lifecycle fact (a wake_request at the same generation),
 // its runtime name, or closed, refuses without Decide; after a section
@@ -633,9 +688,13 @@ func TestTxPremiseComparesTheRegistryFacts(t *testing.T) {
 		{"after a start: the current bead", []string{session.CurrentBeadIDKey, "b-1"}, false, []callKind{callStart}, true},
 		{"after a start: the current claim", []string{beadmeta.CurrentClaimBeadIDMetadataKey, "b-1"}, false, []callKind{callStart}, false},
 		{"after a start: lifecycle", []string{"state_reason", "x"}, false, []callKind{callStart}, true},
-		{"after a stop: a session key", []string{"session_key", "k2"}, false, []callKind{callStop}, true},
-		{"after a stop: detached_at", []string{"detached_at", rowAt(0)}, false, []callKind{callStop}, true},
-		{"after a start, then a stop: a session key", []string{"session_key", "k2"}, false, []callKind{callStart, callStop}, true},
+		{"after a stop: an agent's heartbeat", []string{"held_until", rowAt(time.Hour)}, false, []callKind{callStop}, false},
+		{"after a stop: its ack", []string{"drain_ack_at", rowAt(0)}, false, []callKind{callStop}, false},
+		{"after a stop: a session key", []string{"session_key", "k2"}, false, []callKind{callStop}, false},
+		{"after a stop: the operator's intent", []string{"sleep_intent", "user-hold"}, false, []callKind{callStop}, true},
+		{"after a stop: a wake request", []string{"wake_request", "explicit"}, false, []callKind{callStop}, true},
+		{"after a stop: the state", []string{"state_reason", "x"}, false, []callKind{callStop}, true},
+		{"after a start, then a stop: a session key", []string{"session_key", "k2"}, false, []callKind{callStart, callStop}, false},
 	} {
 		k := newTxKit(t)
 		spec := effectSpec{sections: []section{{Decide: mark(txKeyA)}}}
@@ -771,7 +830,7 @@ func TestExecutorSettlesAnAbandonedEffectByItsLatch(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	waitTimersAt(t, clk, plannerT0.Add(30*time.Second), 4)
+	waitTimersAt(t, clk, plannerT0.Add(30*time.Second), 2)
 	clk.Advance(30 * time.Second)
 	for range latches {
 		switch s := receive(t, posted); s.Key.ID {
@@ -827,7 +886,7 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 			t.Errorf("%s: only the create has a body, and a body declares no needs or sections", kind)
 		}
 	}
-	if want := []string{intentAdopt, intentBaseline, intentClose, intentCreate, intentDrainBegin, intentDrainBeginFresh, intentDrainCancel, intentDrainVoid, intentRekey, intentRollback, intentRowHeal, intentRowHealFresh, intentStart}; !slices.Equal(running, want) {
+	if want := []string{intentAdopt, intentBaseline, intentClose, intentCreate, intentDrainBegin, intentDrainBeginFresh, intentDrainCancel, intentDrainVoid, intentDriftRelaunch, intentDriftRepair, intentDriftRestart, intentLiveApply, intentMarkerClear, intentRekey, intentRollback, intentRowHeal, intentRowHealFresh, intentRowMetadata, intentRuntimeAlias, intentSignal, intentSignalAck, intentSignalFresh, intentStart, intentStop, intentZombie}; !slices.Equal(running, want) {
 		t.Fatalf("running kinds %v, want %v", running, want)
 	}
 	p := &effectPass{held: heldCaps{create: &createPass{}, creates: &createEffects{}}}
@@ -847,8 +906,13 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 // runner, the adopt the read-only stores its prepare reads.
 var effectCapGrants = map[string]caps{
 	intentCreate: capCreate, intentAdopt: capReadStores, intentStart: capReadStores | capProviderStart | capEpisode | capRetire,
-	intentRollback: capProviderStart | capRetire,
-	intentClose:    capReadStores | capRelease,
+	intentRollback:    capProviderStart | capRetire,
+	intentClose:       capReadStores | capRelease,
+	intentRowMetadata: capReadStores, intentRuntimeAlias: capProviderStart, // the alias probe's store; the runtime alias sync
+	intentMarkerClear:  capProviderStart,                                                                                         // the pinned skip's runtime marker clear (mc-nm6yt)
+	intentStop:         capReadStores | capProviderStop | capRelease,                                                             // an execution-stalled stop gives back its claim in its Call (v5.10x)
+	intentSignalFresh:  capReadStores,                                                                                            // an idle-respawn signal's claim revalidation (C6d)
+	intentDriftRestart: capReadStores | capProviderStop, intentDriftRelaunch: capReadStores | capProviderStart | capProviderStop, // the prepare's stores; the relaunch; the stop
 }
 
 // Kills a fact the planner drops: every effectFacts field, set, is consumed
@@ -870,12 +934,26 @@ func TestApplyFactsConsumesEveryField(t *testing.T) {
 	savedQ := recordAgentQuarantine
 	recordAgentQuarantine = func(_ context.Context, agent string) { quarantined = append(quarantined, agent) }
 	t.Cleanup(func() { recordAgentQuarantine = savedQ })
+	var stops []string
+	savedS := recordAgentStop
+	recordAgentStop = func(_ context.Context, name, identity, reason string, _ error) {
+		stops = append(stops, name+"/"+identity+"/"+reason)
+	}
+	t.Cleanup(func() { recordAgentStop = savedS })
+	var idleKills []string
+	savedI := recordAgentIdleKill
+	recordAgentIdleKill = func(_ context.Context, agent string) { idleKills = append(idleKills, agent) }
+	t.Cleanup(func() { recordAgentIdleKill = savedI })
 	f := effectFacts{
 		Events:      []events.Event{{Type: "session.test"}},
 		Transition:  &drainTransition{Name: "s", Reason: "idle", Transition: "cancel"},
 		Work:        &workVerdict{BeadID: "gc-w1", Refused: true},
 		Noted:       &notedRuntime{Name: "s1", At: plannerT0},
 		Quarantined: "worker-1",
+		AliasOwed:   &rowKey{Leg: rowLeg, ID: "gc-a"},
+		Stopped:     &agentStop{Name: "s1", Identity: "worker"},
+		Classified:  &classifiedRuntime{Key: rowKey{ID: "gc-1"}, Token: "tok", Crash: &events.Event{Type: events.SessionCrashed}, Recycle: true},
+		IdleKilled:  "worker",
 	}
 	p.applyFacts(f, plannerT0)
 	consumed := map[string]bool{
@@ -884,6 +962,10 @@ func TestApplyFactsConsumesEveryField(t *testing.T) {
 		"Work":        p.backoff.Snapshot()[workBackoffKey("gc-w1")].Cause == createStageWorktree,
 		"Noted":       cache.Snapshot().ByName["s1"].Listed.Value == ObsYes,
 		"Quarantined": slices.Equal(quarantined, []string{"worker-1"}),
+		"AliasOwed":   p.aliasOwed[rowKey{Leg: rowLeg, ID: "gc-a"}],
+		"Stopped":     slices.Equal(stops, []string{"s1/worker/drain-ack"}),
+		"Classified":  p.classified[rowKey{ID: "gc-1"}].Token == "tok" && p.classified[rowKey{ID: "gc-1"}].Crash != nil && p.classified[rowKey{ID: "gc-1"}].Recycle,
+		"IdleKilled":  slices.Equal(idleKills, []string{"worker"}),
 	}
 	ft := reflect.TypeOf(f)
 	for i := range ft.NumField() {
@@ -934,7 +1016,7 @@ func (b racingBacking) Get(id string) (beads.Bead, error) {
 func TestTxRetriesAFencedRefresh(t *testing.T) {
 	k := newTxKit(t)
 	m := beads.NewMemStoreFrom(0, []beads.Bead{poolRow("gc-1", "worker", 1, "asleep")}, nil)
-	if err := beads.StampOpenedStore(m, "MemStore", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(m, "MemStore", gate.Require, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	var cache *beads.CachingStore
@@ -1050,13 +1132,15 @@ func TestOnlyStagingCodeAssignsTheStagingSeam(t *testing.T) {
 // Call's handles (provider start, routing, kill) go on txCaps alone. The one
 // write handle an around holds is the close's release (capRelease), for the
 // post-close cascade it runs only once its close landed (settlement.Closed),
-// as runTx's design names; only the close's spec grants it.
+// as runTx's design names; only the close's spec grants it to an around. The
+// stop holds it too, for its Call alone (an execution-stalled stop gives back
+// its claim under the name lock, v5.10x), and has no around.
 func TestAroundCapsAreScoped(t *testing.T) {
 	if got := reflect.TypeOf(section{}.probe).In(1); got != reflect.TypeFor[effectReads]() {
 		t.Errorf("a Probe holds %v, want effectReads alone", got)
 	}
 	for kind, spec := range effectSpecs {
-		if spec.caps&capRelease != 0 && kind != intentClose {
+		if spec.caps&capRelease != 0 && kind != intentClose && (kind != intentStop || spec.around != nil) {
 			t.Errorf("%s holds the close's release handles", kind)
 		}
 	}
@@ -1489,6 +1573,55 @@ func TestLandedCauseOnlyFromTheWritingStep(t *testing.T) {
 	}}
 	if s := newTxKit(t).run(context.Background(), effectSpec{sections: []section{writes}}); s.Outcome != settledLanded || s.Cause != causeHeld {
 		t.Fatalf("settlement %+v, want landed with cause %q", s, causeHeld)
+	}
+}
+
+// Kills a step's title or label deltas dropped, or written apart from its
+// metadata (v5 M1; C7d): a step's Title, AddLabels and RemoveLabels land
+// with its Write, in its one CAS.
+func TestTxWritesTitleAndLabelsWithTheMetadata(t *testing.T) {
+	k := newTxKit(t)
+	if err := k.backing.Update(k.it.Key.ID, beads.UpdateOpts{Labels: []string{"agent:old"}}); err != nil {
+		t.Fatal(err)
+	}
+	title := "worker-1"
+	spec := effectSpec{sections: []section{{Decide: func(txView) txStep {
+		return txStep{Write: session.MetadataPatch{txKeyA: "1"}, Title: &title, AddLabels: []string{"agent:new"}, RemoveLabels: []string{"agent:old"}}
+	}}}}
+	if s := k.run(context.Background(), spec); s.Outcome != settledLanded {
+		t.Fatalf("settlement %+v, want landed", s)
+	}
+	b, err := k.backing.Get(k.it.Key.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata[txKeyA] != "1" || b.Title != title || !slices.Contains(b.Labels, "agent:new") || slices.Contains(b.Labels, "agent:old") {
+		t.Fatalf("row title %q labels %v meta %v, want the title and label deltas with the write", b.Title, b.Labels, b.Metadata)
+	}
+}
+
+// labelRefusingBacking is a backing whose conditional write cannot guard
+// labels, as a FileStore's (LL1).
+type labelRefusingBacking struct{ simBacking }
+
+func (b labelRefusingBacking) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	if len(opts.Labels)+len(opts.RemoveLabels) > 0 {
+		return &beads.ConditionalUpdateFieldUnsupportedError{Field: "labels"}
+	}
+	return b.MemStore.UpdateIfMatch(id, rev, opts)
+}
+
+// Kills a label write the store cannot guard settled as a plain failure
+// (C7d-1 review should-fix 4): it refuses with its own cause, which A7's
+// deferral reads, and writes nothing.
+func TestTxRefusesUnguardedLabels(t *testing.T) {
+	m := beads.NewMemStoreFrom(0, []beads.Bead{poolRow("gc-1", "worker", 1, "asleep")}, nil)
+	k := newTxKitOn(t, m, labelRefusingBacking{simBacking{m}})
+	spec := effectSpec{sections: []section{{Decide: func(txView) txStep {
+		return txStep{Write: session.MetadataPatch{txKeyA: "1"}, AddLabels: []string{"agent:new"}}
+	}}}}
+	if s := k.run(context.Background(), spec); s.Outcome != settledRefused || s.Cause != causeLabelsUnguarded || k.meta(txKeyA) != "" {
+		t.Fatalf("settlement %+v, a=%q; want refused with cause %q and nothing written", s, k.meta(txKeyA), causeLabelsUnguarded)
 	}
 }
 

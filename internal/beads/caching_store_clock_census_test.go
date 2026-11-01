@@ -18,7 +18,7 @@ func TestCachingStoreWallClockReadsCensus(t *testing.T) {
 		"runReconciliation":       {"start := time.Now()": true, "bdStart := time.Now()": true, "projectStart := time.Now()": true},
 		"cachedReadyCompleteOnly": {"now := time.Now().UTC()": true}, // defer_until, the backing's clock
 		"cachedReadyLocked":       {"now := time.Now().UTC()": true},
-		"Ready":                   {"now := time.Now().UTC()": true},
+		"readyFromCache":          {"now := time.Now().UTC()": true}, // Ready and ReadyPreferCache share it
 		"CachedReady":             {"now := time.Now().UTC()": true},
 		"ReleaseIfCurrent":        {"b.UpdatedAt = time.Now()": true}, // a patched row mirrors the backing
 		"TransferIfCurrent":       {"b.UpdatedAt = time.Now()": true},

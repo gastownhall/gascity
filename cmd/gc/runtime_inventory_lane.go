@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"reflect"
@@ -91,6 +92,12 @@ type runtimeInventoryLane struct {
 	envWindowRefreshes int
 	lastSignature      string
 	alerted            map[string]time.Time
+	// captureSweptCfg is the config the last finished program-capture
+	// disarm sweep ran under (healProgramCaptures): one finished sweep per
+	// config load. captureSweep paces the sweeps of one that has not
+	// finished.
+	captureSweptCfg *config.City
+	captureSweep    captureSweepRetry
 	// poolDeathPrev holds the on_death handler names listed and not yet
 	// proven gone (detectPoolDeathEdges).
 	poolDeathPrev map[string]poolDeathSighting
@@ -354,6 +361,9 @@ func (cr *CityRuntime) runInventoryPass(ctx context.Context, reason string) {
 	if report.snapshot != nil {
 		cr.detectPoolDeaths(lane, &report)
 	}
+	if result == inventoryResultPublished {
+		cr.healProgramCaptures(lane, cfg, sp, &report)
+	}
 	finished := lane.clock.Now()
 	report.duration = finished.Sub(started)
 
@@ -361,6 +371,7 @@ func (cr *CityRuntime) runInventoryPass(ctx context.Context, reason string) {
 	lane.status = inventoryLaneStatus{at: finished, reason: reason, ran: true, seq: report.seq, result: result, duration: report.duration, v2Fields: map[string]any{
 		"process_probe_ms": report.processProbe.Milliseconds(), "process_probes": report.processProbes,
 		"activity_read_ms": report.activityRead.Milliseconds(), "activity_reads": report.activityReads,
+		"content_read_ms": report.contentRead.Milliseconds(), "content_reads": report.contentReads,
 		"env_reads": report.envReads, "env_read_backlog": report.envBacklog,
 	}}
 	lane.statusMu.Unlock()
@@ -386,13 +397,17 @@ func (l *runtimeInventoryLane) publish(ctx context.Context, listing inventoryLis
 		backends[i] = classifyInventoryBackend(leaf)
 	}
 
-	// The batched inventory reads and the process probes share one bound.
-	enrichCtx, cancel := context.WithTimeout(ctx, inventoryEnrichBound)
+	// The batched inventory reads and the process probes share one bound,
+	// less the content reads' reserved share.
+	want := l.cache.contentWanted()
+	reserve := contentReserve(want)
+	enrichCtx, cancel := context.WithTimeout(ctx, inventoryEnrichBound-reserve)
 	defer cancel()
 	phase := l.clock.Now()
-	attrs, hosts, enrichErrs := l.enrich(enrichCtx, listing.leaves, backends)
+	attrs, hosts, programs, enrichErrs := l.enrich(enrichCtx, listing.leaves, backends)
 	report.enrich = l.clock.Now().Sub(phase)
 	report.enrichErrors = enrichErrs
+	report.programs = programs
 
 	phase = l.clock.Now()
 	report.envReads, report.envBacklog = l.readIdentities(ctx, attrs, hosts)
@@ -402,9 +417,16 @@ func (l *runtimeInventoryLane) publish(ctx context.Context, listing inventoryLis
 	report.processProbes = probeProcesses(enrichCtx, attrs, hosts, concurrency)
 	report.processProbe = l.clock.Now().Sub(phase)
 
+	readSidecarRestartMarkers(enrichCtx, attrs, hosts, concurrency)
+
 	phase = l.clock.Now()
 	report.activityReads = readActivities(enrichCtx, attrs, hosts, concurrency)
 	report.activityRead = l.clock.Now().Sub(phase)
+	phase = l.clock.Now()
+	contentCtx, cancelContent := context.WithTimeout(ctx, reserve+remaining(enrichCtx))
+	report.contentReads = readContents(contentCtx, attrs, hosts, want, concurrency)
+	cancelContent()
+	report.contentRead = l.clock.Now().Sub(phase)
 
 	pass := InventoryPass{
 		Epoch:       l.cache.epoch,
@@ -610,10 +632,12 @@ func classifyInventoryBackend(leaf inventoryBackend) BackendPass {
 // which record their enrichment facts as unsupported; names whose backend's
 // inventory failed, or that the inventory omits, get none and keep theirs.
 // hosts maps each enriched name to its backend, for the identity read and
-// the process probe.
-func (l *runtimeInventoryLane) enrich(ctx context.Context, leaves []inventoryBackend, backends []BackendPass) (attrs map[string]InventoryAttrs, hosts map[string]runtime.Provider, errs []string) {
+// the process probe; programs holds each enriched name's program-status
+// reading, for program-capture heal.
+func (l *runtimeInventoryLane) enrich(ctx context.Context, leaves []inventoryBackend, backends []BackendPass) (attrs map[string]InventoryAttrs, hosts map[string]runtime.Provider, programs map[string]runtime.ProgramStatus, errs []string) {
 	attrs = make(map[string]InventoryAttrs)
 	hosts = make(map[string]runtime.Provider)
+	programs = make(map[string]runtime.ProgramStatus)
 	claimed := make(map[string]bool)
 	for i, leaf := range leaves {
 		if backends[i].Outcome == OutcomeFailed {
@@ -648,18 +672,20 @@ func (l *runtimeInventoryLane) enrich(ctx context.Context, leaves []inventoryBac
 				continue
 			}
 			attrs[name] = InventoryAttrs{
-				Incarnation:   e.Incarnation,
-				DeadKnown:     e.DeadKnown,
-				AllPanesDead:  e.AllPanesDead,
-				AttachedKnown: e.AttachedKnown,
-				Attached:      e.Attached,
-				ActivityKnown: e.ActivityKnown,
-				LastActivity:  e.LastActivity,
+				Incarnation:      e.Incarnation,
+				DeadKnown:        e.DeadKnown,
+				AllPanesDead:     e.AllPanesDead,
+				AttachedKnown:    e.AttachedKnown,
+				Attached:         e.Attached,
+				ActivityKnown:    e.ActivityKnown,
+				LastActivity:     e.LastActivity,
+				RestartRequested: e.RestartRequested,
 			}
 			hosts[name] = leaf.provider
+			programs[name] = e.Program
 		}
 	}
-	return attrs, hosts, errs
+	return attrs, hosts, programs, errs
 }
 
 // readIdentities fills the identity of every enriched name on a backend
@@ -921,6 +947,70 @@ func probeProcesses(ctx context.Context, attrs map[string]InventoryAttrs, hosts 
 	return len(names)
 }
 
+// readSidecarRestartMarkers is the restart marker's GetMeta fallback
+// (CONTRACT v5.10q C7a-2b): a name on a leaf whose identity is cheap to
+// read (identityReadable: a local sidecar, acp or subprocess) and which has
+// no batched inventory to carry the marker has GC_RESTART_REQUESTED read
+// through GetMeta every pass. At
+// most concurrency run at a time within ctx, each on its own goroutine; an
+// error, a panic or a read past ctx leaves the marker unread, which A13 reads
+// as not requested.
+func readSidecarRestartMarkers(ctx context.Context, attrs map[string]InventoryAttrs, hosts map[string]runtime.Provider, concurrency int) {
+	var names []string
+	for name := range attrs {
+		leaf := hosts[name]
+		if _, batched := leaf.(runtime.InventoryProvider); batched {
+			continue
+		}
+		if identityReadable(leaf) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	type answer struct {
+		name string
+		set  bool
+	}
+	answers := make(chan answer, len(names))
+	sem := make(chan struct{}, max(concurrency, 1))
+	reads := 0
+	for _, name := range names {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		reads++
+		go func(leaf runtime.Provider) {
+			defer func() { <-sem }()
+			done := make(chan answer, 1)
+			go func() {
+				got := answer{name: name}
+				defer func() {
+					_ = recover()
+					done <- got
+				}()
+				v, err := leaf.GetMeta(name, "GC_RESTART_REQUESTED")
+				got.set = err == nil && strings.TrimSpace(v) != ""
+			}()
+			select {
+			case got := <-done:
+				answers <- got
+			case <-ctx.Done():
+				answers <- answer{name: name}
+			}
+		}(hosts[name])
+	}
+	for range reads {
+		got := <-answers
+		a := attrs[got.name]
+		a.RestartRequested = got.set
+		attrs[got.name] = a
+	}
+}
+
 // readActivities reads the last activity of every enriched name on a leaf
 // without a batched inventory (whose inventory read carries activity: tmux's
 // #{window_activity}, at no extra fork) that can report it for that name
@@ -989,6 +1079,84 @@ func readActivities(ctx context.Context, attrs map[string]InventoryAttrs, hosts 
 		attrs[got.name] = a
 	}
 	return reads
+}
+
+// readContents reads, within ctx (the content reads' share of the pass's
+// enrichment bound, contentReserve), the pane content of each enriched name
+// the planner wants (WantContent: the rows on A15's content clock) on a
+// leaf that can snapshot it, at most concurrency at a time, and returns
+// the reads it made; a read past ctx stays unread.
+func readContents(ctx context.Context, attrs map[string]InventoryAttrs, hosts map[string]runtime.Provider, want map[string]bool, concurrency int) int {
+	type answer struct {
+		name string
+		got  contentState
+	}
+	var names []string
+	for name := range want {
+		_, enriched := attrs[name]
+		if _, ok := hosts[name].(runtime.IdleSnapshotProvider); ok && enriched {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	answers := make(chan answer, len(names))
+	sem := make(chan struct{}, max(concurrency, 1))
+	reads := 0
+	for _, name := range names {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		reads++
+		go func(snap runtime.IdleSnapshotProvider) {
+			defer func() { <-sem }()
+			done := make(chan contentState, 1)
+			go func() { done <- snapshotContent(snap, name) }()
+			select {
+			case got := <-done:
+				answers <- answer{name, got}
+			case <-ctx.Done():
+				answers <- answer{name, contentUnread}
+			}
+		}(hosts[name].(runtime.IdleSnapshotProvider))
+	}
+	for range reads {
+		got := <-answers
+		a := attrs[got.name]
+		a.Content = got.got
+		attrs[got.name] = a
+	}
+	return reads
+}
+
+// snapshotContent is one pane snapshot, classified as legacy's
+// checkIdleByContent reads it; a panicking read is an erring one.
+func snapshotContent(snap runtime.IdleSnapshotProvider, name string) (got contentState) {
+	got = contentError
+	defer func() { _ = recover() }()
+	idle, err := snap.SnapshotIdle(name)
+	switch {
+	case errors.Is(err, runtime.ErrIdleIndeterminate):
+		return contentIndeterminate
+	case err != nil:
+		return contentError
+	case idle:
+		return contentIdle
+	}
+	return contentBusy
+}
+
+// contentReserve is the share of the enrichment bound held back for the
+// content reads when the planner wants any (v5.9s): the reads before them
+// stop that much early.
+func contentReserve(want map[string]bool) time.Duration {
+	if len(want) == 0 {
+		return 0
+	}
+	return inventoryEnrichBound / 4
 }
 
 // probedIncarnation reports whether a probe answered for incarnation: the
@@ -1075,17 +1243,23 @@ type inventoryPassReport struct {
 	envRead       time.Duration
 	processProbe  time.Duration
 	activityRead  time.Duration
+	contentRead   time.Duration
 	enrichErrors  []string
 	envReads      int
 	envBacklog    int
 	processProbes int
 	activityReads int
+	contentReads  int
 	flips         int
 	alerts        []string
 	snapshot      *ObservationSnapshot
 	// attrs is the pass's enrichment, and gone the names it proved gone.
 	attrs map[string]InventoryAttrs
 	gone  []string
+	// programs is each enriched name's program-status reading, and
+	// captureHeals what program-capture heal did with them.
+	programs     map[string]runtime.ProgramStatus
+	captureHeals programCaptureHealTally
 }
 
 // traceDue reports whether a pass is worth a trace record: a flip, a change
@@ -1098,7 +1272,7 @@ func (l *runtimeInventoryLane) traceDue(r *inventoryPassReport) bool {
 	}
 	changed := signature != l.lastSignature
 	l.lastSignature = signature
-	return changed || r.flips > 0 || len(r.alerts) > 0 || r.seq%inventoryTraceHeartbeatPasses == 0
+	return changed || r.flips > 0 || len(r.alerts) > 0 || r.captureHeals.acted() || r.seq%inventoryTraceHeartbeatPasses == 0
 }
 
 // traceInventoryPass records one pass in its own trace cycle, like an
@@ -1160,6 +1334,7 @@ func inventoryPassFields(r *inventoryPassReport) map[string]any {
 		"inventory_probe_ms":      r.processProbe.Milliseconds(),
 		"inventory_enrich_errors": strings.Join(r.enrichErrors, "; "),
 		"inventory_health_alerts": strings.Join(r.alerts, ","),
+		"inventory_capture_heals": r.captureHeals.String(),
 	}
 	if s := r.snapshot; s != nil {
 		addInventorySnapshotFields(fields, s)
@@ -1228,4 +1403,13 @@ func inventoryHealthSummary(health map[string]BackendHealth) string {
 		parts = append(parts, inventoryLabelForTrace(label)+"="+health[label].State)
 	}
 	return strings.Join(parts, ",")
+}
+
+// remaining is what is left of ctx's deadline, zero when it has passed.
+func remaining(ctx context.Context) time.Duration {
+	dl, ok := ctx.Deadline()
+	if !ok {
+		return 0
+	}
+	return max(time.Until(dl), 0)
 }

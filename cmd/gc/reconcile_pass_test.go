@@ -213,6 +213,23 @@ func TestPassCarriesAdmissionStateAndDeadlines(t *testing.T) {
 	}
 }
 
+// Kills a row backoff's expiry left to the patrol (CONTRACT v5.10d (b);
+// staging lmcp: a killed seat's restart waited 13-23s past its 10s
+// backoff): a pass whose admission defers gc-1's heal on a live row backoff
+// asks for its next pass at the backoff's expiry.
+func TestPassWakesAtRowBackoffExpiry(t *testing.T) {
+	f := newGatherFixture(t, poolRow("gc-1", "worker", 1, "asleep", expiredHold...))
+	f.p.backoff.Refuse(rowBackoffKey(rowKey{Leg: rowLeg, ID: "gc-1"}), gatherNow, time.Time{}, causeRedecided, "")
+	res := f.p.tracePass(f.env, gatherNow)
+	rec := f.p.out.record.Load()
+	if len(rec.Deferred) != 1 || rec.Deferred[0].Cause != causeRowBackoff {
+		t.Fatalf("deferred %+v, want gc-1's heal on its row backoff", rec.Deferred)
+	}
+	if want := gatherNow.Add(backoffBase); !res.Next.Equal(want) {
+		t.Fatalf("next pass = %v, want the backoff's expiry %v", res.Next, want)
+	}
+}
+
 // Kills the boot gate left out of the pass (P2): with no inventory pass yet,
 // admission defers a destructive intent with cause boot-gate. No C2c1 arm
 // proposes one, so a test arm proposes a stop.

@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/rollout"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
@@ -65,10 +66,7 @@ listed.`,
   gc doctor --check controller,events-log --json`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doDoctor(opts, stdout, stderr) != 0 {
-				return errExit
-			}
-			return nil
+			return exitForCode(doDoctor(opts, stdout, stderr))
 		},
 	}
 	cmd.Flags().BoolVar(&opts.Fix, "fix", false, "attempt automatic repairs and safe mechanical migrations")
@@ -183,6 +181,7 @@ type buildDoctorChecksOpts struct {
 	SupervisorRunning       bool
 	SupervisorPID           int
 	SupervisorUnitOwnership doctor.SupervisorUnitOwnership
+	SupervisorBinary        doctor.SupervisorBinary
 	SkipCityDoltCheck       bool
 	SkipManagedDoltCheck    bool
 	SkipRigDoltChecks       bool
@@ -192,6 +191,9 @@ type buildDoctorChecksOpts struct {
 	// out and the probe's result cannot affect warmup output — it would only
 	// add up to doctorBeadStorePreflightTimeout of startup latency.
 	SkipStorePreflight bool
+	// Warmup builds the checks for gc start's warm-up scan: checks that
+	// would do slow work (the bd command-tree walk) report from caches only.
+	Warmup bool
 	// RolloutFlags is the on-disk rollout-gate snapshot doctor renders; RolloutResolveErr
 	// is set when resolving it failed (an out-of-enum config value).
 	RolloutFlags      rollout.Flags
@@ -295,14 +297,35 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			register(newDoltDriftCheck(cityPath, cfg))
 		}
 		register(doctor.NewConfigValidCheck(cfg))
+		// A split city's gc bd refuses everything when the scope's bd matches
+		// no pinned command-tree inventory (bd_inventory_trust.go).
+		if opts.Warmup {
+			register(newWarmupBdInventoryCheck(cityPath, cfg))
+		} else {
+			register(newBdInventoryCheck(cityPath, cfg))
+		}
 		register(doctor.NewLegacySuspendedFieldCheck(cfg))
 		reconcilerCheck = newSessionReconcilerDoctorCheck(cfg, reconcilerModeLookupEnv)
 		register(reconcilerCheck)
+		register(newLedgerFeedDoctorCheck(cfg, queryLedgerFeedStatus))
 		// Rollout gates section: one advisory line per registered gate (value +
 		// origin + notices). Never blocks the exit code.
 		for _, c := range rolloutGateChecks(opts.RolloutFlags, opts.RolloutResolveErr) {
 			register(c)
 		}
+		// The ops-recording line sits with the rollout gates it reports on, so
+		// it runs before the bead-store preflight and opens its own store
+		// rather than the preflight's shared factory. With every ops gate off,
+		// or auto by default over a store the default does not record on (not
+		// SQLite, or unable to record ops), the check reads at most one op
+		// row, and scans for expired legacy ops only once that read finds
+		// one; during a store outage it reports the outage too, beside the
+		// preflight's line. It also counts op rows (one bd read per bd scope
+		// the store gate lets doctor read) and, on a scope holding any, reads
+		// the purge and prune help and the types.retained setting, as the
+		// core reaper does before it purges.
+		registerCityStoreCheck(newOpsRecordingDoctorCheck(cityPath, cfg, opts.RolloutFlags, opts.RolloutResolveErr, storeGate.Skipped))
+		registerCityStoreCheck(newConversationLanesDoctorCheck(cityPath, cfg))
 		register(doctor.NewConfigRefsCheck(cfg, cityPath))
 		register(doctor.NewStaleLocalPackDirCheck(cfg.Packs, cfg.Imports, cfg.DefaultRigImports, cityPath, cfg.Rigs...))
 		register(doctor.NewPreStartScriptsCheck(cfg))
@@ -316,8 +339,12 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewServiceSecretsPermsCheck(cfg, cityPath))
 		register(doctor.NewSkillCollisionCheck(cfg, cityPath))
 		register(doctor.NewSkillDanglingSinkCheck(doctorSkillStaticSinks(cityPath, cfg), materialize.LegacyOwnedRootsFor(cityPath), liveSessionSinks))
-		registerCityStoreCheck(doctor.NewOrderFiringCurrentCheck(cfg, cityPath, doctor.WithOrderFiringCurrentLastRunFunc(
-			storeGate.OrderLastRun(cityPath, cfg, doctorOrderFiringCurrentLastRunFunc(cityPath, cfg, opts.Stderr)))))
+		registerCityStoreCheck(doctor.NewOrderFiringCurrentCheck(cfg, cityPath,
+			doctor.WithOrderFiringCurrentLastRunFunc(
+				storeGate.OrderLastRun(cityPath, cfg, doctorOrderFiringCurrentLastRunFunc(cityPath, cfg, opts.Stderr))),
+			doctor.WithOrderFiringCurrentInapplicableFunc(func(a orders.Order) (string, bool) {
+				return orderInapplicableBackend(cityPath, cfg, a)
+			})))
 		register(doctor.NewOrderOutcomeHealthyCheck(cfg, cityPath))
 		register(newCodexHooksDriftCheck(cityPath, codexHookWorkDirs(cityPath, cfg)))
 		register(doctor.NewRigPackCoverageCheck(cfg, cityPath))
@@ -325,6 +352,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(newPromptDeliveryBudgetDoctorCheck(cityPath, cfg, exec.LookPath))
 		register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
 		register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
+		register(newMCPAdoptionDoctorCheck(cityPath, cfg, exec.LookPath))
 	}
 	if _, rawCfgErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); rawCfgErr == nil {
 		register(newBuiltinImportDoctorCheck(cityPath))
@@ -372,7 +400,12 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	register(doctor.NewControllerCheck(cityPath, controllerRunning))
 	register(doctor.NewSupervisorHTTPCheck(opts.SupervisorRunning))
 	register(doctor.NewSupervisorUnitOwnershipCheck(opts.SupervisorRunning, opts.SupervisorPID, opts.SupervisorUnitOwnership))
+	register(doctor.NewSupervisorBinaryCheck(opts.SupervisorRunning, opts.SupervisorPID, opts.SupervisorBinary))
 
+	// sessionSP is the session provider the session checks read, and the
+	// ownerless-runtimes check after them; sessionSPErr is why there is none.
+	var sessionSP runtime.Provider
+	sessionSPErr := errors.New("the session provider was not built")
 	if cfgErr == nil && cfg != nil {
 		cityName := loadedCityName(cfg, cityPath)
 		st := cfg.Workspace.SessionTemplate
@@ -386,10 +419,12 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			sp, err := newSessionProvider()
 			if err != nil {
 				register(doctor.ErrorCheck("session-provider", err.Error()))
+				sessionSPErr = err
 			} else {
 				register(doctor.NewAgentSessionsCheck(cfg, cityName, st, sp))
 				register(doctor.NewZombieSessionsCheck(cfg, cityName, st, sp))
 				register(doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp))
+				sessionSP = sp
 			}
 		}
 	}
@@ -445,6 +480,9 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			registerCityStoreCheck(newCensusOwnerLivenessCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newRunTargetRoutedToBackfillCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newRouteRecoveryQuarantineCheck(cfg, cityPath, storeFactory))
+			registerCityStoreCheck(newCrossStoreGatesCheck(cfg, cityPath, storeFactory))
+			registerCityStoreCheck(newStorageRigsCheck(cfg, cityPath))
+			registerCityStoreCheck(newDanglingBlockingEdgesCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newHoldLabelRoutedToCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newPoolIdleRoutedWorkCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newV2DemandMigrationsCheck(cfg, cityPath, storeFactory))
@@ -464,6 +502,14 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			registerCityStoreCheck(newOrderTrackingRetentionCheck(cityPath, storeFactory))
 			registerCityStoreCheck(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
 			registerCityStoreCheck(newStartupHealthEpisodesCheck(cfg, cityPath, storeFactory))
+			registerCityStoreCheck(newOwnerlessRuntimesCheck(cfg, cityPath, storeFactory, sessionSP, sessionSPErr))
+			registerCityStoreCheck(newProgramCaptureDoctorCheck(cfg, func() (*sessionBeadSnapshot, error) {
+				store, err := storeFactory(cityPath)
+				if err != nil {
+					return nil, fmt.Errorf("opening the city bead store: %w", err)
+				}
+				return loadSessionBeadSnapshot(cliSessionStore(store, cfg, cityPath))
+			}, sessionSP, sessionSPErr))
 			// Differential probe: the preflight above just proved the store
 			// reachable with the controller's environment, so a read that
 			// fails under the gate sandbox isolates the sandbox (ga-pqlgh).
@@ -489,6 +535,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// managed bd scope. The version check follows the same gate so file-backed
 	// and external Dolt workspaces do not get irrelevant local-binary warnings.
 	register(doctor.NewDoltNomsSizeCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
+	register(doctor.NewDoltCompactStateCheck(cityPath, opts.SkipManagedDoltCheck))
 	register(doctor.NewDoltJournalSizeCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
 	// Managed Dolt server log growth canary. dolt.log is opened O_APPEND at
 	// every start and nothing rotates or truncates it, so it accumulates for
@@ -623,6 +670,19 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	return checks
 }
 
+// gatherSupervisorUnitOwnership relates the live supervisor PID to gc's own
+// systemd user unit for the supervisor-unit-ownership doctor check.
+func gatherSupervisorUnitOwnership(pid int) doctor.SupervisorUnitOwnership {
+	raw := supervisorDetermineUnitOwnership(pid)
+	return doctor.SupervisorUnitOwnership{
+		Status:     raw.Status,
+		Unit:       raw.Unit,
+		UnitActive: raw.UnitActive,
+		UnitPID:    raw.UnitPID,
+		ProbeErr:   raw.ProbeErr,
+	}
+}
+
 // doDoctor runs the health checks and prints results. With opts.Checks set it
 // runs only those checks and derives the exit code from them alone.
 func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
@@ -650,14 +710,10 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 	supervisorPID := supervisorAliveHook()
 	supervisorRunning := supervisorPID != 0
 	var supervisorUnitOwnership doctor.SupervisorUnitOwnership
+	var supervisorBinary doctor.SupervisorBinary
 	if supervisorPID != 0 {
-		raw := supervisorDetermineUnitOwnership(supervisorPID)
-		supervisorUnitOwnership = doctor.SupervisorUnitOwnership{
-			Status:     raw.Status,
-			Unit:       raw.Unit,
-			UnitActive: raw.UnitActive,
-			UnitPID:    raw.UnitPID,
-		}
+		supervisorBinary = gatherSupervisorBinary(supervisorPID)
+		supervisorUnitOwnership = gatherSupervisorUnitOwnership(supervisorPID)
 	}
 	skipRigDoltChecks := gcDoltSkip()
 	skipCityDoltCheck := skipRigDoltChecks || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
@@ -678,6 +734,7 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 		SupervisorRunning:       supervisorRunning,
 		SupervisorPID:           supervisorPID,
 		SupervisorUnitOwnership: supervisorUnitOwnership,
+		SupervisorBinary:        supervisorBinary,
 		SkipCityDoltCheck:       skipCityDoltCheck,
 		SkipManagedDoltCheck:    skipManagedDoltCheck,
 		SkipRigDoltChecks:       skipRigDoltChecks,
@@ -706,10 +763,15 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 	}
 
 	if report.BlockingFailed > 0 {
-		return 1
+		return doctorBlockingFailureExitCode
 	}
 	return 0
 }
+
+// doctorBlockingFailureExitCode is the exit code gc doctor returns when any
+// blocking check fails. The --json failure record carries it as
+// error.exit_code, so the record and the process agree.
+const doctorBlockingFailureExitCode = 1
 
 // maxDoctorCheckSuggestions bounds the "did you mean" list so one typo cannot
 // print most of the registry inline. The full list still follows in text mode.
@@ -1067,7 +1129,7 @@ func writeDoctorJSON(w io.Writer, report *doctor.Report) error {
 				Error: jsonSchemaErrorDetail{
 					Code:     doctorBlockingFailedErrorCode,
 					Message:  fmt.Sprintf("%d blocking check(s) failed", report.BlockingFailed),
-					ExitCode: 1,
+					ExitCode: doctorBlockingFailureExitCode,
 				},
 			},
 			doctorJSONReport: out,

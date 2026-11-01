@@ -16,7 +16,6 @@ type erroringStore struct {
 	beads.Store
 	createErr    error
 	setErr       error
-	listErr      error
 	listQueryErr error
 }
 
@@ -32,13 +31,6 @@ func (e *erroringStore) SetMetadataBatch(id string, kvs map[string]string) error
 		return e.setErr
 	}
 	return e.Store.SetMetadataBatch(id, kvs)
-}
-
-func (e *erroringStore) ListByMetadata(filters map[string]string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
-	if e.listErr != nil {
-		return nil, e.listErr
-	}
-	return e.Store.ListByMetadata(filters, limit, opts...)
 }
 
 func (e *erroringStore) List(q beads.ListQuery) ([]beads.Bead, error) {
@@ -325,9 +317,39 @@ func TestStoreSaveStartupHealthEpisodeUpsertsNoDuplicate(t *testing.T) {
 	}
 }
 
+// TestStoreStartupHealthEpisodeIsTyped (mc-lp7zb): only a
+// startup-health-episode bead is a session's episode. A task carrying the
+// episode's keys, a quarantine included, quarantines nothing, and the
+// controller's save records the real episode on its own bead, never on the
+// task.
+func TestStoreStartupHealthEpisodeIsTyped(t *testing.T) {
+	mem := beads.NewMemStore()
+	s := NewStore(beads.SessionStore{Store: mem})
+	forged, err := mem.Create(beads.Bead{Title: "t", Type: "task", Metadata: map[string]string{
+		StartupHealthSessionNameMetadataKey:      "w",
+		StartupHealthQuarantinedUntilMetadataKey: "9999-01-01T00:00:00Z",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ep, err := s.LoadStartupHealthEpisode("w"); err != nil || ep != (StartupHealthEpisode{}) {
+		t.Fatalf("LoadStartupHealthEpisode = %+v, %v: want none, a task is no episode", ep, err)
+	}
+	saved := StartupHealthEpisode{SessionName: "w", ConsecutiveCount: 1}
+	if err := s.SaveStartupHealthEpisode(saved); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := mem.Get(forged.ID); got.Metadata[StartupHealthConsecutiveMetadataKey] != "" {
+		t.Fatalf("task %v: the save wrote the episode onto it", got.Metadata)
+	}
+	if ep, err := s.LoadStartupHealthEpisode("w"); err != nil || ep != saved {
+		t.Fatalf("LoadStartupHealthEpisode = %+v, %v: want the saved %+v", ep, err, saved)
+	}
+}
+
 func TestStoreLoadStartupHealthEpisodePropagatesStoreError(t *testing.T) {
 	boom := errors.New("boom")
-	s := NewStore(beads.SessionStore{Store: &erroringStore{Store: beads.NewMemStore(), listErr: boom}})
+	s := NewStore(beads.SessionStore{Store: &erroringStore{Store: beads.NewMemStore(), listQueryErr: boom}})
 	_, err := s.LoadStartupHealthEpisode("w")
 	if !errors.Is(err, boom) {
 		t.Errorf("LoadStartupHealthEpisode error = %v, want wrapped %v", err, boom)

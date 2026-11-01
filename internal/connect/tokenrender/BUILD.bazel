@@ -1,0 +1,73 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "tokenrender",
+    srcs = [
+        "doc.go",
+        "eligible.go",
+        "errors.go",
+        "key.go",
+        "renderer.go",
+        "write.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/connect/tokenrender",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beads",
+        "//internal/clock",
+        "//internal/connect",
+        "//internal/session",
+        "@org_golang_x_sys//unix",
+    ],
+)
+
+go_test(
+    name = "tokenrender_test",
+    srcs = [
+        "eligible_test.go",
+        "key_test.go",
+        "renderer_test.go",
+        "testenv_import_test.go",
+        "write_test.go",
+    ],
+    embed = [":tokenrender"],
+    deps = [
+        "//internal/beads",
+        "//internal/clock",
+        "//internal/connect",
+        "//internal/session",
+        "//internal/testenv",
+        "@org_golang_x_sys//unix",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

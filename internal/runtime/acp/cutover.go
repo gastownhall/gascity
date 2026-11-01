@@ -12,9 +12,11 @@ import (
 // interfaces production callers type-assert — InteractionProvider (pending /
 // respond), TransportCapabilityProvider (SupportsTransport), SleepCapability,
 // IdleWaitProvider (WaitForIdle), IdleSnapshotProvider (SnapshotIdle),
-// SessionEventProvider (SubscribeSessionEvents), ProcessTableScanner (orphan
-// reaping), LivenessObserverWithError and ListingAttestation — through to the
-// underlying *Provider. The early cut-over for the acp provider.
+// SessionEventProvider (SubscribeSessionEvents), TurnEventProvider
+// (SubscribeTurnEvents), TurnFenceProvider and TurnObservationProvider (turn
+// reads and the turn-scoped interrupt), ProcessTableScanner (orphan reaping),
+// LivenessObserverWithError, ListingAttestation and FencedInputProvider (the
+// checked input fence) — through to the underlying *Provider. The early cut-over for the acp provider.
 type seamBackedProvider struct {
 	runtime.Provider
 	raw *Provider
@@ -31,8 +33,12 @@ var (
 	_ runtime.ProcessTableScanner         = (*seamBackedProvider)(nil)
 	_ runtime.LivenessObserverWithError   = (*seamBackedProvider)(nil)
 	_ runtime.ListingAttestation          = (*seamBackedProvider)(nil)
+	_ runtime.FencedInputProvider         = (*seamBackedProvider)(nil)
 	_ runtime.IdentitySidecarProvider     = (*seamBackedProvider)(nil)
 	_ runtime.IdentitySidecarProvider     = (*Provider)(nil)
+	_ runtime.TurnEventProvider           = (*seamBackedProvider)(nil)
+	_ runtime.TurnFenceProvider           = (*seamBackedProvider)(nil)
+	_ runtime.TurnObservationProvider     = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked constructs an acp provider served through the seams.
@@ -84,6 +90,39 @@ func (s *seamBackedProvider) SubscribeSessionEvents(ctx context.Context) (<-chan
 	return s.raw.SubscribeSessionEvents(ctx)
 }
 
+// SubscribeTurnEvents implements [runtime.TurnEventProvider] (non-seam
+// passthrough).
+func (s *seamBackedProvider) SubscribeTurnEvents(ctx context.Context) (<-chan runtime.TurnEvent, error) {
+	return s.raw.SubscribeTurnEvents(ctx)
+}
+
+// ObserveTurn implements [runtime.TurnFenceProvider] (non-seam passthrough).
+func (s *seamBackedProvider) ObserveTurn(ctx context.Context, name string) (runtime.TurnState, error) {
+	return s.raw.ObserveTurn(ctx, name)
+}
+
+// InterruptTurn implements [runtime.TurnFenceProvider] (non-seam passthrough).
+func (s *seamBackedProvider) InterruptTurn(ctx context.Context, name, turnID string) (runtime.TurnInterrupt, error) {
+	return s.raw.InterruptTurn(ctx, name, turnID)
+}
+
+// WaitTurnEnded implements [runtime.TurnFenceProvider] (non-seam passthrough).
+func (s *seamBackedProvider) WaitTurnEnded(ctx context.Context, name, turnID string, timeout time.Duration) (runtime.TurnState, error) {
+	return s.raw.WaitTurnEnded(ctx, name, turnID, timeout)
+}
+
+// TurnCapabilities implements [runtime.TurnObservationProvider] (non-seam
+// passthrough).
+func (s *seamBackedProvider) TurnCapabilities(name string) runtime.TurnCapabilities {
+	return s.raw.TurnCapabilities(name)
+}
+
+// TurnHistory implements [runtime.TurnObservationProvider] (non-seam
+// passthrough).
+func (s *seamBackedProvider) TurnHistory(ctx context.Context, name string) (runtime.TurnHistory, error) {
+	return s.raw.TurnHistory(ctx, name)
+}
+
 // FindRuntimesBySessionID implements [runtime.ProcessTableScanner] (non-seam
 // passthrough).
 func (s *seamBackedProvider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
@@ -113,4 +152,28 @@ func (s *seamBackedProvider) LivenessReadsFresh() bool { return s.raw.LivenessRe
 // through; the seams route ListRunning to the same raw listing.
 func (s *seamBackedProvider) ListRunningComplete() bool {
 	return s.raw.ListRunningComplete()
+}
+
+// InputFencing implements [runtime.FencedInputProvider] (non-seam
+// passthrough).
+func (s *seamBackedProvider) InputFencing(name string) runtime.InputFencing {
+	return s.raw.InputFencing(name)
+}
+
+// NudgeFenced implements [runtime.FencedInputProvider] (non-seam
+// passthrough).
+func (s *seamBackedProvider) NudgeFenced(ctx context.Context, name string, content []runtime.ContentBlock, n runtime.FencedNudge) error {
+	return s.raw.NudgeFenced(ctx, name, content, n)
+}
+
+// SendKeysFenced implements [runtime.FencedInputProvider] (non-seam
+// passthrough).
+func (s *seamBackedProvider) SendKeysFenced(ctx context.Context, name string, fence runtime.InputFence, keys ...string) error {
+	return s.raw.SendKeysFenced(ctx, name, fence, keys...)
+}
+
+// InterruptFenced implements [runtime.FencedInputProvider] (non-seam
+// passthrough).
+func (s *seamBackedProvider) InterruptFenced(ctx context.Context, name string, fence runtime.InputFence) error {
+	return s.raw.InterruptFenced(ctx, name, fence)
 }

@@ -34,8 +34,8 @@ func LastRunAcross(stores []*Store) LastRunFunc {
 }
 
 // LastRunFuncWithEventFallback wraps fn with an events.Provider fallback.
-// When fn returns a zero time (no tracking beads found — e.g. after a
-// wisp-compact prune), it queries the event bus for the most recent
+// When fn returns a zero time (no tracking beads found — e.g. after the
+// tracking beads were purged), it queries the event bus for the most recent
 // order.fired event whose Subject matches the order's scoped name and
 // returns its timestamp. A nil ep disables the fallback and the wrapped
 // fn's result is returned unchanged. Event bus errors are non-fatal:

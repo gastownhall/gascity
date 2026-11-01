@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"slices"
 	"strings"
@@ -83,17 +84,19 @@ func TestPassRecordCarriesSoakFields(t *testing.T) {
 	for _, s := range []settlement{
 		{Kind: intentRekey, Outcome: settledLanded},
 		{Kind: intentRekey, Outcome: settledRefused, Cause: "name-busy"},
-		{Kind: intentDrainBeginFresh, Reason: idleRespawnDrainReason, Outcome: settledLanded},
-		{Kind: intentDrainBeginFresh, Reason: "idle", Outcome: settledLanded},
-		{Kind: intentDrainVoid, Reason: idleRespawnDrainReason, Outcome: settledLanded},
-		{Kind: intentStop, Reason: idleRespawnDrainReason, Outcome: settledLanded},
-		{Kind: intentStop, Reason: idleRespawnDrainReason, Outcome: settledRefused, Cause: "attached"},
+		{Kind: intentDrainBeginFresh, Reason: decideDrainBegin + idleRespawnDrainReason, Outcome: settledLanded},
+		{Kind: intentDrainBeginFresh, Reason: decideDrainBegin + "idle", Outcome: settledLanded},
+		{Kind: intentDrainVoid, Reason: decideDrainVoid + idleRespawnDrainReason, Outcome: settledLanded},
+		{Kind: intentDrainCancel, Reason: decideDrainCancel + idleRespawnDrainReason, Outcome: settledLanded},
+		{Kind: intentSignalFresh, Reason: decideDrainSignal + idleRespawnDrainReason, Outcome: settledLanded, Cause: causeIdleRespawnVoid + "activity-resumed"},
+		{Kind: intentSignalFresh, Reason: decideDrainSignal + idleRespawnDrainReason, Outcome: settledLanded},
+		{Kind: intentStop, Reason: decideStopVerb + idleRespawnDrainReason, Outcome: settledLanded},
+		{Kind: intentStop, Reason: decideStopVerb + idleRespawnDrainReason, Outcome: settledRefused, Cause: "attached"},
 		{Kind: intentStart, Key: rowKey{ID: "gc-3"}, Outcome: settledFailed, Cause: causeDeadline},
 	} {
 		f.p.settlements.post(s)
 	}
-	f.p.record(events.Event{Type: events.SessionDrainStopEscalated})
-	f.runPass(0)
+	f.runPass(0) // gc-1's outstanding stop escalates (v5 D6)
 
 	if len(f.records) != 1 {
 		t.Fatalf("records = %d, want 1", len(f.records))
@@ -107,7 +110,7 @@ func TestPassRecordCarriesSoakFields(t *testing.T) {
 	assertLinesEqual(t, "reconcile.pass fields", names, v2PassRecordWireFields)
 	for field, want := range map[string]any{
 		"rows": 2, "stops_outstanding_30m": 1, "stop_escalations": uint64(1), "stale_self_rekeys": uint64(1),
-		"idle_respawn_begun": uint64(1), "idle_respawn_voided": uint64(1), "idle_respawn_completed": uint64(1),
+		"idle_respawn_begun": uint64(1), "idle_respawn_voided": uint64(3), "idle_respawn_completed": uint64(1),
 		"effects": "trace-only", "passes": uint64(1),
 	} {
 		if rec[field] != want {
@@ -261,23 +264,22 @@ func TestV2AlertsOncePerEpisode(t *testing.T) {
 	})
 }
 
-// TestDoctorWarnsFloorOutsideControlDispatcher pins ruling 2's doctor
-// warning: a floor on any template but the control dispatcher is a v2
-// warning (a note under legacy) and never changes the status; and under v2
-// the check prints the last pass's age when the controller answers.
+// TestDoctorReportsNoFloorAndThePassAge: a floor is no longer a v2
+// difference (PAR-FLOORACK: a floor member's own ack keeps it warm), so
+// doctor lists none and the status is as without it; and under v2 the check
+// prints the last pass's age when the controller answers.
 //
-// Kills: a silent floor-ack difference on a new template; a warning on
-// core.control-dispatcher; a warning that changes the exit status; a pass
-// age read from a legacy city's socket.
-func TestDoctorWarnsFloorOutsideControlDispatcher(t *testing.T) {
+// Kills: a floor warning left behind; a floor that changes the exit status;
+// a pass age read from a legacy city's socket.
+func TestDoctorReportsNoFloorAndThePassAge(t *testing.T) {
 	one, two := 1, 2
 	agents := []config.Agent{
 		{Name: "core.control-dispatcher", Dir: "gascity", MinActiveSessions: &one},
 		{Name: "worker", MinActiveSessions: &two},
 		{Name: "idle"},
 	}
-	override := func(k string) (string, bool) { return "1", k == v2SkeletonEnv }
-	for _, tc := range []struct{ raw, prefix string }{{"", "v2 note: "}, {"v2", "v2 warning: "}} {
+	override := noEnv
+	for _, tc := range []struct{ raw string }{{""}, {"v2"}} {
 		cfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: tc.raw}, Agents: agents}
 		c := newSessionReconcilerDoctorCheck(cfg, override)
 		queried := false
@@ -292,8 +294,8 @@ func TestDoctorWarnsFloorOutsideControlDispatcher(t *testing.T) {
 				floors = append(floors, d)
 			}
 		}
-		if len(floors) != 1 || !strings.HasPrefix(floors[0], tc.prefix+"agent worker sets min_active_sessions = 2") || !strings.Contains(floors[0], "stopped and restarted, not kept warm") {
-			t.Errorf("%q: floor details = %q, want one %q line for worker", tc.raw, floors, tc.prefix)
+		if len(floors) != 0 {
+			t.Errorf("%q: floor details = %q, want none", tc.raw, floors)
 		}
 		bare := newSessionReconcilerDoctorCheck(&config.City{Daemon: cfg.Daemon}, override)
 		bare.queryPass = c.queryPass
@@ -321,5 +323,175 @@ func TestControllerReportsV2PassStatus(t *testing.T) {
 	}
 	if got := (&controllerWake{}).v2PassStatus(plannerT0); got != (v2PassStatus{}) {
 		t.Errorf("legacy status = %+v, want zero", got)
+	}
+}
+
+// TestStopOutstandingAlertAt30MinutesThenEvery15 (v5 D6). Kills a missing
+// alert, an alert storm, an alert for a stop under 30 minutes old, an alert
+// that names no refusing cause, and a new incarnation's request deduped
+// under its predecessor's: a signaled stop alerts at 30 minutes, then at
+// most every 15 per (row, incarnation), with legacy's payload shape and the
+// stop verb's last refusing cause, and never force_terminated.
+func TestStopOutstandingAlertAt30MinutesThenEvery15(t *testing.T) {
+	stopPending := func(gen string, age time.Duration) beads.Bead {
+		return poolRow("gc-1", "worker", 1, "draining", "state_reason", session.DrainAckStopPendingReason, "drain_at", rowAt(-age), "generation", gen)
+	}
+	escalations := func(f *observeFixture) []events.Event {
+		var out []events.Event
+		for _, e := range f.ev.Events {
+			if e.Type == events.SessionDrainStopEscalated {
+				out = append(out, e)
+			}
+		}
+		return out
+	}
+	var transitions []string
+	saved := recordDrainTransition
+	recordDrainTransition = func(_ context.Context, _, _, transition string) { transitions = append(transitions, transition) }
+	t.Cleanup(func() { recordDrainTransition = saved })
+	f := newObserveFixture(t, stopPending("1", 29*time.Minute))
+	w := f.gather(t)
+	k := w.Census.Canonical()[0].Key
+	f.p.backoff.Refuse(rowBackoffKey(k), w.Now, time.Time{}, fenceAttached, "")
+	f.p.observeWorld(&w, nil, &passCounts{})
+	if got := escalations(f); len(got) != 0 {
+		t.Fatalf("at 29 minutes: %d alerts, want none", len(got))
+	}
+	for _, c := range []struct {
+		advance time.Duration
+		want    int
+	}{
+		{time.Minute, 1},      // 30 minutes: the first
+		{14 * time.Minute, 1}, // 44: inside the 15
+		{time.Minute, 2},      // 45: the repeat
+		{5 * time.Minute, 2},  // 50
+		{10 * time.Minute, 3}, // 60
+	} {
+		w.Now = w.Now.Add(c.advance)
+		f.p.observeWorld(&w, nil, &passCounts{})
+		if got := escalations(f); len(got) != c.want {
+			t.Fatalf("at %v: %d alerts, want %d", w.Now.Sub(gatherNow)+29*time.Minute, len(got), c.want)
+		}
+	}
+	e := escalations(f)[0]
+	var payload map[string]any
+	if err := json.Unmarshal(e.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["reason"] != "stop_outstanding/"+fenceAttached || e.Subject != "worker" || e.SessionID != k.ID || strings.Contains(string(e.Payload), "force_terminated") {
+		t.Fatalf("alert %+v payload %v, want legacy's shape with reason stop_outstanding/%s", e, payload, fenceAttached)
+	}
+	if f.p.metrics.series["stop_escalations"] != 3 {
+		t.Fatalf("stop_escalations = %d, want 3", f.p.metrics.series["stop_escalations"])
+	}
+	if !slices.Equal(transitions, []string{"escalate", "escalate", "escalate"}) {
+		t.Fatalf("drain transitions %v, want legacy's escalate per alert, never force_terminated (§12.2 #1)", transitions)
+	}
+	// A new incarnation's stop is its own: it alerts at once, inside the
+	// last one's 15 minutes.
+	r := w.Census.Rows[k]
+	r.Incarnation++
+	w.Census.Rows[k] = r
+	w.Now = w.Now.Add(time.Minute)
+	f.p.observeWorld(&w, nil, &passCounts{})
+	if got := escalations(f); len(got) != 4 {
+		t.Fatalf("a new incarnation: %d alerts, want a fourth at once", len(got))
+	}
+	// A stop no longer outstanding drops its memory: the next stop on the
+	// same incarnation alerts at once, inside the last one's 15 minutes.
+	r = w.Census.Rows[k]
+	stamp := r.Info.DrainAt
+	r.Info.DrainAt = ""
+	w.Census.Rows[k] = r
+	w.Now = w.Now.Add(time.Minute)
+	f.p.observeWorld(&w, nil, &passCounts{})
+	r.Info.DrainAt = stamp
+	w.Census.Rows[k] = r
+	w.Now = w.Now.Add(time.Minute)
+	f.p.observeWorld(&w, nil, &passCounts{})
+	if got := escalations(f); len(got) != 5 {
+		t.Fatalf("a stop outstanding again: %d alerts, want a fifth at once", len(got))
+	}
+	// A stop no refusal has recorded names no cause.
+	g := newObserveFixture(t, stopPending("1", 31*time.Minute))
+	wg := g.gather(t)
+	g.p.observeWorld(&wg, nil, &passCounts{})
+	if got := escalations(g); len(got) != 1 || !strings.Contains(string(got[0].Payload), stopEscalationReason+"/"+stopEscalationNoCause) {
+		t.Fatalf("no refusal yet: %v, want one alert naming no cause", got)
+	}
+}
+
+// TestStopOutstandingAlertOnlyOwnRowsOutsideTheQuietHold (#7619 review).
+// Kills an alert or a stops_outstanding_30m count for a rig leg's row,
+// which may be another city's and which v2 never stops (A1); and one under
+// legacy's quiet hold (owner rulings): no alert while a human is attached,
+// the pane was active within drainAckEscalationQuietGrace, or its activity
+// is unreadable; one at once when the hold clears past a threshold; and a
+// runtime that reads gone never holds.
+func TestStopOutstandingAlertOnlyOwnRowsOutsideTheQuietHold(t *testing.T) {
+	f := newObserveFixture(t, poolRow("gc-1", "worker", 1, "draining", "state_reason", session.DrainAckStopPendingReason, "drain_at", rowAt(-31*time.Minute), "generation", "1"))
+	w := f.gather(t)
+	rig := rowKey{Leg: "rig:shared", ID: "other-city-7"}
+	w.Census.Rows[rig] = newCensusRow(rig, session.Info{
+		ID: rig.ID, Template: "worker", SessionName: "other-7", MetadataState: "draining",
+		StateReason: session.DrainAckStopPendingReason, DrainAt: w.Now.Add(-31 * time.Minute).UTC().Format(time.RFC3339), Generation: "1",
+	})
+	w.Census.canonical = append(w.Census.canonical, rig)
+	k := rowKeyOf("gc-1")
+	alerts := func() []string {
+		var ids []string
+		for _, e := range f.ev.Events {
+			if e.Type == events.SessionDrainStopEscalated {
+				ids = append(ids, e.SessionID)
+			}
+		}
+		return ids
+	}
+	const unread = -1 // activity the pass cannot read
+	// observe advances by d and observes gc-1 alive, attached or not, last
+	// active idle ago (unread for none), or gone.
+	observe := func(d time.Duration, live rowLiveness, attached bool, idle time.Duration) *passCounts {
+		w.Now = w.Now.Add(d)
+		w.Observed = map[rowKey]rowObservation{k: {Liveness: live, Attached: attached}}
+		w.Obs, w.ObsMaxAge = observedOwn(&w, k.ID), observeMaxAge
+		if idle != unread {
+			name := w.Census.Rows[k].Info.SessionName
+			obs := w.Obs.ByName[name]
+			obs.LastActivity, obs.LastActivityKnown = w.Now.Add(-idle), true
+			w.Obs.ByName[name] = obs
+		}
+		c := &passCounts{}
+		f.p.observeWorld(&w, nil, c)
+		return c
+	}
+	quiet := 11 * time.Minute // past drainAckEscalationQuietGrace
+	if c := observe(0, livenessAlive, true, quiet); len(alerts()) != 0 || c.StopOutstanding != 1 {
+		t.Fatalf("attached: alerts %v, %d outstanding; want none, and only the city's row counted", alerts(), c.StopOutstanding)
+	}
+	if observe(time.Minute, livenessAlive, false, time.Minute); len(alerts()) != 0 {
+		t.Fatalf("active a minute ago: alerts %v, want none", alerts())
+	}
+	if observe(time.Minute, livenessAlive, false, unread); len(alerts()) != 0 {
+		t.Fatalf("activity unreadable: alerts %v, want none", alerts())
+	}
+	if observe(time.Minute, livenessAlive, false, quiet); !slices.Equal(alerts(), []string{k.ID}) {
+		t.Fatalf("the hold cleared: alerts %v, want one at once for %s alone", alerts(), k.ID)
+	}
+	if observe(15*time.Minute, livenessAlive, true, quiet); len(alerts()) != 1 {
+		t.Fatalf("attached at the repeat: %d alerts, want still one", len(alerts()))
+	}
+	if observe(time.Minute, livenessAlive, false, quiet); len(alerts()) != 2 {
+		t.Fatalf("detached past the repeat: %d alerts, want a second at once", len(alerts()))
+	}
+	// A hold keeps the memory: one inside the repeat alerts nothing when it
+	// clears.
+	observe(5*time.Minute, livenessAlive, true, quiet)
+	if observe(time.Minute, livenessAlive, false, quiet); len(alerts()) != 2 {
+		t.Fatalf("a hold inside the repeat cleared: %d alerts, want still two", len(alerts()))
+	}
+	// A runtime that reads gone has no pane to be busy: its unread activity
+	// holds nothing.
+	if observe(15*time.Minute, livenessGone, false, unread); len(alerts()) != 3 {
+		t.Fatalf("gone, activity unread: %d alerts, want a third", len(alerts()))
 	}
 }

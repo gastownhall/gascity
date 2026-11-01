@@ -51,7 +51,7 @@ var rawWriteFenced = map[string]string{
 	"internal/session/store.go:commitIf":                    "Store.Commit's and ApplyPatchIfLifecycleUnchanged's loop",
 	"internal/session/store.go:CommitStartedIfCurrentUnder": "the start commit (v5 S2)",
 	"internal/session/store.go:applyPatchIfClosed":          "writes only a row still closed",
-	"internal/session/store.go:CloseWithTerminalPatchUnder": "the terminal close: guarded on its read (closePremiseHolds), atomic where the store can close conditionally (R8b's CommitClose)",
+	"internal/session/store.go:CommitClose":                 "the terminal close: guarded on every read by its decision's site, atomic where the store can close conditionally",
 }
 
 // rawWriteNotSession are writes the scan's name match counts that do not
@@ -60,6 +60,7 @@ var rawWriteNotSession = map[string]string{
 	"cmd/gc/autoclose_fence.go:autocloseCloseIfStill":                      "close_reason on the work bead autoclose closes",
 	"cmd/gc/molecule_autoclose.go:closeMoleculeWithReason":                 "close_reason on a molecule bead",
 	"cmd/gc/cmd_convoy_dispatch.go:reopenTrackingConvoysForReopenedSource": "close_reason cleared on a reopened convoy bead",
+	"cmd/gc/cmd_formula.go:stampFormulaCookRootMetadata":                   "gc formula cook's --meta pairs on the root it cooked",
 	"cmd/gc/convergence_store.go:CloseBead":                                "close_reason on a convergence bead",
 	"internal/api/huma_handlers_beads.go:humaHandleBeadClose":              "close_reason on the bead the API closes (two writes)",
 	"internal/session/wait_store.go:CloseWaitFromNudge":                    "a wait bead's terminal state",

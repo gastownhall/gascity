@@ -21,12 +21,20 @@ var ErrOperationUnsupported = errors.New("worker operation is unsupported")
 // RuntimeHandleConfig configures a worker handle for a legacy runtime-only
 // session target that has no bead-backed session identity.
 type RuntimeHandleConfig struct {
-	Provider     runtime.Provider
-	SessionName  string
+	Provider    runtime.Provider
+	SessionName string
+	// ProviderName is the builtin provider family (for example "claude"), not
+	// the configured provider name. Callers resolve a wrapped alias first with
+	// config.BuiltinFamily or ResolvedProvider.BuiltinAncestor.
 	ProviderName string
 	Transport    string
 	ProcessNames []string
 	Recorder     events.Recorder
+	// CityPath is the city the session belongs to, which scopes the
+	// handle's bounded turn reads as a SessionHandle's are; empty scopes
+	// them to Provider, so they share no read with the city's
+	// SessionHandles. Set it wherever the handle reads turns.
+	CityPath string
 }
 
 // RuntimeHandle adapts a legacy runtime session name to the canonical worker
@@ -39,6 +47,7 @@ type RuntimeHandle struct {
 	transport    string
 	processNames []string
 	recorder     events.Recorder
+	cityPath     string
 }
 
 var _ Handle = (*RuntimeHandle)(nil)
@@ -62,6 +71,7 @@ func NewRuntimeHandle(cfg RuntimeHandleConfig) (*RuntimeHandle, error) {
 		transport:    strings.TrimSpace(cfg.Transport),
 		processNames: append([]string(nil), cfg.ProcessNames...),
 		recorder:     recorder,
+		cityPath:     strings.TrimSpace(cfg.CityPath),
 	}, nil
 }
 
@@ -77,8 +87,10 @@ func (h *RuntimeHandle) Start(ctx context.Context, _ sessionpkg.Actor) (err erro
 	return err
 }
 
-// StartResolved starts a runtime-only handle using the provided resolved command.
-func (h *RuntimeHandle) StartResolved(ctx context.Context, by sessionpkg.Actor, startCommand string, cfg runtime.Config) (err error) {
+// StartResolved starts a runtime-only handle using the provided resolved
+// command. It has no session row, so it has no incarnation to run under: the
+// legacy bead-less start (§3.3 S8), allowlisted until legacy is deleted.
+func (h *RuntimeHandle) StartResolved(ctx context.Context, by sessionpkg.Actor, _ sessionpkg.Incarnation, startCommand string, cfg runtime.Config) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationStartResolved)
 	defer func() { event.finish(err) }()
 
@@ -230,6 +242,7 @@ func (h *RuntimeHandle) State(context.Context) (State, error) {
 		state.Phase = PhaseStopped
 		return state, nil
 	}
+	state.Program = ProgramStatusOf(h.provider, h.sessionName)
 	pending, err := h.Pending(context.Background())
 	if err != nil {
 		return State{}, err
@@ -237,6 +250,10 @@ func (h *RuntimeHandle) State(context.Context) (State, error) {
 	if pending != nil {
 		state.Phase = PhaseBlocked
 		state.Pending = pending
+		return state, nil
+	}
+	if phase, decided := ProgramPhase(state.Program); decided {
+		state.Phase = phase
 		return state, nil
 	}
 	state.Phase = PhaseReady
@@ -258,23 +275,109 @@ func (h *RuntimeHandle) Message(ctx context.Context, _ sessionpkg.Actor, req Mes
 		err = fmt.Errorf("message text is required")
 		return MessageResult{}, err
 	}
+	if _, held, lookErr := heldDelivery(ctx, req.Redelivery, req.DeliveryKey, h.lookupDelivery); lookErr != nil || held {
+		err = lookErr
+		result = MessageResult{Replayed: held}
+		return result, err
+	}
 	if !h.provider.IsRunning(h.sessionName) {
 		err = fmt.Errorf("%w: %s", sessionpkg.ErrSessionInactive, h.sessionName)
 		return MessageResult{}, err
 	}
-	if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
-		return MessageResult{}, err
+	// A message goes out unfenced, as it always has, under its key alone.
+	ctx, _, _ = fencedNudgeContext(ctx, NudgeRequest{}, nil)
+	ctx = nudgeDeliveryContext(ctx, NudgeRequest{DeliveryKey: req.DeliveryKey})
+	if _, err := runtime.NudgeWithReceipt(ctx, h.provider, h.sessionName, runtime.TextContent(req.Text), false); err != nil {
+		return MessageResult{}, runtimeInteractionError(err)
 	}
 	result = MessageResult{Queued: false}
 	return result, nil
 }
 
-// Interrupt asks the provider to interrupt the live runtime session.
-func (h *RuntimeHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err error) {
+// lookupDelivery is the session's delivery lookup for heldDelivery.
+func (h *RuntimeHandle) lookupDelivery(ctx context.Context, key string) (runtime.DeliveryReceipt, bool, error) {
+	return runtime.LookupDelivery(ctx, h.provider, h.sessionName, key)
+}
+
+// Interrupt asks the provider to interrupt the live runtime session. With no
+// session bead to pick provider-specific keys, keystroke and protocol
+// runtimes both get Interrupt; a runtime that cannot interrupt the turn is
+// sent nothing and reported with [sessionpkg.ErrTurnInterruptUnsupported].
+// A turn-scoped interrupt (req.Turn) needs a provider that observes and
+// fences turns itself, since a RuntimeHandle reads no transcript: it runs
+// the provider's InterruptTurn and WaitTurnEnded, and is refused, nothing
+// sent, on any other provider, and with an input fence, which a protocol
+// turn interrupt cannot carry (runtime.ErrInputFenceUnsupported).
+func (h *RuntimeHandle) Interrupt(ctx context.Context, req InterruptRequest) error {
+	_, err := h.interrupt(ctx, nil, req)
+	return err
+}
+
+// InterruptAs is Interrupt; by is unused, since a bare runtime is never
+// restarted: an OnFailure restart is refused, nothing sent, with
+// ErrInterruptRestartUnsupported, and a ForReplacement interrupt with
+// session.ErrTurnInterruptUnsupported (a bare runtime has no deliver-now,
+// its Replace is none).
+func (h *RuntimeHandle) InterruptAs(ctx context.Context, by sessionpkg.Actor, req InterruptRequest) (InterruptResult, error) {
+	return h.interrupt(ctx, &by, req)
+}
+
+// interrupt is InterruptAs for by, nil for no actor.
+func (h *RuntimeHandle) interrupt(ctx context.Context, by *sessionpkg.Actor, req InterruptRequest) (result InterruptResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationInterrupt)
 	defer func() { event.finish(err) }()
 
+	if err = req.validate(by); err != nil {
+		return InterruptResult{}, err
+	}
+	switch {
+	case req.OnFailure == InterruptOnFailureRestart:
+		err = fmt.Errorf("interrupting %s: %w", h.sessionName, ErrInterruptRestartUnsupported)
+		return InterruptResult{}, err
+	case req.ForReplacement:
+		err = replacementRefusal(TurnReplaceNone, h.sessionName)
+		return InterruptResult{}, err
+	case req.Turn != "":
+		if !req.Fence.IsZero() && req.AllowUnfenced && h.turnCapabilities().Source == TurnSourceProtocol {
+			req.Fence, result.Unfenced = runtime.InputFence{}, true
+		}
+		err = h.interruptTurn(ctx, req.Turn, req.Fence)
+		return result, err
+	}
+	if !req.Fence.IsZero() && runtime.InputFencingFor(h.provider, h.sessionName) == runtime.InputFencingNone {
+		if !req.AllowUnfenced {
+			err = fmt.Errorf("%w: %s", runtime.ErrInputFenceUnsupported, h.sessionName)
+			return InterruptResult{}, err
+		}
+		req.Fence, result.Unfenced = runtime.InputFence{}, true
+	}
+	if runtime.TurnInterruptModeFor(h.provider, h.sessionName) == runtime.TurnInterruptUnsupported {
+		err = fmt.Errorf("%w: %s", sessionpkg.ErrTurnInterruptUnsupported, h.sessionName)
+		return InterruptResult{}, err
+	}
+	if !req.Fence.IsZero() {
+		err = runtime.InterruptWithContext(runtime.WithInputFence(ctx, req.Fence), h.provider, h.sessionName)
+		return result, err
+	}
 	err = h.provider.Interrupt(h.sessionName)
+	return result, err
+}
+
+// interruptTurn is the turn-scoped interrupt from the provider alone: its
+// turn capabilities decide the refusal, and its turn fence the interrupt.
+func (h *RuntimeHandle) interruptTurn(ctx context.Context, turn string, fence runtime.InputFence) error {
+	caps := h.turnCapabilities()
+	if err := turnInterruptRefusal(caps, h.sessionName, turn); err != nil {
+		return err
+	}
+	tf, ok := h.provider.(runtime.TurnFenceProvider)
+	if caps.Source != TurnSourceProtocol || !ok {
+		return fmt.Errorf("interrupting turn %q of %s: %w", turn, h.sessionName, runtime.ErrTurnIdentityUnsupported)
+	}
+	if err := protocolTurnInterruptFenceRefusal(fence, h.sessionName, turn); err != nil {
+		return err
+	}
+	_, err := sessionpkg.InterruptTurnOn(ctx, tf, h.sessionName, turn)
 	return err
 }
 
@@ -282,6 +385,7 @@ func (h *RuntimeHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err 
 // Like Message, it is permanently excluded from invocation telemetry;
 // see SessionHandle.recordInvocationTelemetry.
 func (h *RuntimeHandle) Nudge(ctx context.Context, _ sessionpkg.Actor, req NudgeRequest) (result NudgeResult, err error) {
+	ctx = nudgeDeliveryContext(ctx, req)
 	event := h.beginOperationEvent(ctx, workerOperationNudge)
 	defer func() {
 		event.payload.Delivered = boolPointer(result.Delivered)
@@ -292,7 +396,34 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, _ sessionpkg.Actor, req Nudge
 		err = fmt.Errorf("nudge text is required")
 		return NudgeResult{}, err
 	}
-	if !h.provider.IsRunning(h.sessionName) {
+	ctx, unfenced, err := fencedNudgeContext(ctx, req, func() (runtime.InputFencing, error) {
+		return runtime.InputFencingFor(h.provider, h.sessionName), nil
+	})
+	if err != nil {
+		return NudgeResult{}, err
+	}
+	defer func() { result.Unfenced = unfenced && result.Delivered && !result.Replayed }()
+	receipt, held, err := heldDelivery(ctx, req.Redelivery, req.DeliveryKey, h.lookupDelivery)
+	if err != nil {
+		return NudgeResult{}, err
+	}
+	if held {
+		result = NudgeResult{Delivered: true, Replayed: true, Receipt: receipt}
+		return result, nil
+	}
+	// Decided on a fresh read, not the provider's cache: the tmux state
+	// cache can show a crashed agent alive for seconds after the crash.
+	live, liveErr := runtime.ObserveLivenessSince(h.provider, h.sessionName, h.processNames, time.Now())
+	// A fenced nudge reports what the read found instead of undelivered.
+	if err = runtime.LivenessFenceMiss(ctx, h.sessionName, live, liveErr); err != nil {
+		return NudgeResult{}, err
+	}
+	if liveErr != nil || live.Running && !live.Alive {
+		// A dead agent's pane takes nothing (mc-48az4): the caller queues it.
+		result = NudgeResult{Undelivered: NudgeUndeliveredAgentDead}
+		return result, nil
+	}
+	if !live.Running {
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
 			result = NudgeResult{Delivered: false}
 			return result, nil
@@ -302,17 +433,13 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, _ sessionpkg.Actor, req Nudge
 		return result, err
 	}
 	switch req.Delivery {
-	case "", NudgeDeliveryDefault:
-		if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
-			return NudgeResult{}, err
+	case "", NudgeDeliveryDefault, NudgeDeliveryImmediate:
+		immediate := req.Delivery == NudgeDeliveryImmediate
+		receipt, err = runtime.NudgeWithReceipt(ctx, h.provider, h.sessionName, runtime.TextContent(req.Text), immediate)
+		if err != nil {
+			return NudgeResult{}, runtimeInteractionError(err)
 		}
-		result = NudgeResult{Delivered: true}
-		return result, nil
-	case NudgeDeliveryImmediate:
-		if err := h.nudgeNow(req.Text); err != nil {
-			return NudgeResult{}, err
-		}
-		result = NudgeResult{Delivered: true}
+		result = NudgeResult{Delivered: true, Receipt: receipt}
 		return result, nil
 	case NudgeDeliveryWaitIdle:
 		result, err = h.nudgeWaitIdle(ctx, req)
@@ -365,9 +492,12 @@ func (h *RuntimeHandle) Pending(ctx context.Context) (*PendingInteraction, error
 // PendingStatus returns the pending interaction plus whether the provider
 // supports it. Support is keyed on the provider's answer, not on the interface:
 // a provider that implements InteractionProvider but answers
-// runtime.ErrInteractionUnsupported (acp) is unsupported. A vanished session
-// has no prompt. Any other probe error is returned, so callers can tell "could
-// not tell" from "nothing pending". The mapping mirrors session.Manager.PendingByName.
+// runtime.ErrInteractionUnsupported (a router whose backend has no
+// interactions) is unsupported. A vanished session reports no prompt, and so
+// does a session this provider instance does not own (ACP answers that with
+// runtime.ErrSessionNotFound). Any other probe error is returned, so callers
+// can tell "could not tell" from "nothing pending". The mapping mirrors
+// session.Manager.PendingByName.
 func (h *RuntimeHandle) PendingStatus(context.Context) (*PendingInteraction, bool, error) {
 	ip, ok := h.provider.(runtime.InteractionProvider)
 	if !ok {
@@ -429,18 +559,44 @@ func (h *RuntimeHandle) LiveObservation(_ context.Context) (LiveObservation, err
 	return obs, nil
 }
 
-// Respond resolves a blocking interaction through the runtime provider.
-func (h *RuntimeHandle) Respond(_ context.Context, req InteractionResponse) error {
+// Respond resolves a blocking interaction through the runtime provider, only
+// in the incarnation req.Fence names when it is set.
+func (h *RuntimeHandle) Respond(ctx context.Context, req InteractionResponse) error {
 	ip, ok := h.provider.(runtime.InteractionProvider)
 	if !ok {
 		return runtime.ErrInteractionUnsupported
 	}
-	return ip.Respond(h.sessionName, runtime.InteractionResponse{
+	response := runtime.InteractionResponse{
 		RequestID: req.RequestID,
 		Action:    req.Action,
 		Text:      req.Text,
 		Metadata:  cloneStringMap(req.Metadata),
-	})
+	}
+	if !req.Fence.IsZero() {
+		if err := req.Fence.Validate(); err != nil {
+			return err
+		}
+		return runtimeInteractionError(runtime.RespondFencedVia(ctx, h.provider, h.sessionName, req.Fence, response))
+	}
+	return runtimeInteractionError(ip.Respond(h.sessionName, response))
+}
+
+// runtimeInteractionError reports the runtime's interaction refusals in the
+// session vocabulary, as session.Manager does, so a caller maps them the same
+// way for a runtime-only handle: a nudge refused while an interaction is
+// pending is session.ErrPendingInteraction, and a response the provider
+// rejects, or one naming an action the pending prompt does not offer, is
+// session.ErrInteractionMismatch. The runtime error stays wrapped.
+func runtimeInteractionError(err error) error {
+	switch {
+	case errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction):
+		return fmt.Errorf("%w: %w", sessionpkg.ErrPendingInteraction, err)
+	case errors.Is(err, runtime.ErrInteractionResponseInvalid),
+		errors.Is(err, runtime.ErrInteractionActionUnavailable),
+		errors.Is(err, runtime.ErrInteractionGone):
+		return fmt.Errorf("%w: %w", sessionpkg.ErrInteractionMismatch, err)
+	}
+	return err
 }
 
 const runtimeHandleWaitIdleTimeout = 30 * time.Second
@@ -459,7 +615,7 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 	}
 	if h.transport == "acp" {
 		if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
-			return NudgeResult{}, err
+			return NudgeResult{}, runtimeInteractionError(err)
 		}
 		return NudgeResult{Delivered: true}, nil
 	}
@@ -474,6 +630,15 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 	waiter, ok := h.provider.(runtime.IdleWaitProvider)
 	if !ok {
 		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredProviderUnsupported}, nil
+	}
+	// Under the program-status shadow switch, the pre-read a wait-idle
+	// delivery would take is recorded beside the record; nothing reads it.
+	runtime.ShadowWaitIdlePreread(h.provider, h.sessionName, "", h.providerName, time.Now())
+	// A pre-read first: a session that reads busy, or whose input a pending
+	// interaction owns, will not reach a boundary within the wait, so the
+	// caller queues it now instead of blocking for runtimeHandleWaitIdleTimeout.
+	if runtime.IdleBoundaryNow(h.provider, h.sessionName).OutOfReach() {
+		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredNoIdleBoundary}, nil
 	}
 	if err := waiter.WaitForIdle(ctx, h.sessionName, runtimeHandleWaitIdleTimeout); err != nil {
 		// A provider type can implement the idle wait while the runtime behind
@@ -495,7 +660,7 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredNoIdleBoundary}, nil
 	}
 	if err := h.nudgeNow(formatRuntimeWaitIdleReminder(req.Source, req.Text)); err != nil {
-		return NudgeResult{}, err
+		return NudgeResult{}, runtimeInteractionError(err)
 	}
 	return NudgeResult{Delivered: true}, nil
 }

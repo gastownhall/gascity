@@ -260,8 +260,7 @@ func TestSplitStoreWork_PoolSlotCloseGateReadsTheWorkStore(t *testing.T) {
 					info := sessionInfosFromBeads([]beads.Bead{seat})[0]
 					sw := seatWorkOn(path, cityPath, cfg, sessions, nil, info)
 
-					closed := closeSessionBeadIfReachableStoreUnassigned(sessions, sw,
-						info, "drained", seatWorkNow, io.Discard, false)
+					closed := closeSeat(sessions, sw, info, closeWhy{reason: "drained", gate: closeGated}, seatWorkNow, io.Discard)
 
 					if want := tc == "empty"; closed != want {
 						t.Fatalf("close = %v, want %v", closed, want)
@@ -341,7 +340,7 @@ func TestSplitStoreWork_RigBoundSeatHoldsItsCityStoreClaim(t *testing.T) {
 				claim := createWork(t, work, "in_progress", infos[0].ID, nil)
 				sw := seatWorkOn(path, cityPath, cfg, sessions, rigs, infos[0])
 
-				if closeSessionBeadIfReachableStoreUnassigned(sessions, sw, infos[0], "drained", seatWorkNow, io.Discard, false) {
+				if closeSeat(sessions, sw, infos[0], closeWhy{reason: "drained", gate: closeGated}, seatWorkNow, io.Discard) {
 					t.Fatal("the rig-bound seat closed holding a city-store claim")
 				}
 				stranded, err := collectSessionAssignedWorkInfo(sw, infos[0])

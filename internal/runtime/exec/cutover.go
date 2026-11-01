@@ -11,6 +11,7 @@ import (
 // de-conflated seams (via [runtime.NewProviderFromSeams]), passing the optional
 // interfaces production callers type-assert — DialogProvider (dialog dismissal),
 // SleepCapability, IdleWaitProvider (the idle boundary) and its probe budget,
+// FencedInputProvider (the carrier guard),
 // the error-bearing attachment probe, and the image-checker (CheckImage) — through to the
 // underlying *Provider. The early cut-over for the exec provider.
 //
@@ -29,6 +30,7 @@ var (
 	_ runtime.SleepCapabilityProvider = (*seamBackedProvider)(nil)
 	_ runtime.RelaunchProvider        = (*seamBackedProvider)(nil)
 
+	_ runtime.FencedInputProvider         = (*seamBackedProvider)(nil)
 	_ runtime.IdleWaitProvider            = (*seamBackedProvider)(nil)
 	_ runtime.AttachmentObserverWithError = (*seamBackedProvider)(nil)
 	_ runtime.IdleProbeBudgetProvider     = (*seamBackedProvider)(nil)
@@ -88,4 +90,25 @@ func (s *seamBackedProvider) Relaunch(ctx context.Context, name string, cfg runt
 // capability set through the production seam-backed composition.
 func (s *seamBackedProvider) Capabilities() runtime.ProviderCapabilities {
 	return s.raw.Capabilities()
+}
+
+// InputFencing passes through to the underlying provider (non-seam): the
+// pack's handshake decides it.
+func (s *seamBackedProvider) InputFencing(name string) runtime.InputFencing {
+	return s.raw.InputFencing(name)
+}
+
+// NudgeFenced passes through to the underlying provider's carrier guard.
+func (s *seamBackedProvider) NudgeFenced(ctx context.Context, name string, content []runtime.ContentBlock, n runtime.FencedNudge) error {
+	return s.raw.NudgeFenced(ctx, name, content, n)
+}
+
+// SendKeysFenced passes through to the underlying provider's carrier guard.
+func (s *seamBackedProvider) SendKeysFenced(ctx context.Context, name string, fence runtime.InputFence, keys ...string) error {
+	return s.raw.SendKeysFenced(ctx, name, fence, keys...)
+}
+
+// InterruptFenced passes through to the underlying provider's carrier guard.
+func (s *seamBackedProvider) InterruptFenced(ctx context.Context, name string, fence runtime.InputFence) error {
+	return s.raw.InterruptFenced(ctx, name, fence)
 }

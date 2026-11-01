@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -62,7 +64,7 @@ type agentResponse struct {
 	// for city-native agents.
 	Pack string `json:"pack,omitempty"`
 
-	State string `json:"state"`
+	State string `json:"state" doc:"Agent state: suspended, quarantined, stopped, working, waiting, idle, blocked or error. blocked and error come only from the session program's own status report, under the city's program_status switch on."`
 
 	Available         bool   `json:"available"`
 	UnavailableReason string `json:"unavailable_reason,omitempty"`
@@ -71,6 +73,12 @@ type agentResponse struct {
 
 	// Activity indicates session turn state: "idle", "in-turn", or omitted.
 	Activity string `json:"activity,omitempty"`
+	// ActivitySource names where Activity came from. Set only while
+	// ProgramStatus is shown.
+	ActivitySource string `json:"activity_source,omitempty" enum:"program,transcript" doc:"Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report."`
+	// ProgramStatus is the agent session program's own status report;
+	// absent means unknown, never idle.
+	ProgramStatus *SessionProgramStatus `json:"program_status,omitempty" doc:"The agent session program's own status report (OSC 7501), present while the city's program_status switch is shadow or on and the reading is valid. Absent means the status is unknown, never idle."`
 
 	Model         string `json:"model,omitempty"`
 	ContextPct    *int   `json:"context_pct,omitempty"`
@@ -97,7 +105,6 @@ type expandedAgent struct {
 	rig           string
 	pool          string
 	suspended     bool
-	provider      string
 	description   string
 }
 
@@ -105,15 +112,20 @@ type expandedAgent struct {
 // For bounded pool agents, this generates pool-1..pool-max members.
 // For unlimited pools (max < 0), it discovers running instances via session
 // provider prefix matching — the same approach as discoverPoolInstances.
-func expandAgent(a config.Agent, cityName, sessTmpl string, sp sessionLister) []expandedAgent {
-	expanded, _ := expandAgentChecked(a, cityName, sessTmpl, sp)
+// That prefix never matches a named session running under the template's
+// bare name, so a template that leaves max_active_sessions unset (the shape
+// gc lint accepts for one) lists its own named session from config instead.
+func expandAgent(a config.Agent, cityName, sessTmpl string, sp sessionLister, named []config.NamedSession) []expandedAgent {
+	expanded, _ := expandAgentChecked(a, cityName, sessTmpl, sp, named)
 	return expanded
 }
 
 // expandAgentChecked is expandAgent that also returns the session-listing
-// error behind an unlimited pool's empty expansion, so a caller can report
-// "could not list sessions" instead of mistaking it for "no sessions".
-func expandAgentChecked(a config.Agent, cityName, sessTmpl string, sp sessionLister) ([]expandedAgent, error) {
+// error that left an unlimited pool without its running instances, so a
+// caller can report "could not list sessions" instead of mistaking it for
+// "no sessions". A template's own named session comes from config, so its
+// row is returned even alongside that error.
+func expandAgentChecked(a config.Agent, cityName, sessTmpl string, sp sessionLister, named []config.NamedSession) ([]expandedAgent, error) {
 	maxSess := a.EffectiveMaxActiveSessions()
 
 	if !isMultiSessionAgent(a) {
@@ -121,7 +133,6 @@ func expandAgentChecked(a config.Agent, cityName, sessTmpl string, sp sessionLis
 			qualifiedName: a.QualifiedName(),
 			rig:           a.Dir,
 			suspended:     a.Suspended,
-			provider:      a.Provider,
 			description:   a.Description,
 		}}, nil
 	}
@@ -131,7 +142,11 @@ func expandAgentChecked(a config.Agent, cityName, sessTmpl string, sp sessionLis
 	// Unlimited: discover running instances via session prefix.
 	isUnlimited := maxSess == nil || *maxSess < 0
 	if isUnlimited && sp != nil {
-		return discoverUnlimitedPoolChecked(a, poolName, cityName, sessTmpl, sp)
+		instances, err := discoverUnlimitedPoolChecked(a, poolName, cityName, sessTmpl, sp)
+		if maxSess == nil && isOwnNamedSession(a, named) {
+			instances = append([]expandedAgent{configuredPoolRow(a)}, instances...)
+		}
+		return instances, err
 	}
 
 	// Bounded: static enumeration.
@@ -149,16 +164,16 @@ func expandAgentChecked(a config.Agent, cityName, sessTmpl string, sp sessionLis
 			rig:           a.Dir,
 			pool:          poolName,
 			suspended:     a.Suspended,
-			provider:      a.Provider,
 			description:   a.Description,
 		})
 	}
 	return result, nil
 }
 
-// configuredPoolRow is the identity of a multi-session agent itself, used to
-// list an on-demand pool that has no live session: its qualified name is both
-// the row name and the pool name.
+// configuredPoolRow is the identity of a multi-session agent itself: its
+// qualified name is both the row name and the pool name. It lists an
+// on-demand pool that has no live session, and a template's own named
+// session beside the instances discovered for it.
 func configuredPoolRow(a config.Agent) expandedAgent {
 	qn := a.QualifiedName()
 	return expandedAgent{
@@ -166,7 +181,6 @@ func configuredPoolRow(a config.Agent) expandedAgent {
 		rig:           a.Dir,
 		pool:          qn,
 		suspended:     a.Suspended,
-		provider:      a.Provider,
 		description:   a.Description,
 	}
 }
@@ -179,6 +193,18 @@ func agentPoolLimits(a config.Agent) *poolLimits {
 		limits.Max = *maxSess
 	}
 	return &limits
+}
+
+// isOwnNamedSession reports whether a configured named session is backed by
+// the agent and uses the agent's own qualified name as its identity.
+func isOwnNamedSession(a config.Agent, named []config.NamedSession) bool {
+	qn := a.QualifiedName()
+	for i := range named {
+		if named[i].QualifiedName() == qn && named[i].TemplateQualifiedName() == qn {
+			return true
+		}
+	}
+	return false
 }
 
 // sessionLister is the subset of session.Provider needed for pool discovery.
@@ -223,7 +249,6 @@ func discoverUnlimitedPoolChecked(a config.Agent, poolName, cityName, sessTmpl s
 			rig:           a.Dir,
 			pool:          poolName,
 			suspended:     a.Suspended,
-			provider:      a.Provider,
 			description:   a.Description,
 		})
 	}
@@ -360,7 +385,8 @@ func rigTemplateInstance(cfg *config.City, name string) (template, rig string, o
 // findActiveBeadForAssignees returns the ID of the first in_progress bead
 // assigned to the given identities using the cached active snapshot. If rig is
 // non-empty, only that rig's store is searched; otherwise all stores are
-// searched. Returns "" if no match.
+// searched. A store only rigs suspended by effective state reach is never
+// searched (activeBeadSearchScope). Returns "" if no match.
 func (s *Server) findActiveBeadForAssignees(rig string, assignees ...string) string {
 	return s.findActiveBeadForAssigneesWithFreshness(rig, false, assignees...)
 }
@@ -368,24 +394,19 @@ func (s *Server) findActiveBeadForAssignees(rig string, assignees ...string) str
 // findLiveActiveBeadForAssignees returns the ID of the first in_progress bead
 // assigned to the given identities, bypassing the cache. Use this on
 // lower-frequency detail views where external reassignment freshness matters.
+// A store only rigs suspended by effective state reach is never searched.
 func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string) string {
 	return s.findActiveBeadForAssigneesWithFreshness(rig, true, assignees...)
 }
 
-// findActiveBeadForAssigneesWithFreshness uses a targeted ListQuery with
-// Limit=1 instead of broad scans so active-bead lookup stays cheap even when
-// bead counts are large.
+// findActiveBeadForAssigneesWithFreshness returns the in_progress bead of the
+// highest-priority identity: identity order first, then store order, then
+// newest first within a store. Cached reads use a targeted ListQuery with
+// Limit=1 per identity and store, stopping at the first match; live reads go
+// through findLiveActiveBeadInStores. Both read only the stores
+// activeBeadSearchScope picks.
 func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, assignees ...string) string {
-	stores := s.state.BeadStores()
-	var rigNames []string
-	if rig != "" {
-		if _, ok := stores[rig]; ok {
-			rigNames = []string{rig}
-		}
-	}
-	if rigNames == nil {
-		rigNames = sortedRigNames(stores)
-	}
+	stores, rigNames := activeBeadSearchScope(s.state.BeadStores(), s.loadCacheColdRigs(), rig)
 	seen := make(map[string]bool, len(assignees))
 	var unique []string
 	for _, assignee := range assignees {
@@ -396,24 +417,24 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 		seen[assignee] = true
 		unique = append(unique, assignee)
 	}
+	if live {
+		return findLiveActiveBeadInStores(stores, rigNames, unique)
+	}
 	for _, assignee := range unique {
 		for _, rn := range rigNames {
 			query := beads.ListQuery{
 				Assignee: assignee,
 				Status:   "in_progress",
-				Live:     live,
 				Limit:    1,
 				Sort:     beads.SortCreatedDesc,
 			}
-			if !live {
-				if cached, ok := stores[rn].(cachedListStore); ok {
-					matches, cacheOK := cached.CachedList(query)
-					if cacheOK {
-						if len(matches) > 0 {
-							return matches[0].ID
-						}
-						continue
+			if cached, ok := stores[rn].(cachedListStore); ok {
+				matches, cacheOK := cached.CachedList(query)
+				if cacheOK {
+					if len(matches) > 0 {
+						return matches[0].ID
 					}
+					continue
 				}
 			}
 			matches, err := stores[rn].List(query)
@@ -426,6 +447,93 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 		}
 	}
 	return ""
+}
+
+// activeBeadSearchScope returns the stores an active-bead lookup may read and
+// the names to read them through, in order. A rig suspended by effective
+// state (cold, cacheColdRigNames) has no cache, and a read of its store
+// restarts its retired proxy and Dolt, so its name is dropped before
+// sortedRigNames dedupes the stores; a store it shares with a rig that is not
+// suspended, as in legacy shared-file mode, stays reachable through that
+// alias. A lookup scoped to a rig reads that rig's store alone: a suspended
+// rig's through such an alias, or nothing when the store has none, never the
+// other rigs' stores. An unscoped lookup, or one scoped to a rig that is not
+// suspended and has no store, reads every remaining store once.
+//
+// residency:allow — filters the caller's own rig map by effective suspension
+// and names the rigs to read it through; it opens no store and consults no
+// binding, namespace or leg order.
+func activeBeadSearchScope(all map[string]beads.Store, cold map[string]bool, rig string) (map[string]beads.Store, []string) {
+	stores := make(map[string]beads.Store, len(all))
+	for name, store := range all {
+		if !cold[name] {
+			stores[name] = store
+		}
+	}
+	if rig != "" && cold[rig] {
+		if shared := all[rig]; shared != nil {
+			for _, name := range sortedRigNames(stores) {
+				if stores[name] == shared {
+					return stores, []string{name}
+				}
+			}
+		}
+		return stores, nil
+	}
+	if _, ok := stores[rig]; ok && rig != "" {
+		return stores, []string{rig}
+	}
+	return stores, sortedRigNames(stores)
+}
+
+// findLiveActiveBeadInStores makes one live List call per store for all
+// identities, not one per identity. That bounds the calls, not the backend
+// work: how far a store narrows its call varies. DoltliteReadStore filters
+// with assignee IN (...), NativeDoltStore and BdStore issue one keyed read per
+// identity, and SQLiteStore reads the store's whole in_progress set and
+// filters it client-side. Precedence matches the cached path. Reading stops
+// once the first identity has a match, since no later store can outrank it.
+func findLiveActiveBeadInStores(stores map[string]beads.Store, rigNames, identities []string) string {
+	if len(identities) == 0 {
+		return ""
+	}
+	firstByIdentity := make(map[string]string, len(identities))
+	for _, rn := range rigNames {
+		for _, match := range liveActiveWork(stores[rn], rn, identities) {
+			if _, ok := firstByIdentity[match.Assignee]; !ok {
+				firstByIdentity[match.Assignee] = match.ID
+			}
+		}
+		if firstByIdentity[identities[0]] != "" {
+			break
+		}
+	}
+	for _, identity := range identities {
+		if id := firstByIdentity[identity]; id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+// liveActiveWork returns a store's in_progress beads assigned to any of the
+// identities, newest first. A failed read is logged and skipped, but a partial
+// result keeps the rows that did decode: one unreadable bead must not hide the
+// session's own work.
+func liveActiveWork(store beads.Store, rig string, identities []string) []beads.Bead {
+	matches, err := store.List(beads.ListQuery{
+		Assignees: identities,
+		Status:    "in_progress",
+		Live:      true,
+		Sort:      beads.SortCreatedDesc,
+	})
+	if err != nil {
+		log.Printf("api: looking up active work in rig %q: %v", rig, err)
+		if !beads.IsPartialResult(err) {
+			return nil
+		}
+	}
+	return matches
 }
 
 // providerPathCheck returns the binary name to check for PATH availability.
@@ -509,8 +617,37 @@ func resolveProviderInfo(agentProvider string, cfg *config.City) (provider, disp
 	return provider, strings.ToUpper(provider[:1]) + provider[1:]
 }
 
-// computeAgentState derives the state enum from existing agent data.
-func computeAgentState(suspended, quarantined, running bool, activeBead string, lastActivity *time.Time) string {
+// agentProviderName is the provider an agent's sessions run under: its own,
+// else the workspace default. The SDK's control dispatcher
+// (config.IsDeterministicControlDispatcher) is providerless by design — its
+// start_command runs `gc convoy control --serve` — so it inherits none.
+func agentProviderName(a *config.Agent, cfg *config.City) string {
+	if config.IsDeterministicControlDispatcher(a) {
+		return ""
+	}
+	if a.Provider != "" {
+		return a.Provider
+	}
+	return cfg.Workspace.Provider
+}
+
+// agentProviderInfo is resolveProviderInfo for a configured agent, applying
+// agentProviderName: an agent without a provider reports none, and no
+// provider binary gates its availability.
+func agentProviderInfo(a *config.Agent, cfg *config.City) (provider, displayName string) {
+	provider = agentProviderName(a, cfg)
+	if provider == "" {
+		return "", ""
+	}
+	return resolveProviderInfo(provider, cfg)
+}
+
+// computeAgentState derives the state enum from existing agent data. A
+// running agent's program-status reading decides its state only when it
+// Decides (valid, city switch on): working is working, blocked is blocked,
+// error is error, and idle or done is waiting with an active bead and idle
+// without one. Any other reading leaves today's derivation.
+func computeAgentState(suspended, quarantined, running bool, activeBead string, lastActivity *time.Time, program runtime.ProgramStatus) string {
 	if suspended {
 		return "suspended"
 	}
@@ -519,6 +656,20 @@ func computeAgentState(suspended, quarantined, running bool, activeBead string, 
 	}
 	if !running {
 		return "stopped"
+	}
+	if program.Decides() {
+		switch program.State {
+		case runtime.ProgramWorking:
+			return "working"
+		case runtime.ProgramBlocked:
+			return "blocked"
+		case runtime.ProgramError:
+			return "error"
+		}
+		if activeBead != "" {
+			return "waiting"
+		}
+		return "idle"
 	}
 	if activeBead != "" {
 		if lastActivity != nil && time.Since(*lastActivity) < 10*time.Minute {
@@ -574,11 +725,7 @@ func canAttributeSession(agentCfg config.Agent, qualifiedName string, cfg *confi
 	}
 	count := 0
 	for _, a := range cfg.Agents {
-		provider := a.Provider
-		if provider == "" {
-			provider = cfg.Workspace.Provider
-		}
-		if provider == "claude" {
+		if agentProviderName(&a, cfg) == "claude" {
 			if isMultiSessionAgent(a) {
 				if multiSessionSharesWorkDir(cityPath, cityName, target, a, cfg.Rigs) {
 					return false

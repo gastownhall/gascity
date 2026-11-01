@@ -97,7 +97,7 @@ func assertSplitFormulaSlingRoutesInTheBinding(t *testing.T, cityPath string) {
 
 	resetCLIStorageRoutes(t)
 	var readyOut, readyErr bytes.Buffer
-	if rc := cmdReady(readyOpts{}, &readyOut, &readyErr); rc != 0 {
+	if rc := cmdReady(readyFlags{}, &readyOut, &readyErr); rc != 0 {
 		t.Fatalf("gc ready exit = %d: %s", rc, readyErr.String())
 	}
 	var rows []struct {

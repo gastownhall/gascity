@@ -40,11 +40,17 @@ func TestGcBdBulkCloseVerifiesIDsWithOneShow(t *testing.T) {
 		t.Fatal(err)
 	}
 	log := string(data)
-	if got := strings.Count(log, "show "); got != 1 {
-		t.Fatalf("bd show ran %d times, want 1 batched verification:\n%s", got, log)
-	}
-	if !strings.Contains(log, "close demo-a demo-wisp-b demo-c --reason stale") {
+	verify, after, found := strings.Cut(log, "close demo-a demo-wisp-b demo-c --reason stale")
+	if !found {
 		t.Fatalf("the verified close was not forwarded to bd:\n%s", log)
+	}
+	if got := strings.Count(verify, "show "); got != 1 {
+		t.Fatalf("bd show ran %d times before the close, want 1 batched verification:\n%s", got, log)
+	}
+	// The close announcement (bd_close_events.go) reads the rows back the
+	// same way: one batched read, not one per id.
+	if got := strings.Count(after, "show "); got != 1 {
+		t.Fatalf("bd show ran %d times after the close, want 1 batched read-back:\n%s", got, log)
 	}
 }
 

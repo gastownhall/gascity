@@ -27,6 +27,23 @@ type reconcileEnv struct {
 	Cfg       *config.City
 	SP        runtime.Provider
 	ConfigRev string
+	// Relaunch is SP's relaunch capability (runtime.RelaunchProvider), a
+	// pass fact that survives the provider's strip from the effects' World
+	// (newEffectPass), where A14 decides again (relaunches).
+	Relaunch bool
+}
+
+// relaunches reports the env's provider can relaunch an agent in its warm
+// box: SP's capability, or the fact a stripped env carries.
+func (e *reconcileEnv) relaunches() bool {
+	if e == nil {
+		return false
+	}
+	if e.SP != nil {
+		_, ok := e.SP.(runtime.RelaunchProvider)
+		return ok
+	}
+	return e.Relaunch
 }
 
 func (e *reconcileEnv) patrol() time.Duration {

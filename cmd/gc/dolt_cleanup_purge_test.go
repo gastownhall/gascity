@@ -88,6 +88,7 @@ func TestRunDoltCleanup_DryRunComputesPurgeBytesFromDroppedDirs(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	opts := cleanupOptions{
+		CityPort:          28231,
 		Rigs:              rigs,
 		FS:                fs,
 		JSON:              true,
@@ -133,6 +134,7 @@ func TestRunDoltCleanup_ForceCallsPurgePerRigDatabase(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	opts := cleanupOptions{
+		CityPort:          28231,
 		Rigs:              rigs,
 		FS:                fs,
 		JSON:              true,
@@ -176,6 +178,7 @@ func TestRunDoltCleanup_PurgeFailureRecordedNotFatal(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	opts := cleanupOptions{
+		CityPort:          28231,
 		Rigs:              rigs,
 		FS:                fs,
 		JSON:              true,
@@ -230,6 +233,7 @@ func TestRunDoltCleanup_ForceFailsPurgeWhenMissingRigDatabaseHasBytes(t *testing
 
 	var stdout, stderr bytes.Buffer
 	opts := cleanupOptions{
+		CityPort:          28231,
 		Rigs:              rigs,
 		FS:                fs,
 		JSON:              true,
@@ -269,6 +273,7 @@ func TestRunDoltCleanup_PurgeReportsUnexpectedFilesystemErrors(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	opts := cleanupOptions{
+		CityPort:          28231,
 		Rigs:              []resolverRig{{Name: "city", Path: "/city", HQ: true}},
 		FS:                fs,
 		JSON:              true,
@@ -341,6 +346,7 @@ func TestRunDoltCleanup_ForceSkipsPurgeForMissingRigDatabases(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	opts := cleanupOptions{
+		CityPort:          28231,
 		Rigs:              rigs,
 		FS:                fs,
 		JSON:              true,
@@ -705,9 +711,9 @@ func TestRunDoltCleanup_ForceSkipsPurgeForInvalidRigEndpointConfigWithCityConfig
 func TestRunDoltCleanup_ForceSkipsPurgeWhenScopeSharingUnproven(t *testing.T) {
 	// No canonical configs anywhere and no managed runtime state: nothing
 	// proves which scopes share the resolved server, and the resolution
-	// source is neither the legacy fallback nor the city config. Every scope
-	// must be excluded from purge accounting — the old port-file vouching is
-	// gone (city-scale plan P1.7).
+	// source is not the city config, the only source that vouches for an
+	// unresolvable scope. Every scope must be excluded from purge accounting
+	// — the old port-file vouching is gone (city-scale plan P1.7).
 	fs := fsys.NewFake()
 	fs.Files["/city/.beads/metadata.json"] = []byte(`{"dolt_database":"hq"}`)
 	putFakeDirTree(fs, "/city/.beads/dolt/.dolt_dropped_databases", map[string]int64{
@@ -758,6 +764,83 @@ func TestRunDoltCleanup_ForceSkipsPurgeWhenScopeSharingUnproven(t *testing.T) {
 	}
 }
 
+// TestRunDoltCleanup_LegacyFallbackPortSkipsPurgeForRigNamingThatPort pins
+// runPurgeStage's own fallback guard, which rigSharesResolvedDoltServer cannot
+// stand in for. A rig whose explicit endpoint is the legacy port matches the
+// resolved port by number, so it counts as sharing the server and its
+// dropped-database bytes are eligible. The port was still reached by fallback,
+// not named by anyone for this run, so a forced run may purge nothing there
+// and a dry run may not report those bytes as reclaimable.
+func TestRunDoltCleanup_LegacyFallbackPortSkipsPurgeForRigNamingThatPort(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		force bool
+	}{
+		{name: "dry run", force: false},
+		{name: "force", force: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := fsys.NewFake()
+			putExplicitRigConfig(fs, "/rigs/r", fmt.Sprint(LegacyDefaultDoltPort))
+			fs.Files["/rigs/r/.beads/metadata.json"] = []byte(`{"dolt_database":"r_db"}`)
+			putFakeDirTree(fs, "/rigs/r/.beads/dolt/.dolt_dropped_databases", map[string]int64{
+				"db_a/data.bin": 100,
+			})
+			rig := resolverRig{Name: "r", Path: "/rigs/r"}
+
+			purgedNames := []string{}
+			client := &fakeCleanupDoltClientCustomPurge{
+				databases: []string{"r_db"},
+				onPurge:   func(name string) error { purgedNames = append(purgedNames, name); return nil },
+			}
+
+			var stdout, stderr bytes.Buffer
+			opts := cleanupOptions{
+				Rigs:              []resolverRig{rig},
+				FS:                fs,
+				CityPath:          "/city",
+				LiveResolve:       fakeLiveResolveMiss(),
+				JSON:              true,
+				Force:             tt.force,
+				DoltClient:        client,
+				DiscoverProcesses: func() ([]DoltProcInfo, error) { return nil, nil },
+				ReapGracePeriod:   1,
+			}
+
+			// The premise: by port number alone this rig shares the fallback
+			// server, so only the stage guard keeps its bytes out of a purge.
+			// If the fixture stops proving that, the assertions below would
+			// pass for the wrong reason.
+			premise := opts
+			premise.PortResolution = PortResolution{Port: LegacyDefaultDoltPort, Source: "legacy default", Fallback: true}
+			if !rigSharesResolvedDoltServer(rig, premise) {
+				t.Fatalf("fixture: rig %s must resolve to the legacy port %d and so share the fallback server", rig.Path, LegacyDefaultDoltPort)
+			}
+
+			runDoltCleanup(opts, &stdout, &stderr)
+			var r CleanupReport
+			if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+				t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+			}
+			if r.Port.Resolved != LegacyDefaultDoltPort || !r.Port.Fallback {
+				t.Fatalf("Port = %+v, want the legacy-default fallback this test is about", r.Port)
+			}
+			if len(purgedNames) != 0 {
+				t.Errorf("purged DBs = %v, want none on the legacy fallback port", purgedNames)
+			}
+			if r.Purge.BytesReclaimed != 0 {
+				t.Errorf("Purge.BytesReclaimed = %d, want 0: nothing on the legacy fallback port is reclaimable", r.Purge.BytesReclaimed)
+			}
+			if r.Purge.OK {
+				t.Errorf("Purge.OK = true, want false: no purge ran on the legacy fallback port")
+			}
+			if r.Summary.BytesFreedDisk != 0 {
+				t.Errorf("Summary.BytesFreedDisk = %d, want 0 on the legacy fallback port", r.Summary.BytesFreedDisk)
+			}
+		})
+	}
+}
+
 func TestRigSharesResolvedDoltServer_ContractResolutionDecides(t *testing.T) {
 	resolved := PortResolution{Port: 28231, Source: liveDoltHandleSource}
 
@@ -801,7 +884,7 @@ func TestRigSharesResolvedDoltServer_ContractResolutionDecides(t *testing.T) {
 		}
 	})
 
-	t.Run("unresolvable managed scope keeps conservative fallback semantics", func(t *testing.T) {
+	t.Run("only a city-config port vouches for an unresolvable managed scope", func(t *testing.T) {
 		fs := fsys.NewFake()
 		opts := cleanupOptions{
 			FS:             fs,
@@ -814,7 +897,11 @@ func TestRigSharesResolvedDoltServer_ContractResolutionDecides(t *testing.T) {
 		}
 		opts.PortResolution = PortResolution{Port: 28231, Source: liveDoltHandleSource}
 		if rigSharesResolvedDoltServer(resolverRig{Name: "r", Path: "/rigs/r"}, opts) {
-			t.Error("non-fallback, non-city-config sources must not vouch for unresolvable scopes")
+			t.Error("a live source must not vouch for unresolvable scopes; only the city config port does")
+		}
+		opts.PortResolution = PortResolution{Port: LegacyDefaultDoltPort, Source: "legacy default", Fallback: true}
+		if rigSharesResolvedDoltServer(resolverRig{Name: "r", Path: "/rigs/r"}, opts) {
+			t.Error("the legacy fallback must not vouch for unresolvable scopes")
 		}
 	})
 }

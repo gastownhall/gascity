@@ -25,6 +25,11 @@ const (
 	// baseline, the live half included, moves to this binary's hashes
 	// (legacy's sessionHashRebaselineMetadata).
 	baselineVersionArtifact baselineReason = "version-artifact"
+	// baselinePrePolicy rebaselines a v6 core hash of unchanged config
+	// (runtime.IsCoreHashArtifact): the core baseline, not the live pair,
+	// which the live check compares on its own, so a changed session_live is
+	// still applied.
+	baselinePrePolicy baselineReason = "pre-policy"
 	// baselineLiveBackfill stamps an empty live hash with no session_live
 	// config (SESS-563).
 	baselineLiveBackfill baselineReason = "live-backfill"
@@ -32,12 +37,20 @@ const (
 	// (MAINT-025): the core baseline, not the live pair, as legacy's
 	// softReloadAcceptedHashMetadata.
 	baselineSoftReload baselineReason = "soft-reload"
+	// baselineAliasRerender rebaselines a started row whose alias A7
+	// changes (SESS-717), all six keys, as legacy's
+	// queueAliasChangeDriftRebaseline: the alias rerenders GC_ALIAS.
+	baselineAliasRerender baselineReason = "alias-rerender"
+	// baselineRelaunch moves a relaunched row's core baseline (SESS-556/560)
+	// to the config it runs, not the live pair, which a relaunch does not
+	// reliably re-apply: legacy's rebaselineLaunchDriftHashesWithBatch.
+	baselineRelaunch baselineReason = "relaunch"
 )
 
 // baselinePatch is cfg's baseline for reason.
 func baselinePatch(cfg runtime.Config, reason baselineReason) session.MetadataPatch {
 	patch := session.MetadataPatch{}
-	if reason != baselineSoftReload {
+	if reason != baselineSoftReload && reason != baselineRelaunch && reason != baselinePrePolicy {
 		live := runtime.LiveFingerprint(cfg)
 		patch["started_live_hash"], patch["live_hash"] = live, live
 	}

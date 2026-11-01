@@ -48,6 +48,9 @@ type SeatWork struct {
 	// alerts raises session.stranded_claims for the claims a close this read
 	// serves leaves on the closed row (work_release.go); nil alerts nothing.
 	alerts *strandedClaimAlerts
+	// refusals logs each row's close refusal once per episode across ticks
+	// (closeSeat); nil logs every refusal.
+	refusals *closeRefusalLog
 
 	once sync.Once
 	read []seatWorkLeg
@@ -115,6 +118,14 @@ func (sw *SeatWork) stranded() *strandedClaimAlerts {
 		return nil
 	}
 	return sw.alerts
+}
+
+// closeRefusals is sw's owner's close-refusal log, or nil.
+func (sw *SeatWork) closeRefusals() *closeRefusalLog {
+	if sw == nil {
+		return nil
+	}
+	return sw.refusals
 }
 
 // Legs is the leg set sw reads. A nil SeatWork reads the zero WorkLegs,
