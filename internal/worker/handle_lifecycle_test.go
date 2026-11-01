@@ -153,6 +153,11 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			want: resumeStart,
 		},
 		{
+			name:     "provider the probe cannot read resumes",
+			provider: "legacy-provider",
+			want:     resumeStart,
+		},
+		{
 			name:     "probe reads the launch work dir",
 			provider: "claude",
 			setup: func(t *testing.T, f *rotatedKeyFixture) {
