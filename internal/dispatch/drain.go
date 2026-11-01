@@ -91,7 +91,7 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 				beadmeta.FailureReasonMetadataKey:  drainPredecessorFailedReason,
 				beadmeta.FailureSubjectMetadataKey: failedID,
 				"close_reason":                     drainPredecessorFailedCloseReason,
-			}, drainPredecessorFailedAction, opts)
+			}, drainPredecessorFailedAction, drainManifest{}, opts)
 		}
 	}
 	root, err := store.Get(rootID)
@@ -282,7 +282,7 @@ func loadOrBuildDrainManifest(store beads.Store, bead beads.Bead, parentConvoyID
 				beadmeta.FailureReasonMetadataKey:  "unresolved_member",
 				beadmeta.FailureSubjectMetadataKey: unresolved.MemberID,
 			}
-			result, closeErr := closeDrainControl(store, bead.ID, closeMetadata, "drain-unresolved-member", opts)
+			result, closeErr := closeDrainControl(store, bead.ID, closeMetadata, "drain-unresolved-member", drainManifest{}, opts)
 			if closeErr != nil {
 				return drainManifest{}, nil, fmt.Errorf("%s: closing unresolved-member drain: %w", bead.ID, closeErr)
 			}
@@ -298,7 +298,7 @@ func loadOrBuildDrainManifest(store beads.Store, bead beads.Bead, parentConvoyID
 			beadmeta.FailureClassMetadataKey:  beadmeta.FailureClassHard,
 			beadmeta.FailureReasonMetadataKey: "drain_max_units_invalid",
 		}
-		if _, closeErr := closeDrainControl(store, bead.ID, closeMetadata, "drain-max-units-invalid", opts); closeErr != nil {
+		if _, closeErr := closeDrainControl(store, bead.ID, closeMetadata, "drain-max-units-invalid", drainManifest{}, opts); closeErr != nil {
 			return drainManifest{}, nil, fmt.Errorf("%s: closing invalid-max-units drain: %w", bead.ID, closeErr)
 		}
 		return drainManifest{}, nil, err
@@ -310,7 +310,7 @@ func loadOrBuildDrainManifest(store beads.Store, bead beads.Bead, parentConvoyID
 			beadmeta.FailureClassMetadataKey:  beadmeta.FailureClassHard,
 			beadmeta.FailureReasonMetadataKey: "limit_exceeded",
 		}
-		result, err := closeDrainControl(store, bead.ID, closeMetadata, "drain-limit-exceeded", opts)
+		result, err := closeDrainControl(store, bead.ID, closeMetadata, "drain-limit-exceeded", drainManifest{}, opts)
 		if err != nil {
 			return drainManifest{}, nil, fmt.Errorf("%s: closing limit-exceeded drain: %w", bead.ID, err)
 		}
@@ -586,7 +586,7 @@ func completeDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 	if err := releaseDrainReservations(store, bead.ID, manifest, opts); err != nil {
 		return ControlResult{}, err
 	}
-	return closeDrainControl(store, bead.ID, metadata, action, opts)
+	return closeDrainControl(store, bead.ID, metadata, action, manifest, opts)
 }
 
 func advanceSharedDrain(store beads.Store, bead beads.Bead, manifest drainManifest, members []beads.Bead, itemFormula string, parentVars map[string]string, opts ProcessOptions) (ControlResult, error) {
@@ -1088,9 +1088,65 @@ func markRemainingSharedRowsSkipped(manifest *drainManifest, start int) {
 // settled before the drain closes (closeScopedControl). A terminal drain
 // carries no controller error: a transient one recorded by an earlier pass
 // (markControllerSpawnError) is cleared with the close.
-func closeDrainControl(store beads.Store, drainID string, metadata map[string]string, action string, opts ProcessOptions) (ControlResult, error) {
+//
+// Before the control itself closes, every still-open "drain unit N for
+// <member>" convoy the manifest minted (ensureDrainUnitConvoy) is retired
+// (gascity#8173): nothing else in the drain lifecycle ever closes these —
+// completeDrain only verifies each row's ITEM ROOT reached "closed", never
+// touching the unit convoy that tracks it, so a drain control that never
+// retires its own bookkeeping convoys leaves them open forever, flooding
+// `bd ready` under sustained decomposition load. manifest may be the zero
+// value (no rows) for a close that happens before any units were ever
+// minted; that is a no-op.
+func closeDrainControl(store beads.Store, drainID string, metadata map[string]string, action string, manifest drainManifest, opts ProcessOptions) (ControlResult, error) {
 	clearControllerSpawnErrorMetadata(metadata)
+	if err := closeDrainManifestUnitConvoys(store, manifest, opts); err != nil {
+		return ControlResult{}, fmt.Errorf("%s: closing drain unit convoys: %w", drainID, err)
+	}
 	return closeScopedControl(store, drainID, metadata, action, opts)
+}
+
+// closeDrainManifestUnitConvoys retires every still-open unit convoy named by
+// manifest's rows, resolving each by its unit_key the same way
+// drainUnitConvoyByKey does (a unit convoy can live in a member's own store,
+// not the control's), so it closes the one actually holding the claim rather
+// than silently no-oping on a store that has never heard of it. A row's
+// close outcome mirrors its own resolved status: "succeeded" -> pass,
+// "failed" -> fail, anything else (an interrupted "unit-created" row, or one
+// a validation failure cut short before it ever resolved) -> skipped, the
+// same residue outcome WorkflowStop stamps on work a stopped workflow
+// stranded before it ran to a verdict. An already-closed or no-longer-
+// resolvable convoy (hard-deleted between passes, which the drain otherwise
+// tolerates by design) is left alone rather than treated as an error.
+func closeDrainManifestUnitConvoys(store beads.Store, manifest drainManifest, opts ProcessOptions) error {
+	for i := range manifest.Rows {
+		row := &manifest.Rows[i]
+		unitKey := strings.TrimSpace(row.UnitKey)
+		if unitKey == "" {
+			continue
+		}
+		unit, unitStore, found, err := drainUnitConvoyByKey(store, unitKey, opts)
+		if err != nil {
+			return fmt.Errorf("looking up unit convoy %s: %w", unitKey, err)
+		}
+		if !found || unit.Status == "closed" {
+			continue
+		}
+		outcome := beadmeta.OutcomeSkipped
+		switch row.Status {
+		case "succeeded":
+			outcome = beadmeta.OutcomePass
+		case "failed":
+			outcome = beadmeta.OutcomeFail
+		}
+		if _, err := unitStore.CloseAll([]string{unit.ID}, map[string]string{
+			beadmeta.OutcomeMetadataKey: outcome,
+			"close_reason":              "drain unit retired: its drain control settled",
+		}); err != nil {
+			return fmt.Errorf("closing unit convoy %s: %w", unit.ID, err)
+		}
+	}
+	return nil
 }
 
 // drainValidationClosedError reports a drain that failed validation while its
@@ -1117,7 +1173,17 @@ func finishRecordedDrainClose(store beads.Store, bead beads.Bead, opts ProcessOp
 	if outcome == "" {
 		return ControlResult{}, fmt.Errorf("%w: %s: gc.drain_state %q recorded without gc.outcome", ErrControlGraphMalformed, bead.ID, bead.Metadata[beadmeta.DrainStateMetadataKey])
 	}
-	return closeDrainControl(store, bead.ID, map[string]string{beadmeta.OutcomeMetadataKey: outcome}, "drain-"+strings.TrimSpace(bead.Metadata[beadmeta.DrainStateMetadataKey]), opts)
+	// The manifest is parsed best-effort: a resumed close must still complete
+	// (the drain already has its recorded terminal state) even if a prior
+	// pass somehow left the manifest unparseable, so a parse failure here
+	// skips unit-convoy retirement rather than blocking the control's own
+	// close.
+	manifest, manifestErr := parseDrainManifest(bead.Metadata[drainManifestMetadataKey])
+	if manifestErr != nil {
+		opts.tracef("process-control bead=%s kind=drain finish-recorded-close: unparseable manifest, skipping unit-convoy retirement: %v", bead.ID, manifestErr)
+		manifest = drainManifest{}
+	}
+	return closeDrainControl(store, bead.ID, map[string]string{beadmeta.OutcomeMetadataKey: outcome}, "drain-"+strings.TrimSpace(bead.Metadata[beadmeta.DrainStateMetadataKey]), manifest, opts)
 }
 
 func closeDrainWithManifest(store beads.Store, beadID string, manifest drainManifest, closeState, outcome, action string, opts ProcessOptions) (ControlResult, error) {
@@ -1133,7 +1199,7 @@ func closeDrainWithManifest(store beads.Store, beadID string, manifest drainMani
 	if err := releaseDrainReservations(store, beadID, manifest, opts); err != nil {
 		return ControlResult{}, err
 	}
-	return closeDrainControl(store, beadID, metadata, action, opts)
+	return closeDrainControl(store, beadID, metadata, action, manifest, opts)
 }
 
 func buildDrainManifest(bead beads.Bead, parentConvoyID, itemFormula string, members []beads.Bead) drainManifest {
@@ -1919,7 +1985,7 @@ func closeDrainReservationFailure(store beads.Store, bead beads.Bead, manifest d
 	if releaseErr := releaseDrainReservations(store, bead.ID, manifest, opts); releaseErr != nil {
 		return ControlResult{}, fmt.Errorf("%s: releasing reservations after %w: %w", bead.ID, err, releaseErr)
 	}
-	result, closeErr := closeDrainControl(store, bead.ID, metadata, "drain-reservation-failed", opts)
+	result, closeErr := closeDrainControl(store, bead.ID, metadata, "drain-reservation-failed", manifest, opts)
 	if closeErr != nil {
 		return ControlResult{}, fmt.Errorf("%s: closing reservation-failed drain after %w: %w", bead.ID, err, closeErr)
 	}
@@ -1949,7 +2015,7 @@ func closeDrainItemFormulaFailure(store beads.Store, bead beads.Bead, manifest d
 	if releaseErr := releaseDrainReservations(store, bead.ID, manifest, opts); releaseErr != nil {
 		return ControlResult{}, fmt.Errorf("%s: releasing reservations after %w: %w", bead.ID, err, releaseErr)
 	}
-	result, closeErr := closeDrainControl(store, bead.ID, metadata, "drain-failed", opts)
+	result, closeErr := closeDrainControl(store, bead.ID, metadata, "drain-failed", manifest, opts)
 	if closeErr != nil {
 		return ControlResult{}, fmt.Errorf("%s: closing invalid-item-formula drain after %w: %w", bead.ID, err, closeErr)
 	}
