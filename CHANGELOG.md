@@ -639,6 +639,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Protocol-mode sessions take lane notices.** A t3bridge session, whose
+  runtime records its turn starts, is now served by the conversation lane
+  for every notice producer (mail `--notify`, sling `--nudge`, the
+  hook-claim continuation, planner notices, the work ladder and wait
+  nudges) wherever `[ops] authoritative` lists message, not only for the
+  ops route. Producers and the lane host decide with one rule, so a notice
+  never waits for a lane that cannot deliver it.
+
 - **Go toolchain 1.27.3.** The `go.mod` floor, the Bazel `go_sdk`, the nogo
   analyzers' module and the `contrib/k8s` Go build images move to Go 1.27.3,
   the toolchain Dolt 2.6.0 and beads `main` build with. Building from source
