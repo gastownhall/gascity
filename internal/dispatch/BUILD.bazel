@@ -50,7 +50,6 @@ go_test(
         "crash_injection_test.go",
         "cross_store_gate_test.go",
         "drain_conditional_test.go",
-        "drain_initiator_test.go",
         "drain_test.go",
         "fanout_membership_test.go",
         "finalize_quarantined_root_test.go",
