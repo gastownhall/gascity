@@ -619,6 +619,9 @@ type bdClassGuardInput struct {
 	gcFlag    bool
 	holds     []coordclass.Class
 	scopeRoot string
+	// inv is the pinned inventory the argv was resolved under; a judge that
+	// repoints argv verifies the result against it (bdRepointFlag).
+	inv *bdflags.Inventory
 	// judged collects the caller-named files the judge read
 	// (readJudgedFile); an admitted write is pointed at private copies.
 	judged *bdJudgedFiles
@@ -664,7 +667,7 @@ func bdClassFlipGuard(cfg *config.City, scopeRoot string, bdArgs []string, deps 
 	judged := &bdJudgedFiles{}
 	g := res.cmd.judge(bdClassGuardInput{
 		path: res.path, args: res.args, bdArgs: args, gcFlag: gcFlag, holds: holds, scopeRoot: scopeRoot,
-		judged: judged, bdClassGuardDeps: deps,
+		inv: inv, judged: judged, bdClassGuardDeps: deps,
 	})
 	if g.refusal == "" {
 		g = judged.pin(inv, res.path, g)

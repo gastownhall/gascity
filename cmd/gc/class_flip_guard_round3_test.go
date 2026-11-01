@@ -172,6 +172,118 @@ func TestGcBdSplitCreateRefusesAnIDTheBindingHolds(t *testing.T) {
 	}
 }
 
+// TestGcBdSplitImportRefusesARowWhoseIDTheBindingHolds: an import row this
+// work store keeps, whose id the class binding holds, is refused as create --id
+// is (gc storage migrate keeps a moved bead's id), for a file, --skip-infra and
+// stdin, under both pinned inventories.
+func TestGcBdSplitImportRefusesARowWhoseIDTheBindingHolds(t *testing.T) {
+	archive := `{"id":"relic-1","title":"w","issue_type":"task"}` + "\n" +
+		`{"id":"demo-9","title":"w","issue_type":"task"}` + "\n"
+	for _, inventory := range []string{"bd-1.3.2", bdEnterpriseInventory} {
+		for _, argv := range [][]string{
+			{"import", "a.jsonl"},
+			{"import", "-i", "a.jsonl", "--skip-infra"},
+			{"import", "-"},
+		} {
+			t.Run(inventory+"/"+strings.Join(argv, " "), func(t *testing.T) {
+				scope := t.TempDir()
+				if err := os.WriteFile(filepath.Join(scope, "a.jsonl"), []byte(archive), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				deps := heldIDDeps(inventory)
+				deps.stdin = bytes.NewBufferString(archive)
+				g := bdClassFlipGuard(splitGuardTestCity(), scope, argv, deps)
+				if g.cleanup != nil {
+					defer g.cleanup()
+				}
+				if !strings.Contains(g.refusal, "relic-1") || !strings.Contains(g.refusal, "Nothing was written.") {
+					t.Fatalf("gc bd %s: forwarded %q, refusal %q; want a refusal naming relic-1", strings.Join(argv, " "), g.args, g.refusal)
+				}
+				if strings.Contains(g.refusal, "demo-9") {
+					t.Errorf("refusal %q names the free id demo-9", g.refusal)
+				}
+			})
+		}
+	}
+}
+
+// TestGcBdSplitImportHeldIDCheckEdges: the held-id check asks the binding once
+// for every kept row's id (infrastructure rows --skip-infra leaves out are not
+// asked), fails closed when the binding cannot answer, follows the edge rule's
+// dry-run convention, and never runs on a single-store city.
+func TestGcBdSplitImportHeldIDCheckEdges(t *testing.T) {
+	archive := `{"id":"demo-8","title":"w","issue_type":"task"}` + "\n" +
+		`{"id":"demo-9","title":"w","issue_type":"task"}` + "\n" +
+		`{"id":"demo-9","title":"again","issue_type":"task"}` + "\n" +
+		`{"id":"demo-7","title":"s","issue_type":"session","labels":["gc:session"]}` + "\n"
+	write := func(t *testing.T, body string) string {
+		t.Helper()
+		scope := t.TempDir()
+		if err := os.WriteFile(filepath.Join(scope, "a.jsonl"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return scope
+	}
+	t.Run("free ids pass, asked once with the kept rows only", func(t *testing.T) {
+		deps := heldIDDeps("bd-1.3.2")
+		var calls [][]string
+		held := deps.held
+		deps.held = func(ids []string) (map[string]bool, error) {
+			calls = append(calls, slices.Clone(ids))
+			return held(ids)
+		}
+		g := bdClassFlipGuard(splitGuardTestCity(), write(t, archive), []string{"import", "a.jsonl", "--skip-infra"}, deps)
+		if g.cleanup != nil {
+			defer g.cleanup()
+		}
+		if g.refusal != "" {
+			t.Fatalf("refused: %q", g.refusal)
+		}
+		if len(calls) != 1 || !slices.Equal(calls[0], []string{"demo-8", "demo-9"}) {
+			t.Fatalf("binding asked %q; want one call with [demo-8 demo-9]", calls)
+		}
+	})
+	for _, c := range []struct {
+		name string
+		held func([]string) (map[string]bool, error)
+		want string
+	}{
+		{"binding cannot answer", func([]string) (map[string]bool, error) { return nil, errors.New("binding offline") }, "binding offline"},
+		{"no held view", nil, "cannot check"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			deps := heldIDDeps("bd-1.3.2")
+			deps.held = c.held
+			g := bdClassFlipGuard(splitGuardTestCity(), write(t, archive), []string{"import", "a.jsonl", "--skip-infra"}, deps)
+			if g.cleanup != nil {
+				defer g.cleanup()
+			}
+			if !strings.Contains(g.refusal, c.want) || !strings.Contains(g.refusal, "Nothing was written.") {
+				t.Fatalf("refusal %q, want %q and 'Nothing was written.'", g.refusal, c.want)
+			}
+		})
+	}
+	relic := `{"id":"relic-1","title":"w","issue_type":"task"}` + "\n"
+	t.Run("dry run follows the edge rule", func(t *testing.T) {
+		g := bdClassFlipGuard(splitGuardTestCity(), write(t, relic), []string{"import", "a.jsonl", "--dry-run"}, heldIDDeps("bd-1.3.2"))
+		if g.cleanup != nil {
+			defer g.cleanup()
+		}
+		if g.refusal != "" {
+			t.Fatalf("dry run refused: %q", g.refusal)
+		}
+	})
+	t.Run("single-store city", func(t *testing.T) {
+		g := bdClassFlipGuard(&config.City{}, write(t, relic), []string{"import", "a.jsonl"}, heldIDDeps("bd-1.3.2"))
+		if g.cleanup != nil {
+			defer g.cleanup()
+		}
+		if g.refusal != "" {
+			t.Fatalf("single-store city refused: %q", g.refusal)
+		}
+	})
+}
+
 // TestGcBdCreateOfAMigratedRelicIDOnAServedSplit is the end-to-end shape: on
 // a migrated, served split city the work store holds no copy of the relic, so
 // bd would mint its id afresh while gc bd show keeps answering from the
