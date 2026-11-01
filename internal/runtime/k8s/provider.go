@@ -21,7 +21,9 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	execerr "k8s.io/client-go/util/exec"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // Compile-time interface checks.
@@ -260,6 +262,18 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if p.image == "" {
 		return fmt.Errorf("starting session %q: GC_K8S_IMAGE is required", name)
 	}
+	if _, err := resolvePodHostedDoltIdentity(cfg.Env, "", p.managedServiceHost, p.managedServicePort); err != nil {
+		return fmt.Errorf("resolving scoped store identity for session %q: %w", name, err)
+	}
+	ctrlCity := controllerCityPath(cfg.Env)
+	var cityIdentity *podHostedDoltIdentity
+	if !p.prebaked && ctrlCity != "" {
+		identity, err := resolvePodHostedDoltIdentity(cfg.Env, "GC_K8S_CITY_", p.managedServiceHost, p.managedServicePort)
+		if err != nil {
+			return fmt.Errorf("resolving City store identity for session %q: %w", name, err)
+		}
+		cityIdentity = identity
+	}
 	podName := SanitizeName(name)
 	label := SanitizeLabel(name)
 
@@ -316,7 +330,6 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		_ = p.ops.deletePod(cleanupCtx, podName, 5)
 	}
 
-	ctrlCity := cfg.Env["GC_CITY"]
 	workDirStaged := false
 
 	if !p.prebaked {
@@ -337,13 +350,12 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return fmt.Errorf("waiting for pod %q: %w", podName, err)
 	}
 
-	if !p.prebaked {
-		// Initialize the city inside the pod.
-		if ctrlCity != "" {
-			skipRel := cityTemplateSkipRel(workDirStaged, ctrlCity, cfg.WorkDir)
-			if err := initCityInPod(ctx, p.ops, podName, ctrlCity, skipRel); err != nil {
-				fmt.Fprintf(p.stderr, "gc: warning: initCityInPod for %s: %v\n", podName, err) //nolint:errcheck
-			}
+	if !p.prebaked && ctrlCity != "" {
+		// Initialize the city inside the pod with its canonical hosted-store identity.
+		skipRel := cityTemplateSkipRel(workDirStaged, ctrlCity, cfg.WorkDir)
+		if err := initCityInPod(ctx, p.ops, podName, ctrlCity, skipRel, cityIdentity); err != nil {
+			cleanup("City initialization failed")
+			return fmt.Errorf("initializing City in pod for session %q: %w", name, err)
 		}
 	}
 
@@ -362,19 +374,20 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		}
 	}
 
-	if !p.prebaked {
-		// Signal entrypoint to proceed.
-		if _, err := p.ops.execInPod(ctx, podName, "agent",
-			[]string{"touch", "/workspace/.gc-workspace-ready"}, nil); err != nil {
-			fmt.Fprintf(p.stderr, "gc: warning: touch .gc-workspace-ready in %s: %v\n", podName, err) //nolint:errcheck
-		}
-	}
-
-	// Ensure .beads/ inside the pod. This remains warning-only so older staged
-	// or prebaked workspaces can self-heal instead of failing session startup.
+	// The selected scope's hosted identity must be initialized and verified
+	// before the entrypoint can run pre_start or start tmux.
 	podWorkDir := projectedPodWorkDir(cfg)
 	if err := initBeadsInPod(ctx, p.ops, podName, cfg, podWorkDir, p.managedServiceHost, p.managedServicePort); err != nil {
-		fmt.Fprintf(p.stderr, "gc: warning: initBeadsInPod for %s: %v\n", podName, err) //nolint:errcheck
+		cleanup("scoped beads initialization failed")
+		return fmt.Errorf("initializing scoped beads in pod for session %q: %w", name, err)
+	}
+
+	if !p.prebaked {
+		if _, err := p.ops.execInPod(ctx, podName, "agent",
+			[]string{"touch", "/workspace/.gc-workspace-ready"}, nil); err != nil {
+			cleanup("workspace readiness signal failed")
+			return fmt.Errorf("signaling workspace ready for session %q: %w", name, err)
+		}
 	}
 
 	// Wait for tmux session.
@@ -1065,8 +1078,37 @@ func waitForTmux(ctx context.Context, ops k8sOps, name string, timeout time.Dura
 	return fmt.Errorf("tmux session not ready in pod %s after %s", name, timeout)
 }
 
+type podHostedDoltIdentity struct {
+	ProjectID string
+	Prefix    string
+	Database  string
+	Host      string
+	Port      string
+}
+
+func resolvePodHostedDoltIdentity(env map[string]string, prefix, managedHost, managedPort string) (*podHostedDoltIdentity, error) {
+	projectKey, prefixKey, databaseKey := "GC_BEADS_PROJECT_ID", "GC_BEADS_PREFIX", "GC_DOLT_DATABASE"
+	if prefix != "" {
+		projectKey, prefixKey, databaseKey = prefix+"BEADS_PROJECT_ID", prefix+"BEADS_PREFIX", prefix+"DOLT_DATABASE"
+	}
+	projected, err := validateProjectedHostedStoreIdentity(env, prefix, managedHost, managedPort)
+	if err != nil {
+		return nil, err
+	}
+	if len(projected) == 0 {
+		return nil, nil
+	}
+	return &podHostedDoltIdentity{
+		ProjectID: strings.TrimSpace(env[projectKey]),
+		Prefix:    strings.TrimSpace(env[prefixKey]),
+		Database:  strings.TrimSpace(env[databaseKey]),
+		Host:      projected["GC_DOLT_HOST"],
+		Port:      projected["GC_DOLT_PORT"],
+	}, nil
+}
+
 // initCityInPod copies the city directory and runs gc init inside the pod.
-func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity, skipRel string) error {
+func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity, skipRel string, identity *podHostedDoltIdentity) error {
 	// Streaming may leave a partial directory if the source or pod exec fails.
 	// Use a bounded cleanup context even when the caller has been canceled.
 	defer func() {
@@ -1079,11 +1121,28 @@ func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity, skipRel s
 	if err := copyDirToPodSkipping(ctx, ops, podName, "agent", ctrlCity, "/tmp/city-src", skipRel); err != nil {
 		return err
 	}
-	// Run gc init --from with GC_DOLT=skip so gc init does not attempt to
-	// start a local Dolt server. Pod sessions consume the projected GC_DOLT_*
-	// connection target through env; they do not rewrite canonical .beads files.
-	_, err := ops.execInPod(ctx, podName, "agent",
-		[]string{"env", "GC_DOLT=skip", "gc", "init", "--from", "/tmp/city-src", "/workspace", "--no-start", "--skip-provider-readiness"}, nil)
+	// Run gc init --from with GC_DOLT=skip so it does not start a local Dolt
+	// server. Hosted City identity is passed explicitly because init's scope
+	// validation requires the controller-owned project identity.
+	// exec inherits the agent container's selected-scope environment, which may
+	// describe a hosted rig store rather than the HQ City being initialized.
+	// Keep only the runtime environment needed to find gc and its home config;
+	// HQ hosted identity is supplied below through explicit init flags.
+	args := []string{
+		"sh", "-c",
+		`exec env -i PATH="$PATH" HOME="$HOME" GC_DOLT=skip "$0" "$@"`,
+		"gc", "init", "--from", "/tmp/city-src", "/workspace",
+	}
+	if identity != nil {
+		args = append(args,
+			"--dolt-host", identity.Host,
+			"--dolt-port", identity.Port,
+			"--dolt-database", identity.Database,
+			"--dolt-project-id", identity.ProjectID,
+		)
+	}
+	args = append(args, "--no-start", "--skip-provider-readiness")
+	_, err := ops.execInPod(ctx, podName, "agent", args, nil)
 	if err != nil {
 		return err
 	}
@@ -1141,60 +1200,63 @@ func writeRemoteStageInPod(ctx context.Context, ops k8sOps, podName, cityName, c
 	return err
 }
 
-// initBeadsInPod ensures the pod workspace has usable .beads state. It keeps
-// the older warning-only self-heal behavior for prebaked or older staged
-// workspaces by patching existing metadata and bootstrapping missing state.
+// initBeadsInPod verifies the existing canonical hosted-Dolt scope before
+// updating only the pod-local server endpoint mirror. Missing or conflicting
+// state fails closed without initializing or mutating the hosted store.
 func initBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime.Config, workDir, managedServiceHost, managedServicePort string) error {
-	projected, err := projectedPodDoltEnv(cfg.Env, managedServiceHost, managedServicePort)
+	identity, err := resolvePodHostedDoltIdentity(cfg.Env, "", managedServiceHost, managedServicePort)
 	if err != nil {
 		return err
 	}
-	if len(projected) == 0 {
+	if identity == nil {
 		return nil
 	}
-	doltHost := projected["GC_DOLT_HOST"]
-	doltPort := projected["GC_DOLT_PORT"]
 	storeRoot := projectedPodStoreRoot(cfg, workDir)
-	prefix := strings.TrimSpace(cfg.Env["GC_BEADS_PREFIX"])
-	if prefix == "" {
-		return fmt.Errorf("missing projected GC_BEADS_PREFIX")
-	}
-
-	portNum, err := strconv.Atoi(doltPort)
+	identityPath := shellquote.Quote(contract.ProjectIdentityPath(""))
+	portNum, err := strconv.Atoi(identity.Port)
 	if err != nil {
-		return fmt.Errorf("invalid projected GC_DOLT_PORT %q: %w", doltPort, err)
+		return fmt.Errorf("invalid projected GC_DOLT_PORT %q: %w", identity.Port, err)
 	}
 	patchJSON, err := json.Marshal(map[string]any{
-		"dolt_server_host": doltHost,
+		"dolt_server_host": identity.Host,
 		"dolt_server_port": portNum,
 	})
 	if err != nil {
 		return fmt.Errorf("marshaling beads patch: %w", err)
 	}
 	patchB64 := base64.StdEncoding.EncodeToString(patchJSON)
-	prefixB64 := base64.StdEncoding.EncodeToString([]byte(prefix))
+	projectIDB64 := base64.StdEncoding.EncodeToString([]byte(identity.ProjectID))
+	prefixB64 := base64.StdEncoding.EncodeToString([]byte(identity.Prefix))
+	databaseB64 := base64.StdEncoding.EncodeToString([]byte(identity.Database))
+	doltHostB64 := base64.StdEncoding.EncodeToString([]byte(identity.Host))
+	doltPortB64 := base64.StdEncoding.EncodeToString([]byte(identity.Port))
 	storeRootB64 := base64.StdEncoding.EncodeToString([]byte(storeRoot))
 
-	patchCmd := fmt.Sprintf(
-		`WD=$(echo '%s' | base64 -d) && cd "$WD" && PATCH=$(echo '%s' | base64 -d) && `+
-			`if [ -f .beads/metadata.json ]; then `+
-			`python3 -c "import json,sys; `+
-			`m=json.load(open('.beads/metadata.json')); `+
-			`p=json.loads(sys.argv[1]); m.update(p); m.pop('project_id', None); `+
+	initCmd := fmt.Sprintf(
+		`WD=$(echo '%s' | base64 -d) && PROJECT_ID=$(echo '%s' | base64 -d) && PREFIX=$(echo '%s' | base64 -d) && `+
+			`DATABASE=$(echo '%s' | base64 -d) && DOLT_HOST=$(echo '%s' | base64 -d) && DOLT_PORT=$(echo '%s' | base64 -d) && `+
+			`PATCH=$(echo '%s' | base64 -d) && cd "$WD" || exit 1; `+
+			`test -f .beads/metadata.json && test -f `+identityPath+` && test -f .beads/config.yaml || `+
+			`{ echo 'hosted Dolt scoped beads files are incomplete' >&2; exit 1; }; `+
+			`grep -Fqx "id = \"$PROJECT_ID\"" `+identityPath+` || `+
+			`{ echo 'hosted Dolt project identity does not match session scope' >&2; exit 1; }; `+
+			`python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); `+
+			`assert str(m.get("dolt_database", "")).strip() == sys.argv[2]; `+
+			`assert str(m.get("project_id", "")).strip() == sys.argv[3]' `+
+			`.beads/metadata.json "$DATABASE" "$PROJECT_ID" || `+
+			`{ echo 'hosted Dolt database or project identity does not match session scope' >&2; exit 1; }; `+
+			`GOT_PREFIX=$(BEADS_DIR="$WD/.beads" bd config get issue_prefix 2>/dev/null) || exit 1; `+
+			`[ "$GOT_PREFIX" = "$PREFIX" ] || { echo 'hosted Dolt beads prefix does not match session scope' >&2; exit 1; }; `+
+			`python3 -c "import json,sys; m=json.load(open('.beads/metadata.json')); `+
+			`p=json.loads(sys.argv[1]); m.update(p); `+
 			`json.dump(m,open('.beads/metadata.json','w'),indent=2)" "$PATCH" 2>/dev/null || `+
 			`printf '%%s' "$PATCH" | python3 -c "import json,sys; `+
 			`m=json.load(open('.beads/metadata.json')); `+
-			`p=json.loads(sys.stdin.read()); m.update(p); m.pop('project_id', None); `+
-			`json.dump(m,open('.beads/metadata.json','w'),indent=2)"; `+
-			`else PREFIX=$(echo '%s' | base64 -d) && `+
-			`DOLT_HOST=$(echo '%s' | base64 -d) && `+
-			`DOLT_PORT=$(echo '%s' | base64 -d) && `+
-			`yes | BEADS_DIR="$WD/.beads" bd init --server --server-host "$DOLT_HOST" --server-port "$DOLT_PORT" -p "$PREFIX" --skip-hooks --skip-agents; fi`,
-		storeRootB64, patchB64, prefixB64,
-		base64.StdEncoding.EncodeToString([]byte(doltHost)),
-		base64.StdEncoding.EncodeToString([]byte(doltPort)),
+			`p=json.loads(sys.stdin.read()); m.update(p); `+
+			`json.dump(m,open('.beads/metadata.json','w'),indent=2)"`,
+		storeRootB64, projectIDB64, prefixB64, databaseB64, doltHostB64, doltPortB64, patchB64,
 	)
-	_, err = ops.execInPod(ctx, podName, "agent", []string{"sh", "-c", patchCmd}, nil)
+	_, err = ops.execInPod(ctx, podName, "agent", []string{"sh", "-c", initCmd}, nil)
 	return err
 }
 

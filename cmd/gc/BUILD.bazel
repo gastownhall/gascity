@@ -1644,6 +1644,7 @@ go_test(
         "json_runtime_schema_test.go",
         "json_schema_test.go",
         "jsonl_archive_doctor_check_test.go",
+        "k8s_session_identity_test.go",
         "ledger_feed_test.go",
         "legacy_act_test.go",
         "legacy_pack_preflight_test.go",
