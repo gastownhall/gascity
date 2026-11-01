@@ -34,7 +34,8 @@ func providerDataProgramStatus(t *testing.T, profile Profile) ProgramStatusDecla
 
 // TestProgramStatusConformance runs the WC-PSTAT rows for every profile: a
 // declaration that drifts fails, an undeclared profile and a pending row
-// are recorded and skipped, and a landed row runs its check.
+// are recorded and skipped, and a landed row runs its check (recorded and
+// skipped when the check reports the profile unsupported).
 func TestProgramStatusConformance(t *testing.T) {
 	reporter := NewSuiteReporter(t, "program_status", map[string]string{"tier": "worker-core"})
 	profiles, err := filterProfiles(ProgramStatusProfiles())
@@ -52,7 +53,15 @@ func TestProgramStatusConformance(t *testing.T) {
 						if !ok {
 							t.Fatalf("%s left pending with no check registered", req.Code)
 						}
-						reporter.Require(t, check(t, profile))
+						checked := check(t, profile)
+						if checked.Status == ResultUnsupported {
+							// A landed row its check cannot run for this
+							// profile (WC-PSTAT-002 needs a worker identity):
+							// record the outcome but do not fail the suite.
+							reporter.Record(checked)
+							t.Skip(checked.Detail)
+						}
+						reporter.Require(t, checked)
 					case result.Status == ResultUnsupported:
 						reporter.Record(result)
 						t.Skip(result.Detail)

@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	worker "github.com/gastownhall/gascity/internal/worker"
+	workerbuiltin "github.com/gastownhall/gascity/internal/worker/builtin"
 )
 
 // programStatusPhaseRow is an armed agent-pane row of a capture that read st
@@ -33,10 +34,17 @@ func programStatusPhaseRow(mode runtime.ProgramStatusMode, st runtime.ProgramSta
 // checkProgramStatusPhase is WC-PSTAT-002: a started session of profile's
 // family reads worker phase from a valid record under on (working Busy,
 // blocked Blocked, idle/done/error Ready) and keeps the phase it reads with no
-// record under shadow, the reading carried on State either way.
+// record under shadow, the reading carried on State either way. A profile
+// with no canonical worker identity (omp, grok) is unsupported.
 func checkProgramStatusPhase(t *testing.T, profile Profile) Result {
 	t.Helper()
 	code := RequirementProgramStatusPhase
+	// The check runs a worker session of the profile, which only a profile
+	// with a canonical worker identity has.
+	if _, ok := workerbuiltin.CanonicalProfileIdentity(profile.Provider); !ok {
+		return Unsupported(profile.ID, code, "profile has no canonical worker profile identity, so no worker session can run it").
+			WithEvidence(map[string]string{"provider": profile.Provider})
+	}
 	fake := runtime.NewFake()
 	manager := sessionpkg.NewManagerWithOptions(beads.NewMemStore(), runtime.FullFake{Fake: fake},
 		sessionpkg.WithCityPath(t.TempDir()),
@@ -105,10 +113,31 @@ func TestProgramStatusPhaseCheckPassesForEveryProfile(t *testing.T) {
 	}
 	for _, profile := range profiles {
 		t.Run(string(profile.ID), func(t *testing.T) {
-			profile.ProgramStatus.Declared = true
+			profile.ProgramStatus.ProgramStatusDeclaration = ProgramStatusDeclaration{Declared: true}
 			if r := checkProgramStatusPhase(t, profile); r.Status != ResultPass {
 				t.Fatalf("WC-PSTAT-002: %s", r.Detail)
 			}
 		})
+	}
+}
+
+// Kills a WC-PSTAT-002 check that opens a session for a profile with no
+// canonical worker identity (a family that declares program status without
+// phase-1 transcript fixtures, such as omp or grok): no worker session can
+// run it, so the row is unsupported for it, never a failure.
+func TestProgramStatusPhaseCheckUnsupportedWithoutWorkerIdentity(t *testing.T) {
+	profile := Profile{
+		ID:       "no-identity/tmux-cli",
+		Provider: "no-identity/tmux-cli",
+		ProgramStatus: ProgramStatusExpectation{
+			ProgramStatusDeclaration: ProgramStatusDeclaration{Declared: true, App: "agent"},
+		},
+	}
+	r := checkProgramStatusPhase(t, profile)
+	if r.Status != ResultUnsupported || !strings.Contains(r.Detail, "canonical worker profile identity") {
+		t.Fatalf("WC-PSTAT-002 without a worker identity: %+v, want unsupported naming the missing identity", r)
+	}
+	if r.Evidence["provider"] != profile.Provider {
+		t.Fatalf("evidence %v does not name provider %q", r.Evidence, profile.Provider)
 	}
 }
