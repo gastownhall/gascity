@@ -392,14 +392,14 @@ func filterAssignedWorkBeadsForSessionWakeOn(
 			continue
 		}
 		if agentIsCrossStoreEligible(agentCfg) {
-			for _, id := range sessionBeadAssigneeIdentitiesInfo(sb) {
+			for _, id := range sessionBeadAssigneeIdentitiesForConfigInfo(sb, cfg) {
 				crossStore[strings.TrimSpace(id)] = struct{}{}
 			}
 			crossStore[strings.TrimSpace(template)] = struct{}{}
 			continue
 		}
 		storeRef := assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
-		for _, id := range sessionBeadAssigneeIdentitiesInfo(sb) {
+		for _, id := range sessionBeadAssigneeIdentitiesForConfigInfo(sb, cfg) {
 			add(id, storeRef)
 			// A claim this session HOLDS can also live on the leading work arm
 			// or in a relocated class binding, whatever the owning agent's rig
