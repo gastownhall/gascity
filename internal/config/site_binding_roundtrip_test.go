@@ -295,6 +295,91 @@ func TestPersistSiteBindingKeepsEmptyUnknownTable(t *testing.T) {
 	}
 }
 
+func TestProjectRigSiteBindingPreservesUnknownAndOtherRigData(t *testing.T) {
+	input := []byte(`future_flag = true
+
+[[rig]]
+name = "alpha"
+path = "/controller/alpha"
+pinned = true
+
+[[rig]]
+name = "beta"
+path = "/controller/beta"
+custom = "keep"
+`)
+	got, err := ProjectRigSiteBinding(input, RigSiteBinding{Name: "alpha", Path: "/workspace/rigs/alpha"})
+	if err != nil {
+		t.Fatalf("ProjectRigSiteBinding: %v", err)
+	}
+	var doc map[string]any
+	if _, err := toml.Decode(string(got), &doc); err != nil {
+		t.Fatalf("decode projected site binding: %v", err)
+	}
+	if doc["future_flag"] != true {
+		t.Errorf("future_flag = %v, want true", doc["future_flag"])
+	}
+	rigs := normalizeSiteRigEntries(doc["rig"])
+	if len(rigs) != 2 {
+		t.Fatalf("rig entries = %#v, want both alpha and beta", rigs)
+	}
+	if got := rigs[0]["path"]; got != "/workspace/rigs/alpha" {
+		t.Errorf("alpha path = %v, want projected path", got)
+	}
+	if got := rigs[0]["pinned"]; got != true {
+		t.Errorf("alpha pinned = %v, want preserved true", got)
+	}
+	if got := rigs[1]["path"]; got != "/controller/beta" {
+		t.Errorf("beta path = %v, want preserved controller binding", got)
+	}
+	if got := rigs[1]["custom"]; got != "keep" {
+		t.Errorf("beta custom = %v, want preserved value", got)
+	}
+}
+
+func TestProjectRigSiteBindingUpdatesDuplicateRigEntries(t *testing.T) {
+	input := []byte(`[[rig]]
+name = "alpha"
+path = "/old/alpha-one"
+first = true
+
+[[rig]]
+name = "alpha"
+path = "/old/alpha-two"
+last = true
+`)
+	got, err := ProjectRigSiteBinding(input, RigSiteBinding{Name: "alpha", Path: "/workspace/rigs/alpha"})
+	if err != nil {
+		t.Fatalf("ProjectRigSiteBinding: %v", err)
+	}
+	var doc map[string]any
+	if _, err := toml.Decode(string(got), &doc); err != nil {
+		t.Fatalf("decode projected site binding: %v", err)
+	}
+	rigs := normalizeSiteRigEntries(doc["rig"])
+	if len(rigs) != 2 {
+		t.Fatalf("rig entries = %#v, want both duplicate alpha entries", rigs)
+	}
+	for i, rig := range rigs {
+		if got := rig["path"]; got != "/workspace/rigs/alpha" {
+			t.Errorf("rig entry %d path = %v, want projected path", i, got)
+		}
+	}
+	if rigs[0]["first"] != true || rigs[1]["last"] != true {
+		t.Errorf("duplicate rig entries lost unowned keys: %#v", rigs)
+	}
+}
+
+func TestProjectRigSiteBindingRejectsMalformedTypedDocument(t *testing.T) {
+	_, err := ProjectRigSiteBinding([]byte(`[[rig]]
+name = "alpha"
+path = 7
+`), RigSiteBinding{Name: "alpha", Path: "/workspace/rigs/alpha"})
+	if err == nil {
+		t.Fatal("ProjectRigSiteBinding accepted a site binding with a non-string path")
+	}
+}
+
 // TestPersistSiteBindingRoundTripIsIdempotent verifies the first rewrite of
 // a file carrying unknown content preserves it, and a repeated identical
 // rewrite leaves the file untouched on disk.

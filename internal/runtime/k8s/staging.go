@@ -36,12 +36,9 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 		return false, err
 	}
 
-	// Copy rig work_dir into the pod.
-	podWorkDir := "/workspace"
-	workDirRel, workDirIsNested := relativeCityWorkDir(ctrlCity, cfg.WorkDir)
-	if workDirIsNested {
-		podWorkDir = filepath.Join("/workspace", workDirRel)
-	}
+	// Copy the workdir to the same normalized pod path used by the pod spec
+	// and agent command.
+	podWorkDir := projectedPodWorkDirForCity(ctrlCity, cfg.WorkDir)
 	workDirStaged := false
 	workDirIsCityRoot := ctrlCity != "" && filepath.Clean(cfg.WorkDir) == filepath.Clean(ctrlCity)
 	if cfg.WorkDir != "" && !workDirIsCityRoot {
@@ -104,6 +101,10 @@ func cityTemplateSkipRel(workDirStaged bool, ctrlCity, workDir string) string {
 	}
 	rel, ok := relativeCityWorkDir(ctrlCity, workDir)
 	if !ok {
+		return ""
+	}
+	projectedWorkDir := projectedPodWorkDirForCity(ctrlCity, workDir)
+	if filepath.Clean(filepath.Join(podWorkspaceRoot, rel)) != filepath.Clean(projectedWorkDir) {
 		return ""
 	}
 	return rel

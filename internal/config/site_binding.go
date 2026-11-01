@@ -193,6 +193,46 @@ func LoadSiteBinding(fs fsys.FS, cityRoot string) (*SiteBinding, error) {
 	return &binding, nil
 }
 
+// ProjectRigSiteBinding returns site-binding TOML with rig updated to binding.
+// It validates the typed view, updates every entry whose trimmed name matches
+// binding.Name, and preserves unknown root and per-rig keys using the same merge
+// policy as the filesystem-backed site-binding writers.
+func ProjectRigSiteBinding(data []byte, binding RigSiteBinding) ([]byte, error) {
+	if strings.TrimSpace(binding.Name) == "" || strings.TrimSpace(binding.Path) == "" {
+		return nil, fmt.Errorf("projecting rig site binding requires a name and path")
+	}
+	doc := map[string]any{}
+	var current SiteBinding
+	if len(data) > 0 {
+		if _, err := toml.Decode(string(data), &doc); err != nil {
+			return nil, fmt.Errorf("parsing site binding: %w", err)
+		}
+		if _, err := toml.Decode(string(data), &current); err != nil {
+			return nil, fmt.Errorf("validating site binding: %w", err)
+		}
+	}
+	rigs := append([]RigSiteBinding(nil), current.Rigs...)
+	found := false
+	for i := range rigs {
+		if strings.TrimSpace(rigs[i].Name) == strings.TrimSpace(binding.Name) {
+			rigs[i].Name = binding.Name
+			rigs[i].Path = binding.Path
+			found = true
+		}
+	}
+	if !found {
+		rigs = append(rigs, binding)
+	}
+	setSiteRigBindings(doc, rigs, nil)
+	var buf bytes.Buffer
+	enc := toml.NewEncoder(&buf)
+	enc.Indent = ""
+	if err := enc.Encode(doc); err != nil {
+		return nil, fmt.Errorf("marshaling site binding: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
 // ApplySiteBindings overlays .gc/site.toml onto cfg. Site bindings take
 // precedence, but legacy city.toml rig paths still flow through as a
 // compatibility fallback until users migrate them into .gc/site.toml.

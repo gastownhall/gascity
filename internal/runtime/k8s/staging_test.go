@@ -244,6 +244,31 @@ func TestStageFilesStagesKiroPackOverlayAtPodWorkDirForRigWorkDir(t *testing.T) 
 	}
 }
 
+func TestStageFilesUsesNormalizedPodWorkDirForRigWorkDir(t *testing.T) {
+	cityRoot := t.TempDir()
+	workDir := filepath.Join(cityRoot, "rigs", "team")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", workDir, err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "task.txt"), []byte("rig payload"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	cfg := runtime.Config{
+		WorkDir: cityRoot + "/rigs/./team",
+		Env:     map[string]string{"GC_CITY": cityRoot + "/"},
+	}
+	ops := newCapturingStageOps()
+	if err := stageFiles(context.Background(), ops, "gc-rig", cfg, cityRoot+"/", io.Discard); err != nil {
+		t.Fatalf("stageFiles: %v", err)
+	}
+	if got := ops.files["/workspace/rigs/team/task.txt"]; got != "rig payload" {
+		t.Fatalf("staged rig file = %q, want payload at normalized pod workdir", got)
+	}
+	if _, ok := ops.files["/workspace/task.txt"]; ok {
+		t.Fatal("rig workdir payload was staged at workspace root instead of normalized rig path")
+	}
+}
+
 func TestStageFilesUsesConcreteProviderOverlayName(t *testing.T) {
 	workDir := t.TempDir()
 	packOverlay := t.TempDir()

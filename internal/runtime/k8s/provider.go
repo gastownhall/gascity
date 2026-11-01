@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -21,8 +22,12 @@ import (
 	execerr "k8s.io/client-go/util/exec"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // Compile-time interface checks.
@@ -287,7 +292,8 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 
 	// Check for existing pod (any phase).
 	existing, err := p.ops.listPods(ctx, "gc-session="+label, "")
-	if err == nil && len(existing) > 0 {
+	haveExisting := err == nil && len(existing) > 0
+	if haveExisting {
 		pod := &existing[0]
 		if pod.Status.Phase == corev1.PodRunning {
 			// Stale-pod detection: is the session's tmux server alive?
@@ -314,11 +320,19 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 			}
 			// Stale pod — tmux definitively dead and past grace period, recreate.
 		}
-		// Clean up existing pod.
-		_ = p.ops.deletePod(ctx, pod.Name, 5)
-		_ = waitForDeletion(ctx, p.ops, pod.Name, 30*time.Second)
 	}
-
+	// Don't let projection/config errors mask a healthy live Pod's normal
+	// ErrSessionExists or ErrSessionInitializing result. Build before deleting
+	// any stale Pod so a bad projection never destroys it.
+	rigProjection, err := buildPodRigProjection(controllerCityPath(cfg.Env), cfg)
+	if err != nil {
+		return fmt.Errorf("preparing rig state for session %q: %w", name, err)
+	}
+	if haveExisting {
+		// Clean up existing pod.
+		_ = p.ops.deletePod(ctx, existing[0].Name, 5)
+		_ = waitForDeletion(ctx, p.ops, existing[0].Name, 30*time.Second)
+	}
 	// Build and create pod.
 	pod, err := buildPod(name, cfg, p)
 	if err != nil {
@@ -339,7 +353,6 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	workDirStaged := false
-
 	if !p.prebaked {
 		// Stage files via init container if needed.
 		if needsStaging(cfg, ctrlCity) {
@@ -358,14 +371,12 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return fmt.Errorf("waiting for pod %q: %w", podName, err)
 	}
 
-	if !p.prebaked {
-		// Initialize the city inside the pod.
-		if ctrlCity != "" {
-			skipRel := cityTemplateSkipRel(workDirStaged, ctrlCity, cfg.WorkDir)
-			if err := initCityInPod(ctx, p.ops, podName, ctrlCity, skipRel, cityIdentity); err != nil {
-				cleanup("City initialization failed")
-				return fmt.Errorf("initializing City in pod for session %q: %w", name, err)
-			}
+	if !p.prebaked && ctrlCity != "" {
+		// Initialize the City using its controller-owned hosted identity.
+		skipRel := cityTemplateSkipRel(workDirStaged, ctrlCity, cfg.WorkDir)
+		if err := initCityInPod(ctx, p.ops, podName, ctrlCity, skipRel, cityIdentity); err != nil {
+			cleanup("City initialization failed")
+			return fmt.Errorf("initializing City in pod for session %q: %w", name, err)
 		}
 	}
 
@@ -377,11 +388,33 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return fmt.Errorf("initializing scoped beads in pod for session %q: %w", name, err)
 	}
 
+	if rigProjection != nil {
+		if err := refreshPodRigSuspensionSnapshot(ctrlCity, rigProjection); err != nil {
+			cleanup("rig suspension refresh failed")
+			return fmt.Errorf("refreshing rig suspension state for session %q: %w", name, err)
+		}
+		if err := applyPodRigProjection(ctx, p.ops, podName, rigProjection); err != nil {
+			cleanup("rig state projection failed")
+			return fmt.Errorf("projecting rig state for session %q: %w", name, err)
+		}
+	}
+
 	if !p.prebaked {
 		if _, err := p.ops.execInPod(ctx, podName, "agent",
 			[]string{"touch", "/workspace/.gc-workspace-ready"}, nil); err != nil {
 			cleanup("workspace readiness signal failed")
 			return fmt.Errorf("signaling workspace ready for session %q: %w", name, err)
+		}
+	}
+	if rigProjection != nil {
+		marker := podEnvValue(pod, "GC_RIG_PROJECTION_MARKER")
+		if marker == "" {
+			cleanup("rig projection marker missing")
+			return fmt.Errorf("pod for rig session %q has no rig projection readiness marker", name)
+		}
+		if _, err := p.ops.execInPod(ctx, podName, "agent", []string{"touch", marker}, nil); err != nil {
+			cleanup("rig projection marker failed")
+			return fmt.Errorf("marking rig projection ready for session %q: %w", name, err)
 		}
 	}
 
@@ -486,19 +519,21 @@ func (p *Provider) runPodPostLaunchSetup(ctx context.Context, podName string, cf
 }
 
 // Relaunch re-launches the agent inside the already-running (warm) pod without
-// recreating it: it respawns the in-pod tmux "main" pane (respawn-pane -k) with
-// the (possibly changed) command over execInPod, then re-runs the post-launch
-// setup tail. The pod stays warm via the entrypoint's `sleep infinity`, so a
-// launch-only config change reaches the live pod without a full reprovision —
-// the k8s half of the runtime/transport un-weld (B3a, mirroring tmux B1 / ssh).
+// recreating it: it refreshes any rig-scoped site and suspension projection,
+// respawns the in-pod tmux "main" pane (respawn-pane -k) with the (possibly
+// changed) command over execInPod, then re-runs the post-launch setup tail. The
+// pod stays warm via the entrypoint's `sleep infinity`, so a launch-only config
+// change reaches the live pod without a full reprovision — the k8s half of the
+// runtime/transport un-weld (B3a, mirroring tmux B1 / ssh).
 //
-// The pod must be Running with a live tmux "main" session, else
-// [runtime.ErrSessionNotFound] (the reconciler decides whether to Start fresh —
-// it does NOT recreate the pod here). Staging, city/beads init, and PreStart are
-// NOT re-run here (k8s treats PreStart as provision-half); env is provision-half
-// too (set in the pod spec at create time, not re-injected — respawn-pane carries
-// no env). NOTE: tmux diverges — as of the relaunch pre_start fix it re-runs
-// PreStart on Relaunch (launch-half), while k8s and ssh intentionally do not.
+// The pod must be Running with a live tmux "main" session and matching rig
+// environment, else [runtime.ErrSessionNotFound]. Rig projection failures also
+// wrap that error so the reconciler can provision a fresh Pod. Staging,
+// city/beads init, and PreStart are NOT re-run here (k8s treats PreStart as
+// provision-half); env is provision-half too (set in the pod spec at create
+// time, not re-injected — respawn-pane carries no env). NOTE: tmux diverges — as
+// of the relaunch pre_start fix it re-runs PreStart on Relaunch (launch-half),
+// while k8s and ssh intentionally do not.
 //
 // CAVEAT (unverified on a real cluster — see the B3 design doc): for
 // LINUX_USERNAME pods the entrypoint runs tmux under `su - <user>`, so the
@@ -509,15 +544,26 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	podName, err := p.findRunningPod(ctx, name)
+	pod, err := p.findRunningPodObject(ctx, name)
 	if err != nil {
 		return fmt.Errorf("%w: session %q (no running pod to relaunch into)", runtime.ErrSessionNotFound, name)
 	}
+	podName := pod.Name
 	// The tmux server + "main" session must be alive to respawn into; a dead
 	// session means the box is not warm enough — reprovision, don't respawn.
 	if _, err := p.ops.execInPod(ctx, podName, "agent",
 		[]string{"tmux", "has-session", "-t", tmuxSession}, nil); err != nil {
 		return fmt.Errorf("%w: session %q (pod %s has no live tmux session)", runtime.ErrSessionNotFound, name, podName)
+	}
+	if projection, projectionErr := buildPodRigProjection(controllerCityPath(cfg.Env), cfg); projectionErr != nil {
+		return fmt.Errorf("preparing rig state for session %q: %w: %w", name, runtime.ErrSessionNotFound, projectionErr)
+	} else if projection != nil {
+		if podEnvValue(pod, "GC_RIG") != projection.binding.Name || podEnvValue(pod, "GC_RIG_ROOT") != projection.binding.Path {
+			return fmt.Errorf("%w: session %q pod has stale rig environment", runtime.ErrSessionNotFound, name)
+		}
+		if err := applyPodRigProjection(ctx, p.ops, podName, projection); err != nil {
+			return fmt.Errorf("projecting rig state for session %q: %w: %w", name, runtime.ErrSessionNotFound, err)
+		}
 	}
 
 	// Respawn the agent in the warm "main" session.
@@ -1074,15 +1120,23 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 // failure reaching a pod that does exist — the same distinction Relaunch
 // already draws at its own call site.
 func (p *Provider) findRunningPod(ctx context.Context, name string) (string, error) {
-	label := SanitizeLabel(name)
-	pods, err := p.ops.listPods(ctx, "gc-session="+label, "status.phase=Running")
+	pod, err := p.findRunningPodObject(ctx, name)
 	if err != nil {
 		return "", err
 	}
-	if len(pods) == 0 {
-		return "", fmt.Errorf("%w: no running pod for session %q", runtime.ErrSessionNotFound, name)
+	return pod.Name, nil
+}
+
+func (p *Provider) findRunningPodObject(ctx context.Context, name string) (*corev1.Pod, error) {
+	label := SanitizeLabel(name)
+	pods, err := p.ops.listPods(ctx, "gc-session="+label, "status.phase=Running")
+	if err != nil {
+		return nil, err
 	}
-	return pods[0].Name, nil
+	if len(pods) == 0 {
+		return nil, fmt.Errorf("%w: no running pod for session %q", runtime.ErrSessionNotFound, name)
+	}
+	return pods[0].DeepCopy(), nil
 }
 
 // findPod finds a pod by session label (any phase).
@@ -1245,6 +1299,217 @@ func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity, skipRel s
 		return err
 	}
 	return nil
+}
+
+type podRigProjection struct {
+	binding              config.RigSiteBinding
+	suspension           suspensionstate.State
+	linuxUsername        string
+	citySuspendedOnStart bool
+	rigSuspendedOnStart  bool
+}
+
+// buildPodRigProjection makes a launch-time snapshot of the selected rig's
+// binding and effective city/rig suspension state. A running Pod does not
+// receive later suspension changes through this snapshot until Relaunch
+// refreshes it. This snapshot does not provide live suspend, no-new-claims, or
+// bounded drain for running Pods; that behavior is unverified and tracked in
+// #8241.
+func buildPodRigProjection(ctrlCity string, cfg runtime.Config) (*podRigProjection, error) {
+	rigName := strings.TrimSpace(cfg.Env["GC_RIG"])
+	rigRoot := strings.TrimSpace(cfg.Env["GC_RIG_ROOT"])
+	if rigName == "" && rigRoot == "" {
+		return nil, nil
+	}
+	if rigName == "" || rigRoot == "" {
+		return nil, fmt.Errorf("rig-scoped session requires both GC_RIG and GC_RIG_ROOT")
+	}
+	ctrlCity = strings.TrimSpace(ctrlCity)
+	if ctrlCity == "" {
+		return nil, fmt.Errorf("rig-scoped session has no controller City path")
+	}
+	ctrlCity, err := filepath.Abs(ctrlCity)
+	if err != nil {
+		return nil, fmt.Errorf("resolving controller City path: %w", err)
+	}
+	ctrlCity = filepath.Clean(ctrlCity)
+
+	cityCfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(ctrlCity, "city.toml"), config.LoadOptions{SkipRevisionSnapshot: true})
+	if err != nil {
+		return nil, fmt.Errorf("loading controller City config: %w", err)
+	}
+	if _, err := config.ApplySiteBindings(fsys.OSFS{}, ctrlCity, cityCfg); err != nil {
+		return nil, fmt.Errorf("loading controller City site bindings: %w", err)
+	}
+	var rig *config.Rig
+	for i := range cityCfg.Rigs {
+		if cityCfg.Rigs[i].Name == rigName {
+			rig = &cityCfg.Rigs[i]
+			break
+		}
+	}
+	if rig == nil {
+		return nil, fmt.Errorf("rig %q is not declared in controller City config", rigName)
+	}
+	if strings.TrimSpace(rig.Path) == "" {
+		return nil, fmt.Errorf("rig %q has no configured path in controller City config or site binding", rigName)
+	}
+	configuredRigRoot, err := resolveControllerPath(ctrlCity, rig.Path)
+	if err != nil {
+		return nil, fmt.Errorf("resolving configured path for rig %q: %w", rigName, err)
+	}
+	requestedRigRoot, err := resolveControllerPath(ctrlCity, rigRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolving GC_RIG_ROOT for rig %q: %w", rigName, err)
+	}
+	if requestedRigRoot != configuredRigRoot {
+		return nil, fmt.Errorf("GC_RIG_ROOT %q does not match configured path for rig %q (%q)", requestedRigRoot, rigName, configuredRigRoot)
+	}
+	rel, err := filepath.Rel(ctrlCity, requestedRigRoot)
+	if err != nil {
+		return nil, fmt.Errorf("mapping rig %q into pod workspace: %w", rigName, err)
+	}
+	podRigRoot := filepath.Clean(filepath.Join(podWorkspaceRoot, rel))
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || !strings.HasPrefix(podRigRoot, podWorkspaceRoot+"/") {
+		// K8s workers only mount the controller City at /workspace. An external
+		// rig root cannot be projected into that namespace, so fail closed rather
+		// than start with GC_RIG_ROOT pointing at a different directory.
+		return nil, fmt.Errorf("rig path %q is outside controller City %q and cannot be mapped under /workspace", requestedRigRoot, ctrlCity)
+	}
+	suspension, err := suspensionstate.Load(fsys.OSFS{}, ctrlCity)
+	if err != nil {
+		return nil, fmt.Errorf("loading controller rig suspension state: %w", err)
+	}
+	effectiveCitySuspended := suspensionstate.EffectiveCitySuspended(suspension, cityCfg.Workspace.EffectiveSuspendedOnStart())
+	effectiveSuspended := suspensionstate.EffectiveRigSuspended(suspension, rigName, rig.EffectiveSuspendedOnStart())
+	// Preserve other rig and reserved agent overrides from the source file,
+	// while projecting effective values for the selected city and rig.
+	podSuspension := suspension
+	podSuspension.City = suspensionstate.Override{Suspended: &effectiveCitySuspended}
+	if podSuspension.Rigs == nil {
+		podSuspension.Rigs = make(map[string]suspensionstate.Override)
+	}
+	podSuspension.Rigs[rigName] = suspensionstate.Override{Suspended: &effectiveSuspended}
+	return &podRigProjection{
+		binding:              config.RigSiteBinding{Name: rigName, Path: podRigRoot},
+		suspension:           podSuspension,
+		linuxUsername:        strings.TrimSpace(cfg.Env["LINUX_USERNAME"]),
+		citySuspendedOnStart: cityCfg.Workspace.EffectiveSuspendedOnStart(),
+		rigSuspendedOnStart:  rig.EffectiveSuspendedOnStart(),
+	}, nil
+}
+
+// refreshPodRigSuspensionSnapshot rereads runtime suspension state immediately
+// before projection so a suspend issued while the Pod is being prepared is not
+// overwritten by the earlier validation snapshot.
+func refreshPodRigSuspensionSnapshot(ctrlCity string, projection *podRigProjection) error {
+	if projection == nil {
+		return nil
+	}
+	suspension, err := suspensionstate.Load(fsys.OSFS{}, ctrlCity)
+	if err != nil {
+		return fmt.Errorf("loading controller rig suspension state: %w", err)
+	}
+	effectiveCitySuspended := suspensionstate.EffectiveCitySuspended(suspension, projection.citySuspendedOnStart)
+	effectiveRigSuspended := suspensionstate.EffectiveRigSuspended(suspension, projection.binding.Name, projection.rigSuspendedOnStart)
+	projection.suspension = suspension
+	projection.suspension.City = suspensionstate.Override{Suspended: &effectiveCitySuspended}
+	if projection.suspension.Rigs == nil {
+		projection.suspension.Rigs = make(map[string]suspensionstate.Override)
+	}
+	projection.suspension.Rigs[projection.binding.Name] = suspensionstate.Override{Suspended: &effectiveRigSuspended}
+	return nil
+}
+
+func applyPodRigProjection(ctx context.Context, ops k8sOps, podName string, projection *podRigProjection) error {
+	if projection == nil {
+		return nil
+	}
+	sitePath := config.SiteBindingPath(podWorkspaceRoot)
+	readSiteScript := `set -eu
+target=$(readlink -f "$1" 2>/dev/null || printf '%s' "$1")
+if [ -e "$1" ]; then printf '%s\n' "$target"; cat "$1"; else printf '%s\n%s' "$target" '__GC_SITE_BINDING_MISSING__'; fi
+`
+	readOutput, err := ops.execInPod(ctx, podName, "agent", []string{"sh", "-c", readSiteScript, "gc-read-site-binding", sitePath}, nil)
+	if err != nil {
+		return fmt.Errorf("reading pod-local site binding: %w", err)
+	}
+	siteTarget, siteData, found := strings.Cut(readOutput, "\n")
+	if !found || strings.TrimSpace(siteTarget) == "" {
+		return fmt.Errorf("reading pod-local site binding returned no target path")
+	}
+	if siteData == "__GC_SITE_BINDING_MISSING__" {
+		siteData = ""
+	}
+	projectedSite, err := config.ProjectRigSiteBinding([]byte(siteData), projection.binding)
+	if err != nil {
+		return fmt.Errorf("projecting pod-local site binding: %w", err)
+	}
+	projectedSuspension, err := json.MarshalIndent(projection.suspension, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding pod-local rig suspension state: %w", err)
+	}
+	writeCommand := podRigProjectionWriteCommand(
+		projectedSite,
+		projectedSuspension,
+		siteTarget,
+		citylayout.SuspensionStateFile(podWorkspaceRoot),
+		projection.linuxUsername,
+	)
+	_, err = ops.execInPod(ctx, podName, "agent", writeCommand, nil)
+	if err != nil {
+		return fmt.Errorf("writing pod-local rig binding and suspension state: %w", err)
+	}
+	return nil
+}
+
+func podRigProjectionWriteCommand(projectedSite, projectedSuspension []byte, sitePath, suspensionPath, linuxUsername string) []string {
+	writeScript := `set -eu
+umask 022
+mkdir -p "$(dirname "$3")" "$(dirname "$4")"
+site_mode=$(stat -c '%a' "$3" 2>/dev/null || printf '%s' '644')
+printf '%s' "$1" | base64 -d > "$3.tmp"
+chmod "$site_mode" "$3.tmp"
+mv "$3.tmp" "$3"
+printf '%s' "$2" | base64 -d > "$4.tmp"
+chmod 600 "$4.tmp"
+mv "$4.tmp" "$4"
+if [ -n "$5" ]; then
+  attempts=0
+  until id "$5" >/dev/null 2>&1; do
+    attempts=$((attempts + 1))
+    if [ "$attempts" -ge 30 ]; then
+      echo "timed out waiting for dynamic user $5" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+  chown "$5" "$3" "$4" "$(dirname "$3")" "$(dirname "$4")"
+fi
+`
+	return []string{
+		"sh", "-c", writeScript, "gc-rig-projection",
+		base64.StdEncoding.EncodeToString(projectedSite),
+		base64.StdEncoding.EncodeToString(projectedSuspension),
+		sitePath,
+		suspensionPath,
+		linuxUsername,
+	}
+}
+
+func resolveControllerPath(ctrlCity, path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", fmt.Errorf("path is empty")
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(ctrlCity, path)
+	}
+	resolved, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(resolved), nil
 }
 
 // initBeadsInPod verifies the existing canonical hosted-Dolt scope before
