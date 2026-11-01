@@ -496,3 +496,263 @@ func TestProjectionClaimsCacheProbesOnlyOverACache(t *testing.T) {
 		t.Fatal("the view's IsLive disagrees with its cache's")
 	}
 }
+
+// handlesFront is a pass-through front that declares explicit store handles
+// without being a cache or a storage-tier creator, as cmd/gc's bead policy
+// store does: its handles are the inner store's.
+type handlesFront struct{ beads.Store }
+
+func (f *handlesFront) Backing() beads.Store { return f.Store }
+
+func (f *handlesFront) Handles() beads.StoreHandles {
+	handles := beads.HandlesFor(f.Store)
+	handles.Writer = f
+	return handles
+}
+
+// storageFront is a pass-through front with a storage-tier create and no
+// explicit handles, as a bd or SQLite store is.
+type storageFront struct{ beads.Store }
+
+func (f *storageFront) Backing() beads.Store { return f.Store }
+
+func (f *storageFront) CreateWithStorage(b beads.Bead, _ beads.StorageClass) (beads.Bead, error) {
+	return f.Create(b)
+}
+
+// storageHandlesFront has both, as a strict kit leaf with a storage tier does.
+type storageHandlesFront struct{ *handlesFront }
+
+func (f *storageHandlesFront) CreateWithStorage(b beads.Bead, _ beads.StorageClass) (beads.Bead, error) {
+	return f.Create(b)
+}
+
+// probesFront answers a cache's liveness probes without explicit handles.
+type probesFront struct{ beads.Store }
+
+func (f *probesFront) Backing() beads.Store    { return f.Store }
+func (f *probesFront) IsLive() bool            { return true }
+func (f *probesFront) Stats() beads.CacheStats { return beads.CacheStats{} }
+
+// probesHandlesFront answers the probes and declares explicit handles.
+type probesHandlesFront struct{ *handlesFront }
+
+func (f *probesHandlesFront) IsLive() bool            { return true }
+func (f *probesHandlesFront) Stats() beads.CacheStats { return beads.CacheStats{} }
+
+// storageProbesFront has a storage-tier create and the probes, no handles.
+type storageProbesFront struct{ *storageFront }
+
+func (f *storageProbesFront) IsLive() bool            { return true }
+func (f *storageProbesFront) Stats() beads.CacheStats { return beads.CacheStats{} }
+
+// TestProjectionClaimsHandlesOnlyOverAFrontWithThem: a view mirrors the three
+// optional capabilities production branches on (explicit handles, the cache
+// probes, the storage-tier create) exactly as its front has them. A view over
+// a plain store must not claim handles: cmd/gc's controller demand read pays an
+// extra live Ready read for a store that has them.
+func TestProjectionClaimsHandlesOnlyOverAFrontWithThem(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		front                    func(beads.Store) beads.Store
+		handles, probes, storage bool
+	}{
+		{name: "plain store", front: func(s beads.Store) beads.Store { return s }},
+		{name: "storage-tier create", front: func(s beads.Store) beads.Store { return &storageFront{Store: s} }, storage: true},
+		{name: "explicit handles", front: func(s beads.Store) beads.Store { return &handlesFront{Store: s} }, handles: true},
+		{name: "handles and storage", front: func(s beads.Store) beads.Store {
+			return &storageHandlesFront{handlesFront: &handlesFront{Store: s}}
+		}, handles: true, storage: true},
+		{name: "cache probes", front: func(s beads.Store) beads.Store { return &probesFront{Store: s} }, probes: true},
+		{name: "probes and handles", front: func(s beads.Store) beads.Store {
+			return &probesHandlesFront{handlesFront: &handlesFront{Store: s}}
+		}, handles: true, probes: true},
+		{name: "probes and storage", front: func(s beads.Store) beads.Store {
+			return &storageProbesFront{storageFront: &storageFront{Store: s}}
+		}, probes: true, storage: true},
+		{name: "CachingStore", front: func(s beads.Store) beads.Store { return beads.NewCachingStore(s, nil) }, handles: true, probes: true, storage: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			front := tc.front(beads.NewMemStore())
+			p := projectionOf(front, newViolationSink())
+			for _, view := range []beads.Store{p.WorkViewOf(front), p.ClassViewOf(front)} {
+				_, handles := view.(interface{ Handles() beads.StoreHandles })
+				_, probes := view.(cacheProbes)
+				_, storage := view.(beads.StorageCreateStore)
+				if handles != tc.handles || probes != tc.probes || storage != tc.storage {
+					t.Fatalf("%T over %T claims handles=%v probes=%v storage=%v; the front has handles=%v probes=%v storage=%v",
+						view, front, handles, probes, storage, tc.handles, tc.probes, tc.storage)
+				}
+				if _, isView := view.(projectionView); !isView {
+					t.Fatalf("%T is not a projection view", view)
+				}
+			}
+		})
+	}
+}
+
+// exactBatchStore is a MemStore with an exact batch read, as a bd or native
+// Dolt backing has.
+type exactBatchStore struct{ *beads.MemStore }
+
+func (s *exactBatchStore) GetExactBatch(ids []string) (map[string]beads.Bead, []string, error) {
+	found := make(map[string]beads.Bead, len(ids))
+	var unresolved []string
+	for _, id := range ids {
+		b, err := s.Get(id)
+		if errors.Is(err, beads.ErrNotFound) {
+			unresolved = append(unresolved, id)
+			continue
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		found[id] = b
+	}
+	return found, unresolved, nil
+}
+
+// TestProjectionViewReadsThroughTheFrontsExplicitHandles: beads.HandlesFor on a
+// view over a front with explicit handles (a CachingStore, or the policy store
+// over one) gets the view's own handles. Their Live reader reads the front's
+// live handle, past a stale cache, as production does; their Cached reader
+// reads the front's cache. Both hide and charge wrong-class rows exactly as the
+// view's own reads do, and the Writer is the view, so writes keep its guards.
+func TestProjectionViewReadsThroughTheFrontsExplicitHandles(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		front func(*beads.CachingStore) beads.Store
+	}{
+		{name: "CachingStore", front: func(c *beads.CachingStore) beads.Store { return c }},
+		{name: "a handles-forwarding policy store over a CachingStore", front: func(c *beads.CachingStore) beads.Store { return &handlesFront{Store: c} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backing := &exactBatchStore{MemStore: beads.NewMemStore()}
+			cache := beads.NewCachingStoreForTest(backing, nil)
+			front := tc.front(cache)
+			sink := newViolationSink()
+			p := projectionOf(front, sink)
+			task := seed(t, backing, beads.Bead{Title: "task", Assignee: "worker"})
+			blocker := seed(t, backing, beads.Bead{Title: "blocker"})
+			session := seed(t, backing, beads.Bead{Title: "s", Type: "session", Labels: []string{"gc:session"}, Assignee: "worker"})
+			step := seed(t, backing, beads.Bead{Title: "step", Assignee: "worker", Metadata: map[string]string{"gc.root_bead_id": "gcg-root"}})
+			if err := cache.Prime(context.Background()); err != nil {
+				t.Fatalf("Prime: %v", err)
+			}
+			// Out-of-process writes the cache has not seen: a pin, a new ready
+			// task and a new edge, on the backing alone.
+			if err := backing.SetMetadata(task.ID, "pin", "fresh"); err != nil {
+				t.Fatal(err)
+			}
+			late := seed(t, backing, beads.Bead{Title: "late", Assignee: "worker"})
+			if err := backing.DepAdd(task.ID, blocker.ID, "related"); err != nil {
+				t.Fatal(err)
+			}
+			if cached, err := cache.Get(task.ID); err != nil || cached.Metadata["pin"] != "" {
+				t.Fatalf("precondition: cached task = %+v, %v; want the pre-write row", cached.Metadata, err)
+			}
+
+			work := p.WorkViewOf(front)
+			h := beads.HandlesFor(work)
+			if w, ok := h.Writer.(beads.Store); !ok || w != work {
+				t.Fatalf("the handles' Writer is %T, want the view itself so writes keep its guards", h.Writer)
+			}
+
+			if got, err := h.Live.Get(task.ID); err != nil || got.Metadata["pin"] != "fresh" {
+				t.Fatalf("Live.Get through the work view = %+v, %v; want the backing's row, past the stale cache", got.Metadata, err)
+			}
+			if got, err := h.Cached.Get(task.ID); err != nil || got.Metadata["pin"] != "" {
+				t.Fatalf("Cached.Get through the work view = %+v, %v; want the cache's pre-write row", got.Metadata, err)
+			}
+			if rows, err := h.Live.List(beads.ListQuery{Assignee: "worker"}); err != nil || !sameIDs(rows, task.ID, late.ID) {
+				t.Fatalf("Live.List(assignee) through the work view = %v, %v; want the task and the late task", beadIDs(rows), err)
+			}
+			if rows, err := h.Cached.List(beads.ListQuery{Assignee: "worker"}); err != nil || !sameIDs(rows, task.ID) {
+				t.Fatalf("Cached.List(assignee) through the work view = %v, %v; want the cached task alone", beadIDs(rows), err)
+			}
+			if rows, err := h.Live.Ready(beads.ReadyQuery{Assignee: "worker"}); err != nil || !sameIDs(rows, task.ID, late.ID) {
+				t.Fatalf("Live.Ready(assignee) through the work view = %v, %v; want the task and the late task", beadIDs(rows), err)
+			}
+			if rows, err := h.Live.Ready(beads.ReadyQuery{Assignee: "worker", Limit: 1}); err != nil || len(rows) != 1 || rows[0].ID == step.ID {
+				t.Fatalf("Live.Ready(assignee, limit 1) through the work view = %v, %v; want one work row (a hidden row must not eat the limit)", beadIDs(rows), err)
+			}
+			if rows, err := h.Cached.Ready(beads.ReadyQuery{Assignee: "worker"}); err != nil || !sameIDs(rows, task.ID) {
+				t.Fatalf("Cached.Ready(assignee) through the work view = %v, %v; want the cached task alone", beadIDs(rows), err)
+			}
+			if deps, err := h.Live.DepList(task.ID, "down"); err != nil || len(deps) != 1 || deps[0].DependsOnID != blocker.ID {
+				t.Fatalf("Live.DepList through the work view = %+v, %v; want the backing's new edge", deps, err)
+			}
+			if deps, err := h.Cached.DepList(task.ID, "down"); err != nil || len(deps) != 0 {
+				t.Fatalf("Cached.DepList through the work view = %+v, %v; want the cache's edge set (none)", deps, err)
+			}
+			// Each selective list hid and charged the session and the step (two
+			// lists, two each); each ready read the step alone, the session
+			// being ready-excluded (three reads).
+			if got, want := sink.testOnlyCount(), 7; got != want {
+				t.Fatalf("selective reads through the handles flagged %d hidden rows, want %d", got, want)
+			}
+
+			before := sink.testOnlyCount()
+			// Wrong-class rows stay hidden through either reader, and are charged.
+			for name, r := range map[string]beads.LiveReader{"Live": h.Live, "Cached": h.Cached} {
+				if _, err := r.Get(session.ID); !errors.Is(err, beads.ErrNotFound) {
+					t.Fatalf("%s.Get(session) through the work view: error = %v, want ErrNotFound", name, err)
+				}
+				if deps, err := r.DepList(step.ID, "down"); err != nil || len(deps) != 0 {
+					t.Fatalf("%s.DepList(step) through the work view = %+v, %v; want no edges", name, deps, err)
+				}
+			}
+			if got, want := sink.testOnlyCount()-before, 4; got != want {
+				t.Fatalf("hidden by-id reads through the handles flagged %d times, want %d", got, want)
+			}
+
+			batch, ok := h.Live.(beads.ExactBatchGetter)
+			if !ok {
+				t.Fatal("the view's live handle drops the exact batch read beads.GetMany reads through")
+			}
+			found, unresolved, err := batch.GetExactBatch([]string{task.ID, session.ID})
+			if err != nil {
+				t.Fatalf("Live.GetExactBatch: %v", err)
+			}
+			if _, has := found[session.ID]; has || len(found) != 1 || found[task.ID].Metadata["pin"] != "fresh" {
+				t.Fatalf("Live.GetExactBatch found %+v; want the fresh task alone", found)
+			}
+			if len(unresolved) != 1 || unresolved[0] != session.ID {
+				t.Fatalf("Live.GetExactBatch unresolved = %v, want the session", unresolved)
+			}
+			many, err := beads.GetMany(work, []string{task.ID, session.ID, late.ID})
+			if err != nil || len(many) != 2 || many[task.ID].Metadata["pin"] != "fresh" {
+				t.Fatalf("beads.GetMany through the work view = %+v, %v; want the fresh task and the late task", many, err)
+			}
+
+			// The Writer is the view: a write to a wrong-class row is refused.
+			if err := h.Writer.SetMetadata(session.ID, "k", "v"); !errors.Is(err, beads.ErrNotFound) {
+				t.Fatalf("Writer.SetMetadata(session) through the work view: error = %v, want ErrNotFound", err)
+			}
+		})
+	}
+}
+
+func beadIDs(rows []beads.Bead) []string {
+	ids := make([]string, 0, len(rows))
+	for _, b := range rows {
+		ids = append(ids, b.ID)
+	}
+	return ids
+}
+
+func sameIDs(rows []beads.Bead, want ...string) bool {
+	if len(rows) != len(want) {
+		return false
+	}
+	have := make(map[string]bool, len(rows))
+	for _, b := range rows {
+		have[b.ID] = true
+	}
+	for _, id := range want {
+		if !have[id] {
+			return false
+		}
+	}
+	return true
+}
