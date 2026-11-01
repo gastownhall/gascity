@@ -72,7 +72,7 @@ func (r *sshRuntime) List(_ context.Context, prefix string) ([]string, error) {
 }
 
 // Capabilities maps the provider capabilities to the box/Place half (ssh reports
-// activity via tmux #{session_activity}).
+// activity via tmux #{window_activity}).
 func (r *sshRuntime) Capabilities() runtime.PlaceCapabilities {
 	return runtime.PlaceCapabilities{ReportActivity: r.p.Capabilities().CanReportActivity}
 }

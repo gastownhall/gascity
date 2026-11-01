@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -46,12 +47,15 @@ type Provider struct {
 	serviceAccount     string              // pod service account name (GC_K8S_SERVICE_ACCOUNT)
 	prebaked           bool                // skip staging + init container for prebaked images
 	podSecurity        PodSecurityConfig   // optional pod-level UID/GID/fsGroup
+	cityName           string              // the controller's city name, for the pod's remote-stage record
 	nodeSelector       map[string]string   // GC_K8S_NODE_SELECTOR (JSON)
 	tolerations        []corev1.Toleration // GC_K8S_TOLERATIONS (JSON)
 	affinity           *corev1.Affinity    // GC_K8S_AFFINITY (JSON)
 	priorityClassName  string              // GC_K8S_PRIORITY_CLASS_NAME
 	postStartSettle    time.Duration       // settle time before post-start liveness check
 	stderr             io.Writer           // warning output (default os.Stderr)
+	pokes              runtime.PokeLedger  // gc's own input, discounted from GetLastActivity
+	now                func() time.Time    // the poke ledger's clock; nil is time.Now
 }
 
 // PodSecurityConfig supplies optional numeric identities for generated agent
@@ -322,7 +326,24 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 				fmt.Fprintf(p.stderr, "gc: warning: initCityInPod for %s: %v\n", podName, err) //nolint:errcheck
 			}
 		}
+	}
 
+	// Record the pod as a remote stage of the controller's city, staged and
+	// prebaked alike (S5-A): on a split city its infrastructure-class
+	// commands then refuse instead of creating a pod-local empty binding. A
+	// direct write, so it works whatever gc the pod image carries. The pod
+	// spec's remote-stage environment already covers the processes started
+	// from it (remoteStageEnv); the record is the durable copy, and the only
+	// cover for a process started with a cleared environment. Failing to write it fails the start: a pod that cannot be
+	// marked is not one this controller hands work to.
+	if ctrlCity != "" {
+		if err := writeRemoteStageInPod(ctx, p.ops, podName, p.cityName, ctrlCity); err != nil {
+			cleanup("remote stage record")
+			return fmt.Errorf("recording pod %q as a remote stage of city %s (%s): %w; the pod was removed rather than run unmarked", podName, remoteStageCityName(p.cityName, ctrlCity), ctrlCity, err)
+		}
+	}
+
+	if !p.prebaked {
 		// Signal entrypoint to proceed.
 		if _, err := p.ops.execInPod(ctx, podName, "agent",
 			[]string{"touch", "/workspace/.gc-workspace-ready"}, nil); err != nil {
@@ -391,9 +412,11 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 // entrypoint launches the agent) and Relaunch (after the respawn). k8s does not
 // run SessionLive (RunLive is a no-op), matching the pre-un-weld behavior.
 func (p *Provider) runPodPostLaunchSetup(ctx context.Context, podName string, cfg runtime.Config) {
-	// Enable pane logging for diagnostics.
+	// Enable pane logging for diagnostics. No -o: the pipe survives
+	// respawn-pane -k, and -o would toggle it off on every other Relaunch;
+	// plain pipe-pane replaces any existing pipe, so this is idempotent.
 	_, _ = p.ops.execInPod(ctx, podName, "agent",
-		[]string{"tmux", "pipe-pane", "-t", tmuxSession, "-o", "cat >> /tmp/agent-output.log"}, nil)
+		[]string{"tmux", "pipe-pane", "-t", tmuxSession, "cat >> /tmp/agent-output.log"}, nil)
 
 	// Run session_setup commands inside the pod.
 	for _, cmd := range cfg.SessionSetup {
@@ -428,8 +451,10 @@ func (p *Provider) runPodPostLaunchSetup(ctx context.Context, podName string, cf
 // it does NOT recreate the pod here). Staging, city/beads init, and PreStart are
 // NOT re-run here (k8s treats PreStart as provision-half); env is provision-half
 // too (set in the pod spec at create time, not re-injected — respawn-pane carries
-// no env). NOTE: tmux diverges — as of the relaunch pre_start fix it re-runs
-// PreStart on Relaunch (launch-half), while k8s and ssh intentionally do not.
+// no env). The remote-stage record is the exception: it is written again before
+// the respawn, so a warm pod an older provider created is marked too. NOTE: tmux
+// diverges — as of the relaunch pre_start fix it re-runs PreStart on Relaunch
+// (launch-half), while k8s and ssh intentionally do not.
 //
 // CAVEAT (unverified on a real cluster — see the B3 design doc): for
 // LINUX_USERNAME pods the entrypoint runs tmux under `su - <user>`, so the
@@ -449,6 +474,17 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 	if _, err := p.ops.execInPod(ctx, podName, "agent",
 		[]string{"tmux", "has-session", "-t", tmuxSession}, nil); err != nil {
 		return fmt.Errorf("%w: session %q (pod %s has no live tmux session)", runtime.ErrSessionNotFound, name, podName)
+	}
+
+	// Record the warm pod as a remote stage before the agent respawns, as
+	// Start does before its ready sentinel (S5-A): a pod an older provider
+	// created carries neither the record nor the pod-spec environment, and
+	// the respawned agent must not run unmarked. A failed write fails the
+	// relaunch rather than respawning into an unmarked pod.
+	if ctrlCity := cfg.Env["GC_CITY"]; ctrlCity != "" {
+		if err := writeRemoteStageInPod(ctx, p.ops, podName, p.cityName, ctrlCity); err != nil {
+			return fmt.Errorf("k8s relaunch %q: recording pod %q as a remote stage of city %s (%s): %w; the agent was not respawned", name, podName, remoteStageCityName(p.cityName, ctrlCity), ctrlCity, err)
+		}
 	}
 
 	// Respawn the agent in the warm "main" session.
@@ -613,19 +649,48 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 
 // Nudge types a message into the tmux session followed by Enter.
 // Uses -l (literal mode) so tmux key names in the message text are not
-// interpreted as keystrokes. Content blocks are flattened to text.
+// interpreted as keystrokes. Content blocks are flattened to text. The
+// delivery is a poke whose keystroke echo GetLastActivity discounts (see
+// [Provider.poke]).
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
-	return p.carrier().Nudge(context.Background(), name, content)
+	ctx := context.Background()
+	return p.poke(ctx, name, func() error { return p.carrier().Nudge(ctx, name, content) })
 }
 
-// SendKeys sends bare keystrokes to the tmux session. Best-effort on a
-// missing session (contract: no-op), but a genuine transport failure to a
-// live pod is propagated (#4389).
+// SendKeys sends bare keystrokes to the tmux session, as a poke whose
+// keystroke echo GetLastActivity discounts (see [Provider.poke]).
+// Best-effort on a missing session (contract: no-op), but a genuine
+// transport failure to a live pod is propagated (#4389).
 func (p *Provider) SendKeys(name string, keys ...string) error {
-	if err := p.carrier().SendKeys(context.Background(), name, keys...); err != nil && !errors.Is(err, runtime.ErrSessionNotFound) {
+	ctx := context.Background()
+	if err := p.poke(ctx, name, func() error { return p.carrier().SendKeys(ctx, name, keys...) }); err != nil && !errors.Is(err, runtime.ErrSessionNotFound) {
 		return err
 	}
 	return nil
+}
+
+// poke runs send, gc's own input to the session, and records it in the poke
+// ledger: tmux counts gc's keystrokes as window activity even when the agent
+// never answers, so GetLastActivity discounts their echo. The session's raw
+// activity is read before send types anything, the genuine baseline, and
+// again once send has delivered, the echo: the pod stamps both on its own
+// clock, so the echo is matched there and only the grace runs on the
+// provider's ([runtime.PokeLedger]).
+func (p *Provider) poke(ctx context.Context, name string, send func() error) error {
+	commit := p.pokes.Begin(name, p.rawActivity(ctx, name))
+	if err := send(); err != nil {
+		return err
+	}
+	commit(p.clock(), p.rawActivity(ctx, name))
+	return nil
+}
+
+// clock is the poke ledger's time source.
+func (p *Provider) clock() time.Time {
+	if p.now != nil {
+		return p.now()
+	}
+	return time.Now()
 }
 
 // RunLive re-applies session_live commands. Not yet supported for K8s.
@@ -718,27 +783,24 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 // is listed too and can mask this city's session dying.
 func (p *Provider) ListRunningComplete() bool { return true }
 
-// GetLastActivity returns the time of the last I/O in the tmux session.
+// GetLastActivity returns the time of the last I/O in the tmux session (zero
+// if unknown), read as the local tmux provider reads it: the newest
+// #{window_activity} of the session's windows, less the keystroke echo of
+// gc's own nudges and keys (see [Provider.poke]). #{session_activity} is
+// pinned at creation/attach time for a detached session and does not advance
+// when the agent prints output.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
-	ctx := context.Background()
-	podName, err := p.findRunningPod(ctx, name)
+	return p.pokes.Discount(name, p.rawActivity(context.Background(), name), p.clock()), nil
+}
+
+// rawActivity reads the session's raw activity clock, the newest
+// #{window_activity} of the in-pod tmux session's windows (zero if unknown).
+func (p *Provider) rawActivity(ctx context.Context, name string) time.Time {
+	activity, err := runtime.ReadTmuxWindowActivity(ctx, p, name, tmuxSession)
 	if err != nil {
-		return time.Time{}, nil
+		return time.Time{}
 	}
-	output, err := p.ops.execInPod(ctx, podName, "agent",
-		[]string{"tmux", "display-message", "-t", tmuxSession, "-p", "#{session_activity}"}, nil)
-	if err != nil {
-		return time.Time{}, nil
-	}
-	epoch := strings.TrimSpace(output)
-	if epoch == "" {
-		return time.Time{}, nil
-	}
-	secs, err := strconv.ParseInt(epoch, 10, 64)
-	if err != nil {
-		return time.Time{}, nil
-	}
-	return time.Unix(secs, 0), nil
+	return activity
 }
 
 // ClearScrollback clears the tmux scrollback buffer (best-effort).
@@ -748,7 +810,7 @@ func (p *Provider) ClearScrollback(name string) error {
 }
 
 // Capabilities reports K8s provider capabilities. The K8s provider
-// supports activity tracking via tmux session_activity but does not
+// supports activity tracking via tmux window_activity but does not
 // support attachment detection from the controller host.
 func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	return runtime.ProviderCapabilities{
@@ -1007,6 +1069,57 @@ func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity string) er
 		return err
 	}
 	return nil
+}
+
+// remoteStageRecordPath is where a pod's remote-stage record lives: gc reads
+// <city>/.gc/remote-stage.toml, and the pod's city root is /workspace in
+// both staged and prebaked pods.
+const remoteStageRecordPath = podWorkspaceRoot + "/.gc/remote-stage.toml"
+
+// The remote-stage environment cmd/gc's remote_stage.go honors from process
+// start. Keep the names in step with cmd/gc (remoteStageControllerEnv,
+// remoteStageCityEnv).
+const (
+	remoteStageControllerEnv = "GC_REMOTE_STAGE_CONTROLLER"
+	remoteStageCityEnv       = "GC_REMOTE_STAGE_CITY"
+)
+
+// remoteStageCityName is the controller's city name, else its path's base.
+func remoteStageCityName(cityName, ctrlCity string) string {
+	if strings.TrimSpace(cityName) == "" {
+		return filepath.Base(ctrlCity)
+	}
+	return cityName
+}
+
+// remoteStageEnv marks the processes started from a pod's environment as a
+// remote stage of ctrlCity, or nothing without a controller city: the
+// entrypoint, the agent and its tmux server (re-exported through su for
+// LINUX_USERNAME pods: suRemoteStageExports), and kubectl exec'd commands. A
+// process started with a deliberately cleared environment relies on the
+// on-disk record.
+func remoteStageEnv(cityName, ctrlCity string) []corev1.EnvVar {
+	if strings.TrimSpace(ctrlCity) == "" {
+		return nil
+	}
+	return []corev1.EnvVar{
+		{Name: remoteStageControllerEnv, Value: ctrlCity},
+		{Name: remoteStageCityEnv, Value: remoteStageCityName(cityName, ctrlCity)},
+	}
+}
+
+// remoteStageRecord renders the record cmd/gc's remote_stage.go reads.
+func remoteStageRecord(cityName, ctrlCity string, now time.Time) string {
+	cityName = remoteStageCityName(cityName, ctrlCity)
+	return fmt.Sprintf("controller_city = %q\ncontroller_path = %q\nstaged_at = %q\n", cityName, ctrlCity, now.UTC().Format(time.RFC3339))
+}
+
+// writeRemoteStageInPod writes the pod's remote-stage record with a plain
+// shell write (temp file, then rename), independent of the pod's gc version.
+func writeRemoteStageInPod(ctx context.Context, ops k8sOps, podName, cityName, ctrlCity string) error {
+	script := "mkdir -p " + podWorkspaceRoot + "/.gc && cat > " + remoteStageRecordPath + ".tmp && mv -f " + remoteStageRecordPath + ".tmp " + remoteStageRecordPath
+	_, err := ops.execInPod(ctx, podName, "agent", []string{"sh", "-c", script}, strings.NewReader(remoteStageRecord(cityName, ctrlCity, time.Now())))
+	return err
 }
 
 // initBeadsInPod ensures the pod workspace has usable .beads state. It keeps

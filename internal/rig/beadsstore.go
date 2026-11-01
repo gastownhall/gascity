@@ -38,3 +38,55 @@ func beadsDirContainsStore(fs fsys.FS, beadsPath string) (bool, error) {
 	}
 	return false, nil
 }
+
+// adoptedStorePrefix is the issue prefix an --adopt'ed store records, read
+// once during planning. prefix is "" when neither .beads/config.yaml nor the
+// store records one, or when err is set; err is the adopt guard's refusal of a
+// store it could not read or whose prefix it will not adopt.
+type adoptedStorePrefix struct {
+	prefix string
+	err    error
+}
+
+// readAdoptedStorePrefix learns the issue prefix of the store an --adopt
+// registers. .beads/config.yaml wins when it records one. Otherwise, when the
+// store has a metadata.json and the caller can read stores, the store's own
+// config table is asked: bd keeps a store's prefix there and leaves
+// config.yaml a commented template. A missing metadata.json is left for the
+// adopt guard to report.
+func readAdoptedStorePrefix(deps Deps, rigPath string) adoptedStorePrefix {
+	if prefix, ok, err := contract.ReadIssuePrefix(deps.FS, filepath.Join(rigPath, ".beads", "config.yaml")); err == nil && ok {
+		return adoptablePrefix(rigPath, prefix, true)
+	}
+	if deps.ReadStorePrefix == nil {
+		return adoptedStorePrefix{}
+	}
+	if _, err := deps.FS.Stat(filepath.Join(rigPath, ".beads", "metadata.json")); err != nil {
+		return adoptedStorePrefix{}
+	}
+	prefix, err := deps.ReadStorePrefix(rigPath)
+	if err != nil {
+		return adoptedStorePrefix{err: fmt.Errorf("--adopt requires a valid issue_prefix in .beads/config.yaml in %s: reading the store's own issue_prefix: %w", rigPath, err)}
+	}
+	return adoptablePrefix(rigPath, strings.TrimSpace(prefix), false)
+}
+
+// adoptablePrefix accepts a recorded prefix that is already lowercase. A
+// mixed-case one is refused rather than lowercased, wherever it is recorded:
+// gc stores rig prefixes lowercase, and minting under a different case would
+// fork the store's bead ID series. The remedy renames the store's prefix; bd
+// rename-prefix leaves .beads/config.yaml alone, and bd create prefers a
+// prefix recorded there, so one recorded in config.yaml must change there too.
+func adoptablePrefix(rigPath, prefix string, inConfigYAML bool) adoptedStorePrefix {
+	lower := strings.ToLower(prefix)
+	if prefix == lower {
+		return adoptedStorePrefix{prefix: prefix}
+	}
+	where, alsoConfigYAML := "", ""
+	if inConfigYAML {
+		where = " in .beads/config.yaml"
+		alsoConfigYAML = " and change the prefix in .beads/config.yaml to " + lower
+	}
+	return adoptedStorePrefix{err: fmt.Errorf("--adopt: the store at %s records issue prefix %q%s; gc stores rig prefixes in lowercase, so adopting it would fork its bead ID series; run %q in %s first%s",
+		rigPath, prefix, where, "bd rename-prefix "+lower, rigPath, alsoConfigYAML)}
+}

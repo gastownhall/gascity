@@ -295,7 +295,7 @@ Table-form fields:
 | Field | Type | Purpose |
 |---|---|---|
 | `description` | string | What the variable is for; shown by `gc formula show` |
-| `default` | string | Value used when none is provided. An explicit empty string is a valid default |
+| `default` | string | Value used when none is provided. An explicit empty string is a valid default. A default may reference other variables with `{{name}}`: values supplied for the invocation (explicit `--var`, rig `formula_vars`, and the injected names below) or other defaults. Supplied values are used verbatim and never re-expanded |
 | `required` | bool | The variable must be provided at instantiation. Declaring `required = true` together with a `default` fails validation: `vars.<name>: cannot have both required:true and default` |
 | `enum` | []string | Allowed values; enforced at instantiation |
 | `pattern` | string | Regex the value must match; enforced at instantiation |

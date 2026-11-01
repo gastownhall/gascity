@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -354,33 +355,60 @@ func TestLockOutputsDedupesOneDirectoryReachedTwoWays(t *testing.T) {
 	}
 }
 
+// overflowGID is the gid the kernel reports for a group that is not mapped in
+// this user namespace; chown to it fails with EINVAL.
+func overflowGID() int {
+	gid := 65534
+	if b, err := os.ReadFile("/proc/sys/kernel/overflowgid"); err == nil {
+		if n, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+			gid = n
+		}
+	}
+	return gid
+}
+
 // TestWriteTokenFileKeepsGroup pins that a replacement keeps the file's group
 // as well as its mode: a bd serve reading a 0640 file through its group must
-// keep reading it after a render.
+// keep reading it after a render. It skips where no secondary group is mapped:
+// a user namespace such as Bazel's linux-sandbox or bwrap maps only the
+// caller's gid, and a file cannot be given a group that does not exist there.
 func TestWriteTokenFileKeepsGroup(t *testing.T) {
 	groups, err := os.Getgroups()
 	if err != nil {
 		t.Fatal(err)
 	}
-	other := -1
+	var candidates []int
 	for _, g := range groups {
 		if g != os.Getegid() {
-			other = g
-			break
+			candidates = append(candidates, g)
 		}
 	}
-	if other < 0 && os.Geteuid() == 0 {
-		other = 4243 // root may give a file any group
+	if len(candidates) == 0 && os.Geteuid() == 0 {
+		candidates = []int{4243} // root may give a file any group
 	}
-	if other < 0 {
+	if len(candidates) == 0 {
 		t.Skip("the test user has no secondary group and is not root")
 	}
 	path := filepath.Join(t.TempDir(), "tokens")
 	if err := os.WriteFile(path, []byte("old\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chown(path, -1, other); err != nil {
-		t.Fatal(err)
+	other, overflow := -1, overflowGID()
+	for _, g := range candidates {
+		if g == overflow {
+			continue
+		}
+		err := os.Chown(path, -1, g)
+		if err == nil {
+			other = g
+			break
+		}
+		if !errors.Is(err, syscall.EINVAL) {
+			t.Fatal(err)
+		}
+	}
+	if other < 0 {
+		t.Skip("no supplementary group is mapped in this user namespace (Bazel linux-sandbox, bwrap), so the file cannot be given a secondary group here")
 	}
 	if err := os.Chmod(path, 0o640); err != nil {
 		t.Fatal(err)

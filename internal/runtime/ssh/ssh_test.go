@@ -90,10 +90,11 @@ func TestParseEndpoint(t *testing.T) {
 
 func TestSSHArgs_BuildsClientInvocation(t *testing.T) {
 	ep := Endpoint{User: "gcagent", Host: "100.110.9.92", Port: 2222, KeyPath: "/k/id", KnownHostsPath: "/k/known"}
-	got := sshArgs(ep, []string{"tmux", "send-keys", "-t", "main", "-l", "hi there"})
+	got := sshArgs(ep, sshConfigured{connectTimeout: true, serverAlive: true}, []string{"tmux", "send-keys", "-t", "main", "-l", "hi there"})
 	want := []string{
 		"-o", "BatchMode=yes",
 		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "LogLevel=ERROR",
 		"-o", "UserKnownHostsFile=/k/known",
 		"-i", "/k/id",
 		"-p", "2222",
@@ -106,10 +107,11 @@ func TestSSHArgs_BuildsClientInvocation(t *testing.T) {
 }
 
 func TestSSHArgs_MinimalEndpoint(t *testing.T) {
-	got := sshArgs(Endpoint{Host: "box"}, []string{"true"})
+	got := sshArgs(Endpoint{Host: "box"}, sshConfigured{connectTimeout: true, serverAlive: true}, []string{"true"})
 	want := []string{
 		"-o", "BatchMode=yes",
 		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "LogLevel=ERROR",
 		"--", "box", "'true'",
 	}
 	if !slices.Equal(got, want) {

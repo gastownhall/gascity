@@ -45,11 +45,15 @@ func newFakeIdleTracker() *fakeIdleTracker {
 	}
 }
 
-func (f *fakeIdleTracker) checkIdle(sessionName, template, _, _ string, _ runtime.Provider, _ time.Time) bool {
-	if f.idle[sessionName] {
+func (f *fakeIdleTracker) checkIdle(sessionName, template, provider, transport string, sp runtime.Provider, now time.Time) bool {
+	return f.checkIdleUnder(sessionName, sessionName, template, provider, transport, sp, now)
+}
+
+func (f *fakeIdleTracker) checkIdleUnder(_, settingName, template, _, _ string, _ runtime.Provider, _ time.Time) bool {
+	if f.idle[settingName] {
 		return true
 	}
-	if template == "" || f.exemptions[sessionName] {
+	if template == "" || f.exemptions[settingName] {
 		return false
 	}
 	return f.templates[template]

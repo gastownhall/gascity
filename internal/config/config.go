@@ -1758,16 +1758,24 @@ type SessionConfig struct {
 	// replaces it.
 	ClaimHolderStallTimeout string `toml:"claim_holder_stall_timeout,omitempty"`
 	// Socket specifies the tmux socket name for per-city isolation.
-	// When set, all tmux commands use "tmux -L <socket>" to connect to
-	// a dedicated server. When empty, defaults to the city name
-	// (workspace.name) — giving every city its own tmux server
-	// automatically. Set explicitly to override.
+	// When set, tmux commands connect to a dedicated server: "tmux -L
+	// <socket>" normally, or "tmux -S <path>" with the path pinned from
+	// $TMUX when gc runs in a pane of that same server, so a pane whose
+	// TMUX_TMPDIR differs from the controller's still reaches the server
+	// hosting it. When empty, defaults to the city name (workspace.name) —
+	// giving every city its own tmux server automatically. Set explicitly
+	// to override.
 	Socket string `toml:"socket,omitempty"`
 	// RemoteMatch is a substring pattern for the hybrid provider to route
 	// sessions to the remote (K8s) backend. Sessions whose names contain
 	// this pattern go to K8s; all others stay local (tmux).
 	// Overridden by the GC_HYBRID_REMOTE_MATCH env var if set.
 	RemoteMatch string `toml:"remote_match,omitempty"`
+	// ProgramStatus is the city switch for OSC 7501 program status. "off"
+	// (the default) changes nothing. "shadow" arms capture on declared
+	// providers ([providers.<p>.program_status]) and compares readings
+	// without changing any decision. "on" lets valid readings decide.
+	ProgramStatus string `toml:"program_status,omitempty" jsonschema:"enum=off,enum=shadow,enum=on,default=off"`
 }
 
 // durationOr parses raw as a Go duration, returning def when raw is empty or
@@ -2967,9 +2975,24 @@ type DaemonConfig struct {
 	// 3 to 60 minutes and never stop, a started claim is recycled at most once
 	// and then escalated, and an unstarted claim is released after its third
 	// unanswered nudge (a nudge the seat could not take, such as one held at
-	// a permission prompt, does not count). "off" runs the three backstops it
-	// replaced (idle-claim, continuation, execution) instead: the rollback.
-	// Read on every pass, so a config reload applies. Legacy ignores it.
+	// a permission prompt, does not count). A claim whose metadata
+	// gc.awaiting_human names its seat (the seat asked a person and waits on
+	// their decision) is nudged only hourly, and never recycled or released.
+	// A seat whose provider refuses its turns with a rate limit (two in a
+	// row, as its own transcript records them, the newest after a nudge it
+	// took) is paced as on a degraded provider, and once a nudge it took
+	// since is refused too, 10 minutes or more after the first refusal, it
+	// is restarted on a fresh conversation once, keeping its claims, at most
+	// one seat per provider per 30 minutes and once per seat per hour. While
+	// a person is attached or its work awaits a person, the restart waits and
+	// one alert says so. If the fresh conversation is refused too (or the
+	// refusal is a spent usage quota), one alert names the provider and the
+	// seat stays paced until its provider serves it. Every move is a
+	// work.rate_limited event, on which a pack may hold the provider through
+	// provider-health.json. Seats whose turns cannot be read are judged on
+	// their activity alone. "off" runs the three backstops it replaced
+	// (idle-claim, continuation, execution) instead: the rollback. Read on
+	// every pass, so a config reload applies. Legacy ignores it.
 	WorkLadder string `toml:"work_ladder,omitempty" jsonschema:"default=on,enum=on,enum=off"`
 	// AutoRestartOnDrift controls whether `gc start` automatically restarts
 	// the supervisor when it detects the running supervisor's binary or
@@ -5155,6 +5178,9 @@ func Parse(data []byte) (*City, error) {
 		return nil, err
 	}
 	if err := validateOpsModes(cfg.Ops); err != nil {
+		return nil, err
+	}
+	if err := validateProgramStatus(&cfg); err != nil {
 		return nil, err
 	}
 	// Parse sees one layer. Cross-layer storage invariants (six-class

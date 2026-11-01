@@ -322,13 +322,22 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 		state.Pending = pending
 		return state, nil
 	case sessionpkg.StateActive, sessionpkg.StateAwake:
+		state.Program = h.programStatus(info.SessionName)
 		pending, err := h.Pending(ctx)
 		if err != nil {
 			return State{}, err
 		}
+		// Under the program-status shadow switch, the phase this view
+		// settles on is recorded beside the record (observation); the
+		// phase returned is this view's alone.
+		defer func() { h.manager.RecordObservationShadow(info, observationVerdict(state.Phase)) }()
 		if pending != nil {
 			state.Phase = PhaseBlocked
 			state.Pending = pending
+			return state, nil
+		}
+		if phase, decided := ProgramPhase(state.Program); decided {
+			state.Phase = phase
 			return state, nil
 		}
 		state.Phase = PhaseReady
@@ -375,6 +384,17 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 	return state, nil
 }
 
+// programStatus reads runtime session sessionName's judged program status
+// through the session manager; a reading the runtime cannot take is Unread
+// (ProgramStatusOf).
+func (h *SessionHandle) programStatus(sessionName string) runtime.ProgramStatus {
+	ps, err := h.manager.ProgramStatusByName(sessionName)
+	if err != nil {
+		return runtime.ProgramStatus{}
+	}
+	return ps
+}
+
 // Message sends a user turn to the worker.
 func (h *SessionHandle) Message(ctx context.Context, by sessionpkg.Actor, req MessageRequest) (result MessageResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationMessage)
@@ -407,6 +427,14 @@ func (h *SessionHandle) Message(ctx context.Context, by sessionpkg.Actor, req Me
 		ctx = runtime.WithNudgeDeliveryKey(ctx, req.DeliveryKey)
 	}
 	outcome, err := h.manager.Submit(ctx, by, id, req.Text, resumeCommand, h.runtimeHints(), submitIntent(req.Delivery))
+	if err != nil && req.QueueBehindPending && errors.Is(err, sessionpkg.ErrPendingInteraction) &&
+		!errors.Is(err, sessionpkg.ErrReplacementNotPrepared) {
+		if err = h.manager.QueueSubmit(id, req.Text); err != nil {
+			return MessageResult{}, err
+		}
+		result = MessageResult{Queued: true}
+		return result, nil
+	}
 	if err != nil {
 		return MessageResult{}, err
 	}
@@ -883,5 +911,21 @@ func submitIntent(intent DeliveryIntent) sessionpkg.SubmitIntent {
 		return sessionpkg.SubmitIntentInterruptNow
 	default:
 		return sessionpkg.SubmitIntentDefault
+	}
+}
+
+// observationVerdict is the shadow observation token for a phase this view
+// settled on for a live session: Busy is busy, Blocked pending, and Ready
+// idle; any other phase reads indeterminate.
+func observationVerdict(phase Phase) runtime.ProgramVerdict {
+	switch phase {
+	case PhaseBusy:
+		return runtime.ProgramVerdictBusy
+	case PhaseBlocked:
+		return runtime.ProgramVerdictPending
+	case PhaseReady:
+		return runtime.ProgramVerdictIdle
+	default:
+		return runtime.ProgramVerdictIndeterminate
 	}
 }

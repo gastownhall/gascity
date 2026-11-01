@@ -132,6 +132,13 @@ const (
 	WorkReleased          = "work.released"
 	WorkReleaseUnfinished = "work.release_unfinished"
 	WorkEscalated         = "work.escalated"
+	// WorkRateLimited is one move of a seat's rate-limit episode
+	// (internal/workladder): its provider refusing its turns with a rate
+	// limit, as the agent's own transcript classifies them. Subject carries
+	// the session ID, SessionID the seat; the payload is
+	// WorkRateLimitedPayload. It reports facts for a pack's provider policy
+	// and for people; the SDK draws no conclusion about the provider from it.
+	WorkRateLimited = "work.rate_limited"
 	// BeadDeadAssigneeReopened fires when the reconciler reopens a routed work
 	// bead whose assignee resolves to no open session bead — the owning session
 	// closed/retired while the bead stayed assigned, leaving it open+routed but
@@ -207,7 +214,10 @@ const (
 	// bead after its runtime has exited — i.e., the worker process is
 	// gone but the bead's assignee/state still references it. Surfaces
 	// the reconciler-detected leak so pack-level subscribers can decide
-	// whether to clear-assignee-and-respawn or escalate.
+	// whether to clear-assignee-and-respawn or escalate. A pool seat parked
+	// on pre-assigned blocked work (cmd/gc/seat_parked.go) does not fire it;
+	// one that stops parking (past its bound, or crowded out of a full
+	// slot-bounded pool) fires it though its work is an open, unstarted pin.
 	SessionStranded = "session.stranded"
 	// SessionPoolSlotRetiredAtDrainDeadline fires when the reconciler force-
 	// retires a pool-managed session bead that entered drain and never
@@ -289,6 +299,13 @@ const (
 	// first, which is correct pull, not a defect) and divergence (the row is
 	// still open, unassigned and route-matching, so the readers disagreed).
 	SessionDemandClaimDivergence = "session.demand_claim_divergence"
+	// SessionProgramStatusShadow fires, only while the city's [session]
+	// program_status switch is shadow, at a decision point that reads the
+	// screen today: it records today's reading beside what the program's own
+	// OSC 7501 record would decide. It is a diagnostics comparison and never
+	// influences the decision it reports on. Continuously evaluated points
+	// record only when their reading changes. Closed tokens only.
+	SessionProgramStatusShadow = "session.program_status_shadow"
 	// SessionColdStartTimeout fires when a pool session's first runtime spawn
 	// (a pending create) exceeds the start deadline and is rolled back. It is
 	// per-session: it fires whenever a fresh spawn times out, including a warm
@@ -632,6 +649,7 @@ var KnownEventTypes = []string{
 	SessionDrainFenceUnavailable,
 	WorkStartedUnrecorded,
 	SessionDemandClaimDivergence,
+	SessionProgramStatusShadow,
 	SessionColdStartTimeout,
 	SessionConversationReset,
 	SessionPending, SessionPendingCleared,
@@ -644,7 +662,7 @@ var KnownEventTypes = []string{
 	ExecutionWorkAssociated, ExecutionRunAnchored, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
 	ExecutionClaimWindowExpired,
 	ExecutionStepStalled,
-	WorkNudged, WorkNudgeFailed, WorkRecycleRequested, WorkReleased, WorkReleaseUnfinished, WorkEscalated,
+	WorkNudged, WorkNudgeFailed, WorkRecycleRequested, WorkReleased, WorkReleaseUnfinished, WorkEscalated, WorkRateLimited,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
 	ConvoyCreated, ConvoyClosed,

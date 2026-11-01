@@ -88,7 +88,7 @@ func TestCompactScriptSharedHistoryGuardSkipsFlattenAndPush(t *testing.T) {
 				t.Fatalf("guard did not name the database and remote:\n%s", out)
 			}
 			log := readCompactDoltLog(t, fixture)
-			for _, forbidden := range []string{"DOLT_RESET", "DOLT_COMMIT", "DOLT_PUSH", "DOLT_FETCH", "DOLT_TAG", "DOLT_GC('--full')"} {
+			for _, forbidden := range []string{"DOLT_RESET", "DOLT_COMMIT", "DOLT_PUSH", "DOLT_FETCH", "DOLT_TAG", "DOLT_GC('--full'"} {
 				if strings.Contains(log, forbidden) {
 					t.Fatalf("guarded database reached %s:\n%s", forbidden, log)
 				}
@@ -97,7 +97,7 @@ func TestCompactScriptSharedHistoryGuardSkipsFlattenAndPush(t *testing.T) {
 				if strings.Contains(log, "CALL ") || !strings.Contains(out, "dry-run (would bare GC)") {
 					t.Fatalf("dry run must only report the bare GC:\n%s\n%s", out, log)
 				}
-			} else if !strings.Contains(log, "CALL DOLT_GC()") || !strings.Contains(out, "db=beads bare-gc duration=") {
+			} else if !strings.Contains(log, "CALL DOLT_GC('--archive-level=0')") || !strings.Contains(out, "db=beads bare-gc duration=") {
 				t.Fatalf("guarded database must still get a bare GC:\n%s\n%s", out, log)
 			}
 			if got := compactWatermark(t, fixture); got != "" {
@@ -119,7 +119,7 @@ func TestCompactScriptSharedHistoryGuardRetriesPendingGCLocally(t *testing.T) {
 		t.Fatalf("pending-GC retry must succeed locally: %v\n%s", err, out)
 	}
 	log := readCompactDoltLog(t, fixture)
-	if !strings.Contains(log, "CALL DOLT_GC('--full')") {
+	if !strings.Contains(log, "CALL DOLT_GC('--full', '--archive-level=0')") {
 		t.Fatalf("pending-GC retry did not run DOLT_GC --full:\n%s", log)
 	}
 	for _, forbidden := range []string{"DOLT_PUSH", "DOLT_FETCH", "DOLT_RESET"} {
@@ -157,7 +157,7 @@ func TestCompactScriptSharedHistoryGuardHoldsPendingPush(t *testing.T) {
 	if strings.Contains(log, "DOLT_PUSH") || strings.Contains(log, "DOLT_FETCH") {
 		t.Fatalf("guard replayed the deferred push:\n%s", log)
 	}
-	if !strings.Contains(log, "CALL DOLT_GC()") {
+	if !strings.Contains(log, "CALL DOLT_GC('--archive-level=0')") {
 		t.Fatalf("guarded database must still get a bare GC:\n%s", log)
 	}
 	data, err := os.ReadFile(marker)
@@ -284,8 +284,8 @@ func TestCompactScriptSharedHistoryGuardLeavesReclaimModesAlone(t *testing.T) {
 		env  []string
 		want string
 	}{
-		{name: "bare-gc", env: []string{"GC_DOLT_COMPACT_BARE_GC=1"}, want: "CALL DOLT_GC()"},
-		{name: "gc-only", args: []string{"--gc-only"}, want: "CALL DOLT_GC('--full')"},
+		{name: "bare-gc", env: []string{"GC_DOLT_COMPACT_BARE_GC=1"}, want: "CALL DOLT_GC('--archive-level=0')"},
+		{name: "gc-only", args: []string{"--gc-only"}, want: "CALL DOLT_GC('--full', '--archive-level=0')"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := newCompactScriptFixture(t)
@@ -296,6 +296,39 @@ func TestCompactScriptSharedHistoryGuardLeavesReclaimModesAlone(t *testing.T) {
 			log := readCompactDoltLog(t, fixture)
 			if !strings.Contains(log, tc.want) || strings.Contains(log, "DOLT_RESET") || strings.Contains(log, "DOLT_PUSH") {
 				t.Fatalf("reclaim must GC without rewriting history or pushing:\n%s", log)
+			}
+		})
+	}
+}
+
+// Dolt 2.3.3-2.5.1 GC archives duplicate their zstd dictionaries once an
+// archive holds more than 256 of them, and each duplicate pins about 137 KB of C
+// memory for the whole GC (ga-rgwfyg4). Every GC the compactor issues must write
+// classic table files, so no CALL DOLT_GC( may go out without the flag.
+func TestCompactScriptGCStatementsDisableArchives(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		env  []string
+		want string
+	}{
+		{name: "bare-gc", env: []string{"GC_DOLT_COMPACT_BARE_GC=1"}, want: "CALL DOLT_GC('--archive-level=0')"},
+		{name: "gc-only", args: []string{"--gc-only"}, want: "CALL DOLT_GC('--full', '--archive-level=0')"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			out, err := fixture.runWithArgs(t, "remote_success", tc.args, tc.env...)
+			if err != nil {
+				t.Fatalf("reclaim failed: %v\n%s", err, out)
+			}
+			log := readCompactDoltLog(t, fixture)
+			if !strings.Contains(log, tc.want) {
+				t.Fatalf("GC must issue %s:\n%s", tc.want, log)
+			}
+			for _, line := range strings.Split(log, "\n") {
+				if strings.Contains(line, "CALL DOLT_GC(") && !strings.Contains(line, "--archive-level=0") {
+					t.Fatalf("GC statement without --archive-level=0: %s\n%s", line, log)
+				}
 			}
 		})
 	}
