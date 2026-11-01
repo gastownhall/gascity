@@ -193,6 +193,7 @@ go_test(
         "metadata_empty_clear_conformance_test.go",
         "metadata_readings_test.go",
         "namespace_census_test.go",
+        "native_dolt_assignment_guard_test.go",
         "native_dolt_events_journal_read_test.go",
         "native_dolt_events_journal_test.go",
         "native_dolt_guarded_batch_export_integration_test.go",

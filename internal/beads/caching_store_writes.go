@@ -128,6 +128,34 @@ func (c *CachingStore) UpdateIfAssignment(id, expectedStatus, expectedAssignee s
 	return true, nil
 }
 
+// ReleaseBlockedIfCurrent forwards the raw-status operation, preserving its
+// handled verdict. The normalized cache cannot decide whether a hold is open.
+func (c *CachingStore) ReleaseBlockedIfCurrent(id, expectedAssignee string, metadata map[string]string) (released, handled bool, err error) {
+	r, ok := BlockedAssignmentReleaserFor(c.conditionalBacking())
+	if !ok {
+		return false, true, ErrConditionalWriteUnsupported
+	}
+	startSeq := c.currentMutationSeq()
+	released, handled, err = r.ReleaseBlockedIfCurrent(id, expectedAssignee, metadata)
+	if err != nil {
+		return false, true, err
+	}
+	if released {
+		empty := ""
+		c.absorbUpdate(id, UpdateOpts{Assignee: &empty, Metadata: metadata}, startSeq, 0)
+	} else if handled {
+		c.evictForConditionalWrite(id)
+	}
+	return released, handled, nil
+}
+
+func (c *CachingStore) blockedAssignmentReleaseHandle() (BlockedAssignmentReleaser, bool) {
+	if _, ok := BlockedAssignmentReleaserFor(c.conditionalBacking()); !ok {
+		return nil, false
+	}
+	return c, true
+}
+
 // absorbUpdate refreshes the cached row for id after opts landed on the
 // backing store, starting from the backing's authoritative row. generation is
 // the close generation of a closing update's intent (beginCloseIntent).
