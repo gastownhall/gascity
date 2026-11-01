@@ -55,6 +55,7 @@ go_test(
         "finalize_blocked_source_test.go",
         "finalize_quarantined_root_test.go",
         "finalize_query_timeout_tier_repro_test.go",
+        "finalize_source_chain_unblocked_test.go",
         "main_test.go",
         "ralph_check_asset_test.go",
         "ralph_check_infra_blind_test.go",
