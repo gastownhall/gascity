@@ -3100,6 +3100,21 @@ func TestWispGC_ReloadKeepsLastRun(t *testing.T) {
 		t.Fatal("rebuilt tracker remembers the old tracker's refusal; notes must not carry across a reload")
 	}
 
+	t.Run("notes are not carried", func(t *testing.T) {
+		prev := &memoryWispGC{interval: time.Hour, ttl: time.Hour, lastRun: lastRun}
+		heldRoot := beads.Bead{ID: "root-held", UpdatedAt: lastRun}
+		refusedRoot := beads.Bead{ID: "root-refused", UpdatedAt: lastRun}
+		prev.notes.noteRefusal(graphArmHolderMemo, heldRoot, lastRun, holderAnswerHeld)
+		prev.notes.noteRefusal("graph", refusedRoot, lastRun, "closure holds a bead that is not closed")
+		next := &memoryWispGC{interval: time.Hour, ttl: time.Hour}
+		m := carryWispGCState(prev, next).(*memoryWispGC)
+		if _, ok := m.notes.remembered(graphArmHolderMemo, heldRoot, lastRun.Add(time.Minute)); ok {
+			t.Fatal("holder memo carried; answers read against a leg set the reload may have changed must not survive it")
+		}
+		if _, ok := m.notes.remembered("graph", refusedRoot, lastRun.Add(time.Minute)); ok {
+			t.Fatal("graph refusal carried into the rebuilt tracker")
+		}
+	})
 	t.Run("startup reload carries a zero lastRun", func(t *testing.T) {
 		got := carryWispGCState(newWispGC(time.Hour, time.Hour, 0), newWispGC(time.Hour, time.Hour, 0))
 		if !got.shouldRun(time.Now()) {
