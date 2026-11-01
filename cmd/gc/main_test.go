@@ -244,6 +244,7 @@ func TestMain(m *testing.M) {
 	maybeRunHostedBeadsCredentialProvider()
 	maybeRunProductMetricsDirectChildEnvSpy()
 	maybeRunFakeDoltSQLServer()
+	maybeRunControlDispatchSigtermChild()
 
 	// testscript re-executes the test binary as "gc" or "bd" for each txtar
 	// command. On that path we must not create a new temp root — the parent

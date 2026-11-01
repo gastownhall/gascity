@@ -712,6 +712,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A stop during a workflow finalizer now ends the control dispatcher.**
+  `gc convoy control --serve` installed a signal handler for each
+  workflow-finalize control, so a SIGTERM or Ctrl-C that landed while the
+  finalizer waited on the source-workflow lock was caught instead of ending
+  the process: the dispatcher kept serving until the stop's grace ran out, and
+  the canceled lock wait quarantined the finalizer and left its source bead
+  open. The dispatcher now keeps the default signal disposition, as it does
+  for every other control kind: a stop ends it at once and leaves the
+  finalizer open for the next dispatcher to retry. The one-shot
+  `gc convoy control <id>` behaves the same way.
+
 - **The core orphan-sweep order judges claims on graph steps in a
   split-storage city.** On a city whose `[storage.classes]` serves the graph
   class from a binding, `gc bd list` answers from a work store only, so the
