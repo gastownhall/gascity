@@ -1113,12 +1113,15 @@ func TestLaunchKeysOnTheVerbSectionsTemplate(t *testing.T) {
 // origin follow the bound row (legacy binds, then resolves).
 func TestLaunchTriggerEnvFollowsTheBoundRow(t *testing.T) {
 	stale := map[string]string{"GC_TRIGGER_BEAD_ID": "w-old", "GC_TRIGGER_WORK_BEAD_ID": "w-old", "GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"}
+	// withheld keys must be present and empty, not absent: only an explicit
+	// empty value keeps the child from inheriting the key.
 	for _, c := range []struct {
 		name, bind string
 		want       map[string]string
+		withheld   []string
 	}{
-		{"cleared", "", map[string]string{"GC_TRIGGER_BEAD_ID": "", "GC_SPAWN_ORIGIN": "", "GC_KEEP": "1"}},
-		{"re-pointed", "w-new", map[string]string{"GC_TRIGGER_BEAD_ID": "w-new", "GC_TRIGGER_WORK_BEAD_ID": "w-new", "GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"}},
+		{"cleared", "", map[string]string{"GC_TRIGGER_BEAD_ID": "", "GC_SPAWN_ORIGIN": "", "GC_KEEP": "1"}, triggerEnvKeys},
+		{"re-pointed", "w-new", map[string]string{"GC_TRIGGER_BEAD_ID": "w-new", "GC_TRIGGER_WORK_BEAD_ID": "w-new", "GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"}, []string{"GC_TRIGGER_BEAD_STORE_REF", "GC_TRIGGER_WORK_STORE_REF"}},
 	} {
 		k, leaf := launchKit(t, "asleep", "gc.trigger_bead_id", "w-old")
 		row := k.p.World.Census.Rows[k.it.Key]
@@ -1130,6 +1133,11 @@ func TestLaunchTriggerEnvFollowsTheBoundRow(t *testing.T) {
 		for key, want := range c.want {
 			if got := leaf.cfgs[0].Env[key]; got != want {
 				t.Errorf("%s: launch %s = %q, want %q", c.name, key, got, want)
+			}
+		}
+		for _, key := range c.withheld {
+			if got, ok := leaf.cfgs[0].Env[key]; !ok || got != "" {
+				t.Errorf("%s: launch %s = %q (present=%v), want present and empty", c.name, key, got, ok)
 			}
 		}
 	}
