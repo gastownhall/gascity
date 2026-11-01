@@ -490,3 +490,62 @@ func TestReusablePoolSessionInfo_PersistentRestartHandoffIsReusable(t *testing.T
 		t.Fatalf("reusablePoolSessionInfo(one_shot, restart handoff, work under its alias) = true; want false")
 	}
 }
+
+// TestReusablePoolSessionInfo_PersistentAsleepNonHandoffNotReusable: only a
+// committed restart handoff with no sleep reason stamped since is admitted;
+// every other asleep persistent-pool row keeps the fresh-identity rule, and a
+// handoff that still holds work or is already taken stays out of reuse.
+func TestReusablePoolSessionInfo_PersistentAsleepNonHandoffNotReusable(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 30, 5, 0, 0, 0, time.UTC)
+	template := "fable-nomad/worker"
+	persistentAgent := &config.Agent{Name: "worker", Dir: "fable-nomad"}
+	handedOff := restartHandedOffPoolInfo(t, template, now)
+
+	plainAsleep := handedOff
+	plainAsleep.ContinuationResetPending = ""
+	plainAsleep.ResetCommittedAt = ""
+
+	resetPendingNoCommit := handedOff
+	resetPendingNoCommit.ResetCommittedAt = ""
+
+	resetPendingBadCommit := handedOff
+	resetPendingBadCommit.ResetCommittedAt = "not-a-time"
+
+	freshWakeDrain := handedOff
+	freshWakeDrain.ResetCommittedAt = ""
+	freshWakeDrain.SleepReason = "drained"
+	freshWakeDrain.SleptAt = now.Format(time.RFC3339)
+
+	sleptAfterHandoff := handedOff
+	sleptAfterHandoff.SleepReason = "idle"
+	sleptAfterHandoff.SleptAt = now.Add(time.Minute).Format(time.RFC3339)
+
+	for _, tc := range []struct {
+		name string
+		bp   *agentBuildParams
+		info session.Info
+		used map[string]bool
+	}{
+		{name: "asleep without reset markers", bp: &agentBuildParams{}, info: plainAsleep},
+		{name: "reset pending with empty reset_committed_at", bp: &agentBuildParams{}, info: resetPendingNoCommit},
+		{name: "reset pending with non-RFC3339 reset_committed_at", bp: &agentBuildParams{}, info: resetPendingBadCommit},
+		{name: "fresh-wake drain sleep", bp: &agentBuildParams{}, info: freshWakeDrain},
+		{name: "handoff given a sleep reason afterwards", bp: &agentBuildParams{}, info: sleptAfterHandoff},
+		{
+			name: "handoff holding open assigned work",
+			bp: &agentBuildParams{
+				assignedWorkBeads: []beads.Bead{{ID: "work-1", Status: "in_progress", Assignee: handedOff.Alias}},
+			},
+			info: handedOff,
+		},
+		{name: "handoff already used", bp: &agentBuildParams{}, info: handedOff, used: map[string]bool{handedOff.ID: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if reusablePoolSessionInfo(tc.bp, persistentAgent, template, tc.info, tc.used) {
+				t.Fatalf("reusablePoolSessionInfo(persistent, %s) = true; want false", tc.name)
+			}
+		})
+	}
+}
