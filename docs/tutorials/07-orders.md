@@ -326,8 +326,8 @@ schedule = "0 6 * * *"
 Overrides match by order name and can change `enabled`, `trigger`, `interval`,
 `schedule`, `check`, `on`, `pool`, `timeout`, `check_timeout`, `idempotent`,
 and `env`. An override targeting a nonexistent order is an error, not a silent
-no-op — `gc order` commands fail; the orchestrator logs the error and skips
-that override and every override listed after it.
+no-op — `gc order` commands fail and name every such override; the orchestrator
+logs them and still applies every other override.
 
 An override without `rig` reaches only an order's city-level instance. A pack
 order that also runs once per rig needs `rig = "*"` to reach those instances.

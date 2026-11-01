@@ -538,9 +538,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Delete any `[[orders.overrides]]` entry that names `wisp-compact`.** The
   core pack no longer ships that order (see Fixed). An override naming an
   order that no longer exists is a config error: `gc order` commands exit 1,
-  and the controller logs the error and skips every override after it.
+  and the controller logs the error and applies every other override.
   `[orders] skip` entries that name `wisp-compact` stay valid; the order
   scanner ignores names it does not find.
+
+- **Run `gc order list` on a city with `[[orders.overrides]]` before you
+  upgrade.** If it fails with `order "<name>" not found`, the controller has
+  been ignoring every override listed after that entry; this build applies
+  them (see Fixed). Correct or delete the entry, and check that the overrides
+  below it, such as an `enabled = false`, still say what you want.
 
 ### Added
 
@@ -781,6 +787,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[mail]` retention covers read mail; and the controller wisp GC (`[daemon]
   wisp_gc_interval` and `wisp_ttl`) collects expired wisps, including on
   split-storage cities, where `gc bd` refuses the script's writes. (#4937)
+
+- **An `[[orders.overrides]]` entry that matches no order no longer cancels
+  the overrides listed after it.** The controller and the API's order views
+  applied overrides in config order and stopped at the first one naming an
+  order the scan did not find: a retired or renamed order, a typo, an order
+  its own file disables, or one `[orders] skip` removes. They logged that
+  error and ran with every later override ignored: an `enabled = false`
+  listed below such an entry no longer kept its order from running, and
+  disabling an order through the API, which appends its override, had no
+  effect. Every override that matches an order now applies. `gc order`
+  commands still exit 1 on a bad override, and now name every bad override at
+  once.
 
 - **Sessions no longer inherit a native store open's temporary environment.**
   While gc opens a native Dolt store it briefly rewrites its own process
