@@ -182,22 +182,42 @@ func LiveSockets(ctx context.Context, dir string) ([]string, error) {
 	return live, nil
 }
 
-// SocketDir returns the tmux-<uid> directory a tmux client whose
-// TMUX_TMPDIR is tmuxTmpdir keeps its -L sockets in. Its parent is
-// tmuxTmpdir resolved through symlinks, or /tmp resolved through symlinks
-// when tmuxTmpdir is empty or does not resolve; tmux never reads TMPDIR. A
-// tmuxTmpdir that resolves to something other than a directory is kept, as
-// tmux keeps it: tmux then fails to create the directory instead of falling
-// back to /tmp, so a socket path below it observes nothing.
+// SocketDir returns the tmux-<uid> directory a tmux client in this process's
+// working directory keeps its -L sockets in when its TMUX_TMPDIR is
+// tmuxTmpdir (SocketDirIn).
 func SocketDir(tmuxTmpdir string) string {
-	return filepath.Join(socketBaseDir(tmuxTmpdir), fmt.Sprintf("tmux-%d", os.Getuid()))
+	dir := ""
+	if tmuxTmpdir != "" && !filepath.IsAbs(tmuxTmpdir) {
+		dir, _ = os.Getwd() // unreadable: the value resolves nowhere, as tmux's realpath(3) fails
+	}
+	return SocketDirIn(dir, tmuxTmpdir)
+}
+
+// SocketDirIn returns the tmux-<uid> directory a tmux client whose working
+// directory is dir, an absolute path, and whose TMUX_TMPDIR is tmuxTmpdir
+// keeps its -L sockets in. Its parent is tmuxTmpdir resolved through symlinks
+// as tmux's realpath(3) resolves it, a relative one from dir, never from this
+// process's working directory. It is /tmp resolved through symlinks when
+// tmuxTmpdir is empty or does not resolve, as a relative one with no absolute
+// dir does not; tmux never reads TMPDIR. A tmuxTmpdir that resolves to
+// something other than a directory is kept, as tmux keeps it: tmux then fails
+// to create the directory instead of falling back to /tmp, so a socket path
+// below it observes nothing.
+func SocketDirIn(dir, tmuxTmpdir string) string {
+	return filepath.Join(socketBaseDir(dir, tmuxTmpdir), fmt.Sprintf("tmux-%d", os.Getuid()))
 }
 
 // socketBaseDir is the directory tmux puts its tmux-<uid> directory in for
-// a TMUX_TMPDIR value (see SocketDir).
-func socketBaseDir(tmuxTmpdir string) string {
-	if tmuxTmpdir != "" {
-		if resolved, err := filepath.EvalSymlinks(tmuxTmpdir); err == nil {
+// a TMUX_TMPDIR value, from working directory dir (see SocketDirIn).
+func socketBaseDir(dir, tmuxTmpdir string) string {
+	path := tmuxTmpdir
+	if path != "" && !filepath.IsAbs(path) && filepath.IsAbs(dir) {
+		// Joined as is: filepath.Join's Clean would drop "link/.." unread,
+		// where realpath(3), like EvalSymlinks, follows link first.
+		path = dir + string(filepath.Separator) + path
+	}
+	if filepath.IsAbs(path) {
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
 			return resolved
 		}
 	}

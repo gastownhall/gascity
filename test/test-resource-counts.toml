@@ -2157,6 +2157,12 @@ resource = "subprocess"
 calls = 2
 
 [[count]]
+path = "internal/pidutil/environ_darwin_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "internal/pidutil/pidutil_test.go"
 resource = "fixed_sleep"
 calls = 2

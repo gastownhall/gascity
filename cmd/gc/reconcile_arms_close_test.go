@@ -2,14 +2,17 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"maps"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -674,7 +677,7 @@ func TestCloseEffectEdges(t *testing.T) {
 			t.Fatalf("settlement %+v, want the marker stamped", s)
 		}
 	})
-	t.Run("a detached probe that observed nothing leaves the slot unsearched and unstamped (AC-6)", func(t *testing.T) {
+	t.Run("a detached probe that observed nothing holds its claim, so a slot of held work is unstamped (AC-6)", func(t *testing.T) {
 		for _, p := range []struct {
 			name  string
 			setup func(t *testing.T)
@@ -694,12 +697,57 @@ func TestCloseEffectEdges(t *testing.T) {
 				w.Env = &reconcileEnv{Cfg: k.cfg}
 				v := txView{It: k.decide(), World: &w, Row: k.w.Census.Rows[k.k].Info, Fence: txFence{Work: &txWork{}}}
 				got, err := strandedProbe(context.Background(), effectReads{legs: testWorkLegs(w.CityPath, k.cfg, k.store, nil)}, v)
-				if err != nil || got.searched || len(got.ids) != 0 {
-					t.Fatalf("probe = %+v, %v: want unsearched with nothing listed stranded", got, err)
+				if err != nil || !got.searched || !got.held || len(got.ids) != 0 {
+					t.Fatalf("probe = %+v, %v: want the claim held with nothing listed stranded", got, err)
 				}
 				s := k.run(t, gone().tmux())
 				if b := k.row(t); s.Cause != causeStranded || b.Metadata[strandedEventEmittedKey] != "" || len(s.Facts.Events) != 0 {
 					t.Fatalf("settlement %+v marker %q, want refused stranded with no marker and no event", s, b.Metadata[strandedEventEmittedKey])
+				}
+			})
+		}
+	})
+	t.Run("a detached probe that observed nothing holds only its own claim: the slot's other work is stranded (AC-6)", func(t *testing.T) {
+		for _, p := range []struct {
+			name  string
+			setup func(t *testing.T)
+		}{
+			{"error: no server socket", func(t *testing.T) {
+				t.Setenv("TMUX_TMPDIR", shortTmuxTmpDir(t))
+				installFakeTmux(t, "exit 1")
+			}},
+			{"error: the server does not answer", func(t *testing.T) { installFakeTmuxServer(t, "gctest-c5c1", "exit 2") }},
+			{"timeout", func(t *testing.T) { installFakeTmuxServer(t, "gctest-c5c1", "sleep 2") }},
+		} {
+			t.Run(p.name, func(t *testing.T) {
+				p.setup(t)
+				c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
+				plain := c.work(t, "in_progress", routedClaim())
+				held := c.work(t, "in_progress", detachedClaim())
+				s := c.run(t, gone().tmux())
+				if s.Outcome != settledLanded || c.row(t).Metadata[strandedEventEmittedKey] == "" || len(s.Facts.Events) != 1 {
+					t.Fatalf("settlement %+v, want the marker stamped with one session.stranded event", s)
+				}
+				var payload api.SessionStrandedPayload
+				if err := json.Unmarshal(s.Facts.Events[0].Payload, &payload); err != nil {
+					t.Fatalf("decoding session.stranded payload: %v", err)
+				}
+				if !slices.Equal(payload.WorkBeadIDs, []string{plain.ID}) {
+					t.Fatalf("stranded work = %v, want only %s: %s is held", payload.WorkBeadIDs, plain.ID, held.ID)
+				}
+
+				at := gatherNow.Add(-time.Hour).Format(time.RFC3339)
+				aged := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", at, strandedEventEmittedKey, at)
+				plain = aged.work(t, "in_progress", routedClaim())
+				held = aged.work(t, "in_progress", detachedClaim())
+				if s := aged.run(t, gone().tmux()); s.Cause != causeDetachedHeld || aged.row(t).Status == "closed" {
+					t.Fatalf("settlement %+v, want refused %s with the row open", s, causeDetachedHeld)
+				}
+				if got, _ := aged.store.Get(plain.ID); got.Assignee != "" {
+					t.Fatalf("stranded claim assignee %q, want released", got.Assignee)
+				}
+				if got, _ := aged.store.Get(held.ID); got.Assignee != aged.k.ID || got.Metadata[beadmeta.DetachedMetadataKey] == "" {
+					t.Fatalf("held claim assignee %q gc.detached %q, want kept", got.Assignee, got.Metadata[beadmeta.DetachedMetadataKey])
 				}
 			})
 		}
@@ -788,7 +836,7 @@ func TestCloseEffectEdges(t *testing.T) {
 				}
 				v := txView{It: k.decide(), World: &w, Row: k.w.Census.Rows[k.k].Info, Fence: txFence{Work: &txWork{}}}
 				got, err := strandedProbe(ctx, effectReads{legs: legs}, v)
-				if err != nil || got.searched != c.searched || len(got.ids) != 0 || got.alive != c.searched {
+				if err != nil || got.searched != c.searched || len(got.ids) != 0 || got.held != c.searched {
 					t.Fatalf("probe = %+v, %v: want searched %v, nothing counted stranded", got, err, c.searched)
 				}
 				if step := closeWorkStep(txView{It: v.It, World: &w, Alloc: k.a, Row: v.Row, Meta: k.row(t).Metadata, Fence: v.Fence}, got, nil); step.Refuse != causeStranded {

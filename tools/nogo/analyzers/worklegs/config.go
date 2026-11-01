@@ -38,7 +38,7 @@ var Analyzer = New(Config{
 	// own layering.
 	Releases: map[string]map[string]string{
 		"workAssignment.ReleaseWorkBead":         {"releaseServed": "the verb's release of one claim"},
-		"workAssignment.ReleaseDetachedWorkBead": {"releaseServed": "the verb's release of one claim whose detached probe attested it dead"},
+		"workAssignment.ReleaseDetachedWorkBead": {"releaseServed": "the verb's release of one claim carrying gc.detached, clearing it in the release write"},
 		"releaseOrphanedPoolAssignment":          {"releaseServed": "the verb's release of one claim (the orphan write)"},
 		"workAssignment.releaseWorkBead": {
 			"workAssignment.ReleaseWorkBead":         "its body",

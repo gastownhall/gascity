@@ -1710,6 +1710,10 @@ func buildSupervisorServiceData() (*supervisorServiceData, error) {
 	if supervisor.UsesIsolatedGCHomeOverride() {
 		xdgRuntimeDir = ""
 	}
+	extraEnv, err := withRecordedTmuxTmpdir(supervisorServiceExtraEnv())
+	if err != nil {
+		return nil, err
+	}
 	return &supervisorServiceData{
 		GCPath:            gcPath,
 		LogPath:           supervisorLogPath(),
@@ -1718,7 +1722,7 @@ func buildSupervisorServiceData() (*supervisorServiceData, error) {
 		LaunchdLabel:      supervisorLaunchdLabel(),
 		SafeName:          sanitizeServiceName(filepath.Base(home)),
 		Path:              searchpath.ExpandPath(homeDir, goruntime.GOOS, os.Getenv("PATH")),
-		ExtraEnv:          withRecordedTmuxTmpdir(supervisorServiceExtraEnv()),
+		ExtraEnv:          extraEnv,
 		PortInUseExitCode: supervisorExitCodePortInUse,
 	}, nil
 }

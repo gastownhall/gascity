@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -55,7 +56,13 @@ func answerTmuxSocket(t *testing.T, tmuxTmpdir, name string) {
 			if err != nil {
 				return
 			}
-			_ = conn.Close()
+			// Hold the connection until its client closes it, as a tmux
+			// server does: darwin reads the server's pid off the client's
+			// end (LOCAL_PEERPID), which fails once this end has closed.
+			go func() {
+				_, _ = io.Copy(io.Discard, conn)
+				_ = conn.Close()
+			}()
 		}
 	}()
 }
@@ -75,11 +82,14 @@ func tmuxServiceData(gcHome, tmuxTmpdir string) *supervisorServiceData {
 
 // stubRunningSupervisor makes the supervisor that answers its socket pid
 // 4242 with TMUX_TMPDIR tmuxTmpdir, or makes none answer when running is
-// false; readErr fails the read of its TMUX_TMPDIR.
+// false; readErr fails the read of its TMUX_TMPDIR. A read of its working
+// directory fails the test unless stubSupervisorCwd stubs it.
 func stubRunningSupervisor(t *testing.T, running bool, tmuxTmpdir string, readErr error) {
 	t.Helper()
-	oldAlive, oldEnvValue := supervisorAliveHook, supervisorProcessEnvValue
-	t.Cleanup(func() { supervisorAliveHook, supervisorProcessEnvValue = oldAlive, oldEnvValue })
+	oldAlive, oldEnvValue, oldCwd := supervisorAliveHook, supervisorProcessEnvValue, supervisorProcessCwd
+	t.Cleanup(func() {
+		supervisorAliveHook, supervisorProcessEnvValue, supervisorProcessCwd = oldAlive, oldEnvValue, oldCwd
+	})
 	supervisorAliveHook = func() int {
 		if running {
 			return 4242
@@ -91,6 +101,24 @@ func stubRunningSupervisor(t *testing.T, running bool, tmuxTmpdir string, readEr
 			t.Errorf("read pid %d %s, want the active supervisor's %s", pid, key, tmux.TmpdirEnv)
 		}
 		return tmuxTmpdir, readErr
+	}
+	supervisorProcessCwd = func(pid int) (string, error) {
+		t.Errorf("read pid %d's working directory, want none read for %s", pid, describeTmuxTmpdir(tmuxTmpdir))
+		return "", errors.New("unexpected working directory read")
+	}
+}
+
+// stubSupervisorCwd makes the active supervisor pid 4242's working directory
+// cwd, or makes its read fail with err.
+func stubSupervisorCwd(t *testing.T, cwd string, err error) {
+	t.Helper()
+	old := supervisorProcessCwd
+	t.Cleanup(func() { supervisorProcessCwd = old })
+	supervisorProcessCwd = func(pid int) (string, error) {
+		if pid != 4242 {
+			t.Errorf("read pid %d's working directory, want the active supervisor's", pid)
+		}
+		return cwd, err
 	}
 }
 
@@ -144,6 +172,33 @@ func TestBuildSupervisorServiceDataRecordsAnUnsetTMUXTMPDIR(t *testing.T) {
 	}
 	if v, ok := launchdPlistEnvValue([]byte(plist), tmux.TmpdirEnv); !ok || v != "" {
 		t.Fatalf("plist records %s %q (present %v), want an explicit empty value:\n%s", tmux.TmpdirEnv, v, ok, plist)
+	}
+}
+
+// A relative TMUX_TMPDIR names a directory only together with the working
+// directory that resolves it, and the service's supervisor runs in the
+// service's. A service file records it absolute, from the installing shell's
+// working directory, where gc's own tmux resolves it.
+func TestBuildSupervisorServiceDataRecordsARelativeTMUXTMPDIRAbsolute(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("GC_SUPERVISOR_ENV", "")
+	stubServiceManagers(t, "", nil, "")
+	wd, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	t.Chdir(wd)
+	t.Setenv(tmux.TmpdirEnv, "sockets")
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	if got, want := supervisorServiceEnvMap(data.ExtraEnv)[tmux.TmpdirEnv], filepath.Join(wd, "sockets"); got != want {
+		t.Fatalf("ExtraEnv[%s] = %q, want %q", tmux.TmpdirEnv, got, want)
 	}
 }
 
@@ -402,11 +457,13 @@ func TestInstallSupervisorServiceLeavesAnUnreachableUserManagerToTheInstall(t *t
 	}
 }
 
-// launchdInstall runs installSupervisorService for darwin over a plist that
-// holds installed, with data's TMUX_TMPDIR next. It returns the exit code,
-// stderr, the launchctl calls, and whether the plist is as it was.
-func launchdInstall(t *testing.T, installed, next string) (int, string, []string, bool) {
+// launchdInstall runs installSupervisorService for darwin over an installed
+// plist that the install changes, with data's TMUX_TMPDIR next. It returns
+// the exit code, stderr, the launchctl calls, and whether the plist is as it
+// was.
+func launchdInstall(t *testing.T, next string) (int, string, []string, bool) {
 	t.Helper()
+	const installed = "old plist\n"
 	path := supervisorLaunchdPlistPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -444,7 +501,7 @@ func TestInstallSupervisorServiceLaunchdKeepsTmuxSockets(t *testing.T) {
 	t.Run("reload moving the sockets", func(t *testing.T) {
 		launchdHome(t)
 		stubRunningSupervisor(t, true, "", nil)
-		code, stderr, calls, unchanged := launchdInstall(t, "old plist\n", dir)
+		code, stderr, calls, unchanged := launchdInstall(t, dir)
 		if code != 1 || len(calls) != 0 || !unchanged || !strings.Contains(stderr, tmux.SocketDir(dir)) {
 			t.Fatalf("code %d, launchctl calls %v, plist unchanged %v, stderr %q; want a refusal that touches nothing", code, calls, unchanged, stderr)
 		}
@@ -452,7 +509,7 @@ func TestInstallSupervisorServiceLaunchdKeepsTmuxSockets(t *testing.T) {
 	t.Run("reload keeping the sockets", func(t *testing.T) {
 		launchdHome(t)
 		stubRunningSupervisor(t, true, dir, nil)
-		code, stderr, calls, _ := launchdInstall(t, "old plist\n", link)
+		code, stderr, calls, _ := launchdInstall(t, link)
 		if code != 0 || !slices.Contains(calls, "load "+supervisorLaunchdPlistPath()) {
 			t.Fatalf("code %d, launchctl calls %v, stderr %q; want the changed plist loaded", code, calls, stderr)
 		}
@@ -463,26 +520,170 @@ func TestInstallSupervisorServiceLaunchdKeepsTmuxSockets(t *testing.T) {
 		stubRunningSupervisor(t, false, "", nil)
 		stubServiceManagers(t, "", nil, old) // a plist an earlier gc wrote takes launchd's
 		answerTmuxSocket(t, old, "gc-city")
-		code, stderr, calls, unchanged := launchdInstall(t, "old plist\n", next)
+		code, stderr, calls, unchanged := launchdInstall(t, next)
 		if code != 1 || len(calls) != 0 || !unchanged || !strings.Contains(stderr, "gc-city") {
 			t.Fatalf("code %d, launchctl calls %v, plist unchanged %v, stderr %q; want a refusal naming the answering server", code, calls, unchanged, stderr)
 		}
 	})
 }
 
+// A TMUX_TMPDIR holding spaces names one directory, which the process
+// environment reader returns whole (on darwin, pidutil.Environ): a plist
+// reload or a drift restart that keeps the running supervisor's directory
+// goes ahead, and one that would move its sockets to the default directory
+// is refused, naming that directory.
+func TestTmuxSocketGuardsKeepATmuxTmpdirHoldingSpaces(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	spaced := filepath.Join(root, "gc sockets")
+	if err := os.Mkdir(spaced, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		next   string // the replacement's TMUX_TMPDIR
+		refuse bool
+	}{
+		{name: "same directory", next: spaced},
+		{name: "default directory", refuse: true},
+	} {
+		t.Run(tc.name+", launchd reload", func(t *testing.T) {
+			launchdHome(t)
+			stubRunningSupervisor(t, true, spaced, nil)
+			code, stderr, calls, unchanged := launchdInstall(t, tc.next)
+			switch {
+			case tc.refuse && (code != 1 || len(calls) != 0 || !unchanged || !strings.Contains(stderr, tmux.SocketDir(spaced))):
+				t.Fatalf("code %d, launchctl calls %v, plist unchanged %v, stderr %q; want a refusal naming %s that touches nothing", code, calls, unchanged, stderr, tmux.SocketDir(spaced))
+			case !tc.refuse && (code != 0 || !slices.Contains(calls, "load "+supervisorLaunchdPlistPath())):
+				t.Fatalf("code %d, launchctl calls %v, stderr %q; want the changed plist loaded", code, calls, stderr)
+			}
+		})
+		t.Run(tc.name+", drift restart", func(t *testing.T) {
+			tmuxHome(t)
+			t.Setenv(tmux.TmpdirEnv, tc.next)
+			stubRunningSupervisor(t, true, spaced, nil)
+			err := refuseSupervisorRestartTmuxSocketDirMove(restartSpec{PID: 4242, ExePath: "/tmp/gc", Argv: []string{"supervisor", "run"}})
+			if refused := err != nil; refused != tc.refuse || refused && !strings.Contains(err.Error(), tmux.SocketDir(spaced)) {
+				t.Fatalf("restart error = %v, want refused %v naming %s", err, tc.refuse, tmux.SocketDir(spaced))
+			}
+		})
+	}
+}
+
+// The running supervisor's tmux resolves a relative TMUX_TMPDIR in its own
+// working directory, which the guards read, never in this process's. From
+// another directory, where the relative path is missing and resolves to /tmp
+// as an unset value does, a drift restart or a warm refresh that would keep
+// the sockets in /tmp is refused, naming the supervisor's directory. One that
+// keeps them there, by the same relative value from the supervisor's
+// directory or by that directory named outright, goes ahead.
+func TestTmuxSocketGuardsPlaceARelativeTmuxTmpdirInTheSupervisorsDirectory(t *testing.T) {
+	supervisorDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	sockets := filepath.Join(supervisorDir, "sockets")
+	if err := os.Mkdir(sockets, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	for _, tc := range []struct {
+		name   string
+		cwd    string // this process's working directory
+		next   string // the replacement's TMUX_TMPDIR, in this process's environment
+		refuse bool
+	}{
+		{name: "unset, from another directory", cwd: elsewhere, refuse: true},
+		{name: "same relative value, from another directory", cwd: elsewhere, next: "sockets", refuse: true},
+		{name: "same relative value, from the supervisor's directory", cwd: supervisorDir, next: "sockets"},
+		{name: "the directory named outright", cwd: elsewhere, next: sockets},
+	} {
+		t.Run(tc.name+", drift restart", func(t *testing.T) {
+			tmuxHome(t)
+			t.Chdir(tc.cwd)
+			t.Setenv(tmux.TmpdirEnv, tc.next)
+			stubRunningSupervisor(t, true, "sockets", nil)
+			stubSupervisorCwd(t, supervisorDir, nil)
+			err := refuseSupervisorRestartTmuxSocketDirMove(restartSpec{PID: 4242, ExePath: "/tmp/gc", Argv: []string{"supervisor", "run"}})
+			if refused := err != nil; refused != tc.refuse || refused && !strings.Contains(err.Error(), tmux.SocketDir(sockets)) {
+				t.Fatalf("restart error = %v, want refused %v naming %s", err, tc.refuse, tmux.SocketDir(sockets))
+			}
+		})
+		t.Run(tc.name+", warm refresh", func(t *testing.T) {
+			tmuxHome(t)
+			t.Chdir(tc.cwd)
+			stubRunningSupervisor(t, true, "sockets", nil)
+			stubSupervisorCwd(t, supervisorDir, nil)
+			next := tc.next
+			if next != "" && !filepath.IsAbs(next) {
+				next = filepath.Join(tc.cwd, next) // as withRecordedTmuxTmpdir records it
+			}
+			code, stderr, calls, unchanged := systemdInstall(t, "old unit\n", next)
+			switch {
+			case tc.refuse && (code != 1 || len(calls) != 0 || !unchanged || !strings.Contains(stderr, tmux.SocketDir(sockets))):
+				t.Fatalf("code %d, systemctl calls %v, unit unchanged %v, stderr %q; want a refusal naming %s that touches nothing", code, calls, unchanged, stderr, tmux.SocketDir(sockets))
+			case !tc.refuse && (code != 0 || !slices.Contains(calls, "--user start gascity-supervisor.service")):
+				t.Fatalf("code %d, systemctl calls %v, stderr %q; want the warm refresh to start the refreshed unit", code, calls, stderr)
+			}
+		})
+	}
+}
+
+// A service that gives its supervisor a relative TMUX_TMPDIR, by its file or
+// by the service manager's environment for a file that records none, leaves
+// its socket directory unknown here: the supervisor's tmux resolves it in the
+// service's working directory, not this process's. A drift restart onto that
+// service, and an install over it with no supervisor running, are refused,
+// naming the relative value.
+func TestTmuxSocketGuardsRefuseARelativeServiceTmuxTmpdir(t *testing.T) {
+	const want = `TMUX_TMPDIR="sockets" is relative`
+	t.Run("drift restart, the service manager's value", func(t *testing.T) {
+		tmuxHome(t)
+		stubRunningSupervisor(t, true, "", nil)
+		stubServiceManagers(t, tmux.TmpdirEnv+"=sockets\n", nil, "sockets")
+		writeSystemdUnit(t, "old unit\n")
+		err := refuseSupervisorRestartTmuxSocketDirMove(restartSpec{SystemdManaged: true, PID: 4242, ServiceName: "gascity-supervisor.service"})
+		if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "gc supervisor install") {
+			t.Fatalf("restart error = %v, want a refusal naming %q and the install remedy", err, want)
+		}
+	})
+	t.Run("idle install, the file's value", func(t *testing.T) {
+		tmuxHome(t)
+		stubRunningSupervisor(t, false, "", nil)
+		stubLiveTmuxSockets(t, "") // nothing answers anywhere
+		unit, err := renderSupervisorTemplate(supervisorSystemdTemplate, tmuxServiceData(os.Getenv("GC_HOME"), "sockets"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		code, stderr, calls, unchanged := systemdInstall(t, unit, shortTmuxTmpDir(t))
+		if code != 1 || len(calls) != 0 || !unchanged || !strings.Contains(stderr, want) || !strings.Contains(stderr, "Refusing to start the supervisor") {
+			t.Fatalf("code %d, systemctl calls %v, unit unchanged %v, stderr %q; want a refusal naming %q that touches nothing", code, calls, unchanged, stderr, want)
+		}
+	})
+}
+
 // A supervisor forked outside its service inherits this process's
-// TMUX_TMPDIR, so it is refused while the installed service keeps its
-// sockets elsewhere and a tmux server there still answers; with the same
-// directory, nothing answering there, or no service installed, it forks.
+// TMUX_TMPDIR and working directory, so it is refused while the installed
+// service keeps its sockets elsewhere and a tmux server there still answers;
+// with the same directory, named outright or relative to this process's
+// working directory, nothing answering there, or no service installed, it
+// forks.
 func TestRefuseForkedSupervisorTmuxSocketDirMove(t *testing.T) {
 	for _, tc := range []struct {
 		name               string
 		installed, answers bool
 		same               bool // this process has the installed service's TMUX_TMPDIR
+		relative           bool // this process names its TMUX_TMPDIR from its working directory
 		refuse             bool
 	}{
 		{name: "elsewhere, answering", installed: true, answers: true, refuse: true},
 		{name: "same directory", installed: true, answers: true, same: true},
+		{name: "same directory, named relative to this one", installed: true, answers: true, same: true, relative: true},
 		{name: "elsewhere, nothing answering", installed: true},
 		{name: "no service installed", answers: true},
 	} {
@@ -491,6 +692,10 @@ func TestRefuseForkedSupervisorTmuxSocketDirMove(t *testing.T) {
 			old, next := shortTmuxTmpDir(t), shortTmuxTmpDir(t)
 			if tc.same {
 				next = old
+			}
+			if tc.relative {
+				t.Chdir(filepath.Dir(next))
+				next = filepath.Base(next)
 			}
 			t.Setenv(tmux.TmpdirEnv, next)
 			if tc.answers {
@@ -652,15 +857,24 @@ func TestRefuseSupervisorRestartTmuxSocketDirMove(t *testing.T) {
 	}
 }
 
-// A restart that cannot read the running supervisor's TMUX_TMPDIR, or its
-// service file, cannot tell where the replacement keeps its sockets, so it
-// is refused.
+// A restart that cannot read the running supervisor's TMUX_TMPDIR, the
+// working directory a relative one resolves in, or its service file, cannot
+// tell where the supervisors keep their sockets, so it is refused.
 func TestRefuseSupervisorRestartTmuxSocketDirMoveFailsClosed(t *testing.T) {
 	t.Run("running supervisor unreadable", func(t *testing.T) {
 		tmuxHome(t)
 		stubRunningSupervisor(t, true, "", errors.New("permission denied"))
 		if err := refuseSupervisorRestartTmuxSocketDirMove(restartSpec{PID: 4242}); err == nil || !strings.Contains(err.Error(), "permission denied") {
 			t.Fatalf("restart error = %v, want the failed read", err)
+		}
+	})
+	t.Run("relative TMUX_TMPDIR, working directory unreadable", func(t *testing.T) {
+		tmuxHome(t)
+		stubRunningSupervisor(t, true, "sockets", nil)
+		stubSupervisorCwd(t, "", errors.New("permission denied"))
+		err := refuseSupervisorRestartTmuxSocketDirMove(restartSpec{PID: 4242})
+		if err == nil || !strings.Contains(err.Error(), `relative TMUX_TMPDIR="sockets"`) || !strings.Contains(err.Error(), "permission denied") {
+			t.Fatalf("restart error = %v, want the relative value and the failed read", err)
 		}
 	})
 	t.Run("service file missing", func(t *testing.T) {

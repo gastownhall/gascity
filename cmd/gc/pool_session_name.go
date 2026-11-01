@@ -412,8 +412,8 @@ func releaseOrphanedPoolAssignments(
 }
 
 // deadAssigneeKeepLog is the last logged keep reason by bead, so a claim the
-// sweep keeps every tick (a detached probe alive, an unserved route) logs
-// once per reason, not per tick. Its owner (the controller, the v2 lane)
+// sweep keeps every tick (one its detached probe holds, an unserved route)
+// logs once per reason, not per tick. Its owner (the controller, the v2 lane)
 // keeps it across ticks; a nil log logs every keep.
 type deadAssigneeKeepLog struct {
 	mu   sync.Mutex

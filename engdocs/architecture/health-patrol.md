@@ -177,7 +177,8 @@ The value is `tmux:<socket>:<session>`, where `<socket>` is a tmux `-L` socket
 name or an absolute socket path and `<session>` is the exact tmux session name.
 The probe resolves a socket name to the path tmux itself binds in the
 controller's environment (`tmux.SocketPath`: `$TMUX_TMPDIR` with symlinks
-resolved, falling back to `/tmp` when it is unset, empty or does not resolve;
+resolved, a relative value from the controller's working directory, falling
+back to `/tmp` when it is unset, empty or does not resolve;
 a `TMUX_TMPDIR` that resolves to a file is kept, as tmux keeps it and fails
 there, so nothing answers; `TMPDIR` is ignored), then runs
 `tmux -S <path> list-sessions` and matches the session name exactly. A server
@@ -205,11 +206,12 @@ destructive:
 - Probe error or timeout: nothing was observed, so the work is held as an alive
   probe holds it, on every tick until a probe attests alive or dead — there is
   no error-count strike release — and the hold is logged rate-throttled per
-  bead. Neither the legacy stranded diagnostic nor a pool slot's close stamps
-  `stranded_event_emitted_at` on such a probe: the diagnostic leaves the work
-  out of `session.stranded` (and records no event when nothing else is
-  stranded), and the close refuses that attempt. The marker is what lets the
-  stranded repair release a slot's work once its confirmation window passes.
+  bead. Neither the legacy stranded diagnostic nor a pool slot's close counts
+  such work stranded: both leave it out of `session.stranded`, and the slot's
+  other work is still stranded. When nothing else on the slot is stranded,
+  neither records the event nor stamps `stranded_event_emitted_at` (the close
+  refuses that attempt). The marker is what lets the stranded repair release
+  a slot's work once its confirmation window passes.
 
 The stranded repair probes each claim carrying `gc.detached` again before it
 releases it. A claim it holds stays assigned, and the repair leaves the pool

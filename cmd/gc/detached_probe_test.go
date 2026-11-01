@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -247,7 +248,13 @@ func installFakeTmuxServer(t *testing.T, socket, body string) {
 			if err != nil {
 				return
 			}
-			_ = conn.Close()
+			// Hold the connection until its client closes it, as a tmux
+			// server does: darwin reads the server's pid off the client's
+			// end (LOCAL_PEERPID), which fails once this end has closed.
+			go func() {
+				_, _ = io.Copy(io.Discard, conn)
+				_ = conn.Close()
+			}()
 		}
 	}()
 	installFakeTmux(t, body)

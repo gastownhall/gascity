@@ -3,54 +3,39 @@
 package proctable
 
 import (
-	"context"
 	"errors"
-	"fmt"
-	"os/exec"
-	"strconv"
-	"strings"
+
+	"github.com/gastownhall/gascity/internal/pidutil"
+	"golang.org/x/sys/unix"
 )
 
 // ProcessEnvValue returns the value of key in pid's environment, or "" when
-// the process is gone, its environment is unreadable, or key is absent. It
-// reads the environment the way [ScanBySessionID] does and refuses the live
-// process table under go test for the same reason.
+// the process is gone, its environment is not this user's to read, or key is
+// absent. It refuses the live process table under go test, as
+// [ScanBySessionID] does.
 //
-// Darwin has no /proc: the environment comes from "ps eww -o command=", which
-// prints the command, its arguments and its environment as one
-// whitespace-separated line. Nothing in that output delimits the three, so a
-// value containing whitespace truncates at the first space and a
-// key=value-shaped argument parses as an environment entry. Duplicate keys
-// resolve last-wins, matching the linux reader, so a real environment entry
-// still outranks a same-named argument token.
+// Darwin has no /proc: the environment comes from the kern.procargs2 sysctl
+// that ps(1) reads (pidutil.Environ), which keeps each entry whole, so a value
+// containing whitespace is intact: a TMUX_TMPDIR, or a gc state directory
+// under a path with spaces, reads as it is set. The kernel answers EINVAL for
+// a pid that does not exist and for one another user owns, and withholds the
+// environment of a restricted process (an Apple platform binary): each reads
+// as "", as each did in ps's output. Duplicate keys resolve last-wins,
+// matching the linux reader.
 //
-// The truncation belongs to that output, not to this function:
-// [ScanBySessionID] fills each record's environment from the same flattened
-// line, so reading a value off the scan record instead would save the second
-// ps fork but truncate identically. Recovering such a value needs a source
-// that keeps the NUL delimiters — the kern.procargs2 sysctl ps itself reads.
-// Until then a gc state directory under a path containing spaces degrades
-// darwin attribution: a lookup of an absolute path (acp's
-// GC_ACP_CONTROL_SOCKET marker) returns a prefix that matches nothing, which
-// is the same outcome as an absent key. For the acp scanner that is its
-// documented markerless case — the root is tracked only by the reading gc
-// process's own live connections — so an owner keeps its running sessions,
-// but another gc process reads that owner's live agent as reapable, which is
-// the case the marker was added to cover.
+// [ScanBySessionID] still reads each process's environment off its flattened
+// "ps eww" line, where a value containing whitespace truncates at its first
+// space; a caller that needs such a value whole reads it here.
 func ProcessEnvValue(pid int, key string) (string, error) {
 	if err := liveScanGuard(); err != nil {
 		return "", err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), processSnapshotTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "ps", "eww", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			// ps exits non-zero when the pid does not exist.
-			return "", nil
-		}
-		return "", fmt.Errorf("running ps for pid %d: %w", pid, err)
+	env, err := pidutil.Environ(pid)
+	if errors.Is(err, unix.EINVAL) {
+		return "", nil
 	}
-	return parseInlineEnv(strings.Fields(string(out)))[key], nil
+	if err != nil {
+		return "", err
+	}
+	return parseInlineEnv(env)[key], nil
 }

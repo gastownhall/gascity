@@ -20,6 +20,14 @@ package main
 // compares the directory the new one would use with where the sessions are:
 // the running supervisor's own TMUX_TMPDIR, or with none running, the
 // installed service's while a tmux server there still answers.
+//
+// tmux resolves a relative TMUX_TMPDIR in its own process's working
+// directory, so each value is placed in the working directory of the process
+// whose tmux reads it: the running supervisor's is read with its value, a
+// supervisor forked from here shares this process's, and a service's is the
+// service's, which this process does not know. A service file therefore
+// records an absolute value, and a relative one a service gives its
+// supervisor leaves the directory unknown, which refuses.
 
 import (
 	"context"
@@ -28,6 +36,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -41,6 +50,10 @@ var (
 	// supervisorProcessEnvValue reads one variable of a running process's
 	// environment. Exposed as a package var so tests stub the process read.
 	supervisorProcessEnvValue = proctable.ProcessEnvValue
+	// supervisorProcessCwd reads a running process's working directory, where
+	// its tmux resolves a relative TMUX_TMPDIR. Exposed as a package var so
+	// tests stub the process read.
+	supervisorProcessCwd = proctable.ProcessCwd
 	// supervisorSystemdManagerEnvironment dumps the systemd user manager's
 	// environment (`systemctl --user show-environment`), which a unit
 	// inherits for every variable it does not set; a failure carries
@@ -85,14 +98,24 @@ const (
 // tier set one: tmux reads an empty TMUX_TMPDIR as unset. A service file that
 // records it leaves the service manager nothing to hand the supervisor in its
 // place, so every start of the service keeps the socket directory the file
-// names, the one the install guard compares.
-func withRecordedTmuxTmpdir(env []supervisorServiceEnvVar) []supervisorServiceEnvVar {
-	if slices.ContainsFunc(env, func(v supervisorServiceEnvVar) bool { return v.Name == tmux.TmpdirEnv }) {
-		return env
+// names, the one the install guard compares. A relative value is recorded
+// absolute, from this process's working directory, where gc's own tmux
+// resolves it: the service's supervisor runs in the service's.
+func withRecordedTmuxTmpdir(env []supervisorServiceEnvVar) ([]supervisorServiceEnvVar, error) {
+	i := slices.IndexFunc(env, func(v supervisorServiceEnvVar) bool { return v.Name == tmux.TmpdirEnv })
+	if i < 0 {
+		env = append(env, supervisorServiceEnvVar{Name: tmux.TmpdirEnv})
+		slices.SortFunc(env, func(a, b supervisorServiceEnvVar) int { return strings.Compare(a.Name, b.Name) })
+		return env, nil
 	}
-	env = append(env, supervisorServiceEnvVar{Name: tmux.TmpdirEnv})
-	slices.SortFunc(env, func(a, b supervisorServiceEnvVar) int { return strings.Compare(a.Name, b.Name) })
-	return env
+	if value := env[i].Value; value != "" && !filepath.IsAbs(value) {
+		abs, err := filepath.Abs(value)
+		if err != nil {
+			return nil, fmt.Errorf("recording the relative %s absolute: %w", describeTmuxTmpdir(value), err)
+		}
+		env[i].Value = abs
+	}
+	return env, nil
 }
 
 // serviceDataTmuxTmpdir is the TMUX_TMPDIR the service file data renders
@@ -133,12 +156,21 @@ func launchdTmuxService() supervisorTmuxService {
 }
 
 // tmuxTmpdir is the TMUX_TMPDIR a start of the service whose file holds
-// content gives the supervisor.
+// content gives the supervisor. A relative value is an error: the
+// supervisor's tmux resolves it in the service's working directory, not this
+// process's, so the directory it names is unknown here.
 func (s supervisorTmuxService) tmuxTmpdir(content []byte) (string, error) {
-	if value, ok := s.recorded(content); ok {
-		return value, nil
+	value, ok := s.recorded(content)
+	if !ok {
+		var err error
+		if value, err = s.manager(); err != nil {
+			return "", err
+		}
 	}
-	return s.manager()
+	if value != "" && !filepath.IsAbs(value) {
+		return "", fmt.Errorf("the supervisor service's %s is relative, and its supervisor's tmux resolves it in the service's working directory, not this process's; give the service an absolute %s", describeTmuxTmpdir(value), tmux.TmpdirEnv)
+	}
+	return value, nil
 }
 
 // systemdManagerTmuxTmpdir is the TMUX_TMPDIR the systemd user manager hands
@@ -174,18 +206,28 @@ func describeTmuxTmpdir(value string) string {
 // supervisorRunningTmuxSocketDirMove describes how a supervisor started with
 // TMUX_TMPDIR next, in place of the running supervisor pid, would keep its
 // tmux sockets in another directory than the sessions pid preserves, or
-// returns "" when it would not.
+// returns "" when it would not. pid's tmux resolves a relative TMUX_TMPDIR in
+// pid's working directory, read for it, and next resolves in this process's:
+// the replacement is forked from here (spawnDetachedSupervisor) or started
+// from a service, whose value supervisorTmuxService.tmuxTmpdir keeps absolute.
 func supervisorRunningTmuxSocketDirMove(pid int, next string) (string, error) {
 	running, err := supervisorProcessEnvValue(pid, tmux.TmpdirEnv)
 	if err != nil {
 		return "", fmt.Errorf("cannot read active supervisor pid %d %s: %w", pid, tmux.TmpdirEnv, err)
 	}
-	from, to := tmux.SocketDir(running), tmux.SocketDir(next)
+	cwd, described := "", describeTmuxTmpdir(running)
+	if running != "" && !filepath.IsAbs(running) {
+		if cwd, err = supervisorProcessCwd(pid); err != nil {
+			return "", fmt.Errorf("active supervisor pid %d has a relative %s, which its tmux resolves in its own working directory, and that cannot be read: %w", pid, described, err)
+		}
+		described += " from its working directory " + cwd
+	}
+	from, to := tmux.SocketDirIn(cwd, running), tmux.SocketDir(next)
 	if from == to {
 		return "", nil
 	}
 	return fmt.Sprintf("active supervisor pid %d keeps its tmux sockets in %s (%s), and its replacement would keep them in %s (%s), where it cannot reach the sessions the active supervisor preserves.",
-		pid, from, describeTmuxTmpdir(running), to, describeTmuxTmpdir(next)), nil
+		pid, from, described, to, describeTmuxTmpdir(next)), nil
 }
 
 // supervisorIdleTmuxSocketDirMove is supervisorRunningTmuxSocketDirMove with

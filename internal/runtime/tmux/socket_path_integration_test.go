@@ -58,7 +58,8 @@ func tmuxReportedSocketPath(t *testing.T, name string) string {
 }
 
 // AC-4: SocketPath agrees with the socket a real tmux server binds for -L,
-// whatever TMUX_TMPDIR holds, and TMPDIR never moves it.
+// whatever TMUX_TMPDIR holds, a relative one from the working directory
+// both share included, and TMPDIR never moves it.
 func TestSocketPathMatchesRealTmuxServer(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
@@ -76,14 +77,19 @@ func TestSocketPathMatchesRealTmuxServer(t *testing.T) {
 		name  string
 		unset bool
 		value string
+		chdir bool // run tmux and SocketPath from root
 	}{
 		{name: "unset", unset: true},
 		{name: "empty", value: ""},
 		{name: "symlink to directory", value: link},
 		{name: "nonexistent directory", value: filepath.Join(root, "missing")},
+		{name: "relative directory", value: "real", chdir: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.chdir {
+				t.Chdir(root)
+			}
 			t.Setenv("TMUX_TMPDIR", tc.value)
 			if tc.unset {
 				if err := os.Unsetenv("TMUX_TMPDIR"); err != nil {

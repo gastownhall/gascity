@@ -409,6 +409,55 @@ func TestSocketPathKeepsTMUXTMPDIRNamingAFile(t *testing.T) {
 	}
 }
 
+// tmux resolves a relative TMUX_TMPDIR with realpath(3) from its client's
+// working directory: SocketPath from this process's, SocketDirIn from the one
+// it is given, either way to an absolute path. A relative value with no
+// working directory to resolve it from falls back to /tmp, as one that does
+// not resolve does. A symlink in the value is followed before the ".." after
+// it, as realpath follows it.
+func TestSocketDirResolvesARelativeTMUXTMPDIRFromItsWorkingDirectory(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	far, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	tmp, err := filepath.EvalSymlinks("/tmp")
+	if err != nil {
+		t.Fatalf("EvalSymlinks(/tmp): %v", err)
+	}
+	for _, dir := range []string{filepath.Join(root, "sockets"), filepath.Join(far, "inner"), filepath.Join(far, "beside")} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(far, "inner"), filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	uid := fmt.Sprintf("tmux-%d", os.Getuid())
+
+	t.Chdir(root)
+	t.Setenv("TMUX_TMPDIR", "sockets")
+	if got, want := SocketPath("gc-test"), filepath.Join(root, "sockets", uid, "gc-test"); got != want {
+		t.Fatalf("SocketPath() = %q, want %q", got, want)
+	}
+	for _, tc := range []struct {
+		name, dir, value, want string
+	}{
+		{name: "relative, from dir", dir: root, value: "sockets", want: filepath.Join(root, "sockets")},
+		{name: "relative, missing from dir", dir: far, value: "sockets", want: tmp},
+		{name: "relative, no working directory", value: "sockets", want: tmp},
+		{name: "absolute, dir unused", dir: far, value: filepath.Join(root, "sockets"), want: filepath.Join(root, "sockets")},
+		{name: "symlink before ..", dir: root, value: "link/../beside", want: filepath.Join(far, "beside")},
+	} {
+		if got, want := SocketDirIn(tc.dir, tc.value), filepath.Join(tc.want, uid); got != want {
+			t.Errorf("%s: SocketDirIn(%q, %q) = %q, want %q", tc.name, tc.dir, tc.value, got, want)
+		}
+	}
+}
+
 func TestCaptureNamedSocketWitnessFailsClosed(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("TMUX_TMPDIR", root)

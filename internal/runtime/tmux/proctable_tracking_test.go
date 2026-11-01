@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -83,8 +84,8 @@ const (
 
 // writePaneProcRoot writes a procfs-shaped root holding a tmux server and a
 // pane root of session gc-1 whose parent is that server, with paneEnv added
-// to the pane root's environment.
-func writePaneProcRoot(t *testing.T, paneEnv ...string) {
+// to the pane root's environment, and returns the root.
+func writePaneProcRoot(t *testing.T, paneEnv ...string) string {
 	t.Helper()
 	if goruntime.GOOS != "linux" {
 		t.Skip("drives the scanner against a procfs-shaped tree")
@@ -110,6 +111,7 @@ func writePaneProcRoot(t *testing.T, paneEnv ...string) {
 	write(paneServerPID, 1, "tmux: server", []string{"GC_SESSION_ID=gc-1"})
 	write(paneRootPID, paneServerPID, "bash", append([]string{"GC_SESSION_ID=gc-1"}, paneEnv...))
 	proctable.SetScanRootForTesting(t, root)
+	return root
 }
 
 // AC-7: the tmux provider claims an untracked, tmux-parented root as a live
@@ -158,6 +160,45 @@ func TestFindRuntimesBySessionIDClaimsUnlistedPanesOfItsOwnSocket(t *testing.T) 
 				t.Errorf("LiveUnlisted = %v, want %v (root %+v)", found[0].LiveUnlisted, tc.want, found[0])
 			}
 		})
+	}
+}
+
+// hookedExecutor runs before ahead of each tmux call it passes on.
+type hookedExecutor struct {
+	executor
+	before func()
+}
+
+func (e hookedExecutor) execute(args []string) (string, error) {
+	e.before()
+	return e.executor.execute(args)
+}
+
+func (e hookedExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
+	e.before()
+	return e.executor.executeCtx(ctx, args)
+}
+
+// A root whose TMUX cannot be read once the scan has found it fails that
+// entry alone (proctable.EntryError): the root is still claimed LiveUnlisted,
+// and the scan's tracking stands, which the process-table orphan sweep reads
+// through HasWholeScanFailure.
+func TestFindRuntimesBySessionIDReportsAnUnreadableRootAsItsOwnFailure(t *testing.T) {
+	environ := filepath.Join(writePaneProcRoot(t), strconv.Itoa(paneRootPID), "environ")
+	p := NewProviderWithConfig(Config{SocketName: "city"})
+	p.tm.exec = hookedExecutor{
+		executor: &fakeExecutor{outs: []string{"worker", "GC_SESSION_ID=gc-2"}},
+		before: func() { // the scan has read the root: its environ turns unreadable
+			_ = os.Remove(environ)
+			_ = os.Mkdir(environ, 0o755)
+		},
+	}
+	found, err := p.FindRuntimesBySessionID("gc-1")
+	if len(found) != 1 || found[0].PID != paneRootPID || !found[0].LiveUnlisted {
+		t.Fatalf("found %+v, want the pane root claimed LiveUnlisted", found)
+	}
+	if err == nil || proctable.HasWholeScanFailure(err) {
+		t.Fatalf("err = %v, want only the root's own read failure", err)
 	}
 }
 

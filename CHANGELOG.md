@@ -540,8 +540,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   places its sockets under `TMUX_TMPDIR` (it never reads `TMPDIR`), and a
   supervisor reaches its sessions' tmux servers only under its own. The
   supervisor's systemd unit and launchd plist now always set
-  `TMUX_TMPDIR`, to the value the installing shell has or to empty (which
-  tmux reads as unset), so a restart by the service manager (a crash
+  `TMUX_TMPDIR`, to the value the installing shell has (a relative one made
+  absolute from the shell's working directory) or to empty (which tmux
+  reads as unset), so a restart by the service manager (a crash
   restart, `systemctl --user restart`, a reboot) keeps the directory the
   file records instead of taking whatever the service manager's
   environment holds. Before `gc start`, `gc supervisor start` or
@@ -566,7 +567,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot reach the user manager (cron, `sudo -u`, `su`), `gc start` still
   falls back to a supervisor outside the service, as before; for a unit an
   earlier `gc` installed, which takes the manager's `TMUX_TMPDIR`, the
-  check then assumes the manager's default (unset).
+  check then assumes the manager's default (unset). A relative
+  `TMUX_TMPDIR` is resolved in the working directory of the process whose
+  tmux reads it: the running supervisor's own, or the shell's for a
+  supervisor started from it; the check refuses one a service gives its
+  supervisor, whose directory it cannot tell.
 
 - **Delete any `[[orders.overrides]]` entry that names `wisp-compact`.** The
   core pack no longer ships that order (see Fixed). An override naming an

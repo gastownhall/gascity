@@ -91,7 +91,7 @@ func TestReleaseListedNeverReopensAClaimWithItsDetachedProbe(t *testing.T) {
 				t.Fatal(err)
 			}
 			if p.detached {
-				if out.Why[claim.ID] != keptDetachedAlive || got.Assignee != "worker-dead" || got.Metadata[detachedProbeMetadataKey] != spec {
+				if out.Why[claim.ID] != keptDetachedHeld || got.Assignee != "worker-dead" || got.Metadata[detachedProbeMetadataKey] != spec {
 					t.Fatalf("why=%q assignee=%q gc.detached=%q, want the claim held with its probe", out.Why[claim.ID], got.Assignee, got.Metadata[detachedProbeMetadataKey])
 				}
 				return
@@ -901,7 +901,7 @@ func TestDeadAssigneeKeepLogDedupes(t *testing.T) {
 	for i, c := range []struct {
 		why  string
 		want bool
-	}{{"detached-alive", true}, {"detached-alive", false}, {"unserved-route", true}, {"", false}} {
+	}{{"detached-held", true}, {"detached-held", false}, {"unserved-route", true}, {"", false}} {
 		if got := l.log("w-1", "gc-dead", c.why); got != c.want {
 			t.Fatalf("step %d (%q): logged %t, want %t", i, c.why, got, c.want)
 		}

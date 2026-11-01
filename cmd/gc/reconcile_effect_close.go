@@ -38,8 +38,8 @@ import (
 //     - with work found on a pool slot, a stranded marker that has aged
 //     unclaims its work on every leg (SESS-625), and the close lands only if
 //     no release failed; with no marker, the effect stamps one and records
-//     session.stranded (SESS-624), unless every claim's detached probe still
-//     reports alive.
+//     session.stranded (SESS-624), unless its detached probe holds every
+//     claim (it reports alive, or observed nothing: error or timeout).
 //  3. The premise close, through the shared precondition (closePermitted):
 //     L5 must read Free, except for a SESS-080 phantom, whose work is the
 //     configured identity's; a repair, whose release decided; and an
@@ -60,7 +60,7 @@ import (
 // Close refusal causes; a fresh read's are readRuntime's.
 const (
 	causeLivePane      = "live-pane"          // the fresh read shows a live pane: not stopped
-	causeStranded      = "stranded-unstamped" // work on an unmarked pool slot whose detached probes all report alive, or one did not answer
+	causeStranded      = "stranded-unstamped" // work on an unmarked pool slot whose every claim its detached probe holds, or whose read the Probe's bound cut short
 	causeReleaseFailed = "release-failed"     // the stranded repair's release failed on a claim or a leg
 	causeDetachedHeld  = "detached-held"      // the stranded repair kept a claim whose detached probe did not attest its runtime dead
 )
@@ -185,11 +185,12 @@ func killCorpse(ctx context.Context, _ txCaps, k corpseKill) (corpseKilled, erro
 // strandedWork is the stranded branch's probe: the unmarked pool slot's
 // assigned work through the read-only legs, filtered by its detached probes
 // (as filterDetachedStrandedDiagnosticWork, without its metadata clear: the
-// legs refuse writes, and the release clears it). Not searched, the branch
-// refuses: no stamp rests on a probe that did not answer.
+// legs refuse writes, and the release clears it). Not searched, or with every
+// claim held, the branch refuses: no stamp rests on a read that did not
+// answer, and none on work that may still run.
 type strandedWork struct {
 	ids      []string
-	alive    bool // every claim read reports a detached probe alive
+	held     bool // every claim read is held: its detached probe does not attest it dead
 	searched bool
 }
 
@@ -197,9 +198,11 @@ type strandedWork struct {
 // found work on a pool slot that is not killed and carries no marker. The
 // detached probes run concurrently after the read, each on its own bound
 // (detachedProbeDefaultTimeout) apart from the read's. Only work whose probe
-// attests dead, or that carries none, is stranded: a probe that observed
-// nothing (error or timeout), or the Probe's own bound cutting the read
-// short, leaves the work unsearched, so this attempt refuses.
+// attests dead, or that carries none, is stranded: a claim whose probe
+// reports it alive or observed nothing (error or timeout) may still run, so
+// it is held out on its own, and the slot's other work is still stranded.
+// The Probe's own bound cutting the read short leaves the work unsearched, so
+// this attempt refuses.
 func strandedProbe(ctx context.Context, r effectReads, v txView) (strandedWork, error) {
 	c := v.It.Closing
 	if c.Kind != closePoolSlot || c.Killed || v.Fence.Work == nil || v.Fence.Work.Free ||
@@ -225,15 +228,11 @@ func strandedProbe(ctx context.Context, r effectReads, v txView) (strandedWork, 
 	}
 	out := strandedWork{searched: true}
 	for i, item := range work {
-		switch status[i] {
-		case detachedProbeAlive:
-		case detachedProbeDead:
+		if status[i] == detachedProbeDead {
 			out.ids = append(out.ids, item.bead.ID)
-		default:
-			return strandedWork{}, nil
 		}
 	}
-	out.alive = err == nil && len(work) > 0 && len(out.ids) == 0
+	out.held = err == nil && len(work) > 0 && len(out.ids) == 0
 	return out, nil
 }
 
@@ -271,7 +270,7 @@ func closeWorkStep(v txView, stranded strandedWork, _ error) txStep {
 	case c.Kind == closePoolSlot && c.Repair:
 		return release(releaseStrandedRepair)
 	case c.Kind == closePoolSlot && strings.TrimSpace(v.Row.StrandedEventEmittedAt) == "":
-		if !stranded.searched || stranded.alive {
+		if !stranded.searched || stranded.held {
 			return txStep{Refuse: causeStranded}
 		}
 		at := v.World.Now.UTC()

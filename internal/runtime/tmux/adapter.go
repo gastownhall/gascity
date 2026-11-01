@@ -508,7 +508,9 @@ func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, er
 // whose TMUX is absent, malformed, names another server pid or cannot be
 // read: nothing then proves it is not this provider's. A pane of a server an
 // agent started on a socket of its own is not set, so a start terminates it
-// as an orphan. It returns the errors of the reads.
+// as an orphan. It returns the errors of the reads, each one root's own
+// (proctable.EntryError): a root it cannot read leaves the scan's tracking
+// standing.
 func (p *Provider) markLiveUnlisted(found []runtime.LiveRuntime) error {
 	socketName := p.tm.socketLabel()
 	var errs []error
@@ -519,7 +521,7 @@ func (p *Provider) markLiveUnlisted(found []runtime.LiveRuntime) error {
 		}
 		value, err := proctable.ProcessEnvValue(root.PID, "TMUX")
 		if err != nil {
-			errs = append(errs, fmt.Errorf("tmux: reading TMUX for PID %d: %w", root.PID, err))
+			errs = append(errs, &proctable.EntryError{PID: root.PID, Err: fmt.Errorf("tmux: reading TMUX for PID %d: %w", root.PID, err)})
 		}
 		root.LiveUnlisted = err != nil || !paneOfOtherSocket(value, root.PPID, socketName)
 	}

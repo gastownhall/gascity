@@ -133,7 +133,7 @@ const (
 	keptStarted       = "started"
 	keptUnservedRoute = "unserved-route"
 	keptMoved         = "moved"
-	keptDetachedAlive = "detached-alive" // its gc.detached probe did not attest the runtime dead
+	keptDetachedHeld  = "detached-held" // its gc.detached probe did not attest the runtime dead
 	failedBudget      = "budget"
 )
 
@@ -274,7 +274,7 @@ func (o ReleaseOutcome) Unserved() []strandedClaim {
 func (o ReleaseOutcome) HeldDetached() int {
 	held := 0
 	for _, k := range o.Kept {
-		if o.Why[k.bead.ID] == keptDetachedAlive {
+		if o.Why[k.bead.ID] == keptDetachedHeld {
 			held++
 		}
 	}
@@ -350,7 +350,7 @@ func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *
 			out.Why[c.bead.ID] = failedBudget
 			continue
 		}
-		switch kept, err := releaseServed(c, p, fallback); {
+		switch kept, err := releaseServed(c, workAssignmentForStore(beads.WorkStore{Store: c.store}), p, fallback); {
 		case kept != "":
 			keep(c, kept)
 		case err != nil:
@@ -364,19 +364,21 @@ func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *
 }
 
 // releaseServed gives back one claim a lane serves, as p says: why it was
-// kept instead, or the error of a release that did not land. A pool release
-// re-reads the claim live first. Under p.detached a claim carrying
-// gc.detached goes back only when its probe attests the runtime dead. Every
-// release clears the claim's gc.detached in its one write: a probe left on
-// the reopened bead would ride into the claim's next assignment, where once
-// its socket is gone it holds the work for good.
-func releaseServed(c seatWorkHit, p releasePolicy, fallback string) (string, error) {
+// kept instead, or the error of a release that did not land. wa is the
+// claim's work store (c.store) as the assignment façade, which a release
+// outside the pool writes through. A pool release re-reads the claim live
+// first. Under p.detached a claim carrying gc.detached goes back only when
+// its probe attests the runtime dead. Every release clears the claim's
+// gc.detached in its one write: a probe left on the reopened bead would ride
+// into the claim's next assignment, where once its socket is gone it holds
+// the work for good.
+func releaseServed(c seatWorkHit, wa workAssignment, p releasePolicy, fallback string) (string, error) {
 	if p.pool && !liveWorkAssignmentStillReleasable(c.store, c.bead.ID, c.bead.Status, strings.TrimSpace(c.bead.Assignee)) {
 		return keptMoved, nil
 	}
 	if p.detached {
 		if allowed, _ := detachedProbeAllowsOrphanRelease(c.bead); !allowed {
-			return keptDetachedAlive, nil
+			return keptDetachedHeld, nil
 		}
 	}
 	clearDetached := strings.TrimSpace(c.bead.Metadata[detachedProbeMetadataKey]) != ""
@@ -386,7 +388,6 @@ func releaseServed(c seatWorkHit, p releasePolicy, fallback string) (string, err
 		}
 		return "", nil
 	}
-	wa := workAssignmentForStore(beads.WorkStore{Store: c.store})
 	if clearDetached {
 		return "", wa.ReleaseDetachedWorkBead(c.bead, fallback)
 	}

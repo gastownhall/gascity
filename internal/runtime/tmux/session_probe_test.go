@@ -3,6 +3,7 @@ package tmux
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -12,7 +13,8 @@ import (
 )
 
 // liveUnixSocket binds a listener in a short directory under /tmp and returns
-// its path; connections are accepted and closed until cleanup.
+// its path; until cleanup, each connection is accepted and held until its
+// client closes it.
 func liveUnixSocket(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "gcps")
@@ -32,7 +34,13 @@ func liveUnixSocket(t *testing.T) string {
 			if err != nil {
 				return
 			}
-			_ = conn.Close()
+			// Hold the connection until its client closes it, as a tmux
+			// server does: darwin reads the server's pid off the client's
+			// end (LOCAL_PEERPID), which fails once this end has closed.
+			go func() {
+				_, _ = io.Copy(io.Discard, conn)
+				_ = conn.Close()
+			}()
 		}
 	}()
 	return path
