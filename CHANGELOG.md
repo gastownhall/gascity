@@ -1343,8 +1343,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the failure as no gates. Gates created before this change carry no stamp and
   stay unannounced; close or re-pour them.
 
-- **Split cities seat a released graph step on the next controller pass
-  again.** On a city whose `[storage.classes]` serves the graph class from a
+- **Split cities seat a released graph step on the next controller pass.**
+  On a city whose `[storage.classes]` serves the graph class from a
   binding, the v2 reconciler read the binding's ready work only from the
   external-reads lane's recording, which refreshes about every 20 seconds at
   the 15-second patrol, so a step released by a blocker in the binding waited

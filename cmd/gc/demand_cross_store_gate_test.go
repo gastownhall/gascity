@@ -73,10 +73,12 @@ func TestLegacyCrossStoreGateGivesUpAtItsDeadline(t *testing.T) {
 }
 
 // TestV2DemandServesAGateLegsReadyOnlyFromAGatedRecording (#8360 review): the
-// v2 pass does no remote I/O, so on a split city it serves every gate leg's
-// Ready from the external-reads lane's gated recording, the exact leg's too,
-// whose rows it otherwise reads from its cache. A recording the lane did not
-// gate is partial, not served. A city with no gate legs reads as before.
+// v2 pass does no remote I/O, so on a split city it serves a gate leg's Ready
+// from the external-reads lane's gated recording, including an exact leg's
+// whose store strands nothing, so that no row of it is left to the leg's own
+// verdict (the rows a stranding binding's cache judges in the pass are
+// TestV2GateLegReadyAgreesWithTheFederatedGate's). A recording the lane did
+// not gate is partial, not served. A city with no gate legs reads as before.
 func TestV2DemandServesAGateLegsReadyOnlyFromAGatedRecording(t *testing.T) {
 	ledger, ledgerBacking := newDemandCache(t, false, routedDemandBead("gc-r1"))
 	binding, bindingBacking := newDemandCache(t, true, routedDemandBead("gcg-r2"))
@@ -467,12 +469,79 @@ func TestV2GateLegServesAReleasedInNamespaceRowWithoutANewRecording(t *testing.T
 	}
 }
 
+// TestV2GateLegWithdrawsARecordedStepWhoseBlockerReopened (ga-ylpbsy.67
+// review): a step the lane recorded as released, whose in-namespace blocker
+// reopens after the recording, is the cache's to answer, and the cache now
+// holds it blocked. Serving the recorded row anyway (keeping the recording's
+// rows beside the cache's instead of letting the cache's verdict replace them)
+// hands a seat work its blocker holds back until the lane records again. Both
+// ways a reopen reaches the binding cache: its own write, and another
+// process's write delivered as an event. Kills: a recorded row kept over the
+// cache's newer verdict.
+func TestV2GateLegWithdrawsARecordedStepWhoseBlockerReopened(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		reopen func(c *gateLegCity, id string)
+	}{
+		{"reopened through the cache", func(c *gateLegCity, id string) {
+			if err := c.binding.Reopen(id); err != nil {
+				c.t.Fatal(err)
+			}
+		}},
+		{"reopened by another process", func(c *gateLegCity, id string) {
+			if err := c.engine.Reopen(id); err != nil {
+				c.t.Fatal(err)
+			}
+			row, err := c.engine.SQLiteStore.Get(id)
+			if err != nil {
+				c.t.Fatal(err)
+			}
+			payload, err := beads.EncodeBeadEventPayload(row)
+			if err != nil {
+				c.t.Fatal(err)
+			}
+			c.binding.ApplyEventSnapshot(events.BeadUpdated, payload)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newGateLegCity(t)
+			blocker, err := c.engine.Create(beads.Bead{Title: "graph blocker", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			step, err := c.engine.Create(beads.Bead{Title: "graph step", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.engine.DepAdd(step.ID, blocker.ID, "blocks"); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.engine.Close(blocker.ID); err != nil {
+				t.Fatal(err)
+			}
+			c.prime()
+			rec := c.recording(c.gated())
+			if ids := beadIDsOf(rec.Sources[keyOf(sourceDemand, c.binding)].Leg.ReadyAll); !slices.Contains(ids, step.ID) {
+				t.Fatalf("fixture: the recording does not serve released %s: %v", step.ID, ids)
+			}
+			tc.reopen(c, blocker.ID)
+			if gated := beadIDsOf(c.gated()); slices.Contains(gated, step.ID) {
+				t.Fatalf("fixture: the gate still serves %s after its blocker reopened: %v", step.ID, gated)
+			}
+			rows, _ := c.served(rec)
+			if slices.Contains(beadIDsOf(rows), step.ID) {
+				t.Errorf("served %s from the stale recording after its in-namespace blocker %s reopened: %v", step.ID, blocker.ID, beadIDsOf(rows))
+			}
+		})
+	}
+}
+
 // TestV2GateLegReadyAgreesWithTheFederatedGate is the readiness oracle for an
 // exact gate leg's Ready (ga-ylpbsy.67). Over random blocker graphs whose edges
 // mix in-namespace, foreign, external:, capability and absent targets, rows
 // created before and after the cache primed (only the latter can lack a
-// projected verdict), and random closes, close-blocked closes and reopens
-// after the recording was taken:
+// projected verdict), some rows already closed when the recording is taken,
+// and random closes, close-blocked closes and reopens after it:
 //
 //   - with nothing changed, the pass serves exactly what the federated gate
 //     serves;
@@ -486,8 +555,8 @@ func TestV2GateLegServesAReleasedInNamespaceRowWithoutANewRecording(t *testing.T
 //     served, wherever the cache vouches for it.
 //
 // Kills: a row served past an open or absent blocker, a row whose readiness
-// needs another store read off the cache, and an own-verdict row that waits
-// for the lane.
+// needs another store read off the cache, a recorded row kept over the cache's
+// newer verdict, and an own-verdict row that waits for the lane.
 func TestV2GateLegReadyAgreesWithTheFederatedGate(t *testing.T) {
 	for seed := int64(1); seed <= 40; seed++ {
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
@@ -541,6 +610,15 @@ func TestV2GateLegReadyAgreesWithTheFederatedGate(t *testing.T) {
 			}
 			for _, id := range graph {
 				addEdges(c.engine.SQLiteStore, id)
+			}
+			// Some blockers are already closed when the recording is taken, so
+			// a recorded row can carry a release that a reopen withdraws.
+			for _, id := range graph {
+				if rng.Intn(3) == 0 {
+					if err := c.engine.Close(id); err != nil {
+						t.Fatal(err)
+					}
+				}
 			}
 			c.prime()
 			for i := 0; i < 4; i++ {
