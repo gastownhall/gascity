@@ -16,14 +16,18 @@ import (
 // comparison sink configured, each leaf decision point records today's
 // reading beside what the program's own record would decide. Nothing here
 // feeds a decision back: every point decides exactly as it does with the
-// switch off. A reading a point needs before it acts (a baseline taken before
-// gc types) is one tmux read on the decision path; everything after the
-// decision (the record read that judges it, any follow-up that times the
+// switch off. Every reading a point's rule judges is taken on the decision
+// path, before the point hands control back to its caller: a baseline before
+// gc types, the reading just before a look whose verdict gc acts on at once,
+// or the reading right after a wait decided. Each is one tmux read (pending's
+// comes from the state cache). Read any later, it could judge what gc did
+// with the decision instead (a delivery typed as soon as a wait returns
+// starts a turn). Everything after that read (any follow-up that times the
 // program's own signal, the hand-off to the sink) runs on a bounded
-// background goroutine, and a point whose work finds no free slot is
-// dropped and counted, never waited for. A comparison carries the reading
-// its rule judged at the decision, and when it judged; a follow-up only
-// times the program's signal.
+// background goroutine, and a point whose work finds no free slot is dropped
+// and counted, never waited for. A comparison carries the reading its rule
+// judged, and when that reading was taken; a follow-up only times the
+// program's signal.
 //
 // A timed point follows its record past the decision only in a process that
 // lives long enough (Config.ComparisonFollowUps), and only one follow-up per
@@ -47,6 +51,10 @@ const (
 	// shadowConfirmFollowLimit bounds how long a submit or settle waits for
 	// the program's evidence after the scrape decided.
 	shadowConfirmFollowLimit = 30 * time.Second
+	// shadowReadTimeout bounds one fresh shadow read. A decision path waits
+	// for its reading, so a wedged tmux server holds a decision under shadow
+	// no longer than the state cache's own fetch (fetchTimeout) would.
+	shadowReadTimeout = fetchTimeout
 )
 
 // shadowFollowInterval is the pause between two follow-up reads at elapsed
@@ -141,6 +149,15 @@ func (p *Provider) ProgramStatusShadowSink() runtime.ProgramStatusComparisonSink
 	}
 }
 
+// ProgramStatusShadowRead implements [runtime.ProgramStatusShadowProvider]:
+// one fresh reading of session name (shadowRead), a tmux list-panes of the
+// session past the state cache, whose snapshot two reads within its TTL
+// would share. ok is false unless the leaf is shadowing and the read
+// succeeded.
+func (p *Provider) ProgramStatusShadowRead(name string) (runtime.ProgramStatus, bool) {
+	return p.tm.shadowRead(name)
+}
+
 var _ runtime.ProgramStatusShadowProvider = (*Provider)(nil)
 
 // shadowGo runs fn on a background goroutine when a slot is free, and
@@ -209,15 +226,18 @@ func (t *Tmux) claimShadowFollow(session string, point runtime.ProgramStatusPoin
 const programFreshFormat = "#{pane_dead}\t" + programPaneFormat + "\t" + runtimeInventoryEnd
 
 // shadowRead takes one fresh reading of session's agent pane: one tmux
-// list-panes of the session, folded to its agent pane and judged under the
-// switch, with the tap liveness of the state cache's last process table. ok
-// is false when the leaf is not shadowing, session is not a session name, or
-// the read failed: there is nothing to compare.
+// list-panes of the session, bounded by shadowReadTimeout, folded to its
+// agent pane and judged under the switch, with the tap liveness of the state
+// cache's last process table. ok is false when the leaf is not shadowing,
+// session is not a session name, or the read failed: there is nothing to
+// compare.
 func (t *Tmux) shadowRead(session string) (runtime.ProgramStatus, bool) {
 	if !t.shadowing() || !validSessionNameRe.MatchString(session) {
 		return runtime.ProgramStatus{}, false
 	}
-	out, err := t.run("list-panes", "-s", "-t", paneTarget(session), "-F", programFreshFormat)
+	ctx, cancel := context.WithTimeout(context.Background(), shadowReadTimeout)
+	defer cancel()
+	out, err := t.runCtx(ctx, "list-panes", "-s", "-t", paneTarget(session), "-F", programFreshFormat)
 	if err != nil {
 		return runtime.ProgramStatus{}, false
 	}
@@ -239,6 +259,24 @@ func (t *Tmux) shadowRead(session string) (runtime.ProgramStatus, bool) {
 		taps = t.shadow.taps()
 	}
 	return judgeProgramPane(t.programStatusMode(), t.captureGatePassed(), pane, named, taps), true
+}
+
+// shadowDecision is the reading a decision point's rule judges, and when it
+// was taken: read on the decision path (shadowDecide), before the point hands
+// control back to its caller, so nothing gc does with the decision can reach
+// it.
+type shadowDecision struct {
+	status runtime.ProgramStatus
+	at     time.Time
+}
+
+// shadowDecide takes a decision's reading (shadowRead), stamped with the
+// clock read after it, the time its rule judges it at: no state the reading
+// shows can have been entered later, while a clock taken before the read
+// would make a state entered during it look skewed and hold nothing.
+func (t *Tmux) shadowDecide(session string) (shadowDecision, bool) {
+	s, ok := t.shadowRead(session)
+	return shadowDecision{status: s, at: time.Now()}, ok
 }
 
 // shadowIdentityOf returns session's provider family and bead id, read from
@@ -374,32 +412,77 @@ func laterOf(a, b time.Time) time.Time {
 	return b
 }
 
-// shadowWaitForIdle records an idle wait's comparison (wait_for_idle): the
-// scrape's verdict at decidedAt beside the record's idle verdict on the
-// reading taken then. A record not yet at a boundary is followed, up to the
-// hold bound, to time when it would have let the wait return: the veto lag,
-// its first input boundary since that reading (shadowTurnEnd). A wait that
-// ended on its context or a gone session decided nothing and records
-// nothing. The settle of an interrupt the wait follows is recorded apart
-// (shadowSettle).
-func (t *Tmux) shadowWaitForIdle(session string, started, decidedAt time.Time, err error) {
-	var scrape runtime.ProgramVerdict
+// idleWaitVerdict is an idle wait's scrape verdict: idle when it returned,
+// busy at its timeout, indeterminate at a timeout no read judged
+// ([runtime.ErrWaitUnobserved]: no evidence a turn still ran). ok is false
+// for a wait that ended any other way (its context, a gone session): it
+// decided nothing.
+func idleWaitVerdict(err error) (runtime.ProgramVerdict, bool) {
 	switch {
 	case err == nil:
-		scrape = runtime.ProgramVerdictIdle
+		return runtime.ProgramVerdictIdle, true
 	case errors.Is(err, ErrIdleTimeout) && errors.Is(err, runtime.ErrWaitUnobserved):
-		scrape = runtime.ProgramVerdictIndeterminate
+		return runtime.ProgramVerdictIndeterminate, true
 	case errors.Is(err, ErrIdleTimeout):
-		scrape = runtime.ProgramVerdictBusy
+		return runtime.ProgramVerdictBusy, true
 	default:
+		return "", false
+	}
+}
+
+// settleWaitVerdict is a settle wait's scrape verdict: settled when it
+// returned, unsettled at its timeout, indeterminate at a timeout no read
+// judged. ok is false for a wait that ended any other way.
+func settleWaitVerdict(err error) (runtime.ProgramVerdict, bool) {
+	switch {
+	case err == nil:
+		return runtime.ProgramVerdictSettled, true
+	case errors.Is(err, ErrIdleTimeout) && errors.Is(err, runtime.ErrWaitUnobserved):
+		return runtime.ProgramVerdictIndeterminate, true
+	case errors.Is(err, ErrIdleTimeout):
+		return runtime.ProgramVerdictUnsettled, true
+	default:
+		return "", false
+	}
+}
+
+// shadowIdleWait records an idle wait that decided at decidedAt with err
+// (WaitForIdle), before the wait returns to its caller: its wait_for_idle,
+// unless ctx's caller records the decision at its own point
+// ([runtime.WithShadowCallerRecords]), and the settle of an interrupt gc
+// noted before it (interrupt_settle). Both judge one reading, taken here. A
+// wait that decided nothing records nothing, and takes no reading when
+// neither point records.
+func (t *Tmux) shadowIdleWait(ctx context.Context, session string, started, decidedAt time.Time, err error) {
+	waitScrape, waits := idleWaitVerdict(err)
+	waits = waits && !runtime.ShadowCallerRecords(ctx)
+	settleScrape, settles := settleWaitVerdict(err)
+	mark, noted := t.takeShadowInterrupt(session, decidedAt)
+	settles = settles && noted
+	if !waits && !settles {
 		return
 	}
+	d, ok := t.shadowDecide(session)
+	if !ok {
+		return
+	}
+	if waits {
+		t.shadowWaitForIdle(session, started, decidedAt, waitScrape, d)
+	}
+	if settles {
+		t.shadowSettleFrom(session, mark, decidedAt, settleScrape, d)
+	}
+}
+
+// shadowWaitForIdle records an idle wait's comparison (wait_for_idle): the
+// scrape's verdict at decidedAt beside the record's idle verdict on d, the
+// wait's decision reading. A record not yet at a boundary is followed, up to
+// the hold bound, to time when it would have let the wait return: the veto
+// lag, its first input boundary since that reading (shadowTurnEnd).
+func (t *Tmux) shadowWaitForIdle(session string, started, decidedAt time.Time, scrape runtime.ProgramVerdict, d shadowDecision) {
 	t.shadowGo(func() {
-		s, ok := t.shadowRead(session)
-		if !ok {
-			return
-		}
-		program := runtime.ProgramIdleVerdict(s, time.Time{}, decidedAt)
+		s := d.status
+		program := runtime.ProgramIdleVerdict(s, time.Time{}, d.at)
 		at, seen := laterOf(s.BoundaryAt(), started), true
 		if program != runtime.ProgramVerdictIdle {
 			at, seen = t.shadowFollow(session, runtime.ProgramPointWaitForIdle, s, runtime.ProgramStatusHoldLimit, shadowStopInvalid, func(r runtime.ProgramStatus) (time.Time, bool) {
@@ -412,7 +495,7 @@ func (t *Tmux) shadowWaitForIdle(session string, started, decidedAt time.Time, e
 				return laterOf(r.BoundaryAt(), started), true
 			})
 		}
-		t.shadowEmit(session, runtime.ProgramPointWaitForIdle, scrape, program, s, decidedAt, at.Sub(decidedAt), seen && !at.IsZero())
+		t.shadowEmit(session, runtime.ProgramPointWaitForIdle, scrape, program, s, d.at, at.Sub(decidedAt), seen && !at.IsZero())
 	})
 }
 
@@ -447,39 +530,28 @@ func (t *Tmux) takeShadowInterrupt(session string, at time.Time) (shadowInterrup
 	return mark, at.Sub(mark.at) <= shadowInterruptWindow
 }
 
-// shadowSettle records an interrupt settle (interrupt_settle) when a wait
-// that decided at decidedAt follows an interrupt gc noted: the wait's verdict
-// (settled when it returned, unsettled at its timeout) beside the record's
-// boundary past the pre-interrupt baseline on the reading taken then,
-// followed to time the settle when it has not settled yet.
-func (t *Tmux) shadowSettle(session string, decidedAt time.Time, err error) {
-	if !t.shadowing() {
-		return
-	}
-	mark, ok := t.takeShadowInterrupt(session, decidedAt)
+// shadowSettleWait records a settle wait that decided at decidedAt with err
+// (WaitForInterruptBoundary) as the settle of the interrupt in mark
+// (shadowSettleFrom), on a reading taken here, before the wait returns to
+// its caller. A wait that decided nothing records nothing.
+func (t *Tmux) shadowSettleWait(session string, mark shadowInterrupt, decidedAt time.Time, err error) {
+	scrape, ok := settleWaitVerdict(err)
 	if !ok {
 		return
 	}
-	t.shadowSettleFrom(session, mark, decidedAt, err)
+	if d, ok := t.shadowDecide(session); ok {
+		t.shadowSettleFrom(session, mark, decidedAt, scrape, d)
+	}
 }
 
-// shadowSettleFrom is shadowSettle for an interrupt baseline already taken.
-func (t *Tmux) shadowSettleFrom(session string, mark shadowInterrupt, decidedAt time.Time, err error) {
-	var scrape runtime.ProgramVerdict
-	switch {
-	case err == nil:
-		scrape = runtime.ProgramVerdictSettled
-	case errors.Is(err, ErrIdleTimeout):
-		scrape = runtime.ProgramVerdictUnsettled
-	default:
-		return
-	}
+// shadowSettleFrom records an interrupt settle (interrupt_settle): the
+// settle wait's verdict at decidedAt beside the record's boundary past the
+// pre-interrupt baseline in mark, on d, the wait's decision reading,
+// followed to time the settle when it has not settled yet.
+func (t *Tmux) shadowSettleFrom(session string, mark shadowInterrupt, decidedAt time.Time, scrape runtime.ProgramVerdict, d shadowDecision) {
 	t.shadowGo(func() {
-		s, ok := t.shadowRead(session)
-		if !ok {
-			return
-		}
-		program := runtime.ProgramSettleVerdict(s, mark.baseline, time.Time{}, decidedAt)
+		s := d.status
+		program := runtime.ProgramSettleVerdict(s, mark.baseline, time.Time{}, d.at)
 		settled := func(r runtime.ProgramStatus) (time.Time, bool) {
 			// A turn that ended since the decision, in the interrupted
 			// incarnation, is the settle, however briefly it stood.
@@ -492,7 +564,7 @@ func (t *Tmux) shadowSettleFrom(session string, mark shadowInterrupt, decidedAt 
 			return laterOf(r.BoundaryAt(), mark.at), true
 		}
 		at, seen := t.shadowFollow(session, runtime.ProgramPointInterruptSettle, s, shadowConfirmFollowLimit, shadowStopInvalid, settled)
-		t.shadowEmit(session, runtime.ProgramPointInterruptSettle, scrape, program, s, decidedAt, at.Sub(decidedAt), seen && !at.IsZero())
+		t.shadowEmit(session, runtime.ProgramPointInterruptSettle, scrape, program, s, d.at, at.Sub(decidedAt), seen && !at.IsZero())
 	})
 }
 
@@ -524,15 +596,17 @@ func (t *Tmux) shadowTypingGateNow(session string, lookErr error) {
 // shadowSubmit records a submit's confirmation (submit_confirm): the scrape's
 // verdict at decidedAt (confirmed, unconfirmed, or none for a family with no
 // busy indicator) beside AdvancedPast against the baseline taken before
-// typing, on the reading taken then, followed to time the program's evidence
-// when the record has not advanced yet. The program's signal time is when
-// the record entered the state that credits it.
+// typing, on a reading taken here, before the nudge goes on (a staged draft's
+// recovery may submit again), followed to time the program's evidence when
+// the record has not advanced yet. The program's signal time is when the
+// record entered the state that credits it.
 func (t *Tmux) shadowSubmit(session string, baseline runtime.ProgramBaseline, scrape runtime.ProgramVerdict, decidedAt time.Time) {
+	d, ok := t.shadowDecide(session)
+	if !ok {
+		return
+	}
 	t.shadowGo(func() {
-		s, ok := t.shadowRead(session)
-		if !ok {
-			return
-		}
+		s := d.status
 		program := runtime.ProgramConfirmVerdict(s, baseline)
 		advanced := func(r runtime.ProgramStatus) (time.Time, bool) {
 			if !r.AdvancedPast(baseline) {
@@ -544,17 +618,21 @@ func (t *Tmux) shadowSubmit(session string, baseline runtime.ProgramBaseline, sc
 			return time.Time{}, true
 		}
 		at, seen := t.shadowFollow(session, runtime.ProgramPointSubmitConfirm, s, shadowConfirmFollowLimit, shadowStopInvalid, advanced)
-		t.shadowEmit(session, runtime.ProgramPointSubmitConfirm, scrape, program, s, decidedAt, at.Sub(decidedAt), seen && !at.IsZero())
+		t.shadowEmit(session, runtime.ProgramPointSubmitConfirm, scrape, program, s, d.at, at.Sub(decidedAt), seen && !at.IsZero())
 	})
 }
 
 // shadowResendLook wraps an Escape-led submit's re-send look (escape_resend):
 // each look's verdict (re-send while the message still waits) is recorded
-// beside the record's AdvancedPast against the baseline taken before typing.
+// beside the record's AdvancedPast against the baseline taken before typing,
+// on a reading taken just before the look. A waiting look is re-sent at
+// once, so a reading taken after it could judge the re-send; one taken
+// before it never widens the gap between the look and that re-send.
 func (t *Tmux) shadowResendLook(session string, baseline runtime.ProgramBaseline, look func() (bool, error)) func() (bool, error) {
 	return func() (bool, error) {
+		d, read := t.shadowDecide(session)
 		waiting, err := look()
-		if err != nil {
+		if err != nil || !read {
 			return waiting, err
 		}
 		scrape := runtime.ProgramVerdictNoResend
@@ -562,11 +640,7 @@ func (t *Tmux) shadowResendLook(session string, baseline runtime.ProgramBaseline
 			scrape = runtime.ProgramVerdictResend
 		}
 		t.shadowGo(func() {
-			s, ok := t.shadowRead(session)
-			if !ok {
-				return
-			}
-			t.shadowEmit(session, runtime.ProgramPointEscapeResend, scrape, runtime.ProgramResendVerdict(s, baseline), s, time.Now(), 0, false)
+			t.shadowEmit(session, runtime.ProgramPointEscapeResend, scrape, runtime.ProgramResendVerdict(d.status, baseline), d.status, d.at, 0, false)
 		})
 		return waiting, err
 	}
@@ -574,7 +648,8 @@ func (t *Tmux) shadowResendLook(session string, baseline runtime.ProgramBaseline
 
 // shadowReadiness records a readiness wait (readiness): the scrape's verdict
 // at decidedAt (ready, or not_ready at its timeout) beside the record's
-// readiness on the reading taken then. The program's signal is its first
+// readiness on a reading taken here, before the start goes on to answer
+// startup dialogs and type its nudge. The program's signal is its first
 // valid report plus ProgramStatusReadySettle; a capture still silent at the
 // decision is followed through its silence, up to shadowReadyFollowLimit, to
 // the first report. A reading's first report is its Since while no turn has
@@ -587,11 +662,12 @@ func (t *Tmux) shadowReadiness(session string, decidedAt time.Time, err error) {
 	case err != nil:
 		scrape = runtime.ProgramVerdictNotReady
 	}
+	d, ok := t.shadowDecide(session)
+	if !ok {
+		return
+	}
 	t.shadowGo(func() {
-		s, ok := t.shadowRead(session)
-		if !ok {
-			return
-		}
+		s := d.status
 		firstReport := func(r runtime.ProgramStatus) (time.Time, bool) {
 			if !r.Valid() || r.TurnEnds > 0 || r.TurnStarts > 1 {
 				return time.Time{}, false
@@ -603,7 +679,7 @@ func (t *Tmux) shadowReadiness(session string, decidedAt time.Time, err error) {
 		if s.Valid() {
 			program = runtime.ProgramVerdictReady
 			if known {
-				program = runtime.ProgramReadyVerdict(s, first, decidedAt)
+				program = runtime.ProgramReadyVerdict(s, first, d.at)
 			}
 		}
 		at, seen := first, known
@@ -618,31 +694,28 @@ func (t *Tmux) shadowReadiness(session string, decidedAt time.Time, err error) {
 				return time.Now(), true
 			})
 		}
-		t.shadowEmit(session, runtime.ProgramPointReadiness, scrape, program, s, decidedAt, at.Add(runtime.ProgramStatusReadySettle).Sub(decidedAt), seen)
+		t.shadowEmit(session, runtime.ProgramPointReadiness, scrape, program, s, d.at, at.Add(runtime.ProgramStatusReadySettle).Sub(decidedAt), seen)
 	})
 }
 
 // shadowStartupBusy wraps the startup ladder's busy look (startup_ladder):
 // each look's verdict (a busy pane confirms the nudge) is recorded beside the
 // record's startup verdict against the baseline taken before the ladder's
-// first send.
+// first send, on a reading taken just before the look: a look that reads no
+// busy pane re-sends the nudge at once, which a later reading could judge.
 func (t *Tmux) shadowStartupBusy(session string, baseline runtime.ProgramBaseline, busy func() (bool, error)) func() (bool, error) {
 	return func() (bool, error) {
+		d, read := t.shadowDecide(session)
 		isBusy, err := busy()
-		if err != nil {
+		if err != nil || !read {
 			return isBusy, err
 		}
 		scrape := runtime.ProgramVerdictUnconfirmed
 		if isBusy {
 			scrape = runtime.ProgramVerdictConfirmed
 		}
-		now := time.Now()
 		t.shadowGo(func() {
-			s, ok := t.shadowRead(session)
-			if !ok {
-				return
-			}
-			t.shadowEmit(session, runtime.ProgramPointStartupLadder, scrape, runtime.ProgramStartupVerdict(s, baseline, time.Time{}, now), s, now, 0, false)
+			t.shadowEmit(session, runtime.ProgramPointStartupLadder, scrape, runtime.ProgramStartupVerdict(d.status, baseline, time.Time{}, d.at), d.status, d.at, 0, false)
 		})
 		return isBusy, err
 	}

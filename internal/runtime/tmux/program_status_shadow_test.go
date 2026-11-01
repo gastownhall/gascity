@@ -27,18 +27,29 @@ type shadowExecutor struct {
 	// never does.
 	dead func(n int) bool
 	// tap returns the nth program read's tap nonce; nil reads readNonce.
-	tap   func(n int) string
+	tap func(n int) string
+	// hold, when set, runs before a program read is answered, outside the
+	// lock.
+	hold  func()
 	reads int
 	// order is every command in the order sent, a program read as
 	// "program-read".
 	order []string
 }
 
+// isProgramRead reports whether args is a leaf's fresh program read.
+func isProgramRead(args []string) bool {
+	return tmuxSubcommand(args) == "list-panes" && args[len(args)-1] == programFreshFormat
+}
+
 func (e *shadowExecutor) execute(args []string) (string, error) {
+	if e.hold != nil && isProgramRead(args) {
+		e.hold()
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	switch {
-	case tmuxSubcommand(args) == "list-panes" && args[len(args)-1] == programFreshFormat:
+	case isProgramRead(args):
 		rec, dead, tap := "", "0", readNonce
 		if e.record != nil {
 			rec = e.record(e.reads)
@@ -89,6 +100,12 @@ func (c *shadowCollector) sink(cmp runtime.ProgramStatusComparison) {
 // wait returns once n comparisons arrived, failing the test after a bound.
 func (c *shadowCollector) wait(t *testing.T, n int) []runtime.ProgramStatusComparison {
 	t.Helper()
+	return c.waitWithin(t, n, 10*time.Second)
+}
+
+// waitWithin is wait bounded by within.
+func (c *shadowCollector) waitWithin(t *testing.T, n int, within time.Duration) []runtime.ProgramStatusComparison {
+	t.Helper()
 	for {
 		c.mu.Lock()
 		got := slices.Clone(c.got)
@@ -98,7 +115,7 @@ func (c *shadowCollector) wait(t *testing.T, n int) []runtime.ProgramStatusCompa
 		}
 		select {
 		case <-c.ch:
-		case <-time.After(10 * time.Second):
+		case <-time.After(within):
 			t.Fatalf("got %d comparisons, want %d: %+v", len(got), n, got)
 		}
 	}
@@ -386,20 +403,66 @@ func TestShadowWrappedLooksAnswerAsTheirLook(t *testing.T) {
 }
 
 // Kills an interrupt settle that is not recorded after an interrupt gc noted,
-// or is recorded for a wait no interrupt preceded.
+// is recorded for a wait no interrupt preceded, or files a settle wait's
+// timeout as the scrape deciding unsettled when no read judged the turn
+// (runtime.ErrWaitUnobserved: a dialog on screen, an unreadable rollout).
+// Such a wait decided nothing, whether it was the idle wait after an
+// Interrupt or the interrupt-boundary wait.
 func TestShadowInterruptSettle(t *testing.T) {
 	stubShadowFollow(t)
 	working := psRecord(t, readNonce, runtime.ProgramWorking, liveSince, func(s *runtime.ProgramStatus) { s.Seq = 4 })
 	stopped := psRecord(t, readNonce, runtime.ProgramIdle, liveSince, func(s *runtime.ProgramStatus) { s.Seq, s.TurnEnds, s.QuietSince = 5, 1, time.Now() })
-	col := newShadowCollector()
 	records := []string{working, stopped}
-	tm, _ := shadowTmux(runtime.ProgramStatusShadow, &fakeExecutor{}, func(n int) string { return records[min(n, 1)] }, col.sink)
-	tm.shadowSettle("s", time.Now(), nil)
-	tm.shadowNoteInterrupt("s")
-	tm.shadowSettle("s", time.Now(), nil)
-	got := col.wait(t, 1)
-	if len(got) != 1 || got[0].Point != runtime.ProgramPointInterruptSettle || got[0].Scrape != runtime.ProgramVerdictSettled || got[0].Program != runtime.ProgramVerdictSettled {
-		t.Fatalf("comparisons %+v, want one interrupt_settle settled/settled", got)
+	// The mark keeps the idle wait's own wait_for_idle out of the record.
+	callerRecords := runtime.WithShadowCallerRecords(context.Background())
+	idleWait := func(tm *Tmux, err error) {
+		tm.shadowIdleWait(callerRecords, "s", time.Now(), time.Now(), err)
+	}
+	boundaryWait := func(tm *Tmux, err error) {
+		mark, ok := tm.takeShadowInterrupt("s", time.Now())
+		if !ok {
+			t.Fatal("no interrupt noted")
+		}
+		tm.shadowSettleWait("s", mark, time.Now(), err)
+	}
+	t.Run("no interrupt noted", func(t *testing.T) {
+		col := newShadowCollector()
+		tm, ex := shadowTmux(runtime.ProgramStatusShadow, &fakeExecutor{}, func(n int) string { return records[min(n, 1)] }, col.sink)
+		idleWait(tm, nil)
+		if reads := ex.programReads(); reads != 0 {
+			t.Fatalf("a wait no interrupt preceded took %d record reads, want none", reads)
+		}
+		tm.shadowNoteInterrupt("s")
+		idleWait(tm, nil)
+		got := col.wait(t, 1)
+		if len(got) != 1 || got[0].Point != runtime.ProgramPointInterruptSettle || got[0].Scrape != runtime.ProgramVerdictSettled || got[0].Program != runtime.ProgramVerdictSettled {
+			t.Fatalf("comparisons %+v, want one interrupt_settle settled/settled", got)
+		}
+	})
+	for _, wait := range []struct {
+		name string
+		run  func(tm *Tmux, err error)
+	}{{"idle wait", idleWait}, {"interrupt boundary wait", boundaryWait}} {
+		for _, c := range []struct {
+			name   string
+			err    error
+			scrape runtime.ProgramVerdict
+		}{
+			{"returned", nil, runtime.ProgramVerdictSettled},
+			{"timed out busy", ErrIdleTimeout, runtime.ProgramVerdictUnsettled},
+			{"timed out unread", idleTimeout(false), runtime.ProgramVerdictIndeterminate},
+		} {
+			t.Run(wait.name+": "+c.name, func(t *testing.T) {
+				col := newShadowCollector()
+				tm, _ := shadowTmux(runtime.ProgramStatusShadow, &fakeExecutor{}, func(n int) string { return records[min(n, 1)] }, col.sink)
+				tm.shadowNoteInterrupt("s")
+				wait.run(tm, c.err)
+				got := col.wait(t, 1)[0]
+				if got.Point != runtime.ProgramPointInterruptSettle || got.Scrape != c.scrape || got.Program != runtime.ProgramVerdictSettled {
+					t.Fatalf("comparison %+v, want interrupt_settle %s/settled", got, c.scrape)
+				}
+			})
+		}
 	}
 }
 
@@ -505,11 +568,12 @@ func TestShadowReadiness(t *testing.T) {
 }
 
 // Kills a comparison that carries a follow-up's last reading instead of the
-// reading its rule judged at the decision, or that does not say when it
-// judged: a record cleared or lost during the follow-up would turn a valid
-// disagreement into capture noise, one that moved on would pair the verdict
-// with a state it was not taken from, and the hold liveness and record age
-// recorded beside it would be the follow-up's, minutes after the decision.
+// reading its rule judged at the decision, or that is not judged at the time
+// that reading was taken, before the point returned: a record cleared or lost
+// during the follow-up would turn a valid disagreement into capture noise,
+// one that moved on would pair the verdict with a state it was not taken
+// from, and the hold liveness and record age recorded beside it would be the
+// follow-up's, minutes after the decision.
 func TestShadowComparisonCarriesDecisionReading(t *testing.T) {
 	stubShadowFollow(t)
 	working := func(t *testing.T) string { return psRecord(t, readNonce, runtime.ProgramWorking, liveSince) }
@@ -534,7 +598,7 @@ func TestShadowComparisonCarriesDecisionReading(t *testing.T) {
 			name:    "wait_for_idle: working, then cleared",
 			records: func(t *testing.T) []string { return []string{working(t), cleared(t)} },
 			run: func(tm *Tmux, decided time.Time) {
-				tm.shadowWaitForIdle("s", decided, decided, nil)
+				tm.shadowIdleWait(context.Background(), "s", decided, decided, nil)
 			},
 			program: runtime.ProgramVerdictBusy, state: runtime.ProgramWorking,
 		},
@@ -542,7 +606,7 @@ func TestShadowComparisonCarriesDecisionReading(t *testing.T) {
 			name:    "wait_for_idle: working, then idle",
 			records: func(t *testing.T) []string { return []string{working(t), ended(t)} },
 			run: func(tm *Tmux, decided time.Time) {
-				tm.shadowWaitForIdle("s", decided, decided, nil)
+				tm.shadowIdleWait(context.Background(), "s", decided, decided, nil)
 			},
 			program: runtime.ProgramVerdictBusy, state: runtime.ProgramWorking, wantTimed: true,
 		},
@@ -561,7 +625,7 @@ func TestShadowComparisonCarriesDecisionReading(t *testing.T) {
 			records: func(t *testing.T) []string { return []string{working(t), ended(t)} },
 			run: func(tm *Tmux, decided time.Time) {
 				mark := shadowInterrupt{baseline: runtime.ProgramStatus{Validity: runtime.ProgramStatusValid, State: runtime.ProgramWorking, Nonce: readNonce, Seq: 1}.Baseline(), at: decided}
-				tm.shadowSettleFrom("s", mark, decided, nil)
+				tm.shadowSettleWait("s", mark, decided, nil)
 			},
 			program: runtime.ProgramVerdictUnsettled, state: runtime.ProgramWorking, wantTimed: true,
 		},
@@ -573,6 +637,7 @@ func TestShadowComparisonCarriesDecisionReading(t *testing.T) {
 			tm, ex := shadowTmux(runtime.ProgramStatusShadow, &fakeExecutor{}, func(n int) string { return records[min(n, len(records)-1)] }, col.sink)
 			decided := time.Now()
 			c.run(tm, decided)
+			returned := time.Now()
 			got := col.wait(t, 1)[0]
 			if got.Program != c.program || got.Timed != c.wantTimed {
 				t.Fatalf("comparison %+v, want program %s timed %v", got, c.program, c.wantTimed)
@@ -580,8 +645,8 @@ func TestShadowComparisonCarriesDecisionReading(t *testing.T) {
 			if got.Status.Validity != runtime.ProgramStatusValid || got.Status.State != c.state {
 				t.Fatalf("comparison carries a %q %q reading, want the valid %q one judged at the decision", got.Status.Validity, got.Status.State, c.state)
 			}
-			if !got.JudgedAt.Equal(decided) {
-				t.Fatalf("comparison judged at %v, want the decision's %v", got.JudgedAt, decided)
+			if got.JudgedAt.Before(decided) || got.JudgedAt.After(returned) {
+				t.Fatalf("comparison judged at %v, want its decision reading's time, between the decision %v and the point's return %v", got.JudgedAt, decided, returned)
 			}
 			if reads := ex.programReads(); reads != 2 {
 				t.Fatalf("took %d program reads, want 2: the decision's and one follow-up read", reads)
@@ -618,10 +683,10 @@ func TestShadowFollowUpTimesTheFirstBoundary(t *testing.T) {
 			s.Seq, s.TurnStarts, s.TurnEnds, s.QuietSince, s.Since = 2+2*uint64(turns), turns, turns, quiet, quiet
 		})
 	}
-	wait := func(tm *Tmux) { tm.shadowWaitForIdle("s", decided.Add(-time.Second), decided, nil) }
+	wait := func(tm *Tmux) { tm.shadowIdleWait(context.Background(), "s", decided.Add(-time.Second), decided, nil) }
 	settle := func(tm *Tmux) {
 		baseline := runtime.ProgramStatus{Validity: runtime.ProgramStatusValid, State: runtime.ProgramWorking, Nonce: readNonce, Seq: 1}.Baseline()
-		tm.shadowSettleFrom("s", shadowInterrupt{baseline: baseline, at: decided.Add(-time.Second)}, decided, nil)
+		tm.shadowSettleWait("s", shadowInterrupt{baseline: baseline, at: decided.Add(-time.Second)}, decided, nil)
 	}
 	cases := []struct {
 		name      string
@@ -772,13 +837,13 @@ func TestShadowFollowUpOnePerSessionPoint(t *testing.T) {
 			return len(tm.shadow.following)
 		}
 		now := time.Now()
-		tm.shadowWaitForIdle("s", now, now, nil)
+		tm.shadowIdleWait(context.Background(), "s", now, now, nil)
 		synctest.Wait()
 		if following() != 1 {
 			t.Fatal("the first wait started no follow-up")
 		}
 		for i := 1; i < idleProofsPerHour; i++ {
-			tm.shadowWaitForIdle("s", now, time.Now(), nil)
+			tm.shadowIdleWait(context.Background(), "s", now, time.Now(), nil)
 			col.wait(t, i)
 		}
 		synctest.Wait()
@@ -825,7 +890,7 @@ func TestShadowNoFollowUpInShortLivedProcess(t *testing.T) {
 	ended := make(chan struct{}, 1)
 	tm.cfg.ComparisonWork = workSignal(&begun, ended)
 	now := time.Now()
-	tm.shadowWaitForIdle("s", now, now, nil)
+	tm.shadowIdleWait(context.Background(), "s", now, now, nil)
 	select {
 	case <-ended:
 	case <-time.After(10 * time.Second):
@@ -863,5 +928,321 @@ func TestShadowGoRecoversPanic(t *testing.T) {
 	tm.shadowEmit("s", runtime.ProgramPointPending, runtime.ProgramVerdictNone, runtime.ProgramVerdictNone, runtime.ProgramStatus{}, time.Now(), 0, false)
 	if got := col.wait(t, 1)[0]; got.Dropped != 1 {
 		t.Fatalf("next comparison Dropped = %d, want the panicked one", got.Dropped)
+	}
+}
+
+// actGate stands for what a caller does with a decision as soon as the
+// decision point hands control back to it: a delivery typed when a wait
+// returns, a re-send after a look, the start's dialogs and nudge once
+// readiness decided. A read held at it (hold) waits for the act, for up to a
+// second: inside a synctest bubble that second passes only once every
+// goroutine is blocked, so a read the decision path takes while its caller
+// waits on it answers before the act, and a read left to a background
+// goroutine answers only after it.
+type actGate struct{ acted chan struct{} }
+
+func newActGate() *actGate { return &actGate{acted: make(chan struct{})} }
+
+// act is the caller acting on the decision.
+func (g *actGate) act() { close(g.acted) }
+
+// done reports whether the caller acted.
+func (g *actGate) done() bool {
+	select {
+	case <-g.acted:
+		return true
+	default:
+		return false
+	}
+}
+
+// hold waits for the act, up to a second.
+func (g *actGate) hold() {
+	select {
+	case <-g.acted:
+	case <-time.After(time.Second):
+	}
+}
+
+// Kills a decision point whose rule judges a reading taken after the point
+// handed control back to its caller (review finding: asynchronous decision
+// reading). gc acts on a decision at once, and a turn its act starts is no
+// evidence of what the program did at the decision: a reading left to a
+// background goroutine judged that turn as a disagreement, and the timing
+// follow-up started from it. Each point runs here as its decision path runs
+// it, the caller acts as soon as it returns, and every program read before
+// the act is held back until it: the comparison must carry the reading from
+// before the act, and a follow-up still times what the program did after it.
+// The comparison is awaited for as long as the longest follow-up may run, so
+// a reading judged after the act fails on its comparison rather than leaving
+// a follow-up running.
+func TestShadowDecisionReadingPrecedesTheCallersAct(t *testing.T) {
+	idleBase := runtime.ProgramStatus{Validity: runtime.ProgramStatusValid, State: runtime.ProgramIdle, Nonce: readNonce, Seq: 1}.Baseline()
+	callerRecords := runtime.WithShadowCallerRecords(context.Background())
+	idleWait := func(ctx context.Context) func(t *testing.T, tm *Tmux) {
+		return func(t *testing.T, tm *Tmux) {
+			if err := tm.WaitForIdle(ctx, "s", 2*time.Second); err != nil {
+				t.Fatalf("WaitForIdle = %v, want the idle prompt's nil", err)
+			}
+		}
+	}
+	cases := []struct {
+		name string
+		// interrupted notes an interrupt first, the first program read its
+		// baseline.
+		interrupted     bool
+		decide          func(t *testing.T, tm *Tmux)
+		point           runtime.ProgramStatusPoint
+		scrape, program runtime.ProgramVerdict
+		timed           bool
+	}{
+		{
+			name:   "wait_for_idle, a delivery typed when the wait returns",
+			decide: idleWait(context.Background()),
+			point:  runtime.ProgramPointWaitForIdle, scrape: runtime.ProgramVerdictIdle, program: runtime.ProgramVerdictIdle, timed: true,
+		},
+		{
+			name:        "interrupt_settle, a delivery typed when the idle wait after an interrupt returns",
+			interrupted: true,
+			decide:      idleWait(callerRecords),
+			point:       runtime.ProgramPointInterruptSettle, scrape: runtime.ProgramVerdictSettled, program: runtime.ProgramVerdictSettled, timed: true,
+		},
+		{
+			name:        "interrupt_settle, a delivery typed when the interrupt boundary wait returns",
+			interrupted: true,
+			decide: func(t *testing.T, tm *Tmux) {
+				mark, ok := tm.takeShadowInterrupt("s", time.Now())
+				if !ok {
+					t.Fatal("no interrupt noted")
+				}
+				tm.shadowSettleWait("s", mark, time.Now(), nil)
+			},
+			point: runtime.ProgramPointInterruptSettle, scrape: runtime.ProgramVerdictSettled, program: runtime.ProgramVerdictSettled, timed: true,
+		},
+		{
+			// The act is the program taking the submit up: the follow-up
+			// times it.
+			name: "submit_confirm, the submit taken up after the confirm decided",
+			decide: func(_ *testing.T, tm *Tmux) {
+				tm.shadowSubmit("s", idleBase, runtime.ProgramVerdictUnconfirmed, time.Now())
+			},
+			point: runtime.ProgramPointSubmitConfirm, scrape: runtime.ProgramVerdictUnconfirmed, program: runtime.ProgramVerdictUnconfirmed, timed: true,
+		},
+		{
+			name: "escape_resend, the re-send a waiting look decided",
+			decide: func(t *testing.T, tm *Tmux) {
+				look := tm.shadowResendLook("s", idleBase, func() (bool, error) { return true, nil })
+				if waiting, err := look(); !waiting || err != nil {
+					t.Fatalf("look = %v, %v; want the wrapped look's true", waiting, err)
+				}
+			},
+			point: runtime.ProgramPointEscapeResend, scrape: runtime.ProgramVerdictResend, program: runtime.ProgramVerdictResend,
+		},
+		{
+			name:   "readiness, the start's nudge typed once readiness decided",
+			decide: func(_ *testing.T, tm *Tmux) { tm.shadowReadiness("s", time.Now(), nil) },
+			point:  runtime.ProgramPointReadiness, scrape: runtime.ProgramVerdictReady, program: runtime.ProgramVerdictReady, timed: true,
+		},
+		{
+			name: "startup_ladder, the nudge re-sent after a look read no busy pane",
+			decide: func(t *testing.T, tm *Tmux) {
+				look := tm.shadowStartupBusy("s", idleBase, func() (bool, error) { return false, nil })
+				if busy, err := look(); busy || err != nil {
+					t.Fatalf("look = %v, %v; want the wrapped look's false", busy, err)
+				}
+			},
+			point: runtime.ProgramPointStartupLadder, scrape: runtime.ProgramVerdictUnconfirmed, program: runtime.ProgramVerdictUnconfirmed,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				// Uninterrupted: at a boundary since its first report 2 s
+				// ago. Interrupted: a turn running when gc interrupted it,
+				// stopped at the decision. Either way gc's act starts a turn.
+				before := psRecord(t, readNonce, runtime.ProgramIdle, func(s *runtime.ProgramStatus) { s.Since = time.Now().Add(-2 * time.Second) })
+				after := psRecord(t, readNonce, runtime.ProgramWorking, liveSince, func(s *runtime.ProgramStatus) { s.Seq, s.TurnStarts = 2, 1 })
+				baseline := ""
+				if c.interrupted {
+					baseline = psRecord(t, readNonce, runtime.ProgramWorking, liveSince, func(s *runtime.ProgramStatus) { s.Seq = 4 })
+					before = psRecord(t, readNonce, runtime.ProgramIdle, liveSince, func(s *runtime.ProgramStatus) {
+						s.Seq, s.TurnStarts, s.TurnEnds, s.QuietSince = 5, 1, 1, time.Now()
+					})
+					after = psRecord(t, readNonce, runtime.ProgramWorking, liveSince, func(s *runtime.ProgramStatus) { s.Seq, s.TurnStarts, s.TurnEnds = 6, 2, 1 })
+				}
+				gate := newActGate()
+				record := func(n int) string {
+					switch {
+					case gate.done():
+						return after
+					case n == 0 && c.interrupted:
+						return baseline
+					default:
+						return before
+					}
+				}
+				col := newShadowCollector()
+				tm, ex := shadowTmux(runtime.ProgramStatusShadow, &paneScriptExecutor{captures: []scriptedCapture{{out: "❯ "}}}, record, col.sink)
+				ex.hold = gate.hold
+				if c.interrupted {
+					tm.shadowNoteInterrupt("s")
+				}
+				c.decide(t, tm)
+				gate.act()
+				got := col.waitWithin(t, 1, runtime.ProgramStatusHoldLimit+time.Minute)[0]
+				synctest.Wait()
+				if len(col.got) != 1 {
+					t.Fatalf("comparisons %+v, want one", col.got)
+				}
+				if got.Point != c.point || got.Scrape != c.scrape || got.Program != c.program || got.Timed != c.timed {
+					t.Fatalf("comparison %+v, want %s %s/%s timed %v", got, c.point, c.scrape, c.program, c.timed)
+				}
+				if got.Status.State != runtime.ProgramIdle {
+					t.Fatalf("comparison carries a %q reading, want the idle one from before gc acted", got.Status.State)
+				}
+				if got.Status.Since.After(got.JudgedAt) {
+					t.Fatalf("comparison judged at %v, before its reading's state was entered at %v", got.JudgedAt, got.Status.Since)
+				}
+			})
+		})
+	}
+}
+
+// heldListingExecutor is pendingPaneExecutor whose state cache listing is
+// listing(), answered after hold.
+type heldListingExecutor struct {
+	hold    func()
+	listing func() string
+}
+
+func (e *heldListingExecutor) execute(args []string) (string, error) {
+	if row, ok := fakeAgentPaneRow(args); ok {
+		return row, nil
+	}
+	switch tmuxSubcommand(args) {
+	case "capture-pane":
+		return "❯ ", nil
+	case "list-panes":
+		e.hold()
+		return e.listing(), nil
+	}
+	return "", nil
+}
+
+func (e *heldListingExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
+}
+
+// Kills a pending comparison whose state cache reading is taken after
+// Pending returned (review finding: asynchronous decision reading): a
+// delivery made once Pending reads nothing pending starts a turn, and a
+// reading of the listing after it judged that turn. The listing from before
+// the delivery is held back until it, as in
+// TestShadowDecisionReadingPrecedesTheCallersAct.
+func TestShadowPendingReadingPrecedesTheCallersAct(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		gate := newActGate()
+		blocked := psRecord(t, readNonce, runtime.ProgramBlocked, liveSince, func(s *runtime.ProgramStatus) { s.Kind = runtime.ProgramBlockQuestion })
+		delivered := psRecord(t, readNonce, runtime.ProgramWorking, liveSince, func(s *runtime.ProgramStatus) { s.Seq, s.TurnStarts = 2, 2 })
+		ex := &heldListingExecutor{hold: gate.hold, listing: func() string {
+			if gate.done() {
+				return fetchRows(armedPane(delivered))
+			}
+			return fetchRows(armedPane(blocked))
+		}}
+		col := newShadowCollector()
+		tm := &Tmux{cfg: Config{ProgramStatus: runtime.ProgramStatusShadow, ComparisonSink: col.sink}, exec: ex}
+		tm.capture.probe = passGate
+		table := tapTable(readNonce)
+		p := &Provider{tm: tm, cfg: tm.cfg, workDirs: map[string]string{}}
+		p.cache = NewStateCache(&tmuxFetcher{tm: tm, snapshot: func(context.Context) (processSnapshot, error) { return table, nil }}, time.Hour)
+		if pending, err := p.Pending("s"); pending != nil || err != nil {
+			t.Fatalf("Pending = %v, %v; want the parsers' nil, nil", pending, err)
+		}
+		gate.act()
+		synctest.Wait()
+		if len(col.got) != 1 {
+			t.Fatalf("comparisons %+v, want one", col.got)
+		}
+		if got := col.got[0]; got.Point != runtime.ProgramPointPending || got.Scrape != runtime.ProgramVerdictNone || got.Program != runtime.ProgramVerdictPending || got.Status.State != runtime.ProgramBlocked {
+			t.Fatalf("comparison %+v, want pending none/pending on the blocked reading from before the delivery", got)
+		}
+	})
+}
+
+// listingExecutor answers the state cache's listing with session "s"'s armed
+// agent pane carrying the record it returns, and nothing else.
+type listingExecutor func() string
+
+func (record listingExecutor) execute(args []string) (string, error) {
+	if tmuxSubcommand(args) == "list-panes" && args[len(args)-1] == programStateFetchFormat {
+		return fetchRows(armedPane(record())), nil
+	}
+	return "", errors.New("unscripted")
+}
+
+func (record listingExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return record.execute(args)
+}
+
+// Kills a sleep proof (proved_idle) whose two readings are one cached
+// snapshot (review finding: proved_idle on cached readings). The state cache
+// answers a session's reading from one listing for its whole TTL, longer
+// than a proof takes, so two cached reads around a proof inside which a turn
+// ran prove the program quiescent. Through the tmux provider and its state
+// cache, with the record moving inside the cache's TTL, the proof's two
+// readings are taken fresh from the session: the turn shows and fails the
+// record's proof, and with no turn the proof holds.
+func TestShadowIdleProofTakesTwoObservations(t *testing.T) {
+	quiet := psRecord(t, readNonce, runtime.ProgramIdle, liveSince, func(s *runtime.ProgramStatus) {
+		s.Seq, s.TurnStarts, s.TurnEnds, s.QuietSince = 3, 1, 1, time.Now()
+	})
+	ranAgain := psRecord(t, readNonce, runtime.ProgramIdle, liveSince, func(s *runtime.ProgramStatus) {
+		s.Seq, s.TurnStarts, s.TurnEnds, s.QuietSince = 5, 2, 2, time.Now()
+	})
+	for _, c := range []struct {
+		name    string
+		after   string
+		program runtime.ProgramVerdict
+	}{
+		{"a turn ran inside the proof", ranAgain, runtime.ProgramVerdictBusy},
+		{"nothing changed", quiet, runtime.ProgramVerdictIdle},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var record atomic.Pointer[string]
+			record.Store(&quiet)
+			current := func() string { return *record.Load() }
+			col := newShadowCollector()
+			tm, ex := shadowTmux(runtime.ProgramStatusShadow, listingExecutor(current), func(int) string { return current() }, col.sink)
+			table := tapTable(readNonce)
+			p := &Provider{tm: tm, cfg: tm.cfg, workDirs: map[string]string{}}
+			// One listing serves the whole test: the record moves inside
+			// the cache's TTL.
+			p.cache = NewStateCache(&tmuxFetcher{tm: tm, snapshot: func(context.Context) (processSnapshot, error) { return table, nil }}, time.Hour)
+			tm.shadow.taps = func() programTaps { return p.cache.observation().state.programTaps() }
+			if s, err := p.ProgramStatus("s"); err != nil || s.Seq != 3 {
+				t.Fatalf("cached reading %+v, %v; want the quiet record", s, err)
+			}
+			proved := runtime.ShadowIdleProof(context.Background(), p, "s", func(context.Context) bool {
+				record.Store(&c.after)
+				return true
+			})
+			if !proved {
+				t.Fatal("ShadowIdleProof returned a verdict other than the proof's")
+			}
+			if s, err := p.ProgramStatus("s"); err != nil || s.Seq != 3 {
+				t.Fatalf("cached reading %+v, %v after the proof; want the listing from before it, which two cached reads would both have judged", s, err)
+			}
+			got := col.wait(t, 1)[0]
+			if got.Point != runtime.ProgramPointProvedIdle || got.Scrape != runtime.ProgramVerdictIdle || got.Program != c.program {
+				t.Fatalf("comparison %+v, want proved_idle idle/%s", got, c.program)
+			}
+			if !got.Status.ReaderVerified {
+				t.Fatal("the proof's reading did not take its tap's liveness from the cache's process table")
+			}
+			if reads := ex.programReads(); reads != 2 {
+				t.Fatalf("%d fresh reads, want one on each side of the proof", reads)
+			}
+		})
 	}
 }

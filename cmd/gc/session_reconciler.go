@@ -7161,7 +7161,7 @@ func launchIdleProbes(
 			continue
 		}
 		go func(beadID, sessionName string, probe *idleProbeState) {
-			idle := shadowIdleProof(ctx, sp, sessionName, func(ctx context.Context) bool {
+			idle := runtime.ShadowIdleProof(ctx, sp, sessionName, func(ctx context.Context) bool {
 				return wp.WaitForIdle(ctx, sessionName, idleSleepProbeTimeoutFor(sp, sessionName)) == nil
 			})
 			dt.finishIdleProbe(beadID, probe, idle, clk.Now().UTC())

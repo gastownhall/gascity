@@ -243,10 +243,17 @@ func (s ProgramStatus) BoundaryAt() time.Time {
 // ProgramStatusShadowProvider is an optional extension: a leaf reading
 // program status under the shadow switch hands out the sink its comparisons
 // go to, so a decision point outside the leaf records against the same
-// switch and sink. It returns nil unless the switch is shadow. Composites do
-// not implement it ([ProgramStatusShadowFor] resolves the leaf).
+// switch and sink. Composites do not implement it ([ProgramStatusShadowFor]
+// resolves the leaf).
 type ProgramStatusShadowProvider interface {
+	// ProgramStatusShadowSink returns the sink, nil unless the switch is
+	// shadow.
 	ProgramStatusShadowSink() ProgramStatusComparisonSink
+	// ProgramStatusShadowRead reads session name's record fresh from the
+	// runtime, past any snapshot [ProgramStatusProvider] answers from, for
+	// a point that judges two readings taken apart ([ShadowIdleProof]). ok
+	// is false unless the switch is shadow and the read succeeded.
+	ProgramStatusShadowRead(name string) (ProgramStatus, bool)
 }
 
 // ProgramStatusShadowFor reads session name's program status on the leaf
@@ -273,6 +280,59 @@ func ProgramStatusShadowFor(p Provider, name string) (ProgramStatus, ProgramStat
 		return ProgramStatus{}, nil, false
 	}
 	return s, sink, true
+}
+
+// programStatusShadowFresh is [ProgramStatusShadowFor] with the reading
+// taken fresh from the runtime
+// ([ProgramStatusShadowProvider.ProgramStatusShadowRead]).
+func programStatusShadowFresh(p Provider, name string) (ProgramStatus, ProgramStatusComparisonSink, bool) {
+	if p == nil || name == "" {
+		return ProgramStatus{}, nil, false
+	}
+	leaf, _, _ := ResolveBackend(p, name)
+	sh, ok := leaf.(ProgramStatusShadowProvider)
+	if !ok {
+		return ProgramStatus{}, nil, false
+	}
+	sink := sh.ProgramStatusShadowSink()
+	if sink == nil {
+		return ProgramStatus{}, nil, false
+	}
+	s, ok := sh.ProgramStatusShadowRead(name)
+	if !ok || s.Mode != ProgramStatusShadow {
+		return ProgramStatus{}, nil, false
+	}
+	return s, sink, true
+}
+
+// ShadowIdleProof runs prove, an idle proof of session name, and returns its
+// verdict alone. While the leaf serving the session is shadowing, the proof
+// is recorded beside the record's own sleep proof (proved_idle,
+// [ProgramQuiescentVerdict]) over two readings the leaf takes fresh from the
+// runtime, one before the proof and one after it: a leaf's cached reading
+// is one snapshot for longer than a proof takes, and one snapshot read twice
+// proves nothing. proved_idle covers the proof's leaf wait, so prove's ctx is
+// marked ([WithShadowCallerRecords]) and that wait records no wait_for_idle
+// of its own: a busy seat's idle proof fails every tick.
+func ShadowIdleProof(ctx context.Context, p Provider, name string, prove func(context.Context) bool) bool {
+	before, sink, shadowed := programStatusShadowFresh(p, name)
+	proved := prove(WithShadowCallerRecords(ctx))
+	if !shadowed {
+		return proved
+	}
+	after, _, ok := programStatusShadowFresh(p, name)
+	if !ok {
+		return proved
+	}
+	scrape := ProgramVerdictBusy
+	if proved {
+		scrape = ProgramVerdictIdle
+	}
+	sink(ProgramStatusComparison{
+		Session: name, Point: ProgramPointProvedIdle,
+		Scrape: scrape, Program: ProgramQuiescentVerdict(before, after), Status: after,
+	})
+	return proved
 }
 
 // ShadowCompare records one comparison for session name at a decision

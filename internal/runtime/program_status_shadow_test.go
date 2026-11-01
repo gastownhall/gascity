@@ -1,6 +1,7 @@
 package runtime_test
 
 import (
+	"context"
 	"errors"
 	"regexp"
 	"slices"
@@ -365,6 +366,83 @@ func TestShadowCompareHoldJudgesAfterItsActivityRead(t *testing.T) {
 	if c.JudgedAt.Before(c.HoldActivity) || c.JudgedAt.After(returned) {
 		t.Fatalf("judged at %v, want after the activity %v and no later than the call's return %v", c.JudgedAt, c.HoldActivity, returned)
 	}
+}
+
+// Kills a sleep proof (proved_idle) judged on the leaf's cached reading, or
+// whose recording changes the proof: the record's own proof takes two fresh
+// readings, one on each side of the proof, so a turn that ran inside it
+// fails the record's proof; the verdict returned is the scan's alone, with
+// its proof's context marked as recorded by its caller, and a leaf that is
+// not shadowing is read nothing.
+func TestShadowIdleProofReadsFreshAroundTheProof(t *testing.T) {
+	quiet := armedRow()
+	quiet.Mode = runtime.ProgramStatusShadow
+	quiet.Record.State, quiet.Record.Seq, quiet.Record.TurnEnds = runtime.ProgramIdle, 4, 1
+	ranAgain := quiet
+	ranAgain.Record.Seq, ranAgain.Record.TurnStarts, ranAgain.Record.TurnEnds = 6, 2, 2
+	for _, c := range []struct {
+		name    string
+		after   runtime.ProgramPaneRow
+		program runtime.ProgramVerdict
+	}{
+		{"a turn ran inside the proof", ranAgain, runtime.ProgramVerdictBusy},
+		{"nothing changed", quiet, runtime.ProgramVerdictIdle},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := runtime.NewFake()
+			if err := f.Start(t.Context(), "s", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			f.SetProgramPane("s", quiet)
+			var got []runtime.ProgramStatusComparison
+			f.ProgramShadowSink = func(c runtime.ProgramStatusComparison) { got = append(got, c) }
+			proved := runtime.ShadowIdleProof(t.Context(), runtime.FullFake{Fake: f}, "s", func(ctx context.Context) bool {
+				if !runtime.ShadowCallerRecords(ctx) {
+					t.Error("the proof's context is not marked as recorded by its caller")
+				}
+				f.SetProgramPane("s", c.after)
+				return false
+			})
+			if proved {
+				t.Fatal("ShadowIdleProof returned a verdict other than the proof's")
+			}
+			if len(got) != 1 || got[0].Point != runtime.ProgramPointProvedIdle || got[0].Scrape != runtime.ProgramVerdictBusy || got[0].Program != c.program {
+				t.Fatalf("recorded %+v, want one proved_idle busy/%s", got, c.program)
+			}
+			if fresh, cached := methodCalls(f, "ProgramStatusShadowRead"), methodCalls(f, "ProgramStatus"); fresh != 2 || cached != 0 {
+				t.Fatalf("%d fresh reads and %d cached ones, want two fresh reads and no cached one", fresh, cached)
+			}
+		})
+	}
+	t.Run("not shadowing", func(t *testing.T) {
+		f := runtime.NewFake()
+		if err := f.Start(t.Context(), "s", runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+		f.SetProgramPane("s", quiet)
+		marked := false
+		proved := runtime.ShadowIdleProof(t.Context(), runtime.FullFake{Fake: f}, "s", func(ctx context.Context) bool {
+			marked = runtime.ShadowCallerRecords(ctx)
+			return true
+		})
+		if !proved || !marked {
+			t.Fatalf("proved %v, marked %v; want the proof's verdict and its context marked", proved, marked)
+		}
+		if reads := methodCalls(f, "ProgramStatusShadowRead") + methodCalls(f, "ProgramStatus"); reads != 0 {
+			t.Fatalf("a leaf with no sink was read %d times", reads)
+		}
+	})
+}
+
+// methodCalls counts the calls f recorded to method.
+func methodCalls(f *runtime.Fake, method string) int {
+	n := 0
+	for _, c := range f.Calls {
+		if c.Method == method {
+			n++
+		}
+	}
+	return n
 }
 
 // Kills a caller-records mark that leaks into an unmarked context.

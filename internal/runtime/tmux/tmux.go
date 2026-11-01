@@ -5616,22 +5616,17 @@ func (t *Tmux) SnapshotIdle(session string) (bool, error) {
 // connection; change the two together.
 //
 // With the program-status switch at shadow, the wait's outcome is recorded
-// beside the program's own record (shadowWaitForIdle) after it is decided,
-// unless ctx carries [runtime.WithShadowCallerRecords]; the outcome returned
-// is the scan's alone.
+// beside the program's own record (shadowIdleWait), on a reading taken after
+// it is decided and before it returns, unless ctx carries
+// [runtime.WithShadowCallerRecords]; the outcome returned is the scan's
+// alone.
 func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Duration) error {
 	if !t.shadowing() {
 		return t.waitForIdle(ctx, session, timeout)
 	}
 	started := time.Now()
 	err := t.waitForIdle(ctx, session, timeout)
-	decidedAt := time.Now()
-	// A caller recording this decision at its own point (an idle proof's
-	// proved_idle) gets no wait_for_idle beside it.
-	if !runtime.ShadowCallerRecords(ctx) {
-		t.shadowWaitForIdle(session, started, decidedAt, err)
-	}
-	t.shadowSettle(session, decidedAt, err)
+	t.shadowIdleWait(ctx, session, started, time.Now(), err)
 	return err
 }
 
@@ -5715,8 +5710,9 @@ func waitForIdlePoll(ctx context.Context) error {
 // does at once.
 //
 // With the program-status switch at shadow, a wait that ran is recorded as
-// the interrupt's settle beside the program's own record (shadowSettle);
-// the outcome returned is the rollout's alone.
+// the interrupt's settle beside the program's own record (shadowSettleWait),
+// on a reading taken before it returns; the outcome returned is the
+// rollout's alone.
 func (t *Tmux) WaitForInterruptBoundary(ctx context.Context, session string, since time.Time, timeout time.Duration) error {
 	if !t.shadowing() {
 		return t.waitForInterruptBoundary(ctx, session, since, timeout)
@@ -5731,7 +5727,7 @@ func (t *Tmux) WaitForInterruptBoundary(ctx context.Context, session string, sin
 	}
 	err := t.waitForInterruptBoundary(ctx, session, since, timeout)
 	if marked && !errors.Is(err, runtime.ErrInteractionUnsupported) {
-		t.shadowSettleFrom(session, mark, time.Now(), err)
+		t.shadowSettleWait(session, mark, time.Now(), err)
 	}
 	return err
 }

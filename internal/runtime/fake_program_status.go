@@ -58,6 +58,20 @@ func (f FullFake) ProgramStatusShadowSink() ProgramStatusComparisonSink {
 	return f.ProgramShadowSink
 }
 
+// ProgramStatusShadowRead implements [ProgramStatusShadowProvider]: name's
+// agent-pane row judged as [FullFake.ProgramStatus] judges it, recorded as a
+// call of its own so a test tells a fresh read from a ProgramStatus one. ok is
+// false unless a test set a shadow sink and that read would succeed.
+func (f FullFake) ProgramStatusShadowRead(name string) (ProgramStatus, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "ProgramStatusShadowRead", Name: name})
+	if f.ProgramShadowSink == nil || f.programReadableLocked(name) != nil || f.ProgramStatusErrors[name] != nil {
+		return ProgramStatus{}, false
+	}
+	return JudgeProgramStatus(f.ProgramPanes[name]), true
+}
+
 // HealProgramCapture implements [ProgramCaptureHealer] over name's agent-pane
 // row, recording what it did in the call's Value:
 //

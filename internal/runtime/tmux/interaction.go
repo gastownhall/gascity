@@ -34,19 +34,20 @@ func (p *Provider) Pending(name string) (*runtime.PendingInteraction, error) {
 
 // shadowPending records a pending read (pending): the parsers' verdict beside
 // the record's pending verdict from the state cache's reading, the reading a
-// kind-only pending interaction would come from. It records on change only
-// (the sink filters).
+// kind-only pending interaction would come from. The reading is taken before
+// Pending returns, so an answer its caller gives the dialog cannot reach it.
+// It records on change only (the sink filters).
 func (p *Provider) shadowPending(name string, pending *runtime.PendingInteraction) {
+	s, err := p.ProgramStatus(name)
+	if err != nil || s.Mode != runtime.ProgramStatusShadow {
+		return
+	}
+	now := time.Now()
 	scrape := runtime.ProgramVerdictNone
 	if pending != nil {
 		scrape = runtime.ProgramVerdictPending
 	}
-	now := time.Now()
 	p.tm.shadowGo(func() {
-		s, err := p.ProgramStatus(name)
-		if err != nil || s.Mode != runtime.ProgramStatusShadow {
-			return
-		}
 		p.tm.shadowEmit(name, runtime.ProgramPointPending, scrape, runtime.ProgramPendingVerdict(s, time.Time{}, now), s, now, 0, false)
 	})
 }
