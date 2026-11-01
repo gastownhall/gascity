@@ -76,6 +76,24 @@ func (e *noServerPreflightExecutor) executeCtx(ctx context.Context, args []strin
 	return realExecutor{}.executeCtx(ctx, args)
 }
 
+// recordPreflightExecutor delegates to real tmux and records the result of
+// every has-session preflight.
+type recordPreflightExecutor struct {
+	results []error
+}
+
+func (e *recordPreflightExecutor) execute(args []string) (string, error) {
+	return realExecutor{}.execute(args)
+}
+
+func (e *recordPreflightExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
+	out, err := realExecutor{}.executeCtx(ctx, args)
+	if firstArgsContainHasSession(args) && slices.Contains(args, "="+probeSessionName) {
+		e.results = append(e.results, err)
+	}
+	return out, err
+}
+
 func TestAttachSessionNoStartServerDoesNotSelfRebindAfterProbe(t *testing.T) {
 	t.Run("missing-socket-after-preflight", func(t *testing.T) {
 		if !hasTmux() {
@@ -405,6 +423,85 @@ func TestNewSessionNoServerProbeDoesNotClobberLiveNamedSocket(t *testing.T) {
 		}
 		if !os.SameFile(beforeSocket, afterSocket) {
 			t.Fatalf("socket inode changed: before=%s after=%s", socketInode(beforeSocket), socketInode(afterSocket))
+		}
+	})
+
+	t.Run("sibling-start-after-no-server-probe-attaches", func(t *testing.T) {
+		// The sibling's startup runs inside this start's preflight budget.
+		prevTimeout := newSessionProbeTimeout
+		newSessionProbeTimeout = 10 * time.Second
+		t.Cleanup(func() { newSessionProbeTimeout = prevTimeout })
+
+		sibling := newTmux(newSocketName("sibling"))
+		socketPath := namedSocketPath(sibling.cfg.SocketName)
+		t.Cleanup(func() {
+			_ = sibling.KillServer()
+			_ = os.Remove(socketPath)
+		})
+		if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("remove prior socket %q: %v", socketPath, err)
+		}
+
+		siblingSession := fmt.Sprintf("gc-sibling-first-%d", time.Now().UnixNano())
+		var siblingPID string
+		var siblingSocket os.FileInfo
+		var firstObservation error
+		observations := 0
+
+		guarded := NewProviderWithConfig(sibling.cfg)
+		preflight := &recordPreflightExecutor{}
+		guarded.Tmux().exec = preflight
+		guarded.Tmux().serverSocketObserver = func(ctx context.Context, path string) error {
+			observations++
+			if observations > 1 {
+				return observeNamedSocket(ctx, path)
+			}
+			if len(preflight.results) != 1 || !errors.Is(preflight.results[0], ErrNoServer) {
+				t.Errorf("preflight results before observation = %v, want one genuine ErrNoServer", preflight.results)
+			}
+			if err := sibling.NewSession(siblingSession, ""); err != nil {
+				t.Errorf("sibling first start: %v", err)
+			}
+			var err error
+			if siblingPID, err = sibling.run("display-message", "-p", "#{pid}"); err != nil {
+				t.Errorf("read sibling server #{pid}: %v", err)
+			}
+			if siblingSocket, err = os.Lstat(socketPath); err != nil {
+				t.Errorf("lstat sibling socket %q: %v", socketPath, err)
+			}
+			firstObservation = observeNamedSocket(ctx, path)
+			return firstObservation
+		}
+
+		loser := fmt.Sprintf("gc-sibling-second-%d", time.Now().UnixNano())
+		if err := guarded.Start(context.Background(), loser, runtimepkg.Config{Command: "sleep 600"}); err != nil {
+			t.Fatalf("Provider.Start after a sibling bound the socket mid-preflight: %v (preflight=%v)", err, preflight.results)
+		}
+		if firstObservation == nil {
+			t.Fatal("socket observation after the sibling start was safe-absent; the interleaving was not exercised")
+		}
+		if len(preflight.results) != 2 {
+			t.Fatalf("preflight results = %v, want the probe and its re-probe", preflight.results)
+		}
+		for _, session := range []string{siblingSession, loser} {
+			has, err := sibling.HasSession(session)
+			if err != nil || !has {
+				t.Fatalf("session %q present = %t, err = %v", session, has, err)
+			}
+		}
+		afterPID, err := sibling.run("display-message", "-p", "#{pid}")
+		if err != nil {
+			t.Fatalf("read server #{pid} after start: %v", err)
+		}
+		if afterPID != siblingPID {
+			t.Fatalf("server pid after start = %q, want sibling's %q", afterPID, siblingPID)
+		}
+		afterSocket, err := os.Lstat(socketPath)
+		if err != nil {
+			t.Fatalf("lstat socket after start: %v", err)
+		}
+		if !os.SameFile(siblingSocket, afterSocket) {
+			t.Fatalf("socket inode changed: before=%s after=%s", socketInode(siblingSocket), socketInode(afterSocket))
 		}
 	})
 
