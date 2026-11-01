@@ -2318,7 +2318,7 @@ func TestWorkerSessionRuntimeResolverWithConfigFallsBackToPersistedRuntimeOnInco
 	info := session.Info{
 		Template:      "worker",
 		Command:       "persisted-worker --dangerously-skip-permissions",
-		Provider:      "persisted-provider",
+		Provider:      "stub",
 		WorkDir:       "/tmp/persisted-workdir",
 		ResumeFlag:    "--resume-persisted",
 		ResumeStyle:   "subcommand",
