@@ -176,6 +176,7 @@ go_library(
         "cmd_dashboard.go",
         "cmd_doctor.go",
         "cmd_doctor_drift.go",
+        "cmd_doctor_live_sessions.go",
         "cmd_doctor_skill_sinks.go",
         "cmd_dolt_cleanup.go",
         "cmd_dolt_config.go",

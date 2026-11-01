@@ -3,10 +3,8 @@ package main
 import (
 	"path/filepath"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/materialize"
-	"github.com/gastownhall/gascity/internal/session"
 )
 
 // doctorSkillStaticSinks resolves the config-derived skill sink
@@ -41,17 +39,13 @@ func doctorSkillStaticSinks(cityPath string, cfg *config.City) []string {
 // failing the whole check (the static sinks still scan).
 func doctorLiveSessionSinks(cityPath string, cfg *config.City) func() []string {
 	return func() []string {
-		store, err := openSessionProviderStore(cityPath)
-		if err != nil {
-			return nil
-		}
-		infos, err := session.NewStore(beads.SessionStore{Store: cliSessionStore(store, cfg, cityPath)}).ListLabeledSessionInfosUnfiltered()
+		infos, err := doctorLiveSessionInfos(cityPath, cfg)
 		if err != nil {
 			return nil
 		}
 		var sinks []string
 		for _, info := range infos {
-			if info.Closed || info.WorkDir == "" {
+			if info.WorkDir == "" {
 				continue
 			}
 			vendor, ok := materialize.VendorSink(info.Provider)
