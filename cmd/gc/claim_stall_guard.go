@@ -21,9 +21,11 @@ package main
 //     trigger_unanswered: a nudge about it went unanswered a base later);
 //   - it has been awake claimStallDeadline without claiming; or
 //   - its session bead closes unclaimed after being awake that long.
-//     A seat CLAIMED when its session bead carries a work_started claim or a
-//     work bead it was waiting on moves to in_progress under its session id;
-//     only a claim newer than the failures it would answer counts as one.
+//     A seat CLAIMED each time its session bead's work_started cell names a
+//     newer claim, and each time a work bead it was waiting on moves to
+//     in_progress under its session id. A claim answers the failures dated at
+//     or before it: they leave the streak, and one counted later (an overdue
+//     seat's is dated at its deadline) never enters it.
 //     Which work waits is the template's default routed demand at the last
 //     pass, less every bead the journal has since shown leave the open state.
 //   - Scope: a template, on the provider its seats run on now. A config change
@@ -37,9 +39,11 @@ package main
 //   - Hold: the template's default routed-work demand stops counting, so no
 //     seat is spawned for it, and agent.claims_stalled names the template, its
 //     provider and the hold's end for the operator (the core pack mails it).
-//     When the hold runs out, one probe seat is admitted; a probe that fails
-//     doubles the hold, up to claimStallHoldMax, and raises the alert again in
-//     the same episode.
+//     When the hold runs out, one probe seat is admitted: its bead counts,
+//     pass after pass, until a seat created since wakes, and the claim
+//     deadline then measures it. A probe that fails, or that has not woken
+//     within claimStallProbeGrace, doubles the hold, up to claimStallHoldMax,
+//     and raises the alert again in the same episode.
 //   - Resume: a claim by any counted seat of the template ends the episode,
 //     lifts the hold and records agent.claims_resumed.
 //
@@ -95,9 +99,10 @@ const (
 	// to claimStallHoldMax.
 	claimStallHoldBase = 5 * time.Minute
 	claimStallHoldMax  = 30 * time.Minute
-	// claimStallProbeGrace is how long a probe seat has to claim or fail
-	// before another probe is admitted: its spawn, its wake and the claim
-	// deadline, with room.
+	// claimStallProbeGrace is how long a probe has to wake and report: its
+	// spawn, its wake and the claim deadline, with room. One that has not
+	// woken by then failed; one that woke and never reported (its work went
+	// away) is replaced by a fresh probe.
 	claimStallProbeGrace = 10 * time.Minute
 	// claimStallForgetAfter drops a seat the journal has said nothing about
 	// for this long.
@@ -116,7 +121,8 @@ type claimStallSeat struct {
 	awake    time.Time // creation_complete_at; zero until the seat woke
 	trigger  string    // gc.trigger_bead_id; "" for a seat no demand spawned
 	claimed  bool
-	settled  bool // counted: as a failure, or by its claim
+	claimAt  time.Time // the newest claim of its work_started cell counted; a cell naming none newer repeats it
+	settled  bool      // counted: as a failure, or by its claim
 	closed   bool
 	seen     time.Time
 }
@@ -127,7 +133,10 @@ type claimStallTemplate struct {
 	provider string    // the provider its seats run on now ("" when unknown)
 	epoch    time.Time // when that provider took effect; zero: since the guard began
 	streak   []time.Time
-	waiting  map[string]struct{} // its routed demand: the last pass's, less what has left the open state since
+	// lastClaim is the newest claim counted in this epoch: a failure dated
+	// at or before it is answered.
+	lastClaim time.Time
+	waiting   map[string]struct{} // its routed demand: the last pass's, less what has left the open state since
 	// episodes are the open stalls, by the provider that stalled.
 	episodes map[string]*claimStallEpisode
 }
@@ -229,7 +238,7 @@ func (g *claimStallGuard) configure(cfg *config.City) {
 			delete(g.templates, name)
 			continue
 		}
-		t.provider, t.epoch, t.streak, t.episodes = provider, now, nil, nil
+		t.provider, t.epoch, t.streak, t.lastClaim, t.episodes = provider, now, nil, time.Time{}, nil
 	}
 	g.mu.Unlock()
 	g.emit(alerts)
@@ -337,10 +346,14 @@ func (g *claimStallGuard) observeSeat(b beads.Bead, closed bool, at time.Time) [
 		}
 	}
 	var alerts []events.Event
-	if claimedAt, claimed := claimStallNewestClaim(b.Metadata[session.WorkStartedKey]); claimed {
-		if known {
+	// Every later write to the session bead carries its cell again: only a
+	// cell that names a claim newer than the last one counted is news.
+	if claimedAt, claimed := claimStallNewestClaim(b.Metadata[session.WorkStartedKey]); claimed && (!seat.claimed || claimedAt.After(seat.claimAt)) {
+		seat.claimAt = claimStallLater(seat.claimAt, claimedAt)
+		if known || claimedAt.After(at) {
 			// A seat the guard watched claim: the claim is news now, on
-			// the controller's clock, whatever the hook's clock says.
+			// the controller's clock, whatever the hook's clock says. No
+			// claim is newer than the notification that carries it.
 			claimedAt = at
 		}
 		alerts = append(alerts, g.claimedLocked(seat, claimedAt)...)
@@ -448,9 +461,11 @@ func (g *claimStallGuard) seatFor(id, template string) *claimStallSeat {
 	return seat
 }
 
-// failedLocked counts seat's failure, once, and trips its template's stall on
-// the claimStallTrip-th in a row. Inside an episode a failure trips nothing:
-// it is the probe's report when the probe seat failed. Caller holds g.mu.
+// failedLocked counts seat's failure, dated at, once, and trips its
+// template's stall on the claimStallTrip-th in a row. A failure dated at or
+// before the template's newest claim is answered by it and counts for nothing.
+// Inside an episode a failure trips nothing: it is the probe's report when the
+// probe seat failed. Caller holds g.mu.
 func (g *claimStallGuard) failedLocked(seat *claimStallSeat, at time.Time) []events.Event {
 	if seat.settled {
 		return nil
@@ -460,17 +475,15 @@ func (g *claimStallGuard) failedLocked(seat *claimStallSeat, at time.Time) []eve
 		return nil
 	}
 	seat.settled = true
+	if !at.After(t.lastClaim) {
+		return nil
+	}
 	if ep := t.stalled(); ep != nil {
 		ep.failures++
-		if !ep.probing || seat.created.IsZero() || seat.created.Before(ep.probeAt) {
+		if !ep.probes(seat) {
 			return nil // a seat already running when the hold began; it neither lengthens the hold nor ends it
 		}
-		ep.probing = false
-		ep.holds++
-		ep.until = claimStallLater(at, g.now()).Add(claimStallHold(ep.holds))
-		fmt.Fprintf(g.stderr, "claims-stall guard: the probe seat of %s on %s failed to claim too (%d seats in all); holding its routed demand until %s\n", //nolint:errcheck // best-effort stderr
-			seat.template, claimStallProviderLabel(ep.provider), ep.failures, ep.until.UTC().Format(time.RFC3339))
-		return []events.Event{g.stalledEvent(seat.template, ep, events.AgentClaimsCauseProbe, ep.failures, at)}
+		return g.probeFailedLocked(seat.template, ep, "failed to claim too", at)
 	}
 	// An overdue seat's failure is dated at its deadline, so failures arrive
 	// out of order: the window is the newest failure's.
@@ -533,32 +546,52 @@ func (g *claimStallGuard) tripLocked(template string, t *claimStallTemplate, sea
 	t.episodes[t.provider] = ep
 	fmt.Fprintf(g.stderr, "claims-stall guard: %s on %s: %d seats in a row failed to claim the work routed to them since %s; holding its routed demand until %s\n", //nolint:errcheck // best-effort stderr
 		template, claimStallProviderLabel(t.provider), seats, since.UTC().Format(time.RFC3339), ep.until.UTC().Format(time.RFC3339))
-	return []events.Event{g.stalledEvent(template, ep, events.AgentClaimsCauseSeats, seats, at)}
+	what := fmt.Sprintf("%d of its seats in a row failed to claim the work routed to them while it waited", seats)
+	return []events.Event{g.stalledEvent(template, ep, events.AgentClaimsCauseSeats, what, seats, at)}
 }
 
-// claimedLocked counts seat's claim, made at claimedAt: one newer than the
-// streak's first failure ends the streak, and one newer than the stall's
-// start ends the stall on the provider that stalled. An older claim (a seat
-// first seen after a controller restart, carrying claims from before) only
-// settles the seat. Caller holds g.mu.
+// probeFailedLocked ends ep's probe as failed (what says how): the hold
+// doubles, up to claimStallHoldMax, and the alert is raised again. Caller
+// holds g.mu.
+func (g *claimStallGuard) probeFailedLocked(template string, ep *claimStallEpisode, what string, at time.Time) []events.Event {
+	ep.probing = false
+	ep.holds++
+	ep.until = claimStallLater(at, g.now()).Add(claimStallHold(ep.holds))
+	fmt.Fprintf(g.stderr, "claims-stall guard: the probe seat of %s on %s %s (%d seats in all); holding its routed demand until %s\n", //nolint:errcheck // best-effort stderr
+		template, claimStallProviderLabel(ep.provider), what, ep.failures, ep.until.UTC().Format(time.RFC3339))
+	what = fmt.Sprintf("its probe seat %s (%d seats in all)", what, ep.failures)
+	return []events.Event{g.stalledEvent(template, ep, events.AgentClaimsCauseProbe, what, ep.failures, at)}
+}
+
+// probes reports whether seat is the probe ep admitted: spawned for routed
+// work, and created since the admission. A store may keep a creation time to
+// the second only, so the admission's is compared to the second too.
+func (ep *claimStallEpisode) probes(seat *claimStallSeat) bool {
+	return ep.probing && seat.trigger != "" && !seat.created.IsZero() && !seat.created.Before(ep.probeAt.Truncate(time.Second))
+}
+
+// claimedLocked counts seat's claim, made at claimedAt. It answers every
+// failure dated at or before it: those leave the streak, and the template's
+// watermark keeps one counted later out of it (an overdue seat's failure is
+// dated at its deadline but counted at the next demand pass). A failure newer
+// than the claim stays: a claim reported late answers only what preceded it.
+// One newer than the stall's start ends the stall on the provider that
+// stalled; an older claim (a seat first seen after a controller restart,
+// carrying claims from before) does not. Caller holds g.mu.
 func (g *claimStallGuard) claimedLocked(seat *claimStallSeat, claimedAt time.Time) []events.Event {
-	if seat.claimed {
-		return nil
-	}
 	seat.claimed, seat.settled = true, true
 	t := g.templateFor(seat.template)
 	if !t.counts(seat) || claimedAt.IsZero() {
 		return nil
 	}
-	if len(t.streak) > 0 {
-		first := t.streak[0]
-		for _, f := range t.streak {
-			first = claimStallEarlier(first, f)
-		}
-		if !claimedAt.Before(first) {
-			t.streak = nil
+	t.lastClaim = claimStallLater(t.lastClaim, claimedAt)
+	streak := t.streak[:0]
+	for _, f := range t.streak {
+		if f.After(claimedAt) {
+			streak = append(streak, f)
 		}
 	}
+	t.streak = streak
 	ep := t.stalled()
 	if ep == nil || claimedAt.Before(ep.since) {
 		return nil
@@ -590,8 +623,9 @@ func claimStallProviderLabel(provider string) string {
 	return provider
 }
 
-// stalledEvent is the agent.claims_stalled alert for ep.
-func (g *claimStallGuard) stalledEvent(template string, ep *claimStallEpisode, cause string, seats int, at time.Time) events.Event {
+// stalledEvent is the agent.claims_stalled alert for ep; what says what the
+// seats did.
+func (g *claimStallGuard) stalledEvent(template string, ep *claimStallEpisode, cause, what string, seats int, at time.Time) events.Event {
 	until := ep.until.UTC()
 	payload, _ := json.Marshal(events.AgentClaimsPayload{ //nolint:errchkjson // a struct of strings, ints and times always marshals
 		Template: template,
@@ -603,10 +637,6 @@ func (g *claimStallGuard) stalledEvent(template string, ep *claimStallEpisode, c
 		Since:    ep.since.UTC(),
 		Until:    &until,
 	})
-	what := fmt.Sprintf("%d of its seats in a row failed to claim the work routed to them while it waited", seats)
-	if cause == events.AgentClaimsCauseProbe {
-		what = fmt.Sprintf("its probe seat failed to claim too (%d seats in all)", seats)
-	}
 	return events.Event{
 		Type:    events.AgentClaimsStalled,
 		Ts:      claimStallLater(at, g.now()).UTC(),
@@ -662,8 +692,9 @@ func (g *claimStallGuard) sweep(now time.Time) {
 // withhold records each template's default routed demand, counts the seats
 // that have been awake past the claim deadline without claiming it, and
 // removes the demand of every held template from one pass: all of it while
-// the hold stands, all but one bead (the probe) when the hold runs out. It
-// never edits its arguments; with nothing held it returns them unchanged.
+// the hold stands, all but one bead (the probe's) from when it runs out until
+// the probe wakes. It never edits its arguments; with nothing held it returns
+// them unchanged.
 func (g *claimStallGuard) withhold(counts map[string]int, demand map[string]scaleCheckDemand) (map[string]int, map[string]scaleCheckDemand) {
 	if g == nil {
 		return counts, demand
@@ -688,7 +719,8 @@ func (g *claimStallGuard) withhold(counts map[string]int, demand map[string]scal
 		if len(entry.WorkBeadIDs) == 0 {
 			continue // nothing to spawn for: a probe admitted now would be spent on nothing
 		}
-		keep := g.admittedLocked(name, ep, now)
+		keep, probe := g.admittedLocked(name, ep, now)
+		alerts = append(alerts, probe...)
 		if keep >= len(entry.WorkBeadIDs) {
 			continue
 		}
@@ -784,20 +816,46 @@ func (g *claimStallGuard) overdueLocked(now time.Time) []events.Event {
 	return alerts
 }
 
-// admittedLocked is how many of the held template's beads this pass counts:
-// none while the hold stands; one, the probe, when it has run out (or when a
-// probe admitted earlier never reported within claimStallProbeGrace), after
-// which the template is withheld again while the probe reports. Caller holds
-// g.mu.
-func (g *claimStallGuard) admittedLocked(template string, ep *claimStallEpisode, now time.Time) int {
-	if now.Before(ep.until) {
-		return 0
+// admittedLocked is how many of the held template's beads this pass counts,
+// and the alert a probe that never woke raises. None while the hold stands.
+// When it runs out, one: the probe's bead counts pass after pass until a seat
+// created since is seen awake, because the v2 allocator writes the probe's row
+// in one pass and starts it only in a later one that still wants it. Then
+// none again, while the claim deadline measures the probe: counting its bead
+// on would spawn a second seat once the probe's post-create protection
+// lapses. A probe that has not woken within claimStallProbeGrace failed (its
+// row never started); one that woke and never reported (its work went away)
+// is replaced by a fresh probe. Caller holds g.mu.
+func (g *claimStallGuard) admittedLocked(template string, ep *claimStallEpisode, now time.Time) (int, []events.Event) {
+	if ep.probing {
+		woke := g.probeWokeLocked(template, ep)
+		switch {
+		case now.Before(ep.until) && woke:
+			return 0, nil
+		case now.Before(ep.until):
+			return 1, nil
+		case !woke:
+			return 0, g.probeFailedLocked(template, ep, fmt.Sprintf("did not start within %s", claimStallProbeGrace), now)
+		}
+	} else if now.Before(ep.until) {
+		return 0, nil
 	}
 	ep.probing = true
 	ep.probeAt = now
 	ep.until = now.Add(claimStallProbeGrace)
 	fmt.Fprintf(g.stderr, "claims-stall guard: admitting one probe seat for %s on %s\n", template, claimStallProviderLabel(ep.provider)) //nolint:errcheck // best-effort stderr
-	return 1
+	return 1, nil
+}
+
+// probeWokeLocked reports whether ep's probe has woken: a seat of template it
+// admitted carries its wake. Caller holds g.mu.
+func (g *claimStallGuard) probeWokeLocked(template string, ep *claimStallEpisode) bool {
+	for _, seat := range g.seats {
+		if seat.template == template && !seat.awake.IsZero() && ep.probes(seat) {
+			return true
+		}
+	}
+	return false
 }
 
 // claimStallGuards maps a normalized city path to its controller's guard, as

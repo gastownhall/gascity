@@ -660,7 +660,7 @@ calls = 14
 [[count]]
 path = "cmd/gc/controller_test.go"
 resource = "listener_helper"
-calls = 5
+calls = 6
 
 [[count]]
 path = "cmd/gc/controller_test.go"

@@ -2,9 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"maps"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workladder"
 )
@@ -96,9 +101,18 @@ func (h *claimStallHarness) wake(s stallSeat) {
 	})
 }
 
-func (h *claimStallHarness) claim(s stallSeat) {
+// claim is s claiming its trigger now: its session bead's work_started cell
+// names the claim. It returns the cell.
+func (h *claimStallHarness) claim(s stallSeat) string {
 	h.t.Helper()
 	cell := fmt.Sprintf(`{"v":1,"claims":[{"store":"city","bead":%q,"gen":2,"at":%q,"via":"claim"}]}`, s.trigger, h.now.UTC().Format(time.RFC3339Nano))
+	h.cell(s, cell)
+	return cell
+}
+
+// cell is a notification of s's session bead carrying the work_started cell.
+func (h *claimStallHarness) cell(s stallSeat, cell string) {
+	h.t.Helper()
 	h.seatEvent(events.BeadUpdated, s.id, s.template, s.created, map[string]string{
 		beadmeta.TriggerBeadIDMetadataKey: s.trigger, "state": "awake", session.WorkStartedKey: cell,
 	})
@@ -387,9 +401,6 @@ func TestClaimStallGuardProbesAndResumes(t *testing.T) {
 	h.advance(time.Minute)
 	if got := h.pass(stallTemplate); !reflect.DeepEqual(got, []string{"step-1"}) {
 		t.Fatalf("demand %v when the hold ran out, want one probe bead", got)
-	}
-	if got := h.pass(stallTemplate); len(got) != 0 {
-		t.Fatalf("demand %v while the probe reports, want none", got)
 	}
 	probe := h.overdueSeat("step-1")
 	stalls := h.stalls()
@@ -720,5 +731,520 @@ func TestClaimStallGuardALateClaimAnswersItsOwnFailure(t *testing.T) {
 	h.seatEvent(events.BeadUpdated, late.id, late.template, late.created, map[string]string{beadmeta.TriggerBeadIDMetadataKey: "step-3", "state": "awake", session.WorkStartedKey: skewed})
 	if resumed := h.ofType(events.AgentClaimsResumed); len(resumed) != 1 {
 		t.Fatalf("resumed %v, want the watched seat's late claim to end the stall despite its lagging clock", resumed)
+	}
+}
+
+// A seat that claimed once and claims again (a continuation session taking its
+// next bead) ends the streak again: its first claim does not use up its later
+// ones.
+func TestClaimStallGuardARepeatedClaimResetsTheStreak(t *testing.T) {
+	h := newClaimStallHarness(t)
+	h.demand[stallTemplate] = []string{"step-1", "step-2", "step-3", "step-4"}
+	h.pass(stallTemplate)
+	healthy := h.spawn(stallTemplate, "step-1")
+	h.claim(healthy)
+	h.overdueSeat("step-2")
+	h.overdueSeat("step-3")
+	h.advance(time.Second)
+	h.claim(healthy)
+	h.overdueSeat("step-4")
+	if len(h.stalls()) != 0 {
+		t.Fatalf("stalled though the seat claimed again between the failures: %v", h.stalls())
+	}
+}
+
+// A seat that claimed before the stall and claims again after it ends the
+// stall, through its session bead's cell or a work bead it takes.
+func TestClaimStallGuardARepeatedClaimEndsTheStall(t *testing.T) {
+	for name, claimAgain := range map[string]func(h *claimStallHarness, s stallSeat){
+		"work_started": func(h *claimStallHarness, s stallSeat) { h.claim(s) },
+		"work bead": func(h *claimStallHarness, s stallSeat) {
+			h.workEvent(events.BeadUpdated, "step-1", "in_progress", s.id)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newClaimStallHarness(t)
+			h.demand[stallTemplate] = []string{"step-1", "step-2", "step-3", "step-4"}
+			h.pass(stallTemplate)
+			healthy := h.spawn(stallTemplate, "step-4")
+			h.claim(healthy)
+			h.advance(time.Minute)
+			for _, trigger := range []string{"step-1", "step-2", "step-3"} {
+				h.overdueSeat(trigger)
+			}
+			if len(h.stalls()) != 1 {
+				t.Fatalf("stalls = %d, want one", len(h.stalls()))
+			}
+			h.advance(10 * time.Second)
+			claimAgain(h, healthy)
+			if resumed := h.ofType(events.AgentClaimsResumed); len(resumed) != 1 {
+				t.Fatalf("resumed %v, want the seat's new claim to end the stall", resumed)
+			}
+			if got := h.pass(stallTemplate); len(got) == 0 {
+				t.Fatal("the template's demand is still withheld after its seat claimed again")
+			}
+		})
+	}
+}
+
+// Every later write to a seat's session bead carries its work_started cell
+// again. A cell that names no newer claim is not one: it neither resets the
+// streak nor ends a stall.
+func TestClaimStallGuardARepeatedCellIsNoClaim(t *testing.T) {
+	h := newClaimStallHarness(t)
+	h.demand[stallTemplate] = []string{"step-1", "step-2", "step-3", "step-4"}
+	h.pass(stallTemplate)
+	healthy := h.spawn(stallTemplate, "step-1")
+	cell := h.claim(healthy)
+	h.overdueSeat("step-2")
+	h.overdueSeat("step-3")
+	h.cell(healthy, cell)
+	h.overdueSeat("step-4")
+	if len(h.stalls()) != 1 {
+		t.Fatalf("stalls = %d, want one: an unchanged cell reset the streak", len(h.stalls()))
+	}
+	h.advance(time.Minute)
+	h.cell(healthy, cell)
+	if resumed := h.ofType(events.AgentClaimsResumed); len(resumed) != 0 {
+		t.Fatalf("resumed %v: an unchanged cell ended the stall", resumed)
+	}
+}
+
+// An overdue seat's failure is dated at its deadline but counted only at the
+// next demand pass. Failures dated before the newest claim are answered by
+// it, even when that pass runs after the claim: a delayed pass cannot trip a
+// lane that claims again.
+func TestClaimStallGuardFailuresBeforeAClaimAreAnswered(t *testing.T) {
+	h := newClaimStallHarness(t)
+	h.demand[stallTemplate] = []string{"step-1", "step-2", "step-3", "step-4"}
+	h.pass(stallTemplate)
+	for _, trigger := range []string{"step-1", "step-2", "step-3"} {
+		h.wake(h.spawn(stallTemplate, trigger))
+		h.advance(time.Minute)
+	}
+	h.advance(4 * time.Minute)
+	h.claim(h.spawn(stallTemplate, "step-4"))
+	h.pass(stallTemplate) // the first pass since: three deadlines from before the claim
+	if len(h.stalls()) != 0 {
+		t.Fatalf("failures dated before a newer claim tripped a stall: %v", h.stalls())
+	}
+}
+
+// A claim made while the streak is empty still answers a failure dated before
+// it and counted after it: seat A's deadline (T+3m30s) passes, seat B claims
+// (T+3m40s), and the pass that counts A runs after B's claim. Two more
+// failures after the claim are two, not three.
+func TestClaimStallGuardAClaimOnAnEmptyStreakAnswersOlderFailures(t *testing.T) {
+	h := newClaimStallHarness(t)
+	h.demand[stallTemplate] = []string{"step-1", "step-2", "step-3", "step-4"}
+	h.pass(stallTemplate)
+	a := h.spawn(stallTemplate, "step-1")
+	h.advance(30 * time.Second)
+	h.wake(a)
+	h.advance(claimStallDeadline + 10*time.Second)
+	h.claim(h.spawn(stallTemplate, "step-2"))
+	h.pass(stallTemplate)
+	h.overdueSeat("step-3")
+	h.overdueSeat("step-4")
+	if len(h.stalls()) != 0 {
+		t.Fatalf("a failure dated before the claim completed a streak with two after it: %v", h.stalls())
+	}
+}
+
+// A claim reported late (a seat first seen carrying a claim older than
+// failures already counted) answers only the failures before it: a newer one
+// stays in the streak.
+func TestClaimStallGuardALateClaimKeepsNewerFailures(t *testing.T) {
+	h := newClaimStallHarness(t)
+	h.demand[stallTemplate] = []string{"step-1", "step-2", "step-3", "step-4"}
+	h.pass(stallTemplate)
+	h.overdueSeat("step-1")
+	claimedAt := h.now
+	h.overdueSeat("step-2")
+	unseen := stallSeat{id: "gcg-session-unseen", template: stallTemplate, trigger: "step-9", created: claimedAt.Add(-time.Minute)}
+	h.cell(unseen, fmt.Sprintf(`{"v":1,"claims":[{"store":"city","bead":"step-9","gen":2,"at":%q,"via":"claim"}]}`, claimedAt.Format(time.RFC3339Nano)))
+	h.overdueSeat("step-3")
+	if len(h.stalls()) != 0 {
+		t.Fatalf("stalled on %v: the late claim answered nothing", h.stalls())
+	}
+	h.overdueSeat("step-4")
+	if len(h.stalls()) != 1 {
+		t.Fatalf("stalls = %d, want one: the late claim erased the failure after it", len(h.stalls()))
+	}
+}
+
+// A claim is never newer than the notification that carries it: a seat first
+// seen with a claim its hook dated ahead of the controller's clock answers no
+// failure after that notification.
+func TestClaimStallGuardAClaimDatedAheadAnswersNothingLater(t *testing.T) {
+	h := newClaimStallHarness(t)
+	h.demand[stallTemplate] = []string{"step-1", "step-2", "step-3"}
+	h.pass(stallTemplate)
+	ahead := stallSeat{id: "gcg-session-ahead", template: stallTemplate, trigger: "step-9", created: h.now}
+	h.cell(ahead, fmt.Sprintf(`{"v":1,"claims":[{"store":"city","bead":"step-9","gen":2,"at":%q,"via":"claim"}]}`, h.now.Add(time.Hour).Format(time.RFC3339Nano)))
+	for _, trigger := range h.demand[stallTemplate] {
+		h.overdueSeat(trigger)
+	}
+	if len(h.stalls()) != 1 {
+		t.Fatalf("stalls = %d, want one: a claim dated an hour ahead answered the failures after it", len(h.stalls()))
+	}
+}
+
+// The probe's bead counts pass after pass until a seat created since the hold
+// ran out wakes: the v2 allocator writes the probe's row in one pass and
+// starts it only in a later one that still wants it. Once the probe is awake
+// its bead stops counting, so no second seat spawns while the claim deadline
+// measures it.
+func TestClaimStallGuardKeepsTheProbeAdmittedUntilItWakes(t *testing.T) {
+	h := newClaimStallHarness(t)
+	h.demand[stallTemplate] = []string{"step-1", "step-2", "step-3", "step-4"}
+	for _, trigger := range []string{"step-1", "step-2", "step-3"} {
+		h.overdueSeat(trigger)
+	}
+	h.advance(claimStallHoldBase)
+	probe1 := []string{"step-1"}
+	if got := h.pass(stallTemplate); !reflect.DeepEqual(got, probe1) {
+		t.Fatalf("demand %v when the hold ran out, want one probe bead", got)
+	}
+	h.advance(15 * time.Second)
+	if got := h.pass(stallTemplate); !reflect.DeepEqual(got, probe1) {
+		t.Fatalf("demand %v before the probe's row exists, want its bead still counted", got)
+	}
+	probe := h.spawn(stallTemplate, "step-1")
+	h.advance(15 * time.Second)
+	if got := h.pass(stallTemplate); !reflect.DeepEqual(got, probe1) {
+		t.Fatalf("demand %v while the probe's row waits to start, want its bead still counted", got)
+	}
+	h.wake(probe)
+	if got := h.pass(stallTemplate); len(got) != 0 {
+		t.Fatalf("demand %v with the probe awake, want none", got)
+	}
+}
+
+// A probe that has not woken by the end of claimStallProbeGrace failed: its
+// row never started. The hold doubles and the alert is raised again, saying
+// so; the row's rollback, when it comes, counts nothing more.
+func TestClaimStallGuardAProbeThatNeverStartsFails(t *testing.T) {
+	h := newClaimStallHarness(t)
+	h.demand[stallTemplate] = []string{"step-1", "step-2", "step-3", "step-4"}
+	for _, trigger := range []string{"step-1", "step-2", "step-3"} {
+		h.overdueSeat(trigger)
+	}
+	episode := stallPayload(t, h.stalls()[0]).Episode
+	h.advance(claimStallHoldBase)
+	h.pass(stallTemplate)
+	probe := h.spawn(stallTemplate, "step-1")
+	h.advance(claimStallProbeGrace)
+	if got := h.pass(stallTemplate); len(got) != 0 {
+		t.Fatalf("demand %v when the probe never started, want all withheld", got)
+	}
+	stalls := h.stalls()
+	if len(stalls) != 2 {
+		t.Fatalf("stalls = %d, want a second alert for the probe that never started", len(stalls))
+	}
+	p := stallPayload(t, stalls[1])
+	if p.Cause != events.AgentClaimsCauseProbe || p.Episode != episode || p.Until == nil || p.Until.Sub(h.now) != 2*claimStallHoldBase ||
+		!strings.Contains(stalls[1].Message, "did not start within "+claimStallProbeGrace.String()) {
+		t.Fatalf("alert %+v %q, want the same episode held %v more for a probe that did not start", p, stalls[1].Message, 2*claimStallHoldBase)
+	}
+	h.close(probe, "failed-create", time.Time{})
+	if len(h.stalls()) != 2 {
+		t.Fatalf("stalls = %d: the never-started probe's rollback was counted again", len(h.stalls()))
+	}
+	h.advance(2 * claimStallHoldBase)
+	if got := h.pass(stallTemplate); len(got) != 1 {
+		t.Fatalf("demand %v when the doubled hold ran out, want the next probe", got)
+	}
+}
+
+// A store may keep a row's creation time to the second only. The probe's row,
+// created in the second the probe was admitted, is still the probe's.
+func TestClaimStallGuardAProbeCreatedInItsAdmissionSecondCounts(t *testing.T) {
+	h := newClaimStallHarness(t)
+	h.demand[stallTemplate] = []string{"step-1", "step-2", "step-3", "step-4"}
+	for _, trigger := range []string{"step-1", "step-2", "step-3"} {
+		h.overdueSeat(trigger)
+	}
+	h.advance(claimStallHoldBase + 700*time.Millisecond)
+	h.pass(stallTemplate)
+	probe := h.spawn(stallTemplate, "step-1")
+	probe.created = probe.created.Truncate(time.Second)
+	h.advance(30 * time.Second)
+	h.wake(probe)
+	if got := h.pass(stallTemplate); len(got) != 0 {
+		t.Fatalf("demand %v: the probe's row, stored to the second, was not taken for the probe", got)
+	}
+}
+
+// heldClaimStall is a guard on now's clock whose stall on template tripped
+// while demand waited, its hold run out: the next demand pass admits the
+// probe. It is registered for cityPath, where both demand passes find it,
+// until the test ends.
+func heldClaimStall(t *testing.T, cityPath string, cfg *config.City, template string, demand []string, now func() time.Time) *claimStallHarness {
+	t.Helper()
+	h := newClaimStallHarness(t)
+	h.guard.configure(cfg)
+	h.now = now().Add(-claimStallHoldBase - 5*time.Minute)
+	h.demand = map[string][]string{template: demand}
+	h.pass(template)
+	for range claimStallTrip {
+		h.close(h.spawn(template, demand[0]), "failed-create", time.Time{})
+		h.advance(time.Minute)
+	}
+	if len(h.stalls()) != 1 {
+		t.Fatalf("stalls = %d, want %s held", len(h.stalls()), template)
+	}
+	h.guard.now = now
+	t.Cleanup(registerClaimStallGuard(context.Background(), cityPath, h.guard))
+	return h
+}
+
+// sessionBeadEvent is the journal's notification of the session bead b.
+func sessionBeadEvent(t *testing.T, typ string, b beads.Bead, at time.Time) events.Event {
+	t.Helper()
+	payload, err := beads.EncodeBeadEventPayload(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return events.Event{Type: typ, Ts: at, Subject: b.ID, Payload: payload}
+}
+
+// openSessionBeads is store's open session beads of template.
+func openSessionBeads(t *testing.T, store beads.Store, template string) []beads.Bead {
+	t.Helper()
+	all, err := store.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []beads.Bead
+	for _, b := range all {
+		if b.Type == sessionBeadType && b.Status != "closed" && b.Metadata["template"] == template {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// simStallJournal feeds a guard one template's session rows from the sim's
+// store, as the journal does: each row when it appears, again whenever it
+// changes, and when it closes. The store stamps creations with the wall clock
+// while the guard runs on the sim clock, so a fed row carries its creation on
+// the sim clock instead: the time of the feed that first saw it, which is the
+// time of the pass that created it.
+type simStallJournal struct {
+	t        *testing.T
+	s        *sim
+	guard    *claimStallGuard
+	template string
+	order    []string             // the rows, in the order they appeared
+	created  map[string]time.Time // each row's creation on the sim clock
+	last     map[string]beads.Bead
+}
+
+// newSimStallJournal is a journal of template's rows in s for guard, which has
+// fed it nothing yet.
+func newSimStallJournal(t *testing.T, s *sim, guard *claimStallGuard, template string) *simStallJournal {
+	return &simStallJournal{t: t, s: s, guard: guard, template: template, created: map[string]time.Time{}, last: map[string]beads.Bead{}}
+}
+
+// feed notifies the guard of every row that appeared, changed or closed since
+// the last feed.
+func (j *simStallJournal) feed() {
+	j.t.Helper()
+	all, err := j.s.legs[0].backing.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		j.t.Fatal(err)
+	}
+	now := j.s.clk.Now()
+	for _, b := range all {
+		if b.Type != sessionBeadType || b.Metadata["template"] != j.template {
+			continue
+		}
+		prev, seen := j.last[b.ID]
+		if seen && prev.Status == b.Status && maps.Equal(prev.Metadata, b.Metadata) {
+			continue
+		}
+		j.last[b.ID] = beads.Bead{Status: b.Status, Metadata: maps.Clone(b.Metadata)}
+		if !seen {
+			j.order = append(j.order, b.ID)
+			j.created[b.ID] = now
+		}
+		b.CreatedAt = j.created[b.ID]
+		if !seen {
+			j.guard.observe(sessionBeadEvent(j.t, events.BeadCreated, b, now))
+			if b.Status != "closed" {
+				continue
+			}
+		}
+		typ := events.BeadUpdated
+		if b.Status == "closed" {
+			typ = events.BeadClosed
+		}
+		j.guard.observe(sessionBeadEvent(j.t, typ, b, now))
+	}
+}
+
+// TestSimClaimStallProbeStarts runs a held template's probes through the v2
+// pass with the real create and start effects, the guard fed the rows as the
+// journal feeds them. The pass that admits a probe creates its row; the next
+// pass must still count the probe's bead, or the template has no demand, the
+// pending create is only kept, and the probe never starts, so the stall never
+// ends. Once the guard sees the probe awake, its bead stops counting: no
+// second seat is created after the probe's post-create protection lapses. A
+// probe that never claims fails at its claim deadline and the hold doubles;
+// when that runs out the next probe is created and started in turn. The guard
+// tells it from the first probe, awake before the admission and drained
+// since, by its creation alone, so a third seat is never created either.
+func TestSimClaimStallProbeStarts(t *testing.T) {
+	demand := []string{"gc-r1", "gc-r2", "gc-r3"}
+	s := scripted(t, nil, routedDemandBead(demand[0]), routedDemandBead(demand[1]), routedDemandBead(demand[2]))
+	h := heldClaimStall(t, s.env.CityPath, s.cfg, "worker", demand, s.clk.Now)
+	journal := newSimStallJournal(t, s, h.guard, "worker")
+	admitted := func() []string { return intentKeys(s.p.out.record.Load().Admitted) }
+	settle := func() {
+		t.Helper()
+		s.settle()
+		journal.feed()
+	}
+	noCreate := func(when string) {
+		t.Helper()
+		if got := admitted(); slices.Contains(got, "create:") {
+			t.Fatalf("admitted %v %s, want no create", got, when)
+		}
+	}
+
+	// probe settles the pass the hold runs out at, which must admit the
+	// probe's create alone, then runs passes until the probe's row starts,
+	// with no second create meanwhile, and returns the awake row. One intent
+	// per row per pass: the row's own writes come first, its start after them.
+	probe := func() beads.Bead {
+		t.Helper()
+		rows := len(journal.order)
+		settle()
+		if got := admitted(); !slices.Equal(got, []string{"create:"}) {
+			t.Fatalf("admitted %v when the hold ran out, want the probe's create alone", got)
+		}
+		if len(journal.order) != rows+1 {
+			t.Fatalf("worker rows %v after the probe's create, want one more than %d", journal.order, rows)
+		}
+		id := journal.order[rows]
+		started := func() bool {
+			return slices.ContainsFunc(s.sp.starts, func(st simStart) bool { return st.ID == id })
+		}
+		for passes := 0; !started(); passes++ {
+			if passes == 4 {
+				t.Fatalf("the probe %s never started in %d passes; starts %+v", id, passes, s.sp.starts)
+			}
+			s.advance(time.Second)
+			settle()
+			noCreate("while the probe waits to start")
+		}
+		woke, err := s.legs[0].backing.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if woke.Metadata["creation_complete_at"] == "" {
+			t.Fatalf("probe %s after its start: %v, want creation_complete_at", id, woke.Metadata)
+		}
+		s.advance(postCreateProtectionTimeout + simPatrol)
+		settle()
+		noCreate("with the probe awake past its post-create protection")
+		return woke
+	}
+
+	first := probe()
+	awake, err := time.Parse(time.RFC3339, first.Metadata["creation_complete_at"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.advance(awake.Add(claimStallDeadline).Sub(s.clk.Now()))
+	settle()
+	if got := len(h.stalls()); got != 2 {
+		t.Fatalf("stalls = %d at the probe's claim deadline, want its failure alerted again", got)
+	}
+	for holdEnds := s.clk.Now().Add(claimStallHold(2)); ; {
+		s.advance(simPatrol)
+		if !s.clk.Now().Before(holdEnds) {
+			break
+		}
+		settle()
+		noCreate("inside the doubled hold")
+	}
+	probe()
+	if len(journal.order) != 2 {
+		t.Fatalf("worker rows %v, want the two probes alone", journal.order)
+	}
+	if got := len(h.stalls()); got != 2 {
+		t.Fatalf("stalls = %d with the second probe awake, want no alert since the first probe's failure", got)
+	}
+	s.noViolations(t)
+}
+
+// TestClaimStallLegacyPassKeepsTheProbeDesired runs a held template's probe
+// through the legacy desired-state build. The build that admits the probe
+// creates its row. Until the probe wakes, every later build still wants that
+// row, so a start the creating tick deferred still happens, and creates no
+// other; once it is awake, none does either.
+func TestClaimStallLegacyPassKeepsTheProbeDesired(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "gc"},
+		Agents:    []config.Agent{{Name: "dog", StartCommand: "true", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}},
+	}
+	city := beads.NewMemStore()
+	var demand []string
+	for range 3 {
+		b, err := city.Create(beads.Bead{Title: "routed", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "dog"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		demand = append(demand, b.ID)
+	}
+	h := heldClaimStall(t, cityPath, cfg, "dog", demand, time.Now)
+	build := func() DesiredStateResult {
+		snap, err := loadSessionBeadSnapshot(city)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return buildDesiredStateWithSessionBeads("gc", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), city, nil, snap, nil, io.Discard)
+	}
+
+	ds := build()
+	rows := openSessionBeads(t, city, "dog")
+	if len(rows) != 1 {
+		t.Fatalf("dog rows %v after the build that admitted the probe, want one", rows)
+	}
+	probe := rows[0]
+	name := probe.Metadata["session_name"]
+	if _, ok := ds.State[name]; !ok || len(ds.State) != 1 {
+		t.Fatalf("desired %v, want the probe %s alone", desiredNames(ds), name)
+	}
+	h.guard.observe(sessionBeadEvent(t, events.BeadCreated, probe, time.Now()))
+
+	ds = build()
+	if rows := openSessionBeads(t, city, "dog"); len(rows) != 1 {
+		t.Fatalf("dog rows %v while the probe waits to start, want the probe alone", rows)
+	}
+	if _, ok := ds.State[name]; !ok {
+		t.Fatalf("desired %v while the probe waits to start, want the probe %s", desiredNames(ds), name)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := city.SetMetadataBatch(probe.ID, map[string]string{
+		"state": "active", "state_reason": "creation_complete", "creation_complete_at": now, "last_woke_at": now, "pending_create_claim": "",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	woke, err := city.Get(probe.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.guard.observe(sessionBeadEvent(t, events.BeadUpdated, woke, time.Now()))
+	ds = build()
+	if rows := openSessionBeads(t, city, "dog"); len(rows) != 1 {
+		t.Fatalf("dog rows %v with the probe awake, want the probe alone", rows)
+	}
+	if _, ok := ds.State[name]; !ok {
+		t.Fatalf("desired %v with the probe awake, want the probe %s", desiredNames(ds), name)
 	}
 }

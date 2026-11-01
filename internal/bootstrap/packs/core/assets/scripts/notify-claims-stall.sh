@@ -26,7 +26,14 @@
 # Loud-fail: a send that fails exits non-zero, which is what makes the
 # controller log the order's output. It is sent again by the next run that
 # still finds the event inside the lookback: the next matching event (a probe
-# alert, the resumption) runs the order.
+# alert, the resumption) runs the order. A resumption whose incident does not
+# clear still sends its note, then fails the run the same way. An event read
+# that fails, or output that does not decode, fails the run and mails
+# nothing: a resumption may raise no later event to run the order again.
+#
+# An escalate.sh override written before incident keys refuses their flags;
+# it is sent each alert again without them, so it still alerts, on every run
+# that finds the event rather than once per episode.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
@@ -61,29 +68,88 @@ resolve_escalate_script() {
 
 ESCALATE_SCRIPT="$(resolve_escalate_script)"
 
-# Read both types. A read failure (API down, no events yet) is not this
-# script's to report: the next event re-runs it.
+# escalate_refused_incident_flags RC STDERR is true when an escalate.sh override
+# refused the incident flags as a usage error, as one written before them (the
+# 1.5.0 contract) does: with exit 2, the usage-error status (the 1.5.0
+# escalate.sh, argparse, Go's flag package), or with a message that names the
+# flag (getopt-style parsers exit 1). The core escalate.sh next to this script
+# takes the flags, so no failure of it is read as a refusal.
+escalate_refused_incident_flags() {
+    [ "$1" -ne 0 ] || return 1
+    if [ "$ESCALATE_SCRIPT" -ef "$SCRIPT_DIR/escalate.sh" ]; then
+        return 1
+    fi
+    [ "$1" -ne 2 ] || return 0
+    case "$2" in
+        *incident-key*|*--fingerprint*|*resolve-incident*) return 0 ;;
+    esac
+    return 1
+}
+
+# raise_incident KEY FINGERPRINT SUBJECT MESSAGE [SEVERITY] escalates MESSAGE
+# as incident KEY, which escalate.sh keeps quiet while FINGERPRINT is
+# unchanged. An override that refuses the incident flags is sent the alert
+# again without them, so it keeps alerting, undeduplicated, rather than losing
+# the alert.
+raise_incident() {
+    local rc=0 err
+    local alert=(--subject "$3" --message "$4")
+    [ -z "${5:-}" ] || alert+=(--severity "$5")
+    # stdout passes through; stderr is held to tell a refusal from a failure.
+    { err=$("$ESCALATE_SCRIPT" "${alert[@]}" \
+        --incident-key "$1" --fingerprint "$2" 2>&1 >&3 3>&-); } 3>&1 || rc=$?
+    if ! escalate_refused_incident_flags "$rc" "$err"; then
+        [ -z "$err" ] || printf '%s\n' "$err" >&2
+        return "$rc"
+    fi
+    echo "notify-claims-stall: $ESCALATE_SCRIPT predates incident keys (exit $rc on --incident-key); sent the alert without them, so it is not deduplicated" >&2
+    "$ESCALATE_SCRIPT" "${alert[@]}"
+}
+
+# resolve_incident KEY tells escalate.sh that incident KEY cleared. An override
+# that refuses the flag keeps no incidents, so there is nothing to clear.
+resolve_incident() {
+    local rc=0 err
+    err=$("$ESCALATE_SCRIPT" --resolve-incident "$1" 2>&1 >/dev/null) || rc=$?
+    if escalate_refused_incident_flags "$rc" "$err"; then
+        echo "notify-claims-stall: $ESCALATE_SCRIPT predates incident keys (exit $rc on --resolve-incident); its alerts are not deduplicated" >&2
+        return 0
+    fi
+    [ -z "$err" ] || printf '%s\n' "$err" >&2
+    return "$rc"
+}
+
+# Read both types; a window that holds neither is a clean run. A read that
+# fails passes its own error through and fails the run before anything is
+# mailed: a stall read without its resumption would mail an episode that is
+# already over.
 EVENTS=""
 for type in agent.claims_stalled agent.claims_resumed; do
-    if out="$(gc events --type "$type" --since "$LOOKBACK" 2>/dev/null)"; then
-        EVENTS="$EVENTS$out"$'\n'
+    if ! out="$(gc events --type "$type" --since "$LOOKBACK")"; then
+        echo "notify-claims-stall: could not read the $type events of the last $LOOKBACK" >&2
+        exit 1
     fi
+    EVENTS="$EVENTS$out"$'\n'
 done
 
 # One compact line per event, in sequence order: seq, type, then the fields
 # the mail needs. The typed payload sits directly under .payload.
-ROWS="$(printf '%s\n' "$EVENTS" | jq -c -s '
+if ! ROWS="$(printf '%s\n' "$EVENTS" | jq -c -s '
     [ .[] | select(type == "object" and (.type == "agent.claims_stalled" or .type == "agent.claims_resumed")) ]
     | unique_by(.seq) | sort_by(.seq) | .[]
     | { seq: .seq, type: .type, message: (.message // ""),
         template: (.payload.template // .subject // ""),
         provider: (.payload.provider // ""),
-        episode: (.payload.episode // "") }' 2>/dev/null)" || ROWS=""
+        episode: (.payload.episode // ""),
+        cause: (.payload.cause // "") }')"; then
+    echo "notify-claims-stall: could not decode the events gc events printed" >&2
+    exit 1
+fi
 [ -n "$ROWS" ] || exit 0
 
 # An episode that ended inside the window is reported by its resumption
 # alone: its stall was mailed by an earlier run, or never needs to be.
-RESUMED="$(printf '%s\n' "$ROWS" | jq -r 'select(.type == "agent.claims_resumed") | .episode' 2>/dev/null)" || RESUMED=""
+RESUMED="$(printf '%s\n' "$ROWS" | jq -r 'select(.type == "agent.claims_resumed") | .episode')"
 
 FAILED=0
 while IFS= read -r row; do
@@ -93,6 +159,7 @@ while IFS= read -r row; do
     provider="$(printf '%s' "$row" | jq -r '.provider')"
     episode="$(printf '%s' "$row" | jq -r '.episode')"
     message="$(printf '%s' "$row" | jq -r '.message')"
+    cause="$(printf '%s' "$row" | jq -r '.cause')"
     if [ -z "$template" ] || [ -z "$episode" ]; then
         continue
     fi
@@ -108,25 +175,24 @@ while IFS= read -r row; do
 Episode: $episode
 See: gc events --type agent.claims_stalled --since 24h
      gc session list --template $template"
-            if ! bash "$ESCALATE_SCRIPT" \
-                --subject "Agent $template stopped claiming its work on $on" \
-                --message "$body" \
-                --severity HIGH \
-                --incident-key "$key" \
-                --fingerprint "$episode"; then
+            if ! raise_incident "$key" "$episode" \
+                "Agent $template stopped claiming its work on $on" "$body" HIGH; then
                 echo "notify-claims-stall: could not escalate the stall of $template ($episode)" >&2
                 FAILED=$((FAILED + 1))
             fi
             ;;
         agent.claims_resumed)
-            # Resolve first: the stall's incident ends with its episode, so a
-            # stall the guard raises later is mailed at once.
-            bash "$ESCALATE_SCRIPT" --resolve-incident "$key" || true
-            if ! bash "$ESCALATE_SCRIPT" \
-                --subject "Agent $template claims its work again on $on" \
-                --message "$message" \
-                --incident-key "claims-resumed:$episode" \
-                --fingerprint "$episode"; then
+            # The episode is over. Resolving its incident drops escalate.sh's
+            # record of it, which nothing else removes.
+            if ! resolve_incident "$key"; then
+                echo "notify-claims-stall: could not resolve the stall incident of $template ($episode)" >&2
+                FAILED=$((FAILED + 1))
+            fi
+            subject="Agent $template claims its work again on $on"
+            if [ "$cause" = config_changed ]; then
+                subject="Agent $template was moved off $on; its claims stall is over"
+            fi
+            if ! raise_incident "claims-resumed:$episode" "$episode" "$subject" "$message"; then
                 echo "notify-claims-stall: could not report that $template resumed ($episode)" >&2
                 FAILED=$((FAILED + 1))
             fi

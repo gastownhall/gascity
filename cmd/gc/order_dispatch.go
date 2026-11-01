@@ -366,6 +366,15 @@ type memoryOrderDispatcher struct {
 	// compile is not retried for the gate (orderPoursWorkFailureTTL). Guarded
 	// by cacheMu.
 	poursWorkFailedUntil map[string]time.Time
+	// eventFloors holds, per scoped event order, the event seq its checks have
+	// read through with no match (eventCheckStart). Guarded by cacheMu; memory
+	// only, carried across rebuilds by carryEventFloorsFrom.
+	eventFloors map[string]uint64
+	// eventSeeds holds, per scoped event order, the event seq it was first
+	// watched from (watchEventOrders): the start of an order that has never
+	// run. Guarded by cacheMu; memory only, carried across rebuilds by
+	// carryEventFloorsFrom.
+	eventSeeds map[string]uint64
 
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
@@ -529,7 +538,7 @@ func newMemoryOrderDispatcher(routes *storageRoutes, aa []orders.Order, cityPath
 	}
 
 	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
-	return &memoryOrderDispatcher{
+	m := &memoryOrderDispatcher{
 		aa: aa,
 		storeFn: func(target execStoreTarget) (beads.Store, error) {
 			// Reuse cfg (rebuilt only on config reload/rescan — see
@@ -551,6 +560,8 @@ func newMemoryOrderDispatcher(routes *storageRoutes, aa []orders.Order, cityPath
 		dispatchCtx:          dispatchCtx,
 		dispatchCancel:       dispatchCancel,
 	}
+	m.watchEventOrders()
+	return m
 }
 
 // orderConditionCheckConcurrency bounds how many condition-check subprocesses a
@@ -986,14 +997,21 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 		return last, err
 	}
 	cursorFn := orders.CursorAcross(orderFrontDoorsForStores(storesForGate))
+	var eventHead uint64
 	if a.Trigger == "event" {
 		cursor, err := bdCursorAcrossStores(a.ScopedName(), storesForGate...)
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: reading event cursor for %s: %v", a.ScopedName(), err)
 			return false
 		}
+		start, head, err := m.eventCheckStart(scoped, cursor)
+		if err != nil {
+			logDispatchError(m.stderr, "gc: order dispatch: reading event head for %s: %v", a.ScopedName(), err)
+			return false
+		}
+		eventHead = head
 		cursorFn = func(string) uint64 {
-			return cursor
+			return start
 		}
 	}
 	triggerOpts := cand.triggerOpts
@@ -1049,6 +1067,16 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 		// (ga-ocypq2). Raise the order's check_timeout to fix.
 		if a.Trigger == "condition" && result.TimedOut {
 			logDispatchError(m.stderr, "gc: order dispatch: %s %s — raise check_timeout if the check needs a slow store read", a.ScopedName(), result.Reason)
+		}
+		// An event check that could not read the log never proves that no
+		// event matched: it is reported and moves nothing, and the next pass
+		// reads the same events again.
+		if a.Trigger == "event" {
+			if result.ReadFailed {
+				logDispatchError(m.stderr, "gc: order dispatch: %s %s", a.ScopedName(), result.Reason)
+			} else {
+				m.advanceEventFloor(scoped, eventHead)
+			}
 		}
 		return false
 	}
@@ -1630,6 +1658,141 @@ func (m *memoryOrderDispatcher) reportInapplicable(a orders.Order, target execSt
 			RequiresBackend: append([]string(nil), a.RequiresBackend...),
 		}),
 	})
+}
+
+// eventCheckStart returns the seq an event order's trigger check reads past,
+// and the event head read before the check, which a check that matches
+// nothing has read through (advanceEventFloor).
+//
+// cursor is the order's run cursor, the seq:<n> its last run stamped. The
+// check starts at the larger of it and the order's floor, so it reads only
+// the events recorded since its previous check. Without the floor, an order on
+// an event that stays absent re-reads from its last run on every pass, and one
+// that has never run re-reads the whole event history, every archive included.
+//
+// An order that has never run starts where the controller began watching it
+// (watchEventOrders), however many passes its first check waits: an event
+// recorded since then fires it, history recorded before then is not replayed.
+// Floors and starts are memory only. A controller restart forgets them, so an
+// order that has run resumes from its run cursor, catching up on events
+// recorded while no controller watched, and one that has not starts where the
+// new controller began watching.
+func (m *memoryOrderDispatcher) eventCheckStart(scoped string, cursor uint64) (start, head uint64, err error) {
+	if m.ep == nil {
+		return cursor, 0, nil
+	}
+	head, err = m.ep.LatestSeq()
+	if err != nil {
+		return 0, 0, err
+	}
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	floor, seen := m.eventFloors[scoped]
+	if !seen && cursor == 0 {
+		floor = head
+		if seed, watched := m.eventSeeds[scoped]; watched {
+			floor = seed
+		}
+		if m.eventFloors == nil {
+			m.eventFloors = make(map[string]uint64)
+		}
+		m.eventFloors[scoped] = floor
+	}
+	return max(cursor, floor), head, nil
+}
+
+// watchEventOrders records the event head as the start of every event order
+// of this dispatcher: an order that has never run fires on the matching events
+// recorded after it. A dispatcher is built when the controller starts, before
+// it records controller.started, and again on every reload or rescan, where
+// carryEventFloorsFrom hands an order the previous dispatcher already watched
+// its earlier start, so only an order a rebuild adds starts at the rebuild's
+// head. An order whose start could not be read starts at its first check.
+func (m *memoryOrderDispatcher) watchEventOrders() {
+	if m.ep == nil {
+		return
+	}
+	var watched []string
+	for i := range m.aa {
+		if m.aa[i].Trigger == "event" {
+			watched = append(watched, m.aa[i].ScopedName())
+		}
+	}
+	if len(watched) == 0 {
+		return
+	}
+	head, err := m.ep.LatestSeq()
+	if err != nil {
+		logDispatchError(m.stderr, "gc: order dispatch: reading the event head the event orders start from: %v; an event order that has never run starts at its first check instead", err)
+		return
+	}
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if m.eventSeeds == nil {
+		m.eventSeeds = make(map[string]uint64, len(watched))
+	}
+	for _, scoped := range watched {
+		m.eventSeeds[scoped] = head
+	}
+}
+
+// advanceEventFloor records that an event order's check matched nothing in
+// the events through head, the head eventCheckStart read before the check:
+// the order's next check starts there. Call it only for a check that read the
+// log; one that failed (TriggerResult.ReadFailed) proves nothing.
+func (m *memoryOrderDispatcher) advanceEventFloor(scoped string, head uint64) {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if head <= m.eventFloors[scoped] {
+		return
+	}
+	if m.eventFloors == nil {
+		m.eventFloors = make(map[string]uint64)
+	}
+	m.eventFloors[scoped] = head
+}
+
+// carryEventFloorsFrom hands this dispatcher the event floors and starts of a
+// previous one for the event orders it still has. Without them a reload or
+// rescan would start an order that has never run at the rebuild's head,
+// skipping the events recorded since the previous dispatcher's last check or,
+// for an order it never checked, since it began watching, and would send an
+// order that has run back to its run cursor. Entries carry by presence: a
+// floor of 0, a first check that read an empty journal, is a floor.
+func (m *memoryOrderDispatcher) carryEventFloorsFrom(prev *memoryOrderDispatcher) {
+	if m == nil || prev == nil {
+		return
+	}
+	prev.cacheMu.Lock()
+	defer prev.cacheMu.Unlock()
+	if len(prev.eventFloors) == 0 && len(prev.eventSeeds) == 0 {
+		return
+	}
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	for i := range m.aa {
+		if m.aa[i].Trigger != "event" {
+			continue
+		}
+		scoped := m.aa[i].ScopedName()
+		if seed, ok := prev.eventSeeds[scoped]; ok {
+			if m.eventSeeds == nil {
+				m.eventSeeds = make(map[string]uint64, len(prev.eventSeeds))
+			}
+			m.eventSeeds[scoped] = seed
+		}
+		floor, ok := prev.eventFloors[scoped]
+		if !ok {
+			continue
+		}
+		if cur, has := m.eventFloors[scoped]; has && cur >= floor {
+			continue
+		}
+		if m.eventFloors == nil {
+			m.eventFloors = make(map[string]uint64, len(prev.eventFloors))
+		}
+		m.eventFloors[scoped] = floor
+	}
 }
 
 // carryInapplicableReportsFrom hands this dispatcher the report set of a

@@ -190,7 +190,10 @@ Notes per trigger:
   would otherwise silently never fire).
 - **`event`** — fires whenever the named event appears on the bus. Cursor-based
   tracking advances a sequence marker per firing, so the same event isn't
-  processed twice. Delivery is at least once, though: one bead close can reach
+  processed twice. An order that has never run fires only on events recorded
+  after the orchestrator started (or, for an order a reload adds, after that
+  reload), so events already on the bus by then don't fire it. Delivery is at
+  least once, though: one bead close can reach
   the bus as two `bead.closed` events, one from the process that closed it and
   one from the orchestrator when it notices the close first. Make an event
   order's action safe to repeat for the same bead.

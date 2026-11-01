@@ -2090,7 +2090,7 @@ func (cr *CityRuntime) rescanOrderDispatcherIfDue(cityRoot string, cfg *config.C
 
 // replaceOrderDispatcher installs next as the active order dispatcher, carrying
 // warm last-run data, active gate-backoff state, open-work suppression
-// streaks and already-reported inapplicable orders from the outgoing dispatcher so a rebuild (reload or rescan) reuses
+// streaks, event floors and starts, and already-reported inapplicable orders from the outgoing dispatcher so a rebuild (reload or rescan) reuses
 // them instead of cold-starting (#3201).
 // Call after draining the outgoing dispatcher.
 func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
@@ -2099,6 +2099,7 @@ func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
 			nextMem.carryLastRunCacheFrom(prev)
 			nextMem.carryGateBackoffFrom(prev, time.Now())
 			nextMem.carryOpenWorkSuppressionFrom(prev)
+			nextMem.carryEventFloorsFrom(prev)
 			nextMem.carryInapplicableReportsFrom(prev)
 		}
 	}

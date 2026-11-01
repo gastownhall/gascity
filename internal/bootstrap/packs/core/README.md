@@ -181,7 +181,15 @@ which reads both event types over a lookback window and mails through
 **Loud-fail.** An undeliverable mail exits non-zero, so the controller logs
 the order's output. It is sent again by the next run that still finds the
 event inside the lookback: the next matching event (a probe alert, the
-resumption) runs the order.
+resumption) runs the order. An event read that fails, or `gc events` output
+that does not decode, also exits non-zero and mails nothing; a window with no
+event is a clean run.
+
+**Overrides.** An `escalate.sh` override written before incident keys, which
+rejects `--incident-key` as a usage error, still alerts: the script sends
+each alert again without the incident flags, so such a city is mailed on
+every run that finds the event instead of once per episode, and the order's
+output names the override.
 
 **Configuration** (all optional):
 

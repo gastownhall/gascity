@@ -15,7 +15,8 @@ const (
 	// routed to them while it waited (agent.claims_stalled).
 	AgentClaimsCauseSeats = "seats"
 	// AgentClaimsCauseProbe: the probe seat admitted after a hold failed to
-	// claim too, and the hold was extended (agent.claims_stalled).
+	// claim too, or did not start within its grace, and the hold was
+	// extended (agent.claims_stalled).
 	AgentClaimsCauseProbe = "probe"
 	// AgentClaimsCauseClaimed: a seat on the stalled provider claimed its
 	// work (agent.claims_resumed).

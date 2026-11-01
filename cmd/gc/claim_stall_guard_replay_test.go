@@ -15,9 +15,10 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 )
 
-// claimStallFixture is testdata/claim_stall_oct31.txt: maintainer-city's pool
+// claimStallFixture is testdata/claim_stall/oct31.csv: maintainer-city's pool
 // seats on 2026-10-31 and the routed work they were spawned for, from the
-// formula-overhead-audit-6 session model.
+// formula-overhead-audit-6 session model. It lives below testdata, not in it:
+// TestTutorial01 runs every .txt and .txtar file in testdata as a script.
 type claimStallFixture struct {
 	start    time.Time
 	seats    []claimStallFixtureSeat
@@ -44,7 +45,7 @@ type claimStallFixtureMove struct {
 
 func loadClaimStallFixture(t *testing.T) claimStallFixture {
 	t.Helper()
-	f, err := os.Open(filepath.Join("testdata", "claim_stall_oct31.txt"))
+	f, err := os.Open(filepath.Join("testdata", "claim_stall", "oct31.csv"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +107,12 @@ func (tr claimStallFixtureTrigger) waiting(now time.Time) bool {
 
 // claimStallReplay drives a guard through the fixture: each seat's
 // notifications at their times, the operator's provider moves, and a demand
-// pass every patrol interval over the work that waits.
+// pass every patrol interval over the work that waits. It replays the day's
+// seats as they came: it does not model the hold, so after a trip it still
+// feeds seats the hold would have withheld. It pins when the guard alerts and
+// that a claim ends an episode, not how a hold and its probes converge; the
+// pass-level tests (TestSimClaimStallProbeStarts,
+// TestClaimStallLegacyPassKeepsTheProbeDesired) pin that.
 type claimStallReplay struct {
 	h        *claimStallHarness
 	fx       claimStallFixture
@@ -232,7 +238,8 @@ func oct31(t *testing.T, s string) time.Time {
 // lane, stopped claiming until the operator moved them to codex-astra-high at
 // 17:44:43Z. Nothing alerted that day. The guard alerts on gascity's lane
 // within three minutes of its first failed create (05:33:51); its cursor seats
-// then worked again from 06:11 to 06:58, which ends that episode. When the
+// then worked again from 06:11 to 06:58 (the day's seats, which the replay
+// feeds as they came), and their claims end that episode. When the
 // lane died for good it took three dead seats to be sure, and seats come only
 // as work does: the first spawned 07:12:30, the third 07:21:54, and the guard
 // alerts at 07:25, thirteen minutes after the first. beads' lane alerts within
