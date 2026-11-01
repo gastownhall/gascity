@@ -209,8 +209,10 @@ func censusRig(cityPath, cityName string, cfg *config.City, target infraBindingT
 			return row
 		}
 		plan := planRigImportReadingPayloads(ctx, store)
-		if err := rigImportSharedStoreRefusal(env, rig); err != nil {
+		if shared, err := rigImportSharedStoreRefusal(env, rig); err != nil {
 			plan.Refusals = append(plan.Refusals, rigImportRefusal{IDs: []string{rig.Name}, Reason: err.Error(), Remedy: "give the rig a store of its own"})
+		} else {
+			shared.Release() // the census writes nothing, so it keeps no co-tenant stopped
 		}
 		if _, err := rigImportHashConfigOpener(cityPath, cfg, rig); err != nil {
 			plan.Refusals = append(plan.Refusals, rigImportRefusal{IDs: []string{rig.Name}, Reason: err.Error(), Remedy: "serve the rig from a bd or file provider"})
