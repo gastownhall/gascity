@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 	"github.com/spf13/cobra"
@@ -92,6 +93,19 @@ config element. Use -f to layer additional config files.`,
 	return cmd
 }
 
+// scanOrderFilesForValidation reads and parses every order file the city's
+// order discovery would read. The config load checks only the order layout,
+// so this is where an unreadable or malformed order file is reported.
+// Semantic order validation and override errors are left to the order
+// consumers, which skip one invalid order rather than reject the config.
+func scanOrderFilesForValidation(cityPath string, cfg *config.City) error {
+	_, err := orderdiscovery.ScanAll(cityPath, cfg, orderdiscovery.ScanOptions{
+		OnOverrideError: func(error) error { return nil },
+		OnValidateError: func(string, error) error { return nil },
+	})
+	return err
+}
+
 // doConfigShow loads city.toml (with includes) and dumps the resolved
 // config, validates it, or shows provenance.
 func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Writer) int {
@@ -136,6 +150,9 @@ func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Write
 		validationErrors = append(validationErrors, err.Error())
 	}
 	validationErrors = append(validationErrors, validateLegacyFormulaConfigRoutes(cfg)...)
+	if err := scanOrderFilesForValidation(cityPath, cfg); err != nil {
+		validationErrors = append(validationErrors, fmt.Sprintf("orders: %v", err))
+	}
 	validationWarnings := singletonSessionMigrationWarnings(cfg)
 	// MCP servers an agent's provider cannot receive: shared-layer ones the
 	// agent starts without, and ones in its own mcp/ directory, which keep

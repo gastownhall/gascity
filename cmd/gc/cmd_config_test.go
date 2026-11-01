@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -139,5 +141,43 @@ func validateConfigShowJSONSchema(t *testing.T, data []byte) {
 	}
 	if err := schema.Validate(doc); err != nil {
 		t.Fatalf("payload does not match config show schema: %v\n%s", err, string(data))
+	}
+}
+
+// A malformed order file no longer fails the config load itself; gc config
+// show --validate scans the orders and reports it, and plain gc config show
+// still renders the config with the order error as a warning.
+func TestConfigShowValidateReportsMalformedOrder(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("GC_CITY_PATH", dir)
+	if err := os.MkdirAll(".gc", 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, "[pack]\nname = \"demo\"\nschema = 1\n")
+	if err := os.MkdirAll(filepath.Join(dir, "orders"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(orders): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "orders", "broken.toml"), []byte("[order\nformula = "), 0o644); err != nil {
+		t.Fatalf("WriteFile(orders/broken.toml): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"config", "show", "--validate"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("run(config show --validate) = 0, want nonzero for a malformed order; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "broken") {
+		t.Fatalf("stderr = %q, want the malformed order named", got)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"config", "show"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run(config show) = %d, want the config shown despite the malformed order; stderr=%q", code, stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "warning") || !strings.Contains(got, "broken") {
+		t.Fatalf("stderr = %q, want the malformed order reported as a warning", got)
 	}
 }

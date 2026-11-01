@@ -1531,12 +1531,15 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	// V2 convention-based order discovery: top-level orders/ flat files are the
 	// standard layout. Deprecated subdirectory order paths are a filesystem
 	// layout cutover, not a city.toml PackV1 authoring surface, so they are
-	// rejected for all pack schemas.
+	// rejected for all pack schemas. Only the layout is checked here: the
+	// order files themselves are parsed where orders are consumed (order
+	// discovery, gc doctor, gc config show --validate), so a malformed order
+	// does not fail every config load.
 	if !opts.allowLegacyOrderLayouts {
-		if _, err := orders.ScanRoots(fs, []orders.ScanRoot{{
+		if err := orders.CheckLayout(fs, []orders.ScanRoot{{
 			Dir:          filepath.Join(topoDir, "orders"),
 			FormulaLayer: filepath.Join(topoDir, "formulas"),
-		}}, nil); err != nil {
+		}}); err != nil {
 			return nil, nil, nil, nil, nil, nil, nil, nil, err
 		}
 	}
