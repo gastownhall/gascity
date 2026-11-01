@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // defaultBackupFreshnessMaxAge is how stale a rig's last bd backup sync may be
@@ -42,18 +43,28 @@ type BdBackupFreshnessCheck struct {
 	scopeRoots []string
 	maxAge     time.Duration
 	now        func() time.Time
+	// suspension maps a cleaned scope root to the instant that scope's rig
+	// was explicitly suspended. A zero time means the scope is not an
+	// explicitly suspended rig, so the age horizon applies unchanged.
+	suspension map[string]time.Time
 }
 
 // NewBdBackupFreshnessCheckForConfig creates a freshness check across the city
 // and all managed rig scope roots, using preloaded city config to avoid
 // reparsing city.toml during doctor registration.
 func NewBdBackupFreshnessCheckForConfig(cityPath string, cfg *config.City, cfgErr error) *BdBackupFreshnessCheck {
-	return &BdBackupFreshnessCheck{
+	c := &BdBackupFreshnessCheck{
 		cityPath:   cityPath,
 		scopeRoots: managedDoltScopeRootsForConfig(cityPath, cfg, cfgErr),
 		maxAge:     defaultBackupFreshnessMaxAge,
 		now:        time.Now,
 	}
+	if cfg != nil {
+		c.suspension = suspensionTimesForConfig(cityPath, cfg)
+	} else if strings.TrimSpace(cityPath) != "" {
+		c.suspension = scopeSuspensionTimes(cityPath)
+	}
+	return c
 }
 
 // NewBdBackupFreshnessCheckForScopeRoots creates a freshness check over an
@@ -65,7 +76,11 @@ func NewBdBackupFreshnessCheckForScopeRoots(cityPath string, scopeRoots []string
 	if now == nil {
 		now = time.Now
 	}
-	return &BdBackupFreshnessCheck{cityPath: cityPath, scopeRoots: scopeRoots, maxAge: maxAge, now: now}
+	c := &BdBackupFreshnessCheck{cityPath: cityPath, scopeRoots: scopeRoots, maxAge: maxAge, now: now}
+	if strings.TrimSpace(cityPath) != "" {
+		c.suspension = scopeSuspensionTimes(cityPath)
+	}
+	return c
 }
 
 // Name returns the check identifier.
@@ -94,18 +109,30 @@ func (c *BdBackupFreshnessCheck) Run(_ *CheckContext) *CheckResult {
 	now := c.now()
 
 	var findings []string
+	var infos []string
 	for _, target := range c.freshnessScanTargets() {
-		if finding, ok := scanBackupFreshness(c.cityPath, target, now, c.maxAge); ok {
+		finding, warn, info := scanBackupFreshness(c.cityPath, target, now, c.maxAge, c.suspensionTime(target.ScopeRoot))
+		if warn {
 			findings = append(findings, finding)
+		}
+		if info != "" {
+			infos = append(infos, info)
 		}
 	}
 
 	if len(findings) == 0 {
 		r.Status = StatusOK
 		r.Message = "all configured bd backups synced within " + c.maxAge.String()
+		if len(infos) > 0 {
+			sort.Strings(infos)
+			r.Details = infos
+			r.Message = "configured bd backups are current; suspended scope last sync is at or after suspension"
+		}
 		return r
 	}
 	sort.Strings(findings)
+	sort.Strings(infos)
+	r.Details = infos
 	r.Status = StatusWarning
 	r.Severity = SeverityAdvisory
 	r.Message = strings.Join(findings, "; ")
@@ -189,7 +216,7 @@ func BulkDeleteSafe(cityPath string, cfg *config.City, maxAge time.Duration, now
 		check = NewBdBackupFreshnessCheckForScopeRoots(cityPath, managedDoltScopeRoots(cityPath), maxAge, nil)
 	}
 	for _, target := range check.freshnessScanTargets() {
-		if finding, ok := scanBackupFreshness(cityPath, target, now, maxAge); ok {
+		if finding, warn, _ := scanBackupFreshness(cityPath, target, now, maxAge, check.suspensionTime(target.ScopeRoot)); warn {
 			return false, finding
 		}
 	}
@@ -260,17 +287,121 @@ func BulkDeleteSafe(cityPath string, cfg *config.City, maxAge time.Duration, now
 // and fall back to the legacy file only for scopes that never migrated, unless a
 // fresh managed sync shows that file is merely frozen. Each finding names the
 // store it describes, so the reader is never left guessing which of the two a
-// message is about. A scope with neither file returns ("", false) — "no backup
+// message is about. A scope with neither file returns ("", false, "") — "no backup
 // at all" is DoltBackupCheck's job, not this one's.
-func scanBackupFreshness(cityPath string, target bdBackupFreshnessTarget, now time.Time, maxAge time.Duration) (string, bool) {
+//
+// suspendedAt, when non-zero, is the instant the scope's rig was explicitly
+// suspended. A last sync at or after that instant is current even when it is
+// older than maxAge: the rig is cold and nothing has written since. A last
+// sync that predates it is a warning even inside maxAge, because writes made
+// before suspension were left unbacked. An unreadable timestamp keeps the
+// age verdict; suspension does not hide a missing recovery point.
+func scanBackupFreshness(cityPath string, target bdBackupFreshnessTarget, now time.Time, maxAge time.Duration, suspendedAt time.Time) (string, bool, string) {
 	if _, err := os.Stat(filepath.Join(target.BeadsDir, "dolt-backup.json")); err == nil {
-		return scanDoltBackupFreshness(target.Label, target.BeadsDir, now, maxAge)
+		finding, isFinding := scanDoltBackupFreshness(target.Label, target.BeadsDir, now, maxAge)
+		synced, syncedOK := readDoltBackupLastSync(target.BeadsDir)
+		return applySuspendedFreshness(target.Label, "dolt backup", finding, isFinding, synced, syncedOK, suspendedAt)
 	}
 	finding, isFinding := scanLegacyBackupFreshness(target.Label, target.BeadsDir, now, maxAge)
 	if isFinding && managedDoltBackupIsFresh(cityPath, target, now, maxAge) {
-		return "", false
+		return "", false, ""
 	}
-	return finding, isFinding
+	synced, syncedOK := readLegacyBackupTimestamp(target.BeadsDir)
+	return applySuspendedFreshness(target.Label, "embedded-store backup", finding, isFinding, synced, syncedOK, suspendedAt)
+}
+
+// applySuspendedFreshness turns a pipeline verdict into the suspended-scope
+// rule. A zero suspendedAt leaves the verdict unchanged and reports no info.
+func applySuspendedFreshness(label, store, finding string, warn bool, synced time.Time, syncedOK bool, suspendedAt time.Time) (string, bool, string) {
+	if suspendedAt.IsZero() || !syncedOK {
+		return finding, warn, ""
+	}
+	if synced.Before(suspendedAt) {
+		return fmt.Sprintf("%s: %s: last sync %s predates suspension %s — writes before suspension are not backed up",
+			label, store, synced.UTC().Format(time.RFC3339), suspendedAt.UTC().Format(time.RFC3339)), true, ""
+	}
+	return "", false, fmt.Sprintf("%s: suspended; %s last sync %s is at or after suspension %s",
+		label, store, synced.UTC().Format(time.RFC3339), suspendedAt.UTC().Format(time.RFC3339))
+}
+
+func readDoltBackupLastSync(beadsDir string) (time.Time, bool) {
+	data, err := os.ReadFile(filepath.Join(beadsDir, "dolt-backup-state.json"))
+	if err != nil {
+		return time.Time{}, false
+	}
+	var state struct {
+		LastSync string `json:"last_sync"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return time.Time{}, false
+	}
+	synced, err := time.Parse(time.RFC3339, strings.TrimSpace(state.LastSync))
+	if err != nil {
+		return time.Time{}, false
+	}
+	return synced, true
+}
+
+func readLegacyBackupTimestamp(beadsDir string) (time.Time, bool) {
+	data, err := os.ReadFile(filepath.Join(beadsDir, "backup", "backup_state.json"))
+	if err != nil {
+		return time.Time{}, false
+	}
+	var state struct {
+		Timestamp string `json:"timestamp"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return time.Time{}, false
+	}
+	synced, err := time.Parse(time.RFC3339, strings.TrimSpace(state.Timestamp))
+	if err != nil {
+		return time.Time{}, false
+	}
+	return synced, true
+}
+
+func (c *BdBackupFreshnessCheck) suspensionTime(scopeRoot string) time.Time {
+	if c == nil || len(c.suspension) == 0 {
+		return time.Time{}
+	}
+	return c.suspension[filepath.Clean(scopeRoot)]
+}
+
+func scopeSuspensionTimes(cityPath string) map[string]time.Time {
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return nil
+	}
+	return suspensionTimesForConfig(cityPath, cfg)
+}
+
+func suspensionTimesForConfig(cityPath string, cfg *config.City) map[string]time.Time {
+	if cfg == nil || strings.TrimSpace(cityPath) == "" {
+		return nil
+	}
+	st, err := suspensionstate.Load(fsys.OSFS{}, cityPath)
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]time.Time)
+	for i := range cfg.Rigs {
+		at, ok := suspensionstate.RigSuspendedAt(st, cfg.Rigs[i].Name)
+		if !ok {
+			continue
+		}
+		root := strings.TrimSpace(cfg.Rigs[i].Path)
+		if root == "" {
+			continue
+		}
+		if !filepath.IsAbs(root) {
+			root = filepath.Join(cityPath, root)
+		}
+		out[filepath.Clean(root)] = at
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // managedDoltBackupIsFresh reports whether the city's managed Dolt backup

@@ -949,6 +949,96 @@ func TestBackupOrderSkipsNonBdStoresQuietly(t *testing.T) {
 	}
 }
 
+func writeRigDoltLastSync(t *testing.T, rigPath, lastSync string) {
+	t.Helper()
+	dir := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	body := `{"last_sync":"` + lastSync + `","duration":"25ms"}`
+	if err := os.WriteFile(filepath.Join(dir, "dolt-backup-state.json"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write dolt-backup-state.json: %v", err)
+	}
+}
+
+func suspendedRigListEnv(t *testing.T, rigPath string, suspendedAt time.Time) string {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"rigs": []map[string]any{{
+			"name":         "daytripper",
+			"path":         rigPath,
+			"hq":           false,
+			"suspended":    true,
+			"suspended_at": suspendedAt.UTC().Format(time.RFC3339),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal rig list: %v", err)
+	}
+	return "FAKE_RIG_LIST_JSON=" + string(payload)
+}
+
+// A suspended rig whose suspension is after its last sync is synced once.
+// The next run, after bd's stamp is at or after suspension, leaves it cold.
+func TestBackupOrderSyncsSuspendedRigOnceWhenSuspensionPostdatesLastSync(t *testing.T) {
+	cityPath := resolvedTempDir(t)
+	rigPath := filepath.Join(cityPath, "daytripper")
+	suspendedAt := time.Date(2026, 10, 30, 22, 28, 14, 0, time.UTC)
+	writeRigDoltLastSync(t, rigPath, suspendedAt.Add(-4*time.Hour).Format(time.RFC3339))
+	binDir := t.TempDir()
+	writeBackupFakeGC(t, binDir)
+	writeExecutable(t, filepath.Join(binDir, "dolt"), "#!/bin/sh\necho 'dolt must not be called' >&2\nexit 97\n")
+
+	env := []string{
+		suspendedRigListEnv(t, rigPath, suspendedAt),
+		"FAKE_SCOPE_DBS=city=prod rig:daytripper=daydb",
+		"FAKE_CONFIGURED_DBS=prod daydb",
+	}
+	out := mustRunBackupOrder(t, binDir, cityPath, env...)
+	if !strings.Contains(out, "syncing once") {
+		t.Fatalf("first run should catch the pre-suspend gap:\n%s", out)
+	}
+	if got := syncAttempts(t, binDir, "daydb"); got != 1 {
+		t.Fatalf("daydb syncs = %d, want 1\n%s", got, out)
+	}
+
+	// bd backup sync stamps last_sync. The fake does not, so the test writes
+	// the file a successful sync would leave behind.
+	writeRigDoltLastSync(t, rigPath, suspendedAt.Format(time.RFC3339))
+	out = mustRunBackupOrder(t, binDir, cityPath, env...)
+	if strings.Contains(out, "syncing once") {
+		t.Fatalf("second run should leave the caught-up rig cold:\n%s", out)
+	}
+	if got := syncAttempts(t, binDir, "daydb"); got != 1 {
+		t.Fatalf("daydb syncs = %d after the covered run, want 1\n%s", got, out)
+	}
+}
+
+func TestBackupOrderLeavesSuspendedRigColdWhenLastSyncCoversSuspension(t *testing.T) {
+	cityPath := resolvedTempDir(t)
+	rigPath := filepath.Join(cityPath, "daytripper")
+	suspendedAt := time.Date(2026, 10, 30, 22, 28, 14, 0, time.UTC)
+	writeRigDoltLastSync(t, rigPath, suspendedAt.Add(time.Minute).Format(time.RFC3339))
+	binDir := t.TempDir()
+	gc := writeBackupFakeGC(t, binDir)
+	writeExecutable(t, filepath.Join(binDir, "dolt"), "#!/bin/sh\necho 'dolt must not be called' >&2\nexit 97\n")
+
+	out := mustRunBackupOrder(t, binDir, cityPath,
+		suspendedRigListEnv(t, rigPath, suspendedAt),
+		"FAKE_SCOPE_DBS=city=prod rig:daytripper=daydb",
+		"FAKE_CONFIGURED_DBS=prod daydb",
+	)
+	if syncAttempts(t, binDir, "daydb") != 0 {
+		t.Fatalf("covered suspended rig was synced:\n%s", out)
+	}
+	if strings.Contains(gc.log(t), "--rig daytripper") {
+		t.Fatalf("covered suspended rig was touched through bd:\n%s", gc.log(t))
+	}
+	if !strings.Contains(out, "left cold") {
+		t.Fatalf("output should say the rig was left cold:\n%s", out)
+	}
+}
+
 // resolvedTempDir returns a t.TempDir with symlinks resolved: the order
 // resolves the city path physically (pwd -P), and macOS temp dirs live under
 // the /var -> /private/var symlink.

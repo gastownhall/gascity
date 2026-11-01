@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // testScopeDoltDatabase is the Dolt database the freshness tests' scope names in
@@ -612,4 +614,99 @@ func TestBackupFreshnessManagedDestination(t *testing.T) {
 			}
 		})
 	}
+}
+
+// writeExplicitlySuspendedRig builds a city whose named rig was suspended at
+// suspendedAt, with the stamp in suspension-state.json.
+func writeExplicitlySuspendedRig(t *testing.T, rigName string, suspendedAt time.Time) (string, string) {
+	t.Helper()
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, rigName)
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf("[workspace]\nname = \"test\"\n\n[[rigs]]\nname = %q\npath = %q\nprefix = \"dt\"\n", rigName, rigPath)
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	suspended := true
+	at := suspendedAt.UTC()
+	st := suspensionstate.State{Rigs: map[string]suspensionstate.Override{
+		rigName: {Suspended: &suspended, SuspendedAt: &at},
+	}}
+	if err := suspensionstate.Save(fsys.OSFS{}, cityPath, st); err != nil {
+		t.Fatalf("save suspension state: %v", err)
+	}
+	return cityPath, rigPath
+}
+
+func TestBdBackupFreshnessSuspendedScope(t *testing.T) {
+	maxAge := 24 * time.Hour
+	rigName := "daytripper"
+
+	t.Run("last sync at or after suspension is fresh even when older than maxAge", func(t *testing.T) {
+		suspendedAt := time.Date(2026, 10, 30, 22, 28, 14, 0, time.UTC)
+		now := suspendedAt.Add(72 * time.Hour)
+		cityPath, rigPath := writeExplicitlySuspendedRig(t, rigName, suspendedAt)
+		writeDoltBackupRegistration(t, rigPath)
+		writeDoltBackupState(t, rigPath, suspendedAt.Format(time.RFC3339))
+
+		r := NewBdBackupFreshnessCheckForScopeRoots(cityPath, []string{rigPath}, maxAge, func() time.Time { return now }).Run(nil)
+		if r.Status != StatusOK {
+			t.Fatalf("caught-up suspended scope: want StatusOK, got %v (%s)", r.Status, r.Message)
+		}
+		if !strings.Contains(r.Message, "at or after suspension") {
+			t.Fatalf("message should report the cold scope as info, got %q", r.Message)
+		}
+		cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		safe, reason := BulkDeleteSafe(cityPath, cfg, maxAge, now)
+		if !safe || reason != "" {
+			t.Fatalf("BulkDeleteSafe: want safe, got safe=%v reason=%q", safe, reason)
+		}
+	})
+
+	t.Run("last sync before suspension warns inside maxAge", func(t *testing.T) {
+		suspendedAt := time.Date(2026, 10, 31, 18, 0, 0, 0, time.UTC)
+		lastSync := suspendedAt.Add(-2 * time.Hour)
+		now := suspendedAt.Add(2 * time.Hour)
+		cityPath, rigPath := writeExplicitlySuspendedRig(t, rigName, suspendedAt)
+		writeDoltBackupRegistration(t, rigPath)
+		writeDoltBackupState(t, rigPath, lastSync.Format(time.RFC3339))
+
+		r := NewBdBackupFreshnessCheckForScopeRoots(cityPath, []string{rigPath}, maxAge, func() time.Time { return now }).Run(nil)
+		if r.Status != StatusWarning || !strings.Contains(r.Message, "predates suspension") {
+			t.Fatalf("gap: want StatusWarning naming predates suspension, got %v (%s)", r.Status, r.Message)
+		}
+		cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		safe, reason := BulkDeleteSafe(cityPath, cfg, maxAge, now)
+		if safe || !strings.Contains(reason, "predates suspension") {
+			t.Fatalf("BulkDeleteSafe: want unsafe gap, got safe=%v reason=%q", safe, reason)
+		}
+	})
+
+	t.Run("legacy explicit suspend uses updated_at when suspended_at is absent", func(t *testing.T) {
+		suspendedAt := time.Date(2026, 10, 30, 22, 28, 14, 0, time.UTC)
+		now := suspendedAt.Add(72 * time.Hour)
+		cityPath, rigPath := writeExplicitlySuspendedRig(t, rigName, suspendedAt)
+		// Save stamps updated_at with the wall clock. Rewrite the file so the
+		// only instant on a legacy explicit suspend is the suspension time.
+		path := filepath.Join(cityPath, ".gc", "runtime", "suspension-state.json")
+		body := fmt.Sprintf("{\n  \"rigs\": {%q: {\"suspended\": true}},\n  \"updated_at\": %q\n}\n", rigName, suspendedAt.Format(time.RFC3339))
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeDoltBackupRegistration(t, rigPath)
+		writeDoltBackupState(t, rigPath, suspendedAt.Add(time.Hour).Format(time.RFC3339))
+
+		r := NewBdBackupFreshnessCheckForScopeRoots(cityPath, []string{rigPath}, maxAge, func() time.Time { return now }).Run(nil)
+		if r.Status != StatusOK {
+			t.Fatalf("legacy caught-up scope: want StatusOK, got %v (%s)", r.Status, r.Message)
+		}
+	})
 }

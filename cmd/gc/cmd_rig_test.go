@@ -1098,6 +1098,57 @@ func TestDoRigListJSONShowsDefaultBranch(t *testing.T) {
 	t.Fatalf("rig my-frontend not found in JSON:\n%s", stdout.String())
 }
 
+func TestDoRigListJSONReportsSuspendedAt(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(t.TempDir(), "my-frontend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"my-frontend\"\npath = \"" + rigPath + "\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := time.Now().Add(-2 * time.Second).UTC()
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityPath, "my-frontend", boolPtr(true)); err != nil {
+		t.Fatal(err)
+	}
+	orig := rigListSessionProvider
+	rigListSessionProvider = func() (runtime.Provider, error) { return &fakeAdoptionProvider{}, nil }
+	t.Cleanup(func() { rigListSessionProvider = orig })
+
+	var stdout, stderr bytes.Buffer
+	if code := doRigList(fsys.OSFS{}, cityPath, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("doRigList returned %d, stderr: %s", code, stderr.String())
+	}
+	var got struct {
+		Rigs []struct {
+			Name        string `json:"name"`
+			Suspended   bool   `json:"suspended"`
+			SuspendedAt string `json:"suspended_at"`
+		} `json:"rigs"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode rig list JSON: %v\n%s", err, stdout.String())
+	}
+	for _, rig := range got.Rigs {
+		if rig.Name != "my-frontend" {
+			continue
+		}
+		if !rig.Suspended {
+			t.Fatalf("suspended = false, want true:\n%s", stdout.String())
+		}
+		at, err := time.Parse(time.RFC3339, rig.SuspendedAt)
+		if err != nil {
+			t.Fatalf("suspended_at %q: %v", rig.SuspendedAt, err)
+		}
+		if at.Before(before) {
+			t.Fatalf("suspended_at %s is before the suspend call", rig.SuspendedAt)
+		}
+		return
+	}
+	t.Fatalf("rig my-frontend not found in JSON:\n%s", stdout.String())
+}
+
 // TestDoRigListJSONBuildsSessionProviderOnce guards against the rig-list --json
 // N+1: the running-status probe must build a single session provider and reuse
 // it across all rigs, not reconstruct one per rig.
