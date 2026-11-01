@@ -54,10 +54,10 @@ exit 1
 	}
 	testMakefile := filepath.Join(tmp, "Makefile")
 	makefileText := string(makefile)
-	if !strings.Contains(makefileText, "\ninstall: check-self-contained\n") {
+	if !strings.Contains(makefileText, "\ninstall: check-self-contained install-bd\n") {
 		t.Fatal("Makefile install target no longer depends on check-self-contained as expected")
 	}
-	makefileContent := strings.Replace(makefileText, "\ninstall: check-self-contained\n", "\ninstall:\n", 1)
+	makefileContent := strings.Replace(makefileText, "\ninstall: check-self-contained install-bd\n", "\ninstall:\n", 1)
 	if err := os.WriteFile(testMakefile, []byte(makefileContent), 0o644); err != nil {
 		t.Fatalf("write test Makefile: %v", err)
 	}
@@ -92,6 +92,66 @@ exit 1
 	for _, entry := range entries {
 		if strings.HasPrefix(entry.Name(), ".gc.tmp.") {
 			t.Fatalf("temporary install file was not cleaned up: %s\nmake output:\n%s", entry.Name(), out)
+		}
+	}
+}
+
+// An explicit installation prefix is used for side-by-side candidates. Installing
+// there must preserve the user's independently installed GC and Beads commands.
+func TestMakeInstallExplicitPrefixPreservesOtherInstallations(t *testing.T) {
+	root := repoRoot(t)
+	sandbox := t.TempDir()
+	build := filepath.Join(sandbox, "build")
+	install := filepath.Join(sandbox, "candidate")
+	testHome := filepath.Join(sandbox, "home")
+	localBin := filepath.Join(testHome, ".local", "bin")
+	for _, dir := range []string{build, install, localBin} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(build, "gc"), []byte("candidate GC"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"gc", "bd"} {
+		if err := os.WriteFile(filepath.Join(localBin, name), []byte("retained "+name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(root, "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(data), "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "install:") {
+			lines[i] = "install:"
+		}
+	}
+	recipe := filepath.Join(sandbox, "Makefile")
+	if err := os.WriteFile(recipe, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := makeCommand("--no-print-directory", "-f", recipe, "install", "BUILD_DIR="+build, "INSTALL_DIR="+install)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "HOME="+testHome, "GOTOOLCHAIN=local")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	got, err := os.ReadFile(filepath.Join(install, "gc"))
+	if err != nil || string(got) != "candidate GC" {
+		t.Fatalf("candidate=%q, err=%v", got, err)
+	}
+	for _, name := range []string{"gc", "bd"} {
+		path := filepath.Join(localBin, name)
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || string(got) != "retained "+name {
+			t.Errorf("explicit prefix changed %s: content=%q, mode=%v, err=%v", path, got, info.Mode(), err)
 		}
 	}
 }

@@ -12,7 +12,12 @@ OASDIFF := $(BIN_DIR)/oasdiff
 
 BINARY     := gc
 BUILD_DIR  := bin
+ifeq ($(origin INSTALL_DIR),undefined)
 INSTALL_DIR := $(BIN_DIR)
+INSTALL_MIGRATE_LOCAL_BIN := 1
+else
+INSTALL_MIGRATE_LOCAL_BIN := 0
+endif
 
 # Version metadata injected via ldflags. These run git in the build directory,
 # so they resolve a worktree's `.git` gitdir pointer and describe the checkout
@@ -168,8 +173,13 @@ ifneq ($(_NIX_ICU_DEV),)
 		echo "OK: $$bin self-contained (RUNPATH present + clean-env boot passes)"
 endif
 
-## install: build and install gc to GOPATH/bin (same location as go install)
-install: check-self-contained
+.PHONY: install-bd
+## install-bd: install bd from the Beads module version pinned by this checkout.
+install-bd:
+	@sh scripts/install-bd-pinned.sh "$(INSTALL_DIR)"
+
+## install: build and install gc and its pinned bd into the same directory.
+install: check-self-contained install-bd
 	@mkdir -p $(INSTALL_DIR)
 	@set -e; \
 		tmp="$(INSTALL_DIR)/.$(BINARY).tmp.$$$$"; \
@@ -178,15 +188,12 @@ install: check-self-contained
 		chmod 0755 "$$tmp"; \
 		mv -f "$$tmp" "$(INSTALL_DIR)/$(BINARY)"; \
 		trap - EXIT INT TERM HUP
-	@# Migrate from old install location: replace stale binary with symlink
-	@if [ "$(INSTALL_DIR)" != "$(HOME)/.local/bin" ]; then \
-		if [ -f "$(HOME)/.local/bin/$(BINARY)" ] || [ -L "$(HOME)/.local/bin/$(BINARY)" ]; then \
-			rm -f "$(HOME)/.local/bin/$(BINARY)"; \
-		fi; \
-		if [ -d "$(HOME)/.local/bin" ]; then \
-			ln -sf "$(INSTALL_DIR)/$(BINARY)" "$(HOME)/.local/bin/$(BINARY)"; \
-			echo "Symlinked $(HOME)/.local/bin/$(BINARY) -> $(INSTALL_DIR)/$(BINARY)"; \
-		fi; \
+	@# Migrate the default installation only; an explicit prefix is isolated.
+	@if [ "$(INSTALL_MIGRATE_LOCAL_BIN)" = 1 ] && [ "$(INSTALL_DIR)" != "$(HOME)/.local/bin" ] && [ -d "$(HOME)/.local/bin" ]; then \
+		for tool in "$(BINARY)" bd; do \
+			ln -sf "$(INSTALL_DIR)/$$tool" "$(HOME)/.local/bin/$$tool"; \
+			echo "Symlinked $(HOME)/.local/bin/$$tool -> $(INSTALL_DIR)/$$tool"; \
+		done; \
 	fi
 	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY)"
 

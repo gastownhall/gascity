@@ -260,3 +260,14 @@ filegroup(
     ),
     visibility = ["//visibility:public"],
 )
+
+# Exercise installer pin verification and atomic replacement without host mutations.
+sh_test(
+    name = "install_bd_pinned_test",
+    srcs = ["test-install-bd-pinned.sh"],
+    args = ["$(rootpath :install-bd-pinned.sh)"],
+    data = [
+        ":install-bd-pinned.sh",
+        "//:go.mod",
+    ],
+)
