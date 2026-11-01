@@ -213,7 +213,8 @@ func (l *externalReadsLane) standDownLadder(env externalReadsEnv, raw []beads.Be
 // unnudged, until the hold lifts, and then the ladder takes it up afresh. A
 // claim whose seat asked a person and waits on their decision
 // (beadmeta.AwaitsHuman, read off the claim's own bead: the same bead ID can
-// exist in another store) is the ladder's only to nudge, an hour apart
+// exist in another store) is the ladder's only to nudge, an hour apart and
+// only while the seat's turns do not show it at work or served
 // (workladder.Work.AwaitsHuman): no nudge can hurry a person, and no recycle
 // or release may cut the wait short, but a turn that died after the answer
 // came must not leave the step silent for good.
@@ -335,8 +336,9 @@ func unlessHeld(res backstopResolution, b beads.Bead) backstopResolution {
 
 // awaitsHuman reports whether claim b's seat (seat, its session ID) asked a
 // person and waits on their decision (gc.awaiting_human names it): the
-// ladder only nudges it, an hour apart, until the seat works the step again
-// and clears it.
+// ladder only nudges it, an hour apart and only while the seat's turns do
+// not show a turn open or the newest completed, until the seat works the
+// step again and clears it.
 func awaitsHuman(b beads.Bead, seat string) bool {
 	return beadmeta.AwaitsHuman(b.Metadata[beadmeta.AwaitingHumanMetadataKey], seat)
 }
