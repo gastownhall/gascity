@@ -53,6 +53,13 @@ type LifecycleHandle interface {
 	StateHandle
 }
 
+// StartResolvedWitnessHandle is the lifecycle start bridge with a
+// session-layer witness. Reused means the session layer's IsRunning check
+// found the runtime; ProviderStart means it attempted Provider.Start.
+type StartResolvedWitnessHandle interface {
+	StartResolvedWithWitness(context.Context, sessionpkg.Actor, sessionpkg.Incarnation, string, runtime.Config) (sessionpkg.StartRuntimeWitness, error)
+}
+
 // FencedKillHandle exposes the operator kill under the session kill fence. A
 // handle bound to a session bead implements it; a bare runtime handle has no
 // row to fence.
@@ -688,16 +695,17 @@ type SessionHandle struct {
 }
 
 var (
-	_ Handle                = (*SessionHandle)(nil)
-	_ LifecycleHandle       = (*SessionHandle)(nil)
-	_ MessagingHandle       = (*SessionHandle)(nil)
-	_ TranscriptHandle      = (*SessionHandle)(nil)
-	_ HistoryHandle         = (*SessionHandle)(nil)
-	_ InteractionHandle     = (*SessionHandle)(nil)
-	_ PeekHandle            = (*SessionHandle)(nil)
-	_ LiveObservationHandle = (*SessionHandle)(nil)
-	_ TurnHandle            = (*SessionHandle)(nil)
-	_ TurnHandle            = (*RuntimeHandle)(nil)
+	_ Handle                     = (*SessionHandle)(nil)
+	_ LifecycleHandle            = (*SessionHandle)(nil)
+	_ StartResolvedWitnessHandle = (*SessionHandle)(nil)
+	_ MessagingHandle            = (*SessionHandle)(nil)
+	_ TranscriptHandle           = (*SessionHandle)(nil)
+	_ HistoryHandle              = (*SessionHandle)(nil)
+	_ InteractionHandle          = (*SessionHandle)(nil)
+	_ PeekHandle                 = (*SessionHandle)(nil)
+	_ LiveObservationHandle      = (*SessionHandle)(nil)
+	_ TurnHandle                 = (*SessionHandle)(nil)
+	_ TurnHandle                 = (*RuntimeHandle)(nil)
 )
 
 type historyGeneration struct {

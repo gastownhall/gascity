@@ -96,7 +96,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileHerdr:
 		return herdrProfile{core, b, b, b, b, b, localTranscriptTrait{}}
 	case ProfileK8s:
-		return k8sProfile{core, b, b, timed}
+		return k8sProfile{core, b, b, b, timed}
 	case ProfileExec:
 		return execProfile{core, b, b, b, b, b, timed, probeBudgetTrait{}}
 	case ProfileSSH:
@@ -240,6 +240,7 @@ type (
 		Provider
 		ListingAttestation
 		RelaunchProvider
+		LivenessObserverWithError
 		sleepTrait
 	}
 	execProfile struct {
