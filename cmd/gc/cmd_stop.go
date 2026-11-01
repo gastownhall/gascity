@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -46,8 +47,11 @@ gc stop reports "City stopped." only when it could confirm that every
 session stopped. If it could not list the runtime's sessions completely,
 or could not check whether a session is still running, it names what it
 could not verify, still stops every session it did see, and exits
-non-zero; a supervisor registration is restored. Resolve the reported
-error and run gc stop again.
+non-zero; a supervisor registration is restored. When a controller
+handled the stop, gc stop lists the runtime afterwards: a session still
+running, or a runtime that does not answer the listing in time (a wedged
+server), is reported the same way. Resolve the reported error and run gc
+stop again.
 
 Use --timeout=DURATION to cap the wall-clock time gc stop will spend
 before giving up; the default budgets configured session interrupt and
@@ -156,6 +160,9 @@ func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, js
 		// supervisor could fall through to the standalone stop while this
 		// process still holds the lock that path waits on.
 		if ownership != nil || supervisorAliveHook() != 0 {
+			if cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard); err == nil && !confirmControllerStopForStop(cfg, cityPath, stderr) {
+				return stopCommandOutcome{code: 1, cityPath: cityPath}
+			}
 			if !stopCityManagedBeadsProviderAfterSuccessfulStop(cityPath, stderr) {
 				return stopCommandOutcome{code: 1, cityPath: cityPath}
 			}
@@ -441,6 +448,9 @@ func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, fo
 			return 1
 		}
 		defer ownership.Close() //nolint:errcheck // releasing the flock cannot fail meaningfully
+		if !confirmControllerStopForStop(cfg, cityPath, stderr) {
+			return 1
+		}
 		// Controller handled the shutdown — still stop the bead store, and
 		// only after waiting for the controller to be gone: a live reader
 		// restarts a provider-owned proxy the moment it is retired. The
@@ -534,15 +544,15 @@ func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, fo
 	var recorded, recordedUnknown []string
 	var recordedUnread error
 	if !runtime.ListRunningAttested(sp) {
-		listed, listErr := sp.ListRunning("")
+		listed, attested, listErr := runtime.ListRunningWithAttestation(sp, "")
 		unreachable = listErr != nil
-		if recordedSweepAllowed(sp, listErr) {
+		if recordedSweepAllowed(sp, attested, listErr) {
 			skip := maps.Clone(desired)
 			for _, name := range listed {
 				skip[strings.TrimSpace(name)] = true
 			}
 			var found []string
-			found, recordedUnknown, recordedUnread = storeRecordedSweep(skip, sessionFrontDoor(sessStore), sp, "gc stop", stderr)
+			found, recordedUnknown, recordedUnread = storeRecordedSweep(skip, sessionFrontDoor(sessStore), sp, attested, "gc stop", stderr)
 			recorded = slices.DeleteFunc(found, func(sn string) bool { return slices.Contains(recordedUnknown, sn) })
 			if extendCap != nil && len(recorded) > 0 {
 				extendCap(stopCapExtensionForRecorded(cfg, len(recorded), !stopTargetsAllResolved(recorded, cfg, sessStore)))
@@ -557,11 +567,11 @@ func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, fo
 		graceTimeout = 0
 	}
 
-	// A start the controller died in leaves its row creating, a state the stop
-	// sweep's suspend refuses (it is the start's own), so its runtime would
-	// outlive the stop. With no controller left, stop those first.
-	// A start in flight is left to that start: keep it out of the sweep (whose
-	// stop would kill it under its starter) and in desired (so the orphan sweep
+	// A start the controller died in leaves its row creating. The sweep's
+	// suspend tears such a row's runtime down too (its sweep-only latitude),
+	// but this pass is what reports a row the stop could not verify, and what
+	// keeps a start still owned by a live starter out of the sweep (whose stop
+	// would kill it under its starter) and in desired (so the orphan sweep
 	// does not stop it either).
 	inFlight, creatingLeft := stopInterruptedStartsForStop(cityPath, sessionFrontDoor(sessStore), sp, unreachable, stdout, stderr)
 	if len(inFlight) > 0 {
@@ -638,9 +648,11 @@ func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, fo
 // for the standalone stop, which runs only once no controller serves the city.
 // A starter holds the runtime name's flock from before it records creating
 // until it commits the start, so a free flock means the process that wrote the
-// row died mid-start (a controller crash). The stop sweep's suspend refuses a
-// creating row, so without this its runtime outlives the stop. The row is left
-// as it is, for the reconciler to resolve on the next start.
+// row died mid-start (a controller crash). The row is left as it is, its
+// in-flight marker with it, for the reconciler to relaunch on the next start:
+// the stop sweep's suspend, which tears a listed creating row's runtime down
+// too, writes nothing to it either. This pass also stops one the runtime does
+// not list, and reports a row the stop could not stop or check.
 //
 // A name whose flock is held is a start in flight, whether or not its runtime
 // is up yet: it is reported and returned in inFlight, for the caller to keep
@@ -1072,6 +1084,75 @@ func stopOrphans(sp runtime.Provider, desired map[string]bool, recorded []string
 	}
 	gracefulStopAllWithForceSignal(orphans, known, sp, timeout, rec, cfg, sessFront.Store(), stdout, stderr, nil)
 	return complete
+}
+
+// stopVerifyListTimeout bounds the confirmation of a controller-handled
+// stop: a wedged runtime server (a SIGSTOPped tmux) never answers a listing,
+// and a stopped session can take a few seconds to leave it (a deleted k8s
+// pod lists Running through its grace period).
+var stopVerifyListTimeout = 10 * time.Second
+
+// stopVerifyPollInterval spaces the confirming listings.
+var stopVerifyPollInterval = 250 * time.Millisecond
+
+// confirmControllerStopForStop reports whether a stop the controller handled
+// (the supervisor's, or a standalone controller's) left no session of the
+// city running (mc-3low3). The controller's shutdown is bounded, so a
+// runtime it could not stop, or a server that never answered it (a wedged
+// tmux), outlives it, and gc stop must say so and fail rather than report
+// "City stopped.". It lists the city's runtime until a complete listing is
+// empty, for up to stopVerifyListTimeout: a session still listed, an
+// incomplete listing, or a listing that does not answer by then fails the
+// stop, each reported. A runtime that does not attest its listing proves
+// nothing either way, nor does one whose listing is shared with other cities
+// (k8s's namespace), and a provider that cannot be opened is reported; none
+// of these changes the outcome the controller reported, as before.
+func confirmControllerStopForStop(cfg *config.City, cityPath string, stderr io.Writer) bool {
+	sp, err := sessionProviderForStopProbe(cfg, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc stop: could not open the runtime to confirm the stop: %v\n", err) //nolint:errcheck // best-effort stderr
+		return true
+	}
+	if !runtime.ListRunningAttested(sp) || runtime.ListRunningShared(sp) {
+		return true
+	}
+	type listed struct {
+		names    []string
+		complete bool
+		report   bytes.Buffer
+	}
+	deadline := time.Now().Add(stopVerifyListTimeout)
+	for {
+		done := make(chan *listed, 1)
+		go func() {
+			l := &listed{}
+			l.names, l.complete = listRunningForStop(sp, &l.report)
+			done <- l
+		}()
+		var l *listed
+		select {
+		case l = <-done:
+		case <-time.After(time.Until(deadline)):
+			fmt.Fprintf(stderr, "gc stop: stop not confirmed: the runtime did not answer a listing within %s after the controller stopped (a wedged runtime server?), so sessions may still be running; resolve it and run gc stop again\n", stopVerifyListTimeout) //nolint:errcheck // best-effort stderr
+			return false
+		}
+		if l.complete && len(l.names) == 0 {
+			return true
+		}
+		if time.Until(deadline) > stopVerifyPollInterval {
+			<-time.After(stopVerifyPollInterval)
+			continue
+		}
+		_, _ = io.Copy(stderr, &l.report)
+		if !l.complete {
+			fmt.Fprintln(stderr, "gc stop: stop not confirmed: the runtime inventory was incomplete after the controller stopped, so sessions may still be running; resolve the runtime error and run gc stop again") //nolint:errcheck // best-effort stderr
+			return false
+		}
+		names := slices.Clone(l.names)
+		slices.Sort(names)
+		fmt.Fprintf(stderr, "gc stop: stop not confirmed: session(s) %s still running %s after the controller stopped; resolve the runtime and run gc stop again\n", strings.Join(names, ", "), stopVerifyListTimeout) //nolint:errcheck // best-effort stderr
+		return false
+	}
 }
 
 // listRunningForStop lists the provider's running sessions for gc stop and

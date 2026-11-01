@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -54,6 +55,29 @@ type SessionRequest struct {
 	// pool's floor spawn cannot be starved by a warm pool's large elastic
 	// demand (follow-up to #2893).
 	FloorGuarantee bool
+	// Parked marks a resume request for a seat parked on pre-assigned
+	// blocked work (parkedSeats): it keeps the seat selected, so it sleeps
+	// rather than draining as an orphan, but takes no cap headroom and is
+	// not pool demand (PoolDesiredCounts) until its pin is ready.
+	Parked bool
+	// ParkedContinuation marks a resume request of a parked seat, or of one
+	// waking from its park, for its pre-assigned work (parkVerdict.Continues):
+	// the wake resumes the seat's conversation, so its binding keeps the
+	// seat's recorded work dir, as a live continuation's does
+	// (computePoolTriggerBindingPatch), while that dir can host the resume
+	// (parkedWorkDirUsable).
+	ParkedContinuation bool
+	// NameOnly marks a request whose work bead only names a seat that a
+	// custom scale_check count places (scaleCheckDemand.NameOnly). When
+	// realization refuses that work's worktree evidence, the seat starts
+	// unnamed in the pool's own directory (unnamedPoolRequest) rather than
+	// leaving the pool a seat short of its count (nameOnlyFallback).
+	NameOnly bool
+	// NameRefused marks that unnamed request (unnamedPoolRequest). Its work
+	// dir is the pool's own directory (poolTriggerWorkDir), so a reused seat
+	// that is not alive moves there rather than start in the directory its
+	// last binding recorded (poolSeatBindingPatch).
+	NameRefused bool
 }
 
 func beadPriority(b beads.Bead) int {
@@ -210,7 +234,15 @@ func PoolDesiredCounts(states []PoolDesiredState) map[string]int {
 	}
 	counts := make(map[string]int, len(states))
 	for _, state := range states {
-		counts[state.Template] = len(state.Requests)
+		n := 0
+		for _, request := range state.Requests {
+			if !request.Parked {
+				n++
+			}
+		}
+		if n > 0 {
+			counts[state.Template] = n
+		}
 	}
 	return counts
 }
@@ -327,6 +359,26 @@ func computePoolDesiredStatesAt(
 	decisionTime time.Time,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
+	return computePoolDesiredStatesParkedAt(cfg, assignedWorkBeads, assignedWorkStoreRefs, readyAssigned, sessionInfos, scaleCheckCounts, scaleCheckDemand, decisionTime, nil, trace)
+}
+
+// computePoolDesiredStatesParkedAt is computePoolDesiredStatesAt with the
+// pass's parked seats (parkSeats): a parked seat's resume request is marked
+// Parked, accepted outside the nested caps (it takes no headroom from
+// anything, floors included) and left out of the pool's demand count. A seat
+// is parked here only when every request it makes is an open pin.
+func computePoolDesiredStatesParkedAt(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
+	readyAssigned map[storeScopedBeadKey]bool,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	scaleCheckDemand map[string]scaleCheckDemand,
+	decisionTime time.Time,
+	parked parkedSeats,
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
 	var readyAssignedFlags []bool
 	if readyAssigned != nil {
 		readyAssignedFlags = readyAssignedFlagsForBeads(readyAssigned, assignedWorkBeads, assignedWorkStoreRefs)
@@ -377,6 +429,9 @@ func computePoolDesiredStatesAt(
 	// routing does not depend on the agent, so it is resolved once and the
 	// beads bucketed by the template they route to, in order (A3).
 	routedWork := make(map[string][]int)
+	// unparkable are the seats holding work that is not an open pin: never
+	// parked, whatever the verdict says.
+	unparkable := make(map[string]bool)
 	for i, wb := range assignedWorkBeads {
 		routedTo := routedToOrLegacyWorkflowTarget(wb)
 		if wb.Status != "in_progress" && wb.Status != "open" {
@@ -401,6 +456,9 @@ func computePoolDesiredStatesAt(
 			}
 		}
 		routedWork[routedTo] = append(routedWork[routedTo], i)
+		if wb.Status != "open" && sessionBeadID != "" {
+			unparkable[sessionBeadID] = true
+		}
 	}
 
 	for i := range cfg.Agents {
@@ -482,15 +540,17 @@ func computePoolDesiredStatesAt(
 					continue
 				}
 				resumeRequests = append(resumeRequests, SessionRequest{
-					Template:       template,
-					BeadPriority:   beadPriorityRank(beadPriority(wb)),
-					Tier:           "resume",
-					SessionBeadID:  sessionBeadID,
-					WorkBeadID:     wb.ID,
-					WorkBeadTitle:  strings.TrimSpace(wb.Title),
-					WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
-					WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
-					BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
+					Template:           template,
+					BeadPriority:       beadPriorityRank(beadPriority(wb)),
+					Tier:               "resume",
+					SessionBeadID:      sessionBeadID,
+					WorkBeadID:         wb.ID,
+					WorkBeadTitle:      strings.TrimSpace(wb.Title),
+					WorkPack:           strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
+					WorkWorkspace:      strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
+					BrainParentSID:     strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
+					Parked:             parked.parked(sessionBeadID) && !unparkable[sessionBeadID],
+					ParkedContinuation: parked.continues(sessionBeadID) && !unparkable[sessionBeadID],
 				})
 				continue
 			}
@@ -542,6 +602,9 @@ func computePoolDesiredStatesAt(
 			resumeSessionBeadIDs[req.SessionBeadID] = struct{}{}
 		}
 	}
+	// A parked seat's requests stand outside the caps: they are accepted
+	// after them, and count toward no limit or floor.
+	resumeRequests, parkedRequests := splitParkedRequests(resumeRequests)
 	protectedNewRequests, inFlightNewRequests := poolNewDemandRequests(cfg, sessionInfos, resumeSessionBeadIDs, decisionTime)
 	sessionInfoByID := make(map[string]sessionpkg.Info, len(sessionInfos))
 	for _, info := range sessionInfos {
@@ -640,57 +703,53 @@ func computePoolDesiredStatesAt(
 			usage.accept(req, limits)
 		}
 		for j := 0; j < newCount-reusedCount; j++ {
-			workBeadID := ""
-			workBeadTitle := ""
-			workPack := ""
-			workWorkspace := ""
-			workStoreRef := ""
-			workParentSID := ""
-			var worktreeSpec *worktree.Spec
-			worktreeError := ""
+			req := SessionRequest{Template: template, Tier: "new"}
 			if len(residualWorkBeadIDs) > j {
-				workBeadID = residualWorkBeadIDs[j]
-				if demand.Titles != nil {
-					workBeadTitle = strings.TrimSpace(demand.Titles[workBeadID])
-				}
-				if demand.Packs != nil {
-					workPack = strings.TrimSpace(demand.Packs[workBeadID])
-				}
-				if demand.Workspaces != nil {
-					workWorkspace = strings.TrimSpace(demand.Workspaces[workBeadID])
-				}
-				if demand.StoreRefs != nil {
-					workStoreRef = strings.TrimSpace(demand.StoreRefs[workBeadID])
-				}
-				if demand.ParentSIDs != nil {
-					workParentSID = strings.TrimSpace(demand.ParentSIDs[workBeadID])
-				}
-				if demand.WorktreeSpecs != nil {
-					worktreeSpec = demand.WorktreeSpecs[workBeadID]
-				}
-				if demand.WorktreeErrors != nil {
-					worktreeError = strings.TrimSpace(demand.WorktreeErrors[workBeadID])
-				}
+				req = requestWithScaleDemandProvenance(req, demand, residualWorkBeadIDs[j])
 			}
-			req := SessionRequest{
-				Template:       template,
-				Tier:           "new",
-				WorkBeadID:     workBeadID,
-				WorkBeadTitle:  workBeadTitle,
-				WorkPack:       workPack,
-				WorkWorkspace:  workWorkspace,
-				WorkStoreRef:   workStoreRef,
-				BrainParentSID: workParentSID,
-				WorktreeSpec:   worktreeSpec,
-				WorktreeError:  worktreeError,
-			}
-			req.WorkBindingResident = demand.BindingResident[workBeadID]
 			allRequests = append(allRequests, req)
 			usage.accept(req, limits)
 		}
 	}
 
-	return applyNestedCaps(cfg, allRequests, aliasHeldTemplates, trace)
+	return withParkedRequests(applyNestedCaps(cfg, allRequests, aliasHeldTemplates, trace), parkedRequests)
+}
+
+// splitParkedRequests separates a parked seat's requests from the counted
+// ones, keeping each side's order.
+func splitParkedRequests(requests []SessionRequest) (counted, parked []SessionRequest) {
+	for _, req := range requests {
+		if req.Parked {
+			parked = append(parked, req)
+		} else {
+			counted = append(counted, req)
+		}
+	}
+	return counted, parked
+}
+
+// withParkedRequests adds each parked seat's first request to its template's
+// accepted state, one per seat, after the caps: it selects the seat (the
+// realize binds it like a resume) without being counted by them.
+func withParkedRequests(states []PoolDesiredState, parked []SessionRequest) []PoolDesiredState {
+	if len(parked) == 0 {
+		return states
+	}
+	seen := make(map[string]bool, len(parked))
+	for _, req := range parked {
+		if seen[req.SessionBeadID] {
+			continue
+		}
+		seen[req.SessionBeadID] = true
+		i := slices.IndexFunc(states, func(s PoolDesiredState) bool { return s.Template == req.Template })
+		if i < 0 {
+			states = append(states, PoolDesiredState{Template: req.Template})
+			i = len(states) - 1
+		}
+		states[i].Requests = append(states[i].Requests, req)
+	}
+	sort.Slice(states, func(i, j int) bool { return states[i].Template < states[j].Template })
+	return states
 }
 
 func concreteNestedCapRequests(
@@ -779,6 +838,20 @@ func requestWithScaleDemandProvenance(request SessionRequest, demand scaleCheckD
 	if demand.WorktreeErrors != nil {
 		request.WorktreeError = strings.TrimSpace(demand.WorktreeErrors[workBeadID])
 	}
+	request.NameOnly = demand.NameOnly
+	return request
+}
+
+// unnamedPoolRequest is request without the work it names, the fields
+// requestWithScaleDemandProvenance sets, marked NameRefused: the request a
+// warm custom scale_check pool's seat made before its work was named, which
+// starts the seat in the pool's own directory and moves a reused seat that is
+// not alive there.
+func unnamedPoolRequest(request SessionRequest) SessionRequest {
+	request.WorkBeadID, request.WorkBeadTitle, request.WorkPack, request.WorkWorkspace = "", "", "", ""
+	request.WorkStoreRef, request.WorkBindingResident, request.BrainParentSID = "", false, ""
+	request.WorktreeSpec, request.WorktreeError, request.NameOnly = nil, "", false
+	request.NameRefused = true
 	return request
 }
 

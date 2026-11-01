@@ -766,7 +766,8 @@ type RowRefreshOptions struct {
 	// (announcedCloses): its closing write, a re-scan or a refresh announced
 	// it, and a re-scan or full Prime then dropped the closed row. A close
 	// the cache never announced is announced, however recently the cache
-	// wrote the row: a full Prime drops a row closed out of band silently.
+	// wrote the row: a write over a close the cache never held installs it
+	// silently, and a full Prime then drops the closed row.
 	// So is the close of a row the cache holds closed only because a path
 	// that announces no close installed it over no cached row (a write that
 	// only refreshed the row, a conditional write's refetch, an applied
@@ -1092,6 +1093,29 @@ func (c *CachingStore) ReadyContext(ctx context.Context, query ...ReadyQuery) ([
 		return nil, err
 	}
 	return rows, nil
+}
+
+// ReadyJudgmentContext is ReadyContext for a reader that trusts the cache
+// row by row: it judges every candidate the cache can vouch for, leaves a
+// dirty or unanswerable one unjudged rather than declining the whole read, and
+// returns the snapshot its verdicts were reached on (ReadyJudgment): each
+// judged candidate's edges, and which rows the cache held and trusted. A
+// reader that must know a verdict judged every target, rather than skipping
+// one the cache does not hold, reads this. Like ReadyContext it never reads
+// the backing: a cache that cannot vouch for any of it (not live, coverage
+// incomplete, projection degraded, busy) returns ErrCacheUnavailable.
+func (c *CachingStore) ReadyJudgmentContext(ctx context.Context, query ReadyQuery) (ReadyJudgment, error) {
+	if err := ctx.Err(); err != nil {
+		return ReadyJudgment{}, err
+	}
+	j, err := c.cachedReadyJudgment(ctx, c.readyTier(query), true)
+	if err != nil {
+		return ReadyJudgment{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return ReadyJudgment{}, err
+	}
+	return j, nil
 }
 
 // CachedReady returns ready beads from the in-memory active read model.

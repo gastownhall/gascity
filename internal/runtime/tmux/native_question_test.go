@@ -208,10 +208,10 @@ func TestNativeQuestionFreeTextUsesEditor(t *testing.T) {
 }
 
 func TestNativeQuestionDraftDoesNotChangeIdentity(t *testing.T) {
-	before := parseAskUserQuestion(strings.Split(nativeClaudeQuestion, "\n"))
+	before := parseQuestionDialog(strings.Split(nativeClaudeQuestion, "\n"))
 	draft := strings.ReplaceAll(nativeClaudeQuestion, "❯ 1. Otter", "  1. Otter")
 	draft = strings.ReplaceAll(draft, "  3. Type something.", "❯ 3. Fox")
-	after := parseAskUserQuestion(strings.Split(draft, "\n"))
+	after := parseQuestionDialog(strings.Split(draft, "\n"))
 	if before == nil || after == nil || before.requestID() != after.requestID() {
 		t.Fatalf("draft must preserve the question identity: before=%+v after=%+v", before, after)
 	}
@@ -376,7 +376,7 @@ func nativeQuestionTmux(t *testing.T, pane string) (*Tmux, *paneExecutor) {
 
 func installNativeClaudeRecord(t *testing.T, tm *Tmux, pane string) {
 	t.Helper()
-	q := parseAskUserQuestion(strings.Split(pane, "\n"))
+	q := parseQuestionDialog(strings.Split(pane, "\n"))
 	if q == nil {
 		return
 	}

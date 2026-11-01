@@ -67,6 +67,15 @@ func TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending(t *testing.T) {
 			wantPendingAny:  true,
 			wantSweepGrowth: false,
 		},
+		{
+			// A no-op dispatch (the bead is no longer open, a spawned fanout
+			// waiting on its finalize) advanced nothing and waits on nothing.
+			name:            "not-processed skip neither processes nor pends",
+			serveErr:        errControlNotProcessed,
+			wantPendingAny:  false,
+			wantProcessed:   false,
+			wantSweepGrowth: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -84,6 +93,11 @@ func TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending(t *testing.T) {
 			serveCalls := 0
 			controlDispatcherServe = func(_, _, _ string, _, _ io.Writer, _ *executionEmitDeferral) error {
 				serveCalls++
+				// The stubbed queue never empties, so a drain that re-queries
+				// after this row would spin forever: fail on the re-dispatch.
+				if serveCalls > 1 {
+					t.Fatalf("controlDispatcherServe called %d times, want 1: the drain re-queried instead of ending the pass", serveCalls)
+				}
 				return tt.serveErr
 			}
 

@@ -21,9 +21,39 @@ var (
 	_ runtime.InteractionProvider = (*Provider)(nil)
 )
 
-// Pending delegates to the underlying Tmux instance.
+// Pending delegates to the underlying Tmux instance. With the
+// program-status switch at shadow, a pending read is recorded beside the
+// program's own record read fresh with the parsers' capture
+// (pendingWithRecord, shadowPending); the answer is the parsers' alone.
 func (p *Provider) Pending(name string) (*runtime.PendingInteraction, error) {
-	return p.tm.Pending(name)
+	if !p.tm.shadowing() {
+		return p.tm.Pending(name)
+	}
+	pending, reading, ok, err := p.pendingWithRecord(name)
+	if err == nil && ok {
+		p.shadowPending(name, pending, reading)
+	}
+	return pending, err
+}
+
+// shadowPending records a pending read (pending): the parsers' verdict beside
+// the record's fresh pending verdict (runtime.ProgramFreshPendingVerdict) on
+// r, the record read fresh with the parsers' capture, the reading a
+// kind-only pending interaction would come from. The reading is taken before
+// Pending returns, so an answer its caller gives the dialog cannot reach it.
+// It records on change only (the sink filters).
+func (p *Provider) shadowPending(name string, pending *runtime.PendingInteraction, r runtime.ProgramPendingReading) {
+	if r.Status.Mode != runtime.ProgramStatusShadow {
+		return
+	}
+	now := time.Now()
+	scrape := runtime.ProgramVerdictNone
+	if pending != nil {
+		scrape = runtime.ProgramVerdictPending
+	}
+	p.tm.shadowGo(func() {
+		p.tm.shadowEmit(name, runtime.ProgramPointPending, scrape, runtime.ProgramFreshPendingVerdict(r, time.Time{}, now), r.Status, now, 0, false)
+	})
 }
 
 // Respond delegates to the underlying Tmux instance.
@@ -723,7 +753,7 @@ func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 		return &runtime.PendingInteraction{
 			RequestID: dialog.question.requestID(),
 			Kind:      "question",
-			Prompt:    dialog.question.Header + ": " + dialog.question.Question,
+			Prompt:    boundPromptText(dialog.question.Question),
 			Options:   dialog.question.answerChoices(),
 			Metadata:  questionMetadata(dialog.question),
 		}, nil
@@ -889,7 +919,7 @@ func (t *Tmux) dialogInPane(target string) (paneDialog, error) {
 	if err != nil {
 		return paneDialog{}, err
 	}
-	if q := parseAskUserQuestion(strings.Split(strings.ReplaceAll(paneText, "\r", ""), "\n")); q != nil {
+	if q := parseQuestionDialog(strings.Split(strings.ReplaceAll(paneText, "\r", ""), "\n")); q != nil {
 		if err := t.bindClaudeQuestion(resolved, q); err != nil {
 			// The pane still has a visible input owner even when the provider
 			// has not published its invocation identity. Keep messages guarded,

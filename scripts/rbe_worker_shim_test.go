@@ -3,6 +3,7 @@ package scripts_test
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -770,8 +771,15 @@ func TestRBEWorkerAlwaysPinned(t *testing.T) {
 						continue
 					}
 					found = append(found, id)
-					if len(step.With) != 0 {
-						t.Errorf("%s job %s: fetch step with %v, want no inputs", path, id, step.With)
+					// The pool workers alone may pass the canary input
+					// (rbe_worker_sha, by hand; TestRBEPoolCanaryInput), and
+					// nothing else.
+					want := map[string]any{}
+					if id == "worker" && (path == rbeWorkerWorkflow || path == rbeForkPoolWorkflow) {
+						want = map[string]any{"canary-sha": "${{ inputs.rbe_worker_sha }}"}
+					}
+					if (len(step.With) != 0 || len(want) != 0) && !reflect.DeepEqual(step.With, want) {
+						t.Errorf("%s job %s: fetch step with %v, want %v", path, id, step.With, want)
 					}
 					if len(step.Env) != 0 {
 						t.Errorf("%s job %s: fetch step env %v, want none", path, id, step.Env)
@@ -788,8 +796,18 @@ func TestRBEWorkerAlwaysPinned(t *testing.T) {
 		})
 	}
 	action := readFile(t, root, rbeWorkerActionDir+"/action.yml")
-	if strings.Contains(action, "inputs:") || strings.Contains(action, "SOURCE") {
-		t.Errorf("%s/action.yml declares an input or passes SOURCE; it fetches ./pin and nothing else:\n%s", rbeWorkerActionDir, action)
+	var act struct {
+		Inputs map[string]any `yaml:"inputs"`
+	}
+	if err := yaml.Unmarshal([]byte(action), &act); err != nil {
+		t.Fatalf("parse action.yml: %v", err)
+	}
+	if strings.Contains(action, "SOURCE") || len(act.Inputs) != 1 || act.Inputs["canary-sha"] == nil {
+		t.Errorf("%s/action.yml: inputs %v (or SOURCE); it fetches ./pin, or the canary-sha commit fetch.sh verifies, and nothing else:\n%s",
+			rbeWorkerActionDir, rbeSortedKeys(act.Inputs), action)
+	}
+	if !strings.Contains(action, "RBE_WORKER_CANARY_SHA: ${{ inputs.canary-sha }}") || strings.Count(action, "${{ inputs.") != 1 {
+		t.Errorf("%s/action.yml: the canary input must reach fetch.sh through env alone", rbeWorkerActionDir)
 	}
 	code := codeLines(readFile(t, root, rbeWorkerFetchScript))
 	for _, banned := range []string{`\bSOURCE\b`, `in-tree`, `GITHUB_WORKSPACE`, `tools/rbe`} {
@@ -875,6 +893,20 @@ func TestRBEWorkerPoolWorkflowIsolatesActions(t *testing.T) {
 			if got, want := step.Env["RBE_WARM_EVERY"], "${{ vars.RBE_WARM_EVERY || '1' }}"; got != want {
 				t.Errorf("worker step RBE_WARM_EVERY = %q, want %q", got, want)
 			}
+			// The read-only R2 hot tier (needs zstd): off unless the
+			// repository variable names it (rollback: unset it); one run in
+			// RBE_HOT_EVERY, by the warm set's run-id parity.
+			if got, want := step.Env["RBE_HOT_URL"], "${{ vars.RBE_HOT_URL || '' }}"; got != want {
+				t.Errorf("worker step RBE_HOT_URL = %q, want %q", got, want)
+			}
+			if got, want := step.Env["RBE_HOT_EVERY"], "${{ vars.RBE_HOT_EVERY || '1' }}"; got != want {
+				t.Errorf("worker step RBE_HOT_EVERY = %q, want %q", got, want)
+			}
+			// The local CAS cap: empty is the script's 150 GB default, so
+			// merging changes nothing; rollback is unsetting the variable.
+			if got, want := step.Env["CAS_MAX_BYTES"], "${{ vars.RBE_CAS_MAX_BYTES || '' }}"; got != want {
+				t.Errorf("worker step CAS_MAX_BYTES = %q, want %q", got, want)
+			}
 			// The OSS pool keeps the script's defaults (tier oss, :443) and its
 			// own certificate; the fork tier is rbe-fork-pool.yml's alone.
 			for _, k := range []string{"WORKER_TIER", "RBE_WEST_PORT"} {
@@ -889,5 +921,213 @@ func TestRBEWorkerPoolWorkflowIsolatesActions(t *testing.T) {
 	}
 	if !checkout || !worker {
 		t.Fatalf("%s: checkout step found %v, worker step found %v", rbeWorkerWorkflow, checkout, worker)
+	}
+}
+
+// canaryUpstreamFixture: rbe-worker's main with 5000 empty commits, c0, c1
+// (the pin), a merge m2 of branch feature (f1, never on main's first-parent
+// line), then c3; and off-main o1, never merged. Each sha is written beside
+// the upstream. The empty commits make main's first-parent line (205 KB of
+// rev-list output) longer than a pipe and one grep read hold together, so
+// fetch.sh must read the whole line: with a reader that stops at the canary
+// (grep -q under pipefail), rev-list is still writing when it stops, dies of
+// SIGPIPE, and a valid canary is refused on every run, however the two
+// processes are scheduled.
+const canaryUpstreamFixture = `#!/usr/bin/env bash
+set -euo pipefail
+dir=${1:?usage: fixture.sh UPSTREAM_DIR}
+git -C "$dir" init -q -b main
+git -C "$dir" config user.email t@example.invalid
+git -C "$dir" config user.name "rbe-worker canary test"
+i=0
+while [ "$i" -lt 5000 ]; do
+	i=$((i + 1))
+	printf 'commit refs/heads/main\ncommitter t <t@example.invalid> %d +0000\ndata 3\nold\n' "$i"
+done | git -C "$dir" fast-import --quiet
+mkdir -p "$dir/worker"
+printf '#!/bin/sh\necho worker\n' >"$dir/worker/blacksmith-worker.sh"
+chmod +x "$dir/worker/blacksmith-worker.sh"
+git -C "$dir" add -A
+git -C "$dir" commit -q -m c0
+git -C "$dir" rev-parse HEAD >"$dir/../c0.sha"
+echo "# c1" >>"$dir/worker/blacksmith-worker.sh"; git -C "$dir" commit -q -am c1
+git -C "$dir" rev-parse HEAD >"$dir/../c1.sha"
+git -C "$dir" checkout -q -b feature
+echo "# f1" >"$dir/worker/f1"; git -C "$dir" add -A; git -C "$dir" commit -q -m f1
+git -C "$dir" rev-parse HEAD >"$dir/../f1.sha"
+git -C "$dir" checkout -q main
+git -C "$dir" merge -q --no-ff -m m2 feature
+git -C "$dir" rev-parse HEAD >"$dir/../m2.sha"
+echo "# c3" >>"$dir/worker/blacksmith-worker.sh"; git -C "$dir" commit -q -am c3
+git -C "$dir" rev-parse HEAD >"$dir/../c3.sha"
+git -C "$dir" checkout -q -b off-main
+echo "# o1" >>"$dir/worker/blacksmith-worker.sh"; git -C "$dir" commit -q -am o1
+git -C "$dir" rev-parse HEAD >"$dir/../o1.sha"
+git -C "$dir" checkout -q main
+`
+
+// TestRBEWorkerFetchCanary: with RBE_WORKER_CANARY_SHA (a pool workflow's
+// rbe_worker_sha input), fetch.sh checks out that commit only if it is on
+// rbe-worker main's first-parent line and descends from the pin; outputs
+// canary and pin. Empty: the pin, as before.
+func TestRBEWorkerFetchCanary(t *testing.T) {
+	root := t.TempDir()
+	fixture := filepath.Join(root, "fixture.sh")
+	if err := os.WriteFile(fixture, []byte(canaryUpstreamFixture), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	upstream := filepath.Join(root, "upstream")
+	if err := os.MkdirAll(upstream, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, stderr, err := runRBEScript(root, os.Environ(), fixture, upstream); err != nil {
+		t.Fatalf("fixture: %v\n%s", err, stderr)
+	}
+	sha := map[string]string{}
+	for _, n := range []string{"c0", "c1", "f1", "m2", "c3", "o1"} {
+		sha[n] = strings.TrimSpace(readFile(t, root, n+".sha"))
+	}
+	for _, c := range []struct {
+		name, canary, mode string
+		ok                 bool
+		wantSHA, msg       string
+	}{
+		{"no canary: the pin", "", "pin", true, sha["c1"], ""},
+		{"a merge on main's first-parent line", sha["m2"], "pin", true, sha["m2"], ""},
+		{"main's head", sha["c3"], "pin", true, sha["c3"], ""},
+		{"the pin itself", sha["c1"], "pin", true, sha["c1"], ""},
+		{"a commit inside a merged branch", sha["f1"], "pin", false, "", "first-parent line"},
+		{"older than the pin (a rollback)", sha["c0"], "pin", false, "", "does not descend from the pin"},
+		{"never merged", sha["o1"], "pin", false, "", "not in gastownhall/rbe-worker main's history"},
+		{"not 40-hex", "C3", "pin", false, "", "one 40-hex sha"},
+		{"two lines", sha["m2"] + "\n" + sha["c3"], "pin", false, "", "one 40-hex sha"},
+		{"the client pin", sha["c3"], "pin-client", false, "", "pool worker's fetch (pin) alone"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			pinfile := c.mode
+			script := rbeWorkerFetchCopy(t, upstream, pinfile, sha["c1"])
+			t.Setenv("RBE_WORKER_CANARY_SHA", c.canary)
+			stdout, stderr, out, err := rbeWorkerRunFetch(t, script, c.mode)
+			if c.ok {
+				if err != nil {
+					t.Fatalf("refused: %v\n%s", err, stderr)
+				}
+				wantCanary := "false"
+				if c.canary != "" {
+					wantCanary = "true"
+				}
+				if out["sha"] != c.wantSHA || out["pin"] != sha["c1"] || out["canary"] != wantCanary {
+					t.Errorf("outputs %v, want sha %s pin %s canary %s", out, c.wantSHA, sha["c1"], wantCanary)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("accepted canary %q; outputs %v", c.canary, out)
+			}
+			if out["dir"] != "" {
+				t.Errorf("a refused canary still checked out %s", out["dir"])
+			}
+			// fetch.sh writes its ::error lines to stdout.
+			if !strings.Contains(stdout+stderr, c.msg) {
+				t.Errorf("refusal says %q, want it to mention %q", stdout+stderr, c.msg)
+			}
+		})
+	}
+}
+
+// TestRBEPoolCanaryInput: both pool workflows' worker job take the canary
+// commit (rbe_worker_sha) only from a person (never bazel-allocator[bot],
+// the pool scalers' App), 40-hex, through env (no expression inside run),
+// cap max_minutes, and run h5.sh pin..sha with a descendant check before
+// any fetched code runs.
+func TestRBEPoolCanaryInput(t *testing.T) {
+	for _, path := range []string{rbeWorkerWorkflow, rbeForkPoolWorkflow} {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			var wf struct {
+				Jobs map[string]struct {
+					Steps []struct {
+						ID   string            `yaml:"id"`
+						Name string            `yaml:"name"`
+						If   string            `yaml:"if"`
+						Uses string            `yaml:"uses"`
+						Env  map[string]string `yaml:"env"`
+						Run  string            `yaml:"run"`
+					} `yaml:"steps"`
+				} `yaml:"jobs"`
+			}
+			text := readFile(t, repoRoot(t), path)
+			if err := yaml.Unmarshal([]byte(text), &wf); err != nil {
+				t.Fatal(err)
+			}
+			at := map[string]int{}
+			for i, st := range wf.Jobs["worker"].Steps {
+				if strings.Contains(st.Run, "${{") {
+					t.Errorf("step %q: an expression inside run", st.Name)
+				}
+				switch {
+				case st.ID == "canary":
+					at["canary"] = i
+					if st.If != "inputs.rbe_worker_sha != ''" {
+						t.Errorf("canary step if %q", st.If)
+					}
+					want := map[string]string{
+						"SHA": "${{ inputs.rbe_worker_sha }}", "ACTOR": "${{ github.triggering_actor }}",
+						"MAX": "${{ inputs.max_minutes }}",
+					}
+					if !reflect.DeepEqual(st.Env, want) {
+						t.Errorf("canary step env %v, want %v", st.Env, want)
+					}
+					for _, s := range []string{
+						`if [[ $ACTOR == *"[bot]" ]]; then`, `[[ $SHA =~ ^[0-9a-f]{40}$ ]]`,
+						`echo "max_minutes=$(( MAX < 60 ? MAX : 60 ))" >>"$GITHUB_OUTPUT"`,
+					} {
+						if !strings.Contains(st.Run, s) {
+							t.Errorf("canary step lacks %q", s)
+						}
+					}
+				case st.ID == "rbe-worker":
+					at["fetch"] = i
+				case strings.Contains(st.Run, "h5.sh"):
+					at["h5"] = i
+					if st.If != "inputs.rbe_worker_sha != ''" || st.Env["GH_TOKEN"] != "${{ github.token }}" ||
+						st.Env["PIN_SHA"] != "${{ steps.rbe-worker.outputs.pin }}" || st.Env["NEW_SHA"] != "${{ steps.rbe-worker.outputs.sha }}" {
+						t.Errorf("h5 step if %q env %v", st.If, st.Env)
+					}
+					if !strings.Contains(st.Run, `merge-base --is-ancestor "$PIN_SHA" "$NEW_SHA"`) ||
+						!strings.Contains(st.Run, `.github/actions/rbe-worker/h5.sh "$WORKER_REPO_DIR/.." "$PIN_SHA" "$NEW_SHA"`) {
+						t.Errorf("h5 step run:\n%s", st.Run)
+					}
+				case strings.Contains(st.Run, "blacksmith-worker.sh") && at["first-worker-code"] == 0:
+					at["first-worker-code"] = i
+				}
+			}
+			if at["canary"] >= at["fetch"] || at["fetch"] >= at["h5"] || at["h5"] >= at["first-worker-code"] {
+				t.Errorf("step order %v, want canary input, fetch, h5, then worker code", at)
+			}
+			// rbe_worker_sha reaches nothing but these: the run name, the
+			// canary step's env and the fetch's canary-sha.
+			if n := strings.Count(text, "inputs.rbe_worker_sha"); n != 8 {
+				t.Errorf("inputs.rbe_worker_sha referenced %d times, want 8 (run-name 2, canary if and env, the fetch's with, the H5 if, await-drift's if)", n)
+			}
+			// No drift job on a canary: a canary commit that measures
+			// something else would open a drift issue for the pin, which caps
+			// both pools and fails remote-mode PRs until closed by hand.
+			// report-drift needs await-drift, so it skips too.
+			var jobs struct {
+				Jobs map[string]struct {
+					If    string `yaml:"if"`
+					Needs any    `yaml:"needs"`
+				} `yaml:"jobs"`
+			}
+			if err := yaml.Unmarshal([]byte(text), &jobs); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasSuffix(jobs.Jobs["await-drift"].If, " && inputs.rbe_worker_sha == ''") {
+				t.Errorf("await-drift if %q: must skip a canary", jobs.Jobs["await-drift"].If)
+			}
+			if jobs.Jobs["report-drift"].Needs != "await-drift" || !strings.Contains(jobs.Jobs["report-drift"].If, "needs.await-drift.outputs.drift == 'true'") {
+				t.Errorf("report-drift needs %v if %q: must follow await-drift", jobs.Jobs["report-drift"].Needs, jobs.Jobs["report-drift"].If)
+			}
+		})
 	}
 }

@@ -242,6 +242,7 @@ func (h *RuntimeHandle) State(context.Context) (State, error) {
 		state.Phase = PhaseStopped
 		return state, nil
 	}
+	state.Program = ProgramStatusOf(h.provider, h.sessionName)
 	pending, err := h.Pending(context.Background())
 	if err != nil {
 		return State{}, err
@@ -249,6 +250,10 @@ func (h *RuntimeHandle) State(context.Context) (State, error) {
 	if pending != nil {
 		state.Phase = PhaseBlocked
 		state.Pending = pending
+		return state, nil
+	}
+	if phase, decided := ProgramPhase(state.Program); decided {
+		state.Phase = phase
 		return state, nil
 	}
 	state.Phase = PhaseReady
@@ -626,6 +631,9 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 	if !ok {
 		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredProviderUnsupported}, nil
 	}
+	// Under the program-status shadow switch, the pre-read a wait-idle
+	// delivery would take is recorded beside the record; nothing reads it.
+	runtime.ShadowWaitIdlePreread(h.provider, h.sessionName, "", h.providerName, time.Now())
 	// A pre-read first: a session that reads busy, or whose input a pending
 	// interaction owns, will not reach a boundary within the wait, so the
 	// caller queues it now instead of blocking for runtimeHandleWaitIdleTimeout.

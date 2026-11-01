@@ -514,7 +514,10 @@ func drainReminderQuietHold(sp runtime.Provider, store beads.Store, info session
 	// A reminder typed into an open dialog (a permission prompt or an
 	// AskUserQuestion question) would answer it, and a refused attempt still
 	// spends budget, so hold before the marker is written.
-	if pendingInteractionBlocked(sp, name) {
+	blocked := pendingInteractionBlocked(sp, name)
+	shadowHold(sp, name, info.ID, sessions.ProviderFamilyFromInfo(info, ""),
+		runtime.ProgramPointDrainReminder, blocked, now, runtime.ProgramBlockedHoldVerdict)
+	if blocked {
 		if noteDrainReminderHold(store, info, drainReminderHoldPending) {
 			fmt.Fprintf(stdout, //nolint:errcheck // best-effort
 				"%s: holding the drain reminder for %s: it is waiting on a dialog that is answered in the terminal\n",

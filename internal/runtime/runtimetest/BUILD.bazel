@@ -9,6 +9,7 @@ go_library(
     name = "runtimetest",
     srcs = [
         "conformance.go",
+        "contracts.go",
         "dolt_env.go",
         "program_status.go",
         "program_status_fake.go",
@@ -27,6 +28,7 @@ go_test(
     name = "runtimetest_test",
     srcs = [
         "conformance_test.go",
+        "contracts_test.go",
         "program_status_test.go",
         "testenv_import_test.go",
     ],

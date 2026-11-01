@@ -115,7 +115,7 @@ func NewConfigValidCheck(cfg *config.City) *ConfigValidCheck {
 func (c *ConfigValidCheck) Name() string { return "config-valid" }
 
 // Run validates agents and rigs in the config.
-func (c *ConfigValidCheck) Run(_ *CheckContext) *CheckResult {
+func (c *ConfigValidCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	if err := config.ValidateAgents(c.cfg.Agents); err != nil {
 		r.Status = StatusError
@@ -123,6 +123,15 @@ func (c *ConfigValidCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 	if err := config.ValidateRigs(c.cfg.Rigs, config.EffectiveHQPrefix(c.cfg)); err != nil {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("rig validation: %v", err)
+		return r
+	}
+	cityPath := ""
+	if ctx != nil {
+		cityPath = ctx.CityPath
+	}
+	if err := config.ValidateRigFederationLayout(cityPath, c.cfg); err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("rig validation: %v", err)
 		return r
@@ -140,6 +149,11 @@ func (c *ConfigValidCheck) Run(_ *CheckContext) *CheckResult {
 	if err := workspacesvc.ValidateRuntimeSupport(c.cfg.Services); err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("service validation: %v", err)
+		return r
+	}
+	if warnings := config.RigFederationWarnings(c.cfg.Rigs); len(warnings) > 0 {
+		r.Status = StatusWarning
+		r.Message = "agents, rigs, and services valid; " + strings.Join(warnings, "; ")
 		return r
 	}
 	r.Status = StatusOK

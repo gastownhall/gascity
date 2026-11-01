@@ -667,7 +667,7 @@ export const replyMail = <ThrowOnError extends boolean = false>(options: Options
 /**
  * Trigger a Dolt store maintenance run
  *
- * Trigger a one-off maintenance cycle (dolt backup + CALL DOLT_GC + smoke test). Default async (202); ?wait=true blocks until completion (200). Returns 409 when a run is already in flight.
+ * Trigger a one-off maintenance cycle. The loop is observe-only for now: the cycle runs the disk-space pre-flight and records run history and events, but takes no backup snapshot and runs no CALL DOLT_GC, so a completed run does not mean the store was compacted. Default async (202); ?wait=true blocks until completion (200). Returns 409 when a run is already in flight.
  */
 export const triggerMaintenanceDoltGc = <ThrowOnError extends boolean = false>(options: Options<TriggerMaintenanceDoltGcData, ThrowOnError>) => (options.client ?? client).post<TriggerMaintenanceDoltGcResponses, TriggerMaintenanceDoltGcErrors, ThrowOnError>({ url: '/v0/city/{cityName}/maintenance/dolt-gc', ...options });
 
@@ -1137,7 +1137,7 @@ export const postV0CityByCityNameSessionByIdRename = <ThrowOnError extends boole
 /**
  * Post v0 city by city name session by ID reset
  *
- * Requests a fresh restart of an existing session: the session bead is kept, and the controller restarts the runtime on the next continuation epoch, so the provider starts a new conversation instead of resuming the previous one. The call records the request and pokes the controller; it returns before the restart happens. A closed session returns 409. For a named session, the controller clears a tripped respawn circuit breaker when its next tick consumes the restart request through the restart path. Unlike `gc session reset`, this endpoint does not clear the breaker synchronously, so the clear does not happen if the controller never processes the request, and it also does not happen when a session drain-acks in the same window: the drain-ack path consumes the restart request without touching the breaker. Use `gc session reset` when clearing the breaker is itself the goal. This endpoint always requests an in-place restart. Unlike `gc session reset`, it never rolls back an unfinished create, so a session wedged mid-create is retried in place instead of being replaced; use `gc session reset` to roll one back.
+ * Requests a fresh restart of an existing session: the session bead is kept, and the controller restarts the runtime on the next continuation epoch, so the provider starts a new conversation instead of resuming the previous one. The call records the request and pokes the controller; it returns before the restart happens. A closed session returns 409. 409 session-conflict also refuses a session in a state the controller skips; the detail names the raw state and `gc session close`, the command that releases the row. For a named session, the controller clears a tripped respawn circuit breaker when its next tick consumes the restart request through the restart path. Unlike `gc session reset`, this endpoint does not clear the breaker synchronously, so the clear does not happen if the controller never processes the request, and it also does not happen when a session drain-acks in the same window: the drain-ack path consumes the restart request without touching the breaker. Use `gc session reset` when clearing the breaker is itself the goal. This endpoint always requests an in-place restart. Unlike `gc session reset`, it never rolls back an unfinished create, so a session wedged mid-create is retried in place instead of being replaced; use `gc session reset` to roll one back.
  */
 export const postV0CityByCityNameSessionByIdReset = <ThrowOnError extends boolean = false>(options: Options<PostV0CityByCityNameSessionByIdResetData, ThrowOnError>) => (options.client ?? client).post<PostV0CityByCityNameSessionByIdResetResponses, PostV0CityByCityNameSessionByIdResetErrors, ThrowOnError>({ url: '/v0/city/{cityName}/session/{id}/reset', ...options });
 
@@ -1170,7 +1170,7 @@ export const postV0CityByCityNameSessionByIdStop = <ThrowOnError extends boolean
 /**
  * Stream session output in real time
  *
- * Server-Sent Events stream of session transcript updates. Streams turns (conversation format), raw messages (JSONL format), or structured messages based on the format query parameter. Emits activity and pending events for tool approval prompts.
+ * Server-Sent Events stream of session transcript updates. Streams turns (conversation format), raw messages (JSONL format), or structured messages based on the format query parameter. Emits activity and pending events for tool approval prompts, and a program_status event when the session program's own reported status changes (only while the city's program_status switch is shadow or on; a frame without program_status means the status became unknown).
  */
 export const streamSession = <ThrowOnError extends boolean = false>(options: Options<StreamSessionData, ThrowOnError, StreamSessionResponse>) => (options.client ?? client).sse.get<StreamSessionResponses, StreamSessionErrors, ThrowOnError>({ url: '/v0/city/{cityName}/session/{id}/stream', ...options });
 
@@ -1213,7 +1213,7 @@ export const postV0CityByCityNameSessionByIdUnpin = <ThrowOnError extends boolea
 /**
  * Post v0 city by city name session by ID wake
  *
- * Records an explicit wake and asks the controller to start the session; the API never starts the runtime itself. 409 wake-will-not-start means the wake is recorded but the controller will not act on it (no runnable template, a dependency-only or drained pool session, a suspended city, rig or agent, a demand-only singleton, an abandoned create, an open circuit breaker, a startup-health quarantine, or an idle latch); the detail names the remedy. `gc session wake` applies the same rules.
+ * Records an explicit wake and asks the controller to start the session; the API never starts the runtime itself. 409 wake-will-not-start means the wake is recorded but the controller will not act on it (no runnable template, a dependency-only or drained pool session, a suspended city, rig or agent, a demand-only singleton, an abandoned create, an open circuit breaker, a startup-health quarantine, or an idle latch); the detail names the remedy. 409 session-conflict refuses a session in a state the controller skips before anything is written; the detail names the raw state and `gc session close`, the command that releases the row. `gc session wake` applies the same rules.
  */
 export const postV0CityByCityNameSessionByIdWake = <ThrowOnError extends boolean = false>(options: Options<PostV0CityByCityNameSessionByIdWakeData, ThrowOnError>) => (options.client ?? client).post<PostV0CityByCityNameSessionByIdWakeResponses, PostV0CityByCityNameSessionByIdWakeErrors, ThrowOnError>({ url: '/v0/city/{cityName}/session/{id}/wake', ...options });
 

@@ -100,6 +100,7 @@ TestSlingDefaultFormulaReceivesTitleAndVars	fails under the gate: no step titled
 TestSlingGraphV2RejectsLegacySourceWorkflowConflict	fails under the gate: status = 200, want 409; body = {"status":"slung","target":"myrig/worker","formula":"graph-work","workflow_id":"gcg-4","root_bead_id":"gcg-4","attached_bead_id":
 TestSlingStandaloneFormulaOnASingleStoreCityRigTargetMintsTheRootInTheRigStore	fails under the gate: fixture is not a single-store city
 TestSourceWorkflowStoresOmitsGraphLegOnSingleStoreCity	fails under the gate: fixture is not a single-store city
+TestStatusFullBuildRetriesACheapStoreHealthFailure	fails under the gate: the gate's work view hides beads.Counter, so the row count takes the list fallback and the counter's transient failure is never reached
 TestStatusSessionSnapshotStoreIdentity	fails under the gate: read store = 0x17fdf963cf40, want CityBeadStore 0x17fdf963cfa0 — a city that relocates nothing must stay byte-identical
 TestWaitInspect_ExistingNonWaitIsWaitNotFound	fails under the gate: detail = "not_found: t-1", want not_a_wait: prefix
 TestWaitInspect_NoStoreIsServiceUnavailable	fails under the gate: status = 404, want 503; body="{\"type\":\"urn:gascity:error:wait-not-found\",\"title\":\"Wait Not Found\",\"status\":404,\"detail\":\"not_found: w-any\",\"code\

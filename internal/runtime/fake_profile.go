@@ -28,11 +28,14 @@ const (
 	ProfileExec
 	ProfileSSH
 	ProfileT3Bridge
+	// ProfileExecV2 is ProfileExec for a pack whose handshake also declares
+	// observe.v1 and report-attachment: v2-ready.
+	ProfileExecV2
 )
 
 // String is the profile's runtime selection name.
 func (p Profile) String() string {
-	return [...]string{"tmux", "acp", "subprocess", "herdr", "k8s", "exec", "ssh", "t3bridge"}[p]
+	return [...]string{"tmux", "acp", "subprocess", "herdr", "k8s", "exec", "ssh", "t3bridge", "exec"}[p]
 }
 
 // ProfileBackend is every optional interface a profiled backend implements
@@ -66,7 +69,9 @@ type ProfileBackend interface {
 	LivenessObserverWithError
 	ProcessTableScanner
 	ProgramCaptureHealer
+	ProgramStatusHoldProvider
 	ProgramStatusProvider
+	ProgramStatusShadowProvider
 	RelaunchProvider
 	ServerDeathConfirmer
 	ServerLifecycleProvider
@@ -88,7 +93,46 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	core, timed := profileProvider{b, profileCapabilities[p]}, sleepTrait{SessionSleepCapabilityTimedOnly}
 	switch p {
 	case ProfileTmux:
-		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}, localTranscriptTrait{}, steerTrait{SteerKeystroke}}
+		// Keyed, one interface per line: a branch adding an interface then
+		// merges with another branch adding one without a silent miscount.
+		return tmuxProfile{
+			Provider:                      core,
+			AttachmentObserverWithError:   b,
+			BackgroundWorkStopper:         b,
+			DeadRuntimeSessionChecker:     b,
+			DialogProvider:                b,
+			EnvironmentBatchProvider:      b,
+			FencedInputProvider:           b,
+			FencedInteractionProvider:     b,
+			FreshActivityProvider:         b,
+			FreshLivenessObserver:         b,
+			IdleSnapshotProvider:          b,
+			IdleWaitProvider:              b,
+			ImmediateNudgeProvider:        b,
+			InputClearProvider:            b,
+			InteractionProvider:           b,
+			InterruptBoundaryWaitProvider: b,
+			InterruptedTurnResetProvider:  b,
+			InventoryProvider:             b,
+			ListingAttestation:            b,
+			LivenessObserver:              b,
+			LivenessObserverWithError:     b,
+			ProcessTableScanner:           b,
+			ProgramCaptureHealer:          b,
+			ProgramStatusHoldProvider:     b,
+			ProgramStatusProvider:         b,
+			ProgramStatusShadowProvider:   b,
+			RelaunchProvider:              b,
+			ServerDeathConfirmer:          b,
+			ServerLifecycleProvider:       b,
+			SessionObjectKiller:           b,
+			SessionRosterProvider:         b,
+			TurnRunningProvider:           b,
+			UnattendedSessionStopper:      b,
+			sleepTrait:                    sleepTrait{SessionSleepCapabilityFull},
+			localTranscriptTrait:          localTranscriptTrait{},
+			steerTrait:                    steerTrait{SteerKeystroke},
+		}
 	case ProfileACP:
 		return acpProfile{core, b, b, b, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}, localTranscriptTrait{}}
 	case ProfileSubprocess:
@@ -96,9 +140,9 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileHerdr:
 		return herdrProfile{core, b, b, b, b, b, localTranscriptTrait{}}
 	case ProfileK8s:
-		return k8sProfile{core, b, b, timed}
-	case ProfileExec:
-		return execProfile{core, b, b, b, b, b, timed, probeBudgetTrait{}}
+		return k8sProfile{core, b, b, timed, sharedListingTrait{}}
+	case ProfileExec, ProfileExecV2:
+		return execProfile{core, b, b, b, b, b, timed, probeBudgetTrait{}, execObserveTrait{core, b, p == ProfileExecV2}}
 	case ProfileSSH:
 		return sshProfile{core, b, b, b, timed}
 	case ProfileT3Bridge:
@@ -113,6 +157,7 @@ type (
 	freshTrait         struct{}                  // acp and subprocess probe their control socket on every read
 	sidecarTrait       struct{}                  // acp and subprocess keep identity in a local sidecar
 	transportTrait     struct{}                  // acp's
+	sharedListingTrait struct{}                  // k8s lists every gc-agent pod in its namespace
 	probeBudgetTrait   struct{ d time.Duration } // exec's idle-proof budget: zero without the idle boundary, which the profile does not declare
 	turnInterruptTrait struct{ m TurnInterruptMode }
 	steerTrait         struct{ m SteerMode }
@@ -137,11 +182,13 @@ func (sidecarTrait) LocalIdentitySidecar() bool { return true }
 
 func (transportTrait) SupportsTransport(transport string) bool { return transport == "acp" }
 
+func (sharedListingTrait) ListRunningShared() bool { return true }
+
 // profileCapabilities are each backend's static capabilities; subprocess
 // has none. exec's come from its script's handshake: the profile is a pack
 // declaring the exec connection and input fencing (proc.exec, input-fence)
 // alone, which reports none of these and fences input atomically through
-// the tmux carrier.
+// the tmux carrier; exec v2 adds observe.v1 and report-attachment.
 var profileCapabilities = map[Profile]ProviderCapabilities{
 	ProfileTmux:     {CanReportAttachment: true, CanReportActivity: true},
 	ProfileACP:      {CanReportActivity: true},
@@ -149,6 +196,7 @@ var profileCapabilities = map[Profile]ProviderCapabilities{
 	ProfileK8s:      {CanReportActivity: true},
 	ProfileSSH:      {CanReportActivity: true, CanAttachTTY: true},
 	ProfileT3Bridge: {CanReportActivity: true},
+	ProfileExecV2:   {CanReportAttachment: true},
 }
 
 // profileProvider is a backend's Provider surface with its capabilities.
@@ -185,7 +233,9 @@ type (
 		LivenessObserverWithError
 		ProcessTableScanner
 		ProgramCaptureHealer
+		ProgramStatusHoldProvider
 		ProgramStatusProvider
+		ProgramStatusShadowProvider
 		RelaunchProvider
 		ServerDeathConfirmer
 		ServerLifecycleProvider
@@ -241,6 +291,7 @@ type (
 		ListingAttestation
 		RelaunchProvider
 		sleepTrait
+		sharedListingTrait
 	}
 	execProfile struct {
 		Provider
@@ -251,6 +302,7 @@ type (
 		RelaunchProvider
 		sleepTrait
 		probeBudgetTrait
+		execObserveTrait
 	}
 	sshProfile struct {
 		Provider
@@ -299,6 +351,103 @@ var t3bridgeTurnCapabilities = TurnCapabilities{
 // static row; TurnHistory stays forwarded to the backend.
 func (t3bridgeProfile) TurnCapabilities(string) TurnCapabilities {
 	return t3bridgeTurnCapabilities
+}
+
+// execObserveTrait is exec's observe.v1 surface, gated as the exec provider
+// gates it on its handshake. Ready (ProfileExecV2), the reads, kills,
+// listing and inventory are the backend's, and the identity is its GetMeta
+// of the identity keys for a name its liveness read shows present, a
+// corpse included, as exec's `observe` reports a dead box's identity.
+// Otherwise (ProfileExec) liveness is the IsRunning and ProcessAlive read
+// with a nil error, nothing reads fresh or observes identity, nothing is
+// killed, no inventory is served or listing attested, and readiness names
+// both missing capabilities.
+type execObserveTrait struct {
+	core  Provider
+	b     ProfileBackend
+	ready bool
+}
+
+func (t execObserveTrait) ObserveLivenessWithError(name string, processNames []string) (Liveness, error) {
+	if !t.ready {
+		return ObserveLiveness(struct{ Provider }{t.core}, name, processNames), nil
+	}
+	return t.b.ObserveLivenessWithError(name, processNames)
+}
+
+func (t execObserveTrait) LivenessReadsFresh() bool { return t.ready }
+
+func (t execObserveTrait) InventoryAvailable() bool { return t.ready }
+
+func (t execObserveTrait) ListRunningComplete() bool { return t.ready }
+
+func (t execObserveTrait) ListInventory(prefix string) ([]string, map[string]InventoryEntry, error) {
+	if !t.ready {
+		return nil, nil, ErrRuntimeUnavailable
+	}
+	names, err := t.core.ListRunning(prefix)
+	if err != nil && !IsPartialListError(err) {
+		return nil, nil, err
+	}
+	inv, invErr := t.b.RuntimeInventory(context.Background())
+	if invErr != nil {
+		return nil, nil, invErr
+	}
+	return names, inv, err
+}
+
+func (t execObserveTrait) RuntimeInventory(ctx context.Context) (map[string]InventoryEntry, error) {
+	if !t.ready {
+		return nil, ErrRuntimeUnavailable
+	}
+	return t.b.RuntimeInventory(ctx)
+}
+
+func (t execObserveTrait) IdentityObservable() bool { return t.ready }
+
+func (t execObserveTrait) ObserveIdentity(name string) (map[string]string, error) {
+	if !t.ready {
+		return nil, ErrRuntimeUnavailable
+	}
+	lv, err := t.b.ObserveLivenessWithError(name, nil)
+	if err != nil {
+		return nil, errors.Join(ErrRuntimeUnavailable, err)
+	}
+	if !lv.Present() {
+		return nil, ErrSessionNotFound
+	}
+	id := map[string]string{}
+	for _, key := range []string{"GC_SESSION_ID", "GC_RUNTIME_EPOCH", "GC_INSTANCE_TOKEN", "GT_PROCESS_NAMES"} {
+		v, err := t.b.GetMeta(name, key)
+		if err != nil {
+			return nil, errors.Join(ErrRuntimeUnavailable, err)
+		}
+		if v != "" {
+			id[key] = v
+		}
+	}
+	return id, nil
+}
+
+func (t execObserveTrait) KillCorpseObject(name, objectID, created string) (SessionObjectKillResult, error) {
+	if !t.ready {
+		return SessionObjectNotKilled, ErrSessionObjectKillUnsupported
+	}
+	return t.b.KillCorpseObject(name, objectID, created)
+}
+
+func (t execObserveTrait) KillZombieObject(name, objectID, created, panePID string) (SessionObjectKillResult, error) {
+	if !t.ready {
+		return SessionObjectNotKilled, ErrSessionObjectKillUnsupported
+	}
+	return t.b.KillZombieObject(name, objectID, created, panePID)
+}
+
+func (t execObserveTrait) V2Readiness() ([]string, error) {
+	if t.ready {
+		return nil, nil
+	}
+	return []string{ProtocolCapabilityObserveV1, ProtocolCapabilityReportAttachment}, nil
 }
 
 // FullFake is a [Fake] implementing every [ProfileBackend] interface, the

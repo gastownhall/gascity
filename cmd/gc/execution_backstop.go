@@ -415,8 +415,9 @@ func holdIs(s beads.Bead, reason string) bool {
 }
 
 // escalatesNext reports whether the engine's next action on s, given its
-// pacing, is the terminal escalation (exhausted): the attempts are spent, or a
-// nudge is due with no content to deliver, which the engine escalates at once.
+// pacing, is the terminal escalation (exhausted): the attempts are spent and
+// the last one's backoff has passed, or a nudge is due with no content to
+// deliver, which the engine escalates at once.
 // The second mirrors runNudgeBackstop's empty-content shortcut; change the two
 // in lockstep.
 func (p poolExecutionBackstop) escalatesNext(s beads.Bead, attempts int, last time.Time) bool {
@@ -440,7 +441,10 @@ func (p poolExecutionBackstop) escalatesNext(s beads.Bead, attempts int, last ti
 // storms. The snapshot is taken only once activity is stale, so a session still
 // producing output costs no pane capture.
 func (p poolExecutionBackstop) quietHold(s beads.Bead, sessName string) string {
-	return sessionQuietHold(p.sp, s, sessName, p.now, snapshotHoldFor)
+	hold := sessionQuietHold(p.sp, s, sessName, p.now, snapshotHoldFor)
+	shadowHold(p.sp, sessName, s.ID, sessionpkg.ProviderFamilyFromMetadata(s.Metadata, ""),
+		runtime.ProgramPointExecutionBackstop, hold != "", p.now, runtime.ProgramHoldVerdict)
+	return hold
 }
 
 // sessionQuietHold is quietHold for any backstop: the hold that keeps sp's
@@ -653,6 +657,17 @@ func (p poolExecutionBackstop) markStarted(s *beads.Bead, beadID string) bool {
 }
 
 func (p poolExecutionBackstop) observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer) {
+	// A new claim, or a new incarnation, starts without the old latch. A
+	// failed clear leaves the window unopened, so the next pass observes
+	// again rather than opening the new window under the old latch.
+	if s.Metadata[executionClaimNudgeStalledKey] != "" || s.Metadata[executionClaimNudgeStalledTokenKey] != "" {
+		if !writeSessionMetadata(store, s, map[string]string{
+			executionClaimNudgeStalledKey:      "",
+			executionClaimNudgeStalledTokenKey: "",
+		}, executionClaimNudgeLabel, stdout) {
+			return
+		}
+	}
 	writeExecutionClaimMarker(store, s, target, 0, now, stdout)
 }
 

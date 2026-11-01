@@ -40,8 +40,9 @@ type LifecycleHandle interface {
 	Stop(context.Context, sessionpkg.Actor) error
 	// StopForShutdown is Stop with CITY-SHUTDOWN intent (an ActorSweep), for
 	// the `gc stop` / `gc restart` sweep only. It carries latitude on lifecycle
-	// states that have no live turn to suspend (notably draining), which a
-	// targeted operator Stop must keep rejecting.
+	// states that have no live turn to suspend (a draining row, and a creating
+	// row whose start has not committed), which a targeted operator Stop must
+	// keep rejecting: it tears their runtime down and writes nothing to the row.
 	StopForShutdown(context.Context) error
 	// StopIdle is Stop for the chat idle auto-suspend: the operator's
 	// transition rules, no operator hold.
@@ -164,6 +165,11 @@ type State struct {
 	Provider    string              `json:"provider,omitempty"`
 	Detail      string              `json:"detail,omitempty"`
 	Pending     *PendingInteraction `json:"pending,omitempty"`
+	// Program is the session program's own judged OSC 7501 status, read
+	// while the runtime is live. The zero (Unread) reading means unknown,
+	// never idle. It decides Phase only when Program.Decides()
+	// (ProgramPhase); its counters, nonce and annotations stay internal.
+	Program runtime.ProgramStatus `json:"-"`
 }
 
 // DeliveryIntent controls how a message should be delivered.

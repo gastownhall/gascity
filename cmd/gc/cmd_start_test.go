@@ -103,6 +103,29 @@ func TestPassthroughEnvPinsControllerTokenEmpty(t *testing.T) {
 	}
 }
 
+// The demand-spawn keys are GC_-prefixed too, so the sweep would copy a
+// controller's own GC_TRIGGER_* (a supervisor started from an agent's pane
+// carries that pane's) over the pin and hand every session another
+// session's trigger id (gastownhall/gascity#5738).
+func TestPassthroughEnvWithholdsInheritedDemandSpawnEnv(t *testing.T) {
+	keys := []string{"GC_SPAWN_ORIGIN", "GC_TRIGGER_BEAD_ID", "GC_TRIGGER_WORK_BEAD_ID", "GC_TRIGGER_BEAD_STORE_REF", "GC_TRIGGER_WORK_STORE_REF"}
+	for _, key := range keys {
+		t.Setenv(key, "ga-foreign")
+	}
+	t.Setenv("GC_BEADS", "file")
+
+	got := passthroughEnv()
+
+	for _, key := range keys {
+		if val, ok := got[key]; !ok || val != "" {
+			t.Errorf("passthroughEnv()[%s] = (%q, present=%v), want (\"\", true) so the session cannot inherit the controller's copy", key, val, ok)
+		}
+	}
+	if got["GC_BEADS"] != "file" {
+		t.Errorf("passthroughEnv()[GC_BEADS] = %q, want %q (the exclusion must be by exact name)", got["GC_BEADS"], "file")
+	}
+}
+
 // A non-GC_-prefixed var is invisible to agent sessions by default — the
 // prefix sweep alone would never forward it, and nothing else short of
 // [workspace.env] does either.

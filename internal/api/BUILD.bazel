@@ -14,6 +14,7 @@ go_library(
         "city_scope.go",
         "client.go",
         "client_remote.go",
+        "client_session_peek.go",
         "client_waits.go",
         "client_work.go",
         "client_work_step.go",
@@ -29,6 +30,7 @@ go_library(
         "decode_maintenance.go",
         "decode_orders.go",
         "decode_rigs.go",
+        "decode_session_list.go",
         "decode_sessions.go",
         "decode_status.go",
         "effective_api_url.go",
@@ -139,10 +141,14 @@ go_library(
         "pack_source_policy.go",
         "pagination.go",
         "partial_errors.go",
+        "partial_list_error.go",
         "pending_interactions.go",
+        "principal.go",
+        "program_status.go",
         "readauth.go",
         "request_id.go",
         "request_outcome.go",
+        "request_session_listing.go",
         "residency_by_id.go",
         "residency_create.go",
         "residency_topology.go",
@@ -164,6 +170,7 @@ go_library(
         "session_lane_ops.go",
         "session_manager.go",
         "session_ops.go",
+        "session_peek_strict.go",
         "session_resolution.go",
         "session_resolved_config.go",
         "session_runtime.go",
@@ -297,7 +304,9 @@ go_test(
         "class_store_test.go",
         "client_extmsg_test.go",
         "client_remote_test.go",
+        "client_session_peek_test.go",
         "client_sling_test.go",
+        "client_status_test.go",
         "client_test.go",
         "client_timeout_test.go",
         "client_waits_test.go",
@@ -308,14 +317,16 @@ go_test(
         "coordination_pour_test.go",
         "cors_test.go",
         "cursor_token_test.go",
+        "dashport_support_stores_test.go",
         "decode_beads_test.go",
         "decode_convoys_test.go",
         "decode_mail_test.go",
         "decode_maintenance_test.go",
         "decode_orders_test.go",
         "decode_rigs_test.go",
-        "decode_sessions_test.go",
+        "decode_session_list_test.go",
         "decode_status_test.go",
+        "decode_status_view_proxied_test.go",
         "effective_api_url_test.go",
         "enqueue_keys_test.go",
         "event_payloads_1a_test.go",
@@ -380,6 +391,7 @@ go_test(
         "handler_provider_crud_test.go",
         "handler_provider_readiness_test.go",
         "handler_rig_crud_test.go",
+        "handler_rigs_latency_test.go",
         "handler_rigs_test.go",
         "handler_services_test.go",
         "handler_session_agents_test.go",
@@ -399,9 +411,11 @@ go_test(
         "handler_sling_test.go",
         "handler_status_bench_test.go",
         "handler_status_count_test.go",
+        "handler_status_fresh_test.go",
         "handler_status_pool_identity_test.go",
         "handler_status_scoped_store_test.go",
         "handler_status_session_class_test.go",
+        "handler_status_session_id_test.go",
         "handler_status_suspended_city_test.go",
         "handler_status_suspended_ready_test.go",
         "handler_status_test.go",
@@ -431,6 +445,7 @@ go_test(
         "idempotency_session_create_test.go",
         "idempotency_session_stop_wake_test.go",
         "idempotency_test.go",
+        "initiator_test.go",
         "keyset_page_test.go",
         "logwatcher_test.go",
         "loopback_transport_test.go",
@@ -447,6 +462,8 @@ go_test(
         "pagination_dialect_guard_test.go",
         "pagination_test.go",
         "pending_interaction_queue_test.go",
+        "principal_test.go",
+        "program_status_test.go",
         "read_model_no_get_test.go",
         "readauth_test.go",
         "relic_census_state_test.go",
@@ -500,6 +517,7 @@ go_test(
         "session_model_phase0_spec_test.go",
         "session_ops_test.go",
         "session_ops_x12_test.go",
+        "session_peek_strict_test.go",
         "session_pending_check_test.go",
         "session_program_status_test.go",
         "session_provider_kind_test.go",
@@ -509,6 +527,7 @@ go_test(
         "session_resolution_precedence_test.go",
         "session_resolution_reserved_name_test.go",
         "session_resolved_config_test.go",
+        "session_response_list_fields_test.go",
         "session_response_wire_test.go",
         "session_running_state_test.go",
         "session_starting_error_test.go",
@@ -525,6 +544,7 @@ go_test(
         "split_strict_gate_test.go",
         "sse_cancel_test.go",
         "state_class_accessors_test.go",
+        "status_build_cost_test.go",
         "status_graph_ready_test.go",
         "store_health_rows_measured_test.go",
         "store_health_test.go",
@@ -642,12 +662,12 @@ go_test(
 # The split-strict projection gate (internal/beads/splittest/projection.go):
 # api_test with GC_TEST_SPLIT_STRICT=1, so every fakeState work accessor hands
 # out a view of the city store that hides infrastructure rows and every class
-# accessor one that hides work rows. Non-blocking for now: manual, so //...
-# skips it, and bazel.yml's evidence-only split-strict lane runs it. TestMain
-# fails the run on a violation site testdata/split_strict_baseline.tsv does not
-# list (the ratchet), and on a failing test testdata/split_strict_known_failures.list
-# does not list; it reports the two apart. It becomes required before new
-# cities default to split.
+# accessor one that hides work rows. Manual, so //... skips it; bazel.yml's
+# split-strict lane runs it and gates (nightly, dispatch, and PRs touching the
+# storage paths). TestMain fails the run on a violation site
+# testdata/split_strict_baseline.tsv does not list (the ratchet), and on a
+# failing test testdata/split_strict_known_failures.list does not list; it
+# reports the two apart.
 go_variant_test(
     name = "api_split_strict_test",
     size = "large",

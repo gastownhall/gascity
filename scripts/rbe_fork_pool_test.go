@@ -70,8 +70,10 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 			t.Errorf("workflow_dispatch input %s = %v, want a string defaulting to %q", name, in, def)
 		}
 	}
-	if len(inputs) != 3 || inputs["role"] == nil {
-		t.Errorf("workflow_dispatch inputs %v, want idle_minutes, max_minutes and role (what the scaler sends)", rbeSortedKeys(inputs))
+	// And rbe_worker_sha, the canary commit (by hand, never the scaler:
+	// TestRBEPoolCanaryInput), empty by default.
+	if c, _ := inputs["rbe_worker_sha"].(map[string]any); len(inputs) != 4 || inputs["role"] == nil || c == nil || c["default"] != "" || c["type"] != "string" {
+		t.Errorf("workflow_dispatch inputs %v, want idle_minutes, max_minutes and role (what the scaler sends) and rbe_worker_sha (empty)", rbeSortedKeys(inputs))
 	}
 	if len(wf.Permissions) != 1 || wf.Permissions["contents"] != "read" {
 		t.Errorf("permissions %v, want contents: read only", wf.Permissions)
@@ -124,7 +126,7 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 			"WORKER_TIER":          "fork",
 			"WORKER_MODE":          "pool",
 			"POOL_IDLE_MINUTES":    "${{ inputs.idle_minutes }}",
-			"POOL_MAX_MINUTES":     "${{ inputs.max_minutes }}",
+			"POOL_MAX_MINUTES":     "${{ steps.canary.outputs.max_minutes || inputs.max_minutes }}", // capped for a canary
 			"WORKER_NAME":          "gha-fork-${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}",
 			"RBE_ACTION_ISOLATION": "1",
 			// The fetch step's outputs.
@@ -140,6 +142,12 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 			// off unless the repository variable names it; one run in N.
 			"RBE_WARM_URL":   "${{ vars.RBE_FORK_WARM_URL || '' }}",
 			"RBE_WARM_EVERY": "${{ vars.RBE_FORK_WARM_EVERY || '1' }}",
+			// The read-only R2 hot tier (needs zstd): off unless the repository
+			// variable names it; the same run-id parity as the warm set.
+			"RBE_HOT_URL":   "${{ vars.RBE_FORK_HOT_URL || '' }}",
+			"RBE_HOT_EVERY": "${{ vars.RBE_FORK_HOT_EVERY || '1' }}",
+			// The local CAS cap: empty is the script's 150 GB default.
+			"CAS_MAX_BYTES": "${{ vars.RBE_FORK_CAS_MAX_BYTES || '' }}",
 		}
 		for k, v := range want {
 			if step.Env[k] != v {
@@ -158,9 +166,10 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 
 	// No secret but the fork worker certificate (never the OSS worker's, which
 	// writes AC_OSS), and no repository variables but RBE_FORK_WIRE_ZSTD,
-	// RBE_FORK_WIRE_ZSTD_READ_URL, RBE_FORK_WARM_URL and RBE_FORK_WARM_EVERY
-	// (pinned above): none can turn isolation down, and none picks the worker
-	// code (always the pin).
+	// RBE_FORK_WIRE_ZSTD_READ_URL, RBE_FORK_WARM_URL, RBE_FORK_WARM_EVERY,
+	// RBE_FORK_HOT_URL, RBE_FORK_HOT_EVERY and RBE_FORK_CAS_MAX_BYTES (pinned
+	// above): none can turn isolation down, and none picks the worker code
+	// (always the pin).
 	secrets := map[string]bool{}
 	for _, m := range regexp.MustCompile(`secrets\.([A-Za-z0-9_]+)`).FindAllStringSubmatch(text, -1) {
 		secrets[m[1]] = true
@@ -168,16 +177,16 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 	if got := rbeSortedKeys(secrets); strings.Join(got, ",") != "RBE_FORK_WORKER_TLS_CERT,RBE_FORK_WORKER_TLS_KEY" {
 		t.Errorf("%s uses secrets %v, want RBE_FORK_WORKER_TLS_CERT and RBE_FORK_WORKER_TLS_KEY only", rbeForkPoolWorkflow, got)
 	}
-	if n := strings.Count(text, "vars."); n != 4 || !strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD ") ||
+	if n := strings.Count(text, "vars."); n != 7 || !strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD ") ||
 		!strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD_READ_URL ") || !strings.Contains(text, "vars.RBE_FORK_WARM_URL ") ||
-		!strings.Contains(text, "vars.RBE_FORK_WARM_EVERY ") {
-		t.Errorf("%s reads repository variables %d times; want RBE_FORK_WIRE_ZSTD, RBE_FORK_WIRE_ZSTD_READ_URL, RBE_FORK_WARM_URL and RBE_FORK_WARM_EVERY once each, nothing else", rbeForkPoolWorkflow, n)
+		!strings.Contains(text, "vars.RBE_FORK_WARM_EVERY ") || !strings.Contains(text, "vars.RBE_FORK_HOT_URL ") ||
+		!strings.Contains(text, "vars.RBE_FORK_HOT_EVERY ") || !strings.Contains(text, "vars.RBE_FORK_CAS_MAX_BYTES ") {
+		t.Errorf("%s reads repository variables %d times; want RBE_FORK_WIRE_ZSTD, RBE_FORK_WIRE_ZSTD_READ_URL, RBE_FORK_WARM_URL, RBE_FORK_WARM_EVERY, RBE_FORK_HOT_URL, RBE_FORK_HOT_EVERY and RBE_FORK_CAS_MAX_BYTES once each, nothing else", rbeForkPoolWorkflow, n)
 	}
 }
 
-// rbe-west's pool scalers count floor workers by run name (infra
-// nativelink-cas/west oss-pool-scaler.py ROLE_TITLE, README "Pool scalers:
-// floor and burst roles"): each pool workflow takes input role, a choice of
+// The run name says a worker's role, for people (no scaler reads it):
+// each pool workflow takes input role, a choice of
 // burst (the default: CI pre-warm and hand dispatches) or floor, and puts it
 // and idle_minutes in run-name. The worker never reads role; idle_minutes is
 // what changes its behavior.
@@ -196,7 +205,13 @@ func TestRBEPoolWorkflowsNameTheirRole(t *testing.T) {
 		if err := yaml.Unmarshal([]byte(text), &wf); err != nil {
 			t.Fatalf("parse %s: %v", tc.path, err)
 		}
-		if want := "${{ format('" + tc.name + " ({0}, idle {1}m)', inputs.role || 'burst', inputs.idle_minutes) }}"; wf.Name != tc.name || wf.RunName != want {
+		want := "${{ format('" + tc.name + " ({0}, idle {1}m)', inputs.role || 'burst', inputs.idle_minutes) }}"
+		if tc.path != rbeWorkerLegacyWorkflow {
+			// A canary (rbe_worker_sha) is named canary, never floor or
+			// burst, and names its commit (TestRBEPoolCanaryInput).
+			want = "${{ format('" + tc.name + " ({0}, idle {1}m){2}', inputs.rbe_worker_sha && 'canary' || inputs.role || 'burst', inputs.idle_minutes, inputs.rbe_worker_sha && format(' rbe-worker {0}', inputs.rbe_worker_sha) || '') }}"
+		}
+		if wf.Name != tc.name || wf.RunName != want {
 			t.Errorf("%s: name %q run-name %q, want %q and %q", tc.path, wf.Name, wf.RunName, tc.name, want)
 		}
 		dispatch, _ := wf.On["workflow_dispatch"].(map[string]any)
@@ -380,7 +395,7 @@ echo "error=$(grep -o 'mint refused (HTTP [0-9]*)' out.txt || true)" >>.bazelrc.
 			t.Fatal(err)
 		}
 		mintLog := filepath.Join(t.TempDir(), "mint.log")
-		got, _ := runBazelRCLocalStep(t, step, map[string]string{
+		got := runBazelRCLocalStep(t, step, map[string]string{
 			"PATH":                bin + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"GITHUB_OUTPUT":       ".bazelrc.local",
 			"RBE_TEST_SCRIPT":     filepath.Join(repoRoot(t), rbeForkCredential),

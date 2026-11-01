@@ -86,12 +86,14 @@ func newScratchServer(t *testing.T, kind string) string {
 	return socket
 }
 
-// captureProvider is a tmux provider on socket arming with companion.
+// captureProvider is a tmux provider on socket arming with companion, under
+// the switch on.
 func captureProvider(t *testing.T, socket, companion string) *Provider {
 	t.Helper()
 	cfg := DefaultConfig()
 	cfg.SocketName = socket
 	cfg.ProgramStatusBin = companion
+	cfg.ProgramStatus = runtime.ProgramStatusOn
 	cfg.NudgeIdleTimeout = 250 * time.Millisecond
 	return NewProviderWithConfig(cfg)
 }
@@ -407,7 +409,7 @@ func TestUnarmedRespawnRemovesPreviousCapture(t *testing.T) {
 	if err := p.Relaunch(context.Background(), name, cfg); err != nil {
 		t.Fatalf("Relaunch: %v", err)
 	}
-	for _, opt := range []string{programTapOption, programStatusOption, programTextOption} {
+	for _, opt := range []string{programTapOption, programStatusOption, programTextOption, programHoldOption} {
 		if got := paneOption(t, p, name, opt); got != "" {
 			t.Fatalf("after an unarmed respawn %s = %q, want unset", opt, got)
 		}
@@ -472,7 +474,7 @@ func TestRespawnUnderSwitchOffRemovesArmedCapture(t *testing.T) {
 	if err := p.Relaunch(context.Background(), name, cfg); err != nil {
 		t.Fatalf("Relaunch under off: %v", err)
 	}
-	for _, opt := range []string{programTapOption, programStatusOption, programTextOption} {
+	for _, opt := range []string{programTapOption, programStatusOption, programTextOption, programHoldOption} {
 		if got := paneOption(t, p, name, opt); got != "" {
 			t.Errorf("after a respawn under off %s = %q, want unset", opt, got)
 		}
@@ -696,7 +698,7 @@ func TestDisarmSweepDefersDeadPaneUntilRevived(t *testing.T) {
 			if n, deferred, err := p.DisarmProgramCaptures(); err != nil || n != disarmed || deferred != 0 {
 				t.Fatalf("DisarmProgramCaptures after the revive = %d, %d, %v; want %d disarmed and none deferred", n, deferred, err, disarmed)
 			}
-			for _, opt := range []string{programTapOption, programStatusOption, programTextOption} {
+			for _, opt := range []string{programTapOption, programStatusOption, programTextOption, programHoldOption} {
 				if got := paneOption(t, p, name, opt); got != "" {
 					t.Fatalf("revived pane %s = %q, want unset", opt, got)
 				}

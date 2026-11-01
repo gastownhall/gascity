@@ -94,21 +94,6 @@ func (s orderTrackingSweepScopedStore) orderTrackingSweepKey() string {
 	return s.key
 }
 
-func openCityOrderStore(stderr io.Writer, cmdName string) (beads.OrdersStore, int) {
-	cityPath, err := resolveCity()
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
-		return beads.OrdersStore{}, 1
-	}
-	store, err := openStoreAtForCity(cityPath, cityPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
-		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
-		return beads.OrdersStore{}, 1
-	}
-	return beads.OrdersStore{Store: store}, 0
-}
-
 func openOrderStoreForOrder(cityPath string, cfg *config.City, a orders.Order, stderr io.Writer, cmdName string) (beads.OrdersStore, int) {
 	target, err := resolveOrderStoreTarget(cityPath, cfg, a)
 	if err != nil {
@@ -694,10 +679,8 @@ func relocatedOrdersClassStore(cityPath string, cfg *config.City) beads.Store {
 // store stays the caller's for everything else it does; only the tracking bead
 // routes here. On a city that relocates nothing this returns a front door over
 // the exact store value it was handed.
-func orderTrackingFrontDoor(cityPath string, cfg *config.City, scopeStore beads.OrdersStore) *orders.Store {
-	return orders.NewStore(beads.OrdersStore{
-		Store: resolveOrderStore(cliStorageRoutes(cityPath), scopeStore.Store, cfg, cityPath, nil),
-	})
+func orderTrackingFrontDoor(cityPath string, _ *config.City, scopeStore beads.OrdersStore) *orders.Store {
+	return orders.NewStore(cliStores(cityPath, scopeStore.Store).Orders())
 }
 
 // appendOrdersSweepStore adds the orders-class binding to a tracking sweep's
@@ -739,6 +722,21 @@ func unwrapOrderTrackingSweepStore(store beads.Store) beads.Store {
 		return scoped.Store
 	}
 	return store
+}
+
+// appendOrdersClassHandle appends an orders class handle to a typed federation
+// of order stores, unless the federation already reads it: on a city that
+// relocates nothing the handle over a scope store is that scope store's leg.
+func appendOrdersClassHandle(stores []beads.OrdersStore, leg beads.OrdersStore) []beads.OrdersStore {
+	if leg == (beads.OrdersStore{}) {
+		return stores
+	}
+	for _, existing := range stores {
+		if existing == leg {
+			return stores
+		}
+	}
+	return append(stores, leg)
 }
 
 // appendOrdersClassStore appends the orders-class binding to a typed federation
@@ -805,7 +803,6 @@ func cachedOrderHistoryStoresResolver(cityPath string, cfg *config.City, stderr 
 		stores[key] = store
 		return store, nil
 	}
-	ordersStore := relocatedOrdersClassStore(cityPath, cfg)
 	return func(a orders.Order) ([]beads.OrdersStore, error) {
 		target, err := resolveOrderStoreTarget(cityPath, cfg, a)
 		if err != nil {
@@ -815,16 +812,22 @@ func cachedOrderHistoryStoresResolver(cityPath string, cfg *config.City, stderr 
 		if err != nil {
 			return nil, err
 		}
+		// The orders leg is the class handle over the order's scope store, the
+		// one gc order run records its tracking bead through
+		// (orderTrackingFrontDoor): the binding on a split city, and the scope
+		// store itself on a city that relocates nothing, where the append
+		// below folds it into the primary leg.
+		ordersLeg := cliStores(cityPath, primary).Orders()
 		out := []beads.OrdersStore{{Store: primary}}
 		if legacyOrderCityFallbackNeeded(cityPath, target) {
 			legacy, err := openCached(legacyOrderCityTarget(cityPath, cfg))
 			if err != nil {
 				fmt.Fprintf(stderr, "gc order history: legacy city fallback unavailable for %s: %v\n", a.ScopedName(), err) //nolint:errcheck
-				return appendOrdersClassStore(out, ordersStore), nil
+				return appendOrdersClassHandle(out, ordersLeg), nil
 			}
 			out = append(out, beads.OrdersStore{Store: legacy})
 		}
-		return appendOrdersClassStore(out, ordersStore), nil
+		return appendOrdersClassHandle(out, ordersLeg), nil
 	}
 }
 
