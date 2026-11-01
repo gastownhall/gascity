@@ -1132,6 +1132,23 @@ func TestLaunchTriggerEnvFollowsTheBoundRow(t *testing.T) {
 				t.Errorf("%s: launch %s = %q, want %q", c.name, key, got, want)
 			}
 		}
+		// Presence, not just value: a deleted key also reads as "", but only a
+		// pinned empty one withholds a marker the child would otherwise inherit
+		// from the environment it already carries.
+		for _, k := range triggerEnvKeys {
+			if _, ok := leaf.cfgs[0].Env[k]; !ok {
+				t.Errorf("%s: launch env omits %s, want present and empty", c.name, k)
+			}
+		}
+		// The bind carries no store ref, so a re-pointed trigger must not pair
+		// its fresh id with a store ref the template resolved under.
+		if c.bind != "" {
+			for _, key := range []string{"GC_TRIGGER_BEAD_STORE_REF", "GC_TRIGGER_WORK_STORE_REF"} {
+				if got, ok := leaf.cfgs[0].Env[key]; !ok || got != "" {
+					t.Errorf("%s: launch %s = %q (present=%v), want present and empty", c.name, key, got, ok)
+				}
+			}
+		}
 	}
 }
 
