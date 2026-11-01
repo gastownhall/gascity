@@ -2658,7 +2658,7 @@ calls = 3
 [[count]]
 path = "internal/suspensionstate/suspensionstate_test.go"
 resource = "fixed_sleep"
-calls = 2
+calls = 3
 
 [[count]]
 path = "internal/testenv/lint_test.go"
