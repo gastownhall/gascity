@@ -1935,6 +1935,7 @@ go_test(
         "run_cancel_bd_calls_test.go",
         "runtime_inventory_activity_test.go",
         "runtime_inventory_differential_test.go",
+        "runtime_inventory_exec_test.go",
         "runtime_inventory_lane_test.go",
         "runtime_inventory_ondeath_test.go",
         "runtime_inventory_view_test.go",

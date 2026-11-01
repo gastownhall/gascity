@@ -16,7 +16,8 @@ import (
 // underlying *Provider. The early cut-over for the exec provider.
 //
 // The observe.v1 interfaces (the error-bearing liveness read, fresh reads,
-// identity, exact object kills, v2 readiness) are forwarded too, and Start
+// identity, exact object kills, v2 readiness, the batched inventory and its
+// gate, the attested listing) are forwarded too, and Start
 // routes a FreshOnly start to the raw provider's: an optional interface the
 // cut-over does not forward does not exist in production.
 //
@@ -45,6 +46,9 @@ var (
 	_ runtime.IdentityObserver          = (*seamBackedProvider)(nil)
 	_ runtime.SessionObjectKiller       = (*seamBackedProvider)(nil)
 	_ runtime.V2ReadinessReporter       = (*seamBackedProvider)(nil)
+	_ runtime.InventoryProvider         = (*seamBackedProvider)(nil)
+	_ runtime.InventoryGate             = (*seamBackedProvider)(nil)
+	_ runtime.ListingAttestation        = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked wraps an exec provider for the given script so it is served
@@ -109,6 +113,23 @@ func (s *seamBackedProvider) KillCorpseObject(name, objectID, created string) (r
 // KillZombieObject passes through to the underlying provider's `kill-object`.
 func (s *seamBackedProvider) KillZombieObject(name, objectID, created, panePID string) (runtime.SessionObjectKillResult, error) {
 	return s.raw.KillZombieObject(name, objectID, created, panePID)
+}
+
+// RuntimeInventory passes through to the underlying provider's `inventory`.
+func (s *seamBackedProvider) RuntimeInventory(ctx context.Context) (map[string]runtime.InventoryEntry, error) {
+	return s.raw.RuntimeInventory(ctx)
+}
+
+// InventoryAvailable passes through to the underlying provider. Safe on a
+// nil provider.
+func (s *seamBackedProvider) InventoryAvailable() bool {
+	return s != nil && s.raw.InventoryAvailable()
+}
+
+// ListRunningComplete passes through to the underlying provider; the seams'
+// ListRunning is the underlying provider's. Safe on a nil provider.
+func (s *seamBackedProvider) ListRunningComplete() bool {
+	return s != nil && s.raw.ListRunningComplete()
 }
 
 // V2Readiness passes through to the underlying provider's handshake.

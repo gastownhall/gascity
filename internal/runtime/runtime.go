@@ -854,6 +854,41 @@ type InventoryEntry struct {
 	// `gc handoff` set) as the batched read sees it. On tmux it is the
 	// marker's user-option mirror (#{@GC_RESTART_REQUESTED}).
 	RestartRequested bool
+	// ProcessKnown and ProcessAlive report whether the agent process (the
+	// GT_PROCESS_NAMES the session was started with) runs in the session's
+	// live box, as the batched read sees it (an exec pack's `inventory`),
+	// so no per-name process probe is needed. ProcessAlive is meaningless
+	// unless ProcessKnown.
+	ProcessKnown, ProcessAlive bool
+	// IdentityKnown and Identity report the session's identity env
+	// (GC_SESSION_ID, GC_RUNTIME_EPOCH, GC_INSTANCE_TOKEN, GT_PROCESS_NAMES;
+	// a missing key is unset) for this Incarnation, read in the same batch.
+	// An empty Identity is a box with no gc identity. Identity is
+	// meaningless unless IdentityKnown.
+	IdentityKnown bool
+	Identity      map[string]string
+}
+
+// InventoryGate is implemented by providers whose [InventoryProvider] is
+// static on the type but served only when their backend says so (an exec
+// pack that is not v2-ready has none). Read it through [InventoryFor].
+type InventoryGate interface {
+	InventoryAvailable() bool
+}
+
+// InventoryFor returns p's batched inventory when p has one it serves now:
+// an [InventoryProvider] that is not an [InventoryGate] reporting it
+// unavailable. Every caller deciding whether to take a batched inventory
+// asks it, so a gated-off provider takes the no-inventory path exactly.
+func InventoryFor(p Provider) (InventoryProvider, bool) {
+	inv, ok := p.(InventoryProvider)
+	if !ok {
+		return nil, false
+	}
+	if gate, gated := p.(InventoryGate); gated && !gate.InventoryAvailable() {
+		return nil, false
+	}
+	return inv, true
 }
 
 // EnvironmentBatchProvider is an optional extension exposing a single-exec
