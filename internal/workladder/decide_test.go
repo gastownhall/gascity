@@ -228,6 +228,66 @@ func TestDecidePendingRelease(t *testing.T) {
 	})
 }
 
+// A wait on a person (Work.AwaitsHuman) is an episode of its own: its start
+// begins one paced at Cap with a fresh count, dropping the old episode's
+// notice mark and a pending release; what the seat does while it waits does
+// not put its nudge off; and its end takes the claim up on a fresh grace.
+func TestDecideAWaitOnAPerson(t *testing.T) {
+	waiting := func(b string) Work { w := claim(b); w.AwaitsHuman = true; return w }
+	t.Run("its start: a new episode, the next nudge a cap later", func(t *testing.T) {
+		now := t0.Add(time.Hour)
+		at := now.Add(-2 * time.Minute)
+		prev := rec(1, Entry{
+			Key: key("s"), Kind: KindClaim, Rung: RungStarted, Since: t0, Attempts: 5, Last: at, Recycles: 1, Escalated: true, Refused: 1,
+			Notice: NoticeMark{Op: "op", At: at},
+		})
+		d := Decide(prev, startedBy1(quiet(now, 1, waiting("s")), "s", SrcAgent), p)
+		wantEffects(t, d)
+		e := entry(t, d, "s")
+		if !e.AwaitsHuman || e.Attempts != 0 || e.Refused != 0 || e.Escalated || !e.Notice.IsZero() || !e.Since.Equal(now) || !e.Last.Equal(now) || e.Rung != RungStarted || e.Recycles != 1 {
+			t.Fatalf("entry %+v, want a fresh waiting episode from now that keeps its rung and recycles", e)
+		}
+		if !d.Changed || !due(d).Equal(now.Add(DefaultCap)) {
+			t.Fatalf("changed %v, due %v: want the episode written, its first nudge a cap later", d.Changed, due(d).Sub(now))
+		}
+	})
+	t.Run("a cap apart, whatever the seat or its rung does meanwhile", func(t *testing.T) {
+		last := t0.Add(time.Hour)
+		prev := rec(1, Entry{Key: key("u"), Kind: KindClaim, Rung: RungClaimed, Since: t0, Attempts: 1, Last: last, AwaitsHuman: true})
+		o := startedBy1(quiet(last.Add(DefaultCap-time.Second), 1, waiting("u")), "u", SrcAgent) // its rung rises now
+		o.LastActivity = last.Add(30 * time.Minute)                                              // the answer's turn, which died before it ended the wait
+		d := Decide(prev, o, p)
+		if e := entry(t, d, "u"); len(effects(d)) != 0 || e.Rung != RungStarted || !e.AwaitsHuman {
+			t.Fatalf("a second short of a cap: %+v, entry %+v", d.Actions, e)
+		}
+		o.Now = last.Add(DefaultCap)
+		d = Decide(d.Next, o, p)
+		wantEffects(t, d, Nudge{Key: key("u"), Kind: KindClaim, Rung: RungStarted, Attempt: 1})
+	})
+	t.Run("a pending release of it is dropped, not re-emitted", func(t *testing.T) {
+		prev := rec(1, Entry{Key: key("u"), Kind: KindClaim, Rung: RungClaimed, Since: t0, Attempts: 3, Last: t0})
+		prev.Release = &ReleaseMark{Key: key("u"), Gen: 1, At: t0}
+		d := Decide(prev, quiet(t0.Add(time.Minute), 1, waiting("u")), p)
+		wantEffects(t, d)
+		if e := entry(t, d, "u"); d.Next.Release != nil || !e.AwaitsHuman || !d.Changed {
+			t.Fatalf("mark %+v, entry %+v: want the release dropped and the claim waiting", d.Next.Release, e)
+		}
+	})
+	t.Run("its end: a new episode on a fresh grace", func(t *testing.T) {
+		now := t0.Add(5 * time.Hour)
+		prev := rec(1, Entry{Key: key("s"), Kind: KindClaim, Rung: RungStarted, Since: t0, Attempts: 4, Last: now.Add(-10 * time.Minute), Recycles: 1, AwaitsHuman: true})
+		d := Decide(prev, startedBy1(quiet(now, 1, claim("s")), "s", SrcAgent), p)
+		wantEffects(t, d)
+		e := entry(t, d, "s")
+		if e.AwaitsHuman || e.Attempts != 0 || !e.Since.Equal(now) || e.Recycles != 1 {
+			t.Fatalf("entry %+v, want a fresh episode that keeps its recycles", e)
+		}
+		if !due(d).Equal(now.Add(DefaultGrace)) {
+			t.Fatalf("due %v, want a fresh grace", due(d).Sub(now))
+		}
+	})
+}
+
 // Steps 4-6: a held gate, a runtime not proven alive, a seat not proven
 // quiet, or work whose live read could not tell get no action.
 func TestDecideHolds(t *testing.T) {
@@ -256,19 +316,18 @@ func TestDecideHolds(t *testing.T) {
 	}
 }
 
-// Activity ProgressReset past the last nudge restarts the count, on any
-// pass where the runtime is alive, whether the ladder saw the seat busy or
-// not (a gate, an outage, the ladder off): its grace restarts from the
-// activity. A runtime not proven alive proves no progress.
+// Activity ProgressReset past the last nudge restarts the count, on a pass
+// that may act on the seat (gate open, runtime alive, seat quiet), whether
+// or not the ladder saw the seat busy in between (a gate, an outage, the
+// ladder off): its grace restarts from the activity. A pass that cannot act
+// judges nothing, and a runtime not proven alive proves no progress.
 func TestDecideProgressReset(t *testing.T) {
 	last := t0.Add(10 * time.Minute)
 	prev := rec(1, Entry{Key: key("s"), Kind: KindClaim, Rung: RungClaimed, Since: t0, Attempts: 3, Paused: 1, Last: last, Unreleased: true})
 	now := last.Add(40 * time.Minute)
 	act := last.Add(DefaultProgressReset)
 	for name, mut := range map[string]func(*Observation){
-		"busy":         func(o *Observation) { o.Quiet = Quiet{State: NotQuiet} },
 		"quiet now":    func(*Observation) {},
-		"behind gate":  func(o *Observation) { o.Gate = Gate{Held: true} },
 		"degraded now": func(o *Observation) { o.Provider.Degraded = true },
 	} {
 		o := quiet(now, 1, claim("s"))
@@ -285,6 +344,17 @@ func TestDecideProgressReset(t *testing.T) {
 			if _, ok := a.(Release); ok {
 				t.Fatalf("%s: released on a count the seat's progress reset", name)
 			}
+		}
+	}
+	for name, mut := range map[string]func(*Observation){
+		"busy":        func(o *Observation) { o.Quiet = Quiet{State: NotQuiet} },
+		"behind gate": func(o *Observation) { o.Gate = Gate{Held: true} },
+	} {
+		o := quiet(now, 1, claim("s"))
+		o.LastActivity = act
+		mut(&o)
+		if d := Decide(prev, o, p); entry(t, d, "s").Attempts != 3 || d.Changed {
+			t.Fatalf("%s: a pass that cannot act judged progress: %+v", name, entry(t, d, "s"))
 		}
 	}
 	o := quiet(now, 1, claim("s"))
@@ -325,6 +395,10 @@ func TestDueAt(t *testing.T) {
 		{"degraded, only paused nudges", Entry{Kind: KindClaim, Rung: RungStarted, Paused: 3, Last: last}, true, last.Add(10 * time.Minute)},
 		{"release unfinished: cap", Entry{Kind: KindClaim, Rung: RungClaimed, Attempts: 3, Last: last, Unreleased: true}, false, last.Add(60 * time.Minute)},
 		{"only paused nudges: base", Entry{Kind: KindClaim, Rung: RungStarted, Paused: 2, Last: last}, false, last.Add(3 * time.Minute)},
+		{"a wait on a person: a cap after its start or its last nudge", Entry{Kind: KindClaim, Rung: RungStarted, Since: t0, Attempts: 1, Last: last, AwaitsHuman: true}, false, last.Add(60 * time.Minute)},
+		{"a wait on a person, uncounted since a later rung rise: still a cap after last", Entry{Kind: KindClaim, Rung: RungStarted, Since: last.Add(30 * time.Minute), Last: last, AwaitsHuman: true}, false, last.Add(60 * time.Minute)},
+		{"a wait on a person, degraded: still a cap", Entry{Kind: KindClaim, Rung: RungStarted, Since: t0, Attempts: 1, Last: last, AwaitsHuman: true}, true, last.Add(60 * time.Minute)},
+		{"a wait on a person, refused: still a cap", Entry{Kind: KindClaim, Rung: RungClaimed, Since: t0, Paused: 1, Refused: 1, Last: last, AwaitsHuman: true}, false, last.Add(60 * time.Minute)},
 	}
 	for _, tc := range cases {
 		if got := p.dueAt(tc.e, tc.degraded); !got.Equal(tc.want) {
@@ -462,10 +536,41 @@ func TestDecideDue(t *testing.T) {
 			e:    due(Entry{Key: key("x"), Kind: KindClaim, Rung: RungEscalated, Attempts: 40, Recycles: 1, Escalated: true}),
 			want: []Action{Nudge{Key: key("x"), Kind: KindClaim, Rung: RungEscalated, Attempt: 41}},
 		},
+		{
+			name: "a wait on a person at the started threshold: a nudge, no recycle, no alert",
+			e:    due(Entry{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempts: 6, AwaitsHuman: true}),
+			want: []Action{Nudge{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempt: 7}},
+			check: func(t *testing.T, e Entry, _ Decision) {
+				if e.Recycles != 0 || e.Escalated || e.Rung != RungStarted || !e.Last.Equal(now) || !p.dueAt(e, false).Equal(now.Add(DefaultCap)) {
+					t.Errorf("entry %+v, want only nudged, the next a cap later", e)
+				}
+			},
+		},
+		{
+			name: "a wait on a person past R: a nudge, never escalated",
+			e:    due(Entry{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempts: 6, Recycles: 1, AwaitsHuman: true}),
+			want: []Action{Nudge{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempt: 7}},
+		},
+		{
+			name: "a wait on a person at the release threshold: a nudge, never released",
+			e:    due(Entry{Key: key("x"), Kind: KindClaim, Rung: RungClaimed, Attempts: 3, AwaitsHuman: true}),
+			want: []Action{Nudge{Key: key("x"), Kind: KindClaim, Rung: RungClaimed, Attempt: 4}},
+			check: func(t *testing.T, _ Entry, d Decision) {
+				if d.Next.Release != nil {
+					t.Errorf("mark %+v on a claim whose seat waits on a person", d.Next.Release)
+				}
+			},
+		},
+		{
+			name: "a wait on a person, degraded: a paused nudge",
+			e:    due(Entry{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempts: 6, AwaitsHuman: true}),
+			obs:  func(o Observation) Observation { o.Provider.Degraded = true; return o },
+			want: []Action{Nudge{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempt: 6, Paused: true}},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			o := quiet(now, 1, Work{Key: tc.e.Key, Kind: tc.e.Kind})
+			o := quiet(now, 1, Work{Key: tc.e.Key, Kind: tc.e.Kind, AwaitsHuman: tc.e.AwaitsHuman})
 			if tc.e.Rung >= RungStarted {
 				o.Started[tc.e.Key] = SrcAgent
 			}
@@ -811,12 +916,12 @@ func TestDecideRefusedNudgesBackOff(t *testing.T) {
 	if e := r.Entries[0]; e.Attempts != 0 || e.Rung != RungStarted || e.Recycles != 0 {
 		t.Fatalf("entry %+v: refusals moved it toward escalation", e)
 	}
-	got, ok := NudgeTaken(r, key("s"))
-	if !ok || got.Entries[0].Refused != 0 {
-		t.Fatalf("NudgeTaken = %+v, %v", got.Entries[0], ok)
+	got, ok := NudgeDelivered(r, key("s"), r.Gen, time.Time{})
+	if !ok || got.Entries[0].Refused != 0 || !got.Delivered.IsZero() {
+		t.Fatalf("NudgeDelivered = %+v, %v", got, ok)
 	}
-	if _, ok := NudgeTaken(got, key("s")); ok {
-		t.Fatal("NudgeTaken wrote with no refusals")
+	if _, ok := NudgeDelivered(got, key("s"), r.Gen, time.Time{}); ok {
+		t.Fatal("NudgeDelivered wrote with no refusals and no delivery time")
 	}
 	if _, _, ok := NudgeRefused(r, key("s"), 99, t0); ok {
 		t.Fatal("NudgeRefused re-counted an attempt the cell no longer holds")
@@ -870,7 +975,7 @@ func TestDecideProgressClearsRefusals(t *testing.T) {
 	last := t0.Add(10 * time.Minute)
 	prev := rec(1, Entry{Key: key("s"), Kind: KindClaim, Rung: RungStarted, Since: t0, Paused: 2, Refused: 2, Last: last})
 	o := quiet(last.Add(30*time.Minute), 1, claim("s"))
-	o.Quiet, o.LastActivity = Quiet{State: NotQuiet}, last.Add(DefaultProgressReset)
+	o.LastActivity = last.Add(DefaultProgressReset)
 	if e := entry(t, Decide(prev, o, p), "s"); e.Refused != 0 {
 		t.Fatalf("entry %+v, want refusals cleared by progress", e)
 	}

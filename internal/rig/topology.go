@@ -30,16 +30,11 @@ func SnapshotTopologyFiles(fs fsys.FS, cityPath string, cfg *config.City) ([]Fil
 		return nil, err
 	}
 	snapshots = append(snapshots, siteToml)
-	citySnapshots, err := snapshotCanonicalFiles(fs, cityPath)
+	citySnapshots, err := snapshotScopeFiles(fs, cityPath)
 	if err != nil {
 		return nil, err
 	}
 	snapshots = append(snapshots, citySnapshots...)
-	cityPort, err := SnapshotResolvedFile(fs, filepath.Join(cityPath, ".beads", "dolt-server.port"))
-	if err != nil {
-		return nil, err
-	}
-	snapshots = append(snapshots, cityPort)
 	seen := map[string]struct{}{}
 	for _, rig := range cfg.Rigs {
 		rigPath := rig.Path
@@ -51,26 +46,23 @@ func SnapshotTopologyFiles(fs fsys.FS, cityPath string, cfg *config.City) ([]Fil
 			continue
 		}
 		seen[rigPath] = struct{}{}
-		rigSnapshots, err := snapshotCanonicalFiles(fs, rigPath)
+		rigSnapshots, err := snapshotScopeFiles(fs, rigPath)
 		if err != nil {
 			return nil, err
 		}
 		snapshots = append(snapshots, rigSnapshots...)
-		rigPort, err := SnapshotResolvedFile(fs, filepath.Join(rigPath, ".beads", "dolt-server.port"))
-		if err != nil {
-			return nil, err
-		}
-		snapshots = append(snapshots, rigPort)
 	}
 	return snapshots, nil
 }
 
-// snapshotCanonicalFiles snapshots the .beads metadata.json and config.yaml
-// mirrors under scopeRoot for rollback.
-func snapshotCanonicalFiles(fs fsys.FS, scopeRoot string) ([]FileSnapshot, error) {
+// snapshotScopeFiles snapshots the .beads files gc writes for one scope — the
+// metadata.json and config.yaml mirrors and the dolt-server.port mirror — for
+// rollback.
+func snapshotScopeFiles(fs fsys.FS, scopeRoot string) ([]FileSnapshot, error) {
 	paths := []string{
 		filepath.Join(scopeRoot, ".beads", "metadata.json"),
 		filepath.Join(scopeRoot, ".beads", "config.yaml"),
+		filepath.Join(scopeRoot, ".beads", "dolt-server.port"),
 	}
 	snapshots := make([]FileSnapshot, 0, len(paths))
 	for _, path := range paths {

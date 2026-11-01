@@ -27,6 +27,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // client runs `herdr` CLI verbs against a named herdr session and decodes the
@@ -39,6 +41,9 @@ type client struct {
 	serverMu    sync.Mutex                                               // serializes startServer: serverAlive → removeStaleSocket → launch → readiness
 	sockPath    string                                                   // test override for socketPath (unit tests point it at a fake server)
 	dialUnix    func(ctx context.Context, path string) (net.Conn, error) // test override for the socket connect (unit tests observe the context the dial runs under)
+	// unixListening is serverConfirmedDead's kernel listener check, a test
+	// override; nil selects runtime.UnixPathListening.
+	unixListening func(path string) (bool, error)
 }
 
 func newClient(session, cityRoot string) *client {
@@ -978,12 +983,44 @@ func herdrConfigDir() string {
 // so the stale socket answers connects with ECONNREFUSED. Presence != liveness;
 // dial to find out for real.
 func (c *client) serverAlive() bool {
-	conn, err := net.DialTimeout("unix", c.socketPath(), 500*time.Millisecond)
+	conn, err := net.DialTimeout("unix", c.socketPath(), serverDialTimeout)
 	if err != nil {
 		return false
 	}
 	_ = conn.Close()
 	return true
+}
+
+// serverDialTimeout bounds one connect to the session server's socket when
+// checking whether the server is there.
+const serverDialTimeout = 500 * time.Millisecond
+
+// serverConfirmedDead reports whether this session's herdr server is
+// confirmed dead, the proof tmux's ServerConfirmedDead makes for its own
+// server: the socket is missing or refuses the connection, and the kernel
+// lists no listener bound to the socket path. The second check refuses a live
+// server whose socket file was unlinked, which the dial alone reads as dead.
+// Every other observation is false: a socket that accepts, a dial that cannot
+// tell (a timeout, EACCES), an unreadable listener table. A dead server hosts
+// no pane, since its panes die with it.
+func (c *client) serverConfirmedDead(ctx context.Context) bool {
+	sock := c.socketPath()
+	dctx, cancel := context.WithTimeout(ctx, serverDialTimeout)
+	defer cancel()
+	conn, err := c.dialUnix(dctx, sock)
+	if err == nil {
+		_ = conn.Close()
+		return false
+	}
+	if runtime.ClassifyControlSocketDial(err) != runtime.ControlSocketAbsent {
+		return false
+	}
+	listening := c.unixListening
+	if listening == nil {
+		listening = runtime.UnixPathListening
+	}
+	bound, err := listening(sock)
+	return err == nil && !bound
 }
 
 // removeStaleSocket unlinks the socket inode when it exists but nothing live is

@@ -29,7 +29,9 @@ func recordedSessionTransport(info session.Info) (transport string, recorded boo
 // session whose recorded transport is ACP keeps its ACP launch when its
 // template now resolves the CLI transport: the session layer routes it to
 // the ACP provider by that recorded transport, so it must start with the
-// template's ACP launch. swapped reports whether tp was switched to it.
+// template's ACP launch. swapped reports whether tp was switched to it. The
+// program-status arm and env need no swap: templateParamsToConfig applies
+// them only when IsACP is false.
 func templateParamsForSession(tp TemplateParams, info session.Info) (TemplateParams, bool) {
 	if tp.IsACP || tp.ACPLaunch == nil {
 		return tp, false

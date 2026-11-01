@@ -28,6 +28,11 @@ type fakeHerdrServer struct {
 
 	mu     sync.Mutex
 	agents []agentInfo // what agent.list returns
+	// onList, when set, runs before each agent.list answer with that call's
+	// 1-based ordinal, so a test can change the listing at an exact poll
+	// instead of after a wall-clock delay.
+	onList    func(call int)
+	listCalls int
 
 	// subscribes receives each events.subscribe call's decoded filter set.
 	subscribes chan []subscribeSub
@@ -115,6 +120,13 @@ func (f *fakeHerdrServer) serve(conn net.Conn) {
 	}
 	switch req.Method {
 	case "agent.list":
+		f.mu.Lock()
+		f.listCalls++
+		call, onList := f.listCalls, f.onList
+		f.mu.Unlock()
+		if onList != nil {
+			onList(call)
+		}
 		f.mu.Lock()
 		agents := f.agents
 		f.mu.Unlock()

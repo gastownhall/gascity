@@ -92,6 +92,7 @@ order-tracking-retention
 session-model
 startup-health-episodes
 ownerless-runtimes
+program-status-capture
 gate-sandbox-reads
 dolt-server
 fork-rate

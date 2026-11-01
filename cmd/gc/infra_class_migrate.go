@@ -327,6 +327,12 @@ const (
 	// is in this state until the operator command clears it, and boot refuses
 	// rather than serve it.
 	infraMigrationRetained
+	// infraMigrationIdentityMismatch reports a converged binding whose marker
+	// records a different work store than the one this city now runs on: a
+	// reused directory whose .beads was recreated while .gc was kept (B15).
+	// Serving it would hand this city another work store's sessions, mail and
+	// workflows, so boot and the storage verbs refuse.
+	infraMigrationIdentityMismatch
 )
 
 // String names the outcome for operator-visible diagnostics and test failures.
@@ -350,6 +356,8 @@ func (o infraMigrationOutcome) String() string {
 		return "genesis-blocked"
 	case infraMigrationRetained:
 		return "retained-copies"
+	case infraMigrationIdentityMismatch:
+		return "identity-mismatch"
 	}
 	return fmt.Sprintf("infraMigrationOutcome(%d)", int(o))
 }
@@ -527,6 +535,9 @@ func infraMigrationOperatorAdvice(report infraMigrationReport, logPrefix string)
 		} else {
 			situation = fmt.Sprintf("%s: this city's infrastructure binding %q could NOT be verified (reason above), so nothing here proved it is safe to serve from.", logPrefix, report.Target.Binding)
 		}
+	case infraMigrationIdentityMismatch:
+		situation = fmt.Sprintf("%s: binding %q (%s) belongs to a different work store than this city's: %v. Serving it would hand this city another work store's sessions, messages and workflows. Restore the work store the binding was converged from, or archive %s and start fresh.",
+			logPrefix, report.Target.Binding, report.Target.MarkerPath(), report.Fault, report.Target.Root)
 	case infraMigrationBornSplitBlocked:
 		// This arm deliberately does NOT name the recovery command. That verb
 		// resolves its destination through resolveInfraBindingTarget, which
@@ -877,6 +888,12 @@ func inspectInfraConvergence(cityPath string, target infraBindingTarget, logPref
 	case infraConvergenceMarked:
 		return confirmInfraConvergence(cityPath, target, logPrefix, stderr)
 	case infraConvergenceStale:
+		// A marker recording another work store holds first: the re-copy the
+		// remedy below names would carry that store's rows into this city
+		// and rewrite the marker so the mismatch no longer shows (B15).
+		if _, _, hold := markerWorkStoreIdentityHold(cityPath, target, logPrefix, stderr); hold != nil {
+			return *hold
+		}
 		// The marker's claim about the past still holds, so this is not a city
 		// that never converged and the revert stays withheld by the marker the
 		// evidence probe can still see. Its claim about the present does not
@@ -920,7 +937,7 @@ func inspectInfraConvergence(cityPath string, target infraBindingTarget, logPref
 	if len(rows) > 0 {
 		return infraMigrationReport{Outcome: infraMigrationUnconverged}
 	}
-	if err := inspectInfraGenesis(target); err != nil {
+	if err := inspectInfraGenesis(cityPath, target); err != nil {
 		report := say(err)
 		// The genesis race (another process created the binding at the same
 		// moment) clears on the next attempt, which serves from the winner's.
@@ -942,7 +959,7 @@ var inspectInfraGenesis = recordInfraGenesis
 // the per-boot containment re-check off for the city's whole life; an empty one
 // says "the copy delivered nothing, because there was nothing", which is the
 // truth and keeps the strand detector armed from the first boot.
-func recordInfraGenesis(target infraBindingTarget) error {
+func recordInfraGenesis(cityPath string, target infraBindingTarget) error {
 	destination, err := openInfraDestination(target)
 	if err != nil {
 		return infraGenesisOpenFailure(target, err)
@@ -957,7 +974,11 @@ func recordInfraGenesis(target infraBindingTarget) error {
 	if err := writeInfraCopyManifest(target, nil); err != nil {
 		return err
 	}
-	return writeInfraMigratedMarker(target)
+	current, err := currentWorkStoreIdentity(cityPath)
+	if err != nil {
+		return err
+	}
+	return writeInfraMigratedMarker(target, current)
 }
 
 // infraGenesisOpenFailure explains a destination that would not open during
@@ -1247,6 +1268,12 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 		}
 		return clearInfraRetainedCopiesReport(cityPath, target, report.ProvenBeads, logPrefix, stderr)
 	case infraConvergenceStale:
+		// Re-copying for a work store the marker does not name would carry
+		// another store's rows (a retained backup holds the old store's) and
+		// rewrite the marker with this store's identity (B15).
+		if _, _, hold := markerWorkStoreIdentityHold(cityPath, target, logPrefix, stderr); hold != nil {
+			return *hold
+		}
 		if backedUp && from == infraMigrationFromWork {
 			// The work store's copies were cleared into the backup, so a re-copy
 			// from it would rebuild a binding holding only what was written to
@@ -1352,7 +1379,11 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 	if err := writeInfraCopyManifestRecord(target, proven, infraManifestRecordCreated(nil, rows, proven), generation); err != nil {
 		return fail(err)
 	}
-	if err := writeInfraMigratedMarker(target); err != nil {
+	current, err := currentWorkStoreIdentity(cityPath)
+	if err != nil {
+		return fail(err)
+	}
+	if err := writeInfraMigratedMarker(target, current); err != nil {
 		return fail(err)
 	}
 	fmt.Fprintf(stderr, "%s: infrastructure classes migrated to %s (%d beads copied)\n", //nolint:errcheck // best-effort stderr
@@ -1497,6 +1528,57 @@ func readInfraConvergenceState(target infraBindingTarget) (infraConvergenceState
 // reporting the city unconverged and handing it the revert, which is the one
 // instruction that would abandon everything written since cutover.
 func confirmInfraConvergence(cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer) infraMigrationReport {
+	storeRecorded, current, hold := markerWorkStoreIdentityHold(cityPath, target, logPrefix, stderr)
+	if hold != nil {
+		return *hold
+	}
+	report := confirmInfraContainment(cityPath, target, logPrefix, stderr)
+	if report.Outcome == infraMigrationConverged && !storeRecorded && !current.empty() {
+		// A legacy marker, back-filled once by the first boot that proved
+		// containment against this work store, under the migration guard so
+		// it cannot race a migration rewriting the marker. A guard someone
+		// else holds, or a failed write, only leaves the marker legacy for
+		// the next boot to try again.
+		if err := backfillMarkerWorkStoreIdentityGuarded(cityPath, target, current); err != nil {
+			fmt.Fprintf(stderr, "%s: recording the work-store identity in %s: %v\n", logPrefix, target.MarkerPath(), err) //nolint:errcheck // best-effort stderr
+		}
+	}
+	return report
+}
+
+// markerWorkStoreIdentityHold reads the work-store identity a convergence
+// marker recorded and this city's current one, and holds the binding when the
+// recorded one names another work store (identity-mismatch). It holds in
+// every state that has a marker: a converged binding must not be served to a
+// recreated work store, and a stale one must not be re-copied for it, since
+// the re-copy rewrites the marker with this store's identity and the mismatch
+// would be gone. An identity file that cannot be read says nothing about
+// which work store this is: the binding is uncheckable (a standing refusal
+// naming the file), never "a different work store". recorded is false for a
+// legacy marker, which records no identity and contradicts nothing.
+func markerWorkStoreIdentityHold(cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer) (recorded bool, current workStoreIdentity, hold *infraMigrationReport) {
+	recordedStore, recorded, err := readMarkerWorkStoreIdentity(target.MarkerPath())
+	if err != nil {
+		report := reportUncheckableConvergence(target, logPrefix, stderr, err)
+		return false, workStoreIdentity{}, &report
+	}
+	current, err = currentWorkStoreIdentity(cityPath)
+	if err != nil {
+		report := reportUncheckableConvergence(target, logPrefix, stderr, err)
+		return false, workStoreIdentity{}, &report
+	}
+	if recorded {
+		if why := workStoreIdentityMismatch(recordedStore, current); why != "" {
+			fmt.Fprintf(stderr, "%s: %s: %s\n", logPrefix, target.MarkerPath(), why) //nolint:errcheck // best-effort stderr
+			return true, current, &infraMigrationReport{Outcome: infraMigrationIdentityMismatch, Fault: errors.New(why)}
+		}
+	}
+	return recorded, current, nil
+}
+
+// confirmInfraContainment is confirmInfraConvergence's containment re-check,
+// once the marker's work-store identity is known not to contradict this city.
+func confirmInfraContainment(cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer) infraMigrationReport {
 	manifest, recorded, err := readInfraCopyManifestRecord(target)
 	if err != nil {
 		return reportUncheckableConvergence(target, logPrefix, stderr, err)
@@ -1983,8 +2065,19 @@ type infraEdgePayload struct {
 func infraReadEdgePayload(store beads.Store, issueID, dependsOnID string) (infraEdgePayload, error) {
 	reader, ok := store.(beads.DepMetadataReader)
 	if !ok {
-		return infraEdgePayload{}, fmt.Errorf("store %T cannot report the payload on dep %s -> %s, and an unanswerable store is not an empty one", store, issueID, dependsOnID)
+		return infraEdgePayload{}, infraEdgePayloadUnanswerable(fmt.Sprintf("%T", store), issueID, dependsOnID)
 	}
+	return infraReadEdgePayloadFrom(reader, issueID, dependsOnID)
+}
+
+// infraEdgePayloadUnanswerable is infraReadEdgePayload's refusal of a store,
+// of type engine, that has no payload read.
+func infraEdgePayloadUnanswerable(engine, issueID, dependsOnID string) error {
+	return fmt.Errorf("store %s cannot report the payload on dep %s -> %s, and an unanswerable store is not an empty one", engine, issueID, dependsOnID)
+}
+
+// infraReadEdgePayloadFrom is infraReadEdgePayload on a store's payload read.
+func infraReadEdgePayloadFrom(reader beads.DepMetadataReader, issueID, dependsOnID string) (infraEdgePayload, error) {
 	payload, carried, err := reader.DepMetadata(issueID, dependsOnID)
 	if err != nil {
 		return infraEdgePayload{}, fmt.Errorf("reading the payload on dep %s -> %s: %w", issueID, dependsOnID, err)
@@ -2606,7 +2699,11 @@ func stringMapDifference(kind string, want, got beads.StringMap, exempt string) 
 // It is not self-certifying: writeInfraCopyManifest has already recorded what
 // the copy was proven to deliver, and every later boot re-checks containment
 // against that record rather than reading convergence off this file.
-func writeInfraMigratedMarker(target infraBindingTarget) error {
+//
+// A leading line records the work store the binding was converged from
+// (storage_store_identity.go), so a later boot against a different work store
+// in the same directory refuses instead of serving this one's state.
+func writeInfraMigratedMarker(target infraBindingTarget, workStore workStoreIdentity) error {
 	if err := os.MkdirAll(target.Root, 0o755); err != nil {
 		return fmt.Errorf("writing infra migrated marker: %w", err)
 	}
@@ -2618,6 +2715,15 @@ func writeInfraMigratedMarker(target infraBindingTarget) error {
 	cleanup := func(cause error) error {
 		_ = os.Remove(name)
 		return fmt.Errorf("writing infra migrated marker: %w", cause)
+	}
+	// The identity line goes first: every gc reads the marker's write time as
+	// the LAST field of the file (readInfraMarkerBound), older binaries
+	// included, so the time line stays last.
+	if !workStore.empty() {
+		if _, err := fmt.Fprintf(tmp, "%s%s\n", workStoreIdentityLinePrefix, workStore); err != nil {
+			_ = tmp.Close()
+			return cleanup(err)
+		}
 	}
 	if _, err := fmt.Fprintf(tmp, "infrastructure classes migrated to binding %s (%s) %s\n", target.Binding, target.Database, time.Now().UTC().Format(time.RFC3339)); err != nil {
 		_ = tmp.Close()

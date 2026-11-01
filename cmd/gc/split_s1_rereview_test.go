@@ -267,7 +267,7 @@ func TestGenesisRaceThroughTheGateIsTransient(t *testing.T) {
 	expireUnsettledCLIRoutesImmediately(t)
 	unmarkSplitCity(t)
 	prev := inspectInfraGenesis
-	inspectInfraGenesis = func(target infraBindingTarget) error {
+	inspectInfraGenesis = func(_ string, target infraBindingTarget) error {
 		return infraGenesisOpenFailure(target, errors.New("applying sqlite schema: table kv already exists (1)"))
 	}
 	t.Cleanup(func() { inspectInfraGenesis = prev })
@@ -493,7 +493,7 @@ func TestGenesisFailureOtherThanTheRaceIsStanding(t *testing.T) {
 	expireUnsettledCLIRoutesImmediately(t)
 	unmarkSplitCity(t)
 	prev := inspectInfraGenesis
-	inspectInfraGenesis = func(target infraBindingTarget) error {
+	inspectInfraGenesis = func(_ string, target infraBindingTarget) error {
 		return infraGenesisOpenFailure(target, errors.New("applying sqlite schema: near \"TABEL\": syntax error"))
 	}
 	t.Cleanup(func() { inspectInfraGenesis = prev })

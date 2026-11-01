@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -760,8 +761,23 @@ func newSessionListCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List chat sessions",
-		Long:  `List all chat sessions. By default shows active and suspended sessions.`,
-		Args:  cobra.NoArgs,
+		Long: `List all chat sessions. By default shows active and suspended sessions.
+
+With --json the output is one JSON document that validates against
+"gc session list --json-schema=result". It has one of two renderings, and
+the route a command takes decides which one it gets:
+
+  - Local rendering (a supervisor-hosted city, a city with no reachable
+    API, or GC_NO_API set for a local target; a remote target rejects
+    GC_NO_API): filters, sessions and summary. Each row carries closed, and
+    agent_name when the session has one, and no liveness.
+  - API rendering (a remote target such as --city-url, a standalone
+    controller's [api] port, or a supervisor serving a city that has no
+    controller): _cache_age_s and sessions. Each row carries running, and no
+    agent_name or closed.
+
+Both carry schema_version "1" and ok true, and an empty list renders as [].`,
+		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if cmdSessionList(stateFilter, templateFilter, jsonOutput, stdout, stderr) != 0 {
 				return errExit
@@ -805,8 +821,10 @@ func routeSessionList(_ string, stateFilter, templateFilter string, c *api.Clien
 // alongside at the envelope level — the shape documented in the
 // ga-h6w designer's D5 contract.
 type sessionListJSONEnvelope struct {
-	CacheAgeS float64       `json:"_cache_age_s"`
-	Sessions  []SessionView `json:"sessions"`
+	SchemaVersion string        `json:"schema_version"`
+	OK            bool          `json:"ok"`
+	CacheAgeS     float64       `json:"_cache_age_s"`
+	Sessions      []SessionView `json:"sessions"`
 }
 
 // SessionView mirrors api.SessionView for CLI JSON output. Defined as an
@@ -820,8 +838,10 @@ type SessionView = api.SessionView
 func renderSessionListFromAPI(cr api.CachedRead[[]SessionView], jsonOutput bool, stdout io.Writer) int {
 	if jsonOutput {
 		env := sessionListJSONEnvelope{
-			CacheAgeS: cr.AgeSeconds,
-			Sessions:  cr.Body,
+			SchemaVersion: "1",
+			OK:            true,
+			CacheAgeS:     cr.AgeSeconds,
+			Sessions:      cr.Body,
 		}
 		if env.Sessions == nil {
 			env.Sessions = []SessionView{}
@@ -837,8 +857,20 @@ func renderSessionListFromAPI(cr api.CachedRead[[]SessionView], jsonOutput bool,
 		return 0
 	}
 
+	// The STATUS column (the session program's own report) appears only when
+	// the API reports one for some session: with the city's program_status
+	// switch off the table is unchanged.
+	withStatus := false
+	for _, s := range cr.Body {
+		withStatus = withStatus || s.ProgramStatus != nil
+	}
+	header := []string{"ID", "TEMPLATE", "STATE", "REASON", "TARGET", "TITLE", "WORKDIR", "AGE", "LAST ACTIVE"}
+	if withStatus {
+		header = slices.Insert(header, 3, "STATUS")
+	}
 	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tTEMPLATE\tSTATE\tREASON\tTARGET\tTITLE\tWORKDIR\tAGE\tLAST ACTIVE") //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(w, strings.Join(header, "\t")) //nolint:errcheck // best-effort stdout
+	now := time.Now()
 	for _, s := range cr.Body {
 		state := s.State
 		if state == "" {
@@ -848,12 +880,11 @@ func renderSessionListFromAPI(cr api.CachedRead[[]SessionView], jsonOutput bool,
 		if reason == "" {
 			reason = "-"
 		}
-		target := sessionViewTarget(s)
-		title := sessionViewTitle(s)
-		workDir := sessionViewWorkDir(s)
-		age := sessionViewAge(s.CreatedAt)
-		lastActive := sessionViewLastActive(s.LastActive)
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Template, state, reason, target, title, workDir, age, lastActive) //nolint:errcheck // best-effort stdout
+		row := []string{s.ID, s.Template, state, reason, sessionViewTarget(s), sessionViewTitle(s), sessionViewWorkDir(s), sessionViewAge(s.CreatedAt), sessionViewLastActive(s.LastActive)}
+		if withStatus {
+			row = slices.Insert(row, 3, sessionViewProgramStatus(s.ProgramStatus, now))
+		}
+		fmt.Fprintln(w, strings.Join(row, "\t")) //nolint:errcheck // best-effort stdout
 	}
 	_ = w.Flush() //nolint:errcheck // best-effort stdout
 
@@ -941,6 +972,24 @@ func sessionViewLastActive(lastActive string) string {
 		return "-"
 	}
 	return formatDuration(time.Since(t)) + " ago"
+}
+
+// sessionViewProgramStatus formats the STATUS column: the state the session
+// program reports, its blocked kind after a colon, and how long it has been
+// in that state ("working 3m", "blocked:permission 12s"). An absent status is
+// unknown and renders as "-", never as idle.
+func sessionViewProgramStatus(ps *api.SessionProgramStatus, now time.Time) string {
+	if ps == nil {
+		return "-"
+	}
+	status := ps.State
+	if ps.Kind != "" {
+		status += ":" + ps.Kind
+	}
+	if ps.Since.IsZero() {
+		return status
+	}
+	return status + " " + formatDuration(max(now.Sub(ps.Since), 0))
 }
 
 // cmdSessionList is the CLI entry point for "gc session list". It routes

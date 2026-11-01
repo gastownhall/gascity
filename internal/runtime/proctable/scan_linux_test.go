@@ -75,20 +75,17 @@ func TestProcessIdentityDistinguishesGoneFromUnreadable(t *testing.T) {
 	}
 }
 
-func TestParseProcStatIdentityCarriesParentGroupAndStart(t *testing.T) {
+func TestParseProcStatCarriesParentGroupSessionAndStart(t *testing.T) {
 	// The suffix begins at field 3 (state), so suffix index 19 is Linux
 	// /proc/<pid>/stat field 22 (starttime); the trailing 0 is field 23.
 	stat := "42 (cmd (worker)) S 11 12 13 0 -1 0 0 0 0 0 0 0 0 0 0 0 1 0 98765 0"
 
-	ppid, pgid, startTime, ok, err := parseProcStatIdentity(stat)
+	got, err := parseProcStat(stat)
 	if err != nil {
-		t.Fatalf("parseProcStatIdentity: %v", err)
+		t.Fatalf("parseProcStat: %v", err)
 	}
-	if !ok {
-		t.Fatal("parseProcStatIdentity reported missing record")
-	}
-	if ppid != 11 || pgid != 12 || startTime != "98765" {
-		t.Fatalf("parseProcStatIdentity = (%d, %d, %q), want (11, 12, %q)", ppid, pgid, startTime, "98765")
+	if want := (procStat{ppid: 11, pgid: 12, sid: 13, startTime: "98765"}); got != want {
+		t.Fatalf("parseProcStat = %+v, want %+v", got, want)
 	}
 }
 

@@ -406,6 +406,9 @@ type CityRuntimeParams struct {
 	// reload's pending-restart warning judges admission the same way; nil has
 	// no developer override.
 	ReconcilerLookupEnv func(string) (string, bool)
+	// ReconcilerV2FellBack reports that the latch was a default v2 the boot
+	// probe demoted to legacy (applyV2DefaultBootFallback).
+	ReconcilerV2FellBack bool
 	// Wake is the controller wiring's wake, which the socket and the API
 	// state already use; nil builds a legacy one over PokeCh and
 	// ControlDispatcherCh.
@@ -550,7 +553,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		configRev:               p.ConfigRev,
 		configDirty:             configDirty,
 		configDebounce:          p.ConfigDebounce,
-		reconcilerDrift:         reconcilerModeDrift{running: p.ReconcilerMode, lookupEnv: p.ReconcilerLookupEnv},
+		reconcilerDrift:         reconcilerModeDrift{running: p.ReconcilerMode, lookupEnv: p.ReconcilerLookupEnv, fellBack: p.ReconcilerV2FellBack},
 		cfg:                     p.Cfg,
 		sp:                      p.SP,
 		publishedRev:            p.ConfigRev,
@@ -3444,7 +3447,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		"awake_assigned_work_bead_count": len(awakeAssignedWorkBeads),
 	})
 	phaseStart = time.Now()
-	triggerResolver := cr.newWarmClaimTriggerResolver(rigStores)
+	warmClaimTriggers := cr.newWarmClaimTriggerResolver(rigStores)
 	reconcileStartOptions := []startExecutionOption{
 		withAsyncStartExecution(),
 		withAsyncStartFollowUp(cr.requestAsyncStartFollowUpTick),
@@ -3473,9 +3476,12 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		// warm-bind gap; on tmux it is the fast primary nudge ahead of the
 		// idle-timeout relaunch backstop, deduped by the marker + the
 		// unclaimed-trigger gate.
-		withWarmClaimProbe(cr.warmClaimTriggerProbe(triggerResolver)),
-		// The launch-time opt_* lookup reads a pool slot's trigger bead through the same residency reader.
-		withTriggerBeadResolver(triggerResolver),
+		withWarmClaimProbe(cr.warmClaimTriggerProbe(warmClaimTriggers)),
+		// The launch reads a pool slot's trigger bead (its opt_* pins and drain
+		// work dir) live from the owning leg, past the bead cache, as v2's start
+		// effect does: demand counts ready work from a live read, and an
+		// out-of-process pin reaches the cache only at its next re-scan.
+		withTriggerBeadResolver(legsTriggerResolver(sw.Legs())),
 	}
 	if bootReconcile {
 		// #3288: skip the per-session orphan/failed-create session-bead closes on

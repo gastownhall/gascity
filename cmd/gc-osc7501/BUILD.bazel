@@ -1,0 +1,90 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "gc-osc7501_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/gastownhall/gascity/cmd/gc-osc7501",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//internal/runtime/programstatus",
+        "//internal/runtime/programstatus/relay",
+        "//internal/runtime/programstatus/tap",
+    ],
+)
+
+# The OSC 7501 companion ships next to gc (.goreleaser.yml, the Homebrew
+# formula in .github/workflows/release.yml, make install): pure Go, so one
+# small process per agent pane.
+go_binary(
+    name = "gc-osc7501",
+    embed = [":gc-osc7501_lib"],
+    pure = "on",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "gc-osc7501_test",
+    srcs = [
+        "e2e_test.go",
+        "main_test.go",
+        "relay_e2e_test.go",
+        "testenv_import_test.go",
+    ],
+    data = select({
+        "//:gotags_integration": [
+            ":gc-osc7501",
+            "//internal/runtime/runtimetest/osc7501emitter",
+        ],
+        "//conditions:default": [],
+    }),
+    embed = [":gc-osc7501_lib"],
+    # e2e_test.go and relay_e2e_test.go (integration) run the built binary
+    # under a scratch tmux and on test-held ptys, relaying the emitter.
+    env = select({
+        "//:gotags_integration": {
+            "GC_TEST_OSC7501_BIN": "$(rootpath :gc-osc7501)",
+            "GC_TEST_OSC7501_EMITTER_BIN": "$(rootpath //internal/runtime/runtimetest/osc7501emitter)",
+        },
+        "//conditions:default": {},
+    }),
+    deps = [
+        "//internal/bazeltest",
+        "//internal/runtime",
+        "//internal/runtime/programstatus",
+        "//internal/runtime/programstatus/relay",
+        "//internal/runtime/programstatus/tap",
+        "//internal/testenv",
+        "//test/tmuxtest",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

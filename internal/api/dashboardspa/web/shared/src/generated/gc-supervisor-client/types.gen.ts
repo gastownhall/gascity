@@ -177,6 +177,10 @@ export type AgentPatchSetInputBody = {
 export type AgentResponse = {
     active_bead?: string;
     activity?: string;
+    /**
+     * Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.
+     */
+    activity_source?: 'program' | 'transcript';
     available: boolean;
     context_pct?: number;
     context_window?: number;
@@ -195,10 +199,17 @@ export type AgentResponse = {
      * Configured session limits of the agent (or of its pool).
      */
     pool_limits?: PoolLimits;
+    /**
+     * The agent session program's own status report (OSC 7501), present while the city's program_status switch is shadow or on and the reading is valid. Absent means the status is unknown, never idle.
+     */
+    program_status?: SessionProgramStatus;
     provider?: string;
     rig?: string;
     running: boolean;
     session?: SessionInfo;
+    /**
+     * Agent state: suspended, quarantined, stopped, working, waiting, idle, blocked or error. blocked and error come only from the session program's own status report, under the city's program_status switch on.
+     */
     state: string;
     suspended: boolean;
     unavailable_reason?: string;
@@ -1360,7 +1371,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimFailedPayload | BeadClaimLoopHeldPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | FactRecordedPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpChangedPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestAcceptedPayload | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StorageRigPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimFailedPayload | BeadClaimLoopHeldPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | FactRecordedPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpChangedPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestAcceptedPayload | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StorageRigPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkRateLimitedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -3764,7 +3775,7 @@ export type ServiceRestartOutputBody = {
 
 export type SessionActivityEvent = {
     /**
-     * Session activity state: 'idle' or 'in-turn'.
+     * Session activity state: 'idle' or 'in-turn', derived from the transcript under every program_status switch. The session program's own status arrives in the program_status frame.
      */
     activity: string;
 };
@@ -4077,6 +4088,44 @@ export type SessionPoolSlotRetiredAtDrainDeadlinePayload = {
     template?: string;
 };
 
+export type SessionProgramStatus = {
+    /**
+     * The program's self-reported name.
+     */
+    app?: string;
+    /**
+     * What a blocked program waits for, when it says. Only with state blocked.
+     */
+    kind?: 'permission' | 'question' | 'auth';
+    /**
+     * Percent complete the program reports, only with working or blocked.
+     */
+    progress?: number;
+    /**
+     * When the program last left working or blocked for an input boundary; absent if it never has in this capture.
+     */
+    quiet_since?: string;
+    /**
+     * When the program entered state, by the capture host's clock.
+     */
+    since: string;
+    /**
+     * The state the program reports. done and error are input boundaries like idle (error is a failed turn with the program alive); blocked is waiting on the user.
+     */
+    state: 'idle' | 'working' | 'done' | 'blocked' | 'error';
+    /**
+     * Child tasks the program reports as working.
+     */
+    working_children: number;
+};
+
+export type SessionProgramStatusEvent = {
+    /**
+     * The session program's current status; absent when it is unknown (never read as idle).
+     */
+    program_status?: SessionProgramStatus;
+};
+
 /**
  * Session raw transcript frame
  *
@@ -4145,6 +4194,10 @@ export type SessionRespondOutputBody = {
 export type SessionResponse = {
     active_bead?: string;
     activity?: string;
+    /**
+     * Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.
+     */
+    activity_source?: 'program' | 'transcript';
     agent_kind?: string;
     alias?: string;
     attached: boolean;
@@ -4166,6 +4219,10 @@ export type SessionResponse = {
         [key: string]: string;
     };
     pool?: string;
+    /**
+     * The session program's own status report (OSC 7501), present while the city's program_status switch is shadow or on and the reading is valid. Absent means the status is unknown, never idle.
+     */
+    program_status?: SessionProgramStatus;
     provider: string;
     reason?: string;
     rig?: string;
@@ -4238,9 +4295,9 @@ export type SessionStrandedPayload = {
 /**
  * Session stream lifecycle event
  *
- * Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
+ * Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, program-status changes, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
  */
-export type SessionStreamCommonEvent = SessionActivityEvent | PendingInteraction | SessionPendingClearedEvent | HeartbeatEvent;
+export type SessionStreamCommonEvent = SessionActivityEvent | PendingInteraction | SessionPendingClearedEvent | SessionProgramStatusEvent | HeartbeatEvent;
 
 export type SessionStreamMessageEvent = {
     format: string;
@@ -6652,6 +6709,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeWorkNudgeFailed) | ({
     type: 'work.nudged';
 } & TypedEventStreamEnvelopeWorkNudged) | ({
+    type: 'work.rate_limited';
+} & TypedEventStreamEnvelopeWorkRateLimited) | ({
     type: 'work.recycle_requested';
 } & TypedEventStreamEnvelopeWorkRecycleRequested) | ({
     type: 'work.release_unfinished';
@@ -8790,6 +8849,24 @@ export type TypedEventStreamEnvelopeWorkNudged = {
 };
 
 /**
+ * TypedEventStreamEnvelope work.rate_limited
+ */
+export type TypedEventStreamEnvelopeWorkRateLimited = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkRateLimitedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.rate_limited';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope work.recycle_requested
  */
 export type TypedEventStreamEnvelopeWorkRecycleRequested = {
@@ -9119,6 +9196,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeWorkNudgeFailed) | ({
     type: 'work.nudged';
 } & TypedTaggedEventStreamEnvelopeWorkNudged) | ({
+    type: 'work.rate_limited';
+} & TypedTaggedEventStreamEnvelopeWorkRateLimited) | ({
     type: 'work.recycle_requested';
 } & TypedTaggedEventStreamEnvelopeWorkRecycleRequested) | ({
     type: 'work.release_unfinished';
@@ -11375,6 +11454,25 @@ export type TypedTaggedEventStreamEnvelopeWorkNudged = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope work.rate_limited
+ */
+export type TypedTaggedEventStreamEnvelopeWorkRateLimited = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkRateLimitedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.rate_limited';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope work.recycle_requested
  */
 export type TypedTaggedEventStreamEnvelopeWorkRecycleRequested = {
@@ -11780,12 +11878,33 @@ export type WorkLadderPayload = {
     generation: number;
     kind?: string;
     paused?: boolean;
+    provider?: string;
     reason?: string;
     rung?: string;
     session_id: string;
     session_name?: string;
     store_ref?: string;
     template?: string;
+};
+
+export type WorkRateLimitedPayload = {
+    alerted?: boolean;
+    cause?: string;
+    claims?: Array<string> | null;
+    conversation: number;
+    error_code?: string;
+    error_text?: string;
+    fresh_at?: string;
+    generation: number;
+    http_status?: number;
+    provider?: string;
+    refused?: number;
+    refused_at?: string;
+    session_id: string;
+    session_name?: string;
+    since: string;
+    template?: string;
+    transition: string;
 };
 
 export type WorkReadyBody = {
@@ -20727,6 +20846,20 @@ export type StreamSessionResponses = {
          * The event name.
          */
         event: 'pending_cleared';
+        /**
+         * The event resume cursor.
+         */
+        id?: string;
+        /**
+         * The retry time in milliseconds.
+         */
+        retry?: number;
+    } | {
+        data: SessionProgramStatusEvent;
+        /**
+         * The event name.
+         */
+        event: 'program_status';
         /**
          * The event resume cursor.
          */
