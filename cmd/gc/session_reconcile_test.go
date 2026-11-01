@@ -3144,6 +3144,56 @@ func TestFindAgentByTemplate(t *testing.T) {
 	}
 }
 
+func TestFindSessionAgentByTemplate(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "rig-0"}, {Name: "rig-1"}},
+		Agents: []config.Agent{
+			{Name: "lead"},
+			{Name: "smith", Dir: "rig-1"},
+			{Name: "smith", Scope: "rig"},
+			{Name: "twin", Scope: "rig"},
+			{Name: "twin", Scope: "rig"},
+		},
+	}
+
+	for _, template := range []string{"lead", "rig-1/smith", " lead "} {
+		want := findAgentByTemplate(cfg, template)
+		if want == nil {
+			t.Fatalf("findAgentByTemplate(%q) = nil, want a configured agent", template)
+		}
+		if got := findSessionAgentByTemplate(cfg, template); got != want {
+			t.Errorf("findSessionAgentByTemplate(%q) = %p, want findAgentByTemplate's %p", template, got, want)
+		}
+	}
+
+	for _, template := range []string{"rig-0/smith", " rig-0/smith "} {
+		got := findSessionAgentByTemplate(cfg, template)
+		if got == nil {
+			t.Fatalf("findSessionAgentByTemplate(%q) = nil, want the rig-stamped copy of the generic rig agent", template)
+		}
+		if got.QualifiedName() != "rig-0/smith" || got.Scope != "rig" {
+			t.Errorf("findSessionAgentByTemplate(%q) = %q (scope %q), want rig-0/smith (scope rig)", template, got.QualifiedName(), got.Scope)
+		}
+		for i := range cfg.Agents {
+			if got == &cfg.Agents[i] {
+				t.Errorf("findSessionAgentByTemplate(%q) returned cfg.Agents[%d], want a synthesized copy", template, i)
+			}
+		}
+	}
+	if cfg.Agents[2].Dir != "" {
+		t.Errorf("generic rig agent Dir = %q after lookup, want it left unbound", cfg.Agents[2].Dir)
+	}
+
+	for _, template := range []string{"", "   ", "rig-9/smith", "rig-0/lead", "rig-0/twin", "rig-0/missing"} {
+		if got := findSessionAgentByTemplate(cfg, template); got != nil {
+			t.Errorf("findSessionAgentByTemplate(%q) = %q, want nil", template, got.QualifiedName())
+		}
+	}
+	if got := findSessionAgentByTemplate(nil, "rig-0/smith"); got != nil {
+		t.Errorf("findSessionAgentByTemplate(nil cfg) = %q, want nil", got.QualifiedName())
+	}
+}
+
 // TestAgentTemplateIdentitiesEquivalent pins the load-bearing asymmetry of
 // the identity-equivalence helper: a legacy bound identity is equivalent to
 // the unbound agent only after the bound agent is gone. While both a bound
