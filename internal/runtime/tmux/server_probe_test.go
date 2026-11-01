@@ -83,6 +83,7 @@ func TestNewSessionErrNoServerRefusesObservedLiveNamedSocket(t *testing.T) {
 				"path=" + socketPath,
 				"inode=97",
 				"peer_pid=4242",
+				"reprobe=" + ErrNoServer.Error(),
 			} {
 				if !strings.Contains(err.Error(), want) {
 					t.Fatalf("err = %q, want %q", err, want)
@@ -91,8 +92,9 @@ func TestNewSessionErrNoServerRefusesObservedLiveNamedSocket(t *testing.T) {
 			if observerCalls != 1 {
 				t.Fatalf("observer calls = %d, want 1", observerCalls)
 			}
-			if len(fe.calls) != 1 || !firstArgsContainHasSession(fe.calls[0]) {
-				t.Fatalf("calls = %#v, want exactly the preflight has-session probe", fe.calls)
+			want := probeArgv(socketName)
+			if len(fe.calls) != 2 || !reflect.DeepEqual(fe.calls[0], want) || !reflect.DeepEqual(fe.calls[1], want) {
+				t.Fatalf("calls = %#v, want the preflight probe and its unanswered re-probe %v", fe.calls, want)
 			}
 		})
 	}
@@ -149,8 +151,8 @@ func TestNewSessionErrNoServerUnknownObservationFailsClosed(t *testing.T) {
 		if errors.Is(err, ErrNoServer) {
 			t.Fatalf("err = %v, must not wrap ErrNoServer", err)
 		}
-		if len(fe.calls) != 1 {
-			t.Fatalf("calls = %#v, want only the preflight probe", fe.calls)
+		if len(fe.calls) != 2 || !firstArgsContainHasSession(fe.calls[0]) || !firstArgsContainHasSession(fe.calls[1]) {
+			t.Fatalf("calls = %#v, want the preflight probe and its unanswered re-probe", fe.calls)
 		}
 	})
 
@@ -782,5 +784,88 @@ func TestAttachArgsFallBackToPinnedSocket(t *testing.T) {
 	}
 	if got := tm.hiddenAttachCommandArgsForWitness("gc-target", namedSocketWitness{}); !reflect.DeepEqual(got, want) {
 		t.Errorf("hiddenAttachCommandArgsForWitness() = %v, want %v", got, want)
+	}
+}
+
+// probeArgv is the exact preflight has-session request probeServerAlive
+// issues, including runCtx's connection flags.
+func probeArgv(socketName string) []string {
+	return []string{"-u", "-L", socketName, "has-session", "-t", "=" + probeSessionName}
+}
+
+// The concurrent first-start race of PR #7840: the preflight has-session runs
+// before a sibling new-session binds the named socket (no-server), the
+// sibling's server binds before the socket observation, and the server is
+// healthy. A single re-probe that returns a positive server answer must relax
+// the guard so every NewSession variant proceeds to creation after two
+// identical preflight requests and one observation.
+func TestNewSessionErrNoServerReprobeAnsweredAllowsCreation(t *testing.T) {
+	answers := []struct {
+		name string
+		err  error
+	}{
+		{name: "success"},
+		{name: "session-not-found", err: ErrSessionNotFound},
+		{name: "no-current-target", err: ErrNoCurrentTarget},
+	}
+	observations := []struct {
+		name string
+		err  error
+	}{
+		{name: "live-socket", err: fmt.Errorf("path=/tmux/gc-race inode=97 peer_pid=4242 reason=live-unix-socket")},
+		{name: "identity-changed", err: fmt.Errorf("path=/tmux/gc-race inode=97 peer_pid=unknown dial=connection refused post_inode=98 reason=socket-identity-changed-or-dial-failed")},
+	}
+	variants := []struct {
+		name string
+		call func(*Tmux) error
+	}{
+		{name: "NewSession", call: func(tm *Tmux) error {
+			return tm.NewSession("gc-race", "")
+		}},
+		{name: "NewSessionWithCommand", call: func(tm *Tmux) error {
+			return tm.NewSessionWithCommand("gc-race", "", "true")
+		}},
+		{name: "NewSessionWithCommandAndEnv", call: func(tm *Tmux) error {
+			return tm.NewSessionWithCommandAndEnv("gc-race", "", "true", map[string]string{"X": "1"})
+		}},
+	}
+	for _, answer := range answers {
+		for _, observation := range observations {
+			for _, variant := range variants {
+				t.Run(answer.name+"/"+observation.name+"/"+variant.name, func(t *testing.T) {
+					fe := probeAssertSet([]string{"", "", ""}, []error{ErrNoServer, answer.err, nil})
+					observerCalls := 0
+					tm := &Tmux{
+						cfg:  Config{SocketName: "gc-race"},
+						exec: fe,
+						serverSocketObserver: func(context.Context, string) error {
+							observerCalls++
+							return observation.err
+						},
+					}
+
+					if err := variant.call(tm); err != nil {
+						t.Fatalf("%s after a %s re-probe: %v (calls=%#v)", variant.name, answer.name, err, fe.calls)
+					}
+					if observerCalls != 1 {
+						t.Fatalf("observer calls = %d, want 1", observerCalls)
+					}
+					want := probeArgv("gc-race")
+					if len(fe.calls) < 3 {
+						t.Fatalf("calls = %#v, want two preflight probes then the create", fe.calls)
+					}
+					if !reflect.DeepEqual(fe.calls[0], want) || !reflect.DeepEqual(fe.calls[1], want) {
+						t.Fatalf("preflight calls = %#v, want two identical %v", fe.calls[:2], want)
+					}
+					create := fe.calls[2]
+					// NewSessionWithCommandAndEnv stages an argv-unsafe env
+					// through `start-server ; source-file`; start-server leads
+					// because source-file cannot create a server.
+					if create[3] != "new-session" && (create[3] != "start-server" || create[5] != "source-file") {
+						t.Fatalf("call after the re-probe = %v, want new-session (or its staged source-file form)", create)
+					}
+				})
+			}
+		}
 	}
 }

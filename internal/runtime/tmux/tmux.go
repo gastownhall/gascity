@@ -676,6 +676,11 @@ func wrapError(err error, stderr string, args []string) error {
 //     server answered and is alive with zero sessions, so new-session attaches
 //     rather than unlinking and rebinding.
 //   - nil when ErrNoServer is corroborated by a safely absent or stale socket.
+//   - nil when a single has-session re-probe — issued after an unexplained
+//     live socket observation, within the same preflight budget — returns a
+//     positive server answer (success, session not found, or no current
+//     target): a sibling first-start bound a healthy server to the socket
+//     between the protocol probe and the observation.
 //   - ErrServerDegraded when the probe times out or returns any other error,
 //     indicating the server is in a state where new-session would risk
 //     clobbering. Callers MUST surface this and refuse to proceed.
@@ -706,9 +711,24 @@ func (t *Tmux) probeServerAlive() error {
 		if observationErr == nil {
 			return nil
 		}
+		// The protocol probe and the observation can describe different
+		// moments: a sibling first-start may bind a healthy server to the
+		// socket in between. Ask the server directly, once, within the
+		// remaining preflight budget; only a positive answer relaxes the
+		// guard.
+		var reprobeErr error
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			reprobeErr = ctxErr
+		} else {
+			_, reprobeErr = t.runCtx(ctx, "has-session", "-t", "="+probeSessionName)
+		}
+		if reprobeErr == nil || errors.Is(reprobeErr, ErrSessionNotFound) || errors.Is(reprobeErr, ErrNoCurrentTarget) {
+			return nil
+		}
 		// Do not wrap ErrNoServer here: callers such as EnsureSessionFresh
-		// must not retry a guarded no-server result as an ordinary absence.
-		return fmt.Errorf("%w: protocol=no-server path=%s observation=%w", ErrServerDegraded, path, observationErr)
+		// must not retry a guarded no-server result as an ordinary absence,
+		// so the re-probe result renders with %v, never %w.
+		return fmt.Errorf("%w: protocol=no-server path=%s observation=%w reprobe=%v", ErrServerDegraded, path, observationErr, reprobeErr) //nolint:errorlint // the re-probe result must not join the wrap chain: %w on a persistent ErrNoServer would make callers retry a guarded refusal as an ordinary absence
 	}
 	// Timeout, fork failure, or any other unrecognized error: server is in
 	// an indeterminate state. Refuse to proceed rather than let tmux silently
