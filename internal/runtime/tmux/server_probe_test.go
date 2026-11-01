@@ -863,3 +863,138 @@ func TestNewSessionErrNoServerReprobeWithoutAnswerFailsClosed(t *testing.T) {
 		}
 	}
 }
+
+// scriptedCtxExecutor scripts tmux replies per call and records each call's
+// context deadline. Unlike fakeExecutor it hands the script the context, so a
+// reply can wait on cancellation.
+type scriptedCtxExecutor struct {
+	calls     [][]string
+	deadlines []time.Time
+	reply     func(ctx context.Context, call int) (string, error)
+}
+
+func (d *scriptedCtxExecutor) execute(args []string) (string, error) {
+	return d.executeCtx(context.Background(), args)
+}
+
+func (d *scriptedCtxExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
+	cp := make([]string, len(args))
+	copy(cp, args)
+	d.calls = append(d.calls, cp)
+	deadline, _ := ctx.Deadline()
+	d.deadlines = append(d.deadlines, deadline)
+	return d.reply(ctx, len(d.calls)-1)
+}
+
+func TestProbeServerAliveReprobeSharesPreflightDeadline(t *testing.T) {
+	liveObservation := func(path string) error {
+		return fmt.Errorf("path=%s inode=97 peer_pid=4242 reason=live-unix-socket", path)
+	}
+
+	t.Run("observation and re-probe use the preflight deadline", func(t *testing.T) {
+		de := &scriptedCtxExecutor{reply: func(context.Context, int) (string, error) {
+			return "", ErrNoServer
+		}}
+		var observerDeadline time.Time
+		tm := &Tmux{
+			cfg:  Config{SocketName: "gc-deadline"},
+			exec: de,
+			serverSocketObserver: func(ctx context.Context, path string) error {
+				deadline, ok := ctx.Deadline()
+				if !ok {
+					t.Fatal("observer context has no deadline")
+				}
+				observerDeadline = deadline
+				return liveObservation(path)
+			},
+		}
+
+		if err := tm.probeServerAlive(); !errors.Is(err, ErrServerDegraded) {
+			t.Fatalf("probeServerAlive = %v, want ErrServerDegraded", err)
+		}
+		if len(de.deadlines) != 2 {
+			t.Fatalf("calls = %#v, want the probe and its re-probe", de.calls)
+		}
+		if de.deadlines[0].IsZero() {
+			t.Fatal("preflight context has no deadline")
+		}
+		if !observerDeadline.Equal(de.deadlines[0]) || !de.deadlines[1].Equal(de.deadlines[0]) {
+			t.Fatalf("deadlines probe=%s observer=%s reprobe=%s, want one shared preflight deadline",
+				de.deadlines[0], observerDeadline, de.deadlines[1])
+		}
+	})
+
+	t.Run("exhausted budget refuses without a re-probe", func(t *testing.T) {
+		prev := newSessionProbeTimeout
+		newSessionProbeTimeout = 50 * time.Millisecond
+		t.Cleanup(func() { newSessionProbeTimeout = prev })
+
+		// A second request would answer positively; the expired budget must
+		// refuse before it is issued.
+		de := &scriptedCtxExecutor{reply: func(_ context.Context, call int) (string, error) {
+			if call == 0 {
+				return "", ErrNoServer
+			}
+			return "", nil
+		}}
+		tm := &Tmux{
+			cfg:  Config{SocketName: "gc-deadline"},
+			exec: de,
+			serverSocketObserver: func(ctx context.Context, path string) error {
+				<-ctx.Done()
+				return fmt.Errorf("path=%s observe: %w", path, ctx.Err())
+			},
+		}
+
+		err := tm.probeServerAlive()
+		if !errors.Is(err, ErrServerDegraded) {
+			t.Fatalf("probeServerAlive = %v, want ErrServerDegraded", err)
+		}
+		if errors.Is(err, ErrNoServer) {
+			t.Fatalf("err = %v, must not wrap ErrNoServer", err)
+		}
+		if !strings.Contains(err.Error(), "reprobe="+context.DeadlineExceeded.Error()) {
+			t.Fatalf("err = %q, want the exhausted budget as the re-probe result", err)
+		}
+		if len(de.calls) != 1 {
+			t.Fatalf("calls = %#v, want only the initial preflight", de.calls)
+		}
+	})
+
+	t.Run("in-flight re-probe is canceled by the preflight deadline", func(t *testing.T) {
+		prev := newSessionProbeTimeout
+		newSessionProbeTimeout = 50 * time.Millisecond
+		t.Cleanup(func() { newSessionProbeTimeout = prev })
+
+		var reprobeCtxErr error
+		de := &scriptedCtxExecutor{reply: func(ctx context.Context, call int) (string, error) {
+			if call == 0 {
+				return "", ErrNoServer
+			}
+			<-ctx.Done()
+			reprobeCtxErr = ctx.Err()
+			return "", ctx.Err()
+		}}
+		tm := &Tmux{
+			cfg:  Config{SocketName: "gc-deadline"},
+			exec: de,
+			serverSocketObserver: func(_ context.Context, path string) error {
+				return liveObservation(path)
+			},
+		}
+
+		err := tm.probeServerAlive()
+		if !errors.Is(err, ErrServerDegraded) {
+			t.Fatalf("probeServerAlive = %v, want ErrServerDegraded", err)
+		}
+		if len(de.calls) != 2 {
+			t.Fatalf("calls = %#v, want the probe and its re-probe", de.calls)
+		}
+		if !errors.Is(reprobeCtxErr, context.DeadlineExceeded) {
+			t.Fatalf("re-probe context error = %v, want the preflight deadline", reprobeCtxErr)
+		}
+		if !de.deadlines[1].Equal(de.deadlines[0]) {
+			t.Fatalf("re-probe deadline = %s, want preflight deadline %s", de.deadlines[1], de.deadlines[0])
+		}
+	})
+}
