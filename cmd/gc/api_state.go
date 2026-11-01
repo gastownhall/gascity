@@ -2435,6 +2435,7 @@ func (cs *controllerState) CityBeadsDiagnostic() *beads.BeadsDiagnostic {
 		return nil
 	}
 	diag := *cs.cityBeadsDiagnostic
+	diag.BdInflight = bdInflightForCity(cs.cityPath)
 	return &diag
 }
 
