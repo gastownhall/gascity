@@ -82,6 +82,9 @@ go_test(
         "zz_boolptr_test.go",
     ],
     embed = [":dispatch"],
+    # Native Dolt gate proofs include a 78 s case; keep all coverage within
+    # the normal 300 s action budget by partitioning top-level tests.
+    shard_count = 8,
     deps = [
         "//internal/beadmeta",
         "//internal/beads",

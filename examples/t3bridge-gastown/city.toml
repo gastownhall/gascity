@@ -35,8 +35,8 @@ source = "packs/t3demo"
 # The builtin-pack-imports doctor check repairs missing entries.
 [imports.core]
 source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
-version = "sha:e38ce9cc55d15fa351199c042f0d07aba1a347af"
+version = "sha:b21ab3b27bd09f9130fb457e6fbf9e3570ea7297"
 
 [imports.bd]
 source = "https://github.com/gastownhall/gascity.git//examples/bd"
-version = "sha:e38ce9cc55d15fa351199c042f0d07aba1a347af"
+version = "sha:b21ab3b27bd09f9130fb457e6fbf9e3570ea7297"

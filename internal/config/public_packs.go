@@ -9,7 +9,7 @@ const (
 	// PublicGastownPackVersion pins fresh init output to the registry release
 	// content commit from gastownhall/gascity-packs (main, or a gastown
 	// release branch such as release/gastown-0.1.11).
-	PublicGastownPackVersion = "sha:478292cb99aec2efe4b3cecc636677b4d2af9665"
+	PublicGastownPackVersion = "sha:cb068845a82e033c32a445d6011ad7127c97377c"
 
 	// PublicGascityPackSource is the concrete durable source for the
 	// gascity planning/implementation skills pack.
@@ -18,7 +18,7 @@ const (
 	// PublicGascityPackVersion pins fresh init output to the registry
 	// release content commit from gastownhall/gascity-packs main
 	// (RFC8191 candidate branch; qualify this exact content before release).
-	PublicGascityPackVersion = "sha:676381ee880a38adb9a629b2cffdb17dd8676243"
+	PublicGascityPackVersion = "sha:9b335f3d6e1326c2230c4d9037ef6e2352a51ba8"
 
 	// PublicGascityRolesPackSource is the concrete durable source for the
 	// gascity role-agents subpack (gc-roles): the providerless, rig-scoped
@@ -49,7 +49,7 @@ const (
 	// trees; bump the pin (and append the old value to
 	// SupersededBundledPackImportVersions) when cutting a release whose
 	// bundled core/bd/dolt content changed.
-	BundledPackImportVersion = "sha:e38ce9cc55d15fa351199c042f0d07aba1a347af"
+	BundledPackImportVersion = "sha:b21ab3b27bd09f9130fb457e6fbf9e3570ea7297"
 )
 
 // SupersededBundledPackImportVersions lists previous canonical pins for the
@@ -70,6 +70,7 @@ var SupersededBundledPackImportVersions = []string{
 	// predates the content those binaries embedded, so it is served from
 	// embedded content and never fetched (isSupersededEmbeddedOnlyPin).
 	"sha:f895c0ff47d6ee9334ed282a416387eb5b084d24",
+	"sha:e38ce9cc55d15fa351199c042f0d07aba1a347af",
 }
 
 // SupersededPublicGastownPackVersions lists previous canonical pins for the
@@ -92,6 +93,7 @@ var SupersededPublicGastownPackVersions = []string{
 	"sha:2cd3360f36b2ff55f6c306546841963cbca1ed69",
 	"sha:92a9e8558b86854264ccc082fe9f27d48db3c749",
 	"sha:124902097faa3d2e4de69e5ac5fe9e5109cad24f",
+	"sha:478292cb99aec2efe4b3cecc636677b4d2af9665",
 }
 
 // SupersededPublicGascityPackVersions is the gascity-pack counterpart of
@@ -108,4 +110,5 @@ var SupersededPublicGascityPackVersions = []string{
 	"sha:20ac017f5417b82a300f0bfdfa7cddab3773cb07",
 	"sha:ef528014c0fd6ec9d2bd6eded4fe800cf61758bc",
 	"sha:124902097faa3d2e4de69e5ac5fe9e5109cad24f",
+	"sha:676381ee880a38adb9a629b2cffdb17dd8676243",
 }
