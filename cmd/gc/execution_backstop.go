@@ -35,14 +35,16 @@ package main
 //
 // Stale activity is not always an ended turn: tmux measures pane output, so a
 // long model turn or a quiet tool call can age past the grace while the TUI
-// still shows its busy indicator. For a busy-readable provider family
-// (tmux.BusyIndicatorReadable) on a non-ACP transport, the predicate therefore
-// also holds while a point-in-time snapshot shows that indicator, or when the
-// snapshot fails. Only the indicator vetoes: a pane showing neither it nor a
-// ready prompt (scrolled away, overwritten by a broadcast, or never repainted
-// by an idle TUI) proves nothing, and holding on it would keep an abandoned
-// claim forever. That pane, every other session, and a runtime that cannot
-// take a snapshot keep the activity clock alone.
+// still shows its busy indicator. On a non-ACP transport the predicate
+// therefore also holds while a point-in-time snapshot reads busy, or when the
+// snapshot fails. Which families' busy readings count is the runtime leaf's
+// policy: tmux reports a busy indicator it cannot vouch for (any family but
+// claude and codex) as indeterminate. Only a busy reading vetoes: a pane
+// showing neither the indicator nor a ready prompt (scrolled away, overwritten
+// by a broadcast, or never repainted by an idle TUI) proves nothing, and
+// holding on it would keep an abandoned claim forever. That pane, an
+// indeterminate reading, and a runtime that cannot take a snapshot keep the
+// activity clock alone.
 //
 // # Execution evidence vetoes the drain, not the nudge
 //
@@ -100,7 +102,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -228,6 +229,11 @@ type executionClaim struct {
 	// graph step, the session that holds it, and its kind
 	// (executionLifecycleCandidate).
 	StepID, SessionID, SessionName, Kind string
+	// AwaitingHuman is the claimed bead's gc.awaiting_human, read off this
+	// claim's own bead and never another store's with its ID: the session
+	// that asked a person about it and waits on their decision
+	// (beadmeta.AwaitsHuman).
+	AwaitingHuman string
 }
 
 // executionLifecycleCandidate reports whether claim can carry a step_started
@@ -265,13 +271,14 @@ func newExecutionClaimSnapshot(work []beads.Bead, stores []beads.Store, storeRef
 			continue
 		}
 		claim := executionClaim{
-			BeadID:      wb.ID,
-			RootID:      strings.TrimSpace(wb.Metadata[beadmeta.RootBeadIDMetadataKey]),
-			Assignee:    assignee,
-			StepID:      strings.TrimSpace(wb.Metadata[beadmeta.StepIDMetadataKey]),
-			SessionID:   strings.TrimSpace(wb.Metadata[beadmeta.SessionIDMetadataKey]),
-			SessionName: strings.TrimSpace(wb.Metadata[beadmeta.SessionNameMetadataKey]),
-			Kind:        strings.TrimSpace(wb.Metadata[beadmeta.KindMetadataKey]),
+			BeadID:        wb.ID,
+			RootID:        strings.TrimSpace(wb.Metadata[beadmeta.RootBeadIDMetadataKey]),
+			Assignee:      assignee,
+			StepID:        strings.TrimSpace(wb.Metadata[beadmeta.StepIDMetadataKey]),
+			SessionID:     strings.TrimSpace(wb.Metadata[beadmeta.SessionIDMetadataKey]),
+			SessionName:   strings.TrimSpace(wb.Metadata[beadmeta.SessionNameMetadataKey]),
+			Kind:          strings.TrimSpace(wb.Metadata[beadmeta.KindMetadataKey]),
+			AwaitingHuman: strings.TrimSpace(wb.Metadata[beadmeta.AwaitingHumanMetadataKey]),
 		}
 		if i < len(storeRefs) {
 			claim.StoreRef = claimStoreRef(storeRefs[i])
@@ -425,9 +432,9 @@ func (p poolExecutionBackstop) escalatesNext(s beads.Bead, attempts int, last ti
 
 // quietHold names the gate that keeps session s from counting as quiet, or
 // returns "" when it is quiet: the runtime has observed no activity for at
-// least the grace window and, for a busy-readable provider family on a
-// non-ACP transport (executionSnapshotVetoApplies), a point-in-time snapshot
-// does not show the busy indicator. An unreadable or unset activity signal is
+// least the grace window and, on a non-ACP transport
+// (executionSnapshotVetoApplies), a point-in-time snapshot does not read
+// busy. An unreadable or unset activity signal is
 // NOT quiet: a backstop that treats "unknown" as "idle" nudges working agents,
 // which is exactly how the reverted idle-session nudger produced restart
 // storms. The snapshot is taken only once activity is stale, so a session still
@@ -485,21 +492,15 @@ func snapshotHoldFor(sp runtime.Provider, sessName string) string {
 }
 
 // executionSnapshotVetoApplies reports whether a snapshot may veto the activity
-// clock for the session whose metadata is meta: its provider family (resolved
-// the way the pane's GC_PROVIDER is) is busy-readable
-// (tmux.BusyIndicatorReadable), and its transport is not ACP. Busy-readable is
-// a policy, tmux's submitVerifyEligibleFamilies, not a property of the pane
-// scan: the scan does not tell families apart and also matches Gemini's busy
-// strings, yet a gemini session, like every unlisted family, keeps the
-// activity clock alone. Adding a family to submitVerifyEligibleFamilies widens
-// this set. It is the claude, non-ACP restriction the idle tracker's content
-// clock applies (idleTrackerContentClockApplies), taken to the full
-// busy-readable set.
+// clock for the session whose metadata is meta: its transport is not ACP. ACP
+// delivers in-process, with no pane to read. Which provider families' busy
+// readings count is the runtime leaf's policy, not this gate's: the tmux leaf
+// reports a busy indicator it cannot vouch for, on every family but claude
+// and codex, as runtime.ErrIdleIndeterminate, which holds nothing
+// (snapshotHoldFor, turnHoldFor), so such a session keeps the activity clock
+// alone.
 func executionSnapshotVetoApplies(meta map[string]string) bool {
-	if strings.TrimSpace(meta["transport"]) == "acp" {
-		return false
-	}
-	return tmux.BusyIndicatorReadable(sessionpkg.ProviderFamilyFromMetadata(meta, ""))
+	return strings.TrimSpace(meta["transport"]) != "acp"
 }
 
 func (p poolExecutionBackstop) state(s beads.Bead, target backstopTarget) (same bool, attempts int, last time.Time) {

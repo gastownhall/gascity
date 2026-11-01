@@ -85,7 +85,8 @@ func parseCodexTurnRecord(line []byte) (codexTurnRecord, bool) {
 }
 
 // codexUsageLimitClass is the codex_error_info variant Codex gives a turn the
-// provider refused because the account's usage limit is spent.
+// provider refused because the account's usage limit is spent: a rate limit,
+// and a spent quota (TurnFailure.Quota).
 const codexUsageLimitClass = "usage_limit_exceeded"
 
 // codexTurnFailure is a failed task_complete's error as Codex classified it:
@@ -93,7 +94,8 @@ const codexUsageLimitClass = "usage_limit_exceeded"
 // message, cut to MaxTurnFailureMessage.
 func codexTurnFailure(e codexEventMsg) TurnFailure {
 	code := codexErrorInfoCode(e.CodexErrorInfo)
-	return newTurnFailure(code, codexErrorInfoStatus(e.CodexErrorInfo), code == codexUsageLimitClass, e.Message)
+	quota := code == codexUsageLimitClass
+	return newTurnFailure(code, codexErrorInfoStatus(e.CodexErrorInfo), quota, quota, e.Message)
 }
 
 // codexErrorInfoStatus is the HTTP status a codex_error_info variant with

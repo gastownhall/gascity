@@ -65,6 +65,9 @@ type Profile struct {
 	Fixtures     ProfileFixtureSet
 	Continuation ContinuationOracle
 	Usage        UsageExpectation
+	// ProgramStatus is the profile's OSC 7501 program-status declaration,
+	// held to the WC-PSTAT rows (ProgramStatusCatalog).
+	ProgramStatus ProgramStatusExpectation
 }
 
 // Phase1Profiles returns the canonical phase-1 worker-core profiles.
@@ -94,6 +97,18 @@ func Phase1Profiles() []Profile {
 				Model:             "claude-sonnet-4-6",
 				DefaultCostPriced: true,
 			},
+			// Claude Code reports only after its support probe is answered,
+			// so it runs under the relay. Recorded under gc's tmux against a
+			// local mock API: the probe, then BEL-terminated reports.
+			ProgramStatus: ProgramStatusExpectation{
+				ProgramStatusDeclaration: ProgramStatusDeclaration{Declared: true, App: "claude-code", Relay: true},
+				Verified:                 "Claude Code 2.1.311",
+				Emission: ProgramStatusEmission{
+					FirstReport: []string{"term bel", "raw " + osc7501ProbeBELHex, "report state=idle:app=claude-code"},
+					TurnStart:   []string{"term bel", "report state=working:app=claude-code"},
+					TurnEnd:     []string{"term bel", "report state=done:app=claude-code"},
+				},
+			},
 		},
 		// codex, cursor, and gemini below are covered by the Phase 1 transcript/
 		// continuation requirements and by the WC-STRUCT-* structured family
@@ -121,6 +136,18 @@ func Phase1Profiles() []Profile {
 				CacheReadTokens:   10,
 				Model:             "gpt-5-codex",
 				DefaultCostPriced: false,
+			},
+			// Codex reports unprompted (it never probes), so capture needs
+			// no relay. Recorded under gc's tmux against a local mock API:
+			// ST-terminated reports.
+			ProgramStatus: ProgramStatusExpectation{
+				ProgramStatusDeclaration: ProgramStatusDeclaration{Declared: true, App: "codex"},
+				Verified:                 "codex-cli 0.165.0",
+				Emission: ProgramStatusEmission{
+					FirstReport: []string{"report state=idle:app=codex"},
+					TurnStart:   []string{"report state=working:app=codex"},
+					TurnEnd:     []string{"report state=done:app=codex"},
+				},
 			},
 		},
 		{
@@ -252,6 +279,19 @@ func Phase1Profiles() []Profile {
 				RecallPromptContains:   "Repeat the exact Pi phase-1 summary from earlier before answering.",
 				RecallResponseContains: "Pi phase 1 validates the tmux CLI transcript contract.",
 				ResetResponseContains:  "I cannot repeat the earlier Pi summary because this session started fresh.",
+			},
+			// pi reports only after a 7501 reply, which tmux never sends; its
+			// declared PI_PROGRAM_STATUS=1 forces reports and skips the probe,
+			// so capture needs no relay. Recorded under gc's tmux with that env
+			// against a local mock API: ST-terminated reports.
+			ProgramStatus: ProgramStatusExpectation{
+				ProgramStatusDeclaration: ProgramStatusDeclaration{Declared: true, App: "pi"},
+				Verified:                 "pi 1.4.0",
+				Emission: ProgramStatusEmission{
+					FirstReport: []string{"report state=idle:app=pi"},
+					TurnStart:   []string{"report state=working:app=pi"},
+					TurnEnd:     []string{"report state=done:app=pi"},
+				},
 			},
 		},
 		{

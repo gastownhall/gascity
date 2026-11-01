@@ -76,9 +76,11 @@ func TestAgentSliceWrapsRespawnPane(t *testing.T) {
 	if err := tm.RespawnPaneWithWorkDir("%0", "/work", "claude --resume"); err != nil {
 		t.Fatalf("RespawnPaneWithWorkDir: %v", err)
 	}
+	// The pane command ends respawn-pane, the list's first command.
 	args := exec.calls[0]
-	if got := args[len(args)-1]; got != want {
-		t.Fatalf("respawn-with-workdir command = %q, want %q", got, want)
+	sep := slices.Index(args, ";")
+	if sep < 1 || args[sep-1] != want {
+		t.Fatalf("respawn-with-workdir command in %q, want %q", args, want)
 	}
 }
 
@@ -225,6 +227,7 @@ func TestAgentInputTarget_WrappedPane(t *testing.T) {
 // requests return a dead PID with no descendants, modeling the startup window
 // where systemd-run exists but the agent has not exec'd yet.
 type wrappedWaitExecutor struct {
+	paneCommand  string // the wrapper the pane reports; "" means systemd-run
 	deadPID      string
 	livePID      string
 	livePIDAfter int
@@ -240,6 +243,9 @@ func (e *wrappedWaitExecutor) execute(args []string) (string, error) {
 			// Agent-pane reads: the session's one, unmarked pane.
 			switch args[len(args)-1] {
 			case agentPaneMarkerFormat + "\t#{pane_current_command}":
+				if e.paneCommand != "" {
+					return "pane\t" + e.paneCommand, nil
+				}
 				return "pane\tsystemd-run", nil
 			case agentPaneMarkerFormat + "\t#{pane_pid}":
 				e.pidRequests++
