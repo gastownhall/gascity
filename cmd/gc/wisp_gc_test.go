@@ -3069,3 +3069,145 @@ func TestWispGC_ReapResolvesRootsLive(t *testing.T) {
 		t.Fatalf("reaped %d; a step of a root the store has reopened was deleted on the cache's word", reaped)
 	}
 }
+
+func TestWispGC_ReloadKeepsLastRun(t *testing.T) {
+	lastRun := time.Now()
+	root := beads.Bead{ID: "gcg-root-1", UpdatedAt: lastRun}
+	prev := &memoryWispGC{interval: time.Hour, ttl: time.Hour, mailRetentionTTL: time.Hour, lastRun: lastRun, cityName: "old"}
+	prev.notes.noteRefusal("graph", root, lastRun, "held")
+	next := &memoryWispGC{interval: time.Hour, ttl: 24 * time.Hour, mailRetentionTTL: 48 * time.Hour, cityName: "test-city"}
+
+	got := carryWispGCState(prev, next)
+
+	m, ok := got.(*memoryWispGC)
+	if !ok || m != next {
+		t.Fatalf("carryWispGCState returned %#v, want the rebuilt tracker", got)
+	}
+	if !m.lastRun.Equal(lastRun) {
+		t.Fatalf("lastRun = %v, want carried %v", m.lastRun, lastRun)
+	}
+	if m.interval != time.Hour || m.ttl != 24*time.Hour || m.mailRetentionTTL != 48*time.Hour || m.cityName != "test-city" {
+		t.Fatalf("config fields = %v/%v/%v/%q, want the rebuilt tracker's 1h/24h/48h/%q",
+			m.interval, m.ttl, m.mailRetentionTTL, m.cityName, "test-city")
+	}
+	if m.shouldRun(lastRun.Add(10 * time.Minute)) {
+		t.Fatal("rebuilt tracker due 10m after the carried last run on a 1h interval")
+	}
+	if !m.shouldRun(lastRun.Add(time.Hour)) {
+		t.Fatal("rebuilt tracker not due 1h after the carried last run")
+	}
+	if _, held := m.notes.remembered("graph", root, lastRun.Add(time.Second)); held {
+		t.Fatal("rebuilt tracker remembers the old tracker's refusal; notes must not carry across a reload")
+	}
+
+	t.Run("notes are not carried", func(t *testing.T) {
+		prev := &memoryWispGC{interval: time.Hour, ttl: time.Hour, lastRun: lastRun}
+		heldRoot := beads.Bead{ID: "root-held", UpdatedAt: lastRun}
+		refusedRoot := beads.Bead{ID: "root-refused", UpdatedAt: lastRun}
+		prev.notes.noteRefusal(graphArmHolderMemo, heldRoot, lastRun, holderAnswerHeld)
+		prev.notes.noteRefusal("graph", refusedRoot, lastRun, "closure holds a bead that is not closed")
+		next := &memoryWispGC{interval: time.Hour, ttl: time.Hour}
+		m := carryWispGCState(prev, next).(*memoryWispGC)
+		if _, ok := m.notes.remembered(graphArmHolderMemo, heldRoot, lastRun.Add(time.Minute)); ok {
+			t.Fatal("holder memo carried; answers read against a leg set the reload may have changed must not survive it")
+		}
+		if _, ok := m.notes.remembered("graph", refusedRoot, lastRun.Add(time.Minute)); ok {
+			t.Fatal("graph refusal carried into the rebuilt tracker")
+		}
+	})
+	t.Run("startup reload carries a zero lastRun", func(t *testing.T) {
+		got := carryWispGCState(newWispGC(time.Hour, time.Hour, 0), newWispGC(time.Hour, time.Hour, 0))
+		if !got.shouldRun(time.Now()) {
+			t.Fatal("tracker that never ran is not due after a reload; want it due on its first tick")
+		}
+	})
+	t.Run("other tracker type", func(t *testing.T) {
+		next := newWispGC(time.Hour, time.Hour, 0)
+		if got := carryWispGCState(fixedWispGC{}, next); got != next || !got.shouldRun(time.Now()) {
+			t.Fatalf("carryWispGCState(fixedWispGC, next) = %#v, want next unchanged", got)
+		}
+	})
+}
+
+func TestWispGC_SessionPurgeCursorSurvivesReload(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		rebuild func(prev wispGC) wispGC
+		want    string
+	}{
+		{name: "carried", rebuild: func(prev wispGC) wispGC {
+			return carryWispGCState(prev, newWispGC(time.Minute, 24*time.Hour, 0))
+		}, want: "[0 1 1]"},
+		{name: "bare rebuild starves", rebuild: func(wispGC) wispGC {
+			return newWispGC(time.Minute, 24*time.Hour, 0)
+		}, want: "[0 0 0]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_INFRA_SESSION_PURGE_AGE", "")
+			now := time.Now()
+			base := now.Add(-60 * 24 * time.Hour)
+			ledger := openSessionPurgeSQLiteStore(t)
+			// Three child-holding sessions are the oldest candidates, then two
+			// purgeable ones.
+			for i := 0; i < 3; i++ {
+				parent := fmt.Sprintf("gcg-session-held-%d", i)
+				mustCreateSessionPurgeBead(t, ledger, closedSessionPurgeBead(parent, "session", base.Add(time.Duration(i)*time.Minute)))
+				child := closedSessionPurgeBead(fmt.Sprintf("gcg-held-child-%d", i), "task", base)
+				child.ParentID = parent
+				mustCreateSessionPurgeBead(t, ledger, child)
+			}
+			mustCreateSessionPurgeBead(t, ledger, closedSessionPurgeBead("gcg-session-free-0", "session", base.Add(10*time.Minute)))
+			mustCreateSessionPurgeBead(t, ledger, closedSessionPurgeBead("gcg-session-free-1", "session", base.Add(11*time.Minute)))
+
+			prevScan := wispGCSessionPurgeScanCap
+			wispGCSessionPurgeScanCap = 2
+			t.Cleanup(func() { wispGCSessionPurgeScanCap = prevScan })
+
+			wg := newWispGC(time.Minute, 24*time.Hour, 0)
+			sessionLedger := beads.SessionStore{Store: ledger}
+			graph := beads.GraphStore{Store: ledger}
+			var total []int
+			for pass := 0; pass < 3; pass++ {
+				if pass > 0 {
+					wg = tc.rebuild(wg)
+				}
+				purged, err := wg.runGC(nil, graph, sessionLedger, beads.MailStore{}, now)
+				if err != nil {
+					t.Fatalf("pass %d runGC: %v", pass, err)
+				}
+				total = append(total, purged)
+			}
+			if fmt.Sprint(total) != tc.want {
+				t.Fatalf("purged per pass with a reload between passes = %v, want %s", total, tc.want)
+			}
+			if tc.want == "[0 0 0]" {
+				return
+			}
+			for _, id := range []string{"gcg-session-free-0", "gcg-session-free-1"} {
+				if _, err := ledger.Get(id); !errors.Is(err, beads.ErrNotFound) {
+					t.Fatalf("Get %s = %v, want ErrNotFound", id, err)
+				}
+			}
+		})
+	}
+}
+
+func TestWispGC_ReloadCarryFollowsEnablement(t *testing.T) {
+	lastRun := time.Now()
+	ran := &memoryWispGC{interval: time.Hour, ttl: time.Hour, lastRun: lastRun}
+
+	if got := carryWispGCState(ran, newWispGC(0, time.Hour, 0)); got != nil {
+		t.Fatalf("carry into a disabled GC = %#v, want an untyped nil interface", got)
+	}
+	if got := carryWispGCState(ran, (*memoryWispGC)(nil)); got == nil {
+		t.Fatal("carry into a typed-nil tracker returned an untyped nil; want next unchanged")
+	}
+	var typedNil *memoryWispGC
+	for _, prev := range []wispGC{nil, typedNil} {
+		next := newWispGC(time.Hour, time.Hour, 0)
+		got := carryWispGCState(prev, next)
+		if got != next || !got.shouldRun(lastRun) {
+			t.Fatalf("carry from a disabled GC (%#v) = %#v, want next due on its first tick", prev, got)
+		}
+	}
+}

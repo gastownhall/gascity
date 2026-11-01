@@ -8863,3 +8863,193 @@ func (p *probeCountingFake) IsRunning(name string) bool {
 	p.probes.Add(1)
 	return p.Fake.IsRunning(name)
 }
+
+// wispGCReloadCityBase is a minimal fake-provider city; tests append a
+// [daemon] (and optional [mail]) section to it.
+const wispGCReloadCityBase = "[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n"
+
+// newWispGCReloadRuntime builds a city runtime from wispGCReloadCityBase+extra
+// with the beads lifecycle stubbed, so reloadConfigTraced applies config edits.
+func newWispGCReloadRuntime(t *testing.T, extra string) (*CityRuntime, string) {
+	t.Helper()
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	if err := os.WriteFile(tomlPath, []byte(wispGCReloadCityBase+extra), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+	var stdout, stderr bytes.Buffer
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  tomlPath,
+		LogPrefix: "gc reload",
+		Cfg:       cfg,
+		SP:        sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+	cr.sessionDrains = newDrainTracker()
+
+	prevStart := cityRuntimeStartBeadsLifecycle
+	cityRuntimeStartBeadsLifecycle = func(string, string, *config.City, cityStoreRecord, io.Writer) error { return nil }
+	t.Cleanup(func() { cityRuntimeStartBeadsLifecycle = prevStart })
+	return cr, tomlPath
+}
+
+// applyWispGCReload rewrites the city config to wispGCReloadCityBase+extra and
+// applies it, failing unless the reload is applied with a new revision.
+func applyWispGCReload(t *testing.T, cr *CityRuntime, tomlPath, extra string) {
+	t.Helper()
+	oldRev := cr.configRev
+	if err := os.WriteFile(tomlPath, []byte(wispGCReloadCityBase+extra), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	lastProviderName := "fake"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cr.cityPath, nil, reloadSourceManual)
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reply.Outcome = %q (err %q), want %q", reply.Outcome, reply.Error, reloadOutcomeApplied)
+	}
+	if cr.configRev == oldRev {
+		t.Fatal("configRev unchanged after reload")
+	}
+}
+
+// stampWispGCLastRun records a pass at lastRun on cr's tracker and returns it.
+func stampWispGCLastRun(t *testing.T, cr *CityRuntime, lastRun time.Time) *memoryWispGC {
+	t.Helper()
+	m, ok := cr.wg.(*memoryWispGC)
+	if !ok {
+		t.Fatalf("wisp GC tracker = %T, want *memoryWispGC", cr.wg)
+	}
+	m.lastRun = lastRun
+	return m
+}
+
+// rebuiltWispGC returns cr's tracker after a reload, failing unless the reload
+// replaced prev with a new *memoryWispGC.
+func rebuiltWispGC(t *testing.T, cr *CityRuntime, prev *memoryWispGC) *memoryWispGC {
+	t.Helper()
+	m, ok := cr.wg.(*memoryWispGC)
+	if !ok {
+		t.Fatalf("wisp GC tracker after reload = %T, want *memoryWispGC", cr.wg)
+	}
+	if m == prev {
+		t.Fatal("wisp GC tracker not rebuilt by the reload")
+	}
+	return m
+}
+
+func TestCityRuntimeReloadKeepsWispGCCadence(t *testing.T) {
+	const daemon = "\n[daemon]\nwisp_gc_interval = \"1h\"\n"
+	for _, tc := range []struct {
+		name    string
+		reload  string
+		wantTTL time.Duration
+	}{
+		{name: "unrelated edit", reload: daemon + "wisp_ttl = \"24h\"\nshutdown_timeout = \"1s\"\n", wantTTL: 24 * time.Hour},
+		{name: "ttl edit", reload: daemon + "wisp_ttl = \"48h\"\n", wantTTL: 48 * time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cr, tomlPath := newWispGCReloadRuntime(t, daemon+"wisp_ttl = \"24h\"\n")
+			lastRun := time.Now()
+			prev := stampWispGCLastRun(t, cr, lastRun)
+
+			applyWispGCReload(t, cr, tomlPath, tc.reload)
+
+			next := rebuiltWispGC(t, cr, prev)
+			if cr.wg.shouldRun(lastRun.Add(10 * time.Minute)) {
+				t.Fatal("wisp GC due 10m after its last run, right after a config reload; want the 1h cadence kept")
+			}
+			if !cr.wg.shouldRun(lastRun.Add(time.Hour)) {
+				t.Fatal("wisp GC not due 1h after its last run; want the 1h cadence kept")
+			}
+			if next.ttl != tc.wantTTL {
+				t.Fatalf("rebuilt ttl = %v, want %v", next.ttl, tc.wantTTL)
+			}
+		})
+	}
+}
+
+func TestCityRuntimeReloadWispGCIntervalCountsFromLastRun(t *testing.T) {
+	for _, tc := range []struct {
+		interval string
+		want     time.Duration
+		notDueAt time.Duration
+		dueAt    time.Duration
+		ttl      string
+		wantTTL  time.Duration
+		mailTTL  string
+		wantMail time.Duration
+	}{
+		{interval: "15m", want: 15 * time.Minute, notDueAt: 10 * time.Minute, dueAt: 15 * time.Minute, ttl: "12h", wantTTL: 12 * time.Hour, mailTTL: "72h", wantMail: 72 * time.Hour},
+		{interval: "2h", want: 2 * time.Hour, notDueAt: time.Hour, dueAt: 2 * time.Hour, ttl: "48h", wantTTL: 48 * time.Hour, mailTTL: "96h", wantMail: 96 * time.Hour},
+	} {
+		t.Run(tc.interval, func(t *testing.T) {
+			cr, tomlPath := newWispGCReloadRuntime(t, "\n[daemon]\nwisp_gc_interval = \"1h\"\nwisp_ttl = \"24h\"\n\n[mail]\nretention_ttl = \"168h\"\n")
+			lastRun := time.Now()
+			prev := stampWispGCLastRun(t, cr, lastRun)
+
+			applyWispGCReload(t, cr, tomlPath, "\n[daemon]\nwisp_gc_interval = \""+tc.interval+"\"\nwisp_ttl = \""+tc.ttl+"\"\n\n[mail]\nretention_ttl = \""+tc.mailTTL+"\"\n")
+
+			next := rebuiltWispGC(t, cr, prev)
+			if next.interval != tc.want || next.ttl != tc.wantTTL || next.mailRetentionTTL != tc.wantMail {
+				t.Fatalf("rebuilt interval/ttl/mailRetentionTTL = %v/%v/%v, want %v/%v/%v",
+					next.interval, next.ttl, next.mailRetentionTTL, tc.want, tc.wantTTL, tc.wantMail)
+			}
+			if cr.wg.shouldRun(lastRun.Add(tc.notDueAt)) {
+				t.Fatalf("wisp GC due %v after its last run on a %s interval; want the new interval counted from the last run", tc.notDueAt, tc.interval)
+			}
+			if !cr.wg.shouldRun(lastRun.Add(tc.dueAt)) {
+				t.Fatalf("wisp GC not due %v after its last run on a %s interval", tc.dueAt, tc.interval)
+			}
+		})
+	}
+}
+
+func TestCityRuntimeReloadKeepsWispGCSessionPurgeCursor(t *testing.T) {
+	cr, tomlPath := newWispGCReloadRuntime(t, "\n[daemon]\nwisp_gc_interval = \"1h\"\nwisp_ttl = \"24h\"\n")
+	prev := stampWispGCLastRun(t, cr, time.Now())
+	cursor := &beads.SeekBoundary{CreatedAt: time.Now().Add(-48 * time.Hour), ID: "gcg-session-p"}
+	prev.sessionPurgeCursor = cursor
+
+	applyWispGCReload(t, cr, tomlPath, "\n[daemon]\nwisp_gc_interval = \"1h\"\nwisp_ttl = \"24h\"\nshutdown_timeout = \"1s\"\n")
+
+	if got := rebuiltWispGC(t, cr, prev).sessionPurgeCursor; got != cursor {
+		t.Fatalf("session purge cursor after reload = %+v, want %+v (resume after the last examined candidate)", got, cursor)
+	}
+}
+
+func TestCityRuntimeReloadWispGCFollowsEnablement(t *testing.T) {
+	const enabled = "\n[daemon]\nwisp_gc_interval = \"1h\"\nwisp_ttl = \"24h\"\n"
+	cr, tomlPath := newWispGCReloadRuntime(t, enabled)
+	lastRun := time.Now()
+	stampWispGCLastRun(t, cr, lastRun)
+
+	applyWispGCReload(t, cr, tomlPath, "\n[daemon]\nshutdown_timeout = \"1s\"\n")
+	if cr.wg != nil {
+		t.Fatalf("wisp GC tracker after disabling reload = %#v, want an untyped nil interface", cr.wg)
+	}
+	cr.tickWispGC(&tickPass{})
+
+	applyWispGCReload(t, cr, tomlPath, enabled)
+	if _, ok := cr.wg.(*memoryWispGC); !ok {
+		t.Fatalf("wisp GC tracker after enabling reload = %T, want *memoryWispGC", cr.wg)
+	}
+	if !cr.wg.shouldRun(lastRun.Add(time.Minute)) {
+		t.Fatal("newly enabled wisp GC not due on its first tick; want it due as at process start")
+	}
+}
