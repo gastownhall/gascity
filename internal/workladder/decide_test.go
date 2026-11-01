@@ -274,16 +274,26 @@ func TestDecideAWaitOnAPerson(t *testing.T) {
 		}
 	})
 	// The seat's own turns say whether the wait needs a nudge: one that
-	// shows its newest ended turn did not fail (or a turn open) leaves it
-	// alone however long the person takes; one that shows that turn failed
-	// takes it up a Cap after the wait began or after its last nudge; one
-	// that cannot tell (none, or of another conversation) keeps the hourly
-	// pace.
+	// shows its newest ended turn completed, or a turn open, leaves it alone
+	// however long the person takes; one that shows that turn failed takes
+	// it up a Cap after the wait began or after its last nudge; any other
+	// (none, of another conversation, a newest turn canceled or ended with
+	// no status, no turn at all) keeps the hourly pace.
 	completed := func(o Observation) Observation {
+		o.Conv, o.Turns = 1, TurnReading{Read: true, Conv: 1, LastCompleted: true, ServedAt: t0.Add(-time.Minute)}
+		return o
+	}
+	open := func(o Observation) Observation {
+		o.Conv, o.Turns = 1, TurnReading{Read: true, Conv: 1, Open: true}
+		return o
+	}
+	// neither: the newest ended turn was canceled, or ended with no status
+	// (an inferred end), after an earlier one completed.
+	neither := func(o Observation) Observation {
 		o.Conv, o.Turns = 1, TurnReading{Read: true, Conv: 1, ServedAt: t0.Add(-time.Minute)}
 		return o
 	}
-	open := func(o Observation) Observation { o.Conv, o.Turns = 1, TurnReading{Read: true, Conv: 1}; return o }
+	noTurns := func(o Observation) Observation { o.Conv, o.Turns = 1, TurnReading{Read: true, Conv: 1}; return o }
 	failed := func(o Observation) Observation {
 		o.Conv, o.Turns = 1, TurnReading{Read: true, Conv: 1, LastFailed: true, ServedAt: t0.Add(-time.Minute)}
 		return o
@@ -346,7 +356,10 @@ func TestDecideAWaitOnAPerson(t *testing.T) {
 			t.Fatalf("nudges %v, want the first when the turn failed at %v and the next a cap later", nudges, died.Sub(t0))
 		}
 	})
-	for name, read := range map[string]func(Observation) Observation{"no reading": noReading, "a reading of another conversation": otherConv} {
+	for name, read := range map[string]func(Observation) Observation{
+		"no reading": noReading, "a reading of another conversation": otherConv,
+		"a newest turn canceled or ended with no status": neither, "a reading with no turn": noTurns,
+	} {
 		t.Run(name+": the hourly pace", func(t *testing.T) {
 			nudges, _ := passes(t, 3*time.Hour+time.Minute, 5*time.Minute, always(read))
 			if want := []time.Duration{DefaultCap, 2 * DefaultCap, 3 * DefaultCap}; fmt.Sprint(nudges) != fmt.Sprint(want) {
@@ -681,7 +694,7 @@ func TestDecideDue(t *testing.T) {
 			name: "a wait on a person whose seat's newest turn completed: nothing",
 			e:    due(Entry{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempts: 6, AwaitsHuman: true}),
 			obs: func(o Observation) Observation {
-				o.Conv, o.Turns = 1, TurnReading{Read: true, Conv: 1, ServedAt: t0}
+				o.Conv, o.Turns = 1, TurnReading{Read: true, Conv: 1, LastCompleted: true, ServedAt: t0}
 				return o
 			},
 			idle: true,
@@ -690,7 +703,7 @@ func TestDecideDue(t *testing.T) {
 			name: "a wait on a person at the release threshold whose seat's newest turn completed: nothing, never released",
 			e:    due(Entry{Key: key("x"), Kind: KindClaim, Rung: RungClaimed, Attempts: 3, AwaitsHuman: true}),
 			obs: func(o Observation) Observation {
-				o.Conv, o.Turns = 1, TurnReading{Read: true, Conv: 1, ServedAt: t0}
+				o.Conv, o.Turns = 1, TurnReading{Read: true, Conv: 1, LastCompleted: true, ServedAt: t0}
 				return o
 			},
 			idle: true,
@@ -699,10 +712,28 @@ func TestDecideDue(t *testing.T) {
 			name: "a wait on a person whose seat has a turn open, degraded: nothing",
 			e:    due(Entry{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempts: 6, Recycles: 1, AwaitsHuman: true}),
 			obs: func(o Observation) Observation {
-				o.Conv, o.Turns, o.Provider.Degraded = 1, TurnReading{Read: true, Conv: 1}, true
+				o.Conv, o.Turns, o.Provider.Degraded = 1, TurnReading{Read: true, Conv: 1, Open: true}, true
 				return o
 			},
 			idle: true,
+		},
+		{
+			name: "a wait on a person whose seat's newest turn was canceled or ended with no status: a nudge",
+			e:    due(Entry{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempts: 6, AwaitsHuman: true}),
+			obs: func(o Observation) Observation {
+				o.Conv, o.Turns = 1, TurnReading{Read: true, Conv: 1, ServedAt: t0}
+				return o
+			},
+			want: []Action{Nudge{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempt: 7}},
+		},
+		{
+			name: "a wait on a person whose seat's reading holds no turn: a nudge",
+			e:    due(Entry{Key: key("x"), Kind: KindClaim, Rung: RungClaimed, Attempts: 3, AwaitsHuman: true}),
+			obs: func(o Observation) Observation {
+				o.Conv, o.Turns = 1, TurnReading{Read: true, Conv: 1}
+				return o
+			},
+			want: []Action{Nudge{Key: key("x"), Kind: KindClaim, Rung: RungClaimed, Attempt: 4}},
 		},
 	}
 	for _, tc := range cases {

@@ -214,11 +214,12 @@ func (s *rlSim) reading(now time.Time) TurnReading {
 			r.ServedAt = t.end
 		}
 	}
-	if s.running(now) || len(ended) == 0 {
+	r.Open = s.running(now)
+	if r.Open || len(ended) == 0 {
 		return r
 	}
 	last := ended[len(ended)-1]
-	r.LastFailed = last.outcome != rlCompleted
+	r.LastFailed, r.LastCompleted = last.outcome != rlCompleted, last.outcome == rlCompleted
 	for i := len(ended) - 1; i >= 0 && ended[i].outcome == rlRefused; i-- {
 		r.Refused++
 	}

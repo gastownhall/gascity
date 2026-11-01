@@ -31,7 +31,8 @@ const (
 // by a refusal of a nudge delivered since, one fresh restart per seat per
 // hour and per provider per 30m, and closed stale 70m after its newest
 // answered refusal ended (an older refusal answers nothing), so a step
-// waiting on a person, nudged hourly, keeps its episode standing.
+// waiting on a person, nudged hourly while its seat's turns are refused,
+// keeps its episode standing.
 func DefaultPolicy() Policy {
 	return Policy{
 		Grace:         DefaultGrace,

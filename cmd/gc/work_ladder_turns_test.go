@@ -31,6 +31,7 @@ func TestLadderTurnReading(t *testing.T) {
 	gateway := runtime.EndedTurn{TurnID: "524", EndedAt: at, Status: runtime.TurnStatusFailed, Failure: runtime.TurnFailure{HTTPStatus: 524}}
 	noStatus := runtime.EndedTurn{TurnID: "gemini", EndedAt: at}
 	canceled := runtime.EndedTurn{TurnID: "esc", EndedAt: at, Status: runtime.TurnStatusCancelled}
+	inferred := runtime.EndedTurn{TurnID: "idle", EndedAt: at, Inferred: true}
 	open := runtime.TurnState{TurnID: "open"}
 	earlier := limited
 	earlier.TurnID, earlier.EndedAt = "429-earlier", at.Add(-time.Minute)
@@ -41,15 +42,18 @@ func TestLadderTurnReading(t *testing.T) {
 		want    workladder.TurnReading
 		refusal runtime.TurnFailure
 	}{
-		{"newest completed", runtime.TurnHistory{Recent: []runtime.EndedTurn{completed}}, workladder.TurnReading{Read: true, Conv: 3, ServedAt: completed.EndedAt}, runtime.TurnFailure{}},
+		{"newest completed", runtime.TurnHistory{Recent: []runtime.EndedTurn{completed}}, workladder.TurnReading{Read: true, Conv: 3, LastCompleted: true, ServedAt: completed.EndedAt}, runtime.TurnFailure{}},
+		{"newest completed after a refusal", runtime.TurnHistory{Recent: []runtime.EndedTurn{completed, limited}}, workladder.TurnReading{Read: true, Conv: 3, LastCompleted: true, ServedAt: completed.EndedAt}, runtime.TurnFailure{}},
 		{"newest refused (429), served behind it", runtime.TurnHistory{Recent: []runtime.EndedTurn{limited, completed}}, workladder.TurnReading{Read: true, Conv: 3, LastFailed: true, ServedAt: completed.EndedAt, Refused: 1, RefusedAt: at}, limited.Failure},
 		{"two refused in a row", runtime.TurnHistory{Recent: []runtime.EndedTurn{limited, earlier, completed}}, workladder.TurnReading{Read: true, Conv: 3, LastFailed: true, ServedAt: completed.EndedAt, Refused: 2, RefusedAt: at}, limited.Failure},
 		{"a 524 breaks the run", runtime.TurnHistory{Recent: []runtime.EndedTurn{limited, gateway, earlier}}, workladder.TurnReading{Read: true, Conv: 3, LastFailed: true, Refused: 1, RefusedAt: at}, limited.Failure},
 		{"a spent quota", runtime.TurnHistory{Recent: []runtime.EndedTurn{spent, limited}}, workladder.TurnReading{Read: true, Conv: 3, LastFailed: true, Refused: 2, RefusedAt: at, Quota: true}, spent.Failure},
 		{"newest failed (524), never served", runtime.TurnHistory{Recent: []runtime.EndedTurn{gateway, limited}}, workladder.TurnReading{Read: true, Conv: 3, LastFailed: true}, runtime.TurnFailure{}},
-		{"no status (Gemini) is no failure", runtime.TurnHistory{Recent: []runtime.EndedTurn{noStatus, limited}}, workladder.TurnReading{Read: true, Conv: 3}, runtime.TurnFailure{}},
+		{"no status (Gemini) is no failure, and no completion", runtime.TurnHistory{Recent: []runtime.EndedTurn{noStatus, limited}}, workladder.TurnReading{Read: true, Conv: 3}, runtime.TurnFailure{}},
+		{"an inferred end with no status after a completed turn is not completed", runtime.TurnHistory{Recent: []runtime.EndedTurn{inferred, completed}}, workladder.TurnReading{Read: true, Conv: 3, ServedAt: completed.EndedAt}, runtime.TurnFailure{}},
 		{"canceled is neither", runtime.TurnHistory{Recent: []runtime.EndedTurn{canceled}}, workladder.TurnReading{Read: true, Conv: 3}, runtime.TurnFailure{}},
-		{"a turn open has no failure yet", runtime.TurnHistory{Current: open, Recent: []runtime.EndedTurn{limited, completed}}, workladder.TurnReading{Read: true, Conv: 3, ServedAt: completed.EndedAt}, runtime.TurnFailure{}},
+		{"a turn open has no failure yet", runtime.TurnHistory{Current: open, Recent: []runtime.EndedTurn{limited, completed}}, workladder.TurnReading{Read: true, Conv: 3, Open: true, ServedAt: completed.EndedAt}, runtime.TurnFailure{}},
+		{"a turn open after a completed one is open, not completed", runtime.TurnHistory{Current: open, Recent: []runtime.EndedTurn{completed}}, workladder.TurnReading{Read: true, Conv: 3, Open: true, ServedAt: completed.EndedAt}, runtime.TurnFailure{}},
 		{"nothing yet", runtime.TurnHistory{}, workladder.TurnReading{Read: true, Conv: 3}, runtime.TurnFailure{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -1664,6 +1664,47 @@ func TestWorkLadderLeavesAHumanWaitAloneWhileItsTurnsDoNotFail(t *testing.T) {
 	}
 }
 
+// A wait is left alone only on positive evidence that its seat is fine: a
+// turn open, or the newest ended turn completed. A reading that shows
+// neither (the newest turn canceled, or ended with no status as the idle
+// overlay infers the end of a turn whose CLI died, or no turn at all) keeps
+// the hourly nudge: the answer's turn may have died, and a resumed seat's
+// startup nudge is best effort.
+func TestWorkLadderNudgesAHumanWaitHourlyOnATurnNeitherOpenNorCompleted(t *testing.T) {
+	asked := runtime.EndedTurn{TurnID: "asked", StartedAt: stepsTestNow.Add(-2 * time.Hour), EndedAt: stepsTestNow.Add(-time.Hour), Status: runtime.TurnStatusCompleted}
+	answer := runtime.EndedTurn{TurnID: "answer", StartedAt: stepsTestNow.Add(-10 * time.Minute), EndedAt: stepsTestNow.Add(-5 * time.Minute)}
+	canceled, inferred := answer, answer
+	canceled.Status = runtime.TurnStatusCancelled
+	inferred.Inferred = true
+	for name, hist := range map[string]runtime.TurnHistory{
+		"the answer's turn canceled":             {Recent: []runtime.EndedTurn{canceled, asked}},
+		"the answer's turn ended with no status": {Recent: []runtime.EndedTurn{inferred, asked}},
+		"no turn":                                {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := newLadderCity(t)
+			id := c.claim("Human review before merge")
+			if err := c.work.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.SessionIDMetadataKey: c.seat}}); err != nil {
+				t.Fatal(err)
+			}
+			c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id})
+			reads := 0
+			c.turnsRead(func() runtime.TurnHistory { reads++; h := hist; h.ObservedAt = c.now; return h })
+			c.awaitHuman(id, c.seat)
+			c.run(3*time.Hour+time.Minute, 30*time.Second, nil)
+			if reads == 0 {
+				t.Fatal("the lane never read the waiting seat's turns")
+			}
+			if want := []time.Duration{workladder.DefaultCap, 2 * workladder.DefaultCap, 3 * workladder.DefaultCap}; fmt.Sprint(c.nudgedAt) != fmt.Sprint(want) {
+				t.Fatalf("nudges %v, want %v: hourly from the ask", c.nudgedAt, want)
+			}
+			if len(c.posted) != 0 || len(c.events(events.WorkReleased)) != 0 || len(escalations(c)) != 0 {
+				t.Fatalf("a waiting step: recycles %+v, releases %d, escalations %v", c.posted, len(c.events(events.WorkReleased)), escalations(c))
+			}
+		})
+	}
+}
+
 // turnsRead makes the lane's turn source report hist() for the seat.
 func (c *ladderCity) turnsRead(hist func() runtime.TurnHistory) {
 	c.lane.turnReaderFor = func(externalReadsEnv) ladderTurnReader {

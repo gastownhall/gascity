@@ -544,17 +544,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **The work ladder only nudges a step, hourly, while its seat waits on a
-  person.** With `[daemon] work_ladder` on (the default), a claimed step whose
-  metadata `gc.awaiting_human` names the session holding it (the seat asked a
-  person and waits on their decision, such as an approval asked by mail) is
-  nudged an hour after the ladder sees the wait and hourly after that, however
-  long the person takes: no recycle, no release, and none of the
-  `work.escalated` alerts its pacing would raise (`started_recycled`,
-  `started_unanswered`, `release_unfinished`). Nudges the seat cannot take
+- **The work ladder leaves a step alone while its seat waits on a person,
+  unless the seat's turns say its answer's turn may have died.** With
+  `[daemon] work_ladder` on (the default), a claimed step whose metadata
+  `gc.awaiting_human` names the session holding it (the seat asked a person
+  and waits on their decision, such as an approval asked by mail) is never
+  recycled or released, however long the person takes, and raises none of the
+  `work.escalated` alerts its pacing would (`started_recycled`,
+  `started_unanswered`, `release_unfinished`). While the seat's own turns show
+  a turn open or its newest turn completed, the step is not nudged either, so
+  a wait costs no turns. Any other reading (the newest turn failed, was
+  canceled or ended with no status, no turn at all, turns that cannot be
+  read) keeps an hourly nudge: an hour after the ladder sees the wait or after
+  its last nudge, at once when that is already past. That nudge takes up an
+  answer whose turn died before the seat could clear the key. A seat restarted
+  while it waits gets its agent's startup prompt or hint nudge only when the
+  agent has one, and that delivery is best effort. Nudges the seat cannot take
   still count toward `nudge_refused`, and a release already in flight that
-  raced the step's start still raises `release_raced_start`. The hourly nudge
-  takes up an answer whose turn died before the seat could clear the key. The
+  raced the step's start still raises `release_raced_start`. The
   ladder checks the key in the planner's snapshot (on the claim's own bead,
   never another store's bead with the same ID) and again in every live
   re-read before it acts (a nudge, a release, pacing carried under an
@@ -572,7 +579,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ending after a nudge the seat took, opens a rate-limit episode, kept on the
   seat's `work_ladder` cell. While it stands the seat is paced as on a
   degraded provider: nudges every 10 minutes that count toward nothing (a
-  step waiting on a person keeps its hourly nudge), and no drain, release or
+  step waiting on a person is nudged hourly while its turns are refused), and
+  no drain, release or
   escalation. Once a nudge the seat took after the episode opened is refused
   too, at least 10 minutes after the first refusal, the seat is restarted in
   place on a fresh conversation (`gc session reset`'s request), keeping its
@@ -638,21 +646,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   claim for different packs fails the add.
 
 ### Changed
-
-- **A claim waiting on a person is nudged only when its seat's newest turn
-  failed, or its turns cannot be read, so a wait no longer costs an hourly
-  no-op turn.** With `[daemon] work_ladder` on, a step whose
-  `gc.awaiting_human` names its seat was nudged an hour after the ask and
-  hourly after that; each nudge cost the waiting seat a turn that did nothing.
-  Now the ladder reads the seat's own turns first. If the newest ended turn
-  failed (the turn the person's answer started died on a provider error or a
-  usage limit), the step is nudged as before: a Cap (60 minutes) after the
-  wait began or after its last nudge, at once when that is already past. If
-  the turns cannot be read (a provider family that records no turn outcomes,
-  a read that failed), the step keeps the hourly nudge. If they show the
-  newest ended turn completed, or a turn open, the step is left alone however
-  long the person takes. A waiting step is still never recycled or released,
-  and a seat restarted while it waits is taken up by its startup prompt.
 
 - **Go toolchain 1.27.3.** The `go.mod` floor, the Bazel `go_sdk`, the nogo
   analyzers' module and the `contrib/k8s` Go build images move to Go 1.27.3,

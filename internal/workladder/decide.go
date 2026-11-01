@@ -19,11 +19,12 @@ import (
 // and so does an entry whose last nudge's delivery is unsettled (a
 // NoticeMark), which also holds the seat's nudge slot (WN1). A mark ends with its episode:
 // a new generation, a rung rise and a progress reset clear it. Work whose
-// seat waits on a person (Work.AwaitsHuman) is only ever nudged, and only on
-// a pass whose reading of the seat's turns shows the newest ended turn
-// failed or cannot tell (waitRedrive): a Cap after its wait began and a Cap
-// apart after that. Its pending release is dropped, and the wait's start and
-// its end each begin a new episode.
+// seat waits on a person (Work.AwaitsHuman) is only ever nudged, a Cap after
+// its wait began and a Cap apart after that, and is left alone on a pass
+// whose reading of the seat's turns shows a turn open or the newest ended
+// turn completed (waitRedrive); any other reading, or none, keeps that pace.
+// Its pending release is dropped, and the wait's start and its end each
+// begin a new episode.
 //
 // Before acting, on a pass that may act on the seat, the seat's rate-limit
 // episode takes its step (rateLimit): it opens on an answered refusal, paces
@@ -123,7 +124,7 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 			continue // a read that could not tell, being released, or its last nudge's delivery not yet settled
 		}
 		if e.AwaitsHuman && !obs.waitRedrive() {
-			continue // a wait on a person whose seat's turns show no turn died
+			continue // a wait on a person whose seat's turns show it at work or served
 		}
 		if !p.dueAt(e, paused).After(now) {
 			order = append(order, i)
@@ -259,17 +260,17 @@ func (obs Observation) progressAt() time.Time {
 }
 
 // waitRedrive reports whether a wait on a person may be taken up on this
-// pass: the seat's reading of this conversation shows its newest ended turn
-// failed (the turn the person's answer started may have died before it
-// cleared the wait), or the pass cannot tell (no reading: a family that
-// records no turn outcomes, a read that failed, no turn source; or a reading
-// of another conversation), which keeps the hourly pace as a fail-safe. A
-// reading that shows the newest ended turn completed, or a turn open, leaves
-// the wait alone: a nudge cannot hurry a person, and a seat that answers
-// starts its own turn.
+// pass. It is left alone only on positive evidence that its seat is fine:
+// this conversation's reading shows a turn open, or the newest ended turn
+// completed. Any other reading keeps the hourly pace: the newest turn failed
+// (the turn the person's answer started may have died before it cleared the
+// wait), was canceled or ended with no status (an end inferred after its CLI
+// went idle or died), no turn at all, a reading of another conversation, or
+// none (a family that records no turn outcomes, a read that failed, no turn
+// source).
 func (obs Observation) waitRedrive() bool {
 	t := obs.Turns
-	return !t.Read || t.Conv != obs.Conv || t.LastFailed
+	return !t.Read || t.Conv != obs.Conv || (!t.Open && !t.LastCompleted)
 }
 
 // clampEntry pulls e's times from a clock that ran ahead back to now, so a
@@ -295,8 +296,8 @@ func minTime(t, now time.Time) time.Time {
 // began or after its last nudge (Last holds either), whatever a rung rise, a
 // new generation, the seat's progress, the provider's health or a rate-limit
 // episode do meanwhile: it paces a person, not the seat or the provider.
-// That is the earliest it is due: Decide takes a wait up only on a pass whose
-// reading shows its seat's newest turn failed, or cannot tell (waitRedrive).
+// That is the earliest it is due: Decide leaves a wait alone on a pass whose
+// reading shows its seat's turn open or newest turn completed (waitRedrive).
 func (p Policy) dueAt(e Entry, paused bool) time.Time {
 	if e.AwaitsHuman {
 		return e.Last.Add(p.Cap)
