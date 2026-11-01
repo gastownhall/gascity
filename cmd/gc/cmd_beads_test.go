@@ -550,6 +550,49 @@ func TestRouteBeadsShow_JSONEnvelopeOnlyForRemoteTargets(t *testing.T) {
 	}
 }
 
+// TestRouteBeadsList_PartialAPIAnswerFailsTheListing proves a partial answer
+// (the server could not read a rig's store) is an error naming the failed
+// store, not a silently shortened list, for local and remote targets alike.
+func TestRouteBeadsList_PartialAPIAnswerFailsTheListing(t *testing.T) {
+	t.Setenv("GC_DEBUG", "1")
+	cityPath := writeBeadsTestCity(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items":          []map[string]any{{"id": "ga-abc", "title": "survivor", "issue_type": "task", "status": "open"}},
+			"partial":        true,
+			"partial_errors": []string{"rig omega: ledger unreadable"},
+		})
+	}))
+	defer srv.Close()
+
+	clients := map[string]struct {
+		cityPath string
+		c        *api.Client
+	}{
+		"local-target": {cityPath, api.NewCityScopedClient(srv.URL, "test-city")},
+		"remote":       {"", beadsTestRemoteClient(t, srv)},
+	}
+	for name, tc := range clients {
+		for _, format := range []string{"text", "json"} {
+			t.Run(name+"/"+format, func(t *testing.T) {
+				var stdout, stderr bytes.Buffer
+				if code := routeBeadsList(tc.cityPath, tc.c, "", format, beadFilters{}, &stdout, &stderr); code != 1 {
+					t.Fatalf("exit = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+				}
+				if stdout.Len() != 0 {
+					t.Fatalf("stdout = %q, want empty", stdout.String())
+				}
+				for _, want := range []string{"rig omega: ledger unreadable", "route=api reason=error"} {
+					if !strings.Contains(stderr.String(), want) {
+						t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), want)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestRouteBeadsList_StaleBannerOver30s(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 	cityPath := writeBeadsTestCity(t)

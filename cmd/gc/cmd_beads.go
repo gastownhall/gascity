@@ -4,10 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/spf13/cobra"
 )
 
@@ -147,7 +151,10 @@ var beadsListAPIClient = func(cityPath string) (*api.Client, string) {
 // routeBeadsList dispatches `beads list` to the supervisor API when a
 // controller is up; otherwise falls back to the local multi-store iterator.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
-
+//
+// A partial API answer (the server could not read one of the city's stores) is
+// an error, not a shorter list: the direct read fails the same way on a store it
+// cannot open or read, so neither route prints part of the city as the whole.
 func routeBeadsList(cityPath string, c *api.Client, nilReason, format string, filters beadFilters, stdout, stderr io.Writer) int {
 	var cr api.CachedRead[api.BeadListView]
 	return routeRead(c, "beads list", nilReason, stderr,
@@ -158,13 +165,28 @@ func routeBeadsList(cityPath string, c *api.Client, nilReason, format string, fi
 				Status: filters.status,
 				All:    filters.all,
 			})
-			return err
+			if err != nil {
+				return err
+			}
+			if cr.Body.Partial {
+				return errorAfterFetch{Detail: beadsListPartialErrorDetail(cr.Body.PartialErrors)}
+			}
+			return nil
 		},
 		func() int {
 			return renderBeadsListFromAPI(cr.Body.Beads, cr.AgeSeconds, format, filters, c.IsRemote(), stdout)
 		},
 		func() int { return doBeadsListFallback(cityPath, format, filters, stdout, stderr) },
 	)
+}
+
+// beadsListPartialErrorDetail is the error gc beads list prints when the API
+// could build the list only from some of the city's stores.
+func beadsListPartialErrorDetail(errs []string) string {
+	if len(errs) == 0 {
+		return "incomplete bead list from the API, not printed: the server reported a failed bead store without naming it"
+	}
+	return "incomplete bead list from the API, not printed: " + strings.Join(errs, "; ")
 }
 
 // renderBeadsListFromAPI formats the API-sourced bead list using the same
@@ -197,8 +219,12 @@ func renderBeadsListFromAPI(bs []beads.Bead, cacheAgeS float64, format string, f
 // This lane is UNBOUNDED: the store list uses Limit 0 (unlimited), so every
 // matching bead is returned. api.Client.ListBeads follows next_cursor to match
 // this coverage on the API/remote lanes (previously it truncated to page 1).
+//
+// A store that cannot be opened or read fails the listing, naming the store:
+// the supervisor reports the same store as a partial answer, which the API
+// route refuses, so both routes fail rather than print part of the city.
 func doBeadsListFallback(cityPath, format string, filters beadFilters, stdout, stderr io.Writer) int {
-	stores, code := openAllConvoyStoresAt(cityPath, stderr, "gc beads list")
+	stores, code := openBeadsListStoresAt(cityPath, stderr)
 	if stores == nil {
 		return code
 	}
@@ -215,6 +241,37 @@ func doBeadsListFallback(cityPath, format string, filters beadFilters, stdout, s
 		writeBeadTable(all, stdout, true)
 	}
 	return 0
+}
+
+// openBeadsListStoresAt opens every bead store gc beads list reads for a
+// pre-resolved cityPath. Unlike openAllConvoyStoresAt, which skips a store it
+// cannot open, any open failure here fails the listing: a list that silently
+// left out a rig's beads would read as the city's complete answer, while the
+// supervisor reports that same store as a partial answer the API route refuses.
+// gc beads show keeps openAllConvoyStoresAt, so one broken rig does not stop
+// showing a bead held by a healthy store.
+func openBeadsListStoresAt(cityPath string, stderr io.Writer) ([]convoyStoreView, int) {
+	const cmdName = "gc beads list"
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+		return nil, 1
+	}
+	emitLoadCityConfigWarnings(stderr, prov)
+	candidates := convoyStoreCandidates(cfg, cityPath, "") // residency:allow — openAllConvoyStoresAt's own enumeration, re-walked so a store that cannot open fails gc beads list instead of vanishing from it (the supervisor reports the same store as a partial answer)
+	failed := 0
+	stores := openConvoyStoreDirs(candidates, openStoreForCity(cityPath), func(dir string, err error) {
+		fmt.Fprintf(stderr, "%s: opening the bead store at %s: %v\n", cmdName, dir, err) //nolint:errcheck // best-effort stderr
+		failed++
+	})
+	if failed > 0 || len(stores) == 0 {
+		if len(stores) == 0 && failed == 0 {
+			fmt.Fprintf(stderr, "%s: no bead stores available\n", cmdName) //nolint:errcheck // best-effort stderr
+		}
+		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+		return nil, 1
+	}
+	return stores, 0
 }
 
 // cmdBeadsShow is the CLI entry point for "gc beads show". The bead id and
@@ -358,7 +415,7 @@ func collectBeadsAcrossStores(stores []convoyStoreView, filters beadFilters) ([]
 	for i, candidate := range stores {
 		list, err := candidate.store.List(q)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("listing beads in %s: %w", candidate.path, err)
 		}
 		rows[i] = list
 	}
