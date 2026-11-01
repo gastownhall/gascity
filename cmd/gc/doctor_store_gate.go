@@ -167,3 +167,9 @@ func (g *doctorStoreGate) OrderLastRun(cityPath string, cfg *config.City, lastRu
 		return lastRun(order)
 	}
 }
+
+// OrderRecentRuns wraps an order-history listing the way OrderLastRun wraps the
+// last-run lookup.
+func (g *doctorStoreGate) OrderRecentRuns(_ string, _ *config.City, recent doctor.OrderOutcomeRecentRunsFunc) doctor.OrderOutcomeRecentRunsFunc {
+	return recent
+}

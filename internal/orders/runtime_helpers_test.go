@@ -301,3 +301,89 @@ func TestLastRunAndCursorKeepAHardBackingErrorThroughACache(t *testing.T) {
 		t.Fatalf("Cursor() = %d, want 0 (unread); a hard backing error was answered from the cache's open rows", got)
 	}
 }
+
+func createDigestRun(t *testing.T, store beads.Store, labels ...string) beads.Bead {
+	t.Helper()
+	b, err := store.Create(beads.Bead{
+		Title:  "order:digest",
+		Status: "closed",
+		Labels: append([]string{"order-run:digest", "order-tracking"}, labels...),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	return b
+}
+
+// TestRecentRunsAcrossMergesNewestFirstAndTruncates proves the federated read
+// interleaves each front door's runs by CreatedAt descending and cuts the merged
+// list to limit, so a rig-scoped order's history is not hidden behind the city's.
+func TestRecentRunsAcrossMergesNewestFirstAndTruncates(t *testing.T) {
+	cityBacking, rigBacking := beads.NewMemStore(), beads.NewMemStore()
+	oldest := createDigestRun(t, cityBacking)
+	second := createDigestRun(t, rigBacking)
+	third := createDigestRun(t, cityBacking)
+	newest := createDigestRun(t, rigBacking, "wisp-failed")
+
+	across := RecentRunsAcross([]*Store{ordersStoreOver(cityBacking), nil, ordersStoreOver(rigBacking)})
+
+	all, err := across("digest", 10)
+	if err != nil {
+		t.Fatalf("RecentRunsAcross(10): %v", err)
+	}
+	want := []string{newest.ID, third.ID, second.ID, oldest.ID}
+	if len(all) != len(want) {
+		t.Fatalf("RecentRunsAcross(10) = %d runs, want %d", len(all), len(want))
+	}
+	for i, id := range want {
+		if all[i].ID != id {
+			t.Fatalf("run[%d] = %s, want %s (newest-first by CreatedAt)", i, all[i].ID, id)
+		}
+	}
+
+	top2, err := across("digest", 2)
+	if err != nil {
+		t.Fatalf("RecentRunsAcross(2): %v", err)
+	}
+	if len(top2) != 2 || top2[0].ID != newest.ID || top2[1].ID != third.ID {
+		t.Fatalf("RecentRunsAcross(2) = %+v, want the two newest runs [%s %s]", top2, newest.ID, third.ID)
+	}
+}
+
+// TestRecentRunsAcrossReturnsNothingWithoutRuns proves the zero case is an
+// empty result, not an error, including when every entry is nil.
+func TestRecentRunsAcrossReturnsNothingWithoutRuns(t *testing.T) {
+	for name, stores := range map[string][]*Store{
+		"no stores":  nil,
+		"nil stores": {nil, nil},
+		"empty":      {ordersStoreOver(beads.NewMemStore())},
+	} {
+		got, err := RecentRunsAcross(stores)("digest", 5)
+		if err != nil {
+			t.Fatalf("%s: RecentRunsAcross: %v", name, err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("%s: RecentRunsAcross = %+v, want none", name, got)
+		}
+	}
+}
+
+// TestRecentRunsAcrossPropagatesStoreError proves one failing front door aborts
+// the read, the LastRunAcross convention: a partial history would let a streak
+// walk reach a wrong verdict.
+func TestRecentRunsAcrossPropagatesStoreError(t *testing.T) {
+	wantErr := errors.New("tier unavailable")
+	healthy := beads.NewMemStore()
+	createDigestRun(t, healthy)
+	broken := &rowsErrorStore{MemStore: beads.NewMemStore(), err: wantErr}
+
+	got, err := RecentRunsAcross([]*Store{ordersStoreOver(healthy), ordersStoreOver(broken)})("digest", 5)
+
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want %v", err, wantErr)
+	}
+	if got != nil {
+		t.Fatalf("runs = %+v, want nil alongside the error", got)
+	}
+}

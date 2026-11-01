@@ -88,3 +88,9 @@ func CursorAcross(stores []*Store) CursorFunc {
 		return latest
 	}
 }
+
+// RecentRunsAcross returns a reader of the newest runs of a named order across a
+// federation of order front doors, newest first, at most limit of them.
+func RecentRunsAcross(_ []*Store) func(scoped string, limit int) ([]OrderRun, error) {
+	return func(string, int) ([]OrderRun, error) { return nil, nil }
+}

@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 // stubDoctorStoreLiveness makes the scopes whose base name is in stopped read
@@ -77,7 +78,7 @@ func TestBuildDoctorChecksNeverReadsAStoppedCityStore(t *testing.T) {
 
 	checks := buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{SkipCityDoltCheck: true, SkipManagedDoltCheck: true, SkipRigDoltChecks: true})
 	for _, name := range []string{
-		"agent-sessions", "zombie-sessions", "orphan-sessions", "order-firing-current",
+		"agent-sessions", "zombie-sessions", "orphan-sessions", "order-firing-current", "order-outcome-healthy",
 		"beads-store", "custom-types:city", "hold-label-conventions:city",
 		"rig:rigstore:beads", "custom-types:rigstore", "hold-label-conventions:rigstore",
 	} {
@@ -225,5 +226,33 @@ func TestBuildDoctorChecksLeavesASuspendedCityCold(t *testing.T) {
 		if r.Status != doctor.StatusOK || !strings.Contains(r.Message, doctor.StoreSuspendedMessage) {
 			t.Errorf("%s = %v %q, want %q", name, r.Status, r.Message, doctor.StoreSuspendedMessage)
 		}
+	}
+}
+
+// OrderRecentRuns is the outcome check's store-backed fallback: like
+// OrderLastRun, an order whose store scope is skipped answers the skip error
+// without the lookup running, and a readable scope is looked up.
+func TestDoctorStoreGateOrderRecentRunsSkipsStoppedScope(t *testing.T) {
+	cityDir, cfg := doctorStoreGateCity(t)
+	stubDoctorStoreLiveness(t, "rigstore")
+	gate := newDoctorStoreGate(false, nil)
+
+	calls := 0
+	recent := gate.OrderRecentRuns(cityDir, cfg, func(orders.Order, int) ([]orders.OrderRun, error) {
+		calls++
+		return nil, nil
+	})
+
+	if _, err := recent(orders.Order{Name: "refresh", Rig: "rigstore"}, 5); !errors.Is(err, errDoctorStoreNotRunning) {
+		t.Fatalf("lookup on a stopped rig: err = %v, want errDoctorStoreNotRunning", err)
+	}
+	if calls != 0 {
+		t.Fatalf("lookup ran %d time(s) against a stopped rig store, want 0", calls)
+	}
+	if _, err := recent(orders.Order{Name: "digest"}, 5); err != nil {
+		t.Fatalf("lookup on a running city: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("lookup ran %d time(s), want exactly the running city's one", calls)
 	}
 }
