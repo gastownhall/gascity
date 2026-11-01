@@ -20,6 +20,10 @@ import (
 
 // StatusJSON is the JSON output format for gc status.
 type StatusJSON struct {
+	// CacheAgeS is set only on output read from the city's API: the age in
+	// seconds of the cached status the server answered from. Nil, and so
+	// absent, on locally built output.
+	CacheAgeS     *float64               `json:"_cache_age_s,omitempty"`
 	SchemaVersion string                 `json:"schema_version"`
 	OK            bool                   `json:"ok"`
 	CityName      string                 `json:"city_name"`
@@ -388,9 +392,10 @@ func snapshotFromStatusView(cityPath string, v api.StatusView) cityStatusSnapsho
 	return snapshot
 }
 
-// writeCityStatusJSONWithCache writes the snapshot's JSON form with a
-// leading _cache_age_s field inserted at the envelope level. Mirrors the
-// envelope shape other routed read commands emit on the API path.
+// writeCityStatusJSONWithCache writes the snapshot's JSON form for output
+// read from the city's API, setting StatusJSON.CacheAgeS so _cache_age_s
+// prints as the leading key (0 included). There is no envelope wrapper: the
+// payload is the same StatusJSON the local route prints, plus that field.
 func writeCityStatusJSONWithCache(
 	snapshot cityStatusSnapshot,
 	summary StatusSummaryJSON,
@@ -398,11 +403,8 @@ func writeCityStatusJSONWithCache(
 	stdout io.Writer,
 ) {
 	status := cityStatusJSONFromSnapshot(snapshot, summary)
-	envelope := struct {
-		CacheAgeS  float64 `json:"_cache_age_s"`
-		StatusJSON         // inline
-	}{CacheAgeS: ageSeconds, StatusJSON: status}
-	data, err := json.MarshalIndent(envelope, "", "  ")
+	status.CacheAgeS = &ageSeconds
+	data, err := json.MarshalIndent(status, "", "  ")
 	if err != nil {
 		fmt.Fprintf(stdout, "{\"error\": %q}\n", err.Error()) //nolint:errcheck // best-effort stdout
 		return
