@@ -803,3 +803,63 @@ func TestNewSessionErrNoServerReprobeAnsweredAllowsCreation(t *testing.T) {
 		}
 	}
 }
+
+func TestNewSessionErrNoServerReprobeWithoutAnswerFailsClosed(t *testing.T) {
+	reprobes := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "persistent-no-server", err: ErrNoServer, want: "reprobe=" + ErrNoServer.Error()},
+		{name: "canceled", err: context.Canceled, want: "reprobe=" + context.Canceled.Error()},
+		{name: "deadline", err: context.DeadlineExceeded, want: "reprobe=" + context.DeadlineExceeded.Error()},
+		{name: "executor-failure", err: errors.New("tmux has-session: fork failed"), want: "reprobe=tmux has-session: fork failed"},
+	}
+	for _, variant := range newSessionVariants {
+		for _, reprobe := range reprobes {
+			t.Run(variant.name+"/"+reprobe.name, func(t *testing.T) {
+				const socketName = "gc-reprobe"
+				socketPath := namedSocketPath(socketName)
+				fe := probeAssertSet(
+					[]string{"", "", "%1", "", ""},
+					[]error{ErrNoServer, reprobe.err, nil, nil, nil},
+				)
+				observerCalls := 0
+				tm := &Tmux{
+					cfg:  Config{SocketName: socketName},
+					exec: fe,
+					serverSocketObserver: func(_ context.Context, path string) error {
+						observerCalls++
+						return fmt.Errorf("path=%s inode=97 peer_pid=4242 reason=live-unix-socket", path)
+					},
+				}
+
+				err := variant.call(tm)
+				if !errors.Is(err, ErrServerDegraded) {
+					t.Fatalf("err = %v, want ErrServerDegraded", err)
+				}
+				if errors.Is(err, ErrNoServer) {
+					t.Fatalf("err = %v, must not wrap ErrNoServer", err)
+				}
+				for _, want := range []string{
+					"protocol=no-server",
+					"path=" + socketPath,
+					"peer_pid=4242",
+					"reason=live-unix-socket",
+					reprobe.want,
+				} {
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("err = %q, want %q", err, want)
+					}
+				}
+				if observerCalls != 1 {
+					t.Fatalf("observer calls = %d, want 1", observerCalls)
+				}
+				want := [][]string{preflightArgs(socketName), preflightArgs(socketName)}
+				if !reflect.DeepEqual(fe.calls, want) {
+					t.Fatalf("calls = %#v, want the probe and its re-probe without creation", fe.calls)
+				}
+			})
+		}
+	}
+}
