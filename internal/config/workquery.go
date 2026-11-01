@@ -235,6 +235,46 @@ func jqMeta(key string) string {
 	return `(.metadata["` + key + `"] // "")`
 }
 
+// excludedClaimantJQPredicate renders the jq boolean that is true when the row
+// in scope names this claimant in gc.exclude_claimants. It mirrors
+// beadmeta.ExcludesClaimant: comma-separated members, each trimmed, empties
+// dropped, exact match. The claimant is read from the query environment
+// (GC_SESSION_ID, GC_SESSION_NAME, GC_ALIAS, GC_AGENT), so the predicate needs
+// no per-tier variable and is inert on the reconciler's identity-free runs: an
+// excluded bead is still demand for its pool, because another seat can claim it.
+func excludedClaimantJQPredicate() string {
+	return `((` + jqMeta(beadmeta.ExcludeClaimantsMetadataKey) + ` | tostring | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $gc_ex | ` +
+		`[$ENV.GC_SESSION_ID, $ENV.GC_SESSION_NAME, $ENV.GC_ALIAS, $ENV.GC_AGENT] | any(.[]; (. // "") as $gc_id | $gc_id != "" and any($gc_ex[]; . == $gc_id)))`
+}
+
+// excludeClaimantsJQClause returns a jq select(...) clause dropping rows that
+// exclude this claimant, for the tiers whose rows already pass through a jq
+// selection of their own.
+func excludeClaimantsJQClause() string {
+	return ` | select((` + excludedClaimantJQPredicate() + `) | not)`
+}
+
+// excludeClaimantsFilterScript drops, in place, the rows of the JSON array in
+// shellVar that exclude this claimant. It runs right after a tier's read and
+// BEFORE the tier picks the row it serves, so an excluded head falls through to
+// the work behind it instead of being served, refused by `gc hook --claim`,
+// and served again on the next tick.
+//
+// The variable is rewritten only when a row was dropped, so an unaffected
+// payload stays byte-identical, and a payload jq cannot parse is left alone:
+// fail-open, like the tiers' other jq gates, so the hook's decode still
+// decides what to do with it. An empty read, the common case on most tiers,
+// costs no jq process.
+func excludeClaimantsFilterScript(shellVar string) string {
+	pred := excludedClaimantJQPredicate()
+	filter := `if type == "array" and any(.[]; ` + pred + `) then [.[] | select((` + pred + `) | not)] else empty end`
+	v := `"$` + shellVar + `"`
+	return `if [ -n ` + v + ` ] && [ ` + v + ` != "[]" ]; then ` +
+		`gc_unexcluded=$(printf "%s" ` + v + ` | jq -c ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
+		`[ -n "$gc_unexcluded" ] && ` + shellVar + `="$gc_unexcluded"; ` +
+		`fi; `
+}
+
 // PoolDemandServeRules names, in Go, exactly what the generated Tier-3
 // pool-demand query will and will not serve a worker for a template.
 //
@@ -485,12 +525,23 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 		`target="$1"; ` +
 		`[ -z "$target" ] && return 1; ` +
 		`r=$(` + routedReadyTierCommand(topo) + `)` + workQueryReadFailure(reader) + `; ` +
+		`gc_routed_window="$r"; ` +
+		excludeClaimantsFilterScript("r") +
+		// A full window that filtered to nothing may still have allowed work
+		// past it, so re-read the queue unbounded. Only this case pays for it.
+		`if [ "$r" = "[]" ] && [ "$gc_routed_window" != "[]" ] && ` +
+		`[ "$(printf "%s" "$gc_routed_window" | jq length 2>/dev/null)" = "` + strconv.Itoa(routedReadyWindow) + `" ]; then ` +
+		`r=$(` + bdReadyPoolDemandShell("--limit=0", topo) + `)` + workQueryReadFailure(reader) + `; ` +
+		excludeClaimantsFilterScript("r") +
+		`fi; ` +
 		preferExecutablePoolDemandScript() +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", topo) + `)` + workQueryReadFailure(reader) + `; ` +
+		excludeClaimantsFilterScript("legacy_candidates") +
 		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		legacyEphemeralPoolDemandFromSnapshotShell("legacy_ephemeral_candidates", 20, topo) +
+		excludeClaimantsFilterScript("legacy_ephemeral_candidates") +
 		`r=$(printf "%s" "$legacy_ephemeral_candidates" | jq '.[0:1]' 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`return 1; ` +
@@ -535,8 +586,11 @@ func routedReadyTierCommand(topo QueryTopology) string {
 	// routed work behind it to fall through to instead of idle-exiting; the
 	// hook layer (filterUnreadyHookCandidates) strips the blocked head from
 	// the result.
-	return bdReadyPoolDemandShell("--limit=20", topo)
+	return bdReadyPoolDemandShell("--limit="+strconv.Itoa(routedReadyWindow), topo)
 }
+
+// routedReadyWindow is the bounded row count the routed tier reads first.
+const routedReadyWindow = 20
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
 // ready, unassigned, routed demand and prints the array length. It shares the
@@ -766,7 +820,8 @@ func assignedInProgressRead(shellVar string, topo QueryTopology, args string, li
 		args = ` --exclude-type=` + mailMessageBeadType + args
 	}
 	return `r=$(` + reader + ` --assignee="$` + shellVar + `"` + args + ` --json --limit=` + strconv.Itoa(limit) + `)` +
-		workQueryReadFailure(reader) + `; `
+		workQueryReadFailure(reader) + `; ` +
+		excludeClaimantsFilterScript("r")
 }
 
 // standardAssignedInProgressWorkQueryScript is the crash-recovery tier.
@@ -939,7 +994,8 @@ func assignedReadyTierCommand(shellVar string, topo QueryTopology) string {
 	reader := readyReaderCommand(topo.FederatedReady)
 	return `r=$(` + reader + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) +
 		` --assignee="$` + shellVar + `" --json --limit=1)` +
-		workQueryReadFailure(reader) + `; `
+		workQueryReadFailure(reader) + `; ` +
+		excludeClaimantsFilterScript("r")
 }
 
 func standardAssignedReadyWorkQueryScript(topo QueryTopology) string {
@@ -1025,7 +1081,7 @@ func legacyControlAssignedReadyWorkQueryScript(topo QueryTopology) string {
 // re-served on every hook tick (ga-qjozkw).
 func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology) string {
 	_ = topo
-	filter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + `] | .[:1]`
+	filter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + excludeClaimantsJQClause() + `] | .[:1]`
 	// federated=false: this row comes from `bd query`, which never carries a
 	// resolved blocked_by, so the carried-lookup branch would only ever fall
 	// through to bd show — skip straight to it. checkHold=false: the filter
@@ -1043,7 +1099,7 @@ func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology)
 
 func ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor(shellVar string, topo QueryTopology) string {
 	_ = topo
-	baseFilter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + `]`
+	baseFilter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + excludeClaimantsJQClause() + `]`
 	return ephemeralStatusSnapshotShell("gc_open_ephemeral_in_progress", "in_progress") +
 		`r=$(printf "%s" "$gc_open_ephemeral_in_progress" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(baseFilter+` | .[:1]`) + ` 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
@@ -1076,8 +1132,9 @@ func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) stri
 	if topo.includeEphemeralReady() {
 		return ""
 	}
-	fastFilter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1, false)
-	slowFilter := ephemeralReadyDependencyCandidateFilterJQ(`select((.assignee // "") == $id)`, 1, false)
+	selector := `select((.assignee // "") == $id)` + excludeClaimantsJQClause()
+	fastFilter := legacyEphemeralReadyFilterJQ(selector, 1, false)
+	slowFilter := ephemeralReadyDependencyCandidateFilterJQ(selector, 1, false)
 	return ephemeralStatusSnapshotShell("open_ephemeral", "open") +
 		`r=$(printf "%s" "$open_ephemeral" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(fastFilter) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
@@ -1150,6 +1207,7 @@ func assignedGraphWorkflowAnchorReadyFunctionScript(topo QueryTopology) string {
 		`graph_anchor_id=$(printf "%s" "$gc_assigned_workflow_anchor_json" | jq -r ".[0].id // empty" 2>/dev/null); ` +
 		`[ -z "$graph_anchor_id" ] && return 1; ` +
 		`r=$(` + readyCommand + `)` + workQueryReadFailure(reader) + `; ` +
+		excludeClaimantsFilterScript("r") +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`return 1; ` +
 		`}; `
