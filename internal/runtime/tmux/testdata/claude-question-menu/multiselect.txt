@@ -1,0 +1,45 @@
+
+ ▐▛███▛█   Claude Code v2.1.314
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   ~/src/project · /rc
+
+
+❯ Call the AskUserQuestion tool exactly once with TWO questions: (1) "Which color?" header Color, options Red and Blue; (2) "Which size?"
+  header Size, options Small and Large. Do nothing else.
+
+● User declined to answer questions
+  ⎿  · Which color? (Red / Blue)
+     · Which size? (Small / Large)
+
+✻ Cogitated for 2s · done 4:25 PM
+
+❯ Call AskUserQuestion exactly once with ONE question "Which toppings?" header Toppings, multiSelect true, options Cheese, Olives, Basil.
+  Do nothing else.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ Toppings  ✔ Submit  →
+
+Which toppings?
+
+❯ 1. [ ] Cheese
+         Add cheese
+  2. [ ] Olives
+         Add olives
+  3. [ ] Basil
+         Add basil
+  4. [ ] Type something
+     Submit
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+
+
+
+
+
+
+
+
+
+
+
