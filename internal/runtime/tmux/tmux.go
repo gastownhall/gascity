@@ -1685,11 +1685,10 @@ type inventoryFaults struct {
 // inventory, as in [tmuxFetcher.FetchState]; an unreachable server
 // (ErrNoServer) is an error. A malformed line costs only its session, which
 // is omitted (see parseRuntimeInventory) and reported in faults; output that
-// leaves no session is an error. While the program-status switch is not off
-// the read also carries each pane's capture fields, and panes holds each
-// session's agent pane that could be named (see foldProgramPane).
-func (t *Tmux) listRuntimeInventory(ctx context.Context) (entries map[string]runtime.InventoryEntry, panes map[string]programPane, faults inventoryFaults, err error) {
-	program := t.programReadEnabled()
+// leaves no session is an error. With program set (the program-status switch
+// is not off) the read also carries each pane's capture fields, and panes
+// holds each session's agent pane that could be named (see foldProgramPane).
+func (t *Tmux) listRuntimeInventory(ctx context.Context, program bool) (entries map[string]runtime.InventoryEntry, panes map[string]programPane, faults inventoryFaults, err error) {
 	format := runtimeInventoryFormat
 	if program {
 		format = programRuntimeInventoryFormat

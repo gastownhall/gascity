@@ -387,7 +387,7 @@ func TestSwitchOffReadsAreByteIdentical(t *testing.T) {
 		if _, err := (&tmuxFetcher{tm: p.tm, snapshot: func(context.Context) (processSnapshot, error) { return table, nil }}).FetchState(context.Background()); err != nil {
 			t.Fatalf("%q: FetchState: %v", mode, err)
 		}
-		if _, _, _, err := p.tm.listRuntimeInventory(context.Background()); err != nil {
+		if _, _, _, err := p.tm.listRuntimeInventory(context.Background(), p.tm.programReadEnabled()); err != nil {
 			t.Fatalf("%q: listRuntimeInventory: %v", mode, err)
 		}
 		if len(fe.calls) != 2 {
@@ -544,6 +544,59 @@ func TestProgramStatusFollowsPublishedSwitch(t *testing.T) {
 			t.Fatalf("published an unknown switch: %+v, want Unread under off", r)
 		}
 	})
+}
+
+// publishingExecutor answers as its fakeExecutor does, and runs publish once,
+// as its first call arrives: a switch published while that read is in flight,
+// after its format was chosen.
+type publishingExecutor struct {
+	*fakeExecutor
+	publish func()
+}
+
+func (e *publishingExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
+	if publish := e.publish; publish != nil {
+		e.publish = nil
+		publish()
+	}
+	return e.fakeExecutor.executeCtx(ctx, args)
+}
+
+// Kills an inventory judged under another switch than the one it listed
+// under: on published while an off listing runs leaves rows with no capture
+// fields, and judging them under on reads every session not_armed. A pass
+// reads the switch once; the next pass lists and judges under the published
+// one.
+func TestRuntimeInventoryJudgesUnderTheSwitchItListedUnder(t *testing.T) {
+	table := tapTable(readNonce)
+	p, fe := readProvider(runtime.ProgramStatusOff, inventoryLines("s\t$1\t1700000000\t0\t0.0\t0\t100\t1700000100\t0"), &table)
+	p.tm.exec = &publishingExecutor{fakeExecutor: fe, publish: func() { p.SetProgramStatusMode(runtime.ProgramStatusOn) }}
+	entries, err := p.RuntimeInventory(context.Background())
+	if err != nil {
+		t.Fatalf("RuntimeInventory: %v", err)
+	}
+	if want := []string{"-u", "list-panes", "-a", "-F", runtimeInventoryFormat}; len(fe.calls) == 0 || !slices.Equal(fe.calls[0], want) {
+		t.Fatalf("tmux calls = %q, want the off listing %q first", fe.calls, want)
+	}
+	if e := entries["s"]; e.Program != (runtime.ProgramStatus{}) {
+		t.Fatalf("listed under off, on published mid-read: %+v, want the zero reading of an off pass", e.Program)
+	}
+
+	fe.calls, fe.out = nil, inventoryLines(inventoryRows("s", armedPane(psRecord(t, readNonce, runtime.ProgramWorking)))...)
+	p.cache = NewStateCache(&mockFetcher{state: runtimeStateSnapshot{
+		Sessions:    map[string]sessionRuntimeState{},
+		ProgramRead: true, ProcessesAvailable: true, ProgramTaps: tapNonces(table),
+	}}, time.Hour)
+	entries, err = p.RuntimeInventory(context.Background())
+	if err != nil {
+		t.Fatalf("RuntimeInventory under on: %v", err)
+	}
+	if want := []string{"-u", "list-panes", "-a", "-F", programRuntimeInventoryFormat}; len(fe.calls) != 1 || !slices.Equal(fe.calls[0], want) {
+		t.Fatalf("next pass tmux calls = %q, want one %q", fe.calls, want)
+	}
+	if s := entries["s"].Program; !s.Running() || !s.ReaderVerified || s.Mode != runtime.ProgramStatusOn {
+		t.Fatalf("next pass reads %+v, want the agent pane's verified working record under on", s)
+	}
 }
 
 // Kills a seam-backed provider (the one the controller builds) that hides

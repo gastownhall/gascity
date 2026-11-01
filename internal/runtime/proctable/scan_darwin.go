@@ -59,11 +59,11 @@ func ScanBySessionIDSince(id string, _ time.Time) ([]runtime.LiveRuntime, error)
 }
 
 // IsScanRoot reports whether pid should be treated as an agent root. A root
-// carries a GC_SESSION_ID, is neither infrastructure nor the program-status
-// relay — a tmux server or client is never a root, whoever its parent is,
-// and the relay is looked through — and sits outside its parent's envelope:
-// the parent is gone, carries a different GC_SESSION_ID, or is
-// infrastructure or the relay.
+// carries a GC_SESSION_ID, is neither infrastructure nor a program-status
+// companion — a tmux server or client is never a root, whoever its parent
+// is, the relay is looked through, and a tap belongs to its tmux server — and
+// sits outside its parent's envelope: the parent is gone, carries a different
+// GC_SESSION_ID, or is infrastructure or the relay.
 func IsScanRoot(pid int) bool {
 	if err := liveScanGuard(); err != nil {
 		return false

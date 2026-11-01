@@ -121,9 +121,10 @@ func isRecordScanRoot(records map[int]psRecord, record psRecord) bool {
 	if isInfrastructureCommand(record.command) {
 		return false
 	}
-	// The program-status relay is looked through (IsProgramStatusRelayArgv):
-	// the program it runs is the root in its place.
-	if isRelayRecord(record) {
+	// Neither program-status companion is a root: the relay is looked
+	// through (IsProgramStatusRelayArgv), and the program it runs is the root
+	// in its place; a tap belongs to its tmux server (IsProgramStatusTapArgv).
+	if isRelayRecord(record) || isTapRecord(record) {
 		return false
 	}
 	sessionID := record.env["GC_SESSION_ID"]
@@ -143,6 +144,12 @@ func isRecordScanRoot(records map[int]psRecord, record psRecord) bool {
 // (IsProgramStatusRelayArgv).
 func isRelayRecord(record psRecord) bool {
 	return IsProgramStatusRelayArgv([]string{record.command, record.arg1})
+}
+
+// isTapRecord reports whether record is gc's program-status tap
+// (IsProgramStatusTapArgv).
+func isTapRecord(record psRecord) bool {
+	return IsProgramStatusTapArgv([]string{record.command, record.arg1})
 }
 
 // reportedParent is the parent the scan reports for a root whose parent is
