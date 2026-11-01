@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -404,6 +405,60 @@ func TestReusablePoolSessionInfo_OneShotAsleepFreeableWithOpenAssignedWorkNotReu
 			"want false — an asleep one_shot exit that still holds in-progress assigned work must fall "+
 			"through to fresh-identity creation, not be wake-reused (session %s)",
 			asleepFreeableWithWork.ID)
+	}
+}
+
+// TestReusablePoolSessionInfo_PersistentRestartHandoffIsReusable is the
+// regression guard for the pool restart-handoff stall (#8021): a restart
+// request on a persistent pool's live runtime hands the row off —
+// restartHandoff commits the continuation reset (RestartRequestPatch is the
+// only writer of reset_committed_at) and marks the row asleep, writing no
+// sleep_reason and no slept_at — and this predicate rejected EVERY asleep row
+// of a persistent pool, so the row never re-entered the desired set: the min
+// floor found nothing to reuse, the fresh create was refused on the canonical
+// runtime name the row still holds (errPoolSessionNameUnavailable), and no
+// close path freed it either (no freeable predicate accepts a row with no
+// sleep reason and no slept_at) until the session sweep — a measured
+// ~13-minute pool outage per restart. A committed handoff is neither a crash
+// nor a sleep: the reset-pending wake starts a fresh conversation, so reusing
+// the row keeps the identity without resuming anything, which is all the
+// crash-gets-a-fresh-identity rule for persistent pools protects.
+func TestReusablePoolSessionInfo_PersistentRestartHandoffIsReusable(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 30, 5, 0, 0, 0, time.UTC)
+	template := "fable-nomad/claude-sonnet-persistent"
+
+	awake := session.Info{
+		ID:                  "session-handoff",
+		Template:            template,
+		SessionNameMetadata: "fable-nomad--claude-sonnet-persistent-1-pool",
+		Alias:               "fable-nomad/claude-sonnet-persistent-1",
+		PoolManaged:         true,
+		PoolSlot:            "1",
+		MetadataState:       "awake",
+	}
+	// Fold the real handoff, not a hand-built shape: drift in restartHandoff
+	// shows up as a fixture failure below, not a predicate failure.
+	handedOff := awake.ApplyPatch(restartHandoff("", true, finalizeFacts{Now: now}))
+	if handedOff.MetadataState != "asleep" {
+		t.Fatalf("fixture: restartHandoff state = %q, want asleep", handedOff.MetadataState)
+	}
+	if _, _, ok := resetPendingCommittedAtInfo(handedOff); !ok {
+		t.Fatalf("fixture: restartHandoff left no committed reset marker (continuation_reset_pending=%q reset_committed_at=%q)",
+			handedOff.ContinuationResetPending, handedOff.ResetCommittedAt)
+	}
+	if got := strings.TrimSpace(handedOff.SleepReason); got != "" {
+		t.Fatalf("fixture: restartHandoff stamped sleep_reason=%q, want none", got)
+	}
+
+	bp := &agentBuildParams{}
+	persistentAgent := &config.Agent{Name: "claude-sonnet-persistent", Dir: "fable-nomad"}
+
+	if got := reusablePoolSessionInfo(bp, persistentAgent, template, handedOff, nil); !got {
+		t.Fatalf("reusablePoolSessionInfo(persistent, asleep restart handoff) = false; "+
+			"want true — a committed handoff must be taken back by its own pool's floor or it "+
+			"stalls the pool's runtime name until the sweep (session %s)", handedOff.ID)
 	}
 }
 

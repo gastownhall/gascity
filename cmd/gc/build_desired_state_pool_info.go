@@ -230,12 +230,18 @@ func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, templ
 		// exit and remints the identity in place. Persistent pools keep
 		// today's behavior (a genuine crash gets a fresh identity rather than
 		// resuming a possibly-corrupt conversation); their freeable rows are
-		// closed by the reconciler's pool-slot close instead.
-		if cfgAgent.Lifecycle != config.AgentLifecycleOneShot || !isPoolSessionSlotFreeableInfo(info, bp.now()) {
+		// closed by the reconciler's pool-slot close instead. A restart
+		// handoff, under either lifecycle, is the second admitted asleep
+		// shape: it is neither a crash nor a sleep, and its reset-pending
+		// wake starts a fresh conversation, so reusing the row keeps the
+		// identity without resuming anything.
+		if !restartHandedOffInfo(info) &&
+			(cfgAgent.Lifecycle != config.AgentLifecycleOneShot || !isPoolSessionSlotFreeableInfo(info, bp.now())) {
 			return false
 		}
-		// A one_shot exit that still holds an open/in-progress assigned work
-		// bead under any of its identities is not a clean exit: the bounded
+		// A one_shot exit, or a restart handoff, that still holds an
+		// open/in-progress assigned work bead under any of its identities is
+		// not a clean exit: the bounded
 		// unit of work never finished, so waking/reusing it here hands the
 		// step no real execution turn — the reused session drains and lands
 		// orphaned ~45-55s later, and the step stays pinned in_progress on
@@ -263,6 +269,21 @@ func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, templ
 		return false
 	}
 	return resolvedSessionTemplateInfo(info, reuseTemplateConfig(bp)) == template
+}
+
+// restartHandedOffInfo reports whether info is a restart handoff still
+// waiting for its fresh start: the continuation reset was committed
+// (resetPendingCommittedAtInfo, the reconciler's one parse-strict reader of
+// the pair — RestartRequestPatch is the only writer of reset_committed_at,
+// which the start's CommitStartedPatch clears) and no sleep reason has been
+// stamped since. slept_at is deliberately not consulted:
+// RestartRequestPatch neither writes nor clears it, so a previously-slept row
+// that later restarts can still carry a stale one.
+func restartHandedOffInfo(info session.Info) bool {
+	if _, _, ok := resetPendingCommittedAtInfo(info); !ok {
+		return false
+	}
+	return strings.TrimSpace(info.SleepReason) == ""
 }
 
 // reusablePoolSessionInfos is the session.Info sibling of reusablePoolSessionBeads.
