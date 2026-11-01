@@ -639,6 +639,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A claim waiting on a person is nudged only when its seat's newest turn
+  failed, or its turns cannot be read, so a wait no longer costs an hourly
+  no-op turn.** With `[daemon] work_ladder` on, a step whose
+  `gc.awaiting_human` names its seat was nudged an hour after the ask and
+  hourly after that; each nudge cost the waiting seat a turn that did nothing.
+  Now the ladder reads the seat's own turns first. If the newest ended turn
+  failed (the turn the person's answer started died on a provider error or a
+  usage limit), the step is nudged as before: a Cap (60 minutes) after the
+  wait began or after its last nudge, at once when that is already past. If
+  the turns cannot be read (a provider family that records no turn outcomes,
+  a read that failed), the step keeps the hourly nudge. If they show the
+  newest ended turn completed, or a turn open, the step is left alone however
+  long the person takes. A waiting step is still never recycled or released,
+  and a seat restarted while it waits is taken up by its startup prompt.
+
 - **Go toolchain 1.27.3.** The `go.mod` floor, the Bazel `go_sdk`, the nogo
   analyzers' module and the `contrib/k8s` Go build images move to Go 1.27.3,
   the toolchain Dolt 2.6.0 and beads `main` build with. Building from source
