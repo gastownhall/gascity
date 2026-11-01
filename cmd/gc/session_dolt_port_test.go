@@ -495,7 +495,9 @@ func TestWithholdDriftLogOmitsEnvValues(t *testing.T) {
 	if out == "" {
 		t.Fatal("expected a drift log line when the mirror cannot stand in for the projected port")
 	}
-	if strings.Contains(out, envPort) {
+	// The scope path is the one place the line may legitimately carry the
+	// probe's digits; every other occurrence is a leak.
+	if strings.Contains(strings.ReplaceAll(out, cityPath, "<scope>"), envPort) {
 		t.Fatalf("drift log contains the env-derived port %q: %s", envPort, out)
 	}
 	if strings.Contains(out, "s3cret-probe") {
