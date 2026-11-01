@@ -31,7 +31,7 @@ func TestCommitStartedPatchRecordsTheRuntimeBinding(t *testing.T) {
 		t.Fatalf("patch = %v, want the runtime thread and project", patch)
 	}
 	unbound := CommitStartedPatch(CommitStartedPatchInput{Now: now})
-	for _, key := range []string{MetadataRuntimeThreadID, MetadataRuntimeProjectID} {
+	for _, key := range []string{MetadataRuntimeThreadID, MetadataRuntimeProjectID, MetadataRuntimePaneID, MetadataRuntimePanePID} {
 		if _, ok := unbound[key]; ok {
 			t.Fatalf("patch without a binding writes %s: %v", key, unbound)
 		}
@@ -58,7 +58,23 @@ func TestRuntimeBindingPatch(t *testing.T) {
 		{
 			name: "no thread bound",
 			sp:   boundProvider{Provider: runtime.NewFake(), err: fmt.Errorf("%w: gone", runtime.ErrSessionNotFound)},
-			want: MetadataPatch{MetadataRuntimeThreadID: "", MetadataRuntimeProjectID: ""},
+			want: MetadataPatch{
+				MetadataRuntimeThreadID: "", MetadataRuntimeProjectID: "",
+				MetadataRuntimePaneID: "", MetadataRuntimePanePID: "",
+			},
+		},
+		{
+			name: "pane only",
+			sp:   boundProvider{Provider: runtime.NewFake(), binding: runtime.SessionBinding{PaneID: "%7", PanePID: "48213"}},
+			want: MetadataPatch{MetadataRuntimePaneID: "%7", MetadataRuntimePanePID: "48213"},
+		},
+		{
+			name: "thread and pane",
+			sp:   boundProvider{Provider: runtime.NewFake(), binding: runtime.SessionBinding{ThreadID: "thread-1", ProjectID: "project-1", PaneID: "%7", PanePID: "48213"}},
+			want: MetadataPatch{
+				MetadataRuntimeThreadID: "thread-1", MetadataRuntimeProjectID: "project-1",
+				MetadataRuntimePaneID: "%7", MetadataRuntimePanePID: "48213",
+			},
 		},
 		{
 			name:    "unreadable",
@@ -215,5 +231,50 @@ func TestCreateSessionSurvivesAnUnreadableRuntimeBinding(t *testing.T) {
 	}
 	if _, ok := b.Metadata[MetadataRuntimeThreadID]; ok {
 		t.Fatalf("session metadata = %v, want no runtime thread", b.Metadata)
+	}
+}
+
+// The pane a session is spawned into is stamped by the start itself and
+// survives to the record a consumer reads; a restart replaces it with the new
+// incarnation's pane, and a start whose pane cannot be read keeps the last one.
+func TestStartStampsThePaneIdentityOnTheRecord(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &boundProvider{Provider: runtime.NewFake(), binding: runtime.SessionBinding{PaneID: "%7", PanePID: "48213"}}
+	mgr := newTestManager(t, store, sp)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	pane := func() (string, string) {
+		t.Helper()
+		b, err := store.Get(info.ID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		return b.Metadata[MetadataRuntimePaneID], b.Metadata[MetadataRuntimePanePID]
+	}
+	if id, pid := pane(); id != "%7" || pid != "48213" {
+		t.Fatalf("pane after create = %q, %q; want %%7, 48213", id, pid)
+	}
+
+	restart := func() {
+		t.Helper()
+		if err := sp.Stop(info.SessionName); err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+		if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, "claude", runtime.Config{WorkDir: "/tmp"}); err != nil {
+			t.Fatalf("Start(restart): %v", err)
+		}
+	}
+	sp.binding = runtime.SessionBinding{PaneID: "%9", PanePID: "51000"}
+	restart()
+	if id, pid := pane(); id != "%9" || pid != "51000" {
+		t.Fatalf("pane after restart = %q, %q; want %%9, 51000", id, pid)
+	}
+
+	sp.err = runtime.ErrRuntimeUnavailable
+	restart()
+	if id, pid := pane(); id != "%9" || pid != "51000" {
+		t.Fatalf("pane after an unreadable restart = %q, %q; want %%9, 51000 kept", id, pid)
 	}
 }
