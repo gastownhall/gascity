@@ -1926,6 +1926,9 @@ func TestInitBeadsInPodPatchesWithheldManagedLocalTargetToAlias(t *testing.T) {
 	fake := newFakeK8sOps()
 	env := runtimetest.WithheldManagedDoltEnv()
 	env["GC_BEADS_PREFIX"] = "demo"
+	env["GC_BEADS_PROJECT_ID"] = "project-demo"
+	env["GC_DOLT_DATABASE"] = "bd_demo"
+	env["GC_STORE_ROOT"] = "/workspace/demo-repo"
 	cfg := runtime.Config{Env: env}
 	if err := initBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, "/workspace/demo-repo", podManagedDoltHost, podManagedDoltPort); err != nil {
 		t.Fatalf("initBeadsInPod: %v", err)
@@ -2286,6 +2289,12 @@ func TestStartSkipsStagingWhenPrebaked(t *testing.T) {
 
 func TestStartProjectsRigStateAfterCityInitAndBeforeReadyMarker(t *testing.T) {
 	cfg := rigProjectionTestFixture(t)
+	isCityInit := func(cmd []string) bool {
+		if len(cmd) >= 5 && cmd[0] == "sh" && cmd[1] == "-c" && cmd[3] == "gc" && cmd[4] == "init" {
+			return true
+		}
+		return len(cmd) >= 4 && cmd[0] == "env" && cmd[2] == "gc" && cmd[3] == "init"
+	}
 	statePath := citylayout.SuspensionStateFile(cfg.Env["GC_CITY"])
 	if err := os.MkdirAll(filepath.Dir(statePath), 0o700); err != nil {
 		t.Fatal(err)
@@ -2301,7 +2310,7 @@ func TestStartProjectsRigStateAfterCityInitAndBeforeReadyMarker(t *testing.T) {
 		if len(cmd) >= 3 && cmd[0] == "sh" && strings.Contains(cmd[2], "tar xf -") {
 			return "gc-stage-ok", nil
 		}
-		if len(cmd) >= 4 && cmd[0] == "env" && cmd[2] == "gc" && cmd[3] == "init" {
+		if isCityInit(cmd) {
 			if err := os.WriteFile(statePath, []byte(`{"city":{"suspended":true},"rigs":{"gascity":{"suspended":true}}}`), 0o600); err != nil {
 				return "", err
 			}
@@ -2313,7 +2322,7 @@ func TestStartProjectsRigStateAfterCityInitAndBeforeReadyMarker(t *testing.T) {
 		t.Fatalf("Start rig session: %v", err)
 	}
 	initAt := findExecCall(fake.calls, func(cmd []string) bool {
-		return len(cmd) >= 4 && cmd[0] == "env" && cmd[2] == "gc" && cmd[3] == "init"
+		return isCityInit(cmd)
 	})
 	projectionAt := findExecCall(fake.calls, func(cmd []string) bool {
 		return len(cmd) >= 4 && cmd[0] == "sh" && cmd[3] == "gc-rig-projection"
