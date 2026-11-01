@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1100,4 +1101,140 @@ func TestManagedDoltRecoverCallerFallsBackToProcess(t *testing.T) {
 	if !strings.Contains(got, fmt.Sprintf("ppid=%d", os.Getppid())) {
 		t.Errorf("managedDoltRecoverCaller() = %q, want it to name the parent pid", got)
 	}
+}
+
+// observedHealthyLivePort is the port the observed-healthy fixture publishes for
+// its live server. Nothing listens on it: the dial is stubbed.
+const observedHealthyLivePort = 43129
+
+// observedHealthyRecovery is an owned managed Dolt that answers every probe on
+// the port its runtime state publishes, beside the first-unresponsive record an
+// earlier stall left behind. A recover that observes the server healthy without
+// running the query probe must end that streak, or a later single probe error
+// extends it and stops a live server.
+type observedHealthyRecovery struct {
+	city      string
+	layout    managedDoltRuntimeLayout
+	ops       managedDoltRecoveryOps
+	published int
+}
+
+func newObservedHealthyRecovery(t *testing.T) *observedHealthyRecovery {
+	t.Helper()
+	clearGCEnv(t)
+	t.Setenv("GC_DOLT_PASSWORD", "test-password")
+	city := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(city)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	for _, dir := range []string{layout.PackStateDir, layout.DataDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", dir, err)
+		}
+	}
+	pid := startSigtermIgnoringProcess(t, layout.DataDir)
+	if err := os.WriteFile(layout.PIDFile, []byte(fmt.Sprint(pid)+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pid): %v", err)
+	}
+	state := doltRuntimeState{
+		Running:   true,
+		PID:       pid,
+		Port:      observedHealthyLivePort,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	for _, path := range []string{layout.StateFile, managedDoltStatePath(city)} {
+		if err := writeDoltRuntimeStateFile(path, state); err != nil {
+			t.Fatalf("writeDoltRuntimeStateFile(%s): %v", path, err)
+		}
+	}
+	// The server answers the TCP and the query probe on its published port
+	// without a socket: the dial hands back one end of an in-memory pipe.
+	stubManagedDoltDial(t, func(string, string, time.Duration) (net.Conn, error) {
+		client, server := net.Pipe()
+		_ = server.Close()
+		return client, nil
+	})
+	oldQueryProbe := managedDoltQueryProbeDirectFn
+	managedDoltQueryProbeDirectFn = func(_, _, _ string) error { return nil }
+	t.Cleanup(func() { managedDoltQueryProbeDirectFn = oldQueryProbe })
+
+	since := time.Unix(1_700_000_000, 0).UTC()
+	if err := os.WriteFile(managedDoltUnresponsiveSincePath(layout), []byte(since.Format(time.RFC3339Nano)+"\n"), 0o600); err != nil {
+		t.Fatalf("seed unresponsive state: %v", err)
+	}
+
+	f := &observedHealthyRecovery{city: city, layout: layout}
+	// Reaching any of these means the fixture missed the observed path, which
+	// is a different failure from a clear that never ran.
+	unexpected := func(op string) error {
+		t.Errorf("recover ran %s although the live server was observed healthy", op)
+		return errors.New(op)
+	}
+	f.ops = managedDoltRecoveryOps{
+		queryProbe: func(string, string, string) error { return unexpected("queryProbe") },
+		healthCheck: func(string, string, string) (managedDoltSQLHealthReport, error) {
+			return managedDoltSQLHealthReport{}, unexpected("healthCheck")
+		},
+		stop: func(string, string) (managedDoltStopReport, error) {
+			return managedDoltStopReport{}, unexpected("stop")
+		},
+		preflightCleanup: func(string) error { return unexpected("preflightCleanup") },
+		start: func(string, string, string, string, string, time.Duration) (managedDoltStartReport, error) {
+			return managedDoltStartReport{}, unexpected("start")
+		},
+		publish:       func(string) error { f.published++; return nil },
+		failedCleanup: func(_ string, _ int, _ int, cause error) error { return cause },
+		classifyUnresponsive: func(string, string, string) (int, bool) {
+			_ = unexpected("classifyUnresponsive")
+			return 0, false
+		},
+		now:                      func() time.Time { return since.Add(time.Hour) },
+		unresponsiveRestartAfter: unresponsiveTestWindow,
+	}
+	return f
+}
+
+// requireReusedLiveServer fails unless recover reused the live server it
+// observed and ended the first-unresponsive streak.
+func (f *observedHealthyRecovery) requireReusedLiveServer(t *testing.T, report managedDoltRecoverReport, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("recover error = %v, want the observed live server reused", err)
+	}
+	if !report.Ready || !report.Healthy || report.Restarted || report.Port != observedHealthyLivePort {
+		t.Fatalf("report = %+v, want ready and healthy on port %d without a restart", report, observedHealthyLivePort)
+	}
+	if f.published != 1 {
+		t.Fatalf("publish ran %d times, want 1", f.published)
+	}
+	if _, statErr := os.Stat(managedDoltUnresponsiveSincePath(f.layout)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("first-unresponsive record after an observed-healthy recover: stat error = %v, want it removed", statErr)
+	}
+}
+
+// The live server publishes a port other than the one recover was asked about
+// (a scope watchdog rebind that provider state has not caught up with).
+// Recover reuses it without running the query probe, and that observation
+// ends the unresponsive streak.
+func TestRecoverManagedDolt_ObservedRebindClearsUnresponsiveState(t *testing.T) {
+	f := newObservedHealthyRecovery(t)
+
+	report, err := recoverManagedDoltProcessWithOps(f.city, "127.0.0.1", fmt.Sprint(observedHealthyLivePort+1), "root", "warning", 3*time.Second, f.ops)
+	f.requireReusedLiveServer(t, report, err)
+}
+
+// Another process holds the lifecycle lock while the server answers on the
+// requested port. Recover returns without the lock, and that observation also
+// ends the unresponsive streak.
+func TestRecoverManagedDolt_ObservedWhileLockHeldClearsUnresponsiveState(t *testing.T) {
+	f := newObservedHealthyRecovery(t)
+	if err := os.WriteFile(f.layout.LockFile, nil, 0o644); err != nil {
+		t.Fatalf("create lifecycle lock file: %v", err)
+	}
+	holdFlock(t, f.layout.LockFile)
+
+	report, err := recoverManagedDoltProcessWithOps(f.city, "127.0.0.1", fmt.Sprint(observedHealthyLivePort), "root", "warning", 3*time.Second, f.ops)
+	f.requireReusedLiveServer(t, report, err)
 }
