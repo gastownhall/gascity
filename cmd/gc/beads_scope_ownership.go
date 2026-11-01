@@ -609,6 +609,16 @@ func validateProviderOwnedProxiedScopeStore(cityPath, scopeRoot string) error {
 	if _, journaled, err := providerScopeOwnership(cityPath, scopeRoot); err != nil || journaled {
 		return err
 	}
+	return validateProxiedScopeBindingHasStore(scopeRoot)
+}
+
+// validateProxiedScopeBindingHasStore is validateProviderOwnedProxiedScopeStore
+// without the journal exemption: whatever the journal records for the scope,
+// a proxied binding to a local store with no store behind it is refused. It is
+// for --adopt, which registers a store that must already exist: a record does
+// not make one, since a fresh add that failed leaves its pending record and gc
+// rig remove leaves a ready one at the rig's path.
+func validateProxiedScopeBindingHasStore(scopeRoot string) error {
 	intent, proxied, err := providerOwnedScopeIntentFromBinding(scopeRoot)
 	if err != nil || !proxied {
 		return err

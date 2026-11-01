@@ -98,9 +98,12 @@ func ReservedPrefixSplitRefusal(cfg *City) error {
 
 // reservedPrefixFixes is the remedy each kind of collision names. A city that
 // exists is fixed in its own files; a city being created is fixed by naming it
-// differently or by changing the config it is created from.
+// differently or by changing the config it is created from. adoptedRig, when
+// set, names a rig being added with the prefix its existing store records:
+// city.toml must match that store, so the rig's fix is adopted, not rig.
 type reservedPrefixFixes struct {
-	hq, rig, patch string
+	hq, rig, patch      string
+	adoptedRig, adopted string
 }
 
 var (
@@ -129,7 +132,11 @@ func reservedPrefixSplitRefusal(cfg *City, fixes reservedPrefixFixes) error {
 	for _, r := range cfg.Rigs {
 		prefix := strings.ToLower(strings.TrimSpace(r.EffectivePrefix()))
 		if reserved, ok := ReservedPrefixCollision(prefix); ok {
-			problems = append(problems, fmt.Sprintf("rig %q bead prefix %q is in the reserved %q namespace; %s", r.Name, prefix, reserved, fixes.rig))
+			fix := fixes.rig
+			if fixes.adoptedRig != "" && r.Name == fixes.adoptedRig {
+				fix = fixes.adopted
+			}
+			problems = append(problems, fmt.Sprintf("rig %q bead prefix %q is in the reserved %q namespace; %s", r.Name, prefix, reserved, fix))
 		}
 	}
 	// A raw (unpatched) config being edited still carries its [[patches.rigs]]
@@ -162,6 +169,16 @@ func reservedPrefixSplitRefusal(cfg *City, fixes reservedPrefixFixes) error {
 // lets one command write a config every later CLI process refuses.
 func ReservedPrefixSplitRefusalForEdit(fs fsys.FS, tomlPath string, next *City) error {
 	return reservedPrefixSplitRefusalForConfig(fs, tomlPath, next, reservedPrefixFixesForExistingCity)
+}
+
+// ReservedPrefixSplitRefusalForAdopt is ReservedPrefixSplitRefusalForEdit for
+// an edit that adds rigName with the prefix its existing store already records
+// (gc rig add --adopt). No [[rigs]] entry can give that rig another prefix, so
+// its problem names fix, the caller's remedy, instead of the [[rigs]] one.
+func ReservedPrefixSplitRefusalForAdopt(fs fsys.FS, tomlPath string, next *City, rigName, fix string) error {
+	fixes := reservedPrefixFixesForExistingCity
+	fixes.adoptedRig, fixes.adopted = rigName, fix
+	return reservedPrefixSplitRefusalForConfig(fs, tomlPath, next, fixes)
 }
 
 // ReservedPrefixSplitRefusalForNewCity is ReservedPrefixSplitRefusalForEdit

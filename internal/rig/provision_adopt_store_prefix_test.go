@@ -261,3 +261,106 @@ func TestProvisionAdoptStorePrefixMeetsTheSplitReservedRefusal(t *testing.T) {
 	}
 	assertCityTOMLUntouched(t, deps)
 }
+
+// adoptedStoreRemedyText is the remedy an adopt's refusal of its store's own
+// prefix names: --prefix must match the store, so neither another --prefix nor
+// a [[rigs]] prefix can help; the store's prefix itself has to change.
+func adoptedStoreRemedyText(rigPath string) string {
+	return "an adopted rig keeps its store's own prefix, so change the issue prefix the store at " + rigPath + " records before adopting it"
+}
+
+func TestProvisionAdoptStorePrefixCollisionNamesTheStoreRemedy(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cfg    *config.City
+		other  string
+		prefix string
+	}{
+		{name: "HQ without --prefix", cfg: &config.City{Workspace: config.Workspace{Name: "havana", Prefix: "hv"}}, other: "HQ"},
+		{name: "HQ with the store's prefix as --prefix", cfg: &config.City{Workspace: config.Workspace{Name: "havana", Prefix: "hv"}}, other: "HQ", prefix: "hv"},
+		{name: "rig without --prefix", cfg: &config.City{Rigs: []config.Rig{{Name: "first", Path: "/elsewhere/first", Prefix: "hv"}}}, other: "first"},
+		{name: "rig with the store's prefix as --prefix", cfg: &config.City{Rigs: []config.Rig{{Name: "first", Path: "/elsewhere/first", Prefix: "hv"}}}, other: "first", prefix: "hv"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deps, req := adoptStoreFixture(t, bdInitConfigYAML)
+			deps.Cfg = tc.cfg
+			deps.ReadStorePrefix = (&storePrefixStub{}).reader("hv", nil)
+			req.Prefix = tc.prefix
+
+			_, _, err := Provision(deps, req)
+			want := `rig "webapp": prefix "hv" collides with ` + tc.other + "; " + adoptedStoreRemedyText(req.Path)
+			if err == nil || err.Error() != want {
+				t.Fatalf("Provision err = %v, want %q", err, want)
+			}
+			assertCityTOMLUntouched(t, deps)
+		})
+	}
+}
+
+// An --adopt whose --prefix differs from the store's but itself collides is
+// not refused over the store's prefix, so it keeps the fresh-add text.
+func TestProvisionAdoptMismatchingCollidingPrefixKeepsTheFreshAddText(t *testing.T) {
+	deps, req := adoptStoreFixture(t, bdInitConfigYAML)
+	deps.Cfg = &config.City{Workspace: config.Workspace{Name: "havana", Prefix: "zz"}}
+	deps.ReadStorePrefix = (&storePrefixStub{}).reader("hv", nil)
+	req.Prefix = "zz"
+
+	_, _, err := Provision(deps, req)
+	want := `rig "webapp": prefix "zz" collides with HQ. Use --prefix to specify a different prefix.`
+	if err == nil || err.Error() != want {
+		t.Fatalf("Provision err = %v, want %q", err, want)
+	}
+	assertCityTOMLUntouched(t, deps)
+}
+
+func TestProvisionFreshAddCollisionKeepsThePrefixRemedy(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cfg   *config.City
+		other string
+	}{
+		{name: "HQ", cfg: &config.City{Workspace: config.Workspace{Name: "havana", Prefix: "hv"}}, other: "HQ"},
+		{name: "rig", cfg: &config.City{Rigs: []config.Rig{{Name: "first", Path: "/elsewhere/first", Prefix: "hv"}}}, other: "first"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deps := stubDeps(t.TempDir())
+			deps.Cfg = tc.cfg
+			_, _, err := Provision(deps, ProvisionRequest{Name: "webapp", Path: filepath.Join(t.TempDir(), "webapp"), Prefix: "hv"})
+			want := `rig "webapp": prefix "hv" collides with ` + tc.other + `. Use --prefix to specify a different prefix.`
+			if err == nil || err.Error() != want {
+				t.Fatalf("Provision err = %v, want %q", err, want)
+			}
+		})
+	}
+}
+
+func TestProvisionAdoptReservedStorePrefixOnASplitCityNamesTheStoreRemedy(t *testing.T) {
+	deps, req := adoptStoreFixture(t, bdInitConfigYAML)
+	deps.Cfg = splitCityCfg()
+	deps.ReadStorePrefix = (&storePrefixStub{}).reader("gco", nil)
+
+	_, _, err := Provision(deps, req)
+	if err == nil {
+		t.Fatal("adopting a store with a reserved prefix on a split city succeeded")
+	}
+	wantProblem := `rig "webapp" bead prefix "gco" is in the reserved "gco" namespace; ` + adoptedStoreRemedyText(req.Path)
+	if !strings.Contains(err.Error(), wantProblem) {
+		t.Errorf("refusal %q does not contain %q", err, wantProblem)
+	}
+	if strings.Contains(err.Error(), "[[rigs]] entry") {
+		t.Errorf("refusal names a [[rigs]] prefix remedy an adopt cannot use: %v", err)
+	}
+	assertCityTOMLUntouched(t, deps)
+}
+
+// A fresh add's reserved prefix keeps the [[rigs]] remedy: that rig's prefix
+// is gc's to choose.
+func TestProvisionFreshAddReservedPrefixOnASplitCityKeepsTheRigsRemedy(t *testing.T) {
+	deps := stubDeps(t.TempDir())
+	deps.Cfg = splitCityCfg()
+	_, _, err := Provision(deps, ProvisionRequest{Name: "beta", Path: filepath.Join(t.TempDir(), "beta"), Prefix: "gco"})
+	want := `rig "beta" bead prefix "gco" is in the reserved "gco" namespace; set an explicit prefix: prefix = "<prefix>" on that [[rigs]] entry`
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Provision err = %v, want it to contain %q", err, want)
+	}
+}
