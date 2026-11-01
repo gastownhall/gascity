@@ -196,6 +196,7 @@ func TestStandbyUsable(t *testing.T) {
 		{"the workspace's provider is its own", Agent{StandbyProvider: "w"}, "own provider"},
 		{"usable off the workspace's provider", Agent{StandbyProvider: "b"}, ""},
 		{"start_command", Agent{StartCommand: "run", StandbyProvider: "b"}, "start_command"},
+		{"own process_names", Agent{Provider: "a", StandbyProvider: "b", ProcessNames: []string{"a-agent"}}, "process_names"},
 	}
 	for _, tc := range cases {
 		got := StandbyUsable(&tc.a, ws)
@@ -324,5 +325,33 @@ command = "cursor-agent"
 	}
 	if a := load(); a.Provider != "cursor-grok" || a.StandbyFor != "codex-astra" || a.MaxActiveSessions == nil || *a.MaxActiveSessions != 2 {
 		t.Fatalf("agent %+v, want it moved to cursor-grok with its own cap 2", a)
+	}
+}
+
+// Only the standby layer's own warnings are non-fatal in strict mode: an
+// unknown-key or typo warning that merely names the key stays fatal.
+func TestIsStandbyWarning(t *testing.T) {
+	if IsStandbyWarning(`city.toml: unknown field "standby_providr"; did you mean "standby_provider"?`) {
+		t.Fatal("a typo warning naming the key was classified as a standby warning")
+	}
+	fs := standbyFS(t, standbyCity)
+	if err := WriteStandby(fs, "/city", StandbyFile{Agents: []StandbyEntry{standbyEntry("codex-astra", "cursor-old")}}); err != nil {
+		t.Fatal(err)
+	}
+	_, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, w := range prov.Warnings {
+		if strings.Contains(w, "recorded move") {
+			found = true
+			if !IsStandbyWarning(w) {
+				t.Fatalf("stale-entry warning %q is not classified as a standby warning", w)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("warnings %v, want the stale entry reported", prov.Warnings)
 	}
 }

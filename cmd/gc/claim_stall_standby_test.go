@@ -759,3 +759,49 @@ func TestClaimStallGuardAStandbyStallEndingKeepsTheMove(t *testing.T) {
 		t.Fatalf("record %+v, want the move to stand", rec)
 	}
 }
+
+// A standby the provider-health record marks unhealthy is not moved to, and
+// a move whose standby turns unhealthy ends: the reconciler starts no seat on
+// a red provider, so the agent would get none.
+func TestClaimStallGuardRespectsTheStandbysHealth(t *testing.T) {
+	t.Run("no move to a red standby", func(t *testing.T) {
+		h := newStandbyHarness(t)
+		h.tick(healthSnapshot(t, map[string]string{standbyProvider: "unhealthy"}))
+		h.tripOnOwn()
+		if p := h.lastStall(); p.Action != events.AgentClaimsHeld {
+			t.Fatalf("stall %+v, want held: the standby is red", p)
+		}
+		if !strings.Contains(h.stderr.String(), "unhealthy") {
+			t.Fatalf("stderr %q, want the reason named", h.stderr.String())
+		}
+	})
+	t.Run("a standby that turns red ends the move", func(t *testing.T) {
+		h := newStandbyHarness(t)
+		h.tripOnOwn()
+		h.tick(nil)
+		if !h.tick(healthSnapshot(t, map[string]string{standbyProvider: "unhealthy"})) {
+			t.Fatal("the move stood on a red standby")
+		}
+		released := h.ofType(events.AgentStandbyReleased)
+		if len(released) != 1 || stallPayload(t, released[0]).Cause != events.AgentClaimsCauseProviderHealth {
+			t.Fatalf("released %v, want one, by the provider-health record", released)
+		}
+	})
+}
+
+// A move is recorded before anything can end it early: a claim on the own
+// provider between the decision and the write does not drop it unseen.
+func TestClaimStallGuardRecordsAMoveBeforeReleasingIt(t *testing.T) {
+	h := newStandbyHarness(t)
+	h.tripOnOwn()
+	h.guard.mu.Lock()
+	h.guard.lastClaim[stallProvider] = h.now.Add(time.Second)
+	h.guard.mu.Unlock()
+	h.advance(time.Minute)
+	if !h.tick(nil) {
+		t.Fatal("the move was not written")
+	}
+	if engaged := h.ofType(events.AgentStandbyEngaged); len(engaged) != 1 {
+		t.Fatalf("engaged %v, want the move recorded before any early release", engaged)
+	}
+}

@@ -243,6 +243,9 @@ type claimStallGuard struct {
 	// lastClaim is each provider's newest claim by a counted seat: evidence
 	// that a provider, or the city, works.
 	lastClaim map[string]time.Time
+	// health is the provider-health record syncStandby read last, nil before
+	// the first: a standby it marks unhealthy is not moved to.
+	health *providerHealthSnapshot
 	// waitedBy is the routed demand's reverse index: a waiting bead → the
 	// templates whose demand lists it.
 	waitedBy map[string]map[string]struct{}
@@ -760,8 +763,17 @@ func (g *claimStallGuard) canEngageLocked(template string, t *claimStallTemplate
 		return fmt.Sprintf("its seats waited on %d bead(s) of work only", beads)
 	case !g.otherProviderClaimedLocked(lane.own, since):
 		return "no seat on another provider claimed meanwhile"
+	case claimStallRed(g.health, lane.standby):
+		return "the provider-health record marks its standby_provider " + lane.standby + " unhealthy"
 	}
 	return ""
+}
+
+// claimStallRed reports whether the provider-health record marks provider
+// unhealthy.
+func claimStallRed(health *providerHealthSnapshot, provider string) bool {
+	healthy, present := health.check(provider)
+	return present && !healthy
 }
 
 // engageableLocked reports whether template may be moved to its standby at
@@ -1188,6 +1200,7 @@ func (g *claimStallGuard) syncStandby(health *providerHealthSnapshot) (bool, err
 	now := g.now()
 	var alerts []events.Event
 	g.mu.Lock()
+	g.health = health
 	g.rereadRecordLocked(now)
 	for _, name := range g.sortedLaneNamesLocked() {
 		lane := g.lanes[name]
@@ -1197,7 +1210,7 @@ func (g *claimStallGuard) syncStandby(health *providerHealthSnapshot) (bool, err
 		if healthy, present := health.check(lane.own); !present || healthy {
 			continue
 		}
-		if healthy, present := health.check(lane.standby); present && !healthy {
+		if claimStallRed(health, lane.standby) {
 			continue // the standby is no better
 		}
 		t := g.templateFor(name)
@@ -1217,16 +1230,20 @@ func (g *claimStallGuard) syncStandby(health *providerHealthSnapshot) (bool, err
 	}
 	for _, name := range g.sortedMoveNamesLocked() {
 		m := g.moves[name]
-		healthy, present := health.check(m.replaced)
+		_, recorded := g.recorded[name]
 		switch {
-		case present && !healthy:
+		case claimStallRed(health, m.replaced):
 			// The pack still marks the own provider unhealthy, and the
 			// reconciler would start no probe seat on it: the move stands.
+		case claimStallRed(health, m.provider):
+			// The standby went red too, and the reconciler starts no seat
+			// on it: back to the own provider, which may have recovered.
+			g.dropMoveLocked(name, events.AgentClaimsCauseProviderHealth, now)
 		case m.cause == events.AgentClaimsCauseProviderHealth:
 			g.dropMoveLocked(name, events.AgentClaimsCauseProviderHealth, now)
 		case !now.Before(m.until):
 			g.dropMoveLocked(name, events.AgentClaimsCauseHoldEnded, now)
-		case m.engagements <= 1 && g.lastClaim[m.replaced].After(m.since):
+		case recorded && m.engagements <= 1 && g.lastClaim[m.replaced].After(m.since):
 			// Another agent's seat claimed on the own provider: the outage
 			// may be over. Only for a first move: once a probe has failed,
 			// the failure was this agent's, whatever its neighbors do.

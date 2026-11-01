@@ -57,10 +57,11 @@ type StandbyEntry struct {
 	Reason string `toml:"reason,omitempty"`
 }
 
-// standbyWarningMarker is in every warning the standby layer raises, so
-// strict mode can tell them apart (IsStandbyWarning): a stale or inert
-// standby is guidance, never a reason to refuse a config.
-const standbyWarningMarker = "standby_provider"
+// standbyWarningMarker opens every warning the standby layer raises, after
+// its source, so strict mode can tell them apart (IsStandbyWarning): a stale
+// or inert standby is guidance, never a reason to refuse a config. It is not
+// the key's name, which an unknown-key or typo warning can carry.
+const standbyWarningMarker = ": standby: "
 
 // IsStandbyWarning reports whether warning is one the standby layer raised:
 // a recorded move that no longer applies, an unreadable record, or a
@@ -148,7 +149,10 @@ func AgentOwnProvider(a *Agent, workspace *Workspace) string {
 }
 
 // StandbyUsable reports why an agent's standby cannot be used, or "" when it
-// can: a provider other than its own, on an agent that runs a provider.
+// can: a provider other than its own, on an agent that runs a provider and
+// leaves the process names to it (an agent's own process_names would name the
+// own provider's process on the standby too, and its seats there would read
+// dead).
 func StandbyUsable(a *Agent, workspace *Workspace) string {
 	switch {
 	case a == nil || strings.TrimSpace(a.StandbyProvider) == "":
@@ -157,6 +161,8 @@ func StandbyUsable(a *Agent, workspace *Workspace) string {
 		return "a start_command agent runs no provider"
 	case strings.TrimSpace(a.StandbyProvider) == AgentOwnProvider(a, workspace):
 		return "standby_provider is the agent's own provider"
+	case len(a.ProcessNames) > 0:
+		return "an agent that sets its own process_names cannot change provider"
 	}
 	return ""
 }
@@ -178,18 +184,18 @@ func applyStandby(cfg *City, f StandbyFile, source string) []string {
 	for _, e := range f.Agents {
 		i, ok := index[e.Name]
 		if !ok {
-			warnings = append(warnings, fmt.Sprintf("%s: agent %q is not in the config; its standby_provider move is ignored", source, e.Name))
+			warnings = append(warnings, fmt.Sprintf("%s"+standbyWarningMarker+"agent %q is not in the config; its recorded move is ignored", source, e.Name))
 			continue
 		}
 		a := &cfg.Agents[i]
 		own := AgentOwnProvider(a, &cfg.Workspace)
 		if a.StandbyFor != "" || strings.TrimSpace(e.Provider) != strings.TrimSpace(a.StandbyProvider) || strings.TrimSpace(e.Replaced) != own {
-			warnings = append(warnings, fmt.Sprintf("%s: agent %q now runs provider %q with standby_provider %q; the recorded move (%q in place of %q) is ignored",
+			warnings = append(warnings, fmt.Sprintf("%s"+standbyWarningMarker+"agent %q now runs provider %q with standby_provider %q; the recorded move (%q in place of %q) is ignored",
 				source, e.Name, own, a.StandbyProvider, e.Provider, e.Replaced))
 			continue
 		}
 		if why := StandbyUsable(a, &cfg.Workspace); why != "" {
-			warnings = append(warnings, fmt.Sprintf("%s: agent %q: %s; its standby_provider move is ignored", source, e.Name, why))
+			warnings = append(warnings, fmt.Sprintf("%s"+standbyWarningMarker+"agent %q: %s; its recorded move is ignored", source, e.Name, why))
 			continue
 		}
 		a.StandbyFor = own
@@ -207,7 +213,7 @@ func applyStandbyLayer(fs fsys.FS, cityRoot string, cfg *City, prov *Provenance)
 		prov.standby = data
 	}
 	if err != nil {
-		return []string{fmt.Sprintf("%v; no agent is moved to its standby_provider", err)}
+		return []string{fmt.Sprintf("%s"+standbyWarningMarker+"%v; no agent is moved to its standby_provider", StandbyPath(cityRoot), err)}
 	}
 	return applyStandby(cfg, f, StandbyPath(cityRoot))
 }
