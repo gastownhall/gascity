@@ -1165,9 +1165,9 @@ func refreshConfiguredNamedStartCandidate(
 	// Fold the resolver's Info too, not just the params: the resolve may have
 	// durably cleared a stale trigger stamp (bindNamedSessionTriggerBead,
 	// gascity#4373), and buildPreparedStartWithWorkDirResolver re-derives the
-	// launch env from candidate.info via sessionTriggerBeadEnv. Keeping the
-	// pre-call Info here would hand the seat starting on the clearing tick the
-	// stale GC_TRIGGER_BEAD_ID the clear just removed.
+	// launch env from candidate.info via sessionDemandSpawnEnv. Keeping the
+	// pre-call Info here would mark the seat starting on the clearing tick
+	// demand-spawned for the stamp the clear just removed.
 	candidate.info = refreshedInfo
 	return candidate
 }
@@ -1475,8 +1475,8 @@ func buildPreparedStartWithTranscript(
 	if gcProvider := sessionpkg.ProviderFamilyFromInfo(candidate.info, ""); gcProvider != "" {
 		agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	}
-	if triggerEnv := sessionTriggerBeadEnv(candidate.info); len(triggerEnv) > 0 {
-		agentCfg.Env = mergeEnv(agentCfg.Env, triggerEnv)
+	if demandEnv := sessionDemandSpawnEnv(candidate.info); len(demandEnv) > 0 {
+		agentCfg.Env = mergeEnv(agentCfg.Env, demandEnv)
 	}
 	agentCfg.Env = git.ApplySSHKeepaliveEnv(agentCfg.Env)
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
@@ -1636,27 +1636,19 @@ func samePreparedWorkDirPath(a, b string) bool {
 	return samePath(a, b)
 }
 
-// sessionTriggerBeadEnv reads the trigger-bead identity off the typed twin
-// (Info.TriggerBeadID / Info.TriggerBeadStoreRef, verbatim raw mirrors) instead of
-// the raw bead metadata. The trigger key IS mutated on the start-prep path —
-// refreshConfiguredNamedStartCandidate runs bindNamedSessionTriggerBead, which
-// clears a stamp whose target is no longer workable (gascity#4373) — so
-// coherence here depends on that refresh folding its returned Info onto
-// candidate.info, not on the key being immutable.
-func sessionTriggerBeadEnv(info sessionpkg.Info) map[string]string {
-	triggerBeadID := strings.TrimSpace(info.TriggerBeadID)
-	if triggerBeadID == "" {
+// sessionDemandSpawnEnv is the launch env a row's trigger stamp contributes:
+// the presence-only marker GC_SPAWN_ORIGIN=demand when info carries a stamp,
+// otherwise nil. It never exports the trigger id or its store ref. The stamp
+// names the row the controller counted, not the bead the seat claims (the pool
+// is pull), and a shell's copy is frozen at exec while the stamp keeps moving,
+// so an id-shaped variable would be one ${…:-} away from closing a foreign
+// bead (gastownhall/gascity#5738). A seat names its own bead through
+// `gc hook current --id-only`.
+func sessionDemandSpawnEnv(info sessionpkg.Info) map[string]string {
+	if strings.TrimSpace(info.TriggerBeadID) == "" {
 		return nil
 	}
-	env := map[string]string{
-		"GC_TRIGGER_BEAD_ID":      triggerBeadID,
-		"GC_TRIGGER_WORK_BEAD_ID": triggerBeadID,
-	}
-	if storeRef := strings.TrimSpace(info.TriggerBeadStoreRef); storeRef != "" {
-		env["GC_TRIGGER_BEAD_STORE_REF"] = storeRef
-		env["GC_TRIGGER_WORK_STORE_REF"] = storeRef
-	}
-	return env
+	return map[string]string{"GC_SPAWN_ORIGIN": demandSpawnOriginValue}
 }
 
 // parseSessionTemplateOverridesForLaunch decodes the per-session template_overrides

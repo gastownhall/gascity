@@ -199,7 +199,7 @@ if [ -n "$CURRENT_ID" ]; then
 fi
 if [ -z "$DRAIN_BEAD_ID" ]; then
   if [ -z "$ROOT_BEAD_ID" ]; then
-    STARTUP_BEAD_ID="${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-}}"
+    STARTUP_BEAD_ID="${GC_BEAD_ID:-}"
     if [ -z "$STARTUP_BEAD_ID" ]; then
       echo "mol-do-work drain resolved no continuation from the current claim and has no startup bead id to fall back on" >&2
       exit 1
