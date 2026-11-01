@@ -81,6 +81,9 @@ func writeKeyedTranscript(t *testing.T, root, workDir, key string) {
 func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 	tests := []struct {
 		name string
+		// provider overrides the spec's (and so the row's) provider; the
+		// default claude row is the probeable one.
+		provider string
 		// setup mutates the row (and handle) after the handoff; want is the
 		// exact command startCommand must build.
 		setup func(t *testing.T, h *SessionHandle, store *beads.MemStore, info sessionpkg.Info, key string)
@@ -90,6 +93,12 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			name:  "no transcript starts a new conversation under the stored key",
 			setup: nil,
 			want:  func(key string) string { return "claude --session-id " + key },
+		},
+		{
+			name:     "provider the probe cannot read resumes",
+			provider: "legacy-provider",
+			setup:    nil,
+			want:     func(key string) string { return "claude --resume " + key },
 		},
 		{
 			name: "keyed transcript present under the handle's search path resumes",
@@ -174,6 +183,9 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 					ResumeStyle:   "flag",
 					SessionIDFlag: "--session-id",
 				},
+			}
+			if tt.provider != "" {
+				spec.Provider = tt.provider
 			}
 			handle, store, info, key := newRotatedKeyHandle(t, spec, []string{t.TempDir()})
 			if tt.setup != nil {
