@@ -51,7 +51,11 @@ func mainExitCode(args []string, stdout, stderr io.Writer) int {
 	if handled, code := privateProductMetricsEntrypoint(args); handled {
 		return code
 	}
-	return run(args, stdout, stderr)
+	code := run(args, stdout, stderr)
+	// A process that recorded program-status shadow comparisons writes the
+	// ones still queued before it exits, bounded so exit never waits long.
+	flushProgramStatusShadow(programShadowFlushTimeout)
+	return code
 }
 
 // errExit is a sentinel error returned by cobra RunE functions to signal
@@ -347,7 +351,7 @@ func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions)
 	root.PersistentFlags().StringVar(&contextFlag, "context", "",
 		"operate the REMOTE city named by this context (~/.gc/contexts.toml)")
 	root.PersistentFlags().StringVar(&cityURLFlag, "city-url", "",
-		"operate a REMOTE city at this base URL (https; requires --city-name)")
+		"operate a REMOTE city at this base URL (https, or http on a loopback host; requires --city-name). A remote target is served by the API, so --json prints the API rendering where a command has two (see gc session list --help)")
 	root.PersistentFlags().StringVar(&cityNameFlag, "city-name", "",
 		"remote city name for --city-url (does not overload --city)")
 	configureJSONSchemaFlag(root)
@@ -538,6 +542,12 @@ var cliStoreCache struct {
 // have a store open. Caches the bead store per cityPath so loops over
 // agents don't open the store repeatedly. Silently falls back to legacy
 // naming if the store is unavailable.
+//
+// The lookup reads session beads, so it goes through the session-class store:
+// on a split city they live only in the binding, and a lookup through the
+// work store missed every one and fell back to the legacy name (gc prime's
+// hook resolved the wrong tmux session). A single-store city gets its one
+// store back.
 func cliSessionName(cityPath, cityName, agentName, sessionTemplate string) string {
 	if strings.TrimSpace(cityPath) == "" {
 		return sessionName(nil, cityName, agentName, sessionTemplate)
@@ -549,6 +559,9 @@ func cliSessionName(cityPath, cityName, agentName, sessionTemplate string) strin
 	}
 	store := cliStoreCache.store
 	cliStoreCache.mu.Unlock()
+	if store != nil {
+		store = cliSessionStore(store, nil, cityPath)
+	}
 	return sessionName(store, cityName, agentName, sessionTemplate)
 }
 
@@ -1758,7 +1771,7 @@ func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverr
 var openStoreFactoryForCity = beads.OpenStoreAtForCity
 
 func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative, longLived bool, nativeOverride *beads.NativeTransportMode) (beads.StoreOpenResult, error) {
-	return openStoreResultAtForCityScoped(storePath, cityPath, cfg, modeOverride, haveMode, authoritative, longLived, false, nativeOverride)
+	return openWorkStoreResultAtForCityScoped(storePath, cityPath, cfg, modeOverride, haveMode, authoritative, longLived, false, nativeOverride)
 }
 
 // openOneShotStoreAtForCityWithConfig is openStoreAtForCityWithConfig for a
@@ -1776,11 +1789,25 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 // Nothing enforces that cfg is fresh; the one-shot entry points
 // (openCityStoreAtWithConfig, oneShotRigStoreOpener) are the only callers.
 func openOneShotStoreAtForCityWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
-	result, err := openStoreResultAtForCityScoped(storePath, cityPath, cfg, gate.ModeUnset, false, false, false, true, nil)
+	result, err := openWorkStoreResultAtForCityScoped(storePath, cityPath, cfg, gate.ModeUnset, false, false, false, true, nil)
 	if err != nil {
 		return nil, err
 	}
 	return result.Store, nil
+}
+
+// openWorkStoreResultAtForCityScoped opens a scope store through the shared
+// open body. A one-shot scope store is a WORK store (the city or a rig
+// ledger); under the split-strict test gate it is handed out as the gate's
+// work view (split_strict_seam.go), and unchanged otherwise. A long-lived open
+// is the controller's: it wraps the store in its cache and hands out views at
+// its own accessors, so it gets the raw store here.
+func openWorkStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative, longLived, oneShotConfig bool, nativeOverride *beads.NativeTransportMode) (beads.StoreOpenResult, error) {
+	result, err := openStoreResultAtForCityScoped(storePath, cityPath, cfg, modeOverride, haveMode, authoritative, longLived, oneShotConfig, nativeOverride)
+	if err == nil && !longLived {
+		result.Store = splitStrictWorkView(result.Store)
+	}
+	return result, err
 }
 
 // openStoreResultAtForCityScoped is the shared open body. oneShotConfig

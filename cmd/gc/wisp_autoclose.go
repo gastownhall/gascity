@@ -222,7 +222,14 @@ func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent b
 		return nil
 	}
 	if graphStore != workStore {
-		graphConvoys, gerr := convoycore.TrackingConvoysForItem(graphStore, parent.ID)
+		// The graph leg of the two-store probe above: a miss here is
+		// covered by the work leg.
+		var graphConvoys []beads.Bead
+		gerr := beads.FederatedRead(func() error {
+			var listErr error
+			graphConvoys, listErr = convoycore.TrackingConvoysForItem(graphStore, parent.ID)
+			return listErr
+		})
 		if gerr != nil {
 			// Fail closed, matching the workStore posture above: on a partial
 			// view we decline to force-close anything. Leaving the root for a

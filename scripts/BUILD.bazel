@@ -168,6 +168,7 @@ go_test(
         "runtime_tmux_manifest_test.go",
         "shard_cgo_test.go",
         "sign_darwin_local_test.go",
+        "split_strict_baseline_test.go",
         "test_go_test_shard_test.go",
         "test_integration_shard_test.go",
         "test_local_parallel_budget_test.go",

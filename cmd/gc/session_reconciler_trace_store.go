@@ -41,12 +41,21 @@ type SessionReconcilerTraceStore struct {
 	currentDay     string
 	currentSegment int
 	currentPath    string
-	currentFile    *os.File
+	currentFile    traceSegmentFile
 	currentBytes   int64
 	currentBatches int
 	disabled       bool
 	lowSpace       bool
 	lastPrune      time.Time
+}
+
+// traceSegmentFile is the open segment AppendBatch writes to. *os.File
+// satisfies it; tests substitute one whose writes fail partway.
+type traceSegmentFile interface {
+	io.Writer
+	Truncate(size int64) error
+	Sync() error
+	Close() error
 }
 
 type sessionReconcilerTraceHead struct {
@@ -68,12 +77,14 @@ func newSessionReconcilerTraceStore(cityPath string, stderr io.Writer) (*Session
 	if err := store.ensureRoot(); err != nil {
 		return nil, err
 	}
-	if ok, err := store.recoverFromHead(); err != nil {
+	floor, ok, err := store.recoverFromHead()
+	if err != nil {
 		return nil, err
-	} else if ok {
+	}
+	if ok {
 		return store, nil
 	}
-	if err := store.recoverExisting(); err != nil {
+	if err := store.recoverExisting(floor); err != nil {
 		return nil, err
 	}
 	return store, nil
@@ -93,13 +104,15 @@ func (s *SessionReconcilerTraceStore) ensureRoot() error {
 	return nil
 }
 
-func (s *SessionReconcilerTraceStore) recoverExisting() error {
-	paths, err := filepath.Glob(filepath.Join(s.rootDir, sessionReconcilerTraceSegments, "*", "*", "*", "*.jsonl"))
+// recoverExisting sets seq to the highest verified batch commit in any
+// segment, or to floor when that is higher, and quarantines segments that do
+// not read.
+func (s *SessionReconcilerTraceStore) recoverExisting(floor uint64) error {
+	paths, err := traceSegmentPaths(s.rootDir)
 	if err != nil {
-		return fmt.Errorf("glob trace segments: %w", err)
+		return err
 	}
-	sort.Strings(paths)
-	var maxSeq uint64
+	maxSeq := floor
 	for _, path := range paths {
 		seq, ok, scanErr := scanTraceSegment(path)
 		if scanErr != nil {
@@ -117,6 +130,18 @@ func (s *SessionReconcilerTraceStore) recoverExisting() error {
 		fmt.Fprintf(s.stderr, "trace: save head: %v\n", err) //nolint:errcheck
 	}
 	return nil
+}
+
+// traceSegmentPaths lists the segments under rootDir oldest first: day
+// directories and zero-padded segment numbers sort in the order they were
+// written.
+func traceSegmentPaths(rootDir string) ([]string, error) {
+	paths, err := filepath.Glob(filepath.Join(rootDir, sessionReconcilerTraceSegments, "*", "*", "*", "*.jsonl"))
+	if err != nil {
+		return nil, fmt.Errorf("glob trace segments: %w", err)
+	}
+	sort.Strings(paths)
+	return paths, nil
 }
 
 func scanTraceSegment(path string) (maxSeq uint64, ok bool, err error) {
@@ -205,31 +230,43 @@ func countBatchesInSegment(path string) int {
 	return count
 }
 
-func (s *SessionReconcilerTraceStore) recoverFromHead() (bool, error) {
+// recoverFromHead takes seq from head.json when the head still describes the
+// newest segment: it names that segment and the segment's size matches. Any
+// other head may predate a batch that was synced before the process died, or
+// before a head write failed, so it reports false and returns the head's seq
+// as the floor for a scan of every segment. The floor keeps the seqs a head
+// retired (see discardFailedWriteLocked) from being issued again.
+func (s *SessionReconcilerTraceStore) recoverFromHead() (uint64, bool, error) {
 	head, err := s.loadHead()
 	if err != nil {
 		if os.IsNotExist(err) {
-			return false, nil
+			return 0, false, nil
 		}
-		return false, err
+		return 0, false, err
 	}
 	if head.CurrentPath == "" {
-		s.seq = head.Seq
-		return true, nil
+		return head.Seq, false, nil
 	}
 	path := filepath.Join(s.rootDir, filepath.FromSlash(head.CurrentPath))
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return false, nil
+			return head.Seq, false, nil
 		}
-		return false, err
+		return 0, false, err
 	}
 	if info.Size() != head.CurrentBytes {
-		return false, nil
+		return head.Seq, false, nil
+	}
+	paths, err := traceSegmentPaths(s.rootDir)
+	if err != nil {
+		return 0, false, err
+	}
+	if len(paths) == 0 || paths[len(paths)-1] != path {
+		return head.Seq, false, nil
 	}
 	s.seq = head.Seq
-	return true, nil
+	return head.Seq, true, nil
 }
 
 func (s *SessionReconcilerTraceStore) loadHead() (sessionReconcilerTraceHead, error) {
@@ -418,6 +455,7 @@ func (s *SessionReconcilerTraceStore) AppendBatch(records []SessionReconcilerTra
 	writeBuf = append(writeBuf, commitLine...)
 
 	if _, err := s.currentFile.Write(writeBuf); err != nil {
+		s.discardFailedWriteLocked(seq)
 		return err
 	}
 	s.seq = seq
@@ -434,6 +472,31 @@ func (s *SessionReconcilerTraceStore) AppendBatch(records []SessionReconcilerTra
 		fmt.Fprintf(s.stderr, "trace: prune: %v\n", pruneErr) //nolint:errcheck
 	}
 	return syncErr
+}
+
+// discardFailedWriteLocked removes what a failed batch write left in the
+// segment. currentBytes ends on the last batch commit, so cutting back to it
+// lets the next batch start on its own line and reuse the failed batch's seqs.
+// If the cut fails, the torn bytes stay as the segment's tail: the segment is
+// abandoned so the next batch starts a new one, and the seqs up to lastSeq are
+// retired so no later record reuses a seq still on disk.
+func (s *SessionReconcilerTraceStore) discardFailedWriteLocked(lastSeq uint64) {
+	truncErr := s.currentFile.Truncate(s.currentBytes)
+	if truncErr == nil {
+		return
+	}
+	if s.stderr != nil {
+		fmt.Fprintf(s.stderr, "trace: rolling back failed write to %s: %v; starting a new segment\n", s.currentPath, truncErr) //nolint:errcheck
+	}
+	_ = s.currentFile.Close()
+	s.currentFile = nil
+	s.currentPath = ""
+	s.currentBytes = 0
+	s.currentBatches = 0
+	s.seq = lastSeq
+	if err := s.saveHeadLocked(); err != nil && s.stderr != nil {
+		fmt.Fprintf(s.stderr, "trace: save head: %v\n", err) //nolint:errcheck
+	}
 }
 
 func (s *SessionReconcilerTraceStore) rotateSegment(now time.Time) error {
@@ -601,12 +664,10 @@ func sortTraceArms(arms []TraceArm) {
 }
 
 func ReadTraceRecords(rootDir string, filter TraceFilter) ([]SessionReconcilerTraceRecord, error) {
-	segmentRoot := filepath.Join(rootDir, sessionReconcilerTraceSegments)
-	paths, err := filepath.Glob(filepath.Join(segmentRoot, "*", "*", "*", "*.jsonl"))
+	paths, err := traceSegmentPaths(rootDir)
 	if err != nil {
 		return nil, err
 	}
-	sort.Strings(paths)
 	if filter.SeqAfter > 0 && len(paths) > 0 {
 		var filtered []string
 		for i := len(paths) - 1; i >= 0; i-- {
@@ -650,6 +711,9 @@ func readTraceRecordsFile(path string, filter TraceFilter, tolerateTail bool) ([
 	var maxSeq uint64
 	var batchRecords []SessionReconcilerTraceRecord
 	var batchCRC uint32
+	// resyncing is set by a mid-file line that does not parse, until the
+	// next batch commit.
+	resyncing := false
 	reader := bufio.NewReader(f)
 	for {
 		line, readErr := reader.ReadBytes('\n')
@@ -668,29 +732,48 @@ func readTraceRecordsFile(path string, filter TraceFilter, tolerateTail bool) ([
 		}
 		var rec SessionReconcilerTraceRecord
 		if parseErr := json.Unmarshal(line, &rec); parseErr != nil {
+			if readErr == nil {
+				// A write that failed partway left a torn line, and the next
+				// batch was appended onto it. The batch being buffered never
+				// committed, and the glued batch lost its first record. Drop
+				// the buffered records and resync at the next line.
+				batchRecords = batchRecords[:0]
+				batchCRC = 0
+				resyncing = true
+				continue
+			}
 			if tolerateTail && readErr == io.EOF {
 				break
 			}
 			return nil, 0, fmt.Errorf("unmarshal trace record %s: %w", path, parseErr)
 		}
 		if rec.RecordType == TraceRecordBatchCommit {
-			if rec.RecordCount != len(batchRecords) {
-				return nil, 0, fmt.Errorf("trace batch %s: commit record_count=%d does not match buffered records=%d", path, rec.RecordCount, len(batchRecords))
+			var verifyErr error
+			switch {
+			case rec.RecordCount != len(batchRecords):
+				verifyErr = fmt.Errorf("trace batch %s: commit record_count=%d does not match buffered records=%d", path, rec.RecordCount, len(batchRecords))
+			case rec.BatchCRC32 != batchCRC:
+				verifyErr = fmt.Errorf("trace batch %s: crc32 mismatch", path)
 			}
-			if rec.BatchCRC32 != batchCRC {
-				return nil, 0, fmt.Errorf("trace batch %s: crc32 mismatch", path)
+			// A commit that does not verify is corruption, unless it closes
+			// the batch that lost its first record to a torn line.
+			if verifyErr != nil && !resyncing {
+				return nil, 0, verifyErr
 			}
-			for _, buffered := range batchRecords {
-				if matchesTraceFilter(buffered, filter) {
-					out = append(out, buffered)
+			if verifyErr == nil {
+				for _, buffered := range batchRecords {
+					if matchesTraceFilter(buffered, filter) {
+						out = append(out, buffered)
+					}
+				}
+				if matchesTraceFilter(rec, filter) {
+					out = append(out, rec)
+				}
+				if rec.Seq > maxSeq {
+					maxSeq = rec.Seq
 				}
 			}
-			if matchesTraceFilter(rec, filter) {
-				out = append(out, rec)
-			}
-			if rec.Seq > maxSeq {
-				maxSeq = rec.Seq
-			}
+			resyncing = false
 			batchRecords = batchRecords[:0]
 			batchCRC = 0
 			if readErr == io.EOF {
