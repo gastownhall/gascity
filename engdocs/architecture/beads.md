@@ -309,6 +309,27 @@ SQL JSON paths in `internal/api/convoy_sql.go` (via `beadmeta.JSONPath`).
 | `cmd/gc/cmd_convoy.go` | Convoy operations (create, list, status, add, close, check, stranded) all operate through Store |
 | `cmd/gc/cmd_handoff.go` | Work handoff between agents reads and writes beads through Store |
 
+### Managed-Dolt recovery governor
+
+A legacy managed city has three entries that can start a managed-Dolt
+recovery: the controller's tick preflight, the env-build health ladder
+(`resolvedRuntimeCityDoltTargetContext`) and the bd retry-path recover
+(`bdCommandRunnerWithManagedRetryErr`). `cmd/gc/managed_dolt_governor.go` makes
+them one governor per city, on the flight registry in
+`managed_dolt_flight.go`. The entries share one in-flight recovery, so
+concurrent env builds and retries cost one ladder and one recover, and the
+retry-path recover takes the same provider slot and cooldown stamp
+(`lastBeadsProviderRecover`) as the ladder. A recovery that fails holds the
+env-build and retry-path entries off for `providerRecoverCooldown`, counted
+from the failure's end; a held entry reports the failure at once and runs no
+provider op, and a live published port is never gated by the hold. A caller
+inside the process that runs the city's controller waits for a recovery only
+until `managedDoltFlightWindow` after it started, then carries on with the
+fail-open env while the recovery keeps running; any other caller waits for the
+recovery's end or its own context. An entry reached from inside a recovery runs
+directly instead of joining it. The governor changes nobody's right to
+recover.
+
 ## Code Map
 
 | Path | Description |
