@@ -92,6 +92,13 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			want:  func(key string) string { return "claude --session-id " + key },
 		},
 		{
+			name: "keyed transcript present under the handle's search path resumes",
+			setup: func(t *testing.T, h *SessionHandle, _ *beads.MemStore, info sessionpkg.Info, key string) {
+				writeKeyedTranscript(t, h.adapter.SearchPaths[0], info.WorkDir, key)
+			},
+			want: func(key string) string { return "claude --resume " + key },
+		},
+		{
 			name: "creating row with a stale creation_complete_at still switches",
 			setup: func(t *testing.T, _ *SessionHandle, store *beads.MemStore, info sessionpkg.Info, _ string) {
 				if err := store.SetMetadata(info.ID, "state", string(sessionpkg.StateCreating)); err != nil {
