@@ -505,8 +505,8 @@ const (
 	MoleculeIDMetadataKey = "molecule_id"
 
 	// MoleculeFailedMetadataKey marks the beads of a partially-instantiated
-	// molecule as failed (value "true"). Written best-effort by
-	// internal/molecule markFailed on instantiation error paths; read by
+	// molecule as failed (value "true"). Written by internal/molecule
+	// markFailed on instantiation error paths; read by
 	// dispatch/sling/cmd/gc to skip or close failed roots.
 	MoleculeFailedMetadataKey = "molecule_failed"
 

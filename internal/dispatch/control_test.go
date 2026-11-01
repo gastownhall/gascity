@@ -1609,6 +1609,102 @@ func TestProcessRalphControlPartialInstantiateTransientFailureClosesHard(t *test
 	}
 }
 
+// stampRefusingStore refuses every molecule_failed stamp with stampErr: a
+// failed mint whose cleanup meets lock contention on each stamp and on its
+// retry. refusals counts the refused stamps per bead.
+type stampRefusingStore struct {
+	beads.Store
+	stampErr error
+	refusals map[string]int
+}
+
+func (s *stampRefusingStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if kvs[beadmeta.MoleculeFailedMetadataKey] == "true" {
+		s.refusals[id]++
+		return s.stampErr
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// A mint that fails for a deterministic reason stays a hard failure when its
+// failure stamps are refused with Dolt's serialization-failure text. No
+// attempt root carries molecule_failed, so only the error's classification
+// keeps the retry from adopting the root the stamp could not mark.
+func TestProcessRalphControlHardMintFailureWithUnconfirmedStampsClosesHard(t *testing.T) {
+	t.Parallel()
+	base := beads.NewMemStore()
+
+	root := mustCreate(t, base, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, base, beads.Bead{
+		Title: "review loop",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop",
+			"gc.step_id":      "review-loop",
+			"gc.max_attempts": "3",
+			"gc.source_step_spec": `{
+				"id":"review-loop",
+				"title":"Review loop",
+				"type":"task",
+				"ralph":{"max_attempts":3,"check":{"mode":"exec","path":"unused.sh"}},
+				"children":[
+					{"id":"review","title":"Review","type":"task"},
+					{"id":"fix","title":"Fix","type":"task","needs":["review"]}
+				]
+			}`,
+			"gc.control_epoch": "1",
+		},
+	})
+	iteration1 := mustCreate(t, base, beads.Bead{
+		Title: "review loop iteration 1",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop.iteration.1",
+			"gc.attempt":      "1",
+			"gc.outcome":      "fail",
+		},
+	})
+	mustClose(t, base, iteration1.ID)
+	mustDep(t, base, control.ID, iteration1.ID, "blocks")
+
+	store := &stampRefusingStore{
+		Store: &failOnceDepAddStore{
+			Store: base,
+			err:   errors.New("wiring dep: dependency would create a cycle"),
+		},
+		stampErr: doltSerializationFailureErr(),
+		refusals: map[string]int{},
+	}
+	_, err := processRalphControl(store, mustGet(t, store, control.ID), testProcessOptionsWithControlDispatcher(""))
+	if len(store.refusals) == 0 {
+		t.Fatalf("no failure stamp was refused (err=%v); the mint took another path", err)
+	}
+	if err == nil || errors.Is(err, ErrControlPending) {
+		t.Fatalf("processRalphControl error = %v, want a hard controller error", err)
+	}
+	if got := ClassifyControllerError(err); got != TierNone {
+		t.Fatalf("ClassifyControllerError(%v) = %v, want %v", err, got, TierNone)
+	}
+
+	afterFailure := mustGet(t, store, control.ID)
+	if afterFailure.Status != "closed" {
+		t.Fatalf("ralph control status after hard mint failure = %q, want closed", afterFailure.Status)
+	}
+	if afterFailure.Metadata["gc.controller_error_class"] != "hard" {
+		t.Fatalf("controller error class = %q, want hard", afterFailure.Metadata["gc.controller_error_class"])
+	}
+	for id := range store.refusals {
+		if !strings.Contains(afterFailure.Metadata["gc.controller_error"], id) {
+			t.Fatalf("controller error = %q, want it to name %s, whose failure stamp was refused", afterFailure.Metadata["gc.controller_error"], id)
+		}
+	}
+}
+
 func TestProcessRalphControlClosesNestedSpecBeadsAfterRecoveredGraphAttachDepFailure(t *testing.T) {
 	prev := molecule.IsGraphApplyEnabled()
 	molecule.SetGraphApplyEnabled(true)
