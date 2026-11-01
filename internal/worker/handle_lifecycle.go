@@ -820,7 +820,7 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	if resumeCommand := strings.TrimSpace(h.session.Resume.ResumeCommand); resumeCommand != "" {
 		resumeInfo.ResumeCommand = resumeCommand
 	}
-	if h.unlaunchedSessionKey(info) {
+	if h.unlaunchedSessionKey(info, pr.Metadata) {
 		return startCommandWithSessionID(resumeInfo, h.session)
 	}
 	return sessionpkg.BuildResumeCommand(resumeInfo), nil
@@ -830,12 +830,16 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 // the provider never created, so a start must create it under the key with the
 // session-id flag rather than resume it: a restart handoff rotates the key onto
 // a row whose creation_complete_at keeps it off the first-start path. It holds
-// when the handle has a session-id flag and the keyed-transcript probe, over
-// the roots and work dir this launch reads, finds no transcript for the key. A
-// provider the probe cannot read keeps the resume.
-func (h *SessionHandle) unlaunchedSessionKey(info sessionpkg.Info) bool {
+// when the handle has a session-id flag, the row has committed no conversation
+// (every key rotation clears started_config_hash in the same write), and the
+// keyed-transcript probe, over the roots and work dir this launch reads, finds
+// no transcript for the key. A provider the probe cannot read keeps the resume.
+func (h *SessionHandle) unlaunchedSessionKey(info sessionpkg.Info, metadata map[string]string) bool {
 	key := strings.TrimSpace(info.SessionKey)
 	if h.session.Resume.SessionIDFlag == "" || key == "" {
+		return false
+	}
+	if strings.TrimSpace(metadata["started_config_hash"]) != "" {
 		return false
 	}
 	hints := h.runtimeHints()

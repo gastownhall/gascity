@@ -145,6 +145,14 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			want: resumeStart,
 		},
 		{
+			name:     "committed conversation resumes",
+			provider: "claude",
+			setup: func(t *testing.T, f *rotatedKeyFixture) {
+				f.setMetadata(t, "started_config_hash", "hash-abc")
+			},
+			want: resumeStart,
+		},
+		{
 			name:     "probe reads the launch work dir",
 			provider: "claude",
 			setup: func(t *testing.T, f *rotatedKeyFixture) {
