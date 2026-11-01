@@ -126,6 +126,7 @@ go_test(
         "githooks_local_runtime_fixture_test.go",
         "githooks_local_runtime_test.go",
         "githooks_pre_push_local_runtime_test.go",
+        "githooks_pre_push_skip_ref_test.go",
         "githooks_pre_push_stdin_test.go",
         "githooks_pre_push_suite_test.go",
         "githooks_pre_push_worker_env_test.go",
