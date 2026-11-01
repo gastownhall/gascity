@@ -533,6 +533,34 @@ func TestReusablePoolSessionInfo_PersistentSingletonAsleepGuardsStillExclude(t *
 	}
 }
 
+// TestReusablePoolSessionInfo_NonSingletonPersistentAsleepFreeableNotReusable
+// pins the scope of asleep reuse: a persistent pool that can mint another
+// identity keeps fresh-identity creation, while one_shot reuse is unchanged.
+func TestReusablePoolSessionInfo_NonSingletonPersistentAsleepFreeableNotReusable(t *testing.T) {
+	t.Parallel()
+
+	_, template, info := persistentSingletonAsleepFixture(t)
+	one, three := 1, 3
+	bp := &agentBuildParams{}
+	for _, tc := range []struct {
+		name  string
+		agent *config.Agent
+	}{
+		{name: "max 3", agent: &config.Agent{Name: "worker", Dir: "rig", MaxActiveSessions: &three}},
+		{name: "uncapped", agent: &config.Agent{Name: "worker", Dir: "rig"}},
+		{name: "max 1 with namepool", agent: &config.Agent{Name: "worker", Dir: "rig", MaxActiveSessions: &one, NamepoolNames: []string{"ada"}}},
+	} {
+		if got := reusablePoolSessionInfo(bp, tc.agent, template, info, nil); got {
+			t.Errorf("reusablePoolSessionInfo(persistent %s, asleep, sleep_reason=%s) = true; want false", tc.name, info.SleepReason)
+		}
+	}
+
+	oneShot := &config.Agent{Name: "worker", Dir: "rig", MaxActiveSessions: &three, Lifecycle: config.AgentLifecycleOneShot}
+	if got := reusablePoolSessionInfo(bp, oneShot, template, info, nil); !got {
+		t.Errorf("reusablePoolSessionInfo(one_shot, asleep, sleep_reason=%s) = false; want true", info.SleepReason)
+	}
+}
+
 func createRoutedReadyBeadForReplacement(t *testing.T, store beads.Store, template, title string) beads.Bead {
 	t.Helper()
 	b, err := store.Create(beads.Bead{
