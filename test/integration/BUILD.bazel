@@ -41,6 +41,7 @@ go_test(
 go_test(
     name = "integration_test",
     srcs = [
+        "bd_dolt_topology_test.go",
         "bdstore_batch_delete_test.go",
         "bdstore_batch_reads_test.go",
         "bdstore_runner_isolation_test.go",

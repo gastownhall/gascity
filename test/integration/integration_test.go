@@ -77,6 +77,8 @@ const (
 	integrationGCLifecycleTimeout    = 120 * time.Second
 	integrationGCDoltCommandTimeout  = 120 * time.Second
 	integrationBDCommandTimeout      = 15 * time.Second
+	integrationManagedDoltReadyWait  = 20 * time.Second
+	integrationManagedDoltPortWait   = 30 * time.Second
 	integrationSupervisorStopTimeout = 10 * time.Second
 	integrationSupervisorWaitDelay   = 10 * time.Second
 	// integrationSupervisorReadyTimeout bounds startIsolatedSupervisor's wait
@@ -1156,9 +1158,22 @@ func hasStandaloneBDWorkspace(dir string) bool {
 }
 
 // bdDolt runs bd against a Dolt-backed city using the same isolated runtime
-// env as integration gc commands plus the city's managed Dolt port.
+// env as integration gc commands plus the city's managed Dolt port (none for a
+// provider-owned proxied store, which resolves its own endpoint).
 func bdDolt(dir string, args ...string) (string, error) {
+	return bdDoltUntil(dir, time.Time{}, args...)
+}
+
+// bdDoltUntil is bdDolt bounded by deadline: every nested step (managed-port
+// recovery, readiness wait, the bd command itself) is capped at the time left
+// until deadline, so a caller's overall wait cannot be outlived by one slow
+// refresh. A zero deadline leaves each step on its own timeout.
+//
+// A provider-owned proxied store resolves its own endpoint, so it never goes
+// through managed-port recovery and never inherits managed endpoint hints.
+func bdDoltUntil(dir string, deadline time.Time, args ...string) (string, error) {
 	env := commandEnvForDir(dir, true)
+	proxied := dir != "" && isProviderOwnedProxiedDoltCity(dir)
 	if dir != "" {
 		env = filterEnv(env, "GC_CITY")
 		env = filterEnv(env, "GC_CITY_PATH")
@@ -1169,32 +1184,88 @@ func bdDolt(dir string, args ...string) (string, error) {
 			"GC_CITY_PATH="+dir,
 			"GC_CITY_RUNTIME_DIR="+filepath.Join(dir, ".gc", "runtime"),
 		)
-		if port, ok := ensureManagedDoltPortForTest(dir); ok {
-			env = appendManagedDoltEndpointEnv(env, port)
-		}
+		env = withBDDoltEndpoint(env, dir, proxied, deadline)
 	}
-	out, err := runCommand(dir, env, integrationBDCommandTimeout, bdBinary, args...)
+	runBD := func() (string, error) {
+		timeout, err := boundedByDeadline(integrationBDCommandTimeout, deadline)
+		if err != nil {
+			return "", fmt.Errorf("running %s: %w", renderCommand(bdBinary, args...), err)
+		}
+		return runCommand(dir, env, timeout, bdBinary, args...)
+	}
+	out, err := runBD()
 	if err == nil || dir == "" || !managedDoltTransportRetryable(out) {
 		return out, err
 	}
-	if _, readyErr := waitForManagedDoltCityReady(env, dir, 20*time.Second); readyErr == nil {
-		if port, ok := currentManagedDoltPortForTest(dir); ok {
-			env = appendManagedDoltEndpointEnv(env, port)
-		}
-		return runCommand(dir, env, integrationBDCommandTimeout, bdBinary, args...)
+	readyTimeout, budgetErr := boundedByDeadline(integrationManagedDoltReadyWait, deadline)
+	if budgetErr != nil {
+		return out, err
 	}
-	if port, ok := ensureManagedDoltPortForTest(dir); ok {
+	if _, readyErr := waitForManagedDoltCityReady(env, dir, readyTimeout); readyErr == nil {
+		if !proxied {
+			if port, ok := currentManagedDoltPortForTest(dir); ok {
+				env = appendManagedDoltEndpointEnv(env, port)
+			}
+		}
+		return runBD()
+	}
+	if proxied {
+		return out, err
+	}
+	if port, ok := ensureManagedDoltPortForTestUntil(dir, deadline); ok {
 		env = appendManagedDoltEndpointEnv(env, port)
-		if delay := managedDoltRetryDelay(out); delay > 0 {
+		if delay, delayErr := boundedByDeadline(managedDoltRetryDelay(out), deadline); delayErr == nil && delay > 0 {
 			time.Sleep(delay)
 		}
-		return runCommand(dir, env, integrationBDCommandTimeout, bdBinary, args...)
+		return runBD()
 	}
 	return out, err
 }
 
+// boundedByDeadline returns limit, or the time left until deadline when that
+// is shorter. A zero deadline means unbounded. Once deadline has passed it
+// returns context.DeadlineExceeded so callers stop instead of starting work
+// that cannot finish inside the caller's budget.
+func boundedByDeadline(limit time.Duration, deadline time.Time) (time.Duration, error) {
+	if deadline.IsZero() {
+		return limit, nil
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return 0, context.DeadlineExceeded
+	}
+	return min(limit, remaining), nil
+}
+
+// withBDDoltEndpoint returns env carrying the endpoint hints bd needs to
+// reach cityDir's Dolt store. A provider-owned proxied store gets every
+// managed hint stripped and no managed-port recovery; a managed store gets
+// the recovered port.
+func withBDDoltEndpoint(env []string, cityDir string, proxied bool, deadline time.Time) []string {
+	if proxied {
+		return stripManagedDoltEndpointEnv(env)
+	}
+	if port, ok := ensureManagedDoltPortForTestUntil(cityDir, deadline); ok {
+		return appendManagedDoltEndpointEnv(env, port)
+	}
+	return env
+}
+
+// managedDoltEndpointEnvKeys are the variables that point bd at a managed
+// Dolt server's host and port.
+var managedDoltEndpointEnvKeys = []string{
+	"GC_DOLT_HOST",
+	"GC_DOLT_PORT",
+	"BEADS_DOLT_SERVER_HOST",
+	"BEADS_DOLT_SERVER_PORT",
+}
+
+func stripManagedDoltEndpointEnv(env []string) []string {
+	return filterEnvMany(env, managedDoltEndpointEnvKeys...)
+}
+
 func appendManagedDoltEndpointEnv(env []string, port string) []string {
-	env = filterEnvMany(env, "GC_DOLT_HOST", "GC_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT")
+	env = stripManagedDoltEndpointEnv(env)
 	return append(env,
 		"GC_DOLT_HOST=127.0.0.1",
 		"GC_DOLT_PORT="+port,
@@ -1857,7 +1928,11 @@ func currentManagedDoltPortForTest(cityDir string) (string, bool) {
 	return port, true
 }
 
-func ensureManagedDoltPortForTest(cityDir string) (string, bool) {
+// ensureManagedDoltPortForTestUntil returns cityDir's managed Dolt port,
+// starting the city's Dolt and polling for the port when it is not yet up. Both
+// the gc start and the port poll are capped at the time left until deadline. A
+// zero deadline leaves them on their own timeouts.
+func ensureManagedDoltPortForTestUntil(cityDir string, deadline time.Time) (string, bool) {
 	if port, ok := currentManagedDoltPortForTest(cityDir); ok {
 		return port, true
 	}
@@ -1871,12 +1946,21 @@ func ensureManagedDoltPortForTest(cityDir string) (string, bool) {
 	if scopeUsesProxiedServerForTest(cityDir) {
 		return "", false
 	}
-	startOut, startErr := runGCDoltWithEnv(commandEnvForDir(cityDir, true), "", "start", cityDir)
+	startArgs := []string{"start", cityDir}
+	startTimeout, err := boundedByDeadline(gcDoltCommandTimeout(startArgs), deadline)
+	if err != nil {
+		return "", false
+	}
+	startOut, startErr := runCommand("", commandEnvForDir(cityDir, true), startTimeout, gcBinary, startArgs...)
 	if startErr != nil && !isGCStartAlreadyRunning(startOut) {
 		return "", false
 	}
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
+	pollTimeout, err := boundedByDeadline(integrationManagedDoltPortWait, deadline)
+	if err != nil {
+		return "", false
+	}
+	pollDeadline := time.Now().Add(pollTimeout)
+	for time.Now().Before(pollDeadline) {
 		if port, ok := currentManagedDoltPortForTest(cityDir); ok {
 			return port, true
 		}
