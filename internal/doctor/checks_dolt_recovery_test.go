@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -104,6 +105,43 @@ func TestDoltUnboundDatabasesCheck_WarnsNamingUnboundDatabase(t *testing.T) {
 		}
 	})
 
+	// A directory two databases register holds whichever synced to it last,
+	// so start-time recovery refuses it (backup_restore_refusal); hq
+	// registering pa's directory under any name makes it no restore source
+	// for pa, whichever of its two names pa registers it under.
+	for _, name := range []string{"default", "pa-backup"} {
+		t.Run("backup directory another database registers is not a restore source: "+name, func(t *testing.T) {
+			dir := setupManagedDoltCity(t)
+			writeCommittedDoltStore(t, dir, "hq")
+			writeCommittedDoltStore(t, dir, "pa")
+			dataDir := filepath.Join(dir, ".beads", "dolt")
+			shared := "file://" + nonEmptyBackupDir(t, t.TempDir(), "pa")
+			writeRepoStateBackups(t, dataDir, "pa", map[string]string{name: shared})
+			writeRepoStateBackups(t, dataDir, "hq", map[string]string{"hq-backup": shared})
+			r := NewDoltUnboundDatabasesCheck(dir, false).Run(&CheckContext{})
+			if r.Status != StatusWarning {
+				t.Fatalf("status = %d, want Warning (pa's backup directory is shared with hq); msg = %s", r.Status, r.Message)
+			}
+			if !strings.Contains(r.Message, "no usable local backup: pa") {
+				t.Errorf("message = %q, want it to name pa as having no usable local backup", r.Message)
+			}
+		})
+	}
+
+	t.Run("backup URL that is not file:// is not a local backup", func(t *testing.T) {
+		dir := setupManagedDoltCity(t)
+		writeCommittedDoltStore(t, dir, "pa")
+		bare := nonEmptyBackupDir(t, t.TempDir(), "pa")
+		writeRepoStateBackups(t, filepath.Join(dir, ".beads", "dolt"), "pa", map[string]string{"pa-backup": bare})
+		r := NewDoltUnboundDatabasesCheck(dir, false).Run(&CheckContext{})
+		if r.Status != StatusWarning {
+			t.Fatalf("status = %d, want Warning (a backup URL without file:// is not restored); msg = %s", r.Status, r.Message)
+		}
+		if !strings.Contains(r.Message, "no usable local backup: pa") {
+			t.Errorf("message = %q, want it to name pa as having no usable local backup", r.Message)
+		}
+	})
+
 	t.Run("phantom and moved-aside stores are not named", func(t *testing.T) {
 		dir := setupManagedDoltCity(t)
 		writePhantomDoltStore(t, dir, "ghost")           // .dolt without a committed store
@@ -150,6 +188,20 @@ func TestDoltUnboundDatabasesCheck_OKOnceUsableBackupRegistered(t *testing.T) {
 		writeCommittedDoltStore(t, dir, "pa")
 		backupDir := nonEmptyBackupDir(t, t.TempDir(), "pa")
 		writeRepoStateBackupsLegacyString(t, dir, "pa", "pa-backup", "file://"+backupDir)
+		r := NewDoltUnboundDatabasesCheck(dir, false).Run(&CheckContext{})
+		if r.Status != StatusOK {
+			t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
+		}
+	})
+
+	t.Run("another database registering its own directory", func(t *testing.T) {
+		dir := setupManagedDoltCity(t)
+		writeCommittedDoltStore(t, dir, "hq")
+		writeCommittedDoltStore(t, dir, "pa")
+		dataDir := filepath.Join(dir, ".beads", "dolt")
+		backups := t.TempDir()
+		writeRepoStateBackups(t, dataDir, "pa", map[string]string{"default": "file://" + nonEmptyBackupDir(t, backups, "pa")})
+		writeRepoStateBackups(t, dataDir, "hq", map[string]string{"default": "file://" + nonEmptyBackupDir(t, backups, "hq")})
 		r := NewDoltUnboundDatabasesCheck(dir, false).Run(&CheckContext{})
 		if r.Status != StatusOK {
 			t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
@@ -290,20 +342,28 @@ func TestManagedDoltRecoveryChecks_SkipWithoutNamingAnyDatabase(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := tc.set(t)
-			for _, check := range []Check{
-				NewDoltUnboundDatabasesCheck(dir, tc.skip),
-				NewDoltCorruptAsideCheck(dir, tc.skip),
+			// gc doctor registers the ForConfig constructors with the
+			// loaded city config; none of these cities declares a rig.
+			cfg := &config.City{}
+			for _, c := range []struct {
+				via   string
+				check Check
+			}{
+				{via: "raw", check: NewDoltUnboundDatabasesCheck(dir, tc.skip)},
+				{via: "raw", check: NewDoltCorruptAsideCheck(dir, tc.skip)},
+				{via: "ForConfig", check: NewDoltUnboundDatabasesCheckForConfig(dir, tc.skip, cfg, nil)},
+				{via: "ForConfig", check: NewDoltCorruptAsideCheckForConfig(dir, tc.skip, cfg, nil)},
 			} {
-				r := check.Run(&CheckContext{})
+				r := c.check.Run(&CheckContext{})
 				if r.Status != StatusOK {
-					t.Fatalf("%s: status = %d, want OK; msg = %s", check.Name(), r.Status, r.Message)
+					t.Fatalf("%s (%s): status = %d, want OK; msg = %s", c.check.Name(), c.via, r.Status, r.Message)
 				}
 				if !strings.Contains(r.Message, "skipped") {
-					t.Errorf("%s: message = %q, want skipped", check.Name(), r.Message)
+					t.Errorf("%s (%s): message = %q, want skipped", c.check.Name(), c.via, r.Message)
 				}
 				for _, db := range []string{"pa", "hq", "prod"} {
 					if strings.Contains(r.Message, db) {
-						t.Errorf("%s: message = %q, must not name %s in a skipped city", check.Name(), r.Message, db)
+						t.Errorf("%s (%s): message = %q, must not name %s in a skipped city", c.check.Name(), c.via, r.Message, db)
 					}
 				}
 			}
@@ -355,4 +415,79 @@ func TestDoltCorruptAsideCheck_OKWhenEmptyOrAbsent(t *testing.T) {
 			t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
 		}
 	})
+}
+
+// setupManagedDoltCityWithRig is setupManagedDoltCity plus a rig, demo,
+// bound to database de and inheriting the city's endpoint. The rig lives
+// outside the city dir and only the returned config declares it, as the
+// config gc doctor loads does: a check that took its bound set from anywhere
+// but that config would not know de is bound.
+func setupManagedDoltCityWithRig(t *testing.T) (string, *config.City) {
+	t.Helper()
+	dir := setupManagedDoltCity(t)
+	rigDir := t.TempDir()
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, rigDir, contract.ConfigState{
+		IssuePrefix:    "de",
+		EndpointOrigin: contract.EndpointOriginInheritedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+	writeDoctorCanonicalMetadata(t, fs, rigDir, "de")
+	return dir, &config.City{Rigs: []config.Rig{{Name: "demo", Path: rigDir}}}
+}
+
+// TestDoltUnboundDatabasesCheckForConfig runs the check through the
+// constructor gc doctor registers (cmd/gc/cmd_doctor.go), which takes the
+// bound set from the loaded config: the rig's database is bound, so only pa
+// is named, and with the city and the rig bound there is nothing to name.
+// TestManagedDoltRecoveryChecks_SkipWithoutNamingAnyDatabase runs the skip
+// cases through it.
+func TestDoltUnboundDatabasesCheckForConfig(t *testing.T) {
+	t.Run("names only the database no scope binds", func(t *testing.T) {
+		dir, cfg := setupManagedDoltCityWithRig(t)
+		for _, db := range []string{"hq", "de", "pa"} {
+			writeCommittedDoltStore(t, dir, db)
+		}
+		r := NewDoltUnboundDatabasesCheckForConfig(dir, false, cfg, nil).Run(&CheckContext{})
+		if r.Status != StatusWarning {
+			t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+		}
+		if want := "unbound dolt databases with no usable local backup: pa"; r.Message != want {
+			t.Errorf("message = %q, want %q: hq is bound by the city and de by the rig", r.Message, want)
+		}
+	})
+
+	t.Run("OK when the city and the rig bind every database", func(t *testing.T) {
+		dir, cfg := setupManagedDoltCityWithRig(t)
+		writeCommittedDoltStore(t, dir, "hq")
+		writeCommittedDoltStore(t, dir, "de")
+		r := NewDoltUnboundDatabasesCheckForConfig(dir, false, cfg, nil).Run(&CheckContext{})
+		if r.Status != StatusOK {
+			t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
+		}
+	})
+}
+
+// TestDoltCorruptAsideCheckForConfig runs the check through the constructor
+// gc doctor registers (cmd/gc/cmd_doctor.go): OK while corrupt-aside/ is
+// absent, then a warning naming the store once one is preserved there.
+// TestManagedDoltRecoveryChecks_SkipWithoutNamingAnyDatabase runs the skip
+// cases through it.
+func TestDoltCorruptAsideCheckForConfig(t *testing.T) {
+	dir, cfg := setupManagedDoltCityWithRig(t)
+	check := NewDoltCorruptAsideCheckForConfig(dir, false, cfg, nil)
+	if r := check.Run(&CheckContext{}); r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK with no corrupt-aside dir; msg = %s", r.Status, r.Message)
+	}
+	aside := filepath.Join(dir, ".gc", "runtime", "packs", "dolt", "corrupt-aside", "prod.20261022T010203Z")
+	if err := os.MkdirAll(aside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := check.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "prod (as of 20261022T010203Z) at "+aside) {
+		t.Errorf("message = %q, want it to name prod, its timestamp and %s", r.Message, aside)
+	}
 }

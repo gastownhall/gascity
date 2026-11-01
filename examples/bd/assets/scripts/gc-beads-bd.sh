@@ -3289,40 +3289,54 @@ jsonl_archive_dir() {
 
 # print_manual_journal_recovery_steps tells the operator how to recover
 # database $1 alone after start-time recovery failed closed: $2 is the
-# recovery timestamp for the aside name and $3 the URL to restore from, the
-# one the manual restore command names, or <url>. The data dir is shared by
-# every database the managed server hosts, so the steps never act on
-# $DATA_DIR itself and name each sibling database to leave in place. They
-# register the store's backups again after the restore, since a restored
-# copy has none. The JSONL fallback names the export the core jsonl-export
-# order keeps of a bead store, which it files under the database's SQL name
-# (Dolt serves directory my-db as my_db).
+# recovery timestamp for the staging and aside names and $3 the URL to
+# restore from, the one the manual restore command names, or <url>. The data
+# dir is shared by every database the managed server hosts, so the steps
+# never act on $DATA_DIR itself and name each sibling database to leave in
+# place. Like the runbook's Step 4 block, they restore into a staging
+# directory next to $DATA_DIR and register the store's backups again on the
+# restored copy there, since a restored copy has none; only then do they move
+# the store aside and the copy in. An operator pastes them as one block, which
+# runs on past a failed command, so each command checks for itself that the
+# ones before it worked: a failed restore removes the staging directory and
+# the partial copy dolt leaves in it; the swap runs only when the restored
+# copy is there and the aside path is free; the store moves back when the
+# copy cannot move in; and `gc start` runs only with the database in place,
+# so it never finds the database missing and initializes it empty.
+# The JSONL fallback names the export the core jsonl-export order keeps of a
+# bead store, which it files under the database's SQL name (Dolt serves
+# directory my-db as my_db).
 print_manual_journal_recovery_steps() {
     local manual_db="$1" manual_ts="$2" manual_url="$3" manual_state manual_dir manual_name manual_backup manual_siblings="" manual_jsonl
+    local manual_staging="$DATA_DIR.restore.$manual_ts" manual_aside="$PACK_STATE_DIR/corrupt-aside/$manual_db.$manual_ts" manual_store="$DATA_DIR/$manual_db"
     for manual_dir in "$DATA_DIR"/*/; do
         [ -d "$manual_dir/.dolt" ] || continue
         manual_name=$(basename "$manual_dir")
         [ "$manual_name" = "$manual_db" ] && continue
         manual_siblings="$manual_siblings $manual_name"
     done
-    manual_state="$DATA_DIR/$manual_db/.dolt/repo_state.json"
+    manual_state="$manual_store/.dolt/repo_state.json"
     manual_jsonl="$(jsonl_archive_dir)/$(printf '%s' "$manual_db" | tr '-' '_')/issues.jsonl"
     if [ -n "$manual_siblings" ]; then
         journal_recovery_note "$DATA_DIR is shared; leave these databases in place:$manual_siblings"
     fi
     journal_recovery_note "do not move, delete or re-create $DATA_DIR itself"
-    journal_recovery_note "to restore '$manual_db' alone, from a backup that holds a copy of '$manual_db', then register its backups again (a restored copy has none):"
+    journal_recovery_note "to restore '$manual_db' alone, from a backup that holds a copy of '$manual_db': restore it into a staging directory, register its backups again there (a restored copy has none), then swap it in for the store"
+    journal_recovery_note "each command checks that the ones before it worked, so $manual_store stays in place until the swap: a failed restore removes $manual_staging (then try another backup), the swap runs only when the restored copy is there, and the store moves back from $manual_aside when the copy cannot move in"
+    journal_recovery_note "\"gc start\" runs only with $manual_store in place; if it does not run, move $manual_aside or the restored copy $manual_staging/$manual_db to $manual_store first"
     journal_recovery_note "  gc stop"
-    journal_recovery_note "  mkdir -p \"$PACK_STATE_DIR/corrupt-aside\""
-    journal_recovery_note "  mv \"$DATA_DIR/$manual_db\" \"$PACK_STATE_DIR/corrupt-aside/$manual_db.$manual_ts\""
-    journal_recovery_note "  (cd \"$DATA_DIR\" && dolt backup restore '$manual_url' $manual_db)"
+    journal_recovery_note "  mkdir \"$manual_staging\""
+    journal_recovery_note "  (cd \"$manual_staging\" && dolt backup restore '$manual_url' $manual_db) || rm -rf \"$manual_staging\""
     for manual_name in default "${manual_db}-backup"; do
         [ -f "$manual_state" ] && backup_registry_has_backup "$manual_state" "$manual_name" || continue
         manual_backup=$(backup_registry_backup_url "$manual_state" "$manual_name")
         [ -n "$manual_backup" ] || continue
-        journal_recovery_note "  (cd \"$DATA_DIR/$manual_db\" && dolt backup add $manual_name '$manual_backup')"
+        journal_recovery_note "  (cd \"$manual_staging/$manual_db\" && dolt backup add $manual_name '$manual_backup')"
     done
-    journal_recovery_note "  gc start"
+    journal_recovery_note "  mkdir -p \"$PACK_STATE_DIR/corrupt-aside\""
+    journal_recovery_note "  [ -d \"$manual_staging/$manual_db\" ] && [ ! -e \"$manual_aside\" ] && mv \"$manual_store\" \"$manual_aside\" && mv \"$manual_staging/$manual_db\" \"$manual_store\" && rmdir \"$manual_staging\""
+    journal_recovery_note "  [ -e \"$manual_store\" ] || mv \"$manual_aside\" \"$manual_store\""
+    journal_recovery_note "  [ -d \"$manual_store\" ] && gc start"
     if [ -f "$manual_jsonl" ]; then
         journal_recovery_note "with no backup, rebuild '$manual_db' from its last JSONL export, $manual_jsonl (the dolt pack's docs/journal-corruption-recovery.md, Step 4b)"
     else
@@ -3401,7 +3415,7 @@ attempt_journal_corruption_recovery() {
         if [ -n "$refusal" ]; then
             journal_recovery_note "NOT auto-recovering '$db': $refusal"
             journal_recovery_note "candidate backups checked: default, ${db}-backup; registered backups: $(backup_registry_summary "$db_dir")"
-            journal_recovery_note "manual recovery required: move $DATA_DIR/$db aside, then run \"dolt backup restore '$manual_url' $db\" from $DATA_DIR$manual_hint"
+            journal_recovery_note "manual recovery required: restore '$db' with \"dolt backup restore '$manual_url' $db\" in a staging directory and swap the copy in for $DATA_DIR/$db, as the steps below do$manual_hint"
             print_manual_journal_recovery_steps "$db" "$ts" "$manual_url"
             return 1
         fi

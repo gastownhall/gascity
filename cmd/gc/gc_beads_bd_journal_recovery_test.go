@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -42,7 +43,10 @@ import (
 //   - a refusal or a failed restore prints the steps that recover that
 //     database alone: the data dir is shared, so they name every sibling
 //     database to leave in place and never act on the data dir itself
-//     (#1979);
+//     (#1979); like the recovery they restore into staging and move the
+//     store only in the swap, and each checks that the ones before it
+//     worked, so pasted as one block they never start the city on a missing
+//     or partial database;
 //   - a restore is recorded in the dolt log, which outlives the stderr the
 //     provider's caller discards on success, and the restored copy has the
 //     backup it came from registered again.
@@ -131,12 +135,13 @@ const fakeBlockShell = `block_at() {
 // contains a .corrupt marker), `dolt backup restore` and `dolt backup add`.
 // The restore records its URL argument in FAKE_RESTORE_CALLS and creates the
 // database in the current directory, as dolt does. With FAKE_RESTORE_EXIT it
-// leaves a partial-marker there and fails. Otherwise it writes a
-// restored-marker, blocks there when FAKE_BLOCK_AT is `restore`, and copies
-// FAKE_RESTORE_REPO_STATE in as the restored repo_state.json when set. The add
-// blocks first when FAKE_BLOCK_AT is `add`, then records
-// `<database dir name> <name> <url>` in FAKE_BACKUP_ADD_CALLS and honors
-// FAKE_BACKUP_ADD_EXIT.
+// fails and, as dolt does, leaves the database it created there with a
+// partial-marker in it, or nothing when FAKE_RESTORE_LEAVES_NOTHING is set
+// too. Otherwise it writes a restored-marker, blocks there when FAKE_BLOCK_AT
+// is `restore`, and copies FAKE_RESTORE_REPO_STATE in as the restored
+// repo_state.json when set. The add blocks first when FAKE_BLOCK_AT is `add`,
+// then records `<database dir name> <name> <url>` in FAKE_BACKUP_ADD_CALLS and
+// honors FAKE_BACKUP_ADD_EXIT.
 func writeJournalFakeDolt(t *testing.T, binDir string) {
 	t.Helper()
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
@@ -154,12 +159,15 @@ set -u
       restore)
         printf '%s\n' "${3:-}" >> "${FAKE_RESTORE_CALLS:-/dev/null}"
         db="$4"
-        mkdir -p "$PWD/$db/.dolt"
         if [ "${FAKE_RESTORE_EXIT:-0}" != "0" ]; then
-          echo partial > "$PWD/$db/partial-marker"
+          if [ -z "${FAKE_RESTORE_LEAVES_NOTHING:-}" ]; then
+            mkdir -p "$PWD/$db/.dolt"
+            echo partial > "$PWD/$db/partial-marker"
+          fi
           echo "restore failed" >&2
           exit "$FAKE_RESTORE_EXIT"
         fi
+        mkdir -p "$PWD/$db/.dolt"
         echo restored > "$PWD/$db/restored-marker"
         block_at restore
         if [ -n "${FAKE_RESTORE_REPO_STATE:-}" ]; then
@@ -238,6 +246,26 @@ func writeJournalFakeBd(t *testing.T, binDir string) {
 set -u
 printf 'bd %s\n' "$*" >> "${FAKE_BD_LOG:-/dev/null}"
 exit 0
+`)
+}
+
+// writeJournalFakeGc stubs gc for running the printed manual recovery steps:
+// it records each call in FAKE_GC_CALLS, a `gc start` with the markers
+// $DATA_DIR/prod holds at that moment, or `missing` when prod is not there.
+func writeJournalFakeGc(t *testing.T, binDir string) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/usr/bin/env bash
+set -u
+call="$*"
+if [ "$call" = start ]; then
+  held=
+  for marker in "$DATA_DIR"/prod/*-marker; do
+    [ -e "$marker" ] && held="$held ${marker##*/}"
+  done
+  [ -d "$DATA_DIR/prod" ] || held=" missing"
+  call="start with prod:$held"
+fi
+printf '%s\n' "$call" >> "$FAKE_GC_CALLS"
 `)
 }
 
@@ -1396,18 +1424,15 @@ func TestJournalRecoveryFailsClosedNamesTheSiblingsToLeaveInPlace(t *testing.T) 
 }
 
 // assertManualRecoverySteps checks the per-database steps printed for db
-// after recovery failed closed: the registered backups, the restore commands
-// for db alone, from url, the JSONL fallback path under the database's SQL
-// name, the siblings to leave in place, and no command whose operand is the
-// data-dir root itself.
+// after recovery failed closed: the registered backups, the commands that
+// restore db alone, from url (assertManualRecoveryCommands), the JSONL
+// fallback path under the database's SQL name, the siblings to leave in
+// place, and no command whose operand is the data-dir root itself.
 func assertManualRecoverySteps(t *testing.T, env journalRecoveryEnv, db, url string, siblings []string, text string) {
 	t.Helper()
+	assertManualRecoveryCommands(t, env, db, url, text)
 	for _, want := range []string{
 		"registered backups: ",
-		"mv \"" + filepath.Join(env.dataDir, db) + "\" \"" + filepath.Join(env.stateDir, "corrupt-aside", db) + ".",
-		"(cd \"" + env.dataDir + "\" && dolt backup restore '" + url + "' " + db + ")",
-		"gc stop",
-		"gc start",
 		filepath.Join("jsonl-archive", strings.ReplaceAll(db, "-", "_"), "issues.jsonl"),
 		"has no JSONL archive",
 		"do not move, delete or re-create " + env.dataDir + " itself",
@@ -1433,6 +1458,73 @@ func assertManualRecoverySteps(t *testing.T, env journalRecoveryEnv, db, url str
 	rootOperand := regexp.MustCompile(`\b(mv|rm|cp|clone|mkdir|rmdir)\b[^\n]*"?` + regexp.QuoteMeta(env.dataDir) + `"?(\s|$)`)
 	if m := rootOperand.FindString(text); m != "" {
 		t.Errorf("manual recovery steps act on the data dir root: %q\n%s", m, text)
+	}
+}
+
+// manualRecoveryCommands returns the commands of the printed manual recovery
+// steps in order: the lines indented under their introduction.
+func manualRecoveryCommands(text string) []string {
+	var commands []string
+	for _, line := range strings.Split(text, "\n") {
+		if _, command, ok := strings.Cut(line, "gc-beads-bd:   "); ok {
+			commands = append(commands, command)
+		}
+	}
+	return commands
+}
+
+// manualRecoveryStaging returns the staging directory the printed manual
+// recovery steps create next to the data dir, and the recovery timestamp
+// that names it.
+func manualRecoveryStaging(t *testing.T, env journalRecoveryEnv, commands []string) (staging, ts string) {
+	t.Helper()
+	stagingRE := regexp.MustCompile(`^mkdir "(` + regexp.QuoteMeta(env.dataDir) + `\.restore\.([^"/]+))"$`)
+	for _, command := range commands {
+		if m := stagingRE.FindStringSubmatch(command); m != nil {
+			return m[1], m[2]
+		}
+	}
+	t.Fatalf("manual recovery steps create no staging directory next to %s: %q", env.dataDir, commands)
+	return "", ""
+}
+
+// assertManualRecoveryCommands checks the order of the printed commands that
+// restore db from url, as the runbook's Step 4 block orders them: stop the
+// city, restore into a new staging directory next to the data dir and remove
+// it when the restore fails, register the store's backups on the restored
+// copy there, and only then, in one command that runs only when the copy is
+// there and refuses a taken aside path, move the store aside and the copy in;
+// then move the store back when db is missing, and start the city only with
+// db in place. Each command checks for itself that the ones before it worked,
+// since a pasted block runs on past a failed one
+// (TestJournalRecoveryManualStepsKeepTheStoreUntilTheSwap runs them).
+func assertManualRecoveryCommands(t *testing.T, env journalRecoveryEnv, db, url, text string) {
+	t.Helper()
+	commands := manualRecoveryCommands(text)
+	staging, ts := manualRecoveryStaging(t, env, commands)
+	dbDir := filepath.Join(env.dataDir, db)
+	copyDir := filepath.Join(staging, db)
+	aside := filepath.Join(env.stateDir, "corrupt-aside", db+"."+ts)
+	head := []string{
+		"gc stop",
+		`mkdir "` + staging + `"`,
+		`(cd "` + staging + `" && dolt backup restore '` + url + `' ` + db + `) || rm -rf "` + staging + `"`,
+	}
+	tail := []string{
+		`mkdir -p "` + filepath.Join(env.stateDir, "corrupt-aside") + `"`,
+		`[ -d "` + copyDir + `" ] && [ ! -e "` + aside + `" ] && mv "` + dbDir + `" "` + aside + `" && mv "` + copyDir + `" "` + dbDir + `" && rmdir "` + staging + `"`,
+		`[ -e "` + dbDir + `" ] || mv "` + aside + `" "` + dbDir + `"`,
+		`[ -d "` + dbDir + `" ] && gc start`,
+	}
+	if len(commands) < len(head)+len(tail) ||
+		!slices.Equal(commands[:len(head)], head) ||
+		!slices.Equal(commands[len(commands)-len(tail):], tail) {
+		t.Fatalf("manual recovery commands = %q, want %q, then the backup registrations, then %q", commands, head, tail)
+	}
+	for _, register := range commands[len(head) : len(commands)-len(tail)] {
+		if !strings.HasPrefix(register, `(cd "`+copyDir+`" && dolt backup add `) {
+			t.Errorf("between the restore and the swap, command %q does not register a backup on the restored copy in %s", register, staging)
+		}
 	}
 }
 
@@ -1493,14 +1585,168 @@ func TestJournalRecoveryPrintsManualStepsWhenRestoreFails(t *testing.T) {
 	for _, want := range []string{
 		"backup restore failed for 'my-db' (see " + env.logFile + ")",
 		"registered backups: default=" + defaultURL + ", my-db-backup=" + legacyURL,
-		`(cd "` + filepath.Join(env.dataDir, "my-db") + `" && dolt backup add default '` + defaultURL + `')`,
-		`(cd "` + filepath.Join(env.dataDir, "my-db") + `" && dolt backup add my-db-backup '` + legacyURL + `')`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
 	}
 	assertManualRecoverySteps(t, env, "my-db", "<url>", []string{"pa"}, out)
+	commands := manualRecoveryCommands(out)
+	staging, _ := manualRecoveryStaging(t, env, commands)
+	for _, want := range []string{
+		`(cd "` + filepath.Join(staging, "my-db") + `" && dolt backup add default '` + defaultURL + `')`,
+		`(cd "` + filepath.Join(staging, "my-db") + `" && dolt backup add my-db-backup '` + legacyURL + `')`,
+	} {
+		if !slices.Contains(commands, want) {
+			t.Errorf("manual recovery commands %q do not register %q on the restored copy", commands, want)
+		}
+	}
+}
+
+// TestJournalRecoveryManualStepsKeepTheStoreUntilTheSwap runs the commands a
+// refusal prints, from `gc stop` to `gc start`, the way an operator pastes
+// them: as one block, which runs on past a failed command. A restore that
+// succeeds leaves the restored copy in prod's place and the corrupt store
+// under corrupt-aside/, and the city starts on the copy. A restore that
+// fails, whether or not dolt leaves a partial copy behind, an aside path that
+// is already taken, and a copy that cannot move in all leave the store in
+// prod's place, and the city starts on it, never on a missing or partial prod
+// (#1979). When neither the copy nor the store can move into prod, the block
+// keeps both and does not start the city.
+func TestJournalRecoveryManualStepsKeepTheStoreUntilTheSwap(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+	const (
+		original = "original-marker"
+		restored = "restored-marker"
+	)
+	for _, tc := range []struct {
+		name string
+		// restoreExit is the fake restore's exit status; leavesNothing makes
+		// a failed restore leave no partial copy behind.
+		restoreExit   string
+		leavesNothing bool
+		// asideTaken pre-creates the aside path the swap moves the store to.
+		asideTaken bool
+		// failCopyIn refuses the move of the restored copy into prod, and
+		// failMoveBack the move of the store back from the aside path.
+		failCopyIn, failMoveBack bool
+		// prod and aside are the markers each holds afterwards: "" for a
+		// missing prod, and for an aside path nothing was left in.
+		prod, aside string
+		// copyKept says the staging directory still holds the restored copy.
+		copyKept bool
+		// started is the marker prod holds when the block runs `gc start`,
+		// "" when the block does not run it.
+		started string
+	}{
+		{name: "restore succeeds", restoreExit: "0", prod: restored, aside: original, started: restored},
+		{name: "restore fails leaving a partial copy", restoreExit: "1", prod: original, started: original},
+		{name: "restore fails leaving nothing", restoreExit: "1", leavesNothing: true, prod: original, started: original},
+		// A failed restore never moves the store, so it stays in place even
+		// where moving it back would fail.
+		{name: "restore fails where the store could not move back", restoreExit: "1", failMoveBack: true, prod: original, started: original},
+		{name: "aside path taken", restoreExit: "0", asideTaken: true, prod: original, copyKept: true, started: original},
+		{name: "restored copy cannot move in", restoreExit: "0", failCopyIn: true, prod: original, copyKept: true, started: original},
+		{name: "neither can move", restoreExit: "0", failCopyIn: true, failMoveBack: true, aside: original, copyKept: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := setupJournalRecoveryEnv(t)
+			writeJournalFakeGc(t, env.binDir)
+			env.addDatabase(t, "prod", true, `{"backups":{"prod-backup":{"url":"aws://bucket/prod"}}}`)
+			env.addDatabase(t, "pa", false, "")
+			out, err := env.run(t, journalRecoveryHarness(t, false))
+			if err == nil {
+				t.Fatalf("recovery must fail closed for a remote backup\n%s", out)
+			}
+			commands := manualRecoveryCommands(out)
+			assertManualRecoveryCommands(t, env, "prod", "aws://bucket/prod", out)
+			staging, ts := manualRecoveryStaging(t, env, commands)
+			copyDir := filepath.Join(staging, "prod")
+			aside := filepath.Join(env.stateDir, "corrupt-aside", "prod."+ts)
+			if tc.asideTaken {
+				if err := os.MkdirAll(aside, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			gcCalls := filepath.Join(env.cityDir, "gc-calls.log")
+			var failMoves []string
+			if tc.failCopyIn {
+				failMoves = append(failMoves, copyDir)
+			}
+			if tc.failMoveBack {
+				failMoves = append(failMoves, aside)
+			}
+			fakeEnv := []string{
+				"FAKE_GC_CALLS=" + gcCalls,
+				"FAKE_RESTORE_EXIT=" + tc.restoreExit,
+				"FAKE_MV_FAIL_FROM=" + strings.Join(failMoves, ":"),
+			}
+			if tc.leavesNothing {
+				fakeEnv = append(fakeEnv, "FAKE_RESTORE_LEAVES_NOTHING=1")
+			}
+
+			// The exact printed block, every line, and no `set -e`: its exit
+			// status is that of its last command, so only the state it
+			// leaves tells whether it worked.
+			blockOut, blockErr := env.run(t, strings.Join(commands, "\n")+"\n", fakeEnv...)
+			var exitErr *exec.ExitError
+			if blockErr != nil && !errors.As(blockErr, &exitErr) {
+				t.Fatalf("run the printed block: %v\n%s", blockErr, blockOut)
+			}
+
+			wantCalls := []string{"stop"}
+			if tc.started != "" {
+				wantCalls = append(wantCalls, "start with prod: "+tc.started)
+			}
+			if got := strings.Split(strings.TrimSpace(readOptional(t, gcCalls)), "\n"); !slices.Equal(got, wantCalls) {
+				t.Errorf("gc calls = %q, want %q\n%s", got, wantCalls, blockOut)
+			}
+			prod := filepath.Join(env.dataDir, "prod")
+			if got := heldMarkers(t, prod); got != tc.prod {
+				t.Errorf("prod holds %q, want %q\n%s", got, tc.prod, blockOut)
+			}
+			if _, err := os.Stat(prod); tc.prod == "" && !os.IsNotExist(err) {
+				t.Errorf("prod must be missing when neither copy can move in (stat err: %v)\n%s", err, blockOut)
+			}
+			if got := heldMarkers(t, aside); got != tc.aside {
+				t.Errorf("%s holds %q, want %q\n%s", aside, got, tc.aside, blockOut)
+			}
+			if entries, _ := os.ReadDir(aside); tc.aside == "" && len(entries) != 0 {
+				t.Errorf("the block must leave nothing in %s, found %d entries\n%s", aside, len(entries), blockOut)
+			}
+			if tc.copyKept {
+				if got := heldMarkers(t, copyDir); got != restored {
+					t.Errorf("%s holds %q, want the restored copy kept\n%s", copyDir, got, blockOut)
+				}
+			} else if _, err := os.Stat(staging); !os.IsNotExist(err) {
+				t.Errorf("the block left the staging directory %s (stat err: %v)\n%s", staging, err, blockOut)
+			}
+			wantAdds := ""
+			if tc.restoreExit == "0" {
+				wantAdds = "prod prod-backup aws://bucket/prod"
+			}
+			if got := strings.TrimSpace(readOptional(t, env.backupAddLog)); got != wantAdds {
+				t.Errorf("backup add calls = %q, want %q: only a restored copy gets its backups registered\n%s", got, wantAdds, blockOut)
+			}
+		})
+	}
+}
+
+// heldMarkers returns the names of the marker files dir holds, space
+// separated, or "" when it holds none or does not exist.
+func heldMarkers(t *testing.T, dir string) string {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, "*-marker"))
+	if err != nil {
+		t.Fatalf("list markers in %s: %v", dir, err)
+	}
+	names := make([]string, 0, len(matches))
+	for _, match := range matches {
+		names = append(names, filepath.Base(match))
+	}
+	return strings.Join(names, " ")
 }
 
 // The JSONL fallback must name the file the core jsonl-export order wrote:
@@ -2111,8 +2357,8 @@ func TestJournalRecoveryRefusesDirectoriesOnAnotherFilesystem(t *testing.T) {
 			if !strings.Contains(out, want) {
 				t.Fatalf("refusal must say which directory a rename cannot reach (%q):\n%s", want, out)
 			}
-			wantManual := "manual recovery required: move " + filepath.Join(env.dataDir, "prod") + " aside, then run \"dolt backup restore 'file://" +
-				env.backupDir + "' prod\" from " + env.dataDir + "\n"
+			wantManual := "manual recovery required: restore 'prod' with \"dolt backup restore 'file://" + env.backupDir +
+				"' prod\" in a staging directory and swap the copy in for " + filepath.Join(env.dataDir, "prod") + ", as the steps below do\n"
 			if !strings.Contains(out, wantManual) {
 				t.Fatalf("refusal must name the usable backup in the manual command (%q):\n%s", wantManual, out)
 			}

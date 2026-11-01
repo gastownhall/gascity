@@ -119,19 +119,26 @@ whose database has no usable backup.
 # WARNING: all changes after the backup snapshot are lost
 # SPLIT-STORE CITY: restore only a backup taken AFTER the split. One taken
 # before it holds that time's infrastructure rows, which land in the work
-# store, and the next boot refuses. Use 4b with --skip-infra for an older backup.
+# store, and the next boot refuses. With only an older backup, stop and
+# escalate: 4b stops on a split city too.
 ```
 
 ```bash
 # 4b. Rebuild one bead scope from the core JSONL archive (lossy last resort)
 # WARNING: JSONL recovery loses all non-issue history (events, wisps, comment and
 #          audit history); issue rows are as of the last 15-minute export
+# SPLIT-STORE CITY: stop here, before the move, and escalate: see Step 4
+#          (fallback) for why
+# <archive> and <sql_name>: see Step 4 (fallback)
+ls -l <archive>/<sql_name>/issues.jsonl   # stop and escalate if it is missing
 mv <data_dir>/<dbname> <somewhere-safe>
 cd /path/to/city
 # for a rig scope, add --rig <rig> to each gc bd command below
 gc bd init --reinit-local -p <prefix> --skip-hooks --skip-agents
-# the default archive path; Step 4 (fallback) lists the others
-gc bd import /path/to/city/.gc/runtime/packs/core/jsonl-archive/<sql_name>/issues.jsonl
+gc bd import <archive>/<sql_name>/issues.jsonl
+# if the import fails, stop before the backup lines and Step 5: move the
+#          re-created <data_dir>/<dbname> aside too, move <somewhere-safe>
+#          back to <data_dir>/<dbname>, and escalate
 gc bd backup status --json | jq -r '.dolt.backup_url // empty'
 # if that printed a URL, register it again (a re-created database has none)
 gc bd backup init <backup_url>
@@ -321,7 +328,13 @@ managed Dolt server: a scope whose `.beads/metadata.json` has `"dolt_mode": "ser
 Run it after Step 3, from the city directory, and only for a database with no usable
 backup. For a rig scope, add `--rig <rig>` to every `gc bd` command below.
 
+On a **split-store city**, stop here and escalate, before you move the store: `gc bd`
+refuses `--reinit-local` there, and the one re-create flag it admits, `--recreate-missing`,
+is not in the pinned bd. This runbook has no tested split-city rebuild for a bd that has it
+(see "gc bd on split cities" in `docs/runbooks/split-storage-classes.md`).
+
 ```bash
+# SPLIT-STORE CITY: stop here, before the move (see above)
 # Confirm the archive snapshot exists before touching the store
 ls -l <archive>/<sql_name>/issues.jsonl
 
@@ -329,8 +342,6 @@ ls -l <archive>/<sql_name>/issues.jsonl
 mv <data_dir>/<dbname> <somewhere-safe>
 
 # Re-create only this scope's database, empty, under the scope's own identity
-# (on a split-store city, gc bd refuses --reinit-local; see "gc bd on split
-# cities" in docs/runbooks/split-storage-classes.md)
 cd /path/to/city
 gc bd init --reinit-local -p <prefix> --skip-hooks --skip-agents
 
@@ -347,19 +358,25 @@ gc bd backup init <backup_url>
 gc bd list --status in_progress --json | jq '.[] | {id, title, status}'
 ```
 
-- `--reinit-local` is how the pinned bd release (v1.3.1) re-creates the database of a scope
+- `--reinit-local` is how the pinned bd release (v1.3.2) re-creates the database of a scope
   that is already initialized; a plain `gc bd init` refuses. It acts on this scope's
   database only (`dolt_database` in `.beads/metadata.json`) and keeps the project id that
   file records, which `gc start` checks against `.beads/identity.toml`. Run it only after
   the move above: against a database that still exists it is bd's destructive reinit.
-  Newer bd (after v1.3.1) refuses `--reinit-local` for a missing database; pass
-  `--recreate-missing` in its place there.
+  A bd whose `bd init --help` lists `--recreate-missing` refuses `--reinit-local` for a
+  missing database; pass `--recreate-missing` in its place there. No release through the
+  pinned one has that flag, but a build from newer beads source can, whatever version it
+  reports, so check the help before the move.
 - `<prefix>` is the scope's issue prefix as `gc rig list --json` shows it (the city scope
   is the entry with `"hq": true`). Without `-p`, bd names the prefix after the directory;
   without `--skip-hooks --skip-agents`, it writes hooks and agent instruction files into
   the scope.
 - Do not leave the re-creation to `gc start`: the database it creates gets a new project
   id, and the start then fails with `PROJECT IDENTITY MISMATCH`.
+- If the import fails, stop before you register the backup or start the city: the
+  re-created database holds part of the archive or none of it, and a backup sync would
+  replace the backup with it. Move it aside to another path outside `<data_dir>`, move
+  `<somewhere-safe>` back to `<data_dir>/<dbname>`, and escalate.
 - `<archive>` is the core `jsonl-export` order's archive,
   `/path/to/city/.gc/runtime/packs/core/jsonl-archive`. A city migrated from the gastown
   maintenance pack keeps `/path/to/city/.gc/runtime/packs/maintenance/jsonl-archive` (or

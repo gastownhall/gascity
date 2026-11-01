@@ -97,11 +97,18 @@ func movesStoreIntoItsOwnDir(sources []string, dest string) bool {
 	return !isDataDirRoot(sources[0]) && !isUnderDataDir(sources[0])
 }
 
+// leadingShellWords are the words that can come before the command a shell
+// segment runs: `if ! mv ...` and `elif mv ...` run mv like a bare line does.
+var leadingShellWords = map[string]bool{
+	"sudo": true, "if": true, "elif": true, "then": true, "else": true,
+	"do": true, "while": true, "until": true, "!": true, "{": true,
+}
+
 // dataDirViolation returns why a single shell command replaces or deletes
 // managed Dolt data, or "" when it does not.
 func dataDirViolation(command string) string {
 	fields := strings.Fields(command)
-	for len(fields) > 0 && (fields[0] == "sudo" || strings.Contains(fields[0], "=")) {
+	for len(fields) > 0 && (leadingShellWords[fields[0]] || strings.Contains(fields[0], "=")) {
 		fields = fields[1:]
 	}
 	if len(fields) == 0 {
@@ -143,6 +150,17 @@ func dataDirViolation(command string) string {
 	return ""
 }
 
+// lineViolation returns why a line of a fenced block replaces or deletes
+// managed Dolt data, or "" when none of the commands it runs does.
+func lineViolation(line string) string {
+	for _, command := range shellCommandRE.Split(line, -1) {
+		if why := dataDirViolation(command); why != "" {
+			return why
+		}
+	}
+	return ""
+}
+
 func readDoltRecoveryDoc(t *testing.T, rel string) string {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(repoRoot(), rel))
@@ -159,10 +177,8 @@ func readDoltRecoveryDoc(t *testing.T, rel string) string {
 func TestDoltRecoveryDocsNeverReplaceTheDataDir(t *testing.T) {
 	for _, rel := range doltRecoveryDocs {
 		for _, line := range fencedShellLines(readDoltRecoveryDoc(t, rel)) {
-			for _, command := range shellCommandRE.Split(line.text, -1) {
-				if why := dataDirViolation(command); why != "" {
-					t.Errorf("%s:%d: %s: %q", rel, line.n, why, line.text)
-				}
+			if why := lineViolation(line.text); why != "" {
+				t.Errorf("%s:%d: %s: %q", rel, line.n, why, line.text)
 			}
 		}
 	}
@@ -193,8 +209,9 @@ func TestDoltRecoveryDocsNameExistingDoltPackCommands(t *testing.T) {
 // TestDataDirViolationRecognizesTheIncidentShapes pins what the page scan
 // rejects, so the rule cannot pass vacuously: the whole-dir move and clone of
 // #1979, deletes, and moves that land inside the data dir, in each data-dir
-// layout the pages use, while the per-database steps stay allowed, a store
-// moved back into its own database directory among them.
+// layout the pages use and after the shell keywords of an if-block, while the
+// per-database steps stay allowed, a store moved back into its own database
+// directory among them.
 func TestDataDirViolationRecognizesTheIncidentShapes(t *testing.T) {
 	for _, tc := range []struct {
 		command string
@@ -209,14 +226,18 @@ func TestDataDirViolationRecognizesTheIncidentShapes(t *testing.T) {
 		{command: "mv <data_dir>/<dbname> <data_dir>/<other>", bad: true},
 		{command: "mv <somewhere-safe> <data_dir>/<dbname> <data_dir>/<other>", bad: true},
 		{command: "mkdir -p <data_dir>", bad: true},
+		{command: "if ! mv <data_dir> <data_dir>.old; then", bad: true},
+		{command: `elif mv "$staging" <data_dir>; then`, bad: true},
 		{command: "mv <data_dir>/<dbname> <city>/.gc/runtime/packs/dolt/corrupt-aside/<dbname>.<timestamp>", bad: false},
 		{command: "mv .dolt-data/<dbname> <city>/.gc/runtime/packs/dolt/corrupt-aside/<dbname>.<timestamp>", bad: false},
 		{command: "mv <somewhere-safe> <data_dir>/<dbname>", bad: false},
+		{command: "if ! mv <data_dir>/<dbname> <somewhere-safe>; then", bad: false},
+		{command: `elif mv "$staging/<dbname>" <data_dir>/<dbname>; then`, bad: false},
 		{command: "dolt backup restore <backup-url> <dbname>", bad: false},
 		{command: "mkdir -p <city>/.gc/runtime/packs/dolt/corrupt-aside", bad: false},
 	} {
-		if got := dataDirViolation(tc.command) != ""; got != tc.bad {
-			t.Errorf("dataDirViolation(%q) reports a violation = %v, want %v", tc.command, got, tc.bad)
+		if got := lineViolation(tc.command) != ""; got != tc.bad {
+			t.Errorf("lineViolation(%q) reports a violation = %v, want %v", tc.command, got, tc.bad)
 		}
 	}
 }
@@ -235,4 +256,45 @@ func TestFencedShellLinesScansEveryFence(t *testing.T) {
 			t.Errorf("fencedShellLines[%d] = %+v, want %+v", i, got[i], want[i])
 		}
 	}
+}
+
+// pinnedBdReleaseRE matches where a recovery page names the bd release its
+// steps were checked against, across a Markdown line wrap.
+var pinnedBdReleaseRE = regexp.MustCompile(`pinned\s+bd\s+release\s+\((v[^)\s]+)\)`)
+
+// TestJournalRecoveryRunbookNamesThePinnedBd fails when the JSONL fallback
+// names a bd release other than the one deps.env pins (BD_VERSION). How that
+// step re-creates a database depends on the release: bd through v1.3.2 does
+// it with --reinit-local and has no --recreate-missing, while beads main
+// refuses --reinit-local for a missing database and wants --recreate-missing.
+// The page went on naming v1.3.1 after the pin moved (#1979), so a pin bump
+// must re-check that step, and its split-store stop, against the new release.
+func TestJournalRecoveryRunbookNamesThePinnedBd(t *testing.T) {
+	const rel = "examples/bd/dolt/docs/journal-corruption-recovery.md"
+	pinned := depsEnvValue(t, "BD_VERSION")
+	named := pinnedBdReleaseRE.FindAllStringSubmatch(readDoltRecoveryDoc(t, rel), -1)
+	if len(named) == 0 {
+		t.Fatalf("%s names no pinned bd release: Step 4 (fallback) must say which release its re-create step holds for", rel)
+	}
+	for _, m := range named {
+		if m[1] != pinned {
+			t.Errorf("%s names the pinned bd release %s, but deps.env pins BD_VERSION=%s: re-check Step 4 (fallback) against bd %s (does --reinit-local still re-create a missing database, and does `bd init --help` list --recreate-missing?) and its split-store stop, then name %s", rel, m[1], pinned, pinned, pinned)
+		}
+	}
+}
+
+// depsEnvValue returns the value deps.env assigns to key.
+func depsEnvValue(t *testing.T, key string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(repoRoot(), "deps.env"))
+	if err != nil {
+		t.Fatalf("reading deps.env: %v", err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if value, ok := strings.CutPrefix(strings.TrimSpace(line), key+"="); ok {
+			return strings.Trim(strings.TrimSpace(value), `"'`)
+		}
+	}
+	t.Fatalf("deps.env does not set %s", key)
+	return ""
 }

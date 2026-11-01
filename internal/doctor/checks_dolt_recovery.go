@@ -107,7 +107,8 @@ func (c *DoltUnboundDatabasesCheck) Run(_ *CheckContext) *CheckResult {
 
 // unboundDoltDatabases returns the orphans among targets that have a
 // committed store, match no bound scope and have no usable local backup,
-// and, as "<db> (<error>)", the orphans whose store could not be checked.
+// and, as "<db> (<error>)", the orphans whose store or backups could not be
+// checked.
 func unboundDoltDatabases(targets []doltDataScanTarget) (unbound, unchecked []string) {
 	bound := make(map[string]struct{}, len(targets))
 	for _, target := range targets {
@@ -138,7 +139,12 @@ func unboundDoltDatabases(targets []doltDataScanTarget) (unbound, unchecked []st
 			// phantom-db order already knows how to reap.
 			continue
 		}
-		if usableLocalBackupName(filepath.Dir(target.ScanRoot), db) != "" {
+		backup, err := usableLocalBackupName(filepath.Dir(target.ScanRoot), db)
+		if err != nil {
+			unchecked = append(unchecked, fmt.Sprintf("%s (%v)", db, err))
+			continue
+		}
+		if backup != "" {
 			continue
 		}
 		unbound = append(unbound, db)
@@ -163,27 +169,29 @@ func normalizeDoltDatabaseName(name string) string {
 // for db that can actually be restored from locally: bd's "default"
 // destination (what mol-dog-backup registers and keeps current) whose URL
 // names db, or the legacy <db>-backup name; either must be a file:// URL to
-// a non-empty directory. Start-time recovery chooses from the same two names
-// (backup_remote_url_for_recovery in
-// examples/bd/assets/scripts/gc-beads-bd.sh) but restores only the one it
-// selects; a usable backup it does not select can still be restored by hand.
-// A missing or unparsable repo_state.json reads as no usable backup — the
-// safe direction for a check whose warning is "this database cannot be
-// restored".
-func usableLocalBackupName(dbDir, db string) string {
-	data, err := os.ReadFile(filepath.Join(dbDir, ".dolt", "repo_state.json"))
+// a non-empty directory that no other database in the data dir registers,
+// since a directory two databases sync to holds whichever synced to it last.
+// Start-time recovery chooses from the same two names and refuses such a
+// shared directory too (backup_remote_url_for_recovery and
+// backup_restore_refusal in examples/bd/assets/scripts/gc-beads-bd.sh), but
+// restores only the one it selects; a usable backup it does not select can
+// still be restored by hand. A missing or unparsable repo_state.json reads
+// as no usable backup — the safe direction for a check whose warning is
+// "this database cannot be restored". The error reports a data dir that
+// could not be listed to rule out a shared directory.
+func usableLocalBackupName(dbDir, db string) (string, error) {
+	backups := repoStateBackups(dbDir)
+	if len(backups) == 0 {
+		return "", nil
+	}
+	shared, err := backupURLsOfOtherDatabases(filepath.Dir(dbDir), filepath.Base(dbDir))
 	if err != nil {
-		return ""
-	}
-	var state struct {
-		Backups map[string]json.RawMessage `json:"backups"`
-	}
-	if err := json.Unmarshal(data, &state); err != nil {
-		return ""
+		return "", err
 	}
 	for _, name := range []string{"default", db + "-backup"} {
-		url := repoStateBackupURL(state.Backups, name)
-		if url == "" {
+		url := repoStateBackupURL(backups, name)
+		path, local := strings.CutPrefix(url, "file://")
+		if !local || shared[url] {
 			continue
 		}
 		// bd registers one destination per database as "default", so the
@@ -191,12 +199,53 @@ func usableLocalBackupName(dbDir, db string) string {
 		if name == "default" && !backupURLNamesDatabase(url, db) {
 			continue
 		}
-		if hasContent, err := dirHasEntries(strings.TrimPrefix(url, "file://")); err != nil || !hasContent {
+		if hasContent, err := dirHasEntries(path); err != nil || !hasContent {
 			continue
 		}
-		return name
+		return name, nil
 	}
-	return ""
+	return "", nil
+}
+
+// repoStateBackups returns the backups object of dbDir/.dolt/repo_state.json,
+// or nil when the file is missing or unparsable.
+func repoStateBackups(dbDir string) map[string]json.RawMessage {
+	data, err := os.ReadFile(filepath.Join(dbDir, ".dolt", "repo_state.json"))
+	if err != nil {
+		return nil
+	}
+	var state struct {
+		Backups map[string]json.RawMessage `json:"backups"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil
+	}
+	return state.Backups
+}
+
+// backupURLsOfOtherDatabases returns the URL of every backup that a
+// directory of dataDir other than dbName registers, read the way
+// backup_restore_refusal reads them: each non-hidden entry's
+// repo_state.json, every backup in it whatever its name. A missing or
+// unparsable repo_state.json registers none.
+func backupURLsOfOtherDatabases(dataDir, dbName string) (map[string]bool, error) {
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		return nil, fmt.Errorf("listing %s for databases that share a backup directory: %w", dataDir, err)
+	}
+	urls := map[string]bool{}
+	for _, entry := range entries {
+		if entry.Name() == dbName || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		backups := repoStateBackups(filepath.Join(dataDir, entry.Name()))
+		for name := range backups {
+			if url := repoStateBackupURL(backups, name); url != "" {
+				urls[url] = true
+			}
+		}
+	}
+	return urls, nil
 }
 
 // repoStateBackupURL reads one backup remote's URL from a repo_state.json
