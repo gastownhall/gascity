@@ -2667,6 +2667,7 @@ func okConvoyListHandler(_ *testing.T) http.Handler {
 				"total":     2,
 				"closed":    1,
 				"complete":  false,
+				"child_ids": []string{"gc-2", "gc-3"},
 			})
 		default:
 			http.NotFound(w, r)
@@ -3969,7 +3970,7 @@ func (f *convoyListAPIFixture) handler(t *testing.T) http.Handler {
 			f.mu.Lock()
 			f.checks[id]++
 			f.mu.Unlock()
-			json.NewEncoder(w).Encode(map[string]any{"convoy_id": id, "total": 1, "closed": 0}) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]any{"convoy_id": id, "total": 1, "closed": 0, "child_ids": []string{id + "-member"}}) //nolint:errcheck
 		default:
 			http.NotFound(w, r)
 		}

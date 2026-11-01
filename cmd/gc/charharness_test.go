@@ -58,6 +58,8 @@ type charHarness struct {
 // newCharCity builds a throwaway file-store city from the given city.toml (which
 // must name the workspace charCityName) and optional bead seed (run on disk
 // before the server exists, so all three lanes read one set).
+//
+//nolint:unparam // cityToml is each command's city fixture; today's callers all use charCityBasic, and a command that needs rigs or providers passes its own.
 func newCharCity(t *testing.T, cityToml string, seed func(t *testing.T, store beads.Store)) *charHarness {
 	t.Helper()
 	t.Setenv("GC_BEADS", "file")
