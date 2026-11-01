@@ -16,19 +16,25 @@ import (
 // session bead its startCommand reads, so the equivalence tests can pin the
 // exact resume/first-start command string across the WI-6 W3 read swap
 // (Manager.GetWithBead -> session.Store.GetPersistedResponse + EnrichInfo).
+// The bead carries the spec's provider (a probe of the row reads the row's
+// family), defaulting to a provider with no probe semantics.
 func newStartCommandHandle(t *testing.T, spec SessionSpec, resume sessionpkg.ProviderResume, command string) (*SessionHandle, *beads.MemStore, sessionpkg.Info) {
 	t.Helper()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
 
+	rowProvider := "legacy-provider"
+	if spec.Provider != "" {
+		rowProvider = spec.Provider
+	}
 	info, err := manager.CreateSession(context.Background(), sessionpkg.CreateOptions{
 		BeadOnly:  true,
 		Template:  "worker",
 		Title:     "Probe",
 		Command:   command,
 		WorkDir:   t.TempDir(),
-		Provider:  "legacy-provider",
+		Provider:  rowProvider,
 		Transport: "",
 		Resume:    resume,
 	})
@@ -194,7 +200,7 @@ func TestStartCommandStaleResumeKey(t *testing.T) {
 				sessionpkg.ProviderResume{ResumeFlag: "--resume", SessionIDFlag: "--session-id"},
 				"mycmd",
 			)
-			handle.searchPaths = []string{root}
+			handle.adapter.SearchPaths = []string{root}
 			if err := store.SetMetadata(info.ID, "started_config_hash", "hash-abc"); err != nil {
 				t.Fatalf("SetMetadata(started_config_hash): %v", err)
 			}
@@ -251,7 +257,7 @@ func TestStartCommandClaudeConfigDir(t *testing.T) {
 				sessionpkg.ProviderResume{ResumeFlag: "--resume", SessionIDFlag: "--session-id"},
 				"mycmd",
 			)
-			handle.searchPaths = []string{t.TempDir()}
+			handle.adapter.SearchPaths = []string{t.TempDir()}
 			if err := store.SetMetadata(info.ID, "started_config_hash", "hash-abc"); err != nil {
 				t.Fatalf("SetMetadata(started_config_hash): %v", err)
 			}

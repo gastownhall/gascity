@@ -2659,7 +2659,7 @@ func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *tes
 	if err != nil {
 		t.Fatalf("Get(%q): %v", handle.sessionID, err)
 	}
-	handle.searchPaths = []string{searchBase}
+	handle.adapter.SearchPaths = []string{searchBase}
 	transcriptDir := filepath.Join(searchBase, sessionlog.ProjectSlug(info.WorkDir))
 	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
@@ -3358,5 +3358,43 @@ func TestRuntimeHandleIsNotAFencedResetHandle(t *testing.T) {
 	var h Handle = handle
 	if _, ok := h.(FencedResetHandle); ok {
 		t.Fatal("RuntimeHandle implements FencedResetHandle; want no row-backed reset")
+	}
+}
+
+func TestSessionHandleRestartWithoutKeyedTranscriptStartsFresh(t *testing.T) {
+	handle, _, sp, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude --dangerously-skip-permissions",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+		Resume: sessionpkg.ProviderResume{
+			ResumeFlag:    "--resume",
+			ResumeStyle:   "flag",
+			SessionIDFlag: "--session-id",
+		},
+	})
+	// An empty transcript root: the stored session key never had a conversation.
+	handle.adapter.SearchPaths = []string{t.TempDir()}
+
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
+		t.Fatalf("Start(first): %v", err)
+	}
+	if err := handle.Stop(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := handle.Attach(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
+		t.Fatalf("Attach(second): %v", err)
+	}
+	secondStart := lastCall(sp.Calls, "Start")
+	if secondStart == nil || secondStart == firstCall(sp.Calls, "Start") {
+		t.Fatalf("runtime calls = %#v, want second Start", sp.Calls)
+	}
+	if strings.Contains(secondStart.Config.Command, "--resume") {
+		t.Fatalf("second start command = %q, want no --resume for a key without a transcript", secondStart.Config.Command)
+	}
+	if !strings.Contains(secondStart.Config.Command, "--session-id") {
+		t.Fatalf("second start command = %q, want --session-id for a key without a transcript", secondStart.Config.Command)
 	}
 }

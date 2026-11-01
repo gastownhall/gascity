@@ -820,19 +820,40 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	if resumeCommand := strings.TrimSpace(h.session.Resume.ResumeCommand); resumeCommand != "" {
 		resumeInfo.ResumeCommand = resumeCommand
 	}
-	isClaude := strings.Contains(strings.ToLower(strings.TrimSpace(resumeInfo.Provider)), "claude")
-	probePaths := h.searchPaths
-	if len(probePaths) == 0 || !isClaude {
-		probePaths = DefaultSearchPaths()
-	}
-	if dir := strings.TrimSpace(h.session.Env["CLAUDE_CONFIG_DIR"]); isClaude && filepath.IsAbs(dir) {
-		probePaths = MergeSearchPaths(append(append([]string(nil), probePaths...), filepath.Join(dir, "projects")))
-	}
-	present, probeable := workertranscript.HasKeyedTranscript(probePaths, resumeInfo.Provider, resumeInfo.WorkDir, resumeInfo.SessionKey)
-	if probeable && !present && h.session.Resume.SessionIDFlag != "" {
+	if h.unlaunchedSessionKey(info) {
 		return startCommandWithSessionID(resumeInfo, h.session)
 	}
 	return sessionpkg.BuildResumeCommand(resumeInfo), nil
+}
+
+// unlaunchedSessionKey reports whether the row's stored session key names a
+// conversation no start ever launched: the handle's resume config takes a
+// session-id flag, the row holds a key, and the keyed-transcript probe of the
+// roots this launch reads finds no transcript for it. A restart handoff mints
+// exactly such a key (sessionpkg.RestartRequestPatch) onto a row whose
+// creation marker keeps the first-start branch off, and resuming it makes the
+// provider exit at once on a conversation that does not exist. The probe
+// follows the launch: the adapter's search roots (plus the projects of an
+// absolute CLAUDE_CONFIG_DIR in the session env), the history provider's
+// family, and the runtime hints' work dir with the row's as fallback. A
+// provider whose family the probe cannot read, or a row without a work dir,
+// keeps the resume.
+func (h *SessionHandle) unlaunchedSessionKey(info sessionpkg.Info) bool {
+	if h.session.Resume.SessionIDFlag == "" || strings.TrimSpace(info.SessionKey) == "" {
+		return false
+	}
+	hints := h.runtimeHints()
+	workDir := strings.TrimSpace(hints.WorkDir)
+	if workDir == "" {
+		workDir = info.WorkDir
+	}
+	provider := h.historyProvider(info)
+	launchRoots := append([]string(nil), h.adapter.SearchPaths...)
+	if dir := strings.TrimSpace(h.session.Env["CLAUDE_CONFIG_DIR"]); filepath.IsAbs(dir) {
+		launchRoots = MergeSearchPaths(append(launchRoots, filepath.Join(dir, "projects")))
+	}
+	present, probeable := workertranscript.HasKeyedTranscript(workertranscript.KeyedProbeRoots(launchRoots, provider), provider, workDir, info.SessionKey)
+	return probeable && !present
 }
 
 func startCommandWithSessionID(info sessionpkg.Info, spec SessionSpec) (string, error) {
