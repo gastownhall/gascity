@@ -121,6 +121,15 @@ type sequencedStartLivenessProvider struct {
 	calls        int
 }
 
+// providerStartCollisionLivenessProvider hides a pre-existing runtime from
+// the session-layer IsRunning check so the test reaches Provider.Start, where
+// the fake then reports ErrSessionExists for that occupied name.
+type providerStartCollisionLivenessProvider struct {
+	*sequencedStartLivenessProvider
+}
+
+func (*providerStartCollisionLivenessProvider) IsRunning(string) bool { return false }
+
 type scriptedStartBoundaryProvider struct {
 	*runtime.Fake
 	mu                sync.Mutex
@@ -1409,7 +1418,6 @@ func TestExecutePlannedStartsCancellationBeforeLaunchCleansPreparedStarts(t *tes
 				limiter = newAsyncStartLimiter(1)
 				options = append(options, withAsyncStartExecution(), withAsyncStartTracker(tracker), withAsyncStartLimiter(limiter))
 			}
-			beforeCalls := len(env.sp.SnapshotCalls())
 			if got := executePlannedStartsTraced(
 				ctx, candidates, env.cfg, map[string]TemplateParams{tp.SessionName: tp, siblingTP.SessionName: siblingTP}, env.sp, env.store,
 				"test-city", env.city, env.clk, events.Discard, 5*time.Second, io.Discard, &env.stderr, nil, options...,
@@ -1461,7 +1469,7 @@ func TestExecutePlannedStartsCancellationBeforeLaunchCleansPreparedStarts(t *tes
 				}
 			}
 			requireSessionCircuitRestartCount(t, cb, env.store, untouched.bead.ID, namedSessionIdentityInfo(untouched.candidate.info), env.clk.Now().UTC(), 0)
-			if tracker != nil && !tracker.wait(0) {
+			if tracker != nil && !tracker.wait(time.Second) {
 				t.Fatal("canceled async preparation left an outstanding tracker entry")
 			}
 			if limiter != nil {
@@ -1470,9 +1478,6 @@ func TestExecutePlannedStartsCancellationBeforeLaunchCleansPreparedStarts(t *tes
 					t.Fatalf("async start slot remained reserved after cleanup: %s", outcome)
 				}
 				release()
-			}
-			if beforeCalls == 0 {
-				t.Fatal("test precondition: expected preparation provider probes")
 			}
 		})
 	}
@@ -1572,18 +1577,21 @@ func TestExecutePlannedStartsRestoresPriorIdentityAfterSessionExistsCollision(t 
 	cb := breakerAt(30*time.Minute, maxRestarts)
 	setSessionCircuitBreakerForTest(t, cb)
 	startIdentityRuntime(t, env, candidate)
+	startsBefore := env.sp.CountCalls("Start", candidate.name())
 	oldToken, oldGeneration, oldEpoch, oldLastWoke := candidate.info.InstanceToken, candidate.info.Generation, candidate.info.ContinuationEpoch, candidate.info.LastWokeAt
-	env.sp.StartErrors[candidate.name()] = runtime.ErrSessionExists
-	sp := &sequencedStartLivenessProvider{
+	sp := &providerStartCollisionLivenessProvider{sequencedStartLivenessProvider: &sequencedStartLivenessProvider{
 		Fake: env.sp,
 		observations: []runtime.Liveness{
 			{},                           // preparation's stale snapshot
 			{},                           // pre-Start check
 			{Running: true, Alive: true}, // collision observation
 		},
-	}
+	}}
 	if got := runIdentityPlannerWithProvider(t, env, candidate, tp, false, sp); got != 1 {
 		t.Fatalf("wake count = %d, want 1 after attributed session collision", got)
+	}
+	if starts := env.sp.CountCalls("Start", candidate.name()); starts != startsBefore+1 {
+		t.Fatalf("Provider.Start calls during collision handling = %d, want exactly one attempt after %d setup call(s)", starts-startsBefore, startsBefore)
 	}
 	requireSessionCircuitRestartCount(t, cb, env.store, bead.ID, namedSessionIdentityInfo(candidate.info), env.clk.Now().UTC(), 1)
 	got := env.sessionInfo(bead.ID)

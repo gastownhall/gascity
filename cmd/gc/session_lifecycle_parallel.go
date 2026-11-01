@@ -2028,7 +2028,7 @@ func executePreparedStartWaveForCity(
 	if waveCtx == nil {
 		waveCtx = context.Background()
 	}
-	cancelWave := func() {}
+	var cancelWave context.CancelFunc
 	var deadline <-chan time.Time
 	var waveDeadlineAt time.Time
 	if startupTimeout > 0 {
@@ -2548,7 +2548,6 @@ func runPreparedStartCandidate(
 		outcome = TraceOutcomeDeferred
 		err = nil
 		rollbackPending = false
-		capacityRefused = false
 		rateLimitScreen = false
 	}
 	if err == nil {
@@ -4104,11 +4103,12 @@ func restorePreWakeStateWithIdentity(prepared preparedStart, sessFront *sessionp
 		})
 		return err
 	})
-	if err != nil {
+	switch {
+	case err != nil:
 		fmt.Fprintf(stderr, "session reconciler: restoring pre-wake state for %s: %v\n", prepared.candidate.name(), err) //nolint:errcheck
-	} else if identityLeaseRefused {
+	case identityLeaseRefused:
 		fmt.Fprintf(stderr, "session reconciler: restoring prior identity for %s: runtime lease is not held on the row\n", prepared.candidate.name()) //nolint:errcheck
-	} else if identityFenceUnavailable {
+	case identityFenceUnavailable:
 		fmt.Fprintf(stderr, "session reconciler: restoring prior identity for %s: conditional-write fence unavailable; restored lifecycle state only\n", prepared.candidate.name()) //nolint:errcheck
 	}
 }

@@ -594,6 +594,9 @@ func (b *sessionCircuitBreaker) metadataLocked(identity string, now time.Time) (
 	if identity == "" {
 		return out, nil
 	}
+	if generation := b.resetGenerationLocked(identity); generation > 0 {
+		out[sessionCircuitResetGenerationMetadata] = strconv.FormatUint(generation, 10)
+	}
 
 	e := b.entries[identity]
 	if e == nil {
@@ -620,9 +623,6 @@ func (b *sessionCircuitBreaker) metadataLocked(identity string, now time.Time) (
 	if e.state == circuitOpen {
 		out[sessionCircuitOpenedAtMetadata] = formatCircuitTime(e.openedAt)
 		out[sessionCircuitOpenRestartCountMetadata] = strconv.Itoa(e.openRestartCnt)
-	}
-	if generation := b.resetGenerationLocked(identity); generation > 0 {
-		out[sessionCircuitResetGenerationMetadata] = strconv.FormatUint(generation, 10)
 	}
 	return out, nil
 }
