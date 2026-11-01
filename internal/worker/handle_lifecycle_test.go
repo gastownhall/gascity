@@ -99,6 +99,15 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			want: func(key string) string { return "claude --resume " + key },
 		},
 		{
+			name: "committed started_config_hash resumes even with no transcript",
+			setup: func(t *testing.T, _ *SessionHandle, store *beads.MemStore, info sessionpkg.Info, _ string) {
+				if err := store.SetMetadata(info.ID, "started_config_hash", "hash-abc"); err != nil {
+					t.Fatalf("SetMetadata(started_config_hash): %v", err)
+				}
+			},
+			want: func(key string) string { return "claude --resume " + key },
+		},
+		{
 			name: "creating row with a stale creation_complete_at still switches",
 			setup: func(t *testing.T, _ *SessionHandle, store *beads.MemStore, info sessionpkg.Info, _ string) {
 				if err := store.SetMetadata(info.ID, "state", string(sessionpkg.StateCreating)); err != nil {

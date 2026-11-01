@@ -820,7 +820,7 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	if resumeCommand := strings.TrimSpace(h.session.Resume.ResumeCommand); resumeCommand != "" {
 		resumeInfo.ResumeCommand = resumeCommand
 	}
-	if h.unlaunchedSessionKey(info) {
+	if h.unlaunchedSessionKey(info, pr) {
 		return startCommandWithSessionID(resumeInfo, h.session)
 	}
 	return sessionpkg.BuildResumeCommand(resumeInfo), nil
@@ -828,18 +828,25 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 
 // unlaunchedSessionKey reports whether the row's stored session key names a
 // conversation no start ever launched: the handle's resume config takes a
-// session-id flag, the row holds a key, and the keyed-transcript probe of the
-// roots this launch reads finds no transcript for it. A restart handoff mints
+// session-id flag, the row holds a key it never committed a start under
+// (started_config_hash empty), and the keyed-transcript probe of the roots
+// this launch reads finds no transcript for it. A restart handoff mints
 // exactly such a key (sessionpkg.RestartRequestPatch) onto a row whose
 // creation marker keeps the first-start branch off, and resuming it makes the
-// provider exit at once on a conversation that does not exist. The probe
-// follows the launch: the adapter's search roots (plus the projects of an
-// absolute CLAUDE_CONFIG_DIR in the session env), the history provider's
-// family, and the runtime hints' work dir with the row's as fallback. A
-// provider whose family the probe cannot read, or a row without a work dir,
-// keeps the resume.
-func (h *SessionHandle) unlaunchedSessionKey(info sessionpkg.Info) bool {
+// provider exit at once on a conversation that does not exist. A committed
+// conversation keeps its resume even when the transcript reads absent: the
+// file may be gone for reasons a restart must not read as "never started"
+// (cleanup, a move between hosts), and only a hash no start ever wrote says
+// the key itself is new. The probe follows the launch: the adapter's search
+// roots (plus the projects of an absolute CLAUDE_CONFIG_DIR in the session
+// env), the history provider's family, and the runtime hints' work dir with
+// the row's as fallback. A provider whose family the probe cannot read, or a
+// row without a work dir, keeps the resume.
+func (h *SessionHandle) unlaunchedSessionKey(info sessionpkg.Info, pr sessionpkg.PersistedResponse) bool {
 	if h.session.Resume.SessionIDFlag == "" || strings.TrimSpace(info.SessionKey) == "" {
+		return false
+	}
+	if strings.TrimSpace(pr.Metadata["started_config_hash"]) != "" {
 		return false
 	}
 	hints := h.runtimeHints()

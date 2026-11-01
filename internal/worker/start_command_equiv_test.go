@@ -174,14 +174,16 @@ func TestStartCommandResumeUsesSpecOverrides(t *testing.T) {
 
 func TestStartCommandStaleResumeKey(t *testing.T) {
 	tests := []struct {
-		name       string
-		provider   string
-		transcript bool
-		wantFlag   string
+		name          string
+		provider      string
+		transcript    bool
+		committedHash bool
+		wantFlag      string
 	}{
 		{name: "probeable transcript absent", provider: "claude", wantFlag: "--session-id"},
 		{name: "probeable transcript present", provider: "claude", transcript: true, wantFlag: "--resume"},
 		{name: "provider not probeable", provider: "legacy-provider", wantFlag: "--resume"},
+		{name: "committed started_config_hash keeps resume", provider: "claude", committedHash: true, wantFlag: "--resume"},
 	}
 
 	for _, tt := range tests {
@@ -201,8 +203,14 @@ func TestStartCommandStaleResumeKey(t *testing.T) {
 				"mycmd",
 			)
 			handle.adapter.SearchPaths = []string{root}
-			if err := store.SetMetadata(info.ID, "started_config_hash", "hash-abc"); err != nil {
-				t.Fatalf("SetMetadata(started_config_hash): %v", err)
+			// A past creation marker keeps the first-start branch off without
+			// committing a start; the committed-hash row does commit one.
+			if tt.committedHash {
+				if err := store.SetMetadata(info.ID, "started_config_hash", "hash-abc"); err != nil {
+					t.Fatalf("SetMetadata(started_config_hash): %v", err)
+				}
+			} else if err := store.SetMetadata(info.ID, "creation_complete_at", "2026-01-01T00:00:00Z"); err != nil {
+				t.Fatalf("SetMetadata(creation_complete_at): %v", err)
 			}
 			if tt.transcript {
 				dir := filepath.Join(root, sessionlog.ProjectSlug(info.WorkDir))
@@ -258,8 +266,10 @@ func TestStartCommandClaudeConfigDir(t *testing.T) {
 				"mycmd",
 			)
 			handle.adapter.SearchPaths = []string{t.TempDir()}
-			if err := store.SetMetadata(info.ID, "started_config_hash", "hash-abc"); err != nil {
-				t.Fatalf("SetMetadata(started_config_hash): %v", err)
+			// A past creation marker keeps the first-start branch off while
+			// the row stays uncommitted, so the probe decides.
+			if err := store.SetMetadata(info.ID, "creation_complete_at", "2026-01-01T00:00:00Z"); err != nil {
+				t.Fatalf("SetMetadata(creation_complete_at): %v", err)
 			}
 			if tt.transcript {
 				dir := filepath.Join(configDir, "projects", sessionlog.ProjectSlug(info.WorkDir))
