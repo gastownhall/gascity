@@ -157,6 +157,23 @@ func TestManagedDoltPreconditionsLeaveRealCitiesAlone(t *testing.T) {
 			t.Fatalf("admitManagedDoltStart(real city) = %v, want nil", err)
 		}
 	})
+	t.Run("relative redirect to the scope's own .beads", func(t *testing.T) {
+		city := t.TempDir()
+		if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"real\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		beads := filepath.Join(city, ".beads")
+		if err := os.MkdirAll(beads, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// bd resolves a relative target from the parent of .beads.
+		if err := os.WriteFile(filepath.Join(beads, "redirect"), []byte(".beads\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := admitManagedDoltStart(city); err != nil {
+			t.Fatalf("admitManagedDoltStart(relative self-redirect) = %v, want nil", err)
+		}
+	})
 	t.Run("redirect names the scope's own .beads", func(t *testing.T) {
 		city := t.TempDir()
 		if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"real\"\n"), 0o644); err != nil {

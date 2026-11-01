@@ -72,7 +72,7 @@ func rigFromRedirectedBeadsDir(cfg *config.City, cityPath, dir string) (config.R
 
 // beadsRedirectTarget returns the normalized .beads directory that
 // beadsDir/redirect names, or "" when there is no redirect file or it is empty.
-// A relative target is taken relative to beadsDir, as bd reads it.
+// A relative target is taken relative to the parent of beadsDir, as bd reads it.
 func beadsRedirectTarget(beadsDir string) string {
 	data, err := os.ReadFile(filepath.Join(beadsDir, "redirect"))
 	if err != nil {
@@ -83,7 +83,7 @@ func beadsRedirectTarget(beadsDir string) string {
 		return ""
 	}
 	if !filepath.IsAbs(target) {
-		target = filepath.Join(beadsDir, target)
+		target = filepath.Join(filepath.Dir(beadsDir), target)
 	}
 	return normalizePathForCompare(target)
 }
