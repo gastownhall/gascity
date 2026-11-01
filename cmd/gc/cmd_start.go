@@ -1220,11 +1220,7 @@ func runStartWarmup(cityPath string, cfg *config.City, controllerLock *os.File, 
 		SkipStorePreflight:   true,
 		Warmup:               true,
 	})
-	warmupOpts := warmup.WarmupOpts{
-		Checks: warmupChecks,
-		Mailer: defaultMailProvider(cityPath),
-		Stderr: stderr,
-	}
+	warmupOpts := startWarmupOpts(cfg, warmupChecks, defaultMailProvider(cityPath), stderr)
 	_, _ = warmup.RunWarmupChecks(context.Background(), warmupCityPath, cfg, warmupOpts)
 }
 

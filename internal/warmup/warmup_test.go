@@ -510,6 +510,24 @@ func TestRunWarmupChecks_CustomMailTo(t *testing.T) {
 	}
 }
 
+func TestRunWarmupChecks_BlankMailToUsesDefault(t *testing.T) {
+	checks := []doctor.Check{
+		stubWarmupCheck{name: "bad", warmup: true, returnedStatus: doctor.StatusError, returnedMessage: "bad"},
+	}
+
+	_, mailer, stderr := runWarmupTest(t, checks, WarmupOpts{MailTo: "  "})
+
+	if len(mailer.sent) != 1 {
+		t.Fatalf("sent mail count = %d, want 1", len(mailer.sent))
+	}
+	if got := mailer.sent[0].To; got != "mayor" {
+		t.Fatalf("mail To = %q, want mayor", got)
+	}
+	if !strings.Contains(stderr, "see mail to mayor") {
+		t.Fatalf("stderr = %q, want \"see mail to mayor\"", stderr)
+	}
+}
+
 func TestRunWarmupChecks_StderrSilentOnOK(t *testing.T) {
 	checks := []doctor.Check{
 		stubWarmupCheck{name: "ok", warmup: true},
