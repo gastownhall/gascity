@@ -353,7 +353,8 @@ func TestNewSessionNoServerProbeDoesNotClobberLiveNamedSocket(t *testing.T) {
 		}
 
 		guarded := NewProviderWithConfig(tm.cfg)
-		guarded.Tmux().exec = &noServerPreflightExecutor{}
+		preflight := &noServerPreflightExecutor{}
+		guarded.Tmux().exec = preflight
 		err = guarded.Start(context.Background(), original, runtimepkg.Config{
 			Command: "sleep 600",
 			Env:     map[string]string{"GC_INSTANCE_TOKEN": instanceToken},
@@ -369,10 +370,14 @@ func TestNewSessionNoServerProbeDoesNotClobberLiveNamedSocket(t *testing.T) {
 			"path=" + socketPath,
 			"inode=" + socketInode(beforeSocket),
 			"peer_pid=" + serverPID,
+			"reprobe=" + ErrNoServer.Error(),
 		} {
 			if !strings.Contains(err.Error(), want) {
 				t.Fatalf("Provider.Start error = %q, want %q", err, want)
 			}
+		}
+		if preflight.probes != 2 {
+			t.Fatalf("preflight probes = %d, want the probe and its re-probe", preflight.probes)
 		}
 
 		hasOriginal, err := tm.HasSession(original)
