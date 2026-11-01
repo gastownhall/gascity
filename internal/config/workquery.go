@@ -669,10 +669,23 @@ func standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTop
 // fails the query, as the one-row read did.
 func assignedInProgressTierCommand(shellVar string, topo QueryTopology) string {
 	if topo.FederatedReady {
-		return assignedInProgressRead(shellVar, topo, excludeLabelArgs(beadmeta.DispatchHoldLabels)+" --until-unblocked", inProgressCandidatesLimit) +
+		return assignedInProgressRead(shellVar, topo, excludeLabelArgs(beadmeta.DispatchHoldLabels)+" --until-unblocked", inProgressCandidatesLimit, false) +
 			servableInProgressRowsScript(1)
 	}
-	return assignedInProgressRead(shellVar, topo, "", 1)
+	command := assignedInProgressRead(shellVar, topo, "", 1, false)
+	if topo.includeEphemeralReady() {
+		// The plain read keeps its priority: it returns the session's first
+		// ordinary in_progress row exactly as stock does. The inclusive one-row read
+		// runs only when the plain read returns no row, which is the no-history step
+		// that plain `bd list` cannot see. Reading inclusively first would let an
+		// owned ephemeral row that sorts ahead of a durable step, and that the serve
+		// gate rejects as blocked or held, hide the durable step the plain read
+		// would have returned.
+		command += `if [ -z "$r" ] || [ "$r" = "[]" ]; then ` +
+			assignedInProgressRead(shellVar, topo, "", 1, true) +
+			`fi; `
+	}
+	return command
 }
 
 // assignedInProgressCandidatesTierCommand is the bounded second read used only
@@ -681,8 +694,11 @@ func assignedInProgressTierCommand(shellVar string, topo QueryTopology) string {
 // root from hiding another in-progress step owned by the same session. The
 // federated form keeps only the window's servable rows, so the first non-anchor
 // row serveOrdinaryInProgressCandidateScript picks is one the gate can serve.
+// The single-store read of a bd-1.0.5 city is inclusive (--include-ephemeral):
+// it runs only behind an anchor, so it cannot displace the plain one-row read
+// assignedInProgressTierCommand serves first.
 func assignedInProgressCandidatesTierCommand(shellVar string, topo QueryTopology) string {
-	command := assignedInProgressRead(shellVar, topo, "", inProgressCandidatesLimit)
+	command := assignedInProgressRead(shellVar, topo, "", inProgressCandidatesLimit, true)
 	if topo.FederatedReady {
 		command += servableInProgressRowsScript(0)
 	}
@@ -725,12 +741,22 @@ func servableInProgressRowsScript(limit int) string {
 // assignedInProgressRead is the crash-recovery tier's in_progress read for one
 // identity, with args after the assignee, bounded to limit rows. The failure
 // clause names the reader alone, whatever args the read carries.
-func assignedInProgressRead(shellVar string, topo QueryTopology, args string, limit int) string {
+//
+// includeEphemeral asks the single-store reader for the no-history rows a bd-1.0.5
+// city may store its workflow steps as. Plain `bd list` hides them, and they are
+// not `ephemeral=true`, so the ephemeral probe behind the tier misses them too:
+// without the switch a session cannot recover a step it already holds. The switch
+// takes effect only where the topology's ready reads take it, and the federated
+// reader never takes it.
+func assignedInProgressRead(shellVar string, topo QueryTopology, args string, limit int, includeEphemeral bool) string {
 	reader := bdListInProgressCommand
+	readerArgs := ""
 	if topo.FederatedReady {
 		reader = gcReadyCommand + ` --status in_progress`
+	} else if includeEphemeral {
+		readerArgs = bdReadyIncludeEphemeralArg(topo.includeEphemeralReady())
 	}
-	return `r=$(` + reader + ` --assignee="$` + shellVar + `"` + args + ` --json --limit=` + strconv.Itoa(limit) + `)` +
+	return `r=$(` + reader + readerArgs + ` --assignee="$` + shellVar + `"` + args + ` --json --limit=` + strconv.Itoa(limit) + `)` +
 		workQueryReadFailure(reader) + `; `
 }
 

@@ -354,10 +354,25 @@ func singleQuoteEscaped(s string) string {
 
 // singleStoreReadCount counts the reads in a single-store command that the
 // federation swap replaces: the `bd ready` call sites plus the crash-recovery
-// tier's `bd list --status in_progress`.
+// tier's `bd list --status in_progress`, without that tier's conditional
+// --include-ephemeral fallback read.
 func singleStoreReadCount(command string) int {
 	return strings.Count(command, bdReadyCommand) +
-		strings.Count(command, bdListInProgressCommand)
+		strings.Count(command, bdListInProgressCommand) -
+		singleStoreOnlyInProgressMentions(command)
+}
+
+// inclusiveRecoveryFallbackMarker opens the single-store crash-recovery tier's
+// conditional second read: the --include-ephemeral one-row read it issues only
+// when the plain one-row read returned no row.
+const inclusiveRecoveryFallbackMarker = `if [ -z "$r" ] || [ "$r" = "[]" ]; then r=$(` + bdListInProgressCommand + ` --include-ephemeral `
+
+// singleStoreOnlyInProgressMentions counts the mentions of the in_progress
+// reader that belong to that conditional second read, which the federated reader
+// has no counterpart for: the read itself and the failure clause naming the
+// reader. They are not a read the swap replaces, so they are not counted as one.
+func singleStoreOnlyInProgressMentions(command string) int {
+	return 2 * strings.Count(command, inclusiveRecoveryFallbackMarker)
 }
 
 // renormalizeFederatedCommand maps a federated command back onto the
@@ -370,7 +385,14 @@ func singleStoreReadCount(command string) int {
 // the enrichment evolves: a change INSIDE the enrichment renormalizes away (it
 // is by definition part of the sanctioned difference), while any change outside
 // the two generators still fails, which is the property this test exists for.
-func renormalizeFederatedCommand(federated string) string {
+//
+// single is the single-store topology being compared against. The recovery
+// read is generated for it rather than for the zero topology because that read
+// carries the bd-1.0.5 --include-ephemeral switch, which the federated reader
+// does not take.
+func renormalizeFederatedCommand(federated string, single QueryTopology) string {
+	fedTopo := single
+	fedTopo.FederatedReady = true
 	// The generated script is embedded in the final command by shellquote.Join,
 	// which wraps it in single quotes and rewrites every inner ' as '\''. The
 	// fragments below are generated raw, so they must be escaped the same way to
@@ -387,11 +409,11 @@ func renormalizeFederatedCommand(federated string) string {
 		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(false, true))
 	for _, shellVar := range []string{"id", "cand"} {
 		federated = replaceFragment(federated,
-			assignedInProgressTierCommand(shellVar, QueryTopology{FederatedReady: true}),
-			assignedInProgressTierCommand(shellVar, QueryTopology{}))
+			assignedInProgressTierCommand(shellVar, fedTopo),
+			assignedInProgressTierCommand(shellVar, single))
 		federated = replaceFragment(federated,
-			assignedInProgressCandidatesTierCommand(shellVar, QueryTopology{FederatedReady: true}),
-			assignedInProgressCandidatesTierCommand(shellVar, QueryTopology{}))
+			assignedInProgressCandidatesTierCommand(shellVar, fedTopo),
+			assignedInProgressCandidatesTierCommand(shellVar, single))
 	}
 	// Both topologies fail a read the same way; only the reader the failure
 	// clause names differs.
@@ -409,7 +431,8 @@ func TestFederatedSwapChangesOnlyTheReader(t *testing.T) {
 				continue
 			}
 			bd105 := BeadsConfig{BDCompatibility: BeadsBDCompatibility105}
-			single := v.forTopo(shape.agent, QueryTopology{Beads: bd105})
+			singleTopo := QueryTopology{Beads: bd105}
+			single := v.forTopo(shape.agent, singleTopo)
 			federated := v.forTopo(shape.agent, QueryTopology{Beads: bd105, FederatedReady: true})
 			if n := singleStoreReadCount(single); n == 0 {
 				t.Fatalf("%s/%s: single-store command contains no read to swap", shape.name, v.name)
@@ -425,7 +448,7 @@ func TestFederatedSwapChangesOnlyTheReader(t *testing.T) {
 			// Everything outside the reader words, their failure handling, and the
 			// crash-recovery presence key must be untouched. Normalizing the
 			// federated form back onto the single-store one is what proves it.
-			if renormalized := renormalizeFederatedCommand(federated); renormalized != single {
+			if renormalized := renormalizeFederatedCommand(federated, singleTopo); renormalized != single {
 				t.Errorf("%s/%s: the federated command differs from the single-store one by more than the reader, its failure clause, and the crash-recovery presence key\n federated(normalized)=%q\n      single-store=%q", shape.name, v.name, renormalized, single)
 			}
 		}

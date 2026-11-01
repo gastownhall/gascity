@@ -2005,6 +2005,9 @@ func TestEffectiveWorkQueryBD105CompatibilityOptIn(t *testing.T) {
 	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
 		t.Errorf("EffectiveWorkQueryForBeads(bd-1.0.5) missing include-ephemeral assigned probe: %q", got)
 	}
+	if !strings.Contains(got, `bd list --status in_progress --include-ephemeral --assignee="$id" --json --limit=1`) {
+		t.Errorf("EffectiveWorkQueryForBeads(bd-1.0.5) missing include-ephemeral crash-recovery read: %q", got)
+	}
 }
 
 func TestEffectiveWorkQueryBD104SurfacesLegacyEphemeralRoutedWork(t *testing.T) {
@@ -2176,6 +2179,9 @@ func TestEffectiveAssignedInProgressQueryDefault(t *testing.T) {
 	if strings.Contains(got, `bd ready`) {
 		t.Fatalf("EffectiveAssignedInProgressQuery() should not include assigned-ready or routed pool demand: %q", got)
 	}
+	if strings.Contains(got, `--include-ephemeral`) {
+		t.Fatalf("EffectiveAssignedInProgressQuery() default must be bd 1.0.4-compatible without --include-ephemeral: %q", got)
+	}
 
 	out := runShellWithFakeBd(t, got, map[string]string{
 		"GC_SESSION_ID": "worker-bead",
@@ -2200,6 +2206,49 @@ esac
 	}
 	if _, ok := gotRows[0]["blocked_by"]; !ok {
 		t.Errorf("EffectiveAssignedInProgressQuery() row missing blocked_by: %q", out)
+	}
+}
+
+// A bd-1.0.5 city may store workflow steps with no_history. Plain `bd list`
+// hides such a row and it is not `ephemeral=true`, so the ephemeral probe misses
+// it too; the crash-recovery read has to ask for it the way the ready tiers do.
+func TestEffectiveAssignedInProgressQueryForBeadsBD105Compatibility(t *testing.T) {
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	bd105 := QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}}
+	got := a.EffectiveAssignedInProgressQueryFor(bd105)
+	if !strings.Contains(got, `bd list --status in_progress --include-ephemeral --assignee="$id" --json --limit=1`) {
+		t.Fatalf("EffectiveAssignedInProgressQueryFor(bd-1.0.5) missing include-ephemeral crash-recovery read: %q", got)
+	}
+
+	// This bd serves the session's no-history step to the inclusive list only.
+	env := map[string]string{"GC_SESSION_ID": "worker-bead"}
+	bdScript := `#!/bin/sh
+set -eu
+case "$*" in
+  "list --status in_progress --include-ephemeral --assignee=worker-bead --json --limit=1") printf '[{"id":"assigned-no-history","assignee":"worker-bead","status":"in_progress","no_history":true}]' ;;
+  *) printf '[]' ;;
+esac
+`
+	out := runShellWithFakeBd(t, got, env, bdScript)
+	var gotRows []map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &gotRows); err != nil {
+		t.Fatalf("EffectiveAssignedInProgressQueryFor(bd-1.0.5) output is not JSON: %v (%q)", err, out)
+	}
+	if len(gotRows) != 1 || gotRows[0]["id"] != "assigned-no-history" {
+		t.Fatalf("EffectiveAssignedInProgressQueryFor(bd-1.0.5) output = %q, want the assigned no-history step", out)
+	}
+
+	// The default mode keeps the plain read, which the same bd answers with nothing.
+	if out := runShellWithFakeBd(t, a.EffectiveAssignedInProgressQuery(), env, bdScript); strings.TrimSpace(out) != "[]" {
+		t.Fatalf("EffectiveAssignedInProgressQuery() default output = %q, want no work from the plain read", out)
+	}
+
+	// The federated reader is a different command and is left as it was.
+	for _, limited := range []func(string, QueryTopology) string{assignedInProgressTierCommand, assignedInProgressCandidatesTierCommand} {
+		federated := limited("id", QueryTopology{FederatedReady: true})
+		if got := limited("id", QueryTopology{Beads: bd105.Beads, FederatedReady: true}); got != federated {
+			t.Errorf("federated crash-recovery read changed under bd-1.0.5: got %q, want %q", got, federated)
+		}
 	}
 }
 
