@@ -550,16 +550,9 @@ describe('createAttentionContributors', () => {
       }),
     );
 
-    // gascity-dashboard-2j8e.3: a long-stale ready-unclaimed open bead surfaces
-    // (attention tier); an assigned in-progress bead is working-as-intended and
-    // no longer counts (the stale-assigned emitter was removed with the badge
-    // redefinition).
-    expect(model.byDomain.beads.items.map((item) => item.id)).toEqual([
-      'beads:B-stale-open:ready-unclaimed',
-    ]);
-    expect(model.byDomain.beads.items.map((item) => item.href)).toEqual([
-      '/beads?bead=B-stale-open',
-    ]);
+    // Stale unassigned and agent-owned work remains machine-operable, so neither
+    // bead contributes to the human attention count.
+    expect(model.byDomain.beads.items).toEqual([]);
     expect(model.byDomain.mail.items.map((item) => item.id)).toContain(
       'mail:M-stale-unread:unread-stale',
     );
@@ -658,7 +651,7 @@ describe('createAttentionContributors', () => {
     ]);
   });
 
-  it('counts ready-unclaimed + escalated beads and excludes plain dependency-blocked (gascity-dashboard-2j8e.3)', () => {
+  it('counts human-assigned and escalated beads but excludes machine-operable work (sc-4oix8)', () => {
     const nowMs = Date.parse('2026-06-01T12:00:00.000Z');
     const model = composeAttention(
       createAttentionContributors({
@@ -666,19 +659,22 @@ describe('createAttentionContributors', () => {
           decisionLabel: NEEDS_STEPHANIE_LABEL,
           nowMs,
           items: [
-            // ready-unclaimed: open, no assignee, aged past the watch window.
             bead({
               created_at: '2026-05-29T11:00:00.000Z',
               id: 'B-ready',
               status: 'open',
             }),
-            // plain dependency-blocked: working-as-intended queuing — excluded.
+            bead({
+              assignee: 'human',
+              created_at: '2026-05-29T11:00:00.000Z',
+              id: 'B-human',
+              status: 'open',
+            }),
             bead({
               created_at: '2026-05-29T11:00:00.000Z',
               id: 'B-dep',
               status: 'blocked',
             }),
-            // assigned in-progress work — excluded (no longer a bead alert).
             bead({
               assignee: 'reviewer',
               created_at: '2026-05-29T11:00:00.000Z',
@@ -686,8 +682,6 @@ describe('createAttentionContributors', () => {
               status: 'in_progress',
             }),
           ],
-          // abnormally-blocked: an escalation marker — counted immediately, from
-          // the dedicated gc:escalation queue (the general list drops gc: labels).
           escalations: [
             bead({
               created_at: '2026-06-01T11:55:00.000Z',
@@ -701,7 +695,7 @@ describe('createAttentionContributors', () => {
     );
 
     const ids = model.byDomain.beads.items.map((item) => item.id);
-    expect([...ids].sort()).toEqual(['beads:B-esc:escalated', 'beads:B-ready:ready-unclaimed']);
+    expect([...ids].sort()).toEqual(['beads:B-esc:escalated', 'beads:B-human:human-assigned']);
     expect(model.byDomain.beads.attention).toBe(2);
   });
 
