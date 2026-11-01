@@ -196,7 +196,12 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	// a mutation with a 403 before the handler runs; reads never emit it.
 	// GET /beads also declares 400: an invalid pagination cursor is a typed
 	// invalid-cursor problem response, never a silent page-1 restart.
-	cityGet(sm, "/beads", (*Server).humaHandleBeadList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable), listOrder("(created_at DESC, id DESC) — newest beads first"))
+	// An unknown query parameter is refused, the same as /work/ready and
+	// /work/active-step below: a misspelled filter (or an undeclared one,
+	// like ?ids=) would otherwise widen the answer to everything instead of
+	// erroring (gastownhall/gascity#8426).
+	cityGet(sm, "/beads", (*Server).humaHandleBeadList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable), listOrder("(created_at DESC, id DESC) — newest beads first"),
+		func(o *huma.Operation) { o.RejectUnknownQueryParameters = true })
 	cityGet(sm, "/beads/graph/{rootID}", (*Server).humaHandleBeadGraph, errorStatuses(http.StatusNotFound))
 	cityGet(sm, "/beads/ready", (*Server).humaHandleBeadReady, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	// Ready work as `gc ready` answers it: live, the serving frame, fail-loud
