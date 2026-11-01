@@ -11,8 +11,11 @@
 #
 # It subscribes to bead.created events. For each newly-created bead whose
 # issue_type is `gate` it re-fetches the bead (`gc bd show --json`) — the
-# event payload does not carry await_type — and, when the gate is an OPEN
-# `human` gate, resolves the addressee and notifies them once. Idempotent:
+# event payload does not carry the gate type — and, when the gate is an OPEN
+# `human` gate, resolves the addressee and notifies them once. The type is
+# bd's await_type for a gate bd created, else the gc.gate_type metadata a
+# formula [steps.gate] stamps; a gate typed neither way is never mailed.
+# Idempotent:
 # a given gate is notified at most once. Dedup state lives in
 # $GC_PACK_STATE_DIR/notify-on-human-gate-creation-state.json, so it is both
 # city- and pack-scoped — multi-city installs never cross-pollinate.
@@ -157,17 +160,21 @@ while IFS= read -r gate_id; do
     set_rig_args "$gate_id"
     [ -z "$RIG_SUSPENDED" ] || continue
     # Re-fetch authoritative gate details: the bead.created payload omits
-    # await_type, so the event alone cannot tell a human gate from a timer/gh
+    # the gate type, so the event alone cannot tell a human gate from a timer/gh
     # gate. `gc bd show --json` returns an array; normalize to the first row.
     GATE_JSON="$(gc bd show "$gate_id" ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} --json 2>/dev/null \
         | jq -c 'if type == "array" then .[0] else . end' 2>/dev/null)" || continue
     [ -n "$GATE_JSON" ] && [ "$GATE_JSON" != "null" ] || continue
 
-    AWAIT_TYPE="$(printf '%s' "$GATE_JSON" | jq -r '.await_type // ""' 2>/dev/null)"
+    # The gate's type: bd's own gates carry it in await_type; a gate a formula
+    # [steps.gate] synthesized carries it in gc.gate_type, because gc's stores
+    # have no await_type column to write.
+    GATE_TYPE="$(printf '%s' "$GATE_JSON" | jq -r \
+        'if (.await_type // "") != "" then .await_type else (.metadata."gc.gate_type" // "") end' 2>/dev/null)"
     STATUS="$(printf '%s' "$GATE_JSON" | jq -r '.status // ""' 2>/dev/null)"
     # Only OPEN human gates. A gate resolved as fast as it was created needs no
     # nudge; non-human gates have their own (auto) watchers.
-    [ "$AWAIT_TYPE" = "human" ] || continue
+    [ "$GATE_TYPE" = "human" ] || continue
     [ "$STATUS" = "open" ] || continue
 
     # Resolve the addressee: assignee -> gc.deferred_assignee -> escalation
@@ -189,8 +196,10 @@ while IFS= read -r gate_id; do
 Title: $TITLE"
     [ -n "$DESC" ] && BODY="$BODY
 $DESC"
+    # `gc bd close` rather than `gc bd gate resolve` (equivalent for a gate):
+    # a split city refuses the latter for a gate its class binding holds.
     BODY="$BODY
-Resolve with: gc bd gate resolve $gate_id"
+Resolve with: gc bd close $gate_id"
 
     # `gc mail send --notify` mails the addressee and nudges them when they are
     # a real session; it skips the nudge for the "human" recipient natively.

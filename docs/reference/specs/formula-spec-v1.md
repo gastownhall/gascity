@@ -548,7 +548,12 @@ The v1 compiler must emit a molecule tree:
   (recipe ID `<formula>.gate-<step>`, type `gate`, title
   `Gate: <type> <id>`) that is a child of the step's container, plus a
   `blocks` edge from the gated step to it: the step stays blocked until
-  the gate bead is closed.
+  the gate bead is closed. The declared `type` is stamped verbatim on the
+  gate bead as `gc.gate_type` metadata. The core pack's human-gate orders
+  mail the addressee of a `human` gate when it is created and re-nudge it
+  while it stays open; close it with `gc bd close <id>`. The gate bead is
+  created with the rest of the recipe at instantiation, so the addressee
+  can be asked before the gated step's `needs` finish.
 - **Root.** The recipe root is type `molecule`, priority 2. Its title is
   the formula name, or the `{{title}}` placeholder when a `title` var is
   declared; its description is the formula description, or `{{desc}}` when
@@ -693,10 +698,12 @@ them; they are documented to prevent silent surprise.
   reads that label. An `until` loop therefore runs exactly one iteration.
 - **Gate `type` vocabulary.** `[steps.gate]` synthesizes a real gate bead
   that blocks its step until the gate bead is closed (manually or by an
-  external watcher), but the `type` values `gh:run`, `gh:pr`, `timer`,
-  `human`, and `mail` are doc-comment vocabulary in
-  `internal/formula/types.go` — the parser never validates them and no
-  bundled watcher acts on them. Zero bundled formulas use `gate`.
+  external watcher), and records the declared `type` as `gc.gate_type`
+  metadata. The values `gh:run`, `gh:pr`, `timer`, `human`, and `mail` are
+  doc-comment vocabulary in `internal/formula/types.go` — the parser never
+  validates them. Only `human` has a bundled consumer: the core pack's
+  human-gate orders announce and re-nudge it. No bundled watcher resolves any
+  gate type. Zero bundled formulas use `gate`.
 - **`waits_for` gate modes.** `waits_for` compiles to a readiness-blocking
   `waits-for` dependency edge plus a recorded gate mode, but no current
   component interprets the `all-children` / `any-children` distinction.

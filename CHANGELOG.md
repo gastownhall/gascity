@@ -712,6 +712,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Formula human gates are now announced and re-nudged.** A `[steps.gate]`
+  with `type = "human"` used to create a gate bead with no machine-readable
+  type, so the core `notify-on-human-gate-creation` and
+  `renudge-stale-human-gates` orders, which selected only bd's `await_type`,
+  never mailed anyone about it. The declared gate type is now stamped on the
+  gate bead as `gc.gate_type`, and both orders select on it as well as on
+  `await_type`. On a split city the re-nudge sweep now finds these gates in
+  the class binding, and both orders' hint now reads `gc bd close <id>`,
+  which a split city serves for a binding-held gate (`gc bd gate resolve` is
+  refused there). A formula gate is created, and announced, when the formula
+  is instantiated, which can be before the gated step's `needs` finish. When
+  the re-nudge sweep cannot list formula gates (one store is unreadable), it
+  says so and records the run as partial (`order.skipped`) instead of reading
+  the failure as no gates. Gates created before this change carry no stamp and
+  stay unannounced; close or re-pour them.
+
 - **The core orphan-sweep order judges claims on graph steps in a
   split-storage city.** On a city whose `[storage.classes]` serves the graph
   class from a binding, `gc bd list` answers from a work store only, so the
