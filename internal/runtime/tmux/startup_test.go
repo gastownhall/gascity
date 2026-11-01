@@ -3475,9 +3475,9 @@ func TestRunSetupCommandCancellationRunsRollbackTrap(t *testing.T) {
 // unlike argv, a credential rendered here outlives the process.
 //
 // The session env value and the inherited one are separate assertions because
-// they arrive by different routes: the caller assembled one and os.Environ()
-// supplied the other, and a fix covering only the first is the shape this
-// package shipped with.
+// they arrive by different routes: the caller assembled one and
+// execenv.Environ() supplied the other, and a fix covering only the first is
+// the shape this package shipped with.
 func TestRunSetupCommandFailureOmitsCredentials(t *testing.T) {
 	const inherited = "inherited-NOT-A-REAL-CREDENTIAL"
 	const sentinel = "sk-test-NOT-A-REAL-CREDENTIAL-8f3a21"

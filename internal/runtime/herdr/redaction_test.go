@@ -472,7 +472,7 @@ func TestSetupCommandFailureOmitsCredentials(t *testing.T) {
 }
 
 // TestSetupCommandFailureOmitsInheritedCredentials is the same leak from the
-// other environment. runSetupCommand builds c.Env from os.Environ() before
+// other environment. runSetupCommand builds c.Env from execenv.Environ() before
 // appending the session env, so a pre_start command echoes the controller's own
 // credentials just as readily as the session's — a failing
 // `curl -H "Authorization: Bearer $GITHUB_TOKEN"` prints the header it sent.

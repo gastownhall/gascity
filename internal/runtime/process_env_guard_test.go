@@ -12,17 +12,19 @@ import (
 )
 
 // bareEnvironAllowed lists the runtime files that may read os.Environ()
-// directly because they never build a child environment from it.
+// directly, each with the reason its read cannot leave a projection in a child
+// that outlives it.
 var bareEnvironAllowed = map[string]string{
-	// processSecretEnvValues reads the process env to scrub its secrets out of
-	// captured output; it starts nothing.
-	"redact.go": "secret scrub list",
 	// RunSetupCommand has no callers (#5637), and this package must stay
 	// stdlib-only, so it cannot reach execenv.
 	"setupcommand.go": "unwired setup runner in the stdlib-only contract package",
 	// mergeCurrentEnv fills this process's own identity into a process-table
 	// scan of itself; it starts nothing.
 	"proctable/scan_linux.go": "self identity merge for the process-table scan",
+	// processSnapshotCommand's ps reads no BEADS_* or BD_* variable and exits
+	// before the state-cache refresh returns. Waiting out a projection there
+	// would stall every liveness read on a stale cache for a whole open.
+	"tmux/state_cache.go": "one-shot ps process snapshot on the liveness path",
 }
 
 // TestRuntimeProvidersBuildChildEnvThroughExecenv keeps every runtime provider

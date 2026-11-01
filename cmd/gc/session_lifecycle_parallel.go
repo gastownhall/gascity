@@ -2277,7 +2277,7 @@ func postStartDeathPane(
 	if err != nil {
 		return ""
 	}
-	return runtime.RedactSecrets(pane, runtime.SetupCommandSecrets(item.cfg.Env))
+	return runtime.RedactSecrets(pane, runtime.SetupCommandSecrets(processEnvSnapshotExcludingNativeDoltOpen(), item.cfg.Env))
 }
 
 func enqueuePreparedStartWaveForCity(

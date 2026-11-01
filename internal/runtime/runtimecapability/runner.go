@@ -254,11 +254,14 @@ func (r *runner) execIn(ctx context.Context, name, command string) (output strin
 // exit is code 0; a non-ExitError failure (timeout, spawn) returns a non-nil
 // runErr with code -1.
 func (r *runner) invoke(ctx context.Context, timeout time.Duration, stdin []byte, args ...string) (string, int, error) {
+	// Read the env before arming the op deadline: execenv.Environ waits out an
+	// in-flight native store open, and that wait is not the op's.
+	env := r.opEnv()
 	opCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(opCtx, r.path, args...)
 	cmd.WaitDelay = 2 * time.Second
-	cmd.Env = r.opEnv()
+	cmd.Env = env
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

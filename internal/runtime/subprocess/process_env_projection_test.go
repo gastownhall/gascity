@@ -64,7 +64,7 @@ func TestStartDoesNotInheritAnInFlightProcessEnvProjection(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Start: %v", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.ExecRaceTimeout):
 		t.Fatal("Start did not return after the projection restored")
 	}
 	defer p.Stop("env-projection") //nolint:errcheck
@@ -76,7 +76,7 @@ func TestStartDoesNotInheritAnInFlightProcessEnvProjection(t *testing.T) {
 	}
 	select {
 	case <-conn.done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.ExecRaceTimeout):
 		t.Fatal("timed out waiting for environment child process")
 	}
 	data, err := os.ReadFile(marker)
@@ -131,8 +131,13 @@ func TestStartWaitingOutAProcessEnvProjectionLeavesTheProviderServing(t *testing
 		t.Fatal("IsRunning waited behind a Start that was waiting out a process-env projection")
 	}
 	restore()
-	if err := <-started; err != nil {
-		t.Fatalf("Start: %v", err)
+	select {
+	case err := <-started:
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+	case <-time.After(testutil.ExecRaceTimeout):
+		t.Fatal("Start did not return after the projection restored")
 	}
 	defer p.Stop("env-waiter") //nolint:errcheck
 }

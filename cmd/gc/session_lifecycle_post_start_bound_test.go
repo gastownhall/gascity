@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -748,4 +749,31 @@ func TestEnqueuePreparedStartWaveReleasesItsSlotWhenAPostStartObservationHangs(t
 		}
 		requireBeadUnchanged(t, store, settled)
 	})
+}
+
+// A resume launch's dead pane is scrubbed against the guarded process-env
+// snapshot, not a bare read: a native store open in flight withholds ambient
+// BEADS_* variables process-wide, so a bare read taken then lacks a credential
+// the pane inherited and echoed.
+func TestPostStartDeathPaneScrubsTheGuardedEnvSnapshot(t *testing.T) {
+	const ambient = "ambient-NOT-A-REAL-CREDENTIAL-post-start"
+	// The process env as an open's window leaves it: the variable withheld.
+	t.Setenv("BEADS_DOLT_PASSWORD", "")
+	prev := processEnvSnapshotExcludingNativeDoltOpen
+	processEnvSnapshotExcludingNativeDoltOpen = func() []string {
+		return append(prev(), "BEADS_DOLT_PASSWORD="+ambient)
+	}
+	t.Cleanup(func() { processEnvSnapshotExcludingNativeDoltOpen = prev })
+
+	env := newReconcilerTestEnv(t)
+	session := env.createSessionBead("worker", "worker")
+	env.sp.SetPeekOutput("worker", "+ curl -u gc:"+ambient+"\ncurl: (22) 401\n")
+	item := preparedStart{candidate: startCandidate{info: env.sessionInfo(session.ID)}, resumed: true}
+	pane := postStartDeathPane(context.Background(), item, env.city, env.sp, env.store, &config.City{})
+	if !strings.Contains(pane, "curl: (22) 401") {
+		t.Fatalf("dead pane %q lost its diagnostic, so this proves nothing", pane)
+	}
+	if strings.Contains(pane, ambient) {
+		t.Errorf("dead pane %q carries the ambient credential the guarded snapshot holds", pane)
+	}
 }

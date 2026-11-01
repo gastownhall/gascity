@@ -536,15 +536,17 @@ func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[stri
 		// the client's are.
 		//
 		// Both environments it was given, not just the session env: c.Env starts
-		// from os.Environ() above, so the controller's own credentials are in
-		// scope for that echo as much as the session's.
+		// from baseEnv above, so the controller's own credentials are in scope
+		// for that echo as much as the session's. The scrub reads baseEnv, the
+		// slice the command inherited, not the process env now, which an
+		// in-flight native store open may be rewriting.
 		//
 		// [runtime.RedactSecretsTail] scrubs before it truncates, which is the
 		// order that matters: redacting a cut tail would leave a straddling
 		// credential decapitated and no longer matching itself. Unlike tmux's
 		// bounded writer this holds the whole output already, so nothing has to
 		// be retained to make that work.
-		tail, _ := runtime.RedactSecretsTail(out.String(), preStartOutputLimit, runtime.SetupCommandSecrets(env))
+		tail, _ := runtime.RedactSecretsTail(out.String(), preStartOutputLimit, runtime.SetupCommandSecrets(baseEnv, env))
 		if tail = strings.TrimSpace(tail); tail != "" {
 			return fmt.Errorf("%w: %s", err, tail)
 		}
