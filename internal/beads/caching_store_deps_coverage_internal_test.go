@@ -145,10 +145,10 @@ func (h *floodLoopHarness) assertNotReady(t *testing.T, id, why string) {
 // flood (every reconcile re-announcing ~14.7k rows). The controller closes an
 // edge-less row with CloseAll (orders.Store.CloseRuns), which keeps the closed
 // row but drops its deps entry; its own bead.closed comes back with no
-// dependencies key (omitempty), as a snapshot through the binding's watcher or
-// as a patch on a rig cache. Neither may clear depsComplete, wipe every other
-// row's ready verdict, or make the next reconcile re-announce rows nothing
-// touched.
+// dependencies key (omitempty). The controller applies a cache's own events as
+// snapshots on every cache; patch mode delivers the same keyless close as a
+// CLI's bd hook would. Neither may clear depsComplete, wipe every other row's
+// ready verdict, or make the next reconcile re-announce rows nothing touched.
 func TestCloseAllEchoFedBackKeepsVerdictsAndReconcileQuiet(t *testing.T) {
 	for _, mode := range []string{"snapshot", "patch"} {
 		t.Run(mode, func(t *testing.T) {
@@ -279,10 +279,10 @@ func TestCacheReadinessNeverAheadOfBacking(t *testing.T) {
 			}
 			for seed := int64(1); seed <= seeds; seed++ {
 				name := fmt.Sprintf("%s/%s/%d", backing.name, mode, seed)
-				if preexistingFalseReady[name] {
-					continue
-				}
 				t.Run(name, func(t *testing.T) {
+					if preexistingFalseReady[name] {
+						t.Skip("pre-existing on main: mc-b4jn5.2")
+					}
 					readinessOracleRun(t, backing.open(t), mode, seed)
 				})
 			}
@@ -597,24 +597,31 @@ func TestSQLiteMidScanFenceKeepsVerdicts(t *testing.T) {
 // row with no entry, whose edges the cache cannot see. A row whose only edge to
 // it does not block readiness, and a row with no edge to it, keep theirs.
 func TestSQLiteIncompleteCoverageStillInvalidatesDependents(t *testing.T) {
-	engine, ids := newVerdictSQLite(t, 2)
-	bystander, related, blocker, step := ids[0], ids[1], ids[2], ids[3]
+	engine, ids := newVerdictSQLite(t, 3)
+	bystander, related, unknown, blocker, step := ids[0], ids[1], ids[2], ids[3], ids[4]
 	if err := engine.DepAdd(related, blocker, "relates-to"); err != nil {
 		t.Fatalf("DepAdd relates-to: %v", err)
 	}
 	h := newFloodLoopHarness(t, engine)
 	h.pass()
-	unknown, _ := midScanFence(t, engine, h)
-	// No write or event path stamps a verdict on an entry-less row (an
-	// event's differing is_blocked is verified against the backing, whose
-	// rows carry none), so the branch that clears one is defensive: plant
-	// the verdict to keep it honest.
-	h.cache.mu.Lock()
-	planted := h.cache.beads[unknown]
-	unblocked := false
-	planted.IsBlocked = &unblocked
-	h.cache.beads[unknown] = planted
-	h.cache.mu.Unlock()
+	// A CloseAll races the reconcile's scan: it drops the row's deps entry but
+	// keeps its verdict, and the pass skips the fenced, entry-less row and
+	// loses coverage. The blocker closes while the CloseAll's echo, which
+	// would replace the row's verdict, is still on the bus.
+	engine.afterList = func() {
+		if _, err := h.cache.CloseAll([]string{unknown}, map[string]string{"close_reason": "done"}); err != nil {
+			t.Errorf("CloseAll: %v", err)
+		}
+	}
+	h.cache.runReconciliation()
+	h.cache.mu.RLock()
+	_, entry := h.cache.deps[unknown]
+	verdict := h.cache.beads[unknown].IsBlocked
+	h.cache.mu.RUnlock()
+	if h.depsComplete() || entry || verdict == nil {
+		t.Fatalf("precondition: want coverage lost and %s entry-less with a verdict; got depsComplete=%v entry=%v verdict=%v",
+			unknown, h.depsComplete(), entry, verdict)
+	}
 
 	if err := h.cache.Close(blocker); err != nil {
 		t.Fatalf("Close blocker: %v", err)
