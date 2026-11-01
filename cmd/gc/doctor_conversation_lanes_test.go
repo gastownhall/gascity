@@ -163,7 +163,8 @@ func TestConversationLanesDoctorMessageUnderV2(t *testing.T) {
 // TestConversationLanesDoctorDefault pins the check with [ops] authoritative
 // unset (OJ-21 21a): over a SQLite sessions store it reports the default
 // kinds as listed, marked default; over any other store it is OK and names
-// legacy delivery, a store that cannot batch with the reason.
+// legacy delivery and the split that ends it, a store that cannot batch with
+// its binding, never the explicit list's remedy.
 func TestConversationLanesDoctorDefault(t *testing.T) {
 	sqlite := newLaneKindsSQLiteStore(t)
 	bd := beads.NewBdStore(t.TempDir(), func(string, string, ...string) ([]byte, error) {
@@ -179,8 +180,8 @@ func TestConversationLanesDoctorDefault(t *testing.T) {
 	}{
 		{name: "sqlite, host running the default", store: sqlite, st: running, status: doctor.StatusOK, want: "conversation lanes on (default: message, interrupt, respond): last pass 2s ago"},
 		{name: "sqlite, no host", store: sqlite, st: conversationLaneStatus{State: laneHostStateNone}, status: doctor.StatusError, want: "conversation lanes on (default: message, interrupt, respond): the controller runs no lane host"},
-		{name: "memory store", store: newLaneTestStore(), status: doctor.StatusOK, want: "conversation lanes are off by default here (the sessions store is not SQLite); this city keeps legacy delivery until its storage is split"},
-		{name: "bd", store: bd, status: doctor.StatusOK, want: "off by default here (conversation lanes need guarded batches; this city's sessions class is bound to the bd CLI (BdStore)"},
+		{name: "memory store", store: newLaneTestStore(), status: doctor.StatusOK, want: "conversation lanes are off by default here (the sessions store is not SQLite); this city keeps legacy delivery until its storage is split (" + legacyDeliverySplitRemedy + ")"},
+		{name: "bd", store: bd, status: doctor.StatusOK, want: "off by default here (its sessions class is bound to the bd CLI (BdStore), which cannot apply guarded batches); this city keeps legacy delivery until its storage is split (" + legacyDeliverySplitRemedy + ")"},
 		{name: "no sessions store", status: doctor.StatusWarning, want: "conversation lanes default undecided: the city store has no sessions store"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -189,6 +190,11 @@ func TestConversationLanesDoctorDefault(t *testing.T) {
 			r := c.Run(&doctor.CheckContext{CityPath: "/city"})
 			if r.Status != tc.status || !strings.Contains(r.Message, tc.want) {
 				t.Fatalf("Run = %v %q, want %v containing %q", r.Status, r.Message, tc.status, tc.want)
+			}
+			// No kind is listed, so the explicit list's refusal remedy
+			// does not apply.
+			if strings.Contains(r.Message, "Remove the kind") {
+				t.Fatalf("Run = %q, want no explicit-list remedy with the list unset", r.Message)
 			}
 			if *opened != 1 {
 				t.Fatalf("store opened %d times, want once", *opened)

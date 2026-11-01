@@ -340,6 +340,11 @@ view: a lane operation's ID is its op ID, pending until the lane takes it, in
 flight while it is delivered, and dead for an hour after it closes failed or
 skipped.
 
+When the session's lane operations cannot all be read (the op store does not
+open or answer, or an op row does not decode), it names what it could not
+read on stderr and exits 1: the text view still lists the rest, and --json
+prints the failure record instead of a partial result.
+
 Defaults to $GC_ALIAS or $GC_SESSION_ID when run inside a session.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -411,9 +416,11 @@ rather than disappearing silently. Find IDs with "gc nudge status".
 Dropping an in-flight nudge dead-letters it even if it was already
 injected into the session but not yet acked.
 
-A conversation-lane operation's ID cancels the operation as the operator:
+A conversation-lane message's op ID cancels the message as the operator:
 one the lane has not taken is dropped, and one being delivered reports
-cancel_requested, the lane's outcome saying whether the cancel won.
+cancel_requested, the lane's outcome saying whether the cancel won. A lane
+ID that cannot be canceled fails on its own: the other IDs are still
+dropped.
 
 This only accepts explicit nudge IDs; it does not do bulk or age-based
 selection.`,
@@ -454,7 +461,17 @@ func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) in
 		fmt.Fprintf(stderr, "gc nudge status: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	lanePending, laneInFlight, laneDead := laneNudgeStatusItems(target, now, stderr)
+	// A lane read that fails fails the command, as a queue read does. With
+	// --json it writes no result, whose ok promises the whole view, so the
+	// caller gets the failure record; the text view still lists what was
+	// read.
+	lanePending, laneInFlight, laneDead, laneErr := laneNudgeStatusItems(target, now)
+	if laneErr != nil {
+		fmt.Fprintf(stderr, "gc nudge status: conversation-lane ops not all read: %v\n", laneErr) //nolint:errcheck
+		if jsonOutput {
+			return 1
+		}
+	}
 	pending = append(pending, lanePending...)
 	inFlight = append(inFlight, laneInFlight...)
 	dead = append(dead, laneDead...)
@@ -526,6 +543,9 @@ func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) in
 		for _, reason := range sortedNudgeDispatchSkipReasons(dispatchSkips) {
 			_, _ = fmt.Fprintf(stdout, "  %s=%d\n", reason, dispatchSkips[reason])
 		}
+	}
+	if laneErr != nil {
+		return 1
 	}
 	return 0
 }
@@ -607,11 +627,7 @@ func doNudgeDrop(cityPath string, ids []string, jsonOutput bool, stdout, stderr 
 		fmt.Fprintf(stderr, "gc nudge drop: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	laneResults, err := dropLaneNudges(cityPath, ids, statuses)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc nudge drop: %v\n", err) //nolint:errcheck
-		return 1
-	}
+	laneResults := dropLaneNudges(cityPath, ids, statuses)
 
 	var droppable []string
 	for _, id := range ids {

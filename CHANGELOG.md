@@ -676,12 +676,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **`gc nudge status` and `gc nudge drop` cover conversation-lane ops.**
-  `gc nudge status` lists a session's open lane ops beside its queue items,
-  pending until the lane takes them and in flight while it delivers, and
-  lane ops that closed failed or skipped in the last hour as dead, in the
-  same schema-v1 JSON. `gc nudge drop <op id>` cancels a lane op as the
-  operator: `dropped` before the lane takes it, `cancel_requested` while it
-  is delivered. `gc doctor` gains a `legacy-delivery` check (queue depth,
+  `gc nudge status` lists a session's open lane messages beside its queue
+  items, pending until the lane takes them and in flight while it delivers,
+  and lane messages that closed failed or skipped in the last hour as dead,
+  in the same schema-v1 JSON; when it cannot read them all it says so and
+  exits 1. `gc nudge drop <op id>` cancels a lane message as the operator:
+  `dropped` before the lane takes it, `cancel_requested` while it is
+  delivered. `gc doctor` gains a `legacy-delivery` check (queue depth,
   live `gc nudge poll` sidecars, deprecated keys in use), and its
   `conversation-lanes` check reports the default kinds and why a city keeps
   legacy delivery.
