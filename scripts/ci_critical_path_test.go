@@ -930,8 +930,51 @@ func TestReleasePipelinesVerifyExactBinaryMetadata(t *testing.T) {
 			if tt.wantVersionArg != "" && !strings.Contains(metadataCheck.Run, tt.wantVersionArg) {
 				t.Errorf("binary metadata verification does not require release version %s", tt.wantVersionArg)
 			}
+			if want := goreleaserGCDistPath(t); !strings.Contains(metadataCheck.Run, want) {
+				t.Errorf("binary metadata verification does not check %s, where GoReleaser writes the gc build", want)
+			}
 		})
 	}
+}
+
+// goreleaserGCDistPath returns where GoReleaser writes the linux/amd64 gc
+// binary. GoReleaser names a build's dist directory after its id (defaulting
+// to the project name), so renaming the gc build id silently moves the binary
+// out from under the release verifiers.
+func goreleaserGCDistPath(t *testing.T) string {
+	t.Helper()
+
+	path := filepath.Join(repoRoot(t), ".goreleaser.yml")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var cfg struct {
+		ProjectName string `yaml:"project_name"`
+		Builds      []struct {
+			ID     string `yaml:"id"`
+			Binary string `yaml:"binary"`
+		} `yaml:"builds"`
+	}
+	if err := yaml.Unmarshal(body, &cfg); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	project := cfg.ProjectName
+	if project == "" {
+		project = "gascity"
+	}
+	for _, b := range cfg.Builds {
+		if b.Binary != "gc" {
+			continue
+		}
+		id := b.ID
+		if id == "" {
+			id = project
+		}
+		return "dist/" + id + "_linux_amd64_v1/gc"
+	}
+	t.Fatalf("%s has no build producing the gc binary", path)
+	return ""
 }
 
 func readCriticalPathWorkflow(t *testing.T, name string) ciCriticalPathWorkflow {

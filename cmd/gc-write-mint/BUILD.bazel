@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
 go_library(
     name = "gc-write-mint_lib",
-    srcs = ["main.go"],
+    srcs = [
+        "keygen.go",
+        "main.go",
+    ],
     importpath = "github.com/gastownhall/gascity/cmd/gc-write-mint",
     visibility = ["//visibility:private"],
     deps = [
@@ -21,6 +24,7 @@ go_test(
     name = "gc-write-mint_test",
     srcs = [
         "e2e_test.go",
+        "keygen_test.go",
         "main_test.go",
         "testenv_import_test.go",
     ],
@@ -39,6 +43,7 @@ go_test(
         "//conditions:default": {},
     }),
     deps = [
+        "//internal/api",
         "//internal/bazeltest",
         "//internal/citywriteauth",
         "//internal/clientgrant",
