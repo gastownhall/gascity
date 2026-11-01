@@ -827,6 +827,13 @@ orphan-sweep: foreign-identity gate budget of ${GATE_BUDGET_SECONDS}s exhausted;
     fi
 fi
 
+# Local skips extend the declaration rather than replace it: the outcome stays
+# partial and the gate's reason, when there is one, leads. A later
+# order_outcome_set skipped would overwrite the gate's partial declaration.
+if [ "$UNVERIFIABLE" -gt 0 ]; then
+    order_outcome_set partial "${ORDER_OUTCOME_REASON:+$ORDER_OUTCOME_REASON; }left $UNVERIFIABLE local claim(s) in place because the holder could not be verified dead or the claim could not be re-read or released; each bead scope names the claim and why"
+fi
+
 if [ "$ORPHANED" -gt 0 ] || [ "$UNVERIFIABLE" -gt 0 ] || [ "$PROTECTED" -gt 0 ]; then
     SUMMARY="orphan-sweep: reset $ORPHANED orphaned beads"
     if [ "$UNVERIFIABLE" -gt 0 ]; then
