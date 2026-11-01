@@ -1342,7 +1342,9 @@ func preflightSourceBeadChain(rootStore beads.Store, rootID string, opts Process
 // closeSourceBeadChain walks gc.source_bead_id / gc.source_store_ref upward
 // from the just-finalized workflow root and closes every parent source bead
 // in its native store. A missing resolver for a cross-store ref, a deleted
-// parent, or a cycle stops the walk as a traced no-op.
+// parent, or a cycle stops the walk as a traced no-op. A source bead marked
+// gc.work_outcome=blocked closes in that form, and the walk stops there so
+// its parents stay open for a human.
 // Resolver, store read, and close failures are returned so the finalizer stays
 // open for retry. This is what makes "Adopt PR" city-scope source beads
 // disappear from the human-visible queue once the rig-scope workflow merges.
@@ -1475,6 +1477,10 @@ func walkSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptio
 				opts.tracef("close-source-chain root=%s stop reason=live_child_workflow source=%s ref=%s live_roots=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef), sourceChainRootIDs(liveRoots))
 				stopWalk = true
 				return nil
+			}
+			if strings.TrimSpace(loaded.Metadata[beadmeta.WorkOutcomeMetadataKey]) == beadmeta.WorkOutcomeBlocked {
+				stopWalk = true
+				opts.tracef("close-source-chain root=%s stop-after reason=blocked_work_outcome source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
 			}
 			if !mutate {
 				return nil
