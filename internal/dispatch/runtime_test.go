@@ -12845,3 +12845,42 @@ func TestProcessWorkflowFinalizeClosesOpenBlockedSourceAndStopsChain(t *testing.
 		}
 	})
 }
+
+func TestProcessWorkflowFinalizeClosesSourceChainPastUnblockedWorkOutcomes(t *testing.T) {
+	t.Parallel()
+
+	for _, workOutcome := range []string{
+		beadmeta.WorkOutcomeShipped,
+		beadmeta.WorkOutcomeNoOp,
+		beadmeta.WorkOutcomeAbandoned,
+		"",
+	} {
+		t.Run("work_outcome="+workOutcome, func(t *testing.T) {
+			t.Parallel()
+
+			f := newSourceChainFinalizeFixture(t)
+			metadata := map[string]string{"gc.outcome": "pass"}
+			if workOutcome != "" {
+				metadata["gc.work_outcome"] = workOutcome
+			}
+			stampSourceChainLaunch(t, f, "mol-do-work", "closed", metadata)
+
+			result, trace := finalizeSourceChainFixture(t, f)
+
+			assertWorkflowPassedClosed(t, f, result)
+			parent, err := f.cityStore.Get(f.citySource.ID)
+			if err != nil {
+				t.Fatalf("get city source: %v", err)
+			}
+			if parent.Status != "closed" {
+				t.Fatalf("city source status = %q, want closed past a %q source", parent.Status, workOutcome)
+			}
+			if got := parent.Metadata["gc.outcome"]; got != "pass" {
+				t.Fatalf("city source gc.outcome = %q, want pass", got)
+			}
+			if strings.Contains(trace, "reason=blocked_source") {
+				t.Fatalf("trace has blocked_source stop for work_outcome %q:\n%s", workOutcome, trace)
+			}
+		})
+	}
+}
