@@ -137,7 +137,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 				env.clk.Advance(time.Minute)
 			}
 		}},
-		{"legacy drain-ack finalize", "last_woke_at pending_create_claim pending_create_started_at slept_at state state_reason", []string{"cmd/gc/session_reconciler.go:finalizeDrainAckStoppedSession"}, func(t *testing.T, rec *sessionKeyRecorder) {
+		{"legacy drain-ack finalize", "currently_processing_bead_id last_woke_at pending_create_claim pending_create_started_at slept_at state state_reason", []string{"cmd/gc/session_reconciler.go:finalizeDrainAckStoppedSession"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			env := newReconcilerTestEnv(t)
 			env.store = rec
 			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
@@ -321,7 +321,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 		{"operator suspend", "held_until last_woke_at runtime_lease_epoch runtime_lease_expires_at runtime_lease_flock runtime_lease_holder runtime_lease_ttl sleep_intent sleep_reason slept_at state suspended_at wake_request wake_requested_at", []string{"internal/session/manager.go:Manager.Suspend", "internal/session/runtime_lease.go:RuntimeLease.acquireRecord"}, func(t *testing.T, _ *sessionKeyRecorder) {
 			must(t, m.Suspend(context.Background(), testActorIn(t, session.ActorOperator, opCity), id, false))
 		}},
-		{"operator kill fence", "held_until last_woke_at pending_create_claim pending_create_started_at sleep_intent sleep_reason slept_at state state_reason suspended_at synced_at wake_request wake_requested_at", []string{"internal/session/kill_fence.go:KillPendingPatch", "internal/session/kill_fence.go:WriteKillFence"}, func(t *testing.T, rec *sessionKeyRecorder) {
+		{"operator kill fence", "currently_processing_bead_id held_until last_woke_at pending_create_claim pending_create_started_at sleep_intent sleep_reason slept_at state state_reason suspended_at synced_at wake_request wake_requested_at", []string{"internal/session/kill_fence.go:KillPendingPatch", "internal/session/kill_fence.go:WriteKillFence"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			_, err := session.WriteKillFence(rec, id, now)
 			must(t, err)
 		}},

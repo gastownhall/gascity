@@ -522,7 +522,14 @@ func RevertDrainAckStopPendingPatch(prior Info) MetadataPatch {
 }
 
 // SleepPatch records a non-terminal sleep/drain result. The holds are the
-// Sleep cell's (Store.ApplySleep).
+// Sleep cell's (Store.ApplySleep). Clears CurrentBeadIDKey along with the
+// other alive-session-only state: a sleeping session isn't processing
+// anything, so a stale anchor here would otherwise outlive the work it once
+// named (gastownhall/gascity#6410). An asleep session still legitimately
+// holding assigned work stays protected via the ordinary assignee-identity
+// match in releaseOrphanedPoolAssignments; it re-stamps the moment it wakes
+// again. suspended_at is not set here -- it is a disposition key
+// (dispositionKeys), owned by the Sleep cell's own mechanism, not this map.
 func SleepPatch(now time.Time, reason string) MetadataPatch {
 	return MetadataPatch{
 		"state":                     string(StateAsleep),
@@ -532,6 +539,7 @@ func SleepPatch(now time.Time, reason string) MetadataPatch {
 		"pending_create_claim":      "",
 		"pending_create_started_at": "",
 		"slept_at":                  now.UTC().Format(time.RFC3339),
+		CurrentBeadIDKey:            "",
 	}
 }
 
@@ -567,6 +575,9 @@ func AcknowledgeDrainPatch(now time.Time, freshWake bool) MetadataPatch {
 		"pending_create_claim":      "",
 		"pending_create_started_at": "",
 		"slept_at":                  now.UTC().Format(time.RFC3339),
+		// See SleepPatch: a drained session isn't processing anything either
+		// (gastownhall/gascity#6410).
+		CurrentBeadIDKey: "",
 	}
 	if freshWake {
 		patch["session_key"] = ""
