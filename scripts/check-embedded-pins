@@ -10,13 +10,12 @@ Checks:
             bundled content moves ahead of the pin between releases by design.
   stale     No example or doc carries a superseded bundled, gastown or
             gascity pin (internal/config/public_packs.go Superseded* lists).
-  releases  deps.env BD_VERSION is the latest published (non-prerelease)
-            gastownhall/beads release, and DOLT_VERSION is the Dolt version
-            that beads release qualifies (scripts/ci/install-dolt.sh at the
-            tag). --bd-advisory (RC Gate) turns a newer beads release into a
-            warning and checks Dolt against the pinned bd instead. beads measures each Dolt release before raising its pin
-            (Dolt 2.3.x regressed DOLT_RESET('--hard')), so the qualified pin,
-            not upstream "latest", is the newest safe Dolt.
+  releases  deps.env BD_VERSION is the latest published Beads release (or
+            advisory under --bd-advisory). Runtime bd and external Dolt must
+            match GC's required native CLI compatibility test toolchain.
+            Beads' own installer default is informational: it is not GC's
+            external-server qualification. The native integration test must
+            still execute; matching declarations alone is not runtime proof.
 
 The public gastown/gascity pack pins are checked against the registry by
 scripts/update-bundled-gastown-pack --check.
@@ -57,13 +56,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-releases", action="store_true", help="skip the bd/dolt release checks")
     parser.add_argument("--skip-stale", action="store_true", help="skip the superseded-pin scan of examples and docs")
     parser.add_argument("--latest-bd", help="latest beads release tag (skips the GitHub lookup)")
-    parser.add_argument("--bd-qualified-dolt", help="Dolt version the beads release qualifies (skips the lookup)")
+    parser.add_argument("--bd-qualified-dolt", help="Beads installer Dolt default, reported for context (skips the lookup)")
     parser.add_argument(
         "--bd-advisory",
         action="store_true",
-        help="report a newer beads release than BD_VERSION as a warning, and check DOLT_VERSION "
-        "against the Dolt the pinned BD_VERSION qualifies (release gates: a beads patch shipped "
-        "after the pin must not block a release)",
+        help="report a newer beads release than BD_VERSION as a warning; still require the runtime "
+        "bd/Dolt pair to match GC native compatibility test tools",
     )
     return parser.parse_args()
 
@@ -187,7 +185,7 @@ def latest_release_tag(repo: str) -> str:
     return json.loads(fetch(f"https://api.github.com/repos/{repo}/releases/latest"))["tag_name"]
 
 
-def beads_qualified_dolt(tag: str) -> str:
+def beads_installer_dolt(tag: str) -> str:
     script = fetch(f"https://raw.githubusercontent.com/{BEADS_REPO}/{tag}/scripts/ci/install-dolt.sh").decode()
     match = re.search(r'^readonly version="([^"]+)"', script, re.M)
     if not match:
@@ -195,27 +193,56 @@ def beads_qualified_dolt(tag: str) -> str:
     return match.group(1)
 
 
+def gc_native_compatibility_pair(root: Path) -> tuple[str, str]:
+    """Read the literal pinned tools used by GC's required native CLI test.
+
+    Fail closed if BUILD structure changes; a silent guess could certify a
+    runtime pair different from the one CI actually exercises. This reads
+    declarations, not a cached or fabricated test-success receipt.
+    """
+    path = root / "cmd/gc/BUILD.bazel"
+    text = path.read_text(encoding="utf-8")
+    target = re.findall(
+        r'^\s*"gc_managed_beads_native_cli_test"\s*:\s*"TestManagedBeadsNativeCLICompatibility"',
+        text, re.M,
+    )
+    tools = re.findall(r'^\s*"GC_TEST_TOOL_PATHS"\s*:\s*"([^"\n]+)"\s*,?\s*(?:#.*)?$', text, re.M)
+    if len(target) != 1 or len(tools) != 1:
+        raise ValueError("expected one native CLI compatibility target and one literal GC_TEST_TOOL_PATHS entry")
+    bd = re.findall(r'@bd_bin_v(\d+)_(\d+)_(\d+)//:bd\)', tools[0])
+    dolt = re.findall(r'@dolt_bin_v(\d+)_(\d+)_(\d+)//:dolt-linux-amd64/bin/dolt\)', tools[0])
+    if len(bd) != 1 or len(dolt) != 1:
+        raise ValueError("expected exactly one pinned bd and one pinned Dolt tool")
+    return "v" + ".".join(bd[0]), ".".join(dolt[0])
+
+
 def check_releases(root: Path, latest_bd: str | None, qualified_dolt: str | None, bd_advisory: bool) -> list[str]:
     env = deps_env(root)
     bd = env.get("BD_VERSION", "")
     dolt = env.get("DOLT_VERSION", "")
     errors: list[str] = []
+    try:
+        tested_bd, tested_dolt = gc_native_compatibility_pair(root)
+    except (OSError, ValueError) as exc:
+        return [f"GC native compatibility toolchain unavailable: {exc}; check cmd/gc/BUILD.bazel before releasing"]
+    if bd != tested_bd:
+        errors.append(f"deps.env BD_VERSION={bd}, GC native compatibility target uses bd {tested_bd}")
+    if dolt != tested_dolt:
+        errors.append(f"deps.env DOLT_VERSION={dolt}, GC native compatibility target uses Dolt {tested_dolt}")
     online = qualified_dolt is None
     latest_bd = latest_bd or latest_release_tag(BEADS_REPO)
-    qualifying_bd = latest_bd
     if bd != latest_bd:
         message = f"deps.env BD_VERSION={bd}, latest beads release is {latest_bd}"
         if bd_advisory:
             print(f"::warning title=bd pin behind latest beads release::{message}")
-            qualifying_bd = bd
         else:
             errors.append(message)
-    qualified_dolt = qualified_dolt or beads_qualified_dolt(qualifying_bd)
-    if dolt != qualified_dolt:
-        errors.append(f"deps.env DOLT_VERSION={dolt}, beads {qualifying_bd} qualifies Dolt {qualified_dolt}")
     if online:
+        installer_dolt = beads_installer_dolt(bd)
         upstream = latest_release_tag(DOLT_REPO).lstrip("v")
-        print(f"bd {bd} (latest {latest_bd}); dolt {dolt} (beads {qualifying_bd} qualifies {qualified_dolt}; upstream latest {upstream})")
+        print(f"bd {bd} (latest {latest_bd}); dolt {dolt} "
+              f"(GC native test pair {tested_bd}/{tested_dolt}; "
+              f"Beads installer default {installer_dolt}; upstream latest {upstream})")
     return errors
 
 

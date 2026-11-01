@@ -33,6 +33,7 @@ func newEmbeddedPinsFixture(t *testing.T) *embeddedPinsFixture {
 	f.write("examples/bd/pack.toml", "[pack]\nname = \"bd\"\n")
 	f.write("examples/bd/dolt/pack.toml", "[pack]\nname = \"dolt\"\n")
 	f.write("deps.env", "DOLT_VERSION=2.2.0\nBD_VERSION=v1.3.1\n")
+	f.writeCompatibilityPair("v1.3.1", "2.2.0")
 	f.writePublicPacks("sha:" + strings.Repeat("0", 40))
 	contentCommit := f.commit("bundled content")
 	f.writePublicPacks("sha:" + contentCommit)
@@ -103,7 +104,7 @@ func (f *embeddedPinsFixture) run(args ...string) (string, error) {
 // embeds from silently drifting behind the latest release: the bundled
 // core/bd/dolt pin must name a commit with the embedded content, examples must
 // not carry a superseded bundled pin, and bd/dolt must match the latest beads
-// release and the Dolt version it qualifies.
+// release and the runtime versions must match GC native compatibility tools.
 func TestCheckEmbeddedPins(t *testing.T) {
 	t.Run("current pins pass", func(t *testing.T) {
 		f := newEmbeddedPinsFixture(t)
@@ -183,7 +184,7 @@ func TestCheckEmbeddedPins(t *testing.T) {
 		if err == nil {
 			t.Fatalf("stale bd/dolt pins passed:\n%s", out)
 		}
-		for _, want := range []string{"BD_VERSION=v1.3.0, latest beads release is v1.3.1", "DOLT_VERSION=2.1.7, beads v1.3.1 qualifies Dolt 2.2.0"} {
+		for _, want := range []string{"BD_VERSION=v1.3.0, latest beads release is v1.3.1", "DOLT_VERSION=2.1.7, GC native compatibility target uses Dolt 2.2.0"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("output missing %q:\n%s", want, out)
 			}
@@ -204,5 +205,85 @@ func TestRepoWritesNoSupersededPins(t *testing.T) {
 	cmd := exec.Command(filepath.Join(root, "scripts", "check-embedded-pins"), "--repo-root", root, "--skip-bundled", "--skip-releases")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("check-embedded-pins: %v\n%s", err, out)
+	}
+}
+
+// The native CLI compatibility test is part of the required integration suite.
+// Its declared tools are the GC-qualified pair, independently of the older
+// default in the Beads release's own installer.
+func (f *embeddedPinsFixture) writeCompatibilityPair(bd, dolt string) {
+	f.t.Helper()
+	bdLabel := strings.ReplaceAll(strings.TrimPrefix(bd, "v"), ".", "_")
+	doltLabel := strings.ReplaceAll(dolt, ".", "_")
+	f.write("cmd/gc/BUILD.bazel", `INTEGRATION_SOLO_TESTS = {
+    "gc_managed_beads_native_cli_test": "TestManagedBeadsNativeCLICompatibility",
+}
+go_test(
+    name = "gc_test",
+    env = select({
+        "//:gotags_integration": {
+            "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v`+bdLabel+`//:bd) $(rootpath @dolt_bin_v`+doltLabel+`//:dolt-linux-amd64/bin/dolt)",
+        },
+    }),
+)
+`)
+}
+
+func TestCheckEmbeddedPinsUsesGCNativeCompatibilityPair(t *testing.T) {
+	t.Run("GC qualified external server newer than Beads installer", func(t *testing.T) {
+		f := newEmbeddedPinsFixture(t)
+		f.write("deps.env", "DOLT_VERSION=2.6.0\nBD_VERSION=v1.3.1\n")
+		f.writeCompatibilityPair("v1.3.1", "2.6.0")
+		f.commit("qualify external server in GC")
+		if out, err := f.run(); err != nil {
+			t.Fatalf("GC runtime/test pair matches, despite older Beads installer: %v\n%s", err, out)
+		}
+	})
+	t.Run("runtime server differs from GC tested server", func(t *testing.T) {
+		f := newEmbeddedPinsFixture(t)
+		f.writeCompatibilityPair("v1.3.1", "2.6.0")
+		f.commit("test a different server than the runtime pin")
+		out, err := f.run()
+		if err == nil || !strings.Contains(out, "DOLT_VERSION=2.2.0, GC native compatibility target uses Dolt 2.6.0") {
+			t.Fatalf("expected runtime/test server mismatch, got %v\n%s", err, out)
+		}
+	})
+	t.Run("runtime Beads differs from GC tested Beads", func(t *testing.T) {
+		f := newEmbeddedPinsFixture(t)
+		f.writeCompatibilityPair("v1.3.0", "2.2.0")
+		f.commit("test a different Beads than the installed default")
+		out, err := f.run()
+		if err == nil || !strings.Contains(out, "BD_VERSION=v1.3.1, GC native compatibility target uses bd v1.3.0") {
+			t.Fatalf("expected runtime/test Beads mismatch, got %v\n%s", err, out)
+		}
+	})
+}
+
+func TestCheckEmbeddedPinsRejectsMissingOrAmbiguousCompatibilityTools(t *testing.T) {
+	for _, fault := range []string{"missing build", "missing target", "missing tools", "ambiguous tools"} {
+		t.Run(fault, func(t *testing.T) {
+			f := newEmbeddedPinsFixture(t)
+			path := filepath.Join(f.root, "cmd/gc/BUILD.bazel")
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch fault {
+			case "missing build":
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			case "missing target":
+				f.write("cmd/gc/BUILD.bazel", strings.ReplaceAll(string(data), "gc_managed_beads_native_cli_test", "unrelated_test"))
+			case "missing tools":
+				f.write("cmd/gc/BUILD.bazel", strings.ReplaceAll(string(data), "GC_TEST_TOOL_PATHS", "UNRELATED_PATHS"))
+			case "ambiguous tools":
+				f.write("cmd/gc/BUILD.bazel", string(data)+"\n\"GC_TEST_TOOL_PATHS\": \"$(rootpath @bd_bin_v1_3_0//:bd) $(rootpath @dolt_bin_v2_1_7//:dolt-linux-amd64/bin/dolt)\",\n")
+			}
+			out, err := f.run()
+			if err == nil || !strings.Contains(out, "GC native compatibility") {
+				t.Fatalf("invalid compatibility toolchain passed or lacked remedy: %v\n%s", err, out)
+			}
+		})
 	}
 }

@@ -110,10 +110,12 @@ func TestMakeInstallExplicitPrefixPreservesOtherInstallations(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(build, "gc"), []byte("candidate GC"), 0o755); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"gc", "gc-osc7501"} {
+		if err := os.WriteFile(filepath.Join(build, name), []byte("candidate "+name), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
-	for _, name := range []string{"gc", "bd"} {
+	for _, name := range []string{"gc", "gc-osc7501", "bd"} {
 		if err := os.WriteFile(filepath.Join(localBin, name), []byte("retained "+name), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -139,11 +141,13 @@ func TestMakeInstallExplicitPrefixPreservesOtherInstallations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("install: %v\n%s", err, out)
 	}
-	got, err := os.ReadFile(filepath.Join(install, "gc"))
-	if err != nil || string(got) != "candidate GC" {
-		t.Fatalf("candidate=%q, err=%v", got, err)
+	for _, name := range []string{"gc", "gc-osc7501"} {
+		got, err := os.ReadFile(filepath.Join(install, name))
+		if err != nil || string(got) != "candidate "+name {
+			t.Fatalf("candidate %s=%q, err=%v", name, got, err)
+		}
 	}
-	for _, name := range []string{"gc", "bd"} {
+	for _, name := range []string{"gc", "gc-osc7501", "bd"} {
 		path := filepath.Join(localBin, name)
 		info, err := os.Lstat(path)
 		if err != nil {
