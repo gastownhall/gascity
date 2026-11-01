@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -651,6 +653,19 @@ func CoreFingerprintBreakdown(cfg Config) BreakdownV1 {
 			}
 		}),
 	}
+	// Upstream and OperatorEnv are conditional, as in the core hash, so a
+	// breakdown that sets neither stays byte-identical to one stored before
+	// these fields existed.
+	if cfg.Upstream != "" {
+		fields["Upstream"] = fieldHash(func(h hash.Hash) {
+			hashOptionalString(h, "upstream", cfg.Upstream)
+		})
+	}
+	if len(cfg.OperatorEnv) > 0 {
+		fields["OperatorEnv"] = fieldHash(func(h hash.Hash) {
+			hashSortedMap(h, cfg.OperatorEnv)
+		})
+	}
 	var copyEntries []BreakdownCopyEntry
 	if len(cfg.CopyFiles) > 0 {
 		copyEntries = make([]BreakdownCopyEntry, 0, len(cfg.CopyFiles))
@@ -736,6 +751,10 @@ func LogCoreFingerprintDrift(w io.Writer, name string, storedJSON string, curren
 			}
 		case "PreStart":
 			fmt.Fprintf(w, "    PreStart: %v\n", current.PreStart) //nolint:errcheck // best-effort diag
+		case "Upstream":
+			fmt.Fprintf(w, "    Upstream: %q\n", current.Upstream) //nolint:errcheck // best-effort diag; a name, not the serving env
+		case "OperatorEnv":
+			fmt.Fprintf(w, "    OperatorEnv keys: %v\n", slices.Sorted(maps.Keys(current.OperatorEnv))) //nolint:errcheck // best-effort diag; values may be secrets
 		case "OverlayDir":
 			fmt.Fprintf(w, "    OverlayDir: %q\n", current.OverlayDir) //nolint:errcheck // best-effort diag
 		case "OverlayProviders":
@@ -806,11 +825,17 @@ func parseStoredBreakdown(stored string) (fields map[string]string, copyEntries 
 }
 
 // diffBreakdownFields returns the sorted list of field names where the
-// stored and current per-field hashes differ.
+// stored and current per-field hashes differ, a field only one side carries
+// (a conditional one such as Upstream or OperatorEnv) included.
 func diffBreakdownFields(stored, current map[string]string) []string {
 	var diffs []string
 	for field, ch := range current {
 		if stored[field] != ch {
+			diffs = append(diffs, field)
+		}
+	}
+	for field := range stored {
+		if _, ok := current[field]; !ok {
 			diffs = append(diffs, field)
 		}
 	}
