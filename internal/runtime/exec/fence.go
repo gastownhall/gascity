@@ -19,7 +19,10 @@ var _ runtime.FencedInputProvider = (*Provider)(nil)
 // if-shell on the agent pane's fence; none for any other pack, whose box tmux
 // need not hold a fence, or which is driven by the dedicated wire ops that
 // cannot condition input on an incarnation. Like the pack's other traits it
-// is read from the handshake, so it is static per provider.
+// is read from the handshake, so it is static once the handshake succeeds.
+// A failed handshake reads none until a retry succeeds (handshakeRetryAfter):
+// a session started meanwhile published no fence, and fenced input to it
+// misses once the retry reads atomic, until that session restarts.
 func (p *Provider) InputFencing(string) runtime.InputFencing {
 	if p.handshakeCapability(runtime.ProtocolCapabilityConnectionExec) &&
 		p.handshakeCapability(runtime.ProtocolCapabilityInputFence) {

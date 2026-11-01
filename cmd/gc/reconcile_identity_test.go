@@ -267,36 +267,44 @@ func TestOwnsNameIdentityOnly(t *testing.T) {
 
 // TestIdentityReadableLeaves pins the leaves whose identity is read, so
 // Ownerless can arise only on a backend that seeds identity before it lists
-// the name (v5 X3): tmux, acp and subprocess (LL3). Every other leaf reads
-// not Known.
+// the name (v5 X3): tmux, acp and subprocess (LL3), and a v2-ready exec
+// pack. Every other leaf reads not Known. It also pins the leaves whose
+// GetMeta reads that identity (metaIdentityReadable), which the legacy
+// pending-create attribution reads it through: the same leaves but the exec
+// pack, whose `get-meta` need not serve what `observe` reports.
 //
-// Kills: a known leaf type made identity-readable without revisiting X3.
+// Kills: a known leaf type made identity-readable without revisiting X3; a
+// v2-ready exec pack read as vouching for identity through GetMeta, which
+// leaves a manual row's unstamped box running when the row closes.
 //
 // auto and hybrid are never leaves (ResolveBackend and inventoryLeaves walk
 // through them), but they forward the batched env read, so they are pinned
 // unreadable by their runtime.Router guard.
 func TestIdentityReadableLeaves(t *testing.T) {
 	for name, tc := range map[string]struct {
-		leaf runtime.Provider
-		want bool
+		leaf       runtime.Provider
+		want, meta bool
 	}{
-		"tmux":       {(*tmux.Provider)(nil), true},
-		"acp":        {(*acp.Provider)(nil), true},
-		"subprocess": {(*subprocess.Provider)(nil), true},
-		"auto":       {(*auto.Provider)(nil), false},
-		"exec":       {(*exec.Provider)(nil), false},
-		"herdr":      {(*herdr.Provider)(nil), false},
-		"hybrid":     {(*hybrid.Provider)(nil), false},
-		"k8s":        {(*k8s.Provider)(nil), false},
-		"ssh":        {(*ssh.Provider)(nil), false},
-		"t3bridge":   {(*t3bridge.Provider)(nil), false},
+		"tmux":       {(*tmux.Provider)(nil), true, true},
+		"acp":        {(*acp.Provider)(nil), true, true},
+		"subprocess": {(*subprocess.Provider)(nil), true, true},
+		"auto":       {(*auto.Provider)(nil), false, false},
+		"exec":       {(*exec.Provider)(nil), false, false},
+		"herdr":      {(*herdr.Provider)(nil), false, false},
+		"hybrid":     {(*hybrid.Provider)(nil), false, false},
+		"k8s":        {(*k8s.Provider)(nil), false, false},
+		"ssh":        {(*ssh.Provider)(nil), false, false},
+		"t3bridge":   {(*t3bridge.Provider)(nil), false, false},
 		// exec observes identity only once its handshake is v2-ready, whose
 		// protocol seeds identity before it reports a name (X3).
-		"exec profile":    {runtime.NewFakeProfile(runtime.ProfileExec, runtime.FullFake{Fake: runtime.NewFake()}), false},
-		"exec v2 profile": {runtime.NewFakeProfile(runtime.ProfileExecV2, runtime.FullFake{Fake: runtime.NewFake()}), true},
+		"exec profile":    {runtime.NewFakeProfile(runtime.ProfileExec, runtime.FullFake{Fake: runtime.NewFake()}), false, false},
+		"exec v2 profile": {runtime.NewFakeProfile(runtime.ProfileExecV2, runtime.FullFake{Fake: runtime.NewFake()}), true, false},
 	} {
 		if got := identityReadable(tc.leaf); got != tc.want {
 			t.Errorf("identityReadable(%s) = %v, want %v", name, got, tc.want)
+		}
+		if got := metaIdentityReadable(tc.leaf); got != tc.meta {
+			t.Errorf("metaIdentityReadable(%s) = %v, want %v", name, got, tc.meta)
 		}
 	}
 }

@@ -777,15 +777,31 @@ func (l *runtimeInventoryLane) readIdentities(ctx context.Context, attrs map[str
 // subprocess). Other leaves' GetMeta reaches a pod, a host or a script, so
 // their identity is never read, and stays unknown. A composite
 // ([runtime.Router]) is never a leaf: it forwards the batched read to a leaf
-// it routes to, so it is not identity-readable itself.
+// it routes to, so it is not identity-readable itself. A caller that reads
+// identity through GetMeta asks metaIdentityReadable instead.
 func identityReadable(leaf runtime.Provider) bool {
+	if metaIdentityReadable(leaf) {
+		return true
+	}
+	if _, ok := leaf.(runtime.Router); ok {
+		return false
+	}
+	observer, ok := leaf.(runtime.IdentityObserver)
+	return ok && observer.IdentityObservable()
+}
+
+// metaIdentityReadable is identityReadable without the fresh identity read:
+// a leaf whose GetMeta reads the identity env its start stamped before the
+// name is visible, from a batched environment (tmux) or a local sidecar
+// (acp, subprocess). A v2-ready exec pack is not one: `observe` reports the
+// identity its box was started with, but nothing requires its `get-meta` to
+// serve those keys, so a GetMeta read (readPendingCreateIdentity) can find
+// the pack's own box unstamped.
+func metaIdentityReadable(leaf runtime.Provider) bool {
 	if _, ok := leaf.(runtime.Router); ok {
 		return false
 	}
 	if _, ok := leaf.(runtime.EnvironmentBatchProvider); ok {
-		return true
-	}
-	if observer, ok := leaf.(runtime.IdentityObserver); ok && observer.IdentityObservable() {
 		return true
 	}
 	return localSidecar(leaf)

@@ -145,6 +145,13 @@ func teardownRuntimeVariants() []teardownRuntimeVariant {
 		profileVariant(runtime.ProfileHerdr, true),
 		profileVariant(runtime.ProfileK8s, true),
 		profileVariant(runtime.ProfileExec, true),
+		// A v2-ready exec pack observes its identity fresh, but the rollback
+		// reads identity through GetMeta, which its protocol need not serve.
+		{
+			name:      "exec-v2",
+			build:     func(f *runtime.Fake, _ string) runtime.Provider { return leg(runtime.ProfileExecV2, f) },
+			tearsDown: true,
+		},
 		profileVariant(runtime.ProfileSSH, true),
 		profileVariant(runtime.ProfileT3Bridge, true),
 		{
@@ -204,7 +211,9 @@ func teardownRuntimeVariants() []teardownRuntimeVariant {
 // on every runtime, as before. A manual row whose name an unseeded composite
 // cannot route to a leaf that vouches for identity is held.
 //
-// Kills: no leaf gate; no manual-origin check; route-unknown read as known.
+// Kills: no leaf gate; no manual-origin check; route-unknown read as known;
+// a leaf gate that takes a v2-ready exec pack's fresh identity read
+// (identityReadable) for the GetMeta read the rollback attributes by.
 func TestPendingCreateRollback_TearsDownManualRowsUnattributedRuntime(t *testing.T) {
 	classes := []teardownRowClass{rowManual, rowManualLegacy, rowNamed, rowSingleton, rowUnsetOrigin, rowPool}
 	for _, v := range teardownRuntimeVariants() {
@@ -580,6 +589,13 @@ type slowStartTmuxProvider struct {
 	runtime.EnvironmentBatchProvider
 }
 
+// slowStartObserverProvider keeps an exec leaf's fresh identity read, so a
+// v2-ready one observes identity as a v2-ready exec pack does.
+type slowStartObserverProvider struct {
+	*slowStartProvider
+	runtime.IdentityObserver
+}
+
 // TestStaleAsyncStart_StopsManualRowsUnattributedRuntime: a manual row is
 // closed while its start is creating the box. The start's commit finds the
 // row gone, and its stale-start cleanup stops the box it created on a runtime
@@ -587,7 +603,9 @@ type slowStartTmuxProvider struct {
 // unstamped box there is another owner's) and for a named row (its name is
 // re-targeted).
 //
-// Kills: no stale-start override.
+// Kills: no stale-start override; an override gated on a v2-ready exec
+// pack's fresh identity read (identityReadable), which the stale start's
+// GetMeta attribution does not read.
 func TestStaleAsyncStart_StopsManualRowsUnattributedRuntime(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -596,6 +614,7 @@ func TestStaleAsyncStart_StopsManualRowsUnattributedRuntime(t *testing.T) {
 		wantStop bool
 	}{
 		{name: "exec/manual", class: rowManual, profile: runtime.ProfileExec, wantStop: true},
+		{name: "exec-v2/manual", class: rowManual, profile: runtime.ProfileExecV2, wantStop: true},
 		{name: "k8s/manual", class: rowManual, profile: runtime.ProfileK8s, wantStop: true},
 		{name: "tmux/manual", class: rowManual, profile: runtime.ProfileTmux},
 		{name: "exec/named", class: rowNamed, profile: runtime.ProfileExec},
@@ -607,6 +626,8 @@ func TestStaleAsyncStart_StopsManualRowsUnattributedRuntime(t *testing.T) {
 			var sp runtime.Provider = slow
 			if batch, ok := profiled.(runtime.EnvironmentBatchProvider); ok {
 				sp = slowStartTmuxProvider{slowStartProvider: slow, EnvironmentBatchProvider: batch}
+			} else if observer, ok := profiled.(runtime.IdentityObserver); ok {
+				sp = slowStartObserverProvider{slowStartProvider: slow, IdentityObserver: observer}
 			}
 			starts := &asyncStartTracker{}
 			released := false
