@@ -18,7 +18,10 @@ import (
 // An entry whose live read could not tell (obs.Hold) waits, kept as it is,
 // and so does an entry whose last nudge's delivery is unsettled (a
 // NoticeMark), which also holds the seat's nudge slot (WN1). A mark ends with its episode:
-// a new generation, a rung rise and a progress reset clear it.
+// a new generation, a rung rise and a progress reset clear it. Work whose
+// seat waits on a person (Work.AwaitsHuman) is only ever nudged, a Cap after
+// its wait began and a Cap apart after that, and its pending release is
+// dropped: the wait's start and its end each begin a new episode.
 //
 // Before acting, on a pass that may act on the seat, the seat's rate-limit
 // episode takes its step (rateLimit): it opens on an answered refusal, paces
@@ -62,6 +65,12 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 				}
 			}
 		}
+		if e.AwaitsHuman != w.AwaitsHuman { // a wait on a person begins or ends: a new episode
+			e.AwaitsHuman, e.Attempts, e.Paused, e.Since, e.Escalated, e.Unreleased, e.Refused, e.Notice = w.AwaitsHuman, 0, 0, now, false, false, 0, NoticeMark{}
+			if e.AwaitsHuman {
+				e.Last = now // the wait is paced from its start (dueAt)
+			}
+		}
 		e = p.progressReset(e, obs)
 		entries = append(entries, e)
 	}
@@ -75,14 +84,15 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 	idx := func(k ClaimKey) int { return slices.IndexFunc(next.Entries, func(e Entry) bool { return e.Key == k }) }
 
 	// 3. A pending release: re-emit while the claim is still outstanding and
-	// unstarted, clear it once it is gone, alarm if it raced a start.
+	// unstarted, clear it once it is gone or its seat waits on a person,
+	// alarm if it raced a start.
 	if r := prev.Release; r != nil {
 		i := idx(r.Key)
 		_, named := obs.Started[r.Key]
 		switch {
 		case obs.StartedRead && (named || (i >= 0 && next.Entries[i].Rung >= RungStarted)):
 			acts = append(acts, Alert{Key: r.Key, Reason: AlertReleaseRacedStart})
-		case i < 0 || next.Entries[i].Kind != KindClaim:
+		case i < 0 || next.Entries[i].Kind != KindClaim || next.Entries[i].AwaitsHuman:
 		case !obs.StartedRead: // cannot re-prove unstarted; hold the mark, so the hook still refuses it
 			next.Release = r
 		default:
@@ -138,7 +148,7 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 			if !nudged {
 				nudge(true)
 			}
-		case e.Rung == RungEscalated || e.Attempts < t:
+		case e.AwaitsHuman || e.Rung == RungEscalated || e.Attempts < t: // a wait on a person is only ever nudged
 			if !nudged {
 				nudge(false)
 			}
@@ -262,8 +272,14 @@ func minTime(t, now time.Time) time.Time {
 // its last nudge. While the seat is paced paused (a degraded provider, an
 // open rate-limit episode) the backoff is PausedCap, both floor and cap:
 // delivery goes on, at a steady pace. While the seat refuses nudges
-// (Refused) PausedCap is the floor.
+// (Refused) PausedCap is the floor. A wait on a person is due a Cap after it
+// began or after its last nudge (Last holds either), whatever a rung rise, a
+// new generation, the seat's progress, the provider's health or a rate-limit
+// episode do meanwhile: it paces a person, not the seat or the provider.
 func (p Policy) dueAt(e Entry, paused bool) time.Time {
+	if e.AwaitsHuman {
+		return e.Last.Add(p.Cap)
+	}
 	if e.Attempts == 0 && e.Paused == 0 && !e.Unreleased {
 		return e.Since.Add(p.Grace)
 	}
@@ -423,7 +439,10 @@ func NudgeRefused(r Record, key ClaimKey, attempt int, now time.Time) (out Recor
 // the nudge may end before the delivery returns), in generation gen:
 // the entry's refusals end, and the seat's Delivered moves to at when r is
 // gen's cell and at is newer. A zero at moves nothing. ok is false when
-// nothing changed (no write needed).
+// nothing changed (no write needed). The caller stamps every delivery that
+// reached the seat, paused or not, one whose turn it never saw start
+// included: an open rate-limit episode is confirmed only by a refusal of a
+// nudge delivered after it opened, so an unstamped delivery confirms nothing.
 func NudgeDelivered(r Record, key ClaimKey, gen int64, at time.Time) (Record, bool) {
 	changed := false
 	if r.V != 0 && r.Gen == gen {

@@ -78,6 +78,8 @@ func TestGcBdSplitHandsBdTheBytesItJudged(t *testing.T) {
 		infra   = `{"id":"demo-1","title":"s","issue_type":"session","labels":["gc:session"]}` + "\n"
 		meta    = `{"note":"x"}`
 		graph   = `{"gc.root_bead_id":"gcg-1"}`
+		plan    = `{"nodes":[{"key":"a","title":"a","type":"task"}]}`
+		session = `{"nodes":[{"key":"s","title":"s","labels":["gc:session"]}]}`
 	)
 	cases := []struct {
 		name, file, judged, swapped, flag, prefix string
@@ -95,6 +97,10 @@ func TestGcBdSplitHandsBdTheBytesItJudged(t *testing.T) {
 		{"create --metadata @file before --", "m.json", meta, graph, "--metadata", "@", []string{"create", "--metadata", "@m.json", "--", "a title"}},
 		{"create --title --", "m.json", meta, graph, "--metadata", "@", []string{"create", "--title", "--", "--metadata", "@m.json"}},
 		{"update --metadata @file", "m.json", meta, graph, "--metadata", "@", []string{"update", "demo-abc", "--metadata", "@m.json"}},
+		{"create --graph", "plan.json", plan, session, "--graph", "", []string{"create", "--graph", "plan.json", "--json"}},
+		{"create --graph=", "plan.json", plan, session, "--graph", "", []string{"create", "--graph=plan.json"}},
+		{"new --graph --dry-run", "plan.json", plan, session, "--graph", "", []string{"new", "--graph", "plan.json", "--dry-run"}},
+		{"create --graph twice", "plan.json", plan, session, "--graph", "", []string{"create", "--graph", "other.json", "--graph", "plan.json"}},
 		{"import <file>", "a.jsonl", row, infra, "", "", []string{"import", "a.jsonl"}},
 		{"import -i", "a.jsonl", row, infra, "", "", []string{"import", "-i", "a.jsonl"}},
 		{"import --input=", "a.jsonl", row, infra, "", "", []string{"import", "--input=a.jsonl"}},
@@ -152,6 +158,7 @@ func TestGcBdSplitPipeOperandReachesBd(t *testing.T) {
 		{"batch --file", "create task 2 hello there\n", "--file", func(p string) []string { return []string{"batch", "--file", p} }},
 		{"delete --from-file", "demo-1\n", "--from-file", func(p string) []string { return []string{"delete", "--from-file", p} }},
 		{"import", `{"id":"demo-1","title":"w","issue_type":"task"}` + "\n", "", func(p string) []string { return []string{"import", p} }},
+		{"create --graph", `{"nodes":[{"key":"a","title":"a","type":"task"}]}`, "--graph", func(p string) []string { return []string{"create", "--graph", p} }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r, w, err := os.Pipe()
@@ -190,6 +197,7 @@ func TestGcBdSplitRefusedFileWriteLeavesNoCopy(t *testing.T) {
 		"ops.txt": "create message 2 hello there\n",
 		"a.jsonl": `{"id":"demo-1","title":"s","issue_type":"session","labels":["gc:session"]}` + "\n",
 		"m.json":  `{"gc.root_bead_id":"gcg-1"}`,
+		"p.json":  `{"nodes":[{"key":"s","title":"s","labels":["gc:session"]}]}`,
 	} {
 		if err := os.WriteFile(filepath.Join(scope, name), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
@@ -199,6 +207,7 @@ func TestGcBdSplitRefusedFileWriteLeavesNoCopy(t *testing.T) {
 		{"batch", "--file", "ops.txt"},
 		{"import", "a.jsonl"},
 		{"create", "--title", "t", "--metadata", "@m.json"},
+		{"create", "--graph", "p.json"},
 	} {
 		if g := bdClassFlipGuard(splitGuardTestCity(), scope, argv, judgedFilesDeps("bd-1.3.2")); g.refusal == "" {
 			t.Errorf("gc bd %q was admitted", argv)

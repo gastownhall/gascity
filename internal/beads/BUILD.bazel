@@ -191,6 +191,7 @@ go_test(
         "memstore_test.go",
         "metadata_cas_operation_test.go",
         "metadata_empty_clear_conformance_test.go",
+        "metadata_readings_test.go",
         "namespace_census_test.go",
         "native_dolt_events_journal_read_test.go",
         "native_dolt_events_journal_test.go",
@@ -295,6 +296,7 @@ go_test(
         "unread_store_notice_test.go",
         "update_reporting_test.go",
         "updated_at_store_test.go",
+        "verbatim_import_test.go",
     ],
     data = glob(
         ["**"],

@@ -178,7 +178,7 @@ const claudeRateLimitClass = "rate_limit"
 func claudeTurnFailure(e claudeTurnLine) TurnFailure {
 	status, _ := jsonIntValue(e.ErrorStatus)
 	class := jsonStringValue(e.ErrorClass)
-	return newTurnFailure(class, status, class == claudeRateLimitClass, claudeMessageText(e.Message))
+	return newTurnFailure(class, status, class == claudeRateLimitClass, false, claudeMessageText(e.Message))
 }
 
 // claudeMessageText is the text of a message: its string content, or its

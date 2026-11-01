@@ -180,6 +180,14 @@ type Config struct {
 	// literal. Empty disables the durable capture, so ad-hoc invocations
 	// and tests run unchanged.
 	RuntimeDir string
+	// ProgramStatusBin is the gc-osc7501 companion that program-status
+	// capture arms with. Empty resolves it at each arm: next to the running
+	// executable, else on PATH. Tests set it to the binary they built.
+	ProgramStatusBin string
+	// ProgramStatus is the city's [session] program_status switch, the mode
+	// every program-status reading is taken under. Off (or empty) reads
+	// nothing: the read formats stay today's and every reading is Unread.
+	ProgramStatus runtime.ProgramStatusMode
 }
 
 // DefaultConfig returns a Config with the original hardcoded values.
@@ -420,23 +428,25 @@ func newTmuxCommand(ctx context.Context, args []string, stdout, stderr *bytes.Bu
 }
 
 func (realExecutor) execute(args []string) (string, error) {
-	var stdout, stderr bytes.Buffer
-	cmd := newTmuxCommand(context.Background(), args, &stdout, &stderr)
-	err := cmd.Run()
-	if err != nil {
-		return "", wrapError(err, stderr.String(), args)
-	}
-	return strings.TrimSpace(stdout.String()), nil
+	return realExecutor{}.executeCtx(context.Background(), args)
 }
 
+// executeCtx runs one tmux invocation. On failure it returns no output; output
+// printed before the failure (a command list's earlier commands) travels in
+// the error as a *tmuxOutputError.
 func (realExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
 	var stdout, stderr bytes.Buffer
 	cmd := newTmuxCommand(ctx, args, &stdout, &stderr)
 	err := cmd.Run()
+	out := strings.TrimSpace(stdout.String())
 	if err != nil {
-		return "", wrapError(err, stderr.String(), args)
+		err = wrapError(err, stderr.String(), args)
+		if out != "" {
+			err = &tmuxOutputError{Stdout: out, Err: err}
+		}
+		return "", err
 	}
-	return strings.TrimSpace(stdout.String()), nil
+	return out, nil
 }
 
 // Tmux wraps tmux operations.
@@ -458,6 +468,14 @@ type Tmux struct {
 	// agentSlice wraps pane commands in a transient systemd user scope when
 	// GC_AGENT_SLICE is set (see AgentSliceEnv in agent_slice.go).
 	agentSlice agentSliceWrapper
+
+	// capture is the program-status capture capability gate (see
+	// program_capture.go).
+	capture captureGate
+	// programStatus is the live program-status switch: nil until
+	// SetProgramStatusMode first publishes one, and then it overrides
+	// cfg.ProgramStatus (see program_capture.go).
+	programStatus atomic.Pointer[runtime.ProgramStatusMode]
 
 	// serverSocketObserver observes the server socket only after tmux reports
 	// ErrNoServer, during the new-session preflight or a liveness observation
@@ -859,6 +877,18 @@ func (t *Tmux) markSessionEnvRemoved(session string, keys []string) error {
 // private file instead — see [Tmux.runNewSession]. The session environment tmux
 // ends up holding is identical either way.
 func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env map[string]string) error {
+	return t.newSessionWithCommandAndEnv(name, workDir, command, env, runtime.ProgramStatusArm{})
+}
+
+// newSessionWithCommandAndEnv is NewSessionWithCommandAndEnv arming the
+// session's program-status capture as arm declares (see program_capture.go).
+// The zero arm, and an arm the capability gate refuses, create exactly as
+// NewSessionWithCommandAndEnv always has. An armed create runs one command
+// list: new-session, then the pane's nonce and tap. When a later command of
+// that list fails the session still exists (its pane id was printed): it is
+// marked, fenced and has its credentials withheld as any other, the arm
+// failure is logged, and create succeeds; heal re-arms the pane.
+func (t *Tmux) newSessionWithCommandAndEnv(name, workDir, command string, env map[string]string, arm runtime.ProgramStatusArm) error {
 	if err := validateSessionName(name); err != nil {
 		return err
 	}
@@ -868,6 +898,7 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	if err := t.probeServerAlive(); err != nil {
 		return err
 	}
+	plan := t.planCapture(arm)
 	args := []string{"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name}
 	if workDir != "" {
 		args = append(args, "-c", workDir)
@@ -888,17 +919,28 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	// For vars that need unsetting, prefix the command with env -u flags. The
 	// pane's shell would otherwise inherit them from the tmux server's global
 	// environment, which holds whatever the controller exported when the server
-	// started. This prefix is a property of THIS command only.
+	// started. This prefix is a property of THIS command only. It sits
+	// outside the relay, so the relay never holds a withheld value its
+	// child could read.
 	var err error
-	command, err = withEnvUnsetPrefix(command, unsetKeys)
+	command, err = withEnvUnsetPrefix(plan.wrapRelay(command), unsetKeys)
 	if err != nil {
 		return err
 	}
 	// Add the command as the last argument
 	args = append(args, t.wrapPaneCommand(command))
-	pane, err := t.runNewSession(args, env)
+	cmds := [][]string{args}
+	if plan != nil {
+		cmds = append(cmds, plan.armCommands(paneTarget(name), false)...)
+	}
+	pane, err := t.runNewSession(cmds, env)
 	if err != nil {
-		return err
+		created := firstLine(outputBeforeError(err))
+		if plan == nil || !wellFormedTmuxID(created, '%') {
+			return err
+		}
+		_, _ = fmt.Fprintf(captureWarningOut, "warning: session %q: arming program-status capture: %v\n", name, err)
+		pane = created
 	}
 	t.markAgentPane(name, pane)
 	t.publishInputFence(name, pane, env)
@@ -1304,10 +1346,22 @@ func buildProcessKillPlan(rootPID int, records []proctable.ProcessRecord, exclud
 	// owned group, members outside that tree are its init/subreaper-adopted tail.
 	// Order each orphan tree deepest-first and resolve disconnected/cyclic
 	// components by PID.
-	if root.PGID == root.PID {
+	//
+	// The same proof holds for every captured descendant that leads its own
+	// group: the program-status relay runs its program in a session and group
+	// of its own (as any setsid'd child does), and that group's
+	// reparented members are the program's, never the pane leader's. An
+	// excluded descendant's group stays as preserved as its leader.
+	owned := make(map[int]bool)
+	for pid := range visited {
+		if record := byPID[pid]; record.PGID == pid && (pid == rootPID || !exclude[pid]) {
+			owned[pid] = true
+		}
+	}
+	if len(owned) > 0 {
 		extra := make(map[int]bool)
 		for pid, record := range byPID {
-			if !visited[pid] && record.PGID == root.PGID && record.PPID > 0 {
+			if !visited[pid] && owned[record.PGID] && record.PPID > 0 {
 				extra[pid] = true
 			}
 		}
@@ -1591,7 +1645,16 @@ func (t *Tmux) listSessionNames() ([]string, error) {
 // runtimeInventoryEnd. The marker is read as a comparison, never its value:
 // tmux prints a user option raw, so a tab or newline in it could forge
 // fields or another session's line.
-const runtimeInventoryFormat = "#{session_name}\t#{session_id}\t#{session_created}\t#{session_attached}\t#{window_index}.#{pane_index}\t#{pane_dead}\t#{pane_pid}\t#{window_activity}\t#{!=:#{" + restartRequestedOption + "},}\t" + runtimeInventoryEnd
+const runtimeInventoryFormat = runtimeInventoryPaneFormat + "\t" + runtimeInventoryEnd
+
+// runtimeInventoryPaneFormat is a runtimeInventoryFormat line's fields before
+// its terminator.
+const runtimeInventoryPaneFormat = "#{session_name}\t#{session_id}\t#{session_created}\t#{session_attached}\t#{window_index}.#{pane_index}\t#{pane_dead}\t#{pane_pid}\t#{window_activity}\t#{!=:#{" + restartRequestedOption + "},}"
+
+// programRuntimeInventoryFormat is runtimeInventoryFormat with each pane's
+// capture fields (programPaneFormat) before its terminator, read while the
+// program-status switch is not off.
+const programRuntimeInventoryFormat = runtimeInventoryPaneFormat + "\t" + programPaneFormat + "\t" + runtimeInventoryEnd
 
 // runtimeInventoryEnd ends every runtimeInventoryFormat line, so the
 // executor's trim cannot drop an empty last field (#7871) and a line cut
@@ -1606,6 +1669,10 @@ const runtimeInventoryEnd = "gc-eol"
 // runtimeInventoryFields is the field count of a runtimeInventoryFormat line.
 const runtimeInventoryFields = 10
 
+// programRuntimeInventoryFields is the field count of a
+// programRuntimeInventoryFormat line.
+const programRuntimeInventoryFields = runtimeInventoryFields + programPaneFields
+
 // inventoryFaults is what parseRuntimeInventory could not read.
 type inventoryFaults struct {
 	lines    []string // the malformed lines
@@ -1618,21 +1685,27 @@ type inventoryFaults struct {
 // inventory, as in [tmuxFetcher.FetchState]; an unreachable server
 // (ErrNoServer) is an error. A malformed line costs only its session, which
 // is omitted (see parseRuntimeInventory) and reported in faults; output that
-// leaves no session is an error.
-func (t *Tmux) listRuntimeInventory(ctx context.Context) (entries map[string]runtime.InventoryEntry, faults inventoryFaults, err error) {
-	out, err := t.runCtx(ctx, "list-panes", "-a", "-F", runtimeInventoryFormat)
+// leaves no session is an error. With program set (the program-status switch
+// is not off) the read also carries each pane's capture fields, and panes
+// holds each session's agent pane that could be named (see foldProgramPane).
+func (t *Tmux) listRuntimeInventory(ctx context.Context, program bool) (entries map[string]runtime.InventoryEntry, panes map[string]programPane, faults inventoryFaults, err error) {
+	format := runtimeInventoryFormat
+	if program {
+		format = programRuntimeInventoryFormat
+	}
+	out, err := t.runCtx(ctx, "list-panes", "-a", "-F", format)
 	if err != nil {
 		if errors.Is(err, ErrNoCurrentTarget) {
-			return map[string]runtime.InventoryEntry{}, faults, nil
+			return map[string]runtime.InventoryEntry{}, nil, faults, nil
 		}
-		return nil, faults, err
+		return nil, nil, faults, err
 	}
-	entries, faults, wellFormed := parseRuntimeInventory(out)
+	entries, panes, faults, wellFormed := parseRuntimeInventory(out, program)
 	if len(entries) == 0 && len(faults.lines) > 0 {
 		if wellFormed == 0 {
-			return nil, faults, fmt.Errorf("tmux list-panes: no well-formed inventory line; first malformed line %q", faults.lines[0])
+			return nil, nil, faults, fmt.Errorf("tmux list-panes: no well-formed inventory line; first malformed line %q", faults.lines[0])
 		}
-		return nil, faults, fmt.Errorf("tmux list-panes: every session omitted for a malformed inventory line: %q", faults.sessions)
+		return nil, nil, faults, fmt.Errorf("tmux list-panes: every session omitted for a malformed inventory line: %q", faults.sessions)
 	}
 	for name, e := range entries {
 		if e.ActivityKnown { // the poke discount GetLastActivity applies
@@ -1640,7 +1713,7 @@ func (t *Tmux) listRuntimeInventory(ctx context.Context) (entries map[string]run
 			entries[name] = e
 		}
 	}
-	return entries, faults, nil
+	return entries, panes, faults, nil
 }
 
 // inventoryFirstPane tracks a session's lowest window.pane index while
@@ -1660,10 +1733,19 @@ type inventoryFirstPane struct {
 // line under the rest of the name: it reads as a session of its own, or folds
 // into a real session of that name, whose liveness and other facts can then
 // read wrong.
-func parseRuntimeInventory(out string) (entries map[string]runtime.InventoryEntry, faults inventoryFaults, wellFormed int) {
+//
+// program says the lines are programRuntimeInventoryFormat's; a line whose
+// capture fields do not parse is malformed like any other. panes holds each
+// session's agent pane that could be named.
+func parseRuntimeInventory(out string, program bool) (entries map[string]runtime.InventoryEntry, panes map[string]programPane, faults inventoryFaults, wellFormed int) {
 	entries = make(map[string]runtime.InventoryEntry)
 	first := make(map[string]inventoryFirstPane)
 	omitted := make(map[string]bool)
+	want := runtimeInventoryFields
+	if program {
+		want = programRuntimeInventoryFields
+	}
+	programRows := make(map[string][]programPane)
 	for _, line := range strings.Split(out, "\n") {
 		if line == "" {
 			continue
@@ -1671,7 +1753,8 @@ func parseRuntimeInventory(out string) (entries map[string]runtime.InventoryEntr
 		fields := strings.Split(line, "\t")
 		name := fields[0]
 		var window, pane int
-		ok := len(fields) == runtimeInventoryFields && fields[runtimeInventoryFields-1] == runtimeInventoryEnd && name != "" &&
+		var capture programPane
+		ok := len(fields) == want && fields[want-1] == runtimeInventoryEnd && name != "" &&
 			(fields[8] == "0" || fields[8] == "1")
 		if ok {
 			windowText, paneText, _ := strings.Cut(fields[4], ".")
@@ -1679,6 +1762,9 @@ func parseRuntimeInventory(out string) (entries map[string]runtime.InventoryEntr
 			window, wErr = strconv.Atoi(windowText)
 			pane, pErr = strconv.Atoi(paneText)
 			ok = wErr == nil && pErr == nil
+		}
+		if ok && program {
+			capture, ok = parseProgramPane(fields[runtimeInventoryFields-1:want-1], fields[5] == "1")
 		}
 		if !ok {
 			faults.lines = append(faults.lines, line)
@@ -1727,12 +1813,23 @@ func parseRuntimeInventory(out string) (entries map[string]runtime.InventoryEntr
 			entry.Incarnation = incarnation
 		}
 		entries[name] = entry
+		if program {
+			programRows[name] = append(programRows[name], capture)
+		}
 	}
 	for _, name := range faults.sessions {
 		delete(entries, name)
 	}
 	sort.Strings(faults.sessions)
-	return entries, faults, wellFormed
+	if program {
+		panes = make(map[string]programPane)
+		for name := range entries {
+			if capture, named := foldProgramPane(programRows[name]); named {
+				panes[name] = capture
+			}
+		}
+	}
+	return entries, panes, faults, wellFormed
 }
 
 // ListSessions returns all session names. An unreachable tmux server is
@@ -6012,17 +6109,57 @@ func (t *Tmux) SetMailClickBinding(_ string) error {
 // (agentPaneTarget), never the active pane: "=name:" would kill whichever pane
 // a human left focused and leave the old agent running.
 func (t *Tmux) RespawnPaneWithWorkDir(pane, workDir, command string) error {
+	return t.respawnPaneWithWorkDir(pane, workDir, command, runtime.ProgramStatusArm{})
+}
+
+// respawnPaneWithWorkDir is RespawnPaneWithWorkDir re-arming the pane's
+// program-status capture as arm declares (see program_capture.go). Every
+// respawn runs one list (respawnPaneList): respawn-pane, its marker, then
+// the capture commands. An armed respawn sets a new nonce, unsets the
+// previous incarnation's record and runs pipe-pane -O replacing the previous
+// tap, which reads EOF after its nonce is gone, so its last write cannot
+// land. The previous pipe is never closed ahead of the respawn: pipe-pane
+// fails on an exited pane, which would refuse to respawn a dead agent. A
+// list that fails after the marker printed respawned the pane: the capture
+// failure is logged and the respawn succeeds; heal re-arms the pane.
+//
+// An unarmed respawn (undeclared, the gate refused, or the switch off) runs
+// the command as RespawnPaneWithWorkDir always has and removes, after the
+// marker, the capture an earlier incarnation was armed with: tmux keeps a
+// pane's options and pipe across respawn-pane, so the old tap would vouch
+// for the new program under its nonce. While the switch is not off that is
+// whatever capture the pane carries (disarmCommands). While it is off it is
+// only a capture bound to the pane (disarmIfArmedCommands), so a pane never
+// armed is left as it was, a pipe of its own included, and a capture armed
+// before the switch went off is not read valid for the new program once the
+// switch is back on.
+func (t *Tmux) respawnPaneWithWorkDir(pane, workDir, command string, arm runtime.ProgramStatusArm) error {
 	target, err := t.agentPaneTarget(pane)
 	if err != nil {
 		return err
 	}
-	args := []string{"respawn-pane", "-k", "-t", target}
-	if workDir != "" {
-		args = append(args, "-c", workDir)
+	if plan := t.planCapture(arm); plan != nil {
+		followErr, err := t.runRespawnList(target, workDir, t.wrapPaneCommand(plan.wrapRelay(command)), plan.armCommands(target, true))
+		if err != nil {
+			return err
+		}
+		if followErr != nil {
+			_, _ = fmt.Fprintf(captureWarningOut, "warning: pane %s: re-arming program-status capture: %v\n", target, followErr)
+		}
+		return nil
 	}
-	args = append(args, t.wrapPaneCommand(command))
-	_, err = t.run(args...)
-	return err
+	disarm := disarmIfArmedCommands(target)
+	if t.programStatusMode() != runtime.ProgramStatusOff {
+		disarm = disarmCommands(target)
+	}
+	followErr, err := t.runRespawnList(target, workDir, t.wrapPaneCommand(command), disarm)
+	if err != nil {
+		return err
+	}
+	if followErr != nil {
+		_, _ = fmt.Fprintf(captureWarningOut, "warning: pane %s: removing program-status capture: %v\n", target, followErr)
+	}
+	return nil
 }
 
 // ClearHistory clears the scrollback history buffer for a pane.

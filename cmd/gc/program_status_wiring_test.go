@@ -352,3 +352,23 @@ func TestBuiltinProgramStatusDeclarationsInertWhenOff(t *testing.T) {
 		})
 	}
 }
+
+// Kills a tmux provider that reads under another switch than the city's:
+// every process building one (controller, CLI, API) passes the [session]
+// program_status switch to the leaf, and an unset switch reads off.
+func TestTmuxConfigFromSessionCarriesProgramStatusSwitch(t *testing.T) {
+	for _, tc := range []struct {
+		set  string
+		want runtime.ProgramStatusMode
+	}{
+		{"", runtime.ProgramStatusOff},
+		{"off", runtime.ProgramStatusOff},
+		{"shadow", runtime.ProgramStatusShadow},
+		{"on", runtime.ProgramStatusOn},
+	} {
+		cfg := tmuxConfigFromSession(config.SessionConfig{ProgramStatus: tc.set}, "city", "/tmp/city-a")
+		if cfg.ProgramStatus != tc.want {
+			t.Errorf("program_status %q: tmux Config.ProgramStatus = %q, want %q", tc.set, cfg.ProgramStatus, tc.want)
+		}
+	}
+}

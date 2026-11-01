@@ -27,7 +27,10 @@ import (
 // in memory (RL6). A seat may also stand for hours under an operator hold,
 // or hold no work for hours before its work comes back; in half the worlds
 // the lane then decides no seat that holds no work, no entry and no
-// release, so a workless seat's episode stands as it is until then.
+// release, so a workless seat's episode stands as it is until then. A
+// seat's claims may wait on a person, the wait beginning and ending at
+// random: such a seat's restart is held (awaiting a person), as the lane
+// holds it, and a waiting claim is nudged only a Cap apart.
 
 // rlPool is how the world's provider pool answers a turn.
 type rlPool uint8
@@ -106,6 +109,8 @@ var rlCoverage = struct {
 	// episode past FreshConfirm with no nudge delivered since it opened
 	// (unprobed), or from before a restarted episode's restart (preRestart).
 	old, unprobed, preRestart atomic.Int64
+	// Nudges of a claim waiting on a person while an episode stands.
+	waitNudged atomic.Int64
 }{moves: sync64Map{}}
 
 type sync64Map struct{ m [64]atomic.Int64 }
@@ -147,8 +152,10 @@ func newRLWorld(seed uint64, seats int) *rlWorld {
 			lastHeard: map[ClaimKey]time.Time{}, lastPaused: map[ClaimKey]time.Time{},
 		}
 		// Every seat holds a started claim; some hold more (RL3: the
-		// episode is the seat's however many claims it holds).
+		// episode is the seat's however many claims it holds). In some, the
+		// first claim waits on a person.
 		s.work = []Work{claim(fmt.Sprintf("s%d", i))}
+		s.work[0].AwaitsHuman = w.chance(20)
 		if w.chance(50) {
 			s.work = append(s.work, claim(fmt.Sprintf("t%d", i)), trig(fmt.Sprintf("u%d", i)))
 		}
@@ -250,7 +257,7 @@ func (w *rlWorld) step() {
 			w.poolRestarts, w.poolCloses = 0, 0
 		}
 	}
-	for name := range map[string]bool{"p1": true, "p2": true} {
+	for _, name := range []string{"p1", "p2"} { // in order: a seed is one world
 		if w.chance(4) {
 			w.degraded[name] = !w.degraded[name]
 		}
@@ -272,6 +279,13 @@ func (w *rlWorld) step() {
 		}
 		if w.chance(5) {
 			s.hold = RestartHold(w.rng.IntN(3))
+		}
+		if i := w.rng.IntN(len(s.work) + 1); i < len(s.work) && s.work[i].Kind == KindClaim {
+			if s.work[i].AwaitsHuman {
+				s.work[i].AwaitsHuman = !w.chance(10) // the seat works the step again and clears the key
+			} else {
+				s.work[i].AwaitsHuman = w.chance(1) // the seat asks a person
+			}
 		}
 		if !w.now.Before(s.heldUntil) && w.chance(1) { // an operator hold or a quarantine
 			s.heldUntil = w.now.Add(w.between(time.Hour, 4*time.Hour))
@@ -300,6 +314,9 @@ func (w *rlWorld) observe(i int) Observation {
 		if wk.Kind == KindClaim {
 			o.Started[wk.Key] = SrcAgent
 		}
+		if wk.AwaitsHuman { // the lane holds the restart of a seat whose work waits (seatAwaitsHuman)
+			o.RestartHold = RestartHoldAwaitingHuman
+		}
 	}
 	switch {
 	case s.restarting > 0:
@@ -323,6 +340,7 @@ func (w *rlWorld) observe(i int) Observation {
 			o.Hold[wk.Key] = true
 		}
 	}
+	o.Partial = w.chance(3) // a store that did not answer the planner's snapshot
 	var last time.Time
 	for _, t := range s.turns {
 		if t.conv == s.conv && !t.start.After(w.now) {
@@ -387,7 +405,7 @@ func refusedSince(o Observation, delivered time.Time, entries int) bool {
 // answered is the RL evidence computed apart from Decide: refusedSince, the
 // refusal no longer than RateLimitEvidenceMaxAge ago.
 func answered(o Observation, delivered time.Time, entries int) bool {
-	return refusedSince(o, delivered, entries) && o.Now.Sub(o.Turns.RefusedAt) <= DefaultCap
+	return refusedSince(o, delivered, entries) && o.Now.Sub(o.Turns.RefusedAt) <= p.RateLimitEvidenceMaxAge
 }
 
 // alertMove is the move an episode's alert reason rides with.
@@ -476,8 +494,8 @@ func (w *rlWorld) pass(i, step int) error {
 			return fail("RL2: restarted from %+v", prl)
 		case !ans || degraded || o.RestartHold != RestartHoldNone:
 			return fail("RL2: restarted with answered %v, degraded %v, hold %v", ans, degraded, o.RestartHold)
-		case anyMarked(d.Next) || d.Next.Release != nil || len(o.Hold) > 0:
-			return fail("RL2: restarted over a pending notice, release or unread claim")
+		case anyMarked(d.Next) || d.Next.Release != nil || len(o.Hold) > 0 || o.Partial:
+			return fail("RL2: restarted over a pending notice, release, unread claim or incomplete listing")
 		case !prl.LastFresh.IsZero() && o.Now.Sub(prl.LastFresh) < DefaultCap:
 			return fail("RL2: restarted %v after the seat's last", o.Now.Sub(prl.LastFresh))
 		case !o.ProviderFreshAt.IsZero() && o.Now.Sub(o.ProviderFreshAt) < DefaultProviderFreshGap:
@@ -531,13 +549,26 @@ func (w *rlWorld) pass(i, step int) error {
 		}
 	}
 
-	// RL4: paced paused while an episode stands.
+	// RL4: paced paused while an episode stands, and never slower than its
+	// evidence allows: every entry falls due again within
+	// RateLimitEvidenceMaxAge - PausedCap of its last nudge (or of its
+	// start), a wait on a person's Cap included, so each nudge's refusal has
+	// PausedCap to be read before the refusal the episode last read is too
+	// old to keep it standing.
 	if nrl.Phase != RateLimitClear {
+		for _, e := range d.Next.Entries {
+			if gap := p.dueAt(e, true).Sub(maxTime(e.Last, e.Since)); gap > p.RateLimitEvidenceMaxAge-p.PausedCap {
+				return fail("RL4: %v paced %v apart inside an episode whose evidence ages out after %v", e.Key, gap, p.RateLimitEvidenceMaxAge)
+			}
+		}
 		for _, a := range d.Actions {
 			switch a := a.(type) {
 			case Nudge:
 				if !a.Paused {
 					return fail("RL4: a counted nudge while rate limited")
+				}
+				if entryOrZero(d.Next, a.Key).AwaitsHuman {
+					rlCoverage.waitNudged.Add(1)
 				}
 				if pe, ok := entryOf(prev, a.Key); ok && prev.Gen == o.Gen && pe.Kind == a.Kind && pe.Since.Equal(entryOrZero(d.Next, a.Key).Since) &&
 					pe.Attempts+pe.Paused > 0 && o.Now.Sub(pe.Last) < DefaultPausedCap {
@@ -569,7 +600,7 @@ func (w *rlWorld) pass(i, step int) error {
 	if ans && o.Turns.RefusedAt.After(s.answeredAt) {
 		s.answeredAt = minTime(o.Turns.RefusedAt, o.Now)
 	}
-	if acting && nrl.Phase != RateLimitClear && o.Now.Sub(s.answeredAt) > DefaultCap {
+	if acting && nrl.Phase != RateLimitClear && o.Now.Sub(s.answeredAt) > p.RateLimitEvidenceMaxAge {
 		return fail("RL5: no new answered refusal for %v and still open", o.Now.Sub(s.answeredAt))
 	}
 	if nrl.Phase != RateLimitClear && !nrl.Checked.Equal(prl.Checked) && !ans {
@@ -584,12 +615,13 @@ func (w *rlWorld) pass(i, step int) error {
 			return fail("RL5: served at %v and still open", t.ServedAt.Sub(t0))
 		}
 	}
-	// WL1 holds: every entry of a nudgeable seat hears from the ladder.
+	// WL1 holds: every entry of a nudgeable seat hears from the ladder. A
+	// wait on a person that begins is paced from its start.
 	eligible := acting
 	for _, e := range d.Next.Entries {
 		since, ok := s.lastHeard[e.Key]
 		switch {
-		case !eligible || !ok || o.Hold[e.Key] || prev.Gen != o.Gen || (d.Next.Release != nil && d.Next.Release.Key == e.Key):
+		case !eligible || !ok || o.Hold[e.Key] || prev.Gen != o.Gen || (d.Next.Release != nil && d.Next.Release.Key == e.Key) || entryOrZero(prev, e.Key).AwaitsHuman != e.AwaitsHuman:
 			s.lastHeard[e.Key] = o.Now
 		case o.Now.Sub(since) > DefaultCap+3*maxStep+2*DefaultBase:
 			return fail("WL1: %v of a quiet seat has not heard from the ladder for %v", e.Key, o.Now.Sub(since))
@@ -609,11 +641,12 @@ func (w *rlWorld) pass(i, step int) error {
 		}
 	}
 
-	// RL8: progress, as C1 judges it.
+	// RL8: progress, as C1 judges it. A wait on a person that begins or
+	// ends starts a new episode instead.
 	if prev.V != 0 && prev.Gen == o.Gen {
 		for _, e := range d.Next.Entries {
 			pe, ok := entryOf(prev, e.Key)
-			if !ok || pe.Kind != e.Kind || e.Rung != pe.Rung {
+			if !ok || pe.Kind != e.Kind || e.Rung != pe.Rung || pe.AwaitsHuman != e.AwaitsHuman {
 				continue
 			}
 			evidence := o.LastActivity
@@ -737,6 +770,7 @@ func rlCovered(t *testing.T) {
 		{"a refusal past the evidence bound", &rlCoverage.old},
 		{"an unprobed refusal past FreshConfirm", &rlCoverage.unprobed},
 		{"a refusal from before the restart", &rlCoverage.preRestart},
+		{"a wait on a person nudged inside an episode", &rlCoverage.waitNudged},
 	} {
 		if c.n.Load() == 0 {
 			missing = append(missing, c.name)

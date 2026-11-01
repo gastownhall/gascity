@@ -55,7 +55,9 @@ func (f FullFake) ProgramStatus(name string) (ProgramStatus, error) {
 //   - a session without a row, or whose pane is dead, is deferred;
 //   - want declares no capture: the armed pane is disarmed, its tap and
 //     record dropped, and its pipe closed only when the process table shows
-//     its own tap alive, since any other pipe may be foreign;
+//     its own tap alive, since any other pipe may be foreign; while its pipe
+//     is open and its tap's liveness is unknown, it is deferred with its
+//     nonce kept, since the pipe may be its live tap's;
 //   - an armed pane whose pipe is open and tap not gone is unchanged;
 //   - any other open pipe (a foreign reader, or a dead tap's pipe not yet
 //     closed) is deferred: heal never takes a pipe over;
@@ -78,6 +80,7 @@ func (f FullFake) HealProgramCapture(name string, want ProgramStatusArm) (Progra
 	case !want.Capture && !armed:
 		action = ProgramCaptureUnchanged
 	case !ok || row.PaneID == "" || row.PaneDead:
+	case !want.Capture && row.PanePipe && row.TapLiveness == ProgramTapUnknown:
 	case !want.Capture:
 		if row.TapLiveness == ProgramTapAlive {
 			row.PanePipe = false

@@ -544,6 +544,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The work ladder only nudges a step, hourly, while its seat waits on a
+  person.** With `[daemon] work_ladder` on (the default), a claimed step whose
+  metadata `gc.awaiting_human` names the session holding it (the seat asked a
+  person and waits on their decision, such as an approval asked by mail) is
+  nudged an hour after the ladder sees the wait and hourly after that, however
+  long the person takes: no recycle, no release, and none of the
+  `work.escalated` alerts its pacing would raise (`started_recycled`,
+  `started_unanswered`, `release_unfinished`). Nudges the seat cannot take
+  still count toward `nudge_refused`, and a release already in flight that
+  raced the step's start still raises `release_raced_start`. The hourly nudge
+  takes up an answer whose turn died before the seat could clear the key. The
+  ladder checks the key in the planner's snapshot (on the claim's own bead,
+  never another store's bead with the same ID) and again in every live
+  re-read before it acts (a nudge, a release, pacing carried under an
+  incomplete snapshot): a wait written after the snapshot holds the step until
+  a snapshot shows it. Once the seat clears the key, the ladder takes the step
+  up on a fresh grace. The key names the seat, not the step: a step released
+  and re-claimed by another seat is paced as usual. Pack formulas write and
+  clear the key; gc only reads it.
+
+- **The work ladder restarts a rate-limited seat on a fresh conversation, once
+  per episode, and reports every move as `work.rate_limited`.** With
+  `[daemon] work_ladder` on, a seat whose provider refused its last two turns
+  with a rate limit (as the agent CLI's own transcript classifies them: HTTP
+  429, Claude Code's `rate_limit`, Codex's `usage_limit_exceeded`), the newer
+  ending after a nudge the seat took, opens a rate-limit episode, kept on the
+  seat's `work_ladder` cell. While it stands the seat is paced as on a
+  degraded provider: nudges every 10 minutes that count toward nothing (a
+  step waiting on a person keeps its hourly nudge), and no drain, release or
+  escalation. Once a nudge the seat took after the episode opened is refused
+  too, at least 10 minutes after the first refusal, the seat is restarted in
+  place on a fresh conversation (`gc session reset`'s request), keeping its
+  claims. The restart waits while another seat on the same provider was
+  restarted fresh in the last 30 minutes, a claim cannot be re-read, or the
+  planner's snapshot of the work is incomplete (the work it lacks may be
+  waiting on a person), and while a person is attached to the seat or its
+  work awaits a person; it lands once nothing holds it. If the fresh
+  conversation is refused too, the refusal is a spent usage quota, or the
+  seat was restarted fresh within the hour, the seat is not restarted again
+  and stays paced until the provider serves it. An episode raises one
+  `work.escalated` alert at most, naming the provider and quoting its
+  refusal: for the first of those outcomes, or for a restart a person holds
+  (at once) or a block holds (after 70 minutes). Every move (`opened`,
+  `restarted`, `held`, `exhausted`, `closed`) is a typed `work.rate_limited`
+  event carrying the provider, the conversation, the CLI's error class and
+  text, and the seat's started claims, so a pack can decide whether a pool is
+  refusing every seat and hold the provider through `provider-health.json`,
+  which pauses its seats and their respawns. Every `work.*` event now names
+  the seat's provider. Seats whose turns cannot be read are judged on their
+  activity alone, as before. Cells written by the per-claim-flag builds decode
+  as they stand; their flags drop on the first rewrite.
+
 - **`[events.mirror]` writes a copy of the city's event log outside `.gc`**
   for a log shipper that may not enter `.gc` (which gc keeps at `0700`). The
   city's controller tails `.gc/events.jsonl` and appends every event line to
@@ -692,6 +744,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   take their owner from their own `gc.root_store_ref`, which
   `worktree.Verify` still checks against the on-disk provenance; work-ledger,
   rig-store and cross-rig rows keep the strict store comparison (ga-8tpvb).
+
+- **A pool session no longer claims routed work bound to another session's
+  managed worktree.** When several ready beads for one pool each carried a
+  managed worktree (`gc.work_dir` with complete gc worktree ownership
+  metadata), the controller started a session inside each bead's worktree,
+  but `gc hook --claim` handed each session the first unassigned bead in the
+  routed window, so work ran in one checkout and on one branch while the bead
+  named another. The fresh-claim tier now skips, for a pool session, any
+  unassigned bead whose managed worktree is a different directory than the
+  session's own; that bead is left to the session started inside it. A pool
+  session running inside a managed worktree also leaves unassigned work that
+  names no managed worktree, which would otherwise run on another bead's
+  checkout and branch; the controller starts a session in the pool's own
+  directory for it, and a session already there takes it, even when that
+  directory is inside a managed worktree. Plain `gc hook` leaves the same
+  beads out of that session's listing and, like the claim, moves on to a
+  later store when a store holds only such beads, so a prompt that lists work
+  and then claims it by id cannot take them either. When these checks leave
+  a session nothing to claim from any store, `gc hook --claim` names each
+  such bead on stderr. A worktree probe that cannot tell (git timed out, or a
+  provenance record that cannot be read) is named on stderr by both commands
+  and counts as no managed worktree. A user-created session row from before
+  manual sessions were marked as such counts as manual here, as it does for
+  the controller. Named, manual and session-less claimants and assigned work
+  claim as before.
+
+- **Pool demand across stores names work in the order sessions claim it.**
+  In a city whose routed work spans more than one bead store, the
+  controller listed pool demand store by store, while `gc hook --claim`
+  reads the merged stores in the canonical ready order (priority, then
+  creation time, then id) through a bounded window. A new session could be
+  started for a bead its window served last or not at all. Demand is now
+  named in the same canonical order, so the session started for a bead finds
+  it at the head of its window. Single-store cities are unaffected.
 
 - **The core pack no longer ships the `wisp-compact` order, which never
   selected a wisp.** The order's script picked its targets from `gc bd list
