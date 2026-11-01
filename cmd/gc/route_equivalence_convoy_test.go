@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -15,6 +18,9 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/chartest"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // Route equivalence for gc convoy list and gc convoy status (#8453): the
@@ -363,8 +369,96 @@ func requireFailedConvoyList(t *testing.T, label string, run convoyRouteRun) {
 	if run.stdout != "" {
 		t.Errorf("%s: stdout = %q, want empty", label, firstBytes(run.stdout, 300))
 	}
-	if !strings.Contains(run.stderr, "convoy list unavailable") {
-		t.Errorf("%s: stderr = %q, want the store's failure named", label, run.stderr)
+	for _, want := range []string{"convoy list unavailable", "rig-broken"} {
+		if !strings.Contains(run.stderr, want) {
+			t.Errorf("%s: stderr = %q, want the failing store named (%q)", label, run.stderr, want)
+		}
+	}
+}
+
+// newConvoyRigCity builds a file-backed city with rigs alpha and omega, one
+// convoy in each of the three stores, and then overwrites omega's ledger with
+// corrupt JSON so neither the supervisor nor the CLI can open it. It returns
+// the harness and omega's path.
+func newConvoyRigCity(t *testing.T) (*charHarness, string) {
+	t.Helper()
+	clearGCEnv(t)
+	clearInheritedBeadsEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("GC_DEBUG", "1")
+	t.Setenv("GC_NO_API", "")
+
+	cityPath := t.TempDir()
+	alphaPath := filepath.Join(t.TempDir(), "alpha")
+	omegaPath := filepath.Join(t.TempDir(), "omega")
+	if err := bootstrapScopedFileProviderCityFS(fsys.OSFS{}, cityPath); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{alphaPath, omegaPath} {
+		if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".gc", "beads.json"), []byte("{\"seq\":0,\"beads\":[]}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cityToml := "[workspace]\n\n[beads]\nprovider = \"file\"\n\n[[rigs]]\nname = \"alpha\"\nprefix = \"al\"\n\n[[rigs]]\nname = \"omega\"\nprefix = \"om\"\n"
+	siteToml := fmt.Sprintf("workspace_name = %q\nworkspace_prefix = \"hq\"\n\n[[rig]]\nname = \"alpha\"\npath = %q\n\n[[rig]]\nname = \"omega\"\npath = %q\n",
+		charCityName, alphaPath, omegaPath)
+	writeSchema2RigCity(t, cityPath, charCityName, cityToml, siteToml)
+
+	for _, scope := range []string{cityPath, alphaPath, omegaPath} {
+		store, err := openScopeLocalFileStoreForCity(scope, cityPath)
+		if err != nil {
+			t.Fatalf("open seed store %s: %v", scope, err)
+		}
+		if _, err := store.Create(beads.Bead{Title: "convoy in " + filepath.Base(scope), Type: "convoy"}); err != nil {
+			t.Fatalf("seed convoy in %s: %v", scope, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(omegaPath, ".gc", "beads.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("load cfg: %v", err)
+	}
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), charCityName, cityPath)
+	return &charHarness{cityPath: cityPath, cs: cs}, omegaPath
+}
+
+// TestConvoyListRouteEquivalenceWhenARigStoreCannotOpen pins that a rig store
+// neither the supervisor nor the CLI can open fails gc convoy list on every
+// lane: the supervisor reports it as a partial answer the API route refuses,
+// and the direct read refuses it too, naming the store, instead of printing
+// the other stores' convoys as the whole list.
+func TestConvoyListRouteEquivalenceWhenARigStoreCannotOpen(t *testing.T) {
+	h, omegaPath := newConvoyRigCity(t)
+	for _, jsonOut := range []bool{true, false} {
+		opts := convoyListOptions{jsonOut: jsonOut}
+		for _, lane := range h.lanes(t) {
+			label := fmt.Sprintf("json=%v lane=%s", jsonOut, lane.name)
+			got := runConvoyRoute(lane, func(c *api.Client, nilReason string, stdout, stderr io.Writer) int {
+				return routeConvoyList(h.cityPath, c, nilReason, opts, stdout, stderr)
+			})
+			if got.exit != 1 {
+				t.Errorf("%s: exit = %d, want 1 (stdout %q, stderr %q)", label, got.exit, firstBytes(got.stdout, 300), got.stderr)
+			}
+			if got.stdout != "" {
+				t.Errorf("%s: stdout = %q, want empty", label, firstBytes(got.stdout, 300))
+			}
+			wantNamed := "rig omega"
+			if lane.client == nil {
+				wantNamed = omegaPath
+			}
+			if !strings.Contains(got.stderr, wantNamed) {
+				t.Errorf("%s: stderr = %q, want the unopenable store named (%q)", label, got.stderr, wantNamed)
+			}
+		}
 	}
 }
 

@@ -477,9 +477,12 @@ func convoyProgressFromAPI(check api.ConvoyCheckView) convoyProgressJSON {
 	}
 }
 
-// doConvoyListFallback is the direct-bd path for "gc convoy list".
+// doConvoyListFallback is the direct-bd path for "gc convoy list". A store it
+// cannot open or list fails the listing, naming the store: the supervisor
+// reports the same store as a partial answer, which the API route refuses, so
+// both routes fail rather than print part of the city's convoys as all of them.
 func doConvoyListFallback(cityPath string, opts convoyListOptions, stdout, stderr io.Writer) int {
-	stores, code := openAllConvoyStoresAt(cityPath, stderr, "gc convoy list")
+	stores, code := openEveryConvoyStoreAt(cityPath, stderr, "gc convoy list")
 	if stores == nil {
 		return code
 	}
@@ -1016,7 +1019,8 @@ func refuseBindingRigCollision(beadID string, cfg *config.City, cityPath string,
 
 // openAllConvoyStoresAt opens every convoy store for a pre-resolved cityPath,
 // used by routed callers that already resolved the city before dispatching
-// to the fallback path.
+// to the fallback path. A store it cannot open is skipped, so lookups by id
+// (status, show) and gc convoy stranded still read the healthy stores.
 func openAllConvoyStoresAt(cityPath string, stderr io.Writer, cmdName string) ([]convoyStoreView, int) {
 	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
@@ -1035,6 +1039,35 @@ func openAllConvoyStoresAt(cityPath string, stderr io.Writer, cmdName string) ([
 		return nil, 1
 	}
 	return stores, 0
+}
+
+// openEveryConvoyStoreAt is openAllConvoyStoresAt for a listing that must not
+// come out short: any store it cannot open is named on stderr and fails the
+// command. A listing that silently left out a rig's convoys would read as the
+// city's complete answer, while the supervisor reports that same store as a
+// partial answer the API route refuses. It opens through openStoreForCity, the
+// opener gc beads list's direct read uses, so it adds no raw-store debt.
+func openEveryConvoyStoreAt(cityPath string, stderr io.Writer, cmdName string) ([]convoyStoreView, int) {
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+		return nil, 1
+	}
+	emitLoadCityConfigWarnings(stderr, prov)
+	candidates := convoyStoreCandidates(cfg, cityPath, "") // residency:allow — openAllConvoyStoresAt's own enumeration, re-walked so a store that cannot open fails the listing instead of vanishing from it (the supervisor reports the same store as a partial answer)
+	failed := 0
+	stores := openConvoyStoreDirs(candidates, openStoreForCity(cityPath), func(dir string, err error) {
+		fmt.Fprintf(stderr, "%s: opening the convoy store at %s: %v\n", cmdName, dir, err) //nolint:errcheck // best-effort stderr
+		failed++
+	})
+	if failed == 0 && len(stores) > 0 {
+		return stores, 0
+	}
+	if failed == 0 {
+		fmt.Fprintf(stderr, "%s: no convoy stores available\n", cmdName) //nolint:errcheck // best-effort stderr
+	}
+	fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+	return nil, 1
 }
 
 // convoyCheckStoreCandidates is convoyStoreCandidates without the suspended
@@ -1187,7 +1220,9 @@ type convoyStatusResultJSON struct {
 // collectOpenConvoys lists the open convoys across stores, failing at the
 // first store whose list fails.
 func collectOpenConvoys(stores []convoyStoreView) ([]convoyWithStore, error) {
-	return collectConvoysAcross(stores, func(_ convoyStoreView, err error) error { return err })
+	return collectConvoysAcross(stores, func(view convoyStoreView, err error) error {
+		return fmt.Errorf("listing convoys in %s: %w", view.path, err)
+	})
 }
 
 // collectConvoysForCheck is collectOpenConvoys for gc convoy check, which goes
