@@ -259,9 +259,11 @@ type workScope interface {
 }
 
 // ReleaseScope is the narrow set: the bead ID, session_name, the configured
-// named identity and the stable alias (sessionAssignmentIdentifiersForConfig).
-// It is the only set work is released under, and it gates closing a seat
-// whose runtime is dead. A transient pool slot alias is never in it.
+// named identity, the stable alias, and a requalified named session's prior
+// bare identity and its named session's runtime name
+// (sessionAssignmentIdentifiersForConfig). It is the only set work is
+// released under, and it gates closing a seat whose runtime is dead. A
+// transient pool slot alias is never in it.
 type ReleaseScope struct{ ids []string }
 
 // RefuseScope is the wide set: ReleaseScope plus the current alias and the
