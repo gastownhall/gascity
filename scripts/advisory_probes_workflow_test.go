@@ -347,6 +347,36 @@ func TestAdvisoryProbesRouteOnCIPathFilters(t *testing.T) {
 	}
 }
 
+// TestContractRadarBuildsBDWithItsOwnToolchain: setup-go exports
+// GOTOOLCHAIN=local, and beads main's go.mod can require a newer Go than
+// ours, so the radar's Build bd step must let that one build fetch the
+// toolchain it needs. The env is on that step alone: the gc contract steps
+// after it keep the pinned toolchain.
+func TestContractRadarBuildsBDWithItsOwnToolchain(t *testing.T) {
+	const buildStep = "Build bd from beads main HEAD"
+	job, ok := readCriticalPathWorkflow(t, advisoryProbesWorkflowFile).Jobs["contract-radar-bd-head"]
+	if !ok {
+		t.Fatalf("%s has no contract-radar-bd-head job", advisoryProbesWorkflowFile)
+	}
+	found := false
+	for _, step := range job.Steps {
+		got, set := step.Env["GOTOOLCHAIN"]
+		if step.Name != buildStep {
+			if set {
+				t.Errorf("contract-radar-bd-head step %q sets GOTOOLCHAIN=%q; only %q may", step.Name, got, buildStep)
+			}
+			continue
+		}
+		found = true
+		if got != "auto" {
+			t.Errorf("contract-radar-bd-head step %q env GOTOOLCHAIN = %q, want %q", buildStep, got, "auto")
+		}
+	}
+	if !found {
+		t.Errorf("contract-radar-bd-head has no step named %q", buildStep)
+	}
+}
+
 // TestRCGateRunsTheAdvisoryProbes: RC Gate calls advisory-probes.yml beside
 // its reusable ci.yml call, with the same force_blacksmith input, and its
 // summary needs that call, so a red radar fails the gate.

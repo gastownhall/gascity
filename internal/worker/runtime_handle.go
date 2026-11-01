@@ -631,6 +631,9 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 	if !ok {
 		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredProviderUnsupported}, nil
 	}
+	// Under the program-status shadow switch, the pre-read a wait-idle
+	// delivery would take is recorded beside the record; nothing reads it.
+	runtime.ShadowWaitIdlePreread(h.provider, h.sessionName, "", h.providerName, time.Now())
 	// A pre-read first: a session that reads busy, or whose input a pending
 	// interaction owns, will not reach a boundary within the wait, so the
 	// caller queues it now instead of blocking for runtimeHandleWaitIdleTimeout.

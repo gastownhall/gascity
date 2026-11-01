@@ -574,6 +574,8 @@ func (p *ladderPass) observeRuntime(row beads.Bead) ladderRuntime {
 	} else {
 		rt.quiet = workladder.Quiet{State: workladder.NotQuiet, Reason: hold}
 	}
+	shadowHold(sp, name, row.ID, session.ProviderFamilyFromMetadata(row.Metadata, ""),
+		runtime.ProgramPointWorkLadder, hold != "", p.now, runtime.ProgramHoldVerdict)
 	return rt
 }
 

@@ -43,6 +43,15 @@ type fakeStore struct {
 	SetMetadataErrFunc func(key string) error
 
 	ActivatedWispIDs []string
+
+	// CloseLog records the ID of every bead CloseBead or CloseOpenDescendants
+	// closes, in order, so tests can verify close ordering.
+	CloseLog []string
+
+	// CloseDescendantErrFunc, when non-nil, is consulted before each
+	// descendant close in CloseOpenDescendants; a non-nil return fails that
+	// close and stops the walk.
+	CloseDescendantErrFunc func(id string) error
 }
 
 func newFakeStore() *fakeStore {
@@ -133,6 +142,45 @@ func (s *fakeStore) CloseBead(id, reason string) error {
 			rec.metadata = map[string]string{}
 		}
 		rec.metadata["close_reason"] = reason
+	}
+	s.CloseLog = append(s.CloseLog, id)
+	return nil
+}
+
+func (s *fakeStore) CloseOpenDescendants(id, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.beads[id]
+	if !ok {
+		return fmt.Errorf("bead %q: %w", id, beads.ErrNotFound)
+	}
+	return s.closeOpenDescendantsLocked(rec, reason)
+}
+
+// closeOpenDescendantsLocked walks rec's children post-order, so an open
+// grandchild under a closed child is still reached, and closes every
+// non-closed descendant.
+func (s *fakeStore) closeOpenDescendantsLocked(rec *fakeBeadRecord, reason string) error {
+	for _, childID := range rec.children {
+		child, ok := s.beads[childID]
+		if !ok {
+			continue
+		}
+		if err := s.closeOpenDescendantsLocked(child, reason); err != nil {
+			return err
+		}
+		if child.info.Status == "closed" {
+			continue
+		}
+		if s.CloseDescendantErrFunc != nil {
+			if err := s.CloseDescendantErrFunc(childID); err != nil {
+				return err
+			}
+		}
+		child.info.Status = "closed"
+		child.info.ClosedAt = time.Now()
+		child.metadata["close_reason"] = reason
+		s.CloseLog = append(s.CloseLog, childID)
 	}
 	return nil
 }

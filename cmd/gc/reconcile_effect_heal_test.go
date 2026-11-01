@@ -442,6 +442,7 @@ func TestOnlyFreshKindsRestOnTheRuntime(t *testing.T) {
 		{"creating heal", newHealCase(t, livenessGone, desireNone, "state", "creating"), intentRowHealFresh, restRuntime},
 		{"dead-runtime heal", newHealCase(t, livenessGone, desireSleep, "state", "active"), intentRowHealFresh, restRuntime},
 		{"awake heal", ownRuntimeCase(t, "tok-3", "state", "asleep", "sleep_reason", "idle"), intentRowHealFresh, restRuntime},
+		{"parked clear", parkedClearCase(t), intentRowHealFresh, restRuntime},
 		{"stranded clear", newHealCase(t, livenessAlive, desireKeep, "state", "active", strandedEventEmittedKey, rowAt(-time.Hour)), intentRowHeal, 0},
 		{"claim clear", newHealCase(t, livenessAlive, desireKeep, "state", "active", "pending_create_claim", "true"), intentRowHeal, 0},
 	} {
@@ -516,6 +517,7 @@ func TestFreshHealDecideMatchesItsArmOnTheFreshRead(t *testing.T) {
 		"asleep, own":  func() *healCase { return ownRuntimeCase(t, "tok-3", "state", "asleep", "sleep_reason", "idle") },
 		"squatted":     func() *healCase { return squatterCase(t, foreignEnv, desireNone) },
 		"ownerless":    func() *healCase { return squatterCase(t, ownerlessEnv, desireNone) },
+		"parked":       func() *healCase { return parkedClearCase(t) },
 	}
 	for rowName, row := range rows {
 		for rtName, sp := range runtimes {
