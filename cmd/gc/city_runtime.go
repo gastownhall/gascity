@@ -112,6 +112,10 @@ type CityRuntime struct {
 	// lastSuspension is the suspension state the previous tick saw, so the
 	// next one can tell which scopes resumed (repairResumedScopes).
 	lastSuspension *beadsScopeSuspension
+	// rigCensusDeferred names the rigs the boot census skipped as suspended;
+	// each is censused on the first tick after it resumes (censusResumedRigs).
+	// Only the controller loop goroutine (run, then tick) reads or writes it.
+	rigCensusDeferred map[string]bool
 	// drainedLastTick records, per suspended scope root, whether its sessions
 	// were already drained on the previous tick (retireSuspendedScopes).
 	drainedLastTick map[string]bool
@@ -701,7 +705,8 @@ func (cr *CityRuntime) run(ctx context.Context) {
 
 	// One asynchronous rig containment census per controller boot (S4b,
 	// D4): rigs awaiting import, pending clears and rows written to a rig
-	// after its import are named once, here, and never in a CLI process.
+	// after its import are named once, here, and never in a CLI process. A
+	// rig suspended now is censused when it resumes (censusResumedRigs).
 	cr.startRigResidueCensus(ctx)
 
 	// Record bead store health metric.

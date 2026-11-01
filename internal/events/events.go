@@ -604,10 +604,11 @@ const (
 	// --from-rigs`: what the import did for that rig (imported, clean,
 	// nothing to import, refused, failed).
 	StorageRigImport = "storage.rig_import"
-	// StorageRigResidue is published by the controller's one asynchronous
-	// census at boot for each rig that holds infrastructure rows the city
-	// binding should hold: a rig awaiting import, a clear left pending, or
-	// rows written to the rig after its import.
+	// StorageRigResidue is published by the controller's asynchronous rig
+	// census (at boot, or when a rig suspended at boot resumes) for each rig
+	// that holds infrastructure rows the city binding should hold: a rig
+	// awaiting import, a clear left pending, or rows written to the rig after
+	// its import.
 	StorageRigResidue = "storage.rig_residue"
 )
 

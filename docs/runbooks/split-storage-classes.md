@@ -293,10 +293,10 @@ A rig whose store holds no infrastructure bead never needs this step: `gc rig
 add` (a new rig, `--adopt`, or a re-add) and the rig census the city runs at
 each boot record it `infra.rig.<rig>.clean` once the city binding has
 converged, so a rig added before a born-split city's first start, or an adopted
-store holding only work, does not wait for an import. A suspended rig is not
-censused at boot. Neither records a store the import refuses as shared (see
-below): that rig stays awaiting import, and `gc rig add` and the boot census's
-`storage.rig_residue` event say why.
+store holding only work, does not wait for an import. A rig suspended at boot
+is not opened then: the controller censuses it when it resumes. Neither records
+a store the import refuses as shared (see below): that rig stays awaiting
+import, and `gc rig add` and the census's `storage.rig_residue` event say why.
 
 The import refuses, before writing anything, a rig store another registered
 city also uses or that it cannot rule out as one (a shared or company store
