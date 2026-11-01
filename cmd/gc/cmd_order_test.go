@@ -1922,6 +1922,82 @@ prefix = "ct"
 	}
 }
 
+// TestCmdOrderSweepTrackingClosesAParkedTrackingBead: gc order sweep-tracking is
+// the on-demand recovery for an order held by its tracking bead, so it reads
+// every not-closed status the strict open-work gate counts. A stale tracking
+// bead parked by hand (blocked here) is reported by --dry-run and closed by a
+// run with the core order-tracking-sweep order's arguments (no order names).
+func TestCmdOrderSweepTrackingClosesAParkedTrackingBead(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_CITY_ROOT", cityDir)
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Chdir(cityDir)
+
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+`)
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(city): %v", err)
+	}
+	parked, err := store.Create(beads.Bead{
+		Title:     "order:cleanup",
+		Labels:    []string{"order-run:cleanup", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(parked): %v", err)
+	}
+	blocked := "blocked"
+	if err := store.Update(parked.ID, beads.UpdateOpts{Status: &blocked}); err != nil {
+		t.Fatalf("Update(%s, blocked): %v", parked.ID, err)
+	}
+	parkedStatus := func() string {
+		t.Helper()
+		reopened, err := openStoreAtForCity(cityDir, cityDir)
+		if err != nil {
+			t.Fatalf("openStoreAtForCity(city reopen): %v", err)
+		}
+		return statusOf(t, reopened, parked.ID)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, true, false, false, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdOrderSweepTrackingWithOptions(dry run) = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "would close 1 stale order-tracking bead") {
+		t.Fatalf("dry-run stdout = %q, want the parked tracking bead reported", stdout.String())
+	}
+	if got := parkedStatus(); got != blocked {
+		t.Fatalf("parked tracking status after dry-run = %q, want %q", got, blocked)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, true, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdOrderSweepTrackingWithOptions = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "closed 1 stale order-tracking bead") {
+		t.Fatalf("stdout = %q, want the parked tracking bead closed", stdout.String())
+	}
+	if got := parkedStatus(); got != "closed" {
+		t.Fatalf("parked tracking status after sweep = %q, want closed", got)
+	}
+}
+
 func TestCmdOrderSweepTrackingFailsWhenTargetedRigStoreOpenFails(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")

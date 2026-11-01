@@ -47,6 +47,7 @@ TestCmdMailSendPositionalBodyHonouredWhenSubjectFlagSet	fails under the gate: me
 TestCmdMailSendTrailingSlashHumanRecipientResolvesToHuman	fails under the gate: message beads = 0, want 1: []beads.Bead(nil)
 TestCmdNudgeDrainReValidatesMailAgainstRealProvider	fails under the gate: FindIncludingTerminal(read) returned not found
 TestCmdOrderRunEventExecAdvancesCursor	fails under the gate: store.ListByLabel() len = 0, want 1 ([]beads.Bead{})
+TestCmdOrderSweepTrackingClosesAParkedTrackingBead	fails under the gate: dry-run stdout = "would close 0 stale order-tracking bead(s)\n", want the parked tracking bead reported
 TestCmdOrderSweepTrackingClosesCityTrackingWhenRigStoreOpenFails	fails under the gate: Get(stale): bead "gcg-1" is not in this store: bead not found
 TestCmdOrderSweepTrackingClosesRigScopedTrackingAfterReopen	fails under the gate: Get(stale): bead "gcg-1" is not in this store: bead not found
 TestCmdOrderSweepTrackingDryRunReportsWithoutClosing	fails under the gate: Get(stale): bead "gcg-1" is not in this store: bead not found
@@ -221,7 +222,12 @@ TestOrderTrackingSweepWatchdogAllowsSweepOrderToCleanStaleTracking	fails under t
 TestOrderTrackingSweepWatchdogClosesAllStaleTracking	fails under the gate: sweep tracking status = open, want closed
 TestOrderTrackingSweepWatchdogClosesRigStoreSweepTracking	fails under the gate: rig sweep tracking status = open, want closed
 TestOrderTrackingSweepWatchdogFallsBackToConfiguredRigStore	fails under the gate: city sweep tracking status = open, want closed
+TestOrderTrackingSweepWatchdogFirstPassReleasesAParkedRigTrackingBead	fails under the gate: parked rig tracking status after the watchdog's first pass = "blocked", want closed
+TestOrderTrackingSweepWatchdogReleasesTheSweepOrdersOwnParkedTrackingBead	fails under the gate: parked tracking status after the pass at +10m0s = "deferred", want closed
+TestOrderTrackingSweepWatchdogRetriesAnIncompleteNotClosedPass	fails under the gate: parked rig tracking status after the next pass = "blocked", want closed
+TestOrderTrackingSweepWatchdogSeesBeadsWrittenBehindTheCache	fails under the gate: stale tracking gc-1 (order:nudge-on-route) status = open, want closed
 TestOrderTrackingSweepWatchdogUsesCloseBudget	fails under the gate: closed = 0, want 4
+TestOrderTrackingSweepsCloseOldestFirstWithinBudget	fails under the gate: gc-c (oldest-first #0) status = open, want closed
 TestOrphanCloseCompletesOverStrandedClaims	fails under the gate: claim assignee="polecat-1" stranded_session="", want kept on the closed seat and stamped
 TestPersistPrimeHookProviderSessionKey_ClaudeDoesNotOverwrite	fails under the gate: get session bead: bead "gcg-1" is not in this store: bead not found
 TestPersistPrimeHookProviderSessionKey_ClaudeEnvSessionIDCaptured	fails under the gate: get session bead: bead "gcg-1" is not in this store: bead not found
