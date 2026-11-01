@@ -743,9 +743,15 @@ func routeRigList(cityPath string, c *api.Client, nilReason string, jsonOutput b
 }
 
 // renderRigListFromAPI formats the API-sourced rig list to match doRigList
-// output. HQ info and per-rig beads status are derived locally (neither
-// lives on the API response); configured rigs come from the API with an
-// _cache_age_s envelope field (JSON) or staleness banner (human).
+// output. The rigs are the ones city.toml registers, listed as doRigList
+// lists them: the controller answers from the config it has published, which
+// reaches a rig gc rig add or gc rig remove just wrote only at its next config
+// reload. The API supplies each loaded rig's runtime state (running agents,
+// effective suspension); a rig the controller has not loaded yet has no
+// running agent and the on-disk suspension doRigList reads. HQ info and
+// per-rig beads status are derived locally (neither lives on the API
+// response); the output carries an _cache_age_s envelope field (JSON) or
+// staleness banner (human).
 func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.RigView], jsonOutput bool, stdout, stderr io.Writer) int {
 	// CLI-unification Move-1: mirror doRigList — suppress advisory config
 	// warnings (e.g. missing builtin-pack import) in --json mode so both the
@@ -763,10 +769,12 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 	hqPrefix := config.EffectiveHQPrefix(cfg)
 	cityName := cfg.EffectiveCityName()
 	resolveRigPaths(cityPath, cfg.Rigs)
-	rigsByName := make(map[string]config.Rig, len(cfg.Rigs))
-	for i := range cfg.Rigs {
-		rigsByName[cfg.Rigs[i].Name] = cfg.Rigs[i]
+	loaded := make(map[string]api.RigView, len(cr.Body))
+	for _, rig := range cr.Body {
+		loaded[rig.Name] = rig
 	}
+	suspState, _ := loadSuspensionState(fs, cityPath)
+	suspNames := buildEffectiveSuspendedRigNames(cfg, suspState)
 
 	// HQ running is derived from controllerStatusForCity (supervisor-aware),
 	// not a hardcoded true — it flips to false only if the controller actually
@@ -793,29 +801,22 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 			Beads:   rigBeadsStatus(fs, cityPath),
 		}},
 	}
-	for _, rig := range cr.Body {
-		path := rig.Path
-		prefix := rig.Prefix
-		defaultBranch := rig.DefaultBranch
-		defaultSlingTarget := ""
-		var defaultSlingTargets []string
-		if cfgRig, ok := rigsByName[rig.Name]; ok {
-			path = cfgRig.Path
-			prefix = cfgRig.EffectivePrefix()
-			defaultBranch = cfgRig.EffectiveDefaultBranch()
-			defaultSlingTarget = cfgRig.DefaultSlingTarget
-			defaultSlingTargets = cfgRig.DefaultSlingTargets
+	for i := range cfg.Rigs {
+		rig := cfg.Rigs[i]
+		suspended, running := suspNames[rig.Name], false
+		if view, ok := loaded[rig.Name]; ok {
+			suspended, running = view.Suspended, view.RunningCount > 0
 		}
 		result.Rigs = append(result.Rigs, RigListItem{
 			Name:                rig.Name,
-			Path:                path,
-			Prefix:              prefix,
-			DefaultBranch:       defaultBranch,
-			Suspended:           rig.Suspended,
-			Running:             rig.RunningCount > 0,
-			DefaultSlingTarget:  defaultSlingTarget,
-			DefaultSlingTargets: defaultSlingTargets,
-			Beads:               rigBeadsStatus(fs, path),
+			Path:                rig.Path,
+			Prefix:              rig.EffectivePrefix(),
+			DefaultBranch:       rig.EffectiveDefaultBranch(),
+			Suspended:           suspended,
+			Running:             running,
+			DefaultSlingTarget:  rig.DefaultSlingTarget,
+			DefaultSlingTargets: rig.DefaultSlingTargets,
+			Beads:               rigBeadsStatus(fs, rig.Path),
 		})
 	}
 
