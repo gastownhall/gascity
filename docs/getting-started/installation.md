@@ -286,6 +286,25 @@ Use `command gc version` for this check and see
 [Troubleshooting](/getting-started/troubleshooting#oh-my-zsh-git-plugin-hides-gc)
 for the permanent fix.
 
+### Configure Dolt's author identity
+
+Dolt records an author for database commits. On a new machine, check:
+
+```bash
+dolt config --global --get user.name
+dolt config --global --get user.email
+```
+
+Set each missing value to your name or email:
+
+```bash
+dolt config --global --add user.name "Your Name"
+dolt config --global --add user.email "you@example.com"
+```
+
+If init has already created a city and reports missing identity, set the named
+values and run `gc start` inside that city to continue.
+
 Then create your first city:
 
 ```bash

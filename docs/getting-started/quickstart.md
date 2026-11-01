@@ -16,7 +16,9 @@ Oh My Zsh can alias `gc` to `git commit`. If `gc version` opens Git, use
 
 ## 1. Choose the beginner experience
 
-Authenticate Claude Code using its login flow, then run:
+Authenticate Claude Code using its login flow and complete the one-time
+[Dolt author setup](/getting-started/installation#configure-dolts-author-identity),
+then run:
 
 ```bash
 gc init --experience beginner --default-provider claude ~/bright-lights
