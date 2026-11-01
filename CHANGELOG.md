@@ -712,6 +712,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Split cities seat a released graph step on the next controller pass.**
+  On a city whose `[storage.classes]` serves the graph class from a
+  binding, the v2 reconciler read the binding's ready work only from the
+  external-reads lane's recording, which refreshes about every 20 seconds at
+  the 15-second patrol, so a step released by a blocker in the binding waited
+  for that recording before it got a seat. A step whose every blocker lives in
+  the binding's own namespace needs no other store, and the controller now
+  judges it from the binding's cache in the pass; a step with a blocker
+  anywhere else is still served from the gated recording.
+
 - **The core orphan-sweep order judges claims on graph steps in a
   split-storage city.** On a city whose `[storage.classes]` serves the graph
   class from a binding, `gc bd list` answers from a work store only, so the

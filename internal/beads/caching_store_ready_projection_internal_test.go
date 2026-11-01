@@ -299,3 +299,125 @@ func equalIDs(got, want []string) bool {
 	}
 	return true
 }
+
+// TestReadyJudgmentContextJudgesRowByRow (ga-ylpbsy.67): the judgment serves
+// what ReadyContext serves while the cache can vouch for every row, and
+// reports the snapshot it judged from: the edges of every judged candidate,
+// served or not, and every row the cache held, closed ones included. Where
+// ReadyContext declines the whole read over one dirty or unanswerable row, the
+// judgment leaves just that row unjudged. Kills: a candidate's edges reported
+// only when it was served, which lets a reader trust a stale "ready" over the
+// cache's "blocked"; a row the cache does not hold, or holds dirty, reported
+// as held, which lets a reader trust a verdict that skipped or misread that
+// target; an unanswerable row judged anyway; and a row whose released verdict
+// its blocking edges reproduce left unjudged over an edge no verdict reads.
+func TestReadyJudgmentContextJudgesRowByRow(t *testing.T) {
+	opened, err := OpenSQLiteStore(t.TempDir(), WithSQLiteStoreIDPrefix("gcg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := opened.(*SQLiteStore)
+	t.Cleanup(func() { _ = engine.CloseStore() })
+	create := func(title string) Bead {
+		t.Helper()
+		b, err := engine.Create(Bead{Title: title, Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	blocker, step, loose, done := create("blocker"), create("step"), create("loose"), create("done")
+	parent, child := create("parent"), create("child")
+	root, gate, tracked := create("root"), create("gate"), create("tracked")
+	for _, edge := range [][3]string{
+		{step.ID, blocker.ID, "blocks"},
+		{loose.ID, "gcg-absent", "blocks"},
+		{child.ID, parent.ID, "blocks"},
+		{child.ID, "gc-elsewhere", "parent-child"},
+		{tracked.ID, gate.ID, "blocks"},
+		{tracked.ID, root.ID, "tracks"},
+	} {
+		if err := engine.DepAdd(edge[0], edge[1], edge[2]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cache := NewCachingStoreForTest(engine, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.Close(done.ID); err != nil {
+		t.Fatal(err)
+	}
+	q := ReadyQuery{TierMode: TierBoth}
+	ids := func(rows []Bead) string {
+		out := make([]string, 0, len(rows))
+		for _, b := range rows {
+			out = append(out, b.ID)
+		}
+		return fmt.Sprint(out)
+	}
+
+	judged, err := cache.ReadyJudgmentContext(context.Background(), q)
+	if err != nil {
+		t.Fatalf("ReadyJudgmentContext: %v", err)
+	}
+	rows, err := cache.ReadyContext(context.Background(), q)
+	if err != nil {
+		t.Fatalf("ReadyContext: %v", err)
+	}
+	if got, want := ids(judged.Rows), ids(rows); got != want {
+		t.Errorf("judged rows %v, ReadyContext %v", got, want)
+	}
+	if deps, ok := judged.Deps[step.ID]; !ok || len(deps) != 1 || deps[0].DependsOnID != blocker.ID {
+		t.Errorf("Deps[%s] = %v (judged %t), want its edge to %s though the step is not served", step.ID, deps, ok, blocker.ID)
+	}
+	if deps, ok := judged.Deps[blocker.ID]; !ok || len(deps) != 0 {
+		t.Errorf("Deps[%s] = %v (judged %t), want an empty entry", blocker.ID, deps, ok)
+	}
+	if _, ok := judged.Deps[done.ID]; ok {
+		t.Errorf("Deps holds closed %s, which is no ready candidate", done.ID)
+	}
+	for id, want := range map[string]bool{blocker.ID: true, step.ID: true, done.ID: true, "gcg-absent": false} {
+		if got := judged.Holds(id); got != want {
+			t.Errorf("Holds(%s) = %t, want %t", id, got, want)
+		}
+	}
+
+	// child keeps a parent-child edge, which bd's verdict reads and the
+	// dependency-derived predicate does not, so once its blocker closes its
+	// lost verdict cannot be re-derived. tracked keeps only a tracks edge
+	// besides its blocker, which no backend's verdict reads, so its verdict
+	// can be. loose goes dirty.
+	for _, id := range []string{parent.ID, gate.ID} {
+		if err := cache.Close(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cache.mu.Lock()
+	cache.markDirtyLocked(loose.ID)
+	cache.mu.Unlock()
+	if _, err := cache.ReadyContext(context.Background(), q); !errors.Is(err, ErrCacheUnavailable) {
+		t.Fatalf("fixture: ReadyContext = %v, want it to decline over a dirty row", err)
+	}
+	judged, err = cache.ReadyJudgmentContext(context.Background(), q)
+	if err != nil {
+		t.Fatalf("ReadyJudgmentContext over a dirty and an unanswerable row: %v", err)
+	}
+	for _, id := range []string{loose.ID, child.ID} {
+		if _, ok := judged.Deps[id]; ok {
+			t.Errorf("%s was judged; a dirty or unanswerable row must be left unjudged", id)
+		}
+		if strings.Contains(ids(judged.Rows), id) {
+			t.Errorf("judged rows %v serve %s, which the cache cannot vouch for", ids(judged.Rows), id)
+		}
+	}
+	if judged.Holds(loose.ID) {
+		t.Errorf("Holds(%s) = true for a dirty row", loose.ID)
+	}
+	if _, ok := judged.Deps[step.ID]; !ok {
+		t.Errorf("%s was left unjudged; only the rows the cache cannot vouch for may be", step.ID)
+	}
+	if _, ok := judged.Deps[tracked.ID]; !ok || !strings.Contains(ids(judged.Rows), tracked.ID) {
+		t.Errorf("%s, released by %s's close and tracking %s, is not judged ready (judged %t, rows %v)", tracked.ID, gate.ID, root.ID, ok, ids(judged.Rows))
+	}
+}
