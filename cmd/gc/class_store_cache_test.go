@@ -1052,6 +1052,17 @@ func TestBindingCacheReconcileStaysQuietAfterTheControllersOwnWrites(t *testing.
 	}
 	feedBackBeadEvents(cs, ep, &cursor)
 
+	// The echoes must not cost the cache its dependency coverage: readers
+	// between two re-scans would otherwise fall back to the backing (#8643's
+	// first hunk), which the re-scan below would hide.
+	readyBetween, err := cache.ReadyContext(context.Background())
+	if err != nil {
+		t.Fatalf("the controller's own close echoes cost the binding cache its dependency coverage: %v", err)
+	}
+	if containsBeadID(readyBetween, step.ID) {
+		t.Fatalf("cached ReadyContext offers %s, which its open blocker holds back", step.ID)
+	}
+
 	before := cache.Stats().Updates
 	cache.ReconcileNowForTest()
 	var reannounced []string
