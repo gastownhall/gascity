@@ -7,11 +7,14 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/chartest"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
@@ -228,4 +231,78 @@ func TestCityStatusJSONValidatesOnEveryRoute(t *testing.T) {
 			})
 		}
 	}
+}
+
+// TestCityStatusJSONRouteEquivalence pins the #8453 contract for gc status:
+// the API route prints the local rendering, plus only the declared API-only
+// keys. The rigs' prefix and default sling targets live only in city.toml,
+// and the proxied-native account rides the status wire, so both are seeded.
+func TestCityStatusJSONRouteEquivalence(t *testing.T) {
+	h := newCityStatusRouteHarness(t)
+	markCityStatusRouteControllerRunning(t, h)
+	giveCityStatusRoutesProxiedDiagnostic(t, h)
+	lanes := h.lanes(t)
+
+	local := cityStatusRouteJSON(t, h, lanes, "serverless")
+	viaAPI := cityStatusRouteJSON(t, h, lanes, "alive")
+	if diff := chartest.JSONShapeDiff(local, viaAPI, cityStatusRouteAdditiveKeys); diff != "" {
+		t.Fatalf("gc status --json differs by route: %s\nlocal:\n%s\napi:\n%s", diff, local, viaAPI)
+	}
+}
+
+// TestFillStatusRigConfigFieldsKeepsRigsConfigDoesNotName pins the edges of
+// the API route's rig-row fill: config supplies prefix and default sling
+// targets by rig name, a rig config does not name keeps its wire row, and
+// the filled slice does not alias the config's.
+func TestFillStatusRigConfigFieldsKeepsRigsConfigDoesNotName(t *testing.T) {
+	wireRows := func() []StatusRigJSON {
+		return []StatusRigJSON{
+			{Name: "alpha", Path: "/srv/alpha"},
+			{Name: "omega", Path: "/srv/omega", Suspended: true},
+			{Name: "stray", Path: "/srv/stray"},
+		}
+	}
+	cfg := &config.City{Rigs: []config.Rig{
+		{Name: "alpha", Path: "/cfg/alpha", Prefix: "al", DefaultSlingTarget: "alpha/rigbot"},
+		{Name: "omega", Path: "/cfg/omega", DefaultSlingTargets: []string{"omega/rigbot", "alpha/rigbot"}},
+	}}
+	omegaPrefix := cfg.Rigs[1].EffectivePrefix()
+	if omegaPrefix == "" {
+		t.Fatal("derived prefix for omega is empty; the case would not pin derivation")
+	}
+
+	tests := []struct {
+		name string
+		cfg  *config.City
+		want []StatusRigJSON
+	}{
+		{name: "nil config leaves rows untouched", cfg: nil, want: wireRows()},
+		{
+			name: "config rigs filled, unnamed rig kept",
+			cfg:  cfg,
+			want: []StatusRigJSON{
+				{Name: "alpha", Path: "/srv/alpha", Prefix: "al", DefaultSlingTarget: "alpha/rigbot"},
+				{Name: "omega", Path: "/srv/omega", Suspended: true, Prefix: omegaPrefix, DefaultSlingTargets: []string{"omega/rigbot", "alpha/rigbot"}},
+				{Name: "stray", Path: "/srv/stray"},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rows := wireRows()
+			fillStatusRigConfigFields(rows, tc.cfg)
+			if !reflect.DeepEqual(rows, tc.want) {
+				t.Fatalf("rows = %+v, want %+v", rows, tc.want)
+			}
+		})
+	}
+
+	t.Run("targets slice is copied", func(t *testing.T) {
+		rows := wireRows()
+		fillStatusRigConfigFields(rows, cfg)
+		cfg.Rigs[1].DefaultSlingTargets[0] = "mutated"
+		if got := rows[1].DefaultSlingTargets[0]; got != "omega/rigbot" {
+			t.Fatalf("row targets alias the config slice: got %q after mutating config", got)
+		}
+	})
 }
