@@ -605,18 +605,28 @@ var mailCheckAPIClient = func(cityPath string) (*api.Client, string) {
 	return nil, apiClientFallbackReason(cityPath)
 }
 
+// Route-log reasons for API-capable mail reads that take the local path
+// because only it can answer the request as the local contract requires.
+const (
+	// mailRouteReasonRecipientUnresolved: the target did not resolve; the
+	// local path reports the resolver's error.
+	mailRouteReasonRecipientUnresolved = "recipient-unresolved"
+	// mailRouteReasonClosedSession: a no-argument check from a session whose
+	// own bead is closed; the local path refuses it.
+	mailRouteReasonClosedSession = "closed-session"
+)
+
 // routeMailCheck dispatches non-injecting `mail check` to the supervisor API
 // when a controller is up; otherwise falls back to the local mail-provider path.
 // Injecting hooks probe the API for degraded-read notices, then use the local
 // path because provider-backed mail may need to perform delivery side effects
 // after successful injection.
 //
-// Only the local path refuses a no-argument check whose own session
-// (GC_SESSION_ID) is closed (refuseClosedHookSession), so the two paths differ
-// there: an injecting check always takes the local path and refuses, while a
-// plain check routed to the API answers for the closed session's id. That read
-// archives nothing and does not fall back to GC_ALIAS, so it consumes and
-// leaks no successor's mail.
+// A plain check resolves its target the way the local path does before asking
+// the supervisor, so both routes name the same mailbox. A target that does not
+// resolve, or a no-argument check whose own session (GC_SESSION_ID) is closed,
+// takes the local path, which reports the error or refuses exactly as it
+// always has.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *api.Client, nilReason string, stdout, stderr io.Writer) int {
 	const cmdName = "mail check"
@@ -648,6 +658,15 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 		logRoute(stderr, cmdName, "fallback", "inject-local-side-effects")
 		return doMailCheckFallback(args, inject, hookFormat, stdout, stderr)
 	}
+	var target resolvedMailTarget
+	if c != nil {
+		var identity string
+		if target, identity, nilReason = resolveMailCheckAPITarget(args); nilReason != "" {
+			c = nil
+		} else {
+			recipient = identity
+		}
+	}
 	if c != nil {
 		cr, err := c.ListMailInbox(recipient, "")
 		if err == nil {
@@ -657,7 +676,7 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 				return 1
 			}
 			logRoute(stderr, cmdName, "api", "")
-			return renderMailCheckFromAPI(cr, recipient, inject, hookFormat, stdout)
+			return renderMailCheckFromAPI(cr, target.display, inject, hookFormat, stdout)
 		}
 		if !api.ShouldFallbackForRead(c, err) {
 			logRoute(stderr, cmdName, "api", "error")
@@ -671,11 +690,27 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 	return doMailCheckFallback(args, inject, hookFormat, stdout, stderr)
 }
 
+// resolveMailCheckAPITarget resolves a plain `gc mail check` target the way
+// the local path does. It returns the target and the identity to ask the
+// supervisor about, or a non-empty route-log reason when the check must take
+// the local path instead.
+func resolveMailCheckAPITarget(args []string) (resolvedMailTarget, string, string) {
+	target, identity, ok := resolveMailTargetAndIdentityFromArgs(args, io.Discard, "gc mail check")
+	if !ok {
+		return resolvedMailTarget{}, "", mailRouteReasonRecipientUnresolved
+	}
+	if len(args) == 0 && refuseClosedHookSession(target) != nil {
+		return resolvedMailTarget{}, "", mailRouteReasonClosedSession
+	}
+	return target, identity, ""
+}
+
 // renderMailCheckFromAPI formats the API-sourced inbox for `gc mail check`.
 // With --inject, writes the <system-reminder> block and always returns 0.
 // Without --inject, returns 0 if mail exists and 1 if empty, matching the
 // local fallback contract; human output appends a stale-read banner when the
-// supervisor cache is > 30 s old.
+// supervisor cache is > 30 s old. The count is the server's pre-paging Total,
+// so a mailbox larger than one page reports every unread message.
 func renderMailCheckFromAPI(cr api.CachedRead[api.MailListView], recipient string, inject bool, hookFormat string, stdout io.Writer) int {
 	messages := cr.Body.Items
 	if inject {
@@ -684,10 +719,11 @@ func renderMailCheckFromAPI(cr api.CachedRead[api.MailListView], recipient strin
 		}
 		return 0
 	}
-	if len(messages) == 0 {
+	n := max(cr.Body.Total, len(messages))
+	if n == 0 {
 		return 1
 	}
-	fmt.Fprintf(stdout, "%d unread message(s) for %s\n", len(messages), recipient) //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "%d unread message(s) for %s\n", n, recipient) //nolint:errcheck // best-effort stdout
 	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
 		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
 	}
@@ -1462,14 +1498,24 @@ func resolveMailTargetsForCommand(identifier string, stderr io.Writer, cmdName s
 // stale GC_ALIAS on a pool worker would otherwise block inbox access when
 // GC_SESSION_ID still matches the bead via session_name.
 func resolveDefaultMailTargetsForCommand(stderr io.Writer, cmdName string) (resolvedMailTarget, bool) {
+	target, _, ok := resolveDefaultMailTargetAndIdentityForCommand(stderr, cmdName)
+	return target, ok
+}
+
+// resolveDefaultMailTargetAndIdentityForCommand is
+// resolveDefaultMailTargetsForCommand that also returns the default identity
+// candidate that resolved, so an API read can ask the supervisor about the
+// same mailbox the local route reads.
+func resolveDefaultMailTargetAndIdentityForCommand(stderr io.Writer, cmdName string) (resolvedMailTarget, string, bool) {
 	candidates := defaultMailIdentityCandidates()
 	if len(candidates) == 1 || isStorelessMailProvider() {
-		return resolveMailTargetsForCommand(candidates[0], stderr, cmdName)
+		target, ok := resolveMailTargetsForCommand(candidates[0], stderr, cmdName)
+		return target, candidates[0], ok
 	}
 	store, code := openCityStore(stderr, cmdName)
 	if store == nil {
 		_ = code
-		return resolvedMailTarget{}, false
+		return resolvedMailTarget{}, "", false
 	}
 	// Memoize the gc:session enumeration so multi-candidate retry shares one
 	// broad scan instead of issuing one per candidate (ga-q6ct Layer 2).
@@ -1479,15 +1525,15 @@ func resolveDefaultMailTargetsForCommand(stderr io.Writer, cmdName string) (reso
 	for _, c := range candidates {
 		target, err := resolveMailTargetsWithConfigCached(cityPath, cfg, sessStore, c, cache)
 		if err == nil {
-			return target, true
+			return target, c, true
 		}
 		if !errors.Is(err, session.ErrSessionNotFound) {
 			fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
-			return resolvedMailTarget{}, false
+			return resolvedMailTarget{}, "", false
 		}
 	}
 	fmt.Fprintf(stderr, "%s: no mail identity resolved (tried %v)\n", cmdName, candidates) //nolint:errcheck // best-effort stderr
-	return resolvedMailTarget{}, false
+	return resolvedMailTarget{}, "", false
 }
 
 func resolveDefaultMailSenderForCommand(cityPath string, cfg *config.City, sessStore beads.Store, stderr io.Writer, cmdName string) (string, bool) {
@@ -1561,6 +1607,17 @@ func resolveMailTargetFromArgs(args []string, stderr io.Writer, cmdName string) 
 		return resolveMailTargetsForCommand(args[0], stderr, cmdName)
 	}
 	return resolveDefaultMailTargetsForCommand(stderr, cmdName)
+}
+
+// resolveMailTargetAndIdentityFromArgs resolves the mail target the local
+// route reads and also returns the identity that resolved it: the argument,
+// or the default identity candidate that matched.
+func resolveMailTargetAndIdentityFromArgs(args []string, stderr io.Writer, cmdName string) (resolvedMailTarget, string, bool) {
+	if len(args) > 0 {
+		target, ok := resolveMailTargetsForCommand(args[0], stderr, cmdName)
+		return target, strings.TrimSpace(args[0]), ok
+	}
+	return resolveDefaultMailTargetAndIdentityForCommand(stderr, cmdName)
 }
 
 func resolveRawMailTargetForStorelessProvider(identifier string, stderr io.Writer, cmdName string) (resolvedMailTarget, bool) {
@@ -2927,17 +2984,27 @@ var mailCountAPIClient = func(cityPath string) (*api.Client, string) {
 
 // routeMailCount dispatches `mail count` to the supervisor API when a
 // controller is up; otherwise falls back to the local mail-provider path.
+// The API route first resolves the target the way the local route does and
+// asks the supervisor about the identity that resolved, so both routes print
+// the same resolved recipient. A target that does not resolve takes the local
+// path, which reports the resolver's error.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeMailCount(_ string, args []string, c *api.Client, nilReason string, jsonOut bool, stdout, stderr io.Writer) int {
-	recipient := defaultMailIdentity()
-	if len(args) > 0 {
-		recipient = strings.TrimSpace(args[0])
+	var (
+		target   resolvedMailTarget
+		identity string
+	)
+	if c != nil {
+		var ok bool
+		if target, identity, ok = resolveMailTargetAndIdentityFromArgs(args, io.Discard, "gc mail count"); !ok {
+			c, nilReason = nil, mailRouteReasonRecipientUnresolved
+		}
 	}
 	var cr api.CachedRead[api.MailCountView]
 	return routeRead(c, "mail count", nilReason, stderr,
 		func() error {
 			var err error
-			if cr, err = c.CountMail(recipient, ""); err != nil {
+			if cr, err = c.CountMail(identity, ""); err != nil {
 				return err
 			}
 			if mailCountHasPartial(cr.Body) {
@@ -2946,20 +3013,9 @@ func routeMailCount(_ string, args []string, c *api.Client, nilReason string, js
 			return nil
 		},
 		func() int {
-			if jsonOut {
-				if err := writeCLIJSONLine(stdout, mailCountJSONResult{
-					SchemaVersion: "1",
-					Recipient:     recipient,
-					Recipients:    []string{recipient},
-					Total:         cr.Body.Total,
-					Unread:        cr.Body.Unread,
-				}); err != nil {
-					fmt.Fprintf(stderr, "gc mail count: %v\n", err) //nolint:errcheck
-					return 1
-				}
-				return 0
+			if code := writeMailCountResult(target, cr.Body.Total, cr.Body.Unread, jsonOut, stdout, stderr); code != 0 || jsonOut {
+				return code
 			}
-			fmt.Fprintf(stdout, "%d total, %d unread for %s\n", cr.Body.Total, cr.Body.Unread, recipient) //nolint:errcheck // best-effort stdout
 			if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
 				fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
 			}
@@ -2967,6 +3023,26 @@ func routeMailCount(_ string, args []string, c *api.Client, nilReason string, js
 		},
 		func() int { return doMailCountFallback(args, jsonOut, stdout, stderr) },
 	)
+}
+
+// writeMailCountResult prints a `gc mail count` result for target on either
+// route: the JSON object, or the "N total, M unread for <mailbox>" line.
+func writeMailCountResult(target resolvedMailTarget, total, unread int, jsonOut bool, stdout, stderr io.Writer) int {
+	if jsonOut {
+		if err := writeCLIJSONLine(stdout, mailCountJSONResult{
+			SchemaVersion: "1",
+			Recipient:     target.display,
+			Recipients:    jsonRecipients(target),
+			Total:         total,
+			Unread:        unread,
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc mail count: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		return 0
+	}
+	fmt.Fprintf(stdout, "%d total, %d unread for %s\n", total, unread, target.display) //nolint:errcheck // best-effort stdout
+	return 0
 }
 
 // doMailCountFallback is the direct-bd path for `gc mail count`.
@@ -3014,21 +3090,7 @@ func doMailCountTargetWithJSON(mp mail.Provider, target resolvedMailTarget, json
 		fmt.Fprintf(stderr, "gc mail count: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if jsonOut {
-		if err := writeCLIJSONLine(stdout, mailCountJSONResult{
-			SchemaVersion: "1",
-			Recipient:     target.display,
-			Recipients:    jsonRecipients(target),
-			Total:         total,
-			Unread:        unread,
-		}); err != nil {
-			fmt.Fprintf(stderr, "gc mail count: %v\n", err) //nolint:errcheck
-			return 1
-		}
-		return 0
-	}
-	fmt.Fprintf(stdout, "%d total, %d unread for %s\n", total, unread, target.display) //nolint:errcheck // best-effort stdout
-	return 0
+	return writeMailCountResult(target, total, unread, jsonOut, stdout, stderr)
 }
 
 func jsonRecipients(target resolvedMailTarget) []string {
