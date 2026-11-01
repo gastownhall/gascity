@@ -727,7 +727,8 @@ if [ "$do_gc" = true ] && [ -d "$data_dir" ]; then
 $(routes_files)
 ROUTES_LIST
     if [ -n "$beads_dir" ]; then
-      purge_args=""
+      # bd purge only previews unless it is given --force.
+      purge_args="--force"
       [ "$dry_run" = true ] && purge_args="--dry-run"
       purged=$(BEADS_DIR="$beads_dir" bd purge $purge_args 2>/dev/null | grep -c "purged" || true)
       [ "$purged" -gt 0 ] && echo "Purged $purged ephemeral bead(s) from $name"
