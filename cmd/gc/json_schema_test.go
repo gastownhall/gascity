@@ -151,15 +151,16 @@ func walkCommandTree(cmd *cobra.Command, visit func(*cobra.Command)) {
 // explicitly opt out of, the schema_version/ok success-discriminator
 // convention checked by TestJSONResultSchemasRequireSuccessDiscriminator.
 var successDiscriminatorExempt = map[string]string{
-	"schemas/bd/result.schema.json":                  "gc bd is an explicit passthrough: bd owns the payload shape.",
-	"schemas/context/list/result.schema.json":        "contextJSON is a raw per-record JSONL line (see writeCLIJSONLine); it has no ok/schema_version envelope by design.",
-	"schemas/context/show/result.schema.json":        "contextJSON is a raw per-record JSONL line (see writeCLIJSONLine); it has no ok/schema_version envelope by design.",
-	"schemas/extmsg/bind/result.schema.json":         "extmsg.SessionBindingRecord is a shared domain type serialized identically over the internal API; it predates the ok convention.",
-	"schemas/extmsg/handoff/result.schema.json":      "extmsg.SessionBindingRecord is a shared domain type serialized identically over the internal API; it predates the ok convention.",
-	"schemas/extmsg/unbind/result.schema.json":       "extmsg.SessionBindingRecord is a shared domain type serialized identically over the internal API; it predates the ok convention.",
-	"schemas/perf/run/result.schema.json":            "gc perf is a hidden development-only harness that predates the ok convention.",
-	"schemas/perf/session-new/result.schema.json":    "gc perf is a hidden development-only harness that predates the ok convention.",
-	"schemas/runtime/conformance/result.schema.json": "runtimecontract.Report is consumed by external runtime packs' CI as-is; it predates the ok convention.",
+	"schemas/bd/result.schema.json":                                    "gc bd is an explicit passthrough: bd owns the payload shape.",
+	"schemas/context/list/result.schema.json":                          "contextJSON is a raw per-record JSONL line (see writeCLIJSONLine); it has no ok/schema_version envelope by design.",
+	"schemas/context/show/result.schema.json":                          "contextJSON is a raw per-record JSONL line (see writeCLIJSONLine); it has no ok/schema_version envelope by design.",
+	"schemas/extmsg/bind/result.schema.json":                           "extmsg.SessionBindingRecord is a shared domain type serialized identically over the internal API; it predates the ok convention.",
+	"schemas/extmsg/handoff/result.schema.json":                        "extmsg.SessionBindingRecord is a shared domain type serialized identically over the internal API; it predates the ok convention.",
+	"schemas/extmsg/unbind/result.schema.json":                         "extmsg.SessionBindingRecord is a shared domain type serialized identically over the internal API; it predates the ok convention.",
+	"schemas/internal/program-status-shadow-report/result.schema.json": "gc internal program-status-shadow-report is a hidden diagnostic that prints a bare report object; it has no ok/schema_version envelope by design.",
+	"schemas/perf/run/result.schema.json":                              "gc perf is a hidden development-only harness that predates the ok convention.",
+	"schemas/perf/session-new/result.schema.json":                      "gc perf is a hidden development-only harness that predates the ok convention.",
+	"schemas/runtime/conformance/result.schema.json":                   "runtimecontract.Report is consumed by external runtime packs' CI as-is; it predates the ok convention.",
 }
 
 func TestJSONResultSchemasRequireSuccessDiscriminator(t *testing.T) {
