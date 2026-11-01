@@ -2305,11 +2305,13 @@ func hookSkipIfInputDone(candidate beads.Bead, opts hookClaimOptions, ops hookCl
 
 // workflowInputDone resolves candidate to its workflow root (itself when it
 // carries gc.input_convoy_id, else via gc.root_bead_id) and reports whether
-// every member the root's input convoy tracks is terminal, or non-terminal
+// every member the root's input convoy tracks is terminal outside this workflow,
+// or non-terminal
 // but handed off to an assignee outside identityCandidates (no longer ours to
 // wait on). A member that is still unassigned, or still assigned to one of
 // identityCandidates, blocks. A root with no input convoy, or a convoy with
-// no resolvable members, is never "done".
+// no resolvable members, is never "done". Input completed by this workflow
+// retains its required continuation; a source close is not a workflow close.
 func workflowInputDone(store beads.WorkStore, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
 	return workflowInputDoneAcross(store, store, candidate, identityCandidates)
 }
@@ -2358,9 +2360,28 @@ func workflowInputDoneAcross(graph beads.Store, work beads.WorkStore, candidate 
 	if len(members) == 0 {
 		return root.ID, false, nil
 	}
-	var workflowSeats []string
+	var workflowSeats, claimedWorkflowSeats []string
 	for _, m := range members {
 		if convoy.IsTerminalStatus(m.Status) {
+			if workflowSeats == nil {
+				workflowSeats, claimedWorkflowSeats, err = workflowStepAssignees(graph, root.ID)
+				if err != nil {
+					return root.ID, false, err
+				}
+			}
+			// Closing this workflow's own input can precede its do-work
+			// close, drain and finalizer. A pre-assignment alone proves no
+			// execution; use actual claim provenance to retain continuation.
+			// An explicit new assignee wins over stale source metadata.
+			memberSeats := []string{strings.TrimSpace(m.Assignee)}
+			if memberSeats[0] == "" {
+				memberSeats = []string{m.Metadata[beadmeta.SessionIDMetadataKey], m.Metadata[beadmeta.SessionNameMetadataKey]}
+			}
+			for _, seat := range memberSeats {
+				if strings.TrimSpace(seat) != "" && hookClaimHasIdentity(seat, claimedWorkflowSeats) {
+					return root.ID, false, nil
+				}
+			}
 			continue
 		}
 		if strings.TrimSpace(m.Assignee) != "" && !hookClaimHasIdentity(m.Assignee, identityCandidates) {
@@ -2368,7 +2389,7 @@ func workflowInputDoneAcross(graph beads.Store, work beads.WorkStore, candidate 
 			// (typically dead, its steps reopened), not another lane: the
 			// member was never handed off (sys-pxryan.44).
 			if workflowSeats == nil {
-				workflowSeats, err = workflowStepAssignees(graph, root.ID)
+				workflowSeats, claimedWorkflowSeats, err = workflowStepAssignees(graph, root.ID)
 				if err != nil {
 					return root.ID, false, err
 				}
@@ -2382,22 +2403,25 @@ func workflowInputDoneAcross(graph beads.Store, work beads.WorkStore, candidate 
 	return root.ID, true, nil
 }
 
-// workflowStepAssignees lists every seat recorded on any step (open or closed)
-// of the workflow rooted at rootID: its assignee plus its gc.session_name and
-// gc.session_id claim provenance, which survive a reopen that clears the
-// assignee of a seat that died mid-step. Closed steps and session provenance
-// are included on purpose so reopened steps of dead seats still count.
-func workflowStepAssignees(store beads.Store, rootID string) ([]string, error) {
+// workflowStepAssignees returns all step seat identities and the subset with
+// native claim evidence. A mere continuation pre-assignment belongs to this
+// workflow while its input is open, but cannot prove it completed terminal
+// input. Claim timestamps and session back-references survive a reopen that
+// clears the assignee. Closed steps remain part of both projections.
+func workflowStepAssignees(store beads.Store, rootID string) ([]string, []string, error) {
 	steps, err := store.List(beads.ListQuery{
 		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
 		IncludeClosed: true,
 		TierMode:      beads.TierBoth,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("listing steps of %s: %w", rootID, err)
+		return nil, nil, fmt.Errorf("listing steps of %s: %w", rootID, err)
 	}
-	seats := []string{}
+	seats, claimedSeats := []string{}, []string{}
 	for _, step := range steps {
+		claimed := strings.TrimSpace(step.Metadata[beadmeta.ClaimedAtMetadataKey]) != "" ||
+			strings.TrimSpace(step.Metadata[beadmeta.SessionIDMetadataKey]) != "" ||
+			strings.TrimSpace(step.Metadata[beadmeta.SessionNameMetadataKey]) != ""
 		for _, a := range []string{
 			step.Assignee,
 			step.Metadata[beadmeta.SessionNameMetadataKey],
@@ -2405,10 +2429,13 @@ func workflowStepAssignees(store beads.Store, rootID string) ([]string, error) {
 		} {
 			if a = strings.TrimSpace(a); a != "" {
 				seats = append(seats, a)
+				if claimed {
+					claimedSeats = append(claimedSeats, a)
+				}
 			}
 		}
 	}
-	return seats, nil
+	return seats, claimedSeats, nil
 }
 
 // skipDoneWorkflow closes rootID and every open/in_progress step under it

@@ -291,3 +291,84 @@ func TestClassRoutedHookReclaimStaleFollowsTheBinding(t *testing.T) {
 		}
 	})
 }
+
+// A successful input close by this workflow is not stale redispatch: its
+// remaining drain/finalizer must still be claimed, even after a seat changes.
+func TestClassRoutedHookTerminalInputKeepsOwnedContinuation(t *testing.T) {
+	cases := []struct {
+		name                  string
+		interrupted           bool
+		clearedAssignee       bool
+		sourceClearedAssignee bool
+		claimed               bool
+		handedOff             bool
+		wantKeep              bool
+	}{
+		{name: "successful input retains required continuation", claimed: true, wantKeep: true},
+		{name: "input closes before do-work closes", interrupted: true, claimed: true, wantKeep: true},
+		{name: "successor uses durable prior claim identity", clearedAssignee: true, claimed: true, wantKeep: true},
+		{name: "source assignee cleared but durable native identity retained", sourceClearedAssignee: true, claimed: true, wantKeep: true},
+		{name: "terminal external handoff overrides stale source provenance", claimed: true, handedOff: true},
+		{name: "terminal input merely assigned before execution still retires"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDoneWorkflowSplitFixture(t, true)
+			owner := "worker-old"
+			if tc.handedOff {
+				owner = "other-lane-seat"
+			}
+			if tc.sourceClearedAssignee {
+				owner = ""
+			}
+			if err := f.work.Update(f.source.ID, beads.UpdateOpts{Assignee: &owner}); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.work.SetMetadata(f.source.ID, beadmeta.OutcomeMetadataKey, beadmeta.OutcomePass); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.work.SetMetadata(f.source.ID, beadmeta.SessionNameMetadataKey, "worker-old-runtime"); err != nil {
+				t.Fatal(err)
+			}
+			if tc.claimed {
+				for k, v := range map[string]string{beadmeta.SessionIDMetadataKey: "worker-old", beadmeta.SessionNameMetadataKey: "worker-old-runtime", "gc.claimed_at": "2026-11-01T15:46:17Z"} {
+					if err := f.binding.SetMetadata(f.done.ID, k, v); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if tc.clearedAssignee {
+				empty := ""
+				if err := f.binding.Update(f.done.ID, beads.UpdateOpts{Assignee: &empty}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.interrupted {
+				state := "in_progress"
+				if err := f.binding.Update(f.done.ID, beads.UpdateOpts{Status: &state}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ops := classRoutedHookClaimOps(f.baseOps(t), f.route)
+			kept, stderr := f.retire(t, ops, f.step)
+			if tc.wantKeep {
+				if len(kept) != 1 {
+					t.Fatalf("successful workflow continuation was retired: kept=%d stderr=%q", len(kept), stderr)
+				}
+				f.assertOpen(t, f.root.ID, f.step.ID)
+			} else {
+				if len(kept) != 0 {
+					t.Fatalf("stale/handed-off input kept workflow alive: kept=%d stderr=%q", len(kept), stderr)
+				}
+				f.assertSkipped(t, f.root.ID, f.step.ID)
+			}
+			got, err := f.work.Get(f.source.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != "closed" || got.Assignee != owner || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+				t.Fatalf("claim retirement changed terminal source: %+v", got)
+			}
+		})
+	}
+}
