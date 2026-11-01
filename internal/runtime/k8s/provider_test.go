@@ -3317,6 +3317,7 @@ func TestInitCityInPodRemovesPartialCopyAfterUploadFailure(t *testing.T) {
 		t.Fatalf("last pod command = %v, want partial-copy cleanup", last.cmd)
 	}
 }
+
 func TestBuildPodRigProjectionUsesPodPathAndEffectiveSuspension(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
