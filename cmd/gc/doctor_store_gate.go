@@ -170,6 +170,18 @@ func (g *doctorStoreGate) OrderLastRun(cityPath string, cfg *config.City, lastRu
 
 // OrderRecentRuns wraps an order-history listing the way OrderLastRun wraps the
 // last-run lookup.
-func (g *doctorStoreGate) OrderRecentRuns(_ string, _ *config.City, recent doctor.OrderOutcomeRecentRunsFunc) doctor.OrderOutcomeRecentRunsFunc {
-	return recent
+func (g *doctorStoreGate) OrderRecentRuns(cityPath string, cfg *config.City, recent doctor.OrderOutcomeRecentRunsFunc) doctor.OrderOutcomeRecentRunsFunc {
+	return func(order orders.Order, limit int) ([]orders.OrderRun, error) {
+		if target, err := resolveOrderStoreTarget(cityPath, cfg, order); err == nil {
+			if err := g.skipErr(target.ScopeRoot); err != nil {
+				return nil, err
+			}
+			if legacyOrderCityFallbackNeeded(cityPath, target) {
+				if err := g.skipErr(cityPath); err != nil {
+					return nil, err
+				}
+			}
+		}
+		return recent(order, limit)
+	}
 }

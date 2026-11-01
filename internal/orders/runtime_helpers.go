@@ -2,6 +2,7 @@ package orders
 
 import (
 	"log"
+	"slices"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
@@ -90,7 +91,27 @@ func CursorAcross(stores []*Store) CursorFunc {
 }
 
 // RecentRunsAcross returns a reader of the newest runs of a named order across a
-// federation of order front doors, newest first, at most limit of them.
-func RecentRunsAcross(_ []*Store) func(scoped string, limit int) ([]OrderRun, error) {
-	return func(string, int) ([]OrderRun, error) { return nil, nil }
+// federation of order front doors, newest first, at most limit of them. Each
+// *Store lists its own newest limit runs; the merge is by CreatedAt descending,
+// so the result is the true newest limit across every scope. A per-scope error
+// aborts and propagates. nil entries are skipped.
+func RecentRunsAcross(stores []*Store) func(scoped string, limit int) ([]OrderRun, error) {
+	return func(scoped string, limit int) ([]OrderRun, error) {
+		var merged []OrderRun
+		for _, s := range stores {
+			if s == nil {
+				continue
+			}
+			runs, err := s.RecentRuns(scoped, limit)
+			if err != nil {
+				return nil, err
+			}
+			merged = append(merged, runs...)
+		}
+		slices.SortStableFunc(merged, func(a, b OrderRun) int { return b.CreatedAt.Compare(a.CreatedAt) })
+		if limit > 0 && len(merged) > limit {
+			merged = merged[:limit]
+		}
+		return merged, nil
+	}
 }
