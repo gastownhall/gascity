@@ -1627,10 +1627,8 @@ const canonicalGCPathPrefix = `export PATH="$HOME/go/bin:$HOME/.local/bin:$PATH"
 // appends the gc install dirs to PATH instead of prepending them, so a
 // pre-existing "gc" already on the user's PATH is never shadowed by a
 // stale binary under $HOME/go/bin or $HOME/.local/bin (gc-af7ad8a0fe).
-// Recognized alongside canonicalGCPathPrefix by parseManagedGCCommand (the
-// Codex/prompt-hook upgrade path); the Claude legacy helpers
-// (commandBodyAfterCanonicalPrefix, isLegacyGCManagedCommand) still strip
-// only the prepend form.
+// Both provider upgrade paths recognize the prepend and append forms.
+// Managed Claude hooks also pin the invoking binary through GC_BIN.
 const canonicalGCPathPrefixAppend = `export PATH="$PATH:$HOME/go/bin:$HOME/.local/bin" && `
 
 // managedGCBinToken is the dequoted form of the current-form gc invocation
@@ -1650,7 +1648,7 @@ const (
 // unchanged. Used to anchor legacy-form matching against the post-prefix
 // body without matching arbitrary user-authored prefixes.
 func commandBodyAfterCanonicalPrefix(command string) string {
-	return strings.TrimPrefix(command, canonicalGCPathPrefix)
+	return strings.TrimPrefix(strings.TrimPrefix(command, canonicalGCPathPrefix), canonicalGCPathPrefixAppend)
 }
 
 // isLegacyGCManagedCommand reports whether a hook command body matches a
@@ -1666,6 +1664,7 @@ func commandBodyAfterCanonicalPrefix(command string) string {
 // trailing args.
 func isLegacyGCManagedCommand(event, command string) bool {
 	body := commandBodyAfterCanonicalPrefix(command)
+	body = strings.Replace(body, managedGCBinInvocation+" ", "gc ", 1)
 	switch event {
 	case "PreCompact":
 		return equalsLegacyCommandBody(body, "gc prime --hook") ||
@@ -1732,6 +1731,22 @@ func equalsLegacyCommandBody(command, token string) bool {
 // `gc prime --hook && my-step`) from matching and being silently
 // rewritten.
 func upgradeClaudeHookCommand(event, command string) (string, bool) {
+	upgraded, legacyChanged := upgradeLegacyClaudeHookCommand(event, command)
+	if legacyChanged {
+		command = upgraded
+	}
+	if !isLegacyGCManagedCommand(event, command) {
+		return command, legacyChanged
+	}
+	body := commandBodyAfterCanonicalPrefix(command)
+	// Recognition above requires an exact known managed command. A wrapper,
+	// suffix, chained command or custom event never reaches this rewrite.
+	body = strings.Replace(body, "gc ", managedGCBinInvocation+" ", 1)
+	desired := canonicalGCPathPrefixAppend + body
+	return desired, legacyChanged || desired != command
+}
+
+func upgradeLegacyClaudeHookCommand(event, command string) (string, bool) {
 	body := commandBodyAfterCanonicalPrefix(command)
 	switch event {
 	case "PreCompact":

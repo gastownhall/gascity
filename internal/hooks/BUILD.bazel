@@ -32,6 +32,7 @@ go_test(
         "testenv_import_test.go",
     ],
     data = [
+        "config/claude.json",
         "opencode_plugin.test.mjs",
         "//internal/bootstrap/packs/core:overlay/per-provider/mimocode/.mimocode/plugin/gascity.js",
         "//internal/bootstrap/packs/core:overlay/per-provider/opencode/.opencode/plugins/gascity.js",

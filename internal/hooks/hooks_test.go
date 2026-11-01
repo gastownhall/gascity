@@ -15,6 +15,55 @@ import (
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
+// Fixed pre-pinning template: upgrade tests must not derive old commands from
+// the current embedded template, whose executable and PATH shape may change.
+const legacyClaudeSettingsJSON = `{
+  "skipDangerousModePermissionPrompt": true,
+  "enableAllProjectMcpServers": true,
+  "editorMode": "normal",
+  "awaySummaryEnabled": false,
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc handoff --auto \"context cycle\""
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject"
+          },
+          {
+            "type": "command",
+            "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject"
+          }
+        ]
+      }
+    ]
+  }
+}
+`
+
 func claudeHookCommand(t *testing.T, data []byte, event string) string {
 	t.Helper()
 	entries := claudeHookEntries(t, data, event)
@@ -125,7 +174,7 @@ func TestInstallClaude(t *testing.T) {
 		t.Error("claude settings should contain SessionStart hook")
 	}
 	sessionStartCommand := claudeHookCommand(t, runtimeData, "SessionStart")
-	if !strings.Contains(sessionStartCommand, "gc prime --hook --hook-format codex") {
+	if !strings.Contains(sessionStartCommand, managedGCBinInvocation+" prime --hook --hook-format codex") {
 		t.Error("claude SessionStart hook should contain gc prime --hook --hook-format codex")
 	}
 	if !strings.Contains(sessionStartCommand, "GC_HOOK_EVENT_NAME=SessionStart") {
@@ -142,13 +191,13 @@ func TestInstallClaude(t *testing.T) {
 			return entries[0].Matcher
 		}())
 	}
-	if !strings.Contains(claudeHookCommand(t, runtimeData, "PreCompact"), `gc handoff --auto "context cycle"`) {
+	if !strings.Contains(claudeHookCommand(t, runtimeData, "PreCompact"), managedGCBinInvocation+` handoff --auto "context cycle"`) {
 		t.Error("claude PreCompact hook should use gc handoff --auto (not gc prime or restart handoff) on compaction")
 	}
-	if !strings.Contains(s, "gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject") {
+	if !strings.Contains(s, " hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject") {
 		t.Error("claude settings should run nudge drain through gc hook run")
 	}
-	if !strings.Contains(s, "gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject") {
+	if !strings.Contains(s, " hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject") {
 		t.Error("claude settings should run mail check through gc hook run")
 	}
 	if strings.Contains(s, "gc hook --inject") {
@@ -173,10 +222,7 @@ func TestInstallClaude(t *testing.T) {
 
 func TestInstallClaudeUpgradesStaleGeneratedFile(t *testing.T) {
 	fs := fsys.NewFake()
-	current, err := readEmbedded("config/claude.json")
-	if err != nil {
-		t.Fatalf("readEmbedded: %v", err)
-	}
+	current := []byte(legacyClaudeSettingsJSON)
 	// Build a realistic stale fixture: the embedded file stores the command
 	// as JSON, so the literal bytes contain escaped quotes. Matching that
 	// shape is what claudeFileNeedsUpgrade expects.
@@ -193,7 +239,7 @@ func TestInstallClaudeUpgradesStaleGeneratedFile(t *testing.T) {
 
 	hookData := fs.Files["/city/hooks/claude.json"]
 	runtimeData := fs.Files["/city/.gc/settings.json"]
-	if !strings.Contains(claudeHookCommand(t, hookData, "PreCompact"), `gc handoff --auto "context cycle"`) {
+	if !strings.Contains(claudeHookCommand(t, hookData, "PreCompact"), managedGCBinInvocation+` handoff --auto "context cycle"`) {
 		t.Fatalf("upgraded claude hook missing gc handoff:\n%s", string(hookData))
 	}
 	if string(runtimeData) != string(hookData) {
@@ -203,10 +249,7 @@ func TestInstallClaudeUpgradesStaleGeneratedFile(t *testing.T) {
 
 func TestInstallClaudeUpgradesRestartingPreCompactHandoff(t *testing.T) {
 	fs := fsys.NewFake()
-	current, err := readEmbedded("config/claude.json")
-	if err != nil {
-		t.Fatalf("readEmbedded: %v", err)
-	}
+	current := []byte(legacyClaudeSettingsJSON)
 	stale := strings.Replace(string(current), `gc handoff --auto \"context cycle\"`, `gc handoff \"context cycle\"`, 1)
 	if stale == string(current) {
 		t.Fatal("stale fixture did not diverge from current embedded config — check stale pattern")
@@ -219,17 +262,14 @@ func TestInstallClaudeUpgradesRestartingPreCompactHandoff(t *testing.T) {
 	}
 
 	hookData := fs.Files["/city/hooks/claude.json"]
-	if !strings.Contains(claudeHookCommand(t, hookData, "PreCompact"), `gc handoff --auto "context cycle"`) {
+	if !strings.Contains(claudeHookCommand(t, hookData, "PreCompact"), managedGCBinInvocation+` handoff --auto "context cycle"`) {
 		t.Fatalf("upgraded claude hook missing gc handoff --auto:\n%s", string(hookData))
 	}
 }
 
 func TestInstallClaudeUpgradesGeneratedFileMissingManagedSessionMarkers(t *testing.T) {
 	fs := fsys.NewFake()
-	current, err := readEmbedded("config/claude.json")
-	if err != nil {
-		t.Fatalf("readEmbedded: %v", err)
-	}
+	current := []byte(legacyClaudeSettingsJSON)
 	stale := strings.Replace(string(current), `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex`, `gc prime --hook`, 1)
 	if stale == string(current) {
 		t.Fatal("stale fixture did not diverge from current embedded config — check SessionStart marker pattern")
@@ -257,10 +297,7 @@ func TestInstallClaudeUpgradesGeneratedFileMissingManagedSessionMarkers(t *testi
 
 func TestInstallClaudeUpgradesPreviousCanonicalSessionStart(t *testing.T) {
 	fs := fsys.NewFake()
-	current, err := readEmbedded("config/claude.json")
-	if err != nil {
-		t.Fatalf("readEmbedded: %v", err)
-	}
+	current := []byte(legacyClaudeSettingsJSON)
 	stale := strings.Replace(string(current), sessionStartCurrentFormBody("", "gc"), sessionStartPreviousManagedFormBody, 1)
 	if stale == string(current) {
 		t.Fatal("stale fixture did not diverge from current embedded config — check previous SessionStart pattern")
@@ -275,8 +312,8 @@ func TestInstallClaudeUpgradesPreviousCanonicalSessionStart(t *testing.T) {
 	hookData := fs.Files["/city/hooks/claude.json"]
 	runtimeData := fs.Files["/city/.gc/settings.json"]
 	sessionStartCommand := claudeHookCommand(t, hookData, "SessionStart")
-	if got := commandBodyAfterCanonicalPrefix(sessionStartCommand); got != sessionStartCurrentFormBody("", "gc") {
-		t.Fatalf("upgraded SessionStart body = %q, want %q", got, sessionStartCurrentFormBody("", "gc"))
+	if got := commandBodyAfterCanonicalPrefix(sessionStartCommand); got != sessionStartCurrentFormBody("", managedGCBinInvocation) {
+		t.Fatalf("upgraded SessionStart body = %q, want %q", got, sessionStartCurrentFormBody("", managedGCBinInvocation))
 	}
 	if string(runtimeData) != string(hookData) {
 		t.Fatalf("runtime Claude settings should mirror upgraded hook settings:\n%s", string(runtimeData))
@@ -899,10 +936,7 @@ func TestInstallCodexPreservesUnreadableExistingHooks(t *testing.T) {
 
 func TestInstallClaudeUpgradesGeneratedFileWithCombinedKnownDrift(t *testing.T) {
 	fs := fsys.NewFake()
-	current, err := readEmbedded("config/claude.json")
-	if err != nil {
-		t.Fatalf("readEmbedded: %v", err)
-	}
+	current := []byte(legacyClaudeSettingsJSON)
 	stale := strings.Replace(string(current), `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex`, `gc prime --hook`, 1)
 	stale = strings.Replace(stale, `"matcher": "startup"`, `"matcher": ""`, 1)
 	if stale == string(current) {
@@ -939,10 +973,7 @@ func TestInstallClaudeUpgradesGeneratedFileWithCombinedKnownDrift(t *testing.T) 
 
 func TestInstallClaudeUpgradesGeneratedFileWithAllKnownDrift(t *testing.T) {
 	fs := fsys.NewFake()
-	current, err := readEmbedded("config/claude.json")
-	if err != nil {
-		t.Fatalf("readEmbedded: %v", err)
-	}
+	current := []byte(legacyClaudeSettingsJSON)
 	stale := strings.Replace(string(current), `gc handoff --auto \"context cycle\"`, `gc prime --hook`, 1)
 	stale = strings.Replace(stale, `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex`, `gc prime --hook --hook-format codex`, 1)
 	stale = strings.Replace(stale, `"matcher": "startup"`, `"matcher": ""`, 1)
@@ -973,7 +1004,7 @@ func TestInstallClaudeUpgradesGeneratedFileWithAllKnownDrift(t *testing.T) {
 			return entries[0].Matcher
 		}())
 	}
-	if !strings.Contains(claudeHookCommand(t, hookData, "PreCompact"), `gc handoff --auto "context cycle"`) {
+	if !strings.Contains(claudeHookCommand(t, hookData, "PreCompact"), managedGCBinInvocation+` handoff --auto "context cycle"`) {
 		t.Fatalf("upgraded all-drift PreCompact hook missing gc handoff:\n%s", string(hookData))
 	}
 	if string(runtimeData) != string(hookData) {
@@ -994,10 +1025,7 @@ func TestInstallClaudeUpgradesGeneratedFileWithAllKnownDrift(t *testing.T) {
 // The JSON-aware upgradeClaudeFile rewrite handles this case correctly.
 func TestInstallClaudeUpgradesPreCompactPreservingCustomHookEvent(t *testing.T) {
 	fs := fsys.NewFake()
-	current, err := readEmbedded("config/claude.json")
-	if err != nil {
-		t.Fatalf("readEmbedded: %v", err)
-	}
+	current := []byte(legacyClaudeSettingsJSON)
 	// Start from the canonical embedded shape, downgrade PreCompact to the
 	// bare-handoff legacy form, and inject a custom Stop hook event that
 	// is not part of the managed set.
@@ -1038,7 +1066,7 @@ func TestInstallClaudeUpgradesPreCompactPreservingCustomHookEvent(t *testing.T) 
 
 	// The managed PreCompact command must be upgraded to include --auto.
 	preCompactCmd := claudeHookCommand(t, runtime, "PreCompact")
-	if !strings.Contains(preCompactCmd, `gc handoff --auto "context cycle"`) {
+	if !strings.Contains(preCompactCmd, managedGCBinInvocation+` handoff --auto "context cycle"`) {
 		t.Fatalf("PreCompact command not upgraded to include --auto:\n%s", preCompactCmd)
 	}
 
@@ -2827,5 +2855,38 @@ func TestInstalledWorkDirPathsMatchesInstall(t *testing.T) {
 	}
 	if got := InstalledWorkDirPaths([]string{"my-codex"}, resolver); !got[".codex/hooks.json"] {
 		t.Errorf("InstalledWorkDirPaths(my-codex -> codex) = %v, want .codex/hooks.json", got)
+	}
+}
+
+func TestInstallClaudePinsLegacyManagedCommandsWithoutChangingCustomHooks(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/hooks/claude.json"] = []byte(`{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"}]}],"PreCompact":[{"matcher":"","hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc handoff --auto \"context cycle\""}]}],"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject"},{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject"}]}],"Stop":[{"hooks":[{"type":"command","command":"my-wrapper gc prime --hook && my-cleanup"}]}]}}`)
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatal(err)
+	}
+	data := fs.Files["/city/.gc/settings.json"]
+	for event, want := range map[string]int{"SessionStart": 1, "PreCompact": 1, "UserPromptSubmit": 2} {
+		count := 0
+		for _, entry := range claudeHookEntries(t, data, event) {
+			for _, hook := range entry.Hooks {
+				count++
+				if !strings.Contains(hook.Command, `"${GC_BIN:-gc}"`) || !strings.HasPrefix(hook.Command, canonicalGCPathPrefixAppend) {
+					t.Errorf("%s still runs an unpinned managed binary: %s", event, hook.Command)
+				}
+			}
+		}
+		if count != want {
+			t.Errorf("%s ran %d managed hooks, want %d without duplicate upgrades", event, count, want)
+		}
+	}
+	if got := claudeHookCommand(t, data, "Stop"); got != "my-wrapper gc prime --hook && my-cleanup" {
+		t.Fatalf("custom hook changed: %q", got)
+	}
+	before := string(data)
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatal(err)
+	}
+	if string(fs.Files["/city/.gc/settings.json"]) != before {
+		t.Fatal("managed hook pinning is not idempotent")
 	}
 }
