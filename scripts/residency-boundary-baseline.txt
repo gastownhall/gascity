@@ -169,10 +169,6 @@ cmd/gc/city_runtime.go	tickReapClosedBeadWorktrees	a:rigBeadStores	2
 cmd/gc/claim_class_route.go	hookClaimClassRouteForCity	b:cliSoleClassBinding	1
 cmd/gc/class_store.go	graphClassBinding	b:graphClassBinding	1
 cmd/gc/class_store.go	graphClassBinding	b:routes.storeFor	1
-cmd/gc/class_store.go	resolveClassStore	b:routes.storeFor	1
-cmd/gc/class_store.go	unwrapWorkStores	ast:returns-store-list	1
-cmd/gc/class_store.go	workBeadStores	a:BeadStores	1
-cmd/gc/class_store.go	workBeadStores	a:rigBeadStores	1
 cmd/gc/cli_class_stores.go	cliSessionsRelocated	ast:uncounted-call-spelling	1
 cmd/gc/cmd_bd_by_id.go	bdByIDRefusedVerb	d:bdIDIsClassReserved	1
 cmd/gc/cmd_bd_by_id.go	bdIDIsClassReserved	d:AllReservedClassPrefixes	1

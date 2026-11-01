@@ -19,108 +19,103 @@ import (
 )
 
 // This file is the controller/CLI-side seam of the per-class store refactor.
-// It gives each coordination class a named accessor so a future per-class
-// backend becomes a change here rather than at every call site. On a
-// single-store city every class collapses to the same concrete store, so these
-// are identity helpers today: each returns the exact wrapped+cached store the
-// call site already uses, never a re-wrapped instance, so optional-capability
-// type assertions (GraphApplyFor, HandlesFor, StorageCreateStore, Counter, ...)
-// keep working.
+// Each coordination class has a named accessor, and every accessor's handle
+// comes from the holder's storeref.Stores (city_stores.go), the one place the
+// class-to-store mapping is decided. On a single-store city every class
+// collapses to the same concrete store, so the handles wrap the exact
+// wrapped+cached store the call site already used, never a re-wrapped
+// instance, and optional capabilities reached through beads.As keep working.
+
+// Stores returns the controller's class handles for its current city work
+// store and the routes it opened at boot. See storesEpochCache for when it is
+// re-minted.
+func (cs *controllerState) Stores() storeref.Stores {
+	cs.mu.RLock()
+	cityPath, routes := cs.cityPath, cs.storageRoutes
+	cs.mu.RUnlock()
+	return cs.storesOver(cityPath, routes)
+}
+
+// storesOver is Stores over the state's city work store with the routes and
+// city path a caller names. Its runtime names its own, which are the state's
+// in production (newControllerStateWithRoutes is handed them), so both share
+// the one epoch.
+func (cs *controllerState) storesOver(cityPath string, routes *storageRoutes) storeref.Stores {
+	cs.mu.RLock()
+	work := cs.cityBeadStore
+	cs.mu.RUnlock()
+	return cs.stores.get(cityPath, routes, work)
+}
 
 // graphBeadStore returns the store that owns graph (workflow/v2) beads. It
 // delegates to the exported GraphBeadStore() accessor so the api.State surface
-// and the controller's own callers share one resolver. Identity to the work
-// store at the default bd backend; returned as the strongly-typed
-// beads.GraphStore so the graph class stays statically visible.
+// and the controller's own callers share one resolver.
 func (cs *controllerState) graphBeadStore() beads.GraphStore {
 	return cs.GraphBeadStore()
 }
 
 // sessionsBeadStore returns the store that owns session and session-wait beads.
 // It delegates to the exported SessionsBeadStore() accessor so the api.State
-// surface and the controller's own callers share one resolver. Identity to the
-// work store at the default bd backend; returned as the strongly-typed
-// beads.SessionStore so the session class stays statically visible.
+// surface and the controller's own callers share one resolver.
 func (cs *controllerState) sessionsBeadStore() beads.SessionStore {
 	return cs.SessionsBeadStore()
 }
 
-// mailBeadStore returns the store that owns mail (message) beads: the configured
-// messaging class store when [beads.classes.messaging] relocates messaging, else
-// the work store. Identity to the work store at the default bd backend; returned
-// as the strongly-typed beads.MailStore so the messaging class stays statically
-// visible.
+// mailBeadStore returns the store that owns mail (message) beads: the binding
+// when the routes relocate messaging, else the city work store.
 func (cs *controllerState) mailBeadStore() beads.MailStore {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	return beads.MailStore{Store: resolveMailMessagesStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
+	return cs.Stores().Mail()
 }
 
 // nudgesBeadStore returns the store that owns nudge beads. It delegates to the
 // exported NudgesBeadStore() accessor so the api.State surface and the
-// controller's own callers share one resolver. Identity to the work store at the
-// default bd backend; returned as the strongly-typed beads.NudgesStore so the
-// nudges class stays statically visible.
+// controller's own callers share one resolver.
 func (cs *controllerState) nudgesBeadStore() beads.NudgesStore {
 	return cs.NudgesBeadStore()
 }
 
 // ordersBeadStore returns the store that owns order-tracking bookkeeping beads
-// for the given scope (rig name, or "" for the city). It delegates to the
-// exported OrdersBeadStore() accessor so the api.State surface and the
-// controller's own callers share one resolver. The scope is accepted so a future
-// per-scope orders backend can route without a call-site change. Identity to the
-// work store at the default bd backend; returned as the strongly-typed
-// beads.OrdersStore so the orders class stays statically visible. This is the
-// city-scope simple case; per-order scope (rig/pool-routed orders) resolves PER
-// ORDER through resolveOrderStoreTarget (the federated dispatch/sweep paths in
-// order_store.go / order_dispatch.go).
+// for the city scope. The scope argument is not read: per-order scope
+// (rig/pool-routed orders) resolves PER ORDER through resolveOrderStoreTarget
+// (the federated dispatch/sweep paths in order_store.go / order_dispatch.go).
 func (cs *controllerState) ordersBeadStore(_ string) beads.OrdersStore {
 	return cs.OrdersBeadStore()
 }
 
 // cityWorkStore returns the city-level store for ordinary WORK-class beads that
-// are not scoped to a named rig. Work is the default/residual coordination class
-// (everything Classify does not route elsewhere), so this is the typed accessor
-// for the work class — distinct from CityBeadStore(), which stays beads.Store as
-// the federation/by-id/default root. Returned as the strongly-typed
-// beads.WorkStore so the work class stays statically visible; the wrapper carries
-// the exact same underlying store value CityBeadStore() returns today, so it is
-// byte-identical. Pass the embedded .Store field to any generic beads.Store
-// helper shared across classes.
+// are not scoped to a named rig: the store CityBeadStore() returns, as a
+// handle. CityBeadStore() stays beads.Store as the federation/by-id/default
+// root until the API state is retyped (T6).
 func (cs *controllerState) cityWorkStore() beads.WorkStore {
-	return beads.WorkStore{Store: cs.CityBeadStore()}
+	return cs.Stores().Work()
 }
 
-// workBeadStores returns all rig WORK-class stores keyed by rig name, including
-// the HQ city store, as strongly-typed beads.WorkStore values. Each wrapper
-// carries the exact same underlying store value BeadStores() returns today, so it
-// is byte-identical; pass the embedded .Store field to any generic beads.Store
-// helper shared across classes.
-func (cs *controllerState) workBeadStores() map[string]beads.WorkStore {
-	return toWorkStores(cs.BeadStores())
+// cityStores returns the runtime's class handles over its routes: with a
+// controllerState, the state's epoch over the state's city work store; else an
+// epoch over its standalone city store.
+func (cr *CityRuntime) cityStores() storeref.Stores {
+	if cr.cs != nil {
+		return cr.cs.storesOver(cr.cityPath, cr.storageRoutes)
+	}
+	cr.serviceStateMu.RLock()
+	work := cr.standaloneCityStore
+	cr.serviceStateMu.RUnlock()
+	return cr.standaloneStores.get(cr.cityPath, cr.storageRoutes, work)
 }
 
 // graphBeadStore returns the runtime's graph (workflow/v2) bead store: the
-// dedicated graph store when [beads.classes.graph] relocates graph, else the
-// work store. Byte-identical to cityBeadStore() at the default bd backend.
-// Returned as the strongly-typed beads.GraphStore so the graph class stays
-// statically visible; the wrapper carries the same underlying store value.
+// binding when the routes relocate graph, else the city work store.
 func (cr *CityRuntime) graphBeadStore() beads.GraphStore {
-	return beads.GraphStore{Store: resolveGraphStore(cr.storageRoutes, cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
+	return cr.cityStores().Graph()
 }
 
 // sessionsBeadStore returns the runtime's session/session-wait bead store: the
-// configured session class store when [beads.classes.sessions] relocates
-// sessions, else the work store. The recorder is passed for signature parity
-// and is not what makes a write observable — the controller's emission comes
-// from the CachingStore around each store it serves, the relocated binding's
-// included (class_store_cache.go; class_store_emit.go covers the one-shot CLI's).
-// Byte-identical to cityBeadStore() at the default bd backend.
-// Returned as the strongly-typed beads.SessionStore so the session class stays
-// statically visible; the wrapper carries the same underlying store value.
+// binding when the routes relocate sessions, else the city work store. A
+// write's emission comes from the CachingStore around each store the
+// controller serves, the relocated binding's included (class_store_cache.go;
+// class_store_emit.go covers the one-shot CLI's).
 func (cr *CityRuntime) sessionsBeadStore() beads.SessionStore {
-	return beads.SessionStore{Store: resolveSessionStore(cr.storageRoutes, cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
+	return cr.cityStores().Sessions()
 }
 
 // infraSessionLedger returns the sessions-class store for the wisp GC's
@@ -129,37 +124,31 @@ func (cr *CityRuntime) sessionsBeadStore() beads.SessionStore {
 // otherwise. An unsplit city keeps its sessions on the work store, where they
 // belong to the reaper order, so the purge must see nothing there.
 func (cr *CityRuntime) infraSessionLedger() beads.SessionStore {
-	return beads.SessionStore{Store: relocatedSQLiteSessionLedger(cr.storageRoutes, cr.sessionsBeadStore().Store, cr.cityBeadStore())}
+	sessions := cr.sessionsBeadStore()
+	if !isRelocatedSQLiteSessionLedger(cr.storageRoutes, sessions.Store, cr.cityBeadStore()) {
+		return beads.SessionStore{}
+	}
+	return sessions
 }
 
-// mailBeadStore returns the runtime's mail (message) bead store: the configured
-// messaging class store when [beads.classes.messaging] relocates messaging, else
-// the work store. Byte-identical to cityBeadStore() at the default bd backend.
-// Returned as the strongly-typed beads.MailStore so the messaging class stays
-// statically visible; the wrapper carries the same underlying store value.
+// mailBeadStore returns the runtime's mail (message) bead store: the binding
+// when the routes relocate messaging, else the city work store.
 func (cr *CityRuntime) mailBeadStore() beads.MailStore {
-	return beads.MailStore{Store: resolveMailMessagesStore(cr.storageRoutes, cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
+	return cr.cityStores().Mail()
 }
 
-// nudgesBeadStore returns the runtime's nudge bead store: the configured nudges
-// class store when [beads.classes.nudges] relocates nudges, else the work store.
-// Byte-identical to cityBeadStore() at the default bd backend. Returned as the
-// strongly-typed beads.NudgesStore so the nudges class stays statically visible;
-// the wrapper carries the same underlying store value.
+// nudgesBeadStore returns the runtime's nudge bead store: the binding when the
+// routes relocate nudges, else the city work store.
 func (cr *CityRuntime) nudgesBeadStore() beads.NudgesStore {
-	return beads.NudgesStore{Store: resolveNudgesStore(cr.storageRoutes, cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
+	return cr.cityStores().Nudges()
 }
 
-// ordersBeadStore returns the runtime's order-tracking bead store for the given
-// scope: the configured orders class store when [beads.classes.orders] relocates
-// orders, else the work store. The scope is accepted for forward compatibility.
-// Byte-identical to cityBeadStore() at the default bd backend; returned as the
-// strongly-typed beads.OrdersStore so the orders class stays statically visible;
-// the wrapper carries the same underlying store value. This is the city-scope
-// simple case; per-order scope resolution flows through resolveOrderStoreTarget
-// in the federated dispatch/sweep paths.
+// ordersBeadStore returns the runtime's order-tracking bead store for the city
+// scope: the binding when the routes relocate orders, else the city work store.
+// The scope argument is not read; per-order scope resolution flows through
+// resolveOrderStoreTarget in the federated dispatch/sweep paths.
 func (cr *CityRuntime) ordersBeadStore(_ string) beads.OrdersStore {
-	return beads.OrdersStore{Store: resolveOrderStore(cr.storageRoutes, cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
+	return cr.cityStores().Orders()
 }
 
 // relocatedOrdersStore returns the runtime's ORDERS-class binding store when
@@ -173,52 +162,10 @@ func (cr *CityRuntime) relocatedOrdersStore(cfg *config.City) beads.Store {
 	return resolveOrderStore(cr.storageRoutes, nil, cfg, cr.cityPath, cr.rec)
 }
 
-// cityWorkStore returns the runtime's city-level WORK-class bead store. Work is
-// the default/residual coordination class; this is its typed accessor, distinct
-// from the federation/by-id/default cityBeadStore() root. Returned as the
-// strongly-typed beads.WorkStore carrying the same underlying store value
-// cityBeadStore() returns today, so it is byte-identical; pass the embedded
-// .Store field to any generic beads.Store helper shared across classes.
+// cityWorkStore returns the runtime's city-level WORK-class bead store: the
+// store cityBeadStore() returns, as a handle.
 func (cr *CityRuntime) cityWorkStore() beads.WorkStore {
-	return beads.WorkStore{Store: cr.cityBeadStore()}
-}
-
-// workBeadStores returns the runtime's per-rig WORK-class stores keyed by rig
-// name as strongly-typed beads.WorkStore values. Each wrapper carries the exact
-// same underlying store value rigBeadStores() returns today, so it is
-// byte-identical; pass the embedded .Store field to any generic beads.Store
-// helper shared across classes.
-func (cr *CityRuntime) workBeadStores() map[string]beads.WorkStore {
-	return toWorkStores(cr.rigBeadStores())
-}
-
-// toWorkStores wraps each store in a rig→store map as a strongly-typed
-// beads.WorkStore, carrying the same underlying store value so the result is
-// byte-identical to the input map.
-func toWorkStores(stores map[string]beads.Store) map[string]beads.WorkStore {
-	if stores == nil {
-		return nil
-	}
-	out := make(map[string]beads.WorkStore, len(stores))
-	for name, store := range stores {
-		out[name] = beads.WorkStore{Store: store}
-	}
-	return out
-}
-
-// unwrapWorkStores unwraps a rig→work-store map back to a generic
-// rig→beads.Store map for passing into helpers shared across coordination
-// classes. Each value carries the same underlying store, so the result is
-// byte-identical.
-func unwrapWorkStores(stores map[string]beads.WorkStore) map[string]beads.Store {
-	if stores == nil {
-		return nil
-	}
-	out := make(map[string]beads.Store, len(stores))
-	for name, store := range stores {
-		out[name] = store.Store
-	}
-	return out
+	return cr.cityStores().Work()
 }
 
 // createTarget returns the inner store that owns creates of the given
@@ -248,56 +195,34 @@ func (s *beadPolicyGraphStore) graphApplierFor(_ coordclass.Class) beads.GraphAp
 	return s.applier
 }
 
-// resolveClassStore returns the beads.Store backing a coordination class. It is
-// the single dispatch point for per-class backend selection, and the one place
-// a resolved storage plan reaches the running city.
+// resolveClassStore returns the beads.Store backing a coordination class at
+// the scope workStore serves, for the callers that still take a raw store. It
+// is the router's own rule (storeref.Place, which storeref.NewStores mints
+// every handle from) over the topology placeClass builds from routes,
+// so a raw caller and a handle holder cannot disagree. A caller that can hold a
+// handle takes it from a Stores instead (city_stores.go).
 //
 // routes is the opened non-work binding this process resolved at boot
 // (storage_boot.go). A nil routes value — every city that authors no [storage]
-// section, and every one-shot CLI caller — takes the identity branch and
-// returns the exact workStore value it was handed, so the optional-capability
-// assertions this file's header names keep working on the value they already
-// worked on.
+// section — relocates nothing, and every class answers with the exact
+// workStore value it was handed, so the optional capabilities reached through
+// it keep working on the value they already worked on. A class the routes do
+// not relocate answers the same way: that is how work stays on the work ledger
+// in a split city.
 //
-// A class the routes do not relocate also returns workStore unchanged. That is
-// how work stays on the work ledger in a split city: the routes carry only the
-// classes the plan assigned to a non-work binding, so "not relocated" and "no
-// routes at all" are the same instruction rather than two branches that have to
-// agree.
-//
-// cfg, cityPath and rec stay in the signature for the per-scope work routing
-// that resolves elsewhere; they are not read here. rec in particular does NOT
-// make a relocated write observable, for any class: what a caller passes here
-// changes nothing about emission. Emission is decided on the ROUTES, once per
+// cfg and rec are not read. rec in particular does NOT make a relocated write
+// observable, for any class: emission is decided on the ROUTES, once per
 // process — the one-shot CLI funnel gives its stores an emit target
 // (storageRoutes.withCLIEmission), and the controller puts its CachingStore
-// over the binding's engine (storageRoutes.withControllerCache), which emits
-// the way the work ledger's does. See class_store_emit.go and
-// class_store_cache.go.
+// over the binding's engine (storageRoutes.withControllerCache). See
+// class_store_emit.go and class_store_cache.go.
 //
 // On a worker site cityPath is read: a class whose binding is not named as the
 // descriptor ledger binding that lists it resolves to a refused store, because
 // the box holds no copy of it that is the city's (DES-CN §4.4). The refusal is
-// standing, as the funnel's is (workerSiteStorageRefusal). Only the binding
-// name is compared (workerSiteClassRefusal).
-func resolveClassStore(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath, class string, rec events.Recorder) beads.Store {
-	_ = cfg
-	_ = rec
-	store, relocated := routes.storeFor(coordclassFor(class))
-	// This agrees with the funnel's Classes.BindingFor only because the one
-	// served split shape, storageSplitWhole, relocates every class to the one
-	// routes.binding; a per-class shape must name the class's own binding here.
-	binding := config.StorageWorkBinding
-	if relocated {
-		binding = routes.binding
-	}
-	if refusal := workerSiteClassRefusal(cityPath, class, binding); refusal != nil {
-		return refusedClassStore{err: standingStorageRefusal{err: refusal}}
-	}
-	if relocated {
-		return store
-	}
-	return splitStrictClassView(workStore)
+// standing, as the funnel's is (workerSiteStorageRefusal).
+func resolveClassStore(routes *storageRoutes, workStore beads.Store, _ *config.City, cityPath, class string, _ events.Recorder) beads.Store {
+	return placeClass(cityPath, routes, workStore, coordclassFor(class))
 }
 
 // coordclassFor maps a config class name to its coordination class. An
@@ -524,8 +449,8 @@ func newCityMailProvider(routes *storageRoutes, workStore beads.Store, cfg *conf
 // than not having it. Refusing surfaces the cause on every operation instead.
 func newCityExtMsgServices(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) *extmsg.Services {
 	msgStore := resolveMailMessagesStore(routes, workStore, cfg, cityPath, rec)
-	sessStore := resolveSessionStore(routes, workStore, cfg, cityPath, rec)
-	svc, err := extmsg.NewServicesWithSessionDirectory(msgStore, session.NewStore(beads.SessionStore{Store: sessStore}))
+	stores := scopeStores(cityPath, routes, workStore)
+	svc, err := extmsg.NewServicesWithSessionDirectory(msgStore, session.NewStore(stores.Sessions()))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "api: external messaging services: %v\n", err) //nolint:errcheck // best-effort stderr
 		return refusedExtMsgServices(err)

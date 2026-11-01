@@ -2281,7 +2281,7 @@ func (m *memoryOrderDispatcher) ordersStoreFor(store beads.Store) beads.Store {
 // are the same bead in the same database by construction rather than by each
 // call site remembering to route.
 func (m *memoryOrderDispatcher) orderFrontDoorFor(store beads.Store) *orders.Store {
-	return orders.NewStore(beads.OrdersStore{Store: m.ordersStoreFor(store)})
+	return orders.NewStore(scopeStores(m.cityPath, m.storageRoutes, store).Orders())
 }
 
 // graphStoreKey is the gate/cooldown cache key for the graph store. It names the

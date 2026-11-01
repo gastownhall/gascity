@@ -7,6 +7,19 @@
 # the tree, and its growth gate judges it like baseline.txt: a new or raised
 # row needs the storeclass/baseline-raise label, so moving debt into an
 # allowlisted file is a raise. Never raise a count by hand.
+cmd/gc/city_stores.go	cityTopology	raw-param	1
+cmd/gc/city_stores.go	cityTopology	raw-result	1
+cmd/gc/city_stores.go	classRefusal	raw-result	1
+cmd/gc/city_stores.go	cliStores	raw-param	1
+cmd/gc/city_stores.go	mintCityStores	mint	1
+cmd/gc/city_stores.go	mintCityStores	raw-param	1
+cmd/gc/city_stores.go	placeClass	mint	1
+cmd/gc/city_stores.go	placeClass	raw-param	1
+cmd/gc/city_stores.go	placeClass	raw-result	1
+cmd/gc/city_stores.go	routesBindings	raw-field	2
+cmd/gc/city_stores.go	scopeStores	raw-param	1
+cmd/gc/city_stores.go	storesEpoch	raw-field	1
+cmd/gc/city_stores.go	storesEpochCache.get	raw-param	1
 cmd/gc/infra_class_clear.go	infraBackupEdgeFor	raw-param	1
 cmd/gc/infra_class_clear.go	infraBackupEntryFor	raw-param	1
 cmd/gc/infra_class_clear.go	infraBackupSourceStore	raw-field	1
