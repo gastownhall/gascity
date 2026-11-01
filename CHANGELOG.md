@@ -9,6 +9,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **Read commands print one JSON document whichever route serves them
+  (#8453).** Since #8331 a supervisor-hosted city, the default shape, reads
+  `gc session list`, `gc session peek`, `gc status`, `gc rig list`,
+  `gc rig status`, `gc beads list` and `show`, `gc convoy list` and
+  `status`, `gc mail count`, `check` and `peek`, `gc order history`, and
+  `gc wait list` and `inspect` through the supervisor API. Each of them now
+  prints the same keys and values on that route as its local read, in the
+  shape its published schema (`gc <command> --json-schema=result`) has
+  always declared. Data only the server has appears as optional keys the
+  schema declares, which a consumer must ignore when it does not know them:
+  `_cache_age_s` on every API-served list, and `running`, `reason`,
+  `last_output` and `program_status` on API-served session rows.
+  `GC_NO_API=1`, `--city-url`, `--city-name`, `GC_CITY_URL` and contexts
+  still choose the route, but no longer change the shape, except for the
+  bead envelope below. What changes, by command:
+  - **`gc session list --json`.** Closed rows carry `"state": "closed"` and
+    `"closed": true` on every route, and a session that never recorded
+    activity prints `"last_active": ""`. `--state all` and `--state closed`
+    now list the full closed history on every route, so the output grows
+    with the city's history. A script that builds an identity-to-state map
+    from `--state all` (for example a liveness map keyed on `alias` or
+    `agent_name`) must not let a closed row overwrite a live row for the
+    same identifier: build it from `--state open`, or set a key only when it
+    is missing or currently `"closed"`. The API route still leaves out
+    `command`, `session_key` and the `resume_*` fields; a script that reads
+    them must set `GC_NO_API=1`.
+  - **`gc beads list` and `gc beads show --format=json`.** For a local city
+    they print a bare JSON array or object on every route, including when
+    the supervisor answers. In 1.5.1 a city whose API answered got
+    `{"beads"|"bead", "_cache_age_s"}`; that envelope is now printed only
+    for a remote target (`--context`, `--city-url`, `--city-name`,
+    `GC_CITY_URL`, `GC_CITY_CONTEXT`, or the context `gc context use`
+    selected). `gc beads list` now exits 1 and names the store when any city
+    or rig bead store cannot be opened or read, on every route, instead of
+    printing a shortened list.
+  - **`gc convoy list` and `gc convoy status`.** The API route prints the
+    local schema (`convoys`, `summary.total`, `summary.hidden_synthetic`),
+    sorts rows by ID, and fills `child_ids` and `progress.dangling_tracks`.
+    When any store cannot be opened or read, `gc convoy list` now fails on
+    every route: it exits 1, prints nothing on stdout, and names the store
+    on stderr. The local read used to skip such a store without a word.
+    `gc convoy status`, `show` and `stranded` still skip a store they cannot
+    open.
+  - **`gc rig status --json`.** API-served agent rows carry `session_id`. A
+    pool instance's `name` is the agent's configured name (`builder`), as
+    the local route has always printed; use `qualified_name` to tell
+    instances apart. `city_name` and `city_path` are the CLI's own name and
+    path for the city. `rig.suspended` reports only the rig's own
+    suspension. On both routes an agent in a suspended rig now reports
+    `"suspended": true`, and `"status": "suspended"` when it is not running
+    (the local route used to print `false` and `"stopped"`), and a rig with
+    no agents prints `"agents": []` instead of `null`. Rows of unlimited
+    pools (agents without `max_active_sessions`) can still differ between
+    the routes.
+  - **`gc mail count` and `gc mail check`.** On the API route `recipient`,
+    `recipients` and the "for <mailbox>" text name the mailbox the CLI
+    resolved (`gc mail count gc-12` prints `"recipient": "lead"`), a
+    recipient the CLI cannot resolve fails with exit 1 instead of printing
+    zero counts, a no-argument `gc mail check` from a session whose own bead
+    is closed refuses, and `gc mail check` counts every unread message
+    rather than the first 100.
+  - **`gc session peek`.** On the API route it peeks every open session that
+    is not suspended (draining, creating, start-pending and asleep sessions
+    included). A suspended or closed session, or a failed capture, exits 1
+    as it does locally, instead of printing nothing with exit 0; a closed
+    session resolves only by its bead ID; and `--lines 0` asks for the full
+    capture. Restart the supervisor after you install this build: one still
+    running an earlier build ignores the new request option and keeps the
+    old behavior.
+  - **`gc status --json`.** Its schema now declares five keys the command
+    already printed: `_cache_age_s` and `conditional_writes` (API route),
+    `summary.store_health`, `rigs[].default_sling_targets` and
+    `beads.proxied`. If you validate against a saved copy of the schema,
+    re-fetch it with `gc status --json-schema=result`. The API route now
+    fills `prefix`, `default_sling_target` and `default_sling_targets` on rig
+    rows from the city's config.
+  - **`gc rig list --json`.** Its schema now declares
+    `rigs[].default_sling_targets`, which both routes already printed, and
+    the HQ row's `running` uses the same supervisor-aware check on both
+    routes. A read with `GC_NO_API=1` of a running supervisor-hosted city
+    used to report the HQ row as not running.
+  - `schema_version` stays `"1"` for every command above: no key was
+    removed, renamed or retyped.
+
 - **Run `gc doctor --fix` in each existing gastown or gascity city after you
   install this build.** gc now pins gastown 0.1.13 and gascity 0.1.7 (see
   Changed) and serves only those pins from the packs it embeds. A city still
@@ -600,6 +684,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **API: optional fields so the CLI can print its local schema on the
+  supervisor route (#8453).** All are optional, so existing clients are
+  unaffected:
+  - session responses (`GET /v0/city/{cityName}/sessions` and
+    `/session/{id}`) carry `agent_name`, `transport` and `worker_dir`;
+  - `GET /v0/city/{cityName}/status` `agent_details[]` rows carry
+    `session_id`, the bead ID of the row's session, omitted when no open
+    session bead records the row's runtime session and while the city is
+    suspended;
+  - `GET /v0/city/{cityName}/convoy/{id}/check` reports the convoy's member
+    IDs and its dangling tracks;
+  - `GET /v0/city/{cityName}/session/{id}` takes `peek_strict`, which
+    implies `peek` and applies `gc session peek`'s contract: a closed
+    session resolves only by its bead ID, every open session that is not
+    suspended is peeked, `peek_lines` passes through (0 is the full
+    capture), a suspended or closed session is refused with `409` and the
+    new problem type `urn:gascity:error:session-inactive`, and a failed peek
+    fails the request. `peek=true` without it keeps the best-effort preview.
+
 - **The work ladder only nudges a step, hourly, while its seat waits on a
   person.** With `[daemon] work_ladder` on (the default), a claimed step whose
   metadata `gc.awaiting_human` names the session holding it (the seat asked a
@@ -787,6 +890,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same way. Pass `--version` to choose another constraint.
 
 ### Fixed
+
+- **The supervisor API route printed different JSON from the local route
+  for the commands supervisor-hosted cities read through it (#8453).**
+  `gc session list` printed a different document and dropped
+  `agent_name`, `transport` and `worker_dir`; `gc beads list`/`show`
+  wrapped a local city's output in an envelope; `gc convoy list` and
+  `status` used another schema and left `child_ids` and `dangling_tracks`
+  empty; `gc rig status` lacked `session_id` and named pool instances
+  differently; `gc mail count`/`check` echoed the raw recipient and stopped
+  counting at 100; `gc session peek` printed nothing with exit 0 for
+  sessions the local route peeks or refuses; `gc status` lacked rig
+  `prefix` and default sling targets and dropped `beads.proxied`; and
+  `gc order history` truncated `created_at` to whole seconds. Each now
+  prints its local schema on both routes, and a test in `cmd/gc` fails for
+  any routed read without a same-state local/API comparison.
+- **`gc status --json` and `gc rig list --json` validate against their own
+  published schemas.** Both closed schemas left out keys the commands
+  print, so a strict validator rejected every status read from a supervisor
+  or controller and any city whose rig sets `default_sling_targets` (#8453).
+- **`gc beads list` and `gc convoy list` no longer print a shortened list
+  when a bead store cannot be read.** Both now fail with exit 1 and name the
+  store on every route (#8453).
+- **A bead with `no_history` prints that field the same way on the API
+  route as on the direct read** (#8453).
 
 - **A stop during a workflow finalizer now ends the control dispatcher.**
   `gc convoy control --serve` installed a signal handler for each
@@ -1145,10 +1272,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`gc convoy list` no longer stops at 100 convoys when the controller
   serves it.** The API lane read only the first page of `/convoys` and dropped
   the rest without a word; it now follows `next_cursor` to the end. The
-  commands that open every convoy store (`gc convoy stranded`, `gc beads list`
-  and `show` when served locally) or resolve a convoy by id
-  (`gc convoy status`, `add`, `close`, `target`, `land`) also stop reloading
-  the whole city config once per bead store they open.
+  commands that open every convoy store but tolerate a store that will not
+  open (`gc convoy stranded`, and `gc beads show` when served locally) or
+  resolve a convoy by id (`gc convoy status`, `add`, `close`, `target`,
+  `land`) also stop reloading the whole city config once per bead store they
+  open.
 
 - **A config reload no longer creates or rebinds a city's bead store.** When a
   city's `.beads/metadata.json` went missing (for example, a `git` checkout
