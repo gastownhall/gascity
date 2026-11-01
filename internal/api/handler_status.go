@@ -279,6 +279,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 				Running:       effectiveRunning,
 				Suspended:     suspended,
 				SessionName:   sessName,
+				SessionID:     info.id,
 				GroupName:     groupName,
 				Expanded:      isPool,
 			}
@@ -544,6 +545,7 @@ type statusSessionSnapshot struct {
 }
 
 type statusSessionInfo struct {
+	id          string
 	sessionName string
 	agentName   string
 	template    string
@@ -718,6 +720,7 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 			continue
 		}
 		info := statusSessionInfo{
+			id:          strings.TrimSpace(sessInfo.ID),
 			sessionName: strings.TrimSpace(sessInfo.SessionNameMetadata),
 			agentName:   strings.TrimSpace(sessInfo.AgentName),
 			template:    strings.TrimSpace(sessInfo.Template),

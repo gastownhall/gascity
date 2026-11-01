@@ -5966,6 +5966,10 @@ export type StatusAgentDetail = {
      */
     scope: string;
     /**
+     * Bead ID of the session the row's runtime session resolved to. Omitted when no open session bead records that runtime session (always while the city is suspended, when no bead store is read).
+     */
+    session_id?: string;
+    /**
      * tmux session name CLI drain-ops key on.
      */
     session_name?: string;
