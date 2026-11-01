@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -105,11 +107,17 @@ type Options struct {
 }
 
 // Verifier checks X-GC-City-Write tokens. It is verify-only: it never mints.
+//
+// The verifying key set can be replaced at runtime with [Verifier.SetKeys]
+// (key rotation, enrollment, revocation) without rebuilding the Verifier, so
+// the replay guard and epoch floor carry over unchanged.
 type Verifier struct {
-	aud        string
-	legacyAud  string
-	cid        string
-	keys       map[string]ed25519.PublicKey
+	aud       string
+	legacyAud string
+	cid       string
+	// keys holds an immutable kid→key map; SetKeys swaps in a fresh copy and
+	// Verify loads whichever map is current.
+	keys       atomic.Pointer[map[string]ed25519.PublicKey]
 	epochFloor int64
 	maxTTL     time.Duration
 	skew       time.Duration
@@ -134,19 +142,9 @@ func New(opts Options) (*Verifier, error) {
 	if opts.MaxTTL <= 0 {
 		return nil, errors.New("citywriteauth: MaxTTL must be positive")
 	}
-	keys := make(map[string]ed25519.PublicKey, len(opts.Keys))
-	for kid, pub := range opts.Keys {
-		if kid == "" {
-			return nil, errors.New("citywriteauth: empty kid in key set")
-		}
-		if len(pub) != ed25519.PublicKeySize {
-			return nil, fmt.Errorf("citywriteauth: key %q has wrong size", kid)
-		}
-		// ed25519.PublicKey is a mutable []byte, so copying only the map would
-		// alias the caller's backing array and let a later mutation of
-		// opts.Keys change the verifier's trust root after construction. Clone
-		// each key so the verifier owns an immutable copy.
-		keys[kid] = append(ed25519.PublicKey(nil), pub...)
+	keys, err := copyKeys(opts.Keys)
+	if err != nil {
+		return nil, err
 	}
 	now := opts.Now
 	if now == nil {
@@ -156,17 +154,98 @@ func New(opts Options) (*Verifier, error) {
 	if replay == nil {
 		replay = NewMemoryReplayGuard()
 	}
-	return &Verifier{
+	v := &Verifier{
 		aud:        opts.Aud,
 		legacyAud:  opts.LegacyAud,
 		cid:        opts.CID,
-		keys:       keys,
 		epochFloor: opts.EpochFloor,
 		maxTTL:     opts.MaxTTL,
 		skew:       opts.Skew,
 		now:        now,
 		replay:     replay,
-	}, nil
+	}
+	v.keys.Store(&keys)
+	return v, nil
+}
+
+// KeyChange reports how [Verifier.SetKeys] changed the verifying key set. Each
+// list holds kids in sorted order.
+type KeyChange struct {
+	// Added lists kids that were not in the previous key set.
+	Added []string
+	// Removed lists kids no longer in the key set; grants they signed now fail
+	// with ErrUnknownKey.
+	Removed []string
+	// Replaced lists kids kept under a different public key; grants signed by
+	// the previous key now fail signature verification.
+	Replaced []string
+}
+
+// Empty reports whether the swap left the key set as it was.
+func (c KeyChange) Empty() bool {
+	return len(c.Added) == 0 && len(c.Removed) == 0 && len(c.Replaced) == 0
+}
+
+// SetKeys atomically replaces the verifying key set and reports how it changed
+// relative to the set it replaced. It validates and copies keys under the same
+// rules as [New] (at least one key, non-empty kids, 32-byte ed25519 public
+// keys); on any error the current key set is left untouched. Grants signed by
+// a removed kid fail with ErrUnknownKey, and grants signed by the previous key
+// of a replaced kid fail signature verification, from the next Verify call on.
+// The replay guard and epoch floor are unaffected, so a jti consumed before
+// the swap stays consumed after it.
+func (v *Verifier) SetKeys(keys map[string]ed25519.PublicKey) (KeyChange, error) {
+	copied, err := copyKeys(keys)
+	if err != nil {
+		return KeyChange{}, err
+	}
+	return diffKeys(*v.keys.Swap(&copied), copied), nil
+}
+
+// diffKeys reports the kids added, removed, and replaced going from before to
+// after.
+func diffKeys(before, after map[string]ed25519.PublicKey) KeyChange {
+	var c KeyChange
+	for kid, pub := range after {
+		prev, ok := before[kid]
+		switch {
+		case !ok:
+			c.Added = append(c.Added, kid)
+		case !prev.Equal(pub):
+			c.Replaced = append(c.Replaced, kid)
+		}
+	}
+	for kid := range before {
+		if _, ok := after[kid]; !ok {
+			c.Removed = append(c.Removed, kid)
+		}
+	}
+	slices.Sort(c.Added)
+	slices.Sort(c.Removed)
+	slices.Sort(c.Replaced)
+	return c
+}
+
+// copyKeys validates a verifying key set and returns a deep copy of it.
+func copyKeys(in map[string]ed25519.PublicKey) (map[string]ed25519.PublicKey, error) {
+	if len(in) == 0 {
+		return nil, errors.New("citywriteauth: at least one verifying key is required")
+	}
+	keys := make(map[string]ed25519.PublicKey, len(in))
+	for kid, pub := range in {
+		if kid == "" {
+			return nil, errors.New("citywriteauth: empty kid in key set")
+		}
+		if len(pub) != ed25519.PublicKeySize {
+			return nil, fmt.Errorf("citywriteauth: key %q has wrong size", kid)
+		}
+		// ed25519.PublicKey is a mutable []byte, so copying only the map would
+		// alias the caller's backing array and let a later mutation of the
+		// caller's keys change the verifier's trust root after installation.
+		// Clone each key so the verifier owns an immutable copy.
+		keys[kid] = append(ed25519.PublicKey(nil), pub...)
+	}
+	return keys, nil
 }
 
 // Verify authenticates token and binds it to expect. On success it returns the
@@ -185,7 +264,7 @@ func (v *Verifier) Verify(token string, expect Expect) (*Grant, error) {
 
 	// Select the key by the (still-untrusted) kid, then let the signature check
 	// authenticate the whole payload. A tampered kid simply fails verification.
-	pub, ok := v.keys[g.Kid]
+	pub, ok := (*v.keys.Load())[g.Kid]
 	if !ok {
 		return nil, ErrUnknownKey
 	}

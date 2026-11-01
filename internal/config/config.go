@@ -2529,11 +2529,11 @@ type APIConfig struct {
 	// only config edits. City registry creation (POST /v0/city) is not covered:
 	// a grant binds a path-resident city name, which a not-yet-created city
 	// lacks, so creation stays governed by the supervisor-registry guards.
-	// Built-in callers (the bundled gc API client and dashboard SPA) send only
-	// the CSRF header and mint no grant, so enabling this gate turns their direct
-	// city mutations away with a clear 401; such deployments front mutations
-	// through the trusted authority that mints grants instead. The value is one
-	// or more "kid:base64-ed25519-pubkey" entries, comma separated.
+	// The in-city gc client and the dashboard SPA mint no grant and send only
+	// the CSRF header, so enabling this gate turns their direct city mutations
+	// away with a clear 401; a remote gc context with a grant_command does mint
+	// one per mutation. The value is one or more "kid:base64-ed25519-pubkey"
+	// entries, comma separated, read once at startup.
 	// The GC_CITY_WRITE_PUBKEY env var overrides this. Grant revocation via an
 	// epoch floor is an ops-plane control set only through the
 	// GC_CITY_WRITE_EPOCH_FLOOR env var; it has no config field. On hosted

@@ -5544,6 +5544,14 @@ immediately re-read the registry and reconcile all cities. Use this
 after killing a child process to force the supervisor to detect the
 change and restart it without waiting for the next patrol tick.
 
+The reload also re-reads write_auth_verify_key from supervisor.toml and
+swaps the write-auth verifying keys in place, so a key can be enrolled,
+rotated, or revoked without a restart. The command prints the key ids
+the reload added, removed, or replaced, and exits 1 when the supervisor
+refused the new key list and kept the current keys. Other
+supervisor.toml settings, read_auth_verify_key included, take effect
+only when the supervisor restarts.
+
 ```
 gc supervisor reload [flags]
 ```
