@@ -242,7 +242,8 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 	// Every bead this lane touches is a session bead (Get by session id,
 	// SetMetadata of the usage markers), so it reads the sessions class, not the
 	// work store. Identity to the work store on a city that relocates nothing.
-	store := cr.sessionsBeadStore().Store
+	sessionsStore := cr.sessionsBeadStore()
+	store := sessionsStore.Store
 	if store == nil {
 		return
 	}
@@ -363,7 +364,7 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 		// interval first: its live and terminal branches would read the
 		// reopened state, not the interval the close ended.
 		if b.Metadata[session.MetadataKeyUsageClosePending] == "true" {
-			cr.settleClosedInterval(ctx, sink, store, b, runtimeKind, now, logf, modelSweepFactory)
+			cr.settleClosedInterval(ctx, sink, sessionsStore, b, runtimeKind, now, logf, modelSweepFactory)
 			continue
 		}
 		processSessionBead(b)
@@ -385,7 +386,7 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 		if ctx.Err() != nil {
 			return
 		}
-		cr.settleClosedInterval(ctx, sink, store, b, runtimeKind, now, logf, modelSweepFactory)
+		cr.settleClosedInterval(ctx, sink, sessionsStore, b, runtimeKind, now, logf, modelSweepFactory)
 	}
 }
 
@@ -429,7 +430,7 @@ func closedUsageListQuery() beads.ListQuery {
 func (cr *CityRuntime) settleClosedInterval(
 	ctx context.Context,
 	sink usage.Sink,
-	store beads.Store,
+	store beads.SessionStore,
 	b beads.Bead,
 	runtimeKind string,
 	now time.Time,
@@ -526,7 +527,7 @@ func (cr *CityRuntime) sweepClosedInterval(
 
 // clearUsageCloseMarkers drops a row's usage close markers without accounting
 // an interval.
-func clearUsageCloseMarkers(store beads.Store, id string, logf func(string, ...any)) {
+func clearUsageCloseMarkers(store beads.SessionStore, id string, logf func(string, ...any)) {
 	if err := store.SetMetadataBatch(id, session.UsageCloseClearPatch()); err != nil {
 		logf("usage: clearing the usage close marker of session %s failed; will retry: %v", id, err)
 	}
