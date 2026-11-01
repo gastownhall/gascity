@@ -398,6 +398,12 @@ func newTestscriptParams(t *testing.T, files ...string) testscript.Params {
 	params := testscript.Params{
 		Dir:         "testdata",
 		WorkdirRoot: shortSocketTempDir(t, "gc-testscript-"),
+		// Commands every script under testdata/ may use: TestTutorial01 runs
+		// the whole directory, so a command a dedicated test registers for
+		// one script would be unknown there.
+		Cmds: map[string]func(*testscript.TestScript, bool, []string){
+			"gzip-profiles": gzipProfilesCmd,
+		},
 		Setup: func(env *testscript.Env) error {
 			gcHome := filepath.Join(env.WorkDir, ".gc-home")
 			runtimeDir := filepath.Join(env.WorkDir, ".xdg-runtime")

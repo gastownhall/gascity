@@ -1,0 +1,36 @@
+# GC_CPUPROFILE: a gc invocation that sets it writes a CPU profile to
+# <value>.<pid> when the command returns.
+#
+# Tests:
+# - the real entry point honors GC_CPUPROFILE
+# - the profile path is pid-suffixed, so one prefix serves many processes
+# - the variable never changes the command's output or exit code
+# - an unset or empty variable writes nothing
+
+env GC_BEADS=file
+env GC_DOLT=skip
+env GC_SESSION=fake
+
+mkdir $WORK/prof
+
+# Unset: no profile.
+exec gc version
+stdout 'dev'
+gzip-profiles $WORK/prof cpu 0
+
+# Set: one profile per process, output unchanged.
+env GC_CPUPROFILE=$WORK/prof/cpu
+exec gc version
+stdout 'dev'
+! stderr .
+gzip-profiles $WORK/prof cpu 1
+
+# A second process under the same prefix gets its own file.
+exec gc version
+gzip-profiles $WORK/prof cpu 2
+
+# A profile that cannot be written warns on stderr and the command still runs.
+env GC_CPUPROFILE=$WORK/no-such-dir/cpu
+exec gc version
+stdout 'dev'
+stderr 'GC_CPUPROFILE'
