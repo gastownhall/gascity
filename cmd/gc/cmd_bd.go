@@ -495,6 +495,14 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// A `--metadata @file` is read once, here, and every check below and bd
+	// read that private copy (bd_metadata_file_pin.go).
+	bdArgs, unpinMetadata, err := bdPinMetadataFiles(target.ScopeRoot, bdArgs)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defer unpinMetadata()
 	if msg, refused := bdRigQualifiedMetadataRefusal(cfg, target.ScopeRoot, bdArgs); refused {
 		fmt.Fprint(stderr, msg) //nolint:errcheck // best-effort stderr
 		return 1

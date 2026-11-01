@@ -344,19 +344,27 @@ func TestGcBdImportSkipInfraWritesAWorkOnlyCopy(t *testing.T) {
 	}
 	read := func(string) (beads.Bead, bdReadResult) { return beads.Bead{}, bdReadNotFound }
 
-	for _, argv := range [][]string{{"import", "a.jsonl", "--skip-infra"}, {"import", "--skip-infra", "-i", "a.jsonl"}, {"import", "--input=a.jsonl", "--skip-infra"}, {"import", "--input", "other.jsonl", "--input=a.jsonl", "--skip-infra"}} {
+	for _, argv := range [][]string{
+		{"import", "a.jsonl", "--skip-infra"},
+		{"import", "--skip-infra", "-i", "a.jsonl"},
+		{"import", "--input=a.jsonl", "--skip-infra"},
+		{"import", "--input", "other.jsonl", "--input=a.jsonl", "--skip-infra"},
+		// A short-flag run ending in -i with its value attached, after an
+		// earlier --input: pflag keeps the run's value, so that is the copy.
+		{"import", "--input", "other.jsonl", "-vi=a.jsonl", "--skip-infra"},
+		{"import", "-i", "other.jsonl", "-qvia.jsonl", "--skip-infra"},
+	} {
 		g := bdClassFlipGuard(splitGuardTestCity(), scope, argv, splitTestDeps(nil, read))
 		if g.refusal != "" {
 			t.Fatalf("%v refused: %s", argv, g.refusal)
 		}
-		if slicesContainsString(g.args, "--skip-infra") || slicesContainsString(g.args, "a.jsonl") || slicesContainsString(g.args, "--input=a.jsonl") {
-			t.Fatalf("%v forwarded %v; want the work-only copy and no gc flag", argv, g.args)
+		if slicesContainsString(g.args, "--skip-infra") {
+			t.Fatalf("%v forwarded %v; want no gc flag", argv, g.args)
 		}
-		var copyPath string
-		for _, a := range g.args {
-			if i := strings.Index(a, "gc-bd-import-work-"); i >= 0 {
-				copyPath = strings.TrimPrefix(a, "--input=")
-			}
+		// What bd reads, resolved as bd resolves the forwarded argv.
+		copyPath := bdReadsFile(t, bdflags.InventoryByName("bd-1.3.2"), scope, g.args, "", "")
+		if !strings.HasPrefix(filepath.Base(copyPath), "gc-bd-import-work-") {
+			t.Fatalf("%v forwarded %v: bd reads %s, want the work-only copy", argv, g.args, copyPath)
 		}
 		data, err := os.ReadFile(copyPath)
 		if err != nil {
