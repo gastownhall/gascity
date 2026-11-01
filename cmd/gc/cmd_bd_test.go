@@ -2963,12 +2963,18 @@ prefix = "fe"
 	fakeBin := t.TempDir()
 	argvLog := filepath.Join(fakeBin, "argv.log")
 	// A capable bd: the verb is understood, and the precondition miss is
-	// reported the way bd reports it — exit 13, nothing written.
+	// reported the way bd reports it — exit 13, nothing written. It holds the
+	// bead, now claimed by someone else, and answers show for it: the verdict
+	// is read back before "skipped" is printed.
 	fakeBD := "#!/bin/sh\n" +
 		"printf ' %s' \"$@\" >> " + strconv.Quote(argvLog) + "\n" +
 		"if [ \"$1\" = \"update\" ]; then\n" +
 		"  printf 'assignee mismatch\\n' >&2\n" +
 		"  exit 13\n" +
+		"fi\n" +
+		"if [ \"$1\" = \"show\" ]; then\n" +
+		"  printf '[{\"id\":\"fe-abc\",\"status\":\"in_progress\",\"assignee\":\"worker-2\"}]\\n'\n" +
+		"  exit 0\n" +
 		"fi\n" +
 		"printf 'unexpected bd args:' >&2\n" +
 		"printf ' %s' \"$@\" >&2\n" +

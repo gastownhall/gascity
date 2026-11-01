@@ -123,7 +123,10 @@ too. Like bd's own watch, it renders the plain form and ignores show's
 display flags (--json, --short, --long, --refs, --children). gc adds one
 subcommand of its own: "release-if-current <issue-id> <assignee>", which
 conditionally resets an in-progress assignment only when the bead still has
-that assignee.
+that assignee. It is routed by the issue id, as "show" and "update" are; the
+assignee never selects the store. It prints "released" when it cleared the
+assignment and "skipped" when that store holds the bead under another
+assignee or status, and exits 1 when that store does not hold the bead.
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. To write a JSONL
@@ -1024,6 +1027,22 @@ func doBdReleaseIfCurrent(cityPath string, cfg *config.City, target execStoreTar
 		fmt.Fprintln(stdout, "released") //nolint:errcheck // best-effort stdout
 		return 0
 	}
+	// "skipped" is the compare-and-swap verdict: this store holds the bead,
+	// and it is no longer in progress under expectedAssignee. The store answers
+	// a bead it does not hold the same way, since there is nothing there to
+	// release, so the bead is read back before the verdict is printed. A
+	// release sent to a store that does not hold the bead (an explicit --city
+	// or --rig naming another store, or an id no store holds) is an error, as
+	// `gc bd show` and `gc bd update` of that id are; callers read "skipped"
+	// as "someone else holds it" and stop.
+	if _, err := store.Get(id); err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			fmt.Fprintf(stderr, "gc bd release-if-current: bead %q is not in the %s store; nothing was released\n", id, scopeLabel(target)) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		fmt.Fprintf(stderr, "gc bd release-if-current: %s was not released, and reading it back from the %s store failed: %v\n", id, scopeLabel(target), err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	fmt.Fprintln(stdout, "skipped") //nolint:errcheck // best-effort stdout
 	return 0
 }
@@ -1142,13 +1161,22 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 		return target, nil
 	}
 
+	// release-if-current's assignee is never a probe candidate, for the reason
+	// the prefix route above never reads it (bdReleaseIfCurrentSubject): the
+	// holder's session bead exists, so a probe would accept the store that
+	// holds the session rather than the bead being released.
+	probeArgs := args
+	if id, ok := bdReleaseIfCurrentSubject(args); ok {
+		probeArgs = []string{id}
+	}
+
 	// Bead-ID auto-detect accepts a candidate store only when the id actually
 	// exists there, which costs a full bd round trip per probe. A probe can only
 	// matter when some outcome differs from another, so when every candidate
 	// store AND the store the rest of the chain would pick are the same store,
 	// the answer is that store whatever the probes say — and the passthrough
 	// below is the one bd invocation the command pays.
-	candidates := bdScopeProbeCandidates(cfg, cityTarget, cityPath, args)
+	candidates := bdScopeProbeCandidates(cfg, cityTarget, cityPath, probeArgs)
 	fallback, gcRigDiscarded, fallbackErr := bdScopeFallbackTarget(cfg, cityPath, cityTarget, args)
 	if len(candidates) > 0 && fallbackErr == nil && gcRigDiscarded == "" && bdScopeCandidatesAgree(candidates, fallback) {
 		return fallback, nil

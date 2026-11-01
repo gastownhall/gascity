@@ -712,6 +712,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc bd release-if-current` releases a rig bead from the city scope.**
+  The verb picked its store from both operands, and the assignee is often the
+  holder's session bead id, which the city store holds. A release of a rig
+  bead therefore ran against the city store, found nothing to release and
+  printed `skipped`, which the core orphan-sweep order reads as "someone else
+  holds it": a dead session's claim on a rig bead stayed `in_progress`. The
+  verb is now routed by the issue id alone, as `gc bd show` and `gc bd update`
+  are, and it exits 1 instead of printing `skipped` when the store it resolves
+  does not hold the bead.
+
 - **The core orphan-sweep order judges claims on graph steps in a
   split-storage city.** On a city whose `[storage.classes]` serves the graph
   class from a binding, `gc bd list` answers from a work store only, so the
