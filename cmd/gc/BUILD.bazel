@@ -2046,6 +2046,7 @@ go_test(
         "session_lifecycle_post_start_bound_test.go",
         "session_lifecycle_prepare_budget_option_test.go",
         "session_lifecycle_prepare_budget_test.go",
+        "session_lifecycle_read_budget_test.go",
         "session_lifecycle_start_boundary_test.go",
         "session_lifecycle_start_deadline_test.go",
         "session_lifecycle_wave_deadline_test.go",
