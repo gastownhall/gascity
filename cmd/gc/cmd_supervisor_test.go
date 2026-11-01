@@ -7942,3 +7942,556 @@ func TestSupervisorLogTail(t *testing.T) {
 		t.Fatalf("tail = %q, want %q", got, want)
 	}
 }
+
+func TestSupervisorServiceFileEnvReadsUnitAndPlist(t *testing.T) {
+	tests := []struct {
+		name  string
+		ext   string
+		data  []byte
+		want  map[string]string
+		noKey string
+	}{
+		{
+			name: "systemd unit assignments",
+			ext:  ".service",
+			data: []byte(`[Service]
+Environment=GC_HOME="/h/.gc"
+Environment=CLAUDE_CONFIG_DIR="/h/claude a"
+Environment="TMUX_TMPDIR=/run/x y"
+Environment=A=1 B='two words'
+Environment=Q="say \"hi\""
+#Environment=NO=1
+ExecStart=/bin/gc supervisor run
+`),
+			want: map[string]string{
+				"GC_HOME":           "/h/.gc",
+				"CLAUDE_CONFIG_DIR": "/h/claude a",
+				"TMUX_TMPDIR":       "/run/x y",
+				"A":                 "1",
+				"B":                 "two words",
+				"Q":                 `say "hi"`,
+			},
+			noKey: "NO",
+		},
+		{
+			name: "systemd round-trip",
+			ext:  ".service",
+			data: []byte("Environment=" + systemdEnv("K", "a\"b\\c d") + "\n"),
+			want: map[string]string{
+				"K": "a\"b\\c d",
+			},
+		},
+		{
+			name: "launchd plist with EnvironmentVariables",
+			ext:  ".plist",
+			data: []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.example.supervisor</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CLAUDE_CONFIG_DIR</key>
+        <string>/h/a &amp; b</string>
+        <key>GC_HOME</key>
+        <string>/h/.gc</string>
+    </dict>
+</dict>
+</plist>`),
+			want: map[string]string{
+				"CLAUDE_CONFIG_DIR": "/h/a & b",
+				"GC_HOME":           "/h/.gc",
+			},
+		},
+		{
+			name: "unsupported extension yields empty",
+			ext:  ".txt",
+			data: []byte("Environment=GC_HOME=/h/.gc\n"),
+			want: nil,
+		},
+		{
+			name: "malformed plist yields empty",
+			ext:  ".plist",
+			data: []byte("<plist><dict><key>EnvironmentVariables</key><dict><key>GC_HOME</key><string>"),
+			want: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := supervisorServiceFileEnv(tc.ext, tc.data)
+			if len(tc.want) == 0 {
+				if len(got) != 0 {
+					t.Errorf("%s: got %v, want drop/empty result", tc.name, got)
+				}
+				return
+			}
+			if len(got) != len(tc.want) {
+				t.Errorf("%s: got %d entries, want %d (keep/drop mismatch; got %v, want %v)", tc.name, len(got), len(tc.want), got, tc.want)
+			}
+			for k, wantVal := range tc.want {
+				if gotVal, ok := got[k]; !ok {
+					t.Errorf("%s: key %s missing, want keep %q", tc.name, k, wantVal)
+				} else if gotVal != wantVal {
+					t.Errorf("%s: key %s = %q, want keep %q", tc.name, k, gotVal, wantVal)
+				}
+			}
+			if tc.noKey != "" {
+				if val, ok := got[tc.noKey]; ok {
+					t.Errorf("%s: key %s present with value %q, want drop", tc.name, tc.noKey, val)
+				}
+			}
+		})
+	}
+}
+
+func TestCarryOverSupervisorServiceEnvGate(t *testing.T) {
+	tests := []struct {
+		name              string
+		supervisorEnv     string
+		omitProviderCreds string
+		extra             []supervisorServiceEnvVar
+		previous          map[string]string
+		wantExtra         []supervisorServiceEnvVar
+		wantDropped       []string
+	}{
+		{
+			name:              "allowlisted key in previous is carried",
+			supervisorEnv:     "",
+			omitProviderCreds: "1",
+			extra:             nil,
+			previous: map[string]string{
+				"CLAUDE_CONFIG_DIR": "/h/.claude",
+			},
+			wantExtra: []supervisorServiceEnvVar{
+				{Name: "CLAUDE_CONFIG_DIR", Value: "/h/.claude"},
+			},
+			wantDropped: nil,
+		},
+		{
+			name:              "key set in extra keeps extra value and is not reported",
+			supervisorEnv:     "",
+			omitProviderCreds: "1",
+			extra: []supervisorServiceEnvVar{
+				{Name: "CLAUDE_CONFIG_DIR", Value: "/h/tier-extra"},
+			},
+			previous: map[string]string{
+				"CLAUDE_CONFIG_DIR": "/h/tier-previous",
+			},
+			wantExtra: []supervisorServiceEnvVar{
+				{Name: "CLAUDE_CONFIG_DIR", Value: "/h/tier-extra"},
+			},
+			wantDropped: nil,
+		},
+		{
+			name:              "non-allowlisted key is dropped and reported",
+			supervisorEnv:     "",
+			omitProviderCreds: "1",
+			extra:             nil,
+			previous: map[string]string{
+				"TMUX_TMPDIR": "/run/user/1000",
+			},
+			wantExtra:   nil,
+			wantDropped: []string{"TMUX_TMPDIR"},
+		},
+		{
+			name:              "non-allowlisted key is carried with GC_SUPERVISOR_ENV opt-in",
+			supervisorEnv:     "TMUX_TMPDIR",
+			omitProviderCreds: "1",
+			extra:             nil,
+			previous: map[string]string{
+				"TMUX_TMPDIR": "/run/user/1000",
+			},
+			wantExtra: []supervisorServiceEnvVar{
+				{Name: "TMUX_TMPDIR", Value: "/run/user/1000"},
+			},
+			wantDropped: nil,
+		},
+		{
+			name:              "provider credential is dropped and reported when OMIT is empty",
+			supervisorEnv:     "",
+			omitProviderCreds: "",
+			extra:             nil,
+			previous: map[string]string{
+				"ANTHROPIC_API_KEY": "sk-ant-test",
+			},
+			wantExtra:   nil,
+			wantDropped: []string{"ANTHROPIC_API_KEY"},
+		},
+		{
+			name:              "allowlisted secrets are dropped and reported when OMIT is empty",
+			supervisorEnv:     "",
+			omitProviderCreds: "",
+			extra:             nil,
+			previous: map[string]string{
+				"CLAUDE_CODE_OAUTH_TOKEN": "oauth-test",
+				"GC_DOLT_PASSWORD":        "dolt-test",
+			},
+			wantExtra:   nil,
+			wantDropped: []string{"CLAUDE_CODE_OAUTH_TOKEN", "GC_DOLT_PASSWORD"},
+		},
+		{
+			name:              "provider credential is carried with GC_SUPERVISOR_ENV opt-in",
+			supervisorEnv:     "ANTHROPIC_API_KEY",
+			omitProviderCreds: "",
+			extra:             nil,
+			previous: map[string]string{
+				"ANTHROPIC_API_KEY": "sk-ant-test",
+			},
+			wantExtra: []supervisorServiceEnvVar{
+				{Name: "ANTHROPIC_API_KEY", Value: "sk-ant-test"},
+			},
+			wantDropped: nil,
+		},
+		{
+			name:              "provider credential is dropped and reported when OMIT is 1",
+			supervisorEnv:     "",
+			omitProviderCreds: "1",
+			extra:             nil,
+			previous: map[string]string{
+				"ANTHROPIC_API_KEY": "sk-ant-test",
+			},
+			wantExtra:   nil,
+			wantDropped: []string{"ANTHROPIC_API_KEY"},
+		},
+		{
+			name:              "fixed keys are neither carried nor reported",
+			supervisorEnv:     "",
+			omitProviderCreds: "1",
+			extra:             nil,
+			previous: map[string]string{
+				"GC_HOME": "/h/.gc",
+				"PATH":    "/bin:/usr/bin",
+			},
+			wantExtra:   nil,
+			wantDropped: nil,
+		},
+		{
+			name:              "empty value is neither carried nor reported",
+			supervisorEnv:     "TMUX_TMPDIR",
+			omitProviderCreds: "1",
+			extra:             nil,
+			previous: map[string]string{
+				"CLAUDE_CONFIG_DIR": "",
+				"TMUX_TMPDIR":       "",
+			},
+			wantExtra:   nil,
+			wantDropped: nil,
+		},
+		{
+			name:              "result is sorted by name and caller extra slice is unchanged",
+			supervisorEnv:     "B_OPT",
+			omitProviderCreds: "1",
+			extra: []supervisorServiceEnvVar{
+				{Name: "Z_EXTRA", Value: "z"},
+				{Name: "A_EXTRA", Value: "a"},
+			},
+			previous: map[string]string{
+				"CLAUDE_CONFIG_DIR": "/h/.claude",
+				"B_OPT":             "b",
+			},
+			wantExtra: []supervisorServiceEnvVar{
+				{Name: "A_EXTRA", Value: "a"},
+				{Name: "B_OPT", Value: "b"},
+				{Name: "CLAUDE_CONFIG_DIR", Value: "/h/.claude"},
+				{Name: "Z_EXTRA", Value: "z"},
+			},
+			wantDropped: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_SUPERVISOR_ENV", tc.supervisorEnv)
+			t.Setenv("GC_SUPERVISOR_OMIT_PROVIDER_CREDS", tc.omitProviderCreds)
+
+			var extraBefore []supervisorServiceEnvVar
+			if tc.extra != nil {
+				extraBefore = make([]supervisorServiceEnvVar, len(tc.extra))
+				copy(extraBefore, tc.extra)
+			}
+
+			gotExtra, gotDropped := carryOverSupervisorServiceEnv(tc.extra, tc.previous)
+
+			if tc.extra != nil {
+				if len(tc.extra) != len(extraBefore) {
+					t.Fatalf("%s: caller extra slice mutated: len %d, want keep %d", tc.name, len(tc.extra), len(extraBefore))
+				}
+				for i := range tc.extra {
+					if tc.extra[i] != extraBefore[i] {
+						t.Fatalf("%s: caller extra slice mutated at [%d]: got %v, want keep %v", tc.name, i, tc.extra[i], extraBefore[i])
+					}
+				}
+			}
+
+			if len(gotExtra) != len(tc.wantExtra) {
+				t.Errorf("%s: got %d extra vars, want %d (keep/drop mismatch; got %v, want %v)", tc.name, len(gotExtra), len(tc.wantExtra), gotExtra, tc.wantExtra)
+			} else {
+				for i := range gotExtra {
+					if gotExtra[i] != tc.wantExtra[i] {
+						t.Errorf("%s: extra[%d] = %v, want keep %v", tc.name, i, gotExtra[i], tc.wantExtra[i])
+					}
+				}
+			}
+
+			if len(gotDropped) != len(tc.wantDropped) {
+				t.Errorf("%s: got dropped %v, want drop %v (keep/drop mismatch)", tc.name, gotDropped, tc.wantDropped)
+			} else {
+				for i := range gotDropped {
+					if gotDropped[i] != tc.wantDropped[i] {
+						t.Errorf("%s: dropped[%d] = %q, want drop %q", tc.name, i, gotDropped[i], tc.wantDropped[i])
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestInstallSupervisorSystemdCarriesOverServiceFilePins(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("systemd path only applies on linux")
+	}
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(homeDir, "run"))
+	t.Setenv("GC_SUPERVISOR_ENV", "")
+	t.Setenv("GC_SUPERVISOR_OMIT_PROVIDER_CREDS", "1")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("TMUX_TMPDIR", "")
+
+	stubSupervisorSystemctlUserAvailable(t, true)
+	oldRun, oldActive, oldGetenv := supervisorSystemctlRun, supervisorSystemctlActive, supervisorLaunchctlGetenv
+	supervisorSystemctlRun = func(_ ...string) error { return nil }
+	supervisorSystemctlActive = func(string) bool { return false }
+	supervisorLaunchctlGetenv = func(string) string { return "" }
+	t.Cleanup(func() {
+		supervisorSystemctlRun, supervisorSystemctlActive, supervisorLaunchctlGetenv = oldRun, oldActive, oldGetenv
+	})
+
+	path := supervisorSystemdServicePath()
+	install := func(label string) (string, string) {
+		data, err := buildSupervisorServiceData()
+		if err != nil {
+			t.Fatalf("%s: buildSupervisorServiceData: %v", label, err)
+		}
+		var stdout, stderr bytes.Buffer
+		if code := installSupervisorSystemd(data, &stdout, &stderr); code != 0 {
+			t.Fatalf("%s: installSupervisorSystemd code = %d; stderr=%q", label, code, stderr.String())
+		}
+		unit, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("%s: read unit: %v", label, err)
+		}
+		return string(unit), stderr.String()
+	}
+
+	first, _ := install("install 1")
+
+	pinned := first +
+		"Environment=CLAUDE_CONFIG_DIR=\"/h/.claude-city-a\"\n" +
+		"Environment=TMUX_TMPDIR=\"/run/user/1000/city-a\"\n"
+	if err := os.WriteFile(path, []byte(pinned), 0o600); err != nil {
+		t.Fatalf("write pinned unit: %v", err)
+	}
+
+	second, stderr2 := install("install 2")
+	if !strings.Contains(second, "Environment=CLAUDE_CONFIG_DIR=\"/h/.claude-city-a\"") {
+		t.Errorf("install 2: unit missing CLAUDE_CONFIG_DIR, want keep /h/.claude-city-a; unit:\n%s", second)
+	}
+	if strings.Contains(second, "TMUX_TMPDIR") {
+		t.Errorf("install 2: unit contains TMUX_TMPDIR, want drop; unit:\n%s", second)
+	}
+	if !strings.Contains(stderr2, "TMUX_TMPDIR") {
+		t.Errorf("install 2: stderr=%q missing TMUX_TMPDIR, want drop report", stderr2)
+	}
+	if strings.Contains(stderr2, "CLAUDE_CONFIG_DIR") {
+		t.Errorf("install 2: stderr=%q mentions CLAUDE_CONFIG_DIR, want keep without drop report", stderr2)
+	}
+
+	pinned3 := second + "Environment=TMUX_TMPDIR=\"/run/user/1000/city-a\"\n"
+	if err := os.WriteFile(path, []byte(pinned3), 0o600); err != nil {
+		t.Fatalf("write pinned3 unit: %v", err)
+	}
+	t.Setenv("GC_SUPERVISOR_ENV", "TMUX_TMPDIR")
+	third, stderr3 := install("install 3")
+	if !strings.Contains(third, "Environment=CLAUDE_CONFIG_DIR=\"/h/.claude-city-a\"") {
+		t.Errorf("install 3: unit missing CLAUDE_CONFIG_DIR, want keep /h/.claude-city-a; unit:\n%s", third)
+	}
+	if !strings.Contains(third, "Environment=TMUX_TMPDIR=\"/run/user/1000/city-a\"") {
+		t.Errorf("install 3: unit missing TMUX_TMPDIR, want keep /run/user/1000/city-a; unit:\n%s", third)
+	}
+	if strings.Contains(stderr3, "TMUX_TMPDIR") {
+		t.Errorf("install 3: stderr=%q mentions TMUX_TMPDIR, want keep without drop report", stderr3)
+	}
+
+	t.Setenv("CLAUDE_CONFIG_DIR", "/h/.claude-city-b")
+	fourth, _ := install("install 4")
+	if !strings.Contains(fourth, "Environment=CLAUDE_CONFIG_DIR=\"/h/.claude-city-b\"") {
+		t.Errorf("install 4: unit missing CLAUDE_CONFIG_DIR city-b, want keep /h/.claude-city-b; unit:\n%s", fourth)
+	}
+	if strings.Contains(fourth, "/h/.claude-city-a") {
+		t.Errorf("install 4: unit contains city-a, want drop in favor of shell value city-b; unit:\n%s", fourth)
+	}
+}
+
+func TestInstallSupervisorSystemdCarriesOverNoCredentialByDefault(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("systemd path only applies on linux")
+	}
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(homeDir, "run"))
+	t.Setenv("GC_SUPERVISOR_ENV", "")
+	t.Setenv("GC_SUPERVISOR_OMIT_PROVIDER_CREDS", "")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-old")
+
+	stubSupervisorSystemctlUserAvailable(t, true)
+	oldRun, oldActive, oldGetenv := supervisorSystemctlRun, supervisorSystemctlActive, supervisorLaunchctlGetenv
+	supervisorSystemctlRun = func(_ ...string) error { return nil }
+	supervisorSystemctlActive = func(string) bool { return false }
+	supervisorLaunchctlGetenv = func(string) string { return "" }
+	t.Cleanup(func() {
+		supervisorSystemctlRun, supervisorSystemctlActive, supervisorLaunchctlGetenv = oldRun, oldActive, oldGetenv
+	})
+
+	path := supervisorSystemdServicePath()
+	install := func(label string) (string, string) {
+		data, err := buildSupervisorServiceData()
+		if err != nil {
+			t.Fatalf("%s: buildSupervisorServiceData: %v", label, err)
+		}
+		var stdout, stderr bytes.Buffer
+		if code := installSupervisorSystemd(data, &stdout, &stderr); code != 0 {
+			t.Fatalf("%s: installSupervisorSystemd code = %d; stderr=%q", label, code, stderr.String())
+		}
+		unit, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("%s: read unit: %v", label, err)
+		}
+		return string(unit), stderr.String()
+	}
+
+	first, _ := install("install 1")
+	if !strings.Contains(first, "sk-ant-old") {
+		t.Fatalf("install 1: unit missing ANTHROPIC_API_KEY from the shell; unit:\n%s", first)
+	}
+
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	second, stderr2 := install("install 2")
+	if strings.Contains(second, "sk-ant-old") {
+		t.Errorf("install 2: unit still holds ANTHROPIC_API_KEY after a reinstall from a shell without it, want drop; unit:\n%s", second)
+	}
+	if !strings.Contains(stderr2, "credentials not carried over from the previous unit: ANTHROPIC_API_KEY") ||
+		!strings.Contains(stderr2, supervisorSecretsEnvFilePath()) {
+		t.Errorf("install 2: stderr=%q, want credential drop report naming ANTHROPIC_API_KEY and secrets.env", stderr2)
+	}
+
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-old")
+	install("install 3")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("GC_SUPERVISOR_ENV", "ANTHROPIC_API_KEY")
+	fourth, stderr4 := install("install 4")
+	if !strings.Contains(fourth, "sk-ant-old") {
+		t.Errorf("install 4: unit missing ANTHROPIC_API_KEY named in GC_SUPERVISOR_ENV, want keep; unit:\n%s", fourth)
+	}
+	if strings.Contains(stderr4, "ANTHROPIC_API_KEY") {
+		t.Errorf("install 4: stderr=%q mentions ANTHROPIC_API_KEY, want keep without drop report", stderr4)
+	}
+}
+
+func TestInstallSupervisorLaunchdCarriesOverPlistPins(t *testing.T) {
+	homeDir := t.TempDir()
+	gcHome := filepath.Join(t.TempDir(), "isolated-home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("GC_SUPERVISOR_ENV", "")
+	t.Setenv("GC_SUPERVISOR_OMIT_PROVIDER_CREDS", "")
+
+	oldRun, oldGetenv := supervisorLaunchctlRun, supervisorLaunchctlGetenv
+	supervisorLaunchctlRun = func(_ ...string) error {
+		return nil
+	}
+	supervisorLaunchctlGetenv = func(string) string {
+		return ""
+	}
+	t.Cleanup(func() {
+		supervisorLaunchctlRun, supervisorLaunchctlGetenv = oldRun, oldGetenv
+	})
+
+	data1 := &supervisorServiceData{
+		GCPath:       "/tmp/gc-new",
+		LogPath:      filepath.Join(gcHome, "supervisor.log"),
+		GCHome:       gcHome,
+		LaunchdLabel: supervisorLaunchdLabel(),
+		Path:         "/usr/local/bin:/usr/bin:/bin",
+		ExtraEnv:     nil,
+	}
+
+	var stdout1, stderr1 bytes.Buffer
+	if code := installSupervisorLaunchd(data1, &stdout1, &stderr1); code != 0 {
+		t.Fatalf("install 1: installSupervisorLaunchd code = %d, want 0; stderr=%q", code, stderr1.String())
+	}
+
+	plistPath := supervisorLaunchdPlistPath()
+	plistBytes, err := os.ReadFile(plistPath)
+	if err != nil {
+		t.Fatalf("read written plist: %v", err)
+	}
+
+	plistStr := string(plistBytes)
+	envIdx := strings.Index(plistStr, "<key>EnvironmentVariables</key>")
+	if envIdx == -1 {
+		t.Fatalf("plist missing <key>EnvironmentVariables</key>:\n%s", plistStr)
+	}
+	dictRelIdx := strings.Index(plistStr[envIdx:], "<dict>")
+	if dictRelIdx == -1 {
+		t.Fatalf("plist missing <dict> after EnvironmentVariables:\n%s", plistStr[envIdx:])
+	}
+	dictEnd := envIdx + dictRelIdx + len("<dict>")
+	target := plistStr[envIdx:dictEnd]
+	pins := "\n        <key>CLAUDE_CONFIG_DIR</key><string>/h/a</string>\n        <key>TMUX_TMPDIR</key><string>/run/t</string>\n        <key>ANTHROPIC_API_KEY</key><string>sk-ant-plist</string>"
+	edited := strings.Replace(plistStr, target, target+pins, 1)
+
+	if err := os.WriteFile(plistPath, []byte(edited), 0o600); err != nil {
+		t.Fatalf("write edited plist: %v", err)
+	}
+
+	data2 := &supervisorServiceData{
+		GCPath:       "/tmp/gc-new",
+		LogPath:      filepath.Join(gcHome, "supervisor.log"),
+		GCHome:       gcHome,
+		LaunchdLabel: supervisorLaunchdLabel(),
+		Path:         "/usr/local/bin:/usr/bin:/bin",
+		ExtraEnv:     nil,
+	}
+
+	var stdout2, stderr2 bytes.Buffer
+	if code := installSupervisorLaunchd(data2, &stdout2, &stderr2); code != 0 {
+		t.Fatalf("install 2: installSupervisorLaunchd code = %d, want 0; stderr=%q", code, stderr2.String())
+	}
+
+	newPlist, err := os.ReadFile(plistPath)
+	if err != nil {
+		t.Fatalf("read new plist: %v", err)
+	}
+
+	env := supervisorServiceFileEnv(".plist", newPlist)
+	if got := env["CLAUDE_CONFIG_DIR"]; got != "/h/a" {
+		t.Errorf("new plist CLAUDE_CONFIG_DIR = %q, want keep %q", got, "/h/a")
+	}
+	if got, ok := env["TMUX_TMPDIR"]; ok {
+		t.Errorf("new plist TMUX_TMPDIR = %q, want drop", got)
+	}
+	if !strings.Contains(stderr2.String(), "TMUX_TMPDIR") {
+		t.Errorf("install 2 stderr = %q, want drop report naming TMUX_TMPDIR", stderr2.String())
+	}
+	if got, ok := env["ANTHROPIC_API_KEY"]; ok {
+		t.Errorf("new plist ANTHROPIC_API_KEY = %q, want drop", got)
+	}
+	if !strings.Contains(stderr2.String(), "credentials not carried over from the previous plist: ANTHROPIC_API_KEY") {
+		t.Errorf("install 2 stderr = %q, want credential drop report naming ANTHROPIC_API_KEY", stderr2.String())
+	}
+}
