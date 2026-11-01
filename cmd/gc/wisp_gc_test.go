@@ -523,6 +523,69 @@ func TestWispGC_SessionPurgeScanBudgetDoesNotStarve(t *testing.T) {
 	}
 }
 
+// carryWispGCState hands a tracker rebuilt by a config reload the progress of
+// the tracker it replaces. The table locks in what the carry keeps (the run
+// clock) and what still comes from the rebuilt tracker alone (interval, TTLs,
+// cityName, notes).
+func TestWispGC_ReloadKeepsLastRunAndCursor(t *testing.T) {
+	now := time.Now()
+
+	t.Run("same interval keeps lastRun; config-derived fields come from next", func(t *testing.T) {
+		prev := &memoryWispGC{interval: time.Hour, ttl: 24 * time.Hour, mailRetentionTTL: time.Minute, lastRun: now, cityName: "prev-city"}
+		next := &memoryWispGC{interval: time.Hour, ttl: 48 * time.Hour, mailRetentionTTL: 2 * time.Minute, cityName: "next-city"}
+		got := carryWispGCState(prev, next)
+		if m, ok := got.(*memoryWispGC); !ok || m != next {
+			t.Fatalf("carryWispGCState returned %T, want the rebuilt tracker", got)
+		}
+		if !next.lastRun.Equal(now) {
+			t.Fatalf("lastRun = %v, want the outgoing tracker's %v carried", next.lastRun, now)
+		}
+		if next.ttl != 48*time.Hour || next.mailRetentionTTL != 2*time.Minute || next.cityName != "next-city" {
+			t.Fatalf("ttl/mailRetentionTTL/cityName = %s/%s/%q, want next's alone", next.ttl, next.mailRetentionTTL, next.cityName)
+		}
+	})
+
+	t.Run("shortened interval counts from the carried lastRun", func(t *testing.T) {
+		prev := &memoryWispGC{interval: time.Hour, ttl: 24 * time.Hour, lastRun: now}
+		next := &memoryWispGC{interval: 15 * time.Minute, ttl: 24 * time.Hour}
+		m := carryWispGCState(prev, next).(*memoryWispGC)
+		if m.shouldRun(now.Add(10 * time.Minute)) {
+			t.Fatal("due 10m after the last run; want the 15m interval to count from the carried lastRun")
+		}
+		if !m.shouldRun(now.Add(15 * time.Minute)) {
+			t.Fatal("not due 15m after the last run; want the 15m interval to count from the carried lastRun")
+		}
+	})
+
+	t.Run("lengthened interval counts from the carried lastRun", func(t *testing.T) {
+		prev := &memoryWispGC{interval: time.Hour, ttl: 24 * time.Hour, lastRun: now}
+		next := &memoryWispGC{interval: 2 * time.Hour, ttl: 24 * time.Hour}
+		m := carryWispGCState(prev, next).(*memoryWispGC)
+		if m.shouldRun(now.Add(time.Hour)) {
+			t.Fatal("due 1h after the last run; want the 2h interval to count from the carried lastRun")
+		}
+		if !m.shouldRun(now.Add(2 * time.Hour)) {
+			t.Fatal("not due 2h after the last run; want the 2h interval to count from the carried lastRun")
+		}
+	})
+
+	t.Run("notes are not carried", func(t *testing.T) {
+		prev := &memoryWispGC{interval: time.Hour, ttl: time.Hour, lastRun: now}
+		heldRoot := beads.Bead{ID: "root-held", UpdatedAt: now}
+		refusedRoot := beads.Bead{ID: "root-refused", UpdatedAt: now}
+		prev.notes.noteRefusal(graphArmHolderMemo, heldRoot, now, holderAnswerHeld)
+		prev.notes.noteRefusal("graph", refusedRoot, now, "closure holds a bead that is not closed")
+		next := &memoryWispGC{interval: time.Hour, ttl: time.Hour}
+		m := carryWispGCState(prev, next).(*memoryWispGC)
+		if _, ok := m.notes.remembered(graphArmHolderMemo, heldRoot, now.Add(time.Minute)); ok {
+			t.Fatal("holder memo carried; answers read against a leg set the reload may have changed must not survive it")
+		}
+		if _, ok := m.notes.remembered("graph", refusedRoot, now.Add(time.Minute)); ok {
+			t.Fatal("graph refusal carried into the rebuilt tracker")
+		}
+	})
+}
+
 func TestWispGC_NothingExpired(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
