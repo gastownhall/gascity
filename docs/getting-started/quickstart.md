@@ -29,8 +29,10 @@ on demand and preserves your normal provider and capacity choices.
 The orchestrator and token-free maintenance can run while idle;
 model work begins when you submit a task or explicitly request a session.
 
-If preflight reports a missing dependency or login, fix the named problem and
-run `gc start` from the city. Keep the existing city and its data.
+If preflight reports a missing dependency or login, apply its named remedy.
+If the city directory was not created, repeat the init command above. If it
+already exists, run `gc start` from that city, preserving its configuration
+and data.
 
 ## 2. Submit your first local task
 

@@ -1,13 +1,57 @@
 ---
 title: Tutorial 04 - Agent-to-Agent Communication
 sidebarTitle: 04 - Communication
-description: How agents coordinate through mail, slung work, and hooks — without direct connections.
+description: Inspect how implementation, independent review and verification exchange durable results.
 ---
+
+## Follow the delivery evidence
+
+Complete the [API lesson](/tutorials/02-agents), using the same `bright-lights`
+city and `practice` repository:
+
+```bash
+cd ~/bright-lights
+gc gc tutorial status --lesson api
+gc events --type execution.step_completed --since 1h
+```
+
+Agents coordinate through durable work and results. The implementation worker
+commits code. A separate reviewer receives that output and records a verdict.
+Verification runs against the approved commit. Integration uses that same
+commit; cleanup and native workflow finalization precede source closure.
+Events let you observe those transitions.
+
+Use the source ID printed by the lesson:
+
+```bash
+# Replace <api-source-id> with the printed ID.
+gc --rig practice bd show <api-source-id> --json
+```
+
+The source metadata records `gc.delivery.integrated_sha` and
+`gc.delivery.workflow_root`. Tutorial status follows that workflow, checks its
+passing outcome and cleanup record, and checks the accepted commit is in the
+local branch. A closed individual step or a running process is insufficient
+completion evidence.
+
+Mail and nudges are also available for conversations between workers; the
+[optional communication exercise](/tutorials/04-communication#custom-configuration-exercise) explains them. The
+built-in delivery path carries the task without requiring a coordinator chat.
+
+Continue to [Formulas](/tutorials/05-formulas) to deliver a client of this API.
+
+## Custom configuration exercise
+
+For an independent configuration exercise, expand the walkthrough below. It
+uses its own `my-city`, `my-project` and explicitly configured agents. The
+numbered configuration exercises share that separate setup with one another.
+
+<Accordion title="Build and customize your own configuration">
 
 Earlier tutorials had _you_ talking to agents — peeking at output, nudging
 sessions. This one covers how agents talk to _each other_. To follow along you
 need `my-city` running with `my-project` rigged and agents for `mayor` and
-`reviewer` (the setup from [Tutorial 03](/tutorials/03-sessions)).
+`reviewer` (the setup from [Tutorial 03](/tutorials/03-sessions#custom-configuration-exercise)).
 
 ## Agents coordinate only through the store
 
@@ -160,6 +204,8 @@ for work — and the hook infrastructure that wires it all together. From here:
 
 - **[The six primitives](/getting-started/how-gas-city-works)** — the canonical model mail,
   slung work, and hooks build on
-- **[Formulas](/tutorials/05-formulas)** — how multi-step work should be
+- **[Formulas](/tutorials/05-formulas#custom-configuration-exercise)** — how multi-step work should be
   done: steps, dependencies, and variables
-- **[Beads](/tutorials/06-beads)** — the work tracking system underneath it all
+- **[Beads](/tutorials/06-beads#custom-configuration-exercise)** — the work tracking system underneath it all
+
+</Accordion>

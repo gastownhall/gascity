@@ -1,17 +1,48 @@
 ---
 title: Tutorial 01 - Cities and Rigs
 sidebarTitle: 01 - Cities and Rigs
-description: Create a city, add a project as a rig, and sling your first work to an agent.
+description: Inspect the city and repository from your completed quickstart.
 ---
 
-## Continuing from the guided quickstart
+## Keep your working city
 
-If you completed the [quickstart](/getting-started/quickstart), keep your existing
-city and `practice` rig. Run `cd ~/bright-lights` and `gc start` if you paused it.
-You can read the setup and creation sections below without repeating them.
-Use `gc rig list` to see your registered practice repository, then continue
-learning the city and rig commands. Tutorials 2–7 build on this same city;
-there is no reset or separate starter pack.
+Complete the [quickstart](/getting-started/quickstart), then keep its city and
+practice repository. These seven lessons extend that same local project.
+
+```bash
+cd ~/bright-lights
+gc start
+gc rig list
+gc gc tutorial status
+```
+
+Wait for `Verified local integration` before continuing. The city is your
+local configuration; a **rig** registers the repository where work happens.
+The practice rig points to `projects/practice` because the tutorial created it.
+Your own repositories can live anywhere on the execution host:
+
+```bash
+# Optional: register an existing project in place.
+gc --city ~/bright-lights rig add /absolute/path/to/project --name project
+```
+
+Keep the existing checkout, branch history and path. Review registration changes
+with Git before submitting its first task. For an existing Beads queue, use the
+[adoption preview](/getting-started/quickstart#adopt-an-existing-beads-queue).
+
+The default Gas City pack supplies the delivery workflow and agent roles. Your
+city is the local root pack; it imports those shared definitions. You can keep
+using this configuration as your projects grow.
+
+Continue to [Agents](/tutorials/02-agents) to add an API to the practice project.
+
+## Custom configuration exercise
+
+For an independent configuration exercise, expand the walkthrough below. It
+uses its own `my-city`, `my-project` and explicitly configured agents. The
+numbered configuration exercises share that separate setup with one another.
+
+<Accordion title="Build and customize your own configuration">
 
 ## Setup
 
@@ -175,7 +206,7 @@ the provider. The `[providers.claude]` table registers your chosen provider
 against the builtin `claude` preset. The `[defaults.rig.imports]` table lists
 packs that every rig you add imports automatically. The v2 formula compiler is
 on by default, so nothing is written for it (you'll meet formulas in
-[Tutorial 05](/tutorials/05-formulas)). The `[imports]` entries
+[Tutorial 05](/tutorials/05-formulas#custom-configuration-exercise)). The `[imports]` entries
 in `pack.toml` are explicit pack composition, not hidden load-time behavior.
 `core` and, for cities on the default `bd` beads provider, `bd` are bundled
 system packs that resolve offline from the user-global pack cache. Their
@@ -359,11 +390,13 @@ one of those in the Formulas tutorial.
 You've created a city, added a project as a rig, and slung work to an agent on
 that rig. From here:
 
-- **[Agents](/tutorials/02-agents)** — go deeper on agent configuration:
+- **[Agents](/tutorials/02-agents#custom-configuration-exercise)** — go deeper on agent configuration:
   prompts, sessions, scope, working directories
-- **[Sessions](/tutorials/03-sessions)** — interactive conversations with
+- **[Sessions](/tutorials/03-sessions#custom-configuration-exercise)** — interactive conversations with
   agents, on-demand workers and persistent worker pools
-- **[Formulas](/tutorials/05-formulas)** — write a method for how a job gets
+- **[Formulas](/tutorials/05-formulas#custom-configuration-exercise)** — write a method for how a job gets
   done and let the orchestrator run it as a graph: fan steps out across many
   agents, gate them on dependencies, retry failures, and drive the job to
   completion outside your session
+
+</Accordion>

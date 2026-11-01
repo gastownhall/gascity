@@ -74,8 +74,8 @@ brew install gascity
 ```
 
 This taps the `gastownhall/gascity` formula, downloads the matching `gc`
-release asset, and installs all six runtime dependencies (tmux, jq, git, dolt,
-flock, beads).
+release asset, and installs the runtime dependencies, including Python 3 for the guided tutorial
+(tmux, jq, git, dolt, flock, beads and Python 3).
 
 Once Gas City is accepted into homebrew-core, the normal install path will be
 `brew install gascity`; the `gastownhall/gascity` tap remains available for
@@ -210,9 +210,17 @@ Requires `make` and Go 1.27.3+ (pinned in `go.mod` as 1.27.3).
 ```bash
 git clone https://github.com/gastownhall/gascity.git
 cd gascity
-make install        # builds and installs to $(GOPATH)/bin/gc
+make install        # installs gc and its pinned bd into $(GOPATH)/bin
 gc version
 ```
+
+`make install` builds `bd` from the Beads module version pinned by this GC
+checkout, verifies the binary metadata, and installs the pair into the same
+directory. Install the other prerequisites above separately. To prepare an
+isolated installation, use `make install INSTALL_DIR=/absolute/candidate/bin`;
+an explicit prefix preserves other installed commands. Add that directory to
+your PATH before starting its cities. `make install-bd INSTALL_DIR=...` installs
+only the matching standalone Beads CLI.
 
 To build without installing globally:
 

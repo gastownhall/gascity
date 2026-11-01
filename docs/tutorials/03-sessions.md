@@ -1,8 +1,51 @@
 ---
 title: Tutorial 03 - Sessions
 sidebarTitle: 03 - Sessions
-description: See agent output, interact directly with agents, and learn the difference between on-demand and always-on sessions.
+description: Observe, pause and resume the API delivery without resetting its work.
 ---
+
+## Watch the API work
+
+From your quickstart city, after submitting the
+[API lesson](/tutorials/02-agents):
+
+```bash
+cd ~/bright-lights
+gc status
+gc session list
+gc gc tutorial status --lesson api
+```
+
+A **session** is one live execution of an agent. The source task and workflow
+outlive it. If the work has already drained, an empty active-session list is
+expected. Use the task and commit evidence to distinguish completion from a
+worker that failed to start.
+
+## Pause and resume
+
+```bash
+gc stop
+gc start
+gc gc tutorial status --lesson api
+```
+
+You can pause during implementation or review. The recorded source task, input
+commit, workflow and owned worktree remain. Starting resumes persistent work;
+it does not create a replacement lesson. Leave unfinished worktrees and source
+tasks intact when diagnosing a failure.
+
+When status prints `Verified local integration`, continue to
+[Communication](/tutorials/04-communication). If it reports a failed stage,
+inspect its source ID with `gc --rig practice bd show <source-id> --json` and
+correct the named problem before retrying.
+
+## Custom configuration exercise
+
+For an independent configuration exercise, expand the walkthrough below. It
+uses its own `my-city`, `my-project` and explicitly configured agents. The
+numbered configuration exercises share that separate setup with one another.
+
+<Accordion title="Build and customize your own configuration">
 
 Slinging work to agents creates **sessions** — live agent processes you
 haven't seen yet. This tutorial shows you how to watch and talk to them. A
@@ -264,8 +307,10 @@ agents. From here:
 
 - **[The six primitives](/getting-started/how-gas-city-works)** — the canonical model the
   session and these mechanisms build on
-- **[Agent-to-Agent Communication](/tutorials/04-communication)** — how agents
+- **[Agent-to-Agent Communication](/tutorials/04-communication#custom-configuration-exercise)** — how agents
   coordinate through mail, slung work, and hooks
-- **[Formulas](/tutorials/05-formulas)** — how multi-step work should be
+- **[Formulas](/tutorials/05-formulas#custom-configuration-exercise)** — how multi-step work should be
   done: steps, dependencies, and variables
-- **[Beads](/tutorials/06-beads)** — the work tracking system underneath it all
+- **[Beads](/tutorials/06-beads#custom-configuration-exercise)** — the work tracking system underneath it all
+
+</Accordion>

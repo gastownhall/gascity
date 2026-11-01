@@ -1,8 +1,69 @@
 ---
 title: Tutorial 07 - Orders
 sidebarTitle: 07 - Orders
-description: Trigger v2 formulas — and the orchestration the orchestrator drives — on a schedule, a condition, or an event, with no human in the loop.
+description: Add an explicit mechanical check, then choose publication or customization.
 ---
+
+## Automate a mechanical check
+
+Start with the completed greeting, API and client lessons in
+`~/bright-lights`. An **order** chooses when to run a formula or command.
+Inspect the installed orders first:
+
+```bash
+cd ~/bright-lights
+gc order list
+```
+
+Create a manual check that runs the practice tests without a model session:
+
+```bash
+mkdir -p scripts orders
+cat > scripts/practice-check.sh <<'CHECK'
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")/../projects/practice"
+exec python3 -m unittest discover -s tests -v
+CHECK
+chmod +x scripts/practice-check.sh
+cat > orders/practice-check.toml <<'ORDER'
+[order]
+description = "Verify the local practice deliverable"
+trigger = "manual"
+exec = "scripts/practice-check.sh"
+ORDER
+gc order run practice-check
+gc order history practice-check
+gc session list
+```
+
+The order should report success and leave no model session behind. The beginner
+experience keeps model workers demand driven. A manual order runs only when
+you request it; token-free maintenance may continue while the city is idle.
+
+## Choose your next step
+
+Your practice repository contains the verified API and client on its local
+integration branch. GitHub publication is a separate choice: configure a remote
+you own, review `git diff` and the accepted commits, push a branch, then use your
+normal pull-request review process. The first local delivery needs neither
+GitHub nor `gh`. Follow your repository's approval rules before publishing.
+
+For customization, keep this city and add local agent, formula or order
+definitions when your project needs them. The default Gas City pack remains the
+starting point. The optional configuration exercises below explain those
+surfaces in more depth.
+
+For your own existing project or queue, follow the
+[registration/adoption path](/getting-started/quickstart#use-your-own-repository).
+
+## Custom configuration exercise
+
+For an independent configuration exercise, expand the walkthrough below. It
+uses its own `my-city`, `my-project` and explicitly configured agents. The
+numbered configuration exercises share that separate setup with one another.
+
+<Accordion title="Build and customize your own configuration">
 
 Formulas describe _what_ work looks like. Orders describe _when_ it should
 happen. An order pairs a trigger with an action — a formula or a shell script.
@@ -17,7 +78,7 @@ graph to completion outside any session — now on a schedule or in response to
 events instead of a person typing `gc sling`.
 
 This page assumes `my-city` is running with agents and formulas configured (as
-built up through [Tutorial 06](/tutorials/06-beads)).
+built up through [Tutorial 06](/tutorials/06-beads#custom-configuration-exercise)).
 
 ## A simple order
 
@@ -36,7 +97,7 @@ formulas/
 ```
 
 Here's a minimal order that dispatches the `pancakes` formula from
-[Tutorial 05](/tutorials/05-formulas) every five minutes:
+[Tutorial 05](/tutorials/05-formulas#custom-configuration-exercise) every five minutes:
 
 ```toml
 # orders/pancakes-check.toml
@@ -550,7 +611,7 @@ independent scoped instances (`test-suite` vs `test-suite:rig:my-api`).
 
 Two orders: a frequent lint check (exec, no agent) and weekly release notes
 (formula, dispatched to the `worker` agent from
-[Tutorial 05](/tutorials/05-formulas)). The pieces are the two order files and
+[Tutorial 05](/tutorials/05-formulas#custom-configuration-exercise)). The pieces are the two order files and
 the formula they dispatch.
 
 ```toml
@@ -635,3 +696,5 @@ guides go deeper:
   including the v2 runtime constructs your orders dispatch
 - **[Understanding packs](/guides/understanding-packs)** — how formulas,
   orders, agents, and prompts travel together as importable packs
+
+</Accordion>

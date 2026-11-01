@@ -1,8 +1,49 @@
 ---
 title: Tutorial 05 - Formulas
 sidebarTitle: 05 - Formulas
-description: Capture how multi-step work should be done — steps, dependencies, variables, and control flow — in a reusable formula, then dispatch it to agents.
+description: Apply the existing delivery formula to a client of the accepted API.
 ---
+
+## Reuse a complete delivery method
+
+Start from the completed API lesson in `~/bright-lights`. A **formula** defines
+how work proceeds; the source task describes what to deliver.
+
+```bash
+cd ~/bright-lights
+gc --rig practice formula list
+gc --rig practice formula show quick-start
+gc gc tutorial start --lesson client
+```
+
+The client lesson adds `client.py`, which imports `greeting_parts` from the API
+lesson and prints its result as JSON. It adds tests for a supplied name and the
+default name, preserving the API and earlier tests.
+
+The tutorial first verifies the API's accepted commit and completed cleanup.
+It records the client task with a dependency on the API source task, includes
+that accepted commit in the task description, and submits it through the same
+quick-start formula. The input is selected from the integration branch that
+already contains the API change. Waiting for a bead to close alone would not
+establish this source boundary.
+
+```bash
+gc gc tutorial status --lesson client
+```
+
+Wait for `Verified local integration`. A required-stage failure prevents later
+integration. Review or test rejection can trigger at most two repair rounds;
+a missing environment prerequisite requires an environment repair instead.
+
+Continue to [Beads](/tutorials/06-beads) to inspect both tasks and their result.
+
+## Custom configuration exercise
+
+For an independent configuration exercise, expand the walkthrough below. It
+uses its own `my-city`, `my-project` and explicitly configured agents. The
+numbered configuration exercises share that separate setup with one another.
+
+<Accordion title="Build and customize your own configuration">
 
 So far you've slung work one piece at a time — `gc sling my-agent "do this
 thing"`. Real workflows have multiple steps with dependencies between them. A
@@ -171,7 +212,7 @@ sling _starts_ a workflow, materializing its steps into beads (the work).
 With the v1 compiler, slinging a formula creates a _wisp_ — an ephemeral
 molecule, a container bead holding its steps as children. You'll see that
 vocabulary in older formulas and messages; v2 formulas start workflows.
-[Tutorial 06](/tutorials/06-beads) shows how both shapes land in the bead store.
+[Tutorial 06](/tutorials/06-beads#custom-configuration-exercise) shows how both shapes land in the bead store.
 </Accordion>
 
 To create the workflow's beads _without_ routing them — to inspect first, or
@@ -642,7 +683,9 @@ set.
   and the work they produce build on
 - **[Formula spec (v2)](/reference/specs/formula-spec-v2)** — the complete surface: every
   top-level key, every step field, and the v2 runtime constructs
-- **[Beads](/tutorials/06-beads)** — the universal work primitive underneath
+- **[Beads](/tutorials/06-beads#custom-configuration-exercise)** — the universal work primitive underneath
   formulas, sessions, and everything else
-- **[Orders](/tutorials/07-orders)** — formulas with scheduling triggers for
+- **[Orders](/tutorials/07-orders#custom-configuration-exercise)** — formulas with scheduling triggers for
   periodic dispatch
+
+</Accordion>

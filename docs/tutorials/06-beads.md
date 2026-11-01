@@ -1,8 +1,62 @@
 ---
 title: Tutorial 06 - Beads
 sidebarTitle: 06 - Beads
-description: Understand the universal work primitive — the bead — that sessions, mail, and convoys are made of, that formulas materialize into when run, and learn to query and manipulate work items directly.
+description: Inspect the API/client dependency and verify the combined deliverable.
 ---
+
+## Inspect persistent work
+
+Complete the API and client lessons in the same `bright-lights` city. A
+**bead** is a persistent unit of work. The tasks, workflow steps and dependency
+edges remain inspectable after their sessions stop.
+
+```bash
+cd ~/bright-lights
+gc --rig practice bd list --all
+gc gc tutorial status --lesson api
+gc gc tutorial status --lesson client
+```
+
+Use the client source ID printed by the lesson:
+
+```bash
+# Replace <client-source-id> with the printed ID.
+gc --rig practice bd dep list <client-source-id>
+```
+
+The client depends on the API task. Its recorded input commit must include the
+API's accepted commit. Inspect the combined code yourself:
+
+```bash
+cd projects/practice
+python3 -m unittest discover -s tests -v
+python3 client.py Ada
+python3 client.py
+git log --oneline -5
+```
+
+The first client invocation prints a JSON object with name `Ada` and message
+`Hello, Ada!`; the second uses `world` and `Hello, world!`. All greeting, API and
+client tests should pass.
+
+## Optional parallel work
+
+Register additional existing repositories in place, give each task explicit
+acceptance criteria, and submit independent work to their rig's delivery route.
+Workers can run concurrently within your configured capacity. Changes that
+share a repository's integration branch need source and conflict checks; an
+open blocker must remain blocked until its prerequisite is delivered.
+
+Continue to [Orders](/tutorials/07-orders) for a token-free automation example
+and optional publication/customization.
+
+## Custom configuration exercise
+
+For an independent configuration exercise, expand the walkthrough below. It
+uses its own `my-city`, `my-project` and explicitly configured agents. The
+numbered configuration exercises share that separate setup with one another.
+
+<Accordion title="Build and customize your own configuration">
 
 Every trackable thing in Gas City is a **bead** — a unit of work in the store.
 Sessions, mail, and convoys are beads; a formula (a reusable method) isn't a
@@ -14,7 +68,7 @@ Formula, Rig, Pack, and Event.
 
 This page continues from a `my-city` with `my-project` rigged, the `pancakes`
 formula cooked, and `mayor` / `reviewer` / `worker` agents (see
-[Tutorial 05](/tutorials/05-formulas)). Everything below runs against the bead
+[Tutorial 05](/tutorials/05-formulas#custom-configuration-exercise)). Everything below runs against the bead
 store with the `bd` tool.
 
 Confirm the local pack, rig registration, and reviewer binding carried forward
@@ -74,7 +128,7 @@ Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred
 ```
 
 The seven `pancakes` beads come from cooking the formula in
-[Tutorial 05](/tutorials/05-formulas): a root bead (`mc-79s`), one bead per
+[Tutorial 05](/tutorials/05-formulas#custom-configuration-exercise): a root bead (`mc-79s`), one bead per
 step, and the `Finalize workflow` control step the v2 compiler appends. Each is
 an independent top-level bead with its own ID; ordering lives in dependency
 edges (below). The leading glyph is status, followed by ID, priority (`P2`),
@@ -402,7 +456,7 @@ flow:
 5. The agent runs the claimed work — find work on your hook, you run it
 
 For work routed to a pool — a group of agents sharing a work queue, which
-[Tutorial 07](/tutorials/07-orders) covers — the query checks metadata instead
+[Tutorial 07](/tutorials/07-orders#custom-configuration-exercise) covers — the query checks metadata instead
 of assignee:
 
 ```shell
@@ -480,5 +534,7 @@ convoys are beads; a formula materializes its work as beads when run.
 
 ## What's next
 
-- **[Orders](/tutorials/07-orders)** — formulas and scripts on autopilot, triggered
+- **[Orders](/tutorials/07-orders#custom-configuration-exercise)** — formulas and scripts on autopilot, triggered
   by time, schedule, conditions, or events
+
+</Accordion>
