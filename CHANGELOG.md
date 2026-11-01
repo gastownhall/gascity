@@ -758,17 +758,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the controller. Named, manual and session-less claimants and assigned work
   claim as before.
 
-- **A running pool session that the legacy session reconciler reuses for new
-  work keeps its work directory.** The legacy reconciler (the default when
+- **The legacy session reconciler no longer re-points a running pool session
+  at work in another directory.** The legacy reconciler (the default when
   the v2 allocator is unavailable, for example a single-store city on the
-  `bd` CLI store) rewrote the reused session's recorded `gc.work_dir` to the
-  new bead's directory without restarting the session. `gc hook --claim`
-  read that as the session's own directory, so a session running inside one
-  managed worktree claimed work bound to another worktree, or to none, and
-  ran it in the wrong checkout. The session now keeps its directory: its
-  claim leaves that work, it drains, and the work gets a session in its own
-  directory. A stopped session still moves, and the v2 allocator is
-  unchanged.
+  `bd` CLI store) reused a running pool session for new work and rewrote its
+  recorded `gc.work_dir` to the new bead's directory without restarting it.
+  `gc hook --claim` read that as the session's own directory, so a session
+  running inside one managed worktree claimed work bound to another worktree,
+  or to none, and ran it in the wrong checkout. Such work now gets a fresh
+  session in its own directory. When the pool is full, work bound to a
+  managed worktree waits while one idle session running elsewhere is
+  retired to free its slot, even at a `min_active_sessions` floor: the
+  controller drains it and closes its session bead, and the work then gets
+  its fresh session. Work bound to no worktree may still go to such a
+  session when no fresh session can start; it then keeps its directory, and
+  its claim decides whether it runs that work there. A session whose agent is
+  not alive (stopped, or a pane whose agent process died) moves as before,
+  and the v2 allocator is unchanged.
 
 - **Pool demand across stores names work in the order sessions claim it.**
   In a city whose routed work spans more than one bead store, the
