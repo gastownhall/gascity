@@ -196,7 +196,7 @@ func NudgeHandleCatalog() []Requirement {
 		{
 			Code:        RequirementWaitIdleOutOfReachQueuesAtOnce,
 			Group:       "nudge",
-			Description: "A wait-idle nudge to a non-ACP session whose non-blocking idle pre-read (runtime.IdleBoundaryNow) reads busy, or reads indeterminate while the runtime reports a pending interaction, is reported undelivered at once, without entering the idle wait and without typing, on a SessionHandle and a RuntimeHandle alike; a pre-read at the boundary, or indeterminate with nothing pending, waits for idle and delivers.",
+			Description: "A wait-idle nudge to a non-ACP session whose non-blocking idle pre-read (runtime.IdleBoundaryNow) reads busy, reads a pending choice (runtime.ErrIdlePendingChoice), or reads indeterminate while the runtime reports a pending interaction, is reported undelivered at once, without entering the idle wait and without typing, on a SessionHandle and a RuntimeHandle alike; a pre-read at the boundary, or indeterminate with nothing pending, waits for idle and delivers.",
 		},
 	}
 }

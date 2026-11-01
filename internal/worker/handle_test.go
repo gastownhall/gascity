@@ -2138,11 +2138,11 @@ type idleSnapshotFake struct {
 func (f *idleSnapshotFake) SnapshotIdle(string) (bool, error) { return f.idle, f.err }
 
 // A wait-idle nudge whose pre-read (runtime.IdleBoundaryNow) shows the
-// session busy, or reads indeterminate while the runtime reports a pending
-// interaction (an open dialog), is queued at once: it reports
-// no_idle_boundary without entering the 30 s idle wait and types nothing. A
-// pre-read at the boundary, or one that cannot tell, waits for idle as
-// before.
+// session busy, reads a pending choice (a numbered menu), or reads
+// indeterminate while the runtime reports a pending interaction (an open
+// dialog), is queued at once: it reports no_idle_boundary without entering
+// the 30 s idle wait and types nothing. A pre-read at the boundary, or one
+// that cannot tell, waits for idle as before.
 func TestRuntimeHandleWaitIdleBusySnapshotQueuesWithoutWaiting(t *testing.T) {
 	indeterminate := fmt.Errorf("scan: %w", runtime.ErrIdleIndeterminate)
 	for _, tc := range []struct {
@@ -2155,6 +2155,7 @@ func TestRuntimeHandleWaitIdleBusySnapshotQueuesWithoutWaiting(t *testing.T) {
 	}{
 		{name: "busy"},
 		{name: "pending", err: indeterminate, pending: &runtime.PendingInteraction{RequestID: "tmux-1", Kind: "approval", Prompt: "Allow Bash?"}},
+		{name: "pending choice", err: fmt.Errorf("scan: %w", runtime.ErrIdlePendingChoice)},
 		{name: "at the boundary", idle: true, wantWait: true, delivered: true},
 		{name: "indeterminate", err: indeterminate, wantWait: true, delivered: true},
 	} {

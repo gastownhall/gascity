@@ -720,6 +720,15 @@ type IdleSnapshotProvider interface {
 // signal they would use without a snapshot.
 var ErrIdleIndeterminate = errors.New("session idle state is indeterminate")
 
+// ErrIdlePendingChoice reports an [IdleSnapshotProvider] observation that saw
+// a menu waiting for a choice: its highlighted option is drawn where the
+// ready prompt would be, so text sent now would pick an option instead of
+// reaching the composer. It wraps [ErrIdleIndeterminate], which is what every
+// caller that does not ask for it by name reads; the wait-idle pre-read
+// ([IdleBoundaryNow]) reads it as pending, since a menu does not close by
+// itself within a short wait.
+var ErrIdlePendingChoice = fmt.Errorf("%w: a menu awaits a choice", ErrIdleIndeterminate)
+
 // ErrWaitUnobserved reports that an idle or interrupt-boundary wait
 // ([IdleWaitProvider], [InterruptBoundaryWaitProvider]) reached its timeout
 // without one reading that showed the session busy: every read failed, or

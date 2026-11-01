@@ -4062,6 +4062,28 @@ func (t *Tmux) dismissMidSessionDialogBeforeNudge(ctx context.Context, target st
 	return dismissed
 }
 
+// dismissMidSessionDialogBeforeIdleWait takes nudgeSession's step 0 ahead of
+// Provider.nudge's idle wait. A blocking mid-session dialog does not close by
+// itself, and the session-limit chooser, a numbered menu, never reads idle
+// (isMenuCursorRow), so a nudge that waited first would run out its whole
+// window before step 0 cleared the dialog. It holds the nudge lock through
+// the settle delay, so a concurrent nudge peeks only once the dialog is gone
+// and never types its own dismissal keys into the prompt. Best-effort, as
+// step 0 is: a lock timeout or an unresolved pane skips it.
+func (t *Tmux) dismissMidSessionDialogBeforeIdleWait(ctx context.Context, session string) {
+	if !acquireNudgeLock(session, t.cfg.NudgeLockTimeout) {
+		return
+	}
+	defer releaseNudgeLock(session)
+	target, err := t.agentInputTarget(session)
+	if err != nil {
+		return
+	}
+	if t.dismissMidSessionDialogBeforeNudge(ctx, target) {
+		time.Sleep(midSessionDialogSettleDelay)
+	}
+}
+
 // DismissModelSwitchModalIfPresent clears a mid-session Codex/GPT model-switch
 // modal on the session's agent pane (keeping the current model — no downgrade,
 // no spend change) so a session that would otherwise hang on it can proceed.
@@ -5323,8 +5345,19 @@ func (t *Tmux) WaitForShellReady(session string, timeout time.Duration) error {
 // NBSP after its ❯ prompt character while the default ReadyPromptPrefix
 // uses a regular space. See https://github.com/steveyegge/gastown/issues/1387.
 func matchesPromptPrefix(line, readyPromptPrefix string) bool {
+	_, ok := promptLineRest(line, readyPromptPrefix)
+	return ok
+}
+
+// promptLineRest is the normalization behind matchesPromptPrefix: ok reports
+// whether line matches readyPromptPrefix, and rest is the text after the
+// prefix and the spaces separating it ("" for a bare prompt glyph). Dropping
+// the separator keeps rest the same whether the prefix carries its trailing
+// space ("› ") or not ("›"), as when idle detection reads the prefix back
+// from the tmux environment: tmux output arrives trimmed.
+func promptLineRest(line, readyPromptPrefix string) (rest string, ok bool) {
 	if readyPromptPrefix == "" {
-		return false
+		return "", false
 	}
 	trimmed := strings.TrimSpace(line)
 	// Normalize NBSP (U+00A0) → regular space so that prompt matching
@@ -5337,11 +5370,99 @@ func matchesPromptPrefix(line, readyPromptPrefix string) bool {
 	// too so the prompt glyph after the border is detected — otherwise readiness
 	// and idle detection never match and queued prompt delivery is never released.
 	for _, cand := range []string{trimmed, stripLeadingBoxBorder(trimmed)} {
-		if strings.HasPrefix(cand, normalizedPrefix) || (prefix != "" && cand == prefix) {
-			return true
+		if rest, ok := strings.CutPrefix(cand, normalizedPrefix); ok {
+			return strings.TrimLeft(rest, " "), true
+		}
+		if prefix != "" && cand == prefix {
+			return "", true
+		}
+	}
+	return "", false
+}
+
+// paneShowsReadyPrompt reports whether the live composer in lines is a ready
+// prompt. The live composer is the LAST line matching promptPrefix (as in
+// paneShowsStagedDraft): agents echo past user turns with the same glyph, so
+// earlier prompt lines are transcript. The prompt need not be the last
+// non-empty line, since TUIs draw a status footer below it. When that line is
+// a numbered menu's cursor row (isMenuCursorRow) the pane is waiting for a
+// choice, so this reports false, as it does with no prompt line on screen.
+func paneShowsReadyPrompt(lines []string, promptPrefix string) bool {
+	i := bottomPromptLine(lines, promptPrefix)
+	return i >= 0 && !isMenuCursorRow(lines, i, promptPrefix)
+}
+
+// bottomPromptLine returns the index of the last line in lines matching
+// promptPrefix, or -1 when none does.
+func bottomPromptLine(lines []string, promptPrefix string) int {
+	for i := len(lines) - 1; i >= 0; i-- {
+		if matchesPromptPrefix(lines[i], promptPrefix) {
+			return i
+		}
+	}
+	return -1
+}
+
+// isMenuCursorRow reports whether lines[i], a line matching promptPrefix, is
+// the selected row of a numbered option menu ("› 1. Trust and continue"):
+// TUIs mark the highlighted option with their prompt glyph, so the row matches
+// the ready prefix although the pane is waiting for a choice. Keys typed into
+// it are menu input, and Enter picks the highlighted option.
+//
+// The row's label must be "N. " and the nearest non-blank line above or below
+// must be option N-1 or N+1 (unselected options carry no glyph: "  2. Quit"),
+// so a composer draft that merely starts with "1. " still reads as a prompt.
+// A two-line numbered draft ("› 1. foo" over "  2. bar") reads as a menu. The
+// startup-dialog prompt scan (runtime.containsPromptIndicator) is stricter: it
+// reads no "N." row after the glyph as a prompt (runtime.isNumberedMenuRow),
+// neighbor or not.
+func isMenuCursorRow(lines []string, i int, promptPrefix string) bool {
+	rest, ok := promptLineRest(lines[i], promptPrefix)
+	if !ok {
+		return false
+	}
+	n, ok := menuOptionNumber(rest)
+	if !ok {
+		return false
+	}
+	for _, step := range []int{-1, 1} {
+		for j := i + step; j >= 0 && j < len(lines); j += step {
+			row := menuRowText(lines[j])
+			if row == "" {
+				continue
+			}
+			if m, ok := menuOptionNumber(row); ok && (m == n-1 || m == n+1) {
+				return true
+			}
+			break
 		}
 	}
 	return false
+}
+
+// menuRowText normalizes a captured menu row the way promptLineRest normalizes
+// a prompt line: NBSP becomes a space, surrounding space is trimmed, and a
+// leading │/┃ box border is stripped.
+func menuRowText(line string) string {
+	return stripLeadingBoxBorder(strings.TrimSpace(strings.ReplaceAll(line, "\u00a0", " ")))
+}
+
+// menuOptionNumber parses a numbered menu label at the start of s: a run of
+// ASCII digits followed by ". ". It reports false for anything else,
+// including a number too large for an int.
+func menuOptionNumber(s string) (int, bool) {
+	digits := 0
+	for digits < len(s) && s[digits] >= '0' && s[digits] <= '9' {
+		digits++
+	}
+	if digits == 0 || !strings.HasPrefix(s[digits:], ". ") {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s[:digits])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // stripLeadingBoxBorder removes a leading vertical box-drawing character
@@ -5358,7 +5479,11 @@ func stripLeadingBoxBorder(s string) string {
 }
 
 // WaitForRuntimeReady polls until the agent runtime's ready prompt appears in
-// the pane. Falls back to a fixed delay when prompt detection is unavailable.
+// the pane. The bottom-most prompt-prefixed line decides (see
+// paneShowsReadyPrompt): a numbered menu whose cursor row carries the prompt
+// glyph, such as a startup trust dialog, is a pending choice and keeps the
+// wait polling. Falls back to a fixed delay when prompt detection is
+// unavailable.
 func (t *Tmux) WaitForRuntimeReady(ctx context.Context, session string, rc *RuntimeConfig, timeout time.Duration) error {
 	if rc == nil || rc.Tmux == nil {
 		return nil
@@ -5409,11 +5534,8 @@ func (t *Tmux) WaitForRuntimeReady(ctx context.Context, session string, rc *Runt
 			}
 			continue
 		}
-		// Look for runtime prompt indicator at start of line
-		for _, line := range lines {
-			if matchesPromptPrefix(line, rc.Tmux.ReadyPromptPrefix) {
-				return nil
-			}
+		if paneShowsReadyPrompt(lines, rc.Tmux.ReadyPromptPrefix) {
+			return nil
 		}
 		select {
 		case <-ctx.Done():
@@ -5513,8 +5635,11 @@ func (t *Tmux) snapshotPaneIdleWithPrefix(session, promptPrefix string) (bool, e
 // idle check does: a busy-indicator string anywhere in lines is the busy
 // reading, (false, nil); a ready prompt (PaneShowsIdlePrompt) is idle,
 // (true, nil); anything else returns [runtime.ErrIdleIndeterminate], since a
-// pane showing neither is not evidence of work. The tmux idle wait and its
-// exec twin both classify each capture through it.
+// pane showing neither is not evidence of work. A pane whose bottom-most
+// prompt-prefixed line is a numbered menu's cursor row (isMenuCursorRow) is
+// waiting for a choice: its error is [runtime.ErrIdlePendingChoice], which
+// wraps that one. The tmux idle wait and its exec twin both classify each
+// capture through it.
 func ClassifyIdlePane(lines []string, promptPrefix string) (bool, error) {
 	if paneContainsBusyIndicator(lines) {
 		return false, nil
@@ -5522,21 +5647,24 @@ func ClassifyIdlePane(lines []string, promptPrefix string) (bool, error) {
 	if PaneShowsIdlePrompt(lines, promptPrefix) {
 		return true, nil
 	}
+	if i := bottomPromptLine(lines, promptPrefix); i >= 0 && isMenuCursorRow(lines, i, promptPrefix) {
+		return false, runtime.ErrIdlePendingChoice
+	}
 	return false, runtime.ErrIdleIndeterminate
 }
 
 // PaneShowsIdlePrompt is the pure scan behind tmux idle detection: it reports
 // whether captured pane lines show promptPrefix with no active-processing
-// indicator. It does not substitute a default for a blank promptPrefix;
-// callers resolve the prefix first (DefaultReadyPromptPrefix when the session
-// configures none).
+// indicator. The bottom-most prompt-prefixed line decides (see
+// paneShowsReadyPrompt): a numbered menu's cursor row there is a pending
+// choice, not an idle composer. It does not substitute a default for a blank
+// promptPrefix; callers resolve the prefix first (DefaultReadyPromptPrefix
+// when the session configures none).
 //
 // Runtimes that run the agent in a tmux session inside a remote box capture
 // the pane over their own connection (PromptObservationLines lines) and apply
 // this same scan, so their idle boundary matches local tmux exactly.
 func PaneShowsIdlePrompt(lines []string, promptPrefix string) bool {
-	prefix := strings.TrimSpace(promptPrefix)
-
 	// Check for active processing indicator in the status bar.
 	// Claude Code shows "esc to interrupt" while processing — if present,
 	// the agent is busy regardless of whether the prompt is visible.
@@ -5558,19 +5686,7 @@ func PaneShowsIdlePrompt(lines []string, promptPrefix string) bool {
 		return false
 	}
 
-	// Scan captured lines for the prompt prefix.
-	// Claude Code renders a status bar below the prompt line,
-	// so the prompt may not be the last non-empty line.
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		if matchesPromptPrefix(trimmed, promptPrefix) || (prefix != "" && trimmed == prefix) {
-			return true
-		}
-	}
-	return false
+	return paneShowsReadyPrompt(lines, promptPrefix)
 }
 
 // SnapshotIdle reports whether the named session is at an idle interactive
@@ -5581,9 +5697,10 @@ func PaneShowsIdlePrompt(lines []string, promptPrefix string) bool {
 // provider family is one whose busy reading this leaf trusts
 // (busyReadingTrusted). The same capture for any other family, and a pane
 // showing neither an indicator string nor the ready prompt, returns
-// [runtime.ErrIdleIndeterminate]; a busy capture whose family cannot be read
-// (busyTrustFamily) is an error, as a failed capture is. A session that has
-// gone away is reported as an error, not as idle.
+// [runtime.ErrIdleIndeterminate], as [runtime.ErrIdlePendingChoice] when the
+// pane is parked on a numbered menu (ClassifyIdlePane); a busy capture whose
+// family cannot be read (busyTrustFamily) is an error, as a failed capture
+// is. A session that has gone away is reported as an error, not as idle.
 func (t *Tmux) SnapshotIdle(session string) (bool, error) {
 	idle, err := t.snapshotPaneIdle(session)
 	if err != nil || idle {

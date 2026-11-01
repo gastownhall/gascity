@@ -44,6 +44,7 @@ var waitIdleReadings = []waitIdleReading{
 		err:     fmt.Errorf("scan: %w", runtime.ErrIdleIndeterminate),
 		pending: &runtime.PendingInteraction{RequestID: "tmux-1", Kind: "approval", Prompt: "Allow Bash?"},
 	},
+	{name: "a pending choice", err: fmt.Errorf("scan: %w", runtime.ErrIdlePendingChoice)},
 	{name: "at the boundary", idle: true, delivered: true},
 	{name: "indeterminate with nothing pending", err: fmt.Errorf("scan: %w", runtime.ErrIdleIndeterminate), delivered: true},
 }
@@ -96,7 +97,7 @@ func waitIdleOutOfReachResult(t *testing.T) Result {
 		return Fail(nudgeHandleProfile, RequirementWaitIdleOutOfReachQueuesAtOnce, strings.Join(violations, "; "))
 	}
 	return Pass(nudgeHandleProfile, RequirementWaitIdleOutOfReachQueuesAtOnce,
-		"busy and pending pre-reads queue at once on both handles; a boundary or indeterminate pre-read waits and delivers")
+		"busy, pending and pending-choice pre-reads queue at once on both handles; a boundary or indeterminate pre-read waits and delivers")
 }
 
 // sessionHandleWaitIdleNudge sends a wait-idle nudge through a claude

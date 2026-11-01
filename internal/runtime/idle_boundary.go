@@ -9,16 +9,16 @@ type IdleBoundary uint8
 const (
 	// IdleBoundaryUnknown means the reading says neither: the runtime takes
 	// no idle snapshot of the session, the snapshot failed, or it was
-	// indeterminate and the runtime reported no pending interaction. Callers
-	// keep the rule they would use without it.
+	// indeterminate, saw no pending choice, and the runtime reported no
+	// pending interaction. Callers keep the rule they would use without it.
 	IdleBoundaryUnknown IdleBoundary = iota
 	// IdleBoundaryAt means the session reads idle at its input boundary.
 	IdleBoundaryAt
 	// IdleBoundaryBusy means the runtime reports the session busy, a reading
 	// the runtime trusts for the session's provider family.
 	IdleBoundaryBusy
-	// IdleBoundaryPending means a pending interaction owns the session's
-	// input: text sent now would answer it.
+	// IdleBoundaryPending means a pending interaction or choice owns the
+	// session's input: text sent now would answer it.
 	IdleBoundaryPending
 )
 
@@ -50,7 +50,8 @@ func (b IdleBoundary) OutOfReach() bool {
 // policy: a runtime that does not trust a family's busy reading reports it
 // as [ErrIdleIndeterminate]. An open permission prompt or question dialog
 // reads indeterminate too, showing neither a ready prompt nor a busy
-// indicator, so an indeterminate reading is pending when the runtime reports
+// indicator, so an indeterminate reading is pending when it saw a menu
+// waiting for a choice ([ErrIdlePendingChoice]), or when the runtime reports
 // a pending interaction for the session ([InteractionProvider]); any other
 // indeterminate reading is [IdleBoundaryUnknown].
 func IdleBoundaryNow(p Provider, name string) IdleBoundary {
@@ -60,6 +61,8 @@ func IdleBoundaryNow(p Provider, name string) IdleBoundary {
 	}
 	idle, err := snap.SnapshotIdle(name)
 	switch {
+	case errors.Is(err, ErrIdlePendingChoice):
+		return IdleBoundaryPending
 	case errors.Is(err, ErrIdleIndeterminate):
 		if interactionPending(p, name) {
 			return IdleBoundaryPending
