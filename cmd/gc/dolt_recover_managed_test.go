@@ -1006,6 +1006,73 @@ func TestRecoverManagedDolt_SuccessfulProbeClearsUnresponsiveState(t *testing.T)
 	}
 }
 
+// The unresponsive window is a CONTINUOUS streak. A stall that cleared by
+// itself (beads-health passed in between, so recover never ran) must not be
+// counted into a later, unrelated stall: one failed probe hours after the
+// first incident has to defer again, not stop the live server.
+func TestRecoverManagedDolt_HealthyGapStartsNewUnresponsiveStreak(t *testing.T) {
+	t.Setenv("BEADS_ACTOR", "order:beads-health")
+	h := newUnresponsiveRecoveryHarness(t, errUnresponsiveTestProbe, 4242)
+	writeHealthyProviderFakes(t, h.city)
+	t.Setenv("GC_BEADS", "")
+
+	// Incident 1: deferred, first-unresponsive time persisted.
+	if _, err := h.recover(t); err == nil {
+		t.Fatal("incident 1: recover returned nil error while deferring")
+	}
+	if _, ok := h.since(t); !ok {
+		t.Fatal("incident 1: first-unresponsive time not persisted")
+	}
+
+	// The server answers again by itself: the health check passes and
+	// recover is never called.
+	if err := healthBeadsProvider(h.city); err != nil {
+		t.Fatalf("healthBeadsProvider: %v", err)
+	}
+
+	// Incident 2, long after: a single failed probe is a new streak.
+	h.now = h.now.Add(2 * time.Hour)
+	if _, err := h.recover(t); err == nil {
+		t.Fatalf("incident 2: recover stopped the live server on one probe error 2h after incident 1 (stop=%d start=%d)", h.stopped, h.started)
+	}
+	if h.stopped != 0 {
+		t.Fatalf("incident 2: stop=%d, want the live server left alone", h.stopped)
+	}
+	if got, ok := h.since(t); !ok || !got.Equal(h.now) {
+		t.Fatalf("incident 2: streak start = %v (present=%v), want a fresh %v", got, ok, h.now)
+	}
+}
+
+// A recover-last stamped in the future (clock step back, bad write) must not
+// suppress recovery until the clock catches up.
+func TestRecentManagedDoltRecoverIgnoresFutureTimestamp(t *testing.T) {
+	h := newUnresponsiveRecoveryHarness(t, nil, 0)
+	if err := recordManagedDoltRecover(h.city, h.now.Add(time.Hour)); err != nil {
+		t.Fatalf("recordManagedDoltRecover: %v", err)
+	}
+	if recentManagedDoltRecover(h.city, h.now, 30*time.Second) {
+		t.Fatal("a recover-last in the future counted as a recent recover")
+	}
+	if err := recordManagedDoltRecover(h.city, h.now.Add(-5*time.Second)); err != nil {
+		t.Fatalf("recordManagedDoltRecover: %v", err)
+	}
+	if !recentManagedDoltRecover(h.city, h.now, 30*time.Second) {
+		t.Fatal("a recover 5s ago was not counted as recent")
+	}
+}
+
+// A decision line is one line: a caller carrying a newline must not forge a
+// second one.
+func TestLogManagedDoltRecoverDecisionQuotesCaller(t *testing.T) {
+	t.Setenv("BEADS_ACTOR", "order:evil\nforged decision=stop")
+	h := newUnresponsiveRecoveryHarness(t, errUnresponsiveTestProbe, 4242)
+
+	logManagedDoltRecoverDecision(h.layout, "defer", "unresponsive-within-window", 4242, unresponsiveTestPort, errUnresponsiveTestProbe, time.Second, h.now)
+	if n := strings.Count(strings.TrimSpace(h.log(t)), "\n"); n != 0 {
+		t.Fatalf("decision spans %d extra lines; got:\n%s", n, h.log(t))
+	}
+}
+
 // (e) Every stop is explained in dolt.log: who asked, which process, and why.
 func TestRecoverManagedDolt_StopLogsReasonToDoltLog(t *testing.T) {
 	t.Setenv("BEADS_ACTOR", "order:beads-health")

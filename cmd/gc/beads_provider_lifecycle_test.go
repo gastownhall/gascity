@@ -13738,6 +13738,70 @@ esac
 	return opsFile
 }
 
+// writeHealthyProviderFakes installs a gc-beads-bd provider whose health op
+// passes, with the same city layout writeBreakerAwarePreflightFakes uses.
+func writeHealthyProviderFakes(t *testing.T, cityPath string) {
+	t.Helper()
+	writeMinimalCityToml(t, cityPath)
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "issue_prefix: gc\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\n"
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := gcBeadsBdScriptPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A published runtime state naming this process as the listener on a
+	// live port keeps the health-success branch from re-publishing, which
+	// this fake provider cannot do.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	if err := writeDoltRuntimeStateFile(managedDoltStatePath(cityPath), doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      ln.Addr().(*net.TCPAddr).Port,
+		DataDir:   filepath.Join(cityPath, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body := "#!/bin/sh\ncase \"$1\" in\n  health) exit 0 ;;\n  *) exit 2 ;;\nesac\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A passing beads-health means the server answers, so the first-unresponsive
+// time left by an earlier deferred recover is stale and must be dropped.
+func TestHealthBeadsProviderClearsUnresponsiveStateWhenHealthy(t *testing.T) {
+	cityPath := t.TempDir()
+	writeHealthyProviderFakes(t, cityPath)
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	since := managedDoltUnresponsiveSincePath(layout)
+	if err := os.MkdirAll(filepath.Dir(since), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(since, []byte(time.Unix(1_700_000_000, 0).UTC().Format(time.RFC3339Nano)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := healthBeadsProvider(cityPath); err != nil {
+		t.Fatalf("healthBeadsProvider: %v", err)
+	}
+	if _, err := os.Stat(since); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unresponsive-since after a healthy beads-health: stat err = %v, want not-exist", err)
+	}
+}
+
 func TestIsBreakerOpenError(t *testing.T) {
 	cases := []struct {
 		name string
