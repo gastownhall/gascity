@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func TestResolveTemplatePrependsGCBinDirToPATH(t *testing.T) {
@@ -358,6 +359,73 @@ func TestResolveTemplatePinsInheritedDemandMarkersEmpty(t *testing.T) {
 		got, ok := tp.Env[key]
 		if !ok || got != "" {
 			t.Errorf("tp.Env[%q] = %q (present=%v), want present and empty: an inherited demand marker reached a no-trigger seat", key, got, ok)
+		}
+	}
+}
+
+// The trigger stamp runs after resolution and over those pins: a row with a
+// trigger carries its own origin and ids, and a trigger row without a store
+// ref keeps the store-ref keys pinned empty instead of pairing its fresh id
+// with one inherited from the controller environment.
+func TestResolveTemplateForSessionBeadInfoStampsOverInheritedDemandMarkers(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	for _, stale := range [][2]string{
+		{"GC_SPAWN_ORIGIN", "demand"},
+		{"GC_TRIGGER_BEAD_ID", "stale-trigger"},
+		{"GC_TRIGGER_WORK_BEAD_ID", "stale-trigger"},
+		{"GC_TRIGGER_BEAD_STORE_REF", "rig:stale"},
+		{"GC_TRIGGER_WORK_STORE_REF", "rig:stale"},
+	} {
+		t.Setenv(stale[0], stale[1])
+	}
+
+	params := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agent := &config.Agent{Name: "worker"}
+
+	tp, err := resolveTemplateForSessionBeadInfo(params, agent, agent.QualifiedName(), nil, session.Info{
+		SessionNameMetadata: "worker-1",
+		TriggerBeadID:       "w-new",
+	})
+	if err != nil {
+		t.Fatalf("resolveTemplateForSessionBeadInfo: %v", err)
+	}
+	for key, want := range map[string]string{
+		"GC_SPAWN_ORIGIN":           "demand",
+		"GC_TRIGGER_BEAD_ID":        "w-new",
+		"GC_TRIGGER_WORK_BEAD_ID":   "w-new",
+		"GC_TRIGGER_BEAD_STORE_REF": "",
+		"GC_TRIGGER_WORK_STORE_REF": "",
+	} {
+		got, ok := tp.Env[key]
+		if !ok || got != want {
+			t.Errorf("tp.Env[%q] = %q (present=%v), want %q and present", key, got, ok, want)
+		}
+	}
+
+	// A row whose trigger also carries a store ref stamps the fresh ref over
+	// the pins, so a real demand seat keeps its full marker set.
+	tp, err = resolveTemplateForSessionBeadInfo(params, agent, agent.QualifiedName(), nil, session.Info{
+		SessionNameMetadata: "worker-2",
+		TriggerBeadID:       "w-new",
+		TriggerBeadStoreRef: "rig:fresh",
+	})
+	if err != nil {
+		t.Fatalf("resolveTemplateForSessionBeadInfo with a store ref: %v", err)
+	}
+	for _, key := range []string{"GC_TRIGGER_BEAD_STORE_REF", "GC_TRIGGER_WORK_STORE_REF"} {
+		if got := tp.Env[key]; got != "rig:fresh" {
+			t.Errorf("tp.Env[%q] = %q, want %q: the row's fresh store ref must beat the inherited one", key, got, "rig:fresh")
 		}
 	}
 }
