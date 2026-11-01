@@ -4460,6 +4460,31 @@ func TestEnsureSupervisorRunningRejectsHomeOverride(t *testing.T) {
 	}
 }
 
+// A supervisor that is already running needs no start, so a HOME override
+// (which only blocks installing or starting a platform unit) must not make
+// ensureSupervisorRunning fail. The shared-city pod runs gc with HOME on its
+// volume, different from the passwd home, and `gc register` there reported
+// "supervisor did not start" while the supervisor was serving the city.
+func TestEnsureSupervisorRunningHomeOverrideAcceptsRunningSupervisor(t *testing.T) {
+	requireHomeOverrideGuard(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv(supervisorIsolatedHomeEnv, "")
+
+	oldAlive := supervisorAliveHook
+	t.Cleanup(func() { supervisorAliveHook = oldAlive })
+	supervisorAliveHook = func() int { return 4242 }
+
+	var stdout, stderr bytes.Buffer
+	if code := ensureSupervisorRunning(&stdout, &stderr); code != 0 {
+		t.Fatalf("ensureSupervisorRunning code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want nothing for an already-running supervisor", stderr.String())
+	}
+}
+
 // requireHomeOverrideGuard skips unless the platform HOME guard applies here.
 func requireHomeOverrideGuard(t *testing.T) {
 	t.Helper()

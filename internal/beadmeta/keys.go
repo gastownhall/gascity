@@ -403,6 +403,16 @@ const (
 	WorkflowExpandedMetadataKey = "gc.workflow_expanded"
 )
 
+// InitiatorMetadataKey records who launched a piece of work: the key id (kid)
+// of the verified write grant on the API request that created a run root, a
+// routed bead or a generic bead. The kid names the key that signed the grant,
+// so it identifies a person only when each principal signs with a key of
+// their own, and the same launcher's work carries a new value after a key
+// rotation. It is server-owned. The generic bead API refuses a client-supplied
+// value, and nothing is stamped when the request carried no verified
+// principal.
+const InitiatorMetadataKey = "gc.initiator"
+
 // Work-record metadata keys (ADR-0009). These bind a work bead to its claim
 // and its outcome so observability/eval can answer "what work was done, by
 // whom, with what artifact, to what end":
@@ -647,6 +657,7 @@ var KnownMetadataKeys = []string{
 	GCExemptMetadataKey,
 	Graphv2RootKeyMetadataKey,
 	IdempotencyKeyMetadataKey,
+	InitiatorMetadataKey,
 	InputConvoyIDMetadataKey,
 	InstantiatingMetadataKey,
 	IterationMetadataKey,
