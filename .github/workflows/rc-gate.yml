@@ -55,6 +55,7 @@ jobs:
     permissions:
       contents: read
       actions: write # bazel.yml's rbe job pre-warms the worker pool
+      pull-requests: read # bazel.yml's rbe job lists a PR's files (split-strict lane; pull_request only)
       # issues: write and id-token: write are requested by bazel.yml's
       # rrc-verify and repo contents cache seed jobs; GitHub validates a called
       # workflow's permissions at startup even for jobs that skip, so the

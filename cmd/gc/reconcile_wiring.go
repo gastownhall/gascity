@@ -17,7 +17,11 @@ import (
 // both take it from newControllerWiring, so neither can wire a channel the
 // other forgets.
 type controllerWiring struct {
-	mode                        reconcilerMode
+	mode reconcilerMode
+	// reason is why the latch resolved mode; a default v2 may still fall back
+	// (applyV2DefaultBootFallback), which sets fellBack.
+	reason                      reconcilerModeReason
+	fellBack                    bool
 	lookupEnv                   func(string) (string, bool)
 	pokeCh, controlDispatcherCh chan struct{}
 	wake                        *controllerWake
@@ -53,6 +57,7 @@ func newControllerWiringLoggingTo(cfg *config.City, lookupEnv func(string) (stri
 	}
 	w := &controllerWiring{
 		mode:                mode,
+		reason:              res.Reason,
 		lookupEnv:           lookupEnv,
 		pokeCh:              make(chan struct{}, 1),
 		controlDispatcherCh: make(chan struct{}, 1),
@@ -79,6 +84,7 @@ func newControllerWiringLoggingTo(cfg *config.City, lookupEnv func(string) (stri
 func (w *controllerWiring) runtimeParams(p CityRuntimeParams) CityRuntimeParams {
 	p.ReconcilerMode = w.mode
 	p.ReconcilerLookupEnv = w.lookupEnv
+	p.ReconcilerV2FellBack = w.fellBack
 	p.Wake = w.wake
 	p.V2 = w.v2
 	p.ConfigDirty = w.configDirty

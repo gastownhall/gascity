@@ -234,6 +234,10 @@ func deliverSessionNudgeLane(target nudgeTarget, store beads.Store, sp runtime.P
 // run proposes the op, runs the inline pass in a live mode, reports and
 // rings.
 func (n *cliLaneNudge) run() int {
+	principal, actor := cliPrincipal(cliOpLookupEnv)
+	if code, refused := n.refuseImmediateBehindPendingInteraction(principal); refused {
+		return code
+	}
 	minted := n.key == ""
 	if minted {
 		k, err := legacyop.MintKey()
@@ -243,7 +247,6 @@ func (n *cliLaneNudge) run() int {
 		}
 		n.key = k
 	}
-	principal, actor := cliPrincipal(cliOpLookupEnv)
 	op, created, err := n.st.Propose(opjournal.Request{
 		Conversation: n.target.sessionID,
 		Kind:         opjournal.KindMessage,
@@ -279,6 +282,47 @@ func (n *cliLaneNudge) run() int {
 	return code
 }
 
+// refuseImmediateBehindPendingInteraction is the front door's refusal,
+// before anything is written, of an explicit immediate nudge to a session
+// waiting on a pending interaction (a permission prompt or a question,
+// which typed text would answer), worded as the legacy path's
+// (immediateNudgeBehindPendingInteractionError): an immediate nudge cannot
+// wait for the answer, where wait-idle and queued nudges are proposed and
+// the lane holds them until it is answered. A look that fails refuses too,
+// as the legacy path's immediate look does. A key that names an op under
+// principal is a rerun the op answers (replay), so it is not looked at.
+func (n *cliLaneNudge) refuseImmediateBehindPendingInteraction(principal string) (code int, refused bool) {
+	if n.mode != nudgeDeliveryImmediate || n.keyNamesOp(principal) {
+		return 0, false
+	}
+	pending, err := nudgeTargetPendingInteraction(n.target, n.sessions, n.sp, n.mode, n.stderr)
+	switch {
+	case err != nil:
+		n.refusal().refuse(cliOpCodePendingCheckUnavailable, fmt.Sprintf("%v; nothing was written, retry", err), "", n.key)
+		return 1, true
+	case pending == nil:
+		return 0, false
+	}
+	why := immediateNudgeBehindPendingInteractionError(n.target, describeWorkerPendingInteraction(pending), isQuestionInteraction(pending))
+	n.refusal().refuse(cliOpCodePendingInteraction, why.Error(), "", n.key)
+	return 1, true
+}
+
+// keyNamesOp reports whether the nudge's --key names an op of its
+// conversation under principal. A key that names none, no key, or a read
+// that fails reports false.
+func (n *cliLaneNudge) keyNamesOp(principal string) bool {
+	if n.key == "" {
+		return false
+	}
+	id, err := opjournal.DeriveID(n.st.Prefix(), n.target.sessionID, principal, n.key)
+	if err != nil {
+		return false
+	}
+	_, err = n.st.Get(id)
+	return err == nil
+}
+
 // replay answers a key that names an existing op: a closed op replays its
 // outcome and runs nothing, an open legacy op is in progress under its own
 // path, and an open lane op goes on as a created one would (done false). A
@@ -303,7 +347,7 @@ func (n *cliLaneNudge) replay(op opjournal.Op) (code int, done bool) {
 		return n.writeQueued(op.ID, true, " in "+openNudgeQueue(n.target.cityPath, beads.NudgesStore{}).Location), true
 	}
 	if op.Outcome.Degradation == opjournal.DegradationExecutorContract {
-		n.warnContractBreach(op.ID, "the op records degradation "+op.Outcome.Degradation)
+		cliLaneWarnContractBreach(n.warnf, op.ID, "the op records degradation "+op.Outcome.Degradation)
 	}
 	return n.writeDelivered(op.ID, true), true
 }
@@ -359,13 +403,7 @@ func (n *cliLaneNudge) report(id string, replayed bool, res opjournal.PassResult
 		n.warnf("reading op %s after the inline delivery failed (%v); it waits for the controller", id, err)
 		return n.writeQueued(id, replayed, " in the conversation lane")
 	}
-	taken := slices.Contains(res.Taken, id)
-	if passErr != nil {
-		n.warnPassError(op, taken, res.Done, passErr)
-	}
-	if taken && res.Done == opjournal.DoneReleased && op.Status != opjournal.StatusClosed && op.MaybeDelivered == op.Attempt {
-		n.warnf("the delivery of op %s may have reached the session but was not confirmed (%s); the controller delivers it again after its retry backoff, marked as a possible repeat", id, op.LastError)
-	}
+	cliLaneWarnPass(n.warnf, op, res, passErr)
 	switch {
 	case op.Status != opjournal.StatusClosed:
 		return n.writeQueued(id, replayed, " in the conversation lane"+cliLaneQueuedNote(op, res))
@@ -377,39 +415,62 @@ func (n *cliLaneNudge) report(id string, replayed bool, res opjournal.PassResult
 	}
 }
 
-// warnPassError warns of the inline pass's error, given op as read after it,
-// whether the pass took op and how its Done ended.
-func (n *cliLaneNudge) warnPassError(op opjournal.Op, taken bool, done opjournal.DoneArm, passErr error) {
+// cliLaneWarnPass warns, through warnf, of what the inline pass that
+// answered res and passErr left of op, read after it: the pass's error
+// (cliLaneWarnPassError), and a delivery the pass took whose outcome the
+// runtime could not confirm, which the Done released with the attempt maybe
+// delivered, so the lane host delivers it again, marked as a possible
+// repeat. gc session nudge and gc session submit share it.
+func cliLaneWarnPass(warnf func(string, ...any), op opjournal.Op, res opjournal.PassResult, passErr error) {
+	taken := slices.Contains(res.Taken, op.ID)
+	if passErr != nil {
+		cliLaneWarnPassError(warnf, op, taken, res.Done, passErr)
+	}
+	if taken && res.Done == opjournal.DoneReleased && op.Status != opjournal.StatusClosed && op.MaybeDelivered == op.Attempt {
+		warnf("the delivery of op %s may have reached the session but was not confirmed (%s); the controller delivers it again after its retry backoff, marked as a possible repeat", op.ID, op.LastError)
+	}
+}
+
+// cliLaneWarnPassError warns of the inline pass's error, given op as read
+// after it, whether the pass took op and how its Done ended.
+func cliLaneWarnPassError(warnf func(string, ...any), op opjournal.Op, taken bool, done opjournal.DoneArm, passErr error) {
 	switch {
 	case taken && done != "":
 		// The Done landed, so the error is the executor's answer breaking
 		// its contract.
-		n.warnContractBreach(op.ID, passErr)
+		cliLaneWarnContractBreach(warnf, op.ID, passErr)
 	case op.Status == opjournal.StatusClosed:
 	case taken:
-		n.warnf("recording the delivery of op %s failed (%v); the controller takes it again after its lease lapses, and it may repeat (recorded on the op)", op.ID, passErr)
+		warnf("recording the delivery of op %s failed (%v); the controller takes it again after its lease lapses, and it may repeat (recorded on the op)", op.ID, passErr)
 	case op.Status == opjournal.StatusExecuting:
-		n.warnf("the inline delivery did not run (%v); another lane host holds it, and op %s is taken again if that delivery does not finish", passErr, op.ID)
+		warnf("the inline delivery did not run (%v); another lane host holds it, and op %s is taken again if that delivery does not finish", passErr, op.ID)
 	default:
-		n.warnf("the inline delivery did not run (%v); op %s waits for the controller", passErr, op.ID)
+		warnf("the inline delivery did not run (%v); op %s waits for the controller", passErr, op.ID)
 	}
 }
 
-// warnContractBreach warns that the runtime's answer to the delivery of op
-// id broke the executor contract; why is the breach, or on a replay the op's
-// record of it.
-func (n *cliLaneNudge) warnContractBreach(id string, why any) {
-	n.warnf("the runtime's answer to the delivery of op %s broke the executor contract (%v)", id, why)
+// cliLaneWarnContractBreach warns that the runtime's answer to the delivery
+// of op id broke the executor contract; why is the breach, or on a replay
+// the op's record of it.
+func cliLaneWarnContractBreach(warnf func(string, ...any), id string, why any) {
+	warnf("the runtime's answer to the delivery of op %s broke the executor contract (%v)", id, why)
 }
 
-// ring rings the lane host for op id once, after the result is written, and
-// warns when the op is still open and no lane host answered.
+// ring rings the lane host for op id once (cliLaneRingHost).
 func (n *cliLaneNudge) ring(id string) {
-	reply, err := cliLaneRing(n.target.cityPath, n.target.sessionID, id)
+	cliLaneRingHost(n.target.cityPath, n.target.sessionID, id, n.st, n.warnf)
+}
+
+// cliLaneRingHost rings the controller's lane host for op id on
+// conversation conv once, after the result is written, and warns through
+// warnf when no lane host answered and the op, read from st, is still open.
+// gc session nudge and gc session submit share it.
+func cliLaneRingHost(cityPath, conv, id string, st *opjournal.Store, warnf func(string, ...any)) {
+	reply, err := cliLaneRing(cityPath, conv, id)
 	if err == nil && reply == "ok" {
 		return
 	}
-	op, gerr := n.st.Get(id)
+	op, gerr := st.Get(id)
 	if gerr == nil && op.Status == opjournal.StatusClosed {
 		return
 	}
@@ -417,7 +478,7 @@ func (n *cliLaneNudge) ring(id string) {
 	if err != nil {
 		why = err.Error()
 	}
-	n.warnf("no controller lane host answered (%s); op %s waits in the conversation lane for a lane host serving the session", why, id)
+	warnf("no controller lane host answered (%s); op %s waits in the conversation lane for a lane host serving the session", why, id)
 }
 
 func (n *cliLaneNudge) writeDelivered(id string, replayed bool) int {

@@ -108,7 +108,7 @@ func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.S
 // backoff. Failures are logged once per streak, not per retry.
 func (p *Provider) runSessionEventStream(ctx context.Context, ch chan runtime.SessionEvent) {
 	defer close(ch)
-	s := &sessionEventStream{c: p.c, ch: ch}
+	s := &sessionEventStream{c: p.c, ch: ch, boundNames: p.boundSessionNames}
 	backoff := sessionEventMinBackoff
 	for {
 		if ctx.Err() != nil {
@@ -147,6 +147,10 @@ func (p *Provider) runSessionEventStream(ctx context.Context, ch chan runtime.Se
 type sessionEventStream struct {
 	c  *client
 	ch chan runtime.SessionEvent
+	// boundNames lists the exact gc names of bound sessions. herdr's registry
+	// holds only their herdrAgentName forms, so attribution reverse-maps
+	// through it. Nil means no bound sessions.
+	boundNames func() []string
 
 	// paneNames maps pane id → gc session name. Rebuilt at cycle start and
 	// merge-only within a cycle: entries are never deleted mid-cycle, so a
@@ -173,6 +177,7 @@ func (s *sessionEventStream) runCycle(ctx context.Context) (resubscribe bool, er
 	}
 	s.paneNames = make(map[string]string, len(agents))
 	s.subscribed = make(map[string]bool, len(agents))
+	gcNames := s.sessionNamesByRegistry()
 	subs := []subscribeSub{
 		{Type: "pane.created"},
 		{Type: "pane.closed"},
@@ -183,7 +188,7 @@ func (s *sessionEventStream) runCycle(ctx context.Context) (resubscribe bool, er
 		if a.PaneID == "" || a.Name == "" {
 			continue
 		}
-		s.paneNames[a.PaneID] = a.Name
+		s.paneNames[a.PaneID] = sessionNameFor(gcNames, a.Name)
 		if !s.subscribed[a.PaneID] {
 			s.subscribed[a.PaneID] = true
 			subs = append(subs, subscribeSub{Type: "pane.agent_status_changed", PaneID: a.PaneID})
@@ -265,11 +270,12 @@ func (s *sessionEventStream) runCycle(ctx context.Context) (resubscribe bool, er
 			if err != nil {
 				return false, err
 			}
+			gcNames := s.sessionNamesByRegistry()
 			for _, a := range agents {
 				if a.PaneID == "" || a.Name == "" {
 					continue
 				}
-				s.paneNames[a.PaneID] = a.Name
+				s.paneNames[a.PaneID] = sessionNameFor(gcNames, a.Name)
 				if !s.subscribed[a.PaneID] {
 					resubscribe = true
 				}
@@ -284,6 +290,15 @@ func (s *sessionEventStream) runCycle(ctx context.Context) (resubscribe bool, er
 			}
 		}
 	}
+}
+
+// sessionNamesByRegistry snapshots the bound sessions' reverse map
+// (registryToSessionNames) for one agent listing.
+func (s *sessionEventStream) sessionNamesByRegistry() map[string]string {
+	if s.boundNames == nil {
+		return nil
+	}
+	return registryToSessionNames(s.boundNames())
 }
 
 // handleFrame translates one wire frame into a SessionEvent. It reports

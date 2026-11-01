@@ -2086,7 +2086,7 @@ func TestConvoyAutocloseHappyPath(t *testing.T) {
 	_ = store.Close("gc-3")
 
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(store, events.Discard, "gc-3", &stdout, &bytes.Buffer{})
+	doConvoyAutocloseWith(store, convoyAutocloseHomes{}, events.Discard, "gc-3", &stdout, &bytes.Buffer{})
 
 	out := stdout.String()
 	if !strings.Contains(out, `Auto-closed convoy gc-1 "batch"`) {
@@ -2114,7 +2114,7 @@ func TestConvoyAutocloseTracksDeps(t *testing.T) {
 	_ = store.Close("gc-4")
 
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(store, events.Discard, "gc-3", &stdout, &bytes.Buffer{})
+	doConvoyAutocloseWith(store, convoyAutocloseHomes{}, events.Discard, "gc-3", &stdout, &bytes.Buffer{})
 
 	out := stdout.String()
 	if !strings.Contains(out, `Auto-closed convoy gc-2 "batch"`) {
@@ -2137,7 +2137,7 @@ func TestConvoyAutocloseOwnedSkip(t *testing.T) {
 	_ = store.Close("gc-2")
 
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(store, events.Discard, "gc-2", &stdout, &bytes.Buffer{})
+	doConvoyAutocloseWith(store, convoyAutocloseHomes{}, events.Discard, "gc-2", &stdout, &bytes.Buffer{})
 
 	if strings.Contains(stdout.String(), "Auto-closed") {
 		t.Errorf("owned convoy should NOT be auto-closed: %q", stdout.String())
@@ -2155,7 +2155,7 @@ func TestConvoyAutocloseNoParent(t *testing.T) {
 	_ = store.Close("gc-1")
 
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(store, events.Discard, "gc-1", &stdout, &bytes.Buffer{})
+	doConvoyAutocloseWith(store, convoyAutocloseHomes{}, events.Discard, "gc-1", &stdout, &bytes.Buffer{})
 
 	if stdout.String() != "" {
 		t.Errorf("no-parent bead should produce no output, got %q", stdout.String())
@@ -2169,7 +2169,7 @@ func TestConvoyAutocloseNotConvoy(t *testing.T) {
 	_ = store.Close("gc-2")
 
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(store, events.Discard, "gc-2", &stdout, &bytes.Buffer{})
+	doConvoyAutocloseWith(store, convoyAutocloseHomes{}, events.Discard, "gc-2", &stdout, &bytes.Buffer{})
 
 	if stdout.String() != "" {
 		t.Errorf("non-convoy parent should produce no output, got %q", stdout.String())
@@ -2189,7 +2189,7 @@ func TestConvoyAutoclosePartialSiblings(t *testing.T) {
 	_ = store.Close("gc-2")                                            // only one sibling closed
 
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(store, events.Discard, "gc-2", &stdout, &bytes.Buffer{})
+	doConvoyAutocloseWith(store, convoyAutocloseHomes{}, events.Discard, "gc-2", &stdout, &bytes.Buffer{})
 
 	if strings.Contains(stdout.String(), "Auto-closed") {
 		t.Errorf("partial siblings should NOT auto-close: %q", stdout.String())
@@ -2214,7 +2214,7 @@ func TestConvoyAutocloseStampsCloseReason(t *testing.T) {
 	_ = store.Close("gc-2")
 
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(store, events.Discard, "gc-2", &stdout, &bytes.Buffer{})
+	doConvoyAutocloseWith(store, convoyAutocloseHomes{}, events.Discard, "gc-2", &stdout, &bytes.Buffer{})
 
 	b, err := store.Get("gc-1")
 	if err != nil {

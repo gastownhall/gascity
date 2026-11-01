@@ -2259,13 +2259,15 @@ func TestPendingInteractionErrorNamesThePrompt(t *testing.T) {
 		Prompt:    "Bash: rm -rf build",
 	})
 
-	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello?", "", runtime.Config{})
+	// An immediate send refuses; a default one queues behind the prompt
+	// (TestSendQueuesBehindPendingInteraction).
+	_, err = mgr.SendImmediate(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello?", "", runtime.Config{})
 	if !errors.Is(err, ErrPendingInteraction) || !errors.Is(err, runtime.ErrPendingInteraction) {
-		t.Fatalf("Send error = %v, want session and runtime ErrPendingInteraction", err)
+		t.Fatalf("SendImmediate error = %v, want session and runtime ErrPendingInteraction", err)
 	}
 	for _, want := range []string{"tmux-abc", "Bash: rm -rf build"} {
 		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("Send error = %q, want it to mention %q", err, want)
+			t.Fatalf("SendImmediate error = %q, want it to mention %q", err, want)
 		}
 	}
 }

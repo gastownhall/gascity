@@ -31,6 +31,10 @@ type SessionRequest struct {
 	WorkPack      string // pack route key from the work bead, when known
 	WorkWorkspace string // explicit pack workspace route key from the work bead, when known
 	WorkStoreRef  string // city or rig:<name> store reference for WorkBeadID when known
+	// WorkBindingResident reports that WorkBeadID was read from a relocated
+	// class binding: WorkStoreRef is then the city key the binding is grouped
+	// under, and the row's owner is its gc.root_store_ref.
+	WorkBindingResident bool
 	// WorktreeSpec is the single-owner evidence published by the provisioner.
 	// When present, the pool path verifies it before publishing work_dir on a
 	// session bead; a mismatch fails the whole atomic metadata update.
@@ -646,6 +650,7 @@ func computePoolDesiredStatesAt(
 				WorktreeSpec:   worktreeSpec,
 				WorktreeError:  worktreeError,
 			}
+			req.WorkBindingResident = demand.BindingResident[workBeadID]
 			allRequests = append(allRequests, req)
 			usage.accept(req, limits)
 		}
@@ -727,6 +732,7 @@ func requestWithScaleDemandProvenance(request SessionRequest, demand scaleCheckD
 	request.WorkPack = strings.TrimSpace(demand.Packs[workBeadID])
 	request.WorkWorkspace = strings.TrimSpace(demand.Workspaces[workBeadID])
 	request.WorkStoreRef = strings.TrimSpace(demand.StoreRefs[workBeadID])
+	request.WorkBindingResident = demand.BindingResident[workBeadID]
 	request.BrainParentSID = strings.TrimSpace(demand.ParentSIDs[workBeadID])
 	// Worktree evidence is per-bead like every field above it. Carrying the
 	// previous bead's spec into a rebound request would hand the session a

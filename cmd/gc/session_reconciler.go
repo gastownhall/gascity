@@ -1565,6 +1565,13 @@ func pendingCreateLeaseActive(i sessionpkg.Info, inFlight, neverStartedExpired, 
 // window still handles corrupt/unparseable last_woke_at metadata and generic
 // creating-state cleanup, while never-started creates need enough time to sit
 // behind a busy pool start queue.
+//
+// A never-started create waiting only on a start gate (a site that declines a
+// ready candidate independent of its own state, refuses it nothing and writes
+// no bead; see startDeferralMemo) is kept past this lease by startDeferralMemo, up
+// to startDeferralHoldCeiling. The memo is in-memory and read by the
+// reconciler and the reaper; a reader that sees only the bead (gc session wake)
+// still judges the row by this lease alone, and a restart forgets the memo.
 const pendingCreateNeverStartedTimeout = 10 * time.Minute
 
 // wakeUndesiredGrace is how long a live session woken recently is spared the
@@ -1682,10 +1689,7 @@ func pendingCreateNeverStartedLeaseExpiredAt(i sessionpkg.Info, now time.Time) b
 	if strings.TrimSpace(i.LastWokeAt) != "" {
 		return false
 	}
-	anchor := i.CreatedAt
-	if started, ok := parseRFC3339Metadata(i.PendingCreateStartedAt); ok {
-		anchor = started
-	}
+	anchor := pendingCreateLeaseAnchor(i)
 	if anchor.IsZero() {
 		return true
 	}
@@ -2026,6 +2030,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 	}
 	capacityGuard := reconcileOpts.capacityGuard
+	deferralMemo := reconcileOpts.deferralMemo
 	effectiveStartOptions := startOptions
 	if !storeQueryPartial && reconcileOpts.workDirResolver == nil && len(assignedWorkBeads) > 0 {
 		effectiveStartOptions = append(append([]startExecutionOption(nil), startOptions...), withTaskWorkDirResolver(newAssignedTaskWorkDirResolver(cityPath, assignedWorkBeads)))
@@ -2105,6 +2110,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	for i := range orderedRows {
 		orderedInfos[i] = orderedRows[i].Info
 	}
+	// The start executor's memo record is this snapshot's never-started creates:
+	// a create the snapshot lacks was never offered a start (see
+	// startDeferralMemo).
+	effectiveStartOptions = append(append([]startExecutionOption(nil), effectiveStartOptions...), deferralMemo.startOptions(storeQueryPartial, orderedInfos)...)
 	// tick owns the coherent typed snapshot for this tick and is the single front
 	// door for folding a mutation onto it (see reconcileTick). Every forward-pass
 	// write below routes its infoByID fold through tick.apply / tick.applyResult /
@@ -3235,6 +3244,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							"state":    st.State.String(),
 						})
 					}
+				} else {
+					expired, capacityHeld = deferralMemo.holdPendingCreate(infoPostZombie, expired, capacityHeld, clk, stderr, trace, tp.TemplateName, name)
 				}
 			}
 			if expired {
@@ -7161,8 +7172,10 @@ func launchIdleProbes(
 			continue
 		}
 		go func(beadID, sessionName string, probe *idleProbeState) {
-			err := wp.WaitForIdle(ctx, sessionName, idleSleepProbeTimeoutFor(sp, sessionName))
-			dt.finishIdleProbe(beadID, probe, err == nil, clk.Now().UTC())
+			idle := runtime.ShadowIdleProof(ctx, sp, sessionName, func(ctx context.Context) bool {
+				return wp.WaitForIdle(ctx, sessionName, idleSleepProbeTimeoutFor(sp, sessionName)) == nil
+			})
+			dt.finishIdleProbe(beadID, probe, idle, clk.Now().UTC())
 		}(target.info.ID, name, probe)
 	}
 }
@@ -7286,9 +7299,16 @@ func resolveTaskBeadWorkDir(cityPath string, store beads.Store, bead beads.Bead)
 // creates that directory, so copied step metadata can still name the launcher
 // checkout. The source anchor is the durable post-prepare authority.
 func resolveDrainSourceWorkDir(cityPath string, store beads.Store, bead beads.Bead) string {
+	return resolveDrainSourceWorkDirWith(cityPath, store.Get, bead)
+}
+
+// resolveDrainSourceWorkDirWith is resolveDrainSourceWorkDir reading the root
+// and the drain member through get, which may span stores: the root is a graph
+// row and the member a work bead.
+func resolveDrainSourceWorkDirWith(cityPath string, get func(string) (beads.Bead, error), bead beads.Bead) string {
 	root := bead
 	if rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey]); rootID != "" && rootID != bead.ID {
-		resolvedRoot, err := store.Get(rootID)
+		resolvedRoot, err := get(rootID)
 		if err != nil {
 			return ""
 		}
@@ -7298,7 +7318,7 @@ func resolveDrainSourceWorkDir(cityPath string, store beads.Store, bead beads.Be
 	if memberID == "" {
 		return ""
 	}
-	source, err := store.Get(memberID)
+	source, err := get(memberID)
 	if err != nil {
 		return ""
 	}

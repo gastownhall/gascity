@@ -849,6 +849,7 @@ var nonSessionKeys = func() map[string]string {
 		"work bead":                   "gc.attempt gc.cancel_requested gc.ralph_step_id gc.step_id gc.routed_to gc.session_name gc.detached gc.control_pending_stalled gc.route_recovery_quarantined gc.route_recovery_quarantine_reason workflow_id gc.run_target gc.root_bead_id gc.root_store_ref gc.scope_ref gc.scope_role gc.on_fail gc.outcome gc.final_disposition gc.failure_class gc.failure_reason gc.execution_routed_to gc.dynamic_fragment gc.graphv2_root_key gc.input_convoy_id gc.finalizer_bead_id gc.root_settle_failed gc.root_settle_failed_at gc.control_dispatcher_fallback gc.control_quarantined gc.control_quarantined_at gc.control_quarantine_reason gc.controller_error gc.controller_error_class gc.controller_retryable synth_context synth_dest synth_meta_path synth_role synth_writer",
 		"GitHub PR bead and trace":    "source github.base github.failed_checks github.failure_kind github.head github.head_sha github.merge_state_status github.monitor github.owner github.pending_checks github.pr github.repo github.state github.url",
 		"order wisp bead":             "order_tracking_sweep order_tracking_sweep_by order_wisp_sweep",
+		"rig-imported graph bead":     "gc.migrated_cross_edges",
 		"rig idempotency bead":        "gc.idem.created_dir gc.idem.dolt_db gc.idem.event_cursor gc.idem.kind gc.idem.result.branch gc.idem.result.prefix gc.idem.result.rig gc.idem.state",
 	} {
 		for _, k := range strings.Fields(keys) {

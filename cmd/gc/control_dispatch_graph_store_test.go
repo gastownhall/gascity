@@ -333,28 +333,26 @@ func TestControlReadyScanStopsOfferingAControlBeadTheDispatchClosed(t *testing.T
 	}
 }
 
-// TestControlDispatchRigScopeStaysOnItsOwnStore guards the scope half of the
-// class hop.
+// TestControlDispatchRigScopeTakesTheBindingAndDispatchesRelicsInPlace guards
+// the scope half of the class hop under the S4 placement rule.
 //
-// There is no per-scope graph binding: resolveClassStore holds one city-level
-// store per class, and `gc storage migrate` copies only the CITY work store, so
-// a rig's control beads were never carried into the binding. Redirecting a rig
-// scope there would look up every rig-scoped control bead in a database that has
-// never held it — "bead not found", which IsTransientControllerError does not
-// match, so drainWorkflowServeWork returns it as fatal and the dispatcher
-// session exits and crash-loops.
-func TestControlDispatchRigScopeStaysOnItsOwnStore(t *testing.T) {
+// A split city creates every graph root in the binding at every scope, so a
+// rig dispatcher's primary graph ledger is the binding. A rig-resident control
+// bead — a tree the rig minted before S4 — is still found, through the relic
+// leg, and dispatched where it lives: "bead not found" there would be fatal to
+// the drain loop (IsTransientControllerError does not match it).
+func TestControlDispatchRigScopeTakesTheBindingAndDispatchesRelicsInPlace(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "rigs", "fixture")
 	rigStore := beads.NewMemStore()
-	graphStore := beads.NewMemStore()
+	graphStore := beads.NewMemStoreFrom(100, nil, nil)
 	seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(graphStore))
 
-	if got := controlGraphStore(cityPath, rigPath, nil, rigStore); got != beads.Store(rigStore) {
-		t.Fatalf("controlGraphStore for a rig scope returned %T(%p), want the rig's own store %p; the city binding never held this rig's beads", got, got, rigStore)
+	if got := controlGraphStore(cityPath, rigPath, nil, rigStore); !sameStorePtr(got, graphStore) {
+		t.Fatalf("controlGraphStore for a split rig scope returned %T(%p), want the city binding; new rig trees are born there", got, got)
 	}
-	if controlGraphRelocated(cityPath, rigPath) {
-		t.Fatal("controlGraphRelocated for a rig scope = true; the readiness scan would go in-process against a binding with none of this rig's beads")
+	if !controlGraphRelocated(cityPath, rigPath) {
+		t.Fatal("controlGraphRelocated for a split rig scope = false; the readiness scan would read only the rig store and miss every tree born since S4")
 	}
 
 	// End to end: a rig-scoped control bead dispatches against the rig store,
