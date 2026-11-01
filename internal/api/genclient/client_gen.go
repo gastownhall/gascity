@@ -3172,6 +3172,9 @@ type ConvoyAddInputBody struct {
 
 // ConvoyCheckResponse defines model for ConvoyCheckResponse.
 type ConvoyCheckResponse struct {
+	// ChildIds IDs of the child beads counted in total, in membership order (created_at, then id); a dangling track appears as the id it names. Omitted when total is 0.
+	ChildIds *[]string `json:"child_ids,omitempty"`
+
 	// Closed Closed child bead count.
 	Closed int64 `json:"closed"`
 
@@ -3180,6 +3183,9 @@ type ConvoyCheckResponse struct {
 
 	// ConvoyId Convoy ID.
 	ConvoyId string `json:"convoy_id"`
+
+	// DanglingTracks Child beads counted in total whose tracks dependency names a bead that cannot be resolved. Omitted when 0.
+	DanglingTracks *int64 `json:"dangling_tracks,omitempty"`
 
 	// Total Total child bead count.
 	Total int64 `json:"total"`

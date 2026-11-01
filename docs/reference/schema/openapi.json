@@ -2920,6 +2920,16 @@
       "ConvoyCheckResponse": {
         "additionalProperties": false,
         "properties": {
+          "child_ids": {
+            "description": "IDs of the child beads counted in total, in membership order (created_at, then id); a dangling track appears as the id it names. Omitted when total is 0.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "closed": {
             "description": "Closed child bead count.",
             "format": "int64",
@@ -2932,6 +2942,11 @@
           "convoy_id": {
             "description": "Convoy ID.",
             "type": "string"
+          },
+          "dangling_tracks": {
+            "description": "Child beads counted in total whose tracks dependency names a bead that cannot be resolved. Omitted when 0.",
+            "format": "int64",
+            "type": "integer"
           },
           "total": {
             "description": "Total child bead count.",
