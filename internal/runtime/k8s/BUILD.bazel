@@ -15,6 +15,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/citylayout",
+        "//internal/config",
         "//internal/pathutil",
         "//internal/runtime",
         "//internal/shellquote",

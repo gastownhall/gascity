@@ -216,6 +216,22 @@ func resolvePodID(envName, configName string, configured *int64, envValue string
 	return &resolved, nil
 }
 
+// ValidateStaticConfig checks provider settings that do not need Kubernetes
+// credentials or a live API client. A managed worker dispatcher uses it before
+// deferring client construction to the controller.
+func ValidateStaticConfig(config PodSecurityConfig) error {
+	if _, err := resolvePodSecurityConfig(config); err != nil {
+		return err
+	}
+	if _, _, err := managedServiceAlias(); err != nil {
+		return err
+	}
+	if _, err := parseSchedulingEnv(); err != nil {
+		return err
+	}
+	return nil
+}
+
 func parseSchedulingEnv() (schedulingFields, error) {
 	var scheduling schedulingFields
 	if v := os.Getenv("GC_K8S_NODE_SELECTOR"); v != "" {
