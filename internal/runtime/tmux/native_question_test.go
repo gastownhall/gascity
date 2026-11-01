@@ -455,3 +455,24 @@ func TestNativeQuestionAnswerKeysStayUnderIncarnationFence(t *testing.T) {
 		})
 	}
 }
+
+// Claude 2.1.308 does not flush the assistant tool invocation while its
+// native question is waiting. Missing answer identity must not hide that
+// visible input owner or let ordinary messages answer it.
+func TestNativeClaudeUnflushedQuestionRemainsVisibleAndGuarded(t *testing.T) {
+	tm, ex := questionTmux(nativeClaudeQuestion)
+	tm.claudeQuestionTranscript = func(string) (string, error) {
+		return `{"type":"user","message":{"content":"ask a native question"}}` + "\n" + `{"type":"attachment"}` + "\n", nil
+	}
+	pending, err := tm.Pending("q")
+	if err != nil || pending == nil || pending.Kind != "question" {
+		t.Fatalf("visible native question lost: %+v, %v", pending, err)
+	}
+	if pending.Metadata["answer_action"] != "" || pending.Metadata["answer_unavailable"] == "" {
+		t.Fatalf("unbound question advertised an answer: %+v", pending)
+	}
+	if err := tm.checkNoApprovalPrompt("q"); !errors.Is(err, runtime.ErrPendingInteraction) {
+		t.Fatalf("message guard = %v", err)
+	}
+	requireNoKeys(t, ex.calls, false)
+}

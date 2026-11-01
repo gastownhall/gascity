@@ -638,3 +638,9 @@ shared domain defaults it to Gas City and validates before scaffolding. The
 provider field remains the default coding-provider choice. Preserve custom
 commands when choosing a factory and refuse providers on providerless templates.
 Valid template choices are discoverable in OpenAPI and match native `gc init`.
+
+A visible native question remains pending when its answer identity is not yet
+published: expose unavailable answer capability and preserve the message guard,
+rather than reporting a dead runtime. Stop cancels the native question widget
+without choosing any answer. Provider callback and installed-binary qualification
+must accompany tests built from completed transcript records.

@@ -84,6 +84,7 @@ type parsedQuestion struct {
 	Numbers       []int
 	Provider      string
 	NativeID      string
+	BindingError  string
 	FreeNumber    int
 	ChatNumber    int
 	Draft         string

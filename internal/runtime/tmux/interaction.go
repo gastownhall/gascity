@@ -820,19 +820,18 @@ func (t *Tmux) checkNoApprovalPromptIn(name, target string) error {
 		runtime.ErrPendingInteraction, name, approvalPromptText(approval), "tmux-"+approvalHash(approval))
 }
 
-// cancelClaudeApproval cancels a Claude permission prompt on session name's
-// agent pane with Escape, the key the prompt offers ("Esc to cancel"). Ctrl-C
-// does not dismiss the prompt, and stopping a turn must never pick one of its
-// numbered options. handled reports that Interrupt is done: a prompt was
+// cancelClaudeDialog cancels a Claude permission or question dialog on the
+// agent pane with Escape. Ctrl-C does not dismiss these widgets, and stopping
+// a turn must never pick one of their numbered options. handled reports that Interrupt is done: a prompt was
 // canceled or the session is gone. A pane that cannot be read is not
 // handled: the error is returned for the caller to log, and the caller
 // interrupts with Ctrl-C as it did before it looked.
-func (t *Tmux) cancelClaudeApproval(ctx context.Context, name string) (handled bool, err error) {
+func (t *Tmux) cancelClaudeDialog(ctx context.Context, name string) (handled bool, err error) {
 	target, err := t.agentPaneTarget(name)
 	if err == nil {
-		var approval *parsedApproval
-		approval, err = t.approvalInPane(target)
-		if err == nil && (approval == nil || approval.Codex) {
+		var dialog paneDialog
+		dialog, err = t.dialogInPane(target)
+		if err == nil && dialog.question == nil && (dialog.approval == nil || dialog.approval.Codex) {
 			return false, nil
 		}
 	}
@@ -840,14 +839,14 @@ func (t *Tmux) cancelClaudeApproval(ctx context.Context, name string) (handled b
 		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
 			return true, absorbGone(ctx, err)
 		}
-		return false, fmt.Errorf("looking for a permission prompt: %w", err)
+		return false, fmt.Errorf("looking for a Claude dialog: %w", err)
 	}
 	t.cancelCopyModeIfParked(ctx, target)
 	if err := t.sendKeysRawCtx(ctx, target, "Escape"); err != nil {
 		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
 			return true, absorbGone(ctx, err)
 		}
-		return true, fmt.Errorf("canceling the permission prompt of %q: %w", name, err)
+		return true, fmt.Errorf("canceling the Claude dialog of %q: %w", name, err)
 	}
 	return true, nil
 }
@@ -859,6 +858,9 @@ func questionMetadata(q *parsedQuestion) map[string]string {
 		metadata["answer_action"] = "answer"
 	} else {
 		metadata["answer_unavailable"] = "native question identity is unavailable; answer in the terminal or start a new session"
+		if q.BindingError != "" {
+			metadata["answer_unavailable"] += ": " + q.BindingError
+		}
 	}
 	if q.Focused != "" {
 		metadata["focused"] = q.Focused
@@ -889,7 +891,11 @@ func (t *Tmux) dialogInPane(target string) (paneDialog, error) {
 	}
 	if q := parseAskUserQuestion(strings.Split(strings.ReplaceAll(paneText, "\r", ""), "\n")); q != nil {
 		if err := t.bindClaudeQuestion(resolved, q); err != nil {
-			return paneDialog{}, err
+			// The pane still has a visible input owner even when the provider
+			// has not published its invocation identity. Keep messages guarded,
+			// expose the question, and refuse answers without that identity.
+			q.NativeID = ""
+			q.BindingError = err.Error()
 		}
 		return paneDialog{question: q}, nil
 	}
