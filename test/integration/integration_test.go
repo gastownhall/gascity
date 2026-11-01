@@ -977,7 +977,7 @@ func isSubprocessTestLeaf(cmd, agentScript string) bool {
 	switch {
 	case strings.Contains(cmd, "bd ready --label=pool:polecat --unassigned --json --limit=1"):
 		return true
-	case strings.Contains(cmd, "bd ready --assignee=worker --json --limit=1"):
+	case strings.Contains(cmd, "bd ready --assignee=worker --exclude-label hold:mayor --exclude-label hold:external --json --limit=1"):
 		return true
 	case strings.Contains(cmd, agentScript):
 		return true
