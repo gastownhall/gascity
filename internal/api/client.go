@@ -829,10 +829,11 @@ func (c *Client) TriggerMaintenanceDoltGC(wait bool) (MaintenanceTriggerView, er
 // omit). peek controls the optional last-output preview. The
 // CachedRead.AgeSeconds field carries the supervisor CachingStore age from
 // the X-GC-Cache-Age-S response header so callers can surface _cache_age_s
-// on --json output and a staleness banner on human output.
-func (c *Client) ListSessions(stateFilter, templateFilter string, peek bool) (CachedRead[[]SessionView], error) {
+// on --json output and a staleness banner on human output. Rows decode into
+// SessionListView; a malformed timestamp is a plain (non-fallback) error.
+func (c *Client) ListSessions(stateFilter, templateFilter string, peek bool) (CachedRead[[]SessionListView], error) {
 	if err := c.requireCityScope(); err != nil {
-		return CachedRead[[]SessionView]{}, err
+		return CachedRead[[]SessionListView]{}, err
 	}
 	// gc session list means "all sessions". Walk the keyset pages until the
 	// server stops minting next_cursor and merge them, so a fleet larger than
@@ -841,7 +842,7 @@ func (c *Client) ListSessions(stateFilter, templateFilter string, peek bool) (Ca
 	// trips; the cache age is taken from the first page.
 	capLimit := int64(maxPaginationLimit)
 	var (
-		all        []SessionView
+		all        []SessionListView
 		ageSeconds float64
 		cursor     string
 	)
@@ -861,15 +862,19 @@ func (c *Client) ListSessions(stateFilter, templateFilter string, peek bool) (Ca
 		}
 		resp, err := c.cw.GetV0CityByCityNameSessionsWithResponse(context.Background(), c.cityName, params)
 		if err != nil {
-			return CachedRead[[]SessionView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+			return CachedRead[[]SessionListView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
 		}
 		if resp == nil {
-			return CachedRead[[]SessionView]{}, &connError{err: fmt.Errorf("nil response")}
+			return CachedRead[[]SessionListView]{}, &connError{err: fmt.Errorf("nil response")}
 		}
 		if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
-			return CachedRead[[]SessionView]{}, err
+			return CachedRead[[]SessionListView]{}, err
 		}
-		all = append(all, sessionsFromGenList(resp.JSON200)...)
+		views, err := sessionListViewsFromGen(resp.JSON200)
+		if err != nil {
+			return CachedRead[[]SessionListView]{}, fmt.Errorf("decoding session list page: %w", err)
+		}
+		all = append(all, views...)
 		if page == 0 {
 			ageSeconds = cacheAgeFromResponse(resp.HTTPResponse)
 		}
@@ -886,9 +891,9 @@ func (c *Client) ListSessions(stateFilter, templateFilter string, peek bool) (Ca
 		cursor = next
 	}
 	if all == nil {
-		all = []SessionView{}
+		all = []SessionListView{}
 	}
-	return CachedRead[[]SessionView]{
+	return CachedRead[[]SessionListView]{
 		Body:       all,
 		AgeSeconds: ageSeconds,
 	}, nil

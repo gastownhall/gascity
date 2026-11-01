@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -804,52 +803,29 @@ var sessionListAPIClient = localWhenSupervisorHostedAPIClient
 // iterator. Emits exactly one route=... log line per exit path (gated on
 // GC_DEBUG).
 func routeSessionList(_ string, stateFilter, templateFilter string, c *api.Client, nilReason string, jsonOutput bool, stdout, stderr io.Writer) int {
-	var cr api.CachedRead[[]api.SessionView]
+	var cr api.CachedRead[[]api.SessionListView]
 	return routeRead(c, "session list", nilReason, stderr,
 		func() error {
 			var err error
 			cr, err = c.ListSessions(stateFilter, templateFilter, false)
 			return err
 		},
-		func() int { return renderSessionListFromAPI(cr, jsonOutput, stdout) },
+		func() int {
+			return renderSessionListFromAPI(cr, stateFilter, templateFilter, jsonOutput, stdout, stderr)
+		},
 		func() int { return doSessionListFallback(stateFilter, templateFilter, jsonOutput, stdout, stderr) },
 	)
 }
 
-// sessionListJSONEnvelope is the API-path --json output shape for
-// `gc session list`. It wraps the items array so _cache_age_s can sit
-// alongside at the envelope level — the shape documented in the
-// ga-h6w designer's D5 contract.
-type sessionListJSONEnvelope struct {
-	SchemaVersion string        `json:"schema_version"`
-	OK            bool          `json:"ok"`
-	CacheAgeS     float64       `json:"_cache_age_s"`
-	Sessions      []SessionView `json:"sessions"`
-}
-
-// SessionView mirrors api.SessionView for CLI JSON output. Defined as an
-// alias so cmd/gc/ can document the JSON shape without exposing genclient.
-type SessionView = api.SessionView
-
-// renderSessionListFromAPI formats the API-sourced session list. On --json
-// the output is the sessionListJSONEnvelope with _cache_age_s; human output
-// mirrors the fallback tabwriter format and appends a staleness banner when
-// the supervisor cache age crosses the threshold.
-func renderSessionListFromAPI(cr api.CachedRead[[]SessionView], jsonOutput bool, stdout io.Writer) int {
+// renderSessionListFromAPI formats the API-sourced session list. On --json it
+// prints the same document as the local read (writeSessionListJSON) plus the
+// API-only _cache_age_s and per-row fields; human output mirrors the local
+// table and appends a staleness banner when the supervisor cache age crosses
+// the threshold.
+func renderSessionListFromAPI(cr api.CachedRead[[]api.SessionListView], stateFilter, templateFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
 	if jsonOutput {
-		env := sessionListJSONEnvelope{
-			SchemaVersion: "1",
-			OK:            true,
-			CacheAgeS:     cr.AgeSeconds,
-			Sessions:      cr.Body,
-		}
-		if env.Sessions == nil {
-			env.Sessions = []SessionView{}
-		}
-		enc := json.NewEncoder(stdout)
-		enc.SetIndent("", "  ")
-		_ = enc.Encode(env) //nolint:errcheck // best-effort stdout
-		return 0
+		age := cr.AgeSeconds
+		return writeSessionListJSON(sessionListJSONRowsFromAPI(cr.Body), stateFilter, templateFilter, &age, stdout, stderr)
 	}
 
 	if len(cr.Body) == 0 {
@@ -864,7 +840,7 @@ func renderSessionListFromAPI(cr api.CachedRead[[]SessionView], jsonOutput bool,
 	for _, s := range cr.Body {
 		withStatus = withStatus || s.ProgramStatus != nil
 	}
-	header := []string{"ID", "TEMPLATE", "STATE", "REASON", "TARGET", "TITLE", "WORKDIR", "AGE", "LAST ACTIVE"}
+	header := []string{"ID", "TEMPLATE", "STATE", "REASON", "TARGET", "TITLE", "WORKDIR", "AGE", "LAST ACTIVE", "LAST NUDGE"}
 	if withStatus {
 		header = slices.Insert(header, 3, "STATUS")
 	}
@@ -874,13 +850,17 @@ func renderSessionListFromAPI(cr api.CachedRead[[]SessionView], jsonOutput bool,
 	for _, s := range cr.Body {
 		state := s.State
 		if state == "" {
-			state = "closed"
+			state = string(session.StateClosed)
 		}
 		reason := s.Reason
 		if reason == "" {
 			reason = "-"
 		}
-		row := []string{s.ID, s.Template, state, reason, sessionViewTarget(s), sessionViewTitle(s), sessionViewWorkDir(s), sessionViewAge(s.CreatedAt), sessionViewLastActive(s.LastActive)}
+		row := []string{
+			s.ID, s.Template, state, reason,
+			sessionListTargetOf(s.Alias, s.SessionName), sessionListTitleOf(s.Title), sessionListDisplayValue(s.WorkDir),
+			sessionListAge(s.CreatedAt, now), sessionListAgo(s.LastActive, now), sessionListAgo(s.LastNudgeDeliveredAt, now),
+		}
 		if withStatus {
 			row = slices.Insert(row, 3, sessionViewProgramStatus(s.ProgramStatus, now))
 		}
@@ -892,6 +872,24 @@ func renderSessionListFromAPI(cr api.CachedRead[[]SessionView], jsonOutput bool,
 		fmt.Fprintln(stdout, sessionCacheAgeBanner(cr.AgeSeconds, "STATE")) //nolint:errcheck
 	}
 	return 0
+}
+
+// sessionListAge formats a session's age for the list table; a zero creation
+// time renders as "-".
+func sessionListAge(createdAt, now time.Time) string {
+	if createdAt.IsZero() {
+		return "-"
+	}
+	return formatDuration(now.Sub(createdAt))
+}
+
+// sessionListAgo formats a past timestamp as "<duration> ago" for the list
+// table; a zero time renders as "-".
+func sessionListAgo(at, now time.Time) string {
+	if at.IsZero() {
+		return "-"
+	}
+	return formatDuration(now.Sub(at)) + " ago"
 }
 
 // sessionStateCacheAgeBannerThresholdSeconds is the cache-age cutoff for the
@@ -916,62 +914,6 @@ const sessionStateCacheAgeBannerThresholdSeconds = 15.0
 // gco-cyt3).
 func sessionCacheAgeBanner(ageSeconds float64, subject string) string {
 	return fmt.Sprintf("(cache age: %.0fs — %s may lag the runtime; verify a just-woken session via transcript / bead state)", ageSeconds, subject)
-}
-
-// sessionViewTarget mirrors sessionListTarget's fallback behavior, but
-// against the SessionView shape the API returns.
-func sessionViewTarget(s SessionView) string {
-	if s.Alias != "" {
-		return s.Alias
-	}
-	if s.SessionName != "" {
-		return s.SessionName
-	}
-	return "-"
-}
-
-// sessionViewTitle mirrors sessionListTitle against the API-returned shape.
-func sessionViewTitle(s SessionView) string {
-	title := s.Title
-	if title == "" {
-		return "-"
-	}
-	if len(title) > 30 {
-		return title[:27] + "..."
-	}
-	return title
-}
-
-func sessionViewWorkDir(s SessionView) string {
-	return sessionListDisplayValue(s.WorkDir)
-}
-
-// sessionViewAge formats a CreatedAt RFC3339 string the same way the
-// fallback formats time.Since(s.CreatedAt). Empty or unparseable strings
-// render as "-".
-func sessionViewAge(createdAt string) string {
-	if createdAt == "" {
-		return "-"
-	}
-	t, err := time.Parse(time.RFC3339, createdAt)
-	if err != nil {
-		return "-"
-	}
-	return formatDuration(time.Since(t))
-}
-
-// sessionViewLastActive formats a LastActive RFC3339 string the same way
-// the fallback formats time.Since. Empty or unparseable strings render as
-// "-".
-func sessionViewLastActive(lastActive string) string {
-	if lastActive == "" {
-		return "-"
-	}
-	t, err := time.Parse(time.RFC3339, lastActive)
-	if err != nil {
-		return "-"
-	}
-	return formatDuration(time.Since(t)) + " ago"
 }
 
 // sessionViewProgramStatus formats the STATUS column: the state the session
@@ -1093,7 +1035,7 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 	sortSessionsCreatedDesc(sessions)
 
 	if jsonOutput {
-		return writeSessionListJSON(sessions, stateFilter, templateFilter, stdout, stderr)
+		return writeSessionListJSON(sessionListJSONRows(sessions), stateFilter, templateFilter, nil, stdout, stderr)
 	}
 
 	// Build the per-session reason-projection index from the one snapshot (no
@@ -1147,21 +1089,20 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		target := sessionListTarget(s)
 		title := sessionListTitle(s)
 		workDir := sessionListWorkDir(s)
-		age := formatDuration(time.Since(s.CreatedAt))
-		lastActive := "-"
-		if !s.LastActive.IsZero() {
-			lastActive = formatDuration(time.Since(s.LastActive)) + " ago"
-		}
-		lastNudge := "-"
-		if !s.LastNudgeDeliveredAt.IsZero() {
-			lastNudge = formatDuration(time.Since(s.LastNudgeDeliveredAt)) + " ago"
-		}
+		now := time.Now()
+		age := formatDuration(now.Sub(s.CreatedAt))
+		lastActive := sessionListAgo(s.LastActive, now)
+		lastNudge := sessionListAgo(s.LastNudgeDeliveredAt, now)
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Template, state, reason, target, title, workDir, age, lastActive, lastNudge) //nolint:errcheck // best-effort stdout
 	}
 	_ = w.Flush() //nolint:errcheck // best-effort stdout
 	return 0
 }
 
+// sessionListJSONRow is one `gc session list --json` row. Both routes print
+// it: a local read fills command, session_key and the resume fields, which
+// the API redacts; an API-served read fills running, reason, last_output and
+// program_status, which only the server observes.
 type sessionListJSONRow struct {
 	ID        string        `json:"id"`
 	Name      string        `json:"name,omitempty"`
@@ -1182,21 +1123,34 @@ type sessionListJSONRow struct {
 	// legacy work_dir is stamped at create/dispatch and is often the agent
 	// home (depth-1) or empty, which is why the worktree reaper's liveness
 	// gate needs the canonical value (gastownhall/gascity#4492 accept-crit #1).
-	WorkerDir            string     `json:"worker_dir,omitempty"`
-	SessionName          string     `json:"session_name,omitempty"`
-	SessionKey           string     `json:"session_key,omitempty"`
-	ResumeFlag           string     `json:"resume_flag,omitempty"`
-	ResumeStyle          string     `json:"resume_style,omitempty"`
-	ResumeCommand        string     `json:"resume_command,omitempty"`
-	CreatedAt            time.Time  `json:"created_at"`
-	LastActive           time.Time  `json:"last_active"`
+	WorkerDir     string    `json:"worker_dir,omitempty"`
+	SessionName   string    `json:"session_name,omitempty"`
+	SessionKey    string    `json:"session_key,omitempty"`
+	ResumeFlag    string    `json:"resume_flag,omitempty"`
+	ResumeStyle   string    `json:"resume_style,omitempty"`
+	ResumeCommand string    `json:"resume_command,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	// LastActive is RFC 3339 (sessionListLastActive), "" when the session has
+	// not been active.
+	LastActive           string     `json:"last_active"`
 	LastNudgeDeliveredAt *time.Time `json:"last_nudge_delivered_at,omitempty"`
 	Attached             bool       `json:"attached"`
 	Closed               bool       `json:"closed"`
+
+	// Running, Reason, LastOutput and ProgramStatus are set only on an
+	// API-served read: they are the server's own observations, and the CLI
+	// never computes them.
+	Running       *bool                     `json:"running,omitempty"`
+	Reason        string                    `json:"reason,omitempty"`
+	LastOutput    string                    `json:"last_output,omitempty"`
+	ProgramStatus *api.SessionProgramStatus `json:"program_status,omitempty"`
 }
 
+// sessionListJSON is the `gc session list --json` document on every route.
+// CacheAgeS is set only when the API served the read.
 type sessionListJSON struct {
 	SchemaVersion string               `json:"schema_version"`
+	CacheAgeS     *float64             `json:"_cache_age_s,omitempty"`
 	Filters       sessionListFilters   `json:"filters"`
 	Sessions      []sessionListJSONRow `json:"sessions"`
 	Summary       sessionListSummary   `json:"summary"`
@@ -1214,10 +1168,15 @@ type sessionListSummary struct {
 	Closed    int `json:"closed"`
 }
 
-func writeSessionListJSON(sessions []session.Info, stateFilter, templateFilter string, stdout, stderr io.Writer) int {
-	rows := sessionListJSONRows(sessions)
+// writeSessionListJSON writes the one `gc session list --json` document for
+// rows built by either route. cacheAgeS is nil on a local read.
+func writeSessionListJSON(rows []sessionListJSONRow, stateFilter, templateFilter string, cacheAgeS *float64, stdout, stderr io.Writer) int {
+	if rows == nil {
+		rows = []sessionListJSONRow{}
+	}
 	result := sessionListJSON{
 		SchemaVersion: "1",
+		CacheAgeS:     cacheAgeS,
 		Filters:       sessionListFilters{State: stateFilter, Template: templateFilter},
 		Sessions:      rows,
 		Summary:       summarizeSessionList(rows),
@@ -1261,57 +1220,131 @@ func writeSessionNewJSON(stdout, stderr io.Writer, result sessionNewJSON) error 
 	return writeCLIJSONLineOrErr(stdout, stderr, "gc session new", result)
 }
 
+// sessionListJSONRows builds the local read's rows. It fills the fields the
+// API redacts (command, session_key, resume_*) and leaves the API-only
+// fields empty.
 func sessionListJSONRows(sessions []session.Info) []sessionListJSONRow {
 	rows := make([]sessionListJSONRow, len(sessions))
 	for i, s := range sessions {
 		rows[i] = sessionListJSONRow{
-			ID:            s.ID,
-			Name:          sessionListJSONName(s),
-			Template:      s.Template,
-			State:         s.State,
-			Closed:        s.Closed,
-			Title:         s.Title,
-			Rig:           sessionListJSONRig(s),
-			Alias:         s.Alias,
-			AgentName:     s.AgentName,
-			Provider:      s.Provider,
-			Transport:     s.Transport,
-			Command:       s.Command,
-			WorkDir:       s.WorkDir,
-			WorkerDir:     strings.TrimSpace(s.WorkerDir),
-			SessionName:   s.SessionName,
-			SessionKey:    s.SessionKey,
-			ResumeFlag:    s.ResumeFlag,
-			ResumeStyle:   s.ResumeStyle,
-			ResumeCommand: s.ResumeCommand,
-			CreatedAt:     s.CreatedAt,
-			LastActive:    s.LastActive,
-			Attached:      s.Attached,
-		}
-		if !s.LastNudgeDeliveredAt.IsZero() {
-			stamp := s.LastNudgeDeliveredAt.UTC()
-			rows[i].LastNudgeDeliveredAt = &stamp
+			ID:                   s.ID,
+			Name:                 sessionListJSONName(s.Alias, s.SessionName, s.ID),
+			Template:             s.Template,
+			State:                sessionListJSONState(s.State, s.Closed),
+			Closed:               s.Closed,
+			Title:                s.Title,
+			Rig:                  sessionListJSONRig(s.Template, s.SessionName),
+			Alias:                s.Alias,
+			AgentName:            s.AgentName,
+			Provider:             s.Provider,
+			Transport:            s.Transport,
+			Command:              s.Command,
+			WorkDir:              s.WorkDir,
+			WorkerDir:            strings.TrimSpace(s.WorkerDir),
+			SessionName:          s.SessionName,
+			SessionKey:           s.SessionKey,
+			ResumeFlag:           s.ResumeFlag,
+			ResumeStyle:          s.ResumeStyle,
+			ResumeCommand:        s.ResumeCommand,
+			CreatedAt:            sessionListTime(s.CreatedAt),
+			LastActive:           sessionListLastActive(s.LastActive),
+			LastNudgeDeliveredAt: sessionListNudge(s.LastNudgeDeliveredAt),
+			Attached:             s.Attached,
 		}
 	}
 	return rows
 }
 
-func sessionListJSONName(s session.Info) string {
-	if s.Alias != "" {
-		return s.Alias
+// sessionListJSONRowsFromAPI builds an API-served read's rows with the same
+// derivations as the local read (name, rig, state, timestamps). It never
+// fills the fields the API redacts, and carries the server's running,
+// reason, last_output and program_status.
+func sessionListJSONRowsFromAPI(views []api.SessionListView) []sessionListJSONRow {
+	rows := make([]sessionListJSONRow, len(views))
+	for i, v := range views {
+		running := v.Running
+		rows[i] = sessionListJSONRow{
+			ID:                   v.ID,
+			Name:                 sessionListJSONName(v.Alias, v.SessionName, v.ID),
+			Template:             v.Template,
+			State:                sessionListJSONState(session.State(v.State), v.Closed),
+			Closed:               v.Closed,
+			Title:                v.Title,
+			Rig:                  sessionListJSONRig(v.Template, v.SessionName),
+			Alias:                v.Alias,
+			AgentName:            v.AgentName,
+			Provider:             v.Provider,
+			Transport:            v.Transport,
+			WorkDir:              v.WorkDir,
+			WorkerDir:            strings.TrimSpace(v.WorkerDir),
+			SessionName:          v.SessionName,
+			CreatedAt:            sessionListTime(v.CreatedAt),
+			LastActive:           sessionListLastActive(v.LastActive),
+			LastNudgeDeliveredAt: sessionListNudge(v.LastNudgeDeliveredAt),
+			Attached:             v.Attached,
+			Running:              &running,
+			Reason:               v.Reason,
+			LastOutput:           v.LastOutput,
+			ProgramStatus:        v.ProgramStatus,
+		}
 	}
-	if s.SessionName != "" {
-		return s.SessionName
-	}
-	return s.ID
+	return rows
 }
 
-func sessionListJSONRig(s session.Info) string {
-	template := strings.TrimSpace(s.Template)
+// sessionListJSONState is the state a list row prints: session.StateClosed
+// for a closed session (session.Info blanks State on a closed bead).
+func sessionListJSONState(state session.State, closed bool) session.State {
+	if closed {
+		return session.StateClosed
+	}
+	return state
+}
+
+// sessionListTime normalizes a list timestamp to UTC at second precision,
+// the precision the API wire carries, so both routes print the same value.
+func sessionListTime(t time.Time) time.Time {
+	return t.UTC().Truncate(time.Second)
+}
+
+// sessionListLastActive renders last_active: "" when the session has not
+// been active, otherwise RFC 3339 in UTC at second precision.
+func sessionListLastActive(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return sessionListTime(t).Format(time.RFC3339)
+}
+
+// sessionListNudge renders last_nudge_delivered_at: nil (omitted) for the zero
+// time, otherwise the normalized stamp.
+func sessionListNudge(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	stamp := sessionListTime(t)
+	return &stamp
+}
+
+// sessionListJSONName is the row's display name: the alias, else the session
+// name, else the id.
+func sessionListJSONName(alias, sessionName, id string) string {
+	if alias != "" {
+		return alias
+	}
+	if sessionName != "" {
+		return sessionName
+	}
+	return id
+}
+
+// sessionListJSONRig derives the row's rig: the template's leading segment
+// before the first '/', else the session name's prefix before "--".
+func sessionListJSONRig(template, sessionName string) string {
+	template = strings.TrimSpace(template)
 	if before, _, ok := strings.Cut(template, "/"); ok {
 		return before
 	}
-	name := strings.TrimSpace(s.SessionName)
+	name := strings.TrimSpace(sessionName)
 	if before, _, ok := strings.Cut(name, "--"); ok {
 		return before
 	}
@@ -1319,17 +1352,28 @@ func sessionListJSONRig(s session.Info) string {
 }
 
 func sessionListTarget(s session.Info) string {
-	if s.Alias != "" {
-		return s.Alias
+	return sessionListTargetOf(s.Alias, s.SessionName)
+}
+
+// sessionListTargetOf is the TARGET column: the alias, else the session name,
+// else "-".
+func sessionListTargetOf(alias, sessionName string) string {
+	if alias != "" {
+		return alias
 	}
-	if s.SessionName != "" {
-		return s.SessionName
+	if sessionName != "" {
+		return sessionName
 	}
 	return "-"
 }
 
 func sessionListTitle(s session.Info) string {
-	title := s.Title
+	return sessionListTitleOf(s.Title)
+}
+
+// sessionListTitleOf is the TITLE column: "-" when empty, truncated to 30
+// characters.
+func sessionListTitleOf(title string) string {
 	if title == "" {
 		title = "-"
 	}
