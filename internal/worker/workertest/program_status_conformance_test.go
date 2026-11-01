@@ -7,7 +7,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
-	workerbuiltin "github.com/gastownhall/gascity/internal/worker/builtin"
 )
 
 // programStatusChecks are the checks of the landed WC-PSTAT rows, by code. A
@@ -19,16 +18,14 @@ var programStatusChecks = map[RequirementCode]func(t *testing.T, profile Profile
 // providerDataProgramStatus returns the program-status declaration gc's
 // builtin provider data arms for profile's family under the shadow switch on
 // a terminal transport: the arm config.ProgramStatusBinding.Arm derives,
-// which is what a session of that family starts with.
+// which is what a session of that family starts with. The family comes from
+// the profile's provider, not a canonical worker identity: omp and grok
+// declare program status without one.
 func providerDataProgramStatus(t *testing.T, profile Profile) ProgramStatusDeclaration {
 	t.Helper()
-	identity, ok := workerbuiltin.CanonicalProfileIdentity(profile.Provider)
+	spec, ok := config.BuiltinProviders()[ProfileFamily(profile)]
 	if !ok {
-		t.Fatalf("profile %s: provider %q has no canonical identity", profile.ID, profile.Provider)
-	}
-	spec, ok := config.BuiltinProviders()[identity.ProviderFamily]
-	if !ok {
-		t.Fatalf("profile %s: family %q is not a builtin provider", profile.ID, identity.ProviderFamily)
+		t.Fatalf("profile %s: family %q is not a builtin provider", profile.ID, ProfileFamily(profile))
 	}
 	arm, _ := spec.ProgramStatus.Arm(runtime.ProgramStatusShadow, false)
 	return ProgramStatusDeclaration{Declared: arm.Capture, App: arm.App, Relay: arm.Relay}
@@ -39,7 +36,7 @@ func providerDataProgramStatus(t *testing.T, profile Profile) ProgramStatusDecla
 // are recorded and skipped, and a landed row runs its check.
 func TestProgramStatusConformance(t *testing.T) {
 	reporter := NewSuiteReporter(t, "program_status", map[string]string{"tier": "worker-core"})
-	profiles, err := selectedProfiles()
+	profiles, err := filterProfiles(ProgramStatusProfiles())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,5 +138,27 @@ func TestProgramStatusGate(t *testing.T) {
 	t.Cleanup(func() { programStatusPending[code] = slice })
 	if r, run := ProgramStatusGate(declared, code, declaration); !run || r.Status != "" {
 		t.Fatalf("declared, row landed: %+v run=%t, want the row run", r, run)
+	}
+}
+
+// Kills a builtin family that declares program status without a WC-PSTAT
+// profile (its declaration would never be held to the rows), and a family
+// listed twice.
+func TestEveryDeclaredBuiltinHasProgramStatusProfile(t *testing.T) {
+	byFamily := map[string]Profile{}
+	for _, profile := range ProgramStatusProfiles() {
+		family := ProfileFamily(profile)
+		if _, dup := byFamily[family]; dup {
+			t.Errorf("family %q has two program-status profiles", family)
+		}
+		byFamily[family] = profile
+	}
+	for family, spec := range config.BuiltinProviders() {
+		if !spec.ProgramStatus.Declared() {
+			continue
+		}
+		if profile, ok := byFamily[family]; !ok || !profile.ProgramStatus.Declared {
+			t.Errorf("builtin %q declares program status but no WC-PSTAT profile expects it", family)
+		}
 	}
 }

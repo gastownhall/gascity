@@ -280,6 +280,19 @@ func Phase1Profiles() []Profile {
 				RecallResponseContains: "Pi phase 1 validates the tmux CLI transcript contract.",
 				ResetResponseContains:  "I cannot repeat the earlier Pi summary because this session started fresh.",
 			},
+			// pi reports only after a 7501 reply, which tmux never sends; its
+			// declared PI_PROGRAM_STATUS=1 forces reports and skips the probe,
+			// so capture needs no relay. Recorded under gc's tmux with that env
+			// against a local mock API: ST-terminated reports.
+			ProgramStatus: ProgramStatusExpectation{
+				ProgramStatusDeclaration: ProgramStatusDeclaration{Declared: true, App: "pi"},
+				Verified:                 "pi 1.4.0",
+				Emission: ProgramStatusEmission{
+					FirstReport: []string{"report state=idle:app=pi"},
+					TurnStart:   []string{"report state=working:app=pi"},
+					TurnEnd:     []string{"report state=done:app=pi"},
+				},
+			},
 		},
 		{
 			ID:       ProfileAntigravityTmuxCLI,
