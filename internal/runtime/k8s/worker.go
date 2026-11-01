@@ -38,8 +38,10 @@ func NewWorkerProvider() *WorkerProvider {
 	}
 }
 
+// own accepts the session's controller-side name and its in-Pod tmux name. A
+// command run inside the Pod resolves itself through tmux, so it asks for "main".
 func (p *WorkerProvider) own(name string) error {
-	if p.session == "" || name != p.session {
+	if p.session == "" || (name != p.session && name != tmuxSession) {
 		return fmt.Errorf("k8s worker %q cannot address session %q: %w", p.session, name, guard.ErrControllerOwnedRuntime)
 	}
 	return nil

@@ -66,6 +66,24 @@ func TestWorkerProviderRoundTripsOwnSessionMetadata(t *testing.T) {
 	}
 }
 
+// A gc command run inside the Pod resolves its own session through tmux, so it
+// addresses the in-Pod session name rather than the controller-side one.
+func TestWorkerProviderAcceptsInPodSessionName(t *testing.T) {
+	alive := true
+	env := map[string]string{}
+	p := newTestWorkerProvider(&alive, env)
+
+	if err := p.SetMeta(tmuxSession, "GC_DRAIN_ACK", "1"); err != nil {
+		t.Fatalf("SetMeta(%q): %v", tmuxSession, err)
+	}
+	if got, err := p.GetMeta(tmuxSession, "GC_DRAIN_ACK"); err != nil || got != "1" {
+		t.Fatalf("GetMeta(%q) = %q, %v; want 1, nil", tmuxSession, got, err)
+	}
+	if !p.IsRunning(tmuxSession) {
+		t.Fatalf("IsRunning(%q) = false, want true", tmuxSession)
+	}
+}
+
 func TestWorkerProviderReportsMissingSessionAsGone(t *testing.T) {
 	alive := false
 	p := newTestWorkerProvider(&alive, map[string]string{})
