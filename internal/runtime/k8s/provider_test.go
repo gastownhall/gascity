@@ -2579,6 +2579,14 @@ func TestInitCityInPodSkipsDolt(t *testing.T) {
 			t.Errorf("gc init should run with %s; got cmd=%v", flag, gcInitCmd)
 		}
 	}
+
+	// The pod's own gc never gets --remote-stage: an older pod image does
+	// not know the flag, and the record is written directly instead.
+	for _, arg := range gcInitCmd {
+		if arg == "--remote-stage" {
+			t.Errorf("gc init in the pod must not carry --remote-stage (old images refuse unknown flags); got cmd=%v", gcInitCmd)
+		}
+	}
 }
 
 type cleanupCaptureOps struct {
@@ -2622,5 +2630,164 @@ func TestInitCityInPodRemovesPartialCopyAfterUploadFailure(t *testing.T) {
 	last := ops.calls[len(ops.calls)-1]
 	if last.method != "execInPod" || strings.Join(last.cmd, " ") != "rm -rf /tmp/city-src" {
 		t.Fatalf("last pod command = %v, want partial-copy cleanup", last.cmd)
+	}
+}
+
+// remoteStageWrite finds the direct remote-stage write among the fake's calls.
+func remoteStageWrite(fake *fakeK8sOps) (fakeCall, bool) {
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) == 3 && c.cmd[0] == "sh" && strings.Contains(c.cmd[2], remoteStageRecordPath) {
+			return c, true
+		}
+	}
+	return fakeCall{}, false
+}
+
+// TestStartRecordsTheRemoteStageInBothModes (S5-A): staged and prebaked pods
+// alike get .gc/remote-stage.toml, written by a direct exec that works with
+// any pod gc version, naming the controller's city and path.
+func TestStartRecordsTheRemoteStageInBothModes(t *testing.T) {
+	for _, prebaked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("prebaked=%v", prebaked), func(t *testing.T) {
+			fake := newFakeK8sOps()
+			p := newProviderWithOps(fake)
+			p.prebaked = prebaked
+			p.cityName = "bright-lights"
+			p.postStartSettle = 0
+			fake.setExecResult("gc-test-agent", []string{"tmux", "has-session", "-t", "main"}, "", nil)
+			cfg := runtime.Config{
+				Command: "claude",
+				WorkDir: "/city",
+				Env:     map[string]string{"GC_AGENT": "rig/polecat", "GC_CITY": "/city"},
+			}
+			if err := p.Start(context.Background(), "gc-test-agent", cfg); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			call, ok := remoteStageWrite(fake)
+			if !ok {
+				t.Fatalf("no remote-stage write among %d calls", len(fake.calls))
+			}
+			for _, want := range []string{`controller_city = "bright-lights"`, `controller_path = "/city"`, "staged_at = "} {
+				if !strings.Contains(call.stdin, want) {
+					t.Errorf("record %q lacks %q", call.stdin, want)
+				}
+			}
+			if strings.Contains(call.stdin, "/tmp/city-src") {
+				t.Errorf("record names the staging copy: %q", call.stdin)
+			}
+			// The pod spec marks every process a remote stage from its
+			// start, which is what closes the prebaked window: the agent can
+			// start before the record lands, but never without the env.
+			env := map[string]string{}
+			for _, pod := range fake.pods {
+				for _, e := range pod.Spec.Containers[0].Env {
+					env[e.Name] = e.Value
+				}
+			}
+			if env[remoteStageControllerEnv] != "/city" || env[remoteStageCityEnv] != "bright-lights" {
+				t.Errorf("pod env %s=%q %s=%q, want /city and bright-lights", remoteStageControllerEnv, env[remoteStageControllerEnv], remoteStageCityEnv, env[remoteStageCityEnv])
+			}
+		})
+	}
+}
+
+// TestStartFailsClosedWhenTheRemoteStageRecordFails: a pod that cannot be
+// marked is deleted and the start fails, in both modes.
+func TestStartFailsClosedWhenTheRemoteStageRecordFails(t *testing.T) {
+	for _, prebaked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("prebaked=%v", prebaked), func(t *testing.T) {
+			fake := newFakeK8sOps()
+			p := newProviderWithOps(fake)
+			p.prebaked = prebaked
+			p.postStartSettle = 0
+			fake.execFunc = func(_ string, cmd []string) (string, error) {
+				if len(cmd) == 3 && cmd[0] == "sh" && strings.Contains(cmd[2], remoteStageRecordPath) {
+					return "", errors.New("read-only file system")
+				}
+				return "", nil
+			}
+			cfg := runtime.Config{Command: "claude", WorkDir: "/city", Env: map[string]string{"GC_AGENT": "mayor", "GC_CITY": "/city"}}
+			err := p.Start(context.Background(), "gc-test-agent", cfg)
+			if err == nil || !strings.Contains(err.Error(), "remote stage") || !strings.Contains(err.Error(), "read-only file system") {
+				t.Fatalf("Start with an unwritable record = %v, want a remote-stage failure", err)
+			}
+			deleted := false
+			for _, c := range fake.calls {
+				if c.method == "deletePod" {
+					deleted = true
+				}
+				if c.method == "execInPod" && len(c.cmd) >= 2 && c.cmd[0] == "touch" && containsStr(c.cmd[1], ".gc-workspace-ready") {
+					t.Error("the ready sentinel was touched on a pod that could not be marked")
+				}
+			}
+			if !deleted {
+				t.Error("the unmarked pod was not deleted")
+			}
+		})
+	}
+}
+
+// TestRelaunchRecordsTheRemoteStageBeforeRespawning (S5-A): a warm pod an
+// older provider created carries neither the record nor the pod-spec
+// environment, and a respawned pane takes the tmux server's environment, not
+// the respawn command's. So Relaunch writes the record, naming the
+// controller's city and path, before it respawns the agent.
+func TestRelaunchRecordsTheRemoteStageBeforeRespawning(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.cityName = "bright-lights"
+	addRunningPod(fake, "s", "s")
+	hasSessionAlive(fake, "s")
+
+	cfg := runtime.Config{Command: "agent", Env: map[string]string{"GC_CITY": "/city", "LINUX_USERNAME": "dev"}}
+	if err := p.Relaunch(context.Background(), "s", cfg); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	record, respawn := -1, -1
+	for i, c := range fake.calls {
+		if c.method != "execInPod" {
+			continue
+		}
+		joined := strings.Join(c.cmd, " ")
+		if record < 0 && strings.Contains(joined, remoteStageRecordPath) {
+			record = i
+		}
+		if respawn < 0 && strings.Contains(joined, "respawn-pane") {
+			respawn = i
+		}
+	}
+	if record < 0 {
+		t.Fatalf("Relaunch wrote no remote-stage record among %d calls", len(fake.calls))
+	}
+	if respawn < 0 || record > respawn {
+		t.Fatalf("remote-stage record at call %d, respawn at call %d; the record must land before the agent respawns", record, respawn)
+	}
+	call, _ := remoteStageWrite(fake)
+	for _, want := range []string{`controller_city = "bright-lights"`, `controller_path = "/city"`} {
+		if !strings.Contains(call.stdin, want) {
+			t.Errorf("record %q lacks %q", call.stdin, want)
+		}
+	}
+}
+
+// TestRelaunchFailsClosedWhenTheRemoteStageRecordFails: a warm pod that
+// cannot be marked is not respawned into, and the error says why.
+func TestRelaunchFailsClosedWhenTheRemoteStageRecordFails(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	addRunningPod(fake, "s", "s")
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) == 3 && cmd[0] == "sh" && strings.Contains(cmd[2], remoteStageRecordPath) {
+			return "", errors.New("read-only file system")
+		}
+		return "", nil
+	}
+
+	err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent", Env: map[string]string{"GC_CITY": "/city"}})
+	if err == nil || !strings.Contains(err.Error(), "remote stage") || !strings.Contains(err.Error(), "read-only file system") {
+		t.Fatalf("Relaunch with an unwritable record = %v, want a remote-stage failure", err)
+	}
+	if findExecCmd(fake, "respawn-pane") != nil {
+		t.Error("the agent was respawned into a pod that could not be marked")
 	}
 }

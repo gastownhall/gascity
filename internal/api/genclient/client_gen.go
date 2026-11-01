@@ -9070,6 +9070,22 @@ type TypedEventStreamEnvelopeWorkNudged struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeWorkRateLimited defines model for TypedEventStreamEnvelopeWorkRateLimited.
+type TypedEventStreamEnvelopeWorkRateLimited struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          WorkRateLimitedPayload   `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeWorkRecycleRequested defines model for TypedEventStreamEnvelopeWorkRecycleRequested.
 type TypedEventStreamEnvelopeWorkRecycleRequested struct {
 	Actor            string                   `json:"actor"`
@@ -11161,6 +11177,23 @@ type TypedTaggedEventStreamEnvelopeWorkNudged struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedTaggedEventStreamEnvelopeWorkRateLimited defines model for TypedTaggedEventStreamEnvelopeWorkRateLimited.
+type TypedTaggedEventStreamEnvelopeWorkRateLimited struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          WorkRateLimitedPayload   `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelopeWorkRecycleRequested defines model for TypedTaggedEventStreamEnvelopeWorkRecycleRequested.
 type TypedTaggedEventStreamEnvelopeWorkRecycleRequested struct {
 	Actor            string                   `json:"actor"`
@@ -11486,12 +11519,34 @@ type WorkLadderPayload struct {
 	Generation  int64   `json:"generation"`
 	Kind        *string `json:"kind,omitempty"`
 	Paused      *bool   `json:"paused,omitempty"`
+	Provider    *string `json:"provider,omitempty"`
 	Reason      *string `json:"reason,omitempty"`
 	Rung        *string `json:"rung,omitempty"`
 	SessionId   string  `json:"session_id"`
 	SessionName *string `json:"session_name,omitempty"`
 	StoreRef    *string `json:"store_ref,omitempty"`
 	Template    *string `json:"template,omitempty"`
+}
+
+// WorkRateLimitedPayload defines model for WorkRateLimitedPayload.
+type WorkRateLimitedPayload struct {
+	Alerted      *bool      `json:"alerted,omitempty"`
+	Cause        *string    `json:"cause,omitempty"`
+	Claims       *[]string  `json:"claims,omitempty"`
+	Conversation int64      `json:"conversation"`
+	ErrorCode    *string    `json:"error_code,omitempty"`
+	ErrorText    *string    `json:"error_text,omitempty"`
+	FreshAt      *time.Time `json:"fresh_at,omitempty"`
+	Generation   int64      `json:"generation"`
+	HttpStatus   *int64     `json:"http_status,omitempty"`
+	Provider     *string    `json:"provider,omitempty"`
+	Refused      *int64     `json:"refused,omitempty"`
+	RefusedAt    *time.Time `json:"refused_at,omitempty"`
+	SessionId    string     `json:"session_id"`
+	SessionName  *string    `json:"session_name,omitempty"`
+	Since        time.Time  `json:"since"`
+	Template     *string    `json:"template,omitempty"`
+	Transition   string     `json:"transition"`
 }
 
 // WorkReadyBody defines model for WorkReadyBody.
@@ -14857,6 +14912,32 @@ func (t *EventPayload) FromWorkLadderPayload(v WorkLadderPayload) error {
 
 // MergeWorkLadderPayload performs a merge with any union data inside the EventPayload, using the provided WorkLadderPayload
 func (t *EventPayload) MergeWorkLadderPayload(v WorkLadderPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsWorkRateLimitedPayload returns the union data inside the EventPayload as a WorkRateLimitedPayload
+func (t EventPayload) AsWorkRateLimitedPayload() (WorkRateLimitedPayload, error) {
+	var body WorkRateLimitedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromWorkRateLimitedPayload overwrites any union data inside the EventPayload as the provided WorkRateLimitedPayload
+func (t *EventPayload) FromWorkRateLimitedPayload(v WorkRateLimitedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeWorkRateLimitedPayload performs a merge with any union data inside the EventPayload, using the provided WorkRateLimitedPayload
+func (t *EventPayload) MergeWorkRateLimitedPayload(v WorkRateLimitedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -19844,6 +19925,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeWorkNudged(v Typ
 	return err
 }
 
+// AsTypedEventStreamEnvelopeWorkRateLimited returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeWorkRateLimited
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeWorkRateLimited() (TypedEventStreamEnvelopeWorkRateLimited, error) {
+	var body TypedEventStreamEnvelopeWorkRateLimited
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeWorkRateLimited overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeWorkRateLimited
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeWorkRateLimited(v TypedEventStreamEnvelopeWorkRateLimited) error {
+	v.Type = "work.rate_limited"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeWorkRateLimited performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeWorkRateLimited
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeWorkRateLimited(v TypedEventStreamEnvelopeWorkRateLimited) error {
+	v.Type = "work.rate_limited"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeWorkRecycleRequested returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeWorkRecycleRequested
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeWorkRecycleRequested() (TypedEventStreamEnvelopeWorkRecycleRequested, error) {
 	var body TypedEventStreamEnvelopeWorkRecycleRequested
@@ -20262,6 +20371,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeWorkNudgeFailed()
 	case "work.nudged":
 		return t.AsTypedEventStreamEnvelopeWorkNudged()
+	case "work.rate_limited":
+		return t.AsTypedEventStreamEnvelopeWorkRateLimited()
 	case "work.recycle_requested":
 		return t.AsTypedEventStreamEnvelopeWorkRecycleRequested()
 	case "work.release_unfinished":
@@ -23563,6 +23674,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeWork
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeWorkRateLimited returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeWorkRateLimited
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeWorkRateLimited() (TypedTaggedEventStreamEnvelopeWorkRateLimited, error) {
+	var body TypedTaggedEventStreamEnvelopeWorkRateLimited
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeWorkRateLimited overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeWorkRateLimited
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeWorkRateLimited(v TypedTaggedEventStreamEnvelopeWorkRateLimited) error {
+	v.Type = "work.rate_limited"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeWorkRateLimited performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeWorkRateLimited
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeWorkRateLimited(v TypedTaggedEventStreamEnvelopeWorkRateLimited) error {
+	v.Type = "work.rate_limited"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeWorkRecycleRequested returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeWorkRecycleRequested
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeWorkRecycleRequested() (TypedTaggedEventStreamEnvelopeWorkRecycleRequested, error) {
 	var body TypedTaggedEventStreamEnvelopeWorkRecycleRequested
@@ -23981,6 +24120,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeWorkNudgeFailed()
 	case "work.nudged":
 		return t.AsTypedTaggedEventStreamEnvelopeWorkNudged()
+	case "work.rate_limited":
+		return t.AsTypedTaggedEventStreamEnvelopeWorkRateLimited()
 	case "work.recycle_requested":
 		return t.AsTypedTaggedEventStreamEnvelopeWorkRecycleRequested()
 	case "work.release_unfinished":

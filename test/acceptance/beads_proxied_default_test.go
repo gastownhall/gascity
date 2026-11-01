@@ -1005,21 +1005,6 @@ func TestBeadsProxiedDefaultRig(t *testing.T) {
 			stop.Run() //nolint:errcheck // best effort
 		})
 
-		// gc's adopt gate reads the issue prefix from .beads/config.yaml, and
-		// `bd init` records its prefix in the store instead — its generated
-		// config leaves issue-prefix commented out, and bd refuses
-		// `bd config set issue_prefix` outright. So adopting a bd-initialised
-		// workspace means writing that one line by hand today. Worth closing:
-		// gc could read the prefix back from bd rather than require the file.
-		configPath := filepath.Join(adopted, ".beads", "config.yaml")
-		existing, err := os.ReadFile(configPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(configPath, append([]byte("issue_prefix: adopt\n"), existing...), 0o600); err != nil {
-			t.Fatal(err)
-		}
-
 		// A workspace that already holds a beads store is an adoption, which gc
 		// makes explicit rather than inferring.
 		owned, addErr := helpers.RunGC(env, cityRoot, "rig", "add", "--adopt", "--prefix", "adopt", adopted)

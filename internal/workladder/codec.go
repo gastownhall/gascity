@@ -32,11 +32,24 @@ var (
 		SrcAgent: "agent", SrcExecutionClaimStarted: "execution_claim_started",
 		SrcCurrentClaim: "current_claim", SrcCurrentlyProcessing: "currently_processing", SrcClaimSession: "claim_session",
 	}
+	// phaseNames has no RateLimitClear: a clear episode writes no phase.
+	phaseNames = map[RateLimitPhase]string{RateLimitOpen: "open", RateLimitRestarted: "restarted", RateLimitExhausted: "exhausted"}
+	// rateLimitAlerts are the alert reasons an episode records raising.
+	rateLimitAlerts = map[string]bool{
+		AlertRateLimitedFreshRefused: true, AlertRateLimitedAgain: true, AlertRateLimitedHeld: true, AlertRateLimitedQuota: true,
+	}
 )
 
 func (k Kind) String() string        { return nameOr(kindNames, k) }
 func (r Rung) String() string        { return nameOr(rungNames, r) }
 func (s StartSource) String() string { return nameOr(srcNames, s) }
+
+func (ph RateLimitPhase) String() string {
+	if ph == RateLimitClear {
+		return "clear"
+	}
+	return nameOr(phaseNames, ph)
+}
 
 func nameOr[T ~uint8](names map[T]string, v T) string {
 	if n, ok := names[v]; ok {
@@ -56,12 +69,34 @@ func parseName[T comparable](names map[T]string, s string) (T, bool) {
 }
 
 type wireLadder struct {
-	V           int          `json:"v"`
-	Gen         int64        `json:"gen"`
-	LastNudge   string       `json:"last_nudge,omitempty"`
-	RecycledGen int64        `json:"recycled_gen,omitempty"`
-	Entries     []wireEntry  `json:"entries"`
-	Release     *wireRelease `json:"release,omitempty"`
+	wireHead
+	// RateLimit is seat-level; older builds ignore it.
+	RateLimit *wireRateLimit `json:"rate_limit,omitempty"`
+	Entries   []wireEntry    `json:"entries"`
+	Release   *wireRelease   `json:"release,omitempty"`
+}
+
+// wireHead is the cell's scalar fields, inlined in its text.
+type wireHead struct {
+	V           int    `json:"v"`
+	Gen         int64  `json:"gen"`
+	LastNudge   string `json:"last_nudge,omitempty"`
+	RecycledGen int64  `json:"recycled_gen,omitempty"`
+	// Delivered is seat-level; older builds ignore it.
+	Delivered string `json:"delivered,omitempty"`
+}
+
+// wireRateLimit is the seat's rate-limit state; absent when it holds
+// neither an episode nor a fresh restart. A clear phase writes no phase.
+type wireRateLimit struct {
+	Phase     string `json:"phase,omitempty"`
+	Conv      int64  `json:"conv,omitempty"`
+	Since     string `json:"since,omitempty"`
+	Checked   string `json:"checked,omitempty"`
+	FreshAt   string `json:"fresh_at,omitempty"`
+	FromConv  int64  `json:"from_conv,omitempty"`
+	Alerted   string `json:"alerted,omitempty"`
+	LastFresh string `json:"last_fresh,omitempty"`
 }
 
 type wireEntry struct {
@@ -82,6 +117,9 @@ type wireEntry struct {
 	Refused    int    `json:"refused,omitempty"`
 	// Notice is the entry's notice mark; older builds ignore the field.
 	Notice *wireNotice `json:"notice,omitempty"`
+	// AwaitsHuman marks an entry whose episode is a wait on a person; older
+	// builds ignore the field.
+	AwaitsHuman bool `json:"awaits_human,omitempty"`
 }
 
 type wireNotice struct {
@@ -117,7 +155,42 @@ func EncodeLadder(r Record) string {
 	if r.V == 0 {
 		return ""
 	}
-	w := wireLadder{V: Version, Gen: r.Gen, LastNudge: fmtTime(r.LastNudge), RecycledGen: r.RecycledGen, Entries: []wireEntry{}}
+	b, err := json.Marshal(toWire(r))
+	if err != nil { // unreachable: every field is a string, number or bool
+		panic(err)
+	}
+	return string(b)
+}
+
+// sameText reports whether a and b encode to the same cell text, without
+// encoding either: the text is a function of the wire form, which holds
+// every field the text does, so comparing wire forms misses none.
+func sameText(a, b Record) bool {
+	if a.V == 0 || b.V == 0 {
+		return a.V == b.V
+	}
+	wa, wb := toWire(a), toWire(b)
+	return wa.wireHead == wb.wireHead && sameRef(wa.RateLimit, wb.RateLimit) && sameRef(wa.Release, wb.Release) &&
+		slices.EqualFunc(wa.Entries, wb.Entries, func(x, y wireEntry) bool {
+			nx, ny := x.Notice, y.Notice
+			x.Notice, y.Notice = nil, nil
+			return x == y && sameRef(nx, ny)
+		})
+}
+
+// sameRef reports whether a and b are both nil or point at equal values.
+func sameRef[T comparable](a, b *T) bool {
+	return a == nil && b == nil || a != nil && b != nil && *a == *b
+}
+
+// toWire is r's wire form, entries in key order.
+func toWire(r Record) wireLadder {
+	w := wireLadder{
+		wireHead: wireHead{
+			V: Version, Gen: r.Gen, LastNudge: fmtTime(r.LastNudge), RecycledGen: r.RecycledGen, Delivered: fmtTime(r.Delivered),
+		},
+		RateLimit: encodeRateLimit(r.RateLimit), Entries: []wireEntry{},
+	}
 	for _, e := range sortedEntries(r.Entries) {
 		seed := ""
 		if e.Seed != 0 {
@@ -128,16 +201,58 @@ func EncodeLadder(r Record) string {
 			Since: fmtTime(e.Since), Attempts: e.Attempts, Paused: e.Paused, Last: fmtTime(e.Last),
 			Next: fmtTime(e.Next), Recycles: e.Recycles, Escalated: e.Escalated, Seed: seed,
 			RecycleAt: fmtTime(e.RecycleAt), Unreleased: e.Unreleased, Refused: e.Refused, Notice: encodeNotice(e.Notice),
+			AwaitsHuman: e.AwaitsHuman,
 		})
 	}
 	if r.Release != nil {
 		w.Release = &wireRelease{Store: r.Release.Key.Store, Bead: r.Release.Key.Bead, Gen: r.Release.Gen, At: fmtTime(r.Release.At)}
 	}
-	b, err := json.Marshal(w)
-	if err != nil { // unreachable: every field is a string, number or bool
-		panic(err)
+	return w
+}
+
+func encodeRateLimit(rl RateLimit) *wireRateLimit {
+	if rl.IsZero() {
+		return nil
 	}
-	return string(b)
+	w := &wireRateLimit{
+		Conv: rl.Conv, Since: fmtTime(rl.Since), Checked: fmtTime(rl.Checked), FreshAt: fmtTime(rl.FreshAt),
+		FromConv: rl.FromConv, Alerted: rl.Alerted, LastFresh: fmtTime(rl.LastFresh),
+	}
+	if rl.Phase != RateLimitClear {
+		w.Phase = rl.Phase.String()
+	}
+	return w
+}
+
+// decodeRateLimit reads the seat's rate-limit state; an unknown phase or
+// alert reason is a reason the cell is unreadable.
+func decodeRateLimit(w *wireRateLimit) (RateLimit, string) {
+	if w == nil {
+		return RateLimit{}, ""
+	}
+	rl := RateLimit{Conv: w.Conv, FromConv: w.FromConv, Alerted: w.Alerted}
+	if w.Phase != "" {
+		ph, ok := parseName(phaseNames, w.Phase)
+		if !ok {
+			return RateLimit{}, fmt.Sprintf("rate_limit: unknown phase %q", w.Phase)
+		}
+		rl.Phase = ph
+	}
+	if w.Alerted != "" && !rateLimitAlerts[w.Alerted] {
+		return RateLimit{}, fmt.Sprintf("rate_limit: unknown alert %q", w.Alerted)
+	}
+	for _, f := range []struct {
+		dst  *time.Time
+		src  string
+		name string
+	}{{&rl.Since, w.Since, "since"}, {&rl.Checked, w.Checked, "checked"}, {&rl.FreshAt, w.FreshAt, "fresh_at"}, {&rl.LastFresh, w.LastFresh, "last_fresh"}} {
+		t, err := parseTime(f.src)
+		if err != nil {
+			return RateLimit{}, fmt.Sprintf("rate_limit: %s %q: %v", f.name, f.src, err)
+		}
+		*f.dst = t
+	}
+	return rl, ""
 }
 
 func encodeNotice(m NoticeMark) *wireNotice {
@@ -148,7 +263,11 @@ func encodeNotice(m NoticeMark) *wireNotice {
 }
 
 // DecodeLadder reads a work_ladder cell. "" is an absent cell (V == 0, no
-// error). Anything unreadable is a *DecodeIssue with a zero Record.
+// error). Anything unreadable is a *DecodeIssue with a zero Record. Fields
+// it does not know are ignored, and the next EncodeLadder drops them: the
+// per-claim rate-limit flags earlier builds wrote on entries
+// (rate_limit_alerted, fresh_recycled, fresh_served, fresh_queued) read as
+// absent.
 func DecodeLadder(raw string) (Record, error) {
 	if strings.TrimSpace(raw) == "" {
 		return Record{}, nil
@@ -169,9 +288,20 @@ func DecodeLadder(raw string) (Record, error) {
 		return bad("last_nudge %q: %v", w.LastNudge, err)
 	}
 	r.LastNudge = lastNudge
+	if r.Delivered, err = parseTime(w.Delivered); err != nil {
+		return bad("delivered %q: %v", w.Delivered, err)
+	}
+	rl, issue := decodeRateLimit(w.RateLimit)
+	if issue != "" {
+		return bad("%s", issue)
+	}
+	r.RateLimit = rl
 	seen := map[ClaimKey]bool{}
 	for i, we := range w.Entries {
-		e := Entry{Key: ClaimKey{Store: we.Store, Bead: we.Bead}, Attempts: we.Attempts, Paused: we.Paused, Recycles: we.Recycles, Escalated: we.Escalated, Unreleased: we.Unreleased, Refused: we.Refused}
+		e := Entry{
+			Key: ClaimKey{Store: we.Store, Bead: we.Bead}, Attempts: we.Attempts, Paused: we.Paused, Recycles: we.Recycles,
+			Escalated: we.Escalated, Unreleased: we.Unreleased, Refused: we.Refused, AwaitsHuman: we.AwaitsHuman,
+		}
 		if e.Key.Bead == "" {
 			return bad("entry %d: empty bead", i)
 		}

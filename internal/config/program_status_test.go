@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/programstatus"
 	workerbuiltin "github.com/gastownhall/gascity/internal/worker/builtin"
 )
 
@@ -135,6 +136,7 @@ func TestParseRejectsInvalidProgramStatus(t *testing.T) {
 		"switch uppercase": "[session]\nprogram_status = \"ON\"\n",
 		"unknown protocol": "[providers.p]\ncommand = \"p\"\n[providers.p.program_status]\nprotocol = \"osc7502\"\n",
 		"bad app":          "[providers.p]\ncommand = \"p\"\n[providers.p.program_status]\nprotocol = \"osc7501\"\napp = \"has space\"\n",
+		"app over 32":      "[providers.p]\ncommand = \"p\"\n[providers.p.program_status]\nprotocol = \"osc7501\"\napp = \"" + strings.Repeat("a", 33) + "\"\n",
 		"bad env key":      "[providers.p]\ncommand = \"p\"\n[providers.p.program_status]\nprotocol = \"osc7501\"\nenv = { \"1BAD\" = \"x\" }\n",
 		"empty env key":    "[providers.p]\ncommand = \"p\"\n[providers.p.program_status]\nprotocol = \"osc7501\"\nenv = { \"\" = \"x\" }\n",
 		"reserved env key": "[providers.p]\ncommand = \"p\"\n[providers.p.program_status]\nprotocol = \"osc7501\"\nenv = { GC_TEMPLATE = \"x\" }\n",
@@ -147,6 +149,29 @@ func TestParseRejectsInvalidProgramStatus(t *testing.T) {
 				t.Errorf("error %q does not name program_status", err)
 			}
 		})
+	}
+}
+
+// TestProgramStatusAppIsTheCodecAppName pins load-time app validation to the
+// codec's app name, which the leaf checks again before arming: a binding
+// loads exactly when its app can be armed, so none loads and then runs
+// unarmed.
+func TestProgramStatusAppIsTheCodecAppName(t *testing.T) {
+	for _, app := range []string{"codex", "claude-code", "a.b_c+d-e", "+x", "-x", ".x", "_x", strings.Repeat("a", 32)} {
+		if !programstatus.ValidApp(app) {
+			t.Fatalf("fixture %q is not a codec app name", app)
+		}
+		if err := validateProgramStatusBinding(ProgramStatusBinding{Protocol: ProgramStatusProtocolOSC7501, App: app}); err != nil {
+			t.Errorf("app %q: err = %v, want accepted", app, err)
+		}
+	}
+	for _, app := range []string{strings.Repeat("a", 33), "has space", "a/b", "a#b", "a%b", "a:b", "é"} {
+		if programstatus.ValidApp(app) {
+			t.Fatalf("fixture %q is a codec app name", app)
+		}
+		if err := validateProgramStatusBinding(ProgramStatusBinding{Protocol: ProgramStatusProtocolOSC7501, App: app}); err == nil || !strings.Contains(err.Error(), "app") {
+			t.Errorf("app %q: err = %v, want an app error", app, err)
+		}
 	}
 }
 
@@ -399,5 +424,37 @@ func TestProviderSpecFromWorkerCarriesProgramStatus(t *testing.T) {
 	undeclared := providerSpecFromWorker(workerbuiltin.BuiltinProviderSpec{Command: "agent"})
 	if undeclared.ProgramStatus.Relay != nil || undeclared.ProgramStatus.Env != nil || undeclared.ProgramStatus.Declared() {
 		t.Fatalf("undeclared builtin produced binding %+v", undeclared.ProgramStatus)
+	}
+}
+
+// Kills a builtin declaration config would reject from a city, one whose
+// protocol literal drifts from ProgramStatusProtocolOSC7501 (the builtin
+// package duplicates it), and a declared builtin whose forced env or app does
+// not reach an armed session.
+func TestBuiltinProgramStatusBindingsValidate(t *testing.T) {
+	declared := 0
+	for name, spec := range BuiltinProviders() {
+		b := spec.ProgramStatus
+		if err := validateProgramStatusBinding(b); err != nil {
+			t.Errorf("builtin %s: %v", name, err)
+		}
+		if b.Protocol == "" {
+			continue
+		}
+		if !b.Declared() {
+			t.Errorf("builtin %s: protocol %q does not declare", name, b.Protocol)
+			continue
+		}
+		declared++
+		arm, env := b.Arm(runtime.ProgramStatusShadow, false)
+		if !arm.Capture || arm.App != b.App {
+			t.Errorf("builtin %s: shadow arm = %+v, want capture of app %q", name, arm, b.App)
+		}
+		if !maps.Equal(env, b.Env) {
+			t.Errorf("builtin %s: armed env = %v, want %v", name, env, b.Env)
+		}
+	}
+	if declared == 0 {
+		t.Fatal("no builtin declares program status")
 	}
 }

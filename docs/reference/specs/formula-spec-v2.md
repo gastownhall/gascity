@@ -264,7 +264,7 @@ Table-form fields:
 | Field | Type | Purpose |
 |---|---|---|
 | `description` | string | What the variable is for; shown by `gc formula show` |
-| `default` | string | Value used when none is provided. An explicit empty string is a valid default |
+| `default` | string | Value used when none is provided. An explicit empty string is a valid default. A default may reference other variables with `{{name}}`: values supplied for the invocation (explicit `--var`, rig `formula_vars`, the routing variables `gc sling` injects, and `{{convoy_id}}`) or other defaults. Supplied values are used verbatim and never re-expanded |
 | `required` | bool | The variable must be provided at instantiation. Declaring `required = true` together with a `default` fails validation: `vars.<name>: cannot have both required:true and default` |
 | `enum` | []string | Allowed values; enforced at instantiation |
 | `pattern` | string | Regex the value must match; enforced at instantiation |
@@ -913,6 +913,15 @@ at runtime.
 | `on_item_failure` | `skip_remaining` or `continue`; defaults to `continue` for separate drains, `skip_remaining` for shared. A shared skip marks remaining items skipped with reason `previous_item_failed` |
 | `continuation_group` | Shared execution group suffix; valid only with `context = "shared"` |
 | `item.single_lane` | Must be `true` for shared drains |
+
+The item formula receives the parent's runtime variables as caller values:
+the values the parent was invoked with and its resolved defaults, so they
+take precedence over the item formula's own defaults. Its `{{convoy_id}}` is
+its unit convoy, and the deprecated `{{issue}}` resolves to the unit's member.
+A parent default derived from the parent's input convoy (one that references
+`{{convoy_id}}` or `{{issue}}`, directly or through another default) is not
+passed on: an item formula that needs the value declares the same default and
+derives it from its unit convoy.
 
 A `blocks` edge is satisfied by its predecessor's close whatever
 `gc.outcome` that close carries, but a drain does not expand when a direct

@@ -290,3 +290,85 @@ func TestEveryRuntimeConfigSiteAppliesProgramStatusArm(t *testing.T) {
 		}
 	})
 }
+
+// builtinProgramStatusTemplateConfig resolves an agent on a city provider
+// "seat" that inherits family's builtin (base = "builtin:<family>", its own
+// wrapper command, as maintainer-city declares its seats) through the
+// reconciler/CLI create path under the given switch, and returns its
+// runtime.Config. binding is the seat's own [providers.seat.program_status].
+func builtinProgramStatusTemplateConfig(t *testing.T, cityPath, mode, family string, binding config.ProgramStatusBinding) runtime.Config {
+	t.Helper()
+	params := upstreamTestParams(t, &config.City{Session: config.SessionConfig{ProgramStatus: mode}})
+	params.cityPath = cityPath
+	params.workspace = &config.Workspace{}
+	base := "builtin:" + family
+	params.providers = map[string]config.ProviderSpec{"seat": {
+		Base:          &base,
+		Command:       "/bin/echo",
+		ResumeCommand: "/bin/echo resume {{.SessionKey}}",
+		ProgramStatus: binding,
+	}}
+	agent := &config.Agent{Name: "runner", Provider: "seat"}
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate(%s): %v", base, err)
+	}
+	return templateParamsToConfig(tp)
+}
+
+// The builtin codex and claude declarations (ga-f4ovjm.18) reach a city
+// provider that inherits them, yet change nothing while the switch is off or
+// unset: the runtime.Config is the one the explicitly undeclared provider
+// resolves to. Under shadow and on they arm capture (claude under the relay)
+// without moving any launch fingerprint, and protocol = "none" undeclares.
+func TestBuiltinProgramStatusDeclarationsInertWhenOff(t *testing.T) {
+	cityPath := newProgramStatusTestCity(t)
+	undeclare := config.ProgramStatusBinding{Protocol: config.ProgramStatusProtocolNone}
+	for family, wantArm := range map[string]runtime.ProgramStatusArm{
+		"codex":  {Capture: true, App: "codex"},
+		"claude": {Capture: true, App: "claude-code", Relay: true},
+	} {
+		t.Run(family, func(t *testing.T) {
+			undeclared := builtinProgramStatusTemplateConfig(t, cityPath, "off", family, undeclare)
+			for _, mode := range []string{"", "off"} {
+				got := builtinProgramStatusTemplateConfig(t, cityPath, mode, family, config.ProgramStatusBinding{})
+				if !reflect.DeepEqual(got, undeclared) {
+					t.Errorf("switch %q: the builtin declaration changed runtime.Config\ndeclared:   %+v\nundeclared: %+v", mode, got, undeclared)
+				}
+			}
+			for _, mode := range []string{"shadow", "on"} {
+				armed := builtinProgramStatusTemplateConfig(t, cityPath, mode, family, config.ProgramStatusBinding{})
+				if armed.ProgramStatus != wantArm {
+					t.Errorf("%s: ProgramStatus = %+v, want %+v", mode, armed.ProgramStatus, wantArm)
+				}
+				if runtime.CoreFingerprint(armed) != runtime.CoreFingerprint(undeclared) ||
+					runtime.PrePolicyLaunchFingerprint(armed) != runtime.PrePolicyLaunchFingerprint(undeclared) {
+					t.Errorf("%s: arming the builtin declaration moved the launch fingerprint", mode)
+				}
+				if got := builtinProgramStatusTemplateConfig(t, cityPath, mode, family, undeclare).ProgramStatus; got != (runtime.ProgramStatusArm{}) {
+					t.Errorf("%s: protocol = \"none\" left ProgramStatus = %+v, want disarmed", mode, got)
+				}
+			}
+		})
+	}
+}
+
+// Kills a tmux provider that reads under another switch than the city's:
+// every process building one (controller, CLI, API) passes the [session]
+// program_status switch to the leaf, and an unset switch reads off.
+func TestTmuxConfigFromSessionCarriesProgramStatusSwitch(t *testing.T) {
+	for _, tc := range []struct {
+		set  string
+		want runtime.ProgramStatusMode
+	}{
+		{"", runtime.ProgramStatusOff},
+		{"off", runtime.ProgramStatusOff},
+		{"shadow", runtime.ProgramStatusShadow},
+		{"on", runtime.ProgramStatusOn},
+	} {
+		cfg := tmuxConfigFromSession(config.SessionConfig{ProgramStatus: tc.set}, "city", "/tmp/city-a")
+		if cfg.ProgramStatus != tc.want {
+			t.Errorf("program_status %q: tmux Config.ProgramStatus = %q, want %q", tc.set, cfg.ProgramStatus, tc.want)
+		}
+	}
+}
