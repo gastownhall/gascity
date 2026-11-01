@@ -14,13 +14,15 @@ import (
 )
 
 // paneScriptExecutor resolves the agent pane like fakeAgentPaneRow and answers
-// each capture-pane with the next scripted capture (the last one repeats);
-// every other command answers "" with an error, so the ready-prompt prefix
-// falls back to its default.
+// each capture-pane with the next scripted capture (the last one repeats). It
+// answers show-environment for a key in env with tmux's "KEY=value" line,
+// trimmed the way realExecutor trims it; every other command answers "" with
+// an error, so without env the ready-prompt prefix falls back to its default.
 type paneScriptExecutor struct {
 	mu       sync.Mutex
 	captures []scriptedCapture
 	next     int
+	env      map[string]string
 }
 
 type scriptedCapture struct {
@@ -31,6 +33,12 @@ type scriptedCapture struct {
 func (e *paneScriptExecutor) execute(args []string) (string, error) {
 	if row, ok := fakeAgentPaneRow(args); ok {
 		return row, nil
+	}
+	if tmuxSubcommand(args) == "show-environment" {
+		key := args[len(args)-1]
+		if value, ok := e.env[key]; ok {
+			return strings.TrimSpace(key + "=" + value), nil
+		}
 	}
 	if tmuxSubcommand(args) != "capture-pane" {
 		return "", errors.New("unscripted")
@@ -94,6 +102,68 @@ func TestWaitForIdleMenuIsNotIdle(t *testing.T) {
 	}
 }
 
+// The idle wait reads the session's prefix back from the tmux environment, and
+// tmux output arrives trimmed, so codex's published "› " comes back as "›".
+// The composer row proves the wait scanned with that prefix, not the default;
+// the menu must still read as a pending choice under it.
+// Kills: a menu check that needs the prefix's separator space, which reads the
+// folder-trust menu under the read-back prefix as an idle composer.
+func TestWaitForIdlePublishedPromptPrefixSeesMenu(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		lines    []string
+		wantIdle bool
+	}{
+		{"codex composer", []string{"› Ask Codex to do anything", "", "  gpt-5.4 high · 100% left · ~/repo"}, true},
+		{"codex folder-trust menu", codexFolderTrustMenu, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tm := NewTmux()
+			tm.exec = &paneScriptExecutor{
+				captures: []scriptedCapture{{out: strings.Join(tc.lines, "\n")}},
+				env:      map[string]string{ReadyPromptEnvKey: "› "},
+			}
+			err := tm.WaitForIdle(context.Background(), "w", 500*time.Millisecond)
+			if tc.wantIdle && err != nil {
+				t.Fatalf("WaitForIdle = %v, want nil: the composer shows the published prompt", err)
+			}
+			if !tc.wantIdle && (!errors.Is(err, ErrIdleTimeout) || !errors.Is(err, runtime.ErrWaitUnobserved)) {
+				t.Fatalf("WaitForIdle = %v, want ErrIdleTimeout wrapping ErrWaitUnobserved: a menu cursor row is not idle", err)
+			}
+		})
+	}
+}
+
+// The wait-idle pre-read (runtime.IdleBoundaryNow) over the tmux leaf reads a
+// pane parked on a numbered menu as pending, so a wait-idle nudge queues at
+// once instead of blocking its caller for a whole idle wait on a menu that
+// does not close by itself. The session's published prefix "❯ " is read back
+// trimmed, as the menu check sees it in production; a composer under it is
+// at the boundary.
+// Kills: a pre-read that reads the menu as plainly indeterminate (unknown, so
+// the caller waits out runtimeHandleWaitIdleTimeout).
+func TestIdleBoundaryNowMenuIsPendingChoice(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		screen string
+		want   runtime.IdleBoundary
+	}{
+		{"claude composer", "● Done.\n\n❯ \n  ? for shortcuts", runtime.IdleBoundaryAt},
+		{"session-limit chooser", claudeSessionLimitMenu, runtime.IdleBoundaryPending},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tm := NewTmux()
+			tm.exec = &paneScriptExecutor{
+				captures: []scriptedCapture{{out: tc.screen}},
+				env:      map[string]string{ReadyPromptEnvKey: DefaultReadyPromptPrefix},
+			}
+			if got := runtime.IdleBoundaryNow(&Provider{tm: tm}, "w"); got != tc.want {
+				t.Fatalf("IdleBoundaryNow = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // One busy reading makes the timeout an observed one, even when later reads
 // fail.
 func TestWaitForIdleBusyReadingIsObserved(t *testing.T) {
@@ -147,23 +217,30 @@ func TestCodexInterruptBoundaryRunningTurnIsObserved(t *testing.T) {
 	}
 }
 
-// ClassifyIdlePane is the one classifier both idle loops share.
+// ClassifyIdlePane is the one classifier both idle loops share. A numbered
+// menu's cursor row is an indeterminate reading that names the pending
+// choice (runtime.ErrIdlePendingChoice); any other pane showing neither its
+// prompt nor a busy indicator is plainly indeterminate.
 func TestClassifyIdlePane(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		lines    []string
-		wantIdle bool
-		wantErr  error
+		name       string
+		lines      []string
+		wantIdle   bool
+		wantErr    error
+		wantChoice bool
 	}{
-		{"busy", []string{"❯ ", busyPane}, false, nil},
-		{"idle", []string{"❯ "}, true, nil},
-		{"indeterminate", strings.Split(indeterminatePane, "\n"), false, runtime.ErrIdleIndeterminate},
-		{"menu", strings.Split(claudeSessionLimitMenu, "\n"), false, runtime.ErrIdleIndeterminate},
+		{"busy", []string{"❯ ", busyPane}, false, nil, false},
+		{"idle", []string{"❯ "}, true, nil, false},
+		{"indeterminate", strings.Split(indeterminatePane, "\n"), false, runtime.ErrIdleIndeterminate, false},
+		{"menu", strings.Split(claudeSessionLimitMenu, "\n"), false, runtime.ErrIdleIndeterminate, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			idle, err := ClassifyIdlePane(tc.lines, DefaultReadyPromptPrefix)
 			if idle != tc.wantIdle || !errors.Is(err, tc.wantErr) || (tc.wantErr == nil && err != nil) {
 				t.Fatalf("ClassifyIdlePane(%q) = (%v, %v), want (%v, %v)", tc.lines, idle, err, tc.wantIdle, tc.wantErr)
+			}
+			if choice := errors.Is(err, runtime.ErrIdlePendingChoice); choice != tc.wantChoice {
+				t.Fatalf("ClassifyIdlePane(%q) = %v: a pending choice = %t, want %t", tc.lines, err, choice, tc.wantChoice)
 			}
 		})
 	}

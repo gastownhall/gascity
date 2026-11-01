@@ -111,11 +111,15 @@ func TestPaneShowsIdlePromptMenuBelowEchoedTurnIsNotIdle(t *testing.T) {
 // ready-prompt scans, the idle boundary (PaneShowsIdlePrompt) and startup
 // readiness (WaitForRuntimeReady), read such a row at the bottom-most prompt
 // line as not ready, and every other bottom-most prompt line as a composer.
+// The prefix may lack its trailing space: the idle path reads it back from the
+// tmux environment, whose output arrives trimmed ("› " comes back as "›").
 // Kills: a menu check without the neighbor test (a composer draft starting
 // with "1. " reads as a menu), one that skips the menu row and keeps scanning
 // (an echoed turn above the menu reads as ready), a neighbor parse without the
-// NBSP / box-border normalization, and one that accepts only option N+1 (the
-// cursor on the last option reads as ready).
+// NBSP / box-border normalization or the blank-line skip, one that accepts
+// only option N+1 (the cursor on the last option reads as ready), and one that
+// needs the prefix's separator space (every menu reads as ready under a
+// read-back prefix).
 func TestMenuCursorRowIsNotAReadyPrompt(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -172,10 +176,24 @@ func TestMenuCursorRowIsNotAReadyPrompt(t *testing.T) {
 			"│   2. Quit                │",
 			"╰──────────────────────────╯",
 		}, "› ", false},
+		{"unselected option with nbsp", []string{
+			"› 1. Trust and continue",
+			"\u00a0\u00a02.\u00a0Quit",
+		}, "› ", false},
+		{"blank lines between the options", []string{
+			"  Pick one",
+			"",
+			"› 1. Alpha",
+			"",
+			"  2. Beta",
+		}, "› ", false},
 		{"two-digit options", []string{
 			"   9. Ninth",
 			"› 10. Tenth",
 		}, "› ", false},
+		// The idle path's prefix, read back from the tmux environment.
+		{"folder trust, read-back prefix", codexFolderTrustMenu, "›", false},
+		{"claude chooser, read-back prefix", strings.Split(claudeSessionLimitMenu, "\n"), "❯", false},
 		// Known false negative: a two-line numbered draft is indistinguishable
 		// from a menu.
 		{"two-line numbered draft reads as a menu", []string{
@@ -191,6 +209,8 @@ func TestMenuCursorRowIsNotAReadyPrompt(t *testing.T) {
 			"  gpt-5.4 high · 100% left · ~/repo",
 		}, "› ", true},
 		{"draft starting with a number", []string{"› 1. fix the flake"}, "› ", true},
+		{"bare composer, read-back prefix", []string{"› "}, "›", true},
+		{"draft starting with a number, read-back prefix", []string{"› 1. fix the flake"}, "›", true},
 		{"draft whose neighbor is not the adjacent option", []string{
 			"› 1. foo",
 			"  3. baz",
