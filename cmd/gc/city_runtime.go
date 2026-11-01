@@ -1667,14 +1667,24 @@ func (cr *CityRuntime) tickLoadSessionSnapshot(p *tickPass) bool {
 // session is dead before loading demand so stale names cannot block
 // desired-state computation (#742).
 //
+// A cleanup that closed or reaped anything reloads the snapshot, as the stale
+// bead reap does: the demand build reads it, and a row closed here that is
+// still inside its post-create protection window would otherwise count as a
+// fresh session and mint a successor for a pool that has no demand.
+//
 // Session bead sync runs BEFORE reconciliation (one-tick state lag; see
 // run()). Post-reconcile sync was intentionally removed: the daemon's next
 // tick corrects bead state, and the pre-reconcile sync is sufficient for the
 // reconciler to read/write hashes during reconciliation.
 func (cr *CityRuntime) phaseCleanupDeadRuntimeSessionCorpses(p *tickPass) bool {
 	phaseStart := time.Now()
-	cleanupDeadRuntimeSessionCorpses(cr.cityPath, cr.sessionsBeadStore().Store, p.seatWork, p.sessionBeads, cr.sessionDrains, cr.sp, p.inv, clock.Real{}, cr.stderr)
+	cleaned := cleanupDeadRuntimeSessionCorpses(cr.cityPath, cr.sessionsBeadStore().Store, p.seatWork, p.sessionBeads, cr.sessionDrains, cr.sp, p.inv, clock.Real{}, cr.stderr)
 	p.recordPhase(TraceSiteControllerTickPhase, "cleanup_dead_runtime_session_corpses", phaseStart, p.inv.corpsePhaseFields())
+	if cleaned > 0 {
+		phaseStart = time.Now()
+		p.sessionBeads = cr.loadSessionBeadSnapshot()
+		p.recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.after_corpse_cleanup", phaseStart, traceSessionSnapshotFields(p.sessionBeads))
+	}
 	return false
 }
 

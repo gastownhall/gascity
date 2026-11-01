@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -942,4 +943,99 @@ func TestLegacySessionEntryGuardBlocksAndCountsUnderV2(t *testing.T) {
 			t.Error("the legacy session phases did not run under legacy")
 		}
 	})
+}
+
+// Kills: the demand build reading the session snapshot loaded before the
+// dead-runtime corpse cleanup. A pool session that exits seconds after its
+// creation_complete is still inside the post-create protection window, so a
+// stale snapshot counts the row the cleanup just closed as a fresh session
+// and the tick mints a successor for it. With no work, that successor exits
+// the same way and the template respawns forever.
+func TestCityRuntimeTickDoesNotRespawnPoolSessionClosedAsDeadRuntime(t *testing.T) {
+	t.Setenv(fsPressureThresholdEnv, "100")
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeSoftReloadConfig(t, tomlPath, "")
+	f, err := os.OpenFile(tomlPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open config: %v", err)
+	}
+	if _, err := f.WriteString("\n[[agent]]\nname = \"worker\"\nstart_command = \"true\"\nmin_active_sessions = 0\nmax_active_sessions = 2\n"); err != nil {
+		t.Fatalf("append config: %v", err)
+	}
+	_ = f.Close()
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+
+	store := beads.NewMemStore()
+	justCompleted := time.Now().Add(-5 * time.Second).UTC().Format(time.RFC3339)
+	corpse, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-1",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"session_origin":       "ephemeral",
+			"state":                "awake",
+			"state_reason":         "creation_complete",
+			"creation_complete_at": justCompleted,
+			"last_woke_at":         justCompleted,
+			"continuation_epoch":   "1",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+	// The worker exited: its pane is kept (remain-on-exit) but dead.
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["worker-1"] = true
+	sp.dead["worker-1"] = true
+
+	stderr := &lockedBuffer{}
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:                cityPath,
+		CityName:                "test-city",
+		TomlPath:                tomlPath,
+		ConfigRev:               configRev,
+		ConfigDirty:             &atomic.Bool{},
+		Cfg:                     cfg,
+		SP:                      sp,
+		BuildFn:                 supervisorBuildAgentsFn(cityPath, "test-city", stderr),
+		BuildFnWithSessionBeads: supervisorBuildAgentsFnWithSessionBeads(cityPath, "test-city", stderr),
+		Dops:                    newDrainOps(sp),
+		Rec:                     events.Discard,
+		Stdout:                  io.Discard,
+		Stderr:                  stderr,
+	})
+	cr.od = nil
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = store
+	cr.setControllerState(cs)
+	cr.sessionDrains = newDrainTracker()
+
+	runFixtureTick(cr, "patrol")
+
+	got, err := store.Get(corpse.ID)
+	if err != nil {
+		t.Fatalf("Get(corpse): %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("corpse row status = %q, want closed\nstderr:\n%s", got.Status, stderr.String())
+	}
+	if n := cr.demandSnapshot.result.PoolDesiredCounts["worker"]; n != 0 {
+		t.Errorf("poolDesired[worker] = %d, want 0: the row closed as dead-runtime was counted as fresh demand", n)
+	}
+	open, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("loadSessionBeads: %v", err)
+	}
+	for _, b := range open {
+		if b.Metadata["template"] == "worker" {
+			t.Errorf("tick created successor session %s (session_name %q) with no demand\nstderr:\n%s", b.ID, b.Metadata["session_name"], stderr.String())
+		}
+	}
 }
