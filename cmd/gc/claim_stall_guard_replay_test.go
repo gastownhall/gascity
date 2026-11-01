@@ -135,7 +135,7 @@ func (r *claimStallReplay) configure() {
 		dir, short, _ := strings.Cut(name, "/")
 		cfg.Agents = append(cfg.Agents, config.Agent{Name: short, Dir: dir, Provider: provider})
 	}
-	r.h.guard.configure(cfg)
+	r.h.guard.configure(cfg, true)
 }
 
 type claimStallStep struct {

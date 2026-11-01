@@ -49,6 +49,12 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 		h.Write([]byte{0})    //nolint:errcheck // hash.Write never errors
 	}
 
+	// The standby record is composed like a source but never watched (it
+	// lives in the runtime directory, which churns): its writer reloads.
+	if prov != nil && prov.standby != nil {
+		writeRevisionBytes(h, "standby:"+StandbyPath(cityRoot), prov.standby)
+	}
+
 	// Hash rig pack directory contents (all pack sources).
 	rigs := cfg.Rigs
 	for _, r := range rigs {

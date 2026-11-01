@@ -1374,6 +1374,7 @@ type tickPhase struct {
 // legacyTickPhases is the tick, in order. tick() runs it as is.
 var legacyTickPhases = []tickPhase{
 	{name: "reconcile_pool_deaths", run: (*CityRuntime).tickReconcilePoolDeaths},
+	{name: "claims_stall_standby", run: (*CityRuntime).tickClaimStallStandby},
 	{name: "config_reload", run: (*CityRuntime).tickConfigReload},
 	{name: "fs_pressure_gate", run: (*CityRuntime).tickFSPressureGate},
 	{name: "managed_dolt_preflight", run: (*CityRuntime).tickManagedDoltPreflight},
@@ -1521,6 +1522,22 @@ func (cr *CityRuntime) completeManualReload(p *tickPass) {
 func (cr *CityRuntime) tickReconcilePoolDeaths(p *tickPass) bool {
 	if cr.inventoryLane == nil {
 		cr.reconcilePoolDeaths(p.prevPoolRunning)
+	}
+	return false
+}
+
+// tickClaimStallStandby writes the claims-stall guard's standby moves to the
+// standby record (claim_stall_guard.go) and, when the record changed, marks the
+// config dirty so the reload that follows composes it: the moved templates'
+// new seats start on their standby, and the returned ones' on their own
+// provider. Ordered just ahead of config_reload for that.
+func (cr *CityRuntime) tickClaimStallStandby(p *tickPass) bool {
+	changed, err := cr.claimStallGuardOf().syncStandby(loadProviderHealthSnapshot(cr.cityPath))
+	if err != nil {
+		fmt.Fprintf(cr.stderr, "%s: claims-stall guard: %v (the standby moves wait for the next tick)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+	}
+	if changed {
+		p.dirty.Store(true)
 	}
 	return false
 }
@@ -5479,7 +5496,7 @@ func (cr *CityRuntime) forceStopRequested() bool {
 func (cr *CityRuntime) adoptConfigRevision(rev string) {
 	if rev != cr.configRev {
 		cr.claimLoopGuardOf().configChanged()
-		cr.claimStallGuardOf().configure(cr.cfg)
+		cr.claimStallGuardOf().configure(cr.cfg, cr.runsV2())
 	}
 	cr.configRev = rev
 }

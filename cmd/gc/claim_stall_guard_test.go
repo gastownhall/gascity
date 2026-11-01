@@ -43,7 +43,7 @@ func newClaimStallHarness(t *testing.T) *claimStallHarness {
 	h := &claimStallHarness{t: t, now: time.Date(2026, 10, 31, 7, 0, 0, 0, time.UTC), demand: map[string][]string{}}
 	h.guard = newClaimStallGuard(func(e events.Event) { h.alerts = append(h.alerts, e) }, &h.stderr)
 	h.guard.now = func() time.Time { return h.now }
-	h.guard.configure(stallConfig(stallProvider))
+	h.guard.configure(stallConfig(stallProvider), true)
 	return h
 }
 
@@ -435,7 +435,7 @@ func TestClaimStallGuardAProviderMoveStartsAfresh(t *testing.T) {
 	h.advance(30 * time.Second)
 	h.wake(lingering)
 	h.advance(time.Minute)
-	h.guard.configure(stallConfig("codex"))
+	h.guard.configure(stallConfig("codex"), true)
 	if got := h.pass(stallTemplate); len(got) != 3 {
 		t.Fatalf("demand %v after the move, want it all counted", got)
 	}

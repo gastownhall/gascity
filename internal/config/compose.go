@@ -89,6 +89,10 @@ type Provenance struct {
 
 	sourceContents   map[string][]byte
 	revisionSnapshot *revisionSnapshot
+	// standby is the standby record's bytes (StandbyFile), nil when there
+	// is none. Revision hashes it; it is not a Source, so the config
+	// watcher never watches the runtime directory it lives in.
+	standby []byte
 }
 
 // LoadOptions controls optional config-loading behavior.
@@ -757,6 +761,10 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		return nil, nil, err
 	}
 	prov.Warnings = append(prov.Warnings, siteBindingWarnings...)
+
+	// Move the agents the controller has put on their standby provider
+	// (.gc/runtime/standby.toml), after every layer that sets a provider.
+	prov.Warnings = append(prov.Warnings, applyStandbyLayer(fs, cityRoot, root, prov)...)
 
 	// Inline scope="rig" named sessions are generic declarations until the
 	// city's rig set is finalized. Stamp them after site bindings so the

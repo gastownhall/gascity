@@ -1118,6 +1118,7 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		Nudge:                  "nudge text",
 		Session:                "acp",
 		Provider:               "claude",
+		StandbyProvider:        "codex",
 		ContextAdvisory:        &config.ContextAdvisory{Enabled: &trueVal, WindowTokens: intPtr(1_000_000), Tiers: []config.ContextAdvisoryTier{{Threshold: intPtr(75), Message: &advisoryMessage, Enabled: &trueVal}}},
 		Upstream:               "anthropic",
 		StartCommand:           "claude --dangerously",
@@ -1178,6 +1179,7 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		"PoolName":                     true,
 		"BindingName":                  true,
 		"PackName":                     true,
+		"StandbyFor":                   true, // runtime-only: set while .gc/runtime/standby.toml moves the agent
 		// Runtime-only provenance consumed inside internal/config.
 		"source": true,
 		"layout": true,

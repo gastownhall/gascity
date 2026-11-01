@@ -23,5 +23,6 @@ func strictWarningIsNonFatal(warning string) bool {
 		config.IsAlwaysFreshWakeModeWarning(warning) ||
 		config.IsRetiredKeyWarning(warning) ||
 		config.IsSessionReconcilerAliasWarning(warning) ||
-		config.IsSessionSetupTimeoutAdvisory(warning)
+		config.IsSessionSetupTimeoutAdvisory(warning) ||
+		config.IsStandbyWarning(warning)
 }

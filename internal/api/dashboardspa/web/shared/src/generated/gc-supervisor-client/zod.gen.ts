@@ -22,10 +22,12 @@ export const zAdapterEventPayload = z.object({
 export const zAgentClaimsPayload = z.object({
     action: z.string().optional(),
     cause: z.string().optional(),
+    engagements: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
     episode: z.string(),
     provider: z.string(),
     seats: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
     since: z.iso.datetime(),
+    standby: z.string().optional(),
     template: z.string(),
     until: z.iso.datetime().optional()
 });
@@ -1456,6 +1458,7 @@ export const zAgentPatch = z.object({
     Skills: z.array(z.string()).nullable(),
     SkillsAppend: z.array(z.string()).nullable(),
     SleepAfterIdle: z.string().nullable(),
+    StandbyProvider: z.string().optional(),
     StartCommand: z.string().nullable(),
     Suspended: z.boolean().nullable(),
     TmuxAlias: z.string().nullable(),
@@ -4264,6 +4267,42 @@ export const zTypedEventStreamEnvelopeAgentClaimsStalled = z.object({
 });
 
 /**
+ * TypedEventStreamEnvelope agent.standby_engaged
+ */
+export const zTypedEventStreamEnvelopeAgentStandbyEngaged = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zAgentClaimsPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('agent.standby_engaged'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedEventStreamEnvelope agent.standby_released
+ */
+export const zTypedEventStreamEnvelopeAgentStandbyReleased = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zAgentClaimsPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('agent.standby_released'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedEventStreamEnvelope backend.credential_resolved
  */
 export const zTypedEventStreamEnvelopeBackendCredentialResolved = z.object({
@@ -6521,6 +6560,8 @@ export const zTypedEventStreamEnvelopeWorkerOperation = z.object({
 export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeAgentClaimsResumed.extend({ type: z.literal('agent.claims_resumed') }),
     zTypedEventStreamEnvelopeAgentClaimsStalled.extend({ type: z.literal('agent.claims_stalled') }),
+    zTypedEventStreamEnvelopeAgentStandbyEngaged.extend({ type: z.literal('agent.standby_engaged') }),
+    zTypedEventStreamEnvelopeAgentStandbyReleased.extend({ type: z.literal('agent.standby_released') }),
     zTypedEventStreamEnvelopeBackendCredentialResolved.extend({ type: z.literal('backend.credential_resolved') }),
     zTypedEventStreamEnvelopeBeadClaimFailed.extend({ type: z.literal('bead.claim_failed') }),
     zTypedEventStreamEnvelopeBeadClaimLoopHeld.extend({ type: z.literal('bead.claim_loop_held') }),
@@ -6707,6 +6748,44 @@ export const zTypedTaggedEventStreamEnvelopeAgentClaimsStalled = z.object({
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.literal('agent.claims_stalled'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedTaggedEventStreamEnvelope agent.standby_engaged
+ */
+export const zTypedTaggedEventStreamEnvelopeAgentStandbyEngaged = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zAgentClaimsPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('agent.standby_engaged'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedTaggedEventStreamEnvelope agent.standby_released
+ */
+export const zTypedTaggedEventStreamEnvelopeAgentStandbyReleased = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zAgentClaimsPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('agent.standby_released'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -9093,6 +9172,8 @@ export const zTypedTaggedEventStreamEnvelopeWorkerOperation = z.object({
 export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeAgentClaimsResumed.extend({ type: z.literal('agent.claims_resumed') }),
     zTypedTaggedEventStreamEnvelopeAgentClaimsStalled.extend({ type: z.literal('agent.claims_stalled') }),
+    zTypedTaggedEventStreamEnvelopeAgentStandbyEngaged.extend({ type: z.literal('agent.standby_engaged') }),
+    zTypedTaggedEventStreamEnvelopeAgentStandbyReleased.extend({ type: z.literal('agent.standby_released') }),
     zTypedTaggedEventStreamEnvelopeBackendCredentialResolved.extend({ type: z.literal('backend.credential_resolved') }),
     zTypedTaggedEventStreamEnvelopeBeadClaimFailed.extend({ type: z.literal('bead.claim_failed') }),
     zTypedTaggedEventStreamEnvelopeBeadClaimLoopHeld.extend({ type: z.literal('bead.claim_loop_held') }),

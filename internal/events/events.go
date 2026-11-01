@@ -86,6 +86,15 @@ const (
 	// the stalled provider claimed its work, or a config change moved the
 	// template off it. Any hold on the template's demand is lifted.
 	AgentClaimsResumed = "agent.claims_resumed"
+	// AgentStandbyEngaged fires when the guard moves a stalled template onto
+	// its configured standby_provider: the move is recorded in
+	// .gc/runtime/standby.toml and the config reloaded, so the template's
+	// new seats start on the standby. AgentStandbyReleased fires when the
+	// move ends (its hold ran out and the template's own provider is probed
+	// again, the own provider proved healthy, or the config changed under
+	// it).
+	AgentStandbyEngaged  = "agent.standby_engaged"
+	AgentStandbyReleased = "agent.standby_released"
 	// HookClaimReclaimedStale fires when gc hook --claim (ga-7rj87d), opted in
 	// via config.Agent.AutoReclaimStaleClaims, recovers a route-matched
 	// candidate whose only claim blocker was another worker's stale (lease-
@@ -671,7 +680,7 @@ var KnownEventTypes = []string{
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected, BeadClaimReleased,
 	BeadClaimFailed, BeadClaimLoopHeld,
-	AgentClaimsStalled, AgentClaimsResumed,
+	AgentClaimsStalled, AgentClaimsResumed, AgentStandbyEngaged, AgentStandbyReleased,
 	HookClaimReclaimedStale,
 	BeadDeadAssigneeReopened,
 	ExecutionWorkAssociated, ExecutionRunAnchored, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,

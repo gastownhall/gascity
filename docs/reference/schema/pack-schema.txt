@@ -63,6 +63,10 @@
           "type": "string",
           "description": "Provider names the provider preset to use for this agent."
         },
+        "standby_provider": {
+          "type": "string",
+          "description": "StandbyProvider names a provider preset this agent's seats move to\nwhile the controller finds them no longer claiming their routed work on\ntheir own provider (several seats in a row failed to start, or woke and\ndid not claim while the work waited, as seats on other providers\nclaimed), or while the city's provider-health record marks that\nprovider unhealthy and work waits. The controller records the move in\n.gc/runtime/standby.toml, which every gc process loads with city.toml:\nthe agent's new seats start on the standby, its idle seats on the own\nprovider are replaced and its busy ones finish. Only the provider\nchanges: the agent's caps, args, env and options apply on the standby\ntoo, so name a preset that runs with them. After a hold (30 minutes,\ndoubling with each move in the same stall, at most 4 hours) the agent\nreturns to its own provider for one probe seat: a claim there ends the\nstall, a failure moves it back. Moves need the v2 session reconciler.\nEmpty: no standby, and a stall only holds the agent's spawns back. It\nmust differ from the agent's own provider; a start_command agent has\nnone."
+        },
         "context_advisory": {
           "$ref": "#/$defs/ContextAdvisory",
           "description": "ContextAdvisory overrides context-pressure guidance for this agent."
@@ -442,6 +446,10 @@
         "provider": {
           "type": "string",
           "description": "Provider overrides the provider name."
+        },
+        "standby_provider": {
+          "type": "string",
+          "description": "StandbyProvider overrides Agent.StandbyProvider (see that field)."
         },
         "context_advisory": {
           "$ref": "#/$defs/ContextAdvisory",

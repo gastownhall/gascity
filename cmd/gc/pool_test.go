@@ -913,6 +913,8 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		Nudge:                        "nudge text",
 		Session:                      "acp",
 		Provider:                     "claude",
+		StandbyProvider:              "codex",
+		StandbyFor:                   "claude-max",
 		ContextAdvisory:              &config.ContextAdvisory{Enabled: &trueVal, WindowTokens: intPtr(1_000_000), Tiers: []config.ContextAdvisoryTier{{Threshold: intPtr(75), Message: strPtr("advisory {{.Pct}}"), Enabled: &trueVal}}},
 		Upstream:                     "anthropic",
 		InheritedProvider:            "codex",

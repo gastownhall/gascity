@@ -713,6 +713,8 @@ type AgentOverride struct {
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// StandbyProvider overrides Agent.StandbyProvider (see that field).
+	StandbyProvider *string `toml:"standby_provider,omitempty" json:"StandbyProvider,omitempty"`
 	// ContextAdvisory overrides context-pressure guidance for this agent.
 	ContextAdvisory *ContextAdvisory `toml:"context_advisory,omitempty"`
 	// Upstream overrides the model-serving endpoint selection (Phase C).
@@ -3681,6 +3683,27 @@ type Agent struct {
 	Session string `toml:"session,omitempty" jsonschema:"enum=acp"`
 	// Provider names the provider preset to use for this agent.
 	Provider string `toml:"provider,omitempty"`
+	// StandbyProvider names a provider preset this agent's seats move to
+	// while the controller finds them no longer claiming their routed work on
+	// their own provider (several seats in a row failed to start, or woke and
+	// did not claim while the work waited, as seats on other providers
+	// claimed), or while the city's provider-health record marks that
+	// provider unhealthy and work waits. The controller records the move in
+	// .gc/runtime/standby.toml, which every gc process loads with city.toml:
+	// the agent's new seats start on the standby, its idle seats on the own
+	// provider are replaced and its busy ones finish. Only the provider
+	// changes: the agent's caps, args, env and options apply on the standby
+	// too, so name a preset that runs with them. After a hold (30 minutes,
+	// doubling with each move in the same stall, at most 4 hours) the agent
+	// returns to its own provider for one probe seat: a claim there ends the
+	// stall, a failure moves it back. Moves need the v2 session reconciler.
+	// Empty: no standby, and a stall only holds the agent's spawns back. It
+	// must differ from the agent's own provider; a start_command agent has
+	// none.
+	StandbyProvider string `toml:"standby_provider,omitempty"`
+	// StandbyFor is the agent's own provider while .gc/runtime/standby.toml
+	// has it on StandbyProvider, and empty otherwise. Runtime-only.
+	StandbyFor string `toml:"-" json:"-"`
 	// ContextAdvisory overrides context-pressure guidance for this agent.
 	ContextAdvisory *ContextAdvisory `toml:"context_advisory,omitempty"`
 	// Upstream selects the model-serving endpoint (a key in [upstreams]) for

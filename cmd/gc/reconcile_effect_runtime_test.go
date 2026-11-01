@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/runtime/herdr"
@@ -397,6 +398,34 @@ func TestReadRuntimeBlankNameAndALateCorpse(t *testing.T) {
 		rt, _ := readRuntime(context.Background(), fallThrough{recordingLeaf: leaf, other: other}, nil, "s-1", gatherNow, time.Now)
 		if want := map[bool]runtimeClass{false: rtCorpse, true: rtUnknown}[elsewhere]; rt.Class != want {
 			t.Errorf("running elsewhere %t: class %d, want %d", elsewhere, rt.Class, want)
+		}
+	}
+}
+
+// Kills an effect reading a live runtime dead after a config change moved its
+// template to another provider: the read probes the agent process this
+// incarnation was launched with (its GT_PROCESS_NAMES, as the inventory
+// read them), not the one the template names now. A runtime whose identity is
+// another incarnation's, or unread, falls back to the template's names.
+func TestProcessNamesForPrefersTheRuntimesOwn(t *testing.T) {
+	row := session.Info{ID: "gc-1", SessionName: "seat-1", InstanceToken: "tok-1", Template: "gascity/review-codex"}
+	memo := &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row): {TP: TemplateParams{Hints: agent.StartupHints{ProcessNames: []string{"codex"}}}}}}
+	obs := func(id runtimeIdentity) *ObservationSnapshot {
+		return &ObservationSnapshot{ByName: map[string]RuntimeObservation{"seat-1": {Identity: id}}}
+	}
+	cases := []struct {
+		name string
+		obs  *ObservationSnapshot
+		want []string
+	}{
+		{"launched under the old provider", obs(runtimeIdentity{Known: true, SessionID: "gc-1", Token: "tok-1", ProcessNames: []string{"cursor-agent"}}), []string{"cursor-agent"}},
+		{"another incarnation's identity", obs(runtimeIdentity{Known: true, SessionID: "gc-1", Token: "tok-0", ProcessNames: []string{"cursor-agent"}}), []string{"codex"}},
+		{"no names recorded", obs(runtimeIdentity{Known: true, SessionID: "gc-1", Token: "tok-1"}), []string{"codex"}},
+		{"no observation", nil, []string{"codex"}},
+	}
+	for _, tc := range cases {
+		if got := processNamesFor(&World{Obs: tc.obs, Templates: memo}, row); !slices.Equal(got, tc.want) {
+			t.Errorf("%s: processNamesFor = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }
