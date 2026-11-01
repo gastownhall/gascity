@@ -2574,6 +2574,11 @@ resource = "fixed_sleep"
 calls = 4
 
 [[count]]
+path = "internal/session/manager_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
 path = "internal/session/nocity_guard_test.go"
 resource = "subprocess"
 calls = 1
