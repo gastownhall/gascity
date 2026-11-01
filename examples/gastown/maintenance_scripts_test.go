@@ -11720,6 +11720,180 @@ esac
 	}
 }
 
+// gateSweepRigStoreBd is a bd double for the rig tests below. It models one
+// due timer gate per bead store: $GATE_DIR/<scope>.open holds a store's open
+// gate, and `gate check --type=timer` in that scope closes it (renames it to
+// .closed), as bd does with a timer gate past its deadline. Scopes named in
+// BD_TIMER_FAIL_SCOPES fail their timer check instead. Every call is logged
+// with its scope to BD_LOG.
+const gateSweepRigStoreBd = `#!/bin/sh
+scope="${GC_FAKE_SCOPE:-city}"
+printf '%s|%s\n' "$scope" "$*" >> "$BD_LOG"
+case "$*" in
+  *--type=timer*)
+    case " ${BD_TIMER_FAIL_SCOPES:-} " in
+      *" $scope "*)
+        echo "bd: simulated timer-gate failure in $scope" >&2
+        exit 1
+        ;;
+    esac
+    if [ -f "$GATE_DIR/$scope.open" ]; then
+      mv "$GATE_DIR/$scope.open" "$GATE_DIR/$scope.closed"
+    fi
+    ;;
+esac
+exit 0
+`
+
+// gateSweepRigList names the city's hq pseudo-rig, two live rigs and a
+// suspended one, the shape `gc rig list --json` reports.
+const gateSweepRigList = `{"rigs":[` +
+	`{"name":"city","hq":true},` +
+	`{"name":"frontend","hq":false},` +
+	`{"name":"backend","hq":false},` +
+	`{"name":"archive","hq":false,"suspended":true}]}`
+
+// gateSweepRigEnv sets up gate-sweep.sh against the bd double bdBody (behind
+// the fake gc's scope routing) with one due timer gate in each of the given
+// stores.
+func gateSweepRigEnv(t *testing.T, bdBody string, scopes ...string) (gateDir, bdLog string, env map[string]string) {
+	t.Helper()
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; gate-sweep.sh reads the rig list with it")
+	}
+	binDir, bdLog, env := gateSweepEnv(t)
+	writeExecutable(t, filepath.Join(binDir, "bd"), bdBody)
+	gateDir = t.TempDir()
+	for _, scope := range scopes {
+		if err := os.WriteFile(filepath.Join(gateDir, scope+".open"), []byte("timer gate\n"), 0o644); err != nil {
+			t.Fatalf("seed gate in %s: %v", scope, err)
+		}
+	}
+	env["GATE_DIR"] = gateDir
+	env["FAKE_RIG_LIST_JSON"] = gateSweepRigList
+	return gateDir, bdLog, env
+}
+
+func gateClosed(gateDir, scope string) bool {
+	return fileExists(filepath.Join(gateDir, scope+".closed"))
+}
+
+// TestGateSweepClosesDueTimerGatesInEveryRigStore pins that a timer gate in a
+// rig's bead store resolves on its own. `gc bd gate check` with no --rig
+// reaches the city store only, so a sweep that checks only there leaves a
+// rig's gate open past its deadline indefinitely, and whatever waits on it
+// never wakes. The hq pseudo-rig is the city store (checked once, bare) and a
+// suspended rig is not touched.
+func TestGateSweepClosesDueTimerGatesInEveryRigStore(t *testing.T) {
+	gateDir, bdLog, env := gateSweepRigEnv(t, gateSweepRigStoreBd, "city", "rig:frontend", "rig:backend", "rig:archive")
+
+	runScript(t, coreScriptPath("gate-sweep.sh"), env)
+
+	log, _ := os.ReadFile(bdLog)
+	for _, scope := range []string{"city", "rig:frontend", "rig:backend"} {
+		if !gateClosed(gateDir, scope) {
+			t.Errorf("due timer gate in %s still open after a sweep; bd calls:\n%s", scope, log)
+		}
+		if want := scope + "|gate check --type=gh --escalate"; !strings.Contains(string(log), want) {
+			t.Errorf("missing %q in bd calls:\n%s", want, log)
+		}
+	}
+	if gateClosed(gateDir, "rig:archive") || strings.Contains(string(log), "rig:archive|") {
+		t.Errorf("a suspended rig's store must not be touched; bd calls:\n%s", log)
+	}
+	if strings.Contains(string(log), "rig:city|") {
+		t.Errorf("the hq pseudo-rig is the city store and must not be swept as a rig; bd calls:\n%s", log)
+	}
+}
+
+// TestGateSweepSweepsRemainingRigsAfterARigTimerFailure pins that one rig's
+// failing timer check neither hides the failure nor stops the sweep of the
+// stores after it. The run exits non-zero, so the controller logs the output
+// naming the rig.
+func TestGateSweepSweepsRemainingRigsAfterARigTimerFailure(t *testing.T) {
+	gateDir, bdLog, env := gateSweepRigEnv(t, gateSweepRigStoreBd, "city", "rig:frontend", "rig:backend")
+	env["BD_TIMER_FAIL_SCOPES"] = "rig:frontend"
+
+	out, err := runScriptResult(t, coreScriptPath("gate-sweep.sh"), env)
+	if err == nil {
+		t.Fatalf("gate-sweep must exit non-zero when a rig's timer check fails; got success\n%s", out)
+	}
+	if !strings.Contains(string(out), "frontend") {
+		t.Errorf("the failure output must name the rig; got:\n%s", out)
+	}
+	if !gateClosed(gateDir, "rig:backend") {
+		log, _ := os.ReadFile(bdLog)
+		t.Errorf("rig backend was not swept after rig frontend failed; bd calls:\n%s\n%s", log, out)
+	}
+}
+
+// TestGateSweepToleratesRigGhGateBdFailures extends the gh-line tolerance to
+// rig stores: bd shells out to gh there too.
+func TestGateSweepToleratesRigGhGateBdFailures(t *testing.T) {
+	_, bdLog, env := gateSweepRigEnv(t, `#!/bin/sh
+printf '%s|%s\n' "$GC_FAKE_SCOPE" "$*" >> "$BD_LOG"
+case "$GC_FAKE_SCOPE|$*" in
+  rig:*--type=gh*)
+    echo "bd: simulated gh-gate failure (e.g., missing gh auth)" >&2
+    exit 1
+    ;;
+esac
+exit 0
+`)
+
+	out, err := runScriptResult(t, coreScriptPath("gate-sweep.sh"), env)
+	if err != nil {
+		t.Fatalf("gate-sweep should exit 0 when only a rig's gh-gate bd call fails; got %v\n%s", err, out)
+	}
+	if log, _ := os.ReadFile(bdLog); !strings.Contains(string(log), "rig:backend|gate check --type=gh") {
+		t.Fatalf("the sweep must reach every rig's gh check; bd calls:\n%s", log)
+	}
+}
+
+// TestGateSweepSkipsRigsThatAreNotBdStores pins that a rig whose beads
+// provider is not bd (a file-backed store under a bd city) is skipped, not
+// failed: gc refuses `gc bd` there, and the store has no bd gates to check.
+// Counting the refusal as a timer failure would fail the order on every
+// cooldown and bury a real timer failure in the noise.
+func TestGateSweepSkipsRigsThatAreNotBdStores(t *testing.T) {
+	gateDir, bdLog, env := gateSweepRigEnv(t, gateSweepRigStoreBd, "city", "rig:frontend")
+	env["FAKE_NOT_BD_SCOPES"] = "rig:backend"
+
+	out, err := runScriptResult(t, coreScriptPath("gate-sweep.sh"), env)
+	if err != nil {
+		t.Fatalf("gate-sweep should exit 0 when a rig is not a bd bead store; got %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "backend is not a bd bead store") {
+		t.Errorf("the output must name the rig that was skipped; got:\n%s", out)
+	}
+	log, _ := os.ReadFile(bdLog)
+	for _, scope := range []string{"city", "rig:frontend"} {
+		if !gateClosed(gateDir, scope) {
+			t.Errorf("due timer gate in %s still open after a sweep; bd calls:\n%s\n%s", scope, log, out)
+		}
+	}
+}
+
+// TestGateSweepFailsLoudWhenRigsCannotBeListed pins that an unreadable rig
+// list is reported rather than silently narrowing the sweep to the city
+// store, which is the defect the rig sweep exists to fix. The city store is
+// still swept.
+func TestGateSweepFailsLoudWhenRigsCannotBeListed(t *testing.T) {
+	gateDir, _, env := gateSweepRigEnv(t, gateSweepRigStoreBd, "city")
+	env["FAKE_RIG_LIST_FAIL"] = "1"
+
+	out, err := runScriptResult(t, coreScriptPath("gate-sweep.sh"), env)
+	if err == nil {
+		t.Fatalf("gate-sweep must exit non-zero when the rig list cannot be read; got success\n%s", out)
+	}
+	if !strings.Contains(string(out), "rig list") {
+		t.Errorf("the failure output must say the rig list could not be read; got:\n%s", out)
+	}
+	if !gateClosed(gateDir, "city") {
+		t.Errorf("the city store must still be swept when the rig list fails:\n%s", out)
+	}
+}
+
 // hermeticGitEnv builds a git invocation env that strips any pre-existing
 // GIT_* control variables from the parent environment before applying the
 // overrides — same approach as mergeTestEnv. This avoids duplicate keys
