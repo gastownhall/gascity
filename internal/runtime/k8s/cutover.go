@@ -45,7 +45,7 @@ func NewSeamBackedWithSecurityConfig(config PodSecurityConfig) (runtime.Provider
 // NewSeamBackedWithConfig constructs a seam-backed K8s provider with optional
 // pod identity values, Secret projections, and provider options.
 func NewSeamBackedWithConfig(config PodSecurityConfig, secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount, opts ...Option) (runtime.Provider, error) {
-	raw, err := newProviderWithConfig(config, secretEnv, secretMounts)
+	raw, err := NewProviderWithConfig(config, secretEnv, secretMounts)
 	if err != nil {
 		return nil, err
 	}

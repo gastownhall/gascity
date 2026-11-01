@@ -106,24 +106,26 @@ type schedulingFields struct {
 // Uses rest.InClusterConfig() when running in a pod, falls back to
 // clientcmd.BuildConfigFromFlags() for local development.
 func NewProvider() (*Provider, error) {
-	return newProviderWithConfig(PodSecurityConfig{}, nil, nil)
+	return NewProviderWithConfig(PodSecurityConfig{}, nil, nil)
 }
 
 // NewProviderWithSecretProjection creates a provider with optional,
 // configuration-backed Kubernetes Secret projections. Existing GC_K8S_*
 // environment settings retain their normal behavior.
 func NewProviderWithSecretProjection(secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount) (*Provider, error) {
-	return newProviderWithConfig(PodSecurityConfig{}, secretEnv, secretMounts)
+	return NewProviderWithConfig(PodSecurityConfig{}, secretEnv, secretMounts)
 }
 
 // NewProviderWithSecurityConfig creates a K8s session provider using optional
 // pod identity values from config. GC_K8S_RUN_AS_USER, GC_K8S_RUN_AS_GROUP,
 // and GC_K8S_FS_GROUP override their corresponding config values when set.
 func NewProviderWithSecurityConfig(config PodSecurityConfig) (*Provider, error) {
-	return newProviderWithConfig(config, nil, nil)
+	return NewProviderWithConfig(config, nil, nil)
 }
 
-func newProviderWithConfig(config PodSecurityConfig, secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount) (*Provider, error) {
+// NewProviderWithConfig creates a provider with optional pod identity and
+// Secret projections.
+func NewProviderWithConfig(config PodSecurityConfig, secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount) (*Provider, error) {
 	podSecurity, err := resolvePodSecurityConfig(config)
 	if err != nil {
 		return nil, err

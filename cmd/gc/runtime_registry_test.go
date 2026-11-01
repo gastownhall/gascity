@@ -462,21 +462,18 @@ func TestRuntimeRegistryACPConfigCarriesCancelTimeout(t *testing.T) {
 	}
 }
 
-func TestK8sConfigReachesBuiltinAndHybridProviders(t *testing.T) {
+func TestK8sConfigAndSecretProjectionReachBuiltinAndHybridProviders(t *testing.T) {
 	oldConstructor := newSeamBackedK8sProvider
 	t.Cleanup(func() { newSeamBackedK8sProvider = oldConstructor })
 
 	wantEnv := []runtime.K8sSecretEnv{{Name: "SERVICE_TOKEN", Secret: "service-auth", Key: "token"}}
 	wantMounts := []runtime.K8sSecretMount{{Secret: "service-files", MountPath: "/run/service"}}
-	runAsUser, runAsGroup, fsGroup := int64(1001), int64(1002), int64(1003)
+	wantUser, wantGroup, wantFSGroup := int64(1234), int64(2345), int64(3456)
 	var calls int
-	newSeamBackedK8sProvider = func(config sessionk8s.PodSecurityConfig, env []runtime.K8sSecretEnv, mounts []runtime.K8sSecretMount, opts ...sessionk8s.Option) (runtime.Provider, error) {
+	newSeamBackedK8sProvider = func(security sessionk8s.PodSecurityConfig, env []runtime.K8sSecretEnv, mounts []runtime.K8sSecretMount, cityName string) (runtime.Provider, error) {
 		calls++
-		if config.RunAsUser == nil || *config.RunAsUser != runAsUser || config.RunAsGroup == nil || *config.RunAsGroup != runAsGroup || config.FSGroup == nil || *config.FSGroup != fsGroup {
-			t.Errorf("K8s constructor call %d pod security config = %+v, want UID/GID/fsGroup %d/%d/%d", calls, config, runAsUser, runAsGroup, fsGroup)
-		}
-		if len(opts) != 1 {
-			t.Errorf("K8s constructor call %d options = %d, want city-name option", calls, len(opts))
+		if cityName != "city" {
+			t.Errorf("K8s constructor call %d city name = %q, want city", calls, cityName)
 		}
 		if len(env) != len(wantEnv) || env[0] != wantEnv[0] {
 			t.Errorf("K8s constructor call %d secret env = %#v, want %#v", calls, env, wantEnv)
@@ -484,15 +481,16 @@ func TestK8sConfigReachesBuiltinAndHybridProviders(t *testing.T) {
 		if len(mounts) != len(wantMounts) || mounts[0] != wantMounts[0] {
 			t.Errorf("K8s constructor call %d secret mounts = %#v, want %#v", calls, mounts, wantMounts)
 		}
+		if security.RunAsUser == nil || *security.RunAsUser != wantUser || security.RunAsGroup == nil || *security.RunAsGroup != wantGroup || security.FSGroup == nil || *security.FSGroup != wantFSGroup {
+			t.Errorf("K8s constructor call %d pod security = %+v, want runAsUser=%d runAsGroup=%d fsGroup=%d", calls, security, wantUser, wantGroup, wantFSGroup)
+		}
 		return runtime.NewFake(), nil
 	}
 
 	sc := config.SessionConfig{RemoteMatch: "remote", K8s: config.K8sConfig{
-		RunAsUser:    &runAsUser,
-		RunAsGroup:   &runAsGroup,
-		FSGroup:      &fsGroup,
 		SecretEnv:    []config.K8sSecretEnv{{Name: "SERVICE_TOKEN", Secret: "service-auth", Key: "token"}},
 		SecretMounts: []config.K8sSecretMount{{Secret: "service-files", MountPath: "/run/service"}},
+		RunAsUser:    &wantUser, RunAsGroup: &wantGroup, FSGroup: &wantFSGroup,
 	}}
 
 	if _, err := buildRuntimeRegistry().New("k8s", sc, "city", t.TempDir()); err != nil {
