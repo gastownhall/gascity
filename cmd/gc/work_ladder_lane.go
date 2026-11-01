@@ -134,14 +134,14 @@ func (l *externalReadsLane) runWorkLadder(ctx context.Context, env externalReads
 	if l.turnReaderFor != nil {
 		p.turnReader = l.turnReaderFor(env)
 	}
-	p.fresh = buildLadderFreshIndex(raw)
+	p.fresh = buildLadderFreshIndex(p.cfg, raw)
 	work := p.outstanding(s, raw)
 	governed := make(map[string]bool)
 	for _, row := range raw {
 		if ctx.Err() != nil {
 			return
 		}
-		if !ladderGoverns(row) {
+		if !ladderGoverns(p.cfg, row) {
 			continue
 		}
 		governed[row.ID] = true
@@ -151,10 +151,14 @@ func (l *externalReadsLane) runWorkLadder(ctx context.Context, env externalReads
 }
 
 // ladderGoverns is the seats the ladder paces: open pool-managed session
-// rows with a runtime name, as the backstops governed.
-func ladderGoverns(row beads.Bead) bool {
-	return !strings.EqualFold(strings.TrimSpace(row.Status), "closed") && isSessionBead(row) &&
-		strings.TrimSpace(row.Metadata["pool_managed"]) == "true" && strings.TrimSpace(row.Metadata["session_name"]) != ""
+// rows with a runtime name, as the backstops governed, including a
+// canonical-singleton pool seat a configured named session took over
+// (isCollapsedCanonicalSingletonPoolBead).
+func ladderGoverns(cfg *config.City, row beads.Bead) bool {
+	if strings.EqualFold(strings.TrimSpace(row.Status), "closed") || !isSessionBead(row) || strings.TrimSpace(row.Metadata["session_name"]) == "" {
+		return false
+	}
+	return strings.TrimSpace(row.Metadata["pool_managed"]) == "true" || isCollapsedCanonicalSingletonPoolBead(cfg, row)
 }
 
 // standDownLadder hands every governed seat back to the backstops when the
@@ -169,7 +173,7 @@ func (l *externalReadsLane) standDownLadder(env externalReadsEnv, raw []beads.Be
 	p := &ladderPass{l: l, env: env, cfg: env.Cfg, now: l.now(), front: sessionFrontDoor(env.CityStore)}
 	off := workladder.Gate{Held: true, Reason: "work_ladder_off"}
 	for _, row := range raw {
-		if !ladderGoverns(row) {
+		if !ladderGoverns(p.cfg, row) {
 			continue
 		}
 		r, err := workladder.DecodeLadder(row.Metadata[session.WorkLadderKey])
@@ -239,7 +243,7 @@ func (p *ladderPass) outstanding(s *allocSummary, raw []beads.Bead) map[string][
 		}
 	}
 	for _, row := range raw {
-		if !ladderGoverns(row) {
+		if !ladderGoverns(p.cfg, row) {
 			continue
 		}
 		var ts []ladderTarget

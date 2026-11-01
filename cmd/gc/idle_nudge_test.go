@@ -1171,3 +1171,62 @@ func TestNudgeStalledPoolClaims_DrainReadsTheLiveTurn(t *testing.T) {
 		})
 	}
 }
+
+// Under [daemon] work_ladder = "off" the claim backstop paces work instead
+// of the ladder, and it must also keep rescuing a canonical-singleton pool
+// seat that the configured named session took over (collapsedSingletonRow):
+// the takeover clears pool_managed, but the seat still wears its pool name.
+func TestNudgeStalledPoolClaims_NudgesCollapsedSingletonPoolSeat(t *testing.T) {
+	cfg := collapsedSingletonCfg()
+	store := beads.NewMemStore()
+	session := collapsedSingletonRow(t, cfg, store)
+	trigger, err := store.Create(beads.Bead{Title: "routed work", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadata(session.ID, testTriggerBeadIDKey, trigger.ID); err != nil {
+		t.Fatal(err)
+	}
+	session = mustGetTestBead(t, store, session.ID)
+	name := session.Metadata["session_name"]
+	sp := runningIdleClaimFake(t, name)
+	work := []beads.Bead{trigger}
+	live := liveClaimDrain(store, nil)
+	clk := &clock.Fake{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	var out bytes.Buffer
+
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), live, &out)
+	session = mustGetTestBead(t, store, session.ID)
+	if got := session.Metadata[idleClaimNudgeTriggerKey]; got != trigger.ID {
+		t.Fatalf("idle claim marker trigger = %q, want %s", got, trigger.ID)
+	}
+	clk.Advance(idleClaimNudgeGrace + time.Second)
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), live, &out)
+	if got := sp.CountCalls("Nudge", name); got != 1 {
+		t.Fatalf("Nudge calls = %d, want 1 after grace", got)
+	}
+}
+
+// A named session that was never a pool seat wears its reserved name and
+// stays out of the pool claim backstop.
+func TestNudgeStalledPoolClaims_IgnoresPlainNamedSession(t *testing.T) {
+	cfg := collapsedSingletonCfg()
+	name := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "poller")
+	session := beads.Bead{ID: "gc-9", Status: "open", Type: "session", Metadata: map[string]string{
+		"session_name": name, "session_origin": "named", "configured_named_session": "true",
+		"template": "poller", testTriggerBeadIDKey: "work-a",
+	}}
+	sp := runningIdleClaimFake(t, name)
+	work := []beads.Bead{{ID: "work-a", Status: "open"}}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{session, work[0]}, nil)
+	live := liveClaimDrain(store, nil)
+	clk := &clock.Fake{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	var out bytes.Buffer
+
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), live, &out)
+	clk.Advance(idleClaimNudgeGrace + time.Second)
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), live, &out)
+	if got := sp.CountCalls("Nudge", name); got != 0 {
+		t.Fatalf("Nudge calls = %d, want 0 for a plain named session", got)
+	}
+}
