@@ -193,6 +193,7 @@ func TestK8SSessionStoreIdentityFailsClosedOnMissingOrConflictingIdentity(t *tes
 	}{
 		{name: "missing canonical identity", metadata: "project", wantErr: "missing project identity at", wantPath: true},
 		{name: "identity mismatch", identity: "scope-id", metadata: "other-id", wantErr: "inconsistent project identity"},
+		{name: "metadata mirror missing", identity: "scope-id", metadata: "", wantErr: "is missing project_id"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cityPath := t.TempDir()
