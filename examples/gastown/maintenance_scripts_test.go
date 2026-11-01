@@ -13463,6 +13463,34 @@ func TestOrphanSweepComposesGateAndLocalSkipOutcomes(t *testing.T) {
 	}
 }
 
+// TestOrphanSweepDeclaresNothingForBenignReleaseRace keeps the benign races
+// quiet: `bd release-if-current` printing "skipped" lost its race (the bead
+// changed after listing), which is not a failure to declare -- the sweep did
+// everything it exists to do and the bead moved on. No summary, no outcome
+// declaration, exit 0. On the unfixed script this fails only because the
+// stuck claim never reaches the release; the declaration assertions are the
+// guard proper.
+func TestOrphanSweepDeclaresNothingForBenignReleaseRace(t *testing.T) {
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{hookClaim("ga-hook-raced", "gc-d34d1", "gastown__polecat-gc-d34d1", nil)},
+		nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d1", Status: "closed", IssueType: "session"}},
+		nil,
+		map[string]string{"ORPHAN_SWEEP_RELEASE_OUTPUT": "skipped"})
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if !strings.Contains(run.log, "bd release-if-current ga-hook-raced gc-d34d1") {
+		t.Fatalf("the dead holder's claim was never offered for release\n%s", run.context())
+	}
+	if strings.Contains(run.out, "orphan-sweep:") {
+		t.Fatalf("a benign release race produced a summary:\n%s", run.out)
+	}
+	if outcome, ok := run.outcome(t); ok {
+		t.Fatalf("a benign release race declared outcome %+v", outcome)
+	}
+}
+
 // TestJsonlExportFirstRunArchivePathCreatedBeforeTheRename covers the window
 // between the first run's "archive path absent" check and its rename of the
 // staging repo into place: another exporter (or anything else) can create
