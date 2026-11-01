@@ -191,8 +191,10 @@ func TestTemplateResolverNamedMatchesLegacyWithoutRebind(t *testing.T) {
 				if got.TP.Env["GC_TRIGGER_BEAD_ID"] != info.TriggerBeadID || want.TP.Env["GC_TRIGGER_BEAD_ID"] != "" {
 					t.Fatalf("trigger env: resolver %q, legacy %q; want the row's stamp and none", got.TP.Env["GC_TRIGGER_BEAD_ID"], want.TP.Env["GC_TRIGGER_BEAD_ID"])
 				}
+				// Legacy's params pin the trigger keys empty (agentEnv), so
+				// normalise the resolver's live stamp down to those pins.
 				for _, k := range []string{"GC_SPAWN_ORIGIN", "GC_TRIGGER_BEAD_ID", "GC_TRIGGER_WORK_BEAD_ID"} {
-					delete(got.TP.Env, k)
+					got.TP.Env[k] = ""
 				}
 			}
 			if !reflect.DeepEqual(got.TP, want.TP) {

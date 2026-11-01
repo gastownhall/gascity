@@ -317,6 +317,51 @@ func TestResolveTemplateWithholdsControllerTokenFromConfigAuthoredEnv(t *testing
 	}
 }
 
+// A trigger's demand markers reach a session only when a row's trigger stamps
+// them after resolution. passthroughEnv forwards every non-empty GC_* key of
+// the controller environment, and the session env is an overlay on what the
+// child already inherits (the tmux server's global env), so a seat no trigger
+// started must pin every trigger key to an explicit empty value — the same
+// env -u idiom as the rig scope — or a stale inherited marker passes the
+// demand gate and classifies as unknown (demand_divergence.go).
+func TestResolveTemplatePinsInheritedDemandMarkersEmpty(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	for _, stale := range [][2]string{
+		{"GC_SPAWN_ORIGIN", "demand"},
+		{"GC_TRIGGER_BEAD_ID", "stale-trigger"},
+		{"GC_TRIGGER_WORK_BEAD_ID", "stale-trigger"},
+		{"GC_TRIGGER_BEAD_STORE_REF", "rig:stale"},
+		{"GC_TRIGGER_WORK_STORE_REF", "rig:stale"},
+	} {
+		t.Setenv(stale[0], stale[1])
+	}
+
+	params := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agent := &config.Agent{Name: "worker"}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	for _, key := range triggerEnvKeys {
+		got, ok := tp.Env[key]
+		if !ok || got != "" {
+			t.Errorf("tp.Env[%q] = %q (present=%v), want present and empty: an inherited demand marker reached a no-trigger seat", key, got, ok)
+		}
+	}
+}
+
 // OperatorEnv (ga-evj082) must carry exactly the operator-authored config
 // layers — workspace.Env, the resolved provider's Env, and agent.Env — with
 // the same last-wins override order as the main Env merge, so a resolved
