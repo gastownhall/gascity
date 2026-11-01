@@ -965,6 +965,16 @@ resource = "listener_helper"
 calls = 4
 
 [[count]]
+path = "cmd/gc/nudge_poller_reap_test.go"
+resource = "fixed_sleep"
+calls = 3
+
+[[count]]
+path = "cmd/gc/nudge_poller_reap_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "cmd/gc/nudge_queue_lock_free_test.go"
 resource = "fixed_sleep"
 calls = 1
