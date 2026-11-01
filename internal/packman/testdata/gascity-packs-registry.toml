@@ -55,8 +55,8 @@ schema = 1
   [[pack.release]]
     version = "0.0.8191"
     ref = "feat/rfc-8191-beginner-experience"
-    commit = "fba9d21174c59bc363fc21b2097092cdc8200933"
-    hash = "sha256:f6e16c81159945f34dfefc65075c5b3e142e56f8454f925068a116bfcaee54f5"
+    commit = "1c7b7c7f1e9799b78b84b11780e1012a70fd3ae9"
+    hash = "sha256:ab965fa2b854af8ca952240708500993ddc2247041a5d41637049f30e027a014"
     description = "RFC8191 candidate content for qualification; stable catalog selection is unchanged."
 
 [[pack]]

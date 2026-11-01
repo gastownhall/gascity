@@ -460,6 +460,8 @@ github.com/gastownhall/gascity-packs v0.4.1-0.20261101101005-cb068845a82e h1:pPY
 github.com/gastownhall/gascity-packs v0.4.1-0.20261101101005-cb068845a82e/go.mod h1:OHqPd055b+3Q93mZqxdwTk2/3sz+xxCBUWlggvuRnMk=
 github.com/gastownhall/gascity-packs v0.4.1-0.20261101130635-9ea1e00ca15a h1:r5Qozu3q9/8DPkXiDRxdKMt88b+eP83gGTp28FkL8+E=
 github.com/gastownhall/gascity-packs v0.4.1-0.20261101130635-9ea1e00ca15a/go.mod h1:OHqPd055b+3Q93mZqxdwTk2/3sz+xxCBUWlggvuRnMk=
+github.com/gastownhall/gascity-packs v0.4.1-0.20261101141635-50e6ce8fc07e h1:AGecgnyLJ+Wr19xkJDuJty8zTQMMfdtXHt5q3FkprQY=
+github.com/gastownhall/gascity-packs v0.4.1-0.20261101141635-50e6ce8fc07e/go.mod h1:OHqPd055b+3Q93mZqxdwTk2/3sz+xxCBUWlggvuRnMk=
 github.com/ghodss/yaml v1.0.0/go.mod h1:4dBDuWmgqj2HViK6kFavaiC9ZROes6MMH2rRYeMEF04=
 github.com/gin-contrib/sse v0.1.0/go.mod h1:RHrZQHXnP2xjPF+u1gW/2HnVO7nvIa9PG3Gm+fLHvGI=
 github.com/gin-gonic/gin v1.6.3/go.mod h1:75u5sXoLsGZoRN5Sgbi1eraJ4GU3++wFwWzhwvtwp4M=
