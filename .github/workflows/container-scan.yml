@@ -71,7 +71,9 @@ env:
 jobs:
   runner-policy:
     name: Runner policy
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    # FINAL-01's fork-owned custody dispatch must use a runner attached to the
+    # fork; Blacksmith labels are available only to the canonical repository.
+    runs-on: ${{ github.repository == 'chris-sanders/gascity' && 'ubuntu-latest' || 'blacksmith-2vcpu-ubuntu-2404' }}
     outputs:
       use_blacksmith: ${{ steps.policy.outputs.use_blacksmith }}
       reason: ${{ steps.policy.outputs.reason }}
@@ -93,7 +95,7 @@ jobs:
   dockerfile-config:
     name: Dockerfile config
     needs: runner-policy
-    runs-on: ${{ needs.runner-policy.outputs.runner_8vcpu }}
+    runs-on: ${{ github.repository == 'chris-sanders/gascity' && 'ubuntu-latest' || needs.runner-policy.outputs.runner_8vcpu }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -156,7 +158,7 @@ jobs:
   image-vulnerabilities:
     name: Image vulnerabilities
     needs: runner-policy
-    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+    runs-on: ${{ github.repository == 'chris-sanders/gascity' && 'ubuntu-latest' || needs.runner-policy.outputs.runner_32vcpu }}
     timeout-minutes: 45
     permissions:
       contents: read
@@ -454,7 +456,7 @@ jobs:
         github.repository == 'chris-sanders/gascity' &&
         github.ref == 'refs/heads/codex/gascity-final01-c14-7472f-20261101'
       }}
-    runs-on: ${{ needs.runner-policy.outputs.runner_8vcpu }}
+    runs-on: ${{ github.repository == 'chris-sanders/gascity' && 'ubuntu-latest' || needs.runner-policy.outputs.runner_8vcpu }}
     timeout-minutes: 30
     permissions:
       contents: read

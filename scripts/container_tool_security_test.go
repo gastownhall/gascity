@@ -489,6 +489,35 @@ func TestContainerScanPublishesOnlyVerifiedC14ImageCustody(t *testing.T) {
 	}
 }
 
+// TestContainerScanForkDispatchUsesGitHubHostedRunners keeps the FINAL-01
+// fork-only workflow_dispatch path schedulable where Blacksmith runners are
+// not attached. Canonical upstream runs must continue using the selected
+// Blacksmith runners.
+func TestContainerScanForkDispatchUsesGitHubHostedRunners(t *testing.T) {
+	workflow := readFile(t, repoRoot(t), ".github/workflows/container-scan.yml")
+	for _, want := range []struct {
+		runsOn string
+		count  int
+	}{
+		{
+			runsOn: "runs-on: ${{ github.repository == 'chris-sanders/gascity' && 'ubuntu-latest' || 'blacksmith-2vcpu-ubuntu-2404' }}",
+			count:  1,
+		},
+		{
+			runsOn: "runs-on: ${{ github.repository == 'chris-sanders/gascity' && 'ubuntu-latest' || needs.runner-policy.outputs.runner_8vcpu }}",
+			count:  2,
+		},
+		{
+			runsOn: "runs-on: ${{ github.repository == 'chris-sanders/gascity' && 'ubuntu-latest' || needs.runner-policy.outputs.runner_32vcpu }}",
+			count:  1,
+		},
+	} {
+		if got := strings.Count(workflow, want.runsOn); got != want.count {
+			t.Errorf("container-scan.yml has %d occurrences of %q, want %d", got, want.runsOn, want.count)
+		}
+	}
+}
+
 // TestContainerScanRunsMCPMailFilelockExitRegression keeps the filelock exit
 // regression running against the built gc-mcp-mail image. A text pin can say
 // which filelock the lock names; only this run shows that the image's actual
