@@ -12228,7 +12228,10 @@ fi
 // foreign-identity gate (orphanSweepGateStubArm). ORPHAN_SWEEP_GATE_EXIT makes
 // it answer "unknown" with that exit code instead, and ORPHAN_SWEEP_GATE_ABSENT
 // models a binary without the verb (exit 1, no JSON). ORPHAN_SWEEP_MAIL_EXIT
-// is the exit code of `mail send`.
+// is the exit code of `mail send`. `bd show` fails for every id listed in
+// ORPHAN_SWEEP_SHOW_FAIL_IDS, listed work beads included, and
+// `bd release-if-current` prints ORPHAN_SWEEP_RELEASE_OUTPUT (default
+// "released") and exits ORPHAN_SWEEP_RELEASE_EXIT (default 0).
 const orphanSweepSharedRigFakeGC = `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 if [ "$1" = "agent" ] && [ -n "${ORPHAN_SWEEP_GATE_ABSENT:-}" ]; then
@@ -12279,6 +12282,9 @@ EOF
       exit 0
     fi
     if [ "$2" = "show" ] && [ "$4" = "--json" ]; then
+      if [ -n "${ORPHAN_SWEEP_SHOW_FAIL_IDS:-}" ] && printf '%s\n' "$ORPHAN_SWEEP_SHOW_FAIL_IDS" | grep -Fxq -- "$3"; then
+        exit 1
+      fi
       row=$(printf '%s\n%s\n%s\n%s\n' "${ORPHAN_SWEEP_HQ_BEADS_JSON:-[]}" "${ORPHAN_SWEEP_SHARED_BEADS_JSON:-[]}" "${ORPHAN_SWEEP_FEDERATED_BEADS_JSON:-[]}" "${ORPHAN_SWEEP_SESSION_BEADS_JSON:-[]}" | jq -c --arg id "$3" '.[] | select(.id == $id)' | head -n 1)
       if [ -n "$row" ]; then
         printf '[%s]\n' "$row"
@@ -12287,8 +12293,8 @@ EOF
       exit 1
     fi
     if [ "$2" = "release-if-current" ]; then
-      printf 'released\n'
-      exit 0
+      printf '%s\n' "${ORPHAN_SWEEP_RELEASE_OUTPUT:-released}"
+      exit "${ORPHAN_SWEEP_RELEASE_EXIT:-0}"
     fi
     if [ "$2" = "update" ]; then
       exit 0
@@ -13306,6 +13312,66 @@ func TestOrphanSweepKeepsClaimWithUnreadableLegacySessionHint(t *testing.T) {
 			}
 			if !strings.Contains(run.out, "orphan-sweep: reset 0 orphaned beads, skipped 1 unverifiable") {
 				t.Fatalf("unexpected orphan-sweep output:\n%s", run.out)
+			}
+		})
+	}
+}
+
+// TestOrphanSweepDeclaresLocalSkipsAsPartialScopes: the controller logs an
+// exit-0 run's output nowhere (#4543), so a local claim the sweep leaves in
+// place is declared as a partial outcome with one scope per claim, naming the
+// bead, its holder and the check that failed.
+func TestOrphanSweepDeclaresLocalSkipsAsPartialScopes(t *testing.T) {
+	const beadID = "ga-hook-dead"
+	for _, tc := range []struct {
+		name       string
+		sessionID  string
+		extra      map[string]string
+		env        map[string]string
+		wantReason []string
+	}{
+		{
+			name: "holder unverifiable", sessionID: "gc-d34d1",
+			extra:      map[string]string{"gc.session_bead_id": "gc-legacy9"},
+			wantReason: []string{"gc-d34d1", "gc-legacy9"},
+		},
+		{
+			name: "work bead re-read failed", sessionID: "gc-d34d2",
+			env:        map[string]string{"ORPHAN_SWEEP_SHOW_FAIL_IDS": beadID},
+			wantReason: []string{"gc-d34d2", "re-read"},
+		},
+		{
+			name: "conditional release failed", sessionID: "gc-d34d3",
+			env:        map[string]string{"ORPHAN_SWEEP_RELEASE_EXIT": "1"},
+			wantReason: []string{"gc-d34d3", "release"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := runOrphanSweepGateFixture(t,
+				[]orphanSweepGateRow{hookClaim(beadID, tc.sessionID, "gastown__polecat-"+tc.sessionID, tc.extra)},
+				nil,
+				[]orphanSweepGateRow{{ID: tc.sessionID, Status: "closed", IssueType: "session"}},
+				nil, tc.env)
+			if run.err != nil {
+				t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+			}
+			if !strings.Contains(run.out, "skipped 1 unverifiable") {
+				t.Fatalf("claim was not counted as skipped:\n%s", run.context())
+			}
+			outcome, ok := run.outcome(t)
+			if !ok {
+				t.Fatalf("no outcome declared for a skipped local claim\n%s", run.context())
+			}
+			if outcome.Outcome != "partial" {
+				t.Fatalf("outcome = %q, want partial", outcome.Outcome)
+			}
+			if len(outcome.Scopes) != 1 || outcome.Scopes[0].Scope != beadID {
+				t.Fatalf("outcome scopes = %+v, want exactly one for %s", outcome.Scopes, beadID)
+			}
+			for _, want := range tc.wantReason {
+				if !strings.Contains(outcome.Scopes[0].Reason, want) {
+					t.Errorf("scope reason %q does not name %q", outcome.Scopes[0].Reason, want)
+				}
 			}
 		})
 	}
