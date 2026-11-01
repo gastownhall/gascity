@@ -137,6 +137,14 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			want:     sessionIDStart,
 		},
 		{
+			name:     "transcript present resumes",
+			provider: "claude",
+			setup: func(t *testing.T, f *rotatedKeyFixture) {
+				writeClaudeTranscript(t, f.root, f.beadWorkDir, rotatedKey)
+			},
+			want: resumeStart,
+		},
+		{
 			name:     "probe reads the launch work dir",
 			provider: "claude",
 			setup: func(t *testing.T, f *rotatedKeyFixture) {
