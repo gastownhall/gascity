@@ -711,3 +711,181 @@ func assertNoDefaultedLastJobPID(t *testing.T, paths ...string) {
 		}
 	}
 }
+
+// privateGotmpdirPattern is the shape of a runner's private GOTMPDIR:
+// gc-gotmp-<creator PID>-<mktemp suffix>.
+var privateGotmpdirPattern = regexp.MustCompile(`^gc-gotmp-[0-9]+-[A-Za-z0-9]+$`)
+
+// assertPrivateGotmpdir checks that the product ran with a private GOTMPDIR
+// directly under base, and that the runner removed it on the way out.
+func assertPrivateGotmpdir(t *testing.T, got, base string) {
+	t.Helper()
+	if filepath.Dir(got) != base || !privateGotmpdirPattern.MatchString(filepath.Base(got)) {
+		t.Fatalf("product GOTMPDIR = %q, want a private gc-gotmp-<pid>-<random> dir directly under %s", got, base)
+	}
+	if _, err := os.Stat(got); !os.IsNotExist(err) {
+		t.Fatalf("private GOTMPDIR %s survived the run (stat err=%v): go's WORK dirs leak with it", got, err)
+	}
+}
+
+// TestGoTestShardRemovesItsGotmpdirWhenTheRunEnds covers the WORK-dir leak:
+// go removes its go-build WORK dir on a normal exit or SIGINT but not on
+// SIGTERM or SIGKILL, so every externally killed run left up to ~1 GB per
+// go process in /var/tmp. The runner gives go a private GOTMPDIR and removes
+// it whole, whether the run finishes or the runner is terminated.
+func TestGoTestShardRemovesItsGotmpdirWhenTheRunEnds(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		terminate bool
+	}{
+		{name: "run finishes", terminate: false},
+		{name: "runner terminated", terminate: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recordDir := t.TempDir()
+			recorded := filepath.Join(recordDir, "gotmpdir")
+			pidFile := filepath.Join(recordDir, "run.pid")
+			tail := "    exit 0"
+			if tc.terminate {
+				tail = fmt.Sprintf("    sleep %d", fixtureLifetimeSeconds)
+			}
+			// The body stands in for go: it builds into a WORK dir under its
+			// GOTMPDIR, as a test binary compile does, then records the path.
+			fixture := newReapFixture(t, fmt.Sprintf(`
+    mkdir -p "$GOTMPDIR/go-build1/b001"
+    : > "$GOTMPDIR/go-build1/b001/example.test"
+    printf '%%s\n' "$GOTMPDIR" > %q
+    echo $$ > %q
+%s
+`, recorded, pidFile, tail))
+
+			cmd := fixture.start(t)
+			if tc.terminate {
+				waitForPIDFile(t, pidFile, 20*time.Second)
+				if err := syscall.Kill(cmd.Process.Pid, syscall.SIGTERM); err != nil {
+					t.Fatalf("signal runner: %v", err)
+				}
+			}
+			_ = waitWithin(t, cmd, 30*time.Second)
+
+			gotmpdir, err := os.ReadFile(recorded)
+			if err != nil {
+				t.Fatalf("the run never recorded its GOTMPDIR: %v\n%s", err, fixture.output())
+			}
+			assertPrivateGotmpdir(t, strings.TrimSpace(string(gotmpdir)), fixture.tmpDir)
+		})
+	}
+}
+
+// TestHarnessGotmpdirSweepRemovesOnlyAbandonedDirs covers the runs that die
+// too hard to run their own traps (SIGKILL of the whole tree): a later run
+// sweeps their private GOTMPDIRs, and must never take one that may still be
+// in use.
+func TestHarnessGotmpdirSweepRemovesOnlyAbandonedDirs(t *testing.T) {
+	base := t.TempDir()
+
+	// Above any kernel's pid_max, so it can never name a live creator.
+	const deadPID = 2147480000
+
+	old := time.Now().Add(-2 * time.Hour)
+	makeDir := func(name string, recentFile bool) string {
+		dir := filepath.Join(base, name)
+		work := filepath.Join(dir, "go-build1", "b001")
+		if err := os.MkdirAll(work, 0o755); err != nil {
+			t.Fatalf("create %s: %v", work, err)
+		}
+		binary := filepath.Join(work, "example.test")
+		if err := os.WriteFile(binary, []byte("x"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", binary, err)
+		}
+		for _, p := range []string{binary, work, filepath.Dir(work), dir} {
+			if err := os.Chtimes(p, old, old); err != nil {
+				t.Fatalf("age %s: %v", p, err)
+			}
+		}
+		if recentFile {
+			if err := os.Chtimes(binary, time.Now(), time.Now()); err != nil {
+				t.Fatalf("touch %s: %v", binary, err)
+			}
+		}
+		return dir
+	}
+
+	abandoned := makeDir(fmt.Sprintf("gc-gotmp-%d-aaaaaa", deadPID), false)
+	live := makeDir(fmt.Sprintf("gc-gotmp-%d-bbbbbb", os.Getpid()), false)
+	stillWriting := makeDir(fmt.Sprintf("gc-gotmp-%d-cccccc", deadPID), true)
+	held := makeDir(fmt.Sprintf("gc-gotmp-%d-dddddd", deadPID), false)
+	foreign := makeDir("go-build123456", false)
+
+	// lsof reports a holder only for the held dir: a running test binary
+	// whose runner died.
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("create bin dir: %v", err)
+	}
+	writeExecutable(t, filepath.Join(binDir, "lsof"), `#!/bin/sh
+for arg in "$@"; do last="$arg"; done
+case "$last" in
+  *-dddddd) echo 4242; exit 0 ;;
+esac
+exit 1
+`)
+
+	script := fmt.Sprintf(`
+set -euo pipefail
+source %q
+gc_harness_sweep_stale_gotmpdirs %q 3600
+`, filepath.Join(repoRoot(t), "scripts", "lib", "harness-reap.sh"), base)
+	cmd := harnessBash(script)
+	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sweep failed: %v\n%s", err, out)
+	}
+
+	if _, err := os.Stat(abandoned); !os.IsNotExist(err) {
+		t.Errorf("sweep kept %s, whose creator is gone and which nothing touched or holds; output:\n%s", abandoned, out)
+	}
+	for _, kept := range []string{live, stillWriting, held, foreign} {
+		if _, err := os.Stat(kept); err != nil {
+			t.Errorf("sweep removed %s, which it must never touch: %v; output:\n%s", kept, err, out)
+		}
+	}
+}
+
+// TestHarnessGotmpdirIsOwnedByTheOutermostRunner pins the nesting rule: a
+// runner whose GOTMPDIR is already a private dir shares it and never removes
+// it, while a runner that creates one removes it.
+func TestHarnessGotmpdirIsOwnedByTheOutermostRunner(t *testing.T) {
+	base := t.TempDir()
+	outer := filepath.Join(base, "gc-gotmp-1-outerX")
+	if err := os.Mkdir(outer, 0o755); err != nil {
+		t.Fatalf("create outer dir: %v", err)
+	}
+	script := fmt.Sprintf(`
+set -euo pipefail
+source %q
+gc_harness_own_gotmpdir %q 3600
+printf 'shared=%%s owned=%%s\n' "$gc_harness_gotmpdir" "$gc_harness_gotmpdir_owned"
+gc_harness_remove_gotmpdir
+gc_harness_own_gotmpdir %q 3600
+printf 'created=%%s owned=%%s\n' "$gc_harness_gotmpdir" "$gc_harness_gotmpdir_owned"
+[ -d "$gc_harness_gotmpdir" ]
+gc_harness_remove_gotmpdir
+[ ! -e "$gc_harness_gotmpdir" ]
+`, filepath.Join(repoRoot(t), "scripts", "lib", "harness-reap.sh"), outer, base)
+	out, err := harnessBash(script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("own/remove cycle failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "shared="+outer+" owned=0") {
+		t.Errorf("a nested runner did not share the outer runner's dir; output:\n%s", out)
+	}
+	if _, err := os.Stat(outer); err != nil {
+		t.Errorf("a nested runner removed the outer runner's dir: %v", err)
+	}
+	m := regexp.MustCompile(`created=(\S+) owned=1`).FindStringSubmatch(string(out))
+	if m == nil || filepath.Dir(m[1]) != base || !privateGotmpdirPattern.MatchString(filepath.Base(m[1])) {
+		t.Errorf("an outermost runner did not create its own private dir under %s; output:\n%s", base, out)
+	}
+}

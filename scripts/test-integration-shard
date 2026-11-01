@@ -18,6 +18,8 @@ source "$repo_root/scripts/lib/common.sh"
 # shellcheck source=lib/test-slice.sh
 source "$repo_root/scripts/lib/test-slice.sh"
 gc_test_slice_reexec "$repo_root/scripts/test-integration-shard" "$@"
+# shellcheck source=lib/harness-reap.sh
+source "$repo_root/scripts/lib/harness-reap.sh"
 
 timeout="${GO_TEST_TIMEOUT:-30m}"
 pkg="./test/integration"
@@ -27,6 +29,25 @@ gocache_val="$(go env GOCACHE)"
 gomodcache_val="$(go env GOMODCACHE)"
 gotmpdir_val="$(go env GOTMPDIR)"
 goroot_val="$(go env GOROOT)"
+
+# Every go invocation in this shard, test-go-test-shard children included,
+# builds under one private GOTMPDIR that these traps remove, so a killed shard
+# cannot strand go's WORK dirs (harness-reap.sh). Under the parallel fan-out
+# this is the fan-out's dir, shared, not a new one.
+gc_integration_on_signal() {
+  local sig="$1"
+  gc_harness_remove_gotmpdir
+  trap - "$sig"
+  kill -"$sig" $$
+}
+trap 'gc_harness_remove_gotmpdir' EXIT
+trap 'gc_integration_on_signal INT' INT
+trap 'gc_integration_on_signal TERM' TERM
+trap 'gc_integration_on_signal HUP' HUP
+gotmpdir_floor="$(gc_harness_duration_seconds "$timeout")" || gotmpdir_floor=3600
+gc_harness_own_gotmpdir "$gotmpdir_val" "$gotmpdir_floor" || exit 1
+gotmpdir_val="$gc_harness_gotmpdir"
+export GOTMPDIR="$gotmpdir_val"
 
 # Mirror the Makefile's CGO path detection here so tests run via this script
 # see the same system dependency paths as `make`.
