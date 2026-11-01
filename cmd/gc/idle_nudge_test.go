@@ -878,8 +878,8 @@ func TestNudgeStalledPoolClaims_UnconfirmedTriggerHoldsTheNudge(t *testing.T) {
 // only on bead state and never asked the runtime whether the slot was busy;
 // delivery then fell to the provider, whose wait-for-idle sends anyway once
 // its own timeout passes and whose Codex submit sequence leads with Escape.
-// A slot whose runtime shows output within the grace, or whose busy-readable
-// pane still shows the busy indicator, or whose pane cannot be read, is held
+// A slot whose runtime shows output within the grace, or whose pane still
+// reads busy, or whose pane cannot be read, is held
 // without spending an attempt; once it is quiet the still-unclaimed trigger
 // is nudged.
 func TestNudgeStalledPoolClaims_BusySlotIsNotNudged(t *testing.T) {
@@ -1055,6 +1055,50 @@ func TestNudgeStalledPoolClaims_HoldsOnlyALiveTurn(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The runtime leaf, not cmd/gc, decides whose turn reading it trusts: a family
+// whose turn it cannot read answers runtime.ErrIdleIndeterminate, and that
+// holds nothing, the way an indeterminate idle snapshot holds nothing
+// (snapshotHoldFor). Every other failed look still holds. With the gate
+// opened to every non-ACP family, an untrusted family's claim nudge is
+// delivered on the activity clock alone, as before.
+func TestTurnHoldForIndeterminateHoldsNothing(t *testing.T) {
+	indeterminate := fmt.Errorf("turn of gemini pane: %w", runtime.ErrIdleIndeterminate)
+	for _, tc := range []struct {
+		name    string
+		running bool
+		err     error
+		hold    string
+	}{
+		{name: "indeterminate", err: indeterminate},
+		{name: "look failed", err: errors.New("capture failed"), hold: executionHoldSnapshotError},
+		{name: "running", running: true, hold: claimHoldTurnRunning},
+		{name: "not running"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := &liveTurnProvider{Fake: runtime.NewFake(), running: tc.running, err: tc.err}
+			if got := turnHoldFor(sp, "session-a"); got != tc.hold {
+				t.Fatalf("turnHoldFor = %q, want %q", got, tc.hold)
+			}
+		})
+	}
+
+	t.Run("untrusted family is nudged", func(t *testing.T) {
+		base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		now := base.Add(idleClaimNudgeGrace + time.Second)
+		s := staleSnapshotClaimSession(base)
+		s.Metadata["provider"] = "gemini"
+		store := beads.NewMemStoreFrom(0, []beads.Bead{s, {ID: "work-a", Status: "open"}}, nil)
+		fake := quietClaimFake(t, now)
+		sp := &liveTurnProvider{Fake: fake, err: indeterminate}
+		var out bytes.Buffer
+		nudgeStalledPoolClaims(sp, idleClaimTestCfg(), store, []beads.Bead{s}, []beads.Bead{{ID: "work-a", Status: "open"}}, nil, now, liveClaimDrain(store, nil), &out)
+		got := mustGetTestBead(t, store, s.ID)
+		if fake.CountCalls("Nudge", "session-a") != 1 || got.Metadata[idleClaimNudgeHoldKey] != "" {
+			t.Fatalf("nudges %d hold %q, want the quiet gemini slot nudged (log %q)", fake.CountCalls("Nudge", "session-a"), got.Metadata[idleClaimNudgeHoldKey], out.String())
+		}
+	})
 }
 
 // Kills a busy hold that never ends (PR #7944 review): a hold spends no

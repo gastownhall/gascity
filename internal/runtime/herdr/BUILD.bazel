@@ -19,6 +19,7 @@ go_library(
     importpath = "github.com/gastownhall/gascity/internal/runtime/herdr",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/execenv",
         "//internal/execgrace",
         "//internal/runtime",
         "//internal/runtime/proctable",
@@ -54,6 +55,7 @@ go_test(
         "panebinding_test.go",
         "placement_test.go",
         "prestart_test.go",
+        "process_env_setup_test.go",
         "processtree_test.go",
         "provider_live_test.go",
         "redaction_test.go",
@@ -66,12 +68,14 @@ go_test(
     ],
     embed = [":herdr"],
     deps = [
+        "//internal/execenv",
         "//internal/runtime",
         "//internal/runtime/herdr/herdrtest",
         "//internal/runtime/proctable",
         "//internal/runtime/runtimetest",
         "//internal/shellquote",
         "//internal/testenv",
+        "//internal/testutil",
     ],
 )
 

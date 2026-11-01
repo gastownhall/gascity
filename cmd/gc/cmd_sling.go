@@ -1880,7 +1880,9 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store, city bead
 	now := time.Now()
 	if running {
 		handle, err := workerHandleForNudgeTarget(target, sessStore, sp)
-		if err == nil {
+		// A session waiting on a pending interaction gets the nudge queued
+		// at once (nudgeHandleAwaitsInteraction), with no wait for idle.
+		if err == nil && !nudgeHandleAwaitsInteraction(handle) {
 			result, nudgeErr := handle.Nudge(context.Background(), sessionActor(session.ActorAgent, target.cityPath), worker.NudgeRequest{
 				Text:     msg,
 				Delivery: worker.NudgeDeliveryWaitIdle,

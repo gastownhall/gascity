@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -929,6 +930,28 @@ func TestProcessSnapshotPSArgsRejectsLinuxSyntaxOnDarwin(t *testing.T) {
 	for _, a := range args {
 		if strings.Contains(a, ":") {
 			t.Fatalf("processSnapshotPSArgs returned %v on darwin; contains Linux-only `:N=` width specifier", args)
+		}
+	}
+}
+
+// ps cuts each line to COLUMNS when stdout is no terminal, and the
+// controller's environment can carry COLUMNS=80 (a nudge poller's shell). The
+// snapshot asks for unlimited width and drops COLUMNS, so a long argv (a
+// tap's nonce follows its companion path) is never cut.
+func TestProcessSnapshotCommandIsWideWithoutColumns(t *testing.T) {
+	t.Setenv("COLUMNS", "80")
+	for _, args := range [][]string{processSnapshotPSArgs(), darwinCommandSnapshotPSArgs()} {
+		cmd := processSnapshotCommand(context.Background(), args)
+		if want := append([]string{"ps", "-ww"}, args...); !slices.Equal(cmd.Args, want) {
+			t.Fatalf("ps argv = %q, want %q", cmd.Args, want)
+		}
+		if cmd.Env == nil {
+			t.Fatal("ps inherits the environment whole, COLUMNS included")
+		}
+		for _, kv := range cmd.Env {
+			if strings.HasPrefix(kv, "COLUMNS=") {
+				t.Fatalf("ps runs with %s", kv)
+			}
 		}
 	}
 }

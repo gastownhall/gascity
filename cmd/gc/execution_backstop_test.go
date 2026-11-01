@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"testing"
 	"time"
@@ -382,26 +383,34 @@ func TestExecutionBackstopKeepsTheActivityClockWhenTheSnapshotIsIndeterminate(t 
 	}
 }
 
-// The scan is known to read only some families' busy indicators. For any other
-// session, and for any session over ACP, a snapshot is evidence of nothing, so
-// those sessions keep the activity clock: the backstop nudges, exhausts its
-// attempts and escalates, without paying for a snapshot.
-func TestExecutionBackstopKeepsTheActivityClockWhereTheSnapshotCannotReadBusy(t *testing.T) {
+// Which families' busy readings count is the runtime leaf's policy, not
+// cmd/gc's: the tmux leaf answers runtime.ErrIdleIndeterminate for a family
+// whose busy indicator it does not trust. So the backstop takes the snapshot
+// for every non-ACP session, and a family the leaf does not trust keeps the
+// activity clock: the backstop nudges, exhausts its attempts and escalates. A
+// session over ACP pays for no snapshot at all, even one that would read busy.
+func TestExecutionBackstopKeepsTheActivityClockWhereTheLeafCannotReadBusy(t *testing.T) {
+	indeterminate := fmt.Errorf("untrusted family: %w", runtime.ErrIdleIndeterminate)
 	for _, tc := range []struct {
 		name string
 		meta map[string]string
+		acp  bool
 	}{
 		{name: "no recorded provider"},
 		{name: "grok", meta: map[string]string{"provider": "grok"}},
 		{name: "kimi", meta: map[string]string{"provider": "kimi"}},
-		{name: "claude over ACP", meta: map[string]string{"provider": "claude", "transport": "acp"}},
+		{name: "gemini", meta: map[string]string{"provider": "gemini"}},
+		{name: "claude over ACP", meta: map[string]string{"provider": "claude", "transport": "acp"}, acp: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newExecutionBackstopFixture(t)
 			if tc.meta != nil {
 				f.setSessionMeta(t, tc.meta)
 			}
-			snap := &executionBackstopIdleSnapshotProvider{Fake: f.sp, idle: false}
+			snap := &executionBackstopIdleSnapshotProvider{Fake: f.sp, err: indeterminate}
+			if tc.acp {
+				snap.err = nil // a busy reading: it must never be taken
+			}
 			f.provider = snap
 
 			f.tickStale(t)
@@ -412,10 +421,70 @@ func TestExecutionBackstopKeepsTheActivityClockWhereTheSnapshotCannotReadBusy(t 
 			if len(f.drained) != 1 || f.drained[0] != f.sessName {
 				t.Fatalf("drain requests = %v, want exactly one for %s", f.drained, f.sessName)
 			}
-			if snap.calls != 0 {
-				t.Fatalf("idle snapshots taken = %d, want 0 for a session the snapshot cannot read as busy", snap.calls)
+			if taken := snap.calls != 0; taken == tc.acp {
+				t.Fatalf("idle snapshots taken = %d, want them taken only off ACP (acp=%t)", snap.calls, tc.acp)
 			}
 		})
+	}
+}
+
+// Regression for moving the busy-trust policy into the runtime leaf: for the
+// families the leaf trusts (claude, codex, and an alias built on one) the
+// backstop's snapshot veto reads exactly as it did when cmd/gc gated on the
+// family itself. A busy reading holds, a failed snapshot holds, an
+// indeterminate one keeps the activity clock, an idle one advances, and over
+// ACP no snapshot is taken.
+func TestExecutionBackstopVetoForTrustedFamiliesIsUnchanged(t *testing.T) {
+	indeterminate := fmt.Errorf("scan: %w", runtime.ErrIdleIndeterminate)
+	for _, family := range []map[string]string{
+		{"provider": "claude"},
+		{"provider": "codex"},
+		{"provider": "team-claude", "builtin_ancestor": "claude"},
+	} {
+		for _, tc := range []struct {
+			name   string
+			acp    bool
+			idle   bool
+			err    error
+			hold   string // the breadcrumb's gate; "" when the clock decides
+			snaps  bool
+			nudges int
+		}{
+			{name: "busy", hold: executionHoldSnapshotNotIdle, snaps: true},
+			{name: "snapshot failed", err: errors.New("capture failed"), hold: executionHoldSnapshotError, snaps: true},
+			{name: "indeterminate", err: indeterminate, snaps: true, nudges: idleClaimNudgeMaxAttempts},
+			{name: "idle", idle: true, snaps: true, nudges: idleClaimNudgeMaxAttempts},
+			{name: "busy over ACP", acp: true, nudges: idleClaimNudgeMaxAttempts},
+		} {
+			t.Run(family["provider"]+"/"+tc.name, func(t *testing.T) {
+				f := newExecutionBackstopFixture(t)
+				meta := maps.Clone(family)
+				if tc.acp {
+					meta["transport"] = "acp"
+				}
+				f.setSessionMeta(t, meta)
+				snap := &executionBackstopIdleSnapshotProvider{Fake: f.sp, idle: tc.idle, err: tc.err}
+				f.provider = snap
+
+				f.tickStale(t)
+
+				if got := f.nudgeCount(); got != tc.nudges {
+					t.Fatalf("delivered nudges = %d, want %d; stdout=%s", got, tc.nudges, f.stdout.String())
+				}
+				if taken := snap.calls != 0; taken != tc.snaps {
+					t.Fatalf("idle snapshots taken = %d, want taken=%t", snap.calls, tc.snaps)
+				}
+				if tc.hold == "" {
+					return
+				}
+				if len(f.drained) != 0 {
+					t.Fatalf("drain requests = %v, want none while the veto holds", f.drained)
+				}
+				if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, tc.hold+" ") {
+					t.Fatalf("hold breadcrumb = %q, want %s", got, tc.hold)
+				}
+			})
+		}
 	}
 }
 

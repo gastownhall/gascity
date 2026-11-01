@@ -500,8 +500,9 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 			return "", err
 		}
 	}
-	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), resolved.Env)
-	hints := sessionCreateHints(resolved, sessionEnv, mcpServers)
+	programStatusArm, providerEnv := sessionProgramStatus(configuredProgramStatusMode(s.state.Config()), resolved, transport)
+	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), providerEnv)
+	hints := sessionCreateHints(resolved, sessionEnv, mcpServers, programStatusArm)
 	// Route the named-session create through the worker.Handle boundary
 	// (worker-boundary migration) rather than calling session.Manager directly.
 	// SessionSpecForResolvedRuntime maps this config 1:1 onto the same

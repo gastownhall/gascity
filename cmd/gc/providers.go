@@ -102,6 +102,7 @@ func tmuxConfigFromSession(sc config.SessionConfig, cityName, cityPath string) s
 		DisplayMs:          sc.DisplayMsOrDefault(),
 		SocketName:         socketName,
 		RuntimeDir:         runtimeDir,
+		ProgramStatus:      sc.ProgramStatusMode(),
 	}
 }
 
@@ -1375,7 +1376,7 @@ func newHybridProvider(sc config.SessionConfig, cityName, cityPath string) (runt
 	// Cut-over: hybrid routes to the seam-backed tmux/k8s providers, so
 	// hybrid-routed sessions flow through the seams like every other path.
 	local := sessiontmux.NewSeamBackedWithConfig(tmuxConfigFromSession(sc, cityName, cityPath))
-	remote, err := sessionk8s.NewSeamBacked()
+	remote, err := sessionk8s.NewSeamBacked(sessionk8s.WithCityName(cityName))
 	if err != nil {
 		return nil, fmt.Errorf("hybrid: k8s backend: %w", err)
 	}

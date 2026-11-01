@@ -1583,6 +1583,18 @@ func nudgeTargetPendingInteraction(target nudgeTarget, sessStore beads.Store, sp
 	return nil, nil
 }
 
+// nudgeHandleAwaitsInteraction reports whether handle's session waits on a
+// pending interaction (a permission prompt or a question, which typed text
+// would answer). A courtesy nudge that would wait for an idle boundary goes
+// straight to the queue instead: the prompt gives no boundary, and the queue
+// delivers the nudge once it is answered (queuedNudgeReleaseAfter). A look
+// that fails, or a runtime without interactions, reads as none: the
+// delivery looks again before it types.
+func nudgeHandleAwaitsInteraction(handle worker.Handle) bool {
+	pending, err := handle.Pending(context.Background())
+	return err == nil && pending != nil
+}
+
 func describeWorkerPendingInteraction(pending *worker.PendingInteraction) string {
 	what := strings.TrimSpace(pending.Kind)
 	if what == "" {
@@ -1614,14 +1626,22 @@ func refuseOrQueueNudgeBehindPendingInteraction(target nudgeTarget, store beads.
 		}
 		return queueSessionNudgeWithWorker(target, store, sp, message, worker.NudgeUndeliveredPendingInteraction)
 	}
+	return sessionNudgeResult{}, &cliMessageRefusal{why: cliOpRefusedPendingInteraction, err: immediateNudgeBehindPendingInteractionError(target, what, question)}
+}
+
+// immediateNudgeBehindPendingInteractionError explains the refusal of an
+// immediate nudge to target, which waits on the interaction what (a question
+// when question): how it is answered, and the delivery modes that deliver
+// the nudge after it is answered.
+func immediateNudgeBehindPendingInteractionError(target nudgeTarget, what string, question bool) error {
 	if question {
 		attach := target.sessionID
 		if attach == "" {
 			attach = target.agentKey()
 		}
-		return sessionNudgeResult{}, &cliMessageRefusal{why: cliOpRefusedPendingInteraction, err: fmt.Errorf("%s is waiting on a question (%s); typing now would answer it. Answer it in the terminal (gc session attach %s), or retry with --delivery=wait-idle or --delivery=queue to deliver after it is answered", target.agentKey(), what, attach)}
+		return fmt.Errorf("%s is waiting on a question (%s); typing now would answer it. Answer it in the terminal (gc session attach %s), or retry with --delivery=wait-idle or --delivery=queue to deliver after it is answered", target.agentKey(), what, attach)
 	}
-	return sessionNudgeResult{}, &cliMessageRefusal{why: cliOpRefusedPendingInteraction, err: fmt.Errorf("%s is waiting on a permission prompt (%s); typing now would answer it. Approve or deny it first (POST .../session/{id}/respond), or retry with --delivery=wait-idle or --delivery=queue to deliver after it is answered", target.agentKey(), what)}
+	return fmt.Errorf("%s is waiting on a permission prompt (%s); typing now would answer it. Approve or deny it first (POST .../session/{id}/respond), or retry with --delivery=wait-idle or --delivery=queue to deliver after it is answered", target.agentKey(), what)
 }
 
 func shouldQueueManagedNudgeWake(target nudgeTarget, store beads.Store, sp runtime.Provider) (bool, error) {
@@ -2138,7 +2158,7 @@ func deliverMailNotifyLegacy(target nudgeTarget, store beads.Store, sp runtime.P
 	}
 	if obs.Running {
 		handle, err := workerHandleForNudgeTarget(target, sessStore, sp)
-		if err == nil {
+		if err == nil && !nudgeHandleAwaitsInteraction(handle) {
 			result, nudgeErr := handle.Nudge(context.Background(), sessionActor(session.ActorAgent, target.cityPath), worker.NudgeRequest{
 				Text:     msg,
 				Delivery: worker.NudgeDeliveryWaitIdle,
@@ -2997,7 +3017,7 @@ func ensureNudgePoller(cityPath, agentName, sessionName string) error {
 		if err != nil {
 			return err
 		}
-		cmd := newNudgePollerCommand(exe, os.Environ(), cityPath, sessionName, agentName)
+		cmd := newNudgePollerCommand(exe, processEnvSnapshotExcludingNativeDoltOpen(), cityPath, sessionName, agentName)
 		if err := cmd.Start(); err != nil {
 			return err
 		}

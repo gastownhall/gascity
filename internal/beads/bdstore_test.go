@@ -5672,3 +5672,59 @@ func TestBdStoreTxFailedUpdateIsNotWriteUnconfirmed(t *testing.T) {
 		t.Fatalf("Tx error = %v, want a failed write, not ErrWriteUnconfirmed", err)
 	}
 }
+
+// bdNotClaimableRefusal is bd's verbatim stderr, as the exec runner folds it
+// into the error, for `bd update <id> --claim --json` refused because the
+// bead's status is not claimable. verb is "updating" on bd's direct update path
+// and "claiming" on its proxied-server path.
+func bdNotClaimableRefusal(verb, id, status string) error {
+	label := "Error updating"
+	if verb == "claiming" {
+		label = "Error claiming"
+	}
+	return fmt.Errorf("exit status 1: %s %s: issue not claimable: status %s\n"+
+		`{"error":"1 of 1 issues failed to update","failed":[{"id":%q,"error":"%s issue: issue not claimable: status %s"}],"schema_version":1}`,
+		label, id, status, id, verb, status)
+}
+
+// TestBdStoreClaimNotClaimableRefusalReturnsFalse pins bd's status refusal as a
+// claim this caller did not win. bd refuses `update --claim` with "issue not
+// claimable: status <status>" when the bead was closed, deferred or set blocked
+// after the caller read it as ready. Like another actor holding the bead, that
+// refusal wrote nothing and leaves nothing for this caller to resolve, so Claim
+// reports ok=false with a nil error, the verdict SQLiteStore.Claim and
+// NativeDoltStore.Claim already return for an ineligible status.
+func TestBdStoreClaimNotClaimableRefusalReturnsFalse(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"closed, direct update path", bdNotClaimableRefusal("updating", "bd-42", "closed")},
+		{"deferred, direct update path", bdNotClaimableRefusal("updating", "bd-42", "deferred")},
+		{"blocked status, proxied server path", bdNotClaimableRefusal("claiming", "bd-42", "blocked")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := func(_, _ string, _ ...string) ([]byte, error) { return nil, tc.err }
+			claimed, ok, err := beads.NewBdStore("/city", runner).Claim("bd-42")
+			if err != nil {
+				t.Fatalf("Claim error = %v, want nil: a status refusal is a claim not won, not a failed write", err)
+			}
+			if ok {
+				t.Fatalf("Claim ok = true, want false; claimed=%+v", claimed)
+			}
+		})
+	}
+}
+
+// TestBdStoreClaimNonRefusalFailureStaysAnError keeps the false verdict to bd's
+// refusals: a claim that failed for any other reason is still an error.
+func TestBdStoreClaimNonRefusalFailureStaysAnError(t *testing.T) {
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		return nil, errors.New("exit status 1: Error updating bd-42: updating: table is read only")
+	}
+	_, ok, err := beads.NewBdStore("/city", runner).Claim("bd-42")
+	if err == nil || ok {
+		t.Fatalf("Claim = (ok=%v, err=%v), want an error for a failure that is not a claim refusal", ok, err)
+	}
+}

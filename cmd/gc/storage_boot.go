@@ -370,6 +370,14 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 		return nil, nil
 	}
 
+	// A remote stage of a split city never resolves, opens or creates a
+	// binding of its own (remote_stage.go): its infrastructure classes are
+	// the controller's, and genesis here would serve them from an empty
+	// pod-local store.
+	if err := remoteStageStorageRefusal(cityPath); err != nil {
+		return nil, fmt.Errorf("%s: %w", logPrefix, err)
+	}
+
 	target, ok, err := resolveInfraBindingTarget(cityPath, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", logPrefix, err)
@@ -782,6 +790,7 @@ var storageBindingEventTypes = map[infraMigrationOutcome]string{
 	infraMigrationBornSplitBlocked: events.StorageBindingUnconverged,
 	infraMigrationGenesisBlocked:   events.StorageBindingUnconverged,
 	infraMigrationRetained:         events.StorageBindingUnconverged,
+	infraMigrationIdentityMismatch: events.StorageBindingUnconverged,
 	infraMigrationUncheckable:      events.StorageBindingUncheckable,
 }
 
@@ -1094,4 +1103,58 @@ func storageClassOrder() []config.StorageClass {
 	classes := make([]config.StorageClass, 0, len(infraMigrationClasses)+1)
 	classes = append(classes, config.StorageClassWork)
 	return append(classes, infraMigrationClasses...)
+}
+
+// infraPurgeStores are the stores `gc storage recover-stranded --purge-type`,
+// --restore-purge and --abandon-purge work on, as typed handles.
+// openInfraPurgeStores is the storage-admin mint for the purge: the purge
+// decides capabilities on the store under the bead-policy wrapper, which no
+// router hands out, and reads the binding through the read-only opener, so
+// its handles are minted here, once, rather than in the purge files.
+type infraPurgeStores struct {
+	// work is the city's work store as every production open hands it out,
+	// under the bead-policy wrapper. The purge reads, deletes and puts back
+	// rows and edges through it.
+	work beads.WorkStore
+	// underPolicy is the same work store under the bead-policy wrapper. The
+	// wrapper declares every optional capability whatever the store under it
+	// can do (asked through it, a bd store reads edge payloads and a native
+	// Dolt store imports verbatim, and each fails only once called), so the
+	// edge-payload read and write and the verbatim import are decided, and
+	// used, on this handle: a dry run refuses exactly where the run would.
+	underPolicy beads.WorkStore
+	// engine is the type of the store under the policy wrapper, for a refusal
+	// that names it: the handle itself would print as beads.WorkStore.
+	engine string
+	// openBinding opens the binding read-only as the mail-class store the
+	// purge must never delete a row of, with its close. It is opened only
+	// where the purge re-reads the binding, and closed right after, as a
+	// separate open: a dry run never opens it.
+	openBinding func() (beads.MailStore, func(), error)
+	// closeWork closes the work store.
+	closeWork func()
+}
+
+// openInfraPurgeStores opens the city's work store through
+// openInfraMigrationSource and binds the read-only opener of target's
+// binding. The caller closes the work store with closeWork.
+func openInfraPurgeStores(cityPath string, target infraBindingTarget) (*infraPurgeStores, error) {
+	source, err := openInfraMigrationSource(cityPath)
+	if err != nil {
+		return nil, err
+	}
+	under, _, _ := unwrapBeadPolicyStore(source)
+	return &infraPurgeStores{
+		work:        beads.WorkStore{Store: source},
+		underPolicy: beads.WorkStore{Store: under},
+		engine:      fmt.Sprintf("%T", under),
+		openBinding: func() (beads.MailStore, func(), error) {
+			binding, err := openInfraBindingReadOnly(target)
+			if err != nil {
+				return beads.MailStore{}, nil, err
+			}
+			return beads.MailStore{Store: binding}, func() { _ = closeBeadStoreHandle(binding) }, nil
+		},
+		closeWork: func() { _ = closeBeadStoreHandle(source) },
+	}, nil
 }

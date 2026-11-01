@@ -225,6 +225,14 @@ func TestProviderScopeOwnershipRemoveAndAdoptReaddKeepsProviderLifecycle(t *test
 
 func testProviderScopeOwnershipRemoveAndAdoptReadd(t *testing.T, readdName string) {
 	t.Helper()
+	oldPrefix := rigAdoptStorePrefix
+	t.Cleanup(func() { rigAdoptStorePrefix = oldPrefix })
+	rigAdoptStorePrefix = func(_, rigPath string) (string, error) {
+		if filepath.Base(rigPath) != "provider-rig" {
+			t.Fatalf("prefix read for wrong workspace %q", rigPath)
+		}
+		return "provider_rig", nil
+	}
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)
 	resetFlags(t)

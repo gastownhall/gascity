@@ -38,6 +38,46 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 	}
 }
 
+// bd creates .beads/config.yaml and metadata.json 0600; a rollback must put
+// that mode back rather than widen the file to 0644.
+func TestSnapshotRestorePreservesFileMode(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("issue-prefix: \"ar\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := SnapshotOptionalFile(fs, path)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+
+	if err := os.WriteFile(path, []byte("issue_prefix: ar\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreSnapshots(fs, []FileSnapshot{snap}); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "issue-prefix: \"ar\"\n" {
+		t.Errorf("restore did not recover original, got %q", got)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("restored mode = %v, want 0600", perm)
+	}
+}
+
 func TestSnapshotRestoreRemovesFileCreatedAfterSnapshot(t *testing.T) {
 	fs := fsys.OSFS{}
 	dir := t.TempDir()

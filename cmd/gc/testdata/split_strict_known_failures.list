@@ -23,6 +23,7 @@ TestCLIStorageRoutesKeepTheWorkStoreForABrokenSingleStoreCity	fails under the ga
 TestCLIStorageRoutesRefuseAnUnconvergedCity	fails under the gate: work resolved to 0x563e1e561c0 on a refused city, want the work store 0x563e278ce00
 TestCLIStorageRoutesRefuseWhenCityConfigFailsToLoad	fails under the gate: work resolved to 0xa08540efc0 on an unloadable config, want the work store 0xa086d06540
 TestCityRuntimeBeadReconcileTick_IdleClaimNudgeSeesReadyUnassignedRoutedTrigger	fails under the gate: idle-claim nudge count = "0", want 1 for ready routed unassigned trigger; output=""
+TestCityRuntimeBeadReconcileTick_ReadsTriggerPinsPastAStaleCache	fails under the gate: started command = "claude", want "claude --effort low" (rig-resident case): the gate's work view over the rig's CachingStore does not forward the cache's Handles(), so readLive's live read falls back to the view's Get, the cached pre-pin row; production rig stores (a CachingStore, or the bead-policy store over one) forward it, and the split-city case passes
 TestCityRuntimeBuildDesiredState_StandaloneIncludesRigStores	fails under the gate: store = &{0x1399298b5dc0 0x139929411140 2}, want city store
 TestCityRuntimeClassAccessorsAreIdentity	fails under the gate: CityRuntime.graphBeadStore() = 0x1399289b35a0, want cityBeadStore 0x139929104e00
 TestCityRuntimeDemandSnapshotRefreshesForNewRoutedReadyWork	fails under the gate: PoolDesiredCounts[gascity/gc.gap-analyst] = 0, want 1 for newly-ready routed work

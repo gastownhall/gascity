@@ -1290,6 +1290,7 @@ func managedDoltTestParentDone(rawFD string) (<-chan struct{}, func(), error) {
 var managedDoltSessionScopedEnvKeys = []string{
 	hookDeadlineEnv,
 	"GC_SESSION_ID",
+	"GC_PROVIDER_SESSION_ID",
 	"GC_SESSION_NAME",
 	"GC_ALIAS",
 	"GC_AGENT",

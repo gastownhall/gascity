@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -211,6 +212,106 @@ func TestGcBdClassGuardModelsMetadataNull(t *testing.T) {
 	})
 }
 
+// TestGcBdClassGuardJudgesMetadataAsEveryStoreReadsIt: a JSON null inside a
+// --metadata object reads back as "" through the bd CLI and as the text "null"
+// from a native Dolt store (beads.MetadataReadings), so create and update judge
+// the write under both readings, as --set-metadata k=null already is, under
+// both pinned bd builds.
+func TestGcBdClassGuardJudgesMetadataAsEveryStoreReadsIt(t *testing.T) {
+	gate := beads.Bead{ID: "demo-1", Type: "gate", Labels: []string{"session:null"}}
+	var cases []guardCase
+	for _, enterprise := range []bool{false, true} {
+		cases = append(cases,
+			guardCase{"create null root", []string{"create", "--title", "x", "--metadata", `{"gc.root_bead_id":null}`}, beads.Bead{}, bdReadNotFound, true, "graph-class", enterprise},
+			guardCase{"create null root names the reading", []string{"create", "--title", "x", "--metadata", `{"gc.root_bead_id":null}`}, beads.Bead{}, bdReadNotFound, true, `"null" as a native Dolt store reads it`, enterprise},
+			guardCase{"update null root", []string{"update", "demo-1", "--metadata", `{"gc.root_bead_id":null}`}, guardTask, bdReadFound, true, `"null" as a native Dolt store reads it`, enterprise},
+			// gc.kind sorts first and is read differently too, but only
+			// gc.root_bead_id decides the class, so the note names each key.
+			guardCase{"create null on two class keys names the deciding one", []string{"create", "--title", "x", "--metadata", `{"gc.kind":null,"gc.root_bead_id":null}`}, beads.Bead{}, bdReadNotFound, true, "gc.root_bead_id differently", enterprise},
+			guardCase{"update null on two class keys names the deciding one", []string{"update", "demo-1", "--metadata", `{"gc.kind":null,"gc.root_bead_id":null}`}, guardTask, bdReadFound, true, "gc.root_bead_id differently", enterprise},
+			guardCase{"create null session_id on an own-session gate", []string{"create", "--title", "x", "--type", "gate", "--labels", "session:null", "--metadata", `{"session_id":null}`}, beads.Bead{}, bdReadNotFound, true, "sessions-class", enterprise},
+			guardCase{"update null session_id on an own-session gate", []string{"update", "demo-1", "--metadata", `{"session_id":null}`}, gate, bdReadFound, true, "sessions-class", enterprise},
+			guardCase{"null on keys no reading sets", []string{"create", "--title", "x", "--metadata", `{"gc.kind":null,"gc.formula_contract":null}`}, beads.Bead{}, bdReadNotFound, false, "", enterprise},
+			guardCase{"null on a class-free key", []string{"update", "demo-1", "--metadata", `{"gc.outcome":null}`}, guardTask, bdReadFound, false, "", enterprise},
+			guardCase{"empty-string root", []string{"create", "--title", "x", "--metadata", `{"gc.root_bead_id":""}`}, beads.Bead{}, bdReadNotFound, false, "", enterprise},
+		)
+	}
+	for i := range cases {
+		if cases[i].enterprise {
+			cases[i].name += "/enterprise"
+		}
+	}
+	runGuardCases(t, cases)
+
+	// A refusal the bd CLI's own reading makes carries no reading note: here
+	// the type flips the class, and gc.kind reads as "" or "null", neither a
+	// class marker.
+	notFound := splitTestDeps(nil, func(string) (beads.Bead, bdReadResult) { return beads.Bead{}, bdReadNotFound })
+	for _, argv := range [][]string{
+		{"create", "--title", "x", "--type", "message", "--metadata", `{"gc.kind":null}`},
+		{"update", "demo-1", "--type", "message", "--metadata", `{"gc.kind":null}`},
+	} {
+		deps := notFound
+		if argv[0] == "update" {
+			deps = splitTestDeps(nil, func(string) (beads.Bead, bdReadResult) { return guardTask, bdReadFound })
+		}
+		g := bdClassFlipGuard(splitGuardTestCity(), t.TempDir(), argv, deps)
+		if !strings.Contains(g.refusal, "messaging-class") || strings.Contains(g.refusal, "native Dolt store") {
+			t.Errorf("gc bd %s: refusal %q, want the messaging flip without a reading note", strings.Join(argv, " "), g.refusal)
+		}
+	}
+
+	// On a split that keeps graph beads on the work store, both readings are
+	// classes the store holds, so the write is no flip.
+	city := splitGuardTestCity()
+	city.Storage.Classes.Graph = config.StorageWorkBinding
+	deps := splitTestDeps(nil, func(string) (beads.Bead, bdReadResult) { return guardTask, bdReadFound })
+	for _, argv := range [][]string{
+		{"create", "--title", "x", "--metadata", `{"gc.root_bead_id":null}`},
+		{"update", "demo-1", "--metadata", `{"gc.root_bead_id":null}`},
+	} {
+		if g := bdClassFlipGuard(city, t.TempDir(), argv, deps); g.refusal != "" {
+			t.Errorf("gc bd %s on a graph-on-work split was refused: %q", strings.Join(argv, " "), g.refusal)
+		}
+	}
+}
+
+// TestGcBdImportJudgesMetadataAsEveryStoreReadsIt: an import row whose
+// metadata the bd CLI and a native Dolt store classify differently is refused,
+// with or without --skip-infra: kept, it is stranded wherever a native store
+// reads the work store; left out, a work row the bd CLI reads is dropped. A
+// null that no reading turns into a class marker imports as before.
+func TestGcBdImportJudgesMetadataAsEveryStoreReadsIt(t *testing.T) {
+	ambiguous := `{"id":"demo-7","title":"x","issue_type":"task","metadata":{"gc.root_bead_id":null}}` + "\n"
+	for _, argv := range [][]string{{"import", "-"}, {"import", "-", "--skip-infra"}} {
+		deps := splitTestDeps(strings.NewReader(ambiguous), func(string) (beads.Bead, bdReadResult) { return beads.Bead{}, bdReadNotFound })
+		g := bdClassFlipGuard(splitGuardTestCity(), t.TempDir(), argv, deps)
+		for _, want := range []string{"demo-7", "work class as the bd CLI", "graph class as a native Dolt store", "Nothing was written"} {
+			if !strings.Contains(g.refusal, want) {
+				t.Errorf("gc bd %s: refusal %q does not carry %q", strings.Join(argv, " "), g.refusal, want)
+			}
+		}
+	}
+	holds := workStoreClassHolds(splitGuardTestCity())
+	if _, problem := splitBdImportRows([]byte(`{"id":"demo-6","title":"x","issue_type":"task","metadata":{"gc.kind":null,"gc.root_bead_id":null}}`+"\n"), holds); !strings.Contains(problem, "gc.root_bead_id differently") {
+		t.Errorf("a row with nulls on two class keys: problem %q does not name gc.root_bead_id, the key that decides its class", problem)
+	}
+	split, problem := splitBdImportRows([]byte(`{"id":"demo-8","title":"x","issue_type":"task","metadata":{"gc.kind":null}}`+"\n"), holds)
+	if problem != "" || !slices.Equal(split.keptIDs, []string{"demo-8"}) {
+		t.Errorf("a null on a key no reading sets: kept %v, problem %q; want demo-8 kept", split.keptIDs, problem)
+	}
+	split, problem = splitBdImportRows([]byte(`{"id":"demo-9","title":"s","issue_type":"session","metadata":{"gc.root_bead_id":null}}`+"\n"), holds)
+	if problem != "" || split.skipped != 1 || formatClassCounts(split.byClass) != "1 sessions" {
+		t.Errorf("a session row both readings place in the binding: skipped %d (%s), problem %q; want it left out and counted", split.skipped, formatClassCounts(split.byClass), problem)
+	}
+	city := splitGuardTestCity()
+	city.Storage.Classes.Graph = config.StorageWorkBinding
+	split, problem = splitBdImportRows([]byte(ambiguous), workStoreClassHolds(city))
+	if problem != "" || !slices.Equal(split.keptIDs, []string{"demo-7"}) {
+		t.Errorf("on a graph-on-work split: kept %v, problem %q; want demo-7 kept", split.keptIDs, problem)
+	}
+}
+
 // TestGcBdClassGuardJudgesOnlyAResolvedBead: a class-touching write is judged
 // against exactly the bead its id resolves to; absent, colliding or unreadable
 // is a refusal. A write that touches no class field needs no read.
@@ -269,9 +370,14 @@ func TestGcBdImportDryRunReportsAndSkipInfraNamesDependents(t *testing.T) {
 	}
 	read := func(string) (beads.Bead, bdReadResult) { return beads.Bead{}, bdReadNotFound }
 	g := bdClassFlipGuard(splitGuardTestCity(), scope, []string{"import", "a.jsonl", "--dry-run"}, splitTestDeps(nil, read))
-	if g.refusal != "" || !strings.Contains(g.notice, "dry run") || strings.Join(g.args, " ") != "import a.jsonl --dry-run" {
+	if g.refusal != "" || !strings.Contains(g.notice, "dry run") || len(g.args) != 3 || g.args[0] != "import" || g.args[2] != "--dry-run" {
 		t.Fatalf("dry run: refusal=%q notice=%q args=%v", g.refusal, g.notice, g.args)
 	}
+	// bd dry-runs a private copy of every row gc judged.
+	if copied, err := os.ReadFile(g.args[1]); err != nil || string(copied) != archive {
+		t.Fatalf("dry run: bd reads %q (err %v), want the whole archive", copied, err)
+	}
+	g.cleanup()
 	// The kept row depends on a left-out session row: the edge would cross
 	// stores, so even --skip-infra refuses it.
 	g = bdClassFlipGuard(splitGuardTestCity(), scope, []string{"import", "a.jsonl", "--skip-infra"}, splitTestDeps(nil, read))

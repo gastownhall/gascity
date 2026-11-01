@@ -224,6 +224,7 @@ var builtinAuthorship = map[string]Authorship{
 	WorkReleased:          AuthorController,
 	WorkReleaseUnfinished: AuthorController,
 	WorkEscalated:         AuthorController,
+	WorkRateLimited:       AuthorController,
 	BeadClaimLoopHeld:     AuthorController, // the controller's claim-loop guard (cmd/gc/claim_loop_guard.go)
 
 	// Controller: the controller, the city, orders, async requests and the

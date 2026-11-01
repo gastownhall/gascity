@@ -234,6 +234,10 @@ func deliverSessionNudgeLane(target nudgeTarget, store beads.Store, sp runtime.P
 // run proposes the op, runs the inline pass in a live mode, reports and
 // rings.
 func (n *cliLaneNudge) run() int {
+	principal, actor := cliPrincipal(cliOpLookupEnv)
+	if code, refused := n.refuseImmediateBehindPendingInteraction(principal); refused {
+		return code
+	}
 	minted := n.key == ""
 	if minted {
 		k, err := legacyop.MintKey()
@@ -243,7 +247,6 @@ func (n *cliLaneNudge) run() int {
 		}
 		n.key = k
 	}
-	principal, actor := cliPrincipal(cliOpLookupEnv)
 	op, created, err := n.st.Propose(opjournal.Request{
 		Conversation: n.target.sessionID,
 		Kind:         opjournal.KindMessage,
@@ -277,6 +280,47 @@ func (n *cliLaneNudge) run() int {
 	code := n.report(op.ID, !created, res, passErr)
 	n.ring(op.ID)
 	return code
+}
+
+// refuseImmediateBehindPendingInteraction is the front door's refusal,
+// before anything is written, of an explicit immediate nudge to a session
+// waiting on a pending interaction (a permission prompt or a question,
+// which typed text would answer), worded as the legacy path's
+// (immediateNudgeBehindPendingInteractionError): an immediate nudge cannot
+// wait for the answer, where wait-idle and queued nudges are proposed and
+// the lane holds them until it is answered. A look that fails refuses too,
+// as the legacy path's immediate look does. A key that names an op under
+// principal is a rerun the op answers (replay), so it is not looked at.
+func (n *cliLaneNudge) refuseImmediateBehindPendingInteraction(principal string) (code int, refused bool) {
+	if n.mode != nudgeDeliveryImmediate || n.keyNamesOp(principal) {
+		return 0, false
+	}
+	pending, err := nudgeTargetPendingInteraction(n.target, n.sessions, n.sp, n.mode, n.stderr)
+	switch {
+	case err != nil:
+		n.refusal().refuse(cliOpCodePendingCheckUnavailable, fmt.Sprintf("%v; nothing was written, retry", err), "", n.key)
+		return 1, true
+	case pending == nil:
+		return 0, false
+	}
+	why := immediateNudgeBehindPendingInteractionError(n.target, describeWorkerPendingInteraction(pending), isQuestionInteraction(pending))
+	n.refusal().refuse(cliOpCodePendingInteraction, why.Error(), "", n.key)
+	return 1, true
+}
+
+// keyNamesOp reports whether the nudge's --key names an op of its
+// conversation under principal. A key that names none, no key, or a read
+// that fails reports false.
+func (n *cliLaneNudge) keyNamesOp(principal string) bool {
+	if n.key == "" {
+		return false
+	}
+	id, err := opjournal.DeriveID(n.st.Prefix(), n.target.sessionID, principal, n.key)
+	if err != nil {
+		return false
+	}
+	_, err = n.st.Get(id)
+	return err == nil
 }
 
 // replay answers a key that names an existing op: a closed op replays its

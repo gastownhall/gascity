@@ -107,6 +107,18 @@ func pendingInteractionBlocked(sp runtime.Provider, sessName string) bool {
 	return err == nil && pending != nil
 }
 
+// nudgeRefusedBehindPendingInteraction reports whether err is the runtime's
+// refusal to type into a pending interaction: the tmux provider's
+// (runtime.ErrPendingInteraction) or the ACP provider's
+// (runtime.ErrNudgeRefusedPendingInteraction). Nothing was submitted, so a
+// bounded retry spends no attempt on it and holds until the interaction is
+// answered. tmux may refuse after its paste, before the submit key, leaving
+// the text unsent in the input box: the retry's clear before its paste
+// removes it, except while a client is attached.
+func nudgeRefusedBehindPendingInteraction(err error) bool {
+	return errors.Is(err, runtime.ErrPendingInteraction) || errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction)
+}
+
 func observeBackstopHold(pred backstopPredicate, store beads.Store, s *beads.Bead, reason string, stdout io.Writer) {
 	if ho, ok := pred.(backstopHoldObserver); ok {
 		ho.observeHold(store, s, reason, stdout)
@@ -321,8 +333,8 @@ func runNudgeBackstop(
 				continue
 			case backstopResolutionOutstanding:
 				// Held before reserve so the open dialog costs no attempt. A
-				// dialog that opens after this look still spends one attempt
-				// on a refused delivery.
+				// dialog that opens after this look is refused at delivery,
+				// which refunds the attempt below.
 				if pendingInteractionBlocked(sp, sessName) {
 					observeBackstopHold(pred, store, s, backstopHoldPendingInteraction, stdout)
 					continue
@@ -373,6 +385,16 @@ func runNudgeBackstop(
 					// which is the write-ahead's ordinary failure mode.
 					pred.reserve(store, s, target, attempts, last, stdout)
 					fmt.Fprintf(stdout, "%s: %s is busy; deferred the nudge for %s without spending an attempt\n", label, sessName, target.ID) //nolint:errcheck // best-effort
+					continue
+				}
+				if nudgeRefusedBehindPendingInteraction(err) {
+					// A permission prompt or question opened after the
+					// look above, and the runtime submitted nothing rather
+					// than answer it. Refunded as a busy deferral is, and
+					// held as the look holds an open dialog.
+					pred.reserve(store, s, target, attempts, last, stdout)
+					observeBackstopHold(pred, store, s, backstopHoldPendingInteraction, stdout)
+					fmt.Fprintf(stdout, "%s: %s is waiting on a pending interaction; deferred the nudge for %s without spending an attempt\n", label, sessName, target.ID) //nolint:errcheck // best-effort
 					continue
 				}
 				fmt.Fprintf(stdout, "%s: %s failed: %v\n", label, sessName, err) //nolint:errcheck // best-effort

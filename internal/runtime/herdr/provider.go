@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
@@ -467,6 +468,9 @@ func (p *Provider) runPreStart(ctx context.Context, cfg runtime.Config) error {
 // (the workDir a pre_start may itself be creating — so it is intentionally read
 // from env rather than cfg.WorkDir), process env plus cfg.Env.
 func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[string]string) error {
+	// Read the base env before arming the deadline: execenv.Environ waits out
+	// an in-flight native store open, and that wait is not the command's.
+	baseEnv := execenv.Environ()
 	timeout := p.setupTimeout
 	if timeout <= 0 {
 		timeout = defaultSetupTimeout
@@ -502,7 +506,7 @@ func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[stri
 			c.Dir = p.c.cityRoot
 		}
 	}
-	c.Env = os.Environ()
+	c.Env = baseEnv
 	for k, v := range env {
 		c.Env = append(c.Env, k+"="+v)
 	}

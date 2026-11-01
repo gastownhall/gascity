@@ -44,6 +44,17 @@ const (
 	lanePendingUnknown = opjournal.PendingUnknown
 	// laneProbeBudget bounds one probe's runtime calls.
 	laneProbeBudget = 10 * time.Second
+	// laneScreenTurnQuietLimit is how long a keystroke runtime's pane may
+	// draw nothing while its screen shows a running turn before
+	// quietBoundary takes that reading as stale. A live turn redraws its
+	// status every second (Claude Code's spinner and timer, Codex's Working
+	// row), so a pane whose own activity clock, read after its screen showed
+	// the turn (runtime.FreshActivityProvider), has stood still this long
+	// runs no turn: what reads as one is a frozen frame or transcript text,
+	// which an idle pane never redraws. The look's observation cannot show
+	// that: its activity can come from a snapshot taken before the turn
+	// started.
+	laneScreenTurnQuietLimit = time.Minute
 )
 
 // laneExecDeps is what the live executor needs, for any host that runs it:
@@ -71,11 +82,12 @@ type laneExecDeps struct {
 
 // conversationLaneExec is the live opjournal.Executor for one conversation
 // over worker.Handle. A keystroke-mode runtime's boundary is the quiescence
-// rule; a protocol-mode one (t3bridge) is live when it reports its turns,
-// their starts included, and its boundary is CurrentTurn showing no turn in
-// progress (DES-T3I §14 item 6). It is built per pass from the session row
-// the pass's view came from, so Probe and Deliver act on the incarnation
-// that view names.
+// rule, which the agent's own screen confirms where the lane can read its
+// busy indicator (quietBoundary); a protocol-mode one (t3bridge) is live
+// when it reports its turns, their starts included, and its boundary is
+// CurrentTurn showing no turn in progress (DES-T3I §14 item 6). It is built
+// per pass from the session row the pass's view came from, so Probe and
+// Deliver act on the incarnation that view names.
 type conversationLaneExec struct {
 	deps laneExecDeps
 	info session.Info
@@ -94,6 +106,19 @@ type conversationLaneExec struct {
 	matches func(nudgeTarget, worker.LiveObservation) (bool, error)
 	handle  func(nudgeTarget) (worker.Handle, error)
 	idle    func(nudgeTarget, worker.LiveObservation) bool
+	// turnOnScreen is the agent's own screen's reading of whether it is
+	// running a turn now, taken once the quiescence rule reads a keystroke
+	// runtime quiet: production reads runtime.TurnRunningProvider on the
+	// session's routed leaf. known is false where no such reading exists,
+	// including the leaf's runtime.ErrIdleIndeterminate for a family whose
+	// busy reading it does not trust, which leaves the quiescence rule alone.
+	turnOnScreen func(nudgeTarget) (running, known bool, err error)
+	// paneActivity is the session's last activity read from its runtime
+	// now, after turnOnScreen showed a turn, not from the snapshot the
+	// look's observation may have come from: production reads
+	// runtime.FreshActivityProvider on the session's routed leaf. known is
+	// false where no such read exists.
+	paneActivity func(nudgeTarget) (at time.Time, known bool, err error)
 	// steerable says whether a session row takes a steer from a runtime
 	// that steers in a mode; production reads session.SupportsSteerForInfo,
 	// the source session responses read too.
@@ -192,6 +217,12 @@ func newConversationLaneExec(deps laneExecDeps, row laneRow) *conversationLaneEx
 	}
 	e.idle = func(t nudgeTarget, obs worker.LiveObservation) bool {
 		return pollerSessionIdleEnough(t, e.deps.sp, defaultNudgePollQuiescence, obs)
+	}
+	e.turnOnScreen = func(t nudgeTarget) (bool, bool, error) {
+		return laneTurnOnScreen(e.deps.sp, t)
+	}
+	e.paneActivity = func(t nudgeTarget) (time.Time, bool, error) {
+		return lanePaneActivity(e.deps.sp, t)
 	}
 	e.steerable = session.SupportsSteerForInfo
 	e.sessionTurns = func(id string) (worker.TurnHandle, error) {
@@ -319,13 +350,13 @@ type laneLook struct {
 // incarnation the row names, resolves its handle once and reads the pending
 // interaction through it, and, when some content may reach it, the
 // session's turns (with withTurns) and the boundary. The boundary is the
-// quiescence rule for a keystroke-mode runtime, and for a protocol-mode one
-// its turns: never the quiescence rule. Neither the content gate nor the
-// stop request holds control (DES-O1 I7, §10.5): a draining, held or
-// stop-requested session blocked on a prompt still has it read, so a
-// respond can answer it. A running live runtime of another incarnation
-// reads lanePendingUnknown: nothing looked, so a respond waits rather than
-// take the prompt for gone.
+// quiescence rule for a keystroke-mode runtime, confirmed on the agent's
+// screen (quietBoundary), and for a protocol-mode one its turns: never the
+// quiescence rule. Neither the content gate nor the stop request holds
+// control (DES-O1 I7, §10.5): a draining, held or stop-requested session
+// blocked on a prompt still has it read, so a respond can answer it. A
+// running live runtime of another incarnation reads lanePendingUnknown:
+// nothing looked, so a respond waits rather than take the prompt for gone.
 //
 // A draining or stop-requested row admits the drain notice, so its look
 // reads the boundary whatever its open ops are: the probe does not see
@@ -382,11 +413,112 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, wi
 	}
 	l.boundary = opjournal.TriNo
 	if e.idle(e.target, obs) {
-		l.boundary = opjournal.TriYes
+		l.boundary = e.quietBoundary(obs)
 	} else {
 		l.boundaryAt = e.quiescenceDeadline(obs)
 	}
 	return l, nil
+}
+
+// quietBoundary is a keystroke runtime's boundary once the quiescence rule
+// reads it quiet in obs. The rule reads the activity clock, which over tmux
+// comes from a cached fleet snapshot in whole seconds, so a pane that redraws
+// every second can read quiet while its agent runs a turn; and the lane comes
+// back at the deadline the last look named (quiescenceDeadline), where the
+// same snapshot reads quiet by construction. The agent's own screen decides:
+// a turn running there keeps the boundary closed, with no deadline, so the
+// busy backoff paces the next look. A screen the look could not read is no
+// boundary either (noted). Without a screen reading the rule stands, and it
+// stands over a stale running turn (staleTurnBoundary).
+//
+// A No does more than hold a boundary prompt: it closes a when=if_idle op
+// skipped{busy}, and a deliver-now unit whose turn its transcript shows ended
+// skips its interrupt (skipped{stale}) and holds its message for the
+// boundary. So while a quiet pane shows busy text (transcript text quoting an
+// indicator counts), an if_idle op is skipped and a deliver-now message waits
+// until the reading goes stale, where the quiescence rule alone delivered
+// both: the price of never typing into a running turn.
+func (e *conversationLaneExec) quietBoundary(obs worker.LiveObservation) opjournal.Tri {
+	running, known, err := e.turnOnScreen(e.target)
+	switch {
+	case !known:
+		return opjournal.TriYes
+	case err != nil:
+		e.note("turn_on_screen", fmt.Errorf("reading session %s's screen for a running turn: %w", e.info.ID, err))
+		return opjournal.TriUnknown
+	case !running:
+		return opjournal.TriYes
+	}
+	return e.staleTurnBoundary(obs)
+}
+
+// staleTurnBoundary is the boundary of a keystroke runtime whose screen shows
+// a running turn: none, unless its pane has drawn nothing for
+// laneScreenTurnQuietLimit, when the reading is stale (noted) and the
+// quiescence rule stands. The look's observation (obs) can only rule that
+// out: its activity can come from a snapshot taken before the turn started,
+// so a pane obs shows quiet that long has its activity read again, now
+// (paneActivity), and the stale verdict rests on that read alone. Without an
+// activity reading the screen decides, and a read that fails is no known
+// boundary (noted).
+func (e *conversationLaneExec) staleTurnBoundary(obs worker.LiveObservation) opjournal.Tri {
+	if obs.LastActivity == nil || obs.LastActivity.IsZero() || e.now().Sub(*obs.LastActivity) < laneScreenTurnQuietLimit {
+		return opjournal.TriNo
+	}
+	at, known, err := e.paneActivity(e.target)
+	switch {
+	case !known:
+		return opjournal.TriNo
+	case err != nil:
+		e.note("pane_activity", fmt.Errorf("reading session %s's activity after its screen showed a running turn: %w", e.info.ID, err))
+		return opjournal.TriUnknown
+	case at.IsZero():
+		return opjournal.TriNo
+	}
+	quiet := e.now().Sub(at)
+	if quiet < laneScreenTurnQuietLimit {
+		return opjournal.TriNo
+	}
+	e.note("turn_on_screen_stale", fmt.Errorf("session %s's screen shows a running turn, but its pane has drawn nothing for %s: taking the reading as stale", e.info.ID, quiet.Round(time.Second)))
+	return opjournal.TriYes
+}
+
+// laneTurnOnScreen reads, in one look at the agent's screen, whether the
+// session target names is running a turn: the reading the runtime's own nudge
+// takes before it types (runtime.TurnRunningProvider, on the routed leaf). It
+// is unknown where the leaf takes no such reading, and where the leaf answers
+// runtime.ErrIdleIndeterminate because it does not trust the busy reading of
+// the session's family: that reading may be transcript text, which would hold
+// the boundary closed while no turn runs.
+func laneTurnOnScreen(sp runtime.Provider, target nudgeTarget) (running, known bool, err error) {
+	if target.sessionName == "" {
+		return false, false, nil
+	}
+	tr, ok := runtime.TurnRunningFor(sp, target.sessionName)
+	if !ok {
+		return false, false, nil
+	}
+	running, err = tr.TurnRunning(target.sessionName)
+	if errors.Is(err, runtime.ErrIdleIndeterminate) {
+		return false, false, nil
+	}
+	return running, true, err
+}
+
+// lanePaneActivity reads the last activity of the session target names from
+// its runtime now (runtime.FreshActivityProvider, on the routed leaf), not
+// from the snapshot a look's observation may have come from. It is known only
+// where that leaf takes such a read.
+func lanePaneActivity(sp runtime.Provider, target nudgeTarget) (at time.Time, known bool, err error) {
+	if target.sessionName == "" {
+		return time.Time{}, false, nil
+	}
+	fa, ok := runtime.FreshActivityFor(sp, target.sessionName)
+	if !ok {
+		return time.Time{}, false, nil
+	}
+	at, err = fa.FreshActivity(target.sessionName)
+	return at, true, err
 }
 
 // quiescenceDeadline is the instant a keystroke runtime that e.idle found

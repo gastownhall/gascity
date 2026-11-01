@@ -3,10 +3,12 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -88,6 +90,147 @@ func TestGcBdSplitNeverWritesACrossStoreEdge(t *testing.T) {
 	})
 }
 
+// heldIDDeps is the runEdgeCases world under one pinned bd inventory:
+// relic-1 is a migrated relic the class binding holds, and the work store
+// holds no copy of it (gc storage migrate clears that copy).
+func heldIDDeps(inventory string) bdClassGuardDeps {
+	deps := splitTestDeps(nil, func(id string) (beads.Bead, bdReadResult) {
+		if id == "demo-1" || id == "demo-2" {
+			return beads.Bead{ID: id, Type: "task"}, bdReadFound
+		}
+		return beads.Bead{}, bdReadNotFound
+	})
+	deps.held = func(ids []string) (map[string]bool, error) {
+		out := map[string]bool{}
+		for _, id := range ids {
+			out[id] = id == "relic-1"
+		}
+		return out, nil
+	}
+	deps.inventory = func() (*bdflags.Inventory, error) { return bdflags.InventoryByName(inventory), nil }
+	return deps
+}
+
+// TestGcBdSplitCreateRefusesAnIDTheBindingHolds: gc storage migrate keeps a
+// moved bead's id and clears the work store's copy, so bd would mint that id
+// again in the work store while every by-id gc command answers from the
+// binding's bead. A create naming such an --id is refused, under both pinned
+// inventories, live and as a dry run; a free id is forwarded; a binding gc
+// cannot ask is a refusal. A single-store city never refuses.
+func TestGcBdSplitCreateRefusesAnIDTheBindingHolds(t *testing.T) {
+	cases := []struct {
+		name   string
+		argv   []string
+		deps   func(inventory string) bdClassGuardDeps
+		refuse bool
+		want   string
+	}{
+		{"held --id", []string{"create", "--title", "dup", "--id", "relic-1"}, heldIDDeps, true, "class binding holds a bead with id relic-1"},
+		{"held --id=", []string{"create", "--title", "dup", "--id=relic-1", "--json"}, heldIDDeps, true, "class binding holds"},
+		{"held via the new alias", []string{"new", "--title", "dup", "--id", "relic-1"}, heldIDDeps, true, "class binding holds"},
+		{"held as a dry run", []string{"create", "--title", "dup", "--id", "relic-1", "--dry-run"}, heldIDDeps, true, "class binding holds"},
+		{"the last --id is the one bd mints", []string{"create", "--title", "dup", "--id", "demo-9", "--id", "relic-1"}, heldIDDeps, true, "class binding holds"},
+		{"reserved --id", []string{"create", "--title", "x", "--id", "gcg-abc"}, heldIDDeps, true, "reserved namespace"},
+		{"free work id", []string{"create", "--title", "ok", "--id", "demo-9"}, heldIDDeps, false, ""},
+		{"empty --id lets bd mint", []string{"create", "--title", "ok", "--id", ""}, heldIDDeps, false, ""},
+		{"no --id asks the binding nothing", []string{"create", "--title", "ok"}, func(inventory string) bdClassGuardDeps {
+			deps := heldIDDeps(inventory)
+			deps.held = func(ids []string) (map[string]bool, error) {
+				return nil, fmt.Errorf("held asked for %v by a create that names no id", ids)
+			}
+			return deps
+		}, false, ""},
+		{"binding cannot answer", []string{"create", "--title", "x", "--id", "demo-9"}, func(inventory string) bdClassGuardDeps {
+			deps := heldIDDeps(inventory)
+			deps.held = func([]string) (map[string]bool, error) { return nil, errors.New("binding offline") }
+			return deps
+		}, true, "binding offline"},
+		{"no held view", []string{"create", "--title", "x", "--id", "demo-9"}, func(inventory string) bdClassGuardDeps {
+			deps := heldIDDeps(inventory)
+			deps.held = nil
+			return deps
+		}, true, "cannot check"},
+	}
+	for _, c := range cases {
+		for _, inventory := range []string{"bd-1.3.2", bdEnterpriseInventory} {
+			t.Run(c.name+"/"+inventory, func(t *testing.T) {
+				g := bdClassFlipGuard(splitGuardTestCity(), t.TempDir(), c.argv, c.deps(inventory))
+				if c.refuse != (g.refusal != "") {
+					t.Fatalf("gc bd %s: refused=%v, want %v; refusal=%q", strings.Join(c.argv, " "), g.refusal != "", c.refuse, g.refusal)
+				}
+				if c.refuse && (!strings.Contains(g.refusal, c.want) || !strings.Contains(g.refusal, "Nothing was written.")) {
+					t.Errorf("gc bd %s: refusal %q lacks %q or 'Nothing was written.'", strings.Join(c.argv, " "), g.refusal, c.want)
+				}
+				if !c.refuse && !slices.Equal(g.args, c.argv) {
+					t.Errorf("gc bd %s forwarded %q, want argv unchanged", strings.Join(c.argv, " "), g.args)
+				}
+				if single := bdClassFlipGuard(&config.City{}, t.TempDir(), c.argv, c.deps(inventory)); single.refusal != "" {
+					t.Errorf("gc bd %s on a single-store city refused: %q", strings.Join(c.argv, " "), single.refusal)
+				}
+			})
+		}
+	}
+}
+
+// TestGcBdCreateOfAMigratedRelicIDOnAServedSplit is the end-to-end shape: on
+// a migrated, served split city the work store holds no copy of the relic, so
+// bd would mint its id afresh while gc bd show keeps answering from the
+// binding. gc refuses the create before bd runs; a free id is forwarded with
+// its argv unchanged.
+func TestGcBdCreateOfAMigratedRelicIDOnAServedSplit(t *testing.T) {
+	cityPath, relic := funnelSkipCity(t, false)
+	log := passthroughFakeBd(t, cityPath)
+
+	freshByIDProcess(t)
+	var stdout, stderr bytes.Buffer
+	args := []string{"create", "--title", "dup", "--id", relic.ID, "--json"}
+	if code := doBd(args, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "class binding holds") {
+		t.Fatalf("doBd(%v) = %d, want the refusal; stderr=%q", args, code, stderr.String())
+	}
+	if calls := singleExecBdCalls(t, log); slices.ContainsFunc(calls, func(c string) bool { return strings.HasPrefix(c, "create ") }) {
+		t.Fatalf("the refused create reached bd: %q", calls)
+	}
+
+	freshByIDProcess(t)
+	stdout.Reset()
+	stderr.Reset()
+	if code := doBd([]string{"show", relic.ID, "--json"}, &stdout, &stderr); code != 0 || !strings.Contains(stdout.String(), relic.ID) {
+		t.Fatalf("gc bd show %s after the refusal = %d, want the binding's bead; stdout=%q stderr=%q", relic.ID, code, stdout.String(), stderr.String())
+	}
+
+	freshByIDProcess(t)
+	stdout.Reset()
+	stderr.Reset()
+	args = []string{"create", "--title", "ok", "--id", "gc-fresh1", "--json"}
+	if code := doBd(args, &stdout, &stderr); code != 0 {
+		t.Fatalf("doBd(%v) = %d, want forwarded; stderr=%q", args, code, stderr.String())
+	}
+	if calls := singleExecBdCalls(t, log); !slices.Contains(calls, strings.Join(args, " ")) {
+		t.Fatalf("a create of a free id was not forwarded unchanged: %q", calls)
+	}
+}
+
+// TestGcBdCreateOfAMigratedRelicIDOnARefusedSplit: a city whose boot gate
+// refuses the split still refuses the relic's id (it fails closed) and still
+// forwards a free id.
+func TestGcBdCreateOfAMigratedRelicIDOnARefusedSplit(t *testing.T) {
+	cityPath, relic := funnelSkipCity(t, true)
+	log := passthroughFakeBd(t, cityPath)
+	for _, row := range []struct {
+		id      string
+		forward bool
+	}{{relic.ID, false}, {"gc-fresh1", true}} {
+		freshByIDProcess(t)
+		var stdout, stderr bytes.Buffer
+		args := []string{"create", "--title", "t", "--id", row.id, "--json"}
+		code := doBd(args, &stdout, &stderr)
+		forwarded := slices.Contains(singleExecBdCalls(t, log), strings.Join(args, " "))
+		if forwarded != row.forward || (code == 0) != row.forward {
+			t.Errorf("create --id %s: code=%d forwarded=%v, want forwarded=%v; stderr=%q", row.id, code, forwarded, row.forward, stderr.String())
+		}
+	}
+}
+
 // TestGcBdSplitJudgesTheCommandBdRuns is review must-fix 1 in gc: the
 // short-flag runs whose last flag takes the next token are refused, and so
 // is any argv whose cobra and pflag readings disagree.
@@ -151,6 +294,30 @@ func TestGcBdSplitShouldFixes(t *testing.T) {
 	}
 	if single := bdClassFlipGuard(&config.City{}, t.TempDir(), []string{"show"}, bdClassGuardDeps{}); single.refusal != "" {
 		t.Fatalf("a single-store city needs no bd version: %q", single.refusal)
+	}
+}
+
+// TestGcBdSplitConfigAdmitsTheIntegrationNamespace: bd documents custom.* as
+// the namespace for user-defined integration keys. No class route and no
+// create reads them, so a split city lets gc bd set and unset them, as a
+// single-store city does; every other key stays refused for both commands.
+func TestGcBdSplitConfigAdmitsTheIntegrationNamespace(t *testing.T) {
+	for _, enterprise := range []bool{false, true} {
+		runGuardCases(t, []guardCase{
+			{"config get a custom key", []string{"config", "get", "custom.example.owner", "--json"}, guardTask, bdReadFound, false, "", enterprise},
+			{"config set a custom key", []string{"config", "set", "custom.example.owner", `{"v":1}`}, guardTask, bdReadFound, false, "", enterprise},
+			{"config set another custom key", []string{"config", "set", "custom.example.marker", "x"}, guardTask, bdReadFound, false, "", enterprise},
+			{"config unset a custom key", []string{"config", "unset", "custom.example.owner"}, guardTask, bdReadFound, false, "", enterprise},
+			{"config unset an admitted exact key", []string{"config", "unset", "types.retained"}, guardTask, bdReadFound, false, "", enterprise},
+			{"config set the bare namespace", []string{"config", "set", "custom.", "x"}, guardTask, bdReadFound, true, "keys under custom.*", enterprise},
+			{"config set a dotless look-alike", []string{"config", "set", "custom", "x"}, guardTask, bdReadFound, true, "keys under custom.*", enterprise},
+			{"config set a look-alike prefix", []string{"config", "set", "customx.y", "x"}, guardTask, bdReadFound, true, "keys under custom.*", enterprise},
+			{"config unset without a key", []string{"config", "unset"}, guardTask, bdReadFound, true, "expected a key", enterprise},
+			{"config unset routing", []string{"config", "unset", "routing.mode"}, guardTask, bdReadFound, true, "only types.custom, types.infra, types.retained", enterprise},
+			{"config unset storage-class", []string{"config", "unset", "storage-class.task"}, guardTask, bdReadFound, true, "gc bd config unset storage-class.task", enterprise},
+			{"config unset dolt", []string{"config", "unset", "dolt.port"}, guardTask, bdReadFound, true, "redirect writes", enterprise},
+			{"config set-many stays refused", []string{"config", "set-many", "custom.a=1"}, guardTask, bdReadFound, true, "beyond get/set/unset/list/show", enterprise},
+		})
 	}
 }
 

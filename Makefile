@@ -11,6 +11,9 @@ GOLANGCI_LINT := $(BIN_DIR)/golangci-lint
 OASDIFF := $(BIN_DIR)/oasdiff
 
 BINARY     := gc
+# COMPANION is gc's OSC 7501 capture companion. It is pure Go and is built,
+# installed and removed alongside gc, which looks it up next to itself.
+COMPANION  := gc-osc7501
 BUILD_DIR  := bin
 ifeq ($(origin INSTALL_DIR),undefined)
 INSTALL_DIR := $(BIN_DIR)
@@ -138,11 +141,13 @@ BAZEL_TEST = $(BAZEL) test $(BAZEL_FLAGS) --keep_going
 bazel-tmpdir:
 	@mkdir -p /tmp/bt
 
-## build: compile gc binary with version metadata
+## build: compile gc and its gc-osc7501 companion with version metadata
 build:
 	go build -buildvcs=false -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/gc
+	CGO_ENABLED=0 go build -buildvcs=false -ldflags "-X main.version=$(VERSION)" -o $(BUILD_DIR)/$(COMPANION) ./cmd/gc-osc7501
 ifeq ($(shell uname),Darwin)
 	@scripts/sign-darwin-local.sh $(BUILD_DIR)/$(BINARY)
+	@GC_SIGN_IDENTIFIER=com.gascity.gc-osc7501 scripts/sign-darwin-local.sh $(BUILD_DIR)/$(COMPANION)
 endif
 
 ## check-self-contained: assert the built gc binary is self-contained (Linux/Nix ICU rpath).
@@ -178,24 +183,26 @@ endif
 install-bd:
 	@sh scripts/install-bd-pinned.sh "$(INSTALL_DIR)"
 
-## install: build and install gc and its pinned bd into the same directory.
+## install: install gc, its companion, and the pinned bd together.
 install: check-self-contained install-bd
 	@mkdir -p $(INSTALL_DIR)
 	@set -e; \
-		tmp="$(INSTALL_DIR)/.$(BINARY).tmp.$$$$"; \
-		trap 'rm -f "$$tmp"' EXIT INT TERM HUP; \
-		cp -f "$(BUILD_DIR)/$(BINARY)" "$$tmp"; \
-		chmod 0755 "$$tmp"; \
-		mv -f "$$tmp" "$(INSTALL_DIR)/$(BINARY)"; \
-		trap - EXIT INT TERM HUP
-	@# Migrate the default installation only; an explicit prefix is isolated.
+		for bin in $(BINARY) $(COMPANION); do \
+			tmp="$(INSTALL_DIR)/.$$bin.tmp.$$$$"; \
+			trap 'rm -f "$$tmp"' EXIT INT TERM HUP; \
+			cp -f "$(BUILD_DIR)/$$bin" "$$tmp"; \
+			chmod 0755 "$$tmp"; \
+			mv -f "$$tmp" "$(INSTALL_DIR)/$$bin"; \
+			trap - EXIT INT TERM HUP; \
+		done
+	@# Migrate only the default installation; an explicit prefix is isolated.
 	@if [ "$(INSTALL_MIGRATE_LOCAL_BIN)" = 1 ] && [ "$(INSTALL_DIR)" != "$(HOME)/.local/bin" ] && [ -d "$(HOME)/.local/bin" ]; then \
-		for tool in "$(BINARY)" bd; do \
+		for tool in "$(BINARY)" "$(COMPANION)" bd; do \
 			ln -sf "$(INSTALL_DIR)/$$tool" "$(HOME)/.local/bin/$$tool"; \
 			echo "Symlinked $(HOME)/.local/bin/$$tool -> $(INSTALL_DIR)/$$tool"; \
 		done; \
 	fi
-	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY)"
+	@echo "Installed $(BINARY) and $(COMPANION) to $(INSTALL_DIR)"
 
 ## generate: regenerate JSON schemas and reference docs
 generate:
@@ -208,7 +215,7 @@ check-schema: generate
 
 ## clean: remove build artifacts
 clean:
-	rm -f $(BUILD_DIR)/$(BINARY)
+	rm -f $(BUILD_DIR)/$(BINARY) $(BUILD_DIR)/$(COMPANION)
 
 ## complexity: print an advisory cyclomatic complexity report for shipped Go
 complexity:

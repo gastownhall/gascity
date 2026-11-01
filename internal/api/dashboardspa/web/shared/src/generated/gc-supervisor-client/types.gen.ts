@@ -1360,7 +1360,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimFailedPayload | BeadClaimLoopHeldPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | FactRecordedPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpChangedPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | ProviderUnresolvedPayload | Record | RequestAcceptedPayload | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StorageRigPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimFailedPayload | BeadClaimLoopHeldPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | FactRecordedPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpChangedPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | ProviderUnresolvedPayload | Record | RequestAcceptedPayload | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StorageRigPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkRateLimitedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -6663,6 +6663,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeWorkNudgeFailed) | ({
     type: 'work.nudged';
 } & TypedEventStreamEnvelopeWorkNudged) | ({
+    type: 'work.rate_limited';
+} & TypedEventStreamEnvelopeWorkRateLimited) | ({
     type: 'work.recycle_requested';
 } & TypedEventStreamEnvelopeWorkRecycleRequested) | ({
     type: 'work.release_unfinished';
@@ -8819,6 +8821,24 @@ export type TypedEventStreamEnvelopeWorkNudged = {
 };
 
 /**
+ * TypedEventStreamEnvelope work.rate_limited
+ */
+export type TypedEventStreamEnvelopeWorkRateLimited = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkRateLimitedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.rate_limited';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope work.recycle_requested
  */
 export type TypedEventStreamEnvelopeWorkRecycleRequested = {
@@ -9150,6 +9170,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeWorkNudgeFailed) | ({
     type: 'work.nudged';
 } & TypedTaggedEventStreamEnvelopeWorkNudged) | ({
+    type: 'work.rate_limited';
+} & TypedTaggedEventStreamEnvelopeWorkRateLimited) | ({
     type: 'work.recycle_requested';
 } & TypedTaggedEventStreamEnvelopeWorkRecycleRequested) | ({
     type: 'work.release_unfinished';
@@ -11425,6 +11447,25 @@ export type TypedTaggedEventStreamEnvelopeWorkNudged = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope work.rate_limited
+ */
+export type TypedTaggedEventStreamEnvelopeWorkRateLimited = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkRateLimitedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.rate_limited';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope work.recycle_requested
  */
 export type TypedTaggedEventStreamEnvelopeWorkRecycleRequested = {
@@ -11830,12 +11871,33 @@ export type WorkLadderPayload = {
     generation: number;
     kind?: string;
     paused?: boolean;
+    provider?: string;
     reason?: string;
     rung?: string;
     session_id: string;
     session_name?: string;
     store_ref?: string;
     template?: string;
+};
+
+export type WorkRateLimitedPayload = {
+    alerted?: boolean;
+    cause?: string;
+    claims?: Array<string> | null;
+    conversation: number;
+    error_code?: string;
+    error_text?: string;
+    fresh_at?: string;
+    generation: number;
+    http_status?: number;
+    provider?: string;
+    refused?: number;
+    refused_at?: string;
+    session_id: string;
+    session_name?: string;
+    since: string;
+    template?: string;
+    transition: string;
 };
 
 export type WorkReadyBody = {

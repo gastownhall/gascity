@@ -202,8 +202,9 @@ func TestTurnHandleConformanceFailedTurn(t *testing.T) {
 	}
 }
 
-// checkTurnRead rejects a failure on a turn that did not fail, and a rate
-// limit with neither the source's class nor HTTP 429 (read from the text).
+// checkTurnRead rejects a failure on a turn that did not fail, a rate limit
+// with neither the source's class nor HTTP 429 (read from the text), and a
+// spent quota that is not a rate limit.
 func TestCheckTurnReadFailures(t *testing.T) {
 	const id = "7f3e9a10-1111-4aaa-8000-000000000001"
 	tests := []struct {
@@ -220,6 +221,8 @@ func TestCheckTurnReadFailures(t *testing.T) {
 		{"completed with a failure", runtime.TurnStatusCompleted, runtime.TurnFailure{Message: "API Error"}, false},
 		{"closed by a newer turn with a failure", "", runtime.TurnFailure{Code: "server_error"}, false},
 		{"rate limit read from the text", runtime.TurnStatusFailed, runtime.TurnFailure{RateLimited: true, HTTPStatus: 503, Message: "429"}, false},
+		{"a spent quota, the source's rate-limit class", runtime.TurnStatusFailed, runtime.TurnFailure{Code: "usage_limit_exceeded", RateLimited: true, Quota: true}, true},
+		{"a spent quota that is no rate limit", runtime.TurnStatusFailed, runtime.TurnFailure{Code: "usage_limit_exceeded", Quota: true}, false},
 	}
 	for _, tc := range tests {
 		hist := runtime.TurnHistory{ObservedAt: time.Now(), Recent: []runtime.EndedTurn{{TurnID: id, Status: tc.status, Failure: tc.failure}}}

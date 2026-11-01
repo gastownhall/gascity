@@ -3714,6 +3714,39 @@ func TestShellExecRunnerKillsProcessGroupOnTimeout(t *testing.T) {
 	processgrouptest.AssertFileSizeStable(t, heartbeatPath, size, 300*time.Millisecond)
 }
 
+func TestShellExecRunnerStopsDescendantsThatLeftItsProcessGroup(t *testing.T) {
+	processgrouptest.RequireRealProcessSignals(t)
+
+	workDir := t.TempDir()
+	heartbeatPath := filepath.Join(workDir, "heartbeat")
+	childPIDPath := filepath.Join(workDir, "child.pid")
+	t.Cleanup(func() { processgrouptest.KillFromPIDFile(t, childPIDPath) })
+	oldWaitDelay := shellExecPostCancelWaitDelay
+	oldSignalGrace := shellExecSignalGrace
+	shellExecPostCancelWaitDelay = 100 * time.Millisecond
+	shellExecSignalGrace = 100 * time.Millisecond
+	t.Cleanup(func() {
+		shellExecPostCancelWaitDelay = oldWaitDelay
+		shellExecSignalGrace = oldSignalGrace
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	// GNU timeout makes itself the leader of a new process group, so what it
+	// bounds runs outside the group the runner signals on cancel.
+	command := fmt.Sprintf("command -v timeout >/dev/null 2>&1 || { echo no-timeout; exit 0; }; timeout 60 sh -c 'printf \"%%s\\n\" \"$$\" > %q; trap \"\" TERM; while :; do printf . >> %q; sleep 0.05; done'", childPIDPath, heartbeatPath)
+	out, err := shellExecRunner(ctx, command, workDir, nil)
+	if strings.Contains(string(out), "no-timeout") {
+		t.Skip("needs a coreutils timeout on PATH")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shellExecRunner() error = %v, want %v", err, context.DeadlineExceeded)
+	}
+
+	size := processgrouptest.WaitForFileSize(t, heartbeatPath)
+	processgrouptest.AssertFileSizeStable(t, heartbeatPath, size, 300*time.Millisecond)
+}
+
 func TestShellExecRunnerKillsProcessGroupAfterWaitDelay(t *testing.T) {
 	processgrouptest.RequireRealProcessSignals(t)
 

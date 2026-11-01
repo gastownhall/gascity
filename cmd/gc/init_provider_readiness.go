@@ -339,7 +339,7 @@ func collectInitProviderTargets(cfg *config.City) ([]initProviderTarget, []strin
 			}
 			return nil
 		}
-		target := initProviderTarget{RefName: ref, DisplayName: display, Runtime: providerreadiness.Target{Family: family, Command: resolved.Command, Args: resolved.Args, Env: resolvedWorkerSessionEnvWithConfig("", cfg, resolved)}}
+		target := initProviderTarget{RefName: ref, DisplayName: display, Runtime: providerreadiness.Target{Family: family, Command: resolved.Command, Args: resolved.Args, Env: resolvedWorkerSessionEnvWithConfig("", cfg, resolved, "")}}
 		for _, prior := range targets {
 			if prior.RefName == ref && reflect.DeepEqual(prior.Runtime, target.Runtime) {
 				return nil
@@ -1014,7 +1014,7 @@ func builtinInitProviderTargets(names []string) []initProviderTarget {
 		if display == "" {
 			display = name
 		}
-		targets = append(targets, initProviderTarget{RefName: name, ProbeName: name, DisplayName: display, Runtime: providerreadiness.Target{Family: name, Command: spec.Command, Args: spec.Args, Env: resolvedWorkerSessionEnvWithConfig("", nil, &config.ResolvedProvider{Env: spec.Env})}})
+		targets = append(targets, initProviderTarget{RefName: name, ProbeName: name, DisplayName: display, Runtime: providerreadiness.Target{Family: name, Command: spec.Command, Args: spec.Args, Env: resolvedWorkerSessionEnvWithConfig("", nil, &config.ResolvedProvider{Env: spec.Env}, "")}})
 	}
 	return targets
 }

@@ -42,6 +42,7 @@ cmd/gc/infra_class_relower.go	convergedInfraBinding.openEngine	raw-result	1
 cmd/gc/infra_class_relower.go	newInfraRelowerStore	raw-param	1
 cmd/gc/infra_class_relower.go	newInfraRelowerStore	raw-var	1
 cmd/gc/infra_class_relower.go	relowerNowUnitsOn	raw-param	1
+cmd/gc/storage_boot.go	openInfraPurgeStores	mint	3
 cmd/gc/storage_boot.go	openPlannedBindingEngine	raw-result	1
 cmd/gc/storage_boot.go	storageRoutes	raw-field	3
 cmd/gc/storage_boot.go	storageRoutes.distinctEngines	raw-result	1

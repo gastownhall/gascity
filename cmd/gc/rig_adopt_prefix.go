@@ -18,6 +18,9 @@ import (
 // onto a queue that has not been adopted. In preview even provider startup is
 // forbidden. Normal adoption uses bd's config capability and owns its startup.
 func readRigAdoptStorePrefix(cityPath, rigPath string, readOnly bool) (string, error) {
+	if !readOnly {
+		return rigAdoptStorePrefix(cityPath, rigPath)
+	}
 	metadataPath := filepath.Join(rigPath, ".beads", "metadata.json")
 	mode, ok, err := contract.ReadDoltMode(fsys.OSFS{}, metadataPath)
 	if err != nil {

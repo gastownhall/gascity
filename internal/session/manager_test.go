@@ -4579,7 +4579,10 @@ func TestPendingAndRespondDoNotSwallowUnrelatedNotFoundErrors(t *testing.T) {
 	}
 }
 
-func TestSendRejectsPendingInteraction(t *testing.T) {
+// TestSendQueuesInsteadOfTypingIntoPendingInteraction: a default send never
+// types into a pending prompt; it is queued for after the prompt is answered.
+func TestSendQueuesInsteadOfTypingIntoPendingInteraction(t *testing.T) {
+	stubSubmitPoller(t)
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := newTestManager(t, store, sp)
@@ -4595,9 +4598,9 @@ func TestSendRejectsPendingInteraction(t *testing.T) {
 		Prompt:    "approve?",
 	})
 
-	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", "", runtime.Config{})
-	if !errors.Is(err, ErrPendingInteraction) {
-		t.Fatalf("Send error = %v, want %v", err, ErrPendingInteraction)
+	out, err := mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", "", runtime.Config{})
+	if err != nil || !out.Queued {
+		t.Fatalf("Send = %+v, %v; want queued behind the pending interaction", out, err)
 	}
 	for _, call := range sp.Calls {
 		if call.Method == "Nudge" && call.Name == info.SessionName {

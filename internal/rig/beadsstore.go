@@ -39,43 +39,76 @@ func beadsDirContainsStore(fs fsys.FS, beadsPath string) (bool, error) {
 	return false, nil
 }
 
-// readAdoptPrefix resolves the existing namespace before deriving a new rig's
-// prefix. Native bd stores it in the database; legacy queues may mirror it in
-// YAML. Never substitute a requested prefix for an unreadable existing one.
-func readAdoptPrefix(deps Deps, req ProvisionRequest, rigPath string) (string, error) {
-	if _, err := deps.FS.Stat(filepath.Join(rigPath, ".beads", "metadata.json")); err != nil {
-		return "", fmt.Errorf("--adopt requires .beads/metadata.json in %s", rigPath)
+// adoptedStorePrefix is the issue prefix an --adopt'ed store records, read
+// once during planning. prefix is "" when neither .beads/config.yaml nor the
+// store records one, or when err is set; err is the adopt guard's refusal of a
+// store it could not read or whose prefix it will not adopt.
+type adoptedStorePrefix struct {
+	prefix string
+	err    error
+}
+
+// readAdoptedStorePrefix learns the issue prefix of the store an --adopt
+// registers. Legacy YAML is accepted alone; native stores verify any YAML
+// mirror against the database namespace. Otherwise, when the
+// store has a metadata.json and the caller can read stores, the store's own
+// config table is asked: bd keeps a store's prefix there and leaves
+// config.yaml a commented template. A missing metadata.json is left for the
+// adopt guard to report.
+func readAdoptedStorePrefix(deps Deps, rigPath string, readOnly bool) adoptedStorePrefix {
+	meta := filepath.Join(rigPath, ".beads", "metadata.json")
+	if _, err := deps.FS.Stat(meta); err != nil {
+		return adoptedStorePrefix{}
 	}
 	configPath := filepath.Join(rigPath, ".beads", "config.yaml")
-	missing := fmt.Errorf("--adopt requires a valid issue_prefix from .beads/config.yaml or the existing Beads store in %s", rigPath)
-	if _, err := deps.FS.Stat(configPath); err != nil {
-		return "", missing
-	}
 	prefix, ok, err := contract.ReadIssuePrefix(deps.FS, configPath)
+	if err != nil && !os.IsNotExist(err) {
+		return adoptedStorePrefix{err: fmt.Errorf("--adopt: reading issue_prefix: %w", err)}
+	}
+	yaml := adoptablePrefix(rigPath, strings.TrimSpace(prefix), true)
+	if yaml.err != nil {
+		return yaml
+	}
+	_, native, err := contract.ReadDoltMode(deps.FS, meta)
 	if err != nil {
-		return "", fmt.Errorf("%w: %w", missing, err)
+		return adoptedStorePrefix{err: err}
 	}
-	_, nativeMode, modeErr := contract.ReadDoltMode(deps.FS, filepath.Join(rigPath, ".beads", "metadata.json"))
-	if modeErr != nil {
-		return "", fmt.Errorf("--adopt: reading workspace metadata: %w", modeErr)
-	}
-	yamlPrefix := strings.ToLower(strings.TrimSpace(prefix))
-	if ok && yamlPrefix != "" && (!nativeMode || deps.ReadStorePrefix == nil) {
-		return yamlPrefix, nil
+	if ok && yaml.prefix != "" && (!native || deps.ReadStorePrefix == nil) {
+		return yaml
 	}
 	if deps.ReadStorePrefix == nil {
-		return "", missing
+		return adoptedStorePrefix{}
 	}
-	prefix, err = deps.ReadStorePrefix(rigPath, req.DryRun)
+	prefix, err = deps.ReadStorePrefix(rigPath, readOnly)
 	if err != nil {
-		return "", fmt.Errorf("%w: reading existing Beads issue_prefix: %w", missing, err)
+		return adoptedStorePrefix{err: fmt.Errorf("--adopt requires a valid issue_prefix in .beads/config.yaml in %s: reading the store's own issue_prefix: %w", rigPath, err)}
 	}
-	if strings.TrimSpace(prefix) == "" {
-		return "", fmt.Errorf("--adopt: existing Beads store has no issue_prefix in %s", rigPath)
+	stored := adoptablePrefix(rigPath, strings.TrimSpace(prefix), false)
+	if stored.err != nil {
+		return stored
 	}
-	storedPrefix := strings.ToLower(strings.TrimSpace(prefix))
-	if ok && yamlPrefix != "" && yamlPrefix != storedPrefix {
-		return "", fmt.Errorf("--adopt: YAML issue_prefix %q conflicts with stored Beads namespace %q; reconcile the existing queue configuration", yamlPrefix, storedPrefix)
+	if ok && yaml.prefix != "" && yaml.prefix != stored.prefix {
+		return adoptedStorePrefix{err: fmt.Errorf("--adopt: YAML issue_prefix %q conflicts with stored Beads namespace %q; reconcile the existing queue configuration", yaml.prefix, stored.prefix)}
 	}
-	return storedPrefix, nil
+	return stored
+}
+
+// adoptablePrefix accepts a recorded prefix that is already lowercase. A
+// mixed-case one is refused rather than lowercased, wherever it is recorded:
+// gc stores rig prefixes lowercase, and minting under a different case would
+// fork the store's bead ID series. The remedy renames the store's prefix; bd
+// rename-prefix leaves .beads/config.yaml alone, and bd create prefers a
+// prefix recorded there, so one recorded in config.yaml must change there too.
+func adoptablePrefix(rigPath, prefix string, inConfigYAML bool) adoptedStorePrefix {
+	lower := strings.ToLower(prefix)
+	if prefix == lower {
+		return adoptedStorePrefix{prefix: prefix}
+	}
+	where, alsoConfigYAML := "", ""
+	if inConfigYAML {
+		where = " in .beads/config.yaml"
+		alsoConfigYAML = " and change the prefix in .beads/config.yaml to " + lower
+	}
+	return adoptedStorePrefix{err: fmt.Errorf("--adopt: the store at %s records issue prefix %q%s; gc stores rig prefixes in lowercase, so adopting it would fork its bead ID series; run %q in %s first%s",
+		rigPath, prefix, where, "bd rename-prefix "+lower, rigPath, alsoConfigYAML)}
 }

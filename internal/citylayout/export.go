@@ -62,6 +62,11 @@ var defaultWorkDirExportExcludes = []string{
 	".gc/emergency/**",
 	".gc/storage-served-binding.json",
 	".gc/storage-infra-cleared.json",
+	// S5-A: storage attestations, the reconciler's v2 fallback record, and a
+	// remote stage's record (written by the staging gc init, never shipped).
+	".gc/storage-attestations.log",
+	".gc/reconciler-v2-fallback.json",
+	".gc/remote-stage.toml",
 	".gc/scope-ownership.json",
 	// gc bd's trust state for this host's bd binaries: the verdict cache,
 	// its lock, the walks' scratch dirs, and the operator's vouches.

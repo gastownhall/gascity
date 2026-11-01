@@ -31,6 +31,7 @@ import (
 // against the suite and, where this test's tree carries the package's
 // BUILD.bazel, against its shard_count.
 var integrationPackagesShards = map[string]int{
+	"//cmd/gc-osc7501:gc-osc7501_test":                           1,
 	"//cmd/gc-write-mint:gc-write-mint_test":                     1,
 	"//cmd/gc:gc_test":                                           24,
 	"//examples/bd/dolt:dolt_test":                               6,
@@ -247,7 +248,11 @@ func TestIntegrationPackagesFitsTheJobsBudget(t *testing.T) {
 // processgrouptest.RequireRealProcessSignals, joining the lane as a single
 // new one-shard action (the test needs real process signals to confirm a
 // wedged pack script is actually killed, not just abandoned).
-const integrationPackagesTwoWaveExceptionPinned = 86
+// Raised to 87 on 2026-10-31 for both the doctor signal regression and
+// //cmd/gc-osc7501:gc-osc7501_test (the
+// OSC 7501 companion against a scratch tmux, about 4 s), which runs inside
+// the second wave without lengthening its tail.
+const integrationPackagesTwoWaveExceptionPinned = 87
 
 // checkIntegrationPackagesJobsBudget reports whether total (the lane's test
 // action count) is acceptable against effective (its --jobs). total may

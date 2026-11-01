@@ -867,7 +867,8 @@ func TestProvider_InputPathsReachMarkedAgentPaneOverSameCLIHumanPane(t *testing.
 // human pane. A human prompt ("❯ ", which is Claude's ready prefix and a p10k
 // prompt line) on the active pane must not make a busy agent read idle, and a
 // real approval prompt on the agent's pane must be seen with the human pane
-// focused (#7657 review, mc-zndi7.101).
+// focused (#7657 review, mc-zndi7.101). The wait-idle pre-read
+// (runtime.IdleBoundaryNow) reads them the same way: busy, then pending.
 func TestProvider_IdleAndPendingReadAgentPaneNotFocusedHumanPrompt(t *testing.T) {
 	f := newAgentPaneFixture(t, "api", "1")
 	tm := f.p.tm
@@ -889,7 +890,8 @@ func TestProvider_IdleAndPendingReadAgentPaneNotFocusedHumanPrompt(t *testing.T)
 	}
 	captured(human, "❯")
 
-	// The agent is busy.
+	// The agent, a claude whose busy reading the leaf trusts, is busy.
+	f.mustRun(t, "set-environment", "-t", f.name, "GC_PROVIDER", "claude")
 	show(f.agent, "✻ Thinking… (12s · esc to interrupt)")
 	captured(f.agent, "esc to interrupt")
 	if idle, err := tm.SnapshotIdle(f.name); err != nil || idle {
@@ -898,12 +900,18 @@ func TestProvider_IdleAndPendingReadAgentPaneNotFocusedHumanPrompt(t *testing.T)
 	if err := tm.WaitForIdle(context.Background(), f.name, time.Second); !errors.Is(err, ErrIdleTimeout) {
 		t.Errorf("WaitForIdle = %v, want ErrIdleTimeout while the agent is busy", err)
 	}
+	if got := runtime.IdleBoundaryNow(f.p, f.name); got != runtime.IdleBoundaryBusy {
+		t.Errorf("IdleBoundaryNow = %v, want %v: the agent's pane shows its spinner", got, runtime.IdleBoundaryBusy)
+	}
 
 	// The agent waits on an approval prompt.
 	show(f.agent, "● Read(file_path: /tmp/test.txt)\n\n This command requires approval\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don't ask again for: Read:*\n   3. No")
 	captured(f.agent, "Do you want to proceed?")
 	if pending, err := tm.Pending(f.name); err != nil || pending == nil {
 		t.Errorf("Pending = (%v, %v), want the agent pane's approval prompt", pending, err)
+	}
+	if got := runtime.IdleBoundaryNow(f.p, f.name); got != runtime.IdleBoundaryPending {
+		t.Errorf("IdleBoundaryNow = %v, want %v: the approval prompt owns the agent's input", got, runtime.IdleBoundaryPending)
 	}
 }
 

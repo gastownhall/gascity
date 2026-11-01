@@ -280,7 +280,7 @@ func TestRenudgeStaleHumanGatesOrder(t *testing.T) {
 //     matching the sibling scripts' cross-rig convention.
 //   - Timestamp parsing is portable: GNU-only `date -d` returns empty on
 //     BSD/macOS, skipping every gate and silently disabling the sweep, so the
-//     BSD `date -ju -f` fallback (matching wisp-compact.sh) is required.
+//     BSD `date -ju -f` fallback is required.
 //   - Loud-fail: an undeliverable send must surface and NOT be recorded. As
 //     with the creation notify, surfacing requires a NON-ZERO exit (the
 //     controller logs an exec order's output only on a non-zero exit), so the
@@ -320,8 +320,7 @@ func TestRenudgeStaleHumanGatesScriptContract(t *testing.T) {
 	}
 	// Timestamp parsing must be portable: GNU-only `date -d` returns empty on
 	// BSD/macOS, which skips every gate at the age check and silently disables
-	// the whole sweep. The BSD `date -ju -f` fallback (matching wisp-compact.sh)
-	// is load-bearing.
+	// the whole sweep. The BSD `date -ju -f` fallback is load-bearing.
 	if !strings.Contains(body, "date -ju -f") {
 		t.Error("renudge-stale-human-gates.sh must parse timestamps portably via the BSD `date -ju -f` fallback; GNU-only `date -d` disables the sweep on macOS")
 	}
