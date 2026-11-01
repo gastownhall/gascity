@@ -2221,6 +2221,8 @@ func TestStartHonorsCancellationDuringPostStartSettle(t *testing.T) {
 		Env:          map[string]string{"GC_AGENT": "deacon", "GC_CITY": "/workspace"},
 		ProcessNames: []string{"claude"},
 	}
+	acceptDialogs := false
+	cfg.AcceptStartupDialogs = &acceptDialogs
 
 	started := time.Now()
 	err := p.Start(ctx, "gc-test-agent", cfg)
@@ -2309,6 +2311,342 @@ func TestStartSkipsNudgeWhenEmpty(t *testing.T) {
 			c.cmd[0] == "tmux" && c.cmd[1] == "send-keys" && c.cmd[4] == "-l" {
 			t.Error("Start sent nudge text when Nudge was empty")
 		}
+	}
+}
+
+// k8sCodex0156TrustDialog is the pane fixture from
+// internal/runtime/dialog_trust_selection_test.go.
+const k8sCodex0156TrustDialog = `› Ask Codex to do anything
+
+  Folder access
+  /Users/u/src/project
+
+  Trust this folder? Codex can read, edit, and run files here, subject to your
+  permission settings. Folder settings can run code automatically, even
+  without a model request. Continue only if you trust these files. Your trust
+  decision will be saved.
+
+› 1. Trust and continue
+  2. Quit
+
+  enter continue · esc quit`
+
+const k8sCodexComposer = `OpenAI Codex (v0.156.0)
+› Ask Codex to do anything`
+
+func k8sCodex0156TrustDialogQuitSelected() string {
+	return strings.Replace(k8sCodex0156TrustDialog,
+		"› 1. Trust and continue\n  2. Quit",
+		"  1. Trust and continue\n› 2. Quit", 1)
+}
+
+func newStartupDialogTestProvider(fake *fakeK8sOps) *Provider {
+	p := newProviderWithOps(fake)
+	p.prebaked = true
+	p.postStartSettle = 0
+	p.startupDialogTimeout = 2 * time.Second
+	return p
+}
+
+func startupDialogTestConfig() runtime.Config {
+	return runtime.Config{Command: "codex", ProcessNames: []string{"codex"}}
+}
+
+func isStartupDialogCapture(c fakeCall) bool {
+	return c.method == "execInPod" && len(c.cmd) > 1 && c.cmd[0] == "tmux" && c.cmd[1] == "capture-pane"
+}
+
+func startupDialogTmuxCalls(fake *fakeK8sOps) []fakeCall {
+	var calls []fakeCall
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) > 1 && c.cmd[0] == "tmux" {
+			calls = append(calls, c)
+		}
+	}
+	return calls
+}
+
+func isStartupDialogSendKeys(c fakeCall, keys ...string) bool {
+	if c.method != "execInPod" || len(c.cmd) < 4 || c.cmd[0] != "tmux" || c.cmd[1] != "send-keys" || c.cmd[2] != "-t" || c.cmd[3] != tmuxSession {
+		return false
+	}
+	if len(c.cmd) != 4+len(keys) {
+		return false
+	}
+	for i, key := range keys {
+		if c.cmd[4+i] != key {
+			return false
+		}
+	}
+	return true
+}
+
+func TestStartAcceptsCodex0156TrustDialogBeforeNudge(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newStartupDialogTestProvider(fake)
+	cfg := startupDialogTestConfig()
+	cfg.Nudge = "Check your assigned work."
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) > 1 && cmd[0] == "tmux" && cmd[1] == "capture-pane" {
+			return k8sCodex0156TrustDialog, nil
+		}
+		return "", nil
+	}
+
+	if err := p.Start(context.Background(), "gc-test-agent", cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	calls := startupDialogTmuxCalls(fake)
+	enterIndex, nudgeIndex, bareEnterCount := -1, -1, 0
+	for i, c := range calls {
+		if isStartupDialogSendKeys(c, "Enter") {
+			bareEnterCount++
+			if enterIndex < 0 {
+				enterIndex = i
+			}
+		}
+		if len(c.cmd) > 4 && c.cmd[1] == "send-keys" && c.cmd[4] == "-l" && strings.Join(c.cmd[5:], " ") == cfg.Nudge {
+			nudgeIndex = i
+		}
+	}
+	if bareEnterCount != 2 {
+		t.Fatalf("bare Enter count = %d, want dialog confirmation and nudge submit; calls=%v", bareEnterCount, calls)
+	}
+	if enterIndex < 0 || nudgeIndex < 0 || enterIndex >= nudgeIndex {
+		t.Fatalf("dialog Enter index = %d, nudge index = %d; want dialog confirmation before nudge; calls=%v", enterIndex, nudgeIndex, calls)
+	}
+}
+
+func TestStartMovesCodex0156QuitSelectionBeforeEnter(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newStartupDialogTestProvider(fake)
+	pane := k8sCodex0156TrustDialogQuitSelected()
+	var captureFrames, enterFrames []string
+	var paneAfterUp string
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) > 1 && cmd[0] == "tmux" && cmd[1] == "capture-pane" {
+			captureFrames = append(captureFrames, pane)
+			if paneAfterUp == "after-up-pending" {
+				paneAfterUp = pane
+			}
+			return pane, nil
+		}
+		if len(cmd) > 4 && cmd[0] == "tmux" && cmd[1] == "send-keys" {
+			if cmd[4] == "Up" {
+				pane = k8sCodex0156TrustDialog
+				paneAfterUp = "after-up-pending"
+			}
+			if cmd[4] == "Enter" {
+				enterFrames = append(enterFrames, pane)
+			}
+		}
+		return "", nil
+	}
+
+	if err := p.Start(context.Background(), "gc-test-agent", startupDialogTestConfig()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if len(enterFrames) != 1 || !strings.Contains(enterFrames[0], "› 1. Trust and continue") || strings.Contains(enterFrames[0], "› 2. Quit") {
+		t.Fatalf("Enter pane frames = %q, want exactly one frame with Trust selected", enterFrames)
+	}
+	if !strings.Contains(paneAfterUp, "› 1. Trust and continue") {
+		t.Fatalf("first pane read after Up = %q, want Trust selected", paneAfterUp)
+	}
+	if len(captureFrames) == 0 || !strings.Contains(captureFrames[0], "› 2. Quit") {
+		t.Fatalf("initial capture frames = %q, want Quit selected", captureFrames)
+	}
+
+	calls := startupDialogTmuxCalls(fake)
+	upIndex, freshReadIndex, enterIndex := -1, -1, -1
+	for i, c := range calls {
+		if isStartupDialogSendKeys(c, "Up") && upIndex < 0 {
+			upIndex = i
+			continue
+		}
+		if upIndex >= 0 && freshReadIndex < 0 && isStartupDialogCapture(c) {
+			freshReadIndex = i
+			continue
+		}
+		if isStartupDialogSendKeys(c, "Enter") && enterIndex < 0 {
+			enterIndex = i
+		}
+	}
+	if upIndex < 0 || freshReadIndex <= upIndex || enterIndex <= freshReadIndex {
+		t.Fatalf("action indices Up=%d fresh capture=%d Enter=%d; want Up, fresh pane read, then Enter; calls=%v", upIndex, freshReadIndex, enterIndex, calls)
+	}
+}
+
+func TestStartAcceptsCodexTrustAfterBlankPane(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newStartupDialogTestProvider(fake)
+	captureCount := 0
+	var captureFrames []string
+	var currentPane, enterPane string
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) > 1 && cmd[0] == "tmux" && cmd[1] == "capture-pane" {
+			captureCount++
+			if captureCount == 1 {
+				currentPane = ""
+			} else {
+				currentPane = k8sCodex0156TrustDialog
+			}
+			captureFrames = append(captureFrames, currentPane)
+			return currentPane, nil
+		}
+		if isStartupDialogSendKeys(fakeCall{method: "execInPod", cmd: cmd}, "Enter") {
+			enterPane = currentPane
+		}
+		return "", nil
+	}
+
+	if err := p.Start(context.Background(), "gc-test-agent", startupDialogTestConfig()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if len(captureFrames) < 2 || captureFrames[0] != "" || !strings.Contains(captureFrames[1], "Trust this folder?") {
+		t.Fatalf("capture frames = %q, want blank pane then delayed trust dialog", captureFrames)
+	}
+	if !strings.Contains(enterPane, "› 1. Trust and continue") {
+		t.Fatalf("Enter pane = %q, want Trust selected", enterPane)
+	}
+}
+
+func TestStartAcceptsCodexTrustDrawnAfterComposer(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newStartupDialogTestProvider(fake)
+	captureCount := 0
+	composerCaptureCount, firstComposerCaptureCount := 0, 0
+	firstTrustCaptureCount, trustCaptureCount, answeredTrustCount := 0, 0, 0
+	var currentPane string
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) > 1 && cmd[0] == "tmux" && cmd[1] == "capture-pane" {
+			captureCount++
+			// The ordered startup-dialog pass currently has ten phases, followed
+			// by the watch's first read. Keep the composer on those eleven reads
+			// so this test exercises a trust dialog drawn by the late-startup watch.
+			if captureCount <= 11 {
+				currentPane = k8sCodexComposer
+				if firstComposerCaptureCount == 0 {
+					firstComposerCaptureCount = captureCount
+				}
+				composerCaptureCount++
+			} else {
+				currentPane = k8sCodex0156TrustDialog
+				if firstTrustCaptureCount == 0 {
+					firstTrustCaptureCount = captureCount
+				}
+				trustCaptureCount++
+			}
+			return currentPane, nil
+		}
+		if isStartupDialogSendKeys(fakeCall{method: "execInPod", cmd: cmd}, "Enter") &&
+			strings.Contains(currentPane, "Trust this folder?") &&
+			strings.Contains(currentPane, "› 1. Trust and continue") &&
+			!strings.Contains(currentPane, "› 2. Quit") {
+			answeredTrustCount++
+		}
+		return "", nil
+	}
+
+	if err := p.Start(context.Background(), "gc-test-agent", startupDialogTestConfig()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if composerCaptureCount == 0 || firstComposerCaptureCount == 0 || firstTrustCaptureCount == 0 || trustCaptureCount == 0 || composerCaptureCount+trustCaptureCount != captureCount {
+		t.Fatalf("composer captures=%d first composer capture=%d first trust capture=%d trust captures=%d after %d captures; want both panes captured", composerCaptureCount, firstComposerCaptureCount, firstTrustCaptureCount, trustCaptureCount, captureCount)
+	}
+	if answeredTrustCount != 1 {
+		t.Fatalf("trust Enter count = %d, want exactly one bare Enter while Trust and continue is selected", answeredTrustCount)
+	}
+	if firstComposerCaptureCount >= firstTrustCaptureCount {
+		t.Fatalf("composer was not captured before trust appeared: first composer capture=%d first trust capture=%d", firstComposerCaptureCount, firstTrustCaptureCount)
+	}
+}
+
+func TestStartDoesNotInspectDialogsWhenExplicitlyDisabled(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newStartupDialogTestProvider(fake)
+	cfg := startupDialogTestConfig()
+	accept := false
+	cfg.AcceptStartupDialogs = &accept
+
+	if err := p.Start(context.Background(), "gc-test-agent", cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	for _, c := range startupDialogTmuxCalls(fake) {
+		if isStartupDialogCapture(c) || len(c.cmd) > 1 && c.cmd[1] == "send-keys" {
+			t.Fatalf("startup dialog interaction with explicit false: %v", c.cmd)
+		}
+	}
+}
+
+func TestStartDoesNotInspectDialogsWithNilAndNoHints(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newStartupDialogTestProvider(fake)
+	cfg := runtime.Config{Command: "codex"}
+
+	if err := p.Start(context.Background(), "gc-test-agent", cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	for _, c := range startupDialogTmuxCalls(fake) {
+		if isStartupDialogCapture(c) || len(c.cmd) > 1 && c.cmd[1] == "send-keys" {
+			t.Fatalf("startup dialog interaction with nil and no hints: %v", c.cmd)
+		}
+	}
+}
+
+func TestStartCleansUpWhenStartupDialogHandlingIsCanceled(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newStartupDialogTestProvider(fake)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stderr strings.Builder
+	p.stderr = &stderr
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) > 1 && cmd[0] == "tmux" && cmd[1] == "capture-pane" {
+			cancel()
+		}
+		return "", nil
+	}
+
+	err := p.Start(ctx, "gc-test-agent", startupDialogTestConfig())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start error = %v, want context.Canceled", err)
+	}
+	if _, exists := fake.pods["gc-test-agent"]; exists {
+		t.Fatal("pod remains after startup dialog cancellation; want cleanup")
+	}
+	var deleted bool
+	for _, c := range fake.calls {
+		if c.method == "deletePod" && c.pod == "gc-test-agent" {
+			deleted = true
+			break
+		}
+	}
+	if !deleted {
+		t.Fatal("Start did not delete the pod after startup dialog cancellation")
+	}
+	if !strings.Contains(stderr.String(), "gc: warning: accepting startup dialogs") {
+		t.Fatalf("warning output = %q, want startup dialog warning", stderr.String())
+	}
+}
+
+func TestStartWarnsAndContinuesWhenStartupDialogReadFails(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newStartupDialogTestProvider(fake)
+	var stderr strings.Builder
+	p.stderr = &stderr
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) > 1 && cmd[0] == "tmux" && cmd[1] == "capture-pane" {
+			return "", errors.New("pane capture failed")
+		}
+		return "", nil
+	}
+
+	if err := p.Start(context.Background(), "gc-test-agent", startupDialogTestConfig()); err != nil {
+		t.Fatalf("Start should continue after a non-cancellation dialog error: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "gc: warning: accepting startup dialogs") || !strings.Contains(stderr.String(), "pane capture failed") {
+		t.Fatalf("warning output = %q, want dialog warning with underlying error", stderr.String())
 	}
 }
 
