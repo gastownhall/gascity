@@ -525,8 +525,8 @@ func TestWispGC_SessionPurgeScanBudgetDoesNotStarve(t *testing.T) {
 
 // carryWispGCState hands a tracker rebuilt by a config reload the progress of
 // the tracker it replaces. The table locks in what the carry keeps (the run
-// clock) and what still comes from the rebuilt tracker alone (interval, TTLs,
-// cityName, notes).
+// clock, the session purge cursor) and what still comes from the rebuilt
+// tracker alone (interval, TTLs, cityName, notes).
 func TestWispGC_ReloadKeepsLastRunAndCursor(t *testing.T) {
 	now := time.Now()
 
@@ -584,6 +584,71 @@ func TestWispGC_ReloadKeepsLastRunAndCursor(t *testing.T) {
 			t.Fatal("graph refusal carried into the rebuilt tracker")
 		}
 	})
+
+	t.Run("session purge cursor is carried", func(t *testing.T) {
+		cursor := &beads.SeekBoundary{CreatedAt: now, ID: "gcg-session-held-2"}
+		prev := &memoryWispGC{interval: time.Hour, ttl: time.Hour, lastRun: now, sessionPurgeCursor: cursor}
+		next := &memoryWispGC{interval: time.Hour, ttl: time.Hour}
+		m := carryWispGCState(prev, next).(*memoryWispGC)
+		if m.sessionPurgeCursor != cursor {
+			t.Fatalf("sessionPurgeCursor = %+v, want the outgoing tracker's cursor carried so the sweep resumes where it stopped", m.sessionPurgeCursor)
+		}
+	})
+}
+
+// A config reload between sweeps must not reset the closed-session sweep's
+// cursor: with the cursor lost, a backlog of child-holding sessions larger
+// than the scan cap eats every pass's budget and the purgeable sessions
+// behind it are never reached.
+func TestWispGC_SessionPurgeCursorSurvivesReload(t *testing.T) {
+	t.Setenv("GC_INFRA_SESSION_PURGE_AGE", "")
+	now := time.Now()
+	base := now.Add(-60 * 24 * time.Hour)
+
+	prevScan := wispGCSessionPurgeScanCap
+	wispGCSessionPurgeScanCap = 2
+	t.Cleanup(func() { wispGCSessionPurgeScanCap = prevScan })
+
+	// Three child-holding sessions are the oldest candidates, then two
+	// purgeable ones. rebuild rebuilds the tracker before every pass, the way
+	// an applied config reload does.
+	run := func(t *testing.T, rebuild func(wispGC) wispGC) []int {
+		ledger := openSessionPurgeSQLiteStore(t)
+		for i := 0; i < 3; i++ {
+			parent := fmt.Sprintf("gcg-session-held-%d", i)
+			mustCreateSessionPurgeBead(t, ledger, closedSessionPurgeBead(parent, "session", base.Add(time.Duration(i)*time.Minute)))
+			child := closedSessionPurgeBead(fmt.Sprintf("gcg-held-child-%d", i), "task", base)
+			child.ParentID = parent
+			mustCreateSessionPurgeBead(t, ledger, child)
+		}
+		mustCreateSessionPurgeBead(t, ledger, closedSessionPurgeBead("gcg-session-free-0", "session", base.Add(10*time.Minute)))
+		mustCreateSessionPurgeBead(t, ledger, closedSessionPurgeBead("gcg-session-free-1", "session", base.Add(11*time.Minute)))
+
+		var per []int
+		wg := newWispGC(time.Minute, 24*time.Hour, 0)
+		for tick := 0; tick < 3; tick++ {
+			wg = rebuild(wg)
+			purged, err := wg.runGC(nil, beads.GraphStore{Store: ledger}, beads.SessionStore{Store: ledger}, beads.MailStore{}, now)
+			if err != nil {
+				t.Fatalf("tick %d runGC: %v", tick, err)
+			}
+			per = append(per, purged)
+		}
+		return per
+	}
+
+	carried := run(t, func(prev wispGC) wispGC {
+		return carryWispGCState(prev, newWispGC(time.Minute, 24*time.Hour, 0))
+	})
+	if fmt.Sprint(carried) != "[0 1 1]" {
+		t.Fatalf("purged per tick with the carry = %v, want [0 1 1] (the cursor survives the rebuild)", carried)
+	}
+	starved := run(t, func(wispGC) wispGC {
+		return newWispGC(time.Minute, 24*time.Hour, 0)
+	})
+	if fmt.Sprint(starved) != "[0 0 0]" {
+		t.Fatalf("purged per tick with a bare rebuild = %v, want [0 0 0] (the cursor reset starves the free sessions)", starved)
+	}
 }
 
 func TestWispGC_NothingExpired(t *testing.T) {
