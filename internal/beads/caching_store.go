@@ -468,9 +468,6 @@ type CacheStats struct {
 	CadenceDriver string
 	// ReconcileRequests counts RequestReconcile calls.
 	ReconcileRequests int64
-	// DepsCoverageLost counts the times the cache stopped vouching for its
-	// dependency coverage (markDepsIncompleteLocked).
-	DepsCoverageLost int64
 }
 
 const (

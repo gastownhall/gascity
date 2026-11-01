@@ -185,7 +185,6 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"LastProblem": true, "State": true, "StaggerOffsetMs": true,
 		"CurrentReconcileInterval": true, "LatencyP95Ms": true, "CadenceDriver": true,
 		"ReconcileRequests": true, // counts RequestReconcile calls, not merge outcome
-		"DepsCoverageLost":  true, // diagnostic count of depsComplete clears; depsComplete is compared
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CacheStats{}), comparedStats, excludedStats)
 }

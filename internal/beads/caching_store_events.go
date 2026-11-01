@@ -489,30 +489,43 @@ func (c *CachingStore) updateEventDepsLocked(eventType string, b Bead, fields ma
 	if _, ok := c.deps[b.ID]; ok {
 		return false
 	}
-	if depsAuthoritative || eventType == "bead.closed" {
-		// No entry under complete coverage means no edges. A snapshot carries
-		// every edge it has (omitempty drops only an empty set), and a close
-		// changes none, so neither leaves this row's coverage unknown. The
-		// cache's own CloseAll echo lands here for every edge-less row it
-		// closes: reading it as unknown cleared depsComplete, wiped every
-		// cached verdict, and the next reconcile re-announced the whole store.
-		return false
+	if c.backingRowsCarryDependencies() {
+		// The backing's rows carry their edges, so a row read from it answers
+		// for its own: install them, as a row the event put in the cache may
+		// have edges no entry records yet.
+		if refreshedFromBacking {
+			return c.setEventDepsLocked(b.ID, depsFromBeadFields(b))
+		}
+		// No entry under complete coverage means no edges, and a close changes
+		// none. The cache's own CloseAll echo lands here for every edge-less
+		// row it closes: reading it as unknown cleared depsComplete, wiped
+		// every cached verdict, and the next reconcile re-announced the store.
+		if eventType == "bead.closed" {
+			return false
+		}
 	}
-	return c.markDepsIncompleteLocked(fmt.Sprintf("%s patch: missing deps for %s", eventType, b.ID))
+	if eventType == "bead.updated" && c.depsComplete {
+		c.recordProblemLocked("apply bead.updated event", errors.New("dependency cache marked complete but missing deps"))
+	}
+	return c.markDepsIncompleteLocked(eventType + " event for a row with no deps entry")
 }
 
 // markDepsIncompleteLocked clears depsComplete, the store-wide claim that each
 // cached row's deps entry, or its absence, is its whole edge set, and reports
 // whether it was set. While it is clear, readiness reads go live and a status
-// change may invalidate every cached verdict, so each flip is counted and
-// logged, rate-limited per reason. Caller must hold c.mu in write mode.
+// change may invalidate cached verdicts well beyond the changed row, so each
+// flip is logged, rate-limited per reason. A flip is not itself a problem: most
+// are races the next scan heals. Caller must hold c.mu in write mode.
 func (c *CachingStore) markDepsIncompleteLocked(reason string) bool {
 	if !c.depsComplete {
 		return false
 	}
 	c.depsComplete = false
-	c.stats.DepsCoverageLost++
-	c.recordProblemLocked("dependency coverage lost", errors.New(reason))
+	if c.problemf != nil {
+		if msg, ok := c.problemLogMessageLocked("dependency coverage lost: "+reason, c.clockNow()); ok {
+			c.problemf(msg)
+		}
+	}
 	return true
 }
 
@@ -608,10 +621,12 @@ func (c *CachingStore) clearDependentReadyProjectionsLocked(dependsOnID string) 
 		return false
 	}
 	// Without depsComplete a row with no deps entry may depend on dependsOnID
-	// unseen. When the backing's rows carry their edges, every entry was
-	// installed from such a row and still answers for it, so only the
-	// entry-less rows are unknown. Otherwise an entry may be a guess derived
-	// from fields that omit edges, and every verdict goes.
+	// unseen. When the backing declares that its rows carry their edges
+	// (SQLite, NativeDolt, a BdStore once it has seen inline edges, and a
+	// ProxiedStore over any of them), every entry was installed from such a
+	// row and still answers for it, so only the entry-less rows are unknown.
+	// Otherwise (MemStore, FileStore, a BdStore before that) an entry may be
+	// a guess derived from fields that omit edges, and every verdict goes.
 	if !c.depsComplete && !c.backingRowsCarryDependencies() {
 		return c.clearAllReadyProjectionsLocked()
 	}
