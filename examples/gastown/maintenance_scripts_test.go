@@ -7168,13 +7168,21 @@ case "$1" in
       exit 1
     fi
     n=0
+    first=""
     while [ $# -gt 0 ]; do
       if [ "$1" = "--from-file" ]; then
         n=$(grep -c . "$2")
+        first=$(grep -m1 . "$2")
       fi
       shift
     done
-    printf '{"deleted_count":%s}\n' "$n"
+    # Real bd answers a one-id delete in its single-issue shape, with no
+    # deleted_count; only a multi-id delete carries the count.
+    if [ "$n" = "1" ]; then
+      printf '{"deleted":"%s","dependencies_removed":0,"references_updated":0,"schema_version":1}\n' "$first"
+    else
+      printf '{"deleted_count":%s}\n' "$n"
+    fi
     ;;
 esac
 exit 0

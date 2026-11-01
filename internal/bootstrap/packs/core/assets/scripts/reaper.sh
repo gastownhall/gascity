@@ -1540,7 +1540,9 @@ if [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
                 printf '%s\n' "$SQL_ROWS_RESULT" >"$SESSION_IDS_FILE"
                 DELETED_COUNT=""
                 if DELETE_OUT=$(scope_bd delete --force --json --from-file "$SESSION_IDS_FILE" 2>"$DELETE_ERR_FILE"); then
-                    DELETED_COUNT=$(printf '%s' "$DELETE_OUT" | jq -r '.deleted_count // empty' 2>/dev/null || true)
+                    # bd answers a one-id delete in its single-issue shape
+                    # ({"deleted":"<id>"}, no deleted_count); count it as 1.
+                    DELETED_COUNT=$(printf '%s' "$DELETE_OUT" | jq -r '.deleted_count // (.deleted | if type == "string" then 1 elif type == "array" then length else empty end)' 2>/dev/null || true)
                 fi
                 case "$DELETED_COUNT" in
                     ''|*[!0-9]*)
