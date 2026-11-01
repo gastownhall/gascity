@@ -1964,6 +1964,18 @@
           "type": "string",
           "description": "Context is the kubectl/kubeconfig context. Default: current."
         },
+        "run_as_user": {
+          "type": "integer",
+          "description": "RunAsUser is an optional numeric UID for generated agent pods. When unset,\nKubernetes admission may assign a UID; otherwise the image's numeric\nnon-root fallback is used. Gas City does not allocate UIDs."
+        },
+        "run_as_group": {
+          "type": "integer",
+          "description": "RunAsGroup is an optional primary GID for generated agent pods. When unset,\nthe image or cluster policy supplies the group identity. For a nonzero\nvalue, generated pods also join supplementary group 0 so image-layer HOME\nand prebaked workspace paths remain writable without changing the primary\nGID."
+        },
+        "fs_group": {
+          "type": "integer",
+          "description": "FSGroup is an optional supplemental filesystem GID. It lets kubelet make\nmounted workspace volumes writable by the pod's non-root identity."
+        },
         "cpu_request": {
           "type": "string",
           "description": "CPURequest is the pod CPU request. Default: \"500m\".",
@@ -1991,7 +2003,7 @@
       },
       "additionalProperties": false,
       "type": "object",
-      "description": "K8sConfig holds native K8s session provider settings."
+      "description": "K8sConfig holds native K8s session provider settings; identity fields run_as_user, run_as_group, and fs_group cannot be combined with LINUX_USERNAME, including through GC_K8S_* environment overrides."
     },
     "LocalDoctorCheck": {
       "properties": {

@@ -71,7 +71,7 @@ RUN bd_version="${BD_VERSION#v}" \
 FROM ${BASE_IMAGE}
 
 # Build-time copies and ownership fixes require root; the final image drops
-# back to gcagent below.
+# back to the numeric non-root fallback below.
 USER root
 
 # bd (beads) CLI, rebuilt above from checksum-pinned release source.
@@ -97,11 +97,14 @@ COPY contrib/mail-scripts/gc-mail-mcp-agent-mail /usr/local/bin/gc-mail-mcp-agen
 # The CLAUDE_CONFIG_DIR env var (set by gc-session-k8s) points to the mount.
 
 WORKDIR /workspace
-RUN chown gcagent:gcagent /workspace
+RUN chown gcagent:0 /workspace && chmod 0775 /workspace
 
-# Default user. When LINUX_USERNAME is set, the pod spec overrides to root
-# (UID 0) via securityContext so the entrypoint can create the dynamic user
-# before dropping privileges.
-USER gcagent
+# An arbitrary pod UID joins group 0, so HOME must be group-writable for the
+# entrypoint's credential copy and git config.
+RUN chown -R gcagent:0 /home/gcagent && chmod -R g=u /home/gcagent
+
+# Numeric fallback for clusters that do not assign a pod UID. Agent pods may
+# override it through admission or [session.k8s] run_as_user.
+USER 1001:0
 
 CMD ["/bin/bash"]

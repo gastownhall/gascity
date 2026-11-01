@@ -1381,6 +1381,15 @@ func openCityEventsProviderWithConfig(providerConfig func() config.EventsConfig,
 	return p, 0
 }
 
+// k8sPodSecurityFromConfig returns the pod identity settings for generated pods.
+func k8sPodSecurityFromConfig(cfg config.K8sConfig) sessionk8s.PodSecurityConfig {
+	return sessionk8s.PodSecurityConfig{
+		RunAsUser:  cfg.RunAsUser,
+		RunAsGroup: cfg.RunAsGroup,
+		FSGroup:    cfg.FSGroup,
+	}
+}
+
 // newHybridProvider constructs a composite provider that routes sessions to
 // tmux (local) or k8s (remote) based on session name. The GC_HYBRID_REMOTE_MATCH
 // env var controls which sessions go to k8s. If unset, all sessions route to
@@ -1389,7 +1398,7 @@ func newHybridProvider(sc config.SessionConfig, cityName, cityPath string) (runt
 	// Cut-over: hybrid routes to the seam-backed tmux/k8s providers, so
 	// hybrid-routed sessions flow through the seams like every other path.
 	local := sessiontmux.NewSeamBackedWithConfig(tmuxConfigFromSession(sc, cityName, cityPath))
-	remote, err := sessionk8s.NewSeamBacked(sessionk8s.WithCityName(cityName))
+	remote, err := sessionk8s.NewSeamBackedWithSecurityConfig(k8sPodSecurityFromConfig(sc.K8s), sessionk8s.WithCityName(cityName))
 	if err != nil {
 		return nil, fmt.Errorf("hybrid: k8s backend: %w", err)
 	}

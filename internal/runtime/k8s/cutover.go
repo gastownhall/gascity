@@ -26,7 +26,13 @@ var (
 
 // NewSeamBacked constructs a k8s provider served through the seams.
 func NewSeamBacked(opts ...Option) (runtime.Provider, error) {
-	raw, err := NewProvider()
+	return NewSeamBackedWithSecurityConfig(PodSecurityConfig{}, opts...)
+}
+
+// NewSeamBackedWithSecurityConfig constructs a K8s provider with optional
+// pod-level UID, GID, and fsGroup values from the city session config.
+func NewSeamBackedWithSecurityConfig(config PodSecurityConfig, opts ...Option) (runtime.Provider, error) {
+	raw, err := NewProviderWithSecurityConfig(config)
 	if err != nil {
 		return nil, err
 	}
