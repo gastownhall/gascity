@@ -72,6 +72,12 @@ func managedCityDriftFixture(t *testing.T, rigName string) (cityDir, rigDir, man
 		t.Fatal(err)
 	}
 
+	// A healthy inherited rig carries the managed port mirror that gc start
+	// writes; tests that need it missing or stale rewrite it.
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "dolt-server.port"), []byte(managedPort+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	cfg = &config.City{
 		Workspace: config.Workspace{Name: "drift-test"},
 		Rigs:      []config.Rig{{Name: rigName, Path: rigDir, Prefix: "r"}},
@@ -226,6 +232,115 @@ func TestDoltDriftCheckDetectsPortFileDrift(t *testing.T) {
 	// doctor offers `--fix`.
 	if !check.CanFix() {
 		t.Errorf("CanFix() = false after pure port-file drift, want true (re-pin is safe)")
+	}
+}
+
+// TestDoltDriftCheckDetectsMissingOrEmptyPortMirror pins Case D: an inherited
+// rig whose .beads/dolt-server.port is gone or empty has no way for raw bd to
+// find the city server, so every bd call there resolves port 0. That is drift
+// `gc doctor --fix` repairs by re-pinning the mirror, not a healthy rig.
+func TestDoltDriftCheckDetectsMissingOrEmptyPortMirror(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state string
+		setup func(t *testing.T, portFile string)
+	}{
+		{name: "missing", state: "missing", setup: func(t *testing.T, portFile string) {
+			if err := os.Remove(portFile); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "empty", state: "empty", setup: func(t *testing.T, portFile string) {
+			if err := os.WriteFile(portFile, []byte("\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir, rigDir, managedPort, cfg := managedCityDriftFixture(t, "severed")
+			portFile := filepath.Join(rigDir, ".beads", "dolt-server.port")
+			tc.setup(t, portFile)
+
+			check := newDoltDriftCheck(cityDir, cfg)
+			r := check.Run(&doctor.CheckContext{CityPath: cityDir})
+			if r.Status != doctor.StatusError {
+				t.Fatalf("Run() status = %v, want StatusError; message=%q details=%v", r.Status, r.Message, r.Details)
+			}
+			joined := strings.Join(r.Details, " ")
+			for _, want := range []string{`rig "severed"`, ".beads/dolt-server.port " + tc.state, managedPort, "gc doctor --fix --check dolt-drift"} {
+				if !strings.Contains(joined, want) {
+					t.Errorf("details = %q, want %q", joined, want)
+				}
+			}
+			if strings.Contains(joined, "endpoint_origin=inherited_city") {
+				t.Errorf("details = %q, want the live rig-local (Case A) marker absent from a missing-mirror finding", joined)
+			}
+			if !check.CanFix() {
+				t.Fatal("CanFix() = false for a missing/empty inherited mirror, want true (re-pin is safe)")
+			}
+
+			d := &doctor.Doctor{}
+			d.Register(check)
+			report := d.RunCollect(&doctor.CheckContext{CityPath: cityDir}, true)
+			if report.Fixed != 1 || report.Failed != 0 {
+				res := report.Results[0]
+				t.Fatalf("doctor --fix: fixed=%d failed=%d, want the mirror restored; status=%v details=%v fixErr=%q", report.Fixed, report.Failed, res.Status, res.Details, res.FixError)
+			}
+			got, err := os.ReadFile(portFile)
+			if err != nil {
+				t.Fatalf("mirror not restored by --fix: %v", err)
+			}
+			if strings.TrimSpace(string(got)) != managedPort {
+				t.Errorf("restored mirror = %q, want managed port %s", got, managedPort)
+			}
+		})
+	}
+}
+
+// TestDoltDriftCheckMissingMirrorWithLiveRigLocalIsCaseAOnly keeps a live
+// rig-local Dolt the only finding: the missing mirror is a symptom of that
+// ownership conflict, and re-pinning it would point raw bd away from the
+// server the operator has not yet resolved.
+func TestDoltDriftCheckMissingMirrorWithLiveRigLocalIsCaseAOnly(t *testing.T) {
+	cityDir, rigDir, _, cfg := managedCityDriftFixture(t, "runner")
+	if err := os.Remove(filepath.Join(rigDir, ".beads", "dolt-server.port")); err != nil {
+		t.Fatal(err)
+	}
+	ln := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = ln.Close() })
+	writeSQLServerInfo(t, rigDir, os.Getpid(), ln.Addr().(*net.TCPAddr).Port)
+
+	check := newDoltDriftCheck(cityDir, cfg)
+	r := check.Run(&doctor.CheckContext{CityPath: cityDir})
+	if r.Status != doctor.StatusError || len(r.Details) != 1 || !strings.Contains(r.Details[0], "rig-local Dolt") {
+		t.Fatalf("Run() = status %v details %v, want only the live rig-local finding", r.Status, r.Details)
+	}
+	if check.CanFix() {
+		t.Error("CanFix() = true beside a live rig-local Dolt, want false")
+	}
+}
+
+// TestDoltDriftCheckMissingMirrorOnBoundRigIsNotDrift pins the Case D gate: a
+// rig whose metadata.json carries a complete storage binding is skipped by the
+// port-file sync, so its missing mirror is no drift — reporting it would fail
+// `gc doctor` with a re-pin `--fix` never performs.
+func TestDoltDriftCheckMissingMirrorOnBoundRigIsNotDrift(t *testing.T) {
+	cityDir, rigDir, _, cfg := managedCityDriftFixture(t, "bound")
+	if err := os.Remove(filepath.Join(rigDir, ".beads", "dolt-server.port")); err != nil {
+		t.Fatal(err)
+	}
+	metadata := `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"r","storage_endpoint":"https://beads.example","storage_database":"r"}`
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(metadata), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := newDoltDriftCheck(cityDir, cfg)
+	r := check.Run(&doctor.CheckContext{CityPath: cityDir})
+	if r.Status != doctor.StatusOK {
+		t.Fatalf("Run() status = %v, want StatusOK for a bound rig; message=%q details=%v", r.Status, r.Message, r.Details)
+	}
+	if check.CanFix() {
+		t.Error("CanFix() = true for a bound rig's missing mirror, want false")
 	}
 }
 
