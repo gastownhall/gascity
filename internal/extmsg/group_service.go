@@ -102,11 +102,29 @@ func (s *groupService) EnsureGroup(ctx context.Context, caller Caller, input Ens
 			if !sameConversationRef(record.RootConversation, ref) {
 				continue
 			}
-			if err := s.store.Update(item.ID, beads.UpdateOpts{Title: &title}); err != nil {
-				return fmt.Errorf("update group title: %w", err)
+			// EnsureGroup is also used to persist application metadata. Avoid
+			// turning an unchanged upsert into multiple native store writes,
+			// and send only changed fields so unrelated metadata stays owned
+			// by its existing writer. Missing fields still need backfilling.
+			changed := make(map[string]string)
+			for key, value := range fields {
+				if previous, exists := item.Metadata[key]; !exists || previous != value {
+					changed[key] = value
+				}
 			}
-			if err := s.store.SetMetadataBatch(item.ID, fields); err != nil {
-				return fmt.Errorf("update group metadata: %w", err)
+			if item.Title == title && len(changed) == 0 {
+				out = record
+				return nil
+			}
+			if item.Title != title {
+				if err := s.store.Update(item.ID, beads.UpdateOpts{Title: &title}); err != nil {
+					return fmt.Errorf("update group title: %w", err)
+				}
+			}
+			if len(changed) != 0 {
+				if err := s.store.SetMetadataBatch(item.ID, changed); err != nil {
+					return fmt.Errorf("update group metadata: %w", err)
+				}
 			}
 			updated, err := s.store.Get(item.ID)
 			if err != nil {

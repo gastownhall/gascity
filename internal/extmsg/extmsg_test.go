@@ -3238,3 +3238,88 @@ func TestCloseSessionBindingsClosesGroupParticipants(t *testing.T) {
 		t.Fatalf("open participants(after CloseSessionBindings) = %#v, want []", got)
 	}
 }
+
+// groupWriteProbe observes storage round trips, not elapsed time: native stores
+// make even unchanged writes expensive and every extra Get is another read.
+type groupWriteProbe struct {
+	beads.Store
+	updates, gets int
+	batches       []map[string]string
+}
+
+func (p *groupWriteProbe) Update(id string, opts beads.UpdateOpts) error {
+	p.updates++
+	return p.Store.Update(id, opts)
+}
+
+func (p *groupWriteProbe) Get(id string) (beads.Bead, error) {
+	p.gets++
+	return p.Store.Get(id)
+}
+
+func (p *groupWriteProbe) SetMetadataBatch(id string, fields map[string]string) error {
+	p.batches = append(p.batches, mapsClone(fields))
+	return p.Store.SetMetadataBatch(id, fields)
+}
+
+func TestEnsureGroupAvoidsUnchangedStorageWrites(t *testing.T) {
+	for _, change := range []string{"none", "metadata", "routing", "title"} {
+		t.Run(change, func(t *testing.T) {
+			probe := &groupWriteProbe{Store: beads.NewMemStore()}
+			svc := NewGroupService(probe)
+			input := EnsureGroupInput{RootConversation: testConversationRef(), Mode: GroupModeLauncher, DefaultHandle: "alpha", Metadata: map[string]string{"intent": "first"}}
+			group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := probe.Store.SetMetadataBatch(group.ID, map[string]string{"meta.unrelated": "retain", "last_addressed_handle": "alpha"}); err != nil {
+				t.Fatal(err)
+			}
+			wantUpdates, wantGets := 0, 1
+			wantFields := map[string]string{}
+			switch change {
+			case "none":
+				wantGets = 0
+			case "metadata":
+				input.Metadata["intent"] = "second"
+				wantFields["meta.intent"] = "second"
+			case "routing":
+				input.DefaultHandle = "beta"
+				wantFields["default_handle"] = "beta"
+			case "title":
+				old := "old title"
+				if err := probe.Store.Update(group.ID, beads.UpdateOpts{Title: &old}); err != nil {
+					t.Fatal(err)
+				}
+				wantUpdates = 1
+			}
+			probe.updates, probe.gets, probe.batches = 0, 0, nil
+			got, err := svc.EnsureGroup(context.Background(), testControllerCaller(), input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if probe.updates != wantUpdates || probe.gets != wantGets {
+				t.Errorf("storage updates/gets=%d/%d, want %d/%d", probe.updates, probe.gets, wantUpdates, wantGets)
+			}
+			wantBatches := 0
+			if len(wantFields) > 0 {
+				wantBatches = 1
+			}
+			if len(probe.batches) != wantBatches {
+				t.Errorf("metadata batches=%v, want %v", probe.batches, wantFields)
+			} else if wantBatches == 1 {
+				if len(probe.batches[0]) != len(wantFields) {
+					t.Errorf("rewrote unchanged fields: %v", probe.batches[0])
+				}
+				for key, value := range wantFields {
+					if probe.batches[0][key] != value {
+						t.Errorf("field %s=%q, want %q", key, probe.batches[0][key], value)
+					}
+				}
+			}
+			if got.ID != group.ID || got.Metadata["unrelated"] != "retain" || got.LastAddressedHandle != "alpha" || got.DefaultHandle != input.DefaultHandle || got.Metadata["intent"] != input.Metadata["intent"] {
+				t.Errorf("lost identity, metadata or routing: %+v", got)
+			}
+		})
+	}
+}
