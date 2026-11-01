@@ -387,7 +387,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	storeScopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
 	sessionRigRoot := rigRoot
 	// Any session that can land in a pod needs the store identity pods verify.
-	podSession := sessionProviderUsesK8sPods(effectiveSessionProvider(cfgAgent.Session, p.sessionProvider))
+	podSession := sessionProviderUsesK8sPods(effectiveSessionProvider(cfgAgent.Session, p.sessionProvider)) ||
+		(strings.TrimSpace(cfgAgent.Session) == "" && sessionProviderUsesK8sPods(strings.TrimSpace(os.Getenv("GC_SESSION"))))
 	if podSession {
 		if samePath(storeScopeRoot, p.cityPath) {
 			sessionRigRoot = ""

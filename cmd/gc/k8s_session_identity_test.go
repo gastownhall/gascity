@@ -115,6 +115,20 @@ func TestResolveTemplateCarriesSelectedAndCityK8SIdentities(t *testing.T) {
 		}
 	}
 
+	t.Run("GC_SESSION override receives pod store identity", func(t *testing.T) {
+		t.Setenv("GC_SESSION", "k8s")
+		agent := &config.Agent{Name: "mayor", Scope: "city", Provider: "test"}
+		p := params()
+		p.sessionProvider = ""
+		tp, err := resolveTemplate(p, agent, agent.QualifiedName(), nil)
+		if err != nil {
+			t.Fatalf("resolveTemplate: %v", err)
+		}
+		if got := tp.Env["GC_STORE_ROOT"]; got != cityPath {
+			t.Errorf("GC_STORE_ROOT = %q, want %q", got, cityPath)
+		}
+	})
+
 	t.Run("hybrid city provider receives pod store identity", func(t *testing.T) {
 		agent := &config.Agent{Name: "mayor", Scope: "city", Provider: "test"}
 		p := params()
