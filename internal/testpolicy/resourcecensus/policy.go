@@ -335,7 +335,7 @@ var bootstrapPolicy = Ledger{
 			Invariant:       "Kubernetes launch-command transport regression is a checked Medium subprocess owner",
 			ResourceOwner:   "the /bin/sh executions are confined to TestDynamicUserWrapperPreservesCommand; test-owned su and tmux scripts receive a private PATH and temporary files, so a real shell verifies the decoded command reaches tmux as one argument",
 			MigrationTarget: "P0.4b",
-			Expires:         "2026-12-31",
+			Expires:         "2026-10-31",
 		},
 		{
 			PackageDir:      "internal/runtime/tmux",
