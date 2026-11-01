@@ -327,6 +327,17 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-12-31",
 		},
 		{
+			PackageDir:      "internal/runtime/k8s",
+			PackageName:     "k8s",
+			Owner:           "TestDynamicUserWrapperPreservesCommand",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "Kubernetes launch-command transport regression is a checked Medium subprocess owner",
+			ResourceOwner:   "the /bin/sh executions are confined to TestDynamicUserWrapperPreservesCommand; test-owned su and tmux scripts receive a private PATH and temporary files, so a real shell verifies the decoded command reaches tmux as one argument",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
+		{
 			PackageDir:      "internal/runtime/tmux",
 			PackageName:     "tmux",
 			Owner:           "TestMain",

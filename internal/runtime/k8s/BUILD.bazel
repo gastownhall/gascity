@@ -38,6 +38,7 @@ go_test(
         "controller_script_test.go",
         "exec_provider_test.go",
         "name_test.go",
+        "pod_prompt_test.go",
         "pod_test.go",
         "provider_stale_probe_test.go",
         "provider_test.go",

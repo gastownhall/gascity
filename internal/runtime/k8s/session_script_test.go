@@ -451,16 +451,14 @@ func runScriptCommand(env []string, stdin io.Reader, name string, args ...string
 	return cmd.CombinedOutput()
 }
 
-// runUnderEnvClearingSu runs the su part of a pod command (from "CMD=$(") in
-// a shell whose environment carries the pod spec's variables, with fakes for
-// su (which, like `su -`, clears the environment), tmux (which records the
+// runUnderEnvClearingSu runs a pod's complete shell argv with a fake su
+// (which, like `su -`, clears the environment), tmux (which records the
 // environment its server would start with) and sleep. It returns what tmux
 // saw.
-func runUnderEnvClearingSu(t *testing.T, command string, podEnv map[string]string) string {
+func runUnderEnvClearingSu(t *testing.T, command []string, podEnv map[string]string) string {
 	t.Helper()
-	at := strings.Index(command, "CMD=$(")
-	if at < 0 {
-		t.Fatalf("no agent launch in %q", command)
+	if len(command) < 3 || !strings.Contains(command[0], "su - ") {
+		t.Fatalf("no dynamic-user agent launch in %#v", command)
 	}
 	dir := t.TempDir()
 	envOut := filepath.Join(dir, "tmux.env")
@@ -478,7 +476,7 @@ func runUnderEnvClearingSu(t *testing.T, command string, podEnv map[string]strin
 	for k, v := range podEnv {
 		env = append(env, k+"="+v)
 	}
-	if out, err := runScriptCommand(env, nil, "/bin/sh", "-c", command[at:]); err != nil {
+	if out, err := runScriptCommand(env, nil, "/bin/sh", append([]string{"-c"}, command...)...); err != nil {
 		t.Fatalf("running the launch: %v\n%s", err, out)
 	}
 	got, err := os.ReadFile(envOut)
@@ -520,7 +518,7 @@ func TestLinuxUsernameAgentCarriesTheRemoteStageEnv(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Run("entrypoint", func(t *testing.T) {
-			want(t, runUnderEnvClearingSu(t, pod.Spec.Containers[0].Args[0], podEnv))
+			want(t, runUnderEnvClearingSu(t, pod.Spec.Containers[0].Args, podEnv))
 		})
 	}
 }
