@@ -151,8 +151,7 @@ func TestControlDispatcherReportsABrokenSessionProviderConfigAtStartup(t *testin
 }
 
 // A marked Kubernetes worker has no Kubernetes credentials of its own. It
-// validates the static city settings but leaves client construction to the
-// controller that creates the Pod.
+// validates the static city settings but leaves client construction to the controller.
 func TestK8sWorkerDispatcherSkipsLiveProviderConstruction(t *testing.T) {
 	clearGCEnv(t)
 	clearKubernetesClientConfigForDispatchTest(t)
@@ -316,7 +315,7 @@ func TestK8sWorkerDispatcherRejectsInvalidStaticProviderConfig(t *testing.T) {
 func TestK8sSessionProviderConstructionStillRequiresClientConfig(t *testing.T) {
 	clearGCEnv(t)
 	clearKubernetesClientConfigForDispatchTest(t)
-	_, err := k8sProviderFromSession(config.K8sConfig{})
+	_, err := k8sProviderFromSession(config.K8sConfig{}, "test-city")
 	if err == nil || !strings.Contains(err.Error(), "building K8s config") {
 		t.Fatalf("K8s provider construction error = %v, want missing client config", err)
 	}
