@@ -5677,6 +5677,35 @@ func TestDoltDoctorScriptUsesExplicitSQLTarget(t *testing.T) {
 	}
 }
 
+// spawnStormReadyArm answers the read spawn-storm-detect takes its candidates
+// from, `gc ready --status open --unassigned --json`. It logs the argv to
+// $GC_CALL_LOG, then answers $SPAWN_STORM_READY_JSON (default []), or writes
+// $SPAWN_STORM_READY_ERR to stderr and exits $SPAWN_STORM_READY_EXIT when that
+// is set.
+const spawnStormReadyArm = `if [ "${1:-}" = "ready" ]; then
+  if [ -n "${GC_CALL_LOG:-}" ]; then
+    printf '%s\n' "$*" >> "$GC_CALL_LOG"
+  fi
+  if [ -n "${SPAWN_STORM_READY_EXIT:-}" ]; then
+    printf '%s\n' "${SPAWN_STORM_READY_ERR:-}" >&2
+    exit "$SPAWN_STORM_READY_EXIT"
+  fi
+  printf '%s\n' "${SPAWN_STORM_READY_JSON:-[]}"
+  exit 0
+fi
+`
+
+// writeSpawnStormGCStub writes a maintenance gc stub that answers `gc ready`
+// with spawnStormReadyArm before it runs body.
+func writeSpawnStormGCStub(t *testing.T, path, body string) {
+	t.Helper()
+	const shebang = "#!/bin/sh\n"
+	if !strings.HasPrefix(body, shebang) {
+		t.Fatalf("gc stub must start with %q", strings.TrimSpace(shebang))
+	}
+	writeMaintenanceGCStub(t, path, shebang+spawnStormReadyArm+strings.TrimPrefix(body, shebang))
+}
+
 func TestSpawnStormDetectPersistsNewLedgerCounts(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -5685,27 +5714,25 @@ func TestSpawnStormDetectPersistsNewLedgerCounts(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
 case "$1" in
-  list)
-    printf '[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]\n'
-    ;;
   show)
     printf '[{"id":"%s","status":"open","title":"Looping bead"}]\n' "$2"
     ;;
 esac
 exit 0
 `)
-	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
 
 	env := map[string]string{
-		"GC_CITY":               cityDir,
-		"GC_CITY_PATH":          cityDir,
-		"GC_PACK_STATE_DIR":     stateDir,
-		"GC_CALL_LOG":           gcLog,
-		"SPAWN_STORM_THRESHOLD": "1",
-		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GC_CITY":                cityDir,
+		"GC_CITY_PATH":           cityDir,
+		"GC_PACK_STATE_DIR":      stateDir,
+		"GC_CALL_LOG":            gcLog,
+		"SPAWN_STORM_THRESHOLD":  "1",
+		"SPAWN_STORM_READY_JSON": `[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]`,
+		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
 	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
@@ -5739,9 +5766,6 @@ func TestSpawnStormDetectPersistsCountWhenTitleLookupFails(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
 case "$1" in
-  list)
-    printf '[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]\n'
-    ;;
   show)
     printf 'temporary backend failure\n' >&2
     exit 1
@@ -5749,18 +5773,19 @@ case "$1" in
 esac
 exit 0
 `)
-	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
 
 	env := map[string]string{
-		"GC_CITY":               cityDir,
-		"GC_CITY_PATH":          cityDir,
-		"GC_PACK_STATE_DIR":     stateDir,
-		"GC_CALL_LOG":           gcLog,
-		"SPAWN_STORM_THRESHOLD": "1",
-		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GC_CITY":                cityDir,
+		"GC_CITY_PATH":           cityDir,
+		"GC_PACK_STATE_DIR":      stateDir,
+		"GC_CALL_LOG":            gcLog,
+		"SPAWN_STORM_THRESHOLD":  "1",
+		"SPAWN_STORM_READY_JSON": `[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]`,
+		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
 	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
@@ -5800,24 +5825,22 @@ func TestSpawnStormDetectFailsOnMalformedOpenBeadJSON(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
 case "$1" in
-  list)
-    printf 'not-json\n'
-    ;;
   show)
     printf '[{"id":"%s","status":"open","title":"Looping bead"}]\n' "$2"
     ;;
 esac
 exit 0
 `)
-	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 exit 0
 `)
 
 	env := map[string]string{
-		"GC_CITY":           cityDir,
-		"GC_CITY_PATH":      cityDir,
-		"GC_PACK_STATE_DIR": stateDir,
-		"PATH":              binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GC_CITY":                cityDir,
+		"GC_CITY_PATH":           cityDir,
+		"GC_PACK_STATE_DIR":      stateDir,
+		"SPAWN_STORM_READY_JSON": `not-json`,
+		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
 	script := coreScriptPath("spawn-storm-detect.sh")
@@ -5850,9 +5873,6 @@ func TestSpawnStormDetectPrunesClosedAndDeletedLedgerEntries(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
 case "$1" in
-  list)
-    printf '[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]\n'
-    ;;
   show)
     # gc writes diagnostics to stderr on a read (scope disclosure, doctor
     # warnings). The prune loop must not fold them into the JSON it parses,
@@ -5874,16 +5894,17 @@ case "$1" in
 esac
 exit 0
 `)
-	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 exit 0
 `)
 
 	env := map[string]string{
-		"GC_CITY":               cityDir,
-		"GC_CITY_PATH":          cityDir,
-		"GC_PACK_STATE_DIR":     stateDir,
-		"SPAWN_STORM_THRESHOLD": "99",
-		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GC_CITY":                cityDir,
+		"GC_CITY_PATH":           cityDir,
+		"GC_PACK_STATE_DIR":      stateDir,
+		"SPAWN_STORM_THRESHOLD":  "99",
+		"SPAWN_STORM_READY_JSON": `[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]`,
+		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
 	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
@@ -5924,9 +5945,6 @@ func TestSpawnStormDetectPreservesLedgerOnTransientShowFailure(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
 case "$1" in
-  list)
-    printf '[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]\n'
-    ;;
   show)
     case "$2" in
       ga-transient)
@@ -5941,16 +5959,17 @@ case "$1" in
 esac
 exit 0
 `)
-	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 exit 0
 `)
 
 	env := map[string]string{
-		"GC_CITY":               cityDir,
-		"GC_CITY_PATH":          cityDir,
-		"GC_PACK_STATE_DIR":     stateDir,
-		"SPAWN_STORM_THRESHOLD": "99",
-		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GC_CITY":                cityDir,
+		"GC_CITY_PATH":           cityDir,
+		"GC_PACK_STATE_DIR":      stateDir,
+		"SPAWN_STORM_THRESHOLD":  "99",
+		"SPAWN_STORM_READY_JSON": `[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]`,
+		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
 	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
@@ -5984,9 +6003,6 @@ func TestSpawnStormDetectRollsBackLedgerWhenAlertUndeliverable(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
 case "$1" in
-  list)
-    printf '[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]\n'
-    ;;
   show)
     printf '[{"id":"%s","status":"open","title":"Looping bead"}]\n' "$2"
     ;;
@@ -5994,7 +6010,7 @@ esac
 exit 0
 `)
 	// Every mail send fails the way an unreachable backend does.
-	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 if [ "${1:-}" = "mail" ]; then
   printf 'mail backend unavailable\n' >&2
@@ -6004,12 +6020,13 @@ exit 0
 `)
 
 	env := map[string]string{
-		"GC_CITY":               cityDir,
-		"GC_CITY_PATH":          cityDir,
-		"GC_PACK_STATE_DIR":     stateDir,
-		"GC_CALL_LOG":           gcLog,
-		"SPAWN_STORM_THRESHOLD": "1",
-		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GC_CITY":                cityDir,
+		"GC_CITY_PATH":           cityDir,
+		"GC_PACK_STATE_DIR":      stateDir,
+		"GC_CALL_LOG":            gcLog,
+		"SPAWN_STORM_THRESHOLD":  "1",
+		"SPAWN_STORM_READY_JSON": `[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]`,
+		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
 	out, err := runScriptResult(t, coreScriptPath("spawn-storm-detect.sh"), env)
@@ -6061,27 +6078,25 @@ func TestSpawnStormDetectAlertsOnceAtThresholdCrossing(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
 case "$1" in
-  list)
-    printf '[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]\n'
-    ;;
   show)
     printf '[{"id":"%s","status":"open","title":"Looping bead"}]\n' "$2"
     ;;
 esac
 exit 0
 `)
-	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
 
 	env := map[string]string{
-		"GC_CITY":               cityDir,
-		"GC_CITY_PATH":          cityDir,
-		"GC_PACK_STATE_DIR":     stateDir,
-		"GC_CALL_LOG":           gcLog,
-		"SPAWN_STORM_THRESHOLD": "2",
-		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GC_CITY":                cityDir,
+		"GC_CITY_PATH":           cityDir,
+		"GC_PACK_STATE_DIR":      stateDir,
+		"GC_CALL_LOG":            gcLog,
+		"SPAWN_STORM_THRESHOLD":  "2",
+		"SPAWN_STORM_READY_JSON": `[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]`,
+		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
 	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
@@ -6121,27 +6136,25 @@ func TestSpawnStormDetectIgnoresEmptyRejectionReason(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
 case "$1" in
-  list)
-    printf '[{"id":"ga-empty","status":"open","metadata":{"rejection_reason":"","recovered":""}},{"id":"ga-rejected","status":"open","metadata":{"rejection_reason":"tests red"}}]\n'
-    ;;
   show)
     printf '[{"id":"%s","status":"open","title":"Some bead"}]\n' "$2"
     ;;
 esac
 exit 0
 `)
-	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
 
 	env := map[string]string{
-		"GC_CITY":               cityDir,
-		"GC_CITY_PATH":          cityDir,
-		"GC_PACK_STATE_DIR":     stateDir,
-		"GC_CALL_LOG":           gcLog,
-		"SPAWN_STORM_THRESHOLD": "1",
-		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GC_CITY":                cityDir,
+		"GC_CITY_PATH":           cityDir,
+		"GC_PACK_STATE_DIR":      stateDir,
+		"GC_CALL_LOG":            gcLog,
+		"SPAWN_STORM_THRESHOLD":  "1",
+		"SPAWN_STORM_READY_JSON": `[{"id":"ga-empty","status":"open","metadata":{"rejection_reason":"","recovered":""}},{"id":"ga-rejected","status":"open","metadata":{"rejection_reason":"tests red"}}]`,
+		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
 	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
@@ -6170,10 +6183,10 @@ exit 0
 	}
 }
 
-// TestSpawnStormDetectListsOnlyUnassignedBeads pins the list filter. bd treats
-// --assignee="" as no filter, so the sweep must ask with --no-assignee; an
-// assigned bead carrying a rejection_reason is being worked, not reset to pool.
-// The stub behaves like bd: it drops assigned rows only for --no-assignee.
+// TestSpawnStormDetectListsOnlyUnassignedBeads pins the read filter. The sweep
+// must ask gc ready for --unassigned beads; an assigned bead carrying a
+// rejection_reason is being worked, not reset to pool. The stub behaves like gc
+// ready: it drops assigned rows only for --unassigned.
 func TestSpawnStormDetectListsOnlyUnassignedBeads(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -6182,16 +6195,6 @@ func TestSpawnStormDetectListsOnlyUnassignedBeads(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
 case "$1" in
-  list)
-    case " $* " in
-      *" --no-assignee "*)
-        printf '[{"id":"ga-pool","status":"open","metadata":{"recovered":"true"}}]\n'
-        ;;
-      *)
-        printf '[{"id":"ga-pool","status":"open","metadata":{"recovered":"true"}},{"id":"ga-held","status":"open","assignee":"worker-1","metadata":{"rejection_reason":"tests red"}}]\n'
-        ;;
-    esac
-    ;;
   show)
     printf '[{"id":"%s","status":"open","title":"Some bead"}]\n' "$2"
     ;;
@@ -6200,6 +6203,16 @@ exit 0
 `)
 	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
+if [ "${1:-}" = "ready" ]; then
+  case " $* " in
+    *" --unassigned "*)
+      printf '[{"id":"ga-pool","status":"open","metadata":{"recovered":"true"}}]\n'
+      ;;
+    *)
+      printf '[{"id":"ga-pool","status":"open","metadata":{"recovered":"true"}},{"id":"ga-held","status":"open","assignee":"worker-1","metadata":{"rejection_reason":"tests red"}}]\n'
+      ;;
+  esac
+fi
 exit 0
 `)
 
@@ -6223,10 +6236,232 @@ exit 0
 		t.Fatalf("Unmarshal(ledger): %v\n%s", err, ledgerData)
 	}
 	if _, ok := counts["ga-held"]; ok {
-		t.Fatalf("ledger counted ga-held, which is assigned; the list must filter with --no-assignee\nledger: %s", ledgerData)
+		t.Fatalf("ledger counted ga-held, which is assigned; the read must filter with --unassigned\nledger: %s", ledgerData)
 	}
 	if got := counts["ga-pool"]; got != 1 {
 		t.Fatalf("ledger count for ga-pool = %d, want 1\nledger: %s", got, ledgerData)
+	}
+}
+
+// TestSpawnStormDetectCountsResetBeadsInEveryStore pins where the sweep reads.
+// gc bd list answers from one store, the city store for this city-scoped order,
+// and bd leaves the wisp plane out of a plain list. A bead reset in a rig
+// store, in the graph store a split city keeps workflow steps in, or on the
+// wisp plane never reached the count. gc ready --status open reads them all.
+func TestSpawnStormDetectCountsResetBeadsInEveryStore(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	// The city store's durable tier holds none of them.
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$1" in
+  list)
+    printf '[]\n'
+    ;;
+  show)
+    printf '[{"id":"%s","status":"open","title":"Looping bead"}]\n' "$2"
+    ;;
+esac
+exit 0
+`)
+	writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"GC_CITY":                cityDir,
+		"GC_CITY_PATH":           cityDir,
+		"GC_PACK_STATE_DIR":      stateDir,
+		"GC_CALL_LOG":            gcLog,
+		"SPAWN_STORM_THRESHOLD":  "1",
+		"SPAWN_STORM_READY_JSON": `[{"id":"gcg-12","status":"open","metadata":{"recovered":"true"}},{"id":"rig-7","status":"open","metadata":{"rejection_reason":"tests red"}},{"id":"hq-wisp-3","status":"open","ephemeral":true,"metadata":{"recovered":"true"}}]`,
+		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
+
+	ledgerData, err := os.ReadFile(filepath.Join(stateDir, "spawn-storm-counts.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(ledger): %v", err)
+	}
+	var counts map[string]int
+	if err := json.Unmarshal(ledgerData, &counts); err != nil {
+		t.Fatalf("Unmarshal(ledger): %v\n%s", err, ledgerData)
+	}
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(gcData), "ready --status open --unassigned --json") {
+		t.Fatalf("sweep did not read with gc ready --status open --unassigned --json\ngc log:\n%s", gcData)
+	}
+	for _, id := range []string{"gcg-12", "rig-7", "hq-wisp-3"} {
+		if got := counts[id]; got != 1 {
+			t.Errorf("ledger count for %s = %d, want 1\nledger: %s", id, got, ledgerData)
+		}
+		if !strings.Contains(string(gcData), "SPAWN_STORM: bead "+id+" reset 1x") {
+			t.Errorf("no spawn storm notification for %s\ngc log:\n%s", id, gcData)
+		}
+	}
+}
+
+// TestSpawnStormDetectFailsLoudWhenTheOpenBeadReadFails pins the failure path.
+// The sweep used to exit 0 when it could not read, and the controller logs an
+// exec order's output only on a non-zero exit, so a store it could not read
+// looked like a city with no storms. It must exit non-zero, say why, and leave
+// the ledger as it was.
+func TestSpawnStormDetectFailsLoudWhenTheOpenBeadReadFails(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "read fails",
+			env:  map[string]string{"SPAWN_STORM_READY_EXIT": "1", "SPAWN_STORM_READY_ERR": "gc ready: graph store: unreachable"},
+			want: "gc ready: graph store: unreachable",
+		},
+		{
+			name: "answer is not an array",
+			env:  map[string]string{"SPAWN_STORM_READY_JSON": `{"error":"partial"}`},
+			want: "did not answer a JSON array",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			binDir := t.TempDir()
+			stateDir := t.TempDir()
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+			ledger := filepath.Join(stateDir, "spawn-storm-counts.json")
+			if err := os.WriteFile(ledger, []byte(`{"ga-existing":2}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			// The city store answers, so a sweep that still read through gc bd
+			// list would count ga-loop, rewrite the ledger and exit 0.
+			writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$1" in
+  list)
+    printf '[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]\n'
+    ;;
+  show)
+    printf '[{"id":"%s","status":"open","title":"Looping bead"}]\n' "$2"
+    ;;
+esac
+exit 0
+`)
+			writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+			env := map[string]string{
+				"GC_CITY":               cityDir,
+				"GC_CITY_PATH":          cityDir,
+				"GC_PACK_STATE_DIR":     stateDir,
+				"GC_CALL_LOG":           gcLog,
+				"SPAWN_STORM_THRESHOLD": "1",
+				"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			}
+			for k, v := range tc.env {
+				env[k] = v
+			}
+
+			out, err := runScriptResult(t, coreScriptPath("spawn-storm-detect.sh"), env)
+			if err == nil {
+				t.Fatalf("spawn-storm-detect exited 0 on a failed read; want non-zero so the controller logs it\n%s", out)
+			}
+			if !strings.Contains(string(out), tc.want) {
+				t.Fatalf("output does not say why the read failed (want %q):\n%s", tc.want, out)
+			}
+			ledgerData, readErr := os.ReadFile(ledger)
+			if readErr != nil {
+				t.Fatalf("ReadFile(ledger): %v", readErr)
+			}
+			if got, want := string(ledgerData), `{"ga-existing":2}`; got != want {
+				t.Fatalf("ledger changed after a failed read: got %s, want %s", got, want)
+			}
+			if gcData, _ := os.ReadFile(gcLog); strings.Contains(string(gcData), "mail send") {
+				t.Fatalf("mailed after a failed read\ngc log:\n%s", gcData)
+			}
+		})
+	}
+}
+
+// TestSpawnStormDetectLeavesSuspendedRigBeadsUnread pins the prune step's
+// quiescence. The ledger can hold beads of any rig the sweep counted, and a
+// suspended rig is left cold: a bd read of one of its beads restarts the
+// store proxy the controller retired. Such a bead keeps its count, unread,
+// until the rig resumes; the other ledger entries are pruned as before.
+func TestSpawnStormDetectLeavesSuspendedRigBeadsUnread(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	ledger := filepath.Join(stateDir, "spawn-storm-counts.json")
+	if err := os.WriteFile(ledger, []byte(`{"cold-abc":2,"ga-closed":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Were cold-abc read, it would answer not found and be pruned.
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$1" in
+  show)
+    case "$2" in
+      cold-abc)
+        printf 'issue not found\n' >&2
+        exit 1
+        ;;
+      ga-closed)
+        printf '[{"id":"ga-closed","status":"closed","title":"Closed bead"}]\n'
+        ;;
+      *)
+        printf '[{"id":"%s","status":"open","title":"Open bead"}]\n' "$2"
+        ;;
+    esac
+    ;;
+esac
+exit 0
+`)
+	writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"GC_CITY":                cityDir,
+		"GC_CITY_PATH":           cityDir,
+		"GC_PACK_STATE_DIR":      stateDir,
+		"GC_CALL_LOG":            gcLog,
+		"SPAWN_STORM_THRESHOLD":  "99",
+		"SPAWN_STORM_READY_JSON": `[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]`,
+		"FAKE_RIG_LIST_JSON":     `{"rigs":[{"name":"warm","prefix":"warm","hq":false,"suspended":false},{"name":"cold","prefix":"cold","hq":false,"suspended":true}]}`,
+		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
+
+	ledgerData, err := os.ReadFile(ledger)
+	if err != nil {
+		t.Fatalf("ReadFile(ledger): %v", err)
+	}
+	var counts map[string]int
+	if err := json.Unmarshal(ledgerData, &counts); err != nil {
+		t.Fatalf("Unmarshal(ledger): %v\n%s", err, ledgerData)
+	}
+	if got := counts["cold-abc"]; got != 2 {
+		t.Fatalf("suspended rig's bead count = %d, want 2 (kept, unread)\nledger: %s", got, ledgerData)
+	}
+	if _, ok := counts["ga-closed"]; ok {
+		t.Fatalf("closed bead was not pruned: %s", ledgerData)
+	}
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if strings.Contains(string(gcData), "show cold-abc") {
+		t.Fatalf("read a bead of a suspended rig\ngc log:\n%s", gcData)
 	}
 }
 
