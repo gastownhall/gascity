@@ -449,7 +449,7 @@ calls = 5
 [[count]]
 path = "cmd/gc/cmd_session_reset_test.go"
 resource = "net_listen"
-calls = 4
+calls = 5
 
 [[count]]
 path = "cmd/gc/cmd_session_test.go"

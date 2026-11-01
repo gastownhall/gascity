@@ -138,7 +138,7 @@ func newCensusRow(k rowKey, info session.Info) censusRow {
 		Key:           k,
 		Info:          info,
 		InstanceToken: info.InstanceToken,
-		UnknownState:  !isKnownStateInfo(info) && !isDrainAckStopPendingInfo(info),
+		UnknownState:  isUnknownStateInfo(info),
 	}
 	row.Incarnation, _ = strconv.ParseInt(strings.TrimSpace(info.Generation), 10, 64)
 	state := session.State(strings.TrimSpace(info.MetadataState))
