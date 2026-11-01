@@ -112,7 +112,10 @@ func TestPaneShowsIdlePromptMenuBelowEchoedTurnIsNotIdle(t *testing.T) {
 // readiness (WaitForRuntimeReady), read such a row at the bottom-most prompt
 // line as not ready, and every other bottom-most prompt line as a composer.
 // Kills: a menu check without the neighbor test (a composer draft starting
-// with "1. " reads as a menu).
+// with "1. " reads as a menu), one that skips the menu row and keeps scanning
+// (an echoed turn above the menu reads as ready), a neighbor parse without the
+// NBSP / box-border normalization, and one that accepts only option N+1 (the
+// cursor on the last option reads as ready).
 func TestMenuCursorRowIsNotAReadyPrompt(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -120,6 +123,24 @@ func TestMenuCursorRowIsNotAReadyPrompt(t *testing.T) {
 		prefix    string
 		wantReady bool
 	}{
+		{"folder trust, cursor on first option", codexFolderTrustMenu, "› ", false},
+		{"folder trust, cursor on last option", []string{"  Trust this folder?", "", "  1. Trust and continue", "› 2. Quit", "", "  enter continue · esc quit"}, "› ", false},
+		{"hook review", []string{
+			"  Hooks need review",
+			"  4 hooks are new or changed.",
+			"› 1. Review hooks",
+			"  2. Trust all and continue",
+			"  3. Continue without trusting (hooks won't run)",
+			"  enter confirm · esc skip",
+		}, "› ", false},
+		{"model switch below echoed turn", []string{"› fix the flaky test", "", "  Switch to gpt-5.4-mini?", "", "› 1. Switch to gpt-5.4-mini", "  2. Keep current model", "  3. Keep current model (never show again)"}, "› ", false},
+		{"folder trust below echoed turn", append([]string{"› Commit the staged API change", ""}, codexFolderTrustMenu...), "› ", false},
+		{"claude chooser with nbsp", []string{"  You've hit your session limit", "", "❯\u00a01. Stop and wait for limit to reset", "  2. Upgrade"}, DefaultReadyPromptPrefix, false},
+		{"boxed menu", []string{"╭──────────────────────────╮", "│ › 1. Trust and continue  │", "│   2. Quit                │", "╰──────────────────────────╯"}, "› ", false},
+		{"two-digit options", []string{"   9. Ninth", "› 10. Tenth"}, "› ", false},
+		// Known false negative: a two-line numbered draft is indistinguishable
+		// from a menu.
+		{"two-line numbered draft reads as a menu", []string{"› 1. foo", "  2. bar"}, "› ", false},
 		{"bare composer", []string{"› "}, "› ", true},
 		{"composer placeholder above status line", []string{"› Ask Codex to do anything", "", "  gpt-5.4 high · 100% left · ~/repo"}, "› ", true},
 		{"draft starting with a number", []string{"› 1. fix the flake"}, "› ", true},
@@ -141,5 +162,18 @@ func TestMenuCursorRowIsNotAReadyPrompt(t *testing.T) {
 				t.Errorf("WaitForRuntimeReady(%q, %q) = %v, want ready=%v", tt.lines, tt.prefix, err, tt.wantReady)
 			}
 		})
+	}
+}
+
+// Startup readiness polls until its budget runs out while the pane keeps
+// showing an unanswered menu, instead of reporting the menu's cursor row as the
+// runtime's ready prompt.
+func TestWaitForRuntimeReadyMenuTimesOut(t *testing.T) {
+	tm := scriptedTmux(scriptedCapture{out: strings.Join(codexFolderTrustMenu, "\n")})
+	err := tm.WaitForRuntimeReady(context.Background(), "w", &RuntimeConfig{
+		Tmux: &RuntimeTmuxConfig{ReadyPromptPrefix: "› "},
+	}, 500*time.Millisecond)
+	if err == nil || err.Error() != "timeout waiting for runtime prompt" {
+		t.Fatalf("WaitForRuntimeReady = %v, want the timeout waiting for runtime prompt error", err)
 	}
 }
