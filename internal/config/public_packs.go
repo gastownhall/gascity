@@ -49,7 +49,7 @@ const (
 	// trees; bump the pin (and append the old value to
 	// SupersededBundledPackImportVersions) when cutting a release whose
 	// bundled core/bd/dolt content changed.
-	BundledPackImportVersion = "sha:bca762adc8ef16fdc7de301b6b31b5ae4dfe2607"
+	BundledPackImportVersion = "sha:9dedf0ce789ce63133cfe7ff6b81fb2be2f59d8a"
 )
 
 // SupersededBundledPackImportVersions lists previous canonical pins for the
@@ -72,6 +72,7 @@ var SupersededBundledPackImportVersions = []string{
 	"sha:f895c0ff47d6ee9334ed282a416387eb5b084d24",
 	"sha:e38ce9cc55d15fa351199c042f0d07aba1a347af",
 	"sha:b21ab3b27bd09f9130fb457e6fbf9e3570ea7297",
+	"sha:bca762adc8ef16fdc7de301b6b31b5ae4dfe2607",
 }
 
 // SupersededPublicGastownPackVersions lists previous canonical pins for the

@@ -13,11 +13,11 @@ schema = 2
 # The builtin-pack-imports doctor check repairs missing entries.
 [imports.core]
 source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
-version = "sha:bca762adc8ef16fdc7de301b6b31b5ae4dfe2607"
+version = "sha:9dedf0ce789ce63133cfe7ff6b81fb2be2f59d8a"
 
 [imports.bd]
 source = "https://github.com/gastownhall/gascity.git//examples/bd"
-version = "sha:bca762adc8ef16fdc7de301b6b31b5ae4dfe2607"
+version = "sha:9dedf0ce789ce63133cfe7ff6b81fb2be2f59d8a"
 
 [imports.swarm]
 source = "packs/swarm"
