@@ -135,7 +135,7 @@ var beadsListAPIClient = func(cityPath string) (*api.Client, string) {
 // controller is up; otherwise falls back to the local multi-store iterator.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeBeadsList(cityPath string, c *api.Client, nilReason, format string, filters beadFilters, stdout, stderr io.Writer) int {
-	var cr api.CachedRead[[]beads.Bead]
+	var cr api.CachedRead[api.BeadListView]
 	return routeRead(c, "beads list", nilReason, stderr,
 		func() error {
 			var err error
@@ -146,7 +146,9 @@ func routeBeadsList(cityPath string, c *api.Client, nilReason, format string, fi
 			})
 			return err
 		},
-		func() int { return renderBeadsListFromAPI(cr, format, filters, stdout) },
+		func() int {
+			return renderBeadsListFromAPI(api.CachedRead[[]beads.Bead]{Body: cr.Body.Beads, AgeSeconds: cr.AgeSeconds}, format, filters, stdout)
+		},
 		func() int { return doBeadsListFallback(cityPath, format, filters, stdout, stderr) },
 	)
 }
