@@ -921,6 +921,8 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 		applyAttemptStepRoute(&recipe.Steps[i], target, routeCfg, store)
 	}
 
+	inheritRootHolderAssignee(store, control, recipe)
+
 	epoch := 0
 	if raw := control.Metadata[beadmeta.ControlEpochMetadataKey]; raw != "" {
 		epoch, _ = strconv.Atoi(raw)
@@ -954,6 +956,46 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 		return err
 	}
 	return nil
+}
+
+// inheritRootHolderAssignee pins a session-affine attempt to the session that
+// holds its workflow root. A pool-routed attempt is minted with no assignee, so
+// between the closing step and the lane's next claim any other pool session can
+// take it. A held root (in_progress + assignee; the reconciler clears it when the
+// holder dies) names the live lane. Best effort: any read miss leaves the attempt
+// unassigned, i.e. the previous behaviour.
+func inheritRootHolderAssignee(store beads.Store, control beads.Bead, recipe *formula.Recipe) {
+	var pinned []*formula.RecipeStep
+	for i := range recipe.Steps {
+		step := &recipe.Steps[i]
+		kind := step.Metadata[beadmeta.KindMetadataKey]
+		if kind == beadmeta.KindSpec || isAttemptControlKind(kind) || strings.TrimSpace(step.Assignee) != "" {
+			continue
+		}
+		if step.Metadata[beadmeta.SessionAffinityMetadataKey] == "require" &&
+			strings.TrimSpace(step.Metadata[beadmeta.ContinuationGroupMetadataKey]) != "" {
+			pinned = append(pinned, step)
+		}
+	}
+	// Read the root only when an affine step needs it: the common retry pays no extra store call.
+	if len(pinned) == 0 {
+		return
+	}
+	rootID := strings.TrimSpace(control.Metadata[beadmeta.RootBeadIDMetadataKey])
+	if rootID == "" {
+		return
+	}
+	root, err := store.Get(rootID)
+	if err != nil || root.Status != "in_progress" {
+		return
+	}
+	holder := strings.TrimSpace(root.Assignee)
+	if holder == "" {
+		return
+	}
+	for _, step := range pinned {
+		step.Assignee = holder
+	}
 }
 
 type partialAttemptAttachError struct {
