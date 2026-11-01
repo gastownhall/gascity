@@ -13486,6 +13486,29 @@ func TestOrphanSweepComposesGateAndLocalSkipOutcomes(t *testing.T) {
 	}
 }
 
+// TestOrphanSweepDeclaresNothingForBenignReleaseRace keeps a clean sweep
+// quiet: `gc bd release-if-current` printing "skipped" is the benign race
+// where the claim changed between listing and release, not work the order
+// failed to do. It is not counted, not scoped, and not declared, and the run
+// exits 0.
+func TestOrphanSweepDeclaresNothingForBenignReleaseRace(t *testing.T) {
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{hookClaim("ga-hook-dead", "gc-d34d1", "gastown__polecat-gc-d34d1", nil)},
+		nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d1", Status: "closed", IssueType: "session"}},
+		nil,
+		map[string]string{"ORPHAN_SWEEP_RELEASE_OUTPUT": "skipped"})
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if !strings.Contains(run.log, "bd release-if-current ga-hook-dead gc-d34d1") {
+		t.Fatalf("the benign release race never happened:\n%s", run.context())
+	}
+	if outcome, ok := run.outcome(t); ok {
+		t.Fatalf("a sweep whose only non-reset is a benign race declared outcome %+v", outcome)
+	}
+}
+
 // TestJsonlExportFirstRunArchivePathCreatedBeforeTheRename covers the window
 // between the first run's "archive path absent" check and its rename of the
 // staging repo into place: another exporter (or anything else) can create
