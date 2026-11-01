@@ -74,6 +74,9 @@ WORKDIR /var/lib/mcp-mail
 USER mcp-mail
 
 # Health endpoint: GET /health/liveness
+# This probe intentionally uses the image's Python runtime, which imports
+# /opt/gc-mail-python/sitecustomize and GitPython before making the HTTP check.
+# Keep its startup cost within the three-second healthcheck timeout.
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
   CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8765/health/liveness')"
 

@@ -230,6 +230,9 @@ const mcpMailFilelockExitRegression = ".github/scripts/mcp-mail-filelock-exit-re
 // path in mcp-agent-mail.
 const mcpMailJWTCompatibility = ".github/scripts/mcp-mail-jwt-compatibility.py"
 
+// mcpMailJWTAudiencePatch repairs the pinned service's configured-audience call.
+const mcpMailJWTAudiencePatch = ".github/scripts/patch-mcp-mail-jwt-audience.py"
+
 // lockPinnedVersion returns the version the hashed lock pins for dist, matching
 // the "name==version \" line uv writes. Names compare case-insensitively.
 func lockPinnedVersion(t *testing.T, lock, dist string) string {
@@ -441,6 +444,7 @@ func TestContainerScanRetainsMCPMailBurstDiagnostics(t *testing.T) {
 	}
 }
 
+// FINAL-01 fork-only guard; remove with the custody publisher before upstreaming.
 func TestContainerScanPublishesOnlyVerifiedC14ImageCustody(t *testing.T) {
 	workflow := readFile(t, repoRoot(t), ".github/workflows/container-scan.yml")
 	imageJobStart := strings.Index(workflow, "  image-vulnerabilities:")
@@ -456,8 +460,9 @@ func TestContainerScanPublishesOnlyVerifiedC14ImageCustody(t *testing.T) {
 	for _, want := range []string{
 		"if: ${{ github.event_name == 'workflow_dispatch' && success() }}",
 		"docker image save",
-		"c14-verified-images-${{ github.sha }}",
+		"c14-verified-images-${{ github.sha }}-${{ github.run_attempt }}",
 		"org.opencontainers.image.source",
+		"compression-level: 0",
 	} {
 		if !strings.Contains(imageJob, want) {
 			t.Errorf("image scan job is missing exact-source custody export guard %q", want)
@@ -469,10 +474,13 @@ func TestContainerScanPublishesOnlyVerifiedC14ImageCustody(t *testing.T) {
 		"github.repository == 'chris-sanders/gascity'",
 		"github.ref == 'refs/heads/codex/gascity-final01-c14-7472f-20261101'",
 		"packages: write",
-		"c14-verified-images-${{ github.sha }}",
+		"c14-verified-images-${{ github.sha }}-${{ github.run_attempt }}",
 		"docker push",
 		"digest_ref",
+		"docker image rm \"$tagged_ref\" \"$local_ref\"",
 		"docker pull \"${package}@${digest}\"",
+		"pulled_id=",
+		"test \"$pulled_id\" = \"$expected_id\"",
 		"anonymous_pull: \"passed\"",
 	} {
 		if !strings.Contains(publishJob, want) {
@@ -533,10 +541,23 @@ func TestContainerScanRunsMCPMailJWTCompatibility(t *testing.T) {
 		"RS256",
 		"wrong configured issuer",
 		"wrong configured audience",
+		"missing a configured audience",
+		"aud list",
+		"alg=none",
+		"HS384",
 		"joserfc",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("%s no longer exercises %q; it must cover the image's JWT decoder and configured claim checks", mcpMailJWTCompatibility, want)
+		}
+	}
+	patch := readFile(t, root, mcpMailJWTAudiencePatch)
+	for _, want := range []string{
+		"claims_options",
+		`"aud": {"essential": True, "values": [audience]}`,
+	} {
+		if !strings.Contains(patch, want) {
+			t.Errorf("%s no longer applies the strict configured-audience patch %q", mcpMailJWTAudiencePatch, want)
 		}
 	}
 
@@ -565,6 +586,9 @@ func TestContainerScanRunsMCPMailJWTCompatibility(t *testing.T) {
 	}
 	if got := strings.Count(workflow, `- "`+mcpMailJWTCompatibility+`"`); got != 2 {
 		t.Errorf("container-scan.yml lists %s in %d path filters, want 2 (push and pull_request)", mcpMailJWTCompatibility, got)
+	}
+	if got := strings.Count(workflow, `- "`+mcpMailJWTAudiencePatch+`"`); got != 2 {
+		t.Errorf("container-scan.yml lists %s in %d path filters, want 2 (push and pull_request)", mcpMailJWTAudiencePatch, got)
 	}
 }
 

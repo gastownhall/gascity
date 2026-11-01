@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib.metadata
 import json
 import time
@@ -33,6 +34,14 @@ def token(algorithm: str, claims: dict[str, object], key: object, *, kid: str | 
     if kid:
         header["kid"] = kid
     return jwt.encode(header, claims, key).decode("utf-8")
+
+
+def unsigned_token(claims: dict[str, object]) -> str:
+    def segment(value: object) -> str:
+        raw = json.dumps(value, separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+    return f"{segment({'alg': 'none', 'typ': 'JWT'})}.{segment(claims)}."
 
 
 async def serve_jwks(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
@@ -67,6 +76,12 @@ async def check_jwt_compatibility() -> None:
         raise AssertionError("valid HS256 role token without configured issuer/audience was rejected")
     if await hmac_middleware._decode_jwt("not.a.jwt") is not None:
         raise AssertionError("malformed JWT was accepted")
+    if await hmac_middleware._decode_jwt(unsigned_token({"sub": "smoke-user", "exp": now + 60})) is not None:
+        raise AssertionError("alg=none JWT was accepted by the HS256-only decoder")
+    if await hmac_middleware._decode_jwt(
+        token("HS384", {"sub": "smoke-user", "exp": now + 60}, hmac_key)
+    ) is not None:
+        raise AssertionError("HS384 JWT was accepted by the HS256-only decoder")
 
     # Explicit issuer and audience checks remain enforced after the JOSE update.
     claims = {
@@ -90,6 +105,15 @@ async def check_jwt_compatibility() -> None:
     bad_audience = dict(claims, aud="other-api")
     if await strict_middleware._decode_jwt(token("HS256", bad_audience, hmac_key)) is not None:
         raise AssertionError("token with wrong configured audience was accepted")
+    missing_audience = {key: value for key, value in claims.items() if key != "aud"}
+    if await strict_middleware._decode_jwt(token("HS256", missing_audience, hmac_key)) is not None:
+        raise AssertionError("token missing a configured audience was accepted")
+    audience_list = dict(claims, aud=["other-api", "mail-api"])
+    if await strict_middleware._decode_jwt(token("HS256", audience_list, hmac_key)) is None:
+        raise AssertionError("token with the configured audience in an aud list was rejected")
+    wrong_audience_list = dict(claims, aud=["other-api", "another-api"])
+    if await strict_middleware._decode_jwt(token("HS256", wrong_audience_list, hmac_key)) is not None:
+        raise AssertionError("token with a non-matching aud list was accepted")
     expired_claims = dict(claims, exp=now - 60)
     if await strict_middleware._decode_jwt(token("HS256", expired_claims, hmac_key)) is not None:
         raise AssertionError("expired HS256 token was accepted")
@@ -139,6 +163,23 @@ async def check_jwt_compatibility() -> None:
         )
         if await jwks_middleware._decode_jwt(bad_rs_audience) is not None:
             raise AssertionError("JWKS-backed token with wrong configured audience was accepted")
+        missing_rs_audience = {
+            key: value for key, value in claims.items() if key != "aud"
+        }
+        if await jwks_middleware._decode_jwt(
+            token("RS256", missing_rs_audience, private_jwk, kid="mail-smoke-key")
+        ) is not None:
+            raise AssertionError("JWKS-backed token missing a configured audience was accepted")
+        rs_audience_list = {**claims, "aud": ["other-api", "mail-api"]}
+        if await jwks_middleware._decode_jwt(
+            token("RS256", rs_audience_list, private_jwk, kid="mail-smoke-key")
+        ) is None:
+            raise AssertionError("JWKS-backed token with configured audience in aud list was rejected")
+        wrong_rs_audience_list = {**claims, "aud": ["other-api", "another-api"]}
+        if await jwks_middleware._decode_jwt(
+            token("RS256", wrong_rs_audience_list, private_jwk, kid="mail-smoke-key")
+        ) is not None:
+            raise AssertionError("JWKS-backed token with non-matching aud list was accepted")
         expired_rs_token = token(
             "RS256",
             {**expired_claims, "sub": "smoke-user", "role": "reader"},
