@@ -94,8 +94,17 @@ To skip the prompts, supply the provider explicitly:
 $ gc init ~/my-city --default-provider claude
 ```
 
-Gas City created the city directory, registered it, and started it. Look
-inside:
+Gas City created the city directory, registered it, and started it.
+
+<Note>
+`gc init` already created the city's bead store under `.beads/` (the `hq`
+database), and `bd` starts and stops its own Dolt server on demand. There is no
+server to manage: never run `bd dolt start`, `bd init`, or `bd bootstrap` inside
+a city — `bd bootstrap` in particular can create a second, empty database beside
+the live one. If something about the bead store looks wrong, run `gc doctor`.
+</Note>
+
+Look inside:
 
 ```shell
 ~
@@ -220,9 +229,9 @@ A named session shows `reserved-unmaterialized` until the orchestrator
 materializes it; once the mayor session is up, its state reads `awake` (or
 `active` — the two are equivalent).
 
-The `dolt.dog` pool is a background utility agent from the bundled `dolt` pack
+The `bd.dog` pool is a background utility agent from the bundled `dolt` pack
 (pulled in transitively through the explicit `bd` import you saw in
-`pack.toml` — the `dolt.` prefix is the import binding it arrived through).
+`pack.toml` — the `bd.` prefix is the import binding it arrived through).
 It handles Dolt database housekeeping for the beads backend. `control-dispatcher` is platform
 infrastructure: the orchestrator uses it to advance formula workflows. You don't
 need to interact with either — ignore them for now.

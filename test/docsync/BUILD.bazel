@@ -8,6 +8,7 @@ go_test(
         "docsync_test.go",
         "provider_env_docs_test.go",
         "testenv_import_test.go",
+        "tutorial01_bead_store_test.go",
     ],
     data = glob(
         ["**"],
