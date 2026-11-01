@@ -1062,3 +1062,303 @@ func TestOrphanCandidate(t *testing.T) {
 		}
 	}
 }
+
+// buildUnreadableProbeProc writes the /proc signals that stay readable for a
+// non-dumpable same-uid process: status, stat, comm, cmdline and, when cgroup
+// is non-empty, a cgroup v2 path. Its environ is left absent; the tests hand
+// unreadableEnvironScanError the EACCES the live read returns.
+func buildUnreadableProbeProc(t *testing.T, root string, pid, ppid int, comm string, argv []string, cgroup string) {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(root, "stat")); errors.Is(err, fs.ErrNotExist) {
+		writeFakeBootTime(t, root, time.Unix(1_700_000_000, 0)) // start ticks 0: started at boot, long before the scan
+	}
+	buildFakeProcUnder(t, root, pid, ppid, comm, nil)
+	dir := filepath.Join(root, strconv.Itoa(pid))
+	if err := os.Remove(filepath.Join(dir, "environ")); err != nil {
+		t.Fatalf("remove environ: %v", err)
+	}
+	var cmdline []byte
+	for _, arg := range argv {
+		cmdline = append(cmdline, []byte(arg+"\x00")...)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cmdline"), cmdline, 0o644); err != nil {
+		t.Fatalf("write cmdline: %v", err)
+	}
+	if cgroup != "" {
+		writeFakeProcessCgroup(t, dir, cgroup)
+	}
+}
+
+// userManagerSlice is the scanning uid's systemd user manager cgroup.
+func userManagerSlice() string {
+	uid := strconv.Itoa(os.Geteuid())
+	return "/user.slice/user-" + uid + ".slice/user@" + uid + ".service"
+}
+
+func environPermissionDenied(pid int) error {
+	return &os.PathError{Op: "open", Path: "/proc/" + strconv.Itoa(pid) + "/environ", Err: syscall.EACCES}
+}
+
+// The hz-03 incident (2026-10-17..21): every scan for a session logged
+// `reading environ for pid 2642 ... permission denied` for the user manager's
+// (sd-pam) helper and an ssh-agent, both same-uid and non-dumpable. Neither
+// can be a runtime, so neither may be an entry error, in the id-scoped scan
+// or the orphan sweep's.
+func TestUnreadableEnvironOfProvenNonRuntimeIsNoEntryError(t *testing.T) {
+	const subreaper = 2641
+	for _, tc := range []struct {
+		name   string
+		pid    int
+		ppid   int
+		comm   string
+		argv   []string
+		cgroup string
+	}{
+		{
+			name: "systemd user manager (sd-pam)", pid: 2642, ppid: subreaper, comm: "(sd-pam)", argv: []string{"(sd-pam)"},
+			cgroup: userManagerSlice() + "/init.scope",
+		},
+		{
+			name: "daemonized ssh-agent", pid: 3700376, ppid: 1, comm: "ssh-agent", argv: []string{"/usr/bin/ssh-agent", "-s"},
+			cgroup: "/user.slice/user-994.slice/session-12.scope",
+		},
+		{
+			name: "ssh-agent started from a session's tmux pane", pid: 3700377, ppid: 1, comm: "ssh-agent", argv: []string{"ssh-agent"},
+			cgroup: userManagerSlice() + "/tmux-spawn-a1b2.scope",
+		},
+		{
+			name: "gpg-agent", pid: 3700378, ppid: subreaper, comm: "gpg-agent", argv: []string{"gpg-agent", "--homedir", "/home/x/.gnupg", "--daemon"},
+			cgroup: userManagerSlice() + "/app.slice/gpg-agent.service",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			buildUnreadableProbeProc(t, root, tc.pid, tc.ppid, tc.comm, tc.argv, tc.cgroup)
+			for _, id := range []string{"gc-wisp-uuom78", ""} {
+				if err := unreadableEnvironScanError(root, tc.pid, id, time.Time{}, time.Now(), environPermissionDenied(tc.pid)); err != nil {
+					t.Fatalf("scan for %q: unreadable %s is an entry error %v, want none", id, tc.comm, err)
+				}
+			}
+		})
+	}
+}
+
+// An unreadable process that could be a runtime still fails closed: a
+// self-hardened agent CLI is non-dumpable too, so dumpability proves nothing.
+// Only the two positive shapes are excused, and only on a permission error.
+func TestUnreadableEnvironOfPossibleRuntimeStillFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		comm    string
+		argv    []string
+		cgroup  string
+		readErr func(pid int) error
+	}{
+		{
+			name: "hardened agent CLI in a tmux pane scope", comm: "codex", argv: []string{"codex", "--yolo"},
+			cgroup: userManagerSlice() + "/tmux-spawn-c3d4.scope",
+		},
+		{
+			name: "agent CLI in the supervisor's service cgroup", comm: "node", argv: []string{"node", "/usr/lib/node_modules/claude/cli.js"},
+			cgroup: "/system.slice/flow-estate-gc.service",
+		},
+		{
+			name: "comm claims ssh-agent but argv[0] is a provider", comm: "ssh-agent", argv: []string{"node", "agent.js"},
+			cgroup: "/user.slice/user-994.slice/session-1.scope",
+		},
+		{
+			name: "argv[0] claims ssh-agent but comm is a provider", comm: "claude", argv: []string{"ssh-agent"},
+			cgroup: "/user.slice/user-994.slice/session-1.scope",
+		},
+		{
+			name: "ssh-agent with no cmdline to prove argv[0]", comm: "ssh-agent", argv: nil,
+			cgroup: "/user.slice/user-994.slice/session-1.scope",
+		},
+		{
+			name: "(sd-pam) named but outside the user manager's init.scope", comm: "(sd-pam)", argv: []string{"(sd-pam)"},
+			cgroup: userManagerSlice() + "/app.slice/x.service",
+		},
+		{
+			name: "init.scope of a non-user-manager unit", comm: "agent", argv: []string{"agent"},
+			cgroup: "/system.slice/gc.service/init.scope",
+		},
+		{name: "(sd-pam) with no cgroup to prove it", comm: "(sd-pam)", argv: []string{"(sd-pam)"}, cgroup: ""},
+		{
+			name: "ssh-agent whose environ failed for a reason other than permission", comm: "ssh-agent", argv: []string{"ssh-agent"},
+			cgroup: "/user.slice/user-994.slice/session-1.scope",
+			readErr: func(pid int) error {
+				return &os.PathError{Op: "read", Path: "/proc/" + strconv.Itoa(pid) + "/environ", Err: syscall.EIO}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const pid = 4242
+			root := t.TempDir()
+			buildUnreadableProbeProc(t, root, pid, 1, tc.comm, tc.argv, tc.cgroup)
+			if tc.argv == nil {
+				if err := os.Remove(filepath.Join(root, strconv.Itoa(pid), "cmdline")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			readErr := environPermissionDenied(pid)
+			if tc.readErr != nil {
+				readErr = tc.readErr(pid)
+			}
+			err := unreadableEnvironScanError(root, pid, "gc-target", time.Time{}, time.Now(), readErr)
+			if err == nil || !errors.Is(err, readErr) {
+				t.Fatalf("unreadableEnvironScanError = %v, want the environ failure kept (fail closed)", err)
+			}
+		})
+	}
+}
+
+// A process that vanished before its identity could be read is not proven
+// (the scan's other paths decide a vanished process), so no proof is minted
+// from files of a pid that no longer exists.
+func TestUnreadableProcessProvenNonRuntimeNeedsAReadableIdentity(t *testing.T) {
+	root := t.TempDir()
+	buildUnreadableProbeProc(t, root, 77, 1, "ssh-agent", []string{"ssh-agent"}, "/user.slice/user-1.slice/session-1.scope")
+	if err := os.Remove(filepath.Join(root, "77", "stat")); err != nil {
+		t.Fatal(err)
+	}
+	if unreadableProcessProvenNonRuntime(root, 77, time.Now()) {
+		t.Fatal("proved a process with no stat identity a non-runtime")
+	}
+}
+
+func TestIsUserManagerInitScope(t *testing.T) {
+	const uid = 994
+	for cgroup, want := range map[string]bool{
+		"/user.slice/user-994.slice/user@994.service/init.scope":           true,
+		"/user.slice/user-1000.slice/user@1000.service/init.scope":         false, // another user's manager
+		"/user.slice/user-994.slice/user@994.service/app.slice/init.scope": false,
+		"/user.slice/user-994.slice/user@.service/init.scope":              false,
+		"/system.slice/gc.service/init.scope":                              false,
+		"/init.scope":                                                      false,
+		"/user.slice/user-994.slice/user@994.service":                      false,
+		"/": false,
+	} {
+		if got := isUserManagerInitScope(cgroup, uid); got != want {
+			t.Errorf("isUserManagerInitScope(%q, %d) = %t, want %t", cgroup, uid, got, want)
+		}
+	}
+}
+
+// A hybrid cgroup host lists v1 controllers beside the unified "0::" line;
+// the proof reads the unified line, and refuses a file with none or two.
+func TestReadUnifiedCgroup(t *testing.T) {
+	for _, tc := range []struct {
+		name, file, want string
+		ok               bool
+	}{
+		{name: "unified", file: "0::/a/b.scope\n", want: "/a/b.scope", ok: true},
+		{name: "hybrid", file: "12:pids:/user.slice\n1:name=systemd:/user.slice/x\n0::/a/init.scope\n", want: "/a/init.scope", ok: true},
+		{name: "v1 only", file: "12:pids:/user.slice\n1:name=systemd:/user.slice/x\n", ok: false},
+		{name: "two unified lines", file: "0::/a\n0::/b\n", ok: false},
+		{name: "empty unified path", file: "0::\n", ok: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, "9")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "cgroup"), []byte(tc.file), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			got, ok := readUnifiedCgroup(root, 9)
+			if got != tc.want || ok != tc.ok {
+				t.Fatalf("readUnifiedCgroup = (%q, %t), want (%q, %t)", got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+// The proof is bound to the process whose environ read failed: a process at
+// that pid that started after the read (a recycled pid) is not proven, nor is
+// one under another user's manager.
+func TestUnreadableProcessProvenNonRuntimeIsBoundToTheFailedRead(t *testing.T) {
+	root := t.TempDir()
+	boot := time.Now().Add(-time.Hour).Truncate(time.Second)
+	writeFakeBootTime(t, root, boot)
+	buildUnreadableProbeProc(t, root, 88, 1, "ssh-agent", []string{"ssh-agent"}, "/user.slice/user-1.slice/session-1.scope")
+	dir := filepath.Join(root, "88")
+	// Started 3599s after boot: one second before now.
+	writeFakeProcessStat(t, dir, 88, 1, 3599*linuxUserHZ)
+	if unreadableProcessProvenNonRuntime(root, 88, boot.Add(30*time.Minute)) {
+		t.Fatal("proved a process that started after the failed environ read")
+	}
+	if !unreadableProcessProvenNonRuntime(root, 88, time.Now().Add(time.Hour)) {
+		t.Fatal("refused a credential agent that predates the failed environ read")
+	}
+
+	other := t.TempDir()
+	buildUnreadableProbeProc(t, other, 89, 1, "(sd-pam)", []string{"(sd-pam)"},
+		"/user.slice/user-"+strconv.Itoa(os.Geteuid()+1)+".slice/user@"+strconv.Itoa(os.Geteuid()+1)+".service/init.scope")
+	if unreadableProcessProvenNonRuntime(other, 89, time.Now()) {
+		t.Fatal("proved a process under another user's manager")
+	}
+}
+
+// The non-runtime proof needs no incarnation bound and wins over the age and
+// tmux-parent proofs: with an incarnation time set and the process newer than
+// it, (sd-pam) is still excused, and a hardened agent CLI is still reported.
+func TestUnreadableEnvironProofWithIncarnationBound(t *testing.T) {
+	root := t.TempDir()
+	boot := time.Now().Add(-time.Hour).Truncate(time.Second)
+	writeFakeBootTime(t, root, boot)
+	incarnation := boot.Add(time.Second) // both processes start 10s after boot: newer than it
+	buildUnreadableProbeProc(t, root, 2642, 1, "(sd-pam)", []string{"(sd-pam)"}, userManagerSlice()+"/init.scope")
+	writeFakeProcessStat(t, filepath.Join(root, "2642"), 2642, 1, 10*linuxUserHZ)
+	buildUnreadableProbeProc(t, root, 2700, 1, "codex", []string{"codex"}, userManagerSlice()+"/tmux-spawn-a1.scope")
+	writeFakeProcessStat(t, filepath.Join(root, "2700"), 2700, 1, 10*linuxUserHZ)
+
+	if err := unreadableEnvironScanError(root, 2642, "gc-target", incarnation, time.Now(), environPermissionDenied(2642)); err != nil {
+		t.Fatalf("(sd-pam) under an incarnation bound: %v, want excused", err)
+	}
+	if err := unreadableEnvironScanError(root, 2700, "gc-target", incarnation, time.Now(), environPermissionDenied(2700)); err == nil {
+		t.Fatal("hardened agent CLI newer than the incarnation excused, want fail closed")
+	}
+}
+
+// End to end through the orphan sweep's scan, with real EACCES environ
+// files: the user manager's helper and an ssh-agent, both reparented to the
+// subreaper or init, add no entry error, while an unreadable hardened agent
+// CLI beside them is still reported, and a readable orphan root is still
+// found.
+func TestOrphanCandidateScanExcusesOnlyProvenNonRuntimes(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads every file; the unreadable fixtures need an unprivileged user")
+	}
+	root := t.TempDir()
+	writeFakeBootTime(t, root, time.Unix(1700000000, 0))
+	const subreaper = 2641
+	buildFakeProcUnder(t, root, subreaper, 1, "systemd", nil)
+	buildFakeProcUnder(t, root, 100, 1, "agent", map[string]string{"GC_SESSION_ID": "gc-orphan"})
+	buildUnreadableProbeProc(t, root, 2642, subreaper, "(sd-pam)", []string{"(sd-pam)"}, userManagerSlice()+"/init.scope")
+	buildUnreadableProbeProc(t, root, 3700376, 1, "ssh-agent", []string{"/usr/bin/ssh-agent", "-s"}, "/user.slice/user-994.slice/session-3.scope")
+	buildUnreadableProbeProc(t, root, 3700400, subreaper, "codex", []string{"codex"}, userManagerSlice()+"/tmux-spawn-e5f6.scope")
+	for _, pid := range []string{"2642", "3700376", "3700400"} {
+		if err := os.WriteFile(filepath.Join(root, pid, "environ"), []byte("GC_SESSION_ID=hidden\x00"), 0o000); err != nil {
+			t.Fatalf("write environ: %v", err)
+		}
+	}
+
+	got, err := scanOrphanCandidatesWithRoot(root, subreaper)
+	if len(got) != 1 || got[0].SessionID != "gc-orphan" {
+		t.Fatalf("orphan candidates %+v, want the readable gc-orphan root only", got)
+	}
+	var entry *EntryError
+	if !errors.As(err, &entry) || HasWholeScanFailure(err) {
+		t.Fatalf("scan error %v, want entry errors only", err)
+	}
+	summary := SummarizeScanError(err)
+	if !strings.HasPrefix(summary, "1 unreadable process entries in 1 classes: ") || !strings.HasSuffix(summary, "(pids 3700400)") {
+		t.Fatalf("SummarizeScanError = %q, want only the hardened agent CLI (pid 3700400) reported", summary)
+	}
+
+	_, err = scanWithRoot(root, "gc-wisp-uuom78")
+	if summary := SummarizeScanError(err); !strings.HasSuffix(summary, "(pids 3700400)") {
+		t.Fatalf("id-scoped SummarizeScanError = %q, want only pid 3700400 reported", summary)
+	}
+}
