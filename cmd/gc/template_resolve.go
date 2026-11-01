@@ -384,18 +384,70 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		agentEnv["GC_BIN"] = exe
 	}
-	sessionBackendEnv, err := sessionBackendEnvWithError(p.cityPath, rigRoot, p.rigs)
+	storeScopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
+	sessionRigRoot := rigRoot
+	// Any session that can land in a pod needs the store identity pods verify.
+	podSession := sessionProviderUsesK8sPods(effectiveSessionProvider(cfgAgent.Session, p.sessionProvider)) ||
+		(strings.TrimSpace(cfgAgent.Session) == "" && sessionProviderUsesK8sPods(strings.TrimSpace(os.Getenv("GC_SESSION"))))
+	if podSession {
+		if samePath(storeScopeRoot, p.cityPath) {
+			sessionRigRoot = ""
+		} else {
+			sessionRigRoot = storeScopeRoot
+		}
+	}
+	sessionBackendEnv, err := sessionBackendEnvWithError(p.cityPath, sessionRigRoot, p.rigs)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: building session backend env: %w", qualifiedName, err)
 	}
 	for key, value := range sessionBackendEnv {
 		agentEnv[key] = value
 	}
+	if podSession {
+		storeIdentityEnv, err := k8sSessionStoreIdentityEnv(p.cityPath, storeScopeRoot, p.city, sessionBackendEnv)
+		if err != nil {
+			return TemplateParams{}, fmt.Errorf("agent %q: resolving Kubernetes store identity: %w", qualifiedName, err)
+		}
+		for key, value := range storeIdentityEnv {
+			agentEnv[key] = value
+		}
+
+		cityBackendEnv := sessionBackendEnv
+		if !samePath(storeScopeRoot, p.cityPath) {
+			cityBackendEnv, err = sessionBackendEnvWithError(p.cityPath, "", p.rigs)
+			if err != nil {
+				return TemplateParams{}, fmt.Errorf("agent %q: building City session backend env: %w", qualifiedName, err)
+			}
+		}
+		cityIdentityEnv, err := k8sSessionStoreIdentityEnv(p.cityPath, p.cityPath, p.city, cityBackendEnv)
+		if err != nil {
+			return TemplateParams{}, fmt.Errorf("agent %q: resolving Kubernetes City store identity: %w", qualifiedName, err)
+		}
+		for _, key := range []string{"GC_BEADS_PROJECT_ID", "GC_BEADS_PREFIX", "GC_DOLT_DATABASE", "GC_STORE_ROOT", "GC_STORE_SCOPE"} {
+			agentEnv["GC_K8S_CITY_"+strings.TrimPrefix(key, "GC_")] = cityIdentityEnv[key]
+		}
+		cityHost := strings.TrimSpace(cityBackendEnv["GC_DOLT_HOST"])
+		cityPort := strings.TrimSpace(cityBackendEnv["GC_DOLT_PORT"])
+		if cityHost == "" {
+			cityHost = strings.TrimSpace(cityBackendEnv["BEADS_DOLT_SERVER_HOST"])
+		}
+		if cityPort == "" {
+			cityPort = strings.TrimSpace(cityBackendEnv["BEADS_DOLT_SERVER_PORT"])
+		}
+		agentEnv["GC_K8S_CITY_DOLT_HOST"] = cityHost
+		agentEnv["GC_K8S_CITY_DOLT_PORT"] = cityPort
+		agentEnv["GC_K8S_CITY_DOLT_MANAGED_LOCAL"] = strings.TrimSpace(cityBackendEnv["GC_DOLT_MANAGED_LOCAL"])
+	}
 	if rigName != "" {
 		agentEnv["GC_RIG"] = rigName
 		agentEnv["GC_RIG_ROOT"] = rigRoot
 		agentEnv["BEADS_DIR"] = filepath.Join(rigRoot, ".beads")
 		agentEnv["GC_BEADS_SCOPE_ROOT"] = rigRoot
+	}
+	if podSession {
+		agentEnv["GC_BEADS_SCOPE_ROOT"] = storeScopeRoot
+		agentEnv["GC_STORE_ROOT"] = storeScopeRoot
+		agentEnv["BEADS_DIR"] = filepath.Join(storeScopeRoot, ".beads")
 	}
 
 	// configDir is the directory agent config-relative paths (pre-start
@@ -1085,3 +1137,9 @@ func prependStartupPromptToNudge(prompt, nudge string) string {
 }
 
 const startupPromptNudgeSeparator = "\n\n---\n\n"
+
+// sessionProviderUsesK8sPods reports whether a session provider can run sessions
+// in generated Kubernetes pods.
+func sessionProviderUsesK8sPods(provider string) bool {
+	return provider == "k8s" || provider == "hybrid"
+}
