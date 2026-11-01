@@ -285,10 +285,44 @@ the result schema belongs to the pack command leaf represented by
 meaningful command-specific failure fields beyond the shared default failure
 shape.
 
+## Same Output On Every Route
+
+A read command such as `gc session list` can answer from two places: the city's
+running supervisor API, or a direct read of the city's own files and bead
+stores. A supervisor-hosted city reads through the API by default. Either way,
+the command prints the same JSON document, in the shape its result schema
+declares:
+
+| What you see | Rule |
+|---|---|
+| Keys and values | Identical on both routes for the same city state. |
+| Data only the server has | Optional keys the schema declares, such as `_cache_age_s` (age of the server's cache) and `running` on session rows. The direct read leaves them out; it never guesses them. |
+| Keys you don't recognize | Ignore them. New optional keys can appear without a `schema_version` bump. |
+
+You can still pick the route. `GC_NO_API=1` forces the direct read of a local
+city, and `--city-url`, `--city-name`, `GC_CITY_URL` and contexts read a remote
+city through its API. Picking a route doesn't change the shape. The one
+exception is `gc beads list` and `gc beads show --format=json`: for a remote
+city they wrap the result in `{"beads"|"bead", "_cache_age_s"}`, and for a
+local city they print the bare array or object.
+
+```sh
+gc session list --json | jq '.sessions[] | {id, state, closed}'
+GC_NO_API=1 gc session list --json | jq '.sessions[] | {id, state, closed}'  # same rows
+```
+
 ## Compatibility Notes
 
-JSON output is an automation contract. A PR that changes an existing JSON output
-shape should call that out explicitly, including:
+JSON output is an automation contract:
+
+- `schema_version` changes only for a breaking change inside a command's
+  schema: a removed, renamed or retyped key, or a changed meaning. Adding an
+  optional key is not breaking.
+- Every change to what a command prints, including a change on one route only,
+  gets an Upgrading Note in the changelog.
+
+A PR that changes an existing JSON output shape should call that out
+explicitly, including:
 
 - the command and invocation.
 - the old shape.
