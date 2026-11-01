@@ -869,3 +869,54 @@ func TestNewSessionErrNoServerReprobeAnsweredAllowsCreation(t *testing.T) {
 		}
 	}
 }
+
+// The fail-closed side of the same race: when the re-probe cannot produce a
+// positive server answer — persistent no-server, an arbitrary executor
+// failure, or a canceled/exhausted context — creation is refused with
+// ErrServerDegraded carrying both the observation and the re-probe result,
+// and new-session is never issued.
+func TestNewSessionErrNoServerReprobeWithoutAnswerFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		reprobe  error
+		wantDiag string
+	}{
+		{name: "persistent-no-server", reprobe: ErrNoServer, wantDiag: "reprobe=" + ErrNoServer.Error()},
+		{name: "executor-failure", reprobe: errors.New("tmux protocol failure"), wantDiag: "reprobe=tmux protocol failure"},
+		{name: "deadline-exceeded", reprobe: context.DeadlineExceeded, wantDiag: "reprobe=context deadline exceeded"},
+		{name: "canceled", reprobe: context.Canceled, wantDiag: "reprobe=context canceled"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fe := probeAssertSet([]string{"", ""}, []error{ErrNoServer, tc.reprobe})
+			observerCalls := 0
+			tm := &Tmux{
+				cfg:  Config{SocketName: "gc-race"},
+				exec: fe,
+				serverSocketObserver: func(context.Context, string) error {
+					observerCalls++
+					return fmt.Errorf("path=/tmux/gc-race inode=97 peer_pid=4242 reason=live-unix-socket")
+				},
+			}
+
+			err := tm.NewSession("gc-fail-closed", "")
+			if !errors.Is(err, ErrServerDegraded) {
+				t.Fatalf("err = %v, want ErrServerDegraded", err)
+			}
+			if errors.Is(err, ErrNoServer) {
+				t.Fatalf("err = %v, must not wrap ErrNoServer", err)
+			}
+			for _, want := range []string{"protocol=no-server", "inode=97", "peer_pid=4242", tc.wantDiag} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("err = %q, want %q", err, want)
+				}
+			}
+			if observerCalls != 1 {
+				t.Fatalf("observer calls = %d, want 1", observerCalls)
+			}
+			want := probeArgv("gc-race")
+			if len(fe.calls) != 2 || !reflect.DeepEqual(fe.calls[0], want) || !reflect.DeepEqual(fe.calls[1], want) {
+				t.Fatalf("calls = %#v, want exactly two identical preflight probes %v", fe.calls, want)
+			}
+		})
+	}
+}
