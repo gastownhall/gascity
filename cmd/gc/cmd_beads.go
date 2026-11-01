@@ -52,10 +52,18 @@ func newBeadsListCmd(stdout, stderr io.Writer) *cobra.Command {
 the controller is alive and falling back to a direct multi-store read
 otherwise.
 
-Supports --label, --status, --all, and --format. --format=json emits
-JSON (API-path JSON includes _cache_age_s; fallback-path JSON omits
-it). The bare --json flag is reserved by the CLI's JSON-contract layer
-and is not wired for this command; use --format=json.`,
+Supports --label, --status, --all, and --format. --format=json prints a
+JSON array of beads, the same on every route for a local city. For a
+remote city (--context, --city-url/--city-name, GC_CITY_URL,
+GC_CITY_CONTEXT, or the context selected by gc context use) it prints
+{"beads": [...], "_cache_age_s": N}, where _cache_age_s is the age in
+seconds of the remote supervisor's bead cache.
+
+A bead store that cannot be opened or read fails the command (exit 1,
+naming the store) rather than being left out of the list.
+
+The bare --json flag is reserved by the CLI's JSON-contract layer and is
+not wired for this command; use --format=json.`,
 		Example: `  gc beads list
   gc beads list --label ready-to-build
   gc beads list --status open --format=json`,
@@ -83,10 +91,15 @@ func newBeadsShowCmd(stdout, stderr io.Writer) *cobra.Command {
 controller is alive and falling back to a direct multi-store lookup
 otherwise.
 
-Supports --format. --format=json emits JSON (API-path JSON includes
-_cache_age_s; fallback-path JSON omits it). The bare --json flag is
-reserved by the CLI's JSON-contract layer and is not wired for this
-command; use --format=json.`,
+Supports --format. --format=json prints the bead as a JSON object, the
+same on every route for a local city. For a remote city (--context,
+--city-url/--city-name, GC_CITY_URL, GC_CITY_CONTEXT, or the context
+selected by gc context use) it prints {"bead": {...}, "_cache_age_s": N},
+where _cache_age_s is the age in seconds of the remote supervisor's bead
+cache.
+
+The bare --json flag is reserved by the CLI's JSON-contract layer and is
+not wired for this command; use --format=json.`,
 		Example: `  gc beads show ga-abc
   gc beads show ga-abc --format=json`,
 		// MaximumNArgs(1), not ExactArgs(1): a missing id must reach the internal
@@ -134,6 +147,7 @@ var beadsListAPIClient = func(cityPath string) (*api.Client, string) {
 // routeBeadsList dispatches `beads list` to the supervisor API when a
 // controller is up; otherwise falls back to the local multi-store iterator.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
+
 func routeBeadsList(cityPath string, c *api.Client, nilReason, format string, filters beadFilters, stdout, stderr io.Writer) int {
 	var cr api.CachedRead[api.BeadListView]
 	return routeRead(c, "beads list", nilReason, stderr,
@@ -147,25 +161,30 @@ func routeBeadsList(cityPath string, c *api.Client, nilReason, format string, fi
 			return err
 		},
 		func() int {
-			return renderBeadsListFromAPI(api.CachedRead[[]beads.Bead]{Body: cr.Body.Beads, AgeSeconds: cr.AgeSeconds}, format, filters, stdout)
+			return renderBeadsListFromAPI(cr.Body.Beads, cr.AgeSeconds, format, filters, c.IsRemote(), stdout)
 		},
 		func() int { return doBeadsListFallback(cityPath, format, filters, stdout, stderr) },
 	)
 }
 
 // renderBeadsListFromAPI formats the API-sourced bead list using the same
-// bead_format.go helpers as the fallback path. JSON output adds the
-// _cache_age_s envelope field; human output appends a staleness banner
+// bead_format.go helpers as the fallback path. JSON output is the bare array
+// the fallback prints, except for a remote target (remote), which gets the
+// {beads, _cache_age_s} envelope; human output appends a staleness banner
 // when cache age > 30s.
-func renderBeadsListFromAPI(cr api.CachedRead[[]beads.Bead], format string, filters beadFilters, stdout io.Writer) int {
-	filtered := filterBeads(cr.Body, filters)
+func renderBeadsListFromAPI(bs []beads.Bead, cacheAgeS float64, format string, filters beadFilters, remote bool, stdout io.Writer) int {
+	filtered := filterBeads(bs, filters)
 	sortBeadsForList(filtered)
 	if format == "json" {
-		writeBeadsJSONWithCache(filtered, cr.AgeSeconds, stdout)
+		if remote {
+			writeBeadsJSONWithCache(filtered, cacheAgeS, stdout)
+		} else {
+			writeBeadsJSON(filtered, stdout)
+		}
 	} else {
 		writeBeadTable(filtered, stdout, true)
-		if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-			fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
+		if cacheAgeS > cacheAgeBannerThresholdSeconds {
+			fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cacheAgeS) //nolint:errcheck // best-effort stdout
 		}
 	}
 	return 0
@@ -239,14 +258,22 @@ func routeBeadsShow(cityPath string, c *api.Client, nilReason, beadID, format st
 			cr, err = c.GetBead(beadID)
 			return err
 		},
-		func() int { return renderBeadsShowFromAPI(cr, format, stdout) },
+		func() int { return renderBeadsShowFromAPI(cr, format, c.IsRemote(), stdout) },
 		func() int { return doBeadsShowFallback(cityPath, beadID, format, stdout, stderr) },
 	)
 }
 
-func renderBeadsShowFromAPI(cr api.CachedRead[beads.Bead], format string, stdout io.Writer) int {
+// renderBeadsShowFromAPI formats the API-sourced bead. JSON output is the bare
+// object the fallback prints, except for a remote target (remote), which gets
+// the {bead, _cache_age_s} envelope; human output appends a staleness banner
+// when cache age > 30s.
+func renderBeadsShowFromAPI(cr api.CachedRead[beads.Bead], format string, remote bool, stdout io.Writer) int {
 	if format == "json" {
-		writeBeadJSONWithCache(cr.Body, cr.AgeSeconds, stdout)
+		if remote {
+			writeBeadJSONWithCache(cr.Body, cr.AgeSeconds, stdout)
+		} else {
+			writeBeadJSON(cr.Body, stdout)
+		}
 	} else {
 		writeBeadDetail(cr.Body, stdout)
 		if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {

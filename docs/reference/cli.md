@@ -509,10 +509,18 @@ List beads across all rigs, routed through the supervisor API when
 the controller is alive and falling back to a direct multi-store read
 otherwise.
 
-Supports --label, --status, --all, and --format. --format=json emits
-JSON (API-path JSON includes _cache_age_s; fallback-path JSON omits
-it). The bare --json flag is reserved by the CLI's JSON-contract layer
-and is not wired for this command; use --format=json.
+Supports --label, --status, --all, and --format. --format=json prints a
+JSON array of beads, the same on every route for a local city. For a
+remote city (--context, --city-url/--city-name, GC_CITY_URL,
+GC_CITY_CONTEXT, or the context selected by gc context use) it prints
+&#123;"beads": [...], "_cache_age_s": N&#125;, where _cache_age_s is the age in
+seconds of the remote supervisor's bead cache.
+
+A bead store that cannot be opened or read fails the command (exit 1,
+naming the store) rather than being left out of the list.
+
+The bare --json flag is reserved by the CLI's JSON-contract layer and is
+not wired for this command; use --format=json.
 
 ```
 gc beads list [flags]
@@ -581,10 +589,15 @@ Show one bead by ID, routed through the supervisor API when the
 controller is alive and falling back to a direct multi-store lookup
 otherwise.
 
-Supports --format. --format=json emits JSON (API-path JSON includes
-_cache_age_s; fallback-path JSON omits it). The bare --json flag is
-reserved by the CLI's JSON-contract layer and is not wired for this
-command; use --format=json.
+Supports --format. --format=json prints the bead as a JSON object, the
+same on every route for a local city. For a remote city (--context,
+--city-url/--city-name, GC_CITY_URL, GC_CITY_CONTEXT, or the context
+selected by gc context use) it prints &#123;"bead": &#123;...&#125;, "_cache_age_s": N&#125;,
+where _cache_age_s is the age in seconds of the remote supervisor's bead
+cache.
+
+The bare --json flag is reserved by the CLI's JSON-contract layer and is
+not wired for this command; use --format=json.
 
 ```
 gc beads show <bead-id> [flags]
