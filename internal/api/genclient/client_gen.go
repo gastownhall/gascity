@@ -13027,11 +13027,14 @@ type PostV0CityByCityNameServiceByNameRestartParams struct {
 
 // GetV0CityByCityNameSessionByIdParams defines parameters for GetV0CityByCityNameSessionById.
 type GetV0CityByCityNameSessionByIdParams struct {
-	// Peek Include last output preview.
+	// Peek Include a best-effort last output preview of a running active session. See peek_strict for gc session peek's contract.
 	Peek *bool `form:"peek,omitempty" json:"peek,omitempty"`
 
-	// PeekLines Number of lines to include in the last output preview when peek=true. Defaults to 5.
+	// PeekLines Number of lines to include in the last output preview when peek=true. Defaults to 5. With peek_strict=true it is passed to the runtime as given, and 0 asks for the runtime's full capture.
 	PeekLines *int64 `form:"peek_lines,omitempty" json:"peek_lines,omitempty"`
+
+	// PeekStrict Peek with gc session peek's contract instead of the best-effort preview; implies peek. {id} resolves as for a live-session command, so a closed session is found only by its exact bead id. Every open session that is not suspended is peeked whatever its runtime state, and peek_lines is passed to the runtime as given (0 asks for its full capture). A suspended or closed session is refused with 409 session-inactive, and a failed peek fails the request instead of omitting last_output.
+	PeekStrict *bool `form:"peek_strict,omitempty" json:"peek_strict,omitempty"`
 
 	// ExactId Resolve {id} as an exact session bead id only: a single point read that also finds closed sessions and answers 404 when no bead has that id. Skips the alias, runtime session_name, configured-name and closed-session name lookups. For callers holding a durable id.
 	ExactId *bool `form:"exact_id,omitempty" json:"exact_id,omitempty"`
@@ -36498,6 +36501,22 @@ func NewGetV0CityByCityNameSessionByIdRequest(server string, cityName string, id
 		if params.PeekLines != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "peek_lines", *params.PeekLines, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.PeekStrict != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "peek_strict", *params.PeekStrict, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

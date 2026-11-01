@@ -1805,7 +1805,7 @@ internal/api/huma_handlers_sessions_command.go	messageDelivery	raw-field	1
 internal/api/huma_handlers_sessions_query.go	Server.humaHandleCityPending	unwrap	2
 internal/api/huma_handlers_sessions_query.go	Server.humaHandleSessionAgentGet	unwrap	3
 internal/api/huma_handlers_sessions_query.go	Server.humaHandleSessionAgentList	unwrap	3
-internal/api/huma_handlers_sessions_query.go	Server.humaHandleSessionGet	unwrap	4
+internal/api/huma_handlers_sessions_query.go	Server.humaHandleSessionGet	unwrap	1
 internal/api/huma_handlers_sessions_query.go	Server.humaHandleSessionList	unwrap	3
 internal/api/huma_handlers_sessions_query.go	Server.humaHandleSessionPending	unwrap	3
 internal/api/huma_handlers_sessions_query.go	Server.humaHandleSessionTranscript	unwrap	4

@@ -3233,6 +3233,7 @@
               "urn:gascity:error:service-not-found",
               "urn:gascity:error:service-unavailable",
               "urn:gascity:error:session-conflict",
+              "urn:gascity:error:session-inactive",
               "urn:gascity:error:session-not-found",
               "urn:gascity:error:sling-cross-rig",
               "urn:gascity:error:sling-cross-store-route",
@@ -3291,6 +3292,7 @@
               "urn:gascity:error:service-not-found",
               "urn:gascity:error:service-unavailable",
               "urn:gascity:error:session-conflict",
+              "urn:gascity:error:session-inactive",
               "urn:gascity:error:session-not-found",
               "urn:gascity:error:sling-cross-rig",
               "urn:gascity:error:sling-cross-store-route",
@@ -50822,26 +50824,36 @@
             }
           },
           {
-            "description": "Include last output preview.",
+            "description": "Include a best-effort last output preview of a running active session. See peek_strict for gc session peek's contract.",
             "explode": false,
             "in": "query",
             "name": "peek",
             "schema": {
-              "description": "Include last output preview.",
+              "description": "Include a best-effort last output preview of a running active session. See peek_strict for gc session peek's contract.",
               "type": "boolean"
             }
           },
           {
-            "description": "Number of lines to include in the last output preview when peek=true. Defaults to 5.",
+            "description": "Number of lines to include in the last output preview when peek=true. Defaults to 5. With peek_strict=true it is passed to the runtime as given, and 0 asks for the runtime's full capture.",
             "explode": false,
             "in": "query",
             "name": "peek_lines",
             "schema": {
-              "description": "Number of lines to include in the last output preview when peek=true. Defaults to 5.",
+              "description": "Number of lines to include in the last output preview when peek=true. Defaults to 5. With peek_strict=true it is passed to the runtime as given, and 0 asks for the runtime's full capture.",
               "format": "int64",
               "maximum": 10000,
               "minimum": 0,
               "type": "integer"
+            }
+          },
+          {
+            "description": "Peek with gc session peek's contract instead of the best-effort preview; implies peek. {id} resolves as for a live-session command, so a closed session is found only by its exact bead id. Every open session that is not suspended is peeked whatever its runtime state, and peek_lines is passed to the runtime as given (0 asks for its full capture). A suspended or closed session is refused with 409 session-inactive, and a failed peek fails the request instead of omitting last_output.",
+            "explode": false,
+            "in": "query",
+            "name": "peek_strict",
+            "schema": {
+              "description": "Peek with gc session peek's contract instead of the best-effort preview; implies peek. {id} resolves as for a live-session command, so a closed session is found only by its exact bead id. Every open session that is not suspended is peeked whatever its runtime state, and peek_lines is passed to the runtime as given (0 asks for its full capture). A suspended or closed session is refused with 409 session-inactive, and a failed peek fails the request instead of omitting last_output.",
+              "type": "boolean"
             }
           },
           {
