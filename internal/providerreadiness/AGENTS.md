@@ -11,3 +11,6 @@ Local configuration is distinct from successful remote inference. Accept the
 native CLI's supported login modes equally; subscription-specific onboarding
 policy belongs to its own projection. Never return or log native credential
 output, environment values or tokens in diagnostic details.
+
+Resolve bare executable names with the effective worker PATH. An explicitly
+empty PATH must not fall back to the supervisor process environment.

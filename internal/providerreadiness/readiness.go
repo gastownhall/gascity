@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -44,6 +45,10 @@ type Result struct{ Status, Detail string }
 type statusOutput struct{ stdout, stderr []byte }
 
 var runStatus = func(ctx context.Context, command string, args []string, env map[string]string) (statusOutput, error) {
+	command, err := configuredExecutable(command, env)
+	if err != nil {
+		return statusOutput{}, err
+	}
 	cmd := exec.CommandContext(ctx, command, args...)
 	execgrace.Apply(cmd, time.Second)
 	cmd.Env = make([]string, 0, len(env))
@@ -54,8 +59,36 @@ var runStatus = func(ctx context.Context, command string, args []string, env map
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	err = cmd.Run()
 	return statusOutput{stdout: stdout.Bytes(), stderr: stderr.Bytes()}, err
+}
+
+// configuredExecutable mirrors executable lookup using the worker environment.
+// exec.Command otherwise resolves a bare name using the supervisor's PATH,
+// before Cmd.Env is applied. An explicitly empty PATH must remain empty.
+func configuredExecutable(command string, env map[string]string) (string, error) {
+	if filepath.Base(command) != command {
+		return command, nil
+	}
+	path, configured := env["PATH"]
+	if !configured {
+		return exec.LookPath(command)
+	}
+	for _, directory := range filepath.SplitList(path) {
+		candidate := filepath.Join(directory, command)
+		if !filepath.IsAbs(candidate) {
+			candidate = "." + string(os.PathSeparator) + candidate
+		}
+		executable, err := exec.LookPath(candidate)
+		if err != nil {
+			continue
+		}
+		if !filepath.IsAbs(executable) {
+			return "", exec.ErrDot
+		}
+		return executable, nil
+	}
+	return "", exec.ErrNotFound
 }
 
 // Probe inspects the selected executable without starting a model conversation.

@@ -3,7 +3,10 @@ package providerreadiness
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -107,5 +110,26 @@ func TestProbeRespectsCallerCancellation(t *testing.T) {
 	result := Probe(ctx, Target{Family: "claude", Command: "claude"})
 	if result.Status != ProbeError {
 		t.Fatalf("result=%+v", result)
+	}
+}
+
+// The provider's PATH can differ from the supervisor's. A native readiness
+// check must execute the same selected CLI, including an explicitly empty PATH.
+func TestProbeUsesConfiguredExecutableSearchPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("native shell fixture for supported Unix providers")
+	}
+	directory := t.TempDir()
+	executable := filepath.Join(directory, "sh")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":true}'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := Target{Family: "claude", Command: "sh", Env: map[string]string{"PATH": directory}}
+	if result := Probe(context.Background(), target); result.Status != Configured {
+		t.Fatalf("selected PATH runtime: %+v", result)
+	}
+	target.Env["PATH"] = ""
+	if result := Probe(context.Background(), target); result.Status != NotInstalled {
+		t.Fatalf("empty configured PATH must not use the supervisor PATH: %+v", result)
 	}
 }
