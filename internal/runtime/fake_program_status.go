@@ -8,6 +8,8 @@ import (
 var (
 	_ ProgramStatusProvider = FullFake{}
 	_ ProgramCaptureHealer  = FullFake{}
+
+	_ ProgramStatusShadowProvider = FullFake{}
 )
 
 // SetProgramPane sets session name's agent-pane row ([Fake.ProgramPanes])
@@ -46,6 +48,28 @@ func (f FullFake) ProgramStatus(name string) (ProgramStatus, error) {
 		return ProgramStatus{}, err
 	}
 	return JudgeProgramStatus(f.ProgramPanes[name]), nil
+}
+
+// ProgramStatusShadowSink implements [ProgramStatusShadowProvider]: the
+// fake's [Fake.ProgramShadowSink], nil unless a test set one.
+func (f FullFake) ProgramStatusShadowSink() ProgramStatusComparisonSink {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ProgramShadowSink
+}
+
+// ProgramStatusShadowRead implements [ProgramStatusShadowProvider]: name's
+// agent-pane row judged as [FullFake.ProgramStatus] judges it, recorded as a
+// call of its own so a test tells a fresh read from a ProgramStatus one. ok is
+// false unless a test set a shadow sink and that read would succeed.
+func (f FullFake) ProgramStatusShadowRead(name string) (ProgramStatus, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "ProgramStatusShadowRead", Name: name})
+	if f.ProgramShadowSink == nil || f.programReadableLocked(name) != nil || f.ProgramStatusErrors[name] != nil {
+		return ProgramStatus{}, false
+	}
+	return JudgeProgramStatus(f.ProgramPanes[name]), true
 }
 
 // HealProgramCapture implements [ProgramCaptureHealer] over name's agent-pane
