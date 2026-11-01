@@ -758,6 +758,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the controller. Named, manual and session-less claimants and assigned work
   claim as before.
 
+- **A running pool session that the legacy session reconciler reuses for new
+  work keeps its work directory.** The legacy reconciler (the default when
+  the v2 allocator is unavailable, for example a single-store city on the
+  `bd` CLI store) rewrote the reused session's recorded `gc.work_dir` to the
+  new bead's directory without restarting the session. `gc hook --claim`
+  read that as the session's own directory, so a session running inside one
+  managed worktree claimed work bound to another worktree, or to none, and
+  ran it in the wrong checkout. The session now keeps its directory: its
+  claim leaves that work, it drains, and the work gets a session in its own
+  directory. A stopped session still moves, and the v2 allocator is
+  unchanged.
+
 - **Pool demand across stores names work in the order sessions claim it.**
   In a city whose routed work spans more than one bead store, the
   controller listed pool demand store by store, while `gc hook --claim`

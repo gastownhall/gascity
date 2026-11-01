@@ -4378,7 +4378,7 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	if info.ID == "" {
 		return info, nil
 	}
-	workDir, err := verifiedPoolTriggerWorkDir(bp, cfgAgent, qualifiedName, request)
+	workDir, err := poolTriggerBindWorkDir(bp, cfgAgent, qualifiedName, info, request)
 	if err != nil {
 		return info, err
 	}
