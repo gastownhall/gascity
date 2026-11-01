@@ -169,6 +169,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"filelock>=3.29.0,<4",
 		"opentelemetry-api>=1.45.1",
 		"dnspython>=2.9.0",
+		"joserfc>=1.7.7",
 	} {
 		if !strings.Contains(input, want) {
 			t.Errorf("mcp-agent-mail input requirements missing security floor %q", want)
@@ -204,6 +205,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"opentelemetry-api==1.45.1 \\",
 		"authlib==1.9.1 \\",
 		"dnspython==2.9.0 \\",
+		"joserfc==1.7.7 \\",
 		// Lock-only CVE bumps: no input floor, so this pin is their only guard.
 		"bleach==6.4.0 \\",
 		"h2==4.4.1 \\",
@@ -223,6 +225,10 @@ const mcpMailLockPath = ".github/requirements/mcp-agent-mail.txt"
 // mcpMailFilelockExitRegression is the script that reproduces filelock 4.x
 // truncating the mail database at interpreter exit.
 const mcpMailFilelockExitRegression = ".github/scripts/mcp-mail-filelock-exit-regression.py"
+
+// mcpMailJWTCompatibility is the image-level smoke for the optional JWT auth
+// path in mcp-agent-mail.
+const mcpMailJWTCompatibility = ".github/scripts/mcp-mail-jwt-compatibility.py"
 
 // lockPinnedVersion returns the version the hashed lock pins for dist, matching
 // the "name==version \" line uv writes. Names compare case-insensitively.
@@ -324,6 +330,51 @@ func TestContainerScanRunsMCPMailFilelockExitRegression(t *testing.T) {
 	}
 	if got := strings.Count(workflow, `- "`+mcpMailFilelockExitRegression+`"`); got != 2 {
 		t.Errorf("container-scan.yml lists %s in %d path filters, want 2 (push and pull_request)", mcpMailFilelockExitRegression, got)
+	}
+}
+
+func TestContainerScanRunsMCPMailJWTCompatibility(t *testing.T) {
+	root := repoRoot(t)
+	script := readFile(t, root, mcpMailJWTCompatibility)
+	for _, want := range []string{
+		"SecurityAndRateLimitMiddleware",
+		"_decode_jwt",
+		"HS256",
+		"RS256",
+		"wrong configured issuer",
+		"wrong configured audience",
+		"joserfc",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("%s no longer exercises %q; it must cover the image's JWT decoder and configured claim checks", mcpMailJWTCompatibility, want)
+		}
+	}
+
+	workflow := readFile(t, root, ".github/workflows/container-scan.yml")
+	stepStart := strings.Index(workflow, "- name: Check MCP mail image JWT compatibility")
+	if stepStart < 0 {
+		t.Fatal(".github/workflows/container-scan.yml has no step running the MCP mail JWT compatibility smoke")
+	}
+	step := workflow[stepStart:]
+	if next := strings.Index(step[1:], "\n      - name: "); next >= 0 {
+		step = step[:next+1]
+	}
+	for _, want := range []string{
+		"docker run --rm",
+		"--entrypoint python3",
+		"/" + mcpMailJWTCompatibility + ":/tmp/mcp-mail-jwt-compatibility.py:ro",
+		`"gc-mcp-mail:${IMAGE_TAG}"`,
+		"/tmp/mcp-mail-jwt-compatibility.py",
+	} {
+		if !strings.Contains(step, want) {
+			t.Errorf("MCP mail JWT smoke step missing %q", want)
+		}
+	}
+	if strings.Contains(step, "continue-on-error") || strings.Contains(step, "|| true") {
+		t.Error("MCP mail JWT smoke step must fail the job on a compatibility regression")
+	}
+	if got := strings.Count(workflow, `- "`+mcpMailJWTCompatibility+`"`); got != 2 {
+		t.Errorf("container-scan.yml lists %s in %d path filters, want 2 (push and pull_request)", mcpMailJWTCompatibility, got)
 	}
 }
 

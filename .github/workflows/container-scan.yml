@@ -12,6 +12,7 @@ on:
       - ".github/requirements/mcp-agent-mail.txt"
       - ".github/scripts/install-*.sh"
       - ".github/scripts/mcp-mail-filelock-exit-regression.py"
+      - ".github/scripts/mcp-mail-jwt-compatibility.py"
       - ".github/workflows/container-scan.yml"
       - "contrib/beads-scripts/gc-beads-br"
       - "contrib/events-scripts/gc-events-k8s"
@@ -37,6 +38,7 @@ on:
       - ".github/requirements/mcp-agent-mail.txt"
       - ".github/scripts/install-*.sh"
       - ".github/scripts/mcp-mail-filelock-exit-regression.py"
+      - ".github/scripts/mcp-mail-jwt-compatibility.py"
       - ".github/workflows/container-scan.yml"
       - "contrib/beads-scripts/gc-beads-br"
       - "contrib/events-scripts/gc-events-k8s"
@@ -292,6 +294,16 @@ jobs:
             -v "${GITHUB_WORKSPACE}/.github/scripts/mcp-mail-filelock-exit-regression.py:/tmp/mcp-mail-filelock-exit-regression.py:ro" \
             "gc-mcp-mail:${IMAGE_TAG}" \
             /tmp/mcp-mail-filelock-exit-regression.py
+
+      - name: Check MCP mail image JWT compatibility
+        if: ${{ !cancelled() && steps.build-images.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --entrypoint python3 \
+            -v "${GITHUB_WORKSPACE}/.github/scripts/mcp-mail-jwt-compatibility.py:/tmp/mcp-mail-jwt-compatibility.py:ro" \
+            "gc-mcp-mail:${IMAGE_TAG}" \
+            /tmp/mcp-mail-jwt-compatibility.py
 
       - name: Upload base image SARIF
         if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
