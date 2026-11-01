@@ -187,6 +187,16 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			wantFlag:    "--resume",
 		},
 		{
+			// A provider that declares a session-id flag but whose keyed
+			// transcripts the probe cannot read (ProviderHasKeyedTranscript
+			// false) is never switched: absence on disk is not a stale-key
+			// signal for a family whose restart semantics are unverified.
+			name:        "provider the probe cannot read",
+			fx:          rotatedKeyFixture{provider: "legacy-provider", freshKey: freshKey},
+			wantCommand: "legacy-provider",
+			wantFlag:    "--resume",
+		},
+		{
 			name:        "creating row with a stale creation_complete_at",
 			fx:          rotatedKeyFixture{freshKey: freshKey, state: string(sessionpkg.StateCreating)},
 			wantCommand: "claude",
