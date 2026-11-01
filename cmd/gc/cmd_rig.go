@@ -726,10 +726,11 @@ var rigListAPIClient = func(cityPath string) (*api.Client, string) {
 }
 
 // rigListHQRunning reports whether the city's controller is running, for the
-// HQ row of the API-render rig list. Indirected through a var so tests pin both
-// outcomes without a live controller. controllerStatusForCity (not bare
-// controllerAlive) is supervisor-aware: on the supervisor sub-lane
-// controllerAlive==0 by construction while the city IS running.
+// HQ row of the rig list on both routes, so the two print the same value.
+// Indirected through a var so tests pin both outcomes without a live
+// controller. controllerStatusForCity (not bare controllerAlive) is
+// supervisor-aware: on the supervisor sub-lane controllerAlive==0 by
+// construction while the city IS running.
 var rigListHQRunning = func(cityPath string) bool {
 	return controllerStatusForCity(cityPath).Running
 }
@@ -966,14 +967,14 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 		CityPath:      cityPath,
 		CityName:      cityName,
 	}
-	// Running-status detection (controllerAlive + the per-rig session provider)
+	// Running-status detection (rigListHQRunning + the per-rig session provider)
 	// is computed for --json ONLY: the session provider forks tmux probes and
 	// scales O(rigs), and the human table does not display running status
 	// (renderRigListText ignores the Running field). Guarding it here preserves
 	// the historical text-path fast path (~7x faster than --json for many rigs).
 	hqRunning := false
 	if jsonOutput {
-		hqRunning = controllerAlive(cityPath) != 0
+		hqRunning = rigListHQRunning(cityPath)
 	}
 	result.Rigs = append(result.Rigs, RigListItem{
 		Name:    cityName,
