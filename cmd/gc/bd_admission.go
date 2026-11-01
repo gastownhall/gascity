@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // bdAdmissionScope resolves the admission-semaphore scope key for a bd call,
@@ -79,14 +81,38 @@ func bdAdmissionForCity(cityPath string) *bdAdmission {
 // bdAdmissionCapsForCity resolves the per-scope and global bd inflight caps
 // plus the bounded admission wait from the city's [beads.resilience] config,
 // falling back to the defaults (4, 16, and 30s) when the config cannot be
-// loaded.
+// loaded. It parses city.toml, so a caller that already holds the config
+// seeds the controller with seedBdAdmissionForCity instead.
 func bdAdmissionCapsForCity(cityPath string) (perScope, global int, maxWait time.Duration) {
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil || cfg == nil {
 		return 4, 16, 30 * time.Second
 	}
+	return bdAdmissionCaps(cfg)
+}
+
+// bdAdmissionCaps reads the admission caps from a loaded city config.
+func bdAdmissionCaps(cfg *config.City) (perScope, global int, maxWait time.Duration) {
 	r := cfg.Beads.Resilience
 	return r.MaxInflightPerScopeOrDefault(), r.MaxInflightGlobalOrDefault(), r.MaxAdmissionWaitOrDefault()
+}
+
+// seedBdAdmissionForCity registers the city's admission controller from a
+// config the caller has already loaded, so the first gated bd call does not
+// parse city.toml and every pack include again just to read the caps. A
+// controller that already exists is kept: the caps are read once per process.
+func seedBdAdmissionForCity(cityPath string, cfg *config.City) {
+	if cfg == nil {
+		return
+	}
+	key := filepath.Clean(cityPath)
+	perScope, global, wait := bdAdmissionCaps(cfg)
+	bdAdmissionRegistry.mu.Lock()
+	defer bdAdmissionRegistry.mu.Unlock()
+	if _, ok := bdAdmissionRegistry.controllers[key]; ok {
+		return
+	}
+	bdAdmissionRegistry.controllers[key] = newBdAdmission(key, perScope, global, wait)
 }
 
 // newBdAdmission constructs an admission controller. A non-positive cap

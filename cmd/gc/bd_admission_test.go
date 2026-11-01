@@ -1,10 +1,13 @@
 package main
 
 import (
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // admissionTestWait is the bounded wait used by the concurrency tests. It is
@@ -126,6 +129,42 @@ func TestBdAdmissionUnboundedWhenCapsDisabled(t *testing.T) {
 func TestBdInflightForCityUnknownCityIsZero(t *testing.T) {
 	if got := bdInflightForCity("/no/such/city/ever"); got != 0 {
 		t.Fatalf("bdInflightForCity(unknown) = %d, want 0", got)
+	}
+}
+
+// TestSeedBdAdmissionForCityUsesSuppliedConfig asserts a store open that
+// already holds the city config seeds the admission caps from it, so the first
+// gated bd call does not parse city.toml again, and that the first seed wins.
+//
+// Not parallel: loadCityConfigCalls is process-wide.
+func TestSeedBdAdmissionForCityUsesSuppliedConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	key := filepath.Clean(cityPath)
+	t.Cleanup(func() {
+		bdAdmissionRegistry.mu.Lock()
+		delete(bdAdmissionRegistry.controllers, key)
+		bdAdmissionRegistry.mu.Unlock()
+	})
+	cfg := &config.City{}
+	cfg.Beads.Resilience.MaxInflightPerScope = 2
+	cfg.Beads.Resilience.MaxInflightGlobal = 3
+	cfg.Beads.Resilience.MaxAdmissionWait = "1s"
+
+	before := loadCityConfigCalls.Load()
+	seedBdAdmissionForCity(cityPath, cfg)
+	a := bdAdmissionForCity(cityPath)
+	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
+		t.Fatalf("seeded admission parsed city config %d times, want 0", grew)
+	}
+	if a.perScope != 2 || a.global != 3 || a.maxWait != time.Second {
+		t.Fatalf("caps = (%d, %d, %s), want (2, 3, 1s)", a.perScope, a.global, a.maxWait)
+	}
+
+	other := &config.City{}
+	other.Beads.Resilience.MaxInflightPerScope = 9
+	seedBdAdmissionForCity(cityPath, other)
+	if got := bdAdmissionForCity(cityPath); got != a || got.perScope != 2 {
+		t.Fatalf("second seed replaced the controller: perScope = %d, want 2", got.perScope)
 	}
 }
 
