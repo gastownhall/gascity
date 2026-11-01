@@ -1112,6 +1112,29 @@ func (c *CachingStore) readyPredicateCanAnswerLocked(deps []Dep) bool {
 	return true
 }
 
+// readyEdgesJudgeableLocked is readyPredicateCanAnswerLocked for a reader
+// that trusts the cache row by row (ReadyJudgmentContext): the
+// dependency-derived predicate reproduces a lost verdict when every
+// ready-blocking edge lands on a resident row and no edge is parent-child, the
+// one non-blocking edge a backend's verdict reads (bd propagates blocked-ness
+// down it). No backend's verdict reads any other non-blocking edge (tracks,
+// relates-to), so such an edge leaves the row judgeable. Caller must hold
+// c.mu.
+func (c *CachingStore) readyEdgesJudgeableLocked(deps []Dep) bool {
+	for _, dep := range deps {
+		if dep.Type == "parent-child" {
+			return false
+		}
+		if !isReadyBlockingDependencyType(dep.Type) {
+			continue
+		}
+		if _, resident := c.beads[dep.DependsOnID]; !resident {
+			return false
+		}
+	}
+	return true
+}
+
 // markReadyProjectionLostLocked records that this row's projected verdict is
 // gone. Whether that costs the row its readiness answer is decided at read time
 // by readyProjectionUnknownLocked, so the mark itself stays a pure function of

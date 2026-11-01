@@ -264,45 +264,97 @@ func (c *CachingStore) cachedReadyOnly(query ReadyQuery) ([]Bead, error) {
 	return c.cachedReadyLocked(query)
 }
 
+// ReadyJudgment is a cache-only ready answer together with the snapshot it
+// was judged from (CachingStore.ReadyJudgmentContext). It judges only the rows
+// the cache can vouch for, and says which those are.
+type ReadyJudgment struct {
+	// Rows is the ready answer over the judged candidates.
+	Rows []Bead
+	// Deps holds the edges of every candidate the read judged, served or not:
+	// a candidate is a row the query selects before its blockers are judged.
+	// A judged candidate with no edges has an entry with none; a candidate
+	// the read could not vouch for has none.
+	Deps map[string][]Dep
+	// held names every row the cache held and trusted, closed ones included.
+	held map[string]struct{}
+}
+
+// Holds reports whether the cache held id, in any status, and trusted its
+// row when the read was judged. The cache's readiness reads a target it does
+// not hold as no blocker, and a dirty row's status may be stale, so a verdict
+// on a row with a target Holds denies is not one the cache vouches for.
+func (j ReadyJudgment) Holds(id string) bool {
+	_, ok := j.held[id]
+	return ok
+}
+
 func (c *CachingStore) cachedReadyCompleteOnly(ctx context.Context, query ReadyQuery) ([]Bead, error) {
+	j, err := c.cachedReadyJudgment(ctx, query, false)
+	return j.Rows, err
+}
+
+// cachedReadyJudgment answers query from the cache alone. With partial false
+// it declines the whole read on any dirty row and on any candidate whose
+// verdict it cannot vouch for (readyProjectionUnknownLocked), as ReadyContext
+// must. With partial true it leaves those rows unjudged instead: a dirty
+// candidate, or one whose lost verdict its own edges cannot reproduce
+// (readyEdgesJudgeableLocked), gets no Deps entry and no place in Rows, and a
+// dirty row is not reported held, while its last status still blocks the rows
+// that wait on it.
+func (c *CachingStore) cachedReadyJudgment(ctx context.Context, query ReadyQuery, partial bool) (ReadyJudgment, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return ReadyJudgment{}, err
 	}
 	// A cache-only deadline-sensitive read must never wait behind a writer
 	// after its caller has returned. A busy cache is a partial observation,
 	// not a reason to abandon a goroutine on RLock.
 	if !c.mu.TryRLock() {
-		return nil, fmt.Errorf("reading complete ready projection from busy cache: %w", ErrCacheUnavailable)
+		return ReadyJudgment{}, fmt.Errorf("reading complete ready projection from busy cache: %w", ErrCacheUnavailable)
 	}
-	if c.state != cacheLive || !c.depsComplete || c.primePartialErr != nil || len(c.dirty) > 0 ||
+	if c.state != cacheLive || !c.depsComplete || c.primePartialErr != nil || (len(c.dirty) > 0 && !partial) ||
 		c.readyReadsMustGoLive() {
 		c.mu.RUnlock()
-		return nil, fmt.Errorf("reading complete ready projection from cache: %w", ErrCacheUnavailable)
+		return ReadyJudgment{}, fmt.Errorf("reading complete ready projection from cache: %w", ErrCacheUnavailable)
 	}
 
 	statusByID := make(map[string]string, len(c.beads))
 	workOutcomeByID := make(map[string]string, len(c.beads))
+	var held map[string]struct{}
+	if partial {
+		held = make(map[string]struct{}, len(c.beads))
+	}
 	openBeads := make([]Bead, 0, len(c.beads))
 	now := time.Now().UTC()
 	for _, b := range c.beads {
 		if err := ctx.Err(); err != nil {
 			c.mu.RUnlock()
-			return nil, err
+			return ReadyJudgment{}, err
 		}
 		statusByID[b.ID] = b.Status
 		workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
+		_, dirty := c.dirty[b.ID]
+		if partial && !dirty {
+			held[b.ID] = struct{}{}
+		}
 		if !IsReadyCandidateForTier(b, now, query.TierMode) {
 			continue
 		}
 		if query.Assignee != "" && b.Assignee != query.Assignee {
 			continue
 		}
-		if c.readyProjectionUnknownLocked(b.ID) {
+		if dirty {
+			continue
+		}
+		if partial {
+			if _, lost := c.readyProjectionLost[b.ID]; lost && !c.readyEdgesJudgeableLocked(c.deps[b.ID]) {
+				continue
+			}
+		} else if c.readyProjectionUnknownLocked(b.ID) {
 			c.mu.RUnlock()
-			return nil, fmt.Errorf("reading complete ready projection for %s from cache: %w", b.ID, ErrCacheUnavailable)
+			return ReadyJudgment{}, fmt.Errorf("reading complete ready projection for %s from cache: %w", b.ID, ErrCacheUnavailable)
 		}
 		openBeads = append(openBeads, cloneBead(b))
 	}
@@ -310,7 +362,7 @@ func (c *CachingStore) cachedReadyCompleteOnly(ctx context.Context, query ReadyQ
 	for _, b := range openBeads {
 		if err := ctx.Err(); err != nil {
 			c.mu.RUnlock()
-			return nil, err
+			return ReadyJudgment{}, err
 		}
 		depsByID[b.ID] = cloneDeps(c.deps[b.ID])
 	}
@@ -318,7 +370,11 @@ func (c *CachingStore) cachedReadyCompleteOnly(ctx context.Context, query ReadyQ
 
 	// The maps above are a consistent snapshot, so sorting and dependency
 	// evaluation need not hold the cache lock or delay writers.
-	return cachedReadyRows(ctx, query, statusByID, workOutcomeByID, openBeads, depsByID, true, true)
+	rows, err := cachedReadyRows(ctx, query, statusByID, workOutcomeByID, openBeads, depsByID, true, true)
+	if err != nil {
+		return ReadyJudgment{}, err
+	}
+	return ReadyJudgment{Rows: rows, Deps: depsByID, held: held}, nil
 }
 
 func (c *CachingStore) cachedReadyLocked(query ReadyQuery) ([]Bead, error) {
