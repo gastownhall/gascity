@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -1744,5 +1746,154 @@ func (c *ladderCity) namesake(id string, meta map[string]string) {
 		s := snapshot()
 		s.AssignedWork, s.AssignedStores, s.AssignedStoreRefs = append(s.AssignedWork, b), append(s.AssignedStores, other), append(s.AssignedStoreRefs, "other")
 		return s
+	}
+}
+
+// collapsedSingletonCfg is a canonical-singleton pool agent (max one session,
+// no namepool) that is also declared as an on_demand named session.
+func collapsedSingletonCfg() *config.City {
+	return &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name: "poller", StartCommand: "true", MaxActiveSessions: intPtr(1), ScaleCheck: "printf 1",
+			Nudge: "configured claim nudge",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "poller", Mode: "on_demand"}},
+	}
+}
+
+// collapsedSingletonRow drives a pool-born seat of collapsedSingletonCfg's
+// agent through the real reconcile path until the configured named session
+// takes it over: buildDesiredState collapses its phantom pool identity and
+// the metadata sync clears pool_managed and stamps session_origin "named",
+// while the row keeps the bead-ID-scoped runtime name the pool path minted
+// for it. It returns the row in that final shape.
+func collapsedSingletonRow(t *testing.T, cfg *config.City, store *beads.MemStore) beads.Bead {
+	t.Helper()
+	b, err := store.Create(beads.Bead{
+		Title: "poller", Type: sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:poller", "template:poller"},
+		Metadata: map[string]string{
+			"template": "poller", "agent_name": "poller", "state": "awake",
+			poolManagedMetadataKey: boolMetadata(true), "session_origin": "ephemeral",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadata(b.ID, "session_name", PoolSessionName("poller", b.ID)); err != nil {
+		t.Fatal(err)
+	}
+	cityPath := t.TempDir()
+	for range 3 {
+		ds := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+		syncSessionBeads(cityPath, store, ds.State, runtime.NewFake(), allConfiguredDS(ds.State), cfg, &clock.Fake{Time: time.Now()}, io.Discard, true)
+	}
+	row, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := row.Metadata
+	if m["pool_managed"] != "" || m["session_origin"] != "named" || m["session_name"] != PoolSessionName("poller", b.ID) {
+		t.Fatalf("precondition: row %s did not collapse onto the named session: session_name=%q pool_managed=%q session_origin=%q",
+			row.ID, m["session_name"], m["pool_managed"], m["session_origin"])
+	}
+	return row
+}
+
+// A canonical-singleton pool seat that the configured named session took
+// over is still the pool's seat (it wears the runtime name the pool minted
+// from its own bead ID), so the ladder must keep pacing it. Gating on the raw
+// pool_managed value, which the takeover clears, leaves such a seat with no
+// claim retry at all.
+func TestLadderGovernsACollapsedSingletonPoolSeat(t *testing.T) {
+	cfg := collapsedSingletonCfg()
+	row := collapsedSingletonRow(t, cfg, beads.NewMemStore())
+	if !ladderGoverns(cfg, row) {
+		t.Fatalf("ladderGoverns(collapsed singleton seat %v) = false, want true", row.Metadata)
+	}
+	// A row minted before v1.5.0 wears poolRuntimeSessionName's "-pool"
+	// step-aside instead of the bead-ID-scoped name.
+	legacy := poolRuntimeSessionName(cfg, "poller", "poller", false)
+	if legacy != "poller-pool" {
+		t.Fatalf("precondition: step-aside name = %q, want poller-pool", legacy)
+	}
+	row.ID, row.Metadata["session_name"] = "gc-legacy", legacy
+	if !ladderGoverns(cfg, row) {
+		t.Fatalf("ladderGoverns(legacy collapsed seat %v) = false, want true", row.Metadata)
+	}
+}
+
+// The carve-out stays narrow: a named session that was never a pool seat,
+// a row wearing another row's pool name, and any seat when the config is
+// unknown are not governed.
+func TestLadderLeavesNonPoolNamedSessionsAlone(t *testing.T) {
+	cfg := collapsedSingletonCfg()
+	named := func(id, sessionName string) beads.Bead {
+		return beads.Bead{ID: id, Status: "open", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+			"session_name": sessionName, "session_origin": "named", namedSessionMetadataKey: "true", "template": "poller",
+		}}
+	}
+	for name, tc := range map[string]struct {
+		cfg *config.City
+		row beads.Bead
+	}{
+		"reserved named name": {cfg, named("gc-9", config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "poller"))},
+		"another row's name":  {cfg, named("gc-9", PoolSessionName("poller", "gc-8"))},
+		"no config":           {nil, named("gc-9", PoolSessionName("poller", "gc-9"))},
+		"multi-session pool": {&config.City{
+			Workspace: cfg.Workspace, Agents: []config.Agent{{Name: "poller", MaxActiveSessions: intPtr(3)}},
+			NamedSessions: cfg.NamedSessions,
+		}, named("gc-9", PoolSessionName("poller", "gc-9"))},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if ladderGoverns(tc.cfg, tc.row) {
+				t.Fatalf("ladderGoverns(%v) = true, want false", tc.row.Metadata)
+			}
+		})
+	}
+}
+
+// End to end: the ladder nudges a collapsed singleton seat's unclaimed
+// trigger with the agent's claim nudge.
+func TestWorkLadderNudgesACollapsedSingletonSeat(t *testing.T) {
+	cfg := collapsedSingletonCfg()
+	sessions := beads.NewMemStore()
+	row := collapsedSingletonRow(t, cfg, sessions)
+	stampedMemStore(t, sessions)
+	name := row.Metadata["session_name"]
+	work := beads.NewMemStore()
+	trigger, err := work.Create(beads.Bead{Title: "trigger", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	casSetRow(t, sessions, row.ID, map[string]string{
+		"state": "active", "generation": "7", "instance_token": "tok-7", "provider": "claude",
+		beadmeta.TriggerBeadIDMetadataKey: trigger.ID,
+	})
+	sp := runningIdleClaimFake(t, name)
+	sp.SetActivity(name, stepsTestNow.Add(-time.Hour))
+	cityPath := t.TempDir()
+	env := externalReadsEnv{
+		CityPath: cityPath, CityName: "test-city", Cfg: cfg, CityStore: blindWriteRefusingStore{inner: sessions}, SP: sp,
+		WorkLegs: testWorkLegs(cityPath, cfg, work, nil),
+	}
+	now := stepsTestNow
+	summary := func() *allocSummary {
+		return &allocSummary{At: now, ReadyRouted: []beads.Bead{{ID: trigger.ID, Status: "open"}}, ReadyRoutedRefs: []string{""}}
+	}
+	lane, _ := newPoolStepsTestLane(env, summary, func(executionStalledRequest) {})
+	lane.now = func() time.Time { return now }
+	lane.events = events.NewFake()
+	for end := now.Add(15 * time.Minute); now.Before(end); now = now.Add(30 * time.Second) {
+		lane.workLadder(context.Background(), env)
+	}
+	if got := sp.CountCalls("Nudge", name); got == 0 {
+		t.Fatalf("Nudge calls on collapsed seat %q = 0, want the ladder to nudge its unclaimed trigger", name)
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "Nudge" && call.Message != "configured claim nudge" {
+			t.Fatalf("nudge %q, want the configured claim nudge", call.Message)
+		}
 	}
 }

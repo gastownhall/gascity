@@ -518,7 +518,7 @@ func currentSessionAssigneeIdentities(sessionBead beads.Bead) []string {
 }
 
 func (p poolClaimBackstop) governs(s beads.Bead) bool {
-	return strings.TrimSpace(s.Metadata["pool_managed"]) == "true"
+	return strings.TrimSpace(s.Metadata["pool_managed"]) == "true" || isCollapsedCanonicalSingletonPoolBead(p.cfg, s)
 }
 
 // outstandingID acts only while the trigger bead is genuinely unclaimed. A
