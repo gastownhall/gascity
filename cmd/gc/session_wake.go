@@ -349,6 +349,67 @@ func drainReasonCancelable(reason string) bool {
 		reason != executionStalledDrainReason && reason != idleRespawnDrainReason
 }
 
+// suspendDrainResumeWakeReason reports whether a wake evaluation is config
+// demand that ends an in-flight suspend drain after city suspension lifts.
+// Only reasons that city suspension itself suppresses qualify. Assigned work,
+// on-demand queue demand, pending interaction, and attach must not abort a
+// suspend drain: those are exactly the signals a scaled-out session is
+// required to ignore.
+func suspendDrainResumeWakeReason(eval wakeEvaluation) bool {
+	if len(eval.Reasons) == 0 {
+		return false
+	}
+	switch eval.Reason {
+	case "named-always", "explicit-wake", "min-active":
+		return true
+	default:
+		return strings.HasPrefix(eval.Reason, "scaled:")
+	}
+}
+
+// cancelResumedSuspendDrains cancels in-flight suspend drains once the city
+// is no longer suspended and config demand wants the session up. Suspend
+// drains stay non-cancelable in drainReasonCancelable so assigned work,
+// pending interaction, and a still-suspended city cannot abort them.
+// executePlannedStarts runs before the drain scan, so without this cancel a
+// replacement started on the resume tick is observed as still running and
+// armed with GC_DRAIN_ACK; the next tick then stops it. Call this after
+// planned starts and before advanceSessionDrainsWithSessionsTraced.
+func cancelResumedSuspendDrains(
+	dt *drainTracker,
+	sp runtime.Provider,
+	infoLookup func(id string) (sessions.Info, bool),
+	wakeEvals map[string]wakeEvaluation,
+	cfg *config.City,
+	citySuspended bool,
+	trace *sessionReconcilerTraceCycle,
+) {
+	if dt == nil || citySuspended {
+		return
+	}
+	for id, ds := range dt.all() {
+		if ds == nil || ds.reason != "suspended" {
+			continue
+		}
+		eval, ok := wakeEvals[id]
+		if !ok || !suspendDrainResumeWakeReason(eval) {
+			continue
+		}
+		info, ok := infoLookup(id)
+		if !ok {
+			continue
+		}
+		if !cancelSessionDrainIfInfo(info, sp, dt, func(reason string) bool {
+			return reason == "suspended"
+		}) {
+			continue
+		}
+		if trace != nil {
+			trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ds.reason), TraceOutcomeCancel, normalizedSessionTemplateInfo(info, cfg), info.SessionNameMetadata, nil)
+		}
+	}
+}
+
 func pendingDrainReasonCancelable(reason string) bool {
 	return reason != "orphaned" && reason != "suspended" && reason != executionStalledDrainReason
 }
@@ -880,7 +941,8 @@ func advanceSessionDrainsWithSessionsTraced(
 
 		// Cancellation check: if wake reasons reappeared, cancel the in-memory
 		// drain. Orphaned, suspended, and ordinary config-drift drains are not
-		// canceled here.
+		// canceled here. A suspend drain whose city suspension has already
+		// lifted is canceled by cancelResumedSuspendDrains before this scan.
 		if drainReasonCancelable(ds.reason) {
 			if eval, ok := wakeEvals[info.ID]; ok && len(eval.Reasons) > 0 {
 				dt.clearIdleProbe(id)

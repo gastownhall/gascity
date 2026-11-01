@@ -5281,6 +5281,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		info, ok := infoByID[id]
 		return info, ok
 	}
+	// Planned starts already ran. Drop suspend drains that the resume made
+	// stale before the scan can arm GC_DRAIN_ACK on the replacement process.
+	cancelResumedSuspendDrains(dt, sp, infoLookup, wakeEvals, cfg, citySuspendedWithState(cfg, suspState), trace)
 	advanceSessionDrainsWithSessionsTraced(cityPath, dt, sp, store, infoLookup, wakeEvals, cfg, clk, trace)
 	clearMissingIdleProbes(dt, infoByID)
 	// Drain-skip lines print on transition (session_drain_skip_log.go); a
