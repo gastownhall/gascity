@@ -43612,7 +43612,7 @@
     },
     "/v0/city/{cityName}/maintenance/dolt-gc": {
       "post": {
-        "description": "Trigger a one-off maintenance cycle (dolt backup + CALL DOLT_GC + smoke test). Default async (202); ?wait=true blocks until completion (200). Returns 409 when a run is already in flight.",
+        "description": "Trigger a one-off maintenance cycle. The loop is observe-only for now: the cycle runs the disk-space pre-flight and records run history and events, but takes no backup snapshot and runs no CALL DOLT_GC, so a completed run does not mean the store was compacted. Default async (202); ?wait=true blocks until completion (200). Returns 409 when a run is already in flight.",
         "operationId": "trigger-maintenance-dolt-gc",
         "parameters": [
           {
