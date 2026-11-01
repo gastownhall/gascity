@@ -58,3 +58,12 @@ A rig import may name a pack-local agent in `defaults.rig.default_sling_target`.
 Qualify it with the actual rig and import binding; explicit rig targets take
 precedence. Reject missing agents and conflicting inherited defaults before
 routing work. Keep role names and delivery formulas in pack configuration.
+
+## Public pack provenance
+
+Keep the active Gas City pin, embedded module and published candidate content
+consistent. Registry hashes prove content identity when the pack's release
+commit differs from the module commit. An unpublished compatibility pin must
+name the exact embedded pseudo-version commit; unrelated old commits fail.
+A Gas City-only update must not invent another pack's RFC registry release.
+Preserve the module-identity and content-hash regression gates together.

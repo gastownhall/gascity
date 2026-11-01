@@ -51,8 +51,8 @@ schema = 1
   [[pack.release]]
     version = "0.0.8191"
     ref = "feat/rfc-8191-beginner-experience"
-    commit = "124902097faa3d2e4de69e5ac5fe9e5109cad24f"
-    hash = "sha256:21e889966725838eff01e0f4eab3fa91db0dc842a3256b4acda7120ce5a1bdaa"
+    commit = "676381ee880a38adb9a629b2cffdb17dd8676243"
+    hash = "sha256:aca7b5d072da3f8e78add5f0a748c788624dc1cd3fb4ec1a6db7d686b6ce413a"
     description = "RFC8191 candidate content for qualification; stable catalog selection is unchanged."
 
 [[pack]]
@@ -145,12 +145,6 @@ schema = 1
     hash = "sha256:9d45214f8e4d997ff84b9daf0e92917141fddda03be132d28382f7ea0c6252d4"
     description = "Maintenance release for Gas City 1.5.x, cut from 0.1.11: every shipped gastown bead command goes through gc bd (backport of 9b4df3e), so split-store cities reach graph steps from the polecat and witness prompts, the polecat-work and witness-patrol formulas, the review check scripts (which now read molecules through a federated gc ready union) and the churn watcher; the refinery duplicate-bug check filters with --title-contains, a flag that exists."
 
-  [[pack.release]]
-    version = "0.0.8191"
-    ref = "feat/rfc-8191-beginner-experience"
-    commit = "124902097faa3d2e4de69e5ac5fe9e5109cad24f"
-    hash = "sha256:ab73744a44615b021691e5ed13f44a51b5f9c5821a994c4c3397b109b63bf799"
-    description = "RFC8191 candidate content for qualification; stable catalog selection is unchanged."
 
 [[pack]]
   name = "cass"

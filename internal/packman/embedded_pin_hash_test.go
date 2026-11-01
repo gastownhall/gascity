@@ -3,20 +3,25 @@ package packman
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/packregistry"
+	"golang.org/x/mod/modfile"
+	"golang.org/x/mod/module"
 )
 
 // The binary serves the public gastown and gascity pins offline from the pack
-// content it embeds. Each pin must therefore name a registry release whose
+// content it embeds. A published pin names a registry release whose
 // content hash is exactly the embedded tree; otherwise gc init writes a pin
 // whose real bytes differ from what the city runs. The gascity pin need not be
 // the embedded module commit (the module commit may carry a byte-identical
-// gascity tree), so this compares content, not commits.
+// gascity tree), so it compares content. An unpublished compatibility pin
+// must instead match the module commit exactly; an unrelated old pin fails.
 func TestEmbeddedPublicPacksHashToTheirPinnedRegistryReleases(t *testing.T) {
 	data, err := os.ReadFile(realRegistryFixture)
 	if err != nil {
@@ -48,7 +53,14 @@ func TestEmbeddedPublicPacksHashToTheirPinnedRegistryReleases(t *testing.T) {
 				}
 			}
 			if want == "" {
-				t.Fatalf("%s pin %s is not a %s release in %s; refresh the fixture from gascity-packs", tc.name, tc.pin, tc.name, realRegistryFixture)
+				// A Gas City-only module update must not manufacture a Gastown
+				// registry release. Its unchanged compatibility tree is proven
+				// by the exact module commit instead; tags still require the
+				// registry hash path because they contain no commit token.
+				if tc.name == "gastown" && publicPinNamesEmbeddedModule(t, commit) {
+					return
+				}
+				t.Fatalf("%s pin %s has neither registry release provenance nor exact embedded module provenance in %s", tc.name, tc.pin, realRegistryFixture)
 			}
 
 			dst := filepath.Join(t.TempDir(), "repo")
@@ -63,5 +75,52 @@ func TestEmbeddedPublicPacksHashToTheirPinnedRegistryReleases(t *testing.T) {
 				t.Fatalf("embedded %s content hash = %s, but its pin %s is registry release hash %s", tc.name, got, tc.pin, want)
 			}
 		})
+	}
+}
+
+// publicPinNamesEmbeddedModule verifies immutable module provenance without
+// inventing a registry release for an unchanged compatibility pack.
+func publicPinNamesEmbeddedModule(t *testing.T, commit string) bool {
+	t.Helper()
+	root := bazeltest.OverrideRoot()
+	if root == "" {
+		_, file, _, ok := runtime.Caller(0)
+		if !ok {
+			t.Fatal("runtime.Caller failed")
+		}
+		root = filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+	}
+	path := filepath.Join(root, "go.mod")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mod, err := modfile.Parse(path, data, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, req := range mod.Require {
+		if req.Mod.Path != "github.com/gastownhall/gascity-packs" {
+			continue
+		}
+		if !module.IsPseudoVersion(req.Mod.Version) {
+			return false
+		}
+		revision, err := module.PseudoVersionRev(req.Mod.Version)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.HasPrefix(commit, revision)
+	}
+	t.Fatal("go.mod has no gascity-packs requirement")
+	return false
+}
+
+func TestUnpublishedPublicPackPinRequiresExactModuleProvenance(t *testing.T) {
+	if !publicPinNamesEmbeddedModule(t, strings.TrimPrefix(config.PublicGastownPackVersion, "sha:")) {
+		t.Fatal("compatibility pin does not name the embedded module")
+	}
+	if publicPinNamesEmbeddedModule(t, "124902097faa3d2e4de69e5ac5fe9e5109cad24f") {
+		t.Fatal("previous module commit incorrectly accepted as current provenance")
 	}
 }

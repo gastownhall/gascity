@@ -9,7 +9,7 @@ const (
 	// PublicGastownPackVersion pins fresh init output to the registry release
 	// content commit from gastownhall/gascity-packs (main, or a gastown
 	// release branch such as release/gastown-0.1.11).
-	PublicGastownPackVersion = "sha:124902097faa3d2e4de69e5ac5fe9e5109cad24f"
+	PublicGastownPackVersion = "sha:478292cb99aec2efe4b3cecc636677b4d2af9665"
 
 	// PublicGascityPackSource is the concrete durable source for the
 	// gascity planning/implementation skills pack.
@@ -18,7 +18,7 @@ const (
 	// PublicGascityPackVersion pins fresh init output to the registry
 	// release content commit from gastownhall/gascity-packs main
 	// (RFC8191 candidate branch; qualify this exact content before release).
-	PublicGascityPackVersion = "sha:124902097faa3d2e4de69e5ac5fe9e5109cad24f"
+	PublicGascityPackVersion = "sha:676381ee880a38adb9a629b2cffdb17dd8676243"
 
 	// PublicGascityRolesPackSource is the concrete durable source for the
 	// gascity role-agents subpack (gc-roles): the providerless, rig-scoped
@@ -90,6 +90,7 @@ var SupersededPublicGastownPackVersions = []string{
 	"sha:342bcfb0775ad79d2c67df3b235edf70a0a7e372",
 	"sha:2cd3360f36b2ff55f6c306546841963cbca1ed69",
 	"sha:92a9e8558b86854264ccc082fe9f27d48db3c749",
+	"sha:124902097faa3d2e4de69e5ac5fe9e5109cad24f",
 }
 
 // SupersededPublicGascityPackVersions is the gascity-pack counterpart of
@@ -105,4 +106,5 @@ var SupersededPublicGascityPackVersions = []string{
 	"sha:7aedf80cfa39905bee4104095bfae8a02c67aaa1",
 	"sha:20ac017f5417b82a300f0bfdfa7cddab3773cb07",
 	"sha:ef528014c0fd6ec9d2bd6eded4fe800cf61758bc",
+	"sha:124902097faa3d2e4de69e5ac5fe9e5109cad24f",
 }
