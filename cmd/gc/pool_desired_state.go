@@ -107,10 +107,6 @@ var legacyWorkDirNoticeSeen sync.Map // work bead ID -> struct{}
 func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, error) {
 	canonicalPath := strings.TrimSpace(bead.Metadata[beadmeta.WorkDirMetadataKey])
 	legacyPath := strings.TrimSpace(bead.Metadata[beadmeta.LegacyWorkDirMetadataKey])
-	if canonicalPath != "" && legacyPath != "" && canonicalPath != legacyPath {
-		return nil, fmt.Errorf("work bead %s has conflicting %s=%q and %s=%q",
-			bead.ID, beadmeta.WorkDirMetadataKey, canonicalPath, beadmeta.LegacyWorkDirMetadataKey, legacyPath)
-	}
 	path := canonicalPath
 	pathKey := beadmeta.WorkDirMetadataKey
 	if path == "" {
@@ -143,6 +139,27 @@ func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, erro
 			present = append(present, item.key)
 		}
 	}
+	if canonicalPath != "" && legacyPath != "" && canonicalPath != legacyPath {
+		unpublished := len(missing) == len(values) ||
+			(len(present) == 1 && present[0] == beadmeta.WorkBranchMetadataKey)
+		if !unpublished {
+			return nil, fmt.Errorf("work bead %s has conflicting %s=%q and %s=%q",
+				bead.ID, beadmeta.WorkDirMetadataKey, canonicalPath, beadmeta.LegacyWorkDirMetadataKey, legacyPath)
+		}
+		// Two disagreeing paths are only two competing ownership claims when
+		// the bead published ownership evidence. Without it (none of the nine
+		// keys, or only the hook claim's gc.work_branch stamp) both are
+		// observability stamps: a non-pool session's stampRunSessionIdentity
+		// rewrites gc.work_dir to its own cwd and leaves the creator's
+		// work_dir in place. Treat the bead as unmanaged, as the shapes below
+		// are, instead of failing closed on every tick when it routes back to
+		// a pool.
+		if _, dup := legacyWorkDirNoticeSeen.LoadOrStore(bead.ID, struct{}{}); !dup {
+			log.Printf("worktreeSpecForBead: work bead %s has conflicting %s=%q and %s=%q with no worktree ownership metadata; treating as unmanaged",
+				bead.ID, beadmeta.WorkDirMetadataKey, canonicalPath, beadmeta.LegacyWorkDirMetadataKey, legacyPath)
+		}
+		return nil, nil
+	}
 	if len(missing) == len(values) {
 		// A bead carrying work_dir without any ownership evidence is not
 		// incomplete evidence -- it never claimed to publish any. Recipe steps
@@ -173,7 +190,7 @@ func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, erro
 	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("work bead %s has %s=%q but is missing %s",
-			bead.ID, beadmeta.WorkDirMetadataKey, path, missing[0])
+			bead.ID, pathKey, path, missing[0])
 	}
 	// The bead's own gc.root_store_ref is the canonical spelling
 	// ("city:<name>", "rig:<name>") and is what the creating side recorded in
@@ -187,7 +204,7 @@ func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, erro
 		resolvedStoreRef = strings.TrimSpace(storeRef)
 	}
 	if resolvedStoreRef == "" {
-		return nil, fmt.Errorf("work bead %s has %s=%q but no store reference", bead.ID, beadmeta.WorkDirMetadataKey, path)
+		return nil, fmt.Errorf("work bead %s has %s=%q but no store reference", bead.ID, pathKey, path)
 	}
 	return &worktree.Spec{
 		RepoDir:    strings.TrimSpace(bead.Metadata[beadmeta.WorktreeRepoMetadataKey]),
