@@ -1887,8 +1887,9 @@ func TestHandleOrderHistoryCreatedAtKeepsSubSecondPrecision(t *testing.T) {
 	fs.autos = []orders.Order{{Name: "digest", Formula: "mol-digest"}}
 	created := time.Date(2026, 11, 1, 12, 30, 45, 123456789, time.UTC)
 	run, err := fs.cityBeadStore.Create(beads.Bead{
-		Title:     "digest run",
-		Labels:    []string{"order-run:digest"},
+		Title:     "order:digest",
+		Labels:    []string{"order-run:digest", "order-tracking"},
+		NoHistory: true,
 		CreatedAt: created,
 	})
 	if err != nil {
