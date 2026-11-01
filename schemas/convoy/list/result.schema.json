@@ -47,6 +47,10 @@
               },
               "total": {
                 "type": "integer"
+              },
+              "dangling_tracks": {
+                "type": "integer",
+                "description": "Members whose tracks dependency names a bead that cannot be resolved. Omitted when 0."
               }
             },
             "additionalProperties": true
@@ -90,6 +94,10 @@
       "properties": {
         "total": {
           "type": "integer"
+        },
+        "hidden_synthetic": {
+          "type": "integer",
+          "description": "Synthetic convoys left out (--include-synthetic lists them). Omitted when 0."
         }
       },
       "additionalProperties": true
