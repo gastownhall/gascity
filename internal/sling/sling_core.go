@@ -805,22 +805,25 @@ func finalizeInStore(opts SlingOpts, deps SlingDeps, beadStore beads.Store, bead
 
 	// Execute routing -- prefer typed Router, fall back to shell Runner.
 	var bead beads.Bead
+	var readErr error
 	if beadStore != nil && strings.TrimSpace(beadID) != "" {
 		if got, err := beadStore.Get(beadID); err == nil {
 			bead = got
+		} else {
+			readErr = err
 		}
 	}
 	// Record who launched this before routing, whichever router routes it:
 	// once routed the bead is claimable, and a claim must never see it
 	// unattributed.
 	if opts.Initiator != "" {
-		if bead.ID == "" {
-			result.MetadataErrors = append(result.MetadataErrors,
-				fmt.Sprintf("initiator not recorded: bead %s is not readable in its store", beadID))
-		} else if err := beadStore.SetMetadata(beadID, beadmeta.InitiatorMetadataKey, opts.Initiator); err != nil {
-			err = fmt.Errorf("recording initiator on %s: %w", beadID, err)
+		warning, err := recordInitiatorBeforeRoute(opts, beadStore, beadID, bead, readErr)
+		if err != nil {
 			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
 			return result, err
+		}
+		if warning != "" {
+			result.MetadataErrors = append(result.MetadataErrors, warning)
 		}
 	}
 	slingEnv := ResolveSlingEnvForBead(a, deps, bead)
@@ -984,6 +987,34 @@ func finalizeInStore(opts SlingOpts, deps SlingDeps, beadStore beads.Store, bead
 	}
 
 	return result, nil
+}
+
+// recordInitiatorBeforeRoute stamps opts.Initiator on the bead finalizeInStore
+// is about to route, through the writer of the store that holds it. bead and
+// readErr are the read finalizeInStore made of it. The write is skipped only
+// when that read shows the bead already carries this initiator, as a root
+// minted with RootMetadata does. Any other failure to read or stamp the bead
+// is returned, so the caller never routes it unattributed. The one exception
+// is a forced sling of a bead its store does not hold, which routes
+// best-effort by design: that is returned as a warning instead.
+func recordInitiatorBeforeRoute(opts SlingOpts, writer beads.Writer, beadID string, bead beads.Bead, readErr error) (string, error) {
+	if writer == nil {
+		return "", fmt.Errorf("recording initiator on %s: no store holds the bead", beadID)
+	}
+	forcedMissing := func(err error) bool { return opts.Force && errors.Is(err, beads.ErrNotFound) }
+	if readErr != nil && !forcedMissing(readErr) {
+		return "", fmt.Errorf("recording initiator on %s: reading the bead: %w", beadID, readErr)
+	}
+	if readErr == nil && bead.Metadata[beadmeta.InitiatorMetadataKey] == opts.Initiator {
+		return "", nil
+	}
+	if err := writer.SetMetadata(beadID, beadmeta.InitiatorMetadataKey, opts.Initiator); err != nil {
+		if forcedMissing(err) {
+			return fmt.Sprintf("initiator not recorded on %s: %v", beadID, err), nil
+		}
+		return "", fmt.Errorf("recording initiator on %s: %w", beadID, err)
+	}
+	return "", nil
 }
 
 func validateBuiltInRouteStoreReachable(deps SlingDeps, beadID string, a config.Agent) error {

@@ -2,6 +2,8 @@ package sling
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -485,5 +487,211 @@ func TestIntentEntryPointsCarryInitiator(t *testing.T) {
 			t.Fatalf("Route saw %s = %q, want %q", beadmeta.InitiatorMetadataKey, got, testInitiator)
 		}
 		requireInitiator(t, store, res.WispRootID)
+	})
+}
+
+// routeCallRouter records every Route call without reading the store, so a
+// test can prove routing never ran even when the store cannot be read.
+type routeCallRouter struct {
+	calls []string
+}
+
+func (r *routeCallRouter) Route(_ context.Context, req RouteRequest) error {
+	r.calls = append(r.calls, req.BeadID)
+	return nil
+}
+
+// initiatorStampErrStore fails every gc.initiator write with err and passes
+// every other call through.
+type initiatorStampErrStore struct {
+	beads.Store
+	err error
+}
+
+func (s *initiatorStampErrStore) SetMetadata(id, key, value string) error {
+	if key == beadmeta.InitiatorMetadataKey {
+		return s.err
+	}
+	return s.Store.SetMetadata(id, key, value)
+}
+
+// initiatorStampCountStore counts the gc.initiator writes made through it.
+type initiatorStampCountStore struct {
+	beads.Store
+	stamps int
+}
+
+func (s *initiatorStampCountStore) SetMetadata(id, key, value string) error {
+	if key == beadmeta.InitiatorMetadataKey {
+		s.stamps++
+	}
+	return s.Store.SetMetadata(id, key, value)
+}
+
+// newRoutingProbe returns deps on store that route through a typed Router
+// (routing "typed") or the shell sling_query runner (routing "shell"), and a
+// func listing every routing call made so far: a bead id or a command.
+func newRoutingProbe(routing string, store beads.Store) (SlingDeps, func() []string) {
+	runner := newFakeRunner()
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
+	deps.Store = store
+	if routing == "typed" {
+		router := &routeCallRouter{}
+		deps.Router = router
+		return deps, func() []string { return router.calls }
+	}
+	return deps, func() []string { return runner.calls }
+}
+
+// routedBead reports whether any routing call names id.
+func routedBead(calls []string, id string) bool {
+	for _, call := range calls {
+		if strings.Contains(call, id) {
+			return true
+		}
+	}
+	return false
+}
+
+// A failed read of the bead about to be routed stops the sling before either
+// router runs: the stamp cannot be confirmed, and a routed bead is claimable.
+// Force skips every preflight read, so DoSling reaches the routing read
+// itself; Force tolerates only a missing bead, not a failed read.
+func TestSlingRefusesToRouteWhenInitiatorReadFails(t *testing.T) {
+	readErr := errors.New("transient read failure")
+	for _, routing := range []string{"typed", "shell"} {
+		t.Run(routing, func(t *testing.T) {
+			deps, routed := newRoutingProbe(routing, &getErrStore{Store: seededStore("BL-1"), err: readErr})
+			opts := testOpts(slingWorker(), "BL-1")
+			opts.Initiator = testInitiator
+			opts.Force = true
+
+			_, err := DoSling(opts, deps, deps.Store)
+			if !errors.Is(err, readErr) {
+				t.Fatalf("DoSling err = %v, want the read failure", err)
+			}
+			if routedBead(routed(), "BL-1") {
+				t.Fatalf("routed BL-1 after the read failed: %q", routed())
+			}
+		})
+	}
+}
+
+// A forced sling of a bead its store does not hold routes best-effort by
+// design. With an initiator pending it still routes, and reports that the
+// stamp was not recorded along with the store's reason.
+func TestForcedSlingOfMissingBeadReportsUnrecordedInitiator(t *testing.T) {
+	for _, routing := range []string{"typed", "shell"} {
+		t.Run(routing, func(t *testing.T) {
+			deps, routed := newRoutingProbe(routing, beads.NewMemStore())
+			opts := testOpts(slingWorker(), "BL-9")
+			opts.Initiator = testInitiator
+			opts.Force = true
+
+			result, err := DoSling(opts, deps, deps.Store)
+			if err != nil {
+				t.Fatalf("DoSling: %v", err)
+			}
+			if !routedBead(routed(), "BL-9") {
+				t.Fatal("BL-9 not routed; a forced sling routes a missing bead best-effort")
+			}
+			var warning string
+			for _, msg := range result.MetadataErrors {
+				if strings.Contains(msg, "initiator not recorded") {
+					warning = msg
+				}
+			}
+			if !strings.Contains(warning, "BL-9") || !strings.Contains(warning, beads.ErrNotFound.Error()) {
+				t.Fatalf("MetadataErrors = %q, want an initiator-not-recorded warning naming BL-9 with the store's reason", result.MetadataErrors)
+			}
+		})
+	}
+}
+
+// A failed gc.initiator write stops the sling before either router runs,
+// forced or not.
+func TestSlingRefusesToRouteWhenInitiatorStampFails(t *testing.T) {
+	stampErr := errors.New("transient write failure")
+	for _, routing := range []string{"typed", "shell"} {
+		for _, force := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/force=%t", routing, force), func(t *testing.T) {
+				deps, routed := newRoutingProbe(routing, &initiatorStampErrStore{Store: seededStore("BL-1"), err: stampErr})
+				opts := testOpts(slingWorker(), "BL-1")
+				opts.Initiator = testInitiator
+				opts.Force = force
+
+				_, err := DoSling(opts, deps, deps.Store)
+				if !errors.Is(err, stampErr) {
+					t.Fatalf("DoSling err = %v, want the stamp failure", err)
+				}
+				if routedBead(routed(), "BL-1") {
+					t.Fatalf("routed BL-1 after its stamp failed: %q", routed())
+				}
+			})
+		}
+	}
+}
+
+// DoSlingBatch: a convoy child whose gc.initiator write fails is reported as
+// failed and is never routed.
+func TestSlingBatchRefusesToRouteChildWhoseInitiatorStampFails(t *testing.T) {
+	stampErr := errors.New("transient write failure")
+	for _, routing := range []string{"typed", "shell"} {
+		t.Run(routing, func(t *testing.T) {
+			mem := beads.NewMemStore()
+			convoyID, children := newInitiatorConvoy(t, mem)
+			deps, routed := newRoutingProbe(routing, &initiatorStampErrStore{Store: mem, err: stampErr})
+
+			result, err := DoSlingBatch(SlingOpts{Target: slingWorker(), BeadOrFormula: convoyID, Initiator: testInitiator}, deps, mem)
+			if !errors.Is(err, stampErr) {
+				t.Fatalf("DoSlingBatch err = %v, want the stamp failure", err)
+			}
+			if result.Routed != 0 || result.Failed != len(children) {
+				t.Fatalf("Routed = %d, Failed = %d, want 0 and %d", result.Routed, result.Failed, len(children))
+			}
+			for _, id := range children {
+				if routedBead(routed(), id) {
+					t.Fatalf("routed child %s after its stamp failed: %q", id, routed())
+				}
+			}
+		})
+	}
+}
+
+// The stamp is written only when the bead lacks this initiator: a root minted
+// with RootMetadata already carries it, while a bead carrying another
+// launcher's initiator is re-stamped before routing.
+func TestSlingStampsInitiatorOnlyWhenBeadLacksIt(t *testing.T) {
+	t.Run("minted root", func(t *testing.T) {
+		store := &initiatorStampCountStore{Store: beads.NewMemStore()}
+		deps, _ := newRoutingProbe("typed", store)
+
+		result, err := DoSling(SlingOpts{Target: slingWorker(), BeadOrFormula: "code-review", IsFormula: true, Initiator: testInitiator}, deps, nil)
+		if err != nil {
+			t.Fatalf("DoSling --formula: %v", err)
+		}
+		requireInitiator(t, store, result.BeadID)
+		if store.stamps != 0 {
+			t.Fatalf("%s written %d times after the root was minted with it, want 0", beadmeta.InitiatorMetadataKey, store.stamps)
+		}
+	})
+	t.Run("another launcher", func(t *testing.T) {
+		store := seededStore("BL-1")
+		if err := store.SetMetadata("BL-1", beadmeta.InitiatorMetadataKey, "bob"); err != nil {
+			t.Fatal(err)
+		}
+		deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), newFakeRunner().run)
+		deps.Store = store
+		router := &initiatorAtRouteRouter{fallback: store}
+		deps.Router = router
+
+		opts := testOpts(slingWorker(), "BL-1")
+		opts.Initiator = testInitiator
+		if _, err := DoSling(opts, deps, deps.Store); err != nil {
+			t.Fatalf("DoSling: %v", err)
+		}
+		if got := router.seen["BL-1"]; got != testInitiator {
+			t.Fatalf("Route saw %s = %q, want %q", beadmeta.InitiatorMetadataKey, got, testInitiator)
+		}
 	})
 }
