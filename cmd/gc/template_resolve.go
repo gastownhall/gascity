@@ -162,6 +162,16 @@ type TemplateParams struct {
 	// (templateParamsForSession). Nil for ACP templates and providers
 	// without ACP support.
 	ACPLaunch *TemplateACPLaunch
+	// ProgramStatusArm is the OSC 7501 capture arm for the template's
+	// resolved transport (config.ProgramStatusArmFor). It stays out of Hints:
+	// templateParamsToConfig applies it, with ProgramStatusEnv, only to a
+	// launch whose transport is not ACP, so a session kept on its ACP launch
+	// (templateParamsForSession) starts disarmed.
+	ProgramStatusArm runtime.ProgramStatusArm
+	// ProgramStatusEnv is the declared provider's forced session env that goes
+	// with ProgramStatusArm, already expanded. It stays out of Env, so an ACP
+	// launch keeps the value Env resolved for any key it names.
+	ProgramStatusEnv map[string]string
 }
 
 // TemplateACPLaunch is the ACP launch command and session/new MCP server set
@@ -593,6 +603,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			env[k] = v
 		}
 	}
+	// Step 10c: program status (OSC 7501). Empty unless the switch is shadow
+	// or on, the transport is not ACP, and the provider declares the protocol.
+	// The arm and the forced env stay out of hints and env:
+	// templateParamsToConfig applies them to a launch whose transport is not
+	// ACP, so a session kept on its ACP launch starts disarmed with this env.
+	programStatusArm, programStatusEnv := config.ProgramStatusArmFor(p.city, resolved, sessionTransport)
 	// Managed agents are Gas City-owned recursive execution environments. Set
 	// the GC-only opt-out after configurable layers so child gc commands cannot
 	// re-enable product metrics; Beads telemetry remains independent.
@@ -830,6 +846,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		HookEnabled:      hasHooks,
 		MCPServers:       mcpServers,
 		ACPLaunch:        acpLaunch,
+		ProgramStatusArm: programStatusArm,
+		ProgramStatusEnv: expandEnvMap(programStatusEnv),
 	}
 	params.SessionOverride = cfgAgent.Session
 	params.EffectiveSessionProvider = effectiveSessionProvider(cfgAgent.Session, p.sessionProvider)
@@ -977,35 +995,10 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 	// SessionStart hooks can enrich context, but the startup prompt still needs
 	// a first-turn delivery mechanism. Without argv/flag/nudge delivery, freshly
 	// spawned workers sit idle at the provider prompt. The routing policy lives
-	// in the pure promptDelivery derivation.
-	delivery, err := promptDelivery(tp.Prompt, tp.IsACP, tp.ResolvedProvider, tp.Hints.Nudge, tp.EffectiveSessionProvider, tp.CityRuntimes)
-	configuredMode := "arg"
-	switch {
-	case tp.IsACP:
-		configuredMode = "acp"
-	case tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode != "":
-		configuredMode = tp.ResolvedProvider.PromptMode
-	}
+	// in the shared startup prompt plan.
+	plan, err := planStartupPrompt(tp.startupPromptSource(), startupPromptFreshLaunch)
 	if err != nil {
-		logOversizedPromptDelivery(slog.Default().Error,
-			"startup prompt exceeds argv-safety threshold; no fallback delivery available",
-			tp, configuredMode, "hard-fail")
-		return runtime.Config{}, promptDeliveryResult{}, fmt.Errorf("template %q (session %q): %w", tp.TemplateName, tp.SessionName, err)
-	}
-	if delivery.OversizedFallback {
-		logOversizedPromptDelivery(slog.Default().Warn,
-			"startup prompt exceeds argv-safety threshold; falling back to nudge delivery",
-			tp, configuredMode, "nudge-fallback")
-	}
-	promptSuffix := delivery.PromptSuffix
-	promptFlag := delivery.PromptFlag
-	nudge := delivery.Nudge
-	env := maps.Clone(tp.Env)
-	if delivery.Delivered {
-		if env == nil {
-			env = map[string]string{}
-		}
-		env[startupPromptDeliveredEnv] = "1"
+		return runtime.Config{}, promptDeliveryResult{}, err
 	}
 	// Startup-hint fields project through the single StartupHints →
 	// runtime.Config mapping (agent.StartupHints.ToRuntimeConfig) so a hint
@@ -1017,17 +1010,18 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 	cfg := tp.Hints.ToRuntimeConfig()
 	cfg.Command = tp.Command
 	cfg.Upstream = tp.Upstream
-	cfg.PromptSuffix = promptSuffix
-	cfg.PromptFlag = promptFlag
-	cfg.Env = env
+	cfg.Env = maps.Clone(tp.Env)
 	cfg.OperatorEnv = maps.Clone(tp.OperatorEnv)
 	if tp.IsACP {
 		cfg.MCPServers = tp.MCPServers
+	} else {
+		applyTemplateProgramStatus(&cfg, tp)
 	}
 	cfg.WorkDir = tp.WorkDir
 	cfg.FingerprintExtra = tp.FPExtra
-	// Prompt delivery may prepend the startup prompt to the configured nudge.
-	cfg.Nudge = nudge
+	// The plan owns the startup prompt payload (it may prepend the prompt to the
+	// configured nudge) and the delivered marker.
+	plan.applyTo(&cfg)
 	// ga-c4w: interactive `gc session new` sessions (session_origin=manual)
 	// resolve mouse-on so the tmux wheel drives copy-mode scrollback, even
 	// when the agent config sets no mouse_mode. This is the managed,
@@ -1038,8 +1032,27 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 	// restart — they follow their resolved Hints.MouseOn (mouse_mode) instead.
 	// Ephemeral pool agents are likewise mouse-off (controller-poll safety).
 	cfg.MouseOn = tp.Hints.MouseOn || templateParamsSessionOrigin(tp) == "manual"
-	applyT3BridgeRuntimeConfig(tp, env)
-	return cfg, delivery, nil
+	applyT3BridgeRuntimeConfig(tp, cfg.Env)
+	return cfg, plan.Delivery, nil
+}
+
+// applyTemplateProgramStatus applies a template's OSC 7501 program status to a
+// launch whose transport is not ACP: the capture arm, and the forced env
+// written over the template env. resolveTemplate's managed pins (the
+// usage-metrics opt-out and the controller-only keys) stay the last writers.
+// The forced env never reaches OperatorEnv, so it stays off the launch
+// fingerprint.
+func applyTemplateProgramStatus(cfg *runtime.Config, tp TemplateParams) {
+	cfg.ProgramStatus = tp.ProgramStatusArm
+	if len(tp.ProgramStatusEnv) == 0 {
+		return
+	}
+	if cfg.Env == nil {
+		cfg.Env = make(map[string]string, len(tp.ProgramStatusEnv))
+	}
+	maps.Copy(cfg.Env, tp.ProgramStatusEnv)
+	cfg.Env[execenv.UsageMetricsDisableEnv] = execenv.UsageMetricsDisableValue
+	maps.Copy(cfg.Env, processenv.ControllerOnlyEnvOverlay())
 }
 
 // logOversizedPromptDelivery emits the one structured launch-log record
@@ -1050,15 +1063,15 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 // content. log is *slog.Logger's Warn or Error method, passed as a value so
 // the fallback (Warn) and hard-fail (Error) call sites can share one record
 // shape.
-func logOversizedPromptDelivery(log func(msg string, args ...any), msg string, tp TemplateParams, configuredMode, effectiveMode string) {
+func logOversizedPromptDelivery(log func(msg string, args ...any), msg string, src startupPromptSource, effectiveMode string) {
 	log(msg,
-		slog.String("session", tp.SessionName),
-		slog.String("agent", tp.InstanceName),
-		slog.String("configured_mode", configuredMode),
+		slog.String("session", src.SessionName),
+		slog.String("agent", src.InstanceName),
+		slog.String("configured_mode", src.configuredMode()),
 		slog.String("effective_mode", effectiveMode),
-		slog.String("runtime", tp.EffectiveSessionProvider),
-		slog.Int("raw_bytes", len(tp.Prompt)),
-		slog.Int("argv_bytes", len(shellquote.Quote(tp.Prompt))),
+		slog.String("runtime", src.RuntimeName),
+		slog.Int("raw_bytes", len(src.Prompt)),
+		slog.Int("argv_bytes", len(shellquote.Quote(src.Prompt))),
 		slog.Int("raw_threshold", maxPromptSuffixRawBytes),
 		slog.Int("argv_threshold", maxPromptSuffixQuotedBytes),
 	)

@@ -2,8 +2,8 @@ schema = 1
 
 [packs]
 [packs."https://github.com/gastownhall/gascity-packs/tree/main/gastown"]
-version = "sha:66c672b5ed00af143158b4eac960523c56b977ee"
-commit = "66c672b5ed00af143158b4eac960523c56b977ee"
+version = "sha:cb6a612882b8402569c495c90ab75bb257a51bdc"
+commit = "cb6a612882b8402569c495c90ab75bb257a51bdc"
 
 [packs."https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"]
 version = "sha:e38ce9cc55d15fa351199c042f0d07aba1a347af"

@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"slices"
 	"strconv"
 	"strings"
@@ -26,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/lanesubmit"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // laneControlAnswerBound is how long a control command under lane authority
@@ -1845,14 +1847,34 @@ func (s *Server) checkInitialMessage(message string) error {
 // message it proposes the message as an operator lane message op at the
 // boundary under a minted key (proposeInitialMessage), so the lane host
 // delivers it and the op journal records it; otherwise it submits it through
-// the session layer (submitMessageToSession). An error means the message was
-// neither proposed nor delivered.
+// the session layer. The create already accepted the message, so a session
+// that came up waiting on a pending interaction keeps it queued as its first
+// turn, delivered once the interaction is answered
+// (worker.MessageRequest.QueueBehindPending), and the create stands. An
+// error means the message was neither proposed, delivered nor queued.
 func (s *Server) deliverInitialMessage(ctx context.Context, store beads.Store, id, message string) error {
 	if s.laneExecutes(opjournal.KindMessage) {
 		return s.proposeInitialMessage(id, message)
 	}
-	_, err := s.submitMessageToSession(ctx, store, id, message, session.SubmitIntentDefault, false)
-	return err
+	handle, err := s.workerHandleForSession(store, id)
+	if err != nil {
+		return err
+	}
+	result, err := handle.Message(ctx, s.actor(session.ActorBackground), worker.MessageRequest{
+		Text:               message,
+		Delivery:           worker.DeliveryIntentDefault,
+		QueueBehindPending: true,
+	})
+	if err != nil {
+		return err
+	}
+	if result.Queued {
+		log.Printf("gc api: session %s: initial message queued for its next delivery boundary", id)
+	}
+	if result.Deferred {
+		s.deferToController(store, id)
+	}
+	return nil
 }
 
 // proposeInitialMessage proposes a create's initial message to session id as

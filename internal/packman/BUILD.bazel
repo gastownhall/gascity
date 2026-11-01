@@ -81,6 +81,7 @@ go_test(
         "cache_compat_test.go",
         "cache_test.go",
         "check_test.go",
+        "embedded_pin_hash_test.go",
         "install_test.go",
         "lockfile_test.go",
         "network_git_args_test.go",

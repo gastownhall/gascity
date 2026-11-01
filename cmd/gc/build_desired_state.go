@@ -213,6 +213,10 @@ type defaultScaleCheckTarget struct {
 	storeKey string
 	store    beads.Store
 	err      error
+	// classBinding marks a relocated class binding read under the city key. It
+	// holds every scope's rows, so storeKey says where a row lives, not who
+	// owns it: the row's gc.root_store_ref does (rootStoreRefMatchesCandidate).
+	classBinding bool
 }
 
 type scaleCheckDemand struct {
@@ -224,6 +228,10 @@ type scaleCheckDemand struct {
 	StoreRefs      map[string]string
 	WorktreeSpecs  map[string]*worktree.Spec
 	WorktreeErrors map[string]string
+	// BindingResident marks the work beads read from a relocated class
+	// binding. Their StoreRefs entry is the city key the binding is grouped
+	// under, which says where the row lives, not who owns it.
+	BindingResident map[string]bool
 	// ParentSIDs maps work-bead id → gc.brain_parent_sid, carrying the fork
 	// parent through to the new pool session bead so the launch path can fork
 	// the warm arm off its pre-built brain.
@@ -1213,8 +1221,9 @@ func buildDemandTargets(
 	// rig pool can't see locally — e.g. work queued in the city store — still
 	// wakes it. Only consulted for the clamped cold-wake probe.
 	type activeStore struct {
-		store beads.Store
-		ref   string
+		store        beads.Store
+		ref          string
+		classBinding bool
 	}
 	// cityLegs is every store a city-scope route's default probe reads past the
 	// leading handle: on a split, the work ledger AND the binding in
@@ -1248,7 +1257,7 @@ func buildDemandTargets(
 		}
 		out := make([]defaultScaleCheckTarget, 0, len(cityLegs))
 		for _, leg := range cityLegs {
-			out = append(out, defaultScaleCheckTarget{template: template, store: leg.store, storeKey: "city"})
+			out = append(out, defaultScaleCheckTarget{template: template, store: leg.store, storeKey: "city", classBinding: storeref.IsClassRef(leg.ref)})
 		}
 		return out
 	}
@@ -1263,7 +1272,7 @@ func buildDemandTargets(
 	}
 	var activeStores []activeStore
 	for _, target := range cityTargets("") {
-		activeStores = append(activeStores, activeStore{store: target.store, ref: target.storeKey})
+		activeStores = append(activeStores, activeStore{store: target.store, ref: target.storeKey, classBinding: target.classBinding})
 	}
 	for _, rig := range cfg.Rigs {
 		if suspendedRigPaths[filepath.Clean(rig.Path)] {
@@ -1380,7 +1389,7 @@ func buildDemandTargets(
 			}
 			if store != nil && isCold && !storeScopedControlDispatcher {
 				for _, source := range activeStores {
-					target := defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref}
+					target := defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref, classBinding: source.classBinding}
 					// Mirror the generic-pool cold-wake probe below (vp-s37 /
 					// #3078): a custom scale_check that is cold and asleep
 					// cannot see routed demand, so probe every active store
@@ -1487,7 +1496,7 @@ func buildDemandTargets(
 		// it itself, or the pool will churn at the warm/cold boundary.
 		if store != nil && isCold && !storeScopedControlDispatcher {
 			for _, source := range activeStores {
-				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref})
+				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref, classBinding: source.classBinding})
 			}
 			coldWakeTemplates[template] = true
 		}
@@ -1961,7 +1970,11 @@ func collectAssignedWorkBeadsWithStores(
 	// suppress the Ready probe for a same-ID assignee in another store.
 	skipReadyAssignees := readyCapturedAssigneeSet(result, resultStoreRefs, readyAssigned)
 	expandSkipAssigneesWithSessionIdentities(skipReadyAssignees, sessionBeads)
-	assignees := readyAssignedWorkAssignees(cfg, cityStore, sessionBeads, skipReadyAssignees, pass, point, reads)
+	closedNamedStore := cityStore
+	if cache != nil && cache.sessions.Store != nil {
+		closedNamedStore = cache.sessions.Store
+	}
+	assignees := readyAssignedWorkAssignees(cfg, closedNamedStore, sessionBeads, skipReadyAssignees, pass, point, reads)
 	if len(skipReadyAssignees) > 0 && len(assignees) == 0 {
 		return result, resultStores, resultStoreRefs, readyAssigned, partial
 	}
@@ -2086,7 +2099,10 @@ func expandSkipAssigneesWithSessionIdentities(skip map[string]struct{}, sessionB
 	}
 }
 
-func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, sessionBeads *sessionBeadSnapshot, skip map[string]struct{}, pass *demandPassTrace, point string, reads demandReads) []string {
+// sessionsStore is the session-class store the closed named-session index is
+// built from (collectAssignedWorkBeadsWithStores: the pass's leading store,
+// or the one its cache names).
+func readyAssignedWorkAssignees(cfg *config.City, sessionsStore beads.Store, sessionBeads *sessionBeadSnapshot, skip map[string]struct{}, pass *demandPassTrace, point string, reads demandReads) []string {
 	seen := make(map[string]struct{})
 	var result []string
 	add := func(value string) {
@@ -2136,8 +2152,8 @@ func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, session
 			// partial read keeps the rows it did get.
 			start := pass.now()
 			var idxErr error
-			closedIdx, idxErr = demandReadsOrLegacy(reads).ClosedNamedIndex(cityStore)
-			pass.read(demandStoreRead{point: point, leg: pass.storeLabel(cityStore, "city"), op: "closed_named_index", tier: demandReadTierCached}, start, -1, idxErr)
+			closedIdx, idxErr = demandReadsOrLegacy(reads).ClosedNamedIndex(sessionsStore)
+			pass.read(demandStoreRead{point: point, leg: pass.storeLabel(sessionsStore, "city"), op: "closed_named_index", tier: demandReadTierCached}, start, -1, idxErr)
 		}
 		for i := range cfg.NamedSessions {
 			if cfg.NamedSessions[i].Mode != "on_demand" {
@@ -2228,6 +2244,8 @@ func ownScaleCheckTarget(
 			template: agentCfg.QualifiedName(),
 			storeKey: "city",
 			store:    controlBinding,
+			// The binding serves every scope's control rows.
+			classBinding: true,
 		}
 	}
 	return defaultScaleCheckTargetForAgent(cityPath, cfg, agentCfg, cityStore, rigStores)
@@ -2286,9 +2304,10 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 	}
 
 	type scaleStoreGroup struct {
-		store     beads.Store
-		storeKey  string
-		templates map[string]struct{}
+		store        beads.Store
+		storeKey     string
+		classBinding bool
+		templates    map[string]struct{}
 		// byTemplate is the group's ready rows bucketed by the template each one
 		// is servable to, in the store's own order.
 		byTemplate map[string][]beads.Bead
@@ -2332,7 +2351,7 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 		gk := scaleStoreGroupKey{key: key, store: target.store}
 		group := groups[gk]
 		if group == nil {
-			group = &scaleStoreGroup{store: target.store, storeKey: key, templates: make(map[string]struct{})}
+			group = &scaleStoreGroup{store: target.store, storeKey: key, classBinding: target.classBinding, templates: make(map[string]struct{})}
 			groups[gk] = group
 			groupOrder = append(groupOrder, group)
 		}
@@ -2389,56 +2408,76 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 	}
 	for _, template := range templateOrder {
 		seen := make(map[string]struct{})
+		var rows []beads.Bead
+		rowStoreKeys := make(map[string]string)
+		rowBindingResident := make(map[string]bool)
 		for _, group := range templateGroups[template] {
 			for _, b := range group.byTemplate[template] {
 				if _, dup := seen[b.ID]; dup {
 					continue
 				}
 				seen[b.ID] = struct{}{}
-				counts[template]++
-				entry := demand[template]
-				entry.Count++
-				entry.WorkBeadIDs = append(entry.WorkBeadIDs, b.ID)
-				if entry.Titles == nil {
-					entry.Titles = make(map[string]string)
-				}
-				entry.Titles[b.ID] = b.Title
-				if pack := strings.TrimSpace(b.Metadata[beadmeta.PackMetadataKey]); pack != "" {
-					if entry.Packs == nil {
-						entry.Packs = make(map[string]string)
-					}
-					entry.Packs[b.ID] = pack
-				}
-				if workspace := strings.TrimSpace(b.Metadata[beadmeta.PackWorkspaceMetadataKey]); workspace != "" {
-					if entry.Workspaces == nil {
-						entry.Workspaces = make(map[string]string)
-					}
-					entry.Workspaces[b.ID] = workspace
-				}
-				if entry.StoreRefs == nil {
-					entry.StoreRefs = make(map[string]string)
-				}
-				entry.StoreRefs[b.ID] = group.storeKey
-				spec, specErr := worktreeSpecForBead(b, group.storeKey)
-				if specErr != nil {
-					if entry.WorktreeErrors == nil {
-						entry.WorktreeErrors = make(map[string]string)
-					}
-					entry.WorktreeErrors[b.ID] = specErr.Error()
-				} else if spec != nil {
-					if entry.WorktreeSpecs == nil {
-						entry.WorktreeSpecs = make(map[string]*worktree.Spec)
-					}
-					entry.WorktreeSpecs[b.ID] = spec
-				}
-				if parentSID := strings.TrimSpace(b.Metadata[beadmeta.BrainParentSIDMetadataKey]); parentSID != "" {
-					if entry.ParentSIDs == nil {
-						entry.ParentSIDs = make(map[string]string)
-					}
-					entry.ParentSIDs[b.ID] = parentSID
-				}
-				demand[template] = entry
+				rows = append(rows, b)
+				rowStoreKeys[b.ID] = group.storeKey
+				rowBindingResident[b.ID] = group.classBinding
 			}
+		}
+		// The claim reader merges these legs and serves them in the canonical
+		// ready order, bounded (routedReadyTierCommand); a concatenation of the
+		// legs is not that order. Name demand in the order the claim window
+		// serves it, so the seat placed for a bead finds it in its window.
+		beads.SortBeadsReadyOrder(rows)
+		for _, b := range rows {
+			storeKey := rowStoreKeys[b.ID]
+			counts[template]++
+			entry := demand[template]
+			entry.Count++
+			entry.WorkBeadIDs = append(entry.WorkBeadIDs, b.ID)
+			if entry.Titles == nil {
+				entry.Titles = make(map[string]string)
+			}
+			entry.Titles[b.ID] = b.Title
+			if pack := strings.TrimSpace(b.Metadata[beadmeta.PackMetadataKey]); pack != "" {
+				if entry.Packs == nil {
+					entry.Packs = make(map[string]string)
+				}
+				entry.Packs[b.ID] = pack
+			}
+			if workspace := strings.TrimSpace(b.Metadata[beadmeta.PackWorkspaceMetadataKey]); workspace != "" {
+				if entry.Workspaces == nil {
+					entry.Workspaces = make(map[string]string)
+				}
+				entry.Workspaces[b.ID] = workspace
+			}
+			if entry.StoreRefs == nil {
+				entry.StoreRefs = make(map[string]string)
+			}
+			entry.StoreRefs[b.ID] = storeKey
+			if rowBindingResident[b.ID] {
+				if entry.BindingResident == nil {
+					entry.BindingResident = make(map[string]bool)
+				}
+				entry.BindingResident[b.ID] = true
+			}
+			spec, specErr := worktreeSpecForBead(b, storeKey)
+			if specErr != nil {
+				if entry.WorktreeErrors == nil {
+					entry.WorktreeErrors = make(map[string]string)
+				}
+				entry.WorktreeErrors[b.ID] = specErr.Error()
+			} else if spec != nil {
+				if entry.WorktreeSpecs == nil {
+					entry.WorktreeSpecs = make(map[string]*worktree.Spec)
+				}
+				entry.WorktreeSpecs[b.ID] = spec
+			}
+			if parentSID := strings.TrimSpace(b.Metadata[beadmeta.BrainParentSIDMetadataKey]); parentSID != "" {
+				if entry.ParentSIDs == nil {
+					entry.ParentSIDs = make(map[string]string)
+				}
+				entry.ParentSIDs[b.ID] = parentSID
+			}
+			demand[template] = entry
 		}
 	}
 	return counts, demand, partialTemplates, errs
@@ -2579,6 +2618,9 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 	if existing.ParentSIDs == nil && len(incoming.ParentSIDs) > 0 {
 		existing.ParentSIDs = make(map[string]string, len(incoming.ParentSIDs))
 	}
+	if existing.BindingResident == nil && len(incoming.BindingResident) > 0 {
+		existing.BindingResident = make(map[string]bool, len(incoming.BindingResident))
+	}
 	if existing.WorktreeSpecs == nil && len(incoming.WorktreeSpecs) > 0 {
 		existing.WorktreeSpecs = make(map[string]*worktree.Spec, len(incoming.WorktreeSpecs))
 	}
@@ -2601,6 +2643,9 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 		}
 		if incoming.StoreRefs != nil {
 			existing.StoreRefs[id] = incoming.StoreRefs[id]
+		}
+		if incoming.BindingResident[id] {
+			existing.BindingResident[id] = true
 		}
 		if incoming.ParentSIDs != nil {
 			if sid := incoming.ParentSIDs[id]; sid != "" {
@@ -3027,6 +3072,23 @@ type readyDemandCache struct {
 	// reads, so a blocker is read once per read point rather than once per
 	// gated snapshot (a store's live and cached snapshots are both gated).
 	gate *readywork.LegGate
+	// sessions is the session-class store the closed named-session index is
+	// built from, set by withSessionsStore for a pass led by a WORK store
+	// (gc doctor's demand-migration sweep). Unset, the pass's leading store
+	// answers: every controller and gc start pass leads with the sessions
+	// store already.
+	sessions beads.SessionStore
+}
+
+// withSessionsStore names the session-class store the closed named-session
+// index reads, for a pass whose leading store is not it, and returns the
+// cache.
+func (c *readyDemandCache) withSessionsStore(sessions beads.SessionStore) *readyDemandCache {
+	if c == nil {
+		return c
+	}
+	c.sessions = sessions
+	return c
 }
 
 // withCrossStoreGate arms the cache with the city's ready legs when the city
@@ -4438,8 +4500,13 @@ func verifiedPoolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	if workID == "" || strings.TrimSpace(spec.BeadID) != workID {
 		return "", fmt.Errorf("%w: bead %q does not match request bead %q", errPoolTriggerWorktreeEvidence, spec.BeadID, workID)
 	}
+	// A row read from a relocated class binding is grouped under the city key,
+	// which says where it lives, not who owns it. Its owner is the row's own
+	// gc.root_store_ref, which the spec already carries (worktreeSpecForBead),
+	// so there is no second store to compare; worktree.Verify still proves the
+	// on-disk provenance names that bead and owner.
 	storeRef := strings.TrimSpace(request.WorkStoreRef)
-	if storeRef != "" && canonicalEvidenceStoreRef(spec.StoreRef) != canonicalEvidenceStoreRef(storeRef) {
+	if storeRef != "" && !request.WorkBindingResident && canonicalEvidenceStoreRef(spec.StoreRef) != canonicalEvidenceStoreRef(storeRef) {
 		return "", fmt.Errorf("%w: store %q does not match request store %q", errPoolTriggerWorktreeEvidence, spec.StoreRef, storeRef)
 	}
 	if bp != nil && bp.planOnly {
@@ -4512,6 +4579,15 @@ func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedN
 	if err != nil || strings.TrimSpace(base) == "" {
 		return ""
 	}
+	return poolWorkDirUnder(base, request)
+}
+
+// poolWorkDirUnder routes request's work under base, the pool session's
+// configured directory: a pack's work to the pack's directory beside base, and
+// an explicit workspace to its own subdirectory. `gc hook --claim` routes a
+// candidate the same way to tell whether the controller starts that work's
+// session in the claiming seat's directory (hookPoolSeat.unboundWorkDir).
+func poolWorkDirUnder(base string, request SessionRequest) string {
 	if pack := strings.TrimSpace(request.WorkPack); pack != "" {
 		packDir := filepath.Join(filepath.Dir(base), pack)
 		if workspace := packWorkspaceSlug(request); workspace != "" {

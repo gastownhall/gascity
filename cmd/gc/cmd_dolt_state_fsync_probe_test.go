@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -221,7 +222,11 @@ esac
 		t.Fatal(err)
 	}
 
-	dataDir := filepath.Join(t.TempDir(), "dolt-data")
+	// op_recover's liveness check ends in a `ps` match on `--data-dir.*<basename>`
+	// (find_dolt_pid), so the basename must not be one a real Dolt on this host
+	// could carry: a plain "dolt-data" would make the "no process" tests depend
+	// on what else is running.
+	dataDir := filepath.Join(t.TempDir(), "fsyncguard-"+strings.NewReplacer("/", "_", " ", "_").Replace(t.Name())+"-dolt-data")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -384,6 +389,153 @@ func TestGcBeadsBdRecoverNeedsNoProbeWhenDoltNotListening(t *testing.T) {
 	if strings.Contains(out, failOpenMarker) {
 		t.Fatalf("a not-listening Dolt is not a guard decision and must stay silent:\n%s", out)
 	}
+}
+
+// livePIDFileEnv plants a PID file naming a process that is alive (this test
+// binary) and returns the env that points op_recover at it: the shape
+// find_dolt_pid reads first, so the script sees a managed Dolt that is running
+// whether or not anything listens.
+//
+// The fake gc's recover-managed always succeeds, which returns from op_recover
+// before op_stop_impl. A case that reached the shell stop path would `kill`
+// this very process, so never combine this with a run that has no GC_BIN.
+func livePIDFileEnv(t *testing.T) string {
+	t.Helper()
+	pidFile := filepath.Join(t.TempDir(), "dolt.pid")
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return "GC_DOLT_PID_FILE=" + pidFile
+}
+
+// A Dolt that is running but not yet accepting connections (a stall-slowed
+// relaunch) is as exposed to a restart as a listening one: the guard must test
+// "managed Dolt running", not just "port answers".
+func TestGcBeadsBdRecoverSkipsARunningDoltThatIsNotListeningWhenFsyncStalled(t *testing.T) {
+	for name, extra := range map[string][]string{
+		"unfinished probe":               {"FAKE_PROBE_MODE=unfinished"},
+		"finished at the warn threshold": {"FAKE_PROBE_MODE=finished", "FAKE_PROBE_MS=1000"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFsyncGuardFixture(t, false)
+			out, err := f.recover(t, false, append(extra, livePIDFileEnv(t))...)
+			assertSkippedForStall(t, f, out, err)
+			if !strings.Contains(f.calls(t), "fsync-probe --dir "+f.dataDir+" --timeout-ms 1000") {
+				t.Fatalf("probe not called with the data dir and the default 1000ms bound; calls:\n%s", f.calls(t))
+			}
+			if strings.Contains(out, failOpenMarker) {
+				t.Fatalf("a stall decision must not print the fail-open line:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestGcBeadsBdRecoverProceedsForARunningDoltThatIsNotListeningWhenFsyncFast(t *testing.T) {
+	f := newFsyncGuardFixture(t, false)
+	out, err := f.recover(t, false, "FAKE_PROBE_MODE=finished", "FAKE_PROBE_MS=999", livePIDFileEnv(t))
+	assertRecoverProceeded(t, f, out, err)
+	if n := countLinesContaining(f.calls(t), "fsync-probe"); n != 1 {
+		t.Fatalf("a running Dolt must be probed exactly once, got %d; calls:\n%s", n, f.calls(t))
+	}
+	if strings.Contains(out, failOpenMarker) {
+		t.Fatalf("a fast probe must not print the fail-open line:\n%s", out)
+	}
+}
+
+func TestGcBeadsBdRecoverFailsOpenWithOneLineForARunningDoltThatIsNotListening(t *testing.T) {
+	for _, mode := range []string{"error", "exit1", "garbage", "empty"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newFsyncGuardFixture(t, false)
+			out, err := f.recover(t, false, "FAKE_PROBE_MODE="+mode, livePIDFileEnv(t))
+			assertRecoverProceeded(t, f, out, err)
+			if n := countLinesContaining(out, failOpenMarker); n != 1 {
+				t.Fatalf("fail-open stderr lines = %d, want exactly 1; output:\n%s", n, out)
+			}
+		})
+	}
+}
+
+// A PID file that names no live process is stale: nothing is running, so there
+// is nothing to protect and recovery must go ahead without probing.
+func TestGcBeadsBdRecoverIgnoresAStalePIDFileWhenNothingListens(t *testing.T) {
+	f := newFsyncGuardFixture(t, false)
+	pidFile := filepath.Join(t.TempDir(), "dolt.pid")
+	if err := os.WriteFile(pidFile, []byte("not-a-pid\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := f.recover(t, false, "FAKE_PROBE_MODE=unfinished", "GC_DOLT_PID_FILE="+pidFile)
+	assertRecoverProceeded(t, f, out, err)
+	if strings.Contains(f.calls(t), "fsync-probe") {
+		t.Fatalf("probed although the PID file names no live process; calls:\n%s", f.calls(t))
+	}
+	if strings.Contains(out, failOpenMarker) {
+		t.Fatalf("a stale PID file is not a guard decision and must stay silent:\n%s", out)
+	}
+}
+
+// TestFindDoltPIDTreatsANonPIDFileAsStale pins find_dolt_pid's PID-file check
+// to the file holding a PID, not to kill's verdict alone. In POSIX mode bash
+// 5.3 (/bin/sh on Fedora 44) `kill -0 not-a-pid` prints an error and exits 0,
+// so a PID file holding anything but a PID read as a live Dolt and sent recover
+// into the fsync-stall guard (ga-uhg2hta); `kill -0 0` and `kill -0 -1` succeed
+// in every shell. The harness kill accepts every operand the way that bash
+// does, so this fails under any /bin/sh when the check trusts kill -0 alone.
+func TestFindDoltPIDTreatsANonPIDFileAsStale(t *testing.T) {
+	materializeBuiltinPacksForTest(t, t.TempDir())
+	target, err := bundledGcBeadsBdScriptTarget()
+	if err != nil {
+		t.Fatalf("resolving bundled gc-beads-bd.sh: %v", err)
+	}
+	src, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("reading %s: %v", target, err)
+	}
+	harness := strings.Join([]string{
+		"kill() { return 0; }",
+		"find_port_holder() { :; }",
+		"ps() { :; }",
+		extractShellFunction(t, string(src), "find_dolt_pid"),
+		"find_dolt_pid",
+	}, "\n") + "\n"
+	findDoltPID := func(t *testing.T, content string) (pid, pidFile string) {
+		t.Helper()
+		dir := t.TempDir()
+		pidFile = filepath.Join(dir, "dolt.pid")
+		if err := os.WriteFile(pidFile, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		env := sanitizedBaseEnv("DATA_DIR="+filepath.Join(dir, "dolt-data"), "PID_FILE="+pidFile, "CONFIG_FILE=")
+		stdout, stderr, err := runGCBeadsBdCommand(t, env, "sh", "-c", harness)
+		if err != nil {
+			t.Fatalf("find_dolt_pid: %v\n%s", err, stderr)
+		}
+		return strings.TrimSpace(stdout), pidFile
+	}
+
+	for name, content := range map[string]string{
+		"word":            "not-a-pid\n",
+		"zero":            "0\n",
+		"negative":        "-1\n",
+		"number and word": "123 abc\n",
+		"empty":           "",
+		"leading zero":    "007\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			pid, pidFile := findDoltPID(t, content)
+			if pid != "" {
+				t.Fatalf("find_dolt_pid reported %q for a PID file holding %q", pid, content)
+			}
+			if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
+				t.Fatalf("the stale PID file holding %q was not removed (stat: %v)", content, err)
+			}
+		})
+	}
+	t.Run("a PID is still reported", func(t *testing.T) {
+		want := strconv.Itoa(os.Getpid())
+		if pid, _ := findDoltPID(t, want+"\n"); pid != want {
+			t.Fatalf("find_dolt_pid = %q, want %q", pid, want)
+		}
+	})
 }
 
 func TestGcBeadsBdRecoverFsyncWarnThresholdFromEnv(t *testing.T) {

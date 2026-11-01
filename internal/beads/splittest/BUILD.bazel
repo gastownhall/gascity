@@ -3,10 +3,15 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "splittest",
     srcs = [
+        "callsite.go",
+        "gate.go",
         "native_work_store.go",
         "pinned_id_fence.go",
+        "projection.go",
+        "ratchet.go",
         "semantics.go",
         "split_stores.go",
+        "split_violation.go",
         "strict_store.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/beads/splittest",
@@ -14,6 +19,7 @@ go_library(
     deps = [
         "//internal/beads",
         "//internal/config",
+        "//internal/coordclass",
         "//internal/storeref",
     ],
 )
@@ -21,9 +27,15 @@ go_library(
 go_test(
     name = "splittest_test",
     srcs = [
+        "callsite_test.go",
+        "federated_marker_guard_test.go",
         "fence_conformance_test.go",
         "import_boundary_test.go",
+        "projection_guard_test.go",
+        "projection_test.go",
+        "ratchet_test.go",
         "split_stores_test.go",
+        "strict_read_test.go",
         "strict_store_test.go",
         "testenv_import_test.go",
     ],
@@ -40,6 +52,9 @@ go_test(
         "//internal/beads",
         "//internal/beads/beadstest",
         "//internal/config",
+        "//internal/convoy",
+        "//internal/coordclass",
+        "//internal/mail/beadmail",
         "//internal/storeref",
         "//internal/testenv",
     ],

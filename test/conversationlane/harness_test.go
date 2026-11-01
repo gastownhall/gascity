@@ -114,6 +114,11 @@ type cityOptions struct {
 	// refuses the exec runtime), and adds a pool of one seat that writes
 	// what is typed into it to a file (ladder_lane_test.go).
 	pool bool
+	// claudeTUI runs the city's sessions on real tmux, under a socket root
+	// of the city's own, and the named session as a claude-family provider
+	// whose agent is the scripted Claude Code-like TUI fakeclaude
+	// (busy_turn_lane_test.go).
+	claudeTUI bool
 }
 
 // laneCity is one isolated city.
@@ -138,8 +143,8 @@ type laneCity struct {
 	// doltServer is the bd-dolt arm's dolt sql-server, stopped after the
 	// city's controllers.
 	doltServer *doltServer
-	// tmuxRoot is a pool city's TMUX_TMPDIR: its tmux servers' sockets
-	// live there and nowhere else, so the cleanup kills only those.
+	// tmuxRoot is a real-tmux city's TMUX_TMPDIR: its tmux servers'
+	// sockets live there and nowhere else, so the cleanup kills only those.
 	tmuxRoot string
 	// mu guards logs, procs, conv and token.
 	mu sync.Mutex
@@ -182,6 +187,9 @@ func newLaneCityWith(t *testing.T, arm storeArm, activity string, opts cityOptio
 	t.Cleanup(c.cleanup)
 	if opts.pool {
 		c.preparePool()
+	}
+	if opts.claudeTUI {
+		c.prepareClaudeTUI()
 	}
 	wrapper := filepath.Join(c.dir, ".gc", "fake-runtime.sh")
 	c.writeFile(wrapper, fmt.Sprintf("#!/bin/sh\nexec %q --state %q \"$@\"\n", fake, c.state), 0o755)
@@ -230,10 +238,16 @@ func (c *laneCity) cityTOML(wrapper string) string {
 		ops += fmt.Sprintf("\n[api]\nport = %d\nbind = \"127.0.0.1\"\n", c.opts.apiPort)
 	}
 	provider := "exec:" + wrapper
+	launch := `start_command = "sleep 100000"`
 	var extra strings.Builder
 	if c.opts.pool {
 		provider = "tmux"
 		extra.WriteString(c.poolTOML())
+	}
+	if c.opts.claudeTUI {
+		provider = "tmux"
+		launch = fmt.Sprintf("provider = %q", fakeClaudeProvider)
+		extra.WriteString(c.claudeProviderTOML())
 	}
 	for _, name := range c.opts.onDemand {
 		fmt.Fprintf(&extra, "\n[[named_session]]\nname = %q\ntemplate = %q\nmode = \"on_demand\"\n", name, sessionName)
@@ -260,12 +274,12 @@ nudges = "lanes"
 %s
 [[agent]]
 name = %q
-start_command = "sleep 100000"
+%s
 
 [[named_session]]
 template = %q
 mode = "always"
-%s`, filepath.Base(c.root), provider, ops, binding, sessionName, sessionName, extra.String())
+%s`, filepath.Base(c.root), provider, ops, binding, sessionName, launch, sessionName, extra.String())
 }
 
 // workspaceRoot is the Dolt arms' beads workspace (beadsworkspace's
@@ -599,7 +613,7 @@ func (c *laneCity) apiUp() bool {
 }
 
 func (c *laneCity) boxUp() bool {
-	if c.opts.pool {
+	if c.opts.pool || c.opts.claudeTUI {
 		return true // no fake runtime: the session's row says it is up
 	}
 	_, err := os.Stat(filepath.Join(c.state, "box."+sessionName))

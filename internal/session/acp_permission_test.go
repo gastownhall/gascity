@@ -72,6 +72,7 @@ func waitForACPFact(t *testing.T, what string, cond func() bool) {
 // surfaces through Pending, rejects an invalid answer as a mismatch, and is
 // resolved by Respond.
 func TestACPPermissionRoundTripThroughManager(t *testing.T) {
+	stubSubmitPoller(t)
 	sp := acp.NewProviderWithDir(filepath.Join(testutil.ShortTempDir(t, "gc-acp-"), "acp"), acp.Config{
 		HandshakeTimeout: acpPermissionWait,
 		NudgeBusyTimeout: acpPermissionWait,
@@ -111,8 +112,13 @@ func TestACPPermissionRoundTripThroughManager(t *testing.T) {
 		t.Fatalf("Pending = %#v, want an acp-<nonce>-7 approval for the tool call", pending)
 	}
 
-	if _, err := mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "another", "", runtime.Config{}); !errors.Is(err, ErrPendingInteraction) {
-		t.Fatalf("Send while pending = %v, want ErrPendingInteraction", err)
+	// A default send queues behind the permission request; an immediate
+	// one refuses.
+	if out, err := mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "another", "", runtime.Config{}); err != nil || !out.Queued {
+		t.Fatalf("Send while pending = %+v, %v; want queued behind the request", out, err)
+	}
+	if _, err := mgr.SendImmediate(context.Background(), testActor(mgr, ActorOperator), info.ID, "another", "", runtime.Config{}); !errors.Is(err, ErrPendingInteraction) {
+		t.Fatalf("SendImmediate while pending = %v, want ErrPendingInteraction", err)
 	}
 	err = mgr.Respond(info.ID, runtime.InteractionResponse{RequestID: pending.RequestID, Action: "approve_always"})
 	if !errors.Is(err, ErrInteractionMismatch) {
@@ -282,17 +288,22 @@ func sessionMutationLockHeld(id string) bool {
 // TestACPSubmitWaitingForIdleRefusedWhenPermissionArrives composes the
 // Manager with the real ACP provider for the sequence where a submit is
 // already waiting on a busy turn (holding the session mutation lock) when
-// the agent asks permission. The submit must refuse promptly with
-// ErrPendingInteraction so Respond, which needs the same lock, is not stuck
-// behind it until the busy timeout.
+// the agent asks permission. The runtime must refuse promptly so Respond,
+// which needs the same lock, is not stuck behind it until the busy timeout;
+// the default send then queues its message for after the answer.
 func TestACPSubmitWaitingForIdleRefusedWhenPermissionArrives(t *testing.T) {
+	stubSubmitPoller(t)
 	s := startACPLatePermissionSession(t)
 
-	result := make(chan error, 1)
+	type sendResult struct {
+		out SubmitOutcome
+		err error
+	}
+	result := make(chan sendResult, 1)
 	start := time.Now()
 	go func() {
-		_, err := s.mgr.Send(context.Background(), testActor(s.mgr, ActorOperator), s.id, "queued", "", runtime.Config{})
-		result <- err
+		out, err := s.mgr.Send(context.Background(), testActor(s.mgr, ActorOperator), s.id, "queued", "", runtime.Config{})
+		result <- sendResult{out: out, err: err}
 	}()
 	waitForACPFact(t, "the second submit to hold the session lock", func() bool {
 		return sessionMutationLockHeld(s.id)
@@ -300,9 +311,9 @@ func TestACPSubmitWaitingForIdleRefusedWhenPermissionArrives(t *testing.T) {
 	s.ask(t)
 
 	select {
-	case err := <-result:
-		if !errors.Is(err, ErrPendingInteraction) {
-			t.Fatalf("waiting Send = %v, want ErrPendingInteraction", err)
+	case got := <-result:
+		if got.err != nil || !got.out.Queued {
+			t.Fatalf("waiting Send = %+v, %v; want queued behind the permission request", got.out, got.err)
 		}
 	case <-time.After(acpStallBound):
 		t.Fatalf("waiting Send still blocked %s after the permission arrived", time.Since(start))

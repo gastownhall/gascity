@@ -494,6 +494,7 @@ func TestProviderFieldSync(t *testing.T) {
 		"EmitsPermissionWarning": "tri-state *bool; merged via MergeProviderOverBuiltin, not ProviderPatch",
 		"SupportsACP":            "tri-state *bool; merged via MergeProviderOverBuiltin, not ProviderPatch",
 		"UpstreamEnv":            "harness serving-env binding; merged via MergeProviderOverBuiltin, not ProviderPatch",
+		"ProgramStatus":          "program-status declaration (OSC 7501); merged per sub-field via MergeProviderOverBuiltin and fragment composition, not ProviderPatch",
 		"SupportsHooks":          "tri-state *bool; merged via MergeProviderOverBuiltin, not ProviderPatch",
 		"InstructionsFile":       "internal config path, not patched",
 		"ResumeFlag":             "internal resume config, not patched directly (use ResumeCommand)",

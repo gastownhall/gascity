@@ -250,21 +250,31 @@ func varsWithConvoyPlaceholder(vars map[string]string) map[string]string {
 // EffectiveRuntimeVars returns formula defaults overlaid by caller vars. It
 // mirrors molecule instantiation's runtime var view so graph.v2 metadata and
 // root keys use the same effective inputs that template substitution sees.
+// A default derived from a runtime-injected identity (one that references
+// convoy_id or the issue alias, directly or through another default) is left
+// out, like the identity itself: it belongs to a single invocation, so it is
+// not keyed or persisted, and a drain item derives its own from its unit
+// convoy instead of inheriting the parent's. Template substitution and routing
+// re-apply the defaults against the identities the vars carry.
 func EffectiveRuntimeVars(f *formula.Formula, vars map[string]string) map[string]string {
-	out := make(map[string]string, len(vars))
-	if f != nil {
-		for name, def := range f.Vars {
-			if def == nil || def.Default == nil {
-				continue
-			}
-			out[name] = *def.Default
-		}
+	if f == nil {
+		return effectiveRuntimeVars(nil, vars)
 	}
-	for key, value := range vars {
-		out[key] = value
+	return effectiveRuntimeVars(f.Vars, vars)
+}
+
+// EffectiveRecipeRuntimeVars is EffectiveRuntimeVars for a compiled recipe.
+func EffectiveRecipeRuntimeVars(recipe *formula.Recipe, vars map[string]string) map[string]string {
+	if recipe == nil {
+		return effectiveRuntimeVars(nil, vars)
 	}
-	if len(out) == 0 {
-		return map[string]string{}
+	return effectiveRuntimeVars(recipe.Vars, vars)
+}
+
+func effectiveRuntimeVars(defs map[string]*formula.VarDef, vars map[string]string) map[string]string {
+	out := formula.ApplyVarDefaults(defs, vars)
+	for name := range formula.DefaultsReferencing(defs, vars, ConvoyIDVar, LegacyIssueVar, legacyBeadIDVar) {
+		delete(out, name)
 	}
 	return out
 }

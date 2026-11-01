@@ -61,6 +61,7 @@ func (p *Provider) stageSecretEnv(ctx context.Context, secretEnv map[string]stri
 		return stagedEnv{}, err
 	}
 	out, code, err := p.conn.execScript(ctx, []byte(script))
+	p.noteTransport(err)
 	if err != nil {
 		return stagedEnv{}, fmt.Errorf("staging session env on box: %w", err)
 	}
