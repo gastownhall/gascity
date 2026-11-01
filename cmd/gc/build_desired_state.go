@@ -157,6 +157,7 @@ type DesiredStateResult struct {
 	// for refreshDesiredStateWithSessionBeads, whose primary snapshot alone may
 	// omit a live holder from another store.
 	SessionSnapshotComplete bool
+	ProviderUnresolved      []ProviderUnresolvedGroup
 	SessionOccupancyInfos   []session.Info
 	BeaconTime              time.Time
 	// ControlDispatcherScopeGaps summarizes, one entry per scope, the open
@@ -929,6 +930,12 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 		"partial":    continuationClaimQueryPartial,
 	})
 
+	providerUnresolved := bp.providerUnresolved.snapshot()
+	for _, group := range providerUnresolved {
+		trace.RecordControllerDecision(TraceSiteDesiredStateProviderUnresolved, TraceReasonProviderNotInPath, TraceOutcomeSkipped, map[string]any{
+			"provider": group.Provider, "command": group.Command, "dropped_templates": group.DroppedTemplates, "templates": group.Templates,
+		})
+	}
 	sessionSnapshotComplete := bp.hasCompleteSessionSnapshot()
 	sessionOccupancyInfos := make([]session.Info, len(allOpenSessionInfos))
 	copy(sessionOccupancyInfos, allOpenSessionInfos)
@@ -955,6 +962,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 		SessionSnapshotComplete:            sessionSnapshotComplete,
 		SessionOccupancyInfos:              sessionOccupancyInfos,
 		BeaconTime:                         beaconTime,
+		ProviderUnresolved:                 providerUnresolved,
 		ControlDispatcherScopeGaps:         controlDispatcherScopeGaps,
 	}
 }
@@ -7406,6 +7414,7 @@ func resolveTemplatePrepared(bp *agentBuildParams, cfgAgent *config.Agent, quali
 		return TemplateParams{}, errPlanOnlyEffect
 	}
 	if err := validateAgentSessionTransportForBuild(bp, cfgAgent, qualifiedName); err != nil {
+		bp.providerUnresolved.record(qualifiedName, err)
 		return TemplateParams{}, err
 	}
 	if !bp.readOnly {

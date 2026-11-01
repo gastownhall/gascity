@@ -3450,6 +3450,9 @@
             "$ref": "#/components/schemas/ProjectIdentityStampedPayload"
           },
           {
+            "$ref": "#/components/schemas/ProviderUnresolvedPayload"
+          },
+          {
             "$ref": "#/components/schemas/Record"
           },
           {
@@ -7438,6 +7441,45 @@
             "type": "integer"
           }
         },
+        "type": "object"
+      },
+      "ProviderUnresolvedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "desired_session_count": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "dropped_templates": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "reconciler": {
+            "type": "string"
+          },
+          "templates": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "provider",
+          "command",
+          "dropped_templates",
+          "templates",
+          "reconciler"
+        ],
         "type": "object"
       },
       "ProviderUpdateInputBody": {
@@ -14512,6 +14554,7 @@
             "order.suppressed": "#/components/schemas/TypedEventStreamEnvelopeOrderSuppressed",
             "project.identity.stamped": "#/components/schemas/TypedEventStreamEnvelopeProjectIdentityStamped",
             "provider.swapped": "#/components/schemas/TypedEventStreamEnvelopeProviderSwapped",
+            "provider.unresolved": "#/components/schemas/TypedEventStreamEnvelopeProviderUnresolved",
             "request.accepted": "#/components/schemas/TypedEventStreamEnvelopeRequestAccepted",
             "request.failed": "#/components/schemas/TypedEventStreamEnvelopeRequestFailed",
             "request.result.city.create": "#/components/schemas/TypedEventStreamEnvelopeRequestResultCityCreate",
@@ -14771,6 +14814,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeProviderSwapped"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeProviderUnresolved"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeRequestAccepted"
@@ -16408,6 +16454,7 @@
           "type": {
             "not": {
               "enum": [
+                "provider.unresolved",
                 "session.woke",
                 "session.stopped",
                 "session.crashed",
@@ -18940,6 +18987,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope provider.swapped",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeProviderUnresolved": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ProviderUnresolvedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "provider.unresolved",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope provider.unresolved",
         "type": "object"
       },
       "TypedEventStreamEnvelopeRequestAccepted": {
@@ -22148,6 +22252,7 @@
             "order.suppressed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderSuppressed",
             "project.identity.stamped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProjectIdentityStamped",
             "provider.swapped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderSwapped",
+            "provider.unresolved": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderUnresolved",
             "request.accepted": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestAccepted",
             "request.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestFailed",
             "request.result.city.create": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultCityCreate",
@@ -22407,6 +22512,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderSwapped"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderUnresolved"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestAccepted"
@@ -24147,6 +24255,7 @@
           "type": {
             "not": {
               "enum": [
+                "provider.unresolved",
                 "session.woke",
                 "session.stopped",
                 "session.crashed",
@@ -26848,6 +26957,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope provider.swapped",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeProviderUnresolved": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ProviderUnresolvedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "provider.unresolved",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope provider.unresolved",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeRequestAccepted": {

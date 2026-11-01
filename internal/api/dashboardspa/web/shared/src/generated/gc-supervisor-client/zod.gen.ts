@@ -1598,6 +1598,15 @@ export const zProviderSpecJson = z.object({
     ready_delay_ms: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional()
 });
 
+export const zProviderUnresolvedPayload = z.object({
+    command: z.string(),
+    desired_session_count: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    dropped_templates: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    provider: z.string(),
+    reconciler: z.string(),
+    templates: z.array(z.string()).nullable()
+});
+
 export const zProviderUpdateInputBody = z.object({
     acp_args: z.array(z.string()).nullish(),
     acp_command: z.string().optional(),
@@ -3951,6 +3960,7 @@ export const zEventPayload = z.union([
     zOutboundChannelMismatchPayload,
     zOutboundEventPayload,
     zProjectIdentityStampedPayload,
+    zProviderUnresolvedPayload,
     zRecord,
     zRequestAcceptedPayload,
     zRequestFailedPayload,
@@ -5303,6 +5313,24 @@ export const zTypedEventStreamEnvelopeProviderSwapped = z.object({
 });
 
 /**
+ * TypedEventStreamEnvelope provider.unresolved
+ */
+export const zTypedEventStreamEnvelopeProviderUnresolved = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zProviderUnresolvedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('provider.unresolved'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedEventStreamEnvelope request.accepted
  */
 export const zTypedEventStreamEnvelopeRequestAccepted = z.object({
@@ -6365,6 +6393,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeOrderSuppressed.extend({ type: z.literal('order.suppressed') }),
     zTypedEventStreamEnvelopeProjectIdentityStamped.extend({ type: z.literal('project.identity.stamped') }),
     zTypedEventStreamEnvelopeProviderSwapped.extend({ type: z.literal('provider.swapped') }),
+    zTypedEventStreamEnvelopeProviderUnresolved.extend({ type: z.literal('provider.unresolved') }),
     zTypedEventStreamEnvelopeRequestAccepted.extend({ type: z.literal('request.accepted') }),
     zTypedEventStreamEnvelopeRequestFailed.extend({ type: z.literal('request.failed') }),
     zTypedEventStreamEnvelopeRequestResultCityCreate.extend({ type: z.literal('request.result.city.create') }),
@@ -7740,6 +7769,25 @@ export const zTypedTaggedEventStreamEnvelopeProviderSwapped = z.object({
 });
 
 /**
+ * TypedTaggedEventStreamEnvelope provider.unresolved
+ */
+export const zTypedTaggedEventStreamEnvelopeProviderUnresolved = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zProviderUnresolvedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('provider.unresolved'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedTaggedEventStreamEnvelope request.accepted
  */
 export const zTypedTaggedEventStreamEnvelopeRequestAccepted = z.object({
@@ -8857,6 +8905,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeOrderSuppressed.extend({ type: z.literal('order.suppressed') }),
     zTypedTaggedEventStreamEnvelopeProjectIdentityStamped.extend({ type: z.literal('project.identity.stamped') }),
     zTypedTaggedEventStreamEnvelopeProviderSwapped.extend({ type: z.literal('provider.swapped') }),
+    zTypedTaggedEventStreamEnvelopeProviderUnresolved.extend({ type: z.literal('provider.unresolved') }),
     zTypedTaggedEventStreamEnvelopeRequestAccepted.extend({ type: z.literal('request.accepted') }),
     zTypedTaggedEventStreamEnvelopeRequestFailed.extend({ type: z.literal('request.failed') }),
     zTypedTaggedEventStreamEnvelopeRequestResultCityCreate.extend({ type: z.literal('request.result.city.create') }),

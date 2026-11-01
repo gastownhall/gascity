@@ -175,7 +175,8 @@ type agentBuildParams struct {
 	// runtime selector: "" / "tmux" / "subprocess" / "acp" / "k8s" /
 	// etc.). Used by the skill materialization integration to decide
 	// stage-2 eligibility.
-	sessionProvider string
+	sessionProvider    string
+	providerUnresolved *providerUnresolvedSet
 }
 
 // hasCompleteSessionSnapshot reports whether a store-backed build has a
@@ -300,27 +301,28 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 // catalogs and no create budget.
 func baseAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime.Provider, beaconTime time.Time, store beads.Store, stderr io.Writer) *agentBuildParams {
 	return &agentBuildParams{
-		city:            cfg,
-		cityName:        cityName,
-		cityPath:        cityPath,
-		workspace:       &cfg.Workspace,
-		agents:          append([]config.Agent(nil), cfg.Agents...),
-		providers:       cfg.Providers,
-		lookPath:        exec.LookPath,
-		fs:              fsys.OSFS{},
-		sp:              sp,
-		rigs:            cfg.Rigs,
-		sessionTemplate: cfg.Workspace.SessionTemplate,
-		beaconTime:      beaconTime,
-		packDirs:        cfg.PackDirs,
-		packOverlayDirs: cfg.PackOverlayDirs,
-		rigOverlayDirs:  cfg.RigOverlayDirs,
-		globalFragments: cfg.Workspace.GlobalFragments,
-		appendFragments: mergeFragmentLists(cfg.AgentDefaults.AppendFragments, cfg.AgentsDefaults.AppendFragments),
-		beadStore:       store,
-		beadNames:       make(map[string]string),
-		stderr:          stderr,
-		sessionProvider: cfg.Session.Provider,
+		city:               cfg,
+		cityName:           cityName,
+		cityPath:           cityPath,
+		workspace:          &cfg.Workspace,
+		agents:             append([]config.Agent(nil), cfg.Agents...),
+		providers:          cfg.Providers,
+		lookPath:           exec.LookPath,
+		fs:                 fsys.OSFS{},
+		sp:                 sp,
+		rigs:               cfg.Rigs,
+		sessionTemplate:    cfg.Workspace.SessionTemplate,
+		beaconTime:         beaconTime,
+		packDirs:           cfg.PackDirs,
+		packOverlayDirs:    cfg.PackOverlayDirs,
+		rigOverlayDirs:     cfg.RigOverlayDirs,
+		globalFragments:    cfg.Workspace.GlobalFragments,
+		appendFragments:    mergeFragmentLists(cfg.AgentDefaults.AppendFragments, cfg.AgentsDefaults.AppendFragments),
+		beadStore:          store,
+		beadNames:          make(map[string]string),
+		stderr:             stderr,
+		sessionProvider:    cfg.Session.Provider,
+		providerUnresolved: newProviderUnresolvedSet(),
 	}
 }
 

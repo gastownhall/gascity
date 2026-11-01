@@ -4447,6 +4447,16 @@ type ProviderSpecJSON struct {
 	ReadyDelayMs *int64             `json:"ready_delay_ms,omitempty"`
 }
 
+// ProviderUnresolvedPayload defines model for ProviderUnresolvedPayload.
+type ProviderUnresolvedPayload struct {
+	Command             string    `json:"command"`
+	DesiredSessionCount *int64    `json:"desired_session_count,omitempty"`
+	DroppedTemplates    int64     `json:"dropped_templates"`
+	Provider            string    `json:"provider"`
+	Reconciler          string    `json:"reconciler"`
+	Templates           *[]string `json:"templates"`
+}
+
 // ProviderUpdateInputBody defines model for ProviderUpdateInputBody.
 type ProviderUpdateInputBody struct {
 	// AcpArgs ACP transport command arguments override.
@@ -8270,6 +8280,22 @@ type TypedEventStreamEnvelopeProviderSwapped struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeProviderUnresolved defines model for TypedEventStreamEnvelopeProviderUnresolved.
+type TypedEventStreamEnvelopeProviderUnresolved struct {
+	Actor            string                    `json:"actor"`
+	DependsOnStepIds *[]string                 `json:"depends_on_step_ids,omitempty"`
+	Message          *string                   `json:"message,omitempty"`
+	Payload          ProviderUnresolvedPayload `json:"payload"`
+	RunId            *string                   `json:"run_id,omitempty"`
+	Seq              int64                     `json:"seq"`
+	SessionId        *string                   `json:"session_id,omitempty"`
+	StepId           *string                   `json:"step_id,omitempty"`
+	Subject          *string                   `json:"subject,omitempty"`
+	Ts               time.Time                 `json:"ts"`
+	Type             string                    `json:"type"`
+	Workflow         *WorkflowEventProjection  `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeRequestAccepted defines model for TypedEventStreamEnvelopeRequestAccepted.
 type TypedEventStreamEnvelopeRequestAccepted struct {
 	Actor            string                   `json:"actor"`
@@ -10309,6 +10335,23 @@ type TypedTaggedEventStreamEnvelopeProviderSwapped struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeProviderUnresolved defines model for TypedTaggedEventStreamEnvelopeProviderUnresolved.
+type TypedTaggedEventStreamEnvelopeProviderUnresolved struct {
+	Actor            string                    `json:"actor"`
+	City             string                    `json:"city"`
+	DependsOnStepIds *[]string                 `json:"depends_on_step_ids,omitempty"`
+	Message          *string                   `json:"message,omitempty"`
+	Payload          ProviderUnresolvedPayload `json:"payload"`
+	RunId            *string                   `json:"run_id,omitempty"`
+	Seq              int64                     `json:"seq"`
+	SessionId        *string                   `json:"session_id,omitempty"`
+	StepId           *string                   `json:"step_id,omitempty"`
+	Subject          *string                   `json:"subject,omitempty"`
+	Ts               time.Time                 `json:"ts"`
+	Type             string                    `json:"type"`
+	Workflow         *WorkflowEventProjection  `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeRequestAccepted defines model for TypedTaggedEventStreamEnvelopeRequestAccepted.
@@ -13973,6 +14016,32 @@ func (t *EventPayload) FromProjectIdentityStampedPayload(v ProjectIdentityStampe
 
 // MergeProjectIdentityStampedPayload performs a merge with any union data inside the EventPayload, using the provided ProjectIdentityStampedPayload
 func (t *EventPayload) MergeProjectIdentityStampedPayload(v ProjectIdentityStampedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsProviderUnresolvedPayload returns the union data inside the EventPayload as a ProviderUnresolvedPayload
+func (t EventPayload) AsProviderUnresolvedPayload() (ProviderUnresolvedPayload, error) {
+	var body ProviderUnresolvedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromProviderUnresolvedPayload overwrites any union data inside the EventPayload as the provided ProviderUnresolvedPayload
+func (t *EventPayload) FromProviderUnresolvedPayload(v ProviderUnresolvedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeProviderUnresolvedPayload performs a merge with any union data inside the EventPayload, using the provided ProviderUnresolvedPayload
+func (t *EventPayload) MergeProviderUnresolvedPayload(v ProviderUnresolvedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -18444,6 +18513,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeProviderSwapped(
 	return err
 }
 
+// AsTypedEventStreamEnvelopeProviderUnresolved returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeProviderUnresolved
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeProviderUnresolved() (TypedEventStreamEnvelopeProviderUnresolved, error) {
+	var body TypedEventStreamEnvelopeProviderUnresolved
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeProviderUnresolved overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeProviderUnresolved
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeProviderUnresolved(v TypedEventStreamEnvelopeProviderUnresolved) error {
+	v.Type = "provider.unresolved"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeProviderUnresolved performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeProviderUnresolved
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeProviderUnresolved(v TypedEventStreamEnvelopeProviderUnresolved) error {
+	v.Type = "provider.unresolved"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeRequestAccepted returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeRequestAccepted
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeRequestAccepted() (TypedEventStreamEnvelopeRequestAccepted, error) {
 	var body TypedEventStreamEnvelopeRequestAccepted
@@ -20162,6 +20259,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeProjectIdentityStamped()
 	case "provider.swapped":
 		return t.AsTypedEventStreamEnvelopeProviderSwapped()
+	case "provider.unresolved":
+		return t.AsTypedEventStreamEnvelopeProviderUnresolved()
 	case "request.accepted":
 		return t.AsTypedEventStreamEnvelopeRequestAccepted()
 	case "request.failed":
@@ -22163,6 +22262,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeProv
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeProviderUnresolved returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeProviderUnresolved
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeProviderUnresolved() (TypedTaggedEventStreamEnvelopeProviderUnresolved, error) {
+	var body TypedTaggedEventStreamEnvelopeProviderUnresolved
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeProviderUnresolved overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeProviderUnresolved
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeProviderUnresolved(v TypedTaggedEventStreamEnvelopeProviderUnresolved) error {
+	v.Type = "provider.unresolved"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeProviderUnresolved performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeProviderUnresolved
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeProviderUnresolved(v TypedTaggedEventStreamEnvelopeProviderUnresolved) error {
+	v.Type = "provider.unresolved"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeRequestAccepted returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeRequestAccepted
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeRequestAccepted() (TypedTaggedEventStreamEnvelopeRequestAccepted, error) {
 	var body TypedTaggedEventStreamEnvelopeRequestAccepted
@@ -23881,6 +24008,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeProjectIdentityStamped()
 	case "provider.swapped":
 		return t.AsTypedTaggedEventStreamEnvelopeProviderSwapped()
+	case "provider.unresolved":
+		return t.AsTypedTaggedEventStreamEnvelopeProviderUnresolved()
 	case "request.accepted":
 		return t.AsTypedTaggedEventStreamEnvelopeRequestAccepted()
 	case "request.failed":

@@ -113,8 +113,9 @@ type World struct {
 	ProviderHealth    *providerHealthSnapshot
 	Episodes          map[string]session.StartupHealthEpisode
 	SleepPolicies     map[string]resolvedSessionSleepPolicy // by bead ID
-	TransportRefused  map[string]string                     // by qualified name
-	ReadyWaits        map[string]bool                       // I10, by session bead ID
+	TransportErrors   map[string]error
+	TransportRefused  map[string]string // by qualified name
+	ReadyWaits        map[string]bool   // I10, by session bead ID
 	Templates         *templateMemo
 	// Suspension is the suspension state the pass read, for the live-claim
 	// veto's scope (liveClaimVetoApplies, the orphaned signal's L5).
@@ -298,6 +299,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	}
 	p.memo.refresh(e, env, now, rows, w.Mislabelled)
 	w.SleepPolicies, w.TransportRefused, w.Templates = p.memo.sleepPolicies(cfg, env, rows), p.memo.transport, p.memo.templates.Load()
+	w.TransportErrors = p.memo.transportErrors
 
 	// The lane-fed check reuses the demand gather's probe stores: building
 	// the demand targets again here (k1Env) cost a whole second demand
@@ -581,11 +583,12 @@ type sleepMemoKey struct{ Template, SessionName string }
 // gatherMemo holds the per-generation memos. Only the planner goroutine
 // touches it; templates is published for the effects.
 type gatherMemo struct {
-	gen       uint64
-	sleep     map[sleepMemoKey]resolvedSessionSleepPolicy
-	transport map[string]string // immutable once built: World shares it
-	resolver  templateResolver
-	templates atomic.Pointer[templateMemo]
+	gen             uint64
+	sleep           map[sleepMemoKey]resolvedSessionSleepPolicy
+	transport       map[string]string // immutable once built: World shares it
+	transportErrors map[string]error  // retains typed missing-provider diagnostics
+	resolver        templateResolver
+	templates       atomic.Pointer[templateMemo]
 }
 
 // refresh starts a new generation's memos when env is new, building its
@@ -598,10 +601,12 @@ func (m *gatherMemo) refresh(e gatherEnv, env *reconcileEnv, now time.Time, rows
 	if newGen {
 		m.gen, m.sleep = env.Gen, make(map[sleepMemoKey]resolvedSessionSleepPolicy)
 		m.transport = make(map[string]string)
+		m.transportErrors = make(map[string]error)
 		for i := range env.Cfg.Agents {
 			a := &env.Cfg.Agents[i]
 			if err := validateAgentSessionTransport(&env.Cfg.Workspace, env.Cfg.Providers, e.LookPath, env.SP, a, a.QualifiedName()); err != nil {
 				m.transport[a.QualifiedName()] = err.Error()
+				m.transportErrors[a.QualifiedName()] = err
 			}
 		}
 	}

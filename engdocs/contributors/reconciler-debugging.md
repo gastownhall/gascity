@@ -134,3 +134,23 @@ Then dump the template-scoped window on failure:
 ```bash
 gc trace show --template repo/polecat --since 15m --json
 ```
+
+## A configured provider executable is missing
+
+A `provider.unresolved` event names the configured provider reference, the
+missing command and a sorted sample of affected templates. `dropped_templates`
+counts distinct templates, not repeated resolution attempts. The event and
+operator log emit once per provider/command failure episode; a successful pass
+clears the episode so a later recurrence alerts again.
+
+Both reconcilers record `desired_state.provider_unresolved` trace decisions.
+The legacy cycle input includes `provider_unresolved_count` alongside its
+desired-session count. V2 emits the diagnostic even when no session row could
+be allocated, and omits a desired-session count from the event because it does
+not build the legacy desired set. An unused provider with no requested work
+is not reported as blocked demand.
+
+Install the executable on the supervisor host or correct the selected provider
+command. Run `gc doctor`, then `gc reload --soft` for the affected city to
+refresh the reconciler's configuration-generation transport checks. This does
+not require replacing or restarting the supervisor.

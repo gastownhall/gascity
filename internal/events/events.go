@@ -506,6 +506,8 @@ const (
 	// session count. One alert per episode; AlertSent is cleared on green so
 	// the next episode fires independently. (ADR-0013 A1 M3a)
 	ProviderHealthGateAlert = "provider.health_gate_alert"
+	// ProviderUnresolved identifies missing executables that block configured templates.
+	ProviderUnresolved = "provider.unresolved"
 
 	// ReconcilerAlert is the v2 session reconciler's operator alert: a
 	// condition that should never happen, or that needs an operator. The
@@ -617,6 +619,7 @@ func IsJournalDerived(eventType string) bool {
 // event type has a registered payload — a missing registration is a
 // programming error that fails CI, not a runtime condition.
 var KnownEventTypes = []string{
+	ProviderUnresolved,
 	SessionWoke, SessionStopped, SessionCrashed,
 	SessionDraining, SessionUndrained, SessionQuarantined,
 	SessionIdleKilled, SessionMaxAgeKilled, SessionSuspended, SessionUpdated,
