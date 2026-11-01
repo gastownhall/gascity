@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok",
+    "bead_id",
+    "formula_name",
+    "bead_hash",
+    "disk_hash",
+    "match"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1"
+    },
+    "ok": {
+      "const": true
+    },
+    "bead_id": {
+      "type": "string"
+    },
+    "formula_name": {
+      "type": "string"
+    },
+    "bead_hash": {
+      "type": "string"
+    },
+    "disk_hash": {
+      "type": "string"
+    },
+    "match": {
+      "type": "boolean"
+    },
+    "formula_path": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}

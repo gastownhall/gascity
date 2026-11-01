@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-gc-jsonl": {},
+  "type": "object",
+  "required": [
+    "name",
+    "url",
+    "city",
+    "default"
+  ],
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "url": {
+      "type": "string"
+    },
+    "city": {
+      "type": "string"
+    },
+    "default": {
+      "type": "boolean"
+    },
+    "credential_command": {
+      "type": "string"
+    },
+    "grant_command": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gc runtime conformance --json result",
+  "description": "The golden RPP conformance suite report (runtimecontract.Report) for the target executable. This describes only the primary report written for --json; the --env flag additionally writes a second, separate runtimecapability.Report JSON document to the same stream afterward, which is out of scope for this single-document schema. gc runtime is a hidden dev-facing command that predates the schema_version/ok success-discriminator convention; this schema describes the actual wire shape as-is.",
+  "type": "object",
+  "required": [
+    "executable",
+    "protocol",
+    "results",
+    "summary"
+  ],
+  "properties": {
+    "executable": {
+      "type": "string"
+    },
+    "protocol": {
+      "$ref": "#/$defs/protocolInfo"
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/result"
+      }
+    },
+    "summary": {
+      "$ref": "#/$defs/summary"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "protocolInfo": {
+      "type": "object",
+      "required": [
+        "version"
+      ],
+      "properties": {
+        "version": {
+          "type": "integer"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "result": {
+      "type": "object",
+      "required": [
+        "code",
+        "group",
+        "title",
+        "status"
+      ],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "group": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["PASS", "FAIL", "SKIP"]
+        },
+        "detail": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "passed",
+        "failed",
+        "skipped"
+      ],
+      "properties": {
+        "passed": {
+          "type": "integer"
+        },
+        "failed": {
+          "type": "integer"
+        },
+        "skipped": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

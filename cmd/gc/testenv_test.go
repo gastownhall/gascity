@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -101,6 +102,13 @@ func clearGCEnv(t *testing.T) {
 	// nested inside a live city — the ceiling never comes into play because
 	// that walk never enters td's ancestry at all. Chdir into td so the walk
 	// starts somewhere with no city.toml in its ancestry.
+	//
+	// Repo-root resolution under bazel also walks up from the cwd (the
+	// runfiles tree), so pin the root before leaving it; otherwise helpers
+	// such as gcRepoRootFromEnv lose the checkout's formulas and packs.
+	if root := bazeltest.OverrideRoot(); root != "" {
+		t.Setenv("GC_TEST_REPO_ROOT", root)
+	}
 	t.Chdir(td)
 }
 
