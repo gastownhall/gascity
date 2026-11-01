@@ -162,6 +162,12 @@ var (
 	ErrInputFenceUnsupported = errors.New("runtime cannot fence this session's input")
 	// ErrInvalidInputFence reports a fence that names no incarnation.
 	ErrInvalidInputFence = errors.New("input fence names no incarnation")
+	// ErrInputNotSent reports a fenced input that failed before any of its
+	// effect (the input FenceMismatchError.Partial counts) was sent, for a
+	// reason that is neither a miss nor ErrRuntimeUnavailable: checking the
+	// fence, or staging the input, failed. An error without it makes no
+	// such claim.
+	ErrInputNotSent = errors.New("fenced input failed before it was sent")
 )
 
 // What a FenceMismatchError found instead of a fence digest.
@@ -223,7 +229,8 @@ type FencedNudge struct {
 // ErrInvalidInputFence, or (InputFencing none) ErrInputFenceUnsupported
 // before any input. A runtime with no server to ask at all (tmux with no
 // server running) returns ErrRuntimeUnavailable instead of a mismatch: it
-// cannot tell absent from unreachable.
+// cannot tell absent from unreachable. A call that fails for another reason
+// before any of its effect was sent may wrap ErrInputNotSent.
 type FencedInputProvider interface {
 	// InputFencing reports how the runtime fences session name's input. It
 	// is a static trait: it reads no runtime state.

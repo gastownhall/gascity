@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -67,7 +68,7 @@ func TestLoadCitySessionReconcilerAliasIsNonFatalInStrictMode(t *testing.T) {
 // the alias is soft. An unknown value stays fatal under strict mode on both
 // deciders, including one that quotes the alias wording to pass as an alias.
 func TestLoadCitySessionReconcilerUnknownIsStrictFatal(t *testing.T) {
-	for _, value := range []string{"v3", `x is a deprecated gc-enterprise alias for \"legacy\"; remove the key, legacy is the default`} {
+	for _, value := range []string{"v3", `x is a deprecated gc-enterprise alias for \"legacy\"; set session_reconciler = \"legacy\"`} {
 		warnings := loadSessionReconcilerWarnings(t, value)
 		if len(warnings) != 1 || config.IsSessionReconcilerAliasWarning(warnings[0]) {
 			t.Fatalf("session_reconciler = %q warnings = %q, want one unknown-value warning", value, warnings)
@@ -95,7 +96,7 @@ func TestLatchReconcilerModeRefusesUnknownAndInadmissibleV2(t *testing.T) {
 		wantV2  bool
 		wantErr string
 	}{
-		{raw: ""},
+		{raw: ""}, // unset on the work binding: the legacy fallback
 		{raw: "legacy"},
 		{raw: "auto"},
 		{raw: "v2", wantV2: true},
@@ -103,7 +104,10 @@ func TestLatchReconcilerModeRefusesUnknownAndInadmissibleV2(t *testing.T) {
 		{raw: "v2", refused: true, wantErr: "is refused"},
 		{raw: "v3", wantErr: "not a known value"},
 	} {
-		cfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: tc.raw, SessionCircuitBreaker: tc.refused}}
+		cfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: tc.raw}}
+		if tc.refused {
+			cfg.ChatSessions.IdleTimeout = "30m"
+		}
 		mode, err := latchReconcilerMode(cfg, nil)
 		if tc.wantErr != "" {
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
@@ -121,27 +125,67 @@ func TestLatchReconcilerModeRefusesUnknownAndInadmissibleV2(t *testing.T) {
 	}
 }
 
-// TestLatchRefusesV2WithIdentityBreaker pins C5's boot rule (START-800..806,
-// SESS-018..024): v2 defers the identity circuit breaker, so a v2 city that
-// turns it on refuses to start, with the reason in the latch error and in
-// doctor, rather than silently running without the protection. Legacy keeps
-// the breaker, and v2 without it is admitted.
-func TestLatchRefusesV2WithIdentityBreaker(t *testing.T) {
-	const want = `[daemon] session_reconciler = "v2" is refused: [daemon] session_circuit_breaker = true (the identity circuit breaker) is not available under v2 until PAR-BRK; remove those settings or run legacy`
-	cfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: "v2", SessionCircuitBreaker: true}}
-	if _, err := latchReconcilerMode(cfg, noEnv); err == nil || err.Error() != want {
-		t.Fatalf("latch(v2, breaker) err = %v, want %q", err, want)
+// TestLatchAdmitsV2WithIgnoredSettings pins mc-ymynp: v2 no longer refuses
+// the identity circuit breaker (PAR-BRK) or the stall recyclers (PAR-STALL-1,
+// PAR-STALL-2), which the work ladder replaces. A v2 city that sets them
+// starts, logs each as deprecated at boot, and doctor warns naming each key;
+// legacy keeps them with no warning.
+func TestLatchAdmitsV2WithIgnoredSettings(t *testing.T) {
+	cfg := &config.City{
+		Daemon:  config.DaemonConfig{SessionReconciler: "v2", SessionCircuitBreaker: true},
+		Session: config.SessionConfig{ProgressStallTimeout: "30m", ClaimHolderStallTimeout: "45m"},
 	}
-	if r := newSessionReconcilerDoctorCheck(cfg, noEnv).Run(&doctor.CheckContext{}); r.Status != doctor.StatusError || !strings.Contains(r.Message, want) {
-		t.Errorf("doctor = %v %q, want an error naming %q", r.Status, r.Message, want)
+	if got := v2LatchRefusals(cfg, noEnv); len(got) != 0 {
+		t.Fatalf("v2LatchRefusals = %+v, want none", got)
 	}
-	cfg.Daemon.SessionReconciler = ""
-	if mode, err := latchReconcilerMode(cfg, noEnv); err != nil || mode != reconcilerLegacy {
-		t.Errorf("latch(legacy, breaker) = %v, %v; want legacy, nil", mode, err)
+	res, err := resolveReconcilerMode(cfg, noEnv)
+	if err != nil || res.Mode != reconcilerV2 {
+		t.Fatalf("resolve(v2, breaker, stalls) = %+v, %v; want v2, nil", res, err)
 	}
-	cfg.Daemon.SessionReconciler, cfg.Daemon.SessionCircuitBreaker = "v2", false
-	if mode, err := latchReconcilerMode(cfg, noEnv); err != nil || mode != reconcilerV2 {
-		t.Errorf("latch(v2, no breaker) = %v, %v; want v2, nil", mode, err)
+	keys := []string{"[daemon] session_circuit_breaker", "[session] progress_stall_timeout", "[session] claim_holder_stall_timeout"}
+	boot := reconcilerBootWarnings(cfg, res)
+	if len(boot) != len(keys) {
+		t.Fatalf("boot warnings = %q, want one per ignored key", boot)
+	}
+	for i, key := range keys {
+		if !strings.HasPrefix(boot[i], key+" is deprecated under v2 and ignored: the work ladder replaces it") {
+			t.Errorf("boot warning %d = %q, want %s deprecated in favor of the work ladder", i, boot[i], key)
+		}
+	}
+	// With the work ladder off, the backstops pace work, not the ladder.
+	cfg.Daemon.WorkLadder = "off"
+	for _, w := range reconcilerBootWarnings(cfg, res) {
+		if strings.Contains(w, "work ladder replaces") || !strings.Contains(w, "backstops pace work instead") {
+			t.Errorf("boot warning under work_ladder = \"off\" = %q, want the backstops named", w)
+		}
+	}
+	cfg.Daemon.WorkLadder = ""
+	r := newSessionReconcilerDoctorCheck(cfg, noEnv).Run(&doctor.CheckContext{})
+	if r.Status != doctor.StatusWarning {
+		t.Errorf("doctor status = %v (%s), want a warning", r.Status, r.Message)
+	}
+	for _, key := range keys {
+		if !strings.Contains(r.Message, key+" is deprecated under v2 and ignored") {
+			t.Errorf("doctor message = %q, want %s named", r.Message, key)
+		}
+	}
+
+	cfg.Daemon.SessionReconciler = "legacy"
+	res, err = resolveReconcilerMode(cfg, noEnv)
+	if err != nil || res.Mode != reconcilerLegacy {
+		t.Fatalf("resolve(legacy, breaker, stalls) = %+v, %v; want legacy, nil", res, err)
+	}
+	if boot := reconcilerBootWarnings(cfg, res); len(boot) != 0 {
+		t.Errorf("legacy boot warnings = %q, want none: legacy honors these keys", boot)
+	}
+	if r := newSessionReconcilerDoctorCheck(cfg, noEnv).Run(&doctor.CheckContext{}); r.Status != doctor.StatusOK {
+		t.Errorf("legacy doctor = %v (%s), want OK", r.Status, r.Message)
+	}
+	if cbCfg, on := sessionCircuitBreakerConfigFromCity(cfg); !on || cbCfg.MaxRestarts <= 0 {
+		t.Errorf("legacy breaker config = %+v, %v; want it on", cbCfg, on)
+	}
+	if cfg.Session.ProgressStallTimeoutDuration() != 30*time.Minute || cfg.Session.ClaimHolderStallTimeoutDuration() != 45*time.Minute {
+		t.Errorf("legacy stall thresholds = %v/%v, want 30m/45m", cfg.Session.ProgressStallTimeoutDuration(), cfg.Session.ClaimHolderStallTimeoutDuration())
 	}
 }
 
@@ -249,14 +293,17 @@ func TestDoctorSessionReconcilerCheck(t *testing.T) {
 		refused bool // a feature v2 defers
 		want    doctor.CheckStatus
 	}{
-		{raw: "", want: doctor.StatusOK},
+		{raw: "", want: doctor.StatusWarning}, // the legacy fallback: the work binding cannot fence
 		{raw: "legacy", want: doctor.StatusOK},
 		{raw: "auto", want: doctor.StatusWarning},
 		{raw: "v2", want: doctor.StatusOK}, // admissible since C9
 		{raw: "v2", refused: true, want: doctor.StatusError},
 		{raw: "v3", want: doctor.StatusError},
 	} {
-		cfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: tc.raw, SessionCircuitBreaker: tc.refused}}
+		cfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: tc.raw}}
+		if tc.refused {
+			cfg.Agents = []config.Agent{{Name: "worker", DependsOn: []string{"db"}}}
+		}
 		r := newSessionReconcilerDoctorCheck(cfg, nil).Run(&doctor.CheckContext{})
 		if r.Status != tc.want {
 			t.Errorf("session_reconciler = %q: status = %v (%s), want %v", tc.raw, r.Status, r.Message, tc.want)
@@ -268,12 +315,12 @@ func TestDoctorSessionReconcilerCheck(t *testing.T) {
 }
 
 // newRefusedSessionReconcilerCity is newForegroundStartLockCity with
-// session_reconciler = "v2" and a feature v2 defers (the identity breaker),
+// session_reconciler = "v2" and a feature v2 defers (chat auto-suspend),
 // so the latch refuses it: its exec bead-store script logs every op it runs,
 // so the log is the store spy.
 func newRefusedSessionReconcilerCity(t *testing.T) (cityPath, opsLog string) {
 	t.Helper()
-	return newV2SessionReconcilerCity(t, "session_circuit_breaker = true\n")
+	return newV2SessionReconcilerCity(t, "\n[chat_sessions]\nidle_timeout = \"30m\"\n")
 }
 
 // newV2SessionReconcilerCity is newForegroundStartLockCity with
@@ -424,7 +471,7 @@ func TestReloadSessionReconcilerDriftFollowsLatchedMode(t *testing.T) {
 		Stdout: io.Discard,
 		Stderr: io.Discard,
 	}))
-	got := cr.reconcilerDrift.observe(&config.City{})
+	got := cr.reconcilerDrift.observe(&config.City{Daemon: config.DaemonConfig{SessionReconciler: "legacy"}})
 	if !strings.Contains(got, "on disk is legacy; this controller runs v2") {
 		t.Fatalf("drift warning for a legacy candidate = %q, want it measured against the latched v2", got)
 	}

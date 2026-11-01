@@ -3,6 +3,7 @@ package workladder
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -24,7 +25,7 @@ func TestDecodeDesignExamples(t *testing.T) {
 	if !reflect.DeepEqual(s, want) {
 		t.Fatalf("DecodeStarted = %+v, want %+v", s, want)
 	}
-	if !s.Names(key("ga-12ab")) || s.Names(key("ga-99zz")) || s.Names(ClaimKey{Store: "rig:other", Bead: "ga-12ab"}) {
+	if !s.Names(key("ga-12ab"), 7) || s.Names(key("ga-99zz"), 7) || s.Names(ClaimKey{Store: "rig:other", Bead: "ga-12ab"}, 6) {
 		t.Fatalf("Names wrong for %+v", s)
 	}
 
@@ -54,10 +55,17 @@ func TestLadderRoundTrip(t *testing.T) {
 		{Key: ClaimKey{Store: "", Bead: "c"}, Kind: KindClaim, Rung: RungEscalated, Since: t0, Recycles: 1, Seed: SrcCurrentlyProcessing},
 		{Key: key("d"), Kind: KindClaim, Rung: RungClaimed, Since: t0.Add(123456789 * time.Nanosecond), Unreleased: true, Refused: 2},
 		{Key: key("e"), Kind: KindClaim, Rung: RungStarted, Since: t0, Seed: SrcClaimSession},
+		{Key: key("f"), Kind: KindClaim, Rung: RungStarted, Since: t0, Attempts: 2, Last: t0.Add(time.Hour), AwaitsHuman: true},
 	}, Release: &ReleaseMark{Key: key("d"), Gen: 9, At: t0}, LastNudge: t0.Add(time.Second), RecycledGen: 8}
-	got, err := DecodeLadder(EncodeLadder(r))
+	text := EncodeLadder(r)
+	got, err := DecodeLadder(text)
 	if err != nil {
 		t.Fatalf("round trip: %v", err)
+	}
+	// Only a wait writes the field, so a cell with none reads the same to
+	// a build that predates it.
+	if strings.Count(text, `"awaits_human"`) != 1 || !strings.Contains(text, `"awaits_human":true`) {
+		t.Fatalf("cell %s: want awaits_human on the waiting entry alone", text)
 	}
 	want := r
 	want.Entries = sortedEntries(r.Entries)
@@ -96,7 +104,7 @@ func TestStartedNames(t *testing.T) {
 		{ClaimKey{Store: "rig:a", Bead: "ga-3"}, false},
 	}
 	for _, tc := range cases {
-		if got := s.Names(tc.key); got != tc.want {
+		if got := s.Names(tc.key, 2); got != tc.want {
 			t.Errorf("Names(%+v) = %v, want %v", tc.key, got, tc.want)
 		}
 	}
@@ -104,7 +112,7 @@ func TestStartedNames(t *testing.T) {
 
 func TestStartedRoundTrip(t *testing.T) {
 	s := Started{V: 1, Claims: []StartedClaim{
-		{Key: key("n"), Gen: 8, At: t0.Add(time.Second), Via: ViaAdopt},
+		{Key: key("n"), Gen: 8, At: t0.Add(time.Second), Via: ViaAdopt, Resident: true},
 		{Key: key("o"), Gen: 7, At: t0, Via: ViaClaim},
 	}}
 	got, err := DecodeStarted(EncodeStarted(s))
@@ -169,5 +177,47 @@ func TestDecodeIssues(t *testing.T) {
 		if !errors.As(err, &issue) || issue.Cell != "work_started" {
 			t.Errorf("started %s: got %v; want a work_started DecodeIssue", name, err)
 		}
+	}
+}
+
+// Names reads the residence marker as the agent's writer does
+// (internal/session.WorkStartedEntry.NamesAt): a resident claim names exactly
+// its own store at any generation; an unmarked one (an older hook's, which
+// spelled a binding-resident claim by its rig leg) also names its bead under
+// any store, at its own generation only, and never at one the reader could
+// not read.
+func TestStartedNamesTheResidence(t *testing.T) {
+	s, err := DecodeStarted(`{"v":1,"claims":[` +
+		`{"store":"city","bead":"gcg-1","gen":2,"at":"2026-10-20T18:10:13Z","via":"claim","resident":true},` +
+		`{"store":"rig:gascity","bead":"gcg-2","gen":2,"at":"2026-10-20T18:10:13Z","via":"claim"},` +
+		`{"store":"rig:gascity","bead":"gcg-3","gen":1,"at":"2026-10-20T18:10:13Z","via":"claim"}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.Claims[0].Resident || s.Claims[1].Resident {
+		t.Fatalf("decoded markers wrong: %+v", s.Claims)
+	}
+	cases := []struct {
+		key  ClaimKey
+		gen  int64
+		want bool
+	}{
+		{ClaimKey{Store: "city", Bead: "gcg-1"}, 2, true},
+		{ClaimKey{Store: "city", Bead: "gcg-1"}, 5, true},
+		{ClaimKey{Store: "rig:gascity", Bead: "gcg-1"}, 2, false},
+		{ClaimKey{Store: "city", Bead: "gcg-2"}, 2, true},
+		{ClaimKey{Store: "rig:gascity", Bead: "gcg-2"}, 3, true},
+		{ClaimKey{Store: "city", Bead: "gcg-2"}, 3, false},
+		{ClaimKey{Store: "city", Bead: "gcg-2"}, 0, false},
+		{ClaimKey{Store: "city", Bead: "gcg-3"}, 2, false},
+		{ClaimKey{Store: "city", Bead: "gcg-3"}, 1, true},
+	}
+	for _, tc := range cases {
+		if got := s.Names(tc.key, tc.gen); got != tc.want {
+			t.Errorf("Names(%+v, gen %d) = %v, want %v", tc.key, tc.gen, got, tc.want)
+		}
+	}
+	if raw := EncodeStarted(Started{V: 1, Claims: []StartedClaim{{Key: ClaimKey{Store: "city", Bead: "gcg-1"}, Gen: 2, At: t0, Via: ViaClaim, Resident: true}}}); raw != `{"v":1,"claims":[{"store":"city","bead":"gcg-1","gen":2,"at":"2026-10-17T20:00:00Z","via":"claim","resident":true}]}` {
+		t.Fatalf("encoded %s", raw)
 	}
 }

@@ -173,10 +173,9 @@ func TestResolveProviderWorkspaceProvider(t *testing.T) {
 		t.Errorf("CommandString() = %q, want %q", rp.CommandString(), "codex")
 	}
 	defaultArgs := rp.ResolveDefaultArgs()
+	// No model or effort flags: codex uses the user's own config for both.
 	codexWantArgs := []string{
 		"--dangerously-bypass-approvals-and-sandbox",
-		"--model", "gpt-5.5",
-		"-c", "model_reasoning_effort=xhigh",
 	}
 	if len(defaultArgs) != len(codexWantArgs) {
 		t.Errorf("ResolveDefaultArgs() = %v, want %v", defaultArgs, codexWantArgs)
@@ -2422,6 +2421,7 @@ func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
 		OptionDefaults:         map[string]string{"permission_mode": "yolo"},
 		OptionsSchema:          []ProviderOption{{Key: "model"}},
 		UpstreamEnv:            UpstreamEnvBinding{BaseURL: "X_BASE_URL", APIKey: "X_API_KEY", AuthToken: "X_AUTH_TOKEN"},
+		ProgramStatus:          ProgramStatusBinding{Protocol: ProgramStatusProtocolOSC7501, App: "custom", Relay: boolPtr(true), Env: map[string]string{"P": "1"}},
 		PrintArgs:              []string{"-p"},
 		TitleModel:             "haiku",
 		ACPCommand:             "custom-acp",

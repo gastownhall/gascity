@@ -3,8 +3,10 @@ package formula
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -2897,6 +2899,64 @@ path = "scripts/verify.sh"
 	}
 }
 
+func TestParseTOML_CheckUnsupportedOuterKeyRejected(t *testing.T) {
+	tomlData := `
+formula = "mol-check-unsupported-outer"
+version = 2
+
+[[steps]]
+id = "verify"
+title = "Verify output"
+
+[steps.check]
+max_attempts = 1
+command = "/bin/true"
+
+[steps.check.check]
+mode = "exec"
+path = "/bin/true"
+timeout = "1m"
+`
+
+	p := NewParser()
+	_, err := p.ParseTOML([]byte(tomlData))
+	if err == nil {
+		t.Fatal("ParseTOML succeeded, want unsupported outer check key rejection")
+	}
+	if !strings.Contains(err.Error(), `step.check: unsupported key "command" (expected max_attempts or check)`) {
+		t.Fatalf("ParseTOML error = %v, want unsupported outer check key rejection", err)
+	}
+}
+
+func TestParseTOML_CheckUnsupportedNestedKeyRejected(t *testing.T) {
+	tomlData := `
+formula = "mol-check-unsupported-nested"
+version = 2
+
+[[steps]]
+id = "verify"
+title = "Verify output"
+
+[steps.check]
+max_attempts = 1
+
+[steps.check.check]
+mode = "exec"
+path = "/bin/true"
+args = ["--must-not-be-silently-dropped"]
+timeout = "1m"
+`
+
+	p := NewParser()
+	_, err := p.ParseTOML([]byte(tomlData))
+	if err == nil {
+		t.Fatal("ParseTOML succeeded, want unsupported nested check key rejection")
+	}
+	if !strings.Contains(err.Error(), `step.check.check: unsupported key "args" (expected mode, path, or timeout)`) {
+		t.Fatalf("ParseTOML error = %v, want unsupported nested check key rejection", err)
+	}
+}
+
 func TestValidateRalphUsesCheckTerminology(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-bad-check",
@@ -3685,5 +3745,210 @@ func TestDescriptionFileBaseDirResolvesSymlinkedParentWithMissingLeaf(t *testing
 	want := testutil.CanonicalPath(aliasDir)
 	if got != want {
 		t.Errorf("descriptionFileBaseDir(%q) = %q, want %q (resolved through symlinked parent)", missing, got, want)
+	}
+}
+
+func TestApplyVarDefaults(t *testing.T) {
+	tests := []struct {
+		name   string
+		defs   map[string]*VarDef
+		values map[string]string
+		want   map[string]string
+	}{
+		{
+			name:   "default references a provided var",
+			defs:   map[string]*VarDef{"review_target": {Default: StringPtr("{{binding_prefix}}reviewer")}},
+			values: map[string]string{"binding_prefix": "ops."},
+			want:   map[string]string{"binding_prefix": "ops.", "review_target": "ops.reviewer"},
+		},
+		{
+			name: "default references another default",
+			defs: map[string]*VarDef{
+				"review_target": {Default: StringPtr("{{prefix}}reviewer")},
+				"prefix":        {Default: StringPtr("{{binding_prefix}}")},
+			},
+			values: map[string]string{"binding_prefix": "ops."},
+			want:   map[string]string{"binding_prefix": "ops.", "prefix": "ops.", "review_target": "ops.reviewer"},
+		},
+		{
+			name:   "caller value wins over default",
+			defs:   map[string]*VarDef{"review_target": {Default: StringPtr("{{binding_prefix}}reviewer")}},
+			values: map[string]string{"binding_prefix": "ops.", "review_target": "{{binding_prefix}}custom"},
+			want:   map[string]string{"binding_prefix": "ops.", "review_target": "{{binding_prefix}}custom"},
+		},
+		{
+			name:   "caller text spliced into a default is not re-expanded",
+			defs:   map[string]*VarDef{"review_target": {Default: StringPtr("{{binding_prefix}}reviewer")}},
+			values: map[string]string{"binding_prefix": "{{secret}}", "secret": "leak"},
+			want:   map[string]string{"binding_prefix": "{{secret}}", "secret": "leak", "review_target": "{{secret}}reviewer"},
+		},
+		{
+			name:   "unknown reference stays literal",
+			defs:   map[string]*VarDef{"review_target": {Default: StringPtr("{{missing}}reviewer")}},
+			values: map[string]string{},
+			want:   map[string]string{"review_target": "{{missing}}reviewer"},
+		},
+		{
+			name:   "self reference stays literal",
+			defs:   map[string]*VarDef{"loop": {Default: StringPtr("x{{loop}}")}},
+			values: nil,
+			want:   map[string]string{"loop": "x{{loop}}"},
+		},
+		{
+			name: "mutual cycle stays literal at the closing placeholder",
+			defs: map[string]*VarDef{
+				"a": {Default: StringPtr("a{{b}}")},
+				"b": {Default: StringPtr("b{{a}}")},
+			},
+			values: nil,
+			want:   map[string]string{"a": "ab{{a}}", "b": "b{{a}}"},
+		},
+		{
+			name:   "nil def and nil default are skipped",
+			defs:   map[string]*VarDef{"nil_def": nil, "no_default": {}},
+			values: map[string]string{"x": "1"},
+			want:   map[string]string{"x": "1"},
+		},
+		{
+			name:   "explicit empty default is kept",
+			defs:   map[string]*VarDef{"empty": {Default: StringPtr("")}},
+			values: nil,
+			want:   map[string]string{"empty": ""},
+		},
+		{
+			name:   "nil defs copies values",
+			defs:   nil,
+			values: map[string]string{"x": "1"},
+			want:   map[string]string{"x": "1"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before := make(map[string]string, len(tt.values))
+			for k, v := range tt.values {
+				before[k] = v
+			}
+			got := ApplyVarDefaults(tt.defs, tt.values)
+			if !maps.Equal(got, tt.want) {
+				t.Fatalf("ApplyVarDefaults = %v, want %v", got, tt.want)
+			}
+			if again := ApplyVarDefaults(tt.defs, tt.values); !maps.Equal(again, got) {
+				t.Fatalf("ApplyVarDefaults not deterministic: %v then %v", got, again)
+			}
+			if !maps.Equal(tt.values, before) {
+				t.Fatalf("ApplyVarDefaults mutated values: %v, want %v", tt.values, before)
+			}
+			if got == nil {
+				t.Fatal("ApplyVarDefaults returned nil map")
+			}
+		})
+	}
+}
+
+func TestApplyDefaultsResolvesDefaultReferencingProvidedVar(t *testing.T) {
+	f := &Formula{Vars: map[string]*VarDef{"review_target": {Default: StringPtr("{{binding_prefix}}reviewer")}}}
+	got := ApplyDefaults(f, map[string]string{"binding_prefix": "ops."})
+	if got["review_target"] != "ops.reviewer" {
+		t.Fatalf("review_target = %q, want ops.reviewer", got["review_target"])
+	}
+	if got := ApplyDefaults(nil, map[string]string{"x": "1"}); got["x"] != "1" {
+		t.Fatalf("ApplyDefaults(nil) = %v, want copy of values", got)
+	}
+}
+
+func TestValidateVarsChecksResolvedDefault(t *testing.T) {
+	f := &Formula{Vars: map[string]*VarDef{
+		"review_target": {Default: StringPtr("{{binding_prefix}}reviewer"), Pattern: `^ops\.`},
+	}}
+	if err := ValidateVars(f, map[string]string{"binding_prefix": "ops."}); err != nil {
+		t.Fatalf("ValidateVars: %v", err)
+	}
+}
+
+func TestDefaultsReferencing(t *testing.T) {
+	tests := []struct {
+		name   string
+		defs   map[string]*VarDef
+		values map[string]string
+		want   []string
+	}{
+		{
+			name: "default references a named var",
+			defs: map[string]*VarDef{
+				"subject": {Default: StringPtr("unit {{convoy_id}}")},
+				"member":  {Default: StringPtr("{{issue}}")},
+			},
+			values: map[string]string{"convoy_id": "gc-1", "issue": "gc-2"},
+			want:   []string{"member", "subject"},
+		},
+		{
+			name:   "named var need not be supplied",
+			defs:   map[string]*VarDef{"subject": {Default: StringPtr("{{convoy_id}}")}},
+			values: nil,
+			want:   []string{"subject"},
+		},
+		{
+			name: "default reaches a named var through other defaults",
+			defs: map[string]*VarDef{
+				"subject": {Default: StringPtr("{{convoy_id}}")},
+				"title":   {Default: StringPtr("Review {{subject}}")},
+				"label":   {Default: StringPtr("{{title}} by {{reviewer}}")},
+			},
+			values: map[string]string{"reviewer": "ops"},
+			want:   []string{"label", "subject", "title"},
+		},
+		{
+			name: "supplied var is never included and passes no reference on",
+			defs: map[string]*VarDef{
+				"subject": {Default: StringPtr("{{convoy_id}}")},
+				"title":   {Default: StringPtr("Review {{subject}}")},
+			},
+			values: map[string]string{"subject": "manual", "convoy_id": "gc-1"},
+			want:   nil,
+		},
+		{
+			name: "defaults referencing no named var are not included",
+			defs: map[string]*VarDef{
+				"review_target": {Default: StringPtr("{{binding_prefix}}reviewer")},
+				"mode":          {Default: StringPtr("fast")},
+			},
+			values: map[string]string{"binding_prefix": "ops."},
+			want:   nil,
+		},
+		{
+			name: "cycle reaching a named var is included",
+			defs: map[string]*VarDef{
+				"a": {Default: StringPtr("{{b}}{{convoy_id}}")},
+				"b": {Default: StringPtr("{{a}}")},
+			},
+			want: []string{"a", "b"},
+		},
+		{
+			name: "cycle reaching no named var is not included",
+			defs: map[string]*VarDef{
+				"a": {Default: StringPtr("{{b}}")},
+				"b": {Default: StringPtr("{{a}}")},
+			},
+			want: nil,
+		},
+		{
+			name: "nil def and nil default are skipped",
+			defs: map[string]*VarDef{"nil_def": nil, "no_default": {}},
+			want: nil,
+		},
+		{
+			name:   "nil defs",
+			defs:   nil,
+			values: map[string]string{"convoy_id": "gc-1"},
+			want:   nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := DefaultsReferencing(tt.defs, tt.values, "convoy_id", "issue")
+			if names := slices.Sorted(maps.Keys(got)); !slices.Equal(names, tt.want) {
+				t.Fatalf("DefaultsReferencing = %v, want %v", names, tt.want)
+			}
+		})
 	}
 }

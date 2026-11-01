@@ -80,6 +80,17 @@ var ErrSQLiteBusyExhausted = errors.New("sqlite busy retries exhausted")
 // TierAvailability.
 var ErrStoreUnavailable = errors.New("bead store unavailable")
 
+// ErrWriteUnconfirmed marks a write the store reported committed whose
+// read-back did not show it before the store stopped waiting. It is not a
+// failed write: the write may well have landed and become visible a moment
+// later, so the caller must neither report it as failed nor replay it blindly.
+// Re-read the row to learn the outcome. When it wraps the error of a
+// multi-write operation (a staged BdStore Tx), the operation may also be
+// incomplete: the writes after the unconfirmed one did not run. Its producer
+// is BdStore's staged Tx apply, which reads each update back before the next
+// write (waitForUpdateProjection). Check with errors.Is.
+var ErrWriteUnconfirmed = errors.New("bead write committed but its read-back was not confirmed")
+
 // ErrParentProjectionSuperseded reports that a parent update was overtaken by a
 // concurrent reparent before the caller's projection wait could converge.
 var ErrParentProjectionSuperseded = errors.New("parent projection superseded by concurrent update")
@@ -200,8 +211,10 @@ type Bead struct {
 	NoHistory bool `json:"no_history,omitempty"`
 	// DeferUntil hides the bead from ready/claimable views until this time,
 	// mirroring bd's defer_until column (a future value means "not yet ready";
-	// nil or past means ready). Create paths preserve it; UpdateOpts does not
-	// mutate it.
+	// nil or past means ready — for a row the store does not record as
+	// deferred: a store-recorded deferred status defers the bead through
+	// IndefinitelyDeferred until the store itself lifts the deferral). Create
+	// paths preserve it; UpdateOpts does not mutate it.
 	DeferUntil *time.Time `json:"defer_until,omitempty"`
 	// IsBlocked carries bd's denormalized dependency-ready projection. Nil
 	// means the store did not provide it and cached ready falls back to
@@ -214,21 +227,36 @@ type Bead struct {
 	// stamped before closing, the same value BdStore and NativeDoltStore
 	// forward to their close. Reopening clears it.
 	CloseReason string `json:"close_reason,omitempty"`
-	// IndefinitelyDeferred preserves bd's status-based indefinite deferral
-	// after richer statuses normalize to Gas City's three-state model. Cache
-	// notifications restore status="deferred" on the event wire so another
-	// process can reconstruct it; other JSON surfaces remain unchanged.
+	// IndefinitelyDeferred preserves bd's status-based deferral after richer
+	// statuses normalize to Gas City's three-state model. It is set whenever
+	// the store records bd's deferred status, dated or not: defer_until only
+	// names when bd's own sweep may lift the deferral, and gc honors the lift
+	// once the store records it (#6207). Cache notifications restore
+	// status="deferred" on the event wire so another process can reconstruct
+	// it; other JSON surfaces remain unchanged.
 	//
 	// No read surface exposes it, so the two projections of the same bead
 	// disagree by design: a direct .gc/events.jsonl reader sees the
 	// status="deferred" EncodeBeadEventPayload wrote, while the HTTP, SSE and
-	// --json surfaces re-project through this struct and report status="open",
-	// defer_until=null, is_blocked=false — three signals that all read as
-	// "ready" for a bead ready deliberately excludes. An operator asking why a
-	// bead is not being picked up has nothing to read; giving the exclusion a
-	// derived read-only representation is a wire-design decision, not a
-	// consequence of this tag.
+	// --json surfaces re-project through this struct and report status="open"
+	// and is_blocked=false, with a defer_until that is null (a dateless
+	// deferral) or already past (a dated one the store has not woken) — signals
+	// that all read as "ready" for a bead ready deliberately excludes. An
+	// operator asking why a bead is not being picked up has nothing to read;
+	// giving the exclusion a derived read-only representation is a wire-design
+	// decision, not a consequence of this tag.
 	IndefinitelyDeferred bool `json:"-"`
+	// SourceStatus is the status the backing store recorded, as read, before
+	// Status folded it into Gas City's three-state model: bd's blocked,
+	// deferred, review, testing, hooked and pinned all read as "open". Empty
+	// means the store did not report one, or an explicit status transition
+	// (setBeadStatus) or an event-carried status superseded it. Like
+	// IndefinitelyDeferred it is store-internal and json:"-". CachingStore
+	// reads it to tell a row a Live read omits by design from one another
+	// process changed: a NativeDoltStore Live "open" is bd's raw open
+	// (nativeListPushesRawOpen), so a parked row is absent from that page
+	// without being stale.
+	SourceStatus string `json:"-"`
 	// Revision is the store-internal optimistic-concurrency token for
 	// ConditionalWriter. It is deliberately json:"-" so it stays off every HTTP
 	// and SSE wire path (beads.Bead is both the Huma response type and the SSE
@@ -269,6 +297,42 @@ type UpdateOpts struct {
 	Labels       []string // append these labels (nil = no change)
 	RemoveLabels []string // remove these labels (nil = no change)
 	Metadata     map[string]string
+	// UnsetMetadata removes these metadata keys. It is bd's
+	// `update --unset-metadata` and has bd's semantics: it is applied AFTER
+	// every Metadata set (so a key named in both ends up absent), and removing
+	// a key the bead does not carry is a no-op rather than an error.
+	//
+	// It is served by the unconditional Update of MemStore (and FileStore),
+	// SQLiteStore (and its Tx), BdStore (and the ProxiedStore and
+	// DoltliteReadStore that delegate to it), and a CachingStore over any of
+	// them. Every revision-guarded path refuses it
+	// (validateConditionalUpdateOpts). A write path that cannot remove a key
+	// (NativeDoltStore, the BdStore Tx, the exec protocol) refuses it with
+	// ErrUnsetMetadataUnsupported rather than silently keeping the key.
+	UnsetMetadata []string
+}
+
+// ErrUnsetMetadataUnsupported reports an UpdateOpts.UnsetMetadata write on a
+// path that cannot remove a metadata key. It is a refusal, never a partial
+// write: the whole update is rejected before anything is applied.
+var ErrUnsetMetadataUnsupported = errors.New("unsetting metadata keys is not supported on this write path")
+
+// refuseUnsetMetadata is the fail-closed guard for write paths that do not
+// implement UpdateOpts.UnsetMetadata. A path that ignored the field would
+// report success while the key stayed set.
+func refuseUnsetMetadata(path string, opts UpdateOpts) error {
+	if len(opts.UnsetMetadata) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", path, ErrUnsetMetadataUnsupported)
+}
+
+// unsetMetadataKeys deletes opts.UnsetMetadata from metadata in place. It runs
+// after the Metadata sets, matching bd's set-then-unset order.
+func unsetMetadataKeys(metadata map[string]string, keys []string) {
+	for _, key := range keys {
+		delete(metadata, key)
+	}
 }
 
 // ConditionalAssignmentReleaser is implemented by stores that can release an
@@ -515,6 +579,8 @@ func validateConditionalUpdateOpts(o UpdateOpts, labelsGuarded bool) error {
 	switch {
 	case o.ParentID != nil:
 		return &ConditionalUpdateFieldUnsupportedError{Field: "parent_id"}
+	case len(o.UnsetMetadata) > 0:
+		return &ConditionalUpdateFieldUnsupportedError{Field: "unset_metadata"}
 	case !labelsGuarded && len(o.Labels) > 0:
 		return &ConditionalUpdateFieldUnsupportedError{Field: "labels"}
 	case !labelsGuarded && len(o.RemoveLabels) > 0:
@@ -545,8 +611,10 @@ type ConditionalWriterHandleProvider interface {
 // globally — mirroring GraphApplyFor. It does NOT unwrap the class_store.go
 // typed wrappers (WorkStore, GraphStore, …): those embed the Store interface, so
 // optional capabilities are not promoted through them and a direct assertion on
-// the wrapper fails. A caller holding a typed class wrapper must pass its
-// unwrapped .Store field to this helper, exactly as with GraphApplyFor.
+// the wrapper fails. A caller holding a typed class wrapper reaches the
+// capability with beads.As[ConditionalWriter], which sees through it; passing
+// the unwrapped .Store field here is the older unwrap the storeclass lint
+// baselines.
 func ConditionalWriterFor(store Store) (ConditionalWriter, bool) {
 	if store == nil {
 		return nil, false
@@ -872,10 +940,12 @@ func HasReadyExcludedLabel(b Bead) bool {
 	return false
 }
 
-// IsDeferred reports whether a bead is hidden indefinitely by bd's deferred
-// status or temporarily by a future defer_until.
-// cmd_hook.isFutureDeferredHookCandidate mirrors only the time-bound half; it
-// operates on raw bd JSON before this normalization.
+// IsDeferred reports whether a bead is hidden by bd's deferred status (dated
+// or not, until the store itself lifts the deferral) or by a future
+// defer_until on a row the store does not record as deferred.
+// cmd_hook's filterUnreadyHookCandidates mirrors both halves on raw bd JSON,
+// before this normalization: isStoreDeferredHookCandidate reads the raw
+// status and isFutureDeferredHookCandidate the date.
 func IsDeferred(b Bead, now time.Time) bool {
 	return b.IndefinitelyDeferred ||
 		(b.DeferUntil != nil && b.DeferUntil.After(now))
@@ -888,6 +958,7 @@ func IsDeferred(b Bead, now time.Time) bool {
 func setBeadStatus(b *Bead, status string) {
 	b.Status = status
 	b.IndefinitelyDeferred = false
+	b.SourceStatus = ""
 	if status != "closed" {
 		b.CloseReason = ""
 	}

@@ -1,11 +1,13 @@
 package acceptancehelpers
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/test/toolhome"
 )
@@ -48,30 +50,38 @@ func (e *Env) ToolList() []string {
 	return toolhome.Environ(list, e.toolHome, toolhome.Explicit(list)...)
 }
 
-// ToolCommand is exec.Command for a bd or dolt the suite runs outside any Env
-// (a version or capability probe): the test process's environment, re-homed
-// under a fresh per-test directory.
+// ToolCommand is a bounded exec.Command for a bd or dolt the suite runs outside
+// any Env (a version or capability probe): the test process's environment,
+// re-homed under a fresh per-test directory.
 func ToolCommand(t *testing.T, bin string, args ...string) *exec.Cmd {
+	t.Helper()
+	cmd, _ := toolCommand(t, acceptanceToolCommandTimeout, bin, args...)
+	return cmd
+}
+
+func toolCommand(t *testing.T, timeout time.Duration, bin string, args ...string) (*exec.Cmd, context.Context) {
 	t.Helper()
 	home := filepath.Join(TempDir(t), "tool-home")
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		t.Fatalf("create tool home: %v", err)
 	}
-	cmd := exec.Command(bin, args...) //nolint:gosec // resolved test binary
+	cmd, ctx := boundedToolCommand(t, timeout, bin, args...)
 	cmd.Env = toolhome.Environ(os.Environ(), home)
 	// bd walks up from its working directory looking for a .beads. The test
 	// process's cwd is its package directory, which on a developer box sits
 	// under the real home, so an inherited cwd reads ~/.beads/config.yaml
 	// whatever HOME says. A caller that needs a workspace sets Dir itself.
 	cmd.Dir = home
-	return cmd
+	return cmd, ctx
 }
 
 // LinkBeadsTooling puts this run's bd and dolt in dir for gc to find on PATH and
 // returns the bd it wrote, which is also what to hand gc as BD_BIN.
 //
 // dolt is a symlink. bd is toolhome's wrapper around bdPath, re-homed under the
-// Env's tool home, because gc forks bd with the Env's real HOME.
+// Env's tool home, because gc forks bd with the Env's real HOME. A failed
+// `bd init` also prints the scope's dolt logs to stderr (see
+// ParseBDInitDiagnostics), because gc rig add removes them on rollback.
 func LinkBeadsTooling(t *testing.T, env *Env, dir, bdPath, doltPath string) string {
 	t.Helper()
 	wrapper, err := InstallBeadsTooling(env, dir, bdPath, doltPath)
@@ -93,7 +103,7 @@ func InstallBeadsTooling(env *Env, dir, bdPath, doltPath string) (string, error)
 		}
 	}
 	wrapper := filepath.Join(dir, "bd")
-	if err := toolhome.WriteWrapper(wrapper, env.ToolHome(), bdPath); err != nil {
+	if err := writeBDInitWrapper(wrapper, env.ToolHome(), bdPath); err != nil {
 		return "", err
 	}
 	return wrapper, nil

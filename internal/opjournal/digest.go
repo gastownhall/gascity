@@ -13,8 +13,24 @@ import (
 // covered, so a retry that only recomputes them still deduplicates. Skipping
 // empty values keeps every existing digest stable when an optional key is
 // added later.
-func RequestDigest(op Op) string {
+func RequestDigest(op Op) string { return digestFields(requestFields(op)) }
+
+// digestCompanionKey names a companion's tag in companionDigest's fields. It
+// is never written as metadata.
+const digestCompanionKey = "gc.op.companion"
+
+// companionDigest is the request digest of op proposed with the companion
+// tag names (Store.ProposeWith): RequestDigest's fields plus the tag, so it
+// never equals the digest of the same request proposed without a companion
+// or with another one.
+func companionDigest(op Op, tag string) string {
 	fields := requestFields(op)
+	fields[digestCompanionKey] = tag
+	return digestFields(fields)
+}
+
+// digestFields hashes fields as RequestDigest describes.
+func digestFields(fields map[string]string) string {
 	keys := make([]string, 0, len(fields))
 	for k, v := range fields {
 		if v != "" {

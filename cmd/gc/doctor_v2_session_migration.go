@@ -18,19 +18,27 @@ import (
 
 // v2SessionMigrationCheck lists, per leg with sample IDs, the open session rows
 // v2 refuses to boot over. It opens each leg read-only itself: doctor's store
-// factory can write (beads v1.3.1's native Dolt open migrates the schema). An
-// unchecked leg may hide a refused row: an error under v2, a warning otherwise.
+// factory can write (beads v1.3.1's native Dolt open migrates the schema). A
+// leg that failed to open or read may hide a refused row: an error under v2, a
+// warning otherwise. A leg whose backend has no read-only open only warns, in
+// either mode: that gap is a fixed property of the backend, not a fault an
+// operator can clear, and v2's boot census reads the leg through the
+// controller's own store.
 type v2SessionMigrationCheck struct {
-	cfg      *config.City
-	cityName string
-	openLegs func() []v2SessionLeg
+	cfg       *config.City
+	cityName  string
+	openLegs  func() []v2SessionLeg
+	lookupEnv func(string) (string, bool) // nil reads reconcilerModeLookupEnv
 }
 
-// v2SessionLeg is one census leg; with no read-only open, notChecked says why.
+// v2SessionLeg is one census leg. A leg with no store is not checked and
+// notChecked says why: noReadOnlyOpen when its backend has no read-only open
+// (v2SessionBdRefusal), else the fault that left it unopened.
 type v2SessionLeg struct {
-	ref        string
-	store      beads.Store
-	notChecked string
+	ref            string
+	store          beads.Store
+	notChecked     string
+	noReadOnlyOpen bool
 }
 
 func newV2SessionMigrationCheck(cfg *config.City, cityPath string) *v2SessionMigrationCheck {
@@ -57,11 +65,16 @@ func (c *v2SessionMigrationCheck) Fix(_ *doctor.CheckContext) error { return nil
 func (c *v2SessionMigrationCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	var rows []session.Info
 	var details []string
-	seen, notChecked := map[string]bool{}, 0
+	seen, notChecked, faulted := map[string]bool{}, 0, 0
 	for _, leg := range c.openLegs() {
 		if leg.store == nil {
 			notChecked++
-			details = append(details, fmt.Sprintf("leg %s: not checked (no read-only open): %s", leg.ref, leg.notChecked))
+			cause := "no read-only open"
+			if !leg.noReadOnlyOpen {
+				faulted++
+				cause = "open failed"
+			}
+			details = append(details, fmt.Sprintf("leg %s: not checked (%s): %s", leg.ref, cause, leg.notChecked))
 			continue
 		}
 		infos, err := sessionFrontDoor(leg.store).ListAll(session.ListAllOptions{Live: true})
@@ -79,6 +92,7 @@ func (c *v2SessionMigrationCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 		}
 		if err != nil {
 			notChecked++
+			faulted++
 			details = append(details, fmt.Sprintf("leg %s: not checked (read failed after %d row(s)): %v", leg.ref, open, err))
 			continue
 		}
@@ -92,16 +106,23 @@ func (c *v2SessionMigrationCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 	}
 	msg := fmt.Sprintf("%d open session row(s): %d in a state main does not know, %d shared pool-slot session name(s), %d named session(s) claimed by more than one row",
 		len(rows), flagged, len(m.SharedSlotNames), len(m.DuplicateNamed))
-	mode, _, _ := c.cfg.Daemon.SessionReconcilerMode()
+	mode, resolved := doctorReconcilerMode(c.cfg, c.lookupEnv)
+	details = append(details, resolved)
+	lowerBound := ""
+	if notChecked > 0 {
+		lowerBound = fmt.Sprintf("; %d leg(s) not checked, counts are a lower bound", notChecked)
+	}
 	switch {
-	case notChecked > 0 && mode == config.SessionReconcilerV2:
-		return errorCheck(c.Name(), msg+fmt.Sprintf("; %d leg(s) not checked, counts are a lower bound", notChecked),
-			"read the unchecked legs from a store copy", details)
+	case faulted > 0 && mode == reconcilerV2:
+		return errorCheck(c.Name(), msg+lowerBound, "read the unchecked legs from a store copy", details)
+	case m.refusal() != nil && mode == reconcilerV2:
+		// An unset key that resolves to v2 boots over this census as an
+		// explicit v2 does, so the refusal is reported before it lands.
+		return warnCheck(c.Name(), msg+"; v2 refuses to boot over them ("+resolved+")"+lowerBound,
+			`close or repair the rows listed in the details (the repair, --fix, is not available yet), or set session_reconciler = "legacy"`, details)
 	case notChecked > 0:
-		return warnCheck(c.Name(), msg+fmt.Sprintf("; %d leg(s) not checked, counts are a lower bound", notChecked),
-			"read the unchecked legs from a store copy; a legacy city warns here, so a census must look for this warning's \"not checked\" details, not the exit code", details)
-	case m.refusal() != nil && mode == config.SessionReconcilerV2:
-		return warnCheck(c.Name(), msg+"; v2 refuses to boot over them", "the repair (--fix) is not available yet", details)
+		return warnCheck(c.Name(), msg+lowerBound,
+			"read the unchecked legs from a store copy; this only warns, so a census must look for this warning's \"not checked\" details, not the exit code", details)
 	case m.refusal() != nil:
 		msg += " (legacy runs over these; v2 would refuse to boot)"
 	}
@@ -174,9 +195,10 @@ func openV2SessionScopeLeg(cityPath string, cfg *config.City, ref, dir string, r
 	if !ok {
 		backend = beadsBackend(cityPath)
 	}
-	leg := v2SessionLeg{ref: ref, notChecked: v2SessionBdRefusal(rawBeadsProviderForScope(dir, cityPath), scopeUsesProxiedDoltMode(cityPath, dir), backend)}
+	refusal := v2SessionBdRefusal(rawBeadsProviderForScope(dir, cityPath), scopeUsesProxiedDoltMode(cityPath, dir), backend)
+	leg := v2SessionLeg{ref: ref, notChecked: refusal, noReadOnlyOpen: refusal != ""}
 	if err != nil {
-		leg.notChecked = err.Error()
+		leg.notChecked, leg.noReadOnlyOpen = err.Error(), false
 	}
 	if leg.notChecked == "" {
 		leg.store = beads.NewBdStoreWithPrefix(dir, readOnlyBdRunner(run), issuePrefixForScope(dir, cityPath, cfg), bdStoreOptionsForConfig(cfg)...)

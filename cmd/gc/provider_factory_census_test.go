@@ -57,7 +57,8 @@ var canonicalProviderCalls = map[string]int{
 	"cmd_convoy_dispatch.go:validateDispatchSessionProviderConfig:newSessionProviderFromContext:bind-error":                                    1,
 	"cmd_doctor.go:buildDoctorChecks:newSessionProvider:bind-error":                                                                            1,
 	"cmd_handoff.go:cmdHandoffRemoteWithForce:newSessionProvider:bind-error":                                                                   1,
-	"cmd_handoff.go:cmdHandoffWithForce:newSessionProvider:bind-error":                                                                         1,
+	"cmd_handoff.go:runHandoff:newSessionProvider:bind-error":                                                                                  1,
+	"cmd_hook_claim.go:continuationLaneNoticeIn:newSessionProviderForCity:bind-error":                                                          1,
 	"cmd_nudge.go:cmdNudgePoll:newSessionProvider:bind-error":                                                                                  1,
 	"cmd_nudge.go:deliverSessionNudge:newSessionProvider:bind-error":                                                                           1,
 	"cmd_nudge.go:sendMailNotify:newSessionProvider:bind-error":                                                                                1,
@@ -88,6 +89,7 @@ var canonicalProviderCalls = map[string]int{
 	"cmd_stop.go:newStopProbeSessionProvider:newSessionProviderFromContext:bind-error":                                                         1,
 	"cmd_supervisor.go:startOneCity:newSessionProviderFromContext:bind-error":                                                                  1,
 	"completion.go:loadSessionsForCompletion:newSessionProviderFromContext:bind-error":                                                         1,
+	"conversation_lane_submit.go:provider:newSessionProvider:bind-error":                                                                       1,
 	"providers.go:newSessionProvider:newSessionProviderFromContext:forward-to-withSessionProviderConstructionContext":                          1,
 	"providers.go:newSessionProvider:withSessionProviderConstructionContext:forward-return":                                                    1,
 	"providers.go:newSessionProviderForCity:newSessionProviderFromContext:forward-to-withSessionProviderConstructionContext":                   1,
@@ -98,6 +100,7 @@ var canonicalProviderCalls = map[string]int{
 	"session_logs_resolve.go:resolveStoredSessionLogSource:newSessionProvider:bind-error":                                                      1,
 	"session_template_start.go:materializeSessionForAgentConfig:newSessionProvider:bind-error":                                                 1,
 	"session_template_start.go:materializeSessionForTemplateWithOptions:newSessionProvider:bind-error":                                         1,
+	"storage_verb_exclusion.go:<package>:newStatusSessionProviderForCityWithSnapshot:bind-error":                                               1,
 }
 
 // Multi-result forwarding is intentionally narrower than ordinary result

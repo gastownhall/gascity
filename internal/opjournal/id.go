@@ -32,6 +32,10 @@ const (
 	maxTokenLen        = 128
 )
 
+// MaxClientKeyLen is the longest client key, in bytes, Propose accepts
+// (ValidateClientKey).
+const MaxClientKeyLen = maxClientKeyLen
+
 // The id families this package mints itself. ownIDFamilies is the one list of
 // them: PinnedID refuses each, and every <family>IDInfix of this package is
 // "-" + one of them + "-" (TestOwnIDFamiliesCoverEveryInfix), so a family
@@ -142,6 +146,12 @@ var pinnedIDRe = regexp.MustCompile(`^[^\s,"@#]+-[a-z][a-z0-9]{0,15}-[a-z2-7]{26
 // it.
 func IsPinnedID(id string) bool { return pinnedIDRe.MatchString(id) }
 
+// IsOpID reports whether id has the shape of an op id (<prefix>-op-<26
+// base32 characters>), as DeriveID mints them. A producer that stores
+// either an op id or another reference in one field (a wait's nudge_id)
+// tells them apart by it.
+func IsOpID(id string) bool { return validOpID(id) }
+
 // ValidateClientKey refuses a client key Propose would refuse: empty, longer
 // than 512 bytes, not UTF-8, with a control character, or with leading or
 // trailing space. Producers check a supplied key with it before proposing.
@@ -161,21 +171,6 @@ func InterruptKey(gen int64, turn string) (string, error) {
 		return "", err
 	}
 	return composedKey("interrupt key", "stop:"+strconv.FormatInt(gen, 10)+":"+turn)
-}
-
-// RespondKey is the client key of a respond to one interaction of one
-// session: respond:<gen>:<request_id>. The generation is part of the key
-// because some runtimes derive request ids from content. It is unused: in O0
-// respond ops are keyed by the client key, and OJ-16 keys them by the
-// interaction occurrence.
-func RespondKey(gen int64, requestID string) (string, error) {
-	if gen < 1 {
-		return "", invalidf("respond key: generation %d must be >= 1", gen)
-	}
-	if err := validateText("respond key request id", requestID, maxClientKeyLen); err != nil {
-		return "", err
-	}
-	return composedKey("respond key", "respond:"+strconv.FormatInt(gen, 10)+":"+requestID)
 }
 
 // composedKey returns key when it is a client key Propose accepts, so a

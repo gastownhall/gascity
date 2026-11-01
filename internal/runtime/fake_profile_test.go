@@ -30,6 +30,7 @@ import (
 // interfaces, by name. TestOptionalInterfacesAreListed keeps it complete.
 var optionalInterfaces = map[string]reflect.Type{
 	"AttachmentObserverWithError":     reflect.TypeFor[runtime.AttachmentObserverWithError](),
+	"BackgroundWorkStopper":           reflect.TypeFor[runtime.BackgroundWorkStopper](),
 	"BackendListingProvider":          reflect.TypeFor[runtime.BackendListingProvider](),
 	"BackendsProvider":                reflect.TypeFor[runtime.BackendsProvider](),
 	"ConditionalProcessTableScanner":  reflect.TypeFor[runtime.ConditionalProcessTableScanner](),
@@ -39,6 +40,8 @@ var optionalInterfaces = map[string]reflect.Type{
 	"ExecProvider":                    reflect.TypeFor[runtime.ExecProvider](),
 	"FreshByConstruction":             reflect.TypeFor[runtime.FreshByConstruction](),
 	"FencedInputProvider":             reflect.TypeFor[runtime.FencedInputProvider](),
+	"FencedInteractionProvider":       reflect.TypeFor[runtime.FencedInteractionProvider](),
+	"FreshActivityProvider":           reflect.TypeFor[runtime.FreshActivityProvider](),
 	"FreshLivenessObserver":           reflect.TypeFor[runtime.FreshLivenessObserver](),
 	"IdentitySidecarProvider":         reflect.TypeFor[runtime.IdentitySidecarProvider](),
 	"IdleProbeBudgetProvider":         reflect.TypeFor[runtime.IdleProbeBudgetProvider](),
@@ -56,6 +59,9 @@ var optionalInterfaces = map[string]reflect.Type{
 	"LivenessObserver":                reflect.TypeFor[runtime.LivenessObserver](),
 	"LivenessObserverWithError":       reflect.TypeFor[runtime.LivenessObserverWithError](),
 	"ProcessTableScanner":             reflect.TypeFor[runtime.ProcessTableScanner](),
+	"ProgramCaptureHealer":            reflect.TypeFor[runtime.ProgramCaptureHealer](),
+	"ProgramStatusProvider":           reflect.TypeFor[runtime.ProgramStatusProvider](),
+	"ProgramStatusShadowProvider":     reflect.TypeFor[runtime.ProgramStatusShadowProvider](),
 	"RelaunchProvider":                reflect.TypeFor[runtime.RelaunchProvider](),
 	"Router":                          reflect.TypeFor[runtime.Router](),
 	"ServerDeathConfirmer":            reflect.TypeFor[runtime.ServerDeathConfirmer](),
@@ -71,6 +77,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"TurnFenceProvider":               reflect.TypeFor[runtime.TurnFenceProvider](),
 	"TurnInterruptCapabilityProvider": reflect.TypeFor[runtime.TurnInterruptCapabilityProvider](),
 	"TurnObservationProvider":         reflect.TypeFor[runtime.TurnObservationProvider](),
+	"TurnRunningProvider":             reflect.TypeFor[runtime.TurnRunningProvider](),
 	"UnattendedSessionStopper":        reflect.TypeFor[runtime.UnattendedSessionStopper](),
 }
 
@@ -182,7 +189,7 @@ func execConnectionPack(t *testing.T) string {
 // or fewer than the provider production builds, other capabilities, another
 // answer from a fixed trait (sleep capability, fresh reads, an identity
 // sidecar, a transport, an idle-proof budget, a turn-interrupt mode, input
-// fencing, local transcripts, a steer mode), or no
+// fencing, response fencing, local transcripts, a steer mode), or no
 // backend checked.
 func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 	backends := productionBackends(t)
@@ -208,7 +215,7 @@ func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 // traits are p's answers to the optional interfaces that report a backend's
 // fixed traits, "-" for one it does not implement.
 func traits(p runtime.Provider) string {
-	out := []string{"-", "-", "-", "-", "-", "-", "-", "-", "-"}
+	out := []string{"-", "-", "-", "-", "-", "-", "-", "-", "-", "-"}
 	if s, ok := p.(runtime.SleepCapabilityProvider); ok {
 		out[0] = string(s.SleepCapability("s"))
 	}
@@ -235,6 +242,9 @@ func traits(p runtime.Provider) string {
 	}
 	if f, ok := p.(runtime.SteerCapabilityProvider); ok {
 		out[8] = string(f.SteerMode("s"))
+	}
+	if f, ok := p.(runtime.FencedInteractionProvider); ok {
+		out[9] = string(f.ResponseFencing("s"))
 	}
 	return strings.Join(out, " ")
 }
@@ -277,6 +287,79 @@ func TestFullFakeAnswersFromItsState(t *testing.T) {
 	broken := runtime.FullFake{Fake: runtime.NewFailFake()}
 	if _, err := broken.ObserveLivenessWithError("s", nil); err == nil {
 		t.Fatal("a broken fake's error-bearing read succeeded")
+	}
+}
+
+// Kills a full fake whose screen readings ignore its busy-turn knobs: a
+// running session shows no turn and reads idle until ScreenTurnRunning names
+// it, then shows the turn and reads busy; ScreenReadErrors fails the turn
+// reading; an unstarted session cannot be looked at.
+func TestFullFakeScreenShowsTheTurnItsKnobsSet(t *testing.T) {
+	f := runtime.NewFake()
+	b := runtime.FullFake{Fake: f}
+	if _, err := b.TurnRunning("s"); !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("unstarted TurnRunning error = %v, want ErrSessionNotFound", err)
+	}
+	if err := f.Start(t.Context(), "s", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	read := func() (bool, bool) {
+		t.Helper()
+		running, err := b.TurnRunning("s")
+		if err != nil {
+			t.Fatalf("TurnRunning: %v", err)
+		}
+		idle, err := b.SnapshotIdle("s")
+		if err != nil {
+			t.Fatalf("SnapshotIdle: %v", err)
+		}
+		return running, idle
+	}
+	if running, idle := read(); running || !idle {
+		t.Fatalf("no knob: running %v idle %v; want no turn, idle", running, idle)
+	}
+	f.ScreenTurnRunning = map[string]bool{"s": true}
+	if running, idle := read(); !running || idle {
+		t.Fatalf("ScreenTurnRunning: running %v idle %v; want a turn, busy", running, idle)
+	}
+	f.ScreenTurnRunning["s"] = false
+	if running, idle := read(); running || !idle {
+		t.Fatalf("turn ended: running %v idle %v; want no turn, idle", running, idle)
+	}
+	f.ScreenReadErrors = map[string]error{"s": runtime.ErrRuntimeUnavailable}
+	if _, err := b.TurnRunning("s"); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("ScreenReadErrors: TurnRunning error = %v, want ErrRuntimeUnavailable", err)
+	}
+}
+
+// Kills a full fake whose fresh activity read ignores its knobs: it reads the
+// Activity GetLastActivity serves until PaneActivity moves the session's own
+// clock past it, while GetLastActivity keeps the older one; PaneActivityErrors
+// fails the read; an unstarted session cannot be read.
+func TestFullFakeFreshActivityReadsThePaneClock(t *testing.T) {
+	f := runtime.NewFake()
+	b := runtime.FullFake{Fake: f}
+	if _, err := b.FreshActivity("s"); !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("unstarted FreshActivity error = %v, want ErrSessionNotFound", err)
+	}
+	if err := f.Start(t.Context(), "s", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	cached, drawn := time.Unix(1000, 0), time.Unix(1060, 0)
+	f.SetActivity("s", cached)
+	if at, err := b.FreshActivity("s"); err != nil || !at.Equal(cached) {
+		t.Fatalf("no knob: FreshActivity = %v, %v; want the Activity %v", at, err, cached)
+	}
+	f.PaneActivity = map[string]time.Time{"s": drawn}
+	if at, err := b.FreshActivity("s"); err != nil || !at.Equal(drawn) {
+		t.Fatalf("PaneActivity: FreshActivity = %v, %v; want %v", at, err, drawn)
+	}
+	if at, err := b.GetLastActivity("s"); err != nil || !at.Equal(cached) {
+		t.Fatalf("PaneActivity: GetLastActivity = %v, %v; want the cached %v", at, err, cached)
+	}
+	f.PaneActivityErrors = map[string]error{"s": runtime.ErrRuntimeUnavailable}
+	if _, err := b.FreshActivity("s"); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("PaneActivityErrors: FreshActivity error = %v, want ErrRuntimeUnavailable", err)
 	}
 }
 
@@ -508,4 +591,38 @@ func TestT3BridgeProfileAnswersProductionsTurnCapabilities(t *testing.T) {
 	if got := fake.TurnCapabilities("s"); got != want {
 		t.Fatalf("t3bridge profile TurnCapabilities = %+v, production declares %+v", got, want)
 	}
+}
+
+// A profiled tmux must reach the backend's background-work stop with its
+// caller's context, and pass its answer back.
+func TestTmuxProfileForwardsBackgroundWorkStop(t *testing.T) {
+	for _, result := range []error{nil, runtime.ErrInteractionUnsupported} {
+		b := &profileBackgroundStopSpy{FullFake: runtime.FullFake{Fake: runtime.NewFake()}, result: result}
+		p := runtime.NewFakeProfile(runtime.ProfileTmux, b)
+		stopper, ok := p.(runtime.BackgroundWorkStopper)
+		if !ok {
+			t.Fatal("tmux profile lacks BackgroundWorkStopper")
+		}
+		ctx := t.Context()
+		if err := stopper.StopBackgroundWork(ctx, "session"); !errors.Is(err, result) {
+			t.Fatalf("StopBackgroundWork error = %v, want %v", err, result)
+		}
+		if b.calls != 1 || b.ctx != ctx || b.name != "session" {
+			t.Fatalf("StopBackgroundWork did not forward context and session: %+v", b)
+		}
+	}
+}
+
+type profileBackgroundStopSpy struct {
+	runtime.FullFake
+	ctx    context.Context
+	name   string
+	result error
+	calls  int
+}
+
+func (b *profileBackgroundStopSpy) StopBackgroundWork(ctx context.Context, name string) error {
+	b.ctx, b.name = ctx, name
+	b.calls++
+	return b.result
 }

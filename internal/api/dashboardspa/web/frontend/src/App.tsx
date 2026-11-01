@@ -6,7 +6,7 @@ import {
   type LazyExoticComponent,
   type ReactNode,
 } from 'react';
-import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation } from 'react-router';
 import { api } from './api/client';
 import { AttentionProvider } from './attention/context';
 import { useLiveAttentionContributors } from './attention/liveContributors';

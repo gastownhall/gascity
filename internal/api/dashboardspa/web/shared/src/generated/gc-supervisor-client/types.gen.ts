@@ -177,6 +177,10 @@ export type AgentPatchSetInputBody = {
 export type AgentResponse = {
     active_bead?: string;
     activity?: string;
+    /**
+     * Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.
+     */
+    activity_source?: 'program' | 'transcript';
     available: boolean;
     context_pct?: number;
     context_window?: number;
@@ -195,10 +199,17 @@ export type AgentResponse = {
      * Configured session limits of the agent (or of its pool).
      */
     pool_limits?: PoolLimits;
+    /**
+     * The agent session program's own status report (OSC 7501), present while the city's program_status switch is shadow or on and the reading is valid. Absent means the status is unknown, never idle.
+     */
+    program_status?: SessionProgramStatus;
     provider?: string;
     rig?: string;
     running: boolean;
     session?: SessionInfo;
+    /**
+     * Agent state: suspended, quarantined, stopped, working, waiting, idle, blocked or error. blocked and error come only from the session program's own status report, under the city's program_status switch on.
+     */
     state: string;
     suspended: boolean;
     unavailable_reason?: string;
@@ -267,7 +278,7 @@ export type AnnotatedProviderResponse = {
 
 export type AsyncAcceptedBody = {
     /**
-     * City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty.
+     * City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog, and to /v0/city/{cityName}/request/{requestId} to read its outcome. A value of 0 means the event log was empty.
      */
     event_cursor: string;
     /**
@@ -1112,7 +1123,7 @@ export type ConversationOpResult = {
      */
     coalesced_into?: string;
     /**
-     * Context epoch the operation ran in.
+     * Context epoch the operation ran in, or, for one skipped{stale} unrun, the epoch that fenced it off.
      */
     context_epoch?: number;
     /**
@@ -1120,7 +1131,7 @@ export type ConversationOpResult = {
      */
     delivery?: ConversationOpDelivery;
     /**
-     * Session generation the operation ran in.
+     * Session generation the operation ran in, or, for one skipped{stale} unrun because its session moved on, the generation that fenced it off.
      */
     generation?: number;
     /**
@@ -1360,7 +1371,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimFailedPayload | BeadClaimLoopHeldPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | FactRecordedPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpChangedPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimFailedPayload | BeadClaimLoopHeldPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | FactRecordedPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpChangedPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestAcceptedPayload | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionProgramStatusShadowPayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StorageRigPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkRateLimitedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -3231,6 +3242,7 @@ export type ReadyBead = {
 
 export type ReadyBeadBlocker = {
     id: string;
+    reason?: string;
     status: string;
 };
 
@@ -3253,6 +3265,17 @@ export type Record = {
     severity: string;
     source_path?: string;
     source_pid?: number;
+};
+
+export type RequestAcceptedPayload = {
+    /**
+     * Which operation was accepted.
+     */
+    operation: 'session.create' | 'session.message' | 'session.submit';
+    /**
+     * Correlation ID from the 202 response.
+     */
+    request_id: string;
 };
 
 export type RequestFailedPayload = {
@@ -3280,6 +3303,25 @@ export type RequestFailedPayload = {
      * Session a failed session.create had already written, when the server could identify it, so the client can inspect or clean it up instead of retrying into a duplicate. Absence does not prove that no session was written. The event subject does not carry this ID; match the event to its request by request_id.
      */
     session_id?: string;
+};
+
+export type RequestOutcome = {
+    /**
+     * The terminal event exactly as /v0/city/{cityName}/events and the event stream deliver it: request.result.session.* for succeeded, request.failed for failed. Absent while pending and for outcome_unknown.
+     */
+    event?: TypedEventStreamEnvelope;
+    /**
+     * The operation that was accepted.
+     */
+    operation: 'session.create' | 'session.message' | 'session.submit';
+    /**
+     * The request_id from the 202 response.
+     */
+    request_id: string;
+    /**
+     * pending: the request is still running, or its terminal event is held until the city event log takes it. succeeded: its request.result.* event was recorded; event carries it. failed: its request.failed event was recorded; event carries it. outcome_unknown: the server that accepted the request stopped (or lost the terminal event) before recording an outcome, so the operation may or may not have taken effect; inspect the target resource before retrying.
+     */
+    state: 'pending' | 'succeeded' | 'failed' | 'outcome_unknown';
 };
 
 export type RigActionBody = {
@@ -3528,11 +3570,30 @@ export type Run = {
     updated_at?: string;
 };
 
+export type RunCancelInterruptFailure = {
+    /**
+     * Why the interrupt failed.
+     */
+    error: string;
+    /**
+     * Session ID, or the step assignee when it could not be resolved to a session.
+     */
+    session: string;
+};
+
 export type RunCancelOutputBody = {
     /**
-     * Count of the run's beads closed by the cancel.
+     * Count of the run's beads closed by the cancel. Closing is the durable part of a cancel: no closed bead is claimed again.
      */
     closed: number;
+    /**
+     * Holders of an in-progress step the cancel closed whose current turn could not be interrupted. The cancel is durable regardless; stop or suspend these sessions directly.
+     */
+    interrupt_failures?: Array<RunCancelInterruptFailure> | null;
+    /**
+     * IDs of the sessions whose current turn was interrupted because they held an in-progress step the cancel closed. Interrupting ends the agent's turn, the same as POST /session/{id}/stop; for Codex it also closes the session's background terminals. It does not verify that every process the step started has exited, and it cannot undo effects the step already made, such as a push or a call to a remote service. The sessions are not killed; they stay up to serve other work.
+     */
+    interrupted?: Array<string> | null;
     /**
      * The canceled run.
      */
@@ -3634,7 +3695,7 @@ export type RunStep = {
      */
     kind?: string;
     /**
-     * Closed step lifecycle status.
+     * Closed step lifecycle status. Under a terminal run an unfinished step reads the status the run's wind-down closes it with (canceled for a canceled run, skipped otherwise), so it never changes from one terminal status to another; a step that executes after the run settles (the workflow finalizer, the teardown tail) reads its own status until it closes.
      */
     status: RunStepStatus;
     /**
@@ -3714,7 +3775,7 @@ export type ServiceRestartOutputBody = {
 
 export type SessionActivityEvent = {
     /**
-     * Session activity state: 'idle' or 'in-turn'.
+     * Session activity state: 'idle' or 'in-turn', derived from the transcript under every program_status switch. The session program's own status arrives in the program_status frame.
      */
     activity: string;
 };
@@ -3880,7 +3941,7 @@ export type SessionMessageInputBody = {
      */
     message: string;
     /**
-     * Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will.
+     * Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will. When the conversation lane delivers messages (message listed in [ops] authoritative) it starts nothing here: it consumes an operator's hold placed before the message and records the session's wake, and the controller starts the session as it does for any queued message, or the result's will_start says why it will not; resending the request under the idempotency_key of its 202 consumes such a hold too.
      */
     resume?: boolean;
 };
@@ -3907,7 +3968,7 @@ export type SessionMessageSucceededPayload = {
      */
     will_not_start_reason?: string;
     /**
-     * Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now.
+     * Present when the message was queued because the session is not running or is held: whether the controller will start it to deliver the message. False means it will not; will_not_start_reason says why, with the remedy. When the conversation lane delivers messages it is read as the request's settle window ends, and resume: true does not start a session the controller will not start.
      */
     will_start?: boolean;
 };
@@ -4027,6 +4088,107 @@ export type SessionPoolSlotRetiredAtDrainDeadlinePayload = {
     template?: string;
 };
 
+export type SessionProgramStatus = {
+    /**
+     * The program's self-reported name.
+     */
+    app?: string;
+    /**
+     * What a blocked program waits for, when it says. Only with state blocked.
+     */
+    kind?: 'permission' | 'question' | 'auth';
+    /**
+     * Percent complete the program reports, only with working or blocked.
+     */
+    progress?: number;
+    /**
+     * When the program last left working or blocked for an input boundary; absent if it never has in this capture.
+     */
+    quiet_since?: string;
+    /**
+     * When the program entered state, by the capture host's clock.
+     */
+    since: string;
+    /**
+     * The state the program reports. done and error are input boundaries like idle (error is a failed turn with the program alive); blocked is waiting on the user.
+     */
+    state: 'idle' | 'working' | 'done' | 'blocked' | 'error';
+    /**
+     * Child tasks the program reports as working.
+     */
+    working_children: number;
+};
+
+export type SessionProgramStatusEvent = {
+    /**
+     * The session program's current status; absent when it is unknown (never read as idle).
+     */
+    program_status?: SessionProgramStatus;
+};
+
+export type SessionProgramStatusShadowPayload = {
+    /**
+     * Whether the two readings agree.
+     */
+    agree: boolean;
+    /**
+     * Comparisons this process dropped since its last recorded one.
+     */
+    dropped?: number;
+    /**
+     * The session's provider family (resolved built-in ancestor).
+     */
+    family?: string;
+    /**
+     * Whether a hold derived from the record is still within its bound.
+     */
+    hold_live: boolean;
+    /**
+     * The blocked state's kind.
+     */
+    kind?: 'permission' | 'question' | 'auth';
+    /**
+     * Program signal minus scrape signal, in milliseconds (timed points only).
+     */
+    latency_ms?: number;
+    /**
+     * The decision point.
+     */
+    point: 'wait_for_idle' | 'typing_gate' | 'submit_confirm' | 'escape_resend' | 'readiness' | 'startup_ladder' | 'interrupt_settle' | 'pending' | 'wait_idle_preread' | 'execution_backstop' | 'claim_nudge_hold' | 'work_ladder' | 'proved_idle' | 'queued_delivery' | 'drain_reminder' | 'observation';
+    /**
+     * What the program-status record would decide.
+     */
+    program: 'idle' | 'busy' | 'indeterminate' | 'pending' | 'confirmed' | 'unconfirmed' | 'ready' | 'not_ready' | 'settled' | 'unsettled' | 'hold' | 'no_hold' | 'resend' | 'no_resend' | 'none';
+    /**
+     * Whether the process table confirmed the capture reader.
+     */
+    reader_verified: boolean;
+    /**
+     * How long the record's root has been in its state, in milliseconds.
+     */
+    record_age_ms: number;
+    /**
+     * Today's screen reading, which decided.
+     */
+    scrape: 'idle' | 'busy' | 'indeterminate' | 'pending' | 'confirmed' | 'unconfirmed' | 'ready' | 'not_ready' | 'settled' | 'unsettled' | 'hold' | 'no_hold' | 'resend' | 'no_resend' | 'none';
+    /**
+     * The session's bead id, when the decision point knows it.
+     */
+    session_id?: string;
+    /**
+     * The record's root state (valid readings only).
+     */
+    state?: 'idle' | 'working' | 'done' | 'blocked' | 'error';
+    /**
+     * Whether latency_ms was measured.
+     */
+    timed?: boolean;
+    /**
+     * The record reading's validity.
+     */
+    validity: 'unread' | 'valid' | 'not_armed' | 'silent' | 'cleared' | 'reader_lost' | 'exited';
+};
+
 /**
  * Session raw transcript frame
  *
@@ -4095,6 +4257,10 @@ export type SessionRespondOutputBody = {
 export type SessionResponse = {
     active_bead?: string;
     activity?: string;
+    /**
+     * Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.
+     */
+    activity_source?: 'program' | 'transcript';
     agent_kind?: string;
     alias?: string;
     attached: boolean;
@@ -4116,9 +4282,16 @@ export type SessionResponse = {
         [key: string]: string;
     };
     pool?: string;
+    /**
+     * The session program's own status report (OSC 7501), present while the city's program_status switch is shadow or on and the reading is valid. Absent means the status is unknown, never idle.
+     */
+    program_status?: SessionProgramStatus;
     provider: string;
     reason?: string;
     rig?: string;
+    /**
+     * Whether the session's runtime was live when this response was built, in any open state. It observes the runtime, not the agent: on tmux it is true while the session has a pane whose process has not exited, so a pane still running a launch wrapper or shell before the agent starts reads true, and a pane kept by remain-on-exit after its process exited reads false. GET /session/{id} and GET /sessions read the same probe, which tmux serves from a fleet snapshot refreshed at most every 2 s. Point-in-time: a session in a transitional state (creating, start-pending, draining) can start or stop its process right after; a client confirming quiescence should re-read after its last transition settles.
+     */
     running: boolean;
     session_name: string;
     state: string;
@@ -4185,9 +4358,9 @@ export type SessionStrandedPayload = {
 /**
  * Session stream lifecycle event
  *
- * Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
+ * Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, program-status changes, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
  */
-export type SessionStreamCommonEvent = SessionActivityEvent | PendingInteraction | SessionPendingClearedEvent | HeartbeatEvent;
+export type SessionStreamCommonEvent = SessionActivityEvent | PendingInteraction | SessionPendingClearedEvent | SessionProgramStatusEvent | HeartbeatEvent;
 
 export type SessionStreamMessageEvent = {
     format: string;
@@ -5198,7 +5371,7 @@ export type SessionStructuredUserPrompt = {
 
 export type SessionSubmitInputBody = {
     /**
-     * Submit intent; empty defaults to "default".
+     * Submit intent; empty defaults to "default". When the conversation lane delivers messages (message listed in [ops] authoritative), follow_up is the default request: the lane delivers both at the session's boundary, so under one Idempotency-Key either answers from the other's operation, and the result says default.
      */
     intent?: SubmitIntent;
     /**
@@ -5206,7 +5379,7 @@ export type SessionSubmitInputBody = {
      */
     message: string;
     /**
-     * Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will.
+     * Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will. When the conversation lane delivers messages (message listed in [ops] authoritative) it starts nothing here: it consumes an operator's hold placed before the message and records the session's wake, and the controller starts the session as it does for any queued message, or the result's will_start says why it will not; resending the request under the idempotency_key of its 202 consumes such a hold too.
      */
     resume?: boolean;
 };
@@ -5228,7 +5401,7 @@ export type SessionSubmitInterrupt = {
 
 export type SessionSubmitSucceededPayload = {
     /**
-     * Resolved submit intent (default, follow_up, interrupt_now).
+     * Resolved submit intent (default, follow_up, interrupt_now). When the conversation lane delivers messages a follow_up resolves to default: the lane delivers both at the session's boundary.
      */
     intent: string;
     /**
@@ -5256,7 +5429,7 @@ export type SessionSubmitSucceededPayload = {
      */
     will_not_start_reason?: string;
     /**
-     * Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now.
+     * Present when the message was queued because the session is not running or is held: whether the controller will start it to deliver the message. False means it will not; will_not_start_reason says why, with the remedy. When the conversation lane delivers messages it is read as the request's settle window ends, and resume: true does not start a session the controller will not start.
      */
     will_start?: boolean;
 };
@@ -5393,6 +5566,102 @@ export type SessionTurnCapPair = {
      * Capability value.
      */
     value: string;
+};
+
+export type SessionTurnCapabilities = {
+    /**
+     * How turn ends are known: recorded means every end carries its id and how it ended; inferred means some ends are inferred from the session going idle.
+     */
+    end: 'none' | 'boundary' | 'inferred' | 'recorded';
+    /**
+     * How an interrupt could be confined to a named turn: atomic means the runtime refuses to interrupt a turn that is not current; checked means the turn is re-read just before an untargeted interrupt, so a turn starting in between can still be hit; none means an interrupt cannot be aimed at a turn.
+     */
+    fence: 'none' | 'checked' | 'atomic';
+    /**
+     * How the runtime interrupts the session's turn. unsupported forces fence none.
+     */
+    interrupt: 'keystroke' | 'protocol' | 'unsupported';
+    /**
+     * How a delivery is tied to the turn it started: exact means the runtime names it; correlated means it is matched by observation.
+     */
+    link: 'none' | 'correlated' | 'exact';
+    /**
+     * Every turn since the last read can be recovered from the next one.
+     */
+    lossless: boolean;
+    /**
+     * How turn starts are known: recorded means every start carries its turn id.
+     */
+    start: 'none' | 'boundary' | 'recorded';
+};
+
+export type SessionTurnCurrent = {
+    /**
+     * The turn's id, as the source records it. Opaque; compare for equality only.
+     */
+    id: string;
+    /**
+     * When the turn started, at the source's precision; absent when unknown.
+     */
+    started_at?: string;
+};
+
+export type SessionTurnEnded = {
+    /**
+     * When the turn ended: the source's time, or, for an inferred end, the server's when the read inferred it; absent when unknown. Each read infers an end anew, so an inferred end's time can differ between reads, and a read that cannot confirm the session idle reports that turn current again.
+     */
+    ended_at?: string;
+    /**
+     * The turn's id, as the source records it. Opaque; compare for equality only.
+     */
+    id: string;
+    /**
+     * The end was inferred from the session going idle, not recorded.
+     */
+    inferred: boolean;
+    /**
+     * When the turn started, at the source's precision; absent when unknown.
+     */
+    started_at?: string;
+    /**
+     * How the turn ended: completed, cancelled or failed (the runtime's spelling); absent when the source closed it only because a newer turn started.
+     */
+    status?: string;
+};
+
+export type SessionTurnResponse = {
+    /**
+     * How far the source's answer can be trusted.
+     */
+    capabilities: SessionTurnCapabilities;
+    /**
+     * The turn in progress. Absent when no turn is running, or when the observation is not observed.
+     */
+    current?: SessionTurnCurrent;
+    /**
+     * Why the observation is not observed.
+     */
+    detail?: string;
+    /**
+     * What this read saw. observed: current and recent are this read's answer, and an absent current means no turn is running. unavailable: the source exists but could not be read now (a transcript not written yet, no conversation key yet, a runtime that did not answer); the session's turns are unknown, not idle, so retry. unsupported: the session's turns cannot be identified (no source, or a transcript that records turns without ids).
+     */
+    observation: 'observed' | 'unavailable' | 'unsupported';
+    /**
+     * When the read was made, on the server's clock. Present only when observed.
+     */
+    observed_at?: string;
+    /**
+     * Turns that ended, newest first. A transcript source reports at most 8 from a bounded window, so a turn that ends between two reads can fall out of it unless capabilities.lossless is true.
+     */
+    recent?: Array<SessionTurnEnded> | null;
+    /**
+     * The resolved session id.
+     */
+    session_id: string;
+    /**
+     * Where the session's turns are read from: protocol (the runtime observes turns itself), transcript (the provider's transcript of the session's own conversation, on this host), or none (the session's turns cannot be identified here). Fixed for the session's generation.
+     */
+    source: 'protocol' | 'transcript' | 'none';
 };
 
 export type SessionUnknownStatePayload = {
@@ -6012,6 +6281,16 @@ export type StorageBindingOutcomePayload = {
     proven_beads: number;
 };
 
+export type StorageRigPayload = {
+    beads: number;
+    binding: string;
+    cleared?: number;
+    detail?: string;
+    gates?: number;
+    outcome: string;
+    rig: string;
+};
+
 export type StoreDiskCriticalPayload = {
     data_dir: string;
     floor_bytes: number;
@@ -6393,6 +6672,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeProjectIdentityStamped) | ({
     type: 'provider.swapped';
 } & TypedEventStreamEnvelopeProviderSwapped) | ({
+    type: 'request.accepted';
+} & TypedEventStreamEnvelopeRequestAccepted) | ({
     type: 'request.failed';
 } & TypedEventStreamEnvelopeRequestFailed) | ({
     type: 'request.result.city.create';
@@ -6435,6 +6716,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionPendingCleared) | ({
     type: 'session.pool_slot_retired_at_drain_deadline';
 } & TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline) | ({
+    type: 'session.program_status_shadow';
+} & TypedEventStreamEnvelopeSessionProgramStatusShadow) | ({
     type: 'session.quarantined';
 } & TypedEventStreamEnvelopeSessionQuarantined) | ({
     type: 'session.reset_stalled';
@@ -6469,6 +6752,10 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeStorageBindingUncheckable) | ({
     type: 'storage.binding.unconverged';
 } & TypedEventStreamEnvelopeStorageBindingUnconverged) | ({
+    type: 'storage.rig_import';
+} & TypedEventStreamEnvelopeStorageRigImport) | ({
+    type: 'storage.rig_residue';
+} & TypedEventStreamEnvelopeStorageRigResidue) | ({
     type: 'supervisor.fs_pressure.skipped_tick';
 } & TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick) | ({
     type: 'supervisor.request';
@@ -6487,6 +6774,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeWorkNudgeFailed) | ({
     type: 'work.nudged';
 } & TypedEventStreamEnvelopeWorkNudged) | ({
+    type: 'work.rate_limited';
+} & TypedEventStreamEnvelopeWorkRateLimited) | ({
     type: 'work.recycle_requested';
 } & TypedEventStreamEnvelopeWorkRecycleRequested) | ({
     type: 'work.release_unfinished';
@@ -7725,6 +8014,24 @@ export type TypedEventStreamEnvelopeProviderSwapped = {
 };
 
 /**
+ * TypedEventStreamEnvelope request.accepted
+ */
+export type TypedEventStreamEnvelopeRequestAccepted = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: RequestAcceptedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'request.accepted';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope request.failed
  */
 export type TypedEventStreamEnvelopeRequestFailed = {
@@ -8103,6 +8410,24 @@ export type TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.program_status_shadow
+ */
+export type TypedEventStreamEnvelopeSessionProgramStatusShadow = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionProgramStatusShadowPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.program_status_shadow';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.quarantined
  */
 export type TypedEventStreamEnvelopeSessionQuarantined = {
@@ -8409,6 +8734,42 @@ export type TypedEventStreamEnvelopeStorageBindingUnconverged = {
 };
 
 /**
+ * TypedEventStreamEnvelope storage.rig_import
+ */
+export type TypedEventStreamEnvelopeStorageRigImport = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: StorageRigPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'storage.rig_import';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope storage.rig_residue
+ */
+export type TypedEventStreamEnvelopeStorageRigResidue = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: StorageRigPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'storage.rig_residue';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope supervisor.fs_pressure.skipped_tick
  */
 export type TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick = {
@@ -8567,6 +8928,24 @@ export type TypedEventStreamEnvelopeWorkNudged = {
     subject?: string;
     ts: string;
     type: 'work.nudged';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope work.rate_limited
+ */
+export type TypedEventStreamEnvelopeWorkRateLimited = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkRateLimitedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.rate_limited';
     workflow?: WorkflowEventProjection;
 };
 
@@ -8800,6 +9179,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeProjectIdentityStamped) | ({
     type: 'provider.swapped';
 } & TypedTaggedEventStreamEnvelopeProviderSwapped) | ({
+    type: 'request.accepted';
+} & TypedTaggedEventStreamEnvelopeRequestAccepted) | ({
     type: 'request.failed';
 } & TypedTaggedEventStreamEnvelopeRequestFailed) | ({
     type: 'request.result.city.create';
@@ -8842,6 +9223,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionPendingCleared) | ({
     type: 'session.pool_slot_retired_at_drain_deadline';
 } & TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline) | ({
+    type: 'session.program_status_shadow';
+} & TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow) | ({
     type: 'session.quarantined';
 } & TypedTaggedEventStreamEnvelopeSessionQuarantined) | ({
     type: 'session.reset_stalled';
@@ -8876,6 +9259,10 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeStorageBindingUncheckable) | ({
     type: 'storage.binding.unconverged';
 } & TypedTaggedEventStreamEnvelopeStorageBindingUnconverged) | ({
+    type: 'storage.rig_import';
+} & TypedTaggedEventStreamEnvelopeStorageRigImport) | ({
+    type: 'storage.rig_residue';
+} & TypedTaggedEventStreamEnvelopeStorageRigResidue) | ({
     type: 'supervisor.fs_pressure.skipped_tick';
 } & TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick) | ({
     type: 'supervisor.request';
@@ -8894,6 +9281,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeWorkNudgeFailed) | ({
     type: 'work.nudged';
 } & TypedTaggedEventStreamEnvelopeWorkNudged) | ({
+    type: 'work.rate_limited';
+} & TypedTaggedEventStreamEnvelopeWorkRateLimited) | ({
     type: 'work.recycle_requested';
 } & TypedTaggedEventStreamEnvelopeWorkRecycleRequested) | ({
     type: 'work.release_unfinished';
@@ -10200,6 +10589,25 @@ export type TypedTaggedEventStreamEnvelopeProviderSwapped = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope request.accepted
+ */
+export type TypedTaggedEventStreamEnvelopeRequestAccepted = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: RequestAcceptedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'request.accepted';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope request.failed
  */
 export type TypedTaggedEventStreamEnvelopeRequestFailed = {
@@ -10599,6 +11007,25 @@ export type TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline 
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope session.program_status_shadow
+ */
+export type TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionProgramStatusShadowPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.program_status_shadow';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope session.quarantined
  */
 export type TypedTaggedEventStreamEnvelopeSessionQuarantined = {
@@ -10922,6 +11349,44 @@ export type TypedTaggedEventStreamEnvelopeStorageBindingUnconverged = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope storage.rig_import
+ */
+export type TypedTaggedEventStreamEnvelopeStorageRigImport = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: StorageRigPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'storage.rig_import';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope storage.rig_residue
+ */
+export type TypedTaggedEventStreamEnvelopeStorageRigResidue = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: StorageRigPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'storage.rig_residue';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope supervisor.fs_pressure.skipped_tick
  */
 export type TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick = {
@@ -11089,6 +11554,25 @@ export type TypedTaggedEventStreamEnvelopeWorkNudged = {
     subject?: string;
     ts: string;
     type: 'work.nudged';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope work.rate_limited
+ */
+export type TypedTaggedEventStreamEnvelopeWorkRateLimited = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkRateLimitedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.rate_limited';
     workflow?: WorkflowEventProjection;
 };
 
@@ -11498,12 +11982,33 @@ export type WorkLadderPayload = {
     generation: number;
     kind?: string;
     paused?: boolean;
+    provider?: string;
     reason?: string;
     rung?: string;
     session_id: string;
     session_name?: string;
     store_ref?: string;
     template?: string;
+};
+
+export type WorkRateLimitedPayload = {
+    alerted?: boolean;
+    cause?: string;
+    claims?: Array<string> | null;
+    conversation: number;
+    error_code?: string;
+    error_text?: string;
+    fresh_at?: string;
+    generation: number;
+    http_status?: number;
+    provider?: string;
+    refused?: number;
+    refused_at?: string;
+    session_id: string;
+    session_name?: string;
+    since: string;
+    template?: string;
+    transition: string;
 };
 
 export type WorkReadyBody = {
@@ -18408,6 +18913,57 @@ export type GetV0CityByCityNameReadinessResponses = {
 
 export type GetV0CityByCityNameReadinessResponse = GetV0CityByCityNameReadinessResponses[keyof GetV0CityByCityNameReadinessResponses];
 
+export type GetRequestOutcomeData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * The request_id from an async session request's 202 response.
+         */
+        requestId: string;
+    };
+    query: {
+        /**
+         * The event_cursor from the same 202 response. The request's request.accepted marker and terminal event both follow it, so the lookup reads only the events after it.
+         */
+        after_seq: string;
+    };
+    url: '/v0/city/{cityName}/request/{requestId}';
+};
+
+export type GetRequestOutcomeErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetRequestOutcomeError = GetRequestOutcomeErrors[keyof GetRequestOutcomeErrors];
+
+export type GetRequestOutcomeResponses = {
+    /**
+     * OK
+     */
+    200: RequestOutcome;
+};
+
+export type GetRequestOutcomeResponse = GetRequestOutcomeResponses[keyof GetRequestOutcomeResponses];
+
 export type DeleteV0CityByCityNameRigByNameData = {
     body?: never;
     headers: {
@@ -19449,7 +20005,12 @@ export type PostV0CityByCityNameSessionByIdKillData = {
          */
         id: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * Kill even when the session has live background subagents, or past a hung holder of its runtime lease whose record expired, as gc session kill --force does.
+         */
+        force?: boolean;
+    };
     url: '/v0/city/{cityName}/session/{id}/kill';
 };
 
@@ -20398,6 +20959,20 @@ export type StreamSessionResponses = {
          */
         retry?: number;
     } | {
+        data: SessionProgramStatusEvent;
+        /**
+         * The event name.
+         */
+        event: 'program_status';
+        /**
+         * The event resume cursor.
+         */
+        id?: string;
+        /**
+         * The retry time in milliseconds.
+         */
+        retry?: number;
+    } | {
         data: SessionStreamStructuredMessageEvent;
         /**
          * The event name.
@@ -20637,6 +21212,56 @@ export type GetV0CityByCityNameSessionByIdTranscriptResponses = {
 
 export type GetV0CityByCityNameSessionByIdTranscriptResponse = GetV0CityByCityNameSessionByIdTranscriptResponses[keyof GetV0CityByCityNameSessionByIdTranscriptResponses];
 
+export type GetV0CityByCityNameSessionByIdTurnData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Session ID, alias, or runtime session_name.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/turn';
+};
+
+export type GetV0CityByCityNameSessionByIdTurnErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameSessionByIdTurnError = GetV0CityByCityNameSessionByIdTurnErrors[keyof GetV0CityByCityNameSessionByIdTurnErrors];
+
+export type GetV0CityByCityNameSessionByIdTurnResponses = {
+    /**
+     * OK
+     */
+    200: SessionTurnResponse;
+};
+
+export type GetV0CityByCityNameSessionByIdTurnResponse = GetV0CityByCityNameSessionByIdTurnResponses[keyof GetV0CityByCityNameSessionByIdTurnResponses];
+
 export type PostV0CityByCityNameSessionByIdUnpinData = {
     body?: never;
     headers: {
@@ -20851,6 +21476,10 @@ export type CreateSessionData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -20879,6 +21508,10 @@ export type CreateSessionErrors = {
      * Not Found
      */
     404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
     /**
      * Unprocessable Entity
      */

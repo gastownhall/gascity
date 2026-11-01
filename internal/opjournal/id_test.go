@@ -96,7 +96,6 @@ func TestTargetKeys(t *testing.T) {
 	// A key at the limit is one DeriveID accepts.
 	for _, fn := range []func() (string, error){
 		func() (string, error) { return InterruptKey(1, strings.Repeat("t", maxClientKeyLen-len("stop:1:"))) },
-		func() (string, error) { return RespondKey(1, strings.Repeat("r", maxClientKeyLen-len("respond:1:"))) },
 	} {
 		k, err := fn()
 		if err != nil {
@@ -109,19 +108,13 @@ func TestTargetKeys(t *testing.T) {
 	if k, err := InterruptKey(7, "run-9:2"); err != nil || k != "stop:7:run-9:2" {
 		t.Errorf("InterruptKey(7, run-9:2) = %q, %v", k, err)
 	}
-	if k, err := RespondKey(7, "req-1"); err != nil || k != "respond:7:req-1" {
-		t.Errorf("RespondKey(7, req-1) = %q, %v", k, err)
-	}
 	for _, c := range []struct {
 		name string
 		fn   func() (string, error)
 	}{
 		{"interrupt gen 0", func() (string, error) { return InterruptKey(0, "t") }},
 		{"interrupt no turn", func() (string, error) { return InterruptKey(1, "") }},
-		{"respond gen -1", func() (string, error) { return RespondKey(-1, "r") }},
-		{"respond no request", func() (string, error) { return RespondKey(1, "") }},
 		{"interrupt key too long", func() (string, error) { return InterruptKey(1, strings.Repeat("t", maxClientKeyLen-len("stop:1:")+1)) }},
-		{"respond key too long", func() (string, error) { return RespondKey(1, strings.Repeat("r", maxClientKeyLen-len("respond:1:")+1)) }},
 	} {
 		if _, err := c.fn(); !errors.Is(err, ErrInvalidRequest) {
 			t.Errorf("%s: err = %v, want ErrInvalidRequest", c.name, err)

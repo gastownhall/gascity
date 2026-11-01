@@ -15,8 +15,15 @@ func rigForDir(cfg *config.City, cityPath, dir string) (config.Rig, bool) {
 }
 
 func resolveRigForDir(cfg *config.City, cityPath, dir string) (config.Rig, bool, error) {
-	dir = normalizePathForCompare(dir)
 	resolveRigPaths(cityPath, cfg.Rigs)
+	return rigOwningDir(cfg, cityPath, dir)
+}
+
+// rigOwningDir is resolveRigForDir without resolving cfg's rig paths in
+// place, so it is safe on a config other readers share: the rig whose
+// checkout holds dir, else the rig dir's .beads redirect names.
+func rigOwningDir(cfg *config.City, cityPath, dir string) (config.Rig, bool, error) {
+	dir = normalizePathForCompare(dir)
 	for _, rig := range cfg.Rigs {
 		if strings.TrimSpace(rig.Path) == "" {
 			continue

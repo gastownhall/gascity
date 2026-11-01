@@ -55,7 +55,19 @@ const (
 	ReasonSessionGone         = "session_gone"
 	ReasonClosedExternally    = "closed_externally"
 	ReasonOther               = "other"
-	RefusedReasonPrefix       = "refused:"
+	// ReasonReplacementNotPrepared is a deliver-now unit's interrupt whose
+	// turn settled but whose session could not be prepared for the message
+	// (X11 D11): the replacement did not complete.
+	ReasonReplacementNotPrepared = "replacement_not_prepared"
+	// ReasonRestartNotStarted is an interrupt whose restart on failure
+	// stopped the runtime and could not start it again: the turn ended
+	// with the runtime, and the session has none until a start brings one
+	// back. Older builds read it as failed{other}.
+	ReasonRestartNotStarted = "restart_not_started"
+	RefusedReasonPrefix     = "refused:"
+	// ReasonRefusedAction closes a respond whose action the pending prompt
+	// does not offer, or whose answer the runtime refused as invalid.
+	ReasonRefusedAction = RefusedReasonPrefix + "action"
 )
 
 // MaxRefusedWhyLen is the longest <why> a refused:<why> reason can carry and
@@ -76,7 +88,8 @@ const (
 var knownFailedReasons = []string{
 	ReasonExpiredBeforeStart, ReasonDeadlineInFlight, ReasonNoBoundary, ReasonProviderUnavailable,
 	ReasonAmbiguousDelivery, ReasonPoison, ReasonUnsupported, ReasonUnauthorized, ReasonCreateFailed,
-	ReasonHeld, ReasonSessionGone, ReasonClosedExternally, ReasonOther,
+	ReasonHeld, ReasonSessionGone, ReasonClosedExternally, ReasonOther, ReasonReplacementNotPrepared,
+	ReasonRestartNotStarted,
 }
 
 var knownSkippedReasons = []string{
@@ -110,12 +123,6 @@ const (
 )
 
 var whens = []When{WhenBoundary, WhenAfterTurn, WhenInterrupt, WhenIfIdle, WhenNow, WhenSteer}
-
-// LaneLowered reports whether this build's conversation lane lowers a
-// message of mode w to a delivery. now and interrupt are not lowered yet: a
-// lane parks such a message (WaitNowUnlowered) until it expires, so a
-// producer that cannot tell its caller so refuses them before writing.
-func (w When) LaneLowered() bool { return w != WhenNow && w != WhenInterrupt }
 
 // Wake says whether a message may wake its conversation.
 type Wake string
@@ -263,8 +270,8 @@ type KillPolicy struct {
 }
 
 // Scope is an op's validity scope: the conversation, one context epoch, or
-// one session generation (with a turn for interrupt, an interaction for
-// respond).
+// one session generation (with a turn for interrupt, an interaction
+// occurrence for respond).
 type Scope struct {
 	Kind        ScopeKind
 	Epoch       int64
@@ -296,7 +303,9 @@ func (c Cancel) Recorded() bool { return c.By != "" }
 // and TurnBasis are the conversation lane's delivery record and turn link
 // (DES-O1 §4.8): set only on a succeeded lane op, and Turn is then the turn
 // CorrelateTurn linked. Turn without a link is legal: legacy and control ops
-// record a turn the runtime named.
+// record a turn the runtime named. An op the lane's scope rule closed
+// skipped{stale} unrun records the generation and epoch that fenced it off
+// (FencedOff).
 type Result struct {
 	Generation    int64
 	Turn          string
@@ -374,6 +383,27 @@ func (o Outcome) Effective() (Arm, string) {
 		return ArmFailed, ReasonOther
 	default:
 		return o.Arm, o.Reason
+	}
+}
+
+// FencedOff reports whether op closed skipped{stale} because the lane's scope
+// rule fenced it off unrun: its conversation had moved past its scope's
+// generation (a session-scoped op) or context epoch (a context-scoped one).
+// That close records the incarnation that fenced the op in its Result, past
+// its scope's; the executor's close of an op that found nothing to do, and
+// the dormant rule's, record none.
+func FencedOff(op Op) bool {
+	arm, reason := op.Outcome.Effective()
+	if op.Status != StatusClosed || arm != ArmSkipped || reason != ReasonStale {
+		return false
+	}
+	switch op.Scope.Kind {
+	case ScopeSession:
+		return op.Outcome.Result.Generation > op.Scope.Generation
+	case ScopeContext:
+		return op.Outcome.Result.ContextEpoch > op.Scope.Epoch
+	default:
+		return false
 	}
 }
 

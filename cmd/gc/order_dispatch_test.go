@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 )
@@ -3496,6 +3497,182 @@ func TestOrderDispatchExecTimeout(t *testing.T) {
 	}
 }
 
+// A run its order timeout stopped used to fail with the runner's error alone:
+// "context deadline exceeded" from a runner that reports the deadline (the
+// production one does), "signal: killed" from one that reports the kill.
+// Neither says the order timed out, or after how long. The order.failed event
+// and the log now name the timeout, and keep the runner's own error.
+func TestOrderDispatchExecTimeoutFailureNamesTheTimeout(t *testing.T) {
+	const wantTimeout = "order timeout of 100ms exceeded"
+	tests := []struct {
+		name string
+		// runErr is what the runner returns once the timeout has stopped it.
+		runErr  func(ctx context.Context) error
+		wantMsg func(t *testing.T, msg string)
+	}{
+		{
+			name:   "runner returns the context error",
+			runErr: func(ctx context.Context) error { return ctx.Err() },
+			wantMsg: func(t *testing.T, msg string) {
+				if !strings.Contains(msg, wantTimeout) || !strings.Contains(msg, "context deadline exceeded") {
+					t.Fatalf("order.failed message = %q, want the timeout named and the runner's error kept", msg)
+				}
+			},
+		},
+		{
+			name:   "runner reports the kill signal",
+			runErr: func(context.Context) error { return errors.New("signal: killed") },
+			wantMsg: func(t *testing.T, msg string) {
+				if !strings.Contains(msg, wantTimeout) || !strings.Contains(msg, "signal: killed") {
+					t.Fatalf("order.failed message = %q, want the timeout named and the runner's error kept", msg)
+				}
+			},
+		},
+		{
+			name:   "runner returns the context cause",
+			runErr: context.Cause,
+			wantMsg: func(t *testing.T, msg string) {
+				if msg != wantTimeout {
+					t.Fatalf("order.failed message = %q, want exactly %q (named once)", msg, wantTimeout)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			var rec memRecorder
+			var stderr bytes.Buffer
+			m := &memoryOrderDispatcher{
+				aa: []orders.Order{{
+					Name:     "slow-exec",
+					Trigger:  "cooldown",
+					Interval: "1m",
+					Exec:     "scripts/slow.sh",
+					Timeout:  "100ms",
+				}},
+				storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+				execRun: func(ctx context.Context, _, _ string, _ []string) ([]byte, error) {
+					<-ctx.Done()
+					return nil, tt.runErr(ctx)
+				},
+				rec:    &rec,
+				stderr: lockedStderr(&stderr),
+				cfg:    &config.City{},
+			}
+			m.dispatch(context.Background(), t.TempDir(), time.Now())
+			m.drain(context.Background())
+
+			tt.wantMsg(t, orderFailedMessage(t, &rec, "slow-exec"))
+			if !strings.Contains(stderr.String(), wantTimeout) {
+				t.Fatalf("dispatch log = %q, want the timeout named", stderr.String())
+			}
+		})
+	}
+}
+
+// Only the order's own timeout is reported as one: a run the controller
+// cancels (shutdown, config reload) keeps reporting the cancellation.
+func TestOrderDispatchExecCanceledFailureDoesNotClaimATimeout(t *testing.T) {
+	store := beads.NewMemStore()
+	var rec memRecorder
+	started := make(chan struct{})
+	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:     "long-exec",
+			Trigger:  "cooldown",
+			Interval: "1m",
+			Exec:     "scripts/long.sh",
+			Timeout:  "1h",
+		}},
+		storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+		execRun: func(ctx context.Context, _, _ string, _ []string) ([]byte, error) {
+			close(started)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+		rec:            &rec,
+		stderr:         lockedStderr(&bytes.Buffer{}),
+		cfg:            &config.City{},
+		dispatchCtx:    dispatchCtx,
+		dispatchCancel: dispatchCancel,
+	}
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	awaitClose(t, started, "exec runner start")
+	m.cancel()
+	m.drain(context.Background())
+
+	msg := orderFailedMessage(t, &rec, "long-exec")
+	if strings.Contains(msg, "order timeout") {
+		t.Fatalf("order.failed message = %q, a canceled run must not be reported as a timeout", msg)
+	}
+	if !strings.Contains(msg, context.Canceled.Error()) {
+		t.Fatalf("order.failed message = %q, want the cancellation reported", msg)
+	}
+}
+
+// stalledGraphApplyStore is a MemStore whose graph apply runs until the
+// caller's context ends, as a graph apply against a wedged server does.
+type stalledGraphApplyStore struct {
+	*beads.MemStore
+}
+
+func (s stalledGraphApplyStore) ApplyGraphPlan(ctx context.Context, _ *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) { //nolint:unparam // interface compliance; a stalled apply never produces a result
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// A formula order's timeout bounds the wisp it writes, and a wisp the timeout
+// stops fails the order with the timeout named, the same as an exec order.
+func TestOrderDispatchWispTimeoutFailureNamesTheTimeout(t *testing.T) {
+	prevGraphApply := molecule.IsGraphApplyEnabled()
+	molecule.SetGraphApplyEnabled(true)
+	t.Cleanup(func() { molecule.SetGraphApplyEnabled(prevGraphApply) })
+
+	store := stalledGraphApplyStore{MemStore: beads.NewMemStore()}
+	var rec memRecorder
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:         "slow-wisp",
+			Trigger:      "cooldown",
+			Interval:     "1m",
+			Formula:      "test-formula",
+			FormulaLayer: sharedTestFormulaDir,
+			Timeout:      "100ms",
+		}},
+		storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+		rec:     &rec,
+		stderr:  lockedStderr(&bytes.Buffer{}),
+		cfg:     &config.City{},
+	}
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	m.drain(context.Background())
+
+	msg := orderFailedMessage(t, &rec, "slow-wisp")
+	if !strings.Contains(msg, "order timeout of 100ms exceeded") {
+		t.Fatalf("order.failed message = %q, want the order timeout named", msg)
+	}
+}
+
+// orderFailedMessage returns the message of the last order.failed event rec
+// holds for subject, failing the test when there is none.
+func orderFailedMessage(t *testing.T, rec *memRecorder, subject string) string {
+	t.Helper()
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	msg, found := "", false
+	for _, e := range rec.events {
+		if e.Type == events.OrderFailed && e.Subject == subject {
+			msg, found = e.Message, true
+		}
+	}
+	if !found {
+		t.Fatalf("no order.failed event for %s; events = %+v", subject, rec.events)
+	}
+	return msg
+}
+
 func TestShellExecRunnerDoesNotStartWhenContextCanceled(t *testing.T) {
 	workDir := t.TempDir()
 	markerPath := filepath.Join(workDir, "started")
@@ -3529,6 +3706,39 @@ func TestShellExecRunnerKillsProcessGroupOnTimeout(t *testing.T) {
 
 	command := fmt.Sprintf("sh -c 'printf \"%%s\\n\" \"$$\" > %q; trap \"\" TERM; while :; do printf . >> %q; sleep 0.05; done' & wait", childPIDPath, heartbeatPath)
 	_, err := shellExecRunner(ctx, command, workDir, nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shellExecRunner() error = %v, want %v", err, context.DeadlineExceeded)
+	}
+
+	size := processgrouptest.WaitForFileSize(t, heartbeatPath)
+	processgrouptest.AssertFileSizeStable(t, heartbeatPath, size, 300*time.Millisecond)
+}
+
+func TestShellExecRunnerStopsDescendantsThatLeftItsProcessGroup(t *testing.T) {
+	processgrouptest.RequireRealProcessSignals(t)
+
+	workDir := t.TempDir()
+	heartbeatPath := filepath.Join(workDir, "heartbeat")
+	childPIDPath := filepath.Join(workDir, "child.pid")
+	t.Cleanup(func() { processgrouptest.KillFromPIDFile(t, childPIDPath) })
+	oldWaitDelay := shellExecPostCancelWaitDelay
+	oldSignalGrace := shellExecSignalGrace
+	shellExecPostCancelWaitDelay = 100 * time.Millisecond
+	shellExecSignalGrace = 100 * time.Millisecond
+	t.Cleanup(func() {
+		shellExecPostCancelWaitDelay = oldWaitDelay
+		shellExecSignalGrace = oldSignalGrace
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	// GNU timeout makes itself the leader of a new process group, so what it
+	// bounds runs outside the group the runner signals on cancel.
+	command := fmt.Sprintf("command -v timeout >/dev/null 2>&1 || { echo no-timeout; exit 0; }; timeout 60 sh -c 'printf \"%%s\\n\" \"$$\" > %q; trap \"\" TERM; while :; do printf . >> %q; sleep 0.05; done'", childPIDPath, heartbeatPath)
+	out, err := shellExecRunner(ctx, command, workDir, nil)
+	if strings.Contains(string(out), "no-timeout") {
+		t.Skip("needs a coreutils timeout on PATH")
+	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("shellExecRunner() error = %v, want %v", err, context.DeadlineExceeded)
 	}
@@ -10947,5 +11157,128 @@ func TestHasOpenWorkStrictIgnoresAForgedOrderRunLabel(t *testing.T) {
 	}
 	if summary := entries["digest"]; summary.openWorkTracking || len(summary.openRoots) != 0 {
 		t.Fatalf("index summary %+v, want no run of digest", summary)
+	}
+}
+
+func TestShellExecRunnerDoesNotInheritSessionIdentity(t *testing.T) {
+	t.Setenv("GC_SESSION_ID", "gc-seat-123")
+	t.Setenv("GC_ALIAS", "some-seat")
+	t.Setenv("GC_AGENT", "some-seat")
+
+	out, err := shellExecRunner(context.Background(),
+		`printf 'sid=%s alias=%s agent=%s' "${GC_SESSION_ID:-unset}" "${GC_ALIAS:-unset}" "${GC_AGENT:-unset}"`,
+		t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("shellExecRunner() error = %v, output = %q", err, out)
+	}
+	if got, want := string(out), "sid=unset alias=unset agent=unset"; got != want {
+		t.Fatalf("order exec inherited the dispatcher's session identity: got %q, want %q", got, want)
+	}
+}
+
+// TestShellExecRunnerScrubsSessionScopedEnv drives the scrub from
+// managedDoltSessionScopedEnvKeys so a session-scoped key added to that list
+// later is covered for exec orders too.
+func TestShellExecRunnerScrubsSessionScopedEnv(t *testing.T) {
+	for _, key := range managedDoltSessionScopedEnvKeys {
+		t.Setenv(key, "leak-"+key)
+	}
+
+	out, err := shellExecRunner(context.Background(), "env", t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("shellExecRunner() error = %v, output = %q", err, out)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		key, _, ok := strings.Cut(line, "=")
+		if ok && containsString(managedDoltSessionScopedEnvKeys, key) {
+			t.Errorf("order exec env carries session-scoped %q", line)
+		}
+	}
+}
+
+func TestMergeOrderExecEnvExplicitAndUnrelatedKeysSurvive(t *testing.T) {
+	environ := []string{
+		"PATH=/usr/bin",
+		"HOME=/h",
+		"FOO=bar",
+		"GC_SESSION_ID=gc-seat-123",
+		"GC_ALIAS=seat",
+		"BEADS_ACTOR=seat",
+	}
+	env := []string{"GC_ALIAS=reporter", "BEADS_ACTOR=order:x"}
+
+	merged := mergeOrderExecEnv(environ, env)
+
+	counts := map[string]int{}
+	for _, entry := range merged {
+		counts[entry]++
+		if key, _, _ := strings.Cut(entry, "="); key == "GC_SESSION_ID" {
+			t.Errorf("seat identity survived merge: %q in %v", entry, merged)
+		}
+	}
+	for _, want := range []string{"GC_ALIAS=reporter", "BEADS_ACTOR=order:x"} {
+		if counts[want] != 1 {
+			t.Errorf("%q appears %d times, want once: %v", want, counts[want], merged)
+		}
+	}
+	for _, unwanted := range []string{"GC_ALIAS=seat", "BEADS_ACTOR=seat"} {
+		if counts[unwanted] != 0 {
+			t.Errorf("inherited %q survived alongside the explicit value: %v", unwanted, merged)
+		}
+	}
+	for _, want := range []string{"PATH=/usr/bin", "HOME=/h", "FOO=bar"} {
+		if counts[want] != 1 {
+			t.Errorf("unrelated %q appears %d times, want once: %v", want, counts[want], merged)
+		}
+	}
+}
+
+func TestOrderExecEnvMergeDropsSeatIdentityKeepsCuratedValues(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("BEADS_ACTOR", "some-seat")
+
+	cityDir := t.TempDir()
+	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
+	a := orders.Order{Name: "digest", Trigger: "cooldown", Interval: "1m", Exec: "true"}
+
+	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a, nil)
+	if err != nil {
+		t.Fatalf("orderExecEnvWithError() error = %v", err)
+	}
+
+	merged := mergeOrderExecEnv([]string{
+		"PATH=/usr/bin",
+		"HOME=/h",
+		"FOO=bar",
+		"GC_SESSION_ID=gc-seat-123",
+		"GC_ALIAS=some-seat",
+		"GC_AGENT=some-seat",
+		"BEADS_ACTOR=some-seat",
+	}, envSlice)
+
+	got := map[string][]string{}
+	for _, entry := range merged {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			got[key] = append(got[key], value)
+		}
+	}
+	for key, want := range map[string]string{
+		"PATH":          "/usr/bin",
+		"HOME":          "/h",
+		"FOO":           "bar",
+		"BEADS_ACTOR":   "order:digest",
+		"GC_STORE_ROOT": cityDir,
+		"GC_RIG":        "",
+	} {
+		if values := got[key]; len(values) != 1 || values[0] != want {
+			t.Errorf("%s = %q, want exactly [%q]", key, values, want)
+		}
+	}
+	for _, key := range []string{"GC_SESSION_ID", "GC_ALIAS", "GC_AGENT"} {
+		if values, present := got[key]; present {
+			t.Errorf("seat identity %s=%q reached the order env", key, values)
+		}
 	}
 }

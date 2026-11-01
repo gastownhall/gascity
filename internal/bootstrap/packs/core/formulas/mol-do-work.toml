@@ -138,14 +138,37 @@ For `blocked` / `abandoned`, use that value for `gc.work_outcome`, close with a
 
 **4. Close this formula step:**
 
-If `GC_BEAD_ID` is set and is different from `$WORK_BEAD_ID`, close it too. This
-prevents `mol-do-work` wrapper beads from remaining ready after the real work
-is complete.
+Close the `do-work` step this session claimed: the bead
+`gc hook current --id-only` names, once it is checked to be this session's
+in-progress `do-work` step and not the work bead. Run the block as one command;
+it derives the work bead from the convoy again. It exits non-zero instead of
+skipping when it cannot name and verify the step, so `drain` never waits on a
+step left open after the real work is complete.
 ```bash
-if [ -n "${GC_BEAD_ID:-}" ] && [ "$GC_BEAD_ID" != "$WORK_BEAD_ID" ]; then
-  gc bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Target $WORK_BEAD_ID completed. Commit: ${COMMIT:-none}."
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json) || exit 1
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+if [ -z "$WORK_BEAD_ID" ]; then
+  echo "mol-do-work do-work: cannot derive the work bead from convoy {{convoy_id}}; not closing this step" >&2
+  exit 1
 fi
+STEP_BEAD_ID=$(gc hook current --id-only) || { echo "mol-do-work do-work: gc hook current failed; not closing this step" >&2; exit 1; }
+if [ -z "$STEP_BEAD_ID" ]; then
+  echo "mol-do-work do-work: gc hook current named no claimed step; not closing it" >&2
+  exit 1
+fi
+STEP_BEAD=$(gc bd show "$STEP_BEAD_ID" --json) || exit 1
+STEP_CHECK='(if type == "array" then .[0] else . end)
+  | .id != $work
+    and .status == "in_progress"
+    and (.metadata["gc.step_ref"] // "") == "mol-do-work.do-work"
+    and ((.assignee // "") as $a | $a != "" and ($a == $sid or $a == $sname or $a == $alias))'
+printf '%s' "$STEP_BEAD" | jq -e --arg work "$WORK_BEAD_ID" --arg sid "${GC_SESSION_ID:-}" --arg sname "${GC_SESSION_NAME:-}" --arg alias "${GC_ALIAS:-}" "$STEP_CHECK" >/dev/null || { echo "mol-do-work do-work: current claim $STEP_BEAD_ID is not this session's in-progress do-work step, or is the work bead; not closing it" >&2; exit 1; }
+gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=pass --status=closed || exit 1
 ```
+This step bead is workflow infrastructure, not work: do not add `--notes` or
+`--append-notes` to it. On a city that keeps its coordination classes in a
+separate store, gc serves this update in process and refuses those flags
+because the step has no notes field. The work bead above carries the notes.
 
 If you get stuck or need clarification, check your inbox:
 ```bash
@@ -153,8 +176,9 @@ gc mail inbox
 ```
 
 **Exit criteria:** The work described in the bead is complete, relevant changes
-are committed, the target bead is closed, and the claimed formula step is
-closed when `GC_BEAD_ID` is available."""
+are committed, the target bead is closed, and this session's `do-work` step bead
+is closed. Step 4 exits non-zero, rather than skipping, when it cannot name and
+verify that step."""
 
 [[steps]]
 id = "drain"
@@ -194,7 +218,7 @@ if [ -z "$DRAIN_BEAD_ID" ]; then
     exit 1
   fi
 fi
-gc bd update "$DRAIN_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Drain acknowledged." || exit 1
+gc bd update "$DRAIN_BEAD_ID" --set-metadata gc.outcome=pass --status=closed || exit 1
 gc runtime drain-ack
 ```
 

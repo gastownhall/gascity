@@ -33,9 +33,10 @@ var ErrSessionInitializing = errors.New("session is initializing")
 var ErrInteractionUnsupported = errors.New("session interaction is unsupported")
 
 // ErrPendingInteraction reports that a session is showing a blocking
-// interaction (for example a tool permission prompt) that must be answered
-// before any text is delivered to it. Typing into such a prompt can select
-// one of its options, so providers refuse the delivery instead.
+// interaction (a tool permission prompt or an AskUserQuestion question
+// dialog) that must be answered before any text is delivered to it. Typing
+// into such a prompt can select one of its options, so providers refuse the
+// delivery instead.
 var ErrPendingInteraction = errors.New("session has a pending interaction")
 
 // ErrInputClearSkipped reports that a runtime left a session's input box
@@ -52,9 +53,9 @@ var ErrInputClearSkipped = errors.New("input box left alone: a client may be att
 var ErrInteractionActionUnavailable = errors.New("pending interaction has no option for the requested action")
 
 // ErrInteractionResponseInvalid reports that a response to a pending
-// interaction cannot be applied: it names no outstanding request, or its
-// action is unknown or not offered by the interaction. The interaction stays
-// pending so the caller can answer again.
+// interaction cannot be applied: its action is unknown or not offered by the
+// interaction. The interaction stays pending so the caller can answer again.
+// A response naming no outstanding request is ErrInteractionGone instead.
 var ErrInteractionResponseInvalid = errors.New("interaction response is invalid")
 
 // ErrNudgeRefusedPendingInteraction reports that a nudge was refused because
@@ -135,6 +136,16 @@ var ErrNudgeDeliveryUnconfirmed = errors.New("nudge delivery unconfirmed")
 // message twice. Providers wrap their own pre-send failures with this
 // sentinel so callers can dispatch with errors.Is.
 var ErrNudgeNotSent = errors.New("nudge not sent")
+
+// ErrSessionBusy reports that a nudge was deferred, not delivered: the session
+// was running a turn that the provider's submit keys would have interrupted,
+// either when the provider's wait for idle ran out (nothing was typed) or
+// for the whole submit window after the message was typed (the submit was
+// never sent, and the provider cleared the typed message). No submit reached
+// the session and nothing the nudge typed is left in its input. Callers must
+// treat it as "try later": keep a queued nudge queued and do not count the
+// attempt against a delivery cap.
+var ErrSessionBusy = errors.New("nudge deferred: session is busy")
 
 // ErrExecUnsupported reports that a provider implements [ExecProvider] but the
 // underlying runtime does not implement the RPP `exec` wire op (it answered
@@ -626,6 +637,11 @@ type PendingInteraction struct {
 
 // InteractionResponse is the client's answer to a pending interaction.
 type InteractionResponse struct {
+	// RequestID names the request the answer is for. A provider answers only
+	// that request and refuses the response when another one is pending, so
+	// a caller answering one raising sets it (the conversation lane always
+	// does: request ids may repeat, and an answer must not reach a prompt it
+	// was not meant for). Empty answers whatever is pending.
 	RequestID string            `json:"request_id,omitempty"`
 	Action    string            `json:"action"`
 	Text      string            `json:"text,omitempty"`
@@ -645,6 +661,11 @@ type InteractionProvider interface {
 // Implementations must treat timeout as a hard upper bound and return
 // promptly once it expires. Callers may launch WaitForIdle asynchronously and
 // rely on timeout-bounded completion for cleanup.
+//
+// A wait that times out without one reading that showed the session busy
+// (every read failed, or none was definitive) returns an error wrapping
+// [ErrWaitUnobserved] beside its own timeout error; a wait that saw the
+// session busy at least once returns the timeout alone.
 type IdleWaitProvider interface {
 	WaitForIdle(ctx context.Context, name string, timeout time.Duration) error
 }
@@ -678,8 +699,13 @@ type IdleProbeBudgetProvider interface {
 // for ACP a prompt response is outstanding, while a pane scan found an
 // active-processing indicator string in its capture, usually the live
 // indicator but possibly a stale frame or transcript text.
+// Which provider families' busy readings count is the runtime's policy, not
+// its callers': a runtime that cannot vouch for a family's busy reading
+// reports it as [ErrIdleIndeterminate], never as (false, nil), so a caller
+// may act on every busy reading it gets.
 // [ErrIdleIndeterminate] means the observation was made but matched neither a
-// ready prompt nor a busy indicator, so it says neither idle nor busy. Any
+// ready prompt nor a busy indicator it trusts, so it says neither idle nor
+// busy. Any
 // other non-nil err means the observation could not be made (the caller must
 // not treat the session as idle on error); a session that has gone away is
 // reported as an error, not as idle.
@@ -693,6 +719,68 @@ type IdleSnapshotProvider interface {
 // message. It is not evidence of a running turn; callers fall back to the
 // signal they would use without a snapshot.
 var ErrIdleIndeterminate = errors.New("session idle state is indeterminate")
+
+// ErrWaitUnobserved reports that an idle or interrupt-boundary wait
+// ([IdleWaitProvider], [InterruptBoundaryWaitProvider]) reached its timeout
+// without one reading that showed the session busy: every read failed, or
+// none was definitive (a pane showing neither its prompt nor a busy
+// indicator, a rollout whose turn activity cannot be told). It is wrapped
+// beside the wait's own timeout error, never returned alone. Such a timeout is
+// no evidence that a turn still runs, so a caller deciding whether to restart
+// a session must not read it as one.
+var ErrWaitUnobserved = errors.New("wait observed no busy session")
+
+// TurnRunningProvider is an optional extension for runtimes that can tell, in
+// one look, whether a session's agent is running a turn now, read the way the
+// runtime's own nudge reads it before it types into the session. It is
+// narrower than [IdleSnapshotProvider]'s busy reading, which counts an
+// active-processing indicator anywhere in what it captured: where the runtime
+// can place a provider family's turn status on the live screen it reads it
+// there alone (tmux, for Codex: the rows right above the live composer), so
+// a busy row an earlier turn left in the scrollback is not a running turn.
+//
+// running=false with a nil err says no turn is running now. An error
+// wrapping [ErrIdleIndeterminate] means the runtime cannot read this
+// session's provider family's turn: it says neither running nor not. Any
+// other non-nil err means the look could not be made; the caller must not
+// take the session as idle. Composites do not implement it: it is read on
+// the session's routed leaf ([TurnRunningFor]).
+type TurnRunningProvider interface {
+	TurnRunning(name string) (running bool, err error)
+}
+
+// TurnRunningFor returns the [TurnRunningProvider] of the backend serving
+// session name, the leaf [ResolveBackend] names, and false when that backend
+// takes no such reading.
+func TurnRunningFor(p Provider, name string) (TurnRunningProvider, bool) {
+	leaf, _, _ := ResolveBackend(p, name)
+	tr, ok := leaf.(TurnRunningProvider)
+	return tr, ok
+}
+
+// FreshActivityProvider is an optional extension for runtimes whose
+// [Provider.GetLastActivity] may answer from a cached snapshot (tmux: the
+// fleet snapshot, kept for its TTL): FreshActivity reads session name's last
+// activity from the session itself, so a read taken after another
+// observation, such as a [TurnRunningProvider] look at its screen, reflects
+// the session no earlier than that observation. The snapshot's activity can
+// predate it: a turn that started after the snapshot was taken is not in it.
+//
+// It discounts gc's own input as [Provider.GetLastActivity] does. A non-nil
+// err means the read could not be made. Composites do not implement it: it
+// is read on the session's routed leaf ([FreshActivityFor]).
+type FreshActivityProvider interface {
+	FreshActivity(name string) (time.Time, error)
+}
+
+// FreshActivityFor returns the [FreshActivityProvider] of the backend serving
+// session name, the leaf [ResolveBackend] names, and false when that backend
+// takes no such read.
+func FreshActivityFor(p Provider, name string) (FreshActivityProvider, bool) {
+	leaf, _, _ := ResolveBackend(p, name)
+	fa, ok := leaf.(FreshActivityProvider)
+	return fa, ok
+}
 
 // ExecProvider is an optional extension for runtimes that expose the RPP
 // connection primitive: run a command inside the box and return its standard
@@ -797,6 +885,10 @@ type InventoryEntry struct {
 	// `gc handoff` set) as the batched read sees it. On tmux it is the
 	// marker's user-option mirror (#{@GC_RESTART_REQUESTED}).
 	RestartRequested bool
+	// Program is the session's agent-pane program-status reading
+	// ([ProgramStatusProvider]) taken in the same batch: Unread unless the
+	// runtime reads program status for this session.
+	Program ProgramStatus
 }
 
 // EnvironmentBatchProvider is an optional extension exposing a single-exec
@@ -863,7 +955,13 @@ type InputClearProvider interface {
 //
 // Codex CLI emits a durable "<turn_aborted>" marker when an in-flight turn has
 // actually been canceled. Waiting for that marker avoids racing a replacement
-// prompt into a session that still intends to finish the interrupted turn.
+// prompt into a session that still intends to finish the interrupted turn. A
+// session that was running no turn records nothing, and its boundary is
+// already reached.
+//
+// A wait that times out without one reading that showed a turn running
+// returns an error wrapping [ErrWaitUnobserved] beside its timeout error, as
+// [IdleWaitProvider] does.
 type InterruptBoundaryWaitProvider interface {
 	WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error
 }
@@ -912,6 +1010,25 @@ func TurnInterruptModeFor(p Provider, name string) TurnInterruptMode {
 	default:
 		return TurnInterruptKeystroke
 	}
+}
+
+// BackgroundWorkStopper is an optional extension for runtimes that can stop
+// work a provider keeps running after its turn was interrupted. A session's
+// explicit stop (session.Manager.StopTurn) calls it once the interrupt
+// boundary is reached; an interrupt that delivers a replacement message does
+// not, so a replacement turn leaves earlier work alone.
+//
+// Codex CLI runs a turn's commands in background terminals that outlive the
+// interrupted turn. tmux stops them with Codex's /stop, which closes ALL of
+// the session's background terminals, including ones earlier turns started:
+// stopping a session stops its work. Claude Code keeps a command the model
+// ran in the background running the same way; tmux stops ALL of its
+// background shells from Claude's background-task view. StopBackgroundWork returns
+// [ErrInteractionUnsupported] for sessions it has no such work to stop for.
+// Work it could not stop is logged rather than returned, because the turn is
+// already stopped; only the caller's context ending is an error.
+type BackgroundWorkStopper interface {
+	StopBackgroundWork(ctx context.Context, name string) error
 }
 
 // RelaunchProvider is an optional extension for runtimes that can re-launch the
@@ -1329,6 +1446,13 @@ type Config struct {
 	// start effect sets it (CONTRACT v5 S1, I24); legacy never does.
 	// Excluded from every fingerprint.
 	FreshOnly bool
+
+	// ProgramStatus is the session's OSC 7501 capture declaration, derived
+	// from the provider's program_status binding, the city switch and the
+	// transport. The zero value declares nothing. Excluded from every
+	// fingerprint: capture is applied at the leaf, and arming or healing it
+	// never restarts the agent.
+	ProgramStatus ProgramStatusArm
 }
 
 // OverlayProviderNames returns the effective provider overlay slots to stage for

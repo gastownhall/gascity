@@ -38,6 +38,7 @@ var (
 	_ runtime.TurnInterruptCapabilityProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider    = (*Provider)(nil)
 	_ runtime.InputClearProvider              = (*Provider)(nil)
+	_ runtime.BackgroundWorkStopper           = (*Provider)(nil)
 	_ runtime.TransportCapabilityProvider     = (*Provider)(nil)
 	_ runtime.RelaunchProvider                = (*Provider)(nil)
 	_ runtime.LivenessObserver                = (*Provider)(nil)
@@ -564,6 +565,15 @@ func (p *Provider) WaitTurnEnded(ctx context.Context, name, turnID string, timeo
 		return tf.WaitTurnEnded(ctx, name, turnID, timeout)
 	}
 	return runtime.TurnState{}, runtime.ErrInteractionUnsupported
+}
+
+// StopBackgroundWork delegates to the routed backend when it can stop work an
+// interrupted turn left running.
+func (p *Provider) StopBackgroundWork(ctx context.Context, name string) error {
+	if sp, ok := p.route(name).(runtime.BackgroundWorkStopper); ok {
+		return sp.StopBackgroundWork(ctx, name)
+	}
+	return runtime.ErrInteractionUnsupported
 }
 
 // WaitForInterruptBoundary delegates to the routed backend when it can confirm

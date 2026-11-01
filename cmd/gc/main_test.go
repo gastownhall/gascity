@@ -222,6 +222,24 @@ func testscriptGC() {
 	os.Exit(sessionpkg.FailOnNoCityRefusals(func() int { return mainExitCode(os.Args[1:], os.Stdout, os.Stderr) }, os.Stderr))
 }
 
+// testProcessTeardown removes what TestMain made for this process: its
+// temp root (with GC_HOME, the runtime dir and the provider stubs inside),
+// the managed dolt servers it registered, and its tmux socket parent. The
+// TestingM chain runs the same teardown after m.Run returns.
+var testProcessTeardown func()
+
+// exitTestProcess ends a re-exec'd helper test binary with code from inside
+// m.Run. A bare os.Exit there skips TestMain's teardown and leaves the
+// helper's temp root and tmux socket parent behind, for the parent's later
+// helpers to sweep and announce on their stderr (ga-gcast6, ga-5qipy6), so
+// it tears down first.
+func exitTestProcess(code int) {
+	if testProcessTeardown != nil {
+		testProcessTeardown()
+	}
+	os.Exit(code)
+}
+
 func TestMain(m *testing.M) {
 	maybeRunHostedBeadsCredentialProvider()
 	maybeRunProductMetricsDirectChildEnvSpy()
@@ -329,7 +347,18 @@ func TestMain(m *testing.M) {
 	// children above keep the real installer: their scripts run follow-on
 	// commands that need the installed imports.
 	configureInitRemoteImportsForTests()
-	var testRunner testscript.TestingM = newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot)
+	// The tests run innermost, under every check below; splitStrictTestingM,
+	// outermost, reads their code apart from the checks' code.
+	tests := &splitStrictTestsM{m: m}
+	doltGuard := newDoltLeakGuardedTestingM(tests, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot)
+	testProcessTeardown = func() {
+		doltGuard.cleanupTemporaryPaths()
+		reapManagedDoltTestProcesses()
+		if tmuxSocketCleanupRoot != "" {
+			_ = os.RemoveAll(tmuxSocketCleanupRoot)
+		}
+	}
+	var testRunner testscript.TestingM = doltGuard
 	// The tmux leak guard wraps outside the dolt guard and inside
 	// cleanupTestingM: it must observe and kill leaked tmux servers while the
 	// per-run socket root still exists (dip-73cr05 — city-name sockets like
@@ -339,6 +368,7 @@ func TestMain(m *testing.M) {
 	if tmuxSocketCleanupRoot != "" {
 		testRunner = cleanupTestingM{m: testRunner, paths: []string{tmuxSocketCleanupRoot}}
 	}
+	testRunner = splitStrictTestingM{checks: testRunner, tests: tests}
 	testscript.Main(testRunner, map[string]func(){
 		"gc": testscriptGC,
 		"bd": bdTestCmd,
@@ -6602,59 +6632,41 @@ prompt_template = %q
 // TestDoPrimeStrictTemplateRendersLegitimatelyEmpty verifies that --strict
 // does NOT error when a template file exists but produces empty output.
 // Templates with conditional blocks (e.g., `{{if .RigName}}...{{end}}`)
-// can legitimately evaluate to empty under some contexts; strict mode is
-// a typo/missing-file detector, not a check that templates produce
-// substantial content. The absence of this test would let the missing-
-// file strict check quietly regress into a broader empty-render check.
+// can legitimately evaluate to empty under some contexts, and an absent key
+// renders empty under missingkey=zero; strict mode fails on templates that
+// cannot be read or rendered, not on templates that render little. The
+// .template.md path matters: a plain .md is never executed, so it could not
+// exercise an empty render.
 func TestDoPrimeStrictTemplateRendersLegitimatelyEmpty(t *testing.T) {
-	clearGCEnv(t)
-	disableManagedDoltRecoveryForTest(t)
-
-	dir := t.TempDir()
-	gcDir := filepath.Join(dir, ".gc")
-	if err := os.MkdirAll(gcDir, 0o755); err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name string
+		body string
+	}{
+		// RigName is empty when GC_RIG isn't set, so the conditional
+		// short-circuits the whole template body.
+		{name: "conditional", body: `{{if .RigName}}You are in rig {{.RigName}}.{{end}}`},
+		{name: "absent key", body: `{{.NoSuchKey}}`},
 	}
-	promptDir := filepath.Join(dir, "prompts")
-	if err := os.MkdirAll(promptDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// Template file exists but renders to empty string under this context.
-	// {{if}} with a missing/empty key (RigName is empty when GC_RIG isn't set)
-	// short-circuits the whole template body.
-	emptyTemplate := `{{if .RigName}}You are in rig {{.RigName}}.{{end}}`
-	if err := os.WriteFile(filepath.Join(promptDir, "mayor.md"), []byte(emptyTemplate), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	toml := `[workspace]
-name = "test-city"
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearGCEnv(t)
+			disableManagedDoltRecoveryForTest(t)
+			setupStrictPrimeTemplateCity(t, tt.body)
 
-[[agent]]
-name = "mayor"
-prompt_template = "prompts/mayor.md"
-`
-	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	orig, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(orig) })
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("GC_CITY_PATH", dir)
-
-	// Clear GC_RIG so .RigName evaluates to empty and the conditional
-	// short-circuits. Without this, an ambient GC_RIG would produce output.
-	t.Setenv("GC_RIG", "")
-	t.Setenv("GC_RIG_ROOT", "")
-	t.Setenv("GC_AGENT", "")
-	t.Setenv("GC_ALIAS", "")
-
-	var stdout, stderr bytes.Buffer
-	code := doPrimeWithMode([]string{"mayor"}, &stdout, &stderr, false, true)
-	if code != 0 {
-		t.Fatalf("doPrimeWithMode(strict=true, legitimately-empty template) = %d, want 0; stderr: %s", code, stderr.String())
+			var stdout, stderr bytes.Buffer
+			code := doPrimeWithMode([]string{"worker"}, &stdout, &stderr, false, true)
+			if code != 0 {
+				t.Fatalf("doPrimeWithMode(strict=true, legitimately-empty template) = %d, want 0; stderr: %s", code, stderr.String())
+			}
+			if strings.Contains(stderr.String(), "prompt template") {
+				t.Errorf("stderr = %q, want no template render warning", stderr.String())
+			}
+			// Only an empty render falls through to the default prompt; a
+			// template returned verbatim would print its own text instead.
+			if !strings.Contains(stdout.String(), "# Gas City Agent") {
+				t.Errorf("stdout = %q, want the default prompt an empty render falls through to", stdout.String())
+			}
+		})
 	}
 }
 
@@ -6773,6 +6785,381 @@ prompt_template = "prompts/does-not-exist.md"
 	}
 	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "" {
 		t.Fatalf("session_key = %q, want empty after strict template failure", got)
+	}
+}
+
+// setupStrictPrimeTemplateCity writes a city whose agent "worker" uses
+// prompts/worker.template.md with the given body, then chdirs into it and
+// points GC_CITY_PATH at it. The .template.md suffix matters: a plain .md
+// prompt_template is returned verbatim and never executed.
+func setupStrictPrimeTemplateCity(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	promptDir := filepath.Join(dir, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(promptDir, "worker.template.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	toml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY_PATH", dir)
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_ALIAS", "")
+	return dir
+}
+
+// TestDoPrimeStrictTemplateParseErrorFails verifies that --strict fails on a
+// prompt_template that does not parse, instead of warning on stderr and
+// emitting the raw template text with exit 0 (issue #8149).
+func TestDoPrimeStrictTemplateParseErrorFails(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	setupStrictPrimeTemplateCity(t, "Hello {{base_branch}}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode([]string{"worker"}, &stdout, &stderr, false, true)
+	if code == 0 {
+		t.Fatalf("doPrimeWithMode(strict=true, parse error) = 0, want non-zero; stdout: %q; stderr: %q", stdout.String(), stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty on strict template failure", stdout.String())
+	}
+	for _, want := range []string{
+		`gc prime: prompt_template "prompts/worker.template.md" for agent "worker": `,
+		`function "base_branch" not defined`,
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+		}
+	}
+}
+
+// TestDoPrimeStrictTemplateExecuteErrorFails verifies that --strict fails on
+// a prompt_template that parses but fails to execute. {{.BogusField}} is not
+// such a template: missingkey=zero renders an absent key as empty. When the
+// execute error is only a symptom, the render warning that names the cause
+// must precede the strict failure line: a shared fragment file that fails to
+// parse leaves its {{template}} call "not defined".
+func TestDoPrimeStrictTemplateExecuteErrorFails(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     string
+		files    map[string]string
+		wantErr  string
+		wantWarn string
+	}{
+		{name: "undefined fragment", body: `Hello {{template "no-such-fragment" .}}`, wantErr: `template "no-such-fragment" not defined`},
+		{name: "field of string", body: `{{.AgentName.Foo}}`, wantErr: `can't evaluate field Foo`},
+		{
+			name:     "fragment fails to parse",
+			body:     `Hello {{template "frag" .}}`,
+			files:    map[string]string{"template-fragments/frag.template.md": `{{define "frag"}}x {{base_branch}}{{end}}`},
+			wantErr:  `template "frag" not defined`,
+			wantWarn: `gc: shared template "frag.template.md": template: prompt:1: function "base_branch" not defined`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearGCEnv(t)
+			disableManagedDoltRecoveryForTest(t)
+			dir := setupStrictPrimeTemplateCity(t, tt.body)
+			for rel, content := range tt.files {
+				path := filepath.Join(dir, rel)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := doPrimeWithMode([]string{"worker"}, &stdout, &stderr, false, true)
+			if code == 0 {
+				t.Fatalf("doPrimeWithMode(strict=true, execute error) = 0, want non-zero; stdout: %q; stderr: %q", stdout.String(), stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Errorf("stdout = %q, want empty on strict template failure", stdout.String())
+			}
+			const failure = `gc prime: prompt_template "prompts/worker.template.md" for agent "worker": `
+			for _, want := range []string{failure, tt.wantErr} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+				}
+			}
+			if tt.wantWarn != "" {
+				warnAt := strings.Index(stderr.String(), tt.wantWarn)
+				if warnAt < 0 || warnAt > strings.Index(stderr.String(), failure) {
+					t.Errorf("stderr = %q, want %q before the strict failure line", stderr.String(), tt.wantWarn)
+				}
+			}
+		})
+	}
+}
+
+// TestDoPrimeStrictHookModeBrokenTemplateDoesNotUpdateProviderMetadata
+// verifies that a prompt_template that fails to parse or execute is caught by
+// the strict precondition, before hook side effects persist session_key. The
+// valid row proves the session_key assertion is not vacuous.
+func TestDoPrimeStrictHookModeBrokenTemplateDoesNotUpdateProviderMetadata(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     string
+		wantFail bool
+	}{
+		{name: "parse error", body: "Hello {{base_branch}}\n", wantFail: true},
+		{name: "execute error", body: `Hello {{template "no-such-fragment" .}}`, wantFail: true},
+		{name: "valid", body: "Hello {{.AgentName}}\n", wantFail: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearGCEnv(t)
+			disableManagedDoltRecoveryForTest(t)
+			t.Setenv("GC_BEADS", "file")
+			dir := setupStrictPrimeTemplateCity(t, tt.body)
+
+			store, err := openCityStoreAt(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sessionBead, err := store.Create(beads.Bead{
+				Title:  "worker",
+				Type:   "session",
+				Labels: []string{"gc:session", "template:worker"},
+				Metadata: map[string]string{
+					"template":     "worker",
+					"session_name": "worker",
+					"state":        "active",
+					"work_dir":     dir,
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			const providerSessionID = "provider-session-broken-template"
+			t.Setenv("GC_SESSION_ID", sessionBead.ID)
+			t.Setenv("GC_PROVIDER_SESSION_ID", providerSessionID)
+
+			var stdout, stderr bytes.Buffer
+			code := doPrimeWithMode([]string{"worker"}, &stdout, &stderr, true, true)
+			if tt.wantFail && code == 0 {
+				t.Fatalf("doPrimeWithMode(strict=true, hook=true, %s) = 0, want non-zero; stderr: %s", tt.name, stderr.String())
+			}
+			if !tt.wantFail && code != 0 {
+				t.Fatalf("doPrimeWithMode(strict=true, hook=true, valid template) = %d, want 0; stderr: %s", code, stderr.String())
+			}
+
+			updated, err := store.Get(sessionBead.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := strings.TrimSpace(updated.Metadata["session_key"])
+			want := providerSessionID
+			if tt.wantFail {
+				want = ""
+			}
+			if got != want {
+				t.Fatalf("session_key = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestDoPrimeBrokenTemplateWithoutStrictFallsBackToRawText pins the
+// non-strict contract the strict check must not change: a prompt_template
+// that fails to parse or execute is reported on stderr and its raw text is
+// output with exit 0, in both plain and hook mode.
+func TestDoPrimeBrokenTemplateWithoutStrictFallsBackToRawText(t *testing.T) {
+	bodies := []struct {
+		name string
+		body string
+	}{
+		{name: "parse error", body: "Hello {{base_branch}}"},
+		{name: "execute error", body: `Hello {{template "no-such-fragment" .}}`},
+	}
+	for _, b := range bodies {
+		for _, hookMode := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/hook=%t", b.name, hookMode), func(t *testing.T) {
+				clearGCEnv(t)
+				disableManagedDoltRecoveryForTest(t)
+				setupStrictPrimeTemplateCity(t, b.body)
+
+				var stdout, stderr bytes.Buffer
+				code := doPrimeWithMode([]string{"worker"}, &stdout, &stderr, hookMode, false)
+				if code != 0 {
+					t.Fatalf("doPrimeWithMode(strict=false, hook=%t, %s) = %d, want 0; stderr: %s", hookMode, b.name, code, stderr.String())
+				}
+				if !strings.Contains(stdout.String(), b.body) {
+					t.Errorf("stdout = %q, want the raw template text %q", stdout.String(), b.body)
+				}
+				if want := `gc: prompt template "prompts/worker.template.md": `; !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+				}
+				if strings.Contains(stderr.String(), "gc prime: prompt_template") {
+					t.Errorf("stderr = %q, want no strict failure line without --strict", stderr.String())
+				}
+			})
+		}
+	}
+}
+
+// setupStrictPrimeFallbackCity writes a city with an agent for each way gc
+// prime's output stops at, or moves past, a candidate agent, and points
+// GC_CITY_PATH at it. It imports the core pack, whose builtin
+// pool-worker prompt the pool agent "pooled" gets; no builtin prompt fits the
+// single-session agent "plain".
+func setupStrictPrimeFallbackCity(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := materializeBuiltinPrompts(dir); err != nil {
+		t.Fatalf("materializeBuiltinPrompts: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "prompts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"worker": "Hello {{.AgentName}}\n",
+		"broken": "Hello {{base_branch}}\n",
+		"empty":  "{{if .RigName}}rig{{end}}",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, "prompts", name+".template.md"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	toml := `[workspace]
+name = "test-city"
+
+[daemon]
+formula_v2 = false
+
+[providers.claude]
+base = "builtin:claude"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+
+[[agent]]
+name = "broken"
+prompt_template = "prompts/broken.template.md"
+
+[[agent]]
+name = "empty"
+prompt_template = "prompts/empty.template.md"
+
+[[agent]]
+name = "sleepy"
+suspended = true
+prompt_template = "prompts/worker.template.md"
+
+[[agent]]
+name = "plain"
+max_active_sessions = 1
+
+[[agent]]
+name = "pooled"
+start_command = "echo"
+
+[agent.pool]
+min = 0
+max = -1
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml+builtinImportsTOML("core")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeBuiltinImportsLock(t, dir, "core")
+
+	t.Setenv("GC_CITY_PATH", dir)
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_ALIAS", "")
+}
+
+// TestDoPrimeStrictHookModeChecksOnlyTheTemplatesPrimeRenders verifies that
+// --strict checks candidate agents in the order gc prime's output tries them
+// and stops where the output stops. In hook mode GC_TEMPLATE adds a fallback
+// candidate after the named agent. A broken fallback must not fail --strict
+// when the named agent is suspended, is a client's provider chat, or renders
+// a prompt of its own; it must fail it, naming the broken agent rather than
+// the named one, when the output would reach it.
+func TestDoPrimeStrictHookModeChecksOnlyTheTemplatesPrimeRenders(t *testing.T) {
+	tests := []struct {
+		name       string
+		agent      string
+		fallback   string
+		origin     string
+		wantFail   bool
+		wantStdout string
+	}{
+		{name: "named agent renders", agent: "worker", fallback: "broken", wantStdout: "Hello worker"},
+		{name: "named agent suspended", agent: "sleepy", fallback: "broken"},
+		{name: "client provider chat", agent: "claude", fallback: "broken", origin: "manual"},
+		{name: "builtin pool prompt", agent: "pooled", fallback: "broken", wantStdout: "GUPP"},
+		{name: "named agent renders empty", agent: "empty", fallback: "broken", wantFail: true},
+		{name: "no prompt fits named agent", agent: "plain", fallback: "broken", wantFail: true},
+		{name: "named agent broken", agent: "broken", fallback: "worker", wantFail: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearGCEnv(t)
+			disableManagedDoltRecoveryForTest(t)
+			setupStrictPrimeFallbackCity(t)
+			t.Setenv("GC_TEMPLATE", tt.fallback)
+			t.Setenv("GC_SESSION_ORIGIN", tt.origin)
+
+			var stdout, stderr bytes.Buffer
+			code := doPrimeWithMode([]string{tt.agent}, &stdout, &stderr, true, true)
+			if tt.wantFail {
+				if code == 0 {
+					t.Fatalf("doPrimeWithMode(strict=true, hook=true, %s then %s) = 0, want non-zero; stdout: %q; stderr: %q", tt.agent, tt.fallback, stdout.String(), stderr.String())
+				}
+				if stdout.Len() != 0 {
+					t.Errorf("stdout = %q, want empty on strict template failure", stdout.String())
+				}
+				if want := `gc prime: prompt_template "prompts/broken.template.md" for agent "broken": `; !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+				}
+				return
+			}
+			if code != 0 {
+				t.Fatalf("doPrimeWithMode(strict=true, hook=true, %s then %s) = %d, want 0; stderr: %q", tt.agent, tt.fallback, code, stderr.String())
+			}
+			if strings.Contains(stderr.String(), "gc prime: prompt_template") {
+				t.Errorf("stderr = %q, want no strict failure for a template gc prime never renders", stderr.String())
+			}
+			if tt.wantStdout == "" {
+				if got := strings.TrimSpace(stdout.String()); got != "" {
+					t.Errorf("stdout = %q, want no prompt", got)
+				}
+			} else if !strings.Contains(stdout.String(), tt.wantStdout) {
+				t.Errorf("stdout = %q, want it to contain %q", stdout.String(), tt.wantStdout)
+			}
+		})
 	}
 }
 
@@ -7224,6 +7611,10 @@ prompt_template = "prompts/probe.md"
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Session rows are seeded and read back through the session-class store,
+	// where gc prime's session-name lookup reads them (cliSessionName): the
+	// fixture now matches the production path.
+	store = cliSessionStore(store, nil, dir)
 	sessionBead, err := store.Create(beads.Bead{
 		Title: "probe",
 		Type:  sessionBeadType,
@@ -7263,6 +7654,7 @@ prompt_template = "prompts/probe.md"
 	if err != nil {
 		t.Fatal(err)
 	}
+	updatedStore = cliSessionStore(updatedStore, nil, dir)
 	updated, err := updatedStore.Get(sessionBead.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -7304,6 +7696,10 @@ prompt_template = "prompts/probe.md"
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Session rows are seeded and read back through the session-class store,
+	// where gc prime's session-name lookup reads them (cliSessionName): the
+	// fixture now matches the production path.
+	store = cliSessionStore(store, nil, dir)
 	sessionBead, err := store.Create(beads.Bead{
 		Title: "probe",
 		Type:  "session",
@@ -7343,6 +7739,7 @@ prompt_template = "prompts/probe.md"
 	if err != nil {
 		t.Fatal(err)
 	}
+	updatedStore = cliSessionStore(updatedStore, nil, dir)
 	updated, err := updatedStore.Get(sessionBead.ID)
 	if err != nil {
 		t.Fatal(err)

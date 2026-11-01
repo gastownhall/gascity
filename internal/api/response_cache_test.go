@@ -1,11 +1,13 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,7 +57,7 @@ func (s *countingStore) ListByAssignee(assignee, status string, limit int) ([]be
 // so a busy city (whose sequence advances every poll) still hits the cache
 // instead of rebuilding the O(store-size) body on every request. Recording an
 // event must NOT bust the /status cache within the TTL window — unlike the
-// index-keyed endpoints (see TestHandleAgentListCachesUntilIndexChanges).
+// index-keyed endpoints (see TestHandleOrdersFeedCachesUntilIndexChanges).
 func TestHandleStatusCachesAcrossIndexChanges(t *testing.T) {
 	// Pin a wide TTL so every request in this test lands in the same time
 	// bucket; this isolates the "index churn must not bust the cache" property
@@ -517,7 +519,17 @@ func TestHandleStatusBlockingBypassesTimeCache(t *testing.T) {
 	}
 }
 
-func TestHandleAgentListCachesUntilIndexChanges(t *testing.T) {
+// TestHandleAgentListCachesAcrossIndexChanges pins the gascity#7149 fix:
+// GET /agents keys its response cache on the time bucket, not the event
+// sequence, so a busy city (whose sequence advances between polls) keeps
+// hitting the cache instead of paying the per-agent rebuild on every request.
+func TestHandleAgentListCachesAcrossIndexChanges(t *testing.T) {
+	// One bucket for the whole test, and the TTL floor off, so the bucket
+	// tier alone carries the assertion; the floor is covered by
+	// TestHandleAgentListServesRecentBodyAfterBucketRollover.
+	pinAgentListCache(t, time.Hour, 0)
+	pinAgentListBuildsSlow(t)
+
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}
 	state.stores["myrig"] = store
@@ -529,25 +541,452 @@ func TestHandleAgentListCachesUntilIndexChanges(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first agents = %d, want 200", rec.Code)
 	}
+	perBuild := store.listByAssigneeCalls
+	if perBuild == 0 {
+		t.Fatal("first agents issued no assignee lookups; the build count cannot tell a hit from a rebuild")
+	}
+	builtIndex := responseIndex(t, rec)
+
+	for i := 0; i < 5; i++ {
+		state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("agents after event %d = %d, want 200", i, rec.Code)
+		}
+		if store.listByAssigneeCalls != perBuild {
+			t.Fatalf("assignee lookups after event %d = %d, want %d (one build; the cache must survive sequence churn)", i, store.listByAssigneeCalls, perBuild)
+		}
+		// The cached body predates the events recorded since its build, so
+		// the hit must report the build index, not the live head.
+		if got := responseIndex(t, rec); got != builtIndex {
+			t.Fatalf("X-GC-Index after event %d = %d, want the build index %d on a bucket hit", i, got, builtIndex)
+		}
+	}
+}
+
+// TestHandleAgentListServesRecentBodyAfterBucketRollover pins the TTL-floor
+// tier: a loaded city's build outlasts its start bucket (8.19s in #7149), so
+// its body is stored under a bucket no later request computes. A repeat inside
+// agentListResponseTTLFloor of that build must still be served from the cache,
+// carrying the build index rather than the live head.
+func TestHandleAgentListServesRecentBodyAfterBucketRollover(t *testing.T) {
+	// Every request lands in a new bucket, so only the TTL floor can hit.
+	pinAgentListCache(t, time.Nanosecond, time.Hour)
+	// A build that outlasts its bucket is a slow one.
+	pinAgentListBuildsSlow(t)
+
+	state := newFakeState(t)
+	store := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first agents = %d, want 200", rec.Code)
+	}
+	perBuild := store.listByAssigneeCalls
+	if perBuild == 0 {
+		t.Fatal("first agents issued no assignee lookups; the build count cannot tell a hit from a rebuild")
+	}
+	builtIndex := responseIndex(t, rec)
+	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
 
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("second agents = %d, want 200", rec.Code)
 	}
+	if store.listByAssigneeCalls != perBuild {
+		t.Fatalf("assignee lookups = %d, want %d: the repeat was rebuilt instead of served from the TTL floor", store.listByAssigneeCalls, perBuild)
+	}
+	if got := responseIndex(t, rec); got != builtIndex {
+		t.Fatalf("X-GC-Index = %d, want the build index %d on a TTL-floor hit", got, builtIndex)
+	}
+}
 
-	if store.listByAssigneeCalls != 2 {
-		t.Fatalf("ListByAssignee calls after cached repeat = %d, want 2", store.listByAssigneeCalls)
+// TestHandleAgentListRebuildsAfterTTLFloor pins the floor's age bound, the
+// only limit on how stale a slow build's list can be served: once the list is
+// older than agentListResponseTTLFloor and its bucket has rolled over, a
+// repeat rebuilds and reports the new head.
+func TestHandleAgentListRebuildsAfterTTLFloor(t *testing.T) {
+	// Both windows have passed by the repeat, and nothing else turns the
+	// list away: every build counts as slow.
+	pinAgentListCache(t, time.Nanosecond, time.Nanosecond)
+	pinAgentListBuildsSlow(t)
+
+	state := newFakeState(t)
+	store := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first agents = %d, want 200", rec.Code)
+	}
+	perBuild := store.listByAssigneeCalls
+	if perBuild == 0 {
+		t.Fatal("first agents issued no assignee lookups; the build count cannot tell a hit from a rebuild")
+	}
+	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+	head, err := state.eventProv.LatestSeq()
+	if err != nil {
+		t.Fatalf("latest seq: %v", err)
 	}
 
-	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("third agents = %d, want 200", rec.Code)
+		t.Fatalf("second agents = %d, want 200", rec.Code)
 	}
-	if store.listByAssigneeCalls != 4 {
-		t.Fatalf("ListByAssignee calls after index change = %d, want 4", store.listByAssigneeCalls)
+	if want := 2 * perBuild; store.listByAssigneeCalls != want {
+		t.Fatalf("assignee lookups = %d, want %d: a list older than the floor was served instead of rebuilt", store.listByAssigneeCalls, want)
+	}
+	if got := responseIndex(t, rec); got != head {
+		t.Fatalf("X-GC-Index = %d, want the head %d the rebuilt list was read at", got, head)
+	}
+}
+
+// TestHandleAgentListRebuildsCheapListAfterEvent pins the reader the time
+// cache must not starve: the dashboard's Agents view refetches the list when a
+// session, bead or agent event arrives and never polls, so a list built before
+// that event, served from either cache tier, would show the pre-event state
+// until the next event. A list as cheap to build as this one is rebuilt once
+// the event index has moved past it; only a slow build
+// (agentListSlowBuildThreshold) is served across index changes.
+func TestHandleAgentListRebuildsCheapListAfterEvent(t *testing.T) {
+	// Either tier could serve the pre-event list: one bucket for the whole
+	// test, and a floor that never expires.
+	pinAgentListCache(t, time.Hour, time.Hour)
+
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+
+	if row, _ := listedWorker(t, getAgents(h, state)); row.Running {
+		t.Fatal("myrig/worker running before its session started")
+	}
+
+	if err := state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}); err != nil {
+		t.Fatalf("start myrig--worker: %v", err)
+	}
+	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "myrig--worker"})
+	head, err := state.eventProv.LatestSeq()
+	if err != nil {
+		t.Fatalf("latest seq: %v", err)
+	}
+
+	row, index := listedWorker(t, getAgents(h, state))
+	if !row.Running {
+		t.Fatal("myrig/worker running = false after session.woke: the refetch the event triggered was served the list built before it")
+	}
+	if index != head {
+		t.Fatalf("X-GC-Index = %d, want the head %d the rebuilt list was read at", index, head)
+	}
+}
+
+// gatedAssigneeStore parks the first active-bead lookup a list build makes
+// until open is called, so a test can hold that build open while another one
+// runs. Later lookups pass straight through.
+type gatedAssigneeStore struct {
+	beads.Store
+	lookups   atomic.Int64
+	parked    atomic.Bool
+	entered   chan struct{}
+	release   chan struct{}
+	closeOnce sync.Once
+}
+
+func newGatedAssigneeStore() *gatedAssigneeStore {
+	return &gatedAssigneeStore{Store: beads.NewMemStore(), entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (s *gatedAssigneeStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Assignee != "" {
+		s.lookups.Add(1)
+		if s.parked.CompareAndSwap(false, true) {
+			close(s.entered)
+			<-s.release
+		}
+	}
+	return s.Store.List(query)
+}
+
+// open releases the parked lookup; it is safe to call more than once.
+func (s *gatedAssigneeStore) open() { s.closeOnce.Do(func() { close(s.release) }) }
+
+// TestHandleAgentListKeepsLaterStartedBuild pins the overlap rule: on a loaded
+// city list builds overlap and can finish out of order, and the age floor
+// serves whatever the slot holds. A build that started first and finishes
+// last must not replace the list a later-started build cached, or requests
+// are served the older list and X-GC-Index steps back.
+func TestHandleAgentListKeepsLaterStartedBuild(t *testing.T) {
+	pinAgentListCache(t, time.Hour, time.Hour)
+	// Every build counts as slow, so a cached list is served across index
+	// changes and the slot alone decides what the repeat gets.
+	pinAgentListBuildsSlow(t)
+
+	state := newFakeState(t)
+	gate := newGatedAssigneeStore()
+	state.stores["myrig"] = gate
+	h := newTestCityHandler(t, state)
+
+	// The first build reads the worker stopped, then parks in its
+	// active-bead lookup.
+	var first *httptest.ResponseRecorder
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		first = getAgents(h, state)
+	}()
+	t.Cleanup(func() {
+		gate.open()
+		<-firstDone
+	})
+	select {
+	case <-gate.entered:
+	case <-firstDone:
+		t.Fatal("first build finished without an active-bead lookup; the test cannot hold it open")
+	}
+
+	// While it is parked, the worker starts and a second build caches the
+	// newer list.
+	if err := state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}); err != nil {
+		t.Fatalf("start myrig--worker: %v", err)
+	}
+	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "myrig--worker"})
+	newer, newerIndex := listedWorker(t, getAgents(h, state))
+	if !newer.Running {
+		t.Fatal("second build read myrig/worker stopped after its session started")
+	}
+
+	// The first build finishes last and tries to cache its older list.
+	gate.open()
+	<-firstDone
+	older, olderIndex := listedWorker(t, first)
+	if older.Running || olderIndex >= newerIndex {
+		t.Fatalf("first build read running=%v at index %d, want a stopped worker before index %d; the test no longer models an older build", older.Running, olderIndex, newerIndex)
+	}
+
+	lookups := gate.lookups.Load()
+	row, index := listedWorker(t, getAgents(h, state))
+	if !row.Running || index != newerIndex {
+		t.Fatalf("repeat served running=%v at X-GC-Index %d, want the later-started build's running=true at %d: the build that finished last replaced it", row.Running, index, newerIndex)
+	}
+	if got := gate.lookups.Load(); got != lookups {
+		t.Fatalf("assignee lookups = %d after the repeat, want %d: it was rebuilt, not served from the cache", got, lookups)
+	}
+}
+
+// getAgents serves one plain GET /agents through h.
+func getAgents(h http.Handler, state *fakeState) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(state, "/agents"), nil))
+	return rec
+}
+
+// listedWorker decodes an agent-list response and returns its myrig/worker
+// row and X-GC-Index.
+func listedWorker(t *testing.T, rec *httptest.ResponseRecorder) (agentResponse, uint64) {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("agents = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp agentListWire
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode agents: %v", err)
+	}
+	row, ok := agentByNameIn(resp.Items, "myrig/worker")
+	if !ok {
+		t.Fatalf("myrig/worker missing; items = %+v", resp.Items)
+	}
+	return row, responseIndex(t, rec)
+}
+
+// pinAgentListCache pins the agent list's cache windows for one test: the
+// time-bucket width and the TTL floor.
+func pinAgentListCache(t *testing.T, bucket, floor time.Duration) {
+	t.Helper()
+	oldBucket, oldFloor := timeBucketResponseCacheTTL, agentListResponseTTLFloor
+	timeBucketResponseCacheTTL, agentListResponseTTLFloor = bucket, floor
+	t.Cleanup(func() { timeBucketResponseCacheTTL, agentListResponseTTLFloor = oldBucket, oldFloor })
+}
+
+// pinAgentListBuildsSlow counts every agent-list build as slow for one test,
+// as on #7149's loaded city, so a cached list is served after the event index
+// has moved past it.
+func pinAgentListBuildsSlow(t *testing.T) {
+	t.Helper()
+	old := agentListSlowBuildThreshold
+	agentListSlowBuildThreshold = 0
+	t.Cleanup(func() { agentListSlowBuildThreshold = old })
+}
+
+// TestHandleAgentListBlockingBypassesTimeCache pins the strict-freshness
+// path: a blocking ?index=&wait= request must rebuild the list so the body
+// reflects the event it waited for, never a cached body built before it. Two
+// identical blocking requests share a cache key, so the second would be a
+// deterministic hit if the handler read the cache for blocking requests.
+func TestHandleAgentListBlockingBypassesTimeCache(t *testing.T) {
+	pinAgentListCache(t, time.Hour, time.Hour)
+
+	state := newFakeState(t)
+	store := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	h := newTestCityHandler(t, state)
+	// Move the head past 0 so ?index=0 returns without waiting.
+	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+
+	// The two requests are identical, so they share one cache key: a handler
+	// that read the cache for blocking requests would serve the second the
+	// list the first built.
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/agents?index=0&wait=1s"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first blocking agents = %d, want 200", rec.Code)
+	}
+	perBuild := store.listByAssigneeCalls
+	if perBuild == 0 {
+		t.Fatal("first blocking agents issued no assignee lookups; the build count cannot tell a hit from a rebuild")
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second blocking agents = %d, want 200", rec.Code)
+	}
+	if want := 2 * perBuild; store.listByAssigneeCalls != want {
+		t.Fatalf("assignee lookups after second blocking request = %d, want %d (blocking must bypass the cache)", store.listByAssigneeCalls, want)
+	}
+}
+
+// TestHandleAgentListDoesNotCachePartialList guards the partial-body rule: a
+// partial list reflects a transient backend failure, so it must not be
+// cached — the next request after the backend recovers must see the complete
+// list, not the failure.
+func TestHandleAgentListDoesNotCachePartialList(t *testing.T) {
+	pinAgentListCache(t, time.Hour, time.Hour)
+
+	state := onDemandPoolState(t)
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	// A failing session provider makes the on-demand pool's session listing
+	// fail, so the response is partial (as in
+	// TestAgentListOnDemandPoolDiscoveryFailureIsPartial).
+	good := state.sp
+	state.sp = runtime.NewFailFake()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(state, "/agents"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("partial agents = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var partial agentListWire
+	if err := json.NewDecoder(rec.Body).Decode(&partial); err != nil {
+		t.Fatalf("decode partial agents: %v", err)
+	}
+	if !partial.Partial {
+		t.Fatal("agents with a failing provider = not partial, want partial")
+	}
+
+	// Recover the provider with no event in between: the repeat must
+	// rebuild, because the partial body was never cached.
+	state.sp = good
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(state, "/agents"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("recovered agents = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var recovered agentListWire
+	if err := json.NewDecoder(rec.Body).Decode(&recovered); err != nil {
+		t.Fatalf("decode recovered agents: %v", err)
+	}
+	if recovered.Partial {
+		t.Fatalf("agents after provider recovery = partial, want complete; errors: %q", recovered.PartialErrors)
+	}
+	if _, ok := agentByNameIn(recovered.Items, "myrig/claude"); !ok {
+		t.Fatalf("myrig/claude missing after provider recovery; items = %+v", recovered.Items)
+	}
+}
+
+// TestHandleAgentListPeekBypassesCache guards the peek rule: ?peek=true
+// requests never read (or write) the response cache. Peek output changes
+// without advancing the event sequence, so a cached peek body would freeze
+// the last output, and the plain list's cached body must not strip the peek
+// output a peek caller asked for.
+func TestHandleAgentListPeekBypassesCache(t *testing.T) {
+	pinAgentListCache(t, time.Hour, time.Hour)
+
+	state := newFakeState(t)
+	store := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
+	state.sp.SetPeekOutput("myrig--worker", "one")
+	h := newTestCityHandler(t, state)
+
+	// Prime the plain-list cache.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(state, "/agents"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("priming agents = %d, want 200", rec.Code)
+	}
+	perBuild := store.listByAssigneeCalls
+	if perBuild == 0 {
+		t.Fatal("priming agents build issued no assignee-scoped List calls")
+	}
+
+	peekList := func() agentListWire {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(state, "/agents?peek=true"), nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("peek agents = %d, want 200; body: %s", rec.Code, rec.Body.String())
+		}
+		var resp agentListWire
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode peek agents: %v", err)
+		}
+		return resp
+	}
+
+	// A peek request must not be served the plain body the prime stored:
+	// that body carries no last_output.
+	peeked := peekList()
+	row, ok := agentByNameIn(peeked.Items, "myrig/worker")
+	if !ok {
+		t.Fatalf("myrig/worker missing from peek list; items = %+v", peeked.Items)
+	}
+	if row.LastOutput != "one" {
+		t.Fatalf("peek last_output = %q, want %q (a peek request must rebuild, not serve the cached plain body)", row.LastOutput, "one")
+	}
+
+	// Peek output changes with no event, so peek requests cannot be cached
+	// against each other either: the second peek must see the new output.
+	state.sp.SetPeekOutput("myrig--worker", "two")
+	peeked = peekList()
+	row, ok = agentByNameIn(peeked.Items, "myrig/worker")
+	if !ok {
+		t.Fatalf("myrig/worker missing from second peek list; items = %+v", peeked.Items)
+	}
+	if row.LastOutput != "two" {
+		t.Fatalf("peek last_output = %q, want %q (peek requests must rebuild on every request)", row.LastOutput, "two")
+	}
+	if got := store.listByAssigneeCalls; got != 3*perBuild {
+		t.Fatalf("assignee List calls after prime + two peeks = %d, want %d (one prime build plus one rebuild per peek)", got, 3*perBuild)
+	}
+
+	// The peek requests must not have disturbed the plain list's cache.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(state, "/agents"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("plain agents after peeks = %d, want 200", rec.Code)
+	}
+	if got := store.listByAssigneeCalls; got != 3*perBuild {
+		t.Fatalf("assignee List calls after plain repeat = %d, want %d (peek requests must not evict the plain cache)", got, 3*perBuild)
 	}
 }
 

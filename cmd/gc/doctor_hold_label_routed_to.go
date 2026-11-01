@@ -11,9 +11,13 @@ import (
 	"github.com/gastownhall/gascity/internal/doctor"
 )
 
-// holdLabelExternalValue is the one hold:<value> value that never implies a
-// routing gap: it names a human/out-of-system dependency, not an agent.
+// holdLabelExternalValue is a hold:<value> value that never implies a routing
+// gap: it names a human/out-of-system dependency, not an agent.
 const holdLabelExternalValue = "external"
+
+// holdLabelClearedValue is the other: `bd set-state <id> hold=cleared` releases
+// a hold and leaves hold:cleared behind, so it means "no hold", not an agent.
+const holdLabelClearedValue = "cleared"
 
 // holdLabelRoutedToCheck detects beads carrying a hold:<value> label whose
 // gc.routed_to metadata is missing or does not match <value>. gc.routed_to is
@@ -37,7 +41,7 @@ func (c *holdLabelRoutedToCheck) CanFix() bool { return true }
 func (c *holdLabelRoutedToCheck) WarmupEligible() bool { return false }
 
 // holdLabelValue returns the hold value carried by labels, if any
-// hold:<value> label is present and <value> is not "external".
+// hold:<value> label is present and <value> is not "external" or "cleared".
 func holdLabelValue(labels []string) (string, bool) {
 	for _, l := range labels {
 		val, ok := strings.CutPrefix(l, "hold:")
@@ -45,7 +49,7 @@ func holdLabelValue(labels []string) (string, bool) {
 			continue
 		}
 		val = strings.TrimSpace(val)
-		if val == "" || val == holdLabelExternalValue {
+		if val == "" || val == holdLabelExternalValue || val == holdLabelClearedValue {
 			continue
 		}
 		return val, true

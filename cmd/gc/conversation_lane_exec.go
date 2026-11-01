@@ -41,9 +41,20 @@ const (
 	laneContentBlockIncarnation = "incarnation"
 	// lanePendingUnknown is Probe.Pending for a pending interaction the
 	// runtime names no request id for.
-	lanePendingUnknown = "?"
+	lanePendingUnknown = opjournal.PendingUnknown
 	// laneProbeBudget bounds one probe's runtime calls.
 	laneProbeBudget = 10 * time.Second
+	// laneScreenTurnQuietLimit is how long a keystroke runtime's pane may
+	// draw nothing while its screen shows a running turn before
+	// quietBoundary takes that reading as stale. A live turn redraws its
+	// status every second (Claude Code's spinner and timer, Codex's Working
+	// row), so a pane whose own activity clock, read after its screen showed
+	// the turn (runtime.FreshActivityProvider), has stood still this long
+	// runs no turn: what reads as one is a frozen frame or transcript text,
+	// which an idle pane never redraws. The look's observation cannot show
+	// that: its activity can come from a snapshot taken before the turn
+	// started.
+	laneScreenTurnQuietLimit = time.Minute
 )
 
 // laneExecDeps is what the live executor needs, for any host that runs it:
@@ -63,18 +74,25 @@ type laneExecDeps struct {
 	// note records a degradation the executor fell back from, by stage:
 	// the host's noteError. Nil notes nothing.
 	note func(stage string, err error)
+	// interrupts records the interrupt each conversation runs, which keeps a
+	// retry of a session-scoped op on its turn (laneInterrupts). Nil records
+	// nothing.
+	interrupts *laneInterrupts
 }
 
 // conversationLaneExec is the live opjournal.Executor for one conversation
 // over worker.Handle. A keystroke-mode runtime's boundary is the quiescence
-// rule; a protocol-mode one (t3bridge) is live when it reports its turns,
-// their starts included, and its boundary is CurrentTurn showing no turn in
-// progress (DES-T3I §14 item 6). It is built per pass from the session row
-// the pass's view came from, so Probe and Deliver act on the incarnation
-// that view names.
+// rule, which the agent's own screen confirms where the lane can read its
+// busy indicator (quietBoundary); a protocol-mode one (t3bridge) is live
+// when it reports its turns, their starts included, and its boundary is
+// CurrentTurn showing no turn in progress (DES-T3I §14 item 6). It is built
+// per pass from the session row the pass's view came from, so Probe and
+// Deliver act on the incarnation that view names.
 type conversationLaneExec struct {
-	deps   laneExecDeps
-	info   session.Info
+	deps laneExecDeps
+	info session.Info
+	// stop is the row's stop request, read with info.
+	stop   session.StopRequest
 	target nudgeTarget
 	// budget bounds one probe's runtime calls; laneProbeBudget in
 	// production.
@@ -88,6 +106,19 @@ type conversationLaneExec struct {
 	matches func(nudgeTarget, worker.LiveObservation) (bool, error)
 	handle  func(nudgeTarget) (worker.Handle, error)
 	idle    func(nudgeTarget, worker.LiveObservation) bool
+	// turnOnScreen is the agent's own screen's reading of whether it is
+	// running a turn now, taken once the quiescence rule reads a keystroke
+	// runtime quiet: production reads runtime.TurnRunningProvider on the
+	// session's routed leaf. known is false where no such reading exists,
+	// including the leaf's runtime.ErrIdleIndeterminate for a family whose
+	// busy reading it does not trust, which leaves the quiescence rule alone.
+	turnOnScreen func(nudgeTarget) (running, known bool, err error)
+	// paneActivity is the session's last activity read from its runtime
+	// now, after turnOnScreen showed a turn, not from the snapshot the
+	// look's observation may have come from: production reads
+	// runtime.FreshActivityProvider on the session's routed leaf. known is
+	// false where no such read exists.
+	paneActivity func(nudgeTarget) (at time.Time, known bool, err error)
 	// steerable says whether a session row takes a steer from a runtime
 	// that steers in a mode; production reads session.SupportsSteerForInfo,
 	// the source session responses read too.
@@ -110,6 +141,16 @@ type conversationLaneExec struct {
 	turnHandle   worker.TurnHandle
 	traits       laneTurnTraits
 	protocol     bool
+	// turnCaps are the session's turn capabilities as the first Probe read
+	// them, the zero value when none were read; the interrupt's tier.
+	turnCaps worker.TurnCapabilities
+	// turnCapsUnread says the first Probe could not read them (noted): a
+	// session-scoped interrupt then has no fresh read to run on.
+	turnCapsUnread bool
+	// interruptHandle resolves the handle an interrupt goes through: the
+	// session's own by its row's bead id, which can read its transcript,
+	// else the runtime's.
+	interruptHandle func() (worker.Handle, error)
 	// lastTurn is the last probe's look at the session's turns, which
 	// Deliver's link evidence starts from.
 	lastTurn laneTurnLook
@@ -144,9 +185,9 @@ func (e *conversationLaneExec) note(stage string, err error) {
 	}
 }
 
-// newConversationLaneExec returns the live executor for info's conversation.
-func newConversationLaneExec(deps laneExecDeps, info session.Info) *conversationLaneExec {
-	e := &conversationLaneExec{deps: deps, info: info, target: resolveNudgeTargetFromSessionInfo(deps.cityPath, deps.cfg, info), budget: laneProbeBudget}
+// newConversationLaneExec returns the live executor for row's conversation.
+func newConversationLaneExec(deps laneExecDeps, row laneRow) *conversationLaneExec {
+	e := &conversationLaneExec{deps: deps, info: row.info, stop: row.stop, target: resolveNudgeTargetFromSessionInfo(deps.cityPath, deps.cfg, row.info), budget: laneProbeBudget}
 	e.observe = func(t nudgeTarget) (worker.LiveObservation, error) {
 		switch {
 		case e.info.ID != "":
@@ -177,11 +218,23 @@ func newConversationLaneExec(deps laneExecDeps, info session.Info) *conversation
 	e.idle = func(t nudgeTarget, obs worker.LiveObservation) bool {
 		return pollerSessionIdleEnough(t, e.deps.sp, defaultNudgePollQuiescence, obs)
 	}
+	e.turnOnScreen = func(t nudgeTarget) (bool, bool, error) {
+		return laneTurnOnScreen(e.deps.sp, t)
+	}
+	e.paneActivity = func(t nudgeTarget) (time.Time, bool, error) {
+		return lanePaneActivity(e.deps.sp, t)
+	}
 	e.steerable = session.SupportsSteerForInfo
 	e.sessionTurns = func(id string) (worker.TurnHandle, error) {
 		return workerHandleForSessionWithConfig(e.deps.cityPath, e.deps.sessions, e.deps.sp, e.deps.cfg, id)
 	}
 	e.turns = e.resolveTurns
+	e.interruptHandle = func() (worker.Handle, error) {
+		if e.info.ID == "" {
+			return e.handle(e.target)
+		}
+		return workerHandleForSessionWithConfig(e.deps.cityPath, e.deps.sessions, e.deps.sp, e.deps.cfg, e.info.ID)
+	}
 	e.now, e.wait = time.Now, laneLinkWait
 	return e
 }
@@ -261,10 +314,14 @@ func (e *conversationLaneExec) probe(ctx context.Context, conv opjournal.Convers
 		return opjournal.Probe{}, fmt.Errorf("probing session %s: %w", e.info.ID, err)
 	}
 	p.Running, p.ContentBlock, p.Pending, p.Boundary = look.running, look.block, look.pending, look.boundary
+	p.BoundaryAt = look.boundaryAt
 	if look.block != "" && look.drainNoticeBlock == "" {
 		p.ContentAdmit = []opjournal.ContentClass{laneDrainNoticeClass}
 	}
 	p.TurnLive, p.Turn, p.KnownTurns = look.turn.live, look.turn.turn, look.turn.known
+	if look.noResponses {
+		p.Caps.Respond = false
+	}
 	e.live, e.lastTurn = look.handle, look.turn
 	return p, nil
 }
@@ -274,29 +331,38 @@ type laneLook struct {
 	running bool
 	// block is why content may not start, drainNoticeBlock why the drain
 	// reminder's notice (laneDrainNoticeClass) may not: the one content a
-	// draining row admits (session.GateContentDrainNotice).
+	// draining or stop-requested row admits (session.GateContentDrainNotice).
 	block            string
 	drainNoticeBlock string
 	pending          string
 	boundary         opjournal.Tri
+	boundaryAt       time.Time
 	handle           worker.Handle
 	turn             laneTurnLook
+	// noResponses is PendingStatus's answer that the session takes no
+	// responses; a look that failed says nothing.
+	noResponses bool
 }
 
-// look observes the runtime, gates content on the row (session.ContentGate,
-// for any content and for the drain reminder's notice) and on the live
-// incarnation, and, only for a running runtime some content may reach,
-// resolves its handle once and reads the pending interaction through it
-// and, with withTurns, the session's turns. The boundary is the quiescence
-// rule for a keystroke-mode runtime, and for a protocol-mode one its turns:
-// never the quiescence rule.
+// look observes the runtime, gates content on the row and its stop request
+// (session.ContentGate, for any content and for the drain reminder's
+// notice) and on the live incarnation, and, for a running runtime of the
+// incarnation the row names, resolves its handle once and reads the pending
+// interaction through it, and, when some content may reach it, the
+// session's turns (with withTurns) and the boundary. The boundary is the
+// quiescence rule for a keystroke-mode runtime, confirmed on the agent's
+// screen (quietBoundary), and for a protocol-mode one its turns: never the
+// quiescence rule. Neither the content gate nor the stop request holds
+// control (DES-O1 I7, §10.5): a draining, held or stop-requested session
+// blocked on a prompt still has it read, so a respond can answer it. A
+// running live runtime of another incarnation reads lanePendingUnknown:
+// nothing looked, so a respond waits rather than take the prompt for gone.
 //
-// A draining row admits the drain notice, so its look resolves the handle
-// and reads the pending interaction and the boundary whatever its open ops
-// are: the probe does not see them, and a pass with only prompts open pays
-// one handle and the reads that its content_block wait does not use.
-// A pass runs only for a row with open ops, so an idle draining row pays
-// nothing.
+// A draining or stop-requested row admits the drain notice, so its look
+// reads the boundary whatever its open ops are: the probe does not see
+// them, and a pass with only prompts open pays the reads that its
+// content_block wait does not use. A pass runs only for a row with open
+// ops, so an idle draining or stop-requested row pays nothing.
 func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, withTurns bool) (laneLook, error) {
 	obs, err := e.observe(e.target)
 	if err != nil {
@@ -304,18 +370,27 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, wi
 	}
 	l := laneLook{running: obs.Running && obs.Alive, turn: laneTurnLook{live: opjournal.TriUnknown}}
 	now := e.deps.clk.Now()
-	l.block = session.ContentGate(e.info, l.running, now, session.GateContentAny)
-	l.drainNoticeBlock = session.ContentGate(e.info, l.running, now, session.GateContentDrainNotice)
-	if l.running && (l.block == "" || l.drainNoticeBlock == "") {
-		matches, err := e.matches(e.target, obs)
-		if err != nil {
+	l.block = session.ContentGate(e.info, e.stop, l.running, now, session.GateContentAny)
+	l.drainNoticeBlock = session.ContentGate(e.info, e.stop, l.running, now, session.GateContentDrainNotice)
+	matches := false
+	if l.running {
+		if matches, err = e.matches(e.target, obs); err != nil {
 			return laneLook{}, fmt.Errorf("matching session %s's live generation: %w", e.info.ID, err)
 		}
 		if !matches {
-			l.block, l.drainNoticeBlock = laneContentBlockIncarnation, laneContentBlockIncarnation
+			if l.block == "" {
+				l.block = laneContentBlockIncarnation
+			}
+			if l.drainNoticeBlock == "" {
+				l.drainNoticeBlock = laneContentBlockIncarnation
+			}
 		}
 	}
-	if !l.running || (l.block != "" && l.drainNoticeBlock != "") || !caps.Live {
+	if !l.running || !caps.Live {
+		return l, nil
+	}
+	if !matches {
+		l.pending = lanePendingUnknown
 		return l, nil
 	}
 	h, err := e.handle(e.target)
@@ -323,8 +398,11 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, wi
 		return laneLook{}, fmt.Errorf("resolving session %s's handle: %w", e.info.ID, err)
 	}
 	l.handle = h
-	if l.pending, err = lanePending(h.PendingStatus(ctx)); err != nil {
+	if l.pending, l.noResponses, err = lanePending(h.PendingStatus(ctx)); err != nil {
 		return laneLook{}, fmt.Errorf("reading session %s's pending interaction: %w", e.info.ID, err)
+	}
+	if l.block != "" && l.drainNoticeBlock != "" {
+		return l, nil
 	}
 	if withTurns && e.traits.readable {
 		l.turn = laneTurnLookOf(e.readTurns(ctx))
@@ -335,9 +413,128 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, wi
 	}
 	l.boundary = opjournal.TriNo
 	if e.idle(e.target, obs) {
-		l.boundary = opjournal.TriYes
+		l.boundary = e.quietBoundary(obs)
+	} else {
+		l.boundaryAt = e.quiescenceDeadline(obs)
 	}
 	return l, nil
+}
+
+// quietBoundary is a keystroke runtime's boundary once the quiescence rule
+// reads it quiet in obs. The rule reads the activity clock, which over tmux
+// comes from a cached fleet snapshot in whole seconds, so a pane that redraws
+// every second can read quiet while its agent runs a turn; and the lane comes
+// back at the deadline the last look named (quiescenceDeadline), where the
+// same snapshot reads quiet by construction. The agent's own screen decides:
+// a turn running there keeps the boundary closed, with no deadline, so the
+// busy backoff paces the next look. A screen the look could not read is no
+// boundary either (noted). Without a screen reading the rule stands, and it
+// stands over a stale running turn (staleTurnBoundary).
+//
+// A No does more than hold a boundary prompt: it closes a when=if_idle op
+// skipped{busy}, and a deliver-now unit whose turn its transcript shows ended
+// skips its interrupt (skipped{stale}) and holds its message for the
+// boundary. So while a quiet pane shows busy text (transcript text quoting an
+// indicator counts), an if_idle op is skipped and a deliver-now message waits
+// until the reading goes stale, where the quiescence rule alone delivered
+// both: the price of never typing into a running turn.
+func (e *conversationLaneExec) quietBoundary(obs worker.LiveObservation) opjournal.Tri {
+	running, known, err := e.turnOnScreen(e.target)
+	switch {
+	case !known:
+		return opjournal.TriYes
+	case err != nil:
+		e.note("turn_on_screen", fmt.Errorf("reading session %s's screen for a running turn: %w", e.info.ID, err))
+		return opjournal.TriUnknown
+	case !running:
+		return opjournal.TriYes
+	}
+	return e.staleTurnBoundary(obs)
+}
+
+// staleTurnBoundary is the boundary of a keystroke runtime whose screen shows
+// a running turn: none, unless its pane has drawn nothing for
+// laneScreenTurnQuietLimit, when the reading is stale (noted) and the
+// quiescence rule stands. The look's observation (obs) can only rule that
+// out: its activity can come from a snapshot taken before the turn started,
+// so a pane obs shows quiet that long has its activity read again, now
+// (paneActivity), and the stale verdict rests on that read alone. Without an
+// activity reading the screen decides, and a read that fails is no known
+// boundary (noted).
+func (e *conversationLaneExec) staleTurnBoundary(obs worker.LiveObservation) opjournal.Tri {
+	if obs.LastActivity == nil || obs.LastActivity.IsZero() || e.now().Sub(*obs.LastActivity) < laneScreenTurnQuietLimit {
+		return opjournal.TriNo
+	}
+	at, known, err := e.paneActivity(e.target)
+	switch {
+	case !known:
+		return opjournal.TriNo
+	case err != nil:
+		e.note("pane_activity", fmt.Errorf("reading session %s's activity after its screen showed a running turn: %w", e.info.ID, err))
+		return opjournal.TriUnknown
+	case at.IsZero():
+		return opjournal.TriNo
+	}
+	quiet := e.now().Sub(at)
+	if quiet < laneScreenTurnQuietLimit {
+		return opjournal.TriNo
+	}
+	e.note("turn_on_screen_stale", fmt.Errorf("session %s's screen shows a running turn, but its pane has drawn nothing for %s: taking the reading as stale", e.info.ID, quiet.Round(time.Second)))
+	return opjournal.TriYes
+}
+
+// laneTurnOnScreen reads, in one look at the agent's screen, whether the
+// session target names is running a turn: the reading the runtime's own nudge
+// takes before it types (runtime.TurnRunningProvider, on the routed leaf). It
+// is unknown where the leaf takes no such reading, and where the leaf answers
+// runtime.ErrIdleIndeterminate because it does not trust the busy reading of
+// the session's family: that reading may be transcript text, which would hold
+// the boundary closed while no turn runs.
+func laneTurnOnScreen(sp runtime.Provider, target nudgeTarget) (running, known bool, err error) {
+	if target.sessionName == "" {
+		return false, false, nil
+	}
+	tr, ok := runtime.TurnRunningFor(sp, target.sessionName)
+	if !ok {
+		return false, false, nil
+	}
+	running, err = tr.TurnRunning(target.sessionName)
+	if errors.Is(err, runtime.ErrIdleIndeterminate) {
+		return false, false, nil
+	}
+	return running, true, err
+}
+
+// lanePaneActivity reads the last activity of the session target names from
+// its runtime now (runtime.FreshActivityProvider, on the routed leaf), not
+// from the snapshot a look's observation may have come from. It is known only
+// where that leaf takes such a read.
+func lanePaneActivity(sp runtime.Provider, target nudgeTarget) (at time.Time, known bool, err error) {
+	if target.sessionName == "" {
+		return time.Time{}, false, nil
+	}
+	fa, ok := runtime.FreshActivityFor(sp, target.sessionName)
+	if !ok {
+		return time.Time{}, false, nil
+	}
+	at, err = fa.FreshActivity(target.sessionName)
+	return at, true, err
+}
+
+// quiescenceDeadline is the instant a keystroke runtime that e.idle found
+// busy turns idle by itself: its last activity plus the quiescence window.
+// It is zero where that is not the only thing keeping the boundary closed or
+// is not known: an ACP session, no known activity, and a deadline at or
+// before now (the window has run out, so something else keeps it closed).
+func (e *conversationLaneExec) quiescenceDeadline(obs worker.LiveObservation) time.Time {
+	if e.target.sessionTransport() == "acp" || obs.LastActivity == nil || obs.LastActivity.IsZero() {
+		return time.Time{}
+	}
+	at := obs.LastActivity.Add(defaultNudgePollQuiescence)
+	if !at.After(e.now()) {
+		return time.Time{}
+	}
+	return at
 }
 
 // caps are the runtime's capabilities for conv. Content is live for a
@@ -347,8 +544,10 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, wi
 // stamp as hosted elsewhere for its current generation (DES-BX D7). Dedup is
 // the worker boundary's read of whether the routed runtime deduplicates
 // keyed deliveries. A live runtime steers where its steer mode and the
-// session row allow it (e.steerable; D-STEER), per laneSteerCap. Nothing
-// responds or injects in band here.
+// session row allow it (e.steerable; D-STEER), per laneSteerCap, and
+// responds unless its probe's session says it takes no responses
+// (PendingStatus, DES-O1 §7.2: capabilities come from the handle, never a
+// type assertion). Nothing injects in band here.
 func (e *conversationLaneExec) caps(conv opjournal.ConversationView) (opjournal.Caps, error) {
 	name := e.target.sessionName
 	caps := opjournal.Caps{
@@ -372,6 +571,7 @@ func (e *conversationLaneExec) caps(conv opjournal.ConversationView) (opjournal.
 		}
 	}
 	caps.Steer = laneSteerCap(caps, e.steerable(e.info, runtime.SteerModeFor(e.deps.sp, name)))
+	caps.Respond = caps.Live
 	return caps, nil
 }
 
@@ -404,17 +604,18 @@ func hostedElsewhere(stamp opjournal.HostStamp, gen int64) bool {
 
 // lanePending is the pending interaction's request id from a PendingStatus
 // answer: "" for none, lanePendingUnknown for one with no request id, and the
-// look's error when it failed, so a failed look is never read as a prompt.
-func lanePending(p *worker.PendingInteraction, _ bool, err error) (string, error) {
+// look's error when it failed, so a failed look is never read as a prompt;
+// and whether the answer says the session takes no responses.
+func lanePending(p *worker.PendingInteraction, supported bool, err error) (pending string, noResponses bool, _ error) {
 	switch {
 	case err != nil:
-		return "", err
+		return "", false, err
 	case p == nil:
-		return "", nil
+		return "", !supported, nil
 	case p.RequestID == "":
-		return lanePendingUnknown, nil
+		return lanePendingUnknown, !supported, nil
 	default:
-		return p.RequestID, nil
+		return p.RequestID, !supported, nil
 	}
 }
 
@@ -428,10 +629,12 @@ var errLaneNoProbedHandle = errors.New("conversation lane: delivery without a ha
 // probe resolved. A steer goes out with immediate delivery, into the running
 // turn without waiting for idle (a keystroke runtime types it; a protocol
 // runtime's immediate nudge is its steer, runtime.SteerProtocol), and is
-// recorded via steer. A redelivery (d.Redelivery) asks a runtime that keeps
-// keyed deliveries first, and one it already holds is replayed: nothing is
-// sent, nothing is stamped and no turn is read. A delivery the runtime took
-// now records the runtime's receipt and gathers its turn evidence within the
+// recorded via steer. A deliver-now unit's message after its replacement
+// step (d.Replacement) goes immediate too, on a runtime that does not
+// deduplicate. A redelivery (d.Redelivery) asks a runtime that keeps keyed
+// deliveries first, and one it already holds is replayed: nothing is sent,
+// nothing is stamped and no turn is read. A delivery the runtime took now
+// records the runtime's receipt and gathers its turn evidence within the
 // link wait (linkEvidence).
 func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery) opjournal.DeliveryResult {
 	h := e.live
@@ -443,7 +646,15 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 		fence = runtime.InputFence{Generation: d.Fence.Generation, Epoch: d.Fence.Epoch, Token: d.Fence.Token}
 	}
 	delivery := worker.NudgeDeliveryDefault
-	if d.Steer {
+	switch {
+	case d.Steer:
+		delivery = worker.NudgeDeliveryImmediate
+	case d.Replacement && !e.lastCaps.Dedup:
+		// A deliver-now message after its settled replacement step goes at
+		// once, as interrupt_now's does, without the idle wait. A
+		// deduplicating runtime keeps its keyed default send, which
+		// dispatches at once and replays on a retry; an immediate nudge is
+		// unkeyed (laneSteerCap).
 		delivery = worker.NudgeDeliveryImmediate
 	}
 	at := e.deps.clk.Now()
@@ -482,8 +693,10 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 // started, which may have begun earlier. The held delivery's own time is its
 // MessageAt, the stamp the runtime stored. A submit
 // the runtime could not confirm may have delivered, so it is Unknown; a
-// nudge refused on a pending interaction, whichever runtime refused it, or
-// one the runtime reports never sent, is a transient miss. Any other error
+// nudge refused on a pending interaction, whichever runtime refused it, one
+// the runtime reports never sent, or one it deferred because the session was
+// running a turn its submit would interrupt (runtime.ErrSessionBusy, nothing
+// left typed), is a transient miss, which counts no failure. Any other error
 // may have come after input reached the session, so it is Unknown too: a
 // retake under a fresh key would deliver it twice.
 func laneDeliveryResult(res worker.NudgeResult, err error, at time.Time, unfencedReq, steer bool) opjournal.DeliveryResult {
@@ -516,6 +729,8 @@ func laneDeliveryResult(res worker.NudgeResult, err error, at time.Time, unfence
 		return delivered(opjournal.AckDeliveredUnobserved, laneDegradationTurnStartUnobserved)
 	case errors.Is(err, runtime.ErrNudgeRejected):
 		return opjournal.Rejected{KeyRejected: true, Reason: err.Error()}
+	case errors.Is(err, runtime.ErrSessionBusy):
+		return opjournal.NotDelivered{Transient: true, Cause: err}
 	case errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed), errors.As(err, &miss) && miss.Partial:
 		return opjournal.Unknown{Cause: err}
 	case errors.As(err, &miss):
@@ -526,16 +741,6 @@ func laneDeliveryResult(res worker.NudgeResult, err error, at time.Time, unfence
 	default:
 		return opjournal.Unknown{Cause: err}
 	}
-}
-
-// Interrupt implements opjournal.Executor: unsupported until OJ-15.
-func (e *conversationLaneExec) Interrupt(context.Context, opjournal.InterruptCall) opjournal.ControlResult {
-	return opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonUnsupported}
-}
-
-// Respond implements opjournal.Executor: unsupported until OJ-16.
-func (e *conversationLaneExec) Respond(context.Context, opjournal.RespondCall) opjournal.ControlResult {
-	return opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonUnsupported}
 }
 
 // laneFence is the fence of view conv.

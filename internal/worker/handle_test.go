@@ -767,6 +767,47 @@ func TestSessionHandleMessageInterruptNowUsesWorkerBoundary(t *testing.T) {
 	}
 }
 
+// A deliver-now whose interrupt went out but whose replacement a pending
+// interaction kept from being prepared is returned, not queued, even to a
+// caller that queues behind a pending interaction (QueueBehindPending): the
+// queue would deliver it as a plain message, onto a session never prepared
+// for it.
+func TestSessionHandleMessageDoesNotQueueAnUnpreparedReplacement(t *testing.T) {
+	handle, _, sp, mgr := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	by := handleActor(t, handle, sessionpkg.ActorAgent)
+	if err := handle.Start(context.Background(), by); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := mgr.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("manager.Get(%q): %v", handle.sessionID, err)
+	}
+	sp.WaitForIdleErrors[info.SessionName] = nil
+	// A permission prompt opened as the turn ended, after the manager's
+	// look: the input clear is refused behind it.
+	sp.ClearInputErrors[info.SessionName] = fmt.Errorf("%w: approval open", runtime.ErrPendingInteraction)
+
+	startCalls := len(sp.Calls)
+	result, err := handle.Message(context.Background(), by, MessageRequest{
+		Text:               "replacement task",
+		Delivery:           DeliveryIntentInterruptNow,
+		QueueBehindPending: true,
+	})
+	if !errors.Is(err, sessionpkg.ErrReplacementNotPrepared) || !errors.Is(err, sessionpkg.ErrPendingInteraction) || result.Queued {
+		t.Fatalf("Message(interrupt_now, QueueBehindPending) = %+v, %v; want ErrReplacementNotPrepared wrapping ErrPendingInteraction, nothing queued", result, err)
+	}
+	if lastCall(sp.Calls[startCalls:], "NudgeNow") != nil || lastCall(sp.Calls[startCalls:], "Nudge") != nil {
+		t.Fatalf("calls = %v, want the unprepared replacement not typed", sp.Calls[startCalls:])
+	}
+}
+
 func TestSessionHandleNudgeImmediateUsesWorkerBoundary(t *testing.T) {
 	handle, _, sp, mgr := newTestSessionHandle(t, SessionSpec{
 		Profile:  ProfileClaudeTmuxCLI,
@@ -2086,6 +2127,77 @@ func TestRuntimeHandleNudgeWaitIdleInteractionUnsupportedReturnsProviderUnsuppor
 	}
 }
 
+// idleSnapshotFake is a Fake whose one-look idle snapshot answers idle and
+// err (runtime.IdleSnapshotProvider).
+type idleSnapshotFake struct {
+	*runtime.Fake
+	idle bool
+	err  error
+}
+
+func (f *idleSnapshotFake) SnapshotIdle(string) (bool, error) { return f.idle, f.err }
+
+// A wait-idle nudge whose pre-read (runtime.IdleBoundaryNow) shows the
+// session busy, or reads indeterminate while the runtime reports a pending
+// interaction (an open dialog), is queued at once: it reports
+// no_idle_boundary without entering the 30 s idle wait and types nothing. A
+// pre-read at the boundary, or one that cannot tell, waits for idle as
+// before.
+func TestRuntimeHandleWaitIdleBusySnapshotQueuesWithoutWaiting(t *testing.T) {
+	indeterminate := fmt.Errorf("scan: %w", runtime.ErrIdleIndeterminate)
+	for _, tc := range []struct {
+		name      string
+		idle      bool
+		err       error
+		pending   *runtime.PendingInteraction
+		wantWait  bool
+		delivered bool
+	}{
+		{name: "busy"},
+		{name: "pending", err: indeterminate, pending: &runtime.PendingInteraction{RequestID: "tmux-1", Kind: "approval", Prompt: "Allow Bash?"}},
+		{name: "at the boundary", idle: true, wantWait: true, delivered: true},
+		{name: "indeterminate", err: indeterminate, wantWait: true, delivered: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := runtime.NewFake()
+			if err := fake.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			fake.WaitForIdleErrors["legacy-worker"] = nil
+			fake.SetPendingInteraction("legacy-worker", tc.pending)
+			handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+				Provider:     &idleSnapshotFake{Fake: fake, idle: tc.idle, err: tc.err},
+				SessionName:  "legacy-worker",
+				ProviderName: "claude",
+			})
+			if err != nil {
+				t.Fatalf("NewRuntimeHandle: %v", err)
+			}
+
+			result, err := handle.Nudge(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), NudgeRequest{
+				Text:     "check deploy status",
+				Delivery: NudgeDeliveryWaitIdle,
+				Source:   "mail",
+			})
+			if err != nil {
+				t.Fatalf("Nudge(wait_idle): %v", err)
+			}
+			if result.Delivered != tc.delivered {
+				t.Fatalf("Nudge(wait_idle) = %+v, want delivered=%t", result, tc.delivered)
+			}
+			if !tc.delivered && result.Undelivered != NudgeUndeliveredNoIdleBoundary {
+				t.Fatalf("Nudge(wait_idle) = %+v, want undelivered %q", result, NudgeUndeliveredNoIdleBoundary)
+			}
+			if waited := fake.CountCalls("WaitForIdle", "legacy-worker") != 0; waited != tc.wantWait {
+				t.Fatalf("waited for idle = %t, want %t", waited, tc.wantWait)
+			}
+			if typed := fake.CountCalls("NudgeNow", "legacy-worker") != 0; typed != tc.delivered {
+				t.Fatalf("typed = %t, want %t", typed, tc.delivered)
+			}
+		})
+	}
+}
+
 func TestRuntimeHandleNudgeWaitIdleUnsupportedProviderReturnsUndelivered(t *testing.T) {
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
@@ -2514,7 +2626,8 @@ func TestSessionHandleStartResolvedUsesProvidedRuntime(t *testing.T) {
 }
 
 func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *testing.T) {
-	handle, _, sp, _ := newTestSessionHandle(t, SessionSpec{
+	searchBase := t.TempDir()
+	handle, _, sp, manager := newTestSessionHandle(t, SessionSpec{
 		Profile:  ProfileClaudeTmuxCLI,
 		Template: "probe",
 		Title:    "Probe",
@@ -2541,6 +2654,18 @@ func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *tes
 	}
 	if strings.Contains(firstCommand, "--resume") {
 		t.Fatalf("first start command = %q, want no --resume", firstCommand)
+	}
+	info, err := manager.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", handle.sessionID, err)
+	}
+	handle.searchPaths = []string{searchBase}
+	transcriptDir := filepath.Join(searchBase, sessionlog.ProjectSlug(info.WorkDir))
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(transcriptDir, info.SessionKey+".jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
 	}
 
 	if err := handle.Stop(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
@@ -3114,5 +3239,124 @@ func TestSessionHandleHistoryDoesNotStitchFreshWakeThatKeepsEpoch(t *testing.T) 
 	}
 	if after.LogicalConversationID == s.before.LogicalConversationID {
 		t.Fatalf("LogicalConversationID = %q before and after a fresh wake, want a new logical conversation", after.LogicalConversationID)
+	}
+}
+
+// TestSessionHandleResetFencedRecordsForTheCurrentIncarnation proves a
+// session handle exposes the in-session restart request and records it only
+// for the row's own incarnation (SG-3).
+func TestSessionHandleResetFencedRecordsForTheCurrentIncarnation(t *testing.T) {
+	handle, store, _, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	info, err := handle.Create(context.Background(), CreateModeDeferred)
+	if err != nil {
+		t.Fatalf("Create(deferred): %v", err)
+	}
+	if err := store.SetMetadataBatch(info.ID, map[string]string{"instance_token": "tok-live"}); err != nil {
+		t.Fatalf("SetMetadataBatch: %v", err)
+	}
+	var fenced FencedResetHandle = handle
+
+	if err := fenced.ResetFenced(context.Background(), "tok-dead", nil); !errors.Is(err, sessionpkg.ErrStaleRestartRequest) {
+		t.Fatalf("ResetFenced(stale) err = %v, want ErrStaleRestartRequest", err)
+	}
+	bead, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if bead.Metadata["restart_requested"] != "" {
+		t.Fatalf("stale request wrote restart_requested = %q", bead.Metadata["restart_requested"])
+	}
+	if err := fenced.ResetFenced(context.Background(), "tok-live", nil); err != nil {
+		t.Fatalf("ResetFenced: %v", err)
+	}
+	bead, err = store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if bead.Metadata["restart_requested"] != "true" || bead.Metadata["continuation_reset_pending"] != "true" {
+		t.Fatalf("row = %v, want both restart keys", bead.Metadata)
+	}
+}
+
+// TestSessionHandleCheckResetFencedWritesNothing proves the handle's
+// read-only fence decision answers as ResetFenced would, refusing another
+// incarnation and passing the row's own, and writes nothing (SG-3).
+func TestSessionHandleCheckResetFencedWritesNothing(t *testing.T) {
+	handle, store, _, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	info, err := handle.Create(context.Background(), CreateModeDeferred)
+	if err != nil {
+		t.Fatalf("Create(deferred): %v", err)
+	}
+	if err := store.SetMetadataBatch(info.ID, map[string]string{"instance_token": "tok-live"}); err != nil {
+		t.Fatalf("SetMetadataBatch: %v", err)
+	}
+	before, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	var fenced FencedResetHandle = handle
+
+	if err := fenced.CheckResetFenced(context.Background(), "tok-dead", nil); !errors.Is(err, sessionpkg.ErrStaleRestartRequest) {
+		t.Fatalf("CheckResetFenced(stale) err = %v, want ErrStaleRestartRequest", err)
+	}
+	if err := fenced.CheckResetFenced(context.Background(), "tok-live", nil); err != nil {
+		t.Fatalf("CheckResetFenced: %v", err)
+	}
+	after, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if after.Revision != before.Revision || after.Metadata["restart_requested"] != "" || after.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("row moved from revision %d to %d (%v); the check must write nothing", before.Revision, after.Revision, after.Metadata)
+	}
+}
+
+// TestSessionHandleResetFencedRequiresExistingSession proves a handle with
+// no session row records nothing and decides nothing.
+func TestSessionHandleResetFencedRequiresExistingSession(t *testing.T) {
+	handle, _, _, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	if err := handle.ResetFenced(context.Background(), "tok", nil); !errors.Is(err, ErrOperationUnsupported) {
+		t.Fatalf("ResetFenced err = %v, want %v", err, ErrOperationUnsupported)
+	}
+	if err := handle.CheckResetFenced(context.Background(), "tok", nil); !errors.Is(err, ErrOperationUnsupported) {
+		t.Fatalf("CheckResetFenced err = %v, want %v", err, ErrOperationUnsupported)
+	}
+}
+
+// TestRuntimeHandleIsNotAFencedResetHandle proves a bare runtime handle,
+// which has no row to record on, does not offer the fenced request.
+func TestRuntimeHandleIsNotAFencedResetHandle(t *testing.T) {
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     runtime.NewFake(),
+		SessionName:  "legacy-worker",
+		ProviderName: "stub",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+	var h Handle = handle
+	if _, ok := h.(FencedResetHandle); ok {
+		t.Fatal("RuntimeHandle implements FencedResetHandle; want no row-backed reset")
 	}
 }

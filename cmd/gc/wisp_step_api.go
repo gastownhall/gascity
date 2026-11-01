@@ -41,14 +41,20 @@ var _ api.ActiveWorkStepReader = (*controllerState)(nil)
 // scope this controller holds no store for is refused
 // (api.ErrActiveWorkStepScopeNotHeld), and the hook opens it itself.
 //
-// It answers only under a config it can show is current, exactly as
-// ReadyWork does (configFreshness), since the config decides which store a
-// scope names. Ambiguities the hook would log to its stderr are not logged
-// here: the hook that asked is the one that would have seen them.
+// It answers from the config this controller has published, read under cs.mu
+// with the stores published alongside it, and refuses with
+// api.ErrReadyWorkConfigNotCurrent exactly when ReadyWork does
+// (configFreshness): while a reload or API config write is in progress, after
+// a failed reload until one applies or finds no change, and when a change
+// began during the read, since the config decides which store a scope names.
+// The dirty flag is not a reason to refuse: it records only that a reload is
+// due, and a scope added or rebound on disk reaches the answer at that reload.
+// Ambiguities the hook would log to its stderr are not logged here: the hook
+// that asked is the one that would have seen them.
 func (cs *controllerState) ActiveWorkStep(ctx context.Context, assignees []string, scopeRoot string) (*api.ActiveWorkStep, error) {
 	var step *beads.Bead
 	var err error
-	if !cs.freshness.read(cs.configDirty, func() {
+	if !cs.freshness.read(func() {
 		step, err = cs.activeWorkStep(ctx, assignees, scopeRoot)
 	}) {
 		return nil, api.ErrReadyWorkConfigNotCurrent
@@ -272,11 +278,22 @@ func (l *wispStepLookup) take() wispStepAnswer {
 	if l.taken != nil {
 		return *l.taken
 	}
+	// An answer already in hand wins over an expired bound: a caller that takes
+	// the answer late finds both ready, and a random pick would discard it.
 	var answer wispStepAnswer
 	select {
 	case answer = <-l.answer:
-	case <-l.expired.C:
-		answer = wispStepAnswer{route: "fallback", reason: "timeout"}
+	default:
+		select {
+		case answer = <-l.answer:
+		case <-l.expired.C:
+			// The answer may have landed in the same instant the bound fired.
+			select {
+			case answer = <-l.answer:
+			default:
+				answer = wispStepAnswer{route: "fallback", reason: "timeout"}
+			}
+		}
 	}
 	l.expired.Stop()
 	l.cancel()

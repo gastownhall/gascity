@@ -18,9 +18,10 @@ import (
 // (state.go, WithState over []Item). The nudge bead exists only for
 // observability / event emission. So this wrapper is a thin veneer over the
 // existing leaf helpers (cmd/gc/nudge_beads.go: ensure/markTerminal/find), NOT
-// a new storage authority. The wrapper's write methods MUST remain callable
-// inside the withNudgeQueueState transaction so the bead shadow and the
-// state.json authority stay coherent under one flock.
+// a new storage authority. Its methods are never called inside the queue's
+// flock (WithState's callbacks are pure): Save runs before an enqueue commits,
+// and a committed exit records a ShadowDebt that Terminalize pays after the
+// lock is released. The shadow lags the queue and never leads it.
 //
 // PHASE 0 STATUS: the wrapper type + Save/Terminalize/Find/FindIncludingTerminal
 // SIGNATURES are the contract; their bodies are routed in Phase 2. The one
@@ -152,8 +153,7 @@ const EnqueueRollbackCloseReason = "nudge rollback: enqueue transaction failed"
 // returning the bead id and whether a new bead was created. It is the write
 // half of the codec: the Item->Bead serialization (metadata map, labels, title,
 // type) is confined here. The flock'd state.json remains the queue authority;
-// this bead is the observability shadow, so Save must stay callable inside the
-// withNudgeQueueState transaction.
+// this bead is the observability shadow, saved before the enqueue commits.
 //
 // Save emits byte-identical bead writes to the prior raw ensureQueuedNudgeBead
 // helper: an existence check by the durable nudge label, then a single Create
@@ -330,8 +330,7 @@ func (s *Store) SweepStale(beadID, closeReason string, now time.Time) error {
 // candidate set the sweep and dry-run see is unchanged. limit caps the number of
 // candidate beads FETCHED (0 or negative == unbounded); the caller keeps its own
 // cross-phase close budget on top, so the live exclusion moving inside here does
-// not alter which beads the budget-limited loop closes. It is nil-receiver safe
-// and callable inside the withNudgeQueueState flock transaction.
+// not alter which beads the budget-limited loop closes. It is nil-receiver safe.
 func (s *Store) StaleShadowsBefore(before time.Time, limit int, liveExcludeIDs map[string]bool) ([]NudgeShadow, error) {
 	if s == nil || s.store.Store == nil {
 		return nil, nil
@@ -538,9 +537,8 @@ func isTerminalNudgeState(state string) bool {
 // human-readable close_reason of at least 20 characters, suitable for
 // `bd close --reason` under validation.on-close=error. Terminalize stamps the
 // result in metadata.close_reason before Close; BdStore.Close forwards it as the
-// --reason argument. Without the canonical reason, validators reject the close,
-// the withNudgeQueueState transaction rolls back, and the nudge bounces between
-// InFlight and Pending until expires_at cuts in.
+// --reason argument. Without the canonical reason, validators reject the close
+// and the item's shadow debt is never paid.
 func canonicalCloseReason(stateCode string) string {
 	switch stateCode {
 	case "failed":

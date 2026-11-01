@@ -142,6 +142,7 @@ var builtinAuthorship = map[string]Authorship{
 	SessionDrainFenceUnavailable:   AuthorWorker,
 	WorkStartedUnrecorded:          AuthorWorker,
 	SessionDemandClaimDivergence:   AuthorWorker,
+	SessionProgramStatusShadow:     AuthorWorker,
 	BeadClaimRejected:              AuthorWorker,
 	BeadClaimReleased:              AuthorWorker,
 	BeadClaimFailed:                AuthorWorker,
@@ -224,6 +225,7 @@ var builtinAuthorship = map[string]Authorship{
 	WorkReleased:          AuthorController,
 	WorkReleaseUnfinished: AuthorController,
 	WorkEscalated:         AuthorController,
+	WorkRateLimited:       AuthorController,
 	BeadClaimLoopHeld:     AuthorController, // the controller's claim-loop guard (cmd/gc/claim_loop_guard.go)
 
 	// Controller: the controller, the city, orders, async requests and the
@@ -248,6 +250,7 @@ var builtinAuthorship = map[string]Authorship{
 	RequestResultSessionSubmit:    AuthorController,
 	RequestResultRigCreate:        AuthorController,
 	RequestFailed:                 AuthorController,
+	RequestAccepted:               AuthorController,
 	RigProvisionProgress:          AuthorController,
 	ExtMsgBound:                   AuthorController,
 	ExtMsgUnbound:                 AuthorController,
@@ -281,6 +284,8 @@ var builtinAuthorship = map[string]Authorship{
 	StorageBindingUnconverged:       AuthorController,
 	StorageBindingUncheckable:       AuthorController,
 	StorageBindingNotConfigured:     AuthorController,
+	StorageRigImport:                AuthorController,
+	StorageRigResidue:               AuthorController,
 }
 
 func init() {

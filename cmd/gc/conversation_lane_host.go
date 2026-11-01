@@ -83,7 +83,10 @@ const (
 	// laneHostScanLimit caps each page of the scan's keyed lists.
 	laneHostScanLimit = 500
 	// The busy re-probe backoff (DES-O1 §4.3): 2 s for the first 30 s, then
-	// 5 s, then 10 s.
+	// 5 s, then 10 s. It is the fallback for a busy boundary with no known
+	// deadline: a keystroke boundary that names its quiescence deadline
+	// (opjournal.Probe.BoundaryAt) is passed again there, when that is
+	// sooner, and the backoff only bounds the wait from above.
 	laneBusyFirst    = 2 * time.Second
 	laneBusyFirstFor = 30 * time.Second
 	laneBusyNext     = 5 * time.Second
@@ -263,7 +266,13 @@ type conversationLaneHost struct {
 	newTimer  func(time.Duration) (<-chan time.Time, func())
 	newTicker func(time.Duration) (<-chan time.Time, func())
 	// newExec builds a pass's executor; production is the live executor.
-	newExec func(laneExecDeps, session.Info) opjournal.Executor
+	newExec func(laneExecDeps, laneRow) opjournal.Executor
+	// stopReading is how this host's passes read a row's stop request: its
+	// controller's latched mode's (laneStopReading). It is fixed at
+	// construction, so the first pass already reads by it.
+	stopReading session.StopRequestReading
+	// interrupts records the interrupt each conversation's executor runs.
+	interrupts *laneInterrupts
 	// turnHandle resolves a conversation's turn handle for its observer
 	// (conversation_lane_turns.go); production builds the session's worker
 	// handle.
@@ -324,6 +333,9 @@ type conversationLaneHost struct {
 	rowRetries   map[string]time.Time
 	retryingRows bool
 	rowsGivenUp  int64
+	// passEnds holds, per conversation with a waiter, the channel the end
+	// of its next pass closes and its waiters (AwaitConversationOp).
+	passEnds map[string]*passEndWait
 	// noticeFailures tallies, per planner notice action (an attempt's
 	// proposal or a reminder's read, plannerNoticeTallyKey), its failures in
 	// a row; nil until the first. An entry is deleted when its action
@@ -346,11 +358,13 @@ type laneParked struct {
 	state laneWorkerState
 }
 
-// newConversationLaneHost builds the host over env, latching kinds.
-func newConversationLaneHost(env laneHostEnv, kinds []string) *conversationLaneHost {
+// newConversationLaneHost builds the host over env, latching kinds and
+// reading stop requests by reading.
+func newConversationLaneHost(env laneHostEnv, kinds []string, reading session.StopRequestReading) *conversationLaneHost {
 	return &conversationLaneHost{
 		env:          env,
 		kinds:        append([]string(nil), kinds...),
+		stopReading:  reading,
 		clk:          clock.Real{},
 		maxWorkers:   laneHostMaxWorkers,
 		scanInterval: clock.Backstop(laneHostScanInterval),
@@ -362,9 +376,10 @@ func newConversationLaneHost(env laneHostEnv, kinds []string) *conversationLaneH
 			t := time.NewTicker(d)
 			return t.C, t.Stop
 		},
-		newExec: func(deps laneExecDeps, info session.Info) opjournal.Executor {
-			return newConversationLaneExec(deps, info)
+		newExec: func(deps laneExecDeps, row laneRow) opjournal.Executor {
+			return newConversationLaneExec(deps, row)
 		},
+		interrupts:   newLaneInterrupts(),
 		logf:         log.Printf,
 		observerName: laneObserverName(),
 		workers:      map[string]*laneWorker{},
@@ -378,13 +393,14 @@ func newConversationLaneHost(env laneHostEnv, kinds []string) *conversationLaneH
 
 // startConversationLaneHost starts the controller's lane host until ctx
 // ends, with [ops] authoritative as the controller loaded it at start, and
-// rings it from the controller's ledger feeds.
-func (cs *controllerState) startConversationLaneHost(ctx context.Context) *conversationLaneHost {
+// rings it from the controller's ledger feeds, and reads stop requests by
+// mode, the reconciler its controller latched.
+func (cs *controllerState) startConversationLaneHost(ctx context.Context, mode reconcilerMode) *conversationLaneHost {
 	var kinds []string
 	if cfg := cs.Config(); cfg != nil {
 		kinds = cfg.Ops.Authoritative
 	}
-	h := newConversationLaneHost(cs, kinds)
+	h := newConversationLaneHost(cs, kinds, laneStopReading(mode))
 	h.start(ctx)
 	cs.ledgerFeeds.setRowsChanged(h.pokeChangedRows)
 	cs.setConversationLaneHost(h)
@@ -684,14 +700,14 @@ func (h *conversationLaneHost) runWorker(conv string, w *laneWorker, state laneW
 		ctx: h.ctx, clk: h.clk, newTimer: h.newTimer, poke: w.poke, queued: w.queued, state: state, startFor: h.wakeStartFor(),
 		hooks: laneWorkerHooks{
 			pass: func() lanePassOutcome {
-				// The turn a content take starts begins after the pass
-				// does, never before.
+				// The turn a content take, or a deliver-now unit's
+				// message, starts begins after the pass does, never before.
 				began := h.clk.Now()
 				out := h.pass(conv)
 				if laneTurnsWatchAfter(out, len(h.kinds) > 0 || resumeTurns) {
 					h.watchTurns(conv, turns)
 				}
-				if out.err == nil && out.res.Took == opjournal.TakeContent {
+				if out.err == nil && (out.res.Took == opjournal.TakeContent || out.res.Took == opjournal.TakeNow) {
 					turns.expect(began)
 				}
 				return out
@@ -753,7 +769,7 @@ func (h *conversationLaneHost) pass(conv string) (out lanePassOutcome) {
 	}
 	sessions := h.env.SessionsBeadStore().Store
 	live := sessionFrontDoor(laneLiveSessions{Store: sessions})
-	view, info, absent, err := readConversationLaneView(live, conv)
+	view, row, absent, err := readConversationLaneView(live, conv, h.stopReading)
 	if err != nil {
 		err = fmt.Errorf("reading conversation %s: %w", conv, err)
 		h.notePass(conv, opjournal.PassResult{}, err)
@@ -763,14 +779,15 @@ func (h *conversationLaneHost) pass(conv string) (out lanePassOutcome) {
 		h.logf("conversation-lanes: conversation %s has no session row on two reads; its open ops close as skipped{conversation_closed}", conv)
 	}
 	exec := h.newExec(laneExecDeps{
-		cityPath: h.env.CityPath(),
-		cfg:      h.env.Config(),
-		sessions: sessions,
-		sp:       h.env.SessionProvider(),
-		lane:     st,
-		clk:      h.clk,
-		note:     h.noteError,
-	}, info)
+		cityPath:   h.env.CityPath(),
+		cfg:        h.env.Config(),
+		sessions:   sessions,
+		sp:         h.env.SessionProvider(),
+		lane:       st,
+		clk:        h.clk,
+		note:       h.noteError,
+		interrupts: h.interrupts,
+	}, row)
 	res, err := lane.Pass(h.ctx, view, exec)
 	h.notePass(conv, res, err)
 	laneFailpointAfterPass(laneHostName, res)
@@ -854,6 +871,7 @@ func (h *conversationLaneHost) store() (*opjournal.Store, *opjournal.Conversatio
 func (h *conversationLaneHost) notePass(conv string, res opjournal.PassResult, err error) {
 	now := h.clk.Now()
 	h.mu.Lock()
+	h.passEndedLocked(conv)
 	h.passes++
 	h.lastPass = now
 	if len(res.Quarantined) > 0 {

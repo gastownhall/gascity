@@ -80,7 +80,7 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 	}
 
 	// Step 3: look up the ProviderSpec.
-	spec, err := lookupProvider(name, cityProviders, lookPath)
+	spec, omittedACPArgs, err := lookupProviderLayers(name, cityProviders, lookPath)
 	if err != nil {
 		return nil, err
 	}
@@ -94,6 +94,7 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 	// of the raw Name. See engdocs/design/provider-inheritance.md
 	// §Kind / provider-family propagation.
 	resolved.BuiltinAncestor = BuiltinFamily(name, cityProviders)
+	resolved.ACPOmittedArgs = omittedACPArgs
 	mergeAgentOverrides(resolved, agent)
 	if agent.ResumeCommand == "" {
 		completeResolvedProviderResumeCommand(resolved)
@@ -110,8 +111,12 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 	if agent.StartCommand == "" && ws != nil && ws.StartCommand != "" {
 		resolved.Command = ws.StartCommand
 		resolved.Args = nil
+		resolved.ACPOmittedArgs = nil
 		resolved.OptionsSchema = nil
 		resolved.EffectiveDefaults = nil
+		// The provider's program-status declaration describes the provider's
+		// program, not the operator's replacement command line.
+		resolved.ProgramStatus = ProgramStatusBinding{}
 	}
 
 	// Step 5: default prompt_mode.
@@ -162,12 +167,20 @@ func ResolveInstallHooks(agent *Agent, ws *Workspace) []string {
 // lets custom provider tiers (e.g. [providers.fast] command = "copilot")
 // inherit PromptMode, PromptFlag, ReadyPromptPrefix, etc.
 func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath LookPathFunc) (*ProviderSpec, error) {
+	spec, _, err := lookupProviderLayers(name, cityProviders, lookPath)
+	return spec, err
+}
+
+// lookupProviderLayers is lookupProvider that also reports the args the
+// merged provider's ACP launch omits (ResolvedProvider.ACPOmittedArgs),
+// computed from the schema-normalized layers the merge composes.
+func lookupProviderLayers(name string, cityProviders map[string]ProviderSpec, lookPath LookPathFunc) (*ProviderSpec, []string, error) {
 	// City-level providers take precedence.
 	if cityProviders != nil {
 		if spec, ok := cityProviders[name]; ok {
 			if spec.Command != "" {
 				if _, err := lookPath(spec.pathCheckBinary()); err != nil {
-					return nil, fmt.Errorf("%w: provider %q command %q", ErrProviderNotInPATH, name, spec.pathCheckBinary())
+					return nil, nil, fmt.Errorf("%w: provider %q command %q", ErrProviderNotInPATH, name, spec.pathCheckBinary())
 				}
 			}
 			// Phase 2+: if the spec has explicit Base declared,
@@ -179,19 +192,19 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 			if spec.Base != nil {
 				if strings.TrimSpace(*spec.Base) == "" {
 					standalone := normalizeProviderLayerArgsForSchema(spec, spec.OptionsSchema)
-					return &standalone, nil
+					return &standalone, nil, nil
 				}
 				resolved, err := resolveProviderChain(name, spec, cityProviders, false)
 				if err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 				merged := resolvedChainToSpec(resolved, spec)
 				if merged.Command != "" {
 					if _, err := lookPath(merged.pathCheckBinary()); err != nil {
-						return nil, fmt.Errorf("%w: provider %q command %q", ErrProviderNotInPATH, name, merged.pathCheckBinary())
+						return nil, nil, fmt.Errorf("%w: provider %q command %q", ErrProviderNotInPATH, name, merged.pathCheckBinary())
 					}
 				}
-				return &merged, nil
+				return &merged, resolved.ACPOmittedArgs, nil
 			}
 			// Phase A legacy: layer city overrides on top of the built-in
 			// if the provider name or command matches a known builtin.
@@ -200,16 +213,16 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 				base = normalizeProviderLayerArgsForSchema(base, base.OptionsSchema)
 				child := normalizeProviderLayerArgsForSchema(spec, providerSchemaForLayerArgs(base, spec))
 				merged := MergeProviderOverBuiltin(base, child)
-				return &merged, nil
+				return &merged, acpOmittedArgs([]ProviderSpec{child, base}), nil
 			}
 			if base, ok := builtins[spec.Command]; ok {
 				base = normalizeProviderLayerArgsForSchema(base, base.OptionsSchema)
 				child := normalizeProviderLayerArgsForSchema(spec, providerSchemaForLayerArgs(base, spec))
 				merged := MergeProviderOverBuiltin(base, child)
-				return &merged, nil
+				return &merged, acpOmittedArgs([]ProviderSpec{child, base}), nil
 			}
 			standalone := normalizeProviderLayerArgsForSchema(spec, spec.OptionsSchema)
-			return &standalone, nil
+			return &standalone, nil, nil
 		}
 	}
 
@@ -217,12 +230,12 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 	builtins := BuiltinProviders()
 	if spec, ok := builtins[name]; ok {
 		if _, err := lookPath(spec.pathCheckBinary()); err != nil {
-			return nil, fmt.Errorf("%w: provider %q command %q", ErrProviderNotInPATH, name, spec.pathCheckBinary())
+			return nil, nil, fmt.Errorf("%w: provider %q command %q", ErrProviderNotInPATH, name, spec.pathCheckBinary())
 		}
-		return &spec, nil
+		return &spec, nil, nil
 	}
 
-	return nil, fmt.Errorf("%w: %q", ErrProviderNotFound, name)
+	return nil, nil, fmt.Errorf("%w: %q", ErrProviderNotFound, name)
 }
 
 // MergeProviderOverBuiltin layers city-level provider fields over a built-in
@@ -315,6 +328,8 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	if city.UpstreamEnv.AuthToken != "" {
 		result.UpstreamEnv.AuthToken = city.UpstreamEnv.AuthToken
 	}
+	// Program-status binding merges per sub-field (mergeProgramStatusBinding).
+	result.ProgramStatus = mergeProgramStatusBinding(base.ProgramStatus, city.ProgramStatus)
 
 	if city.TitleModel != "" {
 		result.TitleModel = city.TitleModel
@@ -637,6 +652,7 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		TitleModel:             spec.TitleModel,
 		ACPCommand:             spec.ACPCommand,
 		UpstreamEnv:            spec.UpstreamEnv,
+		ProgramStatus:          spec.ProgramStatus.clone(),
 	}
 	// Deep-copy OptionsSchema to avoid aliasing the spec's slice.
 	if len(spec.OptionsSchema) > 0 {
@@ -937,6 +953,21 @@ func resolvedChainToSpec(r ResolvedProvider, leaf ProviderSpec) ProviderSpec {
 			out.Env[k] = v
 		}
 	}
+	// upstream_env is the harness's serving-env contract, and it is merged
+	// through the chain by MergeProviderOverBuiltin. Folding the resolved
+	// chain back onto the leaf has to carry it, or a provider written as
+	// `base = "builtin:claude"` loses the binding its base declares: the
+	// upstream axis then hard-errors with "declares no upstream_env.api_key
+	// binding" for a harness that does declare one. Per field, leaf wins.
+	if out.UpstreamEnv.BaseURL == "" {
+		out.UpstreamEnv.BaseURL = r.UpstreamEnv.BaseURL
+	}
+	if out.UpstreamEnv.APIKey == "" {
+		out.UpstreamEnv.APIKey = r.UpstreamEnv.APIKey
+	}
+	if out.UpstreamEnv.AuthToken == "" {
+		out.UpstreamEnv.AuthToken = r.UpstreamEnv.AuthToken
+	}
 	if r.PermissionModes != nil {
 		out.PermissionModes = make(map[string]string, len(r.PermissionModes))
 		for k, v := range r.PermissionModes {
@@ -946,6 +977,8 @@ func resolvedChainToSpec(r ResolvedProvider, leaf ProviderSpec) ProviderSpec {
 	if r.OptionsSchema != nil {
 		out.OptionsSchema = deepCopyProviderOptions(r.OptionsSchema)
 	}
+	// The chain walk already merged every layer's binding, the leaf's included.
+	out.ProgramStatus = r.ProgramStatus.clone()
 	// EffectiveDefaults on ResolvedProvider is the normalized merged defaults;
 	// replace OptionDefaults on the folded spec so same-layer schema-managed
 	// args cannot be shadowed again by the original stale leaf map.

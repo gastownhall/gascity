@@ -1258,3 +1258,218 @@ func TestSQLiteStoreReadOnlyMissingFileErrors(t *testing.T) {
 		t.Fatalf("read-only open created the directory: stat err = %v", statErr)
 	}
 }
+
+// unsetMetadataStores are the Update implementations that serve
+// UpdateOpts.UnsetMetadata, plus a CachingStore over each backing so the cached
+// row is held to the same semantics as the store under it.
+func unsetMetadataStores(t *testing.T) map[string]Store {
+	t.Helper()
+	openSQLite := func(dir string) Store {
+		s, err := OpenSQLiteStore(dir)
+		if err != nil {
+			t.Fatalf("OpenSQLiteStore: %v", err)
+		}
+		t.Cleanup(func() { _ = s.(*SQLiteStore).CloseStore() })
+		return s
+	}
+	primed := func(backing Store) Store {
+		cache := NewCachingStoreForTest(backing, nil)
+		if err := cache.Prime(context.Background()); err != nil {
+			t.Fatalf("Prime: %v", err)
+		}
+		return cache
+	}
+	return map[string]Store{
+		"mem":            NewMemStore(),
+		"sqlite":         openSQLite(t.TempDir()),
+		"caching/mem":    primed(NewMemStore()),
+		"caching/sqlite": primed(openSQLite(t.TempDir())),
+	}
+}
+
+func mustGetMetadata(t *testing.T, s Store, id string) map[string]string {
+	t.Helper()
+	b, err := s.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", id, err)
+	}
+	return b.Metadata
+}
+
+// TestUpdateUnsetMetadataMatchesBd pins bd's `update --unset-metadata`
+// semantics on every store that serves it: the key is ABSENT afterwards (not
+// an empty value), several keys go in one call, an absent key is a quiet
+// no-op, and the unset runs after every set in the same call, so a key named
+// in both ends up absent while the rest of the update still lands.
+func TestUpdateUnsetMetadataMatchesBd(t *testing.T) {
+	for name, store := range unsetMetadataStores(t) {
+		t.Run(name, func(t *testing.T) {
+			b, err := store.Create(Bead{Title: "step", Type: "task", Metadata: map[string]string{
+				"a": "1", "b": "2", "c": "3", "keep": "yes",
+			}})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+
+			if err := store.Update(b.ID, UpdateOpts{UnsetMetadata: []string{"a"}}); err != nil {
+				t.Fatalf("unset one key: %v", err)
+			}
+			got := mustGetMetadata(t, store, b.ID)
+			if _, present := got["a"]; present {
+				t.Errorf("a still present after unset: %v", got)
+			}
+			if got["b"] != "2" || got["keep"] != "yes" {
+				t.Errorf("unset of a disturbed other keys: %v", got)
+			}
+
+			if err := store.Update(b.ID, UpdateOpts{UnsetMetadata: []string{"b", "c"}}); err != nil {
+				t.Fatalf("unset two keys: %v", err)
+			}
+			got = mustGetMetadata(t, store, b.ID)
+			for _, key := range []string{"b", "c"} {
+				if _, present := got[key]; present {
+					t.Errorf("%s still present after a multi-key unset: %v", key, got)
+				}
+			}
+
+			if err := store.Update(b.ID, UpdateOpts{UnsetMetadata: []string{"never-set"}}); err != nil {
+				t.Fatalf("unsetting an absent key must be a no-op, got %v", err)
+			}
+			if got = mustGetMetadata(t, store, b.ID); len(got) != 1 || got["keep"] != "yes" {
+				t.Errorf("unsetting an absent key changed metadata: %v", got)
+			}
+
+			closed := "closed"
+			if err := store.Update(b.ID, UpdateOpts{
+				Status:        &closed,
+				Metadata:      map[string]string{"gc.outcome": "pass", "both": "set"},
+				UnsetMetadata: []string{"keep", "both"},
+			}); err != nil {
+				t.Fatalf("combined update: %v", err)
+			}
+			after, err := store.Get(b.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if after.Status != "closed" {
+				t.Errorf("status = %q, want closed", after.Status)
+			}
+			if after.Metadata["gc.outcome"] != "pass" {
+				t.Errorf("gc.outcome = %q, want pass: %v", after.Metadata["gc.outcome"], after.Metadata)
+			}
+			for _, key := range []string{"keep", "both"} {
+				if _, present := after.Metadata[key]; present {
+					t.Errorf("%s present after a combined set+unset; bd applies unsets last: %v", key, after.Metadata)
+				}
+			}
+		})
+	}
+}
+
+// TestSQLiteUnsetMetadataDeletesTheRow is the claim the in-process
+// `gc bd update --unset-metadata` rests on: upsertBeadTx deletes every metadata
+// row of the bead and re-inserts the map, so removing the key from the map
+// removes the row. A reopened store must not see the key at all, not even as
+// an empty value.
+func TestSQLiteUnsetMetadataDeletesTheRow(t *testing.T) {
+	dir := t.TempDir()
+	opened, err := OpenSQLiteStore(dir)
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	store := opened.(*SQLiteStore)
+	b, err := store.Create(Bead{Title: "root", Metadata: map[string]string{"pr.followup_url": "x", "keep": "yes"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Update(b.ID, UpdateOpts{UnsetMetadata: []string{"pr.followup_url"}}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	var rows int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM metadata WHERE bead_id=? AND meta_key=?`, b.ID, "pr.followup_url").Scan(&rows); err != nil {
+		t.Fatalf("counting metadata rows: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("metadata table still holds %d row(s) for the unset key", rows)
+	}
+	if err := store.CloseStore(); err != nil {
+		t.Fatalf("CloseStore: %v", err)
+	}
+
+	reopened, err := OpenSQLiteStore(dir)
+	if err != nil {
+		t.Fatalf("reopening: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.(*SQLiteStore).CloseStore() })
+	got := mustGetMetadata(t, reopened, b.ID)
+	if _, present := got["pr.followup_url"]; present {
+		t.Errorf("the unset key came back after reopen: %v", got)
+	}
+	if got["keep"] != "yes" {
+		t.Errorf("keep = %q after reopen, want yes", got["keep"])
+	}
+}
+
+// TestConditionalUpdatesRefuseUnsetMetadata pins that no revision-guarded
+// write path accepts an unset, on SQLite as on every store that goes through
+// validateConditionalUpdateOpts, and that the refusal writes nothing.
+func TestConditionalUpdatesRefuseUnsetMetadata(t *testing.T) {
+	sqlite, err := OpenSQLiteStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlite.(*SQLiteStore).CloseStore() })
+	for name, store := range map[string]Store{"mem": NewMemStore(), "sqlite": sqlite} {
+		t.Run(name, func(t *testing.T) {
+			writer, ok := store.(ConditionalWriter)
+			if !ok {
+				t.Fatalf("%T is not a ConditionalWriter", store)
+			}
+			b, err := store.Create(Bead{Title: "step", Metadata: map[string]string{"k": "v"}})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			err = writer.UpdateIfMatch(b.ID, b.Revision, UpdateOpts{UnsetMetadata: []string{"k"}})
+			var unsupported *ConditionalUpdateFieldUnsupportedError
+			if !errors.As(err, &unsupported) || unsupported.Field != "unset_metadata" {
+				t.Fatalf("UpdateIfMatch with an unset = %v, want ConditionalUpdateFieldUnsupportedError{unset_metadata}", err)
+			}
+			if got := mustGetMetadata(t, store, b.ID); got["k"] != "v" {
+				t.Errorf("the refused conditional unset wrote anyway: %v", got)
+			}
+		})
+	}
+}
+
+// TestUnsetMetadataOnPathsThatCannotRemoveAKey pins the fail-closed half: a
+// write path that cannot express a removal refuses the whole update rather
+// than applying the rest and keeping the key.
+func TestUnsetMetadataOnPathsThatCannotRemoveAKey(t *testing.T) {
+	if _, err := nativeIssuePatchFromUpdateOpts(UpdateOpts{UnsetMetadata: []string{"k"}}); !errors.Is(err, ErrUnsetMetadataUnsupported) {
+		t.Errorf("native dolt patch builder = %v, want ErrUnsetMetadataUnsupported", err)
+	}
+	tx := &bdStoreTx{}
+	if err := tx.Update("gc-1", UpdateOpts{UnsetMetadata: []string{"k"}}); !errors.Is(err, ErrUnsetMetadataUnsupported) {
+		t.Errorf("bd store Tx update = %v, want ErrUnsetMetadataUnsupported", err)
+	}
+	// The native Tx writes through applyUpdateInTx, which never reaches the
+	// patch builder above, so it carries its own refusal.
+	if err := (&nativeDoltTx{}).Update("gc-1", UpdateOpts{UnsetMetadata: []string{"k"}}); !errors.Is(err, ErrUnsetMetadataUnsupported) {
+		t.Errorf("native dolt Tx update = %v, want ErrUnsetMetadataUnsupported", err)
+	}
+}
+
+// TestBdUpdateArgsRenderUnsetMetadataAfterSets pins the BdStore spelling: one
+// repeated `--unset-metadata <key>` per key, which bd applies after every
+// --set-metadata regardless of argv order.
+func TestBdUpdateArgsRenderUnsetMetadataAfterSets(t *testing.T) {
+	args := bdUpdateArgs("gc-1", UpdateOpts{
+		Metadata:      map[string]string{"gc.outcome": "pass"},
+		UnsetMetadata: []string{"a", "b"},
+	})
+	got := strings.Join(args, " ")
+	want := "update --json gc-1 --set-metadata gc.outcome=pass --unset-metadata a --unset-metadata b"
+	if got != want {
+		t.Errorf("bdUpdateArgs = %q, want %q", got, want)
+	}
+}

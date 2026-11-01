@@ -152,6 +152,34 @@ func TestStoreListFiltersLikeCatalog(t *testing.T) {
 	}
 }
 
+// TestStateFilterIncludesClosedMatchesTheListFilter pins
+// StateFilterIncludesClosed to the list filter it predicts: for every state
+// filter it is true exactly when sessionMatchesFiltersInfo can keep a closed
+// session. A list that reads closed rows only on its say-so then never misses
+// a closed session the filter keeps, and never reads one the filter drops.
+func TestStateFilterIncludesClosedMatchesTheListFilter(t *testing.T) {
+	closed := []Info{
+		infoFromPersistedBead(sessionBeadFixture("s-closed-active", "closed", map[string]string{"state": "active", "template": "polecat"})),
+		infoFromPersistedBead(sessionBeadFixture("s-closed-bare", "closed", nil)),
+	}
+	filters := []string{
+		"", "all", "closed", "open", "active", "asleep", "suspended",
+		"active,", "active,asleep", "active,closed", "closed,active", ",closed",
+		" closed", "closed ", "CLOSED", "All", "all,active",
+	}
+	for _, filter := range filters {
+		keepsClosed := false
+		for _, info := range closed {
+			if sessionMatchesFiltersInfo(info, filter, "") {
+				keepsClosed = true
+			}
+		}
+		if got := StateFilterIncludesClosed(filter); got != keepsClosed {
+			t.Errorf("StateFilterIncludesClosed(%q) = %v, but the list filter keeps a closed session: %v", filter, got, keepsClosed)
+		}
+	}
+}
+
 // TestInfoFromPersistedBeadProjectionDeterminism asserts the persisted
 // projection is a deterministic, store-identity-independent function of the
 // bead's plain fields: the same bead seeded into two distinct store instances

@@ -511,3 +511,44 @@ func TestRecordTurnInterrupt(t *testing.T) {
 		t.Fatalf("last event severity = %v, want ERROR", recs[2].Severity())
 	}
 }
+
+// RecordNudgeQueueLock records the lock's wait and hold by verb and outcome.
+func TestRecordNudgeQueueLockRegistersBothHistograms(t *testing.T) {
+	resetInstruments(t)
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(provider)
+	t.Cleanup(func() { otel.SetMeterProvider(prev) })
+
+	ctx := context.Background()
+	RecordNudgeQueueLock(ctx, "ack", "ok", 1.5, 0.4)
+	RecordNudgeQueueLock(ctx, "enqueue", "busy", 8000, 0)
+
+	var out metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &out); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	found := map[string]int{}
+	for _, sm := range out.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			hist, ok := m.Data.(metricdata.Histogram[float64])
+			if !ok {
+				continue
+			}
+			for _, dp := range hist.DataPoints {
+				verb, _ := dp.Attributes.Value(attribute.Key("verb"))
+				outcome, _ := dp.Attributes.Value(attribute.Key("outcome"))
+				found[m.Name+"/"+verb.AsString()+"/"+outcome.AsString()]++
+			}
+		}
+	}
+	for _, key := range []string{
+		"gc.nudge_queue.lock.wait_ms/ack/ok", "gc.nudge_queue.lock.hold_ms/ack/ok",
+		"gc.nudge_queue.lock.wait_ms/enqueue/busy", "gc.nudge_queue.lock.hold_ms/enqueue/busy",
+	} {
+		if found[key] != 1 {
+			t.Errorf("data points for %s = %d, want 1 (all: %v)", key, found[key], found)
+		}
+	}
+}

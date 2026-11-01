@@ -408,7 +408,7 @@ func (s *touchingStore) ConditionalWritesResolveTarget() beads.Store { return s.
 func refusalFixture(t *testing.T) (cs *controllerState, mem *beads.MemStore, backing *touchingStore, cached *beads.CachingStore, convoy, member beads.Bead) {
 	t.Helper()
 	mem = beads.NewMemStore()
-	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	convoy, _ = mem.Create(beads.Bead{Title: "batch", Type: "convoy"})
@@ -594,6 +594,73 @@ func TestLiveReadOwnerReadsTheStoreThatHoldsTheRow(t *testing.T) {
 	}
 	if _, _, err := liveReadOwner([]beads.Store{other}, row.ID); !errors.Is(err, beads.ErrNotFound) {
 		t.Fatalf("liveReadOwner of a row nowhere: err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestLiveCloseOwnerTakesTheRowThatReadsClosed: for an id a relic's binding
+// holds beside its prefix route, the confirming read takes the first store
+// whose row reads closed. An open row ahead of it does not refute the close; a
+// failed read leaves the close unconfirmed; a close no row confirms is
+// refuted. Without a relic it is liveReadOwner.
+func TestLiveCloseOwnerTakesTheRowThatReadsClosed(t *testing.T) {
+	const id = "hq-7"
+	store := func(t *testing.T, status string) *downGetStore {
+		t.Helper()
+		mem := beads.NewMemStore()
+		mem.HonorExplicitIDs = true
+		s := &downGetStore{Store: mem}
+		switch status {
+		case "missing":
+		case "unreadable":
+			s.down.Store(true)
+		default:
+			if _, err := mem.Create(beads.Bead{ID: id, Title: "row"}); err != nil {
+				t.Fatal(err)
+			}
+			if status == "closed" {
+				if err := mem.Close(id); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		return s
+	}
+	for _, tc := range []struct {
+		work, relic string
+		noRelic     bool
+		want        closeVerdict
+		wantOwner   string // "work" or "relic" when confirmed
+	}{
+		{work: "open", relic: "closed", want: closeConfirmed, wantOwner: "relic"},
+		{work: "missing", relic: "closed", want: closeConfirmed, wantOwner: "relic"},
+		{work: "closed", relic: "open", want: closeConfirmed, wantOwner: "work"},
+		{work: "closed", relic: "closed", want: closeConfirmed, wantOwner: "work"},
+		{work: "open", relic: "open", want: closeRefuted},
+		{work: "open", relic: "missing", want: closeRefuted},
+		{work: "missing", relic: "missing", want: closeRefuted},
+		{work: "unreadable", relic: "closed", want: closeUnconfirmed},
+		{work: "open", relic: "unreadable", want: closeUnconfirmed},
+		{work: "open", relic: "closed", noRelic: true, want: closeRefuted},
+	} {
+		name := fmt.Sprintf("work=%s/relic=%s/probed=%v", tc.work, tc.relic, !tc.noRelic)
+		t.Run(name, func(t *testing.T) {
+			work, relic := store(t, tc.work), store(t, tc.relic)
+			var probed beads.Store = relic
+			if tc.noRelic {
+				probed = nil
+			}
+			owner, live, err := liveCloseOwner([]beads.Store{work, relic}, id, probed)
+			if got := confirmInferredClose(live, err); got != tc.want {
+				t.Fatalf("verdict = %v (row %q, err %v), want %v", got, live.Status, err, tc.want)
+			}
+			if tc.want != closeConfirmed {
+				return
+			}
+			want := map[string]beads.Store{"work": work, "relic": relic}[tc.wantOwner]
+			if owner != want {
+				t.Fatalf("close owner = %p, want the %s store %p", owner, tc.wantOwner, want)
+			}
+		})
 	}
 }
 

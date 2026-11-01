@@ -122,19 +122,7 @@ type beadsStorePayloadDoc struct {
 // they are absent, or fails under GC_REQUIRE_ACCEPTANCE_TOOLING.
 func requireProxiedTooling(t *testing.T) (string, string) {
 	t.Helper()
-	bdPath := helpers.FindBD()
-	if bdPath == "" {
-		helpers.MissingTooling(t, "bd is not available; set GC_ACCEPTANCE_BD_BIN to a bd >= 1.3.0")
-	}
-	out, err := helpers.ToolCommand(t, bdPath, "init", "--help").CombinedOutput()
-	if err != nil || !strings.Contains(string(out), "--proxied-server") {
-		helpers.MissingTooling(t, "bd at %s has no proxied-server support; set GC_ACCEPTANCE_BD_BIN to a bd >= 1.3.0", bdPath)
-	}
-	doltPath, err := exec.LookPath("dolt")
-	if err != nil {
-		helpers.MissingTooling(t, "dolt is not installed")
-	}
-	return bdPath, doltPath
+	return helpers.RequireTopologyTooling(t)
 }
 
 // proxiedEnv builds this test's own environment: the shared Tier A env with a
@@ -1016,21 +1004,6 @@ func TestBeadsProxiedDefaultRig(t *testing.T) {
 			stop.Env = env.ToolList()
 			stop.Run() //nolint:errcheck // best effort
 		})
-
-		// gc's adopt gate reads the issue prefix from .beads/config.yaml, and
-		// `bd init` records its prefix in the store instead — its generated
-		// config leaves issue-prefix commented out, and bd refuses
-		// `bd config set issue_prefix` outright. So adopting a bd-initialised
-		// workspace means writing that one line by hand today. Worth closing:
-		// gc could read the prefix back from bd rather than require the file.
-		configPath := filepath.Join(adopted, ".beads", "config.yaml")
-		existing, err := os.ReadFile(configPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(configPath, append([]byte("issue_prefix: adopt\n"), existing...), 0o600); err != nil {
-			t.Fatal(err)
-		}
 
 		// A workspace that already holds a beads store is an adoption, which gc
 		// makes explicit rather than inferring.

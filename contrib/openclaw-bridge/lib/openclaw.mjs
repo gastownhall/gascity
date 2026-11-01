@@ -7,14 +7,16 @@
 // at runtime, so both packages are direct dependencies pinned to the same
 // release.
 //
-// Most of what the bridge needs is on the iMessage plugin's public entry
-// modules (runtime-api.js, api.js). One seam — the persistent JSON-RPC client
-// used for watch-mode inbound — is NOT re-exported there, only bundled into a
-// hash-named chunk under dist/.setup with mangled export aliases.
-// resolveChunkExport() finds it by scanning chunk export statements at
+// The probe and the id model are on the iMessage plugin's public entry module
+// (api.js). Two seams are NOT re-exported there, only bundled into hash-named
+// chunks under dist/.setup with mangled export aliases: the persistent
+// JSON-RPC client used for watch-mode inbound, and (since 2026.10, when
+// runtime-api.js stopped re-exporting it) the outbound send pipeline.
+// resolveChunkExport() finds each by scanning chunk export statements at
 // startup, so this keeps working across openclaw releases as long as the
-// symbol itself survives.
-// (Upstream ask: export createIMessageRpcClient from the plugin API.)
+// symbols themselves survive.
+// (Upstream ask: export createIMessageRpcClient and sendMessageIMessage from
+// the plugin API.)
 //
 // watchDaemonClose() adapts that client's close contract, which changed in
 // 2026.8 (waitForClose() now rejects), to the one callback bridge.mjs needs.
@@ -32,16 +34,17 @@ const imessageDist = path.join(nodeModules, '@openclaw', 'imessage', 'dist')
 // openclaw's shipped code, imported as-is.
 export async function loadIMessageConnector() {
   const entryUrl = (f) => pathToFileURL(path.join(imessageDist, f)).href
-  const [runtimeApi, api, createIMessageRpcClient] = await Promise.all([
-    import(entryUrl('runtime-api.js')),
+  const setupDir = path.join(imessageDist, '.setup')
+  const [api, sendMessageIMessage, createIMessageRpcClient] = await Promise.all([
     import(entryUrl('api.js')),
-    resolveChunkExport(path.join(imessageDist, '.setup'), 'createIMessageRpcClient', 'client-'),
+    resolveChunkExport(setupDir, 'sendMessageIMessage', 'send-'),
+    resolveChunkExport(setupDir, 'createIMessageRpcClient', 'client-'),
   ])
   return {
     // outbound pipeline: target parsing, markdown handling, chunking, receipts
-    sendMessageIMessage: runtimeApi.sendMessageIMessage,
+    sendMessageIMessage,
     // startup handshake against the imsg CLI
-    probeIMessage: runtimeApi.probeIMessage,
+    probeIMessage: api.probeIMessage,
     // persistent JSON-RPC client (send + watch notifications)
     createIMessageRpcClient,
     // canonical conversation-id model

@@ -25,6 +25,7 @@ go_test(
         "liveness_forwarding_test.go",
         "nudge_keyed_test.go",
         "proctable_forwarding_test.go",
+        "respond_fence_test.go",
         "router_test.go",
         "session_events_test.go",
         "testenv_import_test.go",

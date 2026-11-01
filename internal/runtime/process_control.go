@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"errors"
 	"os/exec"
 	"syscall"
 	"time"
@@ -31,8 +32,18 @@ func SignalProcessGroup(cmd *exec.Cmd, sig syscall.Signal) error {
 	return cmd.Process.Signal(sig)
 }
 
-// TerminateManagedProcess sends SIGTERM, waits for done, then escalates to
-// SIGKILL after grace if the process group is still alive.
+// managedGroupPollInterval is how often TerminateManagedProcess checks whether
+// a group whose leader has exited still has members.
+const managedGroupPollInterval = 25 * time.Millisecond
+
+// TerminateManagedProcess sends SIGTERM to the process group, waits up to
+// grace for the whole group to exit, then SIGKILLs what is left of it.
+//
+// The leader exiting is not the group exiting. A member that handles or
+// ignores SIGTERM outlives a leader that does not (a wrapper shell dies at
+// once while the program it started finishes what it was doing, or never
+// stops), and nothing would kill it afterwards: for a provider whose control
+// socket lives in the stopping process, nothing can even reach it.
 func TerminateManagedProcess(cmd *exec.Cmd, done <-chan struct{}, grace time.Duration) error {
 	_ = SignalProcessGroup(cmd, syscall.SIGTERM)
 	timer := time.NewTimer(grace)
@@ -40,11 +51,37 @@ func TerminateManagedProcess(cmd *exec.Cmd, done <-chan struct{}, grace time.Dur
 
 	select {
 	case <-done:
-		return nil
+		if !startedAsGroupLeader(cmd) || groupGoneBefore(cmd.Process.Pid, timer.C) {
+			return nil
+		}
 	case <-timer.C:
 	}
 
 	_ = SignalProcessGroup(cmd, syscall.SIGKILL)
 	<-done
 	return nil
+}
+
+// startedAsGroupLeader reports whether cmd was started as the leader of a new
+// process group, so its PID names that group even after the leader is reaped.
+func startedAsGroupLeader(cmd *exec.Cmd) bool {
+	return cmd != nil && cmd.Process != nil && cmd.SysProcAttr != nil &&
+		cmd.SysProcAttr.Setpgid && cmd.SysProcAttr.Pgid == 0
+}
+
+// groupGoneBefore polls process group pgid until it has no members (true) or
+// expired fires (false). A member this process may not signal still counts.
+func groupGoneBefore(pgid int, expired <-chan time.Time) bool {
+	ticker := time.NewTicker(managedGroupPollInterval)
+	defer ticker.Stop()
+	for {
+		if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
+			return true
+		}
+		select {
+		case <-expired:
+			return false
+		case <-ticker.C:
+		}
+	}
 }

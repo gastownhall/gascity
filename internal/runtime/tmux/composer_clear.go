@@ -2,9 +2,12 @@ package tmux
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -122,13 +125,34 @@ func readClaudeInput(lines []string) (claudeInput, bool) {
 // capture-pane -e, and with them every character drawn with the dim (faint)
 // attribute. Claude Code draws its input placeholder ("Try \"write a test for
 // <filepath>\"") and prompt suggestions dim; they are not a draft, and Ctrl-U
-// cannot delete them.
+// cannot delete them. On an empty input box the cursor sits on the
+// placeholder's first character, which is drawn reverse video rather than dim
+// ("Press up to edit queued messages" while a message waits behind a running
+// turn): a single reverse-video cell followed directly by dim text is that
+// cursor and goes with the placeholder. A reverse-video run followed by
+// anything else, or longer than one cell, is the cursor on or after typed
+// text, or highlighted text, and stays.
 func stripDimText(line string) string {
 	var b strings.Builder
-	dim := false
+	var attrs sgrAttrs
+	// cursor holds a reverse-video run until the next visible character
+	// shows whether a dim placeholder follows it.
+	var cursor strings.Builder
+	settle := func(beforeDim bool) {
+		if !beforeDim || utf8.RuneCountInString(cursor.String()) != 1 {
+			b.WriteString(cursor.String())
+		}
+		cursor.Reset()
+	}
 	for i := 0; i < len(line); {
 		if line[i] != 0x1b {
-			if !dim {
+			switch {
+			case attrs.dim:
+				settle(true)
+			case attrs.reverse:
+				cursor.WriteByte(line[i])
+			default:
+				settle(false)
 				b.WriteByte(line[i])
 			}
 			i++
@@ -144,7 +168,7 @@ func stripDimText(line string) string {
 				j++
 			}
 			if j < len(line) && line[j] == 'm' {
-				dim = applySGRDim(dim, line[i+2:j])
+				attrs = attrs.apply(line[i+2 : j])
 			}
 			i = j + 1
 		case ']': // OSC (e.g. a hyperlink): ends with BEL or ESC \.
@@ -160,21 +184,34 @@ func stripDimText(line string) string {
 			i += 2
 		}
 	}
+	settle(false)
 	return b.String()
 }
 
-// applySGRDim returns whether text is dim after the SGR parameters params.
-func applySGRDim(dim bool, params string) bool {
+// sgrAttrs are the SGR attributes stripDimText tracks.
+type sgrAttrs struct {
+	dim     bool // SGR 2, cleared by 22
+	reverse bool // SGR 7, cleared by 27
+}
+
+// apply returns a after the SGR parameters params; an empty list resets.
+func (a sgrAttrs) apply(params string) sgrAttrs {
 	if params == "" {
-		return false
+		return sgrAttrs{}
 	}
 	parts := strings.Split(params, ";")
 	for k := 0; k < len(parts); k++ {
 		switch parts[k] {
-		case "", "0", "22":
-			dim = false
+		case "", "0":
+			a = sgrAttrs{}
 		case "2":
-			dim = true
+			a.dim = true
+		case "22":
+			a.dim = false
+		case "7":
+			a.reverse = true
+		case "27":
+			a.reverse = false
 		case "38", "48", "58": // extended color: 5;n or 2;r;g;b
 			if k+1 < len(parts) {
 				switch parts[k+1] {
@@ -186,7 +223,7 @@ func applySGRDim(dim bool, params string) bool {
 			}
 		}
 	}
-	return dim
+	return a
 }
 
 // readInput captures target and reads its input box.
@@ -291,6 +328,87 @@ func (t *Tmux) clearInputBeforePaste(ctx context.Context, session, target string
 	}
 	time.Sleep(50 * time.Millisecond)
 	return nil
+}
+
+// clearHeldDraft empties target's composer of the message a nudge typed
+// before a running turn held its interrupting submit back for the whole
+// confirm window (see nudgeSession). The draft is gc's own, so it is cleared
+// with a client attached too. Codex's Ctrl-U deletes one line of a draft at a
+// time (the cursor's line, or the line break before an empty one), so it
+// presses Ctrl-U until the composer reads empty (see emptyComposer). mayType
+// runs before every press and stops the clear with its error.
+func (t *Tmux) clearHeldDraft(ctx context.Context, target string, mayType func() error) error {
+	read := func() ([]string, error) { return t.captureInputLines(target) }
+	press := func() error {
+		if err := mayType(); err != nil {
+			return err
+		}
+		_, err := t.runCtx(ctx, "send-keys", "-t", paneTarget(target), "C-u")
+		return err
+	}
+	return emptyComposer(read, press, time.Sleep)
+}
+
+// emptyComposer presses Ctrl-U until the live composer in read's capture
+// reads empty (paneShowsDrainedComposer). After each press it waits for the
+// composer to redraw. It fails when no composer is on screen, when two
+// presses in a row leave the composer unchanged while it still holds text,
+// when the pane can no longer be read, when press fails, or after
+// inputMaxCtrlU presses.
+func emptyComposer(read func() ([]string, error), press func() error, sleep func(time.Duration)) error {
+	lines, err := read()
+	if err != nil {
+		return fmt.Errorf("reading the composer: %w", err)
+	}
+	stalled := 0
+	for presses := 0; !paneShowsDrainedComposer(lines); presses++ {
+		before, ok := liveComposerRows(lines)
+		if !ok {
+			return errors.New("no composer on screen to clear")
+		}
+		if presses >= inputMaxCtrlU || stalled >= inputStalledCtrlU {
+			return fmt.Errorf("composer still holds %q after %d Ctrl-U", firstNRunes(strings.Join(before, " "), 80), presses)
+		}
+		if err := press(); err != nil {
+			return fmt.Errorf("clearing the composer: %w", err)
+		}
+		changed := false
+		for waited := time.Duration(0); waited < inputRedrawWait; waited += inputRedrawPoll {
+			sleep(inputRedrawPoll)
+			if lines, err = read(); err != nil {
+				return fmt.Errorf("reading the composer while clearing it: %w", err)
+			}
+			if after, _ := liveComposerRows(lines); !slices.Equal(after, before) {
+				changed = true
+				break
+			}
+		}
+		if changed {
+			stalled = 0
+		} else {
+			stalled++
+		}
+	}
+	return nil
+}
+
+// liveComposerRows returns lines from the live composer, the last row that
+// starts with a known family's composer prompt (stagedDraftMarkers), to the
+// end, and whether there is one. Rows above it are the transcript and the
+// turn's status, which redraw on their own while a turn runs.
+func liveComposerRows(lines []string) ([]string, bool) {
+	live := -1
+	for i, line := range lines {
+		for _, marker := range stagedDraftMarkers {
+			if matchesPromptPrefix(line, marker.promptPrefix) {
+				live = i
+			}
+		}
+	}
+	if live < 0 {
+		return nil, false
+	}
+	return lines[live:], true
 }
 
 // emptyInput clears in from target's input box. mayType, when set, runs
