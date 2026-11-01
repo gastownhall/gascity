@@ -86,6 +86,7 @@ go_test(
         "escalate_script_test.go",
         "human_gate_script_test.go",
         "notify_claims_stall_script_test.go",
+        "nudge_on_route_script_test.go",
         "pack_assets_test.go",
         "pack_formulas_test.go",
         "pack_orders_test.go",
