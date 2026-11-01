@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -812,4 +813,428 @@ func TestRecoverManagedDolt_ProceedsWhenHealthCheckErrors(t *testing.T) {
 	if report.Ready {
 		t.Error("expected Ready=false when health check errors")
 	}
+}
+
+// unresponsiveRecoveryHarness drives recoverManagedDoltProcessWithOps against a
+// managed Dolt whose query probe fails, recording which lifecycle ops ran.
+type unresponsiveRecoveryHarness struct {
+	city    string
+	layout  managedDoltRuntimeLayout
+	ops     managedDoltRecoveryOps
+	stopped int
+	started int
+	now     time.Time
+}
+
+const (
+	unresponsiveTestPort   = "3306"
+	unresponsiveTestWindow = 180 * time.Second
+)
+
+var errUnresponsiveTestProbe = errors.New("query probe timed out after 5s")
+
+func newUnresponsiveRecoveryHarness(t *testing.T, probeErr error, listeningPID int) *unresponsiveRecoveryHarness {
+	t.Helper()
+	city := setupRecoveryTestCity(t)
+	layout, err := resolveManagedDoltRuntimeLayout(city)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	h := &unresponsiveRecoveryHarness{city: city, layout: layout, now: time.Unix(1_700_000_000, 0).UTC()}
+	h.ops = managedDoltRecoveryOps{
+		queryProbe: func(string, string, string) error { return probeErr },
+		healthCheck: func(string, string, string) (managedDoltSQLHealthReport, error) {
+			return managedDoltSQLHealthReport{QueryReady: true, ReadOnly: "false"}, nil
+		},
+		stop: func(string, string) (managedDoltStopReport, error) {
+			h.stopped++
+			return managedDoltStopReport{HadPID: true, PID: listeningPID}, nil
+		},
+		preflightCleanup: func(string) error { return nil },
+		start: func(string, string, string, string, string, time.Duration) (managedDoltStartReport, error) {
+			h.started++
+			return managedDoltStartReport{Ready: true, PID: 9999, Port: 3306}, nil
+		},
+		publish:       func(string) error { return nil },
+		failedCleanup: func(_ string, _ int, _ int, cause error) error { return cause },
+		classifyUnresponsive: func(string, string, string) (int, bool) {
+			return listeningPID, listeningPID > 0
+		},
+		now:                      func() time.Time { return h.now },
+		unresponsiveRestartAfter: unresponsiveTestWindow,
+	}
+	return h
+}
+
+func (h *unresponsiveRecoveryHarness) recover(t *testing.T) (managedDoltRecoverReport, error) {
+	t.Helper()
+	return recoverManagedDoltProcessWithOps(h.city, "127.0.0.1", unresponsiveTestPort, "root", "warning", 2*time.Second, h.ops)
+}
+
+func (h *unresponsiveRecoveryHarness) since(t *testing.T) (time.Time, bool) {
+	t.Helper()
+	data, err := os.ReadFile(managedDoltUnresponsiveSincePath(h.layout))
+	if errors.Is(err, os.ErrNotExist) {
+		return time.Time{}, false
+	}
+	if err != nil {
+		t.Fatalf("read unresponsive state: %v", err)
+	}
+	when, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatalf("parse unresponsive state %q: %v", data, err)
+	}
+	return when, true
+}
+
+func (h *unresponsiveRecoveryHarness) log(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile(h.layout.LogFile)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read dolt.log: %v", err)
+	}
+	return string(data)
+}
+
+// (a) A probe timeout against a live, owned, still-listening server is not
+// enough to stop it: the first-unresponsive time is persisted and the recover
+// reports unhealthy without touching the process.
+func TestRecoverManagedDolt_DefersStopWhileLiveServerUnresponsive(t *testing.T) {
+	t.Setenv("BEADS_ACTOR", "order:beads-health")
+	h := newUnresponsiveRecoveryHarness(t, errUnresponsiveTestProbe, 4242)
+
+	report, err := h.recover(t)
+	if err == nil {
+		t.Fatal("recover returned nil error while deferring; callers must see unhealthy-not-recovered")
+	}
+	if h.stopped != 0 || h.started != 0 {
+		t.Fatalf("stop=%d start=%d, want the live server left alone", h.stopped, h.started)
+	}
+	if report.Restarted {
+		t.Error("report.Restarted = true for a deferred recover")
+	}
+	got, ok := h.since(t)
+	if !ok || !got.Equal(h.now) {
+		t.Fatalf("first-unresponsive state = %v (present=%v), want %v", got, ok, h.now)
+	}
+	logged := h.log(t)
+	for _, want := range []string{"defer", "pid=4242", "port=3306", "query probe timed out", "unresponsive_for=", `caller="order:beads-health"`} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("dolt.log missing %q; got:\n%s", want, logged)
+		}
+	}
+
+	// A later recover inside the window keeps deferring and keeps the
+	// original first-unresponsive time instead of restarting the clock.
+	h.now = h.now.Add(60 * time.Second)
+	if _, err := h.recover(t); err == nil {
+		t.Fatal("second recover inside the window returned nil error")
+	}
+	if h.stopped != 0 {
+		t.Fatalf("stop called %d times inside the window", h.stopped)
+	}
+	if again, _ := h.since(t); !again.Equal(got) {
+		t.Fatalf("first-unresponsive time moved from %v to %v", got, again)
+	}
+}
+
+// (b) A refused connection, a dead PID, or an unowned process is not the
+// "alive but slow" case, so today's stop-and-start path is kept.
+func TestRecoverManagedDolt_StopsWhenNotLiveListening(t *testing.T) {
+	h := newUnresponsiveRecoveryHarness(t, errors.New("dial tcp 127.0.0.1:3306: connect: connection refused"), 0)
+
+	if _, err := h.recover(t); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if h.stopped != 1 || h.started != 1 {
+		t.Fatalf("stop=%d start=%d, want one stop-and-start", h.stopped, h.started)
+	}
+	if _, ok := h.since(t); ok {
+		t.Error("unresponsive state recorded for a server that is not listening")
+	}
+}
+
+// (c) Once the server has been continuously unresponsive for the window, the
+// stop-and-start path runs, even when the state was written by another process.
+func TestRecoverManagedDolt_StopsAfterUnresponsiveWindowElapsed(t *testing.T) {
+	h := newUnresponsiveRecoveryHarness(t, errUnresponsiveTestProbe, 4242)
+	first := h.now.Add(-unresponsiveTestWindow - time.Second)
+	if err := os.WriteFile(managedDoltUnresponsiveSincePath(h.layout), []byte(first.Format(time.RFC3339Nano)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := h.recover(t); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if h.stopped != 1 || h.started != 1 {
+		t.Fatalf("stop=%d start=%d, want one stop-and-start after the window", h.stopped, h.started)
+	}
+}
+
+// A window of zero restores the pre-existing behavior: stop on any probe
+// failure, with no state written.
+func TestRecoverManagedDolt_ZeroWindowStopsImmediately(t *testing.T) {
+	h := newUnresponsiveRecoveryHarness(t, errUnresponsiveTestProbe, 4242)
+	h.ops.unresponsiveRestartAfter = 0
+
+	if _, err := h.recover(t); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if h.stopped != 1 {
+		t.Fatalf("stop=%d, want 1 with the window disabled", h.stopped)
+	}
+	if _, ok := h.since(t); ok {
+		t.Error("unresponsive state recorded with the window disabled")
+	}
+}
+
+// (d) A successful probe means the server recovered by itself, so the
+// continuous-unresponsive clock must start over next time.
+func TestRecoverManagedDolt_SuccessfulProbeClearsUnresponsiveState(t *testing.T) {
+	h := newUnresponsiveRecoveryHarness(t, nil, 4242)
+	if err := os.WriteFile(managedDoltUnresponsiveSincePath(h.layout), []byte(h.now.Format(time.RFC3339Nano)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := h.recover(t); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if h.stopped != 0 {
+		t.Fatalf("stop=%d, want a healthy server left alone", h.stopped)
+	}
+	if _, ok := h.since(t); ok {
+		t.Error("unresponsive state survived a successful probe")
+	}
+}
+
+// The unresponsive window is a CONTINUOUS streak. A stall that cleared by
+// itself (beads-health passed in between, so recover never ran) must not be
+// counted into a later, unrelated stall: one failed probe hours after the
+// first incident has to defer again, not stop the live server.
+func TestRecoverManagedDolt_HealthyGapStartsNewUnresponsiveStreak(t *testing.T) {
+	t.Setenv("BEADS_ACTOR", "order:beads-health")
+	h := newUnresponsiveRecoveryHarness(t, errUnresponsiveTestProbe, 4242)
+	writeHealthyProviderFakes(t, h.city)
+	t.Setenv("GC_BEADS", "")
+
+	// Incident 1: deferred, first-unresponsive time persisted.
+	if _, err := h.recover(t); err == nil {
+		t.Fatal("incident 1: recover returned nil error while deferring")
+	}
+	if _, ok := h.since(t); !ok {
+		t.Fatal("incident 1: first-unresponsive time not persisted")
+	}
+
+	// The server answers again by itself: the health check passes and
+	// recover is never called.
+	if err := healthBeadsProvider(h.city); err != nil {
+		t.Fatalf("healthBeadsProvider: %v", err)
+	}
+
+	// Incident 2, long after: a single failed probe is a new streak.
+	h.now = h.now.Add(2 * time.Hour)
+	if _, err := h.recover(t); err == nil {
+		t.Fatalf("incident 2: recover stopped the live server on one probe error 2h after incident 1 (stop=%d start=%d)", h.stopped, h.started)
+	}
+	if h.stopped != 0 {
+		t.Fatalf("incident 2: stop=%d, want the live server left alone", h.stopped)
+	}
+	if got, ok := h.since(t); !ok || !got.Equal(h.now) {
+		t.Fatalf("incident 2: streak start = %v (present=%v), want a fresh %v", got, ok, h.now)
+	}
+}
+
+// A recover-last stamped in the future (clock step back, bad write) must not
+// suppress recovery until the clock catches up.
+func TestRecentManagedDoltRecoverIgnoresFutureTimestamp(t *testing.T) {
+	h := newUnresponsiveRecoveryHarness(t, nil, 0)
+	if err := recordManagedDoltRecover(h.city, h.now.Add(time.Hour)); err != nil {
+		t.Fatalf("recordManagedDoltRecover: %v", err)
+	}
+	if recentManagedDoltRecover(h.city, h.now, 30*time.Second) {
+		t.Fatal("a recover-last in the future counted as a recent recover")
+	}
+	if err := recordManagedDoltRecover(h.city, h.now.Add(-5*time.Second)); err != nil {
+		t.Fatalf("recordManagedDoltRecover: %v", err)
+	}
+	if !recentManagedDoltRecover(h.city, h.now, 30*time.Second) {
+		t.Fatal("a recover 5s ago was not counted as recent")
+	}
+}
+
+// A decision line is one line: a caller carrying a newline must not forge a
+// second one.
+func TestLogManagedDoltRecoverDecisionQuotesCaller(t *testing.T) {
+	t.Setenv("BEADS_ACTOR", "order:evil\nforged decision=stop")
+	h := newUnresponsiveRecoveryHarness(t, errUnresponsiveTestProbe, 4242)
+
+	logManagedDoltRecoverDecision(h.layout, "defer", "unresponsive-within-window", 4242, unresponsiveTestPort, errUnresponsiveTestProbe, time.Second, h.now)
+	if n := strings.Count(strings.TrimSpace(h.log(t)), "\n"); n != 0 {
+		t.Fatalf("decision spans %d extra lines; got:\n%s", n, h.log(t))
+	}
+}
+
+// (e) Every stop is explained in dolt.log: who asked, which process, and why.
+func TestRecoverManagedDolt_StopLogsReasonToDoltLog(t *testing.T) {
+	t.Setenv("BEADS_ACTOR", "order:beads-health")
+	h := newUnresponsiveRecoveryHarness(t, errors.New("dial tcp 127.0.0.1:3306: connect: connection refused"), 0)
+
+	if _, err := h.recover(t); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	logged := h.log(t)
+	for _, want := range []string{"stop", "port=3306", "connection refused", `caller="order:beads-health"`} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("dolt.log missing %q; got:\n%s", want, logged)
+		}
+	}
+}
+
+// The caller falls back to the executable and parent when no order set
+// BEADS_ACTOR, so an unattributed stop is still traceable.
+func TestManagedDoltRecoverCallerFallsBackToProcess(t *testing.T) {
+	t.Setenv("BEADS_ACTOR", "")
+	got := managedDoltRecoverCaller()
+	if got == "" || strings.HasPrefix(got, "order:") {
+		t.Fatalf("managedDoltRecoverCaller() = %q, want an argv0/parent description", got)
+	}
+	if !strings.Contains(got, fmt.Sprintf("ppid=%d", os.Getppid())) {
+		t.Errorf("managedDoltRecoverCaller() = %q, want it to name the parent pid", got)
+	}
+}
+
+// observedHealthyLivePort is the port the observed-healthy fixture publishes for
+// its live server. Nothing listens on it: the dial is stubbed.
+const observedHealthyLivePort = 43129
+
+// observedHealthyRecovery is an owned managed Dolt that answers every probe on
+// the port its runtime state publishes, beside the first-unresponsive record an
+// earlier stall left behind. A recover that observes the server healthy without
+// running the query probe must end that streak, or a later single probe error
+// extends it and stops a live server.
+type observedHealthyRecovery struct {
+	city      string
+	layout    managedDoltRuntimeLayout
+	ops       managedDoltRecoveryOps
+	published int
+}
+
+func newObservedHealthyRecovery(t *testing.T) *observedHealthyRecovery {
+	t.Helper()
+	clearGCEnv(t)
+	t.Setenv("GC_DOLT_PASSWORD", "test-password")
+	city := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(city)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	for _, dir := range []string{layout.PackStateDir, layout.DataDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", dir, err)
+		}
+	}
+	pid := startSigtermIgnoringProcess(t, layout.DataDir)
+	if err := os.WriteFile(layout.PIDFile, []byte(fmt.Sprint(pid)+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pid): %v", err)
+	}
+	state := doltRuntimeState{
+		Running:   true,
+		PID:       pid,
+		Port:      observedHealthyLivePort,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	for _, path := range []string{layout.StateFile, managedDoltStatePath(city)} {
+		if err := writeDoltRuntimeStateFile(path, state); err != nil {
+			t.Fatalf("writeDoltRuntimeStateFile(%s): %v", path, err)
+		}
+	}
+	// The server answers the TCP and the query probe on its published port
+	// without a socket: the dial hands back one end of an in-memory pipe.
+	stubManagedDoltDial(t, func(string, string, time.Duration) (net.Conn, error) {
+		client, server := net.Pipe()
+		_ = server.Close()
+		return client, nil
+	})
+	oldQueryProbe := managedDoltQueryProbeDirectFn
+	managedDoltQueryProbeDirectFn = func(_, _, _ string) error { return nil }
+	t.Cleanup(func() { managedDoltQueryProbeDirectFn = oldQueryProbe })
+
+	since := time.Unix(1_700_000_000, 0).UTC()
+	if err := os.WriteFile(managedDoltUnresponsiveSincePath(layout), []byte(since.Format(time.RFC3339Nano)+"\n"), 0o600); err != nil {
+		t.Fatalf("seed unresponsive state: %v", err)
+	}
+
+	f := &observedHealthyRecovery{city: city, layout: layout}
+	// Reaching any of these means the fixture missed the observed path, which
+	// is a different failure from a clear that never ran.
+	unexpected := func(op string) error {
+		t.Errorf("recover ran %s although the live server was observed healthy", op)
+		return errors.New(op)
+	}
+	f.ops = managedDoltRecoveryOps{
+		queryProbe: func(string, string, string) error { return unexpected("queryProbe") },
+		healthCheck: func(string, string, string) (managedDoltSQLHealthReport, error) {
+			return managedDoltSQLHealthReport{}, unexpected("healthCheck")
+		},
+		stop: func(string, string) (managedDoltStopReport, error) {
+			return managedDoltStopReport{}, unexpected("stop")
+		},
+		preflightCleanup: func(string) error { return unexpected("preflightCleanup") },
+		start: func(string, string, string, string, string, time.Duration) (managedDoltStartReport, error) {
+			return managedDoltStartReport{}, unexpected("start")
+		},
+		publish:       func(string) error { f.published++; return nil },
+		failedCleanup: func(_ string, _ int, _ int, cause error) error { return cause },
+		classifyUnresponsive: func(string, string, string) (int, bool) {
+			_ = unexpected("classifyUnresponsive")
+			return 0, false
+		},
+		now:                      func() time.Time { return since.Add(time.Hour) },
+		unresponsiveRestartAfter: unresponsiveTestWindow,
+	}
+	return f
+}
+
+// requireReusedLiveServer fails unless recover reused the live server it
+// observed and ended the first-unresponsive streak.
+func (f *observedHealthyRecovery) requireReusedLiveServer(t *testing.T, report managedDoltRecoverReport, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("recover error = %v, want the observed live server reused", err)
+	}
+	if !report.Ready || !report.Healthy || report.Restarted || report.Port != observedHealthyLivePort {
+		t.Fatalf("report = %+v, want ready and healthy on port %d without a restart", report, observedHealthyLivePort)
+	}
+	if f.published != 1 {
+		t.Fatalf("publish ran %d times, want 1", f.published)
+	}
+	if _, statErr := os.Stat(managedDoltUnresponsiveSincePath(f.layout)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("first-unresponsive record after an observed-healthy recover: stat error = %v, want it removed", statErr)
+	}
+}
+
+// The live server publishes a port other than the one recover was asked about
+// (a scope watchdog rebind that provider state has not caught up with).
+// Recover reuses it without running the query probe, and that observation
+// ends the unresponsive streak.
+func TestRecoverManagedDolt_ObservedRebindClearsUnresponsiveState(t *testing.T) {
+	f := newObservedHealthyRecovery(t)
+
+	report, err := recoverManagedDoltProcessWithOps(f.city, "127.0.0.1", fmt.Sprint(observedHealthyLivePort+1), "root", "warning", 3*time.Second, f.ops)
+	f.requireReusedLiveServer(t, report, err)
+}
+
+// Another process holds the lifecycle lock while the server answers on the
+// requested port. Recover returns without the lock, and that observation also
+// ends the unresponsive streak.
+func TestRecoverManagedDolt_ObservedWhileLockHeldClearsUnresponsiveState(t *testing.T) {
+	f := newObservedHealthyRecovery(t)
+	if err := os.WriteFile(f.layout.LockFile, nil, 0o644); err != nil {
+		t.Fatalf("create lifecycle lock file: %v", err)
+	}
+	holdFlock(t, f.layout.LockFile)
+
+	report, err := recoverManagedDoltProcessWithOps(f.city, "127.0.0.1", fmt.Sprint(observedHealthyLivePort), "root", "warning", 3*time.Second, f.ops)
+	f.requireReusedLiveServer(t, report, err)
 }
