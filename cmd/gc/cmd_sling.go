@@ -736,26 +736,21 @@ func canInferSlingDefaultTargetFromBead(cfg *config.City, beadOrFormula string) 
 
 // populateSlingDepsCallbacks fills in the interface fields on SlingDeps.
 // stderr receives the direct-session resolver's report of a named session it
-// materialized for the reconciler to start (cliDirectSessionResolverTo).
+// materialized for the reconciler to start (cliDirectSessionResolver).
 func populateSlingDepsCallbacks(deps *slingDeps, stderr io.Writer) {
 	deps.Resolver = cliAgentResolver{}
 	deps.Branches = cliBranchResolver{}
 	deps.Notify = &cliNotifier{}
-	deps.DirectSessionResolver = cliDirectSessionResolverTo(stderr)
+	deps.DirectSessionResolver = cliDirectSessionResolver(stderr)
 	deps.Router = cliBeadRouter{deps: deps}
 }
 
-// cliDirectSessionResolver is cliDirectSessionResolverTo for graph routing
-// that has no caller's stderr to report to.
-func cliDirectSessionResolver(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error) {
-	return cliDirectSessionResolverTo(nil)(store, cityName, cityPath, cfg, target, rigContext)
-}
-
-// cliDirectSessionResolverTo returns the resolver that binds a direct graph
+// cliDirectSessionResolver returns the resolver that binds a direct graph
 // assignee naming a configured named session to that session's row,
 // materializing the row when it has none. stderr receives the materializer's
-// report of a start it left to the reconciler; nil discards it.
-func cliDirectSessionResolverTo(stderr io.Writer) graphroute.DirectSessionResolver {
+// report of a start it left to the reconciler; nil discards it, for graph
+// routing that has no caller's stderr to report to.
+func cliDirectSessionResolver(stderr io.Writer) graphroute.DirectSessionResolver {
 	return func(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error) {
 		if cfg == nil {
 			return "", false, nil

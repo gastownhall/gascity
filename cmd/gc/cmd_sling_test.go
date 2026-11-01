@@ -5191,7 +5191,7 @@ func TestCLIDirectSessionResolverMaterializesNamedSessionAliasShadow(t *testing.
 		}},
 	}
 
-	id, ok, err := cliDirectSessionResolver(store, cfg.Workspace.Name, t.TempDir(), cfg, "claude", "")
+	id, ok, err := cliDirectSessionResolver(nil)(store, cfg.Workspace.Name, t.TempDir(), cfg, "claude", "")
 	if err != nil {
 		t.Fatalf("cliDirectSessionResolver: %v", err)
 	}
