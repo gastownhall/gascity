@@ -13413,6 +13413,56 @@ func TestOrphanSweepDeclaresLocalSkipsAsPartialScopes(t *testing.T) {
 	}
 }
 
+// TestOrphanSweepComposesGateAndLocalSkipOutcomes keeps one pass's
+// declarations from fighting each other: a gate that protected a foreign
+// claim and a local claim the sweep could not verify compose into a single
+// partial outcome. The gate's per-identity scope stands verbatim, the local
+// skip adds its bead-id scope, and the top-level reason states both counts
+// -- calling order_outcome_set skipped here would have replaced the gate's
+// declaration instead.
+func TestOrphanSweepComposesGateAndLocalSkipOutcomes(t *testing.T) {
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{
+			inProgress("ga-foreign", "project/dalinar"),
+			hookClaim("ga-legacy-hint", "gc-d34d1", "gastown__polecat-gc-d34d1", map[string]string{
+				"gc.session_bead_id": "gc-legacy9",
+			}),
+		},
+		nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d1", Status: "closed", IssueType: "session"}},
+		[]string{"project/dalinar"}, nil)
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if run.released("ga-foreign") || run.released("ga-legacy-hint") {
+		t.Fatalf("a protected or unverifiable claim was released\n%s", run.context())
+	}
+	outcome, ok := run.outcome(t)
+	if !ok || outcome.Outcome != "partial" {
+		t.Fatalf("outcome = %+v (written %v), want partial\n%s", outcome, ok, run.context())
+	}
+	if len(outcome.Scopes) != 2 {
+		t.Fatalf("outcome scopes = %+v, want one identity scope and one bead-id scope", outcome.Scopes)
+	}
+	gateScope, localScope := false, false
+	for _, scope := range outcome.Scopes {
+		switch scope.Scope {
+		case "project/dalinar":
+			gateScope = strings.Contains(scope.Reason, "absent_from_roster")
+		case "ga-legacy-hint":
+			localScope = strings.Contains(scope.Reason, "gc-d34d1") && strings.Contains(scope.Reason, "gc-legacy9")
+		}
+	}
+	if !gateScope || !localScope {
+		t.Fatalf("outcome scopes = %+v, want the gate's identity scope (absent_from_roster) and the bead-id scope naming the assignee and unreadable candidate", outcome.Scopes)
+	}
+	for _, want := range []string{"protected 1 claim", "skipped 1 unverifiable"} {
+		if !strings.Contains(outcome.Reason, want) {
+			t.Fatalf("outcome reason %q, want it to state both counts (%q missing)", outcome.Reason, want)
+		}
+	}
+}
+
 // TestJsonlExportFirstRunArchivePathCreatedBeforeTheRename covers the window
 // between the first run's "archive path absent" check and its rename of the
 // staging repo into place: another exporter (or anything else) can create

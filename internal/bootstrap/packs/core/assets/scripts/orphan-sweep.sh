@@ -847,6 +847,16 @@ orphan-sweep: foreign-identity gate budget of ${GATE_BUDGET_SECONDS}s exhausted;
     fi
 fi
 
+# A run that skipped local claims declares them too: one partial outcome
+# carrying both what the gate protected and what could not be verified or
+# released. Never `skipped` -- some of the order's work ran, and a later
+# `skipped` would replace the gate's declaration above instead of extending
+# it.
+if [ "$UNVERIFIABLE" -gt 0 ]; then
+    local_skip_note="skipped $UNVERIFIABLE unverifiable local claim(s): the holder could not be verified dead, re-read, or conditionally released"
+    order_outcome_set partial "${ORDER_OUTCOME_REASON:+$ORDER_OUTCOME_REASON; }$local_skip_note"
+fi
+
 if [ "$ORPHANED" -gt 0 ] || [ "$UNVERIFIABLE" -gt 0 ] || [ "$PROTECTED" -gt 0 ]; then
     SUMMARY="orphan-sweep: reset $ORPHANED orphaned beads"
     if [ "$UNVERIFIABLE" -gt 0 ]; then
@@ -880,10 +890,12 @@ misidentified live session -- inspect via gc bd show <id> --json." \
     fi
 fi
 
-# Declare protected claims as a partial outcome: the controller logs an exit-0
-# run's output nowhere, but turns this declaration into a typed order.skipped
-# event naming each protected identity (order_outcome.sh). A no-op when nothing
-# was protected or when run by hand without GC_ORDER_OUTCOME_FILE.
+# Declare protected claims and skipped local claims as one partial outcome:
+# the controller logs an exit-0 run's output nowhere, but turns this
+# declaration into a typed order.skipped event naming each protected
+# identity and each skipped bead (order_outcome.sh). A no-op when nothing
+# was protected or skipped, or when run by hand without
+# GC_ORDER_OUTCOME_FILE.
 order_outcome_write
 
 # Loud-fail: the summary has been printed above, so a non-zero exit now
