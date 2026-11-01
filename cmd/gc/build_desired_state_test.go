@@ -10307,6 +10307,100 @@ func TestSelectOrCreatePoolSessionBead_PrefersConcreteAgentSlotOverStalePoolMeta
 	}
 }
 
+// persistentSingletonAsleepHolderParams seeds the sole open session of a
+// persistent canonical singleton pool, asleep after city-stop, into an
+// in-memory store and a complete session snapshot.
+func persistentSingletonAsleepHolderParams(t *testing.T, extra map[string]string) (*agentBuildParams, *config.Agent, beads.Bead) {
+	t.Helper()
+	store := beads.NewMemStore()
+	metadata := map[string]string{
+		"template":       "rig/worker",
+		"agent_name":     "rig/worker",
+		"alias":          "rig/worker",
+		"session_name":   "rig--worker",
+		"pool_managed":   "true",
+		"session_origin": "ephemeral",
+		"state":          "asleep",
+		"sleep_reason":   "city-stop",
+		"slept_at":       "2026-11-01T16:00:00Z",
+	}
+	for k, v := range extra {
+		metadata[k] = v
+	}
+	holder, err := store.Create(beads.Bead{
+		Title:    "rig/worker",
+		Type:     sessionBeadType,
+		Labels:   []string{sessionBeadLabel},
+		Metadata: metadata,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Agents: []config.Agent{{
+		Dir:               "rig",
+		Name:              "worker",
+		MaxActiveSessions: intPtr(1),
+	}}}
+	if !cfg.Agents[0].UsesCanonicalSingletonPoolIdentity() {
+		t.Fatal("precondition: agent must use the canonical singleton pool identity")
+	}
+	bp := &agentBuildParams{
+		city:                             cfg,
+		beadStore:                        store,
+		sessionBeads:                     newSessionBeadSnapshot([]beads.Bead{holder}),
+		sessionOccupancyInfos:            []sessionpkg.Info{sessiontest.SeedBead(t, holder)},
+		sessionSnapshotComplete:          true,
+		sessionSnapshotCompletenessKnown: true,
+		agents:                           cfg.Agents,
+	}
+	if !bp.hasCompleteSessionSnapshot() {
+		t.Fatal("precondition: session snapshot must be complete")
+	}
+	return bp, &cfg.Agents[0], holder
+}
+
+// TestSelectOrPlanPoolSessionBead_PersistentSingletonHeldAsleepHolderNotReused
+// pins the anonymous-request hold filters for a persistent canonical
+// singleton: a freeable asleep holder under a live wait, heartbeat hold or
+// quarantine stays excluded from anonymous reuse, and the fresh create still
+// refuses its canonical identity.
+func TestSelectOrPlanPoolSessionBead_PersistentSingletonHeldAsleepHolderNotReused(t *testing.T) {
+	decisionTime := time.Date(2026, 11, 1, 17, 0, 0, 0, time.UTC)
+	future := decisionTime.Add(time.Hour).Format(time.RFC3339)
+	for _, tc := range []struct {
+		name  string
+		extra map[string]string
+	}{
+		{name: "wait_hold", extra: map[string]string{"wait_hold": "w-1"}},
+		{name: "future held_until", extra: map[string]string{"held_until": future}},
+		{name: "future quarantined_until", extra: map[string]string{"quarantined_until": future}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bp, cfgAgent, holder := persistentSingletonAsleepHolderParams(t, tc.extra)
+
+			result, _, plan, err := selectOrPlanPoolSessionBead(
+				bp,
+				cfgAgent,
+				"rig/worker",
+				nil,
+				SessionRequest{Template: "rig/worker", Tier: "new"},
+				decisionTime,
+				map[string]bool{},
+				map[int]bool{},
+			)
+			if result.ID == holder.ID {
+				t.Fatalf("selected held holder %s for an anonymous request; want it excluded", holder.ID)
+			}
+			if plan != nil {
+				t.Fatalf("planned fresh create %+v while holder %s holds the canonical identity", plan, holder.ID)
+			}
+			if !errors.Is(err, errPoolSessionNameUnavailable) {
+				t.Fatalf("err = %v, want errPoolSessionNameUnavailable for canonical holder %s", err, holder.ID)
+			}
+		})
+	}
+}
+
 func TestSelectOrCreatePoolSessionBead_PreservesPreferredNamepoolSlotAboveReducedCapacity(t *testing.T) {
 	store := beads.NewMemStore()
 	nux, err := store.Create(beads.Bead{
