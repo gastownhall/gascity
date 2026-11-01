@@ -455,8 +455,11 @@ func TestK8sSecretProjectionReachesBuiltinAndHybridProviders(t *testing.T) {
 	wantEnv := []runtime.K8sSecretEnv{{Name: "SERVICE_TOKEN", Secret: "service-auth", Key: "token"}}
 	wantMounts := []runtime.K8sSecretMount{{Secret: "service-files", MountPath: "/run/service"}}
 	var calls int
-	newSeamBackedK8sProvider = func(env []runtime.K8sSecretEnv, mounts []runtime.K8sSecretMount) (runtime.Provider, error) {
+	newSeamBackedK8sProvider = func(env []runtime.K8sSecretEnv, mounts []runtime.K8sSecretMount, cityName string) (runtime.Provider, error) {
 		calls++
+		if cityName != "city" {
+			t.Errorf("K8s constructor call %d city name = %q, want city", calls, cityName)
+		}
 		if len(env) != len(wantEnv) || env[0] != wantEnv[0] {
 			t.Errorf("K8s constructor call %d secret env = %#v, want %#v", calls, env, wantEnv)
 		}

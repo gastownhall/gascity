@@ -2125,7 +2125,7 @@ func TestTryReloadConfig_IncludesBuiltinPackOrders(t *testing.T) {
 	}
 
 	// Core pack housekeeping orders (explicit core include).
-	for _, want := range []string{"gate-sweep", "wisp-compact"} {
+	for _, want := range []string{"gate-sweep", "orphan-sweep"} {
 		if !names[want] {
 			t.Errorf("missing core order %q; got %v", want, names)
 		}
@@ -2138,6 +2138,9 @@ func TestTryReloadConfig_IncludesBuiltinPackOrders(t *testing.T) {
 	}
 	if names["dolt-gc-nudge"] {
 		t.Errorf("dolt-gc-nudge should not be registered as a recurring order; got %v", names)
+	}
+	if names["wisp-compact"] {
+		t.Errorf("wisp-compact is retired and should not be registered; got %v", names)
 	}
 }
 

@@ -124,7 +124,13 @@ func (b *demandBacking) SetMetadataBatch(id string, kvs map[string]string) error
 // exact or not, and returns both.
 func newDemandCache(t *testing.T, exact bool, seed ...beads.Bead) (*beads.CachingStore, *demandBacking) {
 	t.Helper()
-	backing := newDemandBacking(seed...)
+	return newDemandCacheDeps(t, exact, nil, seed...)
+}
+
+// newDemandCacheDeps is newDemandCache over a backing seeded with deps too.
+func newDemandCacheDeps(t *testing.T, exact bool, deps []beads.Dep, seed ...beads.Bead) (*beads.CachingStore, *demandBacking) {
+	t.Helper()
+	backing := &demandBacking{Store: beads.NewMemStoreFrom(0, seed, deps)}
 	var store beads.Store = backing
 	if exact {
 		store = exactDemandBacking{backing}

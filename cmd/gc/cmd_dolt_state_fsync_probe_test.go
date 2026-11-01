@@ -473,6 +473,71 @@ func TestGcBeadsBdRecoverIgnoresAStalePIDFileWhenNothingListens(t *testing.T) {
 	}
 }
 
+// TestFindDoltPIDTreatsANonPIDFileAsStale pins find_dolt_pid's PID-file check
+// to the file holding a PID, not to kill's verdict alone. In POSIX mode bash
+// 5.3 (/bin/sh on Fedora 44) `kill -0 not-a-pid` prints an error and exits 0,
+// so a PID file holding anything but a PID read as a live Dolt and sent recover
+// into the fsync-stall guard (ga-uhg2hta); `kill -0 0` and `kill -0 -1` succeed
+// in every shell. The harness kill accepts every operand the way that bash
+// does, so this fails under any /bin/sh when the check trusts kill -0 alone.
+func TestFindDoltPIDTreatsANonPIDFileAsStale(t *testing.T) {
+	materializeBuiltinPacksForTest(t, t.TempDir())
+	target, err := bundledGcBeadsBdScriptTarget()
+	if err != nil {
+		t.Fatalf("resolving bundled gc-beads-bd.sh: %v", err)
+	}
+	src, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("reading %s: %v", target, err)
+	}
+	harness := strings.Join([]string{
+		"kill() { return 0; }",
+		"find_port_holder() { :; }",
+		"ps() { :; }",
+		extractShellFunction(t, string(src), "find_dolt_pid"),
+		"find_dolt_pid",
+	}, "\n") + "\n"
+	findDoltPID := func(t *testing.T, content string) (pid, pidFile string) {
+		t.Helper()
+		dir := t.TempDir()
+		pidFile = filepath.Join(dir, "dolt.pid")
+		if err := os.WriteFile(pidFile, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		env := sanitizedBaseEnv("DATA_DIR="+filepath.Join(dir, "dolt-data"), "PID_FILE="+pidFile, "CONFIG_FILE=")
+		stdout, stderr, err := runGCBeadsBdCommand(t, env, "sh", "-c", harness)
+		if err != nil {
+			t.Fatalf("find_dolt_pid: %v\n%s", err, stderr)
+		}
+		return strings.TrimSpace(stdout), pidFile
+	}
+
+	for name, content := range map[string]string{
+		"word":            "not-a-pid\n",
+		"zero":            "0\n",
+		"negative":        "-1\n",
+		"number and word": "123 abc\n",
+		"empty":           "",
+		"leading zero":    "007\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			pid, pidFile := findDoltPID(t, content)
+			if pid != "" {
+				t.Fatalf("find_dolt_pid reported %q for a PID file holding %q", pid, content)
+			}
+			if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
+				t.Fatalf("the stale PID file holding %q was not removed (stat: %v)", content, err)
+			}
+		})
+	}
+	t.Run("a PID is still reported", func(t *testing.T) {
+		want := strconv.Itoa(os.Getpid())
+		if pid, _ := findDoltPID(t, want+"\n"); pid != want {
+			t.Fatalf("find_dolt_pid = %q, want %q", pid, want)
+		}
+	})
+}
+
 func TestGcBeadsBdRecoverFsyncWarnThresholdFromEnv(t *testing.T) {
 	t.Run("override lowers the threshold and the probe bound", func(t *testing.T) {
 		f := newFsyncGuardFixture(t, true)

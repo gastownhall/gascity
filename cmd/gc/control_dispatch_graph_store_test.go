@@ -221,11 +221,11 @@ func controlReadyScan(t *testing.T, dir string, agentCfg config.Agent, beadsCfg 
 // nextWorkflowServeBeads -> tryControlReadyScan, and if that scan
 // keeps reading the work store while the dispatch closes the binding's copy, the
 // retained work copy stays open and ready forever: it is re-offered on every
-// tick, ProcessControl no-ops on the already-closed binding copy, and
-// drainWorkflowServeWork counts a no-op as progress and immediately re-queries.
-// The loop never returns. Symmetrically, the beads a dispatch CREATES land in
-// the binding, which a work-store scan never reads, so the workflow cannot
-// advance past its first hop.
+// sweep, ProcessControl no-ops on the already-closed binding copy, and
+// drainWorkflowServeWork pays a full dispatch each time to skip it.
+// Symmetrically, the beads a dispatch CREATES land in the binding, which a
+// work-store scan never reads, so the workflow cannot advance past its first
+// hop.
 //
 // Both bd compatibility modes are covered: the scan must read the resolved
 // class store in-process under either, rather than shell `bd ready` in a
@@ -265,14 +265,16 @@ func TestControlReadyScanEnumeratesTheGraphBindingOnSplitCity(t *testing.T) {
 }
 
 // TestControlReadyScanStopsOfferingAControlBeadTheDispatchClosed is the
-// termination property the drain loop depends on, asserted directly.
+// property that keeps the drain loop from re-dispatching a control bead it
+// already finished, asserted directly.
 //
-// drainWorkflowServeWork loops until its queue comes back empty, and it has no
-// iteration bound and no sleep between passes. What makes it terminate is that
-// the copy it enumerates is the copy the dispatch closes. On a converged split
-// city the migration retains the source verbatim, so the same control-bead id is
-// open in the work store and live in the binding; a scan pointed at the work
-// store therefore keeps returning an id the dispatch has already finished.
+// drainWorkflowServeWork dispatches every control bead its queue offers, on
+// every sweep. What keeps a finished one out of the queue is that the copy it
+// enumerates is the copy the dispatch closes. On a converged split city the
+// migration retains the source verbatim, so the same control-bead id is open in
+// the work store and live in the binding; a scan pointed at the work store
+// therefore keeps returning an id the dispatch has already finished, and every
+// sweep pays a full dispatch to skip it.
 //
 // The assertion is the fixed point: after the dispatch, a fresh scan is empty
 // even though the retained work copy is still open.
@@ -329,7 +331,7 @@ func TestControlReadyScanStopsOfferingAControlBeadTheDispatchClosed(t *testing.T
 	}
 
 	if got := controlReadyScan(t, cityPath, agentCfg, config.BeadsConfig{}); len(got) != 0 {
-		t.Fatalf("control-ready queue after dispatch = %v, want empty; the serve loop re-offers a bead the dispatch already finished and never returns", got)
+		t.Fatalf("control-ready queue after dispatch = %v, want empty; the serve loop re-dispatches a bead the dispatch already finished on every sweep", got)
 	}
 }
 

@@ -92,16 +92,30 @@ func tmuxConfigFromSession(sc config.SessionConfig, cityName, cityPath string) s
 	if cityPath != "" {
 		runtimeDir = citylayout.RuntimePath(cityPath)
 	}
+	// Every city's leaf gets the shadow sink; the leaf hands it out only
+	// while its live switch is shadow (a reload publishes the switch to a
+	// leaf it keeps), so off and on record nothing.
+	var comparisons runtime.ProgramStatusComparisonSink
+	var followUps func() bool
+	var work func() func()
+	if cityPath != "" {
+		comparisons = programStatusShadowSink(cityPath)
+		followUps, work = programShadowFollowUps, programShadowBeginWork
+	}
 	return sessiontmux.Config{
-		SetupTimeout:       sc.SetupTimeoutDuration(),
-		SetupMaxTimeout:    sc.SetupMaxTimeoutDuration(),
-		NudgeReadyTimeout:  sc.NudgeReadyTimeoutDuration(),
-		NudgeRetryInterval: sc.NudgeRetryIntervalDuration(),
-		NudgeLockTimeout:   sc.NudgeLockTimeoutDuration(),
-		DebounceMs:         sc.DebounceMsOrDefault(),
-		DisplayMs:          sc.DisplayMsOrDefault(),
-		SocketName:         socketName,
-		RuntimeDir:         runtimeDir,
+		ComparisonSink:      comparisons,
+		ComparisonFollowUps: followUps,
+		ComparisonWork:      work,
+		SetupTimeout:        sc.SetupTimeoutDuration(),
+		SetupMaxTimeout:     sc.SetupMaxTimeoutDuration(),
+		NudgeReadyTimeout:   sc.NudgeReadyTimeoutDuration(),
+		NudgeRetryInterval:  sc.NudgeRetryIntervalDuration(),
+		NudgeLockTimeout:    sc.NudgeLockTimeoutDuration(),
+		DebounceMs:          sc.DebounceMsOrDefault(),
+		DisplayMs:           sc.DisplayMsOrDefault(),
+		SocketName:          socketName,
+		RuntimeDir:          runtimeDir,
+		ProgramStatus:       sc.ProgramStatusMode(),
 	}
 }
 
@@ -1375,7 +1389,7 @@ func newHybridProvider(sc config.SessionConfig, cityName, cityPath string) (runt
 	// Cut-over: hybrid routes to the seam-backed tmux/k8s providers, so
 	// hybrid-routed sessions flow through the seams like every other path.
 	local := sessiontmux.NewSeamBackedWithConfig(tmuxConfigFromSession(sc, cityName, cityPath))
-	remote, err := k8sProviderFromSession(sc.K8s)
+	remote, err := k8sProviderFromSession(sc.K8s, cityName)
 	if err != nil {
 		return nil, fmt.Errorf("hybrid: k8s backend: %w", err)
 	}
@@ -1388,15 +1402,18 @@ func newHybridProvider(sc config.SessionConfig, cityName, cityPath string) (runt
 	}), nil
 }
 
-func k8sProviderFromSession(cfg config.K8sConfig) (runtime.Provider, error) {
+func k8sProviderFromSession(cfg config.K8sConfig, cityName string) (runtime.Provider, error) {
 	secretEnv, secretMounts := k8sSecretProjectionFromConfig(cfg)
-	return newSeamBackedK8sProvider(secretEnv, secretMounts)
+	return newSeamBackedK8sProvider(secretEnv, secretMounts, cityName)
 }
 
 // newSeamBackedK8sProvider keeps provider construction behind the same narrow
 // seam for builtin and hybrid routing, and lets wiring tests verify the exact
-// projections passed to the K8s provider without creating a cluster client.
-var newSeamBackedK8sProvider = sessionk8s.NewSeamBackedWithSecretProjection
+// projections and city name passed to the K8s provider without creating a
+// cluster client.
+var newSeamBackedK8sProvider = func(secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount, cityName string) (runtime.Provider, error) {
+	return sessionk8s.NewSeamBackedWithSecretProjection(secretEnv, secretMounts, sessionk8s.WithCityName(cityName))
+}
 
 func k8sSecretProjectionFromConfig(cfg config.K8sConfig) ([]runtime.K8sSecretEnv, []runtime.K8sSecretMount) {
 	secretEnv := make([]runtime.K8sSecretEnv, 0, len(cfg.SecretEnv))

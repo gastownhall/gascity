@@ -243,7 +243,7 @@ func legacyStructuredFallbackTranscriptResponse(ctx context.Context, info sessio
 	output := ""
 	peekOutput, peekErr := handle.Peek(ctx, 100)
 	if peekErr == nil {
-		activity = string(worker.TailActivityInTurn)
+		activity = string(worker.TailActivityUnknown)
 		output = peekOutput
 	}
 	projection := structuredSnapshotProjection(SessionStreamStructuredMessageEvent{

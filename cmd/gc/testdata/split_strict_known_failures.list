@@ -12,6 +12,7 @@ TestAttachGitHubPRRepairWorkflowStaysOnTheOneStoreOnSingleStoreCity	fails under 
 TestAutocloseLeavesAPersistentlyRefusedCloseToTheSweep	fails under the gate: convoy closed; every close was refused
 TestAutocloseSweepClosesMoleculeForALostStepClose	fails under the gate: molecule root open after the sweep, want closed
 TestBdByIDUnservedReadOfAMigratedBeadIsRefusedNotAnsweredFromTheRetainedCopy	fails under the gate: [show --id gcg-2 --long] fell through to the bd subprocess, which answers from the retained work-store copy
+TestBeadReconcileTickHoldsAParkedSeat	fails under the gate: session.stranded events = 0, want 1 (and "the demand snapshot counted 0 worker sessions, want 1") in the past-the-bound controls: the fixture seeds its seat into a bare MemStore handed in as standaloneCityStore, so the tick reads it through the gate's work view, which hides session rows, and the config-less city gives the session census no sessions binding to lead with. A seat no pass sees is never stranded, so under the gate the parked subtests pass without reaching the hold; on a split city the census's sessions-binding leg holds the seat.
 TestBindingCacheSurvivesConfigReload	fails under the gate: city store is *splittest.storageCacheView, want a CachingStore
 TestBuildOrderDispatcherRigOrderHonorsLegacyCityRunHistory	fails under the gate: rig store has 1 new run bead(s), want 0 because legacy city run is still inside cooldown
 TestCLIFactIsAnnouncedThroughTheDoorbell	fails under the gate: fact.recorded = 0 events, want one (events [bead.created gc-1])
@@ -23,6 +24,7 @@ TestCLIStorageRoutesKeepTheWorkStoreForABrokenSingleStoreCity	fails under the ga
 TestCLIStorageRoutesRefuseAnUnconvergedCity	fails under the gate: work resolved to 0x563e1e561c0 on a refused city, want the work store 0x563e278ce00
 TestCLIStorageRoutesRefuseWhenCityConfigFailsToLoad	fails under the gate: work resolved to 0xa08540efc0 on an unloadable config, want the work store 0xa086d06540
 TestCityRuntimeBeadReconcileTick_IdleClaimNudgeSeesReadyUnassignedRoutedTrigger	fails under the gate: idle-claim nudge count = "0", want 1 for ready routed unassigned trigger; output=""
+TestCityRuntimeBeadReconcileTick_ReadsTriggerPinsPastAStaleCache	fails under the gate: started command = "claude", want "claude --effort low" (rig-resident case): the gate's work view over the rig's CachingStore does not forward the cache's Handles(), so readLive's live read falls back to the view's Get, the cached pre-pin row; production rig stores (a CachingStore, or the bead-policy store over one) forward it, and the split-city case passes
 TestCityRuntimeBuildDesiredState_StandaloneIncludesRigStores	fails under the gate: store = &{0x1399298b5dc0 0x139929411140 2}, want city store
 TestCityRuntimeClassAccessorsAreIdentity	fails under the gate: CityRuntime.graphBeadStore() = 0x1399289b35a0, want cityBeadStore 0x139929104e00
 TestCityRuntimeDemandSnapshotRefreshesForNewRoutedReadyWork	fails under the gate: PoolDesiredCounts[gascity/gc.gap-analyst] = 0, want 1 for newly-ready routed work
@@ -91,6 +93,7 @@ TestCompletionBackstopSweepsOnlyRigsThatMayHoldRoots	fails under the gate: the b
 TestCompletionReconcileInputsNarrowToTheInfraStoreOnTheRuntimePlane	fails under the gate: the convergence lane fans out to 4 store(s), want 3 (city work + two rigs)
 TestCompletionReconcileInputsSkipSuspendedRigs	fails under the gate: the sweep fans out to 3 store(s), want 2 (city work + the unsuspended rig)
 TestControlDispatchSingleStoreUsesTheOneStore	fails under the gate: controlGraphStore returned *splittest.view(0xa3b5887da00), want the identical scope store 0xa3b58bd60e0
+TestControlDispatcherTickHoldsAParkedSeat	fails under the gate: session.stranded events = 0, want 1 (past the bound): the fixture shape of TestBeadReconcileTickHoldsAParkedSeat; the control-dispatcher tick's counts and reconciler read the seat through the gate's work view of the bare standalone store, which hides it.
 TestControlGraphStoreFollowsThePlacementRule	fails under the gate: a city that relocates nothing must get its own store back unchanged
 TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout	fails under the gate: timed out waiting for configured_named_mode="always"; beads=[{gcg-1 mayor open session <nil> 2026-10-28 02:28:56.257573349 +0000 UTC 2026-10-28 02:28:56.2739079
 TestControllerStateClassAccessorsAreIdentity	fails under the gate: controllerState.graphBeadStore() = 0x6315ef69640, want CityBeadStore 0x6315cefec40
