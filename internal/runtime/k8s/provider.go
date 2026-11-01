@@ -175,6 +175,13 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if p.image == "" {
 		return fmt.Errorf("starting session %q: GC_K8S_IMAGE is required", name)
 	}
+	// Template resolution gives every pod session a store root. A managed session
+	// without one came from a start with only partial hints, such as a client
+	// delivering input while the controller recycles it. Its pod could not find
+	// its store, so refuse and leave the start to the controller.
+	if strings.TrimSpace(cfg.Env["GC_SESSION_ID"]) != "" && strings.TrimSpace(cfg.Env["GC_STORE_ROOT"]) == "" {
+		return fmt.Errorf("starting session %q: no resolved store root; the controller must start this session: %w", name, runtime.ErrSessionNotFound)
+	}
 	if _, err := resolvePodHostedDoltIdentity(cfg.Env, "", p.managedServiceHost, p.managedServicePort); err != nil {
 		return fmt.Errorf("resolving scoped store identity for session %q: %w", name, err)
 	}

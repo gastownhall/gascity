@@ -1872,6 +1872,28 @@ func TestVerifyBeadsInPodRejectsHostOnlyProjectedTarget(t *testing.T) {
 	}
 }
 
+// A managed session started with only partial hints has no store root. Creating
+// its pod would leave an agent that cannot find its store.
+func TestStartRefusesManagedSessionWithoutResolvedStoreRoot(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	err := p.Start(context.Background(), "s-worker", runtime.Config{
+		Command: "agent",
+		Env:     map[string]string{"GC_SESSION_ID": "de-worker", "GC_CITY": "/city"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "no resolved store root") {
+		t.Fatalf("Start error = %v, want a refusal naming the missing store root", err)
+	}
+	if !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("Start error = %v, want ErrSessionNotFound", err)
+	}
+	for _, c := range fake.calls {
+		if c.method == "createPod" {
+			t.Fatal("Start created a pod for a session without a store root")
+		}
+	}
+}
+
 func TestStartFailsClosedWhenHostedBeadsFilesAreMissing(t *testing.T) {
 	fake := newFakeK8sOps()
 	p := newProviderWithOps(fake)
