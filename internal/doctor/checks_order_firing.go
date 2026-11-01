@@ -159,6 +159,10 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 		result.Message = "no city config loaded"
 		return result
 	}
+	// The orders lane evaluates gates only during passes it paces up to one
+	// patrol interval apart, so a healthy order fires up to interval+patrol
+	// apart. The fired-order thresholds below pace on that effective period.
+	patrol := c.cfg.Daemon.PatrolIntervalDuration()
 
 	cityPath := c.cityPath
 	if cityPath == "" && ctx != nil {
@@ -253,7 +257,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 			blockingErrors++
 			continue
 		}
-		status, severity, detail := classifyOrderFiring(order, now, expected, lastFired, startedAt)
+		status, severity, detail := classifyOrderFiring(order, now, expected, patrol, lastFired, startedAt)
 		worst = worseStatus(worst, status)
 		result.Details = append(result.Details, detail)
 		if status != StatusOK {
@@ -727,7 +731,7 @@ func latestOrderFiredAt(evts []events.Event, subject string) time.Time {
 	return latest
 }
 
-func classifyOrderFiring(order orders.Order, now time.Time, expected time.Duration, lastFired, controllerStarted time.Time) (CheckStatus, CheckSeverity, string) {
+func classifyOrderFiring(order orders.Order, now time.Time, expected, patrol time.Duration, lastFired, controllerStarted time.Time) (CheckStatus, CheckSeverity, string) {
 	name := orderDisplayName(order)
 	if lastFired.IsZero() {
 		if controllerStarted.IsZero() {
@@ -749,13 +753,41 @@ func classifyOrderFiring(order orders.Order, now time.Time, expected time.Durati
 
 	age := nonNegativeDuration(now.Sub(lastFired))
 	switch {
-	case age >= expected*3:
+	case age >= orderFiringStaleAfter(expected, patrol):
 		return StatusError, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (CRITICAL: stale)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
-	case age >= expected+expected/2:
+	case age >= orderFiringOverdueAfter(expected, patrol):
 		return StatusWarning, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (overdue)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
 	default:
 		return StatusOK, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
 	}
+}
+
+// orderFiringPeriod returns the effective period between healthy firings of
+// an order with the given expected interval. The orders lane evaluates gates
+// only during passes it paces up to one patrol interval apart, so a healthy
+// order fires up to interval+patrol apart (ga-or367d). A non-positive patrol
+// interval means passes can run back to back, so the period never drops
+// below the configured interval.
+func orderFiringPeriod(expected, patrol time.Duration) time.Duration {
+	if patrol < 0 {
+		patrol = 0
+	}
+	return expected + patrol
+}
+
+// orderFiringOverdueAfter returns the age at which a fired order counts as
+// overdue: 1.5x its effective period. eventEvidenceSuffices shares this line
+// so the event-log shortcut never skips the authoritative order-run lookup
+// for an order the classifier would flag.
+func orderFiringOverdueAfter(expected, patrol time.Duration) time.Duration {
+	period := orderFiringPeriod(expected, patrol)
+	return period + period/2
+}
+
+// orderFiringStaleAfter returns the age at which a fired order counts as
+// stale: 3x its effective period.
+func orderFiringStaleAfter(expected, patrol time.Duration) time.Duration {
+	return 3 * orderFiringPeriod(expected, patrol)
 }
 
 func orderDisplayName(order orders.Order) string {

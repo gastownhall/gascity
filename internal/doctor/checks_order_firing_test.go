@@ -798,3 +798,61 @@ func TestOrderFiringCurrent_InapplicableOrderIsReportedNotStale(t *testing.T) {
 		t.Fatalf("details = %v, want the order reported inapplicable", result.Details)
 	}
 }
+
+// classifyOrderFiring paces a fired order's thresholds on the effective
+// period — expected interval plus patrol interval — because the orders lane
+// evaluates gates only during passes up to one patrol interval apart, so a
+// healthy order fires up to interval+patrol late (ga-or367d). The
+// multipliers stay 1.5x/3x; only the base moves. A non-positive patrol
+// interval means passes can run back to back, so the period never drops
+// below the configured interval.
+func TestClassifyOrderFiringThresholdsIncludePatrolInterval(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	controllerStarted := now.Add(-24 * time.Hour)
+	tests := []struct {
+		name     string
+		trigger  string
+		expected time.Duration
+		patrol   time.Duration
+		age      time.Duration
+		want     CheckStatus
+		wantSub  string
+	}{
+		// E=1m, P=30s: period 90s, overdue at 135s, stale at 270s.
+		{"cooldown 2m14s is ok", "cooldown", time.Minute, 30 * time.Second, 2*time.Minute + 14*time.Second, StatusOK, ""},
+		{"cooldown 2m15s is overdue", "cooldown", time.Minute, 30 * time.Second, 2*time.Minute + 15*time.Second, StatusWarning, "(overdue)"},
+		{"cooldown 4m29s is overdue", "cooldown", time.Minute, 30 * time.Second, 4*time.Minute + 29*time.Second, StatusWarning, "(overdue)"},
+		{"cooldown 4m30s is stale", "cooldown", time.Minute, 30 * time.Second, 4*time.Minute + 30*time.Second, StatusError, "(CRITICAL: stale)"},
+		{"cron 2m14s is ok", "cron", time.Minute, 30 * time.Second, 2*time.Minute + 14*time.Second, StatusOK, ""},
+		{"cron 2m15s is overdue", "cron", time.Minute, 30 * time.Second, 2*time.Minute + 15*time.Second, StatusWarning, "(overdue)"},
+		{"cron 4m29s is overdue", "cron", time.Minute, 30 * time.Second, 4*time.Minute + 29*time.Second, StatusWarning, "(overdue)"},
+		{"cron 4m30s is stale", "cron", time.Minute, 30 * time.Second, 4*time.Minute + 30*time.Second, StatusError, "(CRITICAL: stale)"},
+		// 4h cron, P=30s: overdue at 6h0m45s, stale at 12h1m30s. Documents
+		// that the existing 7h/13h fixtures stay on the same side of the line.
+		{"4h cron 6h0m44s is ok", "cron", 4 * time.Hour, 30 * time.Second, 6*time.Hour + 44*time.Second, StatusOK, ""},
+		{"4h cron 6h0m45s is overdue", "cron", 4 * time.Hour, 30 * time.Second, 6*time.Hour + 45*time.Second, StatusWarning, "(overdue)"},
+		{"4h cron 12h1m29s is overdue", "cron", 4 * time.Hour, 30 * time.Second, 12*time.Hour + 89*time.Second, StatusWarning, "(overdue)"},
+		{"4h cron 12h1m30s is stale", "cron", 4 * time.Hour, 30 * time.Second, 12*time.Hour + 90*time.Second, StatusError, "(CRITICAL: stale)"},
+		// Non-positive patrol: passes can run back to back, so the thresholds
+		// are the bare 1.5E and 3E.
+		{"zero patrol 89s is ok", "cooldown", time.Minute, 0, 89 * time.Second, StatusOK, ""},
+		{"zero patrol 90s is overdue", "cooldown", time.Minute, 0, 90 * time.Second, StatusWarning, "(overdue)"},
+		{"negative patrol 179s is overdue", "cooldown", time.Minute, -5 * time.Second, 179 * time.Second, StatusWarning, "(overdue)"},
+		{"negative patrol 180s is stale", "cooldown", time.Minute, -5 * time.Second, 180 * time.Second, StatusError, "(CRITICAL: stale)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			order := orders.Order{Name: "paced-order", Trigger: tt.trigger}
+			status, severity, detail := classifyOrderFiring(order, now, tt.expected, tt.patrol, now.Add(-tt.age), controllerStarted)
+			if status != tt.want {
+				t.Fatalf("status = %v, want %v; detail = %q", status, tt.want, detail)
+			}
+			if tt.want != StatusOK && severity != SeverityBlocking {
+				t.Fatalf("severity = %v, want SeverityBlocking for %q", severity, detail)
+			}
+			if tt.wantSub != "" && !strings.Contains(detail, tt.wantSub) {
+				t.Fatalf("detail = %q, want it to contain %q", detail, tt.wantSub)
+			}
+		})
+	}
+}
