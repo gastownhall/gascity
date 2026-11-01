@@ -90,24 +90,18 @@ func TestGcBdSplitNeverWritesACrossStoreEdge(t *testing.T) {
 	})
 }
 
-// heldIDDeps is the runEdgeCases world under one pinned bd inventory:
-// relic-1 is a migrated relic the class binding holds, and the work store
-// holds no copy of it (gc storage migrate clears that copy).
+// heldIDDeps is the runEdgeCases world (graphJudgeDeps) after gc storage
+// migrate cleared relic-1's work copy: the class binding still holds relic-1,
+// and the work store no longer does.
 func heldIDDeps(inventory string) bdClassGuardDeps {
-	deps := splitTestDeps(nil, func(id string) (beads.Bead, bdReadResult) {
-		if id == "demo-1" || id == "demo-2" {
-			return beads.Bead{ID: id, Type: "task"}, bdReadFound
+	deps := graphJudgeDeps(inventory)
+	read := deps.read
+	deps.read = func(id string) (beads.Bead, bdReadResult) {
+		if id == "relic-1" {
+			return beads.Bead{}, bdReadNotFound
 		}
-		return beads.Bead{}, bdReadNotFound
-	})
-	deps.held = func(ids []string) (map[string]bool, error) {
-		out := map[string]bool{}
-		for _, id := range ids {
-			out[id] = id == "relic-1"
-		}
-		return out, nil
+		return read(id)
 	}
-	deps.inventory = func() (*bdflags.Inventory, error) { return bdflags.InventoryByName(inventory), nil }
 	return deps
 }
 
