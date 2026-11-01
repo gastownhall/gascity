@@ -1,0 +1,17 @@
+ ▐▛███▛█   Claude Code v2.1.280
+▝▜██████▀  Sonnet 5 · Claude Max
+  ▝▝ ▝▝    /home/user/projects/gc-management/.gc/worktrees/beads/deployer
+❯ Check your hook and continue the deploy.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ be-tx30v
+│ Push deploy/be-tx30v-gate to headfork and open the PR against gastownhall/beads. How do you want to proceed?
+❯ 1. Run gates, then ship if clean (Recommended)
+     Run gates, then ship if clean
+  2. Run gates, ask again before push
+     Run gates, ask again before push
+  3. Keep holding
+     Keep holding
+  4. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+Enter to select · ↑/↓ to navigate · Esc to cancel
