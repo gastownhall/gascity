@@ -1433,7 +1433,10 @@ const (
 // with an illegal transition made every restart SKIP them, so they survived
 // as live panes still holding their pool slot names (ga-rxhu2). The runtime
 // is torn down and the bead is left in draining for the drain machinery or
-// the reconciler to finish.
+// the reconciler to finish. A creating seat gets the same sweep-only
+// teardown, also writing nothing: the row is its start's, and the
+// last_woke_at its PreWake stamped is what keeps the next start's
+// stuck-creating reap from closing a start the stop cut short.
 func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) error {
 	if err := m.checkActor(by); err != nil {
 		return err
@@ -1527,6 +1530,31 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 		// release no pool name while silently losing the drain. Only a close frees
 		// the name, and CmdClose is already legal from draining.
 		if current == StateDraining && intent == suspendIntentShutdown {
+			return m.tearDownRuntimeForSuspend(sessName)
+		}
+		// creating is the same shape of problem as draining above, and likewise
+		// only for the SHUTDOWN sweep: only a start's commit moves its row from
+		// creating to active, after the provider's Start returns, and the city
+		// stop cancels its starts first, so the sweep can reach a live runtime
+		// whose row still reads creating (a forced stop's late re-list can reach
+		// one whose Start has not returned). Rejecting it here made the stop fail
+		// and the runtime survive the shutdown.
+		//
+		// Scoped to the sweep on purpose: an operator naming ONE session in creating
+		// still gets the illegal transition (TestConformance_SuspendStillRejectsOtherIllegalStates).
+		// Idle auto-suspend of creating is refused the same way.
+		//
+		// The early return writes NOTHING, last_woke_at included. The row belongs
+		// to its start: a start the stop canceled never commits it active, so
+		// the next controller start settles the row the sweep leaves, and the
+		// last_woke_at PreWake stamped is the marker it reads. With it, the
+		// stuck-creating reap keeps a claimless row for the reconciler to
+		// relaunch (mc-5a1ma), and a pending create keeps its started-create
+		// lease rather than the 10-minute never-started one. A `gc rig restart`
+		// sweep runs beside a live controller, so its stop can land under a
+		// start still in flight, which settles the row as it does any runtime
+		// that dies under it (SESSION-START-026).
+		if current == StateCreating && intent == suspendIntentShutdown {
 			return m.tearDownRuntimeForSuspend(sessName)
 		}
 		// Normalize legacy/aliased states (empty and awake both mean active)
