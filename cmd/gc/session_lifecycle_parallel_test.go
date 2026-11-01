@@ -35,6 +35,7 @@ import (
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/testutil"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 type failingMetadataBatchStore struct {
@@ -9632,5 +9633,40 @@ func TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv(t *testing.T) {
 	}
 	if v := after.Metadata[beadmeta.TriggerBeadIDMetadataKey]; v != "" {
 		t.Errorf("durable trigger stamp = %q, want cleared", v)
+	}
+}
+
+// A start boundary that ended before Provider.Start must report an unanswered
+// observation and never start a runtime: the caller can no longer judge it.
+func TestStartPreparedStartCandidate_ExpiredBoundaryNeverReachesProviderStart(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tc := range []struct {
+		name               string
+		observation, start context.Context
+	}{
+		{name: "observation context ended", observation: canceled, start: context.Background()},
+		{name: "start context ended", observation: context.Background(), start: canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			item := preparedStart{
+				candidate: startCandidate{
+					info: sessionpkg.Info{ID: "gc-creating", SessionName: "test-agent", SessionNameMetadata: "test-agent", Template: "worker"},
+					tp:   TemplateParams{Command: "worker", SessionName: "test-agent", TemplateName: "worker"},
+				},
+				cfg: runtime.Config{Command: "worker"},
+			}
+			witness, err := startPreparedStartCandidate(tc.observation, tc.start, item, t.TempDir(), nil, sp, nil, &startPhaseTimings{}, nil, nil)
+			if !errors.Is(err, worker.ErrObservationUnanswered) || !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("error = %v, want unanswered observation and unavailable runtime", err)
+			}
+			if witness != sessionpkg.StartRuntimeWitnessUnknown {
+				t.Fatalf("witness = %v, want unknown", witness)
+			}
+			if got := sp.CountCalls("Start", "test-agent"); got != 0 {
+				t.Fatalf("Provider.Start calls = %d, want 0", got)
+			}
+		})
 	}
 }

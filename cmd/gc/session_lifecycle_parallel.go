@@ -3162,6 +3162,12 @@ func startPreparedStartCandidate(
 	defer cancelProbe()
 	if sp != nil {
 		running, alive, err := observeRuntimeProviderLivenessBounded(probeCtx, cityPath, sp, name, item.cfg.ProcessNames)
+		if probeCtx.Err() != nil {
+			return sessionpkg.StartRuntimeWitnessUnknown, fmt.Errorf(
+				"start boundary for runtime %q ended before it could be used: %w: %w: %w",
+				name, worker.ErrObservationUnanswered, runtime.ErrRuntimeUnavailable, probeCtx.Err(),
+			)
+		}
 		if err != nil {
 			return sessionpkg.StartRuntimeWitnessUnknown, err
 		}
@@ -3301,6 +3307,18 @@ func startPreparedStartCandidate(
 	// the runtime-only handle borrows instead of taking the name's flock.
 	by := sessionActor(sessionpkg.ActorController, cityPath)
 	by.Lease = item.candidate.lease
+	if err := observationCtx.Err(); err != nil {
+		return sessionpkg.StartRuntimeWitnessUnknown, fmt.Errorf(
+			"start boundary for runtime %q ended before Provider.Start: %w: %w: %w",
+			name, worker.ErrObservationUnanswered, runtime.ErrRuntimeUnavailable, err,
+		)
+	}
+	if err := startCtx.Err(); err != nil {
+		return sessionpkg.StartRuntimeWitnessUnknown, fmt.Errorf(
+			"start context for runtime %q ended before Provider.Start: %w: %w: %w",
+			name, worker.ErrObservationUnanswered, runtime.ErrRuntimeUnavailable, err,
+		)
+	}
 	if store == nil || strings.TrimSpace(item.candidate.info.ID) == "" {
 		handle, err := runtimeWorkerHandleWithConfig(
 			cityPath,
