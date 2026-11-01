@@ -13390,6 +13390,49 @@ func TestOrphanSweepDeclaresLocalSkipsAsPartialScopes(t *testing.T) {
 	}
 }
 
+// TestOrphanSweepComposesGateAndLocalSkipOutcomes keeps one declaration for a
+// pass in which the foreign-identity gate protected a claim and a local claim
+// was also left in place: the gate's identity scope keeps its reason, the
+// local claim gets its own scope, and the top-level reason counts both.
+func TestOrphanSweepComposesGateAndLocalSkipOutcomes(t *testing.T) {
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{
+			inProgress("ga-foreign", "project/dalinar"),
+			hookClaim("ga-hook-dead", "gc-d34d5", "gastown__polecat-gc-d34d5", map[string]string{"gc.session_bead_id": "gc-legacy9"}),
+		},
+		nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d5", Status: "closed", IssueType: "session"}},
+		[]string{"project/dalinar"}, nil)
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if run.released("ga-foreign") || run.released("ga-hook-dead") {
+		t.Fatalf("a protected or unverifiable claim was released\n%s", run.context())
+	}
+	outcome, ok := run.outcome(t)
+	if !ok || outcome.Outcome != "partial" {
+		t.Fatalf("outcome = %+v (written %v), want partial\n%s", outcome, ok, run.context())
+	}
+	if len(outcome.Scopes) != 2 {
+		t.Fatalf("outcome scopes = %+v, want the gate's identity scope and the local bead scope", outcome.Scopes)
+	}
+	scopes := map[string]string{}
+	for _, scope := range outcome.Scopes {
+		scopes[scope.Scope] = scope.Reason
+	}
+	if reason := scopes["project/dalinar"]; !strings.Contains(reason, "ga-foreign") || !strings.Contains(reason, "absent_from_roster") {
+		t.Errorf("gate scope reason = %q, want it to name ga-foreign and the gate's reason", reason)
+	}
+	if reason := scopes["ga-hook-dead"]; !strings.Contains(reason, "gc-d34d5") || !strings.Contains(reason, "gc-legacy9") {
+		t.Errorf("local scope reason = %q, want it to name the holder and the unreadable candidate", reason)
+	}
+	for _, want := range []string{"protected 1 claim(s)", "1 local claim(s)"} {
+		if !strings.Contains(outcome.Reason, want) {
+			t.Errorf("outcome reason %q does not state %q", outcome.Reason, want)
+		}
+	}
+}
+
 // TestJsonlExportFirstRunArchivePathCreatedBeforeTheRename covers the window
 // between the first run's "archive path absent" check and its rename of the
 // staging repo into place: another exporter (or anything else) can create

@@ -791,6 +791,7 @@ while IFS=$'\t' read -r bead_id assignee; do
 done < <([ -z "$UNRECOGNIZED_ROWS" ] || printf '%s\n' "$UNRECOGNIZED_ROWS")
 
 PROTECTED_DETAIL=""
+PROTECTED_OUTCOME_REASON=""
 if [ "$PROTECTED" -gt 0 ]; then
     PROTECTED_JSON=$(protected_claims_json) || PROTECTED_JSON=""
     if [ -n "$PROTECTED_JSON" ]; then
@@ -798,7 +799,8 @@ if [ "$PROTECTED" -gt 0 ]; then
             "orphan-sweep: protected \(length) foreign/unknown identities this pass (\($claims) claims): "
             + (map("\(.identity | tojson) (\(.beads | length): \(.beads[:$limit] | join(", "))\(if (.beads | length) > $limit then " +\((.beads | length) - $limit) more" else "" end))") | join(", "))
         ' <<<"$PROTECTED_JSON") || PROTECTED_DETAIL=""
-        order_outcome_set partial "protected $PROTECTED claim(s) held by identities this city could not vouch for; each scope names the identity and why"
+        PROTECTED_OUTCOME_REASON="protected $PROTECTED claim(s) held by identities this city could not vouch for; each scope names the identity and why"
+        order_outcome_set partial "$PROTECTED_OUTCOME_REASON"
         # Reason first, identity last, joined by a bare tab: the spool holds no
         # tab or newline, so the identity reads back verbatim. @tsv would
         # escape a backslash, and the scope would stop naming the identity.
@@ -812,7 +814,8 @@ if [ "$PROTECTED" -gt 0 ]; then
     fi
     if [ -z "$PROTECTED_DETAIL" ]; then
         PROTECTED_DETAIL="orphan-sweep: protected $PROTECTED claims this pass, but the per-identity summary is UNAVAILABLE"
-        order_outcome_set partial "protected $PROTECTED claim(s) held by identities this city could not vouch for (per-identity summary unavailable)"
+        PROTECTED_OUTCOME_REASON="protected $PROTECTED claim(s) held by identities this city could not vouch for (per-identity summary unavailable)"
+        order_outcome_set partial "$PROTECTED_OUTCOME_REASON"
     fi
     if [ "$GATE_BUDGET_SKIPPED" -gt 0 ]; then
         PROTECTED_DETAIL="$PROTECTED_DETAIL
@@ -820,8 +823,11 @@ orphan-sweep: foreign-identity gate budget of ${GATE_BUDGET_SECONDS}s exhausted;
     fi
 fi
 
+# Local claims left in place join the gate's partial declaration rather than
+# replace it: the run still did part of its work, and a "skipped" here would
+# overwrite the gate's kind and reason.
 if [ "$UNVERIFIABLE" -gt 0 ]; then
-    order_outcome_set partial "left $UNVERIFIABLE local claim(s) in place: the holder could not be verified dead or the claim could not be released; each scope names the bead and why"
+    order_outcome_set partial "${PROTECTED_OUTCOME_REASON:+$PROTECTED_OUTCOME_REASON; }left $UNVERIFIABLE local claim(s) in place: the holder could not be verified dead or the claim could not be released; each scope names the bead and why"
 fi
 
 if [ "$ORPHANED" -gt 0 ] || [ "$UNVERIFIABLE" -gt 0 ] || [ "$PROTECTED" -gt 0 ]; then
