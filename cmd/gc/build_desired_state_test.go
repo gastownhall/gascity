@@ -10401,6 +10401,38 @@ func TestSelectOrPlanPoolSessionBead_PersistentSingletonHeldAsleepHolderNotReuse
 	}
 }
 
+// TestSelectOrPlanPoolSessionBead_PersistentSingletonReusesFreeableAsleepHolder
+// guards gastownhall/gascity#8364 end to end through selection: an anonymous
+// request for a persistent canonical singleton whose only session is asleep
+// after city-stop reuses that holder instead of planning a fresh create that
+// collides with the holder's canonical identity.
+func TestSelectOrPlanPoolSessionBead_PersistentSingletonReusesFreeableAsleepHolder(t *testing.T) {
+	bp, cfgAgent, holder := persistentSingletonAsleepHolderParams(t, nil)
+
+	result, slot, plan, err := selectOrPlanPoolSessionBead(
+		bp,
+		cfgAgent,
+		"rig/worker",
+		nil,
+		SessionRequest{Template: "rig/worker", Tier: "new"},
+		time.Date(2026, 11, 1, 17, 0, 0, 0, time.UTC),
+		map[string]bool{},
+		map[int]bool{},
+	)
+	if err != nil {
+		t.Fatalf("selectOrPlanPoolSessionBead: %v; want reuse of asleep canonical holder %s", err, holder.ID)
+	}
+	if plan != nil {
+		t.Fatalf("selectOrPlanPoolSessionBead returned create plan %+v; want reuse of holder %s", plan, holder.ID)
+	}
+	if result.ID != holder.ID {
+		t.Fatalf("selected bead %q, want asleep canonical holder %q", result.ID, holder.ID)
+	}
+	if slot != 0 {
+		t.Fatalf("slot = %d, want canonical singleton slot 0", slot)
+	}
+}
+
 func TestSelectOrCreatePoolSessionBead_PreservesPreferredNamepoolSlotAboveReducedCapacity(t *testing.T) {
 	store := beads.NewMemStore()
 	nux, err := store.Create(beads.Bead{
