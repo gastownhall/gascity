@@ -28,6 +28,15 @@ func turnConformanceSession(t *testing.T, sp runtime.Provider, script func(name 
 
 func turnConformanceSessionWithStore(t *testing.T, sp runtime.Provider, script func(name string), transcript []string) (*worker.SessionHandle, beads.Store) {
 	t.Helper()
+	return turnConformanceSessionAged(t, sp, script, transcript, 0)
+}
+
+// turnConformanceSessionAged is turnConformanceSessionWithStore with the
+// transcript's modification time set age in the past, so a read sees a
+// transcript that stopped growing that long ago (the idle overlay's quiet
+// window) without the test sleeping.
+func turnConformanceSessionAged(t *testing.T, sp runtime.Provider, script func(name string), transcript []string, age time.Duration) (*worker.SessionHandle, beads.Store) {
+	t.Helper()
 	searchBase, workDir := t.TempDir(), t.TempDir()
 	store := beads.NewMemStore()
 	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()),
@@ -72,8 +81,15 @@ func turnConformanceSessionWithStore(t *testing.T, sp runtime.Provider, script f
 		for _, line := range transcript {
 			body += line + "\n"
 		}
-		if err := os.WriteFile(filepath.Join(slugDir, info.SessionKey+".jsonl"), []byte(body), 0o644); err != nil {
+		path := filepath.Join(slugDir, info.SessionKey+".jsonl")
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 			t.Fatalf("WriteFile: %v", err)
+		}
+		if age > 0 {
+			at := time.Now().Add(-age)
+			if err := os.Chtimes(path, at, at); err != nil {
+				t.Fatalf("Chtimes: %v", err)
+			}
 		}
 	}
 	return handle, store
@@ -198,6 +214,66 @@ func TestTurnHandleConformanceFailedTurn(t *testing.T) {
 		}
 		if len(hist.Recent) != 1 || hist.Recent[0].Status != runtime.TurnStatusFailed || hist.Recent[0].Failure != want {
 			t.Fatalf("%s recent = %+v, want one failed turn with failure %+v", name, hist.Recent, want)
+		}
+	}
+}
+
+// A transcript whose newest turn ended failed on a provider error, with no
+// turn after it, reads as that turn failed and no turn open, whatever the
+// error: the work ladder takes up a step whose seat waits on a person only on
+// such a reading (the turn the person's answer started died), so a failed
+// turn must never read as a turn still open or as one completed.
+func TestTurnHandleConformanceNewestTurnFailed(t *testing.T) {
+	const prompt = `{"type":"user","isSidechain":false,"timestamp":"2026-10-13T05:00:00.123Z","message":{"role":"user","content":"a prompt"},"promptId":"7f3e9a10-1111-4aaa-8000-000000000001","origin":"user","promptSource":"prompt"}`
+	const ended = `{"type":"system","subtype":"turn_duration","isSidechain":false,"timestamp":"2026-10-13T05:00:01.010Z"}`
+	for name, apiError := range map[string]string{
+		"a rate limit": `{"type":"assistant","isSidechain":false,"timestamp":"2026-10-13T05:00:01.000Z","isApiErrorMessage":true,"error":"rate_limit","apiErrorStatus":429,"message":{"role":"assistant","content":[{"type":"text","text":"API Error: Request rejected (429)"}]}}`,
+		"an overload":  `{"type":"assistant","isSidechain":false,"timestamp":"2026-10-13T05:00:01.000Z","isApiErrorMessage":true,"error":"server_error","apiErrorStatus":529,"message":{"role":"assistant","content":[{"type":"text","text":"API Error: overloaded"}]}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := turnConformanceSession(t, runtime.NewFakeProfile(runtime.ProfileTmux, runtime.FullFake{Fake: runtime.NewFake()}), nil, []string{prompt, apiError, ended})
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := CheckTurnHandle(ctx, h); err != nil {
+				t.Fatal(err)
+			}
+			for read, f := range map[string]func(context.Context) (runtime.TurnHistory, error){"CurrentTurn": h.CurrentTurn, "FreshTurn": h.FreshTurn} {
+				hist, err := f(ctx)
+				if err != nil {
+					t.Fatalf("%s: %v", read, err)
+				}
+				if hist.Current.Active() || len(hist.Recent) != 1 || hist.Recent[0].Status != runtime.TurnStatusFailed {
+					t.Fatalf("%s = %+v, want no turn open and the newest ended turn failed", read, hist)
+				}
+			}
+		})
+	}
+}
+
+// A Claude CLI that stops at a provider error, idle or dead, writes no
+// turn_duration: its transcript leaves the turn open after the error. Once
+// the transcript has been quiet past the overlay's window and the session
+// reads idle, every read ends that turn failed on the error, with no turn
+// open, as a recorded end does: the work ladder takes up a step waiting on a
+// person on that reading, never on a turn still open.
+func TestTurnHandleConformanceNewestTurnStoppedAtAnErrorFailed(t *testing.T) {
+	const prompt = `{"type":"user","isSidechain":false,"timestamp":"2026-10-13T05:00:00.123Z","message":{"role":"user","content":"a prompt"},"promptId":"7f3e9a10-1111-4aaa-8000-000000000001","origin":"user","promptSource":"prompt"}`
+	const apiError = `{"type":"assistant","isSidechain":false,"timestamp":"2026-10-13T05:00:01.000Z","isApiErrorMessage":true,"error":"server_error","apiErrorStatus":529,"message":{"role":"assistant","content":[{"type":"text","text":"API Error: overloaded"}]}}`
+	// The transcript stopped growing a minute ago: past the idle overlay's
+	// quiet window, so the overlay may end the open turn.
+	h, _ := turnConformanceSessionAged(t, runtime.NewFakeProfile(runtime.ProfileTmux, runtime.FullFake{Fake: runtime.NewFake()}), nil, []string{prompt, apiError}, time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := CheckTurnHandle(ctx, h); err != nil {
+		t.Fatal(err)
+	}
+	for read, f := range map[string]func(context.Context) (runtime.TurnHistory, error){"CurrentTurn": h.CurrentTurn, "FreshTurn": h.FreshTurn} {
+		hist, err := f(ctx)
+		if err != nil {
+			t.Fatalf("%s: %v", read, err)
+		}
+		if hist.Current.Active() || len(hist.Recent) != 1 || hist.Recent[0].Status != runtime.TurnStatusFailed || !hist.Recent[0].Inferred {
+			t.Fatalf("%s = %+v, want no turn open and the newest turn ended failed, inferred", read, hist)
 		}
 	}
 }

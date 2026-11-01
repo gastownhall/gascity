@@ -64,14 +64,16 @@ type Work struct {
 	Key  ClaimKey
 	Kind Kind
 	// AwaitsHuman: the seat said it waits on a person's decision about this
-	// work (the caller reads it off the claim). Its entry is only nudged, a
-	// Cap apart, and never recycled or released, and its pacing raises none
-	// of AlertStartedRecycled, AlertStartedUnanswered and
-	// AlertReleaseUnfinished: no nudge can hurry a person, and one a Cap
-	// apart still re-drives a seat whose turn ended after the answer came
-	// but before the seat said the wait is over. A nudge the seat cannot
-	// take still counts toward AlertNudgeRefused, and a pending release that
-	// raced a start still raises AlertReleaseRacedStart.
+	// work (the caller reads it off the claim). Its entry is never recycled
+	// or released, and its pacing raises none of AlertStartedRecycled,
+	// AlertStartedUnanswered and AlertReleaseUnfinished: no nudge can hurry
+	// a person. It is left alone while the seat's turns show a turn open or
+	// the newest ended turn completed (Observation.Turns). Any other reading
+	// (a failed, canceled or status-less newest turn, no turn, none) keeps
+	// it nudged, a Cap apart: that re-drives a seat whose turn died after
+	// the answer came but before the seat said the wait is over. A nudge the
+	// seat cannot take still counts toward AlertNudgeRefused, and a pending
+	// release that raced a start still raises AlertReleaseRacedStart.
 	AwaitsHuman bool
 }
 
@@ -172,6 +174,14 @@ type TurnReading struct {
 	// LastFailed reports that the newest ended turn failed, whatever the
 	// cause, and no turn is open.
 	LastFailed bool
+	// Open reports that a turn is open: the seat is at work, or its turn
+	// has not been seen to end.
+	Open bool
+	// LastCompleted reports that the newest ended turn completed (the
+	// provider served it) and no turn is open. A turn canceled, or ended
+	// with no status (an end inferred from an idle boundary, a family that
+	// records none), is not completed.
+	LastCompleted bool
 	// ServedAt is when the newest turn the provider completed ended,
 	// anywhere in the turns read; zero when none did.
 	ServedAt time.Time
@@ -354,7 +364,7 @@ type Entry struct {
 	Attempts  int       // counted nudges on this rung, this generation
 	Paused    int       // nudges sent while the provider was degraded
 	Last      time.Time // the last nudge or recycle, or the start of a wait on a person
-	Next      time.Time // when the entry is next due if the seat stays quiet
+	Next      time.Time // when the entry is next due if the seat stays quiet; for a wait on a person, the earliest it is due, unless its seat's turns show a turn open or the newest completed
 	Recycles  int       // across generations
 	Escalated bool      // the entry's alert was raised (cleared on a rung change)
 	Seed      StartSource
@@ -371,8 +381,8 @@ type Entry struct {
 	// the caller settles it (SettleNotice); zero when there is none.
 	Notice NoticeMark
 	// AwaitsHuman: the entry's episode is a wait on a person
-	// (Work.AwaitsHuman). The wait's start and its end each begin a new
-	// episode, with a fresh count.
+	// (Work.AwaitsHuman), left alone while its seat's turns show it fine. The
+	// wait's start and its end each begin a new episode, with a fresh count.
 	AwaitsHuman bool
 }
 

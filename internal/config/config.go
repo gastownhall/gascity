@@ -2962,7 +2962,11 @@ type DaemonConfig struct {
 	// unanswered nudge (a nudge the seat could not take, such as one held at
 	// a permission prompt, does not count). A claim whose metadata
 	// gc.awaiting_human names its seat (the seat asked a person and waits on
-	// their decision) is nudged only hourly, and never recycled or released.
+	// their decision) is never recycled or released. While the seat's turns
+	// show a turn open or its newest turn completed, it is left alone; any
+	// other reading (a failed, canceled or status-less newest turn, no turn,
+	// turns that cannot be read) keeps it nudged hourly, so an answer whose
+	// turn died is redriven.
 	// A seat whose provider refuses its turns with a rate limit (two in a
 	// row, as its own transcript records them, the newest after a nudge it
 	// took) is paced as on a degraded provider, and once a nudge it took

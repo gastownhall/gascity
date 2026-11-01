@@ -41,8 +41,9 @@ const (
 type ladderTurnReader func(ctx context.Context, row beads.Bead) (runtime.TurnHistory, error)
 
 // ladderTurnReading reduces hist to what the ladder judges progress and rate
-// limits by, in conversation conv: whether the newest ended turn failed
-// (whatever the cause, with no turn open), and when the newest turn the
+// limits by, in conversation conv: whether a turn is open, whether the
+// newest ended turn failed (whatever the cause) or completed (each with no
+// turn open), and when the newest turn the
 // provider completed ended, anywhere in the recent turns; how many of the
 // newest ended turns in a row the provider refused with a rate limit (none
 // while a turn is open: it has no answer yet), when the newest of them
@@ -59,7 +60,9 @@ func ladderTurnReading(hist runtime.TurnHistory, conv int64) workladder.TurnRead
 		}
 	}
 	open := hist.Current.Active()
+	r.Open = open
 	r.LastFailed = !open && len(hist.Recent) > 0 && hist.Recent[0].Status == runtime.TurnStatusFailed
+	r.LastCompleted = !open && len(hist.Recent) > 0 && hist.Recent[0].Status == runtime.TurnStatusCompleted
 	if open {
 		return r
 	}

@@ -71,6 +71,11 @@ func TestDecisionTable(t *testing.T) {
 		{"quiet, newest turn failed, served since", workedSince(func(o *Observation) {
 			o.Turns = TurnReading{Read: true, Conv: 1, LastFailed: true, ServedAt: o.Now.Add(-5 * time.Minute)}
 		})},
+		{"quiet, newest turn failed", reading(TurnReading{Read: true, Conv: 1, LastFailed: true, ServedAt: t0.Add(-time.Hour)})},
+		{"quiet, newest turn completed", reading(TurnReading{Read: true, Conv: 1, LastCompleted: true, ServedAt: t0.Add(-time.Hour)})},
+		{"quiet, a turn open", reading(TurnReading{Read: true, Conv: 1, Open: true})},
+		{"quiet, newest turn ended with no status", reading(TurnReading{Read: true, Conv: 1, ServedAt: t0.Add(-time.Hour)})},
+		{"quiet, a reading of another conversation", reading(TurnReading{Read: true, Conv: 2, ServedAt: t0.Add(-time.Hour)})},
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "# workladder decision table (DefaultPolicy; a due entry; next = when the entry is next due)\n\n")
@@ -104,7 +109,7 @@ func TestDecisionTable(t *testing.T) {
 			if len(d.Next.Entries) > 0 && !d.Next.Entries[0].Since.Equal(r.e.Since) {
 				reset = "count reset; "
 			}
-			fmt.Fprintf(&b, " %s%s; next %v |", reset, strings.Join(acts, " + "), nextLook(d, now, o.Provider.Degraded))
+			fmt.Fprintf(&b, " %s%s; next %v |", reset, strings.Join(acts, " + "), nextLook(d, o))
 		}
 		b.WriteString("\n")
 	}
@@ -137,6 +142,12 @@ func workedSince(mut func(*Observation)) func(*Observation) {
 			mut(o)
 		}
 	}
+}
+
+// reading is a column whose quiet seat's turns, read in its conversation
+// (1), say r.
+func reading(r TurnReading) func(*Observation) {
+	return func(o *Observation) { o.Conv, o.Turns = 1, r }
 }
 
 // pendingOther is a trigger the table's seat also holds, its nudge's notice
@@ -172,13 +183,20 @@ func render(a Action) string {
 	return fmt.Sprintf("%T", a)
 }
 
-// nextLook is when the table's entry is next due after this pass, from now:
-// "-" when the pass leaves it due (it waits on a hold).
-func nextLook(d Decision, now time.Time, degraded bool) string {
+// nextLook is when the table's entry is next due after this pass (observed
+// as o), from now: "-" when the pass leaves it due (it waits on a hold), and
+// "when its turns change" for a wait on a person that o's reading leaves
+// alone (a turn open, or the newest ended turn completed): it is due again
+// only once a reading shows something else.
+func nextLook(d Decision, o Observation) string {
+	now := o.Now
 	if len(d.Next.Entries) == 0 || (d.Next.Release != nil && d.Next.Release.Key == d.Next.Entries[0].Key) {
 		return "-"
 	}
-	at := p.dueAt(d.Next.Entries[0], degraded)
+	if d.Next.Entries[0].AwaitsHuman && quietWait(o) {
+		return "when its turns change"
+	}
+	at := p.dueAt(d.Next.Entries[0], o.Provider.Degraded)
 	if !at.After(now) {
 		return "now"
 	}
