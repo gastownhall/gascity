@@ -9033,3 +9033,24 @@ func TestCityRuntimeReloadKeepsWispGCSessionPurgeCursor(t *testing.T) {
 		t.Fatalf("session purge cursor after reload = %+v, want %+v (resume after the last examined candidate)", got, cursor)
 	}
 }
+
+func TestCityRuntimeReloadWispGCFollowsEnablement(t *testing.T) {
+	const enabled = "\n[daemon]\nwisp_gc_interval = \"1h\"\nwisp_ttl = \"24h\"\n"
+	cr, tomlPath := newWispGCReloadRuntime(t, enabled)
+	lastRun := time.Now()
+	stampWispGCLastRun(t, cr, lastRun)
+
+	applyWispGCReload(t, cr, tomlPath, "\n[daemon]\nshutdown_timeout = \"1s\"\n")
+	if cr.wg != nil {
+		t.Fatalf("wisp GC tracker after disabling reload = %#v, want an untyped nil interface", cr.wg)
+	}
+	cr.tickWispGC(&tickPass{})
+
+	applyWispGCReload(t, cr, tomlPath, enabled)
+	if _, ok := cr.wg.(*memoryWispGC); !ok {
+		t.Fatalf("wisp GC tracker after enabling reload = %T, want *memoryWispGC", cr.wg)
+	}
+	if !cr.wg.shouldRun(lastRun.Add(time.Minute)) {
+		t.Fatal("newly enabled wisp GC not due on its first tick; want it due as at process start")
+	}
+}
