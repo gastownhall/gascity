@@ -45,7 +45,7 @@ const (
 // API order-history-detail path (an exempt by-id federation surface that still
 // emits raw labels on the wire) will migrate onto it in WI-6/7.
 func (s *Store) Get(handle string) (OrderRun, error) {
-	if s.store.Store == nil {
+	if s.store == (beads.OrdersStore{}) {
 		return OrderRun{}, fmt.Errorf("orders get %q: nil store", handle)
 	}
 	b, err := s.store.Get(handle)
@@ -72,7 +72,7 @@ type RunDetail struct {
 // RunDetail (OrderRun + the run's gate output). The gate-output vocabulary stays
 // owned by internal/convergence; only the typed GateOutput escapes.
 func (s *Store) RunDetail(handle string) (RunDetail, error) {
-	if s.store.Store == nil {
+	if s.store == (beads.OrdersStore{}) {
 		return RunDetail{}, fmt.Errorf("orders run detail %q: nil store", handle)
 	}
 	b, err := s.store.Get(handle)
@@ -94,10 +94,10 @@ func (s *Store) RunDetail(handle string) (RunDetail, error) {
 // guarantee); beads with no resolvable order name are skipped, exactly like the
 // index fold.
 func (s *Store) RecentRunsAll(limit int) ([]OrderRun, error) {
-	if s.store.Store == nil {
+	if s.store == (beads.OrdersStore{}) {
 		return nil, nil
 	}
-	list, err := beads.HandlesFor(s.store.Store).Live.List(beads.ListQuery{
+	list, err := beads.LiveFor(s.store).List(beads.ListQuery{
 		Label:         labelOrderTracking,
 		Limit:         limit,
 		IncludeClosed: true,
@@ -126,10 +126,10 @@ func (s *Store) RecentRunsAll(limit int) ([]OrderRun, error) {
 // tier for the same cache-bypass reason as RecentRunsAll. Beads with no
 // resolvable order name are skipped.
 func (s *Store) OpenRuns() ([]OrderRun, error) {
-	if s.store.Store == nil {
+	if s.store == (beads.OrdersStore{}) {
 		return nil, nil
 	}
-	list, err := beads.HandlesFor(s.store.Store).Live.List(beads.ListQuery{
+	list, err := beads.LiveFor(s.store).List(beads.ListQuery{
 		Label:  labelOrderTracking,
 		Status: "open",
 		Sort:   beads.SortCreatedDesc,
@@ -161,13 +161,12 @@ func (s *Store) OpenRuns() ([]OrderRun, error) {
 // title), matching the sweep's "when no order filter is set, close every stale
 // tracking bead" behavior.
 func (s *Store) StaleOpenRuns(cutoff time.Time) ([]OrderRun, error) {
-	store := s.store.Store
-	if store == nil {
+	if s.store == (beads.OrdersStore{}) {
 		return nil, nil
 	}
 	// Open first: a claim moves a bead forward to in_progress, so a bead
 	// claimed between the two reads is read twice rather than missed.
-	return staleRuns(beads.HandlesFor(store).Live, cutoff, "open", "in_progress")
+	return staleRuns(beads.LiveFor(s.store), cutoff, "open", "in_progress")
 }
 
 // StaleNotClosedRuns lists every not-closed tracking bead whose CreatedAt is at
@@ -185,31 +184,10 @@ func (s *Store) StaleOpenRuns(cutoff time.Time) ([]OrderRun, error) {
 // decodes the retained closed tracking history for it, as it already does when
 // gc order sweep-tracking reads that history to prune it.
 func (s *Store) StaleNotClosedRuns(cutoff time.Time) ([]OrderRun, error) {
-	live, ok := s.liveHandle()
-	if !ok {
+	if s.store == (beads.OrdersStore{}) {
 		return nil, nil
 	}
-	return staleRuns(live, cutoff, everyNotClosed)
-}
-
-// liveHandle is the LIVE read handle over s's store, reached without
-// unwrapping the typed class handle (the storeclass lint lets that debt only
-// shrink, so StaleOpenRuns and OrphanedOpenRuns keep their baselined unwrap).
-// It answers what beads.HandlesFor answers on the unwrapped store: beads.As
-// sees through the class handle to a store with its own Handles (a
-// CachingStore, a policy store), and any other store, such as a wrapper that
-// only embeds Store (the stale sweep labels each leg that way), is read
-// through HandlesFor's logical wrapper over the handle, which forwards to the
-// store. The answers differ only for a store that is itself a class handle,
-// which As also sees through. ok is false for a zero handle.
-func (s *Store) liveHandle() (beads.LiveReader, bool) {
-	if s.store == (beads.OrdersStore{}) {
-		return nil, false
-	}
-	if p, ok := beads.As[interface{ Handles() beads.StoreHandles }](s.store); ok {
-		return p.Handles().Live, true
-	}
-	return beads.HandlesFor(s.store).Live, true
+	return staleRuns(beads.LiveFor(s.store), cutoff, everyNotClosed)
 }
 
 // staleRuns is the stale readers' shared body: the tracking beads in statuses
@@ -242,11 +220,10 @@ func staleRuns(live beads.LiveReader, cutoff time.Time, statuses ...string) ([]O
 // caller closes the returned runs via CloseRuns. Names are best-effort (the
 // sweep closes by ID and does not resolve names).
 func (s *Store) OrphanedOpenRuns() ([]OrderRun, error) {
-	store := s.store.Store
-	if store == nil {
+	if s.store == (beads.OrdersStore{}) {
 		return nil, nil
 	}
-	all, err := sweepTrackingBeads(beads.HandlesFor(store).Live, everyNotClosed)
+	all, err := sweepTrackingBeads(beads.LiveFor(s.store), everyNotClosed)
 	if err != nil {
 		return nil, err
 	}
@@ -302,10 +279,10 @@ func sweepTrackingBeads(live beads.LiveReader, statuses ...string) ([]beads.Bead
 // floor, and deletes the aged remainder. Names are resolved best-effort so an
 // unresolvable-name bead can be routed to the legacy retention bucket.
 func (s *Store) ClosedRunsForRetention() ([]OrderRun, error) {
-	if s.store.Store == nil {
+	if s.store == (beads.OrdersStore{}) {
 		return nil, nil
 	}
-	list, err := beads.HandlesFor(s.store.Store).Live.List(beads.ListQuery{
+	list, err := beads.LiveFor(s.store).List(beads.ListQuery{
 		Status:   "closed",
 		Label:    labelOrderTracking,
 		Sort:     beads.SortCreatedDesc,
@@ -344,7 +321,7 @@ func (s *Store) CloseRuns(ctx context.Context, ids []string, reason string) (int
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if s.store.Store == nil {
+	if s.store == (beads.OrdersStore{}) {
 		return 0, fmt.Errorf("order-tracking close: nil store")
 	}
 	metadata := map[string]string{"close_reason": reason}
@@ -398,7 +375,7 @@ func (s *Store) CloseRunsSwept(ctx context.Context, ids []string, reason, sweptB
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if s.store.Store == nil {
+	if s.store == (beads.OrdersStore{}) {
 		return 0, fmt.Errorf("order-tracking close: nil store")
 	}
 	metadata := map[string]string{"close_reason": reason, "order_tracking_sweep": reason}

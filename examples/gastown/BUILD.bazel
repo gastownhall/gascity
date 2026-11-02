@@ -54,6 +54,7 @@ go_test(
         "//examples/bd/dolt",
         "//internal/bazeltest",
         "//internal/beads",
+        "//internal/beads/beadstest",
         "//internal/bootstrap/packs/core",
         "//internal/builtinpacks",
         "//internal/clock",

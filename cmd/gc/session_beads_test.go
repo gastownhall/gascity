@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -987,7 +988,7 @@ func TestSyncSessionBeads_RetiresRemovedNamedSessionAndCreatesFreshOnReadd(t *te
 	if err != nil {
 		t.Fatalf("Create(wait): %v", err)
 	}
-	fabric := extmsg.NewServices(store)
+	fabric := extmsg.NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := extmsg.ConversationRef{
 		ScopeID:        "test-city",
 		Provider:       "discord",
@@ -2509,7 +2510,7 @@ func TestRetireDuplicateConfiguredNamedSessionBeads_DoesNotStopWinnerSharingSess
 	if err != nil {
 		t.Fatalf("create loser wait: %v", err)
 	}
-	fabric := extmsg.NewServices(store)
+	fabric := extmsg.NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := extmsg.ConversationRef{
 		ScopeID:        "test-city",
 		Provider:       "discord",
@@ -9522,7 +9523,7 @@ func setupSessionWithExtmsgMembership(t *testing.T, store beads.Store, state ses
 	if err != nil {
 		t.Fatalf("create session bead: %v", err)
 	}
-	fabric := extmsg.NewServices(store)
+	fabric := extmsg.NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
 	group, err := fabric.Groups.EnsureGroup(context.Background(), caller, extmsg.EnsureGroupInput{
 		RootConversation: extmsg.ConversationRef{

@@ -1692,10 +1692,11 @@ func reassignStateAssignedToRetiredSessionBead(store beads.Store, oldSessionID, 
 	if err := sessionFrontDoor(store).ReassignWaits(oldSessionID, newSessionID); err != nil {
 		fmt.Fprintf(stderr, "session beads: reassigning waits from retired session %s to %s: %v\n", oldSessionID, newSessionID, err) //nolint:errcheck
 	}
-	if err := extmsg.ReassignSessionBindings(context.Background(), store, oldSessionID, newSessionID, now); err != nil {
+	messaging := extmsgStoreOverSessions(beads.SessionStore{Store: store})
+	if err := extmsg.ReassignSessionBindings(context.Background(), messaging, oldSessionID, newSessionID, now); err != nil {
 		fmt.Fprintf(stderr, "session beads: reassigning external message bindings from retired session %s to %s: %v\n", oldSessionID, newSessionID, err) //nolint:errcheck
 	}
-	if err := extmsg.ReassignSessionParticipants(context.Background(), store, oldSessionID, newSessionID); err != nil {
+	if err := extmsg.ReassignSessionParticipants(context.Background(), messaging, oldSessionID, newSessionID); err != nil {
 		fmt.Fprintf(stderr, "session beads: reassigning external message participants from retired session %s to %s: %v\n", oldSessionID, newSessionID, err) //nolint:errcheck
 	}
 }
@@ -1719,7 +1720,8 @@ func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string
 	if err != nil {
 		fmt.Fprintf(stderr, "session beads: canceling waits for retired session %s: %v\n", sessionID, err) //nolint:errcheck
 	}
-	if err := extmsg.CloseSessionBindings(context.Background(), store, sessionID, now); err != nil {
+	sessions := beads.SessionStore{Store: store}
+	if err := extmsg.CloseSessionBindings(context.Background(), extmsgStoreOverSessions(sessions), sessions, sessionID, now); err != nil {
 		fmt.Fprintf(stderr, "session beads: closing external message bindings for retired session %s: %v\n", sessionID, err) //nolint:errcheck
 	}
 }

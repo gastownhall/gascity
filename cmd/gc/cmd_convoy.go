@@ -517,9 +517,9 @@ func convoyProgressFromAPI(check api.ConvoyCheckView) convoyProgressJSON {
 // reports the same store as a partial answer, which the API route refuses, so
 // both routes fail rather than print part of the city's convoys as all of them.
 // A store only suspended rigs reach is left out, and its rigs named, on both
-// routes (openEveryConvoyStoreAt), so a suspended rig fails neither.
+// routes (openEveryStoreAt), so a suspended rig fails neither.
 func doConvoyListFallback(cityPath string, opts convoyListOptions, stdout, stderr io.Writer) int {
-	stores, code := openEveryConvoyStoreAt(cityPath, stderr, "gc convoy list")
+	stores, code := openEveryStoreAt(cityPath, stderr, "gc convoy list", "convoy", true)
 	if stores == nil {
 		return code
 	}
@@ -1057,8 +1057,7 @@ func refuseBindingRigCollision(beadID string, cfg *config.City, cityPath string,
 // openAllConvoyStoresAt opens every convoy store for a pre-resolved cityPath,
 // used by routed callers that already resolved the city before dispatching
 // to the fallback path. A store it cannot open is skipped, so gc beads show's
-// lookup by id, gc beads list and gc convoy stranded still read the healthy
-// stores.
+// lookup by id and gc convoy stranded still read the healthy stores.
 func openAllConvoyStoresAt(cityPath string, stderr io.Writer, cmdName string) ([]convoyStoreView, int) {
 	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
@@ -1079,37 +1078,43 @@ func openAllConvoyStoresAt(cityPath string, stderr io.Writer, cmdName string) ([
 	return stores, 0
 }
 
-// openEveryConvoyStoreAt is openAllConvoyStoresAt for gc convoy list, a
-// listing that must not come out short. A suspended rig's store is left
-// unopened and named on stderr, as gc convoy check leaves it
-// (convoyCheckStoreCandidates): suspension is quiescence, and the supervisor's
-// /convoys leaves the same stores out. Any other store it cannot open is named
-// on stderr and fails the command: a listing that silently left out a rig's
-// convoys would read as the city's complete answer, while the supervisor
-// reports that same store as a partial answer the API route refuses. It opens
-// through openStoreForCity, which adds no raw-store debt but loads the city
-// config again for each store it opens.
-func openEveryConvoyStoreAt(cityPath string, stderr io.Writer, cmdName string) ([]convoyStoreView, int) {
+// openEveryStoreAt is openAllConvoyStoresAt for a listing that must not come
+// out short (gc convoy list, gc beads list). Any store it cannot open is named
+// on stderr, as the storeNoun store at its directory, and fails the command: a
+// listing that silently left out a rig's rows would read as the city's
+// complete answer, while the supervisor reports that same store as a partial
+// answer the API route refuses. With skipSuspendedRigs, a store only suspended
+// rigs reach is left unopened and its rigs named on stderr, as gc convoy check
+// leaves it (convoyCheckStoreCandidates): the supervisor's /convoys leaves the
+// same stores out, while its /beads still reads them. It opens through
+// openStoreForCity, which adds no raw-store debt but loads the city config
+// again for each store it opens.
+func openEveryStoreAt(cityPath string, stderr io.Writer, cmdName, storeNoun string, skipSuspendedRigs bool) ([]convoyStoreView, int) {
 	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
 	emitLoadCityConfigWarnings(stderr, prov)
-	candidates, suspended := convoyCheckStoreCandidates(cfg, cityPath)
+	var candidates, suspended []string
+	if skipSuspendedRigs {
+		candidates, suspended = convoyCheckStoreCandidates(cfg, cityPath)
+	} else {
+		candidates = convoyStoreCandidates(cfg, cityPath, "") // residency:allow — openAllConvoyStoresAt's own enumeration, re-walked so a store that cannot open fails the listing instead of vanishing from it (the supervisor reports the same store as a partial answer)
+	}
 	for _, rig := range suspended {
-		fmt.Fprintf(stderr, "%s: rig %q is suspended; its convoys are listed once it resumes\n", cmdName, rig) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: rig %q is suspended; its %ss are listed once it resumes\n", cmdName, rig, storeNoun) //nolint:errcheck // best-effort stderr
 	}
 	failed := 0
 	stores := openConvoyStoreDirs(candidates, openStoreForCity(cityPath), func(dir string, err error) {
-		fmt.Fprintf(stderr, "%s: opening the convoy store at %s: %v\n", cmdName, dir, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: opening the %s store at %s: %v\n", cmdName, storeNoun, dir, err) //nolint:errcheck // best-effort stderr
 		failed++
 	})
 	if failed == 0 && len(stores) > 0 {
 		return stores, 0
 	}
 	if failed == 0 {
-		fmt.Fprintf(stderr, "%s: no convoy stores available\n", cmdName) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: no %s stores available\n", cmdName, storeNoun) //nolint:errcheck // best-effort stderr
 	}
 	fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
 	return nil, 1

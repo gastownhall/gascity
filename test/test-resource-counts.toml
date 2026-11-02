@@ -2649,6 +2649,18 @@ calls = 6
 tagged = true
 
 [[count]]
+path = "internal/runtime/tmux/wrapped_wait_cost_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/runtime/tmux/wrapped_wait_cost_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "internal/sdnotify/sdnotify_test.go"
 resource = "net_listen_packet"
 calls = 2
