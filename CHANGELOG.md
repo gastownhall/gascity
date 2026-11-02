@@ -1295,8 +1295,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   next compaction: a refresh that fails keeps the previous prime, and with
   none yet the prime is asked for again when the next turn opens. An empty
   prime, which `gc` prints on purpose for a client's provider chat or a
-  suspended agent, is still kept. Installed plugins without these changes
-  are replaced. (#5553)
+  suspended agent, is still kept. Installed plugins that still read nudges
+  and mail one after the other are replaced. (#5553)
 
 - **An attached session is no longer idle-slept.** Under a `[session_sleep]`
   policy or an agent's `sleep_after_idle`, interactive sessions on local tmux

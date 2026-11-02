@@ -807,9 +807,9 @@ for (const plugin of plugins) {
       delete process.env.GC_FAKE_PRIME_STAMP;
     });
 
-    async function stableSystem(hooks) {
+    async function stableSystem(hooks, sessionID = "ses_prime") {
       const output = { system: [HEADER] };
-      await hooks["experimental.chat.system.transform"]({ sessionID: "ses_prime", model: {} }, output);
+      await hooks["experimental.chat.system.transform"]({ sessionID, model: {} }, output);
       return output.system[0];
     }
 
@@ -826,6 +826,31 @@ for (const plugin of plugins) {
       await hooks.event(userMessageEvent("ses_prime", "msg_p2"));
       const next = await stableSystem(hooks);
       assert.ok(next.startsWith(ROLE), `the next turn has no role: ${JSON.stringify(next)}`);
+      assert.equal(readPrimeLog(fake).length, 2);
+    });
+
+    it("asks again every generation while the session's turn is unknown", async () => {
+      // No message.updated reached the plugin, so it cannot tell turns apart;
+      // like readTurnVolatile it then asks every time rather than never.
+      const hooks = await gascityPlugin({ directory: tmp, client: {} });
+      process.env.GC_FAKE_PRIME_FAIL = "1";
+      assert.equal(await stableSystem(hooks), HEADER);
+      delete process.env.GC_FAKE_PRIME_FAIL;
+      const next = await stableSystem(hooks);
+      assert.ok(next.startsWith(ROLE), `the next generation has no role: ${JSON.stringify(next)}`);
+      assert.equal(readPrimeLog(fake).length, 2);
+    });
+
+    it("remembers a failed read's turn per session", async () => {
+      const hooks = await gascityPlugin({ directory: tmp, client: {} });
+      await hooks.event(userMessageEvent("ses_prime", "msg_parent"));
+      await hooks.event(userMessageEvent("ses_sub", "msg_sub"));
+      process.env.GC_FAKE_PRIME_FAIL = "1";
+      await stableSystem(hooks, "ses_prime");
+      await stableSystem(hooks, "ses_sub");
+      // The subagent's failure must not clear the parent's: the parent's next
+      // generation in the same turn does not ask again.
+      await stableSystem(hooks, "ses_prime");
       assert.equal(readPrimeLog(fake).length, 2);
     });
 

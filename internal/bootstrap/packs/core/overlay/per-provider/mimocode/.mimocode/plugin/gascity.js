@@ -215,11 +215,9 @@ export default async function gascityPlugin({ directory, client }) {
   }
   // cachedPrime is the last prompt `gc prime --hook` returned, an empty one
   // included; null until a read succeeds. primeRead is the unforced read in
-  // flight, shared by generations that ask at once, and primeFailedTurn is
-  // the turn whose unforced read failed.
+  // flight, shared by generations that ask at once.
   let cachedPrime = null;
   let primeRead = null;
-  let primeFailedTurn = null;
 
   // experimental.chat.system.transform fires once per model generation, not
   // once per user turn, so every tool call in a turn rebuilds the prefix.
@@ -251,10 +249,12 @@ export default async function gascityPlugin({ directory, client }) {
   // an empty prompt included: gc prints none on purpose for a client's
   // provider chat or a suspended agent. A failed read is not kept, so it does
   // not leave the session without its role. A forced refresh that fails keeps
-  // the last prime; with none yet, the prime is asked for again once another
-  // turn opens, so a gc that keeps failing or hangs costs one call per turn,
-  // not one per generation.
-  async function readPrime(force = false, extraEnv = {}, turn = "") {
+  // the last prime. With none yet, a session whose read failed asks again once
+  // its next turn opens, so a gc that keeps failing or hangs costs it one call
+  // per turn, not one per generation; a generation whose turn is unknown asks
+  // every time, as readTurnVolatile drains every time. A forced read owns the
+  // cache: an unforced read only fills an empty one.
+  async function readPrime(force = false, extraEnv = {}, sessionID = "") {
     if (force) {
       const prime = await runCommand(directory, ["prime", "--hook"], true, extraEnv);
       if (prime !== null) {
@@ -266,28 +266,24 @@ export default async function gascityPlugin({ directory, client }) {
       return cachedPrime;
     }
     if (!primeRead) {
-      if (turn === primeFailedTurn) {
+      const state = turns.get(String(sessionID || ""));
+      const turn = state?.currentTurnID || "";
+      if (turn && state.primeFailedTurn === turn) {
         return "";
       }
       primeRead = runCommand(directory, ["prime", "--hook"], true, extraEnv).then((prime) => {
         primeRead = null;
         if (prime === null) {
-          primeFailedTurn = turn;
-          return "";
+          if (turn) {
+            state.primeFailedTurn = turn;
+          }
+        } else if (cachedPrime === null) {
+          cachedPrime = prime;
         }
-        cachedPrime = prime;
-        return prime;
+        return cachedPrime ?? "";
       });
     }
     return primeRead;
-  }
-
-  // turnKey names the turn a generation belongs to, or "" when its session or
-  // turn is unknown. It reads the turn state without creating it.
-  function turnKey(sessionID) {
-    sessionID = String(sessionID || "");
-    const state = sessionID ? turns.get(sessionID) : null;
-    return state && state.currentTurnID ? `${sessionID}/${state.currentTurnID}` : "";
   }
 
   function prependText(existing, prefix) {
@@ -319,6 +315,7 @@ export default async function gascityPlugin({ directory, client }) {
         drainedTurnID: null,
         volatile: Promise.resolve(""),
         userMessageIDs: new Set(),
+        primeFailedTurn: "",
       };
       turns.set(sessionID, state);
     }
@@ -475,7 +472,7 @@ export default async function gascityPlugin({ directory, client }) {
     // the split below. It is not needed to open the turn either;
     // message.updated precedes the first generation.
     "experimental.chat.system.transform": async (input, output) => {
-      const prime = await readPrime(false, {}, turnKey(input?.sessionID));
+      const prime = await readPrime(false, {}, input?.sessionID);
       const volatile = await readTurnVolatile(input?.sessionID);
       prependStableSystem(output.system, prime);
       appendVolatileSystem(output.system, volatile);
