@@ -1220,6 +1220,10 @@ export type ConvoyAddInputBody = {
 
 export type ConvoyCheckResponse = {
     /**
+     * IDs of the child beads counted in total, in membership order (created_at, then id); a dangling track appears as the id it names. Omitted when total is 0.
+     */
+    child_ids?: Array<string> | null;
+    /**
      * Closed child bead count.
      */
     closed: number;
@@ -1231,6 +1235,10 @@ export type ConvoyCheckResponse = {
      * Convoy ID.
      */
     convoy_id: string;
+    /**
+     * Child beads counted in total whose tracks dependency names a bead that cannot be resolved. Omitted when 0.
+     */
+    dangling_tracks?: number;
     /**
      * Total child bead count.
      */
