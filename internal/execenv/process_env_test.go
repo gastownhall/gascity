@@ -5,6 +5,8 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestEnvironWaitsForAProjectionToRestore(t *testing.T) {
@@ -36,7 +38,7 @@ func TestEnvironWaitsForAProjectionToRestore(t *testing.T) {
 		if !slices.Contains(env, "GC_EXECENV_PROJECTION_PROBE=ambient") || slices.Contains(env, "GC_EXECENV_PROJECTION_PROBE=projected") {
 			t.Fatalf("Environ after the projection restored = %v, want the ambient value only", env)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.GoroutineRaceTimeout):
 		t.Fatal("Environ did not return after the projection restored")
 	}
 }

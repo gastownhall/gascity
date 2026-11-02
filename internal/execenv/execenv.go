@@ -1,5 +1,8 @@
 // Package execenv centralizes environment filtering and log redaction for
-// subprocess boundaries.
+// subprocess boundaries, and owns the process-environment snapshot a child
+// environment is built from: Environ reads os.Environ() under ProcessEnvLock,
+// which a transient projection (a native beads store open) holds for as long
+// as it rewrites this process's environment.
 package execenv
 
 import (

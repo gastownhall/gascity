@@ -4,12 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 const (
@@ -343,5 +347,51 @@ func TestAlwaysNamedFirstStartStillRetriesFresh(t *testing.T) {
 				t.Errorf("continuation_reset_pending = %q, want true", got)
 			}
 		})
+	}
+}
+
+// A dead session's pane is scrubbed against the inherited environment read
+// through execenv.Environ. A capture taken while a native store open withholds
+// an ambient credential waits the open out instead of scrubbing without it.
+func TestExitedAfterStartScrubsTheAmbientEnvironmentAProjectionHides(t *testing.T) {
+	const ambient = "ambient-NOT-A-REAL-CREDENTIAL-exited"
+	t.Setenv("BEADS_DOLT_PASSWORD", ambient)
+	sp := runtime.NewFake()
+	sp.SetPeekOutput("exited", "+ curl -u gc:"+ambient+"\ncurl: (22) 401\n")
+	m := &Manager{sp: sp}
+
+	execenv.ProcessEnvLock.Lock()
+	projected := true
+	restore := func() {
+		if projected {
+			projected = false
+			_ = os.Setenv("BEADS_DOLT_PASSWORD", ambient)
+			execenv.ProcessEnvLock.Unlock()
+		}
+	}
+	t.Cleanup(restore)
+	if err := os.Unsetenv("BEADS_DOLT_PASSWORD"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- m.exitedAfterStart("exited", nil) }()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(20 * time.Millisecond):
+	}
+	restore()
+	if err == nil {
+		select {
+		case err = <-done:
+		case <-time.After(testutil.GoroutineRaceTimeout):
+			t.Fatal("exitedAfterStart did not return after the projection restored")
+		}
+	}
+	if !strings.Contains(err.Error(), "curl: (22) 401") {
+		t.Fatalf("the error lost the pane's diagnostic, so this proves nothing: %v", err)
+	}
+	if strings.Contains(err.Error(), ambient) {
+		t.Errorf("the dead session's pane carries the ambient credential a projection hid when it was scrubbed: %v", err)
 	}
 }

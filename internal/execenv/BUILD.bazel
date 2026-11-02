@@ -22,7 +22,10 @@ go_test(
         exclude = ["BUILD.bazel"],
     ),
     embed = [":execenv"],
-    deps = ["//internal/testenv"],
+    deps = [
+        "//internal/testenv",
+        "//internal/testutil",
+    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

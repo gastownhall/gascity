@@ -1,7 +1,6 @@
 package runtime
 
 import (
-	"os"
 	"sort"
 	"strings"
 )
@@ -89,17 +88,17 @@ func SecretEnvValues(env map[string]string) []string {
 	return secrets
 }
 
-// processSecretEnvValues returns the same for this process's own environment.
+// inheritedSecretEnvValues returns the same for an inherited environment in
+// os.Environ() form.
 //
-// A child that inherits os.Environ() can echo any of it back: a `set -x` trace
-// prints every expansion, and a failing curl prints the header it sent. The
-// controller's environment is where the fleet's credentials live, so a command
-// spawned with it needs its output scrubbed against that set too, not only
-// against the session env the caller assembled.
-func processSecretEnvValues() []string {
-	environ := os.Environ()
-	secrets := make([]string, 0, len(environ))
-	for _, kv := range environ {
+// A child that inherits an environment can echo any of it back: a `set -x`
+// trace prints every expansion, and a failing curl prints the header it sent.
+// The controller's environment is where the fleet's credentials live, so a
+// command spawned with it needs its output scrubbed against that set too, not
+// only against the session env the caller assembled.
+func inheritedSecretEnvValues(inherited []string) []string {
+	secrets := make([]string, 0, len(inherited))
+	for _, kv := range inherited {
 		k, v, ok := strings.Cut(kv, "=")
 		if ok && redactableEnvValue(k, v) {
 			secrets = append(secrets, v)
@@ -110,19 +109,29 @@ func processSecretEnvValues() []string {
 
 // SetupCommandSecrets is the value set to scrub from a session lifecycle
 // command's captured output when the command runs HOST-SIDE. Those runners
-// build the child environment the same way — os.Environ() overlaid with the
+// build the child environment the same way — inherited, overlaid with env, the
 // session env the caller assembled — so both halves are in scope for anything
-// the command echoes, and both belong here. Shared so the three host-side
-// runners (this package's [RunSetupCommand], the tmux adapter's and herdr's)
-// cannot drift apart on which half they cover.
+// the command echoes, and both belong here. Shared so the host-side runners
+// (this package's [RunSetupCommand], the tmux adapter's and herdr's) and the
+// pane captures of a session that died starting cannot drift apart on which
+// half they cover.
+//
+// inherited is the environment the command was given, not a fresh read of
+// this process's: the two differ whenever the process environment changes
+// between the spawn and the scrub. A native beads store open rewrites it for
+// its whole window (execenv.ProcessEnvLock), so a set read inside that window
+// lacks an ambient credential the command still holds and could have echoed. A
+// runner passes the slice it spawned the command with; a caller scrubbing
+// output it did not spawn (a pane capture) passes its closest view of what the
+// pane inherited, taken through execenv.Environ.
 //
 // Not for a runner that executes the command somewhere else. The ssh provider
 // runs pre_start on the far box, which inherits that box's environment and not
 // this process's, so only [SecretEnvValues] of the session env applies there;
 // adding our own would scrub the controller's credentials out of text that
 // never had a way to contain them.
-func SetupCommandSecrets(env map[string]string) []string {
-	return append(SecretEnvValues(env), processSecretEnvValues()...)
+func SetupCommandSecrets(inherited []string, env map[string]string) []string {
+	return append(SecretEnvValues(env), inheritedSecretEnvValues(inherited)...)
 }
 
 // RedactSecrets replaces every one of secrets with [RedactedValue], so one pass

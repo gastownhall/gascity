@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/execenv"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // The proxied-native open window and the session runtimes must share one
@@ -62,7 +63,7 @@ func TestProxiedNativeOpenWindowBlocksChildEnvSnapshots(t *testing.T) {
 		if got := envValues(env, "BD_BIN"); len(got) != 1 || got[0] != "/ambient/bd" {
 			t.Fatalf("BD_BIN after the window = %v, want [/ambient/bd]", got)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.GoroutineRaceTimeout):
 		t.Fatal("execenv.Environ did not return after the proxied open window closed")
 	}
 }

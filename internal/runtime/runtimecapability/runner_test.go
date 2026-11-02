@@ -6,6 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/execenv"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // refConfig parameterizes the golden reference runtime: which capabilities it
@@ -225,5 +229,50 @@ func TestEveryCapabilityIsGated(t *testing.T) {
 					m.target, got.Status, got.Detail)
 			}
 		})
+	}
+}
+
+// The op timeout bounds the op, not the wait for an in-flight process-env
+// projection (mirrors the tmux and herdr setup-command runners): a native
+// store open can hold the projection past an op budget, and the op must still
+// get its whole budget once the projection restores.
+func TestInvokeOpTimeoutStartsAfterAProcessEnvProjection(t *testing.T) {
+	const budget = time.Second
+	r := &runner{path: "/bin/sh"}
+	execenv.ProcessEnvLock.Lock()
+	projected := true
+	restore := func() {
+		if projected {
+			projected = false
+			execenv.ProcessEnvLock.Unlock()
+		}
+	}
+	t.Cleanup(restore)
+
+	type result struct {
+		code int
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		_, code, err := r.invoke(context.Background(), budget, nil, "-c", "true")
+		done <- result{code, err}
+	}()
+	// The window is the assertion: the op cannot run while the projection
+	// stands, and it stands past the op's budget.
+	select {
+	case got := <-done:
+		restore()
+		t.Fatalf("invoke returned (code %d, err %v) while a process-env projection was in flight", got.code, got.err)
+	case <-time.After(2 * budget):
+	}
+	restore()
+	select {
+	case got := <-done:
+		if got.err != nil || got.code != 0 {
+			t.Errorf("invoke after the projection restored = (code %d, err %v), want the op to run", got.code, got.err)
+		}
+	case <-time.After(testutil.ExecRaceTimeout):
+		t.Fatal("invoke did not return after the projection restored")
 	}
 }
