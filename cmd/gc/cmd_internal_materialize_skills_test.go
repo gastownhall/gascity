@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -308,6 +309,63 @@ provider = "file"
 	}
 	if strings.Contains(stderr.String(), "shared skill catalog unavailable") {
 		t.Fatalf("snapshot-backed run should not reload the live catalog, stderr=%q", stderr.String())
+	}
+}
+
+// TestSharedCatalogSnapshotFrontmatterNameCompatibility pins the
+// additive round-trip of the SKILL.md display name: FrontmatterName
+// survives the JSON snapshot encode/decode that hands the shared
+// catalog to the stage-2 materializer, and a snapshot written before
+// the field existed (the same encoding shape — exported Go field
+// names — with no FrontmatterName key) decodes with the field empty,
+// leaving materialization identity (qualified names, sources)
+// unchanged.
+func TestSharedCatalogSnapshotFrontmatterNameCompatibility(t *testing.T) {
+	t.Parallel()
+	sharedCat := materialize.CityCatalog{
+		Entries: []materialize.SkillEntry{{
+			Name:            "core.gc-work",
+			Source:          "/skills/gc-work",
+			Origin:          "core",
+			Description:     "Working with beads",
+			FrontmatterName: "gc-work",
+		}},
+		OwnedRoots: []string{"/skills"},
+	}
+	snapshot, err := encodeSharedCatalogSnapshot(sharedCat)
+	if err != nil {
+		t.Fatalf("encodeSharedCatalogSnapshot: %v", err)
+	}
+	decoded, err := decodeSharedCatalogSnapshot(snapshot)
+	if err != nil {
+		t.Fatalf("decodeSharedCatalogSnapshot: %v", err)
+	}
+	if len(decoded.Entries) != 1 {
+		t.Fatalf("decoded %d entries, want 1: %+v", len(decoded.Entries), decoded.Entries)
+	}
+	e := decoded.Entries[0]
+	if e.FrontmatterName != "gc-work" {
+		t.Errorf("FrontmatterName = %q, want it to round-trip as %q", e.FrontmatterName, "gc-work")
+	}
+	if e.Name != "core.gc-work" || e.Source != "/skills/gc-work" || e.Origin != "core" || e.Description != "Working with beads" {
+		t.Errorf("decoded entry identity changed: %+v", e)
+	}
+
+	// Pre-field snapshot: same encoding shape, no FrontmatterName key.
+	oldJSON := `{"Entries":[{"Name":"core.gc-work","Source":"/skills/gc-work","Origin":"core","Description":"Working with beads"}],"OwnedRoots":["/skills"],"Shadowed":null}`
+	fromOld, err := decodeSharedCatalogSnapshot(base64.StdEncoding.EncodeToString([]byte(oldJSON)))
+	if err != nil {
+		t.Fatalf("decodeSharedCatalogSnapshot(pre-field snapshot): %v", err)
+	}
+	if len(fromOld.Entries) != 1 {
+		t.Fatalf("decoded %d entries, want 1: %+v", len(fromOld.Entries), fromOld.Entries)
+	}
+	old := fromOld.Entries[0]
+	if old.FrontmatterName != "" {
+		t.Errorf("pre-field snapshot decoded FrontmatterName = %q, want \"\"", old.FrontmatterName)
+	}
+	if old.Name != "core.gc-work" || old.Source != "/skills/gc-work" || old.Origin != "core" || old.Description != "Working with beads" {
+		t.Errorf("pre-field snapshot decoded entry identity changed: %+v", old)
 	}
 }
 

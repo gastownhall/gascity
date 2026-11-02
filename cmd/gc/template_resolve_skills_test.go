@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -777,6 +778,123 @@ func TestResolveTemplateAppendixShowsImportedSkillFrontmatterName(t *testing.T) 
 	}
 	if _, ok := tp.FPExtra["skills:gc-work"]; ok {
 		t.Errorf("FPExtra = %+v, must not gain an unqualified skills:gc-work entry", tp.FPExtra)
+	}
+}
+
+// TestResolveTemplateSkillDisplayNameDoesNotAffectFingerprints pins
+// #8501 AC-4: the SKILL.md display name is display metadata only.
+// Resolving the same agent template with a loaded imported catalog and
+// with an otherwise identical copy whose display names are cleared
+// yields the same qualified skill fingerprint keys, PreStart commands,
+// and runtime core, provision, and launch fingerprints — only the
+// prompt's appendix annotation differs. Both the scope-root and the
+// stage-2 workdir shapes are exercised; the two catalogs differ in
+// nothing but the display-name field.
+func TestResolveTemplateSkillDisplayNameDoesNotAffectFingerprints(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"),
+		[]byte("[pack]\nname = \"s\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	importedPack := t.TempDir()
+	importedDir := filepath.Join(importedPack, "skills", "gc-work")
+	if err := os.MkdirAll(importedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(importedDir, "SKILL.md"),
+		[]byte("---\nname: gc-work\ndescription: Working with beads\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := materialize.LoadCityCatalog("", config.DiscoveredSkillCatalog{
+		SourceDir:   filepath.Join(importedPack, "skills"),
+		PackDir:     importedPack,
+		PackName:    "core",
+		BindingName: "core",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleared := loaded
+	cleared.Entries = append([]materialize.SkillEntry(nil), loaded.Entries...)
+	for i := range cleared.Entries {
+		cleared.Entries[i].FrontmatterName = ""
+	}
+
+	resolve := func(t *testing.T, cat *materialize.CityCatalog, a *config.Agent) TemplateParams {
+		t.Helper()
+		params := &agentBuildParams{
+			cityName:  "city",
+			cityPath:  cityPath,
+			workspace: &config.Workspace{Provider: "claude"},
+			providers: map[string]config.ProviderSpec{
+				"claude": {Command: "echo", PromptMode: "none"},
+			},
+			lookPath:        func(string) (string, error) { return "/bin/echo", nil },
+			fs:              fsys.OSFS{},
+			rigs:            []config.Rig{},
+			beaconTime:      time.Unix(0, 0),
+			beadNames:       make(map[string]string),
+			stderr:          io.Discard,
+			skillCatalog:    cat,
+			sessionProvider: "tmux",
+		}
+		tp, err := resolveTemplate(params, a, a.QualifiedName(), nil)
+		if err != nil {
+			t.Fatalf("resolveTemplate: %v", err)
+		}
+		return tp
+	}
+
+	for _, c := range []struct {
+		name  string
+		agent *config.Agent
+	}{
+		{"scope root", &config.Agent{Name: "mayor", Scope: "city", Provider: "claude"}},
+		{"stage-2 workdir", &config.Agent{Name: "polecat", Scope: "city", Provider: "claude", WorkDir: ".gc/worktrees/polecat-1"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			withNames := resolve(t, &loaded, c.agent)
+			withoutNames := resolve(t, &cleared, c.agent)
+
+			if !strings.Contains(withNames.Prompt, "(SKILL.md name: `gc-work`)") {
+				t.Errorf("prompt with display names must carry the annotation:\n%s", withNames.Prompt)
+			}
+			if strings.Contains(withoutNames.Prompt, "(SKILL.md name:") {
+				t.Errorf("prompt with cleared display names must not carry the annotation:\n%s", withoutNames.Prompt)
+			}
+
+			// Fingerprint keys stay on the qualified catalog name.
+			if !reflect.DeepEqual(withNames.FPExtra, withoutNames.FPExtra) {
+				t.Errorf("FPExtra differs: with names %+v, without %+v", withNames.FPExtra, withoutNames.FPExtra)
+			}
+			if _, ok := withNames.FPExtra["skills:core.gc-work"]; !ok {
+				t.Errorf("FPExtra = %+v, want a skills:core.gc-work entry", withNames.FPExtra)
+			}
+			if _, ok := withNames.FPExtra["skills:gc-work"]; ok {
+				t.Errorf("FPExtra = %+v, must not gain an unqualified skills:gc-work entry", withNames.FPExtra)
+			}
+
+			if !reflect.DeepEqual(withNames.Hints.PreStart, withoutNames.Hints.PreStart) {
+				t.Errorf("PreStart differs: with names %v, without %v", withNames.Hints.PreStart, withoutNames.Hints.PreStart)
+			}
+
+			cfgWith := templateParamsToConfig(withNames)
+			cfgWithout := templateParamsToConfig(withoutNames)
+			for _, fp := range []struct {
+				name string
+				fn   func(runtime.Config) string
+			}{
+				{"core", runtime.CoreFingerprint},
+				{"provision", runtime.ProvisionFingerprint},
+				{"launch", runtime.LaunchFingerprint},
+			} {
+				if got, want := fp.fn(cfgWith), fp.fn(cfgWithout); got != want {
+					t.Errorf("%s fingerprint differs with display names: %s vs %s", fp.name, want, got)
+				}
+			}
+		})
 	}
 }
 
