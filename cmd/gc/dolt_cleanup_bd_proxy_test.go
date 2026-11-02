@@ -368,8 +368,8 @@ func TestClassifyDoltProcess_ProtectsVersionedBdDBProxyChild(t *testing.T) {
 // (B5b §8). It does not have to. The reaper classifies processes from argv
 // alone, and the shared root has exactly one sql-server, launched with
 // --config <city>/.beads/dolt/config.yaml — the city's root, where the live
-// proxy.pid is. Resolving each scope's provider root would add a mapping with
-// no process on the other end of it.
+// proxy.pid is. The rig's provider root, which follows its dolt_data_dir as bd
+// does, is that same root: one process for every scope on it.
 func TestClassifyDoltProcess_ProtectsSharedRootRigChild(t *testing.T) {
 	city := filepath.Join(t.TempDir(), "city")
 	configPath := writeBdProxyRoot(t, city, 4254)
@@ -381,7 +381,7 @@ func TestClassifyDoltProcess_ProtectsSharedRootRigChild(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(rig, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	metadata := `{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"app","dolt_data_dir":"../../.beads/dolt"}`
+	metadata := `{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"app","dolt_data_dir":"../../../.beads/dolt"}`
 	if err := os.WriteFile(filepath.Join(rig, ".beads", "metadata.json"), []byte(metadata), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -390,8 +390,8 @@ func TestClassifyDoltProcess_ProtectsSharedRootRigChild(t *testing.T) {
 	}
 	if root, err := proxiedScopeProviderRoot(rig); err != nil {
 		t.Fatal(err)
-	} else if _, err := os.Stat(filepath.Join(root, "proxy.pid")); !os.IsNotExist(err) {
-		t.Fatalf("per-scope provider root %q unexpectedly has a proxy.pid", root)
+	} else if !samePath(root, filepath.Dir(configPath)) {
+		t.Fatalf("rig provider root = %q, want the city's root %q its dolt_data_dir names", root, filepath.Dir(configPath))
 	}
 
 	// bd runs one child for the shared root, and it names the city's config.

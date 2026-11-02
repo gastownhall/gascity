@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -18,8 +19,9 @@ import (
 // between the two reads is written unjudged. A judge therefore reads such a
 // file through readJudgedFile, and once it admits the write, bdClassFlipGuard
 // points bd at a private copy of exactly the bytes judged (bdJudgedFiles.pin).
-// import redirects its source itself, because it may hand bd only some of
-// the rows.
+// import writes its own copy, because it may hand bd only some of the rows,
+// and repoints its source with the same verified rewrites (bdRepointFlag,
+// bdRepointPositional).
 
 // bdJudgedFile is one caller-named file a judge read.
 type bdJudgedFile struct {
@@ -91,21 +93,26 @@ func (j *bdJudgedFiles) pin(inv *bdflags.Inventory, cmdPath string, g bdClassGua
 }
 
 // bdWriteJudgedCopy writes data to a new private temp file (0600) and returns
-// its path.
+// its absolute path: bd runs in the scope root, so a path relative to gc's
+// working directory (a relative $TMPDIR) would name a different file there.
 func bdWriteJudgedCopy(data []byte, pattern string) (string, error) {
 	tmp, err := os.CreateTemp("", pattern)
 	if err != nil {
 		return "", err
 	}
+	name := tmp.Name()
 	_, err = tmp.Write(data)
 	if closeErr := tmp.Close(); err == nil {
 		err = closeErr
 	}
-	if err != nil {
-		_ = os.Remove(tmp.Name())
-		return "", err
+	if err == nil {
+		var abs string
+		if abs, err = filepath.Abs(name); err == nil {
+			return abs, nil
+		}
 	}
-	return tmp.Name(), nil
+	_ = os.Remove(name)
+	return "", err
 }
 
 // bdRepointFlag returns argv with the string flag long set to value. pflag
@@ -131,6 +138,41 @@ func bdRepointFlag(inv *bdflags.Inventory, argv []string, long, value string) ([
 	for _, c := range candidates {
 		got, err := inv.Resolve(c)
 		if err == nil && bdResolvedSameExcept(want, got, long, value) {
+			return c, true
+		}
+	}
+	return nil, false
+}
+
+// bdRepointPositional returns argv with the positional argument from replaced
+// by to, rewriting the token in place. The result must resolve, under inv as bd
+// resolves it, to the same command and flags as argv, and to the same
+// positionals with from replaced by to; a token that equals from but is a flag's
+// value (or one after a terminator that bd reads differently) never verifies.
+// ok is false when no token does.
+func bdRepointPositional(inv *bdflags.Inventory, argv []string, from, to string) ([]string, bool) {
+	if inv == nil {
+		return nil, false
+	}
+	want, err := inv.Resolve(argv)
+	if err != nil {
+		return nil, false
+	}
+	at := slices.Index(want.Positionals, from)
+	if at < 0 {
+		return nil, false
+	}
+	expect := slices.Clone(want.Positionals)
+	expect[at] = to
+	for i, tok := range argv {
+		if tok != from {
+			continue
+		}
+		c := slices.Clone(argv)
+		c[i] = to
+		got, err := inv.Resolve(c)
+		if err == nil && got.Path == want.Path && got.Help == want.Help && got.DisableFlagParsing == want.DisableFlagParsing &&
+			slices.Equal(got.Positionals, expect) && maps.EqualFunc(got.Flags, want.Flags, slices.Equal[[]string]) {
 			return c, true
 		}
 	}

@@ -914,6 +914,28 @@ type IdentitySidecarProvider interface {
 	LocalIdentitySidecar() bool
 }
 
+// IdentityObserver is an optional extension for providers that read a
+// session's identity env (GC_SESSION_ID, GC_RUNTIME_EPOCH,
+// GC_INSTANCE_TOKEN, GT_PROCESS_NAMES) in one fresh answer, without
+// [EnvironmentBatchProvider]'s adoption and API side effects. A provider
+// whose identity is not readable now reports IdentityObservable false.
+// ObserveIdentity returns [ErrSessionNotFound] for an absent name and an
+// error wrapping [ErrRuntimeUnavailable] while the identity cannot be read;
+// an empty map is a box with no gc identity.
+type IdentityObserver interface {
+	IdentityObservable() bool
+	ObserveIdentity(name string) (map[string]string, error)
+}
+
+// V2ReadinessReporter is an optional extension for providers whose fitness
+// for reconciler v2 depends on what their backend declares (an exec
+// script's handshake). V2Readiness returns the capabilities v2 needs that
+// the backend lacks, nil when it has them all, or the error that kept it
+// from asking.
+type V2ReadinessReporter interface {
+	V2Readiness() (missing []string, err error)
+}
+
 // TransportCapabilityProvider is an optional extension for providers that can
 // report whether they support starting sessions with a specific transport.
 //
@@ -1094,7 +1116,8 @@ type LiveRuntime struct {
 	// tmux process on this host. It is not socket-scoped to one provider
 	// instance, and it does not separate a server from a client. A caller that
 	// needs true provider-scoped attribution — this provider's own server, on
-	// this provider's socket — must add that check itself.
+	// this provider's socket — must add that check itself, or read the
+	// provider's LiveUnlisted.
 	//
 	// It is the positive form of the PPID test above, and it exists because the
 	// negative form cannot be made reliable: recognizing a reparent destination
@@ -1132,6 +1155,19 @@ type LiveRuntime struct {
 	// IsTracked is true when this runtime also appears in the provider's
 	// registry. False marks a live process that is invisible to the provider.
 	IsTracked bool
+	// LiveUnlisted is true when the provider claims an untracked root as a
+	// live runtime of its own that its listing does not show, or cannot rule
+	// that out. Only the provider sets it, from its own provider-scoped
+	// evidence, which ParentIsProviderInfrastructure alone is not: the tmux
+	// provider sets it on a tmux-parented root unless the root's TMUX
+	// variable proves its parent is a server bound to another socket, so a
+	// pane of this provider's socket name in a socket directory this process
+	// does not resolve, or one a failed or racing listing missed, is set,
+	// while a server an agent started on its own socket is not. Such a root
+	// is not an orphan, and a replacement would race it for the session's
+	// work, so a caller that terminates orphans before a start must refuse
+	// the start instead.
+	LiveUnlisted bool
 }
 
 // ProcessTableScanner is an optional extension for runtimes that can discover

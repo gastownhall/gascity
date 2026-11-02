@@ -1,0 +1,10 @@
+# notify-on-claims-resumed closes the loop notify-on-claims-stalled opens:
+# when a seat of a stalled agent template claims its work again
+# (agent.claims_resumed), the stall's incident is resolved and the
+# escalation recipient gets one short note. See
+# assets/scripts/notify-claims-stall.sh, which both orders run.
+[order]
+description = "Tell the escalation recipient when a stalled agent claims its work again"
+trigger = "event"
+on = "agent.claims_resumed"
+exec = "$PACK_DIR/assets/scripts/notify-claims-stall.sh"

@@ -301,13 +301,14 @@ func rigBootRefusal(cityPath string, target infraBindingTarget) error {
 	return errors.New(strings.Join(reasons, "; "))
 }
 
-// rigResidueCensusDone is a test seam: closed when a boot census finishes.
+// rigResidueCensusDone is a test seam: called when a controller census (at
+// boot, or for a resumed rig) finishes.
 var rigResidueCensusDone = func() {}
 
 // startRigResidueCensus runs the controller's one rig containment census, in
 // the background so boot never waits on a rig store. A suspended rig is not
 // opened (reading it would restart its retired proxy and Dolt); it is named
-// unchecked.
+// unchecked and censused when it resumes (censusResumedRigs).
 func (cr *CityRuntime) startRigResidueCensus(ctx context.Context) {
 	cfg, cityPath := cr.cfg, cr.cityPath
 	if cfg == nil || len(cfg.Rigs) == 0 || cityPath == "" {
@@ -327,16 +328,63 @@ func (cr *CityRuntime) startRigResidueCensus(ctx context.Context) {
 		}
 		rigs = append(rigs, rig)
 	}
+	cr.rigCensusDeferred = make(map[string]bool, len(unchecked))
+	for _, name := range unchecked {
+		cr.rigCensusDeferred[name] = true
+	}
+	cr.runRigCensus(ctx, cfg, target, rigs, unchecked, "the controller's boot census")
+}
+
+// censusResumedRigs runs, once, the census the boot skipped for a suspended
+// rig, on the first tick that finds neither the rig nor the city suspended, so
+// a rig suspended at boot (one added to a born-split city before its first
+// start, say) is recorded clean or named as residue when it resumes rather
+// than at the next boot. A rig no longer configured is forgotten unopened.
+func (cr *CityRuntime) censusResumedRigs(ctx context.Context, citySuspended bool, suspendedRigs map[string]bool) {
+	if len(cr.rigCensusDeferred) == 0 || cr.cfg == nil || citySuspended {
+		return
+	}
+	configured := make(map[string]bool, len(cr.cfg.Rigs))
+	var resumed []config.Rig
+	for _, rig := range cr.cfg.Rigs {
+		configured[rig.Name] = true
+		if cr.rigCensusDeferred[rig.Name] && !suspendedRigs[rig.Name] {
+			resumed = append(resumed, rig)
+		}
+	}
+	for name := range cr.rigCensusDeferred {
+		if !configured[name] {
+			delete(cr.rigCensusDeferred, name)
+		}
+	}
+	if len(resumed) == 0 {
+		return
+	}
+	target, ok, err := resolveInfraBindingTarget(cr.cityPath, cr.cfg)
+	if err != nil || !ok {
+		return
+	}
+	for _, rig := range resumed {
+		delete(cr.rigCensusDeferred, rig.Name)
+	}
+	cr.runRigCensus(ctx, cr.cfg, target, resumed, nil, "the controller's census when the rig resumed")
+}
+
+// runRigCensus censuses rigs in the background: it records clean each one
+// with nothing to import (recordCensusCleanRows; by names the census in the
+// record) and publishes storage.rig_residue for each that holds the deploy
+// gate, naming unchecked the suspended rigs it left cold.
+func (cr *CityRuntime) runRigCensus(ctx context.Context, cfg *config.City, target infraBindingTarget, rigs []config.Rig, unchecked []string, by string) {
 	census := *cfg
 	census.Rigs = rigs
-	rec, stderr, logPrefix := cr.rec, cr.stderr, cr.logPrefix
+	cityPath, rec, stderr, logPrefix := cr.cityPath, cr.rec, cr.stderr, cr.logPrefix
 	go func() {
 		defer rigResidueCensusDone()
 		if ctx.Err() != nil {
 			return
 		}
 		rows := censusRigs(cityPath, &census, target, false)
-		recordCensusCleanRows(cityPath, target, census.Rigs, rows, stderr, logPrefix)
+		recordCensusCleanRows(cityPath, target, census.Rigs, rows, by, stderr, logPrefix)
 		emitRigResidue(rec, stderr, logPrefix, target, rows, unchecked)
 	}()
 }
@@ -346,7 +394,7 @@ func (cr *CityRuntime) startRigResidueCensus(ctx context.Context) {
 // the binding converged, or one whose add-time census failed, is not asked to
 // be imported. A rig that cannot be recorded keeps its row and is warned on;
 // one the record's gate refuses keeps its row, which says why.
-func recordCensusCleanRows(cityPath string, target infraBindingTarget, rigs []config.Rig, rows []rigCensusRow, stderr io.Writer, logPrefix string) {
+func recordCensusCleanRows(cityPath string, target infraBindingTarget, rigs []config.Rig, rows []rigCensusRow, by string, stderr io.Writer, logPrefix string) {
 	byName := make(map[string]config.Rig, len(rigs))
 	for _, rig := range rigs {
 		byName[rig.Name] = rig
@@ -356,7 +404,7 @@ func recordCensusCleanRows(cityPath string, target infraBindingTarget, rigs []co
 		if !ok {
 			continue
 		}
-		recorded, err := recordCensusClean(cityPath, target, rig, &rows[i], "the controller's boot census")
+		recorded, err := recordCensusClean(cityPath, target, rig, &rows[i], by)
 		switch {
 		case err != nil:
 			if stderr != nil {
@@ -444,7 +492,7 @@ func emitRigResidue(rec events.Recorder, stderr io.Writer, logPrefix string, tar
 	}
 	if len(unchecked) > 0 && stderr != nil {
 		sort.Strings(unchecked)
-		fmt.Fprintf(stderr, "%s: storage: suspended rig(s) %s were not censused at boot; `gc storage status` reports them\n", logPrefix, strings.Join(unchecked, ", ")) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: storage: suspended rig(s) %s were not censused at boot; each is censused when it resumes\n", logPrefix, strings.Join(unchecked, ", ")) //nolint:errcheck // best-effort stderr
 	}
 }
 
