@@ -2718,3 +2718,33 @@ func TestValidateLockedRemoteCacheAcceptsContentIdenticalStatDirtyFiles(t *testi
 		})
 	}
 }
+
+func TestValidateLockedRemoteCacheIgnoresGitTraceOutput(t *testing.T) {
+	useNeutralGitTestEnv(t)
+	cacheDir := t.TempDir()
+	writeTestFile(t, cacheDir, "pack.toml", "[pack]\nname = \"tools\"\nschema = 1\n")
+	commit := seedRepoCacheGit(t, cacheDir)
+
+	t.Setenv("GIT_TRACE", "1")
+	t.Setenv("GIT_TRACE2_PERF", "1")
+	if err := validateLockedRemoteCache("https://example.com/tools.git", cacheDir, commit); err != nil {
+		t.Fatalf("validateLockedRemoteCache with GIT_TRACE set: %v", err)
+	}
+}
+
+func TestRepoCacheGitEnvDropsOnlyTraceVariables(t *testing.T) {
+	t.Setenv("GIT_TRACE", "1")
+	t.Setenv("GIT_TRACE2_PERF", "1")
+	t.Setenv("GC_REPO_CACHE_ENV_PROBE", "kept")
+	env := repoCacheGitEnv()
+	for _, e := range env {
+		if strings.HasPrefix(e, "GIT_TRACE") {
+			t.Errorf("repoCacheGitEnv kept trace variable %q", e)
+		}
+	}
+	for _, want := range []string{"GC_REPO_CACHE_ENV_PROBE=kept", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"} {
+		if !slices.Contains(env, want) {
+			t.Errorf("repoCacheGitEnv missing %q", want)
+		}
+	}
+}
