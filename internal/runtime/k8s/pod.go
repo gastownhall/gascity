@@ -630,11 +630,26 @@ func buildPodEnvWithSecretEnv(cfgEnv map[string]string, podWorkDir, managedServi
 
 var secretProjectionEnvName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// secretEnvNameReserved reports whether a Secret would replace a variable the
+// controller owns. Secret entries follow generated ones, so Kubernetes would let
+// the Secret win while controller reads of the Pod spec still see its own value.
+func secretEnvNameReserved(name string) bool {
+	if !strings.HasPrefix(name, "GC_") && !strings.HasPrefix(name, "BEADS_") {
+		return false
+	}
+	isDoltCredential := strings.Contains(name, "DOLT") &&
+		(strings.HasSuffix(name, "_USER") || strings.HasSuffix(name, "_PASSWORD"))
+	return !isDoltCredential
+}
+
 func validateSecretProjection(secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount) error {
 	seenEnv := make(map[string]struct{}, len(secretEnv))
 	for i, projection := range secretEnv {
 		if strings.TrimSpace(projection.Name) == "" || strings.TrimSpace(projection.Secret) == "" || strings.TrimSpace(projection.Key) == "" {
 			return fmt.Errorf("k8s secret_env[%d] requires non-blank name, secret, and key", i)
+		}
+		if secretEnvNameReserved(projection.Name) {
+			return fmt.Errorf("k8s secret_env[%d].name %q is reserved: GC_ and BEADS_ variables other than Dolt credentials belong to the controller", i, projection.Name)
 		}
 		if !secretProjectionEnvName.MatchString(projection.Name) {
 			return fmt.Errorf("k8s secret_env[%d].name %q is not a valid environment variable name", i, projection.Name)
