@@ -249,6 +249,16 @@ func checkoutExistingCache(cachePath, commit string) error {
 }
 
 func cachedRepoDirty(cachePath string) (bool, error) {
+	// Refresh git's cached stat info before trusting `git status`: a
+	// pack-cache file re-rendered with byte-identical content (e.g. after a
+	// redeploy or a filesystem copy that preserves bytes but not mtime/inode)
+	// makes git's stat-cache optimization report the file as dirty even
+	// though its content matches the index exactly (ga-8705). `update-index
+	// --refresh` is git's supported way to clear that stale stat state
+	// without touching any file. It exits non-zero when a file is genuinely
+	// modified; `git status` below still reports those as dirty, so that
+	// exit status is deliberately ignored here.
+	_, _ = runGit(cachePath, "update-index", "--refresh")
 	// Intentionally NOT --ignored: gitignored build artifacts written into
 	// the cache in place (e.g. Python __pycache__/*.pyc from running a cached
 	// pack's scripts, or a stray .DS_Store) are not local modifications to the

@@ -73,6 +73,9 @@ func TestEnsureRepoInCacheUsesExistingCloneWhenCheckoutMatches(t *testing.T) {
 		if reflect.DeepEqual(args, []string{"rev-parse", "HEAD"}) {
 			return "abc123", nil
 		}
+		if reflect.DeepEqual(args, []string{"update-index", "--refresh"}) {
+			return "", nil
+		}
 		if reflect.DeepEqual(args, []string{"status", "--porcelain"}) {
 			return "", nil
 		}
@@ -89,6 +92,7 @@ func TestEnsureRepoInCacheUsesExistingCloneWhenCheckoutMatches(t *testing.T) {
 	}
 	want := [][]string{
 		{"rev-parse", "HEAD"},
+		{"update-index", "--refresh"},
 		{"status", "--porcelain"},
 	}
 	if !reflect.DeepEqual(calls, want) {
@@ -118,6 +122,8 @@ func TestEnsureRepoInCacheRepairsDirtyMatchingCheckout(t *testing.T) {
 		switch args[0] {
 		case "rev-parse":
 			return "abc123", nil
+		case "update-index":
+			return "", nil
 		case "status":
 			return " M pack.toml", nil
 		case "reset":
@@ -142,6 +148,7 @@ func TestEnsureRepoInCacheRepairsDirtyMatchingCheckout(t *testing.T) {
 	}
 	want := [][]string{
 		{"rev-parse", "HEAD"},
+		{"update-index", "--refresh"},
 		{"status", "--porcelain"},
 		{"reset", "--hard", "--quiet", "abc123"},
 		{"clean", "-ffdx", "--quiet"},
@@ -222,6 +229,8 @@ func TestEnsureRepoInCacheReclonesInvalidExistingCache(t *testing.T) {
 		switch args[0] {
 		case "rev-parse":
 			return "abc123", nil
+		case "update-index":
+			return "", nil
 		case "status":
 			return "", nil
 		case "checkout":
@@ -257,6 +266,7 @@ func TestEnsureRepoInCacheReclonesInvalidExistingCache(t *testing.T) {
 	}
 	want := [][]string{
 		{"rev-parse", "HEAD"},
+		{"update-index", "--refresh"},
 		{"status", "--porcelain"},
 		{"clone", "--quiet", "https://github.com/example/repo", path},
 		{"checkout", "--quiet", "abc123"},

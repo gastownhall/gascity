@@ -575,6 +575,16 @@ func validateLockedRemoteCache(source, cacheDir, commit string) error {
 	if !gitutil.SameCommit(head, commit) {
 		return fmt.Errorf("cached import %s is checked out at %s, expected %s; run \"gc import install\"", source, strings.TrimSpace(head), commit)
 	}
+	// Refresh git's cached stat info before trusting `git status`: a
+	// pack-cache file re-rendered with byte-identical content (e.g. after a
+	// redeploy or a filesystem copy that preserves bytes but not mtime/inode)
+	// makes git's stat-cache optimization report the file as dirty even
+	// though its content matches the index exactly (ga-8705). `update-index
+	// --refresh` is git's supported way to clear that stale stat state
+	// without touching any file. It exits non-zero when a file is genuinely
+	// modified; `git status` below still reports those as dirty, so that
+	// exit status is deliberately ignored here.
+	_, _ = runRepoCacheGit(cacheDir, "update-index", "--refresh")
 	// Intentionally NOT --ignored: gitignored build artifacts that land in the
 	// cache in place (Python __pycache__/*.pyc from a cached pack's scripts, a
 	// stray .DS_Store, etc.) are not local edits to the pack and must not trip

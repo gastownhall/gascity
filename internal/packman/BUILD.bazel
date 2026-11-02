@@ -90,6 +90,7 @@ go_test(
         "network_git_timeout_test.go",
         "prune_test.go",
         "registry_release_test.go",
+        "repro_8705_stat_dirty_cache_test.go",
         "resolve_test.go",
         "testenv_import_test.go",
     ],

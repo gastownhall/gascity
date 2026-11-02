@@ -300,6 +300,8 @@ content_hash = "sha256:deadbeef"
 		switch strings.Join(args, " ") {
 		case "rev-parse HEAD":
 			return commit, nil
+		case "update-index --refresh":
+			return "", nil
 		case "status --porcelain":
 			return "", nil
 		default:
