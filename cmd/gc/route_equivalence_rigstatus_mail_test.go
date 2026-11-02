@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -350,14 +352,27 @@ func TestRigStatusJSONRouteEquivalence(t *testing.T) {
 	}
 }
 
+// routeEquivalenceMailProvider is a beadmail provider over the store the
+// messaging class reads on a city that relocates no class, as the fixture
+// cities here do: the city's store, through the split-strict gate's class view
+// when that gate runs (resolveClassStore's identity branch). Mail it seeds or
+// drains is where both routes read it.
+func routeEquivalenceMailProvider(store beads.Store) *beadmail.Provider {
+	return beadmail.New(splitStrictClassView(store))
+}
+
 // mailRouteCity builds a city with one "lead" session and mail for it. It
 // returns the harness and the IDs it seeded ("lead", and "gone" for a closed
-// session whose mailbox still holds one message).
+// session whose mailbox still holds one message). It also seeds "boss", a
+// configured named session whose closed earlier incarnation holds one message
+// and whose live incarnation holds another, and two sessions aliased
+// "north/dup" and "south/dup", which make a bare "dup" ambiguous.
 func mailRouteCity(t *testing.T) (*charHarness, map[string]string) {
 	t.Helper()
 	clearInheritedBeadsEnv(t)
 	resetRouteEquivalenceIdentityEnv(t)
-	cityToml := charCityBasic + "\n[[agent]]\nname = \"lead\"\nmax_active_sessions = 1\n"
+	cityToml := charCityBasic + "\n[[agent]]\nname = \"lead\"\nmax_active_sessions = 1\n" +
+		"\n[[agent]]\nname = \"boss\"\n\n[[named_session]]\ntemplate = \"boss\"\n"
 	ids := map[string]string{}
 	h := newCharCity(t, cityToml, func(t *testing.T, store beads.Store) {
 		lead, err := store.Create(routeEquivalenceSessionBead(map[string]string{
@@ -374,12 +389,24 @@ func mailRouteCity(t *testing.T) (*charHarness, map[string]string) {
 			t.Fatalf("seed gone session: %v", err)
 		}
 		ids["gone"] = gone.ID
-		mp := beadmail.New(store)
+		bossMeta := func() map[string]string {
+			return map[string]string{
+				"alias": "boss", "session_name": "boss", "template": "boss",
+				"configured_named_session": "true", "configured_named_identity": "boss",
+			}
+		}
+		bossGone, err := store.Create(routeEquivalenceSessionBead(bossMeta()))
+		if err != nil {
+			t.Fatalf("seed closed boss incarnation: %v", err)
+		}
+		mp := routeEquivalenceMailProvider(store)
 		first, err := mp.Send("human", "lead", "one", "body")
 		if err != nil {
 			t.Fatalf("seed mail: %v", err)
 		}
-		for _, msg := range []struct{ to, subject string }{{"lead", "two"}, {"lead", "three"}, {"human", "four"}, {gone.ID, "five"}} {
+		for _, msg := range []struct{ to, subject string }{
+			{"lead", "two"}, {"lead", "three"}, {"human", "four"}, {gone.ID, "five"}, {bossGone.ID, "six"},
+		} {
 			if _, err := mp.Send("human", msg.to, msg.subject, "body"); err != nil {
 				t.Fatalf("seed mail: %v", err)
 			}
@@ -389,6 +416,24 @@ func mailRouteCity(t *testing.T) (*charHarness, map[string]string) {
 		}
 		if err := store.Close(gone.ID); err != nil {
 			t.Fatalf("close gone session: %v", err)
+		}
+		if err := store.Close(bossGone.ID); err != nil {
+			t.Fatalf("close boss incarnation: %v", err)
+		}
+		boss, err := store.Create(routeEquivalenceSessionBead(bossMeta()))
+		if err != nil {
+			t.Fatalf("seed live boss incarnation: %v", err)
+		}
+		ids["boss"] = boss.ID
+		if _, err := mp.Send("human", "boss", "seven", "body"); err != nil {
+			t.Fatalf("seed mail: %v", err)
+		}
+		for _, alias := range []string{"north/dup", "south/dup"} {
+			if _, err := store.Create(routeEquivalenceSessionBead(map[string]string{
+				"alias": alias, "session_name": strings.ReplaceAll(alias, "/", "--"), "template": "lead",
+			})); err != nil {
+				t.Fatalf("seed %s session: %v", alias, err)
+			}
 		}
 	})
 	t.Setenv("GC_CITY_PATH", h.cityPath)
@@ -402,20 +447,30 @@ func TestMailCountRouteEquivalence(t *testing.T) {
 		env           func(ids map[string]string) map[string]string
 		jsonOut       bool
 		wantRecipient string
+		wantTotal     int
+		wantUnread    int
 		wantFail      bool
+		wantStderr    string
 	}
 	cases := []mailCountCase{
-		{name: "by session id", args: func(ids map[string]string) []string { return []string{ids["lead"]} }, jsonOut: true, wantRecipient: "lead"},
-		{name: "by alias", args: func(map[string]string) []string { return []string{"lead"} }, jsonOut: true, wantRecipient: "lead"},
+		{name: "by session id", args: func(ids map[string]string) []string { return []string{ids["lead"]} }, jsonOut: true, wantRecipient: "lead", wantTotal: 3, wantUnread: 2},
+		{name: "by alias", args: func(map[string]string) []string { return []string{"lead"} }, jsonOut: true, wantRecipient: "lead", wantTotal: 3, wantUnread: 2},
 		{name: "default GC_SESSION_ID", env: func(ids map[string]string) map[string]string {
 			return map[string]string{"GC_SESSION_ID": ids["lead"]}
-		}, jsonOut: true, wantRecipient: "lead"},
+		}, jsonOut: true, wantRecipient: "lead", wantTotal: 3, wantUnread: 2},
 		{name: "stale GC_SESSION_ID falls back to GC_ALIAS", env: func(map[string]string) map[string]string {
 			return map[string]string{"GC_SESSION_ID": "gc-999", "GC_ALIAS": "lead"}
-		}, jsonOut: true, wantRecipient: "lead"},
+		}, jsonOut: true, wantRecipient: "lead", wantTotal: 3, wantUnread: 2},
 		{name: "text by session id", args: func(ids map[string]string) []string { return []string{ids["lead"]} }},
-		{name: "default human", jsonOut: true, wantRecipient: "human"},
+		{name: "default human", jsonOut: true, wantRecipient: "human", wantTotal: 1, wantUnread: 1},
+		// The CLI reads "" and "human/" as the human mailbox; the supervisor
+		// must count that mailbox, not every message in the city or none.
+		{name: "empty recipient", args: func(map[string]string) []string { return []string{""} }, jsonOut: true, wantRecipient: "human", wantTotal: 1, wantUnread: 1},
+		{name: "human with a trailing slash", args: func(map[string]string) []string { return []string{"human/"} }, jsonOut: true, wantRecipient: "human", wantTotal: 1, wantUnread: 1},
+		// The live incarnation's mailbox, not the closed incarnation's mail too.
+		{name: "named session with a closed incarnation", args: func(map[string]string) []string { return []string{"boss"} }, jsonOut: true, wantRecipient: "boss", wantTotal: 1, wantUnread: 1},
 		{name: "unresolvable recipient", args: func(map[string]string) []string { return []string{"nosuch"} }, jsonOut: true, wantFail: true},
+		{name: "ambiguous recipient", args: func(map[string]string) []string { return []string{"dup"} }, jsonOut: true, wantFail: true, wantStderr: "matches 2 sessions"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -448,6 +503,9 @@ func TestMailCountRouteEquivalence(t *testing.T) {
 				if stripRouteLog(apiErr) != stripRouteLog(localErr) {
 					t.Fatalf("stderr differs:\napi:   %s\nlocal: %s", apiErr, localErr)
 				}
+				if !strings.Contains(string(localErr), tc.wantStderr) {
+					t.Fatalf("stderr = %q, want it to contain %q", localErr, tc.wantStderr)
+				}
 				return
 			}
 			requireRoute(t, apiErr, "mail count", "api")
@@ -471,13 +529,11 @@ func TestMailCountRouteEquivalence(t *testing.T) {
 			if got.Recipient != tc.wantRecipient {
 				t.Fatalf("recipient = %q, want %q (%s)", got.Recipient, tc.wantRecipient, apiOut)
 			}
-			if tc.wantRecipient == "lead" {
-				if got.Total != 3 || got.Unread != 2 {
-					t.Fatalf("counts = %d/%d, want 3/2 (%s)", got.Total, got.Unread, apiOut)
-				}
-				if !containsString(got.Recipients, ids["lead"]) {
-					t.Fatalf("recipients = %v, want the session bead id %q", got.Recipients, ids["lead"])
-				}
+			if got.Total != tc.wantTotal || got.Unread != tc.wantUnread {
+				t.Fatalf("counts = %d/%d, want %d/%d (%s)", got.Total, got.Unread, tc.wantTotal, tc.wantUnread, apiOut)
+			}
+			if id := ids[tc.wantRecipient]; id != "" && !containsString(got.Recipients, id) {
+				t.Fatalf("recipients = %v, want the session bead id %q", got.Recipients, id)
 			}
 		})
 	}
@@ -513,6 +569,28 @@ func TestMailCheckRouteEquivalence(t *testing.T) {
 			args:     func(map[string]string) []string { return []string{"human"} },
 			wantExit: 1,
 		},
+		{
+			name:       "empty recipient",
+			args:       func(map[string]string) []string { return []string{""} },
+			wantStdout: "1 unread message(s) for human\n",
+		},
+		{
+			name:       "human with a trailing slash",
+			args:       func(map[string]string) []string { return []string{"human/"} },
+			wantStdout: "1 unread message(s) for human\n",
+		},
+		{
+			name:       "named session with a closed incarnation",
+			args:       func(map[string]string) []string { return []string{"boss"} },
+			wantStdout: "1 unread message(s) for boss\n",
+		},
+		{
+			name:       "ambiguous recipient",
+			args:       func(map[string]string) []string { return []string{"dup"} },
+			wantExit:   1,
+			wantReason: "recipient-unresolved",
+			wantStderr: "matches 2 sessions",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -523,7 +601,7 @@ func TestMailCheckRouteEquivalence(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				mp := beadmail.New(store)
+				mp := routeEquivalenceMailProvider(store)
 				msgs, err := mp.Check("human")
 				if err != nil {
 					t.Fatal(err)
@@ -569,6 +647,93 @@ func TestMailCheckRouteEquivalence(t *testing.T) {
 			}
 			if tc.wantStderr != "" && !strings.Contains(string(localErr), tc.wantStderr) {
 				t.Fatalf("stderr = %q, want it to contain %q", localErr, tc.wantStderr)
+			}
+		})
+	}
+}
+
+// TestMailReadsAskSupervisorWhenLocalStoreFails pins the API route of
+// `gc mail count` and plain `gc mail check` when the CLI cannot read its own
+// bead store but the supervisor can answer: the read still asks the
+// supervisor, about the identity as given, and GC_DEBUG notes why the CLI did
+// not resolve it. The local route reads the failing store and cannot answer,
+// which keeps the test from passing without the failure in place.
+func TestMailReadsAskSupervisorWhenLocalStoreFails(t *testing.T) {
+	cases := []struct {
+		name       string
+		cmdName    string
+		run        func(c *api.Client, nilReason string, stdout, stderr io.Writer) int
+		jsonOut    bool
+		wantStdout string
+	}{
+		{
+			name:    "mail count --json",
+			cmdName: "mail count",
+			run: func(c *api.Client, nilReason string, stdout, stderr io.Writer) int {
+				return routeMailCount("", []string{"lead"}, c, nilReason, true, stdout, stderr)
+			},
+			jsonOut: true,
+		},
+		{
+			name:    "mail count",
+			cmdName: "mail count",
+			run: func(c *api.Client, nilReason string, stdout, stderr io.Writer) int {
+				return routeMailCount("", []string{"lead"}, c, nilReason, false, stdout, stderr)
+			},
+			wantStdout: "3 total, 2 unread for lead\n",
+		},
+		{
+			name:    "mail check",
+			cmdName: "mail check",
+			run: func(c *api.Client, nilReason string, stdout, stderr io.Writer) int {
+				return routeMailCheck("", []string{"lead"}, false, "", c, nilReason, stdout, stderr)
+			},
+			wantStdout: "2 unread message(s) for lead\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _ := mailRouteCity(t)
+			client := serveStateClient(t, h.cs)
+			// The supervisor opened its store above. From here on every store
+			// the CLI opens is a bead provider whose every call fails.
+			script := filepath.Join(t.TempDir(), "unreachable-beads.sh")
+			if err := os.WriteFile(script, []byte("#!/bin/sh\necho 'local bead store unreachable' >&2\nexit 1\n"), 0o755); err != nil {
+				t.Fatalf("write bead provider script: %v", err)
+			}
+			t.Setenv("GC_BEADS", "exec:"+script)
+
+			var apiOut, apiErr bytes.Buffer
+			if exit := tc.run(client, "", &apiOut, &apiErr); exit != 0 {
+				t.Fatalf("api exit = %d, want 0\nstderr: %s", exit, apiErr.String())
+			}
+			requireRoute(t, apiErr.Bytes(), tc.cmdName, "api")
+			if n := strings.Count(apiErr.String(), "route="); n != 1 {
+				t.Fatalf("route=... lines = %d, want 1:\n%s", n, apiErr.String())
+			}
+			const note = `asking the supervisor about "lead" as given`
+			if !strings.Contains(apiErr.String(), note) || !strings.Contains(apiErr.String(), "local bead store unreachable") {
+				t.Fatalf("api stderr = %q, want the GC_DEBUG note %q carrying the store error", apiErr.String(), note)
+			}
+			if tc.jsonOut {
+				validateJSONAgainstResultSchema(t, []string{"mail", "count"}, apiOut.Bytes())
+				var got mailCountJSONResult
+				if err := json.Unmarshal(apiOut.Bytes(), &got); err != nil {
+					t.Fatalf("decode: %v\n%s", err, apiOut.String())
+				}
+				if got.Recipient != "lead" || strings.Join(got.Recipients, ",") != "lead" || got.Total != 3 || got.Unread != 2 {
+					t.Fatalf("api result = %+v, want recipient lead, recipients [lead], counts 3/2", got)
+				}
+			} else if got := apiOut.String(); got != tc.wantStdout {
+				t.Fatalf("api stdout = %q, want %q", got, tc.wantStdout)
+			}
+
+			var localOut, localErr bytes.Buffer
+			if exit := tc.run(nil, "controller-down", &localOut, &localErr); exit != 1 || localOut.Len() != 0 {
+				t.Fatalf("local exit = %d stdout = %q, want 1 and empty: the failing store must fail the local route", exit, localOut.String())
+			}
+			if !strings.Contains(localErr.String(), "local bead store unreachable") {
+				t.Fatalf("local stderr = %q, want the store error", localErr.String())
 			}
 		})
 	}

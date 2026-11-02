@@ -1539,6 +1539,69 @@ func TestResolveMailTargetsForCommand_FailsWhenStoreOpenErrors(t *testing.T) {
 	}
 }
 
+// TestMailTargetLookupFailuresPrintAndClassify pins how a failed mail target
+// lookup reads: printed after the command's name, with the gc doctor hint only
+// for a store that does not open, and classified so an API read takes the
+// local path only for a target that names no mailbox or several.
+func TestMailTargetLookupFailuresPrintAndClassify(t *testing.T) {
+	noIdentity := noMailIdentityError{candidates: []string{"gc-999", "nosuch"}}
+	for _, tc := range []struct {
+		name           string
+		err            error
+		wantStderr     string
+		wantUnresolved bool
+	}{
+		{
+			name:       "store does not open",
+			err:        mailStoreOpenError{err: errors.New("opening bead store: boom")},
+			wantStderr: "gc mail inbox: opening bead store: boom\nhint: run \"gc doctor\" for diagnostics\n",
+		},
+		{
+			name:       "store read fails",
+			err:        fmt.Errorf("listing sessions: %w", errors.New("boom")),
+			wantStderr: "gc mail inbox: listing sessions: boom\n",
+		},
+		{
+			name:           "no default identity resolves",
+			err:            noIdentity,
+			wantStderr:     "gc mail inbox: no mail identity resolved (tried [gc-999 nosuch])\n",
+			wantUnresolved: true,
+		},
+		{
+			name:           "ambiguous target",
+			err:            fmt.Errorf("%w: %q matches 2 sessions", session.ErrAmbiguous, "dup"),
+			wantStderr:     "gc mail inbox: " + session.ErrAmbiguous.Error() + ": \"dup\" matches 2 sessions\n",
+			wantUnresolved: true,
+		},
+		{
+			name:           "configured named session conflict",
+			err:            fmt.Errorf("resolving configured named session %q: %w", "boss", errNamedSessionConflict),
+			wantStderr:     "gc mail inbox: resolving configured named session \"boss\": configured named session conflict\n",
+			wantUnresolved: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			if mailTargetLookupOK(tc.err, &stderr, "gc mail inbox") {
+				t.Fatal("mailTargetLookupOK = true for a failed lookup")
+			}
+			if got := stderr.String(); got != tc.wantStderr {
+				t.Fatalf("stderr = %q, want %q", got, tc.wantStderr)
+			}
+			if got := mailTargetUnresolved(tc.err); got != tc.wantUnresolved {
+				t.Fatalf("mailTargetUnresolved = %v, want %v", got, tc.wantUnresolved)
+			}
+		})
+	}
+	if !errors.Is(noIdentity, session.ErrSessionNotFound) {
+		t.Fatal("noMailIdentityError does not match session.ErrSessionNotFound")
+	}
+	var stderr bytes.Buffer
+	if !mailTargetLookupOK(nil, &stderr, "gc mail inbox") || stderr.Len() != 0 {
+		t.Fatalf("mailTargetLookupOK(nil) = false or printed %q", stderr.String())
+	}
+}
+
 func TestConfiguredMailboxAddressDoesNotRequireProviderResolution(t *testing.T) {
 	cityPath := t.TempDir()
 	cityToml := `[workspace]
