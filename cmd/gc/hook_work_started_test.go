@@ -1295,3 +1295,38 @@ func TestHookClaimRefusesTheStartedWriteWhenTheCityRecordsOnlyByCAS(t *testing.T
 		})
 	}
 }
+
+// TestHookClaimRecordsByCASWithoutAskingTheMode (AC-6, #8313): where the
+// session store resolves a conditional writer, the record and the forget are
+// revision CAS end to end and the mode predicate is never asked — a nil one
+// (a caller that wired none) included.
+func TestHookClaimRecordsByCASWithoutAskingTheMode(t *testing.T) {
+	never := func() bool {
+		t.Fatal("the mode predicate was asked on a store with a conditional writer")
+		return true
+	}
+	row := newStartedRow(t, nil) // capable: CAS open, blind writes refused
+	opts := startedOpts(startedEnv(startedToken, "7"))
+	opts.StartedCASOnly = never
+	l := &startedLog{}
+	stdout := &orderedWriter{l: l}
+	var stderr bytes.Buffer
+	code := doHookClaim("q", "/rig", opts, l.ops(startedRoutedWork, row, nil), stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("code %d; stderr=%s", code, stderr.String())
+	}
+	if row.store.rowWrites != 1 || !row.cell(t).Names(startedStoreRef, "work-1", 7) {
+		t.Fatalf("conditional row writes = %d, cell %+v; want one CAS recording the claim", row.store.rowWrites, row.cell(t))
+	}
+	if len(l.unrecorded) != 0 || strings.Contains(stderr.String(), "delivering it anyway") {
+		t.Fatalf("unrecorded %v, stderr %q; want a recorded claim", l.unrecorded, stderr.String())
+	}
+	// The forget is CAS too, without the mode.
+	if err := forgetWorkStarted(row.front, startedSessionID, hookStartedKey{Store: startedStoreRef, Bead: "work-1"}, never); err != nil {
+		t.Fatalf("forgetWorkStarted: %v", err)
+	}
+	if row.cell(t).Names(startedStoreRef, "work-1", 7) {
+		t.Fatalf("work_started %+v; want the entry forgotten", row.cell(t))
+	}
+}
