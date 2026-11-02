@@ -185,6 +185,7 @@ go_test(
         "orphan_scan_abandoned_test.go",
         "orphan_scan_bound_test.go",
         "orphan_scan_latch_test.go",
+        "orphan_termination_cancel_test.go",
         "overlay_test.go",
         "pending_create_lease_test.go",
         "pending_interaction_queue_test.go",

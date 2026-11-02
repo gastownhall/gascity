@@ -796,7 +796,8 @@ type orphanScanAnswer struct {
 // FindRuntimesBySessionID): the orphans the scan did surface are still
 // terminated unless one of them is LiveUnlisted, which terminates none, and
 // matching the started replacement is impossible because it does not exist
-// yet.
+// yet. Terminations stop when the start's context ends, keeping the errors
+// of the kills that already failed beside the context error.
 //
 // The scan can wedge on a hung tmux subprocess or a stalled process-table read
 // and cannot be canceled, so the wait for it is bounded by the caller's
@@ -860,6 +861,15 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 	}
 	var termErrs []error
 	for _, live := range orphans {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// The start whose sweep this is is gone: stop grinding through the
+			// roots it asked for, and keep the errors of the kills that already
+			// failed beside the cancellation.
+			if len(termErrs) > 0 {
+				return fmt.Errorf("%d orphaned runtime(s) not confirmed dead: %w", len(termErrs), errors.Join(append(termErrs, ctxErr)...))
+			}
+			return fmt.Errorf("terminating orphans for session %s: %w", sessionID, ctxErr)
+		}
 		if err := scanner.TerminateRuntime(live); err != nil {
 			log.Printf("session: terminating orphaned runtime for %s pid=%d provider_name=%q: %v", sessionID, live.PID, live.ProviderName, err)
 			termErrs = append(termErrs, fmt.Errorf("orphan pid=%d provider_name=%q: %w", live.PID, live.ProviderName, err))
