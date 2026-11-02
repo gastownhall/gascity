@@ -18,15 +18,16 @@ import (
 //
 // A graph.v2 workflow root and its steps live in the relocated binding; its
 // synthetic input convoy and the source work it tracks stay in the work store.
-// The production InputDone / SkipDoneWorkflow / ReclaimStale seams run a bd
+// The production InputVerdict / RetireWorkflow / ReclaimStale seams run a bd
 // subprocess in the agent's work directory, so on a split city they could not
 // read the root: the "input work already terminal, retire the workflow" path
 // never fired, and the pool re-served the same step every tick.
 //
 // The work store here is a real FileStore and the binding a real SQLite store,
 // fenced to the infrastructure namespaces. The base seams are the production
-// functions (workflowInputDone, skipDoneWorkflow) over the work store, exactly
-// as hookInputDoneWithBdStore runs them over the bd store.
+// functions (workflowInputDone, skipDoneWorkflow, failPurgedWorkflow) over the
+// work store, exactly as hookInputVerdictWithBdStore and
+// hookRetireWorkflowWithBdStore run them over the bd store.
 
 type doneWorkflowSplitFixture struct {
 	work     beads.Store
@@ -99,11 +100,14 @@ func newDoneWorkflowSplitFixture(t *testing.T, sourceClosed bool) doneWorkflowSp
 func (f doneWorkflowSplitFixture) baseOps(t *testing.T) hookClaimOps {
 	t.Helper()
 	return hookClaimOps{
-		InputDone: func(_ context.Context, _ string, _ []string, candidate beads.Bead, ids []string) (string, bool, error) {
-			return workflowInputDone(f.work, candidate, ids)
+		InputVerdict: func(ctx context.Context, _ string, _ []string, candidate beads.Bead, ids []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
+			return workflowInputDone(ctx, f.work, candidate, ids, prove)
 		},
-		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
-			return skipDoneWorkflow(f.work, rootID)
+		RetireWorkflow: func(ctx context.Context, _ string, _ []string, verdict workflowInputVerdict) error {
+			if verdict.State == workflowInputPurged {
+				return failPurgedWorkflow(ctx, f.work, verdict.RootID)
+			}
+			return skipDoneWorkflow(f.work, verdict.RootID)
 		},
 		ReadWorkMeta: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, error) {
 			return f.work.Get(beadID)

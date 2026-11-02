@@ -830,31 +830,34 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 	// decided by the same read the claim-time seams use — the work leg first,
 	// the binding only on a proven absence — so a work-resident workflow
 	// keeps the exact unrouted call.
-	ops.InputDone = func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
+	ops.InputVerdict = func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
 		rootID := workflowRootIDForInputCheck(candidate)
 		if rootID == "" {
-			return base.InputDone(ctx, dir, env, candidate, identityCandidates)
+			return base.InputVerdict(ctx, dir, env, candidate, identityCandidates, prove)
 		}
 		resident, err := route.resolvesToBinding(ctx, base, dir, env, rootID)
 		if err != nil {
-			return rootID, false, err
+			return workflowInputVerdict{RootID: rootID}, err
 		}
 		if !resident {
-			return base.InputDone(ctx, dir, env, candidate, identityCandidates)
+			return base.InputVerdict(ctx, dir, env, candidate, identityCandidates, prove)
 		}
 		work := base.WorkflowStore(ctx, dir, env, rootID, "")
-		return workflowInputDoneAcross(route.class, work, candidate, identityCandidates)
+		return workflowInputDoneAcross(ctx, route.class, work, candidate, identityCandidates, nil)
 	}
 
-	ops.SkipDoneWorkflow = func(ctx context.Context, dir string, env []string, rootID string) error {
-		resident, err := route.resolvesToBinding(ctx, base, dir, env, rootID)
+	ops.RetireWorkflow = func(ctx context.Context, dir string, env []string, verdict workflowInputVerdict) error {
+		resident, err := route.resolvesToBinding(ctx, base, dir, env, verdict.RootID)
 		if err != nil {
 			return err
 		}
-		if resident {
-			return skipDoneWorkflow(route.class, rootID)
+		if !resident {
+			return base.RetireWorkflow(ctx, dir, env, verdict)
 		}
-		return base.SkipDoneWorkflow(ctx, dir, env, rootID)
+		if verdict.State == workflowInputPurged {
+			return failPurgedWorkflow(ctx, route.class, verdict.RootID)
+		}
+		return skipDoneWorkflow(route.class, verdict.RootID)
 	}
 
 	// A stale-lease reclaim of a binding-resident bead belongs to the binding.

@@ -59,10 +59,17 @@ func seedDoneWorkflow(t *testing.T, memberStatus string) (*beads.MemStore, beads
 	return store, root, step
 }
 
+// workflowInputCompleteIn is workflowInputDone over store with no absence
+// prover, as the root id it resolved and whether the input is complete.
+func workflowInputCompleteIn(store beads.Store, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
+	verdict, err := workflowInputDone(context.Background(), store, candidate, identityCandidates, nil)
+	return verdict.RootID, verdict.State == workflowInputComplete, err
+}
+
 func TestWorkflowInputDoneDetectsTerminalConvoyMember(t *testing.T) {
 	store, root, step := seedDoneWorkflow(t, "closed")
 
-	rootID, done, err := workflowInputDone(store, root, nil)
+	rootID, done, err := workflowInputCompleteIn(store, root, nil)
 	if err != nil {
 		t.Fatalf("workflowInputDone(root): %v", err)
 	}
@@ -70,7 +77,7 @@ func TestWorkflowInputDoneDetectsTerminalConvoyMember(t *testing.T) {
 		t.Fatalf("root: done=%v rootID=%q, want done=true rootID=%q", done, rootID, root.ID)
 	}
 
-	rootID, done, err = workflowInputDone(store, step, nil)
+	rootID, done, err = workflowInputCompleteIn(store, step, nil)
 	if err != nil {
 		t.Fatalf("workflowInputDone(step): %v", err)
 	}
@@ -81,7 +88,7 @@ func TestWorkflowInputDoneDetectsTerminalConvoyMember(t *testing.T) {
 
 func TestWorkflowInputDoneFalseWhileMemberOpen(t *testing.T) {
 	store, root, _ := seedDoneWorkflow(t, "open")
-	_, done, err := workflowInputDone(store, root, nil)
+	_, done, err := workflowInputCompleteIn(store, root, nil)
 	if err != nil {
 		t.Fatalf("workflowInputDone: %v", err)
 	}
@@ -98,7 +105,7 @@ func TestWorkflowInputDoneFalseWithoutInputConvoy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	_, done, err := workflowInputDone(store, root, nil)
+	_, done, err := workflowInputCompleteIn(store, root, nil)
 	if err != nil {
 		t.Fatalf("workflowInputDone: %v", err)
 	}
@@ -109,7 +116,7 @@ func TestWorkflowInputDoneFalseWithoutInputConvoy(t *testing.T) {
 
 func TestWorkflowInputDoneTrueWhenMemberHandedOffToOtherLane(t *testing.T) {
 	store, root, _ := seedDoneWorkflow(t, "handed_off")
-	_, done, err := workflowInputDone(store, root, []string{"gastown__polecat-gc-xxxx"})
+	_, done, err := workflowInputCompleteIn(store, root, []string{"gastown__polecat-gc-xxxx"})
 	if err != nil {
 		t.Fatalf("workflowInputDone: %v", err)
 	}
@@ -144,7 +151,7 @@ func TestWorkflowInputDoneFalseWhenMemberHeldBySiblingSeatOfSameWorkflow(t *test
 		t.Fatalf("update work: %v", err)
 	}
 
-	_, done, err := workflowInputDone(store, step, []string{"homeops__homeops-luna-gc-9b2b0a"})
+	_, done, err := workflowInputCompleteIn(store, step, []string{"homeops__homeops-luna-gc-9b2b0a"})
 	if err != nil {
 		t.Fatalf("workflowInputDone: %v", err)
 	}
@@ -176,7 +183,7 @@ func TestWorkflowInputDoneFalseWhenMemberHeldBySiblingSeatWhoseStepWasReopened(t
 		t.Fatalf("update work: %v", err)
 	}
 
-	_, done, err := workflowInputDone(store, step, []string{"homeops__homeops-luna-gc-9b2b0a"})
+	_, done, err := workflowInputCompleteIn(store, step, []string{"homeops__homeops-luna-gc-9b2b0a"})
 	if err != nil {
 		t.Fatalf("workflowInputDone: %v", err)
 	}
@@ -206,7 +213,7 @@ func TestWorkflowInputDoneFalseWhenMemberHeldBySessionIDOnlyProvenance(t *testin
 		t.Fatalf("update work: %v", err)
 	}
 
-	_, done, err := workflowInputDone(store, step, []string{"homeops__homeops-luna-gc-9b2b0a"})
+	_, done, err := workflowInputCompleteIn(store, step, []string{"homeops__homeops-luna-gc-9b2b0a"})
 	if err != nil {
 		t.Fatalf("workflowInputDone: %v", err)
 	}
@@ -228,7 +235,7 @@ func TestWorkflowInputDoneFalseWhenMemberAssignedToIdentityCandidate(t *testing.
 	if err := store.Update(members[0].ID, beads.UpdateOpts{Assignee: strPtr("gastown__polecat-gc-xxxx")}); err != nil {
 		t.Fatalf("update work: %v", err)
 	}
-	_, done, err := workflowInputDone(store, root, []string{"gastown__polecat-gc-xxxx"})
+	_, done, err := workflowInputCompleteIn(store, root, []string{"gastown__polecat-gc-xxxx"})
 	if err != nil {
 		t.Fatalf("workflowInputDone: %v", err)
 	}
@@ -239,7 +246,7 @@ func TestWorkflowInputDoneFalseWhenMemberAssignedToIdentityCandidate(t *testing.
 
 func TestWorkflowInputDoneFalseWhenMemberUnassignedOpen(t *testing.T) {
 	store, root, _ := seedDoneWorkflow(t, "open")
-	_, done, err := workflowInputDone(store, root, []string{"gastown__polecat-gc-xxxx"})
+	_, done, err := workflowInputCompleteIn(store, root, []string{"gastown__polecat-gc-xxxx"})
 	if err != nil {
 		t.Fatalf("workflowInputDone: %v", err)
 	}
@@ -294,11 +301,11 @@ func TestDoHookClaimSkipsWorkflowWhoseInputIsDone(t *testing.T) {
 			claimed = true
 			return beads.Bead{ID: beadID, Assignee: assignee}, true, nil
 		},
-		InputDone: func(_ context.Context, _ string, _ []string, _ beads.Bead, _ []string) (string, bool, error) {
-			return "root-1", true, nil
+		InputVerdict: func(_ context.Context, _ string, _ []string, _ beads.Bead, _ []string, _ workflowInputAbsenceProver) (workflowInputVerdict, error) {
+			return workflowInputVerdict{RootID: "root-1", State: workflowInputComplete}, nil
 		},
-		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
-			skipped = rootID
+		RetireWorkflow: func(_ context.Context, _ string, _ []string, verdict workflowInputVerdict) error {
+			skipped = verdict.RootID
 			return nil
 		},
 		DrainAck: func(io.Writer) error {
@@ -357,11 +364,11 @@ func TestDoHookClaimSkipsExistingAssignmentWhoseInputIsDone(t *testing.T) {
 			t.Fatalf("unexpected claim of %s", beadID)
 			return beads.Bead{}, false, nil
 		},
-		InputDone: func(_ context.Context, _ string, _ []string, _ beads.Bead, _ []string) (string, bool, error) {
-			return "root-1", true, nil
+		InputVerdict: func(_ context.Context, _ string, _ []string, _ beads.Bead, _ []string, _ workflowInputAbsenceProver) (workflowInputVerdict, error) {
+			return workflowInputVerdict{RootID: "root-1", State: workflowInputComplete}, nil
 		},
-		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
-			skipped = rootID
+		RetireWorkflow: func(_ context.Context, _ string, _ []string, verdict workflowInputVerdict) error {
+			skipped = verdict.RootID
 			return nil
 		},
 		DrainAck: func(io.Writer) error { return nil },
@@ -410,11 +417,11 @@ func TestDoHookClaimStillClaimsWhenInputNotDone(t *testing.T) {
 			claimedID = beadID
 			return beads.Bead{ID: beadID, Assignee: assignee, Status: "in_progress"}, true, nil
 		},
-		InputDone: func(_ context.Context, _ string, _ []string, _ beads.Bead, _ []string) (string, bool, error) {
-			return "root-1", false, nil
+		InputVerdict: func(_ context.Context, _ string, _ []string, _ beads.Bead, _ []string, _ workflowInputAbsenceProver) (workflowInputVerdict, error) {
+			return workflowInputVerdict{RootID: "root-1"}, nil
 		},
-		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
-			t.Fatalf("unexpected skip of %s", rootID)
+		RetireWorkflow: func(_ context.Context, _ string, _ []string, verdict workflowInputVerdict) error {
+			t.Fatalf("unexpected retirement of %s", verdict.RootID)
 			return nil
 		},
 		ListContinuation: func(_ context.Context, _ string, _ []string, _, _ string) ([]beads.Bead, error) {
