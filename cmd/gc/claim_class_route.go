@@ -856,6 +856,39 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 		return base.SkipDoneWorkflow(ctx, dir, env, rootID)
 	}
 
+	// The input-purged probe is the done-check's twin (city-4uo) and reads the
+	// same two halves across the same two stores: the root from the store that
+	// holds it, the convoy, its members and the absence proofs from the work
+	// leg. Same routing as InputDone — work leg first, binding only on a
+	// proven absence — so a work-resident workflow keeps the unrouted call and
+	// a binding-resident one gets the cross-store probe.
+	ops.InputPurged = func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
+		rootID := workflowRootIDForInputCheck(candidate)
+		if rootID == "" {
+			return base.InputPurged(ctx, dir, env, candidate, identityCandidates)
+		}
+		resident, err := route.resolvesToBinding(ctx, base, dir, env, rootID)
+		if err != nil {
+			return rootID, false, err
+		}
+		if !resident {
+			return base.InputPurged(ctx, dir, env, candidate, identityCandidates)
+		}
+		work := base.WorkflowStore(ctx, dir, env, rootID, "")
+		return workflowInputPurged(route.class, work, candidate)
+	}
+
+	ops.CancelInputPurgedWorkflow = func(ctx context.Context, dir string, env []string, rootID string) error {
+		resident, err := route.resolvesToBinding(ctx, base, dir, env, rootID)
+		if err != nil {
+			return err
+		}
+		if resident {
+			return cancelInputPurgedWorkflow(route.class, rootID)
+		}
+		return base.CancelInputPurgedWorkflow(ctx, dir, env, rootID)
+	}
+
 	// A stale-lease reclaim of a binding-resident bead belongs to the binding.
 	// Beads, not gc, is the authority on staleness (ga-7rj87d NFR3), so a
 	// binding whose engine exposes no stale-lease reclaim reclaims nothing:

@@ -31,6 +31,17 @@ const moleculeAutocloseReason = "molecule autoclose: all step children closed"
 // source-bead-trigger close apart from the all-steps-terminal close.
 const moleculeSourceAutocloseReason = "molecule autoclose: source work bead closed"
 
+// moleculeInputClosedReason is the close_reason stamped on a live
+// graph-workflow instance and its still-open steps when the work bead their
+// input convoy tracks closes while the instance is still in flight
+// (city-4uo): the input the workflow was poured for is over, so the instance
+// can never produce anything, and it is retired at the moment of that close
+// — skipped, the same disposition the claim path's done-check gives a workflow
+// whose input work is terminal — instead of its open steps lingering in the
+// ready pool until some seat's next poll happens to retire them (and forever
+// on a pool no seat polls).
+const moleculeInputClosedReason = "molecule autoclose: input convoy work closed"
+
 // newMoleculeCmd is the parent for molecule lifecycle operations.
 // Hidden — exposed only so the bd close hook can dispatch into it.
 func newMoleculeCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -146,6 +157,17 @@ func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Reco
 	// close them once their own subtree is terminal.
 	autocloseRootsForSourceBead(graphStore, storeRef, rec, beadID, stdout, &run)
 
+	// Input-bead trigger (city-4uo): when a graph-workflow input convoy
+	// tracked this bead and every tracked member is now terminal, any live
+	// instance poured for that convoy is moot — retire it here, at the close,
+	// rather than leaving its open steps to linger in the ready pool until a
+	// seat's next claim poll retires them (or forever, on a pool no seat
+	// polls). Reads the convoy and its members from the store that owns the
+	// closed bead (the synthetic convoy is work class, beside the work it
+	// tracks) and the roots from the graph store, like the source-bead
+	// trigger above.
+	cancelInFlightForClosedInput(store, graphStore, rec, beadID, stdout, &run)
+
 	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if rootID == "" {
 		// Legacy fallback for pre-metadata beads: react only to typed
@@ -253,6 +275,82 @@ func autocloseRootsForSourceBead(store beads.Store, storeRef string, rec events.
 			if announceClosedMolecule(store, rec, root, moleculeSourceAutocloseReason, stdout, run) {
 				_, _ = sourceworkflow.CloseSpecSidecarsForRoot(store, root.ID, sourceworkflow.WorkflowSpecSidecarClosedReason)
 			}
+		}
+	}
+}
+
+// cancelInFlightForClosedInput retires every live graph-workflow instance
+// whose input convoy tracks the just-closed bead once the convoy's whole
+// tracked set is terminal (city-4uo). The convoy is the instance's only
+// input: when nothing it tracks is live any more, no seat can ever produce a
+// verdict for the instance's steps, so they are closed with the root as
+// skipped (moleculeInputClosedReason) — the same disposition the claim path's
+// done-check stamps — instead of re-entering the ready pool.
+//
+// Scoping matches the source-bead trigger: convoy membership edges and the
+// work they track are read from convoyStore (the store that owns the closed
+// bead), roots and their steps from graphStore. A convoy with a member that
+// is still open, or that reads as an unresolved placeholder, is left alone —
+// a placeholder is not proof of a purge, and the claim path owns purge
+// evidence (workflowInputPurged). Roots with no descendants are also left
+// alone: still instantiating, or the stepless-wisp shape the source-bead
+// trigger owns. Best-effort: store errors are swallowed so a misbehaving hook
+// never breaks the bd close path.
+func cancelInFlightForClosedInput(convoyStore, graphStore beads.Store, rec events.Recorder, beadID string, stdout io.Writer, run *autocloseRun) {
+	convoys, err := convoycore.TrackingConvoysForItem(convoyStore, beadID)
+	if err != nil {
+		run.note(err)
+		return
+	}
+	for _, conv := range convoys {
+		members, err := convoycore.Members(convoyStore, conv.ID, true)
+		if err != nil {
+			run.note(err)
+			continue
+		}
+		if len(members) == 0 {
+			continue
+		}
+		allTerminal := true
+		for _, member := range members {
+			if !convoycore.IsTerminalStatus(member.Status) {
+				allTerminal = false
+				break
+			}
+		}
+		if !allTerminal {
+			continue
+		}
+		roots, err := sourceworkflow.KeyedRoots(graphStore, beadmeta.InputConvoyIDMetadataKey, conv.ID)
+		if err != nil {
+			run.note(err)
+			continue
+		}
+		for _, root := range roots {
+			if convoycore.IsTerminalStatus(root.Status) {
+				continue
+			}
+			_, descendants, err := subtreeTerminalOrErr(graphStore, root.ID)
+			if err != nil {
+				run.note(err)
+				continue
+			}
+			if descendants == 0 {
+				// Only the root itself was returned — still instantiating,
+				// or a stepless wisp the source-bead trigger owns (the work
+				// bead an input convoy tracks is the instance's source bead
+				// for the mol-polecat-work shape). Closing here would race
+				// the instantiator, the same trade autocloseMoleculeIfComplete
+				// makes.
+				continue
+			}
+			if err := closeWorkflowStepsSkipped(graphStore, root.ID, moleculeInputClosedReason); err != nil {
+				run.note(err)
+				continue
+			}
+			// The root's own close runs through the shared fenced announcer so
+			// the lifecycle events match every other autoclose trigger.
+			announceClosedMolecule(graphStore, rec, root, moleculeInputClosedReason, stdout, run)
 		}
 	}
 }

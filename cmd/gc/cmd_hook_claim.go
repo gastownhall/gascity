@@ -263,6 +263,21 @@ type hookClaimOps struct {
 	// SkipDoneWorkflow closes a workflow root and its open steps with
 	// gc.outcome=skipped after InputDone reported the input terminal.
 	SkipDoneWorkflow hookSkipDoneWorkflowFunc
+	// InputPurged reports whether the workflow a candidate belongs to has an
+	// input convoy that is definitively GONE — the convoy bead purged, or
+	// every tracked member purged — rather than merely terminal (city-4uo).
+	// A purged input is invisible to InputDone, which fails open on it, so
+	// without this arm a workflow whose input was purged is re-served to
+	// every poll of every seat forever, each taker burning a claim cycle
+	// proving the spec no longer exists. Returns the workflow root id so
+	// CancelInputPurgedWorkflow can retire it.
+	InputPurged hookInputPurgedFunc
+	// CancelInputPurgedWorkflow closes a workflow root and its open steps
+	// with gc.outcome=fail, gc.failure_class=hard and
+	// gc.failure_reason=input_purged after InputPurged reported the input
+	// gone — the disposition a seat's dispose shape writes after proving the
+	// spec vanished, applied once here instead of per burned seat.
+	CancelInputPurgedWorkflow hookCancelInputPurgedWorkflowFunc
 	// EmitClaimRejected publishes a bead.claim_rejected event when a claim is
 	// lost to a different live claimant (ADR-0009). Best-effort.
 	EmitClaimRejected hookEmitClaimRejectedFunc
@@ -399,20 +414,22 @@ type hookClaimOps struct {
 }
 
 type (
-	hookClaimFunc                 func(context.Context, string, []string, string, string) (beads.Bead, bool, error)
-	hookListContinuationFunc      func(context.Context, string, []string, string, string) ([]beads.Bead, error)
-	hookAssignContinuationFunc    func(context.Context, string, []string, string, string) error
-	hookDrainAckFunc              func(io.Writer) error
-	hookDrainPendingFunc          func(sessionID string) (bool, error)
-	hookInputDoneFunc             func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (string, bool, error)
-	hookSkipDoneWorkflowFunc      func(ctx context.Context, dir string, env []string, rootID string) error
-	hookEmitClaimRejectedFunc     func(beadID, existingClaimant, attemptedClaimant string)
-	hookResolveWorkBranchFunc     func(tree hookClaimWorkTree) string
-	hookResolveSessionWorkDirFunc func(sessionID string) string
-	hookStampWorkMetaFunc         func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error
-	hookStampSessionClaimFunc     func(sessionID, beadID string) error
-	hookPublishRunMapFunc         func(runID, beadID string, sessionKeys ...string) error
-	hookClaimReleaseFunc          func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error)
+	hookClaimFunc                     func(context.Context, string, []string, string, string) (beads.Bead, bool, error)
+	hookListContinuationFunc          func(context.Context, string, []string, string, string) ([]beads.Bead, error)
+	hookAssignContinuationFunc        func(context.Context, string, []string, string, string) error
+	hookDrainAckFunc                  func(io.Writer) error
+	hookDrainPendingFunc              func(sessionID string) (bool, error)
+	hookInputDoneFunc                 func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (string, bool, error)
+	hookSkipDoneWorkflowFunc          func(ctx context.Context, dir string, env []string, rootID string) error
+	hookInputPurgedFunc               func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (string, bool, error)
+	hookCancelInputPurgedWorkflowFunc func(ctx context.Context, dir string, env []string, rootID string) error
+	hookEmitClaimRejectedFunc         func(beadID, existingClaimant, attemptedClaimant string)
+	hookResolveWorkBranchFunc         func(tree hookClaimWorkTree) string
+	hookResolveSessionWorkDirFunc     func(sessionID string) string
+	hookStampWorkMetaFunc             func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error
+	hookStampSessionClaimFunc         func(sessionID, beadID string) error
+	hookPublishRunMapFunc             func(runID, beadID string, sessionKeys ...string) error
+	hookClaimReleaseFunc              func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error)
 	// hookClaimReclaimFunc attempts a scoped stale-lease reclaim for exactly
 	// one bead ID (ctx, dir, env, beadID) and reports whether it reclaimed
 	// the lease and, if so, the previous owner.
@@ -676,6 +693,12 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.SkipDoneWorkflow == nil {
 		ops.SkipDoneWorkflow = hookSkipDoneWorkflowWithBdStore
+	}
+	if ops.InputPurged == nil {
+		ops.InputPurged = hookInputPurgedWithBdStore
+	}
+	if ops.CancelInputPurgedWorkflow == nil {
+		ops.CancelInputPurgedWorkflow = hookCancelInputPurgedWorkflowWithBdStore
 	}
 	if ops.EmitClaimRejected == nil {
 		ops.EmitClaimRejected = hookEmitClaimRejected
@@ -2253,7 +2276,7 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 // untouched, #2293) has a path to end it, so the claim path is where the
 // done-check belongs.
 func retireDoneWorkflowCandidates(candidates []beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) []beads.Bead {
-	if ops.InputDone == nil || ops.SkipDoneWorkflow == nil {
+	if ops.InputDone == nil && ops.InputPurged == nil {
 		return candidates
 	}
 	kept := candidates[:0:0]
@@ -2265,12 +2288,57 @@ func retireDoneWorkflowCandidates(candidates []beads.Bead, opts hookClaimOptions
 		now := ops.nowOrWallClock()
 		served := hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) ||
 			hookCandidateClaimable(candidate, opts.RouteTargets, now)
-		if served && hookSkipIfInputDone(candidate, opts, ops, dir, stderr) {
+		if served && hookRetireIfInputDead(candidate, opts, ops, dir, stderr) {
 			continue
 		}
 		kept = append(kept, candidate)
 	}
 	return kept
+}
+
+// hookRetireIfInputDead reports whether candidate belongs to a workflow whose
+// input is dead in one of the two ways the pool cannot recover from, and
+// retires that workflow if so. The arms differ in what the input's state
+// means for the work:
+//
+//   - InputPurged (checked first): the input convoy or every bead it tracks
+//     is definitively purged. The workflow can never run — there is nothing
+//     left to wait on and nothing to do — so it closes as failed
+//     (gc.failure_class=hard, gc.failure_reason=input_purged). A purged
+//     input is invisible to the done-check, which fails open on it, so
+//     without this arm the workflow's open steps are re-served to every poll
+//     of every seat forever (city-4uo: gk-npgx and friends).
+//   - InputDone: the input convoy's tracked work is already terminal or
+//     handed off. The work happened, this workflow just missed it, so it
+//     closes as skipped.
+//
+// Lookup and close failures are logged and treated as alive — a store hiccup
+// must never suppress real work — except that a purged verdict is only
+// returned on definitive evidence, so its error arm is the ambiguous case,
+// which falls through to the done-check.
+func hookRetireIfInputDead(candidate beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
+	if ops.InputPurged != nil && ops.CancelInputPurgedWorkflow != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+		rootID, purged, err := ops.InputPurged(ctx, dir, opts.Env, candidate, opts.IdentityCandidates)
+		cancel()
+		switch {
+		case err != nil:
+			fmt.Fprintf(stderr, "gc hook --claim: purge check unavailable for %s: %v; proceeding\n", candidate.ID, err) //nolint:errcheck
+		case purged:
+			ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+			defer cancel()
+			if err := ops.CancelInputPurgedWorkflow(ctx, dir, opts.Env, rootID); err != nil {
+				fmt.Fprintf(stderr, "gc hook --claim: failing workflow %s whose input convoy is purged: %v\n", rootID, err) //nolint:errcheck
+				return false
+			}
+			fmt.Fprintf(stderr, "gc hook --claim: failed %s: workflow %s input convoy is purged; root and open steps closed as hard failure (input_purged)\n", candidate.ID, rootID) //nolint:errcheck
+			return true
+		}
+	}
+	if ops.InputDone == nil || ops.SkipDoneWorkflow == nil {
+		return false
+	}
+	return hookSkipIfInputDone(candidate, opts, ops, dir, stderr)
 }
 
 // hookSkipIfInputDone reports whether candidate belongs to a workflow whose
@@ -2376,6 +2444,76 @@ func workflowInputDoneAcross(graph, work beads.Store, candidate beads.Bead, iden
 	return root.ID, true, nil
 }
 
+// workflowInputPurged resolves candidate to its workflow root exactly as
+// workflowInputDone does and reports whether the root's input convoy is
+// definitively GONE: either the convoy bead itself is absent from every store
+// the workflow spans, or every member the convoy tracks is an unresolved
+// placeholder whose target bead is absent from every such store (city-4uo).
+// Only definitive evidence counts: a placeholder in convoy.MembersIn can also
+// mean a member resolved by a class this read did not span, so absence is
+// confirmed with direct reads before it is believed, and any other member
+// listing error is returned for the caller to fail open on — a store hiccup
+// must never suppress real work. A convoy with no resolvable members is
+// ambiguous by the same standard (a degenerate convoy and a purged one are
+// indistinguishable at that layer), so it is not purged either.
+func workflowInputPurged(graph, work beads.Store, candidate beads.Bead) (string, bool, error) {
+	root := candidate
+	if strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey]) == "" {
+		rootID := workflowRootIDForInputCheck(candidate)
+		if rootID == "" {
+			return "", false, nil
+		}
+		var err error
+		root, err = graph.Get(rootID)
+		if err != nil {
+			return "", false, fmt.Errorf("loading workflow root %s: %w", rootID, err)
+		}
+	}
+	convoyID := strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey])
+	if convoyID == "" {
+		return root.ID, false, nil
+	}
+	if inputBeadGone(graph, work, convoyID) {
+		return root.ID, true, nil
+	}
+	members, err := convoy.Members(work, convoyID, true)
+	if err != nil {
+		return root.ID, false, fmt.Errorf("listing input convoy %s members: %w", convoyID, err)
+	}
+	if len(members) == 0 {
+		return root.ID, false, nil
+	}
+	for _, m := range members {
+		if !convoy.IsUnresolvedTrackedItem(m) {
+			// At least one member still resolves to a real bead: the input
+			// exists, whatever state it is in (the done-check owns state).
+			return root.ID, false, nil
+		}
+	}
+	for _, m := range members {
+		if !inputBeadGone(graph, work, m.ID) {
+			return root.ID, false, nil
+		}
+	}
+	return root.ID, true, nil
+}
+
+// inputBeadGone reports whether id is absent from both stores a workflow's
+// input can live in. A read error other than not-found leaves the question
+// open, and an open question is never a purge: the caller answers not-purged
+// and lets the done-check decide.
+func inputBeadGone(graph, work beads.Store, id string) bool {
+	for _, store := range []beads.Store{work, graph} {
+		if store == nil {
+			continue
+		}
+		if _, err := store.Get(id); err == nil || !errors.Is(err, beads.ErrNotFound) {
+			return false
+		}
+	}
+	return true
+}
+
 // workflowStepAssignees lists every seat recorded on any step (open or closed)
 // of the workflow rooted at rootID: its assignee plus its gc.session_name and
 // gc.session_id claim provenance, which survive a reopen that clears the
@@ -2408,14 +2546,22 @@ func workflowStepAssignees(store beads.Store, rootID string) ([]string, error) {
 // skipDoneWorkflow closes rootID and every open/in_progress step under it
 // with gc.outcome=skipped so pool demand and continuation claims drop.
 func skipDoneWorkflow(store beads.Store, rootID string) error {
+	return closeWorkflowInstanceSkipped(store, rootID, hookSkipDoneWorkflowCloseReason)
+}
+
+// openWorkflowSteps lists the open/in_progress step beads of the workflow
+// rooted at rootID (the root itself excluded, deduplicated). Shared by the
+// claim-path and close-path instance retires, which differ only in why the
+// instance is moot and what outcome the close stamps.
+func openWorkflowSteps(store beads.Store, rootID string) ([]string, error) {
 	steps, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
 		TierMode: beads.TierBoth,
 	})
 	if err != nil {
-		return fmt.Errorf("listing steps of %s: %w", rootID, err)
+		return nil, fmt.Errorf("listing steps of %s: %w", rootID, err)
 	}
-	ids := make([]string, 0, len(steps)+1)
+	ids := make([]string, 0, len(steps))
 	seen := map[string]bool{}
 	for _, step := range steps {
 		if step.ID == "" || step.ID == rootID || seen[step.ID] || convoy.IsTerminalStatus(step.Status) {
@@ -2424,15 +2570,79 @@ func skipDoneWorkflow(store beads.Store, rootID string) error {
 		seen[step.ID] = true
 		ids = append(ids, step.ID)
 	}
+	return ids, nil
+}
+
+// closeWorkflowStepsSkipped closes every open step under rootID with
+// gc.outcome=skipped and the given close_reason, leaving the root alone.
+// Used where the root's own close is handled by a fenced path that records
+// lifecycle events (the molecule autoclose chain).
+func closeWorkflowStepsSkipped(store beads.Store, rootID, reason string) error {
+	ids, err := openWorkflowSteps(store, rootID)
+	if err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err = store.CloseAll(ids, map[string]string{
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
+		"close_reason":              reason,
+	})
+	return err
+}
+
+// closeWorkflowInstanceSkipped closes rootID and every open/in_progress step
+// under it with gc.outcome=skipped and the given close_reason, so pool demand
+// and continuation claims drop. Shared by the claim-path done-retire
+// (skipDoneWorkflow) and its callers, which differ only in why the instance
+// is moot. Closed members are left alone so a recorded outcome survives.
+func closeWorkflowInstanceSkipped(store beads.Store, rootID, reason string) error {
+	ids, err := openWorkflowSteps(store, rootID)
+	if err != nil {
+		return err
+	}
 	ids = append(ids, rootID)
 	_, err = store.CloseAll(ids, map[string]string{
 		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
-		"close_reason":              hookSkipDoneWorkflowCloseReason,
+		"close_reason":              reason,
 	})
 	return err
 }
 
 const hookSkipDoneWorkflowCloseReason = "hook --claim: input convoy work already terminal; nothing to do"
+
+// hookInputPurgedFailureReason is the gc.failure_reason stamped on a workflow
+// retired for a purged input. Same vocabulary as the dispatcher's
+// missing_workflow_root stamp: a short snake_case reason a reader of bd show
+// can tell apart from a worker's own failure text.
+const hookInputPurgedFailureReason = "input_purged"
+
+// hookCancelInputPurgedWorkflowCloseReason is the close_reason stamped on a
+// workflow retired for a purged input.
+const hookCancelInputPurgedWorkflowCloseReason = "hook --claim: input convoy purged; workflow can never run"
+
+// cancelInputPurgedWorkflow closes rootID and every open/in_progress step
+// under it with gc.outcome=fail, gc.failure_class=hard and
+// gc.failure_reason=input_purged (city-4uo): a workflow whose input convoy is
+// purged can never run, and the honest record is the failure a seat would
+// write after burning a claim cycle proving the spec is gone — written once
+// here instead of once per burned seat. Closed steps are left as they are so
+// an already-recorded outcome survives.
+func cancelInputPurgedWorkflow(store beads.Store, rootID string) error {
+	ids, err := openWorkflowSteps(store, rootID)
+	if err != nil {
+		return err
+	}
+	ids = append(ids, rootID)
+	_, err = store.CloseAll(ids, map[string]string{
+		beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
+		beadmeta.FailureClassMetadataKey:  beadmeta.FailureClassHard,
+		beadmeta.FailureReasonMetadataKey: hookInputPurgedFailureReason,
+		"close_reason":                    hookCancelInputPurgedWorkflowCloseReason,
+	})
+	return err
+}
 
 func hookInputDoneWithBdStore(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
 	return workflowInputDone(hookClaimBdStoreContext(ctx, dir, env, ""), candidate, identityCandidates)
@@ -2440,6 +2650,15 @@ func hookInputDoneWithBdStore(ctx context.Context, dir string, env []string, can
 
 func hookSkipDoneWorkflowWithBdStore(ctx context.Context, dir string, env []string, rootID string) error {
 	return skipDoneWorkflow(hookClaimBdStoreContext(ctx, dir, env, ""), rootID)
+}
+
+func hookInputPurgedWithBdStore(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
+	store := hookClaimBdStoreContext(ctx, dir, env, "")
+	return workflowInputPurged(store, store, candidate)
+}
+
+func hookCancelInputPurgedWorkflowWithBdStore(ctx context.Context, dir string, env []string, rootID string) error {
+	return cancelInputPurgedWorkflow(hookClaimBdStoreContext(ctx, dir, env, ""), rootID)
 }
 
 func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
