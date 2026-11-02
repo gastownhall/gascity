@@ -834,7 +834,11 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	if dir := strings.TrimSpace(h.session.Env["CLAUDE_CONFIG_DIR"]); isClaude && filepath.IsAbs(dir) {
 		probePaths = MergeSearchPaths(append(append([]string(nil), probePaths...), filepath.Join(dir, "projects")))
 	}
-	present, probeable := workertranscript.HasKeyedTranscript(probePaths, resumeInfo.Provider, resumeInfo.WorkDir, resumeInfo.SessionKey)
+	workDir := strings.TrimSpace(h.runtimeHints().WorkDir)
+	if workDir == "" {
+		workDir = resumeInfo.WorkDir
+	}
+	present, probeable := workertranscript.HasKeyedTranscript(probePaths, resumeInfo.Provider, workDir, resumeInfo.SessionKey)
 	if probeable && !present && h.session.Resume.SessionIDFlag != "" {
 		return startCommandWithSessionID(resumeInfo, h.session)
 	}

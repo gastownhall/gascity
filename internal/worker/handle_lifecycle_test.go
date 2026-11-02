@@ -166,6 +166,26 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			want: "claude --resume " + rotatedKey,
 		},
 		{
+			name:     "AC-2 transcript present resumes",
+			provider: "claude",
+			spec:     claudeSpec,
+			setup: func(t *testing.T, f rotatedKeyFixture) {
+				writeKeyedTranscript(t, f.root, f.workDir, f.key)
+			},
+			want: "claude --resume " + rotatedKey,
+		},
+		{
+			name:     "AC-2 transcript under the launch work dir resumes",
+			provider: "claude",
+			spec:     claudeSpec,
+			setup: func(t *testing.T, f rotatedKeyFixture) {
+				launchDir := t.TempDir()
+				f.handle.session.Hints.WorkDir = launchDir
+				writeKeyedTranscript(t, f.root, launchDir, f.key)
+			},
+			want: "claude --resume " + rotatedKey,
+		},
+		{
 			name:     "empty key keeps the base command",
 			provider: "claude",
 			spec:     claudeSpec,
