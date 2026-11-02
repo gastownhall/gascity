@@ -1,5 +1,6 @@
 # Gas City
 
+<!-- seat:begin -->
 Gas City is an orchestration-builder SDK — a Go toolkit for composing
 multi-agent coding workflows. It extracts the battle-tested subsystems from
 Steve Yegge's Gas Town (github.com/steveyegge/gastown) into a configurable
@@ -7,6 +8,7 @@ SDK where **all role behavior is user-supplied configuration** and the SDK
 provides only infrastructure. The core principle: **ZERO hardcoded roles.**
 The SDK has no built-in Mayor, Deacon, Polecat, or any other role. If a
 line of Go references a specific role name, it's a bug.
+<!-- seat:end -->
 
 You can build Gas Town in Gas City, or Ralph, or Claude Code Agent Teams,
 or any other orchestration pack — via specific configurations.
@@ -56,6 +58,7 @@ next to that code; read the matching file before changing it.
 - **Agents:** when you do file an issue, use the bug or feature form fields,
   fill each from evidence, and answer `NOT_ENOUGH_INFO` where the evidence
   runs out.
+<!-- seat:begin -->
 - Branch from `main` (`fix/*`, `feat/*`, `refactor/*`, `docs/*`), use
   Conventional Commits, and push to your branch — never to `main`.
 - A fix that changes an invariant or boundary updates the owning `AGENTS.md`
@@ -71,6 +74,7 @@ configuration (agents, formulas, orders) → composing existing formula and
 order machinery → an adapter behind an existing provider interface → new SDK
 surface. New SDK surface must pass the Primitive Test
 (`engdocs/contributors/primitive-test.md`).
+<!-- seat:end -->
 
 ## Development approach
 
@@ -116,6 +120,7 @@ config, prompt templates, and the dispatch/health machinery implement the
 six primitives, plus the progressive capability levels — is
 `engdocs/architecture/nine-concepts.md`.
 
+<!-- seat:begin -->
 ### Layering invariants
 
 1. **No upward dependencies.** Layer N never imports Layer N+1.
@@ -246,14 +251,17 @@ becoming more useful as models improve — it becomes LESS useful instead.
   hang an agent; use `cp -f`, `mv -f`, `rm -f`, `rm -rf`, `cp -rf`. Use
   `-o BatchMode=yes` for `ssh`/`scp`, `-y` for `apt-get`, and
   `HOMEBREW_NO_AUTO_UPDATE=1` for `brew`.
+<!-- seat:end -->
 
 ## Build and test
 
+<!-- seat:begin -->
 **Bazel is the build and test system, and `bazel test` is authoritative:**
 it is what CI gates on (`.github/workflows/bazel.yml`). Agents run tests
 only with `bazel test`, also while iterating on one package. Do not run
 `go test`: it skips nogo lint/vet, formatting, generated-artifact and policy
 targets, and a green `go test` is not evidence a change passes CI.
+<!-- seat:end -->
 
 | Tier | Command (`make` alias) |
 |---|---|
@@ -279,6 +287,7 @@ targets, and a green `go test` is not evidence a change passes CI.
   `--test_env=VAR=x` and `-tags integration` is `--config=integration`. On a
   sharded target, `--test_sharding_strategy=disabled` runs a narrow filter
   as one action.
+<!-- seat:begin -->
 - **Evidence.** Results are cached by input: an unchanged target returns its
   cached result, which is the same evidence, so do not add
   `--nocache_test_results` to re-prove a pass (timing runs are the
@@ -290,6 +299,7 @@ targets, and a green `go test` is not evidence a change passes CI.
   and `--test_summary` only change what is printed, but any other change to
   `--test_arg`, `--test_env` or `--test_filter` is a new cache key, and
   `--test_arg=-test.v` keys the same verbose run apart from everyone else's.
+<!-- seat:end -->
 - **Regenerating checked files** (`-update`, `-update-golden`,
   `UPDATE_GOLDEN=1`) is not a test run: `bazel test` runs the test in a
   sandbox, so `--test_arg=-update` can pass while changing nothing. Run the
@@ -314,6 +324,7 @@ targets, and a green `go test` is not evidence a change passes CI.
   `--config=remote-exec` (ask your human before adding either to
   `.bazelrc.local`). Details: TESTING.md "Bazel cache tiers" and
   `engdocs/bazel-quickstart.md`.
+<!-- seat:begin -->
 - **BUILD files.** After changing imports or adding packages or files, run
   `make bazel-sync` and commit the result; the `BUILD files in sync` CI gate
   fails otherwise. Never commit machine-specific endpoints; they belong in
@@ -327,6 +338,7 @@ targets, and a green `go test` is not evidence a change passes CI.
   `go clean -testcache` is fine. Maintainers on the shared build hosts: read
   `engdocs/contributors/maintainer-environment.md` before touching `GOCACHE`
   or `TMPDIR`.
+<!-- seat:end -->
 - **Git hooks:** `make setup` installs `.githooks` as `core.hooksPath`;
   `make check-hooks` verifies it. Pre-commit runs nogo on staged packages;
   pre-push runs `bazel test //...` and says loudly when it falls back to
