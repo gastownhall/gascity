@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"sort"
 	"strings"
@@ -963,5 +964,197 @@ func TestSkipDoneWorkflowPreservesRecordedOutcomesAndExistingMetadata(t *testing
 	}
 	if got, _ := store.Get(root.ID); got.Metadata[beadmeta.InputConvoyIDMetadataKey] == "" {
 		t.Errorf("the root's input convoy id was clobbered by the skip close")
+	}
+}
+
+// flakyPurgeCloseStore faults the purge retirement's subtree close so a row
+// can drive the failure and retry paths. With failFirst set, the first batch
+// lands on the ids it is given minus the root — the steps close, the root
+// stays open — and then fails, the shape a flush failure after a partial
+// write leaves behind; every later batch delegates cleanly.
+type flakyPurgeCloseStore struct {
+	beads.Store
+	failFirst bool
+}
+
+func (s *flakyPurgeCloseStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	if s.failFirst {
+		s.failFirst = false
+		closed, err := s.Store.CloseAll(ids[:len(ids)-1], metadata)
+		if err != nil {
+			return closed, err
+		}
+		return closed, fmt.Errorf("flush failed after %d close(s)", closed)
+	}
+	return s.Store.CloseAll(ids, metadata)
+}
+
+// failingPurgeCloseStore refuses every subtree close, so the retirement can
+// never land at all.
+type failingPurgeCloseStore struct {
+	beads.Store
+}
+
+func (s *failingPurgeCloseStore) CloseAll([]string, map[string]string) (int, error) {
+	return 0, errors.New("store is read-only")
+}
+
+// TestDoHookClaimKeepsCandidateWhenPurgeRetirementWriteFails pins the
+// retention rule: a purge verdict whose subtree close fails is logged and the
+// candidate stays in the pool — a store hiccup must not silently drop real
+// work, and the next poll's retirement retries it.
+func TestDoHookClaimKeepsCandidateWhenPurgeRetirementWriteFails(t *testing.T) {
+	mem, root, _, _ := seedPurgedInputWorkflow(t)
+	store := &failingPurgeCloseStore{Store: mem}
+	claimedID := ""
+	ops := hookClaimOps{
+		Runner: func(string, string) (string, error) {
+			output, err := json.Marshal([]beads.Bead{root})
+			if err != nil {
+				return "", err
+			}
+			return string(output), nil
+		},
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			claimedID = beadID
+			return beads.Bead{ID: beadID, Assignee: assignee}, true, nil
+		},
+		InputDone: func(_ context.Context, _ string, _ []string, candidate beads.Bead, ids []string) (workflowInputEvaluation, error) {
+			return workflowInputDone(mem, candidate, ids, func([]string) (bool, error) { return true, nil })
+		},
+		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
+			t.Errorf("skipped %s; a purged input retires as a hard failure, not as skipped", rootID)
+			return nil
+		},
+		CancelPurgedWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
+			return cancelPurgedWorkflow(store, rootID)
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", "/rig", hookClaimOptions{
+		Assignee:     "worker-1",
+		RouteTargets: []string{"worker"},
+		DrainAck:     true,
+		JSON:         true,
+	}, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim = %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	if claimedID != root.ID {
+		t.Fatalf("claimed = %q, want %s; a retirement that could not write must leave the candidate in the pool", claimedID, root.ID)
+	}
+	got, err := mem.Get(root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == "closed" {
+		t.Errorf("the root %s was closed even though its retirement write failed", root.ID)
+	}
+	if !strings.Contains(stderr.String(), root.ID) || !strings.Contains(stderr.String(), "store is read-only") {
+		t.Errorf("stderr = %q, want it to log the failed retirement naming the root and the write error", stderr.String())
+	}
+}
+
+// TestDoHookClaimRetryPreservesTerminalOutcomesAfterPartialPurgeRetirement
+// pins the retry: a retirement whose batch landed on the open steps but
+// failed before the root leaves the steps terminal with the purge
+// disposition; the next poll's retirement finishes the job — closing the root
+// — without rewriting what the first attempt already recorded.
+func TestDoHookClaimRetryPreservesTerminalOutcomesAfterPartialPurgeRetirement(t *testing.T) {
+	mem, root, step, finished := seedPurgedInputWorkflow(t)
+	store := &flakyPurgeCloseStore{Store: mem, failFirst: true}
+	opsFor := func() hookClaimOps {
+		return hookClaimOps{
+			Runner: func(string, string) (string, error) {
+				output, err := json.Marshal([]beads.Bead{root})
+				if err != nil {
+					return "", err
+				}
+				return string(output), nil
+			},
+			Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+				return beads.Bead{ID: beadID, Assignee: assignee}, true, nil
+			},
+			InputDone: func(_ context.Context, _ string, _ []string, candidate beads.Bead, ids []string) (workflowInputEvaluation, error) {
+				return workflowInputDone(mem, candidate, ids, func([]string) (bool, error) { return true, nil })
+			},
+			SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
+				t.Errorf("skipped %s; a purged input retires as a hard failure, not as skipped", rootID)
+				return nil
+			},
+			CancelPurgedWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
+				return cancelPurgedWorkflow(store, rootID)
+			},
+			DrainAck: func(io.Writer) error { return nil },
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", "/rig", hookClaimOptions{
+		Assignee:     "worker-1",
+		RouteTargets: []string{"worker"},
+		DrainAck:     true,
+		JSON:         true,
+	}, opsFor(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("first doHookClaim = %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "flush failed after 1 close(s)") {
+		t.Fatalf("first stderr = %q, want the partial retirement failure logged", stderr.String())
+	}
+	midStep, err := mem.Get(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if midStep.Status != "closed" || midStep.Metadata[beadmeta.FailureReasonMetadataKey] != "input_purged" {
+		t.Fatalf("after the partial retirement the step = closed:%q failure_reason:%q, want closed with the purge disposition", midStep.Status, midStep.Metadata[beadmeta.FailureReasonMetadataKey])
+	}
+	midRoot, err := mem.Get(root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if midRoot.Status == "closed" {
+		t.Fatal("the first attempt closed the root; the fixture faults the batch before the root")
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = doHookClaim("query", "/rig", hookClaimOptions{
+		Assignee:     "worker-1",
+		RouteTargets: []string{"worker"},
+		DrainAck:     true,
+		JSON:         true,
+	}, opsFor(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("retry doHookClaim = %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	gotRoot, err := mem.Get(root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotRoot.Status != "closed" ||
+		gotRoot.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail ||
+		gotRoot.Metadata[beadmeta.FailureClassMetadataKey] != beadmeta.FailureClassHard ||
+		gotRoot.Metadata[beadmeta.FailureReasonMetadataKey] != "input_purged" {
+		t.Errorf("the retry left the root = closed:%q outcome:%q class:%q reason:%q; want the hard input_purged retirement", gotRoot.Status, gotRoot.Metadata[beadmeta.OutcomeMetadataKey], gotRoot.Metadata[beadmeta.FailureClassMetadataKey], gotRoot.Metadata[beadmeta.FailureReasonMetadataKey])
+	}
+	gotStep, err := mem.Get(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotStep.Revision != midStep.Revision {
+		t.Errorf("the retry rewrote the already-terminal step (revision %d -> %d); terminal outcomes are preserved", midStep.Revision, gotStep.Revision)
+	}
+	if gotStep.Metadata[beadmeta.FailureReasonMetadataKey] != "input_purged" {
+		t.Errorf("the retried step failure_reason = %q, want the first attempt's input_purged preserved", gotStep.Metadata[beadmeta.FailureReasonMetadataKey])
+	}
+	done, err := mem.Get(finished.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+		t.Errorf("finished step gc.outcome = %q, want pass preserved across both attempts", done.Metadata[beadmeta.OutcomeMetadataKey])
 	}
 }
