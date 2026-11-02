@@ -1258,3 +1258,40 @@ func TestHookDrainAckFenceHoldsALegacyRecordedClaim(t *testing.T) {
 		t.Fatalf("code %d, result %+v, acked %v; want work started_claim_held for g-1 and no ack", code, got, l.acked)
 	}
 }
+
+// TestHookClaimRefusesTheStartedWriteWhenTheCityRecordsOnlyByCAS (AC-5,
+// #8313): a store without a conditional writer whose city records only by
+// compare-and-swap — a v2 one, or a caller that wired no predicate — gets no
+// fallback: nothing is written, and the claim is delivered anyway with the
+// existing one-line warning and work.started_unrecorded event wrapping
+// ErrConditionalWriteUnsupported.
+func TestHookClaimRefusesTheStartedWriteWhenTheCityRecordsOnlyByCAS(t *testing.T) {
+	for name, casOnly := range map[string]func() bool{
+		"a v2 city":          func() bool { return true },
+		"no predicate wired": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			row := newStartedRowWithoutConditionalWrites(t)
+			opts := startedOpts(startedEnv(startedToken, "7"))
+			opts.StartedCASOnly = casOnly
+			l := &startedLog{}
+			stdout := &orderedWriter{l: l}
+			var stderr bytes.Buffer
+			code := doHookClaim("q", "/rig", opts, l.ops(startedRoutedWork, row, nil), stdout, &stderr)
+
+			got := decodeTurnBoundResult(t, stdout.buf.String())
+			if code != 0 || got.Action != "work" || got.BeadID != "work-1" {
+				t.Fatalf("code %d, result %+v; want the claim delivered anyway", code, got)
+			}
+			if raw := row.meta(t, session.WorkStartedKey); raw != "" {
+				t.Fatalf("work_started = %q; want nothing written", raw)
+			}
+			if len(l.unrecorded) != 1 || l.unrecorded[0] != "work-1" ||
+				!strings.HasPrefix(l.causes[0], "delivered without a work_started record") ||
+				!strings.Contains(l.causes[0], beads.ErrConditionalWriteUnsupported.Error()) ||
+				strings.Count(stderr.String(), "delivering it anyway") != 1 {
+				t.Fatalf("unrecorded %v, causes %q, stderr %q; want one event and one line naming the refusal", l.unrecorded, l.causes, stderr.String())
+			}
+		})
+	}
+}
