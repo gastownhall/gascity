@@ -1546,7 +1546,7 @@ if [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
                     # Also covers a zero-id batch (deleted: [], no deleted_count), which
                     # a string-only fallback reads as empty and treats as a failure even
                     # though nothing needed deleting.
-                    DELETED_COUNT=$(printf '%s' "$DELETE_OUT" | jq -r '.deleted_count // (.deleted | if type == "array" then length elif type == "string" then 1 else empty end)' 2>/dev/null || true)
+                    DELETED_COUNT=$(printf '%s' "$DELETE_OUT" | jq -r '.deleted_count // (.deleted | if type == "array" then length elif type == "string" and length > 0 then 1 else empty end)' 2>/dev/null || true)
                 fi
                 case "$DELETED_COUNT" in
                     ''|*[!0-9]*)

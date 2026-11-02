@@ -70,6 +70,11 @@ func TestReaperDeletedCountFilterHandlesBothBdDeleteShapes(t *testing.T) {
 			json: `{"error":"something else entirely"}`,
 			want: "",
 		},
+		{
+			name: "deleted is an empty string, not a valid single id, stays empty",
+			json: `{"deleted":""}`,
+			want: "",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := runReaperDeletedCountFilter(t, filter, tc.json)
