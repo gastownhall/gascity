@@ -635,3 +635,107 @@ func TestOrderOutcomeHealthyRecordedIncompleteOutcomes(t *testing.T) {
 		})
 	}
 }
+
+// TestLatestIncompleteOrderOutcome pins the declaration lookup: newest
+// order.skipped first, stopping at a later order.completed and continuing
+// across failures. Completions clear by Seq without being attributed to the
+// run that declared.
+func TestLatestIncompleteOrderOutcome(t *testing.T) {
+	base := time.Date(2026, 8, 4, 0, 0, 0, 0, time.UTC)
+	const subject = "export-sweep"
+	c := func(seq uint64) events.Event { return outcomeEvent(seq, subject, events.OrderCompleted, base, "") }
+	s := func(seq uint64, msg string) events.Event {
+		return outcomeEvent(seq, subject, events.OrderSkipped, base, msg)
+	}
+	f := func(seq uint64) events.Event {
+		return outcomeEvent(seq, subject, events.OrderFailed, base, "exit status 1")
+	}
+
+	cases := []struct {
+		name     string
+		outcomes []events.Event
+		wantSeq  uint64
+		wantOK   bool
+	}{
+		{name: "no events", outcomes: nil},
+		{name: "completion only", outcomes: []events.Event{c(1), c(2)}},
+		{name: "C S", outcomes: []events.Event{c(1), s(2, "partial: a")}, wantSeq: 2, wantOK: true},
+		{name: "C S C clears", outcomes: []events.Event{c(1), s(2, "partial: a"), c(3)}},
+		{name: "C S C S keeps newest", outcomes: []events.Event{c(1), s(2, "partial: a"), c(3), s(4, "partial: b")}, wantSeq: 4, wantOK: true},
+		{name: "C1 C2 S1 S2 quotes newest", outcomes: []events.Event{c(1), c(2), s(3, "partial: a"), s(4, "partial: b")}, wantSeq: 4, wantOK: true},
+		{name: "C1 S1 C2 clears", outcomes: []events.Event{c(1), s(2, "partial: a"), c(3)}},
+		{name: "C S F continues across failures", outcomes: []events.Event{c(1), s(2, "partial: a"), f(3)}, wantSeq: 2, wantOK: true},
+		{name: "blank declaration is still a declaration", outcomes: []events.Event{s(1, "partial: a"), s(2, "")}, wantSeq: 2, wantOK: true},
+		{
+			name: "other subjects neither declare nor clear",
+			outcomes: []events.Event{
+				c(1), s(2, "partial: a"),
+				outcomeEvent(3, "export-sweep:rig:st", events.OrderCompleted, base, ""),
+				outcomeEvent(4, "other", events.OrderSkipped, base, "partial: other"),
+			},
+			wantSeq: 2, wantOK: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := latestIncompleteOrderOutcome(tc.outcomes, subject)
+			if ok != tc.wantOK {
+				t.Fatalf("declared = %v, want %v (got %+v)", ok, tc.wantOK, got)
+			}
+			if ok && got.Seq != tc.wantSeq {
+				t.Fatalf("declaration seq = %d, want %d", got.Seq, tc.wantSeq)
+			}
+		})
+	}
+}
+
+// TestOrderOutcomeHealthyIncompleteOutcomeClearsOnCompletion pins that a
+// later recorded order.completed clears a declaration, restoring the existing
+// success output, while suppressed and inapplicable events neither clear nor
+// create one.
+func TestOrderOutcomeHealthyIncompleteOutcomeClearsOnCompletion(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	const subject = "export-sweep"
+	completed := func(ts time.Time) events.Event {
+		return events.Event{Type: events.OrderCompleted, Ts: ts, Subject: subject, Actor: "controller"}
+	}
+	partial := skippedEvent(subject, now.Add(-2*time.Hour), "partial", "store unreachable",
+		events.OrderSkippedScope{Scope: "rig:st", Reason: "dolt not reachable"})
+	suppressed := events.Event{Type: events.OrderSuppressed, Ts: now.Add(-time.Minute), Subject: subject, Actor: "controller"}
+	inapplicable := events.Event{Type: events.OrderInapplicable, Ts: now.Add(-time.Minute), Subject: subject, Actor: "controller"}
+
+	clears := []struct {
+		name string
+		evts []events.Event
+	}{
+		{name: "C S C", evts: []events.Event{completed(now.Add(-3 * time.Hour)), partial, completed(now.Add(-time.Hour))}},
+		{name: "C1 S1 C2 without attribution", evts: []events.Event{completed(now.Add(-2 * time.Hour)), partial, completed(now.Add(-2 * time.Hour))}},
+		{name: "completion stamped earlier but recorded later", evts: []events.Event{completed(now.Add(-3 * time.Hour)), partial, completed(now.Add(-4 * time.Hour))}},
+		{name: "scheduler events alone", evts: []events.Event{completed(now.Add(-3 * time.Hour)), suppressed, inapplicable}},
+		{name: "another order's declaration", evts: []events.Event{completed(now.Add(-3 * time.Hour)), skippedEvent("other-order", now.Add(-time.Hour), "skipped", "gate held")}},
+	}
+	for _, tc := range clears {
+		t.Run("clears/"+tc.name, func(t *testing.T) {
+			result := runOrderOutcomeIncompleteCase(t, tc.evts...)
+			if result.Status != StatusOK {
+				t.Fatalf("status = %v, want StatusOK; msg=%q details=%v", result.Status, result.Message, result.Details)
+			}
+			if result.Message != "all scheduled orders succeeding" {
+				t.Fatalf("message = %q, want %q", result.Message, "all scheduled orders succeeding")
+			}
+			if got, want := strings.Join(result.Details, "\n"), "export-sweep: last run succeeded"; got != want {
+				t.Fatalf("details = %q, want %q", got, want)
+			}
+		})
+	}
+
+	t.Run("scheduler events do not clear", func(t *testing.T) {
+		result := runOrderOutcomeIncompleteCase(t, completed(now.Add(-3*time.Hour)), partial, suppressed, inapplicable)
+		if result.Status != StatusWarning {
+			t.Fatalf("status = %v, want StatusWarning; msg=%q details=%v", result.Status, result.Message, result.Details)
+		}
+		if joined := strings.Join(result.Details, "\n"); !strings.Contains(joined, partial.Message) {
+			t.Fatalf("details = %v, want them to carry %q", result.Details, partial.Message)
+		}
+	})
+}

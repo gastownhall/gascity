@@ -130,15 +130,24 @@ func classifyOrderOutcome(order orders.Order, streak int, threshold int, lastMes
 }
 
 // latestIncompleteOrderOutcome returns the newest order.skipped declaration
-// recorded for one order.
+// recorded for one order after its latest order.completed.
 //
-// outcomes must be ordered by Seq ascending. The boolean distinguishes a
-// declaration with an empty message from no declaration at all.
+// outcomes must be ordered by Seq ascending. The walk runs newest-first, stops
+// at a completion (which clears every older declaration) and continues across
+// failures: a failure is not proof the declared work has since run. Seq alone
+// decides; nothing pairs a completion with the run that declared. The boolean
+// distinguishes a declaration with an empty message from no declaration.
 func latestIncompleteOrderOutcome(outcomes []events.Event, subject string) (events.Event, bool) {
 	for i := len(outcomes) - 1; i >= 0; i-- {
 		event := outcomes[i]
-		if event.Subject == subject && event.Type == events.OrderSkipped {
+		if event.Subject != subject {
+			continue
+		}
+		switch event.Type {
+		case events.OrderSkipped:
 			return event, true
+		case events.OrderCompleted:
+			return events.Event{}, false
 		}
 	}
 	return events.Event{}, false
