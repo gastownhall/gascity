@@ -1700,6 +1700,14 @@ func reassignStateAssignedToRetiredSessionBead(store beads.Store, oldSessionID, 
 	}
 }
 
+// retiredCleanupLegBudget bounds each leg of retired-session cleanup (the
+// waits and the external-messaging state) independently. It bounds new store
+// work between calls; a call already in flight finishes.
+const retiredCleanupLegBudget = 10 * time.Second
+
+// cancelStateAssignedToRetiredSessionBead cancels a retired session's waits
+// and closes its external-messaging state, each leg under its own
+// retiredCleanupLegBudget, and writes their failures to stderr.
 func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string, now time.Time, stderr io.Writer) {
 	if store == nil || strings.TrimSpace(sessionID) == "" {
 		return
@@ -1708,7 +1716,9 @@ func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string
 		stderr = io.Discard
 	}
 	sessFront := sessionFrontDoor(store)
-	_, capped, err := sessFront.CancelWaits(context.Background(), sessionID, now)
+	waitsCtx, cancelWaits := context.WithTimeout(context.Background(), retiredCleanupLegBudget)
+	_, capped, err := sessFront.CancelWaits(waitsCtx, sessionID, now)
+	cancelWaits()
 	if capped {
 		stampWaitLookupCapDiagnostic(sessFront, sessionID, beads.LookupLimitError{
 			Kind:  "wait",
