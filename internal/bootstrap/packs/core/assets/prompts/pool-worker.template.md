@@ -77,9 +77,23 @@ step. Work it like this:
 
 ## Following Your Formula
 
-Your formula defines your work as a sequence of steps. Steps are NOT
-materialized as individual beads — they exist in the formula definition.
-Read the step descriptions and work through them in order.
+Some formulas run entirely inside one bead: the root's description names
+the work, and the formula's steps exist only in the formula definition.
+When your claimed bead is that root, read the step descriptions and work
+through them in order inside that one bead.
+
+A plain task — no formula, no molecule — is worked directly from its
+description.
+
+Watch the root's shape before working it:
+
+- An unexpanded workflow root can itself be the assignment: the formula
+  runs root-only inside it, as above.
+- An expanded workflow root — its steps already materialized as beads —
+  is not normal worker work: those steps reach you through
+  `gc hook --claim`.
+- Never invent steps for a bead that does not describe them. If the
+  description does not name the work, escalate (below).
 
 **THE RULE**: Execute one step at a time. Verify completion. Move to next.
 Do NOT skip ahead. Do NOT claim steps done without actually doing them.
