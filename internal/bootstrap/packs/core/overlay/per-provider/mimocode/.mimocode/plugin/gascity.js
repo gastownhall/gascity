@@ -209,7 +209,7 @@ export default async function gascityPlugin({ directory, client }) {
   if (!managedSessionIdentityPresent()) {
     return {};
   }
-  let cachedPrime = null;
+  let cachedPrime = "";
 
   // experimental.chat.system.transform fires once per model generation, not
   // once per user turn, so every tool call in a turn rebuilds the prefix.
@@ -236,9 +236,19 @@ export default async function gascityPlugin({ directory, client }) {
   // `gc prime --hook` as the provider resume key.
   const childSessions = new Set();
 
+  // readPrime returns the role prompt from `gc prime --hook`, read once and
+  // read again when forced. A read that fails or comes back empty is not
+  // cached: a forced refresh that fails keeps the last prime, and while there
+  // is none the next generation asks again, so one bad read does not leave
+  // the rest of the session without its role. Until gc answers, each
+  // generation pays for one failed call, the trade readTurnVolatile makes
+  // when it cannot tell turns apart.
   async function readPrime(force = false, extraEnv = {}) {
-    if (force || cachedPrime === null) {
-      cachedPrime = await runCommand(directory, ["prime", "--hook"], false, extraEnv);
+    if (force || !cachedPrime) {
+      const prime = await runCommand(directory, ["prime", "--hook"], true, extraEnv);
+      if (prime) {
+        cachedPrime = prime;
+      }
     }
     return cachedPrime;
   }

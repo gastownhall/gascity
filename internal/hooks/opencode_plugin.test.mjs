@@ -63,7 +63,9 @@ const plugins = [
 // command bakes the current time into its beacon, so a test can tell a
 // refreshed prime from the cached one. Every call of any kind appends its
 // arguments to the call log. `handoff --auto` fails outside a gc session the
-// way the real command does (cmd/gc/session_target.go). GC_FAKE_MAIL_FAIL
+// way the real command does (cmd/gc/session_target.go). GC_FAKE_PRIME_FAIL
+// makes `prime --hook` fail and GC_FAKE_PRIME_EMPTY makes it print nothing,
+// as it does in a suspended city; both are still logged. GC_FAKE_MAIL_FAIL
 // makes `mail check` fail. With GC_FAKE_RENDEZVOUS naming a directory,
 // `nudge drain` and `mail check` each wait up to 5s for the other to start
 // and fail if it never does, so calling them one after the other fails.
@@ -90,6 +92,8 @@ rendezvous() {
 case "$1 $2" in
   "prime --hook")
     printf '%s\\n' "\${GC_PROVIDER_SESSION_ID:-<unset>}" >> "${primeLog}"
+    if [ -n "\${GC_FAKE_PRIME_FAIL:-}" ]; then exit 1; fi
+    if [ -n "\${GC_FAKE_PRIME_EMPTY:-}" ]; then exit 0; fi
     printf '%s' '${ROLE}'
     if [ -n "\${GC_FAKE_PRIME_STAMP:-}" ]; then printf ' (stamp %s)' "\${GC_FAKE_PRIME_STAMP}"; fi
     ;;
@@ -771,6 +775,75 @@ for (const plugin of plugins) {
       assert.match(
         warnings[0],
         new RegExp(`^gascity ${plugin.name} plugin: \\S+ mail check --inject cwd \\S+ failed after \\d+ms \\(timeout 30000ms\\): 1$`),
+      );
+    });
+  });
+
+  describe(`${plugin.name} plugin prime cache`, { timeout: SUITE_TIMEOUT_MS }, () => {
+    // Each test makes its own plugin instance: the prime cache is per
+    // instance.
+    let gascityPlugin;
+    let warnings;
+    let savedWarn;
+
+    before(async () => {
+      const staged = stagePlugin(tmp, plugin);
+      ({ default: gascityPlugin } = await import(pathToFileURL(staged).href));
+    });
+
+    beforeEach(() => {
+      resetDrains(fake);
+      fs.rmSync(fake.primeLog, { force: true });
+      warnings = [];
+      savedWarn = console.warn;
+      console.warn = (...args) => warnings.push(args.join(" "));
+    });
+
+    afterEach(() => {
+      console.warn = savedWarn;
+      delete process.env.GC_FAKE_PRIME_FAIL;
+      delete process.env.GC_FAKE_PRIME_EMPTY;
+      delete process.env.GC_FAKE_PRIME_STAMP;
+    });
+
+    async function stableSystem(hooks) {
+      const output = { system: [HEADER] };
+      await hooks["experimental.chat.system.transform"]({ sessionID: "ses_prime", model: {} }, output);
+      return output.system[0];
+    }
+
+    for (const [outcome, env] of [["failed", "GC_FAKE_PRIME_FAIL"], ["came back empty", "GC_FAKE_PRIME_EMPTY"]]) {
+      it(`asks for the prime again after a read that ${outcome}`, async () => {
+        const hooks = await gascityPlugin({ directory: tmp, client: {} });
+        process.env[env] = "1";
+        assert.equal(await stableSystem(hooks), HEADER);
+        delete process.env[env];
+        const next = await stableSystem(hooks);
+        assert.ok(next.startsWith(ROLE), `the next generation has no role: ${JSON.stringify(next)}`);
+        assert.equal(readPrimeLog(fake).length, 2);
+      });
+    }
+
+    it("keeps the last prime when a refresh fails", async () => {
+      const hooks = await gascityPlugin({ directory: tmp, client: {} });
+      process.env.GC_FAKE_PRIME_STAMP = "created";
+      await hooks.event(sessionEvent("session.created", "ses_prime", { directory: tmp }));
+      process.env.GC_FAKE_PRIME_FAIL = "1";
+      await hooks.event(sessionEvent("session.compacted", "ses_prime"));
+      delete process.env.GC_FAKE_PRIME_FAIL;
+      const system0 = await stableSystem(hooks);
+      assert.ok(system0.startsWith(`${ROLE} (stamp created)`), `the failed refresh dropped the role: ${JSON.stringify(system0)}`);
+      assert.deepEqual(readPrimeLog(fake), ["ses_prime", "ses_prime"], "the cached prime must not be read again");
+    });
+
+    it("reports a failed prime read", async () => {
+      const hooks = await gascityPlugin({ directory: tmp, client: {} });
+      process.env.GC_FAKE_PRIME_FAIL = "1";
+      await stableSystem(hooks);
+      assert.equal(warnings.length, 1, `want one warning, got ${JSON.stringify(warnings)}`);
+      assert.match(
+        warnings[0],
+        new RegExp(`^gascity ${plugin.name} plugin: \\S+ prime --hook cwd \\S+ failed after \\d+ms \\(timeout 30000ms\\): 1$`),
       );
     });
   });
