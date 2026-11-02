@@ -1790,4 +1790,54 @@ func TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules(t *testing.T
 			"leave it closed and keep its recorded outcome",
 		)
 	})
+
+	t.Run("graph steps continue through the hook with bounded polling", func(t *testing.T) {
+		openingText, _, found := strings.Cut(got, "\n## ")
+		if !found {
+			t.Fatalf("prompt has no second-level heading:\n%s", got)
+		}
+		opening := strings.Join(strings.Fields(openingText), " ")
+		if strings.Contains(opening, "close it, and exit") {
+			t.Errorf("opening teaches exit after one bead for every assignment:\n%s", opening)
+		}
+		if gupp := promptSection(t, got, "## GUPP"); strings.Contains(gupp, "When you're done, exit.") {
+			t.Errorf("GUPP section teaches exit after one bead for every assignment:\n%s", gupp)
+		}
+
+		assertSectionOrder(t, got, "## How to Work", "### After a workflow step", "### After a molecule attachment or a plain bead", "## Closing a Bead")
+		graph := promptSection(t, got, "### After a workflow step")
+		assertSectionContains(t, "graph continuation", graph,
+			"Do not drain after your first step",
+			"gc hook --claim --json",
+			"in its own tool call",
+			"`\"action\":\"work\"` — a new assignment",
+			"Re-check at most three times, each in a new tool call",
+			"gc hook --claim --drain-ack --json",
+			"If it returns `work`, go to step 2",
+			"`drain_pending`",
+			"gc runtime drain-ack",
+			"Never wrap the claim in a `sleep`/retry loop",
+			"Do not look for work any other way",
+			"says your session ends after it",
+			"one-step lane",
+			"already ran the drain",
+		)
+		if strings.Contains(graph, "MANDATORY") {
+			t.Errorf("graph continuation makes the one-assignment drain mandatory:\n%s", graph)
+		}
+
+		single := promptSection(t, got, "### After a molecule attachment or a plain bead")
+		assertSectionContains(t, "one-assignment lifetime", single,
+			"Your session ends with that one assignment",
+			"MANDATORY",
+			"gc runtime drain-ack",
+		)
+
+		restart := promptSection(t, got, "## Context Exhaustion")
+		assertSectionContains(t, "restart guidance", restart,
+			"gc runtime request-restart",
+			"gc hook --claim --drain-ack --json",
+			"A workflow step you held comes back from the hook",
+		)
+	})
 }
