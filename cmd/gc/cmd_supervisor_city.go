@@ -971,21 +971,41 @@ func supervisorCityAPIClient(cityPath string) *api.Client {
 }
 
 // supervisorRequiresCityGrants reports whether supervisor.toml makes the
-// supervisor require a signed grant on its per-city routes: a write-auth or
-// read-auth verify key, or write_auth_required/read_auth_required, under
-// which the supervisor either gates those routes with a key from its
-// environment or refuses to boot. A key set only through the supervisor's
-// GC_CITY_WRITE_PUBKEY or GC_CITY_READ_PUBKEY environment is invisible here.
-// An unreadable supervisor.toml reports false: supervisorCityAPIClient cannot
-// resolve the supervisor's address from it either.
+// supervisor require a signed grant on its per-city routes, for a write or
+// for a read (supervisorCityGrantRequirements).
 func supervisorRequiresCityGrants() bool {
+	write, read := supervisorCityGrantRequirements()
+	return write || read
+}
+
+// supervisorRequiresCityWriteGrants reports whether supervisor.toml makes the
+// supervisor require a signed grant on its per-city mutations
+// (supervisorCityGrantRequirements). A supervisor that requires only read
+// grants accepts a mutation without one: its read gate passes every
+// non-GET/HEAD request through.
+func supervisorRequiresCityWriteGrants() bool {
+	write, _ := supervisorCityGrantRequirements()
+	return write
+}
+
+// supervisorCityGrantRequirements reports whether supervisor.toml makes the
+// supervisor require a signed write grant and a signed read grant on its
+// per-city routes: a write-auth or read-auth verify key, or
+// write_auth_required/read_auth_required, under which the supervisor either
+// gates those routes with a key from its environment or refuses to boot. A key
+// set only through the supervisor's GC_CITY_WRITE_PUBKEY or GC_CITY_READ_PUBKEY
+// environment is invisible here. An unreadable supervisor.toml reports neither:
+// supervisorCityAPIClient cannot resolve the supervisor's address from it
+// either.
+func supervisorCityGrantRequirements() (write, read bool) {
 	cfg, err := supervisor.LoadConfig(supervisor.ConfigPath())
 	if err != nil {
-		return false
+		return false, false
 	}
 	s := cfg.Supervisor
-	return strings.TrimSpace(s.WriteAuthVerifyKey) != "" || s.WriteAuthRequired ||
-		strings.TrimSpace(s.ReadAuthVerifyKey) != "" || s.ReadAuthRequired
+	write = strings.TrimSpace(s.WriteAuthVerifyKey) != "" || s.WriteAuthRequired
+	read = strings.TrimSpace(s.ReadAuthVerifyKey) != "" || s.ReadAuthRequired
+	return write, read
 }
 
 func supervisorCityRunning(cityPath string) (running bool, status string, known bool) {
