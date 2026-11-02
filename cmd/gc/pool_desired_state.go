@@ -16,6 +16,8 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worktree"
+	"github.com/shirou/gopsutil/v4/load"
+	"github.com/shirou/gopsutil/v4/mem"
 )
 
 // SessionRequest represents a single session the reconciler should start.
@@ -324,6 +326,70 @@ func computePoolDesiredStatesAt(
 	return computePoolDesiredStatesParkedAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, decisionTime, nil, trace)
 }
 
+// poolMintStandDownLoad1 and poolMintStandDownFreeRAMBytes are the capacity
+// rails behind the pool mint stand-down (ci-soai behavior 3): while the host
+// is over either, the reconciler must not materialize NEW pool sessions —
+// anonymous demand creates or min_active_sessions floor fills. The rails are
+// the city's standing dispatch practice (the load-8 rail the mayor dispatches
+// against) made structural: minting a fresh provider session into an already
+// saturated host multiplies the load instead of serving demand (observed
+// 2026-11-02 08:12Z: two adhoc polecat mints at load1=33.51, zero beads
+// pulled). Sessions that already exist are untouched — resume, wake,
+// protected reuse, and in-flight floors keep their seats — so no live work is
+// stranded by the gate.
+const (
+	poolMintStandDownLoad1        = 8.0
+	poolMintStandDownFreeRAMBytes = uint64(2) << 30
+)
+
+// poolCapacityVerdict is one host-capacity observation read once per
+// desired-state pass. probeErr is the sampling failure, if any; a pass that
+// cannot read the host fails CLOSED (standDown true) because the defect class
+// this gate closes is over-minting, and an unreadable host is at least as
+// untrustworthy as a known-hot one. The error travels into the trace payload
+// so a persistent probe failure is diagnosable rather than a silent stall.
+type poolCapacityVerdict struct {
+	load1    float64
+	freeRAM  uint64
+	probeErr error
+}
+
+// standDown reports whether NEW pool session mints must be suppressed this
+// pass, and the reason string for the trace record when they must.
+func (v poolCapacityVerdict) standDown() (bool, string) {
+	if v.probeErr != nil {
+		return true, "probe_error=" + v.probeErr.Error()
+	}
+	if v.load1 > poolMintStandDownLoad1 {
+		return true, fmt.Sprintf("load1=%.2f>%g", v.load1, poolMintStandDownLoad1)
+	}
+	if v.freeRAM < poolMintStandDownFreeRAMBytes {
+		return true, fmt.Sprintf("free_ram_bytes=%d<%d", v.freeRAM, poolMintStandDownFreeRAMBytes)
+	}
+	return false, ""
+}
+
+// poolHostCapacity is the seam the desired-state pass reads host capacity
+// through. It is a package variable so tests can pin the verdict; production
+// installs leave it pointing at readPoolHostCapacity.
+var poolHostCapacity = readPoolHostCapacity
+
+// readPoolHostCapacity samples the host through the same gopsutil collectors
+// the dashboard health plane uses. Available (not Free) is the memory rail:
+// Free excludes reclaimable page cache and under-reports a Linux host that is
+// actually fine.
+func readPoolHostCapacity() poolCapacityVerdict {
+	avg, err := load.Avg()
+	if err != nil {
+		return poolCapacityVerdict{probeErr: fmt.Errorf("reading host load average: %w", err)}
+	}
+	vm, err := mem.VirtualMemory()
+	if err != nil {
+		return poolCapacityVerdict{probeErr: fmt.Errorf("reading host memory: %w", err)}
+	}
+	return poolCapacityVerdict{load1: avg.Load1, freeRAM: vm.Available}
+}
+
 // computePoolDesiredStatesParkedAt is computePoolDesiredStatesAt with the
 // pass's parked seats (parkSeats): a parked seat's resume request is marked
 // Parked, accepted outside the nested caps (it takes no headroom from
@@ -573,6 +639,11 @@ func computePoolDesiredStatesParkedAt(
 	floorUsage := acceptedNestedCapUsage(limits, concreteNestedCapRequests(cfg, resumeRequests, protectedNewRequests, inFlightNewRequests))
 	floorReservations := newNestedCapFloorReservations(cfg, aliasHeldTemplates, limits, floorUsage)
 	allRequests := append([]SessionRequest(nil), resumeRequests...)
+	// One capacity observation per pass, taken even when no template has
+	// demand: the cost is two /proc reads, and a pass that would mint must
+	// consult the same verdict every template saw (ci-soai behavior 3).
+	capacity := poolHostCapacity()
+	standDown, standDownWhy := capacity.standDown()
 
 	// Merge scale_check demand. In bead-backed reconciliation, scale_check is
 	// the authoritative signal for new unassigned demand only; resume requests
@@ -623,6 +694,27 @@ func computePoolDesiredStatesParkedAt(
 		protectedCount := minInt(len(protected), concreteLimit)
 		inFlightCount := minInt(len(inFlight), concreteLimit-protectedCount)
 		reusedCount := protectedCount + inFlightCount
+		// Mint stand-down: cap the template's new sessions at what it can
+		// satisfy by reusing sessions that already exist. Placed after
+		// concreteLimit so protected/in-flight reuse keeps its seats — only
+		// anonymous creates are suppressed, because those are the mints the
+		// rails exist to stop. Demand rows stay queued and are served the
+		// first pass after the host drops back under the rails.
+		if standDown && newCount > reusedCount {
+			if trace != nil {
+				payload := traceRecordPayload{
+					"why":                      standDownWhy,
+					"load1":                    capacity.load1,
+					"free_ram_bytes":           capacity.freeRAM,
+					"anonymous_new_suppressed": newCount - reusedCount,
+				}
+				if capacity.probeErr != nil {
+					payload["probe_error"] = capacity.probeErr.Error()
+				}
+				trace.RecordDecision(TraceSitePoolCapacityStandDown, TraceReasonCapacityStandDown, TraceOutcomeSkipped, template, "", payload)
+			}
+			newCount = reusedCount
+		}
 		selectedConcrete := make([]SessionRequest, 0, reusedCount)
 		selectedConcrete = append(selectedConcrete, protected[:protectedCount]...)
 		selectedConcrete = append(selectedConcrete, inFlight[:inFlightCount]...)
@@ -692,7 +784,7 @@ func computePoolDesiredStatesParkedAt(
 		}
 	}
 
-	return withParkedRequests(applyNestedCaps(cfg, allRequests, aliasHeldTemplates, trace), parkedRequests)
+	return withParkedRequests(applyNestedCaps(cfg, allRequests, aliasHeldTemplates, trace, capacity, standDownWhy), parkedRequests)
 }
 
 // splitParkedRequests separates a parked seat's requests from the counted
@@ -1049,7 +1141,13 @@ func poolSessionConsumesNewDemandInfo(info sessionpkg.Info) bool {
 //     therefore the precedence *within* new demand, not across phases.
 //
 // TestApplyNestedCaps_NoFloorsPreservesDemandPriority pins both regimes.
-func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTemplates map[string]struct{}, trace *sessionReconcilerTraceCycle) []PoolDesiredState {
+//
+// capacity carries the pass's mint stand-down verdict (ci-soai behavior 3):
+// when the verdict stands down, floor fills are suppressed — binding EXISTING
+// sessions to floors still happens (that is reuse, not minting), but the
+// count-below-minimum fill loop that materializes FloorGuarantee sessions is
+// skipped, because a floor mint is a session mint like any other.
+func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTemplates map[string]struct{}, trace *sessionReconcilerTraceCycle, capacity poolCapacityVerdict, standDownWhy string) []PoolDesiredState {
 	// Order the phase-3 priority walk: priority DESC, resume tier first within
 	// same priority. Phase 1 walks this same slice but does not honor the order
 	// as an admission ranking against new demand — it admits every concrete
@@ -1071,7 +1169,7 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTempl
 	usage := newNestedCapUsage()
 	accepted := make(map[string][]SessionRequest) // template → accepted requests
 	consumed := acceptConcreteNestedCapRequests(requests, limits, &usage, accepted, trace)
-	reserveNestedCapFloors(cfg, requests, aliasHeldTemplates, limits, &usage, accepted, consumed, trace)
+	reserveNestedCapFloors(cfg, requests, aliasHeldTemplates, limits, &usage, accepted, consumed, trace, capacity, standDownWhy)
 
 	// Walk demand not already used by a floor, accepting by priority.
 	for i, req := range requests {
@@ -1162,6 +1260,8 @@ func reserveNestedCapFloors(
 	accepted map[string][]SessionRequest,
 	consumed []bool,
 	trace *sessionReconcilerTraceCycle,
+	capacity poolCapacityVerdict,
+	standDownWhy string,
 ) {
 	floors := make([]nestedCapFloor, 0, len(cfg.Agents))
 	for i := range cfg.Agents {
@@ -1177,6 +1277,7 @@ func reserveNestedCapFloors(
 	}
 	sort.Slice(floors, func(i, j int) bool { return floors[i].template < floors[j].template })
 
+	standDown, _ := capacity.standDown()
 	for _, floor := range floors {
 		if limits.agentRigUnresolved[floor.template] {
 			log.Printf("pool desired state: template %q rig_resolution_error: refusing min_active_sessions floor %d for non-city agent",
@@ -1202,6 +1303,24 @@ func reserveNestedCapFloors(
 			if !acceptNestedCapFloor(request, floor, limits, usage, accepted, trace) {
 				break
 			}
+		}
+		// The fill loop materializes FloorGuarantee sessions — new mints, so
+		// the mint stand-down gates it. Binding existing sessions to the
+		// floor above already ran; only the mint is suppressed, and the
+		// floor refills the first pass after the host drops back under the
+		// rails (ci-soai behavior 3).
+		if standDown && usage.agentCount[floor.template] < floor.minimum {
+			if trace != nil {
+				trace.RecordDecision(TraceSitePoolCapacityStandDown, TraceReasonCapacityStandDown, TraceOutcomeSkipped, floor.template, "", traceRecordPayload{
+					"why":               standDownWhy,
+					"load1":             capacity.load1,
+					"free_ram_bytes":    capacity.freeRAM,
+					"floor_min":         floor.minimum,
+					"current":           usage.agentCount[floor.template],
+					"floors_suppressed": floor.minimum - usage.agentCount[floor.template],
+				})
+			}
+			continue
 		}
 		for usage.agentCount[floor.template] < floor.minimum {
 			request := SessionRequest{Template: floor.template, Tier: "new", FloorGuarantee: true}
