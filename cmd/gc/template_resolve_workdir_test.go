@@ -550,3 +550,68 @@ func TestRediscoveredNamedBeadWorkDirUsesAliasNotTemplate(t *testing.T) {
 		t.Fatalf("WorkDir collapsed onto the shared template path %q", sharedWorkDir)
 	}
 }
+
+// TestResolveTemplateHookCopyDestinationMatchesSessionRuntime protects real
+// repositories from duplicated city-relative hook paths on local startup.
+func TestResolveTemplateHookCopyDestinationMatchesSessionRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		name, citySession, agentSession, want string
+		external                              bool
+	}{
+		{"tmux", "tmux", "", ".codex/hooks.json", false},
+		{"subprocess", "subprocess", "", ".codex/hooks.json", false},
+		{"local override", "k8s", "tmux", ".codex/hooks.json", false},
+		{"container", "k8s", "", "projects/practice/.codex/hooks.json", false},
+		{"default", "", "", ".codex/hooks.json", false},
+		{"herdr", "herdr", "", ".codex/hooks.json", false},
+		{"acp", "acp", "", ".codex/hooks.json", false},
+		{"acp override", "k8s", "acp", ".codex/hooks.json", false},
+		{"external tmux", "tmux", "", ".codex/hooks.json", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city := t.TempDir()
+			writeTemplateResolveCityConfig(t, city, "file")
+			repo := filepath.Join(city, "projects", "practice")
+			if tc.external {
+				repo = filepath.Join(t.TempDir(), "existing-repo")
+			}
+			if err := os.MkdirAll(filepath.Join(repo, ".codex"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			hook := filepath.Join(repo, ".codex", "hooks.json")
+			if err := os.WriteFile(hook, []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			params := &agentBuildParams{
+				cityName: "city", cityPath: city,
+				workspace: &config.Workspace{Provider: "test"},
+				providers: map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none", SupportsACP: boolPtr(true)}},
+				lookPath:  func(string) (string, error) { return "/bin/echo", nil },
+				fs:        fsys.OSFS{}, rigs: []config.Rig{{Name: "practice", Path: repo}},
+				beaconTime: time.Unix(0, 0), beadNames: make(map[string]string), stderr: io.Discard,
+				sessionProvider: tc.citySession, readOnly: true,
+			}
+			agent := &config.Agent{Name: "worker", Dir: "practice", Session: tc.agentSession, InstallAgentHooks: []string{"codex"}}
+			tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, entry := range tp.Hints.CopyFiles {
+				if entry.Src != hook {
+					continue
+				}
+				found = true
+				if filepath.ToSlash(entry.RelDst) != tc.want {
+					t.Errorf("hook target = %q, want %q for %s", entry.RelDst, tc.want, tc.name)
+				}
+				if !entry.Probed || entry.ContentHash == "" {
+					t.Error("hook fingerprint provenance was lost")
+				}
+			}
+			if !found {
+				t.Fatal("installed hook missing from runtime copy plan")
+			}
+		})
+	}
+}

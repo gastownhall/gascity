@@ -307,7 +307,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			ContentHash: runtime.HashPathContentExcluding(scriptsDir, isOperationalScript),
 		})
 	}
-	copyFiles = stageHookFiles(copyFiles, p.cityPath, workDir, hookFileProvidersForResolved(resolved, installHooks, p.providers))
+	effectiveRuntime := effectiveSessionProvider(cfgAgent.Session, p.sessionProvider)
+	hookStagingRoot := p.cityPath
+	switch effectiveRuntime {
+	case "", "tmux", "subprocess", "herdr", "acp":
+		hookStagingRoot = workDir
+	}
+	copyFiles = stageHookFiles(copyFiles, p.cityPath, workDir, hookStagingRoot, hookFileProvidersForResolved(resolved, installHooks, p.providers))
 
 	// Step 6: Compute session name.
 	// Uses bead-derived naming ("s-{beadID}") when a bead store is available,
@@ -851,7 +857,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		ProgramStatusEnv: expandEnvMap(programStatusEnv),
 	}
 	params.SessionOverride = cfgAgent.Session
-	params.EffectiveSessionProvider = effectiveSessionProvider(cfgAgent.Session, p.sessionProvider)
+	params.EffectiveSessionProvider = effectiveRuntime
 	if p.city != nil {
 		params.CityRuntimes = p.city.Runtimes
 	}

@@ -1457,21 +1457,20 @@ func claudeSettingsSource(cityPath string) (src, rel string) {
 	return "", ""
 }
 
-// stageHookFiles adds hook files to the copy_files list so container
-// providers (K8s) can stage them into pods. Docker doesn't need this
-// (bind-mount), but the extra entries are harmless.
+// stageHookFiles adds hook files to the copy_files list relative to the
+// runtime staging root: the session workdir locally, or the city root for
+// container providers that project that root at /workspace.
 //
 // Claude's city-level .gc/settings.json is staged here because settingsArgs
 // points --settings at the city-root path. Workdir hook files are included
 // only when they match the resolved provider or requested install-hook slots.
-func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string, hookProviders []string) []runtime.CopyEntry {
-	// Compute the relative path from cityPath to workDir so that
-	// container-side RelDst places files under the agent's WorkingDir
-	// (/workspace/<relWorkDir>/), not always at /workspace/.
-	// When workDir == cityPath, relWorkDir is "." and path.Join collapses it.
+func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir, stagingRoot string, hookProviders []string) []runtime.CopyEntry {
+	// Local consumers join RelDst to workDir; container consumers join it
+	// to /workspace. Match that consumer instead of prefixing a city-relative
+	// path a second time on local startup.
 	relWorkDir := "."
-	if workDir != cityPath {
-		if r, err := filepath.Rel(cityPath, workDir); err == nil {
+	if workDir != stagingRoot {
+		if r, err := filepath.Rel(stagingRoot, workDir); err == nil {
 			relWorkDir = r
 		}
 	}

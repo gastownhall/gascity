@@ -14,3 +14,8 @@ output, environment values or tokens in diagnostic details.
 
 Resolve bare executable names with the effective worker PATH. An explicitly
 empty PATH must not fall back to the supervisor process environment.
+
+Hook copy destinations must match the effective session runtime, including
+per-agent overrides: local consumers resolve them from the session workdir;
+container consumers retain their city-root projection. Keep managed hook
+content fingerprints and unrelated user files intact.
