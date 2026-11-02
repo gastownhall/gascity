@@ -73,7 +73,13 @@ case "$1 $2" in
       *--status=open*) ;;
       *) if [ -f "$FIXTURE/blocked" ]; then echo '[]'; exit 0; fi ;;
     esac
-    jq '[.[] | select(.status == "open" and (.assignee // "") == "" and (.metadata."gc.routed_to" // "") != "")]' "$FIXTURE/beads"
+    excluded='[]'
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = --exclude-label ]; then excluded="$(jq -cn --argjson l "$excluded" --arg v "$2" '$l + [$v]')"; shift; fi
+      shift
+    done
+    jq --argjson excluded "$excluded" '[.[] | select(.status == "open" and (.assignee // "") == "" and (.metadata."gc.routed_to" // "") != "")
+      | select(((.labels // []) - $excluded) == (.labels // []))]' "$FIXTURE/beads"
     ;;
   'session list') cat "$FIXTURE/sessions" ;;
   'session nudge')
@@ -660,6 +666,67 @@ func TestRouteNotificationWaitsForReadyWork(t *testing.T) {
 	}
 }
 
+// gc's bead events carry a deferral as status "deferred"
+// (beads.EncodeBeadEventPayload), while gc ready lists the bead as open. The
+// route must wait like other blocked work, not be dropped.
+func TestRouteNotificationDeferredRouteWaits(t *testing.T) {
+	f := newRouteScriptFixture(t)
+	f.bus.Record(events.Event{Type: "city.started"})
+	f.write("state/nudge-on-route-delivery.json", `{"version":1,"cursor":1,"pending":{},"notified":{},"retry":{}}`, 0o600)
+	f.write("beads", `[{"id":"test-work","status":"open","assignee":"","metadata":{"gc.routed_to":"worker"}}]`, 0o600)
+	f.write("blocked", "", 0o600)
+	f.bus.Record(events.Event{Type: "bead.updated", Subject: "test-work",
+		Payload: json.RawMessage(`{"id":"test-work","status":"deferred","assignee":"","metadata":{"gc.routed_to":"worker"}}`)})
+	f.syncEvents()
+	if !f.due() {
+		t.Fatal("a deferred route did not schedule a run")
+	}
+	if err := f.run(); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.nudges(); got != "" {
+		t.Fatalf("deferred work was nudged: %q", got)
+	}
+	if err := os.Remove(filepath.Join(f.dir, "blocked")); err != nil {
+		t.Fatal(err)
+	}
+	f.expireRetry()
+	if !f.due() {
+		t.Fatal("a deferred route was dropped instead of kept pending")
+	}
+	if err := f.run(); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.nudges(); got != "worker\n" {
+		t.Fatalf("work that became ready = %q", got)
+	}
+}
+
+// Routed readiness leaves out beads labelled exactly "human" (#7366). Such a
+// route waits like held work and is nudged once the label is gone.
+func TestRouteNotificationHumanLabelledRouteWaits(t *testing.T) {
+	f := newRouteScriptFixture(t)
+	f.seed("bead.created", true)
+	f.write("beads", `[{"id":"test-work","status":"open","assignee":"","labels":["human"],"metadata":{"gc.routed_to":"worker"}}]`, 0o600)
+	if err := f.run(); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.nudges(); got != "" {
+		t.Fatalf("human work was nudged: %q", got)
+	}
+	f.write("beads", `[{"id":"test-work","status":"open","assignee":"","metadata":{"gc.routed_to":"worker"}}]`, 0o600)
+	f.expireRetry()
+	if !f.due() {
+		t.Fatal("a human-labelled route was dropped instead of kept pending")
+	}
+	if err := f.run(); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.nudges(); got != "worker\n" {
+		t.Fatalf("work after the label was removed = %q", got)
+	}
+}
+
 func TestRouteNotificationPreservesEachBacklogNotification(t *testing.T) {
 	f := newRouteScriptFixture(t)
 	f.seed("bead.created", true)
@@ -709,6 +776,29 @@ func TestRouteNotificationImportsLegacySuccesses(t *testing.T) {
 	}
 	if got := f.nudges(); got != "" {
 		t.Fatalf("upgrade repeated an accepted notification: %q", got)
+	}
+}
+
+// A state file holding only whitespace carries no state; jq 1.6 could leave
+// one behind (#8611). It must not stop the order on every pass.
+func TestRouteNotificationWhitespaceStateReadsAsAbsent(t *testing.T) {
+	for _, file := range []string{"nudge-on-route-delivery.json", "nudge-on-route-state.json"} {
+		for name, body := range map[string]string{"empty": "", "newline": "\n", "blanks": " \t\n"} {
+			t.Run(file+"/"+name, func(t *testing.T) {
+				f := newRouteScriptFixture(t)
+				f.seed("bead.created", true)
+				f.write("state/"+file, body, 0o600)
+				if !f.due() {
+					t.Fatal("whitespace state did not schedule a run")
+				}
+				if err := f.run(); err != nil {
+					t.Fatal(err)
+				}
+				if got := f.nudges(); got != "worker\n" {
+					t.Fatalf("nudges = %q, want worker", got)
+				}
+			})
+		}
 	}
 }
 
