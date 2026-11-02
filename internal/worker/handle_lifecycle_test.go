@@ -113,6 +113,12 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			want:          "mycmd --session-id " + rotatedSessionKey,
 		},
 		{
+			name:       "present transcript resumes",
+			provider:   "claude",
+			transcript: true,
+			want:       "mycmd --resume " + rotatedSessionKey,
+		},
+		{
 			name:     "creating row with a stale creation marker starts a new session",
 			provider: "claude",
 			state:    string(sessionpkg.StateCreating),
