@@ -19,7 +19,9 @@ import (
 // fakeBackend is a directory of fake screen and ps executables. screen -ls
 // prints the file ls (or fails when ls.fail exists) and logs every other
 // invocation to calls; ps prints ps.procs as its snapshot (or fails it when
-// ps.fail exists) and a fixed start time for -o lstart=.
+// ps.fail exists), cut to COLUMNS without -ww as procps cuts it even into a
+// pipe, and a fixed start time for -o lstart=; uname -n prints host when it
+// exists.
 type fakeBackend struct {
 	t                  *testing.T
 	dir, script, state string
@@ -35,6 +37,10 @@ func newFakeBackend(t *testing.T) *fakeBackend {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("%s not installed", tool)
 		}
+	}
+	uname, err := exec.LookPath("uname")
+	if err != nil {
+		t.Skip("uname not installed")
 	}
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "bin")
@@ -80,10 +86,15 @@ esac
   *args=*)
     [ -f "$F/ps.fail" ] && exit 1
     [ -f "$F/ps.procs" ] || exit 0
+    cut=cat
+    case " $* " in *" -ww "*) ;; *) [ -n "${COLUMNS:-}" ] && cut="cut -c1-$COLUMNS" ;; esac
     while read -r pid ppid comm args; do
       printf '%10s %10s %-16.16s %s\n' "$pid" "$ppid" "$(printf %s "$comm" | tr '+' ' ')" "$args"
-    done < "$F/ps.procs" ;;
+    done < "$F/ps.procs" | $cut ;;
 esac
+`)
+	write("uname", `if [ "$1" = -n ] && [ -f "$F/host" ]; then cat "$F/host"; exit 0; fi
+exec `+fmt.Sprintf("%q", uname)+` "$@"
 `)
 	// A short state directory, so the socket-path guard admits ordinary
 	// names.
@@ -516,5 +527,79 @@ func TestScreenScriptAgentAliases(t *testing.T) {
 	inv, _ := f.run("", "inventory")
 	if !strings.Contains(inv, `"name":"mc-s","state":"running"`) || !strings.Contains(inv, `"agent":"alive"`) {
 		t.Errorf("inventory of a box running its own GC_BIN = %q, want its agent alive", inv)
+	}
+}
+
+// Kills (round 3 MUST) a process snapshot cut to the caller's COLUMNS:
+// procps cuts each line to COLUMNS even into a pipe, so without -ww an agent
+// matched by a long command line reads dead and a zombie kill quits its box.
+func TestScreenScriptReadsTheWholeCommandLine(t *testing.T) {
+	f := newFakeBackend(t)
+	f.env = append(f.env, "COLUMNS=80")
+	f.rows("4194001.mc-c\tDetached")
+	f.run("copilot", "set-meta", "mc-c", "GT_PROCESS_NAMES")
+	f.file("ps.procs", "4194101 4194001 sh /bin/sh /x/wrapper.sh\n"+
+		"4194102 4194101 node node /home/agent/.local/share/nvm/versions/node/v25.1.0/lib/node_modules/@github/copilot/dist/copilot.js\n")
+	if out, _ := f.run("copilot\n", "observe", "mc-c"); !strings.Contains(out, `"agent":"alive"`) {
+		t.Errorf("observe under COLUMNS=80 = %q, want the agent alive", out)
+	}
+	req := `{"object":{"id":"4194001","created":"Mon Nov 2 00:00:00 2026"},"mode":"zombie"}`
+	if out, code := f.run(req, "kill-object", "mc-c"); code != 0 || out != "changed" || strings.Contains(f.calls(), "quit") {
+		t.Errorf("zombie kill under COLUMNS=80 = %q (%d), calls %q; want changed and no quit", out, code, f.calls())
+	}
+}
+
+// Kills (round 3 SHOULD) a city key without the host: two hosts sharing a
+// home and a city path would list each other's sockets, which screen reads
+// as dead and a stop or start wipes.
+func TestScreenScriptKeysStateByHost(t *testing.T) {
+	f := newFakeBackend(t)
+	f.file("host", "host-a")
+	if _, code := f.run(`{"command":"sleep 300"}`, "start", "mc-a"); code != 0 {
+		t.Fatal("start on host-a failed")
+	}
+	f.file("host", "host-b")
+	if out, _ := f.run("", "observe", "mc-a"); !strings.Contains(out, `"absent"`) {
+		t.Errorf("observe on host-b of host-a's box = %q, want absent", out)
+	}
+	if dirs, _ := filepath.Glob(filepath.Join(f.state, "city-*")); len(dirs) != 2 {
+		t.Errorf("city directories for two hosts = %v, want two", dirs)
+	}
+}
+
+// Kills (round 3 NIT) a legacy start refused by the dead boxes a reboot
+// leaves (state now persists): it wipes a name only dead boxes hold and
+// starts once they are gone; a live box still refuses it, and fresh_only
+// still answers 73.
+func TestScreenScriptStartsOverADeadBox(t *testing.T) {
+	f := newFakeBackend(t)
+	f.rows("4194001.mc-r\tDead ???")
+	if _, code := f.run(`{"command":"sleep 300","fresh_only":true}`, "start", "mc-r"); code != 73 {
+		t.Fatalf("fresh_only start over a dead box exited %d, want 73", code)
+	}
+	if strings.Contains(f.calls(), "-wipe") {
+		t.Fatalf("a refused fresh_only start wiped: %q", f.calls())
+	}
+	if _, code := f.run(`{"command":"sleep 300"}`, "start", "mc-r"); code != 0 {
+		t.Fatal("legacy start over a dead box failed")
+	}
+	if calls := f.calls(); !strings.Contains(calls, "-wipe 4194001.mc-r") || !strings.Contains(calls, "-dmS mc-r") {
+		t.Fatalf("legacy start over a dead box: calls %q, want the wipe then the start", calls)
+	}
+	// A dead box that stays listed after the wipe still holds the name.
+	f.rows("4194001.mc-s\tDead ???")
+	f.file("sticky", "")
+	if _, code := f.run(`{"command":"sleep 300"}`, "start", "mc-s"); code == 0 || strings.Contains(f.calls(), "-dmS mc-s") {
+		t.Fatalf("legacy start over a dead box the wipe left succeeded: %q", f.calls())
+	}
+	if err := os.Remove(filepath.Join(f.dir, "sticky")); err != nil {
+		t.Fatal(err)
+	}
+	f.rows("4194001.mc-l\tDead ???", "4194002.mc-l\tDetached")
+	if _, code := f.run(`{"command":"sleep 300"}`, "start", "mc-l"); code == 0 {
+		t.Fatal("legacy start over a live box succeeded")
+	}
+	if strings.Contains(f.calls(), "mc-l") {
+		t.Fatalf("a refused start touched mc-l: %q", f.calls())
 	}
 }

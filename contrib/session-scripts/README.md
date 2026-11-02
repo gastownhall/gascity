@@ -25,8 +25,11 @@ home directory from the password database, never from `XDG_RUNTIME_DIR`,
 the same directory, so none of them can read a running box as absent and
 start a twin. `GC_EXEC_STATE_DIR` overrides it, and then must be identical
 for every gc process of the city. It is a 0700 directory the script refuses
-to use if it is a symlink or someone else's. Keep it short: a screen socket
-path must fit 107 bytes.
+to use if it is a symlink or someone else's: to keep state elsewhere, set
+`GC_EXEC_STATE_DIR` instead of linking `~/.gc-session-screen`. Keep it
+short: a screen socket path must fit 107 bytes. Each city's directory is
+keyed by the host name and the city path, so two hosts sharing a home never
+list (and wipe) each other's boxes.
 
 **Upgrading from an earlier version:** with the old script still in place,
 stop the city (`gc stop <city>`: the controller and every session), then
@@ -34,8 +37,16 @@ replace the file and start the city again. The earlier version kept its
 boxes in the user's default screen directory, which this version does not
 list: replacing the file under a running controller starts every session a
 second time.
+For the same reason, stop the city before upgrading from a gc that does not
+set `GC_EXEC_CITY_PATH`, or renaming the host: either changes the city's
+key, and its running boxes would no longer be listed.
 
-**Dependencies:** `bash`, `screen`, `jq`, `flock`, `ps`, `awk`, `cksum`
+After a reboot the old sockets list as dead. A legacy start wipes a name
+only dead sessions hold and starts it; a v2 (`fresh_only`) start refuses it
+with exit 73 and leaves the removal to gc, by the dead box's object.
+
+**Dependencies:** `bash`, `screen`, `jq`, `flock`, `ps`, `awk`, `cksum`,
+`uname`
 
 **Usage:**
 

@@ -5,7 +5,8 @@
 # profile reconciler v2 reads. See docs/reference/exec-session-provider.md
 # for the full protocol specification.
 #
-# Dependencies: bash, screen, jq, flock, procps ps, awk, cksum (Linux: /proc).
+# Dependencies: bash, screen, jq, flock, procps ps, awk, cksum, uname
+# (Linux: /proc).
 #
 # Declares observe.v1 and report-attachment, so it is v2-ready; city-scoped
 # (each city gets its own private screen socket directory, so its listing
@@ -21,17 +22,22 @@
 # them can read a box as absent and start a twin. GC_EXEC_STATE_DIR overrides
 # it, and then must be the same for every gc process of the city. It is a
 # 0700 directory owned by the user (the script refuses a symlink or another
-# owner's directory). Per city it holds the screen sockets (SCREENDIR) and
-# each box's metadata, written 0600 by rename, so no write follows a link. To
-# reach a box with screen directly, point SCREENDIR at
-# <state>/city-<cksum of GC_EXEC_CITY_PATH>/s; `gc session attach` does it for
-# you.
+# owner's directory; to keep state elsewhere, set GC_EXEC_STATE_DIR rather
+# than link it). Per city and host it holds the screen sockets (SCREENDIR) and
+# each box's metadata, written 0600 by rename, so no write follows a link. The
+# host is in the key so two hosts sharing a home never list each other's
+# sockets, which screen would read as dead and wipe. To reach a box with
+# screen directly, point SCREENDIR at
+# <state>/city-<cksum of `uname -n` and GC_EXEC_CITY_PATH>/s; `gc session
+# attach` does it for you.
 #
 # Upgrading from the previous version: stop the city with the OLD script in
 # place (`gc stop <city>`: the controller and every session), then replace
 # the file and start the city again. The previous version kept its boxes in
 # the user's default screen directory, which this version does not list, so
 # replacing the file under a running controller starts every session twice.
+# For the same reason, stop the city before upgrading from a gc that does
+# not set GC_EXEC_CITY_PATH, or renaming the host: either changes the key.
 #
 # --- Gas Town feature parity notes ---
 #
@@ -62,14 +68,15 @@ private_dir() {
 }
 
 # user_home prints the user's home directory from the password database
-# (getent, else the shell's ~user lookup), ignoring $HOME.
+# (getent, else /etc/passwd), ignoring $HOME.
 user_home() {
-  local h=""
+  local h="" uid
+  uid=$(id -u)
   if command -v getent >/dev/null 2>&1; then
-    h=$(getent passwd "$(id -u)" | cut -d: -f6) || h=""
+    h=$(getent passwd "$uid" | cut -d: -f6) || h=""
   fi
-  if [ -z "$h" ]; then
-    h=$(eval "printf %s ~$(id -un)")
+  if [ -z "$h" ] && [ -r /etc/passwd ]; then
+    h=$(awk -F: -v uid="$uid" '$3 == uid { print $6; exit }' /etc/passwd) || h=""
   fi
   case "$h" in
     /*) printf %s "$h" ;;
@@ -84,7 +91,8 @@ else
   STATE_ROOT=$home/.gc-session-screen
 fi
 private_dir "$STATE_ROOT"
-CITY_KEY=$(printf %s "${GC_EXEC_CITY_PATH:-}" | cksum | cut -d' ' -f1)
+host=$(uname -n) || die "cannot read the host name"
+CITY_KEY=$(printf '%s\n%s' "$host" "${GC_EXEC_CITY_PATH:-}" | cksum | cut -d' ' -f1)
 CITY_DIR=$STATE_ROOT/city-$CITY_KEY
 META=$CITY_DIR/meta
 private_dir "$CITY_DIR"
@@ -219,7 +227,7 @@ agent_states() {
   local procs
   # One snapshot in fixed columns (pid, ppid, comm, args): a command name
   # may hold spaces ("tmux: server"), so columns are read by position.
-  procs=$(ps -e -o pid:10= -o ppid:10= -o comm:16= -o args=) || return 1
+  procs=$(ps -ww -e -o pid:10= -o ppid:10= -o comm:16= -o args=) || return 1
   awk '
     function base(p,   n, a) { n = split(p, a, "/"); return a[n] }
     function noext(b,   i) { i = match(b, /\.[^.]*$/); return i > 0 ? substr(b, 1, i - 1) : b }
@@ -345,14 +353,25 @@ case "$op" in
     fi
 
     lock "$name"
-    # A held name, live or dead, refuses the start; a listing that cannot be
-    # read refuses it too, rather than read as vacant. Under fresh_only the
-    # refusal is exit 73, and nothing is touched.
+    # A held name refuses the start; a listing that cannot be read refuses
+    # it too, rather than read as vacant. Under fresh_only the refusal is exit
+    # 73, and nothing is touched: v2 removes a dead box itself, by its object.
+    # A legacy start wipes a name only dead boxes hold (as a reboot leaves
+    # them) and starts once they are gone.
     load_rows || exit 1
-    if [ -n "$(rows_of "$name")" ]; then
-      echo "session \"$name\" already exists" >&2
-      if [ "$fresh_only" = true ]; then exit 73; fi
-      exit 1
+    held=$(rows_of "$name")
+    if [ -n "$held" ]; then
+      if [ "$fresh_only" = true ]; then
+        echo "session \"$name\" already exists" >&2
+        exit 73
+      fi
+      if printf '%s\n' "$held" | awk -F'\t' '$3 != "Dead ???" { live = 1 } END { exit !live }'; then
+        die "session \"$name\" already exists"
+      fi
+      while IFS=$'\t' read -r pid _ _; do
+        screen -wipe "$pid.$name" >/dev/null 2>&1 || true
+      done <<< "$held"
+      gone_after "$name" || die "start: the dead session $name could not be wiped"
     fi
 
     # Seed the identity before the box exists, so the first observe that
@@ -418,7 +437,10 @@ case "$op" in
       sleep 0.1
     done
     if [ -z "$up" ]; then
-      # Ambiguous: the session may still appear, so its identity stays.
+      # Ambiguous: the session may still appear, so its identity stays. Its
+      # SCREEN process is not known here, so it is not killed: a retry that
+      # lists the session by then is refused (73 under fresh_only), but one
+      # that runs before screen creates the socket can start a second box.
       die "start: screen started no session $name within 2s"
     fi
     ;;

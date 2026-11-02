@@ -834,7 +834,9 @@ cron job and a sudo shell differ in `XDG_RUNTIME_DIR`, `TMPDIR` and even
 creates a twin. Derive the default from something fixed per user (the home
 directory in the password database, for example). An operator who sets
 `GC_EXEC_STATE_DIR` must set the same value for every gc process of the
-city.
+city. A home can be shared between hosts (NFS), so a script whose boxes
+live on one host keys that state by host as well, or one host reads the
+other's boxes as dead and removes them.
 
 gc sets `GC_EXEC_CITY_NAME` and `GC_EXEC_CITY_PATH` on every operation to
 the city the provider serves. A script shared by several cities on one
@@ -850,4 +852,5 @@ See `contrib/session-scripts/` for maintained implementations:
 - **gc-session-screen** — GNU screen backend, v2-ready (`observe.v1`,
   `report-attachment`, `city-scoped`, locality `local`). Each city gets a
   private screen socket directory under the script's state directory.
-  Dependencies: `bash`, `screen`, `jq`, `flock`, `ps`, `awk`, `cksum`.
+  Dependencies: `bash`, `screen`, `jq`, `flock`, `ps`, `awk`, `cksum`,
+  `uname`.
