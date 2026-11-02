@@ -1630,57 +1630,57 @@ func TestWorkLadderRedrivesAnAnswerWhoseTurnDied(t *testing.T) {
 // takes: three days with no nudge, recycle, release or alert, and the claim
 // stays with its seat, which is never restarted. The wait costs no turn. When
 // the seat clears the key, the ladder takes the step up on a fresh grace.
-func TestWorkLadderLeavesAHumanWaitAloneWhileItsTurnsDoNotFail(t *testing.T) {
-	for name, current := range map[string]runtime.TurnState{"its newest turn completed": {}, "a turn open": {TurnID: "answering"}} {
-		t.Run(name, func(t *testing.T) {
-			c := newLadderCity(t)
-			id := c.claim("Human review before merge")
-			if err := c.work.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.SessionIDMetadataKey: c.seat}}); err != nil {
-				t.Fatal(err)
-			}
-			c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id})
-			reads := 0
-			c.turnsRead(func() runtime.TurnHistory {
-				reads++
-				return runtime.TurnHistory{ObservedAt: c.now, Current: current, Recent: []runtime.EndedTurn{
-					{TurnID: "asked", StartedAt: c.start.Add(-2 * time.Hour), EndedAt: c.start.Add(-time.Hour), Status: runtime.TurnStatusCompleted},
-				}}
-			})
-			c.run(time.Minute, 30*time.Second, nil) // the step runs, then asks
-			c.awaitHuman(id, c.seat)
-			c.run(3*24*time.Hour, 5*time.Minute, nil)
-			if reads == 0 {
-				t.Fatal("the lane never read the waiting seat's turns")
-			}
-			if e := c.entry(id); !e.AwaitsHuman || e.Rung != workladder.RungStarted || e.Attempts != 0 || e.Paused != 0 {
-				t.Fatalf("entry %+v, want the started claim kept, waiting on a person, never nudged", e)
-			}
-			if len(c.nudgedAt) != 0 || len(c.posted) != 0 || len(c.events(events.WorkReleased)) != 0 || len(escalations(c)) != 0 {
-				t.Fatalf("three days waiting on a person: nudges %v, recycles %+v, releases %d, escalations %v", c.nudgedAt, c.posted, len(c.events(events.WorkReleased)), escalations(c))
-			}
-			if b, _ := c.work.Get(id); b.Status != "in_progress" || b.Assignee != c.seat {
-				t.Fatalf("the waiting step is %q %q, want it left with its agent", b.Status, b.Assignee)
-			}
-			if v := c.row().Metadata["restart_requested"]; v != "" {
-				t.Fatalf("restart_requested %q on a seat waiting on a person", v)
-			}
-			c.awaitHuman(id, "")
-			answered := c.now
-			c.run(5*time.Minute, 30*time.Second, nil)
-			if len(c.nudgedAt) == 0 || c.nudgedAt[0] != answered.Add(workladder.DefaultGrace).Sub(c.start) {
-				t.Fatalf("after the answer at %v: nudges %v, want the first a grace later", answered.Sub(c.start), c.nudgedAt)
-			}
-		})
+func TestWorkLadderLeavesAHumanWaitAloneWhileItsNewestTurnCompleted(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("Human review before merge")
+	if err := c.work.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.SessionIDMetadataKey: c.seat}}); err != nil {
+		t.Fatal(err)
+	}
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id})
+	reads := 0
+	c.turnsRead(func() runtime.TurnHistory {
+		reads++
+		return runtime.TurnHistory{ObservedAt: c.now, Recent: []runtime.EndedTurn{
+			{TurnID: "asked", StartedAt: c.start.Add(-2 * time.Hour), EndedAt: c.start.Add(-time.Hour), Status: runtime.TurnStatusCompleted},
+		}}
+	})
+	c.run(time.Minute, 30*time.Second, nil) // the step runs, then asks
+	c.awaitHuman(id, c.seat)
+	c.run(3*24*time.Hour, 5*time.Minute, nil)
+	if reads == 0 {
+		t.Fatal("the lane never read the waiting seat's turns")
+	}
+	if e := c.entry(id); !e.AwaitsHuman || e.Rung != workladder.RungStarted || e.Attempts != 0 || e.Paused != 0 {
+		t.Fatalf("entry %+v, want the started claim kept, waiting on a person, never nudged", e)
+	}
+	if len(c.nudgedAt) != 0 || len(c.posted) != 0 || len(c.events(events.WorkReleased)) != 0 || len(escalations(c)) != 0 {
+		t.Fatalf("three days waiting on a person: nudges %v, recycles %+v, releases %d, escalations %v", c.nudgedAt, c.posted, len(c.events(events.WorkReleased)), escalations(c))
+	}
+	if b, _ := c.work.Get(id); b.Status != "in_progress" || b.Assignee != c.seat {
+		t.Fatalf("the waiting step is %q %q, want it left with its agent", b.Status, b.Assignee)
+	}
+	if v := c.row().Metadata["restart_requested"]; v != "" {
+		t.Fatalf("restart_requested %q on a seat waiting on a person", v)
+	}
+	c.awaitHuman(id, "")
+	answered := c.now
+	c.run(5*time.Minute, 30*time.Second, nil)
+	if len(c.nudgedAt) == 0 || c.nudgedAt[0] != answered.Add(workladder.DefaultGrace).Sub(c.start) {
+		t.Fatalf("after the answer at %v: nudges %v, want the first a grace later", answered.Sub(c.start), c.nudgedAt)
 	}
 }
 
-// A wait is left alone only on positive evidence that its seat is fine: a
-// turn open, or the newest ended turn completed. A reading that shows
-// neither (the newest turn canceled, or ended with no status as the idle
-// overlay infers the end of a turn whose CLI died, or no turn at all) keeps
-// the hourly nudge: the answer's turn may have died, and a resumed seat's
-// startup nudge is best effort.
-func TestWorkLadderNudgesAHumanWaitHourlyOnATurnNeitherOpenNorCompleted(t *testing.T) {
+// A wait is left alone only on positive evidence that its seat is fine: its
+// newest ended turn completed. Any other reading keeps the hourly nudge, since
+// the answer's turn may have died and a resumed seat's startup nudge is best
+// effort: the newest turn canceled, or ended with no status as the idle
+// overlay infers the end of a turn whose CLI died; no turn at all; and a turn
+// open. The ladder reads only a quiet seat's turns, so a turn open there is
+// one no read saw end: a turn whose CLI died before its rollout recorded the
+// end (a family that records its ends gets no idle overlay), or a Claude turn
+// stopped at a dialog the idle scan cannot read, which the overlay leaves
+// open.
+func TestWorkLadderNudgesAHumanWaitHourlyUnlessItsNewestTurnCompleted(t *testing.T) {
 	asked := runtime.EndedTurn{TurnID: "asked", StartedAt: stepsTestNow.Add(-2 * time.Hour), EndedAt: stepsTestNow.Add(-time.Hour), Status: runtime.TurnStatusCompleted}
 	answer := runtime.EndedTurn{TurnID: "answer", StartedAt: stepsTestNow.Add(-10 * time.Minute), EndedAt: stepsTestNow.Add(-5 * time.Minute)}
 	canceled, inferred := answer, answer
@@ -1689,6 +1689,7 @@ func TestWorkLadderNudgesAHumanWaitHourlyOnATurnNeitherOpenNorCompleted(t *testi
 	for name, hist := range map[string]runtime.TurnHistory{
 		"the answer's turn canceled":             {Recent: []runtime.EndedTurn{canceled, asked}},
 		"the answer's turn ended with no status": {Recent: []runtime.EndedTurn{inferred, asked}},
+		"the answer's turn open":                 {Current: runtime.TurnState{TurnID: answer.TurnID}, CurrentStart: answer.StartedAt, Recent: []runtime.EndedTurn{asked}},
 		"no turn":                                {},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -1712,6 +1713,54 @@ func TestWorkLadderNudgesAHumanWaitHourlyOnATurnNeitherOpenNorCompleted(t *testi
 				t.Fatalf("a waiting step: recycles %+v, releases %d, escalations %v", c.posted, len(c.events(events.WorkReleased)), escalations(c))
 			}
 		})
+	}
+}
+
+// A family that records its turns' ends (Codex) gets no idle overlay, so a
+// rollout whose newest record is a turn's start reads as that turn open
+// however long it has been quiet. Here the answer's turn dies with its CLI
+// before the rollout records its end, and the seat is resumed in place: a
+// new generation in the same conversation, whose rollout the resumed CLI
+// appends to. Its startup nudge is best effort and never lands, so the
+// seat's turns show the answer's turn open for good. Once the resumed seat
+// is quiet, the ladder takes the step up at once (the wait began more than a
+// Cap ago), then a Cap apart, with no recycle, release or alert.
+func TestWorkLadderRedrivesAWaitWhoseAnswerTurnStaysOpenAcrossAResumedRestart(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("Human review before merge")
+	if err := c.work.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.SessionIDMetadataKey: c.seat}}); err != nil {
+		t.Fatal(err)
+	}
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id, "provider": "codex"})
+	asked := runtime.EndedTurn{TurnID: "asked", StartedAt: c.now.Add(-2 * time.Hour), EndedAt: c.now.Add(-time.Hour), Status: runtime.TurnStatusCompleted}
+	hist := runtime.TurnHistory{Recent: []runtime.EndedTurn{asked}}
+	c.turnsRead(func() runtime.TurnHistory { h := hist; h.ObservedAt = c.now; return h })
+	c.awaitHuman(id, c.seat) // the step ran and asked
+	c.run(3*time.Hour, 30*time.Second, nil)
+	if len(c.nudgedAt) != 0 {
+		t.Fatalf("nudges %v while the seat's newest turn, the ask, completed: want none", c.nudgedAt)
+	}
+	// The answer came: its turn runs for ten minutes, the seat at work, then
+	// dies with its CLI.
+	hist = runtime.TurnHistory{Current: runtime.TurnState{TurnID: "answer"}, CurrentStart: c.now, Recent: []runtime.EndedTurn{asked}}
+	c.sp.SetActivity(ladderSeatName, c.now)
+	c.run(10*time.Minute, 30*time.Second, func() { c.sp.SetActivity(ladderSeatName, c.now) })
+	if len(c.nudgedAt) != 0 {
+		t.Fatalf("nudges %v while the seat works the answer: want none", c.nudgedAt)
+	}
+	c.setRow(map[string]string{"generation": "8", "instance_token": "tok-8"})
+	resumed := c.now
+	c.sp.SetActivity(ladderSeatName, resumed) // its startup output
+	c.run(2*time.Hour+2*time.Minute, 30*time.Second, nil)
+	quiet := resumed.Sub(c.start) + idleClaimNudgeGrace // the first pass that finds the resumed seat quiet
+	if want := []time.Duration{quiet, quiet + workladder.DefaultCap, quiet + 2*workladder.DefaultCap}; fmt.Sprint(c.nudgedAt) != fmt.Sprint(want) {
+		t.Fatalf("nudges %v, want %v: the step taken up once the resumed seat is quiet, then a cap apart", c.nudgedAt, want)
+	}
+	if e := c.entry(id); !e.AwaitsHuman || e.Rung != workladder.RungStarted {
+		t.Fatalf("entry %+v, want the started claim kept, waiting on a person", e)
+	}
+	if len(c.posted) != 0 || len(c.events(events.WorkReleased)) != 0 || len(escalations(c)) != 0 {
+		t.Fatalf("a waiting step: recycles %+v, releases %d, escalations %v", c.posted, len(c.events(events.WorkReleased)), escalations(c))
 	}
 }
 

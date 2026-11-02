@@ -214,8 +214,7 @@ func (s *rlSim) reading(now time.Time) TurnReading {
 			r.ServedAt = t.end
 		}
 	}
-	r.Open = s.running(now)
-	if r.Open || len(ended) == 0 {
+	if s.running(now) || len(ended) == 0 {
 		return r
 	}
 	last := ended[len(ended)-1]
@@ -618,7 +617,7 @@ func (w *rlWorld) pass(i, step int) error {
 	}
 	// WL1 holds: every entry of a nudgeable seat hears from the ladder. A
 	// wait on a person that begins is paced from its start, and is left
-	// alone while the seat's turns show no failed turn.
+	// alone while the seat's newest turn completed.
 	eligible := acting
 	for _, e := range d.Next.Entries {
 		since, ok := s.lastHeard[e.Key]
@@ -634,7 +633,7 @@ func (w *rlWorld) pass(i, step int) error {
 		switch a := a.(type) {
 		case Nudge:
 			if entryOrZero(d.Next, a.Key).AwaitsHuman && quietWait(o) {
-				return fail("a wait on a person nudged on a reading that shows no failed turn")
+				return fail("a wait on a person nudged on a reading that shows its newest turn completed")
 			}
 			s.lastHeard[a.Key] = o.Now
 		case Alert:
@@ -760,8 +759,8 @@ func TestRateLimitInvariantsAcrossSeats(t *testing.T) {
 	// A seat refused again within SeatFreshGap of its own fresh restart
 	// (exhausted/again) is the one-seat sim's to reach: across seats the
 	// provider gap spaces the restarts, and the seats whose work waits on a
-	// person, nudged only on a failed turn, take few turns between episodes,
-	// so the move is too rare there to pin.
+	// person, nudged only while their newest turn did not complete, take few
+	// turns between episodes, so the move is too rare there to pin.
 	rlCovered(t, RateLimitMove{RateLimitTransitionExhausted, RateLimitCauseAgain})
 }
 

@@ -274,21 +274,18 @@ func TestDecideAWaitOnAPerson(t *testing.T) {
 		}
 	})
 	// The seat's own turns say whether the wait needs a nudge: one that
-	// shows its newest ended turn completed, or a turn open, leaves it alone
-	// however long the person takes; one that shows that turn failed takes
-	// it up a Cap after the wait began or after its last nudge; any other
-	// (none, of another conversation, a newest turn canceled or ended with
-	// no status, no turn at all) keeps the hourly pace.
+	// shows its newest ended turn completed leaves it alone however long the
+	// person takes; one that shows that turn failed takes it up a Cap after
+	// the wait began or after its last nudge; any other (none, of another
+	// conversation, a turn open, a newest turn canceled or ended with no
+	// status, no turn at all) keeps the hourly pace.
 	completed := func(o Observation) Observation {
 		o.Conv, o.Turns = 1, TurnReading{Read: true, Conv: 1, LastCompleted: true, ServedAt: t0.Add(-time.Minute)}
 		return o
 	}
-	open := func(o Observation) Observation {
-		o.Conv, o.Turns = 1, TurnReading{Read: true, Conv: 1, Open: true}
-		return o
-	}
-	// neither: the newest ended turn was canceled, or ended with no status
-	// (an inferred end), after an earlier one completed.
+	// neither: a turn open, or the newest ended turn canceled or ended with
+	// no status (an inferred end), after an earlier one completed. The
+	// lane reduces each to no outcome of the newest ended turn.
 	neither := func(o Observation) Observation {
 		o.Conv, o.Turns = 1, TurnReading{Read: true, Conv: 1, ServedAt: t0.Add(-time.Minute)}
 		return o
@@ -330,14 +327,12 @@ func TestDecideAWaitOnAPerson(t *testing.T) {
 	always := func(f func(Observation) Observation) func(time.Time) func(Observation) Observation {
 		return func(time.Time) func(Observation) Observation { return f }
 	}
-	for name, read := range map[string]func(Observation) Observation{"its newest turn completed": completed, "a turn open": open} {
-		t.Run("a reading that shows "+name+": never nudged, never written, over three days", func(t *testing.T) {
-			nudges, writes := passes(t, 3*24*time.Hour, 5*time.Minute, always(read))
-			if len(nudges) != 0 || writes != 0 {
-				t.Fatalf("nudges %v, writes %d after the wait's start: want the wait left alone", nudges, writes)
-			}
-		})
-	}
+	t.Run("a reading that shows its newest turn completed: never nudged, never written, over three days", func(t *testing.T) {
+		nudges, writes := passes(t, 3*24*time.Hour, 5*time.Minute, always(completed))
+		if len(nudges) != 0 || writes != 0 {
+			t.Fatalf("nudges %v, writes %d after the wait's start: want the wait left alone", nudges, writes)
+		}
+	})
 	t.Run("a reading that shows its newest turn failed: nudged a cap after the wait began, a cap apart after", func(t *testing.T) {
 		nudges, _ := passes(t, 3*time.Hour+time.Minute, 5*time.Minute, always(failed))
 		if want := []time.Duration{DefaultCap, 2 * DefaultCap, 3 * DefaultCap}; fmt.Sprint(nudges) != fmt.Sprint(want) {
@@ -358,7 +353,7 @@ func TestDecideAWaitOnAPerson(t *testing.T) {
 	})
 	for name, read := range map[string]func(Observation) Observation{
 		"no reading": noReading, "a reading of another conversation": otherConv,
-		"a newest turn canceled or ended with no status": neither, "a reading with no turn": noTurns,
+		"a turn open, or a newest turn canceled or ended with no status": neither, "a reading with no turn": noTurns,
 	} {
 		t.Run(name+": the hourly pace", func(t *testing.T) {
 			nudges, _ := passes(t, 3*time.Hour+time.Minute, 5*time.Minute, always(read))
@@ -757,13 +752,13 @@ func TestDecideDue(t *testing.T) {
 			idle: true,
 		},
 		{
-			name: "a wait on a person whose seat has a turn open, degraded: nothing",
+			name: "a wait on a person whose seat has a turn open, degraded: a paused nudge",
 			e:    due(Entry{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempts: 6, Recycles: 1, AwaitsHuman: true}),
 			obs: func(o Observation) Observation {
-				o.Conv, o.Turns, o.Provider.Degraded = 1, TurnReading{Read: true, Conv: 1, Open: true}, true
+				o.Conv, o.Turns, o.Provider.Degraded = 1, TurnReading{Read: true, Conv: 1, ServedAt: t0}, true
 				return o
 			},
-			idle: true,
+			want: []Action{Nudge{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Attempt: 6, Paused: true}},
 		},
 		{
 			name: "a wait on a person whose seat's newest turn was canceled or ended with no status: a nudge",

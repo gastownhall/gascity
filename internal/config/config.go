@@ -2971,8 +2971,8 @@ type DaemonConfig struct {
 	// a permission prompt, does not count). A claim whose metadata
 	// gc.awaiting_human names its seat (the seat asked a person and waits on
 	// their decision) is never recycled or released. While the seat's turns
-	// show a turn open or its newest turn completed, it is left alone; any
-	// other reading (a failed, canceled or status-less newest turn, no turn,
+	// show its newest turn completed, it is left alone; any other reading (a
+	// turn open, a failed, canceled or status-less newest turn, no turn,
 	// turns that cannot be read) keeps it nudged hourly, so an answer whose
 	// turn died is redriven.
 	// A seat whose provider refuses its turns with a rate limit (two in a

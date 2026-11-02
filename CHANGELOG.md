@@ -820,16 +820,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recycled or released, however long the person takes, and raises none of the
   `work.escalated` alerts its pacing would (`started_recycled`,
   `started_unanswered`, `release_unfinished`). While the seat's own turns show
-  a turn open or its newest turn completed, the step is not nudged either, so
-  a wait costs no turns. Any other reading (the newest turn failed, was
-  canceled or ended with no status, no turn at all, turns that cannot be
-  read) keeps an hourly nudge: an hour after the ladder sees the wait or after
-  its last nudge, at once when that is already past. That nudge takes up an
-  answer whose turn died before the seat could clear the key. A seat restarted
-  while it waits gets its agent's startup prompt or hint nudge only when the
-  agent has one, and that delivery is best effort. Nudges the seat cannot take
-  still count toward `nudge_refused`, and a release already in flight that
-  raced the step's start still raises `release_raced_start`. The
+  its newest turn completed, the step is not nudged either, so a wait costs no
+  turns. Any other reading (a turn open, the newest turn failed, was canceled
+  or ended with no status, no turn at all, turns that cannot be read) keeps an
+  hourly nudge: an hour after the ladder sees the wait or after its last nudge,
+  at once when that is already past. That nudge takes up an answer whose turn
+  died before the seat could clear the key, even one whose end was never
+  recorded: the ladder reads only a quiet seat's turns, so a turn open there
+  may have died with its CLI or stopped at a dialog the idle check cannot read.
+  A seat restarted while it waits gets its agent's startup prompt or hint nudge
+  only when the agent has one, and that delivery is best effort. Nudges the
+  seat cannot take still count toward `nudge_refused`, and a release already in
+  flight that raced the step's start still raises `release_raced_start`. The
   ladder checks the key in the planner's snapshot (on the claim's own bead,
   never another store's bead with the same ID) and again in every live
   re-read before it acts (a nudge, a release, pacing carried under an

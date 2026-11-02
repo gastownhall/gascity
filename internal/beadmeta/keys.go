@@ -51,8 +51,8 @@ const (
 	// claim (AwaitsHuman), the work ladder never recycles or releases it, and
 	// raises none of the escalations its pacing would (started_recycled,
 	// started_unanswered, release_unfinished). It leaves the claim alone,
-	// however long the person takes, while the seat's own turns show a turn
-	// open or the newest ended turn completed. Any other reading (the newest
+	// however long the person takes, while the seat's own turns show the
+	// newest ended turn completed. Any other reading (a turn open, the newest
 	// turn failed, canceled or ended with no status, no turn) or none keeps
 	// it nudged an hour after the ask or after its last nudge, at once when
 	// that is already past, so a turn the answer started that died is

@@ -220,9 +220,10 @@ func TestTurnHandleConformanceFailedTurn(t *testing.T) {
 
 // A transcript whose newest turn ended failed on a provider error, with no
 // turn after it, reads as that turn failed and no turn open, whatever the
-// error: the work ladder takes up a step whose seat waits on a person only on
-// such a reading (the turn the person's answer started died), so a failed
-// turn must never read as a turn still open or as one completed.
+// error: the work ladder judges a seat's progress and its rate limits on that
+// reading, and leaves a step whose seat waits on a person alone only on a
+// newest turn completed, so a failed turn must never read as a turn still
+// open or as one completed.
 func TestTurnHandleConformanceNewestTurnFailed(t *testing.T) {
 	const prompt = `{"type":"user","isSidechain":false,"timestamp":"2026-10-13T05:00:00.123Z","message":{"role":"user","content":"a prompt"},"promptId":"7f3e9a10-1111-4aaa-8000-000000000001","origin":"user","promptSource":"prompt"}`
 	const ended = `{"type":"system","subtype":"turn_duration","isSidechain":false,"timestamp":"2026-10-13T05:00:01.010Z"}`
@@ -254,8 +255,8 @@ func TestTurnHandleConformanceNewestTurnFailed(t *testing.T) {
 // turn_duration: its transcript leaves the turn open after the error. Once
 // the transcript has been quiet past the overlay's window and the session
 // reads idle, every read ends that turn failed on the error, with no turn
-// open, as a recorded end does: the work ladder takes up a step waiting on a
-// person on that reading, never on a turn still open.
+// open, as a recorded end does: the work ladder sees the failure (a refusal
+// drives the seat's rate-limit episode), never a turn still open.
 func TestTurnHandleConformanceNewestTurnStoppedAtAnErrorFailed(t *testing.T) {
 	const prompt = `{"type":"user","isSidechain":false,"timestamp":"2026-10-13T05:00:00.123Z","message":{"role":"user","content":"a prompt"},"promptId":"7f3e9a10-1111-4aaa-8000-000000000001","origin":"user","promptSource":"prompt"}`
 	const apiError = `{"type":"assistant","isSidechain":false,"timestamp":"2026-10-13T05:00:01.000Z","isApiErrorMessage":true,"error":"server_error","apiErrorStatus":529,"message":{"role":"assistant","content":[{"type":"text","text":"API Error: overloaded"}]}}`

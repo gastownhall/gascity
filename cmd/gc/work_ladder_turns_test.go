@@ -52,8 +52,8 @@ func TestLadderTurnReading(t *testing.T) {
 		{"no status (Gemini) is no failure, and no completion", runtime.TurnHistory{Recent: []runtime.EndedTurn{noStatus, limited}}, workladder.TurnReading{Read: true, Conv: 3}, runtime.TurnFailure{}},
 		{"an inferred end with no status after a completed turn is not completed", runtime.TurnHistory{Recent: []runtime.EndedTurn{inferred, completed}}, workladder.TurnReading{Read: true, Conv: 3, ServedAt: completed.EndedAt}, runtime.TurnFailure{}},
 		{"canceled is neither", runtime.TurnHistory{Recent: []runtime.EndedTurn{canceled}}, workladder.TurnReading{Read: true, Conv: 3}, runtime.TurnFailure{}},
-		{"a turn open has no failure yet", runtime.TurnHistory{Current: open, Recent: []runtime.EndedTurn{limited, completed}}, workladder.TurnReading{Read: true, Conv: 3, Open: true, ServedAt: completed.EndedAt}, runtime.TurnFailure{}},
-		{"a turn open after a completed one is open, not completed", runtime.TurnHistory{Current: open, Recent: []runtime.EndedTurn{completed}}, workladder.TurnReading{Read: true, Conv: 3, Open: true, ServedAt: completed.EndedAt}, runtime.TurnFailure{}},
+		{"a turn open has no failure yet", runtime.TurnHistory{Current: open, Recent: []runtime.EndedTurn{limited, completed}}, workladder.TurnReading{Read: true, Conv: 3, ServedAt: completed.EndedAt}, runtime.TurnFailure{}},
+		{"a turn open after a completed one is not completed", runtime.TurnHistory{Current: open, Recent: []runtime.EndedTurn{completed}}, workladder.TurnReading{Read: true, Conv: 3, ServedAt: completed.EndedAt}, runtime.TurnFailure{}},
 		{"nothing yet", runtime.TurnHistory{}, workladder.TurnReading{Read: true, Conv: 3}, runtime.TurnFailure{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

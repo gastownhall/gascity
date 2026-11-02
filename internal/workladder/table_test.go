@@ -76,7 +76,10 @@ func TestDecisionTable(t *testing.T) {
 		})},
 		{"quiet, newest turn failed", reading(TurnReading{Read: true, Conv: 1, LastFailed: true, ServedAt: t0.Add(-time.Hour)})},
 		{"quiet, newest turn completed", reading(TurnReading{Read: true, Conv: 1, LastCompleted: true, ServedAt: t0.Add(-time.Hour)})},
-		{"quiet, a turn open", reading(TurnReading{Read: true, Conv: 1, Open: true})},
+		// A turn open reads, as the lane reduces it (ladderTurnReading),
+		// with no outcome of the newest ended turn: the same reading as an
+		// end with no status.
+		{"quiet, a turn open", reading(TurnReading{Read: true, Conv: 1, ServedAt: t0.Add(-time.Hour)})},
 		{"quiet, newest turn ended with no status", reading(TurnReading{Read: true, Conv: 1, ServedAt: t0.Add(-time.Hour)})},
 		{"quiet, a reading of another conversation", reading(TurnReading{Read: true, Conv: 2, ServedAt: t0.Add(-time.Hour)})},
 	}
@@ -189,8 +192,8 @@ func render(a Action) string {
 // nextLook is when the table's entry is next due after this pass (observed
 // as o), from now: "-" when the pass leaves it due (it waits on a hold), and
 // "when its turns change" for a wait on a person that o's reading leaves
-// alone (a turn open, or the newest ended turn completed): it is due again
-// only once a reading shows something else.
+// alone (the newest ended turn completed): it is due again only once a
+// reading shows something else.
 func nextLook(d Decision, o Observation) string {
 	now := o.Now
 	if len(d.Next.Entries) == 0 || (d.Next.Release != nil && d.Next.Release.Key == d.Next.Entries[0].Key) {
