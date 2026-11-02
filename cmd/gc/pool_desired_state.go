@@ -712,6 +712,12 @@ func computePoolDesiredStatesParkedAt(
 					payload["probe_error"] = capacity.probeErr.Error()
 				}
 				trace.RecordDecision(TraceSitePoolCapacityStandDown, TraceReasonCapacityStandDown, TraceOutcomeSkipped, template, "", payload)
+			} else {
+				// nil-trace callers (the decide pass at allocator_plan.go)
+				// would otherwise suppress silently; the 2026-11-02
+				// allocator-suite regression hid behind exactly that
+				// silence for the length of a full suite run.
+				log.Printf("pool desired state: capacity stand-down suppressing %d new mint(s) for %q: %s", newCount-reusedCount, template, standDownWhy)
 			}
 			newCount = reusedCount
 		}

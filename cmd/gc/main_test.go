@@ -241,6 +241,19 @@ func exitTestProcess(code int) {
 }
 
 func TestMain(m *testing.M) {
+	// Pin the pool host-capacity seam healthy for the whole test binary.
+	// The ci-soai behavior-3 stand-down reads live host state once per
+	// desired-state pass; without this pin, every allocator fixture that
+	// expects fresh mints fails whenever the dev host is loaded — including
+	// from the test build itself (2026-11-02: 90 allocator failures in the
+	// first full cmd/gc suite run, all "planned 0, want N", with the
+	// identical fixtures passing on the merge-base commit; the decide pass
+	// consults the gate with a nil trace, so the suppression was also
+	// invisible in verbose output). The planning tests assert plan logic,
+	// not host state. Stand-down tests re-pin the seam per test with their
+	// own verdicts and cleanups, and stay authoritative where they pin.
+	poolHostCapacity = poolCapacityOK
+
 	maybeRunHostedBeadsCredentialProvider()
 	maybeRunProductMetricsDirectChildEnvSpy()
 	maybeRunFakeDoltSQLServer()
