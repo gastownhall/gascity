@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -648,9 +649,23 @@ func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", cmdArgs...)
 	cmd.Dir = dir
 	cmd.Env = repoCacheGitEnv()
-	out, err := cmd.CombinedOutput()
+	// Keep stderr out of the parsed stdout: callers treat the output as a
+	// commit hash or porcelain records, so merged diagnostics masquerade as
+	// both. Diagnostics are reported, never laundered into a verdict.
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
+		if diag := strings.TrimSpace(stderr.String()); diag != "" {
+			return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), diag, err)
+		}
+		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
+	if diag := strings.TrimSpace(stderr.String()); diag != "" {
+		// A zero exit with diagnostics (git could not inspect something it
+		// was asked to) is a Git problem, not evidence about the worktree:
+		// reject conservatively with an accurate reason.
+		return "", fmt.Errorf("git %s wrote diagnostics to stderr: %s", strings.Join(args, " "), diag)
 	}
 	// Trim only trailing newlines: leading spaces are porcelain status
 	// columns the dirty-cache diagnostics must preserve.

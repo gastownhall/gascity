@@ -1018,7 +1018,7 @@ schema = 1
 name = "polecat"
 scope = "city"
 `)
-	if _, err := runRepoCacheGit(seedDir, "init"); err != nil {
+	if _, err := runRepoCacheGit(seedDir, "init", "-q"); err != nil {
 		t.Fatalf("git init: %v", err)
 	}
 	if _, err := runRepoCacheGit(seedDir, "add", "pack.toml"); err != nil {
@@ -2887,6 +2887,108 @@ func TestValidateLockedRemoteCacheDirtyErrorNamesEntries(t *testing.T) {
 		writeTestFile(t, cacheDir, "artifact.pyc", "binary artifact\n")
 		if err := validateLockedRemoteCache(source, cacheDir, commit); err != nil {
 			t.Fatalf("validateLockedRemoteCache rejected an ignored artifact: %v", err)
+		}
+	})
+}
+
+// TestValidateLockedRemoteCacheGitStderrFailsClosed covers git writing
+// diagnostics to stderr while exiting zero: the stderr is a Git problem,
+// not evidence about the worktree, so validation must reject as a command
+// failure naming the command and the diagnostic text — never as local
+// worktree changes. The stdout dirt plus stderr case must fail the same
+// way: stderr cannot be laundered into a dirty-cache verdict.
+func TestValidateLockedRemoteCacheGitStderrFailsClosed(t *testing.T) {
+	const source = "https://example.com/tools.git"
+	const commit = "0123456789abcdef0123456789abcdef01234567"
+
+	// installFakeGit shadows git with a fixture whose rev-parse reports the
+	// pinned commit and whose status prints the given stdout/stderr with a
+	// zero exit, exercising the actual default runner.
+	installFakeGit := func(t *testing.T, statusStdout, statusStderr string) {
+		t.Helper()
+		binDir := t.TempDir()
+		script := `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+	-c) shift 2 ;;
+	*) break ;;
+	esac
+done
+case "$1" in
+rev-parse)
+	printf '%s\n' "$FAKE_GIT_COMMIT"
+	;;
+status)
+	if [ -n "$FAKE_GIT_STATUS_STDOUT" ]; then printf '%s\n' "$FAKE_GIT_STATUS_STDOUT"; fi
+	if [ -n "$FAKE_GIT_STATUS_STDERR" ]; then printf '%s\n' "$FAKE_GIT_STATUS_STDERR" >&2; fi
+	;;
+*)
+	exit 2
+	;;
+esac
+exit 0
+`
+		if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", binDir)
+		t.Setenv("FAKE_GIT_COMMIT", commit)
+		t.Setenv("FAKE_GIT_STATUS_STDOUT", statusStdout)
+		t.Setenv("FAKE_GIT_STATUS_STDERR", statusStderr)
+	}
+
+	t.Run("status diagnostics on stderr", func(t *testing.T) {
+		installFakeGit(t, "", "fixture git diagnostic")
+		err := validateLockedRemoteCache(source, t.TempDir(), commit)
+		if err == nil {
+			t.Fatal("expected stderr diagnostics to fail validation")
+		}
+		msg := err.Error()
+		if strings.Contains(msg, "local worktree changes") {
+			t.Errorf("stderr mislabeled as local worktree changes: %s", msg)
+		}
+		if !strings.Contains(msg, "status --porcelain") || !strings.Contains(msg, "fixture git diagnostic") {
+			t.Errorf("error missing the command or diagnostic text: %s", msg)
+		}
+	})
+
+	t.Run("stdout dirt plus stderr is a command failure", func(t *testing.T) {
+		installFakeGit(t, " M pack.toml", "fixture git diagnostic")
+		err := validateLockedRemoteCache(source, t.TempDir(), commit)
+		if err == nil {
+			t.Fatal("expected stderr diagnostics to fail validation")
+		}
+		msg := err.Error()
+		if strings.Contains(msg, "local worktree changes") {
+			t.Errorf("stderr laundered into a dirty-cache verdict: %s", msg)
+		}
+		if !strings.Contains(msg, "status --porcelain") || !strings.Contains(msg, "fixture git diagnostic") {
+			t.Errorf("error missing the command or diagnostic text: %s", msg)
+		}
+	})
+
+	t.Run("unreadable worktree directory via real git", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("running as root: directory permissions cannot block reads")
+		}
+		t.Setenv("LC_ALL", "C")
+		cacheDir := t.TempDir()
+		commit := seedRepoCacheFixture(t, cacheDir)
+		sub := filepath.Join(cacheDir, "formulas")
+		if err := os.Chmod(sub, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(sub, 0o755) })
+		err := validateLockedRemoteCache(source, cacheDir, commit)
+		if err == nil {
+			t.Fatal("expected unreadable worktree to fail validation")
+		}
+		msg := err.Error()
+		if strings.Contains(msg, "local worktree changes") {
+			t.Errorf("read failure mislabeled as local worktree changes: %s", msg)
+		}
+		if !strings.Contains(msg, "status --porcelain") || !strings.Contains(msg, "Permission denied") {
+			t.Errorf("error missing the command or diagnostic text: %s", msg)
 		}
 	})
 }
