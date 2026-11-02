@@ -2,6 +2,7 @@
 # plus the gastown 0.1.11 and 0.1.12 and gascity 0.1.7 releases verbatim from 427c2dedce37 (2026-10-29),
 # plus the gastown 0.1.13 release verbatim from gascity-packs #596.
 # RFC8191 candidate entry retained from53037f641ed0d6bd9ec8982cd7f09e941e5f5186.
+# RFC candidate catalog entry preserved.
 # Refresh it when the registry publishes releases the import tests should cover.
 schema = 1
 
@@ -56,8 +57,8 @@ schema = 1
   [[pack.release]]
     version = "0.0.8191"
     ref = "feat/rfc-8191-gascity-only"
-    commit = "c5aaa9fae54af7a13be6e4f5a594d7d49a58e2cb"
-    hash = "sha256:16e9f3506a21918130dcb562038dabf943d66e0520a110f3204dff8c8814a97f"
+    commit = "4c479c7dfb5b0b38e227953ab9ab75905d6f5b66"
+    hash = "sha256:3a890e2a6292ab7f03f322942406802145422c45571f0c5022e7ee4474c0d73b"
     description = "RFC8191 qualification candidate on the original compatible module baseline; stable catalog selection is unchanged."
 
 [[pack]]

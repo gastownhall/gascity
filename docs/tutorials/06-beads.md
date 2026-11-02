@@ -41,14 +41,16 @@ client tests should pass.
 
 ## Optional parallel work
 
-Register additional existing repositories in place, give each task explicit
-acceptance criteria, and submit independent work to their rig's delivery route.
-Workers can run concurrently within your configured capacity. Changes that
-share a repository's integration branch need source and conflict checks; an
-open blocker must remain blocked until its prerequisite is delivered.
+The next tutorial adds two independent read-only checks to this same project
+and runs them through manual orders. Follow its [parallel-check exercise](/tutorials/07-orders#optional-run-independent-checks-in-parallel)
+for commands, expected results and retained command logs. It also explains
+the additional source/conflict boundaries for concurrent code changes.
 
-Continue to [Orders](/tutorials/07-orders) for a token-free automation example
-and optional publication/customization.
+You can register other existing repositories in place and route independent
+work to their normal rig workers within your configured capacity.
+
+Continue to [Orders](/tutorials/07-orders) for the first mechanical order,
+parallel checks and optional publication using your accepted commit.
 
 ## Custom configuration exercise
 

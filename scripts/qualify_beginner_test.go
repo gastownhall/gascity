@@ -16,7 +16,7 @@ import (
 // A qualification runner installs a real service. Bad inputs must be refused
 // before it invokes any candidate or touches an existing user's directory.
 func TestBeginnerQualifierRefusesUnsafeCandidates(t *testing.T) {
-	for _, fault := range []string{"existing directory", "symlink directory", "missing companion", "occupied port", "changed published commands"} {
+	for _, fault := range []string{"existing directory", "symlink directory", "missing companion", "occupied port", "changed published commands", "changed parallel commands"} {
 		t.Run(fault, func(t *testing.T) {
 			base := t.TempDir()
 			candidate := filepath.Join(base, "candidate")
@@ -52,12 +52,29 @@ func TestBeginnerQualifierRefusesUnsafeCandidates(t *testing.T) {
 				}
 			case "missing companion":
 				want = "candidate companion"
-			case "changed published commands":
+			case "changed published commands", "changed parallel commands":
 				docs = filepath.Join(base, "docs")
 				if err := os.MkdirAll(filepath.Join(docs, "getting-started"), 0o755); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(filepath.Join(docs, "getting-started", "quickstart.md"), []byte("```bash\ngc init --default-provider claude ~/bright-lights\n```\n"), 0o644); err != nil {
+				if fault == "changed parallel commands" {
+					for _, name := range []string{"getting-started/quickstart.md", "tutorials/02-agents.md", "tutorials/05-formulas.md", "tutorials/07-orders.md"} {
+						data, err := os.ReadFile(filepath.Join(repoRoot(t), "docs", name))
+						if err != nil {
+							t.Fatal(err)
+						}
+						if name == "tutorials/07-orders.md" {
+							data = []byte(strings.ReplaceAll(string(data), "cat > orders/practice-client-check.toml", "cat > orders/renamed-client-check.toml"))
+						}
+						target := filepath.Join(docs, name)
+						if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.WriteFile(target, data, 0o644); err != nil {
+							t.Fatal(err)
+						}
+					}
+				} else if err := os.WriteFile(filepath.Join(docs, "getting-started", "quickstart.md"), []byte("```bash\ngc init --default-provider claude ~/bright-lights\n```\n"), 0o644); err != nil {
 					t.Fatal(err)
 				}
 				listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -69,6 +86,9 @@ func TestBeginnerQualifierRefusesUnsafeCandidates(t *testing.T) {
 					t.Fatal(err)
 				}
 				want = "published commands changed"
+				if fault == "changed parallel commands" {
+					want = "published parallel-check exercise is missing or ambiguous"
+				}
 			case "occupied port":
 				listener, err := net.Listen("tcp", "127.0.0.1:0")
 				if err != nil {

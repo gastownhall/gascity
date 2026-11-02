@@ -1,5 +1,17 @@
 load("@rules_go//go:def.bzl", "go_test")
+load("@rules_python//python:defs.bzl", "py_test")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+py_test(
+    name = "qualify_process_test",
+    size = "medium",
+    srcs = [
+        "qualify_process.py",
+        "qualify_process_test.py",
+    ],
+    data = ["//docs:tutorials/07-orders.md"],
+    imports = ["."],
+)
 
 exports_files([
     "check-generated-in-sync.sh",

@@ -7,7 +7,9 @@ the isolated profile it started. Provider HOME/credentials are caller-managed.
 """
 from __future__ import annotations
 import argparse, atexit, datetime, hashlib, json, math, os, pathlib, re, socket
-import signal, subprocess, sys, time, urllib.request
+import shlex, signal, subprocess, sys, time, urllib.request
+
+from qualify_process import run_logged
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--gc', type=pathlib.Path, required=True, help='Exact candidate gc binary; companion must be beside it')
@@ -47,6 +49,12 @@ for name, commands in required.items():
 order_doc = (a.docs_root/'tutorials/07-orders.md').read_text()
 order_blocks = [block for block in re.findall(r'```(?:bash|shell)\n(.*?)\n```', order_doc, re.S) if "cat > orders/practice-check.toml <<'ORDER'" in block]
 if len(order_blocks) != 1: p.error('published manual-order exercise is missing or ambiguous')
+parallel_setup = [block for block in re.findall(r'```(?:bash|shell)\n(.*?)\n```', order_doc, re.S) if "cat > orders/practice-client-check.toml <<'ORDER'" in block]
+parallel_run = [block for block in re.findall(r'```(?:bash|shell)\n(.*?)\n```', order_doc, re.S) if block.startswith("bash <<'CHECKS'\n")]
+if len(parallel_setup) != 1 or len(parallel_run) != 1:
+    p.error('published parallel-check exercise is missing or ambiguous')
+if parallel_setup[0].count('cd ~/bright-lights') != 1 or parallel_run[0].count('cd "$HOME/bright-lights"') != 1:
+    p.error('published parallel-check city selection changed; reconcile qualification')
 instructions['tutorials/07-orders.md'] = hashlib.sha256(order_doc.encode()).hexdigest()
 
 root.mkdir(parents=True)
@@ -219,9 +227,9 @@ print("Run the documented token-free manual order",flush=True)
 cmd("orders",["order","list"])
 order_script = out/'published-manual-order.sh'
 order_script.write_text(order_blocks[0]+'\n')
-r = subprocess.run(['/bin/bash',str(order_script)],cwd=city,env=env,capture_output=True,text=True,timeout=240)
-(out/'manual-order.stdout').write_text(r.stdout);(out/'manual-order.stderr').write_text(r.stderr)
-assert r.returncode == 0,(r.stdout,r.stderr)
+code = run_logged(['/bin/bash', str(order_script)], cwd=city, env=env,
+                  stdout_path=out/'manual-order.stdout', stderr_path=out/'manual-order.stderr', timeout=240)
+assert code == 0, ('manual order failed', code, str(out/'manual-order.stderr'))
 
 print('[8/9] Observe a finite idle interval without stopping workers first',flush=True)
 def active_models():
@@ -234,6 +242,23 @@ while active_models():
     if time.monotonic()-settle >= 120: raise TimeoutError('model workers did not become idle within120seconds')
     print('Waiting for native worker drain, '+str(int(time.monotonic()-settle))+'s',flush=True)
     time.sleep(5)
+print('Run the documented independent read-only order checks', flush=True)
+parallel_began = datetime.datetime.now(datetime.timezone.utc)
+parallel_temp = out/'parallel-check-tmp'
+parallel_temp.mkdir()
+parallel_env = dict(env, TMPDIR=str(parallel_temp))
+for label, block in (('parallel-setup', parallel_setup[0]), ('parallel-checks', parallel_run[0])):
+    # As with init's parameterized destination, substitute only the documented
+    # city path. Keep every exercise command and its failure checks intact.
+    block = block.replace('cd ~/bright-lights', 'cd '+shlex.quote(str(city)))
+    block = block.replace('cd "$HOME/bright-lights"', 'cd '+shlex.quote(str(city)))
+    script = out/(label+'.sh')
+    script.write_text(block+'\n')
+    code = run_logged(['/bin/bash', str(script)], cwd=city, env=parallel_env,
+                      stdout_path=out/(label+'.stdout'), stderr_path=out/(label+'.stderr'), timeout=240)
+    assert code == 0, (label, code, str(out/(label+'.stderr')))
+parallel_checks = {'exercises': ['practice-check', 'practice-client-check'], 'evidence': 'parallel-checks.stdout', 'history': 'Manual exec orders deliberately return results without history rows'}
+assert not active_models(), 'model session started during mechanical checks'
 idle_began = datetime.datetime.now(datetime.timezone.utc)
 idle_clock = time.monotonic(); samples = []
 while True:
@@ -246,12 +271,16 @@ while True:
     print('Idle '+str(int(elapsed))+'/300seconds, zero running model sessions',flush=True)
     if elapsed >= 300: break
     time.sleep(min(30,300-elapsed))
-event_text = cmd('idle-events',['events','--since',str(math.ceil(time.monotonic()-idle_clock)+5)+'s'])
+event_window = (datetime.datetime.now(datetime.timezone.utc)-parallel_began).total_seconds()
+event_text = cmd('idle-events',['events','--since',str(math.ceil(event_window)+5)+'s'])
 def event_time(raw):
     raw = re.sub(r'\.(\d+)(?=Z|[+-]\d\d:\d\d$)',lambda m:'.'+(m.group(1)+'000000')[:6],raw)
     return datetime.datetime.fromisoformat(raw.replace('Z','+00:00'))
 events = [json.loads(line) for line in event_text.splitlines() if line.strip()]
 assert not [row for row in events if row['type']=='session.woke' and event_time(row['ts'])>=idle_began],'model wake during idle observation'
+assert not [row for row in events if row['type']=='session.woke' and event_time(row['ts'])>=parallel_began], 'model wake during mechanical checks or idle observation'
+parallel_checks.update(status='PASS', model_wakes=0)
+(out/'parallel-checks.json').write_text(json.dumps(parallel_checks, indent=2)+'\n')
 idle_result = {'duration_s':time.monotonic()-idle_clock,'samples':len(samples),'model_wakes':0,'scope':'GC city running model sessions and native wake events; host-global provider processes are not measured'}
 with urllib.request.urlopen(base+'/v0/city/'+city.name+'/usage',timeout=30) as response:
     usage = json.load(response)
@@ -259,5 +288,5 @@ with urllib.request.urlopen(base+'/v0/city/'+city.name+'/usage',timeout=30) as r
 assert usage.get('available') and usage.get('recording') and not usage.get('partial'), 'native usage evidence unavailable or partial'
 assert cleanup(),'isolated profile cleanup failed; inspect retained evidence'
 
-(out/'result.json').write_text(json.dumps({'status':'PASS','commit':a.expected_commit,'provider':a.provider,'city':str(city),'identity':start,'lessons':lessons,'idle':idle_result,'provider_usage':usage,'limits':'Primary published journey only. Optional follow-ons and failure matrix are separate. Finite idle observation.'},indent=2)+'\n')
+(out/'result.json').write_text(json.dumps({'status':'PASS','commit':a.expected_commit,'provider':a.provider,'city':str(city),'identity':start,'lessons':lessons,'parallel_checks':parallel_checks,'idle':idle_result,'provider_usage':usage,'limits':'Published local journey and independent mechanical-order follow-on. Publication and failure matrix are separate. Finite idle observation.'},indent=2)+'\n')
 print('[9/9] BEGINNER_QUALIFICATION_PASS '+str(out),flush=True)

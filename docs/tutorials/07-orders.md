@@ -30,24 +30,151 @@ cat > orders/practice-check.toml <<'ORDER'
 [order]
 description = "Verify the local practice deliverable"
 trigger = "manual"
+timeout = "30s"
 exec = "scripts/practice-check.sh"
 ORDER
-gc order run practice-check
-gc order history practice-check
-gc session list
+gc order run practice-check && gc session list
 ```
 
-The order should report success and leave no model session behind. The beginner
+The order should report success and leave no model session behind. Its
+30-second deadline bounds this small mechanical check. The beginner
 experience keeps model workers demand driven. A manual order runs only when
 you request it; token-free maintenance may continue while the city is idle.
 
-## Choose your next step
+## Optional: run independent checks in parallel
 
-Your practice repository contains the verified API and client on its local
-integration branch. GitHub publication is a separate choice: configure a remote
-you own, review `git diff` and the accepted commits, push a branch, then use your
-normal pull-request review process. The first local delivery needs neither
-GitHub nor `gh`. Follow your repository's approval rules before publishing.
+Keep this city and practice repository. The existing `practice-check` order runs
+its unit tests. Add a second read-only check for the client's public output:
+
+```bash
+cd ~/bright-lights
+cat > scripts/practice-client-check.sh <<'CLIENTCHECK'
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")/../projects/practice"
+exec python3 - <<'PY'
+import json
+import subprocess
+import sys
+
+result = json.loads(subprocess.check_output(
+    [sys.executable, "client.py", "Ada"], text=True, timeout=10))
+assert result["name"] == "Ada", result
+assert result["message"] == "Hello, Ada!", result
+print("PASS: the client uses the accepted API")
+PY
+CLIENTCHECK
+chmod +x scripts/practice-client-check.sh
+cat > orders/practice-client-check.toml <<'ORDER'
+[order]
+description = "Verify the practice client's public output"
+trigger = "manual"
+timeout = "30s"
+exec = "scripts/practice-client-check.sh"
+ORDER
+```
+
+Launch both checks without a dependency between them, then wait for both
+results. Use Bash for this block on either platform:
+
+```bash
+bash <<'CHECKS'
+set -eu
+cd "$HOME/bright-lights"
+results=$(mktemp -d "${TMPDIR:-/tmp}/gc-practice-checks.XXXXXX")
+before=$(git -C projects/practice rev-parse HEAD)
+test -z "$(git -C projects/practice status --porcelain)"
+gc order run practice-check > "$results/tests.log" 2>&1 &
+tests_pid=$!
+gc order run practice-client-check > "$results/client.log" 2>&1 &
+client_pid=$!
+tests_status=0
+wait "$tests_pid" || tests_status=$?
+client_status=0
+wait "$client_pid" || client_status=$?
+cat "$results/tests.log" "$results/client.log"
+printf 'Results retained at %s\n' "$results"
+test "$tests_status" -eq 0
+test "$client_status" -eq 0
+test "$(git -C projects/practice rev-parse HEAD)" = "$before"
+test -z "$(git -C projects/practice status --porcelain)"
+gc session list
+CHECKS
+```
+
+Both commands should report successful exec runs; the commit and working tree
+must stay unchanged. These are independent mechanical checks and may execute
+concurrently. They do not need model sessions or test concurrent edits.
+
+Manual exec orders return their result directly and do not create history rows.
+The displayed directory retains both command logs. If a terminal disconnects,
+inspect those logs before repeating; repeating these read-only checks is safe.
+Scheduled and event-triggered orders use run history to track their activity.
+
+Model workers can also run independent tasks within their configured capacity.
+For edits sharing one integration branch, another task may advance the recorded
+input before integration. Gas City must then retain and report that work rather
+than merge an unreviewed result. Preserve the failed worktree and inspect its
+recorded input before choosing a new task or recovery path.
+
+## Optional: publish the accepted result
+
+Local delivery is complete before this step. Choose a GitHub repository you own
+and have permission to publish to. Create it using your normal account workflow
+if needed; authenticate Git for that remote. These credentials are separate from
+your coding provider's credentials.
+
+First inspect the client lesson's accepted commit and the local repository:
+
+```bash
+cd ~/bright-lights
+gc gc tutorial status --lesson client
+cd projects/practice
+git status --short
+git log --oneline -5
+```
+
+Continue only after the lesson reports verified local integration and the working
+tree is clean. Copy its full accepted SHA below. Choose a new branch name; this
+example uses the accepted commit's prefix so an identical retry finds the same
+result. Replace the SHA and remote placeholders before running the block:
+
+```bash
+bash <<'PUBLISH'
+set -eu
+cd "$HOME/bright-lights/projects/practice"
+ACCEPTED_COMMIT='<verified-local-integration-sha>'
+REMOTE_URL='https://github.com/<owner>/<repository>.git'
+git cat-file -e "$ACCEPTED_COMMIT^{commit}"
+git merge-base --is-ancestor "$ACCEPTED_COMMIT" HEAD
+test -z "$(git status --porcelain)"
+BRANCH="practice-$(git rev-parse --short=12 "$ACCEPTED_COMMIT")"
+existing=$(git ls-remote --heads "$REMOTE_URL" "refs/heads/$BRANCH")
+if [ -n "$existing" ]; then
+    test "$(printf '%s\n' "$existing" | cut -f1)" = "$ACCEPTED_COMMIT" || {
+        echo 'That branch contains a different commit; choose another branch.' >&2
+        exit 1
+    }
+else
+    git push --force-with-lease="refs/heads/$BRANCH:" "$REMOTE_URL" \
+        "$ACCEPTED_COMMIT:refs/heads/$BRANCH"
+fi
+published=$(git ls-remote --heads "$REMOTE_URL" "refs/heads/$BRANCH" | cut -f1)
+test "$published" = "$ACCEPTED_COMMIT"
+printf 'Verified published commit %s on branch %s\n' "$published" "$BRANCH"
+PUBLISH
+```
+
+The empty expected lease permits branch creation only, including when another
+writer races the push. It cannot replace an existing branch. A retry after a
+lost push acknowledgment verifies the same commit without pushing again. A
+branch conflict stops for inspection; do not force an overwrite.
+
+This step publishes a branch and stops before creating a pull request. Open a
+PR through your repository's normal review process only when you choose to do
+so. Neither publication nor a PR is required for the beginner local delivery.
+
+## Keep customizing this city
 
 For customization, keep this city and add local agent, formula or order
 definitions when your project needs them. The default Gas City pack remains the
