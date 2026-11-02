@@ -230,8 +230,8 @@ func TestRowMetadataDefersAfterItsPersistentRefusal(t *testing.T) {
 
 // Kills the launch and close refresh drifting from legacy's (SESS-713..715,
 // SESS-701): wake_mode, command, the provider family and resume keys
-// follow the resolution, an empty resolved value never clobbers a stored
-// one; continuation_epoch and a session key the provider takes are
+// follow the resolution, an empty command or a nil resolution never
+// clobbers a stored value; continuation_epoch and a session key the provider takes are
 // backfilled, a stored key kept; a stale close clears; a typeless row is
 // repaired; and work_dir is backfilled, alias-guarded for a legacy
 // identity and never under its running session.
@@ -368,6 +368,102 @@ func TestAliasTakenReadsTheRowsLeg(t *testing.T) {
 			w := &World{Census: readCensus(t, gatherNow, tc.legs), Env: &reconcileEnv{Cfg: cfg}}
 			if got := w.aliasTaken(rowKey{Leg: rowLeg, ID: "gc-1"}, rowIdentity{Alias: "lead"}, session.Info{ID: "gc-1"}); got != tc.taken {
 				t.Fatalf("aliasTaken = %v, want %v", got, tc.taken)
+			}
+		})
+	}
+}
+
+// providerProjectionKeys are the provider name and the six family and
+// resume keys a successful provider resolution projects onto a session.
+var providerProjectionKeys = []string{
+	"provider", "provider_kind", "builtin_ancestor", "resume_flag", "resume_style", "resume_command", "session_id_flag",
+}
+
+// providerProjectionCase is a stored provider projection reconciled
+// against a resolution: want is the projection after (a missing key reads
+// empty) and family, when set, its provider family.
+type providerProjectionCase struct {
+	name     string
+	stored   map[string]string
+	resolved *config.ResolvedProvider
+	want     map[string]string
+	family   string
+}
+
+// providerProjectionCases are the cases both reconciliation paths share
+// (#8539): a successful resolution is authoritative for the six family and
+// resume keys, empties included; a nil one keeps all seven.
+func providerProjectionCases(t *testing.T) []providerProjectionCase {
+	t.Helper()
+	claudeMax := map[string]string{
+		"provider": "claude-max", "provider_kind": "claude", "builtin_ancestor": "claude",
+		"resume_flag": "--resume", "resume_style": "flag", "resume_command": "claude --resume", "session_id_flag": "--session-id",
+	}
+	return []providerProjectionCase{
+		{
+			name: "AC-1/a codex wrapper switched to claude",
+			stored: map[string]string{
+				"provider": "codex-wrapped", "provider_kind": "codex", "builtin_ancestor": "codex", "resume_command": "codex resume {{.SessionKey}}",
+			},
+			resolved: &config.ResolvedProvider{Name: "claude", BuiltinAncestor: "claude", ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--session-id"},
+			want:     map[string]string{"provider": "claude", "resume_flag": "--resume", "resume_style": "flag", "session_id_flag": "--session-id"},
+			family:   "claude",
+		},
+		{
+			name:     "AC-1/switched to a provider with no family or resume keys",
+			stored:   claudeMax,
+			resolved: &config.ResolvedProvider{Name: "plain-cli"},
+			want:     map[string]string{"provider": "plain-cli"},
+		},
+		{
+			name:     "AC-1/claude switched back to a codex wrapper",
+			stored:   map[string]string{"provider": "claude", "resume_flag": "--resume", "resume_style": "flag", "session_id_flag": "--session-id"},
+			resolved: &config.ResolvedProvider{Name: "codex-wrapped", BuiltinAncestor: "codex", ResumeCommand: "codex resume {{.SessionKey}}"},
+			want: map[string]string{
+				"provider": "codex-wrapped", "provider_kind": "codex", "builtin_ancestor": "codex", "resume_command": "codex resume {{.SessionKey}}",
+			},
+			family: "codex",
+		},
+	}
+}
+
+// Kills A7 keeping a previous provider's family or resume keys that a
+// successful resolution leaves empty (#8539): the patch carries exactly
+// the changed keys, clears as explicit empties, and the refreshed row
+// refreshes to nothing.
+func TestDesiredRowLaunchRefreshClearsMissingProviderFields(t *testing.T) {
+	for _, tc := range providerProjectionCases(t) {
+		t.Run(tc.name, func(t *testing.T) {
+			tp := TemplateParams{Command: "run-worker", ResolvedProvider: tc.resolved}
+			raw := rowRefreshKeys{"command": "run-worker", "continuation_epoch": "1"}
+			maps.Copy(raw, tc.stored)
+			wantPatch := session.MetadataPatch{}
+			for _, k := range providerProjectionKeys {
+				if tc.want[k] != tc.stored[k] {
+					wantPatch[k] = tc.want[k]
+				}
+			}
+			m := session.MetadataPatch{}
+			refreshLaunchKeys(m, tp, raw)
+			if !maps.Equal(m, wantPatch) {
+				t.Fatalf("refreshLaunchKeys patch = %v, want %v", m, wantPatch)
+			}
+			got := maps.Clone(map[string]string(raw))
+			maps.Copy(got, m)
+			for _, k := range providerProjectionKeys {
+				if got[k] != tc.want[k] {
+					t.Errorf("%s = %q after refresh, want %q", k, got[k], tc.want[k])
+				}
+			}
+			if tc.family != "" {
+				if family := session.ProviderFamilyFromMetadata(got, ""); family != tc.family {
+					t.Errorf("provider family = %q after refresh, want %q", family, tc.family)
+				}
+			}
+			again := session.MetadataPatch{}
+			refreshLaunchKeys(again, tp, rowRefreshKeys(got))
+			if len(again) != 0 {
+				t.Errorf("refreshed row refreshed again: patch %v, want nothing", again)
 			}
 		})
 	}
