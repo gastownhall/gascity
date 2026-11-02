@@ -76,15 +76,26 @@ func (in bdClassGuardInput) checkIDs(ids []string, variants ...coordclass.Mutati
 // readRefusal is the refusal for a pre-read that did not find exactly the
 // bead id names, or "".
 func (in bdClassGuardInput) readRefusal(id string, result bdReadResult) string {
+	problem := bdReadProblem(id, result)
+	if problem == "" {
+		return ""
+	}
+	return fmt.Sprintf("gc bd %s %s: refused on this split city: %s. Nothing was written.", in.path, id, problem)
+}
+
+// bdReadProblem says why a pre-read that did not find exactly the bead id
+// names leaves a write unjudged, or "" when it found it. It is the cause
+// clause of readRefusal and of an edge endpoint's refusal.
+func bdReadProblem(id string, result bdReadResult) string {
 	switch result {
 	case bdReadFound:
 		return ""
 	case bdReadCollision:
-		return fmt.Sprintf("gc bd %s %s: refused on this split city: bd resolves %q to a different bead (a short or partial id), so the write would land on a bead gc did not judge. Name the bead by its full id. Nothing was written.", in.path, id, id)
+		return fmt.Sprintf("bd resolves %q to a different bead (a short or partial id), so the write would land on a bead gc did not judge. Name the bead by its full id", id)
 	case bdReadNotFound:
-		return fmt.Sprintf("gc bd %s %s: refused on this split city: no bead %q in this store, so gc cannot judge what the write would do. Nothing was written.", in.path, id, id)
+		return fmt.Sprintf("no bead %q in this store, so gc cannot judge what the write would do", id)
 	default:
-		return fmt.Sprintf("gc bd %s %s: refused on this split city: gc could not read the bead to check the write. Retry once the store answers. Nothing was written.", in.path, id)
+		return "gc could not read the bead to check the write. Retry once the store answers"
 	}
 }
 
@@ -122,7 +133,7 @@ func (in bdClassGuardInput) checkEdgeEndpoints(ids ...string) string {
 			result = bdReadFailed
 		}
 		if result != bdReadFound {
-			return fmt.Sprintf("gc bd %s: refused on this split city: an edge endpoint must be a bead of this city's work stores, and %s. A dependency edge across stores is never written. Nothing was written.", in.path, strings.TrimPrefix(in.readRefusal(id, result), fmt.Sprintf("gc bd %s %s: refused on this split city: ", in.path, id)))
+			return fmt.Sprintf("gc bd %s: refused on this split city: an edge endpoint must be a bead of this city's work stores: %s. A dependency edge across stores is never written. Nothing was written.", in.path, bdReadProblem(id, result))
 		}
 	}
 	if in.held == nil {
