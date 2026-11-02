@@ -1254,3 +1254,44 @@ func TestLegacyHookDrainAckFenceHoldsARecordedClaim(t *testing.T) {
 		t.Fatalf("nudged hook: result %+v, acked %v; want action=work, started_claim_held and no ack; stderr=%s", got, l.acked, stderr.String())
 	}
 }
+
+// TestV2HookClaimFailsOpenWithoutConditionalWrites (ga-6eefx8, #8313): a
+// city whose write predicate answers CAS only (formula v2, off the worker
+// site) on a session store with no conditional writer records no entry, yet
+// still delivers the claim, with one stderr warning and one
+// work.started_unrecorded whose cause wraps ErrConditionalWriteUnsupported.
+// Kills an unfenced write taken where v2 requires the CAS, and failing closed.
+func TestV2HookClaimFailsOpenWithoutConditionalWrites(t *testing.T) {
+	for _, c := range []struct{ name, output string }{
+		{"claim", startedRoutedWork},
+		{"adopt", startedAssignedWork},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			row := newLegacyStartedRow(t)
+			l := &startedLog{}
+			ops := l.ops(c.output, row, nil)
+			var causes []error
+			ops.EmitWorkStartedUnrecorded = func(_, _, beadID string, cause error) {
+				l.unrecorded = append(l.unrecorded, beadID)
+				causes = append(causes, cause)
+			}
+			opts := startedOpts(startedEnv(startedToken, "7"))
+			asks := 0
+			opts.StartedCASOnly = func() bool { asks++; return true }
+			stdout := &orderedWriter{l: l}
+			var stderr bytes.Buffer
+			code := doHookClaim("q", "/rig", opts, ops, stdout, &stderr)
+
+			if got := decodeTurnBoundResult(t, stdout.buf.String()); code != 0 || got.Action != "work" || got.BeadID != "work-1" {
+				t.Fatalf("code %d, result %+v; want work-1 delivered", code, got)
+			}
+			if got := row.meta(t, session.WorkStartedKey); got != "" || asks == 0 {
+				t.Fatalf("work_started %q after %d asks; want the predicate asked and no entry", got, asks)
+			}
+			if len(l.unrecorded) != 1 || l.unrecorded[0] != "work-1" || !errors.Is(causes[0], beads.ErrConditionalWriteUnsupported) ||
+				strings.Count(stderr.String(), "delivering it anyway") != 1 {
+				t.Fatalf("unrecorded %v, causes %v, stderr %q; want one event wrapping ErrConditionalWriteUnsupported and one line", l.unrecorded, causes, stderr.String())
+			}
+		})
+	}
+}
