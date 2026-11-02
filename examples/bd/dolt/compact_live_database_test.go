@@ -19,6 +19,36 @@ func compactQuarantineMarkerPath(fixture compactScriptFixture, db string) string
 	return filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", db)
 }
 
+func compactPendingGCMarkerPath(fixture compactScriptFixture, db string) string {
+	return filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", db)
+}
+
+func addCompactDatabase(t *testing.T, fixture compactScriptFixture, db string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(fixture.dataDir, db, ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir %s database: %v", db, err)
+	}
+}
+
+// assertCompactNothingAfterLiveGate fails if any statement follows the failed
+// gate's final probe of the beads database.
+func assertCompactNothingAfterLiveGate(t *testing.T, fixture compactScriptFixture) {
+	t.Helper()
+	lines := compactDoltLogLines(t, fixture)
+	last := -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, "db=beads ") && strings.Contains(line, "SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))") {
+			last = i
+		}
+	}
+	if last < 0 {
+		t.Fatalf("the live gate never probed beads:\n%s", strings.Join(lines, "\n"))
+	}
+	if last != len(lines)-1 {
+		t.Fatalf("no statement may follow a failed live gate:\n%s", strings.Join(lines[last:], "\n"))
+	}
+}
+
 // installCompactLiveFault wraps the fake dolt so that, after a statement
 // against the beads database whose text contains trigger returns (whatever its
 // exit status), the shell action runs. The statement's own exit status is
@@ -53,17 +83,17 @@ exit "$rc"
 `, shellQuote(realPath), shellQuote("beads"), shellQuote(trigger), action))
 }
 
-// compactLiveRemoveDirAction removes db's directory from the data dir.
-func compactLiveRemoveDirAction(fixture compactScriptFixture, db string) string {
-	return "rm -rf " + shellQuote(filepath.Join(fixture.dataDir, db))
+// compactLiveRemoveDirAction removes the beads database from the data dir.
+func compactLiveRemoveDirAction(fixture compactScriptFixture) string {
+	return "rm -rf " + shellQuote(filepath.Join(fixture.dataDir, "beads"))
 }
 
-// compactLiveUnserveAction makes the fake server refuse db: state is
-// "forever" or the number of refusals before it serves db again.
-func compactLiveUnserveAction(fixture compactScriptFixture, db, state string) string {
+// compactLiveUnserveAction makes the fake server refuse the beads database:
+// state is "forever" or the number of refusals before it serves beads again.
+func compactLiveUnserveAction(fixture compactScriptFixture, state string) string {
 	dir := filepath.Join(fixture.binDir, "live-unserved")
 	return fmt.Sprintf("mkdir -p %s && printf '%%s\\n' %s > %s",
-		shellQuote(dir), shellQuote(state), shellQuote(filepath.Join(dir, db)))
+		shellQuote(dir), shellQuote(state), shellQuote(filepath.Join(dir, "beads")))
 }
 
 func compactDoltLogLines(t *testing.T, fixture compactScriptFixture) []string {
@@ -172,7 +202,7 @@ func TestCompactScriptAcceptsLiveProbeSettings(t *testing.T) {
 // quarantined even though SQL still answers for it.
 func TestCompactScriptQuarantinesWhenFlattenRemovesDatabaseDirectory(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
-	installCompactLiveFault(t, fixture, "DOLT_RESET", compactLiveRemoveDirAction(fixture, "beads"))
+	installCompactLiveFault(t, fixture, "DOLT_RESET", compactLiveRemoveDirAction(fixture))
 
 	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", compactLiveFastProbe)
 	if err == nil {
@@ -194,7 +224,7 @@ func TestCompactScriptQuarantinesWhenFlattenRemovesDatabaseDirectory(t *testing.
 // quarantined and the run fails.
 func TestCompactScriptAbortsWhenDatabaseLeavesDataDirAfterGC(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
-	installCompactLiveFault(t, fixture, "DOLT_GC", compactLiveRemoveDirAction(fixture, "beads"))
+	installCompactLiveFault(t, fixture, "DOLT_GC", compactLiveRemoveDirAction(fixture))
 
 	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 	if err == nil {
@@ -225,7 +255,7 @@ func TestCompactScriptQuarantinesWhenRewriteLeavesDatabaseUnserved(t *testing.T)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fixture := newCompactScriptFixture(t)
-			installCompactLiveFault(t, fixture, tt.trigger, compactLiveUnserveAction(fixture, "beads", "forever"))
+			installCompactLiveFault(t, fixture, tt.trigger, compactLiveUnserveAction(fixture, "forever"))
 
 			out, err := fixture.run(t, tt.mode, "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
 				"GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=2", compactLiveFastProbe)
@@ -259,7 +289,7 @@ func TestCompactScriptLiveProbeRecoversWithinConfiguredAttempts(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fixture := newCompactScriptFixture(t)
-			installCompactLiveFault(t, fixture, tt.trigger, compactLiveUnserveAction(fixture, "beads", "2"))
+			installCompactLiveFault(t, fixture, tt.trigger, compactLiveUnserveAction(fixture, "2"))
 
 			out, err := fixture.run(t, tt.mode, "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
 				"GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=3", compactLiveFastProbe)
@@ -283,4 +313,57 @@ func TestCompactScriptLiveProbeRecoversWithinConfiguredAttempts(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCompactScriptLiveGateFailureAbortsRemainingDatabases asserts that a
+// failed live gate stops the run: no later statement for that database or any
+// other, no pending-GC bookkeeping, exit 1, and a diagnostic that names the
+// selected databases not reached.
+func TestCompactScriptLiveGateFailureAbortsRemainingDatabases(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	addCompactDatabase(t, fixture, "zed")
+	addCompactDatabase(t, fixture, "zzz")
+	installCompactLiveFault(t, fixture, "DOLT_GC", compactLiveRemoveDirAction(fixture))
+
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", compactLiveFastProbe,
+		"GC_DOLT_COMPACT_ONLY_DBS=beads,zed")
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("a failed live gate must exit 1: got err=%v\n%s", err, out)
+	}
+	assertCompactLiveQuarantine(t, fixture, out, "post-flatten-full-gc", "0")
+	assertCompactNothingAfterLiveGate(t, fixture)
+	for _, line := range compactDoltLogLines(t, fixture) {
+		if strings.HasPrefix(line, "db=zed ") || strings.HasPrefix(line, "db=zzz ") {
+			t.Fatalf("no database may be touched after a failed live gate:\n%s", line)
+		}
+	}
+	if _, statErr := os.Stat(compactPendingGCMarkerPath(fixture, "beads")); !os.IsNotExist(statErr) {
+		t.Fatalf("a failed live gate must not record pending-GC bookkeeping (stat err=%v)", statErr)
+	}
+	want := "compact: live-database gate failed for db=beads after post-flatten-full-gc — run aborted; selected databases not reached: zed"
+	if !strings.Contains(out, want) {
+		t.Fatalf("output missing abort diagnostic %q:\n%s", want, out)
+	}
+	if strings.Contains(out, "failed compaction") {
+		t.Fatalf("an aborted run must not report an ordinary failure count:\n%s", out)
+	}
+}
+
+// TestCompactScriptLiveGateAbortNamesNoUnreachedDatabase asserts that the
+// abort diagnostic says "none" when the failing database was the last one.
+func TestCompactScriptLiveGateAbortNamesNoUnreachedDatabase(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	installCompactLiveFault(t, fixture, "DOLT_RESET", compactLiveRemoveDirAction(fixture))
+
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", compactLiveFastProbe)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("a failed live gate must exit 1: got err=%v\n%s", err, out)
+	}
+	want := "compact: live-database gate failed for db=beads after flatten — run aborted; selected databases not reached: none"
+	if !strings.Contains(out, want) {
+		t.Fatalf("output missing abort diagnostic %q:\n%s", want, out)
+	}
+	assertCompactNothingAfterLiveGate(t, fixture)
 }

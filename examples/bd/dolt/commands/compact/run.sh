@@ -4133,6 +4133,9 @@ flatten_database() {
     fi
     return "$primary_push_rc"
   fi
+  if [ "$live_gate_failed" = "1" ]; then
+    return 1
+  fi
   write_compact_marker "$pending_gc_dir" "$db" "flatten succeeded but full GC failed" \
     "remote=$remote" "expected_remote_head=$expected_remote_head" \
     "expected_remote_head_verified=$expected_remote_head_verified" \
@@ -4456,21 +4459,52 @@ acquire_lock() {
   exit 1
 }
 
+# compact_db_selected DB — whether GC_DOLT_COMPACT_ONLY_DBS (if set) selects DB,
+# matching the per-database passes' own allowlist check.
+compact_db_selected() {
+  [ -n "$only_dbs" ] || return 0
+  case ",$only_dbs," in
+    *,"$1",*) return 0 ;;
+  esac
+  return 1
+}
+
 # compact_each_database PASS FAILURE_LABEL — run PASS on every selected
 # database with a fresh live gate, then exit 1 naming FAILURE_LABEL if any
-# database failed.
+# database failed. A failed live gate aborts the run at once: no later
+# database is touched, and the diagnostic names the selected databases the
+# run never reached.
 compact_each_database() {
   _ced_pass="$1"
   _ced_label="$2"
   _ced_failed=0
+  _ced_aborted_db=""
+  _ced_aborted_step=""
+  _ced_not_reached=""
   while IFS= read -r _ced_db; do
     [ -n "$_ced_db" ] || continue
+    if [ -n "$_ced_aborted_db" ]; then
+      if compact_db_selected "$_ced_db"; then
+        _ced_not_reached="${_ced_not_reached:+$_ced_not_reached,}$_ced_db"
+      fi
+      continue
+    fi
     live_gate_reset
     if ! "$_ced_pass" "$_ced_db"; then
+      if [ "$live_gate_failed" = "1" ]; then
+        _ced_aborted_db=$_ced_db
+        _ced_aborted_step=$live_gate_failed_step
+        continue
+      fi
       _ced_failed=$((_ced_failed + 1))
     fi
   done < "$_unique_db_tmp"
 
+  if [ -n "$_ced_aborted_db" ]; then
+    printf 'compact: live-database gate failed for db=%s after %s — run aborted; selected databases not reached: %s\n' \
+      "$_ced_aborted_db" "$_ced_aborted_step" "${_ced_not_reached:-none}" >&2
+    exit 1
+  fi
   if [ "$_ced_failed" -gt 0 ]; then
     printf 'compact: %s database(s) failed %s\n' "$_ced_failed" "$_ced_label" >&2
     exit 1
