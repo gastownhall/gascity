@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -159,7 +160,7 @@ func TestPlannerNoticeProtocolSessionGoesToTheLane(t *testing.T) {
 func TestWaitNoticeProtocolSessionGoesToTheLane(t *testing.T) {
 	f := newLaneFixture(t)
 	f.asT3Bridge()
-	f.cfg.Ops.Authoritative = []string{"message"}
+	f.cfg.Ops.Authoritative = config.OpsKinds("message")
 	newNoticeLaneHost(t, f, "message")
 	st := f.laneStore(t)
 	wait := readyWait(t, f, "Continue after review closes.")
