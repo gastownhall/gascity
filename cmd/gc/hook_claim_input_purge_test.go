@@ -481,3 +481,86 @@ func TestProveInputAbsentAcrossCityHonorsCancellation(t *testing.T) {
 		t.Fatalf("proveInputAbsentAcrossCity = %v, %v; want not proven, context.Canceled", absent, err)
 	}
 }
+
+// membershipCountingStore counts the membership listings of one convoy: the
+// legacy parent-child List and the tracks DepList.
+type membershipCountingStore struct {
+	beads.Store
+	convoyID         string
+	childLists, deps int
+}
+
+func (s *membershipCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.ParentID == s.convoyID {
+		s.childLists++
+	}
+	return s.Store.List(query)
+}
+
+func (s *membershipCountingStore) DepList(id, direction string) ([]beads.Dep, error) {
+	if id == s.convoyID {
+		s.deps++
+	}
+	return s.Store.DepList(id, direction)
+}
+
+// Present input whose tracked work is all terminal keeps the skipped
+// retirement: one membership listing, no absence proof, and the root and open
+// steps closed with the skipped disposition and no failure stamp.
+func TestHookDoneWorkflowRetirementListsMembershipOnceAndNeverProves(t *testing.T) {
+	mem := beads.NewMemStore()
+	source, err := mem.Create(beads.Bead{Title: "source work", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mem.Close(source.ID); err != nil {
+		t.Fatal(err)
+	}
+	conv, err := mem.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := convoy.TrackItem(mem, conv.ID, source.ID); err != nil {
+		t.Fatal(err)
+	}
+	w := seedPurgedInputWorkflow(t, mem, conv.ID)
+	store := &membershipCountingStore{Store: mem, convoyID: conv.ID}
+	prover := &recordingProver{absent: map[string]bool{conv.ID: true, source.ID: true}}
+	ops := hookClaimOps{
+		InputVerdict: func(ctx context.Context, _ string, _ []string, candidate beads.Bead, ids []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
+			return workflowInputDone(ctx, store, candidate, ids, prove)
+		},
+		RetireWorkflow: func(ctx context.Context, _ string, _ []string, verdict workflowInputVerdict) error {
+			if verdict.State == workflowInputPurged {
+				return failPurgedWorkflow(ctx, store, verdict.RootID)
+			}
+			return skipDoneWorkflow(store, verdict.RootID)
+		},
+		ProveInputAbsent: prover.prove,
+	}
+	opts := hookClaimOptions{Assignee: "worker-1", IdentityCandidates: []string{"worker-1"}, RouteTargets: []string{"worker"}}
+
+	var stderr bytes.Buffer
+	kept := retireDoneWorkflowCandidates([]beads.Bead{w.open}, opts, ops, "/work", &stderr)
+	if len(kept) != 0 {
+		t.Fatalf("candidate %s kept (stderr=%q); its input work is terminal", w.open.ID, stderr.String())
+	}
+	if len(prover.calls) != 0 {
+		t.Errorf("prover calls = %v; present input must not be scanned for absence", prover.calls)
+	}
+	if store.childLists != 1 || store.deps != 1 {
+		t.Errorf("membership listings of %s: %d child lists, %d dep lists; want one of each", conv.ID, store.childLists, store.deps)
+	}
+	for _, id := range []string{w.root.ID, w.open.ID, w.active.ID} {
+		got, err := mem.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != "closed" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeSkipped ||
+			got.Metadata["close_reason"] != sourceworkflow.HookSkipDoneWorkflowCloseReason ||
+			got.Metadata[beadmeta.FailureReasonMetadataKey] != "" || got.Metadata[beadmeta.FailureClassMetadataKey] != "" {
+			t.Errorf("%s: status=%q metadata=%v, want closed as skipped with no failure stamp", id, got.Status, got.Metadata)
+		}
+	}
+	assertFinishedOutcomeKept(t, mem, w.finished.ID)
+}
