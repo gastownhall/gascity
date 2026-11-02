@@ -440,3 +440,52 @@ func TestCancelStateAssignedToRetiredSessionBeadContextSentinelWhileLegLiveIsNot
 		}
 	})
 }
+
+// ga-68eubg AC-6: a healthy store's full retirement — waits, a binding, a
+// group participant's membership — converges with no diagnostics at all:
+// the leg budgets and the cut-off classification stay silent when nothing
+// is slow. This guard passes on the unbounded base on purpose; it holds the
+// bounded implementation to it.
+func TestCancelStateAssignedToRetiredSessionBeadHealthyCleanupCleansAllStateWithoutDiagnostics(t *testing.T) {
+	mem := beads.NewMemStore()
+	sessionBead, fabric, caller := setupSessionWithExtmsgMembership(t, mem, session.StateArchived)
+	seedRetiredSessionWaits(t, mem, sessionBead.ID, 5)
+	ref, _ := bindRetiredSession(t, mem, sessionBead.ID, "thread-1")
+
+	var stderr bytes.Buffer
+	cancelStateAssignedToRetiredSessionBead(mem, sessionBead.ID, time.Now(), &stderr)
+
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want no diagnostics for a healthy cleanup", stderr.String())
+	}
+	if open := openRetiredSessionWaits(t, mem, sessionBead.ID); open != 0 {
+		t.Errorf("open waits after retirement = %d, want 0", open)
+	}
+	got, err := fabric.Bindings.ResolveByConversation(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("resolve binding after retirement: %v", err)
+	}
+	if got != nil {
+		t.Errorf("binding after retirement = %#v, want nil", got)
+	}
+	if open := countOpenMembershipsForSession(t, fabric, caller, sessionBead.ID); open != 0 {
+		t.Errorf("open memberships after retirement = %d, want 0", open)
+	}
+}
+
+// ga-68eubg AC-6: the retirement helper's no-op guards stay panic-free and
+// issue no work — a nil store, a blank session ID, and a nil stderr (a
+// failing store's diagnostics discarded).
+func TestCancelStateAssignedToRetiredSessionBeadGuardsNoopInputs(t *testing.T) {
+	cancelStateAssignedToRetiredSessionBead(nil, "gc-1", time.Now(), nil)
+
+	mem := beads.NewMemStore()
+	sessionBead := retiredSessionBeadFixture(t, mem)
+	seedRetiredSessionWaits(t, mem, sessionBead.ID, 3)
+	cancelStateAssignedToRetiredSessionBead(mem, "   ", time.Now(), nil)
+	if open := openRetiredSessionWaits(t, mem, sessionBead.ID); open != 3 {
+		t.Errorf("open waits after a blank-session call = %d, want the 3 untouched", open)
+	}
+
+	cancelStateAssignedToRetiredSessionBead(failingCleanupCloseAllStore{MemStore: mem}, sessionBead.ID, time.Now(), nil)
+}
