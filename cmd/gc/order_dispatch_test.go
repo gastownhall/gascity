@@ -4168,7 +4168,7 @@ func TestSweepOrphanedOrderTrackingRetryLimitSpendsRemainingBudget(t *testing.T)
 		t.Fatalf("n = %d, want 2", n)
 	}
 	if fs.listCalls != 1 {
-		t.Fatalf("ListByLabel calls = %d, want 1 (budget exhaustion should stop retries)", fs.listCalls)
+		t.Fatalf("order-tracking list calls = %d, want 1 (budget exhaustion should stop retries)", fs.listCalls)
 	}
 }
 
@@ -6797,7 +6797,7 @@ func TestSweepOrphanedOrderTracking_RetryOnTransientError(t *testing.T) {
 		t.Fatalf("closed = %d, want 1", closed)
 	}
 	if fs.calls != 3 {
-		t.Fatalf("ListByLabel calls = %d, want 3", fs.calls)
+		t.Fatalf("order-tracking list calls = %d, want 3", fs.calls)
 	}
 }
 
@@ -6818,7 +6818,7 @@ func TestSweepOrphanedOrderTracking_RetryExhausted(t *testing.T) {
 		t.Fatal("expected error when retries exhausted")
 	}
 	if fs.calls != 3 {
-		t.Fatalf("ListByLabel calls = %d, want 3", fs.calls)
+		t.Fatalf("order-tracking list calls = %d, want 3", fs.calls)
 	}
 }
 
@@ -6850,23 +6850,28 @@ func TestSweepOrphanedOrderTracking_RetryOnPartialClose(t *testing.T) {
 		t.Fatalf("n = %d, want 3 (accumulated across retries)", n)
 	}
 	if fs.listCalls != 3 {
-		t.Fatalf("ListByLabel calls = %d, want 3 (retry on partial close)", fs.listCalls)
+		t.Fatalf("order-tracking list calls = %d, want 3 (retry on partial close)", fs.listCalls)
 	}
 }
 
-// countFailStore wraps a Store and fails the first N ListByLabel calls.
+// countFailStore wraps a Store and fails the first N order-tracking list
+// reads. The fault sits on List because the sweep reads through
+// beads.HandlesFor(store).Live.List; an override on ListByLabel never fires.
 type countFailStore struct {
 	beads.Store
 	failCount int
 	calls     int
 }
 
-func (f *countFailStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+func (f *countFailStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label != labelOrderTracking {
+		return f.Store.List(query)
+	}
 	f.calls++
 	if f.calls <= f.failCount {
 		return nil, fmt.Errorf("connection refused")
 	}
-	return f.Store.ListByLabel(label, limit, opts...)
+	return f.Store.List(query)
 }
 
 // closeFailStore wraps a Store and always fails CloseAll with a
@@ -6877,9 +6882,13 @@ type closeFailStore struct {
 	closeN    int // number of beads "closed" before error
 }
 
-func (f *closeFailStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
-	f.listCalls++
-	return f.Store.ListByLabel(label, limit, opts...)
+// List counts the sweep's order-tracking reads, which go through
+// beads.HandlesFor(store).Live.List.
+func (f *closeFailStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == labelOrderTracking {
+		f.listCalls++
+	}
+	return f.Store.List(query)
 }
 
 func (f *closeFailStore) CloseAll(_ []string, _ map[string]string) (int, error) {
@@ -11291,4 +11300,283 @@ func TestOrderExecEnvMergeDropsSeatIdentityKeepsCuratedValues(t *testing.T) {
 			t.Errorf("seat identity %s=%q reached the order env", key, values)
 		}
 	}
+}
+
+// writeOrderRoutingVarsCity writes a city that imports pack ops (which ships
+// a worker agent, a manual city order "sweep", and a graph.v2 formula whose
+// step targets {{binding_prefix}}worker) once per binding, plus an unrelated
+// pack tools that also exports a worker so the bare name is ambiguous.
+func writeOrderRoutingVarsCity(t *testing.T, cityDir string, bindings []string) {
+	t.Helper()
+	writeFile(t, filepath.Join(cityDir, "city.toml"), "\n[workspace]\nname = \"test-city\"\n")
+	packDir := filepath.Join(cityDir, "packs", "ops")
+	for _, d := range []string{filepath.Join(packDir, "orders"), filepath.Join(packDir, "formulas"), filepath.Join(cityDir, "packs", "tools")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(t, filepath.Join(packDir, "pack.toml"), `
+[pack]
+name = "ops"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "city"
+`)
+	writeFile(t, filepath.Join(packDir, "orders", "sweep.toml"), `
+[order]
+formula = "routed-sweep"
+trigger = "manual"
+scope = "city"
+`)
+	writeFile(t, filepath.Join(packDir, "formulas", "routed-sweep.toml"), `
+formula = "routed-sweep"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "work"
+title = "Sweep"
+metadata = { "gc.run_target" = "{{binding_prefix}}worker" }
+`)
+	writeFile(t, filepath.Join(cityDir, "packs", "tools", "pack.toml"), `
+[pack]
+name = "tools"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "city"
+`)
+	var packToml strings.Builder
+	packToml.WriteString("\n[pack]\nname = \"test-city\"\nschema = 1\n")
+	for _, b := range bindings {
+		packToml.WriteString("\n[imports." + b + "]\nsource = \"./packs/ops\"\n")
+	}
+	packToml.WriteString("\n[imports.tools]\nsource = \"./packs/tools\"\n")
+	writeFile(t, filepath.Join(cityDir, "pack.toml"), packToml.String())
+}
+
+// findScannedOrder scans a city's orders and returns the named one.
+func findScannedOrder(t *testing.T, cityDir string, cfg *config.City, name string) (orders.Order, []orders.Order) {
+	t.Helper()
+	var scanErr bytes.Buffer
+	aa, err := scanAllOrders(cityDir, cfg, &scanErr, "gc order list")
+	if err != nil {
+		t.Fatalf("scanAllOrders: %v (%s)", err, scanErr.String())
+	}
+	for _, a := range aa {
+		if a.Name == name {
+			return a, aa
+		}
+	}
+	t.Fatalf("order %q not discovered: %+v", name, aa)
+	return orders.Order{}, nil
+}
+
+func dispatchRoutingVarsSweep(t *testing.T, bindings []string) (*memRecorder, *bytes.Buffer, beads.Store) {
+	t.Helper()
+	formulatest.EnableV2ForTest(t)
+	cityDir := t.TempDir()
+	writeOrderRoutingVarsCity(t, cityDir, bindings)
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	addTestControlDispatcherAgents(cfg, "")
+	order, _ := findScannedOrder(t, cityDir, cfg, "sweep")
+	target, err := resolveOrderStoreTarget(cityDir, cfg, order)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := beads.NewMemStore()
+	tracking, err := store.Create(beads.Bead{Title: "order:sweep", Labels: []string{"order-run:sweep", labelOrderTracking}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := &memRecorder{}
+	stderr := &bytes.Buffer{}
+	m := &memoryOrderDispatcher{cfg: cfg, cityName: "test-city", rec: rec, stderr: stderr}
+	m.dispatchWisp(context.Background(), store, target, order, cityDir, tracking.ID, nil)
+	return rec, stderr, store
+}
+
+func TestOrderDispatchV2BindingPrefixTargetRoutesToOrderPackBinding(t *testing.T) {
+	rec, stderr, store := dispatchRoutingVarsSweep(t, []string{"ops"})
+	if !rec.hasType(events.OrderCompleted) {
+		t.Fatalf("want order.completed; stderr=%s events=%+v", stderr.String(), rec.events)
+	}
+	all, err := store.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range all {
+		if b.Title == "Sweep" {
+			if got := b.Metadata["gc.routed_to"]; got != "ops.worker" {
+				t.Fatalf("step gc.routed_to = %q, want ops.worker", got)
+			}
+			return
+		}
+	}
+	t.Fatalf("step bead %q not poured; beads=%+v", "Sweep", all)
+}
+
+func TestOrderDispatchPackImportedTwiceGetsNoBindingVars(t *testing.T) {
+	rec, stderr, _ := dispatchRoutingVarsSweep(t, []string{"ops", "ops2"})
+	if !rec.hasType(events.OrderFailed) {
+		t.Fatalf("want order.failed for a pack with two bindings; events=%+v", rec.events)
+	}
+	if !strings.Contains(stderr.String(), `{{binding_prefix}}worker`) {
+		t.Fatalf("stderr = %q, want the unresolved binding_prefix target", stderr.String())
+	}
+}
+
+// writeRigSweepFormula writes a v1 formula rig-sweep whose step title is
+// title and whose cmd var defaults to default-cmd.
+func writeRigSweepFormula(t *testing.T, formulaDir, title string) {
+	t.Helper()
+	writeFile(t, filepath.Join(formulaDir, "rig-sweep.toml"), `
+formula = "rig-sweep"
+description = "root {{cmd}}"
+
+[vars.cmd]
+default = "default-cmd"
+
+[[steps]]
+id = "work"
+title = "`+title+`"
+`)
+}
+
+func requireBeadTitled(t *testing.T, store beads.Store, want string) {
+	t.Helper()
+	all, err := store.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range all {
+		if b.Title == want {
+			return
+		}
+	}
+	titles := make([]string, 0, len(all))
+	for _, b := range all {
+		titles = append(titles, b.Title)
+	}
+	t.Fatalf("no bead titled %q; titles=%q", want, titles)
+}
+
+func TestOrderDispatchRigOrderGetsRigNameAndFormulaVars(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		title string
+		args  map[string]string
+		want  string
+	}{
+		{name: "rig formula_vars beat formula default", title: "Run {{cmd}}", want: "Run rig-cmd"},
+		{name: "rig_name renders", title: "Sweep {{rig_name}}", want: "Sweep frontend"},
+		{name: "dispatch args win", title: "Run {{cmd}} in {{rig_name}}", args: map[string]string{"cmd": "arg-cmd", "rig_name": "other"}, want: "Run arg-cmd in other"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			rigPath := filepath.Join(cityPath, "frontend")
+			if err := os.MkdirAll(rigPath, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			formulaDir := t.TempDir()
+			writeRigSweepFormula(t, formulaDir, tc.title)
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Rigs:      []config.Rig{{Name: "frontend", Path: rigPath, FormulaVars: map[string]string{"cmd": "rig-cmd"}}},
+				Agents:    []config.Agent{{Name: "worker", Dir: "frontend"}},
+			}
+			a := orders.Order{Name: "rig-sweep", Rig: "frontend", Formula: "rig-sweep", Trigger: "manual", FormulaLayer: formulaDir}
+			target, err := resolveOrderStoreTarget(cityPath, cfg, a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := beads.NewMemStore()
+			tracking, err := store.Create(beads.Bead{Title: "order:rig-sweep", Labels: []string{"order-run:rig-sweep:rig:frontend", labelOrderTracking}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var rec memRecorder
+			var stderr bytes.Buffer
+			m := &memoryOrderDispatcher{cfg: cfg, cityName: "test-city", rec: &rec, stderr: &stderr}
+			m.dispatchWisp(context.Background(), store, target, a, cityPath, tracking.ID, tc.args)
+			if !rec.hasType(events.OrderCompleted) {
+				t.Fatalf("want order.completed; events=%+v stderr=%s", rec.events, stderr.String())
+			}
+			requireBeadTitled(t, store, tc.want)
+		})
+	}
+}
+
+func TestOrderFormulaVars(t *testing.T) {
+	packDir := filepath.Join("/city", "packs", "ops")
+	order := orders.Order{Name: "sweep", Rig: "frontend", FormulaLayer: filepath.Join(packDir, "formulas")}
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "frontend", FormulaVars: map[string]string{"cmd": "rig-cmd", "rig_name": "rig-var"}},
+			{Name: "backend", FormulaVars: map[string]string{"cmd": "backend-cmd"}},
+		},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", BindingName: "ops", SourceDir: packDir},
+			{Name: "worker", Dir: "frontend", BindingName: "tools", SourceDir: filepath.Join("/city", "packs", "tools")},
+		},
+	}
+
+	t.Run("precedence", func(t *testing.T) {
+		args := map[string]string{"cmd": "arg-cmd"}
+		got := orderFormulaVars(cfg, order, args)
+		want := map[string]string{"cmd": "arg-cmd", "rig_name": "rig-var", "binding_name": "ops", "binding_prefix": "ops."}
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("orderFormulaVars = %v, want %v", got, want)
+		}
+		if len(args) != 1 {
+			t.Fatalf("args mutated: %v", args)
+		}
+	})
+
+	t.Run("rig order without formula_vars gets rig_name", func(t *testing.T) {
+		got := orderFormulaVars(&config.City{Rigs: []config.Rig{{Name: "frontend"}}}, orders.Order{Name: "sweep", Rig: "frontend"}, nil)
+		want := map[string]string{"rig_name": "frontend"}
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("orderFormulaVars = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("nil cfg copies args", func(t *testing.T) {
+		args := map[string]string{"cmd": "arg-cmd"}
+		got := orderFormulaVars(nil, order, args)
+		got["extra"] = "x"
+		if fmt.Sprint(got) != fmt.Sprint(map[string]string{"cmd": "arg-cmd", "extra": "x"}) || len(args) != 1 {
+			t.Fatalf("orderFormulaVars(nil) = %v (args %v), want an independent copy", got, args)
+		}
+	})
+
+	t.Run("city order gets empty rig_name and root binding", func(t *testing.T) {
+		rootDir := "/city"
+		cityCfg := &config.City{Agents: []config.Agent{{Name: "worker", SourceDir: rootDir}}}
+		got := orderFormulaVars(cityCfg, orders.Order{Name: "sweep", FormulaLayer: filepath.Join(rootDir, "formulas")}, nil)
+		want := map[string]string{"rig_name": "", "binding_name": "", "binding_prefix": ""}
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("orderFormulaVars = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("ambiguous binding leaves binding vars unset", func(t *testing.T) {
+		twice := &config.City{Agents: []config.Agent{
+			{Name: "worker", BindingName: "ops", SourceDir: packDir},
+			{Name: "worker", BindingName: "ops2", SourceDir: packDir},
+		}}
+		got := orderFormulaVars(twice, orders.Order{Name: "sweep", FormulaLayer: filepath.Join(packDir, "formulas")}, nil)
+		if _, ok := got["binding_name"]; ok {
+			t.Fatalf("binding_name set for a pack with two bindings: %v", got)
+		}
+		if _, ok := got["binding_prefix"]; ok {
+			t.Fatalf("binding_prefix set for a pack with two bindings: %v", got)
+		}
+	})
 }

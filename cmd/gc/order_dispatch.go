@@ -92,6 +92,15 @@ const (
 	defaultMaxOrderDispatchesPerTick = 4
 	orderTrackingSweepCloseBudget    = 4
 
+	// orderTrackingSweepWatchdogNotClosedInterval is how often the stale
+	// watchdog reads every not-closed tracking bead, rather than only the open
+	// and in_progress ones, so that it releases a tracking bead parked by hand
+	// (blocked, deferred, ...). A native Dolt store decodes its retained closed
+	// tracking history for that read, so the 30 s passes skip it. A not-closed
+	// pass that does not complete is retried sooner
+	// (CityRuntime.scheduleOrderSweepWatchdogNotClosed).
+	orderTrackingSweepWatchdogNotClosedInterval = 10 * time.Minute
+
 	// orderTrackingRetentionWatchdogInterval is the minimum time between
 	// controller-driven closed-bead retention sweeps. 15 minutes balances
 	// effective cleanup against per-tick overhead.
@@ -2281,6 +2290,82 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 	}
 }
 
+// orderFormulaVars returns the vars an order's formula is invoked with. It
+// gives a formula order the invocation context a targeted sling gives its
+// formula (sling.BuildSlingFormulaVars): the dispatch args win, then the
+// order rig's formula_vars, then the routing vars rig_name, binding_name and
+// binding_prefix. The formula's own defaults apply last, in
+// prepareOrderWispRecipe. The binding vars are set only when the order's
+// source pack has exactly one binding in the order's scope: a pack imported
+// under two bindings is discovered once, so its orders have no single one.
+func orderFormulaVars(cfg *config.City, a orders.Order, args map[string]string) map[string]string {
+	vars := make(map[string]string, len(args))
+	for k, v := range args {
+		vars[k] = v
+	}
+	if cfg == nil {
+		return vars
+	}
+	setDefault := func(key, value string) {
+		if _, explicit := vars[key]; !explicit {
+			vars[key] = value
+		}
+	}
+	if a.Rig != "" {
+		for i := range cfg.Rigs {
+			if cfg.Rigs[i].Name != a.Rig {
+				continue
+			}
+			for k, v := range cfg.Rigs[i].FormulaVars {
+				setDefault(k, v)
+			}
+			break
+		}
+	}
+	setDefault("rig_name", a.Rig)
+	if binding, ok := orderSourceBinding(cfg, a); ok {
+		prefix := ""
+		if binding != "" {
+			prefix = binding + "."
+		}
+		setDefault("binding_name", binding)
+		setDefault("binding_prefix", prefix)
+	}
+	return vars
+}
+
+// orderSourceBinding returns the import binding of the pack that declared the
+// order, resolved the way qualifyOrderPool resolves a bare pool: agents of the
+// order's scope (its rig, then the city) whose source is the order's pack,
+// exact source first, then the two-component tail match. It reports false
+// when no agent names the pack or when the pack has more than one binding.
+func orderSourceBinding(cfg *config.City, a orders.Order) (string, bool) {
+	hint := orderPoolSourceDirHint(a)
+	if cfg == nil || hint == "" {
+		return "", false
+	}
+	dirs := []string{a.Rig}
+	if a.Rig != "" {
+		dirs = append(dirs, "")
+	}
+	for _, dir := range dirs {
+		for _, match := range []func(config.Agent, string) bool{agentSourceDirEqualsOrderHint, agentMatchesOrderSourceHint} {
+			bindings := sourceBindingsMatchingOrderHint(cfg, dir, hint, match)
+			switch len(bindings) {
+			case 0:
+				continue
+			case 1:
+				for binding := range bindings {
+					return binding, true
+				}
+			default:
+				return "", false
+			}
+		}
+	}
+	return "", false
+}
+
 // prepareOrderWispRecipe compiles an order's formula into a recipe and returns
 // the resolved invocation vars alongside it. The caller must thread those vars
 // into molecule.Instantiate; without them every {{var}} referencing a
@@ -2444,7 +2529,7 @@ func (m *memoryOrderDispatcher) ordersStoreFor(store beads.Store) beads.Store {
 // are the same bead in the same database by construction rather than by each
 // call site remembering to route.
 func (m *memoryOrderDispatcher) orderFrontDoorFor(store beads.Store) *orders.Store {
-	return orders.NewStore(beads.OrdersStore{Store: m.ordersStoreFor(store)})
+	return orders.NewStore(scopeStores(m.cityPath, m.storageRoutes, store).Orders())
 }
 
 // graphStoreKey is the gate/cooldown cache key for the graph store. It names the
@@ -2679,6 +2764,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		}
 	}
 
+	vars = orderFormulaVars(m.cfg, a, vars)
 	searchPaths := orderFormulaSearchPaths(m.cfg, a)
 	recipe, effectiveVars, err := prepareOrderWispRecipe(ctx, store, a, searchPaths, vars)
 	if err != nil {
@@ -3412,19 +3498,45 @@ func sweepStaleOrderTrackingLimit(store beads.Store, now time.Time, staleAfter t
 	return result.trackingClosed, err
 }
 
+// staleTrackingRead names the read a stale order-tracking sweep lists its
+// candidates with.
+type staleTrackingRead int
+
+const (
+	// staleTrackingReadNotClosed lists every not-closed tracking bead
+	// (orders.Store.StaleNotClosedRuns): the set the strict open-work gate
+	// counts, a tracking bead parked by hand included. It is the on-demand
+	// sweep's read, and the watchdog's on its first pass and then once every
+	// orderTrackingSweepWatchdogNotClosedInterval.
+	staleTrackingReadNotClosed staleTrackingRead = iota
+	// staleTrackingReadOpenInProgress lists only the open and in_progress ones
+	// (orders.Store.StaleOpenRuns): every backing selects those exactly, so a
+	// native Dolt store decodes no closed row for it. It is the read of the
+	// watchdog's other 30 s passes.
+	staleTrackingReadOpenInProgress
+)
+
+// runs lists the stale tracking runs this read selects at or before cutoff.
+func (r staleTrackingRead) runs(front *orders.Store, cutoff time.Time) ([]orders.OrderRun, error) {
+	if r == staleTrackingReadOpenInProgress {
+		return front.StaleOpenRuns(cutoff)
+	}
+	return front.StaleNotClosedRuns(cutoff)
+}
+
 func sweepStaleOrderTrackingAcrossStores(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingAcrossStoresLimit(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0)
+	return sweepStaleOrderTrackingAcrossStoresLimit(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0, staleTrackingReadNotClosed)
 }
 
 // sweepStaleOrderTrackingAcrossStoresLimit applies limit only to
 // order-tracking bead closes. Wisp subtree recovery is operator-scoped by
 // order name and closes complete stale subtrees when explicitly requested.
-func sweepStaleOrderTrackingAcrossStoresLimit(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, false)
+func sweepStaleOrderTrackingAcrossStoresLimit(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, read staleTrackingRead) (orderTrackingSweepResult, error) {
+	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, false, read)
 }
 
 func sweepStaleOrderTrackingAcrossStoresDryRun(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0, true)
+	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0, true, staleTrackingReadNotClosed)
 }
 
 // sweepStaleOrderTrackingAcrossStoresLimitMode sweeps two coordination classes,
@@ -3456,7 +3568,7 @@ func sweepStaleOrderTrackingAcrossStoresDryRun(stores []beads.Store, wispStore b
 // and multiply the reported count. When it is itself one of the swept stores the
 // loop has already covered it, and the hoisted pass is skipped for the same
 // count-once reason.
-func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool) (orderTrackingSweepResult, error) {
+func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool, read staleTrackingRead) (orderTrackingSweepResult, error) {
 	if staleAfter <= 0 {
 		return orderTrackingSweepResult{}, fmt.Errorf("stale-after must be positive")
 	}
@@ -3477,7 +3589,7 @@ func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, wispStor
 				break
 			}
 		}
-		partial, err := sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, perStoreWisps, remainingLimit, dryRun)
+		partial, err := sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, perStoreWisps, remainingLimit, dryRun, read)
 		result.trackingClosed += partial.trackingClosed
 		result.wispClosed += partial.wispClosed
 		if err != nil {
@@ -3528,14 +3640,14 @@ func orderTrackingSweepStoreLabel(store beads.Store, index int) string {
 // order-tracking bead closes. Wisp subtree recovery is order-scoped and closes
 // complete stale subtrees when includeWispSubtrees is set.
 func sweepStaleOrderTrackingWithOptionsLimit(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, false)
+	return sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, false, staleTrackingReadNotClosed)
 }
 
 func sweepStaleOrderTrackingWithOptionsLimitDryRun(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, true)
+	return sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, true, staleTrackingReadNotClosed)
 }
 
-func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool) (orderTrackingSweepResult, error) {
+func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool, read staleTrackingRead) (orderTrackingSweepResult, error) {
 	if staleAfter <= 0 {
 		return orderTrackingSweepResult{}, fmt.Errorf("stale-after must be positive")
 	}
@@ -3543,18 +3655,18 @@ func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Tim
 		return orderTrackingSweepResult{}, fmt.Errorf("include-wisps requires at least one order name")
 	}
 	cutoff := now.Add(-staleAfter)
-	// StaleOpenRuns is the typed read half: OPEN tracking runs at or before the
-	// cutoff, across both tiers, with best-effort names. The sweep-vocabulary
-	// close (below) stays raw because it stamps sweep audit metadata that the
-	// domain object deliberately omits, and the wisp-subtree recovery is graph
-	// residual.
+	// read is the typed read half: the tracking runs at or before the cutoff
+	// that it selects, across both tiers, with best-effort names. The
+	// sweep-vocabulary close (below) stays raw because it stamps sweep audit
+	// metadata that the domain object deliberately omits, and the wisp-subtree
+	// recovery is graph residual.
 	// The sweep federates the scope stores, kept for tracking rows written
 	// before the orders class moved to its binding, with the binding itself:
 	// a scope leg reads relics.
 	var runs []orders.OrderRun
 	err := beads.RelicRead(func() error {
 		var listErr error
-		runs, listErr = orders.NewStore(beads.OrdersStore{Store: store}).StaleOpenRuns(cutoff)
+		runs, listErr = read.runs(orders.NewStore(beads.OrdersStore{Store: store}), cutoff)
 		return listErr
 	})
 	if err != nil {

@@ -205,10 +205,21 @@ yet settled.
   `usage_compute_emitted_at:<epoch>` marker, then writes the marker. This is
   at-least-once: a crash between the durable sink append and the marker write
   re-emits next tick, and `IdempotencyKey` collapses the duplicate at read time
-  (fix double-count, not under-count). The scan only sees the open set, so a
-  session closed directly from active without first reaching an open terminal
-  state (asleep/drained/archived/suspended/quarantined) is a known under-count.
-  The single-key marker sidesteps open question 3 (`beads.Tx` validation across
+  (fix double-count, not under-count). The scan only sees the open set, so
+  every session close (except a failed create) also stamps
+  `usage_close_pending` and `usage_closed_at`: a session closed directly from
+  active without first reaching an open terminal state
+  (asleep/drained/archived/suspended/quarantined) is listed by that marker on
+  non-boot ticks (at most 64 rows, oldest first, once per 30s, in a List whose
+  limit the store pushes to its backing), its interval ends at
+  `usage_closed_at`, and its model-usage sweep is retried until it settles or
+  15 minutes past the close. A named session's reopen copies the closed
+  interval's `awake_started_at` and `session_key` onto the marker
+  (`usage_closed_awake_started_at`, `usage_closed_session_key`), so a start
+  that stamps a new epoch before the lane runs does not lose that interval.
+  The closed sweep finds a claude transcript by that key alone; a keyless
+  closed claude interval records its compute fact without model usage. The
+  single-key marker sidesteps open question 3 (`beads.Tx` validation across
   store impls).
 - **The awake epoch is `awake_started_at` at nanosecond precision**, stamped
   fresh whenever a confirmed start/wake opens an awake interval — both

@@ -766,7 +766,8 @@ type RowRefreshOptions struct {
 	// (announcedCloses): its closing write, a re-scan or a refresh announced
 	// it, and a re-scan or full Prime then dropped the closed row. A close
 	// the cache never announced is announced, however recently the cache
-	// wrote the row: a full Prime drops a row closed out of band silently.
+	// wrote the row: a write over a close the cache never held installs it
+	// silently, and a full Prime then drops the closed row.
 	// So is the close of a row the cache holds closed only because a path
 	// that announces no close installed it over no cached row (a write that
 	// only refreshed the row, a conditional write's refetch, an applied

@@ -121,9 +121,10 @@ func ScanningBackends(backends []Backend) []BackendScanner {
 // Local backends scan the same host process table, so one root commonly
 // appears in several results, each backend marking tracked only the sessions
 // it hosts. A root is therefore tracked when ANY backend tracks it, and the
-// tracking backend's record (with its ProviderName) is kept. Results are
-// ordered by PID. Backend errors are labeled and joined; partial results from
-// a failing backend are still merged, per the best-effort contract.
+// tracking backend's record (with its ProviderName) is kept. An untracked root
+// is LiveUnlisted when ANY backend claims it so. Results are ordered by PID.
+// Backend errors are labeled and joined; partial results from a failing
+// backend are still merged, per the best-effort contract.
 func FindRuntimesAcross(backends []Backend, id string) ([]LiveRuntime, error) {
 	merged := make(map[int]LiveRuntime)
 	var errs []error
@@ -133,8 +134,13 @@ func FindRuntimesAcross(backends []Backend, id string) ([]LiveRuntime, error) {
 			errs = append(errs, fmt.Errorf("%s backend: %w", b.Label, err))
 		}
 		for _, r := range found {
-			if existing, ok := merged[r.PID]; !ok || (r.IsTracked && !existing.IsTracked) {
+			existing, ok := merged[r.PID]
+			switch {
+			case !ok || (r.IsTracked && !existing.IsTracked):
 				merged[r.PID] = r
+			case r.LiveUnlisted && !existing.IsTracked:
+				existing.LiveUnlisted = true
+				merged[r.PID] = existing
 			}
 		}
 	}
