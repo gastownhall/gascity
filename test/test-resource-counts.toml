@@ -879,6 +879,7 @@ calls = 1
 path = "cmd/gc/gc_beads_bd_journal_recovery_test.go"
 resource = "subprocess"
 calls = 2
+tagged = true
 
 [[count]]
 path = "cmd/gc/gc_beads_bd_server_reachable_test.go"
@@ -995,6 +996,7 @@ calls = 4
 path = "cmd/gc/nudge_queue_lock_free_test.go"
 resource = "fixed_sleep"
 calls = 1
+tagged = true
 
 [[count]]
 path = "cmd/gc/nudge_queue_lock_policy_test.go"
@@ -1381,16 +1383,19 @@ calls = 2
 path = "examples/bd/dolt/backup_order_test.go"
 resource = "fixed_sleep"
 calls = 1
+tagged = true
 
 [[count]]
 path = "examples/bd/dolt/backup_order_test.go"
 resource = "subprocess"
 calls = 1
+tagged = true
 
 [[count]]
 path = "examples/bd/dolt/cleanup_test.go"
 resource = "subprocess"
 calls = 2
+tagged = true
 
 [[count]]
 path = "examples/bd/dolt/compact_real_dolt_test.go"
@@ -1414,21 +1419,25 @@ tagged = true
 path = "examples/bd/dolt/doctor_test.go"
 resource = "subprocess"
 calls = 1
+tagged = true
 
 [[count]]
 path = "examples/bd/dolt/dog_exec_scripts_test.go"
 resource = "fixed_sleep"
 calls = 2
+tagged = true
 
 [[count]]
 path = "examples/bd/dolt/dog_exec_scripts_test.go"
 resource = "subprocess"
 calls = 4
+tagged = true
 
 [[count]]
 path = "examples/bd/dolt/health_order_test.go"
 resource = "subprocess"
 calls = 2
+tagged = true
 
 [[count]]
 path = "examples/bd/dolt/health_test.go"
@@ -1449,61 +1458,61 @@ calls = 20
 path = "examples/bd/dolt/journal_recovery_runbook_test.go"
 resource = "subprocess"
 calls = 2
+tagged = true
 
 [[count]]
 path = "examples/bd/dolt/logs_test.go"
 resource = "subprocess"
 calls = 1
+tagged = true
 
 [[count]]
 path = "examples/bd/dolt/port_resolve_test.go"
 resource = "subprocess"
 calls = 1
+tagged = true
 
 [[count]]
 path = "examples/bd/dolt/proxied_scope_test.go"
 resource = "subprocess"
 calls = 9
+tagged = true
 
 [[count]]
 path = "examples/bd/dolt/pull_remote_selection_test.go"
 resource = "subprocess"
 calls = 11
+tagged = true
 
 [[count]]
 path = "examples/bd/dolt/pull_test.go"
 resource = "subprocess"
 calls = 2
+tagged = true
 
 [[count]]
 path = "examples/bd/dolt/recover_host_test.go"
 resource = "subprocess"
 calls = 1
+tagged = true
 
 [[count]]
 path = "examples/bd/dolt/restart_test.go"
 resource = "subprocess"
 calls = 1
-
-[[count]]
-path = "examples/bd/dolt/runtime_bounded_test.go"
-resource = "net_listen"
-calls = 6
+tagged = true
 
 [[count]]
 path = "examples/bd/dolt/runtime_bounded_test.go"
 resource = "subprocess"
 calls = 5
-
-[[count]]
-path = "examples/bd/dolt/sql_test.go"
-resource = "net_listen"
-calls = 1
+tagged = true
 
 [[count]]
 path = "examples/bd/dolt/sql_test.go"
 resource = "subprocess"
 calls = 2
+tagged = true
 
 [[count]]
 path = "examples/bd/dolt/stale_db_close_reason_real_bd_test.go"
@@ -1515,36 +1524,37 @@ tagged = true
 path = "examples/bd/dolt/stale_db_formula_test.go"
 resource = "subprocess"
 calls = 11
+tagged = true
 
 [[count]]
 path = "examples/bd/dolt/status_test.go"
 resource = "subprocess"
 calls = 1
+tagged = true
 
 [[count]]
 path = "examples/bd/dolt/sync_ffclassify_test.go"
 resource = "subprocess"
 calls = 2
-
-[[count]]
-path = "examples/bd/dolt/sync_test.go"
-resource = "net_listen"
-calls = 1
+tagged = true
 
 [[count]]
 path = "examples/bd/dolt/sync_test.go"
 resource = "subprocess"
 calls = 28
+tagged = true
 
 [[count]]
 path = "examples/gastown/bind_key_script_test.go"
 resource = "subprocess"
 calls = 2
+tagged = true
 
 [[count]]
 path = "examples/gastown/cycle_script_test.go"
 resource = "subprocess"
 calls = 1
+tagged = true
 
 [[count]]
 path = "examples/gastown/dolt_orphan_sweep_integration_test.go"
@@ -1573,11 +1583,13 @@ tagged = true
 path = "examples/gastown/maintenance_installed_layout_test.go"
 resource = "subprocess"
 calls = 2
+tagged = true
 
 [[count]]
 path = "examples/gastown/maintenance_scope_test.go"
 resource = "subprocess"
 calls = 6
+tagged = true
 
 [[count]]
 path = "examples/gastown/maintenance_scripts_dolt_integration_test.go"
@@ -1595,11 +1607,13 @@ tagged = true
 path = "examples/gastown/maintenance_scripts_test.go"
 resource = "subprocess"
 calls = 91
+tagged = true
 
 [[count]]
 path = "examples/gastown/tmux_theme_script_test.go"
 resource = "subprocess"
 calls = 1
+tagged = true
 
 [[count]]
 path = "internal/api/apierr/emitted_codes_guard_test.go"
@@ -2021,6 +2035,7 @@ calls = 1
 path = "internal/bootstrap/packs/core/escalate_script_test.go"
 resource = "subprocess"
 calls = 1
+tagged = true
 
 [[count]]
 path = "internal/cliauth/client_test.go"

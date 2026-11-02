@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration && unix
 
 // Package integration provides end-to-end tests that exercise the real gc
 // binary against real session providers (tmux or subprocess). Tests validate
