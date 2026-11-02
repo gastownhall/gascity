@@ -2485,9 +2485,10 @@ func boundedSumDirBytes(ctx *CheckContext, root string, bound time.Duration) (in
 const doltDirWalkReserve = 30 * time.Second
 
 // errDirMeasureAbandoned is the measure error returned when the runner has
-// already abandoned the owning check (CheckContext.Done closed): measurement
-// stops instead of issuing I/O whose result can no longer be delivered.
-var errDirMeasureAbandoned = errors.New("measure directory: check abandoned before du started")
+// already abandoned the owning check (CheckContext.Done closed) — before du
+// starts, while du runs, or before the fallback walk: measurement stops
+// instead of issuing I/O whose result can no longer be delivered.
+var errDirMeasureAbandoned = errors.New("measure directory: check abandoned")
 
 // errDirMeasureWalkBound builds the context cause a fallback walk fails with
 // when its stage bound expires.
@@ -2498,8 +2499,8 @@ func errDirMeasureWalkBound(bound time.Duration) error {
 // watchCheckDone cancels cancel when the owning check's runner abandons it
 // (ctx.Done closes), so staged measurement stops issuing I/O the moment its
 // result can no longer be delivered. Returns the watcher's stop function;
-// nil-safe. The stop function must be called exactly once (defer it) so the
-// watcher goroutine never outlives the measurement.
+// nil-safe. Call the stop function at least once (defer it) so the watcher
+// goroutine never outlives the measurement; repeat calls are safe.
 func watchCheckDone(ctx *CheckContext, cancel context.CancelFunc) func() {
 	if ctx == nil || ctx.Done == nil {
 		return func() {}
@@ -2521,11 +2522,12 @@ func watchCheckDone(ctx *CheckContext, cancel context.CancelFunc) func() {
 // measurement under a runner deadline. Unbounded runs (zero deadline) get
 // the historical hard cap and report unbounded, so the fallback walk keeps
 // its own hard cap too. A bounded run gives du
-// min(doltDirMeasureTimeout, remaining − doltDirWalkReserve): never the
-// whole budget, so the Go-walk fallback always has the remainder to finish
+// min(doltDirMeasureTimeout, remaining − doltDirWalkReserve), holding the
+// reserve back so the Go-walk fallback has a slice of the budget to finish
 // the measurement du couldn't. When the remaining budget can't cover the
-// reserve the bound is the whole remainder — du is the fast path, and a
-// walk on the leftovers of a budget that small would finish nothing.
+// reserve, du gets the whole remainder and the walk gets nothing — du is
+// the fast path, and a walk on the leftovers of a budget that small would
+// finish nothing.
 func measureStageBound(deadline, now time.Time) (time.Duration, bool) {
 	if deadline.IsZero() {
 		return doltDirMeasureTimeout, false
@@ -2542,8 +2544,9 @@ func measureStageBound(deadline, now time.Time) (time.Duration, bool) {
 // when du is missing or exceeds its stage bound. Bounds are derived from
 // the check's runner budget (ctx.Deadline, stamped by Doctor.boundedRun)
 // so a bounded run's measurement finishes inside the budget that bounds
-// the check itself; the fallback walk gets the remainder. Without a runner
-// budget both stages keep the historical hard 60-second caps.
+// the check itself; the fallback walk gets whatever budget du leaves
+// (nothing, when the budget was too small to hold a reserve back).
+// Without a runner budget both stages keep the historical hard 60-second caps.
 func duDirBytes(ctx *CheckContext, root string) (int64, bool, error) {
 	info, err := os.Stat(root)
 	if err != nil {
@@ -2638,8 +2641,13 @@ func walkDirBytesRemainder(ctx *CheckContext, root string, stageStart time.Time,
 	total, exists, err := boundedSumDirBytes(ctx, root, walkBound)
 	if err != nil && !ctx.Canceled() && isDeadline(err) {
 		// Say what the walk's own bound was, not just "context deadline
-		// exceeded" — the operator needs the number to size --check-timeout.
-		return 0, true, fmt.Errorf("walk timed out after %s (check budget; raise --check-timeout for artifact-heavy trees)", walkBound)
+		// exceeded" — the operator needs the number to act on. Under a
+		// runner budget raising --check-timeout helps; on the unbounded
+		// path the bound is the hard cap and no flag can raise it.
+		if bounded {
+			return 0, true, fmt.Errorf("walk timed out after %s (check budget; raise --check-timeout for artifact-heavy trees)", walkBound)
+		}
+		return 0, true, fmt.Errorf("walk timed out after %s (hard cap; this run is unbounded, so --check-timeout cannot raise it)", walkBound)
 	}
 	return total, exists, err
 }

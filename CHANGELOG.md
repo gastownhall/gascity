@@ -1097,10 +1097,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   regardless of `--check-timeout`. The runner now stamps the
   abandonment moment on the check context (`CheckContext.Deadline`) and
   measurement sizes its stages from it: du gets
-  `min(60s, remaining − 30s reserve)`, the walk gets the remainder, and
-  both stop the moment the check is abandoned. Unbounded runs
-  (`--check-timeout 0`) keep the historical hard caps; fast trees still
-  return through the du fast path unchanged.
+  `min(60s, remaining − 30s reserve)` and the walk gets whatever budget
+  du leaves (a budget too small to cover the reserve goes entirely to
+  du, and a check scanning several directories shares the one budget
+  across them — a first target that consumes it can leave later targets
+  unmeasured, reported as a measure warning rather than a stale
+  number). Both stages stop the moment the check is abandoned.
+  Unbounded runs (`--check-timeout 0`) keep the historical hard caps;
+  fast trees still return through the du fast path unchanged.
 
 - **The supervisor API route printed different JSON from the local route
   for the commands supervisor-hosted cities read through it (#8453).**
