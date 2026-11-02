@@ -501,6 +501,139 @@ func TestOrderFiringCurrentAndOrderOutcomeHealthy_MonitorSameOrderSet(t *testing
 	}
 }
 
+// TestOrderOutcomeHealthyRecordedIncompleteOutcomes pins the PR #8543 defect:
+// an exec order can exit 0 while declaring that some of its work did not run
+// (order.skipped), yet order-outcome-healthy read only completed/failed
+// events, so the run surfaced as "last run succeeded" and the declaration
+// stayed invisible. Events are recorded in log order — the recorder assigns
+// Seq in record order — so each case's slice is its Seq order.
+func TestOrderOutcomeHealthyRecordedIncompleteOutcomes(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	const subject = "export-sweep"
+	const declMsg = "partial: store unreachable; not run: rig:st (dolt not reachable)"
+	const olderMsg = "skipped: nothing ran; not run: rig:st (asleep)"
+	const unreadableMsg = "unreadable outcome declaration: unexpected end of JSON input"
+
+	completed := func(ts time.Time) events.Event {
+		return events.Event{Type: events.OrderCompleted, Ts: ts, Subject: subject, Actor: "controller"}
+	}
+	declared := func(ts time.Time, msg string) events.Event {
+		return events.Event{
+			Type: events.OrderSkipped, Ts: ts, Subject: subject, Actor: "controller", Message: msg,
+			Payload: events.OrderSkippedPayloadJSON(events.OrderSkippedPayload{
+				OrderName: subject, Outcome: "partial", Reason: "store unreachable",
+				Scopes: []events.OrderSkippedScope{{Scope: "rig:st", Reason: "dolt not reachable"}},
+			}),
+		}
+	}
+
+	cases := []struct {
+		name       string
+		evts       []events.Event
+		wantDetail []string
+		notDetail  []string
+	}{
+		{
+			name:       "completion then declaration warns",
+			evts:       []events.Event{completed(now.Add(-time.Hour)), declared(now.Add(-time.Hour), declMsg)},
+			wantDetail: []string{"recorded incomplete work", declMsg},
+			notDetail:  []string{"last run succeeded"},
+		},
+		{
+			name:       "newest of repeated declarations wins",
+			evts:       []events.Event{completed(now.Add(-3 * time.Hour)), declared(now.Add(-2*time.Hour), olderMsg), declared(now.Add(-time.Hour), declMsg)},
+			wantDetail: []string{"recorded incomplete work", declMsg},
+			notDetail:  []string{olderMsg},
+		},
+		{
+			name:       "declaration without any completion warns",
+			evts:       []events.Event{declared(now.Add(-time.Hour), declMsg)},
+			wantDetail: []string{"recorded incomplete work", declMsg},
+			notDetail:  []string{"no completed runs yet", "last run succeeded"},
+		},
+		{
+			// A declaration with no message still means work did not run; the
+			// detail must not grow a dangling ": " artifact.
+			name:       "blank declaration message still warns generically",
+			evts:       []events.Event{completed(now.Add(-time.Hour)), declared(now.Add(-time.Hour), "")},
+			wantDetail: []string{"recorded incomplete work"},
+			notDetail:  []string{"last run succeeded", "recorded incomplete work: "},
+		},
+		{
+			// The controller records a declaration it could not decode with the
+			// decode error in the message; that text must reach the operator.
+			name:       "unreadable declaration keeps its error text",
+			evts:       []events.Event{completed(now.Add(-time.Hour)), declared(now.Add(-time.Hour), unreadableMsg)},
+			wantDetail: []string{"recorded incomplete work", unreadableMsg},
+			notDetail:  []string{"last run succeeded"},
+		},
+		{
+			// Seq, not Ts, orders the log: a declaration recorded after the
+			// completion warns even when its timestamp is older.
+			name:       "declaration with older timestamp but newer seq warns",
+			evts:       []events.Event{completed(now), declared(now.Add(-2*time.Hour), declMsg)},
+			wantDetail: []string{"recorded incomplete work", declMsg},
+			notDetail:  []string{"last run succeeded"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, cfg := orderFiringTestCity(t)
+			writeOrderFiringTestOrderInDir(t, filepath.Join(cityPath, "orders"), subject, "cooldown", "6h")
+			writeOrderFiringTestEvents(t, cityPath, tc.evts...)
+
+			result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
+
+			if result.Status != StatusWarning {
+				t.Fatalf("status = %v, want StatusWarning for a recorded incomplete outcome; msg=%q details=%v", result.Status, result.Message, result.Details)
+			}
+			if result.Severity != SeverityAdvisory {
+				t.Fatalf("severity = %v, want SeverityAdvisory", result.Severity)
+			}
+			joined := strings.Join(result.Details, "\n")
+			for _, want := range tc.wantDetail {
+				if !strings.Contains(joined, want) {
+					t.Fatalf("details missing %q:\n%s", want, joined)
+				}
+			}
+			for _, notWant := range tc.notDetail {
+				if strings.Contains(joined, notWant) {
+					t.Fatalf("details must not contain %q:\n%s", notWant, joined)
+				}
+			}
+		})
+	}
+}
+
+// TestLatestIncompleteOrderOutcome pins the declaration walk directly: it
+// returns the newest order.skipped for the subject, ignoring other subjects'
+// events entirely.
+func TestLatestIncompleteOrderOutcome(t *testing.T) {
+	base := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	outcomes := []events.Event{
+		outcomeEvent(1, "export-sweep", events.OrderSkipped, base, "older declaration"),
+		outcomeEvent(2, "other-order", events.OrderSkipped, base.Add(time.Hour), "not mine"),
+		outcomeEvent(3, "export-sweep", events.OrderSkipped, base.Add(2*time.Hour), "newest declaration"),
+	}
+
+	decl, ok := latestIncompleteOrderOutcome(outcomes, "export-sweep")
+
+	if !ok {
+		t.Fatal("ok = false, want a declaration for export-sweep")
+	}
+	if decl.Message != "newest declaration" {
+		t.Fatalf("message = %q, want the newest declaration", decl.Message)
+	}
+
+	if _, ok := latestIncompleteOrderOutcome(outcomes, "unheard-of"); ok {
+		t.Fatal("ok = true for a subject with no events, want false")
+	}
+	if _, ok := latestIncompleteOrderOutcome(nil, "export-sweep"); ok {
+		t.Fatal("ok = true for an empty stream, want false")
+	}
+}
+
 // orderOutcomeTestDetailNames extracts the order display name from each
 // detail line. Both checks' details begin with the order display name
 // followed by ": ".

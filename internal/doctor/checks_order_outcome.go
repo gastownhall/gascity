@@ -55,8 +55,13 @@ func nearControllerStart(ts time.Time, starts []time.Time, grace time.Duration) 
 
 // consecutiveOrderFailures counts trailing order.failed events for one order.
 //
-// outcomes must hold order.completed and order.failed events ordered by Seq
-// ascending; the walk runs newest-first and stops at the first success.
+// outcomes must hold order.completed, order.failed and order.skipped events
+// ordered by Seq ascending; the walk runs newest-first and stops at the first
+// success. order.skipped declarations are neither success nor failure — an
+// order that exits 0 while declaring incomplete work still completed its run —
+// so they are ignored entirely, never marking the order as having produced an
+// outcome and never breaking or resetting the streak. See
+// latestIncompleteOrderOutcome, which owns declarations.
 //
 // A success always ends the streak, even if it falls within the post-start grace
 // window. The grace window skips only spurious FAILURES (neither counting them nor
@@ -81,6 +86,9 @@ func consecutiveOrderFailures(outcomes []events.Event, subject string, starts []
 		if event.Subject != subject {
 			continue
 		}
+		if event.Type == events.OrderSkipped {
+			continue
+		}
 		sawOutcome = true
 		if event.Type != events.OrderFailed {
 			break
@@ -97,6 +105,41 @@ func consecutiveOrderFailures(outcomes []events.Event, subject string, starts []
 	}
 
 	return streak, lastMessage, sawOutcome, skipped
+}
+
+// latestIncompleteOrderOutcome returns the newest order.skipped declaration
+// for one order. outcomes must be ordered by Seq ascending; the walk runs
+// newest-first and stops at the first declaration for the subject, ignoring
+// other subjects' events.
+//
+// The boolean distinguishes a declaration whose Message is empty from no
+// declaration at all: both carry evidence that work did not run, and the
+// empty-message case must still warn.
+func latestIncompleteOrderOutcome(outcomes []events.Event, subject string) (events.Event, bool) {
+	for i := len(outcomes) - 1; i >= 0; i-- {
+		event := outcomes[i]
+		if event.Subject != subject {
+			continue
+		}
+		if event.Type == events.OrderSkipped {
+			return event, true
+		}
+	}
+	return events.Event{}, false
+}
+
+// orderIncompleteDetail renders the doctor detail for one order's recorded
+// incomplete-work declaration. The declaration message carries the outcome,
+// reason and scopes verbatim (see cmd/gc's orderSkippedEventFor); an
+// unreadable declaration carries its decode error instead. A blank message
+// still means work did not run, so the detail stays without a dangling
+// message slot.
+func orderIncompleteDetail(order orders.Order, decl events.Event) string {
+	detail := fmt.Sprintf("%s: recorded incomplete work", orderDisplayName(order))
+	if strings.TrimSpace(decl.Message) != "" {
+		detail = fmt.Sprintf("%s: %s", detail, decl.Message)
+	}
+	return detail
 }
 
 // classifyOrderOutcome turns one order's failure streak into a doctor result.
@@ -227,8 +270,17 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 		monitored++
 
 		streak, lastMessage, sawOutcome, skipped := consecutiveOrderFailures(log.bySubject[order.ScopedName()], order.ScopedName(), log.starts, c.grace)
+		decl, hasDecl := latestIncompleteOrderOutcome(log.bySubject[order.ScopedName()], order.ScopedName())
 		status, detail := classifyOrderOutcome(order, streak, c.threshold, lastMessage, sawOutcome, skipped)
 		worst = worseStatus(worst, status)
+		if hasDecl {
+			// An outstanding declaration is evidence the newest run did not
+			// finish its work, so the order warns even on a clean failure
+			// streak. It replaces the failure-based detail: "last run
+			// succeeded" would contradict the declaration outright.
+			worst = worseStatus(worst, StatusWarning)
+			detail = orderIncompleteDetail(order, decl)
+		}
 		result.Details = append(result.Details, detail)
 		if status != StatusOK {
 			failing++
@@ -262,17 +314,18 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 // orderOutcomeLog is everything order-outcome-healthy needs from the event log,
 // gathered in a single read.
 type orderOutcomeLog struct {
-	// bySubject holds each order's order.completed and order.failed events in
-	// Seq order, keyed by the order's scoped name.
+	// bySubject holds each order's order.completed, order.failed and
+	// order.skipped events in Seq order, keyed by the order's scoped name.
 	bySubject map[string][]events.Event
 	// starts holds every controller.started timestamp — see nearControllerStart.
 	starts []time.Time
 }
 
-// readOrderOutcomeLog reads order.completed, order.failed and controller.started
-// in ONE pass over the log. The log is not rotated in practice and reached
-// 151MB, so each extra pass cost ~30s; the events reader screens raw lines by
-// type before decoding, which is what keeps a single pass cheap.
+// readOrderOutcomeLog reads order.completed, order.failed, order.skipped and
+// controller.started in ONE pass over the log. The log is not rotated in
+// practice and reached 151MB, so each extra pass cost ~30s; the events reader
+// screens raw lines by type before decoding, which is what keeps a single
+// pass cheap.
 //
 // The read stops early, returning an error, once ctx reports the check
 // abandoned. A nil ctx is never abandoned.
@@ -281,7 +334,7 @@ func readOrderOutcomeLog(ctx *CheckContext, eventPath string) (orderOutcomeLog, 
 	defer cancel()
 
 	evts, err := events.ReadFilteredContext(goCtx, eventPath, events.Filter{
-		Types: []string{events.OrderCompleted, events.OrderFailed, events.ControllerStarted},
+		Types: []string{events.OrderCompleted, events.OrderFailed, events.OrderSkipped, events.ControllerStarted},
 	})
 	if err != nil {
 		return orderOutcomeLog{}, err
