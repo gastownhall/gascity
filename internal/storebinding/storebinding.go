@@ -271,7 +271,7 @@ type SessionsStore interface {
 	MarkWaitReadyForRedelivery(string, string, time.Time) error
 	SetWaitNudgeID(string, string) error
 	WaitNudgeIDs(string) ([]string, error)
-	CancelWaits(string, time.Time) ([]string, bool, error)
+	CancelWaits(context.Context, string, time.Time) ([]string, bool, error)
 	WakeSession(string, time.Time, session.WakeOpts) (session.WakeResult, error)
 	ReassignWaits(string, string) error
 }
