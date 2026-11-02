@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -517,5 +518,50 @@ func TestCodexAutoEditMapsToUnremovedCLIFlags(t *testing.T) {
 			t.Errorf("auto-edit FlagArgs = %v, want %v", autoEdit.FlagArgs, wantArgs)
 			break
 		}
+	}
+}
+
+// codex-cli 0.149.0 retired the "untrusted" approval policy (openai/codex
+// #39630); --ask-for-approval now accepts only on-request and never, and any
+// other value exits 2 before the TUI starts. suggest must use Codex's own
+// "Read Only" preset (on-request approval in the read-only sandbox), which
+// still asks before editing files.
+func TestCodexPermissionModesUseApprovalPoliciesStockCodexAccepts(t *testing.T) {
+	codex, ok := BuiltinProviders()["codex"]
+	if !ok {
+		t.Fatal("BuiltinProviders() missing codex")
+	}
+	accepted := map[string]bool{"on-request": true, "never": true}
+	checkArgs := func(where string, args []string) {
+		t.Helper()
+		for i, arg := range args {
+			if arg == "--ask-for-approval" && (i+1 >= len(args) || !accepted[args[i+1]]) {
+				t.Errorf("%s passes --ask-for-approval %v; stock codex accepts only on-request and never", where, args[i+1:])
+			}
+		}
+	}
+	for mode, flags := range codex.PermissionModes {
+		checkArgs("PermissionModes["+mode+"]", strings.Fields(flags))
+	}
+	for _, option := range codex.OptionsSchema {
+		if option.Key != "permission_mode" {
+			continue
+		}
+		for _, c := range option.Choices {
+			// FlagAliases are only matched against input args and never
+			// emitted, so the retired untrusted alias is left unchecked.
+			checkArgs("permission_mode choice "+c.Value, c.FlagArgs)
+			// PermissionModes is what clients and gc config explain show for
+			// a mode, and FlagArgs is what a launch emits, so they must
+			// spell the same flags.
+			if flags, ok := codex.PermissionModes[c.Value]; ok && flags != strings.Join(c.FlagArgs, " ") {
+				t.Errorf("PermissionModes[%s] = %q, want choice FlagArgs %q", c.Value, flags, strings.Join(c.FlagArgs, " "))
+			}
+		}
+	}
+
+	const want = "--ask-for-approval on-request --sandbox read-only"
+	if got := codex.PermissionModes["suggest"]; got != want {
+		t.Errorf("PermissionModes[suggest] = %q, want %q", got, want)
 	}
 }

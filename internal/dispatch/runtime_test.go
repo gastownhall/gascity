@@ -445,6 +445,110 @@ func TestProcessScopeCheckAbortsScopeOnFailure(t *testing.T) {
 	}
 }
 
+// TestProcessScopeCheckSubjectSkipsFanoutBlocker pins that a scoped on_complete
+// source's scope-check, which blocks on both the source and its
+// <source>-fanout control, resolves the source as its subject even when the
+// fanout edge is listed first. The fanout edge is a readiness gate only: scope
+// output and the pass/fail decision come from the source.
+func TestProcessScopeCheckSubjectSkipsFanoutBlocker(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name          string
+		sourceOutcome string
+		wantAction    string
+	}{
+		{name: "pass", sourceOutcome: "pass", wantAction: "scope-pass"},
+		{name: "fail", sourceOutcome: "fail", wantAction: "scope-fail"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := beads.NewMemStore()
+			body := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title: "body",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.kind":         "scope",
+					"gc.scope_role":   "body",
+					"gc.root_bead_id": "wf-1",
+					"gc.step_ref":     "demo.body",
+				},
+			})
+			source := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:  "A",
+				Type:   "task",
+				Status: "closed",
+				Metadata: map[string]string{
+					"gc.root_bead_id": "wf-1",
+					"gc.scope_ref":    "body",
+					"gc.scope_role":   "member",
+					"gc.outcome":      tc.sourceOutcome,
+					"gc.output_json":  `{"from":"source"}`,
+				},
+			})
+			fanout := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:  "Expand fanout for A",
+				Type:   "task",
+				Status: "closed",
+				Metadata: map[string]string{
+					"gc.kind":         "fanout",
+					"gc.root_bead_id": "wf-1",
+					"gc.scope_ref":    "body",
+					"gc.scope_role":   "control",
+					"gc.outcome":      "pass",
+					"gc.output_json":  `{"from":"fanout"}`,
+				},
+			})
+			control := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title: "Finalize scope for A",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.kind":         "scope-check",
+					"gc.root_bead_id": "wf-1",
+					"gc.scope_ref":    "body",
+					"gc.scope_role":   "control",
+				},
+			})
+
+			// The fanout edge goes in first so a first-blocker lookup would
+			// pick the fanout control.
+			mustDepAdd(t, store, control.ID, fanout.ID, "blocks")
+			mustDepAdd(t, store, control.ID, source.ID, "blocks")
+			mustDepAdd(t, store, body.ID, control.ID, "blocks")
+
+			subjectID, err := resolveScopeCheckSubjectID(store, control.ID)
+			if err != nil {
+				t.Fatalf("resolveScopeCheckSubjectID: %v", err)
+			}
+			if subjectID != source.ID {
+				t.Fatalf("subject = %s, want source %s (fanout is %s)", subjectID, source.ID, fanout.ID)
+			}
+
+			result, err := ProcessControl(store, mustGetBead(t, store, control.ID), ProcessOptions{})
+			if err != nil {
+				t.Fatalf("ProcessControl(scope-check): %v", err)
+			}
+			if !result.Processed || result.Action != tc.wantAction {
+				t.Fatalf("scope result = %+v, want processed %s", result, tc.wantAction)
+			}
+
+			bodyAfter := mustGetBead(t, store, body.ID)
+			if bodyAfter.Status != "closed" {
+				t.Fatalf("body status = %q, want closed", bodyAfter.Status)
+			}
+			if got := bodyAfter.Metadata["gc.outcome"]; got != tc.sourceOutcome {
+				t.Fatalf("body outcome = %q, want %q", got, tc.sourceOutcome)
+			}
+			if tc.sourceOutcome == "pass" {
+				if got := bodyAfter.Metadata["gc.output_json"]; got != `{"from":"source"}` {
+					t.Fatalf("body output_json = %q, want the source's output", got)
+				}
+			}
+		})
+	}
+}
+
 // TestProcessScopeCheckAbortSkipsMemberBlockedOnInFlightControl covers the shape
 // that TestProcessScopeCheckAbortsScopeOnFailure deliberately omits: a scope
 // member whose only blocker is the scope-check currently aborting the scope.
@@ -2928,7 +3032,6 @@ func TestProcessScopeCheckUsesSingleWorkflowSnapshotAndEmitsTrace(t *testing.T) 
 		"scope-check bead=" + control.ID + " phase=load-snapshot start",
 		"scope-check bead=" + control.ID + " phase=load-snapshot ok",
 		"scope-check bead=" + control.ID + " snapshot root=" + workflow.ID,
-		"scope-check bead=" + control.ID + " phase=propagate-metadata",
 		"scope-check bead=" + control.ID + " phase=close-body",
 	} {
 		if !strings.Contains(traceText, want) {
@@ -3164,6 +3267,15 @@ func (s *failBodyMetadataStore) SetMetadataBatch(id string, kvs map[string]strin
 		return errors.New("injected body metadata failure")
 	}
 	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// Update fails the same body closeout when it arrives as one write: the
+// propagated member metadata and the close together.
+func (s *failBodyMetadataStore) Update(id string, opts beads.UpdateOpts) error {
+	if id == s.failID && opts.Metadata["review.verdict"] != "" {
+		return errors.New("injected body metadata failure")
+	}
+	return s.Store.Update(id, opts)
 }
 
 func newStrictCloseStore() *strictCloseStore {
@@ -5069,6 +5181,107 @@ func TestProcessWorkflowFinalizeClosesIntraStoreSourceBeadWithoutResolver(t *tes
 	}
 	if got := sourceAfter.Metadata["gc.outcome"]; got != "pass" {
 		t.Fatalf("source gc.outcome = %q, want pass", got)
+	}
+}
+
+// TestProcessWorkflowFinalizeUnderCanceledRunFinalizesCanceled guards the race
+// between a run cancel and the work it interrupts. Run cancel durably stamps
+// gc.cancel_requested on the run root first, then interrupts the sessions
+// executing its steps while it closes the rest of the run. An interrupted agent
+// winding down its turn may still close its step as passed before the cancel
+// reaches it; that can make the workflow finalizer ready, and the finalizer is
+// exempt from the dispatcher's canceled-root gate because it is the bead that
+// settles the root. It must settle the root as canceled, not as a success
+// computed from the steps, and it must not close the source bead as done. A
+// drain item workflow whose own root is still live but whose parent run is
+// canceled finalizes the same way: the cancel will close it as canceled anyway.
+func TestProcessWorkflowFinalizeUnderCanceledRunFinalizesCanceled(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		nested bool
+	}{
+		{name: "run root marked canceled"},
+		{name: "drain item under a run marked canceled", nested: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := beads.NewMemStore()
+			source := mustCreateWorkflowBead(t, store, beads.Bead{Title: "work item", Type: "task"})
+			run := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title: "implement run",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.kind":             "workflow",
+					"gc.formula_contract": "graph.v2",
+					"gc.cancel_requested": "true",
+				},
+			})
+			workflow := run
+			if tc.nested {
+				drain := mustCreateWorkflowBead(t, store, beads.Bead{
+					Title:    "drain work",
+					Type:     "task",
+					Metadata: map[string]string{"gc.kind": "drain", "gc.root_bead_id": run.ID},
+				})
+				workflow = mustCreateWorkflowBead(t, store, beads.Bead{
+					Title: "do-work item",
+					Type:  "task",
+					Metadata: map[string]string{
+						"gc.kind":             "workflow",
+						"gc.formula_contract": "graph.v2",
+						"gc.drain_control_id": drain.ID,
+					},
+				})
+			}
+			if err := store.SetMetadata(workflow.ID, "gc.source_bead_id", source.ID); err != nil {
+				t.Fatal(err)
+			}
+			// The interrupted agent closed its step as passed.
+			step := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:    "implement",
+				Type:     "task",
+				Status:   "closed",
+				Metadata: map[string]string{"gc.outcome": "pass", "gc.root_bead_id": workflow.ID},
+			})
+			finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:    "Finalize workflow",
+				Type:     "task",
+				Metadata: map[string]string{"gc.kind": "workflow-finalize", "gc.root_bead_id": workflow.ID},
+			})
+			mustDepAdd(t, store, finalizer.ID, step.ID, "blocks")
+			mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
+
+			result, err := ProcessControl(store, finalizer, ProcessOptions{})
+			if err != nil {
+				t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+			}
+			if !result.Processed || result.Action != "workflow-canceled" {
+				t.Fatalf("result = %+v, want processed workflow-canceled", result)
+			}
+			rootAfter, err := store.Get(workflow.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rootAfter.Status != "closed" || rootAfter.Metadata["gc.outcome"] != "canceled" {
+				t.Fatalf("workflow root = status %q outcome %q, want closed canceled: a step passed after the cancel must not settle the run as a success", rootAfter.Status, rootAfter.Metadata["gc.outcome"])
+			}
+			sourceAfter, err := store.Get(source.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sourceAfter.Status == "closed" {
+				t.Fatalf("source bead closed with outcome %q; a canceled workflow must not close its source as done", sourceAfter.Metadata["gc.outcome"])
+			}
+			finalizerAfter, err := store.Get(finalizer.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if finalizerAfter.Status != "closed" {
+				t.Fatalf("finalizer status = %q, want closed", finalizerAfter.Status)
+			}
+		})
 	}
 }
 
@@ -11309,8 +11522,8 @@ func TestProcessWorkflowFinalize_PurgeOnMissingDir(t *testing.T) {
 
 // TestCloseScopeAsPassedSharedConvergence exercises the single scope-close
 // helper that both processScopeCheck branches and reconcileTerminalScopedMember
-// now share: propagate non-gc.* member metadata onto the body, write the
-// resolved output_json, and close the body pass unless it is already closed.
+// now share: propagate non-gc.* member metadata and the resolved output_json
+// onto the body, and close it pass unless it is already closed, as one write.
 func TestCloseScopeAsPassedSharedConvergence(t *testing.T) {
 	t.Parallel()
 
@@ -11387,14 +11600,18 @@ func TestCloseScopeAsPassedSharedConvergence(t *testing.T) {
 			}
 
 			traceText := trace.String()
-			for _, want := range []string{"phase=propagate-metadata", "phase=resolve-output", "phase=write-output", "phase=reload-body"} {
-				if !strings.Contains(traceText, want) {
-					t.Fatalf("trace missing %q:\n%s", want, traceText)
-				}
+			if !strings.Contains(traceText, "phase=resolve-output") {
+				t.Fatalf("trace missing %q:\n%s", "phase=resolve-output", traceText)
 			}
+			// An open body takes its metadata and its close in one write; an
+			// already closed body takes the metadata alone.
 			gotClose := strings.Contains(traceText, "phase=close-body ")
 			if gotClose != tc.wantCloseTrace {
 				t.Fatalf("close-body trace present=%v, want %v:\n%s", gotClose, tc.wantCloseTrace, traceText)
+			}
+			gotPropagate := strings.Contains(traceText, "phase=propagate-metadata ")
+			if gotPropagate == tc.wantCloseTrace {
+				t.Fatalf("propagate-metadata trace present=%v, want %v:\n%s", gotPropagate, !tc.wantCloseTrace, traceText)
 			}
 		})
 	}
@@ -12427,5 +12644,285 @@ func TestProcessWorkflowFinalizeStampsFailureOnSameStoreDomainParent(t *testing.
 	assertFailureStamp(t, parent, "postcondition_failed", "hard", cleanup.ID)
 	if got := parent.Metadata["gc.outcome"]; got != "" {
 		t.Errorf("parent gc.outcome = %q, want unset (the parent is not terminal)", got)
+	}
+}
+
+// stampSourceChainLaunch rewrites the fixture's work bead (the workflow's first
+// source) and names the root's formula before finalize runs. The root also
+// carries a domain key so propagation onto the source chain is observable.
+func stampSourceChainLaunch(t *testing.T, f sourceChainFinalizeFixture, formula, status string, metadata map[string]string) {
+	t.Helper()
+	if err := f.rigStore.Update(f.rigLaunch.ID, beads.UpdateOpts{Status: &status, Metadata: metadata}); err != nil {
+		t.Fatalf("stamp rig launch: %v", err)
+	}
+	if err := f.rigStore.SetMetadataBatch(f.workflow.ID, map[string]string{
+		"gc.formula_name":   formula,
+		"pr_review.verdict": "approve",
+	}); err != nil {
+		t.Fatalf("stamp workflow root: %v", err)
+	}
+}
+
+// finalizeSourceChainFixture runs the fixture's passing workflow-finalize with
+// the cross-store resolver and returns the result plus the trace it wrote.
+func finalizeSourceChainFixture(t *testing.T, f sourceChainFinalizeFixture) (ControlResult, string) {
+	t.Helper()
+	var trace bytes.Buffer
+	result, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{
+		ResolveStoreRef:      f.resolver,
+		SourceWorkflowStores: sourceChainFixtureStores(f),
+		SourceWorkflowLock:   func(_ string, _ string, fn func() error) error { return fn() },
+		Tracef: func(format string, args ...any) {
+			fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
+		},
+	})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	return result, trace.String()
+}
+
+// assertWorkflowPassedClosed checks the finalize result, that the root and
+// finalizer both closed, and that the root recorded the pass.
+func assertWorkflowPassedClosed(t *testing.T, f sourceChainFinalizeFixture, result ControlResult) {
+	t.Helper()
+	if !result.Processed || result.Action != "workflow-pass" {
+		t.Fatalf("ProcessControl result = %+v, want processed workflow-pass", result)
+	}
+	for _, id := range []string{f.workflow.ID, f.finalizer.ID} {
+		got, err := f.rigStore.Get(id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("%s status = %q, want closed", id, got.Status)
+		}
+	}
+	root, err := f.rigStore.Get(f.workflow.ID)
+	if err != nil {
+		t.Fatalf("get workflow root: %v", err)
+	}
+	if got := root.Metadata[beadmeta.OutcomeMetadataKey]; got != beadmeta.OutcomePass {
+		t.Fatalf("workflow root gc.outcome = %q, want pass", got)
+	}
+}
+
+// assertSourceChainParentHeld checks that the fixture's city parent was left
+// open and untouched by the pass path.
+func assertSourceChainParentHeld(t *testing.T, f sourceChainFinalizeFixture) {
+	t.Helper()
+	parent, err := f.cityStore.Get(f.citySource.ID)
+	if err != nil {
+		t.Fatalf("get city source: %v", err)
+	}
+	if parent.Status != "open" {
+		t.Fatalf("city source status = %q (gc.outcome %q), want open above a blocked source", parent.Status, parent.Metadata["gc.outcome"])
+	}
+	if got := parent.Metadata["gc.outcome"]; got != "" {
+		t.Fatalf("city source gc.outcome = %q, want unset", got)
+	}
+	if got := parent.Metadata["pr_review.verdict"]; got != "" {
+		t.Fatalf("city source pr_review.verdict = %q, want unset", got)
+	}
+}
+
+// assertBlockedSourceClosed checks that the work bead is closed in the blocked
+// form with the root's domain metadata carried onto it and no failure stamp.
+func assertBlockedSourceClosed(t *testing.T, f sourceChainFinalizeFixture) {
+	t.Helper()
+	source, err := f.rigStore.Get(f.rigLaunch.ID)
+	if err != nil {
+		t.Fatalf("get rig launch: %v", err)
+	}
+	if source.Status != "closed" {
+		t.Fatalf("rig launch status = %q, want closed", source.Status)
+	}
+	for key, want := range map[string]string{
+		"gc.work_outcome":                  beadmeta.WorkOutcomeBlocked,
+		"gc.outcome":                       "pass",
+		"pr_review.verdict":                "approve",
+		beadmeta.FailureReasonMetadataKey:  "",
+		beadmeta.FailureClassMetadataKey:   "",
+		beadmeta.FailureSubjectMetadataKey: "",
+	} {
+		if got := strings.TrimSpace(source.Metadata[key]); got != want {
+			t.Fatalf("rig launch %s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestProcessWorkflowFinalizeStopsSourceChainAtClosedBlockedSource(t *testing.T) {
+	t.Parallel()
+
+	for _, formula := range []string{"mol-do-work", "mol-polecat-report"} {
+		for _, tc := range []struct {
+			name  string
+			extra map[string]string
+		}{
+			{name: "plain"},
+			{name: "stale failure stamp", extra: map[string]string{
+				beadmeta.FailureReasonMetadataKey:  "postcondition_failed",
+				beadmeta.FailureClassMetadataKey:   "hard",
+				beadmeta.FailureSubjectMetadataKey: "earlier-attempt-step",
+			}},
+		} {
+			t.Run(formula+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				f := newSourceChainFinalizeFixture(t)
+				metadata := map[string]string{
+					"gc.outcome":      "pass",
+					"gc.work_outcome": beadmeta.WorkOutcomeBlocked,
+				}
+				for key, value := range tc.extra {
+					metadata[key] = value
+				}
+				stampSourceChainLaunch(t, f, formula, "closed", metadata)
+
+				result, trace := finalizeSourceChainFixture(t, f)
+
+				assertWorkflowPassedClosed(t, f, result)
+				assertBlockedSourceClosed(t, f)
+				assertSourceChainParentHeld(t, f)
+				if want := "stop reason=blocked_source source=" + f.rigLaunch.ID; !strings.Contains(trace, want) {
+					t.Fatalf("trace missing %q:\n%s", want, trace)
+				}
+			})
+		}
+	}
+}
+
+func TestProcessWorkflowFinalizeClosesOpenBlockedSourceAndStopsChain(t *testing.T) {
+	t.Parallel()
+
+	for _, formula := range []string{"mol-do-work", "mol-polecat-report"} {
+		t.Run(formula, func(t *testing.T) {
+			t.Parallel()
+
+			f := newSourceChainFinalizeFixture(t)
+			stampSourceChainLaunch(t, f, formula, "open", map[string]string{
+				"gc.work_outcome": beadmeta.WorkOutcomeBlocked,
+			})
+
+			result, trace := finalizeSourceChainFixture(t, f)
+
+			assertWorkflowPassedClosed(t, f, result)
+			assertBlockedSourceClosed(t, f)
+			assertSourceChainParentHeld(t, f)
+			if want := "stop reason=blocked_source source=" + f.rigLaunch.ID; !strings.Contains(trace, want) {
+				t.Fatalf("trace missing %q:\n%s", want, trace)
+			}
+		})
+	}
+
+	t.Run("live sibling workflow keeps precedence", func(t *testing.T) {
+		t.Parallel()
+
+		f := newSourceChainFinalizeFixture(t)
+		stampSourceChainLaunch(t, f, "mol-do-work", "open", map[string]string{
+			"gc.work_outcome": beadmeta.WorkOutcomeBlocked,
+		})
+		sibling := mustCreateWorkflowBead(t, f.rigStore, beads.Bead{
+			Title: "second live workflow",
+			Type:  "task",
+			Metadata: map[string]string{
+				"gc.kind":             "workflow",
+				"gc.formula_contract": "graph.v2",
+				"gc.source_bead_id":   f.rigLaunch.ID,
+				"gc.source_store_ref": "rig:test",
+			},
+		})
+
+		result, trace := finalizeSourceChainFixture(t, f)
+
+		assertWorkflowPassedClosed(t, f, result)
+		source, err := f.rigStore.Get(f.rigLaunch.ID)
+		if err != nil {
+			t.Fatalf("get rig launch: %v", err)
+		}
+		if source.Status != "open" {
+			t.Fatalf("rig launch status = %q, want open while %s is live", source.Status, sibling.ID)
+		}
+		assertSourceChainParentHeld(t, f)
+		for _, want := range []string{"stop reason=live_child_workflow source=" + f.rigLaunch.ID, "live_roots=" + sibling.ID} {
+			if !strings.Contains(trace, want) {
+				t.Fatalf("trace missing %q:\n%s", want, trace)
+			}
+		}
+		if strings.Contains(trace, "reason=blocked_source") {
+			t.Fatalf("trace has blocked_source stop; live child workflow must take precedence:\n%s", trace)
+		}
+	})
+}
+
+func TestProcessWorkflowFinalizeClosesSourceChainPastUnblockedWorkOutcomes(t *testing.T) {
+	t.Parallel()
+
+	for _, workOutcome := range []string{
+		beadmeta.WorkOutcomeShipped,
+		beadmeta.WorkOutcomeNoOp,
+		beadmeta.WorkOutcomeAbandoned,
+		"",
+	} {
+		t.Run("work_outcome="+workOutcome, func(t *testing.T) {
+			t.Parallel()
+
+			f := newSourceChainFinalizeFixture(t)
+			metadata := map[string]string{"gc.outcome": "pass"}
+			if workOutcome != "" {
+				metadata["gc.work_outcome"] = workOutcome
+			}
+			stampSourceChainLaunch(t, f, "mol-do-work", "closed", metadata)
+
+			result, trace := finalizeSourceChainFixture(t, f)
+
+			assertWorkflowPassedClosed(t, f, result)
+			parent, err := f.cityStore.Get(f.citySource.ID)
+			if err != nil {
+				t.Fatalf("get city source: %v", err)
+			}
+			if parent.Status != "closed" {
+				t.Fatalf("city source status = %q, want closed past a %q source", parent.Status, workOutcome)
+			}
+			if got := parent.Metadata["gc.outcome"]; got != "pass" {
+				t.Fatalf("city source gc.outcome = %q, want pass", got)
+			}
+			if got := parent.Metadata["pr_review.verdict"]; got != "approve" {
+				t.Fatalf("city source pr_review.verdict = %q, want the root's propagated approve", got)
+			}
+			if strings.Contains(trace, "reason=blocked_source") {
+				t.Fatalf("trace has blocked_source stop for work_outcome %q:\n%s", workOutcome, trace)
+			}
+		})
+	}
+}
+
+func TestProcessWorkflowFinalizeDoesNotResolveStoresAboveBlockedSource(t *testing.T) {
+	t.Parallel()
+
+	f := newSourceChainFinalizeFixture(t)
+	stampSourceChainLaunch(t, f, "mol-do-work", "closed", map[string]string{
+		"gc.outcome":      "pass",
+		"gc.work_outcome": beadmeta.WorkOutcomeBlocked,
+	})
+	var resolved []string
+	resolver := func(ref string) (beads.Store, error) {
+		resolved = append(resolved, ref)
+		if ref == "city:test" {
+			return nil, errors.New("city store unavailable")
+		}
+		return f.resolver(ref)
+	}
+
+	result, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{
+		ResolveStoreRef: resolver,
+	})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+
+	assertWorkflowPassedClosed(t, f, result)
+	if slices.Contains(resolved, "city:test") {
+		t.Fatalf("resolver asked for %v; the store above a blocked source must never be resolved", resolved)
 	}
 }

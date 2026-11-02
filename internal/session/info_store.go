@@ -156,11 +156,13 @@ func (s *Store) List(stateFilter, templateFilter string) ([]Info, error) {
 	return out, nil
 }
 
-// ListByMetadataInfos returns the Info projection of every bead matching the given
-// metadata filters, keeping the raw-bead codec confined to this edge. It is the typed
-// front door for the session-log workdir fallback's ListByMetadata scans (the callers
-// need only Info fields). limit is passed through to the store; a zero limit is
-// unbounded. No raw bead escapes.
+// ListByMetadataInfos returns the Info projection of every session row
+// (IsSessionBeadOrRepairable) matching the given metadata filters, keeping the
+// raw-bead codec confined to this edge. It is the typed front door for the
+// session-log workdir fallback's ListByMetadata scans (the callers need only
+// Info fields). Only a session row is one: another bead carrying the keys (a
+// task's) is no sibling session (architecture B). limit is passed through to
+// the store; a zero limit is unbounded. No raw bead escapes.
 func (s *Store) ListByMetadataInfos(filters map[string]string, limit int) ([]Info, error) {
 	if s == nil || s.store.Store == nil {
 		return nil, nil
@@ -171,7 +173,9 @@ func (s *Store) ListByMetadataInfos(filters map[string]string, limit int) ([]Inf
 	}
 	out := make([]Info, 0, len(found))
 	for _, b := range found {
-		out = append(out, infoFromPersistedBead(b))
+		if IsSessionBeadOrRepairable(b) {
+			out = append(out, infoFromPersistedBead(b))
+		}
 	}
 	return out, nil
 }
@@ -290,4 +294,21 @@ func sessionMatchesFiltersInfo(info Info, stateFilter, templateFilter string) bo
 		return false
 	}
 	return true
+}
+
+// StateFilterIncludesClosed reports whether a session-list state filter can
+// keep a closed session under the filter ListFromInfos applies: the whole
+// filter "all", or a comma-separated "closed" entry. The empty default and
+// every other filter keep open sessions only, so a list that reads persisted
+// rows before filtering them needs closed rows only when this is true.
+func StateFilterIncludesClosed(stateFilter string) bool {
+	if stateFilter == "all" {
+		return true
+	}
+	for _, sf := range strings.Split(stateFilter, ",") {
+		if sf == "closed" {
+			return true
+		}
+	}
+	return false
 }

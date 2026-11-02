@@ -11,7 +11,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -124,7 +123,7 @@ func materializeSessionForTemplateWithOptions(
 		if err != nil {
 			return "", err
 		}
-		if err := validateResolvedSessionTransport(resolved, sessionTransport, sp); err != nil {
+		if err := validateSessionTransportAt(cityPath, resolved, sessionTransport, sp); err != nil {
 			return "", err
 		}
 		sessionCommand, err := resolvedSessionCommand(cityPath, resolved, nil, sessionTransport)
@@ -184,35 +183,41 @@ func materializeSessionForTemplateWithOptions(
 			return "", err
 		}
 
-		if cityUsesManagedReconciler(cityPath) {
-			if pokeErr := pokeController(cityPath); pokeErr == nil {
-				var info session.Info
-				createErr := session.WithCitySessionIdentifierLocks(cityPath, []string{spec.Identity, spec.SessionName}, func() error {
-					if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, spec.Identity, "", spec.Identity); err != nil {
-						return err
-					}
-					if err := session.EnsureSessionNameAvailableWithConfigForOwner(store, cfg, spec.SessionName, "", spec.Identity); err != nil {
-						return err
-					}
-					var createErr error
-					info, createErr = handle.Create(context.Background(), worker.CreateModeDeferred)
-					return createErr
-				})
-				if createErr == nil {
-					_ = enqueueController(cityPath, reconcilekey.Session(info.ID))
-					return info.SessionName, nil
+		// A controller owns the start (a worker site, a live controller, or a
+		// city registered with the supervisor, running or not): create the
+		// bead only and let the reconciler start the session.
+		owned, err := sessionStartOwnedByReconciler(cityPath)
+		if err != nil {
+			return "", err
+		}
+		if owned {
+			pokeErr := pokeController(cityPath)
+			var info session.Info
+			createErr := session.WithCitySessionIdentifierLocks(cityPath, []string{spec.Identity, spec.SessionName}, func() error {
+				if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, spec.Identity, "", spec.Identity); err != nil {
+					return err
 				}
-				if snapshot, err := loadSessionBeadSnapshot(store); err == nil {
-					if info, ok := findCanonicalNamedSessionInfo(snapshot, spec); ok {
-						if sn := info.SessionNameMetadata; sn != "" {
-							return sn, nil
-						}
-					}
-				} else if stderr != nil {
-					fmt.Fprintf(stderr, "session materialize: reloading canonical named session %q after create failure: %v\n", spec.Identity, err) //nolint:errcheck
+				if err := session.EnsureSessionNameAvailableWithConfigForOwner(store, cfg, spec.SessionName, "", spec.Identity); err != nil {
+					return err
 				}
-				return "", createErr
+				var createErr error
+				info, createErr = handle.Create(context.Background(), worker.CreateModeDeferred)
+				return createErr
+			})
+			if createErr == nil {
+				noteDeferredSessionStart(stderr, "session materialize", info, enqueueDeferredSessionStart(cityPath, info.ID, pokeErr))
+				return info.SessionName, nil
 			}
+			if snapshot, err := loadSessionBeadSnapshot(store); err == nil {
+				if info, ok := findCanonicalNamedSessionInfo(snapshot, spec); ok {
+					if sn := info.SessionNameMetadata; sn != "" {
+						return sn, nil
+					}
+				}
+			} else if stderr != nil {
+				fmt.Fprintf(stderr, "session materialize: reloading canonical named session %q after create failure: %v\n", spec.Identity, err) //nolint:errcheck
+			}
+			return "", createErr
 		}
 
 		var info session.Info
@@ -242,7 +247,7 @@ func materializeSessionForTemplateWithOptions(
 		return "", err
 	}
 
-	return materializeSessionForAgentConfig(cityPath, cfg, store, &found)
+	return materializeSessionForAgentConfig(cityPath, cfg, store, &found, stderr)
 }
 
 func ensureSessionIDForTemplateWithOptions(
@@ -264,7 +269,10 @@ func ensureSessionIDForTemplateWithOptions(
 	return sessionID, nil
 }
 
-func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store beads.Store, agentCfg *config.Agent) (string, error) {
+func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store beads.Store, agentCfg *config.Agent, stderr io.Writer) (string, error) {
+	if stderr == nil {
+		stderr = io.Discard
+	}
 	if cfg == nil {
 		return "", fmt.Errorf("city config unavailable")
 	}
@@ -284,7 +292,7 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 	if err != nil {
 		return "", err
 	}
-	if err := validateResolvedSessionTransport(resolved, sessionTransport, sp); err != nil {
+	if err := validateSessionTransportAt(cityPath, resolved, sessionTransport, sp); err != nil {
 		return "", err
 	}
 	sessionCommand, err := resolvedSessionCommand(cityPath, resolved, nil, sessionTransport)
@@ -339,26 +347,31 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 	}
 	reservationIDs := []string{explicitName, sessionQualifiedName}
 
-	if cityUsesManagedReconciler(cityPath) {
-		if pokeErr := pokeController(cityPath); pokeErr == nil {
-			var info session.Info
-			createErr := session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
-				if err := session.EnsureAliasAvailableWithConfig(store, cfg, sessionQualifiedName, ""); err != nil {
-					return err
-				}
-				if err := session.EnsureSessionNameAvailableWithConfig(store, cfg, explicitName, ""); err != nil {
-					return err
-				}
-				var createErr error
-				info, createErr = handle.Create(context.Background(), worker.CreateModeDeferred)
-				return createErr
-			})
-			if createErr == nil {
-				_ = enqueueController(cityPath, reconcilekey.Session(info.ID))
-				return info.SessionName, nil
+	// As for a named session: a controller owns the start, so create the
+	// bead only and let the reconciler start the session.
+	owned, err := sessionStartOwnedByReconciler(cityPath)
+	if err != nil {
+		return "", err
+	}
+	if owned {
+		pokeErr := pokeController(cityPath)
+		var info session.Info
+		createErr := session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
+			if err := session.EnsureAliasAvailableWithConfig(store, cfg, sessionQualifiedName, ""); err != nil {
+				return err
 			}
-			return "", createErr
+			if err := session.EnsureSessionNameAvailableWithConfig(store, cfg, explicitName, ""); err != nil {
+				return err
+			}
+			var createErr error
+			info, createErr = handle.Create(context.Background(), worker.CreateModeDeferred)
+			return createErr
+		})
+		if createErr == nil {
+			noteDeferredSessionStart(stderr, "session materialize", info, enqueueDeferredSessionStart(cityPath, info.ID, pokeErr))
+			return info.SessionName, nil
 		}
+		return "", createErr
 	}
 
 	var info session.Info

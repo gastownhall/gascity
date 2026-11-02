@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -42,7 +43,12 @@ func (h agentOutputCapabilityHandle) Peek(context.Context, int) (string, error) 
 }
 
 func TestEnrichSessionResponseAcceptsStateAndPeekCapability(t *testing.T) {
-	srv := New(newSessionFakeState(t))
+	fs := newSessionFakeState(t)
+	// running is the runtime probe, so the session's runtime must be up.
+	if err := fs.sp.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	srv := New(fs)
 	resp := &sessionResponse{}
 
 	srv.enrichSessionResponse(resp, session.Info{

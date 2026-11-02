@@ -109,3 +109,54 @@ func TestBeadsGraphAdapterDelegatesClaimWhenAvailable(t *testing.T) {
 		t.Fatalf("adapter passed (%q, %q) to the store, want (%q, %q)", backing.lastID, backing.lastAssignee, created.ID, "worker")
 	}
 }
+
+// payloadMemStore is a canonical store that DOES retain graph-edge payloads,
+// proving the capability probe finds one rather than always vetoing — and, more
+// to the point, that the adapter hands the two ids over in the order it was
+// given them.
+//
+// The transposition is the reason this arm needs a test at all. DepMetadata's
+// two parameters are both strings and both bead ids, so a swap compiles, reads
+// naturally, and answers a real payload for the wrong edge; nothing else in the
+// package would notice. NativeDoltStore's arrival as a second implementation
+// (it reads the edge row through the beads role accessors) is what makes the
+// pass-through load-bearing on a served city rather than a SQLite detail.
+type payloadMemStore struct {
+	beads.Store
+	payloads map[[2]string]string
+	lastFrom string
+	lastTo   string
+}
+
+func (s *payloadMemStore) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
+	s.lastFrom, s.lastTo = issueID, dependsOnID
+	payload, ok := s.payloads[[2]string{issueID, dependsOnID}]
+	return payload, ok, nil
+}
+
+func TestBeadsGraphAdapterDelegatesDepMetadataWhenAvailable(t *testing.T) {
+	backing := &payloadMemStore{
+		Store: beads.NewMemStore(),
+		payloads: map[[2]string]string{
+			{"gc-step", "gc-root"}: `{"gate":"approval"}`,
+			// The reverse edge, holding a DIFFERENT payload. Without it a
+			// transposed delegation would answer the same string and pass.
+			{"gc-root", "gc-step"}: `{"gate":"WRONG-DIRECTION"}`,
+		},
+	}
+	graph := graphAdapterOver(t, backing)
+
+	payload, ok, err := graph.DepMetadata("gc-step", "gc-root")
+	if err != nil || !ok {
+		t.Fatalf("DepMetadata = (%q, %v, %v), want a delegated payload", payload, ok, err)
+	}
+	if payload != `{"gate":"approval"}` {
+		t.Errorf("DepMetadata = %q, want the payload of the edge asked for", payload)
+	}
+	if backing.lastFrom != "gc-step" || backing.lastTo != "gc-root" {
+		t.Errorf("adapter passed (%q, %q) to the store, want (%q, %q) — an edge is directed and its payload belongs to one direction only", backing.lastFrom, backing.lastTo, "gc-step", "gc-root")
+	}
+	if payload, ok, err := graph.DepMetadata("gc-step", "gc-absent"); err != nil || ok || payload != "" {
+		t.Errorf("DepMetadata over an edge the store does not hold = (%q, %v, %v), want absence delegated verbatim", payload, ok, err)
+	}
+}

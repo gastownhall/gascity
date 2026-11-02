@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	// Embedded zoneinfo: named-zone results must not depend on the host's tzdata.
+	_ "time/tzdata"
+
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
@@ -756,6 +759,54 @@ func TestCheckTriggerEventNoEventsProvider(t *testing.T) {
 	result := CheckTrigger(a, time.Time{}, neverRan, nil, nil)
 	if result.Due {
 		t.Errorf("Due = true, want false (nil provider)")
+	}
+}
+
+// strandedEventsProvider is an event log caught mid-rotation: its plain List
+// misses the events still stranded in the in-flight rotating file, which
+// ListInFlight folds in, as a FileRecorder's do during an archive's
+// compression window.
+type strandedEventsProvider struct {
+	*events.Fake
+	stranded []events.Event
+}
+
+func (p *strandedEventsProvider) ListInFlight(filter events.Filter) ([]events.Event, error) {
+	visible, err := p.List(filter)
+	if err != nil {
+		return nil, err
+	}
+	return append(events.ApplyFilter(p.stranded, filter), visible...), nil
+}
+
+// TestCheckTriggerEventReadsEventsStrandedInARotation: while an archive is
+// compressed, the events just rotated out of the active log live only in the
+// in-flight rotating file. The check reads them too, so it does not call an
+// event order undue over a matching event that is on disk.
+func TestCheckTriggerEventReadsEventsStrandedInARotation(t *testing.T) {
+	ep := &strandedEventsProvider{
+		Fake:     events.NewFake(),
+		stranded: []events.Event{{Seq: 3, Type: "bead.closed"}},
+	}
+	a := Order{Name: "convoy-check", Trigger: "event", On: "bead.closed"}
+	result := CheckTrigger(a, time.Time{}, neverRan, ep, func(string) uint64 { return 2 })
+	if !result.Due {
+		t.Fatalf("Due = false, want true for the event stranded in the rotating file; reason: %s", result.Reason)
+	}
+}
+
+// TestCheckTriggerEventReportsAReadFailure: a check that cannot read the event
+// log says the read failed, not that no event matched, so a caller that keeps
+// how far its checks have read does not move past events it never read.
+func TestCheckTriggerEventReportsAReadFailure(t *testing.T) {
+	a := Order{Name: "convoy-check", Trigger: "event", On: "bead.closed"}
+	failed := CheckTrigger(a, time.Time{}, neverRan, events.NewFailFake(), nil)
+	if failed.Due || !failed.ReadFailed {
+		t.Fatalf("unreadable log: result = %+v, want not due and ReadFailed", failed)
+	}
+	unmatched := CheckTrigger(a, time.Time{}, neverRan, newEventsProvider(t, []events.Event{{Type: "bead.created"}}), nil)
+	if unmatched.Due || unmatched.ReadFailed {
+		t.Fatalf("no matching event: result = %+v, want not due and not ReadFailed", unmatched)
 	}
 }
 

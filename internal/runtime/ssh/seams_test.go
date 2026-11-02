@@ -166,12 +166,16 @@ func TestSeamsSshObserve(t *testing.T) {
 		switch {
 		case isTmux("has-session")(argv):
 			return nil, 0, nil
-		case len(argv) > 0 && argv[0] == "pgrep":
-			return []byte("1234\n"), 0, nil
-		case last == "#{session_attached}":
-			return []byte("1"), 0, nil // attached
+		case isProcessAliveScript(argv):
+			return []byte(processTable("1234", "1234 1 claude")), 0, nil
+		case last == "#{session_name}|#{session_attached}":
+			return []byte("s|1"), 0, nil // attached
+		case last == "#{window_activity}":
+			return []byte("1700000000"), 0, nil // pane-output clock, epoch seconds
 		case last == "#{session_activity}":
-			return []byte("1700000000"), 0, nil // last-activity epoch seconds
+			// Detached tmux pins session_activity at creation/attach time; it
+			// never advances on pane output, so it must not be the clock read.
+			return []byte("1600000000"), 0, nil
 		}
 		return nil, 0, nil
 	}}
@@ -188,14 +192,15 @@ func TestSeamsSshObserve(t *testing.T) {
 		t.Fatalf("launch: %v", err)
 	}
 
-	// Observe folds all three reads: ProcessAlive from pgrep, Attached parsed
-	// from #{session_attached}=1, LastActivity parsed from #{session_activity}.
+	// Observe folds all three reads: ProcessAlive from the pane tree, Attached parsed
+	// from #{session_attached}=1, LastActivity parsed from #{window_activity}
+	// (the pane-output clock, not the creation-pinned #{session_activity}).
 	obs, err := att.Observe(ctx, []string{"claude"})
 	if err != nil {
 		t.Fatalf("Observe: %v", err)
 	}
 	if !obs.ProcessAlive {
-		t.Fatal("Observe ProcessAlive = false; want true (pgrep found it)")
+		t.Fatal("Observe ProcessAlive = false; want true (the pane runs claude)")
 	}
 	if !obs.Attached {
 		t.Fatal("Observe Attached = false; want true (#{session_attached}=1)")

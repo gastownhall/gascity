@@ -61,6 +61,10 @@ func managedCityHostRequiresLocalPID(host string) bool {
 	return DoltHostIsLocal(host)
 }
 
+// DefaultDoltDatabase is the database a scope's Dolt target names when its
+// .beads/metadata.json pins none: bd's own default.
+const DefaultDoltDatabase = "beads"
+
 // DoltConnectionTarget is the resolved connection info for a beads scope.
 type DoltConnectionTarget struct {
 	Host string
@@ -120,6 +124,15 @@ func (e *InvalidCanonicalConfigError) Unwrap() error {
 
 // ResolveDoltConnectionTarget returns the effective Dolt target for a scope.
 func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltConnectionTarget, error) {
+	return resolveDoltConnectionTarget(fs, cityRoot, scopeRoot, contractPortReachable)
+}
+
+func resolveDoltConnectionTarget(
+	fs fsys.FS,
+	cityRoot,
+	scopeRoot string,
+	portReachable func(host, port string) bool,
+) (DoltConnectionTarget, error) {
 	cfgPath := filepath.Join(scopeRoot, ".beads", "config.yaml")
 	cfg, ok, err := ReadConfigState(fs, cfgPath)
 	if err != nil {
@@ -152,7 +165,7 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 	target := DoltConnectionTarget{
 		EndpointOrigin: cfg.EndpointOrigin,
 		EndpointStatus: cfg.EndpointStatus,
-		Database:       "beads",
+		Database:       DefaultDoltDatabase,
 		User:           strings.TrimSpace(cfg.DoltUser),
 	}
 	if db, ok, err := ReadDoltDatabase(fs, filepath.Join(scopeRoot, ".beads", "metadata.json")); err != nil {
@@ -192,7 +205,7 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 			}
 			return target, nil
 		}
-		port, err := readManagedRuntimePort(fs, cityRoot)
+		port, err := readManagedRuntimePort(fs, cityRoot, portReachable)
 		if err != nil {
 			// No runtime state of gc's own. A scope whose store bd owns never
 			// has one: bd records the server it started, or the upstream it was
@@ -227,7 +240,15 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 	case EndpointOriginCityCanonical, EndpointOriginExplicit:
 		return populateExternalTarget(target, cfg)
 	case EndpointOriginInheritedCity:
-		return resolveInheritedCityConnectionTarget(fs, cityRoot, scopeRoot, target, cfg, gcCanonicalInheritedRig)
+		return resolveInheritedCityConnectionTarget(
+			fs,
+			cityRoot,
+			scopeRoot,
+			target,
+			cfg,
+			gcCanonicalInheritedRig,
+			portReachable,
+		)
 	default:
 		return DoltConnectionTarget{}, fmt.Errorf("unsupported endpoint origin %q for %s", cfg.EndpointOrigin, cfgPath)
 	}
@@ -677,7 +698,15 @@ func deriveLegacyConnectionConfig(fs fsys.FS, cityRoot, scopeRoot string, cfg Co
 	return derived
 }
 
-func resolveInheritedCityConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string, target DoltConnectionTarget, rigCfg ConfigState, gcCanonicalRig bool) (DoltConnectionTarget, error) {
+func resolveInheritedCityConnectionTarget(
+	fs fsys.FS,
+	cityRoot,
+	scopeRoot string,
+	target DoltConnectionTarget,
+	rigCfg ConfigState,
+	gcCanonicalRig bool,
+	portReachable func(host, port string) bool,
+) (DoltConnectionTarget, error) {
 	// A rig whose store bd owns carries its own binding, so that binding
 	// outranks anything inherited. Without this a bd-owned direct rig resolves
 	// to the city's server, where its database does not exist.
@@ -717,7 +746,7 @@ func resolveInheritedCityConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string
 		if cityState.EndpointStatus != "" {
 			target.EndpointStatus = cityState.EndpointStatus
 		}
-		port, err := readManagedRuntimePort(fs, cityRoot)
+		port, err := readManagedRuntimePort(fs, cityRoot, portReachable)
 		if err != nil {
 			return DoltConnectionTarget{}, err
 		}
@@ -1057,12 +1086,16 @@ func readProviderOwnedServerPort(fs fsys.FS, scopeRoot string) (string, bool) {
 	return port, true
 }
 
-func readManagedRuntimePort(fs fsys.FS, cityRoot string) (string, error) {
+func readManagedRuntimePort(
+	fs fsys.FS,
+	cityRoot string,
+	portReachable func(host, port string) bool,
+) (string, error) {
 	state, err := readManagedRuntimeState(fs, cityRoot)
 	if err != nil {
 		return "", err
 	}
-	if !validManagedRuntimeState(state, cityRoot) {
+	if !validManagedRuntimeState(state, cityRoot, portReachable) {
 		return "", fmt.Errorf("%w", ErrManagedRuntimeUnavailable)
 	}
 	return strconv.Itoa(state.Port), nil
@@ -1090,7 +1123,11 @@ func readManagedRuntimeState(fs fsys.FS, cityRoot string) (managedRuntimeState, 
 	return state, nil
 }
 
-func validManagedRuntimeState(state managedRuntimeState, cityRoot string) bool {
+func validManagedRuntimeState(
+	state managedRuntimeState,
+	cityRoot string,
+	portReachable func(host, port string) bool,
+) bool {
 	if !state.Running || state.Port <= 0 || state.PID <= 0 {
 		return false
 	}
@@ -1102,7 +1139,7 @@ func validManagedRuntimeState(state managedRuntimeState, cityRoot string) bool {
 	if managedCityHostRequiresLocalPID(host) && !contractPIDAlive(state.PID) {
 		return false
 	}
-	return contractPortReachable(host, strconv.Itoa(state.Port))
+	return portReachable(host, strconv.Itoa(state.Port))
 }
 
 func contractPIDAlive(pid int) bool {

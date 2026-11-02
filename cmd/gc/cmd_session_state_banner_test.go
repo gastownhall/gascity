@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 )
@@ -36,16 +37,16 @@ func TestSessionCacheAgeBanner(t *testing.T) {
 func sessionListBannerOutput(t *testing.T, ageSeconds float64) string {
 	t.Helper()
 	var stdout bytes.Buffer
-	code := renderSessionListFromAPI(api.CachedRead[[]SessionView]{
+	code := renderSessionListFromAPI(api.CachedRead[[]api.SessionListView]{
 		AgeSeconds: ageSeconds,
-		Body: []SessionView{{
+		Body: []api.SessionListView{{
 			ID:         "gc-abc",
 			Template:   "worker",
 			State:      "asleep",
-			CreatedAt:  "2026-04-23T10:00:00Z",
-			LastActive: "2026-04-23T12:00:00Z",
+			CreatedAt:  time.Date(2026, 4, 23, 10, 0, 0, 0, time.UTC),
+			LastActive: time.Date(2026, 4, 23, 12, 0, 0, 0, time.UTC),
 		}},
-	}, false, &stdout)
+	}, "", "", false, &stdout, &bytes.Buffer{})
 	if code != 0 {
 		t.Fatalf("renderSessionListFromAPI = %d, want 0", code)
 	}
@@ -114,14 +115,14 @@ func TestRenderSessionPeekStateBannerWakeWindow(t *testing.T) {
 // guards against a later refactor moving the footer above the early return.
 func TestRenderSessionListFromAPIJSONHasNoBanner(t *testing.T) {
 	var stdout bytes.Buffer
-	code := renderSessionListFromAPI(api.CachedRead[[]SessionView]{
+	code := renderSessionListFromAPI(api.CachedRead[[]api.SessionListView]{
 		AgeSeconds: 20,
-		Body: []SessionView{{
+		Body: []api.SessionListView{{
 			ID:       "gc-abc",
 			Template: "worker",
 			State:    "asleep",
 		}},
-	}, true, &stdout)
+	}, "", "", true, &stdout, &bytes.Buffer{})
 	if code != 0 {
 		t.Fatalf("renderSessionListFromAPI = %d, want 0", code)
 	}

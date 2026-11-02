@@ -65,8 +65,12 @@ var cleanupLiveSessionProbeTimeout = 2 * time.Second
 // classifies them with planDoltDrops against the protection list, and (when
 // --force is set) drops each stale name. Errors are recorded into the
 // report. It returns false only when a force-mode safety guard refuses cleanup
-// and the caller must skip the remaining destructive stages.
+// and the caller must skip the remaining destructive stages. A legacy-fallback
+// port is never scanned or dropped; runDoltCleanup records that refusal.
 func runDropStage(report *CleanupReport, opts cleanupOptions) bool {
+	if opts.PortResolution.Fallback {
+		return true
+	}
 	if opts.DoltClient == nil {
 		if opts.DoltClientOpenErr != nil {
 			recordCleanupError(report, "drop", "", opts.DoltClientOpenErr)

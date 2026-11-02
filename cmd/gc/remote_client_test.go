@@ -97,10 +97,10 @@ func TestCmdBeadsList_RemoteRoutesToServerNoFallback(t *testing.T) {
 	scriptPath := filepath.Join(t.TempDir(), "credential-helper.sh")
 	script := "#!/bin/sh\n" +
 		"if [ -e \"$1\" ]; then\n" +
-		"  printf '%s\\n' '{\"token\":\"fresh\",\"expiration_timestamp\":\"2030-01-01T00:00:00Z\"}'\n" +
+		"  printf '%s\\n' '{\"token\":\"fresh\",\"expiration_timestamp\":\"2099-01-01T00:00:00Z\"}'\n" +
 		"else\n" +
 		"  : > \"$1\"\n" +
-		"  printf '%s\\n' '{\"token\":\"stale\",\"expiration_timestamp\":\"2030-01-01T00:00:00Z\"}'\n" +
+		"  printf '%s\\n' '{\"token\":\"stale\",\"expiration_timestamp\":\"2099-01-01T00:00:00Z\"}'\n" +
 		"fi\n"
 	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
 		t.Fatal(err)

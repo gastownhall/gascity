@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -16,89 +17,39 @@ import (
 // A pull_request run checks out refs/pull/N/merge as GitHub computed it when
 // the event fired, and reopens, approval-delayed first-time runs and re-runs
 // reuse it, so a run can test a merge onto a main that predates fixes (plan
-// F11g-2). Every bazel-test.yml job follows its blobless full-history
+// F11g-2). Every bazel.yml job that tests follows its blobless full-history
 // checkout with .github/actions/fresh-merge, which merges the PR head onto
-// the base branch's current tip.
+// the rbe job's base-sha (TestBazelMultiLaneWorkflowShape pins that).
 
 const (
-	freshMergeAction     = ".github/actions/fresh-merge/action.yml"
-	freshMergeUses       = "./.github/actions/fresh-merge"
-	freshMergeStepName   = "Merge the PR head onto the base branch's current tip"
-	bazelEvidenceStep    = "bazel test //test/integration (evidence-only)"
-	bazelEvidenceStepIf  = "always() && steps.fresh-merge.outcome != 'failure'"
-	bazelTestConcurrency = "${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}"
+	freshMergeAction = ".github/actions/fresh-merge/action.yml"
+	freshMergeUses   = "./.github/actions/fresh-merge"
 )
 
-// TestBazelTestConcurrency: a PR's runs share a group and cancel each other;
-// every other event gets a group of its own (the run id), so a push to main
-// is never canceled, nor replaced while pending by the next push.
-func TestBazelTestConcurrency(t *testing.T) {
-	var wf struct {
-		Concurrency map[string]string `yaml:"concurrency"`
-	}
-	if err := yaml.Unmarshal([]byte(readFile(t, repoRoot(t), bazelTestWorkflow)), &wf); err != nil {
-		t.Fatalf("parse %s: %v", bazelTestWorkflow, err)
-	}
-	want := map[string]string{
-		"group":              bazelTestConcurrency,
-		"cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
-	}
-	if !reflect.DeepEqual(wf.Concurrency, want) {
-		t.Errorf("%s concurrency = %v, want %v", bazelTestWorkflow, wf.Concurrency, want)
-	}
-}
-
-// TestBazelTestFreshMergeSteps pins every job's checkout (full blobless
-// history) and the fresh-merge step right after it, and keeps the
-// always() evidence step off a failed merge's half-merged tree.
-func TestBazelTestFreshMergeSteps(t *testing.T) {
-	var wf bazelTestWorkflowFile
-	if err := yaml.Unmarshal([]byte(readFile(t, repoRoot(t), bazelTestWorkflow)), &wf); err != nil {
-		t.Fatalf("parse %s: %v", bazelTestWorkflow, err)
-	}
-	if len(wf.Jobs) != 2 {
-		t.Errorf("%s has %d jobs, want bazel and sync-check (each needs the fresh merge)", bazelTestWorkflow, len(wf.Jobs))
-	}
-	for _, name := range []string{"bazel", "sync-check"} {
-		job, ok := wf.Jobs[name]
-		if !ok {
-			t.Errorf("%s has no %s job", bazelTestWorkflow, name)
-			continue
-		}
-		checkouts := 0
-		for i, step := range job.Steps {
-			if !strings.HasPrefix(step.Uses, "actions/checkout@") {
-				continue
-			}
-			checkouts++
-			want := map[string]string{"fetch-depth": "0", "filter": "blob:none"}
-			if !reflect.DeepEqual(step.With, want) {
-				t.Errorf("%s checkout with = %v, want %v", name, step.With, want)
-			}
-			if i+1 >= len(job.Steps) {
-				t.Errorf("%s: checkout is the last step; want fresh-merge after it", name)
-				continue
-			}
-			next := job.Steps[i+1]
-			if next.Uses != freshMergeUses || next.ID != "fresh-merge" || next.Name != freshMergeStepName || next.If != "" || next.With != nil || next.Run != "" {
-				t.Errorf("%s: step after checkout = %+v; want %q (id fresh-merge, no if, no inputs)", name, next, freshMergeUses)
-			}
-		}
-		if checkouts != 1 {
-			t.Errorf("%s has %d checkouts, want 1", name, checkouts)
-		}
-	}
-	found := false
-	for _, step := range wf.Jobs["bazel"].Steps {
-		if step.Name == bazelEvidenceStep {
-			found = true
-			if step.If != bazelEvidenceStepIf {
-				t.Errorf("%q if = %q, want %q", bazelEvidenceStep, step.If, bazelEvidenceStepIf)
+// TestBazelRequiredGateRunsNoNeverFailingBazel: bazel.yml's gate is the
+// required check "bazel test (side-by-side)", so every bazel invocation it
+// fans in gates. A `bazel ... || true` costs the gate its wall time and can
+// never fail it; evidence-only suites (integration until G3) run in the
+// integration lane, whose matrix entry alone says evidence-only
+// (TestBazelMultiLaneLaneList).
+func TestBazelRequiredGateRunsNoNeverFailingBazel(t *testing.T) {
+	wf := readMultiLaneWorkflow(t)
+	bazelRun := regexp.MustCompile(`(?m)^\s*bazel\s[^\n]*$`)
+	for id, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			joined := strings.ReplaceAll(step.Run, "\\\n", " ")
+			for _, inv := range bazelRun.FindAllString(joined, -1) {
+				if strings.HasSuffix(strings.TrimSpace(inv), "|| true") {
+					t.Errorf("job %s step %q runs a bazel command that can never fail the gate:\n%s", id, step.Name, strings.TrimSpace(inv))
+				}
+				if strings.Contains(inv, "//test/integration") {
+					t.Errorf("job %s step %q runs //test/integration outside the integration lane's matrix entry", id, step.Name)
+				}
 			}
 		}
 	}
-	if !found {
-		t.Errorf("bazel job has no %q step", bazelEvidenceStep)
+	if !strings.Contains(multiLaneCommands["integration"], "//test/integration") {
+		t.Errorf("the integration lane no longer runs //test/integration; update this test")
 	}
 }
 
@@ -120,7 +71,7 @@ type freshMergeActionFile struct {
 
 // freshMergeActionRun returns the action's one step script after pinning
 // what the behavior test cannot see: pull_request only, bash, env, and no
-// required input (bazel-test.yml passes none; bazel.yml passes base-sha).
+// required input (bazel.yml passes base-sha; an empty one merges onto the tip).
 func freshMergeActionRun(t *testing.T) string {
 	t.Helper()
 	var action freshMergeActionFile

@@ -137,8 +137,12 @@ func keyedPokeUnsupported(err error) bool {
 // existing wake: the allocator key is pokeController, the control-dispatch
 // key is pokeControlDispatch, and a session key is a keyed poke that falls
 // back to pokeController (plain poke, then the supervisor) when the keyed
-// form is not acknowledged.
+// form is not acknowledged. On a worker site it returns
+// errWorkerSiteNoController without trying any of them.
 func enqueueController(cityPath string, key reconcilekey.Key) error {
+	if onWorkerSite(cityPath) {
+		return errWorkerSiteNoController
+	}
 	switch key = key.Normalize(); key.Kind {
 	case reconcilekey.KindControlDispatch:
 		return pokeControlDispatch(cityPath)
@@ -164,8 +168,12 @@ func enqueueController(cityPath string, key reconcilekey.Key) error {
 // pokeController: pokeController silently falls back to the city-agnostic
 // global supervisor socket on any send failure, which would make an
 // explicit-restart request for one city spuriously report success via an
-// unrelated supervisor.
+// unrelated supervisor. On a worker site it returns errWorkerSiteNoController
+// without dialing.
 func pokeControllerForRestart(cityPath string, key reconcilekey.Key) error {
+	if onWorkerSite(cityPath) {
+		return errWorkerSiteNoController
+	}
 	send := func(command string) ([]byte, error) {
 		return sendControllerCommandWithTimeouts(cityPath, command, 2*time.Second, 2*time.Second, 5*time.Second)
 	}

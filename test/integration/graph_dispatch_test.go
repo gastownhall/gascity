@@ -72,6 +72,7 @@ func TestGraphWorkflowSuccessPath(t *testing.T) {
 		t.Fatalf("body outcome = %q, want pass", got)
 	}
 
+	waitForWorkflowTeardown(t, cityDir, workflowID)
 	convoy := showBead(t, cityDir, convoyID)
 	if got := metaValue(convoy, "work_dir"); got != "" {
 		t.Fatalf("convoy work_dir = %q, want unset after cleanup", got)
@@ -117,6 +118,7 @@ func TestGraphWorkflowFailureRunsCleanup(t *testing.T) {
 		t.Fatalf("body outcome = %q, want fail", got)
 	}
 
+	waitForWorkflowTeardown(t, cityDir, workflowID)
 	convoy := showBead(t, cityDir, convoyID)
 	if got := metaValue(convoy, "work_dir"); got != "" {
 		t.Fatalf("convoy work_dir = %q, want unset after cleanup", got)
@@ -149,6 +151,23 @@ func TestGraphWorkflowFailureRunsCleanup(t *testing.T) {
 
 	assertControlDispatcherLane(t, cityDir)
 }
+
+// waitForWorkflowTeardown waits for the workflow's cleanup-worktree step to
+// close. Teardown is post-settlement by contract (internal/formula/graph.go
+// keeps it out of the finalizer's sinks): workflow-finalize closes the root
+// first and only then does the teardown tail run, so the root closing says
+// nothing yet about the worktree or the convoy's work_dir. The cleanup
+// assertions that follow read state the teardown writes, so they wait for it
+// explicitly instead of racing it.
+func waitForWorkflowTeardown(t *testing.T, cityDir, workflowID string) {
+	t.Helper()
+	cleanup := mustFindWorkflowBeadByRefSuffix(t, cityDir, workflowID, ".cleanup-worktree")
+	waitForBeadClosed(t, cityDir, cleanup.ID, graphWorkflowTeardownTimeout)
+}
+
+// graphWorkflowTeardownTimeout bounds the wait for the cleanup-worktree step
+// after the root has closed: one worker hop plus its retry control.
+const graphWorkflowTeardownTimeout = 2 * time.Minute
 
 func assertControlDispatcherLane(t *testing.T, cityDir string) {
 	t.Helper()

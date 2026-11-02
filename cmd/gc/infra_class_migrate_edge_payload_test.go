@@ -423,13 +423,13 @@ func TestTheDestinationPayloadRefusalRunsBeforeTheDestinationIsCleared(t *testin
 	var body *ast.BlockStmt
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
-		if ok && fn.Name.Name == "runInfraClassMigration" && fn.Recv == nil {
+		if ok && fn.Name.Name == "runInfraClassMigrationFrom" && fn.Recv == nil {
 			body = fn.Body
 			break
 		}
 	}
 	if body == nil {
-		t.Fatal("runInfraClassMigration is gone from infra_class_migrate.go, so this guard is watching nothing")
+		t.Fatal("runInfraClassMigrationFrom is gone from infra_class_migrate.go, so this guard is watching nothing")
 	}
 
 	positions := map[string]token.Pos{}

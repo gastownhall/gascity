@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -177,4 +178,23 @@ func templateParamsSessionOrigin(tp TemplateParams) string {
 	default:
 		return "ephemeral"
 	}
+}
+
+// isClientProviderChat reports whether a session of agent is a client's
+// provider chat rather than a worker: a manual session (POST /sessions with
+// kind=provider, `gc session new <provider>`) of a provider's implicit agent,
+// which runs under that agent only because the agent is named after the
+// provider. Such a session gets no worker persona on any start path; the
+// persona tells it to claim queue work and drain, which ends the client's
+// conversation after one turn.
+//
+// A manual session aliased as the agent's own queue identity is the exception:
+// the work query's origin gate (namedSelfTargetAdmit) admits it to routed work,
+// so it is a worker its operator deliberately created and keeps the persona.
+// origin and alias are the session's GC_SESSION_ORIGIN and GC_ALIAS.
+func isClientProviderChat(agent *config.Agent, origin, alias string) bool {
+	if agent == nil || !agent.Implicit || strings.TrimSpace(origin) != "manual" {
+		return false
+	}
+	return strings.TrimSpace(alias) != agentutil.RoutedToIdentity(agent)
 }

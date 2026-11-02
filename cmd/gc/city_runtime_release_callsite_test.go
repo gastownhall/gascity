@@ -132,7 +132,7 @@ func TestBeadReconcileTick_OrphanReleaseCallSite_RetainsLiveAndWakeProtectedWork
 		AssignedWorkStoreRefs: []string{"", ""},
 	}
 
-	cr.beadReconcileTick(context.Background(), result, newSessionBeadSnapshot([]beads.Bead{snapshotSession}), nil, false)
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result, newSessionBeadSnapshot([]beads.Bead{snapshotSession}), nil, false)
 
 	for _, tc := range []struct {
 		id, assignee, cure string
