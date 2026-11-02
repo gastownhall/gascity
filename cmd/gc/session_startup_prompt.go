@@ -25,12 +25,12 @@ type startupPromptCity struct {
 // so the SessionStart hook adds context without repeating a prompt it cannot
 // inline past the provider's size cap. When the provider hook supplies the role
 // to every generation instead (startupPromptSource.roleSuppliedByHook), the
-// resume sends no turn: these resolvers carry no configured nudge, and the
-// submit or attach that resumed the session supplies the next turn. That
-// relies on the plugin a previous launch staged in the session workdir, since
-// the API resolver does not restage provider overlays. It applies the
-// reconciler's promptDelivery policy and returns hints unchanged when nothing
-// can or needs to be delivered:
+// resume sends no turn: these resolvers carry no configured nudge, and the next
+// human message, submit or queued nudge starts the turn. The CLI resolver
+// restages the provider overlay first (applyWorkerOverlayHints); the API
+// resolver does not, so an API resume relies on the plugin a previous launch
+// staged in the session workdir. It applies the reconciler's promptDelivery
+// policy and returns hints unchanged when nothing can or needs to be delivered:
 // a closed session, a session with no agent config or prompt, a client's provider
 // chat (isClientProviderChat), and a runtime that
 // cannot be confirmed to carry a nudge (subprocess ignores cfg.Nudge, so marking

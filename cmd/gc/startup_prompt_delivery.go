@@ -35,7 +35,8 @@ type startupPromptSource struct {
 	// Beacon is the bare identity line (`[city] agent • ts`, no prime
 	// instruction) that opens a resume turn when the provider hook supplies
 	// the role (roleSuppliedByHook). The worker resolvers leave it empty: they
-	// carry no configured nudge, so that resume sends no turn at all.
+	// carry no configured nudge, so that resume sends no turn at all. Were
+	// they to carry one, it would go out without a beacon.
 	Beacon string
 	IsACP  bool
 	// HookEnabled is config.AgentHasHooks for the launching agent: its
