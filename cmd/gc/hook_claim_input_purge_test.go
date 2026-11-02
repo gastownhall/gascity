@@ -564,3 +564,71 @@ func TestHookDoneWorkflowRetirementListsMembershipOnceAndNeverProves(t *testing.
 	}
 	assertFinishedOutcomeKept(t, mem, w.finished.ID)
 }
+
+// partialCloseStore closes only the first id of a CloseAll and then fails, for
+// as long as fail is set.
+type partialCloseStore struct {
+	beads.Store
+	fail bool
+}
+
+func (s *partialCloseStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	if !s.fail {
+		return s.Store.CloseAll(ids, metadata)
+	}
+	n, err := s.Store.CloseAll(ids[:1], metadata)
+	if err != nil {
+		return n, err
+	}
+	return n, errors.New("injected close failure")
+}
+
+// A purge retirement whose write fails keeps the candidate and logs the
+// workflow, the missing input and the error; the retry after the store
+// recovers retires the rest and keeps every outcome already recorded,
+// including the one the failed write left and one a worker recorded since.
+func TestHookInputPurgeRetirementFailure(t *testing.T) {
+	mem := beads.NewMemStore()
+	w := seedPurgedInputWorkflow(t, mem, "gc-gone")
+	store := &partialCloseStore{Store: mem, fail: true}
+	prover := &recordingProver{absent: map[string]bool{"gc-gone": true}}
+	ops := hookClaimOps{
+		InputVerdict: func(ctx context.Context, _ string, _ []string, candidate beads.Bead, ids []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
+			return workflowInputDone(ctx, store, candidate, ids, prove)
+		},
+		RetireWorkflow: func(ctx context.Context, _ string, _ []string, verdict workflowInputVerdict) error {
+			if verdict.State == workflowInputPurged {
+				return failPurgedWorkflow(ctx, store, verdict.RootID)
+			}
+			return skipDoneWorkflow(store, verdict.RootID)
+		},
+		ProveInputAbsent: prover.prove,
+	}
+	opts := hookClaimOptions{Assignee: "worker-1", IdentityCandidates: []string{"worker-1"}, RouteTargets: []string{"worker"}}
+
+	var stderr bytes.Buffer
+	kept := retireDoneWorkflowCandidates([]beads.Bead{w.open}, opts, ops, "/work", &stderr)
+	if len(kept) != 1 || kept[0].ID != w.open.ID {
+		t.Fatalf("kept = %v after a failed retirement write, want [%s]", kept, w.open.ID)
+	}
+	for _, want := range []string{w.root.ID, "gc-gone", "injected close failure"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr = %q, want it to name %q", stderr.String(), want)
+		}
+	}
+	if root, err := mem.Get(w.root.ID); err != nil || root.Status == "closed" {
+		t.Fatalf("root %s: status=%q err=%v; a failed write must leave it open for the retry", w.root.ID, root.Status, err)
+	}
+	if _, err := mem.CloseAll([]string{w.active.ID}, map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass}); err != nil {
+		t.Fatalf("finishing %s: %v", w.active.ID, err)
+	}
+
+	store.fail = false
+	stderr.Reset()
+	if kept := retireDoneWorkflowCandidates([]beads.Bead{w.open}, opts, ops, "/work", &stderr); len(kept) != 0 {
+		t.Fatalf("candidate %s kept on retry (stderr=%q), want retired", w.open.ID, stderr.String())
+	}
+	assertPurgeRetired(t, mem, w.root.ID, w.open.ID)
+	assertFinishedOutcomeKept(t, mem, w.finished.ID)
+	assertFinishedOutcomeKept(t, mem, w.active.ID)
+}
