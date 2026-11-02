@@ -132,6 +132,19 @@ func requireLiveGateQuarantine(t *testing.T, fixture compactScriptFixture, out, 
 	return marker
 }
 
+// requireNotReached checks the run abort names exactly the selected databases
+// the run never reached.
+func requireNotReached(t *testing.T, out, step, notReached string) {
+	t.Helper()
+	want := "compact: db=beads live-database gate failed after " + step + " — aborting run; selected databases not reached: " + notReached
+	for _, line := range strings.Split(out, "\n") {
+		if line == want {
+			return
+		}
+	}
+	t.Fatalf("output missing run abort diagnostic %q:\n%s", want, out)
+}
+
 // AC-1: a data directory that disappears during a rewrite quarantines the
 // database and fails the run even though SQL still answers.
 func TestCompactScriptLiveGateQuarantinesVanishedDataDir(t *testing.T) {
@@ -263,6 +276,47 @@ func TestCompactScriptLiveGateQuarantinesUnservedDatabase(t *testing.T) {
 			}
 			requireFailedRun(t, err, out)
 			requireLiveGateQuarantine(t, fixture, out, "flatten")
+		})
+	}
+}
+
+// AC-3: a live-gate failure stops the whole run at once, with no further
+// statements or bookkeeping, and names the selected databases not reached.
+func TestCompactScriptLiveGateAbortsRunBeforeLaterDatabases(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		extraDBs   []string
+		onlyDBs    string
+		notReached string
+	}{
+		{name: "selected databases remain", extraDBs: []string{"mid", "zed"}, onlyDBs: "beads,zed", notReached: "zed"},
+		{name: "every database remains", extraDBs: []string{"mid", "zed"}, notReached: "mid zed"},
+		{name: "last database", notReached: "none"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			addCompactDatabases(t, fixture, tc.extraDBs...)
+			out, err := fixture.run(t, "success", liveGateEnv(
+				"GC_FAKE_DOLT_LIVE_FAULT=unserve",
+				"GC_DOLT_COMPACT_ONLY_DBS="+tc.onlyDBs,
+			)...)
+			requireFailedRun(t, err, out)
+			requireLiveGateQuarantine(t, fixture, out, "post-flatten full GC")
+			requireNotReached(t, out, "post-flatten full GC", tc.notReached)
+			after := beadsLogAfter(t, readCompactDoltLog(t, fixture), "DOLT_GC")
+			for _, entry := range doltLogEntries(strings.TrimSpace(after)) {
+				if !strings.HasPrefix(entry, "db=beads "+liveProbeQuery) {
+					t.Fatalf("statement after the live-gate failure: %q\n%s", entry, after)
+				}
+			}
+			if beadsReportedSuccess(out) {
+				t.Fatalf("live-gate abort must not report success:\n%s", out)
+			}
+			for _, forbidden := range []string{"database(s) failed compaction", "db=mid", "db=zed"} {
+				if strings.Contains(out, forbidden) {
+					t.Fatalf("live-gate abort reached %q:\n%s", forbidden, out)
+				}
+			}
 		})
 	}
 }

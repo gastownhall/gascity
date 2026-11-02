@@ -4435,7 +4435,8 @@ acquire_lock() {
 
 # compact_each_database PASS_FN FAILURE_LABEL
 #   Run PASS_FN on every discovered database. An ordinary failure is counted
-#   and the run goes on; a live-gate failure aborts the run at once. Returns 1
+#   and the run goes on; a live-gate failure aborts the run at once, naming
+#   the selected databases it never reached. Returns 1
 #   after printing the summary when any database failed.
 compact_each_database() {
   _ced_pass="$1"
@@ -4447,8 +4448,20 @@ compact_each_database() {
     _ced_rc=0
     "$_ced_pass" "$_ced_db" || _ced_rc=$?
     if [ "$live_gate_failed" = "1" ]; then
-      printf 'compact: db=%s live-database gate failed after %s — aborting run\n' \
-        "$_ced_db" "$live_gate_failed_step" >&2
+      # The loop's stdin still holds the databases this run never reached.
+      _ced_rest=""
+      while IFS= read -r _ced_next; do
+        [ -n "$_ced_next" ] || continue
+        if [ -n "$only_dbs" ]; then
+          case ",$only_dbs," in
+            *,"$_ced_next",*) ;;
+            *) continue ;;
+          esac
+        fi
+        _ced_rest="${_ced_rest:+$_ced_rest }$_ced_next"
+      done
+      printf 'compact: db=%s live-database gate failed after %s — aborting run; selected databases not reached: %s\n' \
+        "$_ced_db" "$live_gate_failed_step" "${_ced_rest:-none}" >&2
       exit 1
     fi
     if [ "$_ced_rc" -ne 0 ]; then
