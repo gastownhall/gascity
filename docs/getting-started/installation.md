@@ -60,11 +60,9 @@ The tested upgrade moves schema 53 to 66 and preserves existing beads. Older
 clients cannot use the migrated schema. Fresh workspaces initialize directly
 at the new schema.
 
-To install the exact release archive pinned by CI:
-
-```bash
-set -a && . ./deps.env && set +a && .github/scripts/install-bd-archive.sh "$BD_VERSION"
-```
+From a clone of the Gas City repository, contributors can install the exact
+bd archive CI pins with
+`set -a && . ./deps.env && set +a && .github/scripts/install-bd-archive.sh "$BD_VERSION"`.
 
 ## Homebrew (recommended)
 
@@ -72,13 +70,8 @@ set -a && . ./deps.env && set +a && .github/scripts/install-bd-archive.sh "$BD_V
 brew install gascity
 ```
 
-This taps the `gastownhall/gascity` formula, downloads the matching `gc`
-release asset, and installs all six runtime dependencies (tmux, jq, git, dolt,
-flock, beads).
-
-Once Gas City is accepted into homebrew-core, the normal install path will be
-`brew install gascity`; the `gastownhall/gascity` tap remains available for
-emergency updates.
+This installs the latest `gc` release and its runtime dependencies (beads,
+dolt, tmux, jq, and flock). Gas City is in homebrew-core, so no tap is needed.
 
 Verify the installation:
 
@@ -118,7 +111,6 @@ one-time database migration. Before upgrading a city you rely on, follow
 ```bash
 gc stop <city-path>                        # stop running city first
 brew uninstall gascity
-brew untap gastownhall/gascity             # remove the tap
 ```
 
 ## Direct download
@@ -135,8 +127,8 @@ Release tarballs are published for every tagged version. Supported platforms:
 ### Download and install
 
 ```bash
-# Set the version you want (check https://github.com/gastownhall/gascity/releases)
-VERSION=1.4.0
+# The latest release (or set a version from https://github.com/gastownhall/gascity/releases)
+VERSION=$(curl -fsSL https://api.github.com/repos/gastownhall/gascity/releases/latest | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
 
 # Detect platform
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -231,45 +223,15 @@ for a local experiment. Successful local signing also removes stale
 
 ### Contributor setup
 
-`make install` and `make build` produce the binary you run. To change Gas
-City itself, you test with [Bazel](https://bazel.build): CI checks every
-pull request with `bazel test`, and the `make` targets below run the same
-commands. Install [Bazelisk](https://github.com/bazelbuild/bazelisk), which
-reads the Bazel version the repo pins, then set up the dev toolchain and git
-hooks:
-
-```bash
-make setup
-echo 'build --config=fork-cache' >> .bazelrc.local   # read CI's build cache
-make check          # bazel test //...: unit tests, lint, vet, formatting, generated files
-```
-
-The `fork-cache` line points Bazel at the project's anonymous, read-only
-cache, so anything CI already built or tested is reused instead of rerun on
-your machine. Nothing you build is uploaded.
-
-| Change | Run |
-|---|---|
-| Any change | `make check` |
-| `gc` command behavior | `make test-acceptance` |
-| Runtime, orchestrator, or formula behavior | `make test-integration` |
-| Docs | `make check-docs` |
-| Added packages, files, or imports | `make bazel-sync`, then commit the result |
-
-Plain `go test ./...` still works for a human's quick check of one package
-(agents run tests only with `bazel test`), but it is not what CI runs and
-skips the lint, formatting, and generated-file checks. See
-[CONTRIBUTING.md](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
-for the full contributor workflow and the
-[Bazel quickstart](https://github.com/gastownhall/gascity/blob/main/engdocs/bazel-quickstart.md)
-for remote execution and troubleshooting.
+To change Gas City itself (tests, lint, docs preview), follow
+[CONTRIBUTING.md](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md).
 
 ## Verify your installation
 
 Regardless of install method, confirm everything is working:
 
 ```bash
-gc version          # should print the installed version and commit
+gc version          # prints the installed version, such as 1.5.1
 ```
 
 If that runs `git commit` instead of Gas City, your shell has a `gc` alias.
@@ -277,33 +239,10 @@ Use `command gc version` for this check and see
 [Troubleshooting](/getting-started/troubleshooting#oh-my-zsh-git-plugin-hides-gc)
 for the permanent fix.
 
-Then create your first city:
-
-```bash
-gc init ~/my-city
-cd ~/my-city
-```
-
-`gc init` registers the city with the supervisor, which then starts it. By the
-time the command returns, the city is running.
-See the [Quickstart](/getting-started/quickstart) for a complete walkthrough.
+Next, follow the [Quickstart](/getting-started/quickstart) to create your
+first city and send work through a formula.
 
 Gas City ships a JSONL archive that snapshots every bead database for
 disaster recovery. By default it runs in local-only mode and keeps commits
 on this host. To enable off-box backup, see
 [JSONL archive push failures](/getting-started/troubleshooting#jsonl-archive-push-failures).
-
-## Docs preview
-
-The docs site uses [Mintlify](https://mintlify.com). Preview locally from the
-repo root:
-
-```bash
-./mint.sh dev
-```
-
-Or run a link check without starting the server:
-
-```bash
-make check-docs
-```

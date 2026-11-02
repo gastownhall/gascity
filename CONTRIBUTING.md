@@ -1,7 +1,8 @@
 # Contributing to Gas City
 
-Gas City is experimental software, but the repo is now structured for external
-contributors. Before making changes, read:
+Gas City is open source under the MIT license and stewarded by
+[Gas City, Inc.](https://gascity.com) It is experimental software, but the repo
+is structured for external contributors. Before making changes, read:
 
 - [docs/index.mdx](docs/index.mdx)
 - [engdocs/contributors/index.md](engdocs/contributors/index.md)
@@ -215,7 +216,7 @@ When updating docs:
 
 ### Docs link conventions
 
-`docs/` is published to **[docs.gascityhall.com](https://docs.gascityhall.com)**
+`docs/` is published to **[docs.gascity.com](https://docs.gascity.com)**
 via Mintlify — it is **not** meant to be read directly on GitHub. The published
 site serves **route-based, extensionless URLs**, so internal page links must be
 written that way:

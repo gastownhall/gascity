@@ -12,7 +12,8 @@ Codex (`codex`), Gemini (`gemini`), Grok Build (`grok`), OpenCode (`opencode`),
 Groq (`groq`), and Cerebras (`cerebras`). Configure each with its token or API
 key so it can run — the more the merrier.
 
-Then install the Gas City CLI and put it on the PATH:
+Then install the Gas City CLI from Homebrew, which brings everything it needs
+with it:
 
 ```shell
 ~
@@ -21,15 +22,22 @@ $ brew install gascity
 
 ~
 $ gc version
-1.1.1
 ```
 
-> NOTE: the gascity installation is a great way to get the right dependencies in
-> place, but may not be enough to keep up with the changes we're making on the
-> way to 1.0. Best practice right now is to build your own `gc` binary from HEAD
-> on the `main` branch of [the gascity
-> repo](https://github.com/gastownhall/gascity) to get the latest and greatest
-> bits before running these tutorials.
+Gas City stores work in Dolt, which needs an author identity before a city can
+start. This copies your git identity into Dolt only where Dolt has none:
+
+```shell
+~
+$ dolt config --global --get user.name  || dolt config --global --add user.name  "$(git config --global user.name)"
+$ dolt config --global --get user.email || dolt config --global --add user.email "$(git config --global user.email)"
+```
+
+<Tip>
+If you followed the [Quickstart](/getting-started/quickstart), you have done
+all of this and already have `~/my-city`. Skip the `gc init` command below and
+continue from [Looking inside](#looking-inside).
+</Tip>
 
 New to the vocabulary? Read [How Gas City Works](/getting-started/how-gas-city-works) first — the
 canonical model for the six primitives (Agent, Bead, Formula, Rig, Pack, Event)
@@ -43,27 +51,12 @@ local settings the orchestrator needs to run multi-agent workflows on this
 machine. Inside it, a **pack** is the portable part — the definitions worth
 sharing with other cities. A city is a pack plus deployment details.
 
-Create one with `gc init`:
+Create one with `gc init`, naming the default `gascity` template and your
+coding agent:
 
 ```shell
-
 ~
-$ gc init ~/my-city
-Welcome to Gas City SDK!
-
-Choose a config template:
-  1. gascity   — planning & implementation skills pack (default)
-  2. minimal   — default coding agent
-  3. gastown   — multi-agent orchestration pack
-  4. custom    — empty workspace, configure it yourself
-Template [1]:
-
-Choose your coding agent:
-  1. Claude Code
-  2. Codex
-  3. Gemini CLI
-If you don't see your coding agent, configure it and restart the wizard.
-Agent: 1
+$ gc init ~/my-city --template gascity --default-provider claude
 [1/8] Creating runtime scaffold
 [2/8] Installing hooks (Claude Code)
 [3/8] Writing default prompts
@@ -82,20 +75,17 @@ NAME     PATH
 my-city  /Users/csells/my-city
 ```
 
-The agent menu lists only the coding agents the wizard finds configured on
-your machine — today it can probe Claude Code, Codex, Gemini CLI, and
-Antigravity. If exactly one is configured, the wizard selects it without
-asking.
+Use `--default-provider codex` (or `gemini`) for a different coding agent. Run
+in a terminal without flags, `gc init ~/my-city` instead asks you for the
+template and the agent.
 
-To skip the prompts, supply the provider explicitly:
+Gas City created the city directory, registered it, and started it. A new city
+takes a few minutes to finish setting up; until then, `gc status` can show
+agents as `unknown (partial status)`, which is normal.
 
-```shell
-~
-$ gc init ~/my-city --default-provider claude
-```
+## Looking inside
 
-Gas City created the city directory, registered it, and started it. Look
-inside:
+Look inside the city:
 
 ```shell
 ~
@@ -220,10 +210,9 @@ A named session shows `reserved-unmaterialized` until the orchestrator
 materializes it; once the mayor session is up, its state reads `awake` (or
 `active` — the two are equivalent).
 
-The `dolt.dog` pool is a background utility agent from the bundled `dolt` pack
-(pulled in transitively through the explicit `bd` import you saw in
-`pack.toml` — the `dolt.` prefix is the import binding it arrived through).
-It handles Dolt database housekeeping for the beads backend. `control-dispatcher` is platform
+The `bd.dog` pool is a background utility agent from the bundled `bd` pack you
+saw imported in `pack.toml` (the `bd.` prefix is the import binding it arrived
+through). It handles Dolt database housekeeping for the beads backend. `control-dispatcher` is platform
 infrastructure: the orchestrator uses it to advance formula workflows. You don't
 need to interact with either — ignore them for now.
 
@@ -237,9 +226,15 @@ registered city.
 </Note>
 
 In Gas City, a project directory registered with a city is called a "rig."
-Rigging a project's directory lets agents work in it.
+Rigging a project's directory lets agents work in it. A rig is a git
+repository; make a small one to work with:
 
 ```shell
+~
+$ mkdir -p ~/my-project && cd ~/my-project
+$ git init && git commit --allow-empty -m "initial commit"
+$ cd ~/my-city
+
 ~/my-city
 $ gc rig add ~/my-project
 Adding rig 'my-project'...

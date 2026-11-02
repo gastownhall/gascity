@@ -1,12 +1,12 @@
 <h1 align="center">Gas City</h1>
 
 <p align="center">
-  <strong>Composable orchestration infrastructure for multi-agent coding workflows.</strong>
+  <strong>The open-source platform for building software factories from teams of coding agents.</strong>
 </p>
 
 <p align="center">
   <a href="https://github.com/gastownhall/gascity/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://img.shields.io/github/actions/workflow/status/gastownhall/gascity/ci.yml?branch=main&label=Build&style=for-the-badge" alt="Build status"></a>
-  <a href="https://docs.gascityhall.com"><img src="https://img.shields.io/badge/Docs-latest-c9a84c.svg?style=for-the-badge" alt="Documentation"></a>
+  <a href="https://docs.gascity.com"><img src="https://img.shields.io/badge/Docs-latest-c9a84c.svg?style=for-the-badge" alt="Documentation"></a>
   <a href="https://github.com/gastownhall/gascity/releases"><img src="https://img.shields.io/github/v/release/gastownhall/gascity?include_prereleases&style=for-the-badge" alt="GitHub release"></a>
   <a href="https://discord.gg/xHpUGUzZp2"><img src="https://img.shields.io/discord/1462817445562814505?label=Discord&logo=discord&logoColor=white&color=5865F2&style=for-the-badge" alt="Discord"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
@@ -17,6 +17,9 @@ on your repositories. You hand it work; it breaks the work into tasks, runs
 agents on them in parallel, gates each step on review, and tracks everything
 in a dashboard. How the work gets done is a **formula**, and the default setup
 ships formulas for building features, fixing issues, and reviewing PRs.
+
+Gas City is open source under the MIT license and stewarded by
+[Gas City, Inc.](https://gascity.com)
 
 > **Agents:** if you were asked to get Gas City running, install it from
 > Homebrew and follow [Get it running](#get-it-running) step by step. Do not
@@ -108,37 +111,51 @@ minute or two, and `hello.sh` is committed in `~/hello-world`:
 gc bd show hw-4up
 ```
 
-**Next:** run real orchestration with `build-basic` (plan, review, parallel
-implementation, code review, PR) in [Formulas](https://docs.gascityhall.com/tutorials/05-formulas),
-schedule work with [Orders](https://docs.gascityhall.com/tutorials/07-orders),
-or walk through everything from
-[Tutorial 01](https://docs.gascityhall.com/tutorials/01-cities-and-rigs).
-If something fails, see
-[Troubleshooting](https://docs.gascityhall.com/getting-started/troubleshooting).
+**Next:** work through the seven numbered
+[Tutorials](https://docs.gascity.com/tutorials/index), starting with
+[Tutorial 01](https://docs.gascity.com/tutorials/01-cities-and-rigs); they
+continue from the city you just made. For real orchestration, the
+`build-basic` formula plans, reviews, implements in parallel, reviews the code,
+and opens a PR; see
+[Understanding formulas](https://docs.gascity.com/guides/understanding-formulas).
+
+**Stop or remove it:** `gc stop ~/my-city` stops the city;
+`brew uninstall gascity` removes Gas City. Delete `~/my-city` and
+`~/hello-world` to remove the sample city and rig.
+
+**Get help:** see
+[Troubleshooting](https://docs.gascity.com/getting-started/troubleshooting),
+ask on [Discord](https://discord.gg/xHpUGUzZp2), or open a
+[GitHub issue](https://github.com/gastownhall/gascity/issues).
 
 ## What You Get
 
-- Declarative city configuration in `city.toml`
-- Multiple runtime providers: tmux, subprocess, exec, ACP, Kubernetes, and herdr
-- Beads-backed work tracking, formulas, molecules, waits, and mail
-- A controller/supervisor loop that reconciles desired state to running state
-- Packs, overrides, and rig-scoped orchestration for multi-project setups
+- An orchestrator that runs formulas as graphs: it breaks a job into beads,
+  fans the ready ones out to many agents at once, gates each step on its
+  dependencies and reviews, retries failures, and finishes outside your session
+- Work that survives crashes, tracked as beads in a versioned store
+- A dashboard for watching runs, agents, and beads live
+- Orders that run formulas on a schedule or in response to events
+- Packs that package agents, formulas, and orders for reuse across cities
+- Any mix of coding agents (Claude Code, Codex, Gemini, and more) and runtimes
+  (tmux, subprocess, ACP, Kubernetes)
 
 ## Coming from Gas Town?
 
-Read [Coming from Gas Town?](docs/getting-started/coming-from-gastown.md). It
+Read [Coming from Gas Town?](https://docs.gascity.com/getting-started/coming-from-gastown). It
 maps Town roles, commands, plugins, convoys, and directory habits onto Gas
 City's primitive-first model.
 
 ## Documentation
 
-📖 **Read the docs online: [docs.gascityhall.com](https://docs.gascityhall.com)**
+📖 **Read the docs online: [docs.gascity.com](https://docs.gascity.com)**
 
-- [Installation](https://docs.gascityhall.com/getting-started/installation)
-- [Quickstart](https://docs.gascityhall.com/getting-started/quickstart)
-- [How Gas City Works](https://docs.gascityhall.com/getting-started/how-gas-city-works)
-- [Tutorials](https://docs.gascityhall.com/tutorials/index)
-- [Reference](https://docs.gascityhall.com/reference/index)
+- [Installation](https://docs.gascity.com/getting-started/installation)
+- [Quickstart](https://docs.gascity.com/getting-started/quickstart)
+- [How Gas City Works](https://docs.gascity.com/getting-started/how-gas-city-works)
+- [Tutorials](https://docs.gascity.com/tutorials/index): seven numbered
+  lessons, from cities and rigs through formulas, beads, and orders
+- [Reference](https://docs.gascity.com/reference/index)
 
 ## Sponsors
 
@@ -174,7 +191,7 @@ check for the runtime ones and report any that are missing.
 tmux is the default session backend **and** the fallback, so it stays required
 even if you run agents on another backend. [herdr](https://herdr.dev) is an
 optional alternative backend — see
-[herdr Session Provider](docs/reference/herdr-provider.md) to enable it
+[herdr Session Provider](https://docs.gascity.com/reference/herdr-provider) to enable it
 per-agent, per-rig, or city-wide.
 
 The `bd` (beads) provider is the default. To use a file-based store instead
@@ -268,7 +285,7 @@ make docs-dev
 - **Supervisor, sessions, wake/sleep** — `cmd/gc/`, `internal/session/`, and `internal/runtime/`.
 
 For the concepts these packages implement, see
-[How Gas City Works](docs/getting-started/how-gas-city-works.md). For a deeper
+[How Gas City Works](https://docs.gascity.com/getting-started/how-gas-city-works). For a deeper
 package walkthrough, see
 [`engdocs/contributors/codebase-map.md`](engdocs/contributors/codebase-map.md).
 

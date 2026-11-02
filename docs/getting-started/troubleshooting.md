@@ -4,10 +4,40 @@ description: Common installation and setup issues and how to fix them.
 ---
 
 <Note>
-If `gc start` fails after install, use the
+If `gc init` or `gc start` fails after install, use the
 [`gc start` failure walkthrough](/troubleshooting/gc-start-walkthrough) to
 match the final `FATAL:` line to the likely cause and resolution.
 </Note>
+
+## Startup is blocked by Dolt author identity
+
+`gc init` and `gc start` stop with "startup is blocked by Dolt author identity"
+when Dolt has no author name or email. Copy your git identity into Dolt, then
+run `gc start` in the city:
+
+```bash
+dolt config --global --get user.name  || dolt config --global --add user.name  "$(git config --global user.name)"
+dolt config --global --get user.email || dolt config --global --add user.email "$(git config --global user.email)"
+gc start
+```
+
+If git has no identity either, set one first with
+`git config --global user.name "Your Name"` and
+`git config --global user.email "you@example.com"`.
+
+## A new city is still setting up
+
+A new city takes a few minutes to finish setting up after `gc init`. Until it
+does, these signals are normal and need no action:
+
+- `gc init`'s output can end at `Adopting sessions...`.
+- `gc status` can list agents as `unknown (partial status)` and print
+  `bead cache unavailable` or `session snapshot timed out`.
+- `gc doctor` can report the store as not running.
+- A dashboard run page can say "run projection is warming"; refresh it after a
+  minute.
+
+If any of these persist after ten minutes, run `gc doctor`.
 
 ## Run the Built-in Doctor
 
