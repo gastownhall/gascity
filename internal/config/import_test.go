@@ -2992,3 +2992,46 @@ exit 0
 		}
 	})
 }
+
+// TestDefaultRunRepoCacheGitFailureKeepsStderr covers the runner's failure
+// contract: a nonzero git exit returns empty output and an error that names
+// the command, retains git's stderr, and wraps the execution failure; a
+// process-start failure stays an error even with nothing on stderr.
+func TestDefaultRunRepoCacheGitFailureKeepsStderr(t *testing.T) {
+	t.Run("nonzero exit keeps stderr and wraps the execution failure", func(t *testing.T) {
+		t.Setenv("LC_ALL", "C")
+		dir := t.TempDir()
+		seedRepoCacheFixture(t, dir)
+		out, err := defaultRunRepoCacheGit(dir, "rev-parse", "no-such-ref")
+		if out != "" {
+			t.Errorf("output = %q, want empty on failure", out)
+		}
+		if err == nil {
+			t.Fatal("expected an error for a nonzero exit")
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "rev-parse no-such-ref") {
+			t.Errorf("error missing command context: %s", msg)
+		}
+		if !strings.Contains(msg, "fatal") || !strings.Contains(msg, "no-such-ref") {
+			t.Errorf("error missing stderr text: %s", msg)
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Errorf("error = %T, want a wrapped exec.ExitError", err)
+		}
+	})
+
+	t.Run("process start failure remains an error", func(t *testing.T) {
+		// A PATH without git produces no stderr at all; the start failure
+		// itself must still surface.
+		t.Setenv("PATH", t.TempDir())
+		_, err := defaultRunRepoCacheGit(t.TempDir(), "rev-parse", "HEAD")
+		if err == nil {
+			t.Fatal("expected an error when git cannot start")
+		}
+		if !errors.Is(err, exec.ErrNotFound) {
+			t.Errorf("error = %v, want exec.ErrNotFound", err)
+		}
+	})
+}
