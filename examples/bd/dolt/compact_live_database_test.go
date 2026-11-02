@@ -438,3 +438,74 @@ func TestCompactScriptLiveGateCoversEveryGCEntryPath(t *testing.T) {
 		})
 	}
 }
+
+// TestCompactScriptDryRunAndSkipIssueNoLiveProbe asserts that the live gate
+// stays out of every pass that never reaches rewrite preparation: a dry run or
+// a pre-rewrite skip issues no served-HEAD probe, writes no quarantine marker,
+// and keeps its existing outcome even when the database would fail the probe.
+func TestCompactScriptDryRunAndSkipIssueNoLiveProbe(t *testing.T) {
+	tests := []struct {
+		name      string
+		mode      string
+		args      []string
+		env       []string
+		pendingGC bool
+		want      string
+	}{
+		{name: "dry-run flatten", mode: "success", env: []string{"GC_DOLT_COMPACT_DRY_RUN=1"}, want: "— dry-run (would flatten)"},
+		{name: "below threshold skip", mode: "below_threshold", want: "below_threshold=500 — skip"},
+		{name: "only-db skip", mode: "success", args: []string{"--only-db", "zed"}, want: "db=beads not in GC_DOLT_COMPACT_ONLY_DBS — skip"},
+		{name: "dry-run gc-only", mode: "below_threshold", args: []string{"--gc-only", "--dry-run"}, want: "db=beads — dry-run (would reclaim via DOLT_GC --full)"},
+		{name: "dry-run bare GC", mode: "below_threshold", env: []string{"GC_DOLT_COMPACT_BARE_GC=1", "GC_DOLT_COMPACT_DRY_RUN=1"}, want: "db=beads — dry-run (would bare GC)"},
+		{name: "dry-run shared-history bare GC", mode: "remote_success", env: []string{"GC_DOLT_COMPACT_DRY_RUN=1"}, want: "db=beads — dry-run (would bare GC)"},
+		{name: "dry-run pending-GC retry", mode: "below_threshold", env: []string{"GC_DOLT_COMPACT_DRY_RUN=1"}, pendingGC: true, want: "db=beads pending_gc=present — dry-run (would retry DOLT_GC --full)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			addCompactDatabase(t, fixture, "zed")
+			var pendingMarker string
+			if tt.pendingGC {
+				pendingMarker = writeCompactPendingGCMarker(t, fixture, "beads")
+			}
+			unserved := filepath.Join(fixture.binDir, "live-unserved")
+			if err := os.MkdirAll(unserved, 0o755); err != nil {
+				t.Fatalf("mkdir live-unserved: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(unserved, "beads"), []byte("forever\n"), 0o644); err != nil {
+				t.Fatalf("write live-unserved state: %v", err)
+			}
+
+			env := append([]string{"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", compactLiveFastProbe}, tt.env...)
+			out, err := fixture.runWithArgs(t, tt.mode, tt.args, env...)
+			if err != nil {
+				t.Fatalf("pass must keep its existing successful outcome: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, tt.want) {
+				t.Fatalf("output missing existing outcome %q:\n%s", tt.want, out)
+			}
+			doltLog, err := os.ReadFile(fixture.doltLog)
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatalf("read dolt log: %v", err)
+			}
+			for _, line := range strings.Split(string(doltLog), "\n") {
+				if strings.HasPrefix(line, "db=beads ") && strings.Contains(line, "HASHOF('HEAD'))") {
+					t.Fatalf("pass issued a live probe for beads: %s\n%s", line, out)
+				}
+			}
+			if strings.Contains(out, "live probe") || strings.Contains(out, "live-gate") || strings.Contains(out, compactLiveReason) {
+				t.Fatalf("pass reported live-gate activity:\n%s", out)
+			}
+			for _, db := range []string{"beads", "zed"} {
+				if _, statErr := os.Stat(compactQuarantineMarkerPath(fixture, db)); !os.IsNotExist(statErr) {
+					t.Fatalf("pass must not write a quarantine marker for %s (stat err=%v)\n%s", db, statErr, out)
+				}
+			}
+			if pendingMarker != "" {
+				if _, statErr := os.Stat(pendingMarker); statErr != nil {
+					t.Fatalf("dry run must keep the pending-GC marker: %v\n%s", statErr, out)
+				}
+			}
+		})
+	}
+}
