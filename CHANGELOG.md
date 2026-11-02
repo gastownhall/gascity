@@ -46,7 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     builds such a map; its fix ships in gastown 0.1.13, which this build
     bundles (see Changed). `gc doctor --fix` (next note) moves a city on an
     earlier bundled pin to it; a city that pins gastown itself must move to
-    0.1.13 (`gc pack update gastown`) before it runs this build. The API
+    0.1.13 (`gc import upgrade gastown`) before it runs this build. The API
     route still leaves out `command`, `session_key` and the `resume_*`
     fields; a script that reads them must set `GC_NO_API=1`. In the text
     table, the REASON column on the API route shows the same wake reasons
