@@ -154,7 +154,7 @@ func TestRouteNotificationDispatchToIdleNamedClaim(t *testing.T) {
 				return
 			}
 			var stdout, stderr bytes.Buffer
-			code := deliverSessionNudgeWithWorker(target, nudges.Store, routeCLIACP{provider}, r.URL.Query().Get("message"), nudgeDeliveryWaitIdle, true, &stdout, &stderr)
+			code := deliverSessionNudgeKeyed(target, nudges.Store, routeCLIACP{provider}, r.URL.Query().Get("message"), nudgeDeliveryWaitIdle, "", true, &stdout, &stderr)
 			if code != 0 {
 				http.Error(w, stderr.String(), 500)
 				return

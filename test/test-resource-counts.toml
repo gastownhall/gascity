@@ -2023,6 +2023,12 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "internal/bootstrap/packs/core/nudge_on_route_integration_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "internal/cliauth/client_test.go"
 resource = "http_test_server"
 calls = 13
