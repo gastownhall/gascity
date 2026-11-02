@@ -4,14 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/spf13/cobra"
 )
 
@@ -249,7 +246,7 @@ func renderBeadsListFromAPI(bs []beads.Bead, cacheAgeS float64, format string, f
 // (convoyStoreViewsForRead), so reads keep working while a city's storage
 // configuration is mid-repair.
 func doBeadsListFallback(cityPath, format string, filters beadFilters, stdout, stderr io.Writer) int {
-	stores, code := openBeadsListStoresAt(cityPath, stderr)
+	stores, code := openEveryStoreAt(cityPath, stderr, "gc beads list", "bead", false)
 	if stores == nil {
 		return code
 	}
@@ -266,37 +263,6 @@ func doBeadsListFallback(cityPath, format string, filters beadFilters, stdout, s
 		writeBeadTable(all, stdout, true)
 	}
 	return 0
-}
-
-// openBeadsListStoresAt opens every bead store gc beads list reads for a
-// pre-resolved cityPath. Unlike openAllConvoyStoresAt, which skips a store it
-// cannot open, any open failure here fails the listing: a list that silently
-// left out a rig's beads would read as the city's complete answer, while the
-// supervisor reports that same store as a partial answer the API route refuses.
-// gc beads show keeps openAllConvoyStoresAt, so one broken rig does not stop
-// showing a bead held by a healthy store.
-func openBeadsListStoresAt(cityPath string, stderr io.Writer) ([]convoyStoreView, int) {
-	const cmdName = "gc beads list"
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
-		return nil, 1
-	}
-	emitLoadCityConfigWarnings(stderr, prov)
-	candidates := convoyStoreCandidates(cfg, cityPath, "") // residency:allow — openAllConvoyStoresAt's own enumeration, re-walked so a store that cannot open fails gc beads list instead of vanishing from it (the supervisor reports the same store as a partial answer)
-	failed := 0
-	stores := openConvoyStoreDirs(candidates, openStoreForCity(cityPath), func(dir string, err error) {
-		fmt.Fprintf(stderr, "%s: opening the bead store at %s: %v\n", cmdName, dir, err) //nolint:errcheck // best-effort stderr
-		failed++
-	})
-	if failed > 0 || len(stores) == 0 {
-		if len(stores) == 0 && failed == 0 {
-			fmt.Fprintf(stderr, "%s: no bead stores available\n", cmdName) //nolint:errcheck // best-effort stderr
-		}
-		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
-		return nil, 1
-	}
-	return stores, 0
 }
 
 // cmdBeadsShow is the CLI entry point for "gc beads show". The bead id and

@@ -86,12 +86,14 @@ func newScratchServer(t *testing.T, kind string) string {
 	return socket
 }
 
-// captureProvider is a tmux provider on socket arming with companion.
+// captureProvider is a tmux provider on socket arming with companion, under
+// the switch on.
 func captureProvider(t *testing.T, socket, companion string) *Provider {
 	t.Helper()
 	cfg := DefaultConfig()
 	cfg.SocketName = socket
 	cfg.ProgramStatusBin = companion
+	cfg.ProgramStatus = runtime.ProgramStatusOn
 	cfg.NudgeIdleTimeout = 250 * time.Millisecond
 	return NewProviderWithConfig(cfg)
 }

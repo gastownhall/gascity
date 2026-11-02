@@ -29,10 +29,13 @@ type sessionResponse struct {
 	Reason      string `json:"reason,omitempty"`
 	Title       string `json:"title"`
 	Alias       string `json:"alias,omitempty"`
+	AgentName   string `json:"agent_name" required:"false" doc:"The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Sent on every session by Gas City 1.6 and later servers, empty when the session records none; older servers omit it."`
 	Provider    string `json:"provider"`
+	Transport   string `json:"transport,omitempty" doc:"How gc drives the session runtime, for example tmux or acp. Empty when unknown."`
 	DisplayName string `json:"display_name,omitempty"`
 	SessionName string `json:"session_name"`
 	WorkDir     string `json:"work_dir,omitempty"`
+	WorkerDir   string `json:"worker_dir,omitempty" doc:"The agent process's canonical working directory (a per-bead worktree when it has one), which work_dir may not be."`
 	CreatedAt   string `json:"created_at"`
 	LastActive  string `json:"last_active,omitempty"`
 	// LastNudgeDeliveredAt is the most recent successful nudge delivery
@@ -75,6 +78,10 @@ type sessionResponse struct {
 	// ProgramStatus is the session program's own status report; absent
 	// means unknown, never idle.
 	ProgramStatus *SessionProgramStatus `json:"program_status,omitempty" doc:"The session program's own status report (OSC 7501), present while the city's program_status switch is shadow or on and the reading is valid. Absent means the status is unknown, never idle."`
+
+	// WakeReasons are the reasons the controller keeps an open session awake,
+	// set only when the list request asks for them (they cost runtime probes).
+	WakeReasons []string `json:"wake_reasons,omitempty" doc:"Why the controller keeps this open session awake (for example session, config, create, attached, keep-warm, wait, pending, pin), as gc session list's REASON column shows them when no lifecycle reason applies. Sent only on GET /sessions?wake_reasons=true, by servers that compute them."`
 
 	// SubmissionCapabilities describes which semantic submit intents the
 	// session runtime can honor.
@@ -152,10 +159,13 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 		State:       state,
 		Title:       info.Title,
 		Alias:       info.Alias,
+		AgentName:   info.AgentName,
 		Provider:    provider,
+		Transport:   info.Transport,
 		DisplayName: displayName,
 		SessionName: info.SessionName,
 		WorkDir:     info.WorkDir,
+		WorkerDir:   strings.TrimSpace(info.WorkerDir),
 		CreatedAt:   info.CreatedAt.Format(time.RFC3339),
 		Attached:    info.Attached,
 		Rig:         rig,

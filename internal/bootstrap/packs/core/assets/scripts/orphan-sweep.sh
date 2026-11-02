@@ -217,9 +217,10 @@ fi
 # it cannot see bead-only fields such as configured_named_identity or
 # alias_history unless the CLI starts exporting them.
 #
-# The default CLI path already omits closed sessions. The closed/state guards
-# below keep explicit or future session-list producers from making terminal
-# rows live while preserving any non-closed row the CLI reports.
+# The default CLI path already omits closed sessions. On every route, a row
+# from --state closed or --state all carries state "closed" and closed true;
+# the closed/state guards below keep such rows from counting as live while
+# preserving any non-closed row the CLI reports.
 #
 # This shell sweep ran without a live-session guard before ga-nvx: an ephemeral
 # assignee whose template-stripped form did not match any agent name was

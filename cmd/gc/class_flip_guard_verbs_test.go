@@ -363,8 +363,11 @@ func TestGcBdImportSkipInfraWritesAWorkOnlyCopy(t *testing.T) {
 		}
 		// What bd reads, resolved as bd resolves the forwarded argv.
 		copyPath := bdReadsFile(t, bdflags.InventoryByName("bd-1.3.2"), scope, g.args, "", "")
-		if !strings.HasPrefix(filepath.Base(copyPath), "gc-bd-import-work-") {
+		if !strings.HasPrefix(filepath.Base(filepath.Dir(copyPath)), "gc-bd-judged-") {
 			t.Fatalf("%v forwarded %v: bd reads %s, want the work-only copy", argv, g.args, copyPath)
+		}
+		if filepath.Base(copyPath) != "a.jsonl" {
+			t.Fatalf("%v: the work-only copy %q does not keep the archive's name", argv, copyPath)
 		}
 		data, err := os.ReadFile(copyPath)
 		if err != nil {
@@ -375,8 +378,8 @@ func TestGcBdImportSkipInfraWritesAWorkOnlyCopy(t *testing.T) {
 			t.Fatalf("%v: work-only copy = %q", argv, got)
 		}
 		g.cleanup()
-		if _, err := os.Stat(copyPath); !os.IsNotExist(err) {
-			t.Errorf("%v: the work-only copy outlived the command", argv)
+		if _, err := os.Stat(filepath.Dir(copyPath)); !os.IsNotExist(err) {
+			t.Errorf("%v: the work-only copy's directory outlived the command", argv)
 		}
 	}
 

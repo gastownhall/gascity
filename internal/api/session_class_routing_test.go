@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -176,7 +177,7 @@ func TestExtmsgNotifyMembersMaterializesIntoSessionsClass(t *testing.T) {
 	srv := New(fs)
 	t.Cleanup(srv.waitForBackground)
 
-	services := extmsg.NewServices(fs.cityBeadStore)
+	services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
 	fs.extmsgSvc = &services
 
 	ref := extmsg.ConversationRef{

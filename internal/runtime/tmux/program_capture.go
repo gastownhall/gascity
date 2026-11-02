@@ -33,7 +33,8 @@ import (
 // with the shell tmux would have run it with.
 //
 // Nothing is armed for an undeclared session, which is every session while
-// the [session] program_status switch is off. Its create keeps today's tmux
+// the [session] program_status switch is off, nor for any session while this
+// Tmux's live switch (SetProgramStatusMode) is off, whatever its arm declares. Its create keeps today's tmux
 // command line byte for byte. Its respawn also removes the capture an armed
 // incarnation left on the pane (see Tmux.respawnPaneWithWorkDir); while the
 // switch is off only a capture bound to the pane is removed, so a pane never
@@ -117,13 +118,16 @@ type companionVerdict struct {
 }
 
 // planCapture returns the arm plan for a session declaring arm, or nil when
-// arm declares no capture or the capability gate fails (logged once per
-// cause). A relay-declared arm whose companion does not run gc's relay
-// protocol is planned without the relay (logged once per cause): the program
-// starts as it would unarmed, and only its capture is armed. It never fails
-// the session.
+// arm declares no capture, this Tmux's live switch is off, or the capability
+// gate fails (logged once per cause). The live switch (programStatusMode)
+// decides, not the switch arm was derived under: an arm resolved from config
+// read before the switch went off would otherwise keep wrapping new starts in
+// the relay and tapping them until every cached resolution caught up. A
+// relay-declared arm whose companion does not run gc's relay protocol is
+// planned without the relay (logged once per cause): the program starts as it
+// would unarmed, and only its capture is armed. It never fails the session.
 func (t *Tmux) planCapture(arm runtime.ProgramStatusArm) *capturePlan {
-	if !arm.Capture {
+	if !arm.Capture || t.programStatusMode() == runtime.ProgramStatusOff {
 		return nil
 	}
 	if arm.App != "" && !programstatus.ValidApp(arm.App) {
