@@ -49,7 +49,10 @@ when the context ends. Take the bound from the caller's own context.
   (`internal/runtime/bounded_call.go`); `ObserveBounded`, `ObserveShared`
   and `ErrObservationOutstanding` forward to them, so packages below worker
   (`internal/session`) bound their waits with the same latch. Keys are one
-  process-wide space, so every caller namespaces its keys.
+  process-wide space: `internal/session` bounds the pre-start orphan scan
+  under the `orphan-scan` namespace (`orphanScanKey`: the normalized city
+  path and the session ID), so a wedged scan holds one goroutine per city
+  and session however many Managers retry it.
 - The key names what is observed, one session in one city, within a caller
   namespace. Every caller in a namespace must derive the key the same way, or
   the one-in-flight limit no longer holds. `cmd/gc` has two namespaces, so a
