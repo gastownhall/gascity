@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -18,12 +19,12 @@ import (
 // newTestProvider is the stateless provider over one store serving both the
 // messaging and the sessions class, as a single-store city's store does.
 func newTestProvider(store beads.Store) *Provider {
-	return NewWithStores(beads.MailStore{Store: store}, beads.SessionStore{Store: store})
+	return NewWithStores(beadstest.Mail(store), beadstest.Sessions(store))
 }
 
 // newTestCachedProvider is newTestProvider with the session enumeration cache.
 func newTestCachedProvider(store beads.Store) *Provider {
-	return NewCachedWithStores(beads.MailStore{Store: store}, beads.SessionStore{Store: store})
+	return NewCachedWithStores(beadstest.Mail(store), beadstest.Sessions(store))
 }
 
 // noListScanStore errors when List is called without a filter, proving that
@@ -128,7 +129,7 @@ func TestProviderWithSessionDirectoryKeepsMessageRowsInMessaging(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := NewWithSessionDirectory(beads.MailStore{Store: messaging}, session.NewStore(beads.SessionStore{Store: sessions}))
+	p := NewWithSessionDirectory(beadstest.Mail(messaging), session.NewStore(beadstest.Sessions(sessions)))
 	message, err := p.Send("split-sender", sessionBead.ID, "subject", "body")
 	if err != nil {
 		t.Fatalf("Send: %v", err)

@@ -560,10 +560,52 @@ func TestLiveForSeesThroughClassHandles(t *testing.T) {
 		"a handle over a cache":       {GraphStore{cache}, liveStoreReader{store: cache}},
 		"nested handles over a cache": {MailStore{OrdersStore{cache}}, liveStoreReader{store: cache}},
 		"a plain store":               {mem, logicalLiveStoreReader{store: mem}},
-		"a handle over a plain store": {MailStore{mem}, logicalLiveStoreReader{store: MailStore{mem}}},
+		"a handle over a plain store": {MailStore{mem}, logicalLiveStoreReader{store: mem}},
 	} {
 		if got := LiveFor(tc.s); got != tc.want {
 			t.Errorf("%s: LiveFor = %#v, want %#v", name, got, tc.want)
+		}
+	}
+}
+
+// exactBatchShapedStore is a store with its own exact batch read and no
+// Handles: the shape of a BdStore, a ProxiedStore and cmd/gc's emitting class
+// store. found marks which store answered.
+type exactBatchShapedStore struct {
+	*MemStore
+	found string
+}
+
+func (s *exactBatchShapedStore) GetExactBatch([]string) (map[string]Bead, []string, error) {
+	return map[string]Bead{s.found: {}}, nil, nil
+}
+
+// TestLiveForKeepsTheExactBatchRead: through a handle, LiveFor's logical
+// reader wraps the store below it, so GetExactBatch reaches that store's own
+// batch read exactly as HandlesFor(raw).Live does (beads.GetMany relies on
+// it), rather than answering ErrExactBatchGetUnsupported from the handle.
+func TestLiveForKeepsTheExactBatchRead(t *testing.T) {
+	for _, shape := range []string{"BdStore", "ProxiedStore", "emitting class store"} {
+		raw := &exactBatchShapedStore{MemStore: NewMemStore(), found: shape}
+		for name, s := range map[string]Store{
+			"the store":      raw,
+			"a handle":       SessionStore{raw},
+			"nested handles": MailStore{SessionStore{raw}},
+		} {
+			for reader, live := range map[string]LiveReader{"LiveFor": LiveFor(s), "HandlesFor(raw)": HandlesFor(raw).Live} {
+				getter, ok := live.(ExactBatchGetter)
+				if !ok {
+					t.Fatalf("%s %s: %s reader %T has no GetExactBatch", shape, name, reader, live)
+				}
+				found, _, err := getter.GetExactBatch([]string{"x"})
+				if err != nil {
+					t.Errorf("%s %s: %s GetExactBatch: %v", shape, name, reader, err)
+					continue
+				}
+				if _, ok := found[shape]; !ok {
+					t.Errorf("%s %s: %s GetExactBatch did not reach the store's own batch read: %v", shape, name, reader, found)
+				}
+			}
 		}
 	}
 }

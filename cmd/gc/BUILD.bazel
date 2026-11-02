@@ -1580,6 +1580,7 @@ go_test(
         "execution_stalled_convergence_test.go",
         "explicit_restart_signal_test.go",
         "extmsg_binding_reaper_test.go",
+        "extmsg_reaper_split_test.go",
         "extmsg_services_wiring_test.go",
         "fast_loop_helpers_env_test.go",
         "fast_loop_helpers_test.go",

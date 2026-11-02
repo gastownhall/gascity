@@ -19,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -5744,5 +5745,5 @@ func TestCmdMailSendAllFlagBodyWinsOverPositional(t *testing.T) {
 // both the messaging and the sessions class, as a single-store city's store
 // does.
 func newTestBeadMail(store beads.Store) *beadmail.Provider {
-	return beadmail.NewWithStores(beads.MailStore{Store: store}, beads.SessionStore{Store: store})
+	return beadmail.NewWithStores(beadstest.Mail(store), beadstest.Sessions(store))
 }

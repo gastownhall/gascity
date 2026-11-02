@@ -891,16 +891,16 @@ type CompletionBackstop struct {
 	VisitStamped bool
 	// sweepVisitsStamped latches VisitStamped for the life of one sweep.
 	sweepVisitsStamped bool
-	// sweepStores latches the store fan, in order, at sweep start. The caller
-	// re-resolves its store set every chunk, and the
-	// cursor is an INDEX into it: if any position's store changes mid-sweep — a
-	// store added, removed, replaced, or reordered, even when the total COUNT is
-	// unchanged (completionReconcileInputs sorts the rig tail, so a rig add+remove
+	// sweepStores latches a copy of the store fan, in order, at sweep start; a
+	// copy, because the caller may reuse its slice. The caller re-resolves its
+	// store set every chunk, and the cursor is an INDEX into it: if any
+	// position's store changes mid-sweep — a store added, removed, replaced, or
+	// reordered, even when the total COUNT is unchanged
+	// (completionReconcileInputs sorts the rig tail, so a rig add+remove
 	// reorders it at equal length) — the held roots no longer correspond to the
 	// store at the cursor, so the sweep restarts rather than reconciling one
 	// store's roots against another store. A length-only latch missed the
-	// equal-length reorder; see sameStoreFan. It is a copy: the caller may reuse
-	// its slice.
+	// equal-length reorder; sameStoreFan compares the fans.
 	sweepStores []beads.GraphStore
 	// index is this sweep's idempotency record, loaded once per SWEEP rather
 	// than once per chunk. Re-reading the whole journal per chunk would make the
@@ -998,7 +998,7 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 // re-derives the completion record — nothing feeds this index between sweeps, so
 // a warm one would only know the facts it emitted itself and would re-emit
 // everything the delta lane or the close path recorded — and latches the sweep's
-// VisitStamped choice and store-fan signature. Mid-sweep, a changed store fan (a
+// VisitStamped choice and a copy of its store fan. Mid-sweep, a changed store fan (a
 // store added, removed, replaced, or reordered, even at unchanged length) means
 // the cursor's store index no longer names the store its held roots came from, so
 // the sweep restarts against the current fan.

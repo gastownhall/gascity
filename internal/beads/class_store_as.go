@@ -207,17 +207,18 @@ func SameStore(a, b Store) (same bool) {
 	return a == b
 }
 
-// LiveFor is HandlesFor(s).Live as HandlesFor answers on the store below s's
-// class layers: a store with its own Handles (a CachingStore, a policy store)
-// answers with its live reader, which a class handle would otherwise hide
-// behind the logical wrapper, and any other store is read through the logical
-// wrapper over s, which forwards to that store. s must be a store: a zero
-// handle answers a reader whose reads panic, as HandlesFor(nil) does.
+// LiveFor is HandlesFor(raw).Live for the store raw below s's class layers: a
+// store with its own Handles (a CachingStore, a policy store) answers with its
+// live reader, which a class handle would otherwise hide behind the logical
+// wrapper, and any other store is read through the logical wrapper over raw
+// itself, so the wrapper's optional reads (GetExactBatch) find raw's
+// capabilities rather than the handle's. s must be a store: a zero handle
+// answers a reader whose reads panic, as HandlesFor(nil) does.
 func LiveFor(s Store) LiveReader {
 	if p, ok := As[interface{ Handles() StoreHandles }](s); ok {
 		return p.Handles().Live
 	}
-	return HandlesFor(s).Live
+	return HandlesFor(physicalStore(s)).Live
 }
 
 // PhysicalStoreKey is a string identity for the store below s's class layers,
