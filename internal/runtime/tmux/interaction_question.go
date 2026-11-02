@@ -34,23 +34,53 @@ import (
 // header row and the focused numbered option, so the folder-trust dialog
 // ("Enter to confirm") and an idle composer's bare "❯" never read as a question.
 //
-// The matcher is checked against one live frame shape, a single-select,
-// single-question dialog (Claude Code 2.1.280). A multiSelect question, a
-// multi-question dialog's later tabs, or a status row under the footer are not
-// verified against a live capture. A form the matcher misses reads as no
-// question and is delivered to as it was before this guard existed.
+// Three later screens bend those anchors. Once a question is answered (or a
+// multiSelect option ticked) its tab is marked ☒, so the header row can lead
+// with ☒. A multiSelect dialog's cursor can rest on its unnumbered Submit row.
+// And a multi-question dialog closes on a review screen with no select footer,
+// whose last rows are fixed:
+//
+//	←  ☒ Approach  ☒ Scope  ✔ Submit  →
+//	Review your answers
+//	 ● Which approach?
+//	   → Small
+//	Ready to submit your answers?
+//	❯ 1. Submit answers
+//	  2. Cancel
+//
+// Enter there submits every answer, so it is as live as a question screen.
+//
+// The matcher is checked against live frames of a single-select dialog
+// (Claude Code 2.1.280 and 2.1.314), and of a two-question dialog's tabs and
+// review screen and a multiSelect dialog (2.1.314; testdata/claude-question-menu).
+// A status row under the footer is not verified against a live capture. A form
+// the matcher misses reads as no question and is delivered to as it was before
+// this guard existed.
 
 var (
 	// askUserQuestionFooterRe matches the select footer on its trimmed row.
 	askUserQuestionFooterRe = regexp.MustCompile(`^Enter to select\b.*Esc to cancel$`)
 
-	// askUserQuestionHeaderRe matches the ☐ header row. A multi-question dialog
-	// leads it with the tab arrow ("← ☐ Approach  ☐ Scope  ✔ Submit →").
-	askUserQuestionHeaderRe = regexp.MustCompile(`^\s*(?:←\s*)?☐\s+(.+)$`)
+	// askUserQuestionHeaderRe matches the header row, its first tab marked ☐,
+	// or ☒ once answered. A multi-question dialog leads it with the tab arrow
+	// ("← ☒ Approach  ☐ Scope  ✔ Submit →").
+	askUserQuestionHeaderRe = regexp.MustCompile(`^\s*(?:←\s*)?[☐☒]\s+(.+)$`)
 
 	// askUserQuestionOptionRe matches a numbered option row; the focused one
 	// carries the cursor glyph.
 	askUserQuestionOptionRe = regexp.MustCompile(`^(❯\s+)?(\d+)\.\s*(.*)$`)
+
+	// askUserQuestionCursorRe matches the focused unnumbered row below the
+	// options (a multiSelect dialog's Submit).
+	askUserQuestionCursorRe = regexp.MustCompile(`^❯\s+(.+)$`)
+
+	// askUserQuestionReviewTail matches the review screen's last non-blank
+	// rows, bottom first, on their trimmed rows.
+	askUserQuestionReviewTail = []*regexp.Regexp{
+		regexp.MustCompile(`^(?:❯\s+)?2\.\s*Cancel$`),
+		regexp.MustCompile(`^(?:❯\s+)?1\.\s*Submit answers$`),
+		regexp.MustCompile(`^Ready to submit your answers\?$`),
+	}
 )
 
 const (
@@ -79,22 +109,9 @@ type parsedQuestion struct {
 // parseAskUserQuestion returns the open AskUserQuestion dialog the pane lines
 // show, or nil when they show none.
 func parseAskUserQuestion(lines []string) *parsedQuestion {
-	// Walk up from the bottom to the footer, allowing only the dialog's own
-	// trailing rows below it.
-	footer, seen := -1, 0
-	for i := len(lines) - 1; i >= 0; i-- {
-		trimmed := strings.TrimSpace(lines[i])
-		if trimmed == "" {
-			continue
-		}
-		if askUserQuestionFooterRe.MatchString(trimmed) {
-			footer = i
-			break
-		}
-		seen++
-		if seen >= askUserQuestionTailSpan || strings.HasPrefix(trimmed, "❯") || strings.HasPrefix(trimmed, ">") {
-			return nil
-		}
+	footer := askUserQuestionFooter(lines)
+	if footer < 0 {
+		footer = askUserQuestionReviewEnd(lines)
 	}
 	if footer < 0 {
 		return nil
@@ -125,7 +142,14 @@ func parseAskUserQuestion(lines []string) *parsedQuestion {
 			}
 			continue
 		}
-		if len(q.Choices) == 0 && trimmed != "" {
+		if len(q.Choices) > 0 {
+			if m := askUserQuestionCursorRe.FindStringSubmatch(trimmed); m != nil {
+				focused = true
+				q.Focused = strings.TrimSpace(m[1])
+			}
+			continue
+		}
+		if trimmed != "" {
 			question = append(question, strings.TrimSpace(strings.TrimPrefix(trimmed, "│")))
 		}
 	}
@@ -134,6 +158,57 @@ func parseAskUserQuestion(lines []string) *parsedQuestion {
 	}
 	q.Question = strings.Join(question, " ")
 	return q
+}
+
+// askUserQuestionFooter walks up from the bottom to the select footer,
+// allowing only the dialog's own trailing rows below it, and returns its row,
+// or -1.
+func askUserQuestionFooter(lines []string) int {
+	seen := 0
+	for i := len(lines) - 1; i >= 0; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" {
+			continue
+		}
+		if askUserQuestionFooterRe.MatchString(trimmed) {
+			return i
+		}
+		seen++
+		if seen >= askUserQuestionTailSpan || strings.HasPrefix(trimmed, "❯") || strings.HasPrefix(trimmed, ">") {
+			return -1
+		}
+	}
+	return -1
+}
+
+// askUserQuestionReviewEnd returns the row just below a review screen whose
+// fixed rows end the pane, or -1. Like the select footer, they may carry the
+// dialog's own trailing row (a named session's rule, "──── name ─"), but no
+// more: an answered review stays in scrollback above the agent's output or
+// the composer.
+func askUserQuestionReviewEnd(lines []string) int {
+	end, matched, seen := -1, 0, 0
+	for i := len(lines) - 1; i >= 0 && matched < len(askUserQuestionReviewTail); i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" {
+			continue
+		}
+		if askUserQuestionReviewTail[matched].MatchString(trimmed) {
+			if end < 0 {
+				end = i + 1
+			}
+			matched++
+			continue
+		}
+		seen++
+		if matched > 0 || seen >= askUserQuestionTailSpan || strings.HasPrefix(trimmed, "❯") || strings.HasPrefix(trimmed, ">") {
+			return -1
+		}
+	}
+	if matched < len(askUserQuestionReviewTail) {
+		return -1
+	}
+	return end
 }
 
 // promptText renders the description a client shows for the pending question:
