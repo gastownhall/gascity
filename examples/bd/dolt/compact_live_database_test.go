@@ -57,6 +57,14 @@ func compactLiveRemoveDirAction(fixture compactScriptFixture, db string) string 
 	return "rm -rf " + shellQuote(filepath.Join(fixture.dataDir, db))
 }
 
+// compactLiveUnserveAction makes the fake server refuse db: state is
+// "forever" or the number of refusals before it serves db again.
+func compactLiveUnserveAction(fixture compactScriptFixture, db, state string) string {
+	dir := filepath.Join(fixture.binDir, "live-unserved")
+	return fmt.Sprintf("mkdir -p %s && printf '%%s\\n' %s > %s",
+		shellQuote(dir), shellQuote(state), shellQuote(filepath.Join(dir, db)))
+}
+
 func compactDoltLogLines(t *testing.T, fixture compactScriptFixture) []string {
 	t.Helper()
 	data, err := os.ReadFile(fixture.doltLog)
@@ -194,5 +202,40 @@ func TestCompactScriptAbortsWhenDatabaseLeavesDataDirAfterGC(t *testing.T) {
 	assertCompactLiveQuarantine(t, fixture, out, "post-flatten-full-gc", "0")
 	if strings.Contains(out, "commits=600->600 duration=") {
 		t.Fatalf("a GC that lost the database must not report success:\n%s", out)
+	}
+}
+
+// TestCompactScriptQuarantinesWhenRewriteLeavesDatabaseUnserved asserts that
+// a database the server stops serving after a rewrite is quarantined with the
+// probe failure recorded, whether the rewrite statement itself succeeded or
+// failed.
+func TestCompactScriptQuarantinesWhenRewriteLeavesDatabaseUnserved(t *testing.T) {
+	tests := []struct {
+		name    string
+		mode    string
+		trigger string
+		step    string
+	}{
+		{name: "flatten succeeded", mode: "success", trigger: "DOLT_RESET", step: "flatten"},
+		{name: "flatten failed", mode: "flatten_failure", trigger: "DOLT_RESET", step: "flatten"},
+		{name: "full GC succeeded", mode: "success", trigger: "DOLT_GC", step: "post-flatten-full-gc"},
+		{name: "full GC failed", mode: "gc_failure", trigger: "DOLT_GC", step: "post-flatten-full-gc"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			installCompactLiveFault(t, fixture, "beads", tt.trigger, compactLiveUnserveAction(fixture, "beads", "forever"))
+
+			out, err := fixture.run(t, tt.mode, "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+				"GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=2", compactLiveFastProbe)
+			if err == nil {
+				t.Fatalf("compact must fail when the rewritten database is not served:\n%s", out)
+			}
+			assertCompactLiveQuarantine(t, fixture, out, tt.step, "1")
+			marker := compactQuarantineMarkerPath(fixture, "beads")
+			if got := compactMarkerValue(t, marker, "live_gate_probe_failure"); !strings.Contains(got, "database not found: beads") {
+				t.Fatalf("marker live_gate_probe_failure = %q, want the server's refusal", got)
+			}
+		})
 	}
 }

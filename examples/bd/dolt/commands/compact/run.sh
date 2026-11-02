@@ -990,7 +990,10 @@ query_single_cell() {
 # Live-database gate. Every rewrite (the flatten and each DOLT_GC entry path)
 # is armed before it runs and checked after it returns, whatever its exit
 # status. The check fails when a database whose <data-dir>/<db>/.dolt existed
-# at arming has left the data dir. A failed check quarantines the database
+# at arming has left the data dir, or when the server no longer answers a
+# served-HEAD probe for it (SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))
+# must return this database's name and a commit hash). A failed check
+# quarantines the database
 # with reason "live database unavailable after compaction" (the existing
 # event/mail path) and aborts the run.
 live_gate_reason="live database unavailable after compaction"
@@ -1095,8 +1098,16 @@ live_gate_check() {
   if [ -d "$_lc_entry/.dolt" ]; then
     _lc_dir_after=1
   fi
+  _lc_probe_ok=1
+  live_gate_probe_failure=""
+  if ! live_probe_once "$_lc_db"; then
+    _lc_probe_ok=0
+    live_gate_probe_failure=$live_probe_error
+  fi
   if [ "$live_gate_dir_before" = "1" ] && [ "$_lc_dir_after" = "0" ]; then
     _lc_cause="$_lc_entry/.dolt left the data dir"
+  elif [ "$_lc_probe_ok" = "0" ]; then
+    _lc_cause="served-HEAD $live_gate_probe_failure"
   else
     return 0
   fi
