@@ -1753,6 +1753,55 @@ func TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules(t *testing.T
 			}
 		}
 	})
+
+	t.Run("AC-2 graph completion polls the hook with bounded rechecks", func(t *testing.T) {
+		got := renderPoolWorkerPrompt(t)
+
+		// Work finished or resumed: further assignments come only through
+		// the hook, re-checks are bounded and one invocation per tool call,
+		// the final claim is drain-aware, and explicit session-ending
+		// contracts override polling.
+		steps := flattenPromptText(renderedPromptSection(t, got, "Workflow Steps"))
+		for _, want := range []string{
+			"`gc hook --claim --json`",
+			"at most three",
+			"one hook invocation per tool call",
+			"`sleep`/retry loop",
+			"`gc hook --claim --drain-ack --json`",
+			"execute it",
+			"`drain_pending`",
+			"`gc runtime drain-ack`",
+			"one-step lane",
+		} {
+			if !strings.Contains(steps, want) {
+				t.Errorf("workflow-steps section missing %q:\n%s", want, steps)
+			}
+		}
+
+		// The lifecycle section routes each classification and keeps the
+		// legacy one-assignment lifetime alongside the graph loop.
+		how := flattenPromptText(renderedPromptSection(t, got, "How to Work"))
+		for _, want := range []string{
+			"`gc hook --claim --drain-ack --json`",
+			"Workflow step",
+			"Molecule attachment",
+			"one-assignment lifetime",
+			"gc runtime drain-ack",
+		} {
+			if !strings.Contains(how, want) {
+				t.Errorf("how-to-work section missing %q:\n%s", want, how)
+			}
+		}
+
+		// After a restart, graph assignments are recovered through the
+		// hook; legacy molecule work resumes from mol current.
+		exhaustion := flattenPromptText(renderedPromptSection(t, got, "Context Exhaustion"))
+		for _, want := range []string{"`gc hook --claim`", "gc bd mol current"} {
+			if !strings.Contains(exhaustion, want) {
+				t.Errorf("context-exhaustion section missing %q:\n%s", want, exhaustion)
+			}
+		}
+	})
 }
 
 // TestRenderPromptCityRootFragmentsAbsentNoEffect is the regression-safety
