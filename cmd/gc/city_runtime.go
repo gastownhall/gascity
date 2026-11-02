@@ -191,6 +191,10 @@ type CityRuntime struct {
 	// journal feed as the delta lanes; created on first use.
 	claimLoop     *claimLoopGuard
 	claimLoopOnce sync.Once
+	// claimStall is the claims-stall guard (claim_stall_guard.go), fed by the
+	// same journal feed; created on first use.
+	claimStall     *claimStallGuard
+	claimStallOnce sync.Once
 
 	// ordersLane runs order dispatch off the tick (orders_lane.go). It owns
 	// od, retiredOrderDispatchers, the order-set bookkeeping and the watchdog
@@ -2107,7 +2111,7 @@ func (cr *CityRuntime) rescanOrderDispatcherIfDue(cityRoot string, cfg *config.C
 
 // replaceOrderDispatcher installs next as the active order dispatcher, carrying
 // warm last-run data, active gate-backoff state, open-work suppression
-// streaks and already-reported inapplicable orders from the outgoing dispatcher so a rebuild (reload or rescan) reuses
+// streaks, event floors and starts, and already-reported inapplicable orders from the outgoing dispatcher so a rebuild (reload or rescan) reuses
 // them instead of cold-starting (#3201).
 // Call after draining the outgoing dispatcher.
 func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
@@ -2116,6 +2120,7 @@ func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
 			nextMem.carryLastRunCacheFrom(prev)
 			nextMem.carryGateBackoffFrom(prev, time.Now())
 			nextMem.carryOpenWorkSuppressionFrom(prev)
+			nextMem.carryEventFloorsFrom(prev)
 			nextMem.carryInapplicableReportsFrom(prev)
 		}
 	}
@@ -5554,6 +5559,7 @@ func (cr *CityRuntime) forceStopRequested() bool {
 func (cr *CityRuntime) adoptConfigRevision(rev string) {
 	if rev != cr.configRev {
 		cr.claimLoopGuardOf().configChanged()
+		cr.claimStallGuardOf().configure(cr.cfg)
 	}
 	cr.configRev = rev
 }
