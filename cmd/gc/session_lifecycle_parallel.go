@@ -276,7 +276,7 @@ type preparedStart struct {
 	// consumed the prompt (gastownhall/gascity#5236). It is the pure
 	// promptDelivery decision AND-ed with the fresh-launch condition, i.e. the
 	// exact complement of the resume override below — so a resume that swaps in
-	// resumeStartupNudge and re-sets GC_STARTUP_PROMPT_DELIVERED for hooks stamps
+	// resumeStartupPromptPlan and re-sets GC_STARTUP_PROMPT_DELIVERED for hooks stamps
 	// no priming marker. promptHash is the sha256 of the rendered startup template
 	// prompt (tp.Prompt) only — it excludes the one-shot initial_message override
 	// appended to the delivered payload, so the stored hash still matches a later
@@ -1419,7 +1419,7 @@ func buildPreparedStartWithTranscript(
 	// S19 priming confirmation (write-only in Stage 2): a marker is stamped only
 	// when the pure delivery decision holds AND this incarnation is a fresh
 	// launch — the exact complement of the resume override below, which swaps in
-	// resumeStartupNudge and delivers nothing. Reading the env marker instead
+	// resumeStartupPromptPlan and delivers nothing. Reading the env marker instead
 	// would mis-stamp every resume (it is re-set to "1" for hook consumption).
 	promptDelivered := delivery.Delivered && (firstStart || forceFresh || !hasResumeKey)
 	// prompt_hash is the sha256 of the rendered startup TEMPLATE prompt (tp.Prompt)
@@ -1430,9 +1430,7 @@ func buildPreparedStartWithTranscript(
 	// make the stored hash never match the re-derivation and re-prime forever.
 	promptHash := sessionpkg.PromptHash(tp.Prompt)
 	if !firstStart && !forceFresh && hasResumeKey {
-		plan := resumeStartupPromptPlan(tp.Prompt, tp.Hints.Nudge)
-		plan.Nudge = resumeStartupNudge(tp)
-		plan.applyTo(&agentCfg)
+		resumeStartupPromptPlan(tp.startupPromptSource()).applyTo(&agentCfg)
 	}
 	// Initial message: append to prompt on first start only, reusing the
 	// overrides parsed once by parseSessionTemplateOverridesForLaunch above.
@@ -2225,52 +2223,6 @@ func restartPromptNudge(prompt, nudge string) string {
 		return nudge
 	}
 	return prependStartupPromptToNudge(prompt, nudge)
-}
-
-// resumeRolePromptSuppliedByHook reports whether a resumed session can skip
-// replaying the rendered startup prompt through its restart nudge because the
-// provider hook already supplies that prompt to every model generation. (The
-// hook decorates generations; it does not start one, which is why the branch
-// still delivers a restart turn — see resumeStartupNudge.)
-//
-// All three legs must hold: the resolved provider's builtin family stages a
-// per-turn role hook (config.ResolvedProvider.HookSuppliesRolePerTurn), that
-// hook is actually installed for this agent (TemplateParams.HookEnabled, the
-// config.AgentHasHooks verdict — true by default for opencode/mimocode since
-// their overlay is staged for every launch; an explicit hooks_installed =
-// false means no plugin, so the nudge stays the only carrier), and the
-// session is not ACP, whose transport never loads the CLI plugin and always
-// receives the prompt through the nudge. Providers
-// whose hooks prime once at SessionStart (pi, codex, antigravity, claude via
-// settings) are excluded by the family fact, not by SupportsHooks, which is
-// true for them as well.
-func resumeRolePromptSuppliedByHook(tp TemplateParams) bool {
-	return tp.HookEnabled && !tp.IsACP && tp.ResolvedProvider.HookSuppliesRolePerTurn()
-}
-
-// resumeStartupNudge is the restart turn delivered to a resumed provider
-// conversation. The rendered startup prompt rides along so a restarted
-// session does not land idle — unless the provider hook re-supplies that
-// prompt to every generation, in which case replaying it here would persist a
-// duplicate copy of the role as a user message on every wake.
-//
-// On that hook-primed branch the turn is the beacon line (`[city] alias • ts`)
-// followed by the configured nudge when there is one: the nudge is the reason
-// for the turn, and the beacon identifies the wake. When no nudge is
-// configured there is no restart turn at all. The role is already in the
-// system prompt through the plugin, so a content-free wake turn only buys a
-// generation that acknowledges and waits; landing idle is the correct state,
-// and the next human message, queued nudge, or reconcile-tick claim backstop
-// (nudgeStalledPoolClaims) starts a real turn. Both tmux and herdr skip an
-// empty nudge, so "" delivers nothing. The turn is never the template.
-func resumeStartupNudge(tp TemplateParams) string {
-	if resumeRolePromptSuppliedByHook(tp) {
-		if strings.TrimSpace(tp.Hints.Nudge) == "" {
-			return ""
-		}
-		return prependStartupPromptToNudge(tp.Beacon, tp.Hints.Nudge)
-	}
-	return restartPromptNudge(tp.Prompt, tp.Hints.Nudge)
 }
 
 // startupRateLimitScreenDetected reports whether the session's pane shows a

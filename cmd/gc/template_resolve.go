@@ -63,7 +63,7 @@ type TemplateParams struct {
 	// (`[city] alias • ts`, no prime instruction). Carried separately so the
 	// resume path can submit a restart turn that identifies the wake without
 	// replaying the template when the provider hook already supplies it
-	// (resumeStartupNudge).
+	// (startupPromptSource.resumeNudge).
 	Beacon string
 	// Env is the merged environment (passthrough + provider + agent + passthrough vars).
 	Env map[string]string
@@ -140,6 +140,10 @@ type TemplateParams struct {
 	// (for example via `gc session new`). These sessions stay desired without
 	// inflating poolDesired for config-managed slots.
 	ManualSession bool
+	// ClientProviderChat marks a client's provider chat
+	// (isClientProviderChat). applyClientProviderChatStartupPrompt sets it
+	// along with the beacon-only Prompt: the chat's hook supplies no role.
+	ClientProviderChat bool
 	// PoolSlot is the 1-based slot number within the pool. Set during
 	// buildDesiredState for pool instances so syncSessionBeads can stamp
 	// pool_slot metadata without reverse-engineering the slot from the name
