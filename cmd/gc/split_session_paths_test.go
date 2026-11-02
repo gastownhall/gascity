@@ -115,7 +115,7 @@ func TestSplitDirectSessionResolverMaterializesInTheBindingNotTheCallerStore(t *
 		Providers: map[string]config.ProviderSpec{"test-agent": {DisplayName: "Test Agent"}},
 	}
 
-	id, ok, err := cliDirectSessionResolver(rig, "test-city", cityPath, cfg, "refinery", "")
+	id, ok, err := cliDirectSessionResolver(nil)(rig, "test-city", cityPath, cfg, "refinery", "")
 	if err != nil || !ok {
 		t.Fatalf("resolving the configured named session = %q, %v, %v", id, ok, err)
 	}
@@ -125,7 +125,7 @@ func TestSplitDirectSessionResolverMaterializesInTheBindingNotTheCallerStore(t *
 	if _, err := binding.Get(id); err != nil {
 		t.Fatalf("the resolved session %s is not in the binding: %v", id, err)
 	}
-	again, _, err := cliDirectSessionResolver(rig, "test-city", cityPath, cfg, "refinery", "")
+	again, _, err := cliDirectSessionResolver(nil)(rig, "test-city", cityPath, cfg, "refinery", "")
 	if err != nil || again != id {
 		t.Fatalf("resolving again = %q, %v; want the canonical %s, not a second materialization", again, err, id)
 	}

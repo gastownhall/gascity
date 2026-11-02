@@ -106,6 +106,13 @@ func TestGcBdSplitHandsBdTheBytesItJudged(t *testing.T) {
 		{"import --input=", "a.jsonl", row, infra, "", "", []string{"import", "--input=a.jsonl"}},
 		{"import --dry-run", "a.jsonl", row, infra, "", "", []string{"import", "a.jsonl", "--dry-run"}},
 		{"import --input twice", "a.jsonl", row, infra, "", "", []string{"import", "--input", "other.jsonl", "-i", "a.jsonl"}},
+		// A short-flag run ending in -i with its value attached, after an
+		// earlier --input: pflag keeps the run's value, so bd reads it.
+		{"import -qiFILE after --input", "a.jsonl", row, infra, "", "", []string{"import", "--input", "other.jsonl", "-qia.jsonl"}},
+		{"import -vi=FILE after --input", "a.jsonl", row, infra, "", "", []string{"import", "--input", "other.jsonl", "-vi=a.jsonl"}},
+		// After the terminator a flag-shaped name is the positional source.
+		{"import -- -input.jsonl", "-input.jsonl", row, infra, "", "", []string{"import", "--", "-input.jsonl"}},
+		{"import -- --archive.jsonl", "--archive.jsonl", row, infra, "", "", []string{"import", "--", "--archive.jsonl"}},
 	}
 	for _, inventory := range judgedFileInventories {
 		inv := bdflags.InventoryByName(inventory)
@@ -261,6 +268,33 @@ func TestBdRepointFlagIsExact(t *testing.T) {
 		t.Errorf("an argv bd rejects was repointed: %q", got)
 	}
 	if got, ok := bdRepointFlag(nil, []string{"batch"}, "--file", "/c"); ok {
+		t.Errorf("repointed with no inventory: %q", got)
+	}
+}
+
+// TestBdRepointPositionalIsExact: only the token bd reads as the positional
+// is rewritten, and the result resolves to the same command and flags, or no
+// argv is returned.
+func TestBdRepointPositionalIsExact(t *testing.T) {
+	inv := bdflags.InventoryByName("bd-1.3.2")
+	for _, c := range []struct {
+		name, from string
+		argv, want []string
+	}{
+		{"plain", "a.jsonl", []string{"import", "a.jsonl"}, []string{"import", "/c"}},
+		{"a flag value spelled like the source", "a.jsonl", []string{"import", "--actor", "a.jsonl", "a.jsonl"}, []string{"import", "--actor", "a.jsonl", "/c"}},
+		{"-i-shaped name after --", "-input.jsonl", []string{"import", "--", "-input.jsonl"}, []string{"import", "--", "/c"}},
+		{"--shaped name after --", "--archive.jsonl", []string{"import", "--", "--archive.jsonl"}, []string{"import", "--", "/c"}},
+	} {
+		got, ok := bdRepointPositional(inv, c.argv, c.from, "/c")
+		if !ok || !slices.Equal(got, c.want) {
+			t.Errorf("%s: bdRepointPositional(%q) = %q, %v; want %q", c.name, c.argv, got, ok, c.want)
+		}
+	}
+	if got, ok := bdRepointPositional(inv, []string{"import", "--actor", "a.jsonl"}, "a.jsonl", "/c"); ok {
+		t.Errorf("a flag value was repointed as the positional: %q", got)
+	}
+	if got, ok := bdRepointPositional(nil, []string{"import", "a.jsonl"}, "a.jsonl", "/c"); ok {
 		t.Errorf("repointed with no inventory: %q", got)
 	}
 }

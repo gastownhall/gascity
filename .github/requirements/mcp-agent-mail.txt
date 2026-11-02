@@ -1278,9 +1278,9 @@ jmespath==1.1.0 \
     # via
     #   boto3
     #   botocore
-joserfc==1.7.2 \
-    --hash=sha256:537ffb8888b2df039cb5b6d017d7cff6f09d521ce65d89cc9b8ab752b1cff947 \
-    --hash=sha256:ddd818c0ca9b4f17bbc2d72cb3966e6ded7502be089316c62c3cc64ae86132b5
+joserfc==1.7.7 \
+    --hash=sha256:06979cfbab78bc802f14c0358f32969826cc26720e13cb38926ffdc86bc0cb2c \
+    --hash=sha256:471d0fd12a5a0d1c0942de280f39efe6f597878315033270b504d4d006d25510
     # via
     #   -r .github/requirements/mcp-agent-mail.in
     #   authlib
@@ -1308,15 +1308,15 @@ keyring==25.7.0 \
     --hash=sha256:be4a0b195f149690c166e850609a477c532ddbfbaed96a404d4e43f8d5e2689f \
     --hash=sha256:fe01bd85eb3f8fb3dd0405defdeac9a5b4f6f0439edbb3149577f244a2e8245b
     # via py-key-value-aio
-litellm==1.106.3 \
-    --hash=sha256:1ee5b8e443ac170da36fbad1da7e810d1bf6d496522e84b8e7aa8bffe544f064 \
-    --hash=sha256:7f19865e23a2c944c7503d67c31ad6ac7f04d7b8335014eebafcd01bf1f8852e \
-    --hash=sha256:9a05ee983e2a9a8414cf2dabf6a6668ce91071194e8524f77308f41b75870621 \
-    --hash=sha256:ac4b87265a136b2dd72a01ac0575c20074b163a3275a8452d4b7edc37d1451a1 \
-    --hash=sha256:b8fd03b264da21e217cafcc3028f1f832ea2a23353d19e028e02f8b3404ba894 \
-    --hash=sha256:dc42686695957708bde4be1d39c2385e9eda65d1024670f5a5dad0c822d9a61a \
-    --hash=sha256:dccfcffb39977013b6515e0797b1a9ee02c405ecea3272aae060e34558bd87ed \
-    --hash=sha256:e2059580bad87f195c11550854c50bca8b4669db271d855786719aa0dfc9bd24
+litellm==1.106.6 \
+    --hash=sha256:42ce43ffb0161c9a844e8b0cd02a8796d0423b11d84fe304bff925378ca55085 \
+    --hash=sha256:8bf6d33b5ca32a5fc6858784b64c82e7f3bfab462d571d7d0def5596c3e1acc3 \
+    --hash=sha256:a2876545a652de5070fa5905849b479cee977680b0616b603a6ab21fd5599524 \
+    --hash=sha256:a51f2a7317ab9cb1ef01a93c619f3c7ff69fe1fe13a59b409d0130748b5d8af9 \
+    --hash=sha256:ac74f9ff9faae1a424dc7be873b80ccf1cea1681a9f4dac03bac068ae3a8d8b0 \
+    --hash=sha256:af0b6f4a3df53194b74188a972f103f41ee5ed86afeefc7d9a1ea40156cc0f2e \
+    --hash=sha256:ec3cae6c87971657c9ae905b6d23aef456e979c8848f22bbc5096a31e1a1da4d \
+    --hash=sha256:f3398d8c21ac9fe851f1788a2d811af7f369fb485d775a25a9b3f517b0b3e88b
     # via
     #   -r .github/requirements/mcp-agent-mail.in
     #   mcp-agent-mail

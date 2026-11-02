@@ -450,38 +450,154 @@ func TestCmdBeadsShow_MissingID_DoesNotProbeAPIClient(t *testing.T) {
 	}
 }
 
-func TestRouteBeadsList_APIJSONIncludesCacheAge(t *testing.T) {
-	t.Setenv("GC_DEBUG", "0")
+// beadsTestRemoteClient builds the client a remote target (--city-url,
+// --context, GC_CITY_URL) gets, pointed at srv.
+func beadsTestRemoteClient(t *testing.T, srv *httptest.Server) *api.Client {
+	t.Helper()
+	c, err := api.NewRemoteCityScopedClient(srv.URL, "test-city", api.RemoteOptions{})
+	if err != nil {
+		t.Fatalf("NewRemoteCityScopedClient: %v", err)
+	}
+	return c
+}
+
+// beadsTestEnvelopeKeys decodes stdout as a JSON object and returns its keys.
+func beadsTestEnvelopeKeys(t *testing.T, stdout []byte) map[string]json.RawMessage {
+	t.Helper()
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal(stdout, &out); err != nil {
+		t.Fatalf("stdout is not a JSON object: %v\n%s", err, stdout)
+	}
+	return out
+}
+
+// TestRouteBeadsList_JSONEnvelopeOnlyForRemoteTargets pins the #8453 shape
+// contract: a local city prints the bare array on every route, the API route
+// included, and only a remote target prints the {beads,_cache_age_s} envelope.
+func TestRouteBeadsList_JSONEnvelopeOnlyForRemoteTargets(t *testing.T) {
+	t.Setenv("GC_DEBUG", "1")
 	cityPath := writeBeadsTestCity(t)
 	srv := httptest.NewServer(okBeadsListHandler(t))
 	defer srv.Close()
-	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	if code := routeBeadsList(cityPath, c, "", "json", beadFilters{}, &stdout, &stderr); code != 0 {
-		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+	if code := routeBeadsList(cityPath, api.NewCityScopedClient(srv.URL, "test-city"), "", "json", beadFilters{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("local-target exit = %d, stderr=%q", code, stderr.String())
 	}
-	var out map[string]any
-	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
-		t.Fatalf("unmarshal stdout: %v\n%s", err, stdout.String())
+	if !strings.Contains(stderr.String(), "route=api") {
+		t.Fatalf("local-target run did not take the API route: %q", stderr.String())
 	}
-	if _, ok := out["_cache_age_s"]; !ok {
-		t.Errorf("_cache_age_s missing from API --json:\n%s", stdout.String())
+	var arr []beads.Bead
+	if err := json.Unmarshal(stdout.Bytes(), &arr); err != nil {
+		t.Fatalf("local-target API JSON must be a bare array: %v\n%s", err, stdout.String())
+	}
+	if len(arr) != 1 || arr[0].ID != "ga-abc" || strings.Contains(stdout.String(), "_cache_age_s") {
+		t.Fatalf("local-target API JSON = %s, want [ga-abc] without _cache_age_s", stdout.String())
 	}
 
-	// Fallback path must omit the envelope field.
+	stdout.Reset()
+	stderr.Reset()
+	if code := routeBeadsList("", beadsTestRemoteClient(t, srv), "", "json", beadFilters{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("remote exit = %d, stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "route=api") {
+		t.Fatalf("remote run did not take the API route: %q", stderr.String())
+	}
+	env := beadsTestEnvelopeKeys(t, stdout.Bytes())
+	if len(env) != 2 || env["beads"] == nil || string(env["_cache_age_s"]) != "2" {
+		t.Fatalf("remote JSON = %s, want exactly {beads, _cache_age_s: 2}", stdout.String())
+	}
+
 	stdout.Reset()
 	stderr.Reset()
 	if code := routeBeadsList(cityPath, nil, "controller-down", "json", beadFilters{}, &stdout, &stderr); code != 0 {
 		t.Fatalf("fallback exit = %d, stderr=%q", code, stderr.String())
 	}
-	// Fallback path writes a bare JSON array (writeBeadsJSON) — no envelope.
-	trimmed := strings.TrimSpace(stdout.String())
-	if !strings.HasPrefix(trimmed, "[") {
-		t.Errorf("fallback JSON must be a bare array, got:\n%s", stdout.String())
+	if trimmed := strings.TrimSpace(stdout.String()); !strings.HasPrefix(trimmed, "[") || strings.Contains(trimmed, "_cache_age_s") {
+		t.Fatalf("fallback JSON must be a bare array, got:\n%s", stdout.String())
 	}
-	if strings.Contains(stdout.String(), "_cache_age_s") {
-		t.Errorf("_cache_age_s must be absent on fallback:\n%s", stdout.String())
+}
+
+// TestRouteBeadsShow_JSONEnvelopeOnlyForRemoteTargets is the show twin: a local
+// city prints the bare object on the API route; a remote target keeps
+// {bead,_cache_age_s}.
+func TestRouteBeadsShow_JSONEnvelopeOnlyForRemoteTargets(t *testing.T) {
+	t.Setenv("GC_DEBUG", "1")
+	cityPath := writeBeadsTestCity(t)
+	srv := httptest.NewServer(okBeadsShowHandler(t))
+	defer srv.Close()
+
+	var stdout, stderr bytes.Buffer
+	if code := routeBeadsShow(cityPath, api.NewCityScopedClient(srv.URL, "test-city"), "", "ga-abc", "json", &stdout, &stderr); code != 0 {
+		t.Fatalf("local-target exit = %d, stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "route=api") {
+		t.Fatalf("local-target run did not take the API route: %q", stderr.String())
+	}
+	obj := beadsTestEnvelopeKeys(t, stdout.Bytes())
+	if string(obj["id"]) != `"ga-abc"` || obj["_cache_age_s"] != nil || obj["bead"] != nil {
+		t.Fatalf("local-target API JSON = %s, want the bare bead object", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := routeBeadsShow("", beadsTestRemoteClient(t, srv), "", "ga-abc", "json", &stdout, &stderr); code != 0 {
+		t.Fatalf("remote exit = %d, stderr=%q", code, stderr.String())
+	}
+	env := beadsTestEnvelopeKeys(t, stdout.Bytes())
+	if len(env) != 2 || env["bead"] == nil || string(env["_cache_age_s"]) != "3" {
+		t.Fatalf("remote JSON = %s, want exactly {bead, _cache_age_s: 3}", stdout.String())
+	}
+}
+
+// TestRouteBeadsList_PartialAPIAnswerFailsTheListing proves a partial answer
+// (the server could not read a rig's store) is an error naming the failed
+// store, not a silently shortened list, for local and remote targets alike.
+// Only a local target gets the remedy hint (gc doctor, then GC_NO_API=1 for a
+// stale supervisor view): a remote target has neither remedy on this host.
+func TestRouteBeadsList_PartialAPIAnswerFailsTheListing(t *testing.T) {
+	t.Setenv("GC_DEBUG", "1")
+	cityPath := writeBeadsTestCity(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items":          []map[string]any{{"id": "ga-abc", "title": "survivor", "issue_type": "task", "status": "open"}},
+			"partial":        true,
+			"partial_errors": []string{"rig omega: ledger unreadable"},
+		})
+	}))
+	defer srv.Close()
+
+	clients := map[string]struct {
+		cityPath string
+		c        *api.Client
+		hint     bool
+	}{
+		"local-target": {cityPath, api.NewCityScopedClient(srv.URL, "test-city"), true},
+		"remote":       {"", beadsTestRemoteClient(t, srv), false},
+	}
+	for name, tc := range clients {
+		for _, format := range []string{"text", "json"} {
+			t.Run(name+"/"+format, func(t *testing.T) {
+				var stdout, stderr bytes.Buffer
+				if code := routeBeadsList(tc.cityPath, tc.c, "", format, beadFilters{}, &stdout, &stderr); code != 1 {
+					t.Fatalf("exit = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+				}
+				if stdout.Len() != 0 {
+					t.Fatalf("stdout = %q, want empty", stdout.String())
+				}
+				for _, want := range []string{"rig omega: ledger unreadable", "route=api reason=error"} {
+					if !strings.Contains(stderr.String(), want) {
+						t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), want)
+					}
+				}
+				for _, remedy := range []string{`hint: run "gc doctor" to find the broken store`, "GC_NO_API=1 gc beads list reads the stores directly"} {
+					if got := strings.Contains(stderr.String(), remedy); got != tc.hint {
+						t.Fatalf("stderr contains %q = %v, want %v; stderr=%q", remedy, got, tc.hint, stderr.String())
+					}
+				}
+			})
+		}
 	}
 }
 

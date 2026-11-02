@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "authorship.go",
         "backend_payloads.go",
+        "claims_payloads.go",
         "control_payloads.go",
         "events.go",
         "execution_payloads.go",
