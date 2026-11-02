@@ -175,6 +175,21 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			want: sessionID,
 		},
 		{
+			name: "AC-2 transcript present resumes",
+			setup: func(t *testing.T, f rotatedKeyFixture) {
+				writeKeyedTranscript(t, f.root, f.workDir, rotatedKey)
+			},
+			want: "claude --resume " + rotatedKey,
+		},
+		{
+			name: "claude transcript of a kimi-named claude seat resumes",
+			opts: rotatedKeyOptions{provider: "kimi-k3-manifold", providerKind: "claude"},
+			setup: func(t *testing.T, f rotatedKeyFixture) {
+				writeKeyedTranscript(t, f.root, f.workDir, rotatedKey)
+			},
+			want: "claude --resume " + rotatedKey,
+		},
+		{
 			name: "switched start keeps the resume command precedence",
 			opts: rotatedKeyOptions{handleCommand: "claude --model opus"},
 			want: "claude --model opus --session-id " + rotatedKey,
