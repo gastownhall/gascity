@@ -521,8 +521,9 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 		!hookContains(src, "state.userMessageIDs.has(messageID)") ||
 		// OpenCode loads the workdir plugin for human-launched sessions
 		// too; without the identity guard the plugin runs gc lifecycle
-		// commands in sessions gc does not manage.
-		!hookContains(src, "managedSessionIdentityPresent()") {
+		// commands in sessions gc does not manage. The marker is the call:
+		// the function's definition alone does not guard anything.
+		!hookContains(src, "if (!managedSessionIdentityPresent())") {
 		return true
 	}
 	for _, marker := range []string{
@@ -574,7 +575,7 @@ func mimocodeHookNeedsUpgrade(existing []byte) bool {
 		// MiMo Code loads the workdir plugin for human-launched sessions
 		// too; without the identity guard the plugin runs gc lifecycle
 		// commands in sessions gc does not manage (same shape as OpenCode).
-		!hookContains(src, "managedSessionIdentityPresent()")
+		!hookContains(src, "if (!managedSessionIdentityPresent())")
 }
 
 func mimocodeHookVersion(content string) int {
