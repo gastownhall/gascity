@@ -5584,6 +5584,36 @@ func TestSyncSessionBeads_ProviderProjectionClearsMissingFields(t *testing.T) {
 		}
 	}
 
+	// Tick 4 (churn guard): an unchanged successful resolution writes
+	// nothing — the authoritative refresh is still diff-gated (#1205).
+	writesBefore := cs.writes
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if cs.writes != writesBefore {
+		t.Errorf("tick 4: unchanged sync wrote metadata (%d -> %d writes); the refresh must be diff-gated (#1205)", writesBefore, cs.writes)
+	}
+
+	// Tick 5 (nil resolution): a transient resolution failure preserves all
+	// seven provider-derived fields — no trustworthy projection exists, so
+	// nothing clears.
+	ds["worker"] = TemplateParams{TemplateName: "worker", Command: claudeCmd, ResolvedProvider: nil}
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	meta = allSessionBeads(t, cs)[0].Metadata
+	for _, c := range []struct{ key, want string }{
+		{"provider", "claude"},
+		{"provider_kind", ""},
+		{"builtin_ancestor", ""},
+		{"resume_flag", "--resume"},
+		{"resume_style", "flag"},
+		{"resume_command", ""},
+		{"session_id_flag", "--session-id"},
+	} {
+		if meta[c.key] != c.want {
+			t.Errorf("tick 5: nil resolution changed %s = %q, want %q preserved", c.key, meta[c.key], c.want)
+		}
+	}
+
 	if stderr.Len() > 0 {
 		t.Fatalf("unexpected stderr: %s", stderr.String())
 	}

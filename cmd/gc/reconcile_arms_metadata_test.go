@@ -417,6 +417,16 @@ func TestDesiredRowLaunchRefreshClearsMissingProviderFields(t *testing.T) {
 	if id := desiredRowIdentity(cfg, tp, seat, corrupted); !maps.Equal(id.Meta, wantSameName) {
 		t.Fatalf("same-name: meta %v, want %v with no provider entry", id.Meta, wantSameName)
 	}
+	// AC-3: an absent resolution keeps every stored field, and the converged
+	// row proposes nothing.
+	bare := tp
+	bare.Command, bare.ResolvedProvider = "", nil
+	if id := desiredRowIdentity(cfg, bare, seat, codex); len(id.Meta) != 0 {
+		t.Fatalf("absent resolution: meta %v, want the stored values kept", id.Meta)
+	}
+	if id := desiredRowIdentity(cfg, tp, seat, rowRefreshKeys(projection)); len(id.Meta) != 0 {
+		t.Fatalf("converged: meta %v, want no write", id.Meta)
+	}
 }
 
 // A successful switch from a wrapped codex provider to the builtin-named
@@ -450,5 +460,18 @@ func TestRefreshLaunchKeysProviderSwitchClearsStaleProjection(t *testing.T) {
 		if got[k] == raw[k] {
 			t.Errorf("%s = %q after switch to claude, want it overwritten or cleared", k, got[k])
 		}
+	}
+}
+
+// The shared projection helper's guards: a nil queue or a nil resolution is
+// a no-op, never a panic, and a nil resolution queues nothing (the
+// absent-resolution half of #8539's contract).
+func TestQueueChangedResolvedProviderSessionMetadataNilGuards(t *testing.T) {
+	existing := map[string]string{"provider": "claude", "provider_kind": "codex"}
+	queueChangedResolvedProviderSessionMetadata(existing, nil, &config.ResolvedProvider{Name: "omp"})
+	var queued []string
+	queueChangedResolvedProviderSessionMetadata(existing, func(k, _ string) { queued = append(queued, k) }, nil)
+	if len(queued) != 0 {
+		t.Fatalf("nil resolution queued %v, want nothing", queued)
 	}
 }
