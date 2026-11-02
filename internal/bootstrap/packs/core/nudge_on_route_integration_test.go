@@ -702,6 +702,44 @@ func TestRouteNotificationDeferredRouteWaits(t *testing.T) {
 	}
 }
 
+// A deferral ends an earlier notification, as a claim and release does: work
+// nudged before it was deferred is nudged again once it is ready.
+func TestRouteNotificationDeferralRenotifiesNotifiedWork(t *testing.T) {
+	f := newRouteScriptFixture(t)
+	f.bus.Record(events.Event{Type: "city.started"})
+	f.write("state/nudge-on-route-delivery.json", `{"version":1,"cursor":1,"pending":{},"notified":{},"retry":{}}`, 0o600)
+	f.seed("bead.created", false)
+	if err := f.run(); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.nudges(); got != "worker\n" {
+		t.Fatalf("routed work = %q", got)
+	}
+	f.write("blocked", "", 0o600)
+	f.bus.Record(events.Event{Type: "bead.updated", Subject: "test-work",
+		Payload: json.RawMessage(`{"id":"test-work","status":"deferred","assignee":"","metadata":{"gc.routed_to":"worker"}}`)})
+	f.syncEvents()
+	if err := f.run(); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.nudges(); got != "worker\n" {
+		t.Fatalf("deferred work was nudged again while deferred: %q", got)
+	}
+	if err := os.Remove(filepath.Join(f.dir, "blocked")); err != nil {
+		t.Fatal(err)
+	}
+	f.expireRetry()
+	if !f.due() {
+		t.Fatal("work notified before its deferral was not queued again")
+	}
+	if err := f.run(); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.nudges(); got != "worker\nworker\n" {
+		t.Fatalf("work after the deferral ended = %q, want a second nudge", got)
+	}
+}
+
 // Routed readiness leaves out beads labelled exactly "human" (#7366). Such a
 // route waits like held work and is nudged once the label is gone.
 func TestRouteNotificationHumanLabelledRouteWaits(t *testing.T) {
@@ -724,6 +762,37 @@ func TestRouteNotificationHumanLabelledRouteWaits(t *testing.T) {
 	}
 	if got := f.nudges(); got != "worker\n" {
 		t.Fatalf("work after the label was removed = %q", got)
+	}
+}
+
+// A run takes at most 20 due routes. Blocked routes that sort first must not
+// fill every run while ready work behind them waits: due routes go oldest first.
+func TestRouteNotificationBlockedRoutesDoNotStarveReadyWork(t *testing.T) {
+	f := newRouteScriptFixture(t)
+	f.bus.Record(events.Event{Type: "city.started"})
+	f.syncEvents()
+	var rows []string
+	pending := map[string]string{"ready-work": "worker"}
+	retry := map[string]any{}
+	for _, c := range "abcdefghijklmnopqrstu" {
+		id := "held-" + string(c)
+		rows = append(rows, `{"id":"`+id+`","status":"open","assignee":"","labels":["hold:mayor"],"metadata":{"gc.routed_to":"worker"}}`)
+		pending[id] = "worker"
+		retry[id] = map[string]any{"reason": "blocked", "attempts": 1, "next_at": 1}
+	}
+	rows = append(rows, `{"id":"ready-work","status":"open","assignee":"","metadata":{"gc.routed_to":"worker"}}`)
+	f.write("beads", "["+strings.Join(rows, ",")+"]", 0o600)
+	state, err := json.Marshal(map[string]any{"version": 1, "cursor": 1, "pending": pending,
+		"notified": map[string]any{}, "retry": retry, "observed": map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.write("state/nudge-on-route-delivery.json", string(state), 0o600)
+	if err := f.run(); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.nudges(); got != "worker\n" {
+		t.Fatalf("ready work behind 21 blocked routes = %q, want one nudge", got)
 	}
 }
 
@@ -799,6 +868,31 @@ func TestRouteNotificationWhitespaceStateReadsAsAbsent(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// An unreadable state file is not a blank one: exec must report it and leave
+// it in place, not start over and lose its notifications.
+func TestRouteNotificationUnreadableStateFailsClosed(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+	f := newRouteScriptFixture(t)
+	f.seed("bead.created", true)
+	path := filepath.Join(f.dir, "state/nudge-on-route-delivery.json")
+	f.write("state/nudge-on-route-delivery.json", `{"version":1,"cursor":1,"pending":{},"notified":{"test-work":"worker"},"retry":{}}`, 0o000)
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+	if !f.due() {
+		t.Fatal("unreadable state did not hand the failure to exec")
+	}
+	if err := f.run(); err == nil {
+		t.Fatal("exec succeeded over an unreadable state file")
+	}
+	if got := f.nudges(); got != "" {
+		t.Fatalf("unreadable state repeated a notification: %q", got)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0 {
+		t.Fatalf("unreadable state file was replaced: %v, %v", info, err)
 	}
 }
 
