@@ -153,6 +153,8 @@ func TestBuildPodRejectsMalformedSecretProjection(t *testing.T) {
 		{"blank env name", &Provider{secretEnv: []runtime.K8sSecretEnv{{Secret: "s", Key: "k"}}}, "name"},
 		{"invalid env name", &Provider{secretEnv: []runtime.K8sSecretEnv{{Name: "bad-name", Secret: "s", Key: "k"}}}, "environment variable"},
 		{"duplicate env name", &Provider{secretEnv: []runtime.K8sSecretEnv{{Name: "TOKEN", Secret: "s", Key: "k"}, {Name: "TOKEN", Secret: "s2", Key: "k"}}}, "duplicated"},
+		{"reserved session identity", &Provider{secretEnv: []runtime.K8sSecretEnv{{Name: "GC_INSTANCE_TOKEN", Secret: "s", Key: "k"}}}, "reserved"},
+		{"reserved store identity", &Provider{secretEnv: []runtime.K8sSecretEnv{{Name: "BEADS_DOLT_SERVER_DATABASE", Secret: "s", Key: "k"}}}, "reserved"},
 		{"blank mount secret", &Provider{secretMounts: []runtime.K8sSecretMount{{MountPath: "/secret"}}}, "secret"},
 		{"relative mount path", &Provider{secretMounts: []runtime.K8sSecretMount{{Secret: "s", MountPath: "secret"}}}, "absolute"},
 		{"duplicate mount path", &Provider{secretMounts: []runtime.K8sSecretMount{{Secret: "s", MountPath: "/secret"}, {Secret: "s2", MountPath: "/secret"}}}, "duplicated"},
@@ -166,6 +168,22 @@ func TestBuildPodRejectsMalformedSecretProjection(t *testing.T) {
 				t.Fatalf("buildPod error = %v, want text %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestBuildPodAllowsDoltCredentialProjection(t *testing.T) {
+	p := newProviderWithOps(newFakeK8sOps())
+	p.secretEnv = []runtime.K8sSecretEnv{
+		{Name: "GC_DOLT_PASSWORD", Secret: "dolt", Key: "password"},
+		{Name: "BEADS_DOLT_SERVER_USER", Secret: "dolt", Key: "user"},
+	}
+	pod, err := buildPod("test-session", runtime.Config{}, p)
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+	env := pod.Spec.Containers[0].Env
+	if !hasSecretEnvRef(env, "GC_DOLT_PASSWORD", "dolt", "password") || !hasSecretEnvRef(env, "BEADS_DOLT_SERVER_USER", "dolt", "user") {
+		t.Fatalf("Dolt credentials were not projected: %v", env)
 	}
 }
 
