@@ -569,8 +569,10 @@ func TestLiveForSeesThroughClassHandles(t *testing.T) {
 }
 
 // exactBatchShapedStore is a store with its own exact batch read and no
-// Handles: the shape of a BdStore, a ProxiedStore and cmd/gc's emitting class
-// store. found marks which store answered.
+// Handles. It is one fake standing for the three production stores of that
+// shape, a BdStore, a ProxiedStore and cmd/gc's emitting class store: what
+// LiveFor does with them depends only on that shape. found marks the answer
+// as the store's own.
 type exactBatchShapedStore struct {
 	*MemStore
 	found string
@@ -585,26 +587,25 @@ func (s *exactBatchShapedStore) GetExactBatch([]string) (map[string]Bead, []stri
 // batch read exactly as HandlesFor(raw).Live does (beads.GetMany relies on
 // it), rather than answering ErrExactBatchGetUnsupported from the handle.
 func TestLiveForKeepsTheExactBatchRead(t *testing.T) {
-	for _, shape := range []string{"BdStore", "ProxiedStore", "emitting class store"} {
-		raw := &exactBatchShapedStore{MemStore: NewMemStore(), found: shape}
-		for name, s := range map[string]Store{
-			"the store":      raw,
-			"a handle":       SessionStore{raw},
-			"nested handles": MailStore{SessionStore{raw}},
-		} {
-			for reader, live := range map[string]LiveReader{"LiveFor": LiveFor(s), "HandlesFor(raw)": HandlesFor(raw).Live} {
-				getter, ok := live.(ExactBatchGetter)
-				if !ok {
-					t.Fatalf("%s %s: %s reader %T has no GetExactBatch", shape, name, reader, live)
-				}
-				found, _, err := getter.GetExactBatch([]string{"x"})
-				if err != nil {
-					t.Errorf("%s %s: %s GetExactBatch: %v", shape, name, reader, err)
-					continue
-				}
-				if _, ok := found[shape]; !ok {
-					t.Errorf("%s %s: %s GetExactBatch did not reach the store's own batch read: %v", shape, name, reader, found)
-				}
+	const shape = "exact-batch store"
+	raw := &exactBatchShapedStore{MemStore: NewMemStore(), found: shape}
+	for name, s := range map[string]Store{
+		"the store":      raw,
+		"a handle":       SessionStore{raw},
+		"nested handles": MailStore{SessionStore{raw}},
+	} {
+		for reader, live := range map[string]LiveReader{"LiveFor": LiveFor(s), "HandlesFor(raw)": HandlesFor(raw).Live} {
+			getter, ok := live.(ExactBatchGetter)
+			if !ok {
+				t.Fatalf("%s %s: %s reader %T has no GetExactBatch", shape, name, reader, live)
+			}
+			found, _, err := getter.GetExactBatch([]string{"x"})
+			if err != nil {
+				t.Errorf("%s %s: %s GetExactBatch: %v", shape, name, reader, err)
+				continue
+			}
+			if _, ok := found[shape]; !ok {
+				t.Errorf("%s %s: %s GetExactBatch did not reach the store's own batch read: %v", shape, name, reader, found)
 			}
 		}
 	}

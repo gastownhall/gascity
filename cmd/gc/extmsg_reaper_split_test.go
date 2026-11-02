@@ -13,46 +13,89 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// extmsgReaperSplitFixture is a controller runtime whose messaging and
-// sessions classes live in two different stores (the fixture
-// TestCityExtMsgServicesRouteEachClassToItsOwnStore uses), with a binding the
-// controller's own services wrote to the messaging store for a session that
-// then respawned. It returns the runtime, the messaging store, the binding id
-// and the respawned session's id.
-func extmsgReaperSplitFixture(t *testing.T) (cr *CityRuntime, messaging beads.Store, bindingID, respawnedID string) {
+// extmsgReaperSplit is a controller runtime whose messaging and sessions
+// classes live in two different stores (the fixture
+// TestCityExtMsgServicesRouteEachClassToItsOwnStore uses), the controller's own
+// external-messaging services, and one session the test can respawn.
+type extmsgReaperSplit struct {
+	cr        *CityRuntime
+	messaging beads.Store
+	sessions  beads.Store
+	svc       *extmsg.Services
+	oldID     string
+}
+
+func newExtmsgReaperSplit(t *testing.T) *extmsgReaperSplit {
 	t.Helper()
 	work := splittest.NewWorkStore(t, "hq")
-	messaging = splittest.NewClassStore(t, config.BeadClassMessaging)
-	sessions := splittest.NewClassStore(t, config.BeadClassSessions)
-	routes := &storageRoutes{stores: map[coordclass.Class]beads.Store{
-		coordclass.ClassMessaging: messaging,
-		coordclass.ClassSessions:  sessions,
-	}}
-	cr = &CityRuntime{cityName: "c", cityPath: t.TempDir(), storageRoutes: routes, standaloneCityStore: work}
-	now := time.Date(2026, time.March, 23, 9, 0, 0, 0, time.UTC)
-	newSession := func() beads.Bead {
-		b, err := sessions.Create(beads.Bead{
-			Title:    "session gc-pl",
-			Type:     session.BeadType,
-			Labels:   []string{session.LabelSession},
-			Metadata: map[string]string{"session_name": "gc-pl"},
-		})
-		if err != nil {
-			t.Fatalf("create session bead: %v", err)
-		}
-		return b
+	f := &extmsgReaperSplit{
+		messaging: splittest.NewClassStore(t, config.BeadClassMessaging),
+		sessions:  splittest.NewClassStore(t, config.BeadClassSessions),
 	}
-	old := newSession()
-	svc := newCityExtMsgServices(routes, work, cr.cityPath)
-	ref := extmsg.ConversationRef{ScopeID: "city-1", Provider: "slack", AccountID: "acct-1", ConversationID: "C0B25SS12CD", Kind: extmsg.ConversationRoom}
-	bound, err := svc.Bindings.Bind(context.Background(), extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}, extmsg.BindInput{Conversation: ref, SessionID: old.ID, Now: now})
+	routes := &storageRoutes{stores: map[coordclass.Class]beads.Store{
+		coordclass.ClassMessaging: f.messaging,
+		coordclass.ClassSessions:  f.sessions,
+	}}
+	f.cr = &CityRuntime{cityName: "c", cityPath: t.TempDir(), storageRoutes: routes, standaloneCityStore: work}
+	f.svc = newCityExtMsgServices(routes, work, f.cr.cityPath)
+	f.oldID = f.newSession(t)
+	return f
+}
+
+func (f *extmsgReaperSplit) newSession(t *testing.T) string {
+	t.Helper()
+	b, err := f.sessions.Create(beads.Bead{
+		Title:    "session gc-pl",
+		Type:     session.BeadType,
+		Labels:   []string{session.LabelSession},
+		Metadata: map[string]string{"session_name": "gc-pl"},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	return b.ID
+}
+
+// respawn closes the old session and mints its replacement under the same
+// name, returning the replacement's id.
+func (f *extmsgReaperSplit) respawn(t *testing.T) string {
+	t.Helper()
+	if err := f.sessions.Close(f.oldID); err != nil {
+		t.Fatalf("close old session: %v", err)
+	}
+	return f.newSession(t)
+}
+
+// wantSessionID asserts the messaging store's row id points at want. It reads
+// the row itself: the services heal at read time, which would hide whether
+// the reaper ran over the row.
+func (f *extmsgReaperSplit) wantSessionID(t *testing.T, what, id, want string) {
+	t.Helper()
+	row, err := f.messaging.Get(id)
+	if err != nil {
+		t.Fatalf("get %s row: %v", what, err)
+	}
+	if got := row.Metadata["session_id"]; got != want {
+		t.Fatalf("the reaper left the messaging store's %s on session %q, want the respawned %q", what, got, want)
+	}
+}
+
+var extmsgReaperTestCaller = extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+
+var extmsgReaperTestRef = extmsg.ConversationRef{ScopeID: "city-1", Provider: "slack", AccountID: "acct-1", ConversationID: "C0B25SS12CD", Kind: extmsg.ConversationRoom}
+
+// bind binds the conversation to the old session and returns the binding id.
+func (f *extmsgReaperSplit) bind(t *testing.T) string {
+	t.Helper()
+	bound, err := f.svc.Bindings.Bind(context.Background(), extmsgReaperTestCaller, extmsg.BindInput{
+		Conversation: extmsgReaperTestRef,
+		SessionID:    f.oldID,
+		Now:          time.Date(2026, time.March, 23, 9, 0, 0, 0, time.UTC),
+	})
 	if err != nil {
 		t.Fatalf("Bind: %v", err)
 	}
-	if err := sessions.Close(old.ID); err != nil {
-		t.Fatalf("close old session: %v", err)
-	}
-	return cr, messaging, bound.ID, newSession().ID
+	return bound.ID
 }
 
 // TestControllerReapsExtmsgBindingsFromTheMessagingStore: the controller's
@@ -61,19 +104,13 @@ func extmsgReaperSplitFixture(t *testing.T) (cr *CityRuntime, messaging beads.St
 // both, so on a city whose two classes live in two stores it never saw the
 // bindings and a respawned session's binding was never re-pointed.
 func TestControllerReapsExtmsgBindingsFromTheMessagingStore(t *testing.T) {
-	cr, messaging, bindingID, respawnedID := extmsgReaperSplitFixture(t)
+	f := newExtmsgReaperSplit(t)
+	bindingID := f.bind(t)
+	respawnedID := f.respawn(t)
 
-	cr.tickReapStaleExtmsgBindings(&tickPass{ctx: context.Background()})
+	f.cr.tickReapStaleExtmsgBindings(&tickPass{ctx: context.Background()})
 
-	// Read the binding row itself: ResolveByConversation heals at read time,
-	// which would hide whether the reaper ran over the row.
-	row, err := messaging.Get(bindingID)
-	if err != nil {
-		t.Fatalf("get binding row: %v", err)
-	}
-	if got := row.Metadata["session_id"]; got != respawnedID {
-		t.Fatalf("the reaper left the messaging store's binding on session %q, want the respawned %q", got, respawnedID)
-	}
+	f.wantSessionID(t, "binding", bindingID, respawnedID)
 }
 
 // TestControllerReapsExtmsgBindingsFromTheMessagingStoreControl is the
@@ -81,15 +118,41 @@ func TestControllerReapsExtmsgBindingsFromTheMessagingStore(t *testing.T) {
 // bindings and the sessions directory for liveness, re-points the binding, so
 // the test above fails only on the routing.
 func TestControllerReapsExtmsgBindingsFromTheMessagingStoreControl(t *testing.T) {
-	cr, messaging, bindingID, respawnedID := extmsgReaperSplitFixture(t)
-	if _, err := extmsg.ReapStaleBindings(context.Background(), cr.mailBeadStore(), cr.sessionsBeadStore(), time.Now()); err != nil {
+	f := newExtmsgReaperSplit(t)
+	bindingID := f.bind(t)
+	respawnedID := f.respawn(t)
+	stores := f.cr.cityStores()
+	if _, err := extmsg.ReapStaleBindings(context.Background(), stores.Mail(), stores.Sessions(), time.Now()); err != nil {
 		t.Fatalf("ReapStaleBindings: %v", err)
 	}
-	row, err := messaging.Get(bindingID)
+	f.wantSessionID(t, "binding", bindingID, respawnedID)
+}
+
+// TestControllerReapsExtmsgParticipantsFromTheMessagingStore is the
+// participant reaper's twin: a group participant on the old session, in the
+// messaging store, follows the respawn when the controller ticks.
+func TestControllerReapsExtmsgParticipantsFromTheMessagingStore(t *testing.T) {
+	f := newExtmsgReaperSplit(t)
+	ctx := context.Background()
+	group, err := f.svc.Groups.EnsureGroup(ctx, extmsgReaperTestCaller, extmsg.EnsureGroupInput{
+		RootConversation: extmsgReaperTestRef,
+		Mode:             extmsg.GroupModeLauncher,
+		DefaultHandle:    "alpha",
+	})
 	if err != nil {
-		t.Fatalf("get binding row: %v", err)
+		t.Fatalf("EnsureGroup: %v", err)
 	}
-	if got := row.Metadata["session_id"]; got != respawnedID {
-		t.Fatalf("control: binding on %q, want %q", got, respawnedID)
+	participant, err := f.svc.Groups.UpsertParticipant(ctx, extmsgReaperTestCaller, extmsg.UpsertParticipantInput{
+		GroupID:   group.ID,
+		Handle:    "alpha",
+		SessionID: f.oldID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertParticipant: %v", err)
 	}
+	respawnedID := f.respawn(t)
+
+	f.cr.tickReapStaleExtmsgParticipants(&tickPass{ctx: ctx})
+
+	f.wantSessionID(t, "participant", participant.ID, respawnedID)
 }
