@@ -84,6 +84,39 @@ func jsonCacheAgeOf(t *testing.T, what string, out []byte) float64 {
 	return *doc.CacheAgeS
 }
 
+// beadsListJSONVia runs gc beads list --format=json through lane's API client
+// and returns its stdout.
+func beadsListJSONVia(t *testing.T, h *charHarness, lane charLane) []byte {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	if code := routeBeadsList(h.cityPath, lane.client, "", "json", beadFilters{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("%s: beads list --format=json exit %d: %s", lane.name, code, stderr.String())
+	}
+	return stdout.Bytes()
+}
+
+// beadsListCacheAgeVia returns the _cache_age_s gc beads list --format=json
+// prints through lane. Only a remote target prints the {beads, _cache_age_s}
+// envelope (#8699); a local target prints the bare array on every route, so
+// for a local lane it fails the test unless the output is that bare array
+// with no _cache_age_s, and reports ok=false.
+func beadsListCacheAgeVia(t *testing.T, h *charHarness, lane charLane) (age float64, ok bool) {
+	t.Helper()
+	what := lane.name + ": beads list --format=json"
+	out := beadsListJSONVia(t, h, lane)
+	if lane.client.IsRemote() {
+		return jsonCacheAgeOf(t, what, out), true
+	}
+	var rows []json.RawMessage
+	if err := json.Unmarshal(out, &rows); err != nil {
+		t.Fatalf("%s: a local target must print the bare array: %v\n%s", what, err, out)
+	}
+	if bytes.Contains(out, []byte("_cache_age_s")) {
+		t.Fatalf("%s: a local target printed _cache_age_s:\n%s", what, out)
+	}
+	return 0, false
+}
+
 func apiLanes(t *testing.T, h *charHarness) []charLane {
 	t.Helper()
 	var out []charLane
@@ -155,17 +188,16 @@ func TestCityAPIReportsTheCityCacheAge(t *testing.T) {
 			}
 
 			lanes := apiLanes(t, h)
+			var remoteLanes, localLanes int
 			for _, lane := range lanes {
-				var stdout, stderr bytes.Buffer
-				if lane.client.IsRemote() {
-					if code := routeBeadsList(h.cityPath, lane.client, "", "json", beadFilters{}, &stdout, &stderr); code != 0 {
-						t.Fatalf("%s: beads list --format=json exit %d: %s", lane.name, code, stderr.String())
-					}
-					inRange(lane.name+": beads list --format=json", jsonCacheAgeOf(t, lane.name+": beads list --format=json", stdout.Bytes()))
-					stdout.Reset()
-					stderr.Reset()
+				if age, ok := beadsListCacheAgeVia(t, h, lane); ok {
+					remoteLanes++
+					inRange(lane.name+": beads list --format=json", age)
+				} else {
+					localLanes++
 				}
 
+				var stdout, stderr bytes.Buffer
 				if code := routeBeadsList(h.cityPath, lane.client, "", "text", beadFilters{}, &stdout, &stderr); code != 0 {
 					t.Fatalf("%s: beads list exit %d: %s", lane.name, code, stderr.String())
 				}
@@ -198,6 +230,10 @@ func TestCityAPIReportsTheCityCacheAge(t *testing.T) {
 				}
 			}
 
+			if remoteLanes == 0 || localLanes == 0 {
+				t.Fatalf("precondition: beads list ran over %d remote and %d local API lanes, want at least one of each", remoteLanes, localLanes)
+			}
+
 			var stdout, stderr bytes.Buffer
 			remote := lanes[0]
 			if code := routeSessionList(h.cityPath, "", "", remote.client, "", true, &stdout, &stderr); code != 0 {
@@ -222,17 +258,10 @@ func TestCityAPIReportsTheCityCacheAge(t *testing.T) {
 			t.Errorf("GET /beads X-GC-Cache-Age-S = %v, want 0 over an uncached store", age)
 		}
 		for _, lane := range apiLanes(t, h) {
-			var stdout, stderr bytes.Buffer
-			if lane.client.IsRemote() {
-				if code := routeBeadsList(h.cityPath, lane.client, "", "json", beadFilters{}, &stdout, &stderr); code != 0 {
-					t.Fatalf("%s: beads list --format=json exit %d: %s", lane.name, code, stderr.String())
-				}
-				if age := jsonCacheAgeOf(t, lane.name+": beads list --format=json", stdout.Bytes()); age != 0 {
-					t.Errorf("%s: beads list --format=json _cache_age_s = %v, want 0 over an uncached store", lane.name, age)
-				}
-				stdout.Reset()
-				stderr.Reset()
+			if age, ok := beadsListCacheAgeVia(t, h, lane); ok && age != 0 {
+				t.Errorf("%s: beads list --format=json _cache_age_s = %v, want 0 over an uncached store", lane.name, age)
 			}
+			var stdout, stderr bytes.Buffer
 			if code := routeBeadsList(h.cityPath, lane.client, "", "text", beadFilters{}, &stdout, &stderr); code != 0 {
 				t.Fatalf("%s: beads list exit %d: %s", lane.name, code, stderr.String())
 			}
