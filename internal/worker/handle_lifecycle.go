@@ -826,7 +826,25 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	if resumeCommand := strings.TrimSpace(h.session.Resume.ResumeCommand); resumeCommand != "" {
 		resumeInfo.ResumeCommand = resumeCommand
 	}
-	isClaude := strings.Contains(strings.ToLower(strings.TrimSpace(resumeInfo.Provider)), "claude")
+	if strings.TrimSpace(pr.Metadata["started_config_hash"]) == "" && h.unlaunchedSessionKey(resumeInfo) {
+		return startCommandWithSessionID(resumeInfo, h.session)
+	}
+	return sessionpkg.BuildResumeCommand(resumeInfo), nil
+}
+
+// unlaunchedSessionKey reports whether info's session key names a
+// conversation the provider never started, so a resume of it would exit at
+// once: the handle can name a new conversation (a session-id flag), and the
+// keyed transcript probe reads the key's transcript absent in the roots and
+// work dir this launch uses. A provider the probe cannot read, or a launch
+// without a work dir, is not judged unlaunched. The caller restricts it to a
+// row with no committed conversation (an empty started_config_hash), which is
+// what every key rotation leaves.
+func (h *SessionHandle) unlaunchedSessionKey(info sessionpkg.Info) bool {
+	if h.session.Resume.SessionIDFlag == "" || strings.TrimSpace(info.SessionKey) == "" {
+		return false
+	}
+	isClaude := strings.Contains(strings.ToLower(strings.TrimSpace(info.Provider)), "claude")
 	probePaths := h.searchPaths
 	if len(probePaths) == 0 || !isClaude {
 		probePaths = DefaultSearchPaths()
@@ -836,13 +854,10 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	}
 	workDir := strings.TrimSpace(h.runtimeHints().WorkDir)
 	if workDir == "" {
-		workDir = resumeInfo.WorkDir
+		workDir = info.WorkDir
 	}
-	present, probeable := workertranscript.HasKeyedTranscript(probePaths, resumeInfo.Provider, workDir, resumeInfo.SessionKey)
-	if probeable && !present && h.session.Resume.SessionIDFlag != "" {
-		return startCommandWithSessionID(resumeInfo, h.session)
-	}
-	return sessionpkg.BuildResumeCommand(resumeInfo), nil
+	present, probeable := workertranscript.HasKeyedTranscript(probePaths, info.Provider, workDir, info.SessionKey)
+	return probeable && !present
 }
 
 func startCommandWithSessionID(info sessionpkg.Info, spec SessionSpec) (string, error) {

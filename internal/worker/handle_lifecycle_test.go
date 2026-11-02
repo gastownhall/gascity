@@ -186,6 +186,15 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			want: "claude --resume " + rotatedKey,
 		},
 		{
+			name:     "AC-3 committed conversation resumes without a transcript",
+			provider: "claude",
+			spec:     claudeSpec,
+			setup: func(t *testing.T, f rotatedKeyFixture) {
+				setMeta(t, f, "started_config_hash", "hash-abc")
+			},
+			want: "claude --resume " + rotatedKey,
+		},
+		{
 			name:     "empty key keeps the base command",
 			provider: "claude",
 			spec:     claudeSpec,
