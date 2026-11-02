@@ -78,6 +78,12 @@ configure those Pod fields for a session; `GC_K8S_RUN_AS_USER`,
 `GC_K8S_RUN_AS_GROUP`, and `GC_K8S_FS_GROUP` environment variables override
 the TOML values. Gas City does not allocate UIDs.
 
+Agent pods now set `runAsNonRoot`, and Kubernetes cannot verify a named image
+user against it. An agent image with a named `USER`, such as an older
+`USER gcagent` image or one that inherits it from `Dockerfile.base`, fails with
+`CreateContainerConfigError` until it is rebuilt with a numeric `USER` or
+`run_as_user` is set to its UID.
+
 The legacy `LINUX_USERNAME` path is preserved: it starts the main container as
 root to create the account and chown its work directory before switching with
 `su`. Such pods are not admitted under Restricted Pod Security; use that
