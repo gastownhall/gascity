@@ -27,7 +27,7 @@ for you; the other methods require manual installation.
 | jq | Yes | — | `brew install jq` | `apt install jq` | JSON processing |
 | git | Yes | — | (built-in) | (built-in) | Version control |
 | dolt | Yes | 2.6.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) | Beads data plane |
-| bd (Beads CLI) | Yes | 1.3.0 minimum; 1.3.2 tested | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking |
+| bd (Beads CLI) | Yes | 1.3.0 or newer | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking |
 | flock | Yes | — | `brew install flock` | (built-in via util-linux) | File locking |
 | gh | Optional | — | `brew install gh` | [cli.github.com](https://cli.github.com/) | GitHub gate checks |
 | Go 1.27.3+ | Source only | 1.27.3 | `brew install go` | [golang.org](https://go.dev/dl/) | Compiler |
@@ -36,33 +36,16 @@ for you; the other methods require manual installation.
 Use a final Dolt 2.6.0 or newer. Gas City's managed Dolt checks reject older
 and pre-release builds because they are below the managed bd/Dolt compatibility
 floor: 2.6.0 is the first Dolt built with a Go toolchain that distrusts the
-compromised eMudhra CA intermediates. Releases before 1.86.2 can also miss the
-upstream GC/writer deadlock fix in dolthub/dolt commit `ccf7bde206`, which can
-hang `dolt_backup sync` under heavy write load.
+compromised eMudhra CA intermediates.
 
-The exact versions CI pins are in [`deps.env`](https://github.com/gastownhall/gascity/blob/main/deps.env).
+`brew install gascity` installs a current `bd` along with `gc`. With another
+install method, install the latest
+[Beads release](https://github.com/gastownhall/beads/releases).
 
-The tested bd is v1.3.2: `brew install beads` (or `brew upgrade beads`)
-installs it, or download `bd` for your platform from the
-[v1.3.2 release assets](https://github.com/gastownhall/beads/releases/tag/v1.3.2).
-With bd v1.3.0 or v1.3.1, a city or rig that connects to its Dolt server
-directly falls back from its native store to the bd CLI, and `gc doctor`
-reports a `beads-store` warning; a proxied city or rig (the default) always
-uses the bd CLI. With bd v1.3.0, proxied `bd backup` and closed-wisp purge are
-also skipped.
-
-Gas City 1.4.2 pairs the native store with Beads 1.3.0, and main pairs it with
-Beads 1.3.2, which keeps the same schema. When upgrading
-an existing shared database from Beads 1.2.2, coordinate the upgrade of all
-clients using that database, then run `bd migrate schema` from the workspace
-(for a city, see [Migrate the Beads schema](/getting-started/upgrading#migrate-the-beads-schema)).
-The tested upgrade moves schema 53 to 66 and preserves existing beads. Older
-clients cannot use the migrated schema. Fresh workspaces initialize directly
-at the new schema.
-
-From a clone of the Gas City repository, contributors can install the exact
-bd archive CI pins with
-`set -a && . ./deps.env && set +a && .github/scripts/install-bd-archive.sh "$BD_VERSION"`.
+An upgrade that moves an existing shared database to a newer Beads schema needs
+every client of that database upgraded together and a one-time `bd migrate
+schema`; see [Upgrading an existing city](/getting-started/upgrading). Fresh
+workspaces start at the current schema.
 
 ## Homebrew (recommended)
 
@@ -231,7 +214,7 @@ To change Gas City itself (tests, lint, docs preview), follow
 Regardless of install method, confirm everything is working:
 
 ```bash
-gc version          # prints the installed version, such as 1.5.1
+gc version          # prints the installed version
 ```
 
 If that runs `git commit` instead of Gas City, your shell has a `gc` alias.

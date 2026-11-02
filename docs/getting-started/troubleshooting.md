@@ -122,7 +122,7 @@ per-city `.gc/system/packs` tree, adds the missing pinned import(s) to
 
 ## `gascity-pack-binding` Doctor Warning
 
-Cities created by gc v1.4.x import the public Gas City pack under the key
+Cities created by older releases import the public Gas City pack under the key
 `gascity`:
 
 ```toml
@@ -132,9 +132,9 @@ source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 
 The import key namespaces the pack's commands and skills, and the pack
 ecosystem is written against `gc`: the pack documents skill `gc.mayor`, and
-role prompts in Gas City pack releases after 0.1.6 run `gc gc claim`. Under
+role prompts in current Gas City pack releases run `gc gc claim`. Under
 `[imports.gascity]` that command is `gc gascity claim`, so role workers fail
-their first claim once the pack is bumped past 0.1.6. Current `gc init` writes
+their first claim once the pack is updated. Current `gc init` writes
 `[imports.gc]`.
 
 `gc doctor` reports this as a warning; the city keeps working at the pinned
@@ -282,9 +282,7 @@ durable versioned storage and is recommended for real work.
 Gas City requires a final Dolt 2.6.0 or newer. Older and pre-release builds
 are below the managed bd/Dolt compatibility floor: 2.6.0 is the first Dolt
 built with a Go toolchain that distrusts the compromised eMudhra CA
-intermediates. Releases before 1.86.2 can also miss the upstream GC/writer
-deadlock fix in dolthub/dolt commit `ccf7bde206`, which can hang
-`dolt_backup sync` under heavy write load. Check your version:
+intermediates. Check your version:
 
 ```bash
 dolt version
@@ -584,13 +582,6 @@ switch the agent to a provider that can receive it.
 A server in an agent's own `agents/<name>/mcp/` directory is meant for that
 agent alone. If the agent's provider cannot receive it, that agent does not
 start, and the warning says `cannot start`; the rest of the city still starts.
-
-## `gc version` Prints Unexpected Output
-
-If `gc version` prints git progress lines (`Enumerating objects...`) instead
-of a clean version string, upgrade to Gas City v0.13.4 or later. This was a
-bug where remote pack fetches wrote git sideband output to the terminal,
-fixed in [PR #141](https://github.com/gastownhall/gascity/pull/141).
 
 ## Provider Credentials Dropped When the Supervisor Starts
 

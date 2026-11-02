@@ -85,8 +85,8 @@ a fresh live session to watch.)
 ```shell
 ~/my-project
 $ gc session list --template my-project/reviewer
-ID       TEMPLATE              STATE     REASON  TARGET        TITLE     AGE  LAST ACTIVE
-mc-8sfd  my-project/reviewer   creating  create  reviewer-a1b  reviewer  1s   -
+ID       TEMPLATE             STATE     REASON  TARGET        TITLE     WORKDIR                AGE  LAST ACTIVE
+mc-8sfd  my-project/reviewer  creating  create  reviewer-a1b  reviewer  /Users/you/my-project  1s   -
 
 ~/my-project
 $ gc session peek mc-8sfd   # use the ID your list printed
@@ -159,9 +159,9 @@ and the mayor up for ten hours (your IDs, ages, and states will differ):
 ```shell
 ~/my-project
 $ gc session list
-ID       TEMPLATE              STATE     REASON          TARGET        TITLE     AGE  LAST ACTIVE
-mc-8sfd  my-project/reviewer   creating  create          reviewer-a1b  reviewer  1s   -
-mc-5o1   mayor                 active    session,config  mayor         mayor     10h  14m ago
+ID       TEMPLATE             STATE     REASON          TARGET        TITLE     WORKDIR                AGE  LAST ACTIVE
+mc-8sfd  my-project/reviewer  creating  create          reviewer-a1b  reviewer  /Users/you/my-project  1s   -
+mc-5o1   mayor                active    session,config  mayor         mayor     /Users/you/my-city     10h  14m ago
 ```
 
 The reviewer will go idle and be shut down once its work is done. The mayor has
@@ -234,8 +234,8 @@ Confirm the session remains available after the nudge:
 ```shell
 ~/my-city
 $ gc session list
-ID      TEMPLATE  STATE   REASON          TARGET  TITLE  AGE  LAST ACTIVE
-mc-5o1  mayor     active  session,config  mayor   mayor  10h  5s ago
+ID      TEMPLATE  STATE   REASON          TARGET  TITLE  WORKDIR             AGE  LAST ACTIVE
+mc-5o1  mayor     active  session,config  mayor   mayor  /Users/you/my-city  10h  5s ago
 ```
 
 ## Session logs

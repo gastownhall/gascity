@@ -65,14 +65,14 @@ $ gc init ~/my-city --template gascity --default-provider claude
 Created gascity config (Level 1) in "my-city".
 [6/8] Checking provider readiness
 [7/8] Registering city with supervisor
-Registered city 'my-city' (/Users/csells/my-city)
-Installed launchd service: /Users/csells/Library/LaunchAgents/com.gascity.supervisor.plist
+Registered city 'my-city' (/Users/you/my-city)
+Installed launchd service: /Users/you/Library/LaunchAgents/com.gascity.supervisor.plist
 [8/8] Waiting for supervisor to start city
 
 ~
 $ gc cities
 NAME     PATH
-my-city  /Users/csells/my-city
+my-city  /Users/you/my-city
 ```
 
 Use `--default-provider codex` (or `gemini`) for a different coding agent. Run
@@ -188,7 +188,7 @@ To check on the status of your city, use `gc status`:
 ```shell
 ~/my-city
 $ gc status
-my-city  /Users/csells/my-city
+my-city  /Users/you/my-city
   Controller: supervisor-managed (PID 83621)
   API:        http://127.0.0.1:8372
   Authority: supervisor process PID 83621
@@ -264,7 +264,7 @@ name = "my-project"
 # .gc/site.toml — machine-local
 [[rig]]
 name = "my-project"
-path = "/Users/csells/my-project"
+path = "/Users/you/my-project"
 ```
 
 You can also see your city's rigs with `gc rig list`:
@@ -273,14 +273,14 @@ You can also see your city's rigs with `gc rig list`:
 ~/my-project
 $ gc rig list
 
-Rigs in /Users/csells/my-city:
+Rigs in /Users/you/my-city:
 
   my-city (HQ):
     Prefix: mc
     Beads:  initialized
 
   my-project:
-    Path:   /Users/csells/my-project
+    Path:   /Users/you/my-project
     Prefix: mp
     Beads:  initialized
 ```

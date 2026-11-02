@@ -201,9 +201,7 @@ to your `city.toml`.
 Managed Dolt checks require a final Dolt 2.6.0 or newer. Older and
 pre-release builds are below Gas City's managed bd/Dolt compatibility floor:
 2.6.0 is the first Dolt built with a Go toolchain that distrusts the
-compromised eMudhra CA intermediates. Releases before 1.86.2 can also miss the
-upstream GC/writer deadlock fix in dolthub/dolt commit `ccf7bde206`, which can
-hang `dolt_backup sync` under heavy write load.
+compromised eMudhra CA intermediates.
 
 ### Build from source
 

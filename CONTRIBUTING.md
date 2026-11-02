@@ -321,7 +321,7 @@ Before tagging a release, run the macOS smoke test on a Mac:
 
 ```bash
 ./scripts/smoke-macos.sh                     # latest release, arm64
-GC_VERSION=v0.13.4 ./scripts/smoke-macos.sh  # specific version
+GC_VERSION=vX.Y.Z ./scripts/smoke-macos.sh  # a specific release
 GC_ARCH=amd64 ./scripts/smoke-macos.sh       # Intel binary
 ```
 
