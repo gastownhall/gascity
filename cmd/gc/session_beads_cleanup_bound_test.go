@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -73,8 +74,9 @@ func seedRetiredSessionWaits(t *testing.T, mem *beads.MemStore, sessionID string
 }
 
 // bindRetiredSession creates one active external-message binding between the
-// conversation named convID and the retired session.
-func bindRetiredSession(t *testing.T, mem *beads.MemStore, sessionID, convID string) extmsg.ConversationRef {
+// conversation named convID and the retired session, returning the
+// conversation ref and the binding record.
+func bindRetiredSession(t *testing.T, mem *beads.MemStore, sessionID, convID string) (extmsg.ConversationRef, extmsg.SessionBindingRecord) {
 	t.Helper()
 	fabric := extmsg.NewServices(mem)
 	ref := extmsg.ConversationRef{
@@ -85,14 +87,15 @@ func bindRetiredSession(t *testing.T, mem *beads.MemStore, sessionID, convID str
 		Kind:           extmsg.ConversationThread,
 	}
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
-	if _, err := fabric.Bindings.Bind(context.Background(), caller, extmsg.BindInput{
+	record, err := fabric.Bindings.Bind(context.Background(), caller, extmsg.BindInput{
 		Conversation: ref,
 		SessionID:    sessionID,
 		Now:          time.Date(2026, 3, 23, 9, 0, 0, 0, time.UTC),
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("bind session %s to %s: %v", sessionID, convID, err)
 	}
-	return ref
+	return ref, record
 }
 
 // openRetiredSessionWaits counts the session's still-open wait beads.
@@ -146,7 +149,7 @@ func TestCancelStateAssignedToRetiredSessionBeadStopsWaitsLegAndStillRunsExtmsg(
 		store := &slowCleanupStore{MemStore: mem, closeAllPerID: 200 * time.Millisecond}
 		sessionBead := retiredSessionBeadFixture(t, mem)
 		seedRetiredSessionWaits(t, mem, sessionBead.ID, 300)
-		ref := bindRetiredSession(t, mem, sessionBead.ID, "thread-1")
+		ref, _ := bindRetiredSession(t, mem, sessionBead.ID, "thread-1")
 		fabric := extmsg.NewServices(mem)
 
 		var stderr bytes.Buffer
@@ -176,7 +179,8 @@ func TestCancelStateAssignedToRetiredSessionBeadExtmsgLegStopsAtItsOwnDeadline(t
 		seedRetiredSessionWaits(t, mem, sessionBead.ID, 3)
 		refs := make([]extmsg.ConversationRef, 0, 20)
 		for i := 0; i < 20; i++ {
-			refs = append(refs, bindRetiredSession(t, mem, sessionBead.ID, fmt.Sprintf("thread-%d", i)))
+			ref, _ := bindRetiredSession(t, mem, sessionBead.ID, fmt.Sprintf("thread-%d", i))
+			refs = append(refs, ref)
 		}
 		fabric := extmsg.NewServices(mem)
 
@@ -219,7 +223,8 @@ func TestCancelStateAssignedToRetiredSessionBeadExtmsgLegGetsFreshBudgetAfterWai
 		seedRetiredSessionWaits(t, mem, sessionBead.ID, 300)
 		refs := make([]extmsg.ConversationRef, 0, 4)
 		for i := 0; i < 4; i++ {
-			refs = append(refs, bindRetiredSession(t, mem, sessionBead.ID, fmt.Sprintf("thread-%d", i)))
+			ref, _ := bindRetiredSession(t, mem, sessionBead.ID, fmt.Sprintf("thread-%d", i))
+			refs = append(refs, ref)
 		}
 		fabric := extmsg.NewServices(mem)
 
@@ -239,6 +244,199 @@ func TestCancelStateAssignedToRetiredSessionBeadExtmsgLegGetsFreshBudgetAfterWai
 		}
 		if minElapsed, limit := 12*time.Second, 25*time.Second; elapsed < minElapsed || elapsed > limit {
 			t.Errorf("cleanup took %v, want between the spent 10s waits budget plus the extmsg work (%v) and %v", elapsed, minElapsed, limit)
+		}
+	})
+}
+
+// ga-68eubg AC-3: a leg its own budget stopped reports exactly one cut-off
+// line naming the session, the leg, and the budget — and the ordinary error
+// line for that leg stays silent, so a cut-off is distinguishable from a store
+// failure by the line alone.
+func TestCancelStateAssignedToRetiredSessionBeadWaitsCutoffLineIsTheOnlyWaitsDiagnostic(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		mem := beads.NewMemStore()
+		store := &slowCleanupStore{MemStore: mem, closeAllPerID: 200 * time.Millisecond}
+		sessionBead := retiredSessionBeadFixture(t, mem)
+		seedRetiredSessionWaits(t, mem, sessionBead.ID, 300)
+
+		var stderr bytes.Buffer
+		cancelStateAssignedToRetiredSessionBead(store, sessionBead.ID, time.Now(), &stderr)
+
+		want := fmt.Sprintf("session beads: retired-session cleanup for %s: waits leg cut off after %s budget\n", sessionBead.ID, retiredCleanupLegBudget)
+		if got := strings.Count(stderr.String(), want); got != 1 {
+			t.Errorf("waits cut-off line count = %d, want exactly 1 of %q (stderr: %q)", got, want, stderr.String())
+		}
+		if strings.Contains(stderr.String(), "canceling waits for retired session") {
+			t.Errorf("ordinary waits error line printed for a cut-off leg: %q", stderr.String())
+		}
+		if strings.Contains(stderr.String(), "external-messaging leg cut off") {
+			t.Errorf("extmsg cut-off line printed though its leg ran: %q", stderr.String())
+		}
+	})
+}
+
+func TestCancelStateAssignedToRetiredSessionBeadExtmsgCutoffLineIsTheOnlyExtmsgDiagnostic(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		mem := beads.NewMemStore()
+		store := &slowCleanupStore{MemStore: mem, closePerCall: 2 * time.Second}
+		sessionBead := retiredSessionBeadFixture(t, mem)
+		seedRetiredSessionWaits(t, mem, sessionBead.ID, 3)
+		for i := 0; i < 20; i++ {
+			_, _ = bindRetiredSession(t, mem, sessionBead.ID, fmt.Sprintf("thread-%d", i))
+		}
+
+		var stderr bytes.Buffer
+		cancelStateAssignedToRetiredSessionBead(store, sessionBead.ID, time.Now(), &stderr)
+
+		want := fmt.Sprintf("session beads: retired-session cleanup for %s: external-messaging leg cut off after %s budget\n", sessionBead.ID, retiredCleanupLegBudget)
+		if got := strings.Count(stderr.String(), want); got != 1 {
+			t.Errorf("extmsg cut-off line count = %d, want exactly 1 of %q (stderr: %q)", got, want, stderr.String())
+		}
+		if strings.Contains(stderr.String(), "closing external message bindings") {
+			t.Errorf("ordinary extmsg error line printed for a cut-off leg: %q", stderr.String())
+		}
+		if strings.Contains(stderr.String(), "waits leg cut off") {
+			t.Errorf("waits cut-off line printed though its leg finished: %q", stderr.String())
+		}
+	})
+}
+
+var (
+	errCleanupCloseWaitBoom    = errors.New("close-wait boom")
+	errCleanupCloseBindingBoom = errors.New("close-binding boom")
+)
+
+// failingCleanupCloseAllStore fails every batch close with a fixed ordinary
+// store error, with the leg's context live throughout.
+type failingCleanupCloseAllStore struct {
+	*beads.MemStore
+}
+
+func (s failingCleanupCloseAllStore) CloseAll(_ []string, _ map[string]string) (int, error) {
+	return 0, errCleanupCloseWaitBoom
+}
+
+// failingCleanupCloseStore fails closes of the given bead IDs — the binding
+// beads the external-messaging leg closes — with err, leaving the leg's
+// earlier membership close working.
+type failingCleanupCloseStore struct {
+	*beads.MemStore
+	failIDs map[string]struct{}
+	err     error
+}
+
+func (s failingCleanupCloseStore) Close(id string) error {
+	if _, ok := s.failIDs[id]; ok {
+		return s.err
+	}
+	return s.MemStore.Close(id)
+}
+
+// ga-68eubg AC-3: ordinary store errors keep their usual diagnostic lines,
+// byte for byte — only a budget stop turns into a cut-off line.
+func TestCancelStateAssignedToRetiredSessionBeadOrdinaryErrorsKeepTheirLineFormat(t *testing.T) {
+	t.Run("waits store error", func(t *testing.T) {
+		mem := beads.NewMemStore()
+		sessionBead := retiredSessionBeadFixture(t, mem)
+		seedRetiredSessionWaits(t, mem, sessionBead.ID, 2)
+
+		var stderr bytes.Buffer
+		cancelStateAssignedToRetiredSessionBead(failingCleanupCloseAllStore{MemStore: mem}, sessionBead.ID, time.Now(), &stderr)
+
+		want := fmt.Sprintf("session beads: canceling waits for retired session %s: %v\n", sessionBead.ID, errCleanupCloseWaitBoom)
+		if stderr.String() != want {
+			t.Errorf("waits stderr = %q, want exactly %q", stderr.String(), want)
+		}
+	})
+	t.Run("extmsg store error", func(t *testing.T) {
+		mem := beads.NewMemStore()
+		sessionBead := retiredSessionBeadFixture(t, mem)
+		_, binding := bindRetiredSession(t, mem, sessionBead.ID, "thread-1")
+
+		var stderr bytes.Buffer
+		cancelStateAssignedToRetiredSessionBead(failingCleanupCloseStore{
+			MemStore: mem,
+			failIDs:  map[string]struct{}{binding.ID: {}},
+			err:      errCleanupCloseBindingBoom,
+		}, sessionBead.ID, time.Now(), &stderr)
+
+		prefix := fmt.Sprintf("session beads: closing external message bindings for retired session %s: close binding ", sessionBead.ID)
+		line := ""
+		for _, candidate := range strings.Split(stderr.String(), "\n") {
+			if strings.HasPrefix(candidate, prefix) {
+				line = candidate
+				break
+			}
+		}
+		if line == "" {
+			t.Fatalf("extmsg stderr = %q, want a line starting with %q", stderr.String(), prefix)
+		}
+		if !strings.HasSuffix(line, fmt.Sprintf(": %v", errCleanupCloseBindingBoom)) {
+			t.Errorf("extmsg error line = %q, want it to end with the bare store error %q", line, errCleanupCloseBindingBoom)
+		}
+		if strings.Contains(stderr.String(), "cut off") {
+			t.Errorf("cut-off line printed for an ordinary store error: %q", stderr.String())
+		}
+	})
+}
+
+// sentinelCleanupClose stores report an error that wraps context.Canceled from
+// their own store calls while the leg's context is still live — a naive
+// "wraps context.Canceled means cut off" classifier would misread these as a
+// budget stop.
+type sentinelCleanupCloseAllStore struct {
+	*beads.MemStore
+}
+
+func (s sentinelCleanupCloseAllStore) CloseAll(_ []string, _ map[string]string) (int, error) {
+	return 0, fmt.Errorf("store closed the conversation: %w", context.Canceled)
+}
+
+// ga-68eubg AC-3: a context.Canceled-wrapped store error while the leg's own
+// context is still live is an ordinary error, not a cut-off — only the leg's
+// own ended context classifies a leg as cut off.
+func TestCancelStateAssignedToRetiredSessionBeadContextSentinelWhileLegLiveIsNotACutoff(t *testing.T) {
+	t.Run("waits leg live", func(t *testing.T) {
+		mem := beads.NewMemStore()
+		sessionBead := retiredSessionBeadFixture(t, mem)
+		seedRetiredSessionWaits(t, mem, sessionBead.ID, 2)
+
+		var stderr bytes.Buffer
+		cancelStateAssignedToRetiredSessionBead(sentinelCleanupCloseAllStore{MemStore: mem}, sessionBead.ID, time.Now(), &stderr)
+
+		want := fmt.Sprintf("session beads: canceling waits for retired session %s: store closed the conversation: context canceled\n", sessionBead.ID)
+		if stderr.String() != want {
+			t.Errorf("waits stderr = %q, want exactly the ordinary line %q", stderr.String(), want)
+		}
+	})
+	t.Run("extmsg leg live", func(t *testing.T) {
+		mem := beads.NewMemStore()
+		sessionBead := retiredSessionBeadFixture(t, mem)
+		_, binding := bindRetiredSession(t, mem, sessionBead.ID, "thread-1")
+
+		var stderr bytes.Buffer
+		cancelStateAssignedToRetiredSessionBead(failingCleanupCloseStore{
+			MemStore: mem,
+			failIDs:  map[string]struct{}{binding.ID: {}},
+			err:      fmt.Errorf("store closed the conversation: %w", context.Canceled),
+		}, sessionBead.ID, time.Now(), &stderr)
+
+		prefix := fmt.Sprintf("session beads: closing external message bindings for retired session %s: close binding ", sessionBead.ID)
+		line := ""
+		for _, candidate := range strings.Split(stderr.String(), "\n") {
+			if strings.HasPrefix(candidate, prefix) {
+				line = candidate
+				break
+			}
+		}
+		if line == "" {
+			t.Fatalf("extmsg stderr = %q, want a line starting with %q", stderr.String(), prefix)
+		}
+		if !strings.HasSuffix(line, ": store closed the conversation: context canceled") {
+			t.Errorf("extmsg error line = %q, want it to keep the store's sentinel error text", line)
+		}
+		if strings.Contains(stderr.String(), "cut off") {
+			t.Errorf("cut-off line printed for a live leg's store error: %q", stderr.String())
 		}
 	})
 }

@@ -1712,7 +1712,9 @@ const retiredCleanupLegBudget = 10 * time.Second
 // waits and external-message state. Each leg runs under its own
 // retiredCleanupLegBudget, the external-messaging leg's budget starting fresh
 // after the waits leg returns; an unspent waits budget does not shorten it.
-// A leg's error reports on stderr; a nil stderr discards it.
+// A leg its own budget stopped reports one cut-off line naming the session,
+// the leg, and the budget; every other error keeps the leg's ordinary
+// diagnostic line. A nil stderr discards both.
 func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string, now time.Time, stderr io.Writer) {
 	if store == nil || strings.TrimSpace(sessionID) == "" {
 		return
@@ -1723,6 +1725,7 @@ func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string
 	sessFront := sessionFrontDoor(store)
 	waitsCtx, releaseWaitsBudget := context.WithTimeout(context.Background(), retiredCleanupLegBudget)
 	_, capped, err := sessFront.CancelWaits(waitsCtx, sessionID, now)
+	waitsCtxErr := waitsCtx.Err()
 	releaseWaitsBudget()
 	if capped {
 		stampWaitLookupCapDiagnostic(sessFront, sessionID, beads.LookupLimitError{
@@ -1732,13 +1735,22 @@ func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string
 		}, now, "retired-session-cleanup")
 	}
 	if err != nil {
-		fmt.Fprintf(stderr, "session beads: canceling waits for retired session %s: %v\n", sessionID, err) //nolint:errcheck
+		if waitsCtxErr != nil && errors.Is(err, waitsCtxErr) {
+			fmt.Fprintf(stderr, "session beads: retired-session cleanup for %s: waits leg cut off after %s budget\n", sessionID, retiredCleanupLegBudget) //nolint:errcheck
+		} else {
+			fmt.Fprintf(stderr, "session beads: canceling waits for retired session %s: %v\n", sessionID, err) //nolint:errcheck
+		}
 	}
 	extmsgCtx, releaseExtmsgBudget := context.WithTimeout(context.Background(), retiredCleanupLegBudget)
-	err = extmsg.CloseSessionBindings(extmsgCtx, store, sessionID, now)
+	extmsgErr := extmsg.CloseSessionBindings(extmsgCtx, store, sessionID, now)
+	extmsgCtxErr := extmsgCtx.Err()
 	releaseExtmsgBudget()
-	if err != nil {
-		fmt.Fprintf(stderr, "session beads: closing external message bindings for retired session %s: %v\n", sessionID, err) //nolint:errcheck
+	if extmsgErr != nil {
+		if extmsgCtxErr != nil && errors.Is(extmsgErr, extmsgCtxErr) {
+			fmt.Fprintf(stderr, "session beads: retired-session cleanup for %s: external-messaging leg cut off after %s budget\n", sessionID, retiredCleanupLegBudget) //nolint:errcheck
+		} else {
+			fmt.Fprintf(stderr, "session beads: closing external message bindings for retired session %s: %v\n", sessionID, extmsgErr) //nolint:errcheck
+		}
 	}
 }
 
