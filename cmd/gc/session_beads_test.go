@@ -5768,6 +5768,79 @@ func TestSyncSessionBeads_ProviderProjectionNilResolutionPreservesAndNoChurn(t *
 	}
 }
 
+// TestSyncSessionBeads_ProviderProjectionUnnamedStartCommand covers the
+// successful unnamed resolution: an agent or workspace start_command escapes
+// the provider catalog (config.ResolveProvider returns a non-nil provider
+// with an empty Name), so the stored provider name is retained — the
+// non-empty name exception — while the six family/resume fields follow the
+// resolution, its explicit resume_command preserved and the fields it lacks
+// cleared.
+func TestSyncSessionBeads_ProviderProjectionUnnamedStartCommand(t *testing.T) {
+	store := beads.NewMemStore()
+	cs := &countingStore{Store: store}
+	clk := &clock.Fake{Time: time.Date(2026, 11, 2, 13, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	_ = sp.Start(context.TODO(), "worker", runtime.Config{Command: "claude-max chat"})
+	ds := map[string]TemplateParams{
+		"worker": {
+			TemplateName: "worker",
+			Command:      "claude-max chat",
+			ResolvedProvider: &config.ResolvedProvider{
+				Name: "claude-max", BuiltinAncestor: "claude",
+				ResumeFlag: "--resume", ResumeStyle: "flag",
+				ResumeCommand: "claude-max --resume {{.SessionKey}}", SessionIDFlag: "--session-id",
+			},
+		},
+	}
+	var stderr bytes.Buffer
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if len(allSessionBeads(t, cs)) != 1 {
+		t.Fatalf("expected 1 bead after tick 1, got %d", len(allSessionBeads(t, cs)))
+	}
+
+	// Tick 2: the agent switches to a start_command; resolution succeeds
+	// with an unnamed provider that carries an explicit resume command.
+	ds["worker"] = TemplateParams{
+		TemplateName:     "worker",
+		Command:          "./agent.sh",
+		ResolvedProvider: &config.ResolvedProvider{Command: "./agent.sh", ResumeCommand: "./agent.sh resume {{.SessionKey}}"},
+	}
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	for _, c := range []struct{ key, want string }{
+		{"provider", "claude-max"},
+		{"provider_kind", ""},
+		{"builtin_ancestor", ""},
+		{"resume_flag", ""},
+		{"resume_style", ""},
+		{"resume_command", "./agent.sh resume {{.SessionKey}}"},
+		{"session_id_flag", ""},
+	} {
+		if got := allSessionBeads(t, cs)[0].Metadata[c.key]; got != c.want {
+			t.Errorf("unnamed resolution: %s = %q, want %q", c.key, got, c.want)
+		}
+	}
+
+	// Tick 3: a start_command without a resume command clears it.
+	ds["worker"] = TemplateParams{
+		TemplateName:     "worker",
+		Command:          "./agent2.sh",
+		ResolvedProvider: &config.ResolvedProvider{Command: "./agent2.sh"},
+	}
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if got := allSessionBeads(t, cs)[0].Metadata["resume_command"]; got != "" {
+		t.Errorf("unnamed resolution without resume command: resume_command = %q, want empty", got)
+	}
+	if got := allSessionBeads(t, cs)[0].Metadata["provider"]; got != "claude-max" {
+		t.Errorf("unnamed resolution without resume command: provider = %q, want the stored claude-max kept", got)
+	}
+
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+}
+
 func TestSyncSessionBeadsWithSnapshot_RefreshesMissingNamedSessionFromStore(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
