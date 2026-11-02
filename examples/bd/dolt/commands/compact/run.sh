@@ -2588,13 +2588,59 @@ live_gate_arm() {
   return 0
 }
 
+# live_gate_probe DB — prove the server still serves DB with a resolvable
+# HEAD. A fresh client connection asks
+# SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD')): the answer must be
+# "<db>:<hash>" with the served name matching DB (case-insensitively; the
+# server may report the name in its own case) and a nonempty hash, so a
+# server that answers SQL but no longer serves the rewritten database
+# fails. Bounded by the probe timeout: the call timeout capped at 30s.
+# Prints a one-line failure description and returns 1 when DB is not
+# served; silent success means live. Runs in a command substitution from
+# live_gate_check, so it must not mutate gate state.
+live_gate_probe() {
+  lgp_db="$1"
+  lgp_timeout="$call_timeout"
+  if [ "$lgp_timeout" -gt 30 ]; then
+    lgp_timeout=30
+  fi
+  lgp_rc=0
+  lgp_out=""
+  export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
+  lgp_out=$(run_bounded "$lgp_timeout" \
+    dolt --host "$host" --port "$GC_DOLT_PORT" \
+    --user "$GC_DOLT_USER" --no-tls \
+    --use-db "$lgp_db" \
+    sql -r tabular -q "SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))" 2>&1) || lgp_rc=$?
+  if [ "$lgp_rc" -ne 0 ]; then
+    printf 'served HEAD probe failed: rc=%s %s' "$lgp_rc" "$(printf '%s' "$lgp_out" | tail -n 1)"
+    return 1
+  fi
+  lgp_cell=$(printf '%s' "$lgp_out" | awk 'NR==4 {gsub(/[| ]/, ""); print; exit}')
+  lgp_served=$(printf '%s' "$lgp_cell" | cut -d: -f1)
+  lgp_head=$(printf '%s' "$lgp_cell" | cut -d: -f2)
+  case "$lgp_head" in
+    ''|*[!A-Za-z0-9]*)
+      printf 'served HEAD probe returned "%s", expected "<db>:<hash>"' "$lgp_cell"
+      return 1
+      ;;
+  esac
+  if [ "$(printf '%s' "$lgp_served" | tr '[:upper:]' '[:lower:]')" != \
+    "$(printf '%s' "$lgp_db" | tr '[:upper:]' '[:lower:]')" ]; then
+    printf 'served HEAD probe returned "%s", expected "<db>:<hash>"' "$lgp_cell"
+    return 1
+  fi
+  return 0
+}
+
 # live_gate_check DB STEP — prove DB survived the storage rewrite named by
 # STEP. The gate passes only when a data-dir entry that was present before
-# the first rewrite is still present; an initially absent entry (an
-# external-local endpoint) carries no directory invariant. On failure the
-# database is quarantined with the recorded evidence and the check returns 1
-# regardless of whether the marker itself could be persisted. Runs in the
-# current shell: gate state must survive the call.
+# the first rewrite is still present (an initially absent entry — an
+# external-local endpoint — carries no directory invariant) AND the server
+# still serves DB with a resolvable HEAD. On failure the database is
+# quarantined with the recorded evidence and the check returns 1 regardless
+# of whether the marker itself could be persisted. Runs in the current
+# shell: gate state must survive the call.
 live_gate_check() {
   lg_db="$1"
   lg_step="$2"
@@ -2606,6 +2652,13 @@ live_gate_check() {
     live_gate_failed=1
     live_gate_failed_step="$lg_step"
     live_gate_probe_failure="data dir entry $live_gate_dir_path no longer present (before=$live_gate_dir_before after=$lg_dir_after)"
+    live_gate_write_marker "$lg_db" "$lg_dir_after"
+    return 1
+  fi
+  if ! lg_probe_detail=$(live_gate_probe "$lg_db"); then
+    live_gate_failed=1
+    live_gate_failed_step="$lg_step"
+    live_gate_probe_failure="$lg_probe_detail"
     live_gate_write_marker "$lg_db" "$lg_dir_after"
     return 1
   fi

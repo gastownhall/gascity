@@ -922,6 +922,37 @@ case "$query" in
     fi
     exit 0
     ;;
+  *"SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))"*)
+    # The live-database gate's served-HEAD probe. Fault knobs (passed via a
+    # test's extraEnv): FAIL_ALL fails every probe; FAIL_AT=N fails only
+    # probe call N, counted per fixture through the state file, so a test
+    # can let the flatten probe pass and fail a later one. The served HEAD
+    # is read straight from the state file — current_head() carries
+    # mode-specific call counting that the gate must not disturb.
+    if [ "${GC_FAKE_DOLT_LIVE_PROBE_FAIL_ALL:-}" = "1" ]; then
+      printf 'served head probe unavailable\n' >&2
+      exit 61
+    fi
+    if [ -n "${GC_FAKE_DOLT_LIVE_PROBE_FAIL_AT:-}" ]; then
+      calls_file="$state_file.live-probe-calls"
+      calls=0
+      if [ -f "$calls_file" ]; then
+        calls="$(cat "$calls_file")"
+      fi
+      calls=$((calls + 1))
+      printf '%%s\n' "$calls" > "$calls_file"
+      if [ "$calls" = "${GC_FAKE_DOLT_LIVE_PROBE_FAIL_AT}" ]; then
+        printf 'served head probe flaked\n' >&2
+        exit 61
+      fi
+    fi
+    lgp_head="headcommit"
+    if [ -n "$state_file" ] && [ -f "$state_file" ]; then
+      lgp_head="$(sed -n '1p' "$state_file")"
+    fi
+    print_cell "$db:$lgp_head"
+    exit 0
+    ;;
   *"SELECT HASHOF('HEAD')"*)
     if { [ "$mode" = "pending_gc_marker_disappears" ] || [ "$mode" = "pending_gc_marker_disappears_remote" ]; } && [ -n "$pending_gc_marker" ]; then
       rm -f "$pending_gc_marker"
