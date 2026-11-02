@@ -1,12 +1,22 @@
 load("@bazel_lib//lib:copy_directory.bzl", "copy_directory")
 load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@bazel_lib//lib:diff_test.bzl", "diff_test")
+load("@bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
 load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+# JavaScript tooling executes on the build worker even when the Go binary
+# targets another OS. Keep native optional dependencies (Rollup, esbuild) in
+# that execution platform configuration; the generated SPA is platform neutral.
+platform_transition_filegroup(
+    name = "worker_dist",
+    srcs = ["//internal/api/dashboardspa/web/frontend:build"],
+    target_platform = "//platforms:rbe_worker",
+)
 
 # dist/, as embed.go's `//go:embed all:dist` names it, from the Bazel build.
 copy_directory(
     name = "dist",
-    src = "//internal/api/dashboardspa/web/frontend:build",
+    src = ":worker_dist",
     out = "dist",
 )
 
