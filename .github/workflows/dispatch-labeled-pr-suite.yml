@@ -6,7 +6,6 @@ on:
       - labeled
 
 permissions:
-  actions: write
   contents: read
   pull-requests: read
 
@@ -17,13 +16,21 @@ jobs:
       github.event.label.name == 'needs-mac' ||
       github.event.label.name == 'needs-review-formulas'
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: read
     steps:
       # This workflow never checks out or runs pull request code. It reads the
-      # trusted base allowlist, then dispatches a dedicated workflow with the
-      # PR head repository and SHA as explicit inputs.
+      # trusted allowlist from the commit this workflow file was read from
+      # (under pull_request_target always a default-branch commit, whatever
+      # the PR's base), then dispatches a dedicated workflow with the PR head
+      # repository and SHA as explicit inputs. No ref from the
+      # github.event.pull_request payload is checked out
+      # (scripts/pull_request_target_checkout_test.go).
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
 
       - name: Dispatch suite for trusted PR author

@@ -130,20 +130,15 @@ func bundledPackDirForTest(t testing.TB, packName string) string {
 
 func TestBuiltinDatabaseEnumeratorsSkipManagedProbeDatabase(t *testing.T) {
 	doltSystemNeedle := "information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe"
-	maintenanceScratchNeedle := "benchdb|testdb_*|beads_pt*|beads_vr*|beads_test_bench_*|doctest_*|doctortest_*"
-	maintenanceTempNeedle := "beads_t[0-9a-f]"
 	for _, tt := range []struct {
 		pack     string
 		rel      string
 		needle   string
 		minCount int
 	}{
-		{"core", "assets/scripts/jsonl-export.sh", doltSystemNeedle, 1},
-		{"core", "assets/scripts/jsonl-export.sh", maintenanceScratchNeedle, 1},
-		{"core", "assets/scripts/jsonl-export.sh", maintenanceTempNeedle, 1},
-		{"core", "assets/scripts/reaper.sh", doltSystemNeedle, 1},
-		{"core", "assets/scripts/reaper.sh", maintenanceScratchNeedle, 1},
-		{"core", "assets/scripts/reaper.sh", maintenanceTempNeedle, 1},
+		// The core reaper and jsonl-export no longer enumerate server
+		// databases: they visit bound bead scopes through `gc bd`, so neither
+		// the probe database nor test scratch databases can reach them.
 		{"core", "assets/scripts/reaper.sh", "expires_at", 1},
 		{"dolt", "commands/list/run.sh", doltSystemNeedle, 1},
 		{"dolt", "commands/cleanup/run.sh", doltSystemNeedle, 1},
@@ -193,7 +188,7 @@ func TestBuiltinDoltDoctorAllowsAtMinimumVersionWhenProbeSucceeds(t *testing.T) 
 		name string
 		body string
 	}{
-		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 2.1.0\\n'\n"},
+		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 2.6.0\\n'\n"},
 		{name: "flock", body: "#!/bin/sh\nexit 0\n"},
 		{name: "lsof", body: "#!/bin/sh\nexit 0\n"},
 	} {
@@ -209,7 +204,7 @@ func TestBuiltinDoltDoctorAllowsAtMinimumVersionWhenProbeSucceeds(t *testing.T) 
 	if err != nil {
 		t.Fatalf("check-dolt unexpectedly rejected Dolt probe at minimum: %v\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "dolt available (dolt version 2.1.0)") {
+	if !strings.Contains(string(out), "dolt available (dolt version 2.6.0)") {
 		t.Fatalf("check-dolt output = %s, want successful version probe", out)
 	}
 }
@@ -229,7 +224,7 @@ func TestBuiltinDoltDoctorBoundsVersionProbe(t *testing.T) {
 			name: "gtimeout",
 			body: "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$TIMEOUT_CAPTURE\"\nif [ \"$1\" = \"--kill-after=2\" ]; then\n  shift\nfi\nshift\nexec \"$@\"\n",
 		},
-		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 2.1.10\\n'\n"},
+		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 2.6.10\\n'\n"},
 		{name: "flock", body: "#!/bin/sh\nexit 0\n"},
 		{name: "lsof", body: "#!/bin/sh\nexit 0\n"},
 	} {
@@ -332,7 +327,11 @@ func TestBundledPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		`pi.on("before_agent_start"`,
 		"GC_PI_HOOK_VERSION",
 		"gc hook --inject",
-		`run(["prime", "--hook"], ctx.cwd, providerSessionEnv(ctx))`,
+		`run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "SessionStart"))`,
+		`run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "PreCompact"))`,
+		"GC_MANAGED_SESSION_HOOK",
+		"GC_HOOK_EVENT_NAME",
+		"pendingPrimeContext",
 		"GC_PROVIDER_SESSION_ID",
 		"GC_PROVIDER_SESSION_ID_REQUIRED",
 		`stdio: ["ignore", "pipe", "inherit"]`,
@@ -424,7 +423,7 @@ func TestBundledBuiltinPackOrdersScanWithoutWarnings(t *testing.T) {
 }
 
 func TestBundledWorkerPromptsIncludeFilesystemSearchGuidance(t *testing.T) {
-	for _, name := range []string{"pool-worker.md", "graph-worker.md"} {
+	for _, name := range []string{"pool-worker.template.md", "graph-worker.md"} {
 		t.Run(name, func(t *testing.T) {
 			data := readBundledPackFileForTest(t, "core", "assets/prompts/"+name)
 			if !strings.Contains(data, formulaFilesystemSearchGuidance) {
@@ -652,7 +651,7 @@ func TestNoMaintenanceBuiltinPack(t *testing.T) {
 	for _, rel := range []string{
 		"orders/gate-sweep.toml",
 		"orders/orphan-sweep.toml",
-		"orders/wisp-compact.toml",
+		"orders/prune-branches.toml",
 		"assets/scripts/gate-sweep.sh",
 		"doctor/check-binaries/run.sh",
 	} {
@@ -681,7 +680,7 @@ func TestEnsureBuiltinRuntimeAssetsHydratesCacheAndShim(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RepoCachePath(%s): %v", name, err)
 		}
-		if err := builtinpacks.ValidateSyntheticRepo(cachePath, commit); err != nil {
+		if err := builtinpacks.ValidateSyntheticRepo(cachePath, builtinpacks.Repository, commit); err != nil {
 			t.Errorf("%s cache invalid after hydration: %v", name, err)
 		}
 	}
@@ -739,7 +738,7 @@ func TestEnsureBuiltinRuntimeAssetsSkipsShimForNonBdCity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RepoCachePath(core): %v", err)
 	}
-	if err := builtinpacks.ValidateSyntheticRepo(coreCache, commit); err != nil {
+	if err := builtinpacks.ValidateSyntheticRepo(coreCache, builtinpacks.Repository, commit); err != nil {
 		t.Errorf("core cache invalid after hydration: %v", err)
 	}
 }
@@ -1049,7 +1048,7 @@ func TestEnsureBuiltinRuntimeAssetsRehydratesEvictedOptionalLockedBundledCache(t
 	if err != nil {
 		t.Fatalf("RepoCachePath(gastown): %v", err)
 	}
-	if err := builtinpacks.ValidateSyntheticRepo(cachePath, commit); err != nil {
+	if err := builtinpacks.ValidateSyntheticRepo(cachePath, builtinpacks.PublicRepository, commit); err != nil {
 		t.Fatalf("gastown cache invalid after ready: %v", err)
 	}
 
@@ -1065,7 +1064,7 @@ func TestEnsureBuiltinRuntimeAssetsRehydratesEvictedOptionalLockedBundledCache(t
 		t.Fatalf("EnsureBuiltinRuntimeAssets after optional cache eviction: %v", err)
 	}
 
-	if err := builtinpacks.ValidateSyntheticRepo(cachePath, commit); err != nil {
+	if err := builtinpacks.ValidateSyntheticRepo(cachePath, builtinpacks.PublicRepository, commit); err != nil {
 		t.Fatalf("optional locked bundled cache not rehydrated after ready fast path: %v", err)
 	}
 }
@@ -1158,7 +1157,7 @@ func TestLoadCityConfigFSHydratesBuiltinRuntimeAssets(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RepoCachePath(%s): %v", name, err)
 		}
-		if err := builtinpacks.ValidateSyntheticRepo(cachePath, commit); err != nil {
+		if err := builtinpacks.ValidateSyntheticRepo(cachePath, builtinpacks.Repository, commit); err != nil {
 			t.Errorf("%s cache invalid after loadCityConfigFS: %v", name, err)
 		}
 	}

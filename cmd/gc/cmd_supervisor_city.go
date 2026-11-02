@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -160,7 +161,13 @@ func registeredCityEntry(cityPath string) (supervisor.CityEntry, bool, error) {
 	return supervisor.CityEntry{}, false, nil
 }
 
+// cityUsesManagedReconciler reports whether a controller manages cityPath. A
+// worker site is managed by definition: its controller is remote, so the
+// answer is true without probing a socket.
 func cityUsesManagedReconciler(cityPath string) bool {
+	if onWorkerSite(cityPath) {
+		return true
+	}
 	if controllerAlive(cityPath) != 0 {
 		return true
 	}
@@ -169,6 +176,42 @@ func cityUsesManagedReconciler(cityPath string) bool {
 		return false
 	}
 	return supervisorAlive() != 0
+}
+
+// sessionStartOwnedByReconciler reports whether starting a session in cityPath
+// belongs to a controller rather than to this CLI process: a worker site, a
+// city whose controller answers, or a city registered with the supervisor,
+// whether or not the supervisor is running now. A registry that cannot be read
+// or parsed is an error, never "unregistered".
+func sessionStartOwnedByReconciler(cityPath string) (bool, error) {
+	if onWorkerSite(cityPath) {
+		return true, nil
+	}
+	if controllerAlive(cityPath) != 0 {
+		return true, nil
+	}
+	_, registered, err := registeredCityEntry(cityPath)
+	if err != nil {
+		return false, fmt.Errorf("reading supervisor registry %s: %w", supervisor.RegistryPath(), err)
+	}
+	return registered, nil
+}
+
+// sessionStartAwaitsSupervisor reports whether starting a session in cityPath
+// belongs to a controller that does not run now: the city is registered with
+// the supervisor while neither its controller nor the supervisor answers, so
+// sessionStartOwnedByReconciler owns the start and cityUsesManagedReconciler
+// sees no one to make it. A registry that cannot be read or parsed is an
+// error, as for sessionStartOwnedByReconciler.
+func sessionStartAwaitsSupervisor(cityPath string) (bool, error) {
+	if onWorkerSite(cityPath) || controllerAlive(cityPath) != 0 {
+		return false, nil
+	}
+	_, registered, err := registeredCityEntry(cityPath)
+	if err != nil {
+		return false, fmt.Errorf("reading supervisor registry %s: %w", supervisor.RegistryPath(), err)
+	}
+	return registered && supervisorAlive() == 0, nil
 }
 
 // justRestartedSupervisorPID records the PID of a supervisor we just
@@ -345,8 +388,30 @@ func supervisorAlreadyManagesCity(cityPath string) bool {
 	return known && running
 }
 
+// supervisorInitializingCity reports that the supervisor lists the city as one
+// it is still bringing up (loading config, starting the bead store, building
+// the runtime, starting agents): listed, not running, not failed, and past
+// queued. Since S5-A the supervisor holds the city's controller lock through
+// that whole init and opens the controller socket only at its end, so a held
+// lock with no controller answering is the supervisor's own in that window. A
+// queued city is listed before the supervisor takes its lock (it publishes
+// its first init phase only once it holds it), so a lock held while the city
+// is queued is someone else's: gc stop, a storage verb, or a booting
+// foreground controller.
+func supervisorInitializingCity(cityPath string) bool {
+	running, status, known := supervisorCityRunningHook(cityPath)
+	status = strings.TrimSpace(status)
+	return known && !running && status != "" && status != "init_failed" && status != cityInitStatusQueued
+}
+
 func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stderr io.Writer, commandName string, showProgress bool) int {
 	cityPath = normalizePathForCompare(cityPath)
+	// Registering hands the city to a local supervisor, which would build its
+	// runtime; a worker site's city is the remote controller's.
+	if err := refuseControllerOnWorkerSite(cityPath); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	// Only the registry-mutating intent commands gate interactively on
 	// cross-city impact. Operational entry points (gc start) and any future
 	// caller warn-and-proceed: the guard still prints the audit warning but
@@ -358,7 +423,13 @@ func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stde
 		return 1
 	}
 	if !supervisorAlreadyManagesCity(cityPath) {
-		if pid, err := ensureNoStandaloneController(cityPath); err != nil {
+		pid, err := ensureNoStandaloneController(cityPath)
+		if errors.Is(err, errControllerHostingUnknown) && pid == 0 && supervisorInitializingCity(cityPath) {
+			// The lock is held and no controller answers: the supervisor
+			// that lists this city as initializing holds it.
+			err = nil
+		}
+		if err != nil {
 			switch {
 			case errors.Is(err, errControllerAlreadyRunning):
 				writeStandaloneControllerConflict(stderr, commandName, cityPath, pid)
@@ -485,7 +556,7 @@ func reloadSupervisorNoWait() error {
 	if sockPath == "" {
 		return errors.New("supervisor is not running; start it with 'gc supervisor start'")
 	}
-	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
+	conn, err := dialGCSocket(sockPath, 2*time.Second)
 	if err != nil {
 		return fmt.Errorf("connecting to supervisor reload socket: %w", err)
 	}
@@ -654,89 +725,249 @@ func statusDisplayText(status string) string {
 }
 
 type supervisorUnregisterOptions struct {
-	Force bool
+	Force       bool
+	transaction *supervisorUnregisterTransaction
+	// retainControllerOwnership makes a successful unregister that waited
+	// for the supervisor-hosted controller to stop return with the
+	// controller lock still held, so the caller can retire the bead store
+	// before any controller can start for the city again.
+	retainControllerOwnership bool
+}
+
+type supervisorUnregisterState uint8
+
+const (
+	supervisorUnregisterOpen supervisorUnregisterState = iota
+	supervisorUnregisterRemoved
+	supervisorUnregisterCommitted
+	supervisorUnregisterAborted
+	supervisorUnregisterRolledBack
+	supervisorUnregisterRollbackFailed
+)
+
+var errSupervisorUnregisterAborted = errors.New("supervisor unregister transaction aborted")
+
+// supervisorUnregisterTransaction keeps the registry mutation pending until
+// the caller that bounds the complete stop sequence accepts its result. Its
+// mutex deliberately spans Registry.Unregister/Register: a timeout either
+// fences removal before it begins or waits for removal and restores the exact
+// captured entry before returning.
+type supervisorUnregisterTransaction struct {
+	mu          sync.Mutex
+	state       supervisorUnregisterState
+	registry    supervisorRegistry
+	entry       supervisor.CityEntry
+	stdout      io.Writer
+	rollbackErr error
+}
+
+type supervisorUnregisterRollback struct {
+	performed bool
+	entry     supervisor.CityEntry
+	err       error
+}
+
+func newSupervisorUnregisterTransaction() *supervisorUnregisterTransaction {
+	return &supervisorUnregisterTransaction{}
+}
+
+func (tx *supervisorUnregisterTransaction) unregister(reg supervisorRegistry, entry supervisor.CityEntry, cityPath string, stdout io.Writer) (bool, error) {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+
+	if tx.state != supervisorUnregisterOpen {
+		switch tx.state {
+		case supervisorUnregisterAborted, supervisorUnregisterRolledBack, supervisorUnregisterRollbackFailed:
+			return false, errSupervisorUnregisterAborted
+		default:
+			return false, fmt.Errorf("supervisor unregister transaction is already settled")
+		}
+	}
+
+	tx.registry = reg
+	tx.entry = entry
+	tx.stdout = stdout
+	if err := reg.Unregister(cityPath); err != nil {
+		return false, err
+	}
+
+	// A missing city is a deliberately permanent stale-entry cleanup. Resolve
+	// that exception while holding the same lock as removal so a concurrent
+	// timeout cannot restore it between Unregister and the directory check.
+	if _, statErr := os.Stat(cityPath); errors.Is(statErr, os.ErrNotExist) {
+		tx.state = supervisorUnregisterCommitted
+		return true, nil
+	}
+
+	tx.state = supervisorUnregisterRemoved
+	return false, nil
+}
+
+func (tx *supervisorUnregisterTransaction) commit() {
+	tx.mu.Lock()
+	if tx.state != supervisorUnregisterRemoved {
+		tx.mu.Unlock()
+		return
+	}
+	tx.state = supervisorUnregisterCommitted
+	entry := tx.entry
+	stdout := tx.stdout
+	tx.mu.Unlock()
+
+	writeSupervisorUnregisterSuccess(stdout, entry)
+}
+
+func (tx *supervisorUnregisterTransaction) rollback() supervisorUnregisterRollback {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+
+	switch tx.state {
+	case supervisorUnregisterOpen:
+		tx.state = supervisorUnregisterAborted
+		return supervisorUnregisterRollback{}
+	case supervisorUnregisterRemoved:
+		result := supervisorUnregisterRollback{performed: true, entry: tx.entry}
+		if err := tx.registry.Register(tx.entry.Path, tx.entry.EffectiveName()); err != nil {
+			tx.state = supervisorUnregisterRollbackFailed
+			tx.rollbackErr = err
+			result.err = err
+			return result
+		}
+		tx.state = supervisorUnregisterRolledBack
+		return result
+	case supervisorUnregisterRollbackFailed:
+		return supervisorUnregisterRollback{entry: tx.entry, err: tx.rollbackErr}
+	default:
+		return supervisorUnregisterRollback{}
+	}
+}
+
+func writeSupervisorUnregisterSuccess(stdout io.Writer, entry supervisor.CityEntry) {
+	fmt.Fprintf(stdout, "Unregistered city '%s' (%s)\n", entry.EffectiveName(), entry.Path) //nolint:errcheck // best-effort stdout
+}
+
+func writeSupervisorUnregisterRollback(stderr io.Writer, commandName, reason string, rollback supervisorUnregisterRollback) {
+	if !rollback.performed {
+		return
+	}
+	if rollback.err != nil {
+		fmt.Fprintf(stderr, "%s: %s; restore failed for '%s': %v\n", commandName, reason, rollback.entry.EffectiveName(), rollback.err) //nolint:errcheck
+		return
+	}
+	fmt.Fprintf(stderr, "%s: %s; restored registration for '%s'\n", commandName, reason, rollback.entry.EffectiveName()) //nolint:errcheck
 }
 
 func unregisterCityFromSupervisor(cityPath string, stdout, stderr io.Writer) (bool, int) {
 	return unregisterCityFromSupervisorWithOptions(cityPath, stdout, stderr, "gc unregister", supervisorUnregisterOptions{})
 }
 
-func unregisterCityFromSupervisorWithForce(cityPath string, stdout, stderr io.Writer, commandName string, force bool) (bool, int) {
+func unregisterCityFromSupervisorWithForce(cityPath string, stdout, stderr io.Writer, commandName string, force bool, transaction *supervisorUnregisterTransaction) (bool, int) {
 	return unregisterCityFromSupervisorWithOptions(cityPath, stdout, stderr, commandName, supervisorUnregisterOptions{
-		Force: force,
+		Force:       force,
+		transaction: transaction,
+	})
+}
+
+// unregisterCityFromSupervisorForStop is the gc stop form of the unregister:
+// when it had to wait for the supervisor to stop the city's controller, it
+// returns with the controller lock held (nil when nothing was waited on). The
+// caller must keep the lock through bead-store shutdown and then Close it.
+func unregisterCityFromSupervisorForStop(cityPath string, stdout, stderr io.Writer, commandName string, force bool, transaction *supervisorUnregisterTransaction) (bool, int, *os.File) {
+	return unregisterCityFromSupervisorRetainingOwnership(cityPath, stdout, stderr, commandName, supervisorUnregisterOptions{
+		Force:                     force,
+		transaction:               transaction,
+		retainControllerOwnership: true,
 	})
 }
 
 func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.Writer, commandName string, opts supervisorUnregisterOptions) (bool, int) {
+	handled, code, ownership := unregisterCityFromSupervisorRetainingOwnership(cityPath, stdout, stderr, commandName, opts)
+	if ownership != nil {
+		ownership.Close() //nolint:errcheck // releasing the flock cannot fail meaningfully
+	}
+	return handled, code
+}
+
+func unregisterCityFromSupervisorRetainingOwnership(cityPath string, stdout, stderr io.Writer, commandName string, opts supervisorUnregisterOptions) (bool, int, *os.File) {
 	cityPath = normalizePathForCompare(cityPath)
 	entry, registered, err := registeredCityEntry(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
-		return false, 1
+		return false, 1, nil
 	}
 	if !registered {
-		return false, 0
+		return false, 0, nil
 	}
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	transaction := opts.transaction
+	ownsTransaction := transaction == nil
+	if ownsTransaction {
+		transaction = newSupervisorUnregisterTransaction()
+	}
 	if opts.Force && supervisorAliveHook() != 0 {
 		stopResult := tryStopControllerWithForce(cityPath, io.Discard, true)
 		switch stopResult.outcome {
 		case controllerStopAcknowledged, controllerStopDefinitePreEntryUnavailable:
 		case controllerStopMayHaveEntered, controllerStopOutcomeInvalid:
 			fmt.Fprintf(stderr, "%s: %v\n", commandName, stopResult.failClosedError()) //nolint:errcheck // best-effort stderr
-			return true, 1
+			return true, 1, nil
 		default:
 			fmt.Fprintf(stderr, "%s: %v\n", commandName, stopResult.failClosedError()) //nolint:errcheck // best-effort stderr
-			return true, 1
+			return true, 1, nil
 		}
 	}
-	if err := reg.Unregister(cityPath); err != nil {
+	cityMissing, err := transaction.unregister(reg, entry, cityPath, stdout)
+	if err != nil {
+		if errors.Is(err, errSupervisorUnregisterAborted) {
+			return true, 1, nil
+		}
 		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
-		return true, 1
+		return true, 1, nil
 	}
-
-	fmt.Fprintf(stdout, "Unregistered city '%s' (%s)\n", entry.EffectiveName(), entry.Path) //nolint:errcheck // best-effort stdout
 
 	// If the city directory is gone, there's nothing to wait on or restore.
 	// Skip the supervisor-side probes that would otherwise spew
 	// "probing standalone controller" + "restore failed" on a missing path
 	// (the unregister itself already succeeded; the supervisor's next
 	// reconcile will drop the dead city).
-	if _, statErr := os.Stat(cityPath); errors.Is(statErr, os.ErrNotExist) {
+	if cityMissing {
+		writeSupervisorUnregisterSuccess(stdout, entry)
 		if supervisorAliveHook() != 0 && reloadSupervisorHook(stdout, stderr) != 0 {
-			return true, 1
+			return true, 1, nil
 		}
-		return true, 0
+		return true, 0, nil
 	}
 
 	if supervisorAliveHook() != 0 {
 		if reloadSupervisorHook(stdout, stderr) != 0 {
-			if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
-				fmt.Fprintf(stderr, "%s: reconcile failed and restore failed for '%s': %v\n", commandName, entry.EffectiveName(), reErr) //nolint:errcheck
-			} else {
-				fmt.Fprintf(stderr, "%s: reconcile failed; restored registration for '%s'\n", commandName, entry.EffectiveName()) //nolint:errcheck
-			}
-			return true, 1
+			writeSupervisorUnregisterRollback(stderr, commandName, "reconcile failed", transaction.rollback())
+			return true, 1, nil
 		}
 		if err := waitForSupervisorCityHook(cityPath, false, supervisorCityStopTimeout(cityPath), nil); err != nil {
-			if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
-				fmt.Fprintf(stderr, "%s: %v; restore failed for '%s': %v\n", commandName, err, entry.EffectiveName(), reErr) //nolint:errcheck
-			} else {
-				fmt.Fprintf(stderr, "%s: %v; restored registration for '%s'\n", commandName, err, entry.EffectiveName()) //nolint:errcheck
-			}
-			return true, 1
+			writeSupervisorUnregisterRollback(stderr, commandName, err.Error(), transaction.rollback())
+			return true, 1, nil
 		}
 		if err := waitForSupervisorControllerStopHook(cityPath, supervisorCityStopTimeout(cityPath)); err != nil {
-			if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
-				fmt.Fprintf(stderr, "%s: %v; restore failed for '%s': %v\n", commandName, err, entry.EffectiveName(), reErr) //nolint:errcheck
-			} else {
-				fmt.Fprintf(stderr, "%s: %v; restored registration for '%s'\n", commandName, err, entry.EffectiveName()) //nolint:errcheck
+			writeSupervisorUnregisterRollback(stderr, commandName, err.Error(), transaction.rollback())
+			return true, 1, nil
+		}
+		if opts.retainControllerOwnership {
+			ownership, err := claimStoppedControllerOwnership(cityPath)
+			if err != nil {
+				writeSupervisorUnregisterRollback(stderr, commandName, err.Error(), transaction.rollback())
+				return true, 1, nil
 			}
-			return true, 1
+			if ownsTransaction {
+				transaction.commit()
+			}
+			return true, 0, ownership
 		}
 	}
-	return true, 0
+	if ownsTransaction {
+		transaction.commit()
+	}
+	return true, 0, nil
 }
 
 var waitForSupervisorControllerStopHook = waitForSupervisorControllerStop
@@ -773,6 +1004,44 @@ func supervisorCityAPIClient(cityPath string) *api.Client {
 		return nil
 	}
 	return api.NewCityScopedClient(baseURL, entry.EffectiveName())
+}
+
+// supervisorRequiresCityGrants reports whether supervisor.toml makes the
+// supervisor require a signed grant on its per-city routes, for a write or
+// for a read (supervisorCityGrantRequirements).
+func supervisorRequiresCityGrants() bool {
+	write, read := supervisorCityGrantRequirements()
+	return write || read
+}
+
+// supervisorRequiresCityWriteGrants reports whether supervisor.toml makes the
+// supervisor require a signed grant on its per-city mutations
+// (supervisorCityGrantRequirements). A supervisor that requires only read
+// grants accepts a mutation without one: its read gate passes every
+// non-GET/HEAD request through.
+func supervisorRequiresCityWriteGrants() bool {
+	write, _ := supervisorCityGrantRequirements()
+	return write
+}
+
+// supervisorCityGrantRequirements reports whether supervisor.toml makes the
+// supervisor require a signed write grant and a signed read grant on its
+// per-city routes: a write-auth or read-auth verify key, or
+// write_auth_required/read_auth_required, under which the supervisor either
+// gates those routes with a key from its environment or refuses to boot. A key
+// set only through the supervisor's GC_CITY_WRITE_PUBKEY or GC_CITY_READ_PUBKEY
+// environment is invisible here. An unreadable supervisor.toml reports neither:
+// supervisorCityAPIClient cannot resolve the supervisor's address from it
+// either.
+func supervisorCityGrantRequirements() (write, read bool) {
+	cfg, err := supervisor.LoadConfig(supervisor.ConfigPath())
+	if err != nil {
+		return false, false
+	}
+	s := cfg.Supervisor
+	write = strings.TrimSpace(s.WriteAuthVerifyKey) != "" || s.WriteAuthRequired
+	read = strings.TrimSpace(s.ReadAuthVerifyKey) != "" || s.ReadAuthRequired
+	return write, read
 }
 
 func supervisorCityRunning(cityPath string) (running bool, status string, known bool) {

@@ -118,7 +118,9 @@ func runAnalyzeReliability(opts reliabilityCmdOptions, stdout, _ io.Writer) erro
 
 // resolveEventsPath returns the absolute path to events.jsonl using
 // the explicit --events flag when set, --city when present, or the
-// standard discovery cascade (env, cwd) otherwise.
+// standard discovery cascade (env, cwd) otherwise. A city found either
+// way that is a worker site refuses (cityEventsLogPath); --events still
+// reads the file it names.
 func resolveEventsPath(opts reliabilityCmdOptions) (string, error) {
 	if strings.TrimSpace(opts.eventPath) != "" {
 		return opts.eventPath, nil
@@ -129,7 +131,7 @@ func resolveEventsPath(opts reliabilityCmdOptions) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("--city %s: %w", cityPath, err)
 		}
-		return filepath.Join(resolved, citylayout.RuntimeRoot, "events.jsonl"), nil
+		return cityEventsLogPath(resolved)
 	}
 
 	resolved, err := resolveCity()
@@ -139,7 +141,17 @@ func resolveEventsPath(opts reliabilityCmdOptions) (string, error) {
 		}
 		return "", fmt.Errorf("could not locate events.jsonl; pass --city or --events: %w", err)
 	}
-	return filepath.Join(resolved, citylayout.RuntimeRoot, "events.jsonl"), nil
+	return cityEventsLogPath(resolved)
+}
+
+// cityEventsLogPath returns the events log of the city at cityPath. A worker
+// site refuses it (errWorkerSiteLocalState): the box's events.jsonl holds only
+// what the box wrote, not the city's events.
+func cityEventsLogPath(cityPath string) (string, error) {
+	if onWorkerSite(cityPath) {
+		return "", errWorkerSiteLocalState{what: "events"}
+	}
+	return filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl"), nil
 }
 
 func validateExplicitEventsPath(path string) error {

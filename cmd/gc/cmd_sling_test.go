@@ -15,9 +15,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
@@ -27,6 +29,7 @@ import (
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // selectiveErrStore wraps a beads.Store and injects Create errors for selected
@@ -253,6 +256,8 @@ type fakeRunner struct {
 func newFakeRunner() *fakeRunner { return &fakeRunner{} }
 
 // on registers a rule: if a command contains prefix, return (out, err).
+//
+//nolint:unparam // keeps each rule's canned stdout explicit at the call site.
 func (r *fakeRunner) on(prefix, out string, err error) {
 	r.rules = append(r.rules, fakeRunnerRule{prefix: prefix, out: out, err: err})
 }
@@ -924,6 +929,37 @@ func TestSlingJSONWarningsSuspendedRig(t *testing.T) {
 	}
 }
 
+const citySuspendedWarning = "warning: city is suspended — bead routed but no worker will spawn until 'gc resume'"
+
+func TestDoSlingWarnsCitySuspendedByRuntimeState(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.CityPath = t.TempDir()
+	suspended := true
+	if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, deps.CityPath, &suspended); err != nil {
+		t.Fatalf("SetCitySuspended: %v", err)
+	}
+	code := doSling(testOpts(a, "my-1"), deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0 (still routes); stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), citySuspendedWarning) {
+		t.Errorf("stderr = %q, want city suspended warning %q", stderr.String(), citySuspendedWarning)
+	}
+	assertStoreRoutedTo(t, deps.Store, "my-1", "worker")
+}
+
+func TestSlingJSONWarningsCitySuspended(t *testing.T) {
+	warnings := slingJSONWarnings(sling.SlingResult{CitySuspended: true})
+	if !slices.Contains(warnings, "city_suspended") {
+		t.Errorf("warnings = %v, want to contain city_suspended", warnings)
+	}
+}
+
 func TestDoSlingMultiSessionMaxZeroWarns(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -1230,7 +1266,7 @@ func TestDoSlingNudgePoolBeadDerivedSession(t *testing.T) {
 	startNudgePoller = func(_, _, _ string) error { return nil }
 	t.Cleanup(func() { startNudgePoller = prev })
 
-	doSlingNudge(&a, deps.CityName, deps.CityPath, cfg, sp, deps.Store, stdout, stderr)
+	doSlingNudge(&a, deps.CityName, deps.CityPath, cfg, sp, deps.Store, "", stdout, stderr)
 	if strings.Contains(stdout.String(), "No running sessions") || strings.Contains(stderr.String(), "poke failed") {
 		t.Fatalf("sling nudge missed live bead-derived pool session; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
@@ -1298,7 +1334,7 @@ func TestDoSlingNudgePoolUsesCityStoreForSessionBeads(t *testing.T) {
 	startNudgePoller = func(_, _, _ string) error { return nil }
 	t.Cleanup(func() { startNudgePoller = prevPoller })
 
-	doSlingNudge(&a, deps.CityName, deps.CityPath, cfg, sp, deps.Store, stdout, stderr)
+	doSlingNudge(&a, deps.CityName, deps.CityPath, cfg, sp, deps.Store, "", stdout, stderr)
 	if strings.Contains(stdout.String(), "No running sessions") || strings.Contains(stderr.String(), "poke failed") {
 		t.Fatalf("sling nudge missed live city-store pool session; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
@@ -1365,7 +1401,7 @@ func TestDoSlingNudgePoolMemberBindingQualifiedCityScope(t *testing.T) {
 	startNudgePoller = func(_, _, _ string) error { return nil }
 	t.Cleanup(func() { startNudgePoller = prev })
 
-	doSlingNudge(&a, deps.CityName, deps.CityPath, cfg, sp, deps.Store, stdout, stderr)
+	doSlingNudge(&a, deps.CityName, deps.CityPath, cfg, sp, deps.Store, "", stdout, stderr)
 	if strings.Contains(stderr.String(), "not found in config") {
 		t.Fatalf("doSlingNudge logged 'not found in config' for a binding-qualified pool instance (#4843); stderr=%q", stderr.String())
 	}
@@ -1950,18 +1986,23 @@ type bdInvocation struct {
 // responses for the subcommands cmdSling's inline-text path actually
 // runs (show, create, update). Unexpected subcommands fail the test
 // loudly so drift in sling's bd usage surfaces instead of silently
-// passing. Returns a pointer to the capture slice; auto-restores via
+// passing. Returns a snapshot func for the captured invocations; the runner
+// can be entered from several goroutines at once (a two-tier List reads both
+// tiers concurrently), so the capture is mutex-protected. Auto-restores via
 // t.Cleanup.
-func installCaptureBdRunner(t *testing.T) *[]bdInvocation {
+func installCaptureBdRunner(t *testing.T) func() []bdInvocation {
 	t.Helper()
 	orig := beadsExecCommandRunnerWithEnv
 	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = orig })
 
-	calls := &[]bdInvocation{}
+	var mu sync.Mutex
+	var calls []bdInvocation
 	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
 		snap := maps.Clone(env)
 		return func(dir, name string, args ...string) ([]byte, error) {
-			*calls = append(*calls, bdInvocation{Env: snap, Dir: dir, Args: append([]string(nil), args...)})
+			mu.Lock()
+			calls = append(calls, bdInvocation{Env: snap, Dir: dir, Args: append([]string(nil), args...)})
+			mu.Unlock()
 			if name != "bd" {
 				t.Errorf("unexpected command %q args=%v", name, args)
 				return nil, fmt.Errorf("unexpected command %q", name)
@@ -1987,7 +2028,11 @@ func installCaptureBdRunner(t *testing.T) *[]bdInvocation {
 			}
 		}
 	}
-	return calls
+	return func() []bdInvocation {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(calls)
+	}
 }
 
 // firstBdCreate returns the first `bd create --json` invocation
@@ -2015,7 +2060,7 @@ func TestCmdSlingInlineBeadRigScopedBdProvider(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir, rigDir := setupRigScopedBdCity(t)
-	calls := installCaptureBdRunner(t)
+	captured := installCaptureBdRunner(t)
 
 	t.Chdir(cityDir)
 	t.Setenv("GC_CITY_PATH", cityDir)
@@ -2026,10 +2071,11 @@ func TestCmdSlingInlineBeadRigScopedBdProvider(t *testing.T) {
 		t.Fatalf("cmdSling returned %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	create := firstBdCreate(t, *calls)
+	calls := captured()
+	create := firstBdCreate(t, calls)
 	wantBeadsDir := filepath.Join(rigDir, ".beads")
 	if got := create.Env["BEADS_DIR"]; got != wantBeadsDir {
-		t.Fatalf("bd create BEADS_DIR = %q, want %q (rig-scoped); all calls: %v", got, wantBeadsDir, *calls)
+		t.Fatalf("bd create BEADS_DIR = %q, want %q (rig-scoped); all calls: %v", got, wantBeadsDir, calls)
 	}
 	if got := create.Env["GC_RIG_ROOT"]; got != rigDir {
 		t.Fatalf("bd create GC_RIG_ROOT = %q, want %q", got, rigDir)
@@ -2050,7 +2096,7 @@ func TestCmdSlingInlineBeadBareTargetFromRigCwdBdProvider(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir, rigDir := setupRigScopedBdCity(t)
-	calls := installCaptureBdRunner(t)
+	captured := installCaptureBdRunner(t)
 
 	t.Chdir(rigDir)
 	t.Setenv("GC_CITY_PATH", cityDir)
@@ -2061,11 +2107,12 @@ func TestCmdSlingInlineBeadBareTargetFromRigCwdBdProvider(t *testing.T) {
 		t.Fatalf("cmdSling returned %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	create := firstBdCreate(t, *calls)
+	calls := captured()
+	create := firstBdCreate(t, calls)
 	wantBeadsDir := filepath.Join(rigDir, ".beads")
 	if got := create.Env["BEADS_DIR"]; got != wantBeadsDir {
 		t.Fatalf("bd create BEADS_DIR = %q, want %q (rig-scoped). Bare target %q from rig cwd must land in the rig store; all calls: %v",
-			got, wantBeadsDir, "worker", *calls)
+			got, wantBeadsDir, "worker", calls)
 	}
 	// Mirror the env-surface assertions from the qualified-target
 	// variant so a regression that sets BEADS_DIR correctly but drops
@@ -4110,6 +4157,49 @@ func TestDoSlingBatchPartialFailure(t *testing.T) {
 	}
 }
 
+// TestDoSlingBatchFailureCountIncludesNoLongerOpenChildren pins the failure
+// summary denominator to every child the batch listed as open, including one
+// whose fresh read finds it no longer open (#5927), matching the "N/M
+// children failed" error DoSlingBatch returns.
+func TestDoSlingBatchFailureCountIncludesNoLongerOpenChildren(t *testing.T) {
+	runner := newFakeRunner()
+	runner.on("custom-dispatch 'BL-2'", "", fmt.Errorf("dispatch failed"))
+	sp := runtime.NewFake()
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), SlingQuery: "custom-dispatch {}"}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{a},
+	}
+
+	q := newFakeChildQuerier()
+	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
+	q.beadsByID["BL-3"] = beads.Bead{ID: "BL-3", Status: "closed", ParentID: "CVY-1"}
+	q.childrenOf["CVY-1"] = []beads.Bead{
+		{ID: "BL-1", Status: "open"},
+		{ID: "BL-2", Status: "open"},
+		{ID: "BL-3", Status: "open"},
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	opts := testOpts(a, "CVY-1")
+	code := doSlingBatch(opts, deps, q, stdout, stderr)
+
+	if code != 1 {
+		t.Fatalf("doSlingBatch returned %d, want 1 (partial failure)", code)
+	}
+	if !strings.Contains(stdout.String(), "Skipped BL-3 (status: closed)") {
+		t.Errorf("stdout = %q, want BL-3 skipped with its fresh status", stdout.String())
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(call, "BL-3") {
+			t.Fatalf("dispatched BL-3 after its fresh read found it closed: calls=%v", runner.calls)
+		}
+	}
+	if !strings.Contains(stderr.String(), "1/3 children failed") {
+		t.Errorf("stderr = %q, want the failure count over all 3 listed-open children", stderr.String())
+	}
+}
+
 func TestDoSlingBatchAllChildrenFail(t *testing.T) {
 	runner := newFakeRunner()
 	runner.on("custom-dispatch", "", fmt.Errorf("dispatch failed"))
@@ -4322,8 +4412,9 @@ version = 1
 	if root.Type != "molecule" {
 		t.Fatalf("attached root type = %q, want molecule", root.Type)
 	}
-	if root.Metadata["gc.kind"] == "wisp" {
-		t.Fatalf("attached root leaked gc.kind=wisp metadata: %+v", root.Metadata)
+	// The root stays a wisp (graph class): only its type keeps it private.
+	if root.Metadata["gc.kind"] != "wisp" {
+		t.Fatalf("attached root lost its gc.kind=wisp marker: %+v", root.Metadata)
 	}
 	ready, err := deps.Store.Ready()
 	if err != nil {
@@ -4459,7 +4550,7 @@ func TestOnFormulaCopiesSourcePriorityToCreatedBeads(t *testing.T) {
 	}
 }
 
-func TestOnFormulaGraphWorkflowPreassignsNonLatchBeadsForFixedAgent(t *testing.T) {
+func TestOnFormulaGraphWorkflowRoutesUnclaimedNonLatchBeadsForFixedAgent(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
@@ -4572,7 +4663,7 @@ title = "Do work"
 	if err != nil {
 		t.Fatalf("list workflow beads: %v", err)
 	}
-	assigned := 0
+	routed := 0
 	for _, bead := range all {
 		if bead.Metadata["gc.root_bead_id"] != rootID {
 			continue
@@ -4592,19 +4683,19 @@ title = "Do work"
 			if bead.Metadata[graphroute.GraphExecutionRouteMetaKey] != "mayor" {
 				t.Fatalf("workflow-finalize execution route = %q, want mayor", bead.Metadata[graphroute.GraphExecutionRouteMetaKey])
 			}
-			assigned++
+			routed++
 		default:
-			if bead.Assignee != "mayor" {
-				t.Fatalf("workflow bead %s assignee = %q, want mayor", bead.ID, bead.Assignee)
+			if bead.Assignee != "" {
+				t.Fatalf("workflow bead %s assignee = %q, want unclaimed routed work", bead.ID, bead.Assignee)
 			}
 			if bead.Metadata["gc.routed_to"] != "mayor" {
 				t.Fatalf("workflow bead %s gc.routed_to = %q, want mayor", bead.ID, bead.Metadata["gc.routed_to"])
 			}
-			assigned++
+			routed++
 		}
 	}
-	if assigned == 0 {
-		t.Fatalf("expected at least one assigned workflow bead; rows=%#v", all)
+	if routed == 0 {
+		t.Fatalf("expected at least one routed workflow bead; rows=%#v", all)
 	}
 	if !strings.Contains(stdout.String(), "Attached workflow") {
 		t.Fatalf("stdout = %q, want attached workflow message", stdout.String())
@@ -5075,6 +5166,45 @@ func TestSlingFormulaRepoDirUsesCanonicalRigRoot(t *testing.T) {
 	}
 }
 
+// TestSlingDirectSessionResolverReportsDeferredNamedStart: in a registered
+// city whose supervisor is down, the resolver gc sling binds a named-session
+// assignee through materializes that session's row for the reconciler to
+// start and reports the deferral, once, on sling's stderr.
+func TestSlingDirectSessionResolverReportsDeferredNamedStart(t *testing.T) {
+	cityDir := newSupervisorDownSessionCity(t)
+	registerCityWithSupervisorForTest(t, cityDir)
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	var deps slingDeps
+	populateSlingDepsCallbacks(&deps, &stderr)
+	id, ok, err := deps.DirectSessionResolver(store, "", cityDir, cfg, "mayor", "")
+	if err != nil || !ok {
+		t.Fatalf("DirectSessionResolver(mayor) = (%q, %v, %v), want a materialized session", id, ok, err)
+	}
+	b := onlySessionBead(t, cityDir)
+	if id != b.ID {
+		t.Fatalf("DirectSessionResolver(mayor) = %q, want %q", id, b.ID)
+	}
+	assertDeferredSessionBead(t, b)
+	errText := stderr.String()
+	if n := strings.Count(errText, "session materialize: warning: poke failed:"); n != 1 {
+		t.Fatalf("deferred-start warnings = %d, want 1; stderr=%s", n, errText)
+	}
+	for _, want := range []string{b.ID, "gc supervisor start", "rolled back if none has started it by " + neverStartedDeadlineForTest(t, b)} {
+		if !strings.Contains(errText, want) {
+			t.Fatalf("stderr = %q, want it to contain %q", errText, want)
+		}
+	}
+}
+
 func TestCLIDirectSessionResolverMaterializesNamedSessionAliasShadow(t *testing.T) {
 	t.Setenv("GC_SESSION", "fake")
 
@@ -5093,7 +5223,7 @@ func TestCLIDirectSessionResolverMaterializesNamedSessionAliasShadow(t *testing.
 		}},
 	}
 
-	id, ok, err := cliDirectSessionResolver(store, cfg.Workspace.Name, t.TempDir(), cfg, "claude", "")
+	id, ok, err := cliDirectSessionResolver(nil)(store, cfg.Workspace.Name, t.TempDir(), cfg, "claude", "")
 	if err != nil {
 		t.Fatalf("cliDirectSessionResolver: %v", err)
 	}
@@ -6428,7 +6558,10 @@ func TestDryRunOnFormula(t *testing.T) {
 	if !strings.Contains(out, "Would run: gc formula cook code-review --attach BL-42") {
 		t.Errorf("stdout missing cook command: %s", out)
 	}
-	if !strings.Contains(out, "Pre-check: BL-42 has no existing molecule/wisp children") {
+	// Full line, not a prefix: the pre-check now also asserts the absence of
+	// a live formulas-v2 workflow for this formula, and a prefix match would
+	// silently accept the old, weaker claim.
+	if !strings.Contains(out, "Pre-check: BL-42 has no existing molecule/wisp children or live formulas-v2 workflow for code-review ✓") {
 		t.Errorf("stdout missing pre-check: %s", out)
 	}
 	if !strings.Contains(out, "bd update 'BL-42' --set-metadata gc.routed_to=mayor") {
@@ -6452,8 +6585,9 @@ func TestDryRunOnFormula(t *testing.T) {
 // writeGraphV2FormulaForDryRunTest writes a minimal graph.v2-contract
 // formula file, mirroring internal/sling's writeNamedGraphV2ConvoyFormula
 // (unexported there, so duplicated here rather than reused across packages).
-func writeGraphV2FormulaForDryRunTest(t *testing.T, dir, name string) {
+func writeGraphV2FormulaForDryRunTest(t *testing.T, dir string) {
 	t.Helper()
+	const name = "graph-work"
 	content := fmt.Sprintf(`
 formula = %q
 version = 2
@@ -6470,7 +6604,7 @@ title = "Do work"
 
 func TestDryRunOnFormulaGraphV2(t *testing.T) {
 	formulaDir := t.TempDir()
-	writeGraphV2FormulaForDryRunTest(t, formulaDir, "graph-work")
+	writeGraphV2FormulaForDryRunTest(t, formulaDir)
 
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -6503,6 +6637,214 @@ func TestDryRunOnFormulaGraphV2(t *testing.T) {
 	}
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
+	}
+}
+
+// seedConvoyTrackedWorkflow puts a live convoy-first formulas-v2 workflow in
+// store: the synthetic single-item input convoy a bare-bead `--on` launch
+// mints for beadID, plus the workflow root stamped with that convoy and
+// formulaName. This is the shape that is invisible to FindBlockingMolecule's
+// three routes but still blocks the real launch (#5420), so the dry-run
+// pre-check must predict it.
+func seedConvoyTrackedWorkflow(t *testing.T, store beads.Store, beadID, formulaName string) beads.Bead {
+	t.Helper()
+	convoy, err := store.Create(beads.Bead{
+		Title:    "input convoy for " + beadID,
+		Type:     "convoy",
+		Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := convoycore.TrackItem(store, convoy.ID, beadID); err != nil {
+		t.Fatal(err)
+	}
+	root, err := store.Create(beads.Bead{
+		Title: "workflow root for " + beadID,
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			beadmeta.FormulaNameMetadataKey:     formulaName,
+			beadmeta.InputConvoyIDMetadataKey:   convoy.ID,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// depListFailingStore fails the first hop of the convoy-tracking lookup
+// (convoycore.TrackingConvoysForItem calls DepList), so the dry-run
+// pre-check cannot reach a conclusion.
+type depListFailingStore struct {
+	beads.Store
+}
+
+func (s depListFailingStore) DepList(string, string) ([]beads.Dep, error) {
+	return nil, errors.New("boom")
+}
+
+// TestDryRunOnFormulaBlockedByLiveConvoyTrackedWorkflow covers the explicit
+// --on preview against a bead that already has a live convoy-tracked
+// workflow for the same formula: the real launch fails closed, so the
+// preview must too, instead of printing a passing pre-check.
+func TestDryRunOnFormulaBlockedByLiveConvoyTrackedWorkflow(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeGraphV2FormulaForDryRunTest(t, formulaDir)
+
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Daemon:        config.DaemonConfig{FormulaV2: boolPtr(true)},
+		FormulaLayers: config.FormulaLayers{City: []string{formulaDir}},
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	q := newFakeChildQuerier()
+	q.beadsByID["BL-42"] = beads.Bead{ID: "BL-42", Type: "task", Status: "open"}
+	q.childrenOf["BL-42"] = []beads.Bead{}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = seededStore("BL-42")
+	root := seedConvoyTrackedWorkflow(t, deps.Store, "BL-42", "graph-work")
+
+	opts := testOpts(a, "BL-42")
+	opts.OnFormula = "graph-work"
+	opts.DryRun = true
+	code := doSling(opts, deps, q, stdout, stderr)
+
+	if code != 1 {
+		t.Fatalf("dry-run returned %d, want 1; stderr: %s", code, stderr.String())
+	}
+	if want := "gc sling: bead BL-42 already has attached workflow " + root.ID; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+	}
+	if strings.Contains(stdout.String(), "✓") {
+		t.Errorf("stdout claims a passing pre-check for a blocked launch: %s", stdout.String())
+	}
+}
+
+// TestDryRunOnFormulaForceSkipsConvoyTrackedWorkflowPreCheck pins the
+// --force preview against the same shape: --force overrides the
+// convoy-tracked duplicate guard at launch time, so the preview must not
+// predict a failure the real run will not produce. The workflow half of the
+// pre-check is skipped, so the pass line reverts to its pre-#5420 wording
+// rather than claiming an absence that was never checked.
+func TestDryRunOnFormulaForceSkipsConvoyTrackedWorkflowPreCheck(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeGraphV2FormulaForDryRunTest(t, formulaDir)
+
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Daemon:        config.DaemonConfig{FormulaV2: boolPtr(true)},
+		FormulaLayers: config.FormulaLayers{City: []string{formulaDir}},
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	q := newFakeChildQuerier()
+	q.beadsByID["BL-42"] = beads.Bead{ID: "BL-42", Type: "task", Status: "open"}
+	q.childrenOf["BL-42"] = []beads.Bead{}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = seededStore("BL-42")
+	seedConvoyTrackedWorkflow(t, deps.Store, "BL-42", "graph-work")
+
+	opts := testOpts(a, "BL-42")
+	opts.OnFormula = "graph-work"
+	opts.DryRun = true
+	opts.Force = true
+	code := doSling(opts, deps, q, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("dry-run --force returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "already has attached workflow") {
+		t.Errorf("stderr predicts a blocking workflow --force would override: %s", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Pre-check: BL-42 has no existing molecule/wisp children ✓") {
+		t.Errorf("stdout missing the pre-#5420 pre-check line: %s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "live formulas-v2 workflow") {
+		t.Errorf("stdout claims a workflow pre-check --force skipped: %s", stdout.String())
+	}
+}
+
+// TestDryRunDefaultFormulaBlockedByLiveConvoyTrackedWorkflow is the
+// default-formula counterpart. An implicit default formula no longer
+// hard-fails on a plain molecule/wisp, but a live convoy-tracked workflow is
+// a distinct error class attachFormulaToBead still fails on, so this one
+// failure must still be predicted.
+func TestDryRunDefaultFormulaBlockedByLiveConvoyTrackedWorkflow(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeGraphV2FormulaForDryRunTest(t, formulaDir)
+
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Daemon:        config.DaemonConfig{FormulaV2: boolPtr(true)},
+		FormulaLayers: config.FormulaLayers{City: []string{formulaDir}},
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), DefaultSlingFormula: strPtr("graph-work")}
+	q := newFakeChildQuerier()
+	q.beadsByID["BL-42"] = beads.Bead{ID: "BL-42", Type: "task", Status: "open"}
+	q.childrenOf["BL-42"] = []beads.Bead{}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = seededStore("BL-42")
+	root := seedConvoyTrackedWorkflow(t, deps.Store, "BL-42", "graph-work")
+
+	opts := testOpts(a, "BL-42")
+	opts.DryRun = true
+	code := doSling(opts, deps, q, stdout, stderr)
+
+	if code != 1 {
+		t.Fatalf("dry-run returned %d, want 1; stderr: %s", code, stderr.String())
+	}
+	if want := "gc sling: bead BL-42 already has attached workflow " + root.ID; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+	}
+	if strings.Contains(stdout.String(), "✓") {
+		t.Errorf("stdout claims a passing pre-check for a blocked launch: %s", stdout.String())
+	}
+}
+
+// TestDryRunOnFormulaPreCheckInconclusiveOnLookupError pins the error path: a
+// failed lookup is not a pass. The preview reports the pre-check as
+// inconclusive and withholds the "✓" line, but still exits 0 -- a read error
+// is not the launch-time conflict this predicts, and a preview should not
+// hard-fail on one.
+func TestDryRunOnFormulaPreCheckInconclusiveOnLookupError(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeGraphV2FormulaForDryRunTest(t, formulaDir)
+
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Daemon:        config.DaemonConfig{FormulaV2: boolPtr(true)},
+		FormulaLayers: config.FormulaLayers{City: []string{formulaDir}},
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	q := newFakeChildQuerier()
+	q.beadsByID["BL-42"] = beads.Bead{ID: "BL-42", Type: "task", Status: "open"}
+	q.childrenOf["BL-42"] = []beads.Bead{}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = depListFailingStore{Store: seededStore("BL-42")}
+
+	opts := testOpts(a, "BL-42")
+	opts.OnFormula = "graph-work"
+	opts.DryRun = true
+	code := doSling(opts, deps, q, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("dry-run returned %d, want 0 (a read error must not hard-fail a preview); stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc sling: pre-check inconclusive:") {
+		t.Errorf("stderr = %q, want an inconclusive pre-check diagnostic", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "✓") {
+		t.Errorf("stdout claims a passing pre-check after a failed lookup: %s", stdout.String())
 	}
 }
 
@@ -6889,6 +7231,48 @@ func TestDryRunOnExistingMolecule(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "already has attached molecule MOL-1") {
 		t.Errorf("stderr = %q, want molecule error", stderr.String())
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
+	}
+}
+
+// TestDryRunDefaultFormulaExistingMolecule pins the dry-run preview to the
+// live behavior for an implicit default_sling_formula: the real run skips the
+// attach and routes the bead plainly (exit 0), so the preview must report the
+// blocking attachment as a note and exit 0 too, rather than predicting the
+// hard failure that only an explicit --on produces
+// (TestDryRunOnExistingMolecule).
+func TestDryRunDefaultFormulaExistingMolecule(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), DefaultSlingFormula: strPtr("code-review")}
+
+	q := newFakeChildQuerier()
+	q.beadsByID["BL-42"] = beads.Bead{ID: "BL-42", Type: "task", Status: "open"}
+	q.childrenOf["BL-42"] = []beads.Bead{
+		{ID: "MOL-1", Type: "molecule", Status: "open"},
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("BL-42")
+	opts := testOpts(a, "BL-42")
+	opts.DryRun = true
+	code := doSling(opts, deps, q, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("dry-run returned %d, want 0 (default formula falls back to plain routing); stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "BL-42 already has attached molecule MOL-1") {
+		t.Errorf("stdout = %q, want the blocking-attachment pre-check note", out)
+	}
+	if !strings.Contains(out, "the default formula will be skipped and the bead routed plainly") {
+		t.Errorf("stdout = %q, want the plain-routing skip note", out)
+	}
+	if strings.Contains(out, "has no existing molecule/wisp children") {
+		t.Errorf("stdout = %q, must not claim the bead has no molecule children", out)
 	}
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
@@ -7421,6 +7805,56 @@ func TestDryRunIdempotentBead(t *testing.T) {
 	}
 }
 
+// TestDryRunClosedRoutedBeadStaysIdempotent pins both dry-run previews to the
+// routing verdict for a closed bead already routed to the target: the check
+// reports the bead's status alongside that verdict rather than folding it in,
+// so neither preview claims the bead would be routed (#5927).
+func TestDryRunClosedRoutedBeadStaysIdempotent(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	convoy := beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
+	closed := beads.Bead{ID: "BL-42", Title: "Login page", ParentID: "CVY-1", Assignee: "mayor", Status: "closed"}
+
+	t.Run("single bead", func(t *testing.T) {
+		runner := newFakeRunner()
+		deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+		deps.Store = seededStore("BL-42")
+		opts := testOpts(a, "BL-42")
+		opts.DryRun = true
+		code := doSling(opts, deps, &fakeQuerier{bead: closed, parent: &convoy}, stdout, stderr)
+
+		if code != 0 {
+			t.Fatalf("returned %d, want 0; stderr: %s", code, stderr.String())
+		}
+		out := stdout.String()
+		if !strings.Contains(out, "Idempotency:") || !strings.Contains(out, "already routed to mayor") {
+			t.Errorf("stdout should keep the idempotency preview for a closed routed bead: %s", out)
+		}
+		if len(runner.calls) != 0 {
+			t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
+		}
+	})
+
+	t.Run("batch child", func(t *testing.T) {
+		q := newFakeChildQuerier()
+		q.beadsByID["CVY-1"] = convoy
+		q.beadsByID["BL-42"] = closed
+		listed := []beads.Bead{{ID: "BL-42", Title: "Login page", ParentID: "CVY-1", Status: "open"}}
+		deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+		opts := testOpts(a, "CVY-1")
+		opts.DryRun = true
+		code := dryRunBatch(opts, deps, stdout, stderr, convoy, listed, listed, q)
+
+		if code != 0 {
+			t.Fatalf("returned %d, want 0; stderr: %s", code, stderr.String())
+		}
+		out := stdout.String()
+		if !strings.Contains(out, "(open) → already routed (skip)") || strings.Contains(out, "would route") {
+			t.Errorf("stdout should preview the closed routed child as already routed: %s", out)
+		}
+	})
+}
+
 // --- Cross-rig guard tests ---
 
 func TestRigPrefixForAgentCityWide(t *testing.T) {
@@ -7506,6 +7940,12 @@ func TestCheckCrossRigDifferentRig(t *testing.T) {
 	if !strings.Contains(msg, "--force") {
 		t.Errorf("message = %q, want --force hint", msg)
 	}
+	if !strings.Contains(msg, "refusing cross-rig route") {
+		t.Errorf("message = %q, want explicit refusal wording", msg)
+	}
+	if !strings.Contains(msg, "nothing was routed") {
+		t.Errorf("message = %q, want explicit no-op statement", msg)
+	}
 }
 
 func TestCheckCrossRigCityAgent(t *testing.T) {
@@ -7538,6 +7978,9 @@ func TestDoSlingCrossRigBlocks(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "cross-rig") {
 		t.Errorf("stderr = %q, want cross-rig error", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "nothing was routed") {
+		t.Errorf("stderr = %q, want explicit refusal wording", stderr.String())
 	}
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0 (should not route)", len(runner.calls))
@@ -7619,6 +8062,9 @@ func TestDoSlingBatchCrossRigBlocks(t *testing.T) {
 	if !strings.Contains(stderr.String(), "cross-rig") {
 		t.Errorf("stderr = %q, want cross-rig error", stderr.String())
 	}
+	if !strings.Contains(stderr.String(), "nothing was routed") {
+		t.Errorf("stderr = %q, want explicit refusal wording", stderr.String())
+	}
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0 (should not route)", len(runner.calls))
 	}
@@ -7636,6 +8082,10 @@ func TestDryRunCrossRigSection(t *testing.T) {
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	deps.Store = seededStore("FE-123")
+	// The target reads rig:hello-world; align StoreRef so the cross-store
+	// guard (now also run in dry-run, #6075) does not refuse the route.
+	// This test exercises only the prefix-based Cross-rig preview.
+	deps.StoreRef = "rig:hello-world"
 	opts := testOpts(a, "FE-123")
 	opts.DryRun = true
 	code := doSling(opts, deps, q, stdout, stderr)
@@ -7678,6 +8128,10 @@ func TestDryRunBatchCrossRigSection(t *testing.T) {
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	// The target reads rig:hello-world; align StoreRef so the cross-store
+	// guard (now also run in dry-run, #6075) does not refuse the route.
+	// This test exercises only the prefix-based Cross-rig preview.
+	deps.StoreRef = "rig:hello-world"
 	opts := testOpts(a, "FE-1")
 	opts.DryRun = true
 	code := doSlingBatch(opts, deps, q, stdout, stderr)
@@ -7694,6 +8148,65 @@ func TestDryRunBatchCrossRigSection(t *testing.T) {
 	}
 	if !strings.Contains(out, `rig prefix "hw"`) {
 		t.Errorf("stdout missing rig prefix: %s", out)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
+	}
+}
+
+func TestDryRunRefusesCrossStoreRoute(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "hello-world", Path: "/tmp/hw"}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "hello-world"}
+	q := &fakeQuerier{bead: beads.Bead{ID: "FE-123", Type: "task", Status: "open"}}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("FE-123")
+	opts := testOpts(a, "FE-123")
+	opts.DryRun = true
+	code := doSling(opts, deps, q, stdout, stderr)
+
+	if code == 0 {
+		t.Fatalf("dry-run returned 0, want non-zero (cross-store refusal); stdout: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "refusing cross-store route") {
+		t.Errorf("stderr = %q, want cross-store refusal", stderr.String())
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
+	}
+}
+
+func TestDryRunBatchRefusesCrossStoreRoute(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "hello-world", Path: "/tmp/hw"}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "hello-world"}
+
+	q := newFakeChildQuerier()
+	q.beadsByID["FE-1"] = beads.Bead{ID: "FE-1", Type: "convoy", Status: "open"}
+	q.childrenOf["FE-1"] = []beads.Bead{
+		{ID: "FE-2", Status: "open"},
+		{ID: "FE-3", Status: "open"},
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	opts := testOpts(a, "FE-1")
+	opts.DryRun = true
+	code := doSlingBatch(opts, deps, q, stdout, stderr)
+
+	if code == 0 {
+		t.Fatalf("dry-run returned 0, want non-zero (cross-store refusal); stdout: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "refusing cross-store route") {
+		t.Errorf("stderr = %q, want cross-store refusal", stderr.String())
 	}
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
@@ -7775,6 +8288,9 @@ func TestDoSlingOnFormulaCrossRigBlocked(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "cross-rig") {
 		t.Errorf("stderr = %q, want cross-rig error", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "nothing was routed") {
+		t.Errorf("stderr = %q, want explicit refusal wording", stderr.String())
 	}
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0", len(runner.calls))
@@ -9106,5 +9622,250 @@ func TestCmdSlingMultiDefaultTargetsEmptyEntryRejected(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "empty entry") {
 		t.Errorf("stderr = %q, want to mention 'empty entry'", stderr.String())
+	}
+}
+
+// Review 6a: on a single-store bd-1.0.5 city the bead-policy layer maps the
+// wisp policy onto the ephemeral tier, which bd's own wisp GC (`gc bd mol wisp
+// gc --age`) reaps by age. The attached root-only wisp keeps its gc.kind=wisp
+// marker but must stay on the durable tier: it lives exactly as long as its
+// source bead. A standalone root-only wisp keeps the ephemeral tier.
+func TestAttachedRootOnlyWispIsNotEphemeralOnABd105City(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "root-only.toml"), []byte("formula = \"root-only\"\nversion = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		FormulaLayers: config.FormulaLayers{City: []string{dir}},
+		Beads:         config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105},
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	runner := newFakeRunner()
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = wrapStoreWithBeadPolicies(beads.NewMemStore(), cfg)
+	src, err := deps.Store.Create(beads.Bead{Title: "Work", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := testOpts(a, src.ID)
+	opts.OnFormula = "root-only"
+	if code := doSling(opts, deps, deps.Store, stdout, stderr); code != 0 {
+		t.Fatalf("doSling --on returned %d; stderr: %s", code, stderr.String())
+	}
+	source, err := deps.Store.Get(src.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := deps.Store.Get(source.Metadata["molecule_id"])
+	if err != nil {
+		t.Fatalf("attached root: %v", err)
+	}
+	if root.Metadata["gc.kind"] != "wisp" {
+		t.Fatalf("attached root lost its wisp marker: %+v", root.Metadata)
+	}
+	if root.Ephemeral {
+		t.Fatalf("attached root-only wisp %s is on the ephemeral tier; bd's wisp GC would reap it while its source %s is live", root.ID, src.ID)
+	}
+
+	standalone := testOpts(a, "root-only")
+	standalone.IsFormula = true
+	stdout.Reset()
+	stderr.Reset()
+	if code := doSling(standalone, deps, deps.Store, stdout, stderr); code != 0 {
+		t.Fatalf("doSling --formula returned %d; stderr: %s", code, stderr.String())
+	}
+	rows, err := deps.Store.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth, Metadata: map[string]string{"gc.kind": "wisp"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundEphemeral := false
+	for _, b := range rows {
+		if b.Type != "molecule" && b.Ephemeral {
+			foundEphemeral = true
+		}
+	}
+	if !foundEphemeral {
+		t.Fatalf("standalone root-only wisp is not ephemeral on a bd-1.0.5 city: %+v", rows)
+	}
+}
+
+func TestDoSlingWarnsCitySuspendedOnStart(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city", SuspendedOnStart: true}}
+	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.CityPath = t.TempDir()
+	code := doSling(testOpts(a, "my-1"), deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0 (still routes); stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), citySuspendedWarning) {
+		t.Errorf("stderr = %q, want city suspended warning %q", stderr.String(), citySuspendedWarning)
+	}
+	assertStoreRoutedTo(t, deps.Store, "my-1", "worker")
+}
+
+func TestDoSlingWarnsRigSuspendedByRuntimeState(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig"}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.CityPath = t.TempDir()
+	// Rig-scoped agents read their rig's store; match it so the
+	// cross-store route guard does not trip before the rig check.
+	deps.StoreRef = "rig:myrig"
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, deps.CityPath, "myrig", &suspended); err != nil {
+		t.Fatalf("SetRigSuspended: %v", err)
+	}
+	code := doSling(testOpts(a, "my-1"), deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0 (still routes); stderr = %q", code, stderr.String())
+	}
+	want := `rig "myrig" is suspended — bead routed but no worker will spawn until 'gc rig resume myrig'`
+	if !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want suspended-rig warning %q", stderr.String(), want)
+	}
+	assertStoreRoutedTo(t, deps.Store, "my-1", "myrig/polecat")
+}
+
+func TestDoSlingRuntimeResumeOverridesAuthoredSuspend(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city", Suspended: true},
+		Rigs:      []config.Rig{{Name: "myrig", Suspended: true}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.CityPath = t.TempDir()
+	// Rig-scoped agents read their rig's store; match it so the
+	// cross-store route guard does not trip before the rig check.
+	deps.StoreRef = "rig:myrig"
+	resumed := false
+	if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, deps.CityPath, &resumed); err != nil {
+		t.Fatalf("SetCitySuspended: %v", err)
+	}
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, deps.CityPath, "myrig", &resumed); err != nil {
+		t.Fatalf("SetRigSuspended: %v", err)
+	}
+	code := doSling(testOpts(a, "my-1"), deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "suspended") {
+		t.Errorf("stderr = %q, want no suspension warning after an explicit runtime resume", stderr.String())
+	}
+	assertStoreRoutedTo(t, deps.Store, "my-1", "myrig/polecat")
+}
+
+func TestDoSlingWarnsPathBoundAgentInSuspendedRig(t *testing.T) {
+	runner := newFakeRunner()
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "repos", "myrig")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig", Path: rigPath, SuspendedOnStart: true}},
+	}
+	a := config.Agent{Name: "polecat", Dir: rigPath, MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.CityPath = cityPath
+	deps.StoreRef = "rig:myrig"
+	code := doSling(testOpts(a, "my-1"), deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0 (still routes); stderr = %q", code, stderr.String())
+	}
+	want := `rig "myrig" is suspended — bead routed but no worker will spawn until 'gc rig resume myrig'`
+	if !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want suspended-rig warning %q", stderr.String(), want)
+	}
+}
+
+func TestDoSlingForceSuppressesEffectiveSuspensionWarnings(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig"}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1), Suspended: true}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.CityPath = t.TempDir()
+	// Rig-scoped agents read their rig's store; match it so the
+	// cross-store route guard does not trip before the rig check.
+	deps.StoreRef = "rig:myrig"
+	suspended := true
+	if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, deps.CityPath, &suspended); err != nil {
+		t.Fatalf("SetCitySuspended: %v", err)
+	}
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, deps.CityPath, "myrig", &suspended); err != nil {
+		t.Fatalf("SetRigSuspended: %v", err)
+	}
+	opts := testOpts(a, "my-1")
+	opts.Force = true
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "suspended") {
+		t.Errorf("stderr = %q, want no suspension warning with --force", stderr.String())
+	}
+	assertStoreRoutedTo(t, deps.Store, "my-1", "myrig/polecat")
+}
+
+// TestDoSlingBatchWarnsCitySuspendedOnFormulaAndConvoy runs gc sling's own
+// path (doSlingBatch, then Sling.Dispatch) into a suspended city for a
+// --formula launch and a convoy. Each builds a result of its own, and each
+// must still print the city warning.
+func TestDoSlingBatchWarnsCitySuspendedOnFormulaAndConvoy(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		target     string
+		isFormula  bool
+		wantStdout string
+	}{
+		{name: "formula", target: "code-review", isFormula: true, wantStdout: "formula"},
+		{name: "convoy", target: "CVY-1", wantStdout: "Slung 1/1 children"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := newFakeRunner()
+			cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+			a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
+			q := newFakeChildQuerier()
+			q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
+			q.childrenOf["CVY-1"] = []beads.Bead{{ID: "BL-1", Status: "open"}}
+
+			deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+			deps.CityPath = t.TempDir()
+			suspended := true
+			if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, deps.CityPath, &suspended); err != nil {
+				t.Fatalf("SetCitySuspended: %v", err)
+			}
+			opts := testOpts(a, tc.target)
+			opts.IsFormula = tc.isFormula
+			code := doSlingBatch(opts, deps, q, stdout, stderr)
+
+			if code != 0 {
+				t.Fatalf("doSlingBatch returned %d, want 0 (still launches); stderr = %q", code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), tc.wantStdout) {
+				t.Errorf("stdout = %q, want %q from the %s path", stdout.String(), tc.wantStdout, tc.name)
+			}
+			if !strings.Contains(stderr.String(), citySuspendedWarning) {
+				t.Errorf("stderr = %q, want city suspended warning %q", stderr.String(), citySuspendedWarning)
+			}
+		})
 	}
 }

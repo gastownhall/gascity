@@ -85,15 +85,7 @@ func compileFormula(name string, searchPaths []string, vars map[string]string, v
 		}
 	}
 
-	compileVars := make(map[string]string)
-	for vname, def := range resolved.Vars {
-		if def != nil && def.Default != nil {
-			compileVars[vname] = *def.Default
-		}
-	}
-	for k, v := range vars {
-		compileVars[k] = v
-	}
+	compileVars := ApplyDefaults(resolved, vars)
 	if err := validateCompileTimeVars(resolved, vars); err != nil {
 		return nil, err
 	}
@@ -148,15 +140,7 @@ func compileFormula(name string, searchPaths []string, vars map[string]string, v
 
 	// Stage 9: Handle standalone expansion formulas
 	if resolved.Type == TypeExpansion && len(resolved.Template) > 0 {
-		expansionVars := make(map[string]string)
-		for vname, def := range resolved.Vars {
-			if def != nil && def.Default != nil {
-				expansionVars[vname] = *def.Default
-			}
-		}
-		for k, v := range vars {
-			expansionVars[k] = v
-		}
+		expansionVars := ApplyDefaults(resolved, vars)
 		if err := MaterializeExpansion(resolved, "main", expansionVars); err != nil {
 			return nil, fmt.Errorf("standalone expansion %q: %w", name, err)
 		}
@@ -384,6 +368,9 @@ func toRecipeWithGraph(f *Formula, graphWorkflow bool) (*Recipe, error) {
 			return nil, err
 		}
 		r.Steps = orderedSteps
+		if err := ValidateNoSelfClosingControlEdges(f.Formula, r.Steps, r.Deps); err != nil {
+			return nil, err
+		}
 	}
 
 	return r, nil
@@ -536,6 +523,9 @@ func flattenSteps(steps []*Step, parentID string, idMapping map[string]string, o
 					Timeout: step.Gate.Timeout,
 				},
 			}
+			if step.Gate.Type != "" {
+				gateStep.Metadata = map[string]string{beadmeta.GateTypeMetadataKey: step.Gate.Type}
+			}
 			defP := 2
 			gateStep.Priority = &defP
 			*out = append(*out, gateStep)
@@ -669,6 +659,23 @@ func isDetachedGraphStep(step *Step) bool {
 	}
 }
 
+// addWorkflowRootDeps links the workflow root to the work that must terminate
+// before it does.
+//
+// The finalize edge is informational ("tracks"), not readiness-blocking. The
+// finalizer is the bead that closes the root (processWorkflowFinalize), so a
+// "blocks" edge here would make the root permanently unclosable: the store
+// refuses to close a blocked issue and the finalizer is the only bead that
+// would ever clear the blocker (ga-a6zy9). Ordering does not need the edge —
+// the finalizer already blocks on every graph sink, so it cannot run early.
+// Without a blocking dep the root is Ready from the moment it is created, and
+// graph routing still stamps it with gc.routed_to, but a root with real child
+// steps is a latch, never dispatched work (beadmeta.WorkflowTopologyKinds):
+// molecule instantiation stamps it gc.workflow_expanded=true, and every worker
+// claim and demand reader excludes a root carrying that stamp whatever its
+// route. The edge is retained as "tracks" so the root still reaches its
+// finalizer through the dependency graph for cascade delete and
+// open-descendant traversal, both of which accept that type.
 func addWorkflowRootDeps(rootID string, steps []*Step, idMapping map[string]string, deps *[]RecipeDep) {
 	for _, step := range steps {
 		if step != nil && step.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
@@ -676,7 +683,7 @@ func addWorkflowRootDeps(rootID string, steps []*Step, idMapping map[string]stri
 				*deps = append(*deps, RecipeDep{
 					StepID:      rootID,
 					DependsOnID: issueID,
-					Type:        "blocks",
+					Type:        "tracks",
 				})
 			}
 			return

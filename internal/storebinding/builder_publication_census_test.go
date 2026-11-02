@@ -6,7 +6,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -14,6 +13,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
+	"github.com/gastownhall/gascity/internal/testpolicy/resourcecensus"
 )
 
 // No consumer may obtain a StoreSet before activation publishes one. Three layers
@@ -649,6 +651,7 @@ func TestSingleCompositionRoot(t *testing.T) {
 	registrySites := map[string]int{}
 	operationSites := map[string]int{}
 	packageFiles := 0
+	arity := censusRegistryOperationArity(t)
 
 	for _, source := range censusSources(t) {
 		inPackage := filepath.Dir(source.rel) == censusPackageDir
@@ -671,7 +674,7 @@ func TestSingleCompositionRoot(t *testing.T) {
 			continue
 		}
 		for _, call := range censusCalls(file) {
-			if call.selector == "" || !censusRegistryOperations[call.name] {
+			if !censusIsRegistryOperation(call, arity) {
 				continue
 			}
 			operationSites[source.rel]++
@@ -692,6 +695,65 @@ func TestSingleCompositionRoot(t *testing.T) {
 	}
 	if declarations := censusDeclarations(t, "NewProviderRegistry"); declarations != 1 {
 		t.Fatalf("registry has %d constructors, want exactly one", declarations)
+	}
+}
+
+// censusRegistryOperationArity resolves, from the registry's own method
+// declarations, how many arguments each censused registry operation takes. It
+// fails closed when an operation is not declared on the registry, because the
+// census would then match it on name alone or not at all.
+func censusRegistryOperationArity(t *testing.T) map[string]int {
+	t.Helper()
+	methods := packageReceiverFuncDecls(t, "ProviderRegistry")
+	arity := make(map[string]int, len(censusRegistryOperations))
+	for name := range censusRegistryOperations {
+		method, ok := methods[name]
+		if !ok {
+			t.Fatalf("ProviderRegistry declares no %s method; the registry census is resolving the wrong contract", name)
+		}
+		params := 0
+		for _, field := range method.Type.Params.List {
+			if len(field.Names) == 0 {
+				params++
+				continue
+			}
+			params += len(field.Names)
+		}
+		arity[name] = params
+	}
+	return arity
+}
+
+// censusIsRegistryOperation reports whether call has the shape of a registry
+// operation: a method call named for one, with the argument count the
+// registry declares for it.
+func censusIsRegistryOperation(call censusCall, arity map[string]int) bool {
+	if call.selector == "" || !censusRegistryOperations[call.name] {
+		return false
+	}
+	return call.args == arity[call.name]
+}
+
+// TestRegistryCensusTellsAQueueLookupFromARegistryLookup pins the arity rule:
+// the registry's one-argument Lookup is censused wherever it appears, and the
+// nudge queue's two-argument Lookup is not a registry operation at all.
+func TestRegistryCensusTellsAQueueLookupFromARegistryLookup(t *testing.T) {
+	arity := censusRegistryOperationArity(t)
+	source := censusSource{rel: "cmd/gc/other.go", src: []byte(`package main
+import sb "github.com/gastownhall/gascity/internal/storebinding"
+func wire(registry *sb.ProviderRegistry, queue sb.NudgeQueue) {
+	_, _ = registry.Lookup(name)
+	_, _ = queue.Lookup(ids, now)
+	_ = registry.Freeze()
+}`)}
+	got := map[string]int{}
+	for _, call := range censusCalls(censusParse(t, source)) {
+		if censusIsRegistryOperation(call, arity) {
+			got[call.name]++
+		}
+	}
+	if got["Lookup"] != 1 || got["Freeze"] != 1 {
+		t.Fatalf("registry operations found = %v, want the registry's Lookup and Freeze once each and the queue's Lookup not at all", got)
 	}
 }
 
@@ -877,10 +939,17 @@ type censusSource struct {
 type censusCall struct {
 	name     string
 	selector string
+	// args is the call's argument count. A registry operation is the call
+	// shape the registry declares, so an unrelated method that shares a
+	// registry verb's name (NudgeQueue.Lookup) is told apart by its arity.
+	args int
 }
 
 func censusModuleRoot(t *testing.T) string {
 	t.Helper()
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
@@ -903,41 +972,52 @@ func censusModuleRoot(t *testing.T) string {
 // every census into a pass.
 func censusSources(t *testing.T) []censusSource {
 	t.Helper()
-	root := censusModuleRoot(t)
-	var sources []censusSource
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			switch entry.Name() {
-			case ".git", ".claude", "node_modules", "vendor", "testdata":
-				return fs.SkipDir
-			}
-			return nil
-		}
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			return nil
-		}
-		source, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		relative, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		sources = append(sources, censusSource{rel: filepath.ToSlash(relative), src: source})
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walking %s: %v", root, err)
-	}
+	sources := censusSourcesFrom(t, censusModuleRoot(t))
 	if len(sources) < censusMinimumFiles {
 		t.Fatalf("census scanned %d non-test Go files, want at least %d; the module walk is broken", len(sources), censusMinimumFiles)
 	}
 	return sources
+}
+
+// censusSourcesFrom reads every non-test Go file under root. censusSources
+// runs it against the module root; a synthetic root (a fixture git
+// repository, say) lets a test exercise the walk itself directly. Only
+// git-tracked files are read, so an untracked nested git worktree checked out
+// under root — the common gitignored worktrees/<bead> pool-slot pattern —
+// never contributes duplicate source: its files live in that worktree's own
+// index, never this one's. testdata is excluded, matching the walk this
+// replaced.
+func censusSourcesFrom(t *testing.T, root string) []censusSource {
+	t.Helper()
+	tracked, err := resourcecensus.TrackedGoFiles(root)
+	if err != nil {
+		t.Fatalf("listing tracked Go files under %s: %v", root, err)
+	}
+	var sources []censusSource
+	for _, rel := range tracked {
+		if strings.HasSuffix(rel, "_test.go") || censusUnderTestdata(rel) {
+			continue
+		}
+		source, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("reading %s: %v", rel, err)
+		}
+		sources = append(sources, censusSource{rel: rel, src: source})
+	}
+	return sources
+}
+
+// censusUnderTestdata reports whether rel is under a testdata directory. git
+// tracks testdata by convention, unlike node_modules, vendor, .claude, and
+// .git, which this module never tracks — so testdata is the one directory the
+// prior filesystem walk excluded that a tracked-files listing does not.
+func censusUnderTestdata(rel string) bool {
+	for _, segment := range strings.Split(rel, "/") {
+		if segment == "testdata" {
+			return true
+		}
+	}
+	return false
 }
 
 func censusParse(t *testing.T, source censusSource) *ast.File {
@@ -988,13 +1068,13 @@ func censusCalls(file *ast.File) []censusCall {
 		}
 		switch function := call.Fun.(type) {
 		case *ast.Ident:
-			calls = append(calls, censusCall{name: function.Name})
+			calls = append(calls, censusCall{name: function.Name, args: len(call.Args)})
 		case *ast.SelectorExpr:
 			receiver := "?"
 			if identifier, ok := function.X.(*ast.Ident); ok {
 				receiver = identifier.Name
 			}
-			calls = append(calls, censusCall{name: function.Sel.Name, selector: receiver})
+			calls = append(calls, censusCall{name: function.Sel.Name, selector: receiver, args: len(call.Args)})
 		}
 		return true
 	})

@@ -12,13 +12,16 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -254,6 +257,99 @@ func TestStorageRecoverStrandedLeavesCrossBoundaryEdgesAlone(t *testing.T) {
 	}
 }
 
+// postClearStrandInto builds the strand recover-stranded is for once the clear
+// has run: a work bead with an edge into carried, a bead the cutover carried;
+// then the clear, which removes carried from the work store and keeps the
+// work bead's edge into it; then a writer the migration could not fence,
+// restamping the work bead as order tracking. It returns the strand's id.
+func postClearStrandInto(t *testing.T, cityPath string, source beads.Store, target infraBindingTarget, carried string) string {
+	t.Helper()
+	vote := mustCreateInfraBead(t, source, beads.Bead{Title: "order vote", Type: "task"})
+	if err := source.DepAdd(vote.ID, carried, "blocks"); err != nil {
+		t.Fatalf("seeding the edge %s -> %s: %v", vote.ID, carried, err)
+	}
+	if _, err := clearRetainedInfraCopies(cityPath, target, io.Discard); err != nil {
+		t.Fatalf("clearing the retained copies: %v", err)
+	}
+	if _, err := source.Get(carried); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("the clear left %s in the work store (err=%v); the binding must be its only holder", carried, err)
+	}
+	if deps, err := source.DepList(vote.ID, "down"); err != nil || len(deps) != 1 || deps[0].DependsOnID != carried {
+		t.Fatalf("the work store's edges of %s after the clear = %v (err=%v), want the one into %s", vote.ID, deps, err, carried)
+	}
+	if err := source.Update(vote.ID, beads.UpdateOpts{Labels: []string{"order-tracking"}}); err != nil {
+		t.Fatalf("restamping %s as order tracking: %v", vote.ID, err)
+	}
+	if got := strandedIDs(t, cityPath, target); !slices.Contains(got, vote.ID) {
+		t.Fatalf("stranded = %v, want %s", got, vote.ID)
+	}
+	return vote.ID
+}
+
+// TestStorageRecoverStrandedRestoresAnEdgeIntoABeadOnlyTheBindingHolds is a
+// strand found after the clear whose edge points at a bead the copy carried.
+// The clear removed that bead from the work store, so only the binding holds
+// it, and the edge is a within-infra edge like any other.
+//
+// The plan read "not in the work store's infrastructure snapshot" as an edge
+// into work and never wrote it, while the equality stage demands every edge
+// into a bead the binding holds. So the run refused before extending the
+// manifest, every re-run refused the same way, and boot stayed refused.
+//
+// Red-before:
+//
+//	recovery exited 1, want 0; ... edges: 0 restored, ..., 1 cross-boundary
+//	edge(s) into work ... stderr: gc storage recover-stranded: dep gc-4 -> gc-2
+//	is in the work store and missing from the binding after the restore. The
+//	manifest was NOT extended
+func TestStorageRecoverStrandedRestoresAnEdgeIntoABeadOnlyTheBindingHolds(t *testing.T) {
+	cityPath, cfg, source, target := convergedRecoveryCity(t)
+	carried := carriedMessageID(t, source)
+	strand := postClearStrandInto(t, cityPath, source, target, carried)
+
+	var stdout, stderr bytes.Buffer
+	if code := runStrandedRecovery(t, cityPath, cfg, &stdout, &stderr); code != 0 {
+		t.Fatalf("recovery exited %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if got := bindingEdges(t, target, strand); !slices.Contains(got, carried) {
+		t.Errorf("the edge %s -> %s did not cross: binding deps of %s = %v", strand, carried, strand, got)
+	}
+	if !strings.Contains(stdout.String(), "1 restored") {
+		t.Errorf("the report does not say the edge was restored: %s", stdout.String())
+	}
+	if got := strandedIDs(t, cityPath, target); len(got) != 0 {
+		t.Errorf("the boot guard still reads %d stranded bead(s): %v", len(got), got)
+	}
+}
+
+// TestStorageRecoverStrandedLeavesAnEdgeIntoAReusedWorkIDCrossBoundary keeps
+// that restore off an id the work store minted again as a work bead after the
+// clear. The work store resolves the edge to that work bead, so the edge is
+// cross-boundary, as the copy treats every edge into work: written into the
+// binding it would point at the bead the copy carried under the id instead.
+func TestStorageRecoverStrandedLeavesAnEdgeIntoAReusedWorkIDCrossBoundary(t *testing.T) {
+	cityPath, cfg, source, target := convergedRecoveryCity(t)
+	carried := carriedMessageID(t, source)
+	strand := postClearStrandInto(t, cityPath, source, target, carried)
+	if _, err := source.Create(beads.Bead{ID: carried, Title: "a later work bead under the same id", Type: "task"}); err != nil {
+		t.Fatalf("re-minting %s as a work bead: %v", carried, err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runStrandedRecovery(t, cityPath, cfg, &stdout, &stderr); code != 0 {
+		t.Fatalf("recovery exited %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if got := bindingEdges(t, target, strand); slices.Contains(got, carried) {
+		t.Errorf("the edge %s -> %s was written into the binding, where it points at the bead the copy carried, not the work bead the work store resolves it to: %v", strand, carried, got)
+	}
+	if !strings.Contains(stdout.String(), "1 cross-boundary edge") {
+		t.Errorf("the report does not account for the edge into the reused work id: %s", stdout.String())
+	}
+	if got := strandedIDs(t, cityPath, target); len(got) != 0 {
+		t.Errorf("the boot guard still reads %d stranded bead(s): %v", len(got), got)
+	}
+}
+
 // TestStorageRecoverStrandedRecordsAResidueAnInterruptedRunLeft is the partial
 // run, reproduced through the atomic publish the manifest is written with.
 //
@@ -383,7 +479,8 @@ func TestStorageRecoverStrandedRecordsAResidueLeftByAnUnwritableBindingRoot(t *t
 
 // TestStorageRecoverStrandedRefusesToRecordAResidueItCannotProve is the other
 // side of the residue fold: a row the binding holds under an id the source also
-// holds is recorded ONLY if it is provably the source's row.
+// holds is recorded ONLY if it is provably the source's bead — the same id,
+// created in the same second (infraHeldRowIsThisBead).
 //
 // The manifest's meaning is "the copy was proven to deliver this id". Folding in
 // an id whose binding row is a different bead would record a proof nobody made,
@@ -396,8 +493,8 @@ func TestStorageRecoverStrandedRefusesToRecordAResidueItCannotProve(t *testing.T
 	cityPath, cfg, source, target := convergedRecoveryCity(t)
 	stranded := mustCreateInfraBead(t, source, beads.Bead{Title: "order vote", Type: "task", Labels: []string{"order-tracking"}})
 
-	// A row under the same id that is NOT the source's row: what an id
-	// collision, or a hand-repair, leaves behind.
+	// A row under the same id that is NOT the source's bead, created at
+	// another time: what an id collision leaves behind.
 	binding := openMigratedDestination(t, target)
 	creator, ok := binding.(beads.ForeignIDCreator)
 	if !ok {
@@ -405,6 +502,8 @@ func TestStorageRecoverStrandedRefusesToRecordAResidueItCannotProve(t *testing.T
 	}
 	divergent := infraMigrationRow(stranded)
 	divergent.Title = "a different bead that happens to share the id"
+	divergent.CreatedAt = stranded.CreatedAt.Add(-time.Hour)
+	divergent.UpdatedAt = divergent.CreatedAt
 	if _, err := creator.CreateWithForeignID(divergent); err != nil {
 		t.Fatalf("seeding the divergent row: %v", err)
 	}
@@ -443,6 +542,13 @@ func (s transientDepListSource) DepList(id, direction string) ([]beads.Dep, erro
 		return nil, s.err
 	}
 	return s.Store.DepList(id, direction)
+}
+
+// DepMetadata forwards to the leaf, for the reason every migration double needs
+// to: embedding beads.Store strips the read, and a source the repair cannot ask
+// about edge payloads is refused rather than assumed empty.
+func (s transientDepListSource) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
+	return depMetadataThrough(s.Store, issueID, dependsOnID)
 }
 
 func (s transientDepListSource) List(query beads.ListQuery) ([]beads.Bead, error) {
@@ -557,6 +663,75 @@ func (s divergentSecondReadSource) DepList(id, direction string) ([]beads.Dep, e
 	return s.Store.DepList(id, direction)
 }
 
+// payloadAppearingOnSecondReadSource reports an edge as carrying nothing the
+// first time it is asked and carrying a payload every time after, which is what
+// a payload the write silently failed to pick up looks like from the outside.
+//
+// It is the payload-side twin of divergentSecondReadSource, and it exists
+// because the recovery's write and its equality stage are the only two callers
+// that ask: the write takes the first answer and adds a bare edge, the verify
+// takes the second and must refuse the binding it just wrote.
+type payloadAppearingOnSecondReadSource struct {
+	beads.Store
+	pair    [2]string
+	payload string
+	seen    map[[2]string]int
+}
+
+func (s payloadAppearingOnSecondReadSource) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
+	key := [2]string{issueID, dependsOnID}
+	if key != s.pair {
+		return depMetadataThrough(s.Store, issueID, dependsOnID)
+	}
+	s.seen[key]++
+	if s.seen[key] == 1 {
+		return "", false, nil
+	}
+	return s.payload, true, nil
+}
+
+// TestStorageRecoverStrandedVerifiesRestoredEdgePayloads is the payload half of
+// the equality stage, and the only thing that proves the stage asks at all.
+//
+// The presence loop cannot see this failure: a repair that wrote every edge in
+// plan.missing and dropped every gate produces exactly the Dep set that loop
+// demands, so the run reported "edges: N restored", extended the manifest, and
+// exited 0 over a binding short of the gates it was being repaired toward — the
+// same blindness the migration's own equality stage carried until it learned to
+// witness payloads.
+//
+// Red-before, with the payload comparison removed from the stage:
+//
+//	the run reported success while the source's own second read names a payload
+//	the binding does not carry
+func TestStorageRecoverStrandedVerifiesRestoredEdgePayloads(t *testing.T) {
+	cityPath, cfg, source, target := convergedRecoveryCity(t)
+	gated := mustCreateInfraBead(t, source, beads.Bead{Title: "order finalize", Type: "task", Labels: []string{"order-tracking"}})
+	gate := mustCreateInfraBead(t, source, beads.Bead{Title: "order vote", Type: "task", Labels: []string{"order-tracking"}})
+	if err := source.DepAdd(gated.ID, gate.ID, "blocks"); err != nil {
+		t.Fatalf("seeding the stranded edge: %v", err)
+	}
+	before := manifestIDs(t, target)
+
+	swapRecoverySource(t, payloadAppearingOnSecondReadSource{
+		Store:   source,
+		pair:    [2]string{gated.ID, gate.ID},
+		payload: `{"gate":"waits_for","threshold":3}`,
+		seen:    map[[2]string]int{},
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := runStrandedRecovery(t, cityPath, cfg, &stdout, &stderr); code == 0 {
+		t.Fatalf("the run reported success while the source's own second read names a payload the binding does not carry: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "dep "+gated.ID+" -> "+gate.ID) {
+		t.Errorf("the refusal does not name the edge whose payload went missing: %q", stderr.String())
+	}
+	if got := manifestIDs(t, target); !slices.Equal(got, before) {
+		t.Errorf("the manifest was extended over an edge restored without its payload: %v -> %v", before, got)
+	}
+}
+
 // TestStorageRecoverStrandedVerifiesEdgesAgainstAFreshSourceRead is why the
 // equality stage re-reads.
 //
@@ -566,34 +741,64 @@ func (s divergentSecondReadSource) DepList(id, direction string) ([]beads.Dep, e
 // proof lost too. verifyInfraCopy on the migration path re-reads source.DepList
 // independently, and this stage now holds itself to the same standard.
 //
-// Red-before, on the stage that compared against the cached read:
+// The batched leg is the same standard on the read ga-50tsx moved the walk to:
+// the prefetch answers every anchor in one read, and a proof read off that same
+// answer is the self-referential proof again. The source there carries the
+// stranded mail's chain as well, so the first batch answers SOMETHING and is
+// kept rather than set aside for the per-bead walk.
+//
+// Red-before, on the stage that compared against the cached read (and, for the
+// batched leg, on the stage that compared against the prefetched answer):
 //
 //	the run reported "verified: 1 bead(s) re-read field-, class- and dep-equal"
 //	and exited 0 while the source's own second read names an edge the binding
 //	does not hold
 func TestStorageRecoverStrandedVerifiesEdgesAgainstAFreshSourceRead(t *testing.T) {
-	cityPath, cfg, source, target := convergedRecoveryCity(t)
-	tracker := mustCreateInfraBead(t, source, beads.Bead{Title: "order vote", Type: "task", Labels: []string{"order-tracking"}})
-	follow := mustCreateInfraBead(t, source, beads.Bead{Title: "order finalize", Type: "task", Labels: []string{"order-tracking"}})
-	before := manifestIDs(t, target)
+	for _, leg := range []struct {
+		name string
+		// chain seeds the stranded mail's edges as well.
+		chain bool
+		// losing wraps the source so its first read of id's edges answers none
+		// and every read after it answers later.
+		losing func(source beads.Store, id string, later []beads.Dep) beads.Store
+	}{
+		{
+			name: "one bead at a time",
+			losing: func(source beads.Store, id string, later []beads.Dep) beads.Store {
+				return divergentSecondReadSource{Store: source, id: id, seen: map[string]int{}, later: later}
+			},
+		},
+		{
+			name:  "batched",
+			chain: true,
+			losing: func(source beads.Store, id string, later []beads.Dep) beads.Store {
+				return &divergentSecondBatchSource{Store: source, id: id, later: later}
+			},
+		},
+	} {
+		t.Run(leg.name, func(t *testing.T) {
+			cityPath, cfg, source, target := convergedRecoveryCity(t)
+			if leg.chain {
+				strandedMessageBeads(t, source)
+			}
+			tracker := mustCreateInfraBead(t, source, beads.Bead{Title: "order vote", Type: "task", Labels: []string{"order-tracking"}})
+			follow := mustCreateInfraBead(t, source, beads.Bead{Title: "order finalize", Type: "task", Labels: []string{"order-tracking"}})
+			before := manifestIDs(t, target)
 
-	swapRecoverySource(t, divergentSecondReadSource{
-		Store: source,
-		id:    follow.ID,
-		seen:  map[string]int{},
-		later: []beads.Dep{{IssueID: follow.ID, DependsOnID: tracker.ID, Type: "blocks"}},
-	})
+			swapRecoverySource(t, leg.losing(source, follow.ID, []beads.Dep{{IssueID: follow.ID, DependsOnID: tracker.ID, Type: "blocks"}}))
 
-	var stdout, stderr bytes.Buffer
-	code := runStrandedRecovery(t, cityPath, cfg, &stdout, &stderr)
-	if code == 0 {
-		t.Fatalf("the run reported success while the source's own second read names an edge the binding does not hold: %s", stdout.String())
-	}
-	if !strings.Contains(stderr.String(), "dep "+follow.ID+" -> "+tracker.ID) {
-		t.Errorf("the refusal does not name the edge the second read found: %q", stderr.String())
-	}
-	if got := manifestIDs(t, target); !slices.Equal(got, before) {
-		t.Errorf("the manifest was extended over an unproven topology: %v -> %v", before, got)
+			var stdout, stderr bytes.Buffer
+			code := runStrandedRecovery(t, cityPath, cfg, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("the run reported success while the source's own second read names an edge the binding does not hold: %s", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "dep "+follow.ID+" -> "+tracker.ID) {
+				t.Errorf("the refusal does not name the edge the second read found: %q", stderr.String())
+			}
+			if got := manifestIDs(t, target); !slices.Equal(got, before) {
+				t.Errorf("the manifest was extended over an unproven topology: %v -> %v", before, got)
+			}
+		})
 	}
 }
 

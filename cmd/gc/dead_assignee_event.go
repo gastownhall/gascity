@@ -47,14 +47,25 @@ func emitDeadAssigneeReopenedEvents(rec events.Recorder, assignedWorkBeads []bea
 
 // formatDeadAssigneeReopenedMessage renders the operator-facing text for a
 // bead.dead_assignee_reopened event.
+//
+// deadAssignee == routedTo (both non-empty) is the bare-template-as-assignee
+// shape: some routing paths write the template name itself into Assignee
+// rather than a concrete session identity, so no session named after the
+// template ever existed to die. The generic "assigned to dead session
+// <template>" wording is misleading there, so that shape gets its own
+// sentence (ga-r22k2y).
 func formatDeadAssigneeReopenedMessage(beadID, deadAssignee, routedTo string) string {
-	assignee := deadAssignee
-	if assignee == "" {
-		assignee = "<unknown>"
-	}
 	route := routedTo
 	if route == "" {
 		route = "<unrouted>"
+	}
+	if deadAssignee != "" && deadAssignee == routedTo {
+		return "reopened routed work " + beadID + " routed to " + route +
+			" with no live session claiming it; assignee cleared so the pool can reclaim it"
+	}
+	assignee := deadAssignee
+	if assignee == "" {
+		assignee = "<unknown>"
 	}
 	return "reopened routed work " + beadID + " assigned to dead session " + assignee +
 		" (route " + route + "); assignee cleared so the pool can reclaim it"

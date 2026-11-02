@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/gitcred"
+	"github.com/gastownhall/gascity/internal/remotesource"
 )
 
 func deriveImportName(source string) string {
@@ -27,12 +28,7 @@ func deriveImportName(source string) string {
 }
 
 func isRemoteImportSource(source string) bool {
-	return strings.HasPrefix(source, "git@") ||
-		strings.HasPrefix(source, "ssh://") ||
-		strings.HasPrefix(source, "https://") ||
-		strings.HasPrefix(source, "http://") ||
-		strings.HasPrefix(source, "file://") ||
-		strings.HasPrefix(source, "github.com/")
+	return remotesource.IsRemote(source)
 }
 
 func hasRepositoryRefInSource(source string) bool {
@@ -45,34 +41,39 @@ func hasRepositoryRefInSource(source string) bool {
 // normalizeImportAddSource canonicalizes the user-supplied source. Remote git
 // sources pass through unchanged; local paths are validated as pack targets and
 // promoted to file:// repo sources when they sit at the HEAD of a git worktree.
-// The boolean reports whether the resolved source is git-backed.
-func normalizeImportAddSource(fs fsys.FS, cityPath, source string) (string, bool, error) {
+// The first boolean reports whether the resolved source is git-backed; the
+// second reports whether it was promoted from a local git worktree, which
+// means the default version (absent an explicit constraint) must lock to
+// HEAD rather than the repo's latest semver tag -- the worktree is what the
+// user pointed at, and a tag cut before the pack existed in the tree would
+// resolve to a checkout missing it entirely (gastownhall/gascity#3659).
+func normalizeImportAddSource(fs fsys.FS, cityPath, source string) (string, bool, bool, error) {
 	if isRemoteImportSource(source) {
-		if err := rejectSourceUserinfo(source); err != nil {
-			return "", false, err
+		if err := RejectSourceUserinfo(source); err != nil {
+			return "", false, false, err
 		}
-		return source, true, nil
+		return source, true, false, nil
 	}
 
 	targetDir, err := resolveImportAddPath(cityPath, source)
 	if err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
 	if err := validateImportPackTarget(fs, targetDir); err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
 
 	canonical, ok, err := canonicalizeLocalGitImportSource(targetDir)
 	if err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
 	if ok {
-		return canonical, true, nil
+		return canonical, true, true, nil
 	}
-	return source, false, nil
+	return source, false, false, nil
 }
 
-// rejectSourceUserinfo refuses a URL-scheme source that embeds credentials in
+// RejectSourceUserinfo refuses a URL-scheme source that embeds credentials in
 // the URL: such a token would leak into city.toml, packs.lock, the shared
 // cache's .git/config, the RepoCacheKey, and error output. For http(s)/file it
 // rejects any userinfo (user or user:password) — those forms carry no legitimate
@@ -81,7 +82,7 @@ func normalizeImportAddSource(fs fsys.FS, cityPath, source string) (string, bool
 // git@host:org/repo carry transport identity, not a secret, and stay legal. The
 // error never echoes the secret (it redacts via gitcred.RedactUserinfo) and is
 // returned as ErrInvalidSource by the caller (HTTP 400).
-func rejectSourceUserinfo(source string) error {
+func RejectSourceUserinfo(source string) error {
 	source = strings.TrimSpace(source)
 	isSSH := strings.HasPrefix(source, "ssh://")
 	if !strings.HasPrefix(source, "https://") &&

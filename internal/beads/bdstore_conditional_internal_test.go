@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,19 +32,19 @@ func TestClassifyConditionalWriteResult(t *testing.T) {
 	})
 
 	t.Run("precondition from flat body", func(t *testing.T) {
-		out := []byte(`{"error":"revision precondition failed","code":"precondition-failed","expected_revision":5,"current_revision":8}`)
+		out := []byte(`{"error":"revision precondition failed","code":"precondition_failed","expected_revision":5,"current_revision":8}`)
 		err := errors.New("exit status 1")
 		assertPrecondition(t, classifyConditionalWriteResult(out, err), 5, 8)
 	})
 
 	t.Run("precondition from data-wrapped envelope", func(t *testing.T) {
-		out := []byte(`{"schema_version":6,"data":{"code":"precondition-failed","expected_revision":2,"current_revision":9}}`)
+		out := []byte(`{"schema_version":6,"data":{"code":"precondition_failed","expected_revision":2,"current_revision":9}}`)
 		err := errors.New("exit status 1")
 		assertPrecondition(t, classifyConditionalWriteResult(out, err), 2, 9)
 	})
 
 	t.Run("precondition body wrapped in log noise", func(t *testing.T) {
-		out := []byte("bd: writing to dolt\n{\"code\":\"precondition-failed\",\"expected_revision\":1,\"current_revision\":4}\n")
+		out := []byte("bd: writing to dolt\n{\"code\":\"precondition_failed\",\"expected_revision\":1,\"current_revision\":4}\n")
 		err := errors.New("exit status 1")
 		assertPrecondition(t, classifyConditionalWriteResult(out, err), 1, 4)
 	})
@@ -51,7 +52,7 @@ func TestClassifyConditionalWriteResult(t *testing.T) {
 	t.Run("precondition recovered from err string when stdout empty", func(t *testing.T) {
 		// bd wrote the JSON envelope to stderr, so classifyBDExecResult folded it
 		// into err.Error() and stdout is empty.
-		err := errors.New(`exit status 1: {"code":"precondition-failed","expected_revision":3,"current_revision":7}`)
+		err := errors.New(`exit status 1: {"code":"precondition_failed","expected_revision":3,"current_revision":7}`)
 		assertPrecondition(t, classifyConditionalWriteResult(nil, err), 3, 7)
 	})
 
@@ -79,11 +80,11 @@ func TestClassifyConditionalWriteResult(t *testing.T) {
 	t.Run("precondition inferred from non-JSON message forms", func(t *testing.T) {
 		// The message-fallback substrings (no parseable body): each must classify
 		// as a zero-valued precondition so a caller still re-reads rather than
-		// hard-failing. Guards the "revision mismatch" and hyphenated
-		// "precondition-failed" message forms bd might emit outside a JSON envelope.
+		// hard-failing. Guards the human "revision mismatch" and
+		// "precondition failed" message forms bd might emit outside a JSON envelope.
 		for _, msg := range []string{
 			"exit status 1: revision mismatch on ga-1",
-			"exit status 1: error: precondition-failed for ga-1 (expected 3, got 5)",
+			"exit status 1: error: precondition failed for ga-1 (expected 3, got 5)",
 		} {
 			got := classifyConditionalWriteResult(nil, errors.New(msg))
 			if !IsPreconditionFailed(got) {
@@ -93,7 +94,7 @@ func TestClassifyConditionalWriteResult(t *testing.T) {
 	})
 
 	t.Run("unsupported from machine body code latches", func(t *testing.T) {
-		out := []byte(`{"error":"conditional writes not supported","code":"conditional-write-unsupported"}`)
+		out := []byte(`{"error":"conditional writes not supported","code":"conditional_write_unsupported"}`)
 		err := errors.New("exit status 1")
 		if got := classifyConditionalWriteResult(out, err); !IsConditionalWriteUnsupported(got) {
 			t.Fatalf("classify = %v, want ErrConditionalWriteUnsupported", got)
@@ -225,12 +226,12 @@ func TestClassifyConditionalWriteResult(t *testing.T) {
 		// coded precondition body folded into err.Error() from stderr. The source
 		// carrying a discriminator must win.
 		out := []byte(`{"error":"progress: 1 of 2 committed"}`)
-		err := errors.New(`exit status 1: {"code":"precondition-failed","expected_revision":3,"current_revision":9}`)
+		err := errors.New(`exit status 1: {"code":"precondition_failed","expected_revision":3,"current_revision":9}`)
 		assertPrecondition(t, classifyConditionalWriteResult(out, err), 3, 9)
 	})
 
 	t.Run("precondition body with trailing log noise still parses", func(t *testing.T) {
-		out := []byte("{\"code\":\"precondition-failed\",\"expected_revision\":6,\"current_revision\":6}\nWARN: dolt reconnected\n")
+		out := []byte("{\"code\":\"precondition_failed\",\"expected_revision\":6,\"current_revision\":6}\nWARN: dolt reconnected\n")
 		err := errors.New("exit status 1")
 		assertPrecondition(t, classifyConditionalWriteResult(out, err), 6, 6)
 	})
@@ -238,7 +239,7 @@ func TestClassifyConditionalWriteResult(t *testing.T) {
 	t.Run("precondition body behind a bracketed log prefix parses", func(t *testing.T) {
 		// extractJSON stops at the first '{' OR '[': a "[WARN]" prefix would make a
 		// naive parse reject the object. The multi-object scan must skip it.
-		out := []byte("[WARN] dolt reconnect\n{\"code\":\"precondition-failed\",\"expected_revision\":3,\"current_revision\":9}")
+		out := []byte("[WARN] dolt reconnect\n{\"code\":\"precondition_failed\",\"expected_revision\":3,\"current_revision\":9}")
 		err := errors.New("exit status 1")
 		assertPrecondition(t, classifyConditionalWriteResult(out, err), 3, 9)
 	})
@@ -246,7 +247,7 @@ func TestClassifyConditionalWriteResult(t *testing.T) {
 	t.Run("precondition body after a leading JSON log line parses", func(t *testing.T) {
 		// A JSON log line precedes the real envelope; the first-object-only parse
 		// would read the log line (no discriminator) and miss the body.
-		out := []byte("{\"level\":\"info\",\"msg\":\"connecting\"}\n{\"code\":\"precondition-failed\",\"expected_revision\":4,\"current_revision\":5}")
+		out := []byte("{\"level\":\"info\",\"msg\":\"connecting\"}\n{\"code\":\"precondition_failed\",\"expected_revision\":4,\"current_revision\":5}")
 		err := errors.New("exit status 1")
 		assertPrecondition(t, classifyConditionalWriteResult(out, err), 4, 5)
 	})
@@ -256,7 +257,7 @@ func TestClassifyConditionalWriteResult(t *testing.T) {
 		// body rides err.Error(). The discriminator-preferring parse must pick it,
 		// exercising the Code arm of hasDiscriminator alone.
 		out := []byte(`{"error":"progress: 1 of 2 committed"}`)
-		err := errors.New(`exit status 1: {"code":"conditional-write-unsupported"}`)
+		err := errors.New(`exit status 1: {"code":"conditional_write_unsupported"}`)
 		if got := classifyConditionalWriteResult(out, err); !IsConditionalWriteUnsupported(got) {
 			t.Fatalf("classify = %v, want ErrConditionalWriteUnsupported from the err-string body", got)
 		}
@@ -640,6 +641,52 @@ func TestUpdateIfMatchSuccessAppliesFence(t *testing.T) {
 	}
 }
 
+// bdAntiStealHook refuses an assignee change without --force the way bd does
+// over another actor's live in_progress claim: exit 1, no precondition body.
+var bdAntiStealHook = func(w *scriptedBd, verb string, _ int64) ([]byte, error, bool) { //nolint:revive // scriptedBd.writeHook's shape
+	argv := w.writeArgv[len(w.writeArgv)-1]
+	if verb != "update" || !slices.Contains(argv, "--assignee") || slices.Contains(argv, "--force") {
+		return nil, nil, false
+	}
+	return []byte(`{"error":"1 of 1 issues failed to update","failed":[{"id":"ga-1","error":"cannot reassign ga-1: held by \"dead\" (in_progress); pass --force only if their claim is abandoned"}]}`),
+		errors.New("exit status 1"), true
+}
+
+// Kills a fenced release without --force: bd refuses to clear another actor's
+// live claim unless forced, so a release at the row's own revision (0 on a
+// legacy row included) failed outright and the dead claim stayed. A stale
+// revision is still refused under --force.
+func TestUpdateIfMatchAssigneeEditForcesTheTransfer(t *testing.T) {
+	for _, rev := range []int64{0, 7} {
+		w := &scriptedBd{id: "ga-1", revision: rev, status: "in_progress", writeHook: bdAntiStealHook}
+		s := NewBdStore("/city", w.runner)
+		empty, open := "", "open"
+		if err := s.UpdateIfMatch("ga-1", rev, UpdateOpts{Assignee: &empty, Status: &open}); err != nil {
+			t.Fatalf("release at revision %d: %v", rev, err)
+		}
+		if !argvContains(w.writeArgv, "update", "--assignee", "", "--force", conditionalWriteFlag, strconv.FormatInt(rev, 10)) {
+			t.Fatalf("release argv %v, want --force beside the fence", w.writeArgv)
+		}
+		if err := s.UpdateIfMatch("ga-1", rev, UpdateOpts{Assignee: &empty}); !IsPreconditionFailed(err) {
+			t.Fatalf("release at the stale revision %d: %v, want a precondition failure", rev, err)
+		}
+	}
+	title, empty, closed := "renamed", "", "closed"
+	for name, opts := range map[string]UpdateOpts{
+		"no assignee edit":             {Title: &title},
+		"an assignee edit that closes": {Assignee: &empty, Status: &closed},
+	} {
+		w := &scriptedBd{id: "ga-1", revision: 1}
+		s := NewBdStore("/city", w.runner)
+		if err := s.UpdateIfMatch("ga-1", 1, opts); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if argvContains(w.writeArgv, "--force") {
+			t.Fatalf("%s forced, which also waives bd's close policy: %v", name, w.writeArgv)
+		}
+	}
+}
+
 func TestUpdateIfMatchEmptyOptsIsTypedErrorNoWrite(t *testing.T) {
 	// Pinned cross-store contract: an empty fenced update is invalid input
 	// (ErrEmptyConditionalUpdate) — never a silent nil, never a fence write.
@@ -659,7 +706,7 @@ func TestUpdateIfMatchPreconditionOverridesExpected(t *testing.T) {
 	// harness asserts this), while Current stays from the body.
 	w := &scriptedBd{id: "ga-1", revision: 5}
 	w.writeHook = func(_ *scriptedBd, _ string, _ int64) ([]byte, error, bool) {
-		return []byte(`{"code":"precondition-failed","expected_revision":4242,"current_revision":5}`),
+		return []byte(`{"code":"precondition_failed","expected_revision":4242,"current_revision":5}`),
 			errors.New("exit status 1"), true
 	}
 	s := NewBdStore("/city", w.runner)
@@ -1295,7 +1342,7 @@ func TestCompareAndSetMetadataKeyExhaustionFinalReadDetectsValueLoss(t *testing.
 		if attempts == casEmulationMaxAttempts {
 			w.metadata["k"] = "competitor"
 		}
-		return []byte(`{"error":"revision precondition failed","code":"precondition-failed"}`), errors.New("exit status 1"), true
+		return []byte(`{"error":"revision precondition failed","code":"precondition_failed"}`), errors.New("exit status 1"), true
 	}
 	s := NewBdStore("/city", w.runner)
 
@@ -1319,12 +1366,93 @@ func TestCompareAndSetMetadataKeyExhaustionWithoutValueLossStaysTyped(t *testing
 	w := &scriptedBd{id: "ga-1", revision: 1, metadata: map[string]string{}}
 	w.writeHook = func(w *scriptedBd, _ string, _ int64) ([]byte, error, bool) {
 		w.revision++
-		return []byte(`{"error":"revision precondition failed","code":"precondition-failed"}`), errors.New("exit status 1"), true
+		return []byte(`{"error":"revision precondition failed","code":"precondition_failed"}`), errors.New("exit status 1"), true
 	}
 	s := NewBdStore("/city", w.runner)
 
 	swapped, err := s.CompareAndSetMetadataKey("ga-1", "k", "", "mine")
 	if swapped || !IsCASRetriesExhausted(err) {
 		t.Fatalf("CompareAndSetMetadataKey = (%v, %v), want (false, *CASRetriesExhaustedError)", swapped, err)
+	}
+}
+
+// TestBdRevisionUnmarshalJSON pins the revision token decode across the forms bd
+// emits: a current decimal string, a legacy JSON integer, a signed value, and —
+// the case that regressed — a JSON null, which means "no token recorded yet" and
+// must decode to the zero token rather than hard-failing the whole issue decode.
+func TestBdRevisionUnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    bdRevision
+		wantErr bool
+	}{
+		{name: "decimal string", input: `"5"`, want: 5},
+		{name: "legacy integer", input: `7`, want: 7},
+		{name: "signed string", input: `"-3"`, want: -3},
+		{name: "null is the zero token", input: `null`, want: 0},
+		{name: "empty string value is invalid", input: `""`, wantErr: true},
+		{name: "non-numeric is invalid", input: `"abc"`, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got bdRevision
+			err := json.Unmarshal([]byte(tt.input), &got)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("Unmarshal(%s) = %d, nil; want error", tt.input, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Unmarshal(%s): %v", tt.input, err)
+			}
+			if got != tt.want {
+				t.Fatalf("Unmarshal(%s) = %d, want %d", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBdIssueDecodesNullRevisionAsZero guards the real path: a bd issue whose
+// revision column is null must decode into a Bead carrying the zero token, not
+// fail the whole issue decode.
+func TestBdIssueDecodesNullRevisionAsZero(t *testing.T) {
+	var issue bdIssue
+	if err := json.Unmarshal([]byte(`{"id":"ga-1","title":"t","revision":null}`), &issue); err != nil {
+		t.Fatalf("decoding issue with null revision: %v", err)
+	}
+	if got := issue.toBead().Revision; got != 0 {
+		t.Fatalf("Bead.Revision = %d, want 0 for a null revision column", got)
+	}
+}
+
+// TestBdStoreStillRefusesLabels pins that bd-backed conditional writes keep
+// refusing labels, directly and through a CachingStore, before bd ever runs:
+// bd persists labels through writes --if-revision does not fence.
+func TestBdStoreStillRefusesLabels(t *testing.T) {
+	calls := 0
+	s := NewBdStore("/city", func(_, _ string, _ ...string) ([]byte, error) {
+		calls++
+		return nil, errors.New("bd must not run for a refused label update")
+	})
+	cache := NewCachingStoreForTest(s, nil)
+	for _, opts := range []UpdateOpts{
+		{Labels: []string{"added"}, Title: strptr("t")},
+		{RemoveLabels: []string{"removed"}, Title: strptr("t")},
+	} {
+		var unsupported *ConditionalUpdateFieldUnsupportedError
+		if err := s.UpdateIfMatch("ga-1", 1, opts); !errors.As(err, &unsupported) {
+			t.Errorf("BdStore.UpdateIfMatch(%+v) = %v, want *ConditionalUpdateFieldUnsupportedError", opts, err)
+		}
+		if _, err := s.UpdateIfAssignment("ga-1", "open", "", opts); !errors.As(err, &unsupported) {
+			t.Errorf("BdStore.UpdateIfAssignment(%+v) = %v, want *ConditionalUpdateFieldUnsupportedError", opts, err)
+		}
+		if err := cache.UpdateIfMatch("ga-1", 1, opts); !errors.As(err, &unsupported) {
+			t.Errorf("CachingStore/BdStore.UpdateIfMatch(%+v) = %v, want *ConditionalUpdateFieldUnsupportedError", opts, err)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("bd ran %d times for refused label updates, want 0", calls)
 	}
 }

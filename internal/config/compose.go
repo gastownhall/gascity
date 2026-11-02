@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -98,9 +99,36 @@ type LoadOptions struct {
 	// AllowMissingProviderReferences leaves provider-reference catalog errors
 	// non-fatal for repair tools that need to inspect broken configs.
 	AllowMissingProviderReferences bool
-	deferRigPatches                bool
-	deferredRigPatches             *[]deferredRigPatches
-	allowLegacyOrderLayouts        bool
+	// SkipRevisionSnapshot declines the load-time revision snapshot, which
+	// content-hashes every pack directory so that a later Revision() call can
+	// compare against the config as it was loaded.
+	//
+	// Only long-running processes ever compute a Revision; a one-shot command
+	// loads config, uses it and exits. Set this on those callers to skip work
+	// nothing will read.
+	//
+	// Declining the snapshot cannot change a revision VALUE: every read of it
+	// already falls back to reading from disk (writeRevisionDirHash,
+	// revisionSnapshotFile, revisionConventionDirs), so it is a prefetch, not
+	// an input. What it does give up is load-time faithfulness — a revision
+	// computed without it reflects the tree at Revision() time rather than at
+	// load time. That only matters to a caller holding a Provenance across a
+	// window in which the config may change, which is exactly the long-running
+	// case that should leave this false.
+	SkipRevisionSnapshot bool
+	// RepoCacheNonBlocking makes every repo-cache lock this load takes fail
+	// fast with ErrRepoCacheBusy instead of waiting for the holder.
+	//
+	// The repo-cache lock is machine-wide and a writer holds it for as long as
+	// its git clone takes, so a blocking load can stall for minutes on work
+	// that has nothing to do with the caller. Advisory loads — command
+	// discovery, shell completion — set this and degrade to "no pack state
+	// right now"; a load whose result the caller acts on must leave it false
+	// and wait, because a busy cache would otherwise read as an empty one.
+	RepoCacheNonBlocking    bool
+	deferRigPatches         bool
+	deferredRigPatches      *[]deferredRigPatches
+	allowLegacyOrderLayouts bool
 }
 
 // LoadWithIncludes loads a city.toml and merges all included fragments.
@@ -114,6 +142,13 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 
 // LoadWithIncludesOptions loads a city.toml with the supplied load options.
 func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraIncludes ...string) (*City, *Provenance, error) {
+	// Convention trees are hashed before the load reads them so an edit that
+	// lands mid-load cannot be stamped with a revision newer than the
+	// content loaded (see conventionRevisionInputs).
+	var conventionInputs *conventionRevisionInputs
+	if !opts.SkipRevisionSnapshot {
+		conventionInputs = captureConventionRevisionInputs(fs, filepath.Dir(path))
+	}
 	data, err := fs.ReadFile(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("loading config %q: %w", path, err)
@@ -380,7 +415,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	for _, inc := range includes {
 		var fragPath string
 		if isRemoteInclude(inc) || isGitHubTreeURL(inc) {
-			resolved, err := resolvePackRef(inc, cityRoot, cityRoot)
+			resolved, err := resolvePackRef(inc, cityRoot, cityRoot, opts.RepoCacheNonBlocking)
 			if err != nil {
 				return nil, nil, fmt.Errorf("resolving include %q: %w", inc, err)
 			}
@@ -445,7 +480,10 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	resolveNamedPacks(root, cityRoot)
 	rootIncludes = root.Workspace.LegacyIncludes()
 
-	existingPacks := resolvedConfigPackNames(root, fs, cityRoot)
+	existingPacks, err := resolvedConfigPackNames(root, fs, cityRoot, opts.RepoCacheNonBlocking)
+	if err != nil {
+		return nil, nil, err
+	}
 	for _, inc := range packIncludes {
 		name := readPackNameFromDir(inc)
 		if name != "" && existingPacks[name] {
@@ -526,9 +564,13 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	if len(root.LoadWarnings) > 0 {
 		prov.Warnings = appendUnique(prov.Warnings, root.LoadWarnings...)
 	}
-	// Track city pack agents in provenance.
+	// Track city pack agents in provenance. The resolve error is discarded
+	// deliberately: this only builds an attribution string for a diagnostic,
+	// and an unresolvable ref yields a useless path rather than a wrong config.
+	// Anything that would change what composes has already been resolved and
+	// hard-failed upstream by then.
 	for _, ref := range root.Workspace.LegacyIncludes() {
-		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
+		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot, opts.RepoCacheNonBlocking)
 		topoPath := filepath.Join(topoDir, packFile)
 		for _, a := range root.Agents {
 			if a.Dir == "" {
@@ -747,6 +789,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	if err := ValidateNonNegativeDurations(root, path); err != nil {
 		return nil, nil, err
 	}
+	prov.Warnings = append(prov.Warnings, ValidateProxiedIdleTimeouts(root, path)...)
 	if err := ValidateDoltConfig(root, path); err != nil {
 		return nil, nil, err
 	}
@@ -820,10 +863,37 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		}
 	}
 
+	// Parse validates the [beads] mode fields on a single layer, but this
+	// composed-root path never calls Parse on the final merged config — it
+	// decodes the root layer with parseWithMeta and merges fragments
+	// in-place, and a fragment that sets one of these fields overrides the
+	// root's value in mergeFragment, so even a root layer that validated
+	// cleanly could end up with a fragment-supplied out-of-enum value.
+	// Without this, a real city.toml like beads.native_transport = "bogus"
+	// loaded via `gc` silently decodes with no error at all:
+	// NormalizedNativeTransport then normalizes "bogus" to itself, every
+	// consumer's `== NativeTransportOff` check fails, and the city silently
+	// goes native regardless of operator intent. Validate once here, over
+	// the fully composed root, so every real load path (not just direct
+	// config.Parse callers, mostly tests) gets the same enum enforcement.
+	if err := validateBeadsModes(root.Beads); err != nil {
+		return nil, nil, err
+	}
+	if err := validateOpsModes(root.Ops); err != nil {
+		return nil, nil, err
+	}
+	if err := validateProgramStatus(root); err != nil {
+		return nil, nil, err
+	}
+
 	// Capture revision inputs after all config and pack discovery so callers
 	// can compare the loaded snapshot to future reloads without re-reading
-	// mutable files from disk.
-	prov.captureRevisionSnapshot(fs, root, cityRoot)
+	// mutable files from disk. Callers that never compute a Revision opt out
+	// via SkipRevisionSnapshot; Revision falls back to reading from disk, so
+	// the value is the same either way.
+	if !opts.SkipRevisionSnapshot {
+		prov.captureRevisionSnapshot(fs, root, cityRoot, conventionInputs)
+	}
 
 	return root, prov, nil
 }
@@ -1081,14 +1151,20 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 
 	// Simple sections: last-writer-wins if fragment defines them.
 	if fragMeta.IsDefined("beads") {
-		// Preserve rollout-gate fields the fragment did not itself set: a
-		// fragment defining any [beads] key would otherwise reset the whole
-		// struct and silently downgrade an explicit conditional_writes /
-		// guarded_release opt-in (mirror of the daemon.formula_v2 preservation
-		// below). Capture before the overwrite; a fragment that DOES set the
-		// field still wins.
+		// Preserve rollout-gate and kill-switch fields the fragment did not
+		// itself set: a fragment defining any [beads] key would otherwise
+		// reset the whole struct and silently downgrade an explicit
+		// conditional_writes / guarded_release / allow_schema_behind_migrate
+		// opt-in, or turn an explicit native_transport = "off" back into the
+		// "auto" default (mirror of the daemon.formula_v2 preservation below).
+		// Capture before the overwrite; a fragment that DOES set the field
+		// still wins.
 		conditionalWrites := base.Beads.ConditionalWrites
 		guardedRelease := base.Beads.GuardedRelease
+		allowSchemaBehindMigrate := base.Beads.AllowSchemaBehindMigrate
+		proxiedIdleTimeout := base.Beads.ProxiedIdleTimeout
+		nativeTransport := base.Beads.NativeTransport
+		ledgerFeed := base.Beads.LedgerFeed
 		base.Beads = fragment.Beads
 		if !fragMeta.IsDefined("beads", "conditional_writes") {
 			base.Beads.ConditionalWrites = conditionalWrites
@@ -1096,6 +1172,34 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		if !fragMeta.IsDefined("beads", "guarded_release") {
 			base.Beads.GuardedRelease = guardedRelease
 		}
+		if !fragMeta.IsDefined("beads", "allow_schema_behind_migrate") {
+			base.Beads.AllowSchemaBehindMigrate = allowSchemaBehindMigrate
+		}
+		if !fragMeta.IsDefined("beads", "proxied_idle_timeout") {
+			base.Beads.ProxiedIdleTimeout = proxiedIdleTimeout
+		}
+		if !fragMeta.IsDefined("beads", "native_transport") {
+			base.Beads.NativeTransport = nativeTransport
+		}
+		if !fragMeta.IsDefined("beads", "ledger_feed") {
+			base.Beads.LedgerFeed = ledgerFeed
+		}
+	}
+	// [ops] merges per key: each field is a rollout gate, so a fragment
+	// defining one gate keeps the base's others.
+	if fragMeta.IsDefined("ops", "content") {
+		base.Ops.ContentMode = fragment.Ops.ContentMode
+	}
+	if fragMeta.IsDefined("ops", "control") {
+		base.Ops.ControlMode = fragment.Ops.ControlMode
+	}
+	if fragMeta.IsDefined("ops", "lifecycle") {
+		base.Ops.LifecycleMode = fragment.Ops.LifecycleMode
+	}
+	// ops.authoritative is one list, not a gate per kind: a fragment that
+	// defines it replaces the base's list.
+	if fragMeta.IsDefined("ops", "authoritative") {
+		base.Ops.Authoritative = fragment.Ops.Authoritative
 	}
 	if fragMeta.IsDefined("dolt") {
 		base.Dolt = fragment.Dolt
@@ -1105,19 +1209,44 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	}
 	if fragMeta.IsDefined("daemon") {
 		formulaV2 := base.Daemon.FormulaV2
+		sessionReconciler := base.Daemon.SessionReconciler
+		workLadder := base.Daemon.WorkLadder
 		base.Daemon = fragment.Daemon
 		if !fragMeta.IsDefined("daemon", "formula_v2") && !fragMeta.IsDefined("daemon", "graph_workflows") {
 			base.Daemon.FormulaV2 = formulaV2
 		}
+		if !fragMeta.IsDefined("daemon", "session_reconciler") {
+			base.Daemon.SessionReconciler = sessionReconciler
+		}
+		if !fragMeta.IsDefined("daemon", "work_ladder") {
+			base.Daemon.WorkLadder = workLadder
+		}
 	}
 	if fragMeta.IsDefined("session") {
+		// Preserve the program_status rollout gate unless the fragment sets
+		// it, as [beads] and [daemon] preserve theirs: a fragment defining any
+		// other [session] key would otherwise reset an explicit shadow or on
+		// to the off default. A fragment that sets it, "off" included, wins.
+		programStatus := base.Session.ProgramStatus
 		base.Session = fragment.Session
+		if !fragMeta.IsDefined("session", "program_status") {
+			base.Session.ProgramStatus = programStatus
+		}
 	}
 	if fragMeta.IsDefined("mail") {
 		base.Mail = fragment.Mail
 	}
-	if fragMeta.IsDefined("events") {
-		base.Events = fragment.Events
+	// [events] merges per key: a fragment that sets only [events.mirror]
+	// keeps the base's provider and [events.rotation], and the reverse. A
+	// table the fragment defines replaces the base's whole table.
+	if fragMeta.IsDefined("events", "provider") {
+		base.Events.Provider = fragment.Events.Provider
+	}
+	if fragMeta.IsDefined("events", "rotation") {
+		base.Events.Rotation = fragment.Events.Rotation
+	}
+	if fragMeta.IsDefined("events", "mirror") {
+		base.Events.Mirror = fragment.Events.Mirror
 	}
 	if fragMeta.IsDefined("usage") {
 		base.Usage = fragment.Usage
@@ -1408,6 +1537,51 @@ func deepMergeProvider(base, frag ProviderSpec, name string, fragMeta toml.MetaD
 		}
 	}
 
+	// program_status merges per sub-field, and its env per key, so a fragment
+	// can set one part of the declaration without dropping the others.
+	if fragMeta.IsDefined("providers", name, "program_status") {
+		bindingFields := []scalarField{
+			{
+				"protocol",
+				func() bool { return base.ProgramStatus.Protocol != "" },
+				func() { result.ProgramStatus.Protocol = frag.ProgramStatus.Protocol },
+			},
+			{
+				"app",
+				func() bool { return base.ProgramStatus.App != "" },
+				func() { result.ProgramStatus.App = frag.ProgramStatus.App },
+			},
+			{
+				"relay",
+				func() bool { return base.ProgramStatus.Relay != nil },
+				func() { result.ProgramStatus.Relay = cloneBoolPtr(frag.ProgramStatus.Relay) },
+			},
+		}
+		for _, bf := range bindingFields {
+			if fragMeta.IsDefined("providers", name, "program_status", bf.key) {
+				if bf.hasBase() {
+					prov.Warnings = append(prov.Warnings,
+						fmt.Sprintf("provider %q.program_status.%s redefined by %q", name, bf.key, fragPath))
+				}
+				bf.apply()
+			}
+		}
+		if fragMeta.IsDefined("providers", name, "program_status", "env") {
+			merged := make(map[string]string, len(base.ProgramStatus.Env)+len(frag.ProgramStatus.Env))
+			for k, v := range base.ProgramStatus.Env {
+				merged[k] = v
+			}
+			for k, v := range frag.ProgramStatus.Env {
+				if _, exists := base.ProgramStatus.Env[k]; exists {
+					prov.Warnings = append(prov.Warnings,
+						fmt.Sprintf("provider %q.program_status.env.%s redefined by %q", name, k, fragPath))
+				}
+				merged[k] = v
+			}
+			result.ProgramStatus.Env = merged
+		}
+	}
+
 	return result
 }
 
@@ -1579,9 +1753,14 @@ func parseWithMeta(data []byte, source string) (*City, toml.MetaData, []string, 
 	}
 	normalizeAgentDefaultsAlias(&cfg, md)
 	applyDaemonFormulaV2Default(&cfg, md)
+	if err := validateContextAdvisories(&cfg); err != nil {
+		return nil, md, nil, err
+	}
 	warnings := agentDefaultsCompatibilityWarnings(md, source)
 	normalizeLegacyOrderOverrideAliases(&cfg)
 	warnings = append(warnings, CheckUndecodedKeys(md, source)...)
+	warnings = append(warnings, sessionReconcilerWarnings(&cfg, source)...)
+	warnings = append(warnings, workLadderWarnings(&cfg, source)...)
 	// Stamp source=sourceInline on inline [[agent]] tables. For fragments,
 	// adjustAgentPaths later sets SourceDir, which takes precedence in
 	// describeSource (FR-1). For the root city.toml, SourceDir is empty
@@ -1694,7 +1873,7 @@ func LoadPackGraphDirsForDoctor(fs fsys.FS, cityTomlPath string) ([]string, erro
 }
 
 func loadImportPackGraphDirsForDoctor(fs fsys.FS, imp Import, declDir, cityRoot string, cache *packLoadCache) ([]string, error) {
-	impDir, err := resolveImportPackRef(imp.Source, imp.Version, declDir, cityRoot)
+	impDir, err := resolveImportPackRef(imp.Source, imp.Version, declDir, cityRoot, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1810,10 +1989,17 @@ func trackWorkspace(prov *Provenance, meta toml.MetaData, source string) {
 // [imports] according to each import's transitive setting so builtin system-pack
 // injection can be skipped when a user pack already brings the same pack into
 // the city closure.
-func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.FS, cityRoot string) map[string]bool {
+// A ref that fails to resolve is skipped, since an unresolvable pack brings
+// nothing into the closure. ErrRepoCacheBusy is the exception: there the pack
+// may well be in the closure and the walk simply could not look. Returning a
+// short set would inject a builtin the city already has, so it is reported
+// instead — this set decides what gets injected, and a busy cache must never
+// quietly change that.
+func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.FS, cityRoot string, nonBlocking bool) (map[string]bool, error) {
 	names := make(map[string]bool, len(includes)+len(imports))
 	seenShallowDirs := make(map[string]bool)
 	expandedDirs := make(map[string]bool)
+	var busyErr error
 
 	var visitDir func(dir string, transitive bool)
 	var visitInclude func(ref, declDir string, transitive bool)
@@ -1865,17 +2051,25 @@ func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.
 		}
 	}
 
+	noteResolveErr := func(err error) {
+		if busyErr == nil && errors.Is(err, ErrRepoCacheBusy) {
+			busyErr = err
+		}
+	}
+
 	visitInclude = func(ref, declDir string, transitive bool) {
-		dir, err := resolvePackRef(ref, declDir, cityRoot)
+		dir, err := resolvePackRef(ref, declDir, cityRoot, nonBlocking)
 		if err != nil {
+			noteResolveErr(err)
 			return
 		}
 		visitDir(dir, transitive)
 	}
 
 	visitImport = func(ref, declDir string, transitive bool) {
-		dir, err := resolveImportPackRef(ref, "", declDir, cityRoot)
+		dir, err := resolveImportPackRef(ref, "", declDir, cityRoot, nonBlocking)
 		if err != nil {
+			noteResolveErr(err)
 			return
 		}
 		visitDir(dir, transitive)
@@ -1887,7 +2081,10 @@ func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.
 	for _, imp := range imports {
 		visitImport(imp.Source, cityRoot, imp.ImportIsTransitive())
 	}
-	return names
+	if busyErr != nil {
+		return nil, busyErr
+	}
+	return names, nil
 }
 
 // PackDirByName returns the composed pack directory whose pack.toml
@@ -1905,28 +2102,46 @@ func (c *City) PackDirByName(name string) string {
 // explicit includes, imports, rig pack graphs, and default-rig pack graphs.
 // The gc binary uses it after composition to verify that required builtin
 // packs (core, and bd for bd-provider cities) are explicitly included.
+// A blocking walk waits out any contention, so the error can only be a busy
+// cache and only a non-blocking caller can see one.
 func ReachablePackNames(cfg *City, sysFS fsys.FS, cityRoot string) map[string]bool {
-	return resolvedConfigPackNames(cfg, sysFS, cityRoot)
+	names, _ := resolvedConfigPackNames(cfg, sysFS, cityRoot, false)
+	return names
 }
 
 // resolvedConfigPackNames collects all pack names reachable from the city,
 // rig, and default-rig pack graphs before builtin extra includes are injected.
-func resolvedConfigPackNames(cfg *City, sysFS fsys.FS, cityRoot string) map[string]bool {
-	names := resolvedPackNames(cfg.Workspace.LegacyIncludes(), cfg.Imports, sysFS, cityRoot)
-	add := func(more map[string]bool) {
+// It returns ErrRepoCacheBusy if any graph could not be walked because another
+// process held the repo-cache lock.
+func resolvedConfigPackNames(cfg *City, sysFS fsys.FS, cityRoot string, nonBlocking bool) (map[string]bool, error) {
+	names, err := resolvedPackNames(cfg.Workspace.LegacyIncludes(), cfg.Imports, sysFS, cityRoot, nonBlocking)
+	if err != nil {
+		return nil, err
+	}
+	add := func(more map[string]bool, err error) error {
+		if err != nil {
+			return err
+		}
 		for name := range more {
 			names[name] = true
 		}
+		return nil
 	}
 
 	for _, rig := range cfg.Rigs {
-		add(resolvedPackNames(rig.Includes, rig.Imports, sysFS, cityRoot))
+		if err := add(resolvedPackNames(rig.Includes, rig.Imports, sysFS, cityRoot, nonBlocking)); err != nil {
+			return nil, err
+		}
 	}
 
-	add(resolvedPackNames(cfg.Workspace.LegacyDefaultRigIncludes(), nil, sysFS, cityRoot))
-	add(resolvedPackNames(nil, cfg.DefaultRigImports, sysFS, cityRoot))
+	if err := add(resolvedPackNames(cfg.Workspace.LegacyDefaultRigIncludes(), nil, sysFS, cityRoot, nonBlocking)); err != nil {
+		return nil, err
+	}
+	if err := add(resolvedPackNames(nil, cfg.DefaultRigImports, sysFS, cityRoot, nonBlocking)); err != nil {
+		return nil, err
+	}
 
-	return names
+	return names, nil
 }
 
 // readPackNameFromDir reads [pack].name from pack.toml in the given directory.

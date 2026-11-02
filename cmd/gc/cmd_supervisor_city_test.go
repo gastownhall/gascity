@@ -2,14 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -88,6 +91,61 @@ func TestEnsureNoStandaloneControllerLeavesHeldLockHostingUnknown(t *testing.T) 
 	if pid != 0 {
 		t.Fatalf("ensureNoStandaloneController pid = %d, want 0 without a responding controller", pid)
 	}
+}
+
+// TestSupervisorRequiresCityGrants reads the supervisor's city grant
+// requirements from supervisor.toml the way the supervisor installs its auth
+// gates: a write-auth or read-auth verify key, or a required flag, gates the
+// per-city routes, and only the write-auth settings gate a mutation; a blank
+// key, an unverified write plane and an unreadable file gate nothing. (#5262)
+func TestSupervisorRequiresCityGrants(t *testing.T) {
+	cases := []struct {
+		name      string
+		toml      string
+		want      bool
+		wantWrite bool
+	}{
+		{name: "no-auth", toml: "[supervisor]\nport = 8372\n", want: false, wantWrite: false},
+		{name: "write-auth-verify-key", toml: "[supervisor]\nwrite_auth_verify_key = \"k1:AAAA\"\n", want: true, wantWrite: true},
+		{name: "write-auth-required", toml: "[supervisor]\nwrite_auth_required = true\n", want: true, wantWrite: true},
+		{name: "read-auth-verify-key", toml: "[supervisor]\nread_auth_verify_key = \"k1:AAAA\"\n", want: true, wantWrite: false},
+		{name: "read-auth-required", toml: "[supervisor]\nread_auth_required = true\n", want: true, wantWrite: false},
+		{name: "blank-verify-keys", toml: "[supervisor]\nwrite_auth_verify_key = \"  \"\nread_auth_verify_key = \"\"\n", want: false, wantWrite: false},
+		{name: "unverified-write-plane", toml: "[supervisor]\nbind = \"0.0.0.0\"\nallow_mutations = true\nwrite_auth_allow_unverified = true\n", want: false, wantWrite: false},
+		{name: "unreadable", toml: "[supervisor\nwrite_auth_required = true\n", want: false, wantWrite: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_HOME", t.TempDir())
+			if err := os.WriteFile(supervisor.ConfigPath(), []byte(tc.toml), 0o644); err != nil {
+				t.Fatalf("writing supervisor.toml: %v", err)
+			}
+			if got := supervisorRequiresCityGrants(); got != tc.want {
+				t.Fatalf("supervisorRequiresCityGrants() = %v, want %v for supervisor.toml:\n%s", got, tc.want, tc.toml)
+			}
+			if got := supervisorRequiresCityWriteGrants(); got != tc.wantWrite {
+				t.Fatalf("supervisorRequiresCityWriteGrants() = %v, want %v for supervisor.toml:\n%s", got, tc.wantWrite, tc.toml)
+			}
+		})
+	}
+}
+
+// useReadAuthOnlySupervisor points GC_HOME at a supervisor.toml that requires
+// grants only on reads, and puts the real grant predicates behind the routing
+// hooks until the test ends, so a resolver reads that supervisor as gc does.
+func useReadAuthOnlySupervisor(t *testing.T) {
+	t.Helper()
+	t.Setenv("GC_HOME", t.TempDir())
+	const toml = "[supervisor]\nread_auth_verify_key = \"k1:AAAA\"\nread_auth_required = true\n"
+	if err := os.WriteFile(supervisor.ConfigPath(), []byte(toml), 0o644); err != nil {
+		t.Fatalf("writing supervisor.toml: %v", err)
+	}
+	prevGrants, prevWriteGrants := apiRouteSupervisorGrantsHook, apiRouteSupervisorWriteGrantsHook
+	apiRouteSupervisorGrantsHook = supervisorRequiresCityGrants
+	apiRouteSupervisorWriteGrantsHook = supervisorRequiresCityWriteGrants
+	t.Cleanup(func() {
+		apiRouteSupervisorGrantsHook, apiRouteSupervisorWriteGrantsHook = prevGrants, prevWriteGrants
+	})
 }
 
 func TestRegisterCityWithSupervisorDoesNotMislabelLegacyController(t *testing.T) {
@@ -1119,6 +1177,187 @@ func TestUnregisterCityFromSupervisorRestoresRegistrationOnReloadFailure(t *test
 	}
 }
 
+type supervisorUnregisterTransactionRegistry struct {
+	entries         []supervisor.CityEntry
+	registerErr     error
+	registerCalls   int
+	unregisterCalls int
+}
+
+func (r *supervisorUnregisterTransactionRegistry) List() ([]supervisor.CityEntry, error) {
+	return append([]supervisor.CityEntry(nil), r.entries...), nil
+}
+
+func (r *supervisorUnregisterTransactionRegistry) Register(cityPath, effectiveName string) error {
+	r.registerCalls++
+	if r.registerErr != nil {
+		return r.registerErr
+	}
+	for _, entry := range r.entries {
+		if entry.Path == cityPath && entry.EffectiveName() == effectiveName {
+			return nil
+		}
+	}
+	r.entries = append(r.entries, supervisor.CityEntry{Path: cityPath, Name: effectiveName})
+	return nil
+}
+
+func (r *supervisorUnregisterTransactionRegistry) Unregister(cityPath string) error {
+	r.unregisterCalls++
+	for i, entry := range r.entries {
+		if entry.Path == cityPath {
+			r.entries = append(r.entries[:i], r.entries[i+1:]...)
+			return nil
+		}
+	}
+	return fmt.Errorf("city at %s is not registered", cityPath)
+}
+
+func newSupervisorUnregisterTransactionFixture(t *testing.T) (*supervisorUnregisterTransaction, *supervisorUnregisterTransactionRegistry, supervisor.CityEntry, *bytes.Buffer) {
+	t.Helper()
+	entry := supervisor.CityEntry{Path: t.TempDir(), Name: "registered-alias"}
+	reg := &supervisorUnregisterTransactionRegistry{entries: []supervisor.CityEntry{entry}}
+	return newSupervisorUnregisterTransaction(), reg, entry, &bytes.Buffer{}
+}
+
+func TestSupervisorUnregisterTransactionAbortBeforeRemoveFencesLateRemoval(t *testing.T) {
+	tx, reg, entry, stdout := newSupervisorUnregisterTransactionFixture(t)
+	if rollback := tx.rollback(); rollback.performed {
+		t.Fatalf("rollback before removal = %+v, want no registry mutation", rollback)
+	}
+
+	if _, err := tx.unregister(reg, entry, entry.Path, stdout); !errors.Is(err, errSupervisorUnregisterAborted) {
+		t.Fatalf("unregister after abort error = %v, want %v", err, errSupervisorUnregisterAborted)
+	}
+	tx.commit()
+	if reg.unregisterCalls != 0 {
+		t.Fatalf("Unregister calls = %d, want 0 after abort", reg.unregisterCalls)
+	}
+	if len(reg.entries) != 1 || reg.entries[0] != entry {
+		t.Fatalf("registry after abort-before-remove = %v, want exact original entry %+v", reg.entries, entry)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("late commit output = %q, want no unregister success", stdout.String())
+	}
+}
+
+func TestSupervisorUnregisterTransactionAbortAfterRemoveRestoresExactEntry(t *testing.T) {
+	tx, reg, entry, stdout := newSupervisorUnregisterTransactionFixture(t)
+	cityMissing, err := tx.unregister(reg, entry, entry.Path, stdout)
+	if err != nil || cityMissing {
+		t.Fatalf("unregister = (missing=%t, err=%v), want (false, nil)", cityMissing, err)
+	}
+	if len(reg.entries) != 0 {
+		t.Fatalf("registry after removal = %v, want empty", reg.entries)
+	}
+
+	rollback := tx.rollback()
+	if !rollback.performed || rollback.err != nil {
+		t.Fatalf("rollback = %+v, want successful restoration", rollback)
+	}
+	tx.commit()
+	if len(reg.entries) != 1 || reg.entries[0] != entry {
+		t.Fatalf("registry after rollback = %v, want exact original entry %+v", reg.entries, entry)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("late commit output = %q, want no unregister success", stdout.String())
+	}
+}
+
+func TestSupervisorUnregisterTransactionSuccessfulCommitKeepsEntryRemoved(t *testing.T) {
+	tx, reg, entry, stdout := newSupervisorUnregisterTransactionFixture(t)
+	if cityMissing, err := tx.unregister(reg, entry, entry.Path, stdout); err != nil || cityMissing {
+		t.Fatalf("unregister = (missing=%t, err=%v), want (false, nil)", cityMissing, err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("output before commit = %q, want no unregister success", stdout.String())
+	}
+	tx.commit()
+	tx.commit()
+	if rollback := tx.rollback(); rollback.performed {
+		t.Fatalf("rollback after commit = %+v, want no registry mutation", rollback)
+	}
+	if len(reg.entries) != 0 {
+		t.Fatalf("registry after commit = %v, want empty", reg.entries)
+	}
+	if got, want := strings.Count(stdout.String(), "Unregistered city 'registered-alias'"), 1; got != want {
+		t.Fatalf("commit output = %q, want one unregister success line", stdout.String())
+	}
+}
+
+func TestSupervisorUnregisterTransactionMissingCityCommitsPermanentRemoval(t *testing.T) {
+	missingPath := filepath.Join(t.TempDir(), "missing-city")
+	entry := supervisor.CityEntry{Path: missingPath, Name: "stale-alias"}
+	reg := &supervisorUnregisterTransactionRegistry{entries: []supervisor.CityEntry{entry}}
+	tx := newSupervisorUnregisterTransaction()
+	var stdout bytes.Buffer
+
+	cityMissing, err := tx.unregister(reg, entry, missingPath, &stdout)
+	if err != nil || !cityMissing {
+		t.Fatalf("unregister = (missing=%t, err=%v), want (true, nil)", cityMissing, err)
+	}
+	if rollback := tx.rollback(); rollback.performed {
+		t.Fatalf("rollback after stale removal = %+v, want permanent removal", rollback)
+	}
+	if len(reg.entries) != 0 {
+		t.Fatalf("registry after stale removal = %v, want empty", reg.entries)
+	}
+}
+
+func TestSupervisorUnregisterTransactionRollbackIsIdempotent(t *testing.T) {
+	tx, reg, entry, stdout := newSupervisorUnregisterTransactionFixture(t)
+	if _, err := tx.unregister(reg, entry, entry.Path, stdout); err != nil {
+		t.Fatal(err)
+	}
+	if rollback := tx.rollback(); !rollback.performed || rollback.err != nil {
+		t.Fatalf("first rollback = %+v, want successful restoration", rollback)
+	}
+	if rollback := tx.rollback(); rollback.performed {
+		t.Fatalf("second rollback = %+v, want no repeated restoration", rollback)
+	}
+	if reg.registerCalls != 1 {
+		t.Fatalf("Register calls = %d, want 1", reg.registerCalls)
+	}
+}
+
+func TestSupervisorUnregisterTransactionTimeoutReportsRestorationFailure(t *testing.T) {
+	tx, reg, entry, stdout := newSupervisorUnregisterTransactionFixture(t)
+	reg.registerErr = errors.New("registry is read-only")
+	if _, err := tx.unregister(reg, entry, entry.Path, stdout); err != nil {
+		t.Fatal(err)
+	}
+
+	releaseWorker := make(chan struct{})
+	oldHook := stopBodyLifecycleHook
+	var bodyDone <-chan struct{}
+	stopBodyLifecycleHook = func(done <-chan struct{}) { bodyDone = done }
+	t.Cleanup(func() { stopBodyLifecycleHook = oldHook })
+
+	var stderr bytes.Buffer
+	out := runStopWithWallClockCap(time.Nanosecond, &stderr, tx, func() stopCommandOutcome {
+		<-releaseWorker
+		return stopCommandOutcome{}
+	})
+	close(releaseWorker)
+	awaitClose(t, bodyDone, "late stop worker after restoration failure")
+
+	if out.code != 1 {
+		t.Fatalf("timeout outcome = %+v, want nonzero", out)
+	}
+	if got := stderr.String(); !strings.Contains(got, "timed out after") || !strings.Contains(got, "restore failed for 'registered-alias': registry is read-only") {
+		t.Fatalf("stderr = %q, want timeout and restoration failure", got)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("late worker output = %q, want no unregister success", stdout.String())
+	}
+	if second := tx.rollback(); second.performed {
+		t.Fatalf("second rollback = %+v, want no repeated restoration", second)
+	}
+	if reg.registerCalls != 1 {
+		t.Fatalf("Register calls = %d, want 1", reg.registerCalls)
+	}
+}
+
 func TestUnregisterCityFromSupervisorWaitsForControllerStop(t *testing.T) {
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)
@@ -1290,7 +1529,7 @@ func TestUnregisterCityFromSupervisorWithForceSendsForceStop(t *testing.T) {
 	waitForSupervisorControllerStopHook = func(string, time.Duration) error { return nil }
 
 	var stdout, stderr bytes.Buffer
-	handled, code := unregisterCityFromSupervisorWithForce(cityPath, &stdout, &stderr, "gc stop", true)
+	handled, code := unregisterCityFromSupervisorWithForce(cityPath, &stdout, &stderr, "gc stop", true, nil)
 	if !handled || code != 0 {
 		t.Fatalf("unregisterCityFromSupervisorWithForce = (%t, %d), want (true, 0); stderr=%q", handled, code, stderr.String())
 	}
@@ -1335,7 +1574,7 @@ func TestUnregisterCityFromSupervisorWithForceKeepsRegistrationAfterAmbiguousSto
 	)
 
 	var stdout, stderr bytes.Buffer
-	handled, code := unregisterCityFromSupervisorWithForce(cityPath, &stdout, &stderr, "gc stop", true)
+	handled, code := unregisterCityFromSupervisorWithForce(cityPath, &stdout, &stderr, "gc stop", true, nil)
 	if !handled || code != 1 {
 		t.Fatalf("unregisterCityFromSupervisorWithForce = (%t, %d), want (true, 1); stderr=%q", handled, code, stderr.String())
 	}
@@ -1522,7 +1761,7 @@ func TestReconcileCitiesUnregisterEventUsesManagedCityName(t *testing.T) {
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	var stdout, stderr bytes.Buffer
-	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 
 	recorded := supRec.Events
 	if len(recorded) != 1 {
@@ -1603,7 +1842,7 @@ func TestReconcileCitiesEmitsCityCreateFailureForPendingConfigLoadError(t *testi
 	}
 
 	var stdout, stderr bytes.Buffer
-	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 
 	recorded := supRec.Events
 	if len(recorded) != 1 {
@@ -1658,7 +1897,7 @@ func TestReconcileCitiesUnregisterSkipsRequestResultWithoutPendingRequestID(t *t
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	var stdout, stderr bytes.Buffer
-	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 
 	if len(supRec.Events) != 0 {
 		t.Fatalf("recorded %d supervisor events without pending request_id, want 0: %#v", len(supRec.Events), supRec.Events)
@@ -1908,7 +2147,7 @@ func TestReconcileCitiesNameDriftStopsBeadsProvider(t *testing.T) {
 	})
 	var stdout, stderr bytes.Buffer
 
-	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 
 	ops := readOpLog(t, logFile)
 	assertSingleStopWithBenignNoise(t, ops)
@@ -1951,7 +2190,7 @@ shutdown_timeout = "100ms"
 
 	cr := newCityRegistry()
 	var stdout, stderr bytes.Buffer
-	reconcileCities(reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
 
 	sockPath := filepath.Join(canonicalTestPath(cityPath), ".gc", "controller.sock")
 	if _, err := os.Stat(sockPath); err != nil {
@@ -2168,7 +2407,7 @@ func TestReconcileCitiesSkipsCityAlreadyInitializing(t *testing.T) {
 	})
 
 	var stdout, stderr bytes.Buffer
-	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 
 	registry.ReadCallback(func(
 		_ map[string]*managedCity,
@@ -2199,7 +2438,7 @@ func TestReconcileCitiesAutoUnregistersAbsentDirectory(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 
 	for i := 0; i < staleCityDirAbsentThreshold; i++ {
-		reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+		reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 	}
 
 	entries, err := reg.List()
@@ -2230,7 +2469,7 @@ func TestReconcileCitiesDoesNotUnregisterBeforeThreshold(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 
 	for i := 0; i < staleCityDirAbsentThreshold-1; i++ {
-		reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+		reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 	}
 
 	entries, err := reg.List()
@@ -2262,13 +2501,13 @@ func TestReconcileCitiesResetsAbsentCounterWhenDirectoryReappears(t *testing.T) 
 	var stdout, stderr bytes.Buffer
 
 	for i := 0; i < staleCityDirAbsentThreshold-1; i++ {
-		reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+		reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 	}
 
 	if err := os.MkdirAll(cityPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 
 	var dirAbsent int
 	registry.ReadCallback(func(
@@ -2956,5 +3195,259 @@ func TestInitFailureBackoffDelayEscalatesStructuralFailuresBeyondTransientCeilin
 	}
 	if got := initFailureBackoffDelay(7, transientMsg); got == structuralInitFailureBackoff {
 		t.Errorf("initFailureBackoffDelay(7, transient) = %s, must not equal the structural backoff by coincidence", got)
+	}
+}
+
+// TestSessionStartOwnedByReconciler pins who owns a session start: a worker
+// site, a city whose controller answers, and a registered city (supervisor
+// running or not) defer to the reconciler; a registry that cannot be read is
+// an error, never "unregistered".
+func TestSessionStartOwnedByReconciler(t *testing.T) {
+	const corruptRegistry = "[[cities]]\n  path = \"/x\"\n  name = \"broken\n"
+	writeRegistry := func(t *testing.T, data string) string {
+		t.Helper()
+		path := supervisor.RegistryPath()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	cases := []struct {
+		name string
+		// setup prepares the city and registry and returns the city path.
+		setup     func(t *testing.T) string
+		want      bool
+		wantErrIn []string
+		noDials   bool
+	}{
+		{
+			name: "worker site",
+			setup: func(t *testing.T) string {
+				cityDir, _ := newWorkerSiteSessionCity(t, nil)
+				writeRegistry(t, corruptRegistry)
+				return cityDir
+			},
+			want:    true,
+			noDials: true,
+		},
+		{
+			name: "controller answers ping, corrupt registry",
+			setup: func(t *testing.T) string {
+				cityDir := shortSocketTempDir(t, "gc-owned-city-")
+				startFakeControllerSocket(t, cityDir, "4242\n")
+				writeRegistry(t, corruptRegistry)
+				return cityDir
+			},
+			want: true,
+		},
+		{
+			name: "registered, no sockets",
+			setup: func(t *testing.T) string {
+				cityDir := t.TempDir()
+				if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityDir, "owned-city"); err != nil {
+					t.Fatal(err)
+				}
+				return cityDir
+			},
+			want: true,
+		},
+		{
+			name: "registry lists other cities only",
+			setup: func(t *testing.T) string {
+				if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(t.TempDir(), "other-city"); err != nil {
+					t.Fatal(err)
+				}
+				return t.TempDir()
+			},
+			want: false,
+		},
+		{
+			name:  "cities.toml missing",
+			setup: func(t *testing.T) string { return t.TempDir() },
+			want:  false,
+		},
+		{
+			name: "corrupt cities.toml",
+			setup: func(t *testing.T) string {
+				writeRegistry(t, corruptRegistry)
+				return t.TempDir()
+			},
+			wantErrIn: []string{"parsing registry"},
+		},
+		{
+			name: "unreadable cities.toml",
+			setup: func(t *testing.T) string {
+				if os.Geteuid() == 0 {
+					t.Skip("root reads a mode-0 file")
+				}
+				path := writeRegistry(t, "")
+				if err := os.Chmod(path, 0); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+				return t.TempDir()
+			},
+			wantErrIn: []string{"reading registry"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetControlPlaneForTest(t)
+			t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+			t.Setenv("XDG_RUNTIME_DIR", shortSocketTempDir(t, "gc-run-"))
+			cityDir := tc.setup(t)
+			var dials *atomic.Int32
+			if tc.noDials {
+				dials = countSocketDials(t)
+			}
+
+			got, err := sessionStartOwnedByReconciler(cityDir)
+			if len(tc.wantErrIn) > 0 {
+				if err == nil {
+					t.Fatalf("sessionStartOwnedByReconciler = (%v, nil), want an error", got)
+				}
+				for _, want := range append([]string{supervisor.RegistryPath()}, tc.wantErrIn...) {
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("error = %q, want it to contain %q", err, want)
+					}
+				}
+				if got {
+					t.Fatal("owned = true alongside an error, want false")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("sessionStartOwnedByReconciler: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("sessionStartOwnedByReconciler = %v, want %v", got, tc.want)
+			}
+			if dials != nil && dials.Load() != 0 {
+				t.Fatalf("socket dials = %d, want 0", dials.Load())
+			}
+		})
+	}
+}
+
+// TestSessionStartAwaitsSupervisor pins the one city whose session starts
+// wait for the supervisor: registered with it while neither the city's
+// controller nor the supervisor answers. A worker site and a city with a
+// live controller or supervisor have someone to start the session; an
+// unregistered city starts it in-process; a registry that cannot be read is
+// an error.
+func TestSessionStartAwaitsSupervisor(t *testing.T) {
+	const corruptRegistry = "[[cities]]\n  path = \"/x\"\n  name = \"broken\n"
+	writeRegistry := func(t *testing.T, data string) {
+		t.Helper()
+		path := supervisor.RegistryPath()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	register := func(t *testing.T, cityDir string) {
+		t.Helper()
+		if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityDir, "awaits-city"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		name string
+		// setup prepares the city, registry and sockets and returns the city path.
+		setup   func(t *testing.T) string
+		want    bool
+		wantErr bool
+		noDials bool
+	}{
+		{
+			name: "registered, no controller or supervisor",
+			setup: func(t *testing.T) string {
+				cityDir := shortSocketTempDir(t, "gc-awaits-city-")
+				register(t, cityDir)
+				return cityDir
+			},
+			want: true,
+		},
+		{
+			name: "registered, supervisor answers",
+			setup: func(t *testing.T) string {
+				cityDir := shortSocketTempDir(t, "gc-awaits-city-")
+				register(t, cityDir)
+				startFakeUnixSocket(t, supervisorSocketPath(), func(line string) string {
+					if line == "ping" {
+						return "4242\n"
+					}
+					return ""
+				})
+				return cityDir
+			},
+		},
+		{
+			name: "registered, controller answers",
+			setup: func(t *testing.T) string {
+				cityDir := shortSocketTempDir(t, "gc-awaits-city-")
+				register(t, cityDir)
+				startFakeControllerSocket(t, cityDir, "4242\n")
+				return cityDir
+			},
+		},
+		{
+			name: "worker site, corrupt registry",
+			setup: func(t *testing.T) string {
+				cityDir, _ := newWorkerSiteSessionCity(t, nil)
+				writeRegistry(t, corruptRegistry)
+				return cityDir
+			},
+			noDials: true,
+		},
+		{
+			name: "unregistered",
+			setup: func(t *testing.T) string {
+				register(t, t.TempDir())
+				return shortSocketTempDir(t, "gc-awaits-city-")
+			},
+		},
+		{
+			name: "corrupt cities.toml",
+			setup: func(t *testing.T) string {
+				writeRegistry(t, corruptRegistry)
+				return shortSocketTempDir(t, "gc-awaits-city-")
+			},
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetControlPlaneForTest(t)
+			t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+			t.Setenv("XDG_RUNTIME_DIR", shortSocketTempDir(t, "gc-run-"))
+			cityDir := tc.setup(t)
+			var dials *atomic.Int32
+			if tc.noDials {
+				dials = countSocketDials(t)
+			}
+
+			got, err := sessionStartAwaitsSupervisor(cityDir)
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), supervisor.RegistryPath()) {
+					t.Fatalf("sessionStartAwaitsSupervisor = (%v, %v), want an error naming %s", got, err, supervisor.RegistryPath())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("sessionStartAwaitsSupervisor: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("sessionStartAwaitsSupervisor = %v, want %v", got, tc.want)
+			}
+			if dials != nil && dials.Load() != 0 {
+				t.Fatalf("socket dials = %d, want 0", dials.Load())
+			}
+		})
 	}
 }

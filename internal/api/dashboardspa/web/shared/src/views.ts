@@ -95,7 +95,7 @@ export interface CityContext<TGc = unknown, TConfig = unknown> {
    *  OWNERSHIP: the host constructs the path but does NOT create the
    *  directory. Each module is responsible for `fs.mkdir(path.dirname(myFile),
    *  { recursive: true })` before writing its own sub-paths. The host's
-   *  `cityName` is validated against `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/i` at
+   *  `cityName` is validated against `^[a-z0-9][a-z0-9._-]*$/i` at
    *  config-load time so this path segment can never escape the
    *  cities/ root via path.join's `..` normalization. */
   cityDataDir: string;

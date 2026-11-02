@@ -91,6 +91,7 @@ func TestPhase2CatalogDataReturnsCopies(t *testing.T) {
 }
 
 func TestPhase2CatalogScenarioCrossReferences(t *testing.T) {
+	wantCursor := ProfileCursorTmuxCLI
 	for _, entry := range Phase2CatalogEntries() {
 		scenario, ok := Phase2ScenarioForID(entry.Scenario.ID)
 		if !ok {
@@ -110,6 +111,16 @@ func TestPhase2CatalogScenarioCrossReferences(t *testing.T) {
 		}
 		if !reflect.DeepEqual(scenario.Profiles, phase2CatalogProfiles) {
 			t.Fatalf("scenario %s profiles = %v, want %v", scenario.ID, scenario.Profiles, phase2CatalogProfiles)
+		}
+		foundCursor := false
+		for _, profile := range scenario.Profiles {
+			if profile == wantCursor {
+				foundCursor = true
+				break
+			}
+		}
+		if !foundCursor {
+			t.Fatalf("scenario %s profiles = %v, want %s", scenario.ID, scenario.Profiles, wantCursor)
 		}
 		if len(scenario.RequirementCodes) != 1 || scenario.RequirementCodes[0] != entry.Requirement.Code {
 			t.Fatalf("scenario %s requirement codes = %v, want [%s]", scenario.ID, scenario.RequirementCodes, entry.Requirement.Code)

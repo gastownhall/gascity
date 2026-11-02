@@ -69,21 +69,64 @@ func (s *convergenceScope) triggerName(prefix string) string {
 // store from the current config: the city/HQ store plus every bound rig
 // store. Returns nil when no city store is available yet, in which case
 // callers leave the existing scopes untouched.
+//
+// Convergence roots are graph class — coordclass.Classify has an explicit
+// typeConvergence arm — and so are the wisps they pour, so they follow the S4
+// placement rule (graphPlacementForScope). On a split city EVERY scope, city
+// and rig alike, creates its loops in the graph binding, and each scope stamps
+// its gc.root_store_ref on what it creates and filters its lists by it. That
+// filter is what keeps the scopes scopes: one binding holds every scope's
+// loops, and no scope sees another's. A rig that may still hold loops created
+// before S4 in its own store keeps that store as a relic leg behind the
+// binding until it is imported (graphRelicLegForScope).
+//
+// Minting a city loop in the work store made the engine self-consistent but
+// left `gc storage migrate` to copy every root into the graph binding while the
+// engine kept reading and writing the retained work-store copies: two
+// divergent convergence ledgers, and every root minted after cutover a strand
+// the per-boot containment re-check names (#5127's bug class). Minting a rig
+// loop in the rig store wrote graph rows into a store that holds only work.
+//
+// On a city that relocates nothing every scope keeps the store it has, with
+// relocated=false, no stamp and no filter: byte-identical to before.
 func (cr *CityRuntime) buildConvergenceScopes() map[string]*convergenceScope {
 	cityStore := cr.cityBeadStore()
 	if cityStore == nil {
 		return nil
 	}
-	scopes := map[string]*convergenceScope{
-		"": cr.newConvergenceScope("", cityStore, cr.cityPath, cr.cfg.FormulaLayers.City),
+	_, graphRelocated := graphClassBinding(cr.storageRoutes)
+	graphStore := cr.graphBeadStore().Store
+	city := cr.newConvergenceScope("", graphStore, cr.cityPath, cr.cfg.FormulaLayers.City, graphRelocated)
+	if graphRelocated {
+		city.adapter.scopeRef = cityGraphScope().rootStoreRef(cr.cityName)
 	}
+	scopes := map[string]*convergenceScope{"": city}
 	rigStorePaths := cr.convergenceRigStorePaths()
 	for rigName, store := range cr.rigBeadStores() {
 		if store == nil {
 			continue
 		}
-		scopes[rigName] = cr.newConvergenceScope(
-			rigName, store, rigStorePaths[rigName], cr.cfg.FormulaLayers.SearchPaths(rigName))
+		if !graphRelocated {
+			// relocated=false: a rig scope's store IS that rig's work ledger, so
+			// a work-class pour belongs there and must not be refused.
+			scopes[rigName] = cr.newConvergenceScope(
+				rigName, store, rigStorePaths[rigName], cr.cfg.FormulaLayers.SearchPaths(rigName), false)
+			continue
+		}
+		scope := rigGraphScope(rigName)
+		rig := cr.newConvergenceScope(
+			rigName, graphStore, rigStorePaths[rigName], cr.cfg.FormulaLayers.SearchPaths(rigName), true)
+		rig.adapter.scopeRef = scope.rootStoreRef(cr.cityName)
+		// A rig whose store IS the city's (a rig registered at the city root)
+		// has no relic leg: that store holds the city's retained copies, and
+		// reading them as the rig's loops would drive frozen city loops
+		// (design §3.2). graphRelicLegForScope answers false on refused routes,
+		// so a refused city gets no relic leg either; its binding refuses every
+		// read, which is the standing refusal the boot gate already reports.
+		if graphRelicLegForScope(cr.storageRoutes, scope) && !rigStoreIsCityStore(cr.cityPath, rigStorePaths[rigName], store, cityStore) {
+			rig.adapter.relic = store
+		}
+		scopes[rigName] = rig
 	}
 	return scopes
 }
@@ -126,8 +169,15 @@ func (cr *CityRuntime) rebuildConvergenceHandler() {
 // newConvergenceScope wires a store adapter and convergence handler for a
 // single bead store. Each rig scope resolves formulas through that rig's
 // formula search paths so rig-local formulas are honored.
-func (cr *CityRuntime) newConvergenceScope(rig string, store beads.Store, storePath string, formulaSearchPaths []string) *convergenceScope {
-	adapter := newConvergenceStoreAdapter(store, formulaSearchPaths)
+//
+// storePath stays the scope's ROOT DIRECTORY (the city path, or the rig path)
+// even when store is a relocated class store: it is what the handler hands to
+// gate commands as their working directory, not a database locator. relocated
+// says whether store is a class binding the scope directory's own `bd` cannot
+// reach; the adapter needs it to refuse pouring work-class molecules into the
+// infrastructure binding.
+func (cr *CityRuntime) newConvergenceScope(rig string, store beads.Store, storePath string, formulaSearchPaths []string, relocated bool) *convergenceScope {
+	adapter := newConvergenceStoreAdapter(store, formulaSearchPaths, relocated)
 	return &convergenceScope{
 		rig:       rig,
 		storePath: storePath,
@@ -230,8 +280,14 @@ func (cr *CityRuntime) convergenceTick(ctx context.Context) {
 	if cr.convScopes == nil || cr.convergenceReqCh == nil {
 		return
 	}
+	// A suspended rig's loops wait for it to resume: reading its store would
+	// restart the bd proxy suspension retired.
+	suspendedRigs := buildEffectiveSuspendedRigNames(cr.cfg, loadSuspensionStateBestEffort(cr.cityPath))
 	for _, scope := range cr.convergenceScopes() {
 		scope := scope
+		if scope.rig != "" && suspendedRigs[scope.rig] {
+			continue
+		}
 		cr.safeTick(func() {
 			cr.convergenceTickScope(ctx, scope)
 		}, scope.triggerName("convergence-tick"))
@@ -536,8 +592,14 @@ func (cr *CityRuntime) convergenceStartupReconcile(ctx context.Context) {
 	if cr.convScopes == nil || cr.convergenceReqCh == nil {
 		return
 	}
+	suspendedRigs := buildEffectiveSuspendedRigNames(cr.cfg, loadSuspensionStateBestEffort(cr.cityPath))
 	for _, scope := range cr.convergenceScopes() {
 		scope := scope
+		if scope.rig != "" && suspendedRigs[scope.rig] {
+			// Reconciled by the first tick after the rig resumes.
+			scope.needsStartupReconcile = true
+			continue
+		}
 		run := func() {
 			cr.convergenceStartupReconcileScope(ctx, scope)
 		}
@@ -560,7 +622,7 @@ func (cr *CityRuntime) convergenceStartupReconcileScope(ctx context.Context, sco
 	}
 	// List() waits for CachingStore prime if not yet live, then serves
 	// from memory. No subprocess stampede.
-	all, err := scope.store.List(beads.ListQuery{Type: "convergence"})
+	all, err := scope.adapter.listConvergence()
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: convergence reconcile%s: listing beads: %v\n", //nolint:errcheck
 			cr.logPrefix, scope.logSuffix(), err)
@@ -634,4 +696,13 @@ func currentUsername() string {
 		return "unknown"
 	}
 	return u.Username
+}
+
+// rigStoreIsCityStore reports whether a rig's store is the city's own: the
+// same handle, or a rig registered at the city root.
+func rigStoreIsCityStore(cityPath, rigStorePath string, rigStore, cityStore beads.Store) bool {
+	if rigStore == cityStore {
+		return true
+	}
+	return rigStorePath != "" && scopeIsCity(cityPath, rigStorePath)
 }

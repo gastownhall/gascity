@@ -6,6 +6,8 @@ package t3bridge
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,13 +32,21 @@ import (
 )
 
 var (
-	authMu                       sync.Mutex
-	cachedBridgeWSToken          string
-	cachedBridgeWSTokenBaseURL   string
-	cachedBridgeWSTokenExpiresAt time.Time
+	// authSem serializes ws-token requests and guards the cached token. It is
+	// a one-slot semaphore rather than a mutex so a waiter can give up when
+	// its ctx ends: see lockBridgeAuth.
+	authSem                       = make(chan struct{}, 1)
+	cachedBridgeWSToken           string
+	cachedBridgeWSTokenBaseURL    string
+	cachedBridgeWSTokenExpiresAt  time.Time
+	errWebSocketTicketUnsupported = errors.New("T3 websocket-ticket endpoint unsupported")
+	errHTTPSnapshotUnsupported    = errors.New("T3 HTTP snapshot endpoint unsupported")
 )
 
-var _ runtime.Provider = (*Provider)(nil)
+var (
+	_ runtime.Provider                  = (*Provider)(nil)
+	_ runtime.LivenessObserverWithError = (*Provider)(nil)
+)
 
 var defaultWSURLCandidates = []string{
 	"ws://127.0.0.1:3773/ws",
@@ -49,6 +60,7 @@ const (
 	bridgeHTTPTimeout        = 12 * time.Second
 	bridgeWSTimeout          = 3 * time.Second
 	snapshotCacheTTL         = 10 * time.Second
+	recentStartGracePeriod   = 30 * time.Second
 )
 
 // Provider wraps an exec.Provider, moving the T3-specific lifecycle and turn
@@ -60,10 +72,20 @@ type Provider struct {
 	watchers     map[string]context.CancelFunc
 	recentStarts map[string]time.Time
 
+	// fenceChecked is a test seam run between a fenced operation's read of
+	// the thread and its dispatch.
+	fenceChecked func(name string)
+
+	// fresh coalesces fresh snapshot reads (DES-T3I D7).
+	fresh freshReads
+
 	// Cached snapshot for batching multiple IsRunning/ProcessAlive calls.
+	// snapshotClears counts clearSnapshotCache calls: a read that started
+	// before the latest clear does not refill the cache.
 	snapshotSnapshot map[string]interface{}
 	snapshotCache    map[string]string // threadID → session status
 	snapshotCacheAt  time.Time
+	snapshotClears   uint64
 }
 
 type threadBinding struct {
@@ -182,9 +204,11 @@ func resolveRuntimeStatePaths() []string {
 		paths = append(paths, path)
 	}
 
+	add(filepath.Join(baseDir, "userdata", "server-runtime.json"))
 	add(filepath.Join(baseDir, "server-runtime.json"))
 	add(filepath.Join(baseDir, "dev", "server-runtime.json"))
 	if !explicitT3Home && strings.TrimSpace(home) != "" {
+		add(filepath.Join(home, ".t3", "userdata", "server-runtime.json"))
 		add(filepath.Join(home, ".t3", "server-runtime.json"))
 		add(filepath.Join(home, ".t3", "dev", "server-runtime.json"))
 	}
@@ -256,9 +280,24 @@ func resolveBearerSessionToken() (string, error) {
 	return readCachedBearerSessionToken()
 }
 
-func issueT3WebSocketToken(wsURL string) (string, error) {
-	authMu.Lock()
-	defer authMu.Unlock()
+// lockBridgeAuth takes authSem, or returns ctx's error if ctx ends first.
+func lockBridgeAuth(ctx context.Context) error {
+	select {
+	case authSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("waiting for the t3 auth lock: %w", ctx.Err())
+	}
+}
+
+// unlockBridgeAuth releases authSem.
+func unlockBridgeAuth() { <-authSem }
+
+func issueT3WebSocketToken(ctx context.Context, wsURL string) (string, error) {
+	if err := lockBridgeAuth(ctx); err != nil {
+		return "", err
+	}
+	defer unlockBridgeAuth()
 
 	parsed, err := url.Parse(wsURL)
 	if err != nil {
@@ -284,7 +323,7 @@ func issueT3WebSocketToken(wsURL string) (string, error) {
 		return cachedBridgeWSToken, nil
 	}
 
-	req, err := http.NewRequest(http.MethodPost, baseURL, bytes.NewReader([]byte("{}")))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL, bytes.NewReader([]byte("{}")))
 	if err != nil {
 		return "", fmt.Errorf("build bridge ws-token request: %w", err)
 	}
@@ -318,6 +357,57 @@ func issueT3WebSocketToken(wsURL string) (string, error) {
 		cachedBridgeWSTokenExpiresAt = expiresAt
 	}
 	return payload.Token, nil
+}
+
+func issueT3WebSocketTicket(ctx context.Context, wsURL, bearerToken string) (string, error) {
+	parsed, err := url.Parse(wsURL)
+	if err != nil {
+		return "", fmt.Errorf("parse ws url: %w", err)
+	}
+	switch parsed.Scheme {
+	case "ws":
+		parsed.Scheme = "http"
+	case "wss":
+		parsed.Scheme = "https"
+	default:
+		return "", fmt.Errorf("unsupported websocket scheme: %s", parsed.Scheme)
+	}
+	parsed.Path = "/api/auth/websocket-ticket"
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, parsed.String(), nil)
+	if err != nil {
+		return "", fmt.Errorf("build websocket-ticket request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+bearerToken)
+
+	client := &http.Client{Timeout: bridgeHTTPTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request websocket ticket: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		detail := runtime.RedactSecrets(strings.TrimSpace(string(body)), []string{bearerToken})
+		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented {
+			return "", fmt.Errorf("%w: status %d: %s", errWebSocketTicketUnsupported, resp.StatusCode, detail)
+		}
+		return "", fmt.Errorf("request websocket ticket: status %d: %s", resp.StatusCode, detail)
+	}
+
+	var payload struct {
+		Ticket string `json:"ticket"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return "", fmt.Errorf("%w: decode websocket ticket: %w", errWebSocketTicketUnsupported, err)
+	}
+	payload.Ticket = strings.TrimSpace(payload.Ticket)
+	if payload.Ticket == "" {
+		return "", fmt.Errorf("%w: decode websocket ticket: empty ticket", errWebSocketTicketUnsupported)
+	}
+	return payload.Ticket, nil
 }
 
 func isTransientBridgeError(err error) bool {
@@ -380,6 +470,138 @@ func softenBridgeStartupError(err error) error {
 	return err
 }
 
+// t3RPCFailureError is T3's Exit Failure or Defect answer to an RPC. When
+// rejected is set, the cause is a definitive refusal: T3 did not do it. Any
+// other failure leaves the outcome unknown, because a handler that died or
+// was interrupted may already have committed the command.
+type t3RPCFailureError struct {
+	method   string
+	cause    string
+	defect   bool
+	rejected bool
+}
+
+func (e *t3RPCFailureError) Error() string {
+	if e.defect {
+		return fmt.Sprintf("t3bridge rpc defect: %s", e.cause)
+	}
+	return fmt.Sprintf("t3 rpc %s: %s", e.method, e.cause)
+}
+
+// isT3Rejection reports whether err is T3's definitive refusal rather than a
+// failure whose outcome is unknown.
+func isT3Rejection(err error) bool {
+	var failure *t3RPCFailureError
+	return errors.As(err, &failure) && failure.rejected
+}
+
+// t3CommandRejectionTags are the error tags of T3 command failures that
+// commit nothing and are recorded as rejection receipts, so replaying the
+// same commandId repeats the refusal. Any other error is treated as ambiguous.
+var t3CommandRejectionTags = map[string]bool{
+	"OrchestrationCommandInvariantError":          true,
+	"OrchestrationCommandPreviouslyRejectedError": true,
+}
+
+// t3DispatchCommandErrorTag is the error tag upstream T3's WS
+// orchestration.dispatchCommand rewraps every engine error in, keeping the
+// engine error's message and carrying the engine error as its cause.
+const t3DispatchCommandErrorTag = "OrchestrationDispatchCommandError"
+
+// t3CommandRejectionMessagePrefixes are the messages of the
+// [t3CommandRejectionTags] errors (T3 orchestration/Errors.ts), which survive
+// the dispatchCommand rewrap even when the cause's encoding drops its tag.
+var t3CommandRejectionMessagePrefixes = []string{
+	"Orchestration command invariant failed (",
+	"Command previously rejected (",
+}
+
+// t3ExitCauseIsRejection reports whether an Exit Failure cause is a
+// definitive refusal: every failure in it is a Fail carrying a T3 command
+// rejection (t3FailureIsRejection). A Die, an Interrupt, an unknown error or
+// an unparseable cause is ambiguous. It reads both Effect cause encodings: the
+// tagged tree (Fail, Die, Interrupt, Sequential, Parallel, Empty) and the
+// flattened list ({"failures": [...]}, {"reasons": [...]} or a bare list).
+func t3ExitCauseIsRejection(raw json.RawMessage) bool {
+	var decoded interface{}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return false
+	}
+	leaves, ok := t3CauseLeaves(decoded)
+	if !ok || len(leaves) == 0 {
+		return false
+	}
+	for _, leaf := range leaves {
+		if leaf["_tag"] != "Fail" {
+			return false
+		}
+		failure, _ := leaf["error"].(map[string]interface{})
+		if !t3FailureIsRejection(failure) {
+			return false
+		}
+	}
+	return true
+}
+
+// t3FailureIsRejection reports whether a Fail's error is a T3 command
+// rejection: one of [t3CommandRejectionTags] as the engine raises it, or the
+// dispatchCommand rewrap of one, recognized by its cause's tag or by the
+// engine error's message it keeps.
+func t3FailureIsRejection(failure map[string]interface{}) bool {
+	tag, _ := failure["_tag"].(string)
+	if t3CommandRejectionTags[tag] {
+		return true
+	}
+	if tag != t3DispatchCommandErrorTag {
+		return false
+	}
+	if cause, ok := failure["cause"].(map[string]interface{}); ok {
+		if causeTag, _ := cause["_tag"].(string); t3CommandRejectionTags[causeTag] {
+			return true
+		}
+	}
+	message, _ := failure["message"].(string)
+	for _, prefix := range t3CommandRejectionMessagePrefixes {
+		if strings.HasPrefix(message, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// t3CauseLeaves flattens a decoded cause into its Fail, Die and Interrupt
+// entries. It reports false for a shape it does not recognize.
+func t3CauseLeaves(node interface{}) ([]map[string]interface{}, bool) {
+	switch v := node.(type) {
+	case []interface{}:
+		var leaves []map[string]interface{}
+		for _, item := range v {
+			sub, ok := t3CauseLeaves(item)
+			if !ok {
+				return nil, false
+			}
+			leaves = append(leaves, sub...)
+		}
+		return leaves, true
+	case map[string]interface{}:
+		switch v["_tag"] {
+		case "Fail", "Die", "Interrupt":
+			return []map[string]interface{}{v}, true
+		case "Empty":
+			return nil, true
+		case "Sequential", "Parallel":
+			return t3CauseLeaves([]interface{}{v["left"], v["right"]})
+		case nil:
+			for _, field := range []string{"failures", "reasons"} {
+				if list, ok := v[field].([]interface{}); ok {
+					return t3CauseLeaves(list)
+				}
+			}
+		}
+	}
+	return nil, false
+}
+
 func isSoftBridgeUnavailable(err error) bool {
 	return errors.Is(err, runtime.ErrSessionInitializing) || isTransientBridgeError(err)
 }
@@ -397,18 +619,34 @@ func isLoopbackWsURL(wsURL string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func authenticatedWsURL(wsURL string) (string, http.Header, error) {
+func authenticatedWsURL(ctx context.Context, wsURL string) (string, http.Header, error) {
+	bearerToken, err := resolveBearerSessionToken()
+	if err != nil {
+		return "", nil, err
+	}
+	if bearerToken != "" {
+		ticket, err := issueT3WebSocketTicket(ctx, wsURL, bearerToken)
+		if err != nil {
+			if errors.Is(err, errWebSocketTicketUnsupported) {
+				headers := http.Header{}
+				headers.Set("Authorization", "Bearer "+bearerToken)
+				return wsURL, headers, nil
+			}
+			return "", nil, err
+		}
+		parsed, err := url.Parse(wsURL)
+		if err != nil {
+			return "", nil, fmt.Errorf("parse authenticated ws url: %w", err)
+		}
+		query := parsed.Query()
+		query.Set("wsTicket", ticket)
+		parsed.RawQuery = query.Encode()
+		return parsed.String(), nil, nil
+	}
 	if isLoopbackWsURL(wsURL) {
 		return wsURL, nil, nil
 	}
-	if bearerToken, err := resolveBearerSessionToken(); err != nil {
-		return "", nil, err
-	} else if bearerToken != "" {
-		headers := http.Header{}
-		headers.Set("Authorization", "Bearer "+bearerToken)
-		return wsURL, headers, nil
-	}
-	wsToken, err := issueT3WebSocketToken(wsURL)
+	wsToken, err := issueT3WebSocketToken(ctx, wsURL)
 	if err != nil {
 		return "", nil, err
 	}
@@ -475,8 +713,14 @@ func resolveNativeStateDir() string {
 	return filepath.Join(home, ".t3", "gc-bridge-native")
 }
 
+// ensureNativeStateDir creates the bridge state directory owner-only.
+//
+// It holds session meta sidecars and the cached auth bearer session token that
+// [readCachedBearerSessionToken] reads back. Gas City is often the process that
+// creates the directory, so the mode chosen here is the one the token lands in
+// even though T3 writes the token itself.
 func ensureNativeStateDir() error {
-	return os.MkdirAll(resolveNativeStateDir(), 0o755)
+	return runtime.EnsurePrivateDir(resolveNativeStateDir())
 }
 
 func safeMetaPathComponent(value string) string {
@@ -532,7 +776,7 @@ func writeMetaValue(name, key, value string) error {
 	if err := ensureNativeStateDir(); err != nil {
 		return err
 	}
-	return os.WriteFile(metaFilePath(name, key), []byte(value), 0o644)
+	return runtime.WritePrivateFile(metaFilePath(name, key), []byte(value))
 }
 
 func readMetaValue(name, key string) (string, error) {
@@ -724,27 +968,80 @@ func SessionNameFromMetadata(meta map[string]string) string {
 
 func snapshotThreadBySessionName(snapshot map[string]interface{}, name string) map[string]interface{} {
 	var best map[string]interface{}
-	bestUpdatedAt := ""
 	for _, thread := range snapshotThreads(snapshot) {
-		if deletedAt, ok := thread["deletedAt"]; ok && deletedAt != nil {
+		if !snapshotThreadEligible(thread) {
 			continue
 		}
 		meta := threadCustomMetadata(thread)
 		if SessionNameFromMetadata(meta) != name {
 			continue
 		}
-		updatedAt, _ := thread["updatedAt"].(string)
-		createdAt, _ := thread["createdAt"].(string)
-		candidate := updatedAt
-		if candidate == "" {
-			candidate = createdAt
-		}
-		if best == nil || candidate > bestUpdatedAt {
+		if snapshotThreadNewerThan(thread, best) {
 			best = thread
-			bestUpdatedAt = candidate
 		}
 	}
 	return best
+}
+
+func snapshotThreadEligible(thread map[string]interface{}) bool {
+	if thread == nil {
+		return false
+	}
+	if deletedAt, ok := thread["deletedAt"]; ok && deletedAt != nil {
+		return false
+	}
+	return threadCustomMetadata(thread)["gc.state"] != "archived"
+}
+
+func snapshotThreadRecency(thread map[string]interface{}) string {
+	if thread == nil {
+		return ""
+	}
+	updatedAt, _ := thread["updatedAt"].(string)
+	if updatedAt != "" {
+		return updatedAt
+	}
+	createdAt, _ := thread["createdAt"].(string)
+	return createdAt
+}
+
+func snapshotThreadNewerThan(candidate, current map[string]interface{}) bool {
+	return current == nil || snapshotThreadRecency(candidate) > snapshotThreadRecency(current)
+}
+
+type t3SessionStatusClass uint8
+
+const (
+	t3SessionStatusUnknown t3SessionStatusClass = iota
+	t3SessionStatusLive
+	t3SessionStatusAbsent
+)
+
+func snapshotThreadSessionStatus(thread map[string]interface{}) string {
+	if thread == nil {
+		return ""
+	}
+	session, _ := thread["session"].(map[string]interface{})
+	if session == nil {
+		return ""
+	}
+	status, _ := session["status"].(string)
+	return strings.ToLower(strings.TrimSpace(status))
+}
+
+func classifyT3SessionStatus(status string) t3SessionStatusClass {
+	switch status {
+	case "idle", "starting", "running", "ready":
+		return t3SessionStatusLive
+	case "interrupted", "stopped", "error", "none", "gone":
+		return t3SessionStatusAbsent
+	default:
+		return t3SessionStatusUnknown
+	}
+}
+
+func isLegacyPreSessionStatus(status string) bool {
+	return status == "none" || status == "gone"
 }
 
 func snapshotThreadBinding(thread map[string]interface{}) *threadBinding {
@@ -855,38 +1152,107 @@ func (p *Provider) withinRecentStart(name string) bool {
 	if !ok {
 		return false
 	}
-	if time.Since(startedAt) >= 30*time.Second {
+	if time.Since(startedAt) >= recentStartGracePeriod {
 		delete(p.recentStarts, name)
 		return false
 	}
 	return true
 }
 
+func (p *Provider) recentStartNames(prefix string) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	now := time.Now()
+	names := make([]string, 0, len(p.recentStarts))
+	for name, startedAt := range p.recentStarts {
+		if now.Sub(startedAt) >= recentStartGracePeriod {
+			delete(p.recentStarts, name)
+			continue
+		}
+		if prefix == "" || strings.HasPrefix(name, prefix) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 // rpcCall makes a generic WebSocket RPC call and returns the result map.
 func (p *Provider) rpcCall(method string, params map[string]interface{}) (map[string]interface{}, error) {
+	return p.rpcCallCtx(context.Background(), method, params)
+}
+
+// rpcCallCtx is rpcCall bounded by ctx: the dial, the auth requests and the
+// read stop when ctx ends, and so do the transient-retry sleeps.
+func (p *Provider) rpcCallCtx(ctx context.Context, method string, params map[string]interface{}) (map[string]interface{}, error) {
+	return p.rpcCallCheckedCtx(ctx, method, params, nil)
+}
+
+// rpcCallCheckedCtx is rpcCallCtx that runs beforeRetry, when set, after each
+// transient-retry sleep and before the next attempt; its error ends the call.
+// With beforeRetry set, an attempt ends at the first candidate that takes the
+// request, so the request is never sent again without the check.
+func (p *Provider) rpcCallCheckedCtx(ctx context.Context, method string, params map[string]interface{}, beforeRetry func(context.Context) error) (map[string]interface{}, error) {
 	p.mu.Lock()
 	p.reqSeq++
 	reqID := p.reqSeq
 	p.mu.Unlock()
 
 	deadline := time.Now().Add(bridgeConnectRetryWindow)
+	// written is whether an earlier attempt wrote the request and got no
+	// answer: T3 may have taken it, so every failure from then on says so.
+	written := false
+	fail := func(err error) error {
+		if written && !errors.Is(err, errRPCWrittenUnanswered) {
+			return fmt.Errorf("%w: %w", errRPCWrittenUnanswered, err)
+		}
+		return err
+	}
 	for attempt := 1; ; attempt++ {
-		result, err := p.rpcCallOnce(method, params, reqID)
+		result, err := p.rpcCallOnceCtx(ctx, method, params, reqID, beforeRetry != nil)
 		if err == nil {
 			return result, nil
 		}
+		written = written || errors.Is(err, errRPCWrittenUnanswered)
 		if !isTransientBridgeError(err) || time.Now().After(deadline) {
-			return nil, err
+			return nil, fail(err)
 		}
-		time.Sleep(nextBridgeRetryDelay(attempt))
+		retry := time.NewTimer(nextBridgeRetryDelay(attempt))
+		select {
+		case <-ctx.Done():
+			retry.Stop()
+			return nil, fail(fmt.Errorf("t3 rpc %s: %w: %w", method, ctx.Err(), err))
+		case <-retry.C:
+		}
+		if beforeRetry != nil {
+			if checkErr := beforeRetry(ctx); checkErr != nil {
+				return nil, fail(fmt.Errorf("t3 rpc %s: not retried after attempt %d failed: %w: %w", method, attempt, checkErr, err))
+			}
+		}
 	}
 }
 
-func (p *Provider) rpcCallOnce(method string, params map[string]interface{}, reqID int) (map[string]interface{}, error) {
+// errRPCWrittenUnanswered marks an RPC failure after a WebSocket candidate
+// took the whole request and no answer came back: T3 may have acted on it.
+var errRPCWrittenUnanswered = errors.New("t3 rpc request written but not answered")
+
+// rpcCallOnceCtx sends the request to each WebSocket candidate in turn until
+// one answers. With stopAfterWrite set, a candidate that takes the request and
+// then fails before answering ends the walk: the request may have reached T3.
+// A failure after any candidate took the request wraps
+// errRPCWrittenUnanswered.
+func (p *Provider) rpcCallOnceCtx(ctx context.Context, method string, params map[string]interface{}, reqID int, stopAfterWrite bool) (map[string]interface{}, error) {
 	var lastErr error
 	var failures []string
+	written := false
 	for _, candidate := range resolveWsURLCandidates() {
-		wsURL, headers, err := authenticatedWsURL(candidate)
+		if err := ctx.Err(); err != nil {
+			lastErr = fmt.Errorf("%s: %w", candidate, err)
+			failures = append(failures, lastErr.Error())
+			break
+		}
+		wsURL, headers, err := authenticatedWsURL(ctx, candidate)
 		if err != nil {
 			lastErr = fmt.Errorf("%s: %w", candidate, err)
 			failures = append(failures, lastErr.Error())
@@ -894,13 +1260,17 @@ func (p *Provider) rpcCallOnce(method string, params map[string]interface{}, req
 		}
 		dialer := *websocket.DefaultDialer
 		dialer.HandshakeTimeout = bridgeWSTimeout
-		conn, _, err := dialer.Dial(wsURL, headers)
+		conn, _, err := dialer.DialContext(ctx, wsURL, headers)
 		if err != nil {
 			lastErr = fmt.Errorf("%s: %w", candidate, err)
 			failures = append(failures, lastErr.Error())
 			continue
 		}
 		defer func() { _ = conn.Close() }()
+		// Closing the connection when ctx ends unblocks the read below even
+		// when ctx has no deadline.
+		stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
+		defer stopClose()
 
 		payload := params
 		if payload == nil {
@@ -914,54 +1284,98 @@ func (p *Provider) rpcCallOnce(method string, params map[string]interface{}, req
 			"headers": []interface{}{},
 		}
 		if err := conn.WriteJSON(request); err != nil {
+			// A failed write left T3 at most part of the message, which it
+			// cannot dispatch, so the walk goes on even with stopAfterWrite.
 			lastErr = fmt.Errorf("%s: %w", candidate, err)
 			failures = append(failures, lastErr.Error())
 			continue
 		}
 
-		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
-		for {
-			_, msg, err := conn.ReadMessage()
-			if err != nil {
-				lastErr = fmt.Errorf("%s: %w", candidate, err)
-				failures = append(failures, lastErr.Error())
-				break
-			}
-			var resp struct {
-				Tag       string `json:"_tag"`
-				RequestID string `json:"requestId"`
-				Exit      *struct {
-					Tag   string                 `json:"_tag"`
-					Value map[string]interface{} `json:"value"`
-					Cause json.RawMessage        `json:"cause"`
-				} `json:"exit"`
-				Defect string `json:"defect"`
-			}
-			if err := json.Unmarshal(msg, &resp); err != nil {
-				continue
-			}
-			if resp.Tag == "Defect" {
-				return nil, fmt.Errorf("t3bridge rpc defect: %s", resp.Defect)
-			}
-			if resp.Tag != "Exit" || resp.RequestID != fmt.Sprintf("%d", reqID) {
-				continue
-			}
-			if resp.Exit == nil {
-				return nil, fmt.Errorf("t3 rpc %s: nil exit", method)
-			}
-			if resp.Exit.Tag == "Failure" {
-				return nil, fmt.Errorf("t3 rpc %s: %s", method, string(resp.Exit.Cause))
-			}
-			return resp.Exit.Value, nil
+		value, answered, err := readRPCAnswer(ctx, conn, method, reqID)
+		if answered {
+			return value, err
+		}
+		written = true
+		lastErr = fmt.Errorf("%s: %w", candidate, err)
+		failures = append(failures, lastErr.Error())
+		if stopAfterWrite {
+			break
 		}
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no T3 WebSocket URL candidates")
 	}
 	if len(failures) > 1 {
-		return nil, fmt.Errorf("all T3 WebSocket candidates failed: %s", strings.Join(failures, "; "))
+		lastErr = fmt.Errorf("all T3 WebSocket candidates failed: %s", strings.Join(failures, "; "))
+	}
+	// The failures above are text, so ctx's error survives only if named here.
+	if ctxErr := ctxEndErr(ctx); ctxErr != nil && !errors.Is(lastErr, ctxErr) {
+		lastErr = fmt.Errorf("%w: %w", ctxErr, lastErr)
+	}
+	if written {
+		return nil, fmt.Errorf("%w: %w", errRPCWrittenUnanswered, lastErr)
 	}
 	return nil, lastErr
+}
+
+// ctxEndErr is ctx.Err(), or context.DeadlineExceeded once ctx's deadline has
+// passed before its timer has run: a socket deadline taken from ctx.Deadline()
+// fires in that gap, and ctx.Err() is still nil there.
+func ctxEndErr(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+// readRPCAnswer reads conn, for up to 30 s or until ctx's deadline, until T3
+// answers request reqID or reports a defect. answered is false when a read
+// fails first; the error is then the read failure, wrapping ctx's error when
+// ctx ended.
+func readRPCAnswer(ctx context.Context, conn *websocket.Conn, method string, reqID int) (map[string]interface{}, bool, error) {
+	readDeadline := time.Now().Add(30 * time.Second)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(readDeadline) {
+		readDeadline = ctxDeadline
+	}
+	_ = conn.SetReadDeadline(readDeadline)
+	for {
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				err = fmt.Errorf("%w: %w", ctxErr, err)
+			}
+			return nil, false, err
+		}
+		var resp struct {
+			Tag       string `json:"_tag"`
+			RequestID string `json:"requestId"`
+			Exit      *struct {
+				Tag   string                 `json:"_tag"`
+				Value map[string]interface{} `json:"value"`
+				Cause json.RawMessage        `json:"cause"`
+			} `json:"exit"`
+			Defect string `json:"defect"`
+		}
+		if err := json.Unmarshal(msg, &resp); err != nil {
+			continue
+		}
+		if resp.Tag == "Defect" {
+			return nil, true, &t3RPCFailureError{method: method, cause: resp.Defect, defect: true}
+		}
+		if resp.Tag != "Exit" || resp.RequestID != fmt.Sprintf("%d", reqID) {
+			continue
+		}
+		if resp.Exit == nil {
+			return nil, true, fmt.Errorf("t3 rpc %s: nil exit", method)
+		}
+		if resp.Exit.Tag == "Failure" {
+			return nil, true, &t3RPCFailureError{method: method, cause: string(resp.Exit.Cause), rejected: t3ExitCauseIsRejection(resp.Exit.Cause)}
+		}
+		return resp.Exit.Value, true, nil
+	}
 }
 
 // threadSessionStatus returns the session status for a thread by checking
@@ -980,30 +1394,12 @@ func (p *Provider) threadSessionStatus(threadID string) string {
 	if err != nil {
 		return ""
 	}
-
-	cache := make(map[string]string)
-	for _, raw := range snapshotItems(snapshot, "threads") {
-		thread, _ := raw.(map[string]interface{})
-		if thread == nil {
-			continue
-		}
-		id, _ := thread["id"].(string)
-		session, _ := thread["session"].(map[string]interface{})
-		if session != nil {
-			st, _ := session["status"].(string)
-			cache[id] = st
-		}
-	}
-
-	p.mu.Lock()
-	p.snapshotCache = cache
-	p.snapshotCacheAt = time.Now()
-	p.mu.Unlock()
-
-	return cache[threadID]
+	return snapshotThreadStatuses(snapshot)[threadID]
 }
 
-func (p *Provider) cacheSnapshot(snapshot map[string]interface{}) {
+// snapshotThreadStatuses maps each thread id in snapshot to its session
+// status.
+func snapshotThreadStatuses(snapshot map[string]interface{}) map[string]string {
 	cache := make(map[string]string)
 	for _, raw := range snapshotItems(snapshot, "threads") {
 		thread, _ := raw.(map[string]interface{})
@@ -1017,16 +1413,37 @@ func (p *Provider) cacheSnapshot(snapshot map[string]interface{}) {
 			cache[id] = st
 		}
 	}
+	return cache
+}
 
+// cacheSnapshot caches snapshot for the bridge's cached readers.
+func (p *Provider) cacheSnapshot(snapshot map[string]interface{}) {
 	p.mu.Lock()
+	clears := p.snapshotClears
+	p.mu.Unlock()
+	p.cacheSnapshotRead(snapshot, clears)
+}
+
+// cacheSnapshotRead caches snapshot, read by a read that started when the
+// cache had been cleared clears times, unless the cache was cleared since:
+// that read may predate the write the clear followed.
+func (p *Provider) cacheSnapshotRead(snapshot map[string]interface{}, clears uint64) {
+	cache := snapshotThreadStatuses(snapshot)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.snapshotClears != clears {
+		return
+	}
 	p.snapshotSnapshot = snapshot
 	p.snapshotCache = cache
 	p.snapshotCacheAt = time.Now()
-	p.mu.Unlock()
 }
 
+// clearSnapshotCache empties the cache after a write the bridge made, so the
+// next cached read is answered by a read that started after the write.
 func (p *Provider) clearSnapshotCache() {
 	p.mu.Lock()
+	p.snapshotClears++
 	p.snapshotSnapshot = nil
 	p.snapshotCache = nil
 	p.snapshotCacheAt = time.Time{}
@@ -1038,20 +1455,129 @@ func (p *Provider) rpcDispatchCommand(command map[string]interface{}) error {
 	return err
 }
 
-func (p *Provider) rpcSnapshot() (map[string]interface{}, error) {
-	p.mu.Lock()
-	if time.Since(p.snapshotCacheAt) < snapshotCacheTTL && p.snapshotSnapshot != nil {
-		snapshot := p.snapshotSnapshot
-		p.mu.Unlock()
+// rpcHTTPSnapshot reads the orchestration snapshot over T3's HTTP endpoint,
+// bounded by ctx as well as the client timeout.
+func (p *Provider) rpcHTTPSnapshot(ctx context.Context, bearerToken string) (map[string]interface{}, error) {
+	var lastErr error
+	var unsupportedErr error
+	var failures []string
+	for _, candidate := range resolveWsURLCandidates() {
+		parsed, err := url.Parse(candidate)
+		if err != nil {
+			lastErr = fmt.Errorf("%s: parse websocket url: %w", candidate, err)
+			failures = append(failures, lastErr.Error())
+			continue
+		}
+		switch parsed.Scheme {
+		case "ws":
+			parsed.Scheme = "http"
+		case "wss":
+			parsed.Scheme = "https"
+		default:
+			lastErr = fmt.Errorf("%s: unsupported websocket scheme: %s", candidate, parsed.Scheme)
+			failures = append(failures, lastErr.Error())
+			continue
+		}
+		parsed.Path = "/api/orchestration/snapshot"
+		parsed.RawQuery = ""
+		parsed.Fragment = ""
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+		if err != nil {
+			lastErr = fmt.Errorf("%s: build snapshot request: %w", candidate, err)
+			failures = append(failures, lastErr.Error())
+			continue
+		}
+		req.Header.Set("Authorization", "Bearer "+bearerToken)
+		resp, err := (&http.Client{Timeout: bridgeHTTPTimeout}).Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("%s: request orchestration snapshot: %w", candidate, err)
+			failures = append(failures, lastErr.Error())
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+			_ = resp.Body.Close()
+			detail := runtime.RedactSecrets(strings.TrimSpace(string(body)), []string{bearerToken})
+			if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented {
+				unsupportedErr = fmt.Errorf("%w: status %d: %s", errHTTPSnapshotUnsupported, resp.StatusCode, detail)
+				failures = append(failures, unsupportedErr.Error())
+				continue
+			}
+			lastErr = fmt.Errorf("%s: request orchestration snapshot: status %d: %s", candidate, resp.StatusCode, detail)
+			failures = append(failures, lastErr.Error())
+			continue
+		}
+		var snapshot map[string]interface{}
+		err = json.NewDecoder(resp.Body).Decode(&snapshot)
+		_ = resp.Body.Close()
+		if err != nil {
+			unsupportedErr = fmt.Errorf("%w: %s: decode orchestration snapshot: %w", errHTTPSnapshotUnsupported, candidate, err)
+			failures = append(failures, unsupportedErr.Error())
+			continue
+		}
 		return snapshot, nil
 	}
-	p.mu.Unlock()
+	if unsupportedErr != nil {
+		return nil, unsupportedErr
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no T3 WebSocket URL candidates")
+	}
+	if len(failures) > 1 {
+		return nil, fmt.Errorf("all T3 snapshot candidates failed: %s", strings.Join(failures, "; "))
+	}
+	return nil, lastErr
+}
 
-	snapshot, err := p.rpcCall("orchestration.getSnapshot", map[string]interface{}{})
+// rpcSnapshot returns the cached snapshot while it is younger than
+// snapshotCacheTTL, else reads one. A cache that only aged out takes the
+// read in flight, if one is; a cache a write cleared (or never filled) waits
+// for a read that started after it arrived, so the write is visible.
+func (p *Provider) rpcSnapshot() (map[string]interface{}, error) {
+	p.mu.Lock()
+	cached := p.snapshotSnapshot
+	if cached != nil && time.Since(p.snapshotCacheAt) < snapshotCacheTTL {
+		p.mu.Unlock()
+		return cached, nil
+	}
+	p.mu.Unlock()
+	if cached == nil {
+		return p.rpcSnapshotFresh(context.Background())
+	}
+	return p.fresh.shared(context.Background(), p.rpcSnapshotRead)
+}
+
+// rpcSnapshotFresh reads the orchestration snapshot from T3, bounded by ctx,
+// never from the cache, and caches what it read for the bridge's other
+// readers. Concurrent callers share reads by generation (freshReads): each
+// is answered by a read that started after it arrived.
+func (p *Provider) rpcSnapshotFresh(ctx context.Context) (map[string]interface{}, error) {
+	return p.fresh.do(ctx, p.rpcSnapshotRead)
+}
+
+// rpcSnapshotRead is one snapshot read for rpcSnapshotFresh.
+func (p *Provider) rpcSnapshotRead(ctx context.Context) (map[string]interface{}, error) {
+	p.mu.Lock()
+	clears := p.snapshotClears
+	p.mu.Unlock()
+	bearerToken, err := resolveBearerSessionToken()
 	if err != nil {
 		return nil, err
 	}
-	p.cacheSnapshot(snapshot)
+	var snapshot map[string]interface{}
+	if bearerToken != "" {
+		snapshot, err = p.rpcHTTPSnapshot(ctx, bearerToken)
+		if errors.Is(err, errHTTPSnapshotUnsupported) {
+			snapshot, err = p.rpcCallCtx(ctx, "orchestration.getSnapshot", map[string]interface{}{})
+		}
+	} else {
+		snapshot, err = p.rpcCallCtx(ctx, "orchestration.getSnapshot", map[string]interface{}{})
+	}
+	if err != nil {
+		return nil, err
+	}
+	p.cacheSnapshotRead(snapshot, clears)
 	return snapshot, nil
 }
 
@@ -1119,7 +1645,7 @@ func (p *Provider) dispatchProjectCreate(projectID, title, workspaceRoot, provid
 		"projectId":     projectID,
 		"title":         title,
 		"workspaceRoot": workspaceRoot,
-		"createdAt":     time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		"createdAt":     time.Now().UTC().Format(t3TimeLayout),
 	}
 	if provider != "" || model != "" {
 		command["defaultModelSelection"] = map[string]interface{}{
@@ -1151,7 +1677,7 @@ func (p *Provider) dispatchThreadCreate(
 		"interactionMode": "default",
 		"branch":          nil,
 		"worktreePath":    nil,
-		"createdAt":       time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		"createdAt":       time.Now().UTC().Format(t3TimeLayout),
 	}
 	if branch != "" {
 		command["branch"] = branch
@@ -1178,7 +1704,7 @@ func (p *Provider) dispatchThreadSessionStop(threadID string) error {
 		"type":      "thread.session.stop",
 		"commandId": p.nextCommandID("t3bridge-session-stop"),
 		"threadId":  threadID,
-		"createdAt": time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		"createdAt": time.Now().UTC().Format(t3TimeLayout),
 	})
 }
 
@@ -1208,7 +1734,7 @@ func (p *Provider) dispatchThreadModelSelection(threadID, provider, model string
 
 func (p *Provider) dispatchActivity(threadID, kind, summary string, payload map[string]interface{}) error {
 	tone := "info"
-	now := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+	now := time.Now().UTC().Format(t3TimeLayout)
 	return p.rpcDispatchCommand(map[string]interface{}{
 		"type":      "thread.activity.append",
 		"commandId": p.nextCommandID("t3bridge-activity"),
@@ -1226,14 +1752,75 @@ func (p *Provider) dispatchActivity(threadID, kind, summary string, payload map[
 	})
 }
 
-func (p *Provider) dispatchTurnStart(threadID, text, provider, model string) error {
-	now := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
-	return p.rpcDispatchCommand(map[string]interface{}{
+// turnStartIDs are the idempotency ids of one thread.turn.start: T3 dedupes a
+// command by commandId (replaying its receipt), and keys the user message by
+// messageId.
+type turnStartIDs struct {
+	commandID string
+	messageID string
+}
+
+// freshTurnStartIDs mints ids for a turn no one will redeliver.
+func (p *Provider) freshTurnStartIDs() turnStartIDs {
+	return turnStartIDs{commandID: p.nextCommandID("t3bridge-turn"), messageID: uuid.NewString()}
+}
+
+// deriveDeliveryIDs derives a turn start's ids from a caller's delivery key,
+// so a redelivery of the same delivery replays T3's receipt instead of
+// starting a second turn. T3's receipt replay compares only the command id
+// and thread, and message ids are global, so both ids carry the command type
+// and the city, and the digest covers the thread: the same key in another
+// city, or on a thread that replaced this one, is another delivery.
+func deriveDeliveryIDs(city, threadID, key string) turnStartIDs {
+	namespace := deliveryIDNamespace(city)
+	sum := sha256.Sum256([]byte(city + "\x00" + threadID + "\x00" + key))
+	digest := hex.EncodeToString(sum[:16])
+	return turnStartIDs{
+		commandID: fmt.Sprintf("gc:%s:thread.turn.start:%s", namespace, digest),
+		messageID: fmt.Sprintf("gc:%s:message:%s", namespace, digest),
+	}
+}
+
+// deliveryIDNamespace is city reduced to id-safe characters.
+func deliveryIDNamespace(city string) string {
+	namespace := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			return r
+		default:
+			return '-'
+		}
+	}, strings.TrimSpace(city))
+	if namespace == "" {
+		return "city"
+	}
+	return namespace
+}
+
+// t3TimeLayout is the layout of every createdAt the bridge stamps on a T3
+// command: UTC with millisecond precision. T3 records a turn start's
+// requestedAt from it, so a turn's start and its message's createdAt compare
+// equal (DES-O1 §4.8 row 3).
+const t3TimeLayout = "2006-01-02T15:04:05.000Z"
+
+func (p *Provider) dispatchTurnStart(threadID, text, provider, model string, ids turnStartIDs) error {
+	_, err := p.dispatchTurnStartFor(context.Background(), threadID, text, provider, model, ids, nil)
+	return err
+}
+
+// dispatchTurnStartFor dispatches thread.turn.start bounded by ctx and
+// returns the createdAt it stamped, which T3 stores as the message's
+// creation time and the turn's requestedAt. ids and the stamp are reused by
+// every retry; beforeRetry, when set, must pass before each transient retry.
+func (p *Provider) dispatchTurnStartFor(ctx context.Context, threadID, text, provider, model string, ids turnStartIDs, beforeRetry func(context.Context) error) (time.Time, error) {
+	stamp := time.Now().UTC().Truncate(time.Millisecond)
+	now := stamp.Format(t3TimeLayout)
+	_, err := p.rpcCallCheckedCtx(ctx, "orchestration.dispatchCommand", map[string]interface{}{
 		"type":      "thread.turn.start",
-		"commandId": p.nextCommandID("t3bridge-turn"),
+		"commandId": ids.commandID,
 		"threadId":  threadID,
 		"message": map[string]interface{}{
-			"messageId":   uuid.NewString(),
+			"messageId":   ids.messageID,
 			"role":        "user",
 			"text":        text,
 			"attachments": []interface{}{},
@@ -1245,16 +1832,33 @@ func (p *Provider) dispatchTurnStart(threadID, text, provider, model string) err
 		"runtimeMode":     "full-access",
 		"interactionMode": "default",
 		"createdAt":       now,
-	})
+	}, beforeRetry)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return stamp, nil
 }
 
 func (p *Provider) dispatchTurnInterrupt(threadID string) error {
-	return p.rpcDispatchCommand(map[string]interface{}{
+	return p.dispatchTurnInterruptFor(context.Background(), threadID, "", nil)
+}
+
+// dispatchTurnInterruptFor dispatches thread.turn.interrupt bounded by ctx,
+// with a fresh command id that every retry reuses. A non-empty turnID is T3's
+// raw turn id: V1 records it and interrupts whatever turn runs. beforeRetry,
+// when set, must pass before each transient retry.
+func (p *Provider) dispatchTurnInterruptFor(ctx context.Context, threadID, turnID string, beforeRetry func(context.Context) error) error {
+	command := map[string]interface{}{
 		"type":      "thread.turn.interrupt",
 		"commandId": p.nextCommandID("t3bridge-interrupt"),
 		"threadId":  threadID,
-		"createdAt": time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
-	})
+		"createdAt": time.Now().UTC().Format(t3TimeLayout),
+	}
+	if turnID != "" {
+		command["turnId"] = turnID
+	}
+	_, err := p.rpcCallCheckedCtx(ctx, "orchestration.dispatchCommand", command, beforeRetry)
+	return err
 }
 
 func snapshotProjects(snapshot map[string]interface{}) []map[string]interface{} {
@@ -1431,6 +2035,17 @@ func buildThreadEnv(env map[string]string) map[string]string {
 		threadEnv["BEADS_DOLT_SERVER_MODE"] = "1"
 	}
 	delete(threadEnv, "BEADS_DOLT_SHARED_SERVER")
+	// Forward the controller's shared-server opt-out, never an opt-in. A
+	// session whose managed port gc withheld (gastownhall/gascity#1656) has no
+	// env port to outrank a HOME-level dolt.shared-server: true, so without the
+	// pin the thread's bd would use the host-wide shared server instead of the
+	// managed one the scope's .beads/dolt-server.port mirror tracks.
+	for _, key := range []string{"BEADS_DOLT_SHARED_SERVER", "BD_DOLT_SHARED_SERVER"} {
+		value := strings.TrimSpace(env[key])
+		if on, err := strconv.ParseBool(value); err == nil && !on {
+			threadEnv[key] = value
+		}
+	}
 	return threadEnv
 }
 
@@ -1539,9 +2154,25 @@ func (p *Provider) removeWorktreeForThread(thread map[string]interface{}) {
 	_ = p.rpcRemoveWorktree(base, worktreePath)
 }
 
+// clearBridgeMeta erases the drain markers this provider left on a session.
+//
+// The acknowledgement's provenance goes with the acknowledgement. Both keys have
+// exactly its lifetime, and Stop reaches here on the isPersistentAgent branch
+// too — where the session is deliberately LEFT RUNNING: same pane, same
+// instance_token. Left behind, a later drain of that still-live incarnation
+// finds an agent source beside a stamp that still matches the row, reads a dead
+// drain's acknowledgement as current, and declines to remind in total silence —
+// the ga-o6uw0 wedge. Removed, the same re-drain finds an unbound source,
+// classifies it unprovable, and asks again.
+//
+// The key names are spelled out rather than shared with cmd/gc's constants
+// because that package is main and cannot be imported; the eraser census in
+// cmd/gc/drain_reminder_ack_binding_test.go is what holds the two in step.
 func (p *Provider) clearBridgeMeta(name string) {
 	_ = removeMetaValue(name, "GC_DRAIN")
 	_ = removeMetaValue(name, "GC_DRAIN_ACK")
+	_ = removeMetaValue(name, "GC_DRAIN_ACK_SOURCE")
+	_ = removeMetaValue(name, "GC_DRAIN_ACK_REQUESTER_INSTANCE_TOKEN")
 	_ = removeMetaValue(name, "drained")
 }
 
@@ -1710,6 +2341,23 @@ func beadStoreForWatcher(workDir string, env map[string]string) *beads.CachingSt
 	return beads.NewCachingStore(bd, nil)
 }
 
+// watchedBeadEvent filters the journal to the bead events the watcher
+// projects and canonicalizes their identity. The cache applies the payload
+// under the snapshot's own ID, so the subject the watcher then reads back must
+// be that same ID; an event whose subject names a different bead is dropped
+// rather than reported as activity on the wrong bead.
+func watchedBeadEvent(ev events.Event) (events.Event, bool) {
+	if ev.Type != events.BeadUpdated && ev.Type != events.BeadClosed && ev.Type != events.BeadCreated {
+		return events.Event{}, false
+	}
+	id, err := beads.BeadEventID(ev.Subject, ev.Payload)
+	if err != nil || id == "" {
+		return events.Event{}, false
+	}
+	ev.Subject = id
+	return ev, true
+}
+
 func beadEventRelevant(ev events.Event, bead beads.Bead, agentName, currentBead string) bool {
 	if ev.Actor == agentName {
 		return true
@@ -1845,6 +2493,13 @@ func latestSeqWithBackoff(ctx context.Context, latest func() (uint64, error)) (u
 	return 0, lastErr
 }
 
+// openWatcherEvents opens the city's event log for the event watcher. It is
+// read-only: the watcher never records, so it holds no write handle that would
+// pin a rotated-away log on disk.
+func openWatcherEvents(cityPath string) *events.FileRecorder {
+	return events.NewReadOnlyFileProvider(filepath.Join(cityPath, ".gc", "events.jsonl"), io.Discard)
+}
+
 func (p *Provider) runEventWatcher(ctx context.Context, _ string, cfg runtime.Config, binding threadBinding, envelope StartupEnvelope, providerName string) {
 	cityPath := cfg.Env["GC_CITY_PATH"]
 	if cityPath == "" {
@@ -1854,11 +2509,7 @@ func (p *Provider) runEventWatcher(ctx context.Context, _ string, cfg runtime.Co
 		return
 	}
 
-	eventPath := filepath.Join(cityPath, ".gc", "events.jsonl")
-	recorder, err := events.NewFileRecorder(eventPath, io.Discard)
-	if err != nil {
-		return
-	}
+	recorder := openWatcherEvents(cityPath)
 	defer func() { _ = recorder.Close() }()
 
 	cache := beadStoreForWatcher(cfg.WorkDir, cfg.Env)
@@ -1890,7 +2541,8 @@ func (p *Provider) runEventWatcher(ctx context.Context, _ string, cfg runtime.Co
 		if err != nil {
 			return
 		}
-		if ev.Type != events.BeadUpdated && ev.Type != events.BeadClosed && ev.Type != events.BeadCreated {
+		ev, ok := watchedBeadEvent(ev)
+		if !ok {
 			continue
 		}
 		cache.ApplyEvent(ev.Type, ev.Payload)
@@ -1967,19 +2619,59 @@ func (p *Provider) IsRunning(name string) bool {
 		return false
 	}
 	thread := snapshotThreadBySessionName(snapshot, name)
+	if thread == nil {
+		return p.withinRecentStart(name)
+	}
 	binding := snapshotThreadBinding(thread)
 	if binding == nil {
-		t3bridgeDebugf("t3bridge: IsRunning(%s) — no snapshot binding\n", name)
+		t3bridgeDebugf("t3bridge: IsRunning(%s) — malformed snapshot binding\n", name)
 		return false
 	}
-	status := p.threadSessionStatus(binding.ThreadID)
-	if (status == "none" || status == "gone") && p.withinRecentStart(name) {
+	status := snapshotThreadSessionStatus(thread)
+	if isLegacyPreSessionStatus(status) && p.withinRecentStart(name) {
 		fmt.Fprintf(os.Stderr, "t3bridge: IsRunning(%s) threadID=%s — startup grace period → true\n", name, binding.ThreadID)
 		return true
 	}
-	result := status == "running" || status == "ready"
+	result := classifyT3SessionStatus(status) == t3SessionStatusLive
 	t3bridgeDebugf("t3bridge: IsRunning(%s) threadID=%s status=%q → %v\n", name, binding.ThreadID, status, result)
 	return result
+}
+
+// ObserveLivenessWithError preserves snapshot uncertainty for lifecycle
+// callers while the legacy IsRunning(bool) and ProcessAlive(bool) surface keeps
+// its historical fail-closed behavior. A recent start remains provisionally
+// live while T3 is materializing the session.
+func (p *Provider) ObserveLivenessWithError(name string, _ []string) (runtime.Liveness, error) {
+	snapshot, err := p.rpcSnapshot()
+	if err != nil {
+		if p.withinRecentStart(name) {
+			return runtime.Liveness{Running: true, Alive: true}, nil
+		}
+		return runtime.Liveness{}, fmt.Errorf("%w: t3bridge snapshot unavailable for %q: %w", runtime.ErrRuntimeUnavailable, name, err)
+	}
+	thread := snapshotThreadBySessionName(snapshot, name)
+	if thread == nil {
+		if p.withinRecentStart(name) {
+			return runtime.Liveness{Running: true, Alive: true}, nil
+		}
+		return runtime.Liveness{}, nil
+	}
+	binding := snapshotThreadBinding(thread)
+	if binding == nil {
+		return runtime.Liveness{}, fmt.Errorf("%w: t3bridge snapshot has incomplete binding for %q", runtime.ErrRuntimeUnavailable, name)
+	}
+	status := snapshotThreadSessionStatus(thread)
+	if isLegacyPreSessionStatus(status) && p.withinRecentStart(name) {
+		return runtime.Liveness{Running: true, Alive: true}, nil
+	}
+	switch classifyT3SessionStatus(status) {
+	case t3SessionStatusLive:
+		return runtime.Liveness{Running: true, Alive: true}, nil
+	case t3SessionStatusAbsent:
+		return runtime.Liveness{}, nil
+	default:
+		return runtime.Liveness{}, fmt.Errorf("%w: t3bridge snapshot has unknown session status %q for %q", runtime.ErrRuntimeUnavailable, status, name)
+	}
 }
 
 // ListRunning enumerates live GC-managed session names from the T3 snapshot.
@@ -1999,8 +2691,10 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	}
 	names := make([]string, 0)
 	seen := make(map[string]struct{})
+	uncertain := make([]error, 0)
+	threadsByName := make(map[string]map[string]interface{})
 	for _, thread := range snapshotThreads(snapshot) {
-		if deletedAt, ok := thread["deletedAt"]; ok && deletedAt != nil {
+		if !snapshotThreadEligible(thread) {
 			continue
 		}
 		meta := threadCustomMetadata(thread)
@@ -2008,17 +2702,51 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 		if name == "" {
 			continue
 		}
-		if meta["gc.state"] == "archived" {
-			continue
-		}
 		if prefix != "" && !strings.HasPrefix(name, prefix) {
 			continue
 		}
+		if snapshotThreadNewerThan(thread, threadsByName[name]) {
+			threadsByName[name] = thread
+		}
+	}
+	orderedNames := make([]string, 0, len(threadsByName))
+	for name := range threadsByName {
+		orderedNames = append(orderedNames, name)
+	}
+	sort.Strings(orderedNames)
+	for _, name := range orderedNames {
+		thread := threadsByName[name]
+		seen[name] = struct{}{}
+		binding := snapshotThreadBinding(thread)
+		if binding == nil {
+			uncertain = append(uncertain, fmt.Errorf("%w: t3bridge snapshot has incomplete binding for %q", runtime.ErrRuntimeUnavailable, name))
+			continue
+		}
+		status := snapshotThreadSessionStatus(thread)
+		if isLegacyPreSessionStatus(status) && p.withinRecentStart(name) {
+			names = append(names, name)
+			continue
+		}
+		switch classifyT3SessionStatus(status) {
+		case t3SessionStatusLive:
+			names = append(names, name)
+		case t3SessionStatusUnknown:
+			uncertain = append(uncertain, fmt.Errorf("%w: t3bridge snapshot has unknown session status %q for %q", runtime.ErrRuntimeUnavailable, status, name))
+		}
+	}
+	for _, name := range p.recentStartNames(prefix) {
 		if _, ok := seen[name]; ok {
 			continue
 		}
 		seen[name] = struct{}{}
 		names = append(names, name)
+	}
+	if len(uncertain) > 0 {
+		err := errors.Join(uncertain...)
+		if len(names) > 0 {
+			return names, &runtime.PartialListError{Err: err}
+		}
+		return nil, err
 	}
 	return names, nil
 }
@@ -2165,6 +2893,13 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 			fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) reuse decision=%s thread=%s\n", name, reuse.Decision, existingBinding.ThreadID) //nolint:errcheck
 			projectID = existingBinding.ProjectID
 			threadID = existingBinding.ThreadID
+			// The thread records the new incarnation before anything stops or
+			// rebinds it: until then its gc.sessionEnv proves the previous
+			// incarnation, and a fence check against it would pass for input
+			// meant for the session being replaced.
+			if err := p.dispatchThreadMeta(threadID, buildGCMetadata(envelope, providerName, buildThreadEnv(cfg.Env))); err != nil {
+				return fail(fmt.Errorf("t3bridge: record incarnation on reused thread %s: %w", threadID, err))
+			}
 			if reuse.Decision == ReuseDecisionRebind {
 				_ = p.dispatchThreadModelSelection(threadID, providerName, modelName)
 			}
@@ -2181,7 +2916,6 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 				Model:       modelName,
 			}
 			p.setRecentStart(name, time.Now())
-			_ = p.dispatchThreadMeta(threadID, buildGCMetadata(envelope, providerName, buildThreadEnv(cfg.Env)))
 			if worktreePath != "" {
 				_ = p.rpcUpdateThreadMeta(threadID, worktreeBranch, worktreePath)
 			}
@@ -2270,7 +3004,7 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 
 	if prompt := strings.TrimSpace(envelope.Startup.StartupPrompt); prompt != "" {
 		fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) sending startup prompt thread=%s len=%d\n", name, threadID, len(prompt)) //nolint:errcheck
-		if err := p.dispatchTurnStart(threadID, prompt, providerName, modelName); err != nil {
+		if err := p.dispatchTurnStart(threadID, prompt, providerName, modelName, p.freshTurnStartIDs()); err != nil {
 			return fail(err)
 		}
 		_ = p.dispatchActivity(threadID, "gc.prompt.sent", "GC startup prompt sent", map[string]interface{}{
@@ -2283,7 +3017,7 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	}
 	if nudgeText != "" {
 		fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) sending nudge thread=%s len=%d\n", name, threadID, len(nudgeText)) //nolint:errcheck
-		if err := p.dispatchTurnStart(threadID, nudgeText, providerName, modelName); err != nil {
+		if err := p.dispatchTurnStart(threadID, nudgeText, providerName, modelName, p.freshTurnStartIDs()); err != nil {
 			return fail(err)
 		}
 		_ = p.dispatchActivity(threadID, "gc.nudge.sent", "GC nudge sent", map[string]interface{}{
@@ -2300,28 +3034,30 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	return nil
 }
 
-// Stop tears down the session's event watcher and stops or archives its T3
-// thread; persistent agents are left running.
+// Stop stops or archives the session's T3 thread and tears down its event
+// watcher; persistent agents are left running. A Stop that fails leaves the
+// session, and its watcher, running.
 func (p *Provider) Stop(name string) error {
-	p.stopEventWatcher(name)
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
 		if isSoftBridgeUnavailable(err) {
-			p.clearRecentStart(name)
-			p.clearBridgeMeta(name)
-			return nil
+			// Nothing was stopped. Keep the drain bookkeeping so the retried
+			// stop still archives a drained thread.
+			return fmt.Errorf("%w: t3bridge snapshot unavailable stopping %q: %w", runtime.ErrRuntimeUnavailable, name, err)
 		}
 		return err
 	}
 	thread := snapshotThreadBySessionName(snapshot, name)
 	binding := snapshotThreadBinding(thread)
 	if binding == nil {
+		p.stopEventWatcher(name)
 		p.clearRecentStart(name)
 		p.clearBridgeMeta(name)
 		return nil
 	}
 
 	if p.isPersistentAgent(thread) {
+		p.stopEventWatcher(name)
 		p.recordStateChange(binding.ThreadID, "persistent-alive", "GC stop skipped (persistent agent)", map[string]interface{}{
 			"reason": "persistent agent not killed",
 		})
@@ -2330,8 +3066,11 @@ func (p *Provider) Stop(name string) error {
 	}
 
 	drained, _ := p.GetMeta(name, "drained")
+	if err := p.dispatchThreadSessionStop(binding.ThreadID); err != nil {
+		return fmt.Errorf("stopping t3 thread %s for %q: %w", binding.ThreadID, name, err)
+	}
+	p.stopEventWatcher(name)
 	p.recordStateChange(binding.ThreadID, "stopped", "GC session stopped", nil)
-	_ = p.dispatchThreadSessionStop(binding.ThreadID)
 
 	if drained == "1" {
 		_ = p.dispatchThreadMeta(binding.ThreadID, map[string]interface{}{"gc.state": "archived"})
@@ -2344,17 +3083,19 @@ func (p *Provider) Stop(name string) error {
 }
 
 // Interrupt cancels the in-flight turn for the named session, if any.
+// It reports [runtime.ErrRuntimeUnavailable] when T3 cannot be read and
+// [runtime.ErrSessionNotFound] when no live thread is bound to name. Inside
+// the startup grace it sends nothing and reports success instead of
+// ErrSessionNotFound: [Provider.IsRunning] counts a just-started session as
+// running before T3 shows its thread, so a caller that checked IsRunning
+// first is not told the session is gone.
 func (p *Provider) Interrupt(name string) error {
-	snapshot, err := p.rpcSnapshot()
-	if err != nil {
-		if isSoftBridgeUnavailable(err) {
-			return nil
-		}
-		return err
-	}
-	binding := snapshotThreadBinding(snapshotThreadBySessionName(snapshot, name))
-	if binding == nil {
+	_, binding, err := p.liveThread(name)
+	if errors.Is(err, runtime.ErrSessionNotFound) && p.withinRecentStart(name) {
 		return nil
+	}
+	if err != nil {
+		return err
 	}
 	if err := p.dispatchTurnInterrupt(binding.ThreadID); err != nil {
 		return err
@@ -2391,31 +3132,120 @@ func (p *Provider) ProcessAlive(name string, _ []string) bool {
 	if err != nil {
 		return p.withinRecentStart(name)
 	}
-	binding := snapshotThreadBinding(snapshotThreadBySessionName(snapshot, name))
+	thread := snapshotThreadBySessionName(snapshot, name)
+	if thread == nil {
+		return p.withinRecentStart(name)
+	}
+	binding := snapshotThreadBinding(thread)
 	if binding == nil {
 		return false
 	}
-	status := p.threadSessionStatus(binding.ThreadID)
-	return status == "running" || status == "ready"
+	status := snapshotThreadSessionStatus(thread)
+	if isLegacyPreSessionStatus(status) && p.withinRecentStart(name) {
+		return true
+	}
+	return classifyT3SessionStatus(status) == t3SessionStatusLive
 }
 
-// Nudge delivers content to the session as a new user turn.
-func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
+// boundThread resolves the T3 thread bound to name, whatever its session
+// status. It reports [runtime.ErrRuntimeUnavailable] when T3 cannot be read
+// and [runtime.ErrSessionNotFound] when no thread is bound to name.
+func (p *Provider) boundThread(name string) (map[string]interface{}, *threadBinding, error) {
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
 		if isSoftBridgeUnavailable(err) {
-			return nil
+			return nil, nil, fmt.Errorf("%w: t3bridge snapshot unavailable for %q: %w", runtime.ErrRuntimeUnavailable, name, err)
 		}
-		return err
+		return nil, nil, err
 	}
 	thread := snapshotThreadBySessionName(snapshot, name)
 	binding := snapshotThreadBinding(thread)
 	if binding == nil {
-		return nil
+		return nil, nil, fmt.Errorf("%w: no t3 thread is bound to %q", runtime.ErrSessionNotFound, name)
 	}
+	return thread, binding, nil
+}
+
+// liveThread resolves the T3 thread that hosts name's live session. Beyond
+// [Provider.boundThread]'s errors, it reports [runtime.ErrSessionNotFound]
+// when the bound thread's session is not live, and
+// [runtime.ErrRuntimeUnavailable] when its status cannot be classified.
+func (p *Provider) liveThread(name string) (map[string]interface{}, *threadBinding, error) {
+	thread, binding, err := p.boundThread(name)
+	if err != nil {
+		return nil, nil, err
+	}
+	status := snapshotThreadSessionStatus(thread)
+	if isLegacyPreSessionStatus(status) && p.withinRecentStart(name) {
+		return thread, binding, nil
+	}
+	switch classifyT3SessionStatus(status) {
+	case t3SessionStatusLive:
+		return thread, binding, nil
+	case t3SessionStatusAbsent:
+		return nil, nil, fmt.Errorf("%w: t3 thread %s for %q has no live session (status %q)", runtime.ErrSessionNotFound, binding.ThreadID, name, status)
+	default:
+		return nil, nil, fmt.Errorf("%w: t3bridge snapshot has unknown session status %q for %q", runtime.ErrRuntimeUnavailable, status, name)
+	}
+}
+
+// SessionBinding implements [runtime.SessionBindingProvider]: the T3 thread
+// and project bound to name, whether or not the thread's session is live. It
+// reports [runtime.ErrRuntimeUnavailable] when T3 cannot be read and
+// [runtime.ErrSessionNotFound] when no thread is bound to name.
+func (p *Provider) SessionBinding(name string) (runtime.SessionBinding, error) {
+	_, binding, err := p.boundThread(name)
+	if err != nil {
+		return runtime.SessionBinding{}, err
+	}
+	return runtime.SessionBinding{ThreadID: binding.ThreadID, ProjectID: binding.ProjectID}, nil
+}
+
+// Nudge delivers content to the session as a new user turn. It reports
+// [runtime.ErrRuntimeUnavailable] when T3 cannot be read and
+// [runtime.ErrSessionNotFound] when no thread is bound to name, so a caller
+// never mistakes an undelivered nudge for a delivered one. A bound thread
+// whose T3 session is stopped takes the turn: T3 relaunches the provider on
+// thread.turn.start. That wakes a reused or idle-reaped thread only for a
+// caller that delivers without first checking IsRunning, which reports such a
+// thread as not running.
+func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
+	_, err := p.nudge(name, content, "")
+	return err
+}
+
+// NudgeKeyed implements [runtime.KeyedNudgeProvider]: it delivers like Nudge,
+// deriving the turn's T3 command and message ids from key, so a redelivery
+// under the same key replays T3's receipt instead of starting a second turn.
+// A definitive T3 refusal is reported as [runtime.ErrNudgeRejected]; the
+// caller then redelivers under a new key. The receipt is the turn's message
+// id and the createdAt this send stamped on it.
+func (p *Provider) NudgeKeyed(name string, content []runtime.ContentBlock, key string) (runtime.DeliveryReceipt, error) {
+	return p.nudge(name, content, key)
+}
+
+func (p *Provider) nudge(name string, content []runtime.ContentBlock, key string) (runtime.DeliveryReceipt, error) {
+	thread, binding, err := p.boundThread(name)
+	if err != nil {
+		return runtime.DeliveryReceipt{}, err
+	}
+	return p.nudgeThread(name, thread, binding, content, key)
+}
+
+// nudgeThread starts a turn carrying content on the thread bound to name, as
+// read: thread and its binding. A non-empty key derives the turn's T3 ids.
+func (p *Provider) nudgeThread(name string, thread map[string]interface{}, binding *threadBinding, content []runtime.ContentBlock, key string) (runtime.DeliveryReceipt, error) {
+	return p.nudgeThreadFor(context.Background(), name, thread, binding, content, key, nil)
+}
+
+// nudgeThreadFor is nudgeThread bounded by ctx, with beforeRetry gating each
+// transient retry of the turn start. It returns the receipt of the turn
+// start: its message id and the createdAt it stamped. Empty text dispatches
+// nothing and reports no receipt.
+func (p *Provider) nudgeThreadFor(ctx context.Context, name string, thread map[string]interface{}, binding *threadBinding, content []runtime.ContentBlock, key string, beforeRetry func(context.Context) error) (runtime.DeliveryReceipt, error) {
 	text := runtime.FlattenText(content)
 	if strings.TrimSpace(text) == "" {
-		return nil
+		return runtime.DeliveryReceipt{}, nil
 	}
 	meta := threadCustomMetadata(thread)
 	provider := meta["gc.runtimeProvider"]
@@ -2426,32 +3256,58 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	if model == "" {
 		model = binding.Model
 	}
-	return p.dispatchTurnStart(binding.ThreadID, text, provider, model)
+	ids := p.freshTurnStartIDs()
+	if key != "" {
+		ids = deriveDeliveryIDs(meta["gc.city"], binding.ThreadID, key)
+	}
+	stamp, err := p.dispatchTurnStartFor(ctx, binding.ThreadID, text, provider, model, ids, beforeRetry)
+	if err != nil {
+		if isT3Rejection(err) {
+			return runtime.DeliveryReceipt{}, fmt.Errorf("%w: t3 refused the turn for %q: %w", runtime.ErrNudgeRejected, name, err)
+		}
+		if errors.Is(err, errRPCWrittenUnanswered) {
+			return runtime.DeliveryReceipt{}, fmt.Errorf("%w: t3 took the turn for %q without answering: %w", runtime.ErrNudgeDeliveryUnconfirmed, name, err)
+		}
+		return runtime.DeliveryReceipt{}, err
+	}
+	return runtime.DeliveryReceipt{MessageID: ids.messageID, MessageAt: stamp}, nil
 }
 
 // SetMeta persists a session metadata value and reflects drain transitions onto
-// the T3 thread.
+// the T3 thread. The local value always lands first; when a drain transition
+// cannot be reflected because T3 cannot be read, SetMeta reports a
+// [runtime.MetadataNotMirroredError] (wrapping [runtime.ErrRuntimeUnavailable]
+// when T3 is unreachable).
 func (p *Provider) SetMeta(name, key, value string) error {
 	if err := writeMetaValue(name, key, value); err != nil {
 		return err
 	}
+	drainAcked := key == "GC_DRAIN_ACK" && value == "1"
+	if drainAcked {
+		// Stop archives a drained thread on this marker, which is local state
+		// whether or not T3 can be told.
+		if err := writeMetaValue(name, "drained", "1"); err != nil {
+			return err
+		}
+	}
+	if key != "GC_DRAIN" && !drainAcked {
+		return nil
+	}
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
 		if isSoftBridgeUnavailable(err) {
-			return nil
+			err = fmt.Errorf("%w: %w", runtime.ErrRuntimeUnavailable, err)
 		}
-		return err
+		return &runtime.MetadataNotMirroredError{Session: name, Key: key, Cause: fmt.Errorf("reflecting onto its t3 thread: %w", err)}
 	}
 	binding := snapshotThreadBinding(snapshotThreadBySessionName(snapshot, name))
 	if binding == nil {
 		return nil
 	}
-	switch {
-	case key == "GC_DRAIN":
-		p.recordStateChange(binding.ThreadID, "draining", "GC session draining", nil)
-	case key == "GC_DRAIN_ACK" && value == "1":
-		_ = writeMetaValue(name, "drained", "1")
+	if drainAcked {
 		p.recordStateChange(binding.ThreadID, "drained", "GC session drained", nil)
+	} else {
+		p.recordStateChange(binding.ThreadID, "draining", "GC session draining", nil)
 	}
 	return nil
 }
@@ -2462,18 +3318,30 @@ func (p *Provider) GetMeta(name, key string) (string, error) {
 }
 
 // RemoveMeta deletes a session metadata key and reflects drain-clearing onto the
-// T3 thread.
+// T3 thread. Like SetMeta, the local state changes first: clearing a drain
+// ack clears the drained marker Stop archives on whether or not T3 can be
+// told. It reads T3 only for GC_DRAIN and GC_DRAIN_ACK, and reports a
+// [runtime.MetadataNotMirroredError] when it cannot reflect them (wrapping
+// [runtime.ErrRuntimeUnavailable] when T3 is unreachable).
 func (p *Provider) RemoveMeta(name, key string) error {
 	err := removeMetaValue(name, key)
 	if err != nil {
 		return err
 	}
+	if key == "GC_DRAIN_ACK" {
+		if err := removeMetaValue(name, "drained"); err != nil {
+			return err
+		}
+	}
+	if key != "GC_DRAIN" && key != "GC_DRAIN_ACK" {
+		return nil
+	}
 	snapshot, loadErr := p.rpcSnapshot()
 	if loadErr != nil {
 		if isSoftBridgeUnavailable(loadErr) {
-			return nil
+			loadErr = fmt.Errorf("%w: %w", runtime.ErrRuntimeUnavailable, loadErr)
 		}
-		return loadErr
+		return &runtime.MetadataNotMirroredError{Session: name, Key: key, Cause: fmt.Errorf("reflecting onto its t3 thread: %w", loadErr)}
 	}
 	binding := snapshotThreadBinding(snapshotThreadBySessionName(snapshot, name))
 	if binding == nil {
@@ -2483,7 +3351,6 @@ func (p *Provider) RemoveMeta(name, key string) error {
 	case "GC_DRAIN":
 		p.recordStateChange(binding.ThreadID, "active", "GC drain cleared", map[string]interface{}{"reason": "drain cleared"})
 	case "GC_DRAIN_ACK":
-		_ = removeMetaValue(name, "drained")
 		p.recordStateChange(binding.ThreadID, "active", "GC drain acknowledgment cleared", map[string]interface{}{"reason": "drain acknowledgment cleared"})
 	}
 	return nil
@@ -2575,10 +3442,7 @@ func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 			defer p.mu.Unlock()
 			return p.recentStarts[name], nil
 		}
-		if isSoftBridgeUnavailable(err) {
-			return time.Time{}, nil
-		}
-		return time.Time{}, err
+		return time.Time{}, fmt.Errorf("%w: t3bridge activity snapshot unavailable for %q: %w", runtime.ErrRuntimeUnavailable, name, err)
 	}
 	thread := snapshotThreadBySessionName(snapshot, name)
 	if thread == nil {
@@ -2664,6 +3528,13 @@ func (p *Provider) SendKeys(_ string, _ ...string) error {
 // RunLive is a no-op; t3bridge does not support live interactive runs.
 func (p *Provider) RunLive(_ string, _ runtime.Config) error {
 	return nil
+}
+
+// TurnInterruptMode reports that t3bridge interrupts turns by protocol: its
+// Interrupt dispatches the bridge's turn interrupt for every agent provider,
+// and SendKeys delivers nothing.
+func (p *Provider) TurnInterruptMode(string) runtime.TurnInterruptMode {
+	return runtime.TurnInterruptProtocol
 }
 
 // Capabilities reports the optional provider features t3bridge supports.

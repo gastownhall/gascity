@@ -76,9 +76,15 @@ if (( ${#manifest_files[@]} == 0 )); then
     exit 1
 fi
 
-declare -A in_manifest=()
+manifest_set=$'\n'
+in_manifest() {
+    case "$manifest_set" in
+        *$'\n'"$1"$'\n'*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 for rel in "${manifest_files[@]}"; do
-    in_manifest["$rel"]=1
+    manifest_set+="$rel"$'\n'
     f="$repo_root/$rel"
     if [[ ! -f "$f" ]]; then
         echo "MANIFEST FILE MISSING: $rel (listed in the manifest but not on disk)"
@@ -96,7 +102,7 @@ done
 shopt -s nullglob
 for test_file in "$cmd_dir"/cmd_*_test.go; do
     rel="cmd/gc/$(basename "$test_file")"
-    [[ -n "${in_manifest[$rel]:-}" ]] && continue
+    in_manifest "$rel" && continue
     present=$(count_rows "$test_file")
     if (( present == 0 )); then
         continue

@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	mysql "github.com/go-sql-driver/mysql"
+	"github.com/gastownhall/gascity/internal/doltpool"
 )
 
 type managedDoltSQLHealthReport struct {
@@ -278,6 +278,9 @@ func managedDoltPassword() string {
 	return strings.TrimSpace(os.Getenv("GC_DOLT_PASSWORD"))
 }
 
+// managedDoltOpenDB returns the shared pooled server-level *sql.DB (no
+// database selected) for a managed Dolt endpoint. The handle is owned by
+// internal/doltpool — callers must NOT Close it.
 func managedDoltOpenDB(host, port, user string) (*sql.DB, error) {
 	host = managedDoltConnectHost(host)
 	port = strings.TrimSpace(port)
@@ -288,16 +291,7 @@ func managedDoltOpenDB(host, port, user string) (*sql.DB, error) {
 	if user == "" {
 		user = "root"
 	}
-	cfg := mysql.NewConfig()
-	cfg.User = user
-	cfg.Passwd = managedDoltPassword()
-	cfg.Net = "tcp"
-	cfg.Addr = host + ":" + port
-	cfg.Timeout = 5 * time.Second
-	cfg.ReadTimeout = 5 * time.Second
-	cfg.WriteTimeout = 5 * time.Second
-	cfg.AllowNativePasswords = true
-	return sql.Open("mysql", cfg.FormatDSN())
+	return doltpool.Open(host, port, user, managedDoltPassword(), "")
 }
 
 func managedDoltQueryProbeDirect(host, port, user string) error {
@@ -305,7 +299,6 @@ func managedDoltQueryProbeDirect(host, port, user string) error {
 	if err != nil {
 		return err
 	}
-	defer db.Close() //nolint:errcheck
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -324,7 +317,6 @@ func managedDoltReadOnlyStateDirect(host, port, user string) (string, error) {
 	if err != nil {
 		return "unknown", err
 	}
-	defer db.Close() //nolint:errcheck
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -389,7 +381,6 @@ func managedDoltConnectionCountDirect(host, port, user string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer db.Close() //nolint:errcheck
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -427,7 +418,6 @@ func managedDoltResetProbeDirect(host, port, user string) error {
 	if err != nil {
 		return err
 	}
-	defer db.Close() //nolint:errcheck
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -475,17 +465,30 @@ func runManagedDoltSQLContext(parent context.Context, host, port, user string, a
 	if user == "" {
 		user = "root"
 	}
+	// A configured password never goes in argv (world-readable
+	// /proc/<pid>/cmdline); it travels only in the environment (owner-only
+	// /proc/<pid>/environ). dolt reads DOLT_CLI_PASSWORD only when argv has no
+	// --password, and a `default` CLI profile that stores a password injects its
+	// own --password first, outranking the variable. So every caller with a
+	// configured password takes the pooled driver connection (managedDoltOpenDB,
+	// managedDoltOpenDatabase) instead of this runner. An empty password is
+	// passed as an explicit empty --password, which discloses nothing and masks
+	// that profile. The variable is exported either way so dolt never falls
+	// back to an interactive password prompt.
+	password := managedDoltPassword()
 	baseArgs := []string{
 		"--host", host,
 		"--port", port,
 		"--user", user,
-		"--password", managedDoltPassword(),
-		"--no-tls",
-		"sql",
 	}
+	if password == "" {
+		baseArgs = append(baseArgs, "--password", "")
+	}
+	baseArgs = append(baseArgs, "--no-tls", "sql")
 	ctx, cancel := context.WithTimeout(parent, managedDoltSQLCommandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "dolt", append(baseArgs, args...)...)
+	cmd.Env = withEnvValue(os.Environ(), "DOLT_CLI_PASSWORD", password)
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		msg := strings.TrimSpace(string(out))

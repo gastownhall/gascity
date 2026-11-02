@@ -26,18 +26,45 @@ func countAndDelayGateQuery(mu *sync.Mutex, counter *int, delay time.Duration) {
 	time.Sleep(delay)
 }
 
-// gateTimeoutStore makes the strict open-work gate scan (the
-// `order-run:`-labeled, !IncludeClosed, Limit==0 List that hasOpenWorkStrict
-// issues) block past the per-order gate timeout, reproducing the #2893 hang
-// where storeHasOpenDescendants exceeds its budget under Dolt contention. Only
-// that exact query shape is delayed; every other read stays fast.
+// isOrderGateIndexQuery reports whether q is the per-tick gate INDEX read: one
+// unlabeled non-closed scan per gate store, folded by order-run label, that
+// replaced the per-order label lists (ga-l7jdg).
+//
+// Every #2893 fixture in this file recognizes it as a gate query alongside the
+// two label shapes it replaced. Recognizing only the old spellings would leave
+// the fixtures delaying a query the dispatcher no longer issues — the store
+// would answer instantly, the gate would never time out, and four fail-closed
+// regression tests would pass while testing nothing.
+func isOrderGateIndexQuery(q beads.ListQuery) bool {
+	return q.AllowScan && q.Label == "" && q.Status == "" && q.Assignee == "" &&
+		len(q.IDs) == 0 && len(q.Metadata) == 0 && !q.IncludeClosed && q.Limit == 0
+}
+
+// isOrderGateListQuery reports whether q is a read either open-work gate makes:
+// the per-tick index scan, the strict `order-run:`-labeled fallback, or the
+// open-tracking list.
+func isOrderGateListQuery(q beads.ListQuery) bool {
+	if isOrderGateIndexQuery(q) {
+		return true
+	}
+	if q.IncludeClosed || q.Limit != 0 {
+		return false
+	}
+	return strings.HasPrefix(q.Label, "order-run:") ||
+		(q.Label == labelOrderTracking && q.Status == "open")
+}
+
+// gateTimeoutStore makes the open-work gate's store read block past the
+// per-order gate timeout, reproducing the #2893 hang where
+// storeHasOpenDescendants exceeds its budget under Dolt contention. Only a gate
+// query shape is delayed; every other read stays fast.
 type gateTimeoutStore struct {
 	beads.Store
 	delay time.Duration
 }
 
 func (s *gateTimeoutStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if strings.HasPrefix(query.Label, "order-run:") && !query.IncludeClosed && query.Limit == 0 {
+	if isOrderGateListQuery(query) {
 		time.Sleep(s.delay)
 	}
 	return s.Store.List(query)
@@ -75,6 +102,130 @@ func TestOrderDispatchIdempotentFailsOpenOnGateTimeout(t *testing.T) {
 	}
 }
 
+// gateErrorStore returns a supplied error (not a hang) from the open-work gate
+// reads, reproducing vp-gprv where the wisp-tier bd query fails with "bd query:
+// timed out after 30s" under Dolt contention. Unlike gateTimeoutStore (which
+// sleeps until the per-order bound fires and yields an errGateTimeout), the
+// error arrives promptly and reaches gateFailClosed as a store-read error.
+//
+// The gate reads the store on TWO legs, and both must fail for the gate itself
+// to fail, because they are each other's fallback:
+//
+//   - the per-tick batched order-run index (orderDispatchTrackingIndex's
+//     entriesForStore), a LABEL-LESS AllowScan read of the store's whole
+//     non-closed corpus, folded by label for every order at once; and
+//   - hasOpenWorkStrict, the per-order "order-run:<scoped>" label query the
+//     index falls back to when its scan errors, so an index hole is not read as
+//     an absence of work.
+//
+// Failing only the label query lets the batched scan succeed and answer "no open
+// work" for every order, so the gate never errors, every order dispatches, and
+// the test passes for entirely the wrong reason while exercising none of the
+// timeout path. Every other read stays live: notably the order-run history query
+// behind lastRun must succeed, or dispatch bails at its lastRunErr check before
+// gateFailClosed is ever consulted.
+type gateErrorStore struct {
+	beads.Store
+	err error
+}
+
+// isGateIndexScan reports whether the query is the batched, label-less order-run
+// index scan the tracking index issues once per store per tick.
+func isGateIndexScan(query beads.ListQuery) bool {
+	return query.AllowScan && query.Label == ""
+}
+
+// isStrictGateQuery reports whether the query is the per-order single-flight
+// "order-run:<scoped>" label read the index falls back to.
+func isStrictGateQuery(query beads.ListQuery) bool {
+	return strings.HasPrefix(query.Label, "order-run:") && !query.IncludeClosed && query.Limit == 0
+}
+
+func (s *gateErrorStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if isGateIndexScan(query) || isStrictGateQuery(query) {
+		return nil, s.err
+	}
+	return s.Store.List(query)
+}
+
+// TestOrderDispatchIdempotentFailsOpenOnStoreTimeout is the vp-gprv regression:
+// when the open-work gate's wisp bd query TIMES OUT (returns a timeout error
+// rather than merely hanging past the per-order bound), an idempotent order
+// must still fail OPEN and dispatch, while a non-idempotent order fails CLOSED.
+// code-review-gate (idempotent) was starved fleet-wide because this store-layer
+// timeout was misclassified as a genuine read failure and failed closed even
+// though the order opted into idempotent fail-open.
+func TestOrderDispatchIdempotentFailsOpenOnStoreTimeout(t *testing.T) {
+	store := &gateErrorStore{
+		Store: beads.NewMemStore(),
+		err:   fmt.Errorf("bd list both tiers: bd query: %w", errors.New("timed out after 30s")),
+	}
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+
+	aa := []orders.Order{
+		{Name: "code-review-gate", Trigger: "cooldown", Interval: "1m", Exec: "true", Idempotent: true},
+		{Name: "merge-loop-sweep", Trigger: "cooldown", Interval: "1m", Exec: "true", Idempotent: false},
+	}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, successfulExec, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	ad.dispatch(context.Background(), t.TempDir(), now)
+	ad.drain(context.Background())
+
+	if got := trackingBeads(t, store, "order-run:code-review-gate"); len(got) == 0 {
+		t.Error("idempotent order should fail OPEN on a store-query timeout and dispatch, but no tracking bead was created (vp-gprv starvation)")
+	}
+	if got := trackingBeads(t, store, "order-run:merge-loop-sweep"); len(got) != 0 {
+		t.Errorf("non-idempotent order should fail CLOSED on a store-query timeout and skip; got %d tracking beads", len(got))
+	}
+}
+
+// TestOrderDispatchIdempotentFailsOpenOnBothTiersDown pins the end-to-end
+// consequence of the mixed-chain classification decision, at the layer where
+// starvation actually shows up.
+//
+// When BOTH list tiers fail, mergeListTierResults returns
+// errors.Join(primaryErr, ephemeralErr) — in practice a timeout leaf joined to a
+// hard-failure leaf. Requiring every leaf to be timeout-shaped before relaxing
+// the gate would fail an idempotent order CLOSED here, and both-tiers-down is
+// strictly WORSE store contention than the single-tier timeout that starved
+// code-review-gate fleet-wide in the first place. That would reinstate vp-gprv
+// at exactly the moment the fail-open matters most, and would make this
+// classifier stricter than isBdAmbiguousWriteError, which already treats
+// "timed out after" and "connection reset" as one transient family.
+//
+// So an idempotent order must still dispatch, and a non-idempotent order must
+// still be skipped — single-flight is not relaxed for anyone who did not opt in.
+func TestOrderDispatchIdempotentFailsOpenOnBothTiersDown(t *testing.T) {
+	store := &gateErrorStore{
+		Store: beads.NewMemStore(),
+		err: fmt.Errorf("bd list both tiers: %w", errors.Join(
+			errors.New("bd query: timed out after 30s"),
+			errors.New("dolt: read failed"),
+		)),
+	}
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+
+	aa := []orders.Order{
+		{Name: "code-review-gate", Trigger: "cooldown", Interval: "1m", Exec: "true", Idempotent: true},
+		{Name: "merge-loop-sweep", Trigger: "cooldown", Interval: "1m", Exec: "true", Idempotent: false},
+	}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, successfulExec, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	ad.dispatch(context.Background(), t.TempDir(), now)
+	ad.drain(context.Background())
+
+	if got := trackingBeads(t, store, "order-run:code-review-gate"); len(got) == 0 {
+		t.Error("idempotent order should fail OPEN when both list tiers fail with a joined timeout and dispatch, but no tracking bead was created (vp-gprv starvation under maximal contention)")
+	}
+	if got := trackingBeads(t, store, "order-run:merge-loop-sweep"); len(got) != 0 {
+		t.Errorf("non-idempotent order should still fail CLOSED when both tiers are down; got %d tracking beads", len(got))
+	}
+}
+
 // TestGateFailClosed covers the gate-error decision logic directly: a per-order
 // gate timeout fails open only for idempotent orders, but a done dispatch
 // context (shutdown / tick deadline) always blocks, even for idempotent orders.
@@ -89,7 +240,46 @@ func TestGateFailClosed(t *testing.T) {
 		t.Error("non-idempotent order on gate timeout should fail CLOSED (blocked)")
 	}
 	if !m.gateFailClosed(context.Background(), orders.Order{Idempotent: true}, "feeder", errors.New("dolt: read failed")) {
-		t.Error("idempotent order must fail CLOSED on a non-timeout gate error (only the bounded-gate timeout fails open)")
+		t.Error("idempotent order must fail CLOSED on a non-timeout gate error (only a timeout fails open)")
+	}
+
+	// A raw store/bd query timeout (the wisp "bd query: timed out after 30s"
+	// case, vp-gprv) is the same store-contention signal as the per-order gate
+	// bound, just surfaced from a different layer: an idempotent order must fail
+	// OPEN on it, a non-idempotent order still fails CLOSED. Before the fix this
+	// reached gateFailClosed as a non-errGateTimeout error and blocked even
+	// idempotent orders, starving code-review-gate fleet-wide.
+	storeTimeoutErr := fmt.Errorf("checking open work: %w", errors.New("bd list both tiers: bd query: timed out after 30s"))
+	if m.gateFailClosed(context.Background(), orders.Order{Idempotent: true}, "review", storeTimeoutErr) {
+		t.Error("idempotent order on a store-query timeout should fail OPEN (vp-gprv)")
+	}
+	if !m.gateFailClosed(context.Background(), orders.Order{Idempotent: false}, "sweep", storeTimeoutErr) {
+		t.Error("non-idempotent order on a store-query timeout should still fail CLOSED")
+	}
+
+	// Both list tiers failing at once produces errors.Join(timeout, read-failure)
+	// from mergeListTierResults, and an idempotent order fails OPEN on it. That
+	// is the reviewed decision, pinned here so a later "only fail open when every
+	// leaf is a timeout" tightening cannot quietly restore the vp-gprv
+	// starvation: both-tiers-down is strictly worse contention than the
+	// single-tier failure that starved code-review-gate, so it is precisely where
+	// an idempotent order must keep dispatching. Non-idempotent orders are
+	// unaffected — they still fail CLOSED and keep single-flight.
+	bothTiersDownErr := fmt.Errorf("checking open work: %w",
+		errors.Join(errors.New("bd query: timed out after 30s"), errors.New("dolt: read failed")))
+	if m.gateFailClosed(context.Background(), orders.Order{Idempotent: true}, "review", bothTiersDownErr) {
+		t.Error("idempotent order on a both-tiers-down join carrying a timeout leaf should fail OPEN (vp-gprv); failing CLOSED here starves it under the worst contention")
+	}
+	if !m.gateFailClosed(context.Background(), orders.Order{Idempotent: false}, "sweep", bothTiersDownErr) {
+		t.Error("non-idempotent order on a both-tiers-down join should still fail CLOSED")
+	}
+	// Control: the same join shape with NO timeout leaf is a plain store failure
+	// and must block even an idempotent order, so the assertion above pins the
+	// timeout leaf rather than "any joined error".
+	noTimeoutJoinErr := fmt.Errorf("checking open work: %w",
+		errors.Join(errors.New("dolt: read failed"), errors.New("connection reset by peer")))
+	if !m.gateFailClosed(context.Background(), orders.Order{Idempotent: true}, "review", noTimeoutJoinErr) {
+		t.Error("idempotent order must fail CLOSED on a joined store failure with no timeout leaf")
 	}
 
 	canceledCtx, cancel := context.WithCancel(context.Background())
@@ -110,7 +300,7 @@ type openWorkGateCallCountStore struct {
 }
 
 func (s *openWorkGateCallCountStore) List(q beads.ListQuery) ([]beads.Bead, error) {
-	if strings.HasPrefix(q.Label, "order-run:") && !q.IncludeClosed && q.Limit == 0 {
+	if isOrderGateListQuery(q) {
 		countAndDelayGateQuery(&s.mu, &s.gateCalls, s.delay)
 	}
 	return s.Store.List(q)
@@ -231,7 +421,7 @@ type trackingGateTimeoutStore struct {
 }
 
 func (s *trackingGateTimeoutStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if query.Label == labelOrderTracking && query.Status == "open" && !query.IncludeClosed && query.Limit == 0 {
+	if isOrderGateIndexQuery(query) || (query.Label == labelOrderTracking && query.Status == "open" && !query.IncludeClosed && query.Limit == 0) {
 		s.gateCount.Add(1)
 		time.Sleep(s.delay)
 	}
@@ -369,16 +559,7 @@ func (s *bothGatesCallCountStore) List(q beads.ListQuery) ([]beads.Bead, error) 
 }
 
 func (s *bothGatesCallCountStore) isGateQuery(q beads.ListQuery) bool {
-	if q.IncludeClosed || q.Limit != 0 {
-		return false
-	}
-	if q.Label == labelOrderTracking && q.Status == "open" {
-		return true
-	}
-	if strings.HasPrefix(q.Label, "order-run:") {
-		return true
-	}
-	return false
+	return isOrderGateListQuery(q)
 }
 
 func (s *bothGatesCallCountStore) gateCalls() int {

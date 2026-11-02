@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -38,7 +39,7 @@ func TestBuildRegistryPublishRequestUsesCleanPushedGitHubHead(t *testing.T) {
 	if request.PackPath != "packs/demo" {
 		t.Fatalf("PackPath = %q", request.PackPath)
 	}
-	if request.RequestedName != "demo-pack" || request.RequestedVersion != "0.2.0" {
+	if request.RequestedName != "gastownhall/demo-pack" || request.RequestedVersion != "0.2.0" {
 		t.Fatalf("pack identity = %s %s", request.RequestedName, request.RequestedVersion)
 	}
 	if request.RequestedRef != "main" {
@@ -76,11 +77,16 @@ func TestBuildRegistryPublishRequestResolvesSymlinkedPackRoot(t *testing.T) {
 	}
 }
 
+// TestBuildRegistryPublishRequestAcceptsWebFormFieldOverrides covers the
+// web-form parity flags. --name is passed here too, but it can only restate the
+// name pack.toml already declares: the registry byte-compares the two, so
+// version, ref, and description are the fields an operator can actually
+// override at publish time.
 func TestBuildRegistryPublishRequestAcceptsWebFormFieldOverrides(t *testing.T) {
 	_, packDir := setupRegistryPublishRepo(t)
 
 	request, err := buildRegistryPublishRequest(t.Context(), packDir, registryPublishOptions{
-		Name:        "renamed-demo-pack",
+		Name:        "gastownhall/demo-pack",
 		Version:     "1.2.3",
 		Ref:         "release/v1.2.3",
 		Description: "Operator supplied release note.",
@@ -89,7 +95,7 @@ func TestBuildRegistryPublishRequestAcceptsWebFormFieldOverrides(t *testing.T) {
 		t.Fatalf("buildRegistryPublishRequest: %v", err)
 	}
 
-	if request.RequestedName != "renamed-demo-pack" {
+	if request.RequestedName != "gastownhall/demo-pack" {
 		t.Fatalf("RequestedName = %q", request.RequestedName)
 	}
 	if request.RequestedVersion != "1.2.3" {
@@ -115,7 +121,11 @@ func TestBuildRegistryPublishRequestRejectsDirtyTree(t *testing.T) {
 	}
 }
 
-func TestBuildRegistryPublishRequestNameFlagSatisfiesMissingManifestName(t *testing.T) {
+// TestBuildRegistryPublishRequestRejectsNameFlagWithoutManifestName pins the
+// deliberate behavior change: --name no longer stands in for a missing
+// [pack].name. The registry rejects a nameless pack.toml unconditionally, so
+// building that request only produced a publish doomed on arrival.
+func TestBuildRegistryPublishRequestRejectsNameFlagWithoutManifestName(t *testing.T) {
 	const manifestWithoutName = `[pack]
 version = "0.2.0"
 schema = 2
@@ -123,14 +133,14 @@ description = "Demo pack for registry publishing."
 `
 	_, packDir := setupRegistryPublishRepoManifest(t, manifestWithoutName)
 
-	request, err := buildRegistryPublishRequest(t.Context(), packDir, registryPublishOptions{
+	_, err := buildRegistryPublishRequest(t.Context(), packDir, registryPublishOptions{
 		Name: "flag-supplied-name",
 	}, false)
-	if err != nil {
-		t.Fatalf("buildRegistryPublishRequest: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "pack.toml does not declare [pack].name") {
+		t.Fatalf("err = %v, want missing [pack].name error", err)
 	}
-	if request.RequestedName != "flag-supplied-name" {
-		t.Fatalf("RequestedName = %q, want flag-supplied-name", request.RequestedName)
+	if want := `set [pack].name = "gastownhall/flag-supplied-name"`; !strings.Contains(err.Error(), want) {
+		t.Fatalf("err = %v, want scoped suggestion %q", err, want)
 	}
 }
 
@@ -142,8 +152,259 @@ schema = 2
 	_, packDir := setupRegistryPublishRepoManifest(t, manifestWithoutName)
 
 	_, err := buildRegistryPublishRequest(t.Context(), packDir, registryPublishOptions{}, false)
-	if err == nil || !strings.Contains(err.Error(), "pack name is required") {
+	if err == nil || err.Error() != "pack name is required; set [pack].name in pack.toml" {
 		t.Fatalf("err = %v, want pack name required error", err)
+	}
+}
+
+// TestValidateRegistryPublishName pins the local twin of the registry's
+// packNamePolicyViolation (server/publish.ts), including the exact remediation
+// text and the check order that walks tdupu's two failed publish attempts to
+// the same pack.toml edit.
+func TestValidateRegistryPublishName(t *testing.T) {
+	const repoURL = "https://github.com/TDupu/mathcity"
+	long := strings.Repeat("a", 65)
+
+	for _, tc := range []struct {
+		name          string
+		packName      string
+		manifestName  string
+		allowUnscoped bool
+		want          string
+	}{
+		{
+			name:         "scoped name matching the lowercased owner",
+			packName:     "tdupu/mathcity",
+			manifestName: "tdupu/mathcity",
+		},
+		{
+			name:         "unscoped name is reserved",
+			packName:     "mathcity",
+			manifestName: "mathcity",
+			want:         `unscoped pack name "mathcity" is reserved by the registry; set [pack].name = "tdupu/mathcity" and push before publishing, or pass --allow-unscoped-name if the registry already holds a claim for "mathcity"`,
+		},
+		{
+			name:          "unscoped name allowed by flag",
+			packName:      "mathcity",
+			manifestName:  "mathcity",
+			allowUnscoped: true,
+		},
+		{
+			name:         "foreign scope names the owner in its original case",
+			packName:     "microsoft/mathcity",
+			manifestName: "microsoft/mathcity",
+			want:         `pack name scope "microsoft" does not match the source repository owner "TDupu"; set [pack].name = "tdupu/mathcity" and push before publishing`,
+		},
+		{
+			name:          "foreign scope has no escape hatch",
+			packName:      "microsoft/mathcity",
+			manifestName:  "microsoft/mathcity",
+			allowUnscoped: true,
+			want:          `pack name scope "microsoft" does not match the source repository owner "TDupu"; set [pack].name = "tdupu/mathcity" and push before publishing`,
+		},
+		{
+			name:         "name flag disagreeing with pack.toml",
+			packName:     "tdupu/mathcity",
+			manifestName: "mathcity",
+			want:         `--name "tdupu/mathcity" does not match pack.toml [pack].name "mathcity"; the registry compares them byte-for-byte, so set [pack].name = "tdupu/mathcity" and push before publishing`,
+		},
+		{
+			// A stale CI workflow still passing the pre-scope --name: pack.toml
+			// is the correct half, so prescribing the pack.toml edit would say
+			// drop the scope, and the next run would refuse that as reserved.
+			name:         "bare name flag against a correctly scoped pack.toml blames the flag",
+			packName:     "mathcity",
+			manifestName: "tdupu/mathcity",
+			want:         `--name "mathcity" does not match pack.toml [pack].name "tdupu/mathcity"; the registry compares them byte-for-byte, and pack.toml already carries the correctly scoped name, so drop --name or pass --name "tdupu/mathcity"`,
+		},
+		{
+			name:         "bare name flag against a foreign-scoped pack.toml still blames pack.toml",
+			packName:     "mathcity",
+			manifestName: "microsoft/mathcity",
+			want:         `--name "mathcity" does not match pack.toml [pack].name "microsoft/mathcity"; the registry compares them byte-for-byte, so set [pack].name = "mathcity" and push before publishing`,
+		},
+		{
+			// The manifest scope matches, but the pack segment is not registry
+			// name grammar, so "pass --name <manifest name>" would be advice the
+			// next run refuses outright.
+			name:         "bare name flag against an ungrammatical pack.toml name still blames pack.toml",
+			packName:     "mathcity",
+			manifestName: "tdupu/MathCity",
+			want:         `--name "mathcity" does not match pack.toml [pack].name "tdupu/MathCity"; the registry compares them byte-for-byte, so set [pack].name = "mathcity" and push before publishing`,
+		},
+		{
+			name:         "mismatch is reported before the scope refusal",
+			packName:     "microsoft/mathcity",
+			manifestName: "tdupu/mathcity",
+			want:         `--name "microsoft/mathcity" does not match pack.toml [pack].name "tdupu/mathcity"; the registry compares them byte-for-byte, so set [pack].name = "microsoft/mathcity" and push before publishing`,
+		},
+		{
+			name:     "pack.toml declares no name",
+			packName: "tdupu/mathcity",
+			want:     `pack.toml does not declare [pack].name; the registry rejects such publishes, so set [pack].name = "tdupu/mathcity" and push before publishing`,
+		},
+		{
+			name:     "pack.toml declares no name and the flag is unscoped",
+			packName: "mathcity",
+			want:     `pack.toml does not declare [pack].name; the registry rejects such publishes, so set [pack].name = "tdupu/mathcity" and push before publishing`,
+		},
+		{
+			// The suggestion rescopes a foreign --name to the repository owner
+			// rather than echoing it back; echoing it would name a pack.toml edit
+			// the next run refuses on the scope check.
+			name:     "pack.toml declares no name and the flag carries a foreign scope",
+			packName: "microsoft/mathcity",
+			want:     `pack.toml does not declare [pack].name; the registry rejects such publishes, so set [pack].name = "tdupu/mathcity" and push before publishing`,
+		},
+		{
+			name:         "uppercase is not registry name grammar",
+			packName:     "TDupu/mathcity",
+			manifestName: "TDupu/mathcity",
+			want:         `invalid pack name "TDupu/mathcity"; registry names are lowercase [a-z0-9-] segments in <github-owner>/<pack> form`,
+		},
+		{
+			name:         "segment longer than 64 characters",
+			packName:     long + "/pack",
+			manifestName: long + "/pack",
+			want:         `invalid pack name "` + long + `/pack": segment "` + long + `" exceeds 64 characters; registry names are lowercase [a-z0-9-] segments in <github-owner>/<pack> form`,
+		},
+		{
+			name:         "more than one scope segment",
+			packName:     "a/b/c",
+			manifestName: "a/b/c",
+			want:         `invalid pack name "a/b/c"; registry names are lowercase [a-z0-9-] segments in <github-owner>/<pack> form`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateRegistryPublishName(tc.packName, tc.manifestName, repoURL, tc.allowUnscoped)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("validateRegistryPublishName = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("validateRegistryPublishName = nil, want %q", tc.want)
+			}
+			if err.Error() != tc.want {
+				t.Fatalf("validateRegistryPublishName = %q, want %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+func TestRegistryGitHubRepoOwner(t *testing.T) {
+	for _, tc := range []struct {
+		repoURL string
+		want    string
+	}{
+		{repoURL: "https://github.com/gastownhall/demo-packs", want: "gastownhall"},
+		{repoURL: "https://github.com/TDupu/mathcity", want: "TDupu"},
+		{repoURL: "https://gitlab.com/o/r"},
+		{repoURL: "https://github.com/soloowner"},
+	} {
+		t.Run(tc.repoURL, func(t *testing.T) {
+			owner, err := registryGitHubRepoOwner(tc.repoURL)
+			if tc.want == "" {
+				if err == nil {
+					t.Fatalf("registryGitHubRepoOwner(%q) = %q, want error", tc.repoURL, owner)
+				}
+				if want := "cannot derive the GitHub owner from repository URL"; !strings.Contains(err.Error(), want) {
+					t.Fatalf("err = %v, want %q", err, want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("registryGitHubRepoOwner(%q): %v", tc.repoURL, err)
+			}
+			if owner != tc.want {
+				t.Fatalf("registryGitHubRepoOwner(%q) = %q, want %q", tc.repoURL, owner, tc.want)
+			}
+		})
+	}
+}
+
+// TestBuildRegistryPublishRequestRejectsBareName is tdupu's second publish
+// attempt: pack.toml declares a bare name, so the request the registry would
+// park forever as an unapprovable pending row never gets built.
+func TestBuildRegistryPublishRequestRejectsBareName(t *testing.T) {
+	_, packDir := setupRegistryPublishRepoManifest(t, registryPublishManifestNamed("mathcity"))
+
+	_, err := buildRegistryPublishRequest(t.Context(), packDir, registryPublishOptions{}, false)
+	if err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("err = %v, want reserved-name refusal", err)
+	}
+	if want := `set [pack].name = "gastownhall/mathcity"`; !strings.Contains(err.Error(), want) {
+		t.Fatalf("err = %v, want %q", err, want)
+	}
+}
+
+// TestBuildRegistryPublishRequestRejectsNameFlagManifestMismatch is tdupu's
+// first publish attempt: the correctly scoped --name disagreed with the bare
+// name pack.toml declares. The registry byte-compares them, so this must fail
+// locally and prescribe the pack.toml edit rather than dropping the scope.
+func TestBuildRegistryPublishRequestRejectsNameFlagManifestMismatch(t *testing.T) {
+	_, packDir := setupRegistryPublishRepoManifest(t, registryPublishManifestNamed("mathcity"))
+
+	_, err := buildRegistryPublishRequest(t.Context(), packDir, registryPublishOptions{
+		Name: "gastownhall/mathcity",
+	}, false)
+	if err == nil {
+		t.Fatal("buildRegistryPublishRequest succeeded, want --name mismatch refusal")
+	}
+	want := `--name "gastownhall/mathcity" does not match pack.toml [pack].name "mathcity"; ` +
+		`the registry compares them byte-for-byte, so set [pack].name = "gastownhall/mathcity" and push before publishing`
+	if err.Error() != want {
+		t.Fatalf("err = %q, want %q", err.Error(), want)
+	}
+}
+
+func TestBuildRegistryPublishRequestRejectsScopeOwnerMismatch(t *testing.T) {
+	_, packDir := setupRegistryPublishRepoManifest(t, registryPublishManifestNamed("microsoft/demo-pack"))
+
+	_, err := buildRegistryPublishRequest(t.Context(), packDir, registryPublishOptions{}, false)
+	if err == nil {
+		t.Fatal("buildRegistryPublishRequest succeeded, want scope refusal")
+	}
+	want := `pack name scope "microsoft" does not match the source repository owner "gastownhall"; ` +
+		`set [pack].name = "gastownhall/demo-pack" and push before publishing`
+	if err.Error() != want {
+		t.Fatalf("err = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestBuildRegistryPublishRequestAllowsClaimedBareNameWithFlag covers the
+// grandfathered publishers: the registry still accepts a bare name it already
+// holds a claim for, and a local preflight cannot see the claim table, so
+// --allow-unscoped-name has to submit the bare name unchanged.
+func TestBuildRegistryPublishRequestAllowsClaimedBareNameWithFlag(t *testing.T) {
+	_, packDir := setupRegistryPublishRepoManifest(t, registryPublishManifestNamed("cacc-twin-team"))
+
+	request, err := buildRegistryPublishRequest(t.Context(), packDir, registryPublishOptions{
+		AllowUnscopedName: true,
+	}, false)
+	if err != nil {
+		t.Fatalf("buildRegistryPublishRequest: %v", err)
+	}
+	if request.RequestedName != "cacc-twin-team" {
+		t.Fatalf("RequestedName = %q, want the bare name submitted unchanged", request.RequestedName)
+	}
+}
+
+// TestBuildRegistryPublishRequestActionsFallbackEnforcesScope proves the
+// namespace check reads the same owner the request is built from on the GitHub
+// Actions fallback path, where the repository comes from GITHUB_REPOSITORY
+// rather than an upstream remote.
+func TestBuildRegistryPublishRequestActionsFallbackEnforcesScope(t *testing.T) {
+	packDir, headSHA := setupRegistryPublishRepoDetachedManifest(t, registryPublishManifestNamed("mathcity"))
+	setSpoofedGitHubActionsEnv(t, headSHA)
+
+	_, err := buildRegistryPublishRequest(t.Context(), packDir, registryPublishOptions{}, true)
+	if err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("err = %v, want reserved-name refusal on the Actions fallback path", err)
+	}
+	if want := `set [pack].name = "gastownhall/mathcity"`; !strings.Contains(err.Error(), want) {
+		t.Fatalf("err = %v, want the GITHUB_REPOSITORY-derived suggestion %q", err, want)
 	}
 }
 
@@ -218,7 +479,7 @@ func TestSubmitRegistryPublishRequestSendsAuthenticatedPayload(t *testing.T) {
 			"publishRequest": {
 				"id": "prq_test",
 				"status": "pending_review",
-				"requestedName": "demo-pack",
+				"requestedName": "gastownhall/demo-pack",
 				"requestedVersion": "0.2.0",
 				"repository": {"fullName": "gastownhall/demo-packs"},
 				"registryEntry": {"release": {"hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}
@@ -235,7 +496,7 @@ func TestSubmitRegistryPublishRequestSendsAuthenticatedPayload(t *testing.T) {
 			RepoURL:          "https://github.com/gastownhall/demo-packs",
 			Commit:           strings.Repeat("1", 40),
 			PackPath:         "packs/demo",
-			RequestedName:    "demo-pack",
+			RequestedName:    "gastownhall/demo-pack",
 			RequestedVersion: "0.2.0",
 			RequestedRef:     "main",
 		},
@@ -245,7 +506,7 @@ func TestSubmitRegistryPublishRequestSendsAuthenticatedPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("submitRegistryPublishRequest: %v", err)
 	}
-	if got.RequestedName != "demo-pack" || got.RequestedVersion != "0.2.0" {
+	if got.RequestedName != "gastownhall/demo-pack" || got.RequestedVersion != "0.2.0" {
 		t.Fatalf("submitted body = %+v", got)
 	}
 	if submitted.ID != "prq_test" || submitted.Status != "pending_review" {
@@ -272,7 +533,7 @@ func TestSubmitRegistryPublishRequestSendsBearerToken(t *testing.T) {
 			"publishRequest": {
 				"id": "prq_token",
 				"status": "pending_review",
-				"requestedName": "demo-pack",
+				"requestedName": "gastownhall/demo-pack",
 				"requestedVersion": "0.2.0",
 				"repository": {"fullName": "gastownhall/demo-packs"}
 			}
@@ -288,7 +549,7 @@ func TestSubmitRegistryPublishRequestSendsBearerToken(t *testing.T) {
 			RepoURL:          "https://github.com/gastownhall/demo-packs",
 			Commit:           strings.Repeat("1", 40),
 			PackPath:         "packs/demo",
-			RequestedName:    "demo-pack",
+			RequestedName:    "gastownhall/demo-pack",
 			RequestedVersion: "0.2.0",
 		},
 		registryPublishAuth{Token: "gcr_test_token"},
@@ -366,7 +627,7 @@ func TestDoRegistryPublishUsesStoredLoginToken(t *testing.T) {
 			"publishRequest": {
 				"id": "prq_stored",
 				"status": "pending_review",
-				"requestedName": "demo-pack",
+				"requestedName": "gastownhall/demo-pack",
 				"requestedVersion": "0.2.0",
 				"repository": {"fullName": "gastownhall/demo-packs"}
 			}
@@ -429,7 +690,7 @@ func TestDoRegistryPublishUsesGasworksProviderWithoutPersistingEIA(t *testing.T)
 			"publishRequest": {
 				"id": "prq_provider",
 				"status": "pending_review",
-				"requestedName": "demo-pack",
+				"requestedName": "gastownhall/demo-pack",
 				"requestedVersion": "0.2.0",
 				"repository": {"fullName": "gastownhall/demo-packs"}
 			}
@@ -545,7 +806,7 @@ func TestRegistryGasworksCredentialOriginAllowsOnlyCanonicalProductionOrigin(t *
 	}
 }
 
-func TestDoRegistryPublishProviderRefreshesOnceAfter401(t *testing.T) {
+func TestDoRegistryPublishProviderDoesNotRefreshAfter401(t *testing.T) {
 	_, packDir := setupRegistryPublishRepo(t)
 	clearRegistryEnv(t)
 	const baseURL = defaultRegistryPublishURL
@@ -571,32 +832,14 @@ func TestDoRegistryPublishProviderRefreshesOnceAfter401(t *testing.T) {
 	requests := 0
 	registryPublishHTTPClient = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 		requests++
-		if requests == 1 {
-			if got := r.Header.Get("Authorization"); got != "Bearer sts-initial" {
-				t.Fatalf("first Authorization = %q", got)
-			}
-			return &http.Response{
-				StatusCode: http.StatusUnauthorized,
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-				Body:       io.NopCloser(strings.NewReader(`{"error":{"code":"unauthorized","message":"expired"}}`)),
-				Request:    r,
-			}, nil
-		}
-		if got := r.Header.Get("Authorization"); got != "Bearer sts-refreshed" {
-			t.Fatalf("retry Authorization = %q", got)
+		if got := r.Header.Get("Authorization"); got != "Bearer sts-initial" {
+			t.Fatalf("Authorization = %q", got)
 		}
 		return &http.Response{
-			StatusCode: http.StatusOK,
+			StatusCode: http.StatusUnauthorized,
 			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body: io.NopCloser(strings.NewReader(`{
-				"publishRequest": {
-					"id": "prq_refreshed",
-					"status": "pending_review",
-					"requestedName": "demo-pack",
-					"requestedVersion": "0.2.0"
-				}
-			}`)),
-			Request: r,
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"code":"unauthorized","message":"expired"}}`)),
+			Request:    r,
 		}, nil
 	})}
 
@@ -605,17 +848,14 @@ func TestDoRegistryPublishProviderRefreshesOnceAfter401(t *testing.T) {
 		RegistryURL: baseURL,
 		Validate:    true,
 	}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("doRegistryPublish = %d, stderr=%q", code, stderr.String())
+	if code == 0 {
+		t.Fatalf("doRegistryPublish succeeded, stdout=%q", stdout.String())
 	}
-	if requests != 2 {
-		t.Fatalf("publish requests = %d, want 2", requests)
+	if requests != 1 {
+		t.Fatalf("publish requests = %d, want 1", requests)
 	}
-	if len(forceRefresh) != 2 || forceRefresh[0] || !forceRefresh[1] {
-		t.Fatalf("force refresh calls = %v, want [false true]", forceRefresh)
-	}
-	if !strings.Contains(stdout.String(), "prq_refreshed") {
-		t.Fatalf("stdout = %q", stdout.String())
+	if len(forceRefresh) != 1 || forceRefresh[0] {
+		t.Fatalf("force refresh calls = %v, want [false]", forceRefresh)
 	}
 }
 
@@ -648,7 +888,7 @@ func TestRegistryProviderReauthRoundTripperRetriesOnlyEligible401(t *testing.T) 
 				return "refreshed", nil
 			},
 		}
-		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://registry.example/api/publish-requests", bytes.NewReader([]byte("payload")))
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://registry.example/api/me", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -695,9 +935,9 @@ func TestRegistryProviderReauthRoundTripperRetriesOnlyEligible401(t *testing.T) 
 			var req *http.Request
 			var err error
 			if tc.replayable {
-				req, err = http.NewRequestWithContext(t.Context(), http.MethodPost, "https://registry.example/api/publish-requests", bytes.NewReader([]byte("payload")))
+				req, err = http.NewRequestWithContext(t.Context(), http.MethodGet, "https://registry.example/api/me", bytes.NewReader([]byte("payload")))
 			} else {
-				req, err = http.NewRequestWithContext(t.Context(), http.MethodPost, "https://registry.example/api/publish-requests", io.NopCloser(strings.NewReader("payload")))
+				req, err = http.NewRequestWithContext(t.Context(), http.MethodGet, "https://registry.example/api/me", io.NopCloser(strings.NewReader("payload")))
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -713,13 +953,212 @@ func TestRegistryProviderReauthRoundTripperRetriesOnlyEligible401(t *testing.T) 
 			}
 		})
 	}
+
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		t.Run(method+" 401 is not replayed", func(t *testing.T) {
+			requests := 0
+			refreshes := 0
+			rt := &registryProviderReauthRoundTripper{
+				base: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+					requests++
+					return &http.Response{
+						StatusCode: http.StatusUnauthorized,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader(`{}`)),
+						Request:    r,
+					}, nil
+				}),
+				refresh: func(context.Context, bool) (string, error) {
+					refreshes++
+					return "refreshed", nil
+				},
+			}
+			req, err := http.NewRequestWithContext(t.Context(), method, "https://registry.example/api/publish-requests", bytes.NewReader([]byte("payload")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer initial")
+			resp, err := rt.RoundTrip(req)
+			if err != nil {
+				t.Fatalf("RoundTrip: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusUnauthorized || requests != 1 || refreshes != 0 {
+				t.Fatalf("status=%d requests=%d refreshes=%d, want 401/1/0", resp.StatusCode, requests, refreshes)
+			}
+		})
+	}
+}
+
+type registryCloseTrackingBody struct {
+	io.Reader
+	closed bool
+}
+
+func (b *registryCloseTrackingBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+func TestRegistryProviderReauthRoundTripperSanitizesBodyRecreationFailure(t *testing.T) {
+	const secretMarker = "registry-body-recreation-super-secret"
+
+	firstBody := &registryCloseTrackingBody{Reader: strings.NewReader("rejected")}
+	baseCalls, refreshes := 0, 0
+	rt := &registryProviderReauthRoundTripper{
+		base: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			baseCalls++
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Header:     make(http.Header),
+				Body:       firstBody,
+				Request:    r,
+			}, nil
+		}),
+		refresh: func(context.Context, bool) (string, error) {
+			refreshes++
+			return "fresh", nil
+		},
+	}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://registry.example/api/me", strings.NewReader("body"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.GetBody = func() (io.ReadCloser, error) {
+		return nil, errors.New("body recreation failed: " + secretMarker)
+	}
+	req.Header.Set("Authorization", "Bearer stale")
+
+	resp, err := rt.RoundTrip(req)
+	if resp != nil || err == nil {
+		t.Fatalf("response=%v error=%v, want nil response and sanitized body recreation failure", resp, err)
+	}
+	if got, want := err.Error(), "replaying registry request after credential refresh: request body recreation failed"; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+	if strings.Contains(err.Error(), secretMarker) {
+		t.Fatalf("body recreation error leaked request material: %q", err)
+	}
+	if baseCalls != 1 || refreshes != 1 || !firstBody.closed {
+		t.Fatalf("calls=%d refreshes=%d body closed=%v, want 1, 1, true", baseCalls, refreshes, firstBody.closed)
+	}
 }
 
 func TestRegistryProviderReauthRoundTripperRefreshHonorsCancellation(t *testing.T) {
-	requests := 0
+	tests := []struct {
+		name                string
+		newContext          func(*testing.T) (context.Context, context.CancelFunc)
+		cancelBeforeRefresh bool
+		want                error
+	}{
+		{
+			name: "canceled",
+			newContext: func(t *testing.T) (context.Context, context.CancelFunc) {
+				return context.WithCancel(t.Context())
+			},
+			cancelBeforeRefresh: true,
+			want:                context.Canceled,
+		},
+		{
+			name: "deadline exceeded",
+			newContext: func(t *testing.T) (context.Context, context.CancelFunc) {
+				return context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+			},
+			want: context.DeadlineExceeded,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := tt.newContext(t)
+			defer cancel()
+			requests := 0
+			rt := &registryProviderReauthRoundTripper{
+				base: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+					requests++
+					if tt.cancelBeforeRefresh {
+						cancel()
+					}
+					return &http.Response{
+						StatusCode: http.StatusUnauthorized,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader(`{}`)),
+						Request:    r,
+					}, nil
+				}),
+				refresh: func(_ context.Context, force bool) (string, error) {
+					if !force {
+						t.Fatal("401 refresh was not forced")
+					}
+					return "", errors.New("credential helper failed: bearer=super-secret helper stderr")
+				},
+			}
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://registry.example/api/me", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer initial")
+
+			resp, err := rt.RoundTrip(req)
+			if resp != nil || !errors.Is(err, tt.want) {
+				t.Fatalf("response=%v error=%v, want nil response and %v", resp, err, tt.want)
+			}
+			if strings.Contains(err.Error(), "super-secret") || strings.Contains(err.Error(), "stderr") {
+				t.Fatalf("refresh error leaked credential-helper output: %q", err)
+			}
+			if requests != 1 {
+				t.Fatalf("requests = %d, want no replay after cancellation", requests)
+			}
+		})
+	}
+}
+
+func TestRegistryProviderReauthRoundTripperRefreshPreservesHelperContext(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		want error
+	}{
+		{name: "canceled", want: context.Canceled},
+		{name: "deadline exceeded", want: context.DeadlineExceeded},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			requests := 0
+			rt := &registryProviderReauthRoundTripper{
+				base: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+					requests++
+					return &http.Response{
+						StatusCode: http.StatusUnauthorized,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader(`{}`)),
+						Request:    r,
+					}, nil
+				}),
+				refresh: func(context.Context, bool) (string, error) {
+					return "", fmt.Errorf("credential helper stderr bearer=super-secret: %w", tt.want)
+				},
+			}
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://registry.example/api/me", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer initial")
+
+			resp, err := rt.RoundTrip(req)
+			if resp != nil || !errors.Is(err, tt.want) {
+				t.Fatalf("response=%v error=%v, want nil response and %v", resp, err, tt.want)
+			}
+			if strings.Contains(err.Error(), "super-secret") || strings.Contains(err.Error(), "stderr") {
+				t.Fatalf("refresh error leaked credential-helper output: %q", err)
+			}
+			if requests != 1 {
+				t.Fatalf("requests = %d, want no replay after helper cancellation", requests)
+			}
+		})
+	}
+}
+
+func TestRegistryProviderReauthRoundTripperRefreshFailureIsSecretSafe(t *testing.T) {
 	rt := &registryProviderReauthRoundTripper{
 		base: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-			requests++
 			return &http.Response{
 				StatusCode: http.StatusUnauthorized,
 				Header:     make(http.Header),
@@ -727,30 +1166,25 @@ func TestRegistryProviderReauthRoundTripperRefreshHonorsCancellation(t *testing.
 				Request:    r,
 			}, nil
 		}),
-		refresh: func(ctx context.Context, force bool) (string, error) {
-			if !force {
-				t.Fatal("401 refresh was not forced")
-			}
-			return "", ctx.Err()
+		refresh: func(context.Context, bool) (string, error) {
+			return "", errors.New("credential helper failed: bearer=super-secret helper stderr")
 		},
 	}
-	ctx, cancel := context.WithCancel(t.Context())
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://registry.example/api/publish-requests", bytes.NewReader([]byte("payload")))
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://registry.example/api/me", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.Header.Set("Authorization", "Bearer initial")
-	cancel()
 
 	resp, err := rt.RoundTrip(req)
-	if resp != nil {
-		t.Fatalf("response = %v, want nil after refresh cancellation", resp)
+	if resp != nil || err == nil {
+		t.Fatalf("response=%v error=%v, want nil response and refresh error", resp, err)
 	}
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("err = %v, want context.Canceled", err)
+	if got, want := err.Error(), "refreshing registry credential after 401: credential refresh failed"; got != want {
+		t.Fatalf("refresh error = %q, want %q", got, want)
 	}
-	if requests != 1 {
-		t.Fatalf("requests = %d, want no replay after cancellation", requests)
+	if strings.Contains(err.Error(), "super-secret") || strings.Contains(err.Error(), "stderr") {
+		t.Fatalf("refresh error leaked credential-helper output: %q", err)
 	}
 }
 
@@ -916,7 +1350,7 @@ func TestDoRegistryPublishValidateFailsOnValidationError(t *testing.T) {
 			"publishRequest": {
 				"id": "prq_invalid",
 				"status": "rejected",
-				"requestedName": "demo-pack",
+				"requestedName": "gastownhall/demo-pack",
 				"requestedVersion": "0.2.0",
 				"validationError": "pack.toml is missing a description"
 			}
@@ -960,7 +1394,7 @@ func TestDoRegistryPublishValidateFailsOnRejectedStatus(t *testing.T) {
 				"id": "prq_denied",
 				"status": "invalid",
 				"statusReason": "name already published at a higher version",
-				"requestedName": "demo-pack",
+				"requestedName": "gastownhall/demo-pack",
 				"requestedVersion": "0.2.0"
 			}
 		}`))
@@ -1007,7 +1441,7 @@ func TestDoRegistryPublishStoredTokenSurvivesPartialCookieEnv(t *testing.T) {
 			"publishRequest": {
 				"id": "prq_partial",
 				"status": "pending_review",
-				"requestedName": "demo-pack",
+				"requestedName": "gastownhall/demo-pack",
 				"requestedVersion": "0.2.0"
 			}
 		}`))
@@ -1070,7 +1504,7 @@ func TestDoRegistryPublishUsesGitHubActionsOIDC(t *testing.T) {
 			if payload.GitHubOIDCToken != "github-oidc-jwt" {
 				t.Fatalf("githubOidcToken = %q", payload.GitHubOIDCToken)
 			}
-			if payload.RequestedName != "demo-pack" || payload.RequestedVersion != "0.2.0" {
+			if payload.RequestedName != "gastownhall/demo-pack" || payload.RequestedVersion != "0.2.0" {
 				t.Fatalf("mint payload = %+v", payload.registryPublishRequest)
 			}
 			sawMint = true
@@ -1088,7 +1522,7 @@ func TestDoRegistryPublishUsesGitHubActionsOIDC(t *testing.T) {
 				"publishRequest": {
 					"id": "prq_actions",
 					"status": "pending_review",
-					"requestedName": "demo-pack",
+					"requestedName": "gastownhall/demo-pack",
 					"requestedVersion": "0.2.0",
 					"repository": {"fullName": "gastownhall/demo-packs"}
 				}
@@ -1166,7 +1600,7 @@ func TestDoRegistryPublishUsesGitHubActionsOIDCWithoutUpstream(t *testing.T) {
 				"publishRequest": {
 					"id": "prq_actions_detached",
 					"status": "pending_review",
-					"requestedName": "demo-pack",
+					"requestedName": "gastownhall/demo-pack",
 					"requestedVersion": "0.2.0",
 					"repository": {"fullName": "gastownhall/demo-packs"}
 				}
@@ -1456,12 +1890,110 @@ func TestDoRegistryPublishDryRunPrintsRequest(t *testing.T) {
 		"Registry: http://127.0.0.1:8080",
 		"Repository: https://github.com/gastownhall/demo-packs",
 		"Pack path: packs/demo",
-		"Pack: demo-pack 0.2.0",
+		"Pack: gastownhall/demo-pack 0.2.0",
 		"Dry run: publish request was not submitted.",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("stdout missing %q:\n%s", want, stdout.String())
 		}
+	}
+}
+
+// TestDoRegistryPublishBareNameFailsBeforeNetwork proves the namespace
+// preflight runs before any credential or publish traffic. The Actions OIDC
+// environment is present, so without the preflight this publish would mint a
+// token and submit; the failing HTTP client turns either into a test failure.
+func TestDoRegistryPublishBareNameFailsBeforeNetwork(t *testing.T) {
+	_, packDir := setupRegistryPublishRepoManifest(t, registryPublishManifestNamed("mathcity"))
+	clearRegistryEnv(t)
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "actions-request-token")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "https://example.test/oidc")
+	failingRegistryHTTPClient(t)
+
+	var stdout, stderr bytes.Buffer
+	code := doRegistryPublish(t.Context(), packDir, registryPublishOptions{
+		RegistryURL: "https://registry.example.com",
+		Validate:    true,
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("doRegistryPublish = 0, want failure; stdout=%q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "reserved") {
+		t.Fatalf("stderr = %q, want reserved-name refusal", stderr.String())
+	}
+}
+
+// The grandfathered lane: --allow-unscoped-name suppresses the refusal, the bare name survives
+// into the request unrewritten, and the warning still fires. Asserted through --dry-run rather
+// than a loopback server, because the warning is deliberately emitted BEFORE the dry-run early
+// return and the request is fully built by then, so a server would only re-cover the submit path
+// TestSubmitRegistryPublishRequestSendsAuthenticatedPayload already owns — at the cost of one more
+// untagged HTTP test server, which internal/testpolicy/resourcecensus caps.
+func TestDoRegistryPublishAllowUnscopedNameWarnsAndKeepsBareName(t *testing.T) {
+	_, packDir := setupRegistryPublishRepoManifest(t, registryPublishManifestNamed("cacc-twin-team"))
+	clearRegistryEnv(t)
+
+	var stdout, stderr bytes.Buffer
+	code := doRegistryPublish(t.Context(), packDir, registryPublishOptions{
+		RegistryURL:       "https://registry.example.com",
+		AllowUnscopedName: true,
+		DryRun:            true,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRegistryPublish = %d, stderr=%q", code, stderr.String())
+	}
+	if want := "Pack: cacc-twin-team 0.2.0"; !strings.Contains(stdout.String(), want) {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	}
+	want := `gc pack registry publish: warning: submitting unscoped name "cacc-twin-team"; ` +
+		"the registry accepts it only when it already holds a claim for that name"
+	if !strings.Contains(stderr.String(), want) {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
+func TestDoRegistryPublishDryRunFailsOnReservedName(t *testing.T) {
+	_, packDir := setupRegistryPublishRepoManifest(t, registryPublishManifestNamed("mathcity"))
+	clearRegistryEnv(t)
+
+	var stdout, stderr bytes.Buffer
+	code := doRegistryPublish(t.Context(), packDir, registryPublishOptions{
+		RegistryURL: "http://127.0.0.1:8080",
+		DryRun:      true,
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("doRegistryPublish = 0, want failure; stdout=%q", stdout.String())
+	}
+	if want := `set [pack].name = "gastownhall/mathcity"`; !strings.Contains(stderr.String(), want) {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+	if strings.Contains(stdout.String(), "Dry run:") {
+		t.Fatalf("stdout printed a dry-run block for a refused name:\n%s", stdout.String())
+	}
+}
+
+// TestDoRegistryPublishDryRunWarnsOnAllowedUnscopedName pins the warning ahead
+// of the --dry-run early return. A dry run is where a publisher inspects what
+// --allow-unscoped-name is about to submit, so it must carry the same caveat a
+// real submit does.
+func TestDoRegistryPublishDryRunWarnsOnAllowedUnscopedName(t *testing.T) {
+	_, packDir := setupRegistryPublishRepoManifest(t, registryPublishManifestNamed("cacc-twin-team"))
+	clearRegistryEnv(t)
+
+	var stdout, stderr bytes.Buffer
+	code := doRegistryPublish(t.Context(), packDir, registryPublishOptions{
+		RegistryURL:       "http://127.0.0.1:8080",
+		AllowUnscopedName: true,
+		DryRun:            true,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRegistryPublish = %d, stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Pack: cacc-twin-team 0.2.0") {
+		t.Fatalf("stdout = %q, want the dry-run block", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), `warning: submitting unscoped name "cacc-twin-team"`) {
+		t.Fatalf("stderr = %q, want the unscoped-name warning on a dry run", stderr.String())
 	}
 }
 
@@ -1575,7 +2107,7 @@ func TestDoRegistryPublishUsesEnvironmentToken(t *testing.T) {
 			"publishRequest": {
 				"id": "prq_env",
 				"status": "pending_review",
-				"requestedName": "demo-pack",
+				"requestedName": "gastownhall/demo-pack",
 				"requestedVersion": "0.2.0",
 				"repository": {"fullName": "gastownhall/demo-packs"}
 			}
@@ -1817,7 +2349,7 @@ func TestSubmitRegistryPublishRequestReportsHTTPStatusForNonJSON(t *testing.T) {
 			RepoURL:          "https://github.com/gastownhall/demo-packs",
 			Commit:           strings.Repeat("1", 40),
 			PackPath:         ".",
-			RequestedName:    "demo-pack",
+			RequestedName:    "gastownhall/demo-pack",
 			RequestedVersion: "0.2.0",
 		},
 		registryPublishAuth{Token: "tok"},
@@ -2419,12 +2951,21 @@ func clearRegistryEnv(t *testing.T, overrides ...registryTestEnv) {
 	}
 }
 
-const registryPublishDemoManifest = `[pack]
-name = "demo-pack"
+// registryPublishManifestNamed renders the demo pack.toml with a caller-chosen
+// [pack].name, so a test can exercise a name the publish preflight refuses.
+func registryPublishManifestNamed(name string) string {
+	return `[pack]
+name = "` + name + `"
 version = "0.2.0"
 schema = 2
 description = "Demo pack for registry publishing."
 `
+}
+
+// registryPublishDemoManifest is the shared publish fixture. Its name is scoped
+// to the fixture repository's GitHub owner, because that is the only name shape
+// the registry accepts for a pack it does not already hold a claim for.
+var registryPublishDemoManifest = registryPublishManifestNamed("gastownhall/demo-pack")
 
 func setupRegistryPublishRepo(t *testing.T) (repo string, packDir string) {
 	t.Helper()
@@ -2452,25 +2993,25 @@ func setupRegistryPublishRepoManifest(t *testing.T, manifest string) (repo strin
 // runner metadata instead of an upstream tracking branch.
 func setupRegistryPublishRepoDetached(t *testing.T) (packDir string, headSHA string) {
 	t.Helper()
+	return setupRegistryPublishRepoDetachedManifest(t, registryPublishDemoManifest)
+}
+
+// setupRegistryPublishRepoDetachedManifest is setupRegistryPublishRepoDetached
+// with a caller-supplied pack.toml body, so a test can exercise the GitHub
+// Actions fallback path against a pack name the fallback-derived owner rejects.
+func setupRegistryPublishRepoDetachedManifest(t *testing.T, manifest string) (packDir string, headSHA string) {
+	t.Helper()
 	var repo string
-	repo, packDir = writeRegistryPublishPackRepo(t)
+	repo, packDir = writeRegistryPublishPackRepoManifest(t, manifest)
 	headSHA = runRegistryPublishGit(t, repo, "rev-parse", "HEAD")
 	runRegistryPublishGit(t, repo, "checkout", "--detach", "HEAD")
 	return packDir, headSHA
 }
 
-// writeRegistryPublishPackRepo initializes a Git repo containing a single demo
-// pack and commits it, returning the repo root and the pack directory. It does
-// not configure a remote or upstream; callers add whatever publish topology
-// they need.
-func writeRegistryPublishPackRepo(t *testing.T) (repo string, packDir string) {
-	t.Helper()
-	return writeRegistryPublishPackRepoManifest(t, registryPublishDemoManifest)
-}
-
 // writeRegistryPublishPackRepoManifest initializes a Git repo containing a
 // single demo pack whose pack.toml holds the given body, commits it, and
-// returns the repo root and the pack directory.
+// returns the repo root and the pack directory. It does not configure a remote
+// or upstream; callers add whatever publish topology they need.
 func writeRegistryPublishPackRepoManifest(t *testing.T, manifest string) (repo string, packDir string) {
 	t.Helper()
 	root := t.TempDir()
@@ -2509,7 +3050,7 @@ func TestWriteRegistryPublishSubmittedPinsRegistryURL(t *testing.T) {
 	writeRegistryPublishSubmitted(&buf, "https://registry.example.com", registryPublishSubmitted{
 		ID:               "prq_x",
 		Status:           "pending_review",
-		RequestedName:    "demo-pack",
+		RequestedName:    "gastownhall/demo-pack",
 		RequestedVersion: "1.2.0",
 	})
 	want := "Next: gc pack registry requests --registry-url https://registry.example.com prq_x"

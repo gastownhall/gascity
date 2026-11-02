@@ -30,6 +30,13 @@ import (
 // timing assertion on a loaded CI box. The latency injector below exists only so
 // the wall-clock half can be stated as narrative: at a stand-in RTT, this many
 // round trips is this many seconds.
+//
+// The remaining two hot legs carry their budgets in their own files, because
+// theirs are not zero and their fixtures are whole subsystems: order dispatch in
+// order_gate_budget_test.go (gate reads scale with STORES, not orders; zero
+// ledger round trips) and the demand snapshot in demand_snapshot_budget_test.go
+// (zero ledger round trips in the cache check and the routed-demand read). Same
+// gate, same unit, three files.
 
 // tickRTT is the stand-in for the remote ledger's per-query latency —
 // maintainer-city's work store answers in ~5.4s, scaled down to keep the

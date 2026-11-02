@@ -1697,6 +1697,7 @@ func TestIsTransientControllerError(t *testing.T) {
 		{name: "dolt breaker failing fast", err: errors.New(`querying control work for fixture/core.control-dispatcher: running work query "bd ready": exit status 1: server appears down, failing fast (cooldown 5s)`), want: true},
 		{name: "dolt server unreachable", err: errors.New("begin read tx: dolt server unreachable"), want: true},
 		{name: "workflow root close blocked", err: errors.New("gsp-p68ch6: completing workflow head: updating bead \"gsp-p68ch6\": exit status 1: cannot close blocked issue: gsp-p68ch6 is blocked by [gsp-yl7fpr]"), want: true},
+		{name: "dolt serialization failure", err: errors.New("gc-x: closing passed: updating bead \"gc-x\": Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction from another client, try restarting transaction"), want: true},
 		{name: "non work query sigterm", err: errors.New("starting provider: exit status 143: Terminated"), want: false},
 		{name: "bad step spec", err: errors.New("deserializing step spec: invalid character 'n'"), want: false},
 	}
@@ -1707,6 +1708,119 @@ func TestIsTransientControllerError(t *testing.T) {
 				t.Fatalf("IsTransientControllerError(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
+	}
+}
+
+// doltSerializationFailureErr is Dolt's own 1213/40001 text, verbatim from a
+// hub control-close log line. It shares MySQL's error number with "Deadlock
+// found" but none of its words, and it reaches the classifier only after the
+// store's bounded write retry has already lost the race three times.
+func doltSerializationFailureErr() error {
+	return errors.New("Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction from another client, try restarting transaction")
+}
+
+// TestClassifyControllerErrorDoltSerializationFailureIsAvailability pins the
+// wrapped control-close shape: a store that answered "try restarting
+// transaction" is lock contention, Tier A, exactly like the MySQL deadlock
+// phrasing of the same 1213 code — never a hard quarantine.
+func TestClassifyControllerErrorDoltSerializationFailureIsAvailability(t *testing.T) {
+	t.Parallel()
+
+	err := fmt.Errorf("closing passed: updating bead %q: %w", "gc-x", doltSerializationFailureErr())
+	if got := ClassifyControllerError(err); got != TierAvailability {
+		t.Fatalf("ClassifyControllerError(%v) = %v, want %v", err, got, TierAvailability)
+	}
+	if !IsTransientControllerError(err) {
+		t.Fatalf("IsTransientControllerError(%v) = false, want true", err)
+	}
+}
+
+// failOnceUpdateStore fails the first Update with err and then delegates, the
+// shape of a control close that loses one Dolt serialization race after the
+// store layer's own bounded retry has given up.
+type failOnceUpdateStore struct {
+	beads.Store
+	err    error
+	failed bool
+}
+
+func (s *failOnceUpdateStore) Update(id string, opts beads.UpdateOpts) error {
+	if !s.failed {
+		s.failed = true
+		return s.err
+	}
+	return s.Store.Update(id, opts)
+}
+
+// TestProcessRetryControlPassCloseLosingDoltSerializationRaceStaysOpen is the
+// field incident end to end at the dispatch boundary: the attempt passed, the
+// close of the control bead lost a 40001 race, and the control must come back
+// as a transient error with no terminal metadata so the next sweep closes it
+// as a pass — not as a hard failure that aborts its scope.
+func TestProcessRetryControlPassCloseLosingDoltSerializationRaceStaysOpen(t *testing.T) {
+	t.Parallel()
+	base := beads.NewMemStore()
+
+	root := mustCreate(t, base, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, base, beads.Bead{
+		Title: "review",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.review",
+			"gc.step_id":          "review",
+			"gc.max_attempts":     "3",
+			"gc.on_exhausted":     "hard_fail",
+			"gc.on_fail":          "abort_scope",
+			"gc.source_step_spec": `{"id":"review","title":"Review","type":"task","retry":{"max_attempts":3}}`,
+			"gc.control_epoch":    "1",
+		},
+	})
+	attempt1 := mustCreate(t, base, beads.Bead{
+		Title: "review attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review.attempt.1",
+			"gc.attempt":      "1",
+			"gc.outcome":      "pass",
+		},
+	})
+	mustClose(t, base, attempt1.ID)
+	mustDep(t, base, control.ID, attempt1.ID, "blocks")
+
+	store := &failOnceUpdateStore{
+		Store: base,
+		err:   fmt.Errorf("updating bead %q: %w", control.ID, doltSerializationFailureErr()),
+	}
+	_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err == nil {
+		t.Fatalf("processRetryControl returned nil, want the lost close race surfaced")
+	}
+	if !IsTransientControllerError(err) {
+		t.Fatalf("processRetryControl error = %v, want transient (would be quarantined as hard)", err)
+	}
+
+	afterFailure := mustGet(t, store, control.ID)
+	if afterFailure.Status != "open" {
+		t.Fatalf("control status after lost close race = %q, want open", afterFailure.Status)
+	}
+	if afterFailure.Metadata["gc.outcome"] != "" || afterFailure.Metadata["gc.final_disposition"] != "" {
+		t.Fatalf("lost close race must not set terminal metadata: %v", afterFailure.Metadata)
+	}
+
+	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("second processRetryControl: %v", err)
+	}
+	if !result.Processed || result.Action != "pass" {
+		t.Fatalf("second result = %+v, want processed pass", result)
+	}
+	after := mustGet(t, store, control.ID)
+	if after.Status != "closed" || after.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("control after retry = status %q outcome %q, want closed pass", after.Status, after.Metadata["gc.outcome"])
 	}
 }
 
@@ -2363,7 +2477,7 @@ func TestApplyAttemptRecipeScopeChecksSkipsDrain(t *testing.T) {
 		},
 	}
 
-	applyAttemptRecipeScopeChecks(recipe)
+	applyAttemptRecipeScopeChecks(recipe, nil)
 
 	stepByID := make(map[string]formula.RecipeStep, len(recipe.Steps))
 	for _, step := range recipe.Steps {
@@ -2532,10 +2646,20 @@ func TestBuildAttemptRecipeRalphWithChildren(t *testing.T) {
 	if applyStep.Metadata["gc.attempt"] != "3" {
 		t.Errorf("apply gc.attempt = %q, want 3", applyStep.Metadata["gc.attempt"])
 	}
+	// gastownhall/gascity#5246: a plain child (no Retry/Ralph/Drain) must still
+	// get a default gc.kind, mirroring the root's unconditional stamp above, so
+	// its control-plane identity remains explicit and it stays out of the
+	// ADR-0009 work-record close gate.
+	if applyStep.Metadata["gc.kind"] != "task" {
+		t.Errorf("apply gc.kind = %q, want task", applyStep.Metadata["gc.kind"])
+	}
 
 	verifyStep := recipe.StepByID("mol-test.converge.iteration.3.verify")
 	if verifyStep == nil {
 		t.Fatal("missing verify step")
+	}
+	if verifyStep.Metadata["gc.kind"] != "task" {
+		t.Errorf("verify gc.kind = %q, want task", verifyStep.Metadata["gc.kind"])
 	}
 	applyScopeCheck := recipe.StepByID("mol-test.converge.iteration.3.apply-scope-check")
 	if applyScopeCheck == nil {
@@ -2568,9 +2692,13 @@ func TestBuildAttemptRecipeRalphWithChildren(t *testing.T) {
 			foundScopeControlDep = true
 		}
 		if dep.StepID == "mol-test.converge.iteration.3" &&
-			dep.DependsOnID == "mol-test.converge.iteration.3.verify-scope-check" &&
+			dep.DependsOnID == "mol-test.converge.iteration.3.verify" &&
 			dep.Type == "blocks" {
 			foundScopeBodyDep = true
+		}
+		if dep.StepID == "mol-test.converge.iteration.3" &&
+			dep.DependsOnID == "mol-test.converge.iteration.3.verify-scope-check" {
+			t.Errorf("scope body blocks on the scope-check that closes it: %+v", dep)
 		}
 	}
 	if !foundBlocksDep {
@@ -2580,7 +2708,7 @@ func TestBuildAttemptRecipeRalphWithChildren(t *testing.T) {
 		t.Errorf("missing dep: apply scope-check blocks on apply; deps = %+v", recipe.Deps)
 	}
 	if !foundScopeBodyDep {
-		t.Errorf("missing dep: scope body blocks on verify scope-check; deps = %+v", recipe.Deps)
+		t.Errorf("missing dep: scope body blocks on verify; deps = %+v", recipe.Deps)
 	}
 
 	// Children should NOT have parent-child deps to the scope root —
@@ -3196,12 +3324,15 @@ func TestBuildAttemptRecipeScopeBlocksOnAllChildren(t *testing.T) {
 	recipe := buildAttemptRecipe(step, control, 1)
 	scopeID := "mol.review-loop.iteration.1"
 
-	// Scope must block on each child.
+	// The scope body must block on each child, and on the raw child rather
+	// than on that child's scope-check: every one of those scope-checks
+	// closes this body, so blocking on one is a permanent deadlock
+	// (ga-a6zy9).
 	expectedBlockers := []string{
-		scopeID + ".review-claude-scope-check",
-		scopeID + ".review-codex-scope-check",
-		scopeID + ".synthesize-scope-check",
-		scopeID + ".apply-fixes-scope-check",
+		scopeID + ".review-claude",
+		scopeID + ".review-codex",
+		scopeID + ".synthesize",
+		scopeID + ".apply-fixes",
 	}
 
 	scopeDeps := map[string]bool{}
@@ -3214,6 +3345,9 @@ func TestBuildAttemptRecipeScopeBlocksOnAllChildren(t *testing.T) {
 	for _, expected := range expectedBlockers {
 		if !scopeDeps[expected] {
 			t.Errorf("scope %q missing blocks dep on %q; scope deps = %v", scopeID, expected, scopeDeps)
+		}
+		if scopeDeps[expected+"-scope-check"] {
+			t.Errorf("scope %q blocks on %q, the control that closes it", scopeID, expected+"-scope-check")
 		}
 	}
 }
@@ -3302,7 +3436,9 @@ func TestBuildAttemptRecipeComposeExpandFanout(t *testing.T) {
 		}
 	}
 
-	// Scope blocks on all 4 child scope-check controls.
+	// Scope body blocks on all 4 children directly. It must NOT block on
+	// their scope-check controls: each of those closes this body, so the
+	// edge would be a permanent deadlock (ga-a6zy9).
 	scopeBlockers := map[string]bool{}
 	for _, dep := range recipe.Deps {
 		if dep.StepID == scopeID && dep.Type == "blocks" {
@@ -3310,13 +3446,16 @@ func TestBuildAttemptRecipeComposeExpandFanout(t *testing.T) {
 		}
 	}
 	for _, childID := range []string{
-		scopeID + ".review-pipeline.review-claude-scope-check",
-		scopeID + ".review-pipeline.review-codex-scope-check",
-		scopeID + ".review-pipeline.synthesize-scope-check",
-		scopeID + ".apply-fixes-scope-check",
+		scopeID + ".review-pipeline.review-claude",
+		scopeID + ".review-pipeline.review-codex",
+		scopeID + ".review-pipeline.synthesize",
+		scopeID + ".apply-fixes",
 	} {
 		if !scopeBlockers[childID] {
 			t.Errorf("scope missing blocks dep on %q", childID)
+		}
+		if scopeBlockers[childID+"-scope-check"] {
+			t.Errorf("scope blocks on %q, the control that closes it", childID+"-scope-check")
 		}
 	}
 
@@ -3455,6 +3594,79 @@ func TestBuildAttemptRecipeRalphChildOnCompleteCreatesScopedFanout(t *testing.T)
 	}
 	if !foundFanoutDep {
 		t.Fatalf("missing fanout blocks dependency on source; deps = %+v", recipe.Deps)
+	}
+}
+
+// TestBuildAttemptRecipeRalphChildOnCompleteGatesDownstreamSibling mirrors the
+// compile-time fanout-gating fix in the retry/ralph re-spawn path: a sibling
+// that needs an on_complete child must block on the child's minted fanout
+// control, and the child's minted scope-check must also wait on that fanout
+// control so the iteration scope finalizes behind the spawned children.
+func TestBuildAttemptRecipeRalphChildOnCompleteGatesDownstreamSibling(t *testing.T) {
+	t.Parallel()
+
+	step := &formula.Step{
+		ID:    "review-loop",
+		Title: "Review loop",
+		Type:  "task",
+		Ralph: &formula.RalphSpec{MaxAttempts: 3},
+		Children: []*formula.Step{
+			{
+				ID:    "dc-members",
+				Title: "List design council members",
+				Type:  "task",
+				OnComplete: &formula.OnCompleteSpec{
+					ForEach: "output.members",
+					Bond:    "review-member",
+				},
+			},
+			{
+				ID:    "synthesize",
+				Title: "Synthesize",
+				Type:  "task",
+				Needs: []string{"dc-members"},
+			},
+		},
+	}
+	control := beads.Bead{
+		ID: "ctrl-fanout",
+		Metadata: map[string]string{
+			"gc.step_id":  "review-loop",
+			"gc.step_ref": "mol-review.review-loop",
+		},
+	}
+
+	recipe := buildAttemptRecipe(step, control, 2)
+	sourceID := "mol-review.review-loop.iteration.2.dc-members"
+	synthID := "mol-review.review-loop.iteration.2.synthesize"
+
+	var siblingWaitsOnFanout, siblingWaitsOnSource bool
+	for _, dep := range recipe.Deps {
+		if dep.StepID != synthID {
+			continue
+		}
+		switch dep.DependsOnID {
+		case sourceID + "-fanout":
+			siblingWaitsOnFanout = true
+		case sourceID:
+			siblingWaitsOnSource = true
+		}
+	}
+	if !siblingWaitsOnFanout {
+		t.Fatalf("synthesize does not block on %s-fanout; deps = %+v", sourceID, recipe.Deps)
+	}
+	if siblingWaitsOnSource {
+		t.Fatalf("synthesize still blocks on raw fanout source %s; deps = %+v", sourceID, recipe.Deps)
+	}
+
+	var scopeCheckWaitsOnFanout bool
+	for _, dep := range recipe.Deps {
+		if dep.StepID == sourceID+"-scope-check" && dep.DependsOnID == sourceID+"-fanout" {
+			scopeCheckWaitsOnFanout = true
+		}
+	}
+	if !scopeCheckWaitsOnFanout {
+		t.Fatalf("dc-members scope-check does not wait on %s-fanout; deps = %+v", sourceID, recipe.Deps)
 	}
 }
 

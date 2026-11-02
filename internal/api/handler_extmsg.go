@@ -163,7 +163,7 @@ func (s *Server) extmsgNotifyMembers(
 
 	notifyResolved := func(sessionSelector, resolvedID string) {
 		handle := s.extmsgSessionHandleForResolvedID(resolvedID, sessionSelector)
-		nudge := formatExtmsgNotifyReminder(extmsgNotifyReminder{
+		nudge := s.extmsgNotice(extmsgNotifyReminder{
 			Provider:                conv.Provider,
 			ConversationID:          conv.ConversationID,
 			ActorDisplay:            actorDisplayName,

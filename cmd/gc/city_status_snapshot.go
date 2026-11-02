@@ -126,16 +126,20 @@ func cityStatusStorePresent(cityPath string) bool {
 // read the latest gc.store.maintenance.{done,failed} event for the
 // StoreHealth block. Tests replace this with a fake provider; the
 // default opens the city's JSONL event log directly (nil on failure so
-// the block still reports size/row data).
+// the block still reports size/row data, and nil on a worker site,
+// whose log holds only what the box wrote).
 var openStoreHealthEvents = defaultOpenStoreHealthEvents
 
 func defaultOpenStoreHealthEvents(cityPath string, stderr io.Writer) events.Provider {
+	if onWorkerSite(cityPath) {
+		return nil
+	}
 	eventsPath := filepath.Join(cityPath, ".gc", "events.jsonl")
 	providerName := os.Getenv("GC_EVENTS")
 	if providerName == "" {
 		providerName = peekEventsProvider(filepath.Join(cityPath, "city.toml"))
 	}
-	p, err := newEventsProviderForName(providerName, eventsPath, stderr)
+	p, err := newEventsReaderForName(providerName, eventsPath, stderr)
 	if err != nil {
 		return nil
 	}
@@ -460,9 +464,28 @@ func cityStatusJSONFromSnapshot(snapshot cityStatusSnapshot, summary StatusSumma
 	if !snapshot.Controller.Running {
 		signals = append(signals, "controller_not_running")
 	}
-	if snapshot.Summary.TotalAgents > 0 && snapshot.Summary.RunningAgents == 0 {
+	// A running count of zero is a fact about the agents only when the probe
+	// answered for all of them. During partial status the count is zero
+	// because nothing was observed, so no_agents_running reports a live city
+	// as dead — the same false reading the text renderer stopped emitting
+	// when it replaced "stopped" rows with "unknown". The JSON is the surface
+	// dashboards and health checks read, and the natural response to "no
+	// agents running" with queued work is to restart the agents and re-sling
+	// the work, which duplicates builds that are already in flight.
+	// Read the counts off the summary parameter rather than snapshot.Summary:
+	// the parameter is what this payload publishes as running_agents and
+	// total_agents, so a signal or an unknown count derived from the other one
+	// could contradict the numbers printed beside it. Both production callers
+	// pass snapshot.Summary, so this changes nothing today; it keeps all three
+	// values on one source if that ever stops being true.
+	unknownAgents := unknownAgentCount(summary.RunningAgents, summary.TotalAgents, snapshot.Partial)
+	switch {
+	case unknownAgents > 0:
+		signals = append(signals, "agent_state_unknown")
+	case summary.TotalAgents > 0 && summary.RunningAgents == 0:
 		signals = append(signals, "no_agents_running")
 	}
+	summary.UnknownAgents = unknownAgents
 	degraded := len(signals) > 0
 	running := snapshot.Controller.Running
 	return StatusJSON{
@@ -515,6 +538,21 @@ func padStatusName(name string, width int) string {
 	return name + strings.Repeat(" ", width-n)
 }
 
+// unknownAgentCount is how many agent rows the runtime probe never answered
+// for. Every surface reporting agent counts — the text summary, the JSON
+// summary, the health signals — derives "unknown" from this one rule, so no
+// two of them can disagree about the same snapshot. Outside partial status
+// nothing is unknown: a row that is not running was observed not running.
+func unknownAgentCount(running, total int, partial bool) int {
+	if !partial {
+		return 0
+	}
+	if unknown := total - running; unknown > 0 {
+		return unknown
+	}
+	return 0
+}
+
 // agentSummaryLine renders the agent-count summary that closes the Agents
 // block. During partial status the runtime probe did not answer, so every
 // non-running row rendered "unknown  (partial status)"; folding those into a
@@ -522,8 +560,8 @@ func padStatusName(name string, width int) string {
 // thirty lines above it. Report unknown separately instead. When the status is
 // not partial (or nothing is unknown) the line is byte-identical to before.
 func agentSummaryLine(running, total int, partial bool) string {
-	if partial && total-running > 0 {
-		return fmt.Sprintf("%d running, %d unknown of %d agents", running, total-running, total)
+	if unknown := unknownAgentCount(running, total, partial); unknown > 0 {
+		return fmt.Sprintf("%d running, %d unknown of %d agents", running, unknown, total)
 	}
 	return fmt.Sprintf("%d/%d agents running", running, total)
 }
@@ -560,6 +598,19 @@ func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.
 		}
 		fmt.Fprintln(stdout)                                                                                                   //nolint:errcheck // best-effort stdout
 		fmt.Fprintln(stdout, agentSummaryLine(snapshot.Summary.RunningAgents, snapshot.Summary.TotalAgents, snapshot.Partial)) //nolint:errcheck // best-effort stdout
+		// Why the count is not a measurement belongs next to the count.
+		// PartialErrors reached the JSON payload but never stdout, so a
+		// reader piping stdout got the number while its caveat sat on
+		// stderr, scrolled above a table that looks complete.
+		if snapshot.Partial {
+			reasons := snapshot.PartialErrors
+			if len(reasons) == 0 {
+				reasons = []string{"status is partial; some agent state was not observed"}
+			}
+			for _, reason := range reasons {
+				fmt.Fprintf(stdout, "  (%s)\n", reason) //nolint:errcheck // best-effort stdout
+			}
+		}
 	}
 
 	if len(snapshot.NamedSessions) > 0 {

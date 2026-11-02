@@ -17,11 +17,11 @@ func TestResolveLockedRemoteImportAcceptsBundledSyntheticCache(t *testing.T) {
 	commit := canonicalBundledCommit(source)
 	writeBundledImportLock(t, cityDir, source, commit)
 	cacheDir := bundledRepoCacheDir(home, source, commit)
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("materialize synthetic repo: %v", err)
 	}
 
-	got, ok, err := resolveLockedRemoteImport(source, cityDir)
+	got, ok, err := resolveLockedRemoteImport(source, cityDir, false)
 	if err != nil {
 		t.Fatalf("resolveLockedRemoteImport: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestResolveLockedRemoteImportFastPathToleratesBundledSyntheticContentDrift(
 	commit := canonicalBundledCommit(source)
 	writeBundledImportLock(t, cityDir, source, commit)
 	cacheDir := bundledRepoCacheDir(home, source, commit)
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("materialize synthetic repo: %v", err)
 	}
 	writeTestFile(t, cacheDir, "internal/bootstrap/packs/core/pack.toml", `
@@ -53,7 +53,7 @@ name = "tampered"
 schema = 1
 `)
 
-	_, ok, err := resolveLockedRemoteImport(source, cityDir)
+	_, ok, err := resolveLockedRemoteImport(source, cityDir, false)
 	if err != nil {
 		t.Fatalf("fast-path resolution must not reject content drift: %v", err)
 	}
@@ -73,12 +73,12 @@ func TestResolveLockedRemoteImportFastPathToleratesBundledSyntheticExtraFile(t *
 	commit := canonicalBundledCommit(source)
 	writeBundledImportLock(t, cityDir, source, commit)
 	cacheDir := bundledRepoCacheDir(home, source, commit)
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("materialize synthetic repo: %v", err)
 	}
 	writeTestFile(t, cacheDir, "internal/bootstrap/packs/core/agents/injected/prompt.md", "extra file")
 
-	_, ok, err := resolveLockedRemoteImport(source, cityDir)
+	_, ok, err := resolveLockedRemoteImport(source, cityDir, false)
 	if err != nil {
 		t.Fatalf("fast-path resolution must not reject extra files: %v", err)
 	}
@@ -93,11 +93,11 @@ func TestResolveInstalledRemoteImportAcceptsBundledSyntheticCache(t *testing.T) 
 	commit := canonicalBundledCommit(source)
 	writeBundledImportLock(t, cityDir, source, commit)
 	cacheDir := bundledRepoCacheDir(home, source, commit)
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("materialize synthetic repo: %v", err)
 	}
 
-	got, err := resolveInstalledRemoteImport(source, "", cityDir)
+	got, err := resolveInstalledRemoteImport(source, "", cityDir, false)
 	if err != nil {
 		t.Fatalf("resolveInstalledRemoteImport: %v", err)
 	}
@@ -112,11 +112,11 @@ func TestResolveImportPackRefAcceptsPublicGastownSyntheticCache(t *testing.T) {
 	commit := strings.TrimPrefix(PublicGastownPackVersion, "sha:")
 	writeBundledImportLock(t, cityDir, source, commit)
 	cacheDir := bundledRepoCacheDir(home, source, commit)
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.PublicRepository, commit); err != nil {
 		t.Fatalf("materialize synthetic repo: %v", err)
 	}
 
-	got, err := resolveImportPackRef(source, "", cityDir, cityDir)
+	got, err := resolveImportPackRef(source, "", cityDir, cityDir, false)
 	if err != nil {
 		t.Fatalf("resolveImportPackRef: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestLoadWithIncludes_RigBundledImportSelfHealsOfflineWithoutLock(t *testing
 	source := PublicGastownPackSource
 	commit := strings.TrimPrefix(PublicGastownPackVersion, "sha:")
 	cacheDir := bundledRepoCacheDir(home, source, commit)
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.PublicRepository, commit); err != nil {
 		t.Fatalf("materialize synthetic repo: %v", err)
 	}
 
@@ -225,7 +225,7 @@ fetched = "2026-01-01T00:00:00Z"
 	// went to fetchRemoteInclude (which would fail with "not cached at ...").
 	refWithGitRef := source + "#main"
 
-	got, err := resolvePackRef(refWithGitRef, cityDir, cityDir)
+	got, err := resolvePackRef(refWithGitRef, cityDir, cityDir, false)
 	if err != nil {
 		t.Fatalf("resolvePackRef(%q): %v", refWithGitRef, err)
 	}
@@ -247,7 +247,7 @@ commit = "abc123def456abc123def456abc123def456abc123de"
 content_hash = "sha256:deadbeef"
 `)
 
-	_, _, err := resolveLockedRemoteImport(source, cityDir)
+	_, _, err := resolveLockedRemoteImport(source, cityDir, false)
 	if err == nil {
 		t.Fatal("expected invalid marker error")
 	}
@@ -269,7 +269,7 @@ commit = %q
 content_hash = "sha256:deadbeef"
 `, source, commit))
 
-	_, _, err := resolveLockedRemoteImport(source, cityDir)
+	_, _, err := resolveLockedRemoteImport(source, cityDir, false)
 	if err == nil {
 		t.Fatal("expected non-bundled synthetic cache to be rejected")
 	}
@@ -308,7 +308,7 @@ content_hash = "sha256:deadbeef"
 		}
 	}
 
-	_, ok, err := resolveLockedRemoteImport(source, cityDir)
+	_, ok, err := resolveLockedRemoteImport(source, cityDir, false)
 	if err != nil {
 		t.Fatalf("resolveLockedRemoteImport: %v", err)
 	}
@@ -405,6 +405,11 @@ func TestIsBundledSourceAtCanonicalPin(t *testing.T) {
 		{"legacy gascity.git gastown at public pin", legacyGastownSource, publicGastownCommit, false},
 		{"non-bundled URL", "https://github.com/example/other.git//pack", gascityGitCommit, false},
 		{"empty commit", coreSource, "", false},
+		{"core at superseded gascity.git canonical pin", coreSource, lastSupersededCommit(SupersededBundledPackImportVersions), true},
+		{"public gastown at superseded public pin", PublicGastownPackSource, lastSupersededCommit(SupersededPublicGastownPackVersions), false},
+		{"core at abbreviated superseded pin", coreSource, lastSupersededCommit(SupersededBundledPackImportVersions)[:10], true},
+		{"core at uppercase superseded pin", coreSource, strings.ToUpper(lastSupersededCommit(SupersededBundledPackImportVersions)), true},
+		{"core at too-short superseded prefix", coreSource, lastSupersededCommit(SupersededBundledPackImportVersions)[:6], false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -413,6 +418,55 @@ func TestIsBundledSourceAtCanonicalPin(t *testing.T) {
 			}
 		})
 	}
+}
+
+func lastSupersededCommit(pins []string) string {
+	if len(pins) == 0 {
+		return ""
+	}
+	return strings.TrimPrefix(pins[len(pins)-1], "sha:")
+}
+
+// TestSupersededGascityGitPinServesEmbeddedContent pins the upgrade path for
+// a city whose core/bd/dolt imports carry a superseded gascity.git canonical
+// pin (every city created by gc through v1.5.0 carries sha:f895c0ff47). Those
+// pins only ever meant "the pack bundled with gc": the commit itself holds
+// June 2026 content. Config load must keep serving the running binary's
+// embedded content offline, with or without a lock entry, instead of failing
+// until "gc doctor --fix" and pointing at "gc import install", which fetched
+// the stale commit from git.
+func TestSupersededGascityGitPinServesEmbeddedContent(t *testing.T) {
+	source := bundledPackSource()
+	superseded := lastSupersededCommit(SupersededBundledPackImportVersions)
+	if superseded == "" || superseded == canonicalBundledCommit(source) {
+		t.Fatalf("superseded pin %q must be set and differ from the canonical pin", superseded)
+	}
+
+	t.Run("locked", func(t *testing.T) {
+		home, cityDir := setupBundledImportTest(t)
+		writeBundledImportLock(t, cityDir, source, superseded)
+		got, err := resolveInstalledRemoteImport(source, "sha:"+superseded, cityDir, false)
+		if err != nil {
+			t.Fatalf("resolveInstalledRemoteImport at superseded gascity.git pin: %v", err)
+		}
+		if want := bundledRepoCacheDir(home, source, superseded); got != want {
+			t.Fatalf("cacheDir = %q, want %q", got, want)
+		}
+		if err := builtinpacks.ValidateSyntheticRepo(got, builtinpacks.Repository, superseded); err != nil {
+			t.Fatalf("superseded pin was not served from embedded content: %v", err)
+		}
+	})
+
+	t.Run("declared without lock", func(t *testing.T) {
+		_, cityDir := setupBundledImportTest(t)
+		got, err := resolveInstalledRemoteImport(source, "sha:"+superseded, cityDir, false)
+		if err != nil {
+			t.Fatalf("resolveInstalledRemoteImport without lock: %v", err)
+		}
+		if err := builtinpacks.ValidateSyntheticRepoFast(got, builtinpacks.Repository, superseded); err != nil {
+			t.Fatalf("superseded declared pin was not served from embedded content: %v", err)
+		}
+	})
 }
 
 // TestBundledSourcePinnedVersionNormalizesSpellings pins the canonical-pin
@@ -457,7 +511,7 @@ func TestValidateInstalledRemoteCacheRequiresGitForNonCanonicalBundledPin(t *tes
 	writeBundledImportLock(t, cityDir, source, commit)
 	cacheDir := bundledRepoCacheDir(home, source, commit)
 
-	_, _, err := resolveLockedRemoteImport(source, cityDir)
+	_, _, err := resolveLockedRemoteImport(source, cityDir, false)
 	if err == nil {
 		t.Fatal("expected non-canonical bundled pin without cache to fail")
 	}
@@ -480,7 +534,7 @@ func TestResolveInstalledRemoteImportBundledFallbackWithoutLock(t *testing.T) {
 	source := bundledPackSource()
 	commit := strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:")
 
-	got, err := resolveInstalledRemoteImport(source, "", cityDir)
+	got, err := resolveInstalledRemoteImport(source, "", cityDir, false)
 	if err != nil {
 		t.Fatalf("resolveInstalledRemoteImport without lock: %v", err)
 	}
@@ -488,7 +542,7 @@ func TestResolveInstalledRemoteImportBundledFallbackWithoutLock(t *testing.T) {
 	if got != want {
 		t.Fatalf("cacheDir = %q, want %q", got, want)
 	}
-	if err := builtinpacks.ValidateSyntheticRepo(got, commit); err != nil {
+	if err := builtinpacks.ValidateSyntheticRepo(got, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("fallback did not hydrate a valid synthetic cache: %v", err)
 	}
 }
@@ -498,7 +552,7 @@ func TestResolveInstalledRemoteImportBundledFallbackWithoutLock(t *testing.T) {
 func TestResolveInstalledRemoteImportNonBundledStillRequiresLock(t *testing.T) {
 	_, cityDir := setupBundledImportTest(t)
 
-	_, err := resolveInstalledRemoteImport("https://github.com/example/other.git", "", cityDir)
+	_, err := resolveInstalledRemoteImport("https://github.com/example/other.git", "", cityDir, false)
 	if err == nil || !strings.Contains(err.Error(), "missing packs.lock") {
 		t.Fatalf("err = %v, want missing packs.lock error", err)
 	}
@@ -525,14 +579,14 @@ func TestResolveInstalledRemoteImportLockedBundledSelfHealsWhenCacheAbsent(t *te
 		t.Fatalf("precondition: cache dir should be absent, stat err = %v", err)
 	}
 
-	got, err := resolveInstalledRemoteImport(source, "", cityDir)
+	got, err := resolveInstalledRemoteImport(source, "", cityDir, false)
 	if err != nil {
 		t.Fatalf("resolveInstalledRemoteImport locked+absent bundled cache: %v", err)
 	}
 	if got != cacheDir {
 		t.Fatalf("cacheDir = %q, want %q", got, cacheDir)
 	}
-	if err := builtinpacks.ValidateSyntheticRepo(got, commit); err != nil {
+	if err := builtinpacks.ValidateSyntheticRepo(got, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("self-heal did not produce a valid synthetic cache: %v", err)
 	}
 }
@@ -546,13 +600,13 @@ func TestResolveInstalledRemoteImportRejectsDeclaredNonCanonicalPinWithoutLock(t
 	_, cityDir := setupBundledImportTest(t)
 	source := bundledPackSource()
 
-	_, err := resolveInstalledRemoteImport(source, "sha:0123456789abcdef0123456789abcdef01234567", cityDir)
+	_, err := resolveInstalledRemoteImport(source, "sha:0123456789abcdef0123456789abcdef01234567", cityDir, false)
 	if err == nil || !strings.Contains(err.Error(), "missing packs.lock") {
 		t.Fatalf("err = %v, want missing packs.lock error for declared non-canonical pin", err)
 	}
 
 	// The canonical declared pin (and an empty declaration) still falls back.
-	if _, err := resolveInstalledRemoteImport(source, BundledSourcePinnedVersion(source), cityDir); err != nil {
+	if _, err := resolveInstalledRemoteImport(source, BundledSourcePinnedVersion(source), cityDir, false); err != nil {
 		t.Fatalf("canonical declared pin should fall back to embedded content: %v", err)
 	}
 }
@@ -595,20 +649,20 @@ func TestSupersededBundledPinErrorsRecommendDoctorFix(t *testing.T) {
 	t.Run("locked but not cached", func(t *testing.T) {
 		_, cityDir := setupBundledImportTest(t)
 		writeBundledImportLock(t, cityDir, source, strings.TrimPrefix(superseded, "sha:"))
-		_, err := resolveInstalledRemoteImport(source, superseded, cityDir)
+		_, err := resolveInstalledRemoteImport(source, superseded, cityDir, false)
 		assertDoctorFirstRemediation(t, err)
 	})
 
 	t.Run("missing packs.lock", func(t *testing.T) {
 		_, cityDir := setupBundledImportTest(t)
-		_, err := resolveInstalledRemoteImport(source, superseded, cityDir)
+		_, err := resolveInstalledRemoteImport(source, superseded, cityDir, false)
 		assertDoctorFirstRemediation(t, err)
 	})
 
 	t.Run("missing packs.lock entry", func(t *testing.T) {
 		_, cityDir := setupBundledImportTest(t)
 		writeBundledImportLock(t, cityDir, "https://github.com/example/other.git", "0123456789abcdef0123456789abcdef01234567")
-		_, err := resolveInstalledRemoteImport(source, superseded, cityDir)
+		_, err := resolveInstalledRemoteImport(source, superseded, cityDir, false)
 		assertDoctorFirstRemediation(t, err)
 	})
 
@@ -616,7 +670,7 @@ func TestSupersededBundledPinErrorsRecommendDoctorFix(t *testing.T) {
 	// plain install remediation — the doctor re-pin would not honor it.
 	t.Run("non-superseded pin stays plain", func(t *testing.T) {
 		_, cityDir := setupBundledImportTest(t)
-		_, err := resolveInstalledRemoteImport(source, "sha:0123456789abcdef0123456789abcdef01234567", cityDir)
+		_, err := resolveInstalledRemoteImport(source, "sha:0123456789abcdef0123456789abcdef01234567", cityDir, false)
 		if err == nil || !strings.Contains(err.Error(), `run "gc import install"`) {
 			t.Fatalf("err = %v, want the plain gc import install remediation", err)
 		}
@@ -624,4 +678,99 @@ func TestSupersededBundledPinErrorsRecommendDoctorFix(t *testing.T) {
 			t.Fatalf("err = %v, must not recommend the doctor re-pin for a deliberate non-canonical pin", err)
 		}
 	})
+}
+
+// TestGascityRolesSubpackSharesGascityPinAndCache pins ga-73eoo's config side:
+// the gascity template's default rig import (gascity/roles) is a bundled
+// subpack of the gascity pack. It carries the gascity pin, is served from
+// embedded content only at that pin, shares the gascity pack's synthetic
+// cache directory (no second materialization), and moves with the gascity pin
+// when the packv2-import-state doctor fix re-pins a superseded canonical one.
+func TestGascityRolesSubpackSharesGascityPinAndCache(t *testing.T) {
+	roles := PublicGascityRolesPackSource
+	if got := BundledSourcePinnedVersion(roles); got != PublicGascityPackVersion {
+		t.Fatalf("BundledSourcePinnedVersion(roles) = %q, want the gascity pin %q", got, PublicGascityPackVersion)
+	}
+	commit := strings.TrimPrefix(PublicGascityPackVersion, "sha:")
+	if !IsBundledSourceAtCanonicalPin(roles, commit) {
+		t.Fatalf("roles at the gascity pin must be served from embedded content")
+	}
+	const other = "0123456789abcdef0123456789abcdef01234567"
+	if IsBundledSourceAtCanonicalPin(roles, other) {
+		t.Fatalf("roles at a non-canonical commit must stay an ordinary remote import")
+	}
+	if a, b := RepoCacheKey(roles, commit), RepoCacheKey(PublicGascityPackSource, commit); a != b {
+		t.Fatalf("roles cache key %s != gascity cache key %s; the subpack must share its parent's synthetic cache", a, b)
+	}
+	if RepoCacheKey(roles, other) == RepoCacheKey(roles, commit) {
+		t.Fatalf("a non-canonical roles pin must not key into the synthetic cache")
+	}
+	for _, old := range SupersededPublicGascityPackVersions {
+		current, ok := SupersededBundledPinTarget(roles, old)
+		if !ok || current != PublicGascityPackVersion {
+			t.Fatalf("SupersededBundledPinTarget(roles, %s) = (%q, %v), want (%q, true): roles must move with the gascity pin", old, current, ok, PublicGascityPackVersion)
+		}
+	}
+	if _, ok := SupersededBundledPinTarget(roles, "sha:"+other); ok {
+		t.Fatalf("a deliberate non-canonical roles pin must not be rewritten")
+	}
+}
+
+// TestResolveGascityRolesWithoutLockIsOffline pins the ga-73eoo user-facing
+// fix: with no packs.lock (a fresh gc init before install) the roles import
+// resolves from the binary's embedded gascity tree, and the resolved pack
+// root holds the roles pack.toml. No git runs: the cache is synthetic.
+func TestResolveGascityRolesWithoutLockIsOffline(t *testing.T) {
+	home, cityDir := setupBundledImportTest(t)
+	roles := PublicGascityRolesPackSource
+	commit := canonicalBundledCommit(roles)
+
+	got, err := resolveInstalledRemoteImport(roles, PublicGascityPackVersion, cityDir, false)
+	if err != nil {
+		t.Fatalf("resolveInstalledRemoteImport(roles) without lock: %v", err)
+	}
+	if want := bundledRepoCacheDir(home, PublicGascityPackSource, commit); got != want {
+		t.Fatalf("cacheDir = %q, want the gascity pack's synthetic cache %q", got, want)
+	}
+	if err := builtinpacks.ValidateSyntheticRepo(got, builtinpacks.PublicRepository, commit); err != nil {
+		t.Fatalf("roles fallback did not hydrate a valid synthetic cache: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(got, "gascity", "roles", "pack.toml")); err != nil {
+		t.Fatalf("roles pack root missing from the synthetic cache: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(got, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("synthetic roles cache must not be a git checkout (stat .git err = %v)", err)
+	}
+}
+
+// TestMatchSupersededPinSpellings pins the spelling tolerance of the
+// superseded-pin match: case-insensitive, "sha:" optional, and an
+// abbreviation of at least 7 hex digits that names exactly one entry. Any
+// other spelling stays a deliberate pin.
+func TestMatchSupersededPinSpellings(t *testing.T) {
+	list := []string{
+		"sha:f895c0ff47d6ee9334ed282a416387eb5b084d24",
+		"sha:f895c0f000000000000000000000000000000000",
+		"sha:282d2bf26b1a9396016e90b0128c1cd16b719f4d3af7cd0ea06cf25fbc426d18",
+	}
+	tests := []struct {
+		version string
+		want    bool
+	}{
+		{"sha:f895c0ff47d6ee9334ed282a416387eb5b084d24", true},
+		{"SHA:F895C0FF47D6EE9334ED282A416387EB5B084D24", true},
+		{"f895c0ff47d6ee9334ed282a416387eb5b084d24", true},
+		{"sha:f895c0ff47", true},
+		{"sha:F895C0FF", true},
+		{"sha:f895c0f", false}, // ambiguous: prefixes two entries
+		{"sha:282d2bf", true},  // unique 7-digit prefix
+		{"sha:282d2b", false},  // shorter than 7
+		{"sha:f895c0ff48", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := matchSupersededPin(tt.version, list); got != tt.want {
+			t.Errorf("matchSupersededPin(%q) = %v, want %v", tt.version, got, tt.want)
+		}
+	}
 }

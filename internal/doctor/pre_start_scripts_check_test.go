@@ -370,6 +370,31 @@ func TestResolvePreStartScript_TableDriven(t *testing.T) {
 			cityPath:  "/c",
 			wantOK:    false,
 		},
+		{
+			// Packs hand context to setup scripts as a leading env
+			// assignment; the script path still has to be validated.
+			name:      "leading env assignment skipped",
+			cmd:       "GC_DEFAULT_BRANCH='{{.DefaultBranch}}' {{.ConfigDir}}/assets/scripts/worktree-setup.sh {{.RigRoot}} --sync",
+			sourceDir: "/p/a",
+			cityPath:  "/c",
+			wantOK:    true,
+			wantPath:  "/p/a/assets/scripts/worktree-setup.sh",
+		},
+		{
+			name:      "multiple leading env assignments skipped",
+			cmd:       "A=1 GC_DEFAULT_BRANCH=main {{.ConfigDir}}/s.sh",
+			sourceDir: "/p/a",
+			cityPath:  "/c",
+			wantOK:    true,
+			wantPath:  "/p/a/s.sh",
+		},
+		{
+			name:      "env assignment only still skipped",
+			cmd:       "GC_DEFAULT_BRANCH={{.ConfigDir}}",
+			sourceDir: "/p/a",
+			cityPath:  "/c",
+			wantOK:    false,
+		},
 	}
 
 	for _, tt := range tests {

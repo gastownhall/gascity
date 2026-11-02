@@ -212,7 +212,19 @@
               "storage-status",
               "ready",
               "storage-recover-stranded",
-              "beads-metadata-cas"
+              "beads-metadata-cas",
+              "worktree-cleanup",
+              "worktree-ensure",
+              "worktree-verify",
+              "storage-preflight",
+              "nudge-drop",
+              "beads-city-migrate-proxied",
+              "storage-repair-sequence",
+              "runtime-workdir-export",
+              "agent-is-foreign",
+              "storage-vouch-bd",
+              "storage-remote-stage-mark",
+              "storage-remote-stage-unmark"
             ]
           },
           "event_id": {

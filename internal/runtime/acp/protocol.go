@@ -67,8 +67,23 @@ type ServerInfo struct {
 
 // InitializeParams is the params for the "initialize" request.
 type InitializeParams struct {
-	ProtocolVersion int        `json:"protocolVersion"`
-	ClientInfo      ClientInfo `json:"clientInfo"`
+	ProtocolVersion    int                `json:"protocolVersion"`
+	ClientInfo         ClientInfo         `json:"clientInfo"`
+	ClientCapabilities ClientCapabilities `json:"clientCapabilities"`
+}
+
+// ClientCapabilities advertises which agent->client methods gc serves.
+// gc serves neither file system nor terminal methods, so every field is
+// sent explicitly false and agents know not to ask.
+type ClientCapabilities struct {
+	FS       FileSystemCapability `json:"fs"`
+	Terminal bool                 `json:"terminal"`
+}
+
+// FileSystemCapability advertises the fs/* methods the client serves.
+type FileSystemCapability struct {
+	ReadTextFile  bool `json:"readTextFile"`
+	WriteTextFile bool `json:"writeTextFile"`
 }
 
 // InitializeResult is the result of the "initialize" request.
@@ -192,11 +207,33 @@ func newNotification(method string) JSONRPCMessage {
 	}
 }
 
+// methodSessionCancel is the ACP notification that cancels a session's
+// in-flight prompt turn.
+const methodSessionCancel = "session/cancel"
+
+// SessionCancelParams is the params object of a session/cancel notification.
+type SessionCancelParams struct {
+	SessionID string `json:"sessionId"`
+}
+
+// newSessionCancelNotification creates a "session/cancel" notification for
+// the given ACP session.
+func newSessionCancelNotification(sessionID string) JSONRPCMessage {
+	msg := newNotification(methodSessionCancel)
+	msg.Params, _ = json.Marshal(SessionCancelParams{SessionID: sessionID})
+	return msg
+}
+
 // newInitializeRequest creates an "initialize" request.
 func newInitializeRequest() (JSONRPCMessage, int64) {
 	return newRequest("initialize", InitializeParams{
 		ProtocolVersion: 1,
 		ClientInfo:      ClientInfo{Name: "gc", Version: "1.0"},
+		// gc serves no fs/* or terminal/* methods; say so explicitly.
+		ClientCapabilities: ClientCapabilities{
+			FS:       FileSystemCapability{ReadTextFile: false, WriteTextFile: false},
+			Terminal: false,
+		},
 	})
 }
 
@@ -211,6 +248,20 @@ func newSessionNewRequest(workDir string, mcpServers []runtime.MCPServerConfig) 
 		Cwd:        workDir,
 		McpServers: sessionNewMCPServers(mcpServers),
 	})
+}
+
+// redactedSessionNewParams renders session/new params for the capture
+// transcript: the same shape the agent receives, with MCP server credentials
+// replaced by runtime.RedactMCPServerConfigs.
+func redactedSessionNewParams(workDir string, mcpServers []runtime.MCPServerConfig) (json.RawMessage, error) {
+	data, err := json.Marshal(SessionNewParams{
+		Cwd:        workDir,
+		McpServers: sessionNewMCPServers(runtime.RedactMCPServerConfigs(mcpServers)),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal redacted session/new params: %w", err)
+	}
+	return data, nil
 }
 
 func sessionNewMCPServers(servers []runtime.MCPServerConfig) []SessionNewMCPServer {

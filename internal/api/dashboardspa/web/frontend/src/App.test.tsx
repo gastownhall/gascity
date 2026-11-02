@@ -1,5 +1,5 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { ThemeProvider } from './contexts/ThemeContext';
@@ -24,6 +24,11 @@ vi.mock('./supervisor/client', () => ({
       items: [{ name: 'test-city', path: '/srv/gc/test-city', running: true }],
       total: 1,
     })),
+    // Routing-level tests do not exercise bead/session data; these stubs exist
+    // so the attention cohort's reads resolve empty instead of tripping over a
+    // missing method.
+    listSessions: vi.fn(async () => ({ items: [], total: 0 })),
+    listBeads: vi.fn(async () => ({ items: [], total: 0 })),
   }),
 }));
 
@@ -43,10 +48,7 @@ function LocationProbe() {
 function renderAt(path: string) {
   return render(
     <ThemeProvider>
-      <MemoryRouter
-        initialEntries={[path]}
-        future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
-      >
+      <MemoryRouter initialEntries={[path]}>
         <App />
         <LocationProbe />
       </MemoryRouter>

@@ -9,12 +9,12 @@ func TestBuiltinProviders(t *testing.T) {
 	providers := BuiltinProviders()
 	order := BuiltinProviderOrder()
 
-	// Must have exactly 17 built-in providers.
-	if len(providers) != 17 {
-		t.Fatalf("len(BuiltinProviders()) = %d, want 17", len(providers))
+	// Must have exactly 18 built-in providers.
+	if len(providers) != 18 {
+		t.Fatalf("len(BuiltinProviders()) = %d, want 18", len(providers))
 	}
-	if len(order) != 17 {
-		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 17", len(order))
+	if len(order) != 18 {
+		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 18", len(order))
 	}
 
 	// Every entry in order must exist in providers.
@@ -216,8 +216,8 @@ func TestBuiltinProvidersCursor(t *testing.T) {
 	if p.Command != "cursor-agent" {
 		t.Errorf("Command = %q, want %q", p.Command, "cursor-agent")
 	}
-	if !reflect.DeepEqual(p.Args, []string{"-f"}) {
-		t.Errorf("Args = %v, want [-f]", p.Args)
+	if !reflect.DeepEqual(p.Args, []string{"-f", "--trust"}) {
+		t.Errorf("Args = %v, want [-f --trust]", p.Args)
 	}
 	rp := &ResolvedProvider{
 		Command:           p.Command,
@@ -225,8 +225,8 @@ func TestBuiltinProvidersCursor(t *testing.T) {
 		OptionsSchema:     p.OptionsSchema,
 		EffectiveDefaults: ComputeEffectiveDefaults(p.OptionsSchema, p.OptionDefaults, nil),
 	}
-	if got := rp.CommandString(); got != "cursor-agent -f" {
-		t.Errorf("CommandString() = %q, want %q", got, "cursor-agent -f")
+	if got := rp.CommandString(); got != "cursor-agent -f --trust" {
+		t.Errorf("CommandString() = %q, want %q", got, "cursor-agent -f --trust")
 	}
 	if got := rp.ResolveDefaultArgs(); len(got) != 0 {
 		t.Errorf("ResolveDefaultArgs() = %v, want no MCP approval args by default", got)
@@ -397,16 +397,24 @@ func TestBuiltinProvidersResumeFlags(t *testing.T) {
 
 // TestBuiltinProvidersSessionIDFlag pins that built-in providers only populate
 // SessionIDFlag when their CLI supports caller-supplied fresh session IDs.
-// Claude and Codex expose session ids through resume paths, not fresh-start
-// creation flags; populating this field makes resolveSessionCommand emit an
-// unsupported first-start command and prevents hook-time provider session IDs
-// from becoming the durable session_key.
+// Populating it for a CLI that has no such flag makes resolveSessionCommand
+// emit an unsupported first-start command and prevents hook-time provider
+// session IDs from becoming the durable session_key.
+//
+// Claude Code is the exception: `claude --session-id <uuid>` starts a fresh
+// conversation under a caller-chosen UUID (verified against claude 2.1.233),
+// and it is the only way gc can hand `--resume <uuid>` back on restart —
+// claude has no gc session hook that could persist a provider-side key, so
+// without this flag every restart silently starts a new conversation.
 func TestBuiltinProvidersSessionIDFlag(t *testing.T) {
 	providers := BuiltinProviders()
-	for _, name := range []string{"claude", "codex", "gemini", "cursor", "copilot", "amp", "opencode", "auggie", "pi", "omp"} {
+	for _, name := range []string{"codex", "gemini", "cursor", "copilot", "amp", "opencode", "auggie", "pi", "omp"} {
 		if got := providers[name].SessionIDFlag; got != "" {
 			t.Errorf("%s SessionIDFlag = %q, want empty (no documented start-with-id flag)", name, got)
 		}
+	}
+	if got := providers["claude"].SessionIDFlag; got != "--session-id" {
+		t.Errorf("claude SessionIDFlag = %q, want --session-id (restart resume depends on it)", got)
 	}
 }
 
@@ -915,5 +923,71 @@ func TestPathCheckBinary(t *testing.T) {
 				t.Errorf("pathCheckBinary() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestProviderSessionCreateTransportBuiltinGolden pins every builtin's
+// default transport and template launch command to the values recorded
+// before ACPOmittedArgs existed, so the omitted-args transport rule moves
+// only city-declared wrappers, never a builtin.
+func TestProviderSessionCreateTransportBuiltinGolden(t *testing.T) {
+	golden := map[string]struct{ transport, launch string }{
+		"amp":         {"", "amp --dangerously-allow-all --no-ide"},
+		"antigravity": {"", "agy --dangerously-skip-permissions"},
+		"auggie":      {"", "auggie --allow-indexing"},
+		"cerebras":    {"acp", "opencode acp --model cerebras/gpt-oss-120b"},
+		"claude":      {"", "claude --dangerously-skip-permissions --effort max"},
+		"codex":       {"", "codex --dangerously-bypass-approvals-and-sandbox"},
+		"copilot":     {"", "copilot --yolo"},
+		"cursor":      {"", "cursor-agent -f --trust"},
+		"gemini":      {"", "gemini --approval-mode yolo"},
+		"grok":        {"", "grok --permission-mode bypassPermissions --model grok-composer-2.5-fast"},
+		"groq":        {"acp", "opencode acp --model groq/openai/gpt-oss-120b"},
+		"kimi":        {"acp", "kimi --yolo --no-thinking acp"},
+		"kiro":        {"", "kiro-cli chat --no-interactive --agent gascity --trust-all-tools"},
+		"mimocode":    {"", "mimo --never-ask"},
+		"omp":         {"", "omp --hook .omp/hooks/gc-hook.ts"},
+		"opencode":    {"acp", "opencode acp"},
+		"pi":          {"", "pi -e .pi/extensions/gc-hooks.js"},
+		"zcode":       {"", "zcode-repl"},
+	}
+	providers := BuiltinProviders()
+	if len(providers) != len(golden) {
+		t.Fatalf("BuiltinProviders() has %d providers, golden table has %d; record the new builtin's transport and launch", len(providers), len(golden))
+	}
+	cfg := &City{Providers: providers}
+	if err := BuildResolvedProviderCache(cfg); err != nil {
+		t.Fatalf("BuildResolvedProviderCache: %v", err)
+	}
+	for name := range providers {
+		want, ok := golden[name]
+		if !ok {
+			t.Errorf("builtin %q missing from golden table", name)
+			continue
+		}
+		resolved, err := ResolveProvider(&Agent{Name: "worker", Provider: name}, nil, providers, func(s string) (string, error) { return s, nil })
+		if err != nil {
+			t.Fatalf("ResolveProvider(%q): %v", name, err)
+		}
+		cached, ok := ResolvedProviderCached(cfg, name)
+		if !ok {
+			t.Fatalf("ResolvedProviderCached(%q) missing", name)
+		}
+		for path, rp := range map[string]*ResolvedProvider{"ResolveProvider": resolved, "ResolvedProviderCached": &cached} {
+			if len(rp.ACPOmittedArgs) != 0 {
+				t.Errorf("%s(%q).ACPOmittedArgs = %q, want empty", path, name, rp.ACPOmittedArgs)
+			}
+		}
+		transport := resolved.ProviderSessionCreateTransport()
+		if transport != want.transport {
+			t.Errorf("%q: ProviderSessionCreateTransport() = %q, want %q", name, transport, want.transport)
+		}
+		launch, err := ProviderTemplateCommand(resolved, transport, nil, providers)
+		if err != nil {
+			t.Fatalf("ProviderTemplateCommand(%q): %v", name, err)
+		}
+		if launch != want.launch {
+			t.Errorf("%q: template launch = %q, want %q", name, launch, want.launch)
+		}
 	}
 }

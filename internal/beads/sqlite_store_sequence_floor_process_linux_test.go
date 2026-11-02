@@ -15,7 +15,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gastownhall/gascity/internal/testutil"
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 const (
@@ -95,8 +95,8 @@ func TestSQLiteStoreSequenceFloorSIGKILLAtBoundaries(t *testing.T) {
 				t.Fatalf("closing initial SQLite store: %v", err)
 			}
 
-			command := exec.Command(os.Args[0], "-test.run=^TestSQLiteSequenceFloorHelperProcess$")
-			command.Env = append(os.Environ(), sqliteSequenceFloorBoundaryEnv+"="+boundary)
+			command := sqliteSequenceHelperCommand("TestSQLiteSequenceFloorHelperProcess")
+			command.Env = append(command.Env, sqliteSequenceFloorBoundaryEnv+"="+boundary)
 			child := startSQLiteSequenceFloorChild(t, command, dir, 50)
 			child.kill()
 
@@ -144,13 +144,13 @@ func TestSQLiteStoreSetSequenceFloorNeverLowersAcrossProcesses(t *testing.T) {
 
 	lower := startSQLiteSequenceFloorChild(
 		t,
-		exec.Command(os.Args[0], "-test.run=^TestSQLiteSequenceFloorHelperProcess$"),
+		sqliteSequenceHelperCommand("TestSQLiteSequenceFloorHelperProcess"),
 		dir,
 		50,
 	)
 	higher := startSQLiteSequenceFloorChild(
 		t,
-		exec.Command(os.Args[0], "-test.run=^TestSQLiteSequenceFloorHelperProcess$"),
+		sqliteSequenceHelperCommand("TestSQLiteSequenceFloorHelperProcess"),
 		dir,
 		100,
 	)
@@ -250,7 +250,7 @@ func (c *sqliteSequenceFloorChild) line(t *testing.T) string {
 			ok   bool
 		}{line: c.stdout.Text(), ok: ok}
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), beadsSequenceFloorHangBudget)
 	defer cancel()
 	select {
 	case result := <-lines:
@@ -259,7 +259,7 @@ func (c *sqliteSequenceFloorChild) line(t *testing.T) string {
 		}
 		return result.line
 	case <-ctx.Done():
-		t.Fatalf("timed out waiting for sequence-floor child protocol after %s", testutil.ExecRaceTimeout)
+		t.Fatalf("timed out waiting for sequence-floor child protocol after %s", beadsSequenceFloorHangBudget)
 		return ""
 	}
 }
@@ -274,4 +274,103 @@ func (c *sqliteSequenceFloorChild) kill() {
 	}
 	_ = c.command.Wait()
 	c.finished = true
+}
+
+// sqliteSequenceHelperCommand re-executes this test binary running only the
+// named helper-process test, without Bazel's test-runner environment: the
+// mint test runs three helpers at once, and under bazel coverage each would
+// otherwise write the parent's coverage profile.
+func sqliteSequenceHelperCommand(testName string) *exec.Cmd {
+	cmd := exec.Command(os.Args[0], "-test.run=^"+testName+"$")
+	cmd.Env = bazeltest.HelperProcessEnv(os.Environ())
+	return cmd
+}
+
+const (
+	sqliteSequenceMintChildDirEnv   = "GC_SQLITE_SEQUENCE_MINT_CHILD_DIR"
+	sqliteSequenceMintChildCountEnv = "GC_SQLITE_SEQUENCE_MINT_CHILD_COUNT"
+)
+
+// TestSQLiteSequenceMintHelperProcess is the child of
+// TestSQLiteSequenceProcessesNeverMintSameID: it mints ids and prints them.
+func TestSQLiteSequenceMintHelperProcess(t *testing.T) {
+	dir := os.Getenv(sqliteSequenceMintChildDirEnv)
+	if dir == "" {
+		return
+	}
+	count, err := strconv.Atoi(os.Getenv(sqliteSequenceMintChildCountEnv))
+	if err != nil {
+		t.Fatalf("parsing mint count: %v", err)
+	}
+	opened, err := OpenSQLiteStore(dir, WithSQLiteStoreIDPrefix(sqliteGraphPrefix))
+	if err != nil {
+		t.Fatalf("opening mint child store: %v", err)
+	}
+	store := opened.(*SQLiteStore)
+	defer store.CloseStore() //nolint:errcheck
+	out := bufio.NewWriter(os.Stdout)
+	for i := 0; i < count; i++ {
+		// Mix committed creates with bare reservations so blocks turn over.
+		id, err := store.nextID()
+		if i%64 == 0 {
+			var created Bead
+			created, err = store.Create(Bead{Title: "child"})
+			id = created.ID
+		}
+		if err != nil {
+			t.Fatalf("minting in child: %v", err)
+		}
+		_, _ = out.WriteString("id " + id + "\n")
+	}
+	_ = out.Flush()
+}
+
+func TestSQLiteSequenceProcessesNeverMintSameID(t *testing.T) {
+	dir := t.TempDir()
+	seed := openSeqStore(t, dir)
+	if err := seed.CloseStore(); err != nil {
+		t.Fatal(err)
+	}
+	const children = 3
+	count := int(2*sqliteSequenceBlockSize + 17)
+	type child struct {
+		cmd    *exec.Cmd
+		stdout bytes.Buffer
+		stderr bytes.Buffer
+	}
+	kids := make([]*child, children)
+	for i := range kids {
+		c := &child{cmd: sqliteSequenceHelperCommand("TestSQLiteSequenceMintHelperProcess")}
+		c.cmd.Env = append(c.cmd.Env,
+			sqliteSequenceMintChildDirEnv+"="+dir,
+			sqliteSequenceMintChildCountEnv+"="+strconv.Itoa(count),
+		)
+		c.cmd.Stdout = &c.stdout
+		c.cmd.Stderr = &c.stderr
+		if err := c.cmd.Start(); err != nil {
+			t.Fatalf("starting mint child: %v", err)
+		}
+		kids[i] = c
+	}
+	seen := map[string]int{}
+	for i, c := range kids {
+		if err := c.cmd.Wait(); err != nil {
+			t.Fatalf("mint child %d: %v\nstdout:\n%s\nstderr:\n%s", i, err, c.stdout.String(), c.stderr.String())
+		}
+		got := 0
+		for _, line := range strings.Split(c.stdout.String(), "\n") {
+			id, ok := strings.CutPrefix(line, "id ")
+			if !ok {
+				continue
+			}
+			got++
+			if prev, dup := seen[id]; dup {
+				t.Fatalf("processes %d and %d both minted %q", prev, i, id)
+			}
+			seen[id] = i
+		}
+		if got != count {
+			t.Fatalf("mint child %d printed %d ids, want %d\nstderr:\n%s", i, got, count, c.stderr.String())
+		}
+	}
 }

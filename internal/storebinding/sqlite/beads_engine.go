@@ -53,6 +53,9 @@ func (c storeCloser) Close() error { return c.store.CloseStore() }
 // The classes are checked against what one Beads ledger can serve rather than
 // trusted: an assignment this provider cannot honor must fail at the open, not
 // at the first read of a class nobody projected.
+//
+// The store comes back fenced to the namespaces those classes hold — the
+// pinned-id contract in engdocs/architecture/beads.md, invariant 16.
 func (p *beadsProvider) OpenEngine(spec storebinding.BindingSpec, classes storebinding.ClassSet) (beads.Store, io.Closer, error) {
 	if err := p.boundTo(spec); err != nil {
 		return nil, nil, err
@@ -71,7 +74,10 @@ func (p *beadsProvider) OpenEngine(spec storebinding.BindingSpec, classes storeb
 	if !ok || prefix == "" {
 		return nil, nil, fmt.Errorf("%w: no reserved id prefix is registered for the %q class", ErrInvalidBeadsBinding, config.BeadClassGraph)
 	}
-	store, err := beads.OpenSQLiteStore(filepath.Dir(p.path), beads.WithSQLiteStoreIDPrefix(prefix))
+	store, err := beads.OpenSQLiteStore(filepath.Dir(p.path),
+		beads.WithSQLiteStoreIDPrefix(prefix),
+		beads.WithSQLiteStoreReservedIDPrefixes(storebinding.EngineReservedPrefixes(classes)...),
+	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening the SQLite Beads engine of binding %q at %s: %w", p.spec.Name, p.path, err)
 	}

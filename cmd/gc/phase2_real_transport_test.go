@@ -19,9 +19,18 @@ import (
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
+// phase2RealTransportBound and phase2RealTransportMarkerBound gate a real
+// tmux session start (ctx timeout, post-start file polling, and the
+// StartElapsed proof below). WC-TRANSPORT-001 proves real transport
+// delivery, not startup speed, so these are hang detectors, not latency
+// assertions — reuse this package's existing hangBudget (ga-cv2tf0) rather
+// than a bespoke deadline sized for an idle box. See
+// TestPhase2RealTransportBoundsStayAHangDetector for the guard and
+// TESTING.md's "Test deadline rule" for why a sub-floor fixed value here is
+// a CI reliability defect, not just tightness.
 const (
-	phase2RealTransportBound       = 5 * time.Second
-	phase2RealTransportMarkerBound = 500 * time.Millisecond
+	phase2RealTransportBound       = hangBudget
+	phase2RealTransportMarkerBound = hangBudget
 )
 
 func TestPhase2WorkerCoreRealTransportProof(t *testing.T) {

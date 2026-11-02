@@ -27,9 +27,13 @@ import (
 )
 
 // nudgeFunc is an optional callback for nudging an agent after sending or
-// replying to mail. When non-nil, it is called with the recipient name.
+// replying to mail. When non-nil, it is called with the recipient name and
+// the ID of the message the nudge announces. messageID lets the queued nudge
+// carry a re-checkable reference, so delivery-time re-validation can withdraw
+// it if the message is read or gone by then (gastownhall/gascity#5321).
+// It returns the id of the op that records the notice, "" when none does.
 // Errors are non-fatal.
-type nudgeFunc func(recipient string) error
+type nudgeFunc func(recipient, messageID string) (opID string, err error)
 
 const (
 	mailInjectMaxMessages          = 3
@@ -77,7 +81,11 @@ type mailActionResult struct {
 	Count         *int                 `json:"count,omitempty"`
 	AlreadyDone   bool                 `json:"already_done,omitempty"`
 	Notified      bool                 `json:"notified,omitempty"`
-	DryRun        bool                 `json:"dry_run,omitempty"`
+	// NotifyOpIDs are the ids of the operation-journal ops that record the
+	// recipients' new-mail notices, one per notified recipient whose notice
+	// was recorded (DES-O0API §8.4).
+	NotifyOpIDs []string `json:"notify_op_ids,omitempty"`
+	DryRun      bool     `json:"dry_run,omitempty"`
 }
 
 type mailMessageSummary struct {
@@ -113,13 +121,28 @@ func summarizeMailMessage(m mail.Message) mailMessageSummary {
 	}
 }
 
+// appendNotifyOp appends a notice's op id to ids, when an op recorded it.
+func appendNotifyOp(ids []string, opID string) []string {
+	if opID == "" {
+		return ids
+	}
+	return append(ids, opID)
+}
+
+// newMailNudgeFunc notifies a mail recipient from sender, passing the mail
+// message id as the notice's cause (sendMailNotify). Under require a notice
+// the op journal cannot record is refused before the recipient resolves, so
+// it materializes no configured named session's row.
 func newMailNudgeFunc(sender string) nudgeFunc {
-	return func(recipient string) error {
-		target, err := resolveNudgeTarget(recipient, io.Discard)
-		if err != nil {
-			return err
+	return func(recipient, messageID string) (string, error) {
+		target, err := resolveMessageOpTarget(recipient, mailNotifyOpRequest(mailNotifyText(sender), messageID), io.Discard)
+		if errors.Is(err, errMessageOpRefused) {
+			return "", mailNotifyRefusedError(messageID)
 		}
-		return sendMailNotify(target, sender)
+		if err != nil {
+			return "", err
+		}
+		return sendMailNotify(target, sender, messageID)
 	}
 }
 
@@ -349,7 +372,19 @@ func doMailArchiveSelectedJSON(mp mail.Provider, rec events.Recorder, args []str
 	return exit
 }
 
+// splitMessageIDArgs splits every argument on whitespace and drops empty
+// tokens. Message IDs never contain whitespace, and some shells can preserve a
+// variable containing multiple IDs as one argument.
+func splitMessageIDArgs(args []string) []string {
+	ids := make([]string, 0, len(args))
+	for _, arg := range args {
+		ids = append(ids, strings.Fields(arg)...)
+	}
+	return ids
+}
+
 func doMailArchiveJSON(mp mail.Provider, rec events.Recorder, args []string, jsonOut bool, stdout, stderr io.Writer) int {
+	args = splitMessageIDArgs(args)
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc mail archive: missing message ID") //nolint:errcheck // best-effort stderr
 		return 1
@@ -516,20 +551,46 @@ $GC_ALIAS, $GC_AGENT, or "human".`,
 }
 
 func cmdMailCheckWithFormat(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {
+	// One composed city-config load for the whole invocation: the suspension
+	// check, the mail provider, the target resolution and every store open each
+	// loaded it again (see invocationConfigMemo).
+	defer beginInvocationConfigMemo()()
+	// --inject writes a <system-reminder> straight into a provider's system
+	// prompt. With no recipient argument the mailbox falls back through
+	// GC_SESSION_ID/GC_ALIAS/GC_AGENT to "human"
+	// (defaultMailIdentityCandidates), so an unmanaged session — a human who
+	// opened a provider in a directory gc staged overlays into — would have the
+	// operator's own inbox injected as an instruction and act on it instead of
+	// answering the human. Naming a mailbox is a deliberate request and is
+	// still served; the plain non-inject form is untouched (#5304).
+	if inject && len(args) == 0 && !hookHasManagedIdentity() {
+		return 0
+	}
 	cityPath, cityPathErr := resolveCity()
+	configLoaded := false
 	if cityPathErr == nil {
-		if cfg, err := loadCityConfig(cityPath, stderr); err == nil && citySuspended(cfg) {
+		cfg, err := loadCityConfig(cityPath, stderr)
+		if err == nil && citySuspended(cfg) {
 			if inject {
 				return 0
 			}
 			fmt.Fprintln(stderr, "gc mail check: city is suspended") //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		configLoaded = err == nil
 	}
 	if cityPathErr != nil {
 		return doMailCheckFallback(args, inject, hookFormat, stdout, stderr)
 	}
 	c, reason := mailCheckAPIClient(cityPath)
+	// An injecting check reads the mailbox in process whatever the controller
+	// says (routeMailCheck), and any check without a controller does. Its config
+	// load above ran the builtin readiness pass the routing read needs, so
+	// resolve the routes alongside the mail provider's store open
+	// (prewarmCLIStorageRoutes).
+	if configLoaded && (inject || c == nil) {
+		defer prewarmCLIStorageRoutes(cityPath)()
+	}
 	return routeMailCheck(cityPath, args, inject, hookFormat, c, reason, stdout, stderr)
 }
 
@@ -544,11 +605,29 @@ var mailCheckAPIClient = func(cityPath string) (*api.Client, string) {
 	return nil, apiClientFallbackReason(cityPath)
 }
 
+// Route-log reasons for API-capable mail reads that take the local path
+// because only it can answer the request as the local contract requires.
+const (
+	// mailRouteReasonRecipientUnresolved: the target names no mailbox or
+	// several (mailTargetUnresolved); the local path reports the resolver's
+	// error.
+	mailRouteReasonRecipientUnresolved = "recipient-unresolved"
+	// mailRouteReasonClosedSession: a no-argument check from a session whose
+	// own bead is closed; the local path refuses it.
+	mailRouteReasonClosedSession = "closed-session"
+)
+
 // routeMailCheck dispatches non-injecting `mail check` to the supervisor API
 // when a controller is up; otherwise falls back to the local mail-provider path.
 // Injecting hooks probe the API for degraded-read notices, then use the local
 // path because provider-backed mail may need to perform delivery side effects
 // after successful injection.
+//
+// A plain check resolves its target the way the local path does and asks the
+// supervisor about that mailbox (resolveMailAPITarget), so both routes name
+// and count the same one. A target that does not resolve, or a no-argument
+// check whose own session (GC_SESSION_ID) is closed, takes the local path,
+// which reports the error or refuses exactly as it always has.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *api.Client, nilReason string, stdout, stderr io.Writer) int {
 	const cmdName = "mail check"
@@ -580,6 +659,16 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 		logRoute(stderr, cmdName, "fallback", "inject-local-side-effects")
 		return doMailCheckFallback(args, inject, hookFormat, stdout, stderr)
 	}
+	var target resolvedMailTarget
+	if c != nil {
+		var at mailAPITarget
+		if at, nilReason = resolveMailCheckAPITarget(args); nilReason != "" {
+			c = nil
+		} else {
+			logMailTargetUnverified(stderr, "gc mail check", at)
+			target, recipient = at.target, at.identity
+		}
+	}
 	if c != nil {
 		cr, err := c.ListMailInbox(recipient, "")
 		if err == nil {
@@ -589,7 +678,7 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 				return 1
 			}
 			logRoute(stderr, cmdName, "api", "")
-			return renderMailCheckFromAPI(cr, recipient, inject, hookFormat, stdout)
+			return renderMailCheckFromAPI(cr, target.display, inject, hookFormat, stdout)
 		}
 		if !api.ShouldFallbackForRead(c, err) {
 			logRoute(stderr, cmdName, "api", "error")
@@ -603,11 +692,102 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 	return doMailCheckFallback(args, inject, hookFormat, stdout, stderr)
 }
 
+// resolveMailCheckAPITarget resolves a plain `gc mail check` target for the
+// API route (resolveMailAPITarget). It returns a non-empty route-log reason
+// when the check must take the local path instead.
+func resolveMailCheckAPITarget(args []string) (mailAPITarget, string) {
+	at, ok := resolveMailAPITarget(args)
+	if !ok {
+		return mailAPITarget{}, mailRouteReasonRecipientUnresolved
+	}
+	if len(args) == 0 && refuseClosedHookSession(at.target) != nil {
+		return mailAPITarget{}, mailRouteReasonClosedSession
+	}
+	return at, ""
+}
+
+// mailAPITarget is the mailbox an API mail read (gc mail count, plain gc mail
+// check) prints and asks the supervisor about.
+type mailAPITarget struct {
+	// target is the mailbox the read prints: the one the local route reads,
+	// or the identity as given when the city's store or config could not be
+	// read to look it up.
+	target resolvedMailTarget
+	// identity is what the supervisor is asked about.
+	identity string
+	// unverified is the failure that kept the target from being looked up;
+	// nil when it was.
+	unverified error
+}
+
+// resolveMailAPITarget looks up the target of an API mail read the way the
+// local route does (lookupMailTargetFromArgs), so both routes name and count
+// the same mailbox: the supervisor is asked about the mailbox the lookup found
+// (mailTargetAPIIdentity), not about the identity as typed, which it would
+// resolve again by its own rules. ok is false for a target that names no
+// mailbox or several; the read then takes the local path, which reports it.
+// When the city's store or config cannot be read, the supervisor is asked
+// about the identity as given, so a supervisor that can answer still does.
+// A no-argument read then asks about the first identity candidate
+// (GC_SESSION_ID when set) without telling whether its session is closed: the
+// read archives nothing and does not fall back to GC_ALIAS, so it consumes no
+// successor's mail.
+func resolveMailAPITarget(args []string) (mailAPITarget, bool) {
+	target, err := lookupMailTargetFromArgs(args)
+	if err == nil {
+		return mailAPITarget{target: target, identity: mailTargetAPIIdentity(target)}, true
+	}
+	if mailTargetUnresolved(err) {
+		return mailAPITarget{}, false
+	}
+	identity := defaultMailIdentity()
+	if len(args) > 0 {
+		identity = strings.TrimSpace(args[0])
+	}
+	return mailAPITarget{
+		target:     resolvedMailTarget{display: identity, recipients: []string{identity}},
+		identity:   identity,
+		unverified: err,
+	}, true
+}
+
+// mailTargetAPIIdentity is the identity an API read asks the supervisor about
+// for a target the CLI resolved: the session bead it resolved to, by id, which
+// the supervisor reads as that session's own inbox, the mailbox the local
+// route reads; otherwise its display address ("human", or a configured mailbox
+// address).
+func mailTargetAPIIdentity(target resolvedMailTarget) string {
+	if target.session != nil {
+		return target.session.ID
+	}
+	return target.display
+}
+
+// mailTargetUnresolved reports whether err, from a mail target lookup, is the
+// resolver's answer about the target itself: it names no mailbox, several, or
+// a session that conflicts with a configured named session. Any other error
+// is a failure to read the city's store or config.
+func mailTargetUnresolved(err error) bool {
+	return errors.Is(err, session.ErrSessionNotFound) ||
+		errors.Is(err, session.ErrAmbiguous) ||
+		errors.Is(err, errNamedSessionConflict)
+}
+
+// logMailTargetUnverified notes under GC_DEBUG that an API mail read asks the
+// supervisor about its identity as given because the local lookup failed.
+func logMailTargetUnverified(stderr io.Writer, cmdName string, at mailAPITarget) {
+	if at.unverified == nil || !gcDebugEnabled() {
+		return
+	}
+	fmt.Fprintf(stderr, "%s: asking the supervisor about %q as given: looking it up locally failed: %v\n", cmdName, at.identity, at.unverified) //nolint:errcheck // best-effort stderr
+}
+
 // renderMailCheckFromAPI formats the API-sourced inbox for `gc mail check`.
 // With --inject, writes the <system-reminder> block and always returns 0.
 // Without --inject, returns 0 if mail exists and 1 if empty, matching the
 // local fallback contract; human output appends a stale-read banner when the
-// supervisor cache is > 30 s old.
+// supervisor cache is > 30 s old. The count is the server's pre-paging Total,
+// so a mailbox larger than one page reports every unread message.
 func renderMailCheckFromAPI(cr api.CachedRead[api.MailListView], recipient string, inject bool, hookFormat string, stdout io.Writer) int {
 	messages := cr.Body.Items
 	if inject {
@@ -616,10 +796,11 @@ func renderMailCheckFromAPI(cr api.CachedRead[api.MailListView], recipient strin
 		}
 		return 0
 	}
-	if len(messages) == 0 {
+	n := max(cr.Body.Total, len(messages))
+	if n == 0 {
 		return 1
 	}
-	fmt.Fprintf(stdout, "%d unread message(s) for %s\n", len(messages), recipient) //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "%d unread message(s) for %s\n", n, recipient) //nolint:errcheck // best-effort stdout
 	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
 		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
 	}
@@ -690,6 +871,15 @@ func doMailCheckFallback(args []string, inject bool, hookFormat string, stdout, 
 		}
 		return 1
 	}
+	if len(args) == 0 {
+		if err := refuseClosedHookSession(target); err != nil {
+			fmt.Fprintf(stderr, "gc mail check: %v; not reading its mailbox\n", err) //nolint:errcheck // best-effort stderr
+			if inject {
+				return 0
+			}
+			return 1
+		}
+	}
 
 	return doMailCheckTargetWithFormat(mp, target, inject, hookFormat, stdout, stderr)
 }
@@ -705,8 +895,40 @@ func doMailCheckTarget(mp mail.Provider, target resolvedMailTarget, inject bool,
 	return doMailCheckTargetWithFormat(mp, target, inject, "", stdout, stderr)
 }
 
-func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, inject bool, hookFormat string, stdout, stderr io.Writer) int {
+// sessionInboxForTarget reads the mailbox of a target resolved from its own
+// session bead in one listing, when mp can; ok is false for any other target or
+// provider. Every self-read — mail check, its injection, SessionStart mail and
+// mail inbox — answers from this one inbox definition, so they agree.
+func sessionInboxForTarget(mp any, target resolvedMailTarget) (inbox *beadmail.Inbox, ok bool, err error) {
+	reader, reads := mp.(beadmail.SessionInboxReader)
+	if !reads || target.session == nil {
+		return nil, false, nil
+	}
+	inbox, err = reader.InboxForSession(*target.session)
+	if err != nil {
+		return nil, true, err
+	}
+	return inbox, true, nil
+}
+
+// unreadMailForTarget returns the target's unread mail, oldest first. A target
+// resolved from its own session bead is read as one inbox (sessionInboxForTarget),
+// returned as the inbox the mail came from; any other target or provider is
+// asked recipient by recipient, and the inbox is nil.
+func unreadMailForTarget(mp mail.Provider, target resolvedMailTarget) ([]mail.Message, *beadmail.Inbox, error) {
+	inbox, ok, err := sessionInboxForTarget(mp, target)
+	if ok {
+		if err != nil {
+			return nil, nil, err
+		}
+		return inbox.Unread(), inbox, nil
+	}
 	messages, err := collectMailMessages(mp.Check, target.recipients)
+	return messages, nil, err
+}
+
+func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, inject bool, hookFormat string, stdout, stderr io.Writer) int {
+	messages, inbox, err := unreadMailForTarget(mp, target)
 	if err != nil {
 		if inject {
 			fmt.Fprintf(stderr, "gc mail check: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -722,15 +944,13 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 				fmt.Fprintf(stderr, "gc mail check: writing hook output: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 0
 			}
-			// Archive the SAME messages that were injected: priority-sort
-			// before the clamp so the archived set matches formatInjectOutput's
-			// displayed set (a priority:1 handoff that floats into the window is
-			// injected AND archived, never injected-but-not-archived).
-			injectedMessages := sortMailByPriority(messages)
-			if len(injectedMessages) > mailInjectMaxMessages {
-				injectedMessages = injectedMessages[:mailInjectMaxMessages]
-			}
-			archiveInjectedAutoHandoffMessages(mp, injectedMessages, stderr)
+			// Archive the SAME messages that were injected: select the same
+			// window formatInjectOutput displays so the archived set matches
+			// (a priority:1 handoff that floats into the window is injected
+			// AND archived, never injected-but-not-archived) — unless the
+			// managing gc hook run would discard this output before the
+			// archive finished.
+			archiveInjectedAutoHandoffMessagesFrom("gc mail check", mp, inbox, selectMailInjectWindow(messages), stderr)
 		}
 		return 0 // --inject always exits 0
 	}
@@ -747,17 +967,47 @@ type injectedAutoHandoffArchiver interface {
 	ArchiveInjectedAutoHandoffs([]string) error
 }
 
-func archiveInjectedAutoHandoffMessages(mp mail.Provider, messages []mail.Message, stderr io.Writer) {
-	archiver, ok := mp.(injectedAutoHandoffArchiver)
-	if !ok {
-		return
-	}
+// inboxAutoHandoffArchiver is the optional capability of archiving injected
+// auto-handoff mail from the rows an inbox read already holds
+// (beadmail.Provider.ArchiveInjectedAutoHandoffsFromInbox).
+type inboxAutoHandoffArchiver interface {
+	ArchiveInjectedAutoHandoffsFromInbox(inbox *beadmail.Inbox, ids []string, mayLabel func() bool) error
+}
+
+// archiveInjectedAutoHandoffMessagesFrom archives the injected auto-handoff
+// messages, unless the managing gc hook run would discard the hook's output
+// before the archive finished (hookDeadlineAllowsArchive). Given the inbox
+// they were read from, a provider that can archives from its rows without
+// reading them again, and only the auto-handoff mail among messages is
+// archived — or, past the deadline, reported as skipped. Without the inbox,
+// which of messages are auto-handoff mail is not known until the provider
+// reads them, so the deadline is checked for any of them.
+func archiveInjectedAutoHandoffMessagesFrom(cmdName string, mp mail.Provider, inbox *beadmail.Inbox, messages []mail.Message, stderr io.Writer) {
 	ids := make([]string, 0, len(messages))
 	for _, msg := range messages {
 		ids = append(ids, msg.ID)
 	}
-	if err := archiver.ArchiveInjectedAutoHandoffs(ids); err != nil {
-		fmt.Fprintf(stderr, "gc mail check: archiving injected auto handoff mail: %v\n", err) //nolint:errcheck // best-effort stderr
+	var archive func() error
+	what := "any injected auto-handoff mail"
+	if archiver, ok := mp.(inboxAutoHandoffArchiver); ok && inbox != nil {
+		ids = inbox.InjectedAutoHandoffIDs(ids)
+		what = fmt.Sprintf("%d injected auto-handoff message(s)", len(ids))
+		// The deadline is asked again before each label write, which follows
+		// the destructive close and adds nothing to a closed handoff.
+		archive = func() error {
+			return archiver.ArchiveInjectedAutoHandoffsFromInbox(inbox, ids, hookDeadlineStillLeavesTime)
+		}
+	} else if archiver, ok := mp.(injectedAutoHandoffArchiver); ok {
+		archive = func() error { return archiver.ArchiveInjectedAutoHandoffs(ids) }
+	}
+	if archive == nil || len(ids) == 0 {
+		return
+	}
+	if !hookDeadlineAllowsArchive(cmdName, what, stderr) {
+		return
+	}
+	if err := archive(); err != nil {
+		fmt.Fprintf(stderr, "%s: archiving injected auto handoff mail: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 	}
 }
 
@@ -784,22 +1034,50 @@ func sortMailByPriority(messages []mail.Message) []mail.Message {
 	return sorted
 }
 
+// selectMailInjectWindow returns the at-most mailInjectMaxMessages messages
+// that formatInjectOutput displays. Any caller archiving "the injected
+// messages" (doMailCheckTargetWithFormat, sessionStartAutoHandoffInjection)
+// must select the same window so the archived set never diverges from the
+// displayed set (see the "Archive the SAME messages" comments at both call
+// sites).
+//
+// It keeps sortMailByPriority's contract (higher priority first) but, within
+// a priority tier, keeps the NEWEST arrivals rather than the oldest: without
+// this, a backlog of stale same-priority mail permanently fills the
+// mailInjectMaxMessages window and a newly arrived message is never surfaced
+// (gastownhall/gascity ga-18f84o). The returned window is re-sorted ascending
+// by CreatedAt so the rendered block still reads oldest-to-newest.
+func selectMailInjectWindow(messages []mail.Message) []mail.Message {
+	windowed := sortMailByPriority(messages)
+	if len(windowed) > mailInjectMaxMessages {
+		sort.SliceStable(windowed, func(i, j int) bool {
+			if windowed[i].Priority != windowed[j].Priority {
+				return windowed[i].Priority > windowed[j].Priority
+			}
+			return windowed[i].CreatedAt.After(windowed[j].CreatedAt)
+		})
+		windowed = windowed[:mailInjectMaxMessages]
+	}
+	sort.SliceStable(windowed, func(i, j int) bool {
+		return windowed[i].CreatedAt.Before(windowed[j].CreatedAt)
+	})
+	return windowed
+}
+
 // formatInjectOutput formats messages as a <system-reminder> block for
-// injection into an agent's prompt via a UserPromptSubmit hook. It priority-
-// sorts before the display clamp so both inject render paths
+// injection into an agent's prompt via a UserPromptSubmit hook. It selects the
+// display window via selectMailInjectWindow so both inject render paths
 // (renderMailCheckFromAPI and doMailCheckTargetWithFormat) surface higher-
-// priority unread first.
+// priority, then most-recent, unread mail first.
 func formatInjectOutput(messages []mail.Message) string {
-	messages = sortMailByPriority(messages)
+	windowed := selectMailInjectWindow(messages)
 	var sb strings.Builder
 	sb.WriteString("<system-reminder>\n")
 	fmt.Fprintf(&sb, "You have %d unread message(s).\n\n", len(messages))
-	limit := len(messages)
-	if limit > mailInjectMaxMessages {
-		limit = mailInjectMaxMessages
-		fmt.Fprintf(&sb, "Showing the first %d message(s) here; run 'gc mail inbox' for the full list.\n\n", limit)
+	if len(windowed) < len(messages) {
+		fmt.Fprintf(&sb, "Showing the %d most recent message(s) here; run 'gc mail inbox' for the full list.\n\n", len(windowed))
 	}
-	for _, m := range messages[:limit] {
+	for _, m := range windowed {
 		// Sanitize attacker-controllable fields (sender identity, subject,
 		// body) before interpolating into the <system-reminder> block.
 		// Without this, a sender can inject </system-reminder> sequences
@@ -809,6 +1087,16 @@ func formatInjectOutput(messages []mail.Message) string {
 		subject := extmsg.SanitizeForSystemReminder(rawSubject)
 		rawBody, bodyTruncated := mailInjectBodyPreview(m.Body)
 		body := extmsg.SanitizeForSystemReminder(rawBody)
+		// A message with no body is not a message whose content went missing:
+		// the subject IS the content. `gc mail send <to> -s "text"` and
+		// POST /v0/mail with the optional body omitted both produce this shape.
+		// Without the substitution it renders as "[subject]: " — a subject in
+		// brackets and nothing behind the colon, which reads as lost content
+		// and is what made ga-6eukj0 look like a storage bug. Substituting here
+		// covers every ingress, since all of them converge on this read path.
+		if body == "" {
+			body, bodyTruncated = subject, subjectTruncated
+		}
 		if subject != "" && subject != body {
 			fmt.Fprintf(&sb, "- %s from %s [%s", m.ID, from, subject)
 			if subjectTruncated {
@@ -931,23 +1219,22 @@ func isStorelessMailProvider() bool {
 	return strings.HasPrefix(v, "exec:") || v == "fake" || v == "fail"
 }
 
-// sessionMailboxAddresses delegates to the session-class front-door codec
-// (internal/session) so the session-bead metadata vocabulary (alias /
-// alias_history / session_name) lives in one place. Its sole remaining caller
-// holds a single bead already fetched by id; the list-scan sites now read
-// session.Info directly via session.MailboxAddress*FromInfo.
-func sessionMailboxAddresses(b beads.Bead) []string {
-	return session.MailboxAddresses(b)
-}
-
-func resolveMailIdentityCached(store beads.Store, identifier string, cache *mailIdentitySessionCache) (string, error) {
+// The mail identity/target resolver family below reads only session-class beads:
+// session-ID resolution, the gc:session enumeration behind named-target matching,
+// and mailbox-identity metadata. Its store parameter is therefore named sessStore
+// and every caller must hand it a session-class store (cliSessionStore at a CLI
+// root, cr.sessionsBeadStore().Store in the controller) — the resolvers do no
+// routing of their own, so a [beads.classes.sessions] relocation reaches mail
+// identity resolution exactly once, at the root that opened the store. Mail
+// *messages* are a different class and travel through mail.Provider, not here.
+func resolveMailIdentityCached(sessStore beads.Store, identifier string, cache *mailIdentitySessionCache) (string, error) {
 	if sender, ok := reservedMailSenderIdentity(identifier); ok {
 		return sender, nil
 	}
-	sessionID, err := resolveSessionID(store, identifier)
+	sessionID, err := resolveSessionID(sessStore, identifier)
 	if err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
-			if target, matched, targetErr := resolveLiveConfiguredNamedMailTargetCached(store, identifier, cache); targetErr != nil {
+			if target, matched, targetErr := resolveLiveConfiguredNamedMailTargetCached(sessStore, identifier, cache); targetErr != nil {
 				return "", targetErr
 			} else if matched {
 				return target.display, nil
@@ -958,7 +1245,7 @@ func resolveMailIdentityCached(store beads.Store, identifier string, cache *mail
 		}
 		return "", err
 	}
-	address, err := session.NewStore(beads.SessionStore{Store: store}).MailboxAddress(sessionID)
+	address, err := session.NewStore(beads.SessionStore{Store: sessStore}).MailboxAddress(sessionID)
 	if err != nil {
 		return "", err
 	}
@@ -968,18 +1255,29 @@ func resolveMailIdentityCached(store beads.Store, identifier string, cache *mail
 	return address, nil
 }
 
-func resolveMailIdentityWithConfig(cityPath string, cfg *config.City, store beads.Store, identifier string) (string, error) {
-	return resolveMailIdentityWithConfigCached(cityPath, cfg, store, identifier, nil)
+func resolveMailIdentityWithConfig(cityPath string, cfg *config.City, sessStore beads.Store, identifier string) (string, error) {
+	return resolveMailIdentityWithConfigCached(cityPath, cfg, sessStore, identifier, nil)
 }
 
-func resolveMailIdentityWithConfigCached(cityPath string, cfg *config.City, store beads.Store, identifier string, cache *mailIdentitySessionCache) (string, error) {
+func resolveMailIdentityWithConfigCached(cityPath string, cfg *config.City, sessStore beads.Store, identifier string, cache *mailIdentitySessionCache) (string, error) {
 	if sender, ok := reservedMailSenderIdentity(identifier); ok {
 		return sender, nil
 	}
-	if store != nil && cfg != nil {
-		sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, identifier)
+	if sessStore != nil && cfg != nil {
+		// A session bead id resolves with one Get, and the address is read off
+		// the bead it returns.
+		if info, ok, err := resolveExactSessionInfo(sessStore, identifier); err != nil {
+			return "", err
+		} else if ok {
+			address := session.MailboxAddressFromInfo(info)
+			if address == "" {
+				return "", errNoMailboxIdentity(identifier)
+			}
+			return address, nil
+		}
+		sessionID, err := resolveSessionIDWithOptions(cityPath, cfg, sessStore, identifier, namedSessionResolveOptions{skipExactID: true})
 		if err == nil {
-			address, err := session.NewStore(beads.SessionStore{Store: store}).MailboxAddress(sessionID)
+			address, err := session.NewStore(beads.SessionStore{Store: sessStore}).MailboxAddress(sessionID)
 			if err != nil {
 				return "", err
 			}
@@ -992,7 +1290,7 @@ func resolveMailIdentityWithConfigCached(cityPath string, cfg *config.City, stor
 			return "", err
 		}
 	}
-	if target, matched, targetErr := resolveLiveConfiguredNamedMailTargetCached(store, identifier, cache); targetErr != nil {
+	if target, matched, targetErr := resolveLiveConfiguredNamedMailTargetCached(sessStore, identifier, cache); targetErr != nil {
 		return "", targetErr
 	} else if matched {
 		return target.display, nil
@@ -1000,19 +1298,19 @@ func resolveMailIdentityWithConfigCached(cityPath string, cfg *config.City, stor
 	if address, ok := configuredMailboxAddressWithConfig(cityPath, cfg, identifier); ok {
 		return address, nil
 	}
-	return resolveMailIdentityCached(store, identifier, cache)
+	return resolveMailIdentityCached(sessStore, identifier, cache)
 }
 
-func resolveMailRecipientIdentity(cityPath string, cfg *config.City, store beads.Store, identifier string) (string, error) {
-	return resolveMailRecipientIdentityCached(cityPath, cfg, store, identifier, nil)
+func resolveMailRecipientIdentity(cityPath string, cfg *config.City, sessStore beads.Store, identifier string) (string, error) {
+	return resolveMailRecipientIdentityCached(cityPath, cfg, sessStore, identifier, nil)
 }
 
-func resolveMailRecipientIdentityCached(cityPath string, cfg *config.City, store beads.Store, identifier string, cache *mailIdentitySessionCache) (string, error) {
+func resolveMailRecipientIdentityCached(cityPath string, cfg *config.City, sessStore beads.Store, identifier string, cache *mailIdentitySessionCache) (string, error) {
 	if normalized := normalizeNamedSessionTarget(identifier); normalized == "" || normalized == "human" {
 		return "human", nil
 	}
-	if store != nil {
-		sessionID, err := session.ResolveSessionIDByExactID(store, identifier)
+	if sessStore != nil {
+		sessionID, err := session.ResolveSessionIDByExactID(sessStore, identifier)
 		if err == nil {
 			return sessionID, nil
 		}
@@ -1020,7 +1318,7 @@ func resolveMailRecipientIdentityCached(cityPath string, cfg *config.City, store
 			return "", err
 		}
 	}
-	if target, matched, targetErr := resolveLiveConfiguredNamedMailTargetCached(store, identifier, cache); targetErr != nil {
+	if target, matched, targetErr := resolveLiveConfiguredNamedMailTargetCached(sessStore, identifier, cache); targetErr != nil {
 		return "", targetErr
 	} else if matched {
 		return target.display, nil
@@ -1028,7 +1326,7 @@ func resolveMailRecipientIdentityCached(cityPath string, cfg *config.City, store
 	if normalizeNamedSessionTarget(identifier) == controllerMailIdentity {
 		return "", session.ErrSessionNotFound
 	}
-	return resolveMailIdentityWithConfigCached(cityPath, cfg, store, identifier, cache)
+	return resolveMailIdentityWithConfigCached(cityPath, cfg, sessStore, identifier, cache)
 }
 
 func configuredMailboxAddress(identifier string) (string, bool) {
@@ -1060,12 +1358,12 @@ func configuredMailboxAddressWithConfig(cityPath string, cfg *config.City, ident
 	return spec.Identity, true
 }
 
-func listLiveSessionMailboxesCached(store beads.Store, cache *mailIdentitySessionCache) (map[string]bool, error) {
+func listLiveSessionMailboxesCached(sessStore beads.Store, cache *mailIdentitySessionCache) (map[string]bool, error) {
 	recipients := map[string]bool{"human": true}
-	if store == nil {
+	if sessStore == nil {
 		return recipients, nil
 	}
-	all, err := listMailIdentitySessions(store, cache)
+	all, err := listMailIdentitySessions(sessStore, cache)
 	if err != nil {
 		return nil, err
 	}
@@ -1084,6 +1382,13 @@ func listLiveSessionMailboxesCached(store beads.Store, cache *mailIdentitySessio
 type resolvedMailTarget struct {
 	display    string
 	recipients []string
+	// session is the session bead the target resolved to, by its id or by a
+	// name (mailTargetFromSessionInfo); nil when no session bead was resolved:
+	// "human", a configured mailbox address, or a live configured named
+	// session matched by its identity. An inbox read takes the session's
+	// mailbox from it (sessionInboxForTarget) instead of expanding each
+	// recipient again.
+	session *session.Info
 }
 
 // mailIdentitySessionCache memoizes a single gc:session enumeration so that
@@ -1112,16 +1417,16 @@ func ambientMailTargetConfig() (string, *config.City) {
 // resolution. It preserves the pre-typed cache semantics exactly: the default
 // direct union with IncludeClosed implicit-false (loadOpenSessionInfos), with the
 // per-loop closed filter kept in the callers.
-func listMailIdentitySessions(store beads.Store, cache *mailIdentitySessionCache) ([]session.Info, error) {
+func listMailIdentitySessions(sessStore beads.Store, cache *mailIdentitySessionCache) ([]session.Info, error) {
 	if cache == nil {
-		return loadOpenSessionInfos(store)
+		return loadOpenSessionInfos(sessStore)
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	if cache.fetched {
 		return cache.list, nil
 	}
-	list, err := loadOpenSessionInfos(store)
+	list, err := loadOpenSessionInfos(sessStore)
 	if err != nil {
 		return nil, err
 	}
@@ -1130,12 +1435,12 @@ func listMailIdentitySessions(store beads.Store, cache *mailIdentitySessionCache
 	return list, nil
 }
 
-func resolveLiveConfiguredNamedMailTargetCached(store beads.Store, identifier string, cache *mailIdentitySessionCache) (resolvedMailTarget, bool, error) {
+func resolveLiveConfiguredNamedMailTargetCached(sessStore beads.Store, identifier string, cache *mailIdentitySessionCache) (resolvedMailTarget, bool, error) {
 	identifier = normalizeNamedSessionTarget(identifier)
-	if store == nil || identifier == "" || identifier == "human" || strings.Contains(identifier, "/") {
+	if sessStore == nil || identifier == "" || identifier == "human" || strings.Contains(identifier, "/") {
 		return resolvedMailTarget{}, false, nil
 	}
-	all, err := listMailIdentitySessions(store, cache)
+	all, err := listMailIdentitySessions(sessStore, cache)
 	if err != nil {
 		return resolvedMailTarget{}, false, err
 	}
@@ -1180,56 +1485,45 @@ func resolveLiveConfiguredNamedMailTargetCached(store beads.Store, identifier st
 	}
 }
 
-func resolveMailTargets(store beads.Store, identifier string) (resolvedMailTarget, error) {
-	return resolveMailTargetsCached(store, identifier, nil)
+func resolveMailTargets(sessStore beads.Store, identifier string) (resolvedMailTarget, error) {
+	return resolveMailTargetsCached(sessStore, identifier, nil)
 }
 
-func resolveMailTargetsWithConfig(cityPath string, cfg *config.City, store beads.Store, identifier string) (resolvedMailTarget, error) {
-	return resolveMailTargetsWithConfigCached(cityPath, cfg, store, identifier, nil)
+func resolveMailTargetsWithConfig(cityPath string, cfg *config.City, sessStore beads.Store, identifier string) (resolvedMailTarget, error) {
+	return resolveMailTargetsWithConfigCached(cityPath, cfg, sessStore, identifier, nil)
 }
 
-func resolveMailTargetsWithConfigCached(cityPath string, cfg *config.City, store beads.Store, identifier string, cache *mailIdentitySessionCache) (resolvedMailTarget, error) {
+func resolveMailTargetsWithConfigCached(cityPath string, cfg *config.City, sessStore beads.Store, identifier string, cache *mailIdentitySessionCache) (resolvedMailTarget, error) {
 	if normalized := normalizeNamedSessionTarget(identifier); normalized == "" || normalized == "human" {
 		return resolvedMailTarget{display: "human", recipients: []string{"human"}}, nil
 	}
-	if store != nil && cfg != nil {
-		// Route the session-ID resolve and the mailbox-identity bead read through
-		// the session coordination-class store so a [beads.classes.sessions]
-		// relocation reaches mail target resolution. Identity at the default
-		// backend. (Mirrors cmd_nudge's sessStore routing; the sibling resolvers
-		// resolveMailTargetsCached / resolveMailIdentityWithConfigCached carry the
-		// same pre-existing gap and are swept on the mail DI pass.)
-		sessStore := cliSessionStore(store, cfg, cityPath)
-		sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, identifier)
+	if sessStore != nil && cfg != nil {
+		// A session bead id resolves with one Get, and the mailbox is read off
+		// the bead it returns.
+		if info, ok, err := resolveExactSessionInfo(sessStore, identifier); err != nil {
+			return resolvedMailTarget{}, err
+		} else if ok {
+			return mailTargetFromSessionInfo(info, identifier)
+		}
+		sessionID, err := resolveSessionIDWithOptions(cityPath, cfg, sessStore, identifier, namedSessionResolveOptions{skipExactID: true})
 		if err == nil {
-			b, err := sessStore.Get(sessionID)
-			if err != nil {
-				return resolvedMailTarget{}, err
-			}
-			addresses := sessionMailboxAddresses(b)
-			if len(addresses) == 0 {
-				return resolvedMailTarget{}, fmt.Errorf("session %q has no mailbox identity", identifier)
-			}
-			return resolvedMailTarget{
-				display:    addresses[0],
-				recipients: addresses,
-			}, nil
+			return mailTargetFromSessionID(sessStore, sessionID, identifier)
 		}
 		if !errors.Is(err, session.ErrSessionNotFound) {
 			return resolvedMailTarget{}, err
 		}
 	}
-	return resolveMailTargetsCached(store, identifier, cache)
+	return resolveMailTargetsCached(sessStore, identifier, cache)
 }
 
-func resolveMailTargetsCached(store beads.Store, identifier string, cache *mailIdentitySessionCache) (resolvedMailTarget, error) {
+func resolveMailTargetsCached(sessStore beads.Store, identifier string, cache *mailIdentitySessionCache) (resolvedMailTarget, error) {
 	if normalized := normalizeNamedSessionTarget(identifier); normalized == "" || normalized == "human" {
 		return resolvedMailTarget{display: "human", recipients: []string{"human"}}, nil
 	}
-	sessionID, err := resolveSessionID(store, identifier)
+	sessionID, err := resolveSessionID(sessStore, identifier)
 	if err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
-			if target, matched, targetErr := resolveLiveConfiguredNamedMailTargetCached(store, identifier, cache); targetErr != nil {
+			if target, matched, targetErr := resolveLiveConfiguredNamedMailTargetCached(sessStore, identifier, cache); targetErr != nil {
 				return resolvedMailTarget{}, targetErr
 			} else if matched {
 				return target, nil
@@ -1240,80 +1534,148 @@ func resolveMailTargetsCached(store beads.Store, identifier string, cache *mailI
 		}
 		return resolvedMailTarget{}, err
 	}
-	addresses, err := session.NewStore(beads.SessionStore{Store: store}).MailboxAddresses(sessionID)
+	return mailTargetFromSessionID(sessStore, sessionID, identifier)
+}
+
+// mailTargetFromSessionID is the mailbox of the session a name resolved to:
+// read off its bead (mailTargetFromSessionInfo), so an inbox read of it answers
+// from its session inbox like a target resolved by id, rather than expanding
+// each of its addresses through whichever session holds that address now.
+func mailTargetFromSessionID(sessStore beads.Store, sessionID, identifier string) (resolvedMailTarget, error) {
+	info, _, err := session.ResolveSessionRecordByExactID(sessStore, sessionID)
 	if err != nil {
 		return resolvedMailTarget{}, err
 	}
-	if len(addresses) == 0 {
-		return resolvedMailTarget{}, fmt.Errorf("session %q has no mailbox identity", identifier)
-	}
-	return resolvedMailTarget{
-		display:    addresses[0],
-		recipients: addresses,
-	}, nil
+	return mailTargetFromSessionInfo(info, identifier)
 }
 
 func resolveMailTargetsForCommand(identifier string, stderr io.Writer, cmdName string) (resolvedMailTarget, bool) {
-	if normalized := normalizeNamedSessionTarget(identifier); normalized == "" || normalized == "human" {
-		return resolvedMailTarget{display: "human", recipients: []string{"human"}}, true
-	}
-	if isStorelessMailProvider() {
-		return resolveRawMailTargetForStorelessProvider(identifier, stderr, cmdName)
-	}
-	store, code := openCityStore(stderr, cmdName)
-	if store == nil {
-		_ = code
-		return resolvedMailTarget{}, false
-	}
-	cityPath, cfg := ambientMailTargetConfig()
-	target, err := resolveMailTargetsWithConfig(cityPath, cfg, store, identifier)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
-		return resolvedMailTarget{}, false
-	}
-	return target, true
+	target, err := lookupMailTarget(identifier)
+	return target, mailTargetLookupOK(err, stderr, cmdName)
 }
 
 // resolveDefaultMailTargetsForCommand tries each default identity candidate
-// against the city's bead store and returns the first that resolves. A
-// stale GC_ALIAS on a pool worker would otherwise block inbox access when
-// GC_SESSION_ID still matches the bead via session_name.
+// against the city's bead store and returns the first that resolves
+// (lookupDefaultMailTarget).
 func resolveDefaultMailTargetsForCommand(stderr io.Writer, cmdName string) (resolvedMailTarget, bool) {
+	target, err := lookupDefaultMailTarget()
+	return target, mailTargetLookupOK(err, stderr, cmdName)
+}
+
+// mailTargetLookupOK reports whether a mail target lookup succeeded. When it
+// did not, it prints the failure after the command's name, with the gc doctor
+// hint openCityStore gives a store that does not open.
+func mailTargetLookupOK(err error, stderr io.Writer, cmdName string) bool {
+	if err == nil {
+		return true
+	}
+	fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+	if errors.As(err, new(mailStoreOpenError)) {
+		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+	}
+	return false
+}
+
+// lookupMailTarget resolves identifier onto the mailbox it names, against the
+// city's bead store unless the mail provider bypasses it. Its error is the
+// failure the command reports.
+func lookupMailTarget(identifier string) (resolvedMailTarget, error) {
+	if normalized := normalizeNamedSessionTarget(identifier); normalized == "" || normalized == "human" {
+		return resolvedMailTarget{display: "human", recipients: []string{"human"}}, nil
+	}
+	if isStorelessMailProvider() {
+		return resolveRawMailTargetForStorelessProvider(identifier)
+	}
+	resolve, err := openMailTargetResolver()
+	if err != nil {
+		return resolvedMailTarget{}, err
+	}
+	return resolve(identifier, nil)
+}
+
+// lookupDefaultMailTarget resolves the caller's own mailbox: the first default
+// identity candidate (defaultMailIdentityCandidates) that names one. A stale
+// GC_ALIAS on a pool worker would otherwise block inbox access when
+// GC_SESSION_ID still matches the bead via session_name.
+func lookupDefaultMailTarget() (resolvedMailTarget, error) {
 	candidates := defaultMailIdentityCandidates()
 	if len(candidates) == 1 || isStorelessMailProvider() {
-		return resolveMailTargetsForCommand(candidates[0], stderr, cmdName)
+		return lookupMailTarget(candidates[0])
 	}
-	store, code := openCityStore(stderr, cmdName)
-	if store == nil {
-		_ = code
-		return resolvedMailTarget{}, false
+	resolve, err := openMailTargetResolver()
+	if err != nil {
+		return resolvedMailTarget{}, err
 	}
 	// Memoize the gc:session enumeration so multi-candidate retry shares one
 	// broad scan instead of issuing one per candidate (ga-q6ct Layer 2).
-	cityPath, cfg := ambientMailTargetConfig()
 	cache := &mailIdentitySessionCache{}
 	for _, c := range candidates {
-		target, err := resolveMailTargetsWithConfigCached(cityPath, cfg, store, c, cache)
+		target, err := resolve(c, cache)
 		if err == nil {
-			return target, true
+			return target, nil
 		}
 		if !errors.Is(err, session.ErrSessionNotFound) {
-			fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
-			return resolvedMailTarget{}, false
+			return resolvedMailTarget{}, err
 		}
 	}
-	fmt.Fprintf(stderr, "%s: no mail identity resolved (tried %v)\n", cmdName, candidates) //nolint:errcheck // best-effort stderr
-	return resolvedMailTarget{}, false
+	return resolvedMailTarget{}, noMailIdentityError{candidates: candidates}
 }
 
-func resolveDefaultMailSenderForCommand(cityPath string, cfg *config.City, store beads.Store, stderr io.Writer, cmdName string) (string, bool) {
-	return resolveDefaultMailSenderForCommandCached(cityPath, cfg, store, stderr, cmdName, nil)
+// lookupMailTargetFromArgs resolves a mail command's target: args[0] when
+// given, else the caller's own mailbox.
+func lookupMailTargetFromArgs(args []string) (resolvedMailTarget, error) {
+	if len(args) > 0 {
+		return lookupMailTarget(args[0])
+	}
+	return lookupDefaultMailTarget()
 }
 
-func resolveDefaultMailSenderForCommandCached(cityPath string, cfg *config.City, store beads.Store, stderr io.Writer, cmdName string, cache *mailIdentitySessionCache) (string, bool) {
+// openMailTargetResolver opens the city's bead store for mail target lookups
+// as openCityStore does, returning the failure instead of printing it, and
+// returns a resolver over the store's session class. The resolver shares
+// cache's gc:session enumeration across calls; a nil cache disables it.
+func openMailTargetResolver() (func(identifier string, cache *mailIdentitySessionCache) (resolvedMailTarget, error), error) {
+	cityPath, err := resolveCity()
+	if err != nil {
+		return nil, err
+	}
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		return nil, mailStoreOpenError{err: err}
+	}
+	_, cfg := ambientMailTargetConfig()
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	return func(identifier string, cache *mailIdentitySessionCache) (resolvedMailTarget, error) {
+		return resolveMailTargetsWithConfigCached(cityPath, cfg, sessStore, identifier, cache)
+	}, nil
+}
+
+// mailStoreOpenError is the city's bead store failing to open for a mail
+// target lookup.
+type mailStoreOpenError struct{ err error }
+
+func (e mailStoreOpenError) Error() string { return e.err.Error() }
+
+func (e mailStoreOpenError) Unwrap() error { return e.err }
+
+// noMailIdentityError is no default identity candidate naming a mailbox. It
+// matches session.ErrSessionNotFound.
+type noMailIdentityError struct{ candidates []string }
+
+func (e noMailIdentityError) Error() string {
+	return fmt.Sprintf("no mail identity resolved (tried %v)", e.candidates)
+}
+
+func (noMailIdentityError) Unwrap() error { return session.ErrSessionNotFound }
+
+func resolveDefaultMailSenderForCommand(cityPath string, cfg *config.City, sessStore beads.Store, stderr io.Writer, cmdName string) (string, bool) {
+	return resolveDefaultMailSenderForCommandCached(cityPath, cfg, sessStore, stderr, cmdName, nil)
+}
+
+func resolveDefaultMailSenderForCommandCached(cityPath string, cfg *config.City, sessStore beads.Store, stderr io.Writer, cmdName string, cache *mailIdentitySessionCache) (string, bool) {
 	candidates := defaultMailIdentityCandidates()
 	for _, c := range candidates {
-		sender, err := resolveMailIdentityWithConfigCached(cityPath, cfg, store, c, cache)
+		sender, err := resolveMailIdentityWithConfigCached(cityPath, cfg, sessStore, c, cache)
 		if err == nil {
 			return sender, true
 		}
@@ -1326,6 +1688,52 @@ func resolveDefaultMailSenderForCommandCached(cityPath string, cfg *config.City,
 	return "", false
 }
 
+// callerOwnMailIdentityCached resolves the calling session's own identity
+// the same way the default (--from-less) sender path does
+// (resolveDefaultMailSenderForCommandCached), but silently -- for callers
+// that only need the identity for an authorization comparison, not to
+// report a user-facing "no sender identity resolved" error.
+func callerOwnMailIdentityCached(cityPath string, cfg *config.City, store beads.Store, cache *mailIdentitySessionCache) (string, bool) {
+	for _, c := range defaultMailIdentityCandidates() {
+		sender, err := resolveMailIdentityWithConfigCached(cityPath, cfg, store, c, cache)
+		if err == nil {
+			return sender, true
+		}
+		if !errors.Is(err, session.ErrSessionNotFound) {
+			return "", false
+		}
+	}
+	return "", false
+}
+
+// mailSenderAuthorizedCached reports whether the calling session may claim
+// resolvedSender as its --from identity (#4070). Neither reserved bucket is
+// exempt: "human" is the operator's identity and "controller" is a
+// structured sender identity, so a live agent claiming either forges
+// authority exactly as claiming a coordinator's mailbox would. A caller
+// with no live-session env vars set at all (own identity resolves to
+// "human": an interactive terminal user, or an exec order, whose inherited
+// session identity gc removes) may claim any sender -- this keeps
+// scripted "--from controller" automation such as
+// examples/bd/dolt/commands/compact/run.sh working. A caller whose own env
+// vars are set but don't resolve to any live session fails closed rather
+// than let an unresolvable identity dodge the check.
+//
+// This is a guard against a session accidentally or naively claiming
+// another identity, not authentication: the caller's own identity comes
+// from its GC_SESSION_ID/GC_ALIAS/GC_AGENT environment, which the caller
+// controls, and mail is a plain bead any store writer can create.
+func mailSenderAuthorizedCached(cityPath string, cfg *config.City, store beads.Store, resolvedSender string, cache *mailIdentitySessionCache) bool {
+	own, ok := callerOwnMailIdentityCached(cityPath, cfg, store, cache)
+	if !ok {
+		return false
+	}
+	if own == "human" {
+		return true
+	}
+	return resolvedSender == own
+}
+
 func resolveMailTargetFromArgs(args []string, stderr io.Writer, cmdName string) (resolvedMailTarget, bool) {
 	if len(args) > 0 {
 		return resolveMailTargetsForCommand(args[0], stderr, cmdName)
@@ -1333,29 +1741,27 @@ func resolveMailTargetFromArgs(args []string, stderr io.Writer, cmdName string) 
 	return resolveDefaultMailTargetsForCommand(stderr, cmdName)
 }
 
-func resolveRawMailTargetForStorelessProvider(identifier string, stderr io.Writer, cmdName string) (resolvedMailTarget, bool) {
-	if !isStorelessMailProvider() {
-		return resolvedMailTarget{}, false
-	}
+// resolveRawMailTargetForStorelessProvider resolves identifier for a mail
+// provider that bypasses the city bead store: the session it names when the
+// city has a store that knows one, else the identifier as given.
+func resolveRawMailTargetForStorelessProvider(identifier string) (resolvedMailTarget, error) {
+	asGiven := resolvedMailTarget{display: identifier, recipients: []string{identifier}}
 	store, err := openMailTargetStore()
 	if err != nil {
 		if isNoCityStoreError(err) {
-			return resolvedMailTarget{display: identifier, recipients: []string{identifier}}, true
+			return asGiven, nil
 		}
-		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
-		return resolvedMailTarget{}, false
+		return resolvedMailTarget{}, err
 	}
-	if err == nil && store != nil {
-		target, resolveErr := resolveMailTargets(store, identifier)
-		if resolveErr == nil {
-			return target, true
-		}
-		if !errors.Is(resolveErr, session.ErrSessionNotFound) {
-			fmt.Fprintf(stderr, "%s: %v\n", cmdName, resolveErr) //nolint:errcheck // best-effort stderr
-			return resolvedMailTarget{}, false
-		}
+	if store == nil {
+		return asGiven, nil
 	}
-	return resolvedMailTarget{display: identifier, recipients: []string{identifier}}, true
+	cityPath, cfg := ambientMailTargetConfig()
+	target, err := resolveMailTargets(cliSessionStore(store, cfg, cityPath), identifier)
+	if errors.Is(err, session.ErrSessionNotFound) {
+		return asGiven, nil
+	}
+	return target, err
 }
 
 func isNoCityStoreError(err error) bool {
@@ -1385,13 +1791,23 @@ func resolveMailAddressForCommand(identifier string, stderr io.Writer, cmdName s
 }
 
 func collectMailMessages(fetch func(string) ([]mail.Message, error), recipients []string) ([]mail.Message, error) {
-	seen := map[string]mail.Message{}
-	order := make([]string, 0, len(recipients))
+	sets := make([][]mail.Message, 0, len(recipients))
 	for _, recipient := range recipients {
 		messages, err := fetch(recipient)
 		if err != nil {
 			return nil, err
 		}
+		sets = append(sets, messages)
+	}
+	return mergeMailByArrival(sets...), nil
+}
+
+// mergeMailByArrival unions message sets by id — a later copy of a message
+// replaces an earlier one — ordered oldest first, ties by id.
+func mergeMailByArrival(sets ...[]mail.Message) []mail.Message {
+	seen := map[string]mail.Message{}
+	var order []string
+	for _, messages := range sets {
 		for _, message := range messages {
 			if _, ok := seen[message.ID]; !ok {
 				order = append(order, message.ID)
@@ -1409,7 +1825,7 @@ func collectMailMessages(fetch func(string) ([]mail.Message, error), recipients 
 		}
 		return result[i].CreatedAt.Before(result[j].CreatedAt)
 	})
-	return result, nil
+	return result
 }
 
 func collectMailCounts(count func(string) (int, int, error), recipients []string) (int, int, error) {
@@ -1438,6 +1854,7 @@ func newMailSendCmd(stdout, stderr io.Writer) *cobra.Command {
 	var subject string
 	var message string
 	var jsonOut bool
+	var dedupKey string
 	cmd := &cobra.Command{
 		Use:   "send [<to>] [<body>]",
 		Short: "Send a message to a session alias or human",
@@ -1450,22 +1867,28 @@ a non-running recipient. Unread mail alone does not request a wake.
 Use --from to override the sender identity.
 Use --to as an alternative to the positional <to> argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
-Use --all to broadcast to all live sessions (excluding sender and "human").`,
+Use --all to broadcast to all live sessions (excluding sender and "human").
+
+Use --dedup <key> for repeating notifications (patrol and cooldown orders
+that re-detect the same condition every run): the send is suppressed while
+a previous message with the same key is still live (un-archived) in the same
+mailbox, and an alias and the session behind it count as one mailbox.
+Suppression exits 0. Once the recipient archives the message the stream may
+alert again; senders that want a longer re-alert cadence keep their own
+last-sent state. Dedup needs a provider that can query its own message
+history. The built-in provider can; one that cannot sends normally and says
+so on stderr, because a duplicate notification beats a dropped one.`,
 		Example: `  gc mail send mayor "Build is green"
   gc mail send mayor -s "Build is green"
-  gc mail send myrig/witness -s "Need investigation" -m "Attach logs from the last failed run"
+  gc mail send myrig/reviewer -s "Need investigation" -m "Attach logs from the last failed run"
   gc mail send --to mayor "Build is green"
   gc mail send human "Review needed for PR #42"
-  gc mail send polecat "Priority task" --notify
-  gc mail send --all "Status update: tests passing"`,
+  gc mail send worker "Priority task" --notify
+  gc mail send --all "Status update: tests passing"
+  gc mail send worker -s "disk warning" --dedup "disk-warn:hq"`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
-			code := 0
-			if jsonOut {
-				code = cmdMailSendJSON(args, notify, all, from, to, subject, message, true, stdout, stderr)
-			} else {
-				code = cmdMailSend(args, notify, all, from, to, subject, message, stdout, stderr)
-			}
+			code := cmdMailSendJSON(args, notify, all, from, to, subject, message, dedupKey, jsonOut, stdout, stderr)
 			if code != 0 {
 				return errExit
 			}
@@ -1481,7 +1904,9 @@ Use --all to broadcast to all live sessions (excluding sender and "human").`,
 	cmd.Flags().StringVarP(&subject, "subject", "s", "", "message subject line")
 	cmd.Flags().StringVarP(&message, "message", "m", "", "message body text")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL result")
+	cmd.Flags().StringVar(&dedupKey, "dedup", "", "suppress the send while a live message with this dedup key is in the same mailbox (provider permitting)")
 	cmd.MarkFlagsMutuallyExclusive("to", "all")
+	cmd.MarkFlagsMutuallyExclusive("dedup", "all")
 	return cmd
 }
 
@@ -1589,10 +2014,14 @@ Use -s/--subject for the reply subject and -m/--message for the reply body.`,
 func newMailMarkReadCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
-		Use:   "mark-read <id>",
-		Short: "Mark a message as read",
-		Long:  `Mark a message as read without displaying it. The message will no longer appear in inbox results.`,
-		Args:  cobra.ArbitraryArgs,
+		Use:   "mark-read <id>...",
+		Short: "Mark one or more messages as read",
+		Long: `Mark one or more messages as read without displaying them. They will no
+longer appear in inbox results. When multiple IDs are passed (as separate
+arguments, or as one whitespace-separated argument such as an unsplit "$IDS"),
+each is marked in input order; a failure on one is reported and the rest are
+still marked.`,
+		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			code := 0
 			if jsonOut {
@@ -1700,11 +2129,17 @@ The recipient defaults to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human".`,
 // cmdMailSend is the CLI entry point for sending mail. It opens the provider,
 // resolves session mailbox identities, and delegates to doMailSend.
 // The to parameter is the --to flag value (empty if not set).
+//
+//nolint:unparam // test-only CLI shim; notify/all are exercised via cmdMailSendJSON from the cobra command
 func cmdMailSend(args []string, notify bool, all bool, from string, to string, subject string, message string, stdout, stderr io.Writer) int {
-	return cmdMailSendJSON(args, notify, all, from, to, subject, message, false, stdout, stderr)
+	return cmdMailSendJSON(args, notify, all, from, to, subject, message, "", false, stdout, stderr)
 }
 
-func cmdMailSendJSON(args []string, notify bool, all bool, from string, to string, subject string, message string, jsonOut bool, stdout, stderr io.Writer) int {
+// cmdMailSendJSON is cmdMailSend with the dedup key and JSON-output controls
+// exposed. A non-empty dedupKey routes the send through the provider's
+// [mail.DedupSender] capability so a repeating notifier keeps at most one live
+// copy; an empty dedupKey sends unconditionally.
+func cmdMailSendJSON(args []string, notify bool, all bool, from string, to string, subject string, message string, dedupKey string, jsonOut bool, stdout, stderr io.Writer) int {
 	mp, code := openCityMailProvider(stderr, "gc mail send")
 	if mp == nil {
 		return code
@@ -1727,35 +2162,69 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 		fmt.Fprintf(stderr, "gc mail send: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// Every read below is session-class (live-mailbox enumeration, sender and
+	// recipient identity), so route once here; the resolvers take the routed
+	// store. store itself stays the work store for the nudge path.
+	var sessStore beads.Store
+	if store != nil {
+		sessStore = cliSessionStore(store, cfg, cityPath)
+	}
 	// Memoize the gc:session enumeration so identity resolution (sender +
 	// recipient + listLiveSessionMailboxes) shares one broad scan instead of
 	// issuing one per call site (ga-q6ct Layer 3).
 	idCache := &mailIdentitySessionCache{}
 	if store != nil {
-		validRecipients, err = listLiveSessionMailboxesCached(store, idCache)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc mail send: listing live sessions: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
+		if all {
+			// A broadcast is addressed to every live mailbox, so it needs them all.
+			validRecipients, err = listLiveSessionMailboxesCached(sessStore, idCache)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc mail send: listing live sessions: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+		} else {
+			// One recipient is valid exactly when it resolves below, which
+			// admits it; enumerating every live session first validated
+			// nothing more.
+			validRecipients = map[string]bool{"human": true}
 		}
 	}
 
 	sender := from
 	if sender == "" {
 		if store != nil {
-			var ok bool
-			sender, ok = resolveDefaultMailSenderForCommandCached(cityPath, cfg, store, stderr, "gc mail send", idCache)
-			if !ok {
+			// The calling session resolves from its own bead id with one Get,
+			// and the provider sends from it without resolving the address
+			// again. Without that id, the default candidates resolve as before.
+			identity, resolved, err := resolveHookIdentity(sessStore)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc mail send: invalid sender %q: %v\n", os.Getenv("GC_SESSION_ID"), err) //nolint:errcheck // best-effort stderr
 				return 1
+			}
+			if resolved && identity.mailboxAddress() != "" {
+				sender = identity.mailboxAddress()
+				identity.pinSender(mp)
+			} else {
+				var ok bool
+				sender, ok = resolveDefaultMailSenderForCommandCached(cityPath, cfg, sessStore, stderr, "gc mail send", idCache)
+				if !ok {
+					return 1
+				}
 			}
 		} else {
 			sender = defaultMailIdentity()
 		}
-	} else if sender != "human" && store != nil {
-		sender, err = resolveMailIdentityWithConfigCached(cityPath, cfg, store, sender, idCache)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc mail send: invalid sender %q: %v\n", sender, err) //nolint:errcheck // best-effort stderr
+	} else if store != nil {
+		requested := sender
+		resolved, resolveErr := resolveMailIdentityWithConfigCached(cityPath, cfg, sessStore, requested, idCache)
+		if resolveErr != nil {
+			fmt.Fprintf(stderr, "gc mail send: invalid sender %q: %v\n", requested, resolveErr) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		if !mailSenderAuthorizedCached(cityPath, cfg, sessStore, resolved, idCache) {
+			fmt.Fprintf(stderr, "gc mail send: --from %q does not match this session's own identity\n", requested) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		sender = resolved
 	}
 
 	var nf nudgeFunc
@@ -1789,7 +2258,7 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 		}
 	}
 	if !all && len(args) > 0 && store != nil {
-		canonicalTo, err := resolveMailRecipientIdentityCached(cityPath, cfg, store, args[0], idCache)
+		canonicalTo, err := resolveMailRecipientIdentityCached(cityPath, cfg, sessStore, args[0], idCache)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc mail send: unknown recipient %q: %v\n", args[0], err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -1806,17 +2275,21 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 	}
 
 	rec := openCityRecorder(stderr)
-	return doMailSendJSON(mp, rec, validRecipients, sender, args, nf, jsonOut, stdout, stderr)
+	return doMailSendJSON(mp, rec, validRecipients, sender, args, nf, dedupKey, jsonOut, stdout, stderr)
 }
 
 // doMailSend creates a message addressed to a recipient. args is [to, subject, body]
 // or [to, body] (subject="" if no -s flag). When nudgeFn is non-nil, the
 // recipient is nudged after message creation (skipped for "human").
 func doMailSend(mp mail.Provider, rec events.Recorder, validRecipients map[string]bool, sender string, args []string, nudgeFn nudgeFunc, stdout, stderr io.Writer) int {
-	return doMailSendJSON(mp, rec, validRecipients, sender, args, nudgeFn, false, stdout, stderr)
+	return doMailSendJSON(mp, rec, validRecipients, sender, args, nudgeFn, "", false, stdout, stderr)
 }
 
-func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[string]bool, sender string, args []string, nudgeFn nudgeFunc, jsonOut bool, stdout, stderr io.Writer) int {
+// doMailSendJSON is doMailSend with the JSON-output and dedup controls exposed.
+// A non-empty dedupKey routes through the provider's [mail.DedupSender]
+// capability; providers without it fall back to a plain send (fail-open, since
+// a duplicate notification beats a silently dropped one).
+func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[string]bool, sender string, args []string, nudgeFn nudgeFunc, dedupKey string, jsonOut bool, stdout, stderr io.Writer) int {
 	if len(args) < 2 {
 		fmt.Fprintln(stderr, "gc mail send: usage: gc mail send <to> <body>  OR  gc mail send <to> -s <subject> [-m <body>]") //nolint:errcheck // best-effort stderr
 		return 1
@@ -1838,11 +2311,35 @@ func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[s
 		return 1
 	}
 
-	m, err := mp.Send(sender, to, subject, body)
+	var (
+		m          mail.Message
+		suppressed bool
+		err        error
+	)
+	if dedupKey != "" {
+		if ds, ok := mp.(mail.DedupSender); ok {
+			m, suppressed, err = ds.SendDeduped(sender, to, subject, body, dedupKey)
+		} else {
+			fmt.Fprintln(stderr, "gc mail send: mail provider does not support --dedup; sending without dedup") //nolint:errcheck // best-effort stderr
+			m, err = mp.Send(sender, to, subject, body)
+		}
+	} else {
+		m, err = mp.Send(sender, to, subject, body)
+	}
 	telemetry.RecordMailOp(context.Background(), "send", err)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc mail send: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if suppressed {
+		// Nothing was created: no mail.sent event, no nudge — the point of
+		// dedup is that the recipient was already notified by m.
+		if jsonOut {
+			summary := summarizeMailMessage(m)
+			return writeCLIJSONLineOrExit(stdout, stderr, "gc mail send", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.send", Action: "send", ID: m.ID, Message: &summary, AlreadyDone: true, Count: intRef(0)})
+		}
+		fmt.Fprintf(stdout, "Suppressed duplicate of %s to %s (dedup key %q)\n", m.ID, to, dedupKey) //nolint:errcheck // best-effort stdout
+		return 0
 	}
 	rec.Record(events.Event{
 		Type:    events.MailSent,
@@ -1851,22 +2348,25 @@ func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[s
 		Message: to,
 		Payload: mailEventPayload(&m),
 	})
+	// escalate.sh's send timeout reads this line as proof the mail was written, so it precedes the nudge.
 	if !jsonOut {
 		fmt.Fprintf(stdout, "Sent message %s to %s\n", m.ID, to) //nolint:errcheck // best-effort stdout
 	}
 
 	// Nudge recipient if requested and recipient is not human.
 	notified := false
+	var notifyOps []string
 	if nudgeFn != nil && to != "human" {
-		if err := nudgeFn(to); err != nil {
+		if opID, err := nudgeFn(to, m.ID); err != nil {
 			fmt.Fprintf(stderr, "gc mail send: nudge failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		} else {
 			notified = true
+			notifyOps = appendNotifyOp(notifyOps, opID)
 		}
 	}
 	if jsonOut {
 		summary := summarizeMailMessage(m)
-		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail send", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.send", Action: "send", ID: m.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1), Notified: notified})
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail send", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.send", Action: "send", ID: m.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1), Notified: notified, NotifyOpIDs: notifyOps})
 	}
 	return 0
 }
@@ -1907,6 +2407,7 @@ func doMailSendAllJSON(mp mail.Provider, rec events.Recorder, validRecipients ma
 	}
 
 	var sent []mailMessageSummary
+	var notifyOps []string
 	notified := false
 	for _, to := range recipients {
 		m, err := mp.Send(sender, to, subject, body)
@@ -1927,15 +2428,16 @@ func doMailSendAllJSON(mp mail.Provider, rec events.Recorder, validRecipients ma
 		}
 
 		if nudgeFn != nil {
-			if err := nudgeFn(to); err != nil {
+			if opID, err := nudgeFn(to, m.ID); err != nil {
 				fmt.Fprintf(stderr, "gc mail send --all: nudge %s failed: %v\n", to, err) //nolint:errcheck // best-effort stderr
 			} else {
 				notified = true
+				notifyOps = appendNotifyOp(notifyOps, opID)
 			}
 		}
 	}
 	if jsonOut {
-		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail send", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.send", Action: "send", Messages: sent, Count: intRef(len(sent)), Notified: notified})
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail send", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.send", Action: "send", Messages: sent, Count: intRef(len(sent)), Notified: notified, NotifyOpIDs: notifyOps})
 	}
 	return 0
 }
@@ -1973,7 +2475,14 @@ func doMailInboxTarget(mp mailInboxReader, target resolvedMailTarget, stdout, st
 }
 
 func doMailInboxTargetWithJSON(mp mailInboxReader, target resolvedMailTarget, jsonOut bool, stdout, stderr io.Writer) int {
-	messages, err := collectMailMessages(mp.Inbox, target.recipients)
+	var messages []mail.Message
+	inbox, ok, err := sessionInboxForTarget(mp, target)
+	switch {
+	case ok && err == nil:
+		messages = inbox.Unread()
+	case !ok:
+		messages, err = collectMailMessages(mp.Inbox, target.recipients)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "gc mail inbox: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -2212,7 +2721,7 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 		}
 		if sender != "human" {
 			if store != nil {
-				resolved, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, store, stderr, "gc mail reply")
+				resolved, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr, "gc mail reply")
 				if !ok {
 					return 1
 				}
@@ -2261,16 +2770,18 @@ func doMailReplyJSON(mp mail.Provider, rec events.Recorder, id, sender, subject,
 	}
 
 	notified := false
+	var notifyOps []string
 	if nudgeFn != nil && reply.To != "human" {
-		if err := nudgeFn(reply.To); err != nil {
+		if opID, err := nudgeFn(reply.To, reply.ID); err != nil {
 			fmt.Fprintf(stderr, "gc mail reply: nudge failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		} else {
 			notified = true
+			notifyOps = appendNotifyOp(notifyOps, opID)
 		}
 	}
 	if jsonOut {
 		summary := summarizeMailMessage(reply)
-		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail reply", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.reply", Action: "reply", ID: reply.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1), Notified: notified})
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail reply", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.reply", Action: "reply", ID: reply.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1), Notified: notified, NotifyOpIDs: notifyOps})
 	}
 	return 0
 }
@@ -2295,28 +2806,46 @@ func doMailMarkRead(mp mail.Provider, rec events.Recorder, args []string, stdout
 }
 
 func doMailMarkReadJSON(mp mail.Provider, rec events.Recorder, args []string, jsonOut bool, stdout, stderr io.Writer) int {
-	if len(args) < 1 {
+	// Split like archive does: a shell can hand over "$IDS" as one argument,
+	// which used to be looked up as a single id and fail "not found".
+	ids := splitMessageIDArgs(args)
+	if len(ids) < 1 {
 		fmt.Fprintln(stderr, "gc mail mark-read: missing message ID") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	id := args[0]
-	if err := mp.MarkRead(id); err != nil {
-		telemetry.RecordMailOp(context.Background(), "mark_read", err)
-		fmt.Fprintf(stderr, "gc mail mark-read: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+	exit := 0
+	marked := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if err := mp.MarkRead(id); err != nil {
+			telemetry.RecordMailOp(context.Background(), "mark_read", err)
+			if len(ids) > 1 {
+				fmt.Fprintf(stderr, "gc mail mark-read %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
+			} else {
+				fmt.Fprintf(stderr, "gc mail mark-read: %v\n", err) //nolint:errcheck // best-effort stderr
+			}
+			exit = 1
+			continue
+		}
+		telemetry.RecordMailOp(context.Background(), "mark_read", nil)
+		rec.Record(events.Event{
+			Type:    events.MailMarkedRead,
+			Actor:   eventActor(),
+			Subject: id,
+			Payload: mailEventPayload(nil),
+		})
+		marked = append(marked, id)
+		if !jsonOut {
+			fmt.Fprintf(stdout, "Marked %s as read\n", id) //nolint:errcheck // best-effort stdout
+		}
 	}
-	telemetry.RecordMailOp(context.Background(), "mark_read", nil)
-	rec.Record(events.Event{
-		Type:    events.MailMarkedRead,
-		Actor:   eventActor(),
-		Subject: id,
-		Payload: mailEventPayload(nil),
-	})
-	if jsonOut {
-		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail mark-read", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.mark-read", Action: "mark-read", ID: id, IDs: []string{id}, Count: intRef(1)})
+	if jsonOut && exit == 0 {
+		result := mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.mark-read", Action: "mark-read", IDs: marked, Count: intRef(len(marked))}
+		if len(marked) == 1 {
+			result.ID = marked[0]
+		}
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail mark-read", result)
 	}
-	fmt.Fprintf(stdout, "Marked %s as read\n", id) //nolint:errcheck // best-effort stdout
-	return 0
+	return exit
 }
 
 // cmdMailMarkUnread marks a message as unread.
@@ -2386,6 +2915,7 @@ func doMailDelete(mp mail.Provider, rec events.Recorder, args []string, stdout, 
 }
 
 func doMailDeleteJSON(mp mail.Provider, rec events.Recorder, args []string, jsonOut bool, stdout, stderr io.Writer) int {
+	args = splitMessageIDArgs(args)
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc mail delete: missing message ID") //nolint:errcheck // best-effort stderr
 		return 1
@@ -2572,17 +3102,26 @@ var mailCountAPIClient = func(cityPath string) (*api.Client, string) {
 
 // routeMailCount dispatches `mail count` to the supervisor API when a
 // controller is up; otherwise falls back to the local mail-provider path.
+// The API route first resolves the target the way the local route does and
+// asks the supervisor about that mailbox (resolveMailAPITarget), so both
+// routes print and count the same recipient. A target that does not resolve
+// takes the local path, which reports the resolver's error.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeMailCount(_ string, args []string, c *api.Client, nilReason string, jsonOut bool, stdout, stderr io.Writer) int {
-	recipient := defaultMailIdentity()
-	if len(args) > 0 {
-		recipient = strings.TrimSpace(args[0])
+	var at mailAPITarget
+	if c != nil {
+		var ok bool
+		if at, ok = resolveMailAPITarget(args); !ok {
+			c, nilReason = nil, mailRouteReasonRecipientUnresolved
+		} else {
+			logMailTargetUnverified(stderr, "gc mail count", at)
+		}
 	}
 	var cr api.CachedRead[api.MailCountView]
 	return routeRead(c, "mail count", nilReason, stderr,
 		func() error {
 			var err error
-			if cr, err = c.CountMail(recipient, ""); err != nil {
+			if cr, err = c.CountMail(at.identity, ""); err != nil {
 				return err
 			}
 			if mailCountHasPartial(cr.Body) {
@@ -2591,20 +3130,9 @@ func routeMailCount(_ string, args []string, c *api.Client, nilReason string, js
 			return nil
 		},
 		func() int {
-			if jsonOut {
-				if err := writeCLIJSONLine(stdout, mailCountJSONResult{
-					SchemaVersion: "1",
-					Recipient:     recipient,
-					Recipients:    []string{recipient},
-					Total:         cr.Body.Total,
-					Unread:        cr.Body.Unread,
-				}); err != nil {
-					fmt.Fprintf(stderr, "gc mail count: %v\n", err) //nolint:errcheck
-					return 1
-				}
-				return 0
+			if code := writeMailCountResult(at.target, cr.Body.Total, cr.Body.Unread, jsonOut, stdout, stderr); code != 0 || jsonOut {
+				return code
 			}
-			fmt.Fprintf(stdout, "%d total, %d unread for %s\n", cr.Body.Total, cr.Body.Unread, recipient) //nolint:errcheck // best-effort stdout
 			if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
 				fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
 			}
@@ -2612,6 +3140,26 @@ func routeMailCount(_ string, args []string, c *api.Client, nilReason string, js
 		},
 		func() int { return doMailCountFallback(args, jsonOut, stdout, stderr) },
 	)
+}
+
+// writeMailCountResult prints a `gc mail count` result for target on either
+// route: the JSON object, or the "N total, M unread for <mailbox>" line.
+func writeMailCountResult(target resolvedMailTarget, total, unread int, jsonOut bool, stdout, stderr io.Writer) int {
+	if jsonOut {
+		if err := writeCLIJSONLine(stdout, mailCountJSONResult{
+			SchemaVersion: "1",
+			Recipient:     target.display,
+			Recipients:    jsonRecipients(target),
+			Total:         total,
+			Unread:        unread,
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc mail count: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		return 0
+	}
+	fmt.Fprintf(stdout, "%d total, %d unread for %s\n", total, unread, target.display) //nolint:errcheck // best-effort stdout
+	return 0
 }
 
 // doMailCountFallback is the direct-bd path for `gc mail count`.
@@ -2638,10 +3186,19 @@ func doMailCountTarget(mp mail.Provider, target resolvedMailTarget, stdout, stde
 	return doMailCountTargetWithJSON(mp, target, false, stdout, stderr)
 }
 
+// doMailCountTargetWithJSON counts the target's mail. A target resolved from
+// its own session bead is counted from its session inbox
+// (sessionInboxForTarget), the mailbox every other self-read and the API's
+// count answer from; any other target or provider is counted recipient by
+// recipient.
 func doMailCountTargetWithJSON(mp mail.Provider, target resolvedMailTarget, jsonOut bool, stdout, stderr io.Writer) int {
 	var total, unread int
-	var err error
-	if counter, ok := mp.(multiRecipientMailCounter); ok {
+	inbox, fromInbox, err := sessionInboxForTarget(mp, target)
+	if fromInbox {
+		if err == nil {
+			total, unread = inbox.Counts()
+		}
+	} else if counter, ok := mp.(multiRecipientMailCounter); ok {
 		total, unread, err = counter.CountRecipients(target.recipients)
 	} else {
 		total, unread, err = collectMailCounts(mp.Count, target.recipients)
@@ -2650,21 +3207,7 @@ func doMailCountTargetWithJSON(mp mail.Provider, target resolvedMailTarget, json
 		fmt.Fprintf(stderr, "gc mail count: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if jsonOut {
-		if err := writeCLIJSONLine(stdout, mailCountJSONResult{
-			SchemaVersion: "1",
-			Recipient:     target.display,
-			Recipients:    jsonRecipients(target),
-			Total:         total,
-			Unread:        unread,
-		}); err != nil {
-			fmt.Fprintf(stderr, "gc mail count: %v\n", err) //nolint:errcheck
-			return 1
-		}
-		return 0
-	}
-	fmt.Fprintf(stdout, "%d total, %d unread for %s\n", total, unread, target.display) //nolint:errcheck // best-effort stdout
-	return 0
+	return writeMailCountResult(target, total, unread, jsonOut, stdout, stderr)
 }
 
 func jsonRecipients(target resolvedMailTarget) []string {

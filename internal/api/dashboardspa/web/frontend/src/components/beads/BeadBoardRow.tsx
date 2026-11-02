@@ -14,13 +14,30 @@ interface BeadBoardRowProps {
   node: BeadNode;
   selected: boolean;
   attentionSeverity?: BadgeSeverity | null;
+  /**
+   * Compact liveness note for in-progress rows (gp-6xd): the waiting/stalled
+   * reason, or `assignee · active Nm ago`. Rendered on its own label line so
+   * the operator reads who holds the bead and whether they are alive without
+   * opening the modal.
+   */
+  note?: string | null;
   onSelect: (beadId: string) => void;
+}
+
+// The note inherits the row's attention tone: maroon for attention
+// (stalled), warm for watch (waiting), quiet otherwise (a healthy
+// assignee · activity line) — the DESIGN.md anomaly-color rule.
+function noteTone(severity: BadgeSeverity | null): string {
+  if (severity === 'attention') return 'text-accent';
+  if (severity === 'watch') return 'text-warn';
+  return 'text-fg-faint';
 }
 
 export function BeadBoardRow({
   node,
   selected,
   attentionSeverity = null,
+  note = null,
   onSelect,
 }: BeadBoardRowProps) {
   const { bead, deps, blocks, hasUnresolvedDeps } = node;
@@ -81,6 +98,15 @@ export function BeadBoardRow({
             <span className="normal-case tracking-normal text-warn">unresolved</span>
           )}
         </span>
+        {note !== null && note.length > 0 && (
+          <span
+            className={`block pl-4 mt-0.5 text-label normal-case tracking-normal ${noteTone(
+              attentionSeverity,
+            )}`}
+          >
+            {note}
+          </span>
+        )}
       </button>
     </li>
   );

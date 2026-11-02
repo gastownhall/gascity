@@ -260,16 +260,19 @@ func TestWebhookOrderDispatchTrackingBeadLandsInTheOrdersBinding(t *testing.T) {
 	}
 }
 
-// TestOrderDispatchGateFederatesTheOrdersBindingExactlyOnce pins the read half
-// of the single-flight gate.
+// TestOrderDispatchGateReadsTheBindingAloneOnASplitCity pins the read half of
+// the single-flight gate.
 //
 // The gate, the cooldown clock and the event cursor all read order-run evidence,
-// and after this change the tracking bead carrying it is in the binding. The
-// federation must therefore include the binding — and must include it ONCE: on
-// the whole-split shape this build serves, the graph class and the orders class
-// are the same binding, and appending it twice would read one database twice on
-// every gate of every order on every tick.
-func TestOrderDispatchGateFederatesTheOrdersBindingExactlyOnce(t *testing.T) {
+// and a dispatch writes that evidence through ordersStoreFor/graphStoreFor — so
+// on a split city it is in the binding. The federation must therefore include
+// the binding, ONCE (the whole-split shape serves both classes from one
+// database, and appending it twice reads it twice per order per tick) — and must
+// include NOTHING ELSE: the order's target scope is a work ledger that cannot
+// hold the answer, and reading it per order per tick was most of the 86s
+// dispatch_orders leg on maintainer-city (ga-l7jdg; bd memory
+// gascity-runtime-infra-store-invariant).
+func TestOrderDispatchGateReadsTheBindingAloneOnASplitCity(t *testing.T) {
 	cityPath, cfg, a := newExecOrderFixture(t)
 	workStore := beads.NewMemStore()
 	binding := beads.NewMemStore()
@@ -282,12 +285,15 @@ func TestOrderDispatchGateFederatesTheOrdersBindingExactlyOnce(t *testing.T) {
 		t.Fatalf("ordersStoreFor = %T(%p), want the binding %p; the tracking bead's own store is not in the gate's reach", got, got, binding)
 	}
 
-	storesForGate, storeKeysForGate := m.gateStoresFor(cityPath, workStore, "city\x00"+cityPath, nil)
+	storesForGate, storeKeysForGate := m.gateStoresFor(cityPath, workStore, "city\x00"+cityPath, nil, nil)
 	if !storeListContains(storesForGate, beads.Store(binding)) {
 		t.Fatalf("gate store list = %+v, missing the binding the tracking bead lives in; the marker the dispatch just wrote is invisible and the order re-fires every tick", storesForGate)
 	}
-	if len(storesForGate) != 2 {
-		t.Fatalf("gate store list = %d stores, want 2 (the target scope and the one binding serving both classes); one database is being read twice for every order on every tick", len(storesForGate))
+	if len(storesForGate) != 1 {
+		t.Fatalf("gate store list = %+v, want exactly the one binding serving both classes; a work-ledger leg on the runtime plane is a misrouting bug and the whole-split binding must not be read twice", storesForGate)
+	}
+	if storeListContains(storesForGate, beads.Store(workStore)) {
+		t.Fatal("the work ledger is still a gate leg; it cannot hold order-run evidence on a split city and reading it costs one remote round trip per order per tick")
 	}
 	if len(storeKeysForGate) != len(storesForGate) {
 		t.Fatalf("gate store keys = %d for %d stores; the cooldown cache key and the store it memoizes have drifted apart", len(storeKeysForGate), len(storesForGate))
@@ -312,7 +318,7 @@ func TestOrderDispatchGateStaysOnTheOneStoreOnSingleStoreCity(t *testing.T) {
 		dispatchCtx:    dispatchCtx,
 		dispatchCancel: cancel,
 	}
-	storesForGate, storeKeysForGate := m.gateStoresFor(cityPath, store, "city\x00"+cityPath, nil)
+	storesForGate, storeKeysForGate := m.gateStoresFor(cityPath, store, "city\x00"+cityPath, nil, nil)
 	if len(storesForGate) != 1 || storesForGate[0] != beads.Store(store) {
 		t.Fatalf("gate store list = %+v, want exactly the one store the city has", storesForGate)
 	}
@@ -431,12 +437,12 @@ func TestOrderTrackingWatchdogsReachTheOrdersBinding(t *testing.T) {
 		logPrefix:           "gc test",
 	}
 
-	if got := cr.relocatedOrdersStore(); got != beads.Store(binding) {
+	if got := cr.relocatedOrdersStore(cr.cfg); got != beads.Store(binding) {
 		t.Fatalf("relocatedOrdersStore = %T(%p), want the binding %p", got, got, binding)
 	}
 
 	now := stale.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter + time.Millisecond)
-	cr.runOrderTrackingSweepWatchdog(now)
+	cr.runOrderTrackingSweepWatchdog(cr.cfg, now)
 
 	closed, err := binding.Get(stale.ID)
 	if err != nil {
@@ -451,7 +457,7 @@ func TestOrderTrackingWatchdogsReachTheOrdersBinding(t *testing.T) {
 	// the resolver rather than by running the prune, because the prune's own
 	// gates (backup freshness, the retain-last floor) are policy this change
 	// does not touch.
-	stores, _, closeOpened, err := cr.orderTrackingSweepStores()
+	stores, _, closeOpened, err := cr.orderTrackingSweepStores(cr.cfg)
 	defer closeOpened()
 	if err != nil {
 		t.Fatalf("resolving the watchdog sweep stores: %v", err)
