@@ -5590,6 +5590,33 @@ func providerProjectionCases() []providerProjectionCase {
 			keepsProvider: true,
 			family:        "claude",
 		},
+		{
+			// AC-4: an agent start_command resolution is unnamed; its
+			// explicit resume_command is kept and the stored name retained.
+			name: "unnamed start command with a resume command",
+			stored: map[string]string{
+				"provider": "my-claude", "provider_kind": "claude", "builtin_ancestor": "claude",
+				"resume_flag": "--resume", "resume_style": "flag", "resume_command": "claude --resume {{.SessionKey}}", "session_id_flag": "--session-id",
+			},
+			resolved: &config.ResolvedProvider{Command: "run-worker", PromptMode: "none", ResumeCommand: "run-worker --resume {{.SessionKey}}"},
+			want: map[string]string{
+				"provider": "my-claude", "provider_kind": "", "builtin_ancestor": "",
+				"resume_flag": "", "resume_style": "", "resume_command": "run-worker --resume {{.SessionKey}}", "session_id_flag": "",
+			},
+			keepsProvider: true,
+		},
+		{
+			// AC-4: a workspace start_command resolution carries no resume
+			// fields at all.
+			name:     "unnamed start command without a resume command",
+			stored:   codexWrappedMetadata(),
+			resolved: &config.ResolvedProvider{Command: "run-worker", PromptMode: "none"},
+			want: map[string]string{
+				"provider": "codex-wrapped", "provider_kind": "", "builtin_ancestor": "",
+				"resume_flag": "", "resume_style": "", "resume_command": "", "session_id_flag": "",
+			},
+			keepsProvider: true,
+		},
 	}
 }
 
