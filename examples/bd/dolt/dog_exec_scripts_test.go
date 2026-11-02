@@ -260,7 +260,14 @@ func (f compactScriptFixture) runWithArgs(t *testing.T, mode string, args []stri
 		"GC_PACK_STATE_DIR",
 		"GC_CITY_RUNTIME_DIR",
 		"GC_DOLT_COMPACT_MIN_FREE_BYTES",
+		"GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS",
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS",
 		"GC_FAKE_DF_MODE",
+		"GC_FAKE_DOLT_LIVE_FAULT",
+		"GC_FAKE_DOLT_LIVE_FAULT_DB",
+		"GC_FAKE_DOLT_LIVE_FAULT_ON",
+		"GC_FAKE_DOLT_LIVE_FAULT_PROBES",
+		"GC_FAKE_DOLT_LIVE_PROBE_REPLY",
 	),
 		"PATH="+f.binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+f.cityPath,
@@ -634,7 +641,57 @@ set_hash() {
   [ -n "$hash_state_file" ] || return 0
   printf '%%s\n' "$1" > "$hash_state_file"
 }
+# Live-database faults (compact_live_database_test.go). The first query on
+# GC_FAKE_DOLT_LIVE_FAULT_DB that contains GC_FAKE_DOLT_LIVE_FAULT_ON (default
+# DOLT_GC) still runs normally, but arms the fault for every later query:
+#   drop_dir  removes the database's data-dir entry; SQL keeps answering.
+#   unserve   fails every query with "database not found" until
+#             GC_FAKE_DOLT_LIVE_FAULT_PROBES live probes have failed (empty:
+#             the database never comes back).
+live_fault="${GC_FAKE_DOLT_LIVE_FAULT:-}"
+if [ -n "$live_fault" ] && [ "$db" = "${GC_FAKE_DOLT_LIVE_FAULT_DB:-beads}" ]; then
+  live_fault_flag="$state_file.$db-live-fault"
+  if [ -f "$live_fault_flag" ]; then
+    if [ "$live_fault" = "unserve" ]; then
+      live_fault_remaining="$(cat "$live_fault_flag")"
+      if [ "$live_fault_remaining" != "0" ]; then
+        if [[ "$query" == *"CONCAT(DATABASE()"* ]] && [ "$live_fault_remaining" != "all" ]; then
+          printf '%%s\n' "$((live_fault_remaining - 1))" > "$live_fault_flag"
+        fi
+        printf 'Error 1049 (HY000): database not found: %%s\n' "$db" >&2
+        exit 1
+      fi
+    fi
+  elif [[ "$query" == *"${GC_FAKE_DOLT_LIVE_FAULT_ON:-DOLT_GC}"* ]]; then
+    printf '%%s\n' "${GC_FAKE_DOLT_LIVE_FAULT_PROBES:-all}" > "$live_fault_flag"
+    if [ "$live_fault" = "drop_dir" ]; then
+      rm -rf -- "${GC_DOLT_DATA_DIR:?}/$db"
+    fi
+  fi
+fi
 case "$query" in
+  *"SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))"*)
+    # The live-database probe reads HEAD state directly so it never advances
+    # the HEAD-probe call counters other modes key on.
+    # GC_FAKE_DOLT_LIVE_PROBE_REPLY malforms the reply for
+    # GC_FAKE_DOLT_LIVE_FAULT_DB only.
+    live_head="headcommit"
+    if [ -n "$state_file" ] && [ -f "$state_file" ]; then
+      live_head="$(sed -n '1p' "$state_file")"
+    fi
+    live_reply=""
+    if [ "$db" = "${GC_FAKE_DOLT_LIVE_FAULT_DB:-beads}" ]; then
+      live_reply="${GC_FAKE_DOLT_LIVE_PROBE_REPLY:-}"
+    fi
+    case "$live_reply" in
+      wrong_db) print_cell "other:$live_head" ;;
+      upper_db) print_cell "$(printf '%%s' "$db" | tr '[:lower:]' '[:upper:]'):$live_head" ;;
+      empty) print_cell "" ;;
+      no_head) print_cell "$db:" ;;
+      *) print_cell "$db:$live_head" ;;
+    esac
+    exit 0
+    ;;
   *"FROM dolt_log ORDER BY date DESC LIMIT 1"*)
     # Legacy date-ordered "HEAD" probe. A future-dated (clock-skewed) commit
     # sorts first, so this is NOT the branch HEAD; compact must resolve HEAD
