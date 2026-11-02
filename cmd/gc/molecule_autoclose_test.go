@@ -622,3 +622,51 @@ func decodeMoleculeResolvedPayload(t *testing.T, ev events.Event) gcapi.Molecule
 	}
 	return p
 }
+
+// TestMoleculeAutocloseLeavesInFlightWorkflowWhenInputConvoyClosed pins the
+// rejected arm of the #8729 triage: input-driven cancellation belongs to the
+// claim-time check (the purged verdict), never to the close-time hook. Closing
+// the synthetic input convoy itself — the convoy bead, not a member — must not
+// retire an in-flight graph.v2 workflow: the root and its unfinished steps stay
+// exactly as they were, unstamped by any retirement disposition, and the next
+// claim's input check is what decides the workflow's fate.
+func TestMoleculeAutocloseLeavesInFlightWorkflowWhenInputConvoyClosed(t *testing.T) {
+	store := beads.NewMemStore()
+	convoy, _ := store.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
+	root, _ := store.Create(beads.Bead{
+		Title: "orchestrated workflow root",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.input_convoy_id":  convoy.ID,
+		},
+	})
+	step, _ := store.Create(beads.Bead{
+		Title:    "in-flight step",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: "worker-1",
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+
+	_ = store.Close(convoy.ID)
+	var out bytes.Buffer
+	doMoleculeAutocloseWith(store, "", events.Discard, convoy.ID, &out, beads.GraphStore{Store: store})
+
+	if out.Len() != 0 {
+		t.Fatalf("stdout = %q, want no auto-close on an input convoy's close", out.String())
+	}
+	for _, b := range []struct{ name, id string }{{"root", root.ID}, {"step", step.ID}} {
+		got, err := store.Get(b.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status == "closed" {
+			t.Errorf("the in-flight workflow's %s was closed by its input convoy's close; cancellation is the claim-time check's verdict", b.name)
+		}
+		if got.Metadata["close_reason"] != "" || got.Metadata["gc.failure_reason"] != "" {
+			t.Errorf("the in-flight workflow's %s was stamped (close_reason=%q failure_reason=%q) by its input convoy's close", b.name, got.Metadata["close_reason"], got.Metadata["gc.failure_reason"])
+		}
+	}
+}
