@@ -83,11 +83,25 @@ filesystem search. If no command exists for what you need, file a bead.
 
 ## Molecules — STOP, check BEFORE you start working
 
-**CRITICAL:** When you run `gc bd show` in step 4, look at the METADATA
-section. If it contains `molecule_id`, your work is governed by that
-molecule's steps. Do NOT just read the description and start coding.
+**CRITICAL:** When you run `gc bd show` in step 2 of "How to Work", look at
+the METADATA section. If the bead the hook returned has `molecule_id` but
+no `gc.root_bead_id`, your work is governed by that molecule's steps. Do
+NOT just read the description and start coding.
 
-Run `gc bd mol current <molecule-id>` to see your steps:
+First inspect the molecule root:
+
+```bash
+gc bd show <molecule-id>
+```
+
+If the root's METADATA has `gc.formula_contract=graph.v2` or
+`gc.kind=workflow`, it is a workflow graph that the orchestrator runs, not
+a legacy molecule: do not navigate it, and do not close it. Escalate
+(below). A root that is missing, or a `gc bd show` that fails, is an error,
+not a reason to fall back to legacy navigation: escalate it as well.
+
+Only for a verified legacy molecule, run `gc bd mol current <molecule-id>`
+to see your steps:
 
 - `[done]` — step is complete
 - `[current]` — step is in progress (you are here)
@@ -106,15 +120,12 @@ Run `gc bd mol current <molecule-id>` to see your steps:
 Do NOT read the parent bead description and do everything at once.
 Do NOT skip steps. Do NOT close steps you didn't execute.
 
-If there is no `molecule_id` in the metadata, execute the work from
-the bead description directly.
-
 ## Your Tools
 
 - `gc hook --claim --drain-ack --json` — find and atomically claim work; acknowledges drain when there is none
 - `gc hook --claim --json` — poll for your next workflow step without acknowledging drain
 - `gc bd show <id>` — see details of a work item or step
-- `gc bd mol current <molecule-id>` — show position in molecule workflow
+- `gc bd mol current <molecule-id>` — show position in a verified legacy molecule (never a workflow graph)
 - `gc bd mol progress <molecule-id>` — show molecule progress summary
 - `gc bd update <id> --set-metadata gc.outcome=pass` — record a successful outcome before you close finished work ("Closing a Bead" covers work that cannot succeed)
 - `gc bd close <id> --reason "<outcome>"` — mark work as done, after its outcome is recorded

@@ -1840,4 +1840,33 @@ func TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules(t *testing.T
 			"A workflow step you held comes back from the hook",
 		)
 	})
+
+	t.Run("molecule attachment root is inspected before legacy navigation", func(t *testing.T) {
+		mol := promptSection(t, got, "## Molecules")
+		assertSectionContains(t, "Molecules section", mol,
+			"`molecule_id` but no `gc.root_bead_id`",
+			"gc bd show <molecule-id>",
+			"`gc.formula_contract=graph.v2`",
+			"`gc.kind=workflow`",
+			"do not navigate it, and do not close it",
+			"is an error, not a reason to fall back to legacy navigation",
+			"gc bd mol current <molecule-id>",
+			"gc bd update <step-id> --set-metadata gc.outcome=pass",
+			`gc bd close <step-id> --reason "<what the step did>"`,
+			"Do not close a step that cannot be done",
+			"Do NOT skip steps. Do NOT close steps you didn't execute.",
+		)
+		show := strings.Index(mol, "gc bd show <molecule-id>")
+		current := strings.Index(mol, "gc bd mol current <molecule-id>")
+		if show < 0 || current < 0 || show > current {
+			t.Errorf("Molecules section must inspect the attachment root before gc bd mol current:\n%s", mol)
+		}
+		if strings.Contains(mol, "in step 4") {
+			t.Errorf("Molecules section cites a stale How to Work step number:\n%s", mol)
+		}
+		closing := promptSection(t, got, "## Closing a Bead")
+		assertSectionContains(t, "Closing a Bead section", closing,
+			"including a molecule step you reached through `gc bd mol current`",
+		)
+	})
 }
