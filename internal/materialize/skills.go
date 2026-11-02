@@ -844,10 +844,14 @@ type skillFrontmatter struct {
 // This is a minimal YAML consumer rather than a real parser. It
 // recognizes `key: <value>` (single-line) for the two keys above,
 // strips optional surrounding quotes, and stops at the closing `---`
-// delimiter. A block-scalar indicator or inline comment is taken
-// literally (e.g. `description: >` yields ">" rather than a folded
-// scalar) — the bounded single-line form is what real pack frontmatter
-// uses; anything richer is out of scope for this consumer.
+// delimiter. `name:` matches only at column zero — the name is the
+// skill's top-level identity, so nested keys (e.g. under `metadata:`)
+// must not be mistaken for it; the description match stays
+// indentation-tolerant. The first value of each key wins, even when
+// empty. A block-scalar indicator or inline comment is taken literally
+// (e.g. `description: >` yields ">" rather than a folded scalar) — the
+// bounded single-line form is what real pack frontmatter uses;
+// anything richer is out of scope for this consumer.
 func readSkillFrontmatter(path string) skillFrontmatter {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -870,17 +874,25 @@ func readSkillFrontmatter(path string) skillFrontmatter {
 		end = maxScan
 	}
 	var fm skillFrontmatter
+	seenName, seenDescription := false, false
 	for i := 1; i < end; i++ {
 		line := strings.TrimRight(lines[i], "\r")
 		if line == "---" {
 			break
 		}
-		trimmed := strings.TrimLeft(line, " \t")
-		if fm.Name == "" && strings.HasPrefix(trimmed, "name:") {
-			fm.Name = stripFrontmatterQuotes(strings.TrimSpace(strings.TrimPrefix(trimmed, "name:")))
+		if !seenName && strings.HasPrefix(line, "name:") {
+			fm.Name = stripFrontmatterQuotes(strings.TrimSpace(strings.TrimPrefix(line, "name:")))
+			seenName = true
 		}
-		if fm.Description == "" && strings.HasPrefix(trimmed, "description:") {
-			fm.Description = stripFrontmatterQuotes(strings.TrimSpace(strings.TrimPrefix(trimmed, "description:")))
+		if !seenDescription {
+			trimmed := strings.TrimLeft(line, " \t")
+			if strings.HasPrefix(trimmed, "description:") {
+				fm.Description = stripFrontmatterQuotes(strings.TrimSpace(strings.TrimPrefix(trimmed, "description:")))
+				seenDescription = true
+			}
+		}
+		if seenName && seenDescription {
+			break
 		}
 	}
 	return fm

@@ -54,7 +54,44 @@ func TestReadSkillFrontmatter(t *testing.T) {
 		// Windows editors / some export pipelines must not blind
 		// the frontmatter detector.
 		{"utf-8 bom", "\ufeff---\nname: x\ndescription: survived bom\n---\n", "x", "survived bom"},
+		// The name is the skill's top-level identity: only a `name:` at
+		// column zero identifies the skill. Nested frontmatter (e.g.
+		// under `metadata:`) and merely indented `name:` keys must not
+		// be mistaken for it \u2014 the description match stays
+		// indentation-tolerant, the name match does not.
+		{"nested name ignored", "---\nmetadata:\n  name: inner\ndescription: A plan\n---\n", "", "A plan"},
+		{"nested name then top-level", "---\nmetadata:\n  name: inner\nname: top\ndescription: A plan\n---\n", "top", "A plan"},
+		{"indented name ignored", "---\n  name: indented\ndescription: A plan\n---\n", "", "A plan"},
+		{"namespace key not a name", "---\nnamespace: core\ndescription: A plan\n---\n", "", "A plan"},
+		// First-match semantics: the first value of a key wins even
+		// when it is empty \u2014 same end state the pre-frontmatter-name
+		// description reader had.
+		{"first empty name wins", "---\nname:\nname: real\ndescription: A plan\n---\n", "", "A plan"},
+		{"first empty description wins", "---\nname: x\ndescription:\ndescription: real\n---\n", "x", ""},
+		// Legacy description behavior: indentation tolerance, and
+		// literal handling of block-scalar indicators / inline
+		// comments \u2014 the scanner is not a YAML parser.
+		{"indented description", "---\nname: x\n  description: indented\n---\n", "x", "indented"},
+		{"block scalar literal", "---\nname: x\ndescription: >\n---\n", "x", ">"},
+		{"inline comment literal", "---\nname: x\ndescription: A plan # note\n---\n", "x", "A plan # note"},
 	}
+	// The 64-line scan window applies to both keys: a value inside the
+	// window is captured, one past it is not.
+	fill := func(n int) string { return strings.Repeat("pad: x\n", n) }
+	cases = append(cases,
+		struct {
+			name            string
+			body            string
+			wantName        string
+			wantDescription string
+		}{"name at last scanned line", "---\n" + fill(62) + "name: in-bounds\n---\n", "in-bounds", ""},
+		struct {
+			name            string
+			body            string
+			wantName        string
+			wantDescription string
+		}{"name past last scanned line", "---\n" + fill(63) + "name: out-of-bounds\n---\n", "", ""},
+	)
 	for _, c := range cases {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
