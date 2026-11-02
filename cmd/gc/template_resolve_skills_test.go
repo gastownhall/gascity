@@ -882,3 +882,88 @@ func TestResolveTemplateNamedSessionMaterializeUsesTemplateName(t *testing.T) {
 		t.Errorf("materialize-skills --agent flag must NOT carry named_session identity rig/utz; got: %q", materializeCmd)
 	}
 }
+
+// importedFrontmatterSkillFixture loads a real city catalog holding one
+// skill imported under binding "core" whose SKILL.md declares
+// `name: gc-work`, so its catalog name core.gc-work differs from the name a
+// frontmatter-keyed provider loads it by (#8501).
+func importedFrontmatterSkillFixture(t *testing.T) (string, materialize.CityCatalog) {
+	t.Helper()
+	t.Setenv("GC_HOME", t.TempDir())
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	packDir := t.TempDir()
+	skillsDir := filepath.Join(packDir, "skills")
+	skillDir := filepath.Join(skillsDir, "gc-work")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
+		[]byte("---\nname: gc-work\ndescription: Working with beads\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := materialize.LoadCityCatalog("", config.DiscoveredSkillCatalog{
+		SourceDir:   skillsDir,
+		PackDir:     packDir,
+		PackName:    "core",
+		BindingName: "core",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cat.Entries) != 1 || cat.Entries[0].Name != "core.gc-work" {
+		t.Fatalf("catalog entries = %+v, want one entry named core.gc-work", cat.Entries)
+	}
+	return cityPath, cat
+}
+
+// skillAppendixAgents covers both skill delivery shapes: a scope-root
+// agent materialized by the supervisor, and a stage-2 agent whose
+// worktree gets a materialize-skills PreStart entry.
+var skillAppendixAgents = []struct {
+	name         string
+	agent        config.Agent
+	wantPreStart bool
+}{
+	{"scope root", config.Agent{Name: "worker", Scope: "city", Provider: "claude"}, false},
+	{"stage-2 workdir", config.Agent{Name: "builder", Scope: "city", Provider: "claude", WorkDir: ".gc/worktrees/builder-1"}, true},
+}
+
+func resolveSkillAppendixTemplate(t *testing.T, cityPath string, cat *materialize.CityCatalog, agent config.Agent) TemplateParams {
+	t.Helper()
+	params := &agentBuildParams{
+		cityName:        "city",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Provider: "claude"},
+		providers:       map[string]config.ProviderSpec{"claude": {Command: "echo", PromptMode: "none"}},
+		lookPath:        func(string) (string, error) { return "/bin/echo", nil },
+		fs:              fsys.OSFS{},
+		rigs:            []config.Rig{},
+		beaconTime:      time.Unix(0, 0),
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+		skillCatalog:    cat,
+		sessionProvider: "tmux",
+	}
+	tp, err := resolveTemplate(params, &agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	return tp
+}
+
+// TestResolveTemplateAppendixShowsImportedSkillFrontmatterName pins that
+// the skills appendix names an imported skill by both its catalog name
+// and the SKILL.md name a frontmatter-keyed provider loads it by.
+func TestResolveTemplateAppendixShowsImportedSkillFrontmatterName(t *testing.T) {
+	cityPath, cat := importedFrontmatterSkillFixture(t)
+	const want = "- `core.gc-work` (SKILL.md name: `gc-work`) — Working with beads *(core)*\n"
+	for _, c := range skillAppendixAgents {
+		t.Run(c.name, func(t *testing.T) {
+			tp := resolveSkillAppendixTemplate(t, cityPath, &cat, c.agent)
+			if !strings.Contains(tp.Prompt, want) {
+				t.Errorf("prompt missing %q:\n%s", want, tp.Prompt)
+			}
+		})
+	}
+}
