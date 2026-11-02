@@ -5484,7 +5484,7 @@ func TestSyncSessionBeads_ProjectsSessionIDFlag(t *testing.T) {
 // provider projection with stored (a missing key stored empty), syncs it
 // under resolved and returns the bead's metadata; a second sync under the
 // same resolution must write nothing.
-func syncProviderProjection(t *testing.T, stored map[string]string, resolved *config.ResolvedProvider) map[string]string {
+func syncProviderProjection(t *testing.T, stored map[string]string, resolved *config.ResolvedProvider) beads.Bead {
 	t.Helper()
 	cs := &countingStore{Store: beads.NewMemStore()}
 	clk := &clock.Fake{Time: time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)}
@@ -5508,7 +5508,7 @@ func syncProviderProjection(t *testing.T, stored map[string]string, resolved *co
 	ds["worker"] = TemplateParams{TemplateName: "worker", Command: "run-worker", ResolvedProvider: resolved}
 	clk.Advance(time.Minute)
 	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
-	got := allSessionBeads(t, cs)[0].Metadata
+	got := allSessionBeads(t, cs)[0]
 
 	writesBefore := cs.writes
 	clk.Advance(time.Minute)
@@ -5530,7 +5530,7 @@ func syncProviderProjection(t *testing.T, stored map[string]string, resolved *co
 func TestSyncSessionBeads_ProviderProjectionClearsMissingFields(t *testing.T) {
 	for _, tc := range providerProjectionCases(t) {
 		t.Run(tc.name, func(t *testing.T) {
-			got := syncProviderProjection(t, tc.stored, tc.resolved)
+			got := syncProviderProjection(t, tc.stored, tc.resolved).Metadata
 			for _, k := range providerProjectionKeys {
 				if got[k] != tc.want[k] {
 					t.Errorf("%s = %q after sync, want %q", k, got[k], tc.want[k])

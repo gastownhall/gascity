@@ -981,6 +981,41 @@ func TestResolvedWorkerRuntimeWithConfigUsesCurrentAgentProviderOverStaleSession
 	}
 }
 
+// TestResolvedWorkerRuntimeDropsStaleResumeCommandAfterProviderSwitch guards
+// #8539 at the resume consumer: once sync refreshes a session switched from a
+// provider with a resume command to one resuming by flag, the resolved
+// runtime resumes by the new flag instead of falling back to the previous
+// provider's stored resume command.
+func TestResolvedWorkerRuntimeDropsStaleResumeCommandAfterProviderSwitch(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", Provider: "flag-cli"}},
+		Providers: map[string]config.ProviderSpec{
+			"flag-cli": {Command: "true", ResumeFlag: "--continue", ResumeStyle: "flag"},
+		},
+	}
+	b := syncProviderProjection(t,
+		map[string]string{"provider": "command-cli", "resume_command": "command-cli resume {{.SessionKey}}"},
+		&config.ResolvedProvider{Name: "flag-cli", ResumeFlag: "--continue", ResumeStyle: "flag"})
+
+	resolved, err := resolvedWorkerRuntimeWithConfigAndMetadata("", cfg, sessionInfoFromBead(b), "", b.Metadata)
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfigAndMetadata: %v", err)
+	}
+	if resolved == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfigAndMetadata() = nil")
+	}
+	if got := resolved.Resume.ResumeCommand; got != "" {
+		t.Errorf("Resume.ResumeCommand = %q, want empty: the previous provider's resume command survived the switch", got)
+	}
+	if got := resolved.Resume.ResumeFlag; got != "--continue" {
+		t.Errorf("Resume.ResumeFlag = %q, want --continue", got)
+	}
+	if got := resolved.Resume.ResumeStyle; got != "flag" {
+		t.Errorf("Resume.ResumeStyle = %q, want flag", got)
+	}
+}
+
 func TestResolvedWorkerRuntimeWithConfigKeepsDefaultTransportWithoutExplicitACPTemplate(t *testing.T) {
 	cityDir := t.TempDir()
 	writePhase0InterfaceCity(t, cityDir, `[workspace]
