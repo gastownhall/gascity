@@ -763,13 +763,13 @@ city's work store, copy them into the binding with
 
 			cookVars := parseFormulaVars(vars)
 
-			// Parse --meta before any bead exists so a malformed flag refuses the
-			// cook write-free: before PrepareInvocation can mint a synthetic input
-			// convoy, and before any root, step or blocking dependency is written,
-			// on whichever arm runs below. The non-attach arms' class-must-not-flip
-			// guard (cookMetaClassFlip) also judges it against the recipe root
-			// before anything is cooked, so a refused stamp leaves no molecule
-			// behind.
+			// Parse --meta before any bead exists so a malformed flag, or a key the
+			// bead store would refuse, refuses the cook write-free: before
+			// PrepareInvocation can mint a synthetic input convoy, and before any
+			// root, step or blocking dependency is written, on whichever arm runs
+			// below. The non-attach arms' class-must-not-flip guard
+			// (cookMetaClassFlip) also judges it against the recipe root before
+			// anything is cooked, so a refused stamp leaves no molecule behind.
 			rootMeta, err := parseMetadataArgs(metadata)
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
@@ -1451,6 +1451,10 @@ func cookMetaFlipError(formulaName string, flip *coordclass.Flip) error {
 	return fmt.Errorf("%s", classFlipRefusalText(fmt.Sprintf("--meta on the root of %q", formulaName), flip))
 }
 
+// parseMetadataArgs parses --meta key=value pairs. It refuses a pair with no
+// "=" or an empty key, and a key the bead store would refuse
+// (beadmeta.ValidateKey): bd and native Dolt reject such a key on the stamp's
+// SetMetadataBatch, which runs only after the cook has written its beads.
 func parseMetadataArgs(items []string) (map[string]string, error) {
 	if len(items) == 0 {
 		return nil, nil
@@ -1460,6 +1464,9 @@ func parseMetadataArgs(items []string) (map[string]string, error) {
 		key, value, ok := strings.Cut(item, "=")
 		if !ok || key == "" {
 			return nil, fmt.Errorf("invalid metadata %q (want key=value)", item)
+		}
+		if err := beadmeta.ValidateKey(key); err != nil {
+			return nil, fmt.Errorf("invalid metadata %q: %w", item, err)
 		}
 		out[key] = value
 	}
