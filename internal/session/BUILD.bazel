@@ -184,6 +184,7 @@ go_test(
         "orphan_infrastructure_fence_linux_test.go",
         "orphan_scan_abandoned_test.go",
         "orphan_scan_bound_test.go",
+        "orphan_scan_completed_test.go",
         "orphan_scan_latch_test.go",
         "overlay_test.go",
         "pending_create_lease_test.go",

@@ -798,7 +798,8 @@ type orphanScan struct {
 // runtime.ErrRuntimeUnavailable, so the gated start is deferred, not failed.
 // The abandoned scan keeps its key (orphanScanKey) until it returns, and a
 // cleanup under that key meanwhile, through this Manager or another, starts
-// no second scan and is refused the same way.
+// no second scan and is refused the same way. Once ctx ends, no further
+// orphan is terminated.
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
 	scanner, ok := runtime.AsProcessTableScanner(m.sp)
 	if !ok || sessionID == "" {
@@ -852,7 +853,12 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 		orphans = append(orphans, live)
 	}
 	var termErrs []error
-	for _, live := range orphans {
+	for i, live := range orphans {
+		// A caller that has given up on the start gets no further
+		// termination; the failures so far still travel with its error.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("pre-start orphan cleanup for session %s stopped with %d of %d orphaned runtime(s) not terminated: %w", sessionID, len(orphans)-i, len(orphans), errors.Join(append(termErrs, ctxErr)...))
+		}
 		if err := scanner.TerminateRuntime(live); err != nil {
 			log.Printf("session: terminating orphaned runtime for %s pid=%d provider_name=%q: %v", sessionID, live.PID, live.ProviderName, err)
 			termErrs = append(termErrs, fmt.Errorf("orphan pid=%d provider_name=%q: %w", live.PID, live.ProviderName, err))
