@@ -1659,3 +1659,135 @@ func TestRenderPromptCityRootFragmentsAbsentNoEffect(t *testing.T) {
 		t.Errorf("renderPrompt(no city-root fragments) = %q, want %q", got, want)
 	}
 }
+
+// renderCorePoolWorkerPrompt renders the shipped pool-worker prompt with the
+// core pack on the pack-dir list, the way a composed city does, and fails on
+// any render warning.
+func renderCorePoolWorkerPrompt(t *testing.T) string {
+	t.Helper()
+	chdirToRealPackageDir(t)
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("filepath.Abs(repo root): %v", err)
+	}
+	coreDir := filepath.Join(repoRoot, "internal", "bootstrap", "packs", "core")
+	promptPath := filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md")
+
+	var stderr strings.Builder
+	got := renderPrompt(fsys.OSFS{}, t.TempDir(), "", promptPath, PromptContext{AgentName: "claude"}, "", &stderr,
+		[]string{coreDir}, nil, nil)
+	if stderr.Len() != 0 {
+		t.Fatalf("renderPrompt(pool-worker) wrote to stderr: %s", stderr.String())
+	}
+	return got
+}
+
+// promptSection returns the body of the markdown section whose heading line
+// starts with heading (for example "## Molecules"), up to the next heading of
+// the same or a higher level, with whitespace runs collapsed to one space so
+// assertions do not depend on line wrapping.
+func promptSection(t *testing.T, doc, heading string) string {
+	t.Helper()
+	level := strings.IndexFunc(heading, func(r rune) bool { return r != '#' })
+	if level <= 0 {
+		t.Fatalf("promptSection(%q): heading must start with #", heading)
+	}
+	lines := strings.Split(doc, "\n")
+	start := -1
+	inFence := false
+	for i, line := range lines {
+		if strings.HasPrefix(line, "```") {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			continue
+		}
+		if start < 0 {
+			if strings.HasPrefix(line, heading) {
+				start = i
+			}
+			continue
+		}
+		if hashes := strings.IndexFunc(line, func(r rune) bool { return r != '#' }); hashes > 0 && hashes <= level && line[hashes] == ' ' {
+			return strings.Join(strings.Fields(strings.Join(lines[start:i], "\n")), " ")
+		}
+	}
+	if start < 0 {
+		t.Fatalf("prompt has no section %q:\n%s", heading, doc)
+	}
+	return strings.Join(strings.Fields(strings.Join(lines[start:], "\n")), " ")
+}
+
+// assertSectionOrder fails unless the headings appear in doc in the given
+// order.
+func assertSectionOrder(t *testing.T, doc string, headings ...string) {
+	t.Helper()
+	prev := -1
+	for _, h := range headings {
+		at := strings.Index(doc, "\n"+h)
+		if at < 0 {
+			t.Fatalf("prompt has no heading %q", h)
+		}
+		if at <= prev {
+			t.Fatalf("heading %q is out of order; want order %q", h, headings)
+		}
+		prev = at
+	}
+}
+
+// assertSectionContains fails for each want missing from section.
+func assertSectionContains(t *testing.T, name, section string, wants ...string) {
+	t.Helper()
+	for _, want := range wants {
+		if !strings.Contains(section, want) {
+			t.Errorf("%s missing %q:\n%s", name, want, section)
+		}
+	}
+}
+
+// TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules pins the
+// execution contract the rendered pool-worker prompt gives each kind of hook
+// assignment. A hook-claimed workflow step (gc.root_bead_id set) is one
+// materialized bead whose graph the orchestrator advances; a legacy molecule
+// attachment is navigated with gc bd mol current only after its root proves
+// it is not a graph; a plain bead or root-only formula runs from its own
+// description. The assertions are scoped to sections so guidance in the wrong
+// place cannot satisfy them.
+func TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules(t *testing.T) {
+	got := renderCorePoolWorkerPrompt(t)
+
+	t.Run("hook-claimed workflow step is the whole assignment", func(t *testing.T) {
+		assertSectionOrder(t, got, "## Startup Protocol", "## What the Hook Gave You", "## Workflow Steps", "## Molecules")
+
+		classify := promptSection(t, got, "## What the Hook Gave You")
+		assertSectionContains(t, "classification section", classify,
+			"`gc.root_bead_id`",
+			"it is your whole assignment, even if it also carries `molecule_id`",
+			"has `molecule_id` but no `gc.root_bead_id`",
+			"Classify only the bead the hook returned",
+			"do not reclassify them, even when they carry `gc.root_bead_id`",
+		)
+		if strings.Index(classify, "`gc.root_bead_id`") > strings.Index(classify, "`molecule_id`") {
+			t.Errorf("classification checks molecule_id before the step ownership cue gc.root_bead_id:\n%s", classify)
+		}
+
+		steps := promptSection(t, got, "## Workflow Steps")
+		assertSectionContains(t, "Workflow Steps section", steps,
+			"The orchestrator owns the graph",
+			"You own only the step the hook claimed for you",
+			"Execute exactly that step's description",
+			"gc bd update <id> --set-metadata gc.outcome=pass",
+			`gc bd close <id> --reason "<what the step did>"`,
+			"Do NOT navigate to sibling steps",
+			"do not run `gc bd mol current` on the workflow",
+			"A sibling becomes yours only when a later `gc hook --claim` returns it",
+			"the orchestrator runs those",
+			"`gc.kind=scope`",
+			"`workflow-finalize`",
+			"`gc.scope_role=teardown`",
+			"run it even if earlier steps failed",
+			"leave it closed and keep its recorded outcome",
+		)
+	})
+}

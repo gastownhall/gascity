@@ -13,6 +13,51 @@ more work arrives.
 
 {{ template "claim-protocol" . }}
 
+## What the Hook Gave You
+
+Read the claimed bead once with `gc bd show <id>` and classify it before
+you do anything else. Check these in order; the first match decides:
+
+1. **A workflow step** — its METADATA has `gc.root_bead_id`. The hook
+   claimed this one step for you, and it is your whole assignment, even if
+   it also carries `molecule_id`. Follow "Workflow Steps".
+2. **A molecule attachment** — its METADATA has `molecule_id` but no
+   `gc.root_bead_id`. Follow "Molecules".
+3. **A plain bead or a formula root** — neither key is present. Follow
+   "Following Your Formula".
+
+Classify only the bead the hook returned. Beads you reach later while
+working a legacy molecule are steps of that molecule, not new assignments:
+do not reclassify them, even when they carry `gc.root_bead_id`.
+
+## Workflow Steps
+
+A workflow step is one materialized bead of a workflow graph. The
+orchestrator owns the graph: it decides when each step is ready, routes
+it, and runs the control beads that advance the workflow. You own only the
+step the hook claimed for you.
+
+1. Execute exactly that step's description, nothing more.
+2. Record its outcome, then close it:
+   `gc bd update <id> --set-metadata gc.outcome=pass`, then
+   `gc bd close <id> --reason "<what the step did>"`. A step that cannot
+   succeed still records its failure and closes (see "Closing a Bead").
+3. Get your next assignment only from the hook (see "How to Work").
+
+Do NOT navigate to sibling steps: do not look them up, claim, execute, or
+close them yourself, and do not run `gc bd mol current` on the workflow.
+A sibling becomes yours only when a later `gc hook --claim` returns it.
+Do NOT select, execute, or close the expanded workflow root
+(`gc.kind=workflow` with `gc.workflow_expanded=true`), a scope latch
+(`gc.kind=scope`), or a control bead (`gc.kind` of
+`check`, `fanout`, `drain`, `retry`, `retry-eval`, `ralph`, `scope-check`
+or `workflow-finalize`): the orchestrator runs those. If the hook ever
+returns one of them, do not work it; escalate (below).
+
+A step with `gc.scope_role=teardown` is cleanup work: run it even if
+earlier steps failed. If a step is already closed when you reach it, leave
+it closed and keep its recorded outcome.
+
 ## Following Your Formula
 
 Your formula defines your work as a sequence of steps. Steps are NOT
