@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,8 +10,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
@@ -978,6 +981,62 @@ func TestResolvedWorkerRuntimeWithConfigUsesCurrentAgentProviderOverStaleSession
 	}
 	if got := resolved.Provider; got != "agent-provider" {
 		t.Fatalf("resolved.Provider = %q, want agent-provider", got)
+	}
+}
+
+// TestResolvedWorkerRuntimeDropsStaleResumeCommandAfterProviderSwitch is the
+// #8539 consumer guard: the worker runtime falls back to the session's
+// stored resume_command when the resolved provider has none, so a provider
+// switch must clear the previous provider's command from the bead or a
+// resume replays it instead of the new provider's flag.
+func TestResolvedWorkerRuntimeDropsStaleResumeCommandAfterProviderSwitch(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", Provider: "flag-provider"}},
+		Providers: map[string]config.ProviderSpec{
+			"flag-provider": {Command: "true", ResumeFlag: "--resume", ResumeStyle: "flag"},
+		},
+	}
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	_ = sp.Start(context.TODO(), "worker", runtime.Config{Command: "true"})
+	ds := map[string]TemplateParams{"worker": {
+		TemplateName: "worker", Command: "true",
+		ResolvedProvider: &config.ResolvedProvider{Name: "command-provider", Command: "true", ResumeCommand: "true resume {{.SessionKey}}"},
+	}}
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	ds["worker"] = TemplateParams{
+		TemplateName: "worker", Command: "true",
+		ResolvedProvider: &config.ResolvedProvider{Name: "flag-provider", Command: "true", ResumeFlag: "--resume", ResumeStyle: "flag"},
+	}
+	clk.Advance(time.Minute)
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+
+	b := allSessionBeads(t, store)[0]
+	info, err := session.NewStore(beads.SessionStore{Store: store}).ResolveAddress(b.ID, false)
+	if err != nil {
+		t.Fatalf("ResolveAddress(%s): %v", b.ID, err)
+	}
+	resolved, err := resolvedWorkerRuntimeWithConfigAndMetadata("", cfg, info, "", b.Metadata)
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfigAndMetadata: %v", err)
+	}
+	if resolved == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfigAndMetadata() = nil")
+	}
+	if got := resolved.Resume.ResumeCommand; got != "" {
+		t.Errorf("Resume.ResumeCommand = %q, want empty after the switch to flag-provider", got)
+	}
+	if got := resolved.Resume.ResumeFlag; got != "--resume" {
+		t.Errorf("Resume.ResumeFlag = %q, want --resume", got)
+	}
+	if got := resolved.Resume.ResumeStyle; got != "flag" {
+		t.Errorf("Resume.ResumeStyle = %q, want flag", got)
 	}
 }
 
