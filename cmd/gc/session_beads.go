@@ -305,56 +305,49 @@ func stampResolvedProviderSessionMetadata(meta map[string]string, resolved *conf
 	}
 }
 
-// resolvedProviderSwitched reports whether resolved reflects an actual
-// provider switch away from the stored "provider" value — i.e. resolution
-// clearly succeeded and named a different provider than what's on the bead.
-// This is the signal that distinguishes "resolution produced a legitimately
-// empty projection field because the new provider has no wrapped ancestor"
-// (switched == true: trust the new, possibly-empty value) from "resolution
-// failed or is a no-op re-resolve of the same provider" (switched == false:
-// never clobber a stored value with empty).
-func resolvedProviderSwitched(existing map[string]string, resolved *config.ResolvedProvider) bool {
-	if resolved == nil {
-		return false
-	}
-	name := strings.TrimSpace(resolved.Name)
-	return name != "" && existing["provider"] != name
-}
-
 // queueChangedResolvedProviderSessionMetadata queues the resolved-provider
-// projection fields (provider, provider_kind, builtin_ancestor) whenever the
-// freshly resolved value differs from what is stored, mirroring the command
-// refresh so a provider switch in agent.toml is reflected on the session bead
-// (gc-rhp36). It is diff-gated (no write when unchanged, honoring the
-// write-if-changed reconcile contract) and never clobbers a stored value with
-// an empty resolved one UNLESS the provider itself just switched (gc-8539):
-// a switch to a builtin-named provider (BuiltinAncestor == Name) legitimately
-// resolves provider_kind/builtin_ancestor to empty, and that empty value must
-// overwrite stale metadata from the old provider rather than being treated as
-// a transient resolution failure.
+// projection (provider, provider_kind, builtin_ancestor, resume_flag,
+// resume_style, resume_command, session_id_flag) wherever the freshly
+// resolved value differs from what is stored, mirroring the command refresh
+// so a provider switch in agent.toml is reflected on the session bead
+// (gc-rhp36). A successful resolution is authoritative for the six family and
+// resume keys: one it leaves empty clears the stored value, so a previous
+// provider's family or resume command does not survive a switch or a config
+// edit (#8539). The provider name is queued only when the resolution names
+// one, since a start-command resolution is unnamed. It is diff-gated (no
+// write when unchanged, honoring the write-if-changed reconcile contract), and
+// a nil resolution queues nothing: a failed resolution must not wipe good
+// metadata.
+//
+// session_id_flag is a peer projection field of resume_flag: the reactive
+// startup-death strip (stripSessionIDFlag via retryFreshStartAfterStaleKey)
+// reads it from persisted bead metadata, so a legacy bead backfilled with
+// session_key but no session_id_flag would replay a rejected first-start
+// `--session-id <key>` command. Projecting it here lets an upgraded bead gain
+// the flag in the same tick its key is backfilled.
 func queueChangedResolvedProviderSessionMetadata(existing map[string]string, queue func(string, string), resolved *config.ResolvedProvider) {
 	if queue == nil || resolved == nil {
 		return
 	}
+	queueChanged := func(key, value string) {
+		if existing[key] != value {
+			queue(key, value)
+		}
+	}
 	name := strings.TrimSpace(resolved.Name)
-	switched := resolvedProviderSwitched(existing, resolved)
-	if name != "" && existing["provider"] != name {
-		queue("provider", name)
+	if name != "" {
+		queueChanged("provider", name)
 	}
-	if family := resolvedProviderFamilyMetadata(resolved); family != "" {
-		if existing["provider_kind"] != family {
-			queue("provider_kind", family)
-		}
-	} else if switched && existing["provider_kind"] != "" {
-		queue("provider_kind", "")
+	queueChanged("provider_kind", resolvedProviderFamilyMetadata(resolved))
+	ancestor := strings.TrimSpace(resolved.BuiltinAncestor)
+	if ancestor == name {
+		ancestor = ""
 	}
-	if ancestor := strings.TrimSpace(resolved.BuiltinAncestor); ancestor != "" && ancestor != name {
-		if existing["builtin_ancestor"] != ancestor {
-			queue("builtin_ancestor", ancestor)
-		}
-	} else if switched && existing["builtin_ancestor"] != "" {
-		queue("builtin_ancestor", "")
-	}
+	queueChanged("builtin_ancestor", ancestor)
+	queueChanged("resume_flag", resolved.ResumeFlag)
+	queueChanged("resume_style", resolved.ResumeStyle)
+	queueChanged("resume_command", resolved.ResumeCommand)
+	queueChanged("session_id_flag", resolved.SessionIDFlag)
 }
 
 func canRebindConfiguredNamedSession(b beads.Bead, identity, sessionName, backingTemplate string) bool {
@@ -2413,59 +2406,17 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		// the authoritative command source for respawn. If agent config changes
 		// (e.g., adding `[option_defaults] model = "opus"`, or switching the
 		// agent's provider), the freshly resolved values differ from the stored
-		// ones; sync here so the bead matches the current config. Empty resolved
-		// values are ignored to avoid clobbering stored values when resolution
-		// fails transiently. The provider/resume projection fields follow the
-		// same diff-gated, clobber-safe refresh as command (gc-rhp36); without
-		// it they freeze at their creation-time provider after an agent.toml
-		// provider switch while command alone follows.
+		// ones; sync here so the bead matches the current config. An empty
+		// resolved command and a nil resolution are ignored to avoid clobbering
+		// stored values when resolution fails transiently. A successful
+		// resolution refreshes the provider projection, clearing the family and
+		// resume fields it leaves empty (gc-rhp36, #8539); without it they
+		// freeze at their creation-time provider after an agent.toml provider
+		// switch while command alone follows.
 		if tp.Command != "" && b.Metadata["command"] != tp.Command {
 			queueMeta("command", tp.Command)
 		}
-		if tp.ResolvedProvider != nil {
-			queueChangedResolvedProviderSessionMetadata(b.Metadata, queueMeta, tp.ResolvedProvider)
-			// providerSwitched: see resolvedProviderSwitched doc. A genuine
-			// provider switch (gc-8539) must let a legitimately-empty
-			// resolved value overwrite stale resume/session-id metadata
-			// from the OLD provider, rather than falling through to the
-			// stored value as if resolution had merely failed.
-			providerSwitched := resolvedProviderSwitched(b.Metadata, tp.ResolvedProvider)
-			if tp.ResolvedProvider.ResumeFlag != "" {
-				if b.Metadata["resume_flag"] != tp.ResolvedProvider.ResumeFlag {
-					queueMeta("resume_flag", tp.ResolvedProvider.ResumeFlag)
-				}
-			} else if providerSwitched && b.Metadata["resume_flag"] != "" {
-				queueMeta("resume_flag", "")
-			}
-			if tp.ResolvedProvider.ResumeStyle != "" {
-				if b.Metadata["resume_style"] != tp.ResolvedProvider.ResumeStyle {
-					queueMeta("resume_style", tp.ResolvedProvider.ResumeStyle)
-				}
-			} else if providerSwitched && b.Metadata["resume_style"] != "" {
-				queueMeta("resume_style", "")
-			}
-			if tp.ResolvedProvider.ResumeCommand != "" {
-				if b.Metadata["resume_command"] != tp.ResolvedProvider.ResumeCommand {
-					queueMeta("resume_command", tp.ResolvedProvider.ResumeCommand)
-				}
-			} else if providerSwitched && b.Metadata["resume_command"] != "" {
-				queueMeta("resume_command", "")
-			}
-			// session_id_flag is a peer projection field of resume_flag: the
-			// reactive startup-death strip (stripSessionIDFlag via
-			// retryFreshStartAfterStaleKey) reads it from persisted bead
-			// metadata, so a legacy bead backfilled with session_key (above)
-			// but no session_id_flag would replay a rejected first-start
-			// `--session-id <key>` command. Project it diff-gated so upgraded
-			// beads gain the flag in the same tick the key is backfilled.
-			if tp.ResolvedProvider.SessionIDFlag != "" {
-				if b.Metadata["session_id_flag"] != tp.ResolvedProvider.SessionIDFlag {
-					queueMeta("session_id_flag", tp.ResolvedProvider.SessionIDFlag)
-				}
-			} else if providerSwitched && b.Metadata["session_id_flag"] != "" {
-				queueMeta("session_id_flag", "")
-			}
-		}
+		queueChangedResolvedProviderSessionMetadata(b.Metadata, queueMeta, tp.ResolvedProvider)
 
 		// Update existing bead metadata.
 		// live_hash is NOT updated here — it records what config the
