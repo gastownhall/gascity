@@ -245,11 +245,18 @@ func continuationPinAssignee(opts hookClaimOptions) string {
 }
 
 type hookClaimOps struct {
-	Runner             WorkQueryRunner
-	Claim              hookClaimFunc
-	ListContinuation   hookListContinuationFunc
-	AssignContinuation hookAssignContinuationFunc
-	DrainAck           hookDrainAckFunc
+	Runner           WorkQueryRunner
+	Claim            hookClaimFunc
+	ListContinuation hookListContinuationFunc
+	// SessionMoleculeRoots resolves the workflow roots this session is
+	// mid-flight on for the ci-soai behavior-6 cross-wire veto: roots with at
+	// least one step stamped to this session (gc.session_id) whose root is
+	// open/in_progress and still has an open or in_progress step. Nil — the
+	// default — reads the bd store (hookClaimMoleculeRootsWithStore).
+	// Best-effort: an error leaves the veto inert for the invocation.
+	SessionMoleculeRoots hookSessionMoleculeRootsFunc
+	AssignContinuation   hookAssignContinuationFunc
+	DrainAck             hookDrainAckFunc
 	// DrainPending reports whether the session bead named by sessionID is
 	// already draining, i.e. whether this seat has been told to stop. It is the
 	// F-D fence's only input and is read from the SESSION row rather than from
@@ -397,6 +404,7 @@ type hookClaimOps struct {
 type (
 	hookClaimFunc                 func(context.Context, string, []string, string, string) (beads.Bead, bool, error)
 	hookListContinuationFunc      func(context.Context, string, []string, string, string) ([]beads.Bead, error)
+	hookSessionMoleculeRootsFunc  func(context.Context, string, []string, string) (map[string]struct{}, error)
 	hookAssignContinuationFunc    func(context.Context, string, []string, string, string) error
 	hookDrainAckFunc              func(io.Writer) error
 	hookDrainPendingFunc          func(sessionID string) (bool, error)
@@ -656,6 +664,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.ListContinuation == nil {
 		ops.ListContinuation = hookListContinuationWithBdStore
+	}
+	if ops.SessionMoleculeRoots == nil {
+		ops.SessionMoleculeRoots = hookClaimMoleculeRootsWithStore
 	}
 	if ops.AssignContinuation == nil {
 		ops.AssignContinuation = hookAssignContinuationWithBdStore
@@ -1086,6 +1097,23 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 	seatManaged := sync.OnceValue(func() bool {
 		return hookSeatManaged(hookClaimLabel, opts.PoolSeat.WorkDir, ops.SeatInManagedWorktree, stderr)
 	})
+	// ci-soai behavior 6 (cross-wired pour): the live molecule roots are
+	// resolved at most once per claim invocation, on the first root-stamped
+	// candidate this seat evaluates. An empty result — including a resolution
+	// failure, which notes stderr and returns nil — leaves the veto inert
+	// (fail-open; the session's own cross-wire detector is the backstop).
+	moleculeRoots := sync.OnceValue(func() map[string]struct{} {
+		resolve := ops.SessionMoleculeRoots
+		if resolve == nil {
+			resolve = hookClaimMoleculeRootsWithStore
+		}
+		roots, err := resolve(ctx, dir, opts.Env, opts.SessionID)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: mid-molecule veto inert; resolving live molecule roots failed: %v\n", err) //nolint:errcheck
+			return nil
+		}
+		return roots
+	})
 	// The claimable candidates left to a session in another directory, named
 	// on stderr only if the invocation then claims nothing.
 	var leftToAnotherSession []beads.Bead
@@ -1098,6 +1126,20 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			if hookCandidateClaimable(candidate, opts.RouteTargets, now) {
 				leftToAnotherSession = append(leftToAnotherSession, candidate)
 			}
+			continue
+		}
+		// ci-soai behavior 6 (cross-wired pour): a session-backed claimant
+		// mid-molecule on one workflow root must not mint an obligation on
+		// another root's step — the slot's own machinery would brake the
+		// foreign step post-hoc (cross-wired-pour playbook), deferring the
+		// root and burning a formula cycle per incident. Refusing here leaves
+		// the step ready for a free session on this same tick. Read-only
+		// veto, checked before the reclaim attempt so a mid-molecule seat
+		// also never frees foreign work. Plain (root-less) beads and
+		// non-session claimants are never vetoed.
+		if opts.SessionID != "" && strings.TrimSpace(candidate.Metadata[beadmeta.RootBeadIDMetadataKey]) != "" &&
+			hookClaimForeignMoleculeStep(candidate, moleculeRoots()) {
+			hookClaimNoteMoleculeSkip(stderr, opts.SessionID, moleculeRoots(), candidate)
 			continue
 		}
 		reclaimedFrom := ""
