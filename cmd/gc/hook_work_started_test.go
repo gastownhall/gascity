@@ -1295,3 +1295,72 @@ func TestV2HookClaimFailsOpenWithoutConditionalWrites(t *testing.T) {
 		})
 	}
 }
+
+// TestStartedWriteOnAWriterStoreNeverAsksThePredicate (ga-6eefx8, #8313): a
+// session store with a conditional writer records by CAS whatever the city's
+// mode, and never asks the write predicate: the hand-over's write is one
+// CAS; a controller write between the read and the CAS makes it re-read,
+// re-decide and land with both cells intact; a ladder release of the claim
+// seen on that re-read is refused, recording nothing; and a hand-over of a
+// claim the ladder is releasing is not delivered. Kills asking the mode on a
+// store that can fence, and a checked write that drops the re-decide.
+func TestStartedWriteOnAWriterStoreNeverAsksThePredicate(t *testing.T) {
+	never := func(t *testing.T) func() bool {
+		return func() bool {
+			t.Fatal("the write predicate was asked on a store with a conditional writer")
+			return false
+		}
+	}
+	key := hookStartedKey{Store: startedStoreRef, Bead: "work-1"}
+	fence := hookStartedFence{Token: startedToken, Gen: 7, HasGen: true}
+	now := time.Date(2026, 10, 17, 20, 0, 0, 0, time.UTC)
+
+	t.Run("hand-over", func(t *testing.T) {
+		row := newStartedRow(t, nil)
+		l := &startedLog{}
+		opts := startedOpts(startedEnv(startedToken, "7"))
+		opts.StartedCASOnly = never(t)
+		var stderr bytes.Buffer
+		if code := doHookClaim("q", "/rig", opts, l.ops(startedRoutedWork, row, nil), &orderedWriter{l: l}, &stderr); code != 0 {
+			t.Fatalf("code %d; stderr=%s", code, stderr.String())
+		}
+		if row.store.rowWrites != 1 || !row.cell(t).Names(startedStoreRef, "work-1", 7) {
+			t.Fatalf("conditional row writes = %d, cell %+v; want one CAS recording work-1", row.store.rowWrites, row.cell(t))
+		}
+	})
+
+	t.Run("contention", func(t *testing.T) {
+		row := newStartedRow(t, nil)
+		ladder := `{"v":1,"gen":7,"entries":[]}`
+		row.store.interleave = map[string]string{session.WorkLadderKey: ladder}
+		res, err := recordWorkStarted(row.front, startedSessionID, fence, key, session.WorkStartedViaClaim, now, never(t))
+		if err != nil || res != hookStartedRecorded {
+			t.Fatalf("record = %v, %v; want recorded after a re-decide", res, err)
+		}
+		if row.meta(t, session.WorkLadderKey) != ladder || !row.cell(t).Names(key.Store, key.Bead, 7) {
+			t.Fatalf("row %q / %q: want the controller's cell and the agent's entry both intact", row.meta(t, session.WorkLadderKey), row.meta(t, session.WorkStartedKey))
+		}
+	})
+
+	t.Run("release on the re-read", func(t *testing.T) {
+		row := newStartedRow(t, nil)
+		row.store.interleave = map[string]string{session.WorkLadderKey: `{"v":1,"gen":7,"release":{"store":"rig:repo","bead":"work-1"}}`}
+		res, err := recordWorkStarted(row.front, startedSessionID, fence, key, session.WorkStartedViaClaim, now, never(t))
+		if err != nil || res != hookStartedReleasing || row.meta(t, session.WorkStartedKey) != "" {
+			t.Fatalf("record = %v, %v, work_started %q; want releasing and nothing recorded", res, err, row.meta(t, session.WorkStartedKey))
+		}
+	})
+
+	t.Run("release before the hand-over", func(t *testing.T) {
+		row := newStartedRow(t, map[string]string{session.WorkLadderKey: `{"v":1,"gen":7,"release":{"store":"rig:repo","bead":"work-1","gen":7}}`})
+		l := &startedLog{}
+		opts := startedOpts(startedEnv(startedToken, "7"))
+		opts.StartedCASOnly = never(t)
+		stdout := &orderedWriter{l: l}
+		var stderr bytes.Buffer
+		doHookClaim("q", "/rig", opts, l.ops(startedRoutedWork, row, nil), stdout, &stderr)
+		if got := decodeTurnBoundResult(t, stdout.buf.String()); got.Action == "work" || row.meta(t, session.WorkStartedKey) != "" || l.acked {
+			t.Fatalf("result %+v, work_started %q, acked %v; want the claim withheld, nothing recorded and no ack", got, row.meta(t, session.WorkStartedKey), l.acked)
+		}
+	})
+}
