@@ -163,6 +163,7 @@ go_test(
         "tmux_unit_test.go",
         "wake_pane_integration_test.go",
         "wake_pane_test.go",
+        "wrapped_wait_cost_test.go",
     ],
     data = glob(
         ["**"],

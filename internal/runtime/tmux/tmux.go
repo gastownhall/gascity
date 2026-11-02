@@ -3955,10 +3955,15 @@ func (t *Tmux) targetLooksLikeAnyProvider(target string, providers ...string) bo
 	if err != nil || strings.TrimSpace(pid) == "" {
 		return false
 	}
-	if processMatchesNames(pid, providers) {
-		return true
+	names := proctable.ProcessNameSet(providers)
+	if len(names) == 0 {
+		return false
 	}
-	return hasDescendantWithNames(pid, providers, 0)
+	processes, err := readProcessSnapshot()
+	if err != nil {
+		return false
+	}
+	return paneRuntimeState{PID: pid}.processAlive(names, processes)
 }
 
 // AcceptStartupDialogs dismisses all Claude Code startup dialogs that can block
@@ -4304,32 +4309,27 @@ func (t *Tmux) agentInputTarget(session string) (string, error) {
 	}
 
 	// Get agent process names from session environment
-	processNames := t.resolveSessionProcessNames(session)
-
-	// Check each pane for agent process
+	names := proctable.ProcessNameSet(t.resolveSessionProcessNames(session))
+	if len(names) == 0 {
+		return first.target, nil
+	}
+	// One process-table snapshot judges every pane, as IsRuntimeRunning
+	// does: a direct pane_current_command match, the pane process itself
+	// (version-as-argv[0], e.g. "2.1.30"), then its descendants (agents
+	// under shells or wrapper roots such as systemd-run or the gc-osc7501
+	// relay, which stay pane_current_command). Without a snapshot only the
+	// direct command match can pick a pane.
+	processes, err := readProcessSnapshot()
+	if err != nil {
+		processes = processSnapshot{}
+	}
 	for _, line := range lines {
 		_, fields, _ := strings.Cut(line, "\t")
 		r, ok := parse(fields)
 		if !ok {
 			continue
 		}
-		// Direct command match
-		for _, name := range processNames {
-			if r.cmd == name {
-				return r.target, nil
-			}
-		}
-
-		// Version-as-argv[0] (e.g., "2.1.30") — check real binary name
-		if processMatchesNames(r.pid, processNames) {
-			return r.target, nil
-		}
-
-		// Descendant walk: agents under shells ("bash -c 'exec claude'")
-		// or wrapper roots (systemd-run when GC_AGENT_SLICE is set) keep
-		// the shell/wrapper as pane_current_command — same unconditional
-		// descendant fallback as IsRuntimeRunning.
-		if hasDescendantWithNames(r.pid, processNames, 0) {
+		if (paneRuntimeState{Command: r.cmd, PID: r.pid}).processAlive(names, processes) {
 			return r.target, nil
 		}
 	}
@@ -4815,61 +4815,16 @@ func (t *Tmux) CheckSessionHealth(session string, maxInactivity time.Duration) Z
 	return SessionHealthy
 }
 
-// processMatchesNames checks if a process's binary name matches any of the given names.
-// Uses ps to get the actual command name from the process's executable path.
-// This handles cases where argv[0] is modified (e.g., Claude showing version "2.1.30").
-func processMatchesNames(pid string, names []string) bool {
-	nameSet := proctable.ProcessNameSet(names)
-	if len(nameSet) == 0 {
-		return false
-	}
-
-	// Use ps to get the command name (COMM column gives the executable name)
-	cmd := exec.Command("ps", "-p", pid, "-o", "comm=")
-	out, err := cmd.Output()
-	if err != nil {
-		return false
-	}
-	commPath := strings.TrimSpace(string(out))
-
-	// Fall back to argv[0] from the full command line. This catches wrapper
-	// scripts launched as "/path/to/codex" where COMM may report "bash" or
-	// another interpreter instead of the provider name.
-	cmd = exec.Command("ps", "-p", pid, "-o", "args=")
-	out, err = cmd.Output()
-	if err != nil {
-		return false
-	}
-	return proctable.ProcessMatchesNameSet(commPath, string(out), nameSet)
-}
-
-// hasDescendantWithNames checks if a process has any descendant (child, grandchild, etc.)
-// matching any of the given names. Recursively traverses the process tree up to maxDepth.
-// Used when the pane command is a shell (bash, zsh) that launched an agent.
-func hasDescendantWithNames(pid string, names []string, depth int) bool {
-	if len(names) == 0 || depth > maxProcessDescendantDepth {
-		return false
-	}
-	// Use pgrep to find child processes.
-	cmd := exec.Command("pgrep", "-P", pid)
-	out, err := cmd.Output()
-	if err != nil {
-		return false
-	}
-	lines := strings.Split(string(out), "\n")
-	for _, line := range lines {
-		childPid := strings.TrimSpace(line)
-		if childPid == "" {
-			continue
-		}
-		if processMatchesNames(childPid, names) {
-			return true
-		}
-		if hasDescendantWithNames(childPid, names, depth+1) {
-			return true
-		}
-	}
-	return false
+// readProcessSnapshot takes one process-table snapshot under the state
+// cache's fetch bound. procps reads the whole process table for every ps or
+// pgrep it runs, so the one-shot pane probes judge a whole process tree
+// against a single snapshot walked in memory rather than forking a ps per
+// descendant: under a wrapper root (the gc-osc7501 relay -> sudo -> bwrap ->
+// claude) that walk cost 17 full reads per look, seconds on a busy host.
+func readProcessSnapshot() (processSnapshot, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+	defer cancel()
+	return fetchProcessSnapshot(ctx)
 }
 
 // FindSessionByWorkDir finds tmux sessions where the pane's current working directory
@@ -5178,20 +5133,14 @@ func (t *Tmux) IsRuntimeRunning(session string, processNames []string) bool {
 	if err != nil || pid == "" {
 		return false
 	}
-	// If pane command is a shell, check descendants
-	for _, shell := range supportedShells {
-		if cmd == shell {
-			return hasDescendantWithNames(pid, processNames, 0)
-		}
+	// Judge the pane against one process-table snapshot, as the state cache
+	// does (paneRuntimeState.processAlive): a shell's descendants; otherwise
+	// the process itself, then its descendants.
+	processes, err := readProcessSnapshot()
+	if err != nil {
+		return false
 	}
-	// If pane command is unrecognized (not in processNames, not a shell),
-	// check if the process ITSELF matches (handles version-as-argv[0] like "2.1.30")
-	// before checking descendants.
-	if processMatchesNames(pid, processNames) {
-		return true
-	}
-	// Finally check descendants as fallback
-	return hasDescendantWithNames(pid, processNames, 0)
+	return paneRuntimeState{Command: cmd, PID: pid}.processAlive(proctable.ProcessNameSet(processNames), processes)
 }
 
 // IsAgentAlive checks if an agent is running in the session using agent-agnostic detection.
