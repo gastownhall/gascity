@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // legacyResolveClassStore is resolveClassStore as it stood before the router
@@ -435,5 +437,43 @@ func TestCLIMailStoreIsTheResolvedMessagingStore(t *testing.T) {
 				t.Errorf("the messaging store is %v, want %v", resolvedKey(want), resolvedKey(wantStore))
 			}
 		})
+	}
+}
+
+// TestSessionStartMailReadsTheMessagingBindingOnASplitCity pins
+// sessionStartMailInjection's messaging route end to end: on a split one-shot
+// city the auto-handoff mail lives in the binding, the hook is handed the
+// work store, and the injection still finds the handoff.
+func TestSessionStartMailReadsTheMessagingBindingOnASplitCity(t *testing.T) {
+	cityPath := t.TempDir()
+	binding := splittest.NewBindingStore(t)
+	work := splittest.NewWorkStore(t, "mc")
+	seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(binding))
+	sessionBead, err := binding.Create(beads.Bead{
+		Title:    "session worker",
+		Type:     sessionpkg.BeadType,
+		Labels:   []string{sessionpkg.LabelSession},
+		Metadata: map[string]string{"session_name": "worker", "alias": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	t.Setenv("GC_SESSION_ID", sessionBead.ID)
+	t.Setenv("GC_MAIL", "")
+	var stderr bytes.Buffer
+	if code := doHandoffAuto(binding, binding, events.Discard, "worker", []string{"context cycle"}, "", io.Discard, &stderr); code != 0 {
+		t.Fatalf("doHandoffAuto = %d; stderr=%s", code, stderr.String())
+	}
+	live := sessionpkg.Info{ID: sessionBead.ID, Alias: "worker", SessionName: "worker"}
+
+	startMail := sessionStartMailInjection(work, &live, cityPath, &stderr)
+
+	if len(startMail.autoHandoffIDs) != 1 {
+		t.Fatalf("the injection found %d auto-handoffs, want the one in the messaging binding (stderr %q)", len(startMail.autoHandoffIDs), stderr.String())
+	}
+	for id := range startMail.autoHandoffIDs {
+		if _, err := binding.Get(id); err != nil {
+			t.Errorf("auto-handoff %s is not the binding's: %v", id, err)
+		}
 	}
 }

@@ -1838,7 +1838,8 @@ func (cr *CityRuntime) tickDemandDesiredStateAndSync(p *tickPass) bool {
 // replacement beads are visible.
 func (cr *CityRuntime) tickReapStaleExtmsgBindings(p *tickPass) bool {
 	phaseStart := time.Now()
-	reapStaleExtmsgBindings(p.ctx, cr.mailBeadStore(), cr.sessionsBeadStore(), time.Now(), cr.stderr)
+	stores := cr.cityStores()
+	reapStaleExtmsgBindings(p.ctx, stores.Mail(), stores.Sessions(), time.Now(), cr.stderr)
 	p.recordPhase(TraceSiteControllerTickPhase, "reap_stale_extmsg_bindings", phaseStart, nil)
 	return false
 }
@@ -1849,7 +1850,8 @@ func (cr *CityRuntime) tickReapStaleExtmsgBindings(p *tickPass) bool {
 // what converges binding-less participants the binding reaper never sees.
 func (cr *CityRuntime) tickReapStaleExtmsgParticipants(p *tickPass) bool {
 	phaseStart := time.Now()
-	reapStaleExtmsgParticipants(p.ctx, cr.mailBeadStore(), cr.sessionsBeadStore(), cr.stderr)
+	stores := cr.cityStores()
+	reapStaleExtmsgParticipants(p.ctx, stores.Mail(), stores.Sessions(), cr.stderr)
 	p.recordPhase(TraceSiteControllerTickPhase, "reap_stale_extmsg_participants", phaseStart, nil)
 	return false
 }

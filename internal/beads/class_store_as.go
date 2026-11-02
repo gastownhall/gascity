@@ -215,9 +215,6 @@ func SameStore(a, b Store) (same bool) {
 // capabilities rather than the handle's. s must be a store: a zero handle
 // answers a reader whose reads panic, as HandlesFor(nil) does.
 func LiveFor(s Store) LiveReader {
-	if p, ok := As[interface{ Handles() StoreHandles }](s); ok {
-		return p.Handles().Live
-	}
 	return HandlesFor(physicalStore(s)).Live
 }
 
