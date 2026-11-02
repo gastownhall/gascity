@@ -6591,7 +6591,8 @@ func clearSessionConfigDriftDeferral(info sessionpkg.Info, sessFront *sessionpkg
 	if info.ConfigDriftDeferredAt == "" &&
 		info.ConfigDriftDeferredKey == "" &&
 		info.AttachedConfigDriftDeferredAt == "" &&
-		info.AttachedConfigDriftDeferredKey == "" {
+		info.AttachedConfigDriftDeferredKey == "" &&
+		info.ConfigDriftEscalatedAt == "" {
 		return nil
 	}
 	return sessFront.ApplyPatch(info.ID, map[string]string{
@@ -6599,6 +6600,7 @@ func clearSessionConfigDriftDeferral(info sessionpkg.Info, sessFront *sessionpkg
 		namedSessionConfigDriftDeferredKeyMetadata:    "",
 		sessionAttachedConfigDriftDeferredAtMetadata:  "",
 		sessionAttachedConfigDriftDeferredKeyMetadata: "",
+		configDriftEscalatedAtMetadata:                "",
 	})
 }
 
@@ -6979,6 +6981,7 @@ func resetConfiguredNamedSessionForConfigDriftInfo(
 	batch[namedSessionConfigDriftDeferredKeyMetadata] = ""
 	batch[sessionAttachedConfigDriftDeferredAtMetadata] = ""
 	batch[sessionAttachedConfigDriftDeferredKeyMetadata] = ""
+	batch[configDriftEscalatedAtMetadata] = ""
 	if err := sessionFrontDoor(store).ApplyPatch(info.ID, batch); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: recording config-drift repair for %s: %v\n", sessionName, err) //nolint:errcheck
 		return nil

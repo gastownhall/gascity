@@ -308,3 +308,66 @@ func TestSessionConfigDriftDeferredLegacyEscalatesOnce(t *testing.T) {
 		t.Fatalf("drain %+v over held work", ds)
 	}
 }
+
+// Kills an escalation marker that outlives its episode (#8345, AC-3): a
+// desired-hash change restarts the episode at now and clears the marker, in
+// v2 and legacy alike, and the new episode's next event is a first
+// observation, not an escalation.
+func TestHeldWorkDriftNewKeyResetsEpisode(t *testing.T) {
+	h := newHeldWorkDrift(t)
+	t.Run("v2", func(t *testing.T) {
+		it, _ := h.decide(t, nil, "config_drift_deferred_key", "v6:a:v6:b", "config_drift_deferred_at", rowAt(-2*time.Hour), "config_drift_escalated_at", rowAt(-time.Hour))
+		if it.Reason != decideDriftHeldWork || it.Patch["config_drift_deferred_at"] != gatherNow.UTC().Format(time.RFC3339) || it.Patch["config_drift_deferred_key"] != h.key {
+			t.Fatalf("decideRow = (%q, %q) %v, want the episode restamped at the pass", it.Kind, it.Reason, it.Patch)
+		}
+		if marker, ok := it.Patch["config_drift_escalated_at"]; !ok || marker != "" {
+			t.Fatalf("patch %v, want the escalation marker cleared", it.Patch)
+		}
+		if p := driftDeferredPayload(t, it.Event); p.Escalated {
+			t.Fatalf("payload %+v, want a first observation", p)
+		}
+	})
+	t.Run("legacy", func(t *testing.T) {
+		env, rec, sess, _ := heldWorkReconcilerEnv(t)
+		old := env.clk.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
+		env.setSessionMetadata(&sess, map[string]string{"config_drift_deferred_key": "v6:a:v6:b", "config_drift_deferred_at": old, "config_drift_escalated_at": old})
+		got := env.reconcileFresh(t, sess)
+		if got.Metadata["config_drift_deferred_at"] != env.clk.Now().UTC().Format(time.RFC3339) || got.Metadata["config_drift_escalated_at"] != "" {
+			t.Fatalf("metadata %v, want the episode restamped at the pass and its marker cleared", got.Metadata)
+		}
+		evs := driftDeferredEvents(rec)
+		if len(evs) != 1 || driftDeferredPayload(t, &evs[0]).Escalated {
+			t.Fatalf("events %+v, want one first observation", evs)
+		}
+	})
+}
+
+// Kills legacy's clears leaving the escalation marker behind (#8345, AC-3):
+// the convergence clear fires on a marker alone and clears it, and the
+// named drift reset clears it with the deferral stamps.
+func TestSessionConfigDriftClearsEscalationMarker(t *testing.T) {
+	marked := map[string]string{"config_drift_escalated_at": "2026-03-08T12:00:00Z"}
+	t.Run("convergence", func(t *testing.T) {
+		env := newReconcilerTestEnv(t)
+		sess := env.createSessionBead("worker", "worker")
+		env.setSessionMetadata(&sess, marked)
+		if err := clearSessionConfigDriftDeferral(env.sessionInfo(sess.ID), sessionFrontDoor(env.store)); err != nil {
+			t.Fatalf("clearSessionConfigDriftDeferral: %v", err)
+		}
+		if got := env.sessionInfo(sess.ID).ConfigDriftEscalatedAt; got != "" {
+			t.Fatalf("marker %q after the clear, want empty", got)
+		}
+	})
+	t.Run("named reset", func(t *testing.T) {
+		env := newReconcilerTestEnv(t)
+		sess := env.createSessionBead("worker", "worker")
+		env.setSessionMetadata(&sess, marked)
+		batch := resetConfiguredNamedSessionForConfigDriftInfo(env.city, env.sessionInfo(sess.ID), driftResumeSessionIDCapableTemplateParams(), env.store, env.sp, "worker", false, "asleep", time.Now().UTC(), &env.stderr)
+		if marker, ok := batch["config_drift_escalated_at"]; !ok || marker != "" {
+			t.Fatalf("batch %v, want the escalation marker cleared", batch)
+		}
+		if got := env.sessionInfo(sess.ID).ConfigDriftEscalatedAt; got != "" {
+			t.Fatalf("marker %q after the reset, want empty", got)
+		}
+	})
+}
