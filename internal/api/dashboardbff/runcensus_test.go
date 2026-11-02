@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,7 +13,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runproj"
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestRunCensusSourceServesOnlyWarmAggregateCounts(t *testing.T) {
@@ -58,7 +58,8 @@ func TestRunProjectionSourceReturnsImmediatelyWhileColdLoadIsPending(t *testing.
 	p := New(Deps{Resolver: fakeResolver{paths: map[string]string{"alpha": dir}}})
 	started := make(chan struct{})
 	release := make(chan struct{})
-	defer close(release)
+	var releaseOnce sync.Once
+	releaseLoad := func() { releaseOnce.Do(func() { close(release) }) }
 	previous := readRunColdLoad
 	readRunColdLoad = func(*runproj.Projector, string) error {
 		close(started)
@@ -68,12 +69,10 @@ func TestRunProjectionSourceReturnsImmediatelyWhileColdLoadIsPending(t *testing.
 	t.Cleanup(func() { readRunColdLoad = previous })
 
 	p.Start(t.Context())
-	t.Cleanup(p.Stop)
-	select {
-	case <-started:
-	case <-time.After(testutil.GoroutineRaceTimeout):
-		t.Fatal("background cold load did not start")
-	}
+	t.Cleanup(func() {
+		releaseLoad()
+		p.Stop()
+	})
 
 	done := make(chan runproj.RunProjectionSnapshot, 1)
 	go func() {
@@ -82,11 +81,17 @@ func TestRunProjectionSourceReturnsImmediatelyWhileColdLoadIsPending(t *testing.
 	}()
 
 	select {
+	case <-started:
+	case <-time.After(hangBudget):
+		t.Fatal("first projection demand did not start the cold load")
+	}
+
+	select {
 	case projection := <-done:
 		if projection.Ready || !projection.Partial || len(projection.Beads) != 0 {
 			t.Fatalf("cold projection = %+v, want empty partial warming snapshot", projection)
 		}
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("RunProjection blocked on the unfinished cold load")
 	}
 }
@@ -267,4 +272,62 @@ func runCensusBeadEvent(seq uint64, bead beads.Bead) events.Event {
 		Bead beads.Bead `json:"bead"`
 	}{Bead: bead})
 	return events.Event{Seq: seq, Type: events.BeadCreated, Payload: payload}
+}
+
+// A run cancel records its bead.closed events synchronously, then the client's
+// next GET /runs/{id} reads the warm projection. Folding only on the poll tick
+// served that GET the pre-cancel run (live: "active" for ~3 s after a 202
+// canceled). SyncRunProjection folds the log through its end before returning,
+// so the read after the write sees it — no store access, one log read.
+func TestRunProjectionSyncFoldsAppendedEventsBeforeTheNextPoll(t *testing.T) {
+	defer func(prev time.Duration) { runTailPollInterval = prev }(runTailPollInterval)
+	runTailPollInterval = time.Hour // only a sync can fold the append below
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, ".gc", "events.jsonl")
+	writeEventLog(t, logPath, runMoleculeEvent(1, "run-1", "test-formula", "worker-1"))
+
+	p := New(Deps{Resolver: fakeResolver{paths: map[string]string{"alpha": dir}}})
+	p.Start(t.Context())
+	t.Cleanup(p.Stop)
+	if census, _ := p.RunCensus(t.Context(), "alpha"); !census.Ready {
+		t.Fatalf("census = %+v, want the cold replay ready", census)
+	}
+
+	closedRoot := beads.Bead{
+		ID: "run-1", Title: "test-formula", Status: "closed", Type: "molecule",
+		Metadata: beads.StringMap{
+			"gc.formula_contract": "graph.v2", "gc.kind": "run", "gc.formula": "test-formula",
+			beadmeta.OutcomeMetadataKey: beadmeta.OutcomeCanceled,
+		},
+	}
+	payload, _ := json.Marshal(struct {
+		Bead beads.Bead `json:"bead"`
+	}{closedRoot})
+	appendEvents(t, logPath, events.Event{Seq: 2, Type: events.BeadClosed, Payload: payload})
+
+	rootStatus := func() string {
+		projection, ok := p.RunProjection(t.Context(), "alpha")
+		if !ok {
+			t.Fatal("RunProjection reported a registered city as unknown")
+		}
+		for _, b := range projection.Beads {
+			if b.ID == "run-1" {
+				return b.Status
+			}
+		}
+		return ""
+	}
+	if got := rootStatus(); got != "open" {
+		t.Fatalf("before sync root status = %q, want the stale open row (no poll has run)", got)
+	}
+	if !p.SyncRunProjection(t.Context(), "alpha") {
+		t.Fatal("SyncRunProjection = false, want the running tailer to fold")
+	}
+	if got := rootStatus(); got != "closed" {
+		t.Fatalf("after sync root status = %q, want closed", got)
+	}
+	if p.SyncRunProjection(t.Context(), "ghost") {
+		t.Fatal("SyncRunProjection = true for an unknown city")
+	}
 }

@@ -1,5 +1,5 @@
 import type { RunLane } from 'gas-city-dashboard-shared';
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import type { BadgeSeverity } from '../../attention/compose';
 import { attentionListItemProps } from '../../attention/routeHighlight';
 import { formatRelative } from '../../hooks/time';
@@ -59,6 +59,18 @@ export function LaneCard({ lane, now, attentionSeverity = null, blocked }: LaneC
       <div className="flex items-baseline justify-between gap-4">
         <span className={`text-label uppercase tracking-wider ${phaseLabelTone(lane.phase)}`}>
           {lane.phaseLabel}
+          {lane.stale && (
+            <span
+              className="ml-2 text-fg-faint"
+              title={
+                lane.staleSince
+                  ? `no activity since ${lane.staleSince}`
+                  : 'no recent activity'
+              }
+            >
+              · stale
+            </span>
+          )}
         </span>
         <span
           className="text-label uppercase tracking-wider text-fg-faint tnum tabular-nums"

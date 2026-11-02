@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"strings"
 	"testing"
 
@@ -23,6 +24,7 @@ import (
 // (#127-class drift). This FAILS against pendingCreateResidueFold(info) and PASSES
 // against pendingCreateResidueFold(partialInfo).
 func TestRecoverRunningPendingCreate_BuildFailResidueMatchesStore(t *testing.T) {
+	testCity := t.TempDir()
 	const parentSID = "brain-xyz"
 	candidate, cfg, store := newForkSessionCandidate(t, forkClaude(), parentSID, "fresh")
 	if candidate.info.StartedConfigHash != "deadbeef" {
@@ -33,10 +35,10 @@ func TestRecoverRunningPendingCreate_BuildFailResidueMatchesStore(t *testing.T) 
 	// pre-flight guard fires clearStaleResumeKeyMetadata (persisting started_config_hash="")
 	// before validateForkLaunch aborts on fork + wake_mode=fresh.
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return false, true }
+	staleResumeKeyProbe = func(_ []string, _, _, _ string) (present, probeable bool) { return false, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
-	ok, residue := recoverRunningPendingCreate(candidate.info, candidate.tp, cfg, store, clock.Real{}, nil)
+	ok, residue := recoverRunningPendingCreate(testCity, candidate.info, candidate.tp, cfg, store, nil, clock.Real{}, io.Discard, nil)
 	if ok {
 		t.Fatal("recoverRunningPendingCreate ok=true; want false (buildPreparedStart errors on fork + wake_mode=fresh)")
 	}
@@ -73,6 +75,66 @@ func forkClaude() *config.ResolvedProvider {
 		ResumeStyle:   "flag",
 		ForkFlag:      "--fork-session",
 		SessionIDFlag: "--session-id",
+	}
+}
+
+// TestForkLaunch_RealBuiltinClaudeSpecPinsContract closes Finding 1 of the
+// PR #5396 post-merge review: the fork-launch suite previously asserted only
+// against the synthetic forkClaude() twin, so the builtin↔fork contract could
+// drift from the real BuiltinProviders()["claude"] spec undetected. Before that
+// PR the claude builtin carried ForkFlag but an empty SessionIDFlag, so
+// validateForkLaunch fail-closed on every warm-arm launch and the fork command
+// was never emitted in production; the SessionIDFlag addition flips that live.
+// This drives the REAL resolved claude provider (worker builtin →
+// config.BuiltinProviders → ResolveProvider/specToResolved) through
+// validateForkLaunch + resolveSessionCommand so the actual spec — not a mock —
+// pins the fork CLI.
+func TestForkLaunch_RealBuiltinClaudeSpecPinsContract(t *testing.T) {
+	const (
+		parentSID  = "brain-parent"
+		sessionKey = "gc-key"
+	)
+	rp, err := config.ResolveProvider(
+		&config.Agent{Provider: "claude"},
+		nil,
+		map[string]config.ProviderSpec{"claude": config.BuiltinProviders()["claude"]},
+		func(string) (string, error) { return "/usr/bin/claude", nil },
+	)
+	if err != nil {
+		t.Fatalf("ResolveProvider(claude): %v", err)
+	}
+
+	// The fork form assumes flag-style resume plus non-empty fork + session-id
+	// flags. Assert them individually so a spec regression fails crisply here
+	// rather than only as a downstream command diff.
+	if rp.ForkFlag == "" {
+		t.Errorf("real claude spec ForkFlag is empty; fork-launch would fail-closed")
+	}
+	if rp.SessionIDFlag == "" {
+		t.Errorf("real claude spec SessionIDFlag is empty; fork-launch would fail-closed")
+	}
+	if rp.ResumeFlag == "" || rp.ResumeStyle != "flag" {
+		t.Errorf("real claude spec resume form = (%q,%q), want flag-style resume", rp.ResumeFlag, rp.ResumeStyle)
+	}
+
+	// The fail-closed guard that flipped live: a first-start warm arm on the
+	// real spec must now validate rather than error.
+	if err := validateForkLaunch(parentSID, rp, true, false, false); err != nil {
+		t.Fatalf("validateForkLaunch(real claude) = %v, want nil (warm-arm first start must pass)", err)
+	}
+
+	// Pin the literal fork CLI claude accepts, built from the real spec's
+	// flags — if the builtin flags drift, this exact string breaks.
+	const wantFork = "claude --resume brain-parent --fork-session --session-id gc-key"
+	if got := resolveSessionCommand(rp.Command, sessionKey, parentSID, rp, true, false); got != wantFork {
+		t.Errorf("fork command = %q, want %q", got, wantFork)
+	}
+
+	// The PR's core mint path: a first start with no parent takes the fresh
+	// --session-id form from the same real spec.
+	const wantFresh = "claude --session-id gc-key"
+	if got := resolveSessionCommand(rp.Command, sessionKey, "", rp, true, false); got != wantFresh {
+		t.Errorf("fresh mint command = %q, want %q", got, wantFresh)
 	}
 }
 
@@ -356,7 +418,7 @@ func TestBuildPreparedStart_ForkValidationNotBypassedByStaleKeyRecovery(t *testi
 			prevProbe := staleResumeKeyProbe
 			// The own session_key is stale (transcript gone) so recovery fires; the
 			// parent's presence is controlled per case.
-			staleResumeKeyProbe = func(_, _, key string) (present, probeable bool) {
+			staleResumeKeyProbe = func(_ []string, _, _, key string) (present, probeable bool) {
 				if key == parentSID {
 					return tc.parentPresent, true
 				}
@@ -389,13 +451,19 @@ func TestBuildPreparedStart_ForkValidationNotBypassedByStaleKeyRecovery(t *testi
 // gc.brain_parent_sid key, the value the launch path forks off of.
 func TestPoolTriggerMetadata_StampsParentSID(t *testing.T) {
 	req := SessionRequest{WorkBeadID: "wb-1", BrainParentSID: "brain-abc"}
-	md := poolTriggerMetadata(nil, nil, "city/claude", req)
+	md, err := poolTriggerMetadata(nil, nil, "city/claude", req)
+	if err != nil {
+		t.Fatalf("poolTriggerMetadata: %v", err)
+	}
 	if got := md[beadmeta.BrainParentSIDMetadataKey]; got != "brain-abc" {
 		t.Errorf("%s = %q, want brain-abc", beadmeta.BrainParentSIDMetadataKey, got)
 	}
 
 	// No parent sid means no key — the fresh path is byte-for-byte unchanged.
-	plain := poolTriggerMetadata(nil, nil, "city/claude", SessionRequest{WorkBeadID: "wb-1"})
+	plain, err := poolTriggerMetadata(nil, nil, "city/claude", SessionRequest{WorkBeadID: "wb-1"})
+	if err != nil {
+		t.Fatalf("poolTriggerMetadata plain: %v", err)
+	}
 	if _, ok := plain[beadmeta.BrainParentSIDMetadataKey]; ok {
 		t.Errorf("plain request stamped %s, want absent", beadmeta.BrainParentSIDMetadataKey)
 	}

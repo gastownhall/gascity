@@ -13,7 +13,7 @@
 // iMessage conversation-id model. Routing policy stays in gc.
 
 import { fileURLToPath } from 'node:url'
-import { loadIMessageConnector } from './lib/openclaw.mjs'
+import { loadIMessageConnector, watchDaemonClose } from './lib/openclaw.mjs'
 import { env, makeGcClient, startCallbackServer, makeAdapterRegistrar, makeShutdown } from './lib/gc-client.mjs'
 import { forwardWithRetry } from './lib/inbound.mjs'
 
@@ -111,12 +111,15 @@ const client = await oc.createIMessageRpcClient({
 if (typeof client.start === 'function') await client.start() // idempotent
 
 // The connector's RPC client fails permanently when the imsg daemon dies;
-// exit loudly instead of staying registered with gc as a zombie adapter.
-client.waitForClose?.().then(() => {
-  if (!shuttingDown) {
-    console.error('[bridge] imsg rpc daemon exited unexpectedly')
+// exit loudly instead of staying registered with gc as a zombie adapter. Our
+// own stop() during shutdown also closes it; watchDaemonClose (lib/openclaw.mjs)
+// handles both, including openclaw >= 2026.8 rejecting waitForClose().
+watchDaemonClose(client, {
+  isShuttingDown: () => shuttingDown,
+  onUnexpectedClose: (err) => {
+    console.error('[bridge] imsg rpc daemon exited unexpectedly' + (err ? `: ${err.message ?? err}` : ''))
     process.exit(1)
-  }
+  },
 })
 
 async function onInbound(params) {

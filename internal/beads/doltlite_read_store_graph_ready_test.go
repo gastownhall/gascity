@@ -116,3 +116,47 @@ func TestDoltliteReadStoreReadyGraphOnlyExcludesBlockedWisps(t *testing.T) {
 		t.Errorf("ReadyGraphOnly missing gco-dep-unblocked (closed-dep wisp); ids=%v", testBeadIDs(rows))
 	}
 }
+
+// TestDoltliteReadStoreReadyGraphOnlyExcludesBlockedWispsByIssueDependency
+// pins ga-rh2mgk: doltliteWispDepGate must gate on depends_on_issue_id targets
+// (durable issues table), not only depends_on_wisp_id. A wisp depending on a
+// still-open durable issue must be excluded; one depending on a closed
+// durable issue must appear as ready.
+func TestDoltliteReadStoreReadyGraphOnlyExcludesBlockedWispsByIssueDependency(t *testing.T) {
+	now := time.Now().UTC()
+	store := newDoltliteStoreWithRows(t,
+		[]testDoltliteIssue{
+			{ID: "gco-issue-blocker-open", Title: "open durable blocker", Status: "open", IssueType: "task", CreatedAt: now},
+			{ID: "gco-issue-blocker-done", Title: "closed durable blocker", Status: "closed", IssueType: "task", CreatedAt: now.Add(time.Second)},
+		},
+		[]testDoltliteIssue{
+			// Blocked by durable issue gco-issue-blocker-open (open) → must be excluded.
+			{
+				ID: "gco-issue-dep-blocked", Title: "blocked by durable issue", Status: "open", IssueType: "molecule", Ephemeral: true,
+				CreatedAt:    now.Add(2 * time.Second),
+				Dependencies: []testDoltliteDependency{{DependsOnIssueID: "gco-issue-blocker-open", Type: "blocks"}},
+			},
+			// Blocked by durable issue gco-issue-blocker-done (closed) → must be included.
+			{
+				ID: "gco-issue-dep-unblocked", Title: "unblocked by durable issue", Status: "open", IssueType: "molecule", Ephemeral: true,
+				CreatedAt:    now.Add(3 * time.Second),
+				Dependencies: []testDoltliteDependency{{DependsOnIssueID: "gco-issue-blocker-done", Type: "blocks"}},
+			},
+		})
+
+	graphOnly, ok := GraphOnlyReadyFor(store)
+	if !ok {
+		t.Skip("DoltliteReadStore does not implement GraphOnlyReadyStore")
+	}
+
+	rows, err := graphOnly.ReadyGraphOnly()
+	if err != nil {
+		t.Fatalf("ReadyGraphOnly: %v", err)
+	}
+	if hasTestBead(rows, "gco-issue-dep-blocked") {
+		t.Errorf("ReadyGraphOnly included wisp gco-issue-dep-blocked whose durable-issue dep gco-issue-blocker-open is still open")
+	}
+	if !hasTestBead(rows, "gco-issue-dep-unblocked") {
+		t.Errorf("ReadyGraphOnly missing gco-issue-dep-unblocked (closed durable-issue dep); ids=%v", testBeadIDs(rows))
+	}
+}

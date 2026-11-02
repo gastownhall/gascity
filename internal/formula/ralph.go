@@ -99,6 +99,7 @@ func expandRalph(step *Step) ([]*Step, error) {
 	// formula syntax, so they intentionally retain legacy ralph naming.
 	iteration.Metadata = withMetadata(iteration.Metadata, map[string]string{
 		beadmeta.AttemptMetadataKey:     strconv.Itoa(attempt),
+		beadmeta.IterationMetadataKey:   strconv.Itoa(attempt),
 		beadmeta.StepIDMetadataKey:      step.ID,
 		beadmeta.RalphStepIDMetadataKey: step.ID,
 		beadmeta.StepRefMetadataKey:     iterationID,
@@ -145,6 +146,7 @@ func expandNestedRalph(step, control, specStep *Step, iterationID string, attemp
 		beadmeta.StepIDMetadataKey:      step.ID,
 		beadmeta.RalphStepIDMetadataKey: step.ID,
 		beadmeta.AttemptMetadataKey:     strconv.Itoa(attempt),
+		beadmeta.IterationMetadataKey:   strconv.Itoa(attempt),
 		beadmeta.StepRefMetadataKey:     iterationID,
 		// gc.control_for on the scope root only (body children hang off it via
 		// gc.scope_ref and are not attempt roots — they must not be stamped).
@@ -159,6 +161,59 @@ func expandNestedRalph(step, control, specStep *Step, iterationID string, attemp
 	out := []*Step{control, specStep, iteration}
 	out = append(out, flattenedBody...)
 	return out, nil
+}
+
+// RalphBodyChildAttempt returns the gc.attempt a ralph body child carries: the
+// iteration it runs in. That is the v1.4.2 contract, and pack gates join the
+// beads of one iteration on it (workflows adopt-pr-review-approved.sh
+// load_verdict matches gc.attempt == the iteration). #5635 briefly stamped a
+// retry child's own counter here instead, which silently wedged those loops
+// from iteration 2 on; the counter now lives in gc.retry_attempt
+// (RalphBodyChildRetryAttempt), so gc.attempt can keep meaning the iteration.
+//
+// Both the compile-time expansion (namespaceRalphBodySteps) and the runtime
+// re-spawn (dispatch.buildAttemptRecipe) route through here so iteration 1 and
+// iterations 2+ cannot disagree about what a child's counters mean.
+func RalphBodyChildAttempt(_ *Step, iterationNum int) string {
+	return strconv.Itoa(iterationNum)
+}
+
+// RalphBodyChildRetryAttempt returns the gc.retry_attempt a ralph body child
+// carries, or "" when the child is not a retry attempt root. A frozen body
+// arrives already retry-expanded, so a retry child's first attempt is in the
+// child list as <step>.attempt.1; it restarts at that number in every
+// iteration, which is what keeps a retry first reached in iteration N from
+// being born at attempt N against its own max_attempts (ga-v7pu5).
+//
+// Specs frozen before gc.retry_attempt existed carry the counter only in the
+// ".attempt.<n>" suffix of the child ID (and, for v1.5.0 pre-releases, in
+// gc.attempt), so the ID is the fallback: it is the one place every binary has
+// always written the retry number.
+func RalphBodyChildRetryAttempt(child *Step) string {
+	if v := strings.TrimSpace(child.Metadata[beadmeta.RetryAttemptMetadataKey]); v != "" {
+		return v
+	}
+	// Only an attempt root carries a lineage stamp or a spec attempt; a plain
+	// step whose ID merely ends in ".attempt.<n>" is not one.
+	if strings.TrimSpace(child.Metadata[beadmeta.ControlForMetadataKey]) == "" &&
+		strings.TrimSpace(child.Metadata[beadmeta.AttemptMetadataKey]) == "" {
+		return ""
+	}
+	return trailingAttemptOrdinal(child.ID)
+}
+
+// trailingAttemptOrdinal returns n when id ends in ".attempt.<n>", else "".
+func trailingAttemptOrdinal(id string) string {
+	const marker = ".attempt."
+	idx := strings.LastIndex(id, marker)
+	if idx < 0 {
+		return ""
+	}
+	n := id[idx+len(marker):]
+	if _, err := strconv.Atoi(n); err != nil || n == "" {
+		return ""
+	}
+	return n
 }
 
 func collectRalphBodyStepIDs(steps []*Step) map[string]bool {
@@ -206,7 +261,8 @@ func namespaceRalphBodySteps(steps []*Step, iterationID string, owner *Step, att
 				beadmeta.ScopeRoleMetadataKey:   metadataDefault(node.Metadata, beadmeta.ScopeRoleMetadataKey, beadmeta.ScopeRoleMember),
 				beadmeta.StepIDMetadataKey:      childStepID,
 				beadmeta.RalphStepIDMetadataKey: owner.ID,
-				beadmeta.AttemptMetadataKey:     strconv.Itoa(attempt),
+				beadmeta.AttemptMetadataKey:     RalphBodyChildAttempt(node, attempt),
+				beadmeta.IterationMetadataKey:   strconv.Itoa(attempt),
 				beadmeta.StepRefMetadataKey:     clone.ID,
 			}
 			// A nested control's attempt/iteration root carries gc.control_for as

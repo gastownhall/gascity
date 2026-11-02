@@ -88,7 +88,29 @@ exhaustion; bead az-405 has the full evidence trail). The adapter was rewritten 
   (`GC_HERDR_STARTUP_DELIVERY_UNCONFIRMED`, cleared unconditionally by the next
   `Start`) and stderr. Every bound here is the shared boot budget
   (`startupBootBudgetMS`, 60s), not the 15s shell-prompt bounds. Mid-session
-  nudges keep the fast un-waited form.
+  nudges keep the fast un-waited form. The first turn's paste fallback is for
+  raw and bare-shell panes only: a kind launch's pane with no named agent is
+  one whose agent exited, and the shell that outlived it would run the turn as
+  commands, so that turn is recorded as undelivered instead.
+- **Startup dialogs** (`startup_dialogs.go`, #7027): when
+  `runtime.ShouldAcceptStartupDialogs` holds, Start runs the shared
+  startup-dialog matcher on the launch's own pane, mirroring tmux's
+  `launchOrchestration`: one pass before the readiness wait, and one after it
+  for dialogs drawn after the first prompt. herdr ≥0.8.2's `agent start` exits
+  `agent_not_ready` once it reads the new agent as blocked on such a dialog;
+  that counts as a launch only while herdr's registry still lists an agent on
+  the pane. The readiness wait names `blocked` too (`--until idle/done/blocked`),
+  so an agent parked on a dialog ends it at once instead of holding it past
+  Start's deadline. A trust dialog the last pass could not confirm withholds
+  the first turn, recorded on the marker, because its submit Enter would
+  answer the dialog. A ctx that has ended by the end of a pass fails Start,
+  except a deadline in the readiness wait or the pass after it on a session
+  that is still up: like tmux's `ignoreDeadlineIfSessionAlive`, Start then
+  returns nil and records the undelivered first turn. After the passes Start
+  checks that the session survived them (tmux's Step 5): a dialog answer can
+  end the agent (the rate-limit step selects Stop), so a kind launch whose
+  agent herdr no longer lists, or a raw launch whose pane is gone, fails Start
+  with `runtime.ErrSessionDiedDuringStartup`.
 
 ### Operational gotchas (learned in production, 2026-07-26)
 
@@ -207,7 +229,7 @@ herdr just becomes another selectable runtime name.
 | `SetMeta`/`GetMeta`/`RemoveMeta` | — | ⚠ no general KV (Gaps) |
 | `Peek(name, lines)` | `pane.read --source recent-unwrapped --lines N` | ✅ (also `--source detection`) |
 | `ListRunning(prefix)` | `workspace.list` + label/name-prefix filter | ✅ orphan detection |
-| `GetLastActivity` | — | ⚠ no timestamp (Gaps) |
+| `GetLastActivity` | tracker-maintained (activity.go): polls `agent.list`, stamps observed changes | ✅ implemented (see Gaps 3 for the rules) |
 | `ClearScrollback` | — | ⚠ not in docs; best-effort (Gaps) |
 | `CopyTo` | host-side fs copy into pane `foreground_cwd` | ✅ provider-agnostic |
 | `SendKeys` | `pane.send_keys` | ✅ exact match (`enter`/`esc`/`ctrl+h`/…) |
@@ -236,8 +258,23 @@ herdr just becomes another selectable runtime name.
    runtime dir). Low risk, fully owned by the provider.
 2. **`IsAttached`** — no dedicated query. **Bridge:** parse `herdr status` / infer from
    `pane.get`; or return false (the contract permits "attach detection unsupported").
-3. **`GetLastActivity`** — no timestamp. **Bridge:** subscribe to `output` events and stamp,
-   or diff `pane.read`. Best-effort per the contract.
+3. **`GetLastActivity`** — no timestamp anywhere in the API. **Bridged (implemented,
+   activity.go):** a lazily started tracker polls `agent.list` and stamps per-session
+   activity from what polls OBSERVE — first observation, any agent-status change, and
+   (only for status `unknown`, where herdr cannot classify the pane) a moved output
+   `revision` counter. `working` reads as continuously active — a status that sits at
+   working emits no transitions, and stamping only transitions would hand the
+   progress-stall/idle nets a live agent to kill. Events are never a stamp source
+   (herdr replays a backlog to every new subscription; 0.7.3 also offers **no**
+   output-changed subscription — `events.subscribe` rejects it) — the session-event
+   stream only accelerates the next poll. Detected-idle revision ticks (TUI redraws) do
+   not stamp, so idle detection cannot be poisoned. Live caveat: 0.7.3 moves the
+   revision only while a client renders the pane — a headless server (gc's normal
+   mode) holds it at 0, so the unknown-status leg contributes exactly when someone is
+   attached, and detected agents carry the tracker everywhere else.
+   `CanReportActivity=true`; `NeedsClaimBackstop=true` keeps the reconciler's
+   stalled-claim nudge backstop active (activity restores idle visibility, not
+   startup-paste redelivery).
 4. **`ClearScrollback`** — not in the API. **Bridge:** best-effort no-op (contract allows), or
    close+respawn the pane on restart.
 5. **Signals** — only keystroke `ctrl+c` (no signal API). **Bridge:** soft `Interrupt` =
@@ -251,6 +288,10 @@ herdr just becomes another selectable runtime name.
 2. **Native push events** (`events.subscribe`) — gascity **polls** today for liveness/wedge
    detection. `pane.exited` → instant dead-agent detection; `agent_status_changed` →
    real-time. **Directly relevant to this town's repeated wedged-agent incidents.**
+   *Implemented:* `events.go` exposes this as `runtime.SessionEventProvider` (self-healing
+   subscribe loop, resync-on-reconnect, level-triggered contract — the server replays a
+   recent-event backlog to every new subscription, so events are hints to re-poll, never
+   authoritative transitions).
 3. **Native agent-state** (`agent_status` working/idle/done/blocked, `--source detection`,
    `wait agent-status`/`wait output`) maps *directly* onto `IdleWaitProvider` /
    `InterruptBoundaryWaitProvider` (tmux implements these by polling/scraping). The

@@ -46,6 +46,21 @@ const (
 	sqliteFenceChildRollbackCrash  = "rollback-crash"
 )
 
+// sqliteFenceHangBudget bounds the two pure hang detectors below ((*sqliteFenceChild).line
+// and .wait) — no assertion depends on how long either takes, so this is a hang detector, not
+// a latency assertion, and raising it does not slow a passing run because both waits return the
+// instant their condition is met. testutil.ExecRaceTimeout (10s) is a floor, not a target
+// (TESTING.md "Floors, ceilings, and inputs"): each child re-execs the 169 MB test binary and
+// must clear Go runtime + package init, flag parse and test enumeration, openGraphSource (SQLite
+// open + schema), a store.Create INSERT, and a WAL fsync before printing its ready line, across
+// 44 child spawn sites and 43 boundary subtests. Measured latency stayed under 3.02s even at 48
+// concurrent children; a >10s gate observation coincided with concurrent Go link steps at ~2.3 GB
+// RSS each and swap at 30/39 GB used, i.e. concurrency plus memory pressure, not pure CPU
+// starvation. Mirrors the precedent in cmd/gc/hangbudget_test.go (hangBudget = 6 *
+// testutil.GoroutineRaceTimeout); 6x ExecRaceTimeout is 60s, well under the 20m gate package
+// timeout.
+const sqliteFenceHangBudget = 6 * testutil.ExecRaceTimeout
+
 // TestSQLiteFenceHelperProcess is entered only by the real-process fence
 // composition test below. The parent and source never share SQLite descriptors.
 func TestSQLiteFenceHelperProcess(t *testing.T) {
@@ -1060,6 +1075,38 @@ func TestSQLiteWriterFenceProcessComposition(t *testing.T) {
 	})
 }
 
+// TestSQLiteFenceChildKillOrder pins down (*sqliteFenceChild).kill's contract
+// directly, without a real subprocess: killFn must run before closeStdin. A
+// fence child blocks reading stdin inside a deliberately-uncommitted
+// transaction so a forced kill leaves a crash artifact (e.g. a hot rollback
+// journal) on disk for the test to inspect. Closing stdin first delivers an
+// ordinary EOF to that blocked read, which can let the child resume and run
+// its own deferred cleanup before the kill signal actually arrives -- wiping
+// the very artifact the kill was supposed to preserve. Killing first
+// forecloses that: once a fatal signal is pending for a task blocked in an
+// interruptible sleep, the kernel handles it at the return-to-userspace
+// checkpoint regardless of what else woke the task, so the child can never
+// reach that cleanup code. Reversing the order (as this once did) reopens a
+// real race whose outcome depends on OS scheduling, which is exactly why it
+// showed up only under load (ga-5skods) -- so this test asserts the order
+// directly instead of racing a real process to reproduce it.
+func TestSQLiteFenceChildKillOrder(t *testing.T) {
+	var order []string
+	killFn := func() error {
+		order = append(order, "kill")
+		return nil
+	}
+	closeStdin := func() error {
+		order = append(order, "close")
+		return nil
+	}
+	killSQLiteFenceChildInOrder(killFn, closeStdin)
+	want := []string{"kill", "close"}
+	if !reflect.DeepEqual(order, want) {
+		t.Fatalf("killSQLiteFenceChildInOrder call order = %v, want %v: killFn must run before closeStdin, or a child blocked reading stdin can wake via ordinary EOF and run more code before it is actually killed", order, want)
+	}
+}
+
 func inspectProcessGraph(t *testing.T, root string) storebinding.Inspection {
 	t.Helper()
 	inspection, err := InspectGraph(context.Background(), storebinding.BindingSpec{
@@ -1139,7 +1186,7 @@ func (c *sqliteFenceChild) line(t *testing.T) string {
 			ok   bool
 		}{line: c.stdout.Text(), ok: ok}
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), sqliteFenceHangBudget)
 	defer cancel()
 	select {
 	case result := <-lines:
@@ -1148,7 +1195,7 @@ func (c *sqliteFenceChild) line(t *testing.T) string {
 		}
 		return result.line
 	case <-ctx.Done():
-		t.Fatalf("timed out waiting for SQLite child protocol line after %s", testutil.ExecRaceTimeout)
+		t.Fatalf("timed out waiting for SQLite child protocol line after %s", sqliteFenceHangBudget)
 		return ""
 	}
 }
@@ -1177,11 +1224,28 @@ func (c *sqliteFenceChild) kill(t *testing.T) {
 	if c.finished {
 		return
 	}
-	_ = c.stdin.Close()
+	killFn := func() error { return nil }
 	if c.cmd.Process != nil {
-		_ = c.cmd.Process.Kill()
+		killFn = c.cmd.Process.Kill
 	}
+	killSQLiteFenceChildInOrder(killFn, c.stdin.Close)
 	_ = c.wait(t)
+}
+
+// killSQLiteFenceChildInOrder issues killFn before closeStdin. A fence child
+// blocks reading stdin inside a deliberately-uncommitted transaction so a
+// forced kill leaves a crash artifact (e.g. a hot rollback journal) on disk
+// for the test to inspect. Closing stdin first would deliver an ordinary EOF
+// to that blocked read, which can let the child resume and run its own
+// deferred cleanup before the kill signal arrives -- wiping the very
+// artifact the kill was supposed to preserve. Killing first forecloses that:
+// once a fatal signal is pending for a task blocked in an interruptible
+// sleep, the kernel handles it at the return-to-userspace checkpoint
+// regardless of what else woke the task, so the child can never reach that
+// cleanup code (ga-5skods).
+func killSQLiteFenceChildInOrder(killFn, closeStdin func() error) {
+	_ = killFn()
+	_ = closeStdin()
 }
 
 func (c *sqliteFenceChild) wait(t *testing.T) error {
@@ -1191,14 +1255,14 @@ func (c *sqliteFenceChild) wait(t *testing.T) error {
 	}
 	waited := make(chan error, 1)
 	go func() { waited <- c.cmd.Wait() }()
-	ctx, cancel := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), sqliteFenceHangBudget)
 	defer cancel()
 	select {
 	case err := <-waited:
 		c.finished = true
 		return err
 	case <-ctx.Done():
-		return fmt.Errorf("timed out after %s", testutil.ExecRaceTimeout)
+		return fmt.Errorf("timed out after %s", sqliteFenceHangBudget)
 	}
 }
 

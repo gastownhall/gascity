@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -8,11 +9,11 @@ func TestBuiltinProvidersAndOrder(t *testing.T) {
 	providers := BuiltinProviders()
 	order := BuiltinProviderOrder()
 
-	if len(providers) != 17 {
-		t.Fatalf("len(BuiltinProviders()) = %d, want 17", len(providers))
+	if len(providers) != 18 {
+		t.Fatalf("len(BuiltinProviders()) = %d, want 18", len(providers))
 	}
-	if len(order) != 17 {
-		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 17", len(order))
+	if len(order) != 18 {
+		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 18", len(order))
 	}
 
 	for _, name := range order {
@@ -75,6 +76,66 @@ func TestBuiltinProviderMimoCodeSpec(t *testing.T) {
 	}
 	if mimocodeIdx != opencodeIdx+1 {
 		t.Errorf("mimocode order index = %d, want immediately after opencode (%d)", mimocodeIdx, opencodeIdx)
+	}
+}
+
+func TestBuiltinProviderZCodeSpec(t *testing.T) {
+	spec, ok := BuiltinProviders()["zcode"]
+	if !ok {
+		t.Fatal("BuiltinProviders() missing zcode")
+	}
+	if spec.Command != "zcode-repl" {
+		t.Errorf("zcode Command = %q, want zcode-repl", spec.Command)
+	}
+	if spec.DisplayName != "ZCode (Z.ai GLM harness)" {
+		t.Errorf("zcode DisplayName = %q", spec.DisplayName)
+	}
+	if spec.PromptMode != "none" {
+		t.Errorf("zcode PromptMode = %q, want none (the adapter is a REPL)", spec.PromptMode)
+	}
+	if spec.PromptFlag != "" {
+		t.Errorf("zcode PromptFlag = %q, want empty under PromptMode none", spec.PromptFlag)
+	}
+	if spec.ReadyPromptPrefix != "zcode-repl ready" {
+		t.Errorf("zcode ReadyPromptPrefix = %q, want the adapter marker", spec.ReadyPromptPrefix)
+	}
+	if spec.ReadyDelayMs <= 0 {
+		t.Errorf("zcode ReadyDelayMs = %d, want a positive probe budget", spec.ReadyDelayMs)
+	}
+	if len(spec.ProcessNames) != 2 || spec.ProcessNames[0] != "bash" || spec.ProcessNames[1] != "node" {
+		t.Errorf("zcode ProcessNames = %v, want [bash node]", spec.ProcessNames)
+	}
+	// Restart continuity is adapter-internal (persisted provider session id
+	// replayed with --resume), so gc must not compose any resume flag.
+	if spec.ResumeFlag != "" || spec.ResumeStyle != "" || spec.ResumeCommand != "" || spec.SessionIDFlag != "" {
+		t.Errorf("zcode declares resume wiring (%q,%q,%q,%q); continuity is adapter-internal",
+			spec.ResumeFlag, spec.ResumeStyle, spec.ResumeCommand, spec.SessionIDFlag)
+	}
+	if spec.AcceptStartupDialogs == nil || *spec.AcceptStartupDialogs {
+		t.Errorf("zcode AcceptStartupDialogs = %v, want an explicit false", spec.AcceptStartupDialogs)
+	}
+	if spec.SupportsHooks {
+		t.Error("zcode SupportsHooks = true, want false")
+	}
+	if spec.SupportsACP {
+		t.Error("zcode SupportsACP = true, want false")
+	}
+	// Evidence: the bundle's NodeContextSourceAdapter context-source list is
+	// ["AGENTS.md"], and /init writes AGENTS.md.
+	if spec.InstructionsFile != "AGENTS.md" {
+		t.Errorf("zcode InstructionsFile = %q, want AGENTS.md", spec.InstructionsFile)
+	}
+	if spec.UpstreamBaseURLEnv != "ZCODE_BASE_URL" || spec.UpstreamAPIKeyEnv != "ZCODE_API_KEY" {
+		t.Errorf("zcode upstream binding = (%q, %q), want (ZCODE_BASE_URL, ZCODE_API_KEY)",
+			spec.UpstreamBaseURLEnv, spec.UpstreamAPIKeyEnv)
+	}
+
+	identity, ok := CanonicalProfileIdentity("zcode/tmux-cli")
+	if !ok {
+		t.Fatal("CanonicalProfileIdentity(zcode/tmux-cli) not registered")
+	}
+	if identity.ProviderFamily != "zcode" {
+		t.Errorf("zcode/tmux-cli family = %q, want zcode", identity.ProviderFamily)
 	}
 }
 
@@ -408,5 +469,99 @@ func TestClaudePermissionModeMapsToAcceptedCLIValues(t *testing.T) {
 	}
 	if len(fullAuto.FlagArgs) != 2 || fullAuto.FlagArgs[0] != "--permission-mode" || fullAuto.FlagArgs[1] != "dontAsk" {
 		t.Errorf("full-auto FlagArgs = %v, want [--permission-mode dontAsk]", fullAuto.FlagArgs)
+	}
+}
+
+// #5415: codex CLI >= 0.128 deprecated --full-auto, and >= 0.147.0 removes it
+// entirely (codex exec --full-auto now errors instead of running). auto-edit
+// must use the modern replacement: --sandbox workspace-write plus
+// --ask-for-approval never. (--full-auto was an alias for
+// `-a on-failure --sandbox workspace-write`; gc pins `never` rather than
+// `on-failure` because an escalation prompt in an unattended slung pane
+// blocks forever.)
+func TestCodexAutoEditMapsToUnremovedCLIFlags(t *testing.T) {
+	providers := BuiltinProviders()
+	codex, ok := providers["codex"]
+	if !ok {
+		t.Fatal("BuiltinProviders() missing codex")
+	}
+
+	const want = "--sandbox workspace-write --ask-for-approval never"
+	if got := codex.PermissionModes["auto-edit"]; got != want {
+		t.Errorf("PermissionModes[auto-edit] = %q, want %q", got, want)
+	}
+
+	var permOpt BuiltinProviderOption
+	for _, option := range codex.OptionsSchema {
+		if option.Key == "permission_mode" {
+			permOpt = option
+			break
+		}
+	}
+	if permOpt.Key == "" {
+		t.Fatal("codex provider missing permission_mode option")
+	}
+	byValue := make(map[string]BuiltinOptionChoice, len(permOpt.Choices))
+	for _, c := range permOpt.Choices {
+		byValue[c.Value] = c
+	}
+	autoEdit, ok := byValue["auto-edit"]
+	if !ok {
+		t.Fatal("codex permission_mode choices missing auto-edit")
+	}
+	wantArgs := []string{"--sandbox", "workspace-write", "--ask-for-approval", "never"}
+	if len(autoEdit.FlagArgs) != len(wantArgs) {
+		t.Fatalf("auto-edit FlagArgs = %v, want %v", autoEdit.FlagArgs, wantArgs)
+	}
+	for i, arg := range wantArgs {
+		if autoEdit.FlagArgs[i] != arg {
+			t.Errorf("auto-edit FlagArgs = %v, want %v", autoEdit.FlagArgs, wantArgs)
+			break
+		}
+	}
+}
+
+// codex-cli 0.149.0 retired the "untrusted" approval policy (openai/codex
+// #39630); --ask-for-approval now accepts only on-request and never, and any
+// other value exits 2 before the TUI starts. suggest must use Codex's own
+// "Read Only" preset (on-request approval in the read-only sandbox), which
+// still asks before editing files.
+func TestCodexPermissionModesUseApprovalPoliciesStockCodexAccepts(t *testing.T) {
+	codex, ok := BuiltinProviders()["codex"]
+	if !ok {
+		t.Fatal("BuiltinProviders() missing codex")
+	}
+	accepted := map[string]bool{"on-request": true, "never": true}
+	checkArgs := func(where string, args []string) {
+		t.Helper()
+		for i, arg := range args {
+			if arg == "--ask-for-approval" && (i+1 >= len(args) || !accepted[args[i+1]]) {
+				t.Errorf("%s passes --ask-for-approval %v; stock codex accepts only on-request and never", where, args[i+1:])
+			}
+		}
+	}
+	for mode, flags := range codex.PermissionModes {
+		checkArgs("PermissionModes["+mode+"]", strings.Fields(flags))
+	}
+	for _, option := range codex.OptionsSchema {
+		if option.Key != "permission_mode" {
+			continue
+		}
+		for _, c := range option.Choices {
+			// FlagAliases are only matched against input args and never
+			// emitted, so the retired untrusted alias is left unchecked.
+			checkArgs("permission_mode choice "+c.Value, c.FlagArgs)
+			// PermissionModes is what clients and gc config explain show for
+			// a mode, and FlagArgs is what a launch emits, so they must
+			// spell the same flags.
+			if flags, ok := codex.PermissionModes[c.Value]; ok && flags != strings.Join(c.FlagArgs, " ") {
+				t.Errorf("PermissionModes[%s] = %q, want choice FlagArgs %q", c.Value, flags, strings.Join(c.FlagArgs, " "))
+			}
+		}
+	}
+
+	const want = "--ask-for-approval on-request --sandbox read-only"
+	if got := codex.PermissionModes["suggest"]; got != want {
+		t.Errorf("PermissionModes[suggest] = %q, want %q", got, want)
 	}
 }

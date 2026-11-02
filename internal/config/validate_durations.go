@@ -2,8 +2,31 @@ package config
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
+
+const (
+	setupTimeoutMaskedByStartupWarningFragment   = "setup_timeout can never fire because startup_timeout bounds the whole session Start() call first"
+	setupTimeoutBecomesIdleBudgetWarningFragment = "setup_timeout now bounds idle/silence time between output, not total setup runtime"
+)
+
+// IsSessionSetupTimeoutAdvisory reports whether warning is one of the
+// [session] setup-timeout advisories. They describe how the timeout knobs
+// reinterpret each other rather than a config the loader cannot honor: the
+// setup_max_timeout advisory fires on every config that sets the field,
+// including a deliberately correct one. Callers that promote warnings to
+// errors must keep these advisory, or setting a documented field would stop a
+// city from starting.
+// The fragments are matched as a suffix rather than anywhere in the string:
+// the unparseable-duration warnings in this file quote the operator's raw
+// value verbatim and then append the parse error, so a value that happens to
+// contain an advisory sentence must not be mistaken for the advisory itself
+// and downgraded out of strict-fatal handling.
+func IsSessionSetupTimeoutAdvisory(warning string) bool {
+	return strings.HasSuffix(warning, setupTimeoutMaskedByStartupWarningFragment) ||
+		strings.HasSuffix(warning, setupTimeoutBecomesIdleBudgetWarningFragment)
+}
 
 // ValidateDurations checks all duration string fields in the config and returns
 // warnings for any values that cannot be parsed by time.ParseDuration. This
@@ -80,6 +103,29 @@ func ValidateDurations(cfg *City, source string) []string {
 	check("[session]", "startup_timeout", cfg.Session.StartupTimeout)
 	check("[session]", "progress_stall_timeout", cfg.Session.ProgressStallTimeout)
 	check("[session]", "claim_holder_stall_timeout", cfg.Session.ClaimHolderStallTimeout)
+	checkPositive("[session.acp]", "stop_grace", cfg.Session.ACP.StopGrace)
+	checkPositive("[session.acp]", "cancel_timeout", cfg.Session.ACP.CancelTimeout)
+
+	// Cross-field: startup_timeout wraps the whole Start() call (pre_start and
+	// setup included), so a setup_timeout that is >= startup_timeout can never
+	// actually fire — startup_timeout kills Start() first. Compared as
+	// effective (defaulted) durations so an unset field that inherits a
+	// conflicting default is still caught (gastownhall/gascity#5279).
+	if setupDur, startupDur := cfg.Session.SetupTimeoutDuration(), cfg.Session.StartupTimeoutDuration(); setupDur >= startupDur {
+		warnings = append(warnings, fmt.Sprintf(
+			"%s: [session] setup_timeout (%s) >= startup_timeout (%s): %s",
+			source, setupDur, startupDur, setupTimeoutMaskedByStartupWarningFragment))
+	}
+
+	// setup_max_timeout > 0 silently reinterprets setup_timeout from a
+	// total-runtime budget into an idle/silence budget (see runSetupCommand in
+	// internal/runtime/tmux/adapter.go) — easy to miss when only setup_timeout
+	// is being tuned (gastownhall/gascity#5279).
+	if maxDur := cfg.Session.SetupMaxTimeoutDuration(); maxDur > 0 {
+		warnings = append(warnings, fmt.Sprintf(
+			"%s: [session] setup_max_timeout (%s) is set: %s",
+			source, maxDur, setupTimeoutBecomesIdleBudgetWarningFragment))
+	}
 
 	// Daemon config durations.
 	check("[daemon]", "patrol_interval", cfg.Daemon.PatrolInterval)
@@ -111,6 +157,7 @@ func ValidateDurations(cfg *City, source string) []string {
 
 	// Mail config durations.
 	check("[mail]", "retention_ttl", cfg.Mail.RetentionTTL)
+	check("[mail]", "unread_retention_ttl", cfg.Mail.UnreadRetentionTTL)
 
 	// Events config durations.
 	check("[events.rotation]", "archive_retain_age", cfg.Events.Rotation.ArchiveRetainAge)
@@ -224,11 +271,18 @@ func ValidateNonNegativeDurations(cfg *City, source string) error {
 }
 
 // ValidateEventsRotation returns non-fatal warnings for risky but intentional
-// events rotation settings.
+// events rotation settings, and for an [events.mirror] that gc will skip.
 func ValidateEventsRotation(cfg *City) []string {
 	if cfg == nil {
 		return nil
 	}
+	if problem := cfg.Events.Mirror.Problem(); problem != "" {
+		return append([]string{"events.mirror: warning: " + problem + "; the events mirror is disabled"}, validateEventsRotationRetainAge(cfg)...)
+	}
+	return validateEventsRotationRetainAge(cfg)
+}
+
+func validateEventsRotationRetainAge(cfg *City) []string {
 	raw := cfg.Events.Rotation.ArchiveRetainAge
 	if raw == "" {
 		return nil

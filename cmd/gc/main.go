@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -40,10 +42,20 @@ func mainExitCode(args []string, stdout, stderr io.Writer) int {
 	// command can handle, not as a signal that kills gc mid-write. The claim
 	// path's delivery unwind depends on surviving that write.
 	ignoreSIGPIPE()
+	// Also before dispatch: every MySQL connection config copies the driver
+	// logger when it is built (mysql_driver_log.go).
+	installMySQLDriverLogger()
+	// A test-only cadence hook (internal/clock.BackstopSpeedupEnv) announces
+	// itself before anything else runs, active or ignored.
+	clock.AnnounceBackstopSpeedup(stderr)
 	if handled, code := privateProductMetricsEntrypoint(args); handled {
 		return code
 	}
-	return run(args, stdout, stderr)
+	code := run(args, stdout, stderr)
+	// A process that recorded program-status shadow comparisons writes the
+	// ones still queued before it exits, bounded so exit never waits long.
+	flushProgramStatusShadow(programShadowFlushTimeout)
+	return code
 }
 
 // errExit is a sentinel error returned by cobra RunE functions to signal
@@ -207,6 +219,9 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 	var observedStdout *countingWriter
 	options.invocationArgs = append([]string(nil), args...)
 	root := newRootCmdWithOptions(execStdout, stderr, options)
+	prevPlaneGateExempt := controlPlaneGateExempt
+	controlPlaneGateExempt = controlPlaneGateExemptFor(root, args)
+	defer func() { controlPlaneGateExempt = prevPlaneGateExempt }()
 	root.SetArgs(args)
 	root.SetOut(execStdout)
 	root.SetErr(stderr)
@@ -231,13 +246,17 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 			return code
 		}
 	}
+	if target, _, findErr := root.Find(args); findErr == nil && invocationStoreMemoEligible(target) {
+		endStoreMemo := beginInvocationStoreMemo()
+		defer endInvocationStoreMemoLogged(endStoreMemo, stderr)
+	}
 	executedCommand, executeErr := root.ExecuteC()
 	lifecycle.attemptFinalOutcome(resolveProductMetricsFinalOutcome(executedCommand, classification))
 	if executeErr != nil {
 		code := commandExitCode(executeErr)
 		if bufferJSONExecution {
 			if len(bytes.TrimSpace(jsonStdout.Bytes())) > 0 {
-				if _, copyErr := io.Copy(stdout, &jsonStdout); copyErr != nil {
+				if copyErr := flushBufferedJSON(stdout, stderr, &jsonStdout); copyErr != nil {
 					return 1
 				}
 			} else {
@@ -249,19 +268,34 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 		return code
 	}
 	if bufferJSONExecution {
-		if _, err := io.Copy(stdout, &jsonStdout); err != nil {
+		if err := flushBufferedJSON(stdout, stderr, &jsonStdout); err != nil {
 			return 1
 		}
 	}
 	return 0
 }
 
+// flushBufferedJSON copies a buffered --json result to stdout. The copy is the
+// only write a full disk or closed descriptor can fail, so a failure is named
+// on stderr rather than leaving the caller an empty file and a bare exit 1.
+func flushBufferedJSON(stdout, stderr io.Writer, buffered *bytes.Buffer) error {
+	if _, err := io.Copy(stdout, buffered); err != nil {
+		fmt.Fprintf(stderr, "gc: writing JSON output: %v\n", err) //nolint:errcheck // best-effort stderr
+		return err
+	}
+	return nil
+}
+
 func commandFailureMessage(err error) string {
 	if err == nil {
 		return "command failed"
 	}
+	// errExit and commandExitError carry only an exit code: the command has
+	// already written its diagnostics to stderr, so point there instead of
+	// echoing "exit N" back as the message.
+	var exitErr *commandExitError
 	msg := strings.TrimSpace(err.Error())
-	if msg == "" || errors.Is(err, errExit) {
+	if msg == "" || errors.Is(err, errExit) || errors.As(err, &exitErr) {
 		return "command failed; see stderr for diagnostics"
 	}
 	return msg
@@ -317,7 +351,7 @@ func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions)
 	root.PersistentFlags().StringVar(&contextFlag, "context", "",
 		"operate the REMOTE city named by this context (~/.gc/contexts.toml)")
 	root.PersistentFlags().StringVar(&cityURLFlag, "city-url", "",
-		"operate a REMOTE city at this base URL (https; requires --city-name)")
+		"operate a REMOTE city at this base URL (https, or http on a loopback host; requires --city-name). A remote target is served by the API, so --json prints the API rendering where a command has two (see gc session list --help)")
 	root.PersistentFlags().StringVar(&cityNameFlag, "city-name", "",
 		"remote city name for --city-url (does not overload --city)")
 	configureJSONSchemaFlag(root)
@@ -378,6 +412,7 @@ func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions)
 		newSessionCmd(stdout, stderr),
 		newConvergeCmd(stdout, stderr),
 		newWorkflowCmd(stdout, stderr),
+		newWorktreeCmd(stdout, stderr),
 		newRuntimeCmd(stdout, stderr),
 		newFormulaCmd(stdout, stderr),
 		newBdCmd(stdout, stderr),
@@ -470,11 +505,7 @@ func printCommandUsage(stderr io.Writer, cmd *cobra.Command) {
 	if cmd == nil {
 		return
 	}
-	usage := strings.TrimRight(cmd.UsageString(), "\n")
-	if usage == "" {
-		return
-	}
-	fmt.Fprintln(stderr, usage) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "Run %q for usage.\n", cmd.CommandPath()+" --help") //nolint:errcheck // best-effort stderr
 }
 
 // sessionName returns the session name for a city agent.
@@ -511,6 +542,12 @@ var cliStoreCache struct {
 // have a store open. Caches the bead store per cityPath so loops over
 // agents don't open the store repeatedly. Silently falls back to legacy
 // naming if the store is unavailable.
+//
+// The lookup reads session beads, so it goes through the session-class store:
+// on a split city they live only in the binding, and a lookup through the
+// work store missed every one and fell back to the legacy name (gc prime's
+// hook resolved the wrong tmux session). A single-store city gets its one
+// store back.
 func cliSessionName(cityPath, cityName, agentName, sessionTemplate string) string {
 	if strings.TrimSpace(cityPath) == "" {
 		return sessionName(nil, cityName, agentName, sessionTemplate)
@@ -522,14 +559,76 @@ func cliSessionName(cityPath, cityName, agentName, sessionTemplate string) strin
 	}
 	store := cliStoreCache.store
 	cliStoreCache.mu.Unlock()
+	if store != nil {
+		store = cliSessionStore(store, nil, cityPath)
+	}
 	return sessionName(store, cityName, agentName, sessionTemplate)
 }
+
+// contextResolutionMode distinguishes the two kinds of caller the resolution
+// chain serves. The zero value is the authoritative one, so every caller that
+// does not opt in keeps waiting for whatever it needs.
+type contextResolutionMode struct {
+	// advisory marks a resolution nobody asked for: eager pack-command
+	// discovery and shell completion, which run on every gc invocation
+	// whatever the user typed. Such a caller would rather have no answer than
+	// wait out another process's network clone, so an advisory resolution
+	// never blocks on the machine-wide repo-cache lock, skips the rig
+	// decoration its caller discards anyway, and stays off the terminal.
+	//
+	// It does not trade accuracy for speed. An advisory resolution either
+	// names the same city an authoritative one would, or fails: whatever it
+	// declines to wait for it reports as an error rather than resolving
+	// around. Eager discovery captures the city it picks into the
+	// pack-command closures the user later runs, so a cheaper-but-different
+	// answer would end up executing pack code against the wrong city.
+	//
+	// It reads the city's plane but never marks the invocation a worker site
+	// (withAdvisoryControlPlane): eager discovery runs before cobra parses
+	// --city, so the city it finds need not be the one the command targets.
+	advisory bool
+	// cityOnly marks an authoritative resolution whose caller reads only
+	// CityPath. It skips the rig decoration (rigFromCwdDir) and nothing else:
+	// every step that decides WHICH city — flags, env, GC_DIR, the registry
+	// scans, walk-up, the remote and sticky tiers — runs exactly as it does
+	// under authoritativeResolution, including blocking on the repo-cache
+	// lock. That last part is why this is not advisory: a command the user
+	// typed must wait for the lock rather than fail on a busy cache.
+	cityOnly bool
+}
+
+// cityOnlyResolution is the mode for a caller that discards RigName.
+var cityOnlyResolution = contextResolutionMode{cityOnly: true}
+
+// resolveCityPathOnly is resolveCity for a caller that never reads the rig.
+// It names the same city resolveCity names, or fails with the same error,
+// including the refusal of a remote target; it only skips the full config
+// load rigFromCwdDir spends on a rig name nobody reads.
+func resolveCityPathOnly() (string, error) {
+	ctx, err := resolveContextMode(cityOnlyResolution)
+	if err != nil {
+		return "", err
+	}
+	return ctx.CityPath, nil
+}
+
+// authoritativeResolution is the mode for anything the user actually typed: it
+// waits for whatever it needs. Named rather than spelled as a bare
+// contextResolutionMode{} so the choice reads as deliberate at the call site.
+var authoritativeResolution contextResolutionMode
 
 // resolvedContext holds the result of city+rig resolution.
 type resolvedContext struct {
 	CityPath string        // absolute path to city root (empty when Remote is set)
 	RigName  string        // rig name (empty if not in a rig context)
 	Remote   *remoteTarget // non-nil => a REMOTE city over the control plane; CityPath is empty
+	// Plane is the city's plane: Local, or Worker when it holds
+	// .gc/control-plane.toml. It is authoritative only when the resolution
+	// succeeded without the gate exemption: for an exempt command on a
+	// descriptor gc cannot use it stays the zero value (Local) while every
+	// seam treats the city as a worker site. Readers that decide behavior
+	// use onWorkerSite(CityPath).
+	Plane controlPlane
 }
 
 // resolveCommandContext resolves city+rig context for commands that accept an
@@ -555,7 +654,7 @@ func resolveCommandContext(args []string) (resolvedContext, error) {
 	// name to resolveContextFromPath's upward city walk (which would silently
 	// target an ambient ancestor city).
 	if classifyCityRef(args[0]) == cityRefName {
-		return resolveCityNameContext(args[0], resolveContextFromPath)
+		return withControlPlane(resolveCityNameContext(args[0], resolveContextFromPath))
 	}
 	return resolveContextFromPath(args[0])
 }
@@ -589,7 +688,11 @@ func resolveCommandCity(args []string) (string, error) {
 // local store. Remote-capable READ commands call resolveContextAllowRemote
 // directly and route through the remote transport (resolveReadRoute).
 func resolveContext() (resolvedContext, error) {
-	ctx, err := resolveContextAllowRemote()
+	return resolveContextMode(authoritativeResolution)
+}
+
+func resolveContextMode(mode contextResolutionMode) (resolvedContext, error) {
+	ctx, err := resolveContextAllowRemoteMode(mode)
 	if err != nil {
 		return resolvedContext{}, err
 	}
@@ -599,11 +702,39 @@ func resolveContext() (resolvedContext, error) {
 	return ctx, nil
 }
 
+// resolveCityForDiscovery returns the city root for a resolution nobody asked
+// for — eager pack-command discovery, shell completion. It is resolveCity that
+// refuses to wait on the machine-wide repo-cache lock: a single `gc import
+// install` holds that lock for the whole of its network clone, and blocking
+// discovery would make every unrelated gc command on the host hang for the
+// duration. Callers get "no city right now" and degrade; anything the user
+// actually typed still resolves through resolveCity and waits.
+func resolveCityForDiscovery() (string, error) {
+	ctx, err := resolveContextMode(contextResolutionMode{advisory: true})
+	if err != nil {
+		return "", err
+	}
+	return ctx.CityPath, nil
+}
+
 // resolveContextAllowRemote is the raw priority-chain resolver. It returns a
 // remote target (resolvedContext.Remote) when one is selected, WITHOUT the
 // capability gate — so only a remote-aware caller that routes through the remote
 // transport should use it. Every other caller uses resolveContext, which gates.
 func resolveContextAllowRemote() (resolvedContext, error) {
+	return resolveContextAllowRemoteMode(authoritativeResolution)
+}
+
+func resolveContextAllowRemoteMode(mode contextResolutionMode) (resolvedContext, error) {
+	if mode.advisory {
+		return withAdvisoryControlPlane(resolveContextChain(mode))
+	}
+	return withControlPlane(resolveContextChain(mode))
+}
+
+// resolveContextChain is resolveContextAllowRemoteMode's priority chain,
+// before the city's plane is filled in.
+func resolveContextChain(mode contextResolutionMode) (resolvedContext, error) {
 	// Step 0: explicit remote target. A conflict (remote+local or remote+remote)
 	// surfaces here regardless.
 	if target, handled, err := resolveRemoteTarget(); err != nil {
@@ -611,15 +742,22 @@ func resolveContextAllowRemote() (resolvedContext, error) {
 	} else if handled {
 		return resolvedContext{Remote: target}, nil
 	}
-	if ctx, handled, err := resolveContextFromFlags(); handled {
+	if ctx, handled, err := resolveContextFromFlags(mode); handled {
 		return ctx, err
 	}
-	if ctx, handled, err := resolveContextFromCityEnv(); handled {
+	if ctx, handled, err := resolveContextFromCityEnv(mode); handled {
 		return ctx, err
 	}
-	ctx, err := resolveContextFromDir()
+	ctx, err := resolveContextFromDir(mode)
 	if err == nil {
 		return ctx, nil
+	}
+	// A busy repo cache means local discovery could not look, not that it
+	// looked and found nothing. Falling through would answer with a remote
+	// sticky default because a clone happened to be running in another
+	// terminal — a different city for the same cwd, decided by timing.
+	if errors.Is(err, config.ErrRepoCacheBusy) {
+		return resolvedContext{}, err
 	}
 	// Step 4: no local city discoverable — fall back to the sticky default
 	// context, if any (subordinate to local discovery, per Decision 4).
@@ -641,7 +779,7 @@ func resolveContextAllowRemote() (resolvedContext, error) {
 // resolveContextFromFlags resolves context from the explicit --city and --rig
 // flags (priority steps 1-3). handled is false with a nil error when neither
 // flag is set, so the caller falls through to env/cwd resolution.
-func resolveContextFromFlags() (resolvedContext, bool, error) {
+func resolveContextFromFlags(mode contextResolutionMode) (resolvedContext, bool, error) {
 	city := cityFlag
 	rig := rigFlag
 	switch {
@@ -656,9 +794,9 @@ func resolveContextFromFlags() (resolvedContext, bool, error) {
 		if err != nil {
 			return resolvedContext{}, true, err
 		}
-		return resolvedContext{CityPath: cp, RigName: rigFromCwd(cp)}, true, nil
+		return resolvedContext{CityPath: cp, RigName: rigFromCwd(cp, mode)}, true, nil
 	case rig != "": // Step 3: --rig only
-		ctx, err := resolveRigToContext(rig)
+		ctx, err := resolveRigToContext(rig, mode)
 		return ctx, true, err
 	default:
 		return resolvedContext{}, false, nil
@@ -668,16 +806,16 @@ func resolveContextFromFlags() (resolvedContext, bool, error) {
 // resolveContextFromCityEnv resolves context from the explicit city env
 // (GC_CITY / GC_CITY_PATH / GC_CITY_ROOT) and GC_RIG (priority steps 4-6).
 // handled is false with a nil error when neither resolves.
-func resolveContextFromCityEnv() (resolvedContext, bool, error) {
+func resolveContextFromCityEnv(mode contextResolutionMode) (resolvedContext, bool, error) {
 	gcRig := os.Getenv("GC_RIG")
 	gcCity, ok := resolveExplicitCityPathEnv()
 	switch {
 	case ok && gcRig != "": // Step 4: explicit city env + GC_RIG
 		return resolvedContext{CityPath: gcCity, RigName: gcRig}, true, nil
 	case ok: // Step 5: explicit city env only
-		return resolvedContext{CityPath: gcCity, RigName: rigFromGCDirOrCwd(gcCity)}, true, nil
+		return resolvedContext{CityPath: gcCity, RigName: rigFromGCDirOrCwd(gcCity, mode)}, true, nil
 	case gcRig != "": // Step 6: GC_RIG only
-		ctx, err := resolveRigToContext(gcRig)
+		ctx, err := resolveRigToContext(gcRig, mode)
 		return ctx, true, err
 	default:
 		return resolvedContext{}, false, nil
@@ -688,7 +826,7 @@ func resolveContextFromCityEnv() (resolvedContext, bool, error) {
 // steps 7-11): a GC_DIR rig binding, a GC_DIR-derived city, a cwd rig binding,
 // and finally a walk up from cwd for city.toml. This is the terminal stage, so
 // it always returns a result or an error.
-func resolveContextFromDir() (resolvedContext, error) {
+func resolveContextFromDir(mode contextResolutionMode) (resolvedContext, error) {
 	// Step 7: Registered rig binding lookup using GC_DIR. Must run before
 	// the GC_DIR walkup (step 8) so that a rig dir with a leftover ".gc/"
 	// runtime artifact does not get mistaken for a legacy city via
@@ -706,14 +844,18 @@ func resolveContextFromDir() (resolvedContext, error) {
 	// rig lookup) covers it.
 	if gcDir := strings.TrimSpace(os.Getenv("GC_DIR")); gcDir != "" &&
 		citylayout.HasRuntimeRoot(gcDir) && !citylayout.HasCityConfig(gcDir) {
-		if ctx, ok := lookupRigFromCwd(gcDir); ok {
+		ctx, ok, err := lookupRigFromCwd(gcDir, mode)
+		if err != nil {
+			return resolvedContext{}, err
+		}
+		if ok {
 			return ctx, nil
 		}
 	}
 
 	// Step 8: GC_DIR-derived city path.
 	if gcDirCity, ok := resolveCityPathFromGCDir(); ok {
-		rn := rigFromCwdDir(gcDirCity, strings.TrimSpace(os.Getenv("GC_DIR")))
+		rn := rigFromCwdDir(gcDirCity, strings.TrimSpace(os.Getenv("GC_DIR")), mode)
 		return resolvedContext{CityPath: gcDirCity, RigName: rn}, nil
 	}
 
@@ -722,7 +864,11 @@ func resolveContextFromDir() (resolvedContext, error) {
 	if err != nil {
 		return resolvedContext{}, err
 	}
-	if ctx, ok := lookupRigFromCwd(cwd); ok {
+	ctx, ok, err := lookupRigFromCwd(cwd, mode)
+	if err != nil {
+		return resolvedContext{}, err
+	}
+	if ok {
 		return ctx, nil
 	}
 
@@ -737,7 +883,7 @@ func resolveContextFromDir() (resolvedContext, error) {
 	if err != nil {
 		return resolvedContext{}, err
 	}
-	return resolvedContext{CityPath: cityPath, RigName: rigFromCwdDir(cityPath, cwd)}, nil
+	return resolvedContext{CityPath: cityPath, RigName: rigFromCwdDir(cityPath, cwd, mode)}, nil
 }
 
 // resolveCity returns the city root path. Thin wrapper over resolveContext
@@ -747,6 +893,12 @@ func resolveCity() (string, error) {
 }
 
 func resolveContextFromPath(path string) (resolvedContext, error) {
+	return withControlPlane(resolveCityContextFromPath(path))
+}
+
+// resolveCityContextFromPath is resolveContextFromPath before the city's
+// plane is filled in.
+func resolveCityContextFromPath(path string) (resolvedContext, error) {
 	abs := normalizePathForCompare(path)
 	// Validate the explicit target directly before scanning the registry for
 	// rig bindings. An unrelated registered city with a broken/stale config
@@ -765,7 +917,7 @@ func resolveContextFromPath(path string) (resolvedContext, error) {
 	if citylayout.HasCityConfig(abs) {
 		return resolvedContext{
 			CityPath: abs,
-			RigName:  rigFromCwdDir(abs, abs),
+			RigName:  rigFromCwdDir(abs, abs, authoritativeResolution),
 		}, nil
 	}
 	ctx, ok, err := resolveRigPathToContext(abs)
@@ -781,7 +933,7 @@ func resolveContextFromPath(path string) (resolvedContext, error) {
 	}
 	return resolvedContext{
 		CityPath: cityPath,
-		RigName:  rigFromCwdDir(cityPath, abs),
+		RigName:  rigFromCwdDir(cityPath, abs, authoritativeResolution),
 	}, nil
 }
 
@@ -798,12 +950,12 @@ func validateCityPath(p string) (string, error) {
 // registered cities and their machine-local .gc/site.toml rig bindings. This
 // is an explicit rig-resolution path, so stale-sibling warnings are emitted
 // to os.Stderr (deduped across the two registry scans below).
-func resolveRigToContext(nameOrPath string) (resolvedContext, error) {
+func resolveRigToContext(nameOrPath string, mode contextResolutionMode) (resolvedContext, error) {
 	var allStale []staleRegisteredCity
 	defer func() { emitStaleRegisteredCityWarnings(os.Stderr, allStale) }()
 
 	var deferredRegisteredLoadErr error
-	matches, stale, err, loadErr := registeredRigBindingsByNameWithDeferredLoadError(nameOrPath, false)
+	matches, stale, err, loadErr := registeredRigBindingsByNameWithDeferredLoadError(nameOrPath, false, mode)
 	allStale = append(allStale, stale...)
 	if err != nil {
 		return resolvedContext{}, err
@@ -817,7 +969,7 @@ func resolveRigToContext(nameOrPath string) (resolvedContext, error) {
 	if err != nil {
 		return resolvedContext{}, fmt.Errorf("rig %q: %w", nameOrPath, err)
 	}
-	matches, stale, err, loadErr = registeredRigBindingsByPathWithDeferredLoadError(abs, false)
+	matches, stale, err, loadErr = registeredRigBindingsByPathWithDeferredLoadError(abs, false, mode)
 	allStale = append(allStale, stale...)
 	if err != nil {
 		return resolvedContext{}, err
@@ -835,7 +987,7 @@ func resolveRigToContext(nameOrPath string) (resolvedContext, error) {
 	// the resolved city for a site-bound rig of this name. Site binding is
 	// required: legacy city.toml-only paths remain rejected so the existing
 	// legacy_city_toml_path_is_not_registered_binding test continues to pass.
-	if ctx, ok, err := lookupRigFromLocalCity(nameOrPath); err != nil {
+	if ctx, ok, err := lookupRigFromLocalCity(nameOrPath, mode); err != nil {
 		return resolvedContext{}, err
 	} else if ok {
 		return ctx, nil
@@ -886,7 +1038,7 @@ func isCityDiscoveryNotFound(err error) bool {
 // .gc/site.toml, matching the registered resolver's binding semantics.
 // Legacy city.toml-only paths are still rejected so this fallback preserves
 // the invariant pinned by legacy_city_toml_path_is_not_registered_binding.
-func lookupRigFromLocalCity(nameOrPath string) (resolvedContext, bool, error) {
+func lookupRigFromLocalCity(nameOrPath string, mode contextResolutionMode) (resolvedContext, bool, error) {
 	cityPath, err := resolveLocalCityForRigFallback()
 	if err != nil {
 		return resolvedContext{}, false, err
@@ -894,7 +1046,7 @@ func lookupRigFromLocalCity(nameOrPath string) (resolvedContext, bool, error) {
 	if cityPath == "" {
 		return resolvedContext{}, false, nil
 	}
-	bindings, err := localCityRigBindings(cityPath)
+	bindings, err := localCityRigBindings(cityPath, mode)
 	if err != nil {
 		return resolvedContext{}, false, err
 	}
@@ -926,8 +1078,8 @@ func lookupRigFromLocalCity(nameOrPath string) (resolvedContext, bool, error) {
 	return resolvedContext{}, false, nil
 }
 
-func localCityRigBindings(cityPath string) ([]registeredRigBinding, error) {
-	cfg, err := loadCityConfig(cityPath, io.Discard)
+func localCityRigBindings(cityPath string, mode contextResolutionMode) ([]registeredRigBinding, error) {
+	cfg, err := loadRegisteredCityConfig(cityPath, mode)
 	if err != nil {
 		if _, ok := missingRootCityTOML(err, cityPath); ok {
 			return nil, nil
@@ -943,14 +1095,9 @@ func localCityRigBindings(cityPath string) ([]registeredRigBinding, error) {
 }
 
 func siteBoundRigBindings(city supervisor.CityEntry, cfg *config.City, siteBinding *config.SiteBinding) []registeredRigBinding {
-	siteRigPaths := make(map[string]string, len(siteBinding.Rigs))
-	for _, rig := range siteBinding.Rigs {
-		name := strings.TrimSpace(rig.Name)
-		path := strings.TrimSpace(rig.Path)
-		if name == "" || path == "" {
-			continue
-		}
-		siteRigPaths[name] = path
+	candidates := make(map[string]rigCandidate, len(siteBinding.Rigs))
+	for _, candidate := range siteRigCandidates(city, siteBinding) {
+		candidates[candidate.Name] = candidate
 	}
 
 	var bindings []registeredRigBinding
@@ -958,25 +1105,50 @@ func siteBoundRigBindings(city supervisor.CityEntry, cfg *config.City, siteBindi
 		if strings.TrimSpace(rig.Name) == "" {
 			continue
 		}
-		sitePath := strings.TrimSpace(siteRigPaths[rig.Name])
-		if sitePath == "" {
+		candidate, ok := candidates[rig.Name]
+		if !ok {
 			continue
 		}
-		rig.Path = sitePath
+		rig.Path = candidate.Path
 		bindings = append(bindings, registeredRigBinding{
 			City: city,
 			Rig:  rig,
-			Path: resolveStoreScopeRoot(city.Path, sitePath),
+			Path: candidate.ScopeRoot,
 		})
 	}
 	return bindings
+}
+
+// siteRigCandidates enumerates the machine-local rig bindings a city's
+// .gc/site.toml declares.
+//
+// This is the single derivation both siteBoundRigBindings and the pre-filter
+// in registeredRigBindings run, which is what makes the pre-filter's superset
+// property structural rather than a claim two functions have to keep agreeing
+// on independently.
+func siteRigCandidates(city supervisor.CityEntry, siteBinding *config.SiteBinding) []rigCandidate {
+	candidates := make([]rigCandidate, 0, len(siteBinding.Rigs))
+	for _, rig := range siteBinding.Rigs {
+		name := strings.TrimSpace(rig.Name)
+		path := strings.TrimSpace(rig.Path)
+		if name == "" || path == "" {
+			continue
+		}
+		candidates = append(candidates, rigCandidate{
+			City:      city,
+			Name:      name,
+			Path:      path,
+			ScopeRoot: resolveStoreScopeRoot(city.Path, path),
+		})
+	}
+	return candidates
 }
 
 // resolveRigPathToContext resolves an explicit path argument to a registered
 // rig context. Stale-sibling warnings are emitted to os.Stderr because the
 // caller is explicitly depending on the registry.
 func resolveRigPathToContext(dir string) (resolvedContext, bool, error) {
-	matches, stale, err := registeredRigBindingsByPath(dir, true)
+	matches, stale, err := registeredRigBindingsByPath(dir, true, authoritativeResolution)
 	emitStaleRegisteredCityWarnings(os.Stderr, stale)
 	if err != nil {
 		return resolvedContext{}, false, err
@@ -995,25 +1167,48 @@ func resolveRigPathToContext(dir string) (resolvedContext, bool, error) {
 // Ambiguous bindings deliberately fall through to the city walk-up fallback.
 // This is an opportunistic probe (failOnLoadError=false): stale-sibling
 // warnings are intentionally dropped so unrelated commands stay quiet.
-func lookupRigFromCwd(cwd string) (resolvedContext, bool) {
-	matches, _, err := registeredRigBindingsByPath(cwd, false)
-	if err != nil || len(matches) != 1 {
-		return resolvedContext{}, false
+// lookupRigFromCwd maps cwd onto the single registered rig that contains it.
+//
+// A scan error normally means "no answer from the registry", and the caller
+// falls back to walking up from cwd. A busy repo cache is different: the
+// registry might well have named a city, and falling back could settle on a
+// different one just because an unrelated clone was running. That case is
+// returned as an error so the caller fails closed instead.
+func lookupRigFromCwd(cwd string, mode contextResolutionMode) (resolvedContext, bool, error) {
+	matches, _, err := registeredRigBindingsByPath(cwd, false, mode)
+	if err != nil {
+		if errors.Is(err, config.ErrRepoCacheBusy) {
+			return resolvedContext{}, false, err
+		}
+		return resolvedContext{}, false, nil
 	}
-	return resolvedContext{CityPath: matches[0].City.Path, RigName: matches[0].Rig.Name}, true
+	if len(matches) != 1 {
+		return resolvedContext{}, false, nil
+	}
+	return resolvedContext{CityPath: matches[0].City.Path, RigName: matches[0].Rig.Name}, true, nil
 }
 
 // rigFromCwd attempts to derive a rig name from cwd when the city is known.
-func rigFromCwd(cityPath string) string {
+func rigFromCwd(cityPath string, mode contextResolutionMode) string {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return ""
 	}
-	return rigFromCwdDir(cityPath, cwd)
+	return rigFromCwdDir(cityPath, cwd, mode)
 }
 
 // rigFromCwdDir matches cwd against registered rigs in a city's config.
-func rigFromCwdDir(cityPath, cwd string) string {
+//
+// This is pure decoration: it loads the whole city config to produce a rig
+// name, and an advisory or city-only resolution's caller only wants the city
+// path. Skipping it for advisory is what keeps discovery off the repo-cache
+// lock entirely, rather than merely making its acquisition non-blocking; for
+// city-only it is the full load (and builtin readiness pass) gc bd used to
+// pay for a rig name it then threw away.
+func rigFromCwdDir(cityPath, cwd string, mode contextResolutionMode) string {
+	if mode.advisory || mode.cityOnly {
+		return ""
+	}
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		return ""
@@ -1031,27 +1226,48 @@ type registeredRigBinding struct {
 	Path string
 }
 
-func registeredRigBindingsByName(name string, failOnLoadError bool) (matches []registeredRigBinding, stale []staleRegisteredCity, err error) {
-	matches, stale, err, _ = registeredRigBindingsByNameWithDeferredLoadError(name, failOnLoadError)
+// rigCandidate is the part of a registered rig binding that a city's
+// .gc/site.toml alone determines — everything siteRigCandidates can produce
+// without loading city.toml.
+//
+// Match predicates take this rather than a whole registeredRigBinding so the
+// compiler forbids a predicate from reading a field the pre-filter cannot
+// populate. That failure would be silent: the pre-filter would stop admitting
+// a city the real scan would have matched, and the scan would just return
+// fewer bindings.
+type rigCandidate struct {
+	City      supervisor.CityEntry
+	Name      string // rig name as recorded in site.toml
+	Path      string // machine-local rig path as recorded in site.toml
+	ScopeRoot string // resolveStoreScopeRoot(City.Path, Path)
+}
+
+// candidate projects a fully resolved binding back onto the fields the
+// pre-filter can see, so both sides hand the predicate the same shape.
+func (b registeredRigBinding) candidate() rigCandidate {
+	return rigCandidate{City: b.City, Name: b.Rig.Name, Path: b.Rig.Path, ScopeRoot: b.Path}
+}
+
+func registeredRigBindingsByName(name string, failOnLoadError bool, mode contextResolutionMode) (matches []registeredRigBinding, stale []staleRegisteredCity, err error) {
+	matches, stale, err, _ = registeredRigBindingsByNameWithDeferredLoadError(name, failOnLoadError, mode)
 	return matches, stale, err
 }
 
-func registeredRigBindingsByNameWithDeferredLoadError(name string, failOnLoadError bool) (matches []registeredRigBinding, stale []staleRegisteredCity, err error, deferredLoadErr error) {
-	return registeredRigBindings(failOnLoadError, func(binding registeredRigBinding) bool {
-		return binding.Rig.Name == name
+func registeredRigBindingsByNameWithDeferredLoadError(name string, failOnLoadError bool, mode contextResolutionMode) (matches []registeredRigBinding, stale []staleRegisteredCity, err error, deferredLoadErr error) {
+	return registeredRigBindings(failOnLoadError, mode, func(c rigCandidate) bool {
+		return c.Name == name
 	})
 }
 
-func registeredRigBindingsByPath(dir string, failOnLoadError bool) (matches []registeredRigBinding, stale []staleRegisteredCity, err error) {
-	matches, stale, err, _ = registeredRigBindingsByPathWithDeferredLoadError(dir, failOnLoadError)
+func registeredRigBindingsByPath(dir string, failOnLoadError bool, mode contextResolutionMode) (matches []registeredRigBinding, stale []staleRegisteredCity, err error) {
+	matches, stale, err, _ = registeredRigBindingsByPathWithDeferredLoadError(dir, failOnLoadError, mode)
 	return matches, stale, err
 }
 
-func registeredRigBindingsByPathWithDeferredLoadError(dir string, failOnLoadError bool) (matches []registeredRigBinding, stale []staleRegisteredCity, err error, deferredLoadErr error) {
+func registeredRigBindingsByPathWithDeferredLoadError(dir string, failOnLoadError bool, mode contextResolutionMode) (matches []registeredRigBinding, stale []staleRegisteredCity, err error, deferredLoadErr error) {
 	dir = normalizePathForCompare(dir)
-	matches, stale, err, deferredLoadErr = registeredRigBindings(failOnLoadError, func(binding registeredRigBinding) bool {
-		rigPath := normalizePathForCompare(binding.Path)
-		return pathWithinScope(dir, rigPath)
+	matches, stale, err, deferredLoadErr = registeredRigBindings(failOnLoadError, mode, func(c rigCandidate) bool {
+		return pathWithinScope(dir, normalizePathForCompare(c.ScopeRoot))
 	})
 	if err != nil {
 		return nil, stale, err, nil
@@ -1087,7 +1303,7 @@ func emitStaleRegisteredCityWarnings(w io.Writer, stale []staleRegisteredCity) {
 	}
 }
 
-func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding) bool) (_ []registeredRigBinding, stale []staleRegisteredCity, _ error, deferredLoadErr error) {
+func registeredRigBindings(failOnLoadError bool, mode contextResolutionMode, match func(rigCandidate) bool) (_ []registeredRigBinding, stale []staleRegisteredCity, _ error, deferredLoadErr error) {
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	cities, err := reg.List()
 	if err != nil {
@@ -1096,8 +1312,52 @@ func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding
 	var matched []registeredRigBinding
 	var loadErrors []string
 	for _, c := range cities {
-		cfg, err := loadCityConfig(c.Path, io.Discard)
+		siteBinding, siteErr := config.LoadSiteBinding(fsys.OSFS{}, c.Path)
+		// A match-only scan skips the config load for cities that cannot
+		// contribute a match.
+		//
+		// This is what keeps the fail-closed behavior above from turning one
+		// clone into a machine-wide outage. Every registered city's load is a
+		// chance to hit a busy repo cache, and a busy cache now aborts the whole
+		// scan — so without this, `gc import install` in any one city would
+		// break rig resolution in all of them. Filtering first narrows that
+		// exposure to the cities that could actually answer the question.
+		//
+		// site.toml names a superset of the rigs siteBoundRigBindings keeps —
+		// it records where a rig lives, not whether city.toml still declares
+		// it — so a city with no candidate here has none after pruning either.
+		// Cities that do have one are loaded and pruned exactly as before.
+		//
+		// The condition deliberately does not mention mode. It once read
+		// `mode.advisory && ...`, which left the two modes disagreeing about a
+		// city that cannot match but can still fail to load: the unfiltered
+		// scan collected that load error, and one load error fails any scan
+		// that also matched something (below). Same registry, same rig, a
+		// different answer depending on who asked — which is what the advisory
+		// contract forbids, and eager discovery captures the city it picks into
+		// pack-command closures the user later runs. With mode out of the
+		// condition the two traversals are identical by construction.
+		//
+		// failOnLoadError is a different request: report everything wrong with
+		// the registry, not just what matched. A caller asking for that is
+		// asking about the cities this filter would skip — a vanished city.toml
+		// or an unloadable include is exactly the diagnostic they came for — so
+		// it turns the filter off and pays the full scan for it.
+		//
+		// A malformed site.toml also disables the filter for that city: it is
+		// not evidence of anything, so the city is loaded and its error
+		// reported below.
+		if !failOnLoadError && siteErr == nil && !siteBindingHasCandidate(c, siteBinding, match) {
+			continue
+		}
+		cfg, err := loadRegisteredCityConfig(c.Path, mode)
 		if err != nil {
+			// A busy repo cache is the one failure an advisory scan must not
+			// absorb: quietly skipping the city would let resolution settle on
+			// a different one purely because a clone happened to be running.
+			if errors.Is(err, config.ErrRepoCacheBusy) {
+				return nil, stale, fmt.Errorf("loading registered city rig bindings: %s: %w", registeredCityLabel(c), err), nil
+			}
 			// Tolerate stale registry entries whose city.toml has been
 			// deleted out from under the registry, but keep missing includes
 			// or other config dependencies as load errors.
@@ -1108,13 +1368,12 @@ func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding
 			loadErrors = append(loadErrors, registeredCityLoadError(c, err))
 			continue
 		}
-		siteBinding, err := config.LoadSiteBinding(fsys.OSFS{}, c.Path)
-		if err != nil {
-			loadErrors = append(loadErrors, registeredCityLoadError(c, err))
+		if siteErr != nil {
+			loadErrors = append(loadErrors, registeredCityLoadError(c, siteErr))
 			continue
 		}
 		for _, binding := range siteBoundRigBindings(c, cfg, siteBinding) {
-			if match(binding) {
+			if match(binding.candidate()) {
 				matched = append(matched, binding)
 			}
 		}
@@ -1126,6 +1385,28 @@ func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding
 		return matched, stale, nil, fmt.Errorf("loading registered city rig bindings: %s", strings.Join(loadErrors, "; "))
 	}
 	return matched, stale, nil, nil
+}
+
+// siteBindingHasCandidate reports whether any machine-local binding in the
+// city's .gc/site.toml could satisfy match. It is a pre-filter, not an answer:
+// site.toml records where a rig lives, not whether city.toml still declares it,
+// so a candidate here is only a reason to load the config and check properly.
+//
+// It runs match over exactly the candidates siteBoundRigBindings prunes from,
+// so "no candidate here" implies "no binding after pruning" by construction.
+func siteBindingHasCandidate(city supervisor.CityEntry, siteBinding *config.SiteBinding, match func(rigCandidate) bool) bool {
+	return slices.ContainsFunc(siteRigCandidates(city, siteBinding), match)
+}
+
+// loadRegisteredCityConfig loads one registered city's config for a rig-binding
+// scan. An advisory scan refuses to wait on the repo-cache lock, and takes
+// builtin packs as they already are on disk — the same staleness window shell
+// completion has always accepted.
+func loadRegisteredCityConfig(cityPath string, mode contextResolutionMode) (*config.City, error) {
+	if mode.advisory {
+		return loadCityConfigAdvisory(cityPath)
+	}
+	return loadCityConfig(cityPath, io.Discard)
 }
 
 func registeredCityLoadError(city supervisor.CityEntry, err error) string {
@@ -1214,13 +1495,11 @@ func openCityRecorder(stderr io.Writer) events.Recorder {
 	return openCityRecorderAt(cityPath, stderr)
 }
 
+// openCityRecorderAt is openCityRecorder for an already-resolved city. The
+// recorder is a secondary writer that never rotates: the city's controller
+// owns rotation (see newSecondaryFileEventsRecorder).
 func openCityRecorderAt(cityPath string, stderr io.Writer) events.Recorder {
-	eventsCfg := config.EventsConfig{}
-	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil {
-		eventsCfg = cfg.Events
-	}
-	rec, err := newFileEventsRecorder(
-		filepath.Join(cityPath, ".gc", "events.jsonl"), eventsCfg, stderr)
+	rec, err := openCityEventsLog(cityPath, stderr)
 	if err != nil {
 		return events.Discard
 	}
@@ -1288,6 +1567,14 @@ func openCityStoreAt(cityPath string) (beads.Store, error) {
 	return result.Store, nil
 }
 
+// openCityStoreAtWithConfig is openCityStoreAt for a one-shot caller that has
+// already loaded this city's config in the same invocation: the open reuses cfg
+// instead of reloading city.toml and every pack include. A nil cfg loads, like
+// openCityStoreAt. Long-lived callers must keep openCityStoreAt.
+func openCityStoreAtWithConfig(cityPath string, cfg *config.City) (beads.Store, error) {
+	return openOneShotStoreAtForCityWithConfig(cityPath, cityPath, cfg)
+}
+
 func openCityStoreResultAt(cityPath string) (beads.StoreOpenResult, error) {
 	return openStoreResultAtForCity(cityPath, cityPath)
 }
@@ -1313,14 +1600,71 @@ func ensureScopedFileStoreLayout(cityPath string) error {
 	return os.WriteFile(fileStoreLayoutMarkerPath(cityPath), []byte(fileStoreLayoutScopedV1+"\n"), 0o644)
 }
 
+// openScopeLocalFileStore opens the file store at scopeRoot without a known
+// city, resolving the owning city from ambient context. Callers that already
+// hold the city path must use openScopeLocalFileStoreForCity instead: ambient
+// resolution misses whenever the process is not pointed at that city (a
+// supervisor serving several cities, --city-url/--context, an unrelated cwd),
+// and a miss silently falls back to the default "gc" prefix.
 func openScopeLocalFileStore(scopeRoot string) (*beads.FileStore, error) {
+	return openScopeLocalFileStoreForCity(scopeRoot, "")
+}
+
+// openScopeLocalFileStoreForCity opens the file store at scopeRoot as a scope
+// of cityPath, so the store mints ids under that scope's configured prefix. A
+// blank cityPath falls back to ambient city resolution.
+func openScopeLocalFileStoreForCity(scopeRoot, cityPath string) (*beads.FileStore, error) {
 	beadsPath := filepath.Join(scopeRoot, ".gc", "beads.json")
-	store, err := beads.OpenFileStore(fsys.OSFS{}, beadsPath)
+	store, err := beads.OpenFileStore(fsys.OSFS{}, beadsPath, fileStoreIDPrefixOpts(scopeRoot, cityPath)...)
 	if err != nil {
 		return nil, err
 	}
 	store.SetLocker(beads.NewFileFlock(beadsPath + ".lock"))
 	return store, nil
+}
+
+// fileStoreIDPrefixOpts resolves the bead-ID prefix a file store at scopeRoot
+// should mint under, so a multi-rig file-backed city does not collide on gc-N
+// across stores (bd/dolt/exec stores already carry their scope's prefix; the
+// file store was the only path that didn't). Returns no option — leaving the
+// default "gc" — when the city config can't be resolved, matching prior
+// behavior for single-scope callers and tests.
+func fileStoreIDPrefixOpts(scopeRoot, cityPath string) []beads.FileStoreOption {
+	if prefix := effectiveFileStorePrefix(scopeRoot, cityPath); prefix != "" {
+		return []beads.FileStoreOption{beads.WithFileStoreIDPrefix(prefix)}
+	}
+	return nil
+}
+
+// effectiveFileStorePrefix maps a store scope root to its configured prefix:
+// the owning rig's EffectivePrefix, or the city HQ prefix for the city store.
+// cityPath names the city that owns the scope; a blank one is resolved from
+// ambient context. Empty when config is unavailable (e.g. tests that open a
+// bare dir).
+func effectiveFileStorePrefix(scopeRoot, cityPath string) string {
+	if strings.TrimSpace(cityPath) == "" {
+		var err error
+		if cityPath, err = resolveCity(); err != nil {
+			return ""
+		}
+	}
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return ""
+	}
+	for i := range cfg.Rigs {
+		rig := cfg.Rigs[i]
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
+		if samePath(resolveStoreScopeRoot(cityPath, rig.Path), scopeRoot) {
+			return rig.EffectivePrefix()
+		}
+	}
+	if samePath(resolveStoreScopeRoot(cityPath, cityPath), scopeRoot) {
+		return config.EffectiveHQPrefix(cfg)
+	}
+	return ""
 }
 
 func ensurePersistedScopeLocalFileStore(scopeRoot string) error {
@@ -1336,23 +1680,23 @@ func ensurePersistedScopeLocalFileStore(scopeRoot string) error {
 	return os.WriteFile(beadsPath, []byte("{\"seq\":0,\"beads\":[]}\n"), 0o644)
 }
 
-func openExistingScopeLocalFileStore(scopeRoot string) (*beads.FileStore, error) {
+func openExistingScopeLocalFileStore(scopeRoot, cityPath string) (*beads.FileStore, error) {
 	beadsPath := filepath.Join(scopeRoot, ".gc", "beads.json")
 	if _, err := os.Stat(beadsPath); err != nil {
 		return nil, err
 	}
-	return openScopeLocalFileStore(scopeRoot)
+	return openScopeLocalFileStoreForCity(scopeRoot, cityPath)
 }
 
 func openCompatibleFileStore(scopeRoot, cityPath string) (*beads.FileStore, error) {
 	scopeRoot = resolveStoreScopeRoot(cityPath, scopeRoot)
 	if !samePath(scopeRoot, cityPath) && scopeUsesFileStoreContract(scopeRoot) {
-		return openExistingScopeLocalFileStore(scopeRoot)
+		return openExistingScopeLocalFileStore(scopeRoot, cityPath)
 	}
 	if fileStoreUsesScopedRoots(cityPath) {
-		return openExistingScopeLocalFileStore(scopeRoot)
+		return openExistingScopeLocalFileStore(scopeRoot, cityPath)
 	}
-	return openScopeLocalFileStore(cityPath)
+	return openScopeLocalFileStoreForCity(cityPath, cityPath)
 }
 
 func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
@@ -1365,7 +1709,7 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 // builtin-cache readiness and pack expansion included — again inside the open.
 // A nil config keeps the loading behavior, matching nativeDoltOpenEnvForScope.
 func openStoreAtForCityWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
-	result, err := openStoreResultAtForCityWithConfig(storePath, cityPath, cfg, gate.ModeUnset, false, false)
+	result, err := openStoreResultAtForCityWithConfig(storePath, cityPath, cfg, gate.ModeUnset, false, false, false, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1377,7 +1721,7 @@ func openAuthoritativeStoreAtForCity(storePath, cityPath string) (beads.Store, e
 }
 
 func openStoreAtForCityWithAuthority(storePath, cityPath string, authoritative bool) (beads.Store, error) {
-	result, err := openStoreResultAtForCityWithAuthority(storePath, cityPath, gate.ModeUnset, false, authoritative)
+	result, err := openStoreResultAtForCityWithAuthority(storePath, cityPath, gate.ModeUnset, false, authoritative, false, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1385,7 +1729,7 @@ func openStoreAtForCityWithAuthority(storePath, cityPath string, authoritative b
 }
 
 func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult, error) {
-	return openStoreResultAtForCityWithMode(storePath, cityPath, gate.ModeUnset, false)
+	return openStoreResultAtForCityWithMode(storePath, cityPath, gate.ModeUnset, false, false, nil)
 }
 
 // openStoreResultAtForCityWithMode is openStoreResultAtForCity with the
@@ -1394,35 +1738,126 @@ func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult
 // boot-latched mode: re-resolving from disk on a reload would flip the city
 // store's write discipline mid-process while rig stores keep the boot mode —
 // exactly the mixed-writer state the process latch exists to prevent.
-func openStoreResultAtForCityWithMode(storePath, cityPath string, modeOverride gate.Mode, haveMode bool) (beads.StoreOpenResult, error) {
-	return openStoreResultAtForCityWithAuthority(storePath, cityPath, modeOverride, haveMode, false)
+//
+// nativeOverride is the analogous boot latch for beads.native_transport: nil
+// means "resolve from cfg" (the default, best-effort behavior every other
+// caller gets); a non-nil value is the controller's frozen boot-time value,
+// carried the same way modeOverride is, for the same reopen-must-not-flip
+// reason.
+func openStoreResultAtForCityWithMode(storePath, cityPath string, modeOverride gate.Mode, haveMode, longLived bool, nativeOverride *beads.NativeTransportMode) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWithAuthority(storePath, cityPath, modeOverride, haveMode, false, longLived, nativeOverride)
 }
 
-func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverride gate.Mode, haveMode, authoritative bool) (beads.StoreOpenResult, error) {
-	return openStoreResultAtForCityWithConfig(storePath, cityPath, nil, modeOverride, haveMode, authoritative)
+func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverride gate.Mode, haveMode, authoritative, longLived bool, nativeOverride *beads.NativeTransportMode) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWithConfig(storePath, cityPath, nil, modeOverride, haveMode, authoritative, longLived, nativeOverride)
 }
 
 // openStoreResultAtForCityWithConfig is openStoreResultAtForCityWithAuthority
 // with the city config supplied by a caller that already loaded it. A nil
 // config is loaded here, which is what every caller outside the bd scope
 // resolution path passes.
-func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative bool) (beads.StoreOpenResult, error) {
+//
+// longLived marks a store the caller keeps open for the process lifetime (the
+// controller's city store). Those keep the beads library's daemon-sized
+// project pool; every other open is a one-shot CLI open and takes the
+// single-connection cap from nativeDoltOneShotOpenEnvForScope.
+// openStoreFactoryForCity is the beads store factory, behind a seam.
+//
+// The seam exists so the WIRING is assertable: which openers this composition
+// root supplies, and whether it threads the long-lived shape, decides whether a
+// proxied city gets the native read lane at all — and every other way of
+// checking that needs a real Dolt server, which a unit test cannot have. The
+// variable is never reassigned in production.
+var openStoreFactoryForCity = beads.OpenStoreAtForCity
+
+func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative, longLived bool, nativeOverride *beads.NativeTransportMode) (beads.StoreOpenResult, error) {
+	return openWorkStoreResultAtForCityScoped(storePath, cityPath, cfg, modeOverride, haveMode, authoritative, longLived, false, nativeOverride)
+}
+
+// openOneShotStoreAtForCityWithConfig is openStoreAtForCityWithConfig for a
+// one-shot CLI invocation whose cfg it loaded itself moments ago. On top of
+// the shared path's reuse it also skips the bd provider's city-scope reload
+// (issue prefix, store options): that reload stays on the shared path because
+// the shared path is what every caller NOT converted to a one-shot entry point
+// still uses, and it must stay safe for the long-lived ones among them (the
+// order dispatcher from the controller tick and the API webhook handler), which
+// pass a cfg that can be stale, or an empty stand-in. The rest of that
+// population is one-shot and keeps paying the reload: gc bd's store-scope probe
+// and its two direct opens, plus the gc bd close work-record gate. Converting
+// those is deliberately out of scope here, so do not read the shared path's
+// remaining callers as long-lived-only.
+// Nothing enforces that cfg is fresh; the one-shot entry points
+// (openCityStoreAtWithConfig, oneShotRigStoreOpener) and the one-shot convoy
+// store openers (openAllConvoyStoresAt, openConvoyStoreByIDAt) are the only
+// callers.
+func openOneShotStoreAtForCityWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
+	result, err := openWorkStoreResultAtForCityScoped(storePath, cityPath, cfg, gate.ModeUnset, false, false, false, true, nil)
+	if err != nil {
+		return nil, err
+	}
+	return result.Store, nil
+}
+
+// openWorkStoreResultAtForCityScoped opens a scope store through the shared
+// open body. A one-shot scope store is a WORK store (the city or a rig
+// ledger); under the split-strict test gate it is handed out as the gate's
+// work view (split_strict_seam.go), and unchanged otherwise. A long-lived open
+// is the controller's: it wraps the store in its cache and hands out views at
+// its own accessors, so it gets the raw store here.
+func openWorkStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative, longLived, oneShotConfig bool, nativeOverride *beads.NativeTransportMode) (beads.StoreOpenResult, error) {
+	result, err := openStoreResultAtForCityScoped(storePath, cityPath, cfg, modeOverride, haveMode, authoritative, longLived, oneShotConfig, nativeOverride)
+	if err == nil && !longLived {
+		result.Store = splitStrictWorkView(result.Store)
+	}
+	return result, err
+}
+
+// openStoreResultAtForCityScoped is the shared open body. oneShotConfig
+// reports that cfg is this one-shot invocation's own fresh load, which lets
+// the bd city-scope open reuse it; see openOneShotStoreAtForCityWithConfig.
+func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative, longLived, oneShotConfig bool, nativeOverride *beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 	runtimeCityPath := cityPath
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(storePath)
 	}
+	// The provider comes from env and raw city.toml reads, not from cfg, so it
+	// is known before the load below and can decide what a load error costs.
+	scopeRoot := resolveStoreScopeRoot(runtimeCityPath, storePath)
+	provider := rawBeadsProviderForScope(scopeRoot, runtimeCityPath)
+	if authoritative {
+		provider = authoritativeBeadsProviderForScope(scopeRoot, runtimeCityPath)
+	}
+	// A one-shot invocation with the memo active opens each scope once; see
+	// invocation_store_memo.go. Long-lived opens never take the memo.
+	var memoEntry *invocationStoreEntry
+	if memo := activeInvocationStoreMemo(); memo != nil && !longLived {
+		memoEntry = memo.entry(invocationStoreKey{scopeRoot: scopeRoot, cityPath: runtimeCityPath, provider: provider, authoritative: authoritative})
+		memoEntry.mu.Lock()
+		defer memoEntry.mu.Unlock()
+		if memoEntry.opened {
+			if cfg == nil {
+				cfg = memoEntry.cfg
+			}
+			mode, nativeTransport := storeOpenModes(cfg, modeOverride, haveMode, nativeOverride)
+			if mode == memoEntry.mode && nativeTransport == memoEntry.nativeTransport {
+				return memoEntry.borrow(cfg), nil
+			}
+			// The same scope asked for under a different write discipline is a
+			// different store: open it unmemoized, as without the memo.
+			memoEntry = nil
+		}
+	}
 	if cfg == nil {
-		cfg, _ = loadCityConfig(runtimeCityPath, io.Discard)
+		loaded, err := loadCityConfigForStoreOpen(runtimeCityPath, provider, nativeOverride)
+		if err != nil {
+			return beads.StoreOpenResult{}, err
+		}
+		cfg = loaded
 	} else {
 		// Loading the config would have run the builtin-cache readiness pass.
 		// Reusing one must not skip that self-heal for a city this process has
 		// never readied.
 		_ = ensureBuiltinRuntimeAssetsForSuppliedConfig(runtimeCityPath, io.Discard)
-	}
-	scopeRoot := resolveStoreScopeRoot(runtimeCityPath, storePath)
-	provider := rawBeadsProviderForScope(scopeRoot, runtimeCityPath)
-	if authoritative {
-		provider = authoritativeBeadsProviderForScope(scopeRoot, runtimeCityPath)
 	}
 	switch strings.TrimSpace(provider) {
 	case "sqlite", "sqlite-cgo", "coordstore":
@@ -1431,17 +1866,29 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 				"update provider in city.toml to a supported value such as %q, or remove the setting to use the default",
 			provider, "doltlite")
 	}
-	mode := resolvedConditionalWritesMode(cfg)
-	if haveMode {
-		mode = modeOverride
+	mode, nativeTransport := storeOpenModes(cfg, modeOverride, haveMode, nativeOverride)
+	// One bd opener, used twice: as the factory's fallback store and as the
+	// WRITE leaf of the proxied split store. They must be the same store, or a
+	// demotion would silently change which store is doing the writing.
+	openBd := func() (beads.Store, error) {
+		if err := requireBdBinaryForCity(runtimeCityPath); err != nil {
+			return nil, err
+		}
+		if oneShotConfig {
+			return openOneShotBdStoreAtWithConfig(scopeRoot, runtimeCityPath, cfg, nativeTransport)
+		}
+		return openBdStoreAtWithConfig(scopeRoot, runtimeCityPath, cfg, nativeTransport)
 	}
-	result, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
-		ScopeRoot:         scopeRoot,
-		CityPath:          runtimeCityPath,
-		Provider:          provider,
-		PreflightChecker:  newBeadsPreflightChecker(runtimeCityPath, provider),
-		Logger:            slog.Default(),
-		ConditionalWrites: mode,
+	result, err := openStoreFactoryForCity(context.Background(), beads.StoreOpenOptions{
+		ScopeRoot:                  scopeRoot,
+		CityPath:                   runtimeCityPath,
+		Provider:                   provider,
+		PreflightChecker:           newBeadsPreflightChecker(runtimeCityPath, provider, cfg),
+		Logger:                     slog.Default(),
+		ConditionalWrites:          mode,
+		ConditionalWritesDefaulted: conditionalWritesOpenDefaulted(cfg, mode),
+		NativeTransport:            nativeTransport,
+		LongLived:                  longLived,
 		OnConditionalWritesDegraded: func() func(beads.ConditionalWritesDegrade) {
 			flags, resolved := resolvedConditionalWritesFlags(cfg)
 			return lazyConditionalWritesDegradeEmitter(
@@ -1450,12 +1897,12 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 		OpenFileStore: func() (beads.Store, error) {
 			return openCompatibleFileStore(scopeRoot, runtimeCityPath)
 		},
-		OpenBdStore: func() (beads.Store, error) {
-			if err := requireBdBinaryForCity(runtimeCityPath); err != nil {
-				return nil, err
-			}
-			return openBdStoreAtWithConfig(scopeRoot, runtimeCityPath, cfg)
-		},
+		OpenBdStore: openBd,
+		// The proxied-native lane. The factory consults this ONLY for a
+		// persisted proxied-server topology with GC_BEADS_PROXIED_NATIVE on, so
+		// wiring it here changes nothing for any other scope or for a binary
+		// with the flag off.
+		OpenProxiedStore: proxiedNativeStoreOpenerForScope(runtimeCityPath, scopeRoot, cfg, openBd),
 		OpenExecStore: func() (beads.Store, error) {
 			return openExecStoreAtForCityWithConfig(provider, scopeRoot, runtimeCityPath, cfg)
 		},
@@ -1465,7 +1912,13 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 			// pack expansion included, for the same city at the same moment.
 			// The reopen hook below deliberately keeps re-loading: it fires long
 			// after this open, where re-reading current state is the point.
-			env, err := nativeDoltOpenEnvForScope(runtimeCityPath, cfg, scopeRoot)
+			var env map[string]string
+			var err error
+			if longLived {
+				env, err = nativeDoltOpenEnvForScope(runtimeCityPath, cfg, scopeRoot)
+			} else {
+				env, err = nativeDoltOneShotOpenEnvForScope(runtimeCityPath, cfg, scopeRoot)
+			}
 			if err != nil {
 				return nil, fmt.Errorf("project native store env %s: %w", scopeRoot, err)
 			}
@@ -1478,8 +1931,20 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 			// the port per command — then re-open against the live server via the
 			// direct native path (which bypasses the factory preflight/identity
 			// gate, so an absent scope project_id cannot block the reconnect).
+			// This reopen passes a nil config, so the fresh env re-reads the
+			// city's current beads.allow_schema_behind_migrate decision rather
+			// than keeping the one in force at open, and the reconnect does not
+			// re-run the preflight's version_compat gate. The controller's
+			// rig-store reopen (api_state.go) instead reuses the config it
+			// opened with.
 			reopen := func(ctx context.Context) (beads.NativeStorage, error) {
-				freshEnv, rerr := nativeDoltOpenEnvForScopeContext(ctx, runtimeCityPath, nil, scopeRoot)
+				var freshEnv map[string]string
+				var rerr error
+				if longLived {
+					freshEnv, rerr = nativeDoltOpenEnvForScopeContext(ctx, runtimeCityPath, nil, scopeRoot)
+				} else {
+					freshEnv, rerr = nativeDoltOneShotOpenEnvForScopeContext(ctx, runtimeCityPath, nil, scopeRoot)
+				}
 				if rerr != nil {
 					return nil, fmt.Errorf("re-resolve native store env %s: %w", scopeRoot, rerr)
 				}
@@ -1491,8 +1956,70 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 	if err != nil {
 		return beads.StoreOpenResult{}, err
 	}
+	if observeOpenedStore != nil {
+		result.Store = observeOpenedStore(scopeRoot, result.Store)
+	}
+	if memoEntry != nil {
+		memoEntry.opened = true
+		memoEntry.result = result
+		memoEntry.cfg = cfg
+		memoEntry.mode = mode
+		memoEntry.nativeTransport = nativeTransport
+		return memoEntry.borrow(cfg), nil
+	}
 	result.Store = wrapStoreWithBeadPolicies(result.Store, cfg)
 	return result, nil
+}
+
+// storeOpenModes resolves the conditional-writes mode and the native transport
+// a store open runs under: the caller's boot-latched values when it carries
+// them, otherwise cfg's.
+func storeOpenModes(cfg *config.City, modeOverride gate.Mode, haveMode bool, nativeOverride *beads.NativeTransportMode) (gate.Mode, beads.NativeTransportMode) {
+	mode := resolvedConditionalWritesMode(cfg)
+	if haveMode {
+		mode = modeOverride
+	}
+	nativeTransport := resolvedNativeTransportMode(cfg)
+	if nativeOverride != nil {
+		nativeTransport = *nativeOverride
+	}
+	return mode, nativeTransport
+}
+
+// observeOpenedStore is a test seam at the single store-open point. When set,
+// it receives every store this process opens, with the scope root it was
+// opened for, and returns the store callers will use. It runs inside the
+// bead-policy wrapper, so policy behavior and unwrapBeadPolicyStore see exactly
+// what they see in production. It is nil in production; request-budget tests
+// set it to count every operation a hook issues. Tests that set it must stay
+// serial.
+var observeOpenedStore func(scopeRoot string, store beads.Store) beads.Store
+
+// loadCityConfigForStoreOpen loads the city config for a store open that was
+// handed none. A missing city.toml is not an error: most opens through the
+// shared body are not city-scoped, and they proceed on a nil config. Any other
+// load error fails the open when no boot-latched value is in hand and the
+// provider reaches the native_transport decision: an unread "off" must not
+// open as "auto". Every other open proceeds on a nil config, best-effort,
+// because the load error cannot change it. The deprecated
+// GC_BEADS_FORCE_FALLBACK alias overrides the city's value but does not excuse
+// the error: excusing it would let a command that works under the alias start
+// failing once the alias is removed.
+//
+// The cost is availability, and it is deliberate: a pack include can set
+// native_transport itself, so while one does not load, every nil-cfg open of
+// the city's bd-contract store fails here, gc order's and the controller's
+// per-tick sweep and standalone opens among them. gc hook adds no new stop: it
+// loads the city config itself and exits on the same error before any open.
+func loadCityConfigForStoreOpen(cityPath, provider string, nativeOverride *beads.NativeTransportMode) (*config.City, error) {
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err == nil || nativeOverride != nil || !beads.ProviderConsultsNativeTransport(provider) {
+		return cfg, nil
+	}
+	if _, missing := missingRootCityTOML(err, cityPath); missing {
+		return cfg, nil
+	}
+	return nil, fmt.Errorf("opening store for city %q: loading city.toml: %w", cityPath, err)
 }
 
 // requireBdBinaryForCity verifies that the logical bd command has either an
@@ -1576,15 +2103,39 @@ func resolveStoreScopeRoot(cityPath, storePath string) string {
 }
 
 // openBdStoreAtWithConfig opens the bd-backed store at storePath for a city.
-// A caller that already holds this city's config passes it to avoid reloading
-// it; a nil config is loaded here.
-func openBdStoreAtWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
+// A rig scope reuses a supplied cfg (a nil config is loaded here). The city
+// scope always reloads config from disk for the issue prefix and store
+// options: this is the shared open path, taken by every caller not converted
+// to a one-shot entry point, and its long-lived callers (order dispatch, API)
+// can hand it a stale or empty cfg. Unconverted one-shot callers are on it too
+// and still pay that reload — gc bd's store-scope probe and its two direct
+// opens, and the gc bd close work-record gate — and converting them is out of
+// scope here. CONVERTED one-shot callers go through
+// openOneShotBdStoreAtWithConfig instead.
+//
+// nativeTransport is this call's resolved beads.native_transport value. Under
+// "off", or with the deprecated GC_BEADS_FORCE_FALLBACK alias set, the
+// GC_NATIVE_DOLTLITE_BEADS read optimization is refused; see
+// openBdStoreAtScoped.
+func openBdStoreAtWithConfig(storePath, cityPath string, cfg *config.City, nativeTransport beads.NativeTransportMode) (beads.Store, error) {
+	return openBdStoreAtScoped(storePath, cityPath, cfg, false, nativeTransport)
+}
+
+// openOneShotBdStoreAtWithConfig is openBdStoreAtWithConfig for a one-shot
+// invocation's fresh cfg: the city scope reuses it instead of reloading.
+func openOneShotBdStoreAtWithConfig(storePath, cityPath string, cfg *config.City, nativeTransport beads.NativeTransportMode) (beads.Store, error) {
+	return openBdStoreAtScoped(storePath, cityPath, cfg, true, nativeTransport)
+}
+
+func openBdStoreAtScoped(storePath, cityPath string, cfg *config.City, oneShotConfig bool, nativeTransport beads.NativeTransportMode) (beads.Store, error) {
 	if filepath.Clean(storePath) == filepath.Clean(cityPath) {
-		store := bdStoreForCity(storePath, cityPath)
-		if optimized, ok := openOptimizedDoltliteStore(storePath, store); ok {
-			return optimized, nil
+		var store *beads.BdStore
+		if oneShotConfig {
+			store = bdStoreForCityWithConfig(storePath, cityPath, cfg)
+		} else {
+			store = bdStoreForCity(storePath, cityPath)
 		}
-		return store, nil
+		return withDoltliteReadOptimization(storePath, store, nativeTransport), nil
 	}
 	if cfg == nil {
 		loaded, err := loadCityConfig(cityPath, io.Discard)
@@ -1594,8 +2145,28 @@ func openBdStoreAtWithConfig(storePath, cityPath string, cfg *config.City) (bead
 		cfg = loaded
 	}
 	store := bdStoreForRig(storePath, cityPath, cfg)
-	if optimized, ok := openOptimizedDoltliteStore(storePath, store); ok {
-		return optimized, nil
+	return withDoltliteReadOptimization(storePath, store, nativeTransport), nil
+}
+
+// openDoltliteReadOptimization is openOptimizedDoltliteStore, held in a
+// variable so a test in the default build, where the optimization does not
+// exist, can see whether a bd store open consults it. Production never
+// reassigns it.
+var openDoltliteReadOptimization = openOptimizedDoltliteStore
+
+// withDoltliteReadOptimization returns store, or the GC_NATIVE_DOLTLITE_BEADS
+// read optimization over it when that optimization is built in and enabled.
+// The optimization serves GET and LIST by direct SQL against the doltlite
+// index file, bypassing the bd subprocess. "off", per city or through the
+// deprecated process-wide GC_BEADS_FORCE_FALLBACK alias, promises every read
+// goes through bd, so it gets the plain BdStore and the optimization is never
+// consulted.
+func withDoltliteReadOptimization(storePath string, store *beads.BdStore, nativeTransport beads.NativeTransportMode) beads.Store {
+	if nativeTransport == beads.NativeTransportOff || beads.ForceNativeFallbackActive() {
+		return store
 	}
-	return store, nil
+	if optimized, ok := openDoltliteReadOptimization(storePath, store); ok {
+		return optimized
+	}
+	return store
 }

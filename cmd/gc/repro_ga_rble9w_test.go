@@ -13,7 +13,7 @@ import (
 )
 
 func TestRepro_ga_rble9w_PinnedMayorHandoffNeverCyclesAndFalselyReportsSuccess(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "mayor", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -68,7 +68,7 @@ func TestRepro_ga_rble9w_PinnedMayorHandoffNeverCyclesAndFalselyReportsSuccess(t
 	var waitErr bytes.Buffer
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	code := waitForControllerRestart(ctx, dops, env.sp, sessionName, "gc handoff", 10*time.Millisecond, 100*time.Millisecond, &waitErr)
+	code := waitForControllerRestart(ctx, dops, env.sp, sessionName, 100*time.Millisecond, &waitErr)
 	if code != 1 {
 		t.Fatalf("waitForControllerRestart code = %d, want 1 (still running, not a false success); stderr=%q", code, waitErr.String())
 	}

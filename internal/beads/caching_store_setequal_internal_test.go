@@ -1,6 +1,9 @@
 package beads
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 // Reordered label/needs/dependency sets must NOT read as a change: the Dolt gcg
 // rig store does not guarantee a stable element order across scans, so an
@@ -46,6 +49,26 @@ func TestBeadChangedIgnoresSetOrder(t *testing.T) {
 	}
 	if !depsChanged(base.Dependencies, depChanged.Dependencies) {
 		t.Error("depsChanged = false when a dependency target changed; want true")
+	}
+}
+
+func TestCacheEventConflictsCurrentIgnoresLabelOrder(t *testing.T) {
+	current := Bead{
+		ID:     "gcg-wisp-x",
+		Title:  "t",
+		Status: "open",
+		Type:   "task",
+		Labels: []string{"a", "b", "c"},
+	}
+	patch := current
+	patch.Labels = []string{"c", "a", "b"}
+
+	fields := map[string]json.RawMessage{
+		"labels": json.RawMessage(`["c","a","b"]`),
+	}
+
+	if cacheEventConflictsCurrent(current, patch, fields) {
+		t.Fatal("cacheEventConflictsCurrent = true for a pure label reorder; want false")
 	}
 }
 

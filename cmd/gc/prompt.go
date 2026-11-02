@@ -34,7 +34,7 @@ type PromptContext struct {
 	WorkDir                 string
 	IssuePrefix             string
 	Branch                  string
-	DefaultBranch           string // e.g. "main" — from git symbolic-ref origin/HEAD
+	DefaultBranch           string // e.g. "main" — from git symbolic-ref origin/HEAD; empty when the build's probe did not complete
 	WorkQuery               string // command to find available work (from Agent.EffectiveWorkQuery)
 	AssignedInProgressQuery string // command to find assigned in-progress work (from Agent.EffectiveAssignedInProgressQuery)
 	AssignedReadyQuery      string // command to find pre-assigned ready work (from Agent.EffectiveAssignedReadyQuery)
@@ -57,7 +57,26 @@ type PromptContext struct {
 	// Templates use {{ .InstructionsFile }} as a provider-aware fallback when
 	// pack-specific guidance (e.g. quality-gate commands) is missing or empty.
 	InstructionsFile string
-	Env              map[string]string // from Agent.Env — custom vars
+	// ConfigDir is the directory the agent's config-relative paths (e.g.
+	// pre-start scripts) resolve against: Agent.SourceDir when set, else
+	// cityPath. Mirrors SessionSetupContext.ConfigDir (cmd/gc/pool.go).
+	ConfigDir string
+	Env       map[string]string // from Agent.Env — custom vars
+}
+
+// resolveConfigDir returns the directory an agent's config-relative paths
+// (pre-start scripts, session setup templates) resolve against: sourceDir
+// when the agent overrides it (imported-pack agents), else cityPath.
+// Shared by every site that populates ConfigDir on a PromptContext or
+// SessionSetupContext, so the resolution rule can't drift between them
+// (#5315). Note that sessionSetupContextForAgent (cmd/gc/cmd_start.go)
+// leaves ConfigDir zero for its rig-only callers; worker_handle.go patches
+// it via this helper.
+func resolveConfigDir(cityPath, sourceDir string) string {
+	if sourceDir != "" {
+		return sourceDir
+	}
+	return cityPath
 }
 
 // PromptRenderResult holds the rendered text plus the version and rendered
@@ -68,10 +87,18 @@ type PromptContext struct {
 // SHA-256 of the rendered text (after text/template substitution); two
 // runs with the same Version but diverging SHAs reveal an unbumped
 // template edit.
+//
+// Err is non-nil when the declared template could not be used as written:
+// it could not be read (Text is empty) or it failed to parse or execute
+// (Text is the raw body). The stderr warning and fallback Text are produced
+// either way; Err only lets strict callers tell a fallback from a clean
+// render. Warnings that leave the main render intact (shared fragment load
+// failures, missing or failing inject fragments) do not set Err.
 type PromptRenderResult struct {
 	Text    string
 	Version string
 	SHA     string
+	Err     error
 }
 
 // renderPrompt reads a prompt template file and renders it with the given
@@ -81,9 +108,11 @@ type PromptRenderResult struct {
 // pack directories; each may contain prompts/shared/ subdirectories
 // loaded as cross-pack shared templates (lower priority than the
 // sibling shared/ dir). injectFragments are named templates to append to
-// the output after rendering. Returns empty string if templatePath is empty
-// or the file doesn't exist. On parse or execute error, logs a warning to
-// stderr and returns the raw text (graceful fallback).
+// the output after rendering. Returns empty string if templatePath is empty.
+// A template path that cannot be read also returns empty, after a warning to
+// stderr. On parse or execute error, logs a warning to stderr and returns the
+// raw text (graceful fallback). Callers that must tell a fallback from a clean
+// render use renderPromptWithMeta(...).Err.
 func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx PromptContext, sessionTemplate string, stderr io.Writer, packDirs []string, injectFragments []string, store beads.Store) string {
 	return renderPromptWithMeta(fs, cityPath, cityName, templatePath, ctx, sessionTemplate, stderr, packDirs, injectFragments, store).Text
 }
@@ -99,7 +128,15 @@ func renderPromptWithMeta(fs fsys.FS, cityPath, cityName, templatePath string, c
 	sourcePath := promptTemplateSourcePath(cityPath, templatePath)
 	data, err := fs.ReadFile(sourcePath)
 	if err != nil {
-		return PromptRenderResult{}
+		// A template path that cannot be read is not "no template": say so,
+		// then keep the fallback (session resolution ships the beacon alone
+		// and a non-strict `gc prime` serves the built-in default).
+		if ctx.AgentName != "" {
+			fmt.Fprintf(stderr, "gc: prompt_template %q for agent %q: %v\n", templatePath, ctx.AgentName, err) //nolint:errcheck // best-effort stderr
+		} else {
+			fmt.Fprintf(stderr, "gc: prompt_template %q: %v\n", templatePath, err) //nolint:errcheck // best-effort stderr
+		}
+		return PromptRenderResult{Err: err}
 	}
 	raw := string(data)
 	fm, body := promptmeta.Parse(raw)
@@ -175,6 +212,7 @@ func renderPromptWithMeta(fs fsys.FS, cityPath, cityName, templatePath string, c
 			Text:    body,
 			Version: fm.Version,
 			SHA:     promptmeta.SHA(body),
+			Err:     err,
 		}
 	}
 
@@ -186,6 +224,7 @@ func renderPromptWithMeta(fs fsys.FS, cityPath, cityName, templatePath string, c
 			Text:    body,
 			Version: fm.Version,
 			SHA:     promptmeta.SHA(body),
+			Err:     err,
 		}
 	}
 
@@ -340,6 +379,7 @@ func buildTemplateData(ctx PromptContext) map[string]string {
 	m["ProviderKey"] = ctx.ProviderKey
 	m["ProviderDisplayName"] = ctx.ProviderDisplayName
 	m["InstructionsFile"] = ctx.InstructionsFile
+	m["ConfigDir"] = ctx.ConfigDir
 	return m
 }
 
@@ -370,17 +410,24 @@ func defaultBranchFor(dir string) string {
 // rendering so polecats and the refinery target the rig's true mainline
 // even when origin/HEAD is unset on the local clone.
 func defaultBranchForRig(rigName string, rigs []config.Rig, dir string) string {
-	if rigName != "" {
-		for i := range rigs {
-			if rigs[i].Name == rigName {
-				if branch := rigs[i].EffectiveDefaultBranch(); branch != "" {
-					return branch
-				}
-				break
-			}
-		}
+	if branch := recordedDefaultBranch(rigName, rigs); branch != "" {
+		return branch
 	}
 	return defaultBranchFor(dir)
+}
+
+// recordedDefaultBranch returns the named rig's recorded DefaultBranch, or ""
+// when the rig is unnamed, unknown, or records none.
+func recordedDefaultBranch(rigName string, rigs []config.Rig) string {
+	if rigName == "" {
+		return ""
+	}
+	for i := range rigs {
+		if rigs[i].Name == rigName {
+			return rigs[i].EffectiveDefaultBranch()
+		}
+	}
+	return ""
 }
 
 // promptFuncMap returns template functions available in prompt templates.

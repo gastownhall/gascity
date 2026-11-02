@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
-	"time"
 )
 
 func TestValidateReviewedHermeticBodiesRequiresExactUniqueUntaggedTest(t *testing.T) {
@@ -84,7 +83,7 @@ func TestValidateAgainstPolicyWiresReviewedHermeticPolicyAndSourceChecks(t *test
 	t.Parallel()
 
 	row := validReviewedHermeticBody("TestOwned")
-	policy := Ledger{Version: 2, ReviewedHermeticBody: []ReviewedHermeticBody{row}}
+	policy := Ledger{Version: 3, ReviewedHermeticBody: []ReviewedHermeticBody{row}}
 	clean := scanHermeticFixture(t, fstest.MapFS{
 		"sample/owned_test.go": &fstest.MapFile{Data: []byte(`package sample
 import "testing"
@@ -96,7 +95,7 @@ func TestOwned(t *testing.T) {}
 		ledger := policy
 		ledger.ReviewedHermeticBody = append([]ReviewedHermeticBody(nil), policy.ReviewedHermeticBody...)
 		ledger.ReviewedHermeticBody[0].EffectiveSize = "small"
-		err := validateAgainstPolicy(policy, ledger, clean, time.Time{})
+		err := validateAgainstPolicy(policy, ledger, clean)
 		requireErrorContains(t, err, `bootstrap policy requires "medium"`)
 	})
 
@@ -111,7 +110,7 @@ func TestOwned(t *testing.T) { helper() }
 func helper() { time.Sleep(0) }
 `)},
 		})
-		err := validateAgainstPolicy(policy, policy, withResource, time.Time{})
+		err := validateAgainstPolicy(policy, policy, withResource)
 		requireErrorContains(t, err, string(ResourceFixedSleep))
 	})
 }

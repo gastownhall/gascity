@@ -11,8 +11,12 @@ import (
 )
 
 const (
-	advancingNudgeStoreSetupOps    = 1
-	advancingNudgeStoreDeadItemOps = 4
+	// advancingNudgeStoreSetupOps is an enqueue's own store cost: the shadow
+	// save's lookup, which finds the store's open shadow.
+	advancingNudgeStoreSetupOps = 1
+	// advancingNudgeStoreTerminalizeOps is the cost of paying one shadow debt
+	// with a known bead: SetMetadataBatch, then Close.
+	advancingNudgeStoreTerminalizeOps = 2
 )
 
 type advancingNudgeStore struct {
@@ -83,7 +87,7 @@ func seedNudgeBudgetPreservationBacklog(t *testing.T, cityPath string, now time.
 	t.Helper()
 	now = now.UTC()
 	buckets := make(map[string]string, deadCount+4)
-	if err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+	if err := withNudgeQueueState(cityPath, "test", func(state *nudgeQueueState) error {
 		for i := 0; i < 2; i++ {
 			id := fmt.Sprintf("nudge-pending-preserve-%d", i)
 			buckets[id] = "pending"
@@ -140,7 +144,7 @@ func seedNudgeBudgetPreservationBacklog(t *testing.T, cityPath string, now time.
 func nudgeQueueBucketsByID(t *testing.T, cityPath string) map[string]string {
 	t.Helper()
 	buckets := make(map[string]string)
-	if err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+	if err := withNudgeQueueState(cityPath, "test", func(state *nudgeQueueState) error {
 		for _, item := range state.Pending {
 			buckets[item.ID] = "pending"
 		}
@@ -157,13 +161,13 @@ func nudgeQueueBucketsByID(t *testing.T, cityPath string) map[string]string {
 	return buckets
 }
 
-// TestSlingNudgeEnqueueBudgetPreservesQueuedItems exercises all three
-// maintenance loops AND the supersede loop at once: a Dead backlog large
-// enough to guarantee the budget cuts in, plus Pending/InFlight items that
-// share the new item's supersession reference, so their "did the budget's
-// early exit correctly leave supersede candidates untouched" behavior is
-// asserted, not just inferred from pruneDeadQueuedNudges alone.
-func TestSlingNudgeEnqueueBudgetPreservesQueuedItems(t *testing.T) {
+// TestSlingNudgeEnqueueSupersedesOverADeadBacklog pins that a dead backlog no
+// longer starves an enqueue's supersession (ga-fsp5w9): the maintenance pass is
+// pure, so a slow store and 160 older-binary dead letters cost the hold
+// nothing, the enqueue supersedes every pending and in-flight item sharing its
+// reference, and the only store calls are the shadow save before the lock and
+// the four superseded shadows' terminal writes after it.
+func TestSlingNudgeEnqueueSupersedesOverADeadBacklog(t *testing.T) {
 	const (
 		deadBacklog = 160
 		latency     = 40 * time.Millisecond
@@ -172,46 +176,42 @@ func TestSlingNudgeEnqueueBudgetPreservesQueuedItems(t *testing.T) {
 	cityPath := t.TempDir()
 	fakeClock := &clock.Fake{Time: time.Now().UTC()}
 	seededBuckets := seedNudgeBudgetPreservationBacklog(t, cityPath, fakeClock.Now(), reference, deadBacklog)
-	maxOps := int64(nudgeEnqueueMaintenanceBudget/latency) + advancingNudgeStoreSetupOps + advancingNudgeStoreDeadItemOps
-	store := &advancingNudgeStore{fakeClock: fakeClock, latency: latency, failAfter: maxOps}
+	wantOps := int64(advancingNudgeStoreSetupOps + 4*advancingNudgeStoreTerminalizeOps)
+	store := &advancingNudgeStore{fakeClock: fakeClock, latency: latency, failAfter: wantOps}
 	item := newQueuedNudgeWithOptions("gascity/deployer", "Work slung. Check your hook.", "sling", fakeClock.Now(), queuedNudgeOptions{
 		ID:        "nudge-new-preservation",
 		Reference: reference,
 	})
 
-	start := fakeClock.Now()
 	if err := enqueueQueuedNudgeWithStoreAndClock(cityPath, beads.NudgesStore{Store: store}, item, fakeClock); err != nil {
 		t.Fatalf("enqueueQueuedNudgeWithStoreAndClock: %v", err)
 	}
-	virtualElapsed := fakeClock.Now().Sub(start)
-	if virtualElapsed <= nudgeEnqueueMaintenanceBudget {
-		t.Fatalf("virtual enqueue elapsed = %v, want the dead backlog to exhaust the %v budget", virtualElapsed, nudgeEnqueueMaintenanceBudget)
-	}
-	if maxElapsed := nudgeEnqueueMaintenanceBudget + (advancingNudgeStoreSetupOps+advancingNudgeStoreDeadItemOps)*latency; virtualElapsed > maxElapsed {
-		t.Fatalf("virtual enqueue elapsed = %v, want at most %v", virtualElapsed, maxElapsed)
-	}
-	if ops := store.operations(); ops > maxOps {
-		t.Fatalf("advancing store ops = %d, want at most %d to prove the maintenance budget cut in", ops, maxOps)
+	if ops := store.operations(); ops != wantOps {
+		t.Fatalf("advancing store ops = %d, want %d (the save, then two writes per superseded shadow)", ops, wantOps)
 	}
 
 	buckets := nudgeQueueBucketsByID(t, cityPath)
-	if got, want := len(buckets), len(seededBuckets)+1; got != want {
+	if got, want := len(buckets), deadBacklog+4+1; got != want {
 		t.Fatalf("queued item count = %d, want %d; buckets=%v", got, want, buckets)
 	}
-	for id, wantBucket := range seededBuckets {
-		if bucket := buckets[id]; bucket != wantBucket {
-			t.Fatalf("seeded queued nudge %q bucket = %q, want %q; buckets=%v", id, bucket, wantBucket, buckets)
+	for id, bucket := range seededBuckets {
+		if bucket == "dead" && buckets[id] != "dead" {
+			t.Fatalf("dead nudge %q bucket = %q, want dead", id, buckets[id])
 		}
 	}
-	for i := 0; i < 2; i++ {
-		id := fmt.Sprintf("nudge-pending-preserve-%d", i)
-		if bucket := buckets[id]; bucket != "pending" {
-			t.Fatalf("%s bucket = %q, want pending because supersede budget was already exhausted", id, bucket)
+	state := loadNudgeStateForTest(t, cityPath)
+	superseded := 0
+	for _, dead := range state.Dead {
+		if dead.LastError != "superseded" {
+			continue
 		}
-		id = fmt.Sprintf("nudge-in-flight-preserve-%d", i)
-		if bucket := buckets[id]; bucket != "in-flight" {
-			t.Fatalf("%s bucket = %q, want in-flight because supersede budget was already exhausted", id, bucket)
+		superseded++
+		if dead.Shadow == nil || !dead.Shadow.Paid || dead.Shadow.State != "superseded" {
+			t.Fatalf("superseded %q debt = %+v, want a paid superseded debt", dead.ID, dead.Shadow)
 		}
+	}
+	if superseded != 4 {
+		t.Fatalf("superseded = %d, want the 2 pending and 2 in-flight items sharing the reference", superseded)
 	}
 	if bucket := buckets[item.ID]; bucket != "pending" {
 		t.Fatalf("new queued nudge bucket = %q, want pending", bucket)

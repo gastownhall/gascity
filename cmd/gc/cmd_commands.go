@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -327,6 +328,7 @@ func runDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName str
 		return 1
 	}
 	cmd.Env = pinInvokingGCBinary(cmd.Env, exe)
+	cmd.Env = pinSupervisorURL(cmd.Env, cityPath, stderr)
 	cmd.Env = mergeCanonicalScopeDoltEnv(cmd.Env, cityPath)
 	cmd.Env = applyCityDoltSettingsEnv(cmd.Env, cityPath)
 	disableProductMetricsForChild(cmd)
@@ -348,6 +350,56 @@ func pinInvokingGCBinary(env []string, executable string) []string {
 		return env
 	}
 	return append(env, "GC_BIN="+executable)
+}
+
+// supervisorURLEnv names the variable that hands a pack command the base URL
+// of the supervisor API serving its city, so packs can call the API without
+// re-implementing the CLI's lookup of $GC_HOME/supervisor.toml.
+const supervisorURLEnv = "GC_SUPERVISOR_URL"
+
+// pinSupervisorURL sets GC_SUPERVISOR_URL for a pack command to the
+// supervisor base URL from packCommandSupervisorURL, or leaves it unset when
+// there is none. An ambient value is always dropped so a command never sees a
+// URL for some other supervisor. A registry or supervisor config that cannot
+// be read is reported on stderr; the command still runs without the URL.
+func pinSupervisorURL(env []string, cityPath string, stderr io.Writer) []string {
+	env = removeEnvKey(env, supervisorURLEnv)
+	baseURL, err := packCommandSupervisorURL(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc: warning: not setting %s: %v\n", supervisorURLEnv, err) //nolint:errcheck // best-effort stderr
+		return env
+	}
+	if baseURL == "" {
+		return env
+	}
+	return append(env, supervisorURLEnv+"="+baseURL)
+}
+
+// packCommandSupervisorURL returns the supervisor API base URL for the city
+// at cityPath, the one the CLI itself dials (supervisorAPIBaseURL), when the
+// city is registered with the supervisor and that URL is plain http on a
+// loopback address. It returns "" when the city is not supervisor-managed or
+// the supervisor binds a non-loopback address.
+func packCommandSupervisorURL(cityPath string) (string, error) {
+	_, registered, err := registeredCityEntry(cityPath)
+	if err != nil {
+		return "", fmt.Errorf("reading city registry: %w", err)
+	}
+	if !registered {
+		return "", nil
+	}
+	baseURL, err := supervisorAPIBaseURL()
+	if err != nil {
+		return "", fmt.Errorf("reading supervisor config: %w", err)
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return "", fmt.Errorf("parsing supervisor URL %q: %w", baseURL, err)
+	}
+	if u.Scheme != "http" || !isLoopbackHost(u.Hostname()) {
+		return "", nil
+	}
+	return baseURL, nil
 }
 
 // mergeCanonicalScopeDoltEnv projects the city's canonical Dolt
@@ -424,7 +476,7 @@ func mergeCanonicalScopeDoltEnv(environ []string, cityPath string) []string {
 // directly invoked pack command talks to the same server as its scheduled order.
 // The rest of the [dolt] block was never carried, and for the managed-server
 // commands that is not cosmetic: gc-beads-bd.sh rebuilds dolt-config.yaml purely
-// from GC_DOLT_* and defaults auto-GC ON and read_timeout to 15000 when they are
+// from GC_DOLT_* and defaults auto-GC ON and read_timeout to 120000 when they are
 // absent. So `gc dolt restart` run from an operator shell wrote a *different*
 // server config than the supervisor writes from the same city.toml — silently
 // reverting a city's configured read/write timeouts and auto-GC state as a side

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -35,7 +37,8 @@ type Report struct {
 
 // Doctor runs registered health checks and reports results.
 type Doctor struct {
-	checks []Check
+	checks   []Check
+	inFlight sync.WaitGroup
 	// CheckTimeout bounds each individual check's Run, its --fix remediation,
 	// and the post-fix verification re-run. Zero (the default) preserves the
 	// historical unbounded behavior. When one of those exceeds the bound it is
@@ -43,13 +46,32 @@ type Doctor struct {
 	// data plane, or a fix script blocked on I/O) cannot stall the entire
 	// doctor run and hide every check registered after it. A timed-out Run is
 	// reported as a timed-out advisory error; a timed-out fix is reported as an
-	// unconfirmed remediation.
+	// unconfirmed remediation. Call Wait before releasing resources that a
+	// timed execution may still be using.
 	CheckTimeout time.Duration
+	// BeforeFix, when set, is called before each --fix remediation and again
+	// before the re-run that verifies it. A caller that shares reads across
+	// the checks of one run (gc doctor's per-run bd read memo) drops them
+	// here, so neither the fix nor its verification is answered from data
+	// read before the fix changed it.
+	BeforeFix func()
 }
 
 // Register adds a check to the doctor's check list.
 func (d *Doctor) Register(c Check) {
 	d.checks = append(d.checks, c)
+}
+
+// Wait blocks until every timed execution started by prior Run or RunCollect
+// calls has finished. Callers that release resources used by checks must call
+// Wait after the run returns and before releasing those resources.
+//
+// A Doctor serves one run at a time: Wait must not be called concurrently with
+// Run or RunCollect on another goroutine. Concurrent use would let a run's
+// inFlight.Add race a Wait that has already observed a zero counter, so Wait
+// could return while a timed execution still owns caller resources.
+func (d *Doctor) Wait() {
+	d.inFlight.Wait()
 }
 
 // Run executes all registered checks, streaming results to w as each
@@ -143,16 +165,23 @@ func (r *Report) tally(result *CheckResult) {
 // buffer: on completion the buffer is flushed to the real writer (keeping a
 // check's incidental output grouped before its result line); on timeout the
 // goroutine is abandoned with its private buffer, so a still-running check
-// can never interleave writes with — or race against — the rest of the run.
+// can never interleave writes with — or race against — the rest of the run,
+// and the check's CheckContext.Done is closed so it can stop issuing I/O.
 func (d *Doctor) boundedRun(c Check, ctx *CheckContext) *CheckResult {
 	if d.CheckTimeout <= 0 {
-		return c.Run(ctx)
+		return runCheckRecoveringPanic(c, ctx)
 	}
 	var buf bytes.Buffer
+	abandoned := make(chan struct{})
 	checkCtx := *ctx
 	checkCtx.Output = &buf
+	checkCtx.Done = abandoned
 	done := make(chan *CheckResult, 1)
-	go func() { done <- c.Run(&checkCtx) }()
+	d.inFlight.Add(1)
+	go func() {
+		defer d.inFlight.Done()
+		done <- runCheckRecoveringPanic(c, &checkCtx)
+	}()
 	select {
 	case result := <-done:
 		if buf.Len() > 0 && ctx.Output != nil {
@@ -160,6 +189,7 @@ func (d *Doctor) boundedRun(c Check, ctx *CheckContext) *CheckResult {
 		}
 		return result
 	case <-time.After(d.CheckTimeout):
+		close(abandoned)
 		return &CheckResult{
 			Name:     c.Name(),
 			Status:   StatusError,
@@ -170,6 +200,32 @@ func (d *Doctor) boundedRun(c Check, ctx *CheckContext) *CheckResult {
 	}
 }
 
+func runCheckRecoveringPanic(c Check, ctx *CheckContext) (result *CheckResult) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result = &CheckResult{
+				Name:     c.Name(),
+				Status:   StatusError,
+				Severity: SeverityBlocking,
+				Message:  fmt.Sprintf("panic: %v", recovered),
+			}
+		}
+	}()
+	return c.Run(ctx)
+}
+
+// runFixRecoveringPanic converts a panic in a check's Fix into an error. Fix
+// runs pack-authored remediation, so a panic there must fail the one check
+// rather than take down the whole doctor process.
+func runFixRecoveringPanic(c Check, ctx *CheckContext) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("fix for %s panicked: %v", c.Name(), recovered)
+		}
+	}()
+	return c.Fix(ctx)
+}
+
 // fixAndVerify remediates a failing, fixable check and re-runs it to confirm,
 // bounding both the fix and the verifying re-run under the per-check timeout.
 // It returns the result to report (res mutated in place on fix failure, or the
@@ -178,6 +234,7 @@ func (d *Doctor) boundedRun(c Check, ctx *CheckContext) *CheckResult {
 // gc doctor --fix cannot hang on a wedged remediation, while the fix still runs
 // to completion in the background rather than being interrupted mid-mutation.
 func (d *Doctor) fixAndVerify(c Check, ctx *CheckContext, res *CheckResult) (*CheckResult, bool) {
+	d.beforeFix()
 	switch err := d.boundedFix(c, ctx); {
 	case errors.Is(err, errFixTimedOut):
 		res.FixAttempted = true
@@ -185,6 +242,10 @@ func (d *Doctor) fixAndVerify(c Check, ctx *CheckContext, res *CheckResult) (*Ch
 		return res, true
 	case err != nil:
 		res.FixError = err.Error()
+		var hinted *FixHintError
+		if errors.As(err, &hinted) && hinted.Hint != "" {
+			res.FixHint = hinted.Hint
+		}
 		res.FixAttempted = true
 		return res, false
 	}
@@ -192,6 +253,7 @@ func (d *Doctor) fixAndVerify(c Check, ctx *CheckContext, res *CheckResult) (*Ch
 	// A check that fails fast, fixes fast, then wedges on this verification
 	// would otherwise hang gc doctor --fix — re-opening the very failure mode
 	// the per-check timeout closes.
+	d.beforeFix()
 	verified := d.boundedRun(c, ctx)
 	if verified.Status == StatusOK {
 		verified.Fixed = true
@@ -199,6 +261,12 @@ func (d *Doctor) fixAndVerify(c Check, ctx *CheckContext, res *CheckResult) (*Ch
 		verified.FixAttempted = true
 	}
 	return verified, false
+}
+
+func (d *Doctor) beforeFix() {
+	if d.BeforeFix != nil {
+		d.BeforeFix()
+	}
 }
 
 // boundedFix runs a check's Fix under the doctor's per-check timeout using the
@@ -214,13 +282,17 @@ func (d *Doctor) fixAndVerify(c Check, ctx *CheckContext, res *CheckResult) (*Ch
 // otherwise Fix's own error (or nil) is returned.
 func (d *Doctor) boundedFix(c Check, ctx *CheckContext) error {
 	if d.CheckTimeout <= 0 {
-		return c.Fix(ctx)
+		return runFixRecoveringPanic(c, ctx)
 	}
 	var buf bytes.Buffer
 	fixCtx := *ctx
 	fixCtx.Output = &buf
 	done := make(chan error, 1)
-	go func() { done <- c.Fix(&fixCtx) }()
+	d.inFlight.Add(1)
+	go func() {
+		defer d.inFlight.Done()
+		done <- runFixRecoveringPanic(c, &fixCtx)
+	}()
 	select {
 	case err := <-done:
 		if buf.Len() > 0 && ctx.Output != nil {
@@ -266,7 +338,10 @@ func printResult(w io.Writer, r *CheckResult, verbose bool) {
 		fmt.Fprintf(w, "      fix attempted; check still failing\n") //nolint:errcheck // best-effort output
 	}
 	if r.FixHint != "" && r.Status != StatusOK && !r.Fixed {
-		fmt.Fprintf(w, "      hint: %s\n", r.FixHint) //nolint:errcheck // best-effort output
+		// Continuation lines of a multi-line hint align under its first.
+		const label = "      hint: "
+		hint := strings.ReplaceAll(r.FixHint, "\n", "\n"+strings.Repeat(" ", len(label)))
+		fmt.Fprintf(w, "%s%s\n", label, hint) //nolint:errcheck // best-effort output
 	}
 }
 

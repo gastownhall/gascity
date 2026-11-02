@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -15,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -30,6 +33,9 @@ type countingRouteStore struct {
 	lists  int
 	gets   int
 	writes int
+	// batches counts exact batch reads (GetExactBatch), the one read by id a
+	// production work store (bd, native Dolt) answers beads.GetMany with.
+	batches int
 	// scanned records whether any List asked for the whole open corpus, which is
 	// the read this slice moved off the tick.
 	scanned int
@@ -58,7 +64,27 @@ func (s *countingRouteStore) SetMetadataBatch(id string, kvs map[string]string) 
 	return s.Store.SetMetadataBatch(id, kvs)
 }
 
-func (s *countingRouteStore) reads() int { return s.lists + s.gets }
+// GetExactBatch answers an exact batch read from the wrapped store, as one
+// counted round trip.
+func (s *countingRouteStore) GetExactBatch(ids []string) (map[string]beads.Bead, []string, error) {
+	s.batches++
+	found := make(map[string]beads.Bead, len(ids))
+	var unresolved []string
+	for _, id := range ids {
+		b, err := s.Store.Get(id)
+		switch {
+		case err == nil:
+			found[id] = b
+		case errors.Is(err, beads.ErrNotFound):
+			unresolved = append(unresolved, id)
+		default:
+			return nil, nil, err
+		}
+	}
+	return found, unresolved, nil
+}
+
+func (s *countingRouteStore) reads() int { return s.lists + s.gets + s.batches }
 
 // unroutedWorkBead is the recoverable shape: open, unassigned, kind-less, a pool
 // route in gc.run_target and nothing in gc.routed_to.
@@ -897,5 +923,65 @@ func TestRouteRecoveryDeltaCountsCandidatesItCouldNotResolve(t *testing.T) {
 	}
 	if _, present := clean.fields()["dropped"]; present {
 		t.Fatalf("clean delta trace fields = %v, want no dropped key", clean.fields())
+	}
+}
+
+// A standalone runtime (no controller state, API disabled) keeps its own city
+// and rig store handles, and a config reload reopens them. The route-recovery
+// backstop reads those handles on its own goroutine, so the reload's swap must
+// be synchronized with the lane's read. Run under -race: without the guard the
+// detector flags the reload's write against the backstop pass's read.
+func TestRouteRecoveryBackstopConcurrentWithStandaloneStoreReload(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeSoftReloadConfig(t, tomlPath, "5s")
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+	sp := runtime.NewFake()
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  tomlPath,
+		ConfigRev: configRev,
+		Cfg:       cfg,
+		SP:        sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	if cr.cs != nil {
+		t.Fatal("fixture has controller state; it must exercise the standalone store handles")
+	}
+
+	// A changed config, so the reload is a real one that reopens the handles.
+	writeCityRuntimeSoftReloadConfig(t, tomlPath, "6s")
+	// Backstop passes run back to back for the whole reload, so passes land
+	// both before and after the reload swaps the handles.
+	stop := make(chan struct{})
+	passesDone := make(chan struct{})
+	go func() {
+		defer close(passesDone)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			cr.runRouteRecoveryBackstop(backstopReasonCadence)
+		}
+	}()
+	lastProviderName := "fake"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceWatch)
+	close(stop)
+	awaitClose(t, passesDone, "the route-recovery backstop passes")
+
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reload reply = %+v, want applied", reply)
+	}
+	if cr.cityBeadStore() == nil {
+		t.Fatal("the reload did not open the standalone city store")
 	}
 }

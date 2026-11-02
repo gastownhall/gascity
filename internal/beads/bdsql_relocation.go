@@ -62,20 +62,52 @@ type RelocatedClass struct {
 	// IDPrefix is the reserved bead-id prefix the class mints, without the
 	// trailing "-", e.g. "gcg".
 	IDPrefix string
+	// HeldPrefixes are the reserved prefixes this class's store HOLDS beads
+	// under without minting them — a subsystem inside the binding that mints
+	// its own ids, like the nudge queue's "gcnq" records inside the nudges
+	// store.
+	//
+	// They are as blind to bd as the mint prefix is, for the same reason: no
+	// row of the work ledger carries one, so a read scoped to one runs
+	// successfully here and matches nothing. Splitting them from IDPrefix
+	// rather than folding them in keeps the operator-facing message able to
+	// say which namespace the class MINTS, which is the one an id in the wild
+	// usually carries.
+	HeldPrefixes []string
 	// Location describes where the class is served from, for the operator
 	// reading the refusal. Free-form; a binding name and path is typical.
 	Location string
 }
 
-// matchesID reports whether id falls under this class's reserved namespace.
-// The match is exact-or-hyphen, the same shape the API's by-id class routing
-// uses, so a prefix never claims an unrelated id that merely starts with the
-// same letters.
-func (r RelocatedClass) matchesID(id string) bool {
-	if r.IDPrefix == "" {
-		return false
+// namespaces returns every reserved prefix this class's store answers for,
+// mint prefix first. It is what every match below scans, so a namespace the
+// class holds without minting is guarded exactly as strongly as the one it
+// mints — an unguarded held namespace is the same silent empty answer, one
+// subsystem in.
+func (r RelocatedClass) namespaces() []string {
+	out := make([]string, 0, 1+len(r.HeldPrefixes))
+	if r.IDPrefix != "" {
+		out = append(out, r.IDPrefix)
 	}
-	return id == r.IDPrefix || strings.HasPrefix(id, r.IDPrefix+"-")
+	for _, held := range r.HeldPrefixes {
+		if held != "" {
+			out = append(out, held)
+		}
+	}
+	return out
+}
+
+// matchesID reports whether id falls under any of this class's reserved
+// namespaces. The match is exact-or-hyphen, the same shape the API's by-id
+// class routing uses, so a prefix never claims an unrelated id that merely
+// starts with the same letters.
+func (r RelocatedClass) matchesID(id string) bool {
+	for _, prefix := range r.namespaces() {
+		if id == prefix || strings.HasPrefix(id, prefix+"-") {
+			return true
+		}
+	}
+	return false
 }
 
 // relocatedClassesForIDs returns the relocated classes that own any of ids, in
@@ -176,11 +208,11 @@ func relocatedClassesNamedIn(relocated []RelocatedClass, text string, anchored f
 	lowered := strings.ToLower(text)
 	var matched []RelocatedClass
 	for _, class := range relocated {
-		if class.IDPrefix == "" {
-			continue
-		}
-		if namesIDNamespace(lowered, strings.ToLower(class.IDPrefix), anchored) {
-			matched = append(matched, class)
+		for _, prefix := range class.namespaces() {
+			if namesIDNamespace(lowered, strings.ToLower(prefix), anchored) {
+				matched = append(matched, class)
+				break
+			}
 		}
 	}
 	return matched
@@ -441,8 +473,15 @@ func RelocatedClassFrontierRefusal(op string, matched []RelocatedClass) error {
 }
 
 // describeRelocatedClasses renders the matched classes for an operator: what
-// moved, the id namespace it mints, and where it is served from now. Shared by
-// both refusals so the two cannot describe the same topology differently.
+// moved, the id namespaces it answers for, and where it is served from now.
+// Shared by both refusals so the two cannot describe the same topology
+// differently.
+//
+// A held namespace is named alongside the mint prefix rather than folded into
+// it, because the operator reading this is holding an id and needs to see the
+// one they are holding. An id under a namespace the class merely holds — a
+// "gcnq-" queue record — would otherwise be refused by a message that names
+// only "gcn-", which reads as the guard having misfired.
 func describeRelocatedClasses(matched []RelocatedClass) string {
 	sorted := append([]RelocatedClass(nil), matched...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Class < sorted[j].Class })
@@ -453,7 +492,24 @@ func describeRelocatedClasses(matched []RelocatedClass) string {
 		if where == "" {
 			where = "another store"
 		}
-		parts = append(parts, fmt.Sprintf("%s-class beads (id prefix %q) are served from %s", class.Class, class.IDPrefix+"-", where))
+		parts = append(parts, fmt.Sprintf("%s-class beads (%s) are served from %s", class.Class, describeIDNamespaces(class), where))
 	}
 	return strings.Join(parts, "; ")
+}
+
+// describeIDNamespaces renders one class's reserved namespaces for a refusal,
+// mint prefix first.
+func describeIDNamespaces(class RelocatedClass) string {
+	spaces := class.namespaces()
+	if len(spaces) == 0 {
+		return "no reserved id prefix"
+	}
+	quoted := make([]string, 0, len(spaces))
+	for _, prefix := range spaces {
+		quoted = append(quoted, fmt.Sprintf("%q", prefix+"-"))
+	}
+	if len(quoted) == 1 {
+		return "id prefix " + quoted[0]
+	}
+	return "id prefix " + quoted[0] + ", and also held under " + strings.Join(quoted[1:], ", ")
 }

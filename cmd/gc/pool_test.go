@@ -12,11 +12,15 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
 type partialListPoolProvider struct {
@@ -110,9 +114,11 @@ func TestEvaluatePoolDefaultScaleCheckCountsRoutedReadyWork(t *testing.T) {
 	if err != nil {
 		t.Skip("jq not installed")
 	}
+	pinTestOwnedBDHome(t)
 	t.Setenv("PATH", filepath.Dir(bdPath)+":"+filepath.Dir(jqPath)+":"+os.Getenv("PATH"))
 
-	dir := t.TempDir()
+	dir := beadstest.GuardedTempDir(t)
+	registerRealBDServerStop(t, dir)
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
@@ -154,9 +160,11 @@ func TestEvaluatePoolDefaultScaleCheckIgnoresRoutedActiveUnassignedWork(t *testi
 	if err != nil {
 		t.Skip("jq not installed")
 	}
+	pinTestOwnedBDHome(t)
 	t.Setenv("PATH", filepath.Dir(bdPath)+":"+filepath.Dir(jqPath)+":"+os.Getenv("PATH"))
 
-	dir := t.TempDir()
+	dir := beadstest.GuardedTempDir(t)
+	registerRealBDServerStop(t, dir)
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
@@ -189,6 +197,98 @@ func TestEvaluatePoolDefaultScaleCheckIgnoresRoutedActiveUnassignedWork(t *testi
 	}
 	if got != 0 {
 		t.Fatalf("evaluatePool with routed in-progress work = %d, want 0", got)
+	}
+}
+
+// TestCmdGCRealBDTestsUseTestOwnedDoltContext is a regression test for
+// ga-us7c35: cmd/gc's real-bd tests only override BEADS_DIR per bd
+// invocation (see runExternalOutput), but that alone does not stop a
+// machine-level dolt.shared-server config or ambient BEADS_DOLT_*/GC_DOLT_*
+// env vars from routing the subprocess to a shared server instead of an
+// embedded per-test store. bd's config precedence falls through, as a last
+// resort, to $HOME/.beads/config.yaml -- pinning a test-owned HOME via
+// pinTestOwnedBDHome removes that fallback entirely. Same root cause as
+// ga-8pkpor/ga-zxpfic (internal/doctor package). The isolation check below
+// runs before any real bd subprocess call, so a not-yet-isolating helper can
+// never itself reach a real shared server.
+func TestCmdGCRealBDTestsUseTestOwnedDoltContext(t *testing.T) {
+	skipSlowCmdGCTest(t, "uses real bd to prove test-owned HOME isolation; run make test-cmd-gc-process for full coverage")
+
+	bdPath, err := findPreferredBinary("bd", "/home/ubuntu/.local/bin/bd")
+	if err != nil {
+		t.Skip("bd not installed")
+	}
+
+	ambientHome := os.Getenv("HOME")
+	home := pinTestOwnedBDHome(t)
+	if home == ambientHome {
+		t.Fatalf("pinTestOwnedBDHome did not isolate HOME (still ambient %q); a machine-level dolt.shared-server config there can route real-bd subprocess calls to the fleet server instead of an embedded per-test store", home)
+	}
+
+	t.Setenv("PATH", filepath.Dir(bdPath)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	dir := beadstest.GuardedTempDir(t)
+	registerRealBDServerStop(t, dir)
+	runExternal(t, dir, bdPath, "init", "-p", "ct", "--skip-hooks", "-q")
+
+	homeConfigPath := filepath.Join(home, ".beads", "config.yaml")
+	if _, err := os.Stat(homeConfigPath); !os.IsNotExist(err) {
+		t.Fatalf("expected no config.yaml under test-owned HOME %s, but Stat returned err=%v", homeConfigPath, err)
+	}
+
+	metadataPath := filepath.Join(dir, ".beads", "metadata.json")
+	meta, ok, err := contract.LoadMetadataState(fsys.OSFS{}, metadataPath)
+	if err != nil || !ok {
+		t.Fatalf("LoadMetadataState(%s): ok=%v err=%v", metadataPath, ok, err)
+	}
+	if meta.DoltMode != "embedded" {
+		t.Fatalf("metadata.json dolt_mode = %q, want %q", meta.DoltMode, "embedded")
+	}
+}
+
+// pinTestOwnedBDHome delegates to the shared gascity test helper (ga-zq8iwb)
+// that deterministically retries a TempDir removal so it never races a
+// lingering real-bd/eventkit writer, and runs every bd subprocess in bd's test
+// mode so that writer is never launched at all (ga-1f81md). Test mode is safe
+// here because every caller's workspace is an embedded one; a fixture bound to
+// a Dolt server must not use this helper (see beadstest.EnvBeadsTestMode). It
+// keeps its original name so this package's existing call sites need no
+// changes.
+func pinTestOwnedBDHome(t *testing.T) string {
+	t.Helper()
+	t.Setenv(beadstest.EnvBeadsTestMode, "1")
+	return beadstest.TestOwnedHome(t)
+}
+
+// TestPinTestOwnedBDHomeRunsBDSubprocessesInTestMode pins the half of the
+// real-bd fixture teardown contract that retrying the TempDir removal cannot
+// provide. Without bd's test mode every bd invocation launches a detached
+// `bd send-metrics` child that outlives the bd that spawned it, and under load
+// the test process too, and keeps writing $HOME/.beads/eventsData while
+// t.TempDir's single-shot RemoveAll runs. The cleanup then fails with
+// "directory not empty" (ga-1f81md). Test mode never launches that child, so
+// there is no writer left to wait for. Both ways these fixtures spawn bd must
+// see it: the direct calls (runExternal) and the production scale_check shell,
+// which makes most of the bd calls.
+func TestPinTestOwnedBDHomeRunsBDSubprocessesInTestMode(t *testing.T) {
+	// Start from a state that is not test mode whatever the ambient environment
+	// holds, so the assertions below pass only if the helper sets it. t.Setenv
+	// restores the original; os.Unsetenv would grow the untagged cmd/gc
+	// environment census.
+	t.Setenv(beadstest.EnvBeadsTestMode, "")
+	pinTestOwnedBDHome(t)
+
+	probe := `printf %s "${` + beadstest.EnvBeadsTestMode + `-unset}"`
+	dir := t.TempDir()
+
+	if got := string(runExternalOutput(t, dir, "sh", "-c", probe)); got != "1" {
+		t.Errorf("runExternal subprocess sees %s=%q, want %q", beadstest.EnvBeadsTestMode, got, "1")
+	}
+	got, err := shellScaleCheck(probe, dir, nil)
+	if err != nil {
+		t.Fatalf("shellScaleCheck: %v", err)
+	}
+	if got != "1" {
+		t.Errorf("scale_check shell sees %s=%q, want %q", beadstest.EnvBeadsTestMode, got, "1")
 	}
 }
 
@@ -813,6 +913,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		Nudge:                        "nudge text",
 		Session:                      "acp",
 		Provider:                     "claude",
+		ContextAdvisory:              &config.ContextAdvisory{Enabled: &trueVal, WindowTokens: intPtr(1_000_000), Tiers: []config.ContextAdvisoryTier{{Threshold: intPtr(75), Message: strPtr("advisory {{.Pct}}"), Enabled: &trueVal}}},
 		Upstream:                     "anthropic",
 		InheritedProvider:            "codex",
 		StartCommand:                 "claude --dangerously",
@@ -835,6 +936,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		MaxSessionAgeJitter:          "15m",
 		SleepAfterIdle:               "30s",
 		SleepAfterIdleSource:         "agent",
+		AutoReclaimStaleClaims:       true,
 		InstallAgentHooks:            []string{"claude"},
 		SkillsDir:                    "/skills",
 		MCPDir:                       "/mcp",
@@ -985,8 +1087,13 @@ func TestDeepCopyAgentSetsPoolName(t *testing.T) {
 }
 
 func TestRunPoolOnBoot(t *testing.T) {
+	// on_boot hooks run concurrently, so this double protects its own state as
+	// the ScaleCheckRunner contract requires.
+	var mu sync.Mutex
 	var ran []string
 	runner := func(cmd, _ string, _ map[string]string) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
 		ran = append(ran, cmd)
 		return "", nil
 	}
@@ -1492,5 +1599,83 @@ func TestParseBDProbeTimeout_InvalidDuration(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "invalid") || !strings.Contains(buf.String(), "GC_BD_PROBE_TIMEOUT") {
 		t.Errorf("expected parse error warning, got: %q", buf.String())
+	}
+}
+
+// TestSessionSetupContextMirrorsPathContext guards the manual mirroring
+// between workdir.PathContext (work_dir expansion) and SessionSetupContext
+// (session_setup / pre_start / session_live expansion). Every PathContext
+// field must have a same-named counterpart here, or a pack template that
+// works in work_dir silently expands to nothing in pre_start.
+func TestSessionSetupContextMirrorsPathContext(t *testing.T) {
+	// WorktreesRoot is a work_dir-only path input: setup commands receive the
+	// already-resolved WorkDir instead, so it has no session_setup counterpart.
+	pathOnly := map[string]bool{"WorktreesRoot": true}
+
+	setup := reflect.TypeOf(SessionSetupContext{})
+	have := make(map[string]bool, setup.NumField())
+	for i := range setup.NumField() {
+		have[setup.Field(i).Name] = true
+	}
+
+	pathCtx := reflect.TypeOf(workdirutil.PathContext{})
+	for i := range pathCtx.NumField() {
+		name := pathCtx.Field(i).Name
+		if pathOnly[name] {
+			continue
+		}
+		if !have[name] {
+			t.Errorf("workdir.PathContext field %q has no SessionSetupContext counterpart; add it and populate every construction site", name)
+		}
+	}
+}
+
+func TestExpandSessionSetup_DefaultBranch(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		branch string
+		want   string
+	}{
+		{name: "configured", branch: "develop", want: "setup.sh 'develop'"},
+		{name: "unset", branch: "", want: "setup.sh ''"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := expandSessionSetup(
+				[]string{"setup.sh '{{.DefaultBranch}}'"},
+				SessionSetupContext{Session: "s", DefaultBranch: tc.branch},
+			)
+			if got[0] != tc.want {
+				t.Errorf("got %q, want %q", got[0], tc.want)
+			}
+		})
+	}
+}
+
+// TestSessionSetupContextForAgentCarriesConfiguredDefaultBranch proves the
+// pre_start expansion context is actually populated from the resolved rig —
+// the plumbing that lets a pack hand GC_DEFAULT_BRANCH to a setup script.
+func TestSessionSetupContextForAgentCarriesConfiguredDefaultBranch(t *testing.T) {
+	cityPath := t.TempDir()
+	rigs := []config.Rig{
+		{Name: "thriva", Path: filepath.Join(cityPath, "rigs", "thriva"), DefaultBranch: "develop"},
+		{Name: "bare", Path: filepath.Join(cityPath, "rigs", "bare")},
+	}
+
+	configured := sessionSetupContextForAgent(cityPath, "city", "thriva/polecat",
+		&config.Agent{Name: "polecat", Dir: "thriva", Scope: "rig"}, rigs)
+	if configured.DefaultBranch != "develop" {
+		t.Errorf("DefaultBranch = %q, want %q", configured.DefaultBranch, "develop")
+	}
+
+	unset := sessionSetupContextForAgent(cityPath, "city", "bare/polecat",
+		&config.Agent{Name: "polecat", Dir: "bare", Scope: "rig"}, rigs)
+	if unset.DefaultBranch != "" {
+		t.Errorf("rig without default_branch: DefaultBranch = %q, want empty", unset.DefaultBranch)
+	}
+
+	cityScoped := sessionSetupContextForAgent(cityPath, "city", "mayor",
+		&config.Agent{Name: "mayor", Scope: "city"}, rigs)
+	if cityScoped.DefaultBranch != "" {
+		t.Errorf("city-scoped agent: DefaultBranch = %q, want empty", cityScoped.DefaultBranch)
 	}
 }

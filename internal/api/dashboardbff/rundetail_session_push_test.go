@@ -62,7 +62,7 @@ func TestFoldNextSessionEventRefreshesSessionsAndNotifies(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	// Warm the sessions cache (a hit if the eager prime hasn't already), then
+	// Warm the sessions cache (a hit if the optional prime hasn't already), then
 	// snapshot the hit count.
 	if _, ok := tl.mgr.fetchSessions(ctx, "alpha"); !ok {
 		t.Fatal("sessions prime must be available")
@@ -283,4 +283,18 @@ func sessionLinkNameEquals(t *testing.T, data, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestContainsSessionEventIgnoresObservationEvents proves that a session event
+// that only observes a session (the program-status shadow records several a
+// second city-wide) does not count as a session change, so the tail does not
+// drop the sessions cache on every poll, while lifecycle events still do.
+func TestContainsSessionEventIgnoresObservationEvents(t *testing.T) {
+	shadow := events.Event{Type: events.SessionProgramStatusShadow}
+	if containsSessionEvent([]events.Event{shadow, shadow}) {
+		t.Fatalf("%s events count as a session change", events.SessionProgramStatusShadow)
+	}
+	if !containsSessionEvent([]events.Event{shadow, {Type: events.SessionWoke}}) {
+		t.Fatalf("a %s event beside shadow records does not count as a session change", events.SessionWoke)
+	}
 }

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
+
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -295,7 +297,7 @@ func TestCityRuntimeRecoverUnroutedWorkRoutes(t *testing.T) {
 // lane, which is the unit the pre-lane restoreCarriedWorkRoutes was: one store,
 // one full live open read, one batched re-verify, no cross-pass accounting.
 func scanOneRouteRecoveryLeg(store beads.Store) (int, error) {
-	report := newRouteRecoveryLane().backstopLeg(store)
+	report := newRouteRecoveryLane().backstopLeg(planeLeg{store: store})
 	return report.restored, report.err
 }
 
@@ -381,5 +383,114 @@ func TestRouteRecoveryBackstopLegSkipsBlockedBead(t *testing.T) {
 	}
 	if route := strings.TrimSpace(mustRoutedTo(t, live, "EB-42o8")); route != "" {
 		t.Errorf("gc.routed_to = %q, want empty (a blocked bead must stay unrouted)", route)
+	}
+}
+
+// TestRouteRecoveryBackstopLegSkipsHeldBead is the run_target twin of the
+// detached-orphan hold gate: open, unassigned work that carries gc.run_target
+// but sits on a canonical dispatch hold is parked, not lost, so the lane must
+// not re-stamp gc.routed_to onto it. An unheld sibling in the same scan is
+// still restored, so the assertion cannot pass because the scan saw nothing.
+func TestRouteRecoveryBackstopLegSkipsHeldBead(t *testing.T) {
+	const pool = "repo/pack.worker"
+	var rows []beads.Bead
+	for i, hold := range beadmeta.DispatchHoldLabels {
+		rows = append(rows, beads.Bead{
+			ID: "HELD-" + string(rune('a'+i)), Title: "parked", Type: "task", Status: "open",
+			Labels:   []string{hold},
+			Metadata: map[string]string{beadmeta.RunTargetMetadataKey: pool},
+		})
+	}
+	rows = append(rows, beads.Bead{
+		ID: "FREE-1", Title: "lost route", Type: "task", Status: "open",
+		Metadata: map[string]string{beadmeta.RunTargetMetadataKey: pool},
+	})
+	store := beads.NewMemStoreFrom(0, rows, nil)
+
+	restored, err := scanOneRouteRecoveryLeg(store)
+	if err != nil {
+		t.Fatalf("backstop leg scan: %v", err)
+	}
+	if restored != 1 {
+		t.Fatalf("restored = %d, want 1 (only the unheld bead)", restored)
+	}
+	if got := mustRoutedTo(t, store, "FREE-1"); got != pool {
+		t.Errorf("unheld bead gc.routed_to = %q, want %q", got, pool)
+	}
+	for _, row := range rows[:len(rows)-1] {
+		if got := mustRoutedTo(t, store, row.ID); got != "" {
+			t.Errorf("%s (%v) gc.routed_to = %q, want empty (held work stays unrouted)", row.ID, row.Labels, got)
+		}
+	}
+}
+
+// TestBackstopCountsRoutedWorkTheRuntimePlaneCannotSee pins the visibility half
+// of the tick's routed-demand narrowing (ga-l7jdg).
+//
+// The runtime plane's routed-work collection is binding-only, so a routed bead
+// left on a work leg of a split city is invisible to it. This lane already reads
+// every leg's open corpus on its own cadence, so the count is free and the
+// assumption "there is no routed work out there" becomes checkable instead of
+// load-bearing. A city with no binding has no such leg (#7410).
+func TestBackstopCountsRoutedWorkTheRuntimePlaneCannotSee(t *testing.T) {
+	routed := func(id, assignee string) beads.Bead {
+		return beads.Bead{
+			ID:       id,
+			Title:    id,
+			Type:     "task",
+			Assignee: assignee,
+			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "pool/worker"},
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		leg     planeLeg
+		seed    beads.Bead
+		want    int
+		because string
+	}{
+		{
+			name: "unassigned routed work on a work leg of a split city",
+			leg:  planeLeg{label: "city", planHasBinding: true},
+			seed: routed("ga-off-plane", ""),
+			want: 1, because: "the runtime plane's collection refuses this leg, so it is counted",
+		},
+		{
+			name: "the same bead on the binding",
+			leg:  planeLeg{label: "class:gmnos", binding: true, planHasBinding: true},
+			seed: routed("gcg-on-plane", ""),
+			want: 0, because: "the runtime plane reads the binding, so this bead IS demanded",
+		},
+		{
+			name: "a routed bead on a work leg that already has a holder",
+			leg:  planeLeg{label: "city", planHasBinding: true},
+			seed: routed("ga-held", "worker-1"),
+			want: 0, because: "an assigned bead needs no seat spawned for it",
+		},
+		{
+			// #7410: a city with no binding has no off-plane leg; its work
+			// store is the runtime plane's store.
+			name: "unassigned routed work on a single-store city",
+			leg:  planeLeg{label: "city"},
+			seed: routed("ga-single-store", ""),
+			want: 0, because: "a city that relocates nothing reads its work store on the runtime plane",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			store.HonorExplicitIDs = true
+			if _, err := store.Create(tc.seed); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			leg := tc.leg
+			leg.store = store
+			report := newRouteRecoveryLane().backstopLeg(leg)
+			if report.err != nil {
+				t.Fatalf("backstop leg: %v", report.err)
+			}
+			if report.offPlaneRouted != tc.want {
+				t.Fatalf("off_plane_routed = %d, want %d: %s", report.offPlaneRouted, tc.want, tc.because)
+			}
+		})
 	}
 }

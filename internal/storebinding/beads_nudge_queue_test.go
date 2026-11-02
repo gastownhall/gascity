@@ -8,6 +8,7 @@ package storebinding
 // against a REOPENED store so in-memory state cannot answer for the record.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
 
@@ -496,7 +498,7 @@ func TestBeadsNudgeQueueAckAndReleaseAreDurable(t *testing.T) {
 	if err := queue.Ack([]string{"n-ack"}, "delivered", "", "commit"); err != nil {
 		t.Fatalf("Ack: %v", err)
 	}
-	if err := queue.ReleaseClaims([]string{"n-release"}); err != nil {
+	if err := queue.ReleaseClaims([]string{"n-release"}, time.Time{}); err != nil {
 		t.Fatalf("ReleaseClaims: %v", err)
 	}
 
@@ -644,10 +646,22 @@ func TestBeadsNudgeQueueExpiresAndAgesDeadLetters(t *testing.T) {
 		t.Fatalf("ClaimDue = %v, want an expired nudge to stay out of delivery", nudgeItemIDs(claimed))
 	}
 
+	// Aging a dead letter out is maintenance: a read past the retention
+	// window still serves it, and only Maintain retires it.
 	afterRetention := afterExpiry.Add(nudgeQueueDeadRetention).Add(time.Minute)
 	_, _, dead, err = queue.ListForAgent(testNudgeAgent, afterRetention)
 	if err != nil {
 		t.Fatalf("ListForAgent after retention: %v", err)
+	}
+	if len(dead) != 1 {
+		t.Fatalf("dead = %v before Maintain, want a read to leave the dead letter alone", nudgeItemIDs(dead))
+	}
+	if _, err := queue.Maintain(context.Background(), afterRetention); err != nil {
+		t.Fatalf("Maintain: %v", err)
+	}
+	_, _, dead, err = queue.ListForAgent(testNudgeAgent, afterRetention)
+	if err != nil {
+		t.Fatalf("ListForAgent after Maintain: %v", err)
 	}
 	if len(dead) != 0 {
 		t.Fatalf("dead = %v, want the dead letter aged into the terminal record", nudgeItemIDs(dead))
@@ -730,6 +744,33 @@ func TestNudgeQueueBeadIDNeverEndsInADigit(t *testing.T) {
 	}
 }
 
+// TestNudgeQueueBeadIDLandsInTheNudgesNamespace closes the loop between the
+// package that MINTS a queue record's id and the package that ROUTES it.
+//
+// Deriving the prefix from config.NudgeQueueIDPrefix removes the second literal
+// but not the second convention: the router matches the segment before the
+// first "-", and the minter is the one that appends it. Moving the separator to
+// the other side of that seam compiles, keeps both sides spelling "gcnq", and
+// silently stops the table matching — queue records land in the work ledger,
+// the queue reads its own binding, finds nothing, and stops draining without an
+// error anywhere.
+func TestNudgeQueueBeadIDLandsInTheNudgesNamespace(t *testing.T) {
+	id := nudgeQueueBeadID("n-1")
+	head, rest, ok := strings.Cut(id, "-")
+	if !ok || rest == "" {
+		t.Fatalf("nudgeQueueBeadID minted %q, want a prefix and a body separated by %q", id, "-")
+	}
+	if !config.IsReservedClassPrefix(head) {
+		t.Errorf("a minted queue id %q carries prefix %q, which config does not reserve — a rig could be configured with it", id, head)
+	}
+	for _, prefix := range config.ReservedClassPrefixesFor(config.BeadClassNudges) {
+		if prefix == head {
+			return
+		}
+	}
+	t.Errorf("a minted queue id %q carries prefix %q, which is reserved for some other class; the nudges binding holds %v", id, head, config.ReservedClassPrefixesFor(config.BeadClassNudges))
+}
+
 // TestBeadsNudgeQueueSweepsTerminalRecordsPastRetention pins the end of a
 // record's life. Every other transition merely stops SERVING a record; without
 // a sweep the terminal bead is immortal, and a city accumulates one forever
@@ -758,17 +799,24 @@ func TestBeadsNudgeQueueSweepsTerminalRecordsPastRetention(t *testing.T) {
 	// on a shorter window than it claims is a failure and not a coincidence of
 	// wall-clock timing.
 	justInside := now.Add(nudgeQueueTerminalRetention).Add(-time.Minute)
-	if _, _, _, err := queue.ListForAgent(testNudgeAgent, justInside); err != nil {
-		t.Fatalf("ListForAgent inside retention: %v", err)
+	if _, err := queue.Maintain(context.Background(), justInside); err != nil {
+		t.Fatalf("Maintain inside retention: %v", err)
 	}
 	if ids := queueRecordIDs(t, store); len(ids) != 1 || ids[0] != "n-delivered" {
 		t.Fatalf("records inside retention = %v, want the terminal record kept", ids)
 	}
 
-	// Past it the maintenance pass every operation runs removes it.
+	// A delivery read past it sweeps nothing: the sweep is maintenance.
 	afterRetention := now.Add(nudgeQueueTerminalRetention).Add(time.Minute)
 	if _, _, _, err := queue.ListForAgent(testNudgeAgent, afterRetention); err != nil {
 		t.Fatalf("ListForAgent past retention: %v", err)
+	}
+	if ids := queueRecordIDs(t, store); len(ids) != 1 {
+		t.Fatalf("records after a read past retention = %v, want the sweep left to Maintain", ids)
+	}
+	// Past it the Maintain pass removes it.
+	if _, err := queue.Maintain(context.Background(), afterRetention); err != nil {
+		t.Fatalf("Maintain past retention: %v", err)
 	}
 	if ids := queueRecordIDs(t, store); len(ids) != 0 {
 		t.Fatalf("records past retention = %v, want the terminal record swept; it would live as long as the city", ids)
@@ -813,6 +861,9 @@ func TestBeadsNudgeQueueSweepKeepsLiveAndDeadRecords(t *testing.T) {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	afterExpiry := late.Add(2 * time.Minute)
+	if _, err := queue.Maintain(context.Background(), afterExpiry); err != nil {
+		t.Fatalf("Maintain: %v", err)
+	}
 	pending, _, dead, err := queue.ListForAgent(testNudgeAgent, afterExpiry)
 	if err != nil {
 		t.Fatalf("ListForAgent: %v", err)
@@ -897,7 +948,7 @@ func TestBeadsNudgeQueueRetriesOrdinaryFailuresAfterAFenceMismatch(t *testing.T)
 // TestNudgeLeaseRoundTrips pins the lease codec the delivery axis rests on.
 func TestNudgeLeaseRoundTrips(t *testing.T) {
 	now := time.Now().UTC()
-	lease, err := newNudgeLease(now, nudgeQueueClaimLease)
+	lease, err := newNudgeLease(now)
 	if err != nil {
 		t.Fatalf("newNudgeLease: %v", err)
 	}
@@ -908,7 +959,7 @@ func TestNudgeLeaseRoundTrips(t *testing.T) {
 	if !parsed.claimedAt.Equal(lease.claimedAt) || !parsed.until.Equal(lease.until) {
 		t.Fatalf("lease round-trip = %+v, want %+v", parsed, lease)
 	}
-	other, err := newNudgeLease(now, nudgeQueueClaimLease)
+	other, err := newNudgeLease(now)
 	if err != nil {
 		t.Fatalf("newNudgeLease: %v", err)
 	}

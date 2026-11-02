@@ -31,6 +31,14 @@ const (
 	// exit 2 at the exec-connection seam. exec stays optional; an executable that
 	// omits this capability is driven via the dedicated ops (the fallback path).
 	ProtocolCapabilityConnectionExec = "proc.exec"
+	// ProtocolCapabilityInputFence declares that the box's tmux can take
+	// fenced input (RUNTIME-CONTRACT-009): tmux 3.0 or later, the `main`
+	// session present when `start` returns, and `sh`. Declared with
+	// proc.exec, it makes gc publish each agent pane's input fence and guard
+	// fenced input over the exec connection (InputFencingAtomic); without it
+	// the pack reports InputFencingNone, and starts and launches touch no
+	// fence.
+	ProtocolCapabilityInputFence = "input-fence"
 	// The proc.* / tty.* tokens below form the connection-plane capability
 	// family — a dotted namespace parallel to the env.* family, distinct from
 	// the flat session-control tokens above. They are reserved now and gain
@@ -53,7 +61,18 @@ const (
 	// requires proc.exec); without it, the controller uses the welded `start` op
 	// (compat). It gates TransportCapabilities.SeparableLaunch.
 	ProtocolCapabilityProvision = "proc.provision"
+	// ProtocolCapabilityObserveV1 declares the exec observe contract
+	// reconciler v2 reads (PAR-EXEC): the `observe`, `inventory` and
+	// `kill-object` ops, `fresh_only` honored on `start` and `provision`, and
+	// exit 2 from a declared op read as a failure, never as the unknown-op
+	// no-op. With report-attachment it makes an exec runtime v2-ready.
+	ProtocolCapabilityObserveV1 = "observe.v1"
 )
+
+// ProtocolLocalityLocal is the handshake locality of an executable whose
+// boxes run on the controller's host. Any other value, or none, reads as
+// remote.
+const ProtocolLocalityLocal = "local"
 
 // ProtocolInfo is the parsed `protocol` handshake response. The zero
 // value is the contract for executables that do not implement the
@@ -61,6 +80,15 @@ const (
 type ProtocolInfo struct {
 	Version      int      `json:"version"`
 	Capabilities []string `json:"capabilities,omitempty"`
+	// Locality is where the executable's boxes run, when it says:
+	// [ProtocolLocalityLocal], or anything else for remote.
+	Locality string `json:"locality,omitempty"`
+}
+
+// DeclaresLocal reports whether the handshake declared its boxes local to
+// the controller's host. An absent or unknown locality is remote.
+func (pi ProtocolInfo) DeclaresLocal() bool {
+	return pi.Locality == ProtocolLocalityLocal
 }
 
 // Has reports whether the handshake declared the given capability.

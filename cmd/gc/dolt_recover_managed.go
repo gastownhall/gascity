@@ -15,6 +15,7 @@ type managedDoltRecoverReport struct {
 	HadPID            bool
 	Forced            bool
 	Ready             bool
+	ReadyInconclusive bool
 	PID               int
 	Port              int
 	Healthy           bool
@@ -70,6 +71,11 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
+	// Refuse before opening or waiting on the legacy lock: that wait probes a
+	// listener and can publish state while a provider-owned scope is pending.
+	if err := admitLegacyManagedDoltLifecycle(cityPath); err != nil {
+		return managedDoltRecoverReport{}, err
+	}
 
 	report := managedDoltRecoverReport{}
 	lockFile, layout, err := openManagedDoltLifecycleLock(cityPath)
@@ -91,6 +97,9 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 			return report, waitErr
 		}
 		if observed {
+			if err := admitLegacyManagedDoltLifecycle(cityPath); err != nil {
+				return report, err
+			}
 			if err := ops.publish(cityPath); err != nil {
 				return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
 			}
@@ -104,15 +113,20 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 	}
 	defer releaseManagedDoltLifecycleLock(lockFile)
 	lockFile = nil
+	if err := admitLegacyManagedDoltLifecycle(cityPath); err != nil {
+		return report, err
+	}
 
 	if parsedPort, parseErr := strconv.Atoi(strings.TrimSpace(port)); parseErr == nil {
 		report.Port = parsedPort
 	}
 
 	if recoverManagedDoltObservedRebindPossible(cityPath, port) {
-		if ready := observeExistingManagedDoltForRecovery(cityPath, host, port, user, recoverManagedDoltExistingObserveTimeout(timeout), &report); ready && recoverManagedDoltShouldReuseExisting(report.Port, port) {
-			report.Ready = true
-			report.Healthy = true
+		observePort := port
+		if alternatePort := recoverManagedDoltObservedPort(cityPath, port); alternatePort != "" {
+			observePort = alternatePort
+		}
+		if ready := observeExistingManagedDoltForRecovery(cityPath, host, observePort, user, recoverManagedDoltExistingObserveTimeout(timeout), &report); ready && recoverManagedDoltShouldReuseExisting(report.Port, port) {
 			if err := ops.publish(cityPath); err != nil {
 				return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
 			}
@@ -222,6 +236,7 @@ func managedDoltRecoverFields(report managedDoltRecoverReport) []string {
 		"had_pid\t" + strconv.FormatBool(report.HadPID),
 		"forced\t" + strconv.FormatBool(report.Forced),
 		"ready\t" + strconv.FormatBool(report.Ready),
+		"ready_inconclusive\t" + strconv.FormatBool(report.ReadyInconclusive),
 		"pid\t" + strconv.Itoa(report.PID),
 		"port\t" + strconv.Itoa(report.Port),
 		"healthy\t" + strconv.FormatBool(report.Healthy),
@@ -255,16 +270,28 @@ func recoverManagedDoltObservedRebindPossible(cityPath, requestedPort string) bo
 	if requestedPort == "" {
 		return true
 	}
+	return recoverManagedDoltObservedPort(cityPath, requestedPort) != ""
+}
+
+// recoverManagedDoltObservedPort returns a live-state port different from the
+// requested port. Provider state can lag a scope watchdog rebind, so probing
+// only the requested port would miss the healthy managed server and start a
+// second recovery against stale endpoint state.
+func recoverManagedDoltObservedPort(cityPath, requestedPort string) string {
+	requestedPort = strings.TrimSpace(requestedPort)
+	if requestedPort == "" {
+		return ""
+	}
 	for _, path := range []string{providerManagedDoltStatePath(cityPath), managedDoltStatePath(cityPath)} {
 		state, err := readDoltRuntimeStateFile(path)
 		if err != nil || !state.Running || state.PID <= 0 || state.Port <= 0 {
 			continue
 		}
 		if strconv.Itoa(state.Port) != requestedPort {
-			return true
+			return strconv.Itoa(state.Port)
 		}
 	}
-	return false
+	return ""
 }
 
 func recoverManagedDoltRepairRuntimeStateForHealthyPort(cityPath, requestedPort string) error {
@@ -332,9 +359,12 @@ func waitForManagedDoltLifecycleOrReady(cityPath, host, port, user string, timeo
 	deadline := time.Now().Add(timeout)
 	for {
 		if report != nil {
-			if ready := observeExistingManagedDoltForRecovery(cityPath, host, port, user, time.Second, report); ready {
+			// Only a measured server lets a contended recovery skip the lock;
+			// an unmeasured one may be the server the lock holder is replacing.
+			if ready := observeExistingManagedDoltForRecovery(cityPath, host, port, user, time.Second, report); ready && !report.ReadyInconclusive {
 				return true, false, nil
 			}
+			report.ReadyInconclusive = false
 		}
 		locked, err := tryManagedDoltLifecycleLock(lockFile)
 		if err != nil {
@@ -368,8 +398,13 @@ func observeExistingManagedDoltForRecovery(cityPath, host, port, user string, ti
 		return false
 	}
 	if report != nil {
-		report.Ready = true
-		report.Healthy = true
+		// A server kept on an inconclusive wait was never measured, so keep it
+		// without reporting it ready or healthy.
+		report.ReadyInconclusive = existing.ReadyInconclusive
+		if !existing.ReadyInconclusive {
+			report.Ready = true
+			report.Healthy = true
+		}
 	}
 	return true
 }

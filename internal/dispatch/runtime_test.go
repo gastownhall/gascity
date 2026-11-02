@@ -394,9 +394,7 @@ func TestProcessScopeCheckAbortsScopeOnFailure(t *testing.T) {
 	})
 
 	mustDepAdd(t, store, control.ID, failed.ID, "blocks")
-	mustDepAdd(t, store, body.ID, control.ID, "blocks")
 	mustDepAdd(t, store, cleanup.ID, body.ID, "blocks")
-	mustDepAdd(t, store, futureMember.ID, control.ID, "blocks")
 	mustDepAdd(t, store, futureControl.ID, futureMember.ID, "blocks")
 
 	result, err := ProcessControl(store, control, ProcessOptions{})
@@ -433,17 +431,533 @@ func TestProcessScopeCheckAbortsScopeOnFailure(t *testing.T) {
 			t.Fatalf("%s outcome = %q, want skipped", beadID, got)
 		}
 	}
-	memberDeps, err := store.DepList(futureMember.ID, "down")
+	controlDeps, err := store.DepList(futureControl.ID, "down")
 	if err != nil {
-		t.Fatalf("dep list future member: %v", err)
+		t.Fatalf("dep list future control: %v", err)
 	}
-	if len(memberDeps) != 1 || memberDeps[0].DependsOnID != control.ID || memberDeps[0].Type != "blocks" {
-		t.Fatalf("future member deps = %+v, want preserved block on %s", memberDeps, control.ID)
+	if len(controlDeps) != 1 || controlDeps[0].DependsOnID != futureMember.ID || controlDeps[0].Type != "blocks" {
+		t.Fatalf("future control deps = %+v, want preserved block on %s", controlDeps, futureMember.ID)
 	}
 
 	cleanupReady := mustReadyContains(t, store, cleanup.ID)
 	if !cleanupReady {
 		t.Fatalf("cleanup %s should be ready after body fails closed", cleanup.ID)
+	}
+}
+
+// TestProcessScopeCheckSubjectSkipsFanoutBlocker pins that a scoped on_complete
+// source's scope-check, which blocks on both the source and its
+// <source>-fanout control, resolves the source as its subject even when the
+// fanout edge is listed first. The fanout edge is a readiness gate only: scope
+// output and the pass/fail decision come from the source.
+func TestProcessScopeCheckSubjectSkipsFanoutBlocker(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name          string
+		sourceOutcome string
+		wantAction    string
+	}{
+		{name: "pass", sourceOutcome: "pass", wantAction: "scope-pass"},
+		{name: "fail", sourceOutcome: "fail", wantAction: "scope-fail"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := beads.NewMemStore()
+			body := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title: "body",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.kind":         "scope",
+					"gc.scope_role":   "body",
+					"gc.root_bead_id": "wf-1",
+					"gc.step_ref":     "demo.body",
+				},
+			})
+			source := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:  "A",
+				Type:   "task",
+				Status: "closed",
+				Metadata: map[string]string{
+					"gc.root_bead_id": "wf-1",
+					"gc.scope_ref":    "body",
+					"gc.scope_role":   "member",
+					"gc.outcome":      tc.sourceOutcome,
+					"gc.output_json":  `{"from":"source"}`,
+				},
+			})
+			fanout := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:  "Expand fanout for A",
+				Type:   "task",
+				Status: "closed",
+				Metadata: map[string]string{
+					"gc.kind":         "fanout",
+					"gc.root_bead_id": "wf-1",
+					"gc.scope_ref":    "body",
+					"gc.scope_role":   "control",
+					"gc.outcome":      "pass",
+					"gc.output_json":  `{"from":"fanout"}`,
+				},
+			})
+			control := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title: "Finalize scope for A",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.kind":         "scope-check",
+					"gc.root_bead_id": "wf-1",
+					"gc.scope_ref":    "body",
+					"gc.scope_role":   "control",
+				},
+			})
+
+			// The fanout edge goes in first so a first-blocker lookup would
+			// pick the fanout control.
+			mustDepAdd(t, store, control.ID, fanout.ID, "blocks")
+			mustDepAdd(t, store, control.ID, source.ID, "blocks")
+			mustDepAdd(t, store, body.ID, control.ID, "blocks")
+
+			subjectID, err := resolveScopeCheckSubjectID(store, control.ID)
+			if err != nil {
+				t.Fatalf("resolveScopeCheckSubjectID: %v", err)
+			}
+			if subjectID != source.ID {
+				t.Fatalf("subject = %s, want source %s (fanout is %s)", subjectID, source.ID, fanout.ID)
+			}
+
+			result, err := ProcessControl(store, mustGetBead(t, store, control.ID), ProcessOptions{})
+			if err != nil {
+				t.Fatalf("ProcessControl(scope-check): %v", err)
+			}
+			if !result.Processed || result.Action != tc.wantAction {
+				t.Fatalf("scope result = %+v, want processed %s", result, tc.wantAction)
+			}
+
+			bodyAfter := mustGetBead(t, store, body.ID)
+			if bodyAfter.Status != "closed" {
+				t.Fatalf("body status = %q, want closed", bodyAfter.Status)
+			}
+			if got := bodyAfter.Metadata["gc.outcome"]; got != tc.sourceOutcome {
+				t.Fatalf("body outcome = %q, want %q", got, tc.sourceOutcome)
+			}
+			if tc.sourceOutcome == "pass" {
+				if got := bodyAfter.Metadata["gc.output_json"]; got != `{"from":"source"}` {
+					t.Fatalf("body output_json = %q, want the source's output", got)
+				}
+			}
+		})
+	}
+}
+
+// TestProcessScopeCheckAbortSkipsMemberBlockedOnInFlightControl covers the shape
+// that TestProcessScopeCheckAbortsScopeOnFailure deliberately omits: a scope
+// member whose only blocker is the scope-check currently aborting the scope.
+// skipScopeMembers judges such a member skippable — runtime.go excludes the
+// in-flight control from the pending set, and canSkipScopeMemberWithDeps only
+// consults that set — so it is closed while its blocker is still open. That is
+// legal only on a forced close; it is ga-4ote2, and closing it with an unforced
+// update is what real bd refused.
+//
+// The compiler mints this shape directly. formula/graph.go mints one scope-check
+// per scoped step, carrying that step's gc.scope_ref, and rewriteGraphRefs then
+// repoints every reference at a scoped step onto that step's scope-check —
+// leaving the raw name only for the body the control closes. So a scoped step B
+// that needs same-scope sibling A compiles to "B needs A-scope-check", with B
+// and the control sharing a scope_ref. When A fails, B is an open member of the
+// very scope its own blocker is aborting.
+//
+// The assertions are deliberately over-specified, because several wrong fixes
+// produce a clean abort too: deleting the offending dep, dropping the skipped
+// outcome, or closing the control before its members. Each has an assertion
+// aimed at it.
+func TestProcessScopeCheckAbortSkipsMemberBlockedOnInFlightControl(t *testing.T) {
+	t.Parallel()
+
+	store := newStrictCloseStore()
+	body := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": "wf-1",
+			"gc.step_ref":     "demo.body",
+		},
+	})
+	failed := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "preflight",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+			"gc.outcome":      "fail",
+		},
+	})
+	control := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize scope for preflight",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "control",
+		},
+	})
+	control = mustGetBead(t, store, control.ID)
+	futureMember := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "implement",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+		},
+	})
+
+	mustDepAdd(t, store, control.ID, failed.ID, "blocks")
+	mustDepAdd(t, store, futureMember.ID, control.ID, "blocks")
+
+	// Seeding "failed" as closed goes through the store, so drop what the
+	// fixture recorded: the assertion below is about the abort's ordering.
+	store.closeOrder = nil
+
+	result, err := ProcessControl(store, control, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(scope-check fail): %v", err)
+	}
+	if !result.Processed || result.Action != "scope-fail" {
+		t.Fatalf("result = %+v, want Processed with action scope-fail", result)
+	}
+	if result.Skipped != 1 {
+		t.Fatalf("result.Skipped = %d, want 1", result.Skipped)
+	}
+
+	memberAfter := mustGetBead(t, store, futureMember.ID)
+	if memberAfter.Status != "closed" {
+		t.Fatalf("futureMember status = %q, want closed", memberAfter.Status)
+	}
+	// A fix that closes the member but drops the metadata leaves outcome
+	// aggregation unable to tell "skipped" from "passed".
+	if got := memberAfter.Metadata["gc.outcome"]; got != "skipped" {
+		t.Fatalf("futureMember outcome = %q, want skipped", got)
+	}
+	// close_reason is not decoration. BdStore.CloseAll forwards it as --reason,
+	// and a city running validation.on-close=error rejects a close whose reason
+	// is under 20 characters — so a skip that carries no reason trades one
+	// failure mode for another in exactly the cities that validate hardest.
+	assertScopeSkipCloseReason(t, memberAfter)
+
+	// The member's edge onto the control must survive. Deleting the dep is the
+	// other obvious way to make this abort succeed, and it would destroy the
+	// audit graph while passing every status assertion above.
+	deps, err := store.DepList(futureMember.ID, "down")
+	if err != nil {
+		t.Fatalf("dep list future member: %v", err)
+	}
+	if len(deps) != 1 || deps[0].Type != "blocks" || deps[0].DependsOnID != control.ID {
+		t.Fatalf("futureMember deps = %+v, want exactly one blocks edge onto %s", deps, control.ID)
+	}
+
+	if bodyAfter := mustGetBead(t, store, body.ID); bodyAfter.Status != "closed" {
+		t.Fatalf("body status = %q, want closed", bodyAfter.Status)
+	}
+	if controlAfter := mustGetBead(t, store, control.ID); controlAfter.Status != "closed" {
+		t.Fatalf("control status = %q, want closed", controlAfter.Status)
+	}
+
+	// Ordering is the ga-a6zy9 invariant: the control closes last, after every
+	// bead it is responsible for closing. Closing it first would also produce a
+	// clean abort and identical end state, while reintroducing the dispatch race
+	// where a member of an aborted scope becomes ready and gets picked up.
+	wantOrder := []string{futureMember.ID, body.ID, control.ID}
+	if !slices.Equal(store.closeOrder, wantOrder) {
+		t.Fatalf("close order = %v, want %v", store.closeOrder, wantOrder)
+	}
+}
+
+// TestProcessScopeCheckAbortSkipsMemberBlockedOnOutOfScopeOpenBead pins the one
+// behavior this fix genuinely widened, so that narrowing it later is a decision
+// rather than an accident.
+//
+// canSkipScopeMemberWithDeps only refuses blockers that are in the pending set,
+// so it is blind to an open blocker outside the aborting scope. Under the old
+// unforced write that blindness was covered by accident: bd's own guard refused
+// the close, and the abort failed loudly. Closing with --force removes that
+// backstop, and this member now closes over its out-of-scope blocker.
+//
+// That is the intended reading of a skip — "this work will never run" is true
+// regardless of what else was blocking it, and an aborted scope has no business
+// waiting on anything. But it is a real change in what gc will do without
+// complaint, so it gets a test that says so out loud. If someone later decides
+// the skip judgment should consult blockers outside the pending set, this test
+// is the one that should fail and force the conversation.
+func TestProcessScopeCheckAbortSkipsMemberBlockedOnOutOfScopeOpenBead(t *testing.T) {
+	t.Parallel()
+
+	store := newStrictCloseStore()
+	body := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": "wf-1",
+			"gc.step_ref":     "demo.body",
+		},
+	})
+	failed := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "preflight",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+			"gc.outcome":      "fail",
+		},
+	})
+	control := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize scope for preflight",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "control",
+		},
+	})
+	control = mustGetBead(t, store, control.ID)
+	member := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "implement",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+		},
+	})
+	// Deliberately carries no gc.root_bead_id: it is not a member of this scope,
+	// so it never enters the pending set and the skip judgment cannot see it.
+	outsider := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "unrelated open work",
+		Type:  "task",
+	})
+
+	mustDepAdd(t, store, control.ID, failed.ID, "blocks")
+	mustDepAdd(t, store, member.ID, control.ID, "blocks")
+	mustDepAdd(t, store, member.ID, outsider.ID, "blocks")
+
+	result, err := ProcessControl(store, control, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(scope-check fail): %v", err)
+	}
+	if result.Action != "scope-fail" || result.Skipped != 1 {
+		t.Fatalf("result = %+v, want action scope-fail with Skipped 1", result)
+	}
+
+	memberAfter := mustGetBead(t, store, member.ID)
+	if memberAfter.Status != "closed" {
+		t.Fatalf("member status = %q, want closed — the skip closes over the out-of-scope blocker", memberAfter.Status)
+	}
+	if got := memberAfter.Metadata["gc.outcome"]; got != "skipped" {
+		t.Fatalf("member outcome = %q, want skipped", got)
+	}
+	assertScopeSkipCloseReason(t, memberAfter)
+
+	// The outsider is untouched. Force-closing over a blocker must not be
+	// mistaken for permission to touch the blocker itself.
+	if outsiderAfter := mustGetBead(t, store, outsider.ID); outsiderAfter.Status != "open" {
+		t.Fatalf("outsider status = %q, want open — it is not part of this scope", outsiderAfter.Status)
+	}
+	deps, err := store.DepList(member.ID, "down")
+	if err != nil {
+		t.Fatalf("dep list member: %v", err)
+	}
+	if len(deps) != 2 {
+		t.Fatalf("member deps = %+v, want both blocks edges intact", deps)
+	}
+
+	if bodyAfter := mustGetBead(t, store, body.ID); bodyAfter.Status != "closed" {
+		t.Fatalf("body status = %q, want closed", bodyAfter.Status)
+	}
+}
+
+// assertScopeSkipCloseReason pins the reason stamped on a member closed by a
+// scope abort. The length check is the part that matters and is not redundant
+// with the equality check: bd's validation.on-close=error validator rejects a
+// close whose reason is under 20 characters, so if someone later shortens
+// scopeAbortSkippedCloseReason to a terse token, equality alone would happily
+// follow them into a city where every skip fails validation.
+func assertScopeSkipCloseReason(t *testing.T, b beads.Bead) {
+	t.Helper()
+	got := b.Metadata["close_reason"]
+	if got != scopeAbortSkippedCloseReason {
+		t.Fatalf("%s close_reason = %q, want %q", b.ID, got, scopeAbortSkippedCloseReason)
+	}
+	if len(got) < 20 {
+		t.Fatalf("%s close_reason %q is %d chars; bd's on-close validator rejects reasons under 20", b.ID, got, len(got))
+	}
+}
+
+// TestReconcileTerminalScopedMemberSkipsSiblingBlockedOnPreservedControl covers
+// the second, independent way a scope member is closed while its blocker is
+// still open — and the one that decides how ga-4ote2 has to be fixed.
+//
+// preserveScopeCheckForSubject (runtime.go) deliberately drops the failed
+// subject's own scope-check from the pending set WITHOUT closing it, because
+// that control is the idempotent recovery path if the abort dies before closing
+// the body. A sibling blocked on that preserved control is then judged skippable
+// with its blocker still open, exactly as in the in-flight-control case.
+//
+// The distinction matters: here the blocker must stay open by design, so no
+// amount of reordering closes it first. That rules out fixing ga-4ote2 by
+// changing when the control closes or which beads land in the pending set, and
+// leaves the write itself — a forced close — as the only repair that covers both
+// triggers. If someone later "fixes" this by reordering, this test is what fails.
+func TestReconcileTerminalScopedMemberSkipsSiblingBlockedOnPreservedControl(t *testing.T) {
+	t.Parallel()
+
+	store := newStrictCloseStore()
+	body := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": "wf-1",
+			"gc.step_ref":     "demo.body",
+		},
+	})
+	failed := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "preflight",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+			"gc.outcome":      "fail",
+		},
+	})
+	// The failed member's own scope-check. preserveScopeCheckForSubject keeps
+	// this one open and replayable.
+	preserved := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize scope for preflight",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "control",
+		},
+	})
+	sibling := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "implement",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+		},
+	})
+
+	mustDepAdd(t, store, preserved.ID, failed.ID, "blocks")
+	mustDepAdd(t, store, sibling.ID, preserved.ID, "blocks")
+
+	result, err := reconcileTerminalScopedMember(store, mustGetBead(t, store, failed.ID))
+	if err != nil {
+		t.Fatalf("reconcileTerminalScopedMember(fail): %v", err)
+	}
+	if result.Action != "scope-fail" {
+		t.Fatalf("action = %q, want scope-fail", result.Action)
+	}
+	if result.Skipped != 1 {
+		t.Fatalf("skipped = %d, want 1", result.Skipped)
+	}
+
+	// The whole point: the blocker is still open, and the sibling closed anyway.
+	if preservedAfter := mustGetBead(t, store, preserved.ID); preservedAfter.Status != "open" {
+		t.Fatalf("preserved control status = %q, want open — it is the replay path", preservedAfter.Status)
+	}
+	siblingAfter := mustGetBead(t, store, sibling.ID)
+	if siblingAfter.Status != "closed" {
+		t.Fatalf("sibling status = %q, want closed", siblingAfter.Status)
+	}
+	if got := siblingAfter.Metadata["gc.outcome"]; got != "skipped" {
+		t.Fatalf("sibling outcome = %q, want skipped", got)
+	}
+	assertScopeSkipCloseReason(t, siblingAfter)
+
+	deps, err := store.DepList(sibling.ID, "down")
+	if err != nil {
+		t.Fatalf("dep list sibling: %v", err)
+	}
+	if len(deps) != 1 || deps[0].Type != "blocks" || deps[0].DependsOnID != preserved.ID {
+		t.Fatalf("sibling deps = %+v, want exactly one blocks edge onto %s", deps, preserved.ID)
+	}
+
+	if bodyAfter := mustGetBead(t, store, body.ID); bodyAfter.Status != "closed" {
+		t.Fatalf("body status = %q, want closed", bodyAfter.Status)
+	}
+}
+
+// TestProcessScopeCheckAbortRefusesLegacyBodyBlockedOnControl pins the original
+// ga-a6zy9 deadlock: the pre-Slice-4 topology where the scope body carries a
+// blocks edge to the very scope-check that closes it. Slice 4 stopped minting
+// this shape, so no live store should contain it, but nothing prevents a formula
+// or a hand-built fixture from reintroducing it — and under real bd it is
+// unrecoverable, because the control can never close the body it is blocked by.
+func TestProcessScopeCheckAbortRefusesLegacyBodyBlockedOnControl(t *testing.T) {
+	t.Parallel()
+
+	store := newStrictCloseStore()
+	body := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": "wf-1",
+			"gc.step_ref":     "demo.body",
+		},
+	})
+	failed := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "preflight",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+			"gc.outcome":      "fail",
+		},
+	})
+	control := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize scope for preflight",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "control",
+		},
+	})
+	control = mustGetBead(t, store, control.ID)
+
+	mustDepAdd(t, store, control.ID, failed.ID, "blocks")
+	mustDepAdd(t, store, body.ID, control.ID, "blocks")
+
+	_, err := ProcessControl(store, control, ProcessOptions{})
+	if err == nil {
+		t.Fatalf("ProcessControl(legacy body self-edge) succeeded; expected the ga-a6zy9 deadlock refusal")
+	}
+	if !strings.Contains(err.Error(), "cannot close blocked issue") {
+		t.Fatalf("ProcessControl error = %v, want a blocked-close refusal naming body %s", err, body.ID)
+	}
+	if bodyAfter := mustGetBead(t, store, body.ID); bodyAfter.Status != "open" {
+		t.Fatalf("body status = %q, want open — bd refuses to close a bead blocked by the closing control", bodyAfter.Status)
 	}
 }
 
@@ -822,12 +1336,18 @@ func TestProcessScopeCheckAbortScopeAffirmativeAndLegacyOutcomes(t *testing.T) {
 }
 
 // Retry-managed attempt subjects are exempt from the fail-closed abort_scope
-// contract: a bare-closed nested-retry attempt (gc.logical_bead_id +
-// gc.attempt, with the opt-in hardcoded at dispatch) must keep routing
-// through retry-eval as a transient contract violation, not abort its
-// iteration scope. An explicit gc.outcome=fail still counts as failed. The
-// opt-in match itself is whitespace-tolerant so formula-authored variants
-// cannot silently keep the legacy lenient contract.
+// contract: a nested-retry attempt (gc.logical_bead_id + gc.attempt, with the
+// opt-in hardcoded at dispatch) must keep routing through retry-eval as a
+// transient contract violation, not abort its iteration scope — whether it
+// closed bare or with an explicit gc.outcome=fail. The retry controller
+// itself carries gc.on_fail=abort_scope and aborts the scope at the level
+// that owns the retry budget if the retry is ultimately exhausted
+// (internal/formula/ralph.go:237), so exempting the individual attempt does
+// not remove the abort, it moves it. A non-retry-attempt member still
+// fail-closes on an explicit gc.outcome=fail: the exemption is scoped to
+// retry attempts, not a blanket lenience. The opt-in match itself is
+// whitespace-tolerant so formula-authored variants cannot silently keep the
+// legacy lenient contract.
 func TestBeadOutcomeFailedRetryAttemptExemptionAndOptInTrim(t *testing.T) {
 	t.Parallel()
 
@@ -846,12 +1366,23 @@ func TestBeadOutcomeFailedRetryAttemptExemptionAndOptInTrim(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "explicit fail on retry attempt still counts as failed",
+			// Regression for gc-pl7ujz: the exemption used to sit after the
+			// unconditional gc.outcome=fail short-circuit, so it was never
+			// reached by the one case it exists for.
+			name: "explicit fail on retry attempt is exempt from fail-closed",
 			meta: map[string]string{
 				"gc.on_fail":         "abort_scope",
 				"gc.logical_bead_id": "ga-logical-1",
 				"gc.attempt":         "1",
 				"gc.outcome":         "fail",
+			},
+			want: false,
+		},
+		{
+			name: "explicit fail on a non-retry-attempt member still counts as failed",
+			meta: map[string]string{
+				"gc.on_fail": "abort_scope",
+				"gc.outcome": "fail",
 			},
 			want: true,
 		},
@@ -887,7 +1418,200 @@ func TestBeadOutcomeFailedRetryAttemptExemptionAndOptInTrim(t *testing.T) {
 	}
 }
 
-func TestSkipOpenScopeMembersBatchesDependencyChecksAndUpdates(t *testing.T) {
+// Regression for gc-pl7ujz: reconcileTerminalScopedMember is one of the two
+// direct abort_scope call sites (the other is processScopeCheck's non-retry
+// branch). A retry-managed attempt that closed gc.outcome=fail must not abort
+// its scope through this path either, mirroring
+// TestReconcileTerminalScopedMemberAbortScopeBareCloseAbortsScope, whose bare
+// (non-retry) failed member must still abort.
+func TestReconcileTerminalScopedMemberRetryAttemptExplicitFailDoesNotAbortScope(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	body := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.body",
+		},
+	})
+	failedAttempt := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "review codex attempt 1",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.kind":            "retry-run",
+			"gc.root_bead_id":    workflow.ID,
+			"gc.scope_ref":       "body",
+			"gc.scope_role":      "member",
+			"gc.on_fail":         "abort_scope",
+			"gc.logical_bead_id": "logical-review-codex",
+			"gc.attempt":         "1",
+			"gc.outcome":         "fail",
+			"gc.failure_class":   "transient",
+		},
+	})
+	// The retry controller's next attempt, still open: representative of the
+	// live-fleet timeline in gc-pl7ujz where attempt 1 fails before attempt 2
+	// is spawned. Its presence is what must keep the scope open instead of
+	// aborting on attempt 1's own failure.
+	_ = mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "review codex attempt 2",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+		},
+	})
+
+	result, err := reconcileTerminalScopedMember(store, failedAttempt)
+	if err != nil {
+		t.Fatalf("reconcileTerminalScopedMember(retry attempt explicit fail): %v", err)
+	}
+	if result.Action == "scope-fail" {
+		t.Fatalf("action = %q, want the scope left open for the retry, not aborted", result.Action)
+	}
+	bodyAfter := mustGetBead(t, store, body.ID)
+	if bodyAfter.Status != "open" {
+		t.Fatalf("body status = %q, want open (retry attempt failure must not abort the scope)", bodyAfter.Status)
+	}
+}
+
+// Regression for gc-pl7ujz: beadOutcomeFailed backs three decision sites —
+// the processScopeCheck non-retry abort branch (runtime.go:482), the
+// reconcileTerminalScopedMember abort branch (runtime.go:1499), and
+// terminalAbortScopeFailure used by workflow-finalize — and they must never
+// diverge for the same bead again.
+func TestBeadOutcomeFailedConvergesAcrossAbortScopeDecisionSites(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		meta map[string]string
+		want bool
+	}{
+		{
+			name: "retry attempt explicit fail is not terminal anywhere",
+			meta: map[string]string{
+				"gc.on_fail":         "abort_scope",
+				"gc.logical_bead_id": "logical-1",
+				"gc.attempt":         "1",
+				"gc.outcome":         "fail",
+			},
+			want: false,
+		},
+		{
+			name: "non-retry explicit fail is terminal everywhere",
+			meta: map[string]string{
+				"gc.on_fail": "abort_scope",
+				"gc.outcome": "fail",
+			},
+			want: true,
+		},
+		{
+			// gc.failure_class=transient is only ever set on retry-attempt
+			// subjects (classifyRetryAttempt in retry.go), so a realistic
+			// transient fixture also carries retry-attempt metadata.
+			name: "transient retry attempt failure is not terminal anywhere",
+			meta: map[string]string{
+				"gc.on_fail":         "abort_scope",
+				"gc.outcome":         "fail",
+				"gc.failure_class":   "transient",
+				"gc.attempt":         "2",
+				"gc.logical_bead_id": "logical-3",
+			},
+			want: false,
+		},
+		{
+			name: "superseded attempt is not terminal anywhere",
+			meta: map[string]string{
+				"gc.on_fail":         "abort_scope",
+				"gc.outcome":         "fail",
+				"gc.failure_class":   "hard",
+				"gc.attempt":         "3",
+				"gc.logical_bead_id": "logical-2",
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			bead := beads.Bead{ID: "ga-subject-1", Status: "closed", Metadata: tc.meta}
+
+			gotPredicate := beadOutcomeFailed(bead)
+			if gotPredicate != tc.want {
+				t.Fatalf("beadOutcomeFailed = %t, want %t", gotPredicate, tc.want)
+			}
+
+			// terminalAbortScopeFailure additionally filters on
+			// gc.failure_class=transient and superseded attempts, but for
+			// these cases (all abort_scope, all closed) it must agree with
+			// the bare predicate: neither the transient nor the superseded
+			// case reaches terminalAbortScopeFailure's extra filters via a
+			// path beadOutcomeFailed disagrees on.
+			gotTerminal := terminalAbortScopeFailure(bead)
+			if gotTerminal != gotPredicate {
+				t.Fatalf("terminalAbortScopeFailure = %t, beadOutcomeFailed = %t; the three abort_scope decision sites diverged", gotTerminal, gotPredicate)
+			}
+		})
+	}
+}
+
+func TestLoadDownDepsForScopeSkipFallsBackWhenBatchUnsupported(t *testing.T) {
+	t.Parallel()
+
+	store := &scopeSkipBatchStore{MemStore: beads.NewMemStore(), batchUnsupported: true}
+	blocker := mustCreateWorkflowBead(t, store, beads.Bead{Title: "blocker", Type: "task"})
+	dependent := mustCreateWorkflowBead(t, store, beads.Bead{Title: "dependent", Type: "task"})
+	mustDepAdd(t, store, dependent.ID, blocker.ID, "blocks")
+
+	deps, err := loadDownDepsForScopeSkip(store, []string{dependent.ID})
+	if err != nil {
+		t.Fatalf("loadDownDepsForScopeSkip returned %v; a capability miss must fall back, not abort the scope", err)
+	}
+	if store.depListCalls == 0 {
+		t.Fatalf("per-anchor DepList never ran; the sentinel must route to the fallback path")
+	}
+	if got := len(deps[dependent.ID]); got != 1 {
+		t.Fatalf("fallback returned %d edge(s) for %s, want 1", got, dependent.ID)
+	}
+}
+
+func TestLoadDownDepsForScopeSkipStillFailsClosedOnRealBatchError(t *testing.T) {
+	t.Parallel()
+
+	store := &scopeSkipFailingBatchStore{MemStore: beads.NewMemStore()}
+	bead := mustCreateWorkflowBead(t, store, beads.Bead{Title: "anchor", Type: "task"})
+
+	if _, err := loadDownDepsForScopeSkip(store, []string{bead.ID}); err == nil {
+		t.Fatal("loadDownDepsForScopeSkip succeeded on a transport error; only the capability sentinel may fall back")
+	}
+}
+
+type scopeSkipFailingBatchStore struct {
+	*beads.MemStore
+}
+
+func (s *scopeSkipFailingBatchStore) DepListBatch([]string) (map[string][]beads.Dep, error) {
+	return nil, errors.New("dolt: connection reset")
+}
+
+func TestSkipOpenScopeMembersBatchesDependencyChecksAndCloses(t *testing.T) {
 	t.Parallel()
 
 	store := &scopeSkipBatchStore{MemStore: beads.NewMemStore()}
@@ -974,14 +1698,16 @@ func TestSkipOpenScopeMembersBatchesDependencyChecksAndUpdates(t *testing.T) {
 	if store.depListBatchCalls != 2 {
 		t.Fatalf("DepListBatch calls = %d, want 2 dependency waves", store.depListBatchCalls)
 	}
+	// The skip path must not dribble out per-id writes; it batches each
+	// dependency wave into one call.
 	if store.updateCalls != 0 {
-		t.Fatalf("Update calls = %d, want 0 when batch update is available", store.updateCalls)
+		t.Fatalf("Update calls = %d, want 0 — the skip path closes, it does not update", store.updateCalls)
 	}
-	if store.updateAllCalls != 2 {
-		t.Fatalf("UpdateAll calls = %d, want 2 dependency waves", store.updateAllCalls)
+	if store.closeAllCalls != 2 {
+		t.Fatalf("CloseAll calls = %d, want 2 dependency waves", store.closeAllCalls)
 	}
-	if got := []int{len(store.updateAllIDs[0]), len(store.updateAllIDs[1])}; !slices.Equal(got, []int{2, 1}) {
-		t.Fatalf("UpdateAll wave sizes = %v, want [2 1]", got)
+	if got := []int{len(store.closeAllIDs[0]), len(store.closeAllIDs[1])}; !slices.Equal(got, []int{2, 1}) {
+		t.Fatalf("CloseAll wave sizes = %v, want [2 1]", got)
 	}
 	for _, beadID := range []string{futureMember.ID, futureControl.ID, independent.ID} {
 		member := mustGetBead(t, store, beadID)
@@ -991,6 +1717,269 @@ func TestSkipOpenScopeMembersBatchesDependencyChecksAndUpdates(t *testing.T) {
 		if got := member.Metadata["gc.outcome"]; got != "skipped" {
 			t.Fatalf("%s outcome = %q, want skipped", beadID, got)
 		}
+	}
+}
+
+// newPinnedScopeSkipStore returns a scope-skip store that honors explicit bead
+// ids. The skip planner walks pending members in sorted id order, so the id
+// order is part of these tests' contract, not an accident of id minting.
+func newPinnedScopeSkipStore() *scopeSkipBatchStore {
+	mem := beads.NewMemStore()
+	mem.HonorExplicitIDs = true
+	return &scopeSkipBatchStore{MemStore: mem}
+}
+
+func mustCreateScopeMember(t *testing.T, store beads.Store, id, title, kind, role string) beads.Bead {
+	t.Helper()
+	metadata := map[string]string{
+		"gc.root_bead_id": "wf-1",
+		"gc.scope_ref":    "body",
+		"gc.scope_role":   role,
+	}
+	if kind != "" {
+		metadata["gc.kind"] = kind
+	}
+	return mustCreateWorkflowBead(t, store, beads.Bead{
+		ID:       id,
+		Title:    title,
+		Type:     "task",
+		Metadata: metadata,
+	})
+}
+
+func mustCreateScopeSkipBody(t *testing.T, store beads.Store) beads.Bead {
+	t.Helper()
+	return mustCreateWorkflowBead(t, store, beads.Bead{
+		ID:    "gcg-267010",
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": "wf-1",
+			"gc.step_ref":     "demo.body",
+		},
+	})
+}
+
+// TestSkipOpenScopeMembersContinuesAfterPreserveOnlyRound pins the specimen
+// behind ga-kzrlh: run gcg-5436965277264861 (beads#6038) quarantined its
+// control bead at 2026-08-30T04:26:11Z with "unable to skip remaining scope
+// members", while the healthy dup twin closed every one of those members one
+// second later. No store call ever failed — the round that PRESERVED the
+// subject's own scope-check (deleting the linchpin blocker from pending)
+// counted as no progress, so a graph that needed one more round was declared
+// deadlocked.
+//
+// The shape is the common one, not an exotic one: finalize scope-checks are
+// minted after the members they block, so their ids sort AFTER their
+// dependents and the preserve lands too late in the pass to unblock anything
+// in the same round.
+func TestSkipOpenScopeMembersContinuesAfterPreserveOnlyRound(t *testing.T) {
+	t.Parallel()
+
+	store := newPinnedScopeSkipStore()
+	body := mustCreateScopeSkipBody(t, store)
+	failed := mustCreateWorkflowBead(t, store, beads.Bead{
+		ID:     "gcg-267018",
+		Title:  "scorecard",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+			"gc.outcome":      "fail",
+		},
+	})
+	control := mustCreateScopeMember(t, store, "gcg-267019", "Finalize scope for scorecard", "scope-check", "control")
+	apply := mustCreateScopeMember(t, store, "gcg-267022", "apply", "", "member")
+	applyTwin := mustCreateScopeMember(t, store, "gcg-267024", "apply twin", "", "member")
+	scorecardFinalize := mustCreateScopeMember(t, store, "gcg-267031", "Finalize scope for scorecard twin", "scope-check", "control")
+	applyFinalize := mustCreateScopeMember(t, store, "gcg-267033", "Finalize scope for apply", "scope-check", "control")
+	applyTwinFinalize := mustCreateScopeMember(t, store, "gcg-267034", "Finalize scope for apply twin", "scope-check", "control")
+
+	mustDepAdd(t, store, apply.ID, scorecardFinalize.ID, "blocks")
+	mustDepAdd(t, store, applyTwin.ID, scorecardFinalize.ID, "blocks")
+	mustDepAdd(t, store, scorecardFinalize.ID, control.ID, "blocks")
+	mustDepAdd(t, store, applyFinalize.ID, apply.ID, "blocks")
+	mustDepAdd(t, store, applyTwinFinalize.ID, applyTwin.ID, "blocks")
+
+	snapshot := scopeSnapshot{
+		rootID:      "wf-1",
+		scopeRef:    "body",
+		allComplete: true,
+		members:     []beads.Bead{body, failed, control, apply, applyTwin, scorecardFinalize, applyFinalize, applyTwinFinalize},
+		body:        body,
+	}
+	skipped, err := snapshot.skipOpenScopeMembers(store, control.ID)
+	if err != nil {
+		t.Fatalf("skipOpenScopeMembers: %v", err)
+	}
+	if skipped != 4 {
+		t.Fatalf("skipped = %d, want 4", skipped)
+	}
+	// Three rounds: preserve-only, then the two dependency waves it unblocked.
+	if store.depListBatchCalls != 3 {
+		t.Fatalf("DepListBatch calls = %d, want 3 (preserve-only round then two skip waves)", store.depListBatchCalls)
+	}
+	if got := [][]string{store.closeAllIDs[0], store.closeAllIDs[1]}; !slices.Equal(got[0], []string{apply.ID, applyTwin.ID}) || !slices.Equal(got[1], []string{applyFinalize.ID, applyTwinFinalize.ID}) {
+		t.Fatalf("CloseAll waves = %v, want [[%s %s] [%s %s]]", got, apply.ID, applyTwin.ID, applyFinalize.ID, applyTwinFinalize.ID)
+	}
+	for _, beadID := range []string{apply.ID, applyTwin.ID, applyFinalize.ID, applyTwinFinalize.ID} {
+		member := mustGetBead(t, store, beadID)
+		if member.Status != "closed" {
+			t.Fatalf("%s status = %q, want closed", beadID, member.Status)
+		}
+		if got := member.Metadata["gc.outcome"]; got != "skipped" {
+			t.Fatalf("%s outcome = %q, want skipped", beadID, got)
+		}
+	}
+	// The subject's own scope-check stays open: it is the replayable recovery
+	// path, which is the whole reason preserving it is progress and not a stall.
+	preserved := mustGetBead(t, store, scorecardFinalize.ID)
+	if preserved.Status != "open" {
+		t.Fatalf("preserved scope-check status = %q, want open", preserved.Status)
+	}
+}
+
+// TestSkipOpenScopeMembersStillFailsOnGenuineBlocksCycle is the control for the
+// fix above: progress-aware rounds must not paper over a real deadlock. Two
+// pending members that block each other can never be skipped, so hard-fail and
+// quarantine remain the correct disposition.
+func TestSkipOpenScopeMembersStillFailsOnGenuineBlocksCycle(t *testing.T) {
+	t.Parallel()
+
+	store := newPinnedScopeSkipStore()
+	body := mustCreateScopeSkipBody(t, store)
+	control := mustCreateScopeMember(t, store, "gcg-267019", "Finalize scope for scorecard", "scope-check", "control")
+	left := mustCreateScopeMember(t, store, "gcg-267041", "left", "", "member")
+	right := mustCreateScopeMember(t, store, "gcg-267042", "right", "", "member")
+
+	mustDepAdd(t, store, left.ID, right.ID, "blocks")
+	mustDepAdd(t, store, right.ID, left.ID, "blocks")
+
+	snapshot := scopeSnapshot{
+		rootID:      "wf-1",
+		scopeRef:    "body",
+		allComplete: true,
+		members:     []beads.Bead{body, control, left, right},
+		body:        body,
+	}
+	skipped, err := snapshot.skipOpenScopeMembers(store, control.ID)
+	if err == nil {
+		t.Fatalf("skipOpenScopeMembers = (%d, nil), want a deadlock error for a genuine blocks cycle", skipped)
+	}
+	if skipped != 0 {
+		t.Fatalf("skipped = %d, want 0", skipped)
+	}
+	for _, want := range []string{
+		"unable to skip remaining scope members",
+		left.ID + " (blocked by " + right.ID + ")",
+		right.ID + " (blocked by " + left.ID + ")",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q, want it to contain %q", err.Error(), want)
+		}
+	}
+	for _, beadID := range []string{left.ID, right.ID} {
+		member := mustGetBead(t, store, beadID)
+		if member.Status != "open" {
+			t.Fatalf("%s status = %q, want open — a genuine deadlock closes nothing", beadID, member.Status)
+		}
+	}
+}
+
+// TestSkipOpenScopeMembersDeadlockErrorNamesCurrentStuckMembers pins F2. The
+// specimen's error listed the round-START ids, which included the member the
+// same round had correctly preserved — that stale list is what misdirected the
+// initial diagnosis toward store failures. The error must describe the members
+// that are actually stuck now, with the blockers that hold them.
+func TestSkipOpenScopeMembersDeadlockErrorNamesCurrentStuckMembers(t *testing.T) {
+	t.Parallel()
+
+	store := newPinnedScopeSkipStore()
+	body := mustCreateScopeSkipBody(t, store)
+	control := mustCreateScopeMember(t, store, "gcg-267019", "Finalize scope for scorecard", "scope-check", "control")
+	left := mustCreateScopeMember(t, store, "gcg-267041", "left", "", "member")
+	right := mustCreateScopeMember(t, store, "gcg-267042", "right", "", "member")
+	preserved := mustCreateScopeMember(t, store, "gcg-267090", "Finalize scope for scorecard twin", "scope-check", "control")
+
+	mustDepAdd(t, store, left.ID, right.ID, "blocks")
+	mustDepAdd(t, store, right.ID, left.ID, "blocks")
+	mustDepAdd(t, store, preserved.ID, control.ID, "blocks")
+
+	snapshot := scopeSnapshot{
+		rootID:      "wf-1",
+		scopeRef:    "body",
+		allComplete: true,
+		members:     []beads.Bead{body, control, left, right, preserved},
+		body:        body,
+	}
+	_, err := snapshot.skipOpenScopeMembers(store, control.ID)
+	if err == nil {
+		t.Fatal("skipOpenScopeMembers = nil error, want a deadlock error for the surviving blocks cycle")
+	}
+	if strings.Contains(err.Error(), preserved.ID) {
+		t.Fatalf("error %q names the preserved scope-check %s — it is not stuck, it was deliberately left open", err.Error(), preserved.ID)
+	}
+	want := "unable to skip remaining scope members: " + left.ID + " (blocked by " + right.ID + "), " + right.ID + " (blocked by " + left.ID + ")"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("error %q, want it to contain %q", err.Error(), want)
+	}
+}
+
+// TestSkipOpenScopeMembersConvergesOverManyRounds pins that progress-aware
+// rounds converge on a chain deep enough to need more than the two waves the
+// original harness exercised: one preserve-only round followed by four
+// single-member waves as each skip unblocks the next link.
+func TestSkipOpenScopeMembersConvergesOverManyRounds(t *testing.T) {
+	t.Parallel()
+
+	store := newPinnedScopeSkipStore()
+	body := mustCreateScopeSkipBody(t, store)
+	control := mustCreateScopeMember(t, store, "gcg-267019", "Finalize scope for scorecard", "scope-check", "control")
+	chain := []beads.Bead{
+		mustCreateScopeMember(t, store, "gcg-267041", "link 1", "", "member"),
+		mustCreateScopeMember(t, store, "gcg-267042", "link 2", "", "member"),
+		mustCreateScopeMember(t, store, "gcg-267043", "link 3", "", "member"),
+		mustCreateScopeMember(t, store, "gcg-267044", "link 4", "", "member"),
+	}
+	// Sorts after every link it blocks, so round one can only preserve.
+	preserved := mustCreateScopeMember(t, store, "gcg-267090", "Finalize scope for scorecard twin", "scope-check", "control")
+
+	mustDepAdd(t, store, preserved.ID, control.ID, "blocks")
+	mustDepAdd(t, store, chain[0].ID, preserved.ID, "blocks")
+	for i := 1; i < len(chain); i++ {
+		mustDepAdd(t, store, chain[i].ID, chain[i-1].ID, "blocks")
+	}
+
+	members := append([]beads.Bead{body, control, preserved}, chain...)
+	snapshot := scopeSnapshot{
+		rootID:      "wf-1",
+		scopeRef:    "body",
+		allComplete: true,
+		members:     members,
+		body:        body,
+	}
+	skipped, err := snapshot.skipOpenScopeMembers(store, control.ID)
+	if err != nil {
+		t.Fatalf("skipOpenScopeMembers: %v", err)
+	}
+	if skipped != len(chain) {
+		t.Fatalf("skipped = %d, want %d", skipped, len(chain))
+	}
+	if store.depListBatchCalls != len(chain)+1 {
+		t.Fatalf("DepListBatch calls = %d, want %d (preserve-only round then one wave per link)", store.depListBatchCalls, len(chain)+1)
+	}
+	for _, member := range chain {
+		got := mustGetBead(t, store, member.ID)
+		if got.Status != "closed" {
+			t.Fatalf("%s status = %q, want closed", member.ID, got.Status)
+		}
+	}
+	if got := mustGetBead(t, store, preserved.ID); got.Status != "open" {
+		t.Fatalf("preserved scope-check status = %q, want open", got.Status)
 	}
 }
 
@@ -2043,7 +3032,6 @@ func TestProcessScopeCheckUsesSingleWorkflowSnapshotAndEmitsTrace(t *testing.T) 
 		"scope-check bead=" + control.ID + " phase=load-snapshot start",
 		"scope-check bead=" + control.ID + " phase=load-snapshot ok",
 		"scope-check bead=" + control.ID + " snapshot root=" + workflow.ID,
-		"scope-check bead=" + control.ID + " phase=propagate-metadata",
 		"scope-check bead=" + control.ID + " phase=close-body",
 	} {
 		if !strings.Contains(traceText, want) {
@@ -2054,6 +3042,12 @@ func TestProcessScopeCheckUsesSingleWorkflowSnapshotAndEmitsTrace(t *testing.T) 
 
 type strictCloseStore struct {
 	*beads.MemStore
+	// closeOrder records every bead this store crossed into "closed", in the
+	// order it happened, across all three write paths. Ordering between a
+	// control and the beads that control closes is the entire ga-a6zy9 failure
+	// mode, and assertions on final status alone cannot see it: a fix that
+	// closed the control first would leave exactly the same end state.
+	closeOrder []string
 }
 
 type countingListStore struct {
@@ -2066,9 +3060,10 @@ type scopeSkipBatchStore struct {
 	*beads.MemStore
 	depListCalls      int
 	depListBatchCalls int
+	batchUnsupported  bool
 	updateCalls       int
-	updateAllCalls    int
-	updateAllIDs      [][]string
+	closeAllCalls     int
+	closeAllIDs       [][]string
 }
 
 type scopeBodyVanishAfterFirstResolveStore struct {
@@ -2122,6 +3117,9 @@ func (s *scopeSkipBatchStore) DepList(id, direction string) ([]beads.Dep, error)
 
 func (s *scopeSkipBatchStore) DepListBatch(ids []string) (map[string][]beads.Dep, error) {
 	s.depListBatchCalls++
+	if s.batchUnsupported {
+		return nil, beads.ErrDepListBatchUnsupported
+	}
 	return s.MemStore.DepListBatch(ids)
 }
 
@@ -2130,17 +3128,10 @@ func (s *scopeSkipBatchStore) Update(id string, opts beads.UpdateOpts) error {
 	return s.MemStore.Update(id, opts)
 }
 
-func (s *scopeSkipBatchStore) UpdateAll(ids []string, opts beads.UpdateOpts) (int, error) {
-	s.updateAllCalls++
-	s.updateAllIDs = append(s.updateAllIDs, slices.Clone(ids))
-	updated := 0
-	for _, id := range ids {
-		if err := s.MemStore.Update(id, opts); err != nil {
-			return updated, err
-		}
-		updated++
-	}
-	return updated, nil
+func (s *scopeSkipBatchStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	s.closeAllCalls++
+	s.closeAllIDs = append(s.closeAllIDs, slices.Clone(ids))
+	return s.MemStore.CloseAll(ids, metadata)
 }
 
 func (s *scopeBodyVanishAfterFirstResolveStore) List(query beads.ListQuery) ([]beads.Bead, error) {
@@ -2278,32 +3269,361 @@ func (s *failBodyMetadataStore) SetMetadataBatch(id string, kvs map[string]strin
 	return s.Store.SetMetadataBatch(id, kvs)
 }
 
+// Update fails the same body closeout when it arrives as one write: the
+// propagated member metadata and the close together.
+func (s *failBodyMetadataStore) Update(id string, opts beads.UpdateOpts) error {
+	if id == s.failID && opts.Metadata["review.verdict"] != "" {
+		return errors.New("injected body metadata failure")
+	}
+	return s.Store.Update(id, opts)
+}
+
 func newStrictCloseStore() *strictCloseStore {
 	return &strictCloseStore{MemStore: beads.NewMemStore()}
 }
 
-func (s *strictCloseStore) Close(id string) error {
+// The rules below mirror bd's close policy as measured against the installed
+// binaries, not as read off a source tree: the version banners on these dev
+// builds are unreliable (one reports its build ref as whatever branch it was
+// compiled on), so behavior is the only trustworthy evidence. Each rule cites
+// the observation that pins it; the probe transcripts are recorded on ga-a6zy9.
+//
+// The guard on the update path is beads #5206, which refuses a status update
+// that crosses a bead into done. It is not #4893 — that one guards "bd close",
+// a path BdStore always bypasses with --force (bdCloseArgs, bdstore.go).
+
+// blockingDepTypes are the dep types that stop a close. The empty string is in
+// the set because MemStore.DepAdd stores the caller's type verbatim, while bd
+// normalizes an unset type to "blocks" when the dep is added — "bd dep add"
+// with no --type reports "(blocks)" and stores dependency_type "blocks", so bd
+// never holds a ""-typed dep to evaluate in the first place. Mirroring bd's
+// behavior from a MemStore-backed double therefore means treating "" as
+// blocking; MemStore's own ready filter (memstore.go) omits it and would
+// under-report.
+var blockingDepTypes = map[string]bool{
+	"":                   true,
+	"blocks":             true,
+	"waits-for":          true,
+	"conditional-blocks": true,
+}
+
+// blockerStopsClose reports whether a blocker in the given status stops a close.
+// Pinned blockers are exempt in bd — pinning a blocker lets the blocked bead
+// close — and closed ones obviously are. Everything else stops it, in_progress
+// included, which is why this is not a status == "open" test.
+func blockerStopsClose(status string) bool {
+	return status != "closed" && status != "pinned"
+}
+
+// openBlockersOf returns the beads whose status stops a close of id.
+func (s *strictCloseStore) openBlockersOf(id string) ([]string, error) {
 	deps, err := s.DepList(id, "down")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var openBlockers []string
 	for _, dep := range deps {
-		if dep.Type != "blocks" {
+		if !blockingDepTypes[dep.Type] {
 			continue
 		}
 		blocker, err := s.Get(dep.DependsOnID)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if blocker.Status == "open" {
+		if blockerStopsClose(blocker.Status) {
 			openBlockers = append(openBlockers, blocker.ID)
 		}
 	}
-	if len(openBlockers) > 0 {
-		return fmt.Errorf("cannot close %s: blocked by open issues %v", id, openBlockers)
+	return openBlockers, nil
+}
+
+// errCloseBlocked mirrors bd's blocked-close refusal. The wording matters:
+// "cannot close blocked issue" is the needle the dispatcher's tier table
+// matches on to classify the refusal as semantic rather than availability
+// (control.go), so a double that phrased it differently would exercise neither
+// the refusal nor its classification.
+func (s *strictCloseStore) errCloseBlocked(id string, openBlockers []string) error {
+	return fmt.Errorf("cannot close blocked issue: %s is blocked by [%s]", id, strings.Join(openBlockers, " "))
+}
+
+// errCloseOpenChildren mirrors bd's open-children refusal, which is a separate
+// rule from the blocked-dep one and carries its own wording.
+func (s *strictCloseStore) errCloseOpenChildren(id string, open int) error {
+	return fmt.Errorf("cannot close %s: %d open child issue(s); close children first or use --force to override", id, open)
+}
+
+// refuseClose returns the refusal bd would raise for closing id, or nil if bd
+// would allow it.
+func (s *strictCloseStore) refuseClose(id string) error {
+	current, err := s.Get(id)
+	if err != nil {
+		return err
 	}
+	// bd gates the policy on crossing INTO done, so restating closed as closed
+	// is allowed even with an open child or an open blocker. Idempotent
+	// re-processing is this codebase's stated convergence mechanism, so a double
+	// that refused a re-close would be stricter than production in exactly the
+	// direction that produces false failures.
+	if current.Status == "closed" {
+		return nil
+	}
+	// Children first: a bead with both an open child and an open blocker is
+	// refused for the child, so evaluating blockers first would report the wrong
+	// rule.
+	children, err := s.Children(current.ID)
+	if err != nil {
+		return err
+	}
+	if len(children) > 0 {
+		return s.errCloseOpenChildren(id, len(children))
+	}
+	openBlockers, err := s.openBlockersOf(id)
+	if err != nil {
+		return err
+	}
+	if len(openBlockers) > 0 {
+		return s.errCloseBlocked(id, openBlockers)
+	}
+	return nil
+}
+
+// Close is stricter than production. BdStore.close and CloseAll both emit
+// "bd close --force" (bdstore.go bdCloseArgs), and --force bypasses bd's
+// blocked-close guard, so real bd never refuses on this path. The override is
+// kept anyway as a belt-and-braces guard for the fallback in
+// updateMetadataAndClose: a test that trips it has built a shape whose safety
+// depends on --force, which is worth knowing even though production survives it.
+// The load-bearing override is Update, below.
+func (s *strictCloseStore) Close(id string) error {
+	if err := s.refuseClose(id); err != nil {
+		return err
+	}
+	s.recordClose(id)
 	return s.MemStore.Close(id)
+}
+
+// recordClose appends id to closeOrder when this write is about to cross it
+// into closed. Already-closed beads are skipped so that idempotent
+// re-processing — which this codebase relies on to converge — does not inflate
+// the sequence and make an ordering assertion flaky.
+func (s *strictCloseStore) recordClose(id string) {
+	current, err := s.Get(id)
+	if err != nil || current.Status == "closed" {
+		return
+	}
+	s.closeOrder = append(s.closeOrder, id)
+}
+
+// CloseAll deliberately does NOT enforce refuseClose, and no one should add it.
+// BdStore.CloseAll closes with "bd close --force" (bdCloseArgs, bdstore.go), and
+// --force bypasses bd's close policy by design, so a double that refused here
+// would be stricter than production — and would reject the very shape ga-4ote2
+// requires, where a scope member is closed while the control aborting its scope
+// is still open. The override exists only to record close order.
+func (s *strictCloseStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	for _, id := range ids {
+		s.recordClose(id)
+	}
+	return s.MemStore.CloseAll(ids, metadata)
+}
+
+// Update enforces the same refusal as Close. The dispatcher does not close beads
+// through Close: updateMetadataAndClose sets Status="closed" via Update and only
+// falls back to Close when that did not take (control.go). A double that guarded
+// Close alone therefore never fired on the path production actually uses, which
+// let a swap of any control's close ordering — closing the bead a control closes
+// before the control itself — pass the whole suite while deadlocking the fleet.
+// That is the ga-a6zy9 failure mode.
+func (s *strictCloseStore) Update(id string, opts beads.UpdateOpts) error {
+	if opts.Status != nil && *opts.Status == "closed" {
+		if err := s.refuseClose(id); err != nil {
+			return err
+		}
+		s.recordClose(id)
+	}
+	return s.MemStore.Update(id, opts)
+}
+
+// UpdateAll enforces the same refusal as Update. BdStore.UpdateAll emits a plain
+// "bd update --status closed" with no --force (bdstore.go), unlike CloseAll, so
+// bd refuses it on a blocked bead — measured against both bd binaries installed
+// on this host, which reject an unforced "update --status closed" on a blocked
+// bead and accept it on an unblocked one.
+//
+// The scope-skip path used to route here, which is what ga-4ote2 was: it closed
+// members while their blocker was still open, on the one batch primitive bd can
+// refuse. That path now uses CloseAll. This override is kept because
+// BdStore.UpdateAll still exists and any future caller inherits the same
+// refusal, and because MemStore has no UpdateAll of its own — so without this
+// declaration a store-shaped double would silently not have one at all.
+func (s *strictCloseStore) UpdateAll(ids []string, opts beads.UpdateOpts) (int, error) {
+	updated := 0
+	for _, id := range ids {
+		if err := s.Update(id, opts); err != nil {
+			return updated, err
+		}
+		updated++
+	}
+	return updated, nil
+}
+
+// TestStrictCloseStoreMirrorsBdClosePolicy covers the double itself. It exists
+// because an unexercised rule in this store is indistinguishable from a missing
+// one — the Close-only guard this file used to carry looked correct for as long
+// as it went unexercised, and the whole point of the store is to be a rule the
+// dispatcher cannot route around. Every case below mirrors a behavior measured
+// against a real bd binary; if bd's policy changes, these are the assertions
+// that should fail first.
+func TestStrictCloseStoreMirrorsBdClosePolicy(t *testing.T) {
+	t.Parallel()
+
+	closed := "closed"
+	newBead := func(t *testing.T, store *strictCloseStore, title string) beads.Bead {
+		t.Helper()
+		return mustCreateWorkflowBead(t, store, beads.Bead{Title: title, Type: "task"})
+	}
+	newChild := func(t *testing.T, store *strictCloseStore, title, parentID string) beads.Bead {
+		t.Helper()
+		return mustCreateWorkflowBead(t, store, beads.Bead{Title: title, Type: "task", ParentID: parentID})
+	}
+	setStatus := func(t *testing.T, store *strictCloseStore, id, status string) {
+		t.Helper()
+		// Go through MemStore so setting up a fixture never trips the policy
+		// under test.
+		if err := store.MemStore.Update(id, beads.UpdateOpts{Status: &status}); err != nil {
+			t.Fatalf("seed status %s=%s: %v", id, status, err)
+		}
+	}
+
+	tests := []struct {
+		name    string
+		build   func(t *testing.T, store *strictCloseStore) string
+		wantErr string
+	}{
+		{
+			name: "open blocker refuses",
+			build: func(t *testing.T, store *strictCloseStore) string {
+				subject, blocker := newBead(t, store, "subject"), newBead(t, store, "blocker")
+				mustDepAdd(t, store, subject.ID, blocker.ID, "blocks")
+				return subject.ID
+			},
+			wantErr: "cannot close blocked issue",
+		},
+		{
+			name: "in_progress blocker refuses",
+			build: func(t *testing.T, store *strictCloseStore) string {
+				subject, blocker := newBead(t, store, "subject"), newBead(t, store, "blocker")
+				mustDepAdd(t, store, subject.ID, blocker.ID, "blocks")
+				setStatus(t, store, blocker.ID, "in_progress")
+				return subject.ID
+			},
+			wantErr: "cannot close blocked issue",
+		},
+		{
+			name: "closed blocker allows",
+			build: func(t *testing.T, store *strictCloseStore) string {
+				subject, blocker := newBead(t, store, "subject"), newBead(t, store, "blocker")
+				mustDepAdd(t, store, subject.ID, blocker.ID, "blocks")
+				setStatus(t, store, blocker.ID, "closed")
+				return subject.ID
+			},
+		},
+		{
+			name: "pinned blocker allows",
+			build: func(t *testing.T, store *strictCloseStore) string {
+				subject, blocker := newBead(t, store, "subject"), newBead(t, store, "blocker")
+				mustDepAdd(t, store, subject.ID, blocker.ID, "blocks")
+				setStatus(t, store, blocker.ID, "pinned")
+				return subject.ID
+			},
+		},
+		{
+			name: "untyped dep refuses because MemStore stores it verbatim",
+			build: func(t *testing.T, store *strictCloseStore) string {
+				subject, blocker := newBead(t, store, "subject"), newBead(t, store, "blocker")
+				mustDepAdd(t, store, subject.ID, blocker.ID, "")
+				return subject.ID
+			},
+			wantErr: "cannot close blocked issue",
+		},
+		{
+			name: "non-blocking dep type allows",
+			build: func(t *testing.T, store *strictCloseStore) string {
+				subject, related := newBead(t, store, "subject"), newBead(t, store, "related")
+				mustDepAdd(t, store, subject.ID, related.ID, "related")
+				return subject.ID
+			},
+		},
+		{
+			name: "open child refuses with its own rule",
+			build: func(t *testing.T, store *strictCloseStore) string {
+				parent := newBead(t, store, "parent")
+				newChild(t, store, "child", parent.ID)
+				return parent.ID
+			},
+			wantErr: "open child issue(s)",
+		},
+		{
+			name: "closed child allows",
+			build: func(t *testing.T, store *strictCloseStore) string {
+				parent := newBead(t, store, "parent")
+				child := newChild(t, store, "child", parent.ID)
+				setStatus(t, store, child.ID, "closed")
+				return parent.ID
+			},
+		},
+		{
+			name: "open child outranks open blocker",
+			build: func(t *testing.T, store *strictCloseStore) string {
+				parent, blocker := newBead(t, store, "parent"), newBead(t, store, "blocker")
+				newChild(t, store, "child", parent.ID)
+				mustDepAdd(t, store, parent.ID, blocker.ID, "blocks")
+				return parent.ID
+			},
+			wantErr: "open child issue(s)",
+		},
+		{
+			name: "re-closing an already-closed bead is exempt from both rules",
+			build: func(t *testing.T, store *strictCloseStore) string {
+				subject, blocker := newBead(t, store, "subject"), newBead(t, store, "blocker")
+				newChild(t, store, "child", subject.ID)
+				mustDepAdd(t, store, subject.ID, blocker.ID, "blocks")
+				setStatus(t, store, subject.ID, "closed")
+				return subject.ID
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := newStrictCloseStore()
+			subjectID := tc.build(t, store)
+
+			err := store.Update(subjectID, beads.UpdateOpts{Status: &closed})
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("Update(%s, closed) = %v, want success", subjectID, err)
+			case tc.wantErr != "" && err == nil:
+				t.Fatalf("Update(%s, closed) succeeded, want refusal containing %q", subjectID, tc.wantErr)
+			case tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr):
+				t.Fatalf("Update(%s, closed) = %v, want refusal containing %q", subjectID, err, tc.wantErr)
+			}
+
+			// UpdateAll must agree with Update or the guard is only half-armed.
+			// No dispatch path routes a close through it today — the scope-skip
+			// path closes via CloseAll — but BdStore.UpdateAll still exists, and
+			// the day something reaches for it the batch verb has to refuse the
+			// same shapes the single verb refuses.
+			store2 := newStrictCloseStore()
+			subjectID2 := tc.build(t, store2)
+			_, batchErr := store2.UpdateAll([]string{subjectID2}, beads.UpdateOpts{Status: &closed})
+			if (batchErr != nil) != (err != nil) {
+				t.Fatalf("UpdateAll disagrees with Update: UpdateAll=%v, Update=%v", batchErr, err)
+			}
+		})
+	}
 }
 
 func TestProcessWorkflowFinalizeClosesWorkflow(t *testing.T) {
@@ -3081,6 +4401,11 @@ type sourceChainFinalizeFixture struct {
 
 func newSourceChainFinalizeFixture(t *testing.T) sourceChainFinalizeFixture {
 	t.Helper()
+	return newSourceChainFinalizeFixtureWithOutcome(t, "pass")
+}
+
+func newSourceChainFinalizeFixtureWithOutcome(t *testing.T, stepOutcome string) sourceChainFinalizeFixture {
+	t.Helper()
 
 	cityStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()
@@ -3111,7 +4436,7 @@ func newSourceChainFinalizeFixture(t *testing.T) sourceChainFinalizeFixture {
 		Type:   "task",
 		Status: "closed",
 		Metadata: map[string]string{
-			"gc.outcome": "pass",
+			"gc.outcome": stepOutcome,
 		},
 	})
 	finalizer := mustCreateWorkflowBead(t, rigStore, beads.Bead{
@@ -3499,6 +4824,155 @@ func TestProcessWorkflowFinalizeRecordsSourceWorkflowStoreScanFailure(t *testing
 	}
 }
 
+// TestProcessWorkflowFinalizeCompletesAfterPendingResolverHeals is the
+// red→green heal test for the pending classification's central claim: a
+// finalize that pended on config drift COMPLETES once the drift is repaired, in
+// the same process, with no dispatcher restart. Before this the claim rested on
+// reasoning alone (city config is reloaded per dispatch, the recorded reason is
+// write-only), and reasoning is exactly what a regression here would keep
+// satisfying while the finalize stayed stuck.
+//
+// It also pins the other half of the lifecycle: the recorded failure does not
+// outlive the success it preceded.
+func TestProcessWorkflowFinalizeCompletesAfterPendingResolverHeals(t *testing.T) {
+	t.Parallel()
+
+	f := newSourceChainFinalizeFixture(t)
+	rigRestored := false
+	resolver := func(ref string) (beads.Store, error) {
+		if ref == "rig:test" && !rigRestored {
+			return nil, fmt.Errorf("%w: rig %q not found in city config", ErrControlPending, "test")
+		}
+		return f.resolver(ref)
+	}
+	opts := ProcessOptions{ResolveStoreRef: resolver}
+
+	if _, err := ProcessControl(f.rigStore, f.finalizer, opts); !errors.Is(err, ErrControlPending) {
+		t.Fatalf("pre-heal ProcessControl error = %v, want ErrControlPending", err)
+	}
+	pending := mustGetBead(t, f.rigStore, f.finalizer.ID)
+	if pending.Status != "open" {
+		t.Fatalf("pre-heal finalizer status = %q, want open", pending.Status)
+	}
+	if got := pending.Metadata[workflowFinalizeErrorMetadataKey]; !strings.Contains(got, "not found in city config") {
+		t.Fatalf("pre-heal gc.last_finalize_error = %q, want the pending reason recorded", got)
+	}
+	if root := mustGetBead(t, f.rigStore, f.workflow.ID); root.Status != "open" {
+		t.Fatalf("pre-heal root status = %q, want open", root.Status)
+	}
+
+	// `gc rig add` puts the entry back.
+	rigRestored = true
+	if _, err := ProcessControl(f.rigStore, pending, opts); err != nil {
+		t.Fatalf("post-heal ProcessControl: %v", err)
+	}
+
+	healed := mustGetBead(t, f.rigStore, f.finalizer.ID)
+	if healed.Status != "closed" {
+		t.Fatalf("post-heal finalizer status = %q, want closed", healed.Status)
+	}
+	if got := healed.Metadata[beadmeta.OutcomeMetadataKey]; got != beadmeta.OutcomePass {
+		t.Fatalf("post-heal finalizer gc.outcome = %q, want pass", got)
+	}
+	if got := healed.Metadata[workflowFinalizeErrorMetadataKey]; got != "" {
+		t.Fatalf("post-heal gc.last_finalize_error = %q, want cleared — a passing finalizer must not advertise the failure it healed from", got)
+	}
+	if root := mustGetBead(t, f.rigStore, f.workflow.ID); root.Status != "closed" {
+		t.Fatalf("post-heal root status = %q, want closed", root.Status)
+	}
+	// The source chain is the reason the finalize exists: assert it was walked
+	// and closed, not merely that the finalizer stopped erroring.
+	if launch := mustGetBead(t, f.rigStore, f.rigLaunch.ID); launch.Status != "closed" {
+		t.Fatalf("post-heal rig launch status = %q, want closed", launch.Status)
+	}
+	if source := mustGetBead(t, f.cityStore, f.citySource.ID); source.Status != "closed" {
+		t.Fatalf("post-heal city source status = %q, want closed", source.Status)
+	}
+}
+
+// TestProcessWorkflowFinalizeFailOutcomeInheritsPendingResolver covers the
+// FAIL-outcome arm, which reaches the same store-ref resolver through
+// annotateSourceBeadFailure rather than preflightSourceBeadChain. It inherited
+// the pending classification by construction and was asserted by nothing: a
+// failed workflow whose rig went missing must stay retryable for exactly the
+// reason a passing one does — quarantine would settle the root and strand the
+// domain parent, and the parent is the human handle a FAILED workflow most
+// needs.
+func TestProcessWorkflowFinalizeFailOutcomeInheritsPendingResolver(t *testing.T) {
+	t.Parallel()
+
+	f := newSourceChainFinalizeFixtureWithOutcome(t, "fail")
+	resolver := func(ref string) (beads.Store, error) {
+		if ref == "rig:test" {
+			// The drift SUBCLASS, matching what the cmd-layer resolver actually
+			// returns for a removed rig — annotateSourceBeadFailure forwards
+			// with %w, so this is the live FAIL+missing-rig shape and not a
+			// stand-in.
+			return nil, fmt.Errorf("%w: rig %q not found in city config", ErrControlDriftPending, "test")
+		}
+		return f.resolver(ref)
+	}
+
+	_, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{ResolveStoreRef: resolver})
+	// Assert the subclass, not just the parent. The cmd layer keys the loudness
+	// horizon on ErrControlDriftPending, so a rewrap along the FAIL path that
+	// preserved only ErrControlPending would keep this retryable while silently
+	// dropping its escalation — retrying forever in silence. The PASS/skip path
+	// already pins exactly this; the FAIL path is the arm that reaches the
+	// resolver through annotateSourceBeadFailure instead.
+	if !errors.Is(err, ErrControlDriftPending) {
+		t.Fatalf("ProcessControl error = %v, want ErrControlDriftPending on the FAIL arm too", err)
+	}
+	finalizer := mustGetBead(t, f.rigStore, f.finalizer.ID)
+	if finalizer.Status != "open" {
+		t.Fatalf("finalizer status = %q, want open (retryable)", finalizer.Status)
+	}
+	if got := finalizer.Metadata[beadmeta.ControlQuarantinedMetadataKey]; got != "" {
+		t.Fatalf("gc.control_quarantined = %q, want empty", got)
+	}
+	if root := mustGetBead(t, f.rigStore, f.workflow.ID); root.Status != "open" {
+		t.Fatalf("root status = %q, want open", root.Status)
+	}
+}
+
+// TestRecordWorkflowFinalizeErrorSkipsUnchangedRestamp pins the write-side half
+// of the pending cadence fix. A pending finalize re-reports the identical
+// reason on every sweep for as long as the drift lasts; re-stamping it each
+// time is a store round-trip and an event-log row per sweep that says nothing
+// new.
+func TestRecordWorkflowFinalizeErrorSkipsUnchangedRestamp(t *testing.T) {
+	t.Parallel()
+
+	mem := beads.NewMemStore()
+	finalizer := mustCreateWorkflowBead(t, mem, beads.Bead{Title: "Finalize workflow", Type: "task"})
+	store := &controlCloseTrackingStore{Store: mem, targetID: finalizer.ID}
+	cause := errors.New(`rig "ghostrig" not found in city config`)
+
+	if err := recordWorkflowFinalizeError(store, finalizer, cause); !errors.Is(err, cause) {
+		t.Fatalf("first record returned %v, want the original cause", err)
+	}
+	if store.setMetadataCalls != 1 {
+		t.Fatalf("SetMetadata calls after first record = %d, want 1", store.setMetadataCalls)
+	}
+
+	// The next sweep re-reads the bead and reports the same refusal.
+	restamped := mustGetBead(t, mem, finalizer.ID)
+	if err := recordWorkflowFinalizeError(store, restamped, cause); !errors.Is(err, cause) {
+		t.Fatalf("repeat record returned %v, want the original cause", err)
+	}
+	if store.setMetadataCalls != 1 {
+		t.Fatalf("SetMetadata calls after identical repeat = %d, want 1 (no re-stamp)", store.setMetadataCalls)
+	}
+
+	// A genuinely different reason still lands.
+	if err := recordWorkflowFinalizeError(store, restamped, errors.New("closing workflow spec sidecars: boom")); err == nil {
+		t.Fatal("changed-reason record returned nil, want the cause")
+	}
+	if store.setMetadataCalls != 2 {
+		t.Fatalf("SetMetadata calls after a changed reason = %d, want 2", store.setMetadataCalls)
+	}
+}
+
 func TestRecordWorkflowFinalizeErrorTruncatesAtUTF8Boundary(t *testing.T) {
 	t.Parallel()
 
@@ -3509,7 +4983,7 @@ func TestRecordWorkflowFinalizeErrorTruncatesAtUTF8Boundary(t *testing.T) {
 	})
 	reason := strings.Repeat("a", maxWorkflowFinalizeErrorMetadata-1) + "é tail"
 
-	err := recordWorkflowFinalizeError(store, finalizer.ID, errors.New(reason))
+	err := recordWorkflowFinalizeError(store, finalizer, errors.New(reason))
 	if err == nil {
 		t.Fatal("recordWorkflowFinalizeError err = nil, want original error returned")
 	}
@@ -3707,6 +5181,107 @@ func TestProcessWorkflowFinalizeClosesIntraStoreSourceBeadWithoutResolver(t *tes
 	}
 	if got := sourceAfter.Metadata["gc.outcome"]; got != "pass" {
 		t.Fatalf("source gc.outcome = %q, want pass", got)
+	}
+}
+
+// TestProcessWorkflowFinalizeUnderCanceledRunFinalizesCanceled guards the race
+// between a run cancel and the work it interrupts. Run cancel durably stamps
+// gc.cancel_requested on the run root first, then interrupts the sessions
+// executing its steps while it closes the rest of the run. An interrupted agent
+// winding down its turn may still close its step as passed before the cancel
+// reaches it; that can make the workflow finalizer ready, and the finalizer is
+// exempt from the dispatcher's canceled-root gate because it is the bead that
+// settles the root. It must settle the root as canceled, not as a success
+// computed from the steps, and it must not close the source bead as done. A
+// drain item workflow whose own root is still live but whose parent run is
+// canceled finalizes the same way: the cancel will close it as canceled anyway.
+func TestProcessWorkflowFinalizeUnderCanceledRunFinalizesCanceled(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		nested bool
+	}{
+		{name: "run root marked canceled"},
+		{name: "drain item under a run marked canceled", nested: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := beads.NewMemStore()
+			source := mustCreateWorkflowBead(t, store, beads.Bead{Title: "work item", Type: "task"})
+			run := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title: "implement run",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.kind":             "workflow",
+					"gc.formula_contract": "graph.v2",
+					"gc.cancel_requested": "true",
+				},
+			})
+			workflow := run
+			if tc.nested {
+				drain := mustCreateWorkflowBead(t, store, beads.Bead{
+					Title:    "drain work",
+					Type:     "task",
+					Metadata: map[string]string{"gc.kind": "drain", "gc.root_bead_id": run.ID},
+				})
+				workflow = mustCreateWorkflowBead(t, store, beads.Bead{
+					Title: "do-work item",
+					Type:  "task",
+					Metadata: map[string]string{
+						"gc.kind":             "workflow",
+						"gc.formula_contract": "graph.v2",
+						"gc.drain_control_id": drain.ID,
+					},
+				})
+			}
+			if err := store.SetMetadata(workflow.ID, "gc.source_bead_id", source.ID); err != nil {
+				t.Fatal(err)
+			}
+			// The interrupted agent closed its step as passed.
+			step := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:    "implement",
+				Type:     "task",
+				Status:   "closed",
+				Metadata: map[string]string{"gc.outcome": "pass", "gc.root_bead_id": workflow.ID},
+			})
+			finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:    "Finalize workflow",
+				Type:     "task",
+				Metadata: map[string]string{"gc.kind": "workflow-finalize", "gc.root_bead_id": workflow.ID},
+			})
+			mustDepAdd(t, store, finalizer.ID, step.ID, "blocks")
+			mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
+
+			result, err := ProcessControl(store, finalizer, ProcessOptions{})
+			if err != nil {
+				t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+			}
+			if !result.Processed || result.Action != "workflow-canceled" {
+				t.Fatalf("result = %+v, want processed workflow-canceled", result)
+			}
+			rootAfter, err := store.Get(workflow.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rootAfter.Status != "closed" || rootAfter.Metadata["gc.outcome"] != "canceled" {
+				t.Fatalf("workflow root = status %q outcome %q, want closed canceled: a step passed after the cancel must not settle the run as a success", rootAfter.Status, rootAfter.Metadata["gc.outcome"])
+			}
+			sourceAfter, err := store.Get(source.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sourceAfter.Status == "closed" {
+				t.Fatalf("source bead closed with outcome %q; a canceled workflow must not close its source as done", sourceAfter.Metadata["gc.outcome"])
+			}
+			finalizerAfter, err := store.Get(finalizer.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if finalizerAfter.Status != "closed" {
+				t.Fatalf("finalizer status = %q, want closed", finalizerAfter.Status)
+			}
+		})
 	}
 }
 
@@ -8197,6 +9772,50 @@ func TestClearRetryEphemeraPreservesRoutingAndClearsFanoutState(t *testing.T) {
 	}
 }
 
+// TestRetryClonedStepGetsItsOwnStepDefined pins CRITICAL 2 of the ga-rd8le
+// council review: a retry attempt clones the previous attempt's metadata, so it
+// must not inherit the projector's per-step step_defined marker
+// (StepDefinedEmittedMetadataKey). A born-marked clone would be skipped by
+// EmitCurrent forever and never get its own execution.step_defined — a
+// deterministic, non-self-healing loss on every retry iteration >= 2.
+//
+// RED on this PR's first commit, before the clone-marker strip:
+// clearRetryEphemera there does not strip the marker, so both the direct-strip
+// and the retryAttemptBead-clone assertions fail.
+func TestRetryClonedStepGetsItsOwnStepDefined(t *testing.T) {
+	t.Parallel()
+
+	const marker = beadmeta.StepDefinedEmittedMetadataKey
+
+	// The shared strip function every clone path calls must drop the marker.
+	meta := map[string]string{
+		marker:                         "2026-09-11T00:00:00Z",
+		beadmeta.RootBeadIDMetadataKey: "gcg-root",
+		beadmeta.StepIDMetadataKey:     "build",
+	}
+	clearRetryEphemera(meta)
+	if _, ok := meta[marker]; ok {
+		t.Fatal("clearRetryEphemera must strip the step_defined marker so a clone is not born-marked")
+	}
+
+	// End to end: a cloned retry attempt must be born unmarked, so a later
+	// EmitCurrent projects DefinedEmitted=false and emits its own step_defined.
+	prev := beads.Bead{
+		ID:    "gcg-attempt-1",
+		Title: "build",
+		Type:  "task",
+		Metadata: map[string]string{
+			marker:                         "2026-09-11T00:00:00Z",
+			beadmeta.RootBeadIDMetadataKey: "gcg-root",
+			beadmeta.StepIDMetadataKey:     "build",
+		},
+	}
+	clone := retryAttemptBead(prev, "gcg-logical", "step.ref.2", 2, (*config.City)(nil))
+	if _, ok := clone.Metadata[marker]; ok {
+		t.Fatal("retry attempt clone inherited the step_defined marker; EmitCurrent would skip it forever")
+	}
+}
+
 func TestRewriteRalphAttemptRefRespectsAttemptBoundaries(t *testing.T) {
 	t.Parallel()
 
@@ -9903,8 +11522,8 @@ func TestProcessWorkflowFinalize_PurgeOnMissingDir(t *testing.T) {
 
 // TestCloseScopeAsPassedSharedConvergence exercises the single scope-close
 // helper that both processScopeCheck branches and reconcileTerminalScopedMember
-// now share: propagate non-gc.* member metadata onto the body, write the
-// resolved output_json, and close the body pass unless it is already closed.
+// now share: propagate non-gc.* member metadata and the resolved output_json
+// onto the body, and close it pass unless it is already closed, as one write.
 func TestCloseScopeAsPassedSharedConvergence(t *testing.T) {
 	t.Parallel()
 
@@ -9981,14 +11600,18 @@ func TestCloseScopeAsPassedSharedConvergence(t *testing.T) {
 			}
 
 			traceText := trace.String()
-			for _, want := range []string{"phase=propagate-metadata", "phase=resolve-output", "phase=write-output", "phase=reload-body"} {
-				if !strings.Contains(traceText, want) {
-					t.Fatalf("trace missing %q:\n%s", want, traceText)
-				}
+			if !strings.Contains(traceText, "phase=resolve-output") {
+				t.Fatalf("trace missing %q:\n%s", "phase=resolve-output", traceText)
 			}
+			// An open body takes its metadata and its close in one write; an
+			// already closed body takes the metadata alone.
 			gotClose := strings.Contains(traceText, "phase=close-body ")
 			if gotClose != tc.wantCloseTrace {
 				t.Fatalf("close-body trace present=%v, want %v:\n%s", gotClose, tc.wantCloseTrace, traceText)
+			}
+			gotPropagate := strings.Contains(traceText, "phase=propagate-metadata ")
+			if gotPropagate == tc.wantCloseTrace {
+				t.Fatalf("propagate-metadata trace present=%v, want %v:\n%s", gotPropagate, !tc.wantCloseTrace, traceText)
 			}
 		})
 	}
@@ -10546,4 +12169,760 @@ func TestTeardownTailClosesItselfAfterFailedSettlement(t *testing.T) {
 		t.Fatalf("teardown control %s gc.outcome = %q, want pass after a failed settlement", control.ID, got)
 	}
 	assertNoOpenMembers(t, store, rootID)
+}
+
+// TestProcessWorkflowFinalizeStampsFailureOnOpenDomainParent pins the failed-DAG
+// diagnostics contract: a FAILED workflow finalize stamps the failing step's
+// gc.failure_reason/class/subject onto the cross-store domain parent (the first
+// gc.source_bead_id hop from the root) and leaves it OPEN/redispatchable, so
+// the human-visible source bead shows why the DAG failed instead of sitting
+// open and indistinguishable from never-run.
+func TestProcessWorkflowFinalizeStampsFailureOnOpenDomainParent(t *testing.T) {
+	t.Parallel()
+
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+
+	citySource := mustCreateWorkflowBead(t, cityStore, beads.Bead{
+		Title: "Adopt PR: gastownhall/example#9",
+		Type:  "task",
+	})
+
+	workflow := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "mol-adopt-pr-v2",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.source_bead_id":   citySource.ID,
+			"gc.source_store_ref": "city:test",
+		},
+	})
+	cleanup := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title:  "Review",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.outcome":        "fail",
+			"gc.failure_reason": "postcondition_failed",
+			"gc.failure_class":  "hard",
+		},
+	})
+	finalizer := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	mustDepAdd(t, rigStore, finalizer.ID, cleanup.ID, "blocks")
+	mustDepAdd(t, rigStore, workflow.ID, finalizer.ID, "blocks")
+
+	result, err := ProcessControl(rigStore, finalizer, ProcessOptions{ResolveStoreRef: cityStoreRefResolver(cityStore)})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize fail): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-fail" {
+		t.Fatalf("workflow result = %+v, want processed workflow-fail", result)
+	}
+
+	parent, err := cityStore.Get(citySource.ID)
+	if err != nil {
+		t.Fatalf("get domain parent: %v", err)
+	}
+	if parent.Status != "open" {
+		t.Fatalf("domain parent status = %q, want open (failure leaves it redispatchable)", parent.Status)
+	}
+	if got := parent.Metadata["gc.failure_reason"]; got != "postcondition_failed" {
+		t.Fatalf("parent gc.failure_reason = %q, want postcondition_failed (no cross-store failure signal stamped)", got)
+	}
+	if got := parent.Metadata["gc.failure_class"]; got != "hard" {
+		t.Errorf("parent gc.failure_class = %q, want hard", got)
+	}
+	if got := parent.Metadata["gc.failure_subject"]; got != cleanup.ID {
+		t.Errorf("parent gc.failure_subject = %q, want %q", got, cleanup.ID)
+	}
+	if got := parent.Metadata["gc.outcome"]; got != "" {
+		t.Errorf("parent gc.outcome = %q, want unset (the parent is not terminal)", got)
+	}
+}
+
+// TestProcessWorkflowFinalizeFailureStampFallsBackToGenericReason: a failed
+// finalize whose failed blocker carries no gc.failure_reason still stamps a
+// generic workflow_failed marker on the domain parent, so the parent always
+// carries a visible failure signal.
+func TestProcessWorkflowFinalizeFailureStampFallsBackToGenericReason(t *testing.T) {
+	t.Parallel()
+
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+
+	citySource := mustCreateWorkflowBead(t, cityStore, beads.Bead{Title: "source", Type: "task"})
+	workflow := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "wf",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.source_bead_id":   citySource.ID,
+			"gc.source_store_ref": "city:test",
+		},
+	})
+	cleanup := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title:    "step",
+		Type:     "task",
+		Status:   "closed",
+		Metadata: map[string]string{"gc.outcome": "fail"},
+	})
+	finalizer := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "fin",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	mustDepAdd(t, rigStore, finalizer.ID, cleanup.ID, "blocks")
+	mustDepAdd(t, rigStore, workflow.ID, finalizer.ID, "blocks")
+
+	if _, err := ProcessControl(rigStore, finalizer, ProcessOptions{ResolveStoreRef: cityStoreRefResolver(cityStore)}); err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize fail): %v", err)
+	}
+
+	parent, err := cityStore.Get(citySource.ID)
+	if err != nil {
+		t.Fatalf("get domain parent: %v", err)
+	}
+	if parent.Status != "open" {
+		t.Fatalf("domain parent status = %q, want open", parent.Status)
+	}
+	if got := parent.Metadata["gc.failure_reason"]; got != "workflow_failed" {
+		t.Fatalf("parent gc.failure_reason = %q, want the generic workflow_failed fallback", got)
+	}
+	if got := parent.Metadata["gc.failure_subject"]; got != cleanup.ID {
+		t.Errorf("parent gc.failure_subject = %q, want %q", got, cleanup.ID)
+	}
+}
+
+// TestProcessWorkflowFinalizeFailAnnotationFailsLoudWithoutResolver: a failed
+// DAG whose parent is cross-store but no resolver is wired must fail loud (the
+// finalizer stays open for retry), not silently skip the failure annotation —
+// the parent would otherwise never learn its DAG failed.
+func TestProcessWorkflowFinalizeFailAnnotationFailsLoudWithoutResolver(t *testing.T) {
+	t.Parallel()
+
+	rigStore := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "wf",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.source_bead_id":   "ga-parent",
+			"gc.source_store_ref": "city:test",
+		},
+	})
+	cleanup := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title:    "step",
+		Type:     "task",
+		Status:   "closed",
+		Metadata: map[string]string{"gc.outcome": "fail"},
+	})
+	finalizer := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "fin",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	mustDepAdd(t, rigStore, finalizer.ID, cleanup.ID, "blocks")
+	mustDepAdd(t, rigStore, workflow.ID, finalizer.ID, "blocks")
+
+	if _, err := ProcessControl(rigStore, finalizer, ProcessOptions{}); err == nil {
+		t.Fatal("want a loud error marking a cross-store failed parent with no resolver; got nil")
+	}
+	fin, err := rigStore.Get(finalizer.ID)
+	if err != nil {
+		t.Fatalf("get finalizer: %v", err)
+	}
+	if fin.Status == "closed" {
+		t.Fatal("finalizer closed on a fail-loud annotation error; want open for retry")
+	}
+}
+
+// staleFailureStamp is the failure stamp a previous, superseded DAG left on a
+// domain parent. Every assertion about supersede/clear behavior starts here.
+func staleFailureStamp() map[string]string {
+	return map[string]string{
+		"gc.failure_reason":  "postcondition_failed",
+		"gc.failure_class":   "hard",
+		"gc.failure_subject": "ga-previous-attempt-step",
+	}
+}
+
+// assertFailureStamp checks all three failure-stamp keys at once. A stamp is
+// only meaningful as a set: reading one key without the others is how a stale
+// class or subject from a previous DAG goes unnoticed.
+func assertFailureStamp(t *testing.T, bead beads.Bead, reason, class, subject string) {
+	t.Helper()
+	want := map[string]string{
+		"gc.failure_reason":  reason,
+		"gc.failure_class":   class,
+		"gc.failure_subject": subject,
+	}
+	for key, wantValue := range want {
+		if got := strings.TrimSpace(bead.Metadata[key]); got != wantValue {
+			t.Errorf("%s %s = %q, want %q", bead.ID, key, got, wantValue)
+		}
+	}
+}
+
+func cityStoreRefResolver(store beads.Store) func(string) (beads.Store, error) {
+	return func(ref string) (beads.Store, error) {
+		if ref == "city:test" {
+			return store, nil
+		}
+		return nil, fmt.Errorf("unknown store ref: %s", ref)
+	}
+}
+
+// TestProcessWorkflowFinalizeFailureStampSupersedesStaleDiagnostics: a second
+// DAG for the same domain parent fails with sparser diagnostics than the first
+// (a failed step carrying no gc.failure_reason/class). Because the stamp is
+// applied as a per-key merge, a sparse second stamp must still overwrite every
+// key — otherwise the parent reports the NEW subject next to the OLD DAG's
+// class, a diagnosis that never existed.
+func TestProcessWorkflowFinalizeFailureStampSupersedesStaleDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+
+	citySource := mustCreateWorkflowBead(t, cityStore, beads.Bead{
+		Title:    "Adopt PR: gastownhall/example#12",
+		Type:     "task",
+		Metadata: staleFailureStamp(),
+	})
+	workflow := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "mol-adopt-pr-v2 (second attempt)",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.source_bead_id":   citySource.ID,
+			"gc.source_store_ref": "city:test",
+		},
+	})
+	// Sparse failure: outcome only, no reason and no class.
+	step := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title:    "Review",
+		Type:     "task",
+		Status:   "closed",
+		Metadata: map[string]string{"gc.outcome": "fail"},
+	})
+	finalizer := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	mustDepAdd(t, rigStore, finalizer.ID, step.ID, "blocks")
+	mustDepAdd(t, rigStore, workflow.ID, finalizer.ID, "blocks")
+
+	result, err := ProcessControl(rigStore, finalizer, ProcessOptions{ResolveStoreRef: cityStoreRefResolver(cityStore)})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize fail): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-fail" {
+		t.Fatalf("workflow result = %+v, want processed workflow-fail", result)
+	}
+
+	parent := mustGetBead(t, cityStore, citySource.ID)
+	if parent.Status != "open" {
+		t.Fatalf("domain parent status = %q, want open (failure leaves it redispatchable)", parent.Status)
+	}
+	assertFailureStamp(t, parent, "workflow_failed", "", step.ID)
+}
+
+// TestProcessWorkflowFinalizePassCloseClearsStaleFailureStamp: after an earlier
+// DAG failed and stamped the domain parent, a later DAG for the same parent
+// passes and closes it. The closed parent must not carry gc.outcome=pass next
+// to the superseded failure stamp — that is a self-contradictory audit record.
+func TestProcessWorkflowFinalizePassCloseClearsStaleFailureStamp(t *testing.T) {
+	t.Parallel()
+
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+
+	citySource := mustCreateWorkflowBead(t, cityStore, beads.Bead{
+		Title:    "Adopt PR: gastownhall/example#13",
+		Type:     "task",
+		Metadata: staleFailureStamp(),
+	})
+	workflow := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "mol-adopt-pr-v2 (passing retry)",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.source_bead_id":   citySource.ID,
+			"gc.source_store_ref": "city:test",
+		},
+	})
+	step := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title:    "Review",
+		Type:     "task",
+		Status:   "closed",
+		Metadata: map[string]string{"gc.outcome": "pass"},
+	})
+	finalizer := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	mustDepAdd(t, rigStore, finalizer.ID, step.ID, "blocks")
+	mustDepAdd(t, rigStore, workflow.ID, finalizer.ID, "blocks")
+
+	result, err := ProcessControl(rigStore, finalizer, ProcessOptions{ResolveStoreRef: cityStoreRefResolver(cityStore)})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize pass): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-pass" {
+		t.Fatalf("workflow result = %+v, want processed workflow-pass", result)
+	}
+
+	parent := mustGetBead(t, cityStore, citySource.ID)
+	if parent.Status != "closed" {
+		t.Fatalf("domain parent status = %q, want closed", parent.Status)
+	}
+	if got := parent.Metadata["gc.outcome"]; got != "pass" {
+		t.Fatalf("domain parent gc.outcome = %q, want pass", got)
+	}
+	assertFailureStamp(t, parent, "", "", "")
+}
+
+// TestProcessWorkflowFinalizeFailureStampNamesAbortScopeMember: when the
+// finalize outcome flips to fail via the abort-scope route, every direct
+// blocker passed, so the blocker scan finds nothing. The abort-scope evaluator
+// already identified the exact failing member — its diagnostics must reach the
+// domain parent instead of a bare generic marker.
+func TestProcessWorkflowFinalizeFailureStampNamesAbortScopeMember(t *testing.T) {
+	t.Parallel()
+
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+
+	citySource := mustCreateWorkflowBead(t, cityStore, beads.Bead{
+		Title: "Adopt PR: gastownhall/example#14",
+		Type:  "task",
+	})
+	workflow := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "mol-adopt-pr-v2",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.source_bead_id":   citySource.ID,
+			"gc.source_store_ref": "city:test",
+		},
+	})
+	preflight := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title:  "Preflight",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id":   workflow.ID,
+			"gc.scope_ref":      "body",
+			"gc.scope_role":     "member",
+			"gc.on_fail":        "abort_scope",
+			"gc.outcome":        "fail",
+			"gc.failure_reason": "preflight_rejected",
+			"gc.failure_class":  "hard",
+		},
+	})
+	cleanup := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title:  "Clean up worktree",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.kind":         "cleanup",
+			"gc.outcome":      "pass",
+		},
+	})
+	finalizer := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	mustDepAdd(t, rigStore, finalizer.ID, cleanup.ID, "blocks")
+	mustDepAdd(t, rigStore, workflow.ID, finalizer.ID, "blocks")
+
+	result, err := ProcessControl(rigStore, finalizer, ProcessOptions{ResolveStoreRef: cityStoreRefResolver(cityStore)})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize abort-scope fail): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-fail" {
+		t.Fatalf("workflow result = %+v, want processed workflow-fail", result)
+	}
+
+	parent := mustGetBead(t, cityStore, citySource.ID)
+	if parent.Status != "open" {
+		t.Fatalf("domain parent status = %q, want open", parent.Status)
+	}
+	assertFailureStamp(t, parent, "preflight_rejected", "hard", preflight.ID)
+}
+
+// TestProcessWorkflowFinalizeStampsFailureOnSameStoreDomainParent pins the
+// DEFAULT single-store configuration of the same contract: with no
+// gc.source_store_ref on the root, the domain parent lives in the workflow's
+// own store and no resolver is wired at all. The failing step's diagnostics
+// must still reach it, and it must still be left OPEN/redispatchable — the
+// cross-store tests all carry a ref, so this is the only coverage of the
+// parentStore == rootStore route every unsplit city takes.
+func TestProcessWorkflowFinalizeStampsFailureOnSameStoreDomainParent(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+
+	source := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Adopt PR: gastownhall/example#15",
+		Type:  "task",
+	})
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "mol-adopt-pr-v2",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.source_bead_id":   source.ID,
+		},
+	})
+	cleanup := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "Review",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.outcome":        "fail",
+			"gc.failure_reason": "postcondition_failed",
+			"gc.failure_class":  "hard",
+		},
+	})
+	finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	mustDepAdd(t, store, finalizer.ID, cleanup.ID, "blocks")
+	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
+
+	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize fail): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-fail" {
+		t.Fatalf("workflow result = %+v, want processed workflow-fail", result)
+	}
+
+	parent := mustGetBead(t, store, source.ID)
+	if parent.Status != "open" {
+		t.Fatalf("domain parent status = %q, want open (failure leaves it redispatchable)", parent.Status)
+	}
+	assertFailureStamp(t, parent, "postcondition_failed", "hard", cleanup.ID)
+	if got := parent.Metadata["gc.outcome"]; got != "" {
+		t.Errorf("parent gc.outcome = %q, want unset (the parent is not terminal)", got)
+	}
+}
+
+// stampSourceChainLaunch rewrites the fixture's work bead (the workflow's first
+// source) and names the root's formula before finalize runs. The root also
+// carries a domain key so propagation onto the source chain is observable.
+func stampSourceChainLaunch(t *testing.T, f sourceChainFinalizeFixture, formula, status string, metadata map[string]string) {
+	t.Helper()
+	if err := f.rigStore.Update(f.rigLaunch.ID, beads.UpdateOpts{Status: &status, Metadata: metadata}); err != nil {
+		t.Fatalf("stamp rig launch: %v", err)
+	}
+	if err := f.rigStore.SetMetadataBatch(f.workflow.ID, map[string]string{
+		"gc.formula_name":   formula,
+		"pr_review.verdict": "approve",
+	}); err != nil {
+		t.Fatalf("stamp workflow root: %v", err)
+	}
+}
+
+// finalizeSourceChainFixture runs the fixture's passing workflow-finalize with
+// the cross-store resolver and returns the result plus the trace it wrote.
+func finalizeSourceChainFixture(t *testing.T, f sourceChainFinalizeFixture) (ControlResult, string) {
+	t.Helper()
+	var trace bytes.Buffer
+	result, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{
+		ResolveStoreRef:      f.resolver,
+		SourceWorkflowStores: sourceChainFixtureStores(f),
+		SourceWorkflowLock:   func(_ string, _ string, fn func() error) error { return fn() },
+		Tracef: func(format string, args ...any) {
+			fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
+		},
+	})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	return result, trace.String()
+}
+
+// assertWorkflowPassedClosed checks the finalize result, that the root and
+// finalizer both closed, and that the root recorded the pass.
+func assertWorkflowPassedClosed(t *testing.T, f sourceChainFinalizeFixture, result ControlResult) {
+	t.Helper()
+	if !result.Processed || result.Action != "workflow-pass" {
+		t.Fatalf("ProcessControl result = %+v, want processed workflow-pass", result)
+	}
+	for _, id := range []string{f.workflow.ID, f.finalizer.ID} {
+		got, err := f.rigStore.Get(id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("%s status = %q, want closed", id, got.Status)
+		}
+	}
+	root, err := f.rigStore.Get(f.workflow.ID)
+	if err != nil {
+		t.Fatalf("get workflow root: %v", err)
+	}
+	if got := root.Metadata[beadmeta.OutcomeMetadataKey]; got != beadmeta.OutcomePass {
+		t.Fatalf("workflow root gc.outcome = %q, want pass", got)
+	}
+}
+
+// assertSourceChainParentHeld checks that the fixture's city parent was left
+// open and untouched by the pass path.
+func assertSourceChainParentHeld(t *testing.T, f sourceChainFinalizeFixture) {
+	t.Helper()
+	parent, err := f.cityStore.Get(f.citySource.ID)
+	if err != nil {
+		t.Fatalf("get city source: %v", err)
+	}
+	if parent.Status != "open" {
+		t.Fatalf("city source status = %q (gc.outcome %q), want open above a blocked source", parent.Status, parent.Metadata["gc.outcome"])
+	}
+	if got := parent.Metadata["gc.outcome"]; got != "" {
+		t.Fatalf("city source gc.outcome = %q, want unset", got)
+	}
+	if got := parent.Metadata["pr_review.verdict"]; got != "" {
+		t.Fatalf("city source pr_review.verdict = %q, want unset", got)
+	}
+}
+
+// assertBlockedSourceClosed checks that the work bead is closed in the blocked
+// form with the root's domain metadata carried onto it and no failure stamp.
+func assertBlockedSourceClosed(t *testing.T, f sourceChainFinalizeFixture) {
+	t.Helper()
+	source, err := f.rigStore.Get(f.rigLaunch.ID)
+	if err != nil {
+		t.Fatalf("get rig launch: %v", err)
+	}
+	if source.Status != "closed" {
+		t.Fatalf("rig launch status = %q, want closed", source.Status)
+	}
+	for key, want := range map[string]string{
+		"gc.work_outcome":                  beadmeta.WorkOutcomeBlocked,
+		"gc.outcome":                       "pass",
+		"pr_review.verdict":                "approve",
+		beadmeta.FailureReasonMetadataKey:  "",
+		beadmeta.FailureClassMetadataKey:   "",
+		beadmeta.FailureSubjectMetadataKey: "",
+	} {
+		if got := strings.TrimSpace(source.Metadata[key]); got != want {
+			t.Fatalf("rig launch %s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestProcessWorkflowFinalizeStopsSourceChainAtClosedBlockedSource(t *testing.T) {
+	t.Parallel()
+
+	for _, formula := range []string{"mol-do-work", "mol-polecat-report"} {
+		for _, tc := range []struct {
+			name  string
+			extra map[string]string
+		}{
+			{name: "plain"},
+			{name: "stale failure stamp", extra: map[string]string{
+				beadmeta.FailureReasonMetadataKey:  "postcondition_failed",
+				beadmeta.FailureClassMetadataKey:   "hard",
+				beadmeta.FailureSubjectMetadataKey: "earlier-attempt-step",
+			}},
+		} {
+			t.Run(formula+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				f := newSourceChainFinalizeFixture(t)
+				metadata := map[string]string{
+					"gc.outcome":      "pass",
+					"gc.work_outcome": beadmeta.WorkOutcomeBlocked,
+				}
+				for key, value := range tc.extra {
+					metadata[key] = value
+				}
+				stampSourceChainLaunch(t, f, formula, "closed", metadata)
+
+				result, trace := finalizeSourceChainFixture(t, f)
+
+				assertWorkflowPassedClosed(t, f, result)
+				assertBlockedSourceClosed(t, f)
+				assertSourceChainParentHeld(t, f)
+				if want := "stop reason=blocked_source source=" + f.rigLaunch.ID; !strings.Contains(trace, want) {
+					t.Fatalf("trace missing %q:\n%s", want, trace)
+				}
+			})
+		}
+	}
+}
+
+func TestProcessWorkflowFinalizeClosesOpenBlockedSourceAndStopsChain(t *testing.T) {
+	t.Parallel()
+
+	for _, formula := range []string{"mol-do-work", "mol-polecat-report"} {
+		t.Run(formula, func(t *testing.T) {
+			t.Parallel()
+
+			f := newSourceChainFinalizeFixture(t)
+			stampSourceChainLaunch(t, f, formula, "open", map[string]string{
+				"gc.work_outcome": beadmeta.WorkOutcomeBlocked,
+			})
+
+			result, trace := finalizeSourceChainFixture(t, f)
+
+			assertWorkflowPassedClosed(t, f, result)
+			assertBlockedSourceClosed(t, f)
+			assertSourceChainParentHeld(t, f)
+			if want := "stop reason=blocked_source source=" + f.rigLaunch.ID; !strings.Contains(trace, want) {
+				t.Fatalf("trace missing %q:\n%s", want, trace)
+			}
+		})
+	}
+
+	t.Run("live sibling workflow keeps precedence", func(t *testing.T) {
+		t.Parallel()
+
+		f := newSourceChainFinalizeFixture(t)
+		stampSourceChainLaunch(t, f, "mol-do-work", "open", map[string]string{
+			"gc.work_outcome": beadmeta.WorkOutcomeBlocked,
+		})
+		sibling := mustCreateWorkflowBead(t, f.rigStore, beads.Bead{
+			Title: "second live workflow",
+			Type:  "task",
+			Metadata: map[string]string{
+				"gc.kind":             "workflow",
+				"gc.formula_contract": "graph.v2",
+				"gc.source_bead_id":   f.rigLaunch.ID,
+				"gc.source_store_ref": "rig:test",
+			},
+		})
+
+		result, trace := finalizeSourceChainFixture(t, f)
+
+		assertWorkflowPassedClosed(t, f, result)
+		source, err := f.rigStore.Get(f.rigLaunch.ID)
+		if err != nil {
+			t.Fatalf("get rig launch: %v", err)
+		}
+		if source.Status != "open" {
+			t.Fatalf("rig launch status = %q, want open while %s is live", source.Status, sibling.ID)
+		}
+		assertSourceChainParentHeld(t, f)
+		for _, want := range []string{"stop reason=live_child_workflow source=" + f.rigLaunch.ID, "live_roots=" + sibling.ID} {
+			if !strings.Contains(trace, want) {
+				t.Fatalf("trace missing %q:\n%s", want, trace)
+			}
+		}
+		if strings.Contains(trace, "reason=blocked_source") {
+			t.Fatalf("trace has blocked_source stop; live child workflow must take precedence:\n%s", trace)
+		}
+	})
+}
+
+func TestProcessWorkflowFinalizeClosesSourceChainPastUnblockedWorkOutcomes(t *testing.T) {
+	t.Parallel()
+
+	for _, workOutcome := range []string{
+		beadmeta.WorkOutcomeShipped,
+		beadmeta.WorkOutcomeNoOp,
+		beadmeta.WorkOutcomeAbandoned,
+		"",
+	} {
+		t.Run("work_outcome="+workOutcome, func(t *testing.T) {
+			t.Parallel()
+
+			f := newSourceChainFinalizeFixture(t)
+			metadata := map[string]string{"gc.outcome": "pass"}
+			if workOutcome != "" {
+				metadata["gc.work_outcome"] = workOutcome
+			}
+			stampSourceChainLaunch(t, f, "mol-do-work", "closed", metadata)
+
+			result, trace := finalizeSourceChainFixture(t, f)
+
+			assertWorkflowPassedClosed(t, f, result)
+			parent, err := f.cityStore.Get(f.citySource.ID)
+			if err != nil {
+				t.Fatalf("get city source: %v", err)
+			}
+			if parent.Status != "closed" {
+				t.Fatalf("city source status = %q, want closed past a %q source", parent.Status, workOutcome)
+			}
+			if got := parent.Metadata["gc.outcome"]; got != "pass" {
+				t.Fatalf("city source gc.outcome = %q, want pass", got)
+			}
+			if got := parent.Metadata["pr_review.verdict"]; got != "approve" {
+				t.Fatalf("city source pr_review.verdict = %q, want the root's propagated approve", got)
+			}
+			if strings.Contains(trace, "reason=blocked_source") {
+				t.Fatalf("trace has blocked_source stop for work_outcome %q:\n%s", workOutcome, trace)
+			}
+		})
+	}
+}
+
+func TestProcessWorkflowFinalizeDoesNotResolveStoresAboveBlockedSource(t *testing.T) {
+	t.Parallel()
+
+	f := newSourceChainFinalizeFixture(t)
+	stampSourceChainLaunch(t, f, "mol-do-work", "closed", map[string]string{
+		"gc.outcome":      "pass",
+		"gc.work_outcome": beadmeta.WorkOutcomeBlocked,
+	})
+	var resolved []string
+	resolver := func(ref string) (beads.Store, error) {
+		resolved = append(resolved, ref)
+		if ref == "city:test" {
+			return nil, errors.New("city store unavailable")
+		}
+		return f.resolver(ref)
+	}
+
+	result, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{
+		ResolveStoreRef: resolver,
+	})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+
+	assertWorkflowPassedClosed(t, f, result)
+	if slices.Contains(resolved, "city:test") {
+		t.Fatalf("resolver asked for %v; the store above a blocked source must never be resolved", resolved)
+	}
 }

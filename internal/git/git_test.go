@@ -1,11 +1,15 @@
 package git
 
 import (
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/testutil"
 )
@@ -23,7 +27,7 @@ func initTestRepo(t *testing.T) string {
 
 // runGit runs a git command in dir and fails the test on error.
 // Strips git env vars to prevent interference from pre-commit hooks.
-func runGit(t *testing.T, dir string, args ...string) {
+func runGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
@@ -38,6 +42,22 @@ func runGit(t *testing.T, dir string, args ...string) {
 	if err != nil {
 		t.Fatalf("git %s: %s: %v", strings.Join(args, " "), out, err)
 	}
+	return string(out)
+}
+
+// runGitAllowFail runs a git command in dir and returns its combined output
+// and error instead of failing the test. Use it where the command is expected
+// to fail (deleting a symref that may not exist) or where the failure IS the
+// assertion (a precondition that origin/HEAD is unset). It strips git env vars
+// exactly like runGit, so a leaked GIT_DIR cannot make such an assertion read
+// the wrong repository.
+func runGitAllowFail(t *testing.T, dir string, args ...string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = sanitizeGitEnv(os.Environ())
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }
 
 func TestSanitizeGitEnvStripsGitLocatingVariables(t *testing.T) {
@@ -115,6 +135,34 @@ func TestHermeticEnvStripsDiscoveryAndConfigVarsAndPinsHermeticConfig(t *testing
 	}
 	if _, ok := seen["PATH"]; !ok {
 		t.Error("HermeticEnv dropped non-git var PATH")
+	}
+}
+
+// TestSanitizedAndHermeticEnvPreserveGitTemplateDir pins the coupling to
+// internal/testenv, which points GIT_TEMPLATE_DIR at a template carrying
+// maintenance.auto=false so no repo a test creates spawns detached
+// auto-maintenance. A repo made through a SanitizedEnv or HermeticEnv command
+// is covered only while the variable survives, so stripping it as
+// "git-locating" or "config-location" would silently drop that coverage.
+func TestSanitizedAndHermeticEnvPreserveGitTemplateDir(t *testing.T) {
+	const template = "/pinned/gc-test-gittemplate"
+	t.Setenv("GIT_TEMPLATE_DIR", template)
+	for _, tc := range []struct {
+		name string
+		env  []string
+	}{
+		{"SanitizedEnv", SanitizedEnv()},
+		{"HermeticEnv", HermeticEnv()},
+	} {
+		var got []string
+		for _, e := range tc.env {
+			if v, ok := strings.CutPrefix(e, "GIT_TEMPLATE_DIR="); ok {
+				got = append(got, v)
+			}
+		}
+		if len(got) != 1 || got[0] != template {
+			t.Errorf("%s GIT_TEMPLATE_DIR entries = %q, want exactly [%q]", tc.name, got, template)
+		}
 	}
 }
 
@@ -259,7 +307,7 @@ func TestDefaultBranch_OriginHEADUnsetWithMasterRef(t *testing.T) {
 				runGit(t, clone, "update-ref", "refs/remotes/origin/"+ref, "HEAD")
 			}
 			// Defensive: ensure no origin/HEAD symref lingers from clone.
-			_ = exec.Command("git", "-C", clone, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD").Run()
+			_, _ = runGitAllowFail(t, clone, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
 
 			g := New(clone)
 			got, err := g.DefaultBranch()
@@ -292,6 +340,119 @@ func TestProbeDefaultBranch_FromOriginHEAD(t *testing.T) {
 	got := g.ProbeDefaultBranch()
 	if got != "master" {
 		t.Errorf("ProbeDefaultBranch() = %q, want %q", got, "master")
+	}
+}
+
+// gas-4cu: a repo whose remote is not named "origin" still has a mainline.
+// Probing only origin/HEAD silently registered the checked-out feature branch
+// as the rig's default branch, pointing every worktree at the wrong target.
+func TestProbeDefaultBranch_FromNonOriginRemoteHEAD(t *testing.T) {
+	bare := t.TempDir()
+	runGit(t, bare, "init", "--bare")
+
+	clone := t.TempDir()
+	runGit(t, clone, "clone", bare, ".")
+	runGit(t, clone, "config", "user.email", "test@test.com")
+	runGit(t, clone, "config", "user.name", "Test")
+	runGit(t, clone, "commit", "--allow-empty", "-m", "init")
+	// The real-world shape: the remote is named "ajb", not "origin", and the
+	// checked-out branch is a feature branch.
+	runGit(t, clone, "remote", "rename", "origin", "ajb")
+	runGit(t, clone, "checkout", "-b", "fix/some-feature")
+
+	target := "refs/remotes/ajb/main"
+	runGit(t, clone, "update-ref", target, "HEAD")
+	runGit(t, clone, "symbolic-ref", "refs/remotes/ajb/HEAD", target)
+
+	g := New(clone)
+	branch, remote := g.ProbeDefaultBranchFrom()
+	if branch != "main" {
+		t.Errorf("ProbeDefaultBranchFrom() branch = %q, want %q", branch, "main")
+	}
+	if remote != "ajb" {
+		t.Errorf("ProbeDefaultBranchFrom() remote = %q, want %q", remote, "ajb")
+	}
+	if got := g.ProbeDefaultBranch(); got != "main" {
+		t.Errorf("ProbeDefaultBranch() = %q, want %q", got, "main")
+	}
+}
+
+// The multi-remote probe consults every remote's HEAD, not just origin's, so
+// a repo whose origin has no HEAD set but which also tracks an upstream reads
+// the mainline from upstream rather than guessing from the checked-out
+// branch. This is the arm that widened: before, an unset origin/HEAD fell
+// straight through to the current branch and would have registered
+// "fix/some-feature" as the rig's mainline.
+func TestProbeDefaultBranchFrom_UsesUpstreamHEADWhenOriginHEADIsUnset(t *testing.T) {
+	bare := t.TempDir()
+	runGit(t, bare, "init", "--bare")
+
+	clone := t.TempDir()
+	runGit(t, clone, "clone", bare, ".")
+	runGit(t, clone, "config", "user.email", "test@test.com")
+	runGit(t, clone, "config", "user.name", "Test")
+	runGit(t, clone, "commit", "--allow-empty", "-m", "init")
+	runGit(t, clone, "remote", "add", "upstream", bare)
+	runGit(t, clone, "checkout", "-b", "fix/some-feature")
+
+	// origin exists and has a tracking ref, but no HEAD symref.
+	runGit(t, clone, "update-ref", "refs/remotes/origin/main", "HEAD")
+	_, _ = runGitAllowFail(t, clone, "symbolic-ref", "-d", "refs/remotes/origin/HEAD")
+	if out, err := runGitAllowFail(t, clone, "symbolic-ref", "refs/remotes/origin/HEAD"); err == nil {
+		t.Fatalf("precondition: origin/HEAD must be unset, got %q", out)
+	}
+
+	// upstream does have a HEAD, pointing at its own mainline.
+	runGit(t, clone, "update-ref", "refs/remotes/upstream/trunk", "HEAD")
+	runGit(t, clone, "symbolic-ref", "refs/remotes/upstream/HEAD", "refs/remotes/upstream/trunk")
+
+	g := New(clone)
+	branch, remote := g.ProbeDefaultBranchFrom()
+	if branch != "trunk" {
+		t.Errorf("ProbeDefaultBranchFrom() branch = %q, want %q (upstream/HEAD, not the checked-out feature branch)", branch, "trunk")
+	}
+	if remote != "upstream" {
+		t.Errorf("ProbeDefaultBranchFrom() remote = %q, want %q", remote, "upstream")
+	}
+}
+
+// origin stays the preferred remote when several are configured.
+func TestProbeDefaultBranch_PrefersOriginOverOtherRemotes(t *testing.T) {
+	bare := t.TempDir()
+	runGit(t, bare, "init", "--bare")
+
+	clone := t.TempDir()
+	runGit(t, clone, "clone", bare, ".")
+	runGit(t, clone, "config", "user.email", "test@test.com")
+	runGit(t, clone, "config", "user.name", "Test")
+	runGit(t, clone, "commit", "--allow-empty", "-m", "init")
+	runGit(t, clone, "remote", "add", "ajb", bare)
+
+	runGit(t, clone, "update-ref", "refs/remotes/origin/master", "HEAD")
+	runGit(t, clone, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master")
+	runGit(t, clone, "update-ref", "refs/remotes/ajb/trunk", "HEAD")
+	runGit(t, clone, "symbolic-ref", "refs/remotes/ajb/HEAD", "refs/remotes/ajb/trunk")
+
+	g := New(clone)
+	branch, remote := g.ProbeDefaultBranchFrom()
+	if branch != "master" || remote != "origin" {
+		t.Errorf("ProbeDefaultBranchFrom() = (%q, %q), want (master, origin)", branch, remote)
+	}
+}
+
+// The current-branch fallback reports no remote, so callers can tell the
+// operator the mainline was guessed rather than read from a remote HEAD.
+func TestProbeDefaultBranchFrom_CurrentBranchFallbackHasNoRemote(t *testing.T) {
+	repo := initTestRepo(t)
+	runGit(t, repo, "checkout", "-b", "develop")
+
+	g := New(repo)
+	branch, remote := g.ProbeDefaultBranchFrom()
+	if branch != "develop" {
+		t.Errorf("ProbeDefaultBranchFrom() branch = %q, want develop", branch)
+	}
+	if remote != "" {
+		t.Errorf("ProbeDefaultBranchFrom() remote = %q, want empty for the current-branch fallback", remote)
 	}
 }
 
@@ -778,5 +939,185 @@ func TestUntrustedRemoteGitConfigArgs(t *testing.T) {
 		if args[i] != "-c" {
 			t.Fatalf("arg %d = %q, want -c; full: %v", i, args[i], args)
 		}
+	}
+}
+
+// git quotes paths containing non-ASCII or control characters in porcelain
+// output. Consuming the quoted text verbatim makes a live registration
+// unmatchable, which the worktree safety scans read as "absent".
+func TestParseWorktreeListUnquotesCQuotedPaths(t *testing.T) {
+	out := "worktree \"/tmp/caf\\303\\251\"\nHEAD abc123\nbranch refs/heads/main\n\n"
+	got := parseWorktreeList(out)
+	if len(got) != 1 {
+		t.Fatalf("parseWorktreeList returned %d entries, want 1", len(got))
+	}
+	if got[0].Path != "/tmp/café" {
+		t.Errorf("Path = %q, want %q", got[0].Path, "/tmp/café")
+	}
+}
+
+// installBlockingGit puts a fake git first on PATH that appends its argv to a
+// log and then execs sleep, so a deadline kill reaps the sleeper directly. It
+// returns the log path.
+func installBlockingGit(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake git is not portable to windows")
+	}
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "git-calls.log")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> \"$GC_TEST_GIT_LOG\"\n" +
+		"exec sleep 60\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write blocking git: %v", err)
+	}
+	t.Setenv("GC_TEST_GIT_LOG", logPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
+}
+
+func readGitCalls(t *testing.T, logPath string) string {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if os.IsNotExist(err) {
+		return ""
+	}
+	if err != nil {
+		t.Fatalf("read fake git log: %v", err)
+	}
+	return string(data)
+}
+
+// A probe that misses its deadline returns the ctx error and no branch: it
+// must never invent "main" for a probe that did not answer.
+func TestDefaultBranchCtx_DeadlineReturnsErrorNotMain(t *testing.T) {
+	installBlockingGit(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	branch, err := New(t.TempDir()).DefaultBranchCtx(ctx)
+	if err == nil {
+		t.Fatalf("DefaultBranchCtx = %q, nil; want a deadline error", branch)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want errors.Is(context.DeadlineExceeded)", err)
+	}
+	if branch != "" {
+		t.Fatalf("branch = %q, want empty on a missed deadline", branch)
+	}
+}
+
+// runCtx itself appends ctx.Err() to a failed run: a git killed by a missed
+// deadline surfaces as errors.Is(err, context.DeadlineExceeded), not only as
+// the exec "signal: killed" exit error.
+func TestRunCtx_MissedDeadlineWrapsContextDeadlineExceeded(t *testing.T) {
+	installBlockingGit(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	out, err := New(t.TempDir()).runCtx(ctx, "status")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("runCtx err = %v, want errors.Is(context.DeadlineExceeded)", err)
+	}
+	if out != "" {
+		t.Fatalf("runCtx out = %q, want empty on a failed run", out)
+	}
+}
+
+// A ctx that is already done spawns no git process at all.
+func TestDefaultBranchCtx_DoneContextSpawnsNothing(t *testing.T) {
+	logPath := installBlockingGit(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	branch, err := New(t.TempDir()).DefaultBranchCtx(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want errors.Is(context.Canceled)", err)
+	}
+	if branch != "" {
+		t.Fatalf("branch = %q, want empty", branch)
+	}
+	if calls := readGitCalls(t, logPath); calls != "" {
+		t.Fatalf("a done ctx spawned git:\n%s", calls)
+	}
+}
+
+// An ordinary non-zero exit (origin/HEAD unset) keeps walking the candidate
+// chain under a live deadline: a master-only repo answers "master".
+func TestDefaultBranchCtx_NonZeroExitKeepsCandidateChain(t *testing.T) {
+	clone := t.TempDir()
+	runGit(t, clone, "init")
+	runGit(t, clone, "config", "user.email", "test@test.com")
+	runGit(t, clone, "config", "user.name", "Test")
+	runGit(t, clone, "commit", "--allow-empty", "-m", "init")
+	runGit(t, clone, "update-ref", "refs/remotes/origin/master", "HEAD")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	got, err := New(clone).DefaultBranchCtx(ctx)
+	if err != nil {
+		t.Fatalf("DefaultBranchCtx: %v", err)
+	}
+	if got != "master" {
+		t.Fatalf("DefaultBranchCtx = %q, want master", got)
+	}
+}
+
+// DefaultBranch keeps its no-deadline contract: with nothing answering it
+// still returns "main" and a nil error.
+func TestDefaultBranch_NoDeadlineStillFallsBackToMain(t *testing.T) {
+	got, err := New(t.TempDir()).DefaultBranch()
+	if err != nil {
+		t.Fatalf("DefaultBranch: %v", err)
+	}
+	if got != "main" {
+		t.Fatalf("DefaultBranch = %q, want main", got)
+	}
+}
+
+// installShowRefBlockingGit puts a fake git first on PATH that fails
+// symbolic-ref at once (origin/HEAD unset) and blocks on anything else, so a
+// deadline lands inside the main/master show-ref loop. It returns the log path.
+func installShowRefBlockingGit(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake git is not portable to windows")
+	}
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "git-calls.log")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> \"$GC_TEST_GIT_LOG\"\n" +
+		"case \"$1\" in symbolic-ref) exit 1 ;; esac\n" +
+		"exec sleep 60\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write show-ref blocking git: %v", err)
+	}
+	t.Setenv("GC_TEST_GIT_LOG", logPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
+}
+
+// A deadline that lands while the main/master show-ref loop is running returns
+// the ctx error and no branch. Falling through to the "main" fallback would
+// present a guess as an answer for a probe that never completed.
+func TestDefaultBranchCtx_DeadlineDuringShowRefReturnsErrorNotMain(t *testing.T) {
+	logPath := installShowRefBlockingGit(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	branch, err := New(t.TempDir()).DefaultBranchCtx(ctx)
+	calls := readGitCalls(t, logPath)
+	if !strings.Contains(calls, "show-ref") {
+		t.Fatalf("the deadline fired before the show-ref loop started; calls:\n%s", calls)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("DefaultBranchCtx = %q, %v; want errors.Is(context.DeadlineExceeded)", branch, err)
+	}
+	if branch != "" {
+		t.Fatalf("branch = %q, want empty: the loop must not fall back to a guessed main", branch)
+	}
+	if n := strings.Count(calls, "show-ref"); n != 1 {
+		t.Fatalf("show-ref ran %d times, want 1: a done ctx must stop the loop at main\n%s", n, calls)
 	}
 }

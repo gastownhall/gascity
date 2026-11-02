@@ -1,11 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -200,4 +202,51 @@ func liveSessionWorktreeDirs(snapshot *sessionBeadSnapshot) []string {
 		add(info.WorkerDir)
 	}
 	return dirs
+}
+
+// worktreeLiveness pairs one Git worktree with whether a live process or
+// active session is working in it. It is the stable, reusable output of
+// discoverWorktreeLiveness: the single shared boundary between "which
+// worktrees does git know about, and which of them are live" and any caller
+// that acts on that fact. The reaper is one such caller — it additionally
+// restricts itself to gc-owned paths before ever considering removal — and
+// reconciler capacity accounting (ga-1xaqgo.3) is another; both read this
+// same result instead of each running their own git-worktree-list plus
+// liveness cross-product.
+type worktreeLiveness struct {
+	Path   string
+	Branch string
+	Live   bool
+	Reason string
+}
+
+// discoverWorktreeLiveness reports liveness for every worktree git knows
+// about in rigRoot's repository — including the main checkout — independent
+// of which directory created or owns each one. It applies no root
+// convention (.gc/worktrees, .claude/worktrees, or anywhere else) and no
+// bead or reap-eligibility filtering: scope decisions belong entirely to the
+// caller.
+//
+// live must already have been gathered by the caller via
+// collectLiveWorktreeStateFn, matching worktreeIsLive's own contract: when
+// live.scanned is false the scan is indeterminate, and every result here
+// reports Live=false with an empty Reason rather than a guessed answer. The
+// caller is responsible for treating that indeterminate case as fail-closed,
+// exactly as it already must before calling worktreeIsLive directly —
+// discoverWorktreeLiveness does not itself decide what an unknown liveness
+// state should protect.
+func discoverWorktreeLiveness(rigRoot string, live liveWorktreeState, sessionDirs []string) ([]worktreeLiveness, error) {
+	worktrees, err := git.New(rigRoot).WorktreeList()
+	if err != nil {
+		return nil, fmt.Errorf("listing worktrees for %s: %w", rigRoot, err)
+	}
+	results := make([]worktreeLiveness, 0, len(worktrees))
+	for _, wt := range worktrees {
+		wl := worktreeLiveness{Path: wt.Path, Branch: wt.Branch}
+		if live.scanned {
+			wl.Live, wl.Reason = worktreeIsLive(wt.Path, live, sessionDirs)
+		}
+		results = append(results, wl)
+	}
+	return results, nil
 }

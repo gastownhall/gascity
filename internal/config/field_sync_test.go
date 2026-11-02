@@ -165,6 +165,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 	trueVal := true
 	strVal := func(s string) *string { return &s }
 	intVal := func(n int) *int { return &n }
+	contextAdvisory := &ContextAdvisory{Enabled: &trueVal}
 
 	patch := AgentPatch{
 		Dir:                     "target-dir",
@@ -181,6 +182,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		PromptTemplate:          strVal("prompts/test.md"),
 		Session:                 strVal("acp"),
 		Provider:                strVal("claude"),
+		ContextAdvisory:         contextAdvisory,
 		Upstream:                strVal("bedrock"),
 		Args:                    Fragments("--custom-arg"),
 		StartCommand:            strVal("claude --dangerously"),
@@ -191,6 +193,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		MaxSessionAgeJitter:     strVal("15m"),
 		AssignedWorkDeferLimit:  intVal(3),
 		SleepAfterIdle:          strVal("30s"),
+		AutoReclaimStaleClaims:  &trueVal,
 		InstallAgentHooks:       []string{"claude"},
 		HooksInstalled:          &trueVal,
 		InjectAssignedSkills:    &trueVal,
@@ -321,6 +324,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 	trueVal := true
 	strVal := func(s string) *string { return &s }
 	intVal := func(n int) *int { return &n }
+	contextAdvisory := &ContextAdvisory{Enabled: &trueVal}
 
 	override := AgentOverride{
 		Agent:                   "target",
@@ -337,6 +341,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		PromptTemplate:          strVal("prompts/test.md"),
 		Session:                 strVal("acp"),
 		Provider:                strVal("claude"),
+		ContextAdvisory:         contextAdvisory,
 		Upstream:                strVal("bedrock"),
 		Args:                    Fragments("--custom-arg"),
 		StartCommand:            strVal("claude --dangerously"),
@@ -347,6 +352,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		MaxSessionAgeJitter:     strVal("15m"),
 		AssignedWorkDeferLimit:  intVal(3),
 		SleepAfterIdle:          strVal("30s"),
+		AutoReclaimStaleClaims:  &trueVal,
 		InstallAgentHooks:       []string{"claude"},
 		HooksInstalled:          &trueVal,
 		InjectAssignedSkills:    &trueVal,
@@ -488,6 +494,7 @@ func TestProviderFieldSync(t *testing.T) {
 		"EmitsPermissionWarning": "tri-state *bool; merged via MergeProviderOverBuiltin, not ProviderPatch",
 		"SupportsACP":            "tri-state *bool; merged via MergeProviderOverBuiltin, not ProviderPatch",
 		"UpstreamEnv":            "harness serving-env binding; merged via MergeProviderOverBuiltin, not ProviderPatch",
+		"ProgramStatus":          "program-status declaration (OSC 7501); merged per sub-field via MergeProviderOverBuiltin and fragment composition, not ProviderPatch",
 		"SupportsHooks":          "tri-state *bool; merged via MergeProviderOverBuiltin, not ProviderPatch",
 		"InstructionsFile":       "internal config path, not patched",
 		"ResumeFlag":             "internal resume config, not patched directly (use ResumeCommand)",

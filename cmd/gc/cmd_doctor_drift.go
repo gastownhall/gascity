@@ -11,12 +11,15 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // doltDriftCheck detects bd-vs-gc Dolt drift in managed-city topology: rigs
 // configured inherited_city but running their own Dolt, port-file mismatches
 // between rig mirrors and the canonical managed city port, and stale
 // .dolt/sql-server.info files left over from abandoned rig-local servers.
+// Embedded rigs serve their own store and are skipped, as the port-file sync
+// skips them.
 type doltDriftCheck struct {
 	cityPath string
 	cfg      *config.City
@@ -73,6 +76,16 @@ func (c *doltDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 			continue
 		}
 		if !rigUsesManagedBdStoreContract(c.cityPath, rig) {
+			continue
+		}
+		embedded, err := scopeMetadataRecordsEmbeddedDolt(fsys.OSFS{}, rig.Path)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("rig %q classify storage mode: %v", rig.Name, err))
+			continue
+		}
+		if embedded {
+			// An embedded rig serves its own store (ga-p9iuv): its port file is
+			// not gc's to re-pin, so there is no drift to report or fix.
 			continue
 		}
 		rigState, err := resolveDesiredRigEndpointState(c.cityPath, rig, cityState)
@@ -206,5 +219,5 @@ func rigLocalDoltPIDFromSQLServerInfo(rigPath string) (pid int, port int, infoEx
 	if !pidAlive(parsed) {
 		return parsed, parsedPort, true, false
 	}
-	return parsed, parsedPort, true, findPortHolderPID(strconv.Itoa(parsedPort)) == parsed
+	return parsed, parsedPort, true, findPortHolderPID(strconv.Itoa(parsedPort), parsed) == parsed
 }

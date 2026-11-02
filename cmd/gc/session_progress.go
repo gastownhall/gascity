@@ -210,3 +210,36 @@ func minPositiveDuration(first, second time.Duration) time.Duration {
 		return second
 	}
 }
+
+// isMinFloorProtectedDrainAckSession reports whether honoring a drain-ack for
+// sessionID would strand the template's min_active_sessions floor empty — the
+// boot/retire loop measured on dip/refinery.refinery 2026-08-21 (sc-j27j0d).
+//
+// THE CONTRADICTION IT RESOLVES: min_active_sessions says "a session of this
+// template must always exist"; the drain-ack protocol says "I found no work,
+// stop me". A pool worker at a floor whose ready queue is empty holds both at
+// once, so the reconciler honored the ack, closed the session, dropped the
+// pool below its floor, and min_fill immediately booted a replacement that
+// repeated the cycle — 8 sessions in 29 minutes, period 75-170s, indefinitely.
+// Deleting the floor is not the cure: the floor is what cured the orphan-flap
+// (dip-ep6me2). The cure is to make the drain-ack site floor-aware the same way
+// the idle-timeout and progress-stall sites already are.
+//
+// WHY THE DETERMINISTIC TWIN, NOT THE COUNT-BASED isMinFloorIdleWorker: this
+// predicate delegates to isMinFloorExemptIdleSession, the SAME per-session
+// membership the idle-timeout path uses, so a session kept alive here is
+// exactly a session that path also keeps warm. Wiring the count-based predicate
+// in instead would keep a session alive at this site only to have the idle path
+// kill it a tick later in a pool above its floor — reinstating the loop with one
+// extra hop — and it exempts EVERY session in an at-floor pool rather than the
+// named floor members, so elastic sessions above the floor could not retire.
+//
+// It answers membership only. The caller is responsible for the equally
+// load-bearing half: applying it ONLY to a self-initiated ack (no outstanding
+// drain request, not reconciler-owned), so an operator drain, a config-drift
+// drain or a reconciler-minted orphan ack still stops the session as ordered.
+//
+// Reads the coherent infoByID snapshot and cfg in memory; no I/O.
+func isMinFloorProtectedDrainAckSession(infoByID map[string]sessionpkg.Info, cfg *config.City, template, sessionID string) bool {
+	return isMinFloorExemptIdleSession(infoByID, cfg, template, sessionID)
+}

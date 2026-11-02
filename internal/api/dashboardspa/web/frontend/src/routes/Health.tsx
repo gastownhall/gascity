@@ -504,9 +504,6 @@ function RigStoreRow({ rig }: { rig: RigStoreHealth }) {
           value={rigDoltServerValue(rig)}
           {...(rig.doltConnected === false ? { tone: 'stuck' as const } : {})}
         />
-        {rig.issueCount !== null && (
-          <Kv label="Live issues" value={rig.issueCount.toLocaleString()} />
-        )}
       </dl>
       {rig.problems.length > 0 && (
         <ul className="space-y-1">

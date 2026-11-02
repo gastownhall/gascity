@@ -176,8 +176,13 @@ func TestValidateMediumOwnersRequiresExactLiveCompleteRows(t *testing.T) {
 	blankPackageName.PackageName = " "
 	blankMetadata := validMain
 	blankMetadata.OwnerBead = ""
-	expired := validMain
-	expired.Expires = "2026-07-12"
+	// A lapsed date is no longer decided here — it depends on an enforcement
+	// mode only the top-level caller knows, and it is collected once per ledger
+	// row rather than at each site that reaches one. See waiver_clock_test.go.
+	// A malformed date is still this function's problem: it needs a code change
+	// to appear, so it fails whoever made that change.
+	malformedExpiry := validMain
+	malformedExpiry.Expires = "07/12/2026"
 
 	tests := []struct {
 		name string
@@ -194,12 +199,12 @@ func TestValidateMediumOwnersRequiresExactLiveCompleteRows(t *testing.T) {
 		{name: "unknown resource", rows: []MediumOwner{validMediumOwner("sample", "sample", "TestMain", Resource("quantum_vm"))}, want: `medium owner package_dir=sample package_name=sample owner=TestMain: unknown resource "quantum_vm"`},
 		{name: "blank package clause", rows: []MediumOwner{blankPackageName}, want: `package_name is required`},
 		{name: "blank metadata", rows: []MediumOwner{blankMetadata}, want: `owner_bead is required`},
-		{name: "expired", rows: []MediumOwner{expired}, want: `expired 2026-07-12`},
+		{name: "malformed expiry", rows: []MediumOwner{malformedExpiry}, want: `expiry "07/12/2026" must use YYYY-MM-DD`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := validateMediumOwners(tt.rows, census, fixedNow())
+			err := validateMediumOwners(tt.rows, census)
 			if tt.want == "" {
 				if err != nil {
 					t.Fatalf("validateMediumOwners: %v", err)
@@ -227,7 +232,7 @@ func TestSmallCountUsesDirectoryPackageClauseAndOwnerIdentity(t *testing.T) {
 func TestParseLedgerAcceptsMediumAndSmallDebtRows(t *testing.T) {
 	t.Parallel()
 
-	ledger, err := ParseLedger([]byte(`version = 2
+	ledger, err := ParseLedger([]byte(`version = 3
 
 [[medium]]
 package_dir = "sample"
@@ -243,8 +248,6 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 1
-baseline_files = 1
 reported_calls = 1
 reported_files = 1
 owner_bead = "ga-test"
@@ -259,7 +262,7 @@ expires = "2026-10-01"
 	if len(ledger.Medium) != 1 || ledger.Medium[0].Owner != "TestOwned" {
 		t.Fatalf("Medium = %+v", ledger.Medium)
 	}
-	if len(ledger.SmallDebt) != 1 || ledger.SmallDebt[0].BaselineCalls != 1 {
+	if len(ledger.SmallDebt) != 1 || ledger.SmallDebt[0].ReportedCalls != 1 {
 		t.Fatalf("SmallDebt = %+v", ledger.SmallDebt)
 	}
 }
@@ -276,38 +279,56 @@ func TestValidateUsesRawAuditAndExactMediumFilteredSmallDebt(t *testing.T) {
 	}
 	medium := validMediumOwner("sample", "sample", "TestOwned", ResourceSubprocess)
 	policy := Ledger{
-		Version:       2,
-		AuditBaseline: []Baseline{validAudit(ScopeAll, ResourceSubprocess, 2, 2)},
-		Debt:          []Baseline{validDebt(ScopeUntagged, ResourceSubprocess, 2, 2)},
+		Version:       3,
+		AuditBaseline: []Baseline{validAudit(ScopeAll, ResourceSubprocess)},
+		Debt:          []Baseline{validDebt(ScopeUntagged, ResourceSubprocess)},
 		Medium:        []MediumOwner{medium},
-		SmallDebt:     []Baseline{validDebt(ScopeUntagged, ResourceSubprocess, 1, 1)},
+		SmallDebt:     []Baseline{validDebt(ScopeUntagged, ResourceSubprocess)},
 	}
-	if err := validateAgainstPolicy(policy, cloneLedger(policy), census, fixedNow()); err != nil {
+	if err := validateAgainstPolicy(policy, cloneLedger(policy), census); err != nil {
 		t.Fatalf("validateAgainstPolicy: %v", err)
 	}
 
-	t.Run("audit remains raw", func(t *testing.T) {
-		grown := cloneLedger(policy)
-		grown.AuditBaseline[0].BaselineCalls = 1
-		grown.AuditBaseline[0].BaselineFiles = 1
-		err := validateAgainstPolicy(grown, cloneLedger(grown), census, fixedNow())
-		requireErrorContains(t, err, "source resource census grew: scope=all resource=subprocess calls=2 (baseline 1), files=2 (baseline 1)")
-	})
+	// The raw audit total and the Medium-filtered Small total are derived from
+	// the same per-file records: a Medium-owned occurrence counts toward the
+	// audit row's calls and not toward the Small row's.
+	records, err := GenerateCounts(policy, census)
+	if err != nil {
+		t.Fatalf("GenerateCounts: %v", err)
+	}
+	if got, want := DerivedCount(records, ScopeAll, ResourceSubprocess), (Count{Calls: 2, Files: 2}); got != want {
+		t.Fatalf("audit (raw) = %+v, want %+v", got, want)
+	}
+	if got, want := DerivedSmallCount(records, ScopeUntagged, ResourceSubprocess), (Count{Calls: 1, Files: 1}); got != want {
+		t.Fatalf("small (Medium-filtered) = %+v, want %+v", got, want)
+	}
+	if err := ValidateCounts(policy, census, []byte(RenderCounts(records))); err != nil {
+		t.Fatalf("ValidateCounts: %v", err)
+	}
 
 	t.Run("small debt uses exact filter", func(t *testing.T) {
-		grown := cloneLedger(policy)
-		grown.SmallDebt[0].BaselineCalls = 0
-		grown.SmallDebt[0].BaselineFiles = 0
-		err := validateAgainstPolicy(grown, cloneLedger(grown), census, fixedNow())
-		requireErrorContains(t, err, "Small resource census grew: scope=untagged resource=subprocess calls=1 (baseline 0), files=1 (baseline 0)")
+		// The Medium-owned occurrence moves to an undeclared test: the raw total
+		// is unchanged, the Small total grows.
+		moved := Census{
+			Runnables: census.Runnables,
+			Occurrences: []Occurrence{
+				{Path: "sample/a_test.go", PackageDir: "sample", PackageName: "sample", Owner: "TestOther", Runnable: true, Resource: ResourceSubprocess},
+				census.Occurrences[1],
+			},
+		}
+		err := ValidateCounts(policy, moved, []byte(RenderCounts(records)))
+		requireErrorContains(t, err, "Small resource census grew: path=sample/a_test.go resource=subprocess small=1 (baseline 0)")
+		requireErrorContains(t, err, "Small resource census grew: scope=untagged resource=subprocess calls=2 (baseline 1), files=2 (baseline 1)")
+		if strings.Contains(err.Error(), "source resource census") {
+			t.Fatalf("the raw audit total did not change: %v", err)
+		}
 	})
 
-	t.Run("small debt reductions lower the baseline", func(t *testing.T) {
-		stale := cloneLedger(policy)
-		stale.SmallDebt[0].BaselineCalls = 2
-		stale.SmallDebt[0].BaselineFiles = 2
-		err := validateAgainstPolicy(stale, cloneLedger(stale), census, fixedNow())
-		requireErrorContains(t, err, "Small resource census baseline is stale: scope=untagged resource=subprocess calls=1 (baseline 2), files=1 (baseline 2); lower the checked baseline to bank the improvement")
+	t.Run("small debt reductions are stale", func(t *testing.T) {
+		// A Small occurrence is removed: the stored file is now too high.
+		reduced := Census{Runnables: census.Runnables, Occurrences: census.Occurrences[:1]}
+		err := ValidateCounts(policy, reduced, []byte(RenderCounts(records)))
+		requireErrorContains(t, err, "Small resource census baseline is stale: path=sample/b_test.go resource=subprocess small=0 (baseline 1)")
 	})
 }
 
@@ -319,9 +340,9 @@ func TestValidateRejectsMediumPolicyDriftBeforeLiveCensus(t *testing.T) {
 		Occurrences: []Occurrence{{Path: "sample/a_test.go", PackageDir: "sample", PackageName: "sample", Owner: "TestOwned", Runnable: true, Resource: ResourceSubprocess}},
 	}
 	policy := Ledger{
-		Version:   2,
+		Version:   3,
 		Medium:    []MediumOwner{validMediumOwner("sample", "sample", "TestOwned", ResourceSubprocess)},
-		SmallDebt: []Baseline{validDebt(ScopeUntagged, ResourceSubprocess, 0, 0)},
+		SmallDebt: []Baseline{validDebt(ScopeUntagged, ResourceSubprocess)},
 	}
 	tests := []struct {
 		name   string
@@ -376,7 +397,7 @@ func TestValidateRejectsMediumPolicyDriftBeforeLiveCensus(t *testing.T) {
 			t.Parallel()
 			ledger := cloneLedger(policy)
 			tt.mutate(&ledger.Medium[0])
-			err := validateAgainstPolicy(policy, ledger, census, fixedNow())
+			err := validateAgainstPolicy(policy, ledger, census)
 			requireErrorContains(t, err, tt.want)
 			if strings.Contains(err.Error(), "resource census") {
 				t.Fatalf("live census was compared before Medium policy drift was rejected: %v", err)
@@ -393,9 +414,9 @@ func TestValidateRequiresExactMediumAndSmallDebtRowSets(t *testing.T) {
 		Occurrences: []Occurrence{{Path: "sample/a_test.go", PackageDir: "sample", PackageName: "sample", Owner: "TestOwned", Runnable: true, Resource: ResourceSubprocess}},
 	}
 	policy := Ledger{
-		Version:   2,
+		Version:   3,
 		Medium:    []MediumOwner{validMediumOwner("sample", "sample", "TestOwned", ResourceSubprocess)},
-		SmallDebt: []Baseline{validDebt(ScopeUntagged, ResourceSubprocess, 0, 0)},
+		SmallDebt: []Baseline{validDebt(ScopeUntagged, ResourceSubprocess)},
 	}
 	tests := []struct {
 		name   string
@@ -436,7 +457,7 @@ func TestValidateRequiresExactMediumAndSmallDebtRowSets(t *testing.T) {
 			t.Parallel()
 			ledger := cloneLedger(policy)
 			tt.mutate(&ledger)
-			err := validateAgainstPolicy(policy, ledger, census, fixedNow())
+			err := validateAgainstPolicy(policy, ledger, census)
 			requireErrorContains(t, err, tt.want)
 			if strings.Contains(err.Error(), "resource census") {
 				t.Fatalf("live census was compared before row-set drift was rejected: %v", err)

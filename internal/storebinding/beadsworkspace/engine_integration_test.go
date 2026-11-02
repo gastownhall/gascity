@@ -19,6 +19,8 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
 // makeWorkspace creates the workspace a binding names and configures the id
@@ -106,6 +108,73 @@ func TestOpenEngineServesTheWorkspaceTheBindingNames(t *testing.T) {
 	}
 	if got.Title != "served from the workspace" {
 		t.Errorf("bead %s title = %q, want the one written through the binding", got.ID, got.Title)
+	}
+}
+
+// openFencedEngine opens the binding for exactly the given classes and returns
+// the store, closed on cleanup. The classes are a caller-chosen SUBSET of what
+// the provider serves, because the fence is derived from the assignment and the
+// full served set — which includes work — is deliberately unfenced.
+func openFencedEngine(t *testing.T, classes ...coordclass.Class) beads.Store {
+	t.Helper()
+	city, provider, spec := cityWithProvider(t)
+	root, err := WorkspaceRoot(city, testConfigRef)
+	if err != nil {
+		t.Fatalf("resolving the workspace root: %v", err)
+	}
+	makeWorkspace(t, root, "gcg")
+	assigned, err := storebinding.NewClassSet(classes...)
+	if err != nil {
+		t.Fatalf("NewClassSet(%v): %v", classes, err)
+	}
+	store, closer, err := engineOpener(t, provider).OpenEngine(spec, assigned)
+	if err != nil {
+		t.Fatalf("opening the workspace binding for %v: %v", classes, err)
+	}
+	t.Cleanup(func() {
+		if err := closer.Close(); err != nil {
+			t.Errorf("closing the workspace binding: %v", err)
+		}
+	})
+	return store
+}
+
+// TestOpenEngineFencesAnInfrastructureBindingToEveryNamespaceItHolds is the
+// wiring half of invariant 16 for this provider.
+//
+// The rows over in storebinding pin what EngineReservedPrefixes returns, and
+// the conformance suite in internal/beads pins that a fenced NativeDoltStore
+// enforces it. Neither can see whether the computed set ever reaches the store:
+// drop the option from OpenEngine and both stay green while this binding
+// accepts any pinned id at all. Only an id pinned through an opened engine
+// answers that, which is why this row is here and tagged.
+func TestOpenEngineFencesAnInfrastructureBindingToEveryNamespaceItHolds(t *testing.T) {
+	store := openFencedEngine(t, coordclass.ClassGraph, coordclass.ClassNudges)
+
+	if _, err := store.Create(beads.Bead{ID: "ga-1", Title: "a work id pinned into an infrastructure binding", Type: "task"}); !errors.Is(err, beads.ErrPinnedIDOutsideNamespace) {
+		t.Errorf("Create(%q) = %v, want ErrPinnedIDOutsideNamespace; the computed namespace set never reached the store, and this binding's id claim is decorative", "ga-1", err)
+	}
+
+	// The second half of the wiring, and the reason this is not one assertion:
+	// a binding holds more than the class it mints under. Passing only the
+	// first computed prefix — or only the graph one this workspace mints with —
+	// would refuse the nudge records the binding exists to hold.
+	for _, id := range []string{"gcg-pinned", "gcn-pinned", "gcnq-pinned"} {
+		if _, err := store.Create(beads.Bead{ID: id, Title: "held by this binding", Type: "task"}); err != nil {
+			t.Errorf("Create(%q) was refused: %v; the store was fenced to less than the binding holds", id, err)
+		}
+	}
+}
+
+// TestOpenEngineLeavesAWorkServingBindingUnfenced is the must-be-silent
+// counterpart. A binding that serves work is unfenceable — work beads carry the
+// operator's configured rig or HQ prefix — so OpenEngine must pass that through
+// as an unfenced store rather than as an empty-but-present namespace set, which
+// would refuse everything.
+func TestOpenEngineLeavesAWorkServingBindingUnfenced(t *testing.T) {
+	store := openFencedEngine(t, coordclass.ClassWork, coordclass.ClassGraph)
+	if _, err := store.Create(beads.Bead{ID: "someRig-1", Title: "a work bead under an operator-configured prefix", Type: "task"}); err != nil {
+		t.Errorf("Create(%q) was refused: %v; a binding serving work claims no namespace and must hold whatever the operator configured", "someRig-1", err)
 	}
 }
 

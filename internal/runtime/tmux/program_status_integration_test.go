@@ -1,0 +1,392 @@
+//go:build integration && linux
+
+package tmux
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"strconv"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/programstatus"
+	"github.com/gastownhall/gascity/internal/runtime/programstatus/tap"
+	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
+	"github.com/gastownhall/gascity/internal/runtime/runtimetest/osc7501emitter/emit"
+)
+
+// RUNTIME-CONTRACT-017 on the real tmux: the runtimetest program-status
+// suite (PS-001…PS-014) against sessions whose agent pane runs the scripted
+// emitter, armed with the built companion, each on its own scratch server
+// (osc7501x-heal-<rand> for the heal cases PS-013 and PS-014). The Relayed
+// fixture runs the emitter under the built companion's relay.
+func TestTmuxProgramStatusContract(t *testing.T) {
+	companion := captureCompanionBin(t)
+	emitter := captureEmitterBin(t)
+	start := func(t *testing.T, mode runtime.ProgramStatusMode, arm runtime.ProgramStatusArm, script []string) *programSession {
+		return startProgramSession(t, companion, emitter, mode, arm, script)
+	}
+	runtimetest.RunProgramStatusContract(t, runtimetest.ProgramStatusFixtures{
+		Armed: func(t *testing.T, mode runtime.ProgramStatusMode, script ...string) runtimetest.ProgramStatusSession {
+			return start(t, mode, runtime.ProgramStatusArm{Capture: true}, script).session()
+		},
+		Unarmed: func(t *testing.T, mode runtime.ProgramStatusMode, script ...string) runtimetest.ProgramStatusSession {
+			return start(t, mode, runtime.ProgramStatusArm{}, script).session()
+		},
+		Relayed: func(t *testing.T, mode runtime.ProgramStatusMode, script ...string) runtimetest.ProgramStatusSession {
+			return start(t, mode, runtime.ProgramStatusArm{Capture: true, Relay: true}, script).session()
+		},
+		Inherited: func(t *testing.T, mode runtime.ProgramStatusMode) runtimetest.ProgramStatusSession {
+			s := start(t, mode, runtime.ProgramStatusArm{}, nil)
+			s.inheritForeignCapture(t)
+			return s.session()
+		},
+	})
+}
+
+// programSession is one contract fixture session: an emitter in a tmux pane,
+// armed for capture or not, on a scratch server of its own.
+type programSession struct {
+	p       *Provider
+	name    string
+	emitter string
+	cfg     runtime.Config
+	relay   bool   // the program runs under the relay
+	nonce   string // the armed incarnation's nonce; "" when unarmed
+	out     []byte // everything this incarnation's program wrote
+	stale   string // the record the incarnation before the last respawn published
+}
+
+// startProgramSession starts the emitter running script, then taking steps
+// typed into its pane, armed as arm declares (the zero arm: unarmed), and
+// waits until the capture has published what the script wrote.
+func startProgramSession(t *testing.T, companion, emitter string, mode runtime.ProgramStatusMode, arm runtime.ProgramStatusArm, script []string) *programSession {
+	t.Helper()
+	p := captureProvider(t, newScratchServer(t, programScratchKind(t)), companion)
+	p.tm.cfg.ProgramStatus, p.cfg.ProgramStatus = mode, mode
+	s := &programSession{p: p, name: "gc-ps-contract", emitter: emitter, relay: arm.Relay}
+	s.cfg = runtime.Config{Command: s.command(script), WorkDir: t.TempDir(), ProgramStatus: arm}
+	if err := p.Start(context.Background(), s.name, s.cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Stop(s.name) })
+	if arm.Capture {
+		s.nonce = armedNonce(t, p, s.name)
+	}
+	s.settle(t, script)
+	return s
+}
+
+// programScratchKind names the scratch server of a contract case: heal for
+// the heal cases (PS-013, PS-014), arm for the rest.
+func programScratchKind(t *testing.T) string {
+	if strings.Contains(t.Name(), "/PS-013_") || strings.Contains(t.Name(), "/PS-014_") {
+		return "heal"
+	}
+	return "arm"
+}
+
+// command is the pane command: the emitter running script, then each typed
+// line as a step.
+func (s *programSession) command(script []string) string {
+	return emitterCommand(s.emitter, append(append([]string(nil), script...), "interactive")...)
+}
+
+// session is the fixture's runtimetest view.
+func (s *programSession) session() runtimetest.ProgramStatusSession {
+	return runtimetest.ProgramStatusSession{
+		Provider:     s.p,
+		Name:         s.name,
+		Emit:         s.emit,
+		Respawn:      s.respawn,
+		PublishStale: s.publishStale,
+		ClosePipe:    s.closePipe,
+		KillReader:   s.killReader,
+		ForeignPipe:  s.foreignPipe,
+		SetMode:      s.setMode,
+	}
+}
+
+// target is the session's agent pane.
+func (s *programSession) target(t *testing.T) string {
+	t.Helper()
+	target, err := s.p.tm.agentPaneTarget(s.name)
+	if err != nil {
+		t.Fatalf("agent pane of %s: %v", s.name, err)
+	}
+	return target
+}
+
+// tmux runs a tmux command on the session's server.
+func (s *programSession) tmux(t *testing.T, args ...string) string {
+	t.Helper()
+	out, err := s.p.tm.run(args...)
+	if err != nil {
+		t.Fatalf("tmux %q: %v", args, err)
+	}
+	return strings.TrimSpace(out)
+}
+
+// paneFormat expands format for the session's agent pane.
+func (s *programSession) paneFormat(t *testing.T, format string) string {
+	t.Helper()
+	return s.tmux(t, "display-message", "-p", "-t", s.target(t), format)
+}
+
+// emit types each step into the pane as one line, then waits until the
+// capture has published what they wrote. A pane heal armed or re-armed since
+// the last step is a new capture incarnation: its tap sees only what the
+// program writes from here on.
+func (s *programSession) emit(t *testing.T, steps ...string) {
+	t.Helper()
+	if nonce := paneOption(t, s.p, s.name, programTapOption); nonce != s.nonce {
+		s.nonce, s.out = nonce, nil
+	}
+	target := s.target(t)
+	for _, step := range steps {
+		s.tmux(t, "send-keys", "-t", target, "-l", step)
+		s.tmux(t, "send-keys", "-t", target, "Enter")
+	}
+	s.settle(t, steps)
+}
+
+// settle waits until the capture has processed steps: the pane is dead when
+// they end the program, and an armed pane carries the record the tap engine
+// makes of everything this incarnation wrote (its Seq counts every change).
+// The next read then sees it.
+func (s *programSession) settle(t *testing.T, steps []string) {
+	t.Helper()
+	ended := s.run(t, steps)
+	if ended {
+		eventually(t, "the pane to die", func() bool { return s.paneFormat(t, "#{pane_dead}") == "1" })
+	}
+	if want := s.expectedSeq(t); want > 0 {
+		eventually(t, "the capture to publish record "+strconv.FormatUint(want, 10), func() bool {
+			rec, err := programstatus.Decode(paneOption(t, s.p, s.name, programStatusOption))
+			return err == nil && rec.Nonce == s.nonce && rec.Seq == want
+		})
+	}
+	s.p.cache.Invalidate()
+}
+
+// run runs steps as the pane's program does, appending what it writes to
+// the incarnation's output, and reports whether they end the program. No
+// probe is answered, as tmux answers none, unless the program runs under the
+// relay, which answers it.
+func (s *programSession) run(t *testing.T, steps []string) bool {
+	t.Helper()
+	if len(steps) == 0 {
+		return false
+	}
+	if s.relay {
+		out, ended := runtimetest.RelayedProgramOutput(t, steps...)
+		s.out = append(s.out, out...)
+		return ended
+	}
+	prog, err := emit.ParseLines(steps...)
+	if err != nil {
+		t.Fatalf("emitter script: %v", err)
+	}
+	var out bytes.Buffer
+	outcome, err := emit.Run(t.Context(), prog, emit.Terminal{Out: &out})
+	if err != nil {
+		t.Fatalf("running emitter script: %v", err)
+	}
+	s.out = append(s.out, out.Bytes()...)
+	return outcome.Ended
+}
+
+// expectedSeq is the Seq of the record the tap engine publishes for this
+// incarnation's output, 0 when it publishes none or the pane is unarmed.
+func (s *programSession) expectedSeq(t *testing.T) uint64 {
+	t.Helper()
+	if s.nonce == "" {
+		return 0
+	}
+	var last lastPublish
+	if err := tap.Run(t.Context(), bytes.NewReader(s.out), &last, tap.Options{Nonce: s.nonce}); err != nil {
+		t.Fatalf("predicting the capture: %v", err)
+	}
+	if last.status == "" {
+		return 0
+	}
+	rec, err := programstatus.Decode(last.status)
+	if err != nil {
+		t.Fatalf("predicted record %q: %v", last.status, err)
+	}
+	return rec.Seq
+}
+
+// lastPublish keeps a tap engine's last write.
+type lastPublish struct{ status string }
+
+func (l *lastPublish) Publish(_ context.Context, w tap.Write) error {
+	l.status = w.Status
+	return nil
+}
+
+// respawn restarts the pane's program, a new capture incarnation, keeping
+// the outgoing incarnation's record for publishStale.
+func (s *programSession) respawn(t *testing.T, script ...string) {
+	t.Helper()
+	s.stale = paneOption(t, s.p, s.name, programStatusOption)
+	s.cfg.Command = s.command(script)
+	if err := s.p.Relaunch(context.Background(), s.name, s.cfg); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	prev := s.nonce
+	s.nonce, s.out = armedNonce(t, s.p, s.name), nil
+	if s.nonce == prev {
+		t.Fatalf("respawn kept nonce %q", prev)
+	}
+	s.settle(t, script)
+}
+
+// publishStale writes the previous incarnation's record onto the pane, as a
+// late write that got past the nonce guard would.
+func (s *programSession) publishStale(t *testing.T) {
+	t.Helper()
+	if s.stale == "" {
+		t.Fatal("no previous incarnation's record to publish")
+	}
+	s.tmux(t, "set-option", "-p", "-t", s.target(t), programStatusOption, s.stale)
+	s.p.cache.Invalidate()
+}
+
+// closePipe closes the pane's pipe; the tap reads EOF.
+func (s *programSession) closePipe(t *testing.T) {
+	t.Helper()
+	s.tmux(t, "pipe-pane", "-t", s.target(t))
+	eventually(t, "the pipe to close", func() bool { return s.paneFormat(t, "#{pane_pipe}") == "0" })
+	s.p.cache.Invalidate()
+}
+
+// killReader kills the tap, leaving the pipe as tmux holds it.
+func (s *programSession) killReader(t *testing.T) {
+	t.Helper()
+	pids := tapPIDs(t, s.nonce)
+	if len(pids) == 0 {
+		t.Fatalf("no tap holds %s", s.nonce)
+	}
+	for _, pid := range pids {
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+			t.Fatalf("killing tap %d: %v", pid, err)
+		}
+	}
+	eventually(t, "the tap to die", func() bool { return !tapRunning(t, s.nonce) })
+	s.p.cache.Invalidate()
+}
+
+// foreignPipe pipes the pane into a reader that is not ours, which replaces
+// the tap's pipe: the tap reads EOF and exits.
+func (s *programSession) foreignPipe(t *testing.T) {
+	t.Helper()
+	s.tmux(t, "pipe-pane", "-O", "-t", s.target(t), "cat > /dev/null")
+	eventually(t, "the displaced tap to exit", func() bool { return !tapRunning(t, s.nonce) })
+	s.p.cache.Invalidate()
+}
+
+// setMode flips the switch the provider reads under.
+func (s *programSession) setMode(t *testing.T, mode runtime.ProgramStatusMode) {
+	t.Helper()
+	s.p.SetProgramStatusMode(mode)
+	s.p.cache.Invalidate()
+}
+
+// inheritForeignCapture sets a global tap nonce and a working record under
+// it that name another pane than the session's, which every pane without
+// values of its own inherits.
+func (s *programSession) inheritForeignCapture(t *testing.T) {
+	t.Helper()
+	pane := s.paneFormat(t, "#{pane_id}")
+	n, err := strconv.Atoi(strings.TrimPrefix(pane, "%"))
+	if err != nil {
+		t.Fatalf("pane id %q: %v", pane, err)
+	}
+	nonce := "inH3r1t.%" + strconv.Itoa(n+1000)
+	store := programstatus.NewStore(nonce)
+	store.Apply(programstatus.Report{State: runtime.ProgramWorking, Progress: -1}, time.Now())
+	record, err := programstatus.Encode(store.Status())
+	if err != nil {
+		t.Fatalf("encoding the inherited record: %v", err)
+	}
+	s.tmux(t, "set-option", "-g", programTapOption, nonce)
+	s.tmux(t, "set-option", "-g", programStatusOption, record)
+	if got := s.paneFormat(t, "#{"+programTapOption+"}"); got != nonce {
+		t.Fatalf("pane reads tap %q, want the inherited %q", got, nonce)
+	}
+	s.p.cache.Invalidate()
+}
+
+// The process table the read path takes tap liveness from is read whole
+// even when the controller's environment carries COLUMNS=80 (a nudge
+// poller's shell does): ps would otherwise cut every line at 80 columns,
+// past which the tap's argv, and its nonce, would be lost, and a live tap
+// would read gone.
+func TestProcessSnapshotReadsTapNonceUnderNarrowColumns(t *testing.T) {
+	t.Setenv("COLUMNS", "80")
+	s := startProgramSession(t, captureCompanionBin(t), captureEmitterBin(t), runtime.ProgramStatusOn,
+		runtime.ProgramStatusArm{Capture: true}, []string{"report state=working"})
+	eventually(t, "the tap to run", func() bool { return tapRunning(t, s.nonce) })
+	snapshot, err := fetchProcessSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("fetchProcessSnapshot: %v", err)
+	}
+	if _, ok := tapNonces(snapshot)[s.nonce]; !ok {
+		t.Fatalf("the snapshot taken under COLUMNS=80 lost the tap of %s", s.nonce)
+	}
+	if r, err := s.p.ProgramStatus(s.name); err != nil || !r.Running() {
+		t.Fatalf("ProgramStatus under COLUMNS=80 = %+v, %v; want a valid working reading", r, err)
+	}
+}
+
+// A disarm while the process table cannot be read, because ps fails or its
+// failure gate is still closed after a failure, keeps the nonce of a pane
+// whose pipe our live tap holds: heal and the sweep both defer, so the tap is
+// never orphaned. Once ps reads again, the sweep closes the pipe and the tap
+// ends, and when the switch is back on, heal arms the pane afresh and its next
+// report reads valid, with no session restart.
+func TestDisarmWhileProcessTableUnreadKeepsTheTapRecoverable(t *testing.T) {
+	s := startProgramSession(t, captureCompanionBin(t), captureEmitterBin(t), runtime.ProgramStatusOn,
+		runtime.ProgramStatusArm{Capture: true}, []string{"report state=working"})
+	eventually(t, "the tap to run", func() bool { return tapRunning(t, s.nonce) })
+	f, ok := s.p.cache.fetcher.(*tmuxFetcher)
+	if !ok {
+		t.Fatalf("state cache fetcher is %T, want *tmuxFetcher", s.p.cache.fetcher)
+	}
+	f.snapshot = func(context.Context) (processSnapshot, error) { return processSnapshot{}, errors.New("ps timed out") }
+	s.setMode(t, runtime.ProgramStatusOff)
+	if action, err := s.p.HealProgramCapture(s.name, runtime.ProgramStatusArm{}); err != nil || action != runtime.ProgramCaptureDeferred {
+		t.Fatalf("disarm with ps failing = %q, %v; want deferred", action, err)
+	}
+	// ps works again, but its failure gate is still closed.
+	f.snapshot = nil
+	if n, deferred, err := s.p.DisarmProgramCaptures(); err != nil || n != 0 || deferred != 1 {
+		t.Fatalf("DisarmProgramCaptures with the gate closed = %d, %d, %v; want the pane deferred", n, deferred, err)
+	}
+	if got := paneOption(t, s.p, s.name, programTapOption); got != s.nonce || s.paneFormat(t, "#{pane_pipe}") != "1" || !tapRunning(t, s.nonce) {
+		t.Fatalf("after disarms with the process table unread: nonce %q; want %s kept on the pipe our live tap holds", got, s.nonce)
+	}
+
+	f.snapshotGate.succeeded()
+	if n, deferred, err := s.p.DisarmProgramCaptures(); err != nil || n != 1 || deferred != 0 {
+		t.Fatalf("DisarmProgramCaptures once ps reads = %d, %d, %v; want the pane disarmed", n, deferred, err)
+	}
+	eventually(t, "our tap to end", func() bool { return !tapRunning(t, s.nonce) })
+	if got := s.paneFormat(t, "#{pane_pipe}"); got != "0" || paneOption(t, s.p, s.name, programTapOption) != "" {
+		t.Fatalf("after the disarm: pane_pipe %q, want our tap's pipe closed and the nonce unset", got)
+	}
+
+	s.setMode(t, runtime.ProgramStatusOn)
+	if action, err := s.p.HealProgramCapture(s.name, runtime.ProgramStatusArm{Capture: true}); err != nil || action != runtime.ProgramCaptureArmed {
+		t.Fatalf("heal back on = %q, %v; want armed", action, err)
+	}
+	s.emit(t, "report state=idle")
+	if r, err := s.p.ProgramStatus(s.name); err != nil || !r.Valid() || r.State != runtime.ProgramIdle {
+		t.Fatalf("re-armed reading = %+v, %v; want a valid idle reading", r, err)
+	}
+}

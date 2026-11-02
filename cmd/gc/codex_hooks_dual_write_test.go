@@ -260,11 +260,42 @@ func TestCodexHooksConvergeWithSkipStaging(t *testing.T) {
 // TestMaterializeProviderOverlays_SkipsMergeableCodexHook guards the production
 // caller wiring: materializeProviderOverlaysBeforeFingerprint (the
 // staging-only half of prepareTemplateResolution) must skip the reconciler-owned
-// mergeable .codex/hooks.json while still staging non-mergeable overlay
+// mergeable .codex/hooks.json when hooks.Install writes it on the same tick
+// (install_agent_hooks names codex), while still staging non-mergeable overlay
 // siblings. This is the observation point where skip vs non-skip staging
 // diverge — the trailing hooks.Install converges either way, so only the
 // staging-only state distinguishes a reverted caller wiring.
 func TestMaterializeProviderOverlays_SkipsMergeableCodexHook(t *testing.T) {
+	workDir := materializeCodexOverlayForTest(t, []string{"codex"})
+	if _, err := os.Stat(filepath.Join(workDir, ".codex", "hooks.json")); !os.IsNotExist(err) {
+		t.Fatalf("build_desired_state staging wrote reconciler-owned .codex/hooks.json (err=%v); caller must use the skip variant so hooks.Install is sole writer", err)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "AGENTS.codex.md")); err != nil {
+		t.Fatalf("non-mergeable codex overlay sibling not staged: %v", err)
+	}
+}
+
+// TestMaterializeProviderOverlays_StagesUninstalledMergeableCodexHook is the
+// other half of the single-writer rule: when install_agent_hooks does not name
+// codex, hooks.Install never writes .codex/hooks.json, so the staging pass is
+// its only tick writer and must stage it before the fingerprint. Skipping it
+// left session-start staging as its first writer, after the fingerprint, and
+// the next tick drained the fresh session for config drift.
+func TestMaterializeProviderOverlays_StagesUninstalledMergeableCodexHook(t *testing.T) {
+	workDir := materializeCodexOverlayForTest(t, nil)
+	if _, err := os.Stat(filepath.Join(workDir, ".codex", "hooks.json")); err != nil {
+		t.Fatalf("staging skipped .codex/hooks.json that no installer writes on the tick: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "AGENTS.codex.md")); err != nil {
+		t.Fatalf("non-mergeable codex overlay sibling not staged: %v", err)
+	}
+}
+
+// materializeCodexOverlayForTest runs the staging-only half of
+// prepareTemplateResolution for a rig-scoped codex agent with the given
+// install_agent_hooks and returns its work dir.
+func materializeCodexOverlayForTest(t *testing.T, installHooks []string) string {
+	t.Helper()
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
@@ -287,10 +318,11 @@ func TestMaterializeProviderOverlays_SkipsMergeableCodexHook(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
-			Name:     "polecat",
-			Provider: "codex",
-			Scope:    "rig",
-			Dir:      "myrig",
+			Name:              "polecat",
+			Provider:          "codex",
+			Scope:             "rig",
+			Dir:               "myrig",
+			InstallAgentHooks: installHooks,
 		}},
 		Providers: map[string]config.ProviderSpec{
 			// Explicit command + resume_command so resolution does not depend on
@@ -315,11 +347,5 @@ func TestMaterializeProviderOverlays_SkipsMergeableCodexHook(t *testing.T) {
 
 	// Staging only — hooks.Install is a separate step in prepareTemplateResolution.
 	materializeProviderOverlaysBeforeFingerprint(bp, cfgAgent, resolved, "myrig/polecat", rigName, workDir, io.Discard)
-
-	if _, err := os.Stat(filepath.Join(workDir, ".codex", "hooks.json")); !os.IsNotExist(err) {
-		t.Fatalf("build_desired_state staging wrote reconciler-owned .codex/hooks.json (err=%v); caller must use the skip variant so hooks.Install is sole writer", err)
-	}
-	if _, err := os.Stat(filepath.Join(workDir, "AGENTS.codex.md")); err != nil {
-		t.Fatalf("non-mergeable codex overlay sibling not staged: %v", err)
-	}
+	return workDir
 }

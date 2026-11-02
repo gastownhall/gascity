@@ -5,6 +5,7 @@ package processenv
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -37,6 +38,7 @@ import (
 //	VERTEX_      Vertex AI direct
 //	XAI_         xAI / Grok
 //	XIAOMI_      Xiaomi MiMo
+//	ZCODE_       Z.ai ZCode (GLM harness)
 var providerCredentialEnvPrefixes = []string{
 	"ANTHROPIC_",
 	"AZURE_",
@@ -55,6 +57,7 @@ var providerCredentialEnvPrefixes = []string{
 	"VERTEX_",
 	"XAI_",
 	"XIAOMI_",
+	"ZCODE_",
 }
 
 // providerCredentialEnvKeys lists exact provider credential/config env vars for
@@ -104,6 +107,28 @@ var providerCredentialEnvKeys = map[string]bool{
 // anchors and the Dolt vars that agents legitimately need.
 var ControllerOnlyEnvKeys = []string{
 	"GC_CONTROLLER_TOKEN",
+}
+
+// DemandSpawnEnvKeys are the variables that describe one session's spawn: the
+// presence-only GC_SPAWN_ORIGIN=demand marker, and the GC_TRIGGER_* ids no
+// session shell carries (gastownhall/gascity#5738). A copy in the controller's
+// own environment describes some other session's spawn (a supervisor started
+// from an agent's pane carries that pane's), so ProviderProcessPassthroughEnv
+// pins every one of them empty, the same overlay withholding
+// ControllerOnlyEnvKeys get. Only a launch whose own session row is stamped
+// sets the marker back, on top.
+var DemandSpawnEnvKeys = []string{
+	"GC_SPAWN_ORIGIN",
+	"GC_TRIGGER_BEAD_ID",
+	"GC_TRIGGER_WORK_BEAD_ID",
+	"GC_TRIGGER_BEAD_STORE_REF",
+	"GC_TRIGGER_WORK_STORE_REF",
+}
+
+// IsDemandSpawnEnv reports whether key is one of DemandSpawnEnvKeys, by exact
+// name.
+func IsDemandSpawnEnv(key string) bool {
+	return slices.Contains(DemandSpawnEnvKeys, key)
 }
 
 // ControllerOnlyEnvOverlay returns ControllerOnlyEnvKeys pinned to the empty
@@ -165,8 +190,8 @@ func IsProviderCredentialEnv(key string) bool {
 // ProviderProcessPassthroughEnv returns non-GC process context that provider
 // sessions need to start reliably: user/home, provider auth/config, locale,
 // time zone, XDG, telemetry, and Claude nesting resets. It also pins
-// ControllerOnlyEnvKeys empty, so every session-env builder that starts here
-// withholds them without having to know they exist.
+// ControllerOnlyEnvKeys and DemandSpawnEnvKeys empty, so every session-env
+// builder that starts here withholds them without having to know they exist.
 func ProviderProcessPassthroughEnv() map[string]string {
 	m := make(map[string]string)
 	if v := os.Getenv("PATH"); v != "" {
@@ -234,6 +259,9 @@ func ProviderProcessPassthroughEnv() map[string]string {
 	m["CODEX_CI"] = ""
 	for key, val := range ControllerOnlyEnvOverlay() {
 		m[key] = val
+	}
+	for _, key := range DemandSpawnEnvKeys {
+		m[key] = ""
 	}
 	return m
 }

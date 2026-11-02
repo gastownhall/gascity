@@ -5,8 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // bdLedgerRow is one row of the fake bd ledger below: the issue fields the
@@ -18,6 +22,14 @@ type bdLedgerRow struct {
 	closed    bool
 	assignee  string
 	deps      []Dep
+	metadata  map[string]string
+	// offscope marks a row bd's ledger HOLDS but this scope's cache never
+	// receives: gc routes relocated classes (the `gcg-` graph beads) to another
+	// store, so `bd list` and `bd query` for this scope do not hand it over.
+	// bd's own answers — ready, sql, blocked — still see it, which is what
+	// makes an edge onto it invisible to the cache's predicate and visible to
+	// bd's column.
+	offscope bool
 }
 
 // fakeBdLedger answers the bd subcommands a CachingStore prime spends, the way
@@ -37,6 +49,10 @@ type fakeBdLedger struct {
 	// bd/Postgres work store answers exactly this (ga-7i7ts), which is why the
 	// completeness verdict cannot be built on DepListBatch.
 	depListRefusal string
+	// closedReadRefusal, when set, is how a `bd list` or `bd query` that asks
+	// for closed rows fails while the active-set reads keep answering: the
+	// work-outcome veto's blocker read breaking on its own.
+	closedReadRefusal string
 	// truncateDeps drops these ids' inline edges while leaving their
 	// dependency_count intact, modeling a bd whose list JSON is short.
 	truncateDeps map[string]bool
@@ -44,23 +60,32 @@ type fakeBdLedger struct {
 	// that cannot testify about its own projection.
 	omitDependencyCount bool
 
+	mu    sync.Mutex // serializes run: a two-tier List runs its two bd reads at once
 	calls [][]string
 }
 
 func (f *fakeBdLedger) run(_, name string, args ...string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, append([]string{name}, args...))
 	joined := strings.Join(args, " ")
+	// bd's list and query hide closed rows unless asked for all of them.
+	all := slices.Contains(args, "--all")
 	switch {
 	case joined == "version":
 		return []byte("bd version 1.1.0\n"), nil
+	case all && f.closedReadRefusal != "" && (args[0] == "list" || args[0] == "query"):
+		return nil, errors.New(f.closedReadRefusal)
 	case args[0] == "list":
-		return f.renderRows(func(r bdLedgerRow) bool { return !r.ephemeral && !r.closed })
+		return f.renderRows(func(r bdLedgerRow) bool { return !r.ephemeral && (all || !r.closed) && !r.offscope })
 	case args[0] == "query":
-		return f.renderRows(func(r bdLedgerRow) bool { return r.ephemeral && !r.closed })
+		return f.renderRows(func(r bdLedgerRow) bool { return r.ephemeral && (all || !r.closed) && !r.offscope })
 	case args[0] == "ready":
 		// bd ready filters is_blocked = 0 (sqlbuild.ReadyWhere). This is the
 		// backing's own verdict, the one the cache may never exceed.
 		return f.renderRows(func(r bdLedgerRow) bool { return !r.blocked && !r.closed })
+	case args[0] == "blocked":
+		return f.renderBlocked()
 	case args[0] == "show":
 		// `bd show --json` answers from types.IssueDetails, which embeds
 		// types.Issue — and NOTHING in beads carries a `json:"is_blocked"` tag.
@@ -160,6 +185,9 @@ func (f *fakeBdLedger) renderRows(keep func(bdLedgerRow) bool) ([]byte, error) {
 		if row.assignee != "" {
 			issue["assignee"] = row.assignee
 		}
+		if len(row.metadata) > 0 {
+			issue["metadata"] = row.metadata
+		}
 		blocking := 0
 		deps := make([]map[string]string, 0, len(row.deps))
 		for _, dep := range row.deps {
@@ -197,10 +225,92 @@ func (f *fakeBdLedger) renderReadyProjection() ([]byte, error) {
 	return json.Marshal(out)
 }
 
-func (f *fakeBdLedger) renderDepRecords(ids []string) ([]byte, error) {
+// renderBlocked answers `bd blocked --json` the way issueops.GetBlockedIssuesInTx
+// does, in both halves, because only the second half can falsify the door built
+// on it:
+//
+//  1. Seed from the denormalized is_blocked column —
+//     `WHERE is_blocked = 1 AND status <> 'closed'` — which is the same column
+//     `bd ready` filters with `is_blocked = 0` above. Rendering both from
+//     bdLedgerRow.blocked is what makes the two answers provably the same
+//     closure here as they are in bd.
+//  2. Narrow to rows whose blocker bd can NAME: an active blocking dep whose
+//     target is a live ledger row, or failing that any parent-child edge, whose
+//     parent is attributed without regard to the parent's own state. A row with
+//     neither is dropped from bd's OUTPUT even though its column says blocked.
+//
+// Modeling (2) is the point. Without it every fixture row would come back and
+// a gc-side reader that mistook membership for the column would pass for the
+// wrong reason.
+func (f *fakeBdLedger) renderBlocked() ([]byte, error) {
+	live := make(map[string]struct{}, len(f.rows))
+	for _, row := range f.rows {
+		if !row.closed {
+			live[row.id] = struct{}{}
+		}
+	}
+	out := make([]map[string]any, 0, len(f.rows))
+	for _, row := range f.rows {
+		if !row.blocked || row.closed {
+			continue
+		}
+		var blockers []string
+		for _, dep := range row.deps {
+			if !isReadyBlockingDependencyType(dep.Type) {
+				continue
+			}
+			if _, ok := live[dep.DependsOnID]; !ok {
+				continue
+			}
+			blockers = append(blockers, dep.DependsOnID)
+		}
+		if len(blockers) == 0 {
+			for _, dep := range row.deps {
+				if dep.Type == "parent-child" {
+					blockers = []string{dep.DependsOnID}
+					break
+				}
+			}
+		}
+		if len(blockers) == 0 {
+			continue
+		}
+		out = append(out, map[string]any{
+			"id":               row.id,
+			"title":            row.id,
+			"status":           "open",
+			"blocked_by":       blockers,
+			"blocked_by_count": len(blockers),
+		})
+	}
+	return json.Marshal(out)
+}
+
+// renderDepRecords answers `bd dep list` as real bd does: several ids print
+// the raw dependency records, one id prints the depended-on beads' rows, each
+// carrying its dependency_type.
+func (f *fakeBdLedger) renderDepRecords(args []string) ([]byte, error) {
+	var ids []string
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") {
+			ids = append(ids, arg)
+		}
+	}
 	wanted := make(map[string]bool, len(ids))
 	for _, id := range ids {
-		wanted[strings.TrimPrefix(id, "--")] = true
+		wanted[id] = true
+	}
+	if len(ids) == 1 {
+		rows := make([]map[string]string, 0)
+		for _, row := range f.rows {
+			if !wanted[row.id] {
+				continue
+			}
+			for _, dep := range row.deps {
+				rows = append(rows, map[string]string{"id": dep.DependsOnID, "dependency_type": dep.Type})
+			}
+		}
+		return json.Marshal(rows)
 	}
 	out := make([]map[string]string, 0)
 	for _, row := range f.rows {
@@ -242,9 +352,10 @@ func (f *fakeBdLedger) callsNamed(sub ...string) [][]string {
 // extended with the tier that actually carries molecule steps.
 //
 //	blocker (open) <-- blocks -- parent <-- parent-child -- child
-//	gcg-offscope (not in this scope) <-- blocks -- xstore
+//	gcg-offscope (in bd's ledger, not in this cache) <-- blocks -- xstore
 //	parent <-- parent-child -- wisp-step   (ephemeral)
 //	unrelated <-- blocks -- wisp-gate      (ephemeral)
+//	unrelated <-- waits-for -- gate-open   (gate already opened)
 //
 // child and wisp-step carry no blocking dep of their own, so the cache's
 // dependency-derived predicate calls them ready while bd marks them
@@ -254,6 +365,24 @@ func (f *fakeBdLedger) callsNamed(sub ...string) [][]string {
 // it too. wisp-gate is the wisp tier's blocking edge, so the tier bd serves
 // through `bd query` rather than `bd list` also has a row that can prove — and
 // disprove — the projection. unrelated is the control both models call ready.
+//
+// Two rows exist so the projection can be disproved in BOTH directions.
+//
+// gcg-offscope is xstore's blocker as a row of bd's ledger rather than as a
+// dangling id. That is the only internally consistent way to state what the
+// fixture claims: bd's recompute joins the target table
+// (issueops.shouldBeBlockedDisjunction), so a dep onto an id bd cannot see
+// leaves is_blocked = 0 and bd's ready OFFERS the row. A cross-store blocker is
+// therefore a row bd holds and gc's class routing keeps out of THIS cache,
+// which is exactly what offscope models. It is itself blocked so bd's ready
+// hides it too, keeping every backing-verdict assertion in this file unchanged.
+//
+// gate-open is the reverse disagreement, and it is what makes "absence means
+// not blocked" falsifiable. Its waits-for gate has opened, so bd's column reads
+// is_blocked = 0 and bd's ready OFFERS it — while the cache's direct-dep
+// predicate, which calls any non-closed blocking target a blocker, would HIDE
+// it. A projection that leaves unblocked rows nil instead of writing false
+// falls back to that predicate and starves the row.
 func bdReadyDisagreementLedger() *fakeBdLedger {
 	return &fakeBdLedger{
 		depListRefusal: `exit status 1: Error: operation "IssueRelations" not supported by the postgres backend`,
@@ -262,7 +391,9 @@ func bdReadyDisagreementLedger() *fakeBdLedger {
 			{id: "bd-parent", blocked: true, deps: []Dep{{IssueID: "bd-parent", DependsOnID: "bd-blocker", Type: "blocks"}}},
 			{id: "bd-child", blocked: true, deps: []Dep{{IssueID: "bd-child", DependsOnID: "bd-parent", Type: "parent-child"}}},
 			{id: "bd-xstore", blocked: true, deps: []Dep{{IssueID: "bd-xstore", DependsOnID: "gcg-offscope", Type: "blocks"}}},
+			{id: "gcg-offscope", offscope: true, blocked: true, deps: []Dep{{IssueID: "gcg-offscope", DependsOnID: "bd-blocker", Type: "blocks"}}},
 			{id: "bd-unrelated"},
+			{id: "bd-gate-open", deps: []Dep{{IssueID: "bd-gate-open", DependsOnID: "bd-unrelated", Type: "waits-for"}}},
 			{id: "bd-wisp-step", ephemeral: true, blocked: true, deps: []Dep{{IssueID: "bd-wisp-step", DependsOnID: "bd-parent", Type: "parent-child"}}},
 			{id: "bd-wisp-gate", ephemeral: true, blocked: true, deps: []Dep{{IssueID: "bd-wisp-gate", DependsOnID: "bd-unrelated", Type: "blocks"}}},
 		},
@@ -271,7 +402,28 @@ func bdReadyDisagreementLedger() *fakeBdLedger {
 
 func primedBdCache(t *testing.T, ledger *fakeBdLedger) (*CachingStore, *BdStore) {
 	t.Helper()
-	store := NewBdStore(t.TempDir(), ledger.run)
+	return primeBdCacheOverScope(t, ledger, t.TempDir())
+}
+
+// primedBdCacheOnUnimplementedBackend primes the same fixture over a scope whose
+// metadata names a backend gc does not register — maintainer-city's shape. That
+// scope's `bd sql` is withheld by the backend gate, so its is_blocked column can
+// only come from `bd blocked`.
+func primedBdCacheOnUnimplementedBackend(t *testing.T, ledger *fakeBdLedger) (*CachingStore, *BdStore) {
+	t.Helper()
+	scope := t.TempDir()
+	writeScopeMetadata(t, scope, map[string]any{
+		"database":   "dolt",
+		"backend":    "postgres",
+		"dolt_mode":  "server",
+		"project_id": "d2e95604-e869-478c-ad1a-ddee6e8bc3fc",
+	})
+	return primeBdCacheOverScope(t, ledger, scope)
+}
+
+func primeBdCacheOverScope(t *testing.T, ledger *fakeBdLedger, scope string) (*CachingStore, *BdStore) {
+	t.Helper()
+	store := NewBdStore(scope, ledger.run)
 	cache := NewCachingStoreForTest(store, nil)
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
@@ -298,7 +450,7 @@ func TestBdBackedCacheServesTheCompleteReadyProjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadyContext error = %v, want rows served from cache", err)
 	}
-	want := wantReadyIDs("bd-blocker", "bd-unrelated")
+	want := wantReadyIDs("bd-blocker", "bd-gate-open", "bd-unrelated")
 	if got := sortedIDs(rows); !equalIDs(got, want) {
 		t.Fatalf("ReadyContext = %v, want %v", got, want)
 	}
@@ -345,10 +497,59 @@ func TestBdBackedCachedReadyNeverOffersWorkTheBackingHides(t *testing.T) {
 	t.Run("after prime", func(t *testing.T) {
 		ledger := bdReadyDisagreementLedger()
 		cache, store := primedBdCache(t, ledger)
-		stage := newReadyInvariantStage(t, cache, bdLiveReady(t, store, "bd-blocker", "bd-unrelated"))
+		stage := newReadyInvariantStage(t, cache, bdLiveReady(t, store, "bd-blocker", "bd-gate-open", "bd-unrelated"))
 
 		stage.assertNeverExceedsBacking("after prime", bdReadyDisagreementHidden)
 		stage.assertStillAnswers("after prime")
+	})
+
+	// The same invariant on the scope whose column comes from `bd blocked`
+	// instead of `bd sql` — maintainer-city's shape, where the backend gate
+	// withholds `bd sql` because gc does not implement the backend.
+	//
+	// Both halves are load-bearing and they pull in opposite directions.
+	// assertNeverExceedsBacking would pass vacuously on a cache that declined
+	// every readiness read, which is exactly today's behavior and exactly what
+	// this door exists to stop; assertStillAnswers is what makes the subset
+	// claim mean something. Red before the fix:
+	//
+	//	CachedReady declined (bd blocked door, after prime): a backing that can answer is_blocked must keep serving readiness from cache
+	t.Run("bd blocked door", func(t *testing.T) {
+		ledger := bdReadyDisagreementLedger()
+		cache, store := primedBdCacheOnUnimplementedBackend(t, ledger)
+		stage := newReadyInvariantStage(t, cache, bdLiveReady(t, store, "bd-blocker", "bd-gate-open", "bd-unrelated"))
+
+		stage.assertNeverExceedsBacking("bd blocked door, after prime", bdReadyDisagreementHidden)
+		stage.assertStillAnswers("bd blocked door, after prime")
+
+		// The gate's whole reason for withholding `bd sql` on an unregistered
+		// backend is that gc cannot assume that backend's SCHEMA. So the door
+		// must not have been opened by accident.
+		if calls := ledger.callsNamed("sql"); len(calls) != 0 {
+			t.Fatalf("an unimplemented backend spent %v; the schema assumption behind `bd sql` is exactly what the gate refuses", calls)
+		}
+		if calls := ledger.callsNamed("blocked"); len(calls) == 0 {
+			t.Fatal("no `bd blocked` was spent; the column cannot have come from bd")
+		}
+
+		// Absence means NOT BLOCKED, written rather than left nil. bd-gate-open
+		// is the row that can tell the difference: its waits-for gate has
+		// opened, so bd offers it, while the direct-dependency predicate a nil
+		// verdict falls back to calls its open target a blocker and hides it.
+		if blocked := cachedIsBlockedForTest(cache, "bd-gate-open"); blocked == nil || *blocked {
+			t.Fatalf("cached is_blocked for bd-gate-open = %v, want false written explicitly: a nil verdict hands the row to the weaker predicate, which starves it", blocked)
+		}
+		for _, id := range []string{"bd-child", "bd-wisp-step", "bd-xstore"} {
+			if blocked := cachedIsBlockedForTest(cache, id); blocked == nil || !*blocked {
+				t.Fatalf("cached is_blocked for %s = %v, want bd's true", id, blocked)
+			}
+		}
+
+		// One subprocess per prime, not one per bead: the door is a whole-scope
+		// projection exactly as `bd sql` was.
+		if calls := ledger.callsNamed("blocked"); len(calls) != 1 {
+			t.Fatalf("prime spent %d `bd blocked` calls, want exactly 1 for the whole scope: %v", len(calls), calls)
+		}
 	})
 
 	// A write-through refresh (CachingStore.Update -> backing.Get) reinstalls the
@@ -356,7 +557,7 @@ func TestBdBackedCachedReadyNeverOffersWorkTheBackingHides(t *testing.T) {
 	t.Run("after update", func(t *testing.T) {
 		ledger := bdReadyDisagreementLedger()
 		cache, store := primedBdCache(t, ledger)
-		stage := newReadyInvariantStage(t, cache, bdLiveReady(t, store, "bd-blocker", "bd-unrelated"))
+		stage := newReadyInvariantStage(t, cache, bdLiveReady(t, store, "bd-blocker", "bd-gate-open", "bd-unrelated"))
 
 		for _, id := range []string{"bd-child", "bd-xstore"} {
 			assignee := "agent"
@@ -381,7 +582,7 @@ func TestBdBackedCachedReadyNeverOffersWorkTheBackingHides(t *testing.T) {
 	t.Run("after dirty overlay ready", func(t *testing.T) {
 		ledger := bdReadyDisagreementLedger()
 		cache, store := primedBdCache(t, ledger)
-		stage := newReadyInvariantStage(t, cache, bdLiveReady(t, store, "bd-blocker", "bd-unrelated"))
+		stage := newReadyInvariantStage(t, cache, bdLiveReady(t, store, "bd-blocker", "bd-gate-open", "bd-unrelated"))
 
 		markDirtyForTest(cache, "bd-child")
 		if _, err := cache.Ready(); err != nil {
@@ -434,6 +635,175 @@ func bdLiveReady(t *testing.T, store *BdStore, want ...string) []string {
 		t.Fatalf("bd Ready = %v, want %v: the fixture must model bd's is_blocked filter", got, wantReadyIDs(want...))
 	}
 	return got
+}
+
+// TestCachedReadyOverBdBackingHonorsAnEvictedBlockersWorkOutcome is
+// TestCachedReadyOverNativeBackingHonorsAnEvictedBlockersWorkOutcome on the bd
+// path, through both doors the is_blocked column arrives by. bd's column counts
+// every closed blocker as satisfied and the reconcile's `bd list` hides closed
+// rows, so once a reconcile evicts a blocker closed with gc.work_outcome=blocked
+// only the projection can still hold its dependent back, the way the backing's
+// own Ready does through filterReadyByWorkOutcome. The evicting reconcile runs
+// first with that closed read failing, so the dependent must stay held on the
+// verdict the cache already had until a healthy cycle vetoes it again.
+//
+//	bd-blocker   (closed, work_outcome=blocked) <-- blocks    -- bd-dependent  held back
+//	bd-passed    (closed step, outcome=pass)    <-- blocks    -- bd-advanced   ready
+//	bd-plain     (closed)                       <-- blocks    -- bd-released   ready
+//	bd-unrelated (open)                         <-- waits-for -- bd-gated      ready
+func TestCachedReadyOverBdBackingHonorsAnEvictedBlockersWorkOutcome(t *testing.T) {
+	for _, door := range []struct {
+		name  string
+		prime func(*testing.T, *fakeBdLedger) (*CachingStore, *BdStore)
+	}{
+		{"bd sql", primedBdCache},
+		{"bd blocked", primedBdCacheOnUnimplementedBackend},
+	} {
+		t.Run(door.name, func(t *testing.T) {
+			ledger := &fakeBdLedger{rows: []bdLedgerRow{
+				{id: "bd-blocker"},
+				{id: "bd-dependent", blocked: true, deps: []Dep{{IssueID: "bd-dependent", DependsOnID: "bd-blocker", Type: "blocks"}}},
+				{id: "bd-passed"},
+				{id: "bd-advanced", blocked: true, deps: []Dep{{IssueID: "bd-advanced", DependsOnID: "bd-passed", Type: "blocks"}}},
+				{id: "bd-plain"},
+				{id: "bd-released", blocked: true, deps: []Dep{{IssueID: "bd-released", DependsOnID: "bd-plain", Type: "blocks"}}},
+				{id: "bd-unrelated"},
+				{id: "bd-gated", deps: []Dep{{IssueID: "bd-gated", DependsOnID: "bd-unrelated", Type: "waits-for"}}},
+			}}
+			cache, store := door.prime(t, ledger)
+			if reads := closedInclusiveReads(ledger.calls); len(reads) != 0 {
+				t.Fatalf("prime spent %v, want no closed read: every edge of an unblocked row ends inside the snapshot", reads)
+			}
+
+			// The closes land behind the cache, as another writer's do, and the
+			// column follows bd: every close satisfies its dependents' blocks
+			// edge.
+			closeRow := func(id string, metadata map[string]string) {
+				t.Helper()
+				if err := ledger.mutate(id, func(r *bdLedgerRow) { r.closed, r.metadata = true, metadata }); err != nil {
+					t.Fatal(err)
+				}
+			}
+			closeRow("bd-blocker", map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked})
+			closeRow("bd-passed", map[string]string{
+				beadmeta.StepRefMetadataKey:     "review",
+				beadmeta.OutcomeMetadataKey:     beadmeta.OutcomePass,
+				beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+			})
+			closeRow("bd-plain", nil)
+			for _, id := range []string{"bd-dependent", "bd-advanced", "bd-released"} {
+				if err := ledger.mutate(id, func(r *bdLedgerRow) { r.blocked = false }); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want := bdLiveReady(t, store, "bd-advanced", "bd-released", "bd-unrelated", "bd-gated")
+			stage := newReadyInvariantStage(t, cache, want)
+
+			// The evicting reconcile's work-outcome read fails, so the cycle
+			// loses the column and the dependent must stay held on the verdict
+			// the cache already had.
+			ledger.closedReadRefusal = "closed history unreadable"
+			cache.ReconcileForTest()
+			ledger.closedReadRefusal = ""
+			cache.mu.RLock()
+			_, resident := cache.beads["bd-blocker"]
+			cache.mu.RUnlock()
+			if resident {
+				t.Fatal("the reconcile kept the closed blocker, so this fixture is not measuring an evicted one")
+			}
+			stage.assertHeldThroughFailedVeto("after the reconcile whose work-outcome read failed", "bd-dependent")
+
+			before := len(ledger.calls)
+			cache.ReconcileForTest()
+			reconciled := len(ledger.calls)
+
+			got, err := cache.ReadyPreferCache(ReadyQuery{TierMode: TierBoth})
+			if err != nil {
+				t.Fatalf("ReadyPreferCache: %v", err)
+			}
+			if gotIDs := sortedIDs(got); !equalIDs(gotIDs, want) {
+				t.Errorf("ReadyPreferCache = %v, want the backing's %v", gotIDs, want)
+			}
+			if spent := ledger.calls[reconciled:]; len(spent) != 0 {
+				t.Errorf("ReadyPreferCache spent %v: it read live, and a warm cache must answer from the snapshot", spent)
+			}
+			stage.assertNeverExceedsBacking("after a healthy reconcile", map[string]string{
+				"bd-dependent": "its blocker closed with gc.work_outcome=blocked, which bd's column counts as satisfied and filterReadyByWorkOutcome does not",
+			})
+			if blocked := cachedIsBlockedForTest(cache, "bd-dependent"); blocked == nil || !*blocked {
+				t.Errorf("cached is_blocked for bd-dependent = %s, want true: the projection must carry the veto its evicted blocker can no longer give", ptrStr(blocked))
+			}
+			stage.assertStillAnswers("after a healthy reconcile")
+
+			// The cost: the reconcile spends the one closed read the backing's
+			// own Ready spends, a `bd list --all` and its wisp-tier `bd query`.
+			reads := closedInclusiveReads(ledger.calls[before:reconciled])
+			if !closedReadsAreOneListAndOneQuery(reads) {
+				t.Fatalf("the reconcile spent closed reads %v, want one `bd list --all` and one `bd query --all`", reads)
+			}
+		})
+	}
+}
+
+// closedReadsAreOneListAndOneQuery reports whether reads are the closed-row
+// budget of one two-tier read: a `bd list --all` and a wisp-tier `bd query
+// --all`, in either order: BdStore.listTierPair issues them concurrently.
+func closedReadsAreOneListAndOneQuery(reads [][]string) bool {
+	var lists, queries int
+	for _, read := range reads {
+		switch read[1] {
+		case "list":
+			lists++
+		case "query":
+			queries++
+		}
+	}
+	return len(reads) == 2 && lists == 1 && queries == 1
+}
+
+// TestClosedReadsAreOneListAndOneQueryInEitherOrder pins the cost invariant
+// the cached-ready reconcile test asserts. BdStore.listTierPair runs its two
+// tier reads concurrently and the fake ledger records them under a mutex, so
+// both recorded orders are valid and neither may be a failure. The calls are
+// scripted rather than scheduled, so no case depends on goroutine timing.
+func TestClosedReadsAreOneListAndOneQueryInEitherOrder(t *testing.T) {
+	list := []string{"bd", "list", "--json", "--status=closed", "--all", "--limit=0"}
+	query := []string{"bd", "query", "--json", "ephemeral=true AND status=closed", "--all", "--limit=0"}
+	cases := []struct {
+		name  string
+		reads [][]string
+		want  bool
+	}{
+		{"list then query", [][]string{list, query}, true},
+		{"query then list", [][]string{query, list}, true},
+		{"no reads", nil, false},
+		{"list only", [][]string{list}, false},
+		{"query only", [][]string{query}, false},
+		{"duplicate list", [][]string{list, list}, false},
+		{"duplicate query", [][]string{query, query}, false},
+		{"extra list", [][]string{list, query, list}, false},
+		{"extra query", [][]string{query, list, query}, false},
+		{"extra unrelated closed read", [][]string{list, query, {"bd", "show", "--all", "bd-1"}}, false},
+		{"unrelated read in place of query", [][]string{list, {"bd", "show", "--all", "bd-1"}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := closedReadsAreOneListAndOneQuery(tc.reads); got != tc.want {
+				t.Errorf("closedReadsAreOneListAndOneQuery(%v) = %v, want %v", tc.reads, got, tc.want)
+			}
+		})
+	}
+}
+
+// closedInclusiveReads returns the calls that asked bd for closed rows.
+func closedInclusiveReads(calls [][]string) [][]string {
+	var found [][]string
+	for _, call := range calls {
+		if slices.Contains(call, "--all") {
+			found = append(found, call)
+		}
+	}
+	return found
 }
 
 // bdReadyCloseInvalidationLedger is the close-path shape:
@@ -664,7 +1034,7 @@ func TestBdWithoutTheBlockedColumnSendsReadyToTheLiveVerdict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ready: %v", err)
 	}
-	want := wantReadyIDs("bd-blocker", "bd-unrelated")
+	want := wantReadyIDs("bd-blocker", "bd-gate-open", "bd-unrelated")
 	if got := sortedIDs(rows); !equalIDs(got, want) {
 		t.Fatalf("Ready = %v, want %v: the transitively blocked rows must not be offered", got, want)
 	}
@@ -684,7 +1054,16 @@ func TestBdWithoutTheBlockedColumnSendsReadyToTheLiveVerdict(t *testing.T) {
 	if !ok {
 		t.Fatal("CachedList declined: the degrade must not make non-readiness reads unavailable")
 	}
-	if len(cached) != len(oldBd.rows) {
-		t.Fatalf("CachedList returned %d rows, want %d", len(cached), len(oldBd.rows))
+	// Every row bd hands THIS scope, which is every row but the relocated one:
+	// gc routes `gcg-` beads to another store, so `bd list`/`bd query` never
+	// return them here.
+	resident := 0
+	for _, row := range oldBd.rows {
+		if !row.offscope {
+			resident++
+		}
+	}
+	if len(cached) != resident {
+		t.Fatalf("CachedList returned %d rows, want %d", len(cached), resident)
 	}
 }

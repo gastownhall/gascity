@@ -1,5 +1,5 @@
 import { cleanup, render, screen } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { HealthPage } from './Health';
 import { invalidate } from '../api/cache';
@@ -563,10 +563,7 @@ function renderPage({ attention }: { attention?: HealthAttentionFacts } = {}) {
     attention === undefined ? {} : { health: attention },
   );
   return render(
-    <MemoryRouter
-      initialEntries={['/health']}
-      future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
-    >
+    <MemoryRouter initialEntries={['/health']}>
       <AttentionProvider contributors={contributors}>
         <HealthPage />
       </AttentionProvider>
@@ -700,6 +697,7 @@ function baseStatus(): StatusBody {
       live_rows: 2000,
       path: '/srv/gc/test-city/.db',
       ratio_mb_per_row: 0.5,
+      rows_measured: true,
       size_bytes: 1_000_000,
       threshold_mb_per_row: 1,
       warning: false,
@@ -736,7 +734,6 @@ function baseRigStores(): RigStoreHealthReport {
         reachable: true,
         doltEndpoint: '127.0.0.1:29620',
         doltConnected: true,
-        issueCount: 129,
         problems: [],
       },
       {
@@ -746,7 +743,6 @@ function baseRigStores(): RigStoreHealthReport {
         reachable: true,
         doltEndpoint: '127.0.0.1:29620',
         doltConnected: false,
-        issueCount: null,
         problems: [],
       },
     ],

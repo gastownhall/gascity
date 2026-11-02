@@ -108,6 +108,7 @@ func TestOrderTrackingRetentionCheck_CheckMetadata(t *testing.T) {
 func TestOrderTrackingRetentionCheck_RegisteredInBuildDoctorChecks(t *testing.T) {
 	cityPath := t.TempDir()
 	cfg := &config.City{}
+	withHealthyStorePreflight(t)
 	checks := buildDoctorChecks(cityPath, cfg, nil, buildDoctorChecksOpts{
 		SkipCityDoltCheck:    true,
 		SkipManagedDoltCheck: true,

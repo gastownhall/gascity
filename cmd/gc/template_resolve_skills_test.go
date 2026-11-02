@@ -160,6 +160,124 @@ func TestResolveTemplateSkillsIntegration(t *testing.T) {
 	}
 }
 
+// TestResolveTemplateSkillChangesDrainOnlyAtTheStage2Boundary pins the
+// skills' NextStart policy (runtime.FingerprintExtraChangePolicy) at
+// resolveTemplate. A skill edit, or a skill added or removed while another
+// remains, moves neither the core nor the provision hash, so it never
+// drains. The stage-2 materialize-skills PreStart entry, a Restart input,
+// exists only while a non-scope-root agent has a skill, so its first skill
+// added or last removed moves both, and that agent drains once. A
+// scope-root agent has no such entry and drains at neither.
+func TestResolveTemplateSkillChangesDrainOnlyAtTheStage2Boundary(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	skillsDir := filepath.Join(cityPath, "skills")
+	planDir := filepath.Join(skillsDir, "plan")
+	reviewDir := filepath.Join(skillsDir, "review")
+	writeSkillSource(t, reviewDir)
+	catalog := func(dirs ...string) *materialize.CityCatalog {
+		cat := &materialize.CityCatalog{OwnedRoots: []string{skillsDir}}
+		for _, dir := range dirs {
+			cat.Entries = append(cat.Entries, materialize.SkillEntry{Name: filepath.Base(dir), Source: dir, Origin: "city"})
+		}
+		return cat
+	}
+	resolve := func(t *testing.T, agent *config.Agent, cat *materialize.CityCatalog) TemplateParams {
+		t.Helper()
+		params := &agentBuildParams{
+			cityName:        "city",
+			cityPath:        cityPath,
+			workspace:       &config.Workspace{Provider: "claude"},
+			providers:       map[string]config.ProviderSpec{"claude": {Command: "echo", PromptMode: "none", SupportsACP: boolPtr(true)}},
+			lookPath:        func(string) (string, error) { return "/bin/echo", nil },
+			fs:              fsys.OSFS{},
+			rigs:            []config.Rig{},
+			beaconTime:      time.Unix(0, 0),
+			beadNames:       make(map[string]string),
+			stderr:          io.Discard,
+			skillCatalog:    cat,
+			sessionProvider: "tmux",
+		}
+		tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+		if err != nil {
+			t.Fatalf("resolveTemplate: %v", err)
+		}
+		return tp
+	}
+	hasMaterializePreStart := func(tp TemplateParams) bool {
+		for _, entry := range tp.Hints.PreStart {
+			if strings.Contains(entry, "internal materialize-skills") {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, c := range []struct {
+		name     string
+		agent    *config.Agent
+		boundary bool // the first skill added moves core and provision
+	}{
+		{
+			name:     "tmux + workdir != scope root",
+			agent:    &config.Agent{Name: "polecat", Scope: "city", Provider: "claude", WorkDir: ".gc/worktrees/polecat-1"},
+			boundary: true,
+		},
+		{
+			name:     "tmux + workdir == scope root",
+			agent:    &config.Agent{Name: "mayor", Scope: "city", Provider: "claude"},
+			boundary: false,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			writeSkillSource(t, planDir)
+			none := resolve(t, c.agent, catalog())
+			one := resolve(t, c.agent, catalog(planDir))
+			if err := os.WriteFile(filepath.Join(planDir, "SKILL.md"),
+				[]byte("---\nname: plan\ndescription: test\n---\nedited body\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			edited := resolve(t, c.agent, catalog(planDir))
+			two := resolve(t, c.agent, catalog(planDir, reviewDir))
+
+			if one.FPExtra["skills:plan"] == "" || edited.FPExtra["skills:plan"] == one.FPExtra["skills:plan"] {
+				t.Fatalf("FPExtra[skills:plan] one=%q edited=%q: the edit must reach the entry", one.FPExtra["skills:plan"], edited.FPExtra["skills:plan"])
+			}
+			if two.FPExtra["skills:review"] == "" {
+				t.Fatalf("FPExtra = %+v, want a skills:review entry", two.FPExtra)
+			}
+			if hasMaterializePreStart(none) || hasMaterializePreStart(one) != c.boundary {
+				t.Fatalf("materialize-skills PreStart with no skill = %v, with one = %v; want false, %v",
+					hasMaterializePreStart(none), hasMaterializePreStart(one), c.boundary)
+			}
+
+			oneCfg := templateParamsToConfig(one)
+			for _, change := range []struct {
+				name string
+				tp   TemplateParams
+			}{
+				{"an edited skill", edited},
+				{"a second skill", two},
+			} {
+				cfg := templateParamsToConfig(change.tp)
+				if got, want := runtime.CoreFingerprint(cfg), runtime.CoreFingerprint(oneCfg); got != want {
+					t.Errorf("%s moved the core hash %s -> %s; skills are NextStart", change.name, want, got)
+				}
+				if got, want := runtime.ProvisionFingerprint(cfg), runtime.ProvisionFingerprint(oneCfg); got != want {
+					t.Errorf("%s moved the provision hash %s -> %s; skills are NextStart", change.name, want, got)
+				}
+			}
+			noneCfg := templateParamsToConfig(none)
+			if got := runtime.CoreFingerprint(noneCfg) != runtime.CoreFingerprint(oneCfg); got != c.boundary {
+				t.Errorf("the first skill moved the core hash = %v, want %v", got, c.boundary)
+			}
+			if got := runtime.ProvisionFingerprint(noneCfg) != runtime.ProvisionFingerprint(oneCfg); got != c.boundary {
+				t.Errorf("the first skill moved the provision hash = %v, want %v", got, c.boundary)
+			}
+		})
+	}
+}
+
 // TestResolveTemplateSharedCatalogSnapshotFlowsThroughFile asserts that
 // resolveTemplate stages the shared skill catalog snapshot to a
 // deterministic file in the workdir while leaving the materialize-skills

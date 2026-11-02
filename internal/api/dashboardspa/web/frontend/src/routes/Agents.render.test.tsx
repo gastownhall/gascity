@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentsPage } from './Agents';
 import { AttentionProvider } from '../attention/context';
@@ -14,7 +14,7 @@ import { resetSupervisorApiForTests } from '../supervisor/client';
 //
 // 1. Peek button errored with "invalid session id" because the modal passed
 //    `agent.session.name` (a friendly alias like "mayor") to a route that
-//    validates against SESSION_ID_RE (`gc-XXX` format). The fix maps
+//    validates the session id (`gc-XXX` format). The fix maps
 //    agent.session.name -> session.id through the sessions cache.
 //
 // 2. The agent name column rendered `display_name ?? name`, so the
@@ -213,7 +213,7 @@ afterEach(() => {
 describe('AgentsPage (post-ay6 regressions)', () => {
   it('renders the alias as primary label and display_name as secondary (Orchestration shows "mayor", not "Claude (Account 5)")', async () => {
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <NowProvider intervalMs={1_000_000}>
           <AgentsPage />
         </NowProvider>
@@ -270,7 +270,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
     });
 
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <NowProvider intervalMs={1_000_000}>
           <AgentsPage />
         </NowProvider>
@@ -308,7 +308,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
     });
 
     const { container } = render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <NowProvider intervalMs={1_000_000}>
           <AgentsPage />
         </NowProvider>
@@ -324,7 +324,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
 
   it('Peek resolves agent.session.name -> session.id via direct supervisor sessions and fetches the right transcript', async () => {
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <NowProvider intervalMs={1_000_000}>
           <AgentsPage />
         </NowProvider>
@@ -360,7 +360,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
     });
 
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <NowProvider intervalMs={1_000_000}>
           <AgentsPage />
         </NowProvider>
@@ -381,7 +381,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
 
   it('responds to pending interactions through the generated supervisor respond endpoint', async () => {
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <NowProvider intervalMs={1_000_000}>
           <AgentsPage />
         </NowProvider>
@@ -408,7 +408,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
 
   it('disables the pending Approve/Deny controls in read-only mode (gascity-dashboard-uzhr)', async () => {
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <NowProvider intervalMs={1_000_000}>
           <ReadOnlyProvider readOnly={true}>
             <AgentsPage />
@@ -435,7 +435,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
 
   it('orphan agent name-link carries a different title tooltip than a session-bound one (ay6.2)', async () => {
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <NowProvider intervalMs={1_000_000}>
           <AgentsPage />
         </NowProvider>
@@ -467,7 +467,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
 
   it('marks rows that match composed agent attention without hiding other agents', async () => {
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <NowProvider intervalMs={1_000_000}>
           <AttentionProvider
             contributors={[
@@ -501,7 +501,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
 
   it('lists agents needing the operator with reason and next step, excluding calm agents', async () => {
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <NowProvider intervalMs={1_000_000}>
           <AgentsPage />
         </NowProvider>

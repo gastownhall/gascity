@@ -36,8 +36,10 @@ func spyEventReader(calls *[]eventReadCall) orderFiringEventReadFunc {
 // and turns this check permanently red for a reason unrelated to order firing.
 //
 // The check needs only the newest firing per order, so every read it issues up
-// front must carry a positive limit. The one sanctioned unbounded read is the
-// controller-start fallback, and only after the bounded read came back empty.
+// front must carry a positive limit. There is no sanctioned unbounded read:
+// the controller-start fallback now goes through events.LatestArchivedMatch,
+// which stops at the newest matching archive, so every read through the
+// readEvents seam is bounded.
 func TestOrderFiringCurrent_EventReadsAreBounded(t *testing.T) {
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	cityPath, cfg := orderFiringTestCity(t)
@@ -69,11 +71,12 @@ func TestOrderFiringCurrent_EventReadsAreBounded(t *testing.T) {
 				t.Fatalf("call %d: order.fired read is unbounded (limit=%d); a full event-log scan blows the check budget", i, call.limit)
 			}
 		case events.ControllerStarted:
-			// The first controller.started read must be bounded. A later
-			// unbounded read is the sanctioned fallback for a log whose
-			// active file holds no controller start at all.
-			if !sawStarted && call.limit <= 0 {
-				t.Fatalf("call %d: first controller.started read is unbounded (limit=%d)", i, call.limit)
+			// Every controller.started read is bounded now. The archive
+			// fallback goes through events.LatestArchivedMatch and never
+			// reaches this seam, so an unbounded call here means someone
+			// reinstated the full-history walk.
+			if call.limit <= 0 {
+				t.Fatalf("call %d: controller.started read is unbounded (limit=%d); the archive fallback must go through events.LatestArchivedMatch", i, call.limit)
 			}
 			sawStarted = true
 		default:

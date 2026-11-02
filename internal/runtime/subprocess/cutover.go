@@ -1,13 +1,19 @@
 package subprocess
 
-import "github.com/gastownhall/gascity/internal/runtime"
+import (
+	"context"
+
+	"github.com/gastownhall/gascity/internal/runtime"
+)
 
 // seamBackedProvider serves the legacy [runtime.Provider] entirely through the
 // de-conflated seams (via [runtime.NewProviderFromSeams]), passing the non-seam
-// extensions (ProcessTableScanner, SleepCapability) through to the underlying
-// *Provider. It is the early CUT-OVER for the subprocess provider: real callers
-// exercise the seams end-to-end, validated by TestSubprocessSeamConformance
-// (the full Provider conformance suite, run against this composition).
+// extensions (ProcessTableScanner, SleepCapability, LivenessObserverWithError,
+// ListingAttestation, FencedInputProvider) through to the underlying
+// *Provider. It is the early CUT-OVER for the
+// subprocess provider: real callers exercise the seams end-to-end, validated by
+// TestSubprocessSeamConformance (the full Provider conformance suite, run
+// against this composition).
 //
 // Subprocess is the cut-over target because the seam contract's known gaps do
 // not bite it: its ProcessAlive ignores process names (so Observe's missing
@@ -20,8 +26,13 @@ type seamBackedProvider struct {
 }
 
 var (
-	_ runtime.Provider            = (*seamBackedProvider)(nil)
-	_ runtime.ProcessTableScanner = (*seamBackedProvider)(nil)
+	_ runtime.Provider                  = (*seamBackedProvider)(nil)
+	_ runtime.ProcessTableScanner       = (*seamBackedProvider)(nil)
+	_ runtime.LivenessObserverWithError = (*seamBackedProvider)(nil)
+	_ runtime.ListingAttestation        = (*seamBackedProvider)(nil)
+	_ runtime.FencedInputProvider       = (*seamBackedProvider)(nil)
+	_ runtime.IdentitySidecarProvider   = (*seamBackedProvider)(nil)
+	_ runtime.IdentitySidecarProvider   = (*Provider)(nil)
 )
 
 // NewSeamBacked returns a subprocess provider served through the seams, storing
@@ -39,6 +50,13 @@ func seamBack(raw *Provider) *seamBackedProvider {
 	return &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: raw}
 }
 
+// LocalIdentitySidecar passes the underlying provider's sidecar declaration
+// through; the seams route GetMeta to the same sidecar.
+func (s *seamBackedProvider) LocalIdentitySidecar() bool { return s.raw.LocalIdentitySidecar() }
+
+// LivenessReadsFresh forwards [runtime.FreshByConstruction].
+func (s *seamBackedProvider) LivenessReadsFresh() bool { return s.raw.LivenessReadsFresh() }
+
 // FindRuntimesBySessionID implements [runtime.ProcessTableScanner] (non-seam).
 func (s *seamBackedProvider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	return s.raw.FindRuntimesBySessionID(id)
@@ -52,4 +70,36 @@ func (s *seamBackedProvider) TerminateRuntime(r runtime.LiveRuntime) error {
 // SleepCapability passes through to the underlying provider (non-seam).
 func (s *seamBackedProvider) SleepCapability(name string) runtime.SessionSleepCapability {
 	return s.raw.SleepCapability(name)
+}
+
+// ObserveLivenessWithError passes the underlying provider's three-outcome
+// liveness through (non-seam); the seams expose only a bool liveness read.
+func (s *seamBackedProvider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	return s.raw.ObserveLivenessWithError(name, processNames)
+}
+
+// ListRunningComplete passes the underlying provider's listing attestation
+// through; the seams route ListRunning to the same raw listing.
+func (s *seamBackedProvider) ListRunningComplete() bool {
+	return s.raw.ListRunningComplete()
+}
+
+// InputFencing passes through to the underlying provider (non-seam).
+func (s *seamBackedProvider) InputFencing(name string) runtime.InputFencing {
+	return s.raw.InputFencing(name)
+}
+
+// NudgeFenced passes through to the underlying provider (non-seam).
+func (s *seamBackedProvider) NudgeFenced(ctx context.Context, name string, content []runtime.ContentBlock, n runtime.FencedNudge) error {
+	return s.raw.NudgeFenced(ctx, name, content, n)
+}
+
+// SendKeysFenced passes through to the underlying provider (non-seam).
+func (s *seamBackedProvider) SendKeysFenced(ctx context.Context, name string, fence runtime.InputFence, keys ...string) error {
+	return s.raw.SendKeysFenced(ctx, name, fence, keys...)
+}
+
+// InterruptFenced passes through to the underlying provider (non-seam).
+func (s *seamBackedProvider) InterruptFenced(ctx context.Context, name string, fence runtime.InputFence) error {
+	return s.raw.InterruptFenced(ctx, name, fence)
 }

@@ -195,6 +195,19 @@ type forceLifecycleProvider struct {
 
 	workerStarted chan struct{}
 	startedOnce   sync.Once
+
+	// awaitAsyncStart blocks until the async-start goroutine has finished,
+	// not merely until its provider Start returned. The two are different
+	// moments and the gap between them is what used to make this test flaky:
+	// enqueuePreparedStartWaveForCity runs the provider Start, then commits
+	// the session's creating -> active transition, and only then releases the
+	// tracker. A sweep stop that lands in the gap now tears the runtime down
+	// through Manager.Suspend's sweep-only creating latitude, writing nothing
+	// to the row, which stays its start's; this test still waits out the gap
+	// so the second sweep stops a committed row, the ordinary path (a sweep
+	// stop of a row still reading creating is
+	// TestCityRuntimeForceShutdownStopsALateStartItCanceled's).
+	awaitAsyncStart func() bool
 }
 
 func newForceLifecycleProvider() *forceLifecycleProvider {
@@ -212,6 +225,15 @@ func (p *forceLifecycleProvider) Start(ctx context.Context, name string, cfg run
 		p.startedOnce.Do(func() { close(p.workerStarted) })
 	}
 	return err
+}
+
+// setAwaitAsyncStart installs the async-start barrier. The test can only build
+// it once the CityRuntime exists, so it is set after construction and read
+// under the same lock ListRunning already takes.
+func (p *forceLifecycleProvider) setAwaitAsyncStart(fn func() bool) {
+	p.evMu.Lock()
+	defer p.evMu.Unlock()
+	p.awaitAsyncStart = fn
 }
 
 func (p *forceLifecycleProvider) record(ev string) {
@@ -235,17 +257,38 @@ func (p *forceLifecycleProvider) ListRunning(prefix string) ([]string, error) {
 			call++
 		}
 	}
+	awaitAsyncStart := p.awaitAsyncStart
 	p.evMu.Unlock()
 
+	// The snapshot is taken before the release, so the first sweep still sees
+	// an empty fleet and the worker is genuinely late. That is the scenario
+	// this test exists for, and it is unchanged.
 	running, err := p.Fake.ListRunning(prefix)
 	if call == 1 {
 		p.release("worker")
 		select {
 		case <-p.workerStarted:
 		case <-time.After(hangBudget):
+			p.record("workerStartTimedOut")
+		}
+		// Provider Start has returned; the session's creating -> active commit
+		// has not necessarily landed yet. Wait for the whole async-start
+		// goroutine so the second sweep stops a committed row, the ordinary
+		// path (a sweep stop of a row still reading creating is
+		// TestCityRuntimeForceShutdownStopsALateStartItCanceled's).
+		if awaitAsyncStart != nil && !awaitAsyncStart() {
+			p.record("asyncStartWaitTimedOut")
 		}
 	}
 	return running, err
+}
+
+// Stop is recorded so the trace says whether the late sweep even ATTEMPTED a
+// stop — an empty lateRunning and a stop that did not take look identical
+// otherwise (ga-0q686).
+func (p *forceLifecycleProvider) Stop(name string) error {
+	p.record("Stop:" + name)
+	return p.Fake.Stop(name)
 }
 
 func (p *forceLifecycleProvider) ConfigureServer() error { return nil }
@@ -268,6 +311,7 @@ var (
 // live. It also confirms the owned+enumerated gate lets the teardown through
 // on the force path.
 func TestCityRuntimeForceShutdownTearsDownAfterLateAsyncSweep(t *testing.T) {
+	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 30, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -306,6 +350,9 @@ func TestCityRuntimeForceShutdownTearsDownAfterLateAsyncSweep(t *testing.T) {
 		stderr:              ioDiscard{},
 	}
 	markOwnedForTest(cr)
+	// hangBudget rather than an unbounded wait: a regression that never
+	// commits the start should fail this test loudly instead of hanging it.
+	sp.setAwaitAsyncStart(func() bool { return cr.asyncStarts.wait(hangBudget) })
 
 	tp := TemplateParams{Command: "worker", SessionName: "worker", TemplateName: "worker"}
 	if got := executePlannedStartsTraced(
@@ -316,7 +363,7 @@ func TestCityRuntimeForceShutdownTearsDownAfterLateAsyncSweep(t *testing.T) {
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		time.Minute,
@@ -340,6 +387,11 @@ func TestCityRuntimeForceShutdownTearsDownAfterLateAsyncSweep(t *testing.T) {
 		if e == "ListRunning" {
 			listRunnings++
 		}
+		// Either barrier expiring turns the assertions below into a coin flip,
+		// so name the expiry instead of letting it resurface as a flake.
+		if e == "workerStartTimedOut" || e == "asyncStartWaitTimedOut" {
+			t.Fatalf("%s: the late async start did not land within hangBudget (%s) (events: %v)", e, hangBudget, ev)
+		}
 	}
 	if listRunnings < 2 {
 		t.Fatalf("ListRunning calls = %d, want a second snapshot for force async-start cleanup (events: %v)", listRunnings, ev)
@@ -351,6 +403,8 @@ func TestCityRuntimeForceShutdownTearsDownAfterLateAsyncSweep(t *testing.T) {
 		t.Fatalf("TeardownServer landed before the last (late-async) ListRunning (events: %v); a session created between the sweeps would be killed ungracefully", ev)
 	}
 	if sp.IsRunning("worker") {
-		t.Fatal("force shutdown missed the late async-started runtime")
+		// The four assertions above all print ev; this one did not, so the only
+		// assertion that ever fires was the only undiagnosable one (ga-0q686).
+		t.Fatalf("force shutdown missed the late async-started runtime (events: %v)", ev)
 	}
 }

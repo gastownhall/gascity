@@ -9,12 +9,18 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // outputTurn is a single conversation turn in the unified output response.
 type outputTurn struct {
+	// ID is the provider transcript entry ID. It is the identifier the
+	// transcript pagination cursors match on, so a client that renders a turn
+	// can page from it without a second lookup. It is omitted for an entry the
+	// provider gave no ID, since no cursor could match one.
+	ID        string `json:"id,omitempty"`
 	Role      string `json:"role"`
 	Text      string `json:"text"`
 	Timestamp string `json:"timestamp,omitempty"`
@@ -51,10 +57,11 @@ func (s *Server) resolveAgentTranscript(name string, agentCfg config.Agent) (*ag
 	}
 
 	state.sessionName = agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
-	state.provider = strings.TrimSpace(agentCfg.Provider)
-	if state.provider == "" {
-		state.provider = strings.TrimSpace(cfg.Workspace.Provider)
+	providerName := strings.TrimSpace(agentCfg.Provider)
+	if providerName == "" {
+		providerName = strings.TrimSpace(cfg.Workspace.Provider)
 	}
+	state.provider = agentTranscriptProvider(nil, providerName, cfg)
 	state.workDir = s.resolveAgentWorkDir(agentCfg, name)
 	if state.workDir == "" {
 		return state, nil
@@ -79,6 +86,7 @@ func (s *Server) resolveAgentTranscript(name string, agentCfg config.Agent) (*ag
 			if catalog, err := s.workerSessionCatalog(store); err == nil {
 				if info, err := catalog.Get(state.sessionID); err == nil {
 					state.sessionKey = strings.TrimSpace(info.SessionKey)
+					state.provider = agentTranscriptProvider(&info, providerName, cfg)
 				}
 			}
 		}
@@ -247,4 +255,37 @@ func workerHandleRunning(ctx context.Context, handle interface {
 		return false, err
 	}
 	return state.Phase != worker.PhaseStopped && state.Phase != worker.PhaseFailed, nil
+}
+
+// agentTranscriptProvider resolves the provider string transcript discovery
+// and reads dispatch on. The session bead's family metadata wins
+// (builtin_ancestor, then provider_kind) because a custom provider's name
+// carries no family signal ("glm53" is a zcode seat) or a misleading one
+// ("kimi-k3-manifold" is a claude seat). Without a bead, or on a bead stamped
+// before family metadata existed, the config chain's builtin ancestor
+// (config.BuiltinFamily) takes over. Only a name with no resolvable family
+// falls through unchanged. PR #6144 gave SessionHandle.historyProvider a
+// provider_kind rung ahead of the recorded provider name for the same reason,
+// but the two ladders are deliberately not identical: historyProvider leads
+// with the session Profile and falls back to the bead's recorded provider,
+// while this helper takes no Profile rung and falls back to the config chain
+// because a stamp-less bead's recorded name can be the misleading alias this
+// fix repairs. Within this API path the resolved string single-sources both
+// DiscoverTranscript and ReadTranscript, so the file found and the reader
+// used agree.
+func agentTranscriptProvider(info *session.Info, providerName string, cfg *config.City) string {
+	if info != nil {
+		if family := strings.TrimSpace(info.BuiltinAncestor); family != "" {
+			return family
+		}
+		if kind := strings.TrimSpace(info.ProviderKind); kind != "" {
+			return kind
+		}
+	}
+	if cfg != nil {
+		if family := strings.TrimSpace(config.BuiltinFamily(providerName, cfg.Providers)); family != "" {
+			return family
+		}
+	}
+	return providerName
 }

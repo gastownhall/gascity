@@ -140,6 +140,11 @@ type ListAllOptions struct {
 	// order that a no-op sort would not stabilize (the cold path returns store
 	// order — the two would disagree). Every CacheFirst caller sets SortCreatedDesc.
 	CacheFirst bool
+	// TierMode sets query.TierMode on each leg. The zero value is the
+	// store's default tier; a federated census states
+	// beads.FederatedReadTier so a relocated sessions binding answers its
+	// ephemeral rows too.
+	TierMode beads.TierMode
 }
 
 // ListedSession pairs the scalar Info projection with the persisted-response
@@ -337,6 +342,23 @@ func (s *Store) listAllBeads(opts ListAllOptions) ([]beads.Bead, error) {
 		Sort:          opts.Sort,
 		Limit:         opts.Limit,
 		Live:          opts.Live,
+		TierMode:      opts.TierMode,
+	}
+	if !opts.IncludeClosed && !opts.Live {
+		// Session bead status is open/closed; richer lifecycle states live in
+		// metadata. Stating the predicate keeps this census cache-servable
+		// under a partial prime, mirroring listSessionBeadsByMetadata. Scoped
+		// to !Live: a Live query bypasses CachingStore's cache path entirely
+		// (query.Live routes straight to the backing store — see
+		// CachingStore.List), so cacheServableForListQueryLocked never sees
+		// it and the predicate would be inert for cache-servability. Setting
+		// it anyway would change the query SHAPE of every Live+non-IncludeClosed
+		// census (e.g. the pool-availability live check in
+		// executePlannedPoolSessionBeadCreate) from {Live:true,Status:""} to
+		// {Live:true,Status:"open"}, which can collide with unrelated
+		// Status=="open"-keyed backing-store error/outage handling that has
+		// nothing to do with this cache fix.
+		base.Status = "open"
 	}
 	// CacheFirst peek — skipped when Live is set (Live wins; the caller demands
 	// a store read, not a cache peek).
@@ -372,8 +394,8 @@ func (s *Store) cachedListUnion(opts ListAllOptions) ([]beads.Bead, bool) {
 	if !ok {
 		return nil, false
 	}
-	typeQuery := beads.ListQuery{Type: BeadType, Sort: opts.Sort, IncludeClosed: opts.IncludeClosed}
-	labelQuery := beads.ListQuery{Label: LabelSession, Sort: opts.Sort, IncludeClosed: opts.IncludeClosed}
+	typeQuery := beads.ListQuery{Type: BeadType, Sort: opts.Sort, IncludeClosed: opts.IncludeClosed, TierMode: opts.TierMode}
+	labelQuery := beads.ListQuery{Label: LabelSession, Sort: opts.Sort, IncludeClosed: opts.IncludeClosed, TierMode: opts.TierMode}
 	typeRows, typeOK := cached.CachedList(typeQuery)
 	labelRows, labelOK := cached.CachedList(labelQuery)
 	if !typeOK || !labelOK {

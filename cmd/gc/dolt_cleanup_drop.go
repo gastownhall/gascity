@@ -65,8 +65,12 @@ var cleanupLiveSessionProbeTimeout = 2 * time.Second
 // classifies them with planDoltDrops against the protection list, and (when
 // --force is set) drops each stale name. Errors are recorded into the
 // report. It returns false only when a force-mode safety guard refuses cleanup
-// and the caller must skip the remaining destructive stages.
+// and the caller must skip the remaining destructive stages. A legacy-fallback
+// port is never scanned or dropped; runDoltCleanup records that refusal.
 func runDropStage(report *CleanupReport, opts cleanupOptions) bool {
+	if opts.PortResolution.Fallback {
+		return true
+	}
 	if opts.DoltClient == nil {
 		if opts.DoltClientOpenErr != nil {
 			recordCleanupError(report, "drop", "", opts.DoltClientOpenErr)
@@ -179,7 +183,8 @@ type sqlCleanupDoltClient struct {
 }
 
 // newSQLCleanupDoltClient opens a connection to the resolved Dolt server.
-// Caller must Close() when done.
+// The backing *sql.DB is the shared pooled handle from internal/doltpool,
+// so Close() on the client is a no-op rather than an owner release.
 func newSQLCleanupDoltClient(cityPath, host, port string) (CleanupDoltClient, error) {
 	return openSQLCleanupDoltClient(cityPath, host, port, doltauth.Resolve, managedDoltOpenDB)
 }
@@ -236,6 +241,22 @@ func (c *sqlCleanupDoltClient) DropDatabase(ctx context.Context, name string) er
 	return err
 }
 
+// PurgeDroppedDatabases runs Dolt's purge on rigDB.
+//
+// Connection-context hazard: c.db is the shared pooled handle from
+// internal/doltpool, opened server-level (empty database). The USE below
+// therefore mutates a connection that conn.Close() returns to the pool
+// still bound to rigDB, where any other caller may draw it next. There
+// is no restore: the connection started with no database selected, and
+// MySQL has no "USE nothing" to put it back.
+//
+// Safe today only because every other query on this pooled server-level
+// handle is database-context-independent — SHOW DATABASES, fully
+// qualified names, or its own USE. That is an invariant, not an
+// accident: any unqualified query added to a server-level pooled client
+// would silently run against whichever database a previous borrower left
+// selected. New callers must qualify their identifiers or issue their
+// own USE.
 func (c *sqlCleanupDoltClient) PurgeDroppedDatabases(ctx context.Context, rigDB string) error {
 	if !validDoltDatabaseIdentifier(rigDB) {
 		return fmt.Errorf("invalid database identifier %q", rigDB)
@@ -280,6 +301,8 @@ func (c *sqlCleanupDoltClient) ProbeLiveSessions(ctx context.Context) (map[strin
 	return out, nil
 }
 
+// Close is a no-op: the underlying *sql.DB is the shared pooled handle
+// owned by internal/doltpool and must outlive this client.
 func (c *sqlCleanupDoltClient) Close() error {
-	return c.db.Close()
+	return nil
 }

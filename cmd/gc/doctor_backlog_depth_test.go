@@ -8,6 +8,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
 func TestClassifyBacklog(t *testing.T) {
@@ -125,5 +127,39 @@ func TestBacklogDepthCheckStoreErrorIsGraceful(t *testing.T) {
 	}
 	if check.CanFix() {
 		t.Errorf("CanFix = true, want false (read-only observability check)")
+	}
+}
+
+// A beads nudge queue record is a delivery chore, as a gc:nudge shadow is
+// (DES-NQ D14): without it a city in beads mode reads its queue as backlog.
+func TestBacklogDepthCountsNudgeQueueRecordsAsNotifications(t *testing.T) {
+	store := openShimTestBeadsStore(t)
+	queue, err := storebinding.NewBeadsNudgeQueue(beads.NudgesStore{Store: store})
+	if err != nil {
+		t.Fatalf("NewBeadsNudgeQueue: %v", err)
+	}
+	now := time.Now().UTC()
+	if err := queue.Enqueue(nudgequeue.Item{ID: "n-backlog", Agent: "alpha/worker", Source: "test", Message: "hi", CreatedAt: now, DeliverAfter: now, ExpiresAt: now.Add(time.Hour)}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	open, err := store.ListOpen("open")
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	var records []beads.Bead
+	for _, b := range open {
+		if storebinding.IsNudgeQueueRecord(b) {
+			records = append(records, b)
+		}
+	}
+	if len(records) != 1 {
+		t.Fatalf("open queue records = %d, want 1", len(records))
+	}
+	if !isNotificationBacklogBead(records[0]) {
+		t.Fatalf("isNotificationBacklogBead(%+v) = false, want a queue record counted as a notification chore", records[0])
+	}
+	b := classifyBacklog(records, map[string]bool{records[0].ID: true})
+	if b.notification != 1 || len(b.real) != 0 {
+		t.Fatalf("classifyBacklog = notification %d, real %d; want the record as a notification, not real work", b.notification, len(b.real))
 	}
 }

@@ -26,7 +26,7 @@ const (
 	// call needs an unbounded hold; the ceiling comfortably exceeds any realistic
 	// silent operation while stopping an oversized --duration (e.g. 8760h) from
 	// pinning a session's timers for an effectively unbounded window.
-	maximumHeartbeatDuration = 12 * time.Hour
+	maximumHeartbeatDuration = session.MaxHeartbeatDuration
 )
 
 // validateHeartbeatDuration bounds a requested hold against the floor and
@@ -134,18 +134,31 @@ func cmdRuntimeHeartbeat(duration time.Duration, jsonOutput bool, stdout, stderr
 // doRuntimeHeartbeat sets held_until on the session bead to suppress
 // idle-timeout and max-session-age timers for the specified duration.
 // Extracted for testability.
-func doRuntimeHeartbeat(store beads.Store, duration time.Duration, display, sessionName string, jsonOutput bool, stdout, stderr io.Writer) int {
-	sessionID, err := session.ResolveSessionID(store, sessionName)
+func doRuntimeHeartbeat(sessStore beads.Store, duration time.Duration, display, sessionName string, jsonOutput bool, stdout, stderr io.Writer) int {
+	sessionID, err := session.ResolveSessionID(sessStore, sessionName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc runtime heartbeat: resolving session %q: %v\n", display, err) //nolint:errcheck
 		return 1
 	}
 
-	heldUntil := time.Now().Add(duration).UTC().Format(time.RFC3339)
-	if err := store.SetMetadataBatch(sessionID, map[string]string{
-		"held_until": heldUntil,
-	}); err != nil {
+	// The disposition's Heartbeat cell, decided on a fresh read and fenced:
+	// it replaces held_until, as legacy's did, so a heartbeat-shaped ∞ heals;
+	// an operator's suspend owns held_until and is left as it is.
+	now := time.Now()
+	w, err := sessionFrontDoor(sessStore).ApplyDispositionFresh(sessionID, session.ActorAgent, session.DispEvent{Kind: session.EvHeartbeat, Until: now.Add(duration)}, nil, now)
+	heldUntil := w.To.Heartbeat.UTC().Format(time.RFC3339)
+	switch {
+	case err != nil:
 		fmt.Fprintf(stderr, "gc runtime heartbeat: setting hold: %v\n", err) //nolint:errcheck
+		return 1
+	case w.Result == session.CommitClosed:
+		fmt.Fprintf(stderr, "gc runtime heartbeat: session %q is closed\n", display) //nolint:errcheck
+		return 1
+	case w.Result != session.CommitLanded:
+		fmt.Fprintf(stderr, "gc runtime heartbeat: setting hold: lost to concurrent writes; retry\n") //nolint:errcheck
+		return 1
+	case w.To.KeepsSlot():
+		fmt.Fprintf(stderr, "gc runtime heartbeat: session %q is suspended by an operator; its hold is left as it is\n", display) //nolint:errcheck
 		return 1
 	}
 
