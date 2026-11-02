@@ -69,12 +69,19 @@ title = "Inspect {{convoy_id}}"
 		t.Fatalf("input convoy metadata = %+v, want %+v", created.Metadata, wantMetadata)
 	}
 
+	// gk-3n3jk dedup veto (mayor word-said, ci-wisp-pvaz7t 2026-11-02): a
+	// re-fire while the first container is still open must REUSE it. Every
+	// observed re-pour defect presented as a second synthetic "input convoy
+	// for <bead>" minted beside the still-open first, whose fresh key then
+	// justified a duplicate workflow root. Consecutive invocations are
+	// idempotent at the mint edge; a fresh container is minted only once
+	// the first is terminal (see invocation_dedup_test.go).
 	again, err := PrepareInvocation(context.Background(), store, "work", []string{dir}, target.ID, nil)
 	if err != nil {
 		t.Fatalf("PrepareInvocation again: %v", err)
 	}
-	if again.InputConvoy == inv.InputConvoy {
-		t.Fatalf("input convoy was reused: first=%s second=%s", inv.InputConvoy, again.InputConvoy)
+	if again.InputConvoy != inv.InputConvoy {
+		t.Fatalf("input convoy was not reused: first=%s second=%s", inv.InputConvoy, again.InputConvoy)
 	}
 }
 

@@ -90,6 +90,37 @@ func TestOnFormulaNeedsAttachmentParkedBrakeVeto(t *testing.T) {
 			wantParked: true,
 		},
 		{
+			// gk-3n3jk (intake re-fires gk-6wed9→gk-h8sdl, gk-y6t8r→gk-ojstx):
+			// a parked branch_ready+auto_push=false bead holds its deliverable
+			// local-only; re-pouring duplicates it. No halt stamp needed —
+			// the metadata pair is the brake.
+			name:       "h8sdl shape: branch_ready=true + auto_push=false, no halt",
+			status:     "open",
+			metadata:   map[string]string{"branch_ready": "true", "auto_push": "false"},
+			wantParked: true,
+		},
+		{
+			name:       "case/whitespace variant of the parked-deliverable stamps",
+			status:     "open",
+			metadata:   map[string]string{"branch_ready": "TRUE ", "auto_push": " False"},
+			wantParked: true,
+		},
+		{
+			// Discriminators: only the pair parks. A pushed deliverable
+			// (auto_push=true) or a not-yet-ready branch (branch_ready
+			// absent) is ordinary pool work.
+			name:       "branch_ready=true + auto_push=true: pushed, not parked",
+			status:     "open",
+			metadata:   map[string]string{"branch_ready": "true", "auto_push": "true"},
+			wantParked: false,
+		},
+		{
+			name:       "auto_push=false alone: branch not ready, pour proceeds",
+			status:     "open",
+			metadata:   map[string]string{"auto_push": "false"},
+			wantParked: false,
+		},
+		{
 			// Precision discriminator: an ordinary label is not a brake —
 			// the routed-raw repair must keep attaching for plain rows.
 			name:       "plain label, no brake: the footgun stays repaired",

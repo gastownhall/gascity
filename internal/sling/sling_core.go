@@ -332,6 +332,15 @@ type attachmentDecision struct {
 // brakes, a dispatch hold label (hold:mayor / hold:external), or a
 // terminal non-pool route. Returns the reason for the warning line when
 // parked.
+// Packs-convention metadata keys the mol-polecat-work formula stamps on a
+// bead whose deliverable is parked local-only (branch pushed-or-held per
+// auto_push, marked ready, never handed to the refinery). The engine owns no
+// gc.* spelling for them; they exist only as the formula writes them.
+const (
+	branchReadyMetadataKey = "branch_ready"
+	autoPushMetadataKey    = "auto_push"
+)
+
 func parkedBrake(b *beads.Bead) (bool, string) {
 	if strings.TrimSpace(b.Status) == "deferred" {
 		return true, "status=deferred"
@@ -362,6 +371,19 @@ func parkedBrake(b *beads.Bead) (bool, string) {
 	// veto here.
 	if r := strings.ToLower(strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey])); r == "human" || r == "gastown.mayor" {
 		return true, "routed_to=" + r
+	}
+	// gk-3n3jk (mayor word-said 08:03Z, intake re-fire instances gk-6wed9→
+	// gk-h8sdl / gk-y6t8r→gk-ojstx): a bead parked branch_ready=true with
+	// auto_push=false holds its deliverable local-only — the work exists on
+	// a branch awaiting the human/GC-BUILD lane. Re-pouring duplicates or
+	// clobbers that deliverable and cross-wires the new molecule's steps
+	// onto draining agents. The pair is the packs-convention stamp from
+	// mol-polecat-work.toml's branch-ready halt; unlike gc.* keys it is
+	// un-prefixed there, so the names are read exactly as the formula
+	// writes them.
+	if strings.EqualFold(strings.TrimSpace(b.Metadata[branchReadyMetadataKey]), "true") &&
+		strings.EqualFold(strings.TrimSpace(b.Metadata[autoPushMetadataKey]), "false") {
+		return true, "branch_ready+auto_push=false"
 	}
 	return false, ""
 }

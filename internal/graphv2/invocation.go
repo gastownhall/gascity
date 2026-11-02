@@ -413,11 +413,45 @@ func NormalizeInputConvoy(store beads.Store, targetID string) (string, error) {
 	if target.Type == "convoy" {
 		return target.ID, nil
 	}
+	// gk-3n3jk dedup veto (mayor word-said, ci-wisp-pvaz7t 2026-11-02T08:03Z):
+	// skip the sling/wrap when an OPEN input convoy already exists for the
+	// target bead. Every observed re-pour (gk-f4gr 3x, the gk-bx4v convoy
+	// pair, the second 5ryve convoy, the h8sdl/ojstx intake re-fires) first
+	// presented as a second synthetic "input convoy for <bead>" minted while
+	// the first was still open — the fresh convoy key then justified a fresh
+	// workflow root. Returning the existing convoy makes a re-fire
+	// idempotent at the mint edge itself, whatever caller or identity
+	// triggers it. Best-effort like the other dedup reads here: a lookup
+	// failure falls through to the pre-existing mint behavior rather than
+	// failing every pour on a transient store error.
+	if existing := openTrackingConvoy(store, target.ID); existing != "" {
+		return existing, nil
+	}
 	inputConvoy, err := CreateSingleItemInputConvoy(store, target)
 	if err != nil {
 		return "", err
 	}
 	return inputConvoy.ID, nil
+}
+
+// openTrackingConvoy returns the ID of the oldest non-terminal convoy that
+// already tracks targetID, or "" when none exists.
+// TrackingConvoysForItem sorts created_at ascending, so the first open hit is
+// the original pour's container — the one a re-fire must reuse instead of
+// minting beside. Callers treat "" as "no dedup evidence, mint normally",
+// including when the lookup itself failed: the dedup veto improves
+// idempotency at the mint edge, it does not gate the pour on a store read.
+func openTrackingConvoy(store beads.Store, targetID string) string {
+	convoys, err := convoycore.TrackingConvoysForItem(store, targetID)
+	if err != nil {
+		return ""
+	}
+	for _, c := range convoys {
+		if !convoycore.IsTerminalStatus(c.Status) {
+			return c.ID
+		}
+	}
+	return ""
 }
 
 // CreateSingleItemInputConvoy creates a system-created one-item convoy for a
