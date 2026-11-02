@@ -194,3 +194,50 @@ func TestProtocolSessionNoticeDeliversTheReminderText(t *testing.T) {
 		t.Fatalf("op after the pass = %+v, want it closed delivered", got)
 	}
 }
+
+// A wait-idle gc session nudge to an idle t3bridge session runs the CLI's
+// inline pass: the lane delivers it once and closes it succeeded via live.
+func TestSessionNudgeLaneInlinePassDeliversToAProtocolSession(t *testing.T) {
+	c := newCLILaneCity(t)
+	sp := c.asT3Bridge()
+	var stdout, stderr bytes.Buffer
+	handled, code := deliverSessionNudgeLane(c.target, c.store, sp, cliLaneTestMessage, nudgeDeliveryWaitIdle, "k-t3-deliver", false, &stdout, &stderr)
+	if !handled || code != 0 {
+		t.Fatalf("deliverSessionNudgeLane = %v, %d; stderr=%s", handled, code, stderr.String())
+	}
+	if nudges := c.nudges(); len(nudges) != 1 || nudges[0].Message != cliLaneTestMessage {
+		t.Fatalf("deliveries %+v, want the message verbatim once", nudges)
+	}
+	op := c.only(t)
+	if op.Status != opjournal.StatusClosed || op.Outcome.Arm != opjournal.ArmSucceeded || op.Outcome.Result.Via != laneViaLive {
+		t.Fatalf("op %+v, want closed succeeded via live", op)
+	}
+	if got := stdout.String(); got != "Nudged "+c.target.agentKey()+"\n" {
+		t.Fatalf("stdout %q", got)
+	}
+}
+
+// An immediate gc session nudge into a t3bridge session's running turn is
+// not steered (laneSteerCap: the runtime deduplicates keyed deliveries): it
+// waits for the turn boundary and is reported queued.
+func TestSessionNudgeLaneImmediateMidTurnProtocolSessionIsQueued(t *testing.T) {
+	c := newCLILaneCity(t)
+	sp := c.asT3Bridge()
+	c.sp.TurnHistoryScripts = map[string][]runtime.TurnHistory{c.name: {running(t3Turn("t1"))}}
+	var stdout, stderr bytes.Buffer
+	handled, code := deliverSessionNudgeLane(c.target, c.store, sp, cliLaneTestMessage, nudgeDeliveryImmediate, "", false, &stdout, &stderr)
+	if !handled || code != 0 {
+		t.Fatalf("deliverSessionNudgeLane = %v, %d; stderr=%s", handled, code, stderr.String())
+	}
+	if nudges := c.nudges(); len(nudges) != 0 {
+		t.Fatalf("deliveries %+v into a running turn", nudges)
+	}
+	op := c.only(t)
+	if op.Status == opjournal.StatusClosed || op.Executor != opjournal.ExecutorLane {
+		t.Fatalf("op %+v, want an open lane op", op)
+	}
+	want := "Queued nudge for " + c.target.agentKey() + " in the conversation lane (the session is mid-turn; the controller delivers it at the next idle boundary)\n"
+	if got := stdout.String(); got != want {
+		t.Fatalf("stdout %q, want %q", got, want)
+	}
+}

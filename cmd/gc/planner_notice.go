@@ -10,8 +10,8 @@ package main
 // becomes one message{notice, boundary, wake: live_only} op that the lane
 // delivers at the session's next boundary. With the list empty, without a
 // running lane host for the sessions store, or for a session no lane host
-// can type into (a protocol-mode runtime no other host serves), the
-// reminders are delivered exactly as before.
+// serves (a protocol-mode runtime whose turn starts are not recorded, with no
+// host stamp), the reminders are delivered exactly as before.
 //
 // The lane host is found through the controller's lane-host registry by the
 // sessions store the reminder writes its markers to, so the legacy reconciler

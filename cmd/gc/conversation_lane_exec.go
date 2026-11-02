@@ -541,9 +541,13 @@ func (e *conversationLaneExec) quiescenceDeadline(obs worker.LiveObservation) ti
 // producers' rule says the executor serves the runtime (laneServesLive: a
 // keystroke-mode runtime, or a protocol-mode one whose turns, starts
 // included, its own protocol reports, its boundary, since a turn whose start
-// is not recorded never reads as in progress), the session's turn handle
-// agrees for a protocol-mode one, and the conversation's row does not stamp
-// it as hosted elsewhere for its current generation (DES-BX D7). Dedup is
+// is not recorded never reads as in progress) and the conversation's row
+// does not stamp it as hosted elsewhere for its current generation (DES-BX
+// D7). The traits term restates laneServesLive from the session's turn
+// handle, which reads the same provider traits, so the two agree in every
+// reachable state (TestLaneServesLiveMatchesExecutorCaps); it is not a
+// second gate, and the conjunct is kept so the executor calls the
+// producers' rule itself rather than a copy of it. Dedup is
 // the worker boundary's read of whether the routed runtime deduplicates
 // keyed deliveries. A live runtime steers where its steer mode and the
 // session row allow it (e.steerable; D-STEER), per laneSteerCap, and
@@ -593,7 +597,7 @@ func laneSteerCap(caps opjournal.Caps, steerable bool) bool {
 // the runtime named name: a keystroke-mode runtime, not a protocol-mode one
 // (runtime.TurnInterruptProtocol), whose turns no keystroke starts. The
 // executor's Caps.Live also takes a protocol-mode runtime whose own protocol
-// reports its turns, starts included, which only its turn-traits read tells.
+// records its turn starts (laneServesLive).
 func laneTypesLive(sp runtime.Provider, name string) bool {
 	return runtime.TurnInterruptModeFor(sp, name) != runtime.TurnInterruptProtocol
 }
