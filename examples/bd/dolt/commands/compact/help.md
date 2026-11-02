@@ -142,6 +142,36 @@ gc dolt compact --gc-only --only-db hq
 gc dolt compact --gc-only --dry-run
 ```
 
+## Live-database gate
+
+Every storage-rewriting pass — flatten, the full GC after it, a bare GC, a
+pending-GC retry, and `--gc-only` — ends with a liveness gate on that
+database: the data-dir entry must still exist if it existed before the
+rewrite, and the server must still serve the database's HEAD (probe
+`SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))`, retried
+`GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS` times, default 3, with
+`GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS` seconds between attempts, default 2;
+each probe is bounded by the smaller of 30s and
+`GC_DOLT_COMPACT_CALL_TIMEOUT_SECS`). The gate runs whether the rewrite
+statement itself succeeded or failed.
+
+When the gate fails, compact writes an integrity-quarantine marker with
+reason `live database unavailable after compaction`, emits the
+`dolt.compact.quarantine` event, mails the compactor alert recipient
+(`GC_DOLT_COMPACT_ALERT_TO`, default `mayor`), and aborts the whole run at
+once instead of moving on to the next database: a rewrite that left the
+server without the database fails every client of the city, and the abort
+diagnostic names the selected databases the run did not reach. No
+pending-GC or pending-push bookkeeping is written for a database whose gate
+failed. Databases later in the run are untouched; the quarantined database
+is refused by later runs until an operator clears the marker.
+
+Restore first: bring the database back (from a safety backup, or by moving
+the data-dir entry back), verify the server serves it again (`gc dolt`
+queries are healthy), then remove the marker and rerun
+`gc dolt compact --gc-only --only-db <db>`. See "Compact Quarantine Reasons"
+in `docs/troubleshooting/dolt-bloat-recovery.md`.
+
 ## Archive level
 
 Every GC the compactor issues passes `--archive-level=0`, which writes classic

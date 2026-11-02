@@ -625,6 +625,16 @@ set_head() {
   [ -n "$state_file" ] || return 0
   printf '%%s\n' "$1" > "$state_file"
 }
+# plain_head is current_head without the mode side effects: the live-probe
+# arm answers from the real state so the head_changes_* mode counters other
+# arms rely on never move.
+plain_head() {
+  if [ -n "$state_file" ] && [ -f "$state_file" ]; then
+    sed -n '1p' "$state_file"
+  else
+    printf 'headcommit\n'
+  fi
+}
 current_hash() {
   if [ -n "$hash_state_file" ] && [ -f "$hash_state_file" ]; then
     sed -n '1p' "$hash_state_file"
@@ -922,6 +932,61 @@ case "$query" in
     else
       print_cell 600
     fi
+    exit 0
+    ;;
+  *"SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))"*)
+    # Live-database gate served-HEAD probe. Answers for every mode by
+    # default from plain_head (never current_head, so the head_changes_*
+    # counters other arms rely on stay untouched) and counts its calls per
+    # database under its own counter file.
+    probe_calls_file="$state_file.$db.live-probe-calls"
+    probe_calls=0
+    if [ -f "$probe_calls_file" ]; then
+      probe_calls="$(cat "$probe_calls_file")"
+    fi
+    probe_calls=$((probe_calls + 1))
+    printf '%%s\n' "$probe_calls" > "$probe_calls_file"
+    if [ -f "$state_file.$db-unserved" ]; then
+      printf 'database not found: %%s\n' "$db" >&2
+      exit 1049
+    fi
+    case "$mode" in
+      live_probe_unserved)
+        printf 'database not found: %%s\n' "$db" >&2
+        exit 1049
+        ;;
+      live_probe_wrong_db)
+        print_cell "othersite:$(plain_head)"
+        exit 0
+        ;;
+      live_probe_bad_head)
+        print_cell "$db:"
+        exit 0
+        ;;
+      live_probe_no_colon)
+        print_cell garbage
+        exit 0
+        ;;
+      live_probe_uppercase_db)
+        print_cell "$(printf '%%s' "$db" | tr '[:lower:]' '[:upper:]'):$(plain_head)"
+        exit 0
+        ;;
+    esac
+    if [ "$mode" = "live_probe_transient_once" ] && [ -f "$state_file.$db-gc-done" ]; then
+      # First probe after the rewrite fails once, then the service recovers.
+      post_gc_file="$state_file.$db.live-post-gc-calls"
+      post_gc_calls=0
+      if [ -f "$post_gc_file" ]; then
+        post_gc_calls="$(cat "$post_gc_file")"
+      fi
+      post_gc_calls=$((post_gc_calls + 1))
+      printf '%%s\n' "$post_gc_calls" > "$post_gc_file"
+      if [ "$post_gc_calls" -eq 1 ]; then
+        printf 'database not found: %%s (transient)\n' "$db" >&2
+        exit 1049
+      fi
+    fi
+    print_cell "$db:$(plain_head)"
     exit 0
     ;;
   *"SELECT HASHOF('HEAD')"*)
@@ -1504,6 +1569,16 @@ case "$query" in
       printf "error on line 1 for query CALL DOLT_GC('--full'): Error 1105 (HY000): row read wait bigger than connection timeout\n" >&2
       exit 1
     fi
+    # Live-gate fault injection: activate only after the rewrite ran, never
+    # during a GC-first baseline probe (which happens before this arm).
+    case "$mode" in
+      live_vanish_after_gc)
+        rm -rf -- "${GC_DOLT_DATA_DIR:-}/$db"
+        ;;
+      live_probe_transient_once)
+        : > "$state_file.$db-gc-done"
+        ;;
+    esac
     rm -rf -- "${GC_DOLT_DATA_DIR:-}/$db/.dolt/noms/oldgen"
     exit 0
     ;;

@@ -562,6 +562,7 @@ should treat these strings as the current vocabulary:
 | `post-flatten value hash probe returned empty value` | The database hash query returned an empty value after flatten. |
 | `post-flatten value hash changed with row-count increase` | The database hash changed after at least one stable-table row-count gain. *(auto-clearable — see below)* |
 | `post-flatten value hash changed without row-count increase` | The database hash changed without a row-count gain. *(auto-clearable — see below)* |
+| `live database unavailable after compaction` | A storage rewrite (flatten, full GC, bare GC, pending-GC retry, `--gc-only`) left the database out of the data dir or the server stopped serving it. Never auto-cleared; restore the database first. |
 
 Four of these reasons are known writer-race false positives and are
 **auto-clearable**. On its next scheduled run, `gc dolt compact`'s flatten
@@ -579,6 +580,19 @@ database name, the preflight/flatten/post-verify HEADs, preflight and
 postflight database value hashes when available, `integrity_table_drift` for
 table-level row/hash mismatches, `database_value_hash_drift` for aggregate hash
 drift, and `decision=preserve_marker_manual_review_required`.
+
+The `live database unavailable after compaction` reason comes from the
+live-database gate: after every storage-rewriting pass, compact proves the
+data-dir entry still exists (if it existed before the rewrite) and that the
+server still serves the database's HEAD. When the gate fails, compact
+quarantines the database with the gate's evidence (`live_gate_steps`,
+`live_gate_failed_step`, `live_gate_probe_failure`, the data-dir path with
+its before/after presence, and the pre-compaction HEAD), aborts the run
+before touching any later database, and names the databases it did not
+reach. Before clearing a marker with this reason, restore the database
+(from a safety backup or by moving the data-dir entry back) and confirm the
+server serves it again — the usual HEAD/hash evidence cannot prove anything
+about a database the server no longer has.
 
 Alert-cadence bookkeeping is deliberately separate from that evidence. The
 compactor stores `seen_count`, `notify_count`, and last-notified fields under
