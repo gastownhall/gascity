@@ -4263,7 +4263,7 @@ export type SessionResponse = {
     activity_source?: 'program' | 'transcript';
     agent_kind?: string;
     /**
-     * The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Empty when the session records none.
+     * The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Sent on every session by Gas City 1.6 and later servers, empty when the session records none; older servers omit it.
      */
     agent_name?: string;
     alias?: string;

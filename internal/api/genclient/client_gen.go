@@ -5758,7 +5758,7 @@ type SessionResponse struct {
 	ActivitySource *SessionResponseActivitySource `json:"activity_source,omitempty"`
 	AgentKind      *string                        `json:"agent_kind,omitempty"`
 
-	// AgentName The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Empty when the session records none.
+	// AgentName The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Sent on every session by Gas City 1.6 and later servers, empty when the session records none; older servers omit it.
 	AgentName              *string               `json:"agent_name,omitempty"`
 	Alias                  *string               `json:"alias,omitempty"`
 	Attached               bool                  `json:"attached"`

@@ -9641,7 +9641,7 @@
             "type": "string"
           },
           "agent_name": {
-            "description": "The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Empty when the session records none.",
+            "description": "The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Sent on every session by Gas City 1.6 and later servers, empty when the session records none; older servers omit it.",
             "type": "string"
           },
           "alias": {

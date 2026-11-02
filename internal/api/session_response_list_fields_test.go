@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -25,8 +27,10 @@ func sessionResponseJSONMap(t *testing.T, r sessionResponse) map[string]any {
 
 // TestSessionToResponseCarriesListIdentityFields pins the optional identity
 // fields `gc session list` needs from the API so its API-routed rows match the
-// local rendering: agent_name, transport and worker_dir (trimmed). They are
-// omitted when empty, and a closed session keeps them.
+// local rendering: agent_name, transport and worker_dir (trimmed). agent_name
+// is always sent ("" when the session records none) so a client can tell a
+// current server from one that predates it; transport and worker_dir are
+// omitted when empty. A closed session keeps them.
 func TestSessionToResponseCarriesListIdentityFields(t *testing.T) {
 	created := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
 	full := session.Info{
@@ -48,7 +52,10 @@ func TestSessionToResponseCarriesListIdentityFields(t *testing.T) {
 	}
 
 	empty := sessionResponseJSONMap(t, sessionToResponse(session.Info{ID: "gc-2", Template: "worker", CreatedAt: created, WorkerDir: "  "}, nil))
-	for _, key := range []string{"agent_name", "transport", "worker_dir"} {
+	if got, ok := empty["agent_name"]; !ok || got != "" {
+		t.Errorf("agent_name on a session that records none = %#v (present %v), want \"\": a current server always sends it", got, ok)
+	}
+	for _, key := range []string{"transport", "worker_dir"} {
 		if _, ok := empty[key]; ok {
 			t.Errorf("%s present on a session that records none: %#v", key, empty[key])
 		}
@@ -63,5 +70,44 @@ func TestSessionToResponseCarriesListIdentityFields(t *testing.T) {
 	}
 	if gotClosed["agent_name"] != "rig/worker-1" {
 		t.Errorf("closed agent_name = %#v, want rig/worker-1", gotClosed["agent_name"])
+	}
+}
+
+// TestHandleSessionListSendsAgentNameOnEveryRow pins the capability signal
+// the CLI reads to tell a current server from an older one: every GET
+// /sessions row carries the agent_name key, including a session that records
+// no agent and a closed one.
+func TestHandleSessionListSendsAgentNameOnEveryRow(t *testing.T) {
+	fs := newSessionFakeState(t)
+	h := newTestCityHandlerWith(t, fs, New(fs))
+	open := createTestSession(t, fs.cityBeadStore, fs.sp, "no agent")
+	closed := createTestSession(t, fs.cityBeadStore, fs.sp, "closed")
+	if err := fs.cityBeadStore.Close(closed.ID); err != nil {
+		t.Fatalf("Close(%s): %v", closed.ID, err)
+	}
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", cityURL(fs, "/sessions?state=all"), nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, item := range body.Items {
+		id, _ := item["id"].(string)
+		seen[id] = true
+		if _, ok := item["agent_name"]; !ok {
+			t.Errorf("row %s (state %v) has no agent_name key: %v", id, item["state"], item)
+		}
+	}
+	for _, id := range []string{open.ID, closed.ID} {
+		if !seen[id] {
+			t.Errorf("row %s missing from GET /sessions?state=all: %v", id, body.Items)
+		}
 	}
 }

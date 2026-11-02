@@ -29,7 +29,7 @@ type sessionResponse struct {
 	Reason      string `json:"reason,omitempty"`
 	Title       string `json:"title"`
 	Alias       string `json:"alias,omitempty"`
-	AgentName   string `json:"agent_name,omitempty" doc:"The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Empty when the session records none."`
+	AgentName   string `json:"agent_name" required:"false" doc:"The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Sent on every session by Gas City 1.6 and later servers, empty when the session records none; older servers omit it."`
 	Provider    string `json:"provider"`
 	Transport   string `json:"transport,omitempty" doc:"How gc drives the session runtime, for example tmux or acp. Empty when unknown."`
 	DisplayName string `json:"display_name,omitempty"`
