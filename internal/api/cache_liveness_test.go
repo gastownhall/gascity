@@ -341,7 +341,7 @@ func setCitySuspendedForTest(t *testing.T, cityPath string, suspended bool) {
 // city store's cache is. Their bodies come from config, the suspension state,
 // runtime probes and the supervisor's maintenance loop, not from the bead
 // cache, so its age says nothing about them, and a CLI that saw it would print
-// the "reconciler may be lagging" footer over output that never came from the
+// its cache-age footer over output that never came from the
 // cache. Neither does GET /status on a suspended city, whose body is built
 // without reading any bead store. GET /beads, which is read from the cache, is
 // the control: it reports the same store's age, as GET /status does once the

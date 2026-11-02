@@ -3721,14 +3721,14 @@ default_branch = "trunk"
 	}
 }
 
-func TestRouteRigList_StaleBannerOver30s(t *testing.T) {
-	// Human output must append a staleness banner when the server reports
-	// a cache age > 30 s.
+func TestRouteRigList_NoCacheAgeFooter(t *testing.T) {
+	// The rig list is not read from the bead cache, so it prints no cache-age
+	// footer on either stream, whatever age a server reports.
 	t.Setenv("GC_DEBUG", "0")
 	cityPath := writeRigListTestCity(t)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-GC-Cache-Age-S", "45")
+		setBehindCacheHeaders(w)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}, "total": 0})
 	}))
@@ -3739,9 +3739,7 @@ func TestRouteRigList_StaleBannerOver30s(t *testing.T) {
 	if code := routeRigList(cityPath, c, "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "cache age: 45s") {
-		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
-	}
+	assertNoCacheAgeFooter(t, stdout.String(), stderr.String())
 }
 
 // writeRigListLagCity writes a city whose city.toml registers frontend and

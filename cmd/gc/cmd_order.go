@@ -1647,8 +1647,9 @@ func orderHistoryEntriesFromAPI(views []api.OrderHistoryView, bounds orderHistor
 
 // renderOrderHistoryFromAPI prints the API-sourced order history to match
 // doOrderHistoryWithStoresResolver's human output. Empty results and
-// rig-column presence are preserved; a staleness banner appends when the
-// supervisor cache age exceeds the shared threshold.
+// rig-column presence are preserved; human output is followed by the
+// cache-age footer on stderr when the server's cache is behind
+// (writeCacheAgeFooter).
 func renderOrderHistoryFromAPI(cr api.CachedRead[[]api.OrderHistoryView], name, rig string, bounds orderHistoryBounds, jsonOutput bool, stdout, stderr io.Writer) int {
 	entries, err := orderHistoryEntriesFromAPI(cr.Body, bounds)
 	if err != nil {
@@ -1709,9 +1710,7 @@ func renderOrderHistoryFromAPI(cr api.CachedRead[[]api.OrderHistoryView], name, 
 		}
 	}
 
-	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck
-	}
+	writeCacheAgeFooter(stderr, cr.AgeSeconds, cr.Refresh)
 	return 0
 }
 
