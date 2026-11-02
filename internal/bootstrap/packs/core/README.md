@@ -83,10 +83,10 @@ supervisor's ACP connection. A queued nudge alone therefore cannot wake an idle
 ACP session in that mode. The remaining default-mode gap is tracked in
 [issue #6080](https://github.com/gastownhall/gascity/issues/6080).
 
-Each run processes at most 20 due beads, oldest due first, and leaves the
-remainder pending, so blocked work being rechecked cannot crowd out ready work.
-Each eligible routing receives its own notification request, even when targets
-are shared. The queue may combine requests into a single turn; the default message
+Each run processes at most 20 due beads and leaves the remainder pending. It
+takes the oldest due first, with work not yet tried ahead of retries and blocked
+rechecks. Each eligible routing receives its own notification request, even when
+targets are shared. The queue may combine requests into a single turn; the default message
 asks the worker to claim and execute work repeatedly until no work remains.
 
 Condition checks run on the controller's orders lane. Dispatch latency depends
