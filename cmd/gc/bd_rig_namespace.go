@@ -119,8 +119,8 @@ var bdRigNamespaceVerbFlags = map[string]struct{ value, bools []string }{
 	"duplicate":     {value: []string{"--of"}},
 	"supersede":     {value: []string{"--with"}},
 	"set-state":     {value: []string{"--reason"}},
-	"comment":       {value: []string{"--author", "--file", "-f"}},
-	"note":          {},
+	"comment":       {value: []string{"--author", "--file", "-f"}, bools: []string{"--stdin"}},
+	"note":          {value: []string{"--file", "-f"}, bools: []string{"--stdin"}},
 	"tag":           {},
 	"label add":     {},
 	"label remove":  {},
@@ -167,7 +167,7 @@ func (c *bdRigNamespaceCheck) check(bdArgs []string) ([]string, string, bool) {
 	}
 	// Everything below writes: it must write this scope's store.
 	for _, f := range []string{"--db", "--database"} {
-		if bdArgsHaveFlag(bdArgs, f) {
+		if bdRigNamespaceFlagSet(verb, sub, bdArgs, f) {
 			return nil, fmt.Sprintf("gc bd: refusing %s %s: rig %s (federation = \"rig\") checks writes against its own store only; use raw bd for another database\n", verb, f, rigNamespaceLabel(c.ns)), true
 		}
 	}
@@ -306,12 +306,41 @@ func bdRigNamespaceHelpOn(verb, sub string, rest []string) bool {
 			key, args = verb+" "+sub, rest[1:]
 		}
 	}
-	value, _ := bdRigNamespaceManifest(key)
+	value, bools := bdRigNamespaceManifest(key)
 	if value == nil {
+		return false
+	}
+	// A flag the manifest does not know could be a value flag that takes the
+	// help token as its value (bd has hidden aliases), and then bd runs the
+	// command: help counts only when the whole argv reads cleanly.
+	if _, ambiguous := bdScanPositionalIDs(args, value, bools, nil); ambiguous {
 		return false
 	}
 	present, on, valid := bdflags.BoolFlagValue(args, value, "--help", "-h")
 	return present && on && valid
+}
+
+// bdRigNamespaceFlagSet reports whether flag is given in an argv read the
+// way pflag reads it with the verb's manifest (a "--" consumed as a value
+// hides nothing): as a value flag with a value, or as a bool flag that is
+// on or carries a value ParseBool rejects (fail closed). A verb without a
+// manifest is read with the global flags only.
+func bdRigNamespaceFlagSet(verb, sub string, args []string, flag string) bool {
+	key := verb
+	if sub != "" {
+		if v, _ := bdRigNamespaceManifest(verb + " " + sub); v != nil {
+			key = verb + " " + sub
+		}
+	}
+	value, _ := bdRigNamespaceManifest(key)
+	if value == nil {
+		value = bdflags.GlobalValueFlags()
+	}
+	if value[flag] {
+		return len(bdflags.FlagValues(args, value, flag)) > 0
+	}
+	present, on, valid := bdflags.BoolFlagValue(args, value, flag)
+	return present && (on || !valid)
 }
 
 func (c *bdRigNamespaceCheck) checkAssign(bdArgs, rest []string) ([]string, string, bool) {
@@ -362,16 +391,16 @@ func (c *bdRigNamespaceCheck) checkCreate(bdArgs, rest []string) ([]string, stri
 		return nil, c.unreadable("create"), true
 	}
 	for _, flag := range []string{"--file", "-f", "--graph"} {
-		if bdArgsHaveFlag(rest, flag) {
+		if bdRigNamespaceFlagSet("create", "", rest, flag) {
 			return nil, fmt.Sprintf("gc bd: refusing create %s: rig %s (federation = \"rig\") stamps every row gc creates, and a batch create cannot be stamped\n", flag, rigNamespaceLabel(c.ns)), true
 		}
 	}
 	for _, flag := range []string{"--deps", "--repo"} {
-		if bdArgsHaveFlag(rest, flag) {
+		if bdRigNamespaceFlagSet("create", "", rest, flag) {
 			return nil, fmt.Sprintf("gc bd: refusing create %s: rig %s (federation = \"rig\") cannot check what it writes outside the new row; use raw bd\n", flag, rigNamespaceLabel(c.ns)), true
 		}
 	}
-	if n := len(bdFlagValues(rest, "--metadata")); n > 1 {
+	if n := len(bdflags.FlagValues(rest, bdSubcmdValueFlags("create"), "--metadata")); n > 1 {
 		return nil, fmt.Sprintf("gc bd: refusing create with %d --metadata flags: bd keeps only the last, so the rig's creation stamp could be lost\n", n), true
 	}
 	writes, msg, refused := bdMetadataWrites("create", rest)
@@ -381,7 +410,7 @@ func (c *bdRigNamespaceCheck) checkCreate(bdArgs, rest []string) ([]string, stri
 	if msg, refused := c.checkStampKey("create", writes); refused {
 		return nil, msg, true
 	}
-	for _, a := range bdFlagValues(rest, "--assignee", "-a") {
+	for _, a := range bdflags.FlagValues(rest, bdSubcmdValueFlags("create"), "--assignee", "-a") {
 		if strings.TrimSpace(a) != "" && !rigNamespacePinAdmitted(c.ns, a) {
 			return nil, c.actorRefusal("create", "a new bead", a), true
 		}
@@ -408,7 +437,7 @@ func (c *bdRigNamespaceCheck) checkByID(verb string, bdArgs, rest []string) ([]s
 	if flag, claims := bdflags.ClaimFlag(verb, rest); claims && verb != "update" {
 		return nil, c.unvettedClaim(verb, flag), true
 	}
-	if verb == "delete" && (bdArgsHaveFlag(rest, "--cascade") || bdArgsHaveFlag(rest, "--from-file")) {
+	if verb == "delete" && (bdRigNamespaceFlagSet(verb, "", rest, "--cascade") || bdRigNamespaceFlagSet(verb, "", rest, "--from-file")) {
 		return nil, fmt.Sprintf("gc bd: refusing delete --cascade/--from-file: rig %s (federation = \"rig\") deletes only rows it can check first\n", rigNamespaceLabel(c.ns)), true
 	}
 	ids, ambiguous := bdScanPositionalIDs(rest, bdSubcmdValueFlags(verb), bdSubcmdBoolFlags(verb), nil)
@@ -436,7 +465,7 @@ func (c *bdRigNamespaceCheck) checkByID(verb string, bdArgs, rest []string) ([]s
 			return nil, c.actorRefusal(verb, subject, actor), true
 		}
 	}
-	for _, a := range bdFlagValues(rest, "--assignee", "-a") {
+	for _, a := range bdflags.FlagValues(rest, bdSubcmdValueFlags(verb), "--assignee", "-a") {
 		if strings.TrimSpace(a) != "" && !rigNamespacePinAdmitted(c.ns, a) {
 			return nil, c.actorRefusal(verb, subject, a), true
 		}
@@ -619,40 +648,6 @@ func bdMetadataWrites(verb string, args []string) ([]bdMetadataWrite, string, bo
 		}
 	}
 	return out, "", false
-}
-
-// bdArgsHaveFlag reports whether a flag appears before "--", bare or with
-// an inline value.
-func bdArgsHaveFlag(args []string, flag string) bool {
-	for _, a := range args {
-		if a == "--" {
-			return false
-		}
-		if a == flag || strings.HasPrefix(a, flag+"=") {
-			return true
-		}
-	}
-	return false
-}
-
-// bdFlagValues returns the values given to any of names before "--", in
-// order, in the separate and the inline spelling.
-func bdFlagValues(args []string, names ...string) []string {
-	var out []string
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if a == "--" {
-			break
-		}
-		for _, n := range names {
-			if a == n && i+1 < len(args) {
-				out = append(out, args[i+1])
-			} else if v, ok := strings.CutPrefix(a, n+"="); ok {
-				out = append(out, v)
-			}
-		}
-	}
-	return out
 }
 
 // bdArgsWithOwnerStamp returns a create argv whose metadata carries the
