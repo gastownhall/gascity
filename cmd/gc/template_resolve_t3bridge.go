@@ -103,12 +103,6 @@ func templateParamsUseT3Bridge(tp TemplateParams) bool {
 }
 
 func effectiveSessionProvider(sessionOverride, citySessionProvider string) string {
-	// "tmux" selects the terminal transport; it does not replace the city's
-	// runtime backend. The default route can still be Herdr, SSH, or another
-	// configured runtime, so staging and prompt-delivery checks must use it.
-	if strings.TrimSpace(sessionOverride) == "tmux" && strings.TrimSpace(citySessionProvider) != "" {
-		return strings.TrimSpace(citySessionProvider)
-	}
 	if strings.TrimSpace(sessionOverride) != "" {
 		return strings.TrimSpace(sessionOverride)
 	}

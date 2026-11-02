@@ -177,20 +177,9 @@ type promptBudgetJSON struct {
 // path) — the caller must treat that as a strict failure and must not
 // write the rendered prompt to stdout.
 func reportPromptDeliveryBudget(prompt string, a *config.Agent, cfg *config.City, resolved *config.ResolvedProvider, stderr io.Writer) (*promptBudgetJSON, error) {
-	effProvider := effectiveSessionProvider(a.Session, cfg.Session.Provider)
-	sessionTransport := config.ResolveSessionCreateTransport(a.Session, resolved)
-	isACP := sessionTransport == config.SessionTransportACP
-
-	providerName := ""
-	if resolved != nil {
-		providerName = resolved.Name
-	}
-	tp := TemplateParams{
-		Prompt: prompt, IsACP: isACP, ResolvedProvider: resolved,
-		HookEnabled:              config.AgentHasHooks(a, &cfg.Workspace, providerName, cfg.Providers),
-		EffectiveSessionProvider: effProvider, CityRuntimes: cfg.Runtimes,
-	}
-	src := tp.startupPromptSource()
+	src := agentStartupPromptSource(cfg, a, resolved, prompt)
+	effProvider := src.RuntimeName
+	isACP := src.IsACP
 	delivery, dErr := src.delivery()
 
 	configuredMode := "arg"
@@ -207,7 +196,7 @@ func reportPromptDeliveryBudget(prompt string, a *config.Agent, cfg *config.City
 		effectiveMode = "hard-fail"
 	case delivery.OversizedFallback:
 		effectiveMode = "nudge-fallback"
-	case src.roleSuppliedByHook():
+	case delivery.EffectiveMode == "hook":
 		effectiveMode = "hook"
 	case isACP || configuredMode == "none":
 		effectiveMode = "nudge"

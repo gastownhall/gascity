@@ -764,3 +764,43 @@ func TestPromptDeliveryBudgetCheck_RendersResolvedWorkDir(t *testing.T) {
 		t.Errorf("workdir %q exists after the check (stat err=%v); doctor must not create it", wantWorkDir, err)
 	}
 }
+
+// TestPromptDeliveryBudgetCheck_HookCarriedRoleIsNotNudgeFallback pins the
+// doctor to the carrier a launch actually uses. An opencode agent on the CLI
+// transport gets its role from the per-generation plugin, so an oversized role
+// never enters argv or a fallback nudge and the check reports no
+// nudge-fallback for it. With hooks_installed = false the launch carries the
+// role again, and so does the warning.
+func TestPromptDeliveryBudgetCheck_HookCarriedRoleIsNotNudgeFallback(t *testing.T) {
+	clearPromptDeliveryBudgetEnv(t)
+	cityPath := t.TempDir()
+	tmpl := writePromptFile(t, cityPath, "prompts/hook-role.md", strings.Repeat("a", 100000))
+	no := false
+	for _, tc := range []struct {
+		name           string
+		hooksInstalled *bool
+		want           doctor.CheckStatus
+	}{
+		{name: "hook carries the role", want: doctor.StatusOK},
+		{name: "hooks_installed=false", hooksInstalled: &no, want: doctor.StatusWarning},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "demo"},
+				Agents: []config.Agent{{
+					Name:           "worker",
+					Provider:       "opencode",
+					Session:        config.SessionTransportTmux,
+					PromptTemplate: tmpl,
+					HooksInstalled: tc.hooksInstalled,
+				}},
+				Providers: builtinProviderAliasesForTest("opencode"),
+			}
+			lookPath := func(name string) (string, error) { return filepath.Join("/usr/bin", name), nil }
+			res := newPromptDeliveryBudgetDoctorCheck(cityPath, cfg, lookPath).Run(&doctor.CheckContext{CityPath: cityPath})
+			if res.Status != tc.want {
+				t.Fatalf("status = %v, want %v; message=%q details=%v", res.Status, tc.want, res.Message, res.Details)
+			}
+		})
+	}
+}

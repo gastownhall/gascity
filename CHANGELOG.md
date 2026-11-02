@@ -15,12 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   messages take precedence. With neither, manual sessions get a short role
   confirmation request, pool workers get the existing claim instruction, and
   other automated sessions get a short startup instruction. Resumes do not
-  repeat this kickoff. ACP, other runtimes, and `hooks_installed = false`
-  keep launch-time role delivery.
-- **`session = "tmux"` uses the city's actual runtime for prompt-delivery
-  checks.** It selects a terminal transport, not necessarily a local tmux
-  backend. Oversized launch prompts on SSH or custom runtimes without a
-  declared fallback now fail rather than assuming tmux nudge support.
+  repeat this kickoff. ACP, other runtimes, a client's provider chat, and
+  `hooks_installed = false` keep launch-time role delivery. `gc prime
+  --strict` and `gc doctor` report such a role as carried by the hook.
 - **Run `gc doctor --fix` in each existing gastown or gascity city after you
   install this build.** gc now pins gastown 0.1.12 and gascity 0.1.7 (see
   Changed) and serves only those pins from the packs it embeds. A city still

@@ -356,3 +356,26 @@ func TestStartupPromptContractClientProviderChatResumeKeepsBeacon(t *testing.T) 
 		})
 	}
 }
+
+// TestStartupPromptContractClientProviderChatFreshStartGetsNoKickoff guards a
+// client's provider chat (#7721) on a hook-primed provider at its fresh start.
+// Its hook supplies no role, so it starts with the beacon on the launch path,
+// as upstream starts it, and never receives the role-confirmation kickoff a
+// manual worker session gets.
+func TestStartupPromptContractClientProviderChatFreshStartGetsNoKickoff(t *testing.T) {
+	city := newHookRoleContractCity(t, "opencode", config.SessionTransportTmux, nil)
+	agent := &city.cfg.Agents[0]
+	agent.Implicit = true
+	agent.Nudge = ""
+	tp, bp := resolveHookRoleTemplate(t, city)
+	tp.ManualSession = true
+	applyClientProviderChatStartupPrompt(bp, agent, agent, agent.QualifiedName(), "my-chat", &tp)
+	beacon := runtime.FormatBeaconAt("test-city", "worker", false, hookRoleBeaconTime)
+	cfg := prepareHookRoleLaunch(t, tp, contractLaunchMode(t, "first start"))
+	if !carriedThroughArgv(cfg, beacon) || cfg.PromptFlag != "--prompt" {
+		t.Errorf("client chat fresh start must carry the beacon on the launch path, got PromptSuffix=%q PromptFlag=%q", abbreviate(cfg.PromptSuffix), cfg.PromptFlag)
+	}
+	if cfg.Nudge != "" {
+		t.Errorf("client chat fresh start got a kickoff: %q", abbreviate(cfg.Nudge))
+	}
+}

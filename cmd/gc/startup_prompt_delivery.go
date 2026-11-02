@@ -48,7 +48,10 @@ type startupPromptSource struct {
 	ResolvedProvider   *config.ResolvedProvider
 	HintNudge          string
 	RuntimeName        string
-	CityRuntimes       map[string]config.DiscoveredRuntime
+	// SessionRuntime is the runtime a non-ACP session runs on: the city's
+	// session provider, whatever the agent's session override says.
+	SessionRuntime string
+	CityRuntimes   map[string]config.DiscoveredRuntime
 }
 
 // roleSuppliedByHook reports whether the provider hook supplies the rendered
@@ -67,15 +70,18 @@ type startupPromptSource struct {
 // means no plugin, so the nudge stays the only carrier). The session is not
 // ACP, whose transport never loads the CLI plugin. And the session is not a
 // client's provider chat: its hook writes no persona (primeHookClientChat),
-// so it keeps its beacon-only turns.
+// so it keeps its beacon-only turns. Last, the session runs on a local
+// terminal runtime, checked below.
 func (s startupPromptSource) roleSuppliedByHook() bool {
 	if !s.HookEnabled || s.IsACP || s.ClientProviderChat || !s.ResolvedProvider.HookSuppliesRolePerTurn() {
 		return false
 	}
 	// Only the local terminal runtimes are known to stage the provider overlay
-	// in the same filesystem where the CLI loads its plugin. Remote and custom
-	// runtimes keep the explicit role carrier rather than assuming hook presence.
-	switch s.RuntimeName {
+	// in the same filesystem where the CLI loads its plugin. That is the
+	// city's runtime: session = "tmux" picks the terminal transport, not the
+	// runtime. Remote and custom runtimes keep the explicit role carrier
+	// rather than assuming hook presence.
+	switch strings.TrimSpace(s.SessionRuntime) {
 	case "", "tmux", "herdr":
 		return true
 	default:
@@ -94,17 +100,44 @@ func (s startupPromptSource) hookNudge() string {
 }
 
 // delivery selects the per-generation hook as the role carrier where it
-// supplies the role. Other launches keep promptDelivery's launch-time routing.
-// Role bytes carried by the hook never enter argv and need no argv-size
-// fallback.
+// supplies the role, reported as effective mode "hook". Other launches keep
+// promptDelivery's launch-time routing. Role bytes carried by the hook never
+// enter argv and need no argv-size fallback. A fresh launch, gc prime --strict
+// and gc doctor all route through it, so none of them can disagree about the
+// carrier.
 func (s startupPromptSource) delivery() (promptDeliveryResult, error) {
 	if s.roleSuppliedByHook() {
-		return promptDeliveryResult{
-			Nudge:     s.hookNudge(),
-			Delivered: strings.TrimSpace(s.Prompt) != "",
-		}, nil
+		res := promptDeliveryResult{
+			Nudge:         s.hookNudge(),
+			Delivered:     strings.TrimSpace(s.Prompt) != "",
+			EffectiveMode: "hook",
+		}
+		if s.ResolvedProvider != nil {
+			res.ConfiguredMode = s.ResolvedProvider.PromptMode
+		}
+		return res, nil
 	}
 	return promptDelivery(s.Prompt, s.IsACP, s.ResolvedProvider, s.HintNudge, s.RuntimeName, s.CityRuntimes)
+}
+
+// agentStartupPromptSource is the source a fresh launch of agent a would plan
+// the rendered prompt with, built from config alone: gc prime --strict and gc
+// doctor measure the delivery budget through it. resolved may be nil.
+func agentStartupPromptSource(cfg *config.City, a *config.Agent, resolved *config.ResolvedProvider, prompt string) startupPromptSource {
+	providerName := ""
+	if resolved != nil {
+		providerName = resolved.Name
+	}
+	return startupPromptSource{
+		TemplateName:     a.QualifiedName(),
+		Prompt:           prompt,
+		IsACP:            config.ResolveSessionCreateTransport(a.Session, resolved) == config.SessionTransportACP,
+		HookEnabled:      config.AgentHasHooks(a, &cfg.Workspace, providerName, cfg.Providers),
+		ResolvedProvider: resolved,
+		RuntimeName:      effectiveSessionProvider(a.Session, cfg.Session.Provider),
+		SessionRuntime:   cfg.Session.Provider,
+		CityRuntimes:     cfg.Runtimes,
+	}
 }
 
 // resumeNudge is the restart turn delivered to a resumed provider
@@ -239,6 +272,7 @@ func (tp TemplateParams) startupPromptSource() startupPromptSource {
 		ResolvedProvider:   tp.ResolvedProvider,
 		HintNudge:          tp.Hints.Nudge,
 		RuntimeName:        tp.EffectiveSessionProvider,
+		SessionRuntime:     tp.CitySessionProvider,
 		CityRuntimes:       tp.CityRuntimes,
 	}
 }

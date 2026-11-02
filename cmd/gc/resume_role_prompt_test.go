@@ -527,3 +527,27 @@ func TestResumeWithoutPerTurnRoleHookStillReplaysRolePrompt(t *testing.T) {
 		})
 	}
 }
+
+// TestHookRoleKeepsSessionOverrideRouting pins that the hook-role runtime check
+// reads the city's runtime without changing what an agent's session override
+// resolves to. In a t3bridge city, session = "tmux" still resolves the tmux
+// session provider, so templateParamsUseT3Bridge stays false as it was, and
+// the role stays on the launch path because the bridge is not a local runtime.
+// In a herdr city the same agent takes the hook, since herdr is local.
+func TestHookRoleKeepsSessionOverrideRouting(t *testing.T) {
+	tp := resolveResumeRoleTemplateWithNudge(t, "opencode", builtinProviderAliasesForTest("opencode"), nil, config.SessionTransportTmux, nil, "configured nudge", "t3bridge")
+	if tp.EffectiveSessionProvider != config.SessionTransportTmux || templateParamsUseT3Bridge(tp) {
+		t.Fatalf("session = tmux in a t3bridge city: EffectiveSessionProvider = %q, t3bridge = %v; want tmux and false",
+			tp.EffectiveSessionProvider, templateParamsUseT3Bridge(tp))
+	}
+	if tp.startupPromptSource().roleSuppliedByHook() {
+		t.Fatal("a t3bridge city must keep the role on the launch path")
+	}
+	herdr := resolveResumeRoleTemplateWithNudge(t, "opencode", builtinProviderAliasesForTest("opencode"), nil, config.SessionTransportTmux, nil, "configured nudge", "herdr")
+	if herdr.EffectiveSessionProvider != config.SessionTransportTmux {
+		t.Fatalf("session = tmux in a herdr city: EffectiveSessionProvider = %q, want tmux", herdr.EffectiveSessionProvider)
+	}
+	if !herdr.startupPromptSource().roleSuppliedByHook() {
+		t.Fatal("a herdr city stages the plugin locally, so the hook must carry the role")
+	}
+}

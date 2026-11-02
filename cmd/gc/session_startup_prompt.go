@@ -77,6 +77,7 @@ func (c startupPromptCity) applyTo(info session.Info, resolved *config.ResolvedP
 		ResolvedProvider: resolved,
 		HintNudge:        hints.Nudge,
 		RuntimeName:      runtimeName,
+		SessionRuntime:   c.cfg.Session.Provider,
 		CityRuntimes:     c.cfg.Runtimes,
 	}, startupPromptResumeLaunch)
 	if err != nil {
