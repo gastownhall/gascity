@@ -562,6 +562,7 @@ should treat these strings as the current vocabulary:
 | `post-flatten value hash probe returned empty value` | The database hash query returned an empty value after flatten. |
 | `post-flatten value hash changed with row-count increase` | The database hash changed after at least one stable-table row-count gain. *(auto-clearable — see below)* |
 | `post-flatten value hash changed without row-count increase` | The database hash changed without a row-count gain. *(auto-clearable — see below)* |
+| `live database unavailable after compaction` | A flatten or GC made the database unavailable: its `.dolt` directory left the data directory, or the server stopped serving its HEAD for every configured probe. The run stops at that database. |
 
 Four of these reasons are known writer-race false positives and are
 **auto-clearable**. On its next scheduled run, `gc dolt compact`'s flatten
@@ -573,6 +574,35 @@ marker, emits the usual alert and event, and continues through flatten and
 full GC in the same cycle. Any probe failure, deleted or modified row, drift
 outside the proved set, or any other reason keeps the marker and blocks GC.
 You do not need to clear these by hand — check the compactor log first.
+
+### Live database unavailable after compaction
+
+After every flatten and every full or bare GC, compact checks that the
+database is still live before it touches anything else. It checks two things:
+
+- The database's `.dolt` directory, if it existed before the rewrite, is
+  still in the data directory.
+- The server still serves the database's HEAD. Compact queries it up to
+  `GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS` times (default `3`), waiting
+  `GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS` seconds (default `2`) between
+  attempts. A probe that recovers within those attempts is not a failure.
+
+If either check fails, compact writes the `live database unavailable after
+compaction` marker, emits the `dolt.compact.quarantine` event, mails the alert
+recipient, and exits `1`. It does not push, clear pending markers, or process
+the remaining databases; the log names the selected databases it did not
+reach. An invalid value for either setting makes compact exit `2` before it
+takes the compaction lock.
+
+The marker records `live_gate_steps` (the rewrites run on the database this
+run), `live_gate_failed_step`, `live_gate_probe_failure`,
+`live_gate_data_dir_entry`, `live_gate_data_dir_present_before`,
+`live_gate_data_dir_present_after`, and `live_gate_pre_compaction_head`.
+
+This marker is never cleared automatically, and the safe marker-clear
+procedure below does not apply to it. Restore the database from a backup or
+its remote first, confirm `gc dolt sql --db <database>` serves its HEAD, then
+remove the marker and rerun `gc dolt compact --only-db <database>`.
 
 Quarantine markers also carry structured evidence. New markers include the
 database name, the preflight/flatten/post-verify HEADs, preflight and

@@ -133,6 +133,12 @@
 #                       notify-once-per-reason-forever (the marker never
 #                       re-mails on its own once a given reason has been
 #                       reported, even if left unresolved indefinitely).
+#   GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS
+#     (default: 3) — served-HEAD probes the live-database gate makes after
+#                   each flatten or GC before it quarantines the database
+#                   and aborts the run. Positive integer.
+#   GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS
+#     (default: 2) — seconds between those probes. Non-negative integer.
 #   GC_DOLT_COMPACT_REMOTE               (optional) — remote to fetch/push.
 #                                         Defaults to origin when present;
 #                                         ambiguous multi-remote stores fail.
@@ -2450,6 +2456,16 @@ print_existing_quarantine_marker() {
     "$(compact_marker_summary_value "$quarantine_dir" "$db" flatten_head)" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" flatten_post_verify_head)" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" decision)" >&2
+  if [ "$reason" = "$live_gate_reason" ]; then
+    printf 'compact: db=%s live-database evidence:%s%s%s%s\n' "$db" \
+      "$(compact_marker_summary_value "$quarantine_dir" "$db" live_gate_failed_step)" \
+      "$(compact_marker_summary_value "$quarantine_dir" "$db" live_gate_probe_failure)" \
+      "$(compact_marker_summary_value "$quarantine_dir" "$db" live_gate_data_dir_present_after)" \
+      "$(compact_marker_summary_value "$quarantine_dir" "$db" live_gate_pre_compaction_head)" >&2
+    printf 'compact: db=%s live-database recovery: restore the database from a backup or its remote, confirm gc dolt sql --db %s serves its HEAD, then remove %s and rerun gc dolt compact --only-db %s\n' \
+      "$db" "$db" "$marker" "$db" >&2
+    return 0
+  fi
   printf 'compact: db=%s quarantine recovery: keep marker unless git status is clean, the Dolt server is reachable, live bead queries are healthy, and marker diff/hash evidence proves no data loss; then remove %s and rerun gc dolt compact --gc-only --only-db %s\n' \
     "$db" "$marker" "$db" >&2
 }
@@ -3126,10 +3142,12 @@ resolve_compact_base() {
   return 0
 }
 
-# run_bare_gc runs a working-set CALL DOLT_GC('--archive-level=0'): it reclaims
-# journal and working-set garbage without touching history.
+# run_bare_gc DB STEP runs a working-set CALL DOLT_GC('--archive-level=0'): it
+# reclaims journal and working-set garbage without touching history. STEP
+# names the entry path in the live-gate evidence.
 run_bare_gc() {
   db="$1"
+  live_gate_arm "$db" "$2" || return 1
   start=$(date +%s)
   gc_rc=0
   gc_err_tmp=$(mktemp)
@@ -3140,9 +3158,11 @@ run_bare_gc() {
       "$db" "$gc_rc" "$elapsed" >&2
     emit_error_file "$db" "$gc_err_tmp"
     rm -f "$gc_err_tmp"
+    live_gate_check "$db" || return 1
     return 1
   fi
   rm -f "$gc_err_tmp"
+  live_gate_check "$db" || return 1
   compact_gc_ran=1
 
   printf 'compact: db=%s bare-gc duration=%ss — ok\n' "$db" "$elapsed"
@@ -3227,7 +3247,7 @@ compact_shared_history_database() {
     printf 'compact: db=%s — dry-run (would bare GC)\n' "$db"
     return 0
   fi
-  run_bare_gc "$db"
+  run_bare_gc "$db" "shared-history-bare-gc"
 }
 
 flatten_database() {
@@ -4168,7 +4188,7 @@ bare_gc_database() {
     return 0
   fi
 
-  run_bare_gc "$db"
+  run_bare_gc "$db" "bare-gc"
 }
 
 # gc_only_database — reclaim orphaned chunks on one database via a full

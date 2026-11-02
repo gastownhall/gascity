@@ -102,6 +102,19 @@ author: every commit after the watermark is squashed, whichever city wrote it.
     only if no other city, clone, or client outside this city has ever written
     to this database, including before this city started using it.
 
+## Live-database gate
+
+After every flatten and every full or bare GC, compact checks that the
+database is still live: its `.dolt` directory is still in the data directory,
+and the server still serves its HEAD within
+`GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS` probes (default `3`), spaced
+`GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS` seconds apart (default `2`). If either
+check fails, compact quarantines the database with the reason `live database
+unavailable after compaction`, alerts, and exits `1` without touching the
+remaining databases; the log names the ones it did not reach. Restore the
+database before removing that marker. An invalid probe setting exits `2`
+before compact takes its lock. `--dry-run` issues no probe.
+
 ## Flags
 
 - `--gc-only` — Reclaim orphaned chunks via

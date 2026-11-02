@@ -367,3 +367,74 @@ func TestCompactScriptLiveGateAbortNamesNoUnreachedDatabase(t *testing.T) {
 	}
 	assertCompactNothingAfterLiveGate(t, fixture)
 }
+
+// TestCompactScriptLiveGateCoversEveryGCEntryPath asserts that every full-GC
+// and bare-GC entry path runs the same live gate: a GC that removes the
+// database quarantines it and aborts the run before any caller-side push or
+// marker clearing.
+func TestCompactScriptLiveGateCoversEveryGCEntryPath(t *testing.T) {
+	tests := []struct {
+		name          string
+		mode          string
+		args          []string
+		env           []string
+		pendingGC     bool
+		step          string
+		statementText string
+	}{
+		{name: "gc-only reclaim", mode: "below_threshold", args: []string{"--gc-only"}, step: "gc-only-reclaim", statementText: "DOLT_GC('--full'"},
+		{name: "pending-GC retry", mode: "below_threshold", pendingGC: true, step: "pending-gc-retry", statementText: "DOLT_GC('--full'"},
+		{name: "shared-history pending-GC retry", mode: "remote_success", pendingGC: true, step: "shared-history-pending-gc-retry", statementText: "DOLT_GC('--full'"},
+		{name: "bare GC", mode: "below_threshold", env: []string{"GC_DOLT_COMPACT_BARE_GC=1"}, step: "bare-gc", statementText: "DOLT_GC('--archive-level=0')"},
+		{name: "shared-history bare GC", mode: "remote_success", step: "shared-history-bare-gc", statementText: "DOLT_GC('--archive-level=0')"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			addCompactDatabase(t, fixture, "zed")
+			var pendingMarker string
+			if tt.pendingGC {
+				pendingMarker = writeCompactPendingGCMarker(t, fixture, "beads")
+			}
+			installCompactLiveFault(t, fixture, "DOLT_GC", compactLiveRemoveDirAction(fixture))
+
+			env := append([]string{"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", compactLiveFastProbe}, tt.env...)
+			out, err := fixture.runWithArgs(t, tt.mode, tt.args, env...)
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+				t.Fatalf("a GC that loses the database must exit 1: got err=%v\n%s", err, out)
+			}
+			if !strings.Contains(strings.Join(compactDoltLogLines(t, fixture), "\n"), tt.statementText) {
+				t.Fatalf("path did not run %s:\n%s", tt.statementText, out)
+			}
+			assertCompactLiveQuarantine(t, fixture, out, tt.step, "0")
+			assertCompactNothingAfterLiveGate(t, fixture)
+			want := "compact: live-database gate failed for db=beads after " + tt.step + " — run aborted; selected databases not reached: zed"
+			if !strings.Contains(out, want) {
+				t.Fatalf("output missing abort diagnostic %q:\n%s", want, out)
+			}
+			if pendingMarker != "" {
+				if _, statErr := os.Stat(pendingMarker); statErr != nil {
+					t.Fatalf("a failed live gate must keep the pending-GC marker: %v\n%s", statErr, out)
+				}
+			}
+			if strings.Contains(out, "— ok") {
+				t.Fatalf("a GC that lost the database must not report success:\n%s", out)
+			}
+
+			rerun, err := fixture.runWithArgs(t, "below_threshold", []string{"--gc-only", "--only-db", "beads"}, compactLiveFastProbe)
+			if err == nil {
+				t.Fatalf("a live-gate quarantine must refuse the next run:\n%s", rerun)
+			}
+			for _, want := range []string{
+				"live-database evidence: live_gate_failed_step=" + tt.step,
+				"live_gate_data_dir_present_after=0",
+				"live-database recovery: restore the database from a backup or its remote",
+			} {
+				if !strings.Contains(rerun, want) {
+					t.Fatalf("refusal output missing %q:\n%s", want, rerun)
+				}
+			}
+		})
+	}
+}
