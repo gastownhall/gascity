@@ -738,6 +738,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc convoy create` honors an explicit `--rig`.** The command never read
+  the flag. An empty convoy created with `--rig <rig>` landed in the city
+  store, where `gc convoy add` cannot track that rig's beads, and a `--rig`
+  that disagreed with the given issues, or named no rig, could be dropped
+  silently. The convoy is now created in the rig's store, named by rig name
+  or by a path inside the rig's directory (a relative path is `.` or `..`
+  or starts with `./` or `../`). A `--rig` that is empty, names no rig, or disagrees with the
+  store an issue's ID prefix routes to, fails before anything is written.
+  Without `--rig`, placement is unchanged (#8696).
+
 - **Formula human gates are now announced and re-nudged.** A `[steps.gate]`
   with `type = "human"` used to create a gate bead with no machine-readable
   type, so the core `notify-on-human-gate-creation` and

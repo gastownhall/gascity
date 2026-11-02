@@ -215,6 +215,108 @@ func TestValidateConvoyCreateStoreScopeAllowsSameRigStore(t *testing.T) {
 	}
 }
 
+func TestConvoyCreateStoreDir(t *testing.T) {
+	root := t.TempDir()
+	cityPath := filepath.Join(root, "city")
+	backendDir := filepath.Join(root, "backend")
+	innerDir := filepath.Join(root, "outer", "inner")
+	if err := os.MkdirAll(filepath.Join(backendDir, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo", Prefix: "dm"},
+		Rigs: []config.Rig{
+			{Name: "frontend", Prefix: "fe", Path: "frontend"},
+			{Name: "backend", Prefix: "be", Path: backendDir},
+			{Name: "outer", Prefix: "ou", Path: filepath.Join(root, "outer")},
+			{Name: "inner", Prefix: "in", Path: innerDir},
+			{Name: "unbound", Prefix: "ub"},
+		},
+	}
+	// A rig named like the city takes the name from the city.
+	cityNamedRig := &config.City{
+		Workspace: cfg.Workspace,
+		Rigs:      []config.Rig{{Name: "demo", Prefix: "dr", Path: backendDir}},
+	}
+	// Rig names are case-sensitive; a path picks the rig it is inside.
+	caseRigs := &config.City{
+		Workspace: cfg.Workspace,
+		Rigs: []config.Rig{
+			{Name: "Frontend", Prefix: "fu", Path: filepath.Join(root, "upper")},
+			{Name: "frontend", Prefix: "fl", Path: filepath.Join(root, "lower")},
+		},
+	}
+	frontend := resolveStoreScopeRoot(cityPath, "frontend")
+	backend := resolveStoreScopeRoot(cityPath, backendDir)
+	inner := resolveStoreScopeRoot(cityPath, innerDir)
+	lower := resolveStoreScopeRoot(cityPath, filepath.Join(root, "lower"))
+	upper := resolveStoreScopeRoot(cityPath, filepath.Join(root, "upper"))
+	tests := []struct {
+		name     string
+		cfg      *config.City
+		chdir    string
+		rig      string
+		issueIDs []string
+		want     string
+		wantErr  string
+	}{
+		{name: "no rig and no issues uses the city store", want: cityPath},
+		{name: "no rig uses the first issue's store", issueIDs: []string{"fe-1"}, want: frontend},
+		{name: "rig with no issues uses that rig's store", rig: "backend", want: backend},
+		{name: "rig matching every issue", rig: "frontend", issueIDs: []string{"fe-1", "FE-2"}, want: frontend},
+		{name: "a rig name with a trailing slash is not the rig", chdir: backendDir, rig: "frontend/", wantErr: `rig "frontend/" not found`},
+		{name: "the city's own name is not a rig", rig: "demo", wantErr: `--rig "demo" names the city, not a rig; omit --rig`},
+		{name: "a rig named like the city is still a rig", cfg: cityNamedRig, rig: "demo", want: backend},
+		{name: "a rig's directory", rig: backendDir, issueIDs: []string{"be-1"}, want: backend},
+		{name: "a directory inside a rig", rig: filepath.Join(backendDir, "src"), want: backend},
+		{name: "a rig with a relative configured path", rig: filepath.Join(cityPath, "frontend", "src"), want: frontend},
+		{name: "the deepest of nested rigs", rig: filepath.Join(innerDir, "src"), want: inner},
+		{name: "a path picks the rig it is inside, by exact name", cfg: caseRigs, rig: filepath.Join(root, "lower", "src"), want: lower},
+		{name: "names match exactly", cfg: caseRigs, rig: "frontend", want: lower},
+		{name: "the other exact name", cfg: caseRigs, rig: "Frontend", want: upper},
+		{name: "a case variant is not a rig name", rig: "BACKEND", wantErr: `rig "BACKEND" not found`},
+		{name: "a trailing space is not trimmed", rig: "frontend ", wantErr: `rig "frontend " not found`},
+		{name: "a case variant of the city name is not the city", rig: "DEMO", wantErr: `rig "DEMO" not found`},
+		{name: "a path that does not exist yet inside a rig", rig: filepath.Join(backendDir, "not-yet-created"), want: backend},
+		{name: "a relative path reads from the working directory", chdir: backendDir, rig: ".", want: backend},
+		{name: "a ./ path", chdir: backendDir, rig: "./src", want: backend},
+		{name: "a ../ path", chdir: filepath.Join(backendDir, "src"), rig: "../src", want: backend},
+		{name: "a bare word naming a directory is not a path", chdir: backendDir, rig: "src", wantErr: `rig "src" not found`},
+		{name: "a bare word with a trailing slash is not a path", chdir: backendDir, rig: "src/", wantErr: `rig "src/" not found`},
+		{name: "a relative path without ./ is not a path", chdir: backendDir, rig: "frontend/src", wantErr: `rig "frontend/src" not found`},
+		{name: "an unexpanded ~ path is not a path", chdir: backendDir, rig: "~/backend", wantErr: `rig "~/backend" not found`},
+		{name: "a path outside every rig", rig: root, wantErr: "not found"},
+		{name: "rig conflicting with a rig issue", rig: "backend", issueIDs: []string{"fe-1"}, wantErr: `--rig "backend" conflicts with issue fe-1, whose prefix routes it to rig "frontend"`},
+		{name: "rig conflicting with a city issue", rig: "frontend", issueIDs: []string{"dm-1"}, wantErr: `--rig "frontend" conflicts with issue dm-1, whose prefix routes it to the city store`},
+		{name: "unknown rig", rig: "nosuch", wantErr: `rig "nosuch" not found`},
+		{name: "declared rig with no path binding", rig: "unbound", wantErr: `rig "unbound" is declared but has no path binding`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rowCfg := cfg
+			if tt.cfg != nil {
+				rowCfg = tt.cfg
+			}
+			if tt.chdir != "" {
+				t.Chdir(tt.chdir)
+			}
+			got, err := convoyCreateStoreDir(rowCfg, cityPath, tt.rig, tt.issueIDs)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("convoyCreateStoreDir() = %q, %v; want error containing %q", got, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("convoyCreateStoreDir() error = %v", err)
+			}
+			if !samePath(got, tt.want) {
+				t.Fatalf("convoyCreateStoreDir() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestConvoyCreateRigChildrenShareStore(t *testing.T) {
 	store := beads.NewMemStore()
 
@@ -268,6 +370,181 @@ func TestConvoyCreateRigChildrenShareStore(t *testing.T) {
 	}
 	if len(children) != 3 {
 		t.Errorf("got %d children, want 3", len(children))
+	}
+}
+
+// TestConvoyCreateRigFlagPlacesConvoy drives convoy placement through the CLI
+// entry point against real scope-local stores. gc convoy add looks an issue up
+// in the convoy's own store, so the store chosen at create time decides what
+// the convoy can ever track: an explicit --rig must place even an empty convoy
+// in that rig's store, and a --rig that disagrees with the issues' store must
+// fail instead of being dropped. Without --rig the placement is unchanged.
+// (gastownhall/gascity#8696)
+func TestConvoyCreateRigFlagPlacesConvoy(t *testing.T) {
+	t.Run("explicit rig on an empty create", func(t *testing.T) {
+		cityDir, frontendDir, _, task := convoyCreateRigCity(t)
+
+		convoyID := runConvoyCreateJSON(t, "--city", cityDir, "--rig", "frontend", "convoy", "create", "frontend batch", "--json")
+		requireScopeHoldsConvoy(t, cityDir, frontendDir, convoyID)
+		requireScopeHasNoConvoys(t, cityDir, cityDir)
+
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"--city", cityDir, "convoy", "add", convoyID, task.ID}, &stdout, &stderr); code != 0 {
+			t.Fatalf("gc convoy add %s %s = %d; stderr=%s", convoyID, task.ID, code, stderr.String())
+		}
+		requireConvoyTrack(t, openConvoyTestScopeStore(t, cityDir, frontendDir), convoyID, task.ID)
+	})
+
+	t.Run("explicit rig that conflicts with an issue's store", func(t *testing.T) {
+		cityDir, frontendDir, backendDir, task := convoyCreateRigCity(t)
+
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"--city", cityDir, "--rig", "backend", "convoy", "create", "backend batch", task.ID, "--json"}, &stdout, &stderr)
+		if code == 0 {
+			t.Fatalf("gc --rig backend convoy create %s exited 0 for a frontend issue; stdout=%s", task.ID, stdout.String())
+		}
+		for _, want := range []string{task.ID, `"backend"`, `"frontend"`} {
+			if !strings.Contains(stderr.String(), want) {
+				t.Errorf("stderr does not name %s: %q", want, stderr.String())
+			}
+		}
+		for _, dir := range []string{cityDir, frontendDir, backendDir} {
+			requireScopeHasNoConvoys(t, cityDir, dir)
+		}
+	})
+
+	// An empty --rig, as an unset variable in a script produces, must fail
+	// rather than fall back to the placement used without --rig.
+	t.Run("explicit empty rig", func(t *testing.T) {
+		cityDir, frontendDir, backendDir, _ := convoyCreateRigCity(t)
+
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"--city", cityDir, "--rig=", "convoy", "create", "batch", "--json"}, &stdout, &stderr); code == 0 {
+			t.Fatalf("gc --rig= convoy create exited 0; stdout=%s", stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "--rig requires a non-empty value") {
+			t.Errorf("stderr = %q, want the empty --rig error", stderr.String())
+		}
+		for _, dir := range []string{cityDir, frontendDir, backendDir} {
+			requireScopeHasNoConvoys(t, cityDir, dir)
+		}
+	})
+
+	// --rig also takes a rig's directory. Before --rig was read, a path with
+	// a member succeeded because the member picked the store, so it must not
+	// start failing now.
+	t.Run("explicit rig given as the rig's directory", func(t *testing.T) {
+		cityDir, frontendDir, _, task := convoyCreateRigCity(t)
+
+		convoyID := runConvoyCreateJSON(t, "--city", cityDir, "--rig", frontendDir, "convoy", "create", "frontend batch", task.ID, "--json")
+		requireScopeHoldsConvoy(t, cityDir, frontendDir, convoyID)
+		requireConvoyTrack(t, openConvoyTestScopeStore(t, cityDir, frontendDir), convoyID, task.ID)
+	})
+
+	t.Run("no rig keeps the default placement", func(t *testing.T) {
+		cityDir, frontendDir, _, task := convoyCreateRigCity(t)
+
+		empty := runConvoyCreateJSON(t, "--city", cityDir, "convoy", "create", "city batch", "--json")
+		requireScopeHoldsConvoy(t, cityDir, cityDir, empty)
+
+		seeded := runConvoyCreateJSON(t, "--city", cityDir, "convoy", "create", "seeded batch", task.ID, "--json")
+		requireScopeHoldsConvoy(t, cityDir, frontendDir, seeded)
+		requireConvoyTrack(t, openConvoyTestScopeStore(t, cityDir, frontendDir), seeded, task.ID)
+	})
+}
+
+// convoyCreateRigCity is a file-provider city laid out the way gc init and gc
+// rig add lay one out: the city and its two rigs, frontend (FE) and backend
+// (BE), each have their own store, and .gc/site.toml binds the rigs to
+// directories outside the city. The frontend store holds one open task.
+func convoyCreateRigCity(t *testing.T) (cityDir, frontendDir, backendDir string, task beads.Bead) {
+	t.Helper()
+	clearInheritedBeadsEnv(t)
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	root := t.TempDir()
+	cityDir = filepath.Join(root, "city")
+	frontendDir = filepath.Join(root, "frontend")
+	backendDir = filepath.Join(root, "backend")
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	writeProviderAwareTestCity(t, cityDir, `[workspace]
+name = "demo"
+prefix = "dm"
+
+[[rigs]]
+name = "frontend"
+prefix = "FE"
+
+[[rigs]]
+name = "backend"
+prefix = "BE"
+`)
+	site := fmt.Sprintf("[[rig]]\nname = \"frontend\"\npath = %q\n\n[[rig]]\nname = \"backend\"\npath = %q\n", frontendDir, backendDir)
+	if err := os.WriteFile(config.SiteBindingPath(cityDir), []byte(site), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{cityDir, frontendDir, backendDir} {
+		if err := ensurePersistedScopeLocalFileStore(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	task, err := openConvoyTestScopeStore(t, cityDir, frontendDir).Create(beads.Bead{Title: "frontend task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cityDir, frontendDir, backendDir, task
+}
+
+// openConvoyTestScopeStore opens the file store at scopeRoot directly, so a
+// read shows where a bead physically lives.
+func openConvoyTestScopeStore(t *testing.T, cityDir, scopeRoot string) beads.Store {
+	t.Helper()
+	store, err := openScopeLocalFileStoreForCity(scopeRoot, cityDir)
+	if err != nil {
+		t.Fatalf("opening store at %s: %v", scopeRoot, err)
+	}
+	return store
+}
+
+// runConvoyCreateJSON runs gc with args, which must create a convoy with
+// --json, and returns the new convoy's id.
+func runConvoyCreateJSON(t *testing.T, args ...string) string {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	if code := run(args, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc %s = %d; stderr=%s", strings.Join(args, " "), code, stderr.String())
+	}
+	var result convoyActionResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("gc %s stdout is not JSON: %v\n%s", strings.Join(args, " "), err, stdout.String())
+	}
+	if result.ConvoyID == "" {
+		t.Fatalf("gc %s returned no convoy id: %s", strings.Join(args, " "), stdout.String())
+	}
+	return result.ConvoyID
+}
+
+func requireScopeHoldsConvoy(t *testing.T, cityDir, scopeRoot, convoyID string) {
+	t.Helper()
+	convoy, err := openConvoyTestScopeStore(t, cityDir, scopeRoot).Get(convoyID)
+	if err != nil {
+		t.Fatalf("convoy %s is not in the store at %s: %v", convoyID, scopeRoot, err)
+	}
+	if convoy.Type != "convoy" {
+		t.Fatalf("bead %s in the store at %s has type %q, want convoy", convoyID, scopeRoot, convoy.Type)
+	}
+}
+
+func requireScopeHasNoConvoys(t *testing.T, cityDir, scopeRoot string) {
+	t.Helper()
+	convoys, err := openConvoyTestScopeStore(t, cityDir, scopeRoot).List(beads.ListQuery{Type: "convoy", IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("listing convoys at %s: %v", scopeRoot, err)
+	}
+	if len(convoys) != 0 {
+		t.Fatalf("the store at %s holds convoys %+v, want none", scopeRoot, convoys)
 	}
 }
 

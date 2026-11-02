@@ -1240,6 +1240,15 @@ Create a convoy and optionally link existing issues to it.
 Creates a convoy bead and tracks any provided issue IDs. Issues can
 also be added later with "gc convoy add".
 
+A convoy and the issues it tracks share one bead store, and "gc convoy
+add" only adds issues from the convoy's store. With --rig, the convoy is
+created in that rig's store, and every issue's ID prefix must route to
+that store. --rig takes a rig's exact name or a path inside the rig's
+directory; a relative path must be . or .. or start with ./ or ../.
+Without --rig, the convoy is created in the first issue's store, or in
+the city store when no issues are given; GC_RIG and the working
+directory do not choose it.
+
 ```
 gc convoy create <name> [issue-ids...] [flags]
 ```
@@ -1249,6 +1258,7 @@ gc convoy create <name> [issue-ids...] [flags]
 ```
 gc convoy create sprint-42
 gc convoy create sprint-42 issue-1 issue-2 issue-3
+gc convoy create frontend-batch --rig frontend
 gc convoy create deploy --owner mayor --notify mayor --merge mr
 gc convoy create auth-rewrite --owned --target integration/auth-rewrite
 ```
