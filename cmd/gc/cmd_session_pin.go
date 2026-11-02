@@ -139,7 +139,7 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 			return 1
 		}
 	}
-	pokeSessionPinController(cityErr, cityPath, id, "gc session "+action, stderr)
+	pokeSessionPinController(cityErr, cityPath, sessionInfoFromBead(b), "gc session "+action, materializedForPin, stderr)
 
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{
@@ -161,13 +161,29 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 	return 0
 }
 
-// pokeSessionPinController asks a managed city's controller to reconcile the
-// session after its pin changed. A failed poke is silent, since the pin is
-// recorded and the next reconcile reads it; on a worker site, where no poke
-// finds a controller, it prints the noteWorkerSitePoke notice.
-func pokeSessionPinController(cityErr error, cityPath, sessionID, command string, stderr io.Writer) {
-	if cityErr != nil || !cityUsesManagedReconciler(cityPath) {
+// pokeSessionPinController asks the controller that owns cityPath's session
+// starts (sessionStartOwnedByReconciler) to reconcile row after its pin
+// changed. A failed poke is silent for a row that already existed, since the
+// pin is recorded and the next reconcile reads it; on a worker site, where no
+// poke finds a controller, it prints the noteWorkerSitePoke notice. A row the
+// pin created gets noteDeferredSessionStart's report instead: only a
+// controller starts it.
+func pokeSessionPinController(cityErr error, cityPath string, row session.Info, command string, created bool, stderr io.Writer) {
+	if cityErr != nil {
 		return
 	}
-	noteWorkerSitePoke(stderr, command, enqueueController(cityPath, reconcilekey.Session(sessionID)))
+	owned, err := sessionStartOwnedByReconciler(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: warning: %v\n", command, err) //nolint:errcheck
+		return
+	}
+	if !owned {
+		return
+	}
+	pokeErr := enqueueController(cityPath, reconcilekey.Session(row.ID))
+	if created {
+		noteDeferredSessionStart(stderr, command, row, pokeErr)
+		return
+	}
+	noteWorkerSitePoke(stderr, command, pokeErr)
 }

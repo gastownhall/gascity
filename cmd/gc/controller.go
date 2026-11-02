@@ -1540,11 +1540,6 @@ func runController(
 	defer convergence.RemoveToken(cityPath) //nolint:errcheck // best-effort cleanup
 
 	cityName := loadedCityName(cfg, cityPath)
-	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
-	telemetry.RecordControllerLifecycle(context.Background(), "started")
-	fmt.Fprintln(stdout, "Controller started.") //nolint:errcheck // best-effort stdout
-	warnBdInventoryAtControllerStart(cityPath, cfg, rec)
-
 	cr, err := newCityRuntime(wiring.runtimeParams(CityRuntimeParams{
 		CityPath:                cityPath,
 		CityName:                cityName,
@@ -1569,6 +1564,13 @@ func runController(
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// Recorded only once the runtime exists, as the supervisor does: building it
+	// built the order dispatcher, which read the event head its never-run event
+	// orders start from, so an order on controller.started sees this one.
+	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
+	telemetry.RecordControllerLifecycle(context.Background(), "started")
+	fmt.Fprintln(stdout, "Controller started.") //nolint:errcheck // best-effort stdout
+	warnBdInventoryAtControllerStart(cityPath, cfg, rec)
 
 	// Install controller-managed bead stores even when the HTTP API is
 	// disabled. Standalone runtime still needs cached city/rig stores for

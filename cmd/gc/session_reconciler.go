@@ -2299,8 +2299,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 
 		// Skip beads with unrecognized states. This enables forward-compatible
-		// rollback: a newer version's states, and this binary's own archived and
-		// draining rows, are ignored rather than crashing the reconciler. An
+		// rollback: a newer gc version's states, and this binary's own parked
+		// rows it does not manage (archived, closing, a draining without its
+		// drain-ack reason), are ignored rather than crashing the reconciler. An
 		// interrupted close of this binary's own (a close code left on an open
 		// row when the status Close was lost) is finished first instead, or
 		// rolled back to asleep when its gate now refuses it, and the next tick
@@ -3949,7 +3950,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		driftRestartedInPlace := false
 		// Config drift: if alive and config changed, drain for restart.
 		// Live-only drift: re-apply session_live without restart.
-		if alive {
+		// Both drift checks hash tp, so they run only on a desired session.
+		// The one undesired row that reaches here is a preserved named
+		// session whose template did not resolve this tick (preserveErr
+		// above): its tp is zero, and hashing that would read as drift and
+		// restart or reset a session whose config never changed.
+		if alive && desired {
 			template := tp.TemplateName
 			if template == "" {
 				template = normalizedSessionTemplateInfo(infoByID[id], cfg)
@@ -3960,7 +3966,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// to avoid false-positive drains. Fixes #127.
 			storedHash := infoByID[id].StartedConfigHash
 			if template != "" && storedHash != "" {
-				cfgAgent := findAgentByTemplate(cfg, template)
+				cfgAgent := findSessionAgentByTemplate(cfg, template)
 				if cfgAgent != nil {
 					agentCfg := sessionCoreConfigForHashInfo(tp, infoByID[id])
 					currentHash := runtime.CoreFingerprint(agentCfg)
@@ -4291,14 +4297,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		infoAsleepDrift := infoByID[id]
 		skipAsleepDriftRepair := driftRestartedInPlace ||
 			pendingResumePreservingNamedRestartInfo(infoAsleepDrift, clk, startupTimeout)
-		if !alive && isNamedSessionInfo(infoByID[id]) && !skipAsleepDriftRepair {
+		if !alive && desired && isNamedSessionInfo(infoByID[id]) && !skipAsleepDriftRepair {
 			template := tp.TemplateName
 			if template == "" {
 				template = normalizedSessionTemplateInfo(infoByID[id], cfg)
 			}
 			storedHash := infoByID[id].StartedConfigHash
 			if template != "" && storedHash != "" {
-				if cfgAgent := findAgentByTemplate(cfg, template); cfgAgent != nil {
+				if cfgAgent := findSessionAgentByTemplate(cfg, template); cfgAgent != nil {
 					agentCfg := sessionCoreConfigForHashInfo(tp, infoByID[id])
 					currentHash := runtime.CoreFingerprint(agentCfg)
 					if storedHash != currentHash {
@@ -6220,30 +6226,27 @@ type strandedAssignedWork struct {
 	store beads.Store
 }
 
+// filterDetachedStrandedDiagnosticWork keeps the work the stranded diagnostic
+// lists: work without gc.detached, and work whose probe attests its runtime
+// dead, whose gc.detached it clears. Work whose probe reports it alive, or
+// observed nothing (error or timeout), may still run, so it is held out
+// (detachedProbeAllowsOrphanRelease): a diagnostic over held work alone
+// records no event and stamps no stranded marker, which the stranded repair
+// would release that work on once the marker aged.
 func filterDetachedStrandedDiagnosticWork(work []strandedAssignedWork) []strandedAssignedWork {
 	if len(work) == 0 {
 		return work
 	}
 	out := make([]strandedAssignedWork, 0, len(work))
 	for _, item := range work {
-		spec := strings.TrimSpace(item.bead.Metadata[detachedProbeMetadataKey])
-		if spec == "" {
-			out = append(out, item)
+		allowed, dead := detachedProbeAllowsOrphanRelease(item.bead)
+		if !allowed {
 			continue
 		}
-		result := probeDetachedWork(context.Background(), spec)
-		switch result.Status {
-		case detachedProbeAlive:
-			log.Printf("session reconciler: suppressing session.stranded for %s: detached probe alive: %s", item.bead.ID, spec)
-			continue
-		case detachedProbeDead:
-			log.Printf("session reconciler: clearing dead detached probe for %s before session.stranded: %s", item.bead.ID, spec)
+		if dead {
 			clearDetachedProbeMetadata(item.store, item.bead.ID)
-			out = append(out, item)
-		default:
-			log.Printf("session reconciler: preserving session.stranded for %s after detached probe %s: %v", item.bead.ID, result.Status, result.Err)
-			out = append(out, item)
 		}
+		out = append(out, item)
 	}
 	return out
 }
@@ -6676,7 +6679,7 @@ func sessionConfigDriftKey(info sessionpkg.Info, cfg *config.City, tp TemplatePa
 	if template == "" || storedHash == "" {
 		return ""
 	}
-	if findAgentByTemplate(cfg, template) == nil {
+	if findSessionAgentByTemplate(cfg, template) == nil {
 		return ""
 	}
 	agentCfg := sessionCoreConfigForHashInfo(tp, info)

@@ -33,6 +33,18 @@ name: storeclass baseline
 # review enforced for .github/workflows, .github/actions and .github/scripts,
 # which this job runs before the trusted build, and the storeclass paths) are
 # listed in #8435.
+#
+# Label events do not start this workflow. It takes the same four pull request
+# types as the other required workflows, so every head pushed to a pull
+# request into main, hotfix/** or release/** gets a run. Status labels change
+# all day and carry no code: as triggers they would cancel and restart this
+# required check and hold a ready pull request BLOCKED at the merge handoff.
+# The job reads the pull request's labels through the API when it runs, so
+# once the coordinator applies storeclass/baseline-raise, a re-run of this job
+# on the pull request's current head sees it (a re-run replays the original
+# event, whose payload lists the old labels), and so does the next push. The
+# merge queue reads the labels the same way, so a removed label is enforced
+# there before anything merges to main.
 
 on:
   push:
@@ -44,8 +56,6 @@ on:
       - reopened
       - synchronize
       - ready_for_review
-      - labeled
-      - unlabeled
   merge_group:
 
 permissions:
@@ -103,7 +113,7 @@ jobs:
           GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
           GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
           GROUP_HEAD_REF: ${{ github.event.merge_group.head_ref }}
-          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
@@ -114,7 +124,8 @@ jobs:
             pull_request)
               branch="$BASE_REF"
               base="$(git merge-base "origin/$branch" HEAD)"
-              labels="$PR_LABELS"
+              # The labels now, not the event's: a re-run replays the event.
+              labels="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '[.labels[].name]')"
               ;;
             merge_group)
               branch="${GROUP_BASE_REF#refs/heads/}"
@@ -163,5 +174,20 @@ jobs:
             (cd tools/nogo && go run "$gen" -repo "$tree")
             "$RUNNER_TEMP/storeclass-baseline-trusted" -repo "$tree" -growth-since "$base" -base-tip "$tip" -gate-only -allow-raise
           else
-            "$RUNNER_TEMP/storeclass-baseline-trusted" -repo "$tree" -growth-since "$base" -base-tip "$tip"
+            # The census first: a baseline that does not match the tree is
+            # fixed by regenerating it, unless the change edits the lint
+            # itself (the merge-base's lint then judges it), which needs the
+            # label.
+            if ! "$RUNNER_TEMP/storeclass-baseline-trusted" -repo "$tree"; then
+              if [ "$EVENT_NAME" = pull_request ]; then
+                echo "::error title=storeclass::the baseline does not match the tree under the merge-base's lint: regenerate it with -write; if this change edits the lint itself, the coordinator applies storeclass/baseline-raise and then re-runs this job on the pull request's current head"
+              fi
+              exit 1
+            fi
+            if ! "$RUNNER_TEMP/storeclass-baseline-trusted" -repo "$tree" -growth-since "$base" -base-tip "$tip" -gate-only; then
+              if [ "$EVENT_NAME" = pull_request ]; then
+                echo "::error title=storeclass::a raise or a change to the lint needs the coordinator: apply storeclass/baseline-raise, then re-run this job on the pull request's current head (applying a label does not start it)"
+              fi
+              exit 1
+            fi
           fi

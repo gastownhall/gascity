@@ -307,6 +307,10 @@ type Info struct {
 	// terminal session whose current interval is already accounted BEFORE issuing a
 	// per-session store Get.
 	UsageComputeEmittedAt string // usage_compute_emitted_at (raw)
+	// UsageClosePending is the RAW usage_close_pending metadata: "true" while a
+	// close's awake interval awaits the compute-usage lane. A reopened row keeps
+	// it, so the lane settles that interval from the open snapshot too.
+	UsageClosePending string // usage_close_pending (raw)
 	// StateReason is the RAW state_reason metadata. The pool sweep's
 	// post-create-protection window matches state_reason == "creation_complete".
 	StateReason string // state_reason (raw)
@@ -762,11 +766,15 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 
 // killExistingOrphans terminates any untracked runtime whose session ID and
 // city match the session about to start, then confirms each is dead. It returns
-// a non-nil error only when an orphan could not be confirmed dead, so callers
-// gating a Start can refuse rather than race a survivor for the same work. A
-// scan error is logged and treated as fail-closed (see FindRuntimesBySessionID):
-// the roots the scan did surface are still killed, and matching the started
-// replacement is impossible because it does not exist yet.
+// a non-nil error when an orphan could not be confirmed dead, or, terminating
+// nothing, when the provider claims one of them as a live runtime it does not
+// list (LiveUnlisted, an error wrapping runtime.ErrRuntimeUnavailable), so
+// callers gating a Start can refuse rather than race a survivor for the same
+// work. A scan error is logged and treated as fail-closed (see
+// FindRuntimesBySessionID): the orphans the scan did surface are still
+// terminated unless one of them is LiveUnlisted, which terminates none, and
+// matching the started replacement is impossible because it does not exist
+// yet.
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
 	_ = ctx
 	scanner, ok := runtime.AsProcessTableScanner(m.sp)
@@ -778,7 +786,7 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %s", sessionID, proctable.SummarizeScanError(err))
 	}
 	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
-	var termErrs []error
+	var orphans []runtime.LiveRuntime
 	for _, live := range found {
 		if live.IsTracked || live.SessionID != sessionID {
 			continue
@@ -795,6 +803,20 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 			log.Printf("session: leaving process-table root for %s pid=%d alone: city infrastructure (managed Dolt watchdog or bd proxy)", sessionID, live.PID)
 			continue
 		}
+		// The provider claims this root as a live runtime of its own that it
+		// does not list: a pane of its socket that it cannot reach or that a
+		// failed listing missed. It is not an orphan, and a replacement would
+		// race it for the session's work, so the start refuses and terminates
+		// nothing. The reconciler defers a refused start without recording a
+		// failure, so the refusal is logged here.
+		if live.LiveUnlisted {
+			log.Printf("session: refusing to start %s: live runtime pid=%d ppid=%d belongs to the provider but is not listed by it", sessionID, live.PID, live.PPID)
+			return fmt.Errorf("live runtime pid=%d ppid=%d for session %s belongs to the provider but is not listed by it: %w", live.PID, live.PPID, sessionID, runtime.ErrRuntimeUnavailable)
+		}
+		orphans = append(orphans, live)
+	}
+	var termErrs []error
+	for _, live := range orphans {
 		if err := scanner.TerminateRuntime(live); err != nil {
 			log.Printf("session: terminating orphaned runtime for %s pid=%d provider_name=%q: %v", sessionID, live.PID, live.ProviderName, err)
 			termErrs = append(termErrs, fmt.Errorf("orphan pid=%d provider_name=%q: %w", live.PID, live.ProviderName, err))
@@ -1433,7 +1455,10 @@ const (
 // with an illegal transition made every restart SKIP them, so they survived
 // as live panes still holding their pool slot names (ga-rxhu2). The runtime
 // is torn down and the bead is left in draining for the drain machinery or
-// the reconciler to finish.
+// the reconciler to finish. A creating seat gets the same sweep-only
+// teardown, also writing nothing: the row is its start's, and the
+// last_woke_at its PreWake stamped is what keeps the next start's
+// stuck-creating reap from closing a start the stop cut short.
 func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) error {
 	if err := m.checkActor(by); err != nil {
 		return err
@@ -1527,6 +1552,31 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 		// release no pool name while silently losing the drain. Only a close frees
 		// the name, and CmdClose is already legal from draining.
 		if current == StateDraining && intent == suspendIntentShutdown {
+			return m.tearDownRuntimeForSuspend(sessName)
+		}
+		// creating is the same shape of problem as draining above, and likewise
+		// only for the SHUTDOWN sweep: only a start's commit moves its row from
+		// creating to active, after the provider's Start returns, and the city
+		// stop cancels its starts first, so the sweep can reach a live runtime
+		// whose row still reads creating (a forced stop's late re-list can reach
+		// one whose Start has not returned). Rejecting it here made the stop fail
+		// and the runtime survive the shutdown.
+		//
+		// Scoped to the sweep on purpose: an operator naming ONE session in creating
+		// still gets the illegal transition (TestConformance_SuspendStillRejectsOtherIllegalStates).
+		// Idle auto-suspend of creating is refused the same way.
+		//
+		// The early return writes NOTHING, last_woke_at included. The row belongs
+		// to its start: a start the stop canceled never commits it active, so
+		// the next controller start settles the row the sweep leaves, and the
+		// last_woke_at PreWake stamped is the marker it reads. With it, the
+		// stuck-creating reap keeps a claimless row for the reconciler to
+		// relaunch (mc-5a1ma), and a pending create keeps its started-create
+		// lease rather than the 10-minute never-started one. A `gc rig restart`
+		// sweep runs beside a live controller, so its stop can land under a
+		// start still in flight, which settles the row as it does any runtime
+		// that dies under it (SESSION-START-026).
+		if current == StateCreating && intent == suspendIntentShutdown {
 			return m.tearDownRuntimeForSuspend(sessName)
 		}
 		// Normalize legacy/aliased states (empty and awake both mean active)
@@ -1778,6 +1828,7 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 		// named session's identifiers, on the incarnation this close stopped.
 		terminal := retiredIdentifiersPatch(b)
 		terminal["pin_awake"] = ""
+		maps.Copy(terminal, UsageClosePatch(m.now()))
 		terminal = CellInto(id, b.Metadata, ActorController, DispEvent{Kind: EvRetire}, m.now(), terminal)
 		// Past a kill fence: the operator's close ends the session a kill was
 		// tearing down, as it did before CommitClose.
@@ -2397,9 +2448,27 @@ func (m *Manager) PersistSessionKey(id, sessionKey string) error {
 // dedup cursor must live on the session bead, not in memory.
 const MetadataKeyInvocationUsageCursor = "invocation_usage_cursor"
 
+// MetadataKeyUsageClosePending marks a session row closed while it may still
+// hold an unaccounted awake interval ("true"); see UsageClosePatch.
+const MetadataKeyUsageClosePending = "usage_close_pending"
+
+// MetadataKeyUsageClosedAt is the close time (RFC3339Nano) that ends the
+// interval a pending usage close accounts; see UsageClosePatch.
+const MetadataKeyUsageClosedAt = "usage_closed_at"
+
+// MetadataKeyUsageClosedAwakeStartedAt is the awake_started_at of the interval
+// a pending usage close ended, kept by the row's reopen; see UsageReopenPatch.
+const MetadataKeyUsageClosedAwakeStartedAt = "usage_closed_awake_started_at"
+
+// MetadataKeyUsageClosedSessionKey is the session_key of the interval a pending
+// usage close ended, kept by the row's reopen; see UsageReopenPatch.
+const MetadataKeyUsageClosedSessionKey = "usage_closed_session_key"
+
 // PersistInvocationUsageCursor stores the invocation-usage telemetry cursor
 // on an existing session. Unlike PersistSessionKey it overwrites any
 // existing value — the cursor advances with every recorded invocation.
+// A closed session is accepted: the usage lane sweeps a closed row's last
+// interval, and its cursor must advance past the turns it billed.
 // Empty id or cursor is a no-op.
 func (m *Manager) PersistInvocationUsageCursor(id, cursor string) error {
 	cursor = strings.TrimSpace(cursor)
@@ -2407,7 +2476,7 @@ func (m *Manager) PersistInvocationUsageCursor(id, cursor string) error {
 		return nil
 	}
 	return withSessionMutationLock(id, func() error {
-		if _, _, err := m.sessionBead(id); err != nil {
+		if _, _, err := m.loadSessionBead(id, true); err != nil {
 			return err
 		}
 		if err := m.store.SetMetadata(id, MetadataKeyInvocationUsageCursor, cursor); err != nil {
