@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -61,9 +62,9 @@ func aliasAvailability(_ context.Context, r effectReads, v txView) (aliasCheck, 
 		return aliasCheck{}, nil
 	}
 	if id.Owner != "" {
-		return aliasCheck{err: session.EnsureAliasAvailableWithConfigForOwner(r.city, v.World.Env.Cfg, id.Alias, v.Row.ID, id.Owner)}, nil
+		return aliasCheck{err: session.EnsureAliasAvailableWithConfigForOwner(beads.SessionStore{Store: r.city}, v.World.Env.Cfg, id.Alias, v.Row.ID, id.Owner)}, nil
 	}
-	return aliasCheck{err: session.EnsureAliasAvailableWithConfig(r.city, v.World.Env.Cfg, id.Alias, v.Row.ID)}, nil
+	return aliasCheck{err: session.EnsureAliasAvailableWithConfig(beads.SessionStore{Store: r.city}, v.World.Env.Cfg, id.Alias, v.Row.ID)}, nil
 }
 
 // rowMetadataStep decides the identity again on the fresh row: a lock the

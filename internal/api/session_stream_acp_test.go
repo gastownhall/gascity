@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
+
 	"github.com/danielgtaylor/huma/v2/sse"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/session"
@@ -28,7 +30,7 @@ func TestSessionStreamDeliversCompleteGrowingACPMessage(t *testing.T) {
 			srv := New(fs)
 			h := newTestCityHandlerWith(t, fs, srv)
 			srv.sessionLogSearchPaths = []string{t.TempDir()}
-			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+			mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 				Template:  "myrig/worker",
 				Title:     "Chat",

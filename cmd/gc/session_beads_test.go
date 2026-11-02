@@ -2163,7 +2163,7 @@ func TestSyncSessionBeads_StaleManualPlanDoesNotRecreateClosedSession(t *testing
 		},
 	}
 	city := t.TempDir()
-	manager := session.NewManagerWithOptions(store, sp, session.WithCityPath(city))
+	manager := session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(city))
 	if _, err := manager.CloseDetailed(context.Background(), testOperatorIn(t, city), bead.ID); err != nil {
 		t.Fatalf("close manual session: %v", err)
 	}
@@ -7990,7 +7990,7 @@ func TestCleanupDeadRuntimeSessionCorpsesReleasesAliasOnBeadClose(t *testing.T) 
 	}
 
 	// The freed alias must now be available for a successor on the same slot.
-	if err := session.EnsureAliasAvailable(store, "gascity-packs/codex-1", ""); err != nil {
+	if err := session.EnsureAliasAvailable(beadstest.Sessions(store), "gascity-packs/codex-1", ""); err != nil {
 		t.Fatalf("EnsureAliasAvailable after cleanup = %v, want nil (alias still held by closed corpse)", err)
 	}
 }

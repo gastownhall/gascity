@@ -16,12 +16,13 @@ func (s *Server) actor(kind session.ActorKind) session.Actor {
 }
 
 func (s *Server) sessionManager(store beads.Store) *session.Manager {
+	sessions := beads.SessionStore{Store: store}
 	cfg := s.state.Config()
 	if cfg == nil {
-		return session.NewManagerWithOptions(store, s.state.SessionProvider(), session.WithCityPath(s.state.CityPath()), session.WithDeferredSubmitQueue(s.state.NudgeQueue()))
+		return session.NewManagerWithOptions(sessions, s.state.SessionProvider(), session.WithCityPath(s.state.CityPath()), session.WithDeferredSubmitQueue(s.state.NudgeQueue()))
 	}
 	return session.NewManagerWithOptions(
-		store,
+		sessions,
 		s.state.SessionProvider(),
 		session.WithCityPath(s.state.CityPath()),
 		session.WithDeferredSubmitQueue(s.state.NudgeQueue()),

@@ -128,7 +128,7 @@ func TestHandleExtMsgInboundAgentBoundColdWakesNamedSession(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Bind(agent): %v", err)
 	}
-	if _, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker"); err == nil {
+	if _, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker"); err == nil {
 		t.Fatal("named agent should not have a session before the inbound message")
 	}
 
@@ -155,7 +155,7 @@ func TestHandleExtMsgInboundAgentBoundColdWakesNamedSession(t *testing.T) {
 	// The notify fan-out materializes the bound agent's named session —
 	// the cold-wake.
 	srv.waitForBackground()
-	if id, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker"); err != nil || id == "" {
+	if id, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker"); err != nil || id == "" {
 		t.Fatalf("agent-bound inbound did not cold-wake myrig/worker: id=%q err=%v", id, err)
 	}
 }

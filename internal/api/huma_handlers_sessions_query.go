@@ -113,7 +113,7 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 // session is found only by its exact bead id.
 func (s *Server) resolveSessionGetID(store beads.Store, input *SessionGetInput) (string, error) {
 	if input.ExactID {
-		return session.ResolveSessionIDByExactID(store, input.ID)
+		return session.ResolveSessionIDByExactID(beads.SessionStore{Store: store}, input.ID)
 	}
 	if input.PeekStrict {
 		return s.resolveSessionIDWithConfig(store, input.ID)

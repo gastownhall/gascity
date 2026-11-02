@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/session"
@@ -98,7 +99,7 @@ func (s *Server) extmsgSessionHandleForSelector(selector string) string {
 	if store == nil {
 		return extmsgHandleLabel(selector)
 	}
-	resolvedID, err := session.ResolveSessionIDAllowClosed(store, selector)
+	resolvedID, err := session.ResolveSessionIDAllowClosed(beads.SessionStore{Store: store}, selector)
 	if err != nil {
 		return extmsgHandleLabel(selector)
 	}

@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -653,7 +654,7 @@ func TestV2DemandReadsCachedWithoutCacheIsPartial(t *testing.T) {
 func TestClosedNamedIndexLegacyIsDirectCallV2ServesRecording(t *testing.T) {
 	backing := newDemandBacking(closedNamedSessionBead("gc-closed", "mayor"))
 	backing.armed.Store(true)
-	direct, directErr := session.BuildClosedNamedSessionBeadIndex(backing)
+	direct, directErr := session.BuildClosedNamedSessionBeadIndex(beadstest.Sessions(backing))
 	directLog := backing.readLog()
 	backing.ops = nil
 	legacy, legacyErr := legacyDemandReads{}.ClosedNamedIndex(backing)

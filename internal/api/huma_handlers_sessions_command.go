@@ -228,15 +228,15 @@ func (s *Server) acceptSessionCreate(ctx context.Context, input *SessionCreateIn
 			reservationIDs = append(reservationIDs, workDirQualifiedName)
 		}
 		createErr := session.WithCitySessionIdentifierLocks(s.state.CityPath(), reservationIDs, func() error {
-			if aliasErr := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), alias, ""); aliasErr != nil {
+			if aliasErr := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); aliasErr != nil {
 				return aliasErr
 			}
 			if reserveConcreteIdentity && workDirQualifiedName != alias {
-				if aliasErr := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), workDirQualifiedName, ""); aliasErr != nil {
+				if aliasErr := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), workDirQualifiedName, ""); aliasErr != nil {
 					return aliasErr
 				}
 			}
-			if nameErr := session.EnsureSessionNameAvailableWithConfig(store.Store, s.state.Config(), explicitName, ""); nameErr != nil {
+			if nameErr := session.EnsureSessionNameAvailableWithConfig(store, s.state.Config(), explicitName, ""); nameErr != nil {
 				return nameErr
 			}
 			var err error
@@ -390,7 +390,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 		}
 		var info session.Info
 		createErr := session.WithCitySessionAliasLock(s.state.CityPath(), alias, func() error {
-			if aliasErr := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), alias, ""); aliasErr != nil {
+			if aliasErr := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); aliasErr != nil {
 				return aliasErr
 			}
 			var err error
@@ -628,7 +628,7 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 			return nil, apierr.Forbidden.Msg("forbidden: alias is controller-managed for this session")
 		}
 		if lockErr := session.WithCitySessionAliasLock(s.state.CityPath(), *aliasPtr, func() error {
-			if avErr := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), *aliasPtr, id); avErr != nil {
+			if avErr := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), *aliasPtr, id); avErr != nil {
 				return avErr
 			}
 			return updateFn()
@@ -680,7 +680,7 @@ func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissio
 	if !session.IsSessionBeadOrRepairable(b) {
 		return nil, apierr.InvalidRequest.Msg(id + " is not a session")
 	}
-	session.RepairEmptyType(store.Store, &b)
+	session.RepairEmptyType(store, &b)
 
 	mgr := s.sessionManager(store.Store)
 	info, err := mgr.Get(id)

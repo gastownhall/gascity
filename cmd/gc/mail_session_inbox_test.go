@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/session"
@@ -68,7 +69,7 @@ func selfReadsAgreeOnTheSessionInbox(t *testing.T, wrap func(mail.Provider, bead
 	want := []string{sent["sky"], sent[predecessor], sent["runtime-pred"]}
 	sort.Strings(want)
 
-	info, _, err := session.ResolveSessionRecordByExactID(store, self)
+	info, _, err := session.ResolveSessionRecordByExactID(beadstest.Sessions(store), self)
 	if err != nil {
 		t.Fatalf("ResolveSessionRecordByExactID: %v", err)
 	}

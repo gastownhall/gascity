@@ -310,7 +310,7 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 // bdStoreBridgeReopen reopens id, clearing a session bead's runtime lease
 // record first: a reopened row holds no lease (SESSION-RUNTIME-012).
 func bdStoreBridgeReopen(store beads.Store, id string) error {
-	if err := session.ClearRuntimeLeaseForReopen(store, id); err != nil {
+	if err := session.ClearRuntimeLeaseForReopen(beads.SessionStore{Store: store}, id); err != nil {
 		return err
 	}
 	return store.Reopen(id)

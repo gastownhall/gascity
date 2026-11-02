@@ -202,15 +202,15 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		reservationIDs = append(reservationIDs, createCtx.Identity)
 	}
 	err = session.WithCitySessionIdentifierLocks(s.state.CityPath(), reservationIDs, func() error {
-		if err := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), alias, ""); err != nil {
+		if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); err != nil {
 			return err
 		}
 		if reserveConcreteIdentity && createCtx.Identity != alias {
-			if err := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), createCtx.Identity, ""); err != nil {
+			if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), createCtx.Identity, ""); err != nil {
 				return err
 			}
 		}
-		if err := session.EnsureSessionNameAvailableWithConfig(store.Store, s.state.Config(), createCtx.ExplicitName, ""); err != nil {
+		if err := session.EnsureSessionNameAvailableWithConfig(store, s.state.Config(), createCtx.ExplicitName, ""); err != nil {
 			return err
 		}
 		var createErr error
@@ -389,7 +389,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	}
 	var info session.Info
 	err = session.WithCitySessionAliasLock(s.state.CityPath(), alias, func() error {
-		if err := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), alias, ""); err != nil {
+		if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); err != nil {
 			return err
 		}
 		var createErr error
