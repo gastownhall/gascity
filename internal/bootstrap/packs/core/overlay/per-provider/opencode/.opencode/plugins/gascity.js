@@ -137,13 +137,14 @@ function sessionIDFromEvent(event) {
   );
 }
 
-// managedSessionIdentityPresent reports whether gc started this process. gc
-// puts GC_SESSION_ID and GC_SESSION_NAME in the environment of every session
-// it starts, with GC_ALIAS, GC_AGENT and GC_TEMPLATE where the session has
-// them. These are the session keys of gc's hookHasManagedIdentity
-// (cmd/gc/cmd_prime.go). Its other key, GC_MANAGED_SESSION_HOOK, marks gc's
-// own hook commands rather than a session, so it says nothing about who
-// started this process.
+// managedSessionIdentityPresent reports whether this process carries the
+// session identity gc puts in the environment of every session it starts:
+// GC_SESSION_ID and GC_SESSION_NAME always, with GC_ALIAS, GC_AGENT and
+// GC_TEMPLATE where the session has them. A process started from inside a gc
+// session inherits that identity and counts as managed. These are the session
+// keys of gc's hookHasManagedIdentity (cmd/gc/cmd_prime.go). Its other key,
+// GC_MANAGED_SESSION_HOOK, marks gc's own hook commands rather than a session,
+// so it says nothing about the process this plugin runs in.
 function managedSessionIdentityPresent() {
   return [
     "GC_SESSION_ID",

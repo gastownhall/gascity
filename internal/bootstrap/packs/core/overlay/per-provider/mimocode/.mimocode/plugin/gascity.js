@@ -29,8 +29,9 @@
 // therefore registers hooks only when gc's session identity is present in
 // the environment. Outside a gc session the injection commands have nothing
 // to return and gc handoff exits 1, so the hooks would only spawn gc on
-// every generation and log a failed handoff on every compaction, in a
-// session Gas City does not own.
+// every generation, log a failed handoff on every compaction, and mirror the
+// transcript into the directory gc reads its own sessions' transcripts from,
+// for a session Gas City does not own.
 
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
@@ -139,13 +140,14 @@ function sessionIDFromEvent(event) {
   );
 }
 
-// managedSessionIdentityPresent reports whether gc started this process. gc
-// puts GC_SESSION_ID and GC_SESSION_NAME in the environment of every session
-// it starts, with GC_ALIAS, GC_AGENT and GC_TEMPLATE where the session has
-// them. These are the session keys of gc's hookHasManagedIdentity
-// (cmd/gc/cmd_prime.go). Its other key, GC_MANAGED_SESSION_HOOK, marks gc's
-// own hook commands rather than a session, so it says nothing about who
-// started this process.
+// managedSessionIdentityPresent reports whether this process carries the
+// session identity gc puts in the environment of every session it starts:
+// GC_SESSION_ID and GC_SESSION_NAME always, with GC_ALIAS, GC_AGENT and
+// GC_TEMPLATE where the session has them. A process started from inside a gc
+// session inherits that identity and counts as managed. These are the session
+// keys of gc's hookHasManagedIdentity (cmd/gc/cmd_prime.go). Its other key,
+// GC_MANAGED_SESSION_HOOK, marks gc's own hook commands rather than a session,
+// so it says nothing about the process this plugin runs in.
 function managedSessionIdentityPresent() {
   return [
     "GC_SESSION_ID",

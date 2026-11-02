@@ -62,13 +62,14 @@ const plugins = [
 // prime log, and GC_FAKE_PRIME_STAMP marks the output the way the real
 // command bakes the current time into its beacon, so a test can tell a
 // refreshed prime from the cached one. Every call of any kind appends its
-// arguments to the call log. `handoff --auto` fails outside a gc session the
-// way the real command does (cmd/gc/session_target.go). GC_FAKE_PRIME_FAIL
-// makes `prime --hook` fail and GC_FAKE_PRIME_EMPTY makes it print nothing,
-// as it does in a suspended city; both are still logged. GC_FAKE_MAIL_FAIL
-// makes `mail check` fail. With GC_FAKE_RENDEZVOUS naming a directory,
-// `nudge drain` and `mail check` each wait up to 5s for the other to start
-// and fail if it never does, so calling them one after the other fails.
+// arguments to the call log. `handoff --auto` fails when GC_ALIAS,
+// GC_SESSION_ID and GC_AGENT are all blank, the first check the real command
+// makes (cmd/gc/session_target.go). GC_FAKE_PRIME_FAIL makes `prime --hook`
+// fail and GC_FAKE_PRIME_EMPTY makes it print nothing, as it does in a
+// suspended city; both are still logged. GC_FAKE_MAIL_FAIL makes `mail check`
+// fail. With GC_FAKE_RENDEZVOUS naming a directory, `nudge drain` and
+// `mail check` each wait up to 5s for the other to start and fail if it never
+// does, so calling them one after the other fails.
 function writeFakeGc(dir) {
   const counter = path.join(dir, "drain-count");
   const drainLog = path.join(dir, "drain-log");

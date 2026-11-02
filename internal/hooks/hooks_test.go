@@ -1904,7 +1904,7 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	opencodeHooks := string(fs.Files["/work/.opencode/plugins/gascity.js"])
 	for _, want := range []string{
 		"const GC_OPENCODE_HOOK_VERSION = 9",
-		"managedSessionIdentityPresent()",
+		"if (!managedSessionIdentityPresent())",
 		"pending.child.stdin?.end();",
 		"appendVolatileSystem",
 		"const turns = new Map()",
@@ -1941,7 +1941,7 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	for _, want := range []string{
 		"Gas City hooks for MiMo Code.",
 		"const GC_MIMOCODE_HOOK_VERSION = 5",
-		"managedSessionIdentityPresent()",
+		"if (!managedSessionIdentityPresent())",
 		"pending.child.stdin?.end();",
 		"appendVolatileSystem",
 		"const turns = new Map()",
@@ -2359,7 +2359,7 @@ export default async function gascityPlugin() {
 	}
 	for _, want := range []string{
 		"const GC_OPENCODE_HOOK_VERSION = 9",
-		"managedSessionIdentityPresent()",
+		"if (!managedSessionIdentityPresent())",
 		"pending.child.stdin?.end();",
 		"appendVolatileSystem",
 		"const turns = new Map()",
@@ -2384,12 +2384,14 @@ export default async function gascityPlugin() {
 }
 
 // The unmanaged-session guard shipped as OpenCode plugin 9 and MiMo Code
-// plugin 5. An installed copy of the version before it is replaced by the
-// bundled plugin, and the replaced file is kept as .bak. The versions are
-// literal: a plugin installed at the old number must not stay current even
-// when its body already matches, as in builds that carried the guard at
-// the old number.
+// plugin 5. An installed copy without it is replaced by the bundled plugin,
+// and the replaced file is kept as .bak, both when the copy is at the version
+// before the guard and when it is at the current version with the guard call
+// removed. The versions are literal: a plugin installed at the old number
+// must not stay current even when its body already matches, as in builds that
+// carried the guard at the old number.
 func TestInstallUpgradesPluginsFromBeforeTheManagedSessionGuard(t *testing.T) {
+	const guard = "  if (!managedSessionIdentityPresent()) {\n    return {};\n  }\n"
 	for _, tc := range []struct {
 		provider string
 		dst      string
@@ -2399,28 +2401,36 @@ func TestInstallUpgradesPluginsFromBeforeTheManagedSessionGuard(t *testing.T) {
 		{"opencode", "/work/.opencode/plugins/gascity.js", "const GC_OPENCODE_HOOK_VERSION = 9;", "const GC_OPENCODE_HOOK_VERSION = 8;"},
 		{"mimocode", "/work/.mimocode/plugin/gascity.js", "const GC_MIMOCODE_HOOK_VERSION = 5;", "const GC_MIMOCODE_HOOK_VERSION = 4;"},
 	} {
-		t.Run(tc.provider, func(t *testing.T) {
-			fs := fsys.NewFake()
-			if err := Install(fs, "/city", "/work", []string{tc.provider}); err != nil {
-				t.Fatalf("Install: %v", err)
-			}
-			bundled := fs.Files[tc.dst]
-			if !bytes.Contains(bundled, []byte(tc.current)) {
-				t.Fatalf("bundled %s plugin does not declare %q", tc.provider, tc.current)
-			}
-			previous := bytes.Replace(bundled, []byte(tc.current), []byte(tc.previous), 1)
-			fs.Files[tc.dst] = previous
+		for _, installed := range []struct {
+			name     string
+			old, new string
+		}{
+			{"previous version", tc.current, tc.previous},
+			{"current version without the guard call", guard, ""},
+		} {
+			t.Run(tc.provider+"/"+installed.name, func(t *testing.T) {
+				fs := fsys.NewFake()
+				if err := Install(fs, "/city", "/work", []string{tc.provider}); err != nil {
+					t.Fatalf("Install: %v", err)
+				}
+				bundled := fs.Files[tc.dst]
+				if !bytes.Contains(bundled, []byte(tc.current)) || bytes.Count(bundled, []byte(guard)) != 1 {
+					t.Fatalf("bundled %s plugin does not declare %q with one guard", tc.provider, tc.current)
+				}
+				stale := bytes.Replace(bundled, []byte(installed.old), []byte(installed.new), 1)
+				fs.Files[tc.dst] = stale
 
-			if err := Install(fs, "/city", "/work", []string{tc.provider}); err != nil {
-				t.Fatalf("reinstall: %v", err)
-			}
-			if !bytes.Equal(fs.Files[tc.dst], bundled) {
-				t.Errorf("installed %q plugin was not replaced by the bundled one", tc.previous)
-			}
-			if !bytes.Equal(fs.Files[tc.dst+".bak"], previous) {
-				t.Errorf("replaced %q plugin was not kept as .bak", tc.previous)
-			}
-		})
+				if err := Install(fs, "/city", "/work", []string{tc.provider}); err != nil {
+					t.Fatalf("reinstall: %v", err)
+				}
+				if !bytes.Equal(fs.Files[tc.dst], bundled) {
+					t.Errorf("installed plugin (%s) was not replaced by the bundled one", installed.name)
+				}
+				if !bytes.Equal(fs.Files[tc.dst+".bak"], stale) {
+					t.Errorf("replaced plugin (%s) was not kept as .bak", installed.name)
+				}
+			})
+		}
 	}
 }
 
@@ -2445,7 +2455,7 @@ pending.child.stdin?.end();
 function appendVolatileSystem(system, volatile) {}
 const turns = new Map();
 if (state.userMessageIDs.has(messageID)) {}
-managedSessionIdentityPresent();
+if (!managedSessionIdentityPresent()) {}
 const [infoResult, messagesResult] = await Promise.all([client.session.get(), client.session.messages()]);
 const [nudges, mail] = await Promise.all([
   runWithWarning(directory, "nudge", "drain", "--inject"),
@@ -2459,7 +2469,7 @@ const [nudges, mail] = await Promise.all([
 	volatileInHeader := bytes.Replace(current, []byte("function appendVolatileSystem(system, volatile) {}\n"), nil, 1)
 	sharedTurnState := bytes.Replace(current, []byte("const turns = new Map();\n"), []byte("let drainedTurnID = null;\n"), 1)
 	idOrderTurnGate := bytes.Replace(current, []byte("if (state.userMessageIDs.has(messageID)) {}\n"), []byte("if (messageID <= state.currentTurnID) {}\n"), 1)
-	unguarded := bytes.ReplaceAll(current, []byte("managedSessionIdentityPresent"), []byte("somethingElse"))
+	unguarded := bytes.Replace(current, []byte("if (!managedSessionIdentityPresent()) {}\n"), nil, 1)
 	concurrentReads := "const [nudges, mail] = await Promise.all([\n  runWithWarning(directory, \"nudge\", \"drain\", \"--inject\"),\n  runWithWarning(directory, \"mail\", \"check\", \"--inject\"),\n]);\n"
 	serialInjection := bytes.Replace(current, []byte(concurrentReads), []byte("const nudges = await run(directory, \"nudge\", \"drain\", \"--inject\");\nconst mail = await run(directory, \"mail\", \"check\", \"--inject\");\n"), 1)
 	silentInjection := bytes.Replace(current, []byte(concurrentReads), []byte(strings.ReplaceAll(concurrentReads, "runWithWarning(", "run(")), 1)
@@ -2521,6 +2531,7 @@ func TestMimoCodeHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 	current := []byte(`// Gas City hooks for MiMo Code.
 const GC_MIMOCODE_HOOK_VERSION = 5;
 const GC_BIN = process.env.GC_BIN || "gc";
+function managedSessionIdentityPresent() {}
 pending.child.stdin?.end();
 function appendVolatileSystem(system, volatile) {}
 const turns = new Map();
@@ -2534,6 +2545,7 @@ const [nudges, mail] = await Promise.all([
 `)
 	versionless := []byte(`// Gas City hooks for MiMo Code.
 const GC_BIN = process.env.GC_BIN || "gc";
+function managedSessionIdentityPresent() {}
 pending.child.stdin?.end();
 function appendVolatileSystem(system, volatile) {}
 const turns = new Map();
