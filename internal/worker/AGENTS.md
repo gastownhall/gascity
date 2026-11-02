@@ -45,6 +45,11 @@ when the context ends. Take the bound from the caller's own context.
   returned, a new call gets `ErrObservationOutstanding` (also
   `runtime.ErrRuntimeUnavailable`) and starts nothing, so a wedged session
   costs one goroutine per key, not one per call.
+- The implementation is `runtime.CallBounded` and `runtime.CallShared`
+  (`internal/runtime/bounded_call.go`); `ObserveBounded`, `ObserveShared`
+  and `ErrObservationOutstanding` forward to them, so packages below worker
+  (`internal/session`) bound their waits with the same latch. Keys are one
+  process-wide space, so every caller namespaces its keys.
 - The key names what is observed, one session in one city, within a caller
   namespace. Every caller in a namespace must derive the key the same way, or
   the one-in-flight limit no longer holds. `cmd/gc` has two namespaces, so a

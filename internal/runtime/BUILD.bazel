@@ -4,6 +4,7 @@ go_library(
     name = "runtime",
     srcs = [
         "beacon.go",
+        "bounded_call.go",
         "carrier.go",
         "carrier_fence.go",
         "composite_forward.go",

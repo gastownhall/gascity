@@ -405,3 +405,46 @@ func TestObserveBoundedRejectsBlankKey(t *testing.T) {
 		}
 	})
 }
+
+// AC-8: ObserveBounded and ObserveShared forward to the runtime bounded-call
+// implementation, so they share its one-in-flight latch and its sentinel: a
+// call wedged through runtime.CallBounded makes a worker observation of the
+// same key outstanding, and a worker shared observation is joined by a
+// runtime.CallShared of the same key.
+func TestObserveFormsShareTheRuntimeBoundedCallImplementation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		wedge := newWedgedObservation()
+		defer wedge.unblock()
+		ctx, cancel := context.WithTimeout(context.Background(), observeBound)
+		defer cancel()
+		go func() { _, _ = runtime.CallBounded(ctx, t.Name()+"/bounded", wedge.observe) }()
+		synctest.Wait()
+
+		_, err := ObserveBounded(ctx, t.Name()+"/bounded", wedge.observe)
+
+		if !errors.Is(err, runtime.ErrBoundedCallOutstanding) || !errors.Is(err, ErrObservationOutstanding) || !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("ObserveBounded behind a wedged runtime.CallBounded = %v, want the outstanding sentinel wrapping runtime.ErrRuntimeUnavailable", err)
+		}
+		if n := wedge.started.Load(); n != 1 {
+			t.Fatalf("observations started = %d, want 1", n)
+		}
+
+		shared := make(chan sharedOutcome, 1)
+		go func() {
+			v, err := runtime.CallShared(ctx, t.Name()+"/shared", wedge.observe)
+			shared <- sharedOutcome{v, err}
+		}()
+		synctest.Wait()
+		joiner := observeSharedAsync(ctx, t.Name()+"/shared", wedge.observe)
+		synctest.Wait()
+		wedge.unblock()
+		for _, ch := range []<-chan sharedOutcome{shared, joiner} {
+			if got := <-ch; got.err != nil || got.value != wedgedAnswer {
+				t.Fatalf("shared answer = %+v, want (%d, nil)", got, wedgedAnswer)
+			}
+		}
+		if n := wedge.started.Load(); n != 2 {
+			t.Fatalf("observations started = %d, want 2: the wedged bounded call and one shared call", n)
+		}
+	})
+}
