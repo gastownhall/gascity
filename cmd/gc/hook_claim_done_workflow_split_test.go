@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 // These rows pin the done-workflow retirement and the stale reclaim of
@@ -232,6 +235,121 @@ func TestUnroutedHookCannotRetireABindingResidentDoneWorkflow(t *testing.T) {
 	kept, stderr := f.retire(t, f.baseOps(t), f.step)
 	if len(kept) != 1 || !strings.Contains(stderr, "not found") {
 		t.Fatalf("unrouted retirement kept=%d stderr=%q; expected the work-scope seam to miss the root (this row documents the bug the route closes)", len(kept), stderr)
+	}
+}
+
+// fixtureProveAbsent is the absence proof over the stores this file's rows
+// stage: the same rule the production prover states
+// (hook_claim_prove_absent.go) — a direct read answering ErrNotFound from
+// every store proves, one hit anywhere disproves, a read error is an
+// operational error. The prover's own behavior is pinned on the logic rows;
+// these rows pin where a purged verdict's retirement WRITES land on a split
+// city, so the proof here only needs to span the stores the row stages.
+func fixtureProveAbsent(stores ...beads.Store) hookProveAbsentFunc {
+	return func(ctx context.Context, _ string, ids []string) (bool, error) {
+		for _, id := range ids {
+			if err := ctx.Err(); err != nil {
+				return false, fmt.Errorf("proving %s absent: %w", id, err)
+			}
+			for _, store := range stores {
+				if _, err := store.Get(id); err == nil {
+					return false, nil
+				} else if !errors.Is(err, beads.ErrNotFound) {
+					return false, fmt.Errorf("proving %s absent: %w", id, err)
+				}
+			}
+		}
+		return true, nil
+	}
+}
+
+// purgedBaseOps is baseOps carrying the two purged-input seams, the way the
+// default seams run them: the work-scope subtree close (cancelPurgedWorkflow
+// over the work store) and the absence proof over the row's own stores.
+func (f doneWorkflowSplitFixture) purgedBaseOps(t *testing.T, prove hookProveAbsentFunc) hookClaimOps {
+	t.Helper()
+	ops := f.baseOps(t)
+	ops.ProveAbsent = prove
+	ops.CancelPurgedWorkflow = func(_ context.Context, _ string, _ []string, rootID string) error {
+		return cancelPurgedWorkflow(f.work, rootID)
+	}
+	return ops
+}
+
+// A purged input retires a binding-resident workflow through the route: the
+// root and its open steps close IN THE BINDING as a hard input_purged
+// failure, the finished step keeps its recorded outcome, the work store is
+// not written, and the log names the convoy the proof ruled on. Without the
+// routed CancelPurgedWorkflow the retirement would run against the work
+// store, miss the root there, and leave the treadmill running — the same
+// miss the unrouted rows above document for the done verdict.
+func TestClassRoutedHookRetiresPurgedInput(t *testing.T) {
+	f := newDoneWorkflowSplitFixture(t, false)
+	if err := f.binding.SetMetadata(f.root.ID, beadmeta.InputConvoyIDMetadataKey, "gc-vanished-convoy"); err != nil {
+		t.Fatal(err)
+	}
+	ops := classRoutedHookClaimOps(f.purgedBaseOps(t, fixtureProveAbsent(f.work, f.binding)), f.route)
+
+	kept, stderr := f.retire(t, ops, f.step)
+	if len(kept) != 0 {
+		t.Fatalf("candidate %s kept (stderr=%q); its workflow's input convoy is proven absent everywhere and must be retired", f.step.ID, stderr)
+	}
+	if !strings.Contains(stderr, f.root.ID) || !strings.Contains(stderr, "gc-vanished-convoy") {
+		t.Fatalf("stderr = %q, want it to name the retired root %s and the absent convoy", stderr, f.root.ID)
+	}
+	for _, id := range []string{f.root.ID, f.step.ID} {
+		got, err := f.binding.Get(id)
+		if err != nil {
+			t.Fatalf("reading %s from the binding: %v", id, err)
+		}
+		if got.Status != "closed" ||
+			got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail ||
+			got.Metadata[beadmeta.FailureClassMetadataKey] != beadmeta.FailureClassHard ||
+			got.Metadata[beadmeta.FailureReasonMetadataKey] != hookInputPurgedFailureReason ||
+			got.Metadata["close_reason"] != sourceworkflow.HookPurgedInputWorkflowCloseReason {
+			t.Errorf("%s in the binding: status=%q outcome=%q failure_class=%q failure_reason=%q close_reason=%q; want closed/%s/%s/%s/%s",
+				id, got.Status, got.Metadata[beadmeta.OutcomeMetadataKey],
+				got.Metadata[beadmeta.FailureClassMetadataKey], got.Metadata[beadmeta.FailureReasonMetadataKey],
+				got.Metadata["close_reason"],
+				beadmeta.OutcomeFail, beadmeta.FailureClassHard, hookInputPurgedFailureReason, sourceworkflow.HookPurgedInputWorkflowCloseReason)
+		}
+	}
+	done, err := f.binding.Get(f.done.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Metadata[beadmeta.FailureReasonMetadataKey] != "" {
+		t.Errorf("the finished step %s was rewritten (failure_reason=%q); terminal beads keep their recorded outcomes", f.done.ID, done.Metadata[beadmeta.FailureReasonMetadataKey])
+	}
+	for _, id := range []string{f.source.ID, f.convoyID} {
+		got, err := f.work.Get(id)
+		if err != nil {
+			t.Fatalf("reading %s from the work store: %v", id, err)
+		}
+		if got.Status == "closed" {
+			t.Errorf("work bead %s was closed by a retirement whose subject lives in the binding; the work store is not written", id)
+		}
+	}
+}
+
+// A convoy that still lives in a store outside the two the claim reads is not
+// proven absent: the third store's hit keeps the workflow live, exactly as
+// the done-path rows keep one open input member live.
+func TestClassRoutedHookKeepsPurgedInputWhenAThirdStoreHoldsTheConvoy(t *testing.T) {
+	f := newDoneWorkflowSplitFixture(t, false)
+	third := &faultableGetStore{Store: beads.NewMemStore(), id: "gc-held-convoy", present: true}
+	if err := f.binding.SetMetadata(f.root.ID, beadmeta.InputConvoyIDMetadataKey, "gc-held-convoy"); err != nil {
+		t.Fatal(err)
+	}
+	ops := classRoutedHookClaimOps(f.purgedBaseOps(t, fixtureProveAbsent(f.work, f.binding, third)), f.route)
+
+	kept, stderr := f.retire(t, ops, f.step)
+	if len(kept) != 1 {
+		t.Fatalf("candidate %s dropped (stderr=%q); its input convoy still lives in a store the proof reads and the workflow must stay live", f.step.ID, stderr)
+	}
+	f.assertOpen(t, f.root.ID, f.step.ID)
+	if third.gets == 0 {
+		t.Fatal("the third store was never read; the row seeded a hit it never proved the proof could see")
 	}
 }
 

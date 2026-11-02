@@ -857,6 +857,22 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 		return base.SkipDoneWorkflow(ctx, dir, env, rootID)
 	}
 
+	// Purged-input retirement (the #8729 close of the R6 treadmill) closes the
+	// same subtree the skip above does, with the hard input_purged disposition
+	// instead of skipped — so it routes the same way: the root and its step
+	// seats live in the binding on a split city, and a work-scope close would
+	// miss the root there and leave the loop running.
+	ops.CancelPurgedWorkflow = func(ctx context.Context, dir string, env []string, rootID string) error {
+		resident, err := route.resolvesToBinding(ctx, base, dir, env, rootID)
+		if err != nil {
+			return err
+		}
+		if resident {
+			return cancelPurgedWorkflow(route.class, rootID)
+		}
+		return base.CancelPurgedWorkflow(ctx, dir, env, rootID)
+	}
+
 	// A stale-lease reclaim of a binding-resident bead belongs to the binding.
 	// Beads, not gc, is the authority on staleness (ga-7rj87d NFR3), so a
 	// binding whose engine exposes no stale-lease reclaim reclaims nothing:
