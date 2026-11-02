@@ -4650,7 +4650,7 @@ compact_each_database() {
     if [ "$live_gate_failed" = "1" ]; then
       printf 'compact: db=%s live-database gate failed at step=%s — aborting run before any further database work\n' \
         "$_ce_db" "${live_gate_failed_step:-<unknown>}" >&2
-      compact_not_reached_dbs "$_ce_processed"
+      compact_not_reached_dbs "$_ce_processed $_ce_db"
       exit 1
     fi
     if [ "$_ce_rc" -ne 0 ]; then

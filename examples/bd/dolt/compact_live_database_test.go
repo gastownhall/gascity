@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -27,6 +28,16 @@ func requireCompactExitCode(t *testing.T, out string, err error, want int) {
 	}
 	if exitErr.ExitCode() != want {
 		t.Fatalf("compact exit code = %d, want %d:\n%s", exitErr.ExitCode(), want, out)
+	}
+}
+
+// addCompactExtraDatabase registers one more discovered database directory
+// in the fixture's data dir, so a run has a second (or third) database to
+// reach after the first.
+func addCompactExtraDatabase(t *testing.T, fixture compactScriptFixture, name string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(fixture.dataDir, name, ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir %s db dir: %v", name, err)
 	}
 }
 
@@ -208,4 +219,61 @@ func TestCompactScriptLiveGateQuarantinesUnservedDatabase(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCompactScriptLiveGateAbortsRunAndNamesDatabasesNotReached: after a
+// failed gate the run stops at once — no statements against later databases,
+// no success or retry bookkeeping — and the diagnostic names the selected
+// databases that were not reached.
+func TestCompactScriptLiveGateAbortsRunAndNamesDatabasesNotReached(t *testing.T) {
+	t.Run("names the untouched database", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		addCompactExtraDatabase(t, fixture, "zed")
+		out, err := fixture.run(t, "live_vanish_after_gc",
+			"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+			"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
+		requireCompactExitCode(t, out, err, 1)
+		if !strings.Contains(out, "aborting the run") {
+			t.Fatalf("gate failure must abort the run:\n%s", out)
+		}
+		if !strings.Contains(out, "not reached after the abort: zed") {
+			t.Fatalf("abort diagnostic must name the database not reached:\n%s", out)
+		}
+		log := readCompactDoltLog(t, fixture)
+		if strings.Contains(log, "db=zed query=") {
+			t.Fatalf("no statements may run against a database after the abort:\n%s", log)
+		}
+		if strings.Contains(out, "— ok") {
+			t.Fatalf("no database may be reported as successful after the abort:\n%s", out)
+		}
+	})
+
+	t.Run("respects only-dbs selection", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		addCompactExtraDatabase(t, fixture, "zed")
+		addCompactExtraDatabase(t, fixture, "alpha")
+		out, err := fixture.run(t, "live_vanish_after_gc",
+			"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+			"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0",
+			"GC_DOLT_COMPACT_ONLY_DBS=beads,zed")
+		requireCompactExitCode(t, out, err, 1)
+		if !strings.Contains(out, "not reached after the abort: zed") {
+			t.Fatalf("abort diagnostic must name the selected database not reached:\n%s", out)
+		}
+		if strings.Contains(out, "not reached after the abort: alpha") || strings.Contains(out, "zed alpha") {
+			t.Fatalf("a database outside the selection is not \"not reached\":\n%s", out)
+		}
+	})
+
+	t.Run("none left when the failure is the last database", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		out, err := fixture.run(t, "live_vanish_after_gc",
+			"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+			"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0",
+			"GC_DOLT_COMPACT_ONLY_DBS=beads")
+		requireCompactExitCode(t, out, err, 1)
+		if !strings.Contains(out, "not reached after the abort: none") {
+			t.Fatalf("abort diagnostic must say no databases were left unreached:\n%s", out)
+		}
+	})
 }
