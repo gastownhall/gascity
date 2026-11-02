@@ -119,7 +119,7 @@ func TestDriftDeferStep(t *testing.T) {
 // for start-pending): a row with its key and stored hash keeps both; one
 // without rotates the key for a provider that takes one and clears it for
 // another; each goes start-pending with its claim at now and its deferral
-// stamps cleared.
+// stamps and escalation marker cleared.
 func TestDriftRestartPatch(t *testing.T) {
 	minting := TemplateParams{ResolvedProvider: &config.ResolvedProvider{SessionIDFlag: "--session-id"}}
 	for _, tc := range []struct {
@@ -148,6 +148,9 @@ func TestDriftRestartPatch(t *testing.T) {
 			}
 			if _, ok := p["config_drift_deferred_key"]; !ok {
 				t.Fatalf("patch %v, want the deferral keys written", p)
+			}
+			if marker, ok := p["config_drift_escalated_at"]; !ok || marker != "" {
+				t.Fatalf("patch %v, want the escalation marker cleared", p)
 			}
 		})
 	}

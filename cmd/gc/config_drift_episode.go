@@ -35,7 +35,7 @@ type driftEpisodeStep struct {
 
 // driftEpisode observes the held-work drift episode under key at now: a
 // stamp that does not parse, lies after now or names another drift key
-// starts the episode at now; an episode under horizon waits until it; past
+// starts the episode at now, clearing any escalation marker; an episode under horizon waits until it; past
 // it, an episode without an escalation marker between its start and now
 // escalates; one with such a marker writes nothing.
 func driftEpisode(info session.Info, key string, now time.Time, horizon time.Duration) driftEpisodeStep {
@@ -44,6 +44,7 @@ func driftEpisode(info session.Info, key string, now time.Time, horizon time.Dur
 		return driftEpisodeStep{Since: now, Patch: session.MetadataPatch{
 			namedSessionConfigDriftDeferredAtMetadata:  now.UTC().Format(time.RFC3339),
 			namedSessionConfigDriftDeferredKeyMetadata: key,
+			configDriftEscalatedAtMetadata:             "",
 		}}
 	}
 	if m, ok := parseRFC3339Metadata(info.ConfigDriftEscalatedAt); ok && !m.Before(since) && !m.After(now) {
