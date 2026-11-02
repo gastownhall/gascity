@@ -290,14 +290,32 @@ shape.
 A read command such as `gc session list` can answer from two places: the city's
 running supervisor API, or a direct read of the city's own files and bead
 stores. A supervisor-hosted city reads through the API by default. Either way,
-the command prints the same JSON document, in the shape its result schema
-declares:
+the command prints a JSON document of the same shape, the one its result
+schema declares:
 
 | What you see | Rule |
 |---|---|
-| Keys and values | Identical on both routes for the same city state. |
-| Data only the server has | Optional keys the schema declares, such as `_cache_age_s` (age of the server's cache) and `running` on session rows. The direct read leaves them out; it never guesses them. |
+| Shape | The same keys and types on both routes. For the same city state the values match too, apart from the known differences listed below. |
+| Data only the server has | Optional keys the schema declares, such as `_cache_age_s` (seconds since the server's bead cache last took in fresh data from its store) and `running` on session rows. The direct read leaves them out; it never guesses them. |
+| Data only the direct read has | `gc session list` prints `command`, `session_key` and the `resume_*` fields only on the direct read; the API never sends them. Set `GC_NO_API=1` if a script needs them. |
 | Keys you don't recognize | Ignore them. New optional keys can appear without a `schema_version` bump. |
+
+A few values can still differ between the routes for the same city state
+([#8453](https://github.com/gastownhall/gascity/issues/8453) tracks them):
+
+- `gc session list`: for a session that recorded no provider, the API route
+  prints the city's `[workspace]` provider, while the direct read leaves
+  `provider` out.
+- `gc session peek`: the two routes resolve a session name through different
+  alias rules, so a name can resolve on one route and not on the other.
+- `gc rig status`: rows for unlimited pools (agents without
+  `max_active_sessions`) can list different instances.
+- `gc status`: a rig's `path` can be relative on one route and absolute on
+  the other.
+- `gc beads list` and `gc convoy list` on a city that splits its bead storage
+  can read a different set of stores on each route.
+- `gc mail count` and `gc mail check` can count a named session's mail across
+  its earlier incarnations differently.
 
 You can still pick the route. `GC_NO_API=1` forces the direct read of a local
 city, and `--city-url`, `--city-name`, `GC_CITY_URL` and contexts read a remote

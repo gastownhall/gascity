@@ -421,6 +421,11 @@ direct read of the city) prints one JSON document on every route. Rules:
   direct read never computes them: a CLI-process liveness probe gives confident
   false negatives. Use one struct for both routes with `omitempty` pointers for
   these keys (the `gc rig list` pattern, #2490).
+- Keys the API deliberately redacts are the one shape exception: `gc session
+  list` prints `command`, `session_key` and `resume_*` only on the direct read,
+  and its schema marks them local-only. Known value differences that remain
+  are listed in `docs/guides/using-json-from-gc.md` ("Same Output On Every
+  Route"); a fix for one should remove it from that list.
 - Consumers must ignore unknown keys. `schema_version` is bumped only for a
   breaking change inside the schema.
 - Every route or shape change gets an Upgrading Note in `CHANGELOG.md`.
