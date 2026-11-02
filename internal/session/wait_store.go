@@ -25,6 +25,11 @@ import (
 const (
 	waitStatePending = "pending"
 	waitStateReady   = "ready"
+
+	// waitCancelCloseBatchLimit bounds each close batch a cancellable
+	// CancelWaits context checks before issuing, so a bounded cancellation pass
+	// commits to at most this many IDs of store work past its last checkpoint.
+	waitCancelCloseBatchLimit = 10
 )
 
 // ErrNotAWait reports that a bead exists but is not a durable session wait. It
@@ -455,12 +460,13 @@ func (s *Store) RetryClosedWait(id, nextAttempt string, now time.Time) (WaitInfo
 // across capped lookup pages, plus whether any lookup page was capped.
 //
 // ctx bounds the store work this call issues between store calls (SESSION-RUNTIME-034):
-// each wait lookup, and each ID-class close, starts only while ctx is live. A
-// context that ends at a checkpoint makes no further store call and returns the
-// nudge IDs observed so far, the accumulated capped flag, and an error wrapping
-// the context's cause and naming the session; store errors keep their bare
-// identity, and a call already in flight finishes. A Background context bounds
-// nothing and behaves exactly as before.
+// each wait lookup, and — under a cancellable context — each close batch of at
+// most waitCancelCloseBatchLimit IDs of one ID class, starts only while ctx is
+// live. A context that ends at a checkpoint makes no further store call and
+// returns the nudge IDs observed so far, the accumulated capped flag, and an
+// error wrapping the context's cause and naming the session; store errors keep
+// their bare identity, and a call already in flight finishes. A Background
+// context bounds nothing and behaves exactly as before.
 func (s *Store) CancelWaits(ctx context.Context, sessionID string, now time.Time) (nudgeIDs []string, capped bool, err error) {
 	return s.cancelWaitsAndCollectNudgeIDs(ctx, sessionID, now)
 }
@@ -513,20 +519,32 @@ func (s *Store) cancelWaitsAndCollectNudgeIDs(ctx context.Context, sessionID str
 }
 
 // closeWaitIDs closes one page's wait IDs of a single class — the canceled
-// metadata for pending waits, none for terminal ones — starting the store call
+// metadata for pending waits, none for terminal ones — starting store calls
 // only while ctx is live, so a bounded cancellation pass commits to no new
-// store work once its context ends. A context stop is reported as an error
-// wrapping the context's cause and naming the session; a store error keeps its
-// bare identity.
+// store work once its context ends. Under a cancellable context the class is
+// closed in batches of at most waitCancelCloseBatchLimit IDs, each checked
+// against ctx before it starts; a Background context keeps one store call for
+// the whole class. A context stop is reported as an error wrapping the
+// context's cause and naming the session; a store error keeps its bare
+// identity.
 func (s *Store) closeWaitIDs(ctx context.Context, sessionID string, ids []string, metadata map[string]string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return fmt.Errorf("canceling waits for session %s: %w", sessionID, ctxErr)
+	if ctx.Done() == nil {
+		_, err := s.store.CloseAll(ids, metadata)
+		return err
 	}
-	_, err := s.store.CloseAll(ids, metadata)
-	return err
+	for start := 0; start < len(ids); start += waitCancelCloseBatchLimit {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("canceling waits for session %s: %w", sessionID, ctxErr)
+		}
+		end := min(start+waitCancelCloseBatchLimit, len(ids))
+		if _, err := s.store.CloseAll(ids[start:end], metadata); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ReassignWaits moves open non-terminal waits from one session bead ID to another
