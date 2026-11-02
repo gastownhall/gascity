@@ -1210,6 +1210,7 @@ func TestEveryControllerSubtreeCloseReadsAsAControllerClose(t *testing.T) {
 		{"workflow finalizer, pass", finalize(false)},
 		{"workflow finalizer, canceled run", finalize(true)},
 		{"gc hook --claim skip of a done workflow (closes by gc.root_bead_id)", closeByRootWith(sourceworkflow.HookSkipDoneWorkflowCloseReason)},
+		{"gc hook --claim retirement of a workflow whose input was purged (closes by gc.root_bead_id)", closeByRootWith(sourceworkflow.HookInputPurgedWorkflowCloseReason)},
 		{"order-tracking sweep of a stale order wisp subtree", closeByRootWith(sourceworkflow.StaleOrderWispCloseReason)},
 		{"POST /runs/{id}/cancel", func(t *testing.T, store beads.Store, rootID string) {
 			if _, err := sourceworkflow.CloseWorkflowSubtreeAsExcept(store, rootID, beadmeta.OutcomeCanceled,
