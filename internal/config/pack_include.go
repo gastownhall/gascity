@@ -584,10 +584,38 @@ func validateLockedRemoteCache(source, cacheDir, commit string) error {
 	if err != nil {
 		return fmt.Errorf("checking cached import %s worktree status: %w", source, err)
 	}
-	if strings.TrimSpace(status) != "" {
-		return fmt.Errorf("cached import %s has local worktree changes; run \"gc import install\"", source)
+	if status != "" {
+		return fmt.Errorf("cached import %s has local worktree changes in %q: %s; run \"gc import install\"", source, cacheDir, dirtyStatusSummary(status))
 	}
 	return nil
+}
+
+// maxDirtyStatusEntries bounds how many porcelain records the dirty-cache
+// error quotes; further records are summarized as a count so a large diff
+// cannot flood the log line. It bounds the record count, not the length of
+// arbitrary pathnames.
+const maxDirtyStatusEntries = 3
+
+// dirtyStatusSummary quotes up to maxDirtyStatusEntries nonempty porcelain
+// records, preserving each record's leading status column, and ends with
+// an omitted-entry count when there are more.
+func dirtyStatusSummary(status string) string {
+	quoted := make([]string, 0, maxDirtyStatusEntries+1)
+	omitted := 0
+	for _, record := range strings.Split(status, "\n") {
+		if record == "" {
+			continue
+		}
+		if len(quoted) < maxDirtyStatusEntries {
+			quoted = append(quoted, fmt.Sprintf("%q", record))
+			continue
+		}
+		omitted++
+	}
+	if omitted > 0 {
+		quoted = append(quoted, fmt.Sprintf("and %d more", omitted))
+	}
+	return strings.Join(quoted, ", ")
 }
 
 func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
@@ -603,7 +631,9 @@ func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
 	}
-	return strings.TrimSpace(string(out)), nil
+	// Trim only trailing newlines: leading spaces are porcelain status
+	// columns the dirty-cache diagnostics must preserve.
+	return strings.TrimRight(string(out), "\r\n"), nil
 }
 
 // repoCacheGitEnv is gitutil.HermeticEnv without GIT_TRACE* variables. Trace
