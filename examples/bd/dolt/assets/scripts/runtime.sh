@@ -245,10 +245,16 @@ managed_runtime_listener_pids() (
     | sort -n -u
 )
 
-# managed_runtime_listener_pid prints the PID of the first running process
-# holding a LISTEN socket on PORT, or nothing when there is none.
+# managed_runtime_listener_pid PORT [CANDIDATE...] prints the PID of the
+# process holding a LISTEN socket on PORT: the first CANDIDATE among the
+# running holders, else the first running holder, or nothing when there is
+# none. Callers pass the pids of state files port resolution trusts, so a
+# lower pid that also listens on PORT (on another address, or through an
+# inherited descriptor) cannot mask the recorded server. Each holder's
+# liveness is judged as the probe lists it.
 managed_runtime_listener_pid() (
   port="$1"
+  shift
 
   case "$port" in
     ''|*[!0-9]*)
@@ -256,7 +262,7 @@ managed_runtime_listener_pid() (
       ;;
   esac
 
-  managed_runtime_listener_pids "$port" \
+  running=$(managed_runtime_listener_pids "$port" \
     | while IFS= read -r holder_pid; do
         case "$holder_pid" in
           ''|*[!0-9]*)
@@ -265,9 +271,22 @@ managed_runtime_listener_pid() (
         esac
         if pid_is_running "$holder_pid"; then
           printf '%s\n' "$holder_pid"
-          break
         fi
-      done
+      done)
+
+  for candidate in "$@"; do
+    for holder_pid in $running; do
+      if [ "$holder_pid" = "$candidate" ]; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    done
+  done
+
+  for holder_pid in $running; do
+    printf '%s\n' "$holder_pid"
+    return 0
+  done
 )
 
 managed_runtime_tcp_reachable() (
@@ -304,7 +323,12 @@ PY
   return 1
 )
 
-managed_runtime_port() (
+# managed_runtime_live_state STATE_FILE EXPECTED_DATA_DIR prints the
+# "PID PORT" a runtime state file records when it describes a running
+# server on EXPECTED_DATA_DIR whose pid is alive, and nothing for any other
+# file. It is the state-file half of managed_runtime_port's acceptance,
+# shared with managed_runtime_server_pid.
+managed_runtime_live_state() (
   state_file="$1"
   expected_data_dir="$2"
 
@@ -325,7 +349,19 @@ managed_runtime_port() (
   fi
   pid_is_running "$pid" || return 0
 
-  holder_pid=$(managed_runtime_listener_pid "$port" || true)
+  printf '%s %s\n' "$pid" "$port"
+)
+
+managed_runtime_port() (
+  state_file="$1"
+  expected_data_dir="$2"
+
+  state=$(managed_runtime_live_state "$state_file" "$expected_data_dir")
+  [ -n "$state" ] || return 0
+  pid=${state% *}
+  port=${state#* }
+
+  holder_pid=$(managed_runtime_listener_pid "$port" "$pid" || true)
   if [ -n "$holder_pid" ]; then
     [ "$holder_pid" = "$pid" ] || return 0
     printf '%s\n' "$port"
@@ -337,6 +373,35 @@ managed_runtime_port() (
   fi
 
   printf '%s\n' "$port"
+)
+
+# managed_runtime_server_pid PORT prints the PID of the managed server
+# holding a LISTEN socket on PORT. Its candidates are the pids of the state
+# files port resolution consults, in its order — DOLT_STATE_FILE, then
+# DOLT_PROVIDER_STATE_FILE unless GC_DOLT_STATE_FILE pins the state file
+# (resolve_dolt_port_or_die) — each only when managed_runtime_live_state
+# accepts it for DOLT_DATA_DIR and it records PORT. A stopped, foreign or
+# other-port state file therefore never names the server; with no
+# candidate, the first running holder answers.
+managed_runtime_server_pid() (
+  port="$1"
+
+  set -- "$DOLT_STATE_FILE"
+  if [ -z "${GC_DOLT_STATE_FILE:-}" ]; then
+    set -- "$@" "$DOLT_PROVIDER_STATE_FILE"
+  fi
+
+  candidates=""
+  for state_file in "$@"; do
+    state=$(managed_runtime_live_state "$state_file" "$DOLT_DATA_DIR" 2>/dev/null)
+    if [ -n "$state" ] && [ "${state#* }" = "$port" ]; then
+      candidates="$candidates ${state% *}"
+    fi
+  done
+
+  # Recorded pids are digits only, so the list splits into one per word.
+  # shellcheck disable=SC2086
+  managed_runtime_listener_pid "$port" $candidates
 )
 
 . "${GC_PACK_DIR:-${PACK_DIR:-${GC_SYSTEM_PACKS_DIR:-$GC_CITY_PATH/.gc/system/packs}/dolt}}/assets/scripts/port_resolve.sh"

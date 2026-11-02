@@ -56,6 +56,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
@@ -117,6 +118,11 @@ type storageRoutes struct {
 	// predicate reads (rigGraphRelicFree). Nil means unknown, and unknown keeps
 	// every rig's relic leg.
 	rigMarkers *rigGraphMarkers
+	// mint memoizes the class bindings the router mints over, for the class
+	// stores the routes held when it was derived (city_stores.go). A rewrite
+	// in place (withControllerCache, withCLIEmission) is noticed on the next
+	// read, so nothing here has to invalidate it.
+	mint atomic.Pointer[routesBindings]
 }
 
 // hasLegacyResidents reports the boot census's verdict for a binding store.
@@ -368,6 +374,14 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 		// should not have to know which edit they made to read it.
 		recordStorageBindingOutcome(rec, infraMigrationReport{Outcome: infraMigrationNotConfigured}, "")
 		return nil, nil
+	}
+
+	// A remote stage of a split city never resolves, opens or creates a
+	// binding of its own (remote_stage.go): its infrastructure classes are
+	// the controller's, and genesis here would serve them from an empty
+	// pod-local store.
+	if err := remoteStageStorageRefusal(cityPath); err != nil {
+		return nil, fmt.Errorf("%s: %w", logPrefix, err)
 	}
 
 	target, ok, err := resolveInfraBindingTarget(cityPath, cfg)
@@ -782,6 +796,7 @@ var storageBindingEventTypes = map[infraMigrationOutcome]string{
 	infraMigrationBornSplitBlocked: events.StorageBindingUnconverged,
 	infraMigrationGenesisBlocked:   events.StorageBindingUnconverged,
 	infraMigrationRetained:         events.StorageBindingUnconverged,
+	infraMigrationIdentityMismatch: events.StorageBindingUnconverged,
 	infraMigrationUncheckable:      events.StorageBindingUncheckable,
 }
 

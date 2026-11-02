@@ -304,9 +304,9 @@ func releaseStalledClaim(r *closeReleases, c stalledClaim) {
 			fmt.Fprintf(r.stderr, "execution-stalled stop: %s keeps claim %s: the seat records that a turn began it\n", c.row.ID, c.beadID) //nolint:errcheck // best-effort
 			continue
 		}
-		// The stranded repair's policy: the claim's route kept, its release
-		// fenced on its status and assignee.
-		out := releaseListed([]seatWorkHit{hit}, releaseStrandedRepair, releaseSeatOfInfo(c.row), r.cfg, ReleaseOpts{})
+		// The stranded repair's rules without its detached hold: the claim's
+		// route kept, its release fenced on its status and assignee.
+		out := releaseListed([]seatWorkHit{hit}, releaseStalled, releaseSeatOfInfo(c.row), r.cfg, ReleaseOpts{})
 		logRelease(r.stderr, "execution-stalled", c.row.ID, out, nil)
 	}
 }

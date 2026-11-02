@@ -609,7 +609,7 @@ func (c *CachingStore) mergeSnapshotLocked(
 	c.preserveCachedReadyProjectionLocked(freshByID, depMap, useFreshDeps)
 
 	res := mergeSectionResult{notifications: make([]cacheNotification, 0, len(freshByID))}
-	nextDepsComplete := useFreshDeps
+	nextDepsComplete, coverageLost := useFreshDeps, "reconcile: dependency read incomplete"
 
 	// 1. Absorb loop — over freshByID. Classification reads pre-absorb state.
 	for id, freshBead := range freshByID {
@@ -637,8 +637,8 @@ func (c *CachingStore) mergeSnapshotLocked(
 			now:           now,
 			skipLabels:    true,
 		})
-		if d.degradeDepsComplete {
-			nextDepsComplete = false
+		if d.degradeDepsComplete && nextDepsComplete {
+			nextDepsComplete, coverageLost = false, "reconcile: skipped a row whose cached edges it could not verify"
 		}
 		if d.action != mergeAbsorb {
 			continue
@@ -751,7 +751,7 @@ func (c *CachingStore) mergeSnapshotLocked(
 
 	// 4. Shared tail (was duplicated per branch).
 	c.syncFailures = 0
-	c.depsComplete = nextDepsComplete
+	c.setDepsCompleteLocked(nextDepsComplete, coverageLost)
 	c.primePartialErr = nil
 	c.advanceObservationLocked()
 	c.promoteLiveLocked()

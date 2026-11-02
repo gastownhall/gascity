@@ -49,11 +49,12 @@ func ScanBySessionIDSince(id string, incarnationStartedAt time.Time) ([]runtime.
 }
 
 // IsScanRoot reports whether pid should be treated as an agent root. A root
-// carries a GC_SESSION_ID, is neither infrastructure nor the program-status
-// relay — a tmux server or client is never a root, whoever its parent is,
-// and the relay is looked through — and sits outside its parent's envelope:
-// the parent is gone, carries a different GC_SESSION_ID, is infrastructure
-// or the relay, or cannot be read (permission denied).
+// carries a GC_SESSION_ID, is neither infrastructure nor a program-status
+// companion — a tmux server or client is never a root, whoever its parent
+// is, the relay is looked through, and a tap belongs to its tmux server — and
+// sits outside its parent's envelope: the parent is gone, carries a different
+// GC_SESSION_ID, is infrastructure or the relay, or cannot be read
+// (permission denied).
 func IsScanRoot(pid int) bool {
 	if err := liveScanGuard(); err != nil {
 		return false
@@ -75,7 +76,7 @@ func IsScanRoot(pid int) bool {
 	if sessionID == "" {
 		return false
 	}
-	if isInfrastructureProcess(scanRoot, pid) || isProgramStatusRelay(scanRoot, pid) {
+	if isInfrastructureProcess(scanRoot, pid) || isProgramStatusCompanion(scanRoot, pid) {
 		return false
 	}
 	isRoot, err := isRootWithSessionID(scanRoot, pid, sessionID)
@@ -219,9 +220,10 @@ func scanProcEntry(root, entryName, id string, incarnationStartedAt time.Time) (
 	if isInfrastructureProcess(root, pid) {
 		return runtime.LiveRuntime{}, false, nil
 	}
-	// The program-status relay is looked through (IsProgramStatusRelayArgv):
-	// the program it runs is reported in its place.
-	if isProgramStatusRelay(root, pid) {
+	// Neither program-status companion is a root: the relay is looked
+	// through (IsProgramStatusRelayArgv), and the program it runs is reported
+	// in its place; a tap belongs to its tmux server (IsProgramStatusTapArgv).
+	if isProgramStatusCompanion(root, pid) {
 		return runtime.LiveRuntime{}, false, nil
 	}
 	rootProcess, err := isRootWithSessionID(root, pid, sessionID)
@@ -661,6 +663,14 @@ func isRootWithSessionID(root string, pid int, sessionID string) (bool, error) {
 func isProgramStatusRelay(root string, pid int) bool {
 	argv, err := readArgv(root, pid)
 	return err == nil && IsProgramStatusRelayArgv(argv)
+}
+
+// isProgramStatusCompanion reports whether pid is gc's program-status relay
+// or tap (IsProgramStatusRelayArgv, IsProgramStatusTapArgv), reading its argv
+// once. An unreadable argv reports false.
+func isProgramStatusCompanion(root string, pid int) bool {
+	argv, err := readArgv(root, pid)
+	return err == nil && (IsProgramStatusRelayArgv(argv) || IsProgramStatusTapArgv(argv))
 }
 
 // effectiveParent is the parent the scan reports for a process whose parent

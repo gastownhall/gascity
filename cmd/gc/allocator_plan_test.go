@@ -1565,3 +1565,75 @@ func TestScaleCheckClaimCutKeepsRows(t *testing.T) {
 		}
 	})
 }
+
+// TestAllocator_UnusableWorktreeEvidenceNamesItsWorkItem pins the refusal
+// record of a request whose worktree evidence the pass finds unusable: it
+// names the work item and why, on the fresh-plan path and on a reused start
+// candidate. A request refused while a failed verification's backoff is live
+// names neither: the create effect logged that verdict on its attempt.
+//
+// Kills: either plan-time site tracing a bare refusal (the planner's alert
+// then never fires); a backoff refusal naming its work item (an alert every
+// backoff cycle); a reused candidate's record without its row.
+func TestAllocator_UnusableWorktreeEvidenceNamesItsWorkItem(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
+	worktreeRefusals := func(d allocDecision) []allocTraceRecord {
+		var out []allocTraceRecord
+		for _, r := range d.Trace {
+			if r.Reason == "ineligible:"+gateWorktreeRefused {
+				out = append(out, r)
+			}
+		}
+		return out
+	}
+	withDemand := func(f *allocFixture, edit func(*scaleCheckDemand)) *allocFixture {
+		d := f.in.Demand.Collected.DefaultDemand["worker"]
+		edit(&d)
+		f.in.Demand.Collected.DefaultDemand["worker"] = d
+		return f
+	}
+
+	t.Run("fresh plan", func(t *testing.T) {
+		const missing = `work bead w-1 has gc.work_dir="/wt/w-1" but is missing gc.worktree_root`
+		f := withDemand(newAllocFixture(t, cfg).demand("worker", "w-1"), func(d *scaleCheckDemand) {
+			d.WorktreeErrors = map[string]string{"w-1": missing}
+		})
+		d := f.decide()
+		got := worktreeRefusals(d)
+		if len(d.Plans) != 0 || len(got) != 1 || got[0].WorkBeadID != "w-1" || !strings.Contains(got[0].Detail, "missing gc.worktree_root") {
+			t.Fatalf("plans %v refusals %+v, want none planned and w-1 refused with its missing key", planSlots(d, "worker"), got)
+		}
+	})
+	t.Run("reused start candidate", func(t *testing.T) {
+		spec := worktree.Spec{BeadID: "w-1", StoreRef: "rig:alpha", Path: "/wt/w-1"}
+		f := withDemand(newAllocFixture(t, cfg).sessions(poolRow("gc-1", "worker", 1, "active")).demand("worker", "w-1"), func(d *scaleCheckDemand) {
+			d.WorktreeSpecs = map[string]*worktree.Spec{"w-1": &spec}
+		})
+		got := worktreeRefusals(f.decide())
+		if len(got) != 1 || got[0].WorkBeadID != "w-1" || got[0].Key.ID != "gc-1" || !strings.Contains(got[0].Detail, `store "rig:alpha" does not match request store "city"`) {
+			t.Fatalf("refusals %+v, want gc-1's w-1 refused for its store", got)
+		}
+	})
+	t.Run("live verification backoff", func(t *testing.T) {
+		spec := worktree.Spec{BeadID: "w-1", StoreRef: "city", Path: "/wt/w-1"}
+		f := withDemand(newAllocFixture(t, cfg).demand("worker", "w-1"), func(d *scaleCheckDemand) {
+			d.WorktreeSpecs = map[string]*worktree.Spec{"w-1": &spec}
+		})
+		f.in.Backoff = workRefusal(spec)
+		d := f.decide()
+		if got := worktreeRefusals(d); len(d.Plans) != 0 || len(got) != 1 || got[0].WorkBeadID != "" || got[0].Detail != "" {
+			t.Fatalf("plans %v refusals %+v, want one refusal naming no work item", planSlots(d, "worker"), got)
+		}
+	})
+	t.Run("reused start candidate under live verification backoff", func(t *testing.T) {
+		spec := worktree.Spec{BeadID: "w-1", StoreRef: "city", Path: "/wt/w-1"}
+		f := withDemand(newAllocFixture(t, cfg).sessions(poolRow("gc-1", "worker", 1, "active")).demand("worker", "w-1"), func(d *scaleCheckDemand) {
+			d.WorktreeSpecs = map[string]*worktree.Spec{"w-1": &spec}
+		})
+		f.in.Backoff = workRefusal(spec)
+		got := worktreeRefusals(f.decide())
+		if len(got) != 1 || got[0].Key.ID != "gc-1" || got[0].WorkBeadID != "" || got[0].Detail != "" {
+			t.Fatalf("refusals %+v, want gc-1's refusal naming no work item", got)
+		}
+	})
+}

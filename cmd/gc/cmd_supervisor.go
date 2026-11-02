@@ -309,6 +309,9 @@ func supervisorSocketPath() string {
 // constructs its own path), this binds to the exact path provided.
 type reconcileRequest struct {
 	done chan struct{}
+	// writeAuthKeys, set only by the reload-report socket verb, receives the
+	// reload's write-auth key outcome (see reportWriteAuthKeys).
+	writeAuthKeys chan writeAuthKeyReload
 }
 
 type supervisorShutdownMode int32
@@ -682,7 +685,9 @@ func startSupervisorSocket(sockPath string, requestShutdown func(supervisorShutd
 
 // handleSupervisorConn reads from a connection and dispatches commands.
 // Supported: "stop" (shutdown), "ping" (liveness check, returns PID),
-// "reload" (trigger immediate reconciliation of all cities).
+// "reload" (trigger immediate reconciliation of all cities), and
+// "reload-report" (the same reload, answered with a JSON report that includes
+// the write-auth key outcome; see supervisorReloadReportCommand).
 //
 // For "stop", the handler first sends "ok\n" (backward compatible ACK),
 // then — if the client keeps the connection open — blocks until shutdown
@@ -745,6 +750,8 @@ func handleSupervisorConn(conn net.Conn, requestShutdown func(supervisorShutdown
 			case <-time.After(supervisorReloadWaitTimeout):
 				conn.Write([]byte("timeout\n")) //nolint:errcheck
 			}
+		case supervisorReloadReportCommand:
+			handleSupervisorReloadReport(conn, reconcileCh)
 		}
 	}
 }
@@ -1199,10 +1206,18 @@ func newSupervisorReloadCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Send a reload signal to the running supervisor, causing it to
 immediately re-read the registry and reconcile all cities. Use this
 after killing a child process to force the supervisor to detect the
-change and restart it without waiting for the next patrol tick.`,
+change and restart it without waiting for the next patrol tick.
+
+The reload also re-reads write_auth_verify_key from supervisor.toml and
+swaps the write-auth verifying keys in place, so a key can be enrolled,
+rotated, or revoked without a restart. The command prints the key ids
+the reload added, removed, or replaced, and exits 1 when the supervisor
+refused the new key list and kept the current keys. Other
+supervisor.toml settings, read_auth_verify_key included, take effect
+only when the supervisor restarts.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if reloadSupervisorJSON(stdout, stderr, jsonOut) != 0 {
+			if reloadSupervisorReport(stdout, stderr, jsonOut) != 0 {
 				return errExit
 			}
 			return nil
@@ -1233,24 +1248,11 @@ func reloadSupervisorJSON(stdout, stderr io.Writer, jsonOut bool) int {
 	conn.SetReadDeadline(time.Now().Add(supervisorReloadWaitTimeout + 5*time.Second)) //nolint:errcheck
 	buf := make([]byte, 64)
 	n, _ := conn.Read(buf)
-	resp := strings.TrimSpace(string(buf[:n]))
-	switch resp {
-	case "ok":
-		if jsonOut {
-			return writeLifecycleActionJSONOrExit(stdout, stderr, "gc supervisor reload", lifecycleActionJSON{
-				Command: "supervisor reload",
-				Action:  "reload",
-				Message: "Reconciliation triggered.",
-			})
-		}
-		fmt.Fprintln(stdout, "Reconciliation triggered.") //nolint:errcheck
-		return 0
-	case "busy":
-		fmt.Fprintln(stderr, "gc supervisor reload: reconcile queue is busy; try again shortly") //nolint:errcheck
-		return 1
-	case "timeout":
-		fmt.Fprintln(stderr, "gc supervisor reload: reconcile did not finish before timeout") //nolint:errcheck
-		return 1
+	// The bare verb replies with the outcome alone; it carries no write-auth
+	// key report.
+	switch outcome := supervisorReloadOutcome(strings.TrimSpace(string(buf[:n]))); outcome {
+	case supervisorReloadOK, supervisorReloadBusy, supervisorReloadTimeout:
+		return writeSupervisorReloadReply(stdout, stderr, jsonOut, supervisorReloadReply{Outcome: outcome})
 	}
 	fmt.Fprintln(stderr, "gc supervisor reload: supervisor not responding (may be shutting down); try 'gc supervisor start'") //nolint:errcheck
 	return 1
@@ -1482,6 +1484,7 @@ func configureSupervisorRuntime() {
 // and runs until canceled.
 func runSupervisor(stdout, stderr io.Writer) int {
 	configureSupervisorRuntime()
+	markProgramShadowLongLived()
 
 	if pid := supervisorAlive(); pid != 0 {
 		fmt.Fprintf(stderr, "gc supervisor: supervisor already running (PID %d)\n", pid) //nolint:errcheck
@@ -1797,6 +1800,11 @@ func runSupervisor(stdout, stderr io.Writer) int {
 			// Ticker and initial reconciles are not reloads and must
 			// not emit RELOADING.
 			notifySdState(stderr, sdnotify.Reloading)
+			// Rotate write-auth verifying keys from the current
+			// supervisor.toml and hand the outcome to a reporting client
+			// before reconciling. Only the key set changes; cities and their
+			// sessions are untouched.
+			req.reportWriteAuthKeys(reloadSupervisorWriteAuthKeys(apiMux, stderr))
 			safeReconcile()
 			// Also poke all running cities so they immediately reconcile
 			// their agents (e.g. after a child process was killed).
@@ -2319,6 +2327,41 @@ func startOneCity(
 		return
 	}
 
+	// A city this supervisor already runs holds its own controller lock, so
+	// the lock below would refuse it as a foreign controller and record a
+	// spurious init failure. publishManagedCity re-checks under its lock; this
+	// is the early answer for the common case.
+	if cr.Has(path) {
+		return
+	}
+
+	// Take the controller lock BEFORE any init, as `gc start` does
+	// (cmd_start.go): init starts the bead-store provider and builds the city
+	// runtime, whose storage boot gate can create a binding (genesis). A start
+	// that loses the lock — to a standalone controller, to `gc stop` retiring
+	// the provider, to a storage migration holding it for its whole run — must
+	// not have touched the city first. The lock is released on every return
+	// below unless the city goroutine takes it over, and it is released last:
+	// the deferred close runs after each branch's own cleanup.
+	if err := ensureCityScaffold(path); err != nil {
+		emitPendingCityCreateFailure(cr, path, cityName, "city_init_failed", err, stderr)
+		recordInitFailure(cityName, fmt.Sprintf("runtime scaffold: %v", err))
+		return
+	}
+	lock, lockErr := acquireControllerLock(path)
+	if lockErr != nil {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': controller lock: %v\n", cityName, lockErr) //nolint:errcheck
+		emitPendingCityCreateFailure(cr, path, cityName, "controller_lock_failed", lockErr, stderr)
+		recordInitFailure(cityName, fmt.Sprintf("controller lock: %v", lockErr))
+		return
+	}
+	lockHandedOff := false
+	defer func() {
+		if !lockHandedOff {
+			lock.Close() //nolint:errcheck // releasing the flock cannot fail meaningfully
+		}
+	}()
+
 	// Track initialization progress for the API.
 	cr.BatchUpdate(func(
 		_ map[string]*managedCity,
@@ -2330,7 +2373,7 @@ func startOneCity(
 	})
 
 	// Run critical city initialization (same steps as cmd_start.go).
-	if err := prepareCityForSupervisor(path, cityName, cfg, stderr, func(status string) {
+	if err := supervisorPrepareCity(path, cityName, cfg, stderr, func(status string) {
 		cr.BatchUpdate(func(
 			_ map[string]*managedCity,
 			initStatus map[string]cityInitProgress,
@@ -2401,6 +2444,15 @@ func startOneCity(
 	if frErr == nil {
 		rec = fr
 		eventProv = fr
+	}
+
+	// The O6 safety net, now that the bead store is up and the city's event
+	// recorder is open, and before the socket or the runtime sees the latch: a default v2 its own boot would refuse
+	// runs legacy, loudly (reconcile_boot_fallback.go).
+	var fallbackLog strings.Builder
+	_ = applyV2DefaultBootFallback(wiring, path, cityName, cfg, rec, &fallbackLog)
+	if fallbackLog.Len() > 0 {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': %s", cityName, fallbackLog.String()) //nolint:errcheck
 	}
 
 	dops := newDrainOps(sp)
@@ -2564,29 +2616,6 @@ func startOneCity(
 		return
 	}
 
-	// Acquire controller lock to prevent split-brain with standalone
-	// controllers (mirrors runController in controller.go).
-	lock, lockErr := acquireControllerLock(path)
-	if lockErr != nil {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': controller lock: %v\n", cityName, lockErr) //nolint:errcheck
-		cityCancel()
-		cityRuntime.shutdown()
-		if fr != nil {
-			fr.Close() //nolint:errcheck
-		}
-		cr.BatchUpdate(func(
-			cities map[string]*managedCity,
-			_ map[string]cityInitProgress,
-			_ map[string]*initFailRecord,
-			_ map[string]*panicRecord,
-		) {
-			delete(cities, path)
-		})
-		emitPendingCityCreateFailure(cr, path, cityName, "controller_lock_failed", lockErr, stderr)
-		recordInitFailure(cityName, fmt.Sprintf("controller lock: %v", lockErr))
-		return
-	}
-
 	// The lock holder — and only the lock holder — is this process's
 	// residency answer for the city. The runtime above already opened its
 	// binding, but registering it at construction time would let a
@@ -2601,7 +2630,6 @@ func startOneCity(
 	lis, lisErr := startControllerSocket(path, controllerHostingSupervisor, cityCancel, forceShutdown, wiring.configDirty, wiring.reloadReqCh, wiring.convergenceReqCh, wiring.wake)
 	if lisErr != nil {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': controller socket: %v\n", cityName, lisErr) //nolint:errcheck
-		lock.Close()                                                                               //nolint:errcheck // no socket to race with
 		cityCancel()
 		cityRuntime.shutdown()
 		if fr != nil {
@@ -2627,7 +2655,6 @@ func startOneCity(
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': controller token: %v\n", cityName, tokenErr) //nolint:errcheck
 		lis.Close()                                                                                 //nolint:errcheck
 		os.Remove(sockPath)                                                                         //nolint:errcheck
-		lock.Close()                                                                                //nolint:errcheck // lock released last
 		cityCancel()
 		cityRuntime.shutdown()
 		if fr != nil {
@@ -2650,7 +2677,6 @@ func startOneCity(
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': writing controller token: %v\n", cityName, err) //nolint:errcheck
 		lis.Close()                                                                                    //nolint:errcheck
 		os.Remove(sockPath)                                                                            //nolint:errcheck
-		lock.Close()                                                                                   //nolint:errcheck // lock released last
 		cityCancel()
 		cityRuntime.shutdown()
 		if fr != nil {
@@ -2683,6 +2709,7 @@ func startOneCity(
 		ul.SetUnlinkOnClose(false)
 	}
 
+	lockHandedOff = true // the city goroutine releases it last
 	go func(n, p string, cityFr *events.FileRecorder, l net.Listener, sock string, origSockInfo os.FileInfo, lk *os.File) {
 		// Recovery and close(done) defer is pushed FIRST so it
 		// executes LAST (Go LIFO), preserving the invariant that
@@ -2795,6 +2822,9 @@ func startOneCity(
 		cityRuntime.run(cityCtx)
 	}(cityName, path, fr, lis, sockPath, sockInfo, lock)
 
+	// Recorded after newCityRuntime: its order dispatcher read the event head
+	// its never-run event orders start from, so an order on controller.started
+	// sees this one.
 	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
 	telemetry.RecordControllerLifecycle(context.Background(), "started")
 	fmt.Fprintf(stdout, "Launching city '%s' (%s)\n", cityName, path) //nolint:errcheck
@@ -2902,6 +2932,10 @@ func publishManagedCity(cr *cityRegistry, path string, mc *managedCity) bool {
 func loadSupervisorCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
 	return loadCityConfigWithBuiltinPacks(cityPath)
 }
+
+// supervisorPrepareCity is the supervisor's per-city init step: a seam, so a
+// test can observe that it runs only under the controller lock.
+var supervisorPrepareCity = prepareCityForSupervisor
 
 // prepareCityForSupervisor runs the critical city initialization steps
 // that cmd_start.go performs before runController. Without these, cities

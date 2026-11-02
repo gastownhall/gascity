@@ -70,6 +70,7 @@ go_test(
         "api_lane_test.go",
         "bddolt_gating_test.go",
         "busy_turn_lane_test.go",
+        "default_lane_test.go",
         "harness_bddolt_test.go",
         "harness_test.go",
         "inline_pass_test.go",

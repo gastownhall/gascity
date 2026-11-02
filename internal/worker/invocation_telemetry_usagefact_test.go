@@ -1753,3 +1753,90 @@ func TestFactorySweepWithoutCursorMatchesFixedTailWindow(t *testing.T) {
 		t.Fatalf("persisted cursor = %q, want %q (the newest entry)", got, wantCursor)
 	}
 }
+
+// TestFactorySweepClosedIntervalModelUsageClaudeReadsTheIntervalKey pins the
+// closed-interval sweep's claude discovery: the transcript resolves by the
+// interval's own session_key, not the newer one a reopened row runs under,
+// and never through the session List the manager's lookup falls back to on a
+// keyed miss (store.fail rejects every List). A keyed miss stays transient;
+// a keyless interval is a permanent miss.
+func TestFactorySweepClosedIntervalModelUsageClaudeReadsTheIntervalKey(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
+	store := &listErrStore{Store: beads.NewMemStore()}
+	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
+		Store:       store,
+		Provider:    runtime.NewFake(),
+		SearchPaths: []string{searchBase},
+		UsageSink:   usage.NewLocalSink(sinkPath),
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+	h, err := factory.Session(SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "one",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+	})
+	if err != nil {
+		t.Fatalf("Session: %v", err)
+	}
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	id := h.sessionID
+	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkerTestJSONL(t, filepath.Join(slugDir, "closed-key.jsonl"), []map[string]any{
+		usageEntryWithMessageID("u1", "msg-1", 100, 50, 0, 0),
+		usageEntryWithMessageID("u2", "msg-2", 200, 100, 0, 0),
+	})
+	writeWorkerTestJSONL(t, filepath.Join(slugDir, "newer-key.jsonl"), []map[string]any{
+		usageEntryWithMessageID("u3", "msg-3", 300, 150, 0, 0),
+	})
+	if err := store.SetMetadata(id, "session_key", "newer-key"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	interval := map[string]string{}
+	for k, v := range b.Metadata {
+		interval[k] = v
+	}
+	interval["session_key"] = "closed-key"
+	store.fail = true
+
+	emitted, settled, err := factory.SweepClosedIntervalModelUsage(context.Background(), id, interval, time.Unix(1, 0).UTC())
+	if err != nil || !settled || emitted != 2 {
+		t.Fatalf("closed-key sweep = %d, settled %t, %v; want 2 facts, settled", emitted, settled, err)
+	}
+	facts, _, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reqs []string
+	for _, f := range facts {
+		reqs = append(reqs, f.UpstreamReqID)
+	}
+	if got := strings.Join(reqs, ","); got != "msg-1,msg-2" {
+		t.Fatalf("swept invocations = %s, want msg-1,msg-2 from the closed interval's transcript", got)
+	}
+
+	interval["session_key"] = "absent-key"
+	if emitted, settled, err := factory.SweepClosedIntervalModelUsage(context.Background(), id, interval, time.Unix(2, 0).UTC()); err != nil || settled || emitted != 0 {
+		t.Fatalf("keyed miss = %d, settled %t, %v; want nothing recorded and unsettled", emitted, settled, err)
+	}
+	interval["session_key"] = ""
+	if emitted, settled, err := factory.SweepClosedIntervalModelUsage(context.Background(), id, interval, time.Unix(3, 0).UTC()); err != nil || !settled || emitted != 0 {
+		t.Fatalf("keyless interval = %d, settled %t, %v; want nothing recorded and settled", emitted, settled, err)
+	}
+}

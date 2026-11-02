@@ -174,9 +174,15 @@ func TestClassRoutedClaimTakesAnInfraBindingWispOverABdSubprocessWorkLeg(t *test
 // served it (here it was closed). bd refuses the claim as not claimable; that is
 // the work store's answer about a row it holds, so the claim is lost there and
 // the binding is never probed or written.
+//
+// The binding holds an open, unassigned copy of the same id, the co-residence a
+// migrated city keeps (`gc storage migrate` copies and never deletes back). A
+// refusal that opened the escalation would find that copy resident and claim
+// it, so the copy is what makes a probe or a binding write observable.
 func TestClassRoutedClaimKeepsAWorkLegStatusRefusalAsALostClaim(t *testing.T) {
 	const id = "ga-closedrace"
 	class := newClaimRouteClassStore(t)
+	mintClaimRouteBead(t, class, id, map[string]string{"gc.routed_to": "worker"})
 
 	claimCmd := "update " + id + " --claim --json"
 	showCmd := "show --json " + id
@@ -204,13 +210,21 @@ func TestClassRoutedClaimKeepsAWorkLegStatusRefusalAsALostClaim(t *testing.T) {
 		}
 	}
 
-	ops := classRoutedHookClaimOps(hookClaimOps{Claim: hookClaimWithBdStore, ReadWorkMeta: hookReadClaimedBeadWithBdStore}, newClaimRouteFor(t, class))
+	route := newClaimRouteFor(t, class)
+	ops := classRoutedHookClaimOps(hookClaimOps{Claim: hookClaimWithBdStore, ReadWorkMeta: hookReadClaimedBeadWithBdStore}, route)
 	_, ok, err := ops.Claim(context.Background(), t.TempDir(), nil, id, "worker-1")
 	if err != nil || ok {
 		t.Fatalf("claim of %s = (ok=%v err=%v), want a lost claim (ok=false, nil error)", id, ok, err)
 	}
-	if _, err := class.Get(id); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("binding Get(%s) err = %v, want ErrNotFound: a work-leg refusal must not reach the binding", id, err)
+	if route.knownResident(id) {
+		t.Fatalf("the route probed the binding for %s: the refusal is the work store's answer about a row it holds, so it must not open the escalation", id)
+	}
+	twin, err := class.Get(id)
+	if err != nil {
+		t.Fatalf("binding Get(%s): %v", id, err)
+	}
+	if twin.Status != "open" || strings.TrimSpace(twin.Assignee) != "" {
+		t.Fatalf("the binding's copy of %s is status=%q assignee=%q, want open and unassigned: a work-leg refusal must not reach the binding", id, twin.Status, twin.Assignee)
 	}
 	if want := []string{claimCmd, showCmd}; !slices.Equal(ran, want) {
 		t.Fatalf("bd ran %q, want the claim and one read of the same leg %q", ran, want)

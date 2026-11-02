@@ -119,7 +119,7 @@ func TestProgramStatusSurfacesCheckFailsBrokenEmissions(t *testing.T) {
 // WC-PSTAT-001, independently of profile selection.
 func TestProgramStatusSurfacesDeclaredProfilesPass(t *testing.T) {
 	var declared int
-	for _, p := range Phase1Profiles() {
+	for _, p := range ProgramStatusProfiles() {
 		if !p.ProgramStatus.Declared {
 			continue
 		}
@@ -129,7 +129,7 @@ func TestProgramStatusSurfacesDeclaredProfilesPass(t *testing.T) {
 		}
 	}
 	if declared == 0 {
-		t.Fatal("no phase-1 profile declares program status")
+		t.Fatal("no profile declares program status")
 	}
 }
 

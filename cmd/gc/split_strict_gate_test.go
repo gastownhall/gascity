@@ -60,11 +60,11 @@ func init() {
 // it is given (see splittest.Projection for root and front).
 type splitStrictGate struct{}
 
-func (splitStrictGate) workView(store beads.Store) beads.Store {
+func (splitStrictGate) WorkView(store beads.Store) beads.Store {
 	return splittest.ProjectionOf(store).WorkViewOf(store)
 }
 
-func (splitStrictGate) classView(store beads.Store) beads.Store {
+func (splitStrictGate) ClassView(store beads.Store) beads.Store {
 	return splittest.ProjectionOf(store).ClassViewOf(store)
 }
 
@@ -212,8 +212,8 @@ type taggedView struct {
 	class bool
 }
 
-func (taggedSeam) workView(store beads.Store) beads.Store { return &taggedView{Store: store} }
-func (taggedSeam) classView(store beads.Store) beads.Store {
+func (taggedSeam) WorkView(store beads.Store) beads.Store { return &taggedView{Store: store} }
+func (taggedSeam) ClassView(store beads.Store) beads.Store {
 	return &taggedView{Store: store, class: true}
 }
 

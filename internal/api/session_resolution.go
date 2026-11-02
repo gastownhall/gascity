@@ -210,6 +210,9 @@ func (s *Server) handOffRetiredNamedSessionState(ctx context.Context, store bead
 	}
 	now := time.Now().UTC()
 	workStores := s.retiredSessionWorkStores(store)
+	// The bindings and participants have always been reassigned through the
+	// sessions store; see extmsgStoreOverSessions in cmd/gc.
+	messaging := beads.MailStore{Store: store}
 	var errs []error
 	for _, info := range retired {
 		for _, workStore := range workStores {
@@ -220,10 +223,10 @@ func (s *Server) handOffRetiredNamedSessionState(ctx context.Context, store bead
 		if err := session.NewStore(beads.SessionStore{Store: store}).ReassignWaits(info.ID, replacementID); err != nil {
 			errs = append(errs, fmt.Errorf("reassign waits from retired session %s to %s: %w", info.ID, replacementID, err))
 		}
-		if err := extmsg.ReassignSessionBindings(ctx, store, info.ID, replacementID, now); err != nil {
+		if err := extmsg.ReassignSessionBindings(ctx, messaging, info.ID, replacementID, now); err != nil {
 			errs = append(errs, fmt.Errorf("reassign external message bindings from retired session %s to %s: %w", info.ID, replacementID, err))
 		}
-		if err := extmsg.ReassignSessionParticipants(ctx, store, info.ID, replacementID); err != nil {
+		if err := extmsg.ReassignSessionParticipants(ctx, messaging, info.ID, replacementID); err != nil {
 			errs = append(errs, fmt.Errorf("reassign external message participants from retired session %s to %s: %w", info.ID, replacementID, err))
 		}
 	}
@@ -982,8 +985,15 @@ func (s *Server) deferToController(store beads.Store, id string) (*bool, string)
 		return nil, ""
 	}
 	certain := true
-	if refuser, ok := s.state.(WakeStartRefuser); ok {
-		if info, err := session.NewStore(beads.SessionStore{Store: store}).Get(id); err == nil {
+	if info, err := session.NewStore(beads.SessionStore{Store: store}).Get(id); err == nil {
+		// Resume does not change a state the controller skips: that refusal
+		// names only its own remedy, the close.
+		if refuser, ok := s.state.(UnknownStateRefuser); ok {
+			if why := refuser.UnknownStateRefusal(info); why != "" {
+				return &no, why
+			}
+		}
+		if refuser, ok := s.state.(WakeStartRefuser); ok {
 			var why string
 			if why, certain = refuser.WakeStartRefusal(info); why != "" {
 				return &no, why + "; resend with resume: true to start it now"

@@ -1,27 +1,63 @@
 package exec
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+// handshakeRetryAfter is how long a failed handshake is cached before the
+// next caller re-runs it. A success is cached for the provider's life.
+const handshakeRetryAfter = 30 * time.Second
+
+// handshakeNow is the handshake cache's clock.
+var handshakeNow = time.Now
+
 // Protocol performs the RPP handshake (`script protocol`) and returns the
-// declared version and capabilities. The handshake runs once per provider
-// instance and is cached, including its error. An executable without a
+// declared version and capabilities. A successful handshake runs once per
+// provider instance and is cached; a failed one is cached for
+// handshakeRetryAfter, so one transient failure does not leave the provider
+// on the zero-capability floor for its whole life. The first handshake runs
+// under the lock, so every caller waits for its one answer; a retry runs
+// outside it, and other callers keep the cached failure meanwhile, so a slow
+// or hung `protocol` op never stalls them. An executable without a
 // `protocol` op (exit 2 → empty stdout) is version 0 with no optional
 // capabilities, so pre-handshake scripts remain fully valid
 // (RUNTIME-RPP-008 in internal/runtime/REQUIREMENTS.md).
 func (p *Provider) Protocol() (runtime.ProtocolInfo, error) {
-	p.handshakeOnce.Do(func() {
-		p.handshakeInfo, p.handshakeErr = p.queryProtocol()
-	})
-	return p.handshakeInfo, p.handshakeErr
+	p.handshakeMu.Lock()
+	if !p.handshakeRan {
+		defer p.handshakeMu.Unlock()
+		p.handshakeInfo, p.handshakeErr = p.queryProtocol(context.Background(), p.timeout)
+		p.handshakeRan, p.handshakeAt = true, handshakeNow()
+		return p.handshakeInfo, p.handshakeErr
+	}
+	if p.handshakeErr == nil || p.handshakeRetrying || handshakeNow().Sub(p.handshakeAt) < handshakeRetryAfter {
+		defer p.handshakeMu.Unlock()
+		return p.handshakeInfo, p.handshakeErr
+	}
+	p.handshakeRetrying = true
+	p.handshakeMu.Unlock()
+	// Cleared however the retry ends, a panic included, or a second failure
+	// would end retrying for the provider's life.
+	defer func() {
+		p.handshakeMu.Lock()
+		p.handshakeRetrying = false
+		p.handshakeMu.Unlock()
+	}()
+
+	info, err := p.queryProtocol(context.Background(), p.timeout)
+	p.handshakeMu.Lock()
+	p.handshakeInfo, p.handshakeErr, p.handshakeAt = info, err, handshakeNow()
+	p.handshakeMu.Unlock()
+	return info, err
 }
 
-func (p *Provider) queryProtocol() (runtime.ProtocolInfo, error) {
-	out, err := p.run(nil, "protocol")
+func (p *Provider) queryProtocol(ctx context.Context, timeout time.Duration) (runtime.ProtocolInfo, error) {
+	out, err := p.runWithContext(ctx, timeout, nil, "protocol")
 	if err != nil {
 		return runtime.ProtocolInfo{}, err
 	}

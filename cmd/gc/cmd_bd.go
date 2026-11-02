@@ -343,6 +343,9 @@ func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 //
 // An `@file` body is read — relative to scopeRoot, the directory bd runs in —
 // and validated like an inline one; a file that cannot be read is refused.
+// bd reads a file only for a value that starts with "@", and reads the path
+// after it as written, spaces included, so that is the path read here; a
+// space-padded "@", which bd rejects as JSON, is read with the spaces trimmed.
 func bdRigQualifiedMetadataRefusal(cfg *config.City, scopeRoot string, bdArgs []string) (string, bool) {
 	verb, args := bdflags.SplitGlobalFlags(bdArgs)
 	// bd registers `new` as an alias for `create` (bd create --help: "Aliases:
@@ -416,6 +419,9 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, scopeRoot string, bdArgs []
 
 		metadataJSON := strings.TrimSpace(value)
 		if path, isFile := strings.CutPrefix(metadataJSON, "@"); isFile {
+			if exact, ok := strings.CutPrefix(value, "@"); ok {
+				path = exact
+			}
 			if !filepath.IsAbs(path) {
 				path = filepath.Join(scopeRoot, path)
 			}
@@ -495,6 +501,14 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// A `--metadata @file` is read once, here, and every check below and bd
+	// read that private copy (bd_metadata_file_pin.go).
+	bdArgs, unpinMetadata, err := bdPinMetadataFiles(target.ScopeRoot, bdArgs)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defer unpinMetadata()
 	if msg, refused := bdRigQualifiedMetadataRefusal(cfg, target.ScopeRoot, bdArgs); refused {
 		fmt.Fprint(stderr, msg) //nolint:errcheck // best-effort stderr
 		return 1

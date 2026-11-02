@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
@@ -184,5 +185,36 @@ func TestHookCityWorkStartedSeamsShareTheFrontDoor(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(cityDir, ".gc", "events.jsonl"))
 	if err != nil || !strings.Contains(string(data), "work.started_unrecorded") {
 		t.Fatalf("event log %s, %v: want work.started_unrecorded recorded in the invocation's city", data, err)
+	}
+}
+
+// Kills a session-trigger seam that reads anything but the invocation's own
+// session row: it returns the row's gc.trigger_bead_id stamp, and a row it
+// cannot read is an error, never an empty stamp (gastownhall/gascity#5738).
+func TestHookCitySessionTriggerReadsTheRowStamp(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := writeFenceTestCity(t)
+	sessionID := newFenceSessionBead(t, cityDir, session.StateActive, "live-token")
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	if err := store.SetMetadata(sessionID, beadmeta.TriggerBeadIDMetadataKey, "wb-1"); err != nil {
+		t.Fatalf("stamp session row: %v", err)
+	}
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("load city config: %v", err)
+	}
+	t.Chdir(t.TempDir()) // nothing to resolve from here
+	ops := newHookCity(cityDir, cfg).claimOps()
+
+	if got, err := ops.ReadSessionTrigger(sessionID); err != nil || got != "wb-1" {
+		t.Fatalf("ReadSessionTrigger = %q, %v; want the row stamp wb-1", got, err)
+	}
+	if got, err := ops.ReadSessionTrigger("gc-no-such-session"); err == nil {
+		t.Fatalf("ReadSessionTrigger of a missing row = %q, nil; want an error", got)
 	}
 }

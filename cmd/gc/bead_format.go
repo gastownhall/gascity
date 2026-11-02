@@ -70,12 +70,13 @@ func parseBeadFilters(args []string) (beadFilters, []string) {
 }
 
 // filterBeads returns beads matching the given filters. Empty filter fields
-// match everything.
+// match everything. A filter that matches nothing returns an empty, non-nil
+// slice, so JSON output prints [] as the direct store read does.
 func filterBeads(bs []beads.Bead, f beadFilters) []beads.Bead {
 	if f.label == "" && f.status == "" {
 		return bs
 	}
-	var out []beads.Bead
+	out := make([]beads.Bead, 0, len(bs))
 	for _, b := range bs {
 		if f.status != "" && b.Status != f.status {
 			continue
@@ -110,9 +111,9 @@ func writeBeadsJSON(bs []beads.Bead, stdout io.Writer) {
 }
 
 // writeBeadJSONWithCache writes a single bead as indented JSON wrapped in
-// an envelope that carries the API-path _cache_age_s staleness signal.
-// Used only on the API routing path; the fallback path omits the envelope
-// by calling writeBeadJSON.
+// an envelope that carries the remote supervisor's _cache_age_s staleness
+// signal. Used only for a remote target; a local city prints the bare object
+// (writeBeadJSON) on every route.
 func writeBeadJSONWithCache(b beads.Bead, cacheAgeS float64, stdout io.Writer) {
 	env := struct {
 		Bead      beads.Bead `json:"bead"`
@@ -123,9 +124,9 @@ func writeBeadJSONWithCache(b beads.Bead, cacheAgeS float64, stdout io.Writer) {
 }
 
 // writeBeadsJSONWithCache writes a bead list as indented JSON wrapped in
-// an envelope that carries the API-path _cache_age_s staleness signal.
-// Used only on the API routing path; the fallback path omits the envelope
-// by calling writeBeadsJSON.
+// an envelope that carries the remote supervisor's _cache_age_s staleness
+// signal. Used only for a remote target; a local city prints the bare array
+// (writeBeadsJSON) on every route.
 func writeBeadsJSONWithCache(bs []beads.Bead, cacheAgeS float64, stdout io.Writer) {
 	env := struct {
 		Beads     []beads.Bead `json:"beads"`

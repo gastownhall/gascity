@@ -190,7 +190,10 @@ Notes per trigger:
   would otherwise silently never fire).
 - **`event`** — fires whenever the named event appears on the bus. Cursor-based
   tracking advances a sequence marker per firing, so the same event isn't
-  processed twice. Delivery is at least once, though: one bead close can reach
+  processed twice. An order that has never run fires only on events recorded
+  after the orchestrator started (or, for an order a reload adds, after that
+  reload), so events already on the bus by then don't fire it. Delivery is at
+  least once, though: one bead close can reach
   the bus as two `bead.closed` events, one from the process that closed it and
   one from the orchestrator when it notices the close first. Make an event
   order's action safe to repeat for the same bead.
@@ -326,8 +329,8 @@ schedule = "0 6 * * *"
 Overrides match by order name and can change `enabled`, `trigger`, `interval`,
 `schedule`, `check`, `on`, `pool`, `timeout`, `check_timeout`, `idempotent`,
 and `env`. An override targeting a nonexistent order is an error, not a silent
-no-op — `gc order` commands fail; the orchestrator logs the error and skips
-that override and every override listed after it.
+no-op — `gc order` commands fail and name every such override; the orchestrator
+logs them and still applies every other override.
 
 An override without `rig` reaches only an order's city-level instance. A pack
 order that also runs once per rig needs `rig = "*"` to reach those instances.
