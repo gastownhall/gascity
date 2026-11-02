@@ -24,6 +24,18 @@ resource = "test_target"
 calls = 38
 
 [[count]]
+path = "cmd/gc-osc7501/e2e_test.go"
+resource = "subprocess"
+calls = 3
+tagged = true
+
+[[count]]
+path = "cmd/gc-osc7501/relay_e2e_test.go"
+resource = "subprocess"
+calls = 3
+tagged = true
+
+[[count]]
 path = "cmd/gc-write-mint/e2e_test.go"
 resource = "subprocess"
 calls = 1
@@ -187,7 +199,7 @@ calls = 4
 [[count]]
 path = "cmd/gc/cmd_beads_test.go"
 resource = "http_test_server"
-calls = 8
+calls = 10
 
 [[count]]
 path = "cmd/gc/cmd_citystatus_test.go"
@@ -227,7 +239,7 @@ calls = 1
 [[count]]
 path = "cmd/gc/cmd_convoy_test.go"
 resource = "http_test_server"
-calls = 8
+calls = 10
 
 [[count]]
 path = "cmd/gc/cmd_doctor_test.go"
@@ -412,7 +424,7 @@ calls = 2
 [[count]]
 path = "cmd/gc/cmd_rig_test.go"
 resource = "http_test_server"
-calls = 5
+calls = 6
 
 [[count]]
 path = "cmd/gc/cmd_rig_test.go"
@@ -437,7 +449,7 @@ calls = 5
 [[count]]
 path = "cmd/gc/cmd_session_reset_test.go"
 resource = "net_listen"
-calls = 4
+calls = 5
 
 [[count]]
 path = "cmd/gc/cmd_session_test.go"
@@ -621,6 +633,16 @@ resource = "subprocess"
 calls = 2
 
 [[count]]
+path = "cmd/gc/cmd_supervisor_writeauth_reload_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_supervisor_writeauth_reload_test.go"
+resource = "listener_helper"
+calls = 1
+
+[[count]]
 path = "cmd/gc/cmd_wait_partial_test.go"
 resource = "http_test_server"
 calls = 1
@@ -641,6 +663,12 @@ resource = "subprocess"
 calls = 7
 
 [[count]]
+path = "cmd/gc/control_dispatch_sigterm_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "cmd/gc/controller_test.go"
 resource = "fixed_sleep"
 calls = 14
@@ -648,7 +676,7 @@ calls = 14
 [[count]]
 path = "cmd/gc/controller_test.go"
 resource = "listener_helper"
-calls = 5
+calls = 6
 
 [[count]]
 path = "cmd/gc/controller_test.go"
@@ -664,6 +692,17 @@ calls = 2
 path = "cmd/gc/conversation_lane_submit_test.go"
 resource = "http_test_server"
 calls = 1
+
+[[count]]
+path = "cmd/gc/detached_probe_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
+path = "cmd/gc/detached_probe_tmux_integration_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
 
 [[count]]
 path = "cmd/gc/dolt_data_dir_lock_linux_test.go"
@@ -1160,6 +1199,21 @@ resource = "cwd"
 calls = 6
 
 [[count]]
+path = "cmd/gc/route_equivalence_beads_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "cmd/gc/route_equivalence_convoy_test.go"
+resource = "http_test_server"
+calls = 2
+
+[[count]]
+path = "cmd/gc/route_equivalence_rigstatus_mail_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
 path = "cmd/gc/runtime_lease_crossproc_test.go"
 resource = "subprocess"
 calls = 1
@@ -1251,6 +1305,11 @@ resource = "http_test_server"
 calls = 3
 
 [[count]]
+path = "cmd/gc/supervisor_tmux_sockets_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
 path = "cmd/gc/telemetry_lifecycle_metrics_test.go"
 resource = "listener_helper"
 calls = 1
@@ -1333,6 +1392,12 @@ tagged = true
 path = "examples/bd/dolt/compact_real_dolt_test.go"
 resource = "subprocess"
 calls = 5
+tagged = true
+
+[[count]]
+path = "examples/bd/dolt/docs_recovery_bd_flags_test.go"
+resource = "subprocess"
+calls = 1
 tagged = true
 
 [[count]]
@@ -1519,7 +1584,7 @@ tagged = true
 [[count]]
 path = "examples/gastown/maintenance_scripts_test.go"
 resource = "subprocess"
-calls = 93
+calls = 91
 
 [[count]]
 path = "examples/gastown/tmux_theme_script_test.go"
@@ -1555,17 +1620,17 @@ calls = 4
 [[count]]
 path = "internal/api/client_sling_test.go"
 resource = "http_test_server"
-calls = 3
+calls = 6
 
 [[count]]
 path = "internal/api/client_test.go"
 resource = "http_test_server"
-calls = 66
+calls = 74
 
 [[count]]
 path = "internal/api/client_waits_test.go"
 resource = "http_test_server"
-calls = 1
+calls = 2
 
 [[count]]
 path = "internal/api/convoy_sql_test.go"
@@ -2129,6 +2194,12 @@ resource = "subprocess"
 calls = 2
 
 [[count]]
+path = "internal/pidutil/environ_darwin_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "internal/pidutil/pidutil_test.go"
 resource = "fixed_sleep"
 calls = 2
@@ -2252,7 +2323,7 @@ calls = 4
 [[count]]
 path = "internal/runtime/herdr/activity_live_test.go"
 resource = "subprocess"
-calls = 4
+calls = 2
 
 [[count]]
 path = "internal/runtime/herdr/activity_test.go"
@@ -2364,6 +2435,11 @@ resource = "listener_helper"
 calls = 1
 
 [[count]]
+path = "internal/runtime/runtimetest/osc7501emitter/main_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "internal/runtime/ssh/process_alive_script_test.go"
 resource = "subprocess"
 calls = 1
@@ -2432,6 +2508,11 @@ resource = "subprocess"
 calls = 2
 
 [[count]]
+path = "internal/runtime/tmux/busy_trust_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "internal/runtime/tmux/dialog_feedback_survey_integration_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -2498,6 +2579,12 @@ calls = 4
 tagged = true
 
 [[count]]
+path = "internal/runtime/tmux/program_capture_integration_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
 path = "internal/runtime/tmux/server_probe_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -2506,6 +2593,17 @@ calls = 1
 path = "internal/runtime/tmux/session_env_file_integration_test.go"
 resource = "fixed_sleep"
 calls = 1
+tagged = true
+
+[[count]]
+path = "internal/runtime/tmux/session_probe_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
+path = "internal/runtime/tmux/socket_path_integration_test.go"
+resource = "subprocess"
+calls = 5
 tagged = true
 
 [[count]]
@@ -2876,7 +2974,7 @@ tagged = true
 [[count]]
 path = "test/acceptance/beads_proxied_default_test.go"
 resource = "subprocess"
-calls = 4
+calls = 5
 tagged = true
 
 [[count]]
@@ -3104,6 +3202,12 @@ tagged = true
 path = "test/conversationlane/bddolt_gating_test.go"
 resource = "subprocess"
 calls = 1
+tagged = true
+
+[[count]]
+path = "test/conversationlane/busy_turn_lane_test.go"
+resource = "fixed_sleep"
+calls = 3
 tagged = true
 
 [[count]]

@@ -4,13 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -421,6 +425,52 @@ func TestClientQualifiedAgentName(t *testing.T) {
 	// unescaped so the server's ServeMux routes to the qualified variant.
 	if gotPath != "/v0/city/alpha/agent/myrig/worker/suspend" {
 		t.Errorf("path = %q, want /v0/city/alpha/agent/myrig/worker/suspend", gotPath)
+	}
+}
+
+// GetAgent reads an unqualified name from /agent/{base} and a rig-qualified one
+// from /agent/{dir}/{base}, maps the agent's name and rig, and surfaces the
+// server's not-found detail as an error.
+func TestClientGetAgent(t *testing.T) {
+	var gotPaths []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPaths = append(gotPaths, r.Method+" "+r.URL.Path)
+		switch r.URL.Path {
+		case "/v0/city/alpha/agent/overseer":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"name":"overseer","available":true,"running":true,"suspended":false,"pack_derived":false,"state":"idle"}`))
+		case "/v0/city/alpha/agent/myrig/worker":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"name":"myrig/worker","rig":"myrig","available":true,"running":false,"suspended":false,"pack_derived":false,"state":"stopped"}`))
+		default:
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"title":"Agent Not Found","status":404,"detail":"agent myrig/nope not found"}`))
+		}
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	city, err := c.GetAgent("overseer")
+	if err != nil {
+		t.Fatalf("GetAgent(overseer): %v", err)
+	}
+	if city != (AgentView{Name: "overseer"}) {
+		t.Errorf("city agent = %+v, want name overseer and no rig", city)
+	}
+	rig, err := c.GetAgent("myrig/worker")
+	if err != nil {
+		t.Fatalf("GetAgent(myrig/worker): %v", err)
+	}
+	if rig != (AgentView{Name: "myrig/worker", Rig: "myrig"}) {
+		t.Errorf("rig agent = %+v, want myrig/worker in rig myrig", rig)
+	}
+	if _, err := c.GetAgent("myrig/nope"); err == nil || err.Error() != "API error: agent myrig/nope not found" {
+		t.Errorf("GetAgent(myrig/nope) error = %v, want the server's not-found detail", err)
+	}
+	want := []string{"GET /v0/city/alpha/agent/overseer", "GET /v0/city/alpha/agent/myrig/worker", "GET /v0/city/alpha/agent/myrig/nope"}
+	if !slices.Equal(gotPaths, want) {
+		t.Errorf("requests = %q, want %q", gotPaths, want)
 	}
 }
 
@@ -1223,6 +1273,144 @@ func TestClientListConvoys_ConnErrorFallback(t *testing.T) {
 	}
 }
 
+// TestClientListConvoysFollowsNextCursor proves ListConvoys drains every page
+// by following next_cursor. It used to make one cursor-less request, so the
+// server's default page (100) silently truncated a larger city's convoy list.
+// The fake serves 250 convoys in pages of at most 100 whatever limit is asked
+// for, the way a server with a lower cap would.
+func TestClientListConvoysFollowsNextCursor(t *testing.T) {
+	const total, pageSize = 250, 100
+	var reqs int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&reqs, 1)
+		if r.URL.Path != "/v0/city/alpha/convoys" {
+			t.Errorf("path = %q, want /v0/city/alpha/convoys", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("limit"); got != "1000" {
+			t.Errorf("page limit = %q, want 1000", got)
+		}
+		start := 0
+		if cursor := r.URL.Query().Get("cursor"); cursor != "" {
+			n, err := strconv.Atoi(strings.TrimPrefix(cursor, "after-"))
+			if err != nil {
+				t.Errorf("unexpected cursor %q", cursor)
+			}
+			start = n
+		}
+		end := min(start+pageSize, total)
+		items := make([]map[string]any, 0, end-start)
+		for i := start; i < end; i++ {
+			items = append(items, map[string]any{"id": fmt.Sprintf("gc-%d", i+1), "title": "c", "issue_type": "convoy", "status": "open"})
+		}
+		body := map[string]any{"items": items, "total": total}
+		if end < total {
+			body["next_cursor"] = fmt.Sprintf("after-%d", end)
+		}
+		if start == 0 {
+			w.Header().Set("X-GC-Cache-Age-S", "2.5")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(body)
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	got, err := c.ListConvoys()
+	if err != nil {
+		t.Fatalf("ListConvoys: %v", err)
+	}
+	if len(got.Body) != total {
+		t.Fatalf("got %d convoys, want %d (pagination not followed)", len(got.Body), total)
+	}
+	for i, b := range got.Body {
+		if want := fmt.Sprintf("gc-%d", i+1); b.ID != want {
+			t.Fatalf("Body[%d].ID = %q, want %q", i, b.ID, want)
+		}
+	}
+	if n := atomic.LoadInt32(&reqs); n != 3 {
+		t.Fatalf("requests = %d, want 3", n)
+	}
+	if got.AgeSeconds != 2.5 {
+		t.Errorf("AgeSeconds = %v, want 2.5 (taken from the first page)", got.AgeSeconds)
+	}
+}
+
+// TestClientListConvoysRepeatedCursorErrors proves a server that never
+// advances next_cursor makes ListConvoys fail loudly instead of spinning.
+func TestClientListConvoysRepeatedCursorErrors(t *testing.T) {
+	var reqs int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&reqs, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items":       []map[string]any{{"id": "gc-1", "title": "c", "issue_type": "convoy", "status": "open"}},
+			"next_cursor": "stuck",
+		})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	_, err := c.ListConvoys()
+	if err == nil || !strings.Contains(err.Error(), "repeated") {
+		t.Fatalf("err = %v, want 'repeated'", err)
+	}
+	if n := atomic.LoadInt32(&reqs); n != 2 {
+		t.Fatalf("requests = %d, want 2 (bounded)", n)
+	}
+}
+
+// TestClientListConvoysKeepsDistinctConvoysThatShareAnID pins which repeated
+// rows each drain drops. IDs are unique only within a store, so ListConvoys
+// returns every different convoy under one ID, on one page or a later one, and
+// drops only a row identical to one it returned: the second copy a server
+// serves when two of its stores read one ledger (legacy shared-file mode). The
+// identical copy carries a priority, labels, metadata and a non-UTC created_at,
+// so the rows compare equal through the whole wire decode. ListBeads keeps its
+// ID rule and returns the first row of each ID.
+func TestClientListConvoysKeepsDistinctConvoysThatShareAnID(t *testing.T) {
+	cityConvoy := map[string]any{"id": "gc-1", "title": "city convoy", "issue_type": "convoy", "status": "open", "created_at": "2026-04-23T10:00:00Z"}
+	rigConvoy := map[string]any{"id": "gc-1", "title": "rig convoy", "issue_type": "convoy", "status": "open", "created_at": "2026-04-23T09:00:00Z"}
+	sharedLedger := map[string]any{
+		"id": "gc-2", "title": "one ledger, two stores", "issue_type": "convoy", "status": "open",
+		"created_at": "2026-04-23T08:00:00+02:00", "priority": 2,
+		"labels": []string{"owned"}, "metadata": map[string]string{"target": "main"},
+	}
+	laterRigConvoy := map[string]any{"id": "gc-1", "title": "another rig's convoy", "issue_type": "convoy", "status": "open", "created_at": "2026-04-23T07:00:00Z"}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := map[string]any{"items": []map[string]any{cityConvoy, rigConvoy, sharedLedger, sharedLedger}, "next_cursor": "page-2"}
+		if r.URL.Query().Get("cursor") == "page-2" {
+			body = map[string]any{"items": []map[string]any{sharedLedger, laterRigConvoy}}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(body)
+	}))
+	defer ts.Close()
+	c := NewCityScopedClient(ts.URL, "alpha")
+
+	titles := func(rows []beads.Bead) []string {
+		out := make([]string, 0, len(rows))
+		for _, b := range rows {
+			out = append(out, b.Title)
+		}
+		return out
+	}
+	convoys, err := c.ListConvoys()
+	if err != nil {
+		t.Fatalf("ListConvoys: %v", err)
+	}
+	if got, want := titles(convoys.Body), []string{"city convoy", "rig convoy", "one ledger, two stores", "another rig's convoy"}; !slices.Equal(got, want) {
+		t.Errorf("ListConvoys titles = %q, want %q: every convoy under gc-1, and gc-2's identical copies once", got, want)
+	}
+
+	list, err := c.ListBeads(ListBeadsOpts{})
+	if err != nil {
+		t.Fatalf("ListBeads: %v", err)
+	}
+	if got, want := titles(list.Body.Beads), []string{"city convoy", "one ledger, two stores"}; !slices.Equal(got, want) {
+		t.Errorf("ListBeads titles = %q, want %q: the first row of each id", got, want)
+	}
+}
+
 func TestClientGetConvoy(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/city/alpha/convoy/gc-1" {
@@ -1658,11 +1846,11 @@ func TestListBeadsFollowsNextCursor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListBeads: %v", err)
 	}
-	if len(res.Body) != 3 {
-		t.Fatalf("got %d beads, want 3 (pagination not followed)", len(res.Body))
+	if len(res.Body.Beads) != 3 {
+		t.Fatalf("got %d beads, want 3 (pagination not followed)", len(res.Body.Beads))
 	}
-	if res.Body[0].ID != "ga-1" || res.Body[1].ID != "ga-2" || res.Body[2].ID != "ga-3" {
-		t.Fatalf("ids = %q, want [ga-1 ga-2 ga-3]", []string{res.Body[0].ID, res.Body[1].ID, res.Body[2].ID})
+	if res.Body.Beads[0].ID != "ga-1" || res.Body.Beads[1].ID != "ga-2" || res.Body.Beads[2].ID != "ga-3" {
+		t.Fatalf("ids = %q, want [ga-1 ga-2 ga-3]", []string{res.Body.Beads[0].ID, res.Body.Beads[1].ID, res.Body.Beads[2].ID})
 	}
 	if n := atomic.LoadInt32(&reqs); n != 3 {
 		t.Fatalf("requests = %d, want 3", n)
@@ -1694,8 +1882,8 @@ func TestListBeadsHonorsLimitBound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListBeads: %v", err)
 	}
-	if len(res.Body) != 2 {
-		t.Fatalf("got %d, want 2", len(res.Body))
+	if len(res.Body.Beads) != 2 {
+		t.Fatalf("got %d, want 2", len(res.Body.Beads))
 	}
 	if n := atomic.LoadInt32(&reqs); n != 1 {
 		t.Fatalf("requests = %d, want 1 (bound reached, no second page)", n)
@@ -1761,9 +1949,9 @@ func TestListBeadsCursorCycleErrors(t *testing.T) {
 }
 
 // TestListBeadsEmptyResultIsNonNilSlice pins the empty-result contract: an empty
-// city must yield an empty, non-nil slice so `--json` emits `beads: []`, not
-// `beads: null`. A nil []beads.Bead marshals to JSON null, which breaks
-// `jq '.beads[]'` and diverges from the direct-bd lane.
+// city must yield an empty, non-nil slice so `--json` emits the bare `[]` for a
+// local target (and `"beads": []` in a remote target's envelope), not `null`. A
+// nil []beads.Bead marshals to JSON null, which diverges from the direct-bd lane.
 func TestListBeadsEmptyResultIsNonNilSlice(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1776,18 +1964,18 @@ func TestListBeadsEmptyResultIsNonNilSlice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListBeads: %v", err)
 	}
-	if res.Body == nil {
-		t.Fatal("res.Body is nil; empty result must be a non-nil empty slice")
+	if res.Body.Beads == nil {
+		t.Fatal("res.Body.Beads is nil; empty result must be a non-nil empty slice")
 	}
-	if len(res.Body) != 0 {
-		t.Fatalf("len(res.Body) = %d, want 0", len(res.Body))
+	if len(res.Body.Beads) != 0 {
+		t.Fatalf("len(res.Body.Beads) = %d, want 0", len(res.Body.Beads))
 	}
-	j, err := json.Marshal(res.Body)
+	j, err := json.Marshal(res.Body.Beads)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 	if string(j) != "[]" {
-		t.Fatalf("json(res.Body) = %s, want []", j)
+		t.Fatalf("json(res.Body.Beads) = %s, want []", j)
 	}
 }
 
@@ -1824,11 +2012,11 @@ func TestListBeadsDedupesAcrossPages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListBeads: %v", err)
 	}
-	if len(res.Body) != 3 {
-		t.Fatalf("got %d beads, want 3 (ga-2 deduped)", len(res.Body))
+	if len(res.Body.Beads) != 3 {
+		t.Fatalf("got %d beads, want 3 (ga-2 deduped)", len(res.Body.Beads))
 	}
 	counts := map[string]int{}
-	for _, b := range res.Body {
+	for _, b := range res.Body.Beads {
 		counts[b.ID]++
 	}
 	if counts["ga-2"] != 1 {
@@ -1884,11 +2072,138 @@ func TestDrainBeadPagesHardPageCap(t *testing.T) {
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
-	_, err := c.drainBeadPages(listBeadsParams(ListBeadsOpts{}), 0, 3)
+	_, err := drainBeadPages(c.beadsPage(listBeadsParams(ListBeadsOpts{})), 0, 3, sameBeadID)
 	if err == nil || !strings.Contains(err.Error(), "exceeded 3 pages") {
 		t.Fatalf("err = %v, want 'exceeded 3 pages'", err)
 	}
 	if n := atomic.LoadInt32(&reqs); n != 3 {
 		t.Fatalf("requests = %d, want 3 (page cap bounds the loop)", n)
+	}
+}
+
+// TestClientListConvoysPartialAnswerIsAnError pins that a /convoys page the
+// server marks partial (a store it aggregates failed) fails ListConvoys rather
+// than returning the other stores' convoys as the whole list, on the first
+// page or a later one, and that the failure is not a local-fallback condition:
+// gc convoy list then exits 1, the way a failed store read does locally.
+func TestClientListConvoysPartialAnswerIsAnError(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		partialPage int
+	}{
+		{name: "first page", partialPage: 0},
+		{name: "later page", partialPage: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var page atomic.Int32
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				n := int(page.Add(1)) - 1
+				body := map[string]any{
+					"items": []map[string]any{{"id": fmt.Sprintf("gc-%d", n+1), "title": "c", "issue_type": "convoy", "status": "open"}},
+					"total": 2,
+				}
+				if n == 0 {
+					body["next_cursor"] = "page-2"
+				}
+				if n == tc.partialPage {
+					body["partial"] = true
+					body["partial_errors"] = []string{"rig beta: store unreachable"}
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(body)
+			}))
+			defer ts.Close()
+
+			c := NewCityScopedClient(ts.URL, "alpha")
+			got, err := c.ListConvoys()
+			if err == nil {
+				t.Fatalf("ListConvoys = %d convoys, nil error; want the partial answer to fail", len(got.Body))
+			}
+			if !strings.Contains(err.Error(), "rig beta: store unreachable") {
+				t.Errorf("err = %v, want the server's partial_errors named", err)
+			}
+			if ShouldFallbackForRead(c, err) {
+				t.Errorf("ShouldFallbackForRead(%v) = true, want false: a partial answer fails the read, it does not reroute it", err)
+			}
+		})
+	}
+}
+
+// TestListBeadsReportsPartialAcrossPages proves the drain keeps the server's
+// report of a backend that failed while building the list: Partial is ORed over
+// every page and PartialErrors are collected once each, in first-seen order (a
+// failing leg repeats its message on every page because each page queries every
+// leg). A caller that prints the list as the city's answer must see it.
+func TestListBeadsReportsPartialAcrossPages(t *testing.T) {
+	t.Run("partial", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			body := map[string]any{"partial": true}
+			switch r.URL.Query().Get("cursor") {
+			case "":
+				body["items"] = []map[string]any{{"id": "ga-1", "title": "t", "issue_type": "task", "status": "open"}}
+				body["next_cursor"] = "c1"
+				body["partial_errors"] = []string{"rig omega: boom"}
+			default:
+				body["items"] = []map[string]any{{"id": "ga-2", "title": "t", "issue_type": "task", "status": "open"}}
+				body["partial_errors"] = []string{"rig omega: boom", "rig zeta: gone"}
+			}
+			_ = json.NewEncoder(w).Encode(body)
+		}))
+		defer ts.Close()
+
+		res, err := NewCityScopedClient(ts.URL, "alpha").ListBeads(ListBeadsOpts{})
+		if err != nil {
+			t.Fatalf("ListBeads: %v", err)
+		}
+		if len(res.Body.Beads) != 2 || res.Body.Beads[0].ID != "ga-1" || res.Body.Beads[1].ID != "ga-2" {
+			t.Fatalf("beads = %+v, want [ga-1 ga-2]", res.Body.Beads)
+		}
+		if !res.Body.Partial {
+			t.Fatal("Partial = false, want true")
+		}
+		want := []string{"rig omega: boom", "rig zeta: gone"}
+		if !slices.Equal(res.Body.PartialErrors, want) {
+			t.Fatalf("PartialErrors = %q, want %q", res.Body.PartialErrors, want)
+		}
+	})
+	t.Run("complete", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{{"id": "ga-1", "title": "t", "issue_type": "task", "status": "open"}},
+			})
+		}))
+		defer ts.Close()
+
+		res, err := NewCityScopedClient(ts.URL, "alpha").ListBeads(ListBeadsOpts{})
+		if err != nil {
+			t.Fatalf("ListBeads: %v", err)
+		}
+		if res.Body.Partial || res.Body.PartialErrors != nil {
+			t.Fatalf("Partial = %v, PartialErrors = %q; want false, nil", res.Body.Partial, res.Body.PartialErrors)
+		}
+	})
+}
+
+// TestListWaitsViaBeadsCarriesPartial proves the legacy gc wait list rung
+// reports a degraded generic-beads read the same way the typed rung does.
+func TestListWaitsViaBeadsCarriesPartial(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items":          []map[string]any{},
+			"partial":        true,
+			"partial_errors": []string{"rig x: down"},
+		})
+	}))
+	defer ts.Close()
+
+	res, err := NewCityScopedClient(ts.URL, "alpha").ListWaitsViaBeads()
+	if err != nil {
+		t.Fatalf("ListWaitsViaBeads: %v", err)
+	}
+	if !res.Body.Partial || !slices.Equal(res.Body.PartialErrors, []string{"rig x: down"}) {
+		t.Fatalf("WaitList = %+v, want Partial with [rig x: down]", res.Body)
 	}
 }

@@ -198,11 +198,13 @@ func TestAmbiguousCreateBoundClearAlerts(t *testing.T) {
 }
 
 // TestV2AlertsOncePerEpisode pins each recurring alert to once per episode:
-// a run of panicking passes, a row's unknown state, a named duplicate, and a
-// boot gate closed for longer than 2 × patrol.
+// a run of panicking passes, a row's unknown state, a named duplicate, a
+// boot gate closed for longer than 2 × patrol, and a work item refused for
+// unusable worktree evidence (once per item and cause while it lasts).
 //
-// Kills: an alert storm at the pass rate, and an episode that ends without
-// re-arming its alert.
+// Kills: an alert storm at the pass rate, an episode that ends without
+// re-arming its alert, a worktree refusal deduped without its cause, and an
+// alert on a refusal that names no work item.
 func TestV2AlertsOncePerEpisode(t *testing.T) {
 	t.Run("pass panic", func(t *testing.T) {
 		f := newObserveFixture(t)
@@ -260,6 +262,36 @@ func TestV2AlertsOncePerEpisode(t *testing.T) {
 		f.runPass(2*time.Minute + time.Second)
 		if got := f.alerts(t); len(got) != 2 {
 			t.Errorf("alerts = %v, want a second episode's alert", got)
+		}
+	})
+	t.Run("worktree refusal", func(t *testing.T) {
+		f := newObserveFixture(t)
+		refusal := func(bead, detail string) allocTraceRecord {
+			return allocTraceRecord{Template: "worker", Reason: "ineligible:" + gateWorktreeRefused, WorkBeadID: bead, Detail: detail}
+		}
+		throttled := allocTraceRecord{Template: "worker", Reason: "ineligible:" + gateWorktreeRefused}
+		for _, pass := range [][]allocTraceRecord{
+			{refusal("w-1", "a"), throttled}, // alerts w-1
+			{refusal("w-1", "a")},            // same episode: no alert
+			nil,                              // repaired: forgotten
+			{refusal("w-1", "a")},            // relapse: alerts w-1
+			{refusal("w-1", "b")},            // changed cause: alerts w-1
+			{refusal("w-1", "b"), refusal("w-2", "a")}, // a second item: alerts w-2
+			{throttled}, // names no work item: no alert
+		} {
+			f.p.observeWorktreeRefusals(pass)
+		}
+		var subjects []string
+		for _, e := range f.ev.Events {
+			if e.Type == events.ReconcilerAlert {
+				subjects = append(subjects, e.Subject)
+			}
+		}
+		if want := []string{"w-1", "w-1", "w-1", "w-2"}; !slices.Equal(subjects, want) {
+			t.Errorf("alert subjects = %v, want %v", subjects, want)
+		}
+		if got := f.alerts(t); len(got) != 4 || got[0] != alertWorktreeRefused {
+			t.Errorf("alert kinds = %v, want four %s", got, alertWorktreeRefused)
 		}
 	})
 }
@@ -493,5 +525,59 @@ func TestStopOutstandingAlertOnlyOwnRowsOutsideTheQuietHold(t *testing.T) {
 	// holds nothing.
 	if observe(15*time.Minute, livenessGone, false, unread); len(alerts()) != 3 {
 		t.Fatalf("gone, activity unread: %d alerts, want a third", len(alerts()))
+	}
+}
+
+// TestV2PassAlertsUnusableWorktreeEvidence pins the alert for a ready routed
+// work item whose worktree evidence the pass finds unusable (here: gc.work_dir
+// with an incomplete gc.worktree_* set). The pool never plans a session for
+// it and no create effect ever sees it, so the planner alerts once, naming
+// the work item and the missing key, on stderr, as a reconciler.alert whose
+// subject is the work item, and in the pass record. An unstamped item and a
+// work_dir-only (unmanaged) item get a create and no alert.
+//
+// Kills: a dropped observeWorktreeRefusals call (a silent starved item); a
+// refusal record without its work item or detail; an alert every pass; an
+// alert whose subject is not the work item; an alert on usable evidence.
+func TestV2PassAlertsUnusableWorktreeEvidence(t *testing.T) {
+	unmanaged := routedDemandBead("gc-r1")
+	unmanaged.Metadata["gc.work_dir"] = "/wt/gc-r1"
+	for name, bead := range map[string]beads.Bead{"unstamped": routedDemandBead("gc-r1"), "work_dir only": unmanaged} {
+		ctrl := newObserveFixture(t, bead)
+		ctrl.runPass(time.Second)
+		if got := intentKeys(ctrl.p.out.record.Load().Admitted); !slices.Contains(got, "create:") {
+			t.Errorf("%s control: admitted = %v, want a create", name, got)
+		}
+		if got := ctrl.alerts(t); len(got) != 0 {
+			t.Errorf("%s control: alerts = %v, want none", name, got)
+		}
+	}
+
+	stamped := routedDemandBead("gc-r1")
+	stamped.Metadata["gc.work_dir"] = "/wt/gc-r1"
+	stamped.Metadata["gc.worktree_repo"] = "/repo"
+	f := newObserveFixture(t, stamped)
+	for range 3 {
+		f.runPass(time.Second)
+	}
+	if got := intentKeys(f.p.out.record.Load().Admitted); slices.Contains(got, "create:") {
+		t.Fatalf("admitted = %v, want no create for incomplete worktree evidence", got)
+	}
+	if got := f.alerts(t); !slices.Equal(got, []string{alertWorktreeRefused}) {
+		t.Fatalf("reconciler.alert kinds = %v, want one %s over three passes", got, alertWorktreeRefused)
+	}
+	for _, e := range f.ev.Events {
+		if e.Type == events.ReconcilerAlert && e.Subject != "gc-r1" {
+			t.Errorf("alert subject = %q, want the work item gc-r1", e.Subject)
+		}
+	}
+	if out := f.stderr.String(); !strings.Contains(out, "gc-r1") || !strings.Contains(out, "is missing gc.worktree_root") {
+		t.Errorf("stderr = %q, want a line naming gc-r1 and its missing gc.worktree_root", out)
+	}
+	if len(f.records) == 0 {
+		t.Fatal("no pass record emitted")
+	}
+	if got := f.records[len(f.records)-1]["alerts"].(map[string]uint64); got[alertWorktreeRefused] != 1 {
+		t.Errorf("pass record alerts = %v, want %s:1", got, alertWorktreeRefused)
 	}
 }

@@ -52,7 +52,10 @@ func TestNewSessionErrNoServerRefusesObservedLiveNamedSocket(t *testing.T) {
 	for _, variant := range variants {
 		t.Run(variant.name, func(t *testing.T) {
 			socketName := "gc-live-socket"
-			tmuxTmpDir := "/tmux-private"
+			tmuxTmpDir, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatalf("EvalSymlinks: %v", err)
+			}
 			t.Setenv("TMUX_TMPDIR", tmuxTmpDir)
 			socketPath := filepath.Join(tmuxTmpDir, fmt.Sprintf("tmux-%d", os.Getuid()), socketName)
 			observerCalls := 0
@@ -71,7 +74,7 @@ func TestNewSessionErrNoServerRefusesObservedLiveNamedSocket(t *testing.T) {
 					return fmt.Errorf("live socket path=%s inode=97 peer_pid=4242", gotPath)
 				},
 			}
-			err := variant.call(tm)
+			err = variant.call(tm)
 			if !errors.Is(err, ErrServerDegraded) {
 				t.Fatalf("err = %v, want ErrServerDegraded", err)
 			}
@@ -351,18 +354,107 @@ func TestProbeServerAliveAcceptsEmptyLiveServer(t *testing.T) {
 }
 
 func TestNamedSocketPathUsesTMUXTMPDIRAndIgnoresTMPDIR(t *testing.T) {
-	t.Setenv("TMUX_TMPDIR", "/tmux-private")
+	tmuxTmpDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	t.Setenv("TMUX_TMPDIR", tmuxTmpDir)
 	t.Setenv("TMPDIR", "/must-not-be-used")
-	if got, want := namedSocketPath("gc-test"), filepath.Join("/tmux-private", fmt.Sprintf("tmux-%d", os.Getuid()), "gc-test"); got != want {
+	if got, want := namedSocketPath("gc-test"), filepath.Join(tmuxTmpDir, fmt.Sprintf("tmux-%d", os.Getuid()), "gc-test"); got != want {
 		t.Fatalf("namedSocketPath() = %q, want %q", got, want)
+	}
+}
+
+func TestSocketPathAbsoluteRef(t *testing.T) {
+	if got, want := SocketPath("/var/run//gc/../gc/city.sock"), "/var/run/gc/city.sock"; got != want {
+		t.Fatalf("SocketPath(abs) = %q, want %q", got, want)
 	}
 }
 
 func TestNamedSocketPathFallsBackToTmpWhenTMUXTMPDIREmpty(t *testing.T) {
 	t.Setenv("TMUX_TMPDIR", "")
 	t.Setenv("TMPDIR", "/must-not-be-used")
-	if got, want := namedSocketPath("gc-test"), filepath.Join("/tmp", fmt.Sprintf("tmux-%d", os.Getuid()), "gc-test"); got != want {
+	// tmux resolves /tmp as it resolves TMUX_TMPDIR: /private/tmp on macOS.
+	tmp, err := filepath.EvalSymlinks("/tmp")
+	if err != nil {
+		t.Fatalf("EvalSymlinks(/tmp): %v", err)
+	}
+	if got, want := namedSocketPath("gc-test"), filepath.Join(tmp, fmt.Sprintf("tmux-%d", os.Getuid()), "gc-test"); got != want {
 		t.Fatalf("namedSocketPath() = %q, want %q", got, want)
+	}
+}
+
+// tmux keeps a TMUX_TMPDIR that resolves to a file and fails there, so the
+// socket path stays below the resolved file and never moves to /tmp, where
+// a stale socket could read as a dead server.
+func TestSocketPathKeepsTMUXTMPDIRNamingAFile(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	file := filepath.Join(dir, "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(file, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	want := filepath.Join(file, fmt.Sprintf("tmux-%d", os.Getuid()), "gc-test")
+	for _, value := range []string{file, link} {
+		t.Setenv("TMUX_TMPDIR", value)
+		if got := SocketPath("gc-test"); got != want {
+			t.Fatalf("TMUX_TMPDIR=%s: SocketPath() = %q, want %q", value, got, want)
+		}
+	}
+}
+
+// tmux resolves a relative TMUX_TMPDIR with realpath(3) from its client's
+// working directory: SocketPath from this process's, SocketDirIn from the one
+// it is given, either way to an absolute path. A relative value with no
+// working directory to resolve it from falls back to /tmp, as one that does
+// not resolve does. A symlink in the value is followed before the ".." after
+// it, as realpath follows it.
+func TestSocketDirResolvesARelativeTMUXTMPDIRFromItsWorkingDirectory(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	far, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	tmp, err := filepath.EvalSymlinks("/tmp")
+	if err != nil {
+		t.Fatalf("EvalSymlinks(/tmp): %v", err)
+	}
+	for _, dir := range []string{filepath.Join(root, "sockets"), filepath.Join(far, "inner"), filepath.Join(far, "beside")} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(far, "inner"), filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	uid := fmt.Sprintf("tmux-%d", os.Getuid())
+
+	t.Chdir(root)
+	t.Setenv("TMUX_TMPDIR", "sockets")
+	if got, want := SocketPath("gc-test"), filepath.Join(root, "sockets", uid, "gc-test"); got != want {
+		t.Fatalf("SocketPath() = %q, want %q", got, want)
+	}
+	for _, tc := range []struct {
+		name, dir, value, want string
+	}{
+		{name: "relative, from dir", dir: root, value: "sockets", want: filepath.Join(root, "sockets")},
+		{name: "relative, missing from dir", dir: far, value: "sockets", want: tmp},
+		{name: "relative, no working directory", value: "sockets", want: tmp},
+		{name: "absolute, dir unused", dir: far, value: filepath.Join(root, "sockets"), want: filepath.Join(root, "sockets")},
+		{name: "symlink before ..", dir: root, value: "link/../beside", want: filepath.Join(far, "beside")},
+	} {
+		if got, want := SocketDirIn(tc.dir, tc.value), filepath.Join(tc.want, uid); got != want {
+			t.Errorf("%s: SocketDirIn(%q, %q) = %q, want %q", tc.name, tc.dir, tc.value, got, want)
+		}
 	}
 }
 
@@ -693,5 +785,94 @@ func TestProbeServerAliveBailsFastOnHang(t *testing.T) {
 	}
 	if elapsed > 2*time.Second {
 		t.Fatalf("probe took %s, want < 2s (timeout should be ~100ms)", elapsed)
+	}
+}
+
+// When $TMUX pins this provider's named socket, every observation of the
+// server socket must use the pinned path, never the path tmux would resolve
+// from the caller's TMUX_TMPDIR (issue #8116).
+func pinnedSocketTestEnv(t *testing.T) (pinned string) {
+	t.Helper()
+	uid := os.Getuid()
+	pinned = fmt.Sprintf("/run/user/%d/tmux-%d/bright-lights", uid, uid)
+	t.Setenv("TMUX", pinned+",4242,0")
+	t.Setenv("TMUX_TMPDIR", t.TempDir())
+	return pinned
+}
+
+func TestServerSocketPathFollowsPinnedServer(t *testing.T) {
+	pinned := pinnedSocketTestEnv(t)
+	tm := &Tmux{cfg: Config{SocketName: "bright-lights"}}
+	if got := tm.serverSocketPath(); got != pinned {
+		t.Fatalf("serverSocketPath() = %q, want %q", got, pinned)
+	}
+}
+
+func TestProbeServerAliveObservesPinnedSocket(t *testing.T) {
+	pinned := pinnedSocketTestEnv(t)
+	fe := &fakeExecutor{err: ErrNoServer}
+	tm := &Tmux{
+		cfg:  Config{SocketName: "bright-lights"},
+		exec: fe,
+		serverSocketObserver: func(_ context.Context, gotPath string) error {
+			if gotPath != pinned {
+				t.Errorf("observer path = %q, want %q", gotPath, pinned)
+			}
+			return fmt.Errorf("live socket path=%s inode=97 peer_pid=4242", gotPath)
+		},
+	}
+	err := tm.probeServerAlive()
+	if !errors.Is(err, ErrServerDegraded) {
+		t.Fatalf("probeServerAlive: err = %v, want ErrServerDegraded", err)
+	}
+	if !strings.Contains(err.Error(), "path="+pinned) {
+		t.Fatalf("err = %q, want it to name the pinned path", err)
+	}
+}
+
+func TestCaptureNamedSocketWitnessUsesPinnedSocket(t *testing.T) {
+	pinned := pinnedSocketTestEnv(t)
+	fixture := filepath.Join(t.TempDir(), "socket-fixture")
+	if err := os.WriteFile(fixture, []byte("fixture"), 0o600); err != nil {
+		t.Fatalf("write socket fixture: %v", err)
+	}
+	node, err := os.Lstat(fixture)
+	if err != nil {
+		t.Fatalf("lstat socket fixture: %v", err)
+	}
+	fe := &fakeExecutor{out: "4242"}
+	tm := &Tmux{cfg: Config{SocketName: "bright-lights"}, exec: fe}
+	var observed []string
+	tm.namedSocketLstat = func(_ context.Context, gotPath string) (namedSocketObservation, error) {
+		observed = append(observed, gotPath)
+		return namedSocketObservation{node: node, isSocket: true}, nil
+	}
+	witness, err := tm.captureNamedSocketWitness(context.Background())
+	if err != nil {
+		t.Fatalf("captureNamedSocketWitness: %v", err)
+	}
+	if witness.canonicalPath != pinned {
+		t.Errorf("witness path = %q, want %q", witness.canonicalPath, pinned)
+	}
+	for i, got := range observed {
+		if got != pinned {
+			t.Errorf("lstat path %d = %q, want %q", i, got, pinned)
+		}
+	}
+	want := []string{"-u", "-N", "-S", pinned, "display-message", "-p", "#{pid}"}
+	if len(fe.calls) != 1 || !reflect.DeepEqual(fe.calls[0], want) {
+		t.Errorf("display-message args = %v, want %v", fe.calls, want)
+	}
+}
+
+func TestAttachArgsFallBackToPinnedSocket(t *testing.T) {
+	pinned := pinnedSocketTestEnv(t)
+	tm := &Tmux{cfg: Config{SocketName: "bright-lights"}}
+	want := []string{"-u", "-N", "-S", pinned, "attach-session", "-t", "gc-target"}
+	if got := tm.attachCommandArgs("gc-target", namedSocketWitness{}); !reflect.DeepEqual(got, want) {
+		t.Errorf("attachCommandArgs() = %v, want %v", got, want)
+	}
+	if got := tm.hiddenAttachCommandArgsForWitness("gc-target", namedSocketWitness{}); !reflect.DeepEqual(got, want) {
+		t.Errorf("hiddenAttachCommandArgsForWitness() = %v, want %v", got, want)
 	}
 }

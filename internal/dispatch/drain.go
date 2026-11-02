@@ -1532,10 +1532,16 @@ func ensureDrainItemRoot(store beads.Store, control, unit, member beads.Bead, co
 			return "", false, fmt.Errorf("%w: %s: preparing drain item formula %q: %w", errDrainInvalidItemFormula, control.ID, itemFormula, err)
 		}
 	}
+	runRootID := strings.TrimSpace(control.Metadata[beadmeta.RootBeadIDMetadataKey])
+	runRoot, err := getRootInView(store, runRootID, opts)
+	if err != nil {
+		return "", false, fmt.Errorf("%s: loading workflow root %q for drain item launch metadata: %w", control.ID, runRootID, err)
+	}
 	result, err := molecule.Instantiate(context.Background(), store, recipe, molecule.Options{
 		Vars:             runtimeVars,
 		ExternalDeps:     drainWorkflowExternalDeps(recipe, blockerIDs),
 		PriorityOverride: member.Priority,
+		RootMetadata:     drainItemRootMetadata(runRoot),
 	})
 	if err != nil {
 		if cleanupErr := closeFailedDrainItemRoots(store, control.ID, row.ItemRootKey); cleanupErr != nil {
@@ -1547,6 +1553,20 @@ func ensureDrainItemRoot(store beads.Store, control, unit, member beads.Bead, co
 		return "", false, fmt.Errorf("%s: instantiating drain item formula %q: %w", control.ID, itemFormula, err)
 	}
 	return result.RootID, true, nil
+}
+
+// drainItemRootMetadata returns the launch facts an item workflow inherits
+// from runRoot, the run that owns the drain control. Each item formula is
+// instantiated as its own self-rooted workflow, so anything resolved through
+// the item root rather than the outer run root would otherwise lose them. Only
+// the run root's gc.initiator is inherited; nothing is stamped when the run
+// carries none.
+func drainItemRootMetadata(runRoot beads.Bead) map[string]string {
+	initiator := strings.TrimSpace(runRoot.Metadata[beadmeta.InitiatorMetadataKey])
+	if initiator == "" {
+		return nil
+	}
+	return map[string]string{beadmeta.InitiatorMetadataKey: initiator}
 }
 
 func drainWorkflowExternalDeps(recipe *formula.Recipe, blockerIDs []string) []molecule.ExternalDep {
@@ -1581,21 +1601,7 @@ func drainWorkflowExternalDeps(recipe *formula.Recipe, blockerIDs []string) []mo
 }
 
 func drainItemRuntimeVars(recipe *formula.Recipe, vars map[string]string) map[string]string {
-	out := make(map[string]string, len(vars))
-	if recipe != nil {
-		for name, def := range recipe.Vars {
-			if def != nil && def.Default != nil {
-				out[name] = *def.Default
-			}
-		}
-	}
-	for key, value := range vars {
-		out[key] = value
-	}
-	if len(out) == 0 {
-		return map[string]string{}
-	}
-	return out
+	return graphv2.EffectiveRecipeRuntimeVars(recipe, vars)
 }
 
 func closeFailedDrainItemRoots(store beads.Store, controlID, itemRootKey string) error {

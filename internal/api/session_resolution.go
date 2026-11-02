@@ -500,8 +500,9 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 			return "", err
 		}
 	}
-	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), resolved.Env)
-	hints := sessionCreateHints(resolved, sessionEnv, mcpServers)
+	programStatusArm, providerEnv := sessionProgramStatus(configuredProgramStatusMode(s.state.Config()), resolved, transport)
+	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), providerEnv)
+	hints := sessionCreateHints(resolved, sessionEnv, mcpServers, programStatusArm)
 	// Route the named-session create through the worker.Handle boundary
 	// (worker-boundary migration) rather than calling session.Manager directly.
 	// SessionSpecForResolvedRuntime maps this config 1:1 onto the same
@@ -981,8 +982,15 @@ func (s *Server) deferToController(store beads.Store, id string) (*bool, string)
 		return nil, ""
 	}
 	certain := true
-	if refuser, ok := s.state.(WakeStartRefuser); ok {
-		if info, err := session.NewStore(beads.SessionStore{Store: store}).Get(id); err == nil {
+	if info, err := session.NewStore(beads.SessionStore{Store: store}).Get(id); err == nil {
+		// Resume does not change a state the controller skips: that refusal
+		// names only its own remedy, the close.
+		if refuser, ok := s.state.(UnknownStateRefuser); ok {
+			if why := refuser.UnknownStateRefusal(info); why != "" {
+				return &no, why
+			}
+		}
+		if refuser, ok := s.state.(WakeStartRefuser); ok {
 			var why string
 			if why, certain = refuser.WakeStartRefusal(info); why != "" {
 				return &no, why + "; resend with resume: true to start it now"

@@ -93,7 +93,7 @@ func TestProbeV2Readiness(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			script, _ := observePack(t, tc.handshake, nil)
-			info, missing, err := ProbeV2Readiness(context.Background(), script, 5*time.Second)
+			info, missing, err := ProbeV2Readiness(context.Background(), script, "alpha", "/cities/alpha", 5*time.Second)
 			if tc.wantErr != (err != nil) || !slices.Equal(missing, tc.missing) || info.DeclaresLocal() != tc.local {
 				t.Fatalf("ProbeV2Readiness = %+v, %v, %v; want missing %v, local %v, error %v", info, missing, err, tc.missing, tc.local, tc.wantErr)
 			}
@@ -107,11 +107,28 @@ func TestProbeV2Readiness(t *testing.T) {
 	slow, _ := observePack(t, "", nil)
 	writeScript(t, filepath.Dir(slow), `[ "$1" = protocol ] && { sleep 5 & wait $!; }; exit 2`)
 	start := time.Now()
-	if _, _, err := ProbeV2Readiness(context.Background(), slow, 200*time.Millisecond); err == nil {
+	if _, _, err := ProbeV2Readiness(context.Background(), slow, "alpha", "/cities/alpha", 200*time.Millisecond); err == nil {
 		t.Error("a probe past its timeout succeeded")
 	}
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Errorf("probe took %v, want it bounded by its timeout", elapsed)
+	}
+}
+
+// Kills: a probe that runs `protocol` without the city env the provider the
+// registry builds for the city runs it with, so a handshake scoped by city
+// answers the latch differently from the provider the latch admits.
+func TestProbeV2ReadinessRunsWithTheCityEnv(t *testing.T) {
+	script := writeScript(t, t.TempDir(), fmt.Sprintf(`
+[ "$1" = protocol ] || exit 2
+[ "$GC_EXEC_CITY_NAME" = alpha ] && [ "$GC_EXEC_CITY_PATH" = /cities/alpha ] && printf '%%s' '%s'
+exit 0
+`, readyHandshake))
+	if _, missing, err := ProbeV2Readiness(context.Background(), script, "alpha", "/cities/alpha", 5*time.Second); err != nil || missing != nil {
+		t.Fatalf("ProbeV2Readiness = %v, %v; want ready: the handshake answers only with the city env", missing, err)
+	}
+	if missing, err := NewProviderForCity(script, "alpha", "/cities/alpha").V2Readiness(); err != nil || missing != nil {
+		t.Fatalf("the city's provider: V2Readiness = %v, %v; want ready, as the probe reads it", missing, err)
 	}
 }
 

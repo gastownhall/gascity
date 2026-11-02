@@ -1539,6 +1539,69 @@ func TestResolveMailTargetsForCommand_FailsWhenStoreOpenErrors(t *testing.T) {
 	}
 }
 
+// TestMailTargetLookupFailuresPrintAndClassify pins how a failed mail target
+// lookup reads: printed after the command's name, with the gc doctor hint only
+// for a store that does not open, and classified so an API read takes the
+// local path only for a target that names no mailbox or several.
+func TestMailTargetLookupFailuresPrintAndClassify(t *testing.T) {
+	noIdentity := noMailIdentityError{candidates: []string{"gc-999", "nosuch"}}
+	for _, tc := range []struct {
+		name           string
+		err            error
+		wantStderr     string
+		wantUnresolved bool
+	}{
+		{
+			name:       "store does not open",
+			err:        mailStoreOpenError{err: errors.New("opening bead store: boom")},
+			wantStderr: "gc mail inbox: opening bead store: boom\nhint: run \"gc doctor\" for diagnostics\n",
+		},
+		{
+			name:       "store read fails",
+			err:        fmt.Errorf("listing sessions: %w", errors.New("boom")),
+			wantStderr: "gc mail inbox: listing sessions: boom\n",
+		},
+		{
+			name:           "no default identity resolves",
+			err:            noIdentity,
+			wantStderr:     "gc mail inbox: no mail identity resolved (tried [gc-999 nosuch])\n",
+			wantUnresolved: true,
+		},
+		{
+			name:           "ambiguous target",
+			err:            fmt.Errorf("%w: %q matches 2 sessions", session.ErrAmbiguous, "dup"),
+			wantStderr:     "gc mail inbox: " + session.ErrAmbiguous.Error() + ": \"dup\" matches 2 sessions\n",
+			wantUnresolved: true,
+		},
+		{
+			name:           "configured named session conflict",
+			err:            fmt.Errorf("resolving configured named session %q: %w", "boss", errNamedSessionConflict),
+			wantStderr:     "gc mail inbox: resolving configured named session \"boss\": configured named session conflict\n",
+			wantUnresolved: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			if mailTargetLookupOK(tc.err, &stderr, "gc mail inbox") {
+				t.Fatal("mailTargetLookupOK = true for a failed lookup")
+			}
+			if got := stderr.String(); got != tc.wantStderr {
+				t.Fatalf("stderr = %q, want %q", got, tc.wantStderr)
+			}
+			if got := mailTargetUnresolved(tc.err); got != tc.wantUnresolved {
+				t.Fatalf("mailTargetUnresolved = %v, want %v", got, tc.wantUnresolved)
+			}
+		})
+	}
+	if !errors.Is(noIdentity, session.ErrSessionNotFound) {
+		t.Fatal("noMailIdentityError does not match session.ErrSessionNotFound")
+	}
+	var stderr bytes.Buffer
+	if !mailTargetLookupOK(nil, &stderr, "gc mail inbox") || stderr.Len() != 0 {
+		t.Fatalf("mailTargetLookupOK(nil) = false or printed %q", stderr.String())
+	}
+}
+
 func TestConfiguredMailboxAddressDoesNotRequireProviderResolution(t *testing.T) {
 	cityPath := t.TempDir()
 	cityToml := `[workspace]
@@ -3708,6 +3771,68 @@ func TestMailSendReportsSentBeforeNudging(t *testing.T) {
 	}
 	if !strings.Contains(stdoutAtNudge, "Sent message gc-1 to mayor") {
 		t.Errorf("stdout when the nudge ran = %q, want the sent confirmation already printed", stdoutAtNudge)
+	}
+}
+
+// TestMailSendNotifyAllReportsEachSkippedWake: gc mail send --all --notify
+// and gc mail reply --notify over held recipients report each recipient's
+// held wake on its own line, while stdout keeps only the sent lines (or the
+// one --json line) and the command exits 0 with notified=true.
+func TestMailSendNotifyAllReportsEachSkippedWake(t *testing.T) {
+	c := newMailNotifyWakeCity(t, true)
+	targets := map[string]nudgeTarget{"worker": c.target, "builder": c.addSession(t, "builder")}
+	for _, target := range targets {
+		if err := c.mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, c.dir), target.sessionID, false); err != nil {
+			t.Fatalf("Suspend(%s): %v", target.alias, err)
+		}
+	}
+	nf := func(recipient, messageID string) (string, error) {
+		return sendMailNotifyWithOp(targets[recipient], c.store, c.fake, "human", messageID)
+	}
+	mp := beadmail.New(beads.NewMemStore())
+	recipients := map[string]bool{"human": true, "worker": true, "builder": true}
+
+	var stdout, stderr bytes.Buffer
+	if code := doMailSendAllJSON(mp, events.Discard, recipients, "human", []string{"standup"}, nf, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("doMailSendAllJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if want := "Sent message gc-1 to builder\nSent message gc-2 to worker\n"; stdout.String() != want {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want no nudge failure", stderr.String())
+	}
+	lines := c.notifyLines()
+	if len(lines) != 2 {
+		t.Fatalf("gc mail notify lines = %q, want one per held recipient", lines)
+	}
+	for i, name := range []string{"builder", "worker"} {
+		if !strings.Contains(lines[i], "queued for "+name) || !strings.Contains(lines[i], "held by an operator") {
+			t.Fatalf("gc mail notify line %d = %q, want %s's hold reported", i, lines[i], name)
+		}
+	}
+
+	original, err := mp.Send("worker", "human", "question", "ping")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	c.warnings.Reset()
+	stdout.Reset()
+	if code := doMailReplyJSON(mp, events.Discard, original.ID, "human", "", "pong", nf, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("doMailReplyJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if n := strings.Count(stdout.String(), "\n"); n != 1 {
+		t.Fatalf("stdout = %q, want the single --json line", stdout.String())
+	}
+	var result mailActionResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal %q: %v", stdout.String(), err)
+	}
+	if !result.Notified {
+		t.Fatalf("notified = false, want true for a queued notice; stdout: %s", stdout.String())
+	}
+	if lines := c.notifyLines(); len(lines) != 1 || !strings.Contains(lines[0], "queued for worker") || !strings.Contains(lines[0], "held by an operator") {
+		t.Fatalf("gc mail notify lines = %q, want worker's hold reported once", lines)
 	}
 }
 

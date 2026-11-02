@@ -64,7 +64,7 @@ func TestLaneTakesInventoryOnlyThroughInventoryFor(t *testing.T) {
 	backend := newScriptedInventory(map[string]runtime.InventoryEntry{"s": {Incarnation: "i", DeadKnown: true}})
 	leaf := runtime.NewFakeProfile(runtime.ProfileExec, backend)
 	l := &runtimeInventoryLane{}
-	attrs, hosts, errs := l.enrich(context.Background(), []inventoryBackend{{label: "exec", provider: leaf, names: []string{"s"}}}, []BackendPass{completeBackend("exec", "s")})
+	attrs, hosts, _, errs := l.enrich(context.Background(), []inventoryBackend{{label: "exec", provider: leaf, names: []string{"s"}}}, []BackendPass{completeBackend("exec", "s")})
 	if a, ok := attrs["s"]; !ok || !reflect.DeepEqual(a, InventoryAttrs{}) || len(errs) != 0 || hosts["s"] == nil {
 		t.Fatalf("enrich = %+v (present %v), %v; want the unsupported entry of a leaf with no inventory", a, ok, errs)
 	}
@@ -113,7 +113,7 @@ func TestLaneTakesTheBatchedProcessFact(t *testing.T) {
 	leaf := runtime.NewFakeProfile(runtime.ProfileExecV2, backend)
 	l := &runtimeInventoryLane{}
 	names := []string{"live", "quiet", "unattributed", "zombie"}
-	attrs, hosts, errs := l.enrich(context.Background(), []inventoryBackend{{label: "exec", provider: leaf, names: names}}, []BackendPass{completeBackend("exec", names...)})
+	attrs, hosts, _, errs := l.enrich(context.Background(), []inventoryBackend{{label: "exec", provider: leaf, names: names}}, []BackendPass{completeBackend("exec", names...)})
 	if len(errs) != 0 {
 		t.Fatal(errs)
 	}
@@ -162,7 +162,7 @@ func TestLaneTakesTheBatchedIdentityWithoutTheBudget(t *testing.T) {
 	l := &runtimeInventoryLane{clock: clk, interval: time.Minute, identity: map[string]inventoryIdentity{}}
 	l.envWindowAt, l.envWindowReads = clk.Now(), inventoryAttributionBudget
 	names := []string{"batched", "unread"}
-	attrs, hosts, _ := l.enrich(context.Background(), []inventoryBackend{{label: "exec", provider: leaf, names: names}}, []BackendPass{completeBackend("exec", names...)})
+	attrs, hosts, _, _ := l.enrich(context.Background(), []inventoryBackend{{label: "exec", provider: leaf, names: names}}, []BackendPass{completeBackend("exec", names...)})
 	before := backend.CountCalls("GetMeta", "batched")
 	reads, _ := l.readIdentities(context.Background(), attrs, hosts)
 	if reads != 0 {
@@ -242,12 +242,12 @@ func TestLaneTakesNoBatchedIdentityFromAnUnreadableLeaf(t *testing.T) {
 		t.Fatal("fixture: the leaf reads identity")
 	}
 	l := &runtimeInventoryLane{}
-	attrs, _, _ := l.enrich(context.Background(), []inventoryBackend{{label: "x", provider: leaf, names: []string{"s"}}}, []BackendPass{completeBackend("x", "s")})
+	attrs, _, _, _ := l.enrich(context.Background(), []inventoryBackend{{label: "x", provider: leaf, names: []string{"s"}}}, []BackendPass{completeBackend("x", "s")})
 	if attrs["s"].Identity.Known {
 		t.Fatalf("identity %+v from an unreadable leaf, want unknown", attrs["s"].Identity)
 	}
 	leaf.err = errors.New("inventory failed")
-	if attrs, _, errs := l.enrich(context.Background(), []inventoryBackend{{label: "x", provider: leaf, names: []string{"s"}}}, []BackendPass{completeBackend("x", "s")}); len(errs) != 1 || len(attrs) != 0 {
+	if attrs, _, _, errs := l.enrich(context.Background(), []inventoryBackend{{label: "x", provider: leaf, names: []string{"s"}}}, []BackendPass{completeBackend("x", "s")}); len(errs) != 1 || len(attrs) != 0 {
 		t.Fatalf("a failed inventory: attrs %+v, errs %v; want no facts and the error", attrs, errs)
 	}
 }
@@ -319,7 +319,7 @@ esac
 	listing := listInventoryBackends(sessionexec.NewSeamBacked(script), "exec")
 	backends := []BackendPass{classifyInventoryBackend(listing.leaves[0])}
 	l := &runtimeInventoryLane{}
-	attrs, _, errs := l.enrich(context.Background(), listing.leaves, backends)
+	attrs, _, _, errs := l.enrich(context.Background(), listing.leaves, backends)
 	if len(errs) != 0 || attrs["mc-a"].Incarnation != "c@t" {
 		t.Fatalf("enrich = %+v, %v; want the listing's inventory", attrs, errs)
 	}
@@ -347,7 +347,7 @@ func TestTmuxUnparsedAttachReadsUncertain(t *testing.T) {
 	backend := newScriptedInventory(map[string]runtime.InventoryEntry{"s": {Incarnation: "$1@1", DeadKnown: true}})
 	leaf := runtime.NewFakeProfile(runtime.ProfileTmux, backend)
 	l := &runtimeInventoryLane{}
-	attrs, _, errs := l.enrich(context.Background(), []inventoryBackend{{label: "tmux", provider: leaf, names: []string{"s"}}}, []BackendPass{completeBackend("tmux", "s")})
+	attrs, _, _, errs := l.enrich(context.Background(), []inventoryBackend{{label: "tmux", provider: leaf, names: []string{"s"}}}, []BackendPass{completeBackend("tmux", "s")})
 	if len(errs) != 0 || !attrs["s"].AttachUnread {
 		t.Fatalf("attrs %+v (%v): want the unparsed attachment marked unread", attrs["s"], errs)
 	}

@@ -364,20 +364,32 @@ func resolveNamedSessionBeadNamePreRefactor(beads []AwakeSessionBead, ns AwakeNa
 	if sn := findNamedSessionNamePreRefactor(beads, ns.Identity); sn != "" {
 		return sn
 	}
-	if ns.RuntimeName == "" {
-		return ""
+	if ns.RuntimeName != "" {
+		bead := findBeadBySessionName(beads, ns.RuntimeName)
+		if bead != nil && bead.ConfiguredNamedSession &&
+			(ns.Template == "" || bead.Template == ns.Template) &&
+			(bead.NamedIdentity == "" || bead.NamedIdentity == ns.Identity) {
+			return bead.SessionName
+		}
 	}
-	bead := findBeadBySessionName(beads, ns.RuntimeName)
-	if bead == nil || !bead.ConfiguredNamedSession {
-		return ""
+	// The #5957 requalification pass, mirroring resolveNamedSessionBead.
+	if bare := ns.BareIdentity; bare != "" && bare != ns.Identity {
+		sn, matches := "", 0
+		for i := range beads {
+			b := &beads[i]
+			if b.NamedIdentity != bare || !b.ConfiguredNamedSession || b.SessionName == "" {
+				continue
+			}
+			matches++
+			if matches == 1 {
+				sn = b.SessionName
+			}
+		}
+		if matches == 1 {
+			return sn
+		}
 	}
-	if ns.Template != "" && bead.Template != ns.Template {
-		return ""
-	}
-	if bead.NamedIdentity != "" && bead.NamedIdentity != ns.Identity {
-		return ""
-	}
-	return bead.SessionName
+	return ""
 }
 
 func countMinActiveCoveredPreRefactor(beads []AwakeSessionBead, desired map[string]string, template string, now time.Time) int {

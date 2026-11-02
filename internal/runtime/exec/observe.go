@@ -369,6 +369,12 @@ func freshCollision(err error) bool {
 // and not one created under the name since; anything else is left for v2's
 // commit and abandon, which decide on their own fresh read. kill-object
 // cannot serve here: its modes refuse a box whose agent lives.
+//
+// The proof and the stop are two ops, and `stop` names neither the object
+// nor the token, so a box that replaces ours between them is stopped.
+// tmux's cleanupFailedStart leaves the same window (its token read, then the
+// kill). A second observe would not close it; a stop conditioned on the
+// token or the object, which the protocol does not have, would.
 func (p *Provider) cleanupAfterFreshStartFailure(name string, cfg runtime.Config, startErr error) error {
 	if freshCollision(startErr) {
 		if errors.Is(startErr, runtime.ErrSessionExists) {

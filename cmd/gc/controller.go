@@ -1482,6 +1482,7 @@ func runController(
 	eventProv events.Provider,
 	stdout, stderr io.Writer,
 ) int {
+	markProgramShadowLongLived()
 	if heldLock == nil {
 		lock, err := acquireControllerLock(cityPath)
 		if err != nil {
@@ -1504,7 +1505,7 @@ func runController(
 
 	// doStartStandalone already refused an inadmissible mode before any init;
 	// this latch is the one whose mode the runtime runs.
-	wiring, wiringErr := newControllerWiring(cfg, reconcilerModeLookupEnv, stderr)
+	wiring, wiringErr := newStandaloneControllerWiring(cityPath, cfg, rec, stderr)
 	if wiringErr != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", wiringErr) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1539,11 +1540,6 @@ func runController(
 	defer convergence.RemoveToken(cityPath) //nolint:errcheck // best-effort cleanup
 
 	cityName := loadedCityName(cfg, cityPath)
-	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
-	telemetry.RecordControllerLifecycle(context.Background(), "started")
-	fmt.Fprintln(stdout, "Controller started.") //nolint:errcheck // best-effort stdout
-	warnBdInventoryAtControllerStart(cityPath, cfg, rec)
-
 	cr, err := newCityRuntime(wiring.runtimeParams(CityRuntimeParams{
 		CityPath:                cityPath,
 		CityName:                cityName,
@@ -1568,6 +1564,13 @@ func runController(
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// Recorded only once the runtime exists, as the supervisor does: building it
+	// built the order dispatcher, which read the event head its never-run event
+	// orders start from, so an order on controller.started sees this one.
+	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
+	telemetry.RecordControllerLifecycle(context.Background(), "started")
+	fmt.Fprintln(stdout, "Controller started.") //nolint:errcheck // best-effort stdout
+	warnBdInventoryAtControllerStart(cityPath, cfg, rec)
 
 	// Install controller-managed bead stores even when the HTTP API is
 	// disabled. Standalone runtime still needs cached city/rig stores for

@@ -33,9 +33,12 @@ func V2ProfileGaps(info runtime.ProtocolInfo) []string {
 
 // ProbeV2Readiness runs `script protocol` once under timeout, for callers
 // that hold no provider (the latch, the doctor), and returns the handshake
-// and its gaps. Nothing is cached, so an error is never remembered.
-func ProbeV2Readiness(ctx context.Context, script string, timeout time.Duration) (runtime.ProtocolInfo, []string, error) {
-	info, err := NewProvider(script).queryProtocol(ctx, timeout)
+// and its gaps. The op runs with the city env, as the provider the registry
+// builds for the city runs it (NewProviderForCity), so a handshake scoped by
+// city answers the probe as it answers that provider. Nothing is cached, so
+// an error is never remembered.
+func ProbeV2Readiness(ctx context.Context, script, cityName, cityPath string, timeout time.Duration) (runtime.ProtocolInfo, []string, error) {
+	info, err := NewProviderForCity(script, cityName, cityPath).queryProtocol(ctx, timeout)
 	if err != nil {
 		return runtime.ProtocolInfo{}, nil, err
 	}

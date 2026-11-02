@@ -92,6 +92,12 @@ type runtimeInventoryLane struct {
 	envWindowRefreshes int
 	lastSignature      string
 	alerted            map[string]time.Time
+	// captureSweptCfg is the config the last finished program-capture
+	// disarm sweep ran under (healProgramCaptures): one finished sweep per
+	// config load. captureSweep paces the sweeps of one that has not
+	// finished.
+	captureSweptCfg *config.City
+	captureSweep    captureSweepRetry
 	// poolDeathPrev holds the on_death handler names listed and not yet
 	// proven gone (detectPoolDeathEdges).
 	poolDeathPrev map[string]poolDeathSighting
@@ -361,6 +367,9 @@ func (cr *CityRuntime) runInventoryPass(ctx context.Context, reason string) {
 	if report.snapshot != nil {
 		cr.detectPoolDeaths(lane, &report)
 	}
+	if result == inventoryResultPublished {
+		cr.healProgramCaptures(lane, cfg, sp, &report)
+	}
 	finished := lane.clock.Now()
 	report.duration = finished.Sub(started)
 
@@ -401,9 +410,10 @@ func (l *runtimeInventoryLane) publish(ctx context.Context, listing inventoryLis
 	enrichCtx, cancel := context.WithTimeout(ctx, inventoryEnrichBound-reserve)
 	defer cancel()
 	phase := l.clock.Now()
-	attrs, hosts, enrichErrs := l.enrich(enrichCtx, listing.leaves, backends)
+	attrs, hosts, programs, enrichErrs := l.enrich(enrichCtx, listing.leaves, backends)
 	report.enrich = l.clock.Now().Sub(phase)
 	report.enrichErrors = enrichErrs
+	report.programs = programs
 
 	phase = l.clock.Now()
 	report.envReads, report.envBacklog = l.readIdentities(ctx, attrs, hosts)
@@ -636,10 +646,12 @@ func classifyInventoryBackend(leaf inventoryBackend) BackendPass {
 // which answers from it only the names it would probe; a batched identity is
 // kept only on a leaf whose identity is readable (readIdentities). hosts
 // maps each enriched name to its backend, for the identity read and the
-// process probe.
-func (l *runtimeInventoryLane) enrich(ctx context.Context, leaves []inventoryBackend, backends []BackendPass) (attrs map[string]InventoryAttrs, hosts map[string]runtime.Provider, errs []string) {
+// process probe; programs holds each enriched name's program-status
+// reading, for program-capture heal.
+func (l *runtimeInventoryLane) enrich(ctx context.Context, leaves []inventoryBackend, backends []BackendPass) (attrs map[string]InventoryAttrs, hosts map[string]runtime.Provider, programs map[string]runtime.ProgramStatus, errs []string) {
 	attrs = make(map[string]InventoryAttrs)
 	hosts = make(map[string]runtime.Provider)
+	programs = make(map[string]runtime.ProgramStatus)
 	claimed := make(map[string]bool)
 	for i, leaf := range leaves {
 		if backends[i].Outcome == OutcomeFailed {
@@ -697,9 +709,10 @@ func (l *runtimeInventoryLane) enrich(ctx context.Context, leaves []inventoryBac
 			}
 			attrs[name] = a
 			hosts[name] = leaf.provider
+			programs[name] = e.Program
 		}
 	}
-	return attrs, hosts, errs
+	return attrs, hosts, programs, errs
 }
 
 // readIdentities fills the identity of every enriched name on a backend
@@ -803,15 +816,31 @@ func (l *runtimeInventoryLane) readIdentities(ctx context.Context, attrs map[str
 // subprocess). Other leaves' GetMeta reaches a pod, a host or a script, so
 // their identity is never read, and stays unknown. A composite
 // ([runtime.Router]) is never a leaf: it forwards the batched read to a leaf
-// it routes to, so it is not identity-readable itself.
+// it routes to, so it is not identity-readable itself. A caller that reads
+// identity through GetMeta asks metaIdentityReadable instead.
 func identityReadable(leaf runtime.Provider) bool {
+	if metaIdentityReadable(leaf) {
+		return true
+	}
+	if _, ok := leaf.(runtime.Router); ok {
+		return false
+	}
+	observer, ok := leaf.(runtime.IdentityObserver)
+	return ok && observer.IdentityObservable()
+}
+
+// metaIdentityReadable is identityReadable without the fresh identity read:
+// a leaf whose GetMeta reads the identity env its start stamped before the
+// name is visible, from a batched environment (tmux) or a local sidecar
+// (acp, subprocess). A v2-ready exec pack is not one: `observe` reports the
+// identity its box was started with, but nothing requires its `get-meta` to
+// serve those keys, so a GetMeta read (readPendingCreateIdentity) can find
+// the pack's own box unstamped.
+func metaIdentityReadable(leaf runtime.Provider) bool {
 	if _, ok := leaf.(runtime.Router); ok {
 		return false
 	}
 	if _, ok := leaf.(runtime.EnvironmentBatchProvider); ok {
-		return true
-	}
-	if observer, ok := leaf.(runtime.IdentityObserver); ok && observer.IdentityObservable() {
 		return true
 	}
 	return localSidecar(leaf)
@@ -1324,6 +1353,10 @@ type inventoryPassReport struct {
 	// attrs is the pass's enrichment, and gone the names it proved gone.
 	attrs map[string]InventoryAttrs
 	gone  []string
+	// programs is each enriched name's program-status reading, and
+	// captureHeals what program-capture heal did with them.
+	programs     map[string]runtime.ProgramStatus
+	captureHeals programCaptureHealTally
 }
 
 // traceDue reports whether a pass is worth a trace record: a flip, a change
@@ -1336,7 +1369,7 @@ func (l *runtimeInventoryLane) traceDue(r *inventoryPassReport) bool {
 	}
 	changed := signature != l.lastSignature
 	l.lastSignature = signature
-	return changed || r.flips > 0 || len(r.alerts) > 0 || r.seq%inventoryTraceHeartbeatPasses == 0
+	return changed || r.flips > 0 || len(r.alerts) > 0 || r.captureHeals.acted() || r.seq%inventoryTraceHeartbeatPasses == 0
 }
 
 // traceInventoryPass records one pass in its own trace cycle, like an
@@ -1398,6 +1431,7 @@ func inventoryPassFields(r *inventoryPassReport) map[string]any {
 		"inventory_probe_ms":      r.processProbe.Milliseconds(),
 		"inventory_enrich_errors": strings.Join(r.enrichErrors, "; "),
 		"inventory_health_alerts": strings.Join(r.alerts, ","),
+		"inventory_capture_heals": r.captureHeals.String(),
 	}
 	if s := r.snapshot; s != nil {
 		addInventorySnapshotFields(fields, s)

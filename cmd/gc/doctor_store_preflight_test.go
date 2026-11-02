@@ -35,6 +35,7 @@ var doctorCityStoreDependentNames = []string{
 	"session-model",
 	"startup-health-episodes",
 	"ownerless-runtimes",
+	"program-status-capture",
 	"gate-sandbox-reads",
 	"custom-types:city",
 	"hold-label-conventions:city",
@@ -117,8 +118,8 @@ func TestBuildDoctorChecks_SkipsStoreChecksWhenStoreUnreachable(t *testing.T) {
 		t.Fatalf("preflight message = %q, want doltlite residual note", res.Message)
 	}
 	// Twenty-one city checks plus three per active rig, two rigs active.
-	if !strings.Contains(res.Message, "skipped 28 store checks") {
-		t.Fatalf("preflight message = %q, want skip count 28", res.Message)
+	if !strings.Contains(res.Message, "skipped 29 store checks") {
+		t.Fatalf("preflight message = %q, want skip count 29", res.Message)
 	}
 	if !strings.Contains(res.Message, "2 rigs") {
 		t.Fatalf("preflight message = %q, want rig count 2", res.Message)

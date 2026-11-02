@@ -102,16 +102,10 @@ func IsCompiledGraphWorkflow(recipe *formula.Recipe) bool {
 // GraphWorkflowRouteVars builds the route variable map by merging recipe
 // defaults with user-provided variables.
 func GraphWorkflowRouteVars(recipe *formula.Recipe, provided map[string]string) map[string]string {
-	routeVars := make(map[string]string, len(provided))
-	if recipe != nil {
-		for name, def := range recipe.Vars {
-			if def != nil && def.Default != nil {
-				routeVars[name] = *def.Default
-			}
-		}
+	if recipe == nil {
+		return formula.ApplyVarDefaults(nil, provided)
 	}
-	maps.Copy(routeVars, provided)
-	return routeVars
+	return formula.ApplyVarDefaults(recipe.Vars, provided)
 }
 
 // GraphRouteRigContext extracts the rig context (directory prefix) from

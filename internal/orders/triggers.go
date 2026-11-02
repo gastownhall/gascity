@@ -27,6 +27,10 @@ type TriggerResult struct {
 	Reason string
 	// TimedOut is true only when a condition check was killed by its check_timeout deadline.
 	TimedOut bool
+	// ReadFailed is true only when an event check could not read the event
+	// log: Due is then false because the read failed, not because no event
+	// matched.
+	ReadFailed bool
 	// LastRun is the last execution time (zero if never run).
 	LastRun time.Time
 }
@@ -478,12 +482,12 @@ func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult 
 		cursor = cursorFn(a.ScopedName())
 	}
 
-	matched, err := ep.List(events.Filter{
+	matched, err := listEventsWithInFlight(ep, events.Filter{
 		Type:     a.On,
 		AfterSeq: cursor,
 	})
 	if err != nil {
-		return TriggerResult{Due: false, Reason: fmt.Sprintf("event: read error: %v", err)}
+		return TriggerResult{Due: false, ReadFailed: true, Reason: fmt.Sprintf("event: read error: %v", err)}
 	}
 	var count int
 	for _, e := range matched {
@@ -497,6 +501,18 @@ func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult 
 		return TriggerResult{Due: false, Reason: "event: no matching events"}
 	}
 	return TriggerResult{Due: true, Reason: fmt.Sprintf("event: %d %s event(s)", count, a.On)}
+}
+
+// listEventsWithInFlight reads the events filter matches, including those
+// still stranded in an in-flight rotation file when the provider can read
+// them ([events.InFlightProvider]). A plain List misses them during an
+// archive's compression window, and a caller that moves its start past a
+// check that matched nothing would then never see them.
+func listEventsWithInFlight(ep events.Provider, filter events.Filter) ([]events.Event, error) {
+	if inFlight, ok := ep.(events.InFlightProvider); ok {
+		return inFlight.ListInFlight(filter)
+	}
+	return ep.List(filter)
 }
 
 // payloadHasLabel reports whether a JSON bead payload contains the given label.

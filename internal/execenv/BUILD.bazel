@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "execenv",
-    srcs = ["execenv.go"],
+    srcs = [
+        "execenv.go",
+        "process_env.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/execenv",
     visibility = ["//:__subpackages__"],
 )
@@ -11,6 +14,7 @@ go_test(
     name = "execenv_test",
     srcs = [
         "execenv_test.go",
+        "process_env_test.go",
         "testenv_import_test.go",
     ],
     data = glob(

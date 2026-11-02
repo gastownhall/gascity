@@ -9,15 +9,93 @@
 package acceptance_test
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
+
+// validateSessionListJSON validates out, the stdout of a
+// `gc session list --json` run, against the result schema the binary itself
+// publishes, and returns the decoded payload and which of the two renderings
+// it is: "api" iff _cache_age_s is present, "local" iff filters and summary
+// are, never both.
+func validateSessionListJSON(t *testing.T, c *helpers.City, out string) (map[string]any, string) {
+	t.Helper()
+	schemaOut, err := c.GC("session", "list", "--json-schema=result")
+	if err != nil {
+		t.Fatalf("gc session list --json-schema=result: %v\n%s", err, schemaOut)
+	}
+	schemaDoc, err := jsonschema.UnmarshalJSON(bytes.NewReader([]byte(schemaOut)))
+	if err != nil {
+		t.Fatalf("parse published schema: %v\n%s", err, schemaOut)
+	}
+	instance, err := jsonschema.UnmarshalJSON(bytes.NewReader([]byte(out)))
+	if err != nil {
+		t.Fatalf("gc session list --json output is not JSON: %v\n%s", err, out)
+	}
+	compiler := jsonschema.NewCompiler()
+	const schemaURL = "gc/session/list/result.schema.json"
+	if err := compiler.AddResource(schemaURL, schemaDoc); err != nil {
+		t.Fatalf("add schema resource: %v", err)
+	}
+	compiled, err := compiler.Compile(schemaURL)
+	if err != nil {
+		t.Fatalf("compile published schema: %v", err)
+	}
+	if err := compiled.Validate(instance); err != nil {
+		t.Fatalf("gc session list --json output does not validate against its schema: %v\n%s", err, out)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("decode gc session list --json output: %v\n%s", err, out)
+	}
+	_, hasAge := payload["_cache_age_s"]
+	_, hasFilters := payload["filters"]
+	_, hasSummary := payload["summary"]
+	switch {
+	case hasAge && !hasFilters && !hasSummary:
+		return payload, "api"
+	case !hasAge && hasFilters && hasSummary:
+		return payload, "local"
+	}
+	t.Fatalf("gc session list --json output is not exactly one rendering (_cache_age_s=%v filters=%v summary=%v)\n%s", hasAge, hasFilters, hasSummary, out)
+	return nil, ""
+}
+
+// supervisorLoopbackURL returns the base URL of the acceptance supervisor,
+// read from the supervisor.toml the test environment wrote.
+func supervisorLoopbackURL(t *testing.T) string {
+	t.Helper()
+	var cfg struct {
+		Supervisor struct {
+			Port int    `toml:"port"`
+			Bind string `toml:"bind"`
+		} `toml:"supervisor"`
+	}
+	path := filepath.Join(testEnv.Get("GC_HOME"), "supervisor.toml")
+	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if cfg.Supervisor.Port == 0 {
+		t.Fatalf("%s has no supervisor port", path)
+	}
+	bind := cfg.Supervisor.Bind
+	if bind == "" {
+		bind = "127.0.0.1"
+	}
+	return fmt.Sprintf("http://%s:%s", bind, strconv.Itoa(cfg.Supervisor.Port))
+}
 
 func TestSessionErrors(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
@@ -133,6 +211,12 @@ func TestSessionDefaultNamedSession(t *testing.T) {
 		if err != nil {
 			t.Fatalf("gc session list --json: %v\n%s", err, out)
 		}
+		// A supervisor-hosted city lists locally, so plain output is exactly
+		// the local rendering.
+		payload, rendering := validateSessionListJSON(t, c, out)
+		if rendering != "local" {
+			t.Fatalf("plain gc session list --json rendering = %s, want local\n%s", rendering, out)
+		}
 		var got struct {
 			Sessions []struct {
 				Template string        `json:"template"`
@@ -141,6 +225,9 @@ func TestSessionDefaultNamedSession(t *testing.T) {
 		}
 		if err := json.Unmarshal([]byte(out), &got); err != nil {
 			t.Fatalf("gc session list --json output is not a session list envelope: %v\n%s", err, out)
+		}
+		if payload["schema_version"] != "1" || payload["ok"] != true {
+			t.Errorf("schema_version/ok = %v/%v, want \"1\"/true\n%s", payload["schema_version"], payload["ok"], out)
 		}
 		var mayorSeen bool
 		for _, sess := range got.Sessions {
@@ -156,6 +243,33 @@ func TestSessionDefaultNamedSession(t *testing.T) {
 			case session.StateCreating, session.StateActive, session.StateAwake, session.StateAsleep:
 			default:
 				t.Errorf("session %q state = %q, want materialized lifecycle state\n%s", sess.Template, sess.State, out)
+			}
+		}
+	})
+
+	t.Run("List_JSON_LoopbackCityURL", func(t *testing.T) {
+		// A remote target is served by the supervisor API, so it prints the
+		// API rendering: _cache_age_s, and running on every row.
+		out, err := c.GC("--city-url", supervisorLoopbackURL(t), "--city-name", filepath.Base(c.Dir),
+			"session", "list", "--state", "open", "--json")
+		if err != nil {
+			t.Fatalf("gc --city-url session list --json: %v\n%s", err, out)
+		}
+		payload, rendering := validateSessionListJSON(t, c, out)
+		if rendering != "api" {
+			t.Fatalf("--city-url gc session list --json rendering = %s, want api\n%s", rendering, out)
+		}
+		if _, ok := payload["_cache_age_s"].(float64); !ok {
+			t.Fatalf("_cache_age_s = %#v, want a number\n%s", payload["_cache_age_s"], out)
+		}
+		rows, _ := payload["sessions"].([]any)
+		if len(rows) == 0 {
+			t.Fatalf("no sessions in the API rendering, want the default mayor session\n%s", out)
+		}
+		for i, r := range rows {
+			row, _ := r.(map[string]any)
+			if _, ok := row["running"].(bool); !ok {
+				t.Errorf("sessions[%d].running = %#v, want a boolean\n%s", i, row["running"], out)
 			}
 		}
 	})

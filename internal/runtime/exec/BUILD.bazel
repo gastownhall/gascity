@@ -18,6 +18,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/citylayout",
+        "//internal/execenv",
         "//internal/execgrace",
         "//internal/runtime",
         "//internal/runtime/tmux",
@@ -42,6 +43,7 @@ go_test(
         "inventory_test.go",
         "json_test.go",
         "observe_test.go",
+        "process_env_projection_test.go",
         "readiness_test.go",
         "readiness_unix_test.go",
         "seams_test.go",
@@ -50,9 +52,11 @@ go_test(
     embed = [":exec"],
     deps = [
         "//internal/citylayout",
+        "//internal/execenv",
         "//internal/runtime",
         "//internal/runtime/runtimetest",
         "//internal/testenv",
+        "//internal/testutil",
     ],
 )
 

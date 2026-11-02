@@ -19,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	"github.com/steveyegge/beads/issueops"
 )
 
 const (
@@ -1193,7 +1194,7 @@ func (b *bdIssue) toBead() Bead {
 			}
 		}
 	}
-	status, indefinitelyDeferred := normalizedBdReadState(b.Status, b.DeferUntil)
+	status, indefinitelyDeferred := normalizedBdReadState(b.Status)
 	return Bead{
 		ID:                   b.ID,
 		Title:                b.Title,
@@ -1385,12 +1386,18 @@ func isExactIDQueryable(id string) bool {
 	return true
 }
 
+// isBdClaimConflictMessage reports whether bd refused a claim because of the
+// bead's own state: another actor holds it, or its status is not claimable
+// (closed, deferred or blocked since the caller read it). bd prints the
+// latter as beads' ErrNotClaimable sentinel followed by the status, on both its
+// direct and proxied-server update paths. Either refusal wrote nothing.
 func isBdClaimConflictMessage(msg string) bool {
 	msg = strings.ToLower(msg)
 	return strings.Contains(msg, "already assigned") ||
 		strings.Contains(msg, "already claimed") ||
 		strings.Contains(msg, "claimed by") ||
-		strings.Contains(msg, "claim conflict")
+		strings.Contains(msg, "claim conflict") ||
+		strings.Contains(msg, strings.ToLower(issueops.ErrNotClaimable.Error()))
 }
 
 // mapBdStatus maps bd's statuses to Gas City's 3. bd uses: open,
@@ -1407,11 +1414,14 @@ func mapBdStatus(s string) string {
 	}
 }
 
-// normalizedBdReadState preserves bd's status-based indefinite deferral after
-// richer bd statuses collapse to Gas City's three-state model. A time-bound
-// deferral remains governed by DeferUntil so it can become ready after expiry.
-func normalizedBdReadState(status string, deferUntil *time.Time) (string, bool) {
-	return mapBdStatus(status), status == "deferred" && deferUntil == nil
+// normalizedBdReadState preserves bd's status-based deferral after richer bd
+// statuses collapse to Gas City's three-state model. bd's deferred status is a
+// deferral in its own right, dated or not: defer_until only says when bd's own
+// sweep may lift the deferral, and gc honors the lift once the store records
+// it. bd's ready query filters on the raw status, so a row the store still
+// records deferred is never served, whatever its date (#6207).
+func normalizedBdReadState(status string) (string, bool) {
+	return mapBdStatus(status), status == "deferred"
 }
 
 type optionalBool struct {
@@ -1869,9 +1879,11 @@ func isBdSQLUnsupportedInEmbeddedMode(err error) bool {
 
 // Claim atomically claims an open bead through bd update --claim.
 //
-// It returns ok=false when bd reports that another actor won the claim race.
-// The caller controls the claim actor through the store's CommandRunner
-// environment, typically BEADS_ACTOR.
+// It returns ok=false with a nil error when bd refuses the claim because of
+// the bead's own state: another actor holds it, or its status is not claimable.
+// That is the conflict verdict SQLiteStore.Claim and NativeDoltStore.Claim
+// return for the same refusals. The caller controls the claim actor through the
+// store's CommandRunner environment, typically BEADS_ACTOR.
 func (s *BdStore) Claim(id string) (Bead, bool, error) {
 	out, err := s.runBDTransientWriteOutput("update", id, "--claim", "--json")
 	if err != nil {
