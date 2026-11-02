@@ -1990,6 +1990,7 @@ go_test(
         "rig_scope_resolution_test.go",
         "root_argv_test.go",
         "route_equivalence_beads_test.go",
+        "route_equivalence_convoy_test.go",
         "route_equivalence_session_peek_test.go",
         "route_equivalence_status_test.go",
         "route_log_test.go",
