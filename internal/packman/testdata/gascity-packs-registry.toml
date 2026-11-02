@@ -1,6 +1,7 @@
 # Copy of gastownhall/gascity-packs registry.toml at 33da48cd9ec44e1de75fe598f520b9b9333ee469 (2026-10-05),
 # plus the gastown 0.1.11 and 0.1.12 and gascity 0.1.7 releases verbatim from 427c2dedce37 (2026-10-29),
 # plus the gastown 0.1.13 release verbatim from gascity-packs #596.
+# RFC8191 candidate entry retained from53037f641ed0d6bd9ec8982cd7f09e941e5f5186.
 # Refresh it when the registry publishes releases the import tests should cover.
 schema = 1
 
@@ -54,10 +55,10 @@ schema = 1
 
   [[pack.release]]
     version = "0.0.8191"
-    ref = "feat/rfc-8191-beginner-experience"
-    commit = "785f4bd6660c7d7e756bbcfcbe14cc514904434c"
-    hash = "sha256:a3c5a4e3af4a57e7a47b232f1ada5eaedb922ef9daf52140c5e601cf9046bfd6"
-    description = "RFC8191 candidate content for qualification; stable catalog selection is unchanged."
+    ref = "feat/rfc-8191-gascity-only"
+    commit = "c5aaa9fae54af7a13be6e4f5a594d7d49a58e2cb"
+    hash = "sha256:16e9f3506a21918130dcb562038dabf943d66e0520a110f3204dff8c8814a97f"
+    description = "RFC8191 qualification candidate on the original compatible module baseline; stable catalog selection is unchanged."
 
 [[pack]]
   name = "gastown"
@@ -215,20 +216,6 @@ schema = 1
     hash = "sha256:2d2255e68175b7d464845100654839a0956e8cd6fefa259e85cd03915213186b"
     description = "Ship idempotent reply-current (stops delivered-but-timed-out double-post) and mark pack scripts/tests executable to align release hash with materialized modes."
 
-  [[pack.release]]
-    version = "0.0.4"
-    ref = "main"
-    commit = "ea4066504ef753c0b4e8bcc73aea2d447c964969"
-    hash = "sha256:00d3af738603107cc507136d9ed3cb3f3e88f3f4834e88a98cd5b0564872cbb1"
-    description = "Rolls up main since 0.0.3: company rooms, per-agent and group DMs, delivery that wakes sleeping sessions, a run.sh entrypoint that rebuilds a missing adapter, thread-root context on every threaded reply, app manifests that Slack accepts on import, and gc slack status reporting unreadable sections instead of empty ones."
-
-  [[pack.release]]
-    version = "0.0.5"
-    ref = "main"
-    commit = "8e95b894d2b24c1aa9b59688e587e5914a169e47"
-    hash = "sha256:9aabd24333cd1790b3b60ef50349e2a874c07ba967433fa21caf9034fa51ea4d"
-    description = "The adapter start script builds in private per-user directories when HOME is unset, instead of shared fixed paths under TMPDIR that another local user could create first."
-
 [[pack]]
   name = "slack-channel"
   description = "Shared Slack channel routing and session identity pack for Gas City."
@@ -249,13 +236,6 @@ schema = 1
     hash = "sha256:e8da9a9dab6e6d3ce8a3cded94104a1c64d88f39130e63b09653ce3e7457dd36"
     description = "Ship idempotent reply-current (stops delivered-but-timed-out double-post) and mark schema test executable to align release hash with materialized modes."
 
-  [[pack.release]]
-    version = "0.1.2"
-    ref = "main"
-    commit = "ea4066504ef753c0b4e8bcc73aea2d447c964969"
-    hash = "sha256:a96786bd538a592dc7eb259adefc2f5d731aafc2724582133bab777a89c00e5b"
-    description = "Socket Mode transport, adapter registration retry during city startup, a checked-in run.sh that rebuilds a missing adapter binary, and install docs for the git import."
-
 [[pack]]
   name = "slack-mini"
   description = "Minimal Slack mention bridge and outbound message pack for Gas City."
@@ -269,13 +249,6 @@ schema = 1
     hash = "sha256:fff2523a9ab32e0812815c8d2addb08e6349d3885052d095bd76600eec87921a"
     description = "Initial Slack mini pack release with canonical content hash."
 
-  [[pack.release]]
-    version = "0.1.1"
-    ref = "main"
-    commit = "ea4066504ef753c0b4e8bcc73aea2d447c964969"
-    hash = "sha256:59996bf0c9dcdedf72a3f058cb13cfb421042fc4099d7beb5d03900523800324"
-    description = "Socket Mode transport for ingress-free installs, a checked-in run.sh that rebuilds a missing adapter binary, and install docs for the git import."
-
 [[pack]]
   name = "pr-pipeline"
   description = "Author-side PR discipline as a pack: planning, blast-radius mapping, outgoing-PR scorecard review, and pre-push gating (mol-pr-start / mol-pr-blast-radius / mol-pr-review / mol-pr-ship)."
@@ -288,6 +261,33 @@ schema = 1
     commit = "26614e665705b33f586c8bc41ef73592548114fd"
     hash = "sha256:92b4debf702222eb5fbb516e78ebd6397b1bdb98c67df2e542522a8faaa337fe"
     description = "Initial pr-pipeline release: four author-side formulas (mol-pr-start, mol-pr-blast-radius, mol-pr-review, mol-pr-ship) + wrapper commands."
+
+[[pack]]
+  name = "contributing"
+  description = "The external-contributor lifecycle for gastownhall/gascity — write a good issue, find priority work, plan a PR, map its blast radius, and self-review against the codebase audit. Each step produces an artifact you act on; the pack stops before pushing — opening the PR is your call. Self-contained: gas-city's actual standards (the B-rule adoption-review audit, blast-radius dimensions, test tiers) are baked into the skills; no imports."
+  source = "https://github.com/gastownhall/gascity-packs/tree/main/contributing"
+  source_kind = "git"
+
+  [[pack.release]]
+    version = "0.1.0"
+    ref = "main"
+    commit = "16f8297d4e62e143456bfbe4a00e0980a7d9400e"
+    hash = "sha256:8ee58fba7a87a2390fe707ccb593eec3f25b303782696d836d800e68992beeef"
+    description = "Initial contributing pack release."
+
+  [[pack.release]]
+    version = "0.2.0"
+    ref = "main"
+    commit = "7dd57dd9be7d286f19f74c27a00a4359392734a4"
+    hash = "sha256:3ba4ad08c81ab8d2cb9bd591a0f546435e14a9132b1d4d4745bde03d0feb94ad"
+    description = "Self-contained gas-city contributor lifecycle: drops the pr-pipeline import, bakes in the B-rule adoption-review audit, blast-radius dimensions, and test-tier strategy (7 skills, zero imports)."
+
+  [[pack.release]]
+    version = "0.2.1"
+    ref = "main"
+    commit = "5b7c5c1320ee6537f5b9c661d2e52712140320df"
+    hash = "sha256:3757a3dee523efb29e7cf1f9927c70c9bf491eba6d8416e147430aa6130702cf"
+    description = "YAML-safe skill front matter (0.2.0 had an unquoted colon that broke parsing) plus a durability pass — removes time-pinned references (PR-number citations, dated product names, build-timeout numbers, drift-prone counts) so the skills resist staleness. No behavior change."
 
 [[pack]]
   name = "oversight-rig"
@@ -394,16 +394,3 @@ schema = 1
     commit = "ffcb02933f878c7c9ac2df470338c28a5e5d829d"
     hash = "sha256:432a1f917c400a3497f1be7466e0297d108b5e2174eed4d7ae4a87579e45d2d1"
     description = "First registry release of the Cloudflare session runtime as an RPP v0 pack."
-
-[[pack]]
-  name = "contributing-to-gascity"
-  description = "The external-contributor lifecycle for gastownhall/gascity — write a good issue, find priority work, plan a PR, map its blast radius, and self-review against the codebase audit. Each step produces an artifact you act on; the pack stops before pushing — opening the PR is your call. Self-contained: gas-city's actual standards (the B-rule adoption-review audit, blast-radius dimensions, test tiers) are baked into the skills; no imports."
-  source = "https://github.com/gastownhall/gascity-packs/tree/main/contributing-to-gascity"
-  source_kind = "git"
-
-  [[pack.release]]
-    version = "0.5.0"
-    ref = "main"
-    commit = "510a4e22a34d325063fe24f77038c004221b7e7e"
-    hash = "sha256:e4d85af1e0e202e30785ac33ac12c83f26dba1cc61de22573d3ac5f8ea9e80de"
-    description = "First release under the new name; the pack was renamed from contributing. Carries everything since contributing 0.2.1: the mol-contributing-* formula set, renamed lifecycle skills with an orchestrated umbrella, default-branch resolution from the local ref, and bead commands routed through gc. Imports must switch from //contributing to //contributing-to-gascity."

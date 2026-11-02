@@ -372,6 +372,7 @@ const (
 	// the workflow DOLT_VERSION env value only. Then Beads v1.3.2 -> v1.3.3:
 	// the workflow BD_VERSION env value only. Then Beads v1.3.3 -> v1.3.4:
 	// the workflow BD_VERSION env value only.
+	// RFC8191 also retains the installed beginner qualification job.
 	expectedNightlyExecutionHash = "e2fb893fdaf435dc264f782c6569c5fb7b7ff7546c10dca92abf273f944bdb64"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,

@@ -90,9 +90,11 @@ go_test(
         "//internal/testutil",
     ] + select({
         "@rules_go//go/platform:android": [
+            "//internal/pidutil",
             "//internal/runtime/proctable",
         ],
         "@rules_go//go/platform:linux": [
+            "//internal/pidutil",
             "//internal/runtime/proctable",
         ],
         "//conditions:default": [],

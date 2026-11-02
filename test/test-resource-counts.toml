@@ -2975,6 +2975,18 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "scripts/qualify_beginner_test.go"
+resource = "net_listen"
+calls = 2
+medium = 2
+
+[[count]]
+path = "scripts/qualify_beginner_test.go"
+resource = "subprocess"
+calls = 1
+medium = 1
+
+[[count]]
 path = "scripts/rbe_worker_env_drift_test.go"
 resource = "subprocess"
 calls = 2

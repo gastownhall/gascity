@@ -8,7 +8,7 @@ require (
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/danielgtaylor/huma/v2 v2.37.3
 	github.com/fsnotify/fsnotify v1.10.1
-	github.com/gastownhall/gascity-packs v0.4.1-0.20261102051710-cc30e82bafe8
+	github.com/gastownhall/gascity-packs v0.3.1-0.20261102072632-53037f641ed0
 	github.com/go-jose/go-jose/v4 v4.1.6
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/golang-jwt/jwt/v5 v5.3.0

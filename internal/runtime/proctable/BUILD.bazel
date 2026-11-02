@@ -32,6 +32,7 @@ go_library(
         "scan_darwin_records.go",
         "scan_linux.go",
         "scan_stub.go",
+        "scan_testhooks_linux.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/proctable",
     visibility = ["//:__subpackages__"],

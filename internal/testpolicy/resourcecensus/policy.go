@@ -417,6 +417,17 @@ var bootstrapPolicy = Ledger{
 		{
 			PackageDir:      "scripts",
 			PackageName:     "scripts_test",
+			Owner:           "TestBeginnerQualifierRefusesUnsafeCandidates",
+			Resources:       []Resource{ResourceNetListen, ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the RFC8191 qualification safety proof is a checked Medium subprocess and loopback-listener owner",
+			ResourceOwner:   "the Python CLI process and two loopback-port fixtures are confined to TestBeginnerQualifierRefusesUnsafeCandidates; they prove invalid destinations, companion binaries, ports and published commands are refused before any candidate runs or existing data changes",
+			MigrationTarget: "RFC8191/P0.4b/P0.4c",
+			Expires:         "2026-12-31",
+		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
 			Owner:           "TestCacheProbes",
 			Resources:       []Resource{ResourceHTTPTestServer},
 			OwnerBead:       "ga-cp3hwi",
