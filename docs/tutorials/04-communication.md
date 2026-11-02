@@ -138,8 +138,16 @@ receive mail, pick up slung work, and drain queued nudges automatically.
 
 `gc init` wires Claude's hooks for you: it writes a managed `.gc/settings.json`
 that Claude reads on every session start. No TOML in `pack.toml` or `city.toml`
-is needed for the default behavior — `grep install_agent_hooks` in a fresh city
-turns up nothing.
+is needed for the default behavior:
+
+```shell
+~/my-city
+$ grep -rn install_agent_hooks --include='*.toml' .    # prints nothing
+
+~/my-city
+$ ls .gc/settings.json
+.gc/settings.json
+```
 
 Claude is the only provider wired automatically. To run an agent on a different
 provider — say you moved the mayor to Codex — list that provider in
