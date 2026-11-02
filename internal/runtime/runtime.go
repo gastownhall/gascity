@@ -1455,6 +1455,19 @@ type Config struct {
 	ProgramStatus ProgramStatusArm
 }
 
+// K8sSecretEnv projects a Kubernetes Secret key into a pod environment variable.
+type K8sSecretEnv struct {
+	Name   string
+	Secret string
+	Key    string
+}
+
+// K8sSecretMount projects a Kubernetes Secret into a pod filesystem path.
+type K8sSecretMount struct {
+	Secret    string
+	MountPath string
+}
+
 // OverlayProviderNames returns the effective provider overlay slots to stage for
 // cfg, preserving first-use order while skipping empty and duplicate names.
 func OverlayProviderNames(cfg Config) []string {
