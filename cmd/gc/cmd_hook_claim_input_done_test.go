@@ -867,3 +867,101 @@ func TestDoHookClaimStillClaimsWhenInputNotDone(t *testing.T) {
 		t.Fatalf("claimed = %q, want root-1", claimedID)
 	}
 }
+
+// membershipListingStore counts the convoy-child listings an evaluation
+// makes, so a row can pin the done verdict's read economy: the membership is
+// listed once, never re-scanned.
+type membershipListingStore struct {
+	beads.Store
+	childLists int
+}
+
+func (s *membershipListingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.ParentID != "" {
+		s.childLists++
+	}
+	return s.Store.List(q)
+}
+
+// TestWorkflowInputDoneListsMembershipOnceAndNeverConsultsTheAbsenceProof pins
+// the done path's economy: an input whose tracked members resolve terminal is
+// answered by ONE membership listing, with no absence scan behind it — the
+// purge verdict's proof is for the purged arm alone.
+func TestWorkflowInputDoneListsMembershipOnceAndNeverConsultsTheAbsenceProof(t *testing.T) {
+	mem, root, _ := seedDoneWorkflow(t, "closed")
+	counting := &membershipListingStore{Store: mem}
+	prove := func(ids []string) (bool, error) {
+		t.Errorf("the absence proof was consulted (%v) for an input whose members resolve terminal; the done verdict needs no absence scan", ids)
+		return false, nil
+	}
+
+	eval, err := workflowInputDone(counting, root, nil, prove)
+	if err != nil {
+		t.Fatalf("workflowInputDone: %v", err)
+	}
+	if eval.Verdict != inputVerdictDone {
+		t.Fatalf("verdict = %d for a terminal tracked member, want done", eval.Verdict)
+	}
+	if counting.childLists != 1 {
+		t.Fatalf("membership was listed %d times, want exactly once", counting.childLists)
+	}
+}
+
+// TestSkipDoneWorkflowPreservesRecordedOutcomesAndExistingMetadata pins the
+// done retirement's write shape: an already-terminal step keeps the outcome it
+// recorded, the open step and the root gain exactly the skipped disposition
+// and its close_reason, and every metadata key they carried before survives.
+func TestSkipDoneWorkflowPreservesRecordedOutcomesAndExistingMetadata(t *testing.T) {
+	store, root, step := seedDoneWorkflow(t, "closed")
+	finished, err := store.Create(beads.Bead{Title: "finished step", Assignee: "worker-old", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(finished.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadata(finished.ID, beadmeta.OutcomeMetadataKey, beadmeta.OutcomePass); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadata(step.ID, "gc.attempt", "2"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := skipDoneWorkflow(store, root.ID); err != nil {
+		t.Fatalf("skipDoneWorkflow: %v", err)
+	}
+
+	fin, err := store.Get(finished.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fin.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+		t.Errorf("the finished step's recorded outcome = %q, want %s; terminal beads keep what they recorded", fin.Metadata[beadmeta.OutcomeMetadataKey], beadmeta.OutcomePass)
+	}
+	if fin.Metadata["close_reason"] == hookSkipDoneWorkflowCloseReason {
+		t.Errorf("the finished step %s was stamped with the skip close_reason; terminal beads are not rewritten", finished.ID)
+	}
+	for _, id := range []string{root.ID, step.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if got.Status != "closed" {
+			t.Errorf("%s status = %q, want closed", id, got.Status)
+		}
+		if got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeSkipped {
+			t.Errorf("%s gc.outcome = %q, want %s", id, got.Metadata[beadmeta.OutcomeMetadataKey], beadmeta.OutcomeSkipped)
+		}
+		if got.Metadata["close_reason"] != hookSkipDoneWorkflowCloseReason {
+			t.Errorf("%s close_reason = %q, want %q", id, got.Metadata["close_reason"], hookSkipDoneWorkflowCloseReason)
+		}
+	}
+	if got, _ := store.Get(step.ID); got.Metadata["gc.attempt"] != "2" {
+		t.Errorf("the open step's pre-existing metadata was clobbered (gc.attempt = %q, want \"2\")", got.Metadata["gc.attempt"])
+	}
+	if got, _ := store.Get(root.ID); got.Metadata[beadmeta.InputConvoyIDMetadataKey] == "" {
+		t.Errorf("the root's input convoy id was clobbered by the skip close")
+	}
+}
