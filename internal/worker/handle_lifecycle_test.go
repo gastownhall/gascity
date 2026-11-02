@@ -114,6 +114,11 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			want: command + " --resume " + key,
 		},
 		{
+			name:     "a provider the probe cannot read keeps the resume",
+			provider: "legacy-provider",
+			want:     command + " --resume " + key,
+		},
+		{
 			name: "a creating row with a stale creation marker starts with the session-id flag",
 			meta: map[string]string{
 				"state": string(sessionpkg.StateCreating),
