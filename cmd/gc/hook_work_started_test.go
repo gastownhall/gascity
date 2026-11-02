@@ -1191,3 +1191,42 @@ func TestRecordWorkStartedOnPinnedBdSessionStore(t *testing.T) {
 		t.Fatalf("work_started = %q; want an entry naming work-1 at generation 7", ledger.bead.Metadata[session.WorkStartedKey])
 	}
 }
+
+// TestLegacySelfDrainAckRefusesARecordedClaim (ga-6eefx8, #8313): on a
+// legacy city whose session store has no conditional writer, a claim the
+// seat's hook handed it is recorded, so the seat's own drain-ack is refused,
+// naming the claim, and releases nothing: neither the started claim nor an
+// unstarted one it also holds. Kills the unrecorded claim the release pass
+// read as unstarted and gave back.
+func TestLegacySelfDrainAckRefusesARecordedClaim(t *testing.T) {
+	row := newLegacyStartedRow(t)
+	store := row.store.MemStore
+	claim := mustCreateDrainAckBead(t, store, beads.Bead{Title: "started step", Type: "task", Metadata: routedToWorker()}, "", "")
+	unstarted := mustCreateDrainAckBead(t, store, beads.Bead{Title: "unstarted", Type: "task", Metadata: routedToWorker()}, "in_progress", "worker-1")
+
+	l := &startedLog{}
+	ops := l.ops(`[{"id":"`+claim.ID+`","status":"open","metadata":{"gc.routed_to":"worker"}}]`, row, nil)
+	ops.Claim = func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+		status := "in_progress"
+		if err := store.Update(beadID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+			return beads.Bead{}, false, err
+		}
+		b, err := store.Get(beadID)
+		return b, true, err
+	}
+	var stderr bytes.Buffer
+	if code := doHookClaim("q", "/rig", legacyStartedOpts(), ops, &orderedWriter{l: l}, &stderr); code != 0 {
+		t.Fatalf("hand-over: code %d; stderr=%s", code, stderr.String())
+	}
+
+	stderr.Reset()
+	refusal := releaseUnexecutedClaimsForSessionStore("", servingCity("worker"), store, nil, "worker-1", drainAckCaller{}, &stderr)
+	if !strings.Contains(refusal, "this session holds "+claim.ID) {
+		t.Fatalf("refusal %q; want the seat's own ack refused, naming %s", refusal, claim.ID)
+	}
+	for _, id := range []string{claim.ID, unstarted.ID} {
+		if status, assignee := drainAckBeadStatus(t, store, id); status != "in_progress" || assignee != "worker-1" {
+			t.Fatalf("%s is %s/%q; want nothing released", id, status, assignee)
+		}
+	}
+}
