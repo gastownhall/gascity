@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // requireCompactExitCode fails the test unless compact exited with exactly
@@ -59,6 +60,11 @@ func readCompactMarkerBody(t *testing.T, path string) string {
 // compactLiveGateMarkerPath is the integrity-quarantine marker path for beads.
 func compactLiveGateMarkerPath(fixture compactScriptFixture) string {
 	return compactStateMarkerPath(fixture, "compact-quarantine")
+}
+
+// freshCompactTimestamp renders a created_at value that is fresh now.
+func freshCompactTimestamp() string {
+	return time.Now().UTC().Format("2006-01-02T15:04:05Z")
 }
 
 // TestCompactScriptRejectsInvalidLiveProbeSettings: an invalid live-probe
@@ -348,3 +354,81 @@ func TestCompactScriptLiveGateRetriesTransientProbeFailures(t *testing.T) {
 		}
 	})
 }
+
+// TestCompactScriptLiveGateCoversEveryRewriteMode: every entry path that
+// rewrites storage — --gc-only, bare GC via env, the shared-history bare GC,
+// and both pending-GC retry shapes — runs the same gate, quarantines on
+// failure, and aborts before any caller-side push or marker clearing.
+func TestCompactScriptLiveGateCoversEveryRewriteMode(t *testing.T) {
+	t.Run("shared-history bare gc", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		out, err := fixture.run(t, "live_unserved_shared_history",
+			"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+			"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
+		requireCompactExitCode(t, out, err, 1)
+		body := readCompactMarkerBody(t, compactLiveGateMarkerPath(fixture))
+		if !strings.Contains(body, "live_gate_failed_step=shared-history bare GC") {
+			t.Fatalf("shared-history bare GC must run the gate:\n%s\noutput:\n%s", body, out)
+		}
+	})
+
+	t.Run("shared-history pending-GC retry keeps its marker", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		pendingMarker := writeCompactStateMarker(t, fixture, "compact-pending-gc", strings.Join([]string{
+			"db=beads",
+			"reason=flatten succeeded but full GC failed",
+			"created_at=" + freshCompactTimestamp(),
+			"remote=origin",
+			"expected_remote_head=headcommit",
+			"expected_remote_head_verified=1",
+			"compacted_from_head=headcommit",
+			"local_branch=main",
+			"remote_branch=main",
+		}, "\n"))
+		out, err := fixture.run(t, "live_unserved_shared_history",
+			"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+			"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
+		requireCompactExitCode(t, out, err, 1)
+		body := readCompactMarkerBody(t, compactLiveGateMarkerPath(fixture))
+		if !strings.Contains(body, "live_gate_failed_step=shared-history pending-GC retry") {
+			t.Fatalf("shared-history pending-GC retry must run the gate:\n%s\noutput:\n%s", body, out)
+		}
+		if _, statErr := os.Stat(pendingMarker); statErr != nil {
+			t.Fatalf("a failed gate must not clear the pending-GC marker: %v\n%s", statErr, out)
+		}
+		if log := readCompactDoltLog(t, fixture); strings.Contains(log, "DOLT_PUSH") {
+			t.Fatalf("no push may happen after a failed gate:\n%s", log)
+		}
+	})
+
+	t.Run("pending-GC retry keeps its marker and skips the push", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		pendingMarker := writeCompactStateMarker(t, fixture, "compact-pending-gc", strings.Join([]string{
+			"db=beads",
+			"reason=flatten succeeded but full GC failed",
+			"created_at=" + freshCompactTimestamp(),
+			"compacted_from_head=headcommit",
+			"local_branch=main",
+			"remote_branch=main",
+		}, "\n"))
+		out, err := fixture.run(t, "live_unserved_after_gc",
+			"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+			"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
+		requireCompactExitCode(t, out, err, 1)
+		body := readCompactMarkerBody(t, compactLiveGateMarkerPath(fixture))
+		if !strings.Contains(body, "live_gate_failed_step=pending-GC retry") {
+			t.Fatalf("pending-GC retry must run the gate:\n%s\noutput:\n%s", body, out)
+		}
+		if _, statErr := os.Stat(pendingMarker); statErr != nil {
+			t.Fatalf("a failed gate must not clear the pending-GC marker: %v\n%s", statErr, out)
+		}
+		if log := readCompactDoltLog(t, fixture); strings.Contains(log, "DOLT_PUSH") {
+			t.Fatalf("no push may happen after a failed gate:\n%s", log)
+		}
+	})
+}
+
+// TestCompactScriptLiveGateSkipsProbingWithoutRewrite: passes that never
+// prepare a rewrite — dry runs, threshold skips, disk-critical holds, an
+// existing quarantine refusal, and a push-only pending-push retry — issue no
+// live-gate probe and keep their existing skip outcome.
