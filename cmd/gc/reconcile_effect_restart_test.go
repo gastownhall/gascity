@@ -114,6 +114,25 @@ func TestDriftDeferStep(t *testing.T) {
 	}
 }
 
+// Repro ga-2q48ek (#8345): an ordinary seat's config-drift deferral over
+// held work has no age bound and no visible signal. The seam's safety check
+// stays exactly as the repro wrote it — a seat whose drift has been deferred
+// over work for 36h still refuses causeHasWork, never a destructive drift
+// action mid-work — and the bound and the signal are the reconciliation's,
+// not the seam's: the same episode escalates once past its horizon through
+// the reconciler and the drain still waits for the work.
+func TestDriftDeferStepOrdinarySeatOverWorkIsBounded(t *testing.T) {
+	v := driftView(t, false, txFence{Work: &txWork{}})
+	key := driftKeyOf(v)
+	v = driftView(t, false, txFence{Work: &txWork{}},
+		"config_drift_deferred_key", key,
+		"config_drift_deferred_at", gatherNow.Add(-36*time.Hour).UTC().Format(time.RFC3339))
+	if step := driftDeferStep(v); step.Refuse != causeHasWork {
+		t.Fatalf("step %+v: held work fences the deferral seam at any episode age", step)
+	}
+	reconcileHeldWorkDriftEpisodeBounded(t)
+}
+
 // Kills the restart losing a resumable conversation or resuming one it
 // must not (SESS-557, legacy's resetConfiguredNamedSessionForConfigDriftInfo
 // for start-pending): a row with its key and stored hash keeps both; one

@@ -367,8 +367,19 @@ func TestReconcileSessionBeads_ConfigDriftHeldWorkDeferralIsVisible(t *testing.T
 // once — the durable config_drift_escalated_at marker counts — and the
 // escalated session.config_drift_deferred event carries the episode's own
 // start and its pending age, while the deferral itself still holds until
-// the work closes.
+// the work closes. The drift defer seam's repro runs this same regression
+// (TestDriftDeferStepOrdinarySeatOverWorkIsBounded).
 func TestReconcileSessionBeads_ConfigDriftHeldWorkDeferralEscalatesOnce(t *testing.T) {
+	reconcileHeldWorkDriftEpisodeBounded(t)
+}
+
+// reconcileHeldWorkDriftEpisodeBounded is the full reconciliation regression
+// of the held-work deferral's bound (#8345): the episode stamps on its first
+// observation, escalates exactly once past the drift_deferral_escalate_after
+// horizon — the durable config_drift_escalated_at marker counts — never
+// repeats, still defers the drain while the work stays open, and proceeds to
+// the config-drift drain once the work closes.
+func reconcileHeldWorkDriftEpisodeBounded(t *testing.T) {
 	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addRunningWorkerDesiredWithNewConfig()

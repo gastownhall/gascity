@@ -59,8 +59,9 @@ const (
 //     active already, or this incarnation's config-drift request stands as
 //     residue (driftRequestStands).
 //
-// An alive row whose drift resolved has its deferral keys cleared
-// (SESS-562), then a live drift has its session_live run again (SESS-565).
+// An alive row whose drift resolved has its deferral keys — the held-work
+// episode's escalation marker among them (#8345) — cleared (SESS-562), then
+// a live drift has its session_live run again (SESS-565).
 // A named row whose runtime reads gone has its drift repaired (SESS-566).
 func armConfigDrift(r *rowFacts) (intent, bool) {
 	e, info := r.entry, r.row.Info
@@ -76,7 +77,7 @@ func armConfigDrift(r *rowFacts) (intent, bool) {
 		return r.driftRepair(cfg, stored, core)
 	}
 	if stored == core {
-		if info.ConfigDriftDeferredAt+info.ConfigDriftDeferredKey+info.AttachedConfigDriftDeferredAt+info.AttachedConfigDriftDeferredKey != "" {
+		if info.ConfigDriftDeferredAt+info.ConfigDriftDeferredKey+info.AttachedConfigDriftDeferredAt+info.AttachedConfigDriftDeferredKey+info.ConfigDriftEscalatedAt != "" {
 			return r.heal(intentRowHeal, decideDriftResolved, session.MetadataPatch{
 				namedSessionConfigDriftDeferredAtMetadata: "", namedSessionConfigDriftDeferredKeyMetadata: "",
 				sessionAttachedConfigDriftDeferredAtMetadata: "", sessionAttachedConfigDriftDeferredKeyMetadata: "",
