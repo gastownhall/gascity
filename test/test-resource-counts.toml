@@ -633,6 +633,16 @@ resource = "subprocess"
 calls = 2
 
 [[count]]
+path = "cmd/gc/cmd_supervisor_writeauth_reload_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_supervisor_writeauth_reload_test.go"
+resource = "listener_helper"
+calls = 1
+
+[[count]]
 path = "cmd/gc/cmd_wait_partial_test.go"
 resource = "http_test_server"
 calls = 1

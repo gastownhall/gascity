@@ -109,6 +109,50 @@ public hostname in `[supervisor] allowed_hosts` or every request dies **421**.
 The standalone `gc controller` allows any host (the network front is the
 boundary), so it needs no `allowed_hosts`.
 
+**Rotating keys without a restart (supervisor only).** On a `gc supervisor`
+deployment, add, rotate, or revoke a key by editing
+`[supervisor] write_auth_verify_key` in `$GC_HOME/supervisor.toml`, then run:
+
+```bash
+gc supervisor reload
+# Reconciliation triggered.
+# write-auth keys reloaded: added [k2], removed [k1]
+```
+
+The supervisor re-reads the key list and swaps it in place; cities and their
+sessions keep running. The command prints the kids the reload added, removed,
+or replaced (a new key under an existing kid), and the supervisor log
+(`gc supervisor logs`) records the same line. `kill -HUP <supervisor pid>`
+reloads the same way but reports only to the log.
+
+A saved edit goes live at the next supervisor reload of any kind. `gc start`,
+`gc init`, `gc register`, `gc unregister`, and commands that poke a
+supervisor-managed city reload the supervisor too, so save a key edit only when
+you mean to apply it.
+
+Once a reload drops a kid, every grant it signed fails at once, including
+grants minted before the reload. To rotate with no gap:
+
+1. List the old and new keys together (`k1:<old>,k2:<new>`) and reload.
+2. Move every minter to `k2`.
+3. Wait until the grants `k1` already signed have expired: a write grant lives
+   at most 2 minutes, plus 30 seconds of clock-skew allowance.
+4. Drop `k1` and reload again.
+
+If the supervisor refuses the new list, it keeps the current keys, and
+`gc supervisor reload` prints why and exits 1. A reload refuses when:
+
+- the key list is malformed or empty, or `supervisor.toml` cannot be read;
+- the file sets a key but write-auth was off at startup (a reload cannot turn
+  write-auth on or off; restart instead);
+- the file sets a key but `GC_CITY_WRITE_PUBKEY` is set too (the env overrides
+  the file, so manage keys in one place).
+
+A reload changes only the write-auth keys: `read_auth_verify_key` and every
+other `supervisor.toml` setting take effect when the supervisor restarts. The
+standalone `gc controller` reads its key only at startup; restart it to change
+keys.
+
 ## 4. Configure the client context
 
 ```bash
