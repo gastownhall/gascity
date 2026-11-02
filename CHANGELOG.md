@@ -848,17 +848,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     new problem type `urn:gascity:error:session-inactive`, and a failed peek
     fails the request. `peek=true` without it keeps the best-effort preview.
 
-- **The work ladder only nudges a step, hourly, while its seat waits on a
-  person.** With `[daemon] work_ladder` on (the default), a claimed step whose
+- **The work ladder nudges a step only daily while its seat waits on a
+  person, and hourly when the seat's turns say its answer's turn may have
+  died.** With `[daemon] work_ladder` on (the default), a claimed step whose
   metadata `gc.awaiting_human` names the session holding it (the seat asked a
   person and waits on their decision, such as an approval asked by mail) is
-  nudged an hour after the ladder sees the wait and hourly after that, however
-  long the person takes: no recycle, no release, and none of the
-  `work.escalated` alerts its pacing would raise (`started_recycled`,
-  `started_unanswered`, `release_unfinished`). Nudges the seat cannot take
-  still count toward `nudge_refused`, and a release already in flight that
-  raced the step's start still raises `release_raced_start`. The hourly nudge
-  takes up an answer whose turn died before the seat could clear the key. The
+  never recycled or released, however long the person takes, and raises none
+  of the `work.escalated` alerts its pacing would (`started_recycled`,
+  `started_unanswered`, `release_unfinished`). While the seat's own turns show
+  its newest turn completed, the step is nudged only a day after the ladder
+  sees the wait or after its last nudge, so a wait costs a turn a day, not one
+  an hour. That daily nudge takes up an answer that started no turn of the
+  seat, which leaves the asking turn the newest: a reply from the dashboard's
+  Mail page or `POST /v0/city/{cityName}/mail/{id}/reply`, which requests no
+  recipient turn, or a `gc mail reply --notify` whose wake failed (the command
+  still exits 0). Any other reading (a turn open, the newest turn failed, was
+  canceled or ended with no status, no turn at all, turns that cannot be read)
+  keeps an hourly nudge: an hour after the ladder sees the wait or after its
+  last nudge, at once when that is already past. That nudge takes up an answer
+  whose turn died before the seat could clear the key, even one whose end was
+  never recorded: the ladder reads only a quiet seat's turns, so a turn open
+  there may have died with its CLI or stopped at a dialog the idle check
+  cannot read.
+  A seat restarted while it waits gets its agent's startup prompt or hint nudge
+  only when the agent has one, and that delivery is best effort. Nudges the
+  seat cannot take still count toward `nudge_refused`, and a release already in
+  flight that raced the step's start still raises `release_raced_start`. The
   ladder checks the key in the planner's snapshot (on the claim's own bead,
   never another store's bead with the same ID) and again in every live
   re-read before it acts (a nudge, a release, pacing carried under an
@@ -876,7 +891,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ending after a nudge the seat took, opens a rate-limit episode, kept on the
   seat's `work_ladder` cell. While it stands the seat is paced as on a
   degraded provider: nudges every 10 minutes that count toward nothing (a
-  step waiting on a person keeps its hourly nudge), and no drain, release or
+  step waiting on a person is nudged hourly while its turns are refused), and
+  no drain, release or
   escalation. Once a nudge the seat took after the episode opened is refused
   too, at least 10 minutes after the first refusal, the seat is restarted in
   place on a fresh conversation (`gc session reset`'s request), keeping its
