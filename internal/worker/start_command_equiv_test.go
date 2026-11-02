@@ -28,7 +28,7 @@ func newStartCommandHandle(t *testing.T, spec SessionSpec, resume sessionpkg.Pro
 		Title:     "Probe",
 		Command:   command,
 		WorkDir:   t.TempDir(),
-		Provider:  "legacy-provider",
+		Provider:  spec.Provider,
 		Transport: "",
 		Resume:    resume,
 	})
