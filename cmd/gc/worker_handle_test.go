@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,8 +10,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
@@ -2827,5 +2830,91 @@ func TestAttachmentHoldsClassifiesWithErrorsIs(t *testing.T) {
 				t.Fatalf("attachmentHolds error = %v, want it to wrap runtime.ErrRuntimeUnavailable", err)
 			}
 		})
+	}
+}
+
+// TestResolvedWorkerRuntimeDropsStaleResumeCommandAfterProviderSwitch is
+// #8539's consumer half: a bead reconciled from a provider that resumes by
+// command to one that resumes by flag must lose the stale resume_command,
+// because resolvedWorkerRuntimeWithConfigAndMetadata falls back to the
+// persisted resume_command when the resolved provider has none
+// (firstNonEmptyGCString(resolved.ResumeCommand, info.ResumeCommand)).
+// Pre-fix, sync left the old provider's resume_command pinned on the bead,
+// so a resume of the switched session replayed the old provider's command.
+func TestResolvedWorkerRuntimeDropsStaleResumeCommandAfterProviderSwitch(t *testing.T) {
+	cityDir := t.TempDir()
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 11, 2, 14, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	_ = sp.Start(context.TODO(), "worker", runtime.Config{Command: "/bin/echo old-chat"})
+
+	// The session starts under a codex-family wrapper that resumes by command.
+	ds := map[string]TemplateParams{
+		"worker": {
+			TemplateName: "worker",
+			Command:      "/bin/echo old-chat",
+			ResolvedProvider: &config.ResolvedProvider{
+				Name:            "old-wrap",
+				BuiltinAncestor: "codex",
+				ResumeCommand:   "old-wrap resume {{.SessionKey}}",
+			},
+		},
+	}
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	created := allSessionBeads(t, store)
+	if len(created) != 1 {
+		t.Fatalf("expected 1 bead after tick 1, got %d", len(created))
+	}
+	if created[0].Metadata["resume_command"] == "" {
+		t.Fatal("tick 1: the create path stamped no resume command")
+	}
+
+	// The agent switches to a provider that resumes by flag and carries no
+	// resume command; reconciliation refreshes the bead.
+	ds["worker"] = TemplateParams{
+		TemplateName: "worker",
+		Command:      "/bin/echo new-chat",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:        "new-cli",
+			ResumeFlag:  "--continue",
+			ResumeStyle: "flag",
+		},
+	}
+	clk.Advance(time.Minute)
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+
+	// Resolve the worker runtime from the refreshed session information the
+	// way the worker boundary does on resume.
+	sessions := session.NewStore(beads.SessionStore{Store: store})
+	info, err := sessions.Get(created[0].ID)
+	if err != nil {
+		t.Fatalf("reading refreshed session info: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", Provider: "new-cli"}},
+		Providers: map[string]config.ProviderSpec{
+			"new-cli": {Command: "/bin/echo", ResumeFlag: "--continue", ResumeStyle: "flag"},
+		},
+	}
+	rt, err := resolvedWorkerRuntimeWithConfig(cityDir, cfg, info, "")
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfig: %v", err)
+	}
+	if rt == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
+	}
+	if got := rt.Resume.ResumeCommand; strings.TrimSpace(got) != "" {
+		t.Errorf("Resume.ResumeCommand = %q, want empty: the switched provider resumes by flag and the stale old-provider command must not survive reconciliation (#8539)", got)
+	}
+	if got := rt.Resume.ResumeFlag; got != "--continue" {
+		t.Errorf("Resume.ResumeFlag = %q, want --continue", got)
+	}
+	if got := rt.Resume.ResumeStyle; got != "flag" {
+		t.Errorf("Resume.ResumeStyle = %q, want flag", got)
 	}
 }
