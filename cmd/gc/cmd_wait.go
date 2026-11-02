@@ -1194,13 +1194,34 @@ func prepareWaitWakeStateHooked(sessFront *sessionpkg.Store, dependencies waitDe
 			}
 		}
 		if epoch := wait.RegisteredEpoch; epoch != "" && sessionInfo.ContinuationEpoch != "" && epoch != sessionInfo.ContinuationEpoch {
-			if err := sessFront.CancelWait(wait.ID, now, "continuation-stale"); err != nil {
+			if !waitSurvivesContinuationReset(sessionInfo) {
+				if err := sessFront.CancelWait(wait.ID, now, "continuation-stale"); err != nil {
+					return nil, err
+				}
+				if err := clearHold(sessFront, sessionID); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			if state == waitStateReady {
+				// A reminder the old continuation already received closes as
+				// delivered rather than reaching the new one a second time.
+				done, err := finalizeReadyWaitFromNudge(sessFront, nudges, wait, now)
+				if err != nil {
+					return nil, err
+				}
+				if done {
+					if err := clearHold(sessFront, sessionID); err != nil {
+						return nil, err
+					}
+					continue
+				}
+			}
+			if err := sessFront.RearmWait(wait.ID, epoch, sessionInfo.ContinuationEpoch, now); err != nil {
 				return nil, err
 			}
-			if err := clearHold(sessFront, sessionID); err != nil {
-				return nil, err
-			}
-			continue
+			wait.RegisteredEpoch = sessionInfo.ContinuationEpoch
+			wait.NudgeID = ""
 		}
 		if sessionInfo.Closed {
 			if err := sessFront.CancelWait(wait.ID, now, "session-closed"); err != nil {
@@ -1305,6 +1326,18 @@ func clearOrphanedWaitHolds(sessFront *sessionpkg.Store, sessionBeads *sessionBe
 			log.Printf("gc wait: clearing session %s's orphaned wait hold: %v", info.ID, err)
 		}
 	}
+}
+
+// waitSurvivesContinuationReset reports whether a session's waits outlive a
+// continuation epoch bump. A configured named session keeps its identity
+// across a restart: the controller resumes the same role in a new
+// conversation, and the waits it registered are that role's durable
+// follow-ups, each carrying its own note. Those waits are re-armed at the new
+// epoch. Any other session, a closed one, and a wake_mode=fresh named session
+// that restarts per cycle by design start a continuation the old waits do not
+// belong to, so those waits are canceled as continuation-stale.
+func waitSurvivesContinuationReset(info sessionpkg.Info) bool {
+	return isNamedSessionInfo(info) && !info.Closed && strings.TrimSpace(info.WakeMode) != "fresh"
 }
 
 // lookupSessionBeadByIDInfo is the wait-diagnostic fallback that reads a single
