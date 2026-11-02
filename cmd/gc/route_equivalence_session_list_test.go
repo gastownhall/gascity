@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -123,7 +124,10 @@ func decodeSessionListDoc(t *testing.T, raw string) map[string]any {
 // route, the supervisor-hosted route (the real routing ladder into the real
 // SupervisorMux) and a remote route against one seeded city and one shared
 // runtime, and asserts the three documents are identical modulo the declared
-// API-only additive keys and the local-only redacted keys (#8453).
+// API-only additive keys and the local-only redacted keys (#8453). A filter
+// that lists closed sessions reads the supervisor-hosted city locally, so
+// that route prints the local document byte for byte, and the remote route
+// alone takes the API.
 func TestSessionListRouteEquivalence(t *testing.T) {
 	clearInheritedCityRoutingEnv(t)
 	var ids sessionListEquivalenceSeed
@@ -193,9 +197,20 @@ func TestSessionListRouteEquivalence(t *testing.T) {
 			if !strings.Contains(localErr, "route=fallback reason=escape-hatch") {
 				t.Fatalf("local stderr = %q, want the escape-hatch route line", localErr)
 			}
+			apiServed := map[string]string{}
 			hostedOut, hostedErr := runSessionListCLI(t, h.cityPath, false, args...)
-			if !strings.Contains(hostedErr, "cmd=session list route=api") {
-				t.Fatalf("supervisor-hosted stderr = %q, want cmd=session list route=api", hostedErr)
+			if session.StateFilterIncludesClosed(f.state) {
+				if !strings.Contains(hostedErr, "cmd=session list route=fallback reason="+sessionListClosedHistoryReason) {
+					t.Fatalf("supervisor-hosted stderr = %q, want the closed-history fallback", hostedErr)
+				}
+				if hostedOut != localOut {
+					t.Errorf("supervisor-hosted stdout = %s\nwant the local read's %s", hostedOut, localOut)
+				}
+			} else {
+				if !strings.Contains(hostedErr, "cmd=session list route=api") {
+					t.Fatalf("supervisor-hosted stderr = %q, want cmd=session list route=api", hostedErr)
+				}
+				apiServed["supervisor-hosted"] = hostedOut
 			}
 			var remoteOut, remoteErr bytes.Buffer
 			if code := routeSessionList("", f.state, f.template, remote, "", true, &remoteOut, &remoteErr); code != 0 {
@@ -204,6 +219,7 @@ func TestSessionListRouteEquivalence(t *testing.T) {
 			if !strings.Contains(remoteErr.String(), "route=api") {
 				t.Fatalf("remote stderr = %q, want route=api", remoteErr.String())
 			}
+			apiServed["remote"] = remoteOut.String()
 
 			local := decodeSessionListDoc(t, localOut)
 			if _, ok := local["_cache_age_s"]; ok {
@@ -216,7 +232,7 @@ func TestSessionListRouteEquivalence(t *testing.T) {
 					}
 				}
 			}
-			for name, raw := range map[string]string{"supervisor-hosted": hostedOut, "remote": remoteOut.String()} {
+			for name, raw := range apiServed {
 				doc := decodeSessionListDoc(t, raw)
 				if _, ok := doc["_cache_age_s"].(float64); !ok {
 					t.Errorf("%s: _cache_age_s = %#v, want a number", name, doc["_cache_age_s"])
@@ -250,7 +266,8 @@ func TestSessionListRouteEquivalence(t *testing.T) {
 
 // sessionListTextRoutes prints the `gc session list` table for state on the
 // local route, the supervisor-hosted route (which the caller has set up) and
-// the remote route over remote.
+// the remote route over remote. The supervisor-hosted route takes the API
+// unless state lists closed sessions, which it reads locally.
 func sessionListTextRoutes(t *testing.T, h *charHarness, remote *api.Client, state string) (local, hosted, remoteOut string) {
 	t.Helper()
 	var args []string
@@ -259,8 +276,12 @@ func sessionListTextRoutes(t *testing.T, h *charHarness, remote *api.Client, sta
 	}
 	local, _ = runSessionListCLI(t, h.cityPath, true, args...)
 	hosted, hostedErr := runSessionListCLI(t, h.cityPath, false, args...)
-	if !strings.Contains(hostedErr, "cmd=session list route=api") {
-		t.Fatalf("supervisor-hosted stderr = %q, want route=api", hostedErr)
+	wantRoute := "cmd=session list route=api"
+	if session.StateFilterIncludesClosed(state) {
+		wantRoute = "cmd=session list route=fallback reason=" + sessionListClosedHistoryReason
+	}
+	if !strings.Contains(hostedErr, wantRoute) {
+		t.Fatalf("supervisor-hosted stderr = %q, want %q", hostedErr, wantRoute)
 	}
 	var out, errOut bytes.Buffer
 	if code := routeSessionList("", state, "", remote, "", false, &out, &errOut); code != 0 {
@@ -511,6 +532,82 @@ func TestSessionListAPIRouteRefusesAPartialAnswer(t *testing.T) {
 	}
 }
 
+// TestSessionListClosedHistoryReadFailureFailsTheList pins the local read's
+// closed-history failure on the route a supervisor-hosted city's --state all
+// takes: a partial or failed listing exits 1 with the session_list_failed
+// document under --json and the message on stderr otherwise, never a list
+// that silently lacks the sessions the read could not return.
+func TestSessionListClosedHistoryReadFailureFailsTheList(t *testing.T) {
+	clearInheritedCityRoutingEnv(t)
+	h := newCharCity(t, charCityBasic+"\n[session]\nprovider = \"fake\"\n", func(t *testing.T, store beads.Store) {
+		seedSessionListEquivalence(t, store)
+	})
+	// The closed-history route never asks the API; were it asked, this
+	// client's refused connection would print another route line.
+	sessionListHostedBy(t, api.NewCityScopedClient("http://127.0.0.1:1", charCityName))
+	origHistory := listSessionHistory
+	t.Cleanup(func() { listSessionHistory = origHistory })
+
+	const prefix = "gc session list: listing sessions including closed history: "
+	for _, tc := range []struct {
+		name   string
+		read   func(front *session.Store) ([]session.Info, error)
+		detail string
+	}{
+		{
+			name: "partial",
+			read: func(front *session.Store) ([]session.Info, error) {
+				infos, err := origHistory(front)
+				if err != nil {
+					return nil, err
+				}
+				return infos, &beads.PartialResultError{Op: "bd list", Err: errors.New("skipped 1 corrupt session bead")}
+			},
+			detail: "skipped 1 corrupt session bead",
+		},
+		{
+			name:   "failed",
+			read:   func(*session.Store) ([]session.Info, error) { return nil, errors.New("store unreachable") },
+			detail: "store unreachable",
+		},
+	} {
+		listSessionHistory = tc.read
+		t.Run(tc.name+"/json", func(t *testing.T) {
+			code, stdout, stderr := runSessionListCLIExit(t, h.cityPath, false, "--state", "all", "--json")
+			if code != 1 {
+				t.Fatalf("exit = %d, want 1; stdout %q stderr %q", code, stdout, stderr)
+			}
+			if !strings.Contains(stderr, "cmd=session list route=fallback reason="+sessionListClosedHistoryReason) {
+				t.Errorf("stderr = %q, want the closed-history fallback", stderr)
+			}
+			doc := validateSessionListFailureDoc(t, stdout)
+			if _, ok := doc["sessions"]; ok {
+				t.Errorf("failure document carries sessions: %s", stdout)
+			}
+			errObj, _ := doc["error"].(map[string]any)
+			if errObj["code"] != "session_list_failed" || errObj["exit_code"] != float64(1) {
+				t.Errorf("error = %#v, want code session_list_failed exit_code 1", errObj)
+			}
+			if msg, _ := errObj["message"].(string); !strings.HasPrefix(msg, prefix) || !strings.Contains(msg, tc.detail) {
+				t.Errorf("message = %q, want %q and %q", msg, prefix, tc.detail)
+			}
+		})
+		t.Run(tc.name+"/text", func(t *testing.T) {
+			code, stdout, stderr := runSessionListCLIExit(t, h.cityPath, false, "--state", "all")
+			if code != 1 {
+				t.Fatalf("exit = %d, want 1; stdout %q stderr %q", code, stdout, stderr)
+			}
+			if stdout != "" {
+				t.Errorf("stdout = %q, want empty", stdout)
+			}
+			if !strings.Contains(stderr, "cmd=session list route=fallback reason="+sessionListClosedHistoryReason) ||
+				!strings.Contains(stderr, prefix) || !strings.Contains(stderr, tc.detail) {
+				t.Errorf("stderr = %q, want the closed-history fallback and %q with %q", stderr, prefix, tc.detail)
+			}
+		})
+	}
+}
+
 // sessionListOldServer wraps base as a supervisor that predates agent_name:
 // its GET /sessions rows carry none of the fields added since.
 func sessionListOldServer(base http.Handler) http.Handler {
@@ -586,7 +683,8 @@ func assertSessionListTablesMatch(t *testing.T, label, want, got string) {
 // of a supervisor still running a gc older than agent_name: a local target
 // reads the city directly, so it prints what GC_NO_API=1 prints; a remote
 // target, which has no local read, prints the server's rows and says what
-// they lack. A current server stays on the API route.
+// they lack. A current server stays on the API route. It lists open
+// sessions: a local target never asks the server for closed history.
 func TestSessionListOnASupervisorThatPredatesAgentName(t *testing.T) {
 	clearInheritedCityRoutingEnv(t)
 	h := newCharCity(t, charCityBasic+"\n[session]\nprovider = \"fake\"\n", func(t *testing.T, store beads.Store) {
@@ -596,7 +694,7 @@ func TestSessionListOnASupervisorThatPredatesAgentName(t *testing.T) {
 	currentHosted, _ := sessionListLanesOver(t, h, func(base http.Handler) http.Handler { return base })
 
 	for _, jsonOut := range []bool{true, false} {
-		args := []string{"--state", "all"}
+		var args []string
 		if jsonOut {
 			args = append(args, "--json")
 		}
@@ -617,7 +715,7 @@ func TestSessionListOnASupervisorThatPredatesAgentName(t *testing.T) {
 		}
 
 		var remoteOut, remoteErr bytes.Buffer
-		if code := routeSessionList("", "all", "", oldRemote, "", jsonOut, &remoteOut, &remoteErr); code != 0 {
+		if code := routeSessionList("", "", "", oldRemote, "", jsonOut, &remoteOut, &remoteErr); code != 0 {
 			t.Fatalf("%s old server, remote: exit %d; stderr %s", label, code, remoteErr.String())
 		}
 		if !strings.Contains(remoteErr.String(), "route=api") || !strings.Contains(remoteErr.String(), "predates agent_name") {
@@ -661,7 +759,10 @@ max_active_sessions = 2
 // TestSessionListTextRouteEquivalence pins the `gc session list` table on
 // every route against one seeded city: the API route prints the local
 // REASON column, wake reasons included, cell for cell. Only the text route
-// asks the server for wake reasons; --json does not.
+// asks the server for wake reasons; --json does not. --state all reads the
+// supervisor-hosted city locally, so the remote route serves the closed
+// row's cell through the API, and the open listing pins the
+// supervisor-hosted API route.
 func TestSessionListTextRouteEquivalence(t *testing.T) {
 	clearInheritedCityRoutingEnv(t)
 	ids := map[string]string{}
@@ -727,6 +828,9 @@ func TestSessionListTextRouteEquivalence(t *testing.T) {
 	}
 	assertSessionListTablesMatch(t, "supervisor-hosted", local, hostedOut)
 	assertSessionListTablesMatch(t, "remote", local, remoteOut)
+	localOpen, hostedOpen, remoteOpen := sessionListTextRoutes(t, h, remote, "")
+	assertSessionListTablesMatch(t, "supervisor-hosted open", localOpen, hostedOpen)
+	assertSessionListTablesMatch(t, "remote open", localOpen, remoteOpen)
 	mu.Lock()
 	textQueries := slices.Clone(wakeQueries)
 	wakeQueries = nil
@@ -735,7 +839,7 @@ func TestSessionListTextRouteEquivalence(t *testing.T) {
 		t.Errorf("text route wake_reasons queries = %q, want true on every request", textQueries)
 	}
 
-	runSessionListCLI(t, h.cityPath, false, "--state", "all", "--json")
+	runSessionListCLI(t, h.cityPath, false, "--json")
 	mu.Lock()
 	jsonQueries := slices.Clone(wakeQueries)
 	mu.Unlock()

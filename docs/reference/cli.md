@@ -4608,11 +4608,14 @@ For a local target the read is local when GC_NO_API is set, when no API is
 reachable, when the supervisor requires grants, when the API gives an
 answer the CLI falls back from (its cache is not live, a server error), or
 when the supervisor still runs a gc that predates agent_name on session
-rows (restart it after upgrading). A remote target never reads locally: an
-older server's rows print without agent_name, transport, worker_dir and
-wake reasons, with a note on stderr. A partial API answer fails as a
-failed local read does: exit 1 and, with --json, the session_list_failed
-error document.
+rows (restart it after upgrading). A local target also reads locally when
+the state filter lists closed sessions (--state closed, --state all): the
+API reads the city's whole session history again for every page it
+serves, where the local read reads it once. A remote target never reads
+locally: an older server's rows print without agent_name, transport,
+worker_dir and wake reasons, with a note on stderr. A partial API answer
+fails as a failed local read does: exit 1 and, with --json, the
+session_list_failed error document.
 
 The REASON column shows a session's lifecycle reason (a hold, sleep,
 quarantine or open circuit), else the reasons it is kept awake (session,

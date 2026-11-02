@@ -803,11 +803,14 @@ For a local target the read is local when GC_NO_API is set, when no API is
 reachable, when the supervisor requires grants, when the API gives an
 answer the CLI falls back from (its cache is not live, a server error), or
 when the supervisor still runs a gc that predates agent_name on session
-rows (restart it after upgrading). A remote target never reads locally: an
-older server's rows print without agent_name, transport, worker_dir and
-wake reasons, with a note on stderr. A partial API answer fails as a
-failed local read does: exit 1 and, with --json, the session_list_failed
-error document.
+rows (restart it after upgrading). A local target also reads locally when
+the state filter lists closed sessions (--state closed, --state all): the
+API reads the city's whole session history again for every page it
+serves, where the local read reads it once. A remote target never reads
+locally: an older server's rows print without agent_name, transport,
+worker_dir and wake reasons, with a note on stderr. A partial API answer
+fails as a failed local read does: exit 1 and, with --json, the
+session_list_failed error document.
 
 The REASON column shows a session's lifecycle reason (a hold, sleep,
 quarantine or open circuit), else the reasons it is kept awake (session,
@@ -829,14 +832,28 @@ config, create, attached, pin, ...), else "-", on every route.`,
 // sessionListAPIClient returns (client, "") when the API path is available,
 // or (nil, reason) when the caller should fall back. It routes as apiClient
 // does: a supervisor-hosted city lists through the supervisor API, and a
-// supervisor that requires grants sends the listing local. Both routes print
-// the same document (writeSessionListJSON).
-func sessionListAPIClient(cityPath string) (*api.Client, string) {
-	if c := apiClient(cityPath); c != nil {
-		return c, ""
+// supervisor that requires grants sends the listing local. A state filter
+// that can keep a closed session (session.StateFilterIncludesClosed) lists
+// locally wherever the API would have served it, with reason
+// sessionListClosedHistoryReason. Both routes print the same document
+// (writeSessionListJSON).
+func sessionListAPIClient(cityPath, stateFilter string) (*api.Client, string) {
+	c := apiClient(cityPath)
+	if c == nil {
+		return nil, apiClientFallbackReason(cityPath)
 	}
-	return nil, apiClientFallbackReason(cityPath)
+	if session.StateFilterIncludesClosed(stateFilter) {
+		return nil, sessionListClosedHistoryReason
+	}
+	return c, ""
 }
+
+// sessionListClosedHistoryReason is the fallback reason for a local target's
+// listing whose state filter can keep a closed session. The API serves no
+// closed row from its cache, so it reads the city's whole session history
+// from the store for every page it serves, and ListSessions walks every page
+// of up to 1000 rows. The local read reads that history once.
+const sessionListClosedHistoryReason = "session-list-closed-history"
 
 // routeSessionList dispatches `session list` to the API when
 // sessionListAPIClient resolved a client; otherwise falls back to the local
@@ -1020,10 +1037,13 @@ func sessionViewProgramStatus(ps *api.SessionProgramStatus, now time.Time) strin
 }
 
 // cmdSessionList is the CLI entry point for "gc session list". It routes
-// through the API when sessionListAPIClient resolves a client and falls back
-// to the local iterator otherwise.
+// through the API when sessionListAPIClient resolves a client for the state
+// filter and falls back to the local iterator otherwise.
 func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
-	return routeReadCmd("session list", stderr, sessionListAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
+	localClient := func(cityPath string) (*api.Client, string) {
+		return sessionListAPIClient(cityPath, stateFilter)
+	}
+	return routeReadCmd("session list", stderr, localClient, func(cityPath string, c *api.Client, nilReason string) int {
 		return routeSessionList(cityPath, stateFilter, templateFilter, c, nilReason, jsonOutput, stdout, stderr)
 	})
 }
@@ -1169,17 +1189,24 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 // sessionListInfos returns the sessions the local read lists before
 // filtering: the open snapshot, or, when the state filter asks for closed
 // sessions (session.StateFilterIncludesClosed), the full history including
-// closed beads, read once for this request as the API does. A partial read
+// closed beads (listSessionHistory), read once for this call. A partial read
 // is an error.
 func sessionListInfos(front *session.Store, snapshot *sessionBeadSnapshot, stateFilter string) ([]session.Info, error) {
 	if !session.StateFilterIncludesClosed(stateFilter) {
 		return snapshot.OpenInfos(), nil
 	}
-	infos, err := front.ListAll(session.ListAllOptions{IncludeClosed: true, Sort: beads.SortCreatedDesc})
+	infos, err := listSessionHistory(front)
 	if err != nil {
 		return nil, fmt.Errorf("listing sessions including closed history: %w", err)
 	}
 	return infos, nil
+}
+
+// listSessionHistory lists every session, closed ones included, newest
+// first. A variable so tests can fail the local read's closed-history
+// listing.
+var listSessionHistory = func(front *session.Store) ([]session.Info, error) {
+	return front.ListAll(session.ListAllOptions{IncludeClosed: true, Sort: beads.SortCreatedDesc})
 }
 
 // sessionListJSONRow is one `gc session list --json` row. Both routes print

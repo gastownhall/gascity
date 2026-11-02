@@ -173,6 +173,8 @@ func TestSessionListJSONRouteConformance(t *testing.T) {
 		{name: "escape-hatch", city: h.cityPath, escapeHatch: true, supervisor: true, pid: 4242, mode: controllerHostingSupervisor, rendering: "local", route: "route=fallback reason=escape-hatch"},
 		{name: "api-empty-list", city: h.cityPath, supervisor: true, args: []string{noMatch}, rendering: "api", empty: true, route: toAPI},
 		{name: "local-empty-list", city: h.cityPath, escapeHatch: true, supervisor: true, pid: 4242, mode: controllerHostingSupervisor, args: []string{noMatch}, rendering: "local", empty: true, route: "route=fallback reason=escape-hatch"},
+		{name: "supervisor-hosted-closed-history", city: h.cityPath, supervisor: true, pid: 4242, mode: controllerHostingSupervisor, args: []string{"--state=all"}, rendering: "local", route: "route=fallback reason=" + sessionListClosedHistoryReason},
+		{name: "standalone-with-api-port-closed-history", city: apiCity, pid: 4242, mode: controllerHostingStandalone, args: []string{"--state=closed"}, rendering: "local", empty: true, route: "route=fallback reason=" + sessionListClosedHistoryReason},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

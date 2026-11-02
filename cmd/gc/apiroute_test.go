@@ -469,11 +469,14 @@ func TestCityStatusAPIClientRoutesToSupervisor(t *testing.T) {
 }
 
 // TestSessionListAPIClientRouting covers the client gc session list resolves:
-// it routes exactly as apiClient does (#8453). A supervisor-hosted city lists
-// through the supervisor API, with or without an [api] port; a supervisor that
+// it routes as apiClient does (#8453). A supervisor-hosted city lists through
+// the supervisor API, with or without an [api] port; a supervisor that
 // requires grants, or a supervisor client that cannot be resolved, sends the
-// listing local. The supervisor client is never resolved under a grant
-// requirement or the GC_NO_API escape hatch.
+// listing local. A state filter that can keep a closed session lists locally
+// wherever the API would have served it, since the API reads the whole
+// session history again for every page; where no API serves it, the reason a
+// nil client gives stands. The supervisor client is never resolved under a
+// grant requirement or the GC_NO_API escape hatch.
 func TestSessionListAPIClientRouting(t *testing.T) {
 	sentinel := api.NewClient("http://supervisor.sentinel:1")
 	origIdentity, origSup, origGrants := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook, apiRouteSupervisorGrantsHook
@@ -488,6 +491,8 @@ func TestSessionListAPIClientRouting(t *testing.T) {
 	)
 	cases := []struct {
 		name string
+		// state is the --state filter.
+		state string
 		// escapeHatch sets GC_NO_API=1, under which nothing may be probed.
 		escapeHatch bool
 		pid         int
@@ -512,6 +517,14 @@ func TestSessionListAPIClientRouting(t *testing.T) {
 		{name: "standalone-no-api-port-lists-locally", pid: 4242, mode: controllerHostingStandalone, toml: noAPIPort, wantReason: "controller-down"},
 		{name: "controller-down-uses-supervisor", supervisor: true, toml: apiPort, want: "supervisor"},
 		{name: "escape-hatch-lists-locally", escapeHatch: true, pid: 4242, mode: controllerHostingSupervisor, toml: noAPIPort, wantReason: "escape-hatch"},
+		{name: "supervisor-hosted-all-lists-locally", state: "all", pid: 4242, mode: controllerHostingSupervisor, supervisor: true, toml: noAPIPort, wantReason: sessionListClosedHistoryReason},
+		{name: "supervisor-hosted-closed-lists-locally", state: "closed", pid: 4242, mode: controllerHostingSupervisor, supervisor: true, toml: noAPIPort, wantReason: sessionListClosedHistoryReason},
+		{name: "supervisor-hosted-active-or-closed-lists-locally", state: "active,closed", pid: 4242, mode: controllerHostingSupervisor, supervisor: true, toml: noAPIPort, wantReason: sessionListClosedHistoryReason},
+		{name: "supervisor-hosted-active-uses-supervisor", state: "active", pid: 4242, mode: controllerHostingSupervisor, supervisor: true, toml: noAPIPort, want: "supervisor"},
+		{name: "standalone-with-api-port-all-lists-locally", state: "all", pid: 4242, mode: controllerHostingStandalone, toml: apiPort, wantReason: sessionListClosedHistoryReason},
+		{name: "controller-down-closed-lists-locally", state: "closed", supervisor: true, toml: apiPort, wantReason: sessionListClosedHistoryReason},
+		{name: "supervisor-hosted-requiring-grants-all-keeps-grant-required", state: "all", pid: 4242, mode: controllerHostingSupervisor, grants: true, toml: noAPIPort, wantReason: "grant-required"},
+		{name: "escape-hatch-all-keeps-escape-hatch", state: "all", escapeHatch: true, pid: 4242, mode: controllerHostingSupervisor, toml: noAPIPort, wantReason: "escape-hatch"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -536,7 +549,7 @@ func TestSessionListAPIClientRouting(t *testing.T) {
 			}
 			apiRouteSupervisorGrantsHook = func() bool { return tc.grants }
 			dir := writeCityTOMLForRoute(t, t.TempDir(), tc.toml)
-			c, reason := sessionListAPIClient(dir)
+			c, reason := sessionListAPIClient(dir, tc.state)
 			switch tc.want {
 			case "supervisor":
 				if c != sentinel {
