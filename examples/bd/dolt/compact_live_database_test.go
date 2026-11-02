@@ -57,6 +57,15 @@ func doltLogEntries(log string) []string {
 	return entries
 }
 
+func hasDoltQuery(log, db, marker string) bool {
+	for _, entry := range doltLogEntries(log) {
+		if strings.HasPrefix(entry, "db="+db+" ") && strings.Contains(entry, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // beadsLogAfter returns the dolt log entries after the first beads query
 // containing marker, or fails when no such query exists.
 func beadsLogAfter(t *testing.T, log, marker string) string {
@@ -496,6 +505,54 @@ func TestCompactScriptLiveGateSkipsProbeWithoutRewrite(t *testing.T) {
 			if strings.Contains(out, "live-database gate") {
 				t.Fatalf("pass without a rewrite reported the live gate:\n%s", out)
 			}
+		})
+	}
+}
+
+// AC-7: a rewrite failure on a database that stays live keeps the existing
+// restore, failure reporting, and pending-marker behavior, and the run goes on.
+func TestCompactScriptLiveGateKeepsOrdinaryRewriteFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mode    string
+		rewrite string
+		check   func(t *testing.T, fixture compactScriptFixture, out string)
+	}{
+		{name: "full GC failed", mode: "gc_failure", rewrite: "DOLT_GC", check: func(t *testing.T, fixture compactScriptFixture, out string) {
+			if got := compactMarkerValue(t, beadsMarker(fixture, "compact-pending-gc"), "reason"); got != "flatten succeeded but full GC failed" {
+				t.Fatalf("pending-GC reason = %q", got)
+			}
+			if !strings.Contains(out, "DOLT_GC failed rc=45") {
+				t.Fatalf("GC failure must still be reported:\n%s", out)
+			}
+		}},
+		{name: "flatten failed", mode: "flatten_failure", rewrite: "DOLT_RESET", check: func(t *testing.T, fixture compactScriptFixture, out string) {
+			if !strings.Contains(out, "compact: db=beads already at pre-flatten HEAD=headcommit after flatten failure") {
+				t.Fatalf("flatten failure must still run the pre-flatten HEAD restore:\n%s", out)
+			}
+			if !strings.Contains(out, "db=beads flatten failed rc=44") {
+				t.Fatalf("flatten failure must still be reported:\n%s", out)
+			}
+			requireNoMarker(t, beadsMarker(fixture, "compact-pending-gc"))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			addCompactDatabases(t, fixture, "zed")
+			out, err := fixture.run(t, tc.mode, liveGateEnv()...)
+			requireFailedRun(t, err, out)
+			requireNoMarker(t, beadsMarker(fixture, "compact-quarantine"))
+			log := readCompactDoltLog(t, fixture)
+			if beadsLiveProbes(beadsLogAfter(t, log, tc.rewrite)) != 1 {
+				t.Fatalf("a failed rewrite must still pass through one live probe:\n%s", log)
+			}
+			if !hasDoltQuery(log, "zed", tc.rewrite) {
+				t.Fatalf("ordinary failure must not stop later databases:\n%s", log)
+			}
+			if !strings.Contains(out, "compact: 2 database(s) failed compaction") {
+				t.Fatalf("failure summary changed:\n%s", out)
+			}
+			tc.check(t, fixture, out)
 		})
 	}
 }
