@@ -1877,10 +1877,11 @@ func TestHandleOrderCheckIgnoresAForgedRunLabel(t *testing.T) {
 }
 
 // TestHandleOrderHistoryCreatedAtKeepsSubSecondPrecision pins that each
-// entry's created_at carries the run bead's full creation time. gc order
-// history --json prints created_at with sub-second precision on its local
-// route, so the API route can print the same value only when the wire keeps
-// it (#8453).
+// entry's created_at, and the run detail's, carries the run bead's full
+// creation time. gc order history --json prints created_at with sub-second
+// precision on its local route, so the API route can print the same value
+// only when the wire keeps it (#8453), and a client joining list rows to
+// detail rows sees one time per run.
 func TestHandleOrderHistoryCreatedAtKeepsSubSecondPrecision(t *testing.T) {
 	fs := newFakeState(t)
 	fs.cityBeadStore = beads.NewMemStore()
@@ -1921,7 +1922,24 @@ func TestHandleOrderHistoryCreatedAtKeepsSubSecondPrecision(t *testing.T) {
 	if len(resp.Entries) != 1 {
 		t.Fatalf("len(entries) = %d, want 1; body = %s", len(resp.Entries), w.Body.String())
 	}
-	if want := stored.CreatedAt.Format(time.RFC3339Nano); resp.Entries[0].CreatedAt != want {
+	want := stored.CreatedAt.Format(time.RFC3339Nano)
+	if resp.Entries[0].CreatedAt != want {
 		t.Fatalf("created_at = %q, want %q", resp.Entries[0].CreatedAt, want)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, cityURL(fs, "/order/history/"+run.ID), nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("detail status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var detail struct {
+		CreatedAt string `json:"created_at"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("unmarshal detail: %v", err)
+	}
+	if detail.CreatedAt != want {
+		t.Fatalf("detail created_at = %q, want %q, the list entry's", detail.CreatedAt, want)
 	}
 }

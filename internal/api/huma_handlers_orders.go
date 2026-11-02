@@ -426,7 +426,7 @@ func (s *Server) humaHandleOrderHistoryDetail(_ context.Context, input *OrderHis
 	}{Body: orderHistoryDetailResponse{
 		BeadID:    b.ID,
 		StoreRef:  result.storeRef,
-		CreatedAt: b.CreatedAt.Format(time.RFC3339),
+		CreatedAt: b.CreatedAt.Format(time.RFC3339Nano),
 		Labels:    b.Labels,
 		Output:    output,
 	}}, nil

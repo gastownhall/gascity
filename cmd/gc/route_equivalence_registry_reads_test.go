@@ -8,10 +8,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/chartest"
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 // Route-equivalence tests for the routed reads that predate #8453 and had no
@@ -194,8 +196,13 @@ func TestWaitInspectRouteEquivalence(t *testing.T) {
 	}
 }
 
+// TestOrderHistoryRouteEquivalence compares both output modes. The store
+// stamps each run to the nanosecond, so the human table also proves the API
+// route prints EXECUTED in whole seconds, as the local route does, while
+// --json keeps the full created_at on both.
 func TestOrderHistoryRouteEquivalence(t *testing.T) {
 	clearInheritedBeadsEnv(t)
+	subSecond := false
 	h := newCharCity(t, charCityBasic, func(t *testing.T, store beads.Store) {
 		for i, closed := range []bool{true, false, true} {
 			b, err := store.Create(beads.Bead{
@@ -206,6 +213,7 @@ func TestOrderHistoryRouteEquivalence(t *testing.T) {
 			if err != nil {
 				t.Fatalf("seed order run: %v", err)
 			}
+			subSecond = subSecond || b.CreatedAt.Nanosecond() != 0
 			if closed {
 				if err := store.Close(b.ID); err != nil {
 					t.Fatalf("close order run: %v", err)
@@ -213,6 +221,9 @@ func TestOrderHistoryRouteEquivalence(t *testing.T) {
 			}
 		}
 	})
+	if !subSecond {
+		t.Fatal("no seeded run has a sub-second creation time; the timestamp comparison needs one")
+	}
 	writeRouteEquivalenceOrder(t, h.cityPath)
 	cfg, err := loadCityConfig(h.cityPath, io.Discard)
 	if err != nil {
@@ -224,13 +235,56 @@ func TestOrderHistoryRouteEquivalence(t *testing.T) {
 	}
 	client := registryReadsAPIClient(t, h)
 	for _, limit := range []int{1, 10} {
-		t.Run(fmt.Sprintf("limit %d", limit), func(t *testing.T) {
-			local, viaAPI := runBothRoutes(t, "order history", client, func(c *api.Client, nilReason string, stdout, stderr io.Writer) int {
-				return routeOrderHistory(h.cityPath, cfg, "digest", "", aa, c, nilReason, orderHistoryBounds{Limit: limit}, true, stdout, stderr)
+		for _, jsonOut := range []bool{false, true} {
+			t.Run(fmt.Sprintf("limit %d/json=%t", limit, jsonOut), func(t *testing.T) {
+				local, viaAPI := runBothRoutes(t, "order history", client, func(c *api.Client, nilReason string, stdout, stderr io.Writer) int {
+					return routeOrderHistory(h.cityPath, cfg, "digest", "", aa, c, nilReason, orderHistoryBounds{Limit: limit}, jsonOut, stdout, stderr)
+				})
+				if jsonOut {
+					assertRouteEquivalentJSONModulo(t, []string{"order", "history"}, local, viaAPI, nil)
+				} else {
+					viaAPI = []byte(peekRouteDropCacheFooter(string(viaAPI)))
+				}
+				if !bytes.Equal(local, viaAPI) {
+					t.Fatalf("order history bytes differ (row order or encoding):\nlocal: %s\napi:   %s", local, viaAPI)
+				}
 			})
-			assertRouteEquivalentJSONModulo(t, []string{"order", "history"}, local, viaAPI, nil)
-			if !bytes.Equal(local, viaAPI) {
-				t.Fatalf("order history bytes differ (row order or encoding):\nlocal: %s\napi:   %s", local, viaAPI)
+		}
+	}
+}
+
+// TestRenderOrderHistoryFromAPIPrintsTheLocalTable gives the API renderer the
+// wire form of a store's runs and requires the local route's table for each
+// order, with and without the RIG column: the wire carries created_at to the
+// nanosecond, and both tables print EXECUTED in whole seconds.
+func TestRenderOrderHistoryFromAPIPrintsTheLocalTable(t *testing.T) {
+	created := time.Date(2026, 11, 1, 12, 30, 45, 123456789, time.UTC)
+	cityRun := beads.Bead{ID: "gc-1", Title: "digest run", Status: "closed", Labels: []string{"order-run:digest"}, CreatedAt: created}
+	rigRun := beads.Bead{ID: "gc-2", Title: "lint run", Status: "closed", Labels: []string{"order-run:lint:rig:frontend"}, CreatedAt: created.Add(time.Minute)}
+	store := beads.OrdersStore{Store: beads.NewMemStoreFrom(2, []beads.Bead{cityRun, rigRun}, nil)}
+	aa := []orders.Order{{Name: "digest"}, {Name: "lint", Rig: "frontend"}}
+	for i, run := range []beads.Bead{cityRun, rigRun} {
+		order := aa[i]
+		t.Run(order.ScopedName(), func(t *testing.T) {
+			var local, viaAPI, stderr bytes.Buffer
+			if code := doOrderHistory(order.Name, order.Rig, aa, store, &local); code != 0 {
+				t.Fatalf("local route exit = %d", code)
+			}
+			wire := api.CachedRead[[]api.OrderHistoryView]{Body: []api.OrderHistoryView{{
+				BeadID:     run.ID,
+				Name:       order.Name,
+				ScopedName: order.ScopedName(),
+				Rig:        order.Rig,
+				CreatedAt:  run.CreatedAt.Format(time.RFC3339Nano),
+			}}}
+			if code := renderOrderHistoryFromAPI(wire, order.Name, order.Rig, orderHistoryBounds{}, false, &viaAPI, &stderr); code != 0 {
+				t.Fatalf("API render exit = %d, stderr=%q", code, stderr.String())
+			}
+			if !strings.Contains(local.String(), run.ID) {
+				t.Fatalf("local table has no row for run %s:\n%s", run.ID, local.String())
+			}
+			if viaAPI.String() != local.String() {
+				t.Fatalf("API table differs from the local table:\nlocal: %q\napi:   %q", local.String(), viaAPI.String())
 			}
 		})
 	}
