@@ -675,8 +675,10 @@ func TestRouteNotificationDeferredRouteWaits(t *testing.T) {
 	f.write("state/nudge-on-route-delivery.json", `{"version":1,"cursor":1,"pending":{},"notified":{},"retry":{}}`, 0o600)
 	f.write("beads", `[{"id":"test-work","status":"open","assignee":"","metadata":{"gc.routed_to":"worker"}}]`, 0o600)
 	f.write("blocked", "", 0o600)
-	f.bus.Record(events.Event{Type: "bead.updated", Subject: "test-work",
-		Payload: json.RawMessage(`{"id":"test-work","status":"deferred","assignee":"","metadata":{"gc.routed_to":"worker"}}`)})
+	f.bus.Record(events.Event{
+		Type: "bead.updated", Subject: "test-work",
+		Payload: json.RawMessage(`{"id":"test-work","status":"deferred","assignee":"","metadata":{"gc.routed_to":"worker"}}`),
+	})
 	f.syncEvents()
 	if !f.due() {
 		t.Fatal("a deferred route did not schedule a run")
@@ -716,8 +718,10 @@ func TestRouteNotificationDeferralRenotifiesNotifiedWork(t *testing.T) {
 		t.Fatalf("routed work = %q", got)
 	}
 	f.write("blocked", "", 0o600)
-	f.bus.Record(events.Event{Type: "bead.updated", Subject: "test-work",
-		Payload: json.RawMessage(`{"id":"test-work","status":"deferred","assignee":"","metadata":{"gc.routed_to":"worker"}}`)})
+	f.bus.Record(events.Event{
+		Type: "bead.updated", Subject: "test-work",
+		Payload: json.RawMessage(`{"id":"test-work","status":"deferred","assignee":"","metadata":{"gc.routed_to":"worker"}}`),
+	})
 	f.syncEvents()
 	if err := f.run(); err != nil {
 		t.Fatal(err)
@@ -782,8 +786,10 @@ func TestRouteNotificationBlockedRoutesDoNotStarveReadyWork(t *testing.T) {
 	}
 	rows = append(rows, `{"id":"ready-work","status":"open","assignee":"","metadata":{"gc.routed_to":"worker"}}`)
 	f.write("beads", "["+strings.Join(rows, ",")+"]", 0o600)
-	state, err := json.Marshal(map[string]any{"version": 1, "cursor": 1, "pending": pending,
-		"notified": map[string]any{}, "retry": retry, "observed": map[string]any{}})
+	state, err := json.Marshal(map[string]any{
+		"version": 1, "cursor": 1, "pending": pending,
+		"notified": map[string]any{}, "retry": retry, "observed": map[string]any{},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
