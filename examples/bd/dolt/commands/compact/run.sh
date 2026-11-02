@@ -54,6 +54,14 @@
 #      content diff is added-only; anything else quarantines.
 #   5. Run CALL DOLT_GC('--full', '--archive-level=0') to reclaim chunks orphaned
 #      by the flatten.
+#   6. Live-database gate: every pass that reached a storage-rewriting step
+#      (flatten, full GC, bare GC) ends by proving the database is still
+#      live — its <data_dir>/<db>/.dolt entry, present before the rewrite,
+#      must still be present and the server must still serve the name with a
+#      resolvable HEAD. A database that fails the gate is quarantined with
+#      reason "live database unavailable after compaction" and the run stops
+#      before touching any further database. The compactor never restores a
+#      database itself; see "Live-database gate" in commands/compact/help.md.
 #
 # Remote push failures are recorded in compact-pending-push markers and do not
 # fail local compaction. Later runs retry those markers before threshold skips,
@@ -174,6 +182,13 @@
 #                                         NOT write pending-GC /
 #                                         pending-push markers (those are
 #                                         flatten-remediation state).
+#   GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS
+#     (default: 3) — attempts for the live-database gate's served-HEAD probe
+#                     after each storage-rewriting step. Must be a positive
+#                     integer.
+#   GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS
+#     (default: 2) — seconds between live-database probe attempts. Must be a
+#                     non-negative integer.
 set -eu
 
 : "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
@@ -490,6 +505,35 @@ case "$compact_remote" in
     exit 2
     ;;
 esac
+
+# Live-database gate bounds. Validated before the compaction lock so an invalid
+# knob refuses the run before any database statement, matching the other
+# GC_DOLT_COMPACT_* knobs above.
+live_probe_attempts="${GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS:-3}"
+live_probe_delay_secs="${GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS:-2}"
+case "$live_probe_attempts" in
+  ''|*[!0-9]*|0)
+    printf 'compact: invalid GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=%s (must be a positive integer)\n' \
+      "$live_probe_attempts" >&2
+    exit 2
+    ;;
+esac
+case "$live_probe_delay_secs" in
+  ''|*[!0-9]*)
+    printf 'compact: invalid GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=%s (must be a non-negative integer)\n' \
+      "$live_probe_delay_secs" >&2
+    exit 2
+    ;;
+esac
+
+# The gate's served-HEAD probe runs after a rewrite, so a wedged server must
+# not hold the gate open for a whole GC_DOLT_COMPACT_CALL_TIMEOUT_SECS
+# statement budget: the probe is bounded by 30s, or the call timeout when it
+# is lower.
+live_probe_timeout=30
+if [ "$call_timeout" -lt 30 ]; then
+  live_probe_timeout="$call_timeout"
+fi
 
 # Cross-city flock keyed on host:port so concurrent compactions on the
 # same Dolt server don't interleave. Compaction holds open transactions
@@ -2229,7 +2273,7 @@ print_existing_quarantine_marker() {
   reason="$3"
   created_at="$4"
 
-  printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s%s%s%s%s%s%s%s — manual intervention required before compaction or GC\n' \
+  printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s — manual intervention required before compaction or GC\n' \
     "$db" "$marker" "${reason:-<unknown>}" "${created_at:-<unknown>}" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" integrity_table_drift)" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" database_value_hash_drift)" \
@@ -2237,7 +2281,19 @@ print_existing_quarantine_marker() {
     "$(compact_marker_summary_value "$quarantine_dir" "$db" flatten_pre_reset_head)" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" flatten_head)" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" flatten_post_verify_head)" \
+    "$(compact_marker_summary_value "$quarantine_dir" "$db" live_gate_steps)" \
+    "$(compact_marker_summary_value "$quarantine_dir" "$db" live_gate_failed_step)" \
+    "$(compact_marker_summary_value "$quarantine_dir" "$db" live_gate_probe_failure)" \
+    "$(compact_marker_summary_value "$quarantine_dir" "$db" live_gate_probe_head_after)" \
+    "$(compact_marker_summary_value "$quarantine_dir" "$db" live_gate_data_dir)" \
+    "$(compact_marker_summary_value "$quarantine_dir" "$db" live_gate_data_dir_present_after)" \
+    "$(compact_marker_summary_value "$quarantine_dir" "$db" live_gate_pre_compaction_head)" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" decision)" >&2
+  if [ "$reason" = "live database unavailable after compaction" ]; then
+    printf 'compact: db=%s live-database quarantine recovery: the compactor never restores databases; restore or re-establish the intended database (marker records its data_dir and pre-compaction HEAD), verify the server serves its name with a resolvable HEAD and healthy bead data, then remove %s and rerun gc dolt compact --gc-only --only-db %s --dry-run before the real reclaim (see docs/troubleshooting/dolt-bloat-recovery.md "Live-database gate")\n' \
+      "$db" "$marker" "$db" >&2
+    return 0
+  fi
   printf 'compact: db=%s quarantine recovery: keep marker unless git status is clean, the Dolt server is reachable, live bead queries are healthy, and marker diff/hash evidence proves no data loss; then remove %s and rerun gc dolt compact --gc-only --only-db %s\n' \
     "$db" "$marker" "$db" >&2
 }
@@ -2460,6 +2516,269 @@ explain_full_gc_cancellation() {
     "$db" "$gc_server" "$gc_elapsed" "$gc_ceiling" "$gc_server_config" "$gc_remedy" >&2
 }
 
+# --- Live-database gate -------------------------------------------------
+# A flatten or DOLT_GC rewrites a live database's storage under a running
+# sql-server. When the rewrite leaves the database out of the data dir, or the
+# server stops serving its name, every client fails until an operator
+# restores the database, so a pass that reached a storage-rewriting step ends
+# by proving the database is still live before the run touches anything
+# else. The gate is evidence, not recovery: the compactor never restores a
+# database itself.
+#
+# Gate state lives in live_gate_* globals. The helpers below share one shell
+# with helpers that overwrite db, head, and start, so every variable here is
+# live_gate_* or helper-prefixed, and the functions that update gate state
+# (arm_live_gate, check_live_gate) must run in the current shell — never
+# inside a pipeline or a command substitution, where their writes would be
+# lost.
+live_gate_armed=0
+live_gate_failed=0
+live_gate_db=""
+live_gate_steps=""
+live_gate_failed_step=""
+live_gate_probe_failure=""
+live_gate_probe_head=""
+live_gate_dir_path=""
+live_gate_dir_present_before=0
+live_gate_dir_present_after=0
+live_gate_pre_head=""
+
+reset_live_gate_state() {
+  live_gate_armed=0
+  live_gate_failed=0
+  live_gate_db=""
+  live_gate_steps=""
+  live_gate_failed_step=""
+  live_gate_probe_failure=""
+  live_gate_probe_head=""
+  live_gate_dir_path=""
+  live_gate_dir_present_before=0
+  live_gate_dir_present_after=0
+  live_gate_pre_head=""
+}
+
+# live_probe_once DB — one bounded served-HEAD probe: SELECT
+# CONCAT(DATABASE(), ':', HASHOF('HEAD')) through the same connection args
+# dolt_query uses. Prints the single tabular cell on success and a short
+# one-line diagnostic on stderr on failure. The bound is the live-probe
+# timeout (30s or GC_DOLT_COMPACT_CALL_TIMEOUT_SECS when lower), not the
+# statement budget a reclaim gets: this probe runs after a rewrite, and a
+# wedged server must not hold the gate open for half an hour.
+live_probe_once() {
+  _lpo_db="$1"
+  _lpo_out=$(mktemp)
+  _lpo_err=$(mktemp)
+  _lpo_rc=0
+  export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
+  run_bounded "$live_probe_timeout" \
+    dolt --host "$host" --port "$GC_DOLT_PORT" \
+    --user "$GC_DOLT_USER" --no-tls \
+    --use-db "$_lpo_db" \
+    sql -r tabular -q "SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))" \
+    > "$_lpo_out" 2>"$_lpo_err" || _lpo_rc=$?
+  if [ "$_lpo_rc" -ne 0 ]; then
+    _lpo_detail=""
+    if [ -s "$_lpo_err" ]; then
+      _lpo_detail=" $(tr '\n' ' ' < "$_lpo_err" | sed 's/^ *//;s/ *$//' | cut -c1-160)"
+    fi
+    printf 'served-HEAD probe failed rc=%s%s' "$_lpo_rc" "$_lpo_detail" >&2
+    rm -f "$_lpo_out" "$_lpo_err"
+    return 1
+  fi
+  _lpo_cell=$(awk 'NR==4 {gsub(/[| ]/, ""); print; exit}' "$_lpo_out" || true)
+  rm -f "$_lpo_out" "$_lpo_err"
+  if [ -z "$_lpo_cell" ]; then
+    printf 'served-HEAD probe returned no value\n' >&2
+    return 1
+  fi
+  printf '%s\n' "$_lpo_cell"
+}
+
+# live_gate_probe DB — the gate's served-HEAD probe with its retry budget:
+# up to GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS attempts, sleeping
+# GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS between attempts (never after the
+# last). A probe passes when the single cell names the requested database
+# (case-insensitively — Dolt keeps database names case-insensitive but the
+# data-dir entry need not match the served case) with a nonempty alphanumeric
+# HEAD. HEAD equality with the baseline is NOT required: a concurrent writer
+# or the flatten itself legitimately moves it between probes.
+# Returns 0 and records live_gate_probe_head on success; returns 1 and
+# records the last failure in live_gate_probe_failure (one line) on failure.
+live_gate_probe() {
+  _lgp_db="$1"
+  _lgp_attempt=1
+  _lgp_failure=""
+  while :; do
+    _lgp_err_tmp=$(mktemp)
+    _lgp_probe_ok=0
+    if _lgp_cell=$(live_probe_once "$_lgp_db" 2>"$_lgp_err_tmp"); then
+      _lgp_probe_ok=1
+    fi
+    if [ "$_lgp_probe_ok" = "1" ]; then
+      _lgp_db_part=${_lgp_cell%%:*}
+      _lgp_head_part=${_lgp_cell#*:}
+      _lgp_valid=0
+      if [ "$_lgp_db_part" != "$_lgp_cell" ] && \
+         [ "$(printf '%s' "$_lgp_db_part" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$_lgp_db" | tr '[:upper:]' '[:lower:]')" ] && \
+         [ -n "$_lgp_head_part" ]; then
+        case "$_lgp_head_part" in
+          *[!A-Za-z0-9]*)
+            ;;
+          *)
+            _lgp_valid=1
+            ;;
+        esac
+      fi
+      if [ "$_lgp_valid" = "1" ]; then
+        rm -f "$_lgp_err_tmp"
+        live_gate_probe_head="$_lgp_head_part"
+        live_gate_probe_failure=""
+        if [ "$_lgp_attempt" -gt 1 ]; then
+          printf 'compact: db=%s live-database probe recovered on attempt %s/%s — service is back\n' \
+            "$_lgp_db" "$_lgp_attempt" "$live_probe_attempts"
+        fi
+        return 0
+      fi
+      _lgp_failure="malformed probe response: $_lgp_cell"
+    else
+      _lgp_failure=$(tr '\n' ' ' < "$_lgp_err_tmp" | sed 's/^ *//;s/ *$//' | cut -c1-200)
+      if [ -z "$_lgp_failure" ]; then
+        _lgp_failure="served-HEAD probe failed"
+      fi
+    fi
+    rm -f "$_lgp_err_tmp"
+    if [ "$_lgp_attempt" -ge "$live_probe_attempts" ]; then
+      live_gate_probe_failure="$_lgp_failure"
+      printf 'compact: db=%s live-database probe failed on attempt %s/%s: %s\n' \
+        "$_lgp_db" "$_lgp_attempt" "$live_probe_attempts" "$_lgp_failure" >&2
+      return 1
+    fi
+    printf 'compact: db=%s live-database probe attempt %s/%s failed: %s — retrying\n' \
+      "$_lgp_db" "$_lgp_attempt" "$live_probe_attempts" "$_lgp_failure" >&2
+    if [ "$live_probe_delay_secs" -gt 0 ]; then
+      sleep "$live_probe_delay_secs"
+    fi
+    _lgp_attempt=$((_lgp_attempt + 1))
+  done
+}
+
+# arm_live_gate DB STEP [BASELINE_HEAD]
+#   Arm the live-database gate for DB immediately before its first storage
+#   rewrite of this pass: record whether <data_dir>/<db>/.dolt is present and
+#   the pre-compaction HEAD. Later arms keep the first baseline (the gate
+#   always proves liveness against the state before the FIRST rewrite) and
+#   only append their step label, so live_gate_steps names every rewrite the
+#   pass performed before a failure.
+#   The flatten path passes its already-proven pre-flight HEAD as
+#   BASELINE_HEAD. A GC-first pass passes no baseline, so the pre-compaction
+#   HEAD comes from the live probe itself; when service cannot be established
+#   the gate returns 2 and the caller must fail the pass as an ordinary error
+#   — no rewrite ran, so there is nothing to prove liveness after.
+arm_live_gate() {
+  _alg_db="$1"
+  _alg_step="$2"
+  _alg_baseline="${3:-}"
+  if [ "$live_gate_armed" = "1" ] && [ "$live_gate_db" = "$_alg_db" ]; then
+    live_gate_steps="${live_gate_steps:+$live_gate_steps,}$_alg_step"
+    return 0
+  fi
+  reset_live_gate_state
+  live_gate_db="$_alg_db"
+  live_gate_dir_path="$DOLT_DATA_DIR/$_alg_db/.dolt"
+  live_gate_dir_present_before=0
+  if [ -d "$live_gate_dir_path" ]; then
+    live_gate_dir_present_before=1
+  fi
+  if [ -n "$_alg_baseline" ]; then
+    live_gate_pre_head="$_alg_baseline"
+  else
+    if ! live_gate_probe "$_alg_db"; then
+      printf 'compact: db=%s cannot establish pre-compaction service for the live-database gate — failing this pass before any rewrite\n' \
+        "$_alg_db" >&2
+      return 2
+    fi
+    live_gate_pre_head="$live_gate_probe_head"
+  fi
+  live_gate_steps="$_alg_step"
+  live_gate_armed=1
+  return 0
+}
+
+# check_live_gate STEP
+#   Prove the database armed by arm_live_gate is still live after a storage
+#   rewrite: an initially present <data_dir>/<db>/.dolt entry must still be
+#   present, and the served-HEAD probe must succeed within its retry budget.
+#   A vanished data-dir entry fails the gate even when open server handles
+#   still answer SQL; an initially absent entry (a database this server does
+#   not hold on disk) never bypasses the SQL check. Both results are recorded
+#   as evidence. A pass that never armed the gate (no rewrite ran) passes
+#   silently, and once the gate has failed it stays failed.
+#   On failure: writes the liveness quarantine marker through
+#   write_compact_marker (which emits the quarantine event and alert mail
+#   through its existing notification policy), sets live_gate_failed=1 so the
+#   run aborts before any further database statement, and returns 1. If the
+#   marker cannot be persisted the evidence goes to stderr and the gate still
+#   fails.
+check_live_gate() {
+  _clg_step="$1"
+  if [ "$live_gate_armed" != "1" ]; then
+    return 0
+  fi
+  if [ "$live_gate_failed" = "1" ]; then
+    return 1
+  fi
+  live_gate_dir_present_after=0
+  if [ -d "$live_gate_dir_path" ]; then
+    live_gate_dir_present_after=1
+  fi
+  _clg_dir_failed=0
+  if [ "$live_gate_dir_present_before" = "1" ] && [ "$live_gate_dir_present_after" != "1" ]; then
+    _clg_dir_failed=1
+  fi
+  live_gate_probe_failure=""
+  _clg_probe_failed=0
+  if ! live_gate_probe "$live_gate_db"; then
+    _clg_probe_failed=1
+  fi
+  if [ "$_clg_dir_failed" != "1" ] && [ "$_clg_probe_failed" != "1" ]; then
+    return 0
+  fi
+  live_gate_failed=1
+  live_gate_failed_step="$_clg_step"
+  if [ "$_clg_probe_failed" = "1" ]; then
+    _clg_probe_evidence="live_gate_probe_failure=$live_gate_probe_failure"
+    _clg_probe_state="$live_gate_probe_failure"
+  else
+    _clg_probe_evidence="live_gate_probe_head_after=$live_gate_probe_head"
+    _clg_probe_state="probe answered but data-dir entry is gone"
+  fi
+  printf 'compact: db=%s live-database gate failed at step %s (steps=%s data_dir=%s present_before=%s present_after=%s probe=%s) — quarantining and stopping before any further database work\n' \
+    "$live_gate_db" "$_clg_step" "$live_gate_steps" "$live_gate_dir_path" \
+    "$live_gate_dir_present_before" "$live_gate_dir_present_after" \
+    "$_clg_probe_state" >&2
+  _clg_marker_ok=0
+  if write_compact_marker "$quarantine_dir" "$live_gate_db" \
+    "live database unavailable after compaction" \
+    "live_gate_steps=$live_gate_steps" \
+    "live_gate_failed_step=$_clg_step" \
+    "$_clg_probe_evidence" \
+    "live_gate_data_dir=$live_gate_dir_path" \
+    "live_gate_data_dir_present_before=$live_gate_dir_present_before" \
+    "live_gate_data_dir_present_after=$live_gate_dir_present_after" \
+    "live_gate_pre_compaction_head=$live_gate_pre_head" \
+    "decision=preserve_marker_manual_review_required" \
+    "clear_decision=restore_the_database_verify_resolvable_head_and_healthy_bead_data_then_clear_and_dry_run"; then
+    _clg_marker_ok=1
+  fi
+  if [ "$_clg_marker_ok" != "1" ]; then
+    printf 'compact: db=%s unable to persist the live-database quarantine marker — evidence: steps=%s failed_step=%s %s data_dir=%s present_before=%s present_after=%s pre_compaction_head=%s\n' \
+      "$live_gate_db" "$live_gate_steps" "$_clg_step" "$_clg_probe_evidence" \
+      "$live_gate_dir_path" "$live_gate_dir_present_before" "$live_gate_dir_present_after" \
+      "$live_gate_pre_head" >&2
+  fi
+  return 1
+}
+
 # Every GC here passes --archive-level=0: Dolt 2.3.3-2.5.1 default to
 # SimpleArchive, which duplicates its zstd dictionaries once an archive holds
 # more than 256, and each duplicate pins about 137 KB of C memory for the whole
@@ -2470,6 +2789,15 @@ run_full_gc() {
   failure_prefix="$2"
   success_prefix="$3"
   start="$4"
+  gate_step="${5:-full GC}"
+
+  # GC-first passes (pending-GC retry, --gc-only, shared-history) take their
+  # pre-compaction baseline from the live probe itself. A baseline that
+  # cannot be established fails this pass as an ordinary error before any
+  # rewrite: there is nothing to prove liveness after.
+  if ! arm_live_gate "$db" "$gate_step"; then
+    return 1
+  fi
 
   printf "compact: db=%s — running DOLT_GC('--full', '--archive-level=0')...\n" "$db"
   gc_rc=0
@@ -2485,10 +2813,17 @@ run_full_gc() {
     emit_error_file "$db" "$gc_err_tmp"
     explain_full_gc_cancellation "$db" "$gc_err_tmp" "$gc_elapsed"
     rm -f "$gc_err_tmp"
+    check_live_gate "$gate_step" || return 1
     return 1
   fi
   rm -f "$gc_err_tmp"
   compact_gc_ran=1
+
+  # A full GC rewrites oldgen archives under the running server; prove the
+  # database is still live before reporting success.
+  if ! check_live_gate "$gate_step"; then
+    return 1
+  fi
 
   printf 'compact: db=%s %s duration=%ss — ok\n' \
     "$db" "$success_prefix" "$elapsed"
@@ -2987,7 +3322,7 @@ compact_shared_history_database() {
     fi
     printf 'compact: db=%s pending_gc=present — retrying DOLT_GC --full locally; deferred push dropped by shared-history guard\n' "$db"
     start=$(date +%s)
-    if ! run_full_gc "$db" "pending-GC retry" "pending-GC retry" "$start"; then
+    if ! run_full_gc "$db" "pending-GC retry" "pending-GC retry" "$start" "shared-history pending-GC retry"; then
       return 1
     fi
     clear_compact_marker "$pending_gc_dir" "$db"
@@ -3193,7 +3528,7 @@ flatten_database() {
     fi
     printf 'compact: db=%s pending_gc=present — retrying DOLT_GC --full\n' "$db"
     start=$(date +%s)
-    if run_full_gc "$db" "pending-GC retry" "pending-GC retry" "$start"; then
+    if run_full_gc "$db" "pending-GC retry" "pending-GC retry" "$start" "pending-GC retry"; then
       push_rc=0
       push_remote_after_compaction "$db" "$pending_remote" "$pending_expected_remote_head" "${pending_expected_remote_head_verified:-0}" "retry" "$pending_compacted_from_head" "$pending_local_branch" "$pending_remote_branch" || push_rc=$?
       if [ "$push_rc" -eq 0 ] || { [ -n "$pending_remote" ] && has_compact_marker "$pending_push_dir" "$db"; }; then
@@ -3540,6 +3875,11 @@ flatten_database() {
   # "unproven" and therefore falls back to the safe quarantine behavior.
   head_before_reset=$(head_commit "$db" || true)
 
+  # Arm the live-database gate immediately before the flatten transaction:
+  # this is the pass's first storage rewrite, and the stable pre-flight HEAD
+  # is the pre-compaction baseline the gate proves liveness against.
+  arm_live_gate "$db" "flatten" "$head"
+
   # Soft-reset to the watermark + commit-everything is the flatten
   # transaction. Both run in a single dolt sql invocation so the session keeps
   # the USE selection across the two CALLs. History at or before the watermark
@@ -3558,9 +3898,18 @@ flatten_database() {
     rm -f "$preflight_tmp"
     rm -f "$reset_err_tmp"
     restore_head_after_flatten_failure "$db" "$head" "$flatten_base" || true
+    check_live_gate "flatten" || return 1
     return 1
   fi
   rm -f "$reset_err_tmp"
+
+  # Prove the database is still live before anything else reads it: a
+  # flatten that left the database out of the data dir or unserved must
+  # quarantine here, not sail on into the integrity probes and the full GC.
+  if ! check_live_gate "flatten"; then
+    rm -f "$preflight_tmp"
+    return 1
+  fi
 
   flatten_head=$(head_commit "$db" || true)
   if [ -z "$flatten_head" ]; then
@@ -3902,7 +4251,7 @@ flatten_database() {
   # require --full to rewrite. Since flatten always orphans the entire prior
   # commit graph, --full is always appropriate here.
   if run_full_gc "$db" "flatten ok commits=$count->${after_count:-?} but" \
-    "commits=$count->${after_count:-?}" "$start"; then
+    "commits=$count->${after_count:-?}" "$start" "post-flatten full GC"; then
     clear_compact_marker "$pending_gc_dir" "$db"
     primary_push_rc=0
     push_remote_after_compaction "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "initial" "$compacted_from_head" "$local_branch" "$remote_branch" || primary_push_rc=$?
@@ -3910,6 +4259,13 @@ flatten_database() {
       reconcile_backup_remotes "$db" "$remote" "$compacted_from_head" "$local_branch" "$remote_branch" || true
     fi
     return "$primary_push_rc"
+  fi
+  if [ "$live_gate_failed" = "1" ]; then
+    # The live-database gate already quarantined this database and stops the
+    # run; a fresh pending-GC marker would tell a later run to keep rewriting
+    # a database that may be out of service. Any existing pending marker
+    # stays untouched as evidence.
+    return 1
   fi
   write_compact_marker "$pending_gc_dir" "$db" "flatten succeeded but full GC failed" \
     "remote=$remote" "expected_remote_head=$expected_remote_head" \
@@ -3986,7 +4342,7 @@ gc_only_database() {
   fi
 
   start=$(date +%s)
-  run_full_gc "$db" "gc-only reclaim" "gc-only reclaim" "$start"
+  run_full_gc "$db" "gc-only reclaim" "gc-only reclaim" "$start" "gc-only reclaim"
 }
 
 # shellcheck disable=SC2317

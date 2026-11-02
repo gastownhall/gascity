@@ -251,12 +251,18 @@ func (f compactScriptFixture) runWithArgs(t *testing.T, mode string, args []stri
 		"GC_DOLT_RIG_LIST_TIMEOUT_SECS",
 		"GC_DOLT_COMPACT_ALERT_TO",
 		"GC_DOLT_CONFIG_FILE",
+		"GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS",
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS",
 		"GC_FAKE_DOLT_COMPACT_MODE",
 		"GC_FAKE_DOLT_COUNT_FILE",
 		"GC_FAKE_DOLT_STATE_FILE",
 		"GC_FAKE_DOLT_HASH_STATE_FILE",
 		"GC_FAKE_DOLT_TAG_STATE_FILE",
 		"GC_FAKE_PENDING_GC_MARKER",
+		"GC_FAKE_DOLT_LIVE_PROBE_UNSERVED",
+		"GC_FAKE_DOLT_LIVE_PROBE_FAIL_AFTER_GC",
+		"GC_FAKE_DOLT_LIVE_PROBE_FAIL_FIRST",
+		"GC_FAKE_DOLT_LIVE_PROBE_CELL",
 		"GC_PACK_STATE_DIR",
 		"GC_CITY_RUNTIME_DIR",
 		"GC_DOLT_COMPACT_MIN_FREE_BYTES",
@@ -922,6 +928,53 @@ case "$query" in
     fi
     exit 0
     ;;
+  *"CONCAT(DATABASE(), ':', HASHOF('HEAD'))"*)
+    # The live-database gate's served-HEAD probe. Distinct from the
+    # HASHOF('HEAD') arm so the existing HEAD-probe counters stay untouched.
+    # Fault knobs (all opt-in, so existing scenarios keep answering healthy):
+    #   GC_FAKE_DOLT_LIVE_PROBE_UNSERVED=1      — the server stopped serving
+    #                                              the database: every probe
+    #                                              fails.
+    #   GC_FAKE_DOLT_LIVE_PROBE_FAIL_AFTER_GC=1 — probes fail once a DOLT_GC
+    #                                              ran for this database (the
+    #                                              gc-ran marker the DOLT_GC
+    #                                              arm stamps), whether or not
+    #                                              that GC succeeded.
+    #   GC_FAKE_DOLT_LIVE_PROBE_FAIL_FIRST=N    — the first N probes for this
+    #                                              database fail, then service
+    #                                              recovers.
+    #   GC_FAKE_DOLT_LIVE_PROBE_CELL=<cell>     — answer with this cell
+    #                                              instead, for malformed /
+    #                                              wrong-name / case-variant
+    #                                              probe responses.
+    if [ "${GC_FAKE_DOLT_LIVE_PROBE_UNSERVED:-}" = "1" ]; then
+      printf 'database not found: %%s\n' "$db" >&2
+      exit 1
+    fi
+    if [ "${GC_FAKE_DOLT_LIVE_PROBE_FAIL_AFTER_GC:-}" = "1" ] && [ -n "$state_file" ] && [ -f "$state_file.$db.gc-ran" ]; then
+      printf 'database not found: %%s\n' "$db" >&2
+      exit 1
+    fi
+    if [ -n "${GC_FAKE_DOLT_LIVE_PROBE_FAIL_FIRST:-}" ]; then
+      calls_file="$state_file.$db.live-probe-calls"
+      calls=0
+      if [ -f "$calls_file" ]; then
+        calls="$(cat "$calls_file")"
+      fi
+      calls=$((calls + 1))
+      printf '%%s\n' "$calls" > "$calls_file"
+      if [ "$calls" -le "$GC_FAKE_DOLT_LIVE_PROBE_FAIL_FIRST" ]; then
+        printf 'database not found: %%s\n' "$db" >&2
+        exit 1
+      fi
+    fi
+    if [ -n "${GC_FAKE_DOLT_LIVE_PROBE_CELL:-}" ]; then
+      print_cell "$GC_FAKE_DOLT_LIVE_PROBE_CELL"
+      exit 0
+    fi
+    print_cell "$db:$(current_head)"
+    exit 0
+    ;;
   *"SELECT HASHOF('HEAD')"*)
     if { [ "$mode" = "pending_gc_marker_disappears" ] || [ "$mode" = "pending_gc_marker_disappears_remote" ]; } && [ -n "$pending_gc_marker" ]; then
       rm -f "$pending_gc_marker"
@@ -1470,6 +1523,12 @@ case "$query" in
     exit 0
     ;;
   *"DOLT_GC"*)
+    # Stamp the per-db gc-ran marker first, before the failure branches, so
+    # GC_FAKE_DOLT_LIVE_PROBE_FAIL_AFTER_GC faults activate even when the GC
+    # itself failed.
+    if [ -n "$state_file" ]; then
+      printf 'ran\n' > "$state_file.$db.gc-ran"
+    fi
     if [ "$mode" = "remote_gc_failure_once" ]; then
       calls_file="$state_file.gc-calls"
       calls=0

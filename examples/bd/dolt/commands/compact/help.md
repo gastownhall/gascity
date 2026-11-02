@@ -102,6 +102,36 @@ author: every commit after the watermark is squashed, whichever city wrote it.
     only if no other city, clone, or client outside this city has ever written
     to this database, including before this city started using it.
 
+## Live-database gate
+
+A flatten or a DOLT_GC rewrites a live database's storage under the running
+sql-server. If the rewrite leaves the database out of the data directory, or the
+server stops serving its name, every client fails until an operator restores
+the database — while compact would report the pass as a success and move on to
+the next database. So every pass that reached a storage-rewriting step (flatten,
+full GC, bare GC) ends by proving the database is still live:
+
+- its `<data_dir>/<db>/.dolt` entry, present before the rewrite, must still be
+  present — a vanished directory fails the gate even while open server handles
+  still answer SQL — and
+- the server must still serve the name with a resolvable HEAD, probed with
+  `SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))` and retried up to
+  `GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS` times (default 3),
+  `GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS` seconds apart (default 2). The probe
+  is bounded at 30s, or `GC_DOLT_COMPACT_CALL_TIMEOUT_SECS` when lower.
+
+A database that fails the gate is quarantined with reason
+`live database unavailable after compaction` — the marker records the rewrite
+steps taken, the failing step, the probe outcome, the data-dir presence before
+and after, and the pre-compaction HEAD — and compact stops before issuing any
+further database statement. The compactor never restores a database itself:
+see "Live-database gate" in
+`docs/troubleshooting/dolt-bloat-recovery.md` for the recovery procedure.
+
+Skips and dry runs mutate nothing and run no probe: a below-threshold skip, a
+dry run, a held marker, or an existing quarantine is reported exactly as
+before.
+
 ## Flags
 
 - `--gc-only` — Reclaim orphaned chunks via

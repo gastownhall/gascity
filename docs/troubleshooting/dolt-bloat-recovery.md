@@ -562,6 +562,7 @@ should treat these strings as the current vocabulary:
 | `post-flatten value hash probe returned empty value` | The database hash query returned an empty value after flatten. |
 | `post-flatten value hash changed with row-count increase` | The database hash changed after at least one stable-table row-count gain. *(auto-clearable — see below)* |
 | `post-flatten value hash changed without row-count increase` | The database hash changed without a row-count gain. *(auto-clearable — see below)* |
+| `live database unavailable after compaction` | A flatten or GC left the database out of the data directory, or the server stopped serving its name. *(never auto-clearable — see below)* |
 
 Four of these reasons are known writer-race false positives and are
 **auto-clearable**. On its next scheduled run, `gc dolt compact`'s flatten
@@ -611,6 +612,44 @@ path also refuses, except for the four auto-clearable reasons above, which it
 may clear on its own after proving content preservation. The refusal output
 repeats the marker path, reason, key evidence fields, and the clear/retry
 command so operators have the next action without opening this runbook first.
+
+## Live-database gate
+
+A flatten or a DOLT_GC rewrites a live database's storage under the running
+sql-server. If the rewrite leaves the database out of the data directory, or
+the server stops serving its name, every client fails with
+`database not found` until the database is restored — while the compactor
+would once have reported the pass as a success and continued to the next
+database. Every compaction pass that reached a storage-rewriting step now
+ends by proving the database is still live: its `<data_dir>/<db>/.dolt`
+entry, present before the rewrite, must still be present, and the server must
+still serve the name with a resolvable HEAD (probed up to
+`GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS` times, `GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS`
+seconds apart). A database that fails the gate is quarantined with reason
+`live database unavailable after compaction`, and the run stops before
+issuing any further database statement.
+
+This quarantine is never auto-clearable: only an operator who has restored
+the database may clear it, because the marker itself is the record of a
+database that was out of service.
+
+Recovery for a `live database unavailable after compaction` quarantine:
+
+1. The compactor never restores databases. Restore or re-establish the
+   intended database yourself — from the data-dir entry the marker names, a
+   clone, or a backup — following the Recovery Procedure above. The marker
+   records the pre-compaction HEAD and the data-dir presence before and after
+   the rewrite, so you can tell a vanished directory (present_before=1
+   present_after=0) from an unserved name (probe failure with the directory
+   intact).
+2. Verify the server serves the database with a resolvable HEAD and healthy
+   bead data — `gc dolt sql --db <database> -q "SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))"`
+   and the bead checks from the safe marker-clear procedure.
+3. Remove that database's quarantine marker, and any pending-GC or
+   pending-push marker the restore made obsolete.
+4. Run `gc dolt compact --gc-only --only-db <database> --dry-run` first, then
+   the real reclaim. If the marker returns, preserve it and escalate with the
+   marker contents and command output.
 
 ## When to Escalate
 
