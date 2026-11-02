@@ -829,7 +829,8 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 	// the convoy and its members from the work leg. Residence of the root is
 	// decided by the same read the claim-time seams use — the work leg first,
 	// the binding only on a proven absence — so a work-resident workflow
-	// keeps the exact unrouted call.
+	// keeps the exact unrouted call. Input missing from both legs is purged
+	// only on prove's city-wide absence proof.
 	ops.InputVerdict = func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
 		rootID := workflowRootIDForInputCheck(candidate)
 		if rootID == "" {
@@ -843,7 +844,7 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			return base.InputVerdict(ctx, dir, env, candidate, identityCandidates, prove)
 		}
 		work := base.WorkflowStore(ctx, dir, env, rootID, "")
-		return workflowInputDoneAcross(ctx, route.class, work, candidate, identityCandidates, nil)
+		return workflowInputDoneAcross(ctx, route.class, work, candidate, identityCandidates, prove)
 	}
 
 	ops.RetireWorkflow = func(ctx context.Context, dir string, env []string, verdict workflowInputVerdict) error {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -228,6 +229,52 @@ func TestClassRoutedHookReadsWorkflowSeatsFromTheBinding(t *testing.T) {
 		t.Fatalf("candidate %s dropped (stderr=%q); its input member is held by %s, a seat of this workflow", f.step.ID, stderr, assignee)
 	}
 	f.assertOpen(t, f.root.ID, f.step.ID)
+}
+
+// A binding-resident workflow whose input convoy is gone from the work store
+// is retired only on the city-wide absence proof: input still held by another
+// store keeps the candidate, and input absent everywhere closes the root and
+// its open steps as purged in the binding, leaving the work store untouched.
+func TestClassRoutedHookRetiresPurgedInput(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		absentInCity bool
+	}{
+		{name: "input in another store", absentInCity: false},
+		{name: "input absent everywhere", absentInCity: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDoneWorkflowSplitFixture(t, false)
+			if err := f.work.Delete(f.convoyID); err != nil {
+				t.Fatalf("purging the input convoy %s: %v", f.convoyID, err)
+			}
+			prover := &recordingProver{absent: map[string]bool{f.convoyID: tc.absentInCity}}
+			ops := classRoutedHookClaimOps(f.baseOps(t), f.route)
+			ops.ProveInputAbsent = prover.prove
+
+			kept, stderr := f.retire(t, ops, f.step)
+			if len(prover.calls) != 1 || !slices.Equal(prover.calls[0], []string{f.convoyID}) {
+				t.Fatalf("prover calls = %v, want one proof of [%s]", prover.calls, f.convoyID)
+			}
+			if !tc.absentInCity {
+				if len(kept) != 1 {
+					t.Fatalf("candidate %s dropped (stderr=%q); its input convoy still exists in another store", f.step.ID, stderr)
+				}
+				f.assertOpen(t, f.root.ID, f.step.ID)
+				return
+			}
+			if len(kept) != 0 {
+				t.Fatalf("candidate %s kept (stderr=%q); its input convoy %s exists in no store", f.step.ID, stderr, f.convoyID)
+			}
+			assertPurgeRetired(t, f.binding, f.root.ID, f.step.ID)
+			if done, err := f.binding.Get(f.done.ID); err != nil || done.Metadata[beadmeta.FailureReasonMetadataKey] != "" {
+				t.Errorf("finished step %s: metadata=%v err=%v; its recorded outcome must survive", f.done.ID, done.Metadata, err)
+			}
+			if src, err := f.work.Get(f.source.ID); err != nil || src.Status == "closed" {
+				t.Errorf("source %s: status=%q err=%v; the retirement must not touch the work store", f.source.ID, src.Status, err)
+			}
+		})
+	}
 }
 
 // The unrouted seams cannot see the root at all, which is the treadmill.
