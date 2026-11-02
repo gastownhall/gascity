@@ -337,7 +337,109 @@ func runtimeDrain(dops drainOps, sp runtime.Provider, rec events.Recorder, targe
 		}
 		return writeOperatorDrainRow(store, id)
 	}
-	return drainRuntime(dops, writeRow, sp, rec, target.display, target.sessionName, jsonOutput, stdout, stderr)
+	cancelPending := func() (handled bool, code int) {
+		return drainCancelPendingStart(target.cityPath, cfg, target, rec, jsonOutput, stdout, stderr)
+	}
+	return drainRuntime(dops, writeRow, sp, rec, target.display, target.sessionName, jsonOutput, stdout, stderr, cancelPending)
+}
+
+// drainCancelPendingStart is `gc runtime drain`'s answer for a session whose
+// start never committed (ci-soai behavior 5): the runtime probe answered not
+// running and the row still reads start-pending or creating. The same fenced
+// pending-create rollback the reconciler's stale-lease pass applies retires a
+// claimed row; a claimless one goes to asleep, the reconciler's own dead-row
+// projection, by fenced CAS. The runtime name's flock is held across the
+// cancel, so a start in flight is reported and left (the stop sweep's rule),
+// never raced. handled=false returns to drainRuntime's generic refusal.
+func drainCancelPendingStart(cityPath string, cfg *config.City, target sessionRuntimeTarget,
+	rec events.Recorder, jsonOutput bool, stdout, stderr io.Writer,
+) (bool, int) {
+	store, id, err := drainAckOpenSessionRow(cityPath, cfg, target.sessionName, target.sessionID)
+	if err != nil {
+		return false, 0
+	}
+	b, err := store.Get(id)
+	if err != nil || b.Status == "closed" {
+		return false, 0
+	}
+	info := sessionInfoFromBead(b)
+	if !pendingCreateQueuedOrCreatingState(info.MetadataState) {
+		return false, 0
+	}
+	_, release, err := tryRuntimeLease(nil, cityPath, target.sessionName, "", 0)
+	if err != nil {
+		if errors.Is(err, session.ErrRuntimeLeaseBusy) {
+			fmt.Fprintf(stderr, "gc runtime drain: session %q is start-pending with its start still in flight; drain it again once the start lands\n", target.display) //nolint:errcheck // best-effort stderr
+		} else {
+			fmt.Fprintf(stderr, "gc runtime drain: session %q is start-pending and its start could not be checked: %v\n", target.display, err) //nolint:errcheck // best-effort stderr
+		}
+		return true, 1
+	}
+	defer release()
+	now := time.Now()
+	if info.PendingCreateClaim {
+		if _, ok := rollbackPendingCreateClears(info, sessionFrontDoor(store), now,
+			"gc runtime drain: cancel pending start of "+info.ID, nil, stderr); !ok {
+			// Superseded or already retired: nothing was written; the row the
+			// probe saw is not the row that reads now.
+			return false, 0
+		}
+	} else if err := cancelClaimlessPendingStartRow(store, id); err != nil {
+		fmt.Fprintf(stderr, "gc runtime drain: canceling the pending start of %q: %v\n", target.display, err) //nolint:errcheck // best-effort stderr
+		return true, 1
+	}
+	rec.Record(events.Event{
+		Type:    events.SessionStopped,
+		Actor:   eventActor(),
+		Subject: target.display,
+	})
+	if jsonOutput {
+		if err := writeCLIJSONLine(stdout, runtimeActionJSON{
+			SchemaVersion: "1",
+			OK:            true,
+			Command:       "runtime drain",
+			Action:        "drain",
+			Session:       target.sessionName,
+			Target:        target.display,
+			Status:        "start-pending-canceled",
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc runtime drain: writing JSON: %v\n", err) //nolint:errcheck // best-effort stderr
+			return true, 1
+		}
+		return true, 0
+	}
+	fmt.Fprintf(stdout, "Canceled pending start of session '%s'\n", target.display) //nolint:errcheck // best-effort stdout
+	return true, 0
+}
+
+// cancelClaimlessPendingStartRow parks a start-pending (or creating) row that
+// holds no pending-create claim: the fenced CAS sets asleep, the reconciler's
+// own projection for a dead row, so the deferred start never proceeds and the
+// row cannot re-project start-pending from its own state (asleep answers
+// sessionStartRequested false on every later tick). A row that moved under
+// the CAS writes nothing.
+func cancelClaimlessPendingStartRow(store beads.Store, id string) error {
+	writer, _, err := beads.ResolveConditionalWriter(store)
+	if err != nil {
+		return err
+	}
+	if writer == nil {
+		return errors.New("the session store has no conditional writer, so the row was left for the reconciler")
+	}
+	return casDrainAckRow(store, writer, id, func(b beads.Bead) (map[string]string, error) {
+		if b.Status == "closed" {
+			return nil, nil
+		}
+		info := sessionInfoFromBead(b)
+		if !pendingCreateQueuedOrCreatingState(info.MetadataState) {
+			return nil, nil
+		}
+		batch := map[string]string{"state": string(session.StateAsleep)}
+		if strings.TrimSpace(info.SleepReason) == "" {
+			batch["sleep_reason"] = string(session.SleepReasonRuntimeMissing)
+		}
+		return batch, nil
+	})
 }
 
 // writeOperatorDrainRow writes the operator's drain mark on the row by CAS
@@ -372,14 +474,18 @@ func clearOperatorDrainRow(store beads.Store, sessionID string) error {
 func doRuntimeDrain(dops drainOps, sp runtime.Provider, rec events.Recorder,
 	targetName, sn string, jsonOutput bool, stdout, stderr io.Writer,
 ) int {
-	return drainRuntime(dops, nil, sp, rec, targetName, sn, jsonOutput, stdout, stderr)
+	return drainRuntime(dops, nil, sp, rec, targetName, sn, jsonOutput, stdout, stderr, nil)
 }
 
 // drainRuntime writes, in a v2 city (writeRow set), the row's operator
 // drain mark, then sets the runtime drain flag. A failed row write sets
-// nothing and exits non-zero.
+// nothing and exits non-zero. cancelPending, set by a v2 caller, answers a
+// not-running probe: a start that never committed (ci-soai behavior 5) is
+// canceled instead of refused, and handled reports whether it took the
+// session (code is then the exit).
 func drainRuntime(dops drainOps, writeRow func() error, sp runtime.Provider, rec events.Recorder,
 	targetName, sn string, jsonOutput bool, stdout, stderr io.Writer,
+	cancelPending func() (handled bool, code int),
 ) int {
 	running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, sn)
 	if err != nil {
@@ -387,6 +493,11 @@ func drainRuntime(dops drainOps, writeRow func() error, sp runtime.Provider, rec
 		return 1
 	}
 	if !running {
+		if cancelPending != nil {
+			if handled, code := cancelPending(); handled {
+				return code
+			}
+		}
 		fmt.Fprintf(stderr, "gc runtime drain: session %q is not running\n", targetName) //nolint:errcheck // best-effort stderr
 		return 1
 	}

@@ -2328,7 +2328,7 @@ func TestDrainRuntimeRowWriteFailure(t *testing.T) {
 	}
 	rec := events.NewFake()
 	var stdout, stderr bytes.Buffer
-	code := drainRuntime(dops, func() error { return errors.New("store down") }, sp, rec, "worker", "worker", false, &stdout, &stderr)
+	code := drainRuntime(dops, func() error { return errors.New("store down") }, sp, rec, "worker", "worker", false, &stdout, &stderr, nil)
 	if code != 1 || dops.draining["worker"] || len(rec.Events) != 0 || !strings.Contains(stderr.String(), "store down") {
 		t.Fatalf("drain = %d (draining %v, events %v, stderr %q), want 1 with nothing set", code, dops.draining["worker"], rec.Events, stderr.String())
 	}
