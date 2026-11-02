@@ -236,6 +236,8 @@ func fillAllFields(t *testing.T, v any) {
 			f.Set(reflect.ValueOf(&yes))
 		case f.Type() == reflect.TypeOf(time.Time{}):
 			f.Set(reflect.ValueOf(stamp))
+		case f.Type() == reflect.TypeOf([]string(nil)):
+			f.Set(reflect.ValueOf([]string{"x-" + tag}))
 		case f.Type() == reflect.TypeOf((*time.Time)(nil)):
 			f.Set(reflect.ValueOf(&stamp))
 		case f.Type() == reflect.TypeOf((*api.SessionProgramStatus)(nil)):

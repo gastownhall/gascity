@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -237,15 +239,34 @@ func TestSessionListRouteEquivalence(t *testing.T) {
 		})
 	}
 
-	t.Run("text-header", func(t *testing.T) {
-		localOut, _ := runSessionListCLI(t, h.cityPath, true, "--state", "all")
-		hostedOut, _ := runSessionListCLI(t, h.cityPath, false, "--state", "all")
-		localHeader, _, _ := strings.Cut(localOut, "\n")
-		hostedHeader, _, _ := strings.Cut(hostedOut, "\n")
-		if strings.Join(strings.Fields(localHeader), " ") != strings.Join(strings.Fields(hostedHeader), " ") {
-			t.Errorf("text headers differ:\nlocal:  %q\nhosted: %q", localHeader, hostedHeader)
-		}
-	})
+	for _, f := range []struct{ name, state string }{{name: "text-default"}, {name: "text-all", state: "all"}} {
+		t.Run(f.name, func(t *testing.T) {
+			local, hosted, remoteOut := sessionListTextRoutes(t, h, remote, f.state)
+			assertSessionListTablesMatch(t, "supervisor-hosted", local, hosted)
+			assertSessionListTablesMatch(t, "remote", local, remoteOut)
+		})
+	}
+}
+
+// sessionListTextRoutes prints the `gc session list` table for state on the
+// local route, the supervisor-hosted route (which the caller has set up) and
+// the remote route over remote.
+func sessionListTextRoutes(t *testing.T, h *charHarness, remote *api.Client, state string) (local, hosted, remoteOut string) {
+	t.Helper()
+	var args []string
+	if state != "" {
+		args = append(args, "--state", state)
+	}
+	local, _ = runSessionListCLI(t, h.cityPath, true, args...)
+	hosted, hostedErr := runSessionListCLI(t, h.cityPath, false, args...)
+	if !strings.Contains(hostedErr, "cmd=session list route=api") {
+		t.Fatalf("supervisor-hosted stderr = %q, want route=api", hostedErr)
+	}
+	var out, errOut bytes.Buffer
+	if code := routeSessionList("", state, "", remote, "", false, &out, &errOut); code != 0 {
+		t.Fatalf("remote routeSessionList = %d; stderr %s", code, errOut.String())
+	}
+	return local, hosted, out.String()
 }
 
 // assertSessionListEquivalenceValues spot-checks the unified values on the
@@ -618,5 +639,107 @@ func TestSessionListOnASupervisorThatPredatesAgentName(t *testing.T) {
 		if _, curErr := runSessionListCLI(t, h.cityPath, false, args...); !strings.Contains(curErr, "cmd=session list route=api") {
 			t.Errorf("%s current server: stderr = %q, want route=api", label, curErr)
 		}
+	}
+}
+
+// sessionListTextCity is a city whose agents give the text-equivalence seed
+// its wake reasons: a named worker and a pool with a static maximum.
+const sessionListTextCity = charCityBasic + `
+[session]
+provider = "fake"
+
+[[agent]]
+name = "worker"
+start_command = "true"
+
+[[agent]]
+name = "pool"
+start_command = "true"
+max_active_sessions = 2
+`
+
+// TestSessionListTextRouteEquivalence pins the `gc session list` table on
+// every route against one seeded city: the API route prints the local
+// REASON column, wake reasons included, cell for cell. Only the text route
+// asks the server for wake reasons; --json does not.
+func TestSessionListTextRouteEquivalence(t *testing.T) {
+	clearInheritedCityRoutingEnv(t)
+	ids := map[string]string{}
+	future := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
+	h := newCharCity(t, sessionListTextCity, func(t *testing.T, store beads.Store) {
+		seed := func(key string, meta map[string]string) {
+			ids[key] = seedSessionListBead(t, store, key, meta)
+		}
+		seed("attached", map[string]string{"template": "worker", "session_name": "tx-attached", "agent_name": "worker", "state": "active"})
+		seed("pool", map[string]string{"template": "pool", "session_name": "tx-pool-1", "agent_name": "pool-1", "state": "active"})
+		seed("creating", map[string]string{"template": "worker", "session_name": "tx-creating", "state": "creating", "pending_create_claim": "true"})
+		seed("pinned", map[string]string{"template": "worker", "session_name": "tx-pinned", "state": "active", "pin_awake": "true"})
+		seed("held", map[string]string{"template": "worker", "session_name": "tx-held", "state": "asleep", "held_until": future, "pin_awake": "true"})
+		seed("closed", map[string]string{"template": "worker", "session_name": "tx-closed", "state": "asleep"})
+		if err := store.Close(ids["closed"]); err != nil {
+			t.Fatalf("store.Close: %v", err)
+		}
+	})
+	fake, ok := h.cs.SessionProvider().(*runtime.Fake)
+	if !ok {
+		t.Fatalf("harness session provider is %T, want *runtime.Fake", h.cs.SessionProvider())
+	}
+	origBuild := buildSessionProviderByName
+	t.Cleanup(func() { buildSessionProviderByName = origBuild })
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return fake, nil
+	}
+	for _, name := range []string{"tx-attached", "tx-pool-1", "tx-pinned"} {
+		if err := fake.Start(context.Background(), name, runtime.Config{}); err != nil {
+			t.Fatalf("fake.Start(%s): %v", name, err)
+		}
+	}
+	fake.SetAttached("tx-attached", true)
+
+	var wakeQueries []string
+	var mu sync.Mutex
+	hosted, remote := sessionListLanesOver(t, h, func(base http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/sessions") {
+				mu.Lock()
+				wakeQueries = append(wakeQueries, r.URL.Query().Get("wake_reasons"))
+				mu.Unlock()
+			}
+			base.ServeHTTP(w, r)
+		})
+	})
+	sessionListHostedBy(t, hosted)
+
+	local, hostedOut, remoteOut := sessionListTextRoutes(t, h, remote, "all")
+	header, rows, _ := sessionListTableCells(t, local)
+	reasonCol := slices.Index(header, "REASON")
+	for key, want := range map[string]string{
+		"attached": "session,attached",
+		"pool":     "session,config",
+		"creating": "create",
+		"pinned":   "session,pin",
+		"held":     "user-hold",
+		"closed":   "-",
+	} {
+		if got := rows[ids[key]][reasonCol]; got != want {
+			t.Errorf("local %s row REASON = %q, want %q\n%s", key, got, want, local)
+		}
+	}
+	assertSessionListTablesMatch(t, "supervisor-hosted", local, hostedOut)
+	assertSessionListTablesMatch(t, "remote", local, remoteOut)
+	mu.Lock()
+	textQueries := slices.Clone(wakeQueries)
+	wakeQueries = nil
+	mu.Unlock()
+	if len(textQueries) == 0 || slices.ContainsFunc(textQueries, func(q string) bool { return q != "true" }) {
+		t.Errorf("text route wake_reasons queries = %q, want true on every request", textQueries)
+	}
+
+	runSessionListCLI(t, h.cityPath, false, "--state", "all", "--json")
+	mu.Lock()
+	jsonQueries := slices.Clone(wakeQueries)
+	mu.Unlock()
+	if len(jsonQueries) == 0 || slices.ContainsFunc(jsonQueries, func(q string) bool { return q != "" }) {
+		t.Errorf("--json wake_reasons queries = %q, want none", jsonQueries)
 	}
 }

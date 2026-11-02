@@ -331,3 +331,35 @@ func TestClientListSessionsReportsAServerWithoutAgentName(t *testing.T) {
 		})
 	}
 }
+
+// TestClientListSessionsAsksForWakeReasonsOnlyWhenTold pins that
+// ListSessions sends wake_reasons=true only for WakeReasons and decodes the
+// rows' wake_reasons.
+func TestClientListSessionsAsksForWakeReasonsOnlyWhenTold(t *testing.T) {
+	var asked []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked = append(asked, r.URL.Query().Get("wake_reasons"))
+		row := sessionListTestRow("gc-1")
+		if r.URL.Query().Get("wake_reasons") == "true" {
+			row["wake_reasons"] = []string{"session", "config"}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{row}}) //nolint:errcheck
+	}))
+	defer ts.Close()
+	c := NewCityScopedClient(ts.URL, "alpha")
+
+	cr, err := c.ListSessions(ListSessionsOpts{WakeReasons: true})
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if got := strings.Join(cr.Body.Sessions[0].WakeReasons, ","); got != "session,config" {
+		t.Errorf("WakeReasons = %q, want session,config", got)
+	}
+	if _, err := c.ListSessions(ListSessionsOpts{}); err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if strings.Join(asked, "|") != "true|" {
+		t.Errorf("wake_reasons query per request = %q, want true then absent", asked)
+	}
+}

@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -252,5 +254,28 @@ func TestSessionListLocalReadListsClosedHistory(t *testing.T) {
 	}
 	if got := len(sessionListRows(t, def)); got != 2 {
 		t.Errorf("default rows = %d, want 2 open rows", got)
+	}
+}
+
+// TestRenderSessionListFromAPIReasonColumn pins the API route's REASON cell:
+// the lifecycle reason wins, else the wake reasons joined by ",", else "-",
+// as the local read renders it.
+func TestRenderSessionListFromAPIReasonColumn(t *testing.T) {
+	created := time.Now().Add(-time.Minute)
+	views := []api.SessionListView{
+		{ID: "gc-1", Template: "w", State: "asleep", Reason: "user-hold", WakeReasons: []string{"pin"}, SessionName: "a", CreatedAt: created},
+		{ID: "gc-2", Template: "w", State: "active", WakeReasons: []string{"session", "config"}, SessionName: "b", CreatedAt: created},
+		{ID: "gc-3", Template: "w", State: "asleep", SessionName: "c", CreatedAt: created},
+	}
+	var stdout, stderr bytes.Buffer
+	if code := renderSessionListFromAPI(api.CachedRead[[]api.SessionListView]{Body: views}, "", "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("render = %d; stderr %s", code, stderr.String())
+	}
+	header, rows, _ := sessionListTableCells(t, stdout.String())
+	col := slices.Index(header, "REASON")
+	for id, want := range map[string]string{"gc-1": "user-hold", "gc-2": "session,config", "gc-3": "-"} {
+		if got := rows[id][col]; got != want {
+			t.Errorf("row %s REASON = %q, want %q", id, got, want)
+		}
 	}
 }

@@ -73,12 +73,15 @@ func (d *sessionListDegradation) add(body *genclient.ListBodySessionResponse) {
 // reports the closed lifecycle state. The API redacts command, session_key
 // and the resume fields, so the view has none of them. It carries no JSON
 // tags: the CLI maps it onto its own row type, which both routes share.
+// WakeReasons are why the controller keeps the session awake, sent only when
+// the read asked for them (ListSessionsOpts.WakeReasons).
 type SessionListView struct {
 	ID          string
 	Template    string
 	State       string
 	Closed      bool
 	Reason      string
+	WakeReasons []string
 	Title       string
 	Alias       string
 	AgentName   string
@@ -129,6 +132,7 @@ func sessionListViewFromGen(g genclient.SessionResponse) (SessionListView, error
 		State:         g.State,
 		Closed:        g.State == string(session.BaseStateClosed),
 		Reason:        derefStr(g.Reason),
+		WakeReasons:   derefStrings(g.WakeReasons),
 		Title:         g.Title,
 		Alias:         derefStr(g.Alias),
 		AgentName:     derefStr(g.AgentName),
@@ -166,4 +170,12 @@ func parseSessionListTime(id, field, raw string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("session %s %s %q: %w", id, field, raw, err)
 	}
 	return t, nil
+}
+
+// derefStrings returns the list p points to, or nil.
+func derefStrings(p *[]string) []string {
+	if p == nil {
+		return nil
+	}
+	return *p
 }

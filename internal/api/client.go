@@ -825,10 +825,11 @@ func (c *Client) TriggerMaintenanceDoltGC(wait bool) (MaintenanceTriggerView, er
 
 // ListSessionsOpts are the GET /v0/city/{cityName}/sessions query options
 // ListSessions sends. Empty State and Template omit the filter; Peek asks for
-// the last-output preview.
+// the last-output preview; WakeReasons asks for each open session's wake
+// reasons, which cost the server runtime probes per session.
 type ListSessionsOpts struct {
-	State, Template string
-	Peek            bool
+	State, Template   string
+	Peek, WakeReasons bool
 }
 
 // ListSessions fetches the current set of sessions via
@@ -868,6 +869,9 @@ func (c *Client) ListSessions(opts ListSessionsOpts) (CachedRead[SessionList], e
 		}
 		if opts.Peek {
 			params.Peek = &opts.Peek
+		}
+		if opts.WakeReasons {
+			params.WakeReasons = &opts.WakeReasons
 		}
 		if cursor != "" {
 			params.Cursor = &cursor

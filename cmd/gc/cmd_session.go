@@ -818,7 +818,9 @@ func routeSessionList(_ string, stateFilter, templateFilter string, c *api.Clien
 	return routeRead(c, "session list", nilReason, stderr,
 		func() error {
 			var err error
-			cr, err = c.ListSessions(api.ListSessionsOpts{State: stateFilter, Template: templateFilter})
+			// Only the table renders wake reasons; they cost the server runtime
+			// probes per session, so --json does not ask for them.
+			cr, err = c.ListSessions(api.ListSessionsOpts{State: stateFilter, Template: templateFilter, WakeReasons: !jsonOutput})
 			if err != nil {
 				return err
 			}
@@ -908,12 +910,8 @@ func renderSessionListFromAPI(cr api.CachedRead[[]api.SessionListView], stateFil
 		if state == "" {
 			state = string(session.StateClosed)
 		}
-		reason := s.Reason
-		if reason == "" {
-			reason = "-"
-		}
 		row := []string{
-			s.ID, s.Template, state, reason,
+			s.ID, s.Template, state, sessionListReasonCell(s.Reason, s.WakeReasons),
 			sessionListTargetOf(s.Alias, s.SessionName), sessionListTitleOf(s.Title), sessionListDisplayValue(s.WorkDir),
 			sessionListAge(s.CreatedAt, now), sessionListAgo(s.LastActive, now), sessionListAgo(s.LastNudgeDeliveredAt, now),
 		}
