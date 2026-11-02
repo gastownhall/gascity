@@ -106,6 +106,9 @@ type controllerState struct {
 	cacheCtx      context.Context
 	beadStores    map[string]beads.Store
 	cityBeadStore beads.Store // city-level store for session beads
+	// stores is the class handles over cityBeadStore and storageRoutes,
+	// re-minted when they change (city_stores.go).
+	stores storesEpochCache
 	// storageRoutes is the opened non-work storage binding the city runtime
 	// resolved at boot: a constructor input, written once in
 	// newControllerStateWithRoutes and never reassigned, so reads are lock-free
@@ -2349,19 +2352,12 @@ func (cs *controllerState) ScopedStoreLike(ctx context.Context, existing beads.S
 	return scopedStoreLike(ctx, cityPath, cfg, existing)
 }
 
-// NudgesBeadStore returns the store backing the nudge-queue shadow beads. At the
-// default backend resolveNudgesStore returns cityBeadStore, so this is byte-identical
-// to CityBeadStore; when [beads.classes.nudges] is relocated it returns the per-class
-// store. cs.eventProv is passed for signature parity with the other accessors and is
-// ignored by resolveNudgesStore; the controller's emission comes from the CachingStore
-// around each store it serves (class_store_cache.go), not from this argument. The
-// result is wrapped in the
-// strongly-typed beads.NudgesStore so the nudges class is statically visible to callers;
-// the wrapper carries the same underlying store value, so runtime behavior is unchanged.
+// NudgesBeadStore returns the store backing the nudge-queue shadow beads: the
+// binding when the routes relocate nudges, else the city work store. The
+// controller's emission comes from the CachingStore around each store it serves
+// (class_store_cache.go).
 func (cs *controllerState) NudgesBeadStore() beads.NudgesStore {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	return beads.NudgesStore{Store: resolveNudgesStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
+	return cs.Stores().Nudges()
 }
 
 // NudgeQueue returns the city's nudge queue over its nudges-class store, for the
@@ -2370,49 +2366,25 @@ func (cs *controllerState) NudgeQueue() api.NudgeQueue {
 	return openNudgeQueue(cs.cityPath, cs.NudgesBeadStore()).Queue
 }
 
-// SessionsBeadStore returns the store backing session-class beads. At the default
-// backend resolveSessionStore returns cityBeadStore, so this is byte-identical to
-// CityBeadStore; when [beads.classes.sessions] is relocated it returns the per-class
-// store. cs.eventProv is passed for signature parity and ignored by
-// resolveSessionStore, exactly as it is for every other class. The
-// result is wrapped in the strongly-typed beads.SessionStore so the session class is
-// statically visible to callers; the wrapper carries the same underlying store value,
-// so runtime behavior is unchanged.
+// SessionsBeadStore returns the store backing session-class beads: the binding
+// when the routes relocate sessions, else the city work store.
 func (cs *controllerState) SessionsBeadStore() beads.SessionStore {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	return beads.SessionStore{Store: resolveSessionStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
+	return cs.Stores().Sessions()
 }
 
-// GraphBeadStore returns the store backing graph-class beads. At the default backend
-// resolveGraphStore returns cityBeadStore, so this is byte-identical to CityBeadStore;
-// when [beads.classes.graph] is relocated it returns the dedicated graph store at the
-// legacy .gc/beads.sqlite location (or the gcg Postgres schema). cs.eventProv is
-// passed for signature parity with the other accessors but is ignored by
-// resolveGraphStore, as it is for every class: on this side the controller's
-// CachingStore over the binding is the emitter (class_store_cache.go). The
-// one-shot CLI's side is covered by class_store_emit.go. The result is wrapped in
-// the strongly-typed beads.GraphStore so the
-// graph class is statically visible to callers; the wrapper carries the same
-// underlying store value, so runtime behavior is unchanged.
+// GraphBeadStore returns the store backing graph-class beads: the binding when
+// the routes relocate graph, else the city work store. On this side the
+// controller's CachingStore over the binding is the emitter
+// (class_store_cache.go); the one-shot CLI's is class_store_emit.go.
 func (cs *controllerState) GraphBeadStore() beads.GraphStore {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	return beads.GraphStore{Store: resolveGraphStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
+	return cs.Stores().Graph()
 }
 
-// OrdersBeadStore returns the store backing orders-class beads. At the default
-// backend resolveOrderStore returns cityBeadStore, so this is byte-identical to
-// CityBeadStore; when [beads.classes.orders] is relocated it returns the
-// per-class store, which is the store the order dispatcher creates every
-// tracking bead in. cs.eventProv is the recorder, matching the nudges/sessions
-// wiring. The result is wrapped in the strongly-typed beads.OrdersStore so the
-// orders class is statically visible to callers; the wrapper carries the same
-// underlying store value, so runtime behavior is unchanged.
+// OrdersBeadStore returns the store backing orders-class beads: the binding
+// when the routes relocate orders, else the city work store. It is the store
+// the order dispatcher creates every tracking bead in.
 func (cs *controllerState) OrdersBeadStore() beads.OrdersStore {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	return beads.OrdersStore{Store: resolveOrderStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
+	return cs.Stores().Orders()
 }
 
 // ClassBindingHasLegacyResidents replays the boot census for one binding store.

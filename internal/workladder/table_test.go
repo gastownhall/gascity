@@ -33,9 +33,12 @@ func TestDecisionTable(t *testing.T) {
 		return e
 	}
 	rows := []row{
-		{"trigger/assigned, attempts < 3", ent(KindTrigger, RungAssigned, 2, nil), nil},
-		{"trigger/assigned, attempts >= 3", ent(KindTrigger, RungAssigned, 3, nil), nil},
-		{"trigger/assigned, >= 3, recycled 10m ago", ent(KindTrigger, RungAssigned, 4, func(e *Entry) { e.RecycleAt = now.Add(-10 * time.Minute) }), nil},
+		{"trigger/assigned, attempts 0", ent(KindTrigger, RungAssigned, 0, nil), nil},
+		{"trigger/assigned, attempts 1", ent(KindTrigger, RungAssigned, 1, nil), nil},
+		{"trigger/assigned, attempts < 3, alerted", ent(KindTrigger, RungAssigned, 2, func(e *Entry) { e.Escalated = true }), nil},
+		{"trigger/assigned, attempts >= 3, alerted", ent(KindTrigger, RungAssigned, 3, func(e *Entry) { e.Escalated = true }), nil},
+		{"trigger/assigned, attempts >= 3, never alerted", ent(KindTrigger, RungAssigned, 3, nil), nil},
+		{"trigger/assigned, >= 3, recycled 10m ago", ent(KindTrigger, RungAssigned, 4, func(e *Entry) { e.Escalated, e.RecycleAt = true, now.Add(-10*time.Minute) }), nil},
 		{"continuation/assigned, attempts < 6", ent(KindContinuation, RungAssigned, 5, nil), nil},
 		{"continuation/assigned, attempts >= 6", ent(KindContinuation, RungAssigned, 6, nil), nil},
 		{"continuation/assigned, >= 6, alerted", ent(KindContinuation, RungAssigned, 7, func(e *Entry) { e.Escalated = true }), nil},

@@ -29,7 +29,7 @@ func cliGraphrouteDeps(cityPath string) graphroute.Deps {
 	return graphroute.Deps{
 		CityPath:              cityPath,
 		Resolver:              cliAgentResolver{},
-		DirectSessionResolver: cliDirectSessionResolver,
+		DirectSessionResolver: cliDirectSessionResolver(nil),
 	}
 }
 
