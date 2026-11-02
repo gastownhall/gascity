@@ -40,7 +40,9 @@ func TestValidateK8sSecretProjectionRejectsMalformedEntries(t *testing.T) {
 		{"blank env secret", K8sConfig{SecretEnv: []K8sSecretEnv{{Name: "TOKEN", Key: "k"}}}, "non-blank"},
 		{"blank env key", K8sConfig{SecretEnv: []K8sSecretEnv{{Name: "TOKEN", Secret: "s"}}}, "non-blank"},
 		{"invalid env name", K8sConfig{SecretEnv: []K8sSecretEnv{{Name: "bad-name", Secret: "s", Key: "k"}}}, "environment variable"},
-		{"reserved worker marker", K8sConfig{SecretEnv: []K8sSecretEnv{{Name: K8sWorkerPodMarkerEnv, Secret: "s", Key: "k"}}}, "reserved for the Kubernetes worker marker"},
+		{"reserved worker marker", K8sConfig{SecretEnv: []K8sSecretEnv{{Name: K8sWorkerPodMarkerEnv, Secret: "s", Key: "k"}}}, "reserved"},
+		{"reserved session identity", K8sConfig{SecretEnv: []K8sSecretEnv{{Name: "GC_INSTANCE_TOKEN", Secret: "s", Key: "k"}}}, "reserved"},
+		{"reserved store identity", K8sConfig{SecretEnv: []K8sSecretEnv{{Name: "BEADS_DOLT_SERVER_DATABASE", Secret: "s", Key: "k"}}}, "reserved"},
 		{"duplicate env name", K8sConfig{SecretEnv: []K8sSecretEnv{{Name: "TOKEN", Secret: "s", Key: "k"}, {Name: "TOKEN", Secret: "s2", Key: "k"}}}, "duplicated"},
 		{"blank mount secret", K8sConfig{SecretMounts: []K8sSecretMount{{MountPath: "/secret"}}}, "non-blank"},
 		{"blank mount path", K8sConfig{SecretMounts: []K8sSecretMount{{Secret: "s"}}}, "non-blank"},
@@ -54,5 +56,13 @@ func TestValidateK8sSecretProjectionRejectsMalformedEntries(t *testing.T) {
 				t.Fatalf("validation error = %v, want text %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestK8sSecretEnvNameReservedAllowsCredentials(t *testing.T) {
+	for _, name := range []string{"GITHUB_TOKEN", "GC_DOLT_PASSWORD", "GC_DOLT_USER", "BEADS_DOLT_PASSWORD", "BEADS_DOLT_SERVER_USER"} {
+		if K8sSecretEnvNameReserved(name) {
+			t.Errorf("K8sSecretEnvNameReserved(%q) = true, want false", name)
+		}
 	}
 }
