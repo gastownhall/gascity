@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -836,27 +835,27 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 // conversation the provider never started, so a resume of it would exit at
 // once: the handle can name a new conversation (a session-id flag), and the
 // keyed transcript probe reads the key's transcript absent in the roots and
-// work dir this launch uses. A provider the probe cannot read, or a launch
-// without a work dir, is not judged unlaunched. The caller restricts it to a
+// work dir this launch uses: the handle's search paths plus the projects
+// root of an absolute CLAUDE_CONFIG_DIR in the launch env, merged rather than
+// pinned, so an extra root can only keep a resume. A provider the probe
+// cannot read, or a launch without a work dir, is not judged unlaunched. The caller restricts it to a
 // row with no committed conversation (an empty started_config_hash), which is
 // what every key rotation leaves.
 func (h *SessionHandle) unlaunchedSessionKey(info sessionpkg.Info) bool {
 	if h.session.Resume.SessionIDFlag == "" || strings.TrimSpace(info.SessionKey) == "" {
 		return false
 	}
-	isClaude := strings.Contains(strings.ToLower(strings.TrimSpace(info.Provider)), "claude")
-	probePaths := h.searchPaths
-	if len(probePaths) == 0 || !isClaude {
-		probePaths = DefaultSearchPaths()
-	}
-	if dir := strings.TrimSpace(h.session.Env["CLAUDE_CONFIG_DIR"]); isClaude && filepath.IsAbs(dir) {
-		probePaths = MergeSearchPaths(append(append([]string(nil), probePaths...), filepath.Join(dir, "projects")))
-	}
-	workDir := strings.TrimSpace(h.runtimeHints().WorkDir)
+	hints := h.runtimeHints()
+	workDir := strings.TrimSpace(hints.WorkDir)
 	if workDir == "" {
 		workDir = info.WorkDir
 	}
-	present, probeable := workertranscript.HasKeyedTranscript(probePaths, info.Provider, workDir, info.SessionKey)
+	launchRoots := h.searchPaths
+	if root, ok := workertranscript.ClaudeConfigProjectsRoot(hints.Env); ok {
+		launchRoots = MergeSearchPaths(append(append([]string(nil), launchRoots...), root))
+	}
+	provider := h.historyProvider(info)
+	present, probeable := workertranscript.HasKeyedTranscript(workertranscript.KeyedProbeRoots(launchRoots, provider), provider, workDir, info.SessionKey)
 	return probeable && !present
 }
 

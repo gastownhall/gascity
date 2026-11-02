@@ -272,3 +272,87 @@ func TestSessionHandleAttachAfterRestartHandoffStartsWithSessionID(t *testing.T)
 		t.Fatalf("Attach start command = %q, want --session-id %s and no --resume", got, rotatedKey)
 	}
 }
+
+func TestStartCommandRotatedKeyClaudeConfigDir(t *testing.T) {
+	tests := []struct {
+		name string
+		// env returns CLAUDE_CONFIG_DIR's value and the root, if any, the
+		// transcript is written under.
+		env     func(t *testing.T) (value, transcriptRoot string)
+		inHints bool // set it in the launch hints' env, not the session env
+		want    string
+	}{
+		{
+			name: "AC-5 transcript only under the absolute config dir resumes",
+			env: func(t *testing.T) (string, string) {
+				dir := t.TempDir()
+				return dir, filepath.Join(dir, "projects")
+			},
+			want: "claude --resume " + rotatedKey,
+		},
+		{
+			name: "AC-5 absolute config dir without the transcript starts with session id",
+			env:  func(t *testing.T) (string, string) { return t.TempDir(), "" },
+			want: "claude --session-id " + rotatedKey,
+		},
+		{
+			name: "AC-5 absolute config dir in the launch hints resumes",
+			env: func(t *testing.T) (string, string) {
+				dir := t.TempDir()
+				return dir, filepath.Join(dir, "projects")
+			},
+			inHints: true,
+			want:    "claude --resume " + rotatedKey,
+		},
+		{
+			name: "AC-5 whitespace around an absolute config dir is trimmed",
+			env: func(t *testing.T) (string, string) {
+				dir := t.TempDir()
+				return "  " + dir + "  ", filepath.Join(dir, "projects")
+			},
+			want: "claude --resume " + rotatedKey,
+		},
+		{
+			name: "relative config dir adds no root",
+			env: func(t *testing.T) (string, string) {
+				cwd := t.TempDir()
+				t.Chdir(cwd)
+				return "rel/claude", filepath.Join(cwd, "rel", "claude", "projects")
+			},
+			want: "claude --session-id " + rotatedKey,
+		},
+		{
+			name: "tilde config dir adds no root",
+			env: func(t *testing.T) (string, string) {
+				home, err := os.UserHomeDir()
+				if err != nil {
+					t.Fatalf("UserHomeDir: %v", err)
+				}
+				return "~/.claude-alt", filepath.Join(home, ".claude-alt", "projects")
+			},
+			want: "claude --session-id " + rotatedKey,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newRotatedKeyFixture(t, "claude", claudeSpec())
+			value, transcriptRoot := tt.env(t)
+			env := map[string]string{"CLAUDE_CONFIG_DIR": value}
+			if tt.inHints {
+				f.handle.session.Hints.Env = env
+			} else {
+				f.handle.session.Env = env
+			}
+			if transcriptRoot != "" {
+				writeKeyedTranscript(t, transcriptRoot, f.workDir, f.key)
+			}
+			got, err := f.handle.startCommand(f.id)
+			if err != nil {
+				t.Fatalf("startCommand: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("startCommand() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
