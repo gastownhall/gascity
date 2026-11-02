@@ -399,6 +399,14 @@ func providerProjectionCases(t *testing.T) []providerProjectionCase {
 		"provider": "claude-max", "provider_kind": "claude", "builtin_ancestor": "claude",
 		"resume_flag": "--resume", "resume_style": "flag", "resume_command": "claude --resume", "session_id_flag": "--session-id",
 	}
+	// startCommand is the unnamed resolution of a start-command escape hatch.
+	startCommand := func(agent *config.Agent, ws *config.Workspace) *config.ResolvedProvider {
+		resolved, err := config.ResolveProvider(agent, ws, nil, nil)
+		if err != nil || resolved == nil || resolved.Name != "" {
+			t.Fatalf("ResolveProvider(start command) = %+v, %v; want an unnamed resolution", resolved, err)
+		}
+		return resolved
+	}
 	return []providerProjectionCase{
 		{
 			name: "AC-1/a codex wrapper switched to claude",
@@ -456,6 +464,18 @@ func providerProjectionCases(t *testing.T) []providerProjectionCase {
 			stored:   map[string]string{"provider": "my-claude", "provider_kind": "claude", "builtin_ancestor": "claude", "resume_flag": "--resume", "resume_command": ""},
 			resolved: &config.ResolvedProvider{Name: "my-claude", BuiltinAncestor: "claude", ResumeFlag: "--resume"},
 			want:     map[string]string{"provider": "my-claude", "provider_kind": "claude", "builtin_ancestor": "claude", "resume_flag": "--resume"},
+		},
+		{
+			name:     "AC-4/an agent start command with its own resume command",
+			stored:   claudeMax,
+			resolved: startCommand(&config.Agent{Name: "worker", StartCommand: "run-worker", ResumeCommand: "run-worker --resume {{.SessionKey}}"}, nil),
+			want:     map[string]string{"provider": "claude-max", "resume_command": "run-worker --resume {{.SessionKey}}"},
+		},
+		{
+			name:     "AC-4/a workspace start command",
+			stored:   claudeMax,
+			resolved: startCommand(&config.Agent{Name: "worker"}, &config.Workspace{StartCommand: "run-city"}),
+			want:     map[string]string{"provider": "claude-max"},
 		},
 	}
 }
