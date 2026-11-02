@@ -1938,6 +1938,7 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	for _, want := range []string{
 		"Gas City hooks for MiMo Code.",
 		"const GC_MIMOCODE_HOOK_VERSION = 4",
+		"managedSessionIdentityPresent()",
 		"pending.child.stdin?.end();",
 		"appendVolatileSystem",
 		"const turns = new Map()",
@@ -2481,6 +2482,7 @@ pending.child.stdin?.end();
 function appendVolatileSystem(system, volatile) {}
 const turns = new Map();
 if (state.userMessageIDs.has(messageID)) {}
+if (!managedSessionIdentityPresent()) {}
 `)
 	versionless := []byte(`// Gas City hooks for MiMo Code.
 const GC_BIN = process.env.GC_BIN || "gc";
@@ -2488,6 +2490,7 @@ pending.child.stdin?.end();
 function appendVolatileSystem(system, volatile) {}
 const turns = new Map();
 if (state.userMessageIDs.has(messageID)) {}
+if (!managedSessionIdentityPresent()) {}
 `)
 	stale := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 4"), []byte("GC_MIMOCODE_HOOK_VERSION = 3"), 1)
 	future := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 4"), []byte("GC_MIMOCODE_HOOK_VERSION = 5"), 1)
@@ -2495,6 +2498,7 @@ if (state.userMessageIDs.has(messageID)) {}
 	volatileInHeader := bytes.Replace(current, []byte("function appendVolatileSystem(system, volatile) {}\n"), nil, 1)
 	sharedTurnState := bytes.Replace(current, []byte("const turns = new Map();\n"), []byte("let drainedTurnID = null;\n"), 1)
 	idOrderTurnGate := bytes.Replace(current, []byte("if (state.userMessageIDs.has(messageID)) {}\n"), []byte("if (messageID <= state.currentTurnID) {}\n"), 1)
+	unguarded := bytes.Replace(current, []byte("if (!managedSessionIdentityPresent()) {}\n"), nil, 1)
 
 	if !mimocodeHookNeedsUpgrade(versionless) {
 		t.Fatal("versionless managed MiMo Code hook did not request upgrade")
@@ -2519,6 +2523,9 @@ if (state.userMessageIDs.has(messageID)) {}
 	}
 	if !mimocodeHookNeedsUpgrade(idOrderTurnGate) {
 		t.Fatal("MiMo Code hook that opens turns by message-id order did not request upgrade")
+	}
+	if !mimocodeHookNeedsUpgrade(unguarded) {
+		t.Fatal("MiMo Code hook without the unmanaged-session guard did not request upgrade")
 	}
 }
 

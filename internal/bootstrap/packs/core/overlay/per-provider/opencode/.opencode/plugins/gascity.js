@@ -23,12 +23,13 @@
 // any other session in the directory share this module's closure, so all
 // per-turn state below is keyed by session id.
 //
-// OpenCode auto-discovers this file for EVERY OpenCode launch in the work
-// dir, including a developer's personal session started by hand. The plugin
+// OpenCode loads this file for every OpenCode launch in the work dir,
+// including a developer's personal session started by hand. The plugin
 // therefore registers hooks only when gc's session identity is present in
-// the environment; otherwise every lifecycle call it would make is
-// guaranteed to fail (gc's session-facing commands require that identity)
-// and the failures surface as warnings in a session Gas City does not own.
+// the environment. Outside a gc session the injection commands have nothing
+// to return and gc handoff exits 1, so the hooks would only spawn gc on
+// every generation and log a failed handoff on every compaction, in a
+// session Gas City does not own.
 
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
@@ -132,12 +133,13 @@ function sessionIDFromEvent(event) {
   );
 }
 
-// Mirrors gc's own hookHasManagedIdentity (cmd/gc/cmd_prime.go): the session
-// lifecycle seeds GC_SESSION_ID, GC_SESSION_NAME and GC_ALIAS into every
-// managed session's environment, and GC_AGENT/GC_TEMPLATE come from templated
-// starts. A process with none of these was not started by gc, so gc handoff
-// would exit 1 ("not in session context") and the injection commands would
-// return nothing.
+// managedSessionIdentityPresent reports whether gc started this process. gc
+// puts GC_SESSION_ID and GC_SESSION_NAME in the environment of every session
+// it starts, with GC_ALIAS, GC_AGENT and GC_TEMPLATE where the session has
+// them. These are the session keys of gc's hookHasManagedIdentity
+// (cmd/gc/cmd_prime.go). Its other key, GC_MANAGED_SESSION_HOOK, marks gc's
+// own hook commands rather than a session, so it says nothing about who
+// started this process.
 function managedSessionIdentityPresent() {
   return [
     "GC_SESSION_ID",

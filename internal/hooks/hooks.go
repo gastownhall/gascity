@@ -570,7 +570,11 @@ func mimocodeHookNeedsUpgrade(existing []byte) bool {
 		!hookContains(src, "const turns = new Map()") ||
 		// A turn opens on an unseen user-message id, not a higher one
 		// (#6629, same shape as OpenCode).
-		!hookContains(src, "state.userMessageIDs.has(messageID)")
+		!hookContains(src, "state.userMessageIDs.has(messageID)") ||
+		// MiMo Code loads the workdir plugin for human-launched sessions
+		// too; without the identity guard the plugin runs gc lifecycle
+		// commands in sessions gc does not manage (same shape as OpenCode).
+		!hookContains(src, "managedSessionIdentityPresent()")
 }
 
 func mimocodeHookVersion(content string) int {
