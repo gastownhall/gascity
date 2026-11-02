@@ -9,18 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
-- **Fresh hook-enabled OpenCode and MiMo Code CLI sessions no longer receive
-  the role template as a user message.** The plugin supplies it in the system
-  prompt on local tmux/Herdr runtimes. Configured startup nudges and initial
-  messages take precedence. With neither, manual sessions get a short role
-  confirmation request, pool workers get the existing claim instruction, and
-  other automated sessions get a short startup instruction. An agent whose
-  template renders no role gets no kickoff and starts with the beacon alone.
-  Resumes do not repeat this kickoff. ACP, other runtimes and
-  `hooks_installed = false` keep launch-time role delivery, and a client's
-  provider chat keeps its beacon-only start. `gc prime --strict` reports a
-  hook-carried role as `effective_mode=hook`, and `gc doctor` no longer warns
-  that it falls back to a post-start nudge.
+- **`gc prime --strict --json` and `gc doctor --json` report a role the
+  provider hook carries.** For an agent on builtin OpenCode or MiMo Code, or
+  a provider wrapped over one, on the CLI transport in a city whose
+  `[session] provider` is `tmux`, `herdr` or unset,
+  `prompt_budget.effective_mode` is now `hook`, with `oversized_fallback`
+  false, instead of the launch carrier (`flag`, `argv`, `nudge` or
+  `nudge-fallback`). The `prompt-delivery-budget` check no longer warns that
+  such a role's oversized prompt falls back to a nudge. An agent with
+  `hooks_installed = false` reports as before. (#6982)
 - **Read commands print one JSON document whichever route serves them
   (#8453).** In 1.5.1 a supervisor-hosted city (the default shape, with no
   `[api]` port) read these commands locally, except `gc status`, which has
