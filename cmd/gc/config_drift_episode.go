@@ -41,11 +41,7 @@ type driftEpisodeStep struct {
 func driftEpisode(info session.Info, key string, now time.Time, horizon time.Duration) driftEpisodeStep {
 	since, ok := parseRFC3339Metadata(info.ConfigDriftDeferredAt)
 	if !ok || since.After(now) || info.ConfigDriftDeferredKey != key {
-		return driftEpisodeStep{Since: now, Patch: session.MetadataPatch{
-			namedSessionConfigDriftDeferredAtMetadata:  now.UTC().Format(time.RFC3339),
-			namedSessionConfigDriftDeferredKeyMetadata: key,
-			configDriftEscalatedAtMetadata:             "",
-		}}
+		return driftEpisodeStep{Since: now, Patch: driftEpisodePatch(key, now, false)}
 	}
 	if m, ok := parseRFC3339Metadata(info.ConfigDriftEscalatedAt); ok && !m.Before(since) && !m.After(now) {
 		return driftEpisodeStep{Since: since}
@@ -53,7 +49,22 @@ func driftEpisode(info session.Info, key string, now time.Time, horizon time.Dur
 	if due := since.Add(horizon); now.Before(due) {
 		return driftEpisodeStep{Since: since, Due: due}
 	}
-	return driftEpisodeStep{Since: since, Escalated: true, Patch: session.MetadataPatch{configDriftEscalatedAtMetadata: now.UTC().Format(time.RFC3339)}}
+	return driftEpisodeStep{Since: since, Escalated: true, Patch: driftEpisodePatch(key, now, true)}
+}
+
+// driftEpisodePatch is a held-work drift episode's write at now: its one
+// escalation's marker, or else the start of an episode under key, clearing
+// any escalation marker an earlier episode left.
+func driftEpisodePatch(key string, now time.Time, escalated bool) session.MetadataPatch {
+	at := now.UTC().Format(time.RFC3339)
+	if escalated {
+		return session.MetadataPatch{configDriftEscalatedAtMetadata: at}
+	}
+	return session.MetadataPatch{
+		namedSessionConfigDriftDeferredAtMetadata:  at,
+		namedSessionConfigDriftDeferredKeyMetadata: key,
+		configDriftEscalatedAtMetadata:             "",
+	}
 }
 
 // driftDeferralHorizon is cfg's held-work escalation horizon, the default

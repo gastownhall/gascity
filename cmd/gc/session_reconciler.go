@@ -6571,13 +6571,14 @@ func recordNamedSessionConfigDriftDeferredAt(info sessionpkg.Info, sessFront *se
 // (#8345): an observation that writes (its first, or its one escalation
 // past horizon) folds the write into the tick and records
 // session.config_drift_deferred; a failed write is logged and records
-// nothing, for a later pass to retry.
+// nothing, for a later pass to retry. The write is driftEpisodePatch's, the
+// registered builder step.Patch comes from, so its keys resolve as advisory.
 func recordConfigDriftHeldWorkEpisode(info sessionpkg.Info, sessFront *sessionpkg.Store, tick *reconcileTick, rec events.Recorder, horizon time.Duration, driftKey string, fields []string, workBeadID string, now time.Time, stderr io.Writer) {
 	step := driftEpisode(info, driftKey, now, horizon)
 	if step.Patch == nil || sessFront == nil || info.ID == "" {
 		return
 	}
-	if err := sessFront.ApplyPatch(info.ID, step.Patch); err != nil {
+	if err := sessFront.ApplyPatch(info.ID, driftEpisodePatch(driftKey, now, step.Escalated)); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: recording config-drift deferral for %s: %v\n", info.ID, err) //nolint:errcheck
 		return
 	}
