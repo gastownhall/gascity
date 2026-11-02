@@ -2,6 +2,7 @@
 package transcript
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -170,6 +171,19 @@ func KeyedProbeRoots(searchPaths []string, provider string) []string {
 		return sessionlog.DefaultSearchPaths()
 	}
 	return searchPaths
+}
+
+// ClaudeConfigProjectsRoot resolves the claude transcript root an absolute
+// CLAUDE_CONFIG_DIR in env names: D/projects. A value that is empty,
+// relative, or home-relative (~) names no root this process can resolve —
+// the provider resolves it against its own working dir and home — so it
+// pins nothing.
+func ClaudeConfigProjectsRoot(env map[string]string) (string, bool) {
+	dir := strings.TrimSpace(env["CLAUDE_CONFIG_DIR"])
+	if dir == "" || dir[0] == '~' || !filepath.IsAbs(dir) {
+		return "", false
+	}
+	return filepath.Join(dir, "projects"), true
 }
 
 // HasKeyedTranscript reports whether the per-session ("keyed") transcript that

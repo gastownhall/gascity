@@ -245,6 +245,100 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 	}
 }
 
+// TestStartCommandRotatedKeyClaudeConfigDir pins how the launch
+// environment's CLAUDE_CONFIG_DIR feeds the rotated-key probe: an absolute D
+// adds D/projects to the probe roots, so a transcript that exists only there
+// keeps the resume; a relative or `~` D adds nothing the probe reads, so the
+// start switches to the session-id form.
+func TestStartCommandRotatedKeyClaudeConfigDir(t *testing.T) {
+	tests := []struct {
+		name       string
+		configDir  func(t *testing.T) string
+		transcript func(t *testing.T, configDir, workDir string)
+		want       string
+	}{
+		{
+			name:       "absolute config dir with the transcript keeps the resume",
+			configDir:  func(t *testing.T) string { return filepath.Join(t.TempDir(), "claude") },
+			transcript: writeClaudeConfigDirTranscript,
+			want:       "mycmd --resume " + rotatedSessionKey,
+		},
+		{
+			name:      "absolute config dir without the transcript starts a new session",
+			configDir: func(t *testing.T) string { return filepath.Join(t.TempDir(), "claude") },
+			want:      "mycmd --session-id " + rotatedSessionKey,
+		},
+		{
+			name:      "relative config dir adds no probe root",
+			configDir: func(*testing.T) string { return "rel/claude" },
+			transcript: func(t *testing.T, configDir, workDir string) {
+				// The transcript exists at the relative path — resolved from the
+				// process CWD — yet the probe reads no root for it.
+				base := t.TempDir()
+				t.Chdir(base)
+				writeClaudeConfigDirTranscript(t, filepath.Join(base, configDir), workDir)
+			},
+			want: "mycmd --session-id " + rotatedSessionKey,
+		},
+		{
+			name:      "home-relative config dir adds no probe root",
+			configDir: func(*testing.T) string { return "~/.claude-alt" },
+			transcript: func(t *testing.T, _, workDir string) {
+				home, err := os.UserHomeDir()
+				if err != nil {
+					t.Fatalf("UserHomeDir: %v", err)
+				}
+				writeClaudeConfigDirTranscript(t, filepath.Join(home, ".claude-alt"), workDir)
+			},
+			want: "mycmd --session-id " + rotatedSessionKey,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := SessionSpec{
+				Template: "worker",
+				Command:  "mycmd",
+				Provider: "claude",
+				Resume: sessionpkg.ProviderResume{
+					ResumeFlag:    "--resume",
+					ResumeStyle:   "flag",
+					SessionIDFlag: "--session-id",
+				},
+			}
+			handle, store, info, _ := rotatedKeyRow(t, spec, "claude", "mycmd")
+			applyRestartHandoff(t, store, info.ID, rotatedSessionKey)
+			configDir := tt.configDir(t)
+			// Whitespace around the value must not defeat the absolute-path read.
+			handle.session.Env = map[string]string{"CLAUDE_CONFIG_DIR": "  " + configDir + "  "}
+			if tt.transcript != nil {
+				tt.transcript(t, configDir, info.WorkDir)
+			}
+
+			got, err := handle.startCommand(info.ID)
+			if err != nil {
+				t.Fatalf("startCommand: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("startCommand() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// writeClaudeConfigDirTranscript writes the claude-family keyed transcript
+// under configDir/projects: the layout an absolute CLAUDE_CONFIG_DIR pins.
+func writeClaudeConfigDirTranscript(t *testing.T, configDir, workDir string) {
+	t.Helper()
+	dir := filepath.Join(configDir, "projects", sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	writeWorkerTestJSONL(t, filepath.Join(dir, rotatedSessionKey+".jsonl"), []map[string]any{
+		{"type": "user", "message": `{"role":"user","content":"hi"}`},
+	})
+}
+
 // TestSessionHandleAttachAfterRestartHandoffStartsWithSessionID runs the
 // guard through the operator funnel a blank pane actually comes through:
 // Start launches the first conversation under a minted key, a restart handoff

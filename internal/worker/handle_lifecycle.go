@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -847,8 +846,8 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 		workDir = info.WorkDir
 	}
 	launchRoots := h.adapter.SearchPaths
-	if dir := strings.TrimSpace(hints.Env["CLAUDE_CONFIG_DIR"]); filepath.IsAbs(dir) {
-		launchRoots = MergeSearchPaths(append(append([]string(nil), launchRoots...), filepath.Join(dir, "projects")))
+	if root, ok := workertranscript.ClaudeConfigProjectsRoot(hints.Env); ok {
+		launchRoots = MergeSearchPaths(append(append([]string(nil), launchRoots...), root))
 	}
 	present, probeable := workertranscript.HasKeyedTranscript(workertranscript.KeyedProbeRoots(launchRoots, provider), provider, workDir, info.SessionKey)
 	if h.session.Resume.SessionIDFlag != "" &&
