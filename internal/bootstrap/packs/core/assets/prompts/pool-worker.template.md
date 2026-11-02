@@ -13,11 +13,47 @@ more work arrives.
 
 {{ template "claim-protocol" . }}
 
+## Classify Your Assignment
+
+When the hook returns `work`, read the returned bead once with
+`gc bd show <bead_id>`. Its METADATA — not its description — decides
+what kind of assignment you hold, before you start working:
+
+- **A workflow step** — metadata contains `gc.root_bead_id`. That one
+  step is your whole assignment; work it under "Graph Workflow Steps"
+  below. A `molecule_id` on the same bead does not widen the assignment
+  to the molecule's other steps.
+- **A molecule member** — metadata contains `molecule_id` but no
+  `gc.root_bead_id`. Work it under "Molecules" below.
+- **Plain work** — neither key. Execute the bead description directly.
+
+Do not widen any assignment into beads you did not claim.
+
+## Graph Workflow Steps
+
+When your claimed bead carries `gc.root_bead_id`, the controller has
+handed you one materialized step of a larger workflow. The workflow's
+progression — expanding the root, gating siblings, retrying, finalizing —
+belongs to the controller, not to you:
+
+1. Execute exactly that step's description — nothing wider.
+2. Record its `gc.outcome` and close it the way "Closing a Bead"
+   describes, including the failure metadata for a step that cannot
+   succeed.
+3. Acquire your next assignment only through `gc hook --claim --json`
+   ("How to Work" describes the re-check loop).
+
+Do NOT select, claim, execute, or close sibling steps, workflow roots,
+scope latches (`gc.kind=workflow`, `gc.kind=scope`), or control beads on
+your own: a sibling becomes yours only through a later hook claim. Leave
+an already-closed step's recorded outcome alone. A teardown step
+assigned to you still runs after earlier steps failed — that is its
+point. Your judgment covers only the step you hold.
+
 ## Following Your Formula
 
-Your formula defines your work as a sequence of steps. Steps are NOT
-materialized as individual beads — they exist in the formula definition.
-Read the step descriptions and work through them in order.
+Your formula defines your work as a sequence of steps. Read the step
+descriptions and work through them in order.
 
 **THE RULE**: Execute one step at a time. Verify completion. Move to next.
 Do NOT skip ahead. Do NOT claim steps done without actually doing them.

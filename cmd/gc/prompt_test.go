@@ -1659,3 +1659,142 @@ func TestRenderPromptCityRootFragmentsAbsentNoEffect(t *testing.T) {
 		t.Errorf("renderPrompt(no city-root fragments) = %q, want %q", got, want)
 	}
 }
+
+// TestPoolWorkerPromptDoesNotDenyMaterializedGraphSteps pins that the
+// rendered pool-worker prompt does not tell a worker its formula steps are
+// never materialized as beads. Under graph.v2 the hook hands the worker one
+// materialized step bead (gc.root_bead_id set); a prompt denying that steers
+// the worker into navigating molecule siblings it never claimed. The legacy
+// Molecules section must survive alongside the graph guidance.
+func TestPoolWorkerPromptDoesNotDenyMaterializedGraphSteps(t *testing.T) {
+	chdirToRealPackageDir(t)
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("filepath.Abs(repo root): %v", err)
+	}
+	coreDir := filepath.Join(repoRoot, "internal", "bootstrap", "packs", "core")
+	promptPath := filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md")
+
+	var stderr strings.Builder
+	got := renderPrompt(fsys.OSFS{}, t.TempDir(), "", promptPath, PromptContext{AgentName: "claude"}, "", &stderr,
+		[]string{coreDir}, nil, nil)
+	if stderr.Len() != 0 {
+		t.Fatalf("renderPrompt(pool-worker) wrote to stderr: %s", stderr.String())
+	}
+	flat := strings.Join(strings.Fields(got), " ")
+	if strings.Contains(flat, "Steps are NOT materialized as individual beads") {
+		t.Errorf("pool-worker prompt denies materialized step beads, contradicting graph.v2 hook-claimed steps:\n%s", got)
+	}
+	if !strings.Contains(got, "## Molecules") {
+		t.Errorf("pool-worker prompt lost the legacy Molecules section:\n%s", got)
+	}
+}
+
+// renderPoolWorkerPrompt renders the shipped pool-worker template from the
+// on-disk source tree with the core pack on the pack-dir list, the way a
+// composed city does, and fails on any render warning.
+func renderPoolWorkerPrompt(t *testing.T) string {
+	t.Helper()
+	chdirToRealPackageDir(t)
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("filepath.Abs(repo root): %v", err)
+	}
+	coreDir := filepath.Join(repoRoot, "internal", "bootstrap", "packs", "core")
+	promptPath := filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md")
+
+	var stderr strings.Builder
+	got := renderPrompt(fsys.OSFS{}, t.TempDir(), "", promptPath, PromptContext{AgentName: "claude"}, "", &stderr,
+		[]string{coreDir}, nil, nil)
+	if stderr.Len() != 0 {
+		t.Fatalf("renderPrompt(pool-worker) wrote to stderr: %s", stderr.String())
+	}
+	return got
+}
+
+// poolWorkerPromptSection returns the body of the level-two section whose
+// heading starts with the given prefix, up to the next level-two heading.
+func poolWorkerPromptSection(t *testing.T, body, heading string) string {
+	t.Helper()
+	marker := "\n## " + heading
+	start := strings.Index(body, marker)
+	if start < 0 {
+		t.Fatalf("pool-worker prompt has no %q section:\n%s", "## "+heading, body)
+	}
+	start += len(marker)
+	if end := strings.Index(body[start:], "\n## "); end >= 0 {
+		return body[start : start+end]
+	}
+	return body[start:]
+}
+
+// poolWorkerFlat normalizes whitespace so assertions do not depend on the
+// template's line wrapping.
+func poolWorkerFlat(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules renders the
+// shipped pool-worker prompt and pins, section by section, that it carries
+// two distinct execution paths: hook-claimed graph workflow steps (execute
+// exactly the claimed step; the controller owns progression) and legacy
+// molecules (root inspection first, then mol navigation), alongside plain
+// and root-only formula work and the drain-aware startup contract. The
+// subtests assert section boundaries and order, not document-wide word
+// presence: a guard placed in the wrong section must fail.
+func TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules(t *testing.T) {
+	got := renderPoolWorkerPrompt(t)
+
+	t.Run("AC-1: a claimed workflow step is the whole assignment", func(t *testing.T) {
+		// Section order: the startup protocol from the claim fragment is
+		// followed by assignment classification, then the graph-step path,
+		// then the legacy Molecules path.
+		var last int
+		for _, heading := range []string{"Startup Protocol", "Classify Your Assignment", "Graph Workflow Steps", "Molecules"} {
+			idx := strings.Index(got, "## "+heading)
+			if idx < 0 {
+				t.Fatalf("pool-worker prompt has no %q section:\n%s", heading, got)
+			}
+			if idx < last {
+				t.Errorf("section %q is out of order in the pool-worker prompt", heading)
+			}
+			last = idx
+		}
+
+		classify := poolWorkerFlat(poolWorkerPromptSection(t, got, "Classify Your Assignment"))
+		for _, want := range []string{
+			"`gc.root_bead_id`",
+			"`molecule_id`",
+			"does not widen the assignment",
+			"beads you did not claim",
+		} {
+			if !strings.Contains(classify, want) {
+				t.Errorf("Classify Your Assignment missing %q:\n%s", want, classify)
+			}
+		}
+
+		graph := poolWorkerFlat(poolWorkerPromptSection(t, got, "Graph Workflow Steps"))
+		for _, want := range []string{
+			"`gc.root_bead_id`",
+			"Execute exactly that step's description",
+			"`gc.outcome`",
+			"`gc hook --claim --json`",
+		} {
+			if !strings.Contains(graph, want) {
+				t.Errorf("Graph Workflow Steps missing %q:\n%s", want, graph)
+			}
+		}
+		// Execution, outcome and close stay limited to the claimed step:
+		// siblings, roots, latches and control beads are the controller's.
+		for _, want := range []string{
+			"sibling steps",
+			"scope latches",
+			"control beads",
+			"belongs to the controller",
+		} {
+			if !strings.Contains(graph, want) {
+				t.Errorf("Graph Workflow Steps does not reserve %q for the controller:\n%s", want, graph)
+			}
+		}
+	})
+}
