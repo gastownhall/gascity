@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -654,12 +656,14 @@ func CoreFingerprintBreakdown(cfg Config) BreakdownV1 {
 		// hashCoreFields. Between two breakdowns written by this binary, an
 		// unset value hashes to the same empty-input digest on both sides
 		// and never reports as drifted on its own. A breakdown stored by a
-		// binary that predates these keys has no entry for them at all, so
-		// on that session's first real drift both keys are listed with
-		// stored-hash=(absent) alongside the field that actually changed,
-		// until the restart re-stamps the breakdown. Parity with
-		// hashCoreFields is pinned by
-		// TestCoreFingerprintBreakdownCoversEveryCoreField; the legacy
+		// binary that predates these keys has no entry for them at all.
+		// Until core_hash_breakdown is next written (a start, relaunch,
+		// rebaseline or accepted soft reload), every drift the legacy
+		// reconciler reports for that session, deferred ticks included,
+		// lists both keys beside the field that actually changed: the
+		// config-drift diagnostic as stored-hash=(absent), the trace's
+		// drifted_fields by name. Parity with hashCoreFields is pinned by
+		// TestCoreFingerprintBreakdownCoversEveryCoreField, the absent-key
 		// rendering by TestLogDriftReportsFieldsAbsentFromStoredBreakdown.
 		"Upstream": fieldHash(func(h hash.Hash) {
 			hashOptionalString(h, "upstream", cfg.Upstream)
@@ -753,7 +757,7 @@ func LogCoreFingerprintDrift(w io.Writer, name string, storedJSON string, curren
 			fmt.Fprintf(w, "    Upstream: %q\n", current.Upstream) //nolint:errcheck // best-effort diag
 		case "OperatorEnv":
 			// Keys only: config-authored env may carry credentials.
-			fmt.Fprintf(w, "    OperatorEnv keys: %v\n", sortedKeys(current.OperatorEnv)) //nolint:errcheck // best-effort diag
+			fmt.Fprintf(w, "    OperatorEnv keys: %v\n", slices.Sorted(maps.Keys(current.OperatorEnv))) //nolint:errcheck // best-effort diag
 		case "Env":
 			fmt.Fprintf(w, "    Env: %v\n", filteredEnv(current.Env)) //nolint:errcheck // best-effort diag
 		case "MCPServers":
@@ -950,17 +954,6 @@ func renderCopyEntry(e BreakdownCopyEntry) string {
 		return fmt.Sprintf("%s (probed)", hash)
 	}
 	return fmt.Sprintf("src=%s", e.Src)
-}
-
-// sortedKeys returns the map's keys in sorted order for deterministic
-// diagnostic output.
-func sortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 // filteredEnv returns only the allow-listed env keys for diagnostic output.

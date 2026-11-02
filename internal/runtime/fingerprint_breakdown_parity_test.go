@@ -116,10 +116,10 @@ func TestCoreFingerprintBreakdownCoversEveryCoreField(t *testing.T) {
 	}
 }
 
-// TestCoreFingerprintBreakdownOptionalFieldsFollowCoreFraming pins that the
-// new optional fields hash exactly like hashCoreFields: nil and empty
-// OperatorEnv / unset Upstream contribute nothing, so their breakdown hashes
-// are identical for every config that does not set them.
+// TestCoreFingerprintBreakdownOptionalFieldsFollowCoreFraming pins how the
+// new optional entries treat unset values: nil and empty OperatorEnv hash
+// alike, map order does not matter, and setting OperatorEnv or Upstream
+// moves its key.
 func TestCoreFingerprintBreakdownOptionalFieldsFollowCoreFraming(t *testing.T) {
 	nilCfg := Config{Command: "claude"}
 	emptyCfg := Config{Command: "claude", OperatorEnv: map[string]string{}}
@@ -226,12 +226,12 @@ func TestLogDriftAttributesUpstreamOnlyChange(t *testing.T) {
 // TestLogDriftReportsFieldsAbsentFromStoredBreakdown pins the upgrade-window
 // behavior: a session started by a binary whose BreakdownV1 predates the
 // OperatorEnv/Upstream keys carries the current FingerprintVersion but no
-// entry for either. On that session's first real drift (here: Command),
+// entry for either. On a real drift of that session (here: Command),
 // diffBreakdownFields sees the current side's empty-input digest for both new
 // keys against nothing stored, so BOTH are listed with stored-hash=(absent)
 // alongside the field that actually changed — never "no per-field diff", and
-// never an empty stored-hash. The restart re-stamps the breakdown and the
-// absent entries disappear.
+// never an empty stored-hash. The next write of core_hash_breakdown carries
+// both keys, and the absent entries disappear.
 func TestLogDriftReportsFieldsAbsentFromStoredBreakdown(t *testing.T) {
 	stored := goldenFixtures()["comprehensive"]
 	legacy := CoreFingerprintBreakdown(stored)

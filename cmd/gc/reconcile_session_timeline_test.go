@@ -577,6 +577,8 @@ const timelineUsageCloseMarker = "fix #6672 (ga-q8t65w): a close stamps the usag
 // timelineBreakdownOperatorEnvUpstream admits the OperatorEnv and Upstream
 // keys in legacy's core_hash_breakdown: each section moved by those two rows
 // alone, both the empty-input digest, as no fixture sets either field.
+// ga-pr6626 is the contributor's own record of the ruling; it is not in the
+// maintainers' ledger.
 const timelineBreakdownOperatorEnvUpstream = "fix #6626 (ga-pr6626): core_hash_breakdown names OperatorEnv and Upstream, the core fields it left out (#6624)"
 
 // timelineRulingRefs are the rulings a later entry may name: the owner's
