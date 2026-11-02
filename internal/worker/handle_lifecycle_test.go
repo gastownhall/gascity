@@ -20,12 +20,11 @@ const rotatedKey = "rotated-key-k"
 
 // rotatedKeyOptions shapes the handle and row newRotatedKeyHandle builds.
 type rotatedKeyOptions struct {
-	provider      string            // bead and handle provider; "claude" when empty
-	providerKind  string            // provider_kind stamped on the bead
-	handleCommand string            // handle command; "claude" when empty
-	env           map[string]string // handle session env
-	hintsWorkDir  bool              // the handle's launch hints name their own work dir
-	noFlag        bool              // the handle resume config has no session-id flag
+	provider      string // bead and handle provider; "claude" when empty
+	providerKind  string // provider_kind stamped on the bead
+	handleCommand string // handle command; "claude" when empty
+	hintsWorkDir  bool   // the handle's launch hints name their own work dir
+	noFlag        bool   // the handle resume config has no session-id flag
 }
 
 // rotatedKeyFixture is a session row left by a restart handoff and the handle
@@ -95,13 +94,12 @@ func newRotatedKeyHandle(t *testing.T, opts rotatedKeyOptions) rotatedKeyFixture
 		Template: "worker",
 		Command:  handleCommand,
 		Provider: provider,
-		Env:      opts.env,
 		Resume:   handleResume,
 	}
 	workDir := beadWorkDir
 	if opts.hintsWorkDir {
 		workDir = t.TempDir()
-		spec.Hints = runtime.Config{WorkDir: workDir}
+		spec.Hints.WorkDir = workDir
 	}
 	root := t.TempDir()
 	handle, err := NewSessionHandle(SessionHandleConfig{
@@ -115,14 +113,15 @@ func newRotatedKeyHandle(t *testing.T, opts rotatedKeyOptions) rotatedKeyFixture
 	return rotatedKeyFixture{handle: handle, store: store, sp: sp, id: info.ID, workDir: workDir, root: root}
 }
 
-// writeKeyedTranscript writes key's claude transcript for workDir under root.
-func writeKeyedTranscript(t *testing.T, root, workDir, key string) {
+// writeKeyedTranscript writes rotatedKey's claude transcript for workDir under
+// root.
+func writeKeyedTranscript(t *testing.T, root, workDir string) {
 	t.Helper()
 	dir := filepath.Join(root, sessionlog.ProjectSlug(workDir))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(%q): %v", dir, err)
 	}
-	writeWorkerTestJSONL(t, filepath.Join(dir, key+".jsonl"), []map[string]any{
+	writeWorkerTestJSONL(t, filepath.Join(dir, rotatedKey+".jsonl"), []map[string]any{
 		{"type": "user", "uuid": "u1", "message": map[string]any{"role": "user", "content": "hello"}},
 	})
 }
@@ -170,14 +169,14 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Get: %v", err)
 				}
-				writeKeyedTranscript(t, f.root, info.WorkDir, rotatedKey)
+				writeKeyedTranscript(t, f.root, info.WorkDir)
 			},
 			want: sessionID,
 		},
 		{
 			name: "AC-2 transcript present resumes",
 			setup: func(t *testing.T, f rotatedKeyFixture) {
-				writeKeyedTranscript(t, f.root, f.workDir, rotatedKey)
+				writeKeyedTranscript(t, f.root, f.workDir)
 			},
 			want: "claude --resume " + rotatedKey,
 		},
@@ -185,7 +184,7 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			name: "claude transcript of a kimi-named claude seat resumes",
 			opts: rotatedKeyOptions{provider: "kimi-k3-manifold", providerKind: "claude"},
 			setup: func(t *testing.T, f rotatedKeyFixture) {
-				writeKeyedTranscript(t, f.root, f.workDir, rotatedKey)
+				writeKeyedTranscript(t, f.root, f.workDir)
 			},
 			want: "claude --resume " + rotatedKey,
 		},
@@ -315,5 +314,81 @@ func TestSessionHandleAttachAfterRestartHandoffStartsWithSessionID(t *testing.T)
 	}
 	if strings.Contains(start.Config.Command, "--resume") || !strings.Contains(start.Config.Command, "--session-id "+rotatedKey) {
 		t.Fatalf("attach start command = %q, want --session-id %s and no --resume", start.Config.Command, rotatedKey)
+	}
+}
+
+func TestStartCommandRotatedKeyClaudeConfigDir(t *testing.T) {
+	sessionID := "claude --session-id " + rotatedKey
+	resume := "claude --resume " + rotatedKey
+	absolute := func(t *testing.T) string { return filepath.Join(t.TempDir(), "claude") }
+	tests := []struct {
+		name string
+		// configDir returns the CLAUDE_CONFIG_DIR value and the dir the
+		// provider would resolve it to.
+		configDir  func(t *testing.T) (value, dir string)
+		inHints    bool
+		transcript bool
+		want       string
+	}{
+		{
+			name:       "AC-5 absolute dir holding the transcript resumes",
+			configDir:  func(t *testing.T) (string, string) { d := absolute(t); return "  " + d + "  ", d },
+			transcript: true,
+			want:       resume,
+		},
+		{
+			name:      "AC-5 absolute dir without the transcript starts with the session-id flag",
+			configDir: func(t *testing.T) (string, string) { d := absolute(t); return d, d },
+			want:      sessionID,
+		},
+		{
+			name:       "absolute dir in the launch hints env holding the transcript resumes",
+			configDir:  func(t *testing.T) (string, string) { d := absolute(t); return d, d },
+			inHints:    true,
+			transcript: true,
+			want:       resume,
+		},
+		{
+			name: "relative dir adds no root",
+			configDir: func(t *testing.T) (string, string) {
+				cwd := t.TempDir()
+				t.Chdir(cwd)
+				return "rel/claude", filepath.Join(cwd, "rel", "claude")
+			},
+			transcript: true,
+			want:       sessionID,
+		},
+		{
+			name: "home-relative dir adds no root",
+			configDir: func(*testing.T) (string, string) {
+				return "~/.claude-alt", filepath.Join(os.Getenv("HOME"), ".claude-alt")
+			},
+			transcript: true,
+			want:       sessionID,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newRotatedKeyHandle(t, rotatedKeyOptions{})
+			value, dir := tt.configDir(t)
+			env := map[string]string{"CLAUDE_CONFIG_DIR": value}
+			if tt.inHints {
+				f.handle.session.Hints.Env = env
+			} else {
+				f.handle.session.Env = env
+			}
+			if tt.transcript {
+				writeKeyedTranscript(t, filepath.Join(dir, "projects"), f.workDir)
+			}
+
+			got, err := f.handle.startCommand(f.id)
+			if err != nil {
+				t.Fatalf("startCommand: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("startCommand() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

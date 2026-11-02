@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -842,7 +841,10 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 // the session's transcript family and finds no transcript for the key in the
 // work dir the launch runs in. The family is the one transcript reads use
 // (historyProvider), and the work dir is the launch hints' before the row's,
-// as the manager launches.
+// as the manager launches. The roots are the handle's search paths plus the
+// projects root of an absolute CLAUDE_CONFIG_DIR in the launch env, merged
+// rather than pinned: a worker launch carries no operator env, so a dir it
+// names may not be the only one the provider reads.
 func (h *SessionHandle) keyedTranscriptAbsent(info sessionpkg.Info) bool {
 	hints := h.runtimeHints()
 	workDir := strings.TrimSpace(hints.WorkDir)
@@ -850,14 +852,11 @@ func (h *SessionHandle) keyedTranscriptAbsent(info sessionpkg.Info) bool {
 		workDir = info.WorkDir
 	}
 	provider := h.historyProvider(info)
-	probePaths := h.searchPaths
-	if len(probePaths) == 0 || !strings.Contains(strings.ToLower(strings.TrimSpace(provider)), "claude") {
-		probePaths = DefaultSearchPaths()
+	roots := h.searchPaths
+	if root, ok := workertranscript.ClaudeConfigProjectsRoot(hints.Env); ok {
+		roots = MergeSearchPaths(append(append([]string(nil), roots...), root))
 	}
-	if dir := strings.TrimSpace(h.session.Env["CLAUDE_CONFIG_DIR"]); filepath.IsAbs(dir) && strings.Contains(strings.ToLower(strings.TrimSpace(provider)), "claude") {
-		probePaths = MergeSearchPaths(append(append([]string(nil), probePaths...), filepath.Join(dir, "projects")))
-	}
-	present, probeable := workertranscript.HasKeyedTranscript(probePaths, provider, workDir, info.SessionKey)
+	present, probeable := workertranscript.HasKeyedTranscript(workertranscript.KeyedProbeRoots(roots, provider), provider, workDir, info.SessionKey)
 	return probeable && !present
 }
 
