@@ -8,6 +8,26 @@ import (
 	"testing"
 )
 
+// TestRuntimeScriptShellCompatibility checks that the system shell can source
+// the complete shared script and call its listener helper. Exact output also
+// catches a source error masked by a later successful command.
+func TestRuntimeScriptShellCompatibility(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "city with spaces 城")
+	if err := os.Mkdir(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	code, out := runRuntimeScriptShell(t, cityPath, t.TempDir(),
+		`managed_runtime_listener_pid ''; printf 'runtime-loaded:%s\n' "$GC_DOLT_PORT"`,
+		"GC_DOLT_PORT=4406",
+	)
+	if code != 0 {
+		t.Fatalf("sh sourcing runtime.sh exited %d\n%s", code, out)
+	}
+	if want := "runtime-loaded:4406\n"; out != want {
+		t.Fatalf("sourcing runtime.sh output = %q, want %q", out, want)
+	}
+}
+
 // neverRunningPID names a process no host can have: it is past Linux's
 // PID_MAX_LIMIT (2^22) and every other kernel's pid range, so pid_is_running
 // rejects it however busy the host's process table is.
