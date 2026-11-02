@@ -727,12 +727,13 @@ var rigListAPIClient = func(cityPath string) (*api.Client, string) {
 
 // rigListHQRunning reports whether the city's controller is running, for the
 // HQ row of the rig list on both routes, so the two print the same value.
+// It pings the city's controller socket, which a standalone controller and
+// the supervisor (for each city it runs) both serve. It never calls the
+// supervisor HTTP API: the local route is the GC_NO_API=1 escape hatch.
 // Indirected through a var so tests pin both outcomes without a live
-// controller. controllerStatusForCity (not bare controllerAlive) is
-// supervisor-aware: on the supervisor sub-lane controllerAlive==0 by
-// construction while the city IS running.
+// controller.
 var rigListHQRunning = func(cityPath string) bool {
-	return controllerStatusForCity(cityPath).Running
+	return controllerAlive(cityPath) != 0
 }
 
 // routeRigList dispatches the `rig list` read to the supervisor API when
@@ -786,11 +787,11 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 	suspState, _ := loadSuspensionState(fs, cityPath)
 	suspNames := buildEffectiveSuspendedRigNames(cfg, suspState)
 
-	// HQ running is derived from controllerStatusForCity (supervisor-aware),
-	// not a hardcoded true — it flips to false only if the controller actually
-	// died between the ListRigs fetch and this render. Computed for --json only:
-	// renderRigListText ignores Running and the probe costs a socket/supervisor
-	// dial (mirrors doRigList's guard). No wire field — rig list is not
+	// HQ running comes from rigListHQRunning, the same controller-socket ping
+	// the local route uses, not a hardcoded true — it flips to false only if
+	// the controller actually died between the ListRigs fetch and this render.
+	// Computed for --json only: renderRigListText ignores Running and the probe
+	// costs a socket dial (mirrors doRigList's guard). No wire field — rig list is not
 	// remote-wired, and "the server handling the request IS the controller".
 	hqRunning := true
 	if jsonOutput {

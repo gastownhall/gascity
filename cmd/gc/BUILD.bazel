@@ -1329,6 +1329,7 @@ go_test(
         "cmd_rig_endpoint_test.go",
         "cmd_rig_include_canonical_test.go",
         "cmd_rig_include_registry_integration_test.go",
+        "cmd_rig_list_hq_running_test.go",
         "cmd_rig_test.go",
         "cmd_runtime_check_test.go",
         "cmd_runtime_conformance_test.go",
