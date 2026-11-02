@@ -284,3 +284,61 @@ func TestCancelStateAssignedToRetiredSessionBeadOrdinaryErrorsKeepTheirFormat(t 
 		}
 	}
 }
+
+// Healthy stores: both legs finish well inside their budgets, so waits,
+// bindings, participants and residual memberships all close and nothing is
+// written to stderr, cut-off line included.
+func TestCancelStateAssignedToRetiredSessionBeadHealthyStoreIsNotCutOff(t *testing.T) {
+	mem := beads.NewMemStore()
+	sessionBead, fabric, caller := setupSessionWithExtmsgMembership(t, mem, session.StateArchived)
+	bindRetiredSession(t, fabric, caller, sessionBead.ID, 2)
+	if _, err := fabric.Transcript.EnsureMembership(context.Background(), extmsg.EnsureMembershipInput{
+		Caller: caller,
+		Conversation: extmsg.ConversationRef{
+			ScopeID:        "ds-research",
+			Provider:       "slack",
+			AccountID:      "T0WORKSPACE",
+			ConversationID: "C0RESIDUAL",
+			Kind:           extmsg.ConversationRoom,
+		},
+		SessionID: sessionBead.ID,
+		Owner:     extmsg.MembershipOwnerManual,
+	}); err != nil {
+		t.Fatalf("EnsureMembership: %v", err)
+	}
+	seedRetiredSessionWaits(t, mem, sessionBead.ID, 25)
+	if _, err := mem.Create(beads.Bead{
+		Title:    "expired-wait",
+		Type:     waitBeadType,
+		Labels:   []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Metadata: map[string]string{"session_id": sessionBead.ID, "state": waitStateExpired},
+	}); err != nil {
+		t.Fatalf("create expired wait: %v", err)
+	}
+	if got := countOpenMembershipsForSession(t, fabric, caller, sessionBead.ID); got < 2 {
+		t.Fatalf("open memberships before cleanup = %d, want the participant's, the bindings' and the residual one", got)
+	}
+
+	var stderr bytes.Buffer
+	cancelStateAssignedToRetiredSessionBead(mem, sessionBead.ID, time.Now(), &stderr)
+
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want no diagnostic", stderr.String())
+	}
+	if open, closed := countRetiredSessionWaits(t, mem, sessionBead.ID); open != 0 || closed != 26 {
+		t.Fatalf("waits open/closed = %d/%d, want 0/26", open, closed)
+	}
+	if got := countActiveBindings(t, fabric, sessionBead.ID); got != 0 {
+		t.Fatalf("active bindings = %d, want 0", got)
+	}
+	participants, err := mem.List(beads.ListQuery{Label: "gc:extmsg-participant"})
+	if err != nil {
+		t.Fatalf("list participants: %v", err)
+	}
+	if len(participants) != 0 {
+		t.Fatalf("open participants = %d, want 0", len(participants))
+	}
+	if got := countOpenMembershipsForSession(t, fabric, caller, sessionBead.ID); got != 0 {
+		t.Fatalf("open memberships = %d, want 0", got)
+	}
+}
