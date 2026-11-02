@@ -1997,6 +1997,7 @@ go_test(
         "route_equivalence_beads_test.go",
         "route_equivalence_convoy_test.go",
         "route_equivalence_registry_reads_test.go",
+        "route_equivalence_registry_test.go",
         "route_equivalence_rigstatus_mail_test.go",
         "route_equivalence_session_list_test.go",
         "route_equivalence_session_peek_test.go",
