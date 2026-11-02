@@ -2288,3 +2288,61 @@ func TestRunControllerLatchesSessionReconciler(t *testing.T) {
 		}
 	})
 }
+
+// A directory created inside a recursive root after startup is registered off
+// the event loop. A file written into it before that registration finishes
+// fires no event of its own, so the finished registration must itself lead to
+// a reload; otherwise the write is lost until some later change.
+func TestWatchConfigDirs_WriteBeforeNewSubdirRegistrationStillReloads(t *testing.T) {
+	dir := t.TempDir()
+	agentsDir := filepath.Join(dir, "agents")
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll agents dir: %v", err)
+	}
+	agentDir := filepath.Join(agentsDir, "sample-agent")
+	promptPath := filepath.Join(agentDir, "prompt.template.md")
+
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	previousHook := configWatchBeforeRuntimeRegisterHook
+	configWatchBeforeRuntimeRegisterHook = func(string) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release
+	}
+	t.Cleanup(func() { configWatchBeforeRuntimeRegisterHook = previousHook })
+
+	var dirty atomic.Bool
+	pokeCh := make(chan struct{}, 1)
+	var stderr bytes.Buffer
+	cleanup := watchConfigTargets([]config.WatchTarget{{Path: agentsDir, Recursive: true}}, testConfigDebounce, &dirty, newLegacyWake(pokeCh, nil), &stderr)
+	defer cleanup()
+	var releaseOnce sync.Once
+	releaseRegistration := func() { releaseOnce.Do(func() { close(release) }) }
+	// Runs before cleanup, which waits for the held registration.
+	defer releaseRegistration()
+
+	if err := os.Mkdir(agentDir, 0o755); err != nil {
+		t.Fatalf("create agent dir: %v", err)
+	}
+	awaitClose(t, entered, "registration of the new recursive subdir")
+	awaitClose(t, pokeCh, "watcher poke after recursive subdir creation")
+
+	// The new directory is not watched yet: this write fires no event.
+	if err := os.WriteFile(promptPath, []byte("written before the watch\n"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	dirty.Store(false)
+	select {
+	case <-pokeCh:
+	default:
+	}
+
+	releaseRegistration()
+	awaitClose(t, pokeCh, "watcher poke after the new recursive subdir was registered")
+	if !dirty.Load() {
+		t.Fatalf("dirty flag not set after the new recursive subdir was registered; stderr=%q", stderr.String())
+	}
+}
