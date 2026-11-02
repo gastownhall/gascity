@@ -969,7 +969,11 @@ func (c *Client) ListConvoys() (CachedRead[[]beads.Bead], error) {
 	if err := c.requireCityScope(); err != nil {
 		return CachedRead[[]beads.Bead]{}, err
 	}
-	return drainBeadPages(c.convoysPage, 0, maxBeadDrainPages, identicalBeadRow)
+	cr, err := drainBeadPages(c.convoysPage, 0, maxBeadDrainPages, identicalBeadRow)
+	if err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	return CachedRead[[]beads.Bead]{Body: cr.Body.Beads, AgeSeconds: cr.AgeSeconds}, nil
 }
 
 // convoysPage is the GET /v0/city/{cityName}/convoys page fetcher for
@@ -1115,22 +1119,27 @@ func listBeadsParams(opts ListBeadsOpts) *genclient.GetV0CityByCityNameBeadsPara
 // GET /v0/city/{cityName}/beads. Server-side filters mirror the BeadListInput
 // query parameters. The CachedRead.AgeSeconds field carries the supervisor
 // CachingStore age from the X-GC-Cache-Age-S response header so callers can
-// surface _cache_age_s on --json output and a staleness banner on human
-// output.
-func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[[]beads.Bead], error) {
+// surface _cache_age_s on a remote target's --json output and a staleness
+// banner on human output. The body also carries the server's report of any
+// backend that failed while building the list (BeadListView.Partial); the
+// client reports it and leaves the judgment to the caller.
+func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[BeadListView], error) {
 	if err := c.requireCityScope(); err != nil {
-		return CachedRead[[]beads.Bead]{}, err
+		return CachedRead[BeadListView]{}, err
 	}
 	return drainBeadPages(c.beadsPage(listBeadsParams(opts)), opts.Limit, maxBeadDrainPages, sameBeadID)
 }
 
 // beadListPage is one page of a keyset-paginated bead list (/beads,
-// /convoys): its items, its next_cursor ("" on the last page) and its
-// X-GC-Cache-Age-S cache age.
+// /convoys): its items, its next_cursor ("" on the last page), its
+// X-GC-Cache-Age-S cache age, and the server's report of any backend that
+// failed while building it.
 type beadListPage struct {
-	items      []beads.Bead
-	next       string
-	ageSeconds float64
+	items         []beads.Bead
+	next          string
+	ageSeconds    float64
+	partial       bool
+	partialErrors []string
 }
 
 // beadPageFetcher requests one page of at most limit beads starting at cursor
@@ -1155,10 +1164,13 @@ func (c *Client) beadsPage(params *genclient.GetV0CityByCityNameBeadsParams) bea
 		if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 			return beadListPage{}, err
 		}
+		partial, partialErrs := beadListDegradationFromGen(resp.JSON200)
 		return beadListPage{
-			items:      beadsFromGenList(resp.JSON200),
-			next:       listNextCursor(resp.JSON200),
-			ageSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+			items:         beadsFromGenList(resp.JSON200),
+			next:          listNextCursor(resp.JSON200),
+			ageSeconds:    cacheAgeFromResponse(resp.HTTPResponse),
+			partial:       partial,
+			partialErrors: partialErrs,
 		}, nil
 	}
 }
@@ -1230,7 +1242,11 @@ func (k *keptBeadRows) add(page []beads.Bead) {
 // rebuild. A cold `--all` drain is therefore ≈O(H²/pageLimit) server work —
 // much costlier than the direct-bd single O(H) pass it matches. Correctness is
 // unaffected; prefer filters over `--all` on very large cities.
-func drainBeadPages(fetch beadPageFetcher, limit, maxPages int, match beadRowsMatch) (CachedRead[[]beads.Bead], error) {
+//
+// Partial is ORed over every page and PartialErrors are kept once each in
+// first-seen order: every page queries every leg, so a failing leg repeats its
+// message on each page.
+func drainBeadPages(fetch beadPageFetcher, limit, maxPages int, match beadRowsMatch) (CachedRead[BeadListView], error) {
 	// Initialize non-nil: an empty city (or an all-filtered-out result) must
 	// serialize as `[]`, not `null`. A nil []beads.Bead marshals to JSON null,
 	// which breaks `--json` consumers (`jq '.beads[]'`) and diverges from the
@@ -1244,10 +1260,13 @@ func drainBeadPages(fetch beadPageFetcher, limit, maxPages int, match beadRowsMa
 	// catches repeated cursors only; maxBeadDrainPages backstops a distinct-
 	// cursor flood.
 	seenCursors := make(map[string]bool)
+	var partial bool
+	var partialErrs []string
+	seenPartialErrs := make(map[string]bool)
 	cursor := ""
 	for page := 0; ; page++ {
 		if page >= maxPages {
-			return CachedRead[[]beads.Bead]{}, fmt.Errorf("pagination exceeded %d pages; aborting", maxPages)
+			return CachedRead[BeadListView]{}, fmt.Errorf("pagination exceeded %d pages; aborting", maxPages)
 		}
 		pageLimit := maxPaginationLimit
 		if limit > 0 {
@@ -1262,10 +1281,18 @@ func drainBeadPages(fetch beadPageFetcher, limit, maxPages int, match beadRowsMa
 
 		got, err := fetch(cursor, int64(pageLimit))
 		if err != nil {
-			return CachedRead[[]beads.Bead]{}, err
+			return CachedRead[BeadListView]{}, err
 		}
 		if page == 0 {
 			ageSeconds = got.ageSeconds
+		}
+		partial = partial || got.partial
+		for _, msg := range got.partialErrors {
+			if seenPartialErrs[msg] {
+				continue
+			}
+			seenPartialErrs[msg] = true
+			partialErrs = append(partialErrs, msg)
 		}
 		kept.add(got.items)
 
@@ -1273,12 +1300,15 @@ func drainBeadPages(fetch beadPageFetcher, limit, maxPages int, match beadRowsMa
 			break
 		}
 		if seenCursors[got.next] {
-			return CachedRead[[]beads.Bead]{}, fmt.Errorf("pagination cursor repeated (%q); aborting", got.next)
+			return CachedRead[BeadListView]{}, fmt.Errorf("pagination cursor repeated (%q); aborting", got.next)
 		}
 		seenCursors[got.next] = true
 		cursor = got.next
 	}
-	return CachedRead[[]beads.Bead]{Body: kept.rows, AgeSeconds: ageSeconds}, nil
+	return CachedRead[BeadListView]{
+		Body:       BeadListView{Beads: kept.rows, Partial: partial, PartialErrors: partialErrs},
+		AgeSeconds: ageSeconds,
+	}, nil
 }
 
 // GetBead fetches one bead by ID via
