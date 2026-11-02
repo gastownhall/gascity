@@ -56,13 +56,15 @@ type sessionWakeDeps struct {
 	// opKey is --key, the wake op's client key; empty mints one.
 	opKey string
 	// cfgErr is the city config's load error, when cfg did not load.
-	cfgErr                    error
-	store                     beads.Store
-	cfg                       *config.City
-	cityPath                  string
-	cityResolved              bool
-	now                       func() time.Time
-	withdrawQueuedWaitNudges  func(string, []string) error
+	cfgErr                   error
+	store                    beads.Store
+	cfg                      *config.City
+	cityPath                 string
+	cityResolved             bool
+	now                      func() time.Time
+	withdrawQueuedWaitNudges func(string, []string) error
+	// cityUsesManagedReconciler reports whether a controller owns the woken
+	// session's start; production wiring answers sessionStartOwnedByReconciler.
 	cityUsesManagedReconciler func(string) bool
 	pokeController            func(string, reconcilekey.Key) error
 	// rigStores opens the rig stores the will-not-start predicate reads for
@@ -95,17 +97,23 @@ func cmdSessionWake(args []string, key string, stdout, stderr io.Writer, asJSON 
 	cityPath, cityErr := resolveCity()
 	cfg, cfgErr := cliCityConfig(cityPath, cityErr, stderr)
 	return doSessionWake(args[0], stdout, stderr, asJSON, sessionWakeDeps{
-		opKey:                     key,
-		cfgErr:                    cfgErr,
-		sp:                        wakeVerdictProvider(),
-		store:                     store,
-		cfg:                       cfg,
-		cityPath:                  cityPath,
-		cityResolved:              cityErr == nil,
-		now:                       time.Now,
-		withdrawQueuedWaitNudges:  withdrawQueuedWaitNudges,
-		cityUsesManagedReconciler: cityUsesManagedReconciler,
-		pokeController:            enqueueController,
+		opKey:                    key,
+		cfgErr:                   cfgErr,
+		sp:                       wakeVerdictProvider(),
+		store:                    store,
+		cfg:                      cfg,
+		cityPath:                 cityPath,
+		cityResolved:             cityErr == nil,
+		now:                      time.Now,
+		withdrawQueuedWaitNudges: withdrawQueuedWaitNudges,
+		cityUsesManagedReconciler: func(cityPath string) bool {
+			owned, err := sessionStartOwnedByReconciler(cityPath)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc session wake: warning: %v\n", err) //nolint:errcheck
+			}
+			return owned
+		},
+		pokeController: enqueueController,
 		rigStores: func() map[string]beads.Store {
 			return buildStandaloneRigStoresWithConfig(cfg, cityPath, io.Discard)
 		},
@@ -195,12 +203,12 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 	// Same "wake recorded but cannot complete" shape: the controller will not
 	// act on the wake. The one will-not-start predicate the API wake also uses
 	// says why, read on the row after the wake (and after the reset above).
+	woken := res.Info
 	if !rejectStuck {
 		rigStores := deps.rigStores
 		if rigStores == nil {
 			rigStores = func() map[string]beads.Store { return nil }
 		}
-		woken := res.Info
 		if info, err := sessFront.Get(id); err == nil {
 			woken = info
 		}
@@ -217,9 +225,7 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 			fmt.Fprintf(stderr, "gc session wake: warning: withdrawing queued wait nudges: %v\n", err) //nolint:errcheck
 		}
 		if deps.cityUsesManagedReconciler(deps.cityPath) {
-			if err := deps.pokeController(deps.cityPath, reconcilekey.Session(id)); err != nil && !noteWorkerSitePoke(stderr, "gc session wake", err) {
-				fmt.Fprintf(stderr, "gc session wake: warning: poke failed: %v\n", err) //nolint:errcheck
-			}
+			noteSessionWakePoke(stderr, woken, rejectStuck, deps.pokeController(deps.cityPath, reconcilekey.Session(id)))
 		}
 	}
 	if rejectStuck {
@@ -228,6 +234,21 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 	}
 	op.finishErr(nil)
 	return emitSessionWakeResult(stdout, stderr, asJSON, id, len(nudgeIDs), op)
+}
+
+// noteSessionWakePoke reports on stderr the poke that follows a recorded wake
+// of row, the session as the wake left it. For a wake the controller acts on,
+// that is how its start proceeds (noteDeferredSessionStart). A wake refused
+// as one that cannot complete starts nothing, so only a failed poke is
+// reported, with no promise of a start.
+func noteSessionWakePoke(stderr io.Writer, row session.Info, refused bool, pokeErr error) {
+	if !refused {
+		noteDeferredSessionStart(stderr, "gc session wake", row, pokeErr)
+		return
+	}
+	if pokeErr != nil && !noteWorkerSitePoke(stderr, "gc session wake", pokeErr) {
+		fmt.Fprintf(stderr, "gc session wake: warning: poke failed: %v\n", pokeErr) //nolint:errcheck
+	}
 }
 
 // errWakeNotAdmitted stops a wake's resolution from reopening a closed named
