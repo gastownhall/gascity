@@ -829,9 +829,6 @@ func validateSecretProjection(secretEnv []runtime.K8sSecretEnv, secretMounts []r
 		if !secretProjectionEnvName.MatchString(projection.Name) {
 			return fmt.Errorf("k8s secret_env[%d].name %q is not a valid environment variable name", i, projection.Name)
 		}
-		if projection.Name == config.K8sWorkerPodMarkerEnv {
-			return fmt.Errorf("k8s secret_env[%d].name %q is reserved for the Kubernetes worker marker", i, projection.Name)
-		}
 		if _, exists := seenEnv[projection.Name]; exists {
 			return fmt.Errorf("k8s secret_env[%d].name %q is duplicated", i, projection.Name)
 		}

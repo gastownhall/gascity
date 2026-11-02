@@ -152,7 +152,7 @@ func TestBuildPodRejectsMalformedSecretProjection(t *testing.T) {
 	}{
 		{"blank env name", &Provider{secretEnv: []runtime.K8sSecretEnv{{Secret: "s", Key: "k"}}}, "name"},
 		{"invalid env name", &Provider{secretEnv: []runtime.K8sSecretEnv{{Name: "bad-name", Secret: "s", Key: "k"}}}, "environment variable"},
-		{"reserved worker marker", &Provider{secretEnv: []runtime.K8sSecretEnv{{Name: "GC_K8S_WORKER_POD", Secret: "s", Key: "k"}}}, "reserved for the Kubernetes worker marker"},
+		{"reserved worker marker", &Provider{secretEnv: []runtime.K8sSecretEnv{{Name: "GC_K8S_WORKER_POD", Secret: "s", Key: "k"}}}, "reserved"},
 		{"duplicate env name", &Provider{secretEnv: []runtime.K8sSecretEnv{{Name: "TOKEN", Secret: "s", Key: "k"}, {Name: "TOKEN", Secret: "s2", Key: "k"}}}, "duplicated"},
 		{"reserved session identity", &Provider{secretEnv: []runtime.K8sSecretEnv{{Name: "GC_INSTANCE_TOKEN", Secret: "s", Key: "k"}}}, "reserved"},
 		{"reserved store identity", &Provider{secretEnv: []runtime.K8sSecretEnv{{Name: "BEADS_DOLT_SERVER_DATABASE", Secret: "s", Key: "k"}}}, "reserved"},
