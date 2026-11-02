@@ -24,17 +24,18 @@ const (
 //     control dispatcher's routed/run-target tiers) must exclude these
 //     (ga-5736js), and so must every path that serves a bead to an agent as
 //     work — including the assignee-scoped crash-recovery tier, the
-//     `gc hook --claim` result (gas-kg6) and the continuation-group siblings
-//     a claim pre-assigns (preassignHookContinuationGroup, #6026). A held bead
-//     handed back as work cannot be advanced, is never released, and so is
-//     re-served forever.
+//     assigned-ready tier (assignedReadyTierCommand and its bd-1.0.4 wisp
+//     probe ephemeralAssignedReadyProbeScript, #8010), the `gc hook --claim`
+//     result (gas-kg6) and the continuation-group siblings a claim pre-assigns
+//     (preassignHookContinuationGroup, #6026). A held bead handed back as work
+//     cannot be advanced, is never released, and so is re-served forever.
 //
 //   - "Does a session still need to EXIST for this bead?" — hold is
 //     irrelevant; the assignment is a real ownership fact either way. The
-//     demand/liveness tiers that answer this (filterReadyByAssignee,
-//     ephemeralAssignedReadyProbeScript) stay hold-transparent by design and
-//     must never filter on this list (ga-5736js), or a parked bead's owner
-//     would go invisible to the pool and to crash recovery.
+//     demand/liveness tier that answers this (filterReadyByAssignee) stays
+//     hold-transparent by design and must never filter on this list
+//     (ga-5736js), or a parked bead's owner would go invisible to the pool and
+//     to crash recovery.
 //
 // The short rule: filter on holds when deciding what to DO, never when
 // deciding who EXISTS.

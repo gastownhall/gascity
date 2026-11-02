@@ -18,6 +18,7 @@ var unforwarded = map[string]map[string]struct{ Class, Reason, Bead string }{
 	"auto": {
 		"FreshByConstruction":         {"deliberate", "a leaf's own read; readRuntime judges it on the routed leaf (cmd/gc/reconcile_effect_runtime.go freshReadable)", ""},
 		"FreshActivityProvider":       {"deliberate", "the fresh activity read is read on the routed leaf (runtime.FreshActivityFor)", ""},
+		"IdentityObserver":            {"deliberate", "identity is read on the routed leaf (cmd/gc/runtime_inventory_lane.go identityReadable)", ""},
 		"IdentitySidecarProvider":     {"deliberate", "identity is read on the routed leaf (cmd/gc/runtime_inventory_lane.go identityReadable)", ""},
 		"IdleProbeBudgetProvider":     {"deliberate", "the idle-proof budget is read on the routed leaf (cmd/gc/session_sleep.go idleSleepProbeTimeoutFor)", ""},
 		"InventoryProvider":           {"deliberate", "the inventory lane reads each backend's leaf through Backends (cmd/gc/runtime_inventory_lane.go)", ""},
@@ -26,10 +27,12 @@ var unforwarded = map[string]map[string]struct{ Class, Reason, Bead string }{
 		"ProgramStatusProvider":       {"deliberate", "the program-status reading is read on the routed leaf (runtime.ProgramStatusFor)", ""},
 		"ProgramStatusShadowProvider": {"deliberate", "the shadow sink is read on the routed leaf with its reading (runtime.ProgramStatusShadowFor)", ""},
 		"TurnRunningProvider":         {"deliberate", "the live turn reading is read on the routed leaf (runtime.TurnRunningFor)", ""},
+		"V2ReadinessReporter":         {"deliberate", "v2 readiness is a leaf's handshake, judged per leaf (PAR-EXEC C0.8 walks inventoryLeaves)", ""},
 	},
 	"hybrid": {
 		"FreshByConstruction":         {"deliberate", "as auto's", ""},
 		"FreshActivityProvider":       {"deliberate", "as auto's", ""},
+		"IdentityObserver":            {"deliberate", "as auto's", ""},
 		"IdentitySidecarProvider":     {"deliberate", "as auto's", ""},
 		"IdleProbeBudgetProvider":     {"deliberate", "as auto's", ""},
 		"InventoryProvider":           {"deliberate", "as auto's", ""},
@@ -38,6 +41,7 @@ var unforwarded = map[string]map[string]struct{ Class, Reason, Bead string }{
 		"ProgramStatusProvider":       {"deliberate", "as auto's", ""},
 		"ProgramStatusShadowProvider": {"deliberate", "as auto's", ""},
 		"TurnRunningProvider":         {"deliberate", "as auto's", ""},
+		"V2ReadinessReporter":         {"deliberate", "as auto's", ""},
 		"FreshLivenessObserver":       {"deliberate", "hybrid's read is its leaves' cached one, so a hop through it proves absence only by its attested listing (cmd/gc/reconcile_effect_runtime.go unlistedElsewhere)", ""},
 		"TransportCapabilityProvider": {"deliberate", "production's hybrid is tmux over k8s (cmd/gc/providers.go newHybridProvider), and neither has it", ""},
 	},

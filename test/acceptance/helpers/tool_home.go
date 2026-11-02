@@ -17,12 +17,17 @@ import (
 // (WithHostHome). bd and dolt see neither: every Env carries a tool home, and
 // each bd or dolt child is re-homed under it — through ToolList or ToolCommand
 // when the suite forks it, through LinkBeadsTooling's wrapper when gc finds it
-// on PATH or via BD_BIN.
+// on PATH or via BD_BIN. The one exception is a split-storage city, whose gc
+// bd refuses the wrapper: there gc runs the real bd (Env.WithRealBD) under
+// NewEnv's isolated HOME.
 // See package toolhome for what bd resolves from HOME and the incident this
 // guards against.
 
 // bdSharedServerConfigEnv is bd's viper env binding for dolt.shared-server.
 const bdSharedServerConfigEnv = toolhome.SharedServerConfigEnv
+
+// bdDisableMetricsEnv turns bd's usage metrics off.
+const bdDisableMetricsEnv = toolhome.DisableMetricsEnv
 
 // IsolatedToolEnv is toolhome.Environ: base with HOME and the XDG base
 // directories moved under home, host BEADS_*/BD_* dropped (except names in
@@ -76,7 +81,8 @@ func toolCommand(t *testing.T, timeout time.Duration, bin string, args ...string
 }
 
 // LinkBeadsTooling puts this run's bd and dolt in dir for gc to find on PATH and
-// returns the bd it wrote, which is also what to hand gc as BD_BIN.
+// returns the bd it wrote, which is also what to hand gc as BD_BIN — except on
+// a split-storage city, whose gc bd refuses a wrapper script (Env.WithRealBD).
 //
 // dolt is a symlink. bd is toolhome's wrapper around bdPath, re-homed under the
 // Env's tool home, because gc forks bd with the Env's real HOME. A failed

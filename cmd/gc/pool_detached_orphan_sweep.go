@@ -197,10 +197,10 @@ func detachedOrphanRoutesForLeg(store, routeStore beads.Store, ownSessions bool)
 
 // isDetachedHandoffOrphanCandidate reports whether b has the signature of a
 // fully-detached handoff orphan: open, unassigned, not on a dispatch hold, no
-// pool route (neither gc.routed_to nor a legacy gc.run_target), no gc.kind,
-// branch set (indicating work was done and pushed), and a session
-// back-reference — gc.session_id or gc.session_name — from which the pool route
-// can be recovered. This sweep's
+// pool route (neither gc.routed_to nor a legacy gc.run_target), no gc.kind, not
+// taken over by a graph workflow, branch set (indicating work was done and
+// pushed), and a session back-reference — gc.session_id or gc.session_name —
+// from which the pool route can be recovered. This sweep's
 // novel domain is exactly work that carries *no* self-declared route: a bead
 // that still has gc.run_target is recovered earlier in the same tick by
 // restoreCarriedWorkRoutes from its own declared route, and any non-empty
@@ -228,6 +228,19 @@ func isDetachedHandoffOrphanCandidate(b beads.Bead) bool {
 	}
 	if strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]) != "" {
 		return false // any non-empty kind is workflow-root/control/topology work, not fully-detached pool work
+	}
+	if strings.TrimSpace(b.Metadata[beadmeta.ExecutionRoutedToMetadataKey]) != "" &&
+		strings.TrimSpace(b.Metadata[beadmeta.RootBeadIDMetadataKey]) == "" {
+		// A graph workflow took this bead over: the sling restamp moved its
+		// route to gc.execution_routed_to and cleared the pool route, so the
+		// workflow's step is its only demand unit and its empty route is
+		// deliberate. The session back-reference is an earlier claim's. The
+		// takeover ends when a plain sling or gc workflow reopen-source hands
+		// the bead back to the pool: both drop the key. A workflow member is
+		// not exempt: a retry or ralph attempt step carries
+		// gc.execution_routed_to beside its own gc.routed_to, and an empty
+		// route there is still a lost one.
+		return false
 	}
 	if strings.TrimSpace(b.Metadata[beadmeta.WorkBranchMetadataKey]) == "" {
 		return false // no work branch → not a completed-work handoff bead

@@ -418,3 +418,59 @@ func TestCheckStability_TerminalErrorScreen_MarksTerminalNotCrash(t *testing.T) 
 		t.Errorf("last_woke_at = %q, want cleared after terminal classification", got)
 	}
 }
+
+// TestCheckStability_CreditBalanceStop_MarksTerminalNotCrash pins the same
+// fix-finding #2 shape as TestCheckStability_TerminalErrorScreen above, for
+// Claude Code's exhausted-credit stop: a pane showing "Credit balance too
+// low · Add funds" is a terminal quota_exceeded provider error — no amount of
+// retrying the start can succeed until credit is added or the key changes —
+// not an ordinary crash whose wake failures accrue into quarantine.
+func TestCheckStability_CreditBalanceStop_MarksTerminalNotCrash(t *testing.T) {
+	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+	dt := newDrainTracker()
+
+	session := makeBead("b1", map[string]string{
+		"last_woke_at":  now.Add(-10 * time.Second).Format(time.RFC3339),
+		"wake_attempts": "3", // a real crash would push us to 4
+	})
+
+	peek := func(_ int) (string, error) {
+		return "⏺ Bash(make test)\n" +
+			"  ⎿ \u00a0Credit balance too low · Add funds: https://platform.claude.com/settings/billing\n" +
+			"╭──────────╮\n" +
+			"│ >        │\n" +
+			"╰──────────╯\n" +
+			" ? for shortcuts", nil
+	}
+
+	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), t.TempDir(), clk, peek, nil, nil)
+	syncBeadFromStore(&session, store)
+	if !stab {
+		t.Fatal("checkStability should return true when it records a terminal provider error")
+	}
+	if got := session.Metadata["wake_attempts"]; got != "3" {
+		t.Errorf("wake_attempts = %q, want 3; a terminal provider error must not count as a crash", got)
+	}
+	if got := session.Metadata["state"]; got != "asleep" {
+		t.Errorf("state = %q, want asleep", got)
+	}
+	if got := session.Metadata["sleep_reason"]; got != string(sessionpkg.SleepReasonProviderTerminalError) {
+		t.Errorf("sleep_reason = %q, want %q", got, string(sessionpkg.SleepReasonProviderTerminalError))
+	}
+	if got := session.Metadata[sessionProviderTerminalErrorMetadataKey]; got != "quota_exceeded" {
+		t.Errorf("%s = %q, want quota_exceeded", sessionProviderTerminalErrorMetadataKey, got)
+	}
+	if got := session.Metadata[sessionHealthStateMetadataKey]; got != "unhealthy" {
+		t.Errorf("%s = %q, want unhealthy", sessionHealthStateMetadataKey, got)
+	}
+	if got := session.Metadata[sessionDrainableMetadataKey]; got != boolMetadata(true) {
+		t.Errorf("%s = %q, want %q", sessionDrainableMetadataKey, got, boolMetadata(true))
+	}
+	// Edge-triggered: last_woke_at cleared so the terminal classification isn't
+	// re-evaluated (and can't accrue a wake failure) on the next tick.
+	if got := session.Metadata["last_woke_at"]; got != "" {
+		t.Errorf("last_woke_at = %q, want cleared after terminal classification", got)
+	}
+}

@@ -2566,11 +2566,11 @@ type APIConfig struct {
 	// only config edits. City registry creation (POST /v0/city) is not covered:
 	// a grant binds a path-resident city name, which a not-yet-created city
 	// lacks, so creation stays governed by the supervisor-registry guards.
-	// Built-in callers (the bundled gc API client and dashboard SPA) send only
-	// the CSRF header and mint no grant, so enabling this gate turns their direct
-	// city mutations away with a clear 401; such deployments front mutations
-	// through the trusted authority that mints grants instead. The value is one
-	// or more "kid:base64-ed25519-pubkey" entries, comma separated.
+	// The in-city gc client and the dashboard SPA mint no grant and send only
+	// the CSRF header, so enabling this gate turns their direct city mutations
+	// away with a clear 401; a remote gc context with a grant_command does mint
+	// one per mutation. The value is one or more "kid:base64-ed25519-pubkey"
+	// entries, comma separated, read once at startup.
 	// The GC_CITY_WRITE_PUBKEY env var overrides this. Grant revocation via an
 	// epoch floor is an ops-plane control set only through the
 	// GC_CITY_WRITE_EPOCH_FLOOR env var; it has no config field. On hosted
@@ -2824,13 +2824,18 @@ func (c ConvergenceConfig) MaxTotalOrDefault() int {
 
 // MaintenanceConfig groups periodic store-maintenance subsections.
 type MaintenanceConfig struct {
-	// Dolt configures the weekly Dolt store maintenance loop
-	// (CALL DOLT_GC + backup snapshot).
+	// Dolt configures the periodic Dolt store maintenance loop. The loop
+	// is observe-only for now: it takes no backup snapshot and runs no
+	// CALL DOLT_GC.
 	Dolt DoltMaintenance `toml:"dolt,omitempty"`
 }
 
-// DoltMaintenance configures the periodic Dolt store maintenance loop.
-// Opt-in for v1: omission or enabled=false leaves the loop disabled.
+// DoltMaintenance configures the periodic Dolt store maintenance loop,
+// which is observe-only: each cycle runs the disk-space pre-flight and
+// records run history and events — it takes no backup snapshot and runs
+// no CALL DOLT_GC, so a completed run does not mean the store was
+// compacted. Opt-in for v1: omission or enabled=false leaves the loop
+// disabled.
 type DoltMaintenance struct {
 	// Enabled toggles the maintenance loop. Defaults to false (opt-in).
 	Enabled bool `toml:"enabled,omitempty"`
@@ -2838,10 +2843,13 @@ type DoltMaintenance struct {
 	// string (e.g., "168h"). Defaults to 168h (weekly).
 	Interval string `toml:"interval,omitempty" jsonschema:"default=168h"`
 	// AlertTo is the agent identity to mail on failure (e.g.,
-	// "gascity/mayor"). Empty disables alert mail.
+	// "gascity/mayor"). Empty disables alert mail. It has no effect while
+	// the loop is observe-only: an observe-only cycle cannot fail, so no
+	// alert mail is sent.
 	AlertTo string `toml:"alert_to,omitempty"`
-	// GCTimeout is the ceiling for CALL DOLT_GC() as a duration string.
-	// Defaults to 10m.
+	// GCTimeout is the intended ceiling for CALL DOLT_GC() as a duration
+	// string. Defaults to 10m. It has no effect while the loop is
+	// observe-only.
 	GCTimeout string `toml:"gc_timeout,omitempty" jsonschema:"default=10m"`
 }
 

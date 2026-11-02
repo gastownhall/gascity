@@ -55,6 +55,8 @@ import "example.com/m/internal/beads"
 
 type Leg struct{ Store beads.Store }
 
+func NewStores(l Leg) beads.GraphStore { return Mint(l.Store) }
+
 func Mint(s beads.Store) beads.GraphStore { _, g := beads.MintClassStores(s); return g }
 
 func Probe(s beads.Store) beads.Store { return beads.FederatedRead(s) }
@@ -69,6 +71,7 @@ const callers = `package gc
 import (
 	"example.com/m/internal/beads"
 	"example.com/m/internal/beads/beadstest" // test-mint-import
+	"example.com/m/internal/storeref"
 )
 
 type holder struct {
@@ -191,6 +194,12 @@ func asRaw(g beads.GraphStore) { _, _ = beads.As[*beads.CachingStore](g) } // un
 func asStore(g beads.GraphStore) { _, _ = beads.As[beads.Store](g) } // unwrap
 
 func embedsOK(e embeds) {}
+
+func carrier(l storeref.Leg) []storeref.Leg { return nil } // raw-param raw-result
+
+type carrierHolder struct{ legs map[string]storeref.Leg } // raw-field
+
+func carrierMint(g beads.GraphStore) beads.GraphStore { return storeref.NewStores(storeref.Leg{Store: g}) } // mint
 `
 
 // bootSrc is an allowlisted file: nothing in it reports.
@@ -241,7 +250,8 @@ func config() storeclass.Config {
 		Handles:          []string{module + "internal/beads.WorkStore", module + "internal/beads.GraphStore"},
 		HandleField:      "Store",
 		UnwrapMethods:    []string{"Raw", "ConditionalWritesResolveTarget"},
-		MintFuncs:        []string{module + "internal/beads.MintClassStores"},
+		MintFuncs:        []string{module + "internal/beads.MintClassStores", module + "internal/storeref.NewStores"},
+		RawCarriers:      []string{module + "internal/storeref.Leg"},
 		TestMintPackages: []string{module + "internal/beads/beadstest"},
 		Markers:          []string{module + "internal/beads.FederatedRead"},
 		Allow: []storeclass.Allow{
