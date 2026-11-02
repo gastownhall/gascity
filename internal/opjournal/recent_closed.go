@@ -7,39 +7,49 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// RecentClosed returns conversation conv's newest limit closed lane ops,
-// newest first: one capped read keyed by the conversation's label and the
-// closed status, as InterruptCredits reads its rows. It is a history window: a conversation with more
-// than limit later closed ops shows none older. A row that
-// does not decode is left out, as OpenByCausation leaves it; the lane's pass
-// quarantines an open one where an operator sees it.
-func (s *Store) RecentClosed(conv string, limit int) ([]Op, error) {
+// RecentClosed returns conversation conv's newest limit closed lane ops of
+// kind, newest first: one capped read keyed by the conversation's label, the
+// closed status, the kind and the lane executor, as InterruptCredits reads
+// its rows. It is a history window over creation: a conversation with more
+// than limit later-created closed lane ops of kind shows none older, even
+// one that closed after them. A row that does not decode is returned in
+// quarantined, as ListOpenTolerant returns an open one, and the rest are
+// served.
+func (s *Store) RecentClosed(conv string, kind Kind, limit int) ([]Op, []QuarantinedRow, error) {
 	if err := validateConversation(conv); err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	if _, err := Lookup(kind); err != nil {
+		return nil, nil, fmt.Errorf("listing closed ops of conversation %s: %w", conv, err)
 	}
 	if limit <= 0 {
-		return nil, fmt.Errorf("listing closed ops of conversation %s: limit must be positive", conv)
+		return nil, nil, fmt.Errorf("listing closed %s ops of conversation %s: limit must be positive", kind, conv)
 	}
 	rows, err := s.store.List(beads.ListQuery{
-		Label:         ConversationLabel(conv),
-		Metadata:      map[string]string{keyStatus: string(StatusClosed)},
+		Label: ConversationLabel(conv),
+		Metadata: map[string]string{
+			keyStatus: string(StatusClosed), keyKind: string(kind), keyExecutor: string(ExecutorLane),
+		},
 		IncludeClosed: true,
 		Sort:          beads.SortCreatedDesc,
 		Limit:         limit,
 		TierMode:      beads.TierBoth,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("listing closed ops of conversation %s: %w", conv, err)
+		return nil, nil, fmt.Errorf("listing closed %s ops of conversation %s: %w", kind, conv, err)
 	}
 	var out []Op
+	var quarantined []QuarantinedRow
 	for _, b := range rows {
 		op, err := DecodeOp(b)
-		if err != nil || op.Status != StatusClosed || op.Conversation != conv || op.Executor != ExecutorLane {
-			continue
+		switch {
+		case err != nil:
+			quarantined = append(quarantined, QuarantinedRow{ID: b.ID, Err: err})
+		case op.Status == StatusClosed && op.Conversation == conv && op.Kind == kind && op.Executor == ExecutorLane:
+			out = append(out, op)
 		}
-		out = append(out, op)
 	}
-	return out, nil
+	return out, quarantined, nil
 }
 
 // ClosedAt is when op closed: its last transition to closed, the zero time

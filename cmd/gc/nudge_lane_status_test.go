@@ -137,16 +137,18 @@ func TestNudgeDropCancelsALaneOp(t *testing.T) {
 
 // TestNudgeStatusFailsWhenLaneOpsCannotBeRead pins gc nudge status over a
 // sessions store that can host lanes but whose ops cannot all be read: an
-// open-ops read that fails, an open op row that does not decode, and a
-// failed read of the closed ops' history each exit 1 and name the failure
-// on stderr. --json then prints no result, whose ok promises the whole
-// view, and the text view still lists what was read: the decodable open op
-// beside the undecodable row, and the open op when only the history failed.
+// open-ops read that fails, an open op row that does not decode, a closed
+// lane message row that does not decode, and a failed read of the closed
+// ops' history each exit 1 and name the failure on stderr. --json then
+// prints no result, whose ok promises the whole view, and the text view
+// still lists what was read: the decodable open op beside the undecodable
+// row, and the open op when only the history failed.
 func TestNudgeStatusFailsWhenLaneOpsCannotBeRead(t *testing.T) {
 	store := &laneNudgeFailStore{laneTestStore: newLaneTestStore()}
 	c := newCLILaneCityOver(t, store)
 	c.nudgeCommandCity(t, store)
-	pending := c.propose(t, c.laneStore(t), c.msg("k-pending", opjournal.RoleNotice, "you have mail"))
+	st := c.laneStore(t)
+	pending := c.propose(t, st, c.msg("k-pending", opjournal.RoleNotice, "you have mail"))
 
 	code, stdout, stderr := c.nudgeStatus(true)
 	var result nudgeStatusJSON
@@ -180,6 +182,26 @@ func TestNudgeStatusFailsWhenLaneOpsCannotBeRead(t *testing.T) {
 		t.Fatalf("status --json beside an undecodable row = %d, %q; want exit 1 and no result", code, stdout)
 	}
 	if err := store.Delete(row.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// A closed lane message a newer build wrote may be a dead nudge this gc
+	// cannot show.
+	dead := c.propose(t, st, c.msg("k-dead", opjournal.RoleNotice, "from the future"))
+	if _, err := st.Close(dead.ID, opjournal.Outcome{Arm: opjournal.ArmFailed, Reason: "expired"}, "lane:ctl"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadata(dead.ID, "gc.op.schema", "99"); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr = c.nudgeStatus(false)
+	if code != 1 || !strings.Contains(stdout, "pending  "+pending.ID) || !strings.Contains(stderr, "closed op row(s) this gc cannot decode are not listed as dead") || !strings.Contains(stderr, dead.ID) {
+		t.Fatalf("status beside an undecodable closed row = %d, %q; stderr %q; want exit 1, the pending op listed and the row named", code, stdout, stderr)
+	}
+	if code, stdout, _ = c.nudgeStatus(true); code != 1 || stdout != "" {
+		t.Fatalf("status --json beside an undecodable closed row = %d, %q; want exit 1 and no result", code, stdout)
+	}
+	if err := store.Delete(dead.ID); err != nil {
 		t.Fatal(err)
 	}
 

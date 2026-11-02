@@ -963,9 +963,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   items, pending until the lane takes them and in flight while it delivers,
   and lane messages that closed failed or skipped in the last hour as dead,
   in the same schema-v1 JSON; when it cannot read them all it says so and
-  exits 1. `gc nudge drop <op id>` cancels a lane message as the operator:
-  `dropped` before the lane takes it, `cancel_requested` while it is
-  delivered. `gc doctor` gains a `legacy-delivery` check (queue depth,
+  exits 1. Dead messages are looked up among the session's 50 most recently
+  created closed lane messages, so an older one is not listed even when it
+  closed last. `gc nudge drop <op id>` cancels a lane message as the
+  operator: `dropped` before the lane takes it, `cancel_requested` while it
+  is delivered. `gc doctor` gains a `legacy-delivery` check (queue depth,
   live `gc nudge poll` sidecars, deprecated keys in use), and its
   `conversation-lanes` check reports the default kinds and why a city keeps
   legacy delivery.

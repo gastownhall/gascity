@@ -11,7 +11,8 @@ package main
 // start-by, attempts its attempt count, and claimed_at and lease_until its
 // lease's. A submitted or accepted op is pending, an executing or settling
 // one in flight, and a lane op closed failed or skipped within the last hour
-// is dead, its dead_at the close.
+// is dead, its dead_at the close, when it is among the session's
+// laneNudgeHistoryRows most recently created closed lane messages.
 
 import (
 	"errors"
@@ -29,8 +30,10 @@ const (
 	// laneNudgeDeadWindow is how far back gc nudge status lists closed
 	// lane ops as dead, as the queue keeps dead letters about that long.
 	laneNudgeDeadWindow = time.Hour
-	// laneNudgeHistoryRows caps the op rows gc nudge status reads for a
-	// session's dead lane ops (opjournal.Store.RecentClosed).
+	// laneNudgeHistoryRows caps the closed lane messages gc nudge status
+	// reads for a session's dead ones (opjournal.Store.RecentClosed): a
+	// message created before the newest this many is not listed, even one
+	// that closed after them.
 	laneNudgeHistoryRows = 50
 	// laneNudgeDropPrincipal is who gc nudge drop cancels a lane op as.
 	laneNudgeDropPrincipal = "operator"
@@ -80,7 +83,8 @@ func openLaneNudgeStore(cityPath string, cfg *config.City) (s laneNudgeStore, ok
 // skipped within laneNudgeDeadWindow, dead. A target with no session id has
 // none. err names what it could not read, and the items are the rest: open
 // rows that do not decode, which it leaves out as the lane host quarantines
-// them, or the closed ops, whose failed read still lists the open ones.
+// them, closed message rows that do not decode, which may be dead ones, or
+// the closed ops, whose failed read still lists the open ones.
 func laneNudgeItems(st *opjournal.Store, target nudgeTarget, now time.Time) (pending, inFlight, dead []queuedNudge, err error) {
 	if target.sessionID == "" {
 		return nil, nil, nil, nil
@@ -101,15 +105,15 @@ func laneNudgeItems(st *opjournal.Store, target nudgeTarget, now time.Time) (pen
 			pending = append(pending, item)
 		}
 	}
-	unread := laneNudgeQuarantined(quarantined)
-	closed, err := st.RecentClosed(target.sessionID, laneNudgeHistoryRows)
+	unread := laneNudgeQuarantined("open op row(s) this gc cannot decode are not listed (the lane host quarantines them)", quarantined)
+	closed, closedQuarantined, err := st.RecentClosed(target.sessionID, opjournal.KindMessage, laneNudgeHistoryRows)
 	if err != nil {
 		return pending, inFlight, nil, errors.Join(unread, fmt.Errorf("dead ops not listed: %w", err))
 	}
 	for _, op := range closed {
 		arm, _ := op.Outcome.Effective()
 		at := op.ClosedAt()
-		if !laneNudgeOp(op) || (arm != opjournal.ArmFailed && arm != opjournal.ArmSkipped) || at.Before(now.Add(-laneNudgeDeadWindow)) {
+		if (arm != opjournal.ArmFailed && arm != opjournal.ArmSkipped) || at.Before(now.Add(-laneNudgeDeadWindow)) {
 			continue
 		}
 		item := laneNudgeItem(op, target)
@@ -117,7 +121,8 @@ func laneNudgeItems(st *opjournal.Store, target nudgeTarget, now time.Time) (pen
 		item.LastError = laneNudgeOutcomeText(op.Outcome)
 		dead = append(dead, item)
 	}
-	return pending, inFlight, dead, unread
+	return pending, inFlight, dead, errors.Join(unread,
+		laneNudgeQuarantined("closed op row(s) this gc cannot decode are not listed as dead", closedQuarantined))
 }
 
 // laneNudgeOp reports whether op is a nudge gc nudge status lists and gc
@@ -126,9 +131,9 @@ func laneNudgeOp(op opjournal.Op) bool {
 	return op.Executor == opjournal.ExecutorLane && op.Kind == opjournal.KindMessage
 }
 
-// laneNudgeQuarantined is the error naming the open op rows a tolerant read
-// set aside, nil for none.
-func laneNudgeQuarantined(rows []opjournal.QuarantinedRow) error {
+// laneNudgeQuarantined is the error naming the op rows a tolerant read set
+// aside, which what describes, nil for none.
+func laneNudgeQuarantined(what string, rows []opjournal.QuarantinedRow) error {
 	if len(rows) == 0 {
 		return nil
 	}
@@ -136,8 +141,7 @@ func laneNudgeQuarantined(rows []opjournal.QuarantinedRow) error {
 	for i, row := range rows {
 		ids[i] = row.ID
 	}
-	return fmt.Errorf("%d open op row(s) this gc cannot decode are not listed (the lane host quarantines them): %s: %w",
-		len(rows), strings.Join(ids, ", "), rows[0].Err)
+	return fmt.Errorf("%d %s: %s: %w", len(rows), what, strings.Join(ids, ", "), rows[0].Err)
 }
 
 // laneNudgeItem is op in gc nudge status's item shape.

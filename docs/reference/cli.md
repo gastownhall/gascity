@@ -3087,7 +3087,9 @@ Lists the legacy nudge queue's items and the session's conversation-lane
 operations (messages and notices the controller's lane host delivers) in one
 view: a lane operation's ID is its op ID, pending until the lane takes it, in
 flight while it is delivered, and dead for an hour after it closes failed or
-skipped.
+skipped. Dead operations are looked up among the session's 50 most recently
+created closed lane messages: an older message is not listed as dead even
+when it closed last.
 
 When the session's lane operations cannot all be read (the op store does not
 open or answer, or an op row does not decode), it names what it could not
