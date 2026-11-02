@@ -71,6 +71,13 @@
           "default_sling_target": {
             "type": "string"
           },
+          "default_sling_targets": {
+            "type": "array",
+            "description": "Configured default sling targets the rig picks among at random, when set.",
+            "items": {
+              "type": "string"
+            }
+          },
           "beads": {
             "type": "string"
           }
