@@ -4166,7 +4166,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 									}))
 								}
 								logDrainSkip(dt, stdout, id, fmt.Sprintf("Skipping config-drift drain for '%s': live assigned work found", name), clk.Now())
-								recordConfigDriftHeldWorkEpisode(infoByID[id], sessFront, tick, rec, driftKey, driftedFields, heldBy.ID, clk.Now(), stderr)
+								recordConfigDriftHeldWorkEpisode(infoByID[id], sessFront, tick, rec, driftDeferralHorizon(cfg), driftKey, driftedFields, heldBy.ID, clk.Now(), stderr)
 								continue
 							}
 							if launchOnlyDrift {
@@ -6568,11 +6568,12 @@ func recordNamedSessionConfigDriftDeferredAt(info sessionpkg.Info, sessFront *se
 }
 
 // recordConfigDriftHeldWorkEpisode is legacy's held-work drift episode
-// (#8345): an observation that writes stamps info's episode, folds it into
-// the tick and records session.config_drift_deferred; a failed write is
-// logged and records nothing, for a later pass to retry.
-func recordConfigDriftHeldWorkEpisode(info sessionpkg.Info, sessFront *sessionpkg.Store, tick *reconcileTick, rec events.Recorder, driftKey string, fields []string, workBeadID string, now time.Time, stderr io.Writer) {
-	step := driftEpisode(info, driftKey, now)
+// (#8345): an observation that writes (its first, or its one escalation
+// past horizon) folds the write into the tick and records
+// session.config_drift_deferred; a failed write is logged and records
+// nothing, for a later pass to retry.
+func recordConfigDriftHeldWorkEpisode(info sessionpkg.Info, sessFront *sessionpkg.Store, tick *reconcileTick, rec events.Recorder, horizon time.Duration, driftKey string, fields []string, workBeadID string, now time.Time, stderr io.Writer) {
+	step := driftEpisode(info, driftKey, now, horizon)
 	if step.Patch == nil || sessFront == nil || info.ID == "" {
 		return
 	}
@@ -6580,7 +6581,7 @@ func recordConfigDriftHeldWorkEpisode(info sessionpkg.Info, sessFront *sessionpk
 		fmt.Fprintf(stderr, "session reconciler: recording config-drift deferral for %s: %v\n", info.ID, err) //nolint:errcheck
 		return
 	}
-	rec.Record(configDriftDeferredEvent(tick.apply(info.ID, step.Patch), fields, workBeadID, step.Since, now))
+	rec.Record(configDriftDeferredEvent(tick.apply(info.ID, step.Patch), fields, workBeadID, step.Since, now, step.Escalated))
 }
 
 func clearSessionConfigDriftDeferral(info sessionpkg.Info, sessFront *sessionpkg.Store) error {

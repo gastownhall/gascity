@@ -211,3 +211,100 @@ func TestSessionConfigDriftDeferredLegacyFirstObservation(t *testing.T) {
 		t.Fatalf("after a later pass: %d events, at=%q; want 1 and %s", n, got.Metadata["config_drift_deferred_at"], start)
 	}
 }
+
+// Kills a held-work episode that escalates early, never, more than once, or
+// off its configured horizon (#8345, AC-2): a stamped episode under the
+// horizon waits with A14 requeued at it; past it, an episode without a valid
+// escalation marker writes the marker alone, its event escalated and its
+// start kept; a marker between the start and the pass writes nothing more,
+// and one before the start (another episode's) or after the pass does not
+// count.
+func TestHeldWorkDriftEscalation(t *testing.T) {
+	h := newHeldWorkDrift(t)
+	now := gatherNow.UTC().Format(time.RFC3339)
+	stamped := func(age time.Duration, meta ...string) []string {
+		return append([]string{"config_drift_deferred_key", h.key, "config_drift_deferred_at", rowAt(-age)}, meta...)
+	}
+	for _, tc := range []struct {
+		name      string
+		horizon   string
+		meta      []string
+		wantDue   time.Duration // a wait's requeue, from the pass
+		escalates bool
+		age       time.Duration
+	}{
+		{name: "under the default horizon waits for it", meta: stamped(10 * time.Minute), wantDue: 50 * time.Minute},
+		{name: "past the default horizon escalates", meta: stamped(36*time.Hour, "core_hash_breakdown", h.breakdown), escalates: true, age: 36 * time.Hour},
+		{name: "under a configured horizon waits for it", horizon: "15m", meta: stamped(10 * time.Minute), wantDue: 5 * time.Minute},
+		{name: "past a configured horizon escalates", horizon: "15m", meta: stamped(20 * time.Minute), escalates: true, age: 20 * time.Minute},
+		{name: "an invalid horizon reads the default", horizon: "soon", meta: stamped(20 * time.Minute), wantDue: 40 * time.Minute},
+		{name: "an escalated episode writes nothing", meta: stamped(36*time.Hour, "config_drift_escalated_at", rowAt(-time.Hour))},
+		{name: "another episode's marker does not count", meta: stamped(2*time.Hour, "config_drift_escalated_at", rowAt(-3*time.Hour)), escalates: true, age: 2 * time.Hour},
+		{name: "a marker after the pass does not count", meta: stamped(2*time.Hour, "config_drift_escalated_at", rowAt(time.Hour)), escalates: true, age: 2 * time.Hour},
+		{name: "a marker that does not parse does not count", meta: stamped(2*time.Hour, "config_drift_escalated_at", "done"), escalates: true, age: 2 * time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			it, next := h.decide(t, &config.City{Daemon: config.DaemonConfig{DriftDeferralEscalateAfter: tc.horizon}}, tc.meta...)
+			if !tc.escalates {
+				if it.Reason == decideDriftHeldWork || it.Reason == decideDriftEscalated || it.Kind == intentDrainBegin {
+					t.Fatalf("decideRow = (%q, %q) %v, want no write", it.Kind, it.Reason, it.Patch)
+				}
+				if due := gatherNow.Add(tc.wantDue); tc.wantDue > 0 && !next.Equal(due) {
+					t.Fatalf("requeue at %v, want the horizon at %v", next, due)
+				}
+				if tc.wantDue == 0 && next.Equal(gatherNow.Add(time.Nanosecond)) {
+					t.Fatalf("an escalated episode requeued at its past horizon")
+				}
+				return
+			}
+			if it.Kind != intentRowHeal || it.Reason != decideDriftEscalated {
+				t.Fatalf("decideRow = (%q, %q) %v, want (%q, %q)", it.Kind, it.Reason, it.Patch, intentRowHeal, decideDriftEscalated)
+			}
+			if len(it.Patch) != 1 || it.Patch["config_drift_escalated_at"] != now {
+				t.Fatalf("patch %v, want the escalation marker alone at %s", it.Patch, now)
+			}
+			p := driftDeferredPayload(t, it.Event)
+			if !p.Escalated || p.DeferredSince != gatherNow.Add(-tc.age).UTC().Format(time.RFC3339) || p.PendingSeconds != int64(tc.age/time.Second) || p.WorkBeadID != "gw-1" {
+				t.Fatalf("payload %+v, want escalated since %v ago", p, tc.age)
+			}
+		})
+	}
+}
+
+// Kills legacy escalating early, never, or again after a later pass
+// (#8345, AC-2): the held-work episode escalates once its horizon passes,
+// keeping its start, records exactly one escalated event, and a later pass
+// (a fresh reconciler reads the same persisted marker) records nothing more.
+func TestSessionConfigDriftDeferredLegacyEscalatesOnce(t *testing.T) {
+	env, rec, sess, work := heldWorkReconcilerEnv(t)
+	start := env.clk.Now()
+	env.reconcileFresh(t, sess)
+	env.clk.Advance(59 * time.Minute)
+	env.reconcileFresh(t, sess)
+	if n := len(driftDeferredEvents(rec)); n != 1 {
+		t.Fatalf("%d events under the horizon, want the first observation alone", n)
+	}
+	env.clk.Advance(2 * time.Minute)
+	got := env.reconcileFresh(t, sess)
+	evs := driftDeferredEvents(rec)
+	if len(evs) != 2 {
+		t.Fatalf("events %+v past the horizon, want one escalation; stderr=%s", evs, env.stderr.String())
+	}
+	p := driftDeferredPayload(t, &evs[1])
+	if !p.Escalated || p.WorkBeadID != work.ID || p.DeferredSince != start.UTC().Format(time.RFC3339) || p.PendingSeconds != int64((61*time.Minute)/time.Second) {
+		t.Fatalf("escalation %+v, want escalated since %v", p, start)
+	}
+	if got.Metadata["config_drift_escalated_at"] != env.clk.Now().UTC().Format(time.RFC3339) || got.Metadata["config_drift_deferred_at"] != start.UTC().Format(time.RFC3339) {
+		t.Fatalf("metadata %v, want the marker at the pass and the start kept", got.Metadata)
+	}
+	for range 3 {
+		env.clk.Advance(time.Hour)
+		env.reconcileFresh(t, sess)
+	}
+	if n := len(driftDeferredEvents(rec)); n != 2 {
+		t.Fatalf("%d events after later passes, want no repeat", n)
+	}
+	if ds := env.dt.get(sess.ID); ds != nil {
+		t.Fatalf("drain %+v over held work", ds)
+	}
+}
