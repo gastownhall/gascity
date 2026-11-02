@@ -103,11 +103,21 @@ invocation the generated work query builds, not with all of "bd ready" —
 unaffected.
 
 All arguments after "gc bd" are forwarded to bd unchanged, with one
-exception: a "list" that filters on the wisps (ephemeral) tier —
-"--type=molecule", "--type=wisp", "--mol-type", "--wisp-type" — also gets
-"--include-infra". bd skips that tier on any list without the flag, so those
-filters would otherwise return [] and exit 0 on a ledger full of live
-molecules. Every other list is forwarded as written. "heartbeat
+exception: a "list" whose filters can reach the wisps (ephemeral) tier also
+gets "--include-infra". bd skips that tier on any list without the flag, so
+two shapes silently lose rows: a filter naming the tier ("--type=molecule",
+"--type=wisp", "--mol-type", "--wisp-type") can only match hidden rows and
+would return [] and exit 0 on a ledger full of live molecules; and a row
+predicate that does not name the tier ("--assignee", "--status", "--label",
+"--parent", a time window) can match hidden rows the caller never sees —
+a deacon startup check once answered [] with a live patrol wisp in the
+ledger and poured a duplicate every startup. The internal store seam passes
+"--include-infra" on every list, so the passthrough widens exactly the
+lists that seam widens: any list carrying at least one row predicate, plus
+the tier-naming filters above. An unfiltered browse — or one narrowed only
+by output-shaping flags (--json, --limit, --sort and friends), store
+selection, or a non-wisp "--type" that provably cannot match the tier — is
+forwarded as written, exactly as before. "heartbeat
 <issue-id>" forwards to bd's native heartbeat, which refreshes the claim's
 lease and fails loudly when the caller no longer owns it. "show <id>
 --watch" (or "show --current --watch", or the "view" alias) is served by gc
@@ -465,9 +475,10 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// A `list` that filters on the wisps tier reaches that tier only with
-	// --include-infra; without it bd answers [] and exit 0 on a ledger full of
-	// molecules. See bd_wisp_tier.go.
+	// A `list` whose filters can reach the wisps tier — a filter naming it,
+	// or any row predicate — reaches that tier only with --include-infra;
+	// without it bd answers [] or trimmed rows and exit 0 on a ledger full
+	// of molecules and live wisps. See bd_wisp_tier.go.
 	bdArgs = rewriteBdWispTierArgs(bdArgs)
 
 	// Refuse a dropped --set-metadata pair before any store work, so nothing is
