@@ -195,6 +195,14 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			want: "claude --resume " + rotatedKey,
 		},
 		{
+			name:     "AC-4 provider the probe cannot read resumes",
+			provider: "legacy-provider",
+			spec: func() SessionSpec {
+				return SessionSpec{Template: "worker", Command: "legacy-provider", Provider: "legacy-provider", Resume: claudeResume()}
+			},
+			want: "legacy-provider --resume " + rotatedKey,
+		},
+		{
 			name:     "empty key keeps the base command",
 			provider: "claude",
 			spec:     claudeSpec,
