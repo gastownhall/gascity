@@ -208,7 +208,8 @@ save_state
 # An empty pool cannot resolve as a session; a pool's only live member may be
 # busy while the controller starts a different slot for the routed work.
 # The native idle-claim backstop owns pool-base reminders in every case.
-# Named templates and explicit slots retain direct delivery.
+# Named templates and explicit slots retain direct delivery, whatever their
+# active-member count.
 AGENTS=''
 nudge_routed_target() {
     _target="$1"
@@ -224,9 +225,6 @@ nudge_routed_target() {
     _sessions="$(gc session list --json --state active --template "$_target")" || return 1
     _member_count="$(printf '%s\n' "$_sessions" | jq -er \
         'if (.sessions | type) == "array" then .sessions | length else error("missing sessions array") end')" || return 1
-    if [ "$_member_count" -gt 1 ]; then
-        return 0
-    fi
     if [ "$_member_count" -eq 1 ]; then
         _members="$(printf '%s\n' "$_sessions" \
             | jq -er '.sessions[0] | .name // .id | select(type == "string" and length > 0)')" || return 1

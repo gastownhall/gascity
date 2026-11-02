@@ -132,6 +132,8 @@ func TestCascadeNudgeRoutesCrossRig(t *testing.T) {
 // eligible slot and its bounded idle-claim backstop wakes that slot if the
 // normal claim does not land; the order must not nudge busy siblings.
 // Direct named-session and explicit-slot routes still need the order's nudge.
+// Pool ownership comes from the agent list's routes_to_pool, not from how
+// many sessions are active.
 func TestNudgeOnRouteDefersPoolMembersToIdleClaimBackstop(t *testing.T) {
 	data, err := fs.ReadFile(PackFS, "assets/scripts/nudge-on-route.sh")
 	if err != nil {
@@ -139,10 +141,11 @@ func TestNudgeOnRouteDefersPoolMembersToIdleClaimBackstop(t *testing.T) {
 	}
 	body := string(data)
 	for _, want := range []string{
+		"gc agent list --json",
+		".routes_to_pool",
 		"gc session list",
 		"--template",
 		"native idle-claim backstop",
-		`if [ "$_member_count" -gt 1 ]`,
 		`gc session nudge "$_members"`,
 		`gc session nudge "$_target"`,
 	} {
@@ -152,6 +155,9 @@ func TestNudgeOnRouteDefersPoolMembersToIdleClaimBackstop(t *testing.T) {
 	}
 	if strings.Contains(body, `gc session nudge "$_m"`) {
 		t.Error("nudge-on-route.sh must not nudge every active pool member")
+	}
+	if strings.Contains(body, `"$_member_count" -gt 1`) {
+		t.Error("nudge-on-route.sh must not treat several active sessions as a pool")
 	}
 }
 

@@ -53,9 +53,10 @@ Capacity information in `pool` alone does not establish notification ownership.
 Pool-base notifications belong to the controller's bounded idle-claim
 backstop, including empty pools and pools with only one active member.
 Other targets use `gc session list --template <routed_to>`: a template with one
-active member receives one nudge, and a target with no members is nudged
-directly. This preserves named-session and explicit-slot routing. Failed or
-malformed lookups retain pending work for retry instead of guessing a target.
+active member receives one nudge, and any other target, with no members or
+several, is nudged directly. This preserves named-session and explicit-slot
+routing. Failed or malformed lookups retain pending work for retry instead of
+guessing a target.
 This pack revision requires a CLI exposing `routes_to_pool` in agent-list
 output. Deploy it with its matching binary; older CLI output fails the read
 and retains pending work rather than silently misclassifying named sessions.

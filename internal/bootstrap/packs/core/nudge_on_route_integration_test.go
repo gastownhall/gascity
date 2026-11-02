@@ -760,6 +760,7 @@ func TestRouteNotificationNamedTemplateMember(t *testing.T) {
 func TestRouteNotificationMultiplePoolMembersDeferred(t *testing.T) {
 	f := newRouteScriptFixture(t)
 	f.seed("bead.created", true)
+	f.write("agents", `{"agents":[{"qualified_name":"worker","pool":{"min":0,"max":3},"routes_to_pool":true}]}`, 0o600)
 	f.write("sessions", `{"sessions":[{"name":"worker-1"},{"name":"worker-2"}]}`, 0o600)
 	if err := f.run(); err != nil {
 		t.Fatal(err)
@@ -770,6 +771,20 @@ func TestRouteNotificationMultiplePoolMembersDeferred(t *testing.T) {
 	f.expireRetry()
 	if f.due() {
 		t.Fatal("work handed to the pool backstop remained pending for notification")
+	}
+}
+
+// Active-member count does not make a pool: a target that does not route to a
+// pool keeps direct delivery however many sessions share its template.
+func TestRouteNotificationNamedTargetWithSeveralMembers(t *testing.T) {
+	f := newRouteScriptFixture(t)
+	f.seed("bead.created", true)
+	f.write("sessions", `{"sessions":[{"name":"worker"},{"name":"worker-2"}]}`, 0o600)
+	if err := f.run(); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.nudges(); got != "worker\n" {
+		t.Fatalf("named target with several members = %q, want a direct nudge", got)
 	}
 }
 
