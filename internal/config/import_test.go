@@ -5,6 +5,7 @@ package config
 // and qualified name generation that form the foundation of #360.
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -2756,4 +2757,136 @@ func TestRepoCacheGitEnvFiltersTraceOutput(t *testing.T) {
 	if sawTrace {
 		t.Error("repoCacheGitEnv kept a GIT_TRACE* entry")
 	}
+}
+
+// TestValidateLockedRemoteCacheDirtyErrorNamesEntries covers genuine cache
+// divergence: the rejection keeps the install remediation hint, names the
+// cache directory, and quotes the porcelain entries (status columns
+// preserved), capped at three records with an omitted-entry count.
+func TestValidateLockedRemoteCacheDirtyErrorNamesEntries(t *testing.T) {
+	const source = "https://example.com/tools.git"
+
+	t.Run("modified tracked file and untracked file", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		commit := seedRepoCacheFixture(t, cacheDir)
+		// Rewrite the committed LF content as CRLF: genuinely modified bytes.
+		packPath := filepath.Join(cacheDir, "pack.toml")
+		content, err := os.ReadFile(packPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(packPath, bytes.ReplaceAll(content, []byte("\n"), []byte("\r\n")), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeTestFile(t, cacheDir, "extra.txt", "untracked\n")
+
+		err = validateLockedRemoteCache(source, cacheDir, commit)
+		if err == nil {
+			t.Fatal("expected dirty-cache rejection")
+		}
+		msg := err.Error()
+		for _, want := range []string{
+			"has local worktree changes",
+			`run "gc import install"`,
+			cacheDir,
+			`" M pack.toml"`,
+			`"?? extra.txt"`,
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("dirty-cache error missing %q: %s", want, msg)
+			}
+		}
+	})
+
+	t.Run("at most three entries plus remainder count", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		commit := seedRepoCacheFixture(t, cacheDir)
+		for _, name := range []string{"pack.toml", "formulas/build.toml"} {
+			path := filepath.Join(cacheDir, filepath.FromSlash(name))
+			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.WriteString("changed\n"); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, name := range []string{"u1.txt", "u2.txt", "u3.txt"} {
+			writeTestFile(t, cacheDir, name, "untracked\n")
+		}
+
+		err := validateLockedRemoteCache(source, cacheDir, commit)
+		if err == nil {
+			t.Fatal("expected dirty-cache rejection")
+		}
+		msg := err.Error()
+		for _, want := range []string{
+			`" M formulas/build.toml"`,
+			`" M pack.toml"`,
+			`"?? u1.txt"`,
+			"and 2 more",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("dirty-cache error missing %q: %s", want, msg)
+			}
+		}
+		if strings.Contains(msg, "u2.txt") || strings.Contains(msg, "u3.txt") {
+			t.Errorf("dirty-cache error quoted beyond the record cap: %s", msg)
+		}
+	})
+
+	t.Run("mode-only change is rejected with its entry", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		commit := seedRepoCacheFixture(t, cacheDir)
+		if err := os.Chmod(filepath.Join(cacheDir, "formulas", "build.toml"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		err := validateLockedRemoteCache(source, cacheDir, commit)
+		if err == nil {
+			t.Fatal("expected dirty-cache rejection for a mode-only change")
+		}
+		if msg := err.Error(); !strings.Contains(msg, `" M formulas/build.toml"`) {
+			t.Errorf("dirty-cache error missing the mode-change entry: %s", msg)
+		}
+	})
+
+	t.Run("unusual pathname characters are quoted safely", func(t *testing.T) {
+		// A pathname with an embedded double quote makes %q's escaping load
+		// bearing; check that directly, deterministically, at the summary.
+		want := `"?? say \"hi\".txt"`
+		if got := dirtyStatusSummary(`?? say "hi".txt`); got != want {
+			t.Errorf("dirtyStatusSummary = %s, want %s", got, want)
+		}
+
+		// End to end, a pathname with a space round-trips quoted with its
+		// status column preserved. How git itself quotes the pathname varies
+		// across versions, so assert on the unambiguous parts: the record's
+		// porcelain column, the pathname, and the entry count.
+		cacheDir := t.TempDir()
+		commit := seedRepoCacheFixture(t, cacheDir)
+		writeTestFile(t, cacheDir, "odd name.txt", "untracked\n")
+		err := validateLockedRemoteCache(source, cacheDir, commit)
+		if err == nil {
+			t.Fatal("expected dirty-cache rejection")
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "?? ") || !strings.Contains(msg, "odd name.txt") {
+			t.Errorf("dirty-cache error missing the quoted entry: %s", msg)
+		}
+	})
+
+	t.Run("ignored artifacts remain accepted", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		commit := seedRepoCacheFixture(t, cacheDir)
+		// The exclude lives in .git/info, cache-local git state, not in the
+		// pack content itself.
+		writeTestFile(t, cacheDir, filepath.Join(".git", "info", "exclude"), "*.pyc\n")
+		writeTestFile(t, cacheDir, "artifact.pyc", "binary artifact\n")
+		if err := validateLockedRemoteCache(source, cacheDir, commit); err != nil {
+			t.Fatalf("validateLockedRemoteCache rejected an ignored artifact: %v", err)
+		}
+	})
 }
