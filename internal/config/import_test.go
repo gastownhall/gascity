@@ -2917,3 +2917,43 @@ func TestValidateLockedRemoteCacheGitStderrFailsClosed(t *testing.T) {
 		requireStatusDiagnostic(t, err, "could not open directory")
 	})
 }
+
+func TestDefaultRunRepoCacheGitFailureKeepsStderr(t *testing.T) {
+	t.Run("nonzero exit", func(t *testing.T) {
+		useNeutralGitTestEnv(t)
+		cacheDir := t.TempDir()
+		writeTestFile(t, cacheDir, "pack.toml", "[pack]\nname = \"tools\"\nschema = 1\n")
+		seedRepoCacheGit(t, cacheDir)
+
+		out, err := defaultRunRepoCacheGit(cacheDir, "rev-parse", "missing-revision")
+		if err == nil {
+			t.Fatal("rev-parse of a missing revision succeeded")
+		}
+		if out != "" {
+			t.Errorf("output = %q, want empty on failure", out)
+		}
+		for _, want := range []string{"git rev-parse missing-revision", "ambiguous argument"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %q, want it to contain %q", err, want)
+			}
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Errorf("error = %v, want it to wrap *exec.ExitError", err)
+		}
+	})
+
+	t.Run("process start failure", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		out, err := defaultRunRepoCacheGit(t.TempDir(), "rev-parse", "HEAD")
+		if out != "" {
+			t.Errorf("output = %q, want empty on failure", out)
+		}
+		if !errors.Is(err, exec.ErrNotFound) {
+			t.Fatalf("error = %v, want it to wrap exec.ErrNotFound", err)
+		}
+		if !strings.Contains(err.Error(), "git rev-parse HEAD") {
+			t.Errorf("error = %q, want it to name the git command", err)
+		}
+	})
+}
