@@ -327,9 +327,11 @@ type attachmentDecision struct {
 }
 
 // parkedBrake reports whether a bead carries an explicit hold the sling must
-// honor: bd's deferred status (parked for a later actor) or a non-blank
+// honor: bd's deferred status (parked for a later actor), a non-blank
 // halt_reason stamp written by the mol-polecat-work STOP arms and by witness
-// brakes. Returns the reason for the warning line when parked.
+// brakes, a dispatch hold label (hold:mayor / hold:external), or a
+// terminal non-pool route. Returns the reason for the warning line when
+// parked.
 func parkedBrake(b *beads.Bead) (bool, string) {
 	if strings.TrimSpace(b.Status) == "deferred" {
 		return true, "status=deferred"
@@ -337,16 +339,29 @@ func parkedBrake(b *beads.Bead) (bool, string) {
 	if h := strings.TrimSpace(b.Metadata[beadmeta.HaltReasonMetadataKey]); h != "" {
 		return true, "halt_reason=" + h
 	}
+	// ci-soai (gk-f4gr 3x pour loop, 2026-11-02): a dispatch hold names the
+	// required next actor as someone other than the pool worker, so the
+	// sling must never attach a workflow over it — the witness hold pass on
+	// the f4gr family parked exactly this shape and the pourer re-minted
+	// through it. beadmeta.DispatchHoldLabels is the complete set.
+	for _, l := range b.Labels {
+		if beadmeta.HasDispatchHold([]string{l}) {
+			return true, "hold-label=" + l
+		}
+	}
 	// ci-9cb R1 amendment (gk-bx4v incident, 2026-11-02): gc.routed_to=human is
 	// terminal for pool machinery at EVERY status. The idempotency check that
 	// gates this call only proves "already routed where we are routing" — a
 	// human-routed bead read as NOT idempotent, fell through to the plain
 	// attach path, and a blocked human-quarantine bead (no halt stamp, not
 	// deferred) minted a pool-routed workflow around it (gk-pwmk/gk-xkisl,
-	// 00:53:21Z). The routed-raw repair above stays available for pool routes:
-	// only the human terminal marker vetoes here.
-	if r := strings.ToLower(strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey])); r == "human" {
-		return true, "routed_to=human"
+	// 00:53:21Z). ci-soai extends the terminal set with the mayor lane:
+	// gastown.mayor-routed parked beads (gk-f4gr/gk-o687j/gk-xt9uc, held
+	// 07:05Z) were re-wrapped by the pourer too. The routed-raw repair above
+	// stays available for pool routes: only these non-pool terminal markers
+	// veto here.
+	if r := strings.ToLower(strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey])); r == "human" || r == "gastown.mayor" {
+		return true, "routed_to=" + r
 	}
 	return false, ""
 }

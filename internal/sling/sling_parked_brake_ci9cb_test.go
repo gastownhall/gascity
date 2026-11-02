@@ -21,6 +21,7 @@ func TestOnFormulaNeedsAttachmentParkedBrakeVeto(t *testing.T) {
 	cases := []struct {
 		name       string
 		status     string
+		labels     []string
 		metadata   map[string]string
 		wantParked bool
 	}{
@@ -61,6 +62,43 @@ func TestOnFormulaNeedsAttachmentParkedBrakeVeto(t *testing.T) {
 			wantParked: true,
 		},
 		{
+			// ci-soai 2026-11-02: the mayor lane is a terminal non-pool
+			// route for the sling. The gk-f4gr family (held 07:05Z, routed
+			// gastown.mayor) was re-wrapped by the pourer anyway —
+			// gk-o687j/gk-xt9uc minted 06:34Z and burned a polecat session.
+			name:       "gk-f4gr shape: open + routed_to=gastown.mayor",
+			status:     "deferred",
+			metadata:   map[string]string{"gc.routed_to": "gastown.mayor"},
+			wantParked: true,
+		},
+		{
+			// ci-soai: a dispatch hold (hold:mayor) names the required next
+			// actor as someone other than the pool worker — the witness
+			// hold pass on the f4gr family is the brake the attach path
+			// must honor at any status.
+			name:       "open + hold:mayor label, no halt stamp",
+			status:     "open",
+			labels:     []string{beadmeta.HoldMayorLabel, "verify"},
+			metadata:   map[string]string{"gc.routed_to": "worker"},
+			wantParked: true,
+		},
+		{
+			name:       "open + hold:external label",
+			status:     "open",
+			labels:     []string{beadmeta.HoldExternalLabel},
+			metadata:   map[string]string{},
+			wantParked: true,
+		},
+		{
+			// Precision discriminator: an ordinary label is not a brake —
+			// the routed-raw repair must keep attaching for plain rows.
+			name:       "plain label, no brake: the footgun stays repaired",
+			status:     "open",
+			labels:     []string{"verify", "qa-retest"},
+			metadata:   map[string]string{"gc.routed_to": "worker"},
+			wantParked: false,
+		},
+		{
 			name:       "unassigned routed-raw, no brake: the footgun stays repaired",
 			status:     "open",
 			metadata:   map[string]string{"gc.routed_to": "worker"},
@@ -72,7 +110,7 @@ func TestOnFormulaNeedsAttachmentParkedBrakeVeto(t *testing.T) {
 			// NewMemStoreFrom seeds status verbatim; MemStore.Create folds
 			// every new bead to "open" and cannot express the parked shape.
 			store := beads.NewMemStoreFrom(1, []beads.Bead{
-				{ID: "PK-1", Type: "task", Status: tc.status, Metadata: tc.metadata},
+				{ID: "PK-1", Type: "task", Status: tc.status, Labels: tc.labels, Metadata: tc.metadata},
 			}, nil)
 			deps := SlingDeps{Store: store}
 

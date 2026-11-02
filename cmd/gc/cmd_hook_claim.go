@@ -4500,6 +4500,13 @@ func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
 	if strings.TrimSpace(candidate.Metadata[beadmeta.HaltReasonMetadataKey]) != "" {
 		return false
 	}
+	// HOLD (ci-soai): a dispatch-held bead is never claimable pool work —
+	// the required next actor is by construction not this worker
+	// (beadmeta.DispatchHoldLabels), matching the demand side and the
+	// executableWorkflowTopologyJQ dispatchHoldBlankJQ clause.
+	if beadmeta.HasDispatchHold(candidate.Labels) {
+		return false
+	}
 	if len(routeTargets) == 0 {
 		return false
 	}

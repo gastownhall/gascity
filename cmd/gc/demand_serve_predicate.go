@@ -119,6 +119,14 @@ func demandRowServable(b beads.Bead) bool {
 	if strings.TrimSpace(b.Metadata[beadmeta.HaltReasonMetadataKey]) != "" {
 		return false
 	}
+	// HOLD (ci-soai, gk-f4gr 3x pour loop): a dispatch hold (hold:mayor /
+	// hold:external — beadmeta.DispatchHoldLabels) names the required next
+	// actor as someone other than the pool worker, so a held row is never
+	// demand. Same lockstep with executableWorkflowTopologyJQ's
+	// dispatchHoldBlankJQ clause as the halt veto above.
+	if beadmeta.HasDispatchHold(b.Labels) {
+		return false
+	}
 	// Each dimension matches whichever filter has the LAST WORD on what the
 	// worker is served. They are not the same comparison, and pretending they
 	// were is how the controller ends up counting a row no worker will take (or

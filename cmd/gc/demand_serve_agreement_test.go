@@ -156,6 +156,40 @@ func agreementRows() []agreementRow {
 			wantServable: true,
 		},
 		{
+			// HOLD (ci-soai, gk-f4gr 3x pour loop): a mayor-held workflow root
+			// still routed to the pool creates NO demand — deferred+unassigned
+			// alone did not gate the pourer, and each re-pour of the held
+			// family burned a polecat session. The witness hold pass is the
+			// brake the demand count must honor.
+			name: "mayor-held workflow root still routed to the pool",
+			bead: beads.Bead{ID: "a-hold-root", Status: "open", Type: "task", Labels: []string{beadmeta.HoldMayorLabel, "verify"}, Metadata: map[string]string{
+				beadmeta.KindMetadataKey:     beadmeta.KindWorkflow,
+				beadmeta.RoutedToMetadataKey: agreementTemplate,
+			}},
+			wantServable: false,
+		},
+		{
+			// The external-hold twin: hold:external is in the same
+			// DispatchHoldLabels set and vetoes identically.
+			name: "externally-held workflow root",
+			bead: beads.Bead{ID: "a-hold-ext", Status: "open", Type: "task", Labels: []string{beadmeta.HoldExternalLabel}, Metadata: map[string]string{
+				beadmeta.KindMetadataKey:     beadmeta.KindWorkflow,
+				beadmeta.RoutedToMetadataKey: agreementTemplate,
+			}},
+			wantServable: false,
+		},
+		{
+			// Discriminating row for the HOLD comparison: an ordinary label is
+			// not a brake — a plain-labeled row stays demand. A filter that
+			// vetoed every label would starve the pool of real work.
+			name: "plain-labeled workflow root stays servable",
+			bead: beads.Bead{ID: "a-hold-plain", Status: "open", Type: "task", Labels: []string{"verify", "qa-retest"}, Metadata: map[string]string{
+				beadmeta.KindMetadataKey:     beadmeta.KindWorkflow,
+				beadmeta.RoutedToMetadataKey: agreementTemplate,
+			}},
+			wantServable: true,
+		},
+		{
 			name: "routed epic",
 			bead: beads.Bead{
 				ID: "a-7", Status: "open", Type: "epic",
@@ -631,8 +665,12 @@ func legacyWorkflowTierServes(bead beads.Bead, matches func(beads.Bead) bool) bo
 	if strings.TrimSpace(bead.Metadata[beadmeta.WorkflowExpandedMetadataKey]) == "true" {
 		return false
 	}
-	// Mirrors the halt veto in poolDemandMigrationFilterJQ (ci-9cb).
+	// Mirrors the halt veto in poolDemandMigrationFilterJQ (ci-9cb) and the
+	// dispatch-hold veto beside it (ci-soai).
 	if strings.TrimSpace(bead.Metadata[beadmeta.HaltReasonMetadataKey]) != "" {
+		return false
+	}
+	if beadmeta.HasDispatchHold(bead.Labels) {
 		return false
 	}
 	return strings.TrimSpace(bead.Metadata[beadmeta.RoutedToMetadataKey]) == ""
@@ -673,7 +711,9 @@ func assertLegacyTierFilterUnchanged(t *testing.T, query string) {
 	// holds the jq PROGRAM rather than the quoting of the shell wrapper around it.
 	// ci-9cb added the halt veto: a run_target-only root parked by a
 	// witness brake (non-blank halt_reason) must not ride the legacy tier.
-	const wantFilter = `jq '[.[] | select(((.metadata["gc.routed_to"] // "") == "") and ((.metadata["gc.workflow_expanded"] // "") != "true") and (((.metadata["halt_reason"] // "") | gsub("^\\s+|\\s+$"; "")) == ""))] | .[:1]'`
+	// ci-soai added the dispatch-hold veto beside it: a held root (hold:mayor
+	// / hold:external) is not legacy-tier servable either.
+	const wantFilter = `jq '[.[] | select(((.metadata["gc.routed_to"] // "") == "") and ((.metadata["gc.workflow_expanded"] // "") != "true") and (((.metadata["halt_reason"] // "") | gsub("^\\s+|\\s+$"; "")) == "") and ([(.labels // [])[] | select(. == "hold:mayor" or . == "hold:external")] | length) == 0)] | .[:1]'`
 	if !strings.Contains(unescapeShellSingleQuotes(query), wantFilter) {
 		t.Fatalf("the legacy workflow tier's post-filter is no longer exactly\n  %s\nso the Go mirror in legacyWorkflowTierServes is unpinned. Re-derive the mirror against the new filter, then update this pin.\nGenerated query:\n%s", wantFilter, query)
 	}
