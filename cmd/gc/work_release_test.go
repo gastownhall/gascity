@@ -107,7 +107,9 @@ func TestReleaseListedNeverReopensAClaimWithItsDetachedProbe(t *testing.T) {
 }
 
 // strandCase is one row of NEW-5's strand table (mc-zndi7.87): a claim no
-// lane would serve once released, except "served", the control.
+// lane would serve once released, except "served", the control — and
+// "bound step", which a lane serves but no release may detach anyway
+// (city-8ym).
 type strandCase struct {
 	name     string
 	meta     map[string]string
@@ -116,6 +118,7 @@ type strandCase struct {
 
 var strandCases = []strandCase{
 	{"served", map[string]string{beadmeta.RoutedToMetadataKey: "repo/other"}, true},
+	{"bound step", map[string]string{beadmeta.RoutedToMetadataKey: "repo/other", beadmeta.RootBeadIDMetadataKey: "gc-workflow-root"}, false},
 	{"unserved route", map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane"}, false},
 	{"expanded root, no route", map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow, beadmeta.WorkflowExpandedMetadataKey: "true"}, false},
 	{"expanded root, served run_target", map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow, beadmeta.WorkflowExpandedMetadataKey: "true", beadmeta.RunTargetMetadataKey: "repo/worker"}, false},
@@ -179,8 +182,9 @@ func (c *strandCity) assertStrandTable(t *testing.T, status string) {
 	}
 }
 
-// unservedIDs are the claims a seat keeps, sorted.
-func (c *strandCity) unservedIDs() []string {
+// keptIDs are the claims a seat keeps — stranded on it, by whatever rule —
+// sorted.
+func (c *strandCity) keptIDs() []string {
 	var ids []string
 	for _, sc := range strandCases {
 		if !sc.released {
@@ -222,15 +226,19 @@ func (c *strandCity) assertAlerted(t *testing.T, kind string, n int) {
 	var ids []string
 	for _, cl := range last.Claims {
 		ids = append(ids, cl.BeadID)
-		if cl.Reason != keptUnservedRoute {
-			t.Errorf("claim %s reason = %q, want %q", cl.BeadID, cl.Reason, keptUnservedRoute)
+		want := keptUnservedRoute
+		if cl.BeadID == c.claim["bound step"].ID {
+			want = keptStepBound // a bound member is stranded under its own reason (city-8ym)
+		}
+		if cl.Reason != want {
+			t.Errorf("claim %s reason = %q, want %q", cl.BeadID, cl.Reason, want)
 		}
 		if want := c.claim["unserved route"].ID; cl.BeadID == want && cl.Route != "nowhere/lane" {
 			t.Errorf("claim %s route = %q, want nowhere/lane", cl.BeadID, cl.Route)
 		}
 	}
-	if last.Kind != kind || last.Template != "repo/worker" || last.SessionID != c.seat.ID || !slices.Equal(ids, c.unservedIDs()) {
-		t.Fatalf("alert = %+v, want kind %q, the seat's template and beads %v", last, kind, c.unservedIDs())
+	if last.Kind != kind || last.Template != "repo/worker" || last.SessionID != c.seat.ID || !slices.Equal(ids, c.keptIDs()) {
+		t.Fatalf("alert = %+v, want kind %q, the seat's template and beads %v", last, kind, c.keptIDs())
 	}
 }
 
@@ -285,6 +293,105 @@ func TestReleasePathsKeepEveryStrand(t *testing.T) {
 		unclaimWorkAssignedToRetiredSessionBead(testWorkLegs(c.path, c.cfg, c.store, nil), c.store, c.seat, "", io.Discard)
 		c.assertStrandTable(t, "in_progress")
 	})
+}
+
+// No release path detaches a workflow member bound to a foreign root, even
+// one whose lane serves it (city-8ym): the release would hand the step to
+// the shared pool, where a session that never owned its molecule claims it.
+// Its plain twin — same route, no root stamp — still goes on every path.
+func TestReleaseListedKeepsABoundWorkflowStepOnEveryPath(t *testing.T) {
+	paths := []struct {
+		name string
+		why  releaseWhy
+	}{
+		{"killed seat", releaseKilledSeat},
+		{"drain-ack", releaseDrainAck},
+		{"close cascade", releaseCloseCascade},
+		{"stranded repair", releaseStrandedRepair},
+		{"orphan", releaseOrphan},
+		{"retired", releaseRetired},
+		{"ladder", releaseLadder},
+		{"stalled", releaseStalled},
+	}
+	for _, path := range paths {
+		t.Run(path.name, func(t *testing.T) {
+			p := releasePolicies[path.why]
+			store := beads.NewMemStore()
+			// A claim the path's status filter selects: open where started
+			// work keeps a killed seat whole, in_progress elsewhere.
+			status := "in_progress"
+			if p.startedKeeps {
+				status = "open"
+			}
+			bound := createWork(t, store, status, "worker-dead", map[string]string{
+				beadmeta.RoutedToMetadataKey:   "worker",
+				beadmeta.RootBeadIDMetadataKey: "gc-root-1",
+			})
+			plain := createWork(t, store, status, "worker-dead", map[string]string{
+				beadmeta.RoutedToMetadataKey: "worker",
+			})
+			out := releaseListed([]seatWorkHit{{store: store, bead: bound}, {store: store, bead: plain}}, path.why, releaseSeat{}, testPoolReleaseConfig(), ReleaseOpts{})
+			if out.Why[bound.ID] != keptStepBound {
+				t.Fatalf("bound step why=%q, want %q", out.Why[bound.ID], keptStepBound)
+			}
+			if len(out.Released) != 1 || out.Released[0].bead.ID != plain.ID {
+				t.Fatalf("released = %+v, want only the plain claim", out.Released)
+			}
+			got, err := store.Get(bound.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Assignee != "worker-dead" || got.Status != status {
+				t.Fatalf("bound step assignee=%q status=%q, want it kept by its owner", got.Assignee, got.Status)
+			}
+		})
+	}
+}
+
+// A mol-do-work drain step is the binding's one exception (city-8ym): the
+// molecule's designed hand-off. The close gate excludes a seat's own drain
+// step (notOwnDrainStep) and the drain-finalize cascade releases it so the
+// drain phase still runs; a drain step carries no owner context to advance
+// prematurely. The exception is isSessionOwnDrainStepBead's narrow match:
+// another formula's ".drain" step is not the hand-off shape and stays bound.
+func TestReleaseListedReleasesAMolDoWorkDrainStep(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{Title: "root", Type: "task", Ref: "mol-do-work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drain := createWork(t, store, "in_progress", "worker-dead", map[string]string{
+		beadmeta.RoutedToMetadataKey:   "worker",
+		beadmeta.StepRefMetadataKey:    "mol-do-work.drain",
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+	})
+	out := releaseListed([]seatWorkHit{{store: store, bead: drain}}, releaseCloseCascade, releaseSeat{}, testPoolReleaseConfig(), ReleaseOpts{})
+	if len(out.Released) != 1 || out.Released[0].bead.ID != drain.ID {
+		t.Fatalf("released = %+v, want the drain step handed off (why=%v)", out.Released, out.Why[drain.ID])
+	}
+	got, err := store.Get(drain.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("drain step = status %q assignee %q, want open/unassigned for the next seat", got.Status, got.Assignee)
+	}
+
+	// Another formula's step that reuses the "drain" id is not the hand-off
+	// shape: it stays bound like any workflow member.
+	other, err := store.Create(beads.Bead{Title: "other root", Type: "task", Ref: "mol-review"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step := createWork(t, store, "in_progress", "worker-dead", map[string]string{
+		beadmeta.RoutedToMetadataKey:   "worker",
+		beadmeta.StepRefMetadataKey:    "mol-review.drain",
+		beadmeta.RootBeadIDMetadataKey: other.ID,
+	})
+	out = releaseListed([]seatWorkHit{{store: store, bead: step}}, releaseCloseCascade, releaseSeat{}, testPoolReleaseConfig(), ReleaseOpts{})
+	if out.Why[step.ID] != keptStepBound {
+		t.Fatalf("why=%q, want %q: only mol-do-work's drain step is the hand-off", out.Why[step.ID], keptStepBound)
+	}
 }
 
 // A close never refuses over claims no lane serves (O5, revised): it lands,
@@ -555,8 +662,10 @@ func TestKilledSeatPreGateWantsARoutedClaim(t *testing.T) {
 
 // The confirmed-orphan close completes over the claims its release kept for
 // want of a lane (O5, revised; the canonical NEW-5 trigger: an agent removed
-// while its seat holds claims routed to it): the claims stay on the closed
-// row, stamped, and the cascade alerts. A served claim is still released.
+// while its seat holds claims routed to it), and over a bound workflow step
+// whose lane serves it, which no release may detach (city-8ym): the claims
+// stay on the closed row, stamped, and the cascade alerts. A served plain
+// claim is still released.
 func TestOrphanCloseCompletesOverStrandedClaims(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -564,6 +673,7 @@ func TestOrphanCloseCompletesOverStrandedClaims(t *testing.T) {
 	}{
 		{"routed to a removed agent", map[string]string{beadmeta.RoutedToMetadataKey: "repo/gone"}},
 		{"expanded root, run_target only", map[string]string{beadmeta.RoutedToMetadataKey: "", beadmeta.KindMetadataKey: beadmeta.KindWorkflow, beadmeta.WorkflowExpandedMetadataKey: "true", beadmeta.RunTargetMetadataKey: "repo/polecat"}},
+		{"bound step on a served route", map[string]string{beadmeta.RootBeadIDMetadataKey: "gc-root-9"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newCloseOrphanEnv(t)
@@ -629,10 +739,12 @@ func (s *detectorReadCounter) List(q beads.ListQuery) ([]beads.Bead, error) {
 }
 
 // The detector reads the stamp, so it finds what a seat's identities cannot:
-// a claim under a namepool alias (PC) and a removed named session's claims
-// on its archived, still-open row (PE). It re-alerts on the cadence, at once
-// when the set changes (D07), and keeps a stamped claim only a run_target
-// routes, which the dead-assignee sweep never releases (D01).
+// a claim under a namepool alias (PC), a removed named session's claims
+// on its archived, still-open row (PE), and a bound workflow member, which
+// no sweep releases whatever its route (city-8ym). It re-alerts on the
+// cadence, at once when the set changes (D07), and keeps a stamped claim
+// only a run_target routes, which the dead-assignee sweep never releases
+// (D01).
 func TestDetectorFollowsTheStamp(t *testing.T) {
 	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
 	t.Run("namepool alias", func(t *testing.T) {
@@ -646,7 +758,7 @@ func TestDetectorFollowsTheStamp(t *testing.T) {
 		before := len(c.alerts(t))
 		sw.alerts.scanned = now // a scan was due an interval ago
 		detectStrandedClaims(testWorkLegs(c.path, c.cfg, c.store, nil), c.store, nil, sw.alerts, now.Add(strandedRealertEvery))
-		if got := c.alerts(t); len(got) != before+1 || len(got[len(got)-1].Claims) != len(c.unservedIDs())+1 {
+		if got := c.alerts(t); len(got) != before+1 || len(got[len(got)-1].Claims) != len(c.keptIDs())+1 {
 			t.Fatalf("alerts = %d (last %+v), want one more naming the alias claim too", len(got), got[len(got)-1])
 		}
 	})
@@ -672,6 +784,28 @@ func TestDetectorFollowsTheStamp(t *testing.T) {
 		detectStrandedClaims(testWorkLegs("", cfg, store, nil), store, sessionInfosFromBeads([]beads.Bead{row}), sw.alerts, now.Add(strandedRealertEvery))
 		if evts, _ := rec.List(events.Filter{Type: events.SessionStrandedClaims}); len(evts) != 2 {
 			t.Fatalf("session.stranded_claims = %d, want the retirement's and the scan's", len(evts))
+		}
+	})
+	t.Run("a bound step on a served route", func(t *testing.T) {
+		store := fencedMemStore(t)
+		seat, err := store.Create(beads.Bead{Title: "seat", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{"session_name": "s-1", "template": "repo/worker", "state": "drained"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Close(seat.ID); err != nil {
+			t.Fatal(err)
+		}
+		createWork(t, store, "in_progress", seat.ID, map[string]string{
+			beadmeta.RoutedToMetadataKey:   "repo/worker",
+			beadmeta.RootBeadIDMetadataKey: "gc-root-1",
+			beadmeta.StrandedMetadataKey:   "true", beadmeta.StrandedSessionMetadataKey: seat.ID, beadmeta.StrandedAssigneeMetadataKey: seat.ID,
+		})
+		rec := events.NewFake()
+		alerts := &strandedClaimAlerts{rec: rec, scanned: now.Add(-strandedRealertEvery)}
+		detectStrandedClaims(testWorkLegs("", servingCity("repo/worker"), store, nil), store, nil, alerts, now)
+		evts, _ := rec.List(events.Filter{Type: events.SessionStrandedClaims})
+		if len(evts) != 1 || !strings.Contains(string(evts[0].Payload), `"reason":"`+keptStepBound+`"`) {
+			t.Fatalf("session.stranded_claims = %+v, want one naming the bound step as %s: no sweep releases it, whatever its route (city-8ym)", evts, keptStepBound)
 		}
 	})
 	t.Run("set change and run_target only", func(t *testing.T) {
@@ -856,7 +990,10 @@ func TestStampStrandedSkipsAMovedClaim(t *testing.T) {
 
 // onlyStrandedWork: a seat holding nothing, a failed read, or any claim the
 // cascade's rule serves (a plain run_target among them) answers false; a
-// served claim in the tick's rows answers with no live read.
+// served claim in the tick's rows answers with no live read. A bound
+// workflow step answers true alone — no release can detach it, so its close
+// may land over it (city-8ym) — but a served plain claim beside it still
+// refuses.
 func TestOnlyStrandedWork(t *testing.T) {
 	cfg := servingCity("repo/worker")
 	info := session.Info{ID: "gc-1", SessionNameMetadata: "s-1", Template: "repo/worker"}
@@ -878,6 +1015,15 @@ func TestOnlyStrandedWork(t *testing.T) {
 	}
 	if counted.live != 0 {
 		t.Fatalf("live per-assignee lists = %d, want none: the tick's rows answered", counted.live)
+	}
+	bound := beads.NewMemStore()
+	createWork(t, bound, "in_progress", "gc-1", map[string]string{beadmeta.RoutedToMetadataKey: "repo/worker", beadmeta.RootBeadIDMetadataKey: "gc-root-1"})
+	if !onlyStrandedWork(testSeatWork("", cfg, bound, nil), info) {
+		t.Fatal("a bound step on a served route does not read stranded-only, though no release may detach it (city-8ym)")
+	}
+	createWork(t, bound, "in_progress", "gc-1", map[string]string{beadmeta.RoutedToMetadataKey: "repo/worker"})
+	if onlyStrandedWork(testSeatWork("", cfg, bound, nil), info) {
+		t.Fatal("a served plain claim beside a bound step did not hold the close")
 	}
 }
 

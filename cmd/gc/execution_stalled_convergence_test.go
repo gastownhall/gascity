@@ -78,10 +78,15 @@ func newStalledConvergenceHarness(t *testing.T) *stalledConvergenceHarness {
 		t.Fatalf("the seat did not start; stdout=%s stderr=%s", env.stdout.String(), env.stderr.String())
 	}
 
+	// A plain pool bead: routed demand with no gc.root_bead_id. A root-stamped
+	// step is bound to its seat (city-8ym) and the reopen lane keeps it for
+	// witness salvage — pinned at the release seam (work_release_test.go, the
+	// every-path table) — so the chain this file converges is the unbound
+	// shape.
 	work, err := env.store.Create(beads.Bead{
 		Title:    "claimed but never executed",
 		Type:     "task",
-		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: template, beadmeta.RootBeadIDMetadataKey: "root-1"},
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: template},
 	})
 	if err != nil {
 		t.Fatalf("seeding work: %v", err)

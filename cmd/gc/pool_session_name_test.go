@@ -2392,9 +2392,16 @@ func TestReleaseOrphanedPoolAssignments_ContinuationGroupBeadBypassesCASWindow(t
 	// fallback, which clears status, assignee, and the group in a single Update —
 	// so the group is never visible on a claimable bead. This is the regression
 	// pin for the CAS release-then-clear ordering window.
+	//
+	// The fixture is the release-reachable group shape: a worker-executable
+	// task (gc.kind=task — shared-drain stamping puts gc.continuation_group on
+	// every non-control recipe step). A group-stamped step with no executable
+	// kind is BOUND to its root (city-8ym): the sweep keeps it outright, and
+	// TestReleaseOrphanedPoolAssignments_KeepsABoundGroupStep pins that keep.
 	store, work := newConditionalReleaseProbeStoreWithMetadata(t, map[string]string{
-		"gc.root_bead_id":       "root-1",
-		"gc.continuation_group": "grp-1",
+		"gc.root_bead_id":        "root-1",
+		"gc.continuation_group":  "grp-1",
+		beadmeta.KindMetadataKey: beadmeta.KindTask,
 	})
 
 	released := releaseProbeAssignments(store, work)
@@ -2429,6 +2436,37 @@ func TestReleaseOrphanedPoolAssignments_ContinuationGroupBeadBypassesCASWindow(t
 	}
 	if strings.TrimSpace(final.Metadata["gc.session_affinity"]) != "" {
 		t.Fatalf("gc.session_affinity = %q, want cleared after release", final.Metadata["gc.session_affinity"])
+	}
+}
+
+// TestReleaseOrphanedPoolAssignments_KeepsABoundGroupStep pins the binding
+// gate above the group write-ordering: a continuation-group step with no
+// executable kind is a workflow member bound to its root (city-8ym), so the
+// dead-assignee sweep keeps it outright — no release write of any shape. The
+// group vector does not make it releasable: the single-write release clears
+// the group, which would leave the step as plain pool membership — the
+// cross-session claim the binding forbids. Witness orphan salvage is the only
+// recovery route for an ownerless step.
+func TestReleaseOrphanedPoolAssignments_KeepsABoundGroupStep(t *testing.T) {
+	store, work := newConditionalReleaseProbeStoreWithMetadata(t, map[string]string{
+		"gc.root_bead_id":       "root-1",
+		"gc.continuation_group": "grp-1",
+	})
+
+	released := releaseProbeAssignments(store, work)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none: a bound group step is never detached to the pool", released)
+	}
+	if len(store.releaseCalls) != 0 || len(store.assignmentUpdates) != 0 {
+		t.Fatalf("release writes = %d conditional, %d assignment-shaped, want none for a bound step",
+			len(store.releaseCalls), len(store.assignmentUpdates))
+	}
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-dead" {
+		t.Fatalf("work = status %q assignee %q, want untouched (in_progress/worker-dead)", got.Status, got.Assignee)
 	}
 }
 
@@ -2487,7 +2525,10 @@ func TestReleaseOrphanedPoolAssignments_FallbackFencesAClaimAfterTheReRead(t *te
 		extra map[string]string
 	}{
 		{name: "conditional release unsupported"},
-		{name: "continuation group", extra: map[string]string{"gc.root_bead_id": "root-1", "gc.continuation_group": "grp-1"}},
+		// kind=task keeps this subtest on the release-reachable group shape:
+		// without an executable kind the group step is bound (city-8ym) and
+		// the sweep keeps it before any fence is consulted.
+		{name: "continuation group", extra: map[string]string{"gc.root_bead_id": "root-1", "gc.continuation_group": "grp-1", "gc.kind": "task"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store, work := newConditionalReleaseProbeStoreWithMetadata(t, tc.extra)
