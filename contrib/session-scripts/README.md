@@ -58,11 +58,30 @@ gc start my-city
 
 See [`contrib/k8s/`](../k8s/) for the K8s manifests, Dockerfiles and an
 example city, and [`gc-controller-k8s`](gc-controller-k8s) for deploying the
-controller as a pod. The native provider reads its settings only from
-`GC_K8S_*` environment variables in the controller's environment, not from
-a `[session.k8s]` table: `GC_K8S_NAMESPACE` (default `gc`), `GC_K8S_IMAGE`
-(required to start a session), `GC_K8S_CONTEXT`, `GC_K8S_SERVICE_ACCOUNT`,
-`GC_K8S_PREBAKED`, the resources `GC_K8S_CPU_REQUEST` (default `500m`),
-`GC_K8S_MEM_REQUEST` (`1Gi`), `GC_K8S_CPU_LIMIT` (`2`) and `GC_K8S_MEM_LIMIT`
-(`4Gi`), the JSON-valued `GC_K8S_NODE_SELECTOR`, `GC_K8S_TOLERATIONS` and
-`GC_K8S_AFFINITY`, and `GC_K8S_PRIORITY_CLASS_NAME`.
+controller as a pod. The native provider reads cluster settings from
+`GC_K8S_*` environment variables in the controller's environment:
+`GC_K8S_NAMESPACE` (default `gc`), `GC_K8S_IMAGE` (required to start a
+session), `GC_K8S_CONTEXT`, `GC_K8S_SERVICE_ACCOUNT`, `GC_K8S_PREBAKED`, the
+resources `GC_K8S_CPU_REQUEST` (default `500m`), `GC_K8S_MEM_REQUEST` (`1Gi`),
+`GC_K8S_CPU_LIMIT` (`2`) and `GC_K8S_MEM_LIMIT` (`4Gi`), the JSON-valued
+`GC_K8S_NODE_SELECTOR`, `GC_K8S_TOLERATIONS` and `GC_K8S_AFFINITY`, and
+`GC_K8S_PRIORITY_CLASS_NAME`.
+
+The native provider creates agent pods with Restricted-compatible security
+settings by default and leaves UID, primary GID, and `fsGroup` unset. Kubernetes
+admission can assign an identity; otherwise the image uses numeric fallback
+UID:GID `1001:0`. Image `HOME` and baked workspace paths are writable by the
+root group. Staged `emptyDir` workspaces need a cluster-assigned `fsGroup` or
+an explicit `[session.k8s] fs_group`, so kubelet can set volume ownership.
+Optional `[session.k8s] run_as_user`, `run_as_group`, and `fs_group` values
+configure those Pod fields for a session; `GC_K8S_RUN_AS_USER`,
+`GC_K8S_RUN_AS_GROUP`, and `GC_K8S_FS_GROUP` environment variables override
+the TOML values. Gas City does not allocate UIDs.
+
+The legacy `LINUX_USERNAME` path is preserved: it starts the main container as
+root to create the account and chown its work directory before switching with
+`su`. Such pods are not admitted under Restricted Pod Security; use that
+compatibility path only in namespaces whose policy permits it.
+
+See [docs/k8s-guide.md](../../docs/k8s-guide.md) for the full setup guide,
+K8s manifests, and agent Dockerfile.

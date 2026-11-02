@@ -918,6 +918,37 @@ name = "mayor"
 	}
 }
 
+func TestParseSessionK8sPodIdentity(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test-city"
+
+[session]
+provider = "k8s"
+
+[session.k8s]
+run_as_user = 23456
+run_as_group = 0
+fs_group = 34567
+
+[[agent]]
+name = "worker"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Session.K8s.RunAsUser == nil || *cfg.Session.K8s.RunAsUser != 23456 {
+		t.Errorf("Session.K8s.RunAsUser = %v, want 23456", cfg.Session.K8s.RunAsUser)
+	}
+	if cfg.Session.K8s.RunAsGroup == nil || *cfg.Session.K8s.RunAsGroup != 0 {
+		t.Errorf("Session.K8s.RunAsGroup = %v, want 0", cfg.Session.K8s.RunAsGroup)
+	}
+	if cfg.Session.K8s.FSGroup == nil || *cfg.Session.K8s.FSGroup != 34567 {
+		t.Errorf("Session.K8s.FSGroup = %v, want 34567", cfg.Session.K8s.FSGroup)
+	}
+}
+
 func TestParseNoSessionSection(t *testing.T) {
 	data := []byte(`
 [workspace]
