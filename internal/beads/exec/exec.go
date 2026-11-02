@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 )
 
 // Store implements [beads.Store] by delegating each operation to a
@@ -604,5 +605,20 @@ func (s *Store) DepList(id, direction string) ([]beads.Dep, error) {
 	return deps, nil
 }
 
-// Compile-time interface check.
-var _ beads.Store = (*Store)(nil)
+// DepMetadataAbsentByProtocol declares that the exec protocol carries no
+// dependency payload: a create request has no edge payload field and dep-add
+// takes three arguments, so gc has never stored one through a generic exec
+// store. A provider under the bd contract does not declare it: its rows live in
+// bd, where a graph plan can have written a payload this protocol cannot read.
+func (s *Store) DepMetadataAbsentByProtocol() (string, bool) {
+	if s == nil || contract.ProviderUsesBDContract("exec:"+s.script) {
+		return "", false
+	}
+	return "exec", true
+}
+
+// Compile-time interface checks.
+var (
+	_ beads.Store                       = (*Store)(nil)
+	_ beads.DepMetadataAbsentByProtocol = (*Store)(nil)
+)

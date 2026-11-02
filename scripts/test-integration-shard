@@ -158,6 +158,8 @@ cmd_gc_integration_tests=(
   TestStartRecycleSparesAZombiesOperatorPaneOnRealTmux
   TestStopRefusesARuntimeReplacedAtTheCallOnRealTmux
   TestStorageGateServesACityFromItsBeadsWorkspace
+  TestStorageMigrateMovesAStoppedManagedDoltCityInsideTheMaintenanceWindow
+  TestStorageMigrateRefusesAForeignSessionOnTheManagedDoltItStarted
 )
 
 join_regex() {

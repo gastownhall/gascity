@@ -40,6 +40,18 @@ const (
 	// on this value, so the factory owns it and they read it.
 	BeadsGateProxiedProvider = "proxied_provider"
 
+	// BeadsGateForceFallback is the gate of the BdStore fallback
+	// GC_BEADS_FORCE_FALLBACK=1 forces. It and the two below are exported for
+	// a caller that must not take that lane (the storage migration) and names
+	// the gate in its refusal.
+	BeadsGateForceFallback = nativeForceFallbackGate
+	// BeadsGateBdHooks is the gate of the BdStore fallback executable bd hooks
+	// force: only the bd CLI runs them.
+	BeadsGateBdHooks = nativeHooksGate
+	// BeadsGateNativeTransportOff is the gate of the BdStore fallback
+	// beads.native_transport = "off" selects.
+	BeadsGateNativeTransportOff = nativeTransportOffGate
+
 	storeNameBdStore         = BeadsStoreNameBdStore
 	storeNameFileStore       = BeadsStoreNameFileStore
 	storeNameExecStore       = BeadsStoreNameExecStore

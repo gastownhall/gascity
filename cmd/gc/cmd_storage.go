@@ -510,6 +510,14 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 			fmt.Fprintf(stderr, "%s: releasing the migration guard: %v\n", logPrefix, releaseErr) //nolint:errcheck // best-effort stderr
 		}
 	}()
+	// The maintenance window (storage_maintenance.go): the provider up, the
+	// payload-reading lanes forced, closed before the lock is released.
+	window, err := openMigrationSource(controllerLock, request.CityPath, logPrefix, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defer window.closeReporting(logPrefix, stderr)
 
 	// No rig census here (S4b). A rig's graph rows no longer block the city
 	// cutover: the relic legs keep them readable, and `--from-rigs` moves
@@ -893,8 +901,10 @@ var openStorageScopeStore = openPhysicalScopeStore
 // census move infrastructure rows out of a rig ledger, so they read the rows
 // a runtime reader is never handed; under the split-strict test gate the
 // one-shot open would hand out the work view, which hides exactly those rows.
+// Inside a maintenance window it takes the window's native transport
+// (storage_maintenance.go).
 func openPhysicalScopeStore(storePath, cityPath string) (beads.Store, error) {
-	result, err := openStoreResultAtForCityScoped(storePath, cityPath, nil, gate.ModeUnset, false, false, false, false, nil)
+	result, err := openStoreResultAtForCityScoped(storePath, cityPath, nil, gate.ModeUnset, false, false, false, false, migrationWindowNativeTransport(cityPath))
 	if err != nil {
 		return nil, err
 	}

@@ -1524,6 +1524,14 @@ func doStorageMigrateFromRigs(ctx context.Context, request storageOperatorReques
 			fmt.Fprintf(stderr, "%s: releasing the migration guard: %v\n", logPrefix, releaseErr) //nolint:errcheck // best-effort stderr
 		}
 	}()
+	// The maintenance window (storage_maintenance.go): the city's provider
+	// serves its rigs' stores too.
+	window, err := openMigrationSource(controllerLock, request.CityPath, logPrefix, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defer window.closeReporting(logPrefix, stderr)
 	// A shared-store attestation is recorded per rig, where it lifts that
 	// rig's refusal (importRig).
 	recordStorageAttestation(request.CityPath, logPrefix, request.Force.acceptedHazards(), stderr)
