@@ -53,7 +53,7 @@ func TestHandleExtMsgOutboundNotifiesPeerMembersAndMaterializesNamedSessions(t *
 	srv := New(fs)
 	t.Cleanup(srv.waitForBackground)
 
-	services := extmsg.NewServices(fs.cityBeadStore)
+	services := extmsg.NewServices(beads.MailStore{Store: fs.cityBeadStore}, beads.SessionStore{Store: fs.cityBeadStore})
 	fs.extmsgSvc = &services
 	registry := extmsg.NewAdapterRegistry()
 	adapter := &testExtMsgAdapter{}
@@ -158,7 +158,7 @@ func TestExtmsgNotifyMembersDoesNotMaterializeExcludedNamedSender(t *testing.T) 
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
-	services := extmsg.NewServices(fs.cityBeadStore)
+	services := extmsg.NewServices(beads.MailStore{Store: fs.cityBeadStore}, beads.SessionStore{Store: fs.cityBeadStore})
 	fs.extmsgSvc = &services
 
 	ref := extmsg.ConversationRef{
@@ -199,7 +199,7 @@ func TestExtmsgNotifyMembersSuppressesDiscriminatorForRoutedParticipant(t *testi
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
-	services := extmsg.NewServices(fs.cityBeadStore)
+	services := extmsg.NewServices(beads.MailStore{Store: fs.cityBeadStore}, beads.SessionStore{Store: fs.cityBeadStore})
 	fs.extmsgSvc = &services
 
 	ref := extmsg.ConversationRef{
@@ -275,7 +275,7 @@ func TestHandleExtMsgOutboundNotifiesDeliveredConversationMembers(t *testing.T) 
 	srv := New(fs)
 	t.Cleanup(srv.waitForBackground)
 
-	services := extmsg.NewServices(fs.cityBeadStore)
+	services := extmsg.NewServices(beads.MailStore{Store: fs.cityBeadStore}, beads.SessionStore{Store: fs.cityBeadStore})
 	fs.extmsgSvc = &services
 	requestRef := extmsg.ConversationRef{
 		ScopeID:        "guild-1",
@@ -408,7 +408,7 @@ func TestHandleExtMsgInboundNormalizedTransientStorageFaultReturns500(t *testing
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
-	services := extmsg.NewServices(fs.cityBeadStore)
+	services := extmsg.NewServices(beads.MailStore{Store: fs.cityBeadStore}, beads.SessionStore{Store: fs.cityBeadStore})
 	services.Bindings = faultBindingService{err: errors.New("database is locked")}
 	fs.extmsgSvc = &services
 	fs.adapterReg = extmsg.NewAdapterRegistry()
@@ -432,7 +432,7 @@ func TestHandleExtMsgInboundNormalizedInvalidConversationReturns400(t *testing.T
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
-	services := extmsg.NewServices(fs.cityBeadStore)
+	services := extmsg.NewServices(beads.MailStore{Store: fs.cityBeadStore}, beads.SessionStore{Store: fs.cityBeadStore})
 	services.Bindings = faultBindingService{err: fmt.Errorf("%w: scope_id required", extmsg.ErrInvalidConversation)}
 	fs.extmsgSvc = &services
 	fs.adapterReg = extmsg.NewAdapterRegistry()
@@ -459,7 +459,7 @@ func TestHandleExtMsgInboundNormalizedInvariantViolationReturns400(t *testing.T)
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
-	services := extmsg.NewServices(fs.cityBeadStore)
+	services := extmsg.NewServices(beads.MailStore{Store: fs.cityBeadStore}, beads.SessionStore{Store: fs.cityBeadStore})
 	services.Bindings = faultBindingService{err: fmt.Errorf("%w: multiple active bindings for telegram/acct-1/chat-1", extmsg.ErrInvariantViolation)}
 	fs.extmsgSvc = &services
 	fs.adapterReg = extmsg.NewAdapterRegistry()

@@ -39,7 +39,7 @@ func respawn(t *testing.T, store beads.Store, oldID, name string) string {
 func TestBindStoresStableSessionName(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewServices(store).Bindings
+	svc := NewServices(beads.MailStore{Store: store}, beads.SessionStore{Store: store}).Bindings
 	ref := testConversationRef()
 
 	sessionID := makeSessionBead(t, store, "gc-pl")
@@ -69,7 +69,7 @@ func TestBindStoresStableSessionName(t *testing.T) {
 func TestResolveByConversationOverlaysLiveSessionAfterRespawn(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewServices(store).Bindings
+	svc := NewServices(beads.MailStore{Store: store}, beads.SessionStore{Store: store}).Bindings
 	ref := testConversationRef()
 
 	oldID := makeSessionBead(t, store, "gc-pl")
@@ -98,7 +98,7 @@ func TestResolveByConversationOverlaysLiveSessionAfterRespawn(t *testing.T) {
 func TestResolveByConversationLeavesStaleIDWhenSessionGone(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewServices(store).Bindings
+	svc := NewServices(beads.MailStore{Store: store}, beads.SessionStore{Store: store}).Bindings
 	ref := testConversationRef()
 
 	oldID := makeSessionBead(t, store, "gc-pl")
@@ -126,7 +126,7 @@ func TestResolveByConversationLeavesStaleIDWhenSessionGone(t *testing.T) {
 func TestReapStaleBindingsReassignsToRespawnedSession(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewServices(store).Bindings
+	svc := NewServices(beads.MailStore{Store: store}, beads.SessionStore{Store: store}).Bindings
 	ref := testConversationRef()
 
 	oldID := makeSessionBead(t, store, "gc-pl")
@@ -139,7 +139,7 @@ func TestReapStaleBindingsReassignsToRespawnedSession(t *testing.T) {
 	}
 	newID := respawn(t, store, oldID, "gc-pl")
 
-	stats, err := ReapStaleBindings(context.Background(), store, testNow())
+	stats, err := ReapStaleBindings(context.Background(), beads.MailStore{Store: store}, beads.SessionStore{Store: store}, testNow())
 	if err != nil {
 		t.Fatalf("ReapStaleBindings: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestReapStaleBindingsReassignsToRespawnedSession(t *testing.T) {
 func TestReapStaleBindingsClearsDeadNamedSession(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewServices(store).Bindings
+	svc := NewServices(beads.MailStore{Store: store}, beads.SessionStore{Store: store}).Bindings
 	ref := testConversationRef()
 
 	oldID := makeSessionBead(t, store, "gc-pl")
@@ -185,7 +185,7 @@ func TestReapStaleBindingsClearsDeadNamedSession(t *testing.T) {
 		t.Fatalf("close session: %v", err)
 	}
 
-	stats, err := ReapStaleBindings(context.Background(), store, testNow())
+	stats, err := ReapStaleBindings(context.Background(), beads.MailStore{Store: store}, beads.SessionStore{Store: store}, testNow())
 	if err != nil {
 		t.Fatalf("ReapStaleBindings: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestReapStaleBindingsClearsDeadNamedSession(t *testing.T) {
 func TestReapStaleBindingsClearsLegacyBindingWithClosedBead(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewServices(store).Bindings
+	svc := NewServices(beads.MailStore{Store: store}, beads.SessionStore{Store: store}).Bindings
 	ref := testConversationRef()
 
 	// Legacy binding: target session bead carries no stable session_name.
@@ -229,7 +229,7 @@ func TestReapStaleBindingsClearsLegacyBindingWithClosedBead(t *testing.T) {
 	}
 
 	// While the bead is open the reaper must leave the legacy binding alone.
-	stats, err := ReapStaleBindings(context.Background(), store, testNow())
+	stats, err := ReapStaleBindings(context.Background(), beads.MailStore{Store: store}, beads.SessionStore{Store: store}, testNow())
 	if err != nil {
 		t.Fatalf("ReapStaleBindings (open): %v", err)
 	}
@@ -240,7 +240,7 @@ func TestReapStaleBindingsClearsLegacyBindingWithClosedBead(t *testing.T) {
 	if err := store.Close(legacy.ID); err != nil {
 		t.Fatalf("close legacy session: %v", err)
 	}
-	stats, err = ReapStaleBindings(context.Background(), store, testNow())
+	stats, err = ReapStaleBindings(context.Background(), beads.MailStore{Store: store}, beads.SessionStore{Store: store}, testNow())
 	if err != nil {
 		t.Fatalf("ReapStaleBindings (closed): %v", err)
 	}
@@ -258,7 +258,7 @@ func TestReapStaleBindingsClearsLegacyBindingWithClosedBead(t *testing.T) {
 func TestBindBackfillsSessionNameOnLegacyBinding(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewServices(store).Bindings
+	svc := NewServices(beads.MailStore{Store: store}, beads.SessionStore{Store: store}).Bindings
 	ref := testConversationRef()
 
 	// Create a session bead without session_name (pre-fix format).
@@ -330,7 +330,7 @@ func TestGroupRoutingFollowsRetiredButOpenSession(t *testing.T) {
 	store := beads.NewMemStore()
 	sessAID := makeSessionBead(t, store, "pl-alpha")
 
-	svc := NewGroupService(store)
+	svc := NewGroupService(beads.MailStore{Store: store}, beads.SessionStore{Store: store})
 	ref := testConversationRef()
 	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
 		RootConversation: ref,

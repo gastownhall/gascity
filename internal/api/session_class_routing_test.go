@@ -176,7 +176,7 @@ func TestExtmsgNotifyMembersMaterializesIntoSessionsClass(t *testing.T) {
 	srv := New(fs)
 	t.Cleanup(srv.waitForBackground)
 
-	services := extmsg.NewServices(fs.cityBeadStore)
+	services := extmsg.NewServices(beads.MailStore{Store: fs.cityBeadStore}, beads.SessionStore{Store: fs.cityBeadStore})
 	fs.extmsgSvc = &services
 
 	ref := extmsg.ConversationRef{

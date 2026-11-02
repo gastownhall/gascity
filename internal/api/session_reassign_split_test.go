@@ -141,7 +141,7 @@ func TestSplitNamedSessionWakeHandsOffPastAFailingWorkStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create(wait): %v", err)
 	}
-	bound, err := extmsg.NewServices(f.binding).Bindings.Bind(context.Background(), extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}, extmsg.BindInput{
+	bound, err := extmsg.NewServices(beads.MailStore{Store: f.binding}, beads.SessionStore{Store: f.binding}).Bindings.Bind(context.Background(), extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}, extmsg.BindInput{
 		Conversation: extmsg.ConversationRef{
 			ScopeID:        "test-city",
 			Provider:       "discord",

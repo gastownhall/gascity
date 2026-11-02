@@ -32,7 +32,7 @@ func TestReapStaleExtmsgBindingsRepointsRespawnedSession(t *testing.T) {
 		ConversationID: "C0B25SS12CD",
 		Kind:           extmsg.ConversationRoom,
 	}
-	svc := extmsg.NewServices(store).Bindings
+	svc := extmsg.NewServices(beads.MailStore{Store: store}, beads.SessionStore{Store: store}).Bindings
 	if _, err := svc.Bind(context.Background(), extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}, extmsg.BindInput{
 		Conversation: ref,
 		SessionID:    oldSession.ID,
@@ -91,7 +91,7 @@ func TestReapStaleExtmsgParticipantsMigratesMembershipToRespawn(t *testing.T) {
 		ConversationID: "C0B25SS12CD",
 		Kind:           extmsg.ConversationRoom,
 	}
-	fabric := extmsg.NewServices(store)
+	fabric := extmsg.NewServices(beads.MailStore{Store: store}, beads.SessionStore{Store: store})
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
 	group, err := fabric.Groups.EnsureGroup(context.Background(), caller, extmsg.EnsureGroupInput{
 		RootConversation: ref,

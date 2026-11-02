@@ -315,6 +315,7 @@ go_test(
         "coordination_pour_test.go",
         "cors_test.go",
         "cursor_token_test.go",
+        "dashport_support_stores_test.go",
         "decode_beads_test.go",
         "decode_convoys_test.go",
         "decode_mail_test.go",
