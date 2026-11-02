@@ -174,6 +174,13 @@
 #                                         NOT write pending-GC /
 #                                         pending-push markers (those are
 #                                         flatten-remediation state).
+#   GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS
+#     (default: 3) — how many times the live-database gate probes the
+#                     server after a storage-rewriting step (flatten,
+#                     full GC, bare GC). Must be a positive integer.
+#   GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS
+#     (default: 2) — seconds to wait between live-gate probe attempts.
+#                     Non-negative; 0 retries immediately.
 set -eu
 
 : "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
@@ -475,6 +482,51 @@ case "$compact_renotify_backstop_secs" in
     exit 2
     ;;
 esac
+
+# Live-database gate probe settings (see live_gate_check): how many times a
+# post-rewrite liveness probe is attempted, and how long to wait between
+# attempts. Empty values use the defaults like the surrounding knobs. Leading
+# zeros are parsed as decimal (an all-zero attempts value is rejected), never
+# as shell octal, and values too large for shell arithmetic are rejected.
+live_probe_attempts_input="${GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS:-}"
+live_probe_delay_input="${GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS:-}"
+live_probe_attempts=3
+live_probe_delay_secs=2
+if [ -n "$live_probe_attempts_input" ]; then
+  case "$live_probe_attempts_input" in
+    *[!0-9]*)
+      printf 'compact: invalid GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=%s (must be a positive integer)\n' \
+        "$live_probe_attempts_input" >&2
+      exit 2
+      ;;
+  esac
+  live_probe_attempts=$(printf '%s' "$live_probe_attempts_input" | sed 's/^0*//')
+  case "$live_probe_attempts" in
+    ''|*[!0-9]*|??????????*)
+      printf 'compact: invalid GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=%s (must be a positive integer)\n' \
+        "$live_probe_attempts_input" >&2
+      exit 2
+      ;;
+  esac
+fi
+if [ -n "$live_probe_delay_input" ]; then
+  case "$live_probe_delay_input" in
+    *[!0-9]*)
+      printf 'compact: invalid GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=%s (must be a non-negative integer)\n' \
+        "$live_probe_delay_input" >&2
+      exit 2
+      ;;
+  esac
+  live_probe_delay_secs=$(printf '%s' "$live_probe_delay_input" | sed 's/^0*//')
+  case "$live_probe_delay_secs" in
+    *[!0-9]*|??????????*)
+      printf 'compact: invalid GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=%s (must be a non-negative integer)\n' \
+        "$live_probe_delay_input" >&2
+      exit 2
+      ;;
+  esac
+  : "$live_probe_delay_secs"
+fi
 
 case "$compact_remote" in
   ''|[A-Za-z0-9_.-]*)
