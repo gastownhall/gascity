@@ -152,8 +152,12 @@ func configurePool(db *sql.DB) {
 	db.SetConnMaxIdleTime(connMaxIdleTime)
 }
 
-// Shutdown closes all pooled connections and empties the registry. Call
-// once on process exit; subsequent Open calls recreate pools on demand.
+// Shutdown closes all pooled connections and empties the registry. Call it on
+// process exit; subsequent Open calls recreate pools on demand. A one-shot
+// process may also call it mid-run to close its own idle sessions before it
+// judges a server's sessions (cmd/gc's storage maintenance window), provided
+// no caller still holds a handle Open returned: a held handle is closed under
+// it.
 func Shutdown() {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()

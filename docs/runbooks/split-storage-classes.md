@@ -117,7 +117,7 @@ The checks that most often stop a real cutover, and what each wants from you:
 | `shared store` | Another registered city uses this city's work store. Under `--force=shared-store:<identity>` it still blocks on rows that name another city's scope, and on an attestation that finds no registered city on the store. | If this city is the only writer of what it migrates, attest the identity the block prints. Move rows that name another city's scope first: no attestation covers them. Register an unregistered co-tenant again (`gc register <path>`). |
 | `rig scopes` | A rig's graph rows have a shape the rig import cannot move without a cross-store edge (an open `tracks`/`parent-child` edge between a graph row and rig work, open work blocked by an open graph row), or a rig store cannot be read. | Do what the named fix says (close the workflow or convoy, finish the work, or remove the edge), or restore access to the rig. Rig history, closed or suspended, no longer blocks: each rig is a `[note]` with what its import would move. |
 | `served binding` | This city already served its infrastructure classes from a different binding. | Verify or recover that binding first. Removing the note is your attestation that you have. |
-| `edge payloads` | The work store cannot be asked what its dependency edges carry — `waits_for` gates store a payload there. | Rehearse on the running city: preflight opens the work store as it finds it, and a stopped managed or proxied city has no server to read. The migration itself starts the provider for its run (Step 4). A store that stays on the bd CLI lane is refused there by the reason it stayed: executable bd hooks (remove or disable them for the window, or wait for ga-qcpgy), schema skew (`bd migrate`), or `GC_BEADS_FORCE_FALLBACK=1` (unset it). A generic exec store is not refused: its protocol carries no payload, so its edges are copied carrying none and the manifest records `#gc:source-payload-blind exec`. |
+| `edge payloads` | The work store cannot be asked what its dependency edges carry — `waits_for` gates store a payload there. | Rehearse on the running city: preflight opens the work store as it finds it, and a stopped managed or proxied city has no server to read. The migration itself starts the provider for its run (Step 4). A store that stays on the bd CLI lane is refused there by the reason it stayed: executable bd hooks (remove or disable them for the window, or wait for ga-qcpgy), schema skew (`bd migrate`), or `GC_BEADS_FORCE_FALLBACK=1` (unset it). The migration probes every edge it and its clear read, cross-store edges included, before writing anything. A generic exec store (one not backed by bd: not `gc-beads-bd`, not `gc-beads-k8s`) is not refused: its protocol carries no payload, so its edges are copied carrying none and the manifest records `#gc:source-payload-blind exec`. |
 | `destination` | The binding already holds beads this migration did not write. | Find out whose they are before letting a copy overwrite them. |
 
 The `shared store` row judges the city as the migration will, with the city
@@ -190,21 +190,29 @@ What the command does, in order:
    refused here first rather than migrated toward.
 2. Takes the city's `.gc/controller.lock` and holds it until it exits. It
    refuses while something else holds the lock, while the city is registered
-   with the supervisor, while any of its sessions runs, on a remote stage, and,
-   without the matching `--force`, on a remote runtime or a shared work store.
-   It also refuses if a controller answers the city's socket.
-3. Takes a migration guard over the city, so a second migrator cannot run,
-   and opens the maintenance window. `gc stop` stopped the city's bead-store
-   provider; a managed bd/Dolt, proxied or bd-contract exec city has no server
-   to read without it. The window starts the provider the way `gc start` does
-   (no agents, no nudge pollers), records that it did in
-   `.gc/storage-window.json`, and stops it again before the lock is released.
-   A provider that was already up is left as it was, and one a killed run
-   started is stopped by the next run. Inside the window the work store opens
-   on the native lane: the proxied-native lane is forced on and
-   `beads.native_transport = "off"` is overridden for this process only. On a
-   Dolt server the window started it refuses while any other client holds a
-   session there, naming each.
+   with the supervisor, while any of its sessions runs, and on a remote stage.
+   Then, still under the lock and before anything reads the work store, it
+   opens the maintenance window:
+   - `gc stop` stopped the city's bead-store provider, and a managed bd/Dolt,
+     proxied or bd-contract exec city has no server to read without it. The
+     window starts the provider the way `gc start` does (no agents, no nudge
+     pollers), recording that it did in `.gc/storage-window.json` first, and
+     stops it again before the lock is released. A provider that was already
+     up is left as it was. A provider a killed run started is stopped by the
+     next run, whoever has started it since: the city is stopped and locked.
+   - Inside the window the migration's own opens of the work store take the
+     native lane: the proxied-native lane is forced on and
+     `beads.native_transport = "off"` is overridden, for those opens only, with
+     the configuration the command loaded.
+   - On a gc-managed Dolt the window started, it lists the server's client
+     sessions over its published port and refuses while any other client holds
+     one, naming each, or when they cannot be listed. A bd-owned proxy or an
+     exec provider the window started cannot be judged that way: the run says
+     so, and `--fleet-stopped` covers it.
+
+   It then refuses, without the matching `--force`, a remote runtime or a
+   shared work store, and refuses if a controller answers the city's socket.
+3. Takes a migration guard over the city, so a second migrator cannot run.
 4. Does not census rig scopes. A rig's graph rows stay readable through its
    relic legs and move with `gc storage migrate --from-rigs` once the binding
    has converged; the success message names every rig still awaiting that.
@@ -317,9 +325,12 @@ and that pins no database name cannot be compared), rows scoped to another rig
 or city, open rows another city's agent claims, rows its manifest says it
 carried that the binding no longer holds, and a rig whose store cannot read the
 payload of an edge the import copies or backs up. A bd CLI rig with an edge on
-a row it moves is such a rig. The import runs in the same maintenance window as
-the city migration (Step 4), so a managed rig is read natively, and a
-proxied-server rig on the proxied-native lane, which the window forces on. While an
+a row it moves is such a rig, and so is a generic exec rig with one: the city
+migration copies a generic exec store's edges carrying no payload, as its
+protocol declares, but the rig import does not take that declaration yet. The
+import runs in the same maintenance window as the city migration (Step 4), so
+a managed rig is read natively, and a proxied-server rig on the proxied-native
+lane, which the window forces on. While an
 import is in flight (`infra.rig.<rig>.importing` beside the binding) boot and
 every gc command refuse; re-run the import to finish it. If a rig store is
 gone for good after its import wrote its marker, `gc storage migrate

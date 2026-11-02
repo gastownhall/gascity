@@ -13,17 +13,29 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
-// migrationWindowProvider stubs the provider lifecycle the window drives and
-// counts what it asked for.
+// migrationWindowProvider stubs the provider lifecycle and the session list
+// the window drives, and records what it asked for.
 type migrationWindowProvider struct {
 	down          bool
 	startErr      error
+	stopErr       error
 	starts, stops int
-	// lockHeldAtStart records whether the controller lock was held when the
-	// window started the provider.
-	lockHeldAtStart bool
+	// lockHeldAtStart and lockHeldAtStop record whether the controller lock
+	// was held when the window started and stopped the provider.
+	lockHeldAtStart, lockHeldAtStop bool
+	// recordAtStart records whether .gc/storage-window.json existed when the
+	// provider was started.
+	recordAtStart bool
+	// sessions, unlistable and listErr are the session list's answer.
+	sessions   []beads.DoltConnection
+	unlistable bool
+	listErr    error
+	lists      int
 }
 
 func stubMigrationWindowProvider(t *testing.T, p *migrationWindowProvider) {
@@ -34,22 +46,40 @@ func stubMigrationWindowProvider(t *testing.T, p *migrationWindowProvider) {
 	migrationWindowProviderDown = func(string) (bool, error) { return p.down, nil }
 }
 
-// stubMigrationWindowStartStop stubs the start and the stop only: whether the
-// provider is down is the real probe's answer.
+// stubMigrationWindowStartStop stubs the start, the stop and the session list:
+// whether the provider is down is the real probe's answer.
 func stubMigrationWindowStartStop(t *testing.T, p *migrationWindowProvider) {
 	t.Helper()
-	prevStart, prevStop := migrationWindowStartProvider, migrationWindowStopProvider
-	t.Cleanup(func() { migrationWindowStartProvider, migrationWindowStopProvider = prevStart, prevStop })
+	prevStart, prevStop, prevSessions, prevSettle := migrationWindowStartProvider, migrationWindowStopProvider, migrationWindowSessions, migrationWindowSessionSettle
+	t.Cleanup(func() {
+		migrationWindowStartProvider, migrationWindowStopProvider, migrationWindowSessions, migrationWindowSessionSettle = prevStart, prevStop, prevSessions, prevSettle
+	})
+	migrationWindowSessionSettle = 0
 	migrationWindowStartProvider = func(cityPath string) error {
 		p.starts++
-		probe, err := acquireControllerLock(cityPath)
-		if err == nil {
-			probe.Close() //nolint:errcheck // probe only
-		}
-		p.lockHeldAtStart = errors.Is(err, errControllerAlreadyRunning)
+		p.lockHeldAtStart = controllerLockHeld(cityPath)
+		p.recordAtStart = fileExists(migrationWindowRecordPath(cityPath))
 		return p.startErr
 	}
-	migrationWindowStopProvider = func(string) error { p.stops++; return nil }
+	migrationWindowStopProvider = func(cityPath string) error {
+		p.stops++
+		p.lockHeldAtStop = controllerLockHeld(cityPath)
+		return p.stopErr
+	}
+	migrationWindowSessions = func(context.Context, string) ([]beads.DoltConnection, bool, error) {
+		p.lists++
+		return p.sessions, !p.unlistable, p.listErr
+	}
+}
+
+// controllerLockHeld probes whether another descriptor holds the city's
+// controller lock.
+func controllerLockHeld(cityPath string) bool {
+	probe, err := acquireControllerLock(cityPath)
+	if err == nil {
+		probe.Close() //nolint:errcheck // probe only
+	}
+	return errors.Is(err, errControllerAlreadyRunning)
 }
 
 // windowCity is a city directory with its controller lock held, as a writing
@@ -63,6 +93,15 @@ func windowCity(t *testing.T) (string, *os.File) {
 	}
 	t.Cleanup(func() { lock.Close() }) //nolint:errcheck // test cleanup
 	return cityPath, lock
+}
+
+// openTestWindow opens a window on cityPath with an empty configuration.
+func openTestWindow(t *testing.T, lock *os.File, cityPath string, stderr *bytes.Buffer) (*migrationSourceWindow, error) {
+	t.Helper()
+	if stderr == nil {
+		stderr = &bytes.Buffer{}
+	}
+	return openMigrationSource(lock, cityPath, &config.City{}, "gc storage migrate", stderr)
 }
 
 func TestMigrationSourceLaneRefusalNamesTheGate(t *testing.T) {
@@ -82,6 +121,7 @@ func TestMigrationSourceLaneRefusalNamesTheGate(t *testing.T) {
 		{name: "bd hooks", diag: bd(beads.BeadsGateBdHooks, "bd hooks are installed"), want: []string{"gate bd_hooks", ".beads/hooks", "ga-qcpgy"}},
 		{name: "schema skew", diag: bd(string(contract.PreflightCheckVersionCompat), "schema behind"), want: []string{"gate version_compat", "`bd migrate`"}},
 		{name: "forced fallback", diag: bd(beads.BeadsGateForceFallback, "GC_BEADS_FORCE_FALLBACK=1"), want: []string{"Unset it"}},
+		{name: "metadata backend", diag: bd(string(contract.PreflightCheckMetadataBackend), "backend http"), want: []string{"gate metadata_backend", "not one the native store serves", "Nothing was written"}},
 		{name: "proxied lane refused", diag: beads.BeadsDiagnostic{Store: beads.BeadsStoreNameBdStore, PreflightGate: beads.BeadsGateProxiedProvider, Proxied: &beads.ProxiedDiagnostic{Verdict: beads.ProxiedVerdict("cursor_skew")}}, want: []string{"verdict cursor_skew", "`gc doctor`"}},
 		{name: "native open failed", diag: bd("native_open", "dial tcp: connection refused"), want: []string{"gate native_open", "connection refused", "`gc doctor`"}},
 		{name: "bd-contract exec fallback", diag: beads.BeadsDiagnostic{Store: beads.BeadsStoreNameExecStore, PreflightGate: "native_open", PreflightReason: "down"}, want: []string{"ExecStore", "gate native_open"}},
@@ -106,33 +146,34 @@ func TestMigrationSourceLaneRefusalNamesTheGate(t *testing.T) {
 	}
 }
 
-// TestMigrationWindowStartsADownProviderAndStopsItOnClose: the window starts
-// the provider under the held lock, records that it did, forces the
-// payload-reading lanes for its lifetime, and on close stops the provider and
-// restores the process.
+// TestMigrationWindowStartsADownProviderAndStopsItOnClose: the window records
+// that it is starting the provider before the start, starts it under the held
+// lock, overrides the native transport for its lifetime, and on close stops
+// the provider and removes the record.
 func TestMigrationWindowStartsADownProviderAndStopsItOnClose(t *testing.T) {
-	stubInfraMigrationSource(t)
 	cityPath, lock := windowCity(t)
 	provider := &migrationWindowProvider{down: true}
 	stubMigrationWindowProvider(t, provider)
-	t.Setenv(migrationWindowProxiedEnv, "0")
 
 	var stderr bytes.Buffer
-	window, err := openMigrationSource(lock, cityPath, "gc storage migrate", &stderr)
+	window, err := openTestWindow(t, lock, cityPath, &stderr)
 	if err != nil {
 		t.Fatalf("openMigrationSource: %v", err)
 	}
 	if provider.starts != 1 || !provider.lockHeldAtStart {
 		t.Fatalf("starts = %d, lock held at start = %v; want one start under the controller lock", provider.starts, provider.lockHeldAtStart)
 	}
+	if !provider.recordAtStart {
+		t.Fatal("the provider was started before the record was written: a run killed in between leaves it running and unrecorded")
+	}
 	if !fileExists(migrationWindowRecordPath(cityPath)) {
-		t.Fatal("the window started the provider without recording that it did: a killed run would leave it running")
+		t.Fatal("the window started the provider without recording that it did")
 	}
-	if got := os.Getenv(migrationWindowProxiedEnv); got != "1" {
-		t.Errorf("%s = %q inside the window, want 1", migrationWindowProxiedEnv, got)
+	if cfg, mode := migrationWindowOpen(cityPath); cfg == nil || mode == nil || *mode != beads.NativeTransportAuto {
+		t.Errorf("inside the window the opens take (%v, %v), want the verb's config and auto (O9)", cfg, mode)
 	}
-	if mode := migrationWindowNativeTransport(cityPath); mode == nil || *mode != beads.NativeTransportAuto {
-		t.Errorf("native transport inside the window = %v, want auto (O9)", mode)
+	if provider.lists != 1 {
+		t.Errorf("the window listed sessions %d time(s) on the server it started, want 1", provider.lists)
 	}
 	if !strings.Contains(stderr.String(), "started the bead-store provider") {
 		t.Errorf("the window did not say it started the provider: %s", stderr.String())
@@ -147,11 +188,8 @@ func TestMigrationWindowStartsADownProviderAndStopsItOnClose(t *testing.T) {
 	if fileExists(migrationWindowRecordPath(cityPath)) {
 		t.Error("the record outlived the stop")
 	}
-	if got := os.Getenv(migrationWindowProxiedEnv); got != "0" {
-		t.Errorf("%s = %q after the window, want the 0 it had", migrationWindowProxiedEnv, got)
-	}
-	if mode := migrationWindowNativeTransport(cityPath); mode != nil {
-		t.Errorf("native transport after the window = %v, want the city's own", *mode)
+	if cfg, mode := migrationWindowOpen(cityPath); cfg != nil || mode != nil {
+		t.Errorf("after the window the opens take (%v, %v), want the city's own", cfg, mode)
 	}
 	if err := window.Close(); err != nil || provider.stops != 1 {
 		t.Errorf("a second Close = %v with %d stops, want a no-op", err, provider.stops)
@@ -162,66 +200,93 @@ func TestMigrationWindowLeavesARunningProviderRunning(t *testing.T) {
 	cityPath, lock := windowCity(t)
 	provider := &migrationWindowProvider{}
 	stubMigrationWindowProvider(t, provider)
-	window, err := openMigrationSource(lock, cityPath, "gc storage migrate", &bytes.Buffer{})
+	window, err := openTestWindow(t, lock, cityPath, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := window.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if provider.starts != 0 || provider.stops != 0 {
-		t.Fatalf("starts = %d, stops = %d on a provider that was up; want neither", provider.starts, provider.stops)
+	if provider.starts != 0 || provider.stops != 0 || provider.lists != 0 {
+		t.Fatalf("starts = %d, stops = %d, lists = %d on a provider that was up; want none", provider.starts, provider.stops, provider.lists)
 	}
 }
 
 // TestMigrationWindowStopsAProviderAKilledRunStarted: a run killed after it
-// started the provider left the record; the next window owns that provider.
+// started the provider left the record; the next window owns that provider,
+// and starts it as well when it is down again.
 func TestMigrationWindowStopsAProviderAKilledRunStarted(t *testing.T) {
-	stubInfraMigrationSource(t)
-	cityPath, lock := windowCity(t)
-	if err := writeMigrationWindowRecord(cityPath); err != nil {
-		t.Fatal(err)
-	}
-	provider := &migrationWindowProvider{}
-	stubMigrationWindowProvider(t, provider)
-	var stderr bytes.Buffer
-	window, err := openMigrationSource(lock, cityPath, "gc storage migrate", &stderr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := window.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if provider.starts != 0 || provider.stops != 1 {
-		t.Fatalf("starts = %d, stops = %d; want the inherited provider stopped, not restarted", provider.starts, provider.stops)
-	}
-	if fileExists(migrationWindowRecordPath(cityPath)) {
-		t.Error("the inherited record outlived the stop")
-	}
-	if !strings.Contains(stderr.String(), "did not stop it") {
-		t.Errorf("the window did not name the provider it inherited: %s", stderr.String())
+	for _, down := range []bool{false, true} {
+		cityPath, lock := windowCity(t)
+		if err := writeMigrationWindowRecord(cityPath); err != nil {
+			t.Fatal(err)
+		}
+		provider := &migrationWindowProvider{down: down}
+		stubMigrationWindowProvider(t, provider)
+		var stderr bytes.Buffer
+		window, err := openTestWindow(t, lock, cityPath, &stderr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := window.Close(); err != nil {
+			t.Fatal(err)
+		}
+		wantStarts := 0
+		if down {
+			wantStarts = 1
+		}
+		if provider.starts != wantStarts || provider.stops != 1 {
+			t.Fatalf("down=%v: starts = %d, stops = %d; want %d start(s) and the inherited provider stopped", down, provider.starts, provider.stops, wantStarts)
+		}
+		if fileExists(migrationWindowRecordPath(cityPath)) {
+			t.Errorf("down=%v: the inherited record outlived the stop", down)
+		}
+		if !strings.Contains(stderr.String(), "did not stop it") {
+			t.Errorf("down=%v: the window did not name the provider it inherited: %s", down, stderr.String())
+		}
 	}
 }
 
-func TestMigrationWindowNeedsTheControllerLock(t *testing.T) {
+// TestMigrationWindowKeepsTheRecordWhenTheStopFails: a provider the stop could
+// not retire stays recorded, so the next window stops it.
+func TestMigrationWindowKeepsTheRecordWhenTheStopFails(t *testing.T) {
+	cityPath, lock := windowCity(t)
+	provider := &migrationWindowProvider{down: true, stopErr: errors.New("dolt would not stop")}
+	stubMigrationWindowProvider(t, provider)
+	window, err := openTestWindow(t, lock, cityPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := window.Close(); err == nil || !strings.Contains(err.Error(), "dolt would not stop") {
+		t.Fatalf("Close = %v, want the stop's failure", err)
+	}
+	if !fileExists(migrationWindowRecordPath(cityPath)) {
+		t.Fatal("the record was removed although the provider it names is still running")
+	}
+}
+
+func TestMigrationWindowNeedsTheControllerLockAndTheConfig(t *testing.T) {
 	provider := &migrationWindowProvider{down: true}
 	stubMigrationWindowProvider(t, provider)
-	if _, err := openMigrationSource(nil, recoveryCityPath(t), "gc storage migrate", &bytes.Buffer{}); err == nil {
+	if _, err := openMigrationSource(nil, recoveryCityPath(t), &config.City{}, "gc storage migrate", &bytes.Buffer{}); err == nil {
 		t.Fatal("a window opened without the controller lock")
 	}
+	cityPath, lock := windowCity(t)
+	if _, err := openMigrationSource(lock, cityPath, nil, "gc storage migrate", &bytes.Buffer{}); err == nil {
+		t.Fatal("a window opened without the verb's configuration: its opens would proceed on none")
+	}
 	if provider.starts != 0 {
-		t.Fatal("the provider was started without the controller lock")
+		t.Fatal("the provider was started by a window that refused")
 	}
 }
 
 // TestMigrationWindowFailedStartStopsWhatItStarted: a start that failed
 // half-way is stopped, so the run leaves nothing it began running.
 func TestMigrationWindowFailedStartStopsWhatItStarted(t *testing.T) {
-	stubInfraMigrationSource(t)
 	cityPath, lock := windowCity(t)
 	provider := &migrationWindowProvider{down: true, startErr: errors.New("dolt did not come up")}
 	stubMigrationWindowProvider(t, provider)
-	_, err := openMigrationSource(lock, cityPath, "gc storage migrate", &bytes.Buffer{})
+	_, err := openTestWindow(t, lock, cityPath, nil)
 	if err == nil || !strings.Contains(err.Error(), "dolt did not come up") {
 		t.Fatalf("openMigrationSource = %v, want the start's failure", err)
 	}
@@ -233,69 +298,95 @@ func TestMigrationWindowFailedStartStopsWhatItStarted(t *testing.T) {
 	}
 }
 
-// sessionListingSource is a work store on a Dolt server that reports the
-// server's other sessions.
-type sessionListingSource struct {
-	beads.Store
-	sessions []beads.DoltConnection
-	listErr  error
+// TestMigrationWindowJudgesTheSessionsOnAServerItStarted (S5 §2.3): a
+// gc-managed Dolt the window just started has no client but this process.
+// Another session refuses, a list that fails refuses, and a provider that is
+// not a gc-managed Dolt is named and left to the attestation.
+func TestMigrationWindowJudgesTheSessionsOnAServerItStarted(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		provider migrationWindowProvider
+		refusal  string
+		note     string
+	}{
+		{name: "foreign session", provider: migrationWindowProvider{sessions: []beads.DoltConnection{{ID: 7, User: "root", Host: "localhost", DB: "hq", Command: "Sleep"}}}, refusal: "session 7: root@localhost on hq (Sleep)"},
+		{name: "unlistable", provider: migrationWindowProvider{listErr: errors.New("processlist denied")}, refusal: "processlist denied"},
+		{name: "not a managed Dolt", provider: migrationWindowProvider{unlistable: true}, note: "not a gc-managed Dolt"},
+		{name: "alone", provider: migrationWindowProvider{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, lock := windowCity(t)
+			provider := tc.provider
+			provider.down = true
+			stubMigrationWindowProvider(t, &provider)
+			var stderr bytes.Buffer
+			window, err := openTestWindow(t, lock, cityPath, &stderr)
+			if tc.refusal != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.refusal) {
+					t.Fatalf("openMigrationSource = %v, want a refusal naming %q", err, tc.refusal)
+				}
+				if provider.stops != 1 || activeMigrationWindow(cityPath) != nil {
+					t.Fatalf("stops = %d, active = %v: the refused window left the server it started running", provider.stops, activeMigrationWindow(cityPath) != nil)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("openMigrationSource: %v", err)
+			}
+			defer window.Close() //nolint:errcheck // test cleanup
+			if tc.note != "" && !strings.Contains(stderr.String(), tc.note) {
+				t.Errorf("the window did not name the provider it cannot judge: %s", stderr.String())
+			}
+		})
+	}
 }
 
-func (s sessionListingSource) ForeignConnections(context.Context) ([]beads.DoltConnection, error) {
-	return s.sessions, s.listErr
-}
-
-// TestMigrationWindowRefusesAForeignSessionOnAServerItStarted (S5 §2.3): a
-// Dolt server the window just started has no client but this process; any
-// other session is a writer, and the window refuses and stops the server.
-func TestMigrationWindowRefusesAForeignSessionOnAServerItStarted(t *testing.T) {
-	foreign := sessionListingSource{Store: beads.NewMemStore(), sessions: []beads.DoltConnection{{ID: 7, User: "root", Host: "localhost", DB: "hq", Command: "Sleep"}}}
-	prev := openInfraMigrationSource
-	openInfraMigrationSource = func(string) (beads.Store, error) { return foreign, nil }
-	t.Cleanup(func() { openInfraMigrationSource = prev })
-
-	prevSettle := migrationWindowSessionSettle
-	migrationWindowSessionSettle = 0
-	t.Cleanup(func() { migrationWindowSessionSettle = prevSettle })
-
-	t.Run("started", func(t *testing.T) {
-		cityPath, lock := windowCity(t)
-		provider := &migrationWindowProvider{down: true}
-		stubMigrationWindowProvider(t, provider)
-		_, err := openMigrationSource(lock, cityPath, "gc storage migrate", &bytes.Buffer{})
-		if err == nil {
-			t.Fatal("the window opened over a foreign session on the server it started")
+// TestMigrationProviderDownReadsTheCitysProvider runs the real probe: a
+// journal-less bd-owned proxied city is always started (bd restarts it on any
+// read), a city with no bd workspace never is, and a generic exec provider is
+// down exactly when its health op fails.
+func TestMigrationProviderDownReadsTheCitysProvider(t *testing.T) {
+	t.Run("journal-less proxied", func(t *testing.T) {
+		city := t.TempDir()
+		if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"migrated\"\n\n[beads]\nprovider = \"bd\"\n"), 0o644); err != nil {
+			t.Fatal(err)
 		}
-		if !strings.Contains(err.Error(), "session 7: root@localhost on hq (Sleep)") {
-			t.Errorf("refusal %q does not name the session", err)
+		if err := os.MkdirAll(filepath.Join(city, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
 		}
-		if provider.stops != 1 || activeMigrationWindow(cityPath) != nil {
-			t.Fatalf("stops = %d, active = %v: the refused window left the server it started running", provider.stops, activeMigrationWindow(cityPath) != nil)
+		if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, filepath.Join(city, ".beads", "metadata.json"), contract.MetadataState{
+			Database: "dolt", Backend: "dolt", DoltMode: "proxied-server", DoltDatabase: "hq",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if down, err := migrationProviderDown(city); err != nil || !down {
+			t.Fatalf("migrationProviderDown = (%v, %v), want a bd-owned proxy always started", down, err)
 		}
 	})
-	t.Run("unlistable", func(t *testing.T) {
-		unlistable := sessionListingSource{Store: beads.NewMemStore(), listErr: errors.New("processlist denied")}
-		openInfraMigrationSource = func(string) (beads.Store, error) { return unlistable, nil }
-		defer func() { openInfraMigrationSource = func(string) (beads.Store, error) { return foreign, nil } }()
-		cityPath, lock := windowCity(t)
-		provider := &migrationWindowProvider{down: true}
-		stubMigrationWindowProvider(t, provider)
-		if _, err := openMigrationSource(lock, cityPath, "gc storage migrate", &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "processlist denied") {
-			t.Fatalf("openMigrationSource = %v, want the listing's failure: a server whose sessions cannot be listed is not one with none", err)
-		}
-		if provider.stops != 1 {
-			t.Fatalf("stops = %d: the refused window left the server it started running", provider.stops)
+	t.Run("no bd workspace", func(t *testing.T) {
+		t.Setenv("GC_BEADS", "bd")
+		if down, err := migrationProviderDown(t.TempDir()); err != nil || down {
+			t.Fatalf("migrationProviderDown = (%v, %v), want a city with no workspace never started", down, err)
 		}
 	})
-	t.Run("already up", func(t *testing.T) {
-		cityPath, lock := windowCity(t)
-		stubMigrationWindowProvider(t, &migrationWindowProvider{})
-		window, err := openMigrationSource(lock, cityPath, "gc storage migrate", &bytes.Buffer{})
-		if err != nil {
-			t.Fatalf("a server the window did not start is not judged by its sessions: %v", err)
-		}
-		_ = window.Close()
-	})
+	for _, tc := range []struct {
+		health   string
+		wantDown bool
+	}{{health: "exit 0", wantDown: false}, {health: "exit 1", wantDown: true}} {
+		t.Run("exec health "+tc.health, func(t *testing.T) {
+			city := t.TempDir()
+			writeMinimalCityToml(t, city)
+			script := filepath.Join(t.TempDir(), "beads-provider")
+			body := "#!/bin/sh\ncase \"$1\" in\n  health) " + tc.health + " ;;\n  *) exit 2 ;;\nesac\n"
+			if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GC_BEADS", "exec:"+script)
+			if down, err := migrationProviderDown(city); err != nil || down != tc.wantDown {
+				t.Fatalf("migrationProviderDown = (%v, %v), want %v", down, err, tc.wantDown)
+			}
+		})
+	}
 }
 
 // payloadBlindSource is a work store whose protocol carries no payload, as a
@@ -352,6 +443,36 @@ func TestInfraMigrationCarriesAPayloadBlindSourceAndSaysSo(t *testing.T) {
 	}
 }
 
+// TestExecStoreOpenerGrantsPayloadBlindOnlyToStoresNotBackedByBd (M1): the
+// opener grants the declaration to a generic exec provider, and never to one
+// whose rows live in bd: gc-beads-bd, or gc-beads-k8s, whose pods write the
+// cluster's Dolt through bd.
+func TestExecStoreOpenerGrantsPayloadBlindOnlyToStoresNotBackedByBd(t *testing.T) {
+	city := t.TempDir()
+	writeMinimalCityToml(t, city)
+	for _, tc := range []struct {
+		provider  string
+		wantBlind bool
+	}{
+		{provider: "exec:/opt/providers/gc-beads-file", wantBlind: true},
+		{provider: "exec:/opt/contrib/gc-beads-k8s", wantBlind: false},
+		{provider: "exec:/opt/contrib/gc-beads-k8s.sh", wantBlind: false},
+	} {
+		store, err := openExecStoreAtForCityWithConfig(tc.provider, city, city, &config.City{})
+		if err != nil {
+			t.Fatalf("%s: %v", tc.provider, err)
+		}
+		if _, blind := beads.DepMetadataAbsent(store); blind != tc.wantBlind {
+			t.Errorf("%s: payload-blind = %v, want %v", tc.provider, blind, tc.wantBlind)
+		}
+	}
+	for _, provider := range []string{"exec:/city/.gc/scripts/gc-beads-bd.sh", "exec:gc-beads-bd", "exec:/opt/gc-beads-k8s", "bd"} {
+		if !execProviderIsBdBacked(provider) {
+			t.Errorf("%s is not classified bd-backed", provider)
+		}
+	}
+}
+
 // migrateInWindow runs the migration of source inside a maintenance window
 // whose city work store opened on lane.
 func migrateInWindow(t *testing.T, source beads.Store, lane beads.BeadsDiagnostic) (infraMigrationReport, string) {
@@ -361,7 +482,7 @@ func migrateInWindow(t *testing.T, source beads.Store, lane beads.BeadsDiagnosti
 	t.Cleanup(func() { openInfraMigrationSource = prev })
 	cityPath, lock := windowCity(t)
 	stubMigrationWindowProvider(t, &migrationWindowProvider{})
-	window, err := openMigrationSource(lock, cityPath, "gc storage migrate", &bytes.Buffer{})
+	window, err := openTestWindow(t, lock, cityPath, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,91 +494,142 @@ func migrateInWindow(t *testing.T, source beads.Store, lane beads.BeadsDiagnosti
 }
 
 // TestMigrationWindowRefusesTheBdLaneByItsGate: a work store the window could
-// not move off the bd CLI lane is refused with that lane's gate and remedy
-// where the copy needs a payload read, and only there: a source with no
-// within-infra edge needs none, and migrates as it did before the window.
+// not move off the bd CLI lane is refused with that lane's gate and remedy,
+// before anything is written, wherever the copy or the clear after it would
+// read a payload: a within-infra edge, an infra row's edge into work, or a
+// work row's edge onto an infra row. A source with no edge needs no read, and
+// migrates as it did before the window.
 func TestMigrationWindowRefusesTheBdLaneByItsGate(t *testing.T) {
 	hooks := beads.BeadsDiagnostic{Store: beads.BeadsStoreNameBdStore, PreflightGate: beads.BeadsGateBdHooks, PreflightReason: "bd hooks are installed"}
-
-	t.Run("an edge to read", func(t *testing.T) {
-		backing, _, _, _ := seedInfraEdgeSource(t)
-		report, said := migrateInWindow(t, wrapStoreWithBeadPolicies(mutePayloadSource{Store: backing}, &config.City{}), hooks)
-		if report.Outcome == infraMigrationConverged {
-			t.Fatalf("a bd-lane source with a within-infra edge converged: %s", said)
-		}
-		for _, want := range []string{"gate bd_hooks", ".beads/hooks"} {
-			if !strings.Contains(said, want) {
-				t.Errorf("refusal does not name %q: %s", want, said)
-			}
-		}
-		assertRefusedBeforeTheDestinationWasTouched(t, report, said)
-	})
-	t.Run("no edge to read", func(t *testing.T) {
+	seed := func(t *testing.T, edge func(store beads.Store, infra, work beads.Bead)) beads.Store {
+		t.Helper()
 		backing := beads.NewMemStore()
-		mustCreateInfraBead(t, backing, beads.Bead{Title: "carried", Type: "session"})
-		report, said := migrateInWindow(t, wrapStoreWithBeadPolicies(mutePayloadSource{Store: backing}, &config.City{}), hooks)
+		infra := mustCreateInfraBead(t, backing, beads.Bead{Title: "carried", Type: "session"})
+		other := mustCreateInfraBead(t, backing, beads.Bead{Title: "carried too", Type: "session"})
+		work := mustCreateInfraBead(t, backing, beads.Bead{Title: "work", Type: "task"})
+		if edge != nil {
+			edge(backing, infra, work)
+		}
+		_ = other
+		return wrapStoreWithBeadPolicies(mutePayloadSource{Store: backing}, &config.City{})
+	}
+	for _, tc := range []struct {
+		name string
+		edge func(store beads.Store, infra, work beads.Bead)
+	}{
+		{name: "within infra", edge: func(store beads.Store, infra, _ beads.Bead) {
+			rows, _ := store.List(beads.ListQuery{Type: "session", AllowScan: true})
+			for _, r := range rows {
+				if r.ID != infra.ID {
+					_ = store.DepAdd(infra.ID, r.ID, "blocks")
+				}
+			}
+		}},
+		{name: "infra onto work", edge: func(store beads.Store, infra, work beads.Bead) { _ = store.DepAdd(infra.ID, work.ID, "blocks") }},
+		{name: "work onto infra", edge: func(store beads.Store, infra, work beads.Bead) { _ = store.DepAdd(work.ID, infra.ID, "tracks") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report, said := migrateInWindow(t, seed(t, tc.edge), hooks)
+			if report.Outcome == infraMigrationConverged {
+				t.Fatalf("a bd-lane source with an edge to read converged: %s", said)
+			}
+			for _, want := range []string{"gate bd_hooks", ".beads/hooks"} {
+				if !strings.Contains(said, want) {
+					t.Errorf("refusal does not name %q: %s", want, said)
+				}
+			}
+			assertRefusedBeforeTheDestinationWasTouched(t, report, said)
+		})
+	}
+	t.Run("no edge to read", func(t *testing.T) {
+		report, said := migrateInWindow(t, seed(t, nil), hooks)
 		if report.Outcome != infraMigrationConverged {
 			t.Fatalf("Outcome = %v: a bd-lane source with no edge to read, which migrates today, was refused: %s", report.Outcome, said)
 		}
 	})
 }
 
-// TestOpenInfraMigrationSourceTakesTheWindowsLanes: inside the window the
-// production opener forces the proxied-native lane and overrides
-// beads.native_transport = "off" (O9), and records the lane; outside it the
-// city's own setting stands.
-func TestOpenInfraMigrationSourceTakesTheWindowsLanes(t *testing.T) {
+// TestOpenersTakeTheWindowsLanesAndConfig: inside the window both openers
+// force the proxied-native lane for their own opens (not the process env),
+// override beads.native_transport = "off" (O9), and open with the verb's
+// configuration, so an unparseable city.toml is never opened on none. Outside
+// it the city's own setting stands, and the unparseable file refuses.
+func TestOpenersTakeTheWindowsLanesAndConfig(t *testing.T) {
 	cityPath, lock := windowCity(t)
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"t\"\n\n[beads]\nnative_transport = \"off\"\n"), 0o644); err != nil {
+	toml := filepath.Join(cityPath, "city.toml")
+	if err := os.WriteFile(toml, []byte("[workspace]\nname = \"t\"\n\n[beads]\nnative_transport = \"off\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(migrationWindowProxiedEnv, "")
+	t.Setenv("GC_BEADS_PROXIED_NATIVE", "")
 	var captured beads.StoreOpenOptions
-	var proxiedAtOpen string
+	var proxiedEnv string
 	lane := beads.BeadsDiagnostic{Store: beads.BeadsStoreNameNativeDoltStore, NativeStoreEligible: true}
 	restore := openStoreFactoryForCity
 	openStoreFactoryForCity = func(_ context.Context, opts beads.StoreOpenOptions) (beads.StoreOpenResult, error) {
-		captured, proxiedAtOpen = opts, os.Getenv(migrationWindowProxiedEnv)
+		captured, proxiedEnv = opts, os.Getenv("GC_BEADS_PROXIED_NATIVE")
 		return beads.StoreOpenResult{Store: beads.NewMemStore(), Diagnostic: lane}, nil
 	}
 	t.Cleanup(func() { openStoreFactoryForCity = restore })
 
-	open := func() {
+	open := func() error {
 		t.Helper()
 		store, err := openInfraMigrationSource(cityPath)
-		if err != nil {
-			t.Fatal(err)
+		if err == nil {
+			_ = closeBeadStoreHandle(store)
 		}
-		_ = closeBeadStoreHandle(store)
+		return err
 	}
-	open()
-	if captured.NativeTransport != beads.NativeTransportOff {
-		t.Fatalf("outside a window the open took native transport %q, want the city's off", captured.NativeTransport)
+	if err := open(); err != nil {
+		t.Fatal(err)
+	}
+	if captured.NativeTransport != beads.NativeTransportOff || captured.ForceProxiedNative {
+		t.Fatalf("outside a window the open took (%q, forced %v), want the city's off and no forced lane", captured.NativeTransport, captured.ForceProxiedNative)
 	}
 
 	stubMigrationWindowProvider(t, &migrationWindowProvider{})
-	window, err := openMigrationSource(lock, cityPath, "gc storage migrate", &bytes.Buffer{})
+	// The verb's config is told from none by what it resolves: an explicit
+	// conditional_writes, where no config resolves the mode as unset. It also
+	// says native_transport = "off", so only the window's override opens auto.
+	verbCfg := &config.City{Workspace: config.Workspace{Name: "from-the-verb"}, Beads: config.BeadsConfig{ConditionalWrites: "require", NativeTransport: "off"}}
+	wantMode := resolvedConditionalWritesMode(verbCfg)
+	if wantMode == gate.ModeUnset {
+		t.Fatal("the verb's config resolves no conditional-writes mode, so nothing tells it from none")
+	}
+	window, err := openMigrationSource(lock, cityPath, verbCfg, "gc storage migrate", &bytes.Buffer{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer window.Close() //nolint:errcheck // test cleanup
-	open()
-	if captured.NativeTransport != beads.NativeTransportAuto {
-		t.Errorf("inside the window the open took native transport %q, want auto (O9)", captured.NativeTransport)
+	if err := os.WriteFile(toml, []byte("[workspace\nname = "), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if proxiedAtOpen != "1" {
-		t.Errorf("inside the window the open saw %s=%q, want 1", migrationWindowProxiedEnv, proxiedAtOpen)
+	if err := open(); err != nil {
+		t.Fatalf("inside the window the open re-read the unparseable city.toml instead of the verb's config: %v", err)
+	}
+	if captured.NativeTransport != beads.NativeTransportAuto || !captured.ForceProxiedNative {
+		t.Errorf("inside the window the open took (%q, forced %v), want auto (O9) and the forced proxied lane", captured.NativeTransport, captured.ForceProxiedNative)
+	}
+	if captured.ConditionalWrites != wantMode {
+		t.Errorf("inside the window the open resolved conditional writes %q, want the verb's config's %q: it opened on no config", captured.ConditionalWrites, wantMode)
+	}
+	if proxiedEnv != "" {
+		t.Errorf("the window set GC_BEADS_PROXIED_NATIVE=%q for the whole process", proxiedEnv)
 	}
 	if !window.laneKnown || window.lane.Store != lane.Store {
 		t.Errorf("the window recorded lane %+v (known %v), want %+v", window.lane, window.laneKnown, lane)
 	}
-
-	// The physical scope open the rig importer uses takes the same transport.
 	if _, err := openPhysicalScopeStore(cityPath, cityPath); err != nil {
+		t.Fatalf("a physical scope open inside the window: %v", err)
+	}
+	if captured.NativeTransport != beads.NativeTransportAuto || !captured.ForceProxiedNative || captured.ConditionalWrites != wantMode {
+		t.Errorf("a physical scope open inside the window took (%q, forced %v, mode %q), want auto, the forced lane and the verb's config", captured.NativeTransport, captured.ForceProxiedNative, captured.ConditionalWrites)
+	}
+
+	if err := window.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if captured.NativeTransport != beads.NativeTransportAuto {
-		t.Errorf("a physical scope open inside the window took native transport %q, want auto", captured.NativeTransport)
+	if err := open(); err == nil {
+		t.Fatal("outside the window an unparseable city.toml opened on no config")
 	}
 }
 
@@ -472,8 +644,35 @@ func TestStorageMigrateRunsInsideTheMaintenanceWindow(t *testing.T) {
 	if code, stderr := migrateFor(t, request); code != 0 {
 		t.Fatalf("migration = %d: %s", code, stderr)
 	}
-	if provider.starts != 1 || !provider.lockHeldAtStart || provider.stops != 1 {
-		t.Fatalf("starts = %d (lock held %v), stops = %d; want one start under the lock and one stop", provider.starts, provider.lockHeldAtStart, provider.stops)
+	if provider.starts != 1 || !provider.lockHeldAtStart || provider.stops != 1 || !provider.lockHeldAtStop {
+		t.Fatalf("starts = %d (lock held %v), stops = %d (lock held %v); want one start and one stop, both under the lock", provider.starts, provider.lockHeldAtStart, provider.stops, provider.lockHeldAtStop)
+	}
+}
+
+// TestStorageMigrateOpensTheWindowBeforeTheSharedStoreRowCheck (S2): under
+// --force=shared-store the row check opens the work store, so on a stopped
+// managed city the window must already be open, or the bd CLI's recovery
+// starts Dolt with no record.
+func TestStorageMigrateOpensTheWindowBeforeTheSharedStoreRowCheck(t *testing.T) {
+	request, source := exclusionCity(t)
+	sharedStoreCities(t, request)
+	request.Force = storageForce{SharedStores: []string{sharedToken}}
+	provider := &migrationWindowProvider{down: true}
+	stubMigrationWindowProvider(t, provider)
+	windowOpenAtFirstOpen := false
+	opened := false
+	prev := openInfraMigrationSource
+	openInfraMigrationSource = func(cityPath string) (beads.Store, error) {
+		if !opened {
+			opened = true
+			windowOpenAtFirstOpen = activeMigrationWindow(cityPath) != nil
+		}
+		return source, nil
+	}
+	t.Cleanup(func() { openInfraMigrationSource = prev })
+	_, _ = migrateFor(t, request)
+	if !opened || !windowOpenAtFirstOpen {
+		t.Fatalf("opened = %v, window open at the first open = %v: the work store was opened before the window", opened, windowOpenAtFirstOpen)
 	}
 }
 
@@ -500,8 +699,8 @@ func TestStorageRecoverStrandedRunsInsideTheMaintenanceWindow(t *testing.T) {
 		if dryRun {
 			want = 0
 		}
-		if provider.starts != want || provider.stops != want {
-			t.Errorf("dry run %v: starts = %d, stops = %d, want %d each: %s", dryRun, provider.starts, provider.stops, want, stderr.String())
+		if provider.starts != want || provider.stops != want || (want == 1 && !provider.lockHeldAtStop) {
+			t.Errorf("dry run %v: starts = %d, stops = %d (lock held at stop %v), want %d each under the lock: %s", dryRun, provider.starts, provider.stops, provider.lockHeldAtStop, want, stderr.String())
 		}
 	}
 }
@@ -516,7 +715,59 @@ func TestStorageMigrateFromRigsRunsInsideTheMaintenanceWindow(t *testing.T) {
 	if code, stdout, stderr := f.importRigs(); code != 0 {
 		t.Fatalf("import = %d: %s %s", code, stdout, stderr)
 	}
-	if provider.starts != 1 || !provider.lockHeldAtStart || provider.stops != 1 {
-		t.Fatalf("starts = %d (lock held %v), stops = %d; want one start under the lock and one stop", provider.starts, provider.lockHeldAtStart, provider.stops)
+	if provider.starts != 1 || !provider.lockHeldAtStart || provider.stops != 1 || !provider.lockHeldAtStop {
+		t.Fatalf("starts = %d (lock held %v), stops = %d (lock held %v); want one start and one stop under the lock", provider.starts, provider.lockHeldAtStart, provider.stops, provider.lockHeldAtStop)
+	}
+}
+
+// TestRigImportRefusesAPayloadBlindRigWithAnEdgeToRead (S4): the rig import
+// does not take the payload-blind declaration, so a generic exec rig with an
+// edge on a row it moves is refused before anything is written, and one with
+// no edge imports.
+func TestRigImportRefusesAPayloadBlindRigWithAnEdgeToRead(t *testing.T) {
+	for _, withEdge := range []bool{true, false} {
+		f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"})
+		root := graphRow("gp-root1", "gp-root1", "closed", map[string]string{beadmeta.RootStoreRefMetadataKey: "rig:packs", "gc.kind": "workflow"})
+		step := graphRow("gp-step1", "gp-root1", "closed", map[string]string{beadmeta.RootStoreRefMetadataKey: "rig:packs"})
+		var deps []beads.Dep
+		if withEdge {
+			deps = []beads.Dep{{IssueID: "gp-step1", DependsOnID: "gp-root1", Type: "blocks"}}
+		}
+		f.seed("packs", []beads.Bead{root, step}, deps)
+		f.open["packs"] = func() (beads.Store, error) {
+			store, err := f.openFileRig("packs")
+			if err != nil {
+				return nil, err
+			}
+			return wrapStoreWithBeadPolicies(payloadBlindSource{Store: store}, f.cfg), nil
+		}
+		code, stdout, stderr := f.importRigs()
+		if withEdge {
+			if code == 0 || !strings.Contains(stdout+stderr, "protocol carries no dependency payload") {
+				t.Fatalf("import = %d, want the payload-blind rig refused: %s %s", code, stdout, stderr)
+			}
+			if fileExists(f.loc("packs").InFlightPath()) {
+				t.Fatal("the refused import left an in-flight record")
+			}
+			continue
+		}
+		if code != 0 {
+			t.Fatalf("import = %d: a payload-blind rig with no edge to read was refused: %s %s", code, stdout, stderr)
+		}
+	}
+}
+
+// TestEmittingClassStoreForwardsThePayloadBlindDeclaration: a payload-blind
+// store under the class emitter still declares it, as under the bead-policy
+// wrapper; a store that declares nothing still does not.
+func TestEmittingClassStoreForwardsThePayloadBlindDeclaration(t *testing.T) {
+	cityPath := t.TempDir()
+	blind := splitClassRoutes(payloadBlindSource{Store: beads.NewMemStore()}).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
+	if protocol, absent := beads.DepMetadataAbsent(blind); !absent || protocol != "exec" {
+		t.Fatalf("the emitter over a payload-blind store answers (%q, %v), want (exec, true)", protocol, absent)
+	}
+	plain := splitClassRoutes(beads.NewMemStore()).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
+	if _, absent := beads.DepMetadataAbsent(plain); absent {
+		t.Fatal("the emitter over a store that declares nothing reads as payload-blind")
 	}
 }

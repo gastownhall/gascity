@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/beads/contract"
 )
 
 // Store implements [beads.Store] by delegating each operation to a
@@ -36,6 +35,9 @@ type Store struct {
 	// restart, which is an accepted limitation for this delegating store.
 	localMu      sync.Mutex
 	localStrings map[string]map[string]string
+
+	// payloadBlind is DeclarePayloadBlind's grant.
+	payloadBlind bool
 }
 
 // SetEnv sets environment variables passed to the script process.
@@ -605,13 +607,21 @@ func (s *Store) DepList(id, direction string) ([]beads.Dep, error) {
 	return deps, nil
 }
 
-// DepMetadataAbsentByProtocol declares that the exec protocol carries no
-// dependency payload: a create request has no edge payload field and dep-add
-// takes three arguments, so gc has never stored one through a generic exec
-// store. A provider under the bd contract does not declare it: its rows live in
-// bd, where a graph plan can have written a payload this protocol cannot read.
+// DeclarePayloadBlind records that this store's provider keeps no dependency
+// payload anywhere it could be read from: the exec protocol has no payload
+// field (a create request carries none and dep-add takes three arguments), and
+// the provider is not backed by bd, where a graph plan can have written one.
+// Whether the provider is bd-backed is the caller's knowledge, not the
+// protocol's, so the store declares nothing until the caller that built it
+// grants it (cmd/gc's exec store opener).
+func (s *Store) DeclarePayloadBlind() {
+	s.payloadBlind = true
+}
+
+// DepMetadataAbsentByProtocol reports the declaration DeclarePayloadBlind
+// granted.
 func (s *Store) DepMetadataAbsentByProtocol() (string, bool) {
-	if s == nil || contract.ProviderUsesBDContract("exec:"+s.script) {
+	if s == nil || !s.payloadBlind {
 		return "", false
 	}
 	return "exec", true

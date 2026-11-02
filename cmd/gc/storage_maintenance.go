@@ -13,27 +13,35 @@ package main
 // pollers are not started: they are controller-side readers.
 //
 // While the window is open every work-store open of this city in this process
-// takes the lanes that can answer a payload read:
+// takes the lanes that can answer a payload read, with the configuration the
+// verb loaded (a nil one refuses the window):
 //
-//   - the proxied-native lane is forced on (GC_BEADS_PROXIED_NATIVE=1, in this
-//     process only, restored on exit);
-//   - beads.native_transport = "off" is overridden for the migration's own
-//     opens (owner decision O9): it is a preference, not a capability, while
-//     bd hooks and schema skew still keep a store on the bd CLI lane.
+//   - the proxied-native lane is forced on for those opens alone
+//     (beads.StoreOpenOptions.ForceProxiedNative);
+//   - beads.native_transport = "off" is overridden for them (owner decision
+//     O9): it is a preference, not a capability, while bd hooks and schema
+//     skew still keep a store on the bd CLI lane.
 //
 // A store that still lands on the bd CLI lane is refused by the gate that put
-// it there, with that gate's remedy, at the point the copy needs a payload
-// read (migrationWindowPayloadRefusal). A source with no within-infra edge
-// needs none and migrates as it did before the window existed.
+// it there, with that gate's remedy, where the copy first needs a payload
+// read: the source refusal probes every edge the copy and the clear will read
+// before anything is written (migrationWindowPayloadRefusal). A source with no
+// edge needs none and migrates as it did before the window existed.
 //
-// A Dolt server the window started has, a moment later, no client of its own
-// but this process: any other session is a writer nothing proved stopped
-// (beads.ForeignDoltConnections), and the window refuses it.
+// A gc-managed Dolt server the window started has, a moment later, no client
+// but this process: any other session is a writer nothing proved stopped, and
+// the window refuses it. The sessions are listed over a direct connection to
+// the published port (beads.ForeignDoltSessions), whatever lane the store
+// opened on, and a list that fails refuses. A provider the window started that
+// is not a gc-managed Dolt (a bd-owned proxy, whose own sessions to its Dolt
+// child no list can tell from another client's; an exec provider) is named,
+// and is left to the --fleet-stopped attestation.
 //
 // The window records that it started the provider in .gc/storage-window.json
 // before the start, and removes the record once the provider is stopped. A run
 // killed in between leaves the record, and the next window stops the provider
-// it inherits.
+// it finds, whoever has started it since: the city is stopped and its lock is
+// held, so nothing of the city's own is using it.
 //
 // The design's openMigrationSource returns the opened store. This one returns
 // the window, and the verbs keep opening the work store where they did, through
@@ -54,6 +62,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltpool"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -62,35 +71,35 @@ const (
 	// migrationWindowRecordName is the .gc file a window writes before it
 	// starts the provider and removes once it has stopped it again.
 	migrationWindowRecordName = "storage-window.json"
-	// migrationWindowProxiedEnv forces the proxied-native lane on.
-	migrationWindowProxiedEnv = "GC_BEADS_PROXIED_NATIVE"
+	// migrationWindowTransport is the native transport the window's opens
+	// take (O9).
+	migrationWindowTransport = beads.NativeTransportAuto
+	// migrationWindowSessionTimeout bounds every session list.
+	migrationWindowSessionTimeout = 10 * time.Second
 )
 
-// migrationWindowTransport is the native transport the window's opens take.
-var migrationWindowTransport = beads.NativeTransportAuto
-
 // migrationWindowSessionSettle bounds how long the window waits for the
-// sessions its own open closed to leave the server before it calls a session
+// sessions this process closed to leave the server before it calls a session
 // foreign.
 var migrationWindowSessionSettle = 3 * time.Second
 
-// The provider lifecycle the window drives. Tests replace them: the real ones
-// start and stop Dolt servers.
+// The provider lifecycle the window drives, and the session list. Tests
+// replace them: the real ones start, stop and dial Dolt servers.
 var (
 	migrationWindowProviderDown  = migrationProviderDown
 	migrationWindowStartProvider = ensureBeadsProvider
 	migrationWindowStopProvider  = shutdownBeadsProvider
+	migrationWindowSessions      = managedDoltForeignSessions
 )
 
 // migrationSourceWindow is one open maintenance window.
 type migrationSourceWindow struct {
 	cityPath string
+	// cfg is the configuration the verb loaded; the window's opens use it.
+	cfg *config.City
 	// started reports that this window, or a killed one before it, started
 	// the provider, so closing the window stops it.
 	started bool
-	// prevProxied and hadProxied restore GC_BEADS_PROXIED_NATIVE on close.
-	prevProxied string
-	hadProxied  bool
 	// lane is the city work store's lane, as its last open in the window
 	// reported it (laneKnown false until one has).
 	lane      beads.BeadsDiagnostic
@@ -105,21 +114,25 @@ var migrationWindows struct {
 	active *migrationSourceWindow
 }
 
-// migrationWindowRecord is the content of .gc/storage-window.json.
+// migrationWindowRecord is the content of .gc/storage-window.json. It names
+// no process: the next window stops the provider whoever started it since
+// (see the file comment).
 type migrationWindowRecord struct {
-	StartedProvider bool      `json:"started_provider"`
-	PID             int       `json:"pid"`
-	At              time.Time `json:"at"`
+	StartedProvider bool `json:"started_provider"`
 }
 
 // openMigrationSource opens the maintenance window for a writing storage verb
-// that holds lock, the city's controller lock (acquireStorageVerbExclusion).
-// It starts the provider when it is down, forces the payload-reading lanes,
-// and, on a Dolt server it started, refuses a foreign session. The caller
-// closes the window before it releases the lock.
-func openMigrationSource(lock *os.File, cityPath, logPrefix string, stderr io.Writer) (*migrationSourceWindow, error) {
+// that holds lock, the city's controller lock (acquireStorageVerbExclusion),
+// with cfg, the configuration it loaded. It starts the provider when it is
+// down, forces the payload-reading lanes, and, on a gc-managed Dolt it
+// started, refuses a foreign session. The caller closes the window before it
+// releases the lock.
+func openMigrationSource(lock *os.File, cityPath string, cfg *config.City, logPrefix string, stderr io.Writer) (*migrationSourceWindow, error) {
 	if lock == nil {
 		return nil, errors.New("the maintenance window needs the city's controller lock held")
+	}
+	if cfg == nil {
+		return nil, errors.New("the maintenance window needs the city's loaded configuration")
 	}
 	migrationWindows.Lock()
 	busy := migrationWindows.active != nil
@@ -127,7 +140,7 @@ func openMigrationSource(lock *os.File, cityPath, logPrefix string, stderr io.Wr
 	if busy {
 		return nil, errors.New("a maintenance window is already open in this process")
 	}
-	w := &migrationSourceWindow{cityPath: cityPath}
+	w := &migrationSourceWindow{cityPath: cityPath, cfg: cfg}
 	inherited, err := readMigrationWindowRecord(cityPath)
 	if err != nil {
 		return nil, err
@@ -136,8 +149,11 @@ func openMigrationSource(lock *os.File, cityPath, logPrefix string, stderr io.Wr
 	if err != nil {
 		return nil, fmt.Errorf("checking the bead-store provider: %w", err)
 	}
-	switch {
-	case down:
+	if inherited {
+		w.started = true
+		fmt.Fprintf(stderr, "%s: an earlier run started the bead-store provider and did not stop it (%s); this run stops it when it ends\n", logPrefix, migrationWindowRecordPath(cityPath)) //nolint:errcheck // best-effort stderr
+	}
+	if down {
 		if err := writeMigrationWindowRecord(cityPath); err != nil {
 			return nil, err
 		}
@@ -147,60 +163,68 @@ func openMigrationSource(lock *os.File, cityPath, logPrefix string, stderr io.Wr
 			return nil, errors.Join(fmt.Errorf("starting the bead-store provider for the maintenance window: %w", err), stopErr)
 		}
 		fmt.Fprintf(stderr, "%s: started the bead-store provider for this run; it is stopped again when the run ends\n", logPrefix) //nolint:errcheck // best-effort stderr
-	case inherited:
-		w.started = true
-		fmt.Fprintf(stderr, "%s: an earlier run started the bead-store provider and did not stop it (%s); this run stops it when it ends\n", logPrefix, migrationWindowRecordPath(cityPath)) //nolint:errcheck // best-effort stderr
-	}
-	w.prevProxied, w.hadProxied = os.LookupEnv(migrationWindowProxiedEnv)
-	if err := os.Setenv(migrationWindowProxiedEnv, "1"); err != nil {
-		return nil, errors.Join(fmt.Errorf("forcing the proxied-native lane: %w", err), w.stopProvider())
 	}
 	migrationWindows.Lock()
 	migrationWindows.active = w
 	migrationWindows.Unlock()
 	if w.started {
-		if err := w.refuseForeignSessions(); err != nil {
+		if err := w.refuseForeignSessions(logPrefix, stderr); err != nil {
 			return nil, errors.Join(err, w.Close())
 		}
 	}
 	return w, nil
 }
 
-// refuseForeignSessions opens the work store once, through the window, and
-// refuses any session on its Dolt server but this process's own. A store not
-// served by a Dolt server it can ask (a proxied, file or exec store) has
-// nothing to list.
-func (w *migrationSourceWindow) refuseForeignSessions() error {
-	store, err := openInfraMigrationSource(w.cityPath)
-	if err != nil {
-		return fmt.Errorf("opening the work store in the maintenance window: %w", err)
-	}
-	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort close
-	under, _, _ := unwrapBeadPolicyStore(store)
-	ctx := context.Background()
-	if _, served, _ := beads.ForeignDoltConnections(ctx, under); !served {
-		return nil
-	}
-	// This process's own sessions are closed first. The open dialed the
-	// server more than once (the library's fail-fast probe and no-database
-	// check, bd's preflight in a subprocess), and the project-id read keeps
-	// pooled sessions in internal/doltpool's process-lifetime registry, idle
-	// for up to 20s; a one-shot verb holds none of those handles past its
-	// call, and the next Open dials afresh. The server reaps a closed session
-	// a moment later, so one still there once the settle has passed is
-	// another client's.
-	doltpool.Shutdown()
+// refuseForeignSessions refuses any client session but this process's on the
+// gc-managed Dolt the window started, and refuses when they cannot be listed.
+// Another provider is named and left to the attestation.
+func (w *migrationSourceWindow) refuseForeignSessions(logPrefix string, stderr io.Writer) error {
+	ctx, cancel := context.WithTimeout(context.Background(), migrationWindowSessionSettle+migrationWindowSessionTimeout)
+	defer cancel()
 	deadline := time.Now().Add(migrationWindowSessionSettle)
 	for {
-		sessions, _, err := beads.ForeignDoltConnections(ctx, under)
+		sessions, listable, err := migrationWindowSessions(ctx, w.cityPath)
 		if err != nil {
-			return fmt.Errorf("listing the sessions on the Dolt server this run started: %w", err)
+			return fmt.Errorf("listing the client sessions on the Dolt server this run started: %w. A server whose sessions cannot be listed is not one with none; nothing was written", err)
 		}
+		if !listable {
+			fmt.Fprintf(stderr, "%s: the bead-store provider this run started is not a gc-managed Dolt, so its client sessions cannot be told from the provider's own; --%s attests that nothing else reaches it\n", logPrefix, storageFleetStoppedFlag) //nolint:errcheck // best-effort stderr
+			return nil
+		}
+		// The server reaps a session this process just closed a moment later,
+		// so one still there once the settle has passed is another client's.
 		if len(sessions) == 0 || !time.Now().Before(deadline) {
 			return migrationForeignSessionRefusal(sessions)
 		}
 		time.Sleep(migrationWindowSessionSettle / 10)
 	}
+}
+
+// managedDoltForeignSessions lists the client sessions on the city's
+// gc-managed Dolt, over a direct connection to its published port, other than
+// the one asking. listable is false for a provider that is not a gc-managed
+// Dolt. This process's own pooled sessions (internal/doltpool: the project-id
+// and health reads keep them idle for up to 20s) are closed first; a one-shot
+// verb holds none of those handles past its call.
+func managedDoltForeignSessions(ctx context.Context, cityPath string) ([]beads.DoltConnection, bool, error) {
+	owned, err := managedDoltLifecycleOwned(cityPath)
+	if err != nil {
+		return nil, true, err
+	}
+	if !owned {
+		return nil, false, nil
+	}
+	port := currentManagedDoltPort(cityPath)
+	if port == "" {
+		return nil, true, errors.New("the managed Dolt publishes no live port")
+	}
+	doltpool.Shutdown()
+	db, err := managedDoltOpenDB("", port, "")
+	if err != nil {
+		return nil, true, err
+	}
+	sessions, err := beads.ForeignDoltSessions(ctx, db)
+	return sessions, true, err
 }
 
 // migrationForeignSessionRefusal is the refusal for the sessions another
@@ -220,10 +244,9 @@ func migrationForeignSessionRefusal(sessions []beads.DoltConnection) error {
 	return fmt.Errorf("the Dolt server this run just started already has %d other client session(s) (%s), and each can write to the work store. Stop whatever holds them (a surviving agent, a bd process, a shell) and run this again", len(sessions), strings.Join(names, "; "))
 }
 
-// Close ends the window: it restores GC_BEADS_PROXIED_NATIVE and, when the
-// window started the provider, stops it while the caller still holds the
-// controller lock. A provider the stop could not retire keeps its record, so
-// the next window stops it.
+// Close ends the window: when the window started the provider, it stops it
+// while the caller still holds the controller lock. A provider the stop could
+// not retire keeps its record, so the next window stops it.
 func (w *migrationSourceWindow) Close() error {
 	if w == nil || w.closed {
 		return nil
@@ -234,13 +257,7 @@ func (w *migrationSourceWindow) Close() error {
 		migrationWindows.active = nil
 	}
 	migrationWindows.Unlock()
-	var envErr error
-	if w.hadProxied {
-		envErr = os.Setenv(migrationWindowProxiedEnv, w.prevProxied)
-	} else {
-		envErr = os.Unsetenv(migrationWindowProxiedEnv)
-	}
-	return errors.Join(envErr, w.stopProvider())
+	return w.stopProvider()
 }
 
 // closeReporting is Close for a defer, naming a failure on stderr.
@@ -274,15 +291,16 @@ func activeMigrationWindow(cityPath string) *migrationSourceWindow {
 	return nil
 }
 
-// migrationWindowNativeTransport is the native transport a store open of
-// cityPath takes: the window's override while one is open, otherwise nil,
-// which resolves the city's own setting.
-func migrationWindowNativeTransport(cityPath string) *beads.NativeTransportMode {
-	if activeMigrationWindow(cityPath) == nil {
-		return nil
+// migrationWindowOpen is what a store open of cityPath takes inside an open
+// window: the verb's configuration and the window's native transport. Outside
+// one it is (nil, nil), which resolves the city's own.
+func migrationWindowOpen(cityPath string) (*config.City, *beads.NativeTransportMode) {
+	w := activeMigrationWindow(cityPath)
+	if w == nil {
+		return nil, nil
 	}
 	mode := migrationWindowTransport
-	return &mode
+	return w.cfg, &mode
 }
 
 // recordMigrationLane records the lane an open of cityPath's work store took
@@ -342,6 +360,8 @@ func migrationSourceLaneRefusal(diag beads.BeadsDiagnostic) error {
 		remedy = "bd's schema and this build disagree. Run `bd migrate` on the work store, then run this again"
 	case beads.BeadsGateForceFallback:
 		remedy = "GC_BEADS_FORCE_FALLBACK=1 pins every store to the bd CLI. Unset it for this run"
+	case string(contract.PreflightCheckMetadataBackend):
+		remedy = "This metadata backend is not one the native store serves, and a migration does not read its payloads through bd (hosted bd over HTTP is not yet a verified source, S5 §1.3). Nothing was written; keep this city unsplit until the backend is supported"
 	case beads.BeadsGateProxiedProvider:
 		verdict := "none"
 		if diag.Proxied != nil && diag.Proxied.Verdict != "" {
@@ -373,6 +393,9 @@ func migrationProviderDown(cityPath string) (bool, error) {
 		if _, err := os.Stat(scopeMetadataJSONPath(cityPath)); err != nil {
 			return false, nil // no bd workspace: nothing to start
 		}
+		// A proxied scope with a persisted binding is provider-owned (above);
+		// one only the fresh-scope default makes proxied has nothing gc
+		// starts, as ensureBeadsProvider has not.
 		if gcDoltSkip() || scopeUsesProxiedDoltMode(cityPath, cityPath) {
 			return false, nil
 		}
@@ -417,7 +440,7 @@ func readMigrationWindowRecord(cityPath string) (bool, error) {
 // writeMigrationWindowRecord records, durably, that this run is starting the
 // provider.
 func writeMigrationWindowRecord(cityPath string) error {
-	data, err := json.Marshal(migrationWindowRecord{StartedProvider: true, PID: os.Getpid(), At: time.Now().UTC()})
+	data, err := json.Marshal(migrationWindowRecord{StartedProvider: true})
 	if err != nil {
 		return err
 	}

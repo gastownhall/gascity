@@ -476,6 +476,16 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 		return 1
 	}
 	defer controllerLock.Close() //nolint:errcheck // released last, after the guard
+	// The maintenance window (storage_maintenance.go), right under the lock:
+	// the provider up, the payload-reading lanes forced, before anything
+	// below opens the work store (the shared-store row check does). Closed
+	// before the lock is released.
+	window, err := openMigrationSource(controllerLock, request.CityPath, request.Cfg, logPrefix, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defer window.closeReporting(logPrefix, stderr)
 	if pid := infraMigrationForeignControllerPID(request.CityPath); pid != 0 {
 		fmt.Fprintf(stderr, "%s: controller PID %d is live on this city and is still writing to the work store. Stop it (%s) and run this again\n", logPrefix, pid, storageStopCommand) //nolint:errcheck // best-effort stderr
 		return 1
@@ -510,14 +520,6 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 			fmt.Fprintf(stderr, "%s: releasing the migration guard: %v\n", logPrefix, releaseErr) //nolint:errcheck // best-effort stderr
 		}
 	}()
-	// The maintenance window (storage_maintenance.go): the provider up, the
-	// payload-reading lanes forced, closed before the lock is released.
-	window, err := openMigrationSource(controllerLock, request.CityPath, logPrefix, stderr)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	defer window.closeReporting(logPrefix, stderr)
 
 	// No rig census here (S4b). A rig's graph rows no longer block the city
 	// cutover: the relic legs keep them readable, and `--from-rigs` moves
@@ -901,10 +903,11 @@ var openStorageScopeStore = openPhysicalScopeStore
 // census move infrastructure rows out of a rig ledger, so they read the rows
 // a runtime reader is never handed; under the split-strict test gate the
 // one-shot open would hand out the work view, which hides exactly those rows.
-// Inside a maintenance window it takes the window's native transport
-// (storage_maintenance.go).
+// Inside a maintenance window it takes the window's configuration and native
+// transport (storage_maintenance.go).
 func openPhysicalScopeStore(storePath, cityPath string) (beads.Store, error) {
-	result, err := openStoreResultAtForCityScoped(storePath, cityPath, nil, gate.ModeUnset, false, false, false, false, migrationWindowNativeTransport(cityPath))
+	cfg, transport := migrationWindowOpen(cityPath)
+	result, err := openStoreResultAtForCityScoped(storePath, cityPath, cfg, gate.ModeUnset, false, false, false, false, transport)
 	if err != nil {
 		return nil, err
 	}

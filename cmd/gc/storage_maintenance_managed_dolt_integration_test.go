@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"net"
 	"os"
 	"os/exec"
@@ -35,18 +36,21 @@ type managedDoltWindowCity struct {
 // reservedDoltPorts are the ports a test must never start or reach a Dolt on.
 var reservedDoltPorts = map[int]bool{3307: true, 45865: true, 8123: true}
 
+// freeDoltTestPort picks a free loopback port, choosing the candidate outside
+// the reserved ones before anything binds it.
 func freeDoltTestPort(t *testing.T) int {
 	t.Helper()
-	for range 20 {
-		lis, err := net.Listen("tcp", "127.0.0.1:0")
+	for range 50 {
+		candidate := 20000 + rand.IntN(40000)
+		if reservedDoltPorts[candidate] {
+			continue
+		}
+		lis, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(candidate))
 		if err != nil {
-			t.Fatalf("pick free port: %v", err)
+			continue
 		}
-		port := lis.Addr().(*net.TCPAddr).Port
 		_ = lis.Close()
-		if !reservedDoltPorts[port] {
-			return port
-		}
+		return candidate
 	}
 	t.Fatal("no free port outside the reserved ones")
 	return 0
@@ -326,4 +330,41 @@ func TestStorageMigrateRefusesAForeignSessionOnTheManagedDoltItStarted(t *testin
 		t.Fatalf("the refused run left the provider it started up (pid %d)", pid)
 	}
 	assertNoConvergenceMarker(t, target, "a refused migration records nothing")
+}
+
+// TestStorageMigrateDoesNotCountItsOwnPooledSessions: this process's own idle
+// pooled sessions on the managed Dolt (internal/doltpool keeps them for up to
+// 20s, past the settle) are not another client's. The window closes them
+// before it lists the server's sessions.
+func TestStorageMigrateDoesNotCountItsOwnPooledSessions(t *testing.T) {
+	city := newManagedDoltWindowCity(t)
+	prevStart := migrationWindowStartProvider
+	migrationWindowStartProvider = func(cityPath string) error {
+		if err := prevStart(cityPath); err != nil {
+			return err
+		}
+		db, err := managedDoltOpenDB("", strconv.Itoa(city.port), "")
+		if err != nil {
+			return err
+		}
+		// Two sessions held at once, both returned to the pool idle.
+		first, err := db.Conn(context.Background())
+		if err != nil {
+			return err
+		}
+		second, err := db.Conn(context.Background())
+		if err != nil {
+			return err
+		}
+		_ = first.Close()
+		_ = second.Close()
+		return nil
+	}
+	t.Cleanup(func() { migrationWindowStartProvider = prevStart })
+	if code, said, _, _ := city.migrateManagedCity(t); code != 0 {
+		t.Fatalf("migrate = %d: this process's own pooled sessions were counted as another client's: %s", code, said)
+	}
+	if pid := managedDoltRuntimePID(t, city.cityPath, city.port); pid != 0 {
+		t.Fatalf("the provider the window started is still up (pid %d)", pid)
+	}
 }

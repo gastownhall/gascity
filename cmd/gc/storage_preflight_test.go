@@ -622,6 +622,9 @@ func TestPreflightRefusesEveryCityTheMigrationRefuses(t *testing.T) {
 			other := newOtherCity(t)
 			writeManagedDoltCity(t, request.CityPath)
 			stopManagedDolt(t, request.CityPath, 3417)
+			// The window starts the stopped managed Dolt before the
+			// shared-store check; this fixture has no provider script.
+			stubMigrationWindowStartStop(t, &migrationWindowProvider{})
 			writeExplicitDoltCity(t, other, 3417)
 			stubOtherCities(t, other)
 			return request

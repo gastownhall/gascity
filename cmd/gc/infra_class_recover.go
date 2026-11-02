@@ -872,15 +872,22 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	// (storage_verb_exclusion.go), and under a shared-store attestation every
 	// co-tenant's lock too; a dry run writes neither store.
 	sharedAttested := false
-	var controllerLock *os.File
 	if !opts.DryRun {
-		var err error
-		controllerLock, err = acquireStorageVerbExclusion(request, storageVerbScope{})
+		controllerLock, err := acquireStorageVerbExclusion(request, storageVerbScope{})
 		if err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		defer controllerLock.Close() //nolint:errcheck // released last, after the guard
+		// A run that writes opens the maintenance window right under its
+		// lock (storage_maintenance.go); a dry run reads the store as it
+		// finds it.
+		window, err := openMigrationSource(controllerLock, request.CityPath, request.Cfg, logPrefix, stderr)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		defer window.closeReporting(logPrefix, stderr)
 		shared, err := sharedWorkStoreRefusal(request.CityPath, request.Force)
 		if err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -914,16 +921,6 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 			fmt.Fprintf(stderr, "%s: releasing the migration guard: %v\n", logPrefix, releaseErr) //nolint:errcheck // best-effort stderr
 		}
 	}()
-	// A run that writes opens the maintenance window under its lock
-	// (storage_maintenance.go); a dry run reads the store as it finds it.
-	if controllerLock != nil {
-		window, err := openMigrationSource(controllerLock, request.CityPath, logPrefix, stderr)
-		if err != nil {
-			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		defer window.closeReporting(logPrefix, stderr)
-	}
 
 	// The manifest, under the lock that makes it a read-modify-WRITE rather than
 	// two unrelated operations. runInfraClassMigration reads and writes it

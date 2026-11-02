@@ -943,9 +943,16 @@ func (s *emittingClassStore) WaitForParentProjection(ctx context.Context, parent
 func (s *emittingClassStore) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
 	reader, ok := s.Store.(beads.DepMetadataReader)
 	if !ok {
-		return "", false, fmt.Errorf("reading dependency metadata %s -> %s: emitting store %T exposes no edge-payload read", issueID, dependsOnID, s.Store)
+		return "", false, fmt.Errorf("reading dependency metadata %s -> %s: emitting store %T: %w", issueID, dependsOnID, s.Store, beads.ErrDepMetadataUnsupported)
 	}
 	return reader.DepMetadata(issueID, dependsOnID)
+}
+
+// DepMetadataAbsentByProtocol forwards what the inner store declares about
+// its protocol, as DepMetadata forwards its read and the bead-policy wrapper
+// forwards both.
+func (s *emittingClassStore) DepMetadataAbsentByProtocol() (string, bool) {
+	return beads.DepMetadataAbsent(s.Store)
 }
 
 // DepAddWithMetadata is DepAdd for an edge that carries a payload, and emits
