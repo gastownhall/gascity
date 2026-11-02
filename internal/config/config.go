@@ -3366,6 +3366,12 @@ func (d *DaemonConfig) DriftDrainTimeoutDuration() time.Duration {
 	return durationOr(d.DriftDrainTimeout, 2*time.Minute)
 }
 
+// DefaultDriftDeferralEscalateAfter is the default config-drift deferral
+// escalation horizon ([daemon].drift_deferral_escalate_after): how long a
+// held-work config-drift deferral episode stays quiet before its one
+// escalated notification (#8345).
+const DefaultDriftDeferralEscalateAfter = time.Hour
+
 // DriftDeferralEscalateAfterDuration returns the config-drift deferral
 // escalation horizon as a time.Duration. Defaults to 1h if empty, unparseable,
 // or non-positive.
@@ -3373,7 +3379,7 @@ func (d *DaemonConfig) DriftDeferralEscalateAfterDuration() time.Duration {
 	if dur, err := time.ParseDuration(d.DriftDeferralEscalateAfter); err == nil && dur > 0 {
 		return dur
 	}
-	return time.Hour
+	return DefaultDriftDeferralEscalateAfter
 }
 
 // DefaultStartReadyTimeout is the default wall-clock budget `gc start` and

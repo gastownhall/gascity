@@ -190,6 +190,7 @@ var infoKeyCodec = []infoKeySpec{
 	{"startup_dialog_verified", func(i *Info, v string) { i.StartupDialogVerified = v }},
 	{"config_drift_deferred_at", func(i *Info, v string) { i.ConfigDriftDeferredAt = v }},
 	{"config_drift_deferred_key", func(i *Info, v string) { i.ConfigDriftDeferredKey = v }},
+	{"config_drift_escalated_at", func(i *Info, v string) { i.ConfigDriftEscalatedAt = v }},
 	{"attached_config_drift_deferred_at", func(i *Info, v string) { i.AttachedConfigDriftDeferredAt = v }},
 	{"attached_config_drift_deferred_key", func(i *Info, v string) { i.AttachedConfigDriftDeferredKey = v }},
 	{"stranded_event_emitted_at", func(i *Info, v string) { i.StrandedEventEmittedAt = v }},

@@ -42,7 +42,7 @@ var allProjectedMetadataKeys = []string{
 	CurrentBeadIDKey, beadmeta.CurrentClaimBeadIDMetadataKey, WorkStartedKey, WorkLadderKey, ContentHoldKey, "execution_claim_started", "core_hash_breakdown", "started_provision_hash",
 	"started_launch_hash", "started_live_hash", "live_hash", "startup_dialog_verified",
 	"config_drift_deferred_at",
-	"config_drift_deferred_key", "attached_config_drift_deferred_at",
+	"config_drift_deferred_key", "config_drift_escalated_at", "attached_config_drift_deferred_at",
 	"attached_config_drift_deferred_key", "stranded_event_emitted_at",
 	"unknown_state_first_seen", "unknown_state_value", "unknown_state_escalated_at",
 	"session_name_explicit", "wake_request", "wake_requested_at", "restart_requested",

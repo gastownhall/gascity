@@ -453,6 +453,11 @@ type Info struct {
 	// and parses the timestamp (RFC3339). Mirrors keep the raw values.
 	ConfigDriftDeferredAt  string // config_drift_deferred_at (raw)
 	ConfigDriftDeferredKey string // config_drift_deferred_key (raw)
+	// ConfigDriftEscalatedAt mirrors the held-work deferral episode's
+	// escalation marker (config_drift_escalated_at), the durable guard that
+	// lets the reconciler emit session.config_drift_deferred with
+	// escalated=true exactly once per episode (#8345). Raw value.
+	ConfigDriftEscalatedAt string // config_drift_escalated_at (raw)
 	// AttachedConfigDriftDeferredAt / AttachedConfigDriftDeferredKey mirror the
 	// attached-session config-drift deferral timer (attached_config_drift_deferred_at
 	// / _key), the same shape as the named pair above but for the attached path.

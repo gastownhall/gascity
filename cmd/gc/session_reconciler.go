@@ -4162,8 +4162,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								// The deferral has no natural end while the work stays
 								// open, so record it as a durable, visible episode: the
 								// first observation stamps the drift key and time and
-								// emits session.config_drift_deferred (#8345).
-								recordHeldWorkConfigDriftDeferral(infoByID[id], sessFront, tick, rec, clk, stderr, name, driftKey, driftedFields, blocker.ID)
+								// emits session.config_drift_deferred; an episode that
+								// outlives the escalation horizon escalates exactly once
+								// (#8345).
+								recordHeldWorkConfigDriftDeferral(infoByID[id], sessFront, tick, rec, clk, stderr, name, driftKey, driftedFields, blocker.ID, cfg.Daemon.DriftDeferralEscalateAfterDuration())
 								if trace != nil {
 									trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeDeferredActive, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
 										"active_reason":  "live_assigned_work",
@@ -5975,6 +5977,23 @@ func driftHeldWorkEpisode(at, stampKey, key string, now time.Time) (stamp bool, 
 	return true, now
 }
 
+// driftHeldWorkEscalation is the pure escalation decision both reconcilers
+// share (#8345): an episode that has outlived the horizon
+// ([daemon] drift_deferral_escalate_after) escalates exactly once — the
+// durable config_drift_escalated_at marker counts when it parses and was
+// stamped no earlier than the episode's own start, so a marker left by a
+// previous episode never suppresses this one's escalation (a fresh episode
+// re-stamps the deferral and clears the marker).
+func driftHeldWorkEscalation(since time.Time, markerAt string, now time.Time, horizon time.Duration) bool {
+	if since.IsZero() || now.Sub(since) < horizon {
+		return false
+	}
+	if marker, ok := parseRFC3339Metadata(markerAt); ok && !marker.Before(since) {
+		return false
+	}
+	return true
+}
+
 // configDriftDeferredEvent is the session.config_drift_deferred event for a
 // held-work deferral observed at now (#8345). driftedFields names the drifted
 // config fields — empty when the stored breakdown is unavailable, which the
@@ -6502,6 +6521,7 @@ const (
 	sessionAttachedConfigDriftRefreshInterval     = 2 * time.Minute
 	namedSessionConfigDriftDeferredAtMetadata     = "config_drift_deferred_at"
 	namedSessionConfigDriftDeferredKeyMetadata    = "config_drift_deferred_key"
+	configDriftEscalatedAtMetadata                = "config_drift_escalated_at"
 	sessionAttachedConfigDriftDeferredAtMetadata  = "attached_config_drift_deferred_at"
 	sessionAttachedConfigDriftDeferredKeyMetadata = "attached_config_drift_deferred_key"
 )
@@ -6667,19 +6687,40 @@ func recordSessionAttachedConfigDriftDeferral(info sessionpkg.Info, sessFront *s
 // session.config_drift_deferred (#8345): the metadata write lands first and
 // the event only after it, so a failed write logs and leaves the episode
 // unstamped — a later pass observes the same first fact again and retries.
-// An episode already stamped for this drift writes and emits nothing, so the
-// per-tick observation stays churn-free. The returned Info is the tick
-// snapshot's post-write value.
-func recordHeldWorkConfigDriftDeferral(info sessionpkg.Info, sessFront *sessionpkg.Store, tick *reconcileTick, rec events.Recorder, clk clock.Clock, stderr io.Writer, name, driftKey string, driftedFields []string, workBeadID string) sessionpkg.Info {
+// An episode already stamped for this drift escalates once past the horizon
+// (the durable config_drift_escalated_at marker counts), its marker-only
+// write guarded by the same write-first order; an episode that already
+// escalated writes and emits nothing, so the per-tick observation stays
+// churn-free. The returned Info is the tick snapshot's post-write value.
+func recordHeldWorkConfigDriftDeferral(info sessionpkg.Info, sessFront *sessionpkg.Store, tick *reconcileTick, rec events.Recorder, clk clock.Clock, stderr io.Writer, name, driftKey string, driftedFields []string, workBeadID string, horizon time.Duration) sessionpkg.Info {
 	now := time.Now().UTC()
 	if clk != nil {
 		now = clk.Now().UTC()
 	}
 	stamp, since := driftHeldWorkEpisode(info.ConfigDriftDeferredAt, info.ConfigDriftDeferredKey, driftKey, now)
-	if !stamp || sessFront == nil || info.ID == "" {
+	if sessFront == nil || info.ID == "" {
 		return info
 	}
-	next, err := sessFront.ApplyPatchInfo(info, driftStamp(namedSessionConfigDriftDeferredAtMetadata, namedSessionConfigDriftDeferredKeyMetadata, driftKey, now))
+	if !stamp {
+		if !driftHeldWorkEscalation(since, info.ConfigDriftEscalatedAt, now, horizon) {
+			return info
+		}
+		next, err := sessFront.ApplyPatchInfo(info, sessionpkg.MetadataPatch{configDriftEscalatedAtMetadata: now.Format(time.RFC3339)})
+		if err != nil {
+			fmt.Fprintf(stderr, "session reconciler: recording held-work config-drift escalation for %s: %v\n", name, err) //nolint:errcheck
+			return info
+		}
+		if tick != nil {
+			tick.set(info.ID, next)
+		}
+		if rec != nil {
+			rec.Record(configDriftDeferredEvent(next, driftedFields, workBeadID, since, now, true))
+		}
+		return next
+	}
+	patch := driftStamp(namedSessionConfigDriftDeferredAtMetadata, namedSessionConfigDriftDeferredKeyMetadata, driftKey, now)
+	patch[configDriftEscalatedAtMetadata] = "" // a fresh episode starts unescalated
+	next, err := sessFront.ApplyPatchInfo(info, patch)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: recording held-work config-drift deferral for %s: %v\n", name, err) //nolint:errcheck
 		return info

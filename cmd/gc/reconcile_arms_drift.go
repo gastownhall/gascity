@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -27,10 +28,14 @@ const (
 	decideDriftAttached = "drift-deferred:attached"  // SESS-552/553
 	decideDriftPinned   = "drift-deferred:pinned"    // SESS-555
 	decideDriftHeldWork = "drift-deferred:held-work" // SESS-559, #8345
-	decideDriftRepair   = "drift-repair"             // SESS-566/568
-	decideLiveApply     = "live-apply"               // SESS-565
-	decideDriftRestart  = "drift-restart"            // SESS-557
-	decideDriftRelaunch = "drift-relaunch"           // SESS-556/560
+
+	// decideDriftHeldWorkEscalated is the held-work episode's one escalation
+	// past the drift_deferral_escalate_after horizon (#8345).
+	decideDriftHeldWorkEscalated = "drift-deferred:held-work-escalated"
+	decideDriftRepair            = "drift-repair"   // SESS-566/568
+	decideLiveApply              = "live-apply"     // SESS-565
+	decideDriftRestart           = "drift-restart"  // SESS-557
+	decideDriftRelaunch          = "drift-relaunch" // SESS-556/560
 )
 
 // armConfigDrift is A14 on an alive desired row whose stored config hash
@@ -138,21 +143,49 @@ func (r *rowFacts) driftRestart(relaunch bool) (intent, bool) {
 // driftHeldWork is SESS-559's held-work protection made a durable, visible
 // episode (#8345): an ordinary seat with assigned work never takes the
 // config-drift drain, and nothing dated or reported the deferral. The first
-// observation of a drift stamps its episode (the drift key and now) and emits
-// session.config_drift_deferred through the row write's Event, so the write
-// lands first and the notification never precedes it; an episode already
-// stamped for this drift decides nothing, so A16's execution-stalled handling
-// still runs behind it.
+// observation of a drift stamps its episode (the drift key and now, the
+// escalation marker cleared) and emits session.config_drift_deferred through
+// the row write's Event, so the write lands first and the notification never
+// precedes it. A stamped episode schedules its own escalation deadline —
+// [daemon] drift_deferral_escalate_after past its start — and escalates
+// exactly once there (the durable config_drift_escalated_at marker counts),
+// reporting the episode's own start and age; an episode that already
+// escalated decides nothing, so A16's execution-stalled handling still runs
+// behind it.
 func (r *rowFacts) driftHeldWork(cfg runtime.Config, key string) (intent, bool) {
 	e, info, now := r.entry, r.row.Info, r.w.Now
 	stamp, since := driftHeldWorkEpisode(info.ConfigDriftDeferredAt, info.ConfigDriftDeferredKey, key, now)
 	if !stamp {
+		horizon := configDriftEscalateHorizon(r.w.Env)
+		if driftHeldWorkEscalation(since, info.ConfigDriftEscalatedAt, now, horizon) {
+			it, ok := r.heal(intentRowHeal, decideDriftHeldWorkEscalated, session.MetadataPatch{configDriftEscalatedAtMetadata: now.UTC().Format(time.RFC3339)})
+			ev := configDriftDeferredEvent(info, runtime.CoreFingerprintDriftFieldsFromJSON(info.CoreHashBreakdown, cfg), e.AssignedWork.BeadID, since, now, true)
+			it.Event = &ev
+			return it, ok
+		}
+		if due := since.Add(horizon); due.After(now) {
+			r.after(requeueUntil(now, due))
+		}
 		return intent{}, false
 	}
-	it, ok := r.heal(intentRowHeal, decideDriftHeldWork, driftStamp(namedSessionConfigDriftDeferredAtMetadata, namedSessionConfigDriftDeferredKeyMetadata, key, now))
+	patch := driftStamp(namedSessionConfigDriftDeferredAtMetadata, namedSessionConfigDriftDeferredKeyMetadata, key, now)
+	patch[configDriftEscalatedAtMetadata] = "" // a fresh episode starts unescalated
+	it, ok := r.heal(intentRowHeal, decideDriftHeldWork, patch)
 	ev := configDriftDeferredEvent(info, runtime.CoreFingerprintDriftFieldsFromJSON(info.CoreHashBreakdown, cfg), e.AssignedWork.BeadID, since, now, false)
 	it.Event = &ev
 	return it, ok
+}
+
+// configDriftEscalateHorizon is the held-work deferral's escalation horizon
+// from the pass's config, [daemon] drift_deferral_escalate_after (1h by
+// default, which the accessor itself supplies on an unset, unparsable or
+// non-positive value). A pass with no config cannot bound the deferral, so
+// it takes the same default.
+func configDriftEscalateHorizon(env *reconcileEnv) time.Duration {
+	if env == nil || env.Cfg == nil {
+		return config.DefaultDriftDeferralEscalateAfter
+	}
+	return env.Cfg.Daemon.DriftDeferralEscalateAfterDuration()
 }
 
 // liveApply is SESS-565: a live hash of this binary's version, or a v6 one
