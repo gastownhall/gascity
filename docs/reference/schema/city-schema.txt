@@ -1634,17 +1634,17 @@
         },
         "alert_to": {
           "type": "string",
-          "description": "AlertTo is the agent identity to mail on failure (e.g.,\n\"gascity/mayor\"). Empty disables alert mail."
+          "description": "AlertTo is the agent identity to mail on failure (e.g.,\n\"gascity/mayor\"). Empty disables alert mail. It has no effect while\nthe loop is observe-only: an observe-only cycle cannot fail, so no\nalert mail is sent."
         },
         "gc_timeout": {
           "type": "string",
-          "description": "GCTimeout is the ceiling for CALL DOLT_GC() as a duration string.\nDefaults to 10m.",
+          "description": "GCTimeout is the intended ceiling for CALL DOLT_GC() as a duration\nstring. Defaults to 10m. It has no effect while the loop is\nobserve-only.",
           "default": "10m"
         }
       },
       "additionalProperties": false,
       "type": "object",
-      "description": "DoltMaintenance configures the periodic Dolt store maintenance loop."
+      "description": "DoltMaintenance configures the periodic Dolt store maintenance loop, which is observe-only: each cycle runs the disk-space pre-flight and records run history and events — it takes no backup snapshot and runs no CALL DOLT_GC, so a completed run does not mean the store was compacted."
     },
     "EventsConfig": {
       "properties": {
@@ -2043,7 +2043,7 @@
       "properties": {
         "dolt": {
           "$ref": "#/$defs/DoltMaintenance",
-          "description": "Dolt configures the weekly Dolt store maintenance loop\n(CALL DOLT_GC + backup snapshot)."
+          "description": "Dolt configures the periodic Dolt store maintenance loop. The loop\nis observe-only for now: it takes no backup snapshot and runs no\nCALL DOLT_GC."
         }
       },
       "additionalProperties": false,

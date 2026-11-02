@@ -667,7 +667,7 @@ export const replyMail = <ThrowOnError extends boolean = false>(options: Options
 /**
  * Trigger a Dolt store maintenance run
  *
- * Trigger a one-off maintenance cycle (dolt backup + CALL DOLT_GC + smoke test). Default async (202); ?wait=true blocks until completion (200). Returns 409 when a run is already in flight.
+ * Trigger a one-off maintenance cycle. The loop is observe-only for now: the cycle runs the disk-space pre-flight and records run history and events, but takes no backup snapshot and runs no CALL DOLT_GC, so a completed run does not mean the store was compacted. Default async (202); ?wait=true blocks until completion (200). Returns 409 when a run is already in flight.
  */
 export const triggerMaintenanceDoltGc = <ThrowOnError extends boolean = false>(options: Options<TriggerMaintenanceDoltGcData, ThrowOnError>) => (options.client ?? client).post<TriggerMaintenanceDoltGcResponses, TriggerMaintenanceDoltGcErrors, ThrowOnError>({ url: '/v0/city/{cityName}/maintenance/dolt-gc', ...options });
 
