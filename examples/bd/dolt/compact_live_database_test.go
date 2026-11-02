@@ -457,3 +457,45 @@ func TestCompactScriptLiveGateCoversEveryRewriteMode(t *testing.T) {
 		}
 	})
 }
+
+// AC-6: passes that never reach a rewrite issue no live probe and write no
+// liveness marker.
+func TestCompactScriptLiveGateSkipsProbeWithoutRewrite(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		mode  string
+		args  []string
+		env   []string
+		setup func(t *testing.T, fixture compactScriptFixture)
+	}{
+		{name: "dry run", mode: "success", args: []string{"--dry-run"}},
+		{name: "gc-only dry run", mode: "success", args: []string{"--gc-only", "--dry-run"}},
+		{name: "bare GC dry run", mode: "success", args: []string{"--dry-run"}, env: []string{"GC_DOLT_COMPACT_BARE_GC=1"}},
+		{name: "shared-history dry run", mode: "remote_success", args: []string{"--dry-run"}, setup: func(t *testing.T, fixture compactScriptFixture) {
+			setCompactWatermark(t, fixture, "")
+		}},
+		{name: "below threshold", mode: "below_threshold"},
+		{name: "existing quarantine", mode: "success", setup: func(t *testing.T, fixture compactScriptFixture) {
+			writeCompactStateMarker(t, fixture, "compact-quarantine", "db=beads\nreason=earlier quarantine\ncreated_at=2026-01-01T00:00:00Z\n")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			if tc.setup != nil {
+				tc.setup(t, fixture)
+			}
+			env := append(liveGateEnv("GC_FAKE_DOLT_LIVE_FAULT=unserve"), tc.env...)
+			out, _ := fixture.runWithArgs(t, tc.mode, tc.args, env...)
+			if log := readCompactDoltLog(t, fixture); strings.Contains(log, liveProbeQuery) {
+				t.Fatalf("pass without a rewrite issued a live probe:\n%s\n%s", out, log)
+			}
+			marker := beadsMarker(fixture, "compact-quarantine")
+			if _, err := os.Stat(marker); err == nil && compactMarkerValue(t, marker, "reason") == liveGateReason {
+				t.Fatalf("pass without a rewrite wrote a liveness marker:\n%s", out)
+			}
+			if strings.Contains(out, "live-database gate") {
+				t.Fatalf("pass without a rewrite reported the live gate:\n%s", out)
+			}
+		})
+	}
+}
