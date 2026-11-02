@@ -100,6 +100,17 @@ private_dir "$META"
 private_dir "$CITY_DIR/s"
 export SCREENDIR=$CITY_DIR/s
 
+# PROC is the process filesystem; GC_SESSION_SCREEN_PROC replaces it only in
+# the script's own tests. BOOT is this boot's id: a process start time read
+# from /proc counts from boot, so a record from another boot names no
+# process that runs now.
+PROC=${GC_SESSION_SCREEN_PROC:-/proc}
+BOOT=-
+if [ -r "$PROC/sys/kernel/random/boot_id" ]; then
+  IFS= read -r BOOT < "$PROC/sys/kernel/random/boot_id" || BOOT=-
+  BOOT=${BOOT:--}
+fi
+
 # The conformance kit's fault injection: under GC_RPP_FAULT=unavailable the
 # backend itself fails, so every op that reads it answers as it would on a
 # real outage.
@@ -198,8 +209,8 @@ classify() {
 start_of() {
   local stat rest
   START=""
-  if [ -r "/proc/$1/stat" ]; then
-    IFS= read -r stat < "/proc/$1/stat" || return 0
+  if [ -r "$PROC/$1/stat" ]; then
+    IFS= read -r stat < "$PROC/$1/stat" || return 0
     rest=${stat##*) }
     read -r -a fields <<< "$rest"
     START=${fields[19]:-}
@@ -223,14 +234,28 @@ created_of() {
   CREATED=$START
 }
 
-# window_alive succeeds while the window process recorded at name $1's start
-# (its pid and start time) still runs. A box screen lists dead whose agent
-# ignored the hangup still has its agent: it is not dead, and not free.
-window_alive() {
+# window_of sets WPID and WSTART to the window process recorded at name
+# $1's start ("<boot id> <pid> <start time>"), both empty when there is no
+# record or it is from another boot (its process is gone).
+window_of() {
+  local rest
+  WPID="" WSTART=""
   read_into "$META/$1.window"
-  [ -n "$REPLY" ] || return 1
-  start_of "${REPLY%% *}"
-  [ -n "$START" ] && [ "$START" = "${REPLY#* }" ]
+  [ "${REPLY%% *}" = "$BOOT" ] || return 0
+  rest=${REPLY#* }
+  WPID=${rest%% *}
+  WSTART=${rest#* }
+}
+
+# window_alive succeeds while the window process recorded at name $1's start
+# (this boot, its pid and its start time) still runs. A box screen lists dead
+# whose agent ignored the hangup still has its agent: it is not dead, and
+# not free.
+window_alive() {
+  window_of "$1"
+  [ -n "$WPID" ] || return 1
+  start_of "$WPID"
+  [ -n "$START" ] && [ "$START" = "$WSTART" ]
 }
 
 # kill_wait ends process $1, if it still started at $2: TERM, then KILL
@@ -250,24 +275,34 @@ kill_wait() {
   return 1
 }
 
+# is_stray succeeds when process $1 is name $2's own SCREEN: its exact argv
+# (read from /proc, never procps' rendering, which can be a path or "?" for
+# bytes the locale cannot show) is SCREEN -dmS <name> <its wrapper>, which is
+# unique to the city and name.
+is_stray() {
+  local -a argv=()
+  [ -r "$PROC/$1/cmdline" ] || return 1
+  mapfile -d '' -t argv < "$PROC/$1/cmdline" 2>/dev/null || return 1
+  [ "${#argv[@]}" -eq 4 ] && [ "${argv[0]##*/}" = SCREEN ] && [ "${argv[1]}" = -dmS ] &&
+    [ "${argv[2]}" = "$2" ] && [ "${argv[3]}" = "$META/$2.wrapper.sh" ]
+}
+
 # stray_kill ends name $1's own SCREEN process and its window when its start
-# timed out: screen -dmS has returned, so that SCREEN runs unless it died,
-# and its command line is unique to the city and name. It fails when the
-# process table cannot be read or a process survives.
+# timed out: screen -dmS has returned, so that SCREEN runs unless it died. It
+# fails when the process table cannot be read or a process survives.
 stray_kill() {
-  local snap pid want
-  snap=$(ps -ww -e -o pid:10= -o ppid:10= -o args=) || return 1
-  while read -r pid; do
-    [ -n "$pid" ] || continue
-    start_of "$pid"
-    want=$START
-    [ -n "$want" ] || continue
-    kill_wait "$pid" "$want" || return 1
-  done <<< "$(printf '%s\n' "$snap" | STRAY="SCREEN -dmS $1 $META/$1.wrapper.sh" awk '
-    { pid = substr($0, 1, 10) + 0; ppid = substr($0, 12, 10) + 0; a = substr($0, 23)
-      sub(/^ +/, "", a); kids[ppid] = kids[ppid] " " pid
-      if (a == ENVIRON["STRAY"]) s[pid] }
-    END { for (p in s) { n = split(kids[p], k, " "); for (i = 1; i <= n; i++) print k[i]; print p } }')"
+  local snap pid p kids want
+  snap=$(ps -e -o pid= -o ppid=) || return 1
+  while read -r pid _; do
+    [ -n "$pid" ] && is_stray "$pid" "$1" || continue
+    kids=$(printf '%s\n' "$snap" | awk -v p="$pid" '$2 == p { print $1 }')
+    for p in $kids $pid; do
+      start_of "$p"
+      want=$START
+      [ -n "$want" ] || continue
+      kill_wait "$p" "$want" || return 1
+    done
+  done <<< "$snap"
 }
 
 # agent_states reads one process snapshot and, for each "<root pid> <names>
@@ -509,7 +544,7 @@ case "$op" in
       wpid=$(ps -e -o pid= -o ppid= | awk -v p="$PID" '$2 == p { print $1; exit }') || wpid=""
       if [ -n "$wpid" ]; then
         start_of "$wpid"
-        if [ -n "$START" ]; then write_file "$META/$name.window" "$wpid $START"; fi
+        if [ -n "$START" ]; then write_file "$META/$name.window" "$BOOT $wpid $START"; fi
         break
       fi
       sleep 0.1
@@ -533,9 +568,9 @@ case "$op" in
     done <<< "$(rows_of "$name")"
     gone_after "$name" || die "stop: $name is still held"
     # An agent that ignored the hangup (or outlived a dead box) is ended too.
-    read_into "$META/$name.window"
-    if [ -n "$REPLY" ]; then
-      kill_wait "${REPLY%% *}" "${REPLY#* }" || die "stop: the agent of $name survived its kill"
+    window_of "$name"
+    if [ -n "$WPID" ]; then
+      kill_wait "$WPID" "$WSTART" || die "stop: the agent of $name survived its kill"
     fi
     forget "$name"
     ;;

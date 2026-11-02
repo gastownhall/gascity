@@ -45,11 +45,13 @@ After a reboot the old sockets list as dead. A legacy start wipes a name
 only dead sessions hold and starts it; a v2 (`fresh_only`) start refuses it
 with exit 73 and leaves the removal to gc, by the dead box's object.
 A box screen lists dead whose agent survived (one that ignores the hangup)
-is not free: each start records its window process (pid and start time),
-and while that process runs the box observes `unknown`, a corpse kill
-answers `live`, and a legacy start refuses it. `stop` ends that agent.
-A start whose session does not appear within 2s ends its own SCREEN before
-it fails, so no box appears after the failure.
+is not free: each start records its window process (boot id, pid and
+start time), and while that process runs the box observes `unknown`, a
+corpse kill answers `live`, and a legacy start refuses it. `stop` ends that
+agent. A record from before a reboot names no process and is never killed.
+A start whose session does not appear within 2s ends its own SCREEN (found
+by its exact argv in `/proc`) before it fails, so no box appears after the
+failure.
 
 **Dependencies:** `bash`, `screen`, `jq`, `flock`, procps `ps` and `kill`,
 `awk`, `cksum`, `uname`
