@@ -3562,7 +3562,7 @@ func TestRouteRigList_APIJSONIncludesCacheAge(t *testing.T) {
 func TestRouteRigList_APIJSONPreservesFallbackContract(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 	// This test exercises the render/fallback contract, not liveness. HQ running
-	// now derives from controllerStatusForCity (false with no live controller),
+	// now derives from a controller-socket ping (false with no live controller),
 	// so pin the seam true to keep asserting the API-render shape.
 	prevHQRunning := rigListHQRunning
 	rigListHQRunning = func(string) bool { return true }

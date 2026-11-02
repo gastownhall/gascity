@@ -824,16 +824,28 @@ func (c *Client) TriggerMaintenanceDoltGC(wait bool) (MaintenanceTriggerView, er
 	return maintenanceTriggerViewFromGen(resp.JSON202), nil
 }
 
+// ListSessionsOpts are the GET /v0/city/{cityName}/sessions query options
+// ListSessions sends. Empty State and Template omit the filter; Peek asks for
+// the last-output preview; WakeReasons asks for each open session's wake
+// reasons, which cost the server runtime probes per session.
+type ListSessionsOpts struct {
+	State, Template   string
+	Peek, WakeReasons bool
+}
+
 // ListSessions fetches the current set of sessions via
-// GET /v0/city/{cityName}/sessions. The stateFilter and templateFilter
-// arguments correspond to the state/template query parameters (empty means
-// omit). peek controls the optional last-output preview. The
+// GET /v0/city/{cityName}/sessions, walking every keyset page. The
 // CachedRead.AgeSeconds field carries the supervisor CachingStore age from
 // the X-GC-Cache-Age-S response header so callers can surface _cache_age_s
-// on --json output and a staleness banner on human output.
-func (c *Client) ListSessions(stateFilter, templateFilter string, peek bool) (CachedRead[[]SessionView], error) {
+// on --json output and a staleness banner on human output. Rows decode into
+// SessionListView; a malformed timestamp is a plain (non-fallback) error.
+// The body also carries the server's report of a partial read
+// (SessionList.Partial) and whether the server predates agent_name
+// (SessionList.AgentNameMissing); the client reports both and leaves the
+// judgment to the caller.
+func (c *Client) ListSessions(opts ListSessionsOpts) (CachedRead[SessionList], error) {
 	if err := c.requireCityScope(); err != nil {
-		return CachedRead[[]SessionView]{}, err
+		return CachedRead[SessionList]{}, err
 	}
 	// gc session list means "all sessions". Walk the keyset pages until the
 	// server stops minting next_cursor and merge them, so a fleet larger than
@@ -842,35 +854,46 @@ func (c *Client) ListSessions(stateFilter, templateFilter string, peek bool) (Ca
 	// trips; the cache age is taken from the first page.
 	capLimit := int64(maxPaginationLimit)
 	var (
-		all        []SessionView
+		all        []SessionListView
 		ageSeconds float64
 		cursor     string
+		report     sessionListDegradation
+		noAgent    bool
 	)
 	for page := 0; ; page++ {
 		params := &genclient.GetV0CityByCityNameSessionsParams{Limit: &capLimit}
-		if stateFilter != "" {
-			params.State = &stateFilter
+		if opts.State != "" {
+			params.State = &opts.State
 		}
-		if templateFilter != "" {
-			params.Template = &templateFilter
+		if opts.Template != "" {
+			params.Template = &opts.Template
 		}
-		if peek {
-			params.Peek = &peek
+		if opts.Peek {
+			params.Peek = &opts.Peek
+		}
+		if opts.WakeReasons {
+			params.WakeReasons = &opts.WakeReasons
 		}
 		if cursor != "" {
 			params.Cursor = &cursor
 		}
 		resp, err := c.cw.GetV0CityByCityNameSessionsWithResponse(context.Background(), c.cityName, params)
 		if err != nil {
-			return CachedRead[[]SessionView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+			return CachedRead[SessionList]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
 		}
 		if resp == nil {
-			return CachedRead[[]SessionView]{}, &connError{err: fmt.Errorf("nil response")}
+			return CachedRead[SessionList]{}, &connError{err: fmt.Errorf("nil response")}
 		}
 		if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
-			return CachedRead[[]SessionView]{}, err
+			return CachedRead[SessionList]{}, err
 		}
-		all = append(all, sessionsFromGenList(resp.JSON200)...)
+		views, err := sessionListViewsFromGen(resp.JSON200)
+		if err != nil {
+			return CachedRead[SessionList]{}, fmt.Errorf("decoding session list page: %w", err)
+		}
+		all = append(all, views...)
+		report.add(resp.JSON200)
+		noAgent = noAgent || sessionListPageLacksAgentName(resp.JSON200)
 		if page == 0 {
 			ageSeconds = cacheAgeFromResponse(resp.HTTPResponse)
 		}
@@ -887,10 +910,15 @@ func (c *Client) ListSessions(stateFilter, templateFilter string, peek bool) (Ca
 		cursor = next
 	}
 	if all == nil {
-		all = []SessionView{}
+		all = []SessionListView{}
 	}
-	return CachedRead[[]SessionView]{
-		Body:       all,
+	return CachedRead[SessionList]{
+		Body: SessionList{
+			Sessions:         all,
+			Partial:          report.partial,
+			PartialErrors:    report.errs,
+			AgentNameMissing: noAgent,
+		},
 		AgeSeconds: ageSeconds,
 	}, nil
 }

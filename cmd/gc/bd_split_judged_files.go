@@ -18,10 +18,10 @@ import (
 // and `bd batch` reports "0 operations (no-op)" and exits 0; a file rewritten
 // between the two reads is written unjudged. A judge therefore reads such a
 // file through readJudgedFile, and once it admits the write, bdClassFlipGuard
-// points bd at a private copy of exactly the bytes judged (bdJudgedFiles.pin).
-// import writes its own copy, because it may hand bd only some of the rows,
-// and repoints its source with the same verified rewrites (bdRepointFlag,
-// bdRepointPositional).
+// points bd at a private copy of exactly the bytes judged (bdJudgedFiles.pin),
+// written by bdWriteJudgedCopy. import writes its own copy, because it may
+// hand bd only some of the rows, and repoints its source with the same
+// verified rewrites (bdRepointFlag, bdRepointPositional).
 
 // bdJudgedFile is one caller-named file a judge read.
 type bdJudgedFile struct {
@@ -30,7 +30,10 @@ type bdJudgedFile struct {
 	// prefix is what bd expects before the path in the flag's value ("@"
 	// for --metadata).
 	prefix string
-	data   []byte
+	// name is the path as the caller spelled it; the copy keeps its base
+	// name.
+	name string
+	data []byte
 }
 
 // bdJudgedFiles collects the files one judgment read.
@@ -57,7 +60,7 @@ func (in bdClassGuardInput) readJudgedFile(flag, prefix, name string) ([]byte, e
 		return nil, err
 	}
 	if in.judged != nil {
-		in.judged.files = append(in.judged.files, bdJudgedFile{flag: flag, prefix: prefix, data: data})
+		in.judged.files = append(in.judged.files, bdJudgedFile{flag: flag, prefix: prefix, name: name, data: data})
 	}
 	return data, nil
 }
@@ -67,21 +70,21 @@ func (in bdClassGuardInput) readJudgedFile(flag, prefix, name string) ([]byte, e
 // cannot write, or an argv gc cannot repoint exactly, refuses the write.
 func (j *bdJudgedFiles) pin(inv *bdflags.Inventory, cmdPath string, g bdClassGuard) bdClassGuard {
 	for _, f := range j.files {
-		copyPath, err := bdWriteJudgedCopy(f.data, "gc-bd-judged-*")
+		copyPath, remove, err := bdWriteJudgedCopy(f.data, f.name)
 		if err == nil {
 			args, ok := bdRepointFlag(inv, g.args, f.flag, f.prefix+copyPath)
 			if ok {
 				g.args = args
 				prev := g.cleanup
 				g.cleanup = func() {
-					_ = os.Remove(copyPath)
+					remove()
 					if prev != nil {
 						prev()
 					}
 				}
 				continue
 			}
-			_ = os.Remove(copyPath)
+			remove()
 			err = fmt.Errorf("its argv cannot be repointed at the copy exactly (spell it as %s <file>)", f.flag)
 		}
 		if g.cleanup != nil {
@@ -92,27 +95,29 @@ func (j *bdJudgedFiles) pin(inv *bdflags.Inventory, cmdPath string, g bdClassGua
 	return g
 }
 
-// bdWriteJudgedCopy writes data to a new private temp file (0600) and returns
-// its absolute path: bd runs in the scope root, so a path relative to gc's
-// working directory (a relative $TMPDIR) would name a different file there.
-func bdWriteJudgedCopy(data []byte, pattern string) (string, error) {
-	tmp, err := os.CreateTemp("", pattern)
+// bdWriteJudgedCopy writes data into a new private directory (0700) under the
+// temp directory, as a file (0600) with the base name of source, the path the
+// caller gave, and returns the copy's path and a func that removes the
+// directory. The path is absolute: bd runs in the scope root and would resolve
+// a relative TMPDIR there. The copy keeps the caller's base name because bd
+// names the file it reads where it records the write (an import's history
+// entry is "bd import: N issues from <name>").
+func bdWriteJudgedCopy(data []byte, source string) (string, func(), error) {
+	tmpDir, err := filepath.Abs(os.TempDir())
 	if err != nil {
-		return "", err
+		return "", nil, fmt.Errorf("the temp directory %s (TMPDIR) cannot be resolved: %w", os.TempDir(), err)
 	}
-	name := tmp.Name()
-	_, err = tmp.Write(data)
-	if closeErr := tmp.Close(); err == nil {
-		err = closeErr
+	dir, err := os.MkdirTemp(tmpDir, "gc-bd-judged-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("writing it under the temp directory %s (TMPDIR) failed: %w", tmpDir, err)
 	}
-	if err == nil {
-		var abs string
-		if abs, err = filepath.Abs(name); err == nil {
-			return abs, nil
-		}
+	remove := func() { _ = os.RemoveAll(dir) }
+	path := filepath.Join(dir, filepath.Base(source))
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		remove()
+		return "", nil, fmt.Errorf("writing it under the temp directory %s (TMPDIR) failed: %w", tmpDir, err)
 	}
-	_ = os.Remove(name)
-	return "", err
+	return path, remove, nil
 }
 
 // bdRepointFlag returns argv with the string flag long set to value. pflag
