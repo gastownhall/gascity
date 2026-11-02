@@ -555,3 +555,118 @@ func TestCompactScriptPreservesOrdinaryFailureBehaviorWhenDatabaseStaysLive(t *t
 		t.Fatalf("the run must continue to the next database:\n%s", log)
 	}
 }
+
+// TestCompactScriptLiveGateEdgeCases: the gate's boundary behavior — a
+// database the server already cannot serve gets an ordinary failure without
+// any rewrite, a database with no data-dir entry is judged by SQL alone,
+// case-variant database names pass, malformed probe answers fail the gate, a
+// marker that cannot be written still aborts loudly, and a later run refuses
+// the quarantined database while compacting the others.
+func TestCompactScriptLiveGateEdgeCases(t *testing.T) {
+	t.Run("baseline unavailable means no rewrite", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		addCompactExtraDatabase(t, fixture, "zed")
+		out, err := fixture.runWithArgs(t, "live_probe_unserved", []string{"--gc-only"},
+			"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
+		requireCompactExitCode(t, out, err, 1)
+		if !strings.Contains(out, "cannot establish a served-HEAD baseline") {
+			t.Fatalf("a database the server cannot serve must be skipped without a rewrite:\n%s", out)
+		}
+		if !strings.Contains(out, "compact: 2 database(s) failed gc-only reclaim") {
+			t.Fatalf("both databases must be reported as ordinary failures:\n%s", out)
+		}
+		if log := readCompactDoltLog(t, fixture); strings.Contains(log, "DOLT_GC") {
+			t.Fatalf("no rewrite may run without a served-HEAD baseline:\n%s", log)
+		}
+		if _, statErr := os.Stat(compactLiveGateMarkerPath(fixture)); !os.IsNotExist(statErr) {
+			t.Fatalf("no rewrite means no liveness quarantine:\n%s", out)
+		}
+	})
+
+	t.Run("no data-dir entry judged by sql alone", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		if err := os.RemoveAll(filepath.Join(fixture.dataDir, "beads", ".dolt")); err != nil {
+			t.Fatalf("remove beads .dolt dir: %v", err)
+		}
+		out, err := fixture.runWithArgs(t, "success", []string{"--gc-only"},
+			"GC_DOLT_COMPACT_ONLY_DBS=beads")
+		if err != nil {
+			t.Fatalf("compact failed for a database that never had a data-dir entry: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "gc-only reclaim") || !strings.Contains(out, "— ok") {
+			t.Fatalf("the pass must succeed on SQL evidence alone:\n%s", out)
+		}
+	})
+
+	t.Run("case-variant database name passes", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		out, err := fixture.run(t, "live_probe_uppercase_db",
+			"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+		if err != nil {
+			t.Fatalf("a case-variant served name must not fail the gate: %v\n%s", err, out)
+		}
+	})
+
+	t.Run("malformed probe answers fail the gate", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			mode string
+		}{
+			{name: "another database answered", mode: "live_probe_wrong_db"},
+			{name: "empty head", mode: "live_probe_bad_head"},
+			{name: "no separator", mode: "live_probe_no_colon"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				fixture := newCompactScriptFixture(t)
+				out, err := fixture.run(t, tc.mode,
+					"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+					"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
+				requireCompactExitCode(t, out, err, 1)
+				if _, statErr := os.Stat(compactLiveGateMarkerPath(fixture)); statErr != nil {
+					t.Fatalf("a malformed probe answer must quarantine (stat err=%v):\n%s", statErr, out)
+				}
+			})
+		}
+	})
+
+	t.Run("unwritable marker still aborts loudly", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		// The fake dolt blocks the quarantine directory during the GC itself,
+		// after the run's writable preflight passed, so the gate's marker
+		// write fails while everything before it succeeded.
+		out, err := fixture.run(t, "live_marker_unwritable",
+			"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+			"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
+		requireCompactExitCode(t, out, err, 1)
+		if !strings.Contains(out, "UNABLE to write the live-database quarantine marker") {
+			t.Fatalf("a failed marker write must be as loud as the quarantine:\n%s", out)
+		}
+		if !strings.Contains(out, "aborting run before any further database work") {
+			t.Fatalf("the run must still abort:\n%s", out)
+		}
+	})
+
+	t.Run("later runs refuse the quarantined database but compact others", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		addCompactExtraDatabase(t, fixture, "zed")
+		out, err := fixture.run(t, "live_vanish_after_gc",
+			"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+			"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
+		requireCompactExitCode(t, out, err, 1)
+
+		resetCompactGCLog(t, fixture)
+		out, err = fixture.run(t, "success",
+			"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+		requireCompactExitCode(t, out, err, 1)
+		if !strings.Contains(out, "integrity quarantine marker exists") {
+			t.Fatalf("the quarantined database must be refused on later runs:\n%s", out)
+		}
+		log := readCompactDoltLog(t, fixture)
+		if !strings.Contains(log, "db=zed query=") {
+			t.Fatalf("the other database must still be compacted:\n%s\noutput:\n%s", log, out)
+		}
+		if !strings.Contains(out, "1 database(s) failed compaction") {
+			t.Fatalf("only the quarantined database fails:\n%s", out)
+		}
+	})
+}

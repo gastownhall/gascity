@@ -1594,6 +1594,17 @@ case "$query" in
       live_probe_transient_once)
         : > "$state_file.$db-gc-done"
         ;;
+      live_marker_unwritable)
+        # Fail the gate and make the quarantine marker unwritable in one
+        # shot: the writable preflight already ran (it gates the loop), so
+        # the block lands between the rewrite and the gate's marker write.
+        : > "$state_file.$db-unserved"
+        quarantine_block_dir="${GC_CITY_PATH:-}/.gc/runtime/packs/dolt/compact-quarantine"
+        if [ -n "${GC_CITY_PATH:-}" ]; then
+          rm -rf -- "$quarantine_block_dir"
+          : > "$quarantine_block_dir"
+        fi
+        ;;
     esac
     rm -rf -- "${GC_DOLT_DATA_DIR:-}/$db/.dolt/noms/oldgen"
     exit 0
