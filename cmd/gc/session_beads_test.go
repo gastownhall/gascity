@@ -5493,6 +5493,8 @@ type providerProjectionCase struct {
 	stored   map[string]string
 	resolved *config.ResolvedProvider
 	want     map[string]string
+	// keepsProvider means the stored provider name must not be rewritten.
+	keepsProvider bool
 	// family, when set, is the provider family the reconciled metadata reads.
 	family string
 }
@@ -5552,6 +5554,41 @@ func providerProjectionCases() []providerProjectionCase {
 				"resume_flag": "", "resume_style": "", "resume_command": "codex resume {{.SessionKey}}", "session_id_flag": "",
 			},
 			family: "codex",
+		},
+		{
+			// AC-2: a row whose provider name was already refreshed while
+			// its family/resume fields stayed the previous provider's.
+			name: "same-name row with a previous provider's fields",
+			stored: map[string]string{
+				"provider": "claude", "provider_kind": "codex", "builtin_ancestor": "codex",
+				"resume_flag": "resume", "resume_style": "subcommand", "resume_command": "codex resume {{.SessionKey}}",
+			},
+			resolved: &config.ResolvedProvider{
+				Name: "claude", BuiltinAncestor: "claude",
+				ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--session-id",
+			},
+			want: map[string]string{
+				"provider": "claude", "provider_kind": "", "builtin_ancestor": "",
+				"resume_flag": "--resume", "resume_style": "flag", "resume_command": "", "session_id_flag": "--session-id",
+			},
+			keepsProvider: true,
+			family:        "claude",
+		},
+		{
+			// AC-2: the same provider's config drops its resume command and
+			// session-id flag.
+			name: "same-name provider config removes resume fields",
+			stored: map[string]string{
+				"provider": "my-claude", "provider_kind": "claude", "builtin_ancestor": "claude",
+				"resume_flag": "--resume", "resume_style": "flag", "resume_command": "claude --resume {{.SessionKey}}", "session_id_flag": "--session-id",
+			},
+			resolved: &config.ResolvedProvider{Name: "my-claude", BuiltinAncestor: "claude", ResumeFlag: "--resume", ResumeStyle: "flag"},
+			want: map[string]string{
+				"provider": "my-claude", "provider_kind": "claude", "builtin_ancestor": "claude",
+				"resume_flag": "--resume", "resume_style": "flag", "resume_command": "", "session_id_flag": "",
+			},
+			keepsProvider: true,
+			family:        "claude",
 		},
 	}
 }
@@ -5613,6 +5650,9 @@ func TestSyncSessionBeads_ProviderProjectionClearsMissingFields(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			meta, _ := syncProviderProjection(t, tc.stored, tc.resolved)
 			checkProviderProjection(t, tc, meta)
+			if tc.keepsProvider && meta["provider"] != tc.stored["provider"] {
+				t.Errorf("provider = %q, want the stored %q kept", meta["provider"], tc.stored["provider"])
+			}
 		})
 	}
 }

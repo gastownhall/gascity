@@ -401,6 +401,9 @@ func TestDesiredRowLaunchRefreshClearsMissingProviderFields(t *testing.T) {
 					t.Errorf("patch[%s] = (%q, %v), want an explicit %q", k, v, ok, tc.want[k])
 				}
 			}
+			if v, ok := patch["provider"]; tc.keepsProvider && ok {
+				t.Errorf("patch[provider] = %q, want the stored %q left unwritten", v, tc.stored["provider"])
+			}
 		})
 	}
 }
