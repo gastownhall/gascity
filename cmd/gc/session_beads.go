@@ -643,6 +643,9 @@ func reopenNamedSessionBatch(closed beads.Bead, state string, now time.Time) map
 	}
 	// A reopened row holds no runtime lease: a close may leave its record.
 	maps.Copy(batch, session.RuntimeLeaseClearPatch())
+	// The start this reopen permits replaces the epoch and key of an interval
+	// the usage lane may not have settled yet: keep them on its close marker.
+	maps.Copy(batch, session.UsageReopenPatch(closed.Metadata))
 	// Reset the pending-create stale clock to NOW. The bead row's
 	// CreatedAt reflects when it was first minted (potentially
 	// long ago); this reopen is a fresh spawn attempt, so the
