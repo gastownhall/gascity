@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // WakeReason describes why a session should be awake.
@@ -56,8 +57,12 @@ type drainState struct {
 	deadline   time.Time
 	reason     string // "idle", "pool-excess", "config-drift", "user"
 	generation int    // generation at drain start — fence for Stop
-	ackSet     bool   // true after GC_DRAIN_ACK has been set by the reconciler
-	followUp   bool   // true when the controller should trigger one more immediate tick
+	// basis is the row the drain began on: its stop-pending mark and its
+	// timeout kill act only while the row still carries the basis's facts
+	// (sessionpkg.FactsLegacyStopPending).
+	basis    sessionpkg.Decided
+	ackSet   bool // true after GC_DRAIN_ACK has been set by the reconciler
+	followUp bool // true when the controller should trigger one more immediate tick
 }
 
 // idleProbeState tracks an async WaitForIdle probe for interactive idle sleep.
@@ -71,11 +76,13 @@ type idleProbeState struct {
 // drainTracker manages in-memory drain states for all sessions.
 type drainTracker struct {
 	mu               sync.Mutex
-	drains           map[string]*drainState     // session bead ID -> drain state
-	idleProbes       map[string]*idleProbeState // session bead ID -> async idle probe
-	resetStalls      map[string]bool            // session bead ID -> reset stall event emitted
-	zombieCrashes    map[string]bool            // session bead ID -> zombie-process session.crashed event emitted
-	suspendDeferrals map[string]int             // session bead ID -> consecutive ticks a named session has been suspend-drain-eligible with its spec absent (#3630)
+	drains           map[string]*drainState          // session bead ID -> drain state
+	idleProbes       map[string]*idleProbeState      // session bead ID -> async idle probe
+	resetStalls      map[string]bool                 // session bead ID -> reset stall event emitted
+	zombieCrashes    map[string]bool                 // session bead ID -> zombie-process session.crashed event emitted
+	suspendDeferrals map[string]int                  // session bead ID -> consecutive ticks a named session has been suspend-drain-eligible with its spec absent (#3630)
+	liveClaimVetoes  map[string]string               // session bead ID -> claimed work bead ID whose live claim last vetoed a demand-class drain (log-once dedupe)
+	drainSkips       map[drainSkipKey]*drainSkipMark // session bead ID + condition kind -> last printed line (log-on-transition dedupe; session_drain_skip_log.go)
 	idleProbeCursor  int
 }
 
@@ -86,6 +93,7 @@ func newDrainTracker() *drainTracker {
 		resetStalls:      make(map[string]bool),
 		zombieCrashes:    make(map[string]bool),
 		suspendDeferrals: make(map[string]int),
+		liveClaimVetoes:  make(map[string]string),
 	}
 }
 
@@ -125,6 +133,37 @@ func (dt *drainTracker) bumpSuspendDeferral(beadID string) int {
 	}
 	dt.suspendDeferrals[beadID]++
 	return dt.suspendDeferrals[beadID]
+}
+
+// noteLiveClaimVeto records that a live claim (claimID) vetoed a demand-class
+// drain of the session and reports whether this is a new sighting — the first
+// veto for the session, or a veto by a different claim. Callers log only on a
+// new sighting, because the vetoed decider re-runs every tick.
+func (dt *drainTracker) noteLiveClaimVeto(beadID, claimID string) bool {
+	if dt == nil {
+		return true
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	if dt.liveClaimVetoes == nil {
+		dt.liveClaimVetoes = make(map[string]string)
+	}
+	if prev, ok := dt.liveClaimVetoes[beadID]; ok && prev == claimID {
+		return false
+	}
+	dt.liveClaimVetoes[beadID] = claimID
+	return true
+}
+
+// clearLiveClaimVeto forgets a session's live-claim veto once the claim is no
+// longer held, so a later claim logs again.
+func (dt *drainTracker) clearLiveClaimVeto(beadID string) {
+	if dt == nil {
+		return
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	delete(dt.liveClaimVetoes, beadID)
 }
 
 // clearSuspendDeferral resets the deferral counter once a named session's spec

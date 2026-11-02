@@ -39,7 +39,7 @@ func TestStartupHintsToRuntimeConfigPropagatesEveryField(t *testing.T) {
 
 // setNonZero assigns a distinctive non-zero value to v based on its kind,
 // covering every field kind present in StartupHints (string/defined-string,
-// int, bool, *bool, and slices).
+// int, bool, *bool, slices, and structs via their first field).
 func setNonZero(t *testing.T, name string, v reflect.Value) {
 	t.Helper()
 	switch v.Kind() {
@@ -53,6 +53,8 @@ func setNonZero(t *testing.T, name string, v reflect.Value) {
 		v.Set(reflect.New(v.Type().Elem()))
 	case reflect.Slice:
 		v.Set(reflect.MakeSlice(v.Type(), 1, 1))
+	case reflect.Struct:
+		setNonZero(t, name+"."+v.Type().Field(0).Name, v.Field(0))
 	default:
 		t.Fatalf("setNonZero: unhandled kind %s for StartupHints.%s — extend this helper", v.Kind(), name)
 	}

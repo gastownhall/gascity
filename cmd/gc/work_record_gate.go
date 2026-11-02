@@ -178,8 +178,8 @@ func cityRigsLoader(cityPath string) func() []config.Rig {
 
 // workRecordCloseTargets returns the bead IDs a bd invocation closes, and
 // whether the invocation is a close at all. It covers both forms the SDK seam
-// sees: the `close` subcommand and `update --status=closed` (the form the
-// worker formulas use to stamp metadata and close in one call). Ambiguous or
+// sees: the `close` subcommand and `update --status=closed` (the form that
+// stamps metadata and closes in one call). Ambiguous or
 // ID-less invocations report not-a-close so the gate stays out of the way.
 func workRecordCloseTargets(bdArgs []string) ([]string, bool) {
 	if len(bdArgs) == 0 {
@@ -353,9 +353,11 @@ type workRecordMetadataEdits struct {
 
 // applyWorkRecordUpdateMetadata overlays metadata mutations from an atomic
 // `bd update ... --status=closed` invocation onto the stored bead before the
-// close gate validates it. The documented worker close form stamps the typed
-// work record and closes in one update, so validating only the pre-update bead
-// would reject a valid enforced close and warn incorrectly in migration mode.
+// close gate validates it. That form stamps the typed work record and closes in
+// one update, so validating only the pre-update bead would reject a valid
+// enforced close and warn incorrectly in migration mode. (mol-do-work instead
+// stamps the record with a plain update and then runs `bd close --reason`, so
+// its close is validated against the stored record.)
 //
 // The parse and apply phases are split so neither carries the whole projection's
 // branch density; together they match bd's update flag semantics exactly.

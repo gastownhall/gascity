@@ -12,6 +12,7 @@ import (
 
 // humaHandleConfigGet is the Huma-typed handler for GET /v0/config.
 func (s *Server) humaHandleConfigGet(_ context.Context, _ *ConfigGetInput) (*IndexOutput[configResponse], error) {
+	index := s.latestIndex()
 	cfg := s.state.Config()
 	name := strings.TrimSpace(s.state.CityName())
 	if name == "" {
@@ -65,16 +66,18 @@ func (s *Server) humaHandleConfigGet(_ context.Context, _ *ConfigGetInput) (*Ind
 		Providers:       providers,
 	}
 
-	if !cfg.Patches.IsEmpty() {
+	// Composition clears the applied patches from cfg; count the declared ones,
+	// as the patch reads list them.
+	if patches := s.patchConfig().Patches; !patches.IsEmpty() {
 		resp.Patches = &configPatchesResponse{
-			AgentCount:    len(cfg.Patches.Agents),
-			RigCount:      len(cfg.Patches.Rigs),
-			ProviderCount: len(cfg.Patches.Providers),
+			AgentCount:    len(patches.Agents),
+			RigCount:      len(patches.Rigs),
+			ProviderCount: len(patches.Providers),
 		}
 	}
 
 	return &IndexOutput[configResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  resp,
 	}, nil
 }
@@ -94,14 +97,12 @@ func effectiveWorkspacePrefix(cfg *config.City, name string) string {
 
 // humaHandleConfigExplain is the Huma-typed handler for GET /v0/config/explain.
 func (s *Server) humaHandleConfigExplain(_ context.Context, _ *ConfigExplainInput) (*IndexOutput[configExplainResponse], error) {
+	index := s.latestIndex()
 	cfg := s.state.Config()
 	builtins := config.BuiltinProviders()
 
 	// Use raw config for accurate provenance when available.
-	var rawCfg *config.City
-	if rcp, ok := s.state.(RawConfigProvider); ok {
-		rawCfg = rcp.RawConfig()
-	}
+	rawCfg := s.rawConfig()
 
 	agents := make([]annotatedAgentResponse, 0, len(cfg.Agents))
 	for _, a := range cfg.Agents {
@@ -155,18 +156,19 @@ func (s *Server) humaHandleConfigExplain(_ context.Context, _ *ConfigExplainInpu
 		}
 	}
 
+	patches := s.patchConfig().Patches
 	resp := configExplainResponse{
 		Agents:    agents,
 		Providers: provMap,
 		Patches: configExplainPatches{
-			Agents:    len(cfg.Patches.Agents),
-			Rigs:      len(cfg.Patches.Rigs),
-			Providers: len(cfg.Patches.Providers),
+			Agents:    len(patches.Agents),
+			Rigs:      len(patches.Rigs),
+			Providers: len(patches.Providers),
 		},
 	}
 
 	return &IndexOutput[configExplainResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  resp,
 	}, nil
 }
@@ -221,6 +223,7 @@ func (s *Server) humaHandleConfigValidate(_ context.Context, _ *ConfigValidateIn
 // derived from the city name, the baseline is computed against the
 // requested city scope, not a static global document.
 func (s *Server) humaHandleConfigDefaults(_ context.Context, _ *ConfigDefaultsInput) (*IndexOutput[configResponse], error) {
+	index := s.latestIndex()
 	cfg := s.state.Config()
 	name := strings.TrimSpace(s.state.CityName())
 	if name == "" {
@@ -244,7 +247,7 @@ func (s *Server) humaHandleConfigDefaults(_ context.Context, _ *ConfigDefaultsIn
 	}
 
 	return &IndexOutput[configResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  resp,
 	}, nil
 }

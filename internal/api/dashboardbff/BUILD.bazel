@@ -24,8 +24,10 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/beads",
+        "//internal/beads/proxyendpoint",
         "//internal/events",
         "//internal/runproj",
+        "//internal/searchpath",
         "@com_github_shirou_gopsutil_v4//host",
         "@com_github_shirou_gopsutil_v4//load",
         "@com_github_shirou_gopsutil_v4//mem",
@@ -40,6 +42,7 @@ go_test(
         "config_test.go",
         "dashboard_endpoints_test.go",
         "enrichment_cache_test.go",
+        "exec_test.go",
         "hangbudget_test.go",
         "health_darwin_test.go",
         "health_test.go",
@@ -78,6 +81,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

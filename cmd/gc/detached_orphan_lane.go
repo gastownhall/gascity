@@ -67,6 +67,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -140,6 +141,11 @@ func (r detachedOrphanReport) fields() map[string]any {
 type detachedOrphanLane struct {
 	mu sync.Mutex
 
+	// retiredRig reports whether a rig is proven relic-free on a split city
+	// (S4b), so its store holds no session bead to index. Nil keeps every
+	// rig's own sessions in the index.
+	retiredRig func(rig string) bool
+
 	// passMu admits ONE authoritative scan at a time. The scan outlives several
 	// poller ticks on a large city, and stacking scans would multiply the ledger
 	// load to converge once.
@@ -165,7 +171,7 @@ func newDetachedOrphanLane() *detachedOrphanLane {
 		pending:  map[string]struct{}{},
 		interval: detachedOrphanBackstopInterval,
 		retry:    detachedOrphanBackstopRetryInterval,
-		poll:     backstopPollInterval,
+		poll:     clock.Backstop(backstopPollInterval),
 		// Nothing has converged yet, so the first thing this lane does is scan.
 		forced:       true,
 		forcedReason: backstopReasonStartup,
@@ -176,7 +182,11 @@ func newDetachedOrphanLane() *detachedOrphanLane {
 // a directly-constructed CityRuntime (every test, every one-shot) needs no
 // wiring.
 func (cr *CityRuntime) detachedOrphanLaneOf() *detachedOrphanLane {
-	cr.detachedOrphanOnce.Do(func() { cr.detachedOrphan = newDetachedOrphanLane() })
+	cr.detachedOrphanOnce.Do(func() {
+		lane := newDetachedOrphanLane()
+		lane.retiredRig = func(rig string) bool { return splitRigGraphRelicFree(cr.storageRoutes, rig) }
+		cr.detachedOrphan = lane
+	})
 	return cr.detachedOrphan
 }
 
@@ -300,16 +310,19 @@ func (l *detachedOrphanLane) pollEvery() time.Duration {
 // candidates first; a pass whose candidates were all claimed or closed since
 // their event never reads a session bead at all.
 //
-// The index comes from detachedOrphanRoutesFor — the same resolution the
+// The index comes from detachedOrphanRoutesForLeg — the same resolution the
 // convergence scan uses — so the two lanes cannot disagree about which session
 // bead answers for an orphan.
 type detachedOrphanRouteResolver struct {
 	store    beads.Store
 	sessions beads.Store
-	index    detachedOrphanRouteIndex
-	built    bool
-	reads    int
-	err      error
+	// sessionless marks a rig store proven relic-free (S4b): it holds no
+	// session bead, so only sessions is indexed.
+	sessionless bool
+	index       detachedOrphanRouteIndex
+	built       bool
+	reads       int
+	err         error
 }
 
 // route resolves a candidate's pool route, building the leg's index on first use.
@@ -317,13 +330,23 @@ func (r *detachedOrphanRouteResolver) route(sessionID, sessionName string) (stri
 	if !r.built {
 		r.built = true
 		var reads int
-		r.index, reads, r.err = detachedOrphanRoutesFor(r.store, r.sessions)
+		r.index, reads, r.err = detachedOrphanRoutesForLeg(r.store, r.sessions, !r.sessionless)
 		r.reads += reads
 	}
 	if r.err != nil {
 		return "", r.err
 	}
 	return r.index.route(sessionID, sessionName), nil
+}
+
+// rigRetired reports whether the plan leg labeled label is a rig store proven
+// relic-free.
+func (l *detachedOrphanLane) rigRetired(label string) bool {
+	if l == nil || l.retiredRig == nil {
+		return false
+	}
+	rig, ok := cutRigLegLabel(label)
+	return ok && l.retiredRig(rig)
 }
 
 // deltaPass repairs only the beads the journal named since the last pass.
@@ -344,7 +367,7 @@ func (l *detachedOrphanLane) deltaPass(plan storeref.ResolvedPlan, sessions bead
 		if err != nil {
 			return fmt.Errorf("re-reading %d detached-orphan candidate(s): %w", len(candidates), err)
 		}
-		resolver := &detachedOrphanRouteResolver{store: leg.store, sessions: sessions}
+		resolver := &detachedOrphanRouteResolver{store: leg.store, sessions: sessions, sessionless: l.rigRetired(leg.label)}
 		defer func() { report.legReads += resolver.reads }()
 		for _, row := range rows {
 			// The LIVE row decides, not the event snapshot: a claim atomically
@@ -390,7 +413,7 @@ func (l *detachedOrphanLane) backstopPassOnPlane(plan storeref.ResolvedPlan, ses
 	var errs []error
 	partial, walkErr := walkPlaneLegs(plan, plane, func(leg planeLeg) error {
 		report.legs++
-		result, err := sweepDetachedHandoffOrphansWithRouteStore(leg.store, sessions)
+		result, err := sweepDetachedHandoffOrphansOnLeg(leg.store, sessions, !l.rigRetired(leg.label))
 		report.candidates += result.candidates
 		report.restored += result.restored
 		report.legReads += result.reads
@@ -487,6 +510,10 @@ func (cr *CityRuntime) sweepDetachedHandoffOrphansDelta() detachedOrphanReport {
 
 // runDetachedOrphanBackstop executes one authoritative pass and reports it.
 func (cr *CityRuntime) runDetachedOrphanBackstop(reason string) detachedOrphanReport {
+	if cr.beadsQuiescent.Load() {
+		// Suspended with nothing running: no store is read until resume.
+		return detachedOrphanReport{lane: "backstop", reason: reason}
+	}
 	lane := cr.detachedOrphanLaneOf()
 	if !lane.beginBackstop() {
 		// Another pass is already reading the same state. On a large city the

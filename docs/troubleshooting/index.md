@@ -17,3 +17,4 @@ alive.
 ## Operate
 
 - [Operate Managed-City Dolt Endpoints](/runbooks/managed-city-endpoints) — mental model, forbidden edits, sanctioned escape hatches, and recovery recipe for the city-level Dolt endpoint architecture.
+- [Maintain Dolt Storage](/runbooks/dolt-compact) — configure automatic history compaction, monitor lifecycle markers, and recover interrupted GC.

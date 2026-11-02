@@ -1,6 +1,7 @@
 package beadmeta
 
 import (
+	"encoding/csv"
 	"fmt"
 	"regexp"
 	"slices"
@@ -29,6 +30,17 @@ var validKeyRe = regexp.MustCompile(ValidKeyPattern)
 // names the same key is refused. Callers that mint keys should check here so a
 // key can never be written by one route and then jam another.
 func ValidKey(key string) bool { return validKeyRe.MatchString(key) }
+
+// ValidLabel reports whether bd reads label back as exactly that one label.
+// bd parses --labels, --add-label and --remove-label as pflag string slices,
+// that is as one CSV record each, so a label holding a comma, a quote, a
+// newline or a trailing CR would add or match a different label
+// ("x,gc:session", "gc:session\n"). This runs the same parser and accepts
+// only a label it returns unchanged as a single field.
+func ValidLabel(label string) bool {
+	fields, err := csv.NewReader(strings.NewReader(label)).Read()
+	return err == nil && len(fields) == 1 && fields[0] == label
+}
 
 // ValidateKey returns an error describing why key is not a usable bead-metadata
 // key, or nil when it is.

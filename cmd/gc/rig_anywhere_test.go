@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1133,6 +1134,11 @@ enabled = false
 		if code != 0 {
 			t.Fatalf("cmdRigRemove = %d, stderr: %s", code, stderr.String())
 		}
+		// Every swept block kind is deleted in place (#7899), without the
+		// comment-dropping full-rewrite fallback.
+		if stderr.Len() != 0 {
+			t.Fatalf("cmdRigRemove stderr = %q, want the in-place removal to need no fallback", stderr.String())
+		}
 
 		// The city must stay loadable: gc reload / gc rig list compose via
 		// LoadWithIncludes, which applies [[patches.agent]]. A patch left
@@ -1182,6 +1188,173 @@ enabled = false
 		}
 		if len(parsed.Orders.Overrides) != 1 || parsed.Orders.Overrides[0].Rig != "" {
 			t.Errorf("city-scoped orders.overrides not preserved: %#v", parsed.Orders.Overrides)
+		}
+	})
+
+	// TestRigAnywhere_RigRemove/preserves_comments pins #7899: cmdRigRemove
+	// used to write city.toml via a full MarshalForWrite round-trip, which
+	// drops every comment in the file (the reported repro went from 1575
+	// comment lines to 0). gc rig add stopped doing this for the common
+	// add path in #3414; this is the same fix for remove.
+	t.Run("preserves_comments", func(t *testing.T) {
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+		resetFlags(t)
+
+		cityPath := setupCity(t, "comment-city")
+		rigDir := filepath.Join(t.TempDir(), "comment-rig")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		keptRigDir := filepath.Join(t.TempDir(), "kept-rig")
+		if err := os.MkdirAll(keptRigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		// Written directly (not through writeRigAnywhereCityToml, which
+		// parses and re-MarshalForWrite's its input — exactly the
+		// comment-dropping round-trip this test exists to catch, so using
+		// it here would erase the comments before cmdRigRemove ever ran).
+		toml := `# This is a city-level rationale comment.
+[workspace]
+name = "comment-city"
+
+# Provider rationale: claude is the only configured provider.
+[providers.claude]
+base = "builtin:claude"
+
+# comment-rig rationale: being removed by this test.
+[[rigs]]
+name = "comment-rig"
+
+# kept-rig rationale: must survive the removal untouched.
+[[rigs]] # kept-rig: the docs repo
+name = "kept-rig"
+
+# comment-rig's patch rationale.
+[[patches.agent]]
+dir = "comment-rig"
+name = "claude"
+suspended = true
+
+[[patches.agent]]
+dir = "kept-rig"
+name = "claude"
+suspended = true
+`
+		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := config.PersistRigSiteBindings(fsys.OSFS{}, cityPath, []config.Rig{
+			{Name: "comment-rig", Path: rigDir},
+			{Name: "kept-rig", Path: keptRigDir},
+		}); err != nil {
+			t.Fatalf("PersistRigSiteBindings: %v", err)
+		}
+		registerCityForRigResolution(t, gcHome, cityPath, "comment-city")
+
+		cityFlag = cityPath
+		var stdout, stderr bytes.Buffer
+		code := cmdRigRemove("comment-rig", &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("cmdRigRemove = %d, stderr: %s", code, stderr.String())
+		}
+
+		data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := string(data)
+		if stderr.Len() != 0 {
+			t.Fatalf("cmdRigRemove stderr = %q, want the in-place removal to need no fallback", stderr.String())
+		}
+		for _, want := range []string{
+			"# This is a city-level rationale comment.",
+			"# Provider rationale: claude is the only configured provider.",
+			"# kept-rig rationale: must survive the removal untouched.",
+			"[[rigs]] # kept-rig: the docs repo\nname = \"kept-rig\"",
+			"dir = \"kept-rig\"",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("city.toml missing %q after rig remove:\n%s", want, got)
+			}
+		}
+		for _, mustBeGone := range []string{
+			"comment-rig",
+			"# comment-rig rationale: being removed by this test.",
+			"# comment-rig's patch rationale.",
+		} {
+			if strings.Contains(got, mustBeGone) {
+				t.Errorf("city.toml still contains %q after removing comment-rig:\n%s", mustBeGone, got)
+			}
+		}
+
+		if _, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); err != nil {
+			t.Fatalf("LoadWithIncludes after rig remove failed: %v", err)
+		}
+	})
+
+	// A city.toml whose rig entries cannot be deleted in place (here an
+	// inline rigs array, which has no [[rigs]] blocks to delete) still loses
+	// the rig: cmdRigRemove falls back to the full rewrite and says on stderr
+	// that the file's comments were dropped.
+	t.Run("falls_back_to_full_rewrite_when_blocks_cannot_be_deleted_in_place", func(t *testing.T) {
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+		resetFlags(t)
+
+		cityPath := setupCity(t, "inline-city")
+		goneDir := filepath.Join(t.TempDir(), "gone-rig")
+		keptDir := filepath.Join(t.TempDir(), "kept-rig")
+		for _, dir := range []string{goneDir, keptDir} {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		toml := `rigs = [{ name = "gone-rig" }, { name = "kept-rig" }]
+
+# inline-city rationale: lost to the full rewrite.
+[workspace]
+name = "inline-city"
+`
+		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := config.PersistRigSiteBindings(fsys.OSFS{}, cityPath, []config.Rig{
+			{Name: "gone-rig", Path: goneDir},
+			{Name: "kept-rig", Path: keptDir},
+		}); err != nil {
+			t.Fatalf("PersistRigSiteBindings: %v", err)
+		}
+		registerCityForRigResolution(t, gcHome, cityPath, "inline-city")
+
+		cityFlag = cityPath
+		var stdout, stderr bytes.Buffer
+		code := cmdRigRemove("gone-rig", &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("cmdRigRemove = %d, stderr: %s", code, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "warning") || !strings.Contains(stderr.String(), "drops its comments") {
+			t.Fatalf("cmdRigRemove stderr = %q, want a warning that the full rewrite drops comments", stderr.String())
+		}
+
+		cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+		if err != nil {
+			t.Fatalf("LoadWithIncludes after rig remove failed: %v", err)
+		}
+		var names []string
+		for _, rig := range cfg.Rigs {
+			names = append(names, rig.Name)
+		}
+		if !slices.Equal(names, []string{"kept-rig"}) {
+			t.Fatalf("rigs after removing gone-rig = %v, want [kept-rig]", names)
+		}
+		binding, err := config.LoadSiteBinding(fsys.OSFS{}, cityPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(binding.Rigs) != 1 || binding.Rigs[0].Name != "kept-rig" {
+			t.Fatalf("site binding rigs = %#v, want only kept-rig", binding.Rigs)
 		}
 	})
 }

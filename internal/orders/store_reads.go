@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -19,6 +20,9 @@ import (
 // Read tiers are declared per method and preserved from the ops they replace:
 //   - RecentRunsAll / OpenRuns (the dispatch cooldown/single-flight index) read
 //     the LIVE tier — cache-bypass is the duplicate-dispatch guarantee.
+//   - StaleOpenRuns / StaleNotClosedRuns / OrphanedOpenRuns (the sweeps that
+//     clear that gate) read the LIVE tier too, so they see every tracking bead
+//     OpenRuns does.
 //   - LastRun / Cursor preserve the dispatcher's pre-existing bare-List tier so
 //     the migration is behavior-preserving.
 //   - Get / RunDetail are the by-id detail reads (bare Get).
@@ -98,6 +102,15 @@ func (s *Store) RecentRunsAll(limit int) ([]OrderRun, error) {
 		Limit:         limit,
 		IncludeClosed: true,
 		Sort:          beads.SortCreatedDesc,
+		// Both tiers, stated rather than inherited. A policy-wrapped store
+		// rewrites TierIssues to TierBoth on the way in (cmd/gc
+		// expandPolicyReadTier), so production already reads both — but the
+		// backing limit only rides down when the backing set IS the query set,
+		// and TierIssues is one of the three predicates that disqualify it
+		// (internal/beads nativeListLimitPushdown). Left unstated, this read's
+		// whole reason for opting into the bounded limit silently evaporates the
+		// moment it runs over an unwrapped store.
+		TierMode: beads.TierBoth,
 		// Aggregate read: the rows fold into entries[order] = max(CreatedAt), so
 		// the backing's created-desc tie-break at the limit boundary is
 		// irrelevant. Opt into the bounded backing limit to keep the fetch off
@@ -124,19 +137,86 @@ func (s *Store) OpenRuns() ([]OrderRun, error) {
 	return decodeTrackingRuns(list), err
 }
 
-// StaleOpenRuns lists OPEN tracking beads whose CreatedAt is at or before cutoff,
-// decoded into OrderRun (both tiers — legacy issues and wisp — like the sweep's
-// ListByLabel). It is the typed read half of the stale-order-tracking sweep: the
-// caller applies any order-name filter (run.Scoped), close budget, and the
+// StaleOpenRuns lists the open and in_progress tracking beads whose CreatedAt is
+// at or before cutoff, oldest-first, decoded into OrderRun across both tiers
+// (legacy issues and wisp). It reads the LIVE tier: the sweep clears the gate
+// OpenRuns holds, so it must see the same set rather than a cache snapshot that
+// never absorbed the dispatcher's uncached writes (#5832).
+//
+// It is the read of most of the stale watchdog's 30 s passes, so it asks for
+// each status by name: a native Dolt listing cannot exclude a status, so one
+// not-closed query would decode every retained closed tracking bead (a week of
+// runs by default) only to drop it in Go. open and in_progress are the statuses
+// every backing selects exactly. Gas City creates a tracking bead open
+// (CreateRun) and only ever closes it; in_progress comes from a claim by hand,
+// and the strict open-work gate counts it, so it is read too. A bead parked by
+// hand (blocked, deferred, ...) also holds that gate but is in neither query:
+// StaleNotClosedRuns lists it, for the on-demand sweep and the watchdog's
+// slower passes.
+//
+// It is the typed read half of the stale-order-tracking sweep: the caller
+// applies any order-name filter (run.Scoped), close budget, and the
 // sweep-vocabulary metadata close. Names are resolved best-effort (Scoped is ""
 // for a tracking bead that carries neither an order-run label nor an order:
 // title), matching the sweep's "when no order filter is set, close every stale
 // tracking bead" behavior.
 func (s *Store) StaleOpenRuns(cutoff time.Time) ([]OrderRun, error) {
-	if s.store.Store == nil {
+	store := s.store.Store
+	if store == nil {
 		return nil, nil
 	}
-	all, err := s.store.ListByLabel(labelOrderTracking, 0, beads.WithBothTiers)
+	// Open first: a claim moves a bead forward to in_progress, so a bead
+	// claimed between the two reads is read twice rather than missed.
+	return staleRuns(beads.HandlesFor(store).Live, cutoff, "open", "in_progress")
+}
+
+// StaleNotClosedRuns lists every not-closed tracking bead whose CreatedAt is at
+// or before cutoff, oldest-first, decoded into OrderRun across both tiers: the
+// whole set the strict open-work gate counts, a tracking bead parked by hand
+// (blocked, deferred, ...) included. Like StaleOpenRuns it reads the LIVE tier
+// and is a typed read half of the stale-order-tracking sweep, with the same
+// best-effort names.
+//
+// It is the read of the on-demand sweep (gc order sweep-tracking, which the
+// core order-tracking-sweep order runs every minute) and of the stale
+// watchdog's slower passes (every ten minutes), so a parked tracking bead
+// releases its order once it is stale rather than holding it until the next
+// boot. It reads every not-closed status in one query, so a native Dolt store
+// decodes the retained closed tracking history for it, as it already does when
+// gc order sweep-tracking reads that history to prune it.
+func (s *Store) StaleNotClosedRuns(cutoff time.Time) ([]OrderRun, error) {
+	live, ok := s.liveHandle()
+	if !ok {
+		return nil, nil
+	}
+	return staleRuns(live, cutoff, everyNotClosed)
+}
+
+// liveHandle is the LIVE read handle over s's store, reached without
+// unwrapping the typed class handle (the storeclass lint lets that debt only
+// shrink, so StaleOpenRuns and OrphanedOpenRuns keep their baselined unwrap).
+// It answers what beads.HandlesFor answers on the unwrapped store: beads.As
+// sees through the class handle to a store with its own Handles (a
+// CachingStore, a policy store), and any other store, such as a wrapper that
+// only embeds Store (the stale sweep labels each leg that way), is read
+// through HandlesFor's logical wrapper over the handle, which forwards to the
+// store. The answers differ only for a store that is itself a class handle,
+// which As also sees through. ok is false for a zero handle.
+func (s *Store) liveHandle() (beads.LiveReader, bool) {
+	if s.store == (beads.OrdersStore{}) {
+		return nil, false
+	}
+	if p, ok := beads.As[interface{ Handles() beads.StoreHandles }](s.store); ok {
+		return p.Handles().Live, true
+	}
+	return beads.HandlesFor(s.store).Live, true
+}
+
+// staleRuns is the stale readers' shared body: the tracking beads in statuses
+// whose CreatedAt is at or before cutoff, oldest-first, read through live. A
+// bead with no CreatedAt is never stale.
+func staleRuns(live beads.LiveReader, cutoff time.Time, statuses ...string) ([]OrderRun, error) {
+	all, err := sweepTrackingBeads(live, statuses...)
 	if err != nil {
 		return nil, err
 	}
@@ -151,17 +231,22 @@ func (s *Store) StaleOpenRuns(cutoff time.Time) ([]OrderRun, error) {
 	return out, nil
 }
 
-// OrphanedOpenRuns lists every OPEN tracking bead EXCEPT pre-dispatch
+// OrphanedOpenRuns lists every not-closed tracking bead EXCEPT pre-dispatch
 // trigger-env-failure markers (which the open-work gate intentionally keeps open
-// until the normal stale sweep), decoded into OrderRun across both tiers. It is
-// the typed read half of the orphaned-order-tracking startup sweep; the caller
-// closes the returned runs via CloseRuns. Names are best-effort (the sweep closes
-// by ID and does not resolve names).
+// until the normal stale sweep), oldest-first, decoded into OrderRun across both
+// tiers. Like StaleOpenRuns it reads the LIVE tier, so it sees every tracking
+// bead OpenRuns does. Like StaleNotClosedRuns it reads every not-closed status
+// in one query, a tracking bead parked by hand included: it runs once per boot,
+// so it can afford the closed rows a native Dolt store decodes for that query.
+// It is the typed read half of the orphaned-order-tracking startup sweep; the
+// caller closes the returned runs via CloseRuns. Names are best-effort (the
+// sweep closes by ID and does not resolve names).
 func (s *Store) OrphanedOpenRuns() ([]OrderRun, error) {
-	if s.store.Store == nil {
+	store := s.store.Store
+	if store == nil {
 		return nil, nil
 	}
-	all, err := s.store.ListByLabel(labelOrderTracking, 0, beads.WithBothTiers)
+	all, err := sweepTrackingBeads(beads.HandlesFor(store).Live, everyNotClosed)
 	if err != nil {
 		return nil, err
 	}
@@ -173,6 +258,40 @@ func (s *Store) OrphanedOpenRuns() ([]OrderRun, error) {
 		name, _ := NameFromTrackingBead(b)
 		out = append(out, decodeRun(name, b))
 	}
+	return out, nil
+}
+
+// everyNotClosed is the ListQuery status that selects every tracking bead that
+// is not closed, whatever its status.
+const everyNotClosed = ""
+
+// sweepTrackingBeads is the sweep readers' shared LIVE read through live: the
+// tracking beads in each of statuses, one query per status across both tiers.
+// A bead two queries both read is listed once, and the list is oldest-first so
+// the caller's close budget drains the oldest jam rather than letting newer
+// beads starve it. No query carries a backing limit: callers post-filter
+// before applying their close budget.
+func sweepTrackingBeads(live beads.LiveReader, statuses ...string) ([]beads.Bead, error) {
+	var out []beads.Bead
+	seen := make(map[string]bool)
+	for _, status := range statuses {
+		list, err := live.List(beads.ListQuery{
+			Label:    labelOrderTracking,
+			Status:   status,
+			Sort:     beads.SortCreatedAsc,
+			TierMode: beads.TierBoth,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, b := range list {
+			if !seen[b.ID] {
+				seen[b.ID] = true
+				out = append(out, b)
+			}
+		}
+	}
+	beads.SortBeads(out, beads.SortCreatedAsc)
 	return out, nil
 }
 
@@ -397,15 +516,16 @@ func (s *Store) LastRun(name string) (time.Time, error) {
 	label := labelOrderRunPrefix + name
 	var latest time.Time
 	for _, store := range s.mixedLegStores() {
-		results, err := store.List(beads.ListQuery{
-			Label:         label,
-			Limit:         1,
-			IncludeClosed: true,
-			Sort:          beads.SortCreatedDesc,
-			TierMode:      beads.TierBoth,
-			// Aggregate read: reduces to max(CreatedAt), so the backing tie-break
-			// at the boundary is irrelevant. Opt into the bounded backing limit.
-			AllowBackingCreatedLimit: true,
+		// One leg of a federation: an order's run evidence is a tracking bead
+		// (orders), a wisp or graph.v2 root (graph) or, for a v1 poured
+		// formula, a work-class root on the work leg the dispatcher's gate
+		// adds. Each leg is read by the run label; a miss on one is covered
+		// by the leg that holds the row.
+		var results []beads.Bead
+		err := beads.FederatedRead(func() error {
+			var readErr error
+			results, readErr = lastRunRecords(store, label, 1)
+			return readErr
 		})
 		if err != nil {
 			if len(results) == 0 {
@@ -423,6 +543,54 @@ func (s *Store) LastRun(name string) (time.Time, error) {
 	return latest, nil
 }
 
+// runRecordScanBound is how far back an order's run reads look past beads
+// that carry its order-run label without being one of its run records
+// (IsRunRecord): the newest bead is read first, and only when it is no run
+// record are this many read, so the ga-klv bound holds for a store with none.
+const runRecordScanBound = 64
+
+// lastRunRecords is NewestRunRecords over store's beads carrying label
+// (newest first, both tiers, closed included, live).
+func lastRunRecords(store beads.Store, label string, n int) ([]beads.Bead, error) {
+	return NewestRunRecords(func(limit int) ([]beads.Bead, error) {
+		// Live: over a CachingStore a hard backing failure of this
+		// closed-history read comes back as a partial result holding only the
+		// cached open rows, which would read as surviving rows and shorten the
+		// cooldown or regress the cursor.
+		return beads.HandlesFor(store).Live.List(beads.ListQuery{
+			Label:         label,
+			Limit:         limit,
+			IncludeClosed: true,
+			Sort:          beads.SortCreatedDesc,
+			TierMode:      beads.TierBoth,
+			// Aggregate read over the newest rows. For LastRun it reduces to
+			// max(CreatedAt), so the backing tie-break at the boundary is
+			// irrelevant; for Cursor see its own note.
+			AllowBackingCreatedLimit: n == 1,
+		})
+	}, n)
+}
+
+// NewestRunRecords is list's run records (IsRunRecord), up to n, newest
+// first: list(n), and when a newer bead that is no run record displaced
+// one, the run records among list(n + runRecordScanBound), so the second
+// read never asks for fewer rows than the first. list reads an
+// order's run-labeled beads newest first, limit at most. LastRun, Cursor and
+// the storebinding adapter share it (the #7766 review).
+func NewestRunRecords(list func(limit int) ([]beads.Bead, error), n int) ([]beads.Bead, error) {
+	results, err := list(n)
+	records := slices.DeleteFunc(slices.Clone(results), func(b beads.Bead) bool { return !IsRunRecord(b) })
+	if len(records) == len(results) {
+		return records, err
+	}
+	results, err = list(n + runRecordScanBound)
+	records = slices.DeleteFunc(results, func(b beads.Bead) bool { return !IsRunRecord(b) })
+	if len(records) > n {
+		records = records[:n]
+	}
+	return records, err
+}
+
 // Cursor reports the max event seq (the order's event-bus high-water mark) for
 // the named order, unioning across the orders leg and the graph leg. Like
 // LastRun it is a MIXED orders+graph read (the seq labels ride both tracking
@@ -432,23 +600,22 @@ func (s *Store) Cursor(name string) EventCursor {
 	label := labelOrderRunPrefix + name
 	var latest uint64
 	for _, store := range s.mixedLegStores() {
-		results, err := store.List(beads.ListQuery{
-			Label:         label,
-			Limit:         10,
-			IncludeClosed: true,
-			Sort:          beads.SortCreatedDesc,
-			TierMode:      beads.TierBoth,
-			// Deliberately NOT an AllowBackingCreatedLimit caller. This read reduces
-			// to MaxSeqFromLabels — a max over seq, a DIFFERENT column than the
-			// created_at sort key. The backing breaks created_at ties by id ASC, so a
-			// bounded backing created-desc read keeps the smaller-id members of the
-			// newest second and drops the larger ids; because seq is forward-only the
-			// max-seq run is exactly that newest largest-id row, so a bounded backing
-			// read could omit it and regress the event cursor into replaying consumed
-			// events. Fetch the full candidate set so ApplyListQuery cuts the canonical
-			// (created_at DESC, id DESC) prefix, which keeps the max-seq run at the
-			// front (the Limit above is an exact client-side cap).
-		})
+		// Live, for LastRun's reason: a cached partial answer would regress the
+		// cursor to the open rows' seqs and replay consumed events. Only run
+		// records count (IsRunRecord).
+		//
+		// Deliberately NOT an AllowBackingCreatedLimit caller (lastRunRecords
+		// sets it only for a one-row read). This read reduces to
+		// MaxSeqFromLabels — a max over seq, a DIFFERENT column than the
+		// created_at sort key. The backing breaks created_at ties by id ASC, so a
+		// bounded backing created-desc read keeps the smaller-id members of the
+		// newest second and drops the larger ids; because seq is forward-only the
+		// max-seq run is exactly that newest largest-id row, so a bounded backing
+		// read could omit it and regress the event cursor into replaying consumed
+		// events. Fetch the full candidate set so ApplyListQuery cuts the canonical
+		// (created_at DESC, id DESC) prefix, which keeps the max-seq run at the
+		// front (the Limit is an exact client-side cap).
+		results, err := lastRunRecords(store, label, 10)
 		if err != nil {
 			if len(results) == 0 {
 				runtimeHelpersLogf("orders: cursor lookup failed for %s: %v", name, err)
@@ -491,7 +658,7 @@ func (s *Store) HasOpenWork(scoped string, wispHasOpenWork func(store beads.Stor
 			return false, fmt.Errorf("listing order work beads: %w", err)
 		}
 		for _, b := range results {
-			if b.Status == "closed" {
+			if b.Status == "closed" || !IsRunRecord(b) { // a plain bead carrying the label is no run (mc-v8g4p)
 				continue
 			}
 			if beadLabelsContain(b.Labels, labelOrderTracking) {

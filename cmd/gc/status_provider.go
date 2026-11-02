@@ -25,8 +25,9 @@ type statusProvider struct {
 }
 
 var (
-	_ runtime.RelaunchProvider          = (*statusProvider)(nil)
-	_ runtime.LivenessObserverWithError = (*statusProvider)(nil)
+	_ runtime.RelaunchProvider            = (*statusProvider)(nil)
+	_ runtime.LivenessObserverWithError   = (*statusProvider)(nil)
+	_ runtime.AttachmentObserverWithError = (*statusProvider)(nil)
 )
 
 func statusProviderPartial(sp any) bool {
@@ -91,6 +92,21 @@ func (p *statusProvider) IsAttached(name string) bool {
 	return boundedStatusCall(p, false, func() bool {
 		return p.base.IsAttached(name)
 	})
+}
+
+// IsAttachedWithError forwards the error-bearing attachment probe. A timed-out
+// probe answers unavailable rather than "not attached".
+func (p *statusProvider) IsAttachedWithError(name string) (bool, error) {
+	type result struct {
+		attached bool
+		err      error
+	}
+	fallbackErr := fmt.Errorf("%w: status attachment probe timed out", runtime.ErrRuntimeUnavailable)
+	got := boundedStatusCall(p, result{err: fallbackErr}, func() result {
+		attached, err := runtime.IsAttachedWithError(p.base, name)
+		return result{attached: attached, err: err}
+	})
+	return got.attached, got.err
 }
 
 func (p *statusProvider) Attach(name string) error {

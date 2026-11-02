@@ -9,6 +9,7 @@
 #   PATH     — must include gc binary
 
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/bead-id.sh"
 cd "$GC_CITY"
 
 while true; do
@@ -16,8 +17,8 @@ while true; do
     inbox=$(gc mail inbox "$GC_AGENT" 2>/dev/null || true)
 
     # Step 2: Process each unread message
-    if echo "$inbox" | grep -q "^gc-"; then
-        echo "$inbox" | grep "^gc-" | while read -r line; do
+    if echo "$inbox" | bead_id_rows | grep -q .; then
+        echo "$inbox" | bead_id_rows | while read -r line; do
             id=$(echo "$line" | awk '{print $1}')
 
             # Read the message

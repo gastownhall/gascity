@@ -4,40 +4,38 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/deps"
 )
 
 // The --beads-transport help — and docs/reference/cli.md, which is generated
-// from it — claimed "Any fresh init, with or without a selector, requires bd >=
-// 1.3.0". checkHardDependencies raises the floor to bdFreshProviderMinVersion
-// only when an initializing ownership record exists, and the legacy
-// `--dolt-host` alias without a selector writes none
-// (persistFreshProviderOwnership returns early for it), so that init passes at
-// the 1.0.4 floor. The behavior is the intended one — the design doc's "bd
-// version floor" section documents it — so the text is what has to change.
+// from it — states the one bd floor the code enforces: bdMinVersion covers a
+// fresh provider-owned init and the legacy `--dolt-host` alias alike (the alias
+// journals no initializing ownership record, so no higher floor applies to it).
+// The help names no alias exception and no older floor such as 1.0.4.
 func TestBeadsTransportHelpMatchesTheBdVersionFloorTheCodeEnforces(t *testing.T) {
 	usage := beadsTransportFlagUsage(t)
 
-	if strings.Contains(usage, "Any fresh init, with or without a selector, requires bd >= "+bdFreshProviderMinVersion) {
-		t.Errorf("help still claims an unconditional %s floor: %q", bdFreshProviderMinVersion, usage)
+	if !strings.Contains(usage, "bd >= "+bdMinVersion) {
+		t.Errorf("help does not state the bd >= %s floor: %q", bdMinVersion, usage)
 	}
-	for _, want := range []string{bdFreshProviderMinVersion, bdMinVersion, "--dolt-host"} {
-		if !strings.Contains(usage, want) {
-			t.Errorf("help does not mention %q, so it cannot state the alias exception: %q", want, usage)
-		}
+	if strings.Contains(usage, "1.0.4") {
+		t.Errorf("help still advertises the retired 1.0.4 floor: %q", usage)
 	}
 }
 
-// The exception only exists because the two floors differ. If they are ever
-// unified the help above is wrong again, and this is the assertion that says so.
-func TestBdVersionFloorsAreDistinct(t *testing.T) {
-	if bdMinVersion == bdFreshProviderMinVersion {
-		t.Fatalf("bdMinVersion and bdFreshProviderMinVersion are both %q; the --beads-transport help describes two floors", bdMinVersion)
+// The fresh provider-owned floor may equal the init floor but never sit below
+// it: checkHardDependencies only ever RAISES the floor for a pending
+// provider-owned scope.
+func TestBdFreshProviderFloorIsNotBelowTheInitFloor(t *testing.T) {
+	if deps.CompareVersions(bdFreshProviderMinVersion, bdMinVersion) < 0 {
+		t.Fatalf("bdFreshProviderMinVersion %q is below bdMinVersion %q", bdFreshProviderMinVersion, bdMinVersion)
 	}
 }
 
 // The alias init journals no initializing ownership record, which is the exact
 // condition checkHardDependencies raises the floor on. Without a record, the
-// floor stays at bdMinVersion.
+// floor stays at bdMinVersion (today the same 1.3.0).
 func TestLegacyDoltHostAliasJournalsNoInitializingOwnership(t *testing.T) {
 	city := t.TempDir()
 	opts := hostedDoltInitOptions{Host: "db.example", Port: "4406", Database: "hosted", ProjectID: "p1"}

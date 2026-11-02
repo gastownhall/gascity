@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -96,7 +97,7 @@ func TestHookClaimMatchesRouteWorkflowRunTargetFallback(t *testing.T) {
 		},
 	}
 	if hookClaimMatchesRoute(expanded, []string{"gascity/builder"}) {
-		t.Fatal("a fully-expanded workflow root (gc.workflow_expanded=true) must not fall back to gc.run_target; it is only claimable via gc.routed_to")
+		t.Fatal("a fully-expanded workflow root (gc.workflow_expanded=true) must not fall back to gc.run_target; its child steps own executable work")
 	}
 
 	if got := hookClaimRoute(expanded); got != "" {
@@ -104,6 +105,55 @@ func TestHookClaimMatchesRouteWorkflowRunTargetFallback(t *testing.T) {
 	}
 	if got := hookClaimRoute(rootOnly); got != "gascity/builder" {
 		t.Fatalf("hookClaimRoute(root-only workflow root) = %q, want %q", got, "gascity/builder")
+	}
+}
+
+// A stale explicit route must not turn a graph latch into executable work or
+// capacity demand. Otherwise each drained worker is replaced by another one.
+func TestHookClaimAndDemandRejectRoutedTopology(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind, expanded string
+		want                 bool
+	}{
+		{"expanded workflow", beadmeta.KindWorkflow, "true", false},
+		{"scope", beadmeta.KindScope, "", false},
+		{"spec", beadmeta.KindSpec, "", false},
+		{"root-only workflow", beadmeta.KindWorkflow, "", true},
+		{"worker step", "", "", true},
+		{"control step", beadmeta.KindWorkflowFinalize, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := beads.Bead{
+				ID: "probe-step", Status: "open", Type: "task",
+				Metadata: beads.StringMap{
+					beadmeta.KindMetadataKey:             tc.kind,
+					beadmeta.WorkflowExpandedMetadataKey: tc.expanded,
+					beadmeta.RoutedToMetadataKey:         "rig/worker",
+				},
+			}
+			if got := hookCandidateClaimable(candidate, []string{"rig/worker"}, time.Now()); got != tc.want {
+				t.Errorf("fresh claim = %v, want %v", got, tc.want)
+			}
+			if got := len(controllerDemandRouteCandidates(candidate)) != 0; got != tc.want {
+				t.Errorf("worker demand = %v, want %v", got, tc.want)
+			}
+			candidate.Assignee = "stale-worker"
+			if got := hookCandidateReclaimEligible(candidate, []string{"rig/worker"}, time.Now()); got != tc.want {
+				t.Errorf("stale reclaim = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFilterUnreadyHookCandidatesPreservesOwnedWorkflowAnchor(t *testing.T) {
+	input := `[{"id":"fresh","status":"open","metadata":{"gc.kind":"workflow","gc.workflow_expanded":"true"}},{"id":"owned","status":"in_progress","assignee":"rig/worker","metadata":{"gc.kind":"workflow","gc.workflow_expanded":"true"}}]`
+	got := filterUnreadyHookCandidates(input, time.Now())
+	var candidates []beads.Bead
+	if err := json.Unmarshal([]byte(got), &candidates); err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].ID != "owned" {
+		t.Fatalf("candidates = %s, want only the owned continuation anchor", got)
 	}
 }
 

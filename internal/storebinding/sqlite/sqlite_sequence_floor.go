@@ -17,7 +17,8 @@ const sqliteSequenceFloorMaxBytes = 128
 
 // sqliteSequenceFloorState records the authoritative allocator floor carried
 // beside a Graph-compatible SQLite database. An absent sidecar is the valid
-// genesis floor zero; a present sidecar must use the exact writer format.
+// genesis floor zero; a present sidecar must use the exact writer format
+// (canonical int64, possibly negative, newline-terminated).
 type sqliteSequenceFloorState struct {
 	present bool
 	value   int64
@@ -31,9 +32,11 @@ func parseSQLiteSequenceFloor(contents []byte) (int64, error) {
 	if text[len(text)-1] != '\n' {
 		return 0, fmt.Errorf("sequence floor lacks trailing newline")
 	}
+	// Negative values are valid: an operator-set continuation point for a
+	// store an older build wrapped past MaxInt64 (beads.RaiseSQLiteSequenceFloor).
 	value, err := strconv.ParseInt(text[:len(text)-1], 10, 64)
-	if err != nil || value < 0 {
-		return 0, fmt.Errorf("invalid nonnegative sequence floor %q", text)
+	if err != nil {
+		return 0, fmt.Errorf("invalid sequence floor %q", text)
 	}
 	if text != strconv.FormatInt(value, 10)+"\n" {
 		return 0, fmt.Errorf("non-canonical sequence floor %q", text)

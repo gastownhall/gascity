@@ -90,3 +90,16 @@ func (p *Plane) ForgetRunProjectionMiss(_ context.Context, cityName, runID strin
 	}
 	tailer.unknownRuns.forget(runID)
 }
+
+// SyncRunProjection folds the city's event log through its current end into
+// the warm projection before it returns, giving a caller that just recorded
+// bead events (a run cancel) read-your-writes on the next point read. It
+// reports false when the city is unknown, its tailer is not running, or ctx
+// ended first; the projection then catches up on its next poll.
+func (p *Plane) SyncRunProjection(ctx context.Context, cityName string) bool {
+	tailer, ok := p.cityRunTailer(cityName)
+	if !ok {
+		return false
+	}
+	return tailer.sync(ctx)
+}

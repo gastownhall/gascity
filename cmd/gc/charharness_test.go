@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/chartest"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -57,7 +58,8 @@ type charHarness struct {
 
 // newCharCity builds a throwaway file-store city from the given city.toml (which
 // must name the workspace charCityName) and optional bead seed (run on disk
-// before the server exists, so all three lanes read one set).
+// before the server exists, so all three lanes read one set). A command that
+// needs rigs or providers passes its own city.toml.
 func newCharCity(t *testing.T, cityToml string, seed func(t *testing.T, store beads.Store)) *charHarness {
 	t.Helper()
 	t.Setenv("GC_BEADS", "file")
@@ -87,7 +89,19 @@ func newCharCity(t *testing.T, cityToml string, seed func(t *testing.T, store be
 		t.Fatalf("load cfg: %v", err)
 	}
 	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), charCityName, cityPath)
+	freezeServerCacheAge(t)
 	return &charHarness{cityPath: cityPath, cs: cs}
+}
+
+// freezeServerCacheAge pins the API's cache-age clock to a fixed instant long
+// before any cache in the test took in data, so every served cache age clamps
+// to 0 and goldens that print _cache_age_s (or the cache-age footer) do not
+// depend on how long the run took. A fixed past instant, rather than one
+// cache's LastFreshAt, stays deterministic when a test builds several
+// controllerStates. Tests that measure the age set their own clock after this.
+func freezeServerCacheAge(t *testing.T) {
+	t.Helper()
+	t.Cleanup(api.SetLivenessClockForTest(&clock.Fake{Time: time.Unix(0, 0).UTC()}))
 }
 
 // lanes stands up one in-process server (plain + TLS fronts) shared by the two
