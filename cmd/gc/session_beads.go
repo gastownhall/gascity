@@ -1729,7 +1729,10 @@ func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string
 	if err != nil {
 		fmt.Fprintf(stderr, "session beads: canceling waits for retired session %s: %v\n", sessionID, err) //nolint:errcheck
 	}
-	if err := extmsg.CloseSessionBindings(context.Background(), store, sessionID, now); err != nil {
+	extmsgCtx, cancelExtmsg := context.WithTimeout(context.Background(), retiredCleanupLegBudget)
+	err = extmsg.CloseSessionBindings(extmsgCtx, store, sessionID, now)
+	cancelExtmsg()
+	if err != nil {
 		fmt.Fprintf(stderr, "session beads: closing external message bindings for retired session %s: %v\n", sessionID, err) //nolint:errcheck
 	}
 }

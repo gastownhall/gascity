@@ -144,3 +144,42 @@ func TestCancelStateAssignedToRetiredSessionBeadStopsSlowWaitsAtTheirBudget(t *t
 		}
 	})
 }
+
+// Fast waits and many slow external-messaging operations: the
+// external-messaging leg stops at its existing cancellation checkpoints once
+// its own 10s budget runs out, leaving bindings for later passes.
+func TestCancelStateAssignedToRetiredSessionBeadStopsSlowExternalMessagingAtItsBudget(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		mem := beads.NewMemStore()
+		sessionBead, fabric, caller := setupSessionWithExtmsgMembership(t, mem, session.StateArchived)
+		const bindingCount = 40
+		bindRetiredSession(t, fabric, caller, sessionBead.ID, bindingCount)
+		seedRetiredSessionWaits(t, mem, sessionBead.ID, 5)
+		store := &retiredCleanupTimedStore{
+			MemStore:   mem,
+			waitLabel:  "session:" + sessionBead.ID,
+			extmsgList: time.Second,
+		}
+
+		var stderr bytes.Buffer
+		start := time.Now()
+		cancelStateAssignedToRetiredSessionBead(store, sessionBead.ID, start, &stderr)
+		elapsed := time.Since(start)
+
+		if open, _ := countRetiredSessionWaits(t, mem, sessionBead.ID); open != 0 {
+			t.Fatalf("open waits = %d, want 0 (fast waits leg finishes)", open)
+		}
+		active := countActiveBindings(t, fabric, sessionBead.ID)
+		if active == 0 || active == bindingCount {
+			t.Fatalf("active bindings = %d of %d, want the leg stopped part way through", active, bindingCount)
+		}
+		// Every extmsg read costs 1s of fake time; each binding's unbind is a
+		// few reads, so the leg ends within a few seconds of its deadline.
+		if limit := retiredCleanupLegBudget + 5*time.Second; elapsed > limit {
+			t.Fatalf("cleanup took %v of fake store time, want <= %v", elapsed, limit)
+		}
+		if !strings.Contains(stderr.String(), sessionBead.ID) {
+			t.Fatalf("stderr = %q, want a diagnostic naming session %s", stderr.String(), sessionBead.ID)
+		}
+	})
+}
