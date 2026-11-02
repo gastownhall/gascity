@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -1181,6 +1182,126 @@ func TestValidateLockedRemoteCacheRequiresGit(t *testing.T) {
 	}
 	if !errors.Is(err, exec.ErrNotFound) {
 		t.Fatalf("validateLockedRemoteCache error = %v, want exec.ErrNotFound", err)
+	}
+}
+
+// seedValidatedRepoCache builds a real git repo shaped like a repo-cache
+// checkout (one committed pack.toml, clean worktree) and returns its path and
+// HEAD commit, ready to pass to validateLockedRemoteCache.
+func seedValidatedRepoCache(t *testing.T) (string, string) {
+	t.Helper()
+	cacheDir := t.TempDir()
+	writeTestFile(t, cacheDir, "pack.toml", "[pack]\nname = \"gastown\"\nschema = 1\n")
+	if _, err := runRepoCacheGit(cacheDir, "init"); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	if _, err := runRepoCacheGit(cacheDir, "add", "pack.toml"); err != nil {
+		t.Fatalf("git add: %v", err)
+	}
+	if _, err := runRepoCacheGit(cacheDir, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "seed"); err != nil {
+		t.Fatalf("git commit: %v", err)
+	}
+	commit, err := runRepoCacheGit(cacheDir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("git rev-parse: %v", err)
+	}
+	return cacheDir, commit
+}
+
+// stubStatDirtyStatusOnce returns the phantom stat-dirty M observed town-wide
+// on 2026-10-31 (porcelain dirty, content identical — plain git cannot be
+// coerced into reporting that state on demand) for the first status call, and
+// delegates every other invocation — including the post-refresh re-check and
+// update-index itself — to the real runner against the real cache repo.
+func stubStatDirtyStatusOnce(t *testing.T) *int {
+	t.Helper()
+	var statusCalls, refreshCalls int
+	prev := runRepoCacheGit
+	runRepoCacheGit = func(dir string, args ...string) (string, error) {
+		if len(args) >= 2 && args[0] == "status" && args[1] == "--porcelain" {
+			statusCalls++
+			if statusCalls == 1 {
+				return " M pack.toml", nil
+			}
+			return prev(dir, args...)
+		}
+		if len(args) >= 1 && args[0] == "update-index" {
+			refreshCalls++
+		}
+		return prev(dir, args...)
+	}
+	t.Cleanup(func() { runRepoCacheGit = prev })
+	return &refreshCalls
+}
+
+func TestValidateLockedRemoteCacheByteIdenticalRewritePasses(t *testing.T) {
+	cacheDir, commit := seedValidatedRepoCache(t)
+
+	// Pins the outcome, not the heal path: content byte-identical to HEAD
+	// must never fail config load, whatever stat state git classifies it
+	// under. On calm-room git 2.43 the racy future mtime content-compares
+	// clean on the first status (old code passes this too); the phantom-M
+	// heal path itself is pinned by TestValidateLockedRemoteCacheStatDirty-
+	// RefreshHeals via the seam stub, since plain git cannot produce that
+	// state on demand.
+	path := filepath.Join(cacheDir, "pack.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(2 * time.Hour)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := validateLockedRemoteCache("https://example.com/tools.git", cacheDir, commit); err != nil {
+		t.Fatalf("byte-identical stat-dirty cache must not fail config load: %v", err)
+	}
+}
+
+func TestValidateLockedRemoteCacheStatDirtyRefreshHeals(t *testing.T) {
+	cacheDir, commit := seedValidatedRepoCache(t)
+	refreshCalls := stubStatDirtyStatusOnce(t)
+
+	if err := validateLockedRemoteCache("https://example.com/tools.git", cacheDir, commit); err != nil {
+		t.Fatalf("content-identical stat-dirty cache must heal via index refresh, err = %v", err)
+	}
+	if got := *refreshCalls; got != 1 {
+		t.Fatalf("update-index --refresh invocations = %d, want 1", got)
+	}
+}
+
+func TestValidateLockedRemoteCacheRealChangeStillFailsAfterRefresh(t *testing.T) {
+	cacheDir, commit := seedValidatedRepoCache(t)
+	writeTestFile(t, cacheDir, "pack.toml", "[pack]\nname = \"tampered\"\nschema = 1\n")
+	_ = stubStatDirtyStatusOnce(t)
+
+	err := validateLockedRemoteCache("https://example.com/tools.git", cacheDir, commit)
+	if err == nil {
+		t.Fatal("genuine worktree change must still fail after the refresh attempt")
+	}
+	if !strings.Contains(err.Error(), "has local worktree changes") || !strings.Contains(err.Error(), `run "gc import install"`) {
+		t.Fatalf("error = %v, want unchanged dirty-cache install hint", err)
+	}
+}
+
+func TestValidateLockedRemoteCacheModeChangeStillFails(t *testing.T) {
+	cacheDir, commit := seedValidatedRepoCache(t)
+	// A mode flip is a real difference: update-index --refresh refuses it, so
+	// the re-checked status stays dirty and the gate must hold.
+	if err := os.Chmod(filepath.Join(cacheDir, "pack.toml"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	err := validateLockedRemoteCache("https://example.com/tools.git", cacheDir, commit)
+	if err == nil {
+		t.Fatal("mode change must still fail; refresh must not launder it")
+	}
+	if !strings.Contains(err.Error(), "has local worktree changes") {
+		t.Fatalf("error = %v, want dirty-cache install hint", err)
 	}
 }
 

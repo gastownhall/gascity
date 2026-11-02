@@ -585,7 +585,33 @@ func validateLockedRemoteCache(source, cacheDir, commit string) error {
 		return fmt.Errorf("checking cached import %s worktree status: %w", source, err)
 	}
 	if strings.TrimSpace(status) != "" {
-		return fmt.Errorf("cached import %s has local worktree changes; run \"gc import install\"", source)
+		// A refresh-healable "dirty" cache must not fail the gate: the
+		// 2026-10-31 town-wide outage (gk-c3iw / city-hsm) wedged every config
+		// load behind "run gc import install" until a human ran a bare
+		// `git update-index --refresh` on the pack cache, which ended it — the
+		// dirty state was content-identical to HEAD (md5 == HEAD, git diff
+		// empty) and cleared by the index refresh alone. Calm-room git 2.43
+		// does not reproduce that phantom M, so the trigger is load- or
+		// environment-shaped; what this gate pins is the verified invariant.
+		// Refresh the index stat cache and re-check status once. The refresh
+		// is lossless: update-index --refresh rewrites stat data only for
+		// entries whose content still matches the index — entries that
+		// genuinely differ (content, mode, staged, deleted, typechange) stay
+		// porcelain-dirty and are caught by the re-check below. Its exit code
+		// is NOT a verdict (with -q it exits 0 even for real changes), which
+		// is exactly why the re-checked status is the sole gate input: the
+		// refresh cannot launder a real change past this gate. The refresh
+		// error is deliberately ignored — a failed refresh (stale index.lock,
+		// busy FS, a lost race with a concurrent reader's refresh) leaves the
+		// re-check reading the pre-refresh index, so the verdict can only
+		// fail closed and the next config load heals.
+		_, _ = runRepoCacheGit(cacheDir, "update-index", "-q", "--refresh")
+		if status, err = runRepoCacheGit(cacheDir, "status", "--porcelain"); err != nil {
+			return fmt.Errorf("checking cached import %s worktree status: %w", source, err)
+		}
+		if strings.TrimSpace(status) != "" {
+			return fmt.Errorf("cached import %s has local worktree changes; run \"gc import install\"", source)
+		}
 	}
 	return nil
 }
