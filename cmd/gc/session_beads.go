@@ -1708,7 +1708,7 @@ func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string
 		stderr = io.Discard
 	}
 	sessFront := sessionFrontDoor(store)
-	_, capped, err := sessFront.CancelWaits(sessionID, now)
+	_, capped, err := sessFront.CancelWaits(context.Background(), sessionID, now)
 	if capped {
 		stampWaitLookupCapDiagnostic(sessFront, sessionID, beads.LookupLimitError{
 			Kind:  "wait",
