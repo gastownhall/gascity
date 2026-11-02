@@ -86,6 +86,9 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 		page[j] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
 		s.enrichSessionResponseWithKeyedPaths(&page[j], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0, keyedTranscriptPaths)
 	}
+	if input.WakeReasons {
+		s.setSessionListWakeReasons(page, pageSessions, listings)
+	}
 	return &ListOutput[sessionResponse]{
 		Index:     index,
 		CacheAgeS: cacheAgeSeconds(store.Store),
@@ -97,6 +100,30 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 			PartialErrors: partialErrors,
 		},
 	}, nil
+}
+
+// setSessionListWakeReasons fills each page row's wake_reasons from the
+// State's SessionListWakeReasoner, asked once for the whole page. A State
+// without the capability leaves them unset.
+func (s *Server) setSessionListWakeReasons(page []sessionResponse, pageSessions []session.Info, listings []session.ListedSession) {
+	reasoner, ok := s.state.(SessionListWakeReasoner)
+	if !ok || len(pageSessions) == 0 {
+		return
+	}
+	onPage := make(map[string]bool, len(pageSessions))
+	for _, sess := range pageSessions {
+		onPage[sess.ID] = true
+	}
+	persisted := make(map[string]session.Info, len(pageSessions))
+	for _, listing := range listings {
+		if onPage[listing.Info.ID] {
+			persisted[listing.Info.ID] = listing.Info
+		}
+	}
+	reasons := reasoner.SessionListWakeReasons(pageSessions, persisted)
+	for j := range page {
+		page[j].WakeReasons = reasons[page[j].ID]
+	}
 }
 
 // --- Session Get ---

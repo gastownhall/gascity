@@ -318,6 +318,17 @@ type WakeStartRefuser interface {
 	WakeStartRefusal(info session.Info) (why string, certain bool)
 }
 
+// SessionListWakeReasoner is an optional State capability: the reasons the
+// controller keeps each listed session awake (session, config, attached,
+// pin, ...), as the CLI's local `gc session list` computes them for its
+// REASON column. listed is one page of sessions after the runtime overlay;
+// persisted maps each listed id to the session's persisted Info. A session
+// with no wake reasons has no entry. The classifiers live in cmd/gc, which
+// internal/api cannot import, hence the capability.
+type SessionListWakeReasoner interface {
+	SessionListWakeReasons(listed []session.Info, persisted map[string]session.Info) map[string][]string
+}
+
 // WebhookDispatchProvider is optionally implemented by State to expose the live
 // order dispatcher the supervisor webhook receiver (E3) fires verified+matched
 // deliveries through. It is the H1/E0.5 dispatch seam: the dispatch machine lives

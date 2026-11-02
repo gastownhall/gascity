@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 
@@ -108,6 +109,91 @@ func TestHandleSessionListSendsAgentNameOnEveryRow(t *testing.T) {
 	for _, id := range []string{open.ID, closed.ID} {
 		if !seen[id] {
 			t.Errorf("row %s missing from GET /sessions?state=all: %v", id, body.Items)
+		}
+	}
+}
+
+// sessionListWakeReasonerState is a fakeState that reports canned wake
+// reasons and records what the list handler asked about.
+type sessionListWakeReasonerState struct {
+	*fakeState
+	reasons   map[string][]string
+	calls     int
+	listed    []string
+	persisted []string
+}
+
+var _ SessionListWakeReasoner = (*sessionListWakeReasonerState)(nil)
+
+func (s *sessionListWakeReasonerState) SessionListWakeReasons(listed []session.Info, persisted map[string]session.Info) map[string][]string {
+	s.calls++
+	s.listed, s.persisted = nil, nil
+	for _, info := range listed {
+		s.listed = append(s.listed, info.ID)
+		if p, ok := persisted[info.ID]; ok && p.ID == info.ID {
+			s.persisted = append(s.persisted, info.ID)
+		}
+	}
+	return s.reasons
+}
+
+// TestHandleSessionListReportsWakeReasonsOnRequest pins GET
+// /sessions?wake_reasons=true: the handler asks the State's wake reasoner
+// once for the page, passing the page rows and their persisted Infos, and
+// sets wake_reasons on the rows it names. Without the parameter it never
+// asks, and no row carries the key.
+func TestHandleSessionListReportsWakeReasonsOnRequest(t *testing.T) {
+	fs := newSessionFakeState(t)
+	first := createTestSession(t, fs.cityBeadStore, fs.sp, "first")
+	second := createTestSession(t, fs.cityBeadStore, fs.sp, "second")
+	state := &sessionListWakeReasonerState{fakeState: fs, reasons: map[string][]string{first.ID: {"session", "config"}}}
+	h := newTestCityHandlerWith(t, state, New(state))
+
+	list := func(query string) map[string]map[string]any {
+		t.Helper()
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("GET", cityURL(state, "/sessions"+query), nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET /sessions%s status = %d; body=%s", query, w.Code, w.Body.String())
+		}
+		var body struct {
+			Items []map[string]any `json:"items"`
+		}
+		if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		rows := map[string]map[string]any{}
+		for _, item := range body.Items {
+			id, _ := item["id"].(string)
+			rows[id] = item
+		}
+		return rows
+	}
+
+	rows := list("")
+	if state.calls != 0 {
+		t.Errorf("wake reasoner called %d times without wake_reasons=true", state.calls)
+	}
+	for id, row := range rows {
+		if _, ok := row["wake_reasons"]; ok {
+			t.Errorf("row %s carries wake_reasons without the parameter: %v", id, row["wake_reasons"])
+		}
+	}
+
+	rows = list("?wake_reasons=true")
+	if state.calls != 1 {
+		t.Fatalf("wake reasoner called %d times, want once per page", state.calls)
+	}
+	got, _ := json.Marshal(rows[first.ID]["wake_reasons"])
+	if string(got) != `["session","config"]` {
+		t.Errorf("row %s wake_reasons = %s, want [\"session\",\"config\"]", first.ID, got)
+	}
+	if _, ok := rows[second.ID]["wake_reasons"]; ok {
+		t.Errorf("row %s carries wake_reasons the reasoner did not name: %v", second.ID, rows[second.ID]["wake_reasons"])
+	}
+	for _, want := range []string{first.ID, second.ID} {
+		if !slices.Contains(state.listed, want) || !slices.Contains(state.persisted, want) {
+			t.Errorf("reasoner got listed %v persisted %v, want both to include %s", state.listed, state.persisted, want)
 		}
 	}
 }

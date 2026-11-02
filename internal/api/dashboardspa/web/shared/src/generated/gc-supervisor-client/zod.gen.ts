@@ -3735,6 +3735,7 @@ export const zSessionResponse = z.object({
     title: z.string(),
     transport: z.string().optional(),
     turn: zSessionTurn.optional(),
+    wake_reasons: z.array(z.string()).nullish(),
     work_dir: z.string().optional(),
     worker_dir: z.string().optional()
 });
@@ -11497,7 +11498,8 @@ export const zGetV0CityByCityNameSessionsQuery = z.object({
     limit: z.coerce.bigint().gte(BigInt(0)).lte(BigInt(1000)).optional().default(BigInt(100)),
     state: z.string().optional(),
     template: z.string().optional(),
-    peek: z.boolean().optional()
+    peek: z.boolean().optional(),
+    wake_reasons: z.boolean().optional()
 });
 
 /**

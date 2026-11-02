@@ -79,6 +79,10 @@ type sessionResponse struct {
 	// means unknown, never idle.
 	ProgramStatus *SessionProgramStatus `json:"program_status,omitempty" doc:"The session program's own status report (OSC 7501), present while the city's program_status switch is shadow or on and the reading is valid. Absent means the status is unknown, never idle."`
 
+	// WakeReasons are the reasons the controller keeps an open session awake,
+	// set only when the list request asks for them (they cost runtime probes).
+	WakeReasons []string `json:"wake_reasons,omitempty" doc:"Why the controller keeps this open session awake (for example session, config, create, attached, keep-warm, wait, pending, pin), as gc session list's REASON column shows them when no lifecycle reason applies. Sent only on GET /sessions?wake_reasons=true, by servers that compute them."`
+
 	// SubmissionCapabilities describes which semantic submit intents the
 	// session runtime can honor.
 	SubmissionCapabilities session.SubmissionCapabilities `json:"submission_capabilities,omitempty"`

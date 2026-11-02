@@ -1109,30 +1109,12 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 	if waitRes.err != nil {
 		fmt.Fprintf(stderr, "gc session list: ready wait indicators degraded: %v\n", waitRes.err) //nolint:errcheck // best-effort stderr
 	}
-	readyWaitSet := waitRes.set
-	cfg := providerCtx.cfg
-	poolDesired := cliPoolDesired(cfg)
-
-	// Build attachment cache. Active sessions already have Info.Attached
-	// populated by ListFullFromBeads; for inactive sessions, query the
-	// provider directly while preserving the old "running and attached"
-	// semantics. Going through workerSessionTargetAttachedWithConfig here
-	// triggered 2-3 extra bd show subprocess lookups per session.
-	attachedSet := buildAttachmentCache(sessions, func(info session.Info) (bool, error) {
-		if info.State == session.StateActive || sp == nil {
-			return info.Attached, nil
-		}
-		return sessionAttachedForWakeReason(sp, info.SessionName), nil
-	})
 
 	if len(sessions) == 0 {
 		fmt.Fprintln(stdout, "No sessions found.") //nolint:errcheck // best-effort stdout
 		return 0
 	}
-
-	// Wrap sp with an attachment cache to avoid redundant IsAttached calls
-	// in wakeReasonsInfo.
-	cachedSP := &attachmentCachingProvider{Provider: sp, cache: attachedSet}
+	reasonInputs := newSessionListReasonInputs(sessions, infoIndex, providerCtx.cfg, sp, waitRes.set)
 
 	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "ID\tTEMPLATE\tSTATE\tREASON\tTARGET\tTITLE\tWORKDIR\tAGE\tLAST ACTIVE\tLAST NUDGE") //nolint:errcheck // best-effort stdout
@@ -1141,7 +1123,7 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		if s.State == "" {
 			state = "closed"
 		}
-		reason := sessionReason(s, infoIndex, cfg, cachedSP, poolDesired, readyWaitSet)
+		reason := reasonInputs.cell(s)
 		target := sessionListTarget(s)
 		title := sessionListTitle(s)
 		workDir := sessionListWorkDir(s)
@@ -1576,13 +1558,80 @@ const (
 	circuitOpenReason  = session.LifecycleReasonCircuitOpen
 )
 
+// sessionListReasonInputs are the reads the REASON column needs beyond the
+// session itself, shared by the local read and the supervisor's
+// SessionListWakeReasons so both routes print the same cell.
+type sessionListReasonInputs struct {
+	infoIndex    map[string]session.Info
+	cfg          *config.City
+	sp           runtime.Provider
+	poolDesired  map[string]int
+	readyWaitSet map[string]bool
+}
+
+// newSessionListReasonInputs builds the REASON inputs for listed. infoIndex
+// is the open sessions' persisted Info by id. The provider is wrapped with an
+// attachment cache built from listed: active sessions already carry
+// Info.Attached from the runtime overlay, and inactive ones are asked once,
+// keeping the "running and attached" semantics, so wakeReasonsInfo does not
+// repeat IsAttached per session. The pool counts are the static config
+// maximums (cliPoolDesired), not the controller's live demand, so the local
+// read and the API route print the same thing.
+func newSessionListReasonInputs(listed []session.Info, infoIndex map[string]session.Info, cfg *config.City, sp runtime.Provider, readyWaitSet map[string]bool) sessionListReasonInputs {
+	attachedSet := buildAttachmentCache(listed, func(info session.Info) (bool, error) {
+		if info.State == session.StateActive || sp == nil {
+			return info.Attached, nil
+		}
+		return sessionAttachedForWakeReason(sp, info.SessionName), nil
+	})
+	return sessionListReasonInputs{
+		infoIndex:    infoIndex,
+		cfg:          cfg,
+		sp:           &attachmentCachingProvider{Provider: sp, cache: attachedSet},
+		poolDesired:  cliPoolDesired(cfg),
+		readyWaitSet: readyWaitSet,
+	}
+}
+
+// parts returns s's REASON parts (sessionListReasonParts).
+func (in sessionListReasonInputs) parts(s session.Info) (string, []string) {
+	return sessionListReasonParts(s, in.infoIndex, in.cfg, in.sp, in.poolDesired, in.readyWaitSet)
+}
+
+// cell returns s's REASON cell.
+func (in sessionListReasonInputs) cell(s session.Info) string {
+	return sessionListReasonCell(in.parts(s))
+}
+
 // sessionReason computes the REASON column for a session in gc session list.
 // For awake sessions, shows wake reasons (e.g., "config", "attached").
 // For asleep sessions, shows the sleep reason (e.g., "user-hold", "quarantine").
 // For closed sessions, shows "-".
 func sessionReason(s session.Info, infoIndex map[string]session.Info, cfg *config.City, sp runtime.Provider, poolDesired map[string]int, readyWaitSet map[string]bool) string {
+	return sessionListReasonCell(sessionListReasonParts(s, infoIndex, cfg, sp, poolDesired, readyWaitSet))
+}
+
+// sessionListReasonCell renders the REASON cell from its parts: the
+// lifecycle reason when there is one, else the wake reasons joined by ",",
+// else "-". The API route renders the server's reason and wake_reasons
+// through it too.
+func sessionListReasonCell(lifecycle string, wake []string) string {
+	if lifecycle != "" {
+		return lifecycle
+	}
+	if len(wake) > 0 {
+		return strings.Join(wake, ",")
+	}
+	return "-"
+}
+
+// sessionListReasonParts computes the two parts of s's REASON cell: the
+// lifecycle (sleep, hold, circuit) reason, and otherwise the reasons the
+// session is kept awake. A closed session, one without typed session data in
+// infoIndex, and an archived session outside continuity have neither.
+func sessionListReasonParts(s session.Info, infoIndex map[string]session.Info, cfg *config.City, sp runtime.Provider, poolDesired map[string]int, readyWaitSet map[string]bool) (string, []string) {
 	if s.State == "" {
-		return "-" // closed
+		return "", nil // closed
 	}
 
 	// info is the typed reason source of truth — the full snapshot Info projection
@@ -1592,7 +1641,7 @@ func sessionReason(s session.Info, infoIndex map[string]session.Info, cfg *confi
 	// wrong REASON cell).
 	info, ok := infoIndex[s.ID]
 	if !ok {
-		return "-" // no typed session data available
+		return "", nil // no typed session data available
 	}
 
 	now := time.Now().UTC()
@@ -1600,7 +1649,7 @@ func sessionReason(s session.Info, infoIndex map[string]session.Info, cfg *confi
 	lcInput.Now = now
 	lifecycle := session.ProjectLifecycle(lcInput)
 	if lifecycle.BaseState == session.BaseStateArchived && !lifecycle.ContinuityEligible {
-		return "-"
+		return "", nil
 	}
 	var isRunning func(string) bool
 	if sp != nil {
@@ -1609,26 +1658,26 @@ func sessionReason(s session.Info, infoIndex map[string]session.Info, cfg *confi
 	// WI-6 R5: the display reason now reads Info.SessionCircuitState (added this
 	// wave) and the other lifecycle markers off the typed snapshot Info.
 	if reason := session.LifecycleDisplayReasonWithLivenessInfo(info, now, isRunning); reason != "" {
-		return reason
+		return reason, nil
 	}
 
 	// If config is available and no lifecycle reason blocks display, compute
 	// full wake reasons (including WakeConfig).
-	if cfg != nil {
-		reasons := wakeReasonsInfo(info, cfg, sp, poolDesired, nil, readyWaitSet, clock.Real{})
-		if pinAwakeWakeReasonVisible(info, cfg, time.Now().UTC()) && !containsWakeReason(reasons, WakePin) {
-			reasons = append(reasons, WakePin)
-		}
-		if len(reasons) > 0 {
-			parts := make([]string, len(reasons))
-			for i, r := range reasons {
-				parts[i] = string(r)
-			}
-			return strings.Join(parts, ",")
-		}
+	if cfg == nil {
+		return "", nil
 	}
-
-	return "-"
+	reasons := wakeReasonsInfo(info, cfg, sp, poolDesired, nil, readyWaitSet, clock.Real{})
+	if pinAwakeWakeReasonVisible(info, cfg, time.Now().UTC()) && !containsWakeReason(reasons, WakePin) {
+		reasons = append(reasons, WakePin)
+	}
+	if len(reasons) == 0 {
+		return "", nil
+	}
+	wake := make([]string, len(reasons))
+	for i, r := range reasons {
+		wake[i] = string(r)
+	}
+	return "", wake
 }
 
 func pinAwakeWakeReasonVisible(info session.Info, cfg *config.City, now time.Time) bool {
