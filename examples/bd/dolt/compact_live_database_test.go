@@ -509,3 +509,85 @@ func TestCompactScriptDryRunAndSkipIssueNoLiveProbe(t *testing.T) {
 		})
 	}
 }
+
+// TestCompactScriptRewriteFailureOnLiveDatabaseKeepsExistingHandling asserts
+// that a rewrite failure on a database that passes the live gate keeps the
+// existing restoration, failure reporting, and pending-GC marker behavior, and
+// that compact goes on to the next database instead of aborting the run.
+func TestCompactScriptRewriteFailureOnLiveDatabaseKeepsExistingHandling(t *testing.T) {
+	tests := []struct {
+		name          string
+		mode          string
+		env           []string
+		want          []string
+		zedFailure    string
+		summary       string
+		wantPendingGC bool
+	}{
+		{
+			name:       "flatten failure restores HEAD",
+			mode:       "flatten_failure",
+			want:       []string{"compact: db=beads flatten failed rc=44 — restoring pre-flatten HEAD=headcommit", "reset exploded"},
+			zedFailure: "flatten failed rc=44",
+			summary:    "compact: 2 database(s) failed compaction",
+		},
+		{
+			name:          "post-flatten GC failure keeps pending-GC marker",
+			mode:          "gc_failure",
+			want:          []string{"gc exploded"},
+			zedFailure:    "DOLT_GC failed rc=45",
+			summary:       "compact: 2 database(s) failed compaction",
+			wantPendingGC: true,
+		},
+		{
+			name:       "bare GC failure",
+			mode:       "gc_failure",
+			env:        []string{"GC_DOLT_COMPACT_BARE_GC=1"},
+			want:       []string{"compact: db=beads bare-gc failed rc=45", "gc exploded"},
+			zedFailure: "bare-gc failed rc=45",
+			summary:    "compact: 2 database(s) failed bare GC",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			addCompactDatabase(t, fixture, "zed")
+
+			env := append([]string{"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", compactLiveFastProbe}, tt.env...)
+			out, err := fixture.run(t, tt.mode, env...)
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+				t.Fatalf("a rewrite failure must exit 1: got err=%v\n%s", err, out)
+			}
+			for _, want := range append(tt.want, tt.summary) {
+				if !strings.Contains(out, want) {
+					t.Fatalf("output missing existing failure report %q:\n%s", want, out)
+				}
+			}
+			reachedZed := false
+			for _, line := range strings.Split(out, "\n") {
+				if strings.HasPrefix(line, "compact: db=zed ") && strings.Contains(line, tt.zedFailure) {
+					reachedZed = true
+				}
+			}
+			if !reachedZed {
+				t.Fatalf("a live database's rewrite failure must not stop the run; zed never reported %q:\n%s", tt.zedFailure, out)
+			}
+			if strings.Contains(out, "run aborted") || strings.Contains(out, compactLiveReason) {
+				t.Fatalf("a live database must not trip the live gate:\n%s", out)
+			}
+			for _, db := range []string{"beads", "zed"} {
+				if _, statErr := os.Stat(compactQuarantineMarkerPath(fixture, db)); !os.IsNotExist(statErr) {
+					t.Fatalf("a live database must not be quarantined: %s (stat err=%v)\n%s", db, statErr, out)
+				}
+				_, statErr := os.Stat(compactPendingGCMarkerPath(fixture, db))
+				if tt.wantPendingGC && statErr != nil {
+					t.Fatalf("GC failure must keep writing the pending-GC marker for %s: %v\n%s", db, statErr, out)
+				}
+				if !tt.wantPendingGC && !os.IsNotExist(statErr) {
+					t.Fatalf("%s must not write a pending-GC marker for %s (stat err=%v)\n%s", tt.name, db, statErr, out)
+				}
+			}
+		})
+	}
+}
