@@ -190,6 +190,15 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			want: "claude --resume " + rotatedKey,
 		},
 		{
+			name: "AC-3 committed conversation without a transcript resumes",
+			setup: func(t *testing.T, f rotatedKeyFixture) {
+				if err := f.store.SetMetadata(f.id, "started_config_hash", "hash-abc"); err != nil {
+					t.Fatalf("SetMetadata(started_config_hash): %v", err)
+				}
+			},
+			want: "claude --resume " + rotatedKey,
+		},
+		{
 			name: "switched start keeps the resume command precedence",
 			opts: rotatedKeyOptions{handleCommand: "claude --model opus"},
 			want: "claude --model opus --session-id " + rotatedKey,

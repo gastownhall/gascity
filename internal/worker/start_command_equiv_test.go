@@ -195,8 +195,10 @@ func TestStartCommandStaleResumeKey(t *testing.T) {
 				"mycmd",
 			)
 			handle.searchPaths = []string{root}
-			if err := store.SetMetadata(info.ID, "started_config_hash", "hash-abc"); err != nil {
-				t.Fatalf("SetMetadata(started_config_hash): %v", err)
+			// A restart handoff leaves the row past its first start with no
+			// committed conversation.
+			if err := store.SetMetadata(info.ID, "creation_complete_at", "2026-01-01T00:00:00Z"); err != nil {
+				t.Fatalf("SetMetadata(creation_complete_at): %v", err)
 			}
 			if tt.transcript {
 				dir := filepath.Join(root, sessionlog.ProjectSlug(info.WorkDir))
@@ -252,8 +254,10 @@ func TestStartCommandClaudeConfigDir(t *testing.T) {
 				"mycmd",
 			)
 			handle.searchPaths = []string{t.TempDir()}
-			if err := store.SetMetadata(info.ID, "started_config_hash", "hash-abc"); err != nil {
-				t.Fatalf("SetMetadata(started_config_hash): %v", err)
+			// A restart handoff leaves the row past its first start with no
+			// committed conversation.
+			if err := store.SetMetadata(info.ID, "creation_complete_at", "2026-01-01T00:00:00Z"); err != nil {
+				t.Fatalf("SetMetadata(creation_complete_at): %v", err)
 			}
 			if tt.transcript {
 				dir := filepath.Join(configDir, "projects", sessionlog.ProjectSlug(info.WorkDir))

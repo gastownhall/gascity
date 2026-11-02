@@ -826,14 +826,19 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	if resumeCommand := strings.TrimSpace(h.session.Resume.ResumeCommand); resumeCommand != "" {
 		resumeInfo.ResumeCommand = resumeCommand
 	}
-	if h.session.Resume.SessionIDFlag != "" && h.keyedTranscriptAbsent(info) {
+	if h.session.Resume.SessionIDFlag != "" &&
+		strings.TrimSpace(pr.Metadata["started_config_hash"]) == "" &&
+		h.keyedTranscriptAbsent(info) {
 		return startCommandWithSessionID(resumeInfo, h.session)
 	}
 	return sessionpkg.BuildResumeCommand(resumeInfo), nil
 }
 
-// keyedTranscriptAbsent reports whether info's session key has never had a
-// conversation the launch would resume: the keyed-transcript probe can read
+// keyedTranscriptAbsent reports whether info's session key has no
+// conversation the launch would resume. startCommand asks it only for a row
+// with no committed conversation (empty started_config_hash, which every key
+// rotation clears), so a committed conversation whose transcript the probe
+// misses still resumes. It holds when the keyed-transcript probe can read
 // the session's transcript family and finds no transcript for the key in the
 // work dir the launch runs in. The family is the one transcript reads use
 // (historyProvider), and the work dir is the launch hints' before the row's,
