@@ -22,14 +22,14 @@ func TestHookMarkerMatchingSurvivesReformatting(t *testing.T) {
 	if strings.Contains(reformatted, marker) {
 		t.Fatal("fixture is not actually reformatted; literal match still succeeds")
 	}
-	if !hookContains(reformatted, marker) {
+	if !hookContains(newHookSource(reformatted), marker) {
 		t.Fatalf("reformatted call did not match marker:\n%s", reformatted)
 	}
 }
 
 // Reflowed comments must still satisfy the managed-file identity guard.
 func TestHookMarkerMatchingSurvivesReflowedComments(t *testing.T) {
-	if !hookContains("// Gas City hooks\n// for OpenCode.\n", "Gas City hooks for OpenCode.") {
+	if !hookContains(newHookSource("// Gas City hooks\n// for OpenCode.\n"), "Gas City hooks for OpenCode.") {
 		t.Fatal("reflowed identity comment did not match")
 	}
 }
@@ -37,16 +37,16 @@ func TestHookMarkerMatchingSurvivesReflowedComments(t *testing.T) {
 // Whitespace inside string literals is meaningful and must be preserved, so
 // two distinct literals never collapse into each other.
 func TestHookMarkerMatchingKeepsStringLiteralSpacing(t *testing.T) {
-	if hookContains(`run("contextcycle")`, `run("context cycle")`) {
+	if hookContains(newHookSource(`run("contextcycle")`), `run("context cycle")`) {
 		t.Fatal("literal spacing was collapsed; distinct string literals matched")
 	}
-	if !hookContains(`run( "context cycle" )`, `run("context cycle")`) {
+	if !hookContains(newHookSource(`run( "context cycle" )`), `run("context cycle")`) {
 		t.Fatal("spacing outside the literal should be ignored")
 	}
 }
 
 func TestHookMarkerMatchingIsNotFooledByMissingContent(t *testing.T) {
-	if hookContains(`output.context.push(other)`, "output.context.push(handoff)") {
+	if hookContains(newHookSource(`output.context.push(other)`), "output.context.push(handoff)") {
 		t.Fatal("unrelated call matched the marker")
 	}
 }
