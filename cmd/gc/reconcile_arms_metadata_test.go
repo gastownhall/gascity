@@ -230,8 +230,12 @@ func TestRowMetadataDefersAfterItsPersistentRefusal(t *testing.T) {
 
 // Kills the launch and close refresh drifting from legacy's (SESS-713..715,
 // SESS-701): wake_mode, command, the provider family and resume keys
-// follow the resolution, an empty resolved value never clobbers a stored
-// one; continuation_epoch and a session key the provider takes are
+// follow the resolution. An absent (nil) resolution preserves the stored
+// projection and an empty resolved command never clobbers a stored one,
+// while a successful resolution is authoritative for the provider/resume
+// fields an empty projection included (#8539; the clears live in
+// TestDesiredRowLaunchRefreshClearsMissingProviderFields);
+// continuation_epoch and a session key the provider takes are
 // backfilled, a stored key kept; a stale close clears; a typeless row is
 // repaired; and work_dir is backfilled, alias-guarded for a legacy
 // identity and never under its running session.
@@ -260,7 +264,7 @@ func TestDesiredRowLaunchRefresh(t *testing.T) {
 	bare := tp
 	bare.Command, bare.ResolvedProvider = "", nil
 	if id := desiredRowIdentity(cfg, bare, seat, converged); len(id.Meta) != 0 {
-		t.Fatalf("an empty resolution: meta %v, want the stored values kept", id.Meta)
+		t.Fatalf("an absent resolution: meta %v, want the stored values kept", id.Meta)
 	}
 	typeless := seat
 	typeless.Type, typeless.Labels = "", []string{session.LabelSession}
@@ -347,6 +351,87 @@ func TestRowMetadataProposesAMissingKeyAlone(t *testing.T) {
 	w.Census.Rows[k] = keyed
 	if it, _ := decideRow(w, a, k); it.Kind == intentRowMetadata {
 		t.Fatalf("decideRow = %q with the key, want nothing", it.Reason)
+	}
+}
+
+// A successful switch from a wrapped codex provider to the builtin-named
+// claude provider must clear the old provider's projection and resume keys,
+// not leave them pinned (#8539).
+func TestRefreshLaunchKeysProviderSwitchClearsStaleProjection(t *testing.T) {
+	raw := rowRefreshKeys{
+		"provider":         "codex-wrapped",
+		"provider_kind":    "codex",
+		"builtin_ancestor": "codex",
+		"resume_command":   "codex resume {{.SessionKey}}",
+		"command":          "codex",
+	}
+	tp := TemplateParams{
+		Command: "claude",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:            "claude",
+			BuiltinAncestor: "claude",
+			ResumeFlag:      "--resume",
+			ResumeStyle:     "flag",
+		},
+	}
+	m := session.MetadataPatch{}
+	refreshLaunchKeys(m, tp, raw)
+	got := maps.Clone(map[string]string(raw))
+	maps.Copy(got, m)
+	if got["provider"] != "claude" {
+		t.Fatalf("provider = %q, want claude", got["provider"])
+	}
+	for _, k := range []string{"provider_kind", "builtin_ancestor", "resume_command"} {
+		if got[k] == raw[k] {
+			t.Errorf("%s = %q after switch to claude, want it overwritten or cleared", k, got[k])
+		}
+	}
+}
+
+// TestDesiredRowLaunchRefreshClearsMissingProviderFields kills #8539 on A7's
+// row-metadata arm: a successful resolution is authoritative for the six
+// family/resume projection fields, the ones the new provider leaves empty
+// included, so a switch to a provider lacking them clears the stored stale
+// values instead of pinning the previous provider's. An absent (nil)
+// resolution stays distinct from a successfully resolved empty field — only
+// the former preserves (TestDesiredRowLaunchRefresh's bare case) — and the
+// clears are diff-gated like every other refresh key.
+func TestDesiredRowLaunchRefreshClearsMissingProviderFields(t *testing.T) {
+	cfg := identityCity()
+	claude := &config.ResolvedProvider{Name: "claude", BuiltinAncestor: "claude", ResumeFlag: "--resume", ResumeStyle: "flag"}
+	tp := TemplateParams{TemplateName: "worker", InstanceName: "worker-2", PoolSlot: 2, WakeMode: "fresh", Command: "claude", ResolvedProvider: claude}
+	seat := session.Info{Template: "worker", SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "2", AgentName: "worker-2", Type: session.BeadType, MetadataState: "asleep"}
+	stale := rowRefreshKeys{
+		"wake_mode": "fresh", "continuation_epoch": "1", "session_key": "k-1",
+		"command": "codex", "provider": "codex-wrapped", "provider_kind": "codex", "builtin_ancestor": "codex",
+		"resume_flag": "-c", "resume_style": "command", "resume_command": "codex resume {{.SessionKey}}", "session_id_flag": "--session-id",
+	}
+	id := desiredRowIdentity(cfg, tp, seat, stale)
+	want := session.MetadataPatch{
+		"command": "claude", "provider": "claude",
+		"provider_kind": "", "builtin_ancestor": "", "resume_command": "", "session_id_flag": "",
+		"resume_flag": "--resume", "resume_style": "flag",
+	}
+	if !maps.Equal(id.Meta, want) {
+		t.Fatalf("switch: meta %v, want %v with explicit clears for the fields claude leaves empty", id.Meta, want)
+	}
+	// The post-switch projection is converged: a second pass queues nothing,
+	// so the clears cost no churn once applied.
+	converged := rowRefreshKeys{
+		"wake_mode": "fresh", "continuation_epoch": "1", "session_key": "k-1",
+		"command": "claude", "provider": "claude", "provider_kind": "", "builtin_ancestor": "",
+		"resume_flag": "--resume", "resume_style": "flag", "resume_command": "", "session_id_flag": "",
+	}
+	if id := desiredRowIdentity(cfg, tp, seat, converged); len(id.Meta) != 0 {
+		t.Fatalf("converged: meta %v, want no writes", id.Meta)
+	}
+	// The launch command keeps its own non-empty guard: an empty resolved
+	// command never clobbers a stored one, even on a switch.
+	bare := tp
+	bare.Command = ""
+	id = desiredRowIdentity(cfg, bare, seat, stale)
+	if _, ok := id.Meta["command"]; ok {
+		t.Fatalf("empty resolved command: meta %v, want the stored command kept", id.Meta)
 	}
 }
 

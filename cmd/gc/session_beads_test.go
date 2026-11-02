@@ -5480,6 +5480,123 @@ func TestSyncSessionBeads_ProjectsSessionIDFlag(t *testing.T) {
 	}
 }
 
+// TestSyncSessionBeads_ProviderProjectionClearsMissingFields is #8539's half
+// of TestSyncSessionBeads_RefreshesResolvedProviderMetadataOnProviderSwitch:
+// gc-rhp36 made the resolved-provider projection refresh on change, but only
+// when the freshly resolved value was non-empty, so a switch to a provider
+// whose own projection is emptier left the previous provider's values pinned
+// — the builtin-named claude provider derives no provider_kind or
+// builtin_ancestor (resolvedProviderFamilyMetadata is empty when the
+// ancestor is the provider itself) and may carry no resume_command. Those
+// stale fields are load-bearing (resume falls back to them in
+// resolvedWorkerRuntimeWithConfigAndMetadata, and family selection prefers
+// them over the provider name), so a successful resolution must be
+// authoritative for the six family/resume fields, empties included.
+func TestSyncSessionBeads_ProviderProjectionClearsMissingFields(t *testing.T) {
+	store := beads.NewMemStore()
+	cs := &countingStore{Store: store}
+	clk := &clock.Fake{Time: time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	_ = sp.Start(context.TODO(), "worker", runtime.Config{Command: "codex-wrap chat"})
+
+	// Tick 1: the session is created under a codex-family wrapper with every
+	// projection field populated.
+	codexCmd := "codex-wrap chat"
+	ds := map[string]TemplateParams{
+		"worker": {
+			TemplateName: "worker",
+			Command:      codexCmd,
+			ResolvedProvider: &config.ResolvedProvider{
+				Name: "codex-wrap", BuiltinAncestor: "codex",
+				ResumeFlag: "-c", ResumeStyle: "command",
+				ResumeCommand: "codex-wrap resume {{.SessionKey}}",
+				SessionIDFlag: "--session-id",
+			},
+		},
+	}
+	var stderr bytes.Buffer
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	beads1 := allSessionBeads(t, cs)
+	if len(beads1) != 1 {
+		t.Fatalf("expected 1 bead after tick 1, got %d", len(beads1))
+	}
+	for k, want := range map[string]string{
+		"provider": "codex-wrap", "provider_kind": "codex", "builtin_ancestor": "codex",
+		"resume_flag": "-c", "resume_style": "command",
+		"resume_command": "codex-wrap resume {{.SessionKey}}", "session_id_flag": "--session-id",
+	} {
+		if got := beads1[0].Metadata[k]; got != want {
+			t.Fatalf("tick 1: %s = %q, want %q (create-path stamp)", k, got, want)
+		}
+	}
+
+	// Tick 2: switch to the builtin-named claude provider. Its projection
+	// leaves provider_kind, builtin_ancestor and resume_command empty.
+	ds["worker"] = TemplateParams{
+		TemplateName: "worker",
+		Command:      "claude chat",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name: "claude", BuiltinAncestor: "claude",
+			ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--resume-session",
+		},
+	}
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	meta := allSessionBeads(t, cs)[0].Metadata
+	for _, c := range []struct{ key, want string }{
+		{"provider", "claude"},
+		{"provider_kind", ""},
+		{"builtin_ancestor", ""},
+		{"resume_flag", "--resume"},
+		{"resume_style", "flag"},
+		{"resume_command", ""},
+		{"session_id_flag", "--resume-session"},
+	} {
+		if got := meta[c.key]; got != c.want {
+			t.Errorf("tick 2: %s = %q, want %q (#8539: a successful resolution is authoritative for the projection, empties included)", c.key, got, c.want)
+		}
+	}
+	// The stale codex family must not survive the clear: family selection
+	// (ProviderFamilyFromMetadata) prefers builtin_ancestor and provider_kind
+	// over the provider name, so pre-fix it kept answering "codex" after the
+	// switch to claude.
+	if fam := session.ProviderFamilyFromMetadata(meta, ""); fam != "claude" {
+		t.Errorf("tick 2: ProviderFamilyFromMetadata = %q, want claude", fam)
+	}
+
+	// Tick 3: a reverse switch to a wrapper that takes no session-id flag
+	// drops session_id_flag instead of pinning claude's.
+	ds["worker"] = TemplateParams{
+		TemplateName: "worker",
+		Command:      codexCmd,
+		ResolvedProvider: &config.ResolvedProvider{
+			Name: "codex-wrap", BuiltinAncestor: "codex",
+			ResumeFlag: "-c", ResumeStyle: "command",
+			ResumeCommand: "codex-wrap resume {{.SessionKey}}",
+		},
+	}
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	meta = allSessionBeads(t, cs)[0].Metadata
+	for _, c := range []struct{ key, want string }{
+		{"provider", "codex-wrap"},
+		{"provider_kind", "codex"},
+		{"builtin_ancestor", "codex"},
+		{"resume_flag", "-c"},
+		{"resume_style", "command"},
+		{"resume_command", "codex-wrap resume {{.SessionKey}}"},
+		{"session_id_flag", ""},
+	} {
+		if got := meta[c.key]; got != c.want {
+			t.Errorf("tick 3: %s = %q, want %q (the reverse switch drops session_id_flag)", c.key, got, c.want)
+		}
+	}
+
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+}
+
 func TestSyncSessionBeadsWithSnapshot_RefreshesMissingNamedSessionFromStore(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
