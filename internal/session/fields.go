@@ -536,6 +536,8 @@ var registry = slices.Concat([]Field{
 		MetadataKeyUsageClosedAwakeStartedAt, MetadataKeyUsageClosedSessionKey),
 	same(ClassAdvisory, false, sites(legacy(srcReconciler, "recordNamedSessionConfigDriftDeferredAt"), legacy(srcReconciler, "recordConfigDriftHeldWorkEpisode"),
 		v2("cmd/gc/reconcile_arms_drift.go", "rowFacts.driftHeldWork")), "config_drift_deferred_at", "config_drift_deferred_key"),
+	same(ClassAdvisory, false, sites(legacy(srcReconciler, "recordConfigDriftHeldWorkEpisode"), v2("cmd/gc/reconcile_arms_drift.go", "rowFacts.driftHeldWork")),
+		"config_drift_escalated_at"),
 	same(ClassAdvisory, false, sites(legacy(srcReconciler, "recordSessionAttachedConfigDriftDeferral")), "attached_config_drift_deferred_at",
 		"attached_config_drift_deferred_key"),
 	same(ClassAdvisory, false, sleepPolicy, "requested_sleep_after_idle", "effective_sleep_after_idle", "sleep_policy_source",

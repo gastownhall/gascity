@@ -32,9 +32,12 @@ const (
 	decideDriftRelaunch = "drift-relaunch"          // SESS-556/560
 )
 
-// decideDriftHeldWork is SESS-559's deferral over open work, its episode
-// stamped and signaled (#8345).
-const decideDriftHeldWork = "drift-deferred:held-work"
+// SESS-559's deferral over open work, its episode stamped and signaled
+// (#8345), then escalated once past its horizon.
+const (
+	decideDriftHeldWork  = "drift-deferred:held-work"
+	decideDriftEscalated = "drift-deferred:escalated"
+)
 
 // armConfigDrift is A14 on an alive desired row whose stored config hash
 // differs from this generation's (a missing one never drifts, #127):
@@ -114,18 +117,26 @@ func armConfigDrift(r *rowFacts) (intent, bool) {
 }
 
 // driftHeldWork is SESS-559's deferral over open work bead workBeadID,
-// signaled (#8345): the episode's first observation is a row heal of its
-// stamp carrying session.config_drift_deferred, which the effect records
-// only once the write lands; a stamped episode waits with no intent, so the
-// arms after A14 still decide the row.
+// signaled (#8345): the episode's first observation, and its one escalation
+// past the horizon, is a row heal carrying session.config_drift_deferred,
+// which the effect records only once the write lands; otherwise the episode
+// waits with no intent, so the arms after A14 still decide the row, and A14
+// requeued at the horizon.
 func (r *rowFacts) driftHeldWork(cfg runtime.Config, key, workBeadID string) (intent, bool) {
 	info, now := r.row.Info, r.w.Now
-	step := driftEpisode(info, key, now)
+	step := driftEpisode(info, key, now, driftDeferralHorizon(worldCfg(r.w)))
 	if step.Patch == nil {
+		if !step.Due.IsZero() {
+			r.after(requeueUntil(now, step.Due))
+		}
 		return intent{}, false
 	}
-	it, ok := r.heal(intentRowHeal, decideDriftHeldWork, step.Patch)
-	ev := configDriftDeferredEvent(info, runtime.CoreFingerprintDriftFieldsFromJSON(info.CoreHashBreakdown, cfg), workBeadID, step.Since, now)
+	reason := decideDriftHeldWork
+	if step.Escalated {
+		reason = decideDriftEscalated
+	}
+	it, ok := r.heal(intentRowHeal, reason, step.Patch)
+	ev := configDriftDeferredEvent(info, runtime.CoreFingerprintDriftFieldsFromJSON(info.CoreHashBreakdown, cfg), workBeadID, step.Since, now, step.Escalated)
 	it.Event = &ev
 	return it, ok
 }
