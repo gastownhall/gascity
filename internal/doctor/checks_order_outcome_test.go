@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -738,4 +739,136 @@ func TestOrderOutcomeHealthyIncompleteOutcomeClearsOnCompletion(t *testing.T) {
 			t.Fatalf("details = %v, want them to carry %q", result.Details, partial.Message)
 		}
 	})
+}
+
+// TestConsecutiveOrderFailuresIgnoresDeclarations pins that order.skipped
+// declarations neither extend, end, nor reset a failure streak: every output
+// equals the one for the same stream with its declarations removed.
+func TestConsecutiveOrderFailuresIgnoresDeclarations(t *testing.T) {
+	start := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	starts := []time.Time{start}
+	const subject = "export-sweep"
+	inGrace := start.Add(time.Minute)
+	late := start.Add(time.Hour)
+	c := func(seq uint64, ts time.Time) events.Event {
+		return outcomeEvent(seq, subject, events.OrderCompleted, ts, "")
+	}
+	s := func(seq uint64, ts time.Time) events.Event {
+		return outcomeEvent(seq, subject, events.OrderSkipped, ts, "partial: store unreachable")
+	}
+	f := func(seq uint64, ts time.Time, msg string) events.Event {
+		return outcomeEvent(seq, subject, events.OrderFailed, ts, msg)
+	}
+
+	cases := []struct {
+		name     string
+		outcomes []events.Event
+	}{
+		{name: "declaration only", outcomes: []events.Event{s(1, late)}},
+		{name: "C S", outcomes: []events.Event{c(1, late), s(2, late)}},
+		{name: "C S F", outcomes: []events.Event{c(1, late), s(2, late), f(3, late, "exit status 1")}},
+		{name: "C S F F F", outcomes: []events.Event{c(1, late), s(2, late), f(3, late, "exit status 1"), f(4, late, "exit status 1"), f(5, late, "exit status 2")}},
+		{name: "C F F F S", outcomes: []events.Event{c(1, late), f(2, late, "exit status 1"), f(3, late, "exit status 1"), f(4, late, "exit status 3"), s(5, late)}},
+		{name: "declarations between failures", outcomes: []events.Event{f(1, late, "a"), s(2, late), f(3, late, "b"), s(4, late), f(5, late, "")}},
+		{
+			name: "other subjects",
+			outcomes: []events.Event{
+				f(1, late, "exit status 1"),
+				outcomeEvent(2, "other", events.OrderSkipped, late, "partial: other"),
+				outcomeEvent(3, "other", events.OrderCompleted, late, ""),
+				s(4, late),
+			},
+		},
+		{name: "completion inside grace", outcomes: []events.Event{f(1, late.Add(-2*time.Hour), "x"), c(2, inGrace), s(3, inGrace)}},
+		{name: "grace-skipped failures", outcomes: []events.Event{c(1, start.Add(-time.Hour)), f(2, inGrace, "spurious"), s(3, inGrace), f(4, inGrace, "spurious")}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stripped := make([]events.Event, 0, len(tc.outcomes))
+			for _, event := range tc.outcomes {
+				if event.Type != events.OrderSkipped {
+					stripped = append(stripped, event)
+				}
+			}
+			streak, lastMessage, sawOutcome, skipped := consecutiveOrderFailures(tc.outcomes, subject, starts, 10*time.Minute)
+			wantStreak, wantMessage, wantSaw, wantSkipped := consecutiveOrderFailures(stripped, subject, starts, 10*time.Minute)
+			if streak != wantStreak || lastMessage != wantMessage || sawOutcome != wantSaw || skipped != wantSkipped {
+				t.Fatalf("with declarations = (%d, %q, %v, %d), without = (%d, %q, %v, %d)",
+					streak, lastMessage, sawOutcome, skipped, wantStreak, wantMessage, wantSaw, wantSkipped)
+			}
+		})
+	}
+
+	if _, _, sawOutcome, _ := consecutiveOrderFailures([]events.Event{s(1, late)}, subject, starts, 10*time.Minute); sawOutcome {
+		t.Fatal("sawOutcome = true for a declaration-only stream, want false: a declaration is not a completed or failed run")
+	}
+}
+
+// TestOrderOutcomeHealthyIncompleteOutcomeWithFailures pins that failures
+// after a declaration neither clear it nor hide their own diagnosis: the
+// order reports both the existing failure detail and the newest declaration.
+func TestOrderOutcomeHealthyIncompleteOutcomeWithFailures(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	const subject = "export-sweep"
+	completed := func(ts time.Time) events.Event {
+		return events.Event{Type: events.OrderCompleted, Ts: ts, Subject: subject, Actor: "controller"}
+	}
+	failed := func(ts time.Time) events.Event {
+		return events.Event{Type: events.OrderFailed, Ts: ts, Subject: subject, Actor: "controller", Message: "exit status 1"}
+	}
+	partial := skippedEvent(subject, now.Add(-5*time.Hour), "partial", "store unreachable",
+		events.OrderSkippedScope{Scope: "rig:st", Reason: "dolt not reachable"})
+	declDetail := "export-sweep: recorded incomplete work: " + partial.Message
+
+	cases := []struct {
+		name       string
+		evts       []events.Event
+		wantDetail string
+	}{
+		{
+			name:       "C S F",
+			evts:       []events.Event{completed(now.Add(-6 * time.Hour)), partial, failed(now.Add(-time.Hour))},
+			wantDetail: "export-sweep: 1 consecutive failure(s), under threshold 3",
+		},
+		{
+			name: "C S F F F",
+			evts: []events.Event{
+				completed(now.Add(-6 * time.Hour)), partial,
+				failed(now.Add(-3 * time.Hour)), failed(now.Add(-2 * time.Hour)), failed(now.Add(-time.Hour)),
+			},
+			wantDetail: `export-sweep: 3 consecutive failures, last "exit status 1"`,
+		},
+		{
+			name: "C F F F S keeps the failure streak",
+			evts: []events.Event{
+				completed(now.Add(-6 * time.Hour)),
+				failed(now.Add(-3 * time.Hour)), failed(now.Add(-2 * time.Hour)), failed(now.Add(-time.Hour)),
+				partial,
+			},
+			wantDetail: `export-sweep: 3 consecutive failures, last "exit status 1"`,
+		},
+		{
+			name: "grace-skipped failure after a declaration",
+			evts: []events.Event{
+				completed(now.Add(-6 * time.Hour)), partial,
+				{Type: events.ControllerStarted, Ts: now.Add(-2 * time.Minute), Subject: "gc"},
+				failed(now.Add(-time.Minute)),
+			},
+			wantDetail: "export-sweep: 1 recent failure(s) within controller-start grace window",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := runOrderOutcomeIncompleteCase(t, tc.evts...)
+			if result.Status != StatusWarning {
+				t.Fatalf("status = %v, want StatusWarning; msg=%q details=%v", result.Status, result.Message, result.Details)
+			}
+			if !slices.Contains(result.Details, tc.wantDetail) {
+				t.Fatalf("details = %v, want the failure detail %q", result.Details, tc.wantDetail)
+			}
+			if !slices.Contains(result.Details, declDetail) {
+				t.Fatalf("details = %v, want the declaration detail %q", result.Details, declDetail)
+			}
+		})
+	}
 }

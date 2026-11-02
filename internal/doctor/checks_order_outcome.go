@@ -57,6 +57,8 @@ func nearControllerStart(ts time.Time, starts []time.Time, grace time.Duration) 
 //
 // outcomes must hold order.completed and order.failed events ordered by Seq
 // ascending; the walk runs newest-first and stops at the first success.
+// order.skipped declarations in outcomes are ignored: they neither extend, end
+// nor reset a streak (see latestIncompleteOrderOutcome).
 //
 // A success always ends the streak, even if it falls within the post-start grace
 // window. The grace window skips only spurious FAILURES (neither counting them nor
@@ -78,7 +80,7 @@ func consecutiveOrderFailures(outcomes []events.Event, subject string, starts []
 
 	for i := len(outcomes) - 1; i >= 0; i-- {
 		event := outcomes[i]
-		if event.Subject != subject {
+		if event.Subject != subject || event.Type == events.OrderSkipped {
 			continue
 		}
 		sawOutcome = true
@@ -267,6 +269,11 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 		status, detail := classifyOrderOutcome(order, streak, c.threshold, lastMessage, sawOutcome, skipped)
 		if declaration, declared := latestIncompleteOrderOutcome(outcomes, order.ScopedName()); declared {
 			status = worseStatus(status, StatusWarning)
+			// Trailing failures keep their own diagnosis next to the
+			// declaration; a success or no-outcome detail would contradict it.
+			if streak > 0 || skipped > 0 {
+				result.Details = append(result.Details, detail)
+			}
 			detail = incompleteOrderOutcomeDetail(order, declaration)
 		}
 		worst = worseStatus(worst, status)
