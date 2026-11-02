@@ -5517,6 +5517,73 @@ func TestBuildDesiredState_MaxOneCanonicalBeadIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestBuildDesiredState_MinFloorCanonicalPoolRowAfterRestartHandoffIsReused
+// covers the restart outage end to end: a min=1, max=1 pool whose only row was
+// stopped by a restart request (asleep, reset committed, no sleep reason)
+// keeps that row desired on every tick, so its reset-pending wake can start
+// it, instead of stalling the floor's fresh create on the row's own name until
+// the session sweep closes it.
+func TestBuildDesiredState_MinFloorCanonicalPoolRowAfterRestartHandoffIsReused(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	now := time.Date(2026, 10, 30, 5, 0, 0, 0, time.UTC)
+	handedOff, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker", "template:worker"},
+		Metadata: map[string]string{
+			"template":                   "worker",
+			"agent_name":                 "worker",
+			"alias":                      "worker",
+			"session_name":               "s-worker-canonical",
+			"state":                      "asleep",
+			"continuation_reset_pending": "true",
+			"reset_committed_at":         now.Add(-time.Minute).Format(time.RFC3339),
+			poolManagedMetadataKey:       boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			ScaleCheck:        "printf 0",
+			MinActiveSessions: intPtr(1),
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+
+	for tick := 1; tick <= 2; tick++ {
+		var stderr bytes.Buffer
+		result := buildDesiredState("test-city", cityPath, now.Add(time.Duration(tick)*time.Minute), cfg, runtime.NewFake(), store, &stderr)
+		if _, ok := result.State[handedOff.Metadata["session_name"]]; !ok {
+			t.Fatalf("tick %d: desired state missing handed-off row %s; keys=%v stderr=%q",
+				tick, handedOff.ID, mapKeys(result.State), stderr.String())
+		}
+		for _, stall := range []string{"slot stalled on its own runtime name", "is held by session"} {
+			if strings.Contains(stderr.String(), stall) {
+				t.Fatalf("tick %d: stderr contains %q: %s", tick, stall, stderr.String())
+			}
+		}
+		rows, err := store.List(beads.ListQuery{Label: sessionBeadLabel})
+		if err != nil {
+			t.Fatalf("tick %d: List: %v", tick, err)
+		}
+		open := 0
+		for _, row := range rows {
+			if row.Status != "closed" {
+				open++
+			}
+		}
+		if open != 1 {
+			t.Fatalf("tick %d: open session beads = %d, want 1 (the handed-off row reused)", tick, open)
+		}
+	}
+}
+
 func TestBuildDesiredState_NamepoolMaxOneUsesNamepoolIdentity(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
