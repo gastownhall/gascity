@@ -1680,8 +1680,8 @@ internal/agentutil/pool.go	findSessionNameByTemplate	raw-param	1
 internal/api/beads_graph_federation.go	Server.bindingReservedPrefixes	raw-param	1
 internal/api/beads_graph_federation.go	relocatedGraphStore	raw-result	1
 internal/api/beads_graph_federation.go	relocatedGraphStore	unwrap	1
-internal/api/cache_liveness.go	cacheAgeSeconds	cap-assert	1
-internal/api/cache_liveness.go	cacheAgeSeconds	raw-param	1
+internal/api/cache_liveness.go	cacheFreshnessOf	cap-assert	1
+internal/api/cache_liveness.go	cacheFreshnessOf	raw-param	1
 internal/api/cache_liveness.go	cacheLiveOr503	cap-assert	1
 internal/api/cache_liveness.go	cacheLiveOr503	raw-param	1
 internal/api/conversation_ops.go	Server.conversationOpTarget	unwrap	2

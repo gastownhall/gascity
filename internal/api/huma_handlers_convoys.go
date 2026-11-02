@@ -129,7 +129,7 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 	beadKey := func(b beads.Bead) keysetKey { return keysetKey{CreatedAt: b.CreatedAt, ID: b.ID} }
 	sortKeysetDesc(convoys, beadKey)
 
-	cacheAge := cacheAgeSeconds(cityStore)
+	freshness := cacheFreshnessOf(cityStore)
 	// A truncated response always carries next_cursor — cursor-less requests
 	// previously truncated silently, making the remainder unfetchable (the
 	// #3208 defect class the bead list already fixed).
@@ -139,8 +139,9 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 		page = []beads.Bead{}
 	}
 	return &ListOutput[beads.Bead]{
-		Index:     index,
-		CacheAgeS: cacheAge,
+		Index:        index,
+		CacheAgeS:    freshness.ageS,
+		CacheRefresh: freshness.refresh,
 		Body: ListBody[beads.Bead]{
 			Items:         page,
 			Total:         total,
@@ -170,10 +171,12 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 			}
 			return nil, apierr.Internal.Msg("workflow snapshot failed")
 		}
+		freshness := cacheFreshnessOf(cityStore)
 		return &IndexOutput[convoyGetResponse]{
-			Index:     index,
-			CacheAgeS: cacheAgeSeconds(cityStore),
-			Body:      convoyGetResponse{workflowSnapshotResponse: snapshot},
+			Index:        index,
+			CacheAgeS:    freshness.ageS,
+			CacheRefresh: freshness.refresh,
+			Body:         convoyGetResponse{workflowSnapshotResponse: snapshot},
 		}, nil
 	}
 
@@ -207,9 +210,11 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 			}
 		}
 
+		freshness := cacheFreshnessOf(cityStore)
 		return &IndexOutput[convoyGetResponse]{
-			Index:     index,
-			CacheAgeS: cacheAgeSeconds(cityStore),
+			Index:        index,
+			CacheAgeS:    freshness.ageS,
+			CacheRefresh: freshness.refresh,
 			Body: convoyGetResponse{
 				Convoy:   &b,
 				Children: children,
@@ -469,10 +474,12 @@ func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInpu
 		if err != nil {
 			return nil, apierr.Internal.Msg(err.Error())
 		}
+		freshness := cacheFreshnessOf(cityStore)
 		return &IndexOutput[convoyCheckResponse]{
-			Index:     index,
-			CacheAgeS: cacheAgeSeconds(cityStore),
-			Body:      convoyCheckFromMembers(id, children),
+			Index:        index,
+			CacheAgeS:    freshness.ageS,
+			CacheRefresh: freshness.refresh,
+			Body:         convoyCheckFromMembers(id, children),
 		}, nil
 	}
 	return nil, apierr.ConvoyNotFound.Msg("convoy " + id + " not found")

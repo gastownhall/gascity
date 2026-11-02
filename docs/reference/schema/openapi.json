@@ -32816,6 +32816,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -33737,6 +33756,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -34556,6 +34594,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -35026,6 +35083,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -35374,6 +35450,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -35694,6 +35789,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -36252,6 +36366,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -36404,6 +36537,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -36575,6 +36727,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -36692,6 +36863,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -36804,6 +36994,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -36901,6 +37110,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -36994,6 +37222,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -37333,6 +37580,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -37609,6 +37875,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -38091,6 +38376,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -38242,6 +38546,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -38474,6 +38797,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -39185,6 +39527,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -39651,6 +40012,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -40772,6 +41152,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -42906,6 +43305,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -43057,6 +43475,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -43238,6 +43675,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Request-Id": {
                 "$ref": "#/components/headers/X-GC-Request-Id"
               }
@@ -43358,6 +43814,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -43631,6 +44106,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -44222,6 +44716,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -45717,6 +46230,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Request-Id": {
                 "$ref": "#/components/headers/X-GC-Request-Id"
               }
@@ -46438,6 +46970,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -46726,6 +47277,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -46819,6 +47389,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -47252,6 +47841,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -47345,6 +47953,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -47778,6 +48405,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -47871,6 +48517,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -48129,6 +48794,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -48548,6 +49232,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -48827,6 +49530,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -49621,6 +50343,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -50078,6 +50819,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -50849,6 +51609,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -51079,6 +51858,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -51225,6 +52023,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -51381,6 +52198,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -51567,6 +52403,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -51710,6 +52565,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -52415,6 +53289,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -52759,6 +53652,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -53080,6 +53992,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -53234,6 +54165,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -53447,6 +54397,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -53646,6 +54615,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -55144,6 +56132,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -55278,6 +56285,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -55427,6 +56453,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -55852,6 +56897,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -56368,6 +57432,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Index": {
                 "schema": {
                   "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
@@ -56658,6 +57741,25 @@
                   "type": "number"
                 }
               },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
               "X-GC-Request-Id": {
                 "$ref": "#/components/headers/X-GC-Request-Id"
               }
@@ -56778,6 +57880,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
@@ -57453,6 +58574,25 @@
               "X-GC-Cache-Age-S": {
                 "schema": {
                   "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Cache-Refresh": {
+                "schema": {
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "enum": [
+                    "scheduled",
+                    "paused",
+                    "failing",
+                    "rebuilding"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-GC-Cache-Refresh-Interval-S": {
+                "schema": {
+                  "description": "Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache.",
                   "format": "double",
                   "type": "number"
                 }
