@@ -39,7 +39,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const GC_MIMOCODE_HOOK_VERSION = 4;
+const GC_MIMOCODE_HOOK_VERSION = 5;
 const GC_BIN = process.env.GC_BIN || "gc";
 // GC_BIN is the explicit override. The fallback order matches Pi hooks so
 // sibling providers resolve the same installed gc before developer-local bins.

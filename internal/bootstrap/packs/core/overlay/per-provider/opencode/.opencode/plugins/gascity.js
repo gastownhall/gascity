@@ -37,7 +37,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const GC_OPENCODE_HOOK_VERSION = 8;
+const GC_OPENCODE_HOOK_VERSION = 9;
 const GC_BIN = process.env.GC_BIN || "gc";
 // GC_BIN is the explicit override. The fallback order matches Pi hooks so
 // sibling providers resolve the same installed gc before developer-local bins.
