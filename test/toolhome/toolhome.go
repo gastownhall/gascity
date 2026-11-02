@@ -21,6 +21,12 @@
 // every bd and dolt child is re-homed on its own, with Environ for a child the
 // test forks directly and WrapperScript for a bd that gc (or a shim) finds on
 // PATH or through BD_BIN.
+//
+// A split-storage city cannot use WrapperScript: its gc bd forwards only to
+// bd's own Go binary, identified by the Go build info a shell script does not
+// carry, and refuses every forwarded command otherwise. A harness that runs a
+// split city must hand gc the real bd, and so must first give gc itself an
+// isolated HOME (the acceptance Env's WithRealBD does both).
 package toolhome
 
 import (

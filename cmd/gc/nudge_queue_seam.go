@@ -6,6 +6,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
@@ -21,15 +22,19 @@ type nudgeQueueHandle struct {
 	// Repin moves in-flight claims onto a new delivery key without a
 	// maintenance pass or a store open (rekeyQueuedNudgesAfterFailedBookkeeping).
 	Repin nudgeClaimRepinner
-	// Probe answers whether a claim would claim anything, from a lock-free
-	// snapshot (the poll loop's due-work gate, nudgePollGate).
+	// Probe answers what a claim would claim, from a lock-free snapshot (the
+	// poll loop's due-work gate, nudgePollGate, and the starvation check,
+	// queuedNudgeStarvedForTarget).
 	Probe nudgeClaimProber
 }
 
-// nudgeClaimProber reports, without the queue lock and without claiming,
-// whether ClaimBatch for ct at now would claim anything.
+// nudgeClaimProber reports, without the queue lock and without claiming, what
+// ClaimBatch for ct at now would claim.
 type nudgeClaimProber interface {
+	// WouldClaimBatch reports whether ClaimBatch would claim anything.
 	WouldClaimBatch(ct storebinding.ClaimTarget, now time.Time) (bool, error)
+	// NextBatch returns the items ClaimBatch would claim, in queue order.
+	NextBatch(ct storebinding.ClaimTarget, now time.Time) ([]nudgequeue.Item, error)
 }
 
 // nudgeDispatchSkipRecorder persists and reads the dispatch skip counters.

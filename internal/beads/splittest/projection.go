@@ -61,9 +61,12 @@ import (
 // targets), so the city cache and the policy store over the same MemStore
 // share one projection, one set of misplaced-row pins and one mint hook. Each
 // view delegates to the FRONT it was asked for, so the code under test keeps
-// its policy, cache and capability paths. A view found nested inside a front
-// (a CachingStore over a work view) is skipped: the outer view delegates to
-// the inner view's front, so views never stack.
+// its policy, cache and capability paths, explicit store handles included: a
+// view over a front with them (beads.HandlesFor) exposes its own, which read
+// the front's Cached and Live handles behind the view's filter, so a live read
+// stays live past a cache. A view found nested inside a front (a CachingStore
+// over a work view) is skipped: the outer view delegates to the inner view's
+// front, so views never stack.
 //
 // # Refinements
 //
@@ -330,17 +333,35 @@ type storageView struct {
 	storage beads.StorageCreateStore
 }
 
+// newProjectionView builds the variant whose optional capabilities are exactly
+// its front's: CreateWithStorage, the cache probes and explicit store handles.
+// Production type-asserts each, so a view must neither drop nor add one.
 func newProjectionView(p *Projection, front beads.Store, side projectionSide) beads.Store {
 	v := &view{Store: front, p: p, side: side}
 	storage, hasStorage := front.(beads.StorageCreateStore)
 	cache, isCache := front.(cacheProbes)
+	handles, hasHandles := front.(handlesProvider)
 	switch {
 	case hasStorage && isCache:
-		return &storageCacheView{storageView: &storageView{view: v, storage: storage}, cache: cache}
+		sv := &storageCacheView{storageView: &storageView{view: v, storage: storage}, cache: cache}
+		if hasHandles {
+			return &storageCacheHandlesView{storageCacheView: sv, front: handles}
+		}
+		return sv
 	case hasStorage:
-		return &storageView{view: v, storage: storage}
+		sv := &storageView{view: v, storage: storage}
+		if hasHandles {
+			return &storageHandlesView{storageView: sv, front: handles}
+		}
+		return sv
 	case isCache:
-		return &cacheView{view: v, cache: cache}
+		cv := &cacheView{view: v, cache: cache}
+		if hasHandles {
+			return &cacheHandlesView{cacheView: cv, front: handles}
+		}
+		return cv
+	case hasHandles:
+		return &handlesView{view: v, front: handles}
 	}
 	return v
 }
@@ -369,6 +390,17 @@ var (
 	_ cachedLister                                = (*view)(nil)
 	_ cacheProbes                                 = (*cacheView)(nil)
 	_ cacheProbes                                 = (*storageCacheView)(nil)
+	_ handlesProvider                             = (*handlesView)(nil)
+	_ handlesProvider                             = (*storageHandlesView)(nil)
+	_ handlesProvider                             = (*cacheHandlesView)(nil)
+	_ handlesProvider                             = (*storageCacheHandlesView)(nil)
+	_ beads.StorageCreateStore                    = (*storageHandlesView)(nil)
+	_ beads.StorageCreateStore                    = (*storageCacheHandlesView)(nil)
+	_ cacheProbes                                 = (*cacheHandlesView)(nil)
+	_ cacheProbes                                 = (*storageCacheHandlesView)(nil)
+	_ beads.CachedReader                          = handleReader{}
+	_ beads.LiveReader                            = liveHandleReader{}
+	_ beads.ExactBatchGetter                      = liveHandleReader{}
 )
 
 // cachedLister is internal/api's cache-first list (cache_read_model.go).
@@ -453,7 +485,12 @@ func (v *view) guardID(op, id string) error {
 
 // Get hides a wrong-class row.
 func (v *view) Get(id string) (beads.Bead, error) {
-	b, err := v.Store.Get(id)
+	return v.getVia(v.Store.Get, id)
+}
+
+// getVia is Get through read: a wrong-class row is hidden and charged.
+func (v *view) getVia(read func(string) (beads.Bead, error), id string) (beads.Bead, error) {
+	b, err := read(id)
 	if err != nil {
 		return b, err
 	}
@@ -467,9 +504,14 @@ func (v *view) Get(id string) (beads.Bead, error) {
 // List hides wrong-class rows, flagging them when the query selected them. A
 // limit applies after the filter.
 func (v *view) List(q beads.ListQuery) ([]beads.Bead, error) {
+	return v.listVia(v.Store.List, q)
+}
+
+// listVia is List through read.
+func (v *view) listVia(read func(beads.ListQuery) ([]beads.Bead, error), q beads.ListQuery) ([]beads.Bead, error) {
 	limit := q.Limit
 	q.Limit = 0
-	rows, err := v.Store.List(q)
+	rows, err := read(q)
 	rows, err = v.filter("list", listSelects(q), rows, err)
 	return limitRows(rows, limit), err
 }
@@ -500,8 +542,13 @@ func (v *view) ListOpen(status ...string) ([]beads.Bead, error) {
 // Ready hides wrong-class rows, flagging them when the query selected them. A
 // limit applies after the filter.
 func (v *view) Ready(q ...beads.ReadyQuery) ([]beads.Bead, error) {
+	return v.readyVia(v.Store.Ready, q)
+}
+
+// readyVia is Ready through read.
+func (v *view) readyVia(read func(...beads.ReadyQuery) ([]beads.Bead, error), q []beads.ReadyQuery) ([]beads.Bead, error) {
 	unlimited, limit := unlimitedReady(q)
-	rows, err := v.Store.Ready(unlimited...)
+	rows, err := read(unlimited...)
 	rows, err = v.filter("ready", readySelects(q), rows, err)
 	return limitRows(rows, limit), err
 }
@@ -585,7 +632,12 @@ func (v *view) GetExactBatch(ids []string) (map[string]beads.Bead, []string, err
 	if !ok {
 		return nil, nil, beads.ErrExactBatchGetUnsupported
 	}
-	found, unresolved, err := getter.GetExactBatch(ids)
+	return v.filterExactBatch(getter.GetExactBatch(ids))
+}
+
+// filterExactBatch moves the wrong-class rows of an exact batch read to
+// unresolved, charging each.
+func (v *view) filterExactBatch(found map[string]beads.Bead, unresolved []string, err error) (map[string]beads.Bead, []string, error) {
 	if err != nil {
 		return found, unresolved, err
 	}
@@ -841,11 +893,17 @@ func (v *view) DepRemove(issueID, dependsOnID string) error {
 // DepList reports no edges for a wrong-class row, which a split city's store
 // would not hold.
 func (v *view) DepList(id, direction string) ([]beads.Dep, error) {
+	return v.depListVia(v.Store.DepList, id, direction)
+}
+
+// depListVia is DepList through read. The anchor's class is read from the
+// front, as guardID reads it.
+func (v *view) depListVia(read func(string, string) ([]beads.Dep, error), id, direction string) ([]beads.Dep, error) {
 	if b, err := v.Store.Get(id); err == nil && !v.visible(b) {
 		v.flag("dep-list", b, true)
 		return nil, nil
 	}
-	return v.Store.DepList(id, direction)
+	return read(id, direction)
 }
 
 // DepListBatch is DepList per id: a wrong-class anchor gets no entry, as a
@@ -1306,6 +1364,114 @@ func (v *storageCacheView) IsLive() bool { return v.cache.IsLive() }
 
 // Stats forwards the front cache's statistics.
 func (v *storageCacheView) Stats() beads.CacheStats { return v.cache.Stats() }
+
+// handlesProvider is a front with explicit store handles, the ones
+// beads.HandlesFor returns before its logical fallback: a CachingStore, whose
+// Live reader reads past the cache, cmd/gc's bead policy store, a strict kit
+// leaf. A view over one must expose its own, or every HandlesFor(view).Live
+// read would fall back to the view's Get and serve the cache. A view over
+// anything else must not claim it: cmd/gc's controller demand read pays a
+// second, live Ready read only for a store that has explicit handles.
+type handlesProvider interface {
+	Handles() beads.StoreHandles
+}
+
+// handlesView is the variant over a front with explicit handles.
+type handlesView struct {
+	*view
+	front handlesProvider
+}
+
+// storageHandlesView is the variant over a front with explicit handles and
+// CreateWithStorage.
+type storageHandlesView struct {
+	*storageView
+	front handlesProvider
+}
+
+// cacheHandlesView is the variant over a cache front with explicit handles.
+type cacheHandlesView struct {
+	*cacheView
+	front handlesProvider
+}
+
+// storageCacheHandlesView is the variant over a cache front with explicit
+// handles and CreateWithStorage: a CachingStore.
+type storageCacheHandlesView struct {
+	*storageCacheView
+	front handlesProvider
+}
+
+// Handles returns the view's handles over its front's (handlesVia).
+func (v *handlesView) Handles() beads.StoreHandles { return v.handlesVia(v.front, v) }
+
+// Handles returns the view's handles over its front's (handlesVia).
+func (v *storageHandlesView) Handles() beads.StoreHandles { return v.handlesVia(v.front, v) }
+
+// Handles returns the view's handles over its front's (handlesVia).
+func (v *cacheHandlesView) Handles() beads.StoreHandles { return v.handlesVia(v.front, v) }
+
+// Handles returns the view's handles over its front's (handlesVia).
+func (v *storageCacheHandlesView) Handles() beads.StoreHandles { return v.handlesVia(v.front, v) }
+
+// handlesVia wraps the front's explicit handles in the view: each reader reads
+// the front's own handle, so a Live read stays live past a cache and a Cached
+// read stays cached, then hides and charges wrong-class rows exactly as the
+// view's own reads do. The writer is self, the view the caller holds, so
+// writes keep the view's guards.
+func (v *view) handlesVia(front handlesProvider, self beads.Writer) beads.StoreHandles {
+	handles := front.Handles()
+	return beads.StoreHandles{
+		Cached: handleReader{v: v, reader: handles.Cached},
+		Live:   liveHandleReader{handleReader: handleReader{v: v, reader: handles.Live}},
+		Writer: self,
+	}
+}
+
+// handleReader is one of a front's explicit read handles behind a view. The
+// CachedReader and LiveReader interfaces share their method set, so one type
+// serves both.
+type handleReader struct {
+	v      *view
+	reader beads.LiveReader
+}
+
+// Get hides a wrong-class row.
+func (r handleReader) Get(id string) (beads.Bead, error) {
+	return r.v.getVia(r.reader.Get, id)
+}
+
+// List hides wrong-class rows, flagging them when the query selected them.
+func (r handleReader) List(q beads.ListQuery) ([]beads.Bead, error) {
+	return r.v.listVia(r.reader.List, q)
+}
+
+// Ready hides wrong-class rows, flagging them when the query selected them.
+func (r handleReader) Ready(q ...beads.ReadyQuery) ([]beads.Bead, error) {
+	return r.v.readyVia(r.reader.Ready, q)
+}
+
+// DepList reports no edges for a wrong-class row.
+func (r handleReader) DepList(id, direction string) ([]beads.Dep, error) {
+	return r.v.depListVia(r.reader.DepList, id, direction)
+}
+
+// liveHandleReader is the front's live handle behind a view, with the exact
+// batch read beads.GetMany reads by id through.
+type liveHandleReader struct {
+	handleReader
+}
+
+// GetExactBatch is the front's live exact batch behind the view's filter, or
+// ErrExactBatchGetUnsupported when the live handle has none, so the caller
+// reads per id through Get.
+func (r liveHandleReader) GetExactBatch(ids []string) (map[string]beads.Bead, []string, error) {
+	getter, ok := r.reader.(beads.ExactBatchGetter)
+	if !ok {
+		return nil, nil, beads.ErrExactBatchGetUnsupported
+	}
+	return r.v.filterExactBatch(getter.GetExactBatch(ids))
+}
 
 // StoreHealthPath forwards the front's health path, "" for a front without
 // one (the answer cmd/gc's emitting class store gives too).

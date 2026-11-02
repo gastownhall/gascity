@@ -615,7 +615,7 @@ func TestCatalogBindsExecCompositionToSeamBackedContract(t *testing.T) {
 		}
 		for _, claim := range entry.Claims {
 			switch claim.Constructor {
-			case repoSymbol("internal/runtime/exec", "NewSeamBacked"):
+			case repoSymbol("internal/runtime/exec", "NewSeamBackedForCity"):
 				if claim.Disposition != DispositionProved {
 					t.Errorf("exec seam-backed disposition = %q, want %q", claim.Disposition, DispositionProved)
 				}
@@ -630,13 +630,13 @@ func TestCatalogBindsExecCompositionToSeamBackedContract(t *testing.T) {
 	}
 
 	if proof == nil {
-		t.Fatal("exec.NewSeamBacked proof is missing")
+		t.Fatal("exec.NewSeamBackedForCity proof is missing")
 	}
 	if proof.File != "internal/runtime/exec/exec_test.go" || proof.Test != "TestExecConformance" {
-		t.Errorf("exec.NewSeamBacked proof = %s#%s, want exec conformance entrypoint", proof.File, proof.Test)
+		t.Errorf("exec.NewSeamBackedForCity proof = %s#%s, want exec conformance entrypoint", proof.File, proof.Test)
 	}
 	if got, want := renderSymbolRefs(proof.AllowedCalls), "fmt.Sprintf, internal/runtime/exec.execConformanceScript, sync/atomic.AddInt64"; got != want {
-		t.Errorf("exec.NewSeamBacked allowed calls = %q, want %q", got, want)
+		t.Errorf("exec.NewSeamBackedForCity allowed calls = %q, want %q", got, want)
 	}
 	if t3Waiver == nil || t3Waiver.Owner != runtimeContractWaiverOwner {
 		t.Errorf("legacy T3 exec-prefix waiver = %+v, want %s ownership", t3Waiver, runtimeContractWaiverOwner)
