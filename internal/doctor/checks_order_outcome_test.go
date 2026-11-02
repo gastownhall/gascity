@@ -872,3 +872,119 @@ func TestOrderOutcomeHealthyIncompleteOutcomeWithFailures(t *testing.T) {
 		})
 	}
 }
+
+// TestOrderOutcomeHealthyIncompleteOutcomeOrderScope pins which declarations
+// count: only monitored cron and cooldown orders contribute, a declaration
+// matches its order's full scoped subject (so a same-name order in another
+// scope neither inherits nor clears it), and the inspection hint keeps the
+// rig-aware gc order history form.
+func TestOrderOutcomeHealthyIncompleteOutcomeOrderScope(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	scopeCity := func(t *testing.T) (string, *config.City) {
+		t.Helper()
+		cityPath, cfg := orderFiringTestCity(t)
+		ordersDir := filepath.Join(cityPath, "orders")
+		writeOrderFiringTestOrderInDir(t, ordersDir, "export-sweep", "cooldown", "6h")
+		writeOrderFiringTestOrderInDir(t, ordersDir, "nightly-export", "cron", "0 3 * * *")
+		writeOrderFiringTestOrderInDir(t, ordersDir, "manual-export", "manual", "")
+		writeOrderFiringTestOrderInDir(t, ordersDir, "event-export", "event", "bead.closed")
+		for _, rig := range []config.Rig{
+			{Name: "st", Path: filepath.Join(cityPath, "rigs", "st")},
+			{Name: "parked", Path: filepath.Join(cityPath, "rigs", "parked"), SuspendedOnStart: true},
+		} {
+			rigOrders := filepath.Join(rig.Path, "orders")
+			if err := os.MkdirAll(rigOrders, 0o755); err != nil {
+				t.Fatalf("creating rig orders dir: %v", err)
+			}
+			cfg.Rigs = append(cfg.Rigs, rig)
+			if cfg.FormulaLayers.Rigs == nil {
+				cfg.FormulaLayers.Rigs = map[string][]string{}
+			}
+			cfg.FormulaLayers.Rigs[rig.Name] = []string{cfg.FormulaLayers.City[0], filepath.Join(rig.Path, "formulas")}
+			writeOrderFiringTestOrderInDir(t, rigOrders, "export-sweep", "cooldown", "6h")
+		}
+		return cityPath, cfg
+	}
+	completed := func(subject string, ts time.Time) events.Event {
+		return events.Event{Type: events.OrderCompleted, Ts: ts, Subject: subject, Actor: "controller"}
+	}
+	excluded := []events.Event{
+		skippedEvent("manual-export", now.Add(-time.Hour), "skipped", "manual run"),
+		skippedEvent("event-export", now.Add(-time.Hour), "skipped", "event run"),
+		skippedEvent("export-sweep:rig:parked", now.Add(-time.Hour), "skipped", "rig parked"),
+	}
+
+	cases := []struct {
+		name         string
+		evts         []events.Event
+		wantWarnings []string
+		wantOK       []string
+		wantHint     string
+	}{
+		{
+			name: "rig-scoped declaration is not cleared by the city order's completion",
+			evts: append([]events.Event{
+				completed("export-sweep:rig:st", now.Add(-2*time.Hour)),
+				skippedEvent("export-sweep:rig:st", now.Add(-2*time.Hour), "partial", "store unreachable",
+					events.OrderSkippedScope{Scope: "rig:st", Reason: "dolt not reachable"}),
+				completed("export-sweep", now.Add(-time.Hour)),
+				completed("nightly-export", now.Add(-time.Hour)),
+			}, excluded...),
+			wantWarnings: []string{"export-sweep:rig:st: recorded incomplete work: partial: store unreachable; not run: rig:st (dolt not reachable)"},
+			wantOK:       []string{"export-sweep: last run succeeded", "nightly-export: last run succeeded"},
+			wantHint:     "Inspect with: gc order check && gc order history export-sweep --rig st",
+		},
+		{
+			name: "city declaration is not cleared by the rig order's completion",
+			evts: append([]events.Event{
+				completed("export-sweep", now.Add(-2*time.Hour)),
+				skippedEvent("export-sweep", now.Add(-2*time.Hour), "skipped", "gate held"),
+				completed("export-sweep:rig:st", now.Add(-time.Hour)),
+				completed("nightly-export", now.Add(-time.Hour)),
+			}, excluded...),
+			wantWarnings: []string{"export-sweep: recorded incomplete work: skipped: gate held"},
+			wantOK:       []string{"export-sweep:rig:st: last run succeeded", "nightly-export: last run succeeded"},
+			wantHint:     "Inspect with: gc order check && gc order history export-sweep",
+		},
+		{
+			name: "cron order declaration",
+			evts: append([]events.Event{
+				completed("export-sweep", now.Add(-time.Hour)),
+				completed("export-sweep:rig:st", now.Add(-time.Hour)),
+				completed("nightly-export", now.Add(-time.Hour)),
+				skippedEvent("nightly-export", now.Add(-time.Hour), "partial", "archive locked"),
+			}, excluded...),
+			wantWarnings: []string{"nightly-export: recorded incomplete work: partial: archive locked"},
+			wantOK:       []string{"export-sweep: last run succeeded", "export-sweep:rig:st: last run succeeded"},
+			wantHint:     "Inspect with: gc order check && gc order history nightly-export",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, cfg := scopeCity(t)
+			writeOrderFiringTestEvents(t, cityPath, tc.evts...)
+
+			result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
+
+			if result.Status != StatusWarning {
+				t.Fatalf("status = %v, want StatusWarning; msg=%q details=%v", result.Status, result.Message, result.Details)
+			}
+			for _, want := range append(append([]string{}, tc.wantWarnings...), tc.wantOK...) {
+				if !slices.Contains(result.Details, want) {
+					t.Fatalf("details = %v, want %q", result.Details, want)
+				}
+			}
+			if got, want := len(result.Details), len(tc.wantWarnings)+len(tc.wantOK); got != want {
+				t.Fatalf("details = %v, want exactly %d (excluded orders must not appear)", result.Details, want)
+			}
+			for _, name := range []string{"manual-export", "event-export", ":rig:parked"} {
+				if strings.Contains(strings.Join(result.Details, "\n"), name) {
+					t.Fatalf("details = %v, %s is out of scope and must not appear", result.Details, name)
+				}
+			}
+			if result.FixHint != tc.wantHint {
+				t.Fatalf("FixHint = %q, want %q", result.FixHint, tc.wantHint)
+			}
+		})
+	}
+}
