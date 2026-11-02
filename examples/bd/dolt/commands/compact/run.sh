@@ -476,6 +476,37 @@ case "$compact_renotify_backstop_secs" in
     ;;
 esac
 
+# Live-database gate settings. Leading zeros are stripped so the values stay
+# decimal under shell arithmetic, and more than nine digits is refused so a
+# value cannot overflow it.
+live_probe_attempts_input="${GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS:-3}"
+live_probe_delay_input="${GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS:-2}"
+live_probe_attempts=$(printf '%s' "$live_probe_attempts_input" | sed 's/^0*//')
+case "$live_probe_attempts_input" in
+  ''|*[!0-9]*)
+    live_probe_attempts=""
+    ;;
+esac
+if [ -z "$live_probe_attempts" ] || [ "${#live_probe_attempts}" -gt 9 ]; then
+  printf 'compact: invalid GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=%s (must be a positive integer of at most 9 digits)\n' \
+    "$live_probe_attempts_input" >&2
+  exit 2
+fi
+live_probe_delay_secs=$(printf '%s' "$live_probe_delay_input" | sed 's/^0*//')
+case "$live_probe_delay_input" in
+  ''|*[!0-9]*)
+    printf 'compact: invalid GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=%s (must be a non-negative integer of at most 9 digits)\n' \
+      "$live_probe_delay_input" >&2
+    exit 2
+    ;;
+esac
+: "${live_probe_delay_secs:=0}"
+if [ "${#live_probe_delay_secs}" -gt 9 ]; then
+  printf 'compact: invalid GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=%s (must be a non-negative integer of at most 9 digits)\n' \
+    "$live_probe_delay_input" >&2
+  exit 2
+fi
+
 case "$compact_remote" in
   ''|[A-Za-z0-9_.-]*)
     case "$compact_remote" in
