@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -47,26 +50,43 @@ func (h heldWorkDrift) decide(t *testing.T, city *config.City, meta ...string) (
 func (h heldWorkDrift) decideIn(t *testing.T, city *config.City, entry func(*selectionEntry), world func(*World), meta ...string) (intent, time.Time) {
 	t.Helper()
 	withoutA7(t)
-	if city == nil {
-		city = &config.City{}
-	}
-	city.Agents = []config.Agent{{Name: "worker"}}
-	tp := TemplateParams{TemplateName: "worker", Command: "run"}
-	return decideDrain(t, append([]string{"started_config_hash", heldWorkStale}, meta...), func(e *selectionEntry) {
-		e.InDesired, e.Desired = true, desireKeep
-		e.AssignedWork = &assignedWorkView{BeadID: "gw-1", Claimed: true}
+	return decideDrain(t, heldWorkMeta(meta...), func(e *selectionEntry) {
+		heldWorkEntry(e)
 		if entry != nil {
 			entry(e)
 		}
 	}, func(w *World) {
-		info := w.Census.Rows[rowKeyOf("gc-1")].Info
-		w.Env = &reconcileEnv{Cfg: city, SP: struct{ runtime.Provider }{runtime.NewFake()}}
-		w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(info): {TP: tp}}}
-		w.Observed = map[rowKey]rowObservation{rowKeyOf("gc-1"): {Liveness: livenessAlive}}
+		heldWorkWorld(w, city)
 		if world != nil {
 			world(w)
 		}
 	})
+}
+
+// heldWorkMeta is the held-work row's metadata: its stale started hash, then
+// meta.
+func heldWorkMeta(meta ...string) []string {
+	return append([]string{"started_config_hash", heldWorkStale}, meta...)
+}
+
+// heldWorkEntry is the held-work row's allocation entry: desired and kept,
+// under its claimed open work gw-1.
+func heldWorkEntry(e *selectionEntry) {
+	e.InDesired, e.Desired = true, desireKeep
+	e.AssignedWork = &assignedWorkView{BeadID: "gw-1", Claimed: true}
+}
+
+// heldWorkWorld is the held-work row's pass under city (an empty one when
+// nil): its worker template resolved and its runtime alive.
+func heldWorkWorld(w *World, city *config.City) {
+	if city == nil {
+		city = &config.City{}
+	}
+	city.Agents = []config.Agent{{Name: "worker"}}
+	info := w.Census.Rows[rowKeyOf("gc-1")].Info
+	w.Env = &reconcileEnv{Cfg: city, SP: struct{ runtime.Provider }{runtime.NewFake()}}
+	w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(info): {TP: TemplateParams{TemplateName: "worker", Command: "run"}}}}
+	w.Observed = map[rowKey]rowObservation{rowKeyOf("gc-1"): {Liveness: livenessAlive}}
 }
 
 // driftDeferredPayload decodes ev's session.config_drift_deferred payload,
@@ -430,5 +450,290 @@ func TestHeldWorkDriftKeepsItsSafety(t *testing.T) {
 				t.Fatalf("decideRow = (%q, %q) %v, want (%q, %q)", it.Kind, it.Reason, it.Patch, tc.wantKind, tc.wantReason)
 			}
 		})
+	}
+}
+
+// effect decides A14 on the held-work row store holds and runs the intent's
+// registered effect writing through writer, under the default horizon: the
+// intent, and the settlement when it ran one.
+func (h heldWorkDrift) effect(t *testing.T, store *beads.MemStore, writer beads.Store) (intent, settlement) {
+	t.Helper()
+	withoutA7(t)
+	k := rowKeyOf("gc-1")
+	w := &World{Now: gatherNow, Census: readCensus(t, gatherNow, censusLegs(rowLeg, store)), Mislabelled: map[rowKey]bool{}, CityPath: t.TempDir()}
+	w.Obs, w.ObsMaxAge = observedOwn(w, "gc-1"), observeMaxAge
+	heldWorkWorld(w, nil)
+	w.LegStores = map[string]beads.Store{rowLeg: writer}
+	a := &allocDecision{Snapshot: &selectionSnapshot{Entries: map[rowKey]*selectionEntry{k: {Key: k, Liveness: livenessAlive}}}}
+	heldWorkEntry(a.Snapshot.Entries[k])
+	it, _ := decideRow(w, a, k)
+	if !effectSpecs[it.Kind].runs() {
+		return it, settlement{}
+	}
+	return it, runTx(context.Background(), newEffectPass(w, a), it, effectSpecs[it.Kind], nil)
+}
+
+// heldWorkStore is a fenced store holding the held-work row with meta.
+func heldWorkStore(t *testing.T, meta ...string) *beads.MemStore {
+	t.Helper()
+	store := censusStore(drainRow(heldWorkMeta(meta...)...))
+	stampedMemStore(t, store)
+	return store
+}
+
+// driftEpisodeCASStore is a fenced store whose conditional writes fail with
+// err, or, for the first races of them, lose to another writer that writes
+// moved onto the row just before.
+type driftEpisodeCASStore struct {
+	*beads.MemStore
+	err    error
+	races  int
+	moved  map[string]string
+	writes int
+}
+
+func (s *driftEpisodeCASStore) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	s.writes++
+	if s.err != nil {
+		return s.err
+	}
+	if s.writes <= s.races {
+		if err := s.SetMetadataBatch(id, s.moved); err != nil {
+			return err
+		}
+	}
+	return s.MemStore.UpdateIfMatch(id, rev, opts)
+}
+
+func (s *driftEpisodeCASStore) ConditionalWritesResolveTarget() beads.Store { return s }
+
+// Kills an episode signal recorded for a write that did not land (#8345,
+// AC-6): v2's row heal whose write fails, or whose CAS loses every attempt,
+// settles with no session.config_drift_deferred and leaves the row as it
+// was, so a later pass writes the episode and records its one event; a CAS
+// lost once lands on its retry with one event, not one per attempt; one lost
+// to another writer's stamp of the same episode records nothing, and leaves
+// a later pass nothing to write.
+func TestHeldWorkDriftUnlandedWriteRecordsNothing(t *testing.T) {
+	h := newHeldWorkDrift(t)
+	now := gatherNow.UTC().Format(time.RFC3339)
+	escalationDue := []string{"config_drift_deferred_key", h.key, "config_drift_deferred_at", rowAt(-36 * time.Hour)}
+	for _, tc := range []struct {
+		name         string
+		meta         []string
+		writer       func(*beads.MemStore) *driftEpisodeCASStore
+		wantOutcome  settleOutcome
+		wantCause    string
+		wantKey      string // the episode write's key, and its value once landed
+		wantEscalate bool
+		retry        bool // a later pass writes the episode
+	}{
+		{
+			name: "a failed first observation",
+			writer: func(m *beads.MemStore) *driftEpisodeCASStore {
+				return &driftEpisodeCASStore{MemStore: m, err: errors.New("store unavailable")}
+			},
+			wantOutcome: settledFailed, wantCause: causeWrite, wantKey: "config_drift_deferred_at", retry: true,
+		},
+		{
+			name: "a failed escalation",
+			meta: escalationDue,
+			writer: func(m *beads.MemStore) *driftEpisodeCASStore {
+				return &driftEpisodeCASStore{MemStore: m, err: errors.New("store unavailable")}
+			},
+			wantOutcome: settledFailed, wantCause: causeWrite, wantKey: "config_drift_escalated_at", wantEscalate: true, retry: true,
+		},
+		{
+			name: "a CAS lost on every attempt",
+			writer: func(m *beads.MemStore) *driftEpisodeCASStore {
+				return &driftEpisodeCASStore{MemStore: m, races: 99, moved: map[string]string{txKeyNote: "moved"}}
+			},
+			wantOutcome: settledRefused, wantCause: causeCAS, wantKey: "config_drift_deferred_at", retry: true,
+		},
+		{
+			name: "a CAS lost once",
+			writer: func(m *beads.MemStore) *driftEpisodeCASStore {
+				return &driftEpisodeCASStore{MemStore: m, races: 1, moved: map[string]string{txKeyNote: "moved"}}
+			},
+			wantOutcome: settledLanded, wantKey: "config_drift_deferred_at",
+		},
+		{
+			name: "a CAS lost to another writer's stamp of the episode",
+			writer: func(m *beads.MemStore) *driftEpisodeCASStore {
+				return &driftEpisodeCASStore{MemStore: m, races: 1, moved: map[string]string{"config_drift_deferred_key": h.key, "config_drift_deferred_at": rowAt(-time.Minute)}}
+			},
+			wantOutcome: settledRefused, wantCause: causeRedecided,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := heldWorkStore(t, append([]string{"core_hash_breakdown", h.breakdown}, tc.meta...)...)
+			before, err := store.Get("gc-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			it, s := h.effect(t, store, tc.writer(store))
+			if it.Kind != intentRowHeal || it.Event == nil {
+				t.Fatalf("decideRow = (%q, %q), want a row heal carrying the episode's event", it.Kind, it.Reason)
+			}
+			after, err := store.Get("gc-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if s.Outcome != tc.wantOutcome || s.Cause != tc.wantCause {
+				t.Fatalf("settlement %v %q (%v), want %v %q", s.Outcome, s.Cause, s.Err, tc.wantOutcome, tc.wantCause)
+			}
+			if tc.wantOutcome == settledLanded {
+				if len(s.Facts.Events) != 1 || after.Metadata[tc.wantKey] != now {
+					t.Fatalf("events %+v, %s=%q; want one event and the episode at %s", s.Facts.Events, tc.wantKey, after.Metadata[tc.wantKey], now)
+				}
+				return
+			}
+			if len(s.Facts.Events) != 0 {
+				t.Fatalf("events %+v on an unlanded write, want none", s.Facts.Events)
+			}
+			if tc.wantKey != "" && after.Metadata[tc.wantKey] != before.Metadata[tc.wantKey] {
+				t.Fatalf("%s = %q after an unlanded write, want %q", tc.wantKey, after.Metadata[tc.wantKey], before.Metadata[tc.wantKey])
+			}
+			it, s = h.effect(t, store, store)
+			if !tc.retry {
+				if it.Reason == decideDriftHeldWork || it.Reason == decideDriftEscalated {
+					t.Fatalf("a later pass decides (%q, %q), want the other writer's episode kept", it.Kind, it.Reason)
+				}
+				return
+			}
+			after, err = store.Get("gc-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if s.Outcome != settledLanded || len(s.Facts.Events) != 1 || after.Metadata[tc.wantKey] != now {
+				t.Fatalf("later pass: settlement %v %q, events %+v, %s=%q; want it landed with one event", s.Outcome, s.Cause, s.Facts.Events, tc.wantKey, after.Metadata[tc.wantKey])
+			}
+			if p := driftDeferredPayload(t, &s.Facts.Events[0]); p.Escalated != tc.wantEscalate {
+				t.Fatalf("later pass escalated %t, want %t", p.Escalated, tc.wantEscalate)
+			}
+		})
+	}
+}
+
+// driftEpisodeFailStore fails the held-work episode's metadata writes (its
+// stamp or its escalation marker) with err.
+type driftEpisodeFailStore struct {
+	beads.Store
+	err error
+}
+
+func (s driftEpisodeFailStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if _, ok := kvs[namedSessionConfigDriftDeferredAtMetadata]; ok {
+		return s.err
+	}
+	if _, ok := kvs[configDriftEscalatedAtMetadata]; ok {
+		return s.err
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// Kills legacy recording an episode signal for a write that failed (#8345,
+// AC-6): a failed first observation or escalation is logged, records no
+// session.config_drift_deferred and leaves the row as it was; the next pass
+// over a healthy store writes it and records its one event.
+func TestSessionConfigDriftDeferredLegacyFailedWriteRetries(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		escalation bool
+		key        string
+	}{
+		{name: "first observation", key: "config_drift_deferred_at"},
+		{name: "escalation", escalation: true, key: "config_drift_escalated_at"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, rec, sess, _ := heldWorkReconcilerEnv(t)
+			healthy := env.store
+			if tc.escalation {
+				env.reconcileFresh(t, sess)
+				env.clk.Advance(61 * time.Minute)
+			}
+			prior := len(driftDeferredEvents(rec))
+			writeErr := errors.New("episode write failed")
+			env.store = driftEpisodeFailStore{Store: healthy, err: writeErr}
+			got := env.reconcileFresh(t, sess)
+			if n := len(driftDeferredEvents(rec)); n != prior || got.Metadata[tc.key] != "" {
+				t.Fatalf("after a failed write: %d events (want %d), %s=%q (want unset)", n, prior, tc.key, got.Metadata[tc.key])
+			}
+			if !strings.Contains(env.stderr.String(), writeErr.Error()) {
+				t.Fatalf("stderr %q, want the failed write logged", env.stderr.String())
+			}
+			env.store = healthy
+			env.clk.Advance(time.Minute)
+			got = env.reconcileFresh(t, sess)
+			evs := driftDeferredEvents(rec)
+			if len(evs) != prior+1 || got.Metadata[tc.key] != env.clk.Now().UTC().Format(time.RFC3339) {
+				t.Fatalf("after a healthy pass: %d events (want %d), %s=%q (want the pass)", len(evs), prior+1, tc.key, got.Metadata[tc.key])
+			}
+			if p := driftDeferredPayload(t, &evs[len(evs)-1]); p.Escalated != tc.escalation {
+				t.Fatalf("retry escalated %t, want %t", p.Escalated, tc.escalation)
+			}
+		})
+	}
+}
+
+// Kills the two reconcilers signaling one held-work episode differently
+// (#8345, AC-6): for a first observation and for an escalation an hour and a
+// minute in, legacy's and v2's events share their type, actor, envelope,
+// payload and message, up to each one's own session, work bead and clock.
+func TestSessionConfigDriftDeferredLegacyAndV2Agree(t *testing.T) {
+	h := newHeldWorkDrift(t)
+	for _, escalation := range []bool{false, true} {
+		t.Run(fmt.Sprintf("escalated=%t", escalation), func(t *testing.T) {
+			env, rec, sess, work := heldWorkReconcilerEnv(t)
+			var meta []string
+			if escalation {
+				env.reconcileFresh(t, sess)
+				env.clk.Advance(61 * time.Minute)
+				meta = []string{"config_drift_deferred_key", h.key, "config_drift_deferred_at", rowAt(-61 * time.Minute)}
+			}
+			env.reconcileFresh(t, sess)
+			evs := driftDeferredEvents(rec)
+			if len(evs) == 0 {
+				t.Fatalf("legacy recorded no event; stderr=%s", env.stderr.String())
+			}
+			legacy := normalizeDriftDeferred(t, evs[len(evs)-1], sess.ID, sess.Metadata["session_name"], work.ID, env.clk.Now())
+			store := heldWorkStore(t, meta...)
+			_, s := h.effect(t, store, store)
+			if len(s.Facts.Events) != 1 {
+				t.Fatalf("v2 settlement %v %q, events %+v; want one event", s.Outcome, s.Cause, s.Facts.Events)
+			}
+			v2 := normalizeDriftDeferred(t, s.Facts.Events[0], "gc-1", "s-gc-1", "gw-1", gatherNow)
+			if legacy != v2 {
+				t.Fatalf("legacy and v2 differ:\nlegacy %+v\nv2     %+v", legacy, v2)
+			}
+		})
+	}
+}
+
+// driftDeferredShape is a session.config_drift_deferred event with its own
+// session, work bead and clock factored out.
+type driftDeferredShape struct {
+	Type, Actor, Message, Template, Fields string
+	SinceAgo                               time.Duration
+	PendingSeconds                         int64
+	Escalated                              bool
+}
+
+// normalizeDriftDeferred is ev's shape, failing unless it names session id
+// (named name) on its envelope and payload, work bead work, and now.
+func normalizeDriftDeferred(t *testing.T, ev events.Event, id, name, work string, now time.Time) driftDeferredShape {
+	t.Helper()
+	p := driftDeferredPayload(t, &ev)
+	if ev.Subject != id || ev.SessionID != id || !ev.Ts.Equal(now) || p.SessionID != id || p.SessionName != name || p.WorkBeadID != work {
+		t.Fatalf("event %+v payload %+v, want session %s (%s), work %s at %v", ev, p, id, name, work, now)
+	}
+	since, err := time.Parse(time.RFC3339, p.DeferredSince)
+	if err != nil {
+		t.Fatalf("deferred_since %q: %v", p.DeferredSince, err)
+	}
+	msg := strings.ReplaceAll(strings.ReplaceAll(ev.Message, work, "<work>"), name, "<session>")
+	return driftDeferredShape{
+		Type: ev.Type, Actor: ev.Actor, Message: msg, Template: p.Template, Fields: strings.Join(p.DriftedFields, ","),
+		SinceAgo: now.Sub(since), PendingSeconds: p.PendingSeconds, Escalated: p.Escalated,
 	}
 }
