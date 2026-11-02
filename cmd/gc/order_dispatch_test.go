@@ -568,11 +568,6 @@ func TestOrderDispatchRejectsAmbiguousEventPoolOncePerEvent(t *testing.T) {
 	}
 
 	eventLog := events.NewFake()
-	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
-	headSeq, err := eventLog.LatestSeq()
-	if err != nil {
-		t.Fatalf("LatestSeq(): %v", err)
-	}
 
 	aa := []orders.Order{{
 		Name:         "release-watch",
@@ -593,6 +588,13 @@ func TestOrderDispatchRejectsAmbiguousEventPoolOncePerEvent(t *testing.T) {
 		rec:     &rec,
 		stderr:  &stderr,
 		cfg:     cfg,
+	}
+
+	startEventOrdersAtTheHead(t, m)
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+	headSeq, err := eventLog.LatestSeq()
+	if err != nil {
+		t.Fatalf("LatestSeq(): %v", err)
 	}
 
 	m.dispatch(context.Background(), t.TempDir(), time.Now())
@@ -640,11 +642,6 @@ func TestOrderDispatchRejectsAmbiguousEventPoolOncePerEvent(t *testing.T) {
 func TestOrderDispatchEventExecAdvancesCursor(t *testing.T) {
 	store := beads.NewMemStore()
 	eventLog := events.NewFake()
-	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
-	headSeq, err := eventLog.LatestSeq()
-	if err != nil {
-		t.Fatalf("LatestSeq(): %v", err)
-	}
 
 	var calls int
 	execRun := func(context.Context, string, string, []string) ([]byte, error) {
@@ -660,6 +657,13 @@ func TestOrderDispatchEventExecAdvancesCursor(t *testing.T) {
 	}}, store, eventLog, execRun, events.Discard)
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
+	}
+
+	startEventOrdersAtTheHead(t, ad)
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+	headSeq, err := eventLog.LatestSeq()
+	if err != nil {
+		t.Fatalf("LatestSeq(): %v", err)
 	}
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
@@ -694,11 +698,6 @@ func TestOrderDispatchEventExecAdvancesCursor(t *testing.T) {
 func TestOrderDispatchEventExecFailureAdvancesCursor(t *testing.T) {
 	store := beads.NewMemStore()
 	eventLog := events.NewFake()
-	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
-	headSeq, err := eventLog.LatestSeq()
-	if err != nil {
-		t.Fatalf("LatestSeq(): %v", err)
-	}
 
 	var calls int
 	execRun := func(context.Context, string, string, []string) ([]byte, error) {
@@ -714,6 +713,13 @@ func TestOrderDispatchEventExecFailureAdvancesCursor(t *testing.T) {
 	}}, store, eventLog, execRun, events.Discard)
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
+	}
+
+	startEventOrdersAtTheHead(t, ad)
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+	headSeq, err := eventLog.LatestSeq()
+	if err != nil {
+		t.Fatalf("LatestSeq(): %v", err)
 	}
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
@@ -818,11 +824,6 @@ func TestOrderDispatchEventExecLatestSeqErrorDoesNotRunExec(t *testing.T) {
 func TestOrderDispatchEventExecLabelFailureRecordsOrderFailure(t *testing.T) {
 	store := beads.NewMemStore()
 	eventLog := events.NewFake()
-	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
-	headSeq, err := eventLog.LatestSeq()
-	if err != nil {
-		t.Fatalf("LatestSeq(): %v", err)
-	}
 
 	var calls int
 	execRun := func(context.Context, string, string, []string) ([]byte, error) {
@@ -842,6 +843,12 @@ func TestOrderDispatchEventExecLabelFailureRecordsOrderFailure(t *testing.T) {
 	}
 	mad := ad.(*memoryOrderDispatcher)
 	mad.stderr = &stderr
+	startEventOrdersAtTheHead(t, ad)
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+	headSeq, err := eventLog.LatestSeq()
+	if err != nil {
+		t.Fatalf("LatestSeq(): %v", err)
+	}
 
 	logs := captureCmdOrderLogs(t, func() {
 		ad.dispatch(context.Background(), t.TempDir(), time.Now())
@@ -886,7 +893,6 @@ func TestOrderDispatchEventExecLabelFailureRecordsOrderFailure(t *testing.T) {
 func TestOrderDispatchEventExecCursorLabelFailureMarksExecFailed(t *testing.T) {
 	store := beads.NewMemStore()
 	eventLog := events.NewFake()
-	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
 
 	var calls int
 	execRun := func(context.Context, string, string, []string) ([]byte, error) {
@@ -906,6 +912,8 @@ func TestOrderDispatchEventExecCursorLabelFailureMarksExecFailed(t *testing.T) {
 	}
 	mad := ad.(*memoryOrderDispatcher)
 	mad.stderr = &stderr
+	startEventOrdersAtTheHead(t, ad)
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
 
 	logs := captureCmdOrderLogs(t, func() {
 		ad.dispatch(context.Background(), t.TempDir(), time.Now())
@@ -6955,7 +6963,7 @@ func buildOrderDispatcherFromListExec(aa []orders.Order, store beads.Store, ep e
 		execRun = shellExecRunner
 	}
 	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
-	return &memoryOrderDispatcher{
+	m := &memoryOrderDispatcher{
 		aa: auto,
 		storeFn: func(_ execStoreTarget) (beads.Store, error) {
 			return store, nil
@@ -6969,6 +6977,8 @@ func buildOrderDispatcherFromListExec(aa []orders.Order, store beads.Store, ep e
 		dispatchCtx:          dispatchCtx,
 		dispatchCancel:       dispatchCancel,
 	}
+	m.watchEventOrders()
+	return m
 }
 
 func slicesContain(values []string, want string) bool {
