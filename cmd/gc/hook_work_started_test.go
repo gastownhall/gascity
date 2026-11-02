@@ -1198,3 +1198,35 @@ func TestHookClaimRecordsStartedWithoutConditionalWrites(t *testing.T) {
 		})
 	}
 }
+
+// TestDrainAckPassRefusesALegacyRecordedClaim (AC-2, #8313): a claim the
+// seat's hook recorded through the checked write's legacy fallback — the only
+// way the default topology's session store can hold it — is one the seat's
+// own drain-ack pass refuses on, naming it, releasing nothing it holds.
+func TestDrainAckPassRefusesALegacyRecordedClaim(t *testing.T) {
+	store := beads.NewMemStore() // unstamped: no conditional writer resolves
+	seat := mustCreateDrainAckBead(t, store, beads.Bead{
+		ID: "worker-1", Title: "city/worker-1", Type: session.BeadType,
+		Metadata: map[string]string{"session_name": "worker-1", "template": "worker", "instance_token": startedToken, "generation": "7"},
+	}, "", "")
+	started := mustCreateDrainAckBead(t, store, beads.Bead{Title: "started", Type: "task", Metadata: routedToWorker()}, "in_progress", "worker-1")
+	unstarted := mustCreateDrainAckBead(t, store, beads.Bead{Title: "unstarted", Type: "task", Metadata: routedToWorker()}, "in_progress", "worker-1")
+	front := session.NewStore(beads.SessionStore{Store: store})
+	res, err := recordWorkStarted(front, seat.ID, hookStartedFence{Token: startedToken, Gen: 7, HasGen: true},
+		hookStartedKey{Bead: started.ID}, session.WorkStartedViaClaim, time.Date(2026, 11, 2, 14, 0, 0, 0, time.UTC), legacyStartedMode())
+	if err != nil || res != hookStartedRecorded {
+		t.Fatalf("recording the claim on a store without a conditional writer = (%v, %v); want (recorded, nil)", res, err)
+	}
+
+	var stderr bytes.Buffer
+	refusal := releaseUnexecutedClaimsForSessionStore("", servingCity("worker"), store, nil, "worker-1", drainAckCaller{}, &stderr)
+	if !strings.Contains(refusal, started.ID) {
+		t.Fatalf("refusal %q; want it naming the legacy-recorded claim %s", refusal, started.ID)
+	}
+	if status, _ := drainAckBeadStatus(t, store, started.ID); status != "in_progress" {
+		t.Fatalf("the legacy-recorded claim is %s; want it kept", status)
+	}
+	if status, _ := drainAckBeadStatus(t, store, unstarted.ID); status != "in_progress" {
+		t.Fatalf("the refused ack released the unstarted claim (%s); want nothing released", status)
+	}
+}
