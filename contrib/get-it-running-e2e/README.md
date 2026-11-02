@@ -49,25 +49,39 @@ open files" and the variant is graded `HARNESS-ERROR`. Raise it with
 
 ## Tutorial walkthrough
 
-`run-tutorials.sh` checks that the user docs work with the latest Homebrew
-release, the way a reader follows them. In one fresh `gce2e-base` container it
-runs one headless Claude Code session per page, in reading order:
+`run-tutorials.sh` checks that the user docs work the way a reader follows
+them, against the `gc` a change will ship. In one fresh `gce2e-base` container
+it runs one headless Claude Code session per page, in reading order:
 Installation, Quickstart, then Tutorials 01 through 07. Each session follows its
 page literally, building on the machine state the earlier pages left, and logs
 every step to a JSONL report as `worked`, `failed`, `improvised` (it had to do
 something the page did not say), or `skipped` (an alternative install method,
 an optional step, or one that needs an interactive terminal).
 
-A page passes when it logged steps and none failed or were improvised. Run it
-whenever a page under `docs/getting-started/` or `docs/tutorials/` changes, or
-after a release:
+The pages and `gc` both come from the source you name: a gascity checkout
+(uncommitted changes included) or a ref of gastownhall/gascity. The harness
+builds `gc` from that source the way a release is built (static, `CGO_ENABLED=0`,
+version `dev` unless the commit is tagged) and installs it over the Homebrew
+`gc` once the Installation page is done, so the Quickstart and every tutorial
+run the branch's `gc` with Homebrew's runtime dependencies. It logs a warning
+when the branch pins a different `bd` in `deps.env` than Homebrew installed.
+
+Run it on a pull request that changes `gc` behavior or a page under
+`docs/getting-started/` or `docs/tutorials/`, before merging. A page passes when
+it logged steps and none failed or were improvised:
 
 ```bash
-./run-tutorials.sh 1 ../../docs           # results in ~/gce2e/results/t1/
+./run-tutorials.sh 1 pr/1234                  # a pull request
+./run-tutorials.sh 2 docs/my-branch           # a branch
+./run-tutorials.sh 3 ~/src/gascity            # a local checkout, as it is on disk
+GCE2E_GC=release ./run-tutorials.sh 4 main    # main's docs against the latest release
 ```
 
-A round takes 30 to 40 minutes. The results directory holds `harness.log` (the
-per-page verdicts and every step that did not work, with the agent's note on
-what the page should say), and per page `NN-<page>.jsonl` (the step report),
-`NN-<page>.transcript.jsonl`, and the prompt. The container is kept as
-`gce2e-t<round>` for inspection; delete it with `incus delete -f`.
+The host needs Go (any version that can fetch the toolchain `go.mod` names).
+Refs are checked out as a temporary worktree of `~/gce2e/gascity`, which is
+cloned on first use. A round takes 30 to 40 minutes. The results directory
+(`~/gce2e/results/t<round>/`) holds `harness.log` (the per-page verdicts and
+every step that did not work, with the agent's note on what the page should
+say), `build.log` and the `gc` under test, and per page `NN-<page>.jsonl` (the
+step report), `NN-<page>.transcript.jsonl`, and the prompt. The container is
+kept as `gce2e-t<round>` for inspection; delete it with `incus delete -f`.
