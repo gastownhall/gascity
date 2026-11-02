@@ -142,6 +142,50 @@ gc dolt compact --gc-only --only-db hq
 gc dolt compact --gc-only --dry-run
 ```
 
+## Live-database gate
+
+A flatten or `DOLT_GC` rewrites a live database's storage under the running
+sql-server. When a rewrite leaves the database out of the data dir — the
+server comes back without it, and every client fails with
+`database not found: <db>` or `cannot resolve default branch head` —
+`gc dolt compact` must not report the pass as a success and go on rewriting
+the next database.
+
+Every per-database pass that reaches a storage-rewriting step (flatten, full
+GC, bare GC, pending-GC retry, `--gc-only`) therefore ends with a
+**live-database gate**:
+
+- a `<data_dir>/<db>/.dolt` entry that was present before the rewrite must
+  still be present, even if the server still answers SQL on open handles;
+- the server must still serve the name with a resolvable HEAD, probed with
+  `SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))` and retried
+  `GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS` times (default 3),
+  `GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS` seconds apart (default 2).
+
+When every attempt fails, compact writes an integrity-quarantine marker with
+reason `live database unavailable after compaction` (carrying the step, the
+probe failure, the data-dir evidence, and the pre-compaction HEAD), alerts
+through the usual quarantine event and mail, and **aborts the whole run at
+once**, naming the selected databases it left untouched. The quarantine keeps
+later runs off the database until it is restored; other databases compact
+normally.
+
+The compactor never restores the database itself. Recovery:
+
+1. Restore the database from backup (see
+   `docs/troubleshooting/dolt-bloat-recovery.md` "Recovery Procedure"), or
+   recreate it if the backup policy allows.
+2. Verify the server serves it with a resolvable HEAD
+   (`gc dolt sql --db <db> -q "SELECT HASHOF('HEAD')"`) and that bead data is
+   healthy (`bd list --limit 1` in the affected rig). A reachable server
+   alone is not evidence that lost data was recovered.
+3. Remove the quarantine marker and any pending-GC/pending-push marker the
+   restore made obsolete, then run `gc dolt compact --gc-only --dry-run
+   --only-db <db>` before a real pass.
+
+Dry runs and passes skipped before rewrite preparation (below-threshold,
+disk-held, marker retries that defer) mutate nothing and run no probe.
+
 ## Archive level
 
 Every GC the compactor issues passes `--archive-level=0`, which writes classic

@@ -562,6 +562,7 @@ should treat these strings as the current vocabulary:
 | `post-flatten value hash probe returned empty value` | The database hash query returned an empty value after flatten. |
 | `post-flatten value hash changed with row-count increase` | The database hash changed after at least one stable-table row-count gain. *(auto-clearable — see below)* |
 | `post-flatten value hash changed without row-count increase` | The database hash changed without a row-count gain. *(auto-clearable — see below)* |
+| `live database unavailable after compaction` | A flatten or GC left the database out of the data dir or unserved — see "Live-database gate" below. |
 
 Four of these reasons are known writer-race false positives and are
 **auto-clearable**. On its next scheduled run, `gc dolt compact`'s flatten
@@ -611,6 +612,39 @@ path also refuses, except for the four auto-clearable reasons above, which it
 may clear on its own after proving content preservation. The refusal output
 repeats the marker path, reason, key evidence fields, and the clear/retry
 command so operators have the next action without opening this runbook first.
+
+### Live-database gate
+
+`live database unavailable after compaction` is written by the
+live-database gate, not by a hash or row-count check: a flatten or `DOLT_GC`
+rewrote a live database's storage and the database did not survive it —
+its `<data_dir>/<db>/.dolt` entry disappeared, or the sql-server stopped
+serving the name with a resolvable HEAD. Every client of that database now
+fails (`database not found: <db>`, `cannot resolve default branch head`)
+until it is restored, so the gate quarantines the database, aborts the
+compaction run, and names the databases the run left untouched. The marker
+carries the gate's own evidence: `live_gate_steps` (every rewrite the pass
+reached), `live_gate_failed_step`, `live_gate_probe_failure`,
+`live_gate_dir`/`live_gate_dir_before`/`live_gate_dir_after`, and
+`live_gate_pre_compaction_head`.
+
+This reason is **not** auto-clearable: a later run refuses the database until
+an operator recovers it, while remaining free to compact the city's other
+databases. Recovery is a restore, not a marker dance:
+
+1. Restore the database from a safety backup (the "Recovery Procedure"
+   above), or recreate it deliberately. Mere connectivity is not evidence
+   that lost data was recovered.
+2. Verify the server serves the name with a resolvable HEAD and that bead
+   queries against the store are healthy.
+3. Remove only that database's quarantine marker, and any pending-GC /
+   pending-push marker the restore made obsolete, then run
+   `gc dolt compact --gc-only --dry-run --only-db <database>` before a real
+   pass.
+
+Probe cadence is bounded by `GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS` (default
+3) and `GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS` (default 2); a transient
+probe failure that recovers within the budget does not quarantine anything.
 
 ## When to Escalate
 
