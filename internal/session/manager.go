@@ -764,24 +764,67 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 	_ = m.store.SetMetadata(id, "transport", transport)
 }
 
+// orphanScanBudget bounds the pre-start orphan scan's wait: a start defers
+// with an error rather than holding its slot on a scan that long, because no
+// SDK operation may depend on a wedged provider call answering.
+const orphanScanBudget = 10 * time.Second
+
+// orphanScanKey names the in-flight slot of one session's pre-start orphan
+// scan in runtime.CallBounded's shared table: the caller namespace, the
+// normalized city, and the session, separated by NUL so neither element can
+// contain another key's separator.
+func orphanScanKey(normalizedCityPath, sessionID string) string {
+	return "orphan-scan\x00" + normalizedCityPath + "\x00" + sessionID
+}
+
+// orphanScanAnswer is what the pre-start orphan scan delivers: the roots it
+// found and its own error, when it answered at all.
+type orphanScanAnswer struct {
+	roots []runtime.LiveRuntime
+	err   error
+}
+
 // killExistingOrphans terminates any untracked runtime whose session ID and
 // city match the session about to start, then confirms each is dead. It returns
-// a non-nil error when an orphan could not be confirmed dead, or, terminating
-// nothing, when the provider claims one of them as a live runtime it does not
-// list (LiveUnlisted, an error wrapping runtime.ErrRuntimeUnavailable), so
-// callers gating a Start can refuse rather than race a survivor for the same
-// work. A scan error is logged and treated as fail-closed (see
+// a non-nil error when an orphan could not be confirmed dead, when an
+// unanswered pre-start scan leaves the orphans unknown (an error wrapping
+// runtime.ErrRuntimeUnavailable, so callers gate the start on it rather than
+// race a survivor for the same work), or, terminating nothing, when the
+// provider claims one of the found roots as a live runtime it does not list
+// (LiveUnlisted, an error wrapping runtime.ErrRuntimeUnavailable). A scan
+// error is logged and treated as fail-closed (see
 // FindRuntimesBySessionID): the orphans the scan did surface are still
 // terminated unless one of them is LiveUnlisted, which terminates none, and
 // matching the started replacement is impossible because it does not exist
 // yet.
+//
+// The scan can wedge on a hung tmux subprocess or a stalled process-table read
+// and cannot be canceled, so the wait for it is bounded by the caller's
+// context and orphanScanBudget, whichever ends first, and only one scan per
+// city and session runs at a time (runtime.CallBounded): a start that gives
+// up before the scan answers defers with an error and terminates nothing — an
+// unanswered scan says nothing about whether orphans exist — while a retry
+// waits on the one in-flight scan instead of piling up more. A scan that
+// answers after its caller left delivers its roots to nobody.
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
-	_ = ctx
 	scanner, ok := runtime.AsProcessTableScanner(m.sp)
 	if !ok || sessionID == "" {
 		return nil
 	}
-	found, err := scanner.FindRuntimesBySessionID(sessionID)
+	key := orphanScanKey(pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath)), sessionID)
+	scanCtx, cancelScan := context.WithTimeout(ctx, orphanScanBudget)
+	defer cancelScan()
+	answer, err := runtime.CallBounded(scanCtx, key, func(context.Context) (orphanScanAnswer, error) {
+		roots, scanErr := scanner.FindRuntimesBySessionID(sessionID)
+		return orphanScanAnswer{roots: roots, err: scanErr}, scanErr
+	})
+	if err != nil && answer.err == nil {
+		// The bound ended the wait before the scan answered: no roots, and
+		// nothing is known about the orphans, so the start defers.
+		log.Printf("session: orphan scan for %s unanswered, terminating nothing: %v", sessionID, err)
+		return fmt.Errorf("pre-start orphan scan for session %s: %w", sessionID, err)
+	}
+	found, err := answer.roots, answer.err
 	if err != nil {
 		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %s", sessionID, proctable.SummarizeScanError(err))
 	}
