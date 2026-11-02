@@ -943,6 +943,11 @@ func supervisorLogTail(path string, n int) string {
 // runtime (ga-s434i0) — a bare `gc supervisor run` with no session of its own
 // then becomes a kill target the next time that session bead pre-starts.
 //
+// Nor may it inherit the pane's demand-spawn keys
+// (processenv.DemandSpawnEnvKeys): they describe that pane's spawn, and a
+// supervisor carrying them starts a tmux server that holds them for every
+// session it later starts.
+//
 // With GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1 in the parent environment the
 // child also drops every provider-credential variable, the same opt-out the
 // launchd plist and systemd unit honor (#6966).
@@ -965,7 +970,7 @@ func supervisorForkEnv(parent []string) []string {
 		if strings.HasPrefix(kv, "GC_SESSION_ID=") || strings.HasPrefix(kv, hookDeadlineEnv+"=") {
 			continue
 		}
-		if key, _, ok := strings.Cut(kv, "="); ok && omitProviderCreds && isProviderCredentialEnv(key) {
+		if key, _, ok := strings.Cut(kv, "="); ok && (processenv.IsDemandSpawnEnv(key) || (omitProviderCreds && isProviderCredentialEnv(key))) {
 			continue
 		}
 		if strings.HasPrefix(kv, supervisorPreserveSessionsOnSignalEnv+"=") {
