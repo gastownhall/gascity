@@ -1214,6 +1214,11 @@ resource = "http_test_server"
 calls = 1
 
 [[count]]
+path = "cmd/gc/route_equivalence_session_list_test.go"
+resource = "http_test_server"
+calls = 2
+
+[[count]]
 path = "cmd/gc/runtime_lease_crossproc_test.go"
 resource = "subprocess"
 calls = 1
@@ -1242,6 +1247,11 @@ calls = 1
 [[count]]
 path = "cmd/gc/session_lifecycle_parallel_test.go"
 resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/session_list_unified_test.go"
+resource = "http_test_server"
 calls = 1
 
 [[count]]
@@ -1711,6 +1721,11 @@ calls = 1
 path = "internal/api/dashboardbff/wire_contract_test.go"
 resource = "http_test_server"
 calls = 1
+
+[[count]]
+path = "internal/api/decode_session_list_test.go"
+resource = "http_test_server"
+calls = 5
 
 [[count]]
 path = "internal/api/genclient/genclient_test.go"

@@ -9699,6 +9699,10 @@
           "agent_kind": {
             "type": "string"
           },
+          "agent_name": {
+            "description": "The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Sent on every session by Gas City 1.6 and later servers, empty when the session records none; older servers omit it.",
+            "type": "string"
+          },
           "alias": {
             "type": "string"
           },
@@ -9787,11 +9791,29 @@
           "title": {
             "type": "string"
           },
+          "transport": {
+            "description": "How gc drives the session runtime, for example tmux or acp. Empty when unknown.",
+            "type": "string"
+          },
           "turn": {
             "$ref": "#/components/schemas/SessionTurn",
             "description": "The turn the session's conversation lane last observed, with the runtime's turn capabilities. Set on a single-session read while the city's conversation lane host runs with a kind of [ops] authoritative, once its observer has recorded the session's runtime row."
           },
+          "wake_reasons": {
+            "description": "Why the controller keeps this open session awake (for example session, config, create, attached, keep-warm, wait, pending, pin), as gc session list's REASON column shows them when no lifecycle reason applies. Sent only on GET /sessions?wake_reasons=true, by servers that compute them.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "work_dir": {
+            "type": "string"
+          },
+          "worker_dir": {
+            "description": "The agent process's canonical working directory (a per-bead worktree when it has one), which work_dir may not be.",
             "type": "string"
           }
         },
@@ -55801,6 +55823,16 @@
             "name": "peek",
             "schema": {
               "description": "Include last output preview.",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Include wake_reasons on each open session: why the controller keeps it awake, as gc session list's REASON column shows them. Costs runtime probes per session.",
+            "explode": false,
+            "in": "query",
+            "name": "wake_reasons",
+            "schema": {
+              "description": "Include wake_reasons on each open session: why the controller keeps it awake, as gc session list's REASON column shows them. Costs runtime probes per session.",
               "type": "boolean"
             }
           }
