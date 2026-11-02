@@ -5,7 +5,7 @@
 # profile reconciler v2 reads. See docs/reference/exec-session-provider.md
 # for the full protocol specification.
 #
-# Dependencies: bash, screen, jq, flock, ps, awk, cksum (Linux: /proc).
+# Dependencies: bash, screen, jq, flock, procps ps, awk, cksum (Linux: /proc).
 #
 # Declares observe.v1 and report-attachment, so it is v2-ready; city-scoped
 # (each city gets its own private screen socket directory, so its listing
@@ -15,17 +15,23 @@
 #
 # Usage: GC_SESSION=exec:/path/to/gc-session-screen gc start <city>
 #
-# State: GC_EXEC_STATE_DIR, else $XDG_RUNTIME_DIR/gc-session-screen, else
-# ${TMPDIR:-/tmp}/gc-session-screen-<uid>, a 0700 directory owned by the
-# user (the script refuses a symlink or another owner's directory). Per city
-# it holds the screen sockets (SCREENDIR) and each box's metadata, written
-# 0600 by rename, so no write follows a link. To reach a box with screen
-# directly, point SCREENDIR at <state>/city-<cksum of GC_EXEC_CITY_PATH>/s;
-# `gc session attach` does it for you.
+# State: <home>/.gc-session-screen, where <home> is the user's home directory
+# from the password database, never from the caller's environment: the
+# supervisor, a cron job and a sudo shell resolve one directory, so none of
+# them can read a box as absent and start a twin. GC_EXEC_STATE_DIR overrides
+# it, and then must be the same for every gc process of the city. It is a
+# 0700 directory owned by the user (the script refuses a symlink or another
+# owner's directory). Per city it holds the screen sockets (SCREENDIR) and
+# each box's metadata, written 0600 by rename, so no write follows a link. To
+# reach a box with screen directly, point SCREENDIR at
+# <state>/city-<cksum of GC_EXEC_CITY_PATH>/s; `gc session attach` does it for
+# you.
 #
-# Upgrading from the previous version: boxes it started live in the user's
-# default screen directory, which this version does not list. Stop them
-# before upgrading (or `screen -ls` and stop them by hand after).
+# Upgrading from the previous version: stop the city with the OLD script in
+# place (`gc stop <city>`: the controller and every session), then replace
+# the file and start the city again. The previous version kept its boxes in
+# the user's default screen directory, which this version does not list, so
+# replacing the file under a running controller starts every session twice.
 #
 # --- Gas Town feature parity notes ---
 #
@@ -42,7 +48,7 @@ op="${1:?missing operation}"
 name="${2:-}"
 
 IDENTITY_KEYS="GC_SESSION_ID GC_RUNTIME_EPOCH GC_INSTANCE_TOKEN GT_PROCESS_NAMES"
-META_KEYS="$IDENTITY_KEYS GC_CITY_PATH"
+META_KEYS="$IDENTITY_KEYS GC_CITY_PATH GC_BIN"
 
 die() { echo "gc-session-screen: $*" >&2; exit 1; }
 
@@ -55,12 +61,27 @@ private_dir() {
   chmod 700 "$1"
 }
 
+# user_home prints the user's home directory from the password database
+# (getent, else the shell's ~user lookup), ignoring $HOME.
+user_home() {
+  local h=""
+  if command -v getent >/dev/null 2>&1; then
+    h=$(getent passwd "$(id -u)" | cut -d: -f6) || h=""
+  fi
+  if [ -z "$h" ]; then
+    h=$(eval "printf %s ~$(id -un)")
+  fi
+  case "$h" in
+    /*) printf %s "$h" ;;
+    *) return 1 ;;
+  esac
+}
+
 if [ -n "${GC_EXEC_STATE_DIR:-}" ]; then
   STATE_ROOT=$GC_EXEC_STATE_DIR
-elif [ -n "${XDG_RUNTIME_DIR:-}" ]; then
-  STATE_ROOT=$XDG_RUNTIME_DIR/gc-session-screen
 else
-  STATE_ROOT=${TMPDIR:-/tmp}/gc-session-screen-$(id -u)
+  home=$(user_home) || die "cannot find the home directory of $(id -un)"
+  STATE_ROOT=$home/.gc-session-screen
 fi
 private_dir "$STATE_ROOT"
 CITY_KEY=$(printf %s "${GC_EXEC_CITY_PATH:-}" | cksum | cut -d' ' -f1)
@@ -185,17 +206,20 @@ created_of() {
   fi
 }
 
-# agent_states reads one process snapshot and, for each "<root pid> <names>"
-# line on stdin (names comma-separated), prints "<root pid> alive|dead": alive
-# when any descendant of the root matches a name as gc's process table does
-# (internal/runtime/proctable ProcessMatchesNameSet): the command's base
-# name, argv[0]'s base name, or, under a node/bun/npx/deno interpreter, the
-# first script argument's base name, with or without its extension. It fails
+# agent_states reads one process snapshot and, for each "<root pid> <names>
+# [<gc binary>]" line on stdin (names comma-separated), prints "<root pid>
+# alive|dead": alive when any descendant of the root matches a name as gc's
+# process table does (internal/runtime/proctable): the command's base name,
+# argv[0]'s base name, or, under a node/bun/npx/deno interpreter, the first
+# script argument's base name, with or without its extension. As there,
+# "kimi" also accepts "kimi-code", and "gc" also accepts the base name of the
+# gc binary the box runs (its GC_BIN, a renamed or wrapped gc). It fails
 # when the snapshot cannot be read, which leaves every agent unknown.
 agent_states() {
-  local procs comms
-  procs=$(ps -e -o pid= -o ppid= -o args=) || return 1
-  comms=$(ps -e -o pid= -o comm=) || return 1
+  local procs
+  # One snapshot in fixed columns (pid, ppid, comm, args): a command name
+  # may hold spaces ("tmux: server"), so columns are read by position.
+  procs=$(ps -e -o pid:10= -o ppid:10= -o comm:16= -o args=) || return 1
   awk '
     function base(p,   n, a) { n = split(p, a, "/"); return a[n] }
     function noext(b,   i) { i = match(b, /\.[^.]*$/); return i > 0 ? substr(b, 1, i - 1) : b }
@@ -213,10 +237,20 @@ agent_states() {
       return 0
     }
     BEGIN { interp["node"]; interp["bun"]; interp["npx"]; interp["deno"]; runner["run"]; runner["exec"]; runner["x"] }
-    FILENAME == ARGV[1] { pid = $1; ppid = $2; $1 = ""; $2 = ""; sub(/^ +/, ""); args[pid] = $0; kids[ppid] = kids[ppid] " " pid; next }
-    FILENAME == ARGV[2] { pid = $1; $1 = ""; sub(/^ +/, ""); comm[pid] = $0; next }
+    function trim(x) { sub(/^ +/, "", x); sub(/ +$/, "", x); return x }
+    FILENAME == ARGV[1] {
+      pid = trim(substr($0, 1, 10)); ppid = trim(substr($0, 12, 10))
+      comm[pid] = trim(substr($0, 23, 16)); args[pid] = trim(substr($0, 40))
+      kids[ppid] = kids[ppid] " " pid; next
+    }
     {
-      root = $1; split("", want); n = split($2, ns, ","); for (i = 1; i <= n; i++) if (ns[i] != "") want[ns[i]]
+      root = $1; split("", want); n = split($2, ns, ",")
+      for (i = 1; i <= n; i++) {
+        if (ns[i] == "") continue
+        want[ns[i]]
+        if (ns[i] == "kimi") want["kimi-code"]
+        if (ns[i] == "gc" && $3 != "" && $3 != "-") want[base($3)]
+      }
       state = "dead"; split("", seen); queue = kids[root]
       while (queue != "" && state == "dead") {
         sub(/^ +/, "", queue); p = queue; sub(/ .*/, "", p); sub(/^[^ ]+/, "", queue)
@@ -224,7 +258,7 @@ agent_states() {
         seen[p]; if (matches(p)) state = "alive"; queue = queue kids[p]
       }
       print root " " state
-    }' <(printf '%s\n' "$procs") <(printf '%s\n' "$comms") -
+    }' <(printf '%s\n' "$procs") -
 }
 
 # identity_of sets IDENT to a box's identity JSON: its metadata once start
@@ -248,17 +282,22 @@ identity_of() {
       for k in $IDENTITY_KEYS; do
         if [ -n "${!k:-}" ]; then json+="$sep\"$k\":$(json_str "${!k}")"; sep=","; fi
       done
-      printf '%s}' "$json"
+      # A wrapper with no identity in it proves no identity: unreadable.
+      if [ -z "$sep" ]; then printf null; else printf '%s}' "$json"; fi
     )
   else
     IDENT=null
   fi
 }
 
-# procs_of sets PROCS to a box's stored process names (GT_PROCESS_NAMES).
+# procs_of sets PROCS to a box's stored process names (GT_PROCESS_NAMES)
+# and GCBIN to the gc binary it runs (GC_BIN, "-" when unknown).
 procs_of() {
   read_into "$META/$1.meta.GT_PROCESS_NAMES"
   PROCS=${REPLY// /}
+  read_into "$META/$1.meta.GC_BIN"
+  GCBIN=${REPLY// /}
+  GCBIN=${GCBIN:--}
 }
 
 # forget removes a box's metadata (not its lock).
@@ -299,7 +338,9 @@ case "$op" in
 
     # A screen socket is "$SCREENDIR/<pid>.<name>", and a Unix socket path
     # longer than 107 bytes cannot be created: screen would start nothing.
-    if [ $(( ${#SCREENDIR} + 9 + ${#name} )) -gt 107 ]; then
+    # Counted in bytes, whatever the locale.
+    sock_bytes=$(LC_ALL=C; s="$SCREENDIR/1234567.$name"; printf %s "${#s}")
+    if [ "$sock_bytes" -gt 107 ]; then
       die "start: the screen socket path for $name would exceed 107 bytes; use a shorter GC_EXEC_STATE_DIR or session name"
     fi
 
@@ -377,8 +418,8 @@ case "$op" in
       sleep 0.1
     done
     if [ -z "$up" ]; then
-      forget "$name"
-      die "start: screen started no session $name"
+      # Ambiguous: the session may still appear, so its identity stays.
+      die "start: screen started no session $name within 2s"
     fi
     ;;
 
@@ -449,7 +490,8 @@ case "$op" in
     if [ "$STATE" = unknown ] || [ -z "$CREATED" ]; then echo '{"state":"unknown"}'; exit 0; fi
     out="{\"state\":\"$STATE\",\"object\":{\"id\":\"$PID\",\"created\":$(json_str "$CREATED")}"
     if [ "$STATE" = running ] && [ -n "$names" ]; then
-      if agent=$(printf '%s %s\n' "$PID" "$names" | agent_states); then
+      procs_of "$name"
+      if agent=$(printf '%s %s %s\n' "$PID" "$names" "$GCBIN" | agent_states); then
         out+=",\"agent\":\"${agent#* }\""
       fi
     fi
@@ -472,7 +514,7 @@ case "$op" in
       classify "$status"
       [ "$STATE" = running ] || continue
       procs_of "$sname"
-      [ -n "$PROCS" ] && specs+="$pid $PROCS"$'\n'
+      [ -n "$PROCS" ] && specs+="$pid $PROCS $GCBIN"$'\n'
     done <<< "$ROWS"
     if [ -n "$specs" ] && states=$(printf '%s' "$specs" | agent_states); then
       while read -r pid state; do agent_of[$pid]=$state; done <<< "$states"
@@ -528,7 +570,7 @@ case "$op" in
         # Kill only a box whose agent is known dead: no stored process
         # names, or a process snapshot that cannot be read, is "changed".
         [ -n "$PROCS" ] || { echo changed; exit 0; }
-        agent=$(printf '%s %s\n' "$PID" "$PROCS" | agent_states) || { echo changed; exit 0; }
+        agent=$(printf '%s %s %s\n' "$PID" "$PROCS" "$GCBIN" | agent_states) || { echo changed; exit 0; }
         [ "${agent#* }" = dead ] || { echo changed; exit 0; }
         screen -S "$PID.$name" -X quit >/dev/null 2>&1 || true
         gone_after "$name" || die "kill-object: $PID.$name survived its kill"
@@ -561,7 +603,8 @@ case "$op" in
     if [ -z "$name" ] || [ -z "$names" ]; then echo true; exit 0; fi
     valid_name "$name"
     target "$name" || { echo false; exit 0; }
-    if agent=$(printf '%s %s\n' "$PID" "$names" | agent_states) && [ "${agent#* }" = dead ]; then
+    procs_of "$name"
+    if agent=$(printf '%s %s %s\n' "$PID" "$names" "$GCBIN" | agent_states) && [ "${agent#* }" = dead ]; then
       echo false
     else
       echo true

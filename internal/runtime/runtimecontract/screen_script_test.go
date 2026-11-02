@@ -18,8 +18,8 @@ import (
 
 // fakeBackend is a directory of fake screen and ps executables. screen -ls
 // prints the file ls (or fails when ls.fail exists) and logs every other
-// invocation to calls; ps prints ps.args / ps.comm for the snapshots (or
-// fails them when ps.fail exists) and a fixed start time for -o lstart=.
+// invocation to calls; ps prints ps.procs as its snapshot (or fails it when
+// ps.fail exists) and a fixed start time for -o lstart=.
 type fakeBackend struct {
 	t                  *testing.T
 	dir, script, state string
@@ -46,25 +46,43 @@ func newFakeBackend(t *testing.T) *fakeBackend {
 			t.Fatal(err)
 		}
 	}
-	write("screen", `if [ "$1" = -ls ]; then
+	// Sessions a test sets live in $F/ls; sessions the script starts live in
+	// its SCREENDIR, as real screen keeps them, so a script resolving
+	// another socket directory does not see them.
+	write("screen", `L="$SCREENDIR/fake-ls"
+if [ "$1" = -ls ]; then
   if [ -f "$F/ls.fail" ]; then echo "Cannot open your terminal"; exit 1; fi
-  if [ -s "$F/ls" ]; then printf 'There are screens on:\n'; cat "$F/ls"; printf '%s Sockets in /x.\n' 1; exit 1; fi
+  rows=$(cat "$F/ls" "$L" 2>/dev/null)
+  if [ -n "$rows" ]; then printf 'There are screens on:\n%s\n%s Sockets in /x.\n' "$rows" 1; exit 1; fi
   echo "No Sockets found in /x."; exit 1
 fi
 printf '%s\n' "$*" >> "$F/calls"
 # -dmS creates a session; -wipe and -X quit remove one, unless sticky.
 case "$1" in
-  -dmS) [ -f "$F/nobox" ] || printf '\t4194999.%s\t(11/02/2026 01:00:00 PM)\t(Detached)\n' "$2" >> "$F/ls" ;;
+  -dmS) [ -f "$F/nobox" ] || printf '\t4194999.%s\t(11/02/2026 01:00:00 PM)\t(Detached)\n' "$2" >> "$L" ;;
   -wipe | -S)
     if [ "$1" = -wipe ] || [ "$4" = quit ]; then
-      [ -f "$F/sticky" ] || { grep -v -F "$(printf '\t%s\t' "$2")" "$F/ls" > "$F/ls.new" || true; mv "$F/ls.new" "$F/ls"; }
+      if [ ! -f "$F/sticky" ]; then
+        for f in "$F/ls" "$L"; do
+          [ -f "$f" ] || continue
+          grep -v -F "$(printf '\t%s\t' "$2")" "$f" > "$f.new" || true; mv "$f.new" "$f"
+        done
+      fi
     fi ;;
 esac
 `)
+	write("getent", `[ "$1" = passwd ] && printf 'u:x:%s:%s::%s:/bin/sh\n' "$2" "$2" "$(cat "$F/home")"
+`)
+	// The snapshot is ps.procs, one "<pid> <ppid> <comm> <args...>" per
+	// line, printed in the fixed columns the script asks for.
 	write("ps", `case "$*" in
   *lstart*) echo "Mon Nov  2 00:00:00 2026" ;;
-  *args=*) [ -f "$F/ps.fail" ] && exit 1; cat "$F/ps.args" 2>/dev/null ;;
-  *comm=*) [ -f "$F/ps.fail" ] && exit 1; cat "$F/ps.comm" 2>/dev/null ;;
+  *args=*)
+    [ -f "$F/ps.fail" ] && exit 1
+    [ -f "$F/ps.procs" ] || exit 0
+    while read -r pid ppid comm args; do
+      printf '%10s %10s %-16.16s %s\n' "$pid" "$ppid" "$(printf %s "$comm" | tr '+' ' ')" "$args"
+    done < "$F/ps.procs" ;;
 esac
 `)
 	// A short state directory, so the socket-path guard admits ordinary
@@ -81,8 +99,13 @@ esac
 	}}
 }
 
-// rows sets screen -ls to the given "<pid>.<name>\t<status>" rows.
+// rows sets screen -ls to exactly the given "<pid>.<name>\t<status>" rows,
+// replacing the sessions the script started.
 func (f *fakeBackend) rows(rows ...string) {
+	started, _ := filepath.Glob(filepath.Join(f.state, "city-*", "s", "fake-ls"))
+	for _, p := range started {
+		f.file(p, "")
+	}
 	var b strings.Builder
 	for _, r := range rows {
 		pidName, status, _ := strings.Cut(r, "\t")
@@ -93,7 +116,10 @@ func (f *fakeBackend) rows(rows ...string) {
 
 func (f *fakeBackend) file(name, content string) {
 	f.t.Helper()
-	if err := os.WriteFile(filepath.Join(f.dir, name), []byte(content), 0o644); err != nil {
+	if !filepath.IsAbs(name) {
+		name = filepath.Join(f.dir, name)
+	}
+	if err := os.WriteFile(name, []byte(content), 0o644); err != nil {
 		f.t.Fatal(err)
 	}
 }
@@ -155,8 +181,7 @@ func TestScreenScriptAttachmentNeverFailsOpen(t *testing.T) {
 
 	// A readable process table in which the agent is not running: only the
 	// attachment keeps the box.
-	f.file("ps.args", "4194101 4194001 /bin/sh /x/wrapper.sh\n")
-	f.file("ps.comm", "4194101 sh\n")
+	f.file("ps.procs", "4194101 4194001 sh /bin/sh /x/wrapper.sh\n")
 	for _, status := range []string{"Attached", "Multi, attached"} {
 		f.rows("4194001.mc-z\t" + status)
 		f.run("nosuch", "set-meta", "mc-z", "GT_PROCESS_NAMES")
@@ -231,19 +256,21 @@ func TestScreenScriptTargetsTheExactSession(t *testing.T) {
 func TestScreenScriptAgentMatching(t *testing.T) {
 	f := newFakeBackend(t)
 	f.rows("4194001.mc-a\tDetached")
+	// Each process is "<pid> <ppid> <comm> <args...>"; "+" in comm is a space.
 	for _, tc := range []struct {
-		name, args, comm, names, want string
+		name, proc, names, want string
 	}{
-		{"node 25 comm", "4194102 4194101 node /usr/local/bin/gemini --yolo", "4194102 node-MainThread", "gemini", "alive"},
-		{"interpreter script with an extension", "4194102 4194101 node /opt/copilot/index.js", "4194102 node", "index", "alive"},
-		{"runner subcommand", "4194102 4194101 npx run codex", "4194102 npx", "codex", "alive"},
-		{"long name truncated in comm", "4194102 4194101 /opt/bin/very-long-agent-name --x", "4194102 very-long-agent", "very-long-agent-name", "alive"},
-		{"grandchild", "4194102 4194101 /usr/bin/claude", "4194102 claude", "claude", "alive"},
-		{"not running", "4194102 4194101 /usr/bin/vim", "4194102 vim", "claude", "dead"},
-		{"another box's agent", "4194102 1 /usr/bin/claude", "4194102 claude", "claude", "dead"},
+		{"node 25 comm", "4194102 4194101 node-MainThread node /usr/local/bin/gemini --yolo", "gemini", "alive"},
+		{"interpreter script with an extension", "4194102 4194101 node node /opt/copilot/index.js", "index", "alive"},
+		{"runner subcommand", "4194102 4194101 npx npx run codex", "codex", "alive"},
+		{"long name truncated in comm", "4194102 4194101 very-long-agent /opt/bin/very-long-agent-name --x", "very-long-agent-name", "alive"},
+		{"comm with a space", "4194102 4194101 tmux:+server /usr/bin/claude", "claude", "alive"},
+		{"matched by comm alone", "4194102 4194101 claude /opt/runner --x", "claude", "alive"},
+		{"grandchild", "4194102 4194101 claude /usr/bin/claude", "claude", "alive"},
+		{"not running", "4194102 4194101 vim /usr/bin/vim", "claude", "dead"},
+		{"another box's agent", "4194102 1 claude /usr/bin/claude", "claude", "dead"},
 	} {
-		f.file("ps.args", "4194101 4194001 /bin/sh /x/wrapper.sh\n"+tc.args+"\n")
-		f.file("ps.comm", "4194101 sh\n"+tc.comm+"\n")
+		f.file("ps.procs", "4194101 4194001 sh /bin/sh /x/wrapper.sh\n"+tc.proc+"\n")
 		out, code := f.run(tc.names+"\n", "observe", "mc-a")
 		var o struct {
 			State, Agent string
@@ -336,14 +363,25 @@ func TestScreenScriptStartNeedsTheBox(t *testing.T) {
 	if strings.Contains(f.calls(), "-dmS") {
 		t.Fatalf("start ran screen for a socket path that cannot fit: %q", f.calls())
 	}
+	// Two bytes per character: 30 characters fit, 60 bytes do not.
+	if _, code := f.run(`{"command":"sleep 300"}`, "start", strings.Repeat("é", 30)+strings.Repeat("n", 10)); code == 0 {
+		t.Fatal("start with a socket path over 107 bytes (but not characters) succeeded")
+	}
+	if strings.Contains(f.calls(), "-dmS") {
+		t.Fatalf("start ran screen for a socket path whose bytes cannot fit: %q", f.calls())
+	}
 	f.file("nobox", "")
 	if _, code := f.run(`{"command":"sleep 300","env":{"GC_SESSION_ID":"sid-n"}}`, "start", "mc-n"); code == 0 {
 		t.Fatal("start succeeded although screen started no session")
 	}
-	if out, _ := f.run("", "get-meta", "mc-n", "GC_SESSION_ID"); out != "" {
-		t.Fatalf("identity of a start that created no box = %q, want none", out)
+	// Ambiguous: the session may yet appear, so its identity stays.
+	if out, _ := f.run("", "get-meta", "mc-n", "GC_SESSION_ID"); out != "sid-n" {
+		t.Fatalf("identity of a start whose box did not appear in time = %q, want it kept", out)
 	}
-	if _, code := f.run(`{"command":"sleep 300"}`, "start", "mc-ok"); code == 0 || !strings.Contains(f.calls(), "-dmS mc-ok") {
+	if err := os.Remove(filepath.Join(f.dir, "nobox")); err != nil {
+		t.Fatal(err)
+	}
+	if _, code := f.run(`{"command":"sleep 300"}`, "start", "mc-ok"); code != 0 || !strings.Contains(f.calls(), "-dmS mc-ok") {
 		t.Fatalf("a start with an ordinary name did not reach screen: %q", f.calls())
 	}
 }
@@ -410,5 +448,73 @@ func TestScreenScriptIdentityFromTheWrapper(t *testing.T) {
 	var o struct{ Identity map[string]string }
 	if err := json.Unmarshal([]byte(out), &o); err != nil || o.Identity["GC_SESSION_ID"] != "sid-w" || o.Identity["GC_INSTANCE_TOKEN"] != "tok w'q" {
 		t.Fatalf("observe without the sidecar = %q (%v), want the wrapper's identity", out, err)
+	}
+
+	// A wrapper carrying no identity proves none: identity null, never {}.
+	if _, code := f.run(`{"command":"sleep 300"}`, "start", "mc-v"); code != 0 {
+		t.Fatal("start mc-v failed")
+	}
+	if err := os.Remove(filepath.Join(meta, "mc-v.identity")); err != nil {
+		t.Fatal(err)
+	}
+	if out, _ := f.run("", "observe", "mc-v"); !strings.Contains(out, `"identity":null`) {
+		t.Fatalf("observe of a box whose wrapper carries no identity = %q, want identity null", out)
+	}
+}
+
+// Kills (MUST A) a state directory that follows the caller's environment:
+// the supervisor, a cron job and a sudo shell differ in XDG_RUNTIME_DIR,
+// TMPDIR and HOME, and each must find the box the other started; a box read
+// absent there would be started twice.
+func TestScreenScriptStateIgnoresTheCallersEnvironment(t *testing.T) {
+	f := newFakeBackend(t)
+	home, err := os.MkdirTemp("", "gch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	f.file("home", home)
+	base := []string{f.env[0], "GC_EXEC_CITY_PATH=/fake-city"} // PATH, no GC_EXEC_STATE_DIR
+	supervisor := append(append([]string{}, base...), "XDG_RUNTIME_DIR="+f.dir+"/run-a", "TMPDIR="+f.dir+"/tmp-a", "HOME="+f.dir+"/home-a")
+	cron := append(append([]string{}, base...), "TMPDIR="+f.dir+"/tmp-b", "HOME="+f.dir+"/home-b")
+	f.env = supervisor
+	if _, code := f.run(`{"command":"sleep 300","env":{"GC_SESSION_ID":"sid-m"}}`, "start", "mc-mayor"); code != 0 {
+		t.Fatal("start failed")
+	}
+	f.env = cron
+	if out, _ := f.run("", "observe", "mc-mayor"); !strings.Contains(out, `"running"`) || !strings.Contains(out, "sid-m") {
+		t.Fatalf("observe from another environment = %q, want the running box with its identity", out)
+	}
+	if _, code := f.run(`{"command":"sleep 300","fresh_only":true}`, "start", "mc-mayor"); code != 73 {
+		t.Fatalf("a fresh_only start from another environment exited %d, want 73 (no twin)", code)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".gc-session-screen")); err != nil {
+		t.Fatalf("state is not under the password database's home: %v", err)
+	}
+}
+
+// Kills (MUST B) proctable's name aliases missing from the script: "kimi"
+// accepts kimi-code, and "gc" accepts the base name of the gc binary the
+// box runs (its GC_BIN), so neither live agent reads dead and is killed.
+func TestScreenScriptAgentAliases(t *testing.T) {
+	f := newFakeBackend(t)
+	f.rows("4194001.mc-k\tDetached", "4194002.mc-g\tDetached")
+	f.run("/nix/store/abc-gc/bin/.gc-wrapped", "set-meta", "mc-g", "GC_BIN")
+	f.file("ps.procs", "4194101 4194001 kimi-code kimi-code --yolo\n4194201 4194002 .gc-wrapped /nix/store/abc-gc/bin/.gc-wrapped start\n")
+	for name, names := range map[string]string{"mc-k": "kimi", "mc-g": "gc"} {
+		out, _ := f.run(names+"\n", "observe", name)
+		if !strings.Contains(out, `"agent":"alive"`) {
+			t.Errorf("%s with process name %s: observe = %q, want agent alive", name, names, out)
+		}
+	}
+
+	// A box started with GC_BIN in its env keeps it for the alias.
+	if _, code := f.run(`{"command":"sleep 300","env":{"GC_BIN":"/opt/gc/.gc-wrapped","GT_PROCESS_NAMES":"gc"}}`, "start", "mc-s"); code != 0 {
+		t.Fatal("start mc-s failed")
+	}
+	f.file("ps.procs", "4194301 4194999 .gc-wrapped /opt/gc/.gc-wrapped start\n")
+	inv, _ := f.run("", "inventory")
+	if !strings.Contains(inv, `"name":"mc-s","state":"running"`) || !strings.Contains(inv, `"agent":"alive"`) {
+		t.Errorf("inventory of a box running its own GC_BIN = %q, want its agent alive", inv)
 	}
 }

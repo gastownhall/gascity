@@ -19,12 +19,21 @@ session, captures output via `hardcopy`, and stores each box's identity and
 metadata in 0600 sidecar files. Each city gets its own private screen
 socket directory, so its listing holds only the boxes gc started for it.
 
-State lives in `GC_EXEC_STATE_DIR`, else `$XDG_RUNTIME_DIR/gc-session-screen`,
-else `${TMPDIR:-/tmp}/gc-session-screen-<uid>` (a 0700 directory the script
-refuses to use if it is a symlink or someone else's). Keep it short: a
-screen socket path must fit 107 bytes. Boxes started by an earlier version
-live in the user's default screen directory and are not listed: stop them
-before upgrading.
+State lives in `<home>/.gc-session-screen`, where `<home>` is the user's
+home directory from the password database, never from `XDG_RUNTIME_DIR`,
+`TMPDIR` or `HOME`: the supervisor, cron jobs and sudo shells all resolve
+the same directory, so none of them can read a running box as absent and
+start a twin. `GC_EXEC_STATE_DIR` overrides it, and then must be identical
+for every gc process of the city. It is a 0700 directory the script refuses
+to use if it is a symlink or someone else's. Keep it short: a screen socket
+path must fit 107 bytes.
+
+**Upgrading from an earlier version:** with the old script still in place,
+stop the city (`gc stop <city>`: the controller and every session), then
+replace the file and start the city again. The earlier version kept its
+boxes in the user's default screen directory, which this version does not
+list: replacing the file under a running controller starts every session a
+second time.
 
 **Dependencies:** `bash`, `screen`, `jq`, `flock`, `ps`, `awk`, `cksum`
 

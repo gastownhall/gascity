@@ -720,6 +720,10 @@ zombie, and v2 recycles it with `kill-object`. Answer `dead` only when sure:
   names as its base name, with or without its extension. The command name
   alone is not enough: the kernel truncates it to 15 characters, and Node 25
   names its main thread `node-MainThread`.
+- Apply gc's name aliases: `kimi` also matches `kimi-code` (the kimi entry
+  point's command and argv[0]), and `gc` also matches the base name of the
+  gc binary the session runs (its `GC_BIN`, which differs when gc is
+  renamed or wrapped, for example `.gc-wrapped`).
 - Read one process snapshot (for example `ps -eo pid=,ppid=,args=` and
   `ps -eo pid=,comm=`) for every box, not one probe per box.
 - When the snapshot cannot be read, or the box has no process names, omit
@@ -823,8 +827,14 @@ esac
 ## Environment Variables
 
 Scripts can use `GC_EXEC_STATE_DIR` (if set) as a directory for sidecar
-state files (metadata, wrappers). If not set, scripts should use a
-reasonable default under `$TMPDIR` or `/tmp`.
+state files (metadata, wrappers). gc does not set it. A script's default
+must not depend on the caller's session environment: the supervisor, a
+cron job and a sudo shell differ in `XDG_RUNTIME_DIR`, `TMPDIR` and even
+`HOME`, and a box one of them cannot find reads absent, so a v2 start
+creates a twin. Derive the default from something fixed per user (the home
+directory in the password database, for example). An operator who sets
+`GC_EXEC_STATE_DIR` must set the same value for every gc process of the
+city.
 
 gc sets `GC_EXEC_CITY_NAME` and `GC_EXEC_CITY_PATH` on every operation to
 the city the provider serves. A script shared by several cities on one

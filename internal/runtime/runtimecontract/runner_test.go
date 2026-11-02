@@ -135,7 +135,9 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		{ReqObserveObjectStable, edit("observe", `printf '{"state":"running","object":{"id":"%s","created":"%s"}' "$(cat "$box/id")" "$(cat "$box/created")";`, `printf '{"state":"running"';`), "a running box without its object"},
 		{ReqObserveObjectStable, edit("observe", `echo '}'`, `echo '} {}'`), "trailing bytes after the answer"},
 		{ReqObserveAgentLiveness, edit("observe", `agent=dead;`, `agent=alive;`), "agent always alive"},
+		{ReqObserveAgentLiveness, edit("observe", `then agent=dead;`, `then agent="";`), "agent omitted for a process the box does not run"},
 		{ReqObserveInventoryComplete, edit("inventory", `sep=','; done;`, `sep=','; break; done;`), "inventory drops every entry but the first"},
+		{ReqObserveInventoryComplete, edit("inventory", `ident; printf '}';`, `printf '{}'; printf '}';`), "inventory identity disagrees with observe's"},
 		{ReqObserveInventoryComplete, map[string]string{
 			"stop":       `if [ -d "$box" ]; then : > "$box/stopped"; fi`,
 			"is-running": `if [ -d "$box" ] && [ ! -f "$box/stopped" ]; then echo true; else echo false; fi`,
@@ -156,6 +158,7 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		{ReqObserveFaultsReadUnknown, edit("is-attached", `be || exit 1;`, `be || echo false;`), "is-attached answers false when the backend fails (|| echo false)"},
 		{ReqObserveWithinBound, set("observe", `sleep 5; `+g["observe"]), "observe sleeps 5s"},
 		{ReqObserveCityScoped, edit("inventory", `for box in "$B"/*;`, `for box in "$S"/city*/*;`), "inventory ignores the city"},
+		{ReqObserveCityScoped, edit("inventory", `for box in "$B"/*;`, `for box in "$B"/none*;`), "inventory omits its own city's box"},
 		{ReqObserveInventoryHasActivity, edit("inventory", `"last_activity":"2026-01-01T00:00:00Z"`, `"last_activity":null`), "inventory reports no activity"},
 	}
 	// Every catalog requirement must have a mutant — otherwise a new
