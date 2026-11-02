@@ -1645,6 +1645,116 @@ func TestRenderPromptCityScopeFragmentCollisionLastRigWins(t *testing.T) {
 	}
 }
 
+// renderPoolWorkerPrompt renders the shipped pool-worker template with the
+// core pack on the pack-dir list, the way a composed city does, and fails the
+// test on any fragment-resolution warning.
+func renderPoolWorkerPrompt(t *testing.T) string {
+	t.Helper()
+	chdirToRealPackageDir(t)
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("filepath.Abs(repo root): %v", err)
+	}
+	coreDir := filepath.Join(repoRoot, "internal", "bootstrap", "packs", "core")
+	promptPath := filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md")
+	var stderr strings.Builder
+	got := renderPrompt(fsys.OSFS{}, t.TempDir(), "", promptPath, PromptContext{AgentName: "claude"}, "", &stderr,
+		[]string{coreDir}, nil, nil)
+	if stderr.Len() != 0 {
+		t.Fatalf("renderPrompt(pool-worker) wrote to stderr: %s", stderr.String())
+	}
+	return got
+}
+
+// renderedPromptSection returns the "## <heading>" section of a rendered
+// prompt, up to the next level-two heading. The heading may be a prefix of
+// the actual heading line ("## Molecules" matches "## Molecules — STOP…").
+// Assertions scoped to a section keep a rule from passing only because its
+// words appear somewhere else in the document.
+func renderedPromptSection(t *testing.T, body, heading string) string {
+	t.Helper()
+	marker := "## " + heading
+	start := strings.Index(body, marker)
+	if start < 0 {
+		t.Fatalf("rendered prompt has no %q section:\n%s", marker, body)
+	}
+	section := body[start:]
+	if end := strings.Index(section[len(marker):], "\n## "); end >= 0 {
+		section = section[:len(marker)+end+1]
+	}
+	return section
+}
+
+// flattenPromptText collapses whitespace so an assertion is immune to the
+// template's line wrapping.
+func flattenPromptText(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules pins the
+// pool-worker contract for the two execution shapes a hook claim can hand a
+// worker: a graph.v2 workflow step (an individually claimable bead whose
+// scope is exactly itself) and a legacy molecule attachment (navigated by
+// mol current after its root is inspected). The pre-fix prompt denied that
+// steps are materialized as beads and then told the worker to navigate
+// molecule siblings — under graph.v2 that is unclaimed-sibling work racing
+// the controller. Subtests follow the acceptance criteria AC-1 through AC-5.
+func TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules(t *testing.T) {
+	t.Run("AC-1 claimed workflow step bounds the assignment", func(t *testing.T) {
+		got := renderPoolWorkerPrompt(t)
+
+		// The classification sits between the startup protocol and the
+		// molecule guidance: the worker must classify the claimed bead
+		// before any execution path can apply.
+		startupIdx := strings.Index(got, "## Startup Protocol")
+		classifyIdx := strings.Index(got, "## Classify the Bead the Hook Returned")
+		stepsIdx := strings.Index(got, "## Workflow Steps")
+		molIdx := strings.Index(got, "## Molecules")
+		if startupIdx < 0 || classifyIdx < 0 || stepsIdx < 0 || molIdx < 0 {
+			t.Fatalf("rendered prompt lost a required section (startup=%d classify=%d steps=%d molecules=%d):\n%s",
+				startupIdx, classifyIdx, stepsIdx, molIdx, got)
+		}
+		if startupIdx >= classifyIdx || classifyIdx >= stepsIdx || stepsIdx >= molIdx {
+			t.Errorf("section order changed: classify must follow the startup protocol and precede the molecules guidance")
+		}
+
+		// gc.root_bead_id is the individual-step ownership cue, considered
+		// before molecule_id; the assignment never expands into siblings.
+		classify := flattenPromptText(renderedPromptSection(t, got, "Classify the Bead the Hook Returned"))
+		for _, want := range []string{
+			"gc.root_bead_id",
+			"molecule_id",
+			"Never expand its scope into sibling",
+		} {
+			if !strings.Contains(classify, want) {
+				t.Errorf("classification section missing %q:\n%s", want, classify)
+			}
+		}
+
+		// The step guidance limits execution, outcome and close to the
+		// claimed step and reserves graph progression and controls for the
+		// controller.
+		steps := flattenPromptText(renderedPromptSection(t, got, "Workflow Steps"))
+		for _, want := range []string{
+			"gc.root_bead_id",
+			"Execute exactly",
+			"gc.outcome",
+			"sibling",
+			"later hook claims",
+			"expanded workflow roots",
+			"scope latches",
+			"control beads",
+			"controller",
+			"after earlier failures",
+			"stays closed",
+		} {
+			if !strings.Contains(steps, want) {
+				t.Errorf("workflow-steps section missing %q:\n%s", want, steps)
+			}
+		}
+	})
+}
+
 // TestRenderPromptCityRootFragmentsAbsentNoEffect is the regression-safety
 // check: when the city root has no template-fragments/ or prompts/shared/,
 // rendered output is byte-identical to pre-fix behavior (i.e. the new

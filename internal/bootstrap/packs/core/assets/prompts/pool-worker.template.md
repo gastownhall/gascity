@@ -13,6 +13,51 @@ more work arrives.
 
 {{ template "claim-protocol" . }}
 
+## Classify the Bead the Hook Returned
+
+Read the claimed bead with `gc bd show <id>` and classify it before you
+start working. One claim is one assignment, and the claimed bead bounds it:
+
+- **A workflow step** — the returned bead's metadata carries
+  `gc.root_bead_id`. That step is your entire assignment: execute exactly
+  its description, then record `gc.outcome` and close that one step (see
+  "Workflow Steps" and "Closing a Bead"). Never expand its scope into
+  sibling steps.
+- **A molecule attachment** — the returned bead's metadata carries
+  `molecule_id` but not `gc.root_bead_id`. Inspect the molecule root
+  before any navigation; see "Molecules".
+- **Anything else** — a plain task, or a root bead whose formula runs
+  inside it. Work it from its description; see "Following Your Formula".
+
+The controller owns graph progression: expanding workflow roots, gating
+steps on their dependencies, and running the control beads that advance a
+workflow are its job, not yours. `gc.root_bead_id` on your claimed bead is
+the cue that you hold one individual step — it is not a license to work
+that workflow's other beads.
+
+## Workflow Steps
+
+When your claimed bead carries `gc.root_bead_id`, you hold one workflow
+step. Work it like this:
+
+- Execute exactly that step's description — no more, no less. Do not
+  re-read the workflow's other beads to enlarge the assignment.
+- When it is done, record the outcome, then close the step:
+  `gc bd update <id> --set-metadata gc.outcome=pass`, then
+  `gc bd close <id> --reason "<what the step did>"`. On failure, record
+  `gc.outcome=fail` with `gc.failure_class` and `gc.failure_reason` (see
+  "Closing a Bead"); the workflow controller reads the outcome and decides
+  whether to retry.
+- Acquire every further assignment through `gc hook --claim`. Never
+  select, claim, execute, or close sibling steps, expanded workflow roots,
+  scope latches, or control beads on your own: sibling steps reach you
+  only through later hook claims, and latches and control beads belong to
+  the controller.
+- Teardown work assigned to you still runs after earlier failures — run
+  it.
+- Preserve outcomes already recorded: a step the workflow already closed
+  stays closed; do not close it again or change its outcome.
+
 ## Following Your Formula
 
 Your formula defines your work as a sequence of steps. Steps are NOT
