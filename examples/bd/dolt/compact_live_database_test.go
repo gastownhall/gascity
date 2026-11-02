@@ -432,3 +432,97 @@ func TestCompactScriptLiveGateCoversEveryRewriteMode(t *testing.T) {
 // prepare a rewrite — dry runs, threshold skips, disk-critical holds, an
 // existing quarantine refusal, and a push-only pending-push retry — issue no
 // live-gate probe and keep their existing skip outcome.
+func TestCompactScriptLiveGateSkipsProbingWithoutRewrite(t *testing.T) {
+	cases := []struct {
+		name        string
+		mode        string
+		args        []string
+		extraEnv    []string
+		marker      string
+		markerBody  string
+		wantExit    int
+		wantPushLog bool
+	}{
+		{
+			name:     "flatten dry-run",
+			mode:     "success",
+			extraEnv: []string{"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_DOLT_COMPACT_DRY_RUN=1"},
+			wantExit: 0,
+		},
+		{
+			name:     "gc-only dry-run",
+			mode:     "success",
+			args:     []string{"--gc-only", "--dry-run"},
+			wantExit: 0,
+		},
+		{
+			name:     "below threshold",
+			mode:     "below_threshold",
+			extraEnv: []string{"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500"},
+			wantExit: 0,
+		},
+		{
+			name:     "disk-critical hold",
+			mode:     "success",
+			extraEnv: []string{"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_FAKE_DF_MODE=df_critical"},
+			wantExit: 0,
+		},
+		{
+			name:       "existing quarantine refusal",
+			mode:       "success",
+			extraEnv:   []string{"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500"},
+			marker:     "compact-quarantine",
+			markerBody: "db=beads\nreason=post-flatten HEAD probe failed\ncreated_at=2026-01-01T00:00:00Z\n",
+			wantExit:   1,
+		},
+		{
+			name: "push-only pending-push retry",
+			mode: "remote_success",
+			extraEnv: []string{
+				"GC_DOLT_COMPACT_THRESHOLD_COMMITS=5000",
+				"GC_DOLT_COMPACT_ALLOW_FEDERATED=1",
+			},
+			marker: "compact-pending-push",
+			markerBody: strings.Join([]string{
+				"db=beads",
+				"reason=deferred remote push",
+				"created_at=" + freshCompactTimestamp(),
+				"remote=origin",
+				"expected_remote_head=headcommit",
+				"expected_remote_head_verified=1",
+				"compacted_from_head=headcommit",
+				"local_branch=main",
+				"remote_branch=main",
+			}, "\n"),
+			wantExit:    0,
+			wantPushLog: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			if tc.marker != "" {
+				writeCompactStateMarker(t, fixture, tc.marker, tc.markerBody)
+			}
+			out, err := fixture.runWithArgs(t, tc.mode, tc.args, tc.extraEnv...)
+			if tc.wantExit == 0 && err != nil {
+				t.Fatalf("compact failed: %v\n%s", err, out)
+			}
+			if tc.wantExit != 0 {
+				requireCompactExitCode(t, out, err, tc.wantExit)
+			}
+			log := readCompactDoltLog(t, fixture)
+			if got := countLiveProbesForDB(log, "beads"); got != 0 {
+				t.Fatalf("no rewrite prepared, but %d live probes ran:\n%s\noutput:\n%s", got, log, out)
+			}
+			if tc.wantPushLog && !strings.Contains(log, "DOLT_PUSH") {
+				t.Fatalf("push-only retry must still push:\n%s\noutput:\n%s", log, out)
+			}
+		})
+	}
+}
+
+// TestCompactScriptPreservesOrdinaryFailureBehaviorWhenDatabaseStaysLive: a
+// rewrite failure on a database that remains live keeps its existing
+// behavior — restoration diagnostics, a pending-GC marker for the deferred
+// full GC, no quarantine, no run abort — and later databases still run.
