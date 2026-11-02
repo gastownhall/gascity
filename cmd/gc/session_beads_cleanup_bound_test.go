@@ -164,3 +164,81 @@ func TestCancelStateAssignedToRetiredSessionBeadStopsWaitsLegAndStillRunsExtmsg(
 		}
 	})
 }
+
+// ga-68eubg AC-2: many slow external-message teardowns cannot keep
+// retired-session cleanup running indefinitely — the extmsg leg stops at its
+// own 10-second budget, leaving the un-reached bindings for the backstops.
+func TestCancelStateAssignedToRetiredSessionBeadExtmsgLegStopsAtItsOwnDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		mem := beads.NewMemStore()
+		store := &slowCleanupStore{MemStore: mem, closePerCall: 2 * time.Second}
+		sessionBead := retiredSessionBeadFixture(t, mem)
+		seedRetiredSessionWaits(t, mem, sessionBead.ID, 3)
+		refs := make([]extmsg.ConversationRef, 0, 20)
+		for i := 0; i < 20; i++ {
+			refs = append(refs, bindRetiredSession(t, mem, sessionBead.ID, fmt.Sprintf("thread-%d", i)))
+		}
+		fabric := extmsg.NewServices(mem)
+
+		var stderr bytes.Buffer
+		start := time.Now()
+		cancelStateAssignedToRetiredSessionBead(store, sessionBead.ID, start, &stderr)
+		elapsed := time.Since(start)
+
+		if limit := 15 * time.Second; elapsed > limit {
+			t.Errorf("cleanup took %v against 20 slow bindings (unbounded extmsg leg), want <= %v", elapsed, limit)
+		}
+		stillBound := 0
+		for _, ref := range refs {
+			got, err := fabric.Bindings.ResolveByConversation(context.Background(), ref)
+			if err != nil {
+				t.Fatalf("resolve binding after retirement: %v", err)
+			}
+			if got != nil {
+				stillBound++
+			}
+		}
+		if stillBound == 0 {
+			t.Errorf("all 20 bindings unbound despite the 10s extmsg budget: the leg must stop at its deadline checkpoint")
+		}
+	})
+}
+
+// ga-68eubg AC-2: the extmsg leg's budget is its own — after a waits leg that
+// consumed its full 10s budget, a fresh deadline still lets moderate extmsg
+// work finish, instead of dying on a timer the waits leg already spent.
+func TestCancelStateAssignedToRetiredSessionBeadExtmsgLegGetsFreshBudgetAfterWaitsCutoff(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		mem := beads.NewMemStore()
+		store := &slowCleanupStore{
+			MemStore:      mem,
+			closeAllPerID: 200 * time.Millisecond,
+			closePerCall:  1 * time.Second,
+		}
+		sessionBead := retiredSessionBeadFixture(t, mem)
+		seedRetiredSessionWaits(t, mem, sessionBead.ID, 300)
+		refs := make([]extmsg.ConversationRef, 0, 4)
+		for i := 0; i < 4; i++ {
+			refs = append(refs, bindRetiredSession(t, mem, sessionBead.ID, fmt.Sprintf("thread-%d", i)))
+		}
+		fabric := extmsg.NewServices(mem)
+
+		var stderr bytes.Buffer
+		start := time.Now()
+		cancelStateAssignedToRetiredSessionBead(store, sessionBead.ID, start, &stderr)
+		elapsed := time.Since(start)
+
+		for _, ref := range refs {
+			got, err := fabric.Bindings.ResolveByConversation(context.Background(), ref)
+			if err != nil {
+				t.Fatalf("resolve binding after retirement: %v", err)
+			}
+			if got != nil {
+				t.Errorf("binding after retirement = %#v, want nil: the fresh extmsg budget must cover moderate work after the waits cut-off", got)
+			}
+		}
+		if minElapsed, limit := 12*time.Second, 25*time.Second; elapsed < minElapsed || elapsed > limit {
+			t.Errorf("cleanup took %v, want between the spent 10s waits budget plus the extmsg work (%v) and %v", elapsed, minElapsed, limit)
+		}
+	})
+}
