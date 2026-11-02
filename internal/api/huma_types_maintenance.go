@@ -34,7 +34,7 @@ type MaintenanceStatusInput struct {
 // MaintenanceStatusOutput wraps the status body and carries the
 // X-GC-Cache-Age-S header so the read-path CLI can surface the banner.
 type MaintenanceStatusOutput struct {
-	CacheAgeHeader float64 `header:"X-GC-Cache-Age-S"`
+	CacheAgeHeader float64 `header:"X-GC-Cache-Age-S" doc:"Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. 0 when this response read no cached store."`
 	Body           MaintenanceStatusBody
 }
 
