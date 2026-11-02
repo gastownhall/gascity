@@ -151,3 +151,28 @@ func TestSetLivenessClockForTest_Restores(t *testing.T) {
 		t.Fatal("restore did not put the original clock back")
 	}
 }
+
+// statsOnlyStore reports cache stats but no liveness: the shape the
+// controller's bead-policy layer presents over a city or rig cache.
+type statsOnlyStore struct {
+	beads.Store
+	lastFresh time.Time
+}
+
+func (s statsOnlyStore) Stats() beads.CacheStats {
+	return beads.CacheStats{LastFreshAt: s.lastFresh}
+}
+
+func TestCacheAgeSecondsReadsAStoreThatReportsStatsWithoutLiveness(t *testing.T) {
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	restore := SetLivenessClockForTest(&clock.Fake{Time: base})
+	defer restore()
+
+	store := statsOnlyStore{lastFresh: base.Add(-45 * time.Second)}
+	if got := cacheAgeSeconds(store); got != 45 {
+		t.Errorf("cacheAgeSeconds(stats-only store) = %v, want 45: the age must not depend on the store also reporting liveness", got)
+	}
+	if err := cacheLiveOr503(store); err != nil {
+		t.Errorf("cacheLiveOr503(stats-only store) = %v, want nil: a store without IsLive is never gated", err)
+	}
+}

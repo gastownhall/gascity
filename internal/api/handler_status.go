@@ -71,11 +71,11 @@ type StatusInput struct {
 
 // humaHandleStatus is the Huma-typed handler for GET /v0/status.
 //
-// Read-path gate: refuses to serve while the city-scope CachingStore is
-// priming (cacheLiveOr503 → typed 503) so the CLI falls back to its local
-// snapshot instead of rendering partial/empty data. CacheAgeS surfaces the
-// age of the latest fresh observation so `gc status` can append a staleness
-// banner when the supervisor is lagging.
+// Read-path gate: cacheLiveOr503 refuses only a store that reports liveness.
+// The controller's city store is the bead-policy layer, which does not, so the
+// gate passes while the city cache primes and the not-live cache answers from
+// its backing store. CacheAgeS surfaces the cache's age so `gc status` can
+// append a staleness banner when the supervisor is lagging.
 //
 // The gate and the age both read the WORK store, which is the class the body's
 // expensive legs come from (work counts, store health). It deliberately does
