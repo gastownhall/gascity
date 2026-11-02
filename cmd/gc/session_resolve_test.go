@@ -1235,3 +1235,9 @@ func TestResolveSessionIDMaterializingNamed_NilStderrDoesNotPanic(t *testing.T) 
 		t.Fatalf("got %q, want canonical %q", id, canonical.ID)
 	}
 }
+
+// resolveSessionIDAllowClosed is session.ResolveSessionIDAllowClosed over a
+// single store serving the sessions class.
+func resolveSessionIDAllowClosed(store beads.Store, identifier string) (string, error) {
+	return session.ResolveSessionIDAllowClosed(beadstest.Sessions(store), identifier)
+}

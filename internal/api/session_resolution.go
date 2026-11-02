@@ -536,11 +536,12 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 		},
 	}
 	var info session.Info
+	sessions := beads.SessionStore{Store: store}
 	err = session.WithCitySessionIdentifierLocks(s.state.CityPath(), []string{spec.Identity, spec.SessionName}, func() error {
-		if err := session.EnsureAliasAvailableWithConfigForOwner(beads.SessionStore{Store: store}, s.state.Config(), spec.Identity, "", spec.Identity); err != nil {
+		if err := session.EnsureAliasAvailableWithConfigForOwner(sessions, s.state.Config(), spec.Identity, "", spec.Identity); err != nil {
 			return err
 		}
-		if err := session.EnsureSessionNameAvailableWithConfigForOwner(beads.SessionStore{Store: store}, s.state.Config(), spec.SessionName, "", spec.Identity); err != nil {
+		if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessions, s.state.Config(), spec.SessionName, "", spec.Identity); err != nil {
 			return err
 		}
 		handle, herr := s.newResolvedWorkerSessionHandle(store, resolvedCfg)

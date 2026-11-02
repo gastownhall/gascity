@@ -125,6 +125,8 @@ func TestGcBdSplitCreateGraphJudgesEveryNode(t *testing.T) {
 		{"metadata_refs writes over its key", `{"nodes":[{"key":"a","title":"a"},{"key":"b","title":"b","metadata":{"gc.root_bead_id":""},"metadata_refs":{"gc.root_bead_id":"a"}}]}`, true, "graph-class"},
 		{"metadata_refs naming an explicit id a label names", `{"nodes":[{"key":"s","title":"s","id":"demo-s1"},{"key":"w","title":"w","type":"gate","labels":["session:demo-s1"],"metadata_refs":{"session_id":"s"}}]}`, true, "sessions-class"},
 		{"metadata_refs naming a minted id a label could name", `{"nodes":[{"key":"s","title":"s"},{"key":"w","title":"w","type":"gate","labels":["session:demo-7"],"metadata_refs":{"session_id":"s"}}]}`, true, "sessions-class"},
+		{"metadata_refs naming an explicit id writes over its key", `{"nodes":[{"key":"a","title":"a","id":"demo-a1"},{"key":"b","title":"b","metadata":{"gc.root_bead_id":""},"metadata_refs":{"gc.root_bead_id":"a"}}]}`, true, "graph-class"},
+		{"metadata_refs naming a minted id only a trimmed label could name", `{"nodes":[{"key":"s","title":"s"},{"key":"w","title":"w","type":"gate","labels":[" session:demo-7"],"metadata_refs":{"session_id":"s"}}]}`, true, "sessions-class"},
 		{"raw spelling only", `{"nodes":[{"key":"g","title":"g","type":"gate","labels":["session:S "],"metadata":{"session_id":"S "}}]}`, true, "sessions-class"},
 		{"plan id the class binding holds, named by an edge", `{"nodes":[{"key":"a","title":"a","id":"relic-1"},{"key":"b","title":"b"}],"edges":[{"from_key":"b","to_id":"relic-1"}]}`, true, "class binding holds a bead with id relic-1"},
 		{"padded id names no plan node", `{"nodes":[{"key":"a","title":"a","id":"demo-x1"},{"key":"b","title":"b"}],"edges":[{"from_key":"b","to_id":" demo-x1"}]}`, true, "whitespace"},
@@ -189,6 +191,48 @@ func TestGcBdSplitCreateGraphJudgesEveryNode(t *testing.T) {
 					}
 				}
 			})
+		}
+	}
+}
+
+// TestGcBdSplitCreateGraphStaticRefusalAsksTheBindingNothing: the node ids
+// are vetted only after every node's class checks, so a plan those refuse
+// never asks the class binding about an explicit id it names.
+func TestGcBdSplitCreateGraphStaticRefusalAsksTheBindingNothing(t *testing.T) {
+	scope := writeGraphPlan(t, `{"nodes":[{"key":"s","title":"s","labels":["gc:session"]},{"key":"x","title":"x","id":"demo-9"}]}`)
+	for _, inventory := range graphJudgeInventories {
+		deps := graphJudgeDeps(inventory)
+		deps.held = func(ids []string) (map[string]bool, error) {
+			t.Fatalf("%s: the class binding was asked about %v for a plan the class checks refuse", inventory, ids)
+			return nil, nil
+		}
+		g := bdClassFlipGuard(splitGuardTestCity(), scope, []string{"create", "--graph", "plan.json"}, deps)
+		if !strings.Contains(g.refusal, `node "s"`) || !strings.Contains(g.refusal, "sessions-class") {
+			t.Errorf("%s: refusal %q, want node s refused as sessions-class", inventory, g.refusal)
+		}
+	}
+}
+
+// TestGcBdSplitGraphPlanSchemaMatchesEveryPinnedInventory: the fields the
+// judge has vetted (bdGraph*Fields) are exactly the graph-plan schema of every
+// pinned bd build, as inventorygen dumped it from bd's own plan types. A new
+// bd build whose schema differs fails here when it is inventoried, so each
+// new or dropped field is vetted before the build is pinned.
+func TestGcBdSplitGraphPlanSchemaMatchesEveryPinnedInventory(t *testing.T) {
+	for _, inv := range bdflags.Inventories() {
+		for _, c := range []struct {
+			level      string
+			got, known []string
+		}{
+			{"plan", inv.GraphPlan.Plan, bdGraphPlanFields},
+			{"node", inv.GraphPlan.Node, bdGraphNodeFields},
+			{"edge", inv.GraphPlan.Edge, bdGraphEdgeFields},
+			{"dep", inv.GraphPlan.Dep, bdGraphDepFields},
+		} {
+			got, known := slices.Sorted(slices.Values(c.got)), slices.Sorted(slices.Values(c.known))
+			if !slices.Equal(got, known) {
+				t.Errorf("%s: bd's graph-plan %s fields are %q, the judge has vetted %q; vet each difference in judgeBdCreateGraph and update bdGraph*Fields", inv.Name, c.level, got, known)
+			}
 		}
 	}
 }

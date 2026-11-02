@@ -2175,7 +2175,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			}
 			if managedAlias != "" {
 				lockFn := func() error {
-					if err := session.EnsureAliasAvailableWithConfigForOwner(beads.SessionStore{Store: store}, cfg, managedAlias, "", managedAlias); err != nil {
+					if err := session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, managedAlias, "", managedAlias); err != nil {
 						fmt.Fprintf(stderr, "session beads: alias %q for %s unavailable: %v\n", managedAlias, agentName, err) //nolint:errcheck
 						if isConfiguredNamed {
 							createErr = err
@@ -2186,7 +2186,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 						meta["alias"] = managedAlias
 					}
 					if isConfiguredNamed {
-						if err := session.EnsureSessionNameAvailableWithConfigForOwner(beads.SessionStore{Store: store}, cfg, sn, "", managedAlias); err != nil {
+						if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessStore, cfg, sn, "", managedAlias); err != nil {
 							fmt.Fprintf(stderr, "session beads: session_name %q for %s unavailable: %v\n", sn, agentName, err) //nolint:errcheck
 							createErr = err
 							blocked = true
@@ -2541,11 +2541,11 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				var err error
 				switch {
 				case isConfiguredNamed:
-					err = session.EnsureAliasAvailableWithConfigForOwner(beads.SessionStore{Store: store}, cfg, managedAlias, b.ID, tp.ConfiguredNamedIdentity)
+					err = session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, managedAlias, b.ID, tp.ConfiguredNamedIdentity)
 				case isManagedPool && isPoolInstance:
-					err = session.EnsureAliasAvailableWithConfigForOwner(beads.SessionStore{Store: store}, cfg, managedAlias, b.ID, managedAlias)
+					err = session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, managedAlias, b.ID, managedAlias)
 				default:
-					err = session.EnsureAliasAvailableWithConfig(beads.SessionStore{Store: store}, cfg, managedAlias, b.ID)
+					err = session.EnsureAliasAvailableWithConfig(sessStore, cfg, managedAlias, b.ID)
 				}
 				if err != nil {
 					recordAliasConflict()

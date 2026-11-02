@@ -572,7 +572,7 @@ func backstopRows(t *testing.T, f *laneFixture, attempts int, last time.Time) []
 // tick's work.
 func runNoticeBackstop(f *laneFixture, rows []beads.Bead, pred noticeTestBackstop, out *bytes.Buffer) {
 	work := []beads.Bead{{ID: pred.target.ID, Status: "open"}}
-	runNudgeBackstop(f.sp, f.store, rows, work, f.clk.Now(), out, "idle-claim-nudge", pred)
+	runNudgeBackstop(f.runtime(), f.store, rows, work, f.clk.Now(), out, "idle-claim-nudge", pred)
 }
 
 // episode is the Episode a backstop attempt paced from last carries.
@@ -1052,11 +1052,13 @@ func TestRunNudgeBackstopLeavesNoticesDirectUnderTheContentGates(t *testing.T) {
 	}
 }
 
-// TestRunNudgeBackstopNudgesAProtocolModeSessionDirectly: no lane can type
-// into a protocol-mode runtime (t3bridge) that no other host serves, so its
+// TestRunNudgeBackstopNudgesAnUnservedProtocolSessionDirectly: no lane can
+// type into a protocol-mode runtime whose turn starts are not recorded and
+// that no other host serves (a t3bridge session is served:
+// TestPlannerNoticeProtocolSessionGoesToTheLane), so its
 // reminder is typed directly as before; a host stamped as serving message
 // for the row's generation gets the notice instead.
-func TestRunNudgeBackstopNudgesAProtocolModeSessionDirectly(t *testing.T) {
+func TestRunNudgeBackstopNudgesAnUnservedProtocolSessionDirectly(t *testing.T) {
 	f := newLaneFixture(t)
 	f.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 	newNoticeLaneHost(t, f, "message")
@@ -1175,7 +1177,7 @@ func TestDeliverWarmBindClaimNudgeRetriesAFailingNoticeThenGivesUp(t *testing.T)
 	}
 }
 
-func TestDeliverWarmBindClaimNudgeNudgesAProtocolModeSlotDirectly(t *testing.T) {
+func TestDeliverWarmBindClaimNudgeNudgesAnUnservedProtocolSlotDirectly(t *testing.T) {
 	f := newLaneFixture(t)
 	f.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 	newNoticeLaneHost(t, f, "message")
@@ -1269,10 +1271,11 @@ func TestDrainReminderNudgesDirectlyWithTheLaneOff(t *testing.T) {
 	}
 }
 
-// TestDrainReminderNudgesAProtocolModeSessionDirectly: no lane can type
-// into a protocol-mode runtime no other host serves, so the reminder is
+// TestDrainReminderNudgesAnUnservedProtocolSessionDirectly: no lane can
+// type into a protocol-mode runtime whose turn starts are not recorded and
+// that no other host serves, so the reminder is
 // typed directly as before.
-func TestDrainReminderNudgesAProtocolModeSessionDirectly(t *testing.T) {
+func TestDrainReminderNudgesAnUnservedProtocolSessionDirectly(t *testing.T) {
 	f := newLaneFixture(t)
 	f.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 	newNoticeLaneHost(t, f, "message")

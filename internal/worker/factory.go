@@ -285,12 +285,13 @@ func (f *Factory) HandleForTarget(target string, processNames []string) (Handle,
 		return nil, sessionpkg.ErrSessionNotFound
 	}
 	if f.store != nil {
-		if id, err := sessionpkg.ResolveSessionIDByExactID(beads.SessionStore{Store: f.store}, target); err == nil {
+		sessions := beads.SessionStore{Store: f.store}
+		if id, err := sessionpkg.ResolveSessionIDByExactID(sessions, target); err == nil {
 			return f.SessionByID(id)
 		} else if !errors.Is(err, sessionpkg.ErrSessionNotFound) {
 			return nil, err
 		}
-		if id, err := sessionpkg.ResolveSessionID(beads.SessionStore{Store: f.store}, target); err == nil {
+		if id, err := sessionpkg.ResolveSessionID(sessions, target); err == nil {
 			return f.SessionByID(id)
 		} else if !errors.Is(err, sessionpkg.ErrSessionNotFound) {
 			return nil, err

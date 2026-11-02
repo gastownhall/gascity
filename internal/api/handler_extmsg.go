@@ -95,11 +95,11 @@ func extmsgHandleLabel(value string) string {
 }
 
 func (s *Server) extmsgSessionHandleForSelector(selector string) string {
-	store := s.state.SessionsBeadStore().Store
-	if store == nil {
+	sessions := s.state.SessionsBeadStore()
+	if sessions == (beads.SessionStore{}) {
 		return extmsgHandleLabel(selector)
 	}
-	resolvedID, err := session.ResolveSessionIDAllowClosed(beads.SessionStore{Store: store}, selector)
+	resolvedID, err := session.ResolveSessionIDAllowClosed(sessions, selector)
 	if err != nil {
 		return extmsgHandleLabel(selector)
 	}

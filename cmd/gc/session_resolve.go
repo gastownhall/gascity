@@ -20,10 +20,6 @@ func resolveSessionID(store beads.Store, identifier string) (string, error) {
 	return session.ResolveSessionID(beads.SessionStore{Store: store}, identifier)
 }
 
-func resolveSessionIDAllowClosed(store beads.Store, identifier string) (string, error) {
-	return session.ResolveSessionIDAllowClosed(beads.SessionStore{Store: store}, identifier)
-}
-
 type namedSessionResolveOptions struct {
 	allowClosed         bool
 	materialize         bool
@@ -144,11 +140,12 @@ func resolveSessionIDWithOptions(
 	if store == nil {
 		return "", fmt.Errorf("session store unavailable")
 	}
+	sessions := beads.SessionStore{Store: store}
 	if isTemplateTarget(identifier) {
 		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
 	if !opts.skipExactID {
-		if id, err := session.ResolveSessionIDByExactID(beads.SessionStore{Store: store}, identifier); err == nil {
+		if id, err := session.ResolveSessionIDByExactID(sessions, identifier); err == nil {
 			return id, nil
 		} else if !errors.Is(err, session.ErrSessionNotFound) {
 			return "", err
@@ -159,7 +156,7 @@ func resolveSessionIDWithOptions(
 	} else if matched || !errors.Is(err, session.ErrSessionNotFound) {
 		return "", fmt.Errorf("resolving configured named session %q: %w", identifier, err)
 	}
-	if id, err := session.ResolveSessionID(beads.SessionStore{Store: store}, identifier); err == nil {
+	if id, err := session.ResolveSessionID(sessions, identifier); err == nil {
 		if cfg != nil {
 			if info, getErr := sessionFrontDoor(store).Get(id); getErr == nil {
 				if isNamedSessionInfo(info) {
@@ -188,7 +185,7 @@ func resolveSessionIDWithOptions(
 				return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 			}
 		}
-		if id, err := session.ResolveSessionIDAllowClosed(beads.SessionStore{Store: store}, identifier); err == nil {
+		if id, err := session.ResolveSessionIDAllowClosed(sessions, identifier); err == nil {
 			return id, nil
 		} else if !errors.Is(err, session.ErrSessionNotFound) {
 			return "", err

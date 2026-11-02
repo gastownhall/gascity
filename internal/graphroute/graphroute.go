@@ -531,6 +531,7 @@ func formulaRoleTarget(target string) string {
 // canonical implementation shared by the graphroute library path and the CLI
 // projection in cmd/gc.
 func ResolveGraphDirectSessionBinding(store beads.Store, cityName string, cfg *config.City, target, rigContext string, deps Deps) (GraphRouteBinding, bool, error) {
+	// store is the caller's graph/scope store, not the sessions class: the relabel keeps its reads (typed-store T5b).
 	sessions := beads.SessionStore{Store: store}
 	target = strings.TrimSpace(target)
 	if store == nil || target == "" {

@@ -160,8 +160,8 @@ type ListedSession struct {
 // cachedListStore is the optional read-model cache capability: it answers a
 // ListQuery from an in-memory cache, reporting whether the cache was clean
 // enough to serve it. It is the same seam internal/api/cache_read_model.go
-// peeks; the CacheFirst tier asserts it on the embedded raw store (optional
-// capabilities are not promoted through the SessionStore wrapper).
+// peeks; the CacheFirst tier reaches it through the handle with beads.As
+// (optional capabilities are not promoted through the SessionStore handle).
 type cachedListStore interface {
 	CachedList(beads.ListQuery) ([]beads.Bead, bool)
 }

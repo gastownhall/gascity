@@ -310,6 +310,7 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 // bdStoreBridgeReopen reopens id, clearing a session bead's runtime lease
 // record first: a reopened row holds no lease (SESSION-RUNTIME-012).
 func bdStoreBridgeReopen(store beads.Store, id string) error {
+	// store is a bd scope store, not the sessions class: the relabel keeps its reads (typed-store T7 ResidentStore).
 	if err := session.ClearRuntimeLeaseForReopen(beads.SessionStore{Store: store}, id); err != nil {
 		return err
 	}

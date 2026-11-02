@@ -688,7 +688,7 @@ func (s *Server) interruptRunHolders(ctx context.Context, runID string, holders 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			mgr := s.sessionManager(store)
+			mgr := s.sessionManager(beads.SessionStore{Store: store})
 			info, err := mgr.Get(id)
 			if err != nil {
 				results[i] = err

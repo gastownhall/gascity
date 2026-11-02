@@ -219,7 +219,8 @@ func (c *cliLaneCity) targetInfo(t *testing.T) session.Info {
 	return info
 }
 
-// A protocol-mode runtime no other host serves takes the legacy path; with a
+// A protocol-mode runtime whose turn starts are not recorded and that no
+// other host serves takes the legacy path; with a
 // host stamp for the row's generation it takes the lane.
 func TestSessionNudgeLaneRoutesUnservedSessionsLegacy(t *testing.T) {
 	t.Run("unserved protocol runtime", func(t *testing.T) {

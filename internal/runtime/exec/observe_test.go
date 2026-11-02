@@ -357,8 +357,8 @@ func TestReadySeamIsFreshReadable(t *testing.T) {
 func TestReadyScriptExitTwoIsAFailure(t *testing.T) {
 	script, _ := observePack(t, readyHandshake, legacyOps)
 	sp := NewSeamBacked(script)
-	if names, err := sp.ListRunning("s"); !errors.Is(err, runtime.ErrListUnsupported) {
-		t.Errorf("ListRunning = %v, %v; want ErrListUnsupported", names, err)
+	if names, err := sp.ListRunning("s"); err == nil || runtime.IsPartialListError(err) || names != nil {
+		t.Errorf("ListRunning = %v, %v; want the inventory's exit 2 as a failure", names, err)
 	}
 	if err := sp.Stop("s"); !errors.Is(err, runtime.ErrStopUnsupported) {
 		t.Errorf("Stop = %v, want ErrStopUnsupported", err)

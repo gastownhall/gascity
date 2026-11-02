@@ -608,7 +608,7 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 		sessFront.RepairTypeBestEffort(id)
 	}
 
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	updateFn := func() error {
 		if titlePtr != nil || aliasPtr != nil {
 			if err := mgr.UpdatePresentation(id, titlePtr, aliasPtr); err != nil {
@@ -682,7 +682,7 @@ func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissio
 	}
 	session.RepairEmptyType(store, &b)
 
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	info, err := mgr.Get(id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
@@ -1349,7 +1349,7 @@ func (s *Server) suspendSession(ctx context.Context, target, key string) (syncAn
 	if store.Store == nil {
 		return syncAnswer{}, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	if err := s.checkBeforeEffect(opjournal.KindSuspend, key); err != nil {
 		return syncAnswer{}, err
 	}
@@ -1681,7 +1681,7 @@ func (s *Server) setSessionPin(ctx context.Context, idRef string, pinned bool) (
 		return nil, humaStoreError(err)
 	}
 	s.state.Enqueue(reconcilekey.Session(id))
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	info, pr, err := sessionGetEnriched(session.NewStore(store), mgr, id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
@@ -1722,7 +1722,7 @@ func (s *Server) humaHandleSessionRename(_ context.Context, input *SessionRename
 		sessFront.RepairTypeBestEffort(id)
 	}
 
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	if err := mgr.Rename(id, input.Body.Title); err != nil {
 		return nil, humaSessionManagerError(err)
 	}

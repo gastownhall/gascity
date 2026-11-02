@@ -7,7 +7,8 @@ package main
 // Rule 1, routing (routeCLILaneNotice). Every notice reads its target's row
 // in the city's sessions-class store, never in a rig bead's store. A row the
 // read cannot answer for is a refusal; a target with no row, or one no lane
-// serves (a protocol-mode session without a host stamp, laneServesSession),
+// serves (a protocol-mode runtime whose turn starts are not recorded, with
+// no host stamp; laneServesSession),
 // keeps the producer's legacy path, as gc session nudge's does. A proposal
 // the op journal cannot record is a refusal too (cliLaneRefusal): the
 // producer reports it (gc sling and gc mail send warn, as they do when their

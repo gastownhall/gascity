@@ -68,12 +68,12 @@ func cliLaneExecutesMessage(cfg *config.City) bool {
 	return cfg != nil && cfg.Ops.LaneExecutes(string(opjournal.KindMessage))
 }
 
-// laneServesSession reports whether a conversation lane can type into the
-// session named sessName: a keystroke-mode runtime (laneTypesLive), or a
-// protocol-mode one whose runtime row carries a host stamp serving message
-// for view's generation (hostedElsewhere), whose lane then delivers.
+// laneServesSession reports whether a conversation lane can deliver into
+// the session named sessName: a runtime the live executor serves
+// (laneServesLive), or one whose runtime row carries a host stamp serving
+// message for view's generation (hostedElsewhere), whose lane then delivers.
 func laneServesSession(sp runtime.Provider, st *opjournal.Store, sessName string, view opjournal.ConversationView) (bool, error) {
-	if laneTypesLive(sp, sessName) {
+	if laneServesLive(sp, sessName) {
 		return true, nil
 	}
 	row, _, found, err := st.Runtime(view.ID)

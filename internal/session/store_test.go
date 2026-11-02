@@ -768,3 +768,18 @@ func TestUpdateMetadataInfoFailedWritePersistsNothingAndReturnsInputUnchanged(t 
 		}
 	}
 }
+
+// TestStoreBacked: a front door over a store is backed; a nil door and a door
+// over the zero handle are not.
+func TestStoreBacked(t *testing.T) {
+	if !NewStore(beadstest.Sessions(beads.NewMemStore())).Backed() {
+		t.Error("a door over a store reports unbacked")
+	}
+	if NewStore(beads.SessionStore{}).Backed() {
+		t.Error("a door over the zero handle reports backed")
+	}
+	var nilDoor *Store
+	if nilDoor.Backed() {
+		t.Error("a nil door reports backed")
+	}
+}

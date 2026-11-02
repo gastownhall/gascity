@@ -126,6 +126,7 @@ go_test(
         "nudge_submit_key_sequence_test.go",
         "pane_idle_scan_test.go",
         "process_env_setup_test.go",
+        "process_table_unread_test.go",
         "proctable_tracking_test.go",
         "program_capture_heal_test.go",
         "program_capture_integration_test.go",
@@ -166,6 +167,7 @@ go_test(
         "tmux_unit_test.go",
         "wake_pane_integration_test.go",
         "wake_pane_test.go",
+        "wrapped_wait_cost_test.go",
     ],
     data = glob(
         ["**"],

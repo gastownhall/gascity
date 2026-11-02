@@ -10888,3 +10888,18 @@ func TestSyncSessionBeads_DoesNotMintSessionKeyOnLiveKeylessRow(t *testing.T) {
 		}
 	}
 }
+
+// findClosedNamedSessionBead is session.FindClosedNamedSessionBead over a
+// single store serving the sessions class, ignoring the error.
+func findClosedNamedSessionBead(store beads.Store, identity string) (beads.Bead, bool) {
+	bead, ok, _ := session.FindClosedNamedSessionBead(beadstest.Sessions(store), identity)
+	return bead, ok
+}
+
+// findClosedNamedSessionBeadForSessionName is
+// session.FindClosedNamedSessionBeadForSessionName over a single store serving
+// the sessions class, ignoring the error.
+func findClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessionName string) (beads.Bead, bool) {
+	bead, ok, _ := session.FindClosedNamedSessionBeadForSessionName(beadstest.Sessions(store), identity, sessionName)
+	return bead, ok
+}

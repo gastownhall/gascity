@@ -1087,6 +1087,7 @@ func TestClientListSessions(t *testing.T) {
 						"template":     "mayor",
 						"state":        "active",
 						"title":        "Overseer",
+						"agent_name":   "mayor",
 						"session_name": "mayor",
 						"provider":     "claude",
 						"created_at":   "2026-04-23T10:00:00Z",
@@ -1108,6 +1109,7 @@ func TestClientListSessions(t *testing.T) {
 						"template":     "polecat",
 						"state":        "active",
 						"title":        "Worker",
+						"agent_name":   "polecat",
 						"session_name": "polecat",
 						"provider":     "claude",
 						"created_at":   "2026-04-23T09:00:00Z",
@@ -1127,15 +1129,15 @@ func TestClientListSessions(t *testing.T) {
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
-	got, err := c.ListSessions("active", "mayor", false)
+	got, err := c.ListSessions(ListSessionsOpts{State: "active", Template: "mayor"})
 	if err != nil {
 		t.Fatalf("ListSessions: %v", err)
 	}
-	if len(got.Body) != 2 {
-		t.Fatalf("items = %d, want 2 (both pages merged)", len(got.Body))
+	if len(got.Body.Sessions) != 2 {
+		t.Fatalf("items = %d, want 2 (both pages merged)", len(got.Body.Sessions))
 	}
-	if got.Body[0].ID != "gc-abc" || got.Body[1].ID != "gc-def" {
-		t.Errorf("merged ids = %q,%q; want gc-abc,gc-def", got.Body[0].ID, got.Body[1].ID)
+	if got.Body.Sessions[0].ID != "gc-abc" || got.Body.Sessions[1].ID != "gc-def" {
+		t.Errorf("merged ids = %q,%q; want gc-abc,gc-def", got.Body.Sessions[0].ID, got.Body.Sessions[1].ID)
 	}
 	if got.AgeSeconds != 2.5 {
 		t.Errorf("AgeSeconds = %v, want 2.5 (first page's age)", got.AgeSeconds)
@@ -1155,7 +1157,7 @@ func TestClientListSessions_CacheNotLiveFallback(t *testing.T) {
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
-	_, err := c.ListSessions("", "", false)
+	_, err := c.ListSessions(ListSessionsOpts{})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}

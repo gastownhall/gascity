@@ -26,11 +26,12 @@ import (
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
-// Route-equivalence tests for `gc rig status --json`, `gc mail count` and
-// `gc mail check` (#8453). Each command runs once on the local route (nil
-// client) and once through an in-process SupervisorMux over the same
-// controllerState, store and runtime.Fake, and the two outputs must match
-// exactly: no API-only additive keys are declared for these commands.
+// Route-equivalence tests for `gc rig status --json`, `gc mail count`,
+// `gc mail check` and `gc mail peek` (#8453). Each command runs once on the
+// local route (nil client) and once through an in-process SupervisorMux over
+// the same controllerState, store and runtime.Fake, and the two outputs must
+// match exactly. The one API-only additive key is `gc mail peek`'s
+// message.rig, which its schema declares optional.
 
 // serveStateClient serves cs through an in-process supervisor mux and returns
 // a city-scoped client for it.
@@ -647,6 +648,46 @@ func TestMailCheckRouteEquivalence(t *testing.T) {
 			}
 			if tc.wantStderr != "" && !strings.Contains(string(localErr), tc.wantStderr) {
 				t.Fatalf("stderr = %q, want it to contain %q", localErr, tc.wantStderr)
+			}
+		})
+	}
+}
+
+// TestMailPeekRouteEquivalence peeks a message and its reply on both routes.
+// The API payload must carry every local key with an equal value; the only
+// extra key it may add is message.rig, which the server stamps with the city
+// name on every message and schemas/mail/peek declares optional.
+func TestMailPeekRouteEquivalence(t *testing.T) {
+	h, _ := mailRouteCity(t)
+	mp := routeEquivalenceMailProvider(h.cs.CityBeadStore())
+	first, err := mp.Send("human", "lead", "kickoff", "first body")
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	reply, err := mp.Reply(first.ID, "lead", "re: kickoff", "reply body")
+	if err != nil {
+		t.Fatalf("reply: %v", err)
+	}
+	client := serveStateClient(t, h.cs)
+	for _, id := range []string{first.ID, reply.ID} {
+		t.Run(id, func(t *testing.T) {
+			run := func(c *api.Client, nilReason string) (int, []byte, []byte) {
+				clearBuiltinImportWarningCache()
+				var stdout, stderr bytes.Buffer
+				exit := routeMailPeek(h.cityPath, []string{id}, c, nilReason, true, &stdout, &stderr)
+				return exit, stdout.Bytes(), stderr.Bytes()
+			}
+			apiExit, apiOut, apiErr := run(client, "")
+			requireRoute(t, apiErr, "mail peek", "api")
+			localExit, localOut, localErr := run(nil, "controller-down")
+			requireRoute(t, localErr, "mail peek", "fallback")
+			if apiExit != 0 || localExit != 0 {
+				t.Fatalf("exit api=%d local=%d, want 0/0\napi stderr: %s\nlocal stderr: %s", apiExit, localExit, apiErr, localErr)
+			}
+			validateJSONAgainstResultSchema(t, []string{"mail", "peek"}, localOut)
+			validateJSONAgainstResultSchema(t, []string{"mail", "peek"}, apiOut)
+			if diff := chartest.JSONShapeDiff(localOut, apiOut, []string{"rig"}); diff != "" {
+				t.Fatalf("API route differs from local route for mail peek: %s\nlocal: %s\napi:   %s", diff, localOut, apiOut)
 			}
 		})
 	}

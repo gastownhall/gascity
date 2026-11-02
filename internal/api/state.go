@@ -319,6 +319,17 @@ type WakeStartRefuser interface {
 	WakeStartRefusal(info session.Info) (why string, certain bool)
 }
 
+// SessionListWakeReasoner is an optional State capability: the reasons the
+// controller keeps each listed session awake (session, config, attached,
+// pin, ...), as the CLI's local `gc session list` computes them for its
+// REASON column. listed is one page of sessions after the runtime overlay;
+// persisted maps each listed id to the session's persisted Info. A session
+// with no wake reasons has no entry. The classifiers live in cmd/gc, which
+// internal/api cannot import, hence the capability.
+type SessionListWakeReasoner interface {
+	SessionListWakeReasons(listed []session.Info, persisted map[string]session.Info) map[string][]string
+}
+
 // UnknownStateRefuser is an optional State capability: the controller names
 // why it will not act on a wake or a fresh-restart request for a session in a
 // state it skips, or "" when it does not skip the row. info is the stored row
