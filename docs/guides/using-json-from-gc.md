@@ -296,7 +296,7 @@ schema declares:
 | What you see | Rule |
 |---|---|
 | Shape | The same keys and types on both routes. For the same city state the values match too, apart from the known differences listed below. |
-| Data only the server has | Optional keys the schema declares, such as `_cache_age_s` and `running` on session rows. The direct read leaves them out; it never guesses them. `gc mail peek` also prints `message.rig`, the city name, only on the API route. |
+| Data only the server has | Optional keys the schema declares, such as `_cache_age_s` (seconds since the server's bead cache last took in fresh data from its store; 0 for a read whose answer does not come from that cache, such as `gc rig list`) and `running` on session rows. The direct read leaves them out; it never guesses them. `gc mail peek` also prints `message.rig`, the city name, only on the API route. |
 | Data only the direct read has | `gc session list` prints `command`, `session_key` and the `resume_*` fields only on the direct read; the API never sends them. Set `GC_NO_API=1` if a script needs them. For a local city, `--state closed` and `--state all` always use the direct read, so they carry these fields and no `running` or `_cache_age_s`. |
 | Keys you don't recognize | Ignore them. New optional keys can appear without a `schema_version` bump. |
 
