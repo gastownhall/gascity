@@ -3311,6 +3311,14 @@ func TestDoRigAdd_FailedInitOverNonStoreBeadsDirAllowsRetry(t *testing.T) {
 // ga-hfly3b.44: an adopt whose provider init narrows .beads/ to 0700 and then
 // fails puts the directory's mode back.
 func TestDoRigAdd_AdoptFailedInitRestoresBeadsDirMode(t *testing.T) {
+	oldPrefix := rigAdoptStorePrefix
+	t.Cleanup(func() { rigAdoptStorePrefix = oldPrefix })
+	rigAdoptStorePrefix = func(_, rigPath string) (string, error) {
+		if filepath.Base(rigPath) != "adopted-rig" {
+			t.Fatalf("prefix read for wrong workspace %q", rigPath)
+		}
+		return "ar", nil
+	}
 	cityPath := t.TempDir()
 	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
 	const initErrText = "managed Dolt server unreachable while inspecting existing store 'ar'"
