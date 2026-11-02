@@ -775,10 +775,23 @@ When the city's API serves the read (a supervisor-hosted city, a standalone
 controller's [api] port, or a remote target such as --city-url), the
 document also carries _cache_age_s, and each row carries running (the
 server's own observation) plus reason and program_status when the server
-reports them. A local read (GC_NO_API set for a local target, or no API
-reachable) omits those fields; the CLI never computes running itself. The
-API does not report command, session_key or the resume_* fields, so only a
-local read carries them.`,
+reports them. A local read omits those fields; the CLI never computes
+running itself. The API does not report command, session_key or the
+resume_* fields, so only a local read carries them.
+
+For a local target the read is local when GC_NO_API is set, when no API is
+reachable, when the supervisor requires grants, when the API gives an
+answer the CLI falls back from (its cache is not live, a server error), or
+when the supervisor still runs a gc that predates agent_name on session
+rows (restart it after upgrading). A remote target never reads locally: an
+older server's rows print without agent_name, transport, worker_dir and
+wake reasons, with a note on stderr. A partial API answer fails as a
+failed local read does: exit 1 and, with --json, the session_list_failed
+error document.
+
+The REASON column shows a session's lifecycle reason (a hold, sleep,
+quarantine or open circuit), else the reasons it is kept awake (session,
+config, create, attached, pin, ...), else "-", on every route.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if cmdSessionList(stateFilter, templateFilter, jsonOutput, stdout, stderr) != 0 {
@@ -797,10 +810,8 @@ local read carries them.`,
 // or (nil, reason) when the caller should fall back. It routes as apiClient
 // does: a supervisor-hosted city lists through the supervisor API, and a
 // supervisor that requires grants sends the listing local. Both routes print
-// the same document (writeSessionListJSON). Indirected through a var so tests
-// inject a client pointed at httptest.Server or force a specific fallback
-// reason without spinning up a real controller.
-var sessionListAPIClient = func(cityPath string) (*api.Client, string) {
+// the same document (writeSessionListJSON).
+func sessionListAPIClient(cityPath string) (*api.Client, string) {
 	if c := apiClient(cityPath); c != nil {
 		return c, ""
 	}
