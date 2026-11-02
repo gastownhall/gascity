@@ -320,3 +320,54 @@ func TestCompactScriptLiveGateAbortsRunBeforeLaterDatabases(t *testing.T) {
 		})
 	}
 }
+
+// AC-4: a probe that fails transiently and recovers within the configured
+// attempts leaves no quarantine; the rewrite result alone decides the run.
+func TestCompactScriptLiveGateRetriesTransientProbeFailure(t *testing.T) {
+	t.Run("rewrite succeeded", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		addCompactDatabases(t, fixture, "zed")
+		out, err := fixture.run(t, "success", liveGateEnv(
+			"GC_FAKE_DOLT_LIVE_FAULT=unserve",
+			"GC_FAKE_DOLT_LIVE_FAULT_PROBES=1",
+		)...)
+		if err != nil {
+			t.Fatalf("recovered probe must not fail the run: %v\n%s", err, out)
+		}
+		requireNoMarker(t, beadsMarker(fixture, "compact-quarantine"))
+		if !strings.Contains(out, "compact: db=beads live probe recovered on attempt 2/3 after post-flatten full GC") {
+			t.Fatalf("output missing probe recovery:\n%s", out)
+		}
+		log := readCompactDoltLog(t, fixture)
+		if got := beadsLiveProbes(beadsLogAfter(t, log, "DOLT_GC")); got != 2 {
+			t.Fatalf("beads live probes after GC = %d, want 2:\n%s", got, log)
+		}
+		if !strings.Contains(log, "db=zed query=CALL DOLT_GC('--full'") {
+			t.Fatalf("run must go on to zed after a recovered probe:\n%s", log)
+		}
+		if !beadsReportedSuccess(out) {
+			t.Fatalf("recovered database must report its compaction success:\n%s", out)
+		}
+	})
+
+	t.Run("rewrite failed", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		addCompactDatabases(t, fixture, "zed")
+		out, err := fixture.run(t, "gc_failure", liveGateEnv(
+			"GC_FAKE_DOLT_LIVE_FAULT=unserve",
+			"GC_FAKE_DOLT_LIVE_FAULT_PROBES=1",
+		)...)
+		requireFailedRun(t, err, out)
+		requireNoMarker(t, beadsMarker(fixture, "compact-quarantine"))
+		if got := compactMarkerValue(t, beadsMarker(fixture, "compact-pending-gc"), "reason"); got != "flatten succeeded but full GC failed" {
+			t.Fatalf("pending-GC reason = %q", got)
+		}
+		log := readCompactDoltLog(t, fixture)
+		if got := beadsLiveProbes(beadsLogAfter(t, log, "DOLT_GC")); got != 2 {
+			t.Fatalf("beads live probes after GC = %d, want 2:\n%s", got, log)
+		}
+		if !strings.Contains(out, "compact: 2 database(s) failed compaction") {
+			t.Fatalf("ordinary failures must still be counted for every database:\n%s", out)
+		}
+	})
+}

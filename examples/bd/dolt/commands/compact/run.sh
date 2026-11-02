@@ -382,6 +382,7 @@ allow_federated_input="${GC_DOLT_COMPACT_ALLOW_FEDERATED:-}"
 skip_fetch_dbs="${GC_DOLT_COMPACT_SKIP_FETCH_DBS:-}"
 compact_alert_to="${GC_DOLT_COMPACT_ALERT_TO:-mayor}"
 live_probe_attempts="${GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS:-3}"
+live_probe_delay="${GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS:-2}"
 case "$bare_gc_input" in
   ''|0|false|FALSE|no|NO)
     bare_gc=0
@@ -2582,20 +2583,27 @@ compact_live_probe_once() {
 }
 
 # compact_live_probe DB STEP
-#   Run compact_live_probe_once up to live_probe_attempts times; succeeds on
-#   the first answer.
+#   Run compact_live_probe_once up to live_probe_attempts times, sleeping
+#   live_probe_delay seconds between attempts; succeeds on the first answer.
 compact_live_probe() {
   _lp_db="$1"
   _lp_step="$2"
   _lp_attempt=1
   while :; do
     if compact_live_probe_once "$_lp_db"; then
+      if [ "$_lp_attempt" -gt 1 ]; then
+        printf 'compact: db=%s live probe recovered on attempt %s/%s after %s\n' \
+          "$_lp_db" "$_lp_attempt" "$live_probe_attempts" "$_lp_step"
+      fi
       return 0
     fi
+    printf 'compact: db=%s live probe attempt %s/%s after %s failed: %s\n' \
+      "$_lp_db" "$_lp_attempt" "$live_probe_attempts" "$_lp_step" "$compact_live_probe_error" >&2
     if [ "$_lp_attempt" -ge "$live_probe_attempts" ]; then
       return 1
     fi
     _lp_attempt=$((_lp_attempt + 1))
+    sleep "$live_probe_delay"
   done
 }
 
