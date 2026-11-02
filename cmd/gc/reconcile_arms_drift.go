@@ -122,8 +122,12 @@ func armConfigDrift(r *rowFacts) (intent, bool) {
 // past the horizon, is a row heal carrying session.config_drift_deferred,
 // which the effect records only once the write lands; otherwise the episode
 // waits with no intent, so the arms after A14 still decide the row, and A14
-// requeued at the horizon.
+// requeued at the horizon. While A16 would begin the execution-stalled
+// drain, the episode waits for a later pass, so its write never holds A16 off.
 func (r *rowFacts) driftHeldWork(cfg runtime.Config, key, workBeadID string) (intent, bool) {
+	if _, stalled := armExecutionStalled(r); stalled {
+		return intent{}, false
+	}
 	info, now := r.row.Info, r.w.Now
 	step := driftEpisode(info, key, now, driftDeferralHorizon(worldCfg(r.w)))
 	if step.Patch == nil {

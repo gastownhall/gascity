@@ -39,6 +39,13 @@ const heldWorkStale = runtime.FingerprintVersion + ":stale"
 
 func (h heldWorkDrift) decide(t *testing.T, city *config.City, meta ...string) (intent, time.Time) {
 	t.Helper()
+	return h.decideIn(t, city, nil, nil, meta...)
+}
+
+// decideIn is decide with entry's change to the row's allocation entry and
+// world's to the pass's world, each when not nil.
+func (h heldWorkDrift) decideIn(t *testing.T, city *config.City, entry func(*selectionEntry), world func(*World), meta ...string) (intent, time.Time) {
+	t.Helper()
 	withoutA7(t)
 	if city == nil {
 		city = &config.City{}
@@ -48,11 +55,17 @@ func (h heldWorkDrift) decide(t *testing.T, city *config.City, meta ...string) (
 	return decideDrain(t, append([]string{"started_config_hash", heldWorkStale}, meta...), func(e *selectionEntry) {
 		e.InDesired, e.Desired = true, desireKeep
 		e.AssignedWork = &assignedWorkView{BeadID: "gw-1", Claimed: true}
+		if entry != nil {
+			entry(e)
+		}
 	}, func(w *World) {
 		info := w.Census.Rows[rowKeyOf("gc-1")].Info
 		w.Env = &reconcileEnv{Cfg: city, SP: struct{ runtime.Provider }{runtime.NewFake()}}
 		w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(info): {TP: tp}}}
 		w.Observed = map[rowKey]rowObservation{rowKeyOf("gc-1"): {Liveness: livenessAlive}}
+		if world != nil {
+			world(w)
+		}
 	})
 }
 
@@ -370,4 +383,52 @@ func TestSessionConfigDriftClearsEscalationMarker(t *testing.T) {
 			t.Fatalf("marker %q after the reset, want empty", got)
 		}
 	})
+}
+
+// Kills the held-work signal weakening the protection or starving A16
+// (#8345, AC-4): an episode of any age, escalated or due, never begins the
+// config-drift drain; a config-drift drain requested before the work is
+// still canceled by a pending interaction; and while the execution backstop's request for the row's
+// generation stands, its execution-stalled begin is decided ahead of the
+// episode's first observation or escalation, which waits for a later pass.
+func TestHeldWorkDriftKeepsItsSafety(t *testing.T) {
+	h := newHeldWorkDrift(t)
+	stalled := func(w *World) {
+		w.ExecutionStalled = map[string]executionStalledRequest{"gc-1": {ID: "gc-1", Generation: "3"}}
+	}
+	for _, tc := range []struct {
+		name       string
+		meta       []string
+		entry      func(*selectionEntry)
+		world      func(*World)
+		wantKind   string
+		wantReason string
+	}{
+		{name: "an escalated episode days old", meta: []string{"config_drift_deferred_key", h.key, "config_drift_deferred_at", rowAt(-72 * time.Hour), "config_drift_escalated_at", rowAt(-48 * time.Hour)}},
+		{name: "an escalation due", meta: []string{"config_drift_deferred_key", h.key, "config_drift_deferred_at", rowAt(-72 * time.Hour)}, wantKind: intentRowHeal, wantReason: decideDriftEscalated},
+		{name: "a config-drift drain requested before the work, then a pending interaction", meta: slices.Concat([]string{"config_drift_deferred_key", h.key, "config_drift_deferred_at", rowAt(-time.Hour)}, intentAt(drainConfigDrift, "3")), entry: func(e *selectionEntry) {
+			e.WakeReasons = []WakeReason{WakePending}
+		}, wantKind: intentDrainCancel, wantReason: decideDrainCancel + drainConfigDrift},
+		{name: "an execution stall over a first observation", world: stalled, wantKind: intentDrainBegin, wantReason: decideDrainBegin + executionStalledDrainReason},
+		{name: "an execution stall over an escalation due", meta: []string{"config_drift_deferred_key", h.key, "config_drift_deferred_at", rowAt(-72 * time.Hour)}, world: stalled, wantKind: intentDrainBegin, wantReason: decideDrainBegin + executionStalledDrainReason},
+		{name: "another generation's execution stall", world: func(w *World) {
+			w.ExecutionStalled = map[string]executionStalledRequest{"gc-1": {ID: "gc-1", Generation: "2"}}
+		}, wantKind: intentRowHeal, wantReason: decideDriftHeldWork},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			it, _ := h.decideIn(t, nil, tc.entry, tc.world, tc.meta...)
+			if it.Reason == decideDrainBegin+drainConfigDrift {
+				t.Fatalf("decideRow = (%q, %q) %v: the config-drift drain begun over held work", it.Kind, it.Reason, it.Patch)
+			}
+			if tc.wantKind == "" {
+				if it.Reason == decideDriftHeldWork || it.Reason == decideDriftEscalated {
+					t.Fatalf("decideRow = (%q, %q) %v, want no write", it.Kind, it.Reason, it.Patch)
+				}
+				return
+			}
+			if it.Kind != tc.wantKind || it.Reason != tc.wantReason {
+				t.Fatalf("decideRow = (%q, %q) %v, want (%q, %q)", it.Kind, it.Reason, it.Patch, tc.wantKind, tc.wantReason)
+			}
+		})
+	}
 }
