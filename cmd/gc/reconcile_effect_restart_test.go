@@ -114,6 +114,31 @@ func TestDriftDeferStep(t *testing.T) {
 	}
 }
 
+// Kills the held-work protection lost to its signal (#8345, AC-4; the
+// triage repro, whose signal half is now TestHeldWorkDrift* and
+// TestSessionConfigDriftDeferred*): an ordinary seat's relaunch over held
+// work refuses has-work whatever its episode's age or escalation, and over
+// a claim raced in since the decide, before any episode; it writes nothing.
+func TestDriftDeferStepOrdinarySeatOverWorkIsBounded(t *testing.T) {
+	key := driftKeyOf(driftView(t, false, txFence{}))
+	long := gatherNow.Add(-72 * time.Hour).UTC().Format(time.RFC3339)
+	for _, tc := range []struct {
+		name string
+		meta []string
+	}{
+		{"a racing claim, no episode yet", nil},
+		{"an episode days old", []string{"config_drift_deferred_key", key, "config_drift_deferred_at", long}},
+		{"an escalated episode", []string{"config_drift_deferred_key", key, "config_drift_deferred_at", long, "config_drift_escalated_at", gatherNow.Add(-time.Hour).UTC().Format(time.RFC3339)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			step := driftDeferStep(driftView(t, false, txFence{Work: &txWork{}}, tc.meta...))
+			if step.Refuse != causeHasWork || len(step.Write) != 0 {
+				t.Fatalf("step %+v, want refused %q, nothing written", step, causeHasWork)
+			}
+		})
+	}
+}
+
 // Kills the restart losing a resumable conversation or resuming one it
 // must not (SESS-557, legacy's resetConfiguredNamedSessionForConfigDriftInfo
 // for start-pending): a row with its key and stored hash keeps both; one

@@ -186,6 +186,49 @@ func TestDecideRowExecutionStalled(t *testing.T) {
 	}
 }
 
+// TestHeldWorkDriftDoesNotStarveExecutionStalled kills a held-work episode
+// starving A16 (#8345): the episode's repeated notification evaluation — a
+// stamped episode waiting for its horizon, or one already escalated — decides
+// nothing on its own, so the execution backstop's drain request still runs
+// behind it the same pass; only the ticks that stamp or escalate the episode
+// are A14's own.
+func TestHeldWorkDriftDoesNotStarveExecutionStalled(t *testing.T) {
+	withoutA7(t)
+	tp := TemplateParams{TemplateName: "worker", Command: "run"}
+	base := censusRowOf(t, drainRow()).Info
+	cfg := sessionCoreConfigForHashInfo(tp, base)
+	core, live := runtime.CoreFingerprint(cfg), runtime.LiveFingerprint(cfg)
+	stale := runtime.FingerprintVersion + ":stale"
+	key := stale + ":" + core
+	stalled := []func(*World){func(w *World) {
+		info := w.Census.Rows[rowKeyOf("gc-1")].Info
+		w.Env = &reconcileEnv{Cfg: &config.City{Agents: []config.Agent{{Name: "worker"}}}, SP: runtime.NewFake()}
+		w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(info): {TP: tp}}}
+		w.Observed = map[rowKey]rowObservation{rowKeyOf("gc-1"): {Liveness: livenessAlive}}
+		w.ExecutionStalled = map[string]executionStalledRequest{"gc-1": {ID: "gc-1", Generation: "3"}}
+	}}
+	for _, tc := range []struct {
+		name       string
+		meta       []string
+		wantKind   string
+		wantReason string
+	}{
+		{name: "a waiting episode leaves the backstop its turn", meta: []string{"started_config_hash", stale, "started_live_hash", live, "config_drift_deferred_key", key, "config_drift_deferred_at", rowAt(-time.Minute)}, wantKind: intentDrainBegin, wantReason: decideDrainBegin + executionStalledDrainReason},
+		{name: "an escalated episode leaves the backstop its turn", meta: []string{"started_config_hash", stale, "started_live_hash", live, "config_drift_deferred_key", key, "config_drift_deferred_at", rowAt(-time.Hour), "config_drift_escalated_at", rowAt(-time.Minute)}, wantKind: intentDrainBegin, wantReason: decideDrainBegin + executionStalledDrainReason},
+		{name: "the first observation is the stamp's own tick", meta: []string{"started_config_hash", stale, "started_live_hash", live}, wantKind: intentRowHeal, wantReason: decideDriftHeldWork},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			it, _ := decideDrain(t, tc.meta, func(e *selectionEntry) {
+				e.InDesired, e.Desired, e.Liveness = true, desireKeep, livenessAlive
+				e.AssignedWork = &assignedWorkView{BeadID: "gw-1", Claimed: true}
+			}, stalled...)
+			if it.Kind != tc.wantKind || it.Reason != tc.wantReason {
+				t.Fatalf("decideRow = (%q, %q), want (%q, %q): the held-work episode must not starve the execution-stalled handling", it.Kind, it.Reason, tc.wantKind, tc.wantReason)
+			}
+		})
+	}
+}
+
 // decideArm is decideDrain deciding gc-1 by arm alone, past the arms ahead
 // of it.
 func decideArm(arm func(*rowFacts) (intent, bool)) func(*testing.T, []string, func(*selectionEntry), ...func(*World)) (intent, time.Time) {
