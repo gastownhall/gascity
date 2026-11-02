@@ -1,7 +1,9 @@
 package k8s
 
 import (
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"maps"
 	"path/filepath"
@@ -250,6 +252,10 @@ func validateProjectedHostedStoreIdentity(cfgEnv map[string]string, prefix, mana
 // buildPod creates a pod manifest compatible with gc-session-k8s.
 // Same labels, annotations, container names, volumes, and tmux-inside-pod
 // pattern so mixed-mode migration works.
+// storeReadyMarkerAnnotation names the path that releases a prebaked pod's
+// entrypoint once the controller has verified its store.
+const storeReadyMarkerAnnotation = "gc-store-ready-marker"
+
 func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error) {
 	podName := SanitizeName(name)
 	label := SanitizeLabel(name)
@@ -311,8 +317,18 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	}
 	credCopy := `mkdir -p $HOME/.claude && cp -rL /tmp/claude-secret/. $HOME/.claude/ 2>/dev/null; git config --global --add safe.directory '*' 2>/dev/null; `
 	wsWait := ""
+	storeReadyMarker := ""
 	if !p.prebaked {
 		wsWait = `while [ ! -f /workspace/.gc-workspace-ready ]; do sleep 0.5; done; `
+	} else {
+		// A prebaked image brings its own workspace, so hold the entrypoint on a
+		// launch-specific path the image cannot already contain.
+		var nonce [16]byte
+		if _, err := rand.Read(nonce[:]); err != nil {
+			return nil, fmt.Errorf("creating store readiness marker: %w", err)
+		}
+		storeReadyMarker = "/tmp/gc-store-ready-" + hex.EncodeToString(nonce[:])
+		wsWait = fmt.Sprintf("while [ ! -f %s ]; do sleep 0.5; done; ", shellquote.Quote(storeReadyMarker))
 	}
 
 	// The pod spec's WorkingDir names the workspace root, because the kubelet
@@ -405,6 +421,10 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 		return nil, err
 	}
 
+	annotations := map[string]string{"gc-session-name": name}
+	if storeReadyMarker != "" {
+		annotations[storeReadyMarkerAnnotation] = storeReadyMarker
+	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podName,
@@ -414,9 +434,7 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 				"gc-session": label,
 				"gc-agent":   agentLabel,
 			},
-			Annotations: map[string]string{
-				"gc-session-name": name,
-			},
+			Annotations: annotations,
 		},
 		Spec: corev1.PodSpec{
 			ServiceAccountName: p.serviceAccount,
