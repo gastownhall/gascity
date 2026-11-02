@@ -110,6 +110,40 @@ func TestGcBdMetadataPipeSurvivesTheRigCheck(t *testing.T) {
 	}
 }
 
+// TestGcBdMetadataFileIsReadAsBdReadsItOnEveryCity runs `gc bd update
+// --metadata "@m.json "` through doBd on a single-store and a split city. bd
+// reads the path after the "@" exactly as written, trailing space included,
+// and so does every check before it (the pin and the rig check on every city,
+// the class judge on a split one): the write reaches bd once, pointed at a
+// copy that keeps the name. m.json, the file the trimmed path names, holds a
+// route the rig check refuses.
+func TestGcBdMetadataFileIsReadAsBdReadsItOnEveryCity(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		opts bdParityOpts
+	}{{"single-store", bdParityOpts{}}, {"split", bdParityOpts{storage: bdSQLRefusalSplitStorage}}} {
+		t.Run(c.name, func(t *testing.T) {
+			res := runBdParityArm(t, false, c.opts, func(t *testing.T, city bdParityCity) []string {
+				for _, f := range []struct{ name, body string }{
+					{"m.json ", `{"note":"x"}`},
+					{"m.json", `{"gc.routed_to":"ghostrig/polecat-01"}`},
+				} {
+					if err := os.WriteFile(filepath.Join(city.city, f.name), []byte(f.body), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return []string{"update", "demo-abc", "--metadata", "@m.json "}
+			})
+			if res.code != 0 {
+				t.Fatalf("exit %d, want 0; stderr=%q", res.code, res.stderr)
+			}
+			if w := bdParityWrites(res.bd); len(w) != 1 || !strings.Contains(w[0], "/gc-bd-judged-") || !strings.HasSuffix(w[0], "/m.json ") {
+				t.Fatalf("bd ran %q, want one update pointed at a copy of %q; stderr=%q", w, "m.json ", res.stderr)
+			}
+		})
+	}
+}
+
 // TestBdPinMetadataFilesIsExact: the pin rewrites exactly the tokens pflag
 // reads as a --metadata @file value of create, new or update, each read once
 // into an absolute private copy that cleanup removes, and leaves every other
