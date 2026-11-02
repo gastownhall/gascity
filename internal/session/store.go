@@ -705,18 +705,21 @@ func (s *Store) CircuitResetGeneration(id string) (string, error) {
 // PersistedMarkers is a narrow typed view of the persisted session-attribute
 // markers the wait paths read off a session bead: the bead Title (used to build
 // the wait bead title), the tmux session_name, the continuation_epoch (stamped
-// onto wait beads as registered_epoch), and the sleep_reason (consulted when
-// clearing a wait-hold). It carries the raw bead fields verbatim.
+// onto wait beads as registered_epoch), the sleep_reason (consulted when
+// clearing a wait-hold), and the continuation_reset_pending marker (stamped
+// onto wait beads as registered_reset_pending). It carries the raw bead fields
+// verbatim.
 type PersistedMarkers struct {
-	Title             string
-	SessionName       string
-	ContinuationEpoch string
-	SleepReason       string
+	Title                    string
+	SessionName              string
+	ContinuationEpoch        string
+	SleepReason              string
+	ContinuationResetPending string
 }
 
 // PersistedMarkers returns the persisted Title / session_name /
-// continuation_epoch / sleep_reason markers for id, verbatim (each "" when
-// unset).
+// continuation_epoch / sleep_reason / continuation_reset_pending markers for
+// id, verbatim (each "" when unset).
 //
 // It is the front door for the raw store.Get(sessionID) + read .Title/.Metadata[...]
 // pattern in the wait registration (cmd_wait.go session-wait creation), the
@@ -731,10 +734,11 @@ func (s *Store) PersistedMarkers(id string) (PersistedMarkers, error) {
 		return PersistedMarkers{}, err
 	}
 	return PersistedMarkers{
-		Title:             b.Title,
-		SessionName:       b.Metadata["session_name"],
-		ContinuationEpoch: b.Metadata["continuation_epoch"],
-		SleepReason:       b.Metadata["sleep_reason"],
+		Title:                    b.Title,
+		SessionName:              b.Metadata["session_name"],
+		ContinuationEpoch:        b.Metadata["continuation_epoch"],
+		SleepReason:              b.Metadata["sleep_reason"],
+		ContinuationResetPending: b.Metadata["continuation_reset_pending"],
 	}, nil
 }
 
