@@ -68,6 +68,14 @@ func (s *seamBackedProvider) ObserveLivenessWithError(name string, processNames 
 	return s.raw.ObserveLivenessWithError(name, processNames)
 }
 
+// ObserveLivenessWithError preserves Kubernetes probe uncertainty across the
+// production seam wrapper. The generic seam adapter only has boolean
+// IsRunning/ProcessAlive methods, which would turn a transient exec failure
+// into a false zombie observation.
+func (s *seamBackedProvider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	return s.raw.ObserveLivenessWithError(name, processNames)
+}
+
 // SleepCapability passes through to the underlying provider (non-seam).
 func (s *seamBackedProvider) SleepCapability(name string) runtime.SessionSleepCapability {
 	return s.raw.SleepCapability(name)

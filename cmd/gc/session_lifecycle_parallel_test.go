@@ -35,6 +35,7 @@ import (
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/testutil"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 type failingMetadataBatchStore struct {
@@ -4394,6 +4395,131 @@ func TestCommitAsyncStartResult_IgnoresCommandChangedDuringStartup(t *testing.T)
 	}
 }
 
+func TestCommitAsyncStartResult_UnansweredLivenessRestoresPriorIdentityAfterRefreshDrift(t *testing.T) {
+	store := beads.NewMemStore()
+	if err := beads.StampOpenedStore(store, "MemStore", gate.Auto, false, nil, nil); err != nil {
+		t.Fatalf("enabling conditional writes for async T1 restore: %v", err)
+	}
+	f := newLeaseStartFixture(t, store)
+	lease, release, err := tryRuntimeLease(store, f.city, "worker", f.cand.info.ID, sessionpkg.RuntimeLeaseTTL(0))
+	if err != nil {
+		t.Fatalf("taking runtime lease: %v", err)
+	}
+	defer release()
+	if err := store.SetMetadata(f.cand.info.ID, "command", "worker"); err != nil {
+		t.Fatal(err)
+	}
+	clk := &clock.Fake{Time: time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)}
+	before, persisted, err := sessionFrontDoor(store).GetPersistedResponse(f.cand.info.ID)
+	if err != nil {
+		t.Fatalf("loading pre-wake session: %v", err)
+	}
+	_, _, fold, err := preWakeCommit(before, sessionFrontDoor(store), clk)
+	if err != nil {
+		t.Fatalf("pre-waking session: %v", err)
+	}
+	attempted := before.ApplyPatch(fold)
+	undo := newPreWakeUndo(before, persisted.Metadata, fold)
+	undo.token = attempted.InstanceToken
+	if err := store.SetMetadata(f.cand.info.ID, "command", "worker-updated"); err != nil {
+		t.Fatal(err)
+	}
+	result := startResult{
+		prepared: preparedStart{
+			candidate:                 startCandidate{info: attempted, tp: f.cand.tp, lease: lease},
+			preWakeUndo:               undo,
+			preWakeLivenessUnanswered: true,
+		},
+		outcome:                             TraceOutcomeDeferred,
+		started:                             clk.Now(),
+		finished:                            clk.Now(),
+		restorePreWakeIdentity:              true,
+		restorePreWakeIdentityRequiresFence: true,
+		startBoundaryLivenessUnanswered:     true,
+		storeOnly:                           true,
+	}
+	sp := runtime.NewFake()
+
+	if commitAsyncStartResultWithContext(context.Background(), result, sp, store, clk, events.Discard, 0, ioDiscard{}, ioDiscard{}, nil) {
+		t.Fatal("unanswered-liveness result should not commit after command drift")
+	}
+	got := mustGetBead(t, store, f.cand.info.ID).Metadata
+	if got["generation"] != before.Generation || got["instance_token"] != before.InstanceToken || got["continuation_epoch"] != before.ContinuationEpoch {
+		t.Fatalf("async settle kept the attempted identity: %v, want prior fence (%q, %q, %q)", got, before.Generation, before.InstanceToken, before.ContinuationEpoch)
+	}
+	if got["last_woke_at"] != "" {
+		t.Fatalf("last_woke_at = %q, want the unanswered attempt's lease cleared", got["last_woke_at"])
+	}
+	if got["command"] != "worker-updated" {
+		t.Fatalf("command = %q, want the concurrent command update preserved", got["command"])
+	}
+	if calls := sp.SnapshotCalls(); len(calls) != 0 {
+		t.Fatalf("async settle touched the provider for an unanswered result: %#v", calls)
+	}
+}
+
+func TestCommitStartResult_IdentityRestoreRefusesMovedLease(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	enableConditionalWritesForStartTest(t, env)
+	candidate, bead, _ := identityPlannerCandidate(t, env, "active")
+	lease, release, err := tryRuntimeLease(env.store, env.city, candidate.name(), bead.ID, startRuntimeLeaseTTL(time.Minute, 0))
+	if err != nil {
+		t.Fatalf("taking runtime lease: %v", err)
+	}
+	defer release()
+
+	sessFront := sessionFrontDoor(env.store)
+	before, persisted, err := sessFront.GetPersistedResponse(bead.ID)
+	if err != nil {
+		t.Fatalf("loading pre-wake session: %v", err)
+	}
+	_, fold, err := preWakeCommitUnder(before, sessFront, env.clk, lease)
+	if err != nil {
+		t.Fatalf("pre-waking session under lease: %v", err)
+	}
+	attempted := before.ApplyPatch(fold)
+	undo := newPreWakeUndo(before, persisted.Metadata, fold)
+	undo.token = attempted.InstanceToken
+	candidate.info = attempted
+	candidate.lease = lease
+
+	if err := sessFront.ApplyPatch(bead.ID, sessionpkg.MetadataPatch{
+		sessionpkg.RuntimeLeaseHolderKey: "successor/1/nonce",
+		sessionpkg.RuntimeLeaseEpochKey:  "999",
+	}); err != nil {
+		t.Fatalf("moving runtime lease record: %v", err)
+	}
+	beforeRefusal := mustGetBead(t, env.store, bead.ID).Metadata
+	sp := runtime.NewFake()
+	result := startResult{
+		prepared: preparedStart{
+			candidate:                 candidate,
+			preWakeUndo:               undo,
+			preWakeLivenessUnanswered: true,
+		},
+		outcome:                             TraceOutcomeDeferred,
+		started:                             env.clk.Now(),
+		finished:                            env.clk.Now(),
+		restorePreWakeIdentity:              true,
+		restorePreWakeIdentityRequiresFence: true,
+		storeOnly:                           true,
+		provider:                            sp,
+	}
+	if verdict := commitStartResultTraced(result, sessFront, env.clk, events.Discard, 0, io.Discard, io.Discard, nil); verdict != startCommitFailed {
+		t.Fatalf("commit verdict = %v, want failed store-only deferral", verdict)
+	}
+	after := mustGetBead(t, env.store, bead.ID).Metadata
+	if !reflect.DeepEqual(after, beforeRefusal) {
+		t.Fatalf("moved-lease restore changed the successor's row:\nbefore: %#v\nafter:  %#v", beforeRefusal, after)
+	}
+	if after[sessionpkg.RuntimeLeaseHolderKey] != "successor/1/nonce" || after[sessionpkg.RuntimeLeaseEpochKey] != "999" {
+		t.Fatalf("runtime lease after refused restore = (%q, %q), want successor record", after[sessionpkg.RuntimeLeaseHolderKey], after[sessionpkg.RuntimeLeaseEpochKey])
+	}
+	if calls := sp.SnapshotCalls(); len(calls) != 0 {
+		t.Fatalf("moved-lease store-only restore touched provider: %#v", calls)
+	}
+}
+
 func TestCommitAsyncStartResult_PreservesRuntimeWhenRefreshFails(t *testing.T) {
 	store := &getErrorStore{MemStore: beads.NewMemStore()}
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 2, 50, 0, time.UTC)}
@@ -7723,6 +7849,123 @@ func TestExecutePreparedStartWave_AlreadyRunningRejectsPendingCreateSessionIDMis
 	}
 }
 
+type existingSessionInitializingAfterDeadlineProvider struct {
+	*runtime.Fake
+	startCalls int
+}
+
+func (p *existingSessionInitializingAfterDeadlineProvider) Start(ctx context.Context, _ string, _ runtime.Config) error {
+	p.startCalls++
+	<-ctx.Done()
+	return runtime.ErrExistingSessionInitializing
+}
+
+func TestRunPreparedStartCandidate_ForeignOtherEpochDefersAfterRestoringPreWakeIdentity(t *testing.T) {
+	sp := &existingSessionInitializingAfterDeadlineProvider{Fake: runtime.NewFake()}
+	for key, value := range map[string]string{
+		"GC_SESSION_ID":     "gc-creating",
+		"GC_INSTANCE_TOKEN": "tok-old",
+		"GC_RUNTIME_EPOCH":  "1",
+	} {
+		if err := sp.SetMeta("test-agent", key, value); err != nil {
+			t.Fatalf("SetMeta %s: %v", key, err)
+		}
+	}
+
+	item := preparedStart{
+		candidate: startCandidate{
+			info: sessionpkg.Info{
+				ID:                         "gc-creating",
+				SessionName:                "test-agent",
+				SessionNameMetadata:        "test-agent",
+				Template:                   "worker",
+				Generation:                 "2",
+				ContinuationEpoch:          "2",
+				InstanceToken:              "tok-new",
+				PendingCreateClaim:         true,
+				PendingCreateClaimMetadata: "true",
+			},
+			tp: TemplateParams{Command: "worker", SessionName: "test-agent", TemplateName: "worker"},
+		},
+		cfg: runtime.Config{Command: "worker"},
+		preWakeUndo: preWakeUndo{
+			before: map[string]string{
+				"generation":         "1",
+				"instance_token":     "tok-old",
+				"continuation_epoch": "1",
+			},
+			written: sessionpkg.MetadataPatch{"instance_token": "tok-new"},
+		},
+	}
+
+	got := runPreparedStartCandidate(context.Background(), item, t.TempDir(), sp, nil, nil, 20*time.Millisecond, immediateStartStabilityWaiter, nil, nil)
+	if sp.startCalls != 1 {
+		t.Fatalf("provider Start calls = %d, want 1", sp.startCalls)
+	}
+	if got.outcome != TraceOutcomeDeferred {
+		t.Fatalf("outcome = %q, want deferred for the live other-epoch runtime", got.outcome)
+	}
+	if got.err != nil {
+		t.Fatalf("deferred result error = %v, want nil", got.err)
+	}
+	if !got.restorePreWakeIdentity {
+		t.Fatal("restorePreWakeIdentity = false, want the prior runtime token to be recognized")
+	}
+	if got.rollbackPending {
+		t.Fatal("rollbackPending = true, want the other epoch's live runtime to keep the pending create")
+	}
+	if !errors.Is(got.unattributedErr, runtime.ErrExistingSessionInitializing) {
+		t.Fatalf("unattributedErr = %v, want the initializing start error retained for the lifecycle trace", got.unattributedErr)
+	}
+}
+
+func TestExecutePreparedStartWave_AlreadyRunningRejectsPendingCreateSameIDTokenMismatch(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "test-agent", runtime.Config{}); err != nil {
+		t.Fatalf("Start existing session: %v", err)
+	}
+	for key, value := range map[string]string{
+		"GC_SESSION_ID":     "gc-creating",
+		"GC_INSTANCE_TOKEN": "tok-old",
+		"GC_RUNTIME_EPOCH":  "2",
+	} {
+		if err := sp.SetMeta("test-agent", key, value); err != nil {
+			t.Fatalf("SetMeta %s: %v", key, err)
+		}
+	}
+	item := preparedStart{
+		candidate: startCandidate{
+			info: sessionpkg.Info{
+				ID:                         "gc-creating",
+				SessionName:                "test-agent",
+				SessionNameMetadata:        "test-agent",
+				Template:                   "worker",
+				Generation:                 "2",
+				InstanceToken:              "tok-new",
+				PendingCreateClaim:         true,
+				PendingCreateClaimMetadata: "true",
+			},
+			tp: TemplateParams{Command: "claude", SessionName: "test-agent", TemplateName: "worker"},
+		},
+		cfg: runtime.Config{Command: "claude"},
+	}
+
+	results := executePreparedStartWaveForCity(context.Background(), []preparedStart{item}, t.TempDir(), sp, nil, nil, 10*time.Second, 1)
+	if len(results) != 1 {
+		t.Fatalf("results = %d, want one", len(results))
+	}
+	got := results[0]
+	if !errors.Is(got.err, runtime.ErrSessionExists) {
+		t.Fatalf("result error = %v, want ErrSessionExists for the mismatched live incarnation", got.err)
+	}
+	if !got.rollbackPending {
+		t.Fatal("rollbackPending = false, want the create rejected without adopting the same-ID runtime")
+	}
+	if got.outcome != TraceOutcomeSessionExists {
+		t.Fatalf("outcome = %q, want session_exists", got.outcome)
+	}
+}
+
 func TestExecutePreparedStartWave_RuntimeOnlyStaleKeyUsesProcessAliveFallback(t *testing.T) {
 	city := t.TempDir()
 	sp := &falseNegativeAfterStartProvider{
@@ -9390,5 +9633,40 @@ func TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv(t *testing.T) {
 	}
 	if v := after.Metadata[beadmeta.TriggerBeadIDMetadataKey]; v != "" {
 		t.Errorf("durable trigger stamp = %q, want cleared", v)
+	}
+}
+
+// A start boundary that ended before Provider.Start must report an unanswered
+// observation and never start a runtime: the caller can no longer judge it.
+func TestStartPreparedStartCandidate_ExpiredBoundaryNeverReachesProviderStart(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tc := range []struct {
+		name               string
+		observation, start context.Context
+	}{
+		{name: "observation context ended", observation: canceled, start: context.Background()},
+		{name: "start context ended", observation: context.Background(), start: canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			item := preparedStart{
+				candidate: startCandidate{
+					info: sessionpkg.Info{ID: "gc-creating", SessionName: "test-agent", SessionNameMetadata: "test-agent", Template: "worker"},
+					tp:   TemplateParams{Command: "worker", SessionName: "test-agent", TemplateName: "worker"},
+				},
+				cfg: runtime.Config{Command: "worker"},
+			}
+			witness, err := startPreparedStartCandidate(tc.observation, tc.start, item, t.TempDir(), nil, sp, nil, &startPhaseTimings{}, nil, nil)
+			if !errors.Is(err, worker.ErrObservationUnanswered) || !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("error = %v, want unanswered observation and unavailable runtime", err)
+			}
+			if witness != sessionpkg.StartRuntimeWitnessUnknown {
+				t.Fatalf("witness = %v, want unknown", witness)
+			}
+			if got := sp.CountCalls("Start", "test-agent"); got != 0 {
+				t.Fatalf("Provider.Start calls = %d, want 0", got)
+			}
+		})
 	}
 }

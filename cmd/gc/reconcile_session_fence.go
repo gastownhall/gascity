@@ -285,21 +285,20 @@ func confirmStopped(ctx context.Context, sp runtime.Provider, processNames []str
 	return ok && !live.Running && hopsQuiet(ctx, sp, name, processNames, since, !live.Present())
 }
 
-// attachLeg is L3 by the leaf's attach tier (§8.1). reporter: the error probe
-// holds on attached or any error but a vanished session. terminal-no-report:
-// passes only after a readable quiet window, and C8.5 classes escalate.
-// no-terminal: passes.
+// attachLeg is L3 by the leaf's attach tier (§8.1). A reporter's error probe
+// holds on attached or any error but a vanished session. A fresh-readable
+// no-terminal leaf passes; otherwise activity must establish a quiet window.
+// C8.5 classes escalate.
 func attachLeg(ctx context.Context, leaf runtime.Provider, name string, escalates bool, now time.Time) (reason string, escalate bool) {
 	caps := leaf.Capabilities()
 	_, observes := leaf.(runtime.AttachmentObserverWithError)
-	_, hardened := leaf.(runtime.LivenessObserverWithError)
 	switch {
 	case observes && caps.CanReportAttachment:
 		if boundedAttachHolds(ctx, leaf, name) {
 			return fenceAttached, false
 		}
 		return "", false
-	case !caps.CanAttachTTY && !caps.CanReportAttachment && hardened:
+	case !caps.CanAttachTTY && !caps.CanReportAttachment && runtime.FreshReadable(leaf):
 		return "", false
 	case escalates:
 		return fenceTerminalNoReport, true

@@ -919,6 +919,58 @@ func TestRuntimeOnlyStartRunsTheCallersIncarnation(t *testing.T) {
 	}
 }
 
+func TestStartRuntimeOnlyWithWitnessDistinguishesReuseAndProviderAttempt(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		alreadyUp  bool
+		superseded bool
+		startErr   error
+		want       StartRuntimeWitness
+		wantErr    bool
+		wantErrIs  error
+		wantCalls  int
+	}{
+		{name: "reuses IsRunning runtime", alreadyUp: true, want: StartRuntimeWitnessReused},
+		{name: "attempts Provider.Start", want: StartRuntimeWitnessProviderStart, wantCalls: 1},
+		{name: "attempt remains witnessed on provider error", startErr: errors.New("provider refused"), want: StartRuntimeWitnessProviderStart, wantErr: true, wantCalls: 1},
+		{name: "early superseded refusal remains unknown", superseded: true, want: StartRuntimeWitnessUnknown, wantErr: true, wantErrIs: ErrMintSuperseded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := openLeaseStore(t, t.TempDir())
+			b := mintRow(t, store)
+			sp := runtime.NewFake()
+			if tc.alreadyUp {
+				if err := sp.Start(context.Background(), "s-mint", runtime.Config{Command: "claude"}); err != nil {
+					t.Fatalf("starting existing runtime: %v", err)
+				}
+			}
+			if tc.startErr != nil {
+				sp.StartErrors["s-mint"] = tc.startErr
+			}
+			mgr := newTestManager(t, store, sp)
+			by := runtimeOnlyActor(t, mgr, b.ID)
+			inc := mintUnder(t, mgr, by.Lease, b.ID)
+			if tc.superseded {
+				mintUnder(t, mgr, by.Lease, b.ID)
+			}
+			startsBefore := sp.CountCalls("Start", "s-mint")
+			got, err := mgr.StartRuntimeOnlyWithWitness(context.Background(), by, b.ID, inc, "claude", runtime.Config{})
+			if got != tc.want {
+				t.Fatalf("StartRuntimeOnlyWithWitness witness = %v, want %v", got, tc.want)
+			}
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("StartRuntimeOnlyWithWitness error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErrIs != nil && !errors.Is(err, tc.wantErrIs) {
+				t.Fatalf("StartRuntimeOnlyWithWitness error = %v, want it to wrap %v", err, tc.wantErrIs)
+			}
+			if calls := sp.CountCalls("Start", "s-mint") - startsBefore; calls != tc.wantCalls {
+				t.Fatalf("provider Start calls = %d, want %d", calls, tc.wantCalls)
+			}
+		})
+	}
+}
+
 // TestStartNeverMintsOverALiveRuntime: under its lease a start reads the
 // runtime fresh, and a runtime that is up with its agent alive is never
 // minted over: the row and the only live runtime keep naming one
