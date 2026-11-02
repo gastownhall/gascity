@@ -18,6 +18,10 @@ func (s *Server) workerFactory(store beads.Store) (*worker.Factory, error) {
 			return configuredSessionTransport(cfg, template, provider)
 		}
 	}
+	var resolveLaunchEnv func(session.Info, string, map[string]string) (map[string]string, error)
+	if p, ok := s.state.(LaunchEnvResolverProvider); ok {
+		resolveLaunchEnv = p.LaunchEnvResolver(cfg)
+	}
 	return worker.NewFactory(worker.FactoryConfig{
 		Store:                 store,
 		Provider:              s.state.SessionProvider(),
@@ -27,6 +31,7 @@ func (s *Server) workerFactory(store beads.Store) (*worker.Factory, error) {
 		UsageSink:             s.state.UsageSink(),
 		ResolveTransport:      resolveTransport,
 		ResolveSessionRuntime: s.resolveWorkerSessionRuntimeWithMetadata,
+		ResolveLaunchEnv:      resolveLaunchEnv,
 		Pricing:               cfg.PricingRegistry(),
 		ActivityMemo:          s.activityMemo,
 		ResolveBead:           s.formulaBeadResolver(),
