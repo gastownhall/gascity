@@ -83,6 +83,7 @@ go_test(
         "fake_test.go",
         "fence_helpers_test.go",
         "fence_test.go",
+        "fingerprint_breakdown_parity_test.go",
         "fingerprint_breakdown_v1_test.go",
         "fingerprint_config_env_test.go",
         "fingerprint_golden_test.go",
