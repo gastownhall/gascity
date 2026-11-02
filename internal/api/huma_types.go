@@ -162,13 +162,16 @@ type ListBody[T any] struct {
 
 // ListOutput is a generic output type for list endpoints. It sets the
 // X-GC-Index header and returns items in the standard list envelope.
-// CacheAgeS reports the age of the CachingStore snapshot that produced
-// the response (0 if the handler did not read from a caching store or
-// the age is unknown); read-path CLI commands surface this as
-// _cache_age_s in --json output and as a stale-read banner > 30 s.
+// CacheAgeS reports the seconds since the server's bead cache last took in
+// fresh data from its store (cacheAgeSeconds): the cache's age, not each
+// row's. Only a handler whose body is read from the cache sets it, and not
+// every such handler does; it is 0 when the handler does not, the store has
+// no cache, or the cache has never been primed. Read-path CLI commands
+// surface it as _cache_age_s in --json output and as a stale-read
+// banner > 30 s.
 type ListOutput[T any] struct {
 	Index     uint64  `header:"X-GC-Index" doc:"City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event."`
-	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Age in seconds of the CachingStore snapshot that served this response (0 if not applicable)."`
+	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed."`
 	Body      ListBody[T]
 }
 
@@ -177,13 +180,13 @@ type ListOutput[T any] struct {
 //
 // One handler widens that meaning: /status may serve a stale-while-revalidate
 // body (ra-4u2eqc, handler_status.go), in which case CacheAgeS reports the
-// GREATER of the CachingStore snapshot age and the age of the cached response
-// entry itself. Reporting only the snapshot age there would let a recently
+// GREATER of the bead cache's age and the age of the cached response entry
+// itself. Reporting only the cache's age there would let a recently
 // lagging reconciler under-report true staleness and suppress the banner
 // `gc status` renders above cacheAgeBannerThresholdSeconds.
 type IndexOutput[T any] struct {
 	Index     uint64  `header:"X-GC-Index" doc:"City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event."`
-	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Age in seconds of the CachingStore snapshot that served this response (0 if not applicable)."`
+	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed."`
 	Body      T
 }
 

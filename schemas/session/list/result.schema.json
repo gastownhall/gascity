@@ -21,7 +21,7 @@
     },
     "_cache_age_s": {
       "type": "number",
-      "description": "API-routed output only: age in seconds of the supervisor session read-model cache the rows came from. Absent on a local read."
+      "description": "API-routed output only: seconds since the server's bead cache last took in fresh data from its store (a full re-scan, or a write, event or row re-read it applied). It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. 0 when the server reads the store without a cache. Absent on a local read."
     },
     "filters": {
       "type": "object",
