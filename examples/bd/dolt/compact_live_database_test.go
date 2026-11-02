@@ -395,11 +395,15 @@ exit "$rc"
 }
 
 // countFakeDoltQueries returns how many invocations in the fake dolt log
-// contain the given SQL fragment.
+// contain the given SQL fragment. A missing log means the run issued no dolt
+// invocation at all.
 func countFakeDoltQueries(t *testing.T, fixture compactScriptFixture, fragment string) int {
 	t.Helper()
 	logData, err := os.ReadFile(fixture.doltLog)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return 0
+		}
 		t.Fatalf("read dolt log: %v", err)
 	}
 	return strings.Count(string(logData), fragment)
@@ -680,5 +684,174 @@ func TestCompactScriptLiveGateBaselineUnavailableFailsPassBeforeRewrite(t *testi
 	}
 	if !strings.Contains(log, "db=zed") {
 		t.Fatalf("the run must still attempt the next database's baseline:\n%s", log)
+	}
+}
+
+// assertNoLiveGateProbeOrMarker pins the skip contract: a pass that never
+// reached a storage-rewriting step issues no served-HEAD probe and writes no
+// quarantine marker, so skips and dry runs keep their exact pre-gate outcome.
+func assertNoLiveGateProbeOrMarker(t *testing.T, fixture compactScriptFixture, out string) {
+	t.Helper()
+	if got := countFakeDoltQueries(t, fixture, "CONCAT(DATABASE(), ':', HASHOF('HEAD'))"); got != 0 {
+		t.Fatalf("skip path issued %d served-HEAD probes, want none:\n%s", got, out)
+	}
+	if _, statErr := os.Stat(liveGateMarkerPath(fixture)); !os.IsNotExist(statErr) {
+		t.Fatalf("skip path must not write a quarantine marker; stat=%v:\n%s", statErr, out)
+	}
+}
+
+// TestCompactScriptLiveGateSkipsDryRun pins that a dry run runs no probe and
+// writes no marker: it mutates nothing, so there is no liveness to prove.
+func TestCompactScriptLiveGateSkipsDryRun(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_DRY_RUN=1")
+	if err != nil {
+		t.Fatalf("dry-run compact must succeed:\n%s", out)
+	}
+	assertNoLiveGateProbeOrMarker(t, fixture, out)
+	logData, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(logData), "DOLT_RESET") || strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("dry run must not rewrite anything:\n%s", logData)
+	}
+}
+
+// TestCompactScriptLiveGateSkipsBelowThresholdDatabase pins that a
+// below-threshold skip runs no probe: the pass decided not to rewrite, so the
+// gate stays out of the way.
+func TestCompactScriptLiveGateSkipsBelowThresholdDatabase(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "below_threshold")
+	if err != nil {
+		t.Fatalf("below-threshold compact must succeed:\n%s", out)
+	}
+	if !strings.Contains(out, "below_threshold=") {
+		t.Fatalf("output missing the threshold skip line:\n%s", out)
+	}
+	assertNoLiveGateProbeOrMarker(t, fixture, out)
+	logData, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(logData), "DOLT_RESET") || strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("a below-threshold skip must not rewrite anything:\n%s", logData)
+	}
+}
+
+// TestCompactScriptLiveGateSkipsExistingQuarantine pins that a run refusing a
+// quarantined database runs no probe and writes no marker of its own — the
+// operator's marker is the whole story.
+func TestCompactScriptLiveGateSkipsExistingQuarantine(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		extraEnv []string
+	}{
+		{name: "flatten_database"},
+		{name: "bare_gc_database", extraEnv: []string{"GC_DOLT_COMPACT_BARE_GC=1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			marker := liveGateMarkerPath(fixture)
+			if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+				t.Fatalf("mkdir quarantine dir: %v", err)
+			}
+			if err := os.WriteFile(marker, []byte("db=beads\nreason=manual repair pending\ncreated_at=2026-05-01T00:00:00Z\n"), 0o600); err != nil {
+				t.Fatalf("write quarantine marker: %v", err)
+			}
+
+			env := append([]string{"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500"}, tc.extraEnv...)
+			out, err := fixture.run(t, "success", env...)
+			if err == nil {
+				t.Fatalf("%s must fail when a quarantine marker exists:\n%s", tc.name, out)
+			}
+			if !strings.Contains(out, "reason=manual repair pending") {
+				t.Fatalf("%s output missing the existing quarantine report:\n%s", tc.name, out)
+			}
+			if got := countFakeDoltQueries(t, fixture, "CONCAT(DATABASE(), ':', HASHOF('HEAD'))"); got != 0 {
+				t.Fatalf("%s issued %d served-HEAD probes, want none:\n%s", tc.name, got, out)
+			}
+			afterMarker, readErr := os.ReadFile(marker)
+			if readErr != nil {
+				t.Fatalf("%s read quarantine marker: %v", tc.name, readErr)
+			}
+			if string(afterMarker) != "db=beads\nreason=manual repair pending\ncreated_at=2026-05-01T00:00:00Z\n" {
+				t.Fatalf("%s must leave the operator's marker untouched, got:\n%s", tc.name, afterMarker)
+			}
+		})
+	}
+}
+
+// TestCompactScriptLiveGateSkipsDiskHold pins that a run held below the disk
+// floor runs no probe and writes no marker: the hold is reported exactly as
+// before the gate existed.
+func TestCompactScriptLiveGateSkipsDiskHold(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	_, outcomeEnv := newCompactOutcomeFile(t)
+	out, err := fixture.run(t, "success", "GC_FAKE_DF_MODE=df_critical",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", outcomeEnv)
+	if err != nil {
+		t.Fatalf("critical-disk compact must exit 0 with a hold:\n%s", out)
+	}
+	if !strings.Contains(out, "disk CRITICAL") {
+		t.Fatalf("output missing the critical-disk hold:\n%s", out)
+	}
+	assertNoLiveGateProbeOrMarker(t, fixture, out)
+	// A held run may issue no dolt invocation at all.
+	logData, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(logData), "DOLT_RESET") || strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("a held run must not rewrite anything:\n%s", logData)
+	}
+}
+
+// TestCompactScriptLiveGateSkipsGcOnlyDryRun pins the gc-only dry run: the
+// reclaim preview issues no probe and no marker.
+func TestCompactScriptLiveGateSkipsGcOnlyDryRun(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.runWithArgs(t, "below_threshold", []string{"--gc-only"},
+		"GC_DOLT_COMPACT_DRY_RUN=1")
+	if err != nil {
+		t.Fatalf("gc-only dry run must succeed:\n%s", out)
+	}
+	if !strings.Contains(out, "dry-run (would reclaim via DOLT_GC --full)") {
+		t.Fatalf("output missing the gc-only dry-run line:\n%s", out)
+	}
+	assertNoLiveGateProbeOrMarker(t, fixture, out)
+}
+
+// TestCompactScriptLiveGateSkipsPushOnlyRetry pins the pending-push retry: it
+// pushes without rewriting storage, so it runs no probe and writes no marker.
+func TestCompactScriptLiveGateSkipsPushOnlyRetry(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "remote_fetch_failure", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
+	if err != nil {
+		t.Fatalf("initial compact should leave the fetch-failure push pending:\n%s", firstOut)
+	}
+	if err := os.Truncate(fixture.doltLog, 0); err != nil {
+		t.Fatalf("truncate dolt log after setup: %v", err)
+	}
+
+	secondOut, err := fixture.run(t, "remote_success", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("pending-push retry should succeed:\n%s", secondOut)
+	}
+	if !strings.Contains(secondOut, "pending_push=present") ||
+		!strings.Contains(secondOut, "pushed compacted main") {
+		t.Fatalf("retry missing the push-only explanation:\n%s", secondOut)
+	}
+	assertNoLiveGateProbeOrMarker(t, fixture, secondOut)
+	logData, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(logData), "DOLT_RESET") || strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("a push-only retry must not rewrite anything:\n%s", logData)
 	}
 }
