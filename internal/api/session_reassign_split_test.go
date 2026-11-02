@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
@@ -141,7 +142,7 @@ func TestSplitNamedSessionWakeHandsOffPastAFailingWorkStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create(wait): %v", err)
 	}
-	bound, err := extmsg.NewServices(beads.MailStore{Store: f.binding}, beads.SessionStore{Store: f.binding}).Bindings.Bind(context.Background(), extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}, extmsg.BindInput{
+	bound, err := extmsg.NewServices(beadstest.Mail(f.binding), beadstest.Sessions(f.binding)).Bindings.Bind(context.Background(), extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}, extmsg.BindInput{
 		Conversation: extmsg.ConversationRef{
 			ScopeID:        "test-city",
 			Provider:       "discord",

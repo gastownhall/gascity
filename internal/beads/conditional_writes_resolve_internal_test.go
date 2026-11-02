@@ -744,6 +744,15 @@ type targetingWrapper struct {
 
 func (w targetingWrapper) ConditionalWritesResolveTarget() Store { return w.target }
 
+// ptrPrefixStore reports a prefix through a pointer receiver that reads its
+// fields, so calling IDPrefix on a nil one panics.
+type ptrPrefixStore struct {
+	*MemStore
+	prefix string
+}
+
+func (s *ptrPrefixStore) IDPrefix() string { return s.prefix }
+
 // reportingWrapper reports a prefix of its own and declares a target.
 type reportingWrapper struct{ targetingWrapper }
 
@@ -756,7 +765,9 @@ func (s *selfTargeting) ConditionalWritesResolveTarget() Store { return s }
 
 func TestIDPrefixFor(t *testing.T) {
 	gc := prefixStore{MemStore: NewMemStore(), prefix: "gc"}
-	var typedNil *MemStore
+	// A typed nil whose IDPrefix dereferences its receiver: the walk must stop
+	// at it rather than call it.
+	var typedNilPrefix *ptrPrefixStore
 	self := &selfTargeting{MemStore: NewMemStore()}
 	for name, tc := range map[string]struct {
 		s    Store
@@ -771,7 +782,7 @@ func TestIDPrefixFor(t *testing.T) {
 		"the outermost reporter wins":     {reportingWrapper{targetingWrapper{Store: NewMemStore(), target: gc}}, "outer"},
 		"an empty prefix walks on":        {targetingWrapper{Store: NewMemStore(), target: prefixStore{MemStore: NewMemStore(), prefix: ""}}, ""},
 		"a zero handle":                   {SessionStore{}, ""},
-		"a handle over a typed nil":       {SessionStore{typedNil}, ""},
+		"a handle over a typed nil":       {SessionStore{typedNilPrefix}, ""},
 		"a self-targeting wrapper":        {self, ""},
 		"a target chain past the bound":   {deepTargets(prefixHopsForTest+1, gc), ""},
 		"a target chain within the bound": {deepTargets(prefixHopsForTest-1, gc), "gc"},

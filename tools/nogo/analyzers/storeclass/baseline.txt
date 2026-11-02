@@ -338,7 +338,6 @@ cmd/gc/class_store.go	moleculeClassStore	raw-result	1
 cmd/gc/class_store.go	newCityExtMsgServices	raw-param	1
 cmd/gc/class_store.go	newCityMailProvider	raw-param	1
 cmd/gc/class_store.go	queryTopologyWorkProbe	raw-field	1
-cmd/gc/class_store.go	refusedExtMsgServices	mint	2
 cmd/gc/class_store.go	resolveClassStore	raw-param	1
 cmd/gc/class_store.go	resolveClassStore	raw-result	1
 cmd/gc/class_store.go	resolveGraphStore	raw-param	1
@@ -1196,7 +1195,7 @@ cmd/gc/pool_session_name.go	storeForPoolAssignment	raw-param	2
 cmd/gc/pool_session_name.go	storeForPoolAssignment	raw-result	1
 cmd/gc/pool_slot_workdir.go	repairPoolSlotWorkDirClobber	raw-param	1
 cmd/gc/prime_auto_handoff_inject.go	sessionStartAutoHandoffInjectionWithStore	raw-param	1
-cmd/gc/prime_auto_handoff_inject.go	sessionStartMailInjection	mint	2
+cmd/gc/prime_auto_handoff_inject.go	sessionStartMailInjection	mint	1
 cmd/gc/prime_auto_handoff_inject.go	sessionStartMailInjection	raw-param	1
 cmd/gc/prompt.go	promptFuncMap	raw-param	1
 cmd/gc/prompt.go	renderPrompt	raw-param	1

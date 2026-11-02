@@ -379,7 +379,7 @@ func newControllerStateWithRoutes(
 		cs.cityBeadStore = wrapWithCachingStoreFeed(ctx, store, ep, true, cs.ledgerFeedRequest(cfg, ledgerFeedCityScope, cs.cityScopeGate()), cs.reconcileGate())
 		cs.cityBeadsDiagnostic = diagnosticPtr(opened.Diagnostic)
 		cs.cityMailProv = newCityMailProvider(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, ep)
-		cs.extmsgSvc = newCityExtMsgServices(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, ep)
+		cs.extmsgSvc = newCityExtMsgServices(cs.storageRoutes, cs.cityBeadStore, cityPath)
 	}
 	cs.preflightConditionalWrites()
 	cs.storeMetadataSignature = storeMetadataSignature(cityPath, cfg)
@@ -1616,7 +1616,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	if cityStore != nil {
 		cityStore = wrapWithCachingStoreFeed(cs.cacheCtx, cityStore, cs.eventProv, true, cs.ledgerFeedRequest(cfg, ledgerFeedCityScope, cs.cityScopeGate()), cs.reconcileGate())
 		cityMailProv = newCityMailProvider(cs.storageRoutes, cityStore, cfg, cs.cityPath, cs.eventProv)
-		extSvc = newCityExtMsgServices(cs.storageRoutes, cityStore, cfg, cs.cityPath, cs.eventProv)
+		extSvc = newCityExtMsgServices(cs.storageRoutes, cityStore, cs.cityPath)
 	}
 
 	// Swap under short critical section.

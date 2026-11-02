@@ -740,5 +740,5 @@ func intPtr(n int) *int { return &n }
 // both the messaging and the sessions class, as a single-store city's store
 // does.
 func newTestBeadMail(store beads.Store) *beadmail.Provider {
-	return beadmail.NewWithStores(beads.MailStore{Store: store}, beads.SessionStore{Store: store})
+	return beadmail.NewWithStores(beadstest.Mail(store), beadstest.Sessions(store))
 }

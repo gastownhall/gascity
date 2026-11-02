@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/extmsg"
 )
 
@@ -5655,7 +5656,7 @@ func TestReaperStaleAutoClosePreservesDurableExtmsgRecords(t *testing.T) {
 func TestReaperPreservedExtmsgRoomStillRoutesInboundAndAdvancesTranscript(t *testing.T) {
 	ctx := context.Background()
 	store := beads.NewMemStore()
-	services := extmsg.NewServices(beads.MailStore{Store: store}, beads.SessionStore{Store: store})
+	services := extmsg.NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "reaper-integration-test"}
 	room := extmsg.ConversationRef{
 		ScopeID:        "test-city",

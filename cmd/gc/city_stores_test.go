@@ -408,3 +408,32 @@ func BenchmarkResolveClassStore(b *testing.B) {
 		}
 	})
 }
+
+// TestCLIMailStoreIsTheResolvedMessagingStore pins the session-start mail
+// injection's reroute (typed-store T3): cliMailStore hands out the store
+// resolveMailMessagesStore did, the binding on a split one-shot city and the
+// scope store on an unsplit one.
+func TestCLIMailStoreIsTheResolvedMessagingStore(t *testing.T) {
+	for name, routes := range map[string]func(binding beads.Store) *storageRoutes{
+		"split":   messagingSplitRoutes,
+		"unsplit": func(beads.Store) *storageRoutes { return nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			binding := splittest.NewBindingStore(t)
+			work := splittest.NewWorkStore(t, "mc")
+			seedCLIStorageRoutes(t, cityPath, routes(binding))
+			want := resolveMailMessagesStore(cliStorageRoutes(cityPath), work, nil, cityPath, nil)
+			if got := cliMailStore(work, nil, cityPath).Store; resolvedKey(got) != resolvedKey(want) {
+				t.Errorf("cliMailStore wraps %v, resolveMailMessagesStore %v", resolvedKey(got), resolvedKey(want))
+			}
+			wantStore := work
+			if name == "split" {
+				wantStore = binding
+			}
+			if !beads.SameStore(want, wantStore) {
+				t.Errorf("the messaging store is %v, want %v", resolvedKey(want), resolvedKey(wantStore))
+			}
+		})
+	}
+}
