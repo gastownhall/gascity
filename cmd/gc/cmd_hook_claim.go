@@ -3342,7 +3342,7 @@ func emitExecutionStepStarted(rec events.Recorder, step beads.Bead, dir string, 
 	}
 	// The hook's bd context owns both the claimed graph step and its workflow
 	// root; EmitLifecycle verifies the root is graph.v2 before recording.
-	_ = executionevent.EmitLifecycle(rec, hookClaimBdStore(dir, env, assignee), events.ExecutionStepStarted, step, eventActor())
+	_ = executionevent.EmitLifecycle(rec, beads.GraphStore{Store: hookClaimBdStore(dir, env, assignee)}, events.ExecutionStepStarted, step, eventActor())
 }
 
 // stampHookSessionCurrentClaim records the claimed bead id on the CLAIMING

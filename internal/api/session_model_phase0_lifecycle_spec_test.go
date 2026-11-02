@@ -407,7 +407,7 @@ func TestPhase0HandleSessionWake_NamedIdentityReassignsHistoricalStateToFreshCan
 	if err != nil {
 		t.Fatalf("Create(wait): %v", err)
 	}
-	fabric := extmsg.NewServices(fs.cityBeadStore)
+	fabric := extmsg.NewServices(beads.MailStore{Store: fs.cityBeadStore}, beads.SessionStore{Store: fs.cityBeadStore})
 	ref := extmsg.ConversationRef{
 		ScopeID:        "test-city",
 		Provider:       "discord",

@@ -66,7 +66,7 @@ type capturedEvent struct {
 func newOutboundTestRig(t *testing.T) (Services, *stubAdapter, *[]capturedEvent, OutboundDeps) {
 	t.Helper()
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beads.MailStore{Store: store}, beads.SessionStore{Store: store})
 	ref := testConversationRef()
 	adapter := newStubAdapter("stub", ref)
 	reg := NewAdapterRegistry()
@@ -395,7 +395,7 @@ func TestHandleOutbound_OwnBindingNoMismatchEvent(t *testing.T) {
 func TestResolveOutbound_NoGroup(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewGroupService(store)
+	svc := NewGroupService(beads.MailStore{Store: store}, beads.SessionStore{Store: store})
 	ref := testConversationRef()
 
 	decision, err := svc.ResolveOutbound(context.Background(), ref, "sess-x")
@@ -413,7 +413,7 @@ func TestResolveOutbound_NoGroup(t *testing.T) {
 func TestResolveOutbound_ParticipantMatch(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewGroupService(store)
+	svc := NewGroupService(beads.MailStore{Store: store}, beads.SessionStore{Store: store})
 	ref := testConversationRef()
 
 	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
@@ -455,7 +455,7 @@ func TestResolveOutbound_ParticipantMatch(t *testing.T) {
 func TestResolveOutbound_ParticipantMiss(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewGroupService(store)
+	svc := NewGroupService(beads.MailStore{Store: store}, beads.SessionStore{Store: store})
 	ref := testConversationRef()
 
 	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
@@ -491,7 +491,7 @@ func TestResolveOutbound_ParticipantMiss(t *testing.T) {
 func TestResolveOutbound_EmptySessionRejected(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewGroupService(store)
+	svc := NewGroupService(beads.MailStore{Store: store}, beads.SessionStore{Store: store})
 	ref := testConversationRef()
 
 	cases := []string{"", "   ", "\t"}

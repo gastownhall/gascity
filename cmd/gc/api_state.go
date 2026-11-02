@@ -1278,7 +1278,7 @@ func liveCloseOwner(stores []beads.Store, id string, relic beads.Store) (beads.S
 // through the delta pass's idempotency record, so a replayed or re-inferred
 // close is not a second fact.
 func (cs *controllerState) emitCompletedFact(step beads.Bead, actor string) {
-	cs.completionsDeltaIndex.EmitCompleted(cs.closeRecorder(), cs.GraphBeadStore().Store, step, actor)
+	cs.completionsDeltaIndex.EmitCompleted(cs.closeRecorder(), cs.GraphBeadStore(), step, actor)
 }
 
 func (cs *controllerState) closeRecorder() events.Recorder {

@@ -2,10 +2,12 @@ package beads
 
 import (
 	"context"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -517,5 +519,79 @@ func TestXForThroughAHandleToday(t *testing.T) {
 	cache := NewCachingStoreForTest(mem, nil)
 	if _, logical := HandlesFor(GraphStore{cache}).Cached.(logicalCachedStoreReader); !logical {
 		t.Error("HandlesFor now sees through a handle to the cache: provider forwarding landed; update this pin")
+	}
+}
+
+func TestIsNilStore(t *testing.T) {
+	a := NewMemStore()
+	var typedNil *MemStore
+	for name, tc := range map[string]struct {
+		s    Store
+		want bool
+	}{
+		"nil":                             {nil, true},
+		"a typed nil":                     {typedNil, true},
+		"a zero handle":                   {SessionStore{}, true},
+		"a handle over a typed nil":       {SessionStore{typedNil}, true},
+		"a handle over a zero handle":     {GraphStore{SessionStore{}}, true},
+		"a store":                         {a, false},
+		"a handle":                        {SessionStore{a}, false},
+		"nested handles":                  {GraphStore{WorkStore{a}}, false},
+		"a non-pointer store":             {unhashableStore{MemStore: a}, false},
+		"a non-pointer store under class": {MailStore{unhashableStore{}}, false},
+	} {
+		if got := IsNilStore(tc.s); got != tc.want {
+			t.Errorf("%s: IsNilStore = %v, want %v", name, got, tc.want)
+		}
+	}
+}
+
+// TestLiveForSeesThroughClassHandles: a handle over a cache answers the
+// cache's live reader, which HandlesFor on the handle would hide behind the
+// logical wrapper (TestXForThroughAHandleToday).
+func TestLiveForSeesThroughClassHandles(t *testing.T) {
+	mem := NewMemStore()
+	cache := NewCachingStoreForTest(mem, nil)
+	for name, tc := range map[string]struct {
+		s    Store
+		want LiveReader
+	}{
+		"a cache":                     {cache, liveStoreReader{store: cache}},
+		"a handle over a cache":       {GraphStore{cache}, liveStoreReader{store: cache}},
+		"nested handles over a cache": {MailStore{OrdersStore{cache}}, liveStoreReader{store: cache}},
+		"a plain store":               {mem, logicalLiveStoreReader{store: mem}},
+		"a handle over a plain store": {MailStore{mem}, logicalLiveStoreReader{store: MailStore{mem}}},
+	} {
+		if got := LiveFor(tc.s); got != tc.want {
+			t.Errorf("%s: LiveFor = %#v, want %#v", name, got, tc.want)
+		}
+	}
+}
+
+// TestPhysicalStoreKey: a store's key is the same through any class handles,
+// and two stores' keys differ.
+func TestPhysicalStoreKey(t *testing.T) {
+	a, b := NewMemStore(), NewMemStore()
+	want := fmt.Sprintf("%T:%x", a, reflect.ValueOf(a).Pointer())
+	for name, s := range map[string]Store{
+		"the store":      a,
+		"a handle":       MailStore{a},
+		"nested handles": MailStore{SessionStore{a}},
+	} {
+		if got := PhysicalStoreKey(s); got != want {
+			t.Errorf("%s: PhysicalStoreKey = %q, want %q", name, got, want)
+		}
+	}
+	if PhysicalStoreKey(a) == PhysicalStoreKey(b) {
+		t.Error("two stores share a key")
+	}
+	for name, s := range map[string]Store{"nil": nil, "a zero handle": MailStore{}, "a handle over a zero handle": MailStore{SessionStore{}}} {
+		if got := PhysicalStoreKey(s); got != "<nil>" {
+			t.Errorf("%s: PhysicalStoreKey = %q, want <nil>", name, got)
+		}
+	}
+	v := unhashableStore{tags: []string{"x"}}
+	if got, want := PhysicalStoreKey(MailStore{v}), fmt.Sprintf("%T:%v", v, v); got != want {
+		t.Errorf("a non-pointer store: PhysicalStoreKey = %q, want %q", got, want)
 	}
 }

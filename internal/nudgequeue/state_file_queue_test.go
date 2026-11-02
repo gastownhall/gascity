@@ -103,7 +103,7 @@ func TestStateFileQueueWithdrawQueuedWaitNudges(t *testing.T) {
 			}
 			queue := StateFileQueue{CityPath: city}
 			if withShadows {
-				queue.Shadows = store
+				queue.Shadows = beads.NudgesStore{Store: store}
 			}
 			if err := queue.WithdrawQueuedWaitNudges([]string{item.ID}); err != nil {
 				t.Fatalf("WithdrawQueuedWaitNudges: %v", err)

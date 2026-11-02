@@ -92,7 +92,7 @@ func newFakeState(t testing.TB) *fakeState {
 	store := beads.NewMemStore()
 	// Mail is messaging-class: under GC_TEST_SPLIT_STRICT=1 it reads the city
 	// store through the gate's class view (identity otherwise).
-	mp := beadmail.New(splittest.GateClassView(store))
+	mp := newTestBeadMail(splittest.GateClassView(store))
 	// Under GC_TEST_SPLIT_STRICT=1 the city store exists, as it does on
 	// every real city: without one the class accessors had no store and the
 	// fixture's rows could only be read through rig views.
@@ -186,7 +186,7 @@ func (f *fakeState) NudgeQueue() NudgeQueue {
 	if f.nudgeQueue != nil {
 		return f.nudgeQueue
 	}
-	return nudgequeue.StateFileQueue{CityPath: f.cityPath, Shadows: f.NudgesBeadStore().Store}
+	return nudgequeue.StateFileQueue{CityPath: f.cityPath, Shadows: f.NudgesBeadStore()}
 }
 
 func (f *fakeState) SessionsBeadStore() beads.SessionStore {
@@ -735,3 +735,10 @@ func (f *fakeMutatorState) DeleteProviderPatch(name string) error {
 }
 
 func intPtr(n int) *int { return &n }
+
+// newTestBeadMail is the stateless beadmail provider over one store serving
+// both the messaging and the sessions class, as a single-store city's store
+// does.
+func newTestBeadMail(store beads.Store) *beadmail.Provider {
+	return beadmail.NewWithStores(beads.MailStore{Store: store}, beads.SessionStore{Store: store})
+}

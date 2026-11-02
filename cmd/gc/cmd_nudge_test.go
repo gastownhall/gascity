@@ -19,7 +19,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/mail"
-	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/nudgepoller"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
@@ -4134,7 +4133,7 @@ func TestTryDeliverQueuedNudgesByPollerKeepsFreshMailReminder(t *testing.T) {
 	idleSince := time.Now().Add(-10 * time.Second)
 	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
 
-	mp := beadmail.New(store.Store)
+	mp := newTestBeadMail(store.Store)
 	if _, err := mp.Send("human", info.ID, "", "still unread"); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -5306,7 +5305,7 @@ func TestCmdNudgeDrainReValidatesMailAgainstRealProvider(t *testing.T) {
 		t.Fatalf("store.Create session: %v", err)
 	}
 
-	mp := beadmail.New(store)
+	mp := newTestBeadMail(store)
 	unread, err := mp.Send("alice", "worker", "still unread", "body")
 	if err != nil {
 		t.Fatalf("Send(alice): %v", err)

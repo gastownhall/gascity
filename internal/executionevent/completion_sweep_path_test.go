@@ -139,3 +139,55 @@ func TestCompletionBackstopGrowthCapFiresOnTheSweepPath(t *testing.T) {
 		t.Fatalf("after the rebuild the set holds %d fact(s), still over the cap; the rotated-out keys were not dropped", trimmed)
 	}
 }
+
+// TestCompletionBackstopKeepsTheSweepAcrossAnEqualStoreFan pins the other half
+// of the store-fan guard: a fan the caller re-resolves to the SAME physical
+// stores in the same order, in a fresh slice of fresh handles (with a zero
+// handle at the same position), keeps the sweep, so a chunked sweep resumes instead of restarting
+// at the first root of the first store every chunk.
+func TestCompletionBackstopKeepsTheSweepAcrossAnEqualStoreFan(t *testing.T) {
+	backing, _, _ := completionCorpus(t, 3)
+	store := &sweepCountingGraphStore{Store: backing}
+	journal := events.NewFake()
+	backstop := &CompletionBackstop{ChunkSize: 1}
+	fans := [][]beads.GraphStore{
+		{{Store: store}, {}},
+		{{Store: store}, {}},
+	}
+	visited := 0
+	for i := 0; ; i++ {
+		r := backstop.Pass(journal, fans[i%len(fans)], "execution-reconcile")
+		visited += r.RootsVisited
+		if r.SweepComplete {
+			break
+		}
+		if i > 20 {
+			t.Fatal("the sweep never completed; the cursor is not advancing")
+		}
+	}
+	if store.rootLists != 1 {
+		t.Fatalf("the store's roots were listed %d times in one sweep, want 1: an equal fan restarted the sweep", store.rootLists)
+	}
+	if visited != 3 {
+		t.Fatalf("visited %d roots in one sweep, want 3", visited)
+	}
+}
+
+// TestCompletionBackstopRestartsWhenAFanPositionEmpties pins that a store
+// replaced by the zero handle at the cursor's position, or the reverse, is a
+// changed fan.
+func TestCompletionBackstopRestartsWhenAFanPositionEmpties(t *testing.T) {
+	backing, _, _ := completionCorpus(t, 2)
+	store := &sweepCountingGraphStore{Store: backing}
+	journal := events.NewFake()
+	backstop := &CompletionBackstop{ChunkSize: 1}
+	backstop.Pass(journal, []beads.GraphStore{{Store: store}}, "execution-reconcile")
+	backstop.Pass(journal, []beads.GraphStore{{}}, "execution-reconcile")
+	r := backstop.Pass(journal, []beads.GraphStore{{Store: store}}, "execution-reconcile")
+	if store.rootLists != 2 {
+		t.Fatalf("the store's roots were listed %d times, want 2: emptying its position did not restart the sweep", store.rootLists)
+	}
+	if r.RootsVisited != 1 {
+		t.Fatalf("the restarted sweep visited %d roots, want 1", r.RootsVisited)
+	}
+}

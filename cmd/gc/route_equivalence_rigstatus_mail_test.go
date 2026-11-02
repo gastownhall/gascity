@@ -358,7 +358,7 @@ func TestRigStatusJSONRouteEquivalence(t *testing.T) {
 // when that gate runs (resolveClassStore's identity branch). Mail it seeds or
 // drains is where both routes read it.
 func routeEquivalenceMailProvider(store beads.Store) *beadmail.Provider {
-	return beadmail.New(splitStrictClassView(store))
+	return newTestBeadMail(splitStrictClassView(store))
 }
 
 // mailRouteCity builds a city with one "lead" session and mail for it. It

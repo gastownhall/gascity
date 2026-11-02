@@ -27,16 +27,16 @@ import (
 // a build where extmsg had stopped checking at all.
 func TestCityExtMsgServicesCannotReachTheRefusalPath(t *testing.T) {
 	work := splittest.NewWorkStore(t, "hq")
-	if _, err := extmsg.NewServicesWithSessionDirectory(work, session.NewStore(beads.SessionStore{Store: work})); err != nil {
+	if _, err := extmsg.NewServicesWithSessionDirectory(beads.MailStore{Store: work}, session.NewStore(beads.SessionStore{Store: work})); err != nil {
 		t.Fatalf("the directory this caller builds was refused: %v", err)
 	}
 	// The store a class resolves to is never consulted for nil-ness, so the
 	// degenerate case reaches the same verdict — which is what makes the arm
 	// unreachable rather than merely unreached today.
-	if _, err := extmsg.NewServicesWithSessionDirectory(work, session.NewStore(beads.SessionStore{Store: nil})); err != nil {
+	if _, err := extmsg.NewServicesWithSessionDirectory(beads.MailStore{Store: work}, session.NewStore(beads.SessionStore{Store: nil})); err != nil {
 		t.Fatalf("a directory wrapping no store was refused, so the fallback arm IS reachable: %v", err)
 	}
-	if _, err := extmsg.NewServicesWithSessionDirectory(work, nil); err == nil {
+	if _, err := extmsg.NewServicesWithSessionDirectory(beads.MailStore{Store: work}, nil); err == nil {
 		t.Fatal("extmsg accepted a nil session directory; the pin above proves nothing")
 	}
 }

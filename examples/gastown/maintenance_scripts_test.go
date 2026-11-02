@@ -5655,7 +5655,7 @@ func TestReaperStaleAutoClosePreservesDurableExtmsgRecords(t *testing.T) {
 func TestReaperPreservedExtmsgRoomStillRoutesInboundAndAdvancesTranscript(t *testing.T) {
 	ctx := context.Background()
 	store := beads.NewMemStore()
-	services := extmsg.NewServices(store)
+	services := extmsg.NewServices(beads.MailStore{Store: store}, beads.SessionStore{Store: store})
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "reaper-integration-test"}
 	room := extmsg.ConversationRef{
 		ScopeID:        "test-city",

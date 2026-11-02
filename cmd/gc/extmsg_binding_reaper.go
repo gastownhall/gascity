@@ -22,13 +22,13 @@ import (
 // session's replacement bead is already visible. Errors are logged and
 // swallowed so a binding-store hiccup never stalls the reconciler loop.
 func reapStaleExtmsgBindings(ctx context.Context, store beads.SessionStore, now time.Time, stderr io.Writer) {
-	if store.Store == nil {
+	if store == (beads.SessionStore{}) {
 		return
 	}
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	stats, err := extmsg.ReapStaleBindings(ctx, store.Store, now)
+	stats, err := extmsg.ReapStaleBindings(ctx, extmsgStoreOverSessions(store), store, now)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: reaping stale extmsg bindings: %v\n", err) //nolint:errcheck
 		return
@@ -49,13 +49,13 @@ func reapStaleExtmsgBindings(ctx context.Context, store beads.SessionStore, now 
 // session beads have been synced. Errors are logged and swallowed so a
 // participant-store hiccup never stalls the reconciler loop.
 func reapStaleExtmsgParticipants(ctx context.Context, store beads.SessionStore, stderr io.Writer) {
-	if store.Store == nil {
+	if store == (beads.SessionStore{}) {
 		return
 	}
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	stats, err := extmsg.ReapStaleParticipants(ctx, store.Store)
+	stats, err := extmsg.ReapStaleParticipants(ctx, extmsgStoreOverSessions(store), store)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: reaping stale extmsg participants: %v\n", err) //nolint:errcheck
 		return
@@ -64,4 +64,15 @@ func reapStaleExtmsgParticipants(ctx context.Context, store beads.SessionStore, 
 		fmt.Fprintf(stderr, "session reconciler: extmsg participants reaped (reassigned=%d scanned=%d)\n", //nolint:errcheck
 			stats.Reassigned, stats.Scanned)
 	}
+}
+
+// extmsgStoreOverSessions is the sessions store as the messaging store, for
+// the extmsg sweeps the session code drives. They have always read and written
+// extmsg's (messaging-class) bindings and participants through the sessions
+// store: one store on a single-store city, and one binding on the split city
+// the routes serve, which relocates every class together. Two classes on two
+// stores would part them, so each use is a typed-store follow-up to route
+// through the city's messaging handle instead.
+func extmsgStoreOverSessions(sessions beads.SessionStore) beads.MailStore {
+	return beads.MailStore{Store: sessions}
 }

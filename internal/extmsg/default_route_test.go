@@ -19,7 +19,7 @@ func defaultRouteTestMessage(ref ConversationRef) ExternalInboundMessage {
 func TestHandleInboundNormalizedDefaultRouteBindsConfiguredAgent(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beads.MailStore{Store: store}, beads.SessionStore{Store: store})
 	ref := testConversationRef()
 
 	deps := InboundDeps{
@@ -70,7 +70,7 @@ func TestHandleInboundNormalizedDefaultRouteBindsConfiguredAgent(t *testing.T) {
 func TestHandleInboundNormalizedDefaultRouteAbsentPreservesUnbound(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beads.MailStore{Store: store}, beads.SessionStore{Store: store})
 	ref := testConversationRef()
 
 	// No resolver wired (config absent) — unrouted, no binding created.
@@ -138,7 +138,7 @@ func TestHandleInboundNormalizedDefaultRouteSkipsGroupedConversation(t *testing.
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			store := beads.NewMemStore()
-			fabric := NewServices(store)
+			fabric := NewServices(beads.MailStore{Store: store}, beads.SessionStore{Store: store})
 			ref := testConversationRef()
 
 			group, err := fabric.Groups.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
@@ -193,7 +193,7 @@ func TestHandleInboundNormalizedDefaultRouteSkipsGroupedConversation(t *testing.
 func TestGroupServiceResolveInboundDistinguishesNoGroupFromNoMatch(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewGroupService(store)
+	svc := NewGroupService(beads.MailStore{Store: store}, beads.SessionStore{Store: store})
 	ref := testConversationRef()
 
 	// No group for the conversation: the distinct "no group" outcome that makes
@@ -237,7 +237,7 @@ func TestGroupServiceResolveInboundDistinguishesNoGroupFromNoMatch(t *testing.T)
 func TestHandleInboundNormalizedDefaultRouteConflictAdoptsExistingBinding(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beads.MailStore{Store: store}, beads.SessionStore{Store: store})
 	ref := testConversationRef()
 
 	// The resolver simulates a concurrent racer: by the time the default

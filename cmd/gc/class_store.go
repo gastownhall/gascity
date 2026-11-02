@@ -447,10 +447,9 @@ func newCityMailProvider(routes *storageRoutes, workStore beads.Store, cfg *conf
 // transcripts in the work ledger, where the class's own readers never look —
 // external messaging would appear to work and deliver nothing, which is worse
 // than not having it. Refusing surfaces the cause on every operation instead.
-func newCityExtMsgServices(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) *extmsg.Services {
-	msgStore := resolveMailMessagesStore(routes, workStore, cfg, cityPath, rec)
+func newCityExtMsgServices(routes *storageRoutes, workStore beads.Store, _ *config.City, cityPath string, _ events.Recorder) *extmsg.Services {
 	stores := scopeStores(cityPath, routes, workStore)
-	svc, err := extmsg.NewServicesWithSessionDirectory(msgStore, session.NewStore(stores.Sessions()))
+	svc, err := extmsg.NewServicesWithSessionDirectory(stores.Mail(), session.NewStore(stores.Sessions()))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "api: external messaging services: %v\n", err) //nolint:errcheck // best-effort stderr
 		return refusedExtMsgServices(err)
@@ -463,9 +462,10 @@ func newCityExtMsgServices(routes *storageRoutes, workStore beads.Store, cfg *co
 // them fails where it stands instead of reading and writing a store that does
 // not serve the messaging class.
 func refusedExtMsgServices(cause error) *extmsg.Services {
-	refused := extmsg.NewServices(refusedClassStore{
+	store := refusedClassStore{
 		err: fmt.Errorf("external messaging is not available on this city: %w", cause),
-	})
+	}
+	refused := extmsg.NewServices(beads.MailStore{Store: store}, beads.SessionStore{Store: store})
 	return &refused
 }
 
