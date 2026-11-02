@@ -172,17 +172,17 @@ func TestClientListSessionsDecodesListContract(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	cr, err := NewCityScopedClient(ts.URL, "alpha").ListSessions("all", "", false)
+	cr, err := NewCityScopedClient(ts.URL, "alpha").ListSessions(ListSessionsOpts{State: "all"})
 	if err != nil {
 		t.Fatalf("ListSessions: %v", err)
 	}
 	if cr.AgeSeconds != 1.5 {
 		t.Errorf("AgeSeconds = %v, want 1.5", cr.AgeSeconds)
 	}
-	if len(cr.Body) != 2 {
-		t.Fatalf("len(Body) = %d, want 2", len(cr.Body))
+	if len(cr.Body.Sessions) != 2 {
+		t.Fatalf("len(Body) = %d, want 2", len(cr.Body.Sessions))
 	}
-	first, second := cr.Body[0], cr.Body[1]
+	first, second := cr.Body.Sessions[0], cr.Body.Sessions[1]
 	if first.AgentName != "alpha/rigbot" || first.Transport != "tmux" || first.WorkerDir != "/w" || first.Provider != "claude" || !first.Running {
 		t.Errorf("first = %+v", first)
 	}
@@ -205,7 +205,7 @@ func TestClientListSessionsDecodesListContract(t *testing.T) {
 	}))
 	defer bad.Close()
 	badClient := NewCityScopedClient(bad.URL, "alpha")
-	_, err = badClient.ListSessions("", "", false)
+	_, err = badClient.ListSessions(ListSessionsOpts{})
 	if err == nil {
 		t.Fatal("want a decode error for a malformed created_at")
 	}
@@ -214,5 +214,81 @@ func TestClientListSessionsDecodesListContract(t *testing.T) {
 	}
 	if ShouldFallbackForRead(badClient, err) {
 		t.Errorf("a decode error must not trigger the local fallback: %v", err)
+	}
+}
+
+// sessionListTestRow is one minimal GET /sessions item for client tests.
+func sessionListTestRow(id string) map[string]any {
+	return map[string]any{
+		"id": id, "template": "worker", "state": "active", "title": "",
+		"session_name": id, "provider": "claude", "created_at": "2026-10-28T10:00:00Z",
+		"attached": false, "running": true, "agent_name": "worker",
+	}
+}
+
+// TestClientListSessionsReportsPartialAcrossPages pins that Client.ListSessions
+// keeps the server's partial report: Partial is ORed over every page, a page
+// that names errors without the flag still counts, and each error message is
+// kept once in first-seen order.
+func TestClientListSessionsReportsPartialAcrossPages(t *testing.T) {
+	cases := []struct {
+		name        string
+		pages       []map[string]any
+		wantPartial bool
+		wantErrs    []string
+	}{
+		{
+			name: "flagged-pages",
+			pages: []map[string]any{
+				{"items": []map[string]any{sessionListTestRow("gc-1")}, "partial": true, "partial_errors": []string{"bd list: boom"}},
+				{"items": []map[string]any{sessionListTestRow("gc-2")}, "partial": true, "partial_errors": []string{"bd list: boom", "rig alpha: gone"}},
+			},
+			wantPartial: true,
+			wantErrs:    []string{"bd list: boom", "rig alpha: gone"},
+		},
+		{
+			name: "errors-without-flag",
+			pages: []map[string]any{
+				{"items": []map[string]any{sessionListTestRow("gc-1")}},
+				{"items": []map[string]any{sessionListTestRow("gc-2")}, "partial_errors": []string{"bd list: boom"}},
+			},
+			wantPartial: true,
+			wantErrs:    []string{"bd list: boom"},
+		},
+		{
+			name: "complete",
+			pages: []map[string]any{
+				{"items": []map[string]any{sessionListTestRow("gc-1")}},
+				{"items": []map[string]any{sessionListTestRow("gc-2")}},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				page := tc.pages[0]
+				if r.URL.Query().Get("cursor") == "page2" {
+					page = tc.pages[1]
+				} else {
+					page["next_cursor"] = "page2"
+				}
+				json.NewEncoder(w).Encode(page) //nolint:errcheck
+			}))
+			defer ts.Close()
+			cr, err := NewCityScopedClient(ts.URL, "alpha").ListSessions(ListSessionsOpts{State: "all"})
+			if err != nil {
+				t.Fatalf("ListSessions: %v", err)
+			}
+			if len(cr.Body.Sessions) != 2 {
+				t.Errorf("sessions = %d, want 2", len(cr.Body.Sessions))
+			}
+			if cr.Body.Partial != tc.wantPartial {
+				t.Errorf("Partial = %v, want %v", cr.Body.Partial, tc.wantPartial)
+			}
+			if strings.Join(cr.Body.PartialErrors, "|") != strings.Join(tc.wantErrs, "|") {
+				t.Errorf("PartialErrors = %q, want %q", cr.Body.PartialErrors, tc.wantErrs)
+			}
+		})
 	}
 }

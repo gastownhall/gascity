@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 // sessionListAdditiveKeys are the optional keys only an API-served read
@@ -296,5 +299,191 @@ func assertSessionListEquivalenceValues(t *testing.T, filter string, local map[s
 		if len(rows) != 1 || rows[0]["id"] != ids.closed {
 			t.Errorf("--state closed rows = %v, want exactly %s", rows, ids.closed)
 		}
+	}
+}
+
+// sessionListLanesOver serves the harness city's supervisor mux behind wrap
+// and returns a plain client (the supervisor-hosted lane) and a TLS remote
+// client (the --city-url lane) over it.
+func sessionListLanesOver(t *testing.T, h *charHarness, wrap func(http.Handler) http.Handler) (hosted, remote *api.Client) {
+	t.Helper()
+	base := api.NewSupervisorMux(&singleCityStateResolver{state: h.cs}, nil, false, "controller", "test", time.Now()).
+		WithAnyHostAllowed().
+		Handler()
+	handler := wrap(base)
+	plain := httptest.NewServer(handler)
+	t.Cleanup(plain.Close)
+	tlsSrv := httptest.NewTLSServer(handler)
+	t.Cleanup(tlsSrv.Close)
+	remote, err := api.NewRemoteCityScopedClient(tlsSrv.URL, charCityName, api.RemoteOptions{CAFile: writeCapstoneServerCA(t, tlsSrv)})
+	if err != nil {
+		t.Fatalf("remote client: %v", err)
+	}
+	return api.NewCityScopedClient(plain.URL, charCityName), remote
+}
+
+// sessionListHostedBy makes the city supervisor-hosted, served by c, for
+// every `run` in the rest of the test.
+func sessionListHostedBy(t *testing.T, c *api.Client) {
+	t.Helper()
+	origIdentity, origSup, origGrants := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook, apiRouteSupervisorGrantsHook
+	t.Cleanup(func() {
+		apiRouteControllerIdentityHook = origIdentity
+		apiRouteSupervisorClientHook = origSup
+		apiRouteSupervisorGrantsHook = origGrants
+	})
+	apiRouteControllerIdentityHook = func(string) controllerIdentityReply {
+		return controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}
+	}
+	apiRouteSupervisorClientHook = func(string) *api.Client { return c }
+	apiRouteSupervisorGrantsHook = func() bool { return false }
+}
+
+// runSessionListCLIExit runs `gc session list` like runSessionListCLI but
+// returns the exit code instead of failing on a non-zero one.
+func runSessionListCLIExit(t *testing.T, cityPath string, noAPI bool, args ...string) (int, string, string) {
+	t.Helper()
+	t.Setenv("GC_NO_API", "")
+	if noAPI {
+		t.Setenv("GC_NO_API", "1")
+	}
+	clearBuiltinImportWarningCache()
+	full := append([]string{"--city", cityPath, "session", "list"}, args...)
+	var stdout, stderr bytes.Buffer
+	code := run(full, &stdout, &stderr)
+	return code, stdout.String(), stderr.String()
+}
+
+// sessionListRewriteListBodies wraps base so every GET /sessions answer is
+// passed through edit before it reaches the client.
+func sessionListRewriteListBodies(base http.Handler, edit func(body map[string]any)) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/sessions") {
+			base.ServeHTTP(w, r)
+			return
+		}
+		rec := httptest.NewRecorder()
+		base.ServeHTTP(rec, r)
+		var body map[string]any
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &body) != nil {
+			for k, v := range rec.Header() {
+				w.Header()[k] = v
+			}
+			w.WriteHeader(rec.Code)
+			_, _ = w.Write(rec.Body.Bytes())
+			return
+		}
+		edit(body)
+		for k, v := range rec.Header() {
+			w.Header()[k] = v
+		}
+		w.Header().Del("Content-Length")
+		w.WriteHeader(rec.Code)
+		_ = json.NewEncoder(w).Encode(body)
+	})
+}
+
+// validateSessionListFailureDoc validates raw against the schema `gc session
+// list --json-schema=failure` prints and decodes it.
+func validateSessionListFailureDoc(t *testing.T, raw string) map[string]any {
+	t.Helper()
+	var schemaOut, schemaErr bytes.Buffer
+	if code := run([]string{"session", "list", "--json-schema=failure"}, &schemaOut, &schemaErr); code != 0 {
+		t.Fatalf("gc session list --json-schema=failure = %d; stderr %s", code, schemaErr.String())
+	}
+	schemaDoc, err := jsonschema.UnmarshalJSON(&schemaOut)
+	if err != nil {
+		t.Fatalf("parse failure schema: %v", err)
+	}
+	instance, err := jsonschema.UnmarshalJSON(strings.NewReader(raw))
+	if err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, raw)
+	}
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource("session/list/failure.schema.json", schemaDoc); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile("session/list/failure.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := compiled.Validate(instance); err != nil {
+		t.Fatalf("document does not validate against the failure schema: %v\n%s", err, raw)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatal(err)
+	}
+	return doc
+}
+
+// TestSessionListAPIRouteRefusesAPartialAnswer pins that a partial GET
+// /sessions answer fails gc session list as a partial local read does: exit
+// 1, the session_list_failed document under --json, the message on stderr
+// otherwise, on the supervisor-hosted and remote routes alike.
+func TestSessionListAPIRouteRefusesAPartialAnswer(t *testing.T) {
+	clearInheritedCityRoutingEnv(t)
+	h := newCharCity(t, charCityBasic+"\n[session]\nprovider = \"fake\"\n", func(t *testing.T, store beads.Store) {
+		seedSessionListEquivalence(t, store)
+	})
+	hosted, remote := sessionListLanesOver(t, h, func(base http.Handler) http.Handler {
+		return sessionListRewriteListBodies(base, func(body map[string]any) {
+			body["partial"] = true
+			body["partial_errors"] = []string{"bd list: boom"}
+		})
+	})
+	sessionListHostedBy(t, hosted)
+
+	type result struct {
+		code           int
+		stdout, stderr string
+	}
+	runRoute := func(lane string, jsonOut bool) result {
+		if lane == "remote" {
+			var stdout, stderr bytes.Buffer
+			code := routeSessionList("", "", "", remote, "", jsonOut, &stdout, &stderr)
+			return result{code, stdout.String(), stderr.String()}
+		}
+		var args []string
+		if jsonOut {
+			args = append(args, "--json")
+		}
+		code, stdout, stderr := runSessionListCLIExit(t, h.cityPath, false, args...)
+		return result{code, stdout, stderr}
+	}
+	for _, lane := range []string{"supervisor-hosted", "remote"} {
+		t.Run(lane+"/json", func(t *testing.T) {
+			got := runRoute(lane, true)
+			if got.code != 1 {
+				t.Fatalf("exit = %d, want 1; stdout %q stderr %q", got.code, got.stdout, got.stderr)
+			}
+			doc := validateSessionListFailureDoc(t, got.stdout)
+			if _, ok := doc["sessions"]; ok {
+				t.Errorf("failure document carries sessions: %s", got.stdout)
+			}
+			errObj, _ := doc["error"].(map[string]any)
+			if errObj["code"] != "session_list_failed" || errObj["exit_code"] != float64(1) {
+				t.Errorf("error = %#v, want code session_list_failed exit_code 1", errObj)
+			}
+			msg, _ := errObj["message"].(string)
+			if !strings.HasPrefix(msg, "gc session list: listing sessions: ") || !strings.Contains(msg, "bd list: boom") {
+				t.Errorf("message = %q, want the local read's prefix and the server's error", msg)
+			}
+			if !strings.Contains(got.stderr, "route=api reason=error") {
+				t.Errorf("stderr = %q, want route=api reason=error", got.stderr)
+			}
+		})
+		t.Run(lane+"/text", func(t *testing.T) {
+			got := runRoute(lane, false)
+			if got.code != 1 {
+				t.Fatalf("exit = %d, want 1; stdout %q stderr %q", got.code, got.stdout, got.stderr)
+			}
+			if got.stdout != "" {
+				t.Errorf("stdout = %q, want empty", got.stdout)
+			}
+			if !strings.Contains(got.stderr, "route=api reason=error") || !strings.Contains(got.stderr, "gc session list: listing sessions: bd list: boom") {
+				t.Errorf("stderr = %q, want route=api reason=error and the listing failure", got.stderr)
+			}
+		})
 	}
 }

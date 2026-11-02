@@ -812,18 +812,48 @@ var sessionListAPIClient = func(cityPath string) (*api.Client, string) {
 // iterator. Emits exactly one route=... log line per exit path (gated on
 // GC_DEBUG).
 func routeSessionList(_ string, stateFilter, templateFilter string, c *api.Client, nilReason string, jsonOutput bool, stdout, stderr io.Writer) int {
-	var cr api.CachedRead[[]api.SessionListView]
+	var cr api.CachedRead[api.SessionList]
 	return routeRead(c, "session list", nilReason, stderr,
 		func() error {
 			var err error
-			cr, err = c.ListSessions(stateFilter, templateFilter, false)
-			return err
+			cr, err = c.ListSessions(api.ListSessionsOpts{State: stateFilter, Template: templateFilter})
+			if err != nil {
+				return err
+			}
+			if cr.Body.Partial {
+				msg := sessionListPartialMessage(cr.Body.PartialErrors)
+				return &reportedErrorAfterFetch{Detail: msg, Report: func() int {
+					return writeSessionListReadFailure(msg, jsonOutput, stdout, stderr)
+				}}
+			}
+			return nil
 		},
 		func() int {
-			return renderSessionListFromAPI(cr, stateFilter, templateFilter, jsonOutput, stdout, stderr)
+			return renderSessionListFromAPI(api.CachedRead[[]api.SessionListView]{Body: cr.Body.Sessions, AgeSeconds: cr.AgeSeconds}, stateFilter, templateFilter, jsonOutput, stdout, stderr)
 		},
 		func() int { return doSessionListFallback(stateFilter, templateFilter, jsonOutput, stdout, stderr) },
 	)
+}
+
+// sessionListPartialMessage is the failure message for a partial API answer:
+// the local read's listing-failure message carrying the server's errors.
+func sessionListPartialMessage(partialErrors []string) string {
+	detail := strings.Join(partialErrors, "; ")
+	if detail == "" {
+		detail = "the city API answered with a partial session list without naming the failed read"
+	}
+	return "gc session list: listing sessions: " + detail
+}
+
+// writeSessionListReadFailure reports a failed session read on either route
+// and returns exit code 1: the session_list_failed error document under
+// --json, the message on stderr otherwise.
+func writeSessionListReadFailure(message string, jsonOutput bool, stdout, stderr io.Writer) int {
+	if jsonOutput {
+		return writeJSONError(stdout, stderr, "session_list_failed", message, 1)
+	}
+	fmt.Fprintln(stderr, message) //nolint:errcheck // best-effort stderr
+	return 1
 }
 
 // renderSessionListFromAPI formats the API-sourced session list. On --json it
@@ -1014,11 +1044,7 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 	// CLI); it loads unsorted, so restore the created-desc order below.
 	sessionBeads, err := loadSessionBeadSnapshot(sessStore)
 	if err != nil {
-		if jsonOutput {
-			return writeJSONError(stdout, stderr, "session_list_failed", fmt.Sprintf("gc session list: listing sessions: %v", err), 1)
-		}
-		fmt.Fprintf(stderr, "gc session list: listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		return writeSessionListReadFailure(fmt.Sprintf("gc session list: listing sessions: %v", err), jsonOutput, stdout, stderr)
 	}
 
 	sp, err := withSessionProviderConstructionContext(
@@ -1042,11 +1068,7 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 	}
 	infos, err := sessionListInfos(sessionFrontDoor(sessStore), sessionBeads, stateFilter)
 	if err != nil {
-		if jsonOutput {
-			return writeJSONError(stdout, stderr, "session_list_failed", fmt.Sprintf("gc session list: %v", err), 1)
-		}
-		fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		return writeSessionListReadFailure(fmt.Sprintf("gc session list: %v", err), jsonOutput, stdout, stderr)
 	}
 	sessions := catalog.ListFromInfos(infos, stateFilter, templateFilter)
 	sortSessionsCreatedDesc(sessions)

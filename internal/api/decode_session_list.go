@@ -8,6 +8,48 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
+// SessionList is one whole GET /sessions read: every page's rows plus the
+// server's report of a partial read. Partial is true when any page said so
+// or named a failed read; PartialErrors keeps each message once, in
+// first-seen order, because every page re-reads every backend.
+type SessionList struct {
+	Sessions      []SessionListView
+	Partial       bool
+	PartialErrors []string
+}
+
+// sessionListDegradation accumulates the partial report over the pages of
+// one session list read.
+type sessionListDegradation struct {
+	partial bool
+	errs    []string
+	seen    map[string]bool
+}
+
+// add folds one page's partial report into d.
+func (d *sessionListDegradation) add(body *genclient.ListBodySessionResponse) {
+	if body == nil {
+		return
+	}
+	if body.Partial != nil && *body.Partial {
+		d.partial = true
+	}
+	if body.PartialErrors == nil {
+		return
+	}
+	for _, msg := range *body.PartialErrors {
+		d.partial = true
+		if d.seen[msg] {
+			continue
+		}
+		if d.seen == nil {
+			d.seen = make(map[string]bool)
+		}
+		d.seen[msg] = true
+		d.errs = append(d.errs, msg)
+	}
+}
+
 // SessionListView is the CLI-facing shape of one `gc session list` row read
 // through the API, with its timestamps parsed. Closed is true when the API
 // reports the closed lifecycle state. The API redacts command, session_key
