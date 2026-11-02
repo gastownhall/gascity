@@ -318,6 +318,7 @@ go_test(
         "decode_rigs_test.go",
         "decode_sessions_test.go",
         "decode_status_test.go",
+        "decode_status_view_proxied_test.go",
         "effective_api_url_test.go",
         "enqueue_keys_test.go",
         "event_payloads_1a_test.go",

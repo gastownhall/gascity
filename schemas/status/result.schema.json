@@ -19,6 +19,10 @@
     "summary"
   ],
   "properties": {
+    "_cache_age_s": {
+      "type": "number",
+      "description": "Present only on output read from the city's API (supervisor or controller); absent on locally built output. Age in seconds of the cached state the server answered from: its bead cache's snapshot age, or the served response's own age when greater (a stale response served while it refreshes); 0 when the server reported no age."
+    },
     "schema_version": {
       "type": "string",
       "description": "Schema version for this command output."
@@ -134,6 +138,200 @@
         "preflight_reason": {
           "type": "string",
           "description": "Human-readable native-store fallback reason, when any."
+        },
+        "proxied": {
+          "type": "object",
+          "description": "The proxied-native read lane's account of the bead store open this output was read through: the CLI's own open on locally built output, the serving controller's on output read from the city's API. Present only when GC_BEADS_PROXIED_NATIVE is on for a proxied-server scope.",
+          "additionalProperties": false,
+          "required": [
+            "endpoint",
+            "cursors"
+          ],
+          "properties": {
+            "endpoint": {
+              "type": "object",
+              "description": "The proxy generation the open pinned; empty when admission refused before resolving one.",
+              "additionalProperties": false,
+              "properties": {
+                "port": {
+                  "type": "integer"
+                },
+                "pid": {
+                  "type": "integer"
+                },
+                "generation": {
+                  "type": "string"
+                }
+              }
+            },
+            "evidence": {
+              "type": "string",
+              "description": "How the proxy's liveness was established."
+            },
+            "idle_policy": {
+              "type": "string",
+              "description": "The proxy's idle-timeout shape."
+            },
+            "cursors": {
+              "type": "object",
+              "description": "The database's two migration cursors as the probe read them.",
+              "additionalProperties": false,
+              "required": [
+                "main",
+                "ignored"
+              ],
+              "properties": {
+                "main": {
+                  "type": "integer"
+                },
+                "ignored": {
+                  "type": "integer"
+                }
+              }
+            },
+            "verdict": {
+              "type": "string",
+              "description": "Why the lane refused; absent when it did not."
+            },
+            "detail": {
+              "type": "string",
+              "description": "An unexpected opener failure's text, or the hashes of a head_moved incident."
+            },
+            "demoted": {
+              "type": "boolean",
+              "description": "True when a handle that served natively has dropped to the bd leaf."
+            }
+          }
+        }
+      }
+    },
+    "conditional_writes": {
+      "type": "object",
+      "description": "Present only on output read from the city's API; absent on locally built output. The serving controller's boot-latched conditional-writes (CAS) rollout state and per-store capability verdicts, as GET /v0/city/{cityName}/status reports them.",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "origin",
+        "effective"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "off",
+            "auto",
+            "require"
+          ],
+          "description": "Boot-latched beads.conditional_writes mode."
+        },
+        "origin": {
+          "type": "string",
+          "enum": [
+            "builtin",
+            "config",
+            "env"
+          ],
+          "description": "Where the latched mode came from."
+        },
+        "effective": {
+          "type": "string",
+          "enum": [
+            "off",
+            "active",
+            "degraded",
+            "fail_closed",
+            "pending_restart"
+          ],
+          "description": "Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store; fenced writes on it refuse), pending_restart (on-disk config drifted from the latched mode)."
+        },
+        "stores": {
+          "type": "array",
+          "description": "Per-store verdicts, one row per controller-owned store.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "store_id",
+              "kind",
+              "probe",
+              "latch",
+              "capable"
+            ],
+            "properties": {
+              "store_id": {
+                "type": "string",
+                "description": "Store scope: city, or rig/<name>."
+              },
+              "kind": {
+                "type": "string",
+                "description": "Store kind in the degraded-event wire vocabulary (bd, native, caching, mem, file)."
+              },
+              "probe": {
+                "type": "string",
+                "enum": [
+                  "capable",
+                  "incapable",
+                  "unprobed"
+                ],
+                "description": "Memoized capability-probe verdict; unprobed means no fenced write has exercised this store yet."
+              },
+              "latch": {
+                "type": "string",
+                "enum": [
+                  "incapable",
+                  "unlatched"
+                ],
+                "description": "Runtime unsupported latch: incapable after the store rejected a real fenced write; cleared only by restart."
+              },
+              "capable": {
+                "type": "boolean",
+                "description": "What the write path uses today: false only on a definitive incapable verdict."
+              },
+              "reason": {
+                "type": "string",
+                "description": "Incapable cause, verbatim from the probe or latch."
+              }
+            }
+          }
+        },
+        "notices": {
+          "type": "array",
+          "description": "Retained rollout notices (env overrides, drift, invalid spellings).",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "flag_key",
+              "message"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "description": "Notice kind (env_overrides_config, pending_restart, invalid_value, ...)."
+              },
+              "flag_key": {
+                "type": "string",
+                "description": "Rollout gate key the notice is about."
+              },
+              "env_var": {
+                "type": "string",
+                "description": "Environment variable involved, when env-related."
+              },
+              "config_value": {
+                "type": "string",
+                "description": "Raw config spelling; empty when unset."
+              },
+              "env_value": {
+                "type": "string",
+                "description": "Raw env spelling as found."
+              },
+              "message": {
+                "type": "string",
+                "description": "Human-readable line carrying the gate and the outcome."
+              }
+            }
+          }
         }
       }
     },
@@ -211,6 +409,13 @@
           },
           "default_sling_target": {
             "type": "string"
+          },
+          "default_sling_targets": {
+            "type": "array",
+            "description": "Configured default sling targets the rig picks among at random, when set.",
+            "items": {
+              "type": "string"
+            }
           }
         }
       }
@@ -238,6 +443,57 @@
         },
         "suspended_sessions": {
           "type": "integer"
+        },
+        "store_health": {
+          "type": "object",
+          "description": "Dolt bead store health. On output read from the city's API: present unless the city is suspended or the measurement failed (the failure is then listed in partial_errors). On locally built output: present when the controller reports itself running.",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "size_bytes",
+            "live_rows",
+            "ratio_mb_per_row",
+            "warning",
+            "threshold_mb_per_row"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "On-disk path of the Dolt store."
+            },
+            "size_bytes": {
+              "type": "integer",
+              "description": "Total bytes of the store directory."
+            },
+            "live_rows": {
+              "type": "integer",
+              "description": "Retained bead rows, open and closed. Meaningless when live_rows_unknown is true."
+            },
+            "live_rows_unknown": {
+              "type": "boolean",
+              "description": "True when the row count failed or timed out; live_rows, ratio_mb_per_row and warning then carry no meaning. Absent when the count is real."
+            },
+            "ratio_mb_per_row": {
+              "type": "number",
+              "description": "Megabytes per retained row."
+            },
+            "warning": {
+              "type": "boolean",
+              "description": "True when maintenance is overdue."
+            },
+            "threshold_mb_per_row": {
+              "type": "number",
+              "description": "Ratio threshold above which warning trips."
+            },
+            "last_gc_at": {
+              "type": "string",
+              "description": "RFC3339 time of the last maintenance run, when one is recorded."
+            },
+            "last_gc_status": {
+              "type": "string",
+              "description": "Outcome of the last maintenance run (success or failed), when one is recorded."
+            }
+          }
         }
       }
     },
