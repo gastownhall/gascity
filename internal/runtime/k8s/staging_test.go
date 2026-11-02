@@ -244,6 +244,33 @@ func TestStageFilesStagesKiroPackOverlayAtPodWorkDirForRigWorkDir(t *testing.T) 
 	}
 }
 
+func TestStageFilesUsesNormalizedPodWorkDirForRigWorkDir(t *testing.T) {
+	cityRoot := t.TempDir()
+	workDir := filepath.Join(cityRoot, "rigs", "team")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", workDir, err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "task.txt"), []byte("rig payload"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	cfg := runtime.Config{
+		WorkDir: cityRoot + "/rigs/./team",
+		Env:     map[string]string{"GC_CITY": cityRoot + "/"},
+	}
+	ops := newCapturingStageOps()
+	if staged, err := stageFiles(context.Background(), ops, "gc-rig", cfg, cityRoot+"/", io.Discard); err != nil {
+		t.Fatalf("stageFiles: %v", err)
+	} else if !staged {
+		t.Fatal("stageFiles did not report the copied rig workdir")
+	}
+	if got := ops.files["/workspace/rigs/team/task.txt"]; got != "rig payload" {
+		t.Fatalf("staged rig file = %q, want payload at normalized pod workdir", got)
+	}
+	if _, ok := ops.files["/workspace/task.txt"]; ok {
+		t.Fatal("rig workdir payload was staged at workspace root instead of normalized rig path")
+	}
+}
+
 func TestStageFilesUsesConcreteProviderOverlayName(t *testing.T) {
 	workDir := t.TempDir()
 	packOverlay := t.TempDir()
@@ -528,7 +555,7 @@ func TestInitCityInPodSkipsSuccessfullyStagedNestedWorkDir(t *testing.T) {
 	}
 
 	cityOps := newCapturingStageOps()
-	if err := initCityInPod(context.Background(), cityOps, "pod", city, skipRel); err != nil {
+	if err := initCityInPod(context.Background(), cityOps, "pod", city, skipRel, nil); err != nil {
 		t.Fatalf("initCityInPod: %v", err)
 	}
 	for _, skipped := range []string{"/tmp/city-src/rigs/team/active.txt", "/tmp/city-src/rigs/team/nested/task.txt"} {
@@ -569,7 +596,7 @@ func TestInitCityInPodKeepsUnstagedWorkDirInTemplate(t *testing.T) {
 	}
 
 	cityOps := newCapturingStageOps()
-	if err := initCityInPod(context.Background(), cityOps, "pod", city, skipRel); err != nil {
+	if err := initCityInPod(context.Background(), cityOps, "pod", city, skipRel, nil); err != nil {
 		t.Fatalf("initCityInPod: %v", err)
 	}
 	if got := cityOps.files["/tmp/city-src/rigs/team"]; got != "unstaged workdir" {
@@ -698,7 +725,14 @@ func (o *capturingStageOps) listPods(context.Context, string, string) ([]corev1.
 }
 
 func (o *capturingStageOps) execInPod(_ context.Context, _, _ string, cmd []string, stdin io.Reader) (string, error) {
-	if len(cmd) == 6 && cmd[0] == "sh" && cmd[4] != "" && cmd[5] == archiveExtractAck && stdin != nil {
+	dstDir := ""
+	switch {
+	case len(cmd) == 6 && cmd[0] == "sh" && cmd[4] != "" && cmd[5] == archiveExtractAck:
+		dstDir = cmd[4]
+	case len(cmd) == 5 && cmd[0] == "tar" && cmd[3] == "-C":
+		dstDir = cmd[4]
+	}
+	if dstDir != "" && stdin != nil {
 		tr := tar.NewReader(stdin)
 		for {
 			hdr, err := tr.Next()
@@ -715,7 +749,7 @@ func (o *capturingStageOps) execInPod(_ context.Context, _, _ string, cmd []stri
 			if err != nil {
 				return "", err
 			}
-			o.files[path.Join(cmd[4], hdr.Name)] = string(data)
+			o.files[path.Join(dstDir, hdr.Name)] = string(data)
 		}
 		return archiveExtractAck + "\n", nil
 	}
@@ -1098,5 +1132,73 @@ func TestStreamArchiveConsumerPanicReleasesProducer(t *testing.T) {
 	case <-producerDone:
 	case <-time.After(10 * time.Second):
 		t.Fatal("producer remained blocked after consumer panic")
+	}
+}
+
+func TestStageFilesProjectsScopedStoreFilesOutsideWorkDir(t *testing.T) {
+	cityRoot := t.TempDir()
+	storeRoot := filepath.Join(cityRoot, "rigs", "team")
+	beadsDir := filepath.Join(storeRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", beadsDir, err)
+	}
+	for name, body := range map[string]string{
+		"metadata.json": `{"dolt_database":"team"}`,
+		"identity.toml": `id = "team-project"`,
+		"config.yaml":   "issue_prefix: tm\n",
+		"secret.db":     "not part of the identity",
+	} {
+		if err := os.WriteFile(filepath.Join(beadsDir, name), []byte(body), 0o644); err != nil {
+			t.Fatalf("WriteFile(%q): %v", name, err)
+		}
+	}
+	worktree := filepath.Join(cityRoot, ".gc", "worktrees", "team", "worker")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", worktree, err)
+	}
+
+	ops := newCapturingStageOps()
+	if _, err := stageFiles(context.Background(), ops, "gc-worktree", runtime.Config{
+		WorkDir: worktree,
+		Env:     map[string]string{"GC_CITY": cityRoot, "GC_STORE_ROOT": storeRoot, "GC_BEADS_PROJECT_ID": "team-project"},
+	}, cityRoot, io.Discard); err != nil {
+		t.Fatalf("stageFiles: %v", err)
+	}
+	for name, want := range map[string]string{
+		"metadata.json": `{"dolt_database":"team"}`,
+		"identity.toml": `id = "team-project"`,
+		"config.yaml":   "issue_prefix: tm\n",
+	} {
+		if got := ops.files["/workspace/rigs/team/.beads/"+name]; got != want {
+			t.Errorf("staged %s = %q, want %q", name, got, want)
+		}
+	}
+	if _, ok := ops.files["/workspace/rigs/team/.beads/secret.db"]; ok {
+		t.Error("staged a store file outside the identity set")
+	}
+}
+
+func TestStageFilesLeavesStoreFilesToWorkDirAndNonHostedScopes(t *testing.T) {
+	cityRoot := t.TempDir()
+	storeRoot := filepath.Join(cityRoot, "rigs", "team")
+	if err := os.MkdirAll(filepath.Join(storeRoot, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(storeRoot, ".beads", "metadata.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	worktree := filepath.Join(cityRoot, ".gc", "worktrees", "team", "worker")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ops := newCapturingStageOps()
+	if _, err := stageFiles(context.Background(), ops, "gc-local", runtime.Config{
+		WorkDir: worktree,
+		Env:     map[string]string{"GC_CITY": cityRoot, "GC_STORE_ROOT": storeRoot},
+	}, cityRoot, io.Discard); err != nil {
+		t.Fatalf("stageFiles: %v", err)
+	}
+	if _, ok := ops.files["/workspace/rigs/team/.beads/metadata.json"]; ok {
+		t.Error("staged store files for a session with no hosted identity")
 	}
 }
