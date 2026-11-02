@@ -129,7 +129,34 @@ func classifyOrderOutcome(order orders.Order, streak int, threshold int, lastMes
 	return StatusWarning, detail
 }
 
-// OrderOutcomeHealthyCheck reports scheduled orders failing repeatedly.
+// latestIncompleteOrderOutcome returns the newest order.skipped declaration
+// recorded for one order.
+//
+// outcomes must be ordered by Seq ascending. The boolean distinguishes a
+// declaration with an empty message from no declaration at all.
+func latestIncompleteOrderOutcome(outcomes []events.Event, subject string) (events.Event, bool) {
+	for i := len(outcomes) - 1; i >= 0; i-- {
+		event := outcomes[i]
+		if event.Subject == subject && event.Type == events.OrderSkipped {
+			return event, true
+		}
+	}
+	return events.Event{}, false
+}
+
+// incompleteOrderOutcomeDetail describes a recorded declaration of incomplete
+// work. It quotes what was recorded rather than naming a run: concurrent
+// executions carry no identity, so the declaration cannot be attributed.
+func incompleteOrderOutcomeDetail(order orders.Order, declaration events.Event) string {
+	name := orderDisplayName(order)
+	if strings.TrimSpace(declaration.Message) == "" {
+		return fmt.Sprintf("%s: recorded incomplete work", name)
+	}
+	return fmt.Sprintf("%s: recorded incomplete work: %s", name, declaration.Message)
+}
+
+// OrderOutcomeHealthyCheck reports scheduled orders failing repeatedly or
+// declaring incomplete work.
 //
 // Sibling to OrderFiringCurrentCheck, which answers "did it run?" while this
 // answers "did it succeed?". An order that fires faithfully on schedule and fails
@@ -226,8 +253,13 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 		monitored++
 
-		streak, lastMessage, sawOutcome, skipped := consecutiveOrderFailures(log.bySubject[order.ScopedName()], order.ScopedName(), log.starts, c.grace)
+		outcomes := log.bySubject[order.ScopedName()]
+		streak, lastMessage, sawOutcome, skipped := consecutiveOrderFailures(outcomes, order.ScopedName(), log.starts, c.grace)
 		status, detail := classifyOrderOutcome(order, streak, c.threshold, lastMessage, sawOutcome, skipped)
+		if declaration, declared := latestIncompleteOrderOutcome(outcomes, order.ScopedName()); declared {
+			status = worseStatus(status, StatusWarning)
+			detail = incompleteOrderOutcomeDetail(order, declaration)
+		}
 		worst = worseStatus(worst, status)
 		result.Details = append(result.Details, detail)
 		if status != StatusOK {
@@ -262,15 +294,15 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 // orderOutcomeLog is everything order-outcome-healthy needs from the event log,
 // gathered in a single read.
 type orderOutcomeLog struct {
-	// bySubject holds each order's order.completed and order.failed events in
-	// Seq order, keyed by the order's scoped name.
+	// bySubject holds each order's order.completed, order.failed and
+	// order.skipped events in Seq order, keyed by the order's scoped name.
 	bySubject map[string][]events.Event
 	// starts holds every controller.started timestamp — see nearControllerStart.
 	starts []time.Time
 }
 
-// readOrderOutcomeLog reads order.completed, order.failed and controller.started
-// in ONE pass over the log. The log is not rotated in practice and reached
+// readOrderOutcomeLog reads order.completed, order.failed, order.skipped and
+// controller.started in ONE pass over the log. The log is not rotated in practice and reached
 // 151MB, so each extra pass cost ~30s; the events reader screens raw lines by
 // type before decoding, which is what keeps a single pass cheap.
 //
@@ -281,7 +313,7 @@ func readOrderOutcomeLog(ctx *CheckContext, eventPath string) (orderOutcomeLog, 
 	defer cancel()
 
 	evts, err := events.ReadFilteredContext(goCtx, eventPath, events.Filter{
-		Types: []string{events.OrderCompleted, events.OrderFailed, events.ControllerStarted},
+		Types: []string{events.OrderCompleted, events.OrderFailed, events.OrderSkipped, events.ControllerStarted},
 	})
 	if err != nil {
 		return orderOutcomeLog{}, err

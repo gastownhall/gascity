@@ -69,6 +69,9 @@ func TestReadOrderEventsSplitsAndGroupsInOnePass(t *testing.T) {
 		{Type: events.OrderFailed, Ts: base.Add(2 * time.Minute), Subject: "b", Message: "boom"},
 		{Type: events.OrderFailed, Ts: base.Add(3 * time.Minute), Subject: "a", Message: "bang"},
 		{Type: events.ControllerStarted, Ts: base.Add(4 * time.Minute), Subject: "gc"},
+		{Type: events.OrderSkipped, Ts: base.Add(5 * time.Minute), Subject: "a", Message: "partial: store unreachable"},
+		{Type: events.OrderSuppressed, Ts: base.Add(6 * time.Minute), Subject: "a"},
+		{Type: events.OrderInapplicable, Ts: base.Add(7 * time.Minute), Subject: "a"},
 	})
 
 	got, err := readOrderOutcomeLog(nil, path)
@@ -79,14 +82,15 @@ func TestReadOrderEventsSplitsAndGroupsInOnePass(t *testing.T) {
 	if len(got.starts) != 2 || !got.starts[0].Equal(base) || !got.starts[1].Equal(base.Add(4*time.Minute)) {
 		t.Fatalf("starts = %v, want both controller starts in log order", got.starts)
 	}
-	if n := len(got.bySubject["a"]); n != 2 {
-		t.Fatalf("subject a outcomes = %d, want 2", n)
+	if n := len(got.bySubject["a"]); n != 3 {
+		t.Fatalf("subject a outcomes = %d, want 3 (completed, failed, skipped; suppressed and inapplicable excluded)", n)
 	}
 	if n := len(got.bySubject["b"]); n != 1 {
 		t.Fatalf("subject b outcomes = %d, want 1", n)
 	}
 	a := got.bySubject["a"]
-	if a[0].Type != events.OrderCompleted || a[1].Type != events.OrderFailed || a[0].Seq >= a[1].Seq {
+	if a[0].Type != events.OrderCompleted || a[1].Type != events.OrderFailed || a[2].Type != events.OrderSkipped ||
+		a[0].Seq >= a[1].Seq || a[1].Seq >= a[2].Seq {
 		t.Fatalf("subject a outcomes must be seq-ordered, got %+v", a)
 	}
 	if _, ok := got.bySubject["gc"]; ok {

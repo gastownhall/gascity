@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -515,4 +516,122 @@ func orderOutcomeTestDetailNames(details []string) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// skippedEvent builds one order.skipped declaration the way the controller
+// records it: a typed payload plus the human message that names the outcome,
+// the reason and every scope that did not run.
+func skippedEvent(subject string, ts time.Time, outcome, reason string, scopes ...events.OrderSkippedScope) events.Event {
+	message := fmt.Sprintf("%s: %s", outcome, reason)
+	if len(scopes) > 0 {
+		names := make([]string, 0, len(scopes))
+		for _, scope := range scopes {
+			names = append(names, scope.Scope+" ("+scope.Reason+")")
+		}
+		message += "; not run: " + strings.Join(names, ", ")
+	}
+	return events.Event{
+		Type: events.OrderSkipped, Ts: ts, Subject: subject, Actor: "controller", Message: message,
+		Payload: events.OrderSkippedPayloadJSON(events.OrderSkippedPayload{
+			OrderName: subject, Outcome: outcome, Reason: reason, Scopes: scopes,
+		}),
+	}
+}
+
+// runOrderOutcomeIncompleteCase runs order-outcome-healthy over one monitored
+// cooldown order, export-sweep, whose log holds evts in Seq order.
+func runOrderOutcomeIncompleteCase(t *testing.T, evts ...events.Event) *CheckResult {
+	t.Helper()
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "export-sweep", "cooldown", "6h")
+	writeOrderFiringTestEvents(t, cityPath, evts...)
+	return NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
+}
+
+// TestOrderOutcomeHealthyRecordedIncompleteOutcomes pins that an exec order
+// which exited 0 but declared incomplete work (order.completed, then its
+// order.skipped) surfaces as an advisory warning carrying the declaration,
+// never as "last run succeeded". Events are matched by Seq alone: no pairing
+// to executions and no attribution of the declaration to one run.
+func TestOrderOutcomeHealthyRecordedIncompleteOutcomes(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	const subject = "export-sweep"
+	completed := func(ts time.Time) events.Event {
+		return events.Event{Type: events.OrderCompleted, Ts: ts, Subject: subject, Actor: "controller"}
+	}
+	partial := skippedEvent(subject, now.Add(-time.Hour), "partial", "store unreachable",
+		events.OrderSkippedScope{Scope: "rig:st", Reason: "dolt not reachable"})
+	skipped := skippedEvent(subject, now.Add(-time.Hour), "skipped", "safety gate held",
+		events.OrderSkippedScope{Scope: "rig:a", Reason: "gate closed"},
+		events.OrderSkippedScope{Scope: "rig:b", Reason: "gate closed"})
+	older := skippedEvent(subject, now.Add(-3*time.Hour), "partial", "older declaration")
+	unreadable := events.Event{
+		Type: events.OrderSkipped, Ts: now.Add(-time.Hour), Subject: subject, Actor: "controller",
+		Message: "unreadable outcome declaration: invalid character 'x' looking for beginning of value",
+	}
+	blank := events.Event{Type: events.OrderSkipped, Ts: now.Add(-time.Hour), Subject: subject, Actor: "controller"}
+
+	cases := []struct {
+		name    string
+		evts    []events.Event
+		want    string
+		notWant []string
+	}{
+		{name: "partial after completion", evts: []events.Event{completed(now.Add(-time.Hour)), partial}, want: partial.Message},
+		{name: "skipped after completion", evts: []events.Event{completed(now.Add(-time.Hour)), skipped}, want: skipped.Message},
+		{
+			name: "newest declaration only",
+			evts: []events.Event{completed(now.Add(-4 * time.Hour)), older, completed(now.Add(-2 * time.Hour)), partial},
+			want: partial.Message, notWant: []string{older.Message},
+		},
+		{
+			name: "two completions then two declarations quotes the newest",
+			evts: []events.Event{completed(now.Add(-2 * time.Hour)), completed(now.Add(-2 * time.Hour)), older, partial},
+			want: partial.Message, notWant: []string{older.Message},
+		},
+		{name: "declaration without a companion completion", evts: []events.Event{partial}, want: partial.Message},
+		{name: "unreadable declaration keeps its error", evts: []events.Event{completed(now.Add(-time.Hour)), unreadable}, want: unreadable.Message},
+		{
+			name: "blank newest declaration does not quote an older one",
+			evts: []events.Event{completed(now.Add(-4 * time.Hour)), older, blank},
+			want: "export-sweep: recorded incomplete work", notWant: []string{older.Message},
+		},
+		{
+			name: "seq orders a declaration stamped before its completion",
+			evts: []events.Event{completed(now), partial},
+			want: partial.Message,
+		},
+		{
+			name: "declaration inside controller-start grace still warns",
+			evts: []events.Event{
+				{Type: events.ControllerStarted, Ts: now.Add(-time.Hour - time.Minute), Subject: "gc"},
+				completed(now.Add(-time.Hour)), partial,
+			},
+			want: partial.Message,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := runOrderOutcomeIncompleteCase(t, tc.evts...)
+
+			if result.Status != StatusWarning {
+				t.Fatalf("status = %v, want StatusWarning; msg=%q details=%v", result.Status, result.Message, result.Details)
+			}
+			if result.Severity != SeverityAdvisory {
+				t.Fatalf("severity = %v, want SeverityAdvisory", result.Severity)
+			}
+			joined := strings.Join(result.Details, "\n")
+			if !strings.Contains(joined, tc.want) {
+				t.Fatalf("details = %v, want them to carry %q", result.Details, tc.want)
+			}
+			for _, bad := range append([]string{"last run succeeded", "no completed runs yet"}, tc.notWant...) {
+				if strings.Contains(joined, bad) {
+					t.Fatalf("details = %v, must not contain %q", result.Details, bad)
+				}
+			}
+			if result.Message == "all scheduled orders succeeding" {
+				t.Fatalf("message = %q, must not claim success over a recorded declaration", result.Message)
+			}
+		})
+	}
 }
