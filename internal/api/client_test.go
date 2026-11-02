@@ -1705,11 +1705,11 @@ func TestListBeadsFollowsNextCursor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListBeads: %v", err)
 	}
-	if len(res.Body) != 3 {
-		t.Fatalf("got %d beads, want 3 (pagination not followed)", len(res.Body))
+	if len(res.Body.Beads) != 3 {
+		t.Fatalf("got %d beads, want 3 (pagination not followed)", len(res.Body.Beads))
 	}
-	if res.Body[0].ID != "ga-1" || res.Body[1].ID != "ga-2" || res.Body[2].ID != "ga-3" {
-		t.Fatalf("ids = %q, want [ga-1 ga-2 ga-3]", []string{res.Body[0].ID, res.Body[1].ID, res.Body[2].ID})
+	if res.Body.Beads[0].ID != "ga-1" || res.Body.Beads[1].ID != "ga-2" || res.Body.Beads[2].ID != "ga-3" {
+		t.Fatalf("ids = %q, want [ga-1 ga-2 ga-3]", []string{res.Body.Beads[0].ID, res.Body.Beads[1].ID, res.Body.Beads[2].ID})
 	}
 	if n := atomic.LoadInt32(&reqs); n != 3 {
 		t.Fatalf("requests = %d, want 3", n)
@@ -1741,8 +1741,8 @@ func TestListBeadsHonorsLimitBound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListBeads: %v", err)
 	}
-	if len(res.Body) != 2 {
-		t.Fatalf("got %d, want 2", len(res.Body))
+	if len(res.Body.Beads) != 2 {
+		t.Fatalf("got %d, want 2", len(res.Body.Beads))
 	}
 	if n := atomic.LoadInt32(&reqs); n != 1 {
 		t.Fatalf("requests = %d, want 1 (bound reached, no second page)", n)
@@ -1808,9 +1808,9 @@ func TestListBeadsCursorCycleErrors(t *testing.T) {
 }
 
 // TestListBeadsEmptyResultIsNonNilSlice pins the empty-result contract: an empty
-// city must yield an empty, non-nil slice so `--json` emits `beads: []`, not
-// `beads: null`. A nil []beads.Bead marshals to JSON null, which breaks
-// `jq '.beads[]'` and diverges from the direct-bd lane.
+// city must yield an empty, non-nil slice so `--json` emits the bare `[]` for a
+// local target (and `"beads": []` in a remote target's envelope), not `null`. A
+// nil []beads.Bead marshals to JSON null, which diverges from the direct-bd lane.
 func TestListBeadsEmptyResultIsNonNilSlice(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1823,18 +1823,18 @@ func TestListBeadsEmptyResultIsNonNilSlice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListBeads: %v", err)
 	}
-	if res.Body == nil {
-		t.Fatal("res.Body is nil; empty result must be a non-nil empty slice")
+	if res.Body.Beads == nil {
+		t.Fatal("res.Body.Beads is nil; empty result must be a non-nil empty slice")
 	}
-	if len(res.Body) != 0 {
-		t.Fatalf("len(res.Body) = %d, want 0", len(res.Body))
+	if len(res.Body.Beads) != 0 {
+		t.Fatalf("len(res.Body.Beads) = %d, want 0", len(res.Body.Beads))
 	}
-	j, err := json.Marshal(res.Body)
+	j, err := json.Marshal(res.Body.Beads)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 	if string(j) != "[]" {
-		t.Fatalf("json(res.Body) = %s, want []", j)
+		t.Fatalf("json(res.Body.Beads) = %s, want []", j)
 	}
 }
 
@@ -1871,11 +1871,11 @@ func TestListBeadsDedupesAcrossPages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListBeads: %v", err)
 	}
-	if len(res.Body) != 3 {
-		t.Fatalf("got %d beads, want 3 (ga-2 deduped)", len(res.Body))
+	if len(res.Body.Beads) != 3 {
+		t.Fatalf("got %d beads, want 3 (ga-2 deduped)", len(res.Body.Beads))
 	}
 	counts := map[string]int{}
-	for _, b := range res.Body {
+	for _, b := range res.Body.Beads {
 		counts[b.ID]++
 	}
 	if counts["ga-2"] != 1 {
@@ -1937,5 +1937,84 @@ func TestDrainBeadPagesHardPageCap(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(&reqs); n != 3 {
 		t.Fatalf("requests = %d, want 3 (page cap bounds the loop)", n)
+	}
+}
+
+// TestListBeadsReportsPartialAcrossPages proves the drain keeps the server's
+// report of a backend that failed while building the list: Partial is ORed over
+// every page and PartialErrors are collected once each, in first-seen order (a
+// failing leg repeats its message on every page because each page queries every
+// leg). A caller that prints the list as the city's answer must see it.
+func TestListBeadsReportsPartialAcrossPages(t *testing.T) {
+	t.Run("partial", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			body := map[string]any{"partial": true}
+			switch r.URL.Query().Get("cursor") {
+			case "":
+				body["items"] = []map[string]any{{"id": "ga-1", "title": "t", "issue_type": "task", "status": "open"}}
+				body["next_cursor"] = "c1"
+				body["partial_errors"] = []string{"rig omega: boom"}
+			default:
+				body["items"] = []map[string]any{{"id": "ga-2", "title": "t", "issue_type": "task", "status": "open"}}
+				body["partial_errors"] = []string{"rig omega: boom", "rig zeta: gone"}
+			}
+			_ = json.NewEncoder(w).Encode(body)
+		}))
+		defer ts.Close()
+
+		res, err := NewCityScopedClient(ts.URL, "alpha").ListBeads(ListBeadsOpts{})
+		if err != nil {
+			t.Fatalf("ListBeads: %v", err)
+		}
+		if len(res.Body.Beads) != 2 || res.Body.Beads[0].ID != "ga-1" || res.Body.Beads[1].ID != "ga-2" {
+			t.Fatalf("beads = %+v, want [ga-1 ga-2]", res.Body.Beads)
+		}
+		if !res.Body.Partial {
+			t.Fatal("Partial = false, want true")
+		}
+		want := []string{"rig omega: boom", "rig zeta: gone"}
+		if !slices.Equal(res.Body.PartialErrors, want) {
+			t.Fatalf("PartialErrors = %q, want %q", res.Body.PartialErrors, want)
+		}
+	})
+	t.Run("complete", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{{"id": "ga-1", "title": "t", "issue_type": "task", "status": "open"}},
+			})
+		}))
+		defer ts.Close()
+
+		res, err := NewCityScopedClient(ts.URL, "alpha").ListBeads(ListBeadsOpts{})
+		if err != nil {
+			t.Fatalf("ListBeads: %v", err)
+		}
+		if res.Body.Partial || res.Body.PartialErrors != nil {
+			t.Fatalf("Partial = %v, PartialErrors = %q; want false, nil", res.Body.Partial, res.Body.PartialErrors)
+		}
+	})
+}
+
+// TestListWaitsViaBeadsCarriesPartial proves the legacy gc wait list rung
+// reports a degraded generic-beads read the same way the typed rung does.
+func TestListWaitsViaBeadsCarriesPartial(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items":          []map[string]any{},
+			"partial":        true,
+			"partial_errors": []string{"rig x: down"},
+		})
+	}))
+	defer ts.Close()
+
+	res, err := NewCityScopedClient(ts.URL, "alpha").ListWaitsViaBeads()
+	if err != nil {
+		t.Fatalf("ListWaitsViaBeads: %v", err)
+	}
+	if !res.Body.Partial || !slices.Equal(res.Body.PartialErrors, []string{"rig x: down"}) {
+		t.Fatalf("WaitList = %+v, want Partial with [rig x: down]", res.Body)
 	}
 }

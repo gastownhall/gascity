@@ -32,6 +32,9 @@ type ConvoyCheckView struct {
 
 // beadFromGen translates one genclient.Bead into the internal beads.Bead used
 // by CLI render helpers. Optional pointer fields are dereferenced safely.
+// IsBlocked is deliberately not decoded: it is a readiness value only the
+// server's cache computes, and no direct store read carries it, so decoding it
+// would make a local city's output depend on which route answered.
 func beadFromGen(g genclient.Bead) beads.Bead {
 	out := beads.Bead{
 		ID:        g.Id,
@@ -49,6 +52,9 @@ func beadFromGen(g genclient.Bead) beads.Bead {
 	}
 	if g.Ephemeral != nil {
 		out.Ephemeral = *g.Ephemeral
+	}
+	if g.NoHistory != nil {
+		out.NoHistory = *g.NoHistory
 	}
 	if g.Priority != nil {
 		p := int(*g.Priority)

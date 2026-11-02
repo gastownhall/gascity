@@ -477,9 +477,9 @@ func routeWaitList(cityPath string, c *api.Client, nilReason, stateFilter, sessi
 
 // emitWaitListPartialNotice surfaces a degraded (partial) wait read on stderr
 // without failing the command, matching the generic /beads partial contract: the
-// surviving rows still render, and the operator sees the degradation. The typed
-// /waits rung carries Partial/PartialErrors; the legacy generic-beads rung never
-// sets them, so this is a no-op there.
+// surviving rows still render, and the operator sees the degradation. Both the
+// typed /waits rung and the legacy generic-beads rung carry
+// Partial/PartialErrors.
 func emitWaitListPartialNotice(stderr io.Writer, wl api.WaitList) {
 	if !wl.Partial {
 		return

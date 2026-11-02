@@ -167,8 +167,8 @@ func (c *Client) ListWaitsViaBeads() (CachedRead[WaitList], error) {
 	if err != nil {
 		return CachedRead[WaitList]{}, err
 	}
-	waits := make([]session.WaitInfo, 0, len(cr.Body))
-	for _, b := range cr.Body {
+	waits := make([]session.WaitInfo, 0, len(cr.Body.Beads))
+	for _, b := range cr.Body.Beads {
 		if b.Status == "closed" {
 			continue
 		}
@@ -177,7 +177,10 @@ func (c *Client) ListWaitsViaBeads() (CachedRead[WaitList], error) {
 		}
 		waits = append(waits, session.WaitInfoFromBead(b))
 	}
-	return CachedRead[WaitList]{Body: WaitList{Waits: waits}, AgeSeconds: cr.AgeSeconds}, nil
+	return CachedRead[WaitList]{
+		Body:       WaitList{Waits: waits, Partial: cr.Body.Partial, PartialErrors: cr.Body.PartialErrors},
+		AgeSeconds: cr.AgeSeconds,
+	}, nil
 }
 
 // GetWaitViaBead is the deprecation-window legacy leg for GetWait over the
