@@ -424,7 +424,7 @@ calls = 2
 [[count]]
 path = "cmd/gc/cmd_rig_test.go"
 resource = "http_test_server"
-calls = 5
+calls = 6
 
 [[count]]
 path = "cmd/gc/cmd_rig_test.go"
