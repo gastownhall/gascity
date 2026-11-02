@@ -174,6 +174,47 @@ func TestGuardSessionKeysRefusesBlindCASOnlyWrites(t *testing.T) {
 	if len(failed) != 0 {
 		t.Errorf("conditional writes failed the guard: %q", failed)
 	}
+
+	// The checked write's legacy fallback is unfenced: only a field opted in
+	// (CheckedWrite: work_started) may take it; work_ladder, through the same
+	// verb, and work_started through the generic fenced verb are blind.
+	for _, key := range []string{WorkStartedKey, WorkLadderKey} {
+		if f, _ := LookupField(key); f.CheckedWrite != (key == WorkStartedKey) {
+			t.Fatalf("%s CheckedWrite = %v; want only %s opted in", key, f.CheckedWrite, WorkStartedKey)
+		}
+	}
+	legacyMem := beads.NewMemStore()
+	legacyRow, err := legacyMem.Create(beads.Bead{Type: BeadType, Metadata: map[string]string{"state": "active"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := NewStore(beads.SessionStore{Store: legacyMem})
+	legacy := func() bool { return false }
+	unfenced := map[string]struct {
+		write func() (bool, error)
+		blind bool
+	}{
+		"work_started, checked": {func() (bool, error) {
+			return front.UpdateMetadataChecked(legacyRow.ID, 1, func(Info, PersistedResponse) MetadataPatch { return MetadataPatch{WorkStartedKey: raw} }, legacy)
+		}, false},
+		"work_ladder, checked": {func() (bool, error) {
+			return front.UpdateMetadataChecked(legacyRow.ID, 1, func(Info, PersistedResponse) MetadataPatch { return MetadataPatch{WorkLadderKey: "{}"} }, legacy)
+		}, true},
+		"work_started, fenced": {func() (bool, error) {
+			return front.UpdateMetadataFenced(legacyRow.ID, 1, func(Info, PersistedResponse) MetadataPatch {
+				return MetadataPatch{WorkStartedKey: EncodeWorkStarted(WorkStarted{})}
+			})
+		}, true},
+	}
+	for name, c := range unfenced {
+		failed = nil
+		if wrote, err := c.write(); err != nil || !wrote {
+			t.Fatalf("%s = %v, %v; want written", name, wrote, err)
+		}
+		if blind := len(failed) == 1 && strings.Contains(failed[0], "CASOnly but was written blind"); blind != c.blind || (!c.blind && len(failed) != 0) {
+			t.Errorf("%s: guard reported %q; want blind=%v", name, failed, c.blind)
+		}
+	}
 }
 
 // TestInfoProjectsWorkCells: Info carries both cells raw, so a fenced

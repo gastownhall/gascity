@@ -300,6 +300,35 @@ func (s *Store) UpdateMetadataFenced(id string, attempts int, decide func(Info, 
 	if err != nil {
 		return false, fmt.Errorf("updating session %q: %w", id, err)
 	}
+	return s.updateMetadataLoop(id, attempts, writer, decide)
+}
+
+// UpdateMetadataChecked is UpdateMetadataFenced for a key every write of which
+// must be fenced where the city requires it (a CASOnly key opted into
+// CheckedWrite). Where the store resolves a conditional writer it writes as
+// UpdateMetadataFenced does, by CAS, re-deciding after a lost one, and never
+// asks casOnly. Where it resolves none it asks casOnly first, before the
+// deciding read, since the ask can take seconds (the CLI asks the
+// controller): nil or true returns beads.ErrConditionalWriteUnsupported and
+// writes nothing; false (a legacy city, where no lane competes for the row)
+// writes unfenced right after the re-read. A require-mode store that cannot
+// fence returns its error without asking. It reports whether it wrote.
+func (s *Store) UpdateMetadataChecked(id string, attempts int, decide func(Info, PersistedResponse) MetadataPatch, casOnly func() bool) (bool, error) {
+	writer, _, err := beads.ResolveConditionalWriter(s.store)
+	if err != nil {
+		return false, fmt.Errorf("updating session %q: %w", id, err)
+	}
+	if writer == nil && (casOnly == nil || casOnly()) {
+		return false, fmt.Errorf("updating session %q: %w", id, beads.ErrConditionalWriteUnsupported)
+	}
+	return s.updateMetadataLoop(id, attempts, writer, decide)
+}
+
+// updateMetadataLoop is the metadata verbs' write: a fresh read, decide, and
+// one Update, fenced at the read's revision by writer when it is set (a lost
+// fence re-reads and re-decides, up to attempts times) and unfenced when it is
+// nil. A write that did not land spends the disposition mint its patch carried.
+func (s *Store) updateMetadataLoop(id string, attempts int, writer beads.ConditionalWriter, decide func(Info, PersistedResponse) MetadataPatch) (bool, error) {
 	for attempt := 0; attempt < attempts; attempt++ {
 		bead, err := s.validatedBead(id)
 		if err != nil {

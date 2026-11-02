@@ -1007,6 +1007,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A legacy city whose bd cannot fence writes records claimed work as
+  started again (#8313).** The pinned bd (v1.3.2) has no `--if-revision`, so
+  the session store resolves no conditional writer, and `gc hook --claim`
+  wrote the session's `work_started` cell only by a CAS on the row: every
+  record failed, so the drain-ack refusal, `gc hook --claim --drain-ack`'s
+  `started_claim_held` fence and the execution backstop's started evidence
+  read nothing. On a legacy city (the session reconciler not v2, or a worker
+  site) the hook now records the claim, and forgets it on an unwind, by an
+  unfenced write right after a fresh read of the row: no lane competes for
+  the cell there. A v2 city still records only by CAS; on a store that
+  cannot fence, the hook still warns, emits `work.started_unrecorded` and
+  delivers the claim. A store that can fence writes by CAS, as before.
+
 - **The supervisor API route printed different JSON from the local route
   for the commands supervisor-hosted cities read through it (#8453).**
   `gc session list` printed a different document and dropped

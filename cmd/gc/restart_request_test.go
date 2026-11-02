@@ -681,7 +681,7 @@ func TestRowFirstRestartRequireRefusesAnIncapableStore(t *testing.T) {
 }
 
 // TestRowFirstRestartWorkerSiteTakesTheCheckedWrite pins the worker-site
-// exemption as current behavior: on a worker site restartRecordsOnlyByCAS
+// exemption as current behavior: on a worker site cityRecordsOnlyByCAS
 // answers false without asking the reconciler mode, so a session store with
 // no conditional writer takes the checked write even under a v2 controller.
 // It is safe today only because v2 refuses exec, k8s, ssh and pack runtimes
@@ -703,8 +703,8 @@ func TestRowFirstRestartWorkerSiteTakesTheCheckedWrite(t *testing.T) {
 				return reconcilerV2, true
 			}
 
-			if restartRecordsOnlyByCAS(cityDir, nil)() {
-				t.Fatal("restartRecordsOnlyByCAS = true on a worker site, want false (the exemption)")
+			if cityRecordsOnlyByCAS(cityDir, func() bool { return cityRunsV2(cityDir, nil) })() {
+				t.Fatal("cityRecordsOnlyByCAS = true on a worker site, want false (the exemption)")
 			}
 			var stdout, stderr bytes.Buffer
 			if code := v.run(&stdout, &stderr); code != 0 {
@@ -724,7 +724,7 @@ func TestRowFirstRestartWorkerSiteTakesTheCheckedWrite(t *testing.T) {
 // sites, through the exec, a pack, the ssh, the k8s or the hybrid session
 // runtime, never runs v2. An explicit v2 is refused, and an unset key falls
 // back to legacy. When v2 admits one of these runtimes, this fails first:
-// restartRecordsOnlyByCAS must then stop exempting worker sites, or a v2
+// cityRecordsOnlyByCAS must then stop exempting worker sites, or a v2
 // city's box takes the checked write.
 func TestRestartWorkerSiteExemptionNeedsV2ToRefuseRemoteRuntimes(t *testing.T) {
 	for _, tc := range []struct {
@@ -742,10 +742,10 @@ func TestRestartWorkerSiteExemptionNeedsV2ToRefuseRemoteRuntimes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if mode, err := latchReconcilerMode(v2City(tc.runtime), noEnv); err == nil {
-				t.Fatalf("an explicit v2 with the %s session runtime latches %s; a v2 city can then have worker sites, which take the checked restart write: revisit restartRecordsOnlyByCAS", tc.name, mode)
+				t.Fatalf("an explicit v2 with the %s session runtime latches %s; a v2 city can then have worker sites, which take the checked restart write: revisit cityRecordsOnlyByCAS", tc.name, mode)
 			}
 			if mode, err := latchReconcilerMode(v2DefaultCity(tc.runtime), noEnv); err != nil || mode != reconcilerLegacy {
-				t.Fatalf("an unset session_reconciler with the %s session runtime latches %s (err %v), want the legacy fallback; a v2 city can then have worker sites, which take the checked restart write: revisit restartRecordsOnlyByCAS", tc.name, mode, err)
+				t.Fatalf("an unset session_reconciler with the %s session runtime latches %s (err %v), want the legacy fallback; a v2 city can then have worker sites, which take the checked restart write: revisit cityRecordsOnlyByCAS", tc.name, mode, err)
 			}
 		})
 	}

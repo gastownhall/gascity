@@ -130,6 +130,11 @@ func TestDispositionGuardReadsTheStack(t *testing.T) {
 	if !dispositionVerbs["internal/session.(*Store).ApplyPatch"] || dispositionVerbs["internal/session.(*Store).OperatorSuspend"] {
 		t.Error("the session store's generic verbs, and only they, are plumbing")
 	}
+	for _, verb := range []string{"UpdateMetadataFenced", "UpdateMetadataChecked", "updateMetadataLoop"} {
+		if !dispositionVerbs["internal/session.(*Store)."+verb] {
+			t.Errorf("the metadata verb %s is not plumbing: its writes would be attributed to the verb, not its caller", verb)
+		}
+	}
 	if at, fixture := dispositionWriterFromHere(); !fixture {
 		t.Errorf("a test's write: at %q fixture %v, want a fixture", at, fixture)
 	}

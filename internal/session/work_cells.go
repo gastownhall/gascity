@@ -13,7 +13,10 @@ import (
 // lane's work-ladder step. Each is one JSON value its owner rewrites whole by
 // a CAS on the row (UpdateRowFenced), never blind (CASOnly), and outside the
 // premise (ClassWork): a v2 effect that loses its CAS to one re-reads and
-// re-decides. This file holds the work_started codec and the one field of
+// re-decides. The one exception is work_started on a legacy city whose store
+// cannot fence (CheckedWrite): UpdateMetadataChecked writes it unfenced there,
+// since no lane competes for the row, and refuses wherever the city records
+// only by CAS. This file holds the work_started codec and the one field of
 // work_ladder the hook reads, its pending release.
 const (
 	WorkStartedKey = "work_started"

@@ -93,6 +93,11 @@ type Field struct {
 	// (UpdateIfMatch, CompareAndSetMetadataKey): GuardSessionKeys fails a
 	// blind one, a fixture's too.
 	CASOnly bool
+	// CheckedWrite admits one unfenced write of a CASOnly key: the one
+	// Store.UpdateMetadataChecked makes where the store has no conditional
+	// writer and its caller answered that the city does not record by CAS
+	// (a legacy city). Every other blind write of the key still fails.
+	CheckedWrite bool
 }
 
 // InPremise reports whether a fence compares f.
@@ -391,8 +396,9 @@ var registry = slices.Concat([]Field{
 	{Key: beadmeta.CurrentClaimBeadIDMetadataKey, Class: ClassMarker, Writers: sites(op("internal/session/store.go", "Store.SetCurrentClaim"))},
 
 	// The work cells (PHASE1-2 §6.1): each written whole, by its one owner,
-	// by a CAS on the row.
-	{Key: WorkStartedKey, Class: ClassWork, NewKey: true, CASOnly: true, Writers: sites(
+	// by a CAS on the row; work_started also unfenced on a legacy city whose
+	// store cannot fence (CheckedWrite).
+	{Key: WorkStartedKey, Class: ClassWork, NewKey: true, CASOnly: true, CheckedWrite: true, Writers: sites(
 		op("cmd/gc/hook_session_claim.go", "recordWorkStarted"), op("cmd/gc/hook_session_claim.go", "forgetWorkStarted"))},
 	{Key: WorkLadderKey, Class: ClassWork, NewKey: true, CASOnly: true, Writers: sites(
 		v2("cmd/gc/work_ladder_lane.go", "ladderPass.commit"), v2("cmd/gc/work_ladder_lane.go", "ladderPass.settle"),
