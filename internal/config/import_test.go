@@ -2709,3 +2709,51 @@ func TestValidateLockedRemoteCacheAcceptsContentIdenticalStatDirtyFiles(t *testi
 		validate(t, cacheDir, commit)
 	})
 }
+
+// TestValidateLockedRemoteCacheIgnoresGitTraceOutput covers a clean cache
+// validated while the parent environment asks git for trace output: the
+// trace lines go to stderr and must not be mistaken for a commit mismatch
+// or dirty porcelain entries.
+func TestValidateLockedRemoteCacheIgnoresGitTraceOutput(t *testing.T) {
+	cacheDir := t.TempDir()
+	commit := seedRepoCacheFixture(t, cacheDir)
+
+	t.Setenv("GIT_TRACE", "1")
+	t.Setenv("GIT_TRACE2_PERF", "1")
+
+	if err := validateLockedRemoteCache("https://example.com/tools.git", cacheDir, commit); err != nil {
+		t.Fatalf("validateLockedRemoteCache rejected clean cache under GIT_TRACE: %v", err)
+	}
+}
+
+// TestRepoCacheGitEnvFiltersTraceOutput covers the runner's local trace
+// filter: GIT_TRACE* entries are removed while unrelated entries and the
+// hermetic pinned config survive.
+func TestRepoCacheGitEnvFiltersTraceOutput(t *testing.T) {
+	t.Setenv("GIT_TRACE", "1")
+	t.Setenv("GIT_TRACE2_PERF", "1")
+	t.Setenv("GC_UNRELATED_PROBE", "keepme")
+
+	env := repoCacheGitEnv()
+	var sawProbe, sawPinnedConfig, sawTrace bool
+	for _, e := range env {
+		k, _, _ := strings.Cut(e, "=")
+		switch {
+		case k == "GC_UNRELATED_PROBE":
+			sawProbe = true
+		case k == "GIT_CONFIG_NOSYSTEM":
+			sawPinnedConfig = true
+		case strings.HasPrefix(k, "GIT_TRACE"):
+			sawTrace = true
+		}
+	}
+	if !sawProbe {
+		t.Error("repoCacheGitEnv dropped an unrelated environment entry")
+	}
+	if !sawPinnedConfig {
+		t.Error("repoCacheGitEnv dropped the hermetic pinned config entries")
+	}
+	if sawTrace {
+		t.Error("repoCacheGitEnv kept a GIT_TRACE* entry")
+	}
+}

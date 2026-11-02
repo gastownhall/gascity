@@ -437,9 +437,11 @@ type remoteCacheValidationEntry struct{ fingerprint string }
 // rewrites the tree (changing root mtime); git checkout/reset update the
 // index. The .git directory itself is intentionally excluded: git status
 // --porcelain creates and removes a lock file inside .git/ as a side effect,
-// updating .git dir mtime on every run and defeating the memo. .git/index
-// mtime is stable across git status (the flags we pass, including
-// -c core.untrackedCache=false, prevent any index refresh writes).
+// updating .git dir mtime on every run and defeating the memo. git status
+// may opportunistically write refreshed stat data back to .git/index, but
+// that does not defeat the memo either: validation records the fingerprint
+// only after it returns, so a written index simply triggers one extra
+// revalidation on the next load.
 // A nested manual worktree edit touching neither root nor the index escapes
 // detection until the process restarts — acceptable for a pinned,
 // gc-managed cache.
@@ -590,6 +592,25 @@ func validateLockedRemoteCache(source, cacheDir, commit string) error {
 	return nil
 }
 
+// repoCacheGitEnv returns the hermetic git environment for repo-cache
+// validation with trace output disabled, local to this runner: GIT_TRACE*
+// variables make git write trace lines to stderr even when the command
+// succeeds, and this runner's callers parse the output, so a parent shell's
+// tracing settings would otherwise surface as a cache validation failure.
+// Only entries with the GIT_TRACE prefix are filtered; everything else
+// (including the hermetic pinned config) passes through untouched.
+func repoCacheGitEnv() []string {
+	env := gitutil.HermeticEnv()
+	filtered := make([]string, 0, len(env))
+	for _, e := range env {
+		if k, _, ok := strings.Cut(e, "="); ok && strings.HasPrefix(k, "GIT_TRACE") {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	return filtered
+}
+
 func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
 	cmdArgs := append([]string{
 		"-c", "core.fsmonitor=false",
@@ -598,7 +619,7 @@ func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
 	}, args...)
 	cmd := exec.Command("git", cmdArgs...)
 	cmd.Dir = dir
-	cmd.Env = gitutil.HermeticEnv()
+	cmd.Env = repoCacheGitEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
