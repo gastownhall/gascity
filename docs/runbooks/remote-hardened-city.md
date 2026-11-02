@@ -45,14 +45,34 @@ new rig — both authenticated by a fresh, request-bound grant your machine mint
 
 ## 2. Mint the city keypair
 
+The operator machine needs the `gc-write-mint` grant minter beside `gc`. Release
+archives and the Homebrew formula ship both binaries from the same tag; from a
+source checkout, install the minter at the tag your `gc` was built from:
+
+```bash
+go install github.com/gastownhall/gascity/cmd/gc-write-mint@<tag>
+```
+
 The server holds only the **public** key; the private key stays on the operator
-machine (`0600`). `gc-write-mint` accepts a PEM PKCS#8, or a raw / hex / base64
-32-byte ed25519 seed.
+machine (`0600`). `gc-write-mint keygen` writes a PEM PKCS#8 ed25519 private key
+and prints the server's verify-key entry:
+
+```bash
+gc-write-mint keygen --kid k1 --out ~/.gc/keys/city.ed25519
+# -> k1:<base64 ed25519 pubkey>
+```
+
+The kid must not contain `:`, `,` or whitespace. `keygen` creates the key
+directory (`0700`) if it is missing and refuses to replace an existing key file
+unless you pass `--force`.
+
+<Accordion title="Generate the key with openssl instead">
+
+`gc-write-mint` also accepts a key you generate yourself: a PEM PKCS#8, or a raw
+/ hex / base64 32-byte ed25519 seed.
 
 ```bash
 mkdir -p ~/.gc/keys && chmod 700 ~/.gc/keys
-
-# Generate a PKCS#8 private key.
 openssl genpkey -algorithm ed25519 -out ~/.gc/keys/city.ed25519
 chmod 600 ~/.gc/keys/city.ed25519
 
@@ -61,6 +81,8 @@ openssl pkey -in ~/.gc/keys/city.ed25519 -pubout -outform DER \
   | tail -c 32 | base64
 # -> <base64 ed25519 pubkey>
 ```
+
+</Accordion>
 
 The verify key is configured as `kid:base64pub` (comma-separable for rotation),
 e.g. `k1:<base64 ed25519 pubkey>`.
