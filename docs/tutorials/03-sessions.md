@@ -37,7 +37,16 @@ tasks intact when diagnosing a failure.
 When status prints `Verified local integration`, continue to
 [Communication](/tutorials/04-communication). If it reports a failed stage,
 inspect its source ID with `gc --rig practice bd show <source-id> --json` and
-correct the named problem before retrying.
+correct the named problem. When the workflow has stopped unsuccessfully, request
+a fresh bounded attempt with the same source task and input:
+
+```bash
+gc gc tutorial retry --lesson api
+```
+
+The old worktree remains available. An active attempt is observed without
+replacement. For environment blockers and input-change refusals, see
+[Recover a stopped lesson](/getting-started/quickstart#recover-a-stopped-lesson).
 
 ## Custom configuration exercise
 

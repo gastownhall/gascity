@@ -96,6 +96,39 @@ paused; start it to resume. A failed stage remains visible for diagnosis. Do not
 delete a worktree or close source work to clear an error. Use the source task
 ID printed by the tutorial with `gc bd show <task-id>` to inspect it.
 
+## Recover a stopped lesson
+
+Inspect the lesson from the city directory:
+
+```bash
+gc gc tutorial status --lesson greeting
+gc status
+```
+
+An environment blocker keeps the existing work waiting. Repair the reported
+prerequisite and resume a paused city with `gc start`.
+
+When review or verification exhausts its two repair rounds, the workflow stops
+and the source task stays open. Correct the reported problem, then request a
+new bounded attempt:
+
+```bash
+gc gc tutorial retry --lesson greeting
+```
+
+Use `api` or `client` for those lessons. Retry keeps the source task and recorded
+input commit, and retains the previous unfinished worktree. Repeating it while
+work is active observes that attempt. If preparation stopped before selecting
+an input, retry pins the current clean default-branch commit.
+
+A dirty or advanced checkout, a changed verification contract, or an already
+integrated change requires attention to the existing work before replacement.
+Keep that work and inspect the source ID shown by status:
+
+```bash
+gc --rig practice bd show <source-id> --json
+```
+
 ## Use your own repository
 
 You can take the delivery path directly to an existing project; the practice
