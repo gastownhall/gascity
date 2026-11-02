@@ -18,3 +18,11 @@ func OpenRealNativeDoltStoreForTest(t *testing.T) Store {
 	}
 	return s
 }
+
+// StartTestDoltServerForTest starts a private dolt sql-server on a free
+// loopback port for external integration tests and returns the port. The
+// server is killed when the test ends.
+func StartTestDoltServerForTest(t testing.TB) int {
+	t.Helper()
+	return startTestDoltServer(t)
+}

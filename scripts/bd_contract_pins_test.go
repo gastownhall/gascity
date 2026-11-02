@@ -22,6 +22,8 @@ import (
 //     cut from (its tag); moving the ref off a released tag needs a
 //     source-built bd here instead, and this test then has no archive to
 //     point at.
+//   - //internal/beads:bd_metadata_compose_floor_test runs BD_PREV_VERSION's
+//     bd (first on PATH through GC_TEST_TOOL_PATHS, plus the pinned dolt);
 //   - the conditional-release target selects the Makefile's
 //     BD_CONDITIONAL_RELEASE_TEST, which must exist in internal/beads under
 //     the integration tag: a -run selector that matches nothing passes.
@@ -125,22 +127,41 @@ func TestBdContractCellsRunTheDepsEnvPins(t *testing.T) {
 			t.Errorf("bd_conditional_release_contract_test lacks %s:\n%s", want, r)
 		}
 	}
+	requireBeadsIntegrationTest(t, root, testName[1])
+
+	r = rule(beadsBuild, "bd_metadata_compose_floor_test")
+	const composeTest = "TestBdStoreConcurrentDifferentKeySetMetadataComposesOnSharedServer"
+	for _, want := range []string{
+		`args = ["-test.run=^` + composeTest + `$$"],`,
+		`gotags = ["integration"],`,
+		`"GC_TEST_TOOL_PATHS": "$(rootpath @` + repoFor(prev) + `//:bd) $(rootpath @dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt)",`,
+		`"@` + repoFor(prev) + `//:bd",`,
+	} {
+		if !strings.Contains(r, want) {
+			t.Errorf("bd_metadata_compose_floor_test lacks %s:\n%s", want, r)
+		}
+	}
+	requireBeadsIntegrationTest(t, root, composeTest)
+}
+
+// requireBeadsIntegrationTest fails unless a //go:build integration test file
+// in internal/beads defines testName: a -run selector that matches nothing
+// passes.
+func requireBeadsIntegrationTest(t *testing.T, root, testName string) {
+	t.Helper()
 	files, err := filepath.Glob(filepath.Join(root, "internal", "beads", "*_test.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var found bool
 	for _, f := range files {
 		data, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatal(err)
 		}
 		src := string(data)
-		if strings.HasPrefix(src, "//go:build integration\n") && strings.Contains(src, "\nfunc "+testName[1]+"(t *testing.T) {") {
-			found = true
+		if strings.HasPrefix(src, "//go:build integration\n") && strings.Contains(src, "\nfunc "+testName+"(t *testing.T) {") {
+			return
 		}
 	}
-	if !found {
-		t.Errorf("no //go:build integration test file in internal/beads defines %s; the contract target would select nothing", testName[1])
-	}
+	t.Errorf("no //go:build integration test file in internal/beads defines %s; the contract target would select nothing", testName)
 }

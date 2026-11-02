@@ -194,6 +194,18 @@ func TestNewConditionalIntegrationRunnerIsolatesHOMEFromSharedServerConfig(t *te
 // mirroring the libstore env-pinning precedent.
 func newConditionalIntegrationBdStore(t *testing.T) (*beads.BdStore, string) {
 	t.Helper()
+	dir := newIntegrationGitScopeDir(t)
+	runner := newConditionalIntegrationRunner(t, dir)
+	if out, err := runner(dir, "bd", "init", "-p", "tst", "--skip-hooks", "--skip-agents"); err != nil {
+		t.Fatalf("bd init: %v\n%s", err, out)
+	}
+	return beads.NewBdStore(dir, runner), dir
+}
+
+// newIntegrationGitScopeDir returns a fresh TempDir holding an empty git
+// repository, the directory a bd scope is initialized in.
+func newIntegrationGitScopeDir(t *testing.T) string {
+	t.Helper()
 	dir := beadstest.GuardedTempDir(t)
 	git := exec.Command("git", "init", "--quiet", dir)
 	// GIT_DIR/GIT_WORK_TREE from the invoking shell would redirect init away
@@ -211,11 +223,7 @@ func newConditionalIntegrationBdStore(t *testing.T) (*beads.BdStore, string) {
 	if out, err := git.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
-	runner := newConditionalIntegrationRunner(t, dir)
-	if out, err := runner(dir, "bd", "init", "-p", "tst", "--skip-hooks", "--skip-agents"); err != nil {
-		t.Fatalf("bd init: %v\n%s", err, out)
-	}
-	return beads.NewBdStore(dir, runner), dir
+	return dir
 }
 
 // newConditionalIntegrationRunner pins BEADS_DIR to the scope so every bd
@@ -231,6 +239,13 @@ func newConditionalIntegrationBdStore(t *testing.T) (*beads.BdStore, string) {
 // route this row into their host-wide shared Dolt server.
 func newConditionalIntegrationRunner(t *testing.T, scopeDir string) beads.CommandRunner {
 	t.Helper()
+	return newIntegrationBdRunner(t, scopeDir, nil)
+}
+
+// newIntegrationBdRunner is newConditionalIntegrationRunner with overrides
+// layered over its env, last.
+func newIntegrationBdRunner(t *testing.T, scopeDir string, overrides map[string]string) beads.CommandRunner {
+	t.Helper()
 	home := filepath.Join(filepath.Dir(scopeDir), "tool-home")
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		t.Fatalf("create bd tool home: %v", err)
@@ -242,6 +257,9 @@ func newConditionalIntegrationRunner(t *testing.T, scopeDir string) beads.Comman
 	}
 	env["BEADS_DIR"] = filepath.Join(scopeDir, ".beads")
 	env["BEADS_DOLT_AUTO_START"] = "0"
+	for k, v := range overrides {
+		env[k] = v
+	}
 	// toolhome.Environ drops every BEADS_* name, so BdSubprocessEnv re-applies the
 	// test-mode default that keeps bd's detached metrics flusher from racing the
 	// TempDir removal (ga-aik16g).
