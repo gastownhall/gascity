@@ -107,6 +107,13 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			want:       command + " --resume " + key,
 		},
 		{
+			name: "a committed hash without a transcript keeps the resume",
+			meta: map[string]string{
+				"started_config_hash": "hash-abc",
+			},
+			want: command + " --resume " + key,
+		},
+		{
 			name: "a creating row with a stale creation marker starts with the session-id flag",
 			meta: map[string]string{
 				"state": string(sessionpkg.StateCreating),

@@ -825,7 +825,7 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	if resumeCommand := strings.TrimSpace(h.session.Resume.ResumeCommand); resumeCommand != "" {
 		resumeInfo.ResumeCommand = resumeCommand
 	}
-	if h.unlaunchedSessionKey(info) {
+	if h.unlaunchedSessionKey(info, pr) {
 		return startCommandWithSessionID(resumeInfo, h.session)
 	}
 	return sessionpkg.BuildResumeCommand(resumeInfo), nil
@@ -834,16 +834,22 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 // unlaunchedSessionKey reports whether the row's stored session key never
 // launched a conversation a resume could reattach to, so the start should open
 // a fresh conversation under the stored key with the provider's session-id
-// flag instead. The key must have a session-id flag to open one with, and the
-// keyed transcript the resume would reattach to must be probeable and absent
-// under the roots this launch reads — the same probe and root rule the
-// reconciler's own start applies (workertranscript.KeyedProbeRoots): the
-// handle's search paths, plus the projects root of an absolute
-// CLAUDE_CONFIG_DIR the launch's env names. A relative or ~ value adds no
-// root; a provider whose transcript layout cannot be probed, a missing key or
-// work dir, and a transcript that is present all keep the resume.
-func (h *SessionHandle) unlaunchedSessionKey(info sessionpkg.Info) bool {
+// flag instead. The key must have a session-id flag to open one with, the row
+// must never have committed a start under the key (started_config_hash empty —
+// every key rotation clears it in the same patch that writes the key, and only
+// a committed start restores it), and the keyed transcript the resume would
+// reattach to must be probeable and absent under the roots this launch reads —
+// the same probe and root rule the reconciler's own start applies
+// (workertranscript.KeyedProbeRoots): the handle's search paths, plus the
+// projects root of an absolute CLAUDE_CONFIG_DIR the launch's env names. A
+// relative or ~ value adds no root; a provider whose transcript layout cannot
+// be probed, a missing key or work dir, and a transcript that is present all
+// keep the resume.
+func (h *SessionHandle) unlaunchedSessionKey(info sessionpkg.Info, pr sessionpkg.PersistedResponse) bool {
 	if h.session.Resume.SessionIDFlag == "" || strings.TrimSpace(info.SessionKey) == "" {
+		return false
+	}
+	if strings.TrimSpace(pr.Metadata["started_config_hash"]) != "" {
 		return false
 	}
 	hints := h.runtimeHints()
