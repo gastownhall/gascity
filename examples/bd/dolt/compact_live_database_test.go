@@ -162,3 +162,50 @@ func TestCompactScriptLiveGateQuarantinesVanishedDataDir(t *testing.T) {
 		}
 	})
 }
+
+// TestCompactScriptLiveGateQuarantinesUnservedDatabase: when the data-dir
+// entry survives but the server stops serving the database, the gate must
+// quarantine and fail the run regardless of the rewrite statement's own exit
+// status, across every rewrite shape.
+func TestCompactScriptLiveGateQuarantinesUnservedDatabase(t *testing.T) {
+	cases := []struct {
+		name       string
+		mode       string
+		args       []string
+		extraEnv   []string
+		failedStep string
+	}{
+		{name: "after flatten", mode: "live_unserved_after_flatten", failedStep: "flatten"},
+		{name: "after post-flatten full gc", mode: "live_unserved_after_gc", failedStep: "post-flatten full GC"},
+		{name: "gc-only", mode: "live_unserved_after_gc", args: []string{"--gc-only"}, failedStep: "gc-only reclaim"},
+		{name: "bare gc", mode: "live_unserved_after_gc", extraEnv: []string{"GC_DOLT_COMPACT_BARE_GC=1"}, failedStep: "bare GC"},
+		{name: "failed flatten", mode: "live_flatten_failure_unserved", failedStep: "flatten"},
+		{name: "failed gc still unserved", mode: "live_gc_failure_unserved", failedStep: "post-flatten full GC"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			env := append([]string{
+				"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+				"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0",
+			}, tc.extraEnv...)
+			out, err := fixture.runWithArgs(t, tc.mode, tc.args, env...)
+			requireCompactExitCode(t, out, err, 1)
+			if !strings.Contains(out, "database not found: beads") {
+				t.Fatalf("output must carry the probe failure the server reported:\n%s", out)
+			}
+
+			body := readCompactMarkerBody(t, compactLiveGateMarkerPath(fixture))
+			for _, want := range []string{
+				"reason=live database unavailable after compaction",
+				"live_gate_failed_step=" + tc.failedStep,
+				"live_gate_probe_failure=",
+				"live_gate_dir_present_after=1",
+			} {
+				if !strings.Contains(body, want) {
+					t.Fatalf("quarantine marker missing %q:\n%s\noutput:\n%s", want, body, out)
+				}
+			}
+		})
+	}
+}

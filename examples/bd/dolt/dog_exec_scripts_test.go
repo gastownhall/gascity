@@ -1514,6 +1514,14 @@ case "$query" in
       printf 'reset exploded\n' >&2
       exit 44
     fi
+    if [ "$mode" = "live_flatten_failure_unserved" ]; then
+      : > "$state_file.$db-unserved"
+      printf 'reset exploded\n' >&2
+      exit 44
+    fi
+    if [ "$mode" = "live_unserved_after_flatten" ]; then
+      : > "$state_file.$db-unserved"
+    fi
     if [ "$mode" = "commit_failure_after_reset" ]; then
       set_head rootcommit
       printf 'commit rejected after reset\n' >&2
@@ -1574,6 +1582,14 @@ case "$query" in
     case "$mode" in
       live_vanish_after_gc)
         rm -rf -- "${GC_DOLT_DATA_DIR:-}/$db"
+        ;;
+      live_unserved_after_gc|live_unserved_shared_history)
+        : > "$state_file.$db-unserved"
+        ;;
+      live_gc_failure_unserved)
+        : > "$state_file.$db-unserved"
+        printf 'gc exploded\n' >&2
+        exit 45
         ;;
       live_probe_transient_once)
         : > "$state_file.$db-gc-done"
