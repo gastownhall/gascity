@@ -54,8 +54,8 @@ func TestStartupDeliveryStallRecoversWithEnter(t *testing.T) {
 			p, state := newFakeHerdrProvider(t)
 			listenHerdrSocket(t, p)
 			setState(t, state, "prompt_stalled")
-			if shape == "stderr_exit_1" {
-				setState(t, state, "prompt_error_stderr")
+			if shape == "stdout" {
+				setState(t, state, "prompt_error_stdout")
 			}
 
 			cfg := runtime.Config{Command: "claude", Nudge: "Run gc hook --claim --json now."}
@@ -93,8 +93,8 @@ func TestStartupDeliveryUnconfirmedRecordsSidecarMarker(t *testing.T) {
 			listenHerdrSocket(t, p)
 			setState(t, state, "prompt_stalled")
 			setState(t, state, "wait_times_out")
-			if shape == "stderr_exit_1" {
-				setState(t, state, "prompt_error_stderr")
+			if shape == "stdout" {
+				setState(t, state, "prompt_error_stdout")
 			}
 
 			cfg := runtime.Config{Command: "claude", Nudge: "Run gc hook --claim --json now."}
@@ -133,8 +133,8 @@ func TestStartupDeliveryStallOnBlockedAgentWithholdsEnter(t *testing.T) {
 			listenHerdrSocket(t, p)
 			setState(t, state, "prompt_stalled")
 			setState(t, state, "agent_blocked")
-			if shape == "stderr_exit_1" {
-				setState(t, state, "prompt_error_stderr")
+			if shape == "stdout" {
+				setState(t, state, "prompt_error_stdout")
 			}
 
 			cfg := runtime.Config{Command: "claude", Nudge: "Run gc hook --claim --json now."}
@@ -175,8 +175,8 @@ func TestStartupDeliveryTimeoutNeverBlindEnters(t *testing.T) {
 			p, state := newFakeHerdrProvider(t)
 			listenHerdrSocket(t, p)
 			setState(t, state, "prompt_times_out")
-			if shape == "stderr_exit_1" {
-				setState(t, state, "prompt_error_stderr")
+			if shape == "stdout" {
+				setState(t, state, "prompt_error_stdout")
 			}
 
 			cfg := runtime.Config{Command: "claude", Nudge: "Run gc hook --claim --json now."}
@@ -361,5 +361,8 @@ func TestWaitForIdleOutcomeMapping(t *testing.T) {
 	setState(t, state, "wait_times_out")
 	if got := p.waitForIdleOutcome(context.Background(), "gastown__witness", time.Second); got != idleWaitTimeout {
 		t.Fatalf("timed-out wait outcome = %q; want %q", got, idleWaitTimeout)
+	}
+	if calls := fakeCalls(t, state); !strings.Contains(calls, "--until idle --until done --timeout") {
+		t.Fatalf("idle wait must also accept a finished Claude turn (done):\n%s", calls)
 	}
 }

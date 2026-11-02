@@ -177,7 +177,8 @@ func TestSeekGatesForceClientSideLimit(t *testing.T) {
 		t.Fatal("bdListRequiresClientLimit must force client-side limit when SeekAfter is set")
 	}
 
-	wisps := ListQuery{Sort: SortCreatedDesc, Limit: 10}
+	// The wisp query carries a limit only for bd's own order (SortDefault).
+	wisps := ListQuery{Sort: SortDefault, Limit: 10}
 	if !canApplyWispsServerLimit(wisps) {
 		t.Fatal("baseline wisps query should allow the server limit (test setup wrong)")
 	}

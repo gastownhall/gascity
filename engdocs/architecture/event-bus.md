@@ -180,7 +180,9 @@ are enforced by the conformance suite in
    because event recording failed.
 
 6. **Events are immutable once recorded.** There is no Update or Delete
-   operation. The append-only log only grows.
+   operation. In `FileRecorder`, rotation moves recorded events into
+   archives unchanged, and only the opt-in `archive_retain_age` removes
+   them (see Known Limitations).
 
 7. **List with empty Filter returns all events.** A zero-valued Filter
    matches everything.
@@ -229,7 +231,7 @@ are enforced by the conformance suite in
 | `cmd/gc/cmd_handoff.go` | Records handoff-related `session.draining` and `session.stopped` events |
 | `cmd/gc/order_dispatch.go` | Records `order.fired`, `order.completed`, `order.failed` events during order dispatch |
 | `cmd/gc/cmd_events.go` | CLI `gc events` command: reads and displays events with filtering (`--type`, `--since`), watch mode (`--watch`), and sequence query (`--seq`) |
-| `cmd/gc/cmd_event_emit.go` | CLI `gc event emit` command: records custom events from scripts and bd hooks (best-effort, always exits 0) |
+| `cmd/gc/cmd_event_emit.go` | CLI `gc event emit` command: records custom events from scripts and bd hooks (best-effort: exits 0 once an event is accepted; `reserved_actor` and `bead_payload_refused` refusals exit 1 and record nothing) |
 | `cmd/gc/cmd_agent.go` | Records session lifecycle events during start/stop/restart operations |
 | `cmd/gc/cmd_suspend.go` | Records `city.suspended` and `city.resumed` events |
 | `cmd/gc/cmd_mail.go` | Records CLI `mail.*` events for send, read, archive, reply, mark-read/unread, and delete operations |
@@ -251,7 +253,7 @@ are enforced by the conformance suite in
 | `internal/events/events_test.go` | FileRecorder-specific tests: write, payload round-trip, monotonic seq, concurrent safety, seq resume, timestamp handling |
 | `cmd/gc/providers.go` | eventsProviderName: resolution logic (GC_EVENTS env -> city.toml -> default); newEventsProvider: factory function |
 | `cmd/gc/cmd_events.go` | `gc events` CLI: list, filter, watch, payload-match, seq query |
-| `cmd/gc/cmd_event_emit.go` | `gc event emit` CLI: best-effort custom event recording |
+| `cmd/gc/cmd_event_emit.go` | `gc event emit` CLI: best-effort custom event recording that exits 0 once an event is accepted; `reserved_actor` and `bead_payload_refused` refusals exit 1 and record nothing |
 
 ### Event Type Constants
 
@@ -295,6 +297,7 @@ API/SSE projection:
 | `RequestResultSessionMessage` | `request.result.session.message` | API async session message completion |
 | `RequestResultSessionSubmit` | `request.result.session.submit` | API async session submit completion |
 | `RequestFailed` | `request.failed` | Supervisor/API async request failure handlers |
+| `RequestAccepted` | `request.accepted` | API async session create/message/submit acceptance marker read by `GET /v0/city/{cityName}/request/{requestId}` |
 | `CityCreated` | `city.created` | City init lifecycle diagnostics |
 | `CityUnregisterRequested` | `city.unregister_requested` | City unregister lifecycle diagnostics |
 | `OrderFired` | `order.fired` | Order dispatch when a trigger is due |
@@ -422,17 +425,21 @@ suite against a stateful jq-based mock script.
   provider uses channel-based notification for zero-latency delivery
   in tests.
 
-- **No event retention or rotation.** The JSONL file grows without
-  bound. There is no built-in log rotation, retention policy, or
-  compaction. For long-running cities, manual truncation or external
-  log rotation is needed.
+- **Rotation and retention.** `[events.rotation]` rotates the active
+  `events.jsonl` into gzip archives once it passes `max_size_bytes`
+  (default 256 MiB; rotation is on by default). `Watch` backfills a
+  resume cursor across the archives, so rotation alone loses no
+  events. `archive_retain_age` prunes older archives; a cursor older
+  than the oldest retained event cannot be replayed in full, and the
+  streams do not yet signal that gap.
 
 - **ReadFiltered streams without indexes.** `ReadFiltered` scans the
-  JSONL file once, applies `Filter` as it reads, and stops early when a
-  positive direct-provider `Limit` is reached. There are still no
-  indexes, so broad time/type/actor/subject queries remain linear in the
-  event log until their limit is satisfied. `ReadFrom` with byte offsets
-  provides incremental reading for the Watch path.
+  archives that overlap the filter and then the active JSONL file,
+  applies `Filter` as it reads, and stops early when a positive
+  direct-provider `Limit` is reached. There are still no indexes, so
+  broad time/type/actor/subject queries remain linear in the event log
+  until their limit is satisfied. `ReadFrom` with byte offsets provides
+  incremental reading for the Watch path.
 
 - **No event schema validation.** Event types are string constants with
   no runtime validation. Recording an event with a misspelled type

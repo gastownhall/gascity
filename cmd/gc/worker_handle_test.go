@@ -82,7 +82,7 @@ STUB_ENV = "present"
 	if err != nil {
 		t.Fatalf("workerHandleForSessionWithConfig: %v", err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testActorIn(t, session.ActorAgent, cityDir)); err != nil {
 		t.Fatalf("handle.Start: %v", err)
 	}
 
@@ -1302,7 +1302,7 @@ session_id_flag = "--session-id"
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, cityDir), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -1312,8 +1312,9 @@ session_id_flag = "--session-id"
 	}
 
 	sp.Calls = nil
-	if err := handle.Start(context.Background()); err != nil {
-		t.Fatalf("handle.Start: %v", err)
+	// Resuming a suspended session is an operator's own act (D8): Attach.
+	if err := handle.Attach(context.Background(), testActorIn(t, session.ActorOperator, cityDir)); err != nil {
+		t.Fatalf("handle.Attach: %v", err)
 	}
 
 	start := sp.LastStartConfig(info.SessionName)
@@ -1356,6 +1357,10 @@ session_id_flag = "--session-id"
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
+	// The session manager and the worker resolvers take the session-class
+	// store, as their production callers hand them (cliSessionStore): the
+	// fixture now matches the production path.
+	store = cliSessionStore(store, cfg, cityDir)
 
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
@@ -1369,7 +1374,7 @@ session_id_flag = "--session-id"
 	if err != nil {
 		t.Fatalf("workerHandleForSessionTargetWithConfig: %v", err)
 	}
-	if err := handle.Kill(context.Background()); err != nil {
+	if err := handle.Kill(context.Background(), testActorIn(t, session.ActorOperator, cityDir)); err != nil {
 		t.Fatalf("handle.Kill: %v", err)
 	}
 	// The live event recorder now wired into the CLI factory (#5859) makes
@@ -1424,6 +1429,10 @@ command = "/bin/echo"
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
+	// The session manager and the worker resolvers take the session-class
+	// store, as their production callers hand them (cliSessionStore): the
+	// fixture now matches the production path.
+	backing = cliSessionStore(backing, cfg, cityDir)
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, backing, sp, cfg)
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Probe", Command: "/bin/echo", WorkDir: t.TempDir(), Provider: "stub", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{Command: "/bin/echo"}, ExtraMeta: map[string]string{"session_origin": "manual"}})
@@ -1522,6 +1531,10 @@ command = "/bin/echo"
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
+	// The session manager and the worker resolvers take the session-class
+	// store, as their production callers hand them (cliSessionStore): the
+	// fixture now matches the production path.
+	store = cliSessionStore(store, cfg, cityDir)
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Probe", Command: "stub", WorkDir: t.TempDir(), Provider: "stub", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
@@ -2696,6 +2709,10 @@ command = "/bin/echo"
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
+	// The session manager and the worker resolvers take the session-class
+	// store, as their production callers hand them (cliSessionStore): the
+	// fixture now matches the production path.
+	store = cliSessionStore(store, cfg, cityDir)
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
@@ -2719,7 +2736,7 @@ command = "/bin/echo"
 	if err != nil {
 		t.Fatalf("factory.SessionByID: %v", err)
 	}
-	if err := handle.Kill(context.Background()); err != nil {
+	if err := handle.Kill(context.Background(), testActorIn(t, session.ActorOperator, cityDir)); err != nil {
 		t.Fatalf("handle.Kill: %v", err)
 	}
 

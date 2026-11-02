@@ -34,6 +34,7 @@ var contractCoverage = map[string]classification{
 	"Stop_MakesSessionNotRunning":    {Code: ReqLifecycleStopNotRunning},
 	"Stop_Idempotent_NotRunning":     {Code: ReqLifecycleStopIdempotent},
 	"Stop_Idempotent_AlreadyStopped": {Code: ReqLifecycleStopIdempotent},
+	"StopForCleanup_NeverStarted":    {Code: ReqLifecycleStopIdempotent},
 	"IsRunning_UnknownSession":       {Code: ReqLifecycleUnknownNotRunning},
 
 	// --- Optional error-bearing capabilities (deferred: in-process provider
@@ -82,6 +83,11 @@ var contractCoverage = map[string]classification{
 	"Interrupt_MissingSession": {Deferred: "signaling group not yet ported"},
 	"Nudge_RunningSession":     {Deferred: "signaling group not yet ported"},
 	"Nudge_MissingSession":     {Deferred: "signaling group not yet ported"},
+
+	// --- Fenced input (deferred: an optional in-process capability) ---
+	"FencedInput_MatchingFenceDelivers":            {Deferred: "optional in-process capability; RPP has no fenced-input op"},
+	"FencedInput_MismatchedFenceRefusesEveryInput": {Deferred: "optional in-process capability; RPP has no fenced-input op"},
+	"FencedInput_AbsentSessionRefuses":             {Deferred: "optional in-process capability; RPP has no fenced-input op"},
 }
 
 // conformanceSourcePath is the in-tree provider contract whose cases this

@@ -57,7 +57,10 @@ func convergedRecoveryCity(t *testing.T) (cityPath string, cfg *config.City, sou
 
 	cfg = infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
 	var log bytes.Buffer
-	if got := migrateInfraClasses(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+	// Migrated the way a build that kept its source did: strands and the
+	// residue this repair handles are the state such a city reaches, and the
+	// cutover's own rows are still in the work store beside them.
+	if got := migrateInfraClassesRetainingSource(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
 		t.Fatalf("cutover outcome = %v, want converged; log: %s", got.Outcome, log.String())
 	}
 	return cityPath, cfg, source, mustResolveInfraTarget(t, cityPath, cfg)
@@ -90,14 +93,14 @@ func runStrandedRecovery(t *testing.T, cityPath string, cfg *config.City, stdout
 // strandedIDs returns the ids the containment check currently calls stranded.
 func strandedIDs(t *testing.T, cityPath string, target infraBindingTarget) []string {
 	t.Helper()
-	proven, recorded, err := readInfraCopyManifest(target)
+	manifest, recorded, err := readInfraCopyManifestRecord(target)
 	if err != nil {
-		t.Fatalf("readInfraCopyManifest: %v", err)
+		t.Fatalf("readInfraCopyManifestRecord: %v", err)
 	}
 	if !recorded {
 		t.Fatal("the city has no proven-copy manifest; the containment check is off and this assertion means nothing")
 	}
-	gap, err := classifyInfraContainmentGap(cityPath, target, proven)
+	gap, err := classifyInfraContainmentGap(cityPath, target, manifest)
 	if err != nil {
 		t.Fatalf("classifyInfraContainmentGap: %v", err)
 	}

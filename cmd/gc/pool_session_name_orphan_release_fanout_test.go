@@ -75,7 +75,7 @@ func countOrphanReleaseLiveSessionLists(t *testing.T, workBeadCount int) int {
 		storeRefs,
 		nil,
 		nil,
-		nil,
+		nil, nil,
 	)
 	return store.liveSessionLists
 }
@@ -206,7 +206,7 @@ func TestReleaseOrphanedPoolAssignments_OwnerStoreMemoDoesNotCollapseDistinctSto
 				tc.refs,
 				nil,
 				nil,
-				nil,
+				nil, nil,
 			)
 
 			var releasedIDs []string
@@ -304,7 +304,7 @@ func TestReleaseOrphanedPoolAssignments_RecordsMemoizedVsFallbackBranchCounts(t 
 
 		releaseOrphanedPoolAssignments(
 			mem, beads.SessionStore{Store: mem}, testPoolReleaseConfig(), "", nil,
-			work, stores, storeRefs, nil, nil, recordPhase,
+			work, stores, storeRefs, nil, nil, recordPhase, nil,
 		)
 
 		phase := findCapturedTracePhase(t, captured, "bead_reconcile.release_orphaned_pool_assignments.release_sweep")
@@ -349,7 +349,7 @@ func TestReleaseOrphanedPoolAssignments_RecordsMemoizedVsFallbackBranchCounts(t 
 
 		releaseOrphanedPoolAssignments(
 			mem, beads.SessionStore{Store: mem}, testPoolReleaseConfig(), "", nil,
-			work, nil, nil, nil, nil, recordPhase,
+			work, nil, nil, nil, nil, recordPhase, nil,
 		)
 
 		phase := findCapturedTracePhase(t, captured, "bead_reconcile.release_orphaned_pool_assignments.release_sweep")

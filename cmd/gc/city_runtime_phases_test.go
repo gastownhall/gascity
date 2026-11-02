@@ -446,6 +446,7 @@ func TestCityRuntimeTickPhasesMatchLegacyTickRecordsAndStoreOps(t *testing.T) {
 				"SetMetadataBatch gc-1 core_hash_breakdown,started_config_hash,started_launch_hash,started_provision_hash",
 				"List status=open type=session label= metadata= include_closed=false live=false",
 				"List status=open type= label=gc:session metadata= include_closed=false live=false",
+				"List status= type= label=gc:session metadata=usage_close_pending include_closed=true live=false",
 				"List status=open type= label=session:gc-1 metadata= include_closed=false live=false",
 				"List status= type= label=gc:wait metadata= include_closed=false live=false",
 				"Get gc-1",
@@ -536,6 +537,7 @@ func TestCityRuntimeTickPhasesMatchLegacyTickRecordsAndStoreOps(t *testing.T) {
 				"List status=open type= label=gc:session metadata= include_closed=false live=false",
 				"List status= type= label=gc:extmsg-binding metadata= include_closed=false live=false",
 				"List status= type= label=gc:extmsg-group-participant metadata= include_closed=false live=false",
+				"List status= type= label=gc:session metadata=usage_close_pending include_closed=true live=false",
 				"List status=open type= label=session:gc-1 metadata= include_closed=false live=false",
 				"List status= type= label=gc:wait metadata= include_closed=false live=false",
 				"Get gc-1",
@@ -595,6 +597,7 @@ func TestCityRuntimeTickLegacyPhaseSequenceUnchanged(t *testing.T) {
 		"refresh_desired_state (session)",
 		"apply_soft_reload_acceptance (session)",
 		"bead_reconcile_tick (session)",
+		"retire_suspended_rig_scopes",
 		"reconcile_execution_completions",
 		"wisp_gc",
 		"workspace_service_tick",
@@ -814,6 +817,7 @@ func TestCityRuntimeTickV2RunsMaintenancePhasesOnly(t *testing.T) {
 		"start_historical_transcript_meta_reconcile",
 		"sweep_detached_handoff_orphans",
 		"nudge_dispatch_tick",
+		"retire_suspended_rig_scopes",
 		"reconcile_execution_completions",
 		"wisp_gc",
 		"workspace_service_tick",
@@ -852,6 +856,7 @@ func TestCityRuntimeTickV2RunsMaintenancePhasesOnly(t *testing.T) {
 		"List status= type= label=gc:extmsg-binding metadata= include_closed=false live=false",
 		"List status= type= label=gc:extmsg-group-participant metadata= include_closed=false live=false",
 		"Get gc-1",
+		"List status= type= label=gc:session metadata=usage_close_pending include_closed=true live=false",
 	})
 	if writes := storeWrites(store.recorded()); len(writes) != 0 {
 		t.Errorf("the v2 tick phases wrote to the store: %v", writes)
@@ -905,7 +910,7 @@ func TestLegacySessionEntryGuardBlocksAndCountsUnderV2(t *testing.T) {
 	enterEverySite := func(cr *CityRuntime) {
 		p := &tickPass{ctx: context.Background(), dirty: cr.configDirty, trigger: "patrol", prevPoolRunning: new(map[string]bool)}
 		cr.runTickPhases(p, legacyTickPhases)
-		cr.beadReconcileTick(context.Background(), DesiredStateResult{}, nil, nil, false)
+		cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), DesiredStateResult{}, nil, nil, false)
 		cr.controlDispatcherTick(context.Background())
 	}
 

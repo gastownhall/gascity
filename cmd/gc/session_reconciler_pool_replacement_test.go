@@ -104,9 +104,9 @@ func TestReconcileSessionBeads_DrainAckNoWorkFreesSlotAndReallocates(t *testing.
 
 		// Tick 1: alive + agent-sourced drain-ack -> mark stop-pending and queue
 		// the async provider stop.
-		reconcileSessionBeads(
-			context.Background(), []beads.Bead{loser}, ds.State, map[string]bool{"repo/worker": true},
-			cfg, sp, store, dops, nil, nil, dt, ds.PoolDesiredCounts, false, nil, "trace-town",
+		reconcileSessionBeadsAtPath(
+			context.Background(), t.TempDir(), []beads.Bead{loser}, ds.State, map[string]bool{"repo/worker": true},
+			cfg, sp, store, dops, nil, nil, nil, dt, ds.PoolDesiredCounts, false, nil, "trace-town",
 			nil, clk, events.Discard, 0, 0, io.Discard, io.Discard,
 		)
 		waitForProviderStopped(t, sp, loserName)
@@ -118,9 +118,9 @@ func TestReconcileSessionBeads_DrainAckNoWorkFreesSlotAndReallocates(t *testing.
 
 		// Tick 2: runtime is gone -> finalize the stop-pending session to a
 		// terminal drained state (pool-managed + no work -> close the bead).
-		reconcileSessionBeads(
-			context.Background(), []beads.Bead{reloaded}, ds.State, map[string]bool{"repo/worker": true},
-			cfg, sp, store, dops, nil, nil, dt, ds.PoolDesiredCounts, false, nil, "trace-town",
+		reconcileSessionBeadsAtPath(
+			context.Background(), t.TempDir(), []beads.Bead{reloaded}, ds.State, map[string]bool{"repo/worker": true},
+			cfg, sp, store, dops, nil, nil, nil, dt, ds.PoolDesiredCounts, false, nil, "trace-town",
 			nil, clk, events.Discard, 0, 0, io.Discard, io.Discard,
 		)
 

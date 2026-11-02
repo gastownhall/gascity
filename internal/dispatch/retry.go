@@ -53,11 +53,22 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: loading logical bead %s: %w", bead.ID, logicalID, err)
 	}
-	if closedBy, _ := strconv.Atoi(logical.Metadata[beadmeta.ClosedByAttemptMetadataKey]); closedBy >= attempt {
+	// gc.closed_by_attempt names the attempt whose eval settled the logical
+	// bead. Every terminal branch below records it in the same batch as the
+	// rest of the verdict, settles the logical bead, and closes this eval last,
+	// so the open eval is what re-drives an interrupted settle.
+	closedBy, _ := strconv.Atoi(logical.Metadata[beadmeta.ClosedByAttemptMetadataKey])
+	switch {
+	case closedBy > attempt:
+		// A later attempt settled the logical bead: this eval is superseded.
 		if err := finalizeRetryEval(store, logicalID, bead.ID); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: finalizing stale retry eval: %w", bead.ID, err)
 		}
 		return ControlResult{Processed: true, Action: "noop"}, nil
+	case closedBy == attempt:
+		// This eval's own settle was interrupted. Finish it from the durable
+		// verdict without re-evaluating the subject, which could disagree.
+		return finishInterruptedRetrySettle(store, bead, logical)
 	}
 
 	subject, err := resolveRetryRunSubject(store, bead, logicalID, attempt)
@@ -81,98 +92,59 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 		return ControlResult{}, fmt.Errorf("%s: persisting retry eval result: %w", bead.ID, err)
 	}
 
+	// Every terminal branch settles the logical bead first and closes the eval
+	// last. A crash in between is finished by the closed_by_attempt guard above.
 	switch result.Outcome {
 	case "pass":
-		if outputJSON := subject.Metadata[beadmeta.OutputJSONMetadataKey]; outputJSON != "" {
-			if err := store.SetMetadata(logicalID, beadmeta.OutputJSONMetadataKey, outputJSON); err != nil {
-				return ControlResult{}, fmt.Errorf("%s: propagating gc.output_json to logical bead: %w", logicalID, err)
-			}
-		}
-		if err := propagateRetrySubjectMetadata(store, logicalID, subject); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: propagating subject metadata to logical bead: %w", logicalID, err)
-		}
-		if err := store.SetMetadataBatch(logicalID, map[string]string{
+		verdict := map[string]string{
+			beadmeta.OutcomeMetadataKey:          beadmeta.OutcomePass,
 			beadmeta.ClosedByAttemptMetadataKey:  strconv.Itoa(attempt),
 			beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionPass,
-		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: marking logical pass: %w", logicalID, err)
 		}
-		if err := updateMetadataAndClose(store, bead.ID, controlCompletionMetadata(bead, beadmeta.OutcomePass)); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: closing passed eval: %w", bead.ID, err)
+		if outputJSON := subject.Metadata[beadmeta.OutputJSONMetadataKey]; outputJSON != "" {
+			verdict[beadmeta.OutputJSONMetadataKey] = outputJSON
 		}
-		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomePass); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: closing logical bead: %w", logicalID, err)
-		}
-		return ControlResult{Processed: true, Action: "pass"}, nil
+		copyNonGCMetadata(verdict, subject.Metadata)
+		return settleRetryEval(store, bead, logicalID, verdict, beadmeta.OutcomePass, "pass")
 
 	case "hard":
-		if err := store.SetMetadataBatch(logicalID, map[string]string{
+		return settleRetryEval(store, bead, logicalID, map[string]string{
+			beadmeta.OutcomeMetadataKey:          beadmeta.OutcomeFail,
 			beadmeta.ClosedByAttemptMetadataKey:  strconv.Itoa(attempt),
 			beadmeta.FailedAttemptMetadataKey:    strconv.Itoa(attempt),
 			beadmeta.FailureClassMetadataKey:     beadmeta.FailureClassHard,
 			beadmeta.FailureReasonMetadataKey:    result.Reason,
 			beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionHardFail,
-		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: marking logical hard failure: %w", logicalID, err)
-		}
-		if err := updateMetadataAndClose(store, bead.ID, controlCompletionMetadata(bead, beadmeta.OutcomeFail)); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: closing hard-failed eval: %w", bead.ID, err)
-		}
-		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeFail); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: closing hard-failed logical bead: %w", logicalID, err)
-		}
-		return ControlResult{Processed: true, Action: "hard-fail"}, nil
+		}, beadmeta.OutcomeFail, "hard-fail")
 
 	case "canceled":
-		// The run was canceled: close the eval and its logical bead as canceled
-		// (an explicit terminal non-failure) rather than scheduling another
+		// The run was canceled: settle the logical bead as canceled (an
+		// explicit terminal non-failure) rather than scheduling another
 		// attempt. The cancellation gate normally closes retry-eval beads before
 		// they reach here; this is the defensive terminal path when an eval does
 		// classify a canceled subject.
-		if err := updateMetadataAndClose(store, bead.ID, controlCompletionMetadata(bead, beadmeta.OutcomeCanceled)); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: closing canceled eval: %w", bead.ID, err)
-		}
-		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeCanceled); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: closing canceled logical bead: %w", logicalID, err)
-		}
-		return ControlResult{Processed: true, Action: "canceled"}, nil
+		return settleRetryEval(store, bead, logicalID, map[string]string{
+			beadmeta.OutcomeMetadataKey:         beadmeta.OutcomeCanceled,
+			beadmeta.ClosedByAttemptMetadataKey: strconv.Itoa(attempt),
+		}, beadmeta.OutcomeCanceled, "canceled")
 
 	case "transient":
 		if attempt >= maxAttempts {
-			if onExhausted == beadmeta.DispositionSoftFail {
-				if err := store.SetMetadataBatch(logicalID, map[string]string{
-					beadmeta.ClosedByAttemptMetadataKey:  strconv.Itoa(attempt),
-					beadmeta.FailedAttemptMetadataKey:    strconv.Itoa(attempt),
-					beadmeta.FailureClassMetadataKey:     beadmeta.FailureClassTransient,
-					beadmeta.FailureReasonMetadataKey:    result.Reason,
-					beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionSoftFail,
-				}); err != nil {
-					return ControlResult{}, fmt.Errorf("%s: marking logical soft-fail: %w", logicalID, err)
-				}
-				if err := updateMetadataAndClose(store, bead.ID, controlCompletionMetadata(bead, beadmeta.OutcomeFail)); err != nil {
-					return ControlResult{}, fmt.Errorf("%s: closing exhausted eval: %w", bead.ID, err)
-				}
-				if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomePass); err != nil {
-					return ControlResult{}, fmt.Errorf("%s: closing soft-failed logical bead: %w", logicalID, err)
-				}
-				return ControlResult{Processed: true, Action: "soft-fail"}, nil
-			}
-			if err := store.SetMetadataBatch(logicalID, map[string]string{
+			exhausted := map[string]string{
+				beadmeta.OutcomeMetadataKey:          beadmeta.OutcomeFail,
 				beadmeta.ClosedByAttemptMetadataKey:  strconv.Itoa(attempt),
 				beadmeta.FailedAttemptMetadataKey:    strconv.Itoa(attempt),
 				beadmeta.FailureClassMetadataKey:     beadmeta.FailureClassTransient,
 				beadmeta.FailureReasonMetadataKey:    result.Reason,
 				beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionHardFail,
-			}); err != nil {
-				return ControlResult{}, fmt.Errorf("%s: marking exhausted logical failure: %w", logicalID, err)
 			}
-			if err := updateMetadataAndClose(store, bead.ID, controlCompletionMetadata(bead, beadmeta.OutcomeFail)); err != nil {
-				return ControlResult{}, fmt.Errorf("%s: closing exhausted eval: %w", bead.ID, err)
+			action := "fail"
+			if onExhausted == beadmeta.DispositionSoftFail {
+				exhausted[beadmeta.OutcomeMetadataKey] = beadmeta.OutcomePass
+				exhausted[beadmeta.FinalDispositionMetadataKey] = beadmeta.DispositionSoftFail
+				action = "soft-fail"
 			}
-			if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeFail); err != nil {
-				return ControlResult{}, fmt.Errorf("%s: closing exhausted logical bead: %w", logicalID, err)
-			}
-			return ControlResult{Processed: true, Action: "fail"}, nil
+			return settleRetryEval(store, bead, logicalID, exhausted, beadmeta.OutcomeFail, action)
 		}
 	default:
 		return ControlResult{}, fmt.Errorf("%s: unsupported retry eval outcome %q", bead.ID, result.Outcome)
@@ -786,6 +758,66 @@ func persistRetryEvalResult(store beads.Store, beadID string, result retryEvalRe
 		batch[beadmeta.FailureClassMetadataKey] = beadmeta.FailureClassHard
 	}
 	return store.SetMetadataBatch(beadID, batch)
+}
+
+// settleRetryEval finishes a terminal retry-eval branch: it settles the logical
+// bead with the whole verdict (one metadata batch, then a forced close), and
+// only then closes the eval with evalOutcome. The verdict must carry
+// gc.closed_by_attempt so a re-drive after a crash between the two writes
+// recognizes the settle as its own (finishInterruptedRetrySettle).
+func settleRetryEval(store beads.Store, eval beads.Bead, logicalID string, verdict map[string]string, evalOutcome, action string) (ControlResult, error) {
+	if err := settleLogicalBead(store, logicalID, verdict); err != nil {
+		return ControlResult{}, fmt.Errorf("%s: settling logical bead (%s): %w", logicalID, action, err)
+	}
+	if err := updateMetadataAndClose(store, eval.ID, controlCompletionMetadata(eval, evalOutcome)); err != nil {
+		return ControlResult{}, fmt.Errorf("%s: closing eval (%s): %w", eval.ID, action, err)
+	}
+	return ControlResult{Processed: true, Action: action}, nil
+}
+
+// finishInterruptedRetrySettle completes a terminal settle that this eval
+// started and a crash or failed write cut short: the logical bead already
+// carries gc.closed_by_attempt for this eval's attempt. The verdict is durable
+// on the logical bead, so the subject is not re-evaluated. The logical bead is
+// closed if the close was the lost write, then the eval closes with the
+// outcome persistRetryEvalResult recorded on it before the settle began. The
+// logical->eval edge is kept, exactly as an uninterrupted settle leaves it.
+func finishInterruptedRetrySettle(store beads.Store, eval, logical beads.Bead) (ControlResult, error) {
+	evalOutcome := strings.TrimSpace(eval.Metadata[beadmeta.OutcomeMetadataKey])
+	if evalOutcome == "" {
+		return ControlResult{}, fmt.Errorf("%s: logical bead %s settled by attempt %s but eval has no recorded gc.outcome", eval.ID, logical.ID, logical.Metadata[beadmeta.ClosedByAttemptMetadataKey])
+	}
+	if logical.Status != "closed" {
+		verdict := map[string]string{}
+		if strings.TrimSpace(logical.Metadata[beadmeta.OutcomeMetadataKey]) == "" {
+			// A settle stamped before gc.outcome joined the verdict batch.
+			outcome, ok := retryLogicalOutcomeForDisposition(logical.Metadata[beadmeta.FinalDispositionMetadataKey])
+			if !ok {
+				return ControlResult{}, fmt.Errorf("%s: logical bead %s settled by this attempt without gc.outcome or a known gc.final_disposition %q", eval.ID, logical.ID, logical.Metadata[beadmeta.FinalDispositionMetadataKey])
+			}
+			verdict[beadmeta.OutcomeMetadataKey] = outcome
+		}
+		if err := settleLogicalBead(store, logical.ID, verdict); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: finishing interrupted settle of logical bead: %w", logical.ID, err)
+		}
+	}
+	if err := updateMetadataAndClose(store, eval.ID, controlCompletionMetadata(eval, evalOutcome)); err != nil {
+		return ControlResult{}, fmt.Errorf("%s: closing eval of settled logical bead %s: %w", eval.ID, logical.ID, err)
+	}
+	return ControlResult{Processed: true, Action: "logical-settled"}, nil
+}
+
+// retryLogicalOutcomeForDisposition maps a retry logical bead's
+// gc.final_disposition to the gc.outcome its terminal branch closes it with.
+func retryLogicalOutcomeForDisposition(disposition string) (string, bool) {
+	switch disposition {
+	case beadmeta.DispositionPass, beadmeta.DispositionSoftFail:
+		return beadmeta.OutcomePass, true
+	case beadmeta.DispositionHardFail:
+		return beadmeta.OutcomeFail, true
+	default:
+		return "", false
+	}
 }
 
 func propagateRetrySubjectMetadata(store beads.Store, logicalID string, subject beads.Bead) error {

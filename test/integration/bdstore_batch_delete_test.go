@@ -39,7 +39,7 @@ func TestBdStoreDeleteBatchOrphansExternalDependents(t *testing.T) {
 	runBDInit(t, env, wsDir, "bd", serverPort)
 	configureCustomTypes(t, env, wsDir, doctor.RequiredCustomTypes)
 
-	store := beads.NewBdStore(wsDir, pinnedBdStoreCommandRunnerWithEnv(map[string]string{"HOME": parseEnvList(isolateBdHomeEnv(env))["HOME"]}))
+	store := beads.NewBdStore(wsDir, isolatedBdStoreCommandRunner(env))
 
 	// Ownership closure: root + child (child is a parent-child descendant).
 	root, err := store.Create(beads.Bead{Title: "closure root", Type: "task", Status: "closed"})

@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -30,9 +29,11 @@ import (
 // Huma registration, and listener bootstrap all agree.
 //
 // The test is build-tagged `integration` so it doesn't run in the
-// default `go test ./...` pass; run it explicitly via:
+// default `bazel test //...` pass; run it explicitly via:
 //
-//	go test -tags=integration ./test/integration/ -run TestHumaBinary
+//	bazel test --config=integration //test/integration:integration_test --test_filter='^TestHumaBinary_'
+//
+// `make test-integration-huma` is its Go-native twin.
 func TestHumaBinary_SupervisorBootsAndServesSpec(t *testing.T) {
 	bin := buildGCBinary(t)
 
@@ -57,7 +58,7 @@ func TestHumaBinary_SupervisorBootsAndServesSpec(t *testing.T) {
 
 	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
 	cityRoot := filepath.Join(gcHome, "city")
-	env := integrationEnvFor(gcHome, runtimeDir, true)
+	env := integrationEnvFor(t, gcHome, runtimeDir, true)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -241,18 +242,15 @@ func findRepoRoot(t *testing.T) string {
 	}
 }
 
-// reserveFreePort asks the kernel for a free TCP port on loopback, then
-// releases it. The caller uses the port number to spawn the supervisor.
-// There's a small race between release and bind; in practice it's fine
-// for test runs.
+// reserveFreePort returns a loopback port for the supervisor this test
+// spawns (reserveLoopbackPort). On Linux the port is leased for the life of
+// the test binary.
 func reserveFreePort(t *testing.T) int {
 	t.Helper()
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	port, err := reserveLoopbackPort()
 	if err != nil {
 		t.Fatalf("reserve port: %v", err)
 	}
-	port := lis.Addr().(*net.TCPAddr).Port
-	_ = lis.Close()
 	return port
 }
 
@@ -320,7 +318,7 @@ func waitHTTP(t *testing.T, url string, deadline time.Duration) {
 //
 // Build-tagged `integration`; run with:
 //
-//	go test -tags=integration ./test/integration/ -run TestHumaBinary_CityCreateAsync
+//	bazel test --config=integration //test/integration:integration_test --test_filter='^TestHumaBinary_CityCreateAsync$'
 func TestHumaBinary_CityCreateAsync(t *testing.T) {
 	bin := buildGCBinary(t)
 
@@ -339,7 +337,7 @@ func TestHumaBinary_CityCreateAsync(t *testing.T) {
 	}
 
 	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
-	env := integrationEnvFor(gcHome, runtimeDir, true)
+	env := integrationEnvFor(t, gcHome, runtimeDir, true)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -496,7 +494,7 @@ func TestHumaBinary_CityCreateAsync(t *testing.T) {
 //
 // Build-tagged `integration`; run with:
 //
-//	go test -tags=integration ./test/integration/ -run TestHumaBinary_CityUnregisterAsync
+//	bazel test --config=integration //test/integration:integration_test --test_filter='^TestHumaBinary_CityUnregisterAsync$'
 func TestHumaBinary_CityUnregisterAsync(t *testing.T) {
 	// Quarantined: this test was the dominant trip on Integration / rest-full-6-of-16
 	// (13 hits in the 2026-05-15 → 2026-05-17 red-CI anchor window). Root cause is the
@@ -526,7 +524,7 @@ func TestHumaBinary_CityUnregisterAsync(t *testing.T) {
 	}
 
 	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
-	env := integrationEnvFor(gcHome, runtimeDir, true)
+	env := integrationEnvFor(t, gcHome, runtimeDir, true)
 	// This test covers the supervisor's async unregister contract, not
 	// provider startup. Keep the city runtime deterministic so unregister
 	// does not race provider resume/startup-key handling.
@@ -794,7 +792,7 @@ func TestHumaBinary_SessionMessageAsync(t *testing.T) {
 	}
 
 	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
-	env := integrationEnvFor(gcHome, runtimeDir, true)
+	env := integrationEnvFor(t, gcHome, runtimeDir, true)
 	envMap := parseEnvList(env)
 	env = replaceEnv(env, "PATH", prependPath(providerBinDir, envMap["PATH"]))
 	env = replaceEnv(env, "GC_SESSION", "fake")

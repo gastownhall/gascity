@@ -35,8 +35,9 @@ func TestPromptDelivery(t *testing.T) {
 			isACP: true,
 			nudge: "wake",
 			want: promptDeliveryResult{
-				Nudge:     prependStartupPromptToNudge(prompt, "wake"),
-				Delivered: true,
+				Nudge:         prependStartupPromptToNudge(prompt, "wake"),
+				Delivered:     true,
+				EffectiveMode: "acp",
 			},
 		},
 		{
@@ -45,8 +46,10 @@ func TestPromptDelivery(t *testing.T) {
 			rp:    &config.ResolvedProvider{PromptMode: "none"},
 			nudge: "",
 			want: promptDeliveryResult{
-				Nudge:     prependStartupPromptToNudge(prompt, ""),
-				Delivered: true,
+				Nudge:          prependStartupPromptToNudge(prompt, ""),
+				Delivered:      true,
+				ConfiguredMode: "none",
+				EffectiveMode:  "none",
 			},
 		},
 		{
@@ -55,9 +58,13 @@ func TestPromptDelivery(t *testing.T) {
 			rp:    &config.ResolvedProvider{PromptMode: "arg"},
 			nudge: "wake",
 			want: promptDeliveryResult{
-				PromptSuffix: quoted,
-				Nudge:        "wake",
-				Delivered:    true,
+				PromptSuffix:   quoted,
+				Nudge:          "wake",
+				Delivered:      true,
+				ConfiguredMode: "arg",
+				EffectiveMode:  "argv",
+				RawBytes:       len(prompt),
+				ArgvBytes:      len(quoted),
 			},
 		},
 		{
@@ -65,8 +72,11 @@ func TestPromptDelivery(t *testing.T) {
 			promp: prompt,
 			rp:    nil,
 			want: promptDeliveryResult{
-				PromptSuffix: quoted,
-				Delivered:    true,
+				PromptSuffix:  quoted,
+				Delivered:     true,
+				EffectiveMode: "argv",
+				RawBytes:      len(prompt),
+				ArgvBytes:     len(quoted),
 			},
 		},
 		{
@@ -74,9 +84,13 @@ func TestPromptDelivery(t *testing.T) {
 			promp: prompt,
 			rp:    &config.ResolvedProvider{PromptMode: "flag", PromptFlag: "--prompt"},
 			want: promptDeliveryResult{
-				PromptSuffix: quoted,
-				PromptFlag:   "--prompt",
-				Delivered:    true,
+				PromptSuffix:   quoted,
+				PromptFlag:     "--prompt",
+				Delivered:      true,
+				ConfiguredMode: "flag",
+				EffectiveMode:  "flag",
+				RawBytes:       len(prompt),
+				ArgvBytes:      len(quoted),
 			},
 		},
 		{
@@ -84,8 +98,12 @@ func TestPromptDelivery(t *testing.T) {
 			promp: prompt,
 			rp:    &config.ResolvedProvider{PromptMode: "flag"},
 			want: promptDeliveryResult{
-				PromptSuffix: quoted,
-				Delivered:    false,
+				PromptSuffix:   quoted,
+				Delivered:      false,
+				ConfiguredMode: "flag",
+				EffectiveMode:  "flag",
+				RawBytes:       len(prompt),
+				ArgvBytes:      len(quoted),
 			},
 		},
 	}
@@ -147,7 +165,15 @@ func TestPromptDeliveryOversized(t *testing.T) {
 		if err != nil {
 			t.Fatalf("promptDelivery() unexpected error: %v", err)
 		}
-		want := promptDeliveryResult{PromptSuffix: quoted, Nudge: "wake", Delivered: true}
+		want := promptDeliveryResult{
+			PromptSuffix:   quoted,
+			Nudge:          "wake",
+			Delivered:      true,
+			ConfiguredMode: "arg",
+			EffectiveMode:  "argv",
+			RawBytes:       len(prompt),
+			ArgvBytes:      len(quoted),
+		}
 		if got != want {
 			t.Errorf("promptDelivery() = %+v, want %+v", got, want)
 		}
@@ -240,7 +266,12 @@ func TestPromptDeliveryOversized(t *testing.T) {
 		if err != nil {
 			t.Fatalf("promptDelivery() unexpected error for ACP: %v", err)
 		}
-		want := promptDeliveryResult{Nudge: prependStartupPromptToNudge(prompt, "wake"), Delivered: true}
+		want := promptDeliveryResult{
+			Nudge:          prependStartupPromptToNudge(prompt, "wake"),
+			Delivered:      true,
+			ConfiguredMode: "arg",
+			EffectiveMode:  "acp",
+		}
 		if got != want {
 			t.Errorf("promptDelivery() ACP oversized = %+v, want %+v (byte lengths only)", promptDeliveryResultLens(got), promptDeliveryResultLens(want))
 		}
@@ -271,7 +302,15 @@ func TestPromptDeliveryOversized(t *testing.T) {
 		if err != nil {
 			t.Fatalf("promptDelivery() unexpected error for t3bridge: %v", err)
 		}
-		want := promptDeliveryResult{PromptSuffix: quoted, Nudge: "wake", Delivered: true}
+		want := promptDeliveryResult{
+			PromptSuffix:   quoted,
+			Nudge:          "wake",
+			Delivered:      true,
+			ConfiguredMode: "arg",
+			EffectiveMode:  "argv",
+			RawBytes:       len(prompt),
+			ArgvBytes:      len(quoted),
+		}
 		if got != want {
 			t.Errorf("promptDelivery() t3bridge oversized: PromptSuffix len=%d Delivered=%v OversizedFallback=%v, want PromptSuffix len=%d Delivered=true OversizedFallback=false",
 				len(got.PromptSuffix), got.Delivered, got.OversizedFallback, len(want.PromptSuffix))
@@ -362,7 +401,7 @@ func TestPromptDeliveryOversized(t *testing.T) {
 			t.Errorf("promptDelivery() error = %v, want errors.Is(err, errOversizedPromptUnsupportedRuntime)", err)
 		}
 		if got.PromptSuffix != "" || got.PromptFlag != "" || got.Delivered {
-			t.Errorf("promptDelivery() must return a zero-value result alongside the hard-fail error, got %+v", got)
+			t.Errorf("promptDelivery() hard-fail must leave PromptSuffix/PromptFlag/Delivered empty, got %+v", got)
 		}
 	})
 

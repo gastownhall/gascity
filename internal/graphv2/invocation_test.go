@@ -16,7 +16,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
+	"github.com/gastownhall/gascity/internal/molecule"
 )
 
 func TestPrepareInvocationCreatesInputConvoyForBeadTarget(t *testing.T) {
@@ -1148,5 +1150,168 @@ func TestSyntheticInputConvoyIsWorkClassAndCoResidentWithItsTarget(t *testing.T)
 	}
 	if !tracked {
 		t.Fatalf("input convoy %s does not track target %s", convoyID, target.ID)
+	}
+}
+
+func TestPrepareInvocationResolvesDefaultReferencingRoutingVar(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeFormula(t, dir, "work.formula.toml", `
+formula = "work"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[vars.review_target]
+default = "{{binding_prefix}}reviewer"
+
+[[steps]]
+id = "review"
+title = "Review {{convoy_id}}"
+metadata = { "gc.run_target" = "{{review_target}}" }
+`)
+	store := beads.NewMemStore()
+	target, err := store.Create(beads.Bead{Title: "target", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create target: %v", err)
+	}
+	inv, err := PrepareInvocation(context.Background(), store, "work", []string{dir}, target.ID, map[string]string{"binding_prefix": "ops."})
+	if err != nil {
+		t.Fatalf("PrepareInvocation: %v", err)
+	}
+	if got := inv.Vars["review_target"]; got != "ops.reviewer" {
+		t.Fatalf("vars[review_target] = %q, want ops.reviewer", got)
+	}
+}
+
+const convoyIDDefaultFormula = `
+formula = "work"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[vars.subject]
+default = "{{convoy_id}}"
+
+[[steps]]
+id = "inspect"
+title = "Inspect {{subject}}"
+`
+
+func TestPrepareInvocationResolvesDefaultReferencingConvoyID(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeFormula(t, dir, "work.formula.toml", convoyIDDefaultFormula)
+	store := beads.NewMemStore()
+	target, err := store.Create(beads.Bead{Title: "target", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create target: %v", err)
+	}
+	inv, err := PrepareInvocation(context.Background(), store, "work", []string{dir}, target.ID, nil)
+	if err != nil {
+		t.Fatalf("PrepareInvocation: %v", err)
+	}
+	if inv.InputConvoy == "" {
+		t.Fatal("InputConvoy is empty, want a resolved convoy")
+	}
+	// The default derives from this invocation's convoy, so the vars that
+	// root keys and the persisted runtime vars are built from leave it out,
+	// and instantiation derives it from the convoy_id the vars carry.
+	if got, ok := inv.Vars["subject"]; ok {
+		t.Fatalf("vars[subject] = %q, want the convoy-derived default left out", got)
+	}
+	if got := RuntimeVarsMetadata(inv.Vars); got != "" {
+		t.Fatalf("RuntimeVarsMetadata = %q, want nothing to persist", got)
+	}
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(context.Background(), "work", []string{dir}, inv.Vars)
+	if err != nil {
+		t.Fatalf("CompileWithoutRuntimeVarValidation: %v", err)
+	}
+	result, err := molecule.Instantiate(context.Background(), store, recipe, molecule.Options{Vars: inv.Vars})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	step, err := store.Get(result.IDMapping["work.inspect"])
+	if err != nil {
+		t.Fatalf("Get inspect step: %v", err)
+	}
+	if want := "Inspect " + inv.InputConvoy; step.Title != want {
+		t.Fatalf("step title = %q, want %q", step.Title, want)
+	}
+}
+
+func TestPreparePreviewInvocationResolvesDefaultReferencingConvoyID(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeFormula(t, dir, "work.formula.toml", convoyIDDefaultFormula)
+	store := beads.NewMemStore()
+	target, err := store.Create(beads.Bead{Title: "target", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create target: %v", err)
+	}
+	inv, err := PreparePreviewInvocation(context.Background(), store, "work", []string{dir}, target.ID, false, nil)
+	if err != nil {
+		t.Fatalf("PreparePreviewInvocation: %v", err)
+	}
+	if got, ok := inv.Vars["subject"]; ok {
+		t.Fatalf("vars[subject] = %q, want the convoy-derived default left out", got)
+	}
+	want := previewInputConvoyPrefix + target.ID
+	if got := formula.ApplyDefaults(inv.Formula, inv.Vars)["subject"]; got != want {
+		t.Fatalf("subject resolved from the preview vars = %q, want %q", got, want)
+	}
+}
+
+func TestPrepareInvocationRejectsDrainItemReferencingParentConvoyDerivedDefault(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeFormula(t, dir, "parent.formula.toml", `
+formula = "parent"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[vars.subject]
+default = "{{convoy_id}}"
+
+[[steps]]
+id = "drain"
+title = "Drain {{subject}}"
+
+[steps.drain]
+context = "separate"
+formula = "item"
+`)
+	writeFormula(t, dir, "item.formula.toml", `
+formula = "item"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[[steps]]
+id = "work"
+title = "Item {{convoy_id}} on {{subject}}"
+`)
+	store := beads.NewMemStore()
+	target, err := store.Create(beads.Bead{Title: "target", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create target: %v", err)
+	}
+
+	// The parent's subject is its own convoy; an item formula that only
+	// references subject must not silently bind the parent's convoy.
+	_, err = PrepareInvocation(context.Background(), store, "parent", []string{dir}, target.ID, nil)
+	if err == nil {
+		t.Fatal("PrepareInvocation succeeded, want the drain item's unresolved subject rejected")
+	}
+	if !strings.Contains(err.Error(), "subject") {
+		t.Fatalf("error = %q, want the unresolved subject named", err)
+	}
+	matches, err := store.List(beads.ListQuery{Type: "convoy"})
+	if err != nil {
+		t.Fatalf("List input convoys: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("input convoys = %+v, want none before validation succeeds", matches)
 	}
 }

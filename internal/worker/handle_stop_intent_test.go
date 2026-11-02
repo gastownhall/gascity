@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -17,7 +18,7 @@ func newDrainingStopHandle(t *testing.T) (*SessionHandle, *runtime.Fake, string,
 	t.Helper()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
 
 	info, err := manager.CreateSession(context.Background(), sessionpkg.CreateOptions{
 		BeadOnly: true,
@@ -41,8 +42,9 @@ func newDrainingStopHandle(t *testing.T) (*SessionHandle, *runtime.Fake, string,
 	if err := store.SetMetadata(info.ID, "state", string(sessionpkg.StateActive)); err != nil {
 		t.Fatalf("set active: %v", err)
 	}
-	if err := manager.BeginDrain(info.ID, "shutdown"); err != nil {
-		t.Fatalf("BeginDrain: %v", err)
+	// The controller's drain-ack path is the only writer of state=draining.
+	if err := manager.PersistedStore().ApplyPatch(info.ID, sessionpkg.DrainAckStopPendingPatch(time.Now())); err != nil {
+		t.Fatalf("seeding drain-ack stop-pending: %v", err)
 	}
 
 	handle, err := NewSessionHandle(SessionHandleConfig{
@@ -68,7 +70,7 @@ func newDrainingStopHandle(t *testing.T) (*SessionHandle, *runtime.Fake, string,
 func TestSessionHandleStopKeepsOperatorIntentOnDrainingSeat(t *testing.T) {
 	handle, sp, sessName, store, id := newDrainingStopHandle(t)
 
-	err := handle.Stop(context.Background())
+	err := handle.Stop(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator))
 	if !errors.Is(err, sessionpkg.ErrIllegalTransition) {
 		t.Fatalf("Stop(draining) = %v, want ErrIllegalTransition — the operator seam must not carry shutdown latitude", err)
 	}

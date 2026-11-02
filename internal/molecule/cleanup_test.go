@@ -375,3 +375,96 @@ func TestCloseSubtree_StampsCloseReason(t *testing.T) {
 		}
 	}
 }
+
+// batchedChildrenStore answers ChildrenOfAny in one call per frontier, with
+// the union deliberately reversed so ListSubtree's own ordering is what puts
+// the members in walk order.
+type batchedChildrenStore struct {
+	beads.Store
+	batches  int
+	children int
+}
+
+func (s *batchedChildrenStore) ChildrenOfAny(parentIDs []string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	s.batches++
+	var out []beads.Bead
+	seen := map[string]bool{}
+	for _, id := range parentIDs {
+		kids, err := s.Store.Children(id, append([]beads.QueryOpt{beads.IncludeClosed}, opts...)...)
+		if err != nil {
+			return nil, err
+		}
+		for _, k := range kids {
+			if !seen[k.ID] {
+				seen[k.ID] = true
+				out = append(out, k)
+			}
+		}
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
+}
+
+func (s *batchedChildrenStore) Children(parentID string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	s.children++
+	return s.Store.Children(parentID, opts...)
+}
+
+// TestListSubtreeBatchedWalkMatchesPerParentWalk pins that reading children a
+// frontier at a time returns the same members in the same order as reading
+// them a parent at a time, over closed intermediates, parent-only descendants
+// (no gc.root_bead_id) and several levels, and that it reads once per level.
+func TestListSubtreeBatchedWalkMatchesPerParentWalk(t *testing.T) {
+	store := beads.NewMemStore()
+	mk := func(b beads.Bead) beads.Bead {
+		t.Helper()
+		created, err := store.Create(b)
+		if err != nil {
+			t.Fatalf("create %s: %v", b.Title, err)
+		}
+		return created
+	}
+	root := mk(beads.Bead{Title: "root", Type: "molecule"})
+	member := func(title string) beads.Bead {
+		return mk(beads.Bead{Title: title, Metadata: map[string]string{"gc.root_bead_id": root.ID}})
+	}
+	m1 := member("m1")
+	m2 := member("m2")
+	c1 := mk(beads.Bead{Title: "c1", ParentID: m1.ID})
+	mk(beads.Bead{Title: "g1", ParentID: c1.ID})
+	mk(beads.Bead{Title: "c2", ParentID: m1.ID})
+	p1 := mk(beads.Bead{Title: "p1", ParentID: root.ID})
+	mk(beads.Bead{Title: "p2", ParentID: p1.ID})
+	mk(beads.Bead{Title: "m2child", ParentID: m2.ID})
+	for _, id := range []string{m1.ID, c1.ID} {
+		if err := store.Close(id); err != nil {
+			t.Fatalf("close %s: %v", id, err)
+		}
+	}
+
+	perParent, err := ListSubtree(store, root.ID)
+	if err != nil {
+		t.Fatalf("ListSubtree (per parent): %v", err)
+	}
+	batched := &batchedChildrenStore{Store: store}
+	got, err := ListSubtree(batched, root.ID)
+	if err != nil {
+		t.Fatalf("ListSubtree (batched): %v", err)
+	}
+	if want := idsOf(perParent); fmt.Sprint(idsOf(got)) != fmt.Sprint(want) {
+		t.Fatalf("batched walk = %v, want the per-parent walk %v", idsOf(got), want)
+	}
+	if len(got) != 9 {
+		t.Fatalf("walk found %d members, want 9 (root, 2 members, 6 descendants)", len(got))
+	}
+	if batched.children != 0 {
+		t.Fatalf("batched walk made %d per-parent Children reads, want 0", batched.children)
+	}
+	// Frontiers {root, m1, m2}, {c1, c2, p1, m2child} and {g1, p2}: one read
+	// each, where the per-parent walk reads once per member (9).
+	if batched.batches != 3 {
+		t.Fatalf("batched walk made %d batched reads, want one per frontier (3)", batched.batches)
+	}
+}

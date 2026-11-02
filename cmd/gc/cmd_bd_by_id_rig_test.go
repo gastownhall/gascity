@@ -212,60 +212,34 @@ func TestBdByIDReservedMissUnderExplicitRigFallsThrough(t *testing.T) {
 	}
 }
 
-// TestBdByIDShadowPrefixRigBeadReachesThePassthrough is the population proof
-// behind the fall-through: the beads a binding miss is ABOUT, and where they
-// actually live.
-//
-// A rig may lawfully be configured with a prefix inside a relocated class's
-// reserved namespace. config.ValidateRigs does not reject one and
-// config.ReservedPrefixWarnings only advises, so such a rig starts, serves, and
-// mints work beads carrying ids the binding has never held and never will. On a
-// split city every `gc bd` invocation naming one used to be answered at this
-// door — a read reported as absent and a write refused — including the
-// step-completion write the core pack renders on every worked bead. The binding
-// is the namespace's AUTHORITY, not its only lawful holder, so its miss hands
-// the id to the passthrough that is pointed at the ledger holding it.
-//
-// Both spellings are driven. The exact reserved prefix is the one an operator
-// gets warned about; the longer prefix inside the same namespace is the one
-// IsReservedClassPrefix's exact match does not warn about at all, and is
-// therefore the likelier of the two to be running somewhere.
-func TestBdByIDShadowPrefixRigBeadReachesThePassthrough(t *testing.T) {
+// TestBdByIDShadowPrefixRigCityIsRefused replaces the shadow-prefix
+// population proof. A rig prefixed inside a relocated class's reserved
+// namespace — the bare "gcg", or "gcg-alpha", whose ids ("gcg-alpha-1") are
+// inside the binding's "gcg" namespace (storeref.IDInNamespace) — used to
+// start and serve on a split city, minting work ids the binding is the
+// authority for, so every by-id read of one had to fall through to the rig's
+// passthrough. Split-default R10 refuses such a city (the prefix or its first
+// hyphen segment is reserved; config.ReservedPrefixCollision), so the
+// population no longer exists: the door answers with that refusal, naming the
+// rig and the fix, rather than reading either ledger.
+func TestBdByIDShadowPrefixRigCityIsRefused(t *testing.T) {
 	reserved, ok := config.ReservedClassPrefix(config.BeadClassGraph)
 	if !ok || reserved == "" {
 		t.Fatalf("no reserved id prefix is registered for the %q class", config.BeadClassGraph)
 	}
 	for _, rigPrefix := range []string{reserved, reserved + "-alpha"} {
 		t.Run(rigPrefix, func(t *testing.T) {
-			cityPath, rigPath, classStore := riggedForeignProviderCity(t, rigPrefix)
+			cityPath, rigPath, _ := riggedForeignProviderCity(t, rigPrefix)
 			resident := seedRigWorkBead(t, cityPath, rigPath, rigPrefix, "a rig work bead inside the reserved namespace")
-			if !bdIDIsClassReserved(resident.ID) {
-				t.Fatalf("the rig's id %q is outside the reserved namespace; the fixture proves nothing about the shadow rule", resident.ID)
-			}
-			if _, err := classStore.Get(resident.ID); err == nil {
-				t.Fatalf("the class binding also holds %s; the fixture cannot tell a fall-through from a served read", resident.ID)
-			}
-
-			for _, rig := range []string{"", byIDRigName} {
-				var stdout, stderr bytes.Buffer
-				code, handled := maybeRouteBdByID(cityPath, rig, []string{"show", resident.ID}, &stdout, &stderr)
-				if handled {
-					t.Fatalf("show %s (--rig %q) was answered at this door (exit %d): %s%s — the only ledger holding it is the rig's, on the far side of the passthrough", resident.ID, rig, code, stdout.String(), stderr.String())
-				}
-			}
-
-			// The control: on the same city an id the binding DOES hold is still
-			// served here. Without it the fix could be "stop routing".
-			held := mustCreateClassBead(t, classStore, beads.Bead{Title: "held by the binding", Type: "task"})
-			if held.ID == resident.ID {
-				t.Fatalf("the binding minted the rig's id %s; the two ledgers agreed and the control is meaningless", held.ID)
-			}
 			var stdout, stderr bytes.Buffer
-			if code, handled := maybeRouteBdByID(cityPath, "", []string{"show", held.ID, "--json"}, &stdout, &stderr); !handled || code != 0 {
-				t.Fatalf("show %s = (%d, %t): %s", held.ID, code, handled, stderr.String())
+			code, handled := maybeRouteBdByID(cityPath, "", []string{"show", resident.ID}, &stdout, &stderr)
+			if !handled || code == 0 {
+				t.Fatalf("show %s = (%d, handled=%t): %s%s; want the door to refuse the city", resident.ID, code, handled, stdout.String(), stderr.String())
 			}
-			if !strings.Contains(stdout.String(), held.ID) {
-				t.Errorf("the served show printed %q, want %s", stdout.String(), held.ID)
+			for _, want := range []string{`rig "` + byIDRigName + `"`, rigPrefix, "reserved"} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("the refusal %q does not mention %q", stderr.String(), want)
+				}
 			}
 		})
 	}

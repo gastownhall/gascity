@@ -113,7 +113,34 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-func (p *Provenance) captureRevisionSnapshot(fs fsys.FS, cfg *City, cityRoot string) {
+// conventionRevisionInputs is the state of the city root's convention
+// discovery trees (agents/, formulas/, ...) hashed BEFORE a load reads them.
+//
+// Hashing these trees after the load would race with config edits: an edit
+// landing between the loader's read and the hash pairs the pre-edit content
+// with the post-edit revision, so a long-running caller would publish stale
+// config under a revision that already matches disk and never reload. Hashed
+// first, an edit that lands mid-load can only leave the revision older than
+// the content, which the next revision comparison turns into a reload.
+type conventionRevisionInputs struct {
+	dirs   []string
+	hashes map[string]string
+}
+
+// captureConventionRevisionInputs hashes the city root's convention trees.
+// Call it before the load reads them.
+func captureConventionRevisionInputs(fs fsys.FS, cityRoot string) *conventionRevisionInputs {
+	in := &conventionRevisionInputs{
+		dirs:   existingConventionDiscoveryDirsFS(fs, cityRoot),
+		hashes: make(map[string]string),
+	}
+	for _, dir := range in.dirs {
+		in.hashes[dir] = packContentHashRecursive(fs, dir, false)
+	}
+	return in
+}
+
+func (p *Provenance) captureRevisionSnapshot(fs fsys.FS, cfg *City, cityRoot string, conventions *conventionRevisionInputs) {
 	if p == nil || cfg == nil {
 		return
 	}
@@ -163,9 +190,12 @@ func (p *Provenance) captureRevisionSnapshot(fs fsys.FS, cfg *City, cityRoot str
 			recordDir("rig-packdir:"+rigName+":"+dir, dir)
 		}
 	}
-	snap.conventionDirs = existingConventionDiscoveryDirsFS(fs, cityRoot)
+	if conventions == nil {
+		conventions = captureConventionRevisionInputs(fs, cityRoot)
+	}
+	snap.conventionDirs = append([]string(nil), conventions.dirs...)
 	for _, dir := range snap.conventionDirs {
-		recordDir("city-discovery:"+dir, dir)
+		snap.dirHashes["city-discovery:"+dir] = conventions.hashes[dir]
 	}
 	p.revisionSnapshot = snap
 }

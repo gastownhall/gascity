@@ -1,9 +1,11 @@
 package main
 
 import (
+	"slices"
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 )
@@ -16,19 +18,46 @@ import (
 // (TestEveryReconcileEnqueueGoesThroughTheWake).
 //
 // Under the legacy reconciler every method is exactly the channel fold it
-// replaces (legacyEnqueue). Under v2, newControllerWiring sets router before
-// the controller socket can deliver anything, and keyed enqueues, bead events
-// and bead event gaps go to the v2 router instead. Maintenance wakes (config
+// replaces (legacyEnqueue). Under v2, newControllerWiring sets planner before
+// the controller socket can deliver anything, and enqueues, relevant bead
+// events and bead event gaps mark it dirty instead. Maintenance wakes (config
 // reload) reach pokeCh in both modes: the reload runs on the maintenance tick.
 type controllerWake struct {
 	pokeCh, controlDispatcherCh chan<- struct{}
-	router                      *reconcileRouter
+	// mode is the session reconciler the controller latched, set by
+	// newControllerWiring; the controller socket publishes it
+	// (reconcilerModeCommand). A directly-built legacy wake is legacy.
+	mode    reconcilerMode
+	planner *planner
+	// waitDepClosed, set with planner, hears each closed bead's ID (GUAR-010).
+	waitDepClosed func(id string)
+	// wakeReads, set with planner, wakes the external-reads lane on the
+	// enqueues that ask for demand (wakesReads).
+	wakeReads func()
 	// now, when set, is the clock routed enqueues rate-limit their landed
 	// report by; nil is time.Now, whose readings compare on the monotonic
 	// clock, so a wall-clock step neither floods nor silences the report.
 	now        func() time.Time
 	lastLanded atomic.Pointer[time.Time] // the last routed enqueue reported landed
 }
+
+// latchedModeName names the session reconciler the controller latched, for
+// the identify reply: the wiring gives a v2 controller's wake its planner and
+// a legacy one's none (checkReconcilerWiring), so the wake carries the latch.
+// It is "" without a wake.
+func (w *controllerWake) latchedModeName() string {
+	switch {
+	case w == nil:
+		return ""
+	case w.runsV2():
+		return reconcilerV2.String()
+	}
+	return reconcilerLegacy.String()
+}
+
+// runsV2 reports that the wake routes to a v2 planner: its controller latched
+// v2 (checkReconcilerWiring).
+func (w *controllerWake) runsV2() bool { return w != nil && w.planner != nil }
 
 // routedLandedEvery bounds how often a routed enqueue reports that it landed.
 const routedLandedEvery = time.Second
@@ -68,9 +97,8 @@ func (cr *CityRuntime) wakeOf() *controllerWake {
 	return cr.wake
 }
 
-// Reasons a trigger gives Enqueue. The legacy fold ignores them; the v2
-// router merges them into the item's reasons, and the operator intents
-// (api, socket) and the supervisor reload bypass the backoff gate.
+// Reasons a trigger gives Enqueue. The legacy fold ignores them; the planner
+// counts its wakes by them.
 const (
 	wakeReasonAPI           = "api"
 	wakeReasonSocket        = "socket"
@@ -80,23 +108,39 @@ const (
 	wakeReasonOnDeath       = "on-death"
 	wakeReasonProviderEvent = "provider-event"
 	wakeReasonFollowUp      = "follow-up"
+	wakeReasonSupervisor    = "supervisor-reload"
 )
 
 // Enqueue asks for keys to be reconciled promptly. No keys means the
 // allocator. It reports whether a signal landed, for callers that log only
-// on a landed wake (the provider event pump). Under the router every enqueue
-// lands, so it reports landed at most once per routedLandedEvery: a replayed
-// backlog burst stays as quiet as the legacy fold's full channel keeps it
-// (API-018).
+// on a landed wake (the provider event pump). Under the planner any keys, or
+// none, the control-dispatch key included (MAINT-056), mark it dirty; every
+// mark lands, so it reports landed at most once per routedLandedEvery: a
+// replayed backlog burst stays as quiet as the legacy fold's full channel
+// keeps it (API-018).
 func (w *controllerWake) Enqueue(reason string, keys ...reconcilekey.Key) bool {
 	if w == nil {
 		return false
 	}
-	if w.router != nil {
-		w.router.Enqueue(reason, keys...)
+	if w.planner != nil {
+		w.planner.markDirty(reason)
+		if w.wakeReads != nil && wakesReads(keys) {
+			w.wakeReads()
+		}
 		return w.reportLanded()
 	}
 	return legacyEnqueue(w.pokeCh, w.controlDispatcherCh, keys...)
+}
+
+// wakesReads reports whether an enqueue of keys asks for demand: key-less
+// (a CLI writer such as gc sling pokes key-less), or an allocator or
+// control-dispatch key. A session key concerns one row, whose reads the
+// cache serves.
+func wakesReads(keys []reconcilekey.Key) bool {
+	return len(keys) == 0 || slices.ContainsFunc(keys, func(k reconcilekey.Key) bool {
+		kind := k.Normalize().Kind
+		return kind == reconcilekey.KindAllocator || kind == reconcilekey.KindControlDispatch
+	})
 }
 
 func (w *controllerWake) reportLanded() bool {
@@ -112,12 +156,6 @@ func (w *controllerWake) reportLanded() bool {
 	return w.lastLanded.CompareAndSwap(last, &t)
 }
 
-// routes reports whether bead events go to the v2 router, which needs to know
-// whether each one landed in the sessions store.
-func (w *controllerWake) routes() bool {
-	return w != nil && w.router != nil
-}
-
 // WakeMaintenance asks for a maintenance pass after a config change. The
 // caller has already set the dirty flag. It is the generic poke in both
 // modes: the reload runs on the maintenance tick.
@@ -131,16 +169,26 @@ func (w *controllerWake) WakeMaintenance() {
 // OnBeadEvent wakes the reconciler for one bead event after the caches
 // applied it. A cache-reconcile replay (snapshot) never wakes the legacy
 // reconciler: the controller's own writes echo back as replays, and a poke
-// per echo is the ga-yoix1 churn shape. The v2 router routes replays too,
-// enqueue-only (F1), and never pokes the tick; appliedToSessions says the
-// event's bead lives in the sessions-class store (routes reports when the
-// caller must work it out).
-func (w *controllerWake) OnBeadEvent(evt events.Event, snapshot, appliedToSessions bool) {
+// per echo is the ga-yoix1 churn shape. Under v2 an event on any leg,
+// replays included, marks the planner dirty when beadEventRelevant says a
+// pass would care, and never pokes the tick.
+func (w *controllerWake) OnBeadEvent(evt events.Event, snapshot bool) {
 	if w == nil {
 		return
 	}
-	if w.router != nil {
-		w.router.OnBeadEvent(evt, snapshot, appliedToSessions)
+	if p := w.planner; p != nil {
+		var recent relevantSet
+		if r := p.out.relevant.Load(); r != nil {
+			recent = *r
+		}
+		if beadEventRelevant(evt, recent) {
+			p.markDirty("bead-event")
+		}
+		if evt.Type == events.BeadClosed && w.waitDepClosed != nil {
+			if b, ok := beads.DecodeBeadEventPayload(evt.Payload); ok {
+				w.waitDepClosed(b.ID)
+			}
+		}
 		return
 	}
 	if snapshot {
@@ -151,10 +199,10 @@ func (w *controllerWake) OnBeadEvent(evt events.Event, snapshot, appliedToSessio
 
 // OnEventGap reports that the bead event tail broke or regressed, so events
 // may be missing. The legacy reconciler re-reads every store each tick and
-// needs nothing; the v2 router rebuilds its indexes.
+// needs nothing; the planner runs a pass, which reads every store too.
 func (w *controllerWake) OnEventGap() {
-	if w == nil || w.router == nil {
+	if w == nil || w.planner == nil {
 		return
 	}
-	w.router.OnEventGap()
+	w.planner.markDirty("event-gap")
 }

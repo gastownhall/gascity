@@ -8,6 +8,7 @@ go_library(
         "content_hash.go",
         "file_lock_unix.go",
         "file_lock_windows.go",
+        "source_lookup.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/packregistry",
     visibility = ["//:__subpackages__"],
@@ -15,6 +16,7 @@ go_library(
         "//internal/fsys",
         "//internal/gchome",
         "//internal/git",
+        "//internal/remotesource",
         "@com_github_burntsushi_toml//:toml",
     ] + select({
         "@rules_go//go/platform:windows": [
@@ -30,6 +32,7 @@ go_test(
         "catalog_test.go",
         "config_test.go",
         "content_hash_test.go",
+        "source_lookup_test.go",
         "testenv_import_test.go",
     ],
     embed = [":packregistry"],
@@ -44,6 +47,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )
