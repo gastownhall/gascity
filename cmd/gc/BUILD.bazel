@@ -2236,6 +2236,8 @@ go_test(
         "start_output_test.go",
         "startup_health_materialization_test.go",
         "startup_health_reconcile_test.go",
+        "startup_kickoff_nudge_stub_test.go",
+        "startup_kickoff_nudge_test.go",
         "startup_prompt_contract_test.go",
         "startup_prompt_delivery_test.go",
         "status_json_schema_contract_test.go",
