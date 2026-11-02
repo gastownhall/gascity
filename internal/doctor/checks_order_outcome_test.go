@@ -526,6 +526,9 @@ func TestOrderOutcomeHealthyRecordedIncompleteOutcomes(t *testing.T) {
 			}),
 		}
 	}
+	failed := func(ts time.Time, msg string) events.Event {
+		return events.Event{Type: events.OrderFailed, Ts: ts, Subject: subject, Actor: "controller", Message: msg}
+	}
 
 	cases := []struct {
 		name       string
@@ -619,6 +622,75 @@ func TestOrderOutcomeHealthyRecordedIncompleteOutcomes(t *testing.T) {
 			wantDetail: []string{"last run succeeded"},
 			notDetail:  []string{"recorded incomplete work"},
 		},
+		{
+			// [C,S,F]: the newest declaration and the failure detail are both
+			// diagnostics of the same order — a failure is not the clearing
+			// event, so neither may drop the other.
+			name:       "declaration with under-threshold failure keeps both diagnostics",
+			evts:       []events.Event{completed(now.Add(-4 * time.Hour)), declared(now.Add(-3*time.Hour), declMsg), failed(now.Add(-2*time.Hour), "exit status 1")},
+			wantStatus: StatusWarning,
+			wantDetail: []string{"1 consecutive failure(s), under threshold 3", "recorded incomplete work", declMsg},
+			notDetail:  []string{"last run succeeded"},
+		},
+		{
+			// [C,S,F,F,F]: an at-threshold failure streak and the declaration
+			// both surface.
+			name: "declaration with threshold failure streak keeps both diagnostics",
+			evts: []events.Event{
+				completed(now.Add(-5 * time.Hour)),
+				declared(now.Add(-4*time.Hour), declMsg),
+				failed(now.Add(-3*time.Hour), "exit status 1"),
+				failed(now.Add(-2*time.Hour), "exit status 1"),
+				failed(now.Add(-time.Hour), "exit status 1"),
+			},
+			wantStatus: StatusWarning,
+			wantDetail: []string{"3 consecutive failures", "recorded incomplete work", declMsg},
+			notDetail:  []string{"last run succeeded"},
+		},
+		{
+			// [C,F,F,F,S]: a declaration recorded after the failures keeps the
+			// failure streak intact — declarations neither count nor reset.
+			name: "declaration after failure streak keeps the streak",
+			evts: []events.Event{
+				completed(now.Add(-5 * time.Hour)),
+				failed(now.Add(-4*time.Hour), "exit status 1"),
+				failed(now.Add(-3*time.Hour), "exit status 1"),
+				failed(now.Add(-2*time.Hour), "exit status 1"),
+				declared(now.Add(-time.Hour), declMsg),
+			},
+			wantStatus: StatusWarning,
+			wantDetail: []string{"3 consecutive failures", "recorded incomplete work", declMsg},
+			notDetail:  []string{"last run succeeded"},
+		},
+		{
+			// The controller-start grace suppresses spurious FAILURES, not
+			// declarations: evidence that work did not run is never grace-
+			// skipped.
+			name: "declaration inside startup grace still warns",
+			evts: []events.Event{
+				{Type: events.ControllerStarted, Ts: now.Add(-5 * time.Minute), Subject: "gc", Actor: "controller"},
+				completed(now.Add(-4 * time.Minute)),
+				declared(now.Add(-3*time.Minute), declMsg),
+			},
+			wantStatus: StatusWarning,
+			wantDetail: []string{"recorded incomplete work", declMsg},
+			notDetail:  []string{"last run succeeded"},
+		},
+		{
+			// Grace-skipped failures and the declaration are both reported:
+			// "recent failure(s) within grace" stays truthful alongside the
+			// declaration.
+			name: "declaration with grace-skipped failures keeps both diagnostics",
+			evts: []events.Event{
+				{Type: events.ControllerStarted, Ts: now.Add(-5 * time.Minute), Subject: "gc", Actor: "controller"},
+				completed(now.Add(-4 * time.Minute)),
+				failed(now.Add(-3*time.Minute), "context canceled"),
+				declared(now.Add(-2*time.Minute), declMsg),
+			},
+			wantStatus: StatusWarning,
+			wantDetail: []string{"1 recent failure(s) within controller-start grace window", "recorded incomplete work", declMsg},
+			notDetail:  []string{"last run succeeded"},
+		},
 	}
 
 	for _, tc := range cases {
@@ -708,6 +780,104 @@ func TestLatestIncompleteOrderOutcome(t *testing.T) {
 	}
 	if decl, ok = latestIncompleteOrderOutcome(blank, "export-sweep"); !ok || decl.Message != "" {
 		t.Fatalf("decl/ok = %q/%v, want an empty-message declaration with ok=true", decl.Message, ok)
+	}
+}
+
+// TestConsecutiveOrderFailuresIgnoresDeclarations pins that order.skipped
+// declarations are invisible to the failure walk: all four outputs must equal
+// those for the same stream with the declarations removed. A declaration is
+// neither success nor failure — counting it as either would let a partial run
+// reset or extend the hard-failure streak.
+func TestConsecutiveOrderFailuresIgnoresDeclarations(t *testing.T) {
+	base := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	start := base.Add(10 * time.Hour)
+
+	strip := func(outcomes []events.Event) []events.Event {
+		kept := make([]events.Event, 0, len(outcomes))
+		for _, e := range outcomes {
+			if e.Type != events.OrderSkipped {
+				kept = append(kept, e)
+			}
+		}
+		return kept
+	}
+
+	cases := []struct {
+		name     string
+		outcomes []events.Event
+		subject  string
+		starts   []time.Time
+	}{
+		{
+			// A declaration alone must not mark the order as having produced
+			// an outcome: sawOutcome stays false, as for an empty stream.
+			name:     "declaration only",
+			outcomes: []events.Event{outcomeEvent(1, "export-sweep", events.OrderSkipped, base, "partial")},
+			subject:  "export-sweep",
+		},
+		{
+			name: "declaration between failures",
+			outcomes: []events.Event{
+				outcomeEvent(1, "export-sweep", events.OrderFailed, base, "exit status 1"),
+				outcomeEvent(2, "export-sweep", events.OrderSkipped, base.Add(time.Hour), "partial"),
+				outcomeEvent(3, "export-sweep", events.OrderFailed, base.Add(2*time.Hour), "exit status 1"),
+				outcomeEvent(4, "export-sweep", events.OrderFailed, base.Add(3*time.Hour), "exit status 1"),
+			},
+			subject: "export-sweep",
+		},
+		{
+			name: "declaration before success",
+			outcomes: []events.Event{
+				outcomeEvent(1, "export-sweep", events.OrderFailed, base, "exit status 1"),
+				outcomeEvent(2, "export-sweep", events.OrderFailed, base.Add(time.Hour), "exit status 1"),
+				outcomeEvent(3, "export-sweep", events.OrderSkipped, base.Add(2*time.Hour), "partial"),
+				outcomeEvent(4, "export-sweep", events.OrderCompleted, base.Add(3*time.Hour), ""),
+			},
+			subject: "export-sweep",
+		},
+		{
+			// Failures inside the grace window stay skipped whether or not a
+			// declaration is interleaved; a completion inside the grace window
+			// still ends the walk.
+			name: "declaration interleaved with grace-window events",
+			outcomes: []events.Event{
+				outcomeEvent(1, "export-sweep", events.OrderCompleted, start.Add(-time.Hour), ""),
+				outcomeEvent(2, "export-sweep", events.OrderFailed, start.Add(time.Minute), "context canceled"),
+				outcomeEvent(3, "export-sweep", events.OrderSkipped, start.Add(2*time.Minute), "partial"),
+				outcomeEvent(4, "export-sweep", events.OrderFailed, start.Add(3*time.Minute), "context canceled"),
+			},
+			subject: "export-sweep",
+			starts:  []time.Time{start},
+		},
+		{
+			name: "another subject's declaration",
+			outcomes: []events.Event{
+				outcomeEvent(1, "export-sweep", events.OrderFailed, base, "exit status 1"),
+				outcomeEvent(2, "other-order", events.OrderSkipped, base.Add(time.Hour), "not mine"),
+				outcomeEvent(3, "export-sweep", events.OrderFailed, base.Add(2*time.Hour), "exit status 1"),
+			},
+			subject: "export-sweep",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			streak, lastMessage, sawOutcome, skipped := consecutiveOrderFailures(tc.outcomes, tc.subject, tc.starts, 10*time.Minute)
+			wantStreak, wantLastMessage, wantSawOutcome, wantSkipped := consecutiveOrderFailures(strip(tc.outcomes), tc.subject, tc.starts, 10*time.Minute)
+
+			if streak != wantStreak || lastMessage != wantLastMessage || sawOutcome != wantSawOutcome || skipped != wantSkipped {
+				t.Fatalf("outputs with declarations (%d, %q, %v, %d) differ from declarations-removed (%d, %q, %v, %d) — declarations must be streak-neutral",
+					streak, lastMessage, sawOutcome, skipped, wantStreak, wantLastMessage, wantSawOutcome, wantSkipped)
+			}
+		})
+	}
+
+	// The declaration-only case must specifically leave sawOutcome false, not
+	// merely match the stripped stream by accident of both seeing nothing.
+	if _, _, sawOutcome, _ := consecutiveOrderFailures(
+		[]events.Event{outcomeEvent(1, "export-sweep", events.OrderSkipped, base, "partial")},
+		"export-sweep", nil, 10*time.Minute); sawOutcome {
+		t.Fatal("sawOutcome = true for a declaration-only stream, want false")
 	}
 }
 

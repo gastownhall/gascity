@@ -136,18 +136,23 @@ func latestIncompleteOrderOutcome(outcomes []events.Event, subject string) (even
 	return events.Event{}, false
 }
 
-// orderIncompleteDetail renders the doctor detail for one order's recorded
-// incomplete-work declaration. The declaration message carries the outcome,
-// reason and scopes verbatim (see cmd/gc's orderSkippedEventFor); an
-// unreadable declaration carries its decode error instead. A blank message
-// still means work did not run, so the detail stays without a dangling
-// message slot.
-func orderIncompleteDetail(order orders.Order, decl events.Event) string {
-	detail := fmt.Sprintf("%s: recorded incomplete work", orderDisplayName(order))
+// orderIncompleteSuffix renders the declaration part of a detail line. The
+// declaration message carries the outcome, reason and scopes verbatim (see
+// cmd/gc's orderSkippedEventFor); an unreadable declaration carries its
+// decode error instead. A blank message still means work did not run, so the
+// suffix stays without a dangling message slot.
+func orderIncompleteSuffix(decl events.Event) string {
+	suffix := "recorded incomplete work"
 	if strings.TrimSpace(decl.Message) != "" {
-		detail = fmt.Sprintf("%s: %s", detail, decl.Message)
+		suffix = fmt.Sprintf("%s: %s", suffix, decl.Message)
 	}
-	return detail
+	return suffix
+}
+
+// orderIncompleteDetail renders the standalone doctor detail for one order's
+// recorded incomplete-work declaration.
+func orderIncompleteDetail(order orders.Order, decl events.Event) string {
+	return fmt.Sprintf("%s: %s", orderDisplayName(order), orderIncompleteSuffix(decl))
 }
 
 // classifyOrderOutcome turns one order's failure streak into a doctor result.
@@ -284,10 +289,18 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 		if hasDecl {
 			// An outstanding declaration is evidence the newest run did not
 			// finish its work, so the order warns even on a clean failure
-			// streak. It replaces the failure-based detail: "last run
-			// succeeded" would contradict the declaration outright.
+			// streak. When the failure walk would emit a success or
+			// no-outcome line, the declaration replaces it — "last run
+			// succeeded" would contradict the declaration outright. Trailing
+			// counted or grace-skipped failures are an independent diagnosis,
+			// so their detail is kept and the declaration is appended to the
+			// same line.
 			worst = worseStatus(worst, StatusWarning)
-			detail = orderIncompleteDetail(order, decl)
+			if streak == 0 && skipped == 0 {
+				detail = orderIncompleteDetail(order, decl)
+			} else {
+				detail = fmt.Sprintf("%s; %s", detail, orderIncompleteSuffix(decl))
+			}
 		}
 		result.Details = append(result.Details, detail)
 		if status != StatusOK {
