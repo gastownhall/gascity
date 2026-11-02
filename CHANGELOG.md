@@ -198,6 +198,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     closed sessions, because an empty answer has no rows to tell the
     version by; a local target reads closed history locally.
 
+- **SQLite cities deliver messages, interrupts and responds on the
+  conversation lane by default.** With `[ops] authoritative` unset, a city
+  whose sessions store is SQLite with guarded batches (a SQLite storage
+  split) now runs `message`, `interrupt` and `respond` on the controller's
+  lane host, as if all three were listed. `gc session nudge`, `gc session
+  submit`, mail `--notify`, sling `--nudge`, the hook-claim continuation,
+  planner notices, wait nudges and the API's submit, messages, stop and
+  respond routes then write lane ops instead of nudge-queue items. Lanes
+  need a split store: any other city (bd-served, DoltLite, an exec provider,
+  native Dolt, the file provider) keeps legacy delivery, and `gc doctor`'s
+  `legacy-delivery` check says which one a city runs. A city whose sessions
+  store cannot host lanes (bd-served, DoltLite, exec) gets a warning to split
+  its storage (`docs/runbooks/split-storage-classes.md`, `gc storage
+  migrate`); an unsplit native-Dolt city gets a note that splitting moves
+  lane records to SQLite, which is cheaper. To roll a SQLite city back, set
+  `[ops] authoritative = []` and restart the controller; the rollback is
+  warned, and it goes away when legacy delivery is removed. Queue items
+  written before the upgrade still drain through the legacy deliverers. On
+  such a city with the list unset, this release also changes:
+  - **Messages over 16 KiB are refused.** `gc session nudge` and `gc session
+    submit` refuse them, and the API's submit and messages routes and a
+    provider `POST .../sessions` initial message answer 422
+    `payload_too_large`. Earlier releases delivered them on the legacy path.
+  - **Lane delivery semantics apply now.** An `interrupt_now` submit
+    interrupts the running turn and never restarts the session; a Codex
+    default submit waits for the turn boundary; `--delivery immediate`
+    steers into a running turn only where the runtime can steer, and
+    otherwise delivers at the next boundary.
+  - **Queued notices and prompts wait for the controller.** The lane host
+    runs in the controller, so while it is down they are delivered when it
+    returns; the legacy pollers used to deliver them meanwhile.
+  - **Downgrade floor.** This is the first release that runs lanes on these
+    cities, and v1.5.1 has no lane host, so open lane ops stranded by a
+    downgrade are never delivered. Before downgrading, let them drain or
+    drop them (`gc nudge status`, `gc nudge drop`).
+
 - **Run `gc doctor --fix` in each existing gastown or gascity city after you
   install this build.** gc now pins gastown 0.1.13 and gascity 0.1.7 (see
   Changed) and serves only those pins from the packs it embeds. A city still
@@ -812,17 +848,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     new problem type `urn:gascity:error:session-inactive`, and a failed peek
     fails the request. `peek=true` without it keeps the best-effort preview.
 
-- **The work ladder only nudges a step, hourly, while its seat waits on a
-  person.** With `[daemon] work_ladder` on (the default), a claimed step whose
+- **The work ladder nudges a step only daily while its seat waits on a
+  person, and hourly when the seat's turns say its answer's turn may have
+  died.** With `[daemon] work_ladder` on (the default), a claimed step whose
   metadata `gc.awaiting_human` names the session holding it (the seat asked a
   person and waits on their decision, such as an approval asked by mail) is
-  nudged an hour after the ladder sees the wait and hourly after that, however
-  long the person takes: no recycle, no release, and none of the
-  `work.escalated` alerts its pacing would raise (`started_recycled`,
-  `started_unanswered`, `release_unfinished`). Nudges the seat cannot take
-  still count toward `nudge_refused`, and a release already in flight that
-  raced the step's start still raises `release_raced_start`. The hourly nudge
-  takes up an answer whose turn died before the seat could clear the key. The
+  never recycled or released, however long the person takes, and raises none
+  of the `work.escalated` alerts its pacing would (`started_recycled`,
+  `started_unanswered`, `release_unfinished`). While the seat's own turns show
+  its newest turn completed, the step is nudged only a day after the ladder
+  sees the wait or after its last nudge, so a wait costs a turn a day, not one
+  an hour. That daily nudge takes up an answer that started no turn of the
+  seat, which leaves the asking turn the newest: a reply from the dashboard's
+  Mail page or `POST /v0/city/{cityName}/mail/{id}/reply`, which requests no
+  recipient turn, or a `gc mail reply --notify` whose wake failed (the command
+  still exits 0). Any other reading (a turn open, the newest turn failed, was
+  canceled or ended with no status, no turn at all, turns that cannot be read)
+  keeps an hourly nudge: an hour after the ladder sees the wait or after its
+  last nudge, at once when that is already past. That nudge takes up an answer
+  whose turn died before the seat could clear the key, even one whose end was
+  never recorded: the ladder reads only a quiet seat's turns, so a turn open
+  there may have died with its CLI or stopped at a dialog the idle check
+  cannot read.
+  A seat restarted while it waits gets its agent's startup prompt or hint nudge
+  only when the agent has one, and that delivery is best effort. Nudges the
+  seat cannot take still count toward `nudge_refused`, and a release already in
+  flight that raced the step's start still raises `release_raced_start`. The
   ladder checks the key in the planner's snapshot (on the claim's own bead,
   never another store's bead with the same ID) and again in every live
   re-read before it acts (a nudge, a release, pacing carried under an
@@ -840,7 +891,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ending after a nudge the seat took, opens a rate-limit episode, kept on the
   seat's `work_ladder` cell. While it stands the seat is paced as on a
   degraded provider: nudges every 10 minutes that count toward nothing (a
-  step waiting on a person keeps its hourly nudge), and no drain, release or
+  step waiting on a person is nudged hourly while its turns are refused), and
+  no drain, release or
   escalation. Once a nudge the seat took after the episode opened is refused
   too, at least 10 minutes after the first refusal, the seat is restarted in
   place on a fresh conversation (`gc session reset`'s request), keeping its
@@ -921,6 +973,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `failed to record cause note` and recorded nothing. Every store serves the
   metadata write. The text is unchanged; read it with `gc bd show <id>
   --json`. A later reset overwrites it.
+
+- **`gc nudge status` and `gc nudge drop` cover conversation-lane ops.**
+  `gc nudge status` lists a session's open lane messages beside its queue
+  items, pending until the lane takes them and in flight while it delivers,
+  and lane messages that closed failed or skipped in the last hour as dead,
+  in the same schema-v1 JSON; when it cannot read them all it says so and
+  exits 1. Dead messages are looked up among the session's 50 most recently
+  created closed lane messages, so an older one is not listed even when it
+  closed last. `gc nudge drop <op id>` cancels a lane message as the
+  operator: `dropped` before the lane takes it, `cancel_requested` while it
+  is delivered. `gc doctor` gains a `legacy-delivery` check (queue depth,
+  live `gc nudge poll` sidecars, deprecated keys in use), and its
+  `conversation-lanes` check reports the default kinds and why a city keeps
+  legacy delivery.
+
+- **Protocol-mode sessions take lane notices.** A t3bridge session, whose
+  runtime records its turn starts, is now served by the conversation lane
+  for every notice producer (mail `--notify`, sling `--nudge`, the
+  hook-claim continuation, planner notices, the work ladder and wait
+  nudges) wherever `[ops] authoritative` lists message, not only for the
+  ops route. Producers and the lane host decide with one rule, so a notice
+  never waits for a lane that cannot deliver it. `gc session nudge` to a
+  t3bridge session goes through the lane too: a wait-idle or immediate nudge
+  is delivered inline at the turn boundary, and an immediate nudge into a
+  running turn is not steered; it waits for that boundary and is reported
+  queued (`queued: true`).
 
 - **Go toolchain 1.27.3.** The `go.mod` floor, the Bazel `go_sdk`, the nogo
   analyzers' module and the `contrib/k8s` Go build images move to Go 1.27.3,
@@ -1004,6 +1082,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path inside a git worktree is still locked to its current commit. Adding a
   pack with `POST /v0/city/{cityName}/packs` and no `version` changes the
   same way. Pass `--version` to choose another constraint.
+
+### Deprecated
+
+- **Legacy delivery.** The nudge queue (`.gc/runtime/nudges/state.json`),
+  its `gc nudge poll` sidecars and the supervisor's nudge dispatcher are
+  removed in a future release: one release after `gc init` creates split
+  cities by default. From then on a city whose sessions store cannot host
+  conversation lanes must split its storage (`gc storage migrate`) before
+  it can start; split now with `docs/runbooks/split-storage-classes.md`.
+  Where the lane runs, the controller warns once at start about each of
+  `[daemon] nudge_dispatcher`, `[session] nudge_poll_interval`, `[ops]
+  content` and `[ops] control` still set, and about `[ops] authoritative =
+  []`. Leave those keys set until legacy delivery is removed: they still
+  govern the legacy deliverers that drain queue items written before the
+  upgrade and serve sessions without a row, and removing `nudge_dispatcher
+  = "supervisor"` now would restart the per-session pollers. `gc nudge
+  drain` without `--inject` is deprecated; the prompt hook's `gc nudge drain
+  --inject` stays.
 
 ### Fixed
 

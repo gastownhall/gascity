@@ -2970,7 +2970,12 @@ type DaemonConfig struct {
 	// unanswered nudge (a nudge the seat could not take, such as one held at
 	// a permission prompt, does not count). A claim whose metadata
 	// gc.awaiting_human names its seat (the seat asked a person and waits on
-	// their decision) is nudged only hourly, and never recycled or released.
+	// their decision) is never recycled or released. While the seat's turns
+	// show its newest turn completed, it is nudged only daily, which takes
+	// up an answer that started no turn; any other reading (a turn open, a
+	// failed, canceled or status-less newest turn, no turn, turns that cannot
+	// be read) keeps it nudged hourly, so an answer whose turn died is
+	// redriven.
 	// A seat whose provider refuses its turns with a rate limit (two in a
 	// row, as its own transcript records them, the newest after a nudge it
 	// took) is paced as on a degraded provider, and once a nudge it took
@@ -2997,7 +3002,7 @@ type DaemonConfig struct {
 	// AutoReapClosedBeadWorktrees controls whether the reconciler patrol
 	// automatically removes per-bead git worktrees once their associated
 	// work bead reaches closed status. Only worktrees with a clean working
-	// tree, no stashes, and no commits that removal would orphan — commits
+	// tree and no commits that removal would orphan — commits
 	// reachable from no branch, tag, or remote-tracking ref — are removed;
 	// push state is deliberately not the test, since `git worktree remove`
 	// deletes the checkout and not refs/heads. Unsafe worktrees are logged
@@ -3055,8 +3060,8 @@ type DaemonConfig struct {
 	// AutoPruneWorkerDir controls whether the reconciler removes a
 	// pool-managed session's worker_dir (agent worktree) after the session
 	// bead is closed. Removal is gated on: path lives under the city's
-	// .gc/worktrees/ tree, clean working tree, no unpushed commits, no
-	// stashed work. Nil (unset) defaults to true so pool worktrees do not
+	// .gc/worktrees/ tree, clean working tree, no unpushed commits.
+	// Nil (unset) defaults to true so pool worktrees do not
 	// accumulate without bound across pool recycles. Set to false to
 	// retain worktrees for post-session diagnostics.
 	AutoPruneWorkerDir *bool `toml:"auto_prune_worker_dir,omitempty" jsonschema:"default=true"`
@@ -3117,7 +3122,7 @@ func (d *DaemonConfig) AutoReapClosedBeadWorktreesMinAge() time.Duration {
 // pool-managed session's worker_dir after the session bead is closed. The
 // default is true: pool worktrees are transient by design and accumulate
 // without bound otherwise. Removal is still gated on per-worktree safety
-// probes (clean tree, no unpushed commits, no stashes).
+// probes (clean tree, no unpushed commits).
 func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
 	if d.AutoPruneWorkerDir == nil {
 		return true
