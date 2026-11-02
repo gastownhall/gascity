@@ -10,12 +10,12 @@ package conversationlane_test
 // keystroke runtime. CI asserts the line at a rate the boundary cadence
 // admits: one injection per boundary, at most MaxBatchOps notices each, none
 // lost, order kept, at 20 notices a second, and it reports the steady
-// phase's latency against the cycle the boundary imposes (x6SteadyP99, with
-// the stream's last injection held to its own bound, x6DrainOver). Those
-// latency bounds are wall clock, so they gate only where the run owns its
-// host (x6PerfEnv); a shared executor's load is a statement about the
-// executor, not the lane (#8240). GC_LANE_X6_FULL=1 runs the literal line and
-// logs the measurement.
+// phase's latency against the cycle the boundary imposes (x6SteadyP99). Every
+// run holds the stream's last injection to its own bound relative to the
+// rest (x6DrainOver) and every notice to a stall ceiling (x6SteadyCeiling);
+// the absolute p99 and max are wall clock on a shared executor, so they gate
+// only under x6PerfEnv, which no CI job sets (#8240). GC_LANE_X6_FULL=1 runs
+// the literal line and logs the measurement.
 
 import (
 	"fmt"
@@ -63,46 +63,76 @@ const (
 // longer than the rest; with the rest at x6SteadyMax that allows up to 10 s.
 const x6DrainOver = 2*time.Second + time.Second
 
-// x6PerfEnv turns the steady phase's latency bounds (x6SteadyP99,
-// x6SteadyMax, x6DrainOver) from a report into a gate. Off by default: the
-// gating run shares its rbe-west executor with other actions, and under that
-// load every boundary slips (injection gaps of 5-9 s against the 3 s
-// quiescence window, steady p99 5.0-10.1 s; 12 merge-queue ejections in the
-// two weeks after #8255 and #8308, each passing on a rerun), so the bound
-// measured the executor. The latency itself is logged on every run. Set it
-// where the phase runs alone on a host it owns:
+// x6SteadyCeiling bounds every steady notice's latency on every run, the
+// gating run included: about 2.7x the worst max a loaded rbe-west executor
+// produced in the 14 days of #8240's failures (11.2 s), and below the stall
+// classes the harness knows (the 60 s anti-entropy scan at production
+// timing, the 130 s controller lease recovery) and x6Check's 3 min wait. A
+// lane that stops serving boundaries fails here even where the SLO is not
+// gated.
+const x6SteadyCeiling = 30 * time.Second
+
+// x6PerfEnv turns the steady phase's absolute SLO (x6SteadyP99 and
+// x6SteadyMax) from a log line into an assertion. Off by default: the gating
+// run shares its rbe-west executor with other actions, and under that load
+// every boundary slips (injection gaps of 5-9 s against the 3 s quiescence
+// window, steady p99 up to 11.18 s; 12 merge-queue ejections in the two
+// weeks after #8255 and #8308, each passing on a rerun), so the SLO measured
+// the executor (#8240). No CI job sets it, so no CI job enforces the
+// absolute SLO: the nightly lanes run on the same shared executors. It is a
+// manual measurement, for a host the run owns with nothing beside it (not a
+// shared executor or a shared development box):
 //
-//	bazel test --config=ci --config=integration --strategy=TestRunner=local \
+//	bazel test --config=ci --config=integration \
 //	  --test_env=GC_LANE_X6_PERF=1 --test_filter='^TestX6FanIn$/^steady$' \
 //	  //test/conversationlane:conversationlane_test
 //
-// The wakes those bounds watch are pinned deterministically elsewhere: the
-// busy re-probe cadence (TestLaneHostReprobesBusyRuntimeWithoutRows,
-// TestLaneWorkerNextDelay) and the wake at a boundary's quiescence deadline
-// (#8308's executor, planner and host tests).
+// Every run still logs the figures and asserts what does not measure the
+// host: x6SteadyCeiling, and x6DrainOver, which is relative to the rest's
+// max and so scales with load. The wakes the SLO watched are pinned
+// deterministically by unit tests: the busy re-probe cadence
+// (TestLaneHostReprobesBusyRuntimeWithoutRows, TestLaneWorkerNextDelay) and
+// the wake at a boundary's quiescence deadline (#8308's executor, planner
+// and host tests).
 const x6PerfEnv = "GC_LANE_X6_PERF"
 
-// x6GatesLatency reports whether getenv opts this run into the steady
-// phase's latency gate.
-func x6GatesLatency(getenv func(string) string) bool {
-	return strings.TrimSpace(getenv(x6PerfEnv)) == "1"
+// x6GatesSLO reports whether getenv opts this run into the steady phase's
+// absolute SLO; it reads the variable as GC_LANE_X6_FULL is read.
+func x6GatesSLO(getenv func(string) string) bool {
+	return getenv(x6PerfEnv) == "1"
 }
 
-// x6LatencyOverruns are the steady phase's latency bounds that lat breaks,
-// one message each; none when it keeps them all. steady must not be empty.
-func x6LatencyOverruns(lat x6Latencies) []string {
-	steady, drain := lat.steady, lat.drain
-	p99, maxLat := percentile(steady, 0.99), steady[len(steady)-1]
-	var out []string
-	if p99 > x6SteadyP99 || maxLat > x6SteadyMax {
-		out = append(out, fmt.Sprintf("latency p99 %s max %s before the last injection, want p99 <= %s and max <= %s", p99, maxLat, x6SteadyP99, x6SteadyMax))
+// x6Assessment is the steady phase's latency figures and the bounds they
+// break, one message each: always for those every run asserts (ceiling
+// first, then the drain), slo for the absolute SLO x6PerfEnv gates.
+type x6Assessment struct {
+	p50, p99, max, drainMax, allMax, allP99 time.Duration
+	always, slo                             []string
+}
+
+// x6Assess assesses lat; lat.steady must not be empty.
+func x6Assess(lat x6Latencies) x6Assessment {
+	steady, drain, all := lat.steady, lat.drain, lat.all()
+	a := x6Assessment{
+		p50:    percentile(steady, 0.5),
+		p99:    percentile(steady, 0.99),
+		max:    steady[len(steady)-1],
+		allMax: all[len(all)-1],
+		allP99: percentile(all, 0.99),
+	}
+	if a.allMax > x6SteadyCeiling {
+		a.always = append(a.always, fmt.Sprintf("a notice waited %s, over the %s ceiling every run holds: the lane stopped serving boundaries", a.allMax, x6SteadyCeiling))
 	}
 	if len(drain) > 0 {
-		if drainMax := drain[len(drain)-1]; drainMax > maxLat+x6DrainOver {
-			out = append(out, fmt.Sprintf("the last injection's notices waited up to %s, want at most %s over the rest's max %s (one busy re-probe period and its pass)", drainMax, x6DrainOver, maxLat))
+		a.drainMax = drain[len(drain)-1]
+		if a.drainMax > a.max+x6DrainOver {
+			a.always = append(a.always, fmt.Sprintf("the last injection's notices waited up to %s, want at most %s over the rest's max %s (one busy re-probe period and its pass)", a.drainMax, x6DrainOver, a.max))
 		}
 	}
-	return out
+	if a.p99 > x6SteadyP99 || a.max > x6SteadyMax {
+		a.slo = append(a.slo, fmt.Sprintf("latency p99 %s max %s before the last injection, want p99 <= %s and max <= %s", a.p99, a.max, x6SteadyP99, x6SteadyMax))
+	}
+	return a
 }
 
 // x6MinGap is the least spacing of two injections: the quiescence window,
@@ -314,19 +344,19 @@ func TestX6FanIn(t *testing.T) {
 		if len(lat.drain) == 0 {
 			t.Fatalf("the steady phase came in %d injections, want several", len(c.injectionSizes("steady")))
 		}
-		steady, drain := lat.steady, lat.drain
-		p50, p99, maxLat := percentile(steady, 0.5), percentile(steady, 0.99), steady[len(steady)-1]
-		drainMax := drain[len(drain)-1]
+		a := x6Assess(lat)
 		t.Logf("x6 steady: %d notices at 20/s in %d injections; latency p50 %s p99 %s max %s; the last injection's %d notices: max %s; all notices: p99 %s",
-			len(ids), len(c.injectionSizes("steady")), p50, p99, maxLat, len(drain), drainMax, percentile(lat.all(), 0.99))
-		overruns := x6LatencyOverruns(lat)
-		if !x6GatesLatency(os.Getenv) {
-			for _, o := range overruns {
-				t.Logf("x6 steady: not gated (set %s=1 on a host the run owns to gate it): %s", x6PerfEnv, o)
+			len(ids), len(c.injectionSizes("steady")), a.p50, a.p99, a.max, len(lat.drain), a.drainMax, a.allP99)
+		for _, o := range a.always {
+			t.Error(o)
+		}
+		if !x6GatesSLO(os.Getenv) {
+			for _, o := range a.slo {
+				t.Logf("x6 steady: absolute SLO not gated (no CI job sets %s=1; set it on a host the run owns): %s", x6PerfEnv, o)
 			}
 			return
 		}
-		for _, o := range overruns {
+		for _, o := range a.slo {
 			t.Error(o)
 		}
 	})
@@ -346,28 +376,29 @@ func TestX6FanIn(t *testing.T) {
 	})
 }
 
-// TestX6LatencyGateIsOptIn pins that the steady phase's wall-clock bounds
-// gate only a run that names x6PerfEnv (#8240).
-func TestX6LatencyGateIsOptIn(t *testing.T) {
+// TestX6SLOGateIsOptIn pins that the steady phase's absolute SLO gates only
+// a run that sets x6PerfEnv to 1, read as GC_LANE_X6_FULL is (#8240).
+func TestX6SLOGateIsOptIn(t *testing.T) {
 	for _, tc := range []struct {
 		value string
 		want  bool
-	}{{"", false}, {"0", false}, {"true", false}, {"1", true}, {" 1 ", true}} {
+	}{{"", false}, {"0", false}, {"true", false}, {" 1 ", false}, {"1", true}} {
 		getenv := func(key string) string {
 			if key == x6PerfEnv {
 				return tc.value
 			}
 			return ""
 		}
-		if got := x6GatesLatency(getenv); got != tc.want {
-			t.Errorf("%s=%q gates latency = %v, want %v", x6PerfEnv, tc.value, got, tc.want)
+		if got := x6GatesSLO(getenv); got != tc.want {
+			t.Errorf("%s=%q gates the SLO = %v, want %v", x6PerfEnv, tc.value, got, tc.want)
 		}
 	}
 }
 
-// TestX6LatencyOverruns pins the bounds the perf gate holds the steady phase
-// to, on latencies shaped like the runs that kept and broke them.
-func TestX6LatencyOverruns(t *testing.T) {
+// TestX6Assess pins which bounds every run holds the steady phase to and
+// which only x6PerfEnv does, on latencies shaped like the runs that kept and
+// broke them.
+func TestX6Assess(t *testing.T) {
 	ramp := func(n int, lo, hi time.Duration) []time.Duration {
 		out := make([]time.Duration, n)
 		for i := range out {
@@ -375,10 +406,17 @@ func TestX6LatencyOverruns(t *testing.T) {
 		}
 		return out
 	}
+	repeat := func(n int, d time.Duration) []time.Duration { return slices.Repeat([]time.Duration{d}, n) }
+	const (
+		ceiling = "a notice waited"
+		drain   = "the last injection's notices waited"
+		slo     = "latency p99"
+	)
 	for _, tc := range []struct {
-		name string
-		lat  x6Latencies
-		want []string
+		name         string
+		lat          x6Latencies
+		always, slo  []string
+		p99, maxWant time.Duration
 	}{
 		{
 			name: "a quiet host",
@@ -387,24 +425,61 @@ func TestX6LatencyOverruns(t *testing.T) {
 		{
 			// #8240's merge-queue failures: every boundary slipped.
 			name: "a loaded executor",
-			lat:  x6Latencies{steady: ramp(394, 200*time.Millisecond, 10377*time.Millisecond), drain: ramp(6, 9*time.Second, 10*time.Second)},
-			want: []string{"latency p99"},
+			lat:  x6Latencies{steady: ramp(394, 200*time.Millisecond, 11200*time.Millisecond), drain: ramp(6, 9*time.Second, 11*time.Second)},
+			slo:  []string{slo},
 		},
 		{
-			name: "a drain past one re-probe period",
-			lat:  x6Latencies{steady: ramp(380, 100*time.Millisecond, 3500*time.Millisecond), drain: ramp(20, 4*time.Second, 6600*time.Millisecond)},
-			want: []string{"the last injection's notices waited"},
+			name:   "a drain past one re-probe period",
+			lat:    x6Latencies{steady: ramp(380, 100*time.Millisecond, 3500*time.Millisecond), drain: ramp(20, 4*time.Second, 6600*time.Millisecond)},
+			always: []string{drain},
+		},
+		{
+			name: "the max alone over the SLO",
+			lat: x6Latencies{
+				steady: slices.Concat(ramp(380, 100*time.Millisecond, 3*time.Second), repeat(8, 4*time.Second), repeat(2, 7500*time.Millisecond)),
+				drain:  ramp(10, 3*time.Second, 4*time.Second),
+			},
+			slo: []string{slo}, p99: 4 * time.Second, maxWant: 7500 * time.Millisecond,
+		},
+		{
+			name: "every bound at its limit",
+			lat:  x6Latencies{steady: slices.Concat(ramp(380, 100*time.Millisecond, 4*time.Second), repeat(10, 5*time.Second), repeat(1, 7*time.Second)), drain: ramp(9, 4*time.Second, 10*time.Second)},
+			p99:  5 * time.Second, maxWant: 7 * time.Second,
+		},
+		{
+			name: "the ceiling at its limit",
+			lat:  x6Latencies{steady: ramp(390, 100*time.Millisecond, 27*time.Second), drain: ramp(10, 20*time.Second, 30*time.Second)},
+			slo:  []string{slo},
+		},
+		{
+			// A lane that stopped serving boundaries mid-stream, then a
+			// drain that waited on it: every bound fires, ceiling first.
+			name:   "a stall",
+			lat:    x6Latencies{steady: ramp(390, 100*time.Millisecond, 25*time.Second), drain: ramp(10, 20*time.Second, 31*time.Second)},
+			always: []string{ceiling, drain},
+			slo:    []string{slo},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := x6LatencyOverruns(tc.lat)
-			if len(got) != len(tc.want) {
-				t.Fatalf("overruns %q, want %d matching %q", got, len(tc.want), tc.want)
-			}
-			for i, prefix := range tc.want {
-				if !strings.HasPrefix(got[i], prefix) {
-					t.Errorf("overrun %d = %q, want prefix %q", i, got[i], prefix)
+			a := x6Assess(tc.lat)
+			matches := func(kind string, got, want []string) {
+				t.Helper()
+				if len(got) != len(want) {
+					t.Fatalf("%s overruns %q, want %d matching %q", kind, got, len(want), want)
 				}
+				for i, prefix := range want {
+					if !strings.HasPrefix(got[i], prefix) {
+						t.Errorf("%s overrun %d = %q, want prefix %q", kind, i, got[i], prefix)
+					}
+				}
+			}
+			matches("always", a.always, tc.always)
+			matches("slo", a.slo, tc.slo)
+			if tc.p99 != 0 && a.p99 != tc.p99 {
+				t.Errorf("p99 = %s, want %s", a.p99, tc.p99)
+			}
+			if tc.maxWant != 0 && a.max != tc.maxWant {
+				t.Errorf("max = %s, want %s", a.max, tc.maxWant)
 			}
 		})
 	}

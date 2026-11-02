@@ -296,6 +296,27 @@ is measured with nothing beside them, and the 90-minute budget leaves about
 16 minutes over the slowest bd-dolt load that ran alone (1h13m49s). Beside
 the matrix parts a load can run past it, so no suite runs the two together.
 
+X6's fan-in (`TestX6FanIn`, in `conversationlane_test`) asserts its
+correctness on every run: every notice delivered once, one injection per
+boundary of at most `MaxBatchOps` notices, injections in order. Its steady
+phase also always holds the last injection to within 3 s of the rest's max
+(relative, so it scales with load) and every notice to a 30 s stall ceiling.
+The absolute SLO (p99 <= 5 s, max <= 7 s) is wall clock on a shared
+executor, which a loaded rbe-west worker broke 12 times in the merge queue
+in two weeks (#8240). It is logged on every run and asserted only on opt-in:
+
+| variable | selects | who needs it |
+| --- | --- | --- |
+| `GC_LANE_X6_PERF` | `1` turns X6 steady's absolute latency SLO from a log line into an assertion. No CI job sets it, so no CI job enforces the SLO: the nightly lanes share the same executors. Set it only on a host the run owns, with nothing beside it | `TestX6FanIn/steady` only |
+| `GC_LANE_X6_FULL` | `1` runs DES-O1's literal line (5,000 notices in 60 s), a manual measurement a keystroke runtime is expected to miss | `TestX6FanIn/full` only |
+
+Replacement coverage for the SLO, under "Flakes are defects": the busy
+re-probe cadence (`TestLaneHostReprobesBusyRuntimeWithoutRows`,
+`TestLaneWorkerNextDelay`) and the wake at a boundary's quiescence deadline
+(#8308's executor, planner and host tests) are pinned by deterministic unit
+tests, and the always-on ceiling and drain bound fail a lane that stops
+serving boundaries. #8240 stays the tracking issue.
+
 ### Git auto-maintenance in test repos
 
 Git 2.55 starts `git maintenance run --auto` detached, in the background, after
