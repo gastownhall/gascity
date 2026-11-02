@@ -34,6 +34,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -86,14 +87,15 @@ var (
 // (TestReleasePoliciesTable pins it):
 //   - a killed seat keeps everything when anything is started (owner ruling
 //     B1): only the seat that started work may resume it;
-//   - drain-ack gives back only in_progress claims (D5): the agent said it
-//     holds nothing, and open claims are its continuation preassignments; a
-//     routeless claim takes the seat's route, as on the paths below, since
-//     kept it would leave the acked seat asleep holding it (mc-sca8r). A
-//     claim the seat's work_started cell or execution_claim_started stamp
-//     names is kept (PHASE1-2 §6.5), unless it is on a dispatch hold: the ack
-//     is no proof it never ran, and giving it back lost started work
-//     (mc-ilr3b);
+//   - drain-ack releases in_progress claims before probing normalized-open
+//     rows for raw blocked holds; ordinary open continuation preassignments
+//     stay assigned (D5). A routeless claim takes the seat's route, as on the
+//     paths below, since kept it would leave the acked seat asleep holding
+//     it (mc-sca8r). A claim the seat's work_started cell or
+//     execution_claim_started stamp names is kept while in_progress
+//     (PHASE1-2 §6.5), unless
+//     it is on a dispatch hold: the ack is no proof it never ran, and giving
+//     it back lost started work (mc-ilr3b);
 //   - the cascade, the stranded repair, both orphan releases and the
 //     retired-session sweep (`gc session close`, a removed named session)
 //     give back started work too: the seat is gone;
@@ -112,6 +114,7 @@ var releasePolicies = map[releaseWhy]releasePolicy{
 
 // Why a claim was kept or failed.
 const (
+	keptPreassigned   = "preassigned"
 	keptStarted       = "started"
 	keptUnservedRoute = "unserved-route"
 	keptMoved         = "moved"
@@ -255,9 +258,15 @@ func (o ReleaseOutcome) Unserved() []strandedClaim {
 // whose gate needs the whole seat; elsewhere what was read is released.
 func ReleaseClaims(sw *SeatWork, scope ReleaseScope, seat releaseSeat, why releaseWhy, opts ReleaseOpts) (ReleaseOutcome, error) {
 	p := releasePolicies[why]
-	claims, err := sw.snapshot(seatWorkQuery{scope: scope, statuses: p.statuses}, false)
+	statuses := p.statuses
+	if why == releaseDrainAck {
+		// A normalized-open row may be raw blocked. Probe that hold, while
+		// keeping ordinary open continuation preassignments under D5.
+		statuses = openOrStarted
+	}
+	claims, err := sw.snapshot(seatWorkQuery{scope: scope, statuses: statuses}, false)
 	if opts.Late {
-		late, lateErr := lateSeatWork(sw.Legs(), scope, p.statuses, nil)
+		late, lateErr := lateSeatWork(sw.Legs(), scope, statuses, nil)
 		claims, err = appendUniqueSeatWork(claims, late), errors.Join(err, lateErr)
 	}
 	// The refusal needs no config: it releases nothing, so a seat whose
@@ -265,13 +274,21 @@ func ReleaseClaims(sw *SeatWork, scope ReleaseScope, seat releaseSeat, why relea
 	if opts.RefuseStarted {
 		out := ReleaseOutcome{Why: map[string]string{}, Route: map[string]string{}}
 		for _, c := range claims {
-			if seat.keepsStarted(c.bead) {
+			if c.bead.Status == "in_progress" && seat.keepsStarted(c.bead) {
 				out.Kept, out.Why[c.bead.ID], out.Refused = append(out.Kept, c), keptStarted, true
 			}
 		}
 		if out.Refused {
 			return out, err
 		}
+	}
+	// Status-filtered live lists exclude bd's raw blocked rows, even through
+	// the controller cache. Discover parked assignments only for release, using
+	// the existing assignee query without a status filter. Other seat-work gates
+	// retain their raw-open semantics. Census failures remain release errors.
+	if why != releaseLadder {
+		parked, parkedErr := blockedReleaseClaims(sw.Legs(), scope)
+		claims, err = appendUniqueSeatWork(parked, claims), errors.Join(err, parkedErr)
 	}
 	if sw.Legs().cfg == nil && len(claims) > 0 {
 		return ReleaseOutcome{}, errors.Join(err, errReleaseNoConfig)
@@ -282,17 +299,64 @@ func ReleaseClaims(sw *SeatWork, scope ReleaseScope, seat releaseSeat, why relea
 	return releaseListed(claims, why, seat, sw.Legs().cfg, opts), err
 }
 
+// blockedReleaseClaims reads raw-blocked assignments through the same work
+// legs and persisted identities as the release. SourceStatus is only a read
+// projection: the eventual writer must still guard the raw status and holder.
+func blockedReleaseClaims(legs WorkLegs, scope ReleaseScope) ([]seatWorkHit, error) {
+	if err := legs.unusable(); err != nil {
+		return nil, err
+	}
+	var hits []seatWorkHit
+	var errs error
+	ids := map[string]bool{}
+	for _, id := range scope.scopeIDs() {
+		if id = strings.TrimSpace(id); id != "" {
+			ids[id] = true
+		}
+	}
+	legs.each(func(store beads.Store) {
+		for id := range ids {
+			rows, err := store.List(beads.ListQuery{Assignee: id, Live: true, TierMode: beads.TierBoth})
+			errs = errors.Join(errs, err)
+			for _, b := range rows {
+				if (b.SourceStatus != "blocked" && b.Status != "blocked") || !ids[strings.TrimSpace(b.Assignee)] || sessionpkg.IsSessionBeadOrRepairable(b) || beadmail.IsMessageBead(b) {
+					continue
+				}
+				hits = append(hits, seatWorkHit{store: store, bead: b})
+			}
+		}
+	})
+	return hits, errs
+}
+
 // releaseListed is ReleaseClaims' body for claims a caller already listed
 // (the orphan releases list them from the tick's census).
 func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *config.City, opts ReleaseOpts) ReleaseOutcome {
+	return releaseListedWithClock(claims, why, seat, cfg, opts, time.Now)
+}
+
+func releaseListedWithClock(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *config.City, opts ReleaseOpts, now func() time.Time) ReleaseOutcome {
 	p := releasePolicies[why]
 	out := ReleaseOutcome{Why: map[string]string{}, Route: map[string]string{}}
 	keep := func(c seatWorkHit, why string) { out.Kept = append(out.Kept, c); out.Why[c.bead.ID] = why }
 	var mine []seatWorkHit
 	for _, c := range claims {
-		if slices.Contains(p.statuses, c.bead.Status) {
+		if slices.Contains(p.statuses, c.bead.Status) || c.bead.Status == "open" || c.bead.Status == "blocked" {
 			mine = append(mine, c)
 		}
+	}
+	if why == releaseDrainAck {
+		// Raw reads for open preassignments must not spend the bounded drain
+		// budget before started claims. Preserve order within both groups.
+		slices.SortStableFunc(mine, func(a, b seatWorkHit) int {
+			if a.bead.Status == "in_progress" && b.bead.Status != "in_progress" {
+				return -1
+			}
+			if a.bead.Status != "in_progress" && b.bead.Status == "in_progress" {
+				return 1
+			}
+			return 0
+		})
 	}
 	if p.startedKeeps && slices.ContainsFunc(mine, func(c seatWorkHit) bool { return c.bead.Status == "in_progress" || seat.started[c.bead.ID] }) {
 		for _, c := range mine {
@@ -305,7 +369,13 @@ func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *
 		fallback = seat.fallback
 	}
 	for _, c := range mine {
-		if p.startedNamedKeeps && seat.keepsStarted(c.bead) {
+		if why == releaseDrainAck && c.bead.Status != "in_progress" && c.bead.Status != "blocked" && c.bead.SourceStatus != "blocked" {
+			// D5 keeps continuation preassignments. They need neither a release
+			// route, a raw-row probe nor a write-budget failure.
+			keep(c, keptPreassigned)
+			continue
+		}
+		if p.startedNamedKeeps && c.bead.Status == "in_progress" && seat.keepsStarted(c.bead) {
 			keep(c, keptStarted)
 			continue
 		}
@@ -314,30 +384,73 @@ func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *
 			out.Route[c.bead.ID] = route
 			continue
 		}
-		if !opts.Deadline.IsZero() && time.Now().After(opts.Deadline) {
+		if !opts.Deadline.IsZero() && now().After(opts.Deadline) {
 			out.Failed = append(out.Failed, c)
 			out.Why[c.bead.ID] = failedBudget
 			continue
 		}
+		clearDetached := false
 		if p.pool {
-			assignee := strings.TrimSpace(c.bead.Assignee)
-			if !liveWorkAssignmentStillReleasable(c.store, c.bead.ID, c.bead.Status, assignee) {
+			matches, err := livePoolReleaseSnapshotMatches(c.store, c.bead)
+			if err != nil {
+				out.Failed = append(out.Failed, c)
+				out.Why[c.bead.ID] = err.Error()
+				continue
+			}
+			if !matches {
 				keep(c, keptMoved)
 				continue
 			}
-			allowed, clearDetached := detachedProbeAllowsOrphanRelease(c.bead)
+			var allowed bool
+			allowed, clearDetached = detachedProbeAllowsOrphanRelease(c.bead)
 			if !allowed {
 				keep(c, keptDetachedAlive)
 				continue
 			}
+		}
+		// A killed seat with started work already returned above. Every
+		// remaining path must probe a normalized-open row before releasing it.
+		if released, handled, err := releaseBlockedAssignment(c.store, c.bead, fallback, clearDetached); err != nil {
+			out.Failed = append(out.Failed, c)
+			out.Why[c.bead.ID] = err.Error()
+			continue
+		} else if released {
+			out.Released = append(out.Released, c)
+			continue
+		} else if handled {
+			keep(c, keptMoved)
+			continue
+		}
+		if !slices.Contains(p.statuses, c.bead.Status) {
+			keep(c, keptMoved)
+			continue
+		}
+		if p.pool {
 			if !releaseOrphanedPoolAssignment(c.store, c.bead, clearDetached) {
 				keep(c, keptMoved)
 				continue
 			}
-		} else if err := workAssignmentForStore(beads.WorkStore{Store: c.store}).ReleaseWorkBead(c.bead, fallback); err != nil {
-			out.Failed = append(out.Failed, c)
-			out.Why[c.bead.ID] = err.Error()
-			continue
+		} else {
+			if err := workAssignmentForStore(beads.WorkStore{Store: c.store}).ReleaseWorkBead(c.bead, fallback); err != nil {
+				out.Failed = append(out.Failed, c)
+				out.Why[c.bead.ID] = err.Error()
+				continue
+			}
+			if _, canProbeBlocked := beads.BlockedAssignmentReleaserFor(c.store); c.bead.Status == "open" && !canProbeBlocked {
+				// This store supplied no raw-status probe. Its existing ordinary
+				// release can return nil on a lost fence, so confirm an empty
+				// assignee before counting a release; this proves no raw status.
+				rows, err := c.store.List(beads.ListQuery{IDs: []string{c.bead.ID}, Live: true, TierMode: beads.TierBoth})
+				if err != nil {
+					out.Failed = append(out.Failed, c)
+					out.Why[c.bead.ID] = err.Error()
+					continue
+				}
+				if len(rows) != 1 || rows[0].ID != c.bead.ID || strings.TrimSpace(rows[0].Assignee) != "" {
+					keep(c, keptMoved)
+					continue
+				}
+			}
 		}
 		out.Released = append(out.Released, c)
 	}

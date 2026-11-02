@@ -209,3 +209,73 @@ func TestCachingStoreUpdateIfAssignment(t *testing.T) {
 		}
 	})
 }
+
+func TestBdStoreBlockedReleaseAcceptsChildID(t *testing.T) {
+	runner := &releaseVerbRunner{show: func(id string) ([]byte, error) {
+		if id != "bd-42.1" {
+			t.Fatalf("read ID = %q", id)
+		}
+		return []byte(`[{"id":"bd-42.1","status":"blocked","assignee":"dead-session"}]`), nil
+	}}
+	released, handled, err := beads.NewBdStore("/city", runner.run).ReleaseBlockedIfCurrent("bd-42.1", "dead-session", map[string]string{"gc.continuation_group": "", "gc.run_target": "repo/worker", "gc.session_affinity": ""})
+	if err != nil || !released || !handled {
+		t.Fatalf("child release = %v, %v, %v", released, handled, err)
+	}
+	want := []string{"bd", "update", "--json", "bd-42.1", "--assignee", "", "--set-metadata", "gc.continuation_group=", "--set-metadata", "gc.run_target=repo/worker", "--set-metadata", "gc.session_affinity=", "--if-status", "blocked", "--if-assignee", "dead-session"}
+	calls := runner.releaseVerbArgv()
+	if len(calls) != 1 || strings.Join(calls[0], "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("mutations = %q, want one combined guarded update %q", calls, want)
+	}
+}
+
+func TestBdStoreBlockedReleaseRefusesUnresolvedRows(t *testing.T) {
+	for _, tc := range []struct {
+		name, id, holder, row string
+		showMiss, backendErr  bool
+		wantErr, wantQuery    bool
+	}{
+		{name: "empty ID", holder: "dead-session", wantErr: true},
+		{name: "empty holder", id: "bd-42.1", holder: " ", wantErr: true},
+		{name: "child miss cannot enter wisp query", id: "bd-42.1", holder: "dead-session", showMiss: true},
+		{name: "exact ID collision", id: "bd-42.1", holder: "dead-session", row: `[{"id":"bd-42.2","status":"blocked","assignee":"dead-session"}]`, wantErr: true},
+		{name: "holder changed", id: "bd-42.1", holder: "dead-session", row: `[{"id":"bd-42.1","status":"blocked","assignee":"live-session"}]`},
+		{name: "absent", id: "bd-42.1", holder: "dead-session", row: `[]`},
+		{name: "ambiguous", id: "bd-42.1", holder: "dead-session", row: `[{"id":"bd-42.1"},{"id":"bd-42.2"}]`},
+		{name: "operational failure", id: "bd-42.1", holder: "dead-session", backendErr: true, wantErr: true},
+		{name: "wisp absent", id: "bd-42", holder: "dead-session", showMiss: true, row: `[]`, wantQuery: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &releaseVerbRunner{show: func(id string) ([]byte, error) {
+				if tc.showMiss {
+					return nil, exitErrorWithDetail(t, 1, `no issue found matching "`+id+`"`)
+				}
+				if tc.backendErr {
+					return nil, errors.New("permission denied")
+				}
+				return []byte(tc.row), nil
+			}, reply: func(args []string) ([]byte, error) {
+				if tc.wantQuery && strings.Join(args, "\x00") == strings.Join([]string{"query", "--json", "ephemeral=true AND id=bd-42", "--all", "--limit", "1"}, "\x00") {
+					return []byte(tc.row), nil
+				}
+				t.Fatalf("unexpected fallback or mutation: %v", args)
+				return nil, errors.New("unexpected command")
+			}}
+			released, handled, err := beads.NewBdStore("/city", runner.run).ReleaseBlockedIfCurrent(tc.id, tc.holder, map[string]string{"gc.continuation_group": "", "gc.run_target": "repo/worker"})
+			if released || !handled || (err != nil) != tc.wantErr {
+				t.Fatalf("refusal = %v, %v, %v", released, handled, err)
+			}
+			queries := 0
+			for _, call := range runner.argv() {
+				if call[1] == "query" {
+					queries++
+				}
+				if call[1] == "update" {
+					t.Fatalf("refusal reached update: %v", call)
+				}
+			}
+			if (queries == 1) != tc.wantQuery {
+				t.Fatalf("query count = %d", queries)
+			}
+		})
+	}
+}

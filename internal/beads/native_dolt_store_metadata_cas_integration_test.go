@@ -11,9 +11,94 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	beadslib "github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/issueops"
 )
+
+// This is the real role/transaction proof; normalized Bead.Status and fast
+// request-recording doubles alone cannot prove raw blocked preservation.
+func TestNativeAssignmentGuardPreservesRawBlockedHoldThroughFacade(t *testing.T) {
+	for _, plane := range []StorageClass{StorageHistory, StorageEphemeral} {
+		t.Run(string(plane), func(t *testing.T) {
+			store := openRealNativeDoltStoreForCAS(t, "blocked-assignment-"+string(plane))
+			b, err := store.CreateWithStorage(Bead{Title: "blocked hold"}, plane)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dep, err := store.Create(Bead{Title: "prerequisite"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.DepAdd(b.ID, dep.ID, "blocks"); err != nil {
+				t.Fatal(err)
+			}
+			holder, status := "dead-session", "blocked"
+			metadata := map[string]string{"hold_reason": "needs input", "work_result": "retained"}
+			patch := map[string]string{beadmeta.RunTargetMetadataKey: "repo/worker"}
+			for _, key := range beadmeta.SessionAffinityMetadataKeys {
+				metadata[key] = "obsolete-session"
+				patch[key] = ""
+			}
+			if err := store.Update(b.ID, UpdateOpts{Assignee: &holder, Status: &status, Metadata: metadata, Labels: []string{"hold:external"}}); err != nil {
+				t.Fatal(err)
+			}
+			func() {
+				storage, release, err := store.acquireStorage()
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer release()
+				ops, err := storage.IssueLifecycle()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := ops.Update(context.Background(), issueops.UpdateRequest{Actor: store.actor, IssueID: b.ID, Patch: issueops.IssuePatch{Notes: issueops.Field[string]{Set: true, Value: "operator hold"}}}); err != nil {
+					t.Fatal(err)
+				}
+			}()
+			readRaw := func() *issueops.IssueDetails {
+				storage, release, err := store.acquireStorage()
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer release()
+				reader, err := storage.IssueReader()
+				if err != nil {
+					t.Fatal(err)
+				}
+				row, err := reader.Get(context.Background(), issueops.GetRequest{ID: b.ID})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return row
+			}
+			before := readRaw()
+			ok, handled, err := store.ReleaseBlockedIfCurrent(b.ID, holder, patch)
+			if err != nil || !ok || !handled {
+				t.Fatalf("guard = %v, %v, %v", ok, handled, err)
+			}
+			after := readRaw()
+			if after.Status != beadslib.StatusBlocked || after.Assignee != "" || after.Notes != before.Notes {
+				t.Fatalf("hold changed: before %+v, after %+v", before, after)
+			}
+			got, err := store.Get(b.ID)
+			if err != nil || got.Metadata["hold_reason"] != "needs input" || got.Metadata["work_result"] != "retained" || got.Metadata[beadmeta.RunTargetMetadataKey] != "repo/worker" || len(got.Labels) != 1 || got.Labels[0] != "hold:external" {
+				t.Fatalf("release metadata/labels = %+v, %v", got, err)
+			}
+			for _, key := range beadmeta.SessionAffinityMetadataKeys {
+				if got.Metadata[key] != "" {
+					t.Fatalf("stale lifecycle key %s = %q", key, got.Metadata[key])
+				}
+			}
+			deps, err := store.DepList(b.ID, "down")
+			if err != nil || len(deps) != 1 || deps[0].DependsOnID != dep.ID {
+				t.Fatalf("hold dependencies = %+v, %v", deps, err)
+			}
+		})
+	}
+}
 
 // TestNativeDoltStoreMetadataCASPreservesMixedJSONSiblingTypesAgainstRealDolt
 // retains one real-storage proof for the raw JSON metadata boundary. The fast

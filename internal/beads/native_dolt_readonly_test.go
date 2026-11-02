@@ -82,6 +82,8 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"DeleteIfMatch":               nativeStoreMutation,
 	"ReleaseIfCurrent":            nativeStoreMutation,
 	"TransferIfCurrent":           nativeStoreMutation,
+	"UpdateIfAssignment":          nativeStoreMutation,
+	"ReleaseBlockedIfCurrent":     nativeStoreMutation,
 	"Claim":                       nativeStoreMutation,
 	"UpdateIfMatch":               nativeStoreMutation,
 	"ApplyGuarded":                nativeStoreMutation,
