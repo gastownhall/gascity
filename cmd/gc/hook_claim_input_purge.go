@@ -92,6 +92,18 @@ func workflowInputAbsent(ctx context.Context, graph, work workflowInputReader, i
 	return absent, nil
 }
 
+// unresolvedMemberIDs returns the ids of the convoy members no store the
+// listing read could resolve (convoy.IsUnresolvedTrackedItem placeholders).
+func unresolvedMemberIDs(members []beads.Bead) []string {
+	var ids []string
+	for _, m := range members {
+		if convoy.IsUnresolvedTrackedItem(m) {
+			ids = append(ids, m.ID)
+		}
+	}
+	return ids
+}
+
 // proveInputAbsentAcrossCity proves each of ids absent from every store of the
 // city at cityPath: no class binding owns it, and every store a by-id lookup
 // of it would read opens and answers not-found. A hit is "not proven"; a

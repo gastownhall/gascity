@@ -243,3 +243,52 @@ func TestDoHookClaimRetiresWorkflowWhoseInputWasPurged(t *testing.T) {
 		t.Fatalf("stderr = %q, want the retired root and the missing input named", stderr.String())
 	}
 }
+
+// runPurgeClaim runs one `gc hook --claim --drain-ack` over candidates with
+// purgeClaimOps and returns the beads it claimed and its stderr.
+func runPurgeClaim(t *testing.T, cityDir string, cfg *config.City, store beads.Store, candidates ...beads.Bead) ([]string, string) {
+	t.Helper()
+	ops, claimed := purgeClaimOps(t, cityDir, cfg, store, candidates)
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", cityDir, hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		DrainAck:           true,
+		JSON:               true,
+	}, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim = %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	return *claimed, stderr.String()
+}
+
+// TestWorkflowInputPurgedEveryTrackedMemberAbsent: the input convoy is still
+// present, but every bead it tracks is gone from every store of the city — its
+// membership is all placeholders — so the workflow is retired with the purge
+// disposition, naming each missing member.
+func TestWorkflowInputPurgedEveryTrackedMemberAbsent(t *testing.T) {
+	cityDir, cfg := purgeProofCity(t, "")
+	store := openPurgeProofStore(t, cityDir, ".")
+	input, err := store.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	for _, id := range []string{"OP-gone1", "OP-gone2"} {
+		if err := store.DepAdd(input.ID, id, "tracks"); err != nil {
+			t.Fatalf("track %s: %v", id, err)
+		}
+	}
+	w := seedPurgedInputWorkflow(t, store, input.ID)
+
+	claimed, stderr := runPurgeClaim(t, cityDir, cfg, store, w.open)
+
+	if len(claimed) != 0 {
+		t.Fatalf("claimed %v; every bead the workflow's input tracks is gone", claimed)
+	}
+	assertPurgeRetired(t, store, w.root.ID, w.open.ID, w.active.ID)
+	assertFinishedOutcomeKept(t, store, w.finished.ID)
+	if !strings.Contains(stderr, "OP-gone1, OP-gone2") {
+		t.Fatalf("stderr = %q, want both missing members named", stderr)
+	}
+}

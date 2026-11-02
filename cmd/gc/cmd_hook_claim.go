@@ -2364,7 +2364,8 @@ func workflowInputDoneAcross(ctx context.Context, graph, work beads.Store, candi
 	if convoyID == "" {
 		return pending, nil
 	}
-	if prove != nil && workflowRootPurgeable(root) {
+	purgeable := prove != nil && workflowRootPurgeable(root)
+	if purgeable {
 		absent, err := workflowInputAbsent(ctx, graph, work, []string{convoyID}, prove)
 		if err != nil {
 			return pending, err
@@ -2378,6 +2379,16 @@ func workflowInputDoneAcross(ctx context.Context, graph, work beads.Store, candi
 		return pending, fmt.Errorf("listing input convoy %s members: %w", convoyID, err)
 	}
 	if len(members) == 0 {
+		return pending, nil
+	}
+	if missing := unresolvedMemberIDs(members); purgeable && len(missing) == len(members) {
+		absent, err := workflowInputAbsent(ctx, graph, work, missing, prove)
+		if err != nil {
+			return pending, err
+		}
+		if absent {
+			return workflowInputVerdict{RootID: root.ID, State: workflowInputPurged, MissingIDs: missing}, nil
+		}
 		return pending, nil
 	}
 	var workflowSeats []string
