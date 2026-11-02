@@ -9,6 +9,18 @@ import (
 
 var k8sEnvNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// K8sSecretEnvNameReserved reports whether a Secret would replace a variable the
+// controller owns. Secret entries follow generated ones, so Kubernetes would let
+// the Secret win while controller reads of the Pod spec still see its own value.
+func K8sSecretEnvNameReserved(name string) bool {
+	if !strings.HasPrefix(name, "GC_") && !strings.HasPrefix(name, "BEADS_") {
+		return false
+	}
+	isDoltCredential := strings.Contains(name, "DOLT") &&
+		(strings.HasSuffix(name, "_USER") || strings.HasSuffix(name, "_PASSWORD"))
+	return !isDoltCredential
+}
+
 // ValidateK8sSecretProjection validates the declarative Secret references in
 // [session.k8s]. It deliberately does not query Kubernetes or read Secret data.
 func ValidateK8sSecretProjection(cfg *City, source string) error {
@@ -24,6 +36,9 @@ func ValidateK8sSecretProjection(cfg *City, source string) error {
 		field := fmt.Sprintf("%s.secret_env[%d]", prefix, i)
 		if strings.TrimSpace(item.Name) == "" || strings.TrimSpace(item.Secret) == "" || strings.TrimSpace(item.Key) == "" {
 			return fmt.Errorf("%s requires non-blank name, secret, and key", field)
+		}
+		if K8sSecretEnvNameReserved(item.Name) {
+			return fmt.Errorf("%s.name %q is reserved: GC_ and BEADS_ variables other than Dolt credentials belong to the controller", field, item.Name)
 		}
 		if !k8sEnvNamePattern.MatchString(item.Name) {
 			return fmt.Errorf("%s.name %q is not a valid environment variable name", field, item.Name)
