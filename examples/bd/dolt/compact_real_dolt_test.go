@@ -277,6 +277,8 @@ func runCompactScriptForRealDoltTest(t *testing.T, doltPath, root, cityPath, dat
 		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS",
 		"GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS",
 		"GC_DOLT_COMPACT_MIN_FREE_BYTES",
+		"GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS",
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS",
 	),
 		"PATH="+filepath.Dir(doltPath)+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
