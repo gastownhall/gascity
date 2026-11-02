@@ -207,8 +207,10 @@ Notes per trigger:
 <Accordion title="Cron catch-up after a missed minute">
 If no orchestrator tick landed during a scheduled minute (the orchestrator was busy
 or down), the next tick fires the missed occurrence once — `gc order check`
-shows the reason `cron: caught up missed occurrence`. Orders that have never run
-don't backfill; they fire only on an exact match.
+shows the reason `cron: caught up missed occurrence`. An order that has never
+run catches up only an occurrence from the last 25 hours, so a newly added
+order can fire right away for a scheduled minute earlier today, but not for one
+from last week.
 </Accordion>
 
 ## Formula orders vs. exec orders
@@ -633,7 +635,9 @@ release-notes        cron         no    cron: schedule not matched
 ```
 
 As before, the built-in orders appear too, and the cooldown reasons depend on
-when each order last ran. The lint check fires on the next tick (never run +
+when each order last ran. If Monday 09:00 fell in the last 25 hours, the
+release-notes row reads `yes  cron: caught up missed occurrence` instead, and
+the orchestrator runs it on the next tick (see Cron catch-up above). The lint check fires on the next tick (never run +
 cooldown = due), then every 30 seconds, so by the time you run `gc order check`
 its row may already read `no` with a few seconds of cooldown left. Give it a
 minute, then confirm it ran and succeeded:

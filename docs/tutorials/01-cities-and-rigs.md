@@ -80,8 +80,9 @@ in a terminal without flags, `gc init ~/my-city` instead asks you for the
 template and the agent.
 
 Gas City created the city directory, registered it, and started it. A new city
-takes a few minutes to finish setting up; until then, `gc status` can show
-agents as `unknown (partial status)`, which is normal.
+takes a few minutes to finish setting up, and on a busy machine `gc status` can
+stay partial for longer, showing agents as `unknown (partial status)`. That is
+normal, and work you send still gets dispatched.
 
 ## Looking inside
 
@@ -190,7 +191,6 @@ To check on the status of your city, use `gc status`:
 $ gc status
 my-city  /Users/you/my-city
   Controller: supervisor-managed (PID 83621)
-  API:        http://127.0.0.1:8372
   Authority: supervisor process PID 83621
   Suspended:  no
 
@@ -198,13 +198,24 @@ Agents:
   bd.dog                  scaled (min=0, max=2)
     bd.dog-1              stopped
     bd.dog-2              stopped
-  control-dispatcher      stopped
+  core.control-dispatcher  stopped
 
 0/3 agents running
 
 Named sessions:
   mayor                   reserved-unmaterialized (always)
+
+Store health:
+  Path:        /Users/you/my-city/.beads/dolt
+  Size:        9.0 MB
+  Live rows:   10
+  Ratio:       0.9 MB/row  (threshold 1.0 MB/row)
 ```
+
+Once the city has rigs, `gc status` also lists them under `Rigs:`, and each
+rig gets its own `<rig>/core.control-dispatcher`. While status is partial,
+agents read `unknown (partial status)` and a line under the count gives the
+reason, such as `(sessions: loading session snapshot timed out after 1s)`.
 
 A named session shows `reserved-unmaterialized` until the orchestrator
 materializes it; once the mayor session is up, its state reads `awake` (or
@@ -212,7 +223,7 @@ materializes it; once the mayor session is up, its state reads `awake` (or
 
 The `bd.dog` pool is a background utility agent from the bundled `bd` pack you
 saw imported in `pack.toml` (the `bd.` prefix is the import binding it arrived
-through). It handles Dolt database housekeeping for the beads backend. `control-dispatcher` is platform
+through). It handles Dolt database housekeeping for the beads backend. `core.control-dispatcher` is platform
 infrastructure: the orchestrator uses it to advance formula workflows. You don't
 need to interact with either — ignore them for now.
 
