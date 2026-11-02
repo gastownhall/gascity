@@ -246,3 +246,53 @@ func TestTerminateRuntimeBindsKillToScannedIdentity(t *testing.T) {
 		t.Fatalf("TerminateRuntime(recycled identity) = %v, want nil (the scanned process is gone)", err)
 	}
 }
+
+// AC-7: a process-table scan that finds no root of the session leaves nothing
+// to mark tracked, so the provider asks tmux nothing: no session listing and
+// no per-session GC_SESSION_ID read.
+func TestFindRuntimesBySessionIDWithNoRootsAsksTmuxNothing(t *testing.T) {
+	writeTrackingProcRoot(t)
+	exec := &fakeExecutor{outs: []string{"worker", "GC_SESSION_ID=gc-1"}}
+	p := NewProviderWithConfig(Config{SocketName: "x"})
+	p.tm.exec = exec
+
+	found, err := p.FindRuntimesBySessionID("gc-absent")
+	if err != nil {
+		t.Fatalf("FindRuntimesBySessionID = %v, want no error", err)
+	}
+	if len(found) != 0 {
+		t.Fatalf("found %+v, want no roots", found)
+	}
+	if len(exec.calls) != 0 {
+		t.Fatalf("tmux was asked %v, want no calls when the scan found no roots", exec.calls)
+	}
+}
+
+// AC-7: the empty-roots return keeps the process-table scan's own error
+// unchanged (a whole-scan failure stays one), and still asks tmux nothing,
+// so a failing tmux server cannot add its error to the scan's.
+func TestFindRuntimesBySessionIDWithNoRootsStillReturnsScanError(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("drives the scanner against a procfs-shaped tree")
+	}
+	proctable.SetScanRootForTesting(t, filepath.Join(t.TempDir(), "missing"))
+	_, scanErr := proctable.ScanBySessionID("gc-1")
+	if scanErr == nil || !proctable.HasWholeScanFailure(scanErr) {
+		t.Fatalf("fixture scan error = %v, want a whole-scan failure", scanErr)
+	}
+	exec := &fakeExecutor{errs: []error{errors.New("tmux server unreachable")}}
+	p := NewProviderWithConfig(Config{SocketName: "x"})
+	p.tm.exec = exec
+
+	found, err := p.FindRuntimesBySessionID("gc-1")
+
+	if len(found) != 0 {
+		t.Fatalf("found %+v, want no roots", found)
+	}
+	if err == nil || err.Error() != scanErr.Error() || !proctable.HasWholeScanFailure(err) {
+		t.Fatalf("FindRuntimesBySessionID error = %v, want the scan's own error %v", err, scanErr)
+	}
+	if len(exec.calls) != 0 {
+		t.Fatalf("tmux was asked %v, want no calls when the scan found no roots", exec.calls)
+	}
+}
