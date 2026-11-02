@@ -140,7 +140,7 @@ func (s *Server) refuseUnconfiguredMailSender(ctx context.Context, from string) 
 	if _, err := mail.ResolveRecipient(from, agentEntries(cfg)); err == nil {
 		return nil
 	}
-	if sessions := s.state.SessionsBeadStore(); sessions.Store != nil {
+	if sessions := s.state.SessionsBeadStore(); sessions != (beads.SessionStore{}) {
 		store := sessions.Store
 		if _, ok, err := s.configuredMailRecipientAddress(store, from); err != nil {
 			return apierr.Internal.Msg(err.Error())

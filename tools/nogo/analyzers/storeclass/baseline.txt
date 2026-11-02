@@ -1763,7 +1763,7 @@ internal/api/handler_mail.go	Server.configuredMailRecipientAddress	raw-param	1
 internal/api/handler_mail.go	Server.mailQueryForNamedSession	mint	1
 internal/api/handler_mail.go	Server.mailQueryForNamedSession	raw-param	1
 internal/api/handler_mail.go	Server.namedSessionIncarnations	raw-param	1
-internal/api/handler_mail.go	Server.refuseUnconfiguredMailSender	unwrap	2
+internal/api/handler_mail.go	Server.refuseUnconfiguredMailSender	unwrap	1
 internal/api/handler_mail.go	Server.resolveLiveConfiguredNamedMailTarget	raw-param	1
 internal/api/handler_mail.go	Server.resolveMailQueryWithContext	unwrap	1
 internal/api/handler_mail.go	Server.resolveMailSendRecipientWithContext	unwrap	1
@@ -1826,7 +1826,6 @@ internal/api/huma_handlers_orders.go	orderHistoryBeadsAcrossStoreInfosCachedFirs
 internal/api/huma_handlers_orders.go	orderHistoryBeadsAcrossStoreInfosCachedFirst	read-marker	1
 internal/api/huma_handlers_rigs.go	Server.rollbackFailedProvision	raw-param	1
 internal/api/huma_handlers_runs.go	Server.cancelRun	read-marker	1
-internal/api/huma_handlers_runs.go	Server.interruptRunHolders	mint	1
 internal/api/huma_handlers_runs.go	Server.interruptRunHolders	unwrap	1
 internal/api/huma_handlers_runs.go	cancelWorkflowRoot	raw-param	1
 internal/api/huma_handlers_runs.go	findWorkflowRoots	raw-param	1
