@@ -29,6 +29,12 @@ const (
 	// "ws" EmptyDir mount point for staged pods and the image WORKDIR for
 	// prebaked ones — so it is what the pod spec's WorkingDir may safely name.
 	podWorkspaceRoot = "/workspace"
+
+	// Linux limits the size of one execve argument to 128 KiB. Keep encoded
+	// command chunks well below that limit while allowing the full prompt payload
+	// to retain the existing shared prompt-resolution threshold.
+	agentCommandChunkSize = 32 * 1024
+	agentCommandArg0      = "gc-agent-command"
 )
 
 func controllerCityPath(cfgEnv map[string]string) string {
@@ -68,24 +74,86 @@ func projectedPodWorkDir(cfg runtime.Config) string {
 	return podWorkDir
 }
 
-// agentCommandB64 resolves the agent command, remaps controller-side city path
-// references to the pod-side /workspace, and returns its base64 form. Shared by
-// buildPod (the pod entrypoint) and Relaunch (respawn over execInPod) so the
-// entrypoint launch and a relaunch produce a byte-identical command.
+// agentCommandB64 resolves the agent command and its configured startup prompt,
+// remaps controller-side city path references to the pod-side /workspace, and
+// returns its base64 form. PromptSuffix is already shell-quoted by the shared
+// prompt-delivery resolver; it is empty for nudge-mode and oversized fallback.
+// Shared by buildPod (the pod entrypoint) and Relaunch (respawn over execInPod)
+// so the entrypoint launch and a relaunch produce a byte-identical command.
 func agentCommandB64(cfg runtime.Config) string {
 	cmd := cfg.Command
 	if cmd == "" {
 		cmd = "/bin/bash"
 	}
+	if cfg.PromptSuffix != "" {
+		if cfg.PromptFlag != "" {
+			cmd += " " + cfg.PromptFlag + " " + cfg.PromptSuffix
+		} else {
+			cmd += " " + cfg.PromptSuffix
+		}
+	}
 	// The controller expands {{.ConfigDir}} templates using its own city path
-	// (e.g. /city/packs/...) but pods have files at /workspace/....
+	// (e.g. /city/packs/...) but pods have files at /workspace/.... Apply this
+	// after adding the prompt so path references in either part are remapped.
 	if ctrlCity := controllerCityPath(cfg.Env); ctrlCity != "" {
 		cmd = strings.ReplaceAll(cmd, ctrlCity, "/workspace")
 	}
 	return base64.StdEncoding.EncodeToString([]byte(cmd))
 }
 
-// buildRespawnCommand builds the in-pod shell command that respawns the agent in
+func agentCommandChunks(cfg runtime.Config) []string {
+	encoded := agentCommandB64(cfg)
+	chunks := make([]string, 0, (len(encoded)+agentCommandChunkSize-1)/agentCommandChunkSize)
+	for len(encoded) > 0 {
+		chunkLen := agentCommandChunkSize
+		if len(encoded) < chunkLen {
+			chunkLen = len(encoded)
+		}
+		chunks = append(chunks, encoded[:chunkLen])
+		encoded = encoded[chunkLen:]
+	}
+	return chunks
+}
+
+// agentCommandShellArgs puts the command chunks after the shell's $0 argument.
+// The static script can therefore reconstruct the payload from "$@" without
+// embedding a long encoded string or the decoded command in shell source.
+func agentCommandShellArgs(script string, cfg runtime.Config) []string {
+	args := []string{script, agentCommandArg0}
+	return append(args, agentCommandChunks(cfg)...)
+}
+
+// buildAgentLaunchCommand builds the static shell transport shared by Start and
+// Relaunch. Dynamic-user launches stream the encoded command through stdin to a
+// static su -c script; the inner script decodes it before passing the command
+// to tmux as one quoted argument. suExports carries the main-container's
+// remote-stage identity through a login shell; Relaunch relies on the durable
+// record it writes before respawn. tmuxCommand is a fixed command selected by
+// the caller.
+func buildAgentLaunchCommand(cfg runtime.Config, tmuxCommand string, keepAlive bool, suExports string) string {
+	keepAliveSuffix := ""
+	if keepAlive {
+		keepAliveSuffix = " && sleep infinity"
+	}
+
+	if user := cfg.Env["LINUX_USERNAME"]; user != "" {
+		userScript := fmt.Sprintf(
+			`%sCMD=$(base64 -d) && cd %s && %s "$CMD"%s`,
+			suExports, shellquote.Quote(projectedPodWorkDir(cfg)), tmuxCommand, keepAliveSuffix,
+		)
+		return fmt.Sprintf(
+			`printf '%%s' "$@" | su - %s -c %s`,
+			shellquote.Quote(user), shellquote.Quote(userScript),
+		)
+	}
+
+	return fmt.Sprintf(
+		`CMD=$(printf '%%s' "$@" | base64 -d) && %s "$CMD"%s`,
+		tmuxCommand, keepAliveSuffix,
+	)
+}
+
+// buildRespawnCommand builds the in-pod shell argv that respawns the agent in
 // the existing tmux "main" session (respawn-pane -k), reusing the warm pod. When
 // LINUX_USERNAME is set the entrypoint runs tmux under `su - <user>`, so the
 // respawn is wrapped in the same su to reach that user's tmux socket.
@@ -95,18 +163,10 @@ func agentCommandB64(cfg runtime.Config) string {
 // environment. The server got the remote-stage variables when the entrypoint
 // started it (suRemoteStageExports for LINUX_USERNAME), and Relaunch writes the
 // on-disk record before respawning, which covers a pod created without them.
-func buildRespawnCommand(cfg runtime.Config) string {
-	cmdB64 := agentCommandB64(cfg)
-	if user := cfg.Env["LINUX_USERNAME"]; user != "" {
-		return fmt.Sprintf(
-			`CMD=$(echo '%s' | base64 -d) && su - %s -c "cd %s && tmux respawn-pane -k -t %s \"$CMD\""`,
-			cmdB64, user, projectedPodWorkDir(cfg), tmuxSession,
-		)
-	}
-	return fmt.Sprintf(
-		`CMD=$(echo '%s' | base64 -d) && tmux respawn-pane -k -t %s "$CMD"`,
-		cmdB64, tmuxSession,
-	)
+func buildRespawnCommand(cfg runtime.Config) []string {
+	script := buildAgentLaunchCommand(cfg, fmt.Sprintf("tmux respawn-pane -k -t %s", tmuxSession), false, "")
+	args := []string{"sh", "-c"}
+	return append(args, agentCommandShellArgs(script, cfg)...)
 }
 
 func projectedPodStoreRoot(cfg runtime.Config, podWorkDir string) string {
@@ -236,10 +296,6 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	podWorkDir := projectedPodWorkDir(cfg)
 	ctrlCity := controllerCityPath(cfg.Env)
 
-	// Build the agent command (base64-encoded to avoid quoting issues) — shared
-	// with the relaunch path so the entrypoint and a respawn launch identically.
-	cmdB64 := agentCommandB64(cfg)
-
 	// Pod entrypoint: wait for workspace ready → pre_start → tmux → keepalive.
 	// Each pre_start command is base64-encoded and decoded at runtime to prevent
 	// shell metacharacter injection from user-supplied commands.
@@ -288,27 +344,23 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	enterWorkDir := fmt.Sprintf("mkdir -p %s && cd %s && ",
 		shellquote.Quote(podWorkDir), shellquote.Quote(podWorkDir))
 
-	var tmuxCmd string
+	// The launch script stays static; the command arrives in bounded positional
+	// chunks after its $0 argument and is reconstructed at runtime.
+	entrypointPrefix := credCopy + wsWait + enterWorkDir + preStartCmds
 	if linuxUsername != "" {
-		// Run tmux session as the dynamic user via su. userSetup already created
-		// and chowned podWorkDir as root; enterWorkDir is idempotent and is what
-		// puts pre_start in the right directory.
-		// su - is a login shell and clears the environment, so the
-		// remote-stage variables the pod spec sets would not reach the agent
-		// (nor the tmux server, whose environment every pane inherits). They
-		// are exported again inside the su command (suRemoteStageExports).
-		tmuxCmd = fmt.Sprintf(
-			"%s%s%s%s%sCMD=$(echo '%s' | base64 -d) && "+
-				`su - %s -c "%scd %s && tmux new-session -d -s %s \"$CMD\" && sleep infinity"`,
-			userSetup, credCopy, wsWait, enterWorkDir, preStartCmds, cmdB64,
-			linuxUsername, suRemoteStageExports(p.cityName, ctrlCity), podWorkDir, tmuxSession,
-		)
-	} else {
-		tmuxCmd = fmt.Sprintf(
-			"%s%s%s%sCMD=$(echo '%s' | base64 -d) && tmux new-session -d -s %s \"$CMD\" && sleep infinity",
-			credCopy, wsWait, enterWorkDir, preStartCmds, cmdB64, tmuxSession,
-		)
+		// Run tmux as the dynamic user via su. userSetup already created and
+		// chowned podWorkDir as root; enterWorkDir is idempotent and keeps
+		// pre_start in the same directory as the historical path. su - clears
+		// the pod environment, so re-export the remote-stage identity inside
+		// the login-shell command before starting tmux.
+		entrypointPrefix = userSetup + entrypointPrefix
 	}
+	tmuxCmd := entrypointPrefix + buildAgentLaunchCommand(
+		cfg,
+		fmt.Sprintf("tmux new-session -d -s %s", tmuxSession),
+		true,
+		suRemoteStageExports(p.cityName, ctrlCity),
+	)
 
 	// Build environment, remapping K8s-specific vars.
 	env, err := buildPodEnvWithSecretEnv(cfg.Env, podWorkDir, p.managedServiceHost, p.managedServicePort, p.secretEnv)
@@ -406,7 +458,7 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 				// itself, as the agent user, so it comes out owned correctly.
 				WorkingDir:      podWorkspaceRoot,
 				Command:         []string{"/bin/sh", "-c"},
-				Args:            []string{tmuxCmd},
+				Args:            agentCommandShellArgs(tmuxCmd, cfg),
 				Env:             env,
 				Stdin:           true,
 				TTY:             true,
@@ -666,21 +718,13 @@ func buildResources(p *Provider) (corev1.ResourceRequirements, error) {
 
 func boolPtr(b bool) *bool { return &b }
 
-// suRemoteStageExports re-exports the remote-stage environment inside a
-// `su - <user> -c "..."` command string, or returns "" without a controller
-// city. su - starts a login shell with a cleared environment, so without this
-// the agent run as LINUX_USERNAME (and its tmux server) would not carry the
-// variables that mark it a remote stage from its first instruction.
-//
-// The string is embedded inside the double-quoted -c argument of an outer sh,
-// so values are passed base64-encoded and decoded by the inner shell: the
-// outer shell sees only \$, \" and base64 characters, and the inner shell
-// gets each value verbatim whatever characters it contains.
+// suRemoteStageExports returns shell statements that restore the remote-stage
+// variables inside the login-shell command passed to `su - <user> -c`. Values
+// are quoted as shell data so spaces and metacharacters remain unchanged.
 func suRemoteStageExports(cityName, ctrlCity string) string {
 	var out strings.Builder
 	for _, e := range remoteStageEnv(cityName, ctrlCity) {
-		b64 := base64.StdEncoding.EncodeToString([]byte(e.Value))
-		fmt.Fprintf(&out, `export %s=\"\$(echo '%s' | base64 -d)\"; `, e.Name, b64)
+		fmt.Fprintf(&out, "export %s=%s; ", e.Name, shellquote.Quote(e.Value))
 	}
 	return out.String()
 }
