@@ -464,6 +464,91 @@ func TestReusablePoolSessionInfo_PersistentRestartHandoffIsReusable(t *testing.T
 			"back on the next tick instead of stalling on the row's own runtime name (session %s)",
 			handedOff.ID)
 	}
+
+	// Controls: every other asleep persistent-pool row keeps today's answer.
+
+	// A plain asleep row with no reset markers is not a handoff: today's
+	// blanket rejection still applies.
+	plainAsleep := awake
+	plainAsleep.ID = "session-asleep-plain"
+	plainAsleep.MetadataState = "asleep"
+	if got := reusablePoolSessionInfo(bp, persistentAgent, template, plainAsleep, nil); got {
+		t.Fatalf("reusablePoolSessionInfo(persistent, asleep, no reset markers) = true; want false")
+	}
+
+	// A reset that never committed (reset pending but reset_committed_at
+	// empty or unparseable) is not a handoff either — only RestartRequestPatch
+	// writes the committed marker.
+	for name, committedAt := range map[string]string{"empty": "", "unparseable": "not-a-time"} {
+		resetUncommitted := awake
+		resetUncommitted.ID = "session-reset-uncommitted-" + name
+		resetUncommitted.MetadataState = "asleep"
+		resetUncommitted.ContinuationResetPending = "true"
+		resetUncommitted.ResetCommittedAt = committedAt
+		if got := reusablePoolSessionInfo(bp, persistentAgent, template, resetUncommitted, nil); got {
+			t.Fatalf("reusablePoolSessionInfo(persistent, asleep, reset pending with %s reset_committed_at) = true; want false", name)
+		}
+	}
+
+	// A fresh-wake drain sleep (reset pending but a sleep reason and slept_at
+	// stamped, no committed reset) is a deliberate sleep, not a handoff.
+	drainSleep := awake
+	drainSleep.ID = "session-drain-sleep"
+	drainSleep.MetadataState = "asleep"
+	drainSleep.ContinuationResetPending = "true"
+	drainSleep.SleepReason = "drain"
+	drainSleep.SleptAt = now.Format(time.RFC3339)
+	if got := reusablePoolSessionInfo(bp, persistentAgent, template, drainSleep, nil); got {
+		t.Fatalf("reusablePoolSessionInfo(persistent, asleep, drain sleep with sleep_reason) = true; want false")
+	}
+
+	// A handed-off row that a sleep reason was stamped on afterwards is no
+	// longer waiting for its fresh start.
+	sleptAfterHandoff := handedOff
+	sleptAfterHandoff.ID = "session-handed-off-then-slept"
+	sleptAfterHandoff.SleepReason = "idle"
+	sleptAfterHandoff.SleptAt = now.Add(time.Minute).Format(time.RFC3339)
+	if got := reusablePoolSessionInfo(bp, persistentAgent, template, sleptAfterHandoff, nil); got {
+		t.Fatalf("reusablePoolSessionInfo(persistent, asleep, handoff then sleep_reason=idle) = true; want false")
+	}
+
+	// A committed handoff that still holds open assigned work under one of
+	// its identities is served by its own resume request; reuse for new or
+	// floor demand must pass over it.
+	bpWithWork := &agentBuildParams{
+		assignedWorkBeads: []beads.Bead{
+			{ID: "work-in-progress", Status: "in_progress", Assignee: handedOff.SessionNameMetadata},
+		},
+	}
+	if got := reusablePoolSessionInfo(bpWithWork, persistentAgent, template, handedOff, nil); got {
+		t.Fatalf("reusablePoolSessionInfo(persistent, asleep, restart handoff holding open assigned work) = true; want false")
+	}
+
+	// A handed-off row already claimed for another request this pass is not
+	// reusable twice.
+	used := map[string]bool{handedOff.ID: true}
+	if got := reusablePoolSessionInfo(bp, persistentAgent, template, handedOff, used); got {
+		t.Fatalf("reusablePoolSessionInfo(persistent, asleep, restart handoff already used this pass) = true; want false")
+	}
+
+	// Edge cases: the handoff admission is lifecycle-agnostic, and the
+	// any-identity assigned-work check still guards admitted handoff rows.
+	oneShotAgent := &config.Agent{Name: "worker-persistent", Dir: "rig", Lifecycle: config.AgentLifecycleOneShot}
+	if got := reusablePoolSessionInfo(bp, oneShotAgent, template, handedOff, nil); !got {
+		t.Fatalf("reusablePoolSessionInfo(one_shot, asleep, restart handoff) = false; want true — " +
+			"a committed handoff is admitted whatever the lifecycle (with no sleep reason the row is not freeable)")
+	}
+	workUnderAlias := beads.Bead{
+		ID:       "work-in-progress-alias",
+		Status:   "in_progress",
+		Assignee: "rig/worker-persistent-1",
+	}
+	handedOffWithAliasWork := handedOff
+	handedOffWithAliasWork.Alias = workUnderAlias.Assignee
+	bpWithAliasWork := &agentBuildParams{assignedWorkBeads: []beads.Bead{workUnderAlias}}
+	if got := reusablePoolSessionInfo(bpWithAliasWork, oneShotAgent, template, handedOffWithAliasWork, nil); got {
+		t.Fatalf("reusablePoolSessionInfo(one_shot, asleep, restart handoff holding work under its alias) = true; want false")
+	}
 }
 
 func createRoutedReadyBeadForReplacement(t *testing.T, store beads.Store, template, title string) beads.Bead {
