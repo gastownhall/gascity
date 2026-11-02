@@ -60,7 +60,7 @@ the cursor together with pending work, before delivery. Failed reads retain the
 cursor; failed sends stay pending without requiring another event. Retry delays
 grow from one minute to a maximum of one hour. Blocked work is rechecked after
 one minute, or sooner when its bead changes. This includes held, deferred and
-`human`-labelled work. Successful requests to the nudge CLI include requests
+`human`-labeled work. Successful requests to the nudge CLI include requests
 accepted by its durable queue; the supervisor owns subsequent runtime delivery.
 ACP cities need the supervisor delivery owner enabled in `city.toml`:
 

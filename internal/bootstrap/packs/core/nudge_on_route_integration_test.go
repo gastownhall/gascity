@@ -214,7 +214,7 @@ func TestRouteNotificationInterruptedCheckSchedulesRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer entered.Close()
+	defer func() { _ = entered.Close() }()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	results := make(chan orders.TriggerResult, 1)
@@ -744,7 +744,7 @@ func TestRouteNotificationDeferralRenotifiesNotifiedWork(t *testing.T) {
 	}
 }
 
-// Routed readiness leaves out beads labelled exactly "human" (#7366). Such a
+// Routed readiness leaves out beads labeled exactly "human" (#7366). Such a
 // route waits like held work and is nudged once the label is gone.
 func TestRouteNotificationHumanLabelledRouteWaits(t *testing.T) {
 	f := newRouteScriptFixture(t)
@@ -759,7 +759,7 @@ func TestRouteNotificationHumanLabelledRouteWaits(t *testing.T) {
 	f.write("beads", `[{"id":"test-work","status":"open","assignee":"","metadata":{"gc.routed_to":"worker"}}]`, 0o600)
 	f.expireRetry()
 	if !f.due() {
-		t.Fatal("a human-labelled route was dropped instead of kept pending")
+		t.Fatal("a human-labeled route was dropped instead of kept pending")
 	}
 	if err := f.run(); err != nil {
 		t.Fatal(err)
@@ -914,12 +914,12 @@ func TestRouteNotificationSerializesManualRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer entered.Close()
+	defer func() { _ = entered.Close() }()
 	release, err := os.OpenFile(filepath.Join(f.dir, "release"), os.O_RDWR, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer release.Close()
+	defer func() { _ = release.Close() }()
 	defer func() { _, _ = release.WriteString("release\n") }()
 	arrived := make(chan error, 1)
 	go func() { _, err := bufio.NewReader(entered).ReadString('\n'); arrived <- err }()
