@@ -88,9 +88,36 @@ func IsGraphV2Formula(formulaName string, searchPaths []string) (bool, *formula.
 	return formula.UsesGraphCompiler(resolved), resolved, nil
 }
 
+// PrepareOption adjusts PrepareInvocation for a caller class.
+type PrepareOption func(*prepareOptions)
+
+type prepareOptions struct {
+	reuseOpenInputConvoy bool
+}
+
+// WithReusableInputConvoy marks the caller as an automated pour surface: a
+// re-fire while an open input convoy already tracks the target reuses that
+// container instead of minting beside it (gk-3n3jk, mayor word-said
+// ci-wisp-pvaz7t 2026-11-02T08:03Z). Explicit `gc formula cook --attach`
+// does NOT pass it: two consecutive attaches are two deliberate invocations,
+// and each must mint a fresh convoy so the workflow roots stay independent
+// (cmd_formula_test.go's double-attach pins). The observed re-pour defects
+// (gk-f4gr 3x, the gk-bx4v convoy pair, the second 5ryve convoy, the
+// h8sdl/ojstx intake re-fires) all came from automated machinery, never from
+// a human cooking twice.
+func WithReusableInputConvoy() PrepareOption {
+	return func(o *prepareOptions) { o.reuseOpenInputConvoy = true }
+}
+
 // PrepareInvocation validates and normalizes a graph.v2 invocation. Non-graph
 // formulas are returned with Formula set and no input convoy.
-func PrepareInvocation(ctx context.Context, store beads.Store, formulaName string, searchPaths []string, targetID string, vars map[string]string) (Invocation, error) {
+func PrepareInvocation(ctx context.Context, store beads.Store, formulaName string, searchPaths []string, targetID string, vars map[string]string, opts ...PrepareOption) (Invocation, error) {
+	var po prepareOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&po)
+		}
+	}
 	resolved, parser, err := loadFormulaWithParser(formulaName, searchPaths)
 	if err != nil {
 		return Invocation{}, err
@@ -155,7 +182,12 @@ func PrepareInvocation(ctx context.Context, store beads.Store, formulaName strin
 	if store == nil {
 		return Invocation{}, fmt.Errorf("v2 formula %q requires a bead store to normalize target %s", formulaName, targetID)
 	}
-	convoyID, err := NormalizeInputConvoy(store, targetID)
+	var convoyID string
+	if po.reuseOpenInputConvoy {
+		convoyID, err = NormalizeInputConvoyForPour(store, targetID)
+	} else {
+		convoyID, err = NormalizeInputConvoy(store, targetID)
+	}
 	if err != nil {
 		return Invocation{}, err
 	}
@@ -413,25 +445,25 @@ func NormalizeInputConvoy(store beads.Store, targetID string) (string, error) {
 	if target.Type == "convoy" {
 		return target.ID, nil
 	}
-	// gk-3n3jk dedup veto (mayor word-said, ci-wisp-pvaz7t 2026-11-02T08:03Z):
-	// skip the sling/wrap when an OPEN input convoy already exists for the
-	// target bead. Every observed re-pour (gk-f4gr 3x, the gk-bx4v convoy
-	// pair, the second 5ryve convoy, the h8sdl/ojstx intake re-fires) first
-	// presented as a second synthetic "input convoy for <bead>" minted while
-	// the first was still open — the fresh convoy key then justified a fresh
-	// workflow root. Returning the existing convoy makes a re-fire
-	// idempotent at the mint edge itself, whatever caller or identity
-	// triggers it. Best-effort like the other dedup reads here: a lookup
-	// failure falls through to the pre-existing mint behavior rather than
-	// failing every pour on a transient store error.
-	if existing := openTrackingConvoy(store, target.ID); existing != "" {
-		return existing, nil
-	}
 	inputConvoy, err := CreateSingleItemInputConvoy(store, target)
 	if err != nil {
 		return "", err
 	}
 	return inputConvoy.ID, nil
+}
+
+// NormalizeInputConvoyForPour is NormalizeInputConvoy for automated pour
+// surfaces: a re-fire while an open container tracks the target reuses that
+// container instead of minting beside it (gk-3n3jk). Reach it from
+// PrepareInvocation with WithReusableInputConvoy; explicit cook attach keeps
+// minting fresh per invocation. The lookup is best-effort: a failure (or a
+// nonexistent target, which no convoy can track) falls through to
+// NormalizeInputConvoy's own validation and mint.
+func NormalizeInputConvoyForPour(store beads.Store, targetID string) (string, error) {
+	if existing := openTrackingConvoy(store, strings.TrimSpace(targetID)); existing != "" {
+		return existing, nil
+	}
+	return NormalizeInputConvoy(store, targetID)
 }
 
 // openTrackingConvoy returns the ID of the oldest non-terminal convoy that

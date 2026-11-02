@@ -1960,7 +1960,11 @@ func isGraphSlingFormula(ctx context.Context, formulaName string, searchPaths []
 func prepareGraphV2FormulaInvocation(ctx context.Context, formulaName, targetID string, opts SlingOpts, deps SlingDeps, a config.Agent) (graphv2.Invocation, bool, error) {
 	searchPaths := SlingFormulaSearchPaths(deps, a)
 	vars := buildGraphV2SlingFormulaVars(formulaName, targetID, opts.Vars, a, deps)
-	inv, err := graphv2.PrepareInvocation(ctx, deps.Store, formulaName, searchPaths, targetID, vars)
+	inv, err := graphv2.PrepareInvocation(ctx, deps.Store, formulaName, searchPaths, targetID, vars,
+		// gk-3n3jk: the automated pour surface reuses an open input convoy on
+		// re-fire instead of minting beside it. Explicit `gc formula cook
+		// --attach` keeps minting fresh per invocation.
+		graphv2.WithReusableInputConvoy())
 	if err != nil {
 		return graphv2.Invocation{}, false, err
 	}
