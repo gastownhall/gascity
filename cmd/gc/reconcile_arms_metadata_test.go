@@ -445,6 +445,18 @@ func providerProjectionCases(t *testing.T) []providerProjectionCase {
 			want:     map[string]string{"provider": "claude", "resume_flag": "--resume", "resume_style": "flag"},
 			family:   "claude",
 		},
+		{
+			name:     "AC-3/a nil resolution keeps all seven keys",
+			stored:   claudeMax,
+			resolved: nil,
+			want:     claudeMax,
+		},
+		{
+			name:     "AC-3/a converged row, its cleared keys empty or absent",
+			stored:   map[string]string{"provider": "my-claude", "provider_kind": "claude", "builtin_ancestor": "claude", "resume_flag": "--resume", "resume_command": ""},
+			resolved: &config.ResolvedProvider{Name: "my-claude", BuiltinAncestor: "claude", ResumeFlag: "--resume"},
+			want:     map[string]string{"provider": "my-claude", "provider_kind": "claude", "builtin_ancestor": "claude", "resume_flag": "--resume"},
+		},
 	}
 }
 
