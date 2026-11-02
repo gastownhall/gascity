@@ -183,3 +183,104 @@ func TestCancelStateAssignedToRetiredSessionBeadStopsSlowExternalMessagingAtItsB
 		}
 	})
 }
+
+// retiredCleanupFailingStore fails every wait close and every
+// external-messaging read with err, returning at once.
+type retiredCleanupFailingStore struct {
+	*beads.MemStore
+	waitLabel string
+	err       error
+}
+
+func (s *retiredCleanupFailingStore) CloseAll([]string, map[string]string) (int, error) {
+	return 0, s.err
+}
+
+func (s *retiredCleanupFailingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label != s.waitLabel {
+		return nil, s.err
+	}
+	return s.MemStore.List(query)
+}
+
+func stderrLines(stderr bytes.Buffer) []string {
+	text := strings.TrimRight(stderr.String(), "\n")
+	if text == "" {
+		return nil
+	}
+	return strings.Split(text, "\n")
+}
+
+func TestCancelStateAssignedToRetiredSessionBeadCutOffLogsOneLinePerLeg(t *testing.T) {
+	for _, tc := range []struct {
+		leg        string
+		waits      int
+		bindings   int
+		closePerID time.Duration
+		extmsgList time.Duration
+	}{
+		{leg: "waits", waits: 300, bindings: 1, closePerID: 200 * time.Millisecond},
+		{leg: "external-messaging", waits: 5, bindings: 40, extmsgList: time.Second},
+	} {
+		t.Run(tc.leg, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				mem := beads.NewMemStore()
+				sessionBead, fabric, caller := setupSessionWithExtmsgMembership(t, mem, session.StateArchived)
+				bindRetiredSession(t, fabric, caller, sessionBead.ID, tc.bindings)
+				seedRetiredSessionWaits(t, mem, sessionBead.ID, tc.waits)
+				store := &retiredCleanupTimedStore{
+					MemStore:   mem,
+					waitLabel:  "session:" + sessionBead.ID,
+					closePerID: tc.closePerID,
+					extmsgList: tc.extmsgList,
+				}
+
+				var stderr bytes.Buffer
+				cancelStateAssignedToRetiredSessionBead(store, sessionBead.ID, time.Now(), &stderr)
+
+				lines := stderrLines(stderr)
+				if len(lines) != 1 {
+					t.Fatalf("stderr lines = %q, want exactly one cut-off line", lines)
+				}
+				line := lines[0]
+				for _, want := range []string{"cut off", sessionBead.ID, " " + tc.leg + " leg", "10s"} {
+					if !strings.Contains(line, want) {
+						t.Fatalf("cut-off line = %q, want it to contain %q", line, want)
+					}
+				}
+			})
+		})
+	}
+}
+
+// A store error that wraps a context sentinel while the leg's own budget is
+// still live is an ordinary error: each leg keeps its existing line and none
+// is labeled cut off.
+func TestCancelStateAssignedToRetiredSessionBeadOrdinaryErrorsKeepTheirFormat(t *testing.T) {
+	mem := beads.NewMemStore()
+	sessionBead, fabric, caller := setupSessionWithExtmsgMembership(t, mem, session.StateArchived)
+	bindRetiredSession(t, fabric, caller, sessionBead.ID, 1)
+	seedRetiredSessionWaits(t, mem, sessionBead.ID, 3)
+	store := &retiredCleanupFailingStore{
+		MemStore:  mem,
+		waitLabel: "session:" + sessionBead.ID,
+		err:       fmt.Errorf("store timeout: %w", context.DeadlineExceeded),
+	}
+
+	var stderr bytes.Buffer
+	cancelStateAssignedToRetiredSessionBead(store, sessionBead.ID, time.Now(), &stderr)
+
+	want := []string{
+		"session beads: canceling waits for retired session " + sessionBead.ID + ": store timeout: context deadline exceeded",
+		"session beads: closing external message bindings for retired session " + sessionBead.ID + ": list bindings by target label: store timeout: context deadline exceeded",
+	}
+	got := stderrLines(stderr)
+	if len(got) != len(want) {
+		t.Fatalf("stderr lines = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("stderr line %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}

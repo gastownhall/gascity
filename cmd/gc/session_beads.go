@@ -1707,7 +1707,9 @@ const retiredCleanupLegBudget = 10 * time.Second
 
 // cancelStateAssignedToRetiredSessionBead cancels a retired session's waits
 // and closes its external-messaging state, each leg under its own
-// retiredCleanupLegBudget, and writes their failures to stderr.
+// retiredCleanupLegBudget, and writes their failures to stderr. A leg its own
+// budget stopped writes one cut-off line naming the session, the leg and the
+// budget instead of its ordinary error line.
 func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string, now time.Time, stderr io.Writer) {
 	if store == nil || strings.TrimSpace(sessionID) == "" {
 		return
@@ -1718,6 +1720,7 @@ func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string
 	sessFront := sessionFrontDoor(store)
 	waitsCtx, cancelWaits := context.WithTimeout(context.Background(), retiredCleanupLegBudget)
 	_, capped, err := sessFront.CancelWaits(waitsCtx, sessionID, now)
+	waitsCutOff := retiredCleanupLegCutOff(waitsCtx, err)
 	cancelWaits()
 	if capped {
 		stampWaitLookupCapDiagnostic(sessFront, sessionID, beads.LookupLimitError{
@@ -1726,15 +1729,36 @@ func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string
 			Limit: waitLookupLimit,
 		}, now, "retired-session-cleanup")
 	}
-	if err != nil {
+	switch {
+	case waitsCutOff:
+		logRetiredCleanupCutOff(stderr, sessionID, "waits", err)
+	case err != nil:
 		fmt.Fprintf(stderr, "session beads: canceling waits for retired session %s: %v\n", sessionID, err) //nolint:errcheck
 	}
 	extmsgCtx, cancelExtmsg := context.WithTimeout(context.Background(), retiredCleanupLegBudget)
 	err = extmsg.CloseSessionBindings(extmsgCtx, store, sessionID, now)
+	extmsgCutOff := retiredCleanupLegCutOff(extmsgCtx, err)
 	cancelExtmsg()
-	if err != nil {
+	switch {
+	case extmsgCutOff:
+		logRetiredCleanupCutOff(stderr, sessionID, "external-messaging", err)
+	case err != nil:
 		fmt.Fprintf(stderr, "session beads: closing external message bindings for retired session %s: %v\n", sessionID, err) //nolint:errcheck
 	}
+}
+
+// retiredCleanupLegCutOff reports whether a cleanup leg's error came from its
+// own budget: legCtx has ended and err wraps legCtx's error. Callers sample it
+// before canceling legCtx, so the cancel cannot relabel a store error.
+func retiredCleanupLegCutOff(legCtx context.Context, err error) bool {
+	ctxErr := legCtx.Err()
+	return err != nil && ctxErr != nil && errors.Is(err, ctxErr)
+}
+
+// logRetiredCleanupCutOff writes the one line reporting that a cleanup leg of
+// sessionID stopped at its retiredCleanupLegBudget.
+func logRetiredCleanupCutOff(stderr io.Writer, sessionID, leg string, err error) {
+	fmt.Fprintf(stderr, "session beads: retired session %s cleanup cut off: %s leg exceeded its %s budget: %v\n", sessionID, leg, retiredCleanupLegBudget, err) //nolint:errcheck
 }
 
 // retiredCleanup is cancelStateAssignedToRetiredSessionBead for a v2
