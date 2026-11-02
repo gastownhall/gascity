@@ -24,6 +24,21 @@ func relocatedGraphStore(state State) beads.Store {
 	return graph
 }
 
+// bindingReservedPrefixes is the reserved id namespaces store holds as a class
+// binding: the prefixes of every binding the residency topology serves from it,
+// as cmd/gc's readyLegReservedPrefixes reads them for `gc ready`. The
+// cross-store ready rule takes the binding's own verdict on a blocker in one of
+// them, which no other store can hold, and reads every copy of any other.
+func (s *Server) bindingReservedPrefixes(store beads.Store) []string {
+	var prefixes []string
+	for _, binding := range s.residencyTopology().Bindings {
+		if binding.Leg.Store == store { // residency:allow — matches the already-resolved graph store to its binding, to read its namespaces; no store is ordered, opened or read
+			prefixes = append(prefixes, binding.Prefixes...)
+		}
+	}
+	return prefixes
+}
+
 // queryTopology answers the city facts a generated work_query or MCP catalog has
 // to be built against, from the API's own view of the city.
 //

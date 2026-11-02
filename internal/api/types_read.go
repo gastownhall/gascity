@@ -80,9 +80,12 @@ type StatusAgentView struct {
 	Running       bool
 	Suspended     bool
 	SessionName   string
-	GroupName     string
-	ScaleLabel    string
-	Expanded      bool
+	// SessionID is the bead ID of the row's session; empty when the server
+	// sent none.
+	SessionID  string
+	GroupName  string
+	ScaleLabel string
+	Expanded   bool
 }
 
 // StatusRigView is the CLI-facing per-rig row.

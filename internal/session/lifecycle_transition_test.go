@@ -9,7 +9,6 @@ import (
 
 func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 	now := time.Date(2026, 4, 15, 13, 0, 0, 0, time.UTC)
-	later := now.Add(5 * time.Minute)
 	resetNow := time.Date(2026, 4, 15, 6, 0, 0, 0, time.FixedZone("test", -7*60*60))
 
 	tests := []struct {
@@ -33,11 +32,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"state_reason":              "explicit",
 				"pending_create_claim":      "true",
 				"pending_create_started_at": now.UTC().Format(time.RFC3339),
-				"held_until":                "",
-				"quarantined_until":         "",
 				"sleep_reason":              "",
-				"wait_hold":                 "",
-				"sleep_intent":              "",
 				"wake_attempts":             "0",
 				"churn_count":               "0",
 			},
@@ -61,7 +56,6 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"pending_create_started_at":  now.UTC().Format(time.RFC3339),
 				"last_woke_at":               now.UTC().Format(time.RFC3339),
 				"sleep_reason":               "idle-timeout",
-				"sleep_intent":               "",
 				"generation":                 "3",
 				"wake_request":               "",
 				"wake_requested_at":          "",
@@ -77,6 +71,8 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				FreshWake:         true,
 			}),
 			want: MetadataPatch{
+				"resume_failures":            "",
+				"resume_launch":              "",
 				"instance_token":             "token-4",
 				"continuation_epoch":         "5",
 				"continuation_reset_pending": "",
@@ -85,7 +81,6 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"pending_create_started_at":  now.UTC().Format(time.RFC3339),
 				"last_woke_at":               now.UTC().Format(time.RFC3339),
 				"sleep_reason":               "",
-				"sleep_intent":               "",
 				"generation":                 "4",
 				"wake_request":               "",
 				"wake_requested_at":          "",
@@ -103,15 +98,13 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "continuation reset wake",
 			patch: ContinuationResetWakePatch(now),
 			want: MetadataPatch{
+				"resume_failures":            "",
+				"resume_launch":              "",
 				"state":                      string(StateStartPending),
 				"state_reason":               "continuation-reset",
 				"pending_create_claim":       "true",
 				"pending_create_started_at":  now.UTC().Format(time.RFC3339),
-				"held_until":                 "",
-				"quarantined_until":          "",
 				"sleep_reason":               "",
-				"wait_hold":                  "",
-				"sleep_intent":               "",
 				"wake_attempts":              "0",
 				"churn_count":                "0",
 				"session_key":                "",
@@ -157,9 +150,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"last_woke_at":              "",
 				"pending_create_claim":      "",
 				"pending_create_started_at": "",
-				"sleep_intent":              "",
 				"slept_at":                  now.Format(time.RFC3339),
-				"suspended_at":              "",
 			},
 		},
 		{
@@ -178,6 +169,8 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "acknowledge drain fresh mode",
 			patch: AcknowledgeDrainPatch(now, true),
 			want: MetadataPatch{
+				"resume_failures":            "",
+				"resume_launch":              "",
 				"state":                      "drained",
 				"state_reason":               "",
 				"last_woke_at":               "",
@@ -199,15 +192,15 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "complete drain fresh mode",
 			patch: CompleteDrainPatch(now, "idle", true),
 			want: MetadataPatch{
+				"resume_failures":            "",
+				"resume_launch":              "",
 				"state":                      string(StateAsleep),
 				"state_reason":               "",
 				"sleep_reason":               "idle",
 				"last_woke_at":               "",
 				"pending_create_claim":       "",
 				"pending_create_started_at":  "",
-				"sleep_intent":               "",
 				"slept_at":                   now.Format(time.RFC3339),
-				"suspended_at":               "",
 				"session_key":                "",
 				"started_config_hash":        "",
 				"started_live_hash":          "",
@@ -223,6 +216,8 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "restart request",
 			patch: RestartRequestPatch("new-session-key", resetNow),
 			want: MetadataPatch{
+				"resume_failures":            "",
+				"resume_launch":              "",
 				"restart_requested":          "",
 				"started_config_hash":        "",
 				"continuation_reset_pending": "true",
@@ -242,6 +237,8 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "restart request without rotated key",
 			patch: RestartRequestPatch("", resetNow),
 			want: MetadataPatch{
+				"resume_failures":            "",
+				"resume_launch":              "",
 				"restart_requested":          "",
 				"started_config_hash":        "",
 				"continuation_reset_pending": "true",
@@ -260,6 +257,8 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "config drift reset to creating",
 			patch: ConfigDriftResetPatch(StateCreating, "new-session-key", now),
 			want: MetadataPatch{
+				"resume_failures":            "",
+				"resume_launch":              "",
 				"state":                      string(StateCreating),
 				"started_config_hash":        "",
 				"started_live_hash":          "",
@@ -280,6 +279,8 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "config drift reset to asleep",
 			patch: ConfigDriftResetPatch(StateAsleep, "new-session-key", now),
 			want: MetadataPatch{
+				"resume_failures":            "",
+				"resume_launch":              "",
 				"state":                      string(StateAsleep),
 				"started_config_hash":        "",
 				"started_live_hash":          "",
@@ -300,6 +301,8 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "config drift reset to asleep without rotated key",
 			patch: ConfigDriftResetPatch(StateAsleep, "", now),
 			want: MetadataPatch{
+				"resume_failures":            "",
+				"resume_launch":              "",
 				"state":                      string(StateAsleep),
 				"started_config_hash":        "",
 				"started_live_hash":          "",
@@ -343,10 +346,14 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "close",
 			patch: ClosePatch(now, "orphaned"),
 			want: MetadataPatch{
-				"state":        "orphaned",
-				"close_reason": "session orphaned: configured agent removed",
-				"closed_at":    now.Format(time.RFC3339),
-				"synced_at":    now.Format(time.RFC3339),
+				"state":                         "orphaned",
+				"close_reason":                  "session orphaned: configured agent removed",
+				"closed_at":                     now.Format(time.RFC3339),
+				"synced_at":                     now.Format(time.RFC3339),
+				"usage_close_pending":           "true",
+				"usage_closed_at":               now.Format(time.RFC3339Nano),
+				"usage_closed_awake_started_at": "",
+				"usage_closed_session_key":      "",
 			},
 		},
 		{
@@ -366,22 +373,17 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"pending_create_started_at": "",
 				"retired_named_identity":    "worker",
 				"synced_at":                 now.Format(time.RFC3339),
-				"held_until":                "",
-				"quarantined_until":         "",
-				"wait_hold":                 "",
-				"sleep_intent":              "",
 				"sleep_reason":              "",
 			},
 		},
 		{
 			name:  "quarantine",
-			patch: QuarantinePatch(later, 3),
+			patch: QuarantinePatch(3),
 			want: MetadataPatch{
-				"state":             string(StateQuarantined),
-				"state_reason":      "crash-loop",
-				"quarantined_until": later.Format(time.RFC3339),
-				"quarantine_cycle":  "3",
-				"last_woke_at":      "",
+				"state":            string(StateQuarantined),
+				"state_reason":     "crash-loop",
+				"quarantine_cycle": "3",
+				"last_woke_at":     "",
 			},
 		},
 		{
@@ -393,7 +395,6 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"pending_create_claim":      "",
 				"pending_create_started_at": "",
 				"continuity_eligible":       "true",
-				"quarantined_until":         "",
 				"crash_count":               "0",
 				"archived_at":               "",
 			},
@@ -407,7 +408,6 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"pending_create_claim":      "",
 				"pending_create_started_at": "",
 				"continuity_eligible":       "false",
-				"quarantined_until":         "",
 				"crash_count":               "0",
 				"archived_at":               "",
 			},
@@ -416,54 +416,47 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "clear expired user hold",
 			patch: ClearExpiredHoldPatch("user-hold"),
 			want: MetadataPatch{
-				"held_until":   "",
 				"sleep_reason": "",
 			},
 		},
 		{
 			name:  "clear expired non-hold timer",
 			patch: ClearExpiredHoldPatch("idle"),
-			want: MetadataPatch{
-				"held_until": "",
-			},
+			want:  MetadataPatch{},
 		},
 		{
 			name:  "clear expired quarantine",
 			patch: ClearExpiredQuarantinePatch("quarantine"),
 			want: MetadataPatch{
-				"quarantined_until": "",
-				"wake_attempts":     "0",
-				"churn_count":       "0",
-				"sleep_reason":      "",
+				"wake_attempts": "0",
+				"churn_count":   "0",
+				"sleep_reason":  "",
 			},
 		},
 		{
 			name:  "clear expired context churn",
 			patch: ClearExpiredQuarantinePatch("context-churn"),
 			want: MetadataPatch{
-				"quarantined_until": "",
-				"wake_attempts":     "0",
-				"churn_count":       "0",
-				"sleep_reason":      "",
+				"wake_attempts": "0",
+				"churn_count":   "0",
+				"sleep_reason":  "",
 			},
 		},
 		{
 			name:  "clear expired rate limit",
 			patch: ClearExpiredQuarantinePatch("rate_limit"),
 			want: MetadataPatch{
-				"quarantined_until": "",
-				"wake_attempts":     "0",
-				"churn_count":       "0",
-				"sleep_reason":      "",
+				"wake_attempts": "0",
+				"churn_count":   "0",
+				"sleep_reason":  "",
 			},
 		},
 		{
 			name:  "clear expired non-quarantine timer",
 			patch: ClearExpiredQuarantinePatch("idle"),
 			want: MetadataPatch{
-				"quarantined_until": "",
-				"wake_attempts":     "0",
-				"churn_count":       "0",
+				"wake_attempts": "0",
+				"churn_count":   "0",
 			},
 		},
 	}
@@ -746,10 +739,6 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 			state:       StateAsleep,
 			sleepReason: "wait-hold",
 			want: MetadataPatch{
-				"held_until":            "",
-				"quarantined_until":     "",
-				"wait_hold":             "",
-				"sleep_intent":          "",
 				"wake_attempts":         "0",
 				"wake_refused_event_at": "",
 				"churn_count":           "0",
@@ -761,16 +750,11 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 			state:       StateDrained,
 			sleepReason: "drained",
 			want: MetadataPatch{
-				"held_until":            "",
-				"quarantined_until":     "",
-				"wait_hold":             "",
-				"sleep_intent":          "",
 				"wake_attempts":         "0",
 				"wake_refused_event_at": "",
 				"churn_count":           "0",
 				"state":                 string(StateAsleep),
 				"sleep_reason":          "",
-				"suspended_at":          "",
 				"slept_at":              waitStoreNow.UTC().Format(time.RFC3339),
 			},
 		},
@@ -779,16 +763,11 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 			state:       StateSuspended,
 			sleepReason: "user-hold",
 			want: MetadataPatch{
-				"held_until":            "",
-				"quarantined_until":     "",
-				"wait_hold":             "",
-				"sleep_intent":          "",
 				"wake_attempts":         "0",
 				"wake_refused_event_at": "",
 				"churn_count":           "0",
 				"state":                 string(StateAsleep),
 				"sleep_reason":          "",
-				"suspended_at":          "",
 				"slept_at":              waitStoreNow.UTC().Format(time.RFC3339),
 			},
 		},
@@ -797,10 +776,6 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 			state:       StateAsleep,
 			sleepReason: "idle",
 			want: MetadataPatch{
-				"held_until":            "",
-				"quarantined_until":     "",
-				"wait_hold":             "",
-				"sleep_intent":          "",
 				"wake_attempts":         "0",
 				"wake_refused_event_at": "",
 				"churn_count":           "0",
@@ -811,10 +786,6 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 			state:       StateAsleep,
 			sleepReason: "rate_limit",
 			want: MetadataPatch{
-				"held_until":            "",
-				"quarantined_until":     "",
-				"wait_hold":             "",
-				"sleep_intent":          "",
 				"wake_attempts":         "0",
 				"wake_refused_event_at": "",
 				"churn_count":           "0",
@@ -846,9 +817,13 @@ func TestRequestWakePatchClearsStaleWakeBlockers(t *testing.T) {
 		"churn_count":       "2",
 	})
 
-	for _, key := range []string{"held_until", "quarantined_until", "sleep_reason", "wait_hold", "sleep_intent"} {
-		if merged[key] != "" {
-			t.Fatalf("%s = %q, want cleared", key, merged[key])
+	if merged["sleep_reason"] != "" {
+		t.Fatalf("sleep_reason = %q, want cleared", merged["sleep_reason"])
+	}
+	// The holds are the cells' (R7c): the builder leaves them.
+	for _, key := range []string{"held_until", "quarantined_until", "wait_hold", "sleep_intent"} {
+		if merged[key] == "" {
+			t.Fatalf("%s cleared by the builder, want it left to its cell", key)
 		}
 	}
 	for _, key := range []string{"wake_attempts", "churn_count"} {
@@ -964,5 +939,90 @@ func TestClosePatchKeepsShortStateCode(t *testing.T) {
 	if trimmed := strings.TrimSpace(patch["close_reason"]); len(trimmed) < 20 {
 		t.Errorf("close_reason = %q (%d trimmed chars); want >=20 to satisfy validator",
 			patch["close_reason"], len(trimmed))
+	}
+}
+
+// TestClosePatchStampsUsageCloseMarker pins the close-time usage marker: every
+// close that ends a confirmed awake interval leaves usage_close_pending=true and
+// usage_closed_at at the close time, so the usage lane can account an interval
+// whose row left the open set in the same commit (#6672). A failed create never
+// confirmed a start, so its close writes neither key and leaves any prior value
+// untouched.
+func TestClosePatchStampsUsageCloseMarker(t *testing.T) {
+	now := time.Date(2026, 9, 24, 9, 57, 55, 123456789, time.UTC)
+	for _, code := range []string{"drained", "dead-runtime", "orphaned", "stranded-repair", "gc_swept", "duplicate"} {
+		patch := ClosePatch(now, code)
+		if got := patch["usage_close_pending"]; got != "true" {
+			t.Errorf("ClosePatch(%q) usage_close_pending = %q, want true", code, got)
+		}
+		if got := patch["usage_closed_at"]; got != now.Format(time.RFC3339Nano) {
+			t.Errorf("ClosePatch(%q) usage_closed_at = %q, want %q", code, got, now.Format(time.RFC3339Nano))
+		}
+	}
+	failed := ClosePatch(now, string(StateFailedCreate))
+	for _, key := range []string{"usage_close_pending", "usage_closed_at", "usage_closed_awake_started_at", "usage_closed_session_key"} {
+		if v, ok := failed[key]; ok {
+			t.Errorf("ClosePatch(failed-create) writes %s=%q, want the key absent", key, v)
+		}
+	}
+}
+
+// TestUsageClosedIntervalSurvivesTheReopen pins the interval a pending usage
+// close names across its row's reopen: the reopen keeps the closed interval's
+// awake_started_at and session_key once, the interval view reads them over a
+// newer start's, and the row's next close drops them, since that close ended
+// the row's current interval.
+func TestUsageClosedIntervalSurvivesTheReopen(t *testing.T) {
+	closeAt := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
+	closed := map[string]string{"awake_started_at": "2026-09-24T09:50:00Z", "session_key": "key-1", "state": "drained"}
+	if got := UsageReopenPatch(closed); got != nil {
+		t.Fatalf("UsageReopenPatch with no pending close = %v, want nothing kept", got)
+	}
+	for k, v := range ClosePatch(closeAt, "drained") {
+		closed[k] = v
+	}
+	kept := UsageReopenPatch(closed)
+	want := MetadataPatch{"usage_closed_awake_started_at": "2026-09-24T09:50:00Z", "usage_closed_session_key": "key-1"}
+	if !reflect.DeepEqual(kept, want) {
+		t.Fatalf("UsageReopenPatch = %v, want %v", kept, want)
+	}
+
+	// The reopened row starts a newer interval under a fresh key.
+	reopened := map[string]string{}
+	for k, v := range closed {
+		reopened[k] = v
+	}
+	for k, v := range kept {
+		reopened[k] = v
+	}
+	reopened["awake_started_at"] = "2026-09-24T10:05:00.123456789Z"
+	reopened["session_key"] = "key-2"
+	if got := UsageReopenPatch(reopened); got != nil {
+		t.Fatalf("UsageReopenPatch over kept values = %v, want the first reopen's kept", got)
+	}
+	interval := UsageClosedIntervalMetadata(reopened)
+	if interval["awake_started_at"] != "2026-09-24T09:50:00Z" || interval["session_key"] != "key-1" {
+		t.Fatalf("interval view start/key = %q/%q, want the closed interval's 2026-09-24T09:50:00Z/key-1", interval["awake_started_at"], interval["session_key"])
+	}
+	if reopened["awake_started_at"] != "2026-09-24T10:05:00.123456789Z" || reopened["session_key"] != "key-2" {
+		t.Fatal("UsageClosedIntervalMetadata modified the row's own metadata")
+	}
+	if end := UsageIntervalEnd(interval, time.Date(2026, 9, 24, 9, 50, 0, 0, time.UTC), closeAt.Add(time.Hour)); !end.Equal(closeAt) {
+		t.Fatalf("closed interval ends at %s, want the close at %s", end, closeAt)
+	}
+
+	for k, v := range ClosePatch(closeAt.Add(30*time.Minute), "drained") {
+		reopened[k] = v
+	}
+	if interval := UsageClosedIntervalMetadata(reopened); interval["awake_started_at"] != "2026-09-24T10:05:00.123456789Z" || interval["session_key"] != "key-2" {
+		t.Fatalf("after a second close the interval view start/key = %q/%q, want the row's own", interval["awake_started_at"], interval["session_key"])
+	}
+	for k, v := range UsageCloseClearPatch() {
+		if v != "" {
+			t.Fatalf("UsageCloseClearPatch sets %s=%q, want it cleared", k, v)
+		}
+	}
+	if len(UsageCloseClearPatch()) != 4 {
+		t.Fatalf("UsageCloseClearPatch = %v, want the marker and the kept start and key", UsageCloseClearPatch())
 	}
 }

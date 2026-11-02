@@ -1539,6 +1539,69 @@ func TestResolveMailTargetsForCommand_FailsWhenStoreOpenErrors(t *testing.T) {
 	}
 }
 
+// TestMailTargetLookupFailuresPrintAndClassify pins how a failed mail target
+// lookup reads: printed after the command's name, with the gc doctor hint only
+// for a store that does not open, and classified so an API read takes the
+// local path only for a target that names no mailbox or several.
+func TestMailTargetLookupFailuresPrintAndClassify(t *testing.T) {
+	noIdentity := noMailIdentityError{candidates: []string{"gc-999", "nosuch"}}
+	for _, tc := range []struct {
+		name           string
+		err            error
+		wantStderr     string
+		wantUnresolved bool
+	}{
+		{
+			name:       "store does not open",
+			err:        mailStoreOpenError{err: errors.New("opening bead store: boom")},
+			wantStderr: "gc mail inbox: opening bead store: boom\nhint: run \"gc doctor\" for diagnostics\n",
+		},
+		{
+			name:       "store read fails",
+			err:        fmt.Errorf("listing sessions: %w", errors.New("boom")),
+			wantStderr: "gc mail inbox: listing sessions: boom\n",
+		},
+		{
+			name:           "no default identity resolves",
+			err:            noIdentity,
+			wantStderr:     "gc mail inbox: no mail identity resolved (tried [gc-999 nosuch])\n",
+			wantUnresolved: true,
+		},
+		{
+			name:           "ambiguous target",
+			err:            fmt.Errorf("%w: %q matches 2 sessions", session.ErrAmbiguous, "dup"),
+			wantStderr:     "gc mail inbox: " + session.ErrAmbiguous.Error() + ": \"dup\" matches 2 sessions\n",
+			wantUnresolved: true,
+		},
+		{
+			name:           "configured named session conflict",
+			err:            fmt.Errorf("resolving configured named session %q: %w", "boss", errNamedSessionConflict),
+			wantStderr:     "gc mail inbox: resolving configured named session \"boss\": configured named session conflict\n",
+			wantUnresolved: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			if mailTargetLookupOK(tc.err, &stderr, "gc mail inbox") {
+				t.Fatal("mailTargetLookupOK = true for a failed lookup")
+			}
+			if got := stderr.String(); got != tc.wantStderr {
+				t.Fatalf("stderr = %q, want %q", got, tc.wantStderr)
+			}
+			if got := mailTargetUnresolved(tc.err); got != tc.wantUnresolved {
+				t.Fatalf("mailTargetUnresolved = %v, want %v", got, tc.wantUnresolved)
+			}
+		})
+	}
+	if !errors.Is(noIdentity, session.ErrSessionNotFound) {
+		t.Fatal("noMailIdentityError does not match session.ErrSessionNotFound")
+	}
+	var stderr bytes.Buffer
+	if !mailTargetLookupOK(nil, &stderr, "gc mail inbox") || stderr.Len() != 0 {
+		t.Fatalf("mailTargetLookupOK(nil) = false or printed %q", stderr.String())
+	}
+}
+
 func TestConfiguredMailboxAddressDoesNotRequireProviderResolution(t *testing.T) {
 	cityPath := t.TempDir()
 	cityToml := `[workspace]
@@ -2297,10 +2360,10 @@ func TestMailReplyNotifySuccess(t *testing.T) {
 	mp.Send("alice", "bob", "Hello", "first") //nolint:errcheck
 
 	var nudged, nudgedMessageID string
-	nf := func(recipient, messageID string) error {
+	nf := func(recipient, messageID string) (string, error) {
 		nudged = recipient
 		nudgedMessageID = messageID
-		return nil
+		return "", nil
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -2324,8 +2387,8 @@ func TestMailReplyNotifyNudgeError(t *testing.T) {
 	mp := beadmail.New(store)
 	mp.Send("alice", "bob", "Hello", "first") //nolint:errcheck
 
-	nf := func(_, _ string) error {
-		return fmt.Errorf("session not found")
+	nf := func(_, _ string) (string, error) {
+		return "", fmt.Errorf("session not found")
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -2703,6 +2766,112 @@ func TestMailMarkReadSuccess(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Marked gc-1 as read") {
 		t.Errorf("stdout = %q, want confirmation", stdout.String())
 	}
+}
+
+// TestMailMarkReadList covers mark-read takes several ids, as
+// separate arguments or as one whitespace-separated argument (an unsplit
+// "$IDS"), which used to be looked up as a single id and mark nothing. A bad
+// id is reported and the rest are still marked.
+func TestMailMarkReadList(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	for _, body := range []string{"one", "two", "three"} {
+		if _, err := mp.Send("human", "mayor", "", body); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailMarkRead(mp, events.Discard, []string{"gc-1 gc-2", "gc-missing", "gc-3"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doMailMarkRead = %d, want 1 for the missing id; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc-missing") {
+		t.Errorf("stderr = %q, want the failing id named", stderr.String())
+	}
+	for _, id := range []string{"gc-1", "gc-2", "gc-3"} {
+		if !strings.Contains(stdout.String(), "Marked "+id+" as read") {
+			t.Errorf("stdout = %q, want %s confirmed", stdout.String(), id)
+		}
+	}
+	if _, unread, err := mp.Count("mayor"); err != nil || unread != 0 {
+		t.Fatalf("Count(mayor) unread = %d, err = %v; want 0 after marking all three", unread, err)
+	}
+}
+
+// TestMailMarkReadListJSON covers the --json result of mark-read: several ids
+// report ids and count with no id, a partial failure writes no JSON and names
+// the failing id, and a single id keeps its id/ids/count shape.
+func TestMailMarkReadListJSON(t *testing.T) {
+	newProvider := func(t *testing.T) mail.Provider {
+		t.Helper()
+		mp := beadmail.New(beads.NewMemStore())
+		for _, body := range []string{"one", "two"} {
+			if _, err := mp.Send("human", "mayor", "", body); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return mp
+	}
+	decode := func(t *testing.T, out string) map[string]any {
+		t.Helper()
+		lines := strings.Split(strings.TrimSpace(out), "\n")
+		if len(lines) != 1 {
+			t.Fatalf("stdout = %q, want one JSON line", out)
+		}
+		var got map[string]any
+		if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
+			t.Fatalf("Unmarshal(%q): %v", lines[0], err)
+		}
+		return got
+	}
+
+	t.Run("several ids", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := doMailMarkReadJSON(newProvider(t), events.Discard, []string{"gc-1 gc-2"}, true, &stdout, &stderr); code != 0 {
+			t.Fatalf("doMailMarkReadJSON = %d, want 0; stderr: %s", code, stderr.String())
+		}
+		got := decode(t, stdout.String())
+		if id, ok := got["id"]; ok && id != "" {
+			t.Errorf("id = %v, want absent for several ids", id)
+		}
+		if ids, _ := got["ids"].([]any); len(ids) != 2 || ids[0] != "gc-1" || ids[1] != "gc-2" {
+			t.Errorf("ids = %v, want [gc-1 gc-2]", got["ids"])
+		}
+		if got["count"] != float64(2) {
+			t.Errorf("count = %v, want 2", got["count"])
+		}
+	})
+
+	t.Run("partial failure", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := doMailMarkReadJSON(newProvider(t), events.Discard, []string{"gc-1", "gc-missing"}, true, &stdout, &stderr); code != 1 {
+			t.Fatalf("doMailMarkReadJSON = %d, want 1; stderr: %s", code, stderr.String())
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("stdout = %q, want no JSON on a partial failure", stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "gc-missing") {
+			t.Errorf("stderr = %q, want the failing id named", stderr.String())
+		}
+	})
+
+	t.Run("single id", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := doMailMarkReadJSON(newProvider(t), events.Discard, []string{"gc-1"}, true, &stdout, &stderr); code != 0 {
+			t.Fatalf("doMailMarkReadJSON = %d, want 0; stderr: %s", code, stderr.String())
+		}
+		got := decode(t, stdout.String())
+		if got["id"] != "gc-1" {
+			t.Errorf("id = %v, want gc-1", got["id"])
+		}
+		if ids, _ := got["ids"].([]any); len(ids) != 1 || ids[0] != "gc-1" {
+			t.Errorf("ids = %v, want [gc-1]", got["ids"])
+		}
+		if got["count"] != float64(1) {
+			t.Errorf("count = %v, want 1", got["count"])
+		}
+	})
 }
 
 func TestMailMarkUnreadSuccess(t *testing.T) {
@@ -3553,10 +3722,10 @@ func TestMailSendNotifySuccess(t *testing.T) {
 	recipients := map[string]bool{"human": true, "mayor": true}
 
 	var nudged, nudgedMessageID string
-	nf := func(recipient, messageID string) error {
+	nf := func(recipient, messageID string) (string, error) {
 		nudged = recipient
 		nudgedMessageID = messageID
-		return nil
+		return "", nil
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -3575,13 +3744,105 @@ func TestMailSendNotifySuccess(t *testing.T) {
 	}
 }
 
+// TestMailSendReportsSentBeforeNudging pins that the sent confirmation is on
+// stdout before the recipient is nudged. escalate.sh relies on that order: a
+// send its timeout cuts off after this line counts as delivered, so printing
+// it only after the nudge would make a stalled wake look like a lost mail.
+func TestMailSendReportsSentBeforeNudging(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	recipients := map[string]bool{"human": true, "mayor": true}
+
+	var stdout, stderr bytes.Buffer
+	nudged := false
+	var stdoutAtNudge string
+	nf := func(_, _ string) (string, error) {
+		nudged = true
+		stdoutAtNudge = stdout.String()
+		return "", nil
+	}
+
+	code := doMailSend(mp, events.Discard, recipients, "human", []string{"mayor", "wake up"}, nf, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailSend = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !nudged {
+		t.Fatal("nudgeFn was not called")
+	}
+	if !strings.Contains(stdoutAtNudge, "Sent message gc-1 to mayor") {
+		t.Errorf("stdout when the nudge ran = %q, want the sent confirmation already printed", stdoutAtNudge)
+	}
+}
+
+// TestMailSendNotifyAllReportsEachSkippedWake: gc mail send --all --notify
+// and gc mail reply --notify over held recipients report each recipient's
+// held wake on its own line, while stdout keeps only the sent lines (or the
+// one --json line) and the command exits 0 with notified=true.
+func TestMailSendNotifyAllReportsEachSkippedWake(t *testing.T) {
+	c := newMailNotifyWakeCity(t, true)
+	targets := map[string]nudgeTarget{"worker": c.target, "builder": c.addSession(t, "builder")}
+	for _, target := range targets {
+		if err := c.mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, c.dir), target.sessionID, false); err != nil {
+			t.Fatalf("Suspend(%s): %v", target.alias, err)
+		}
+	}
+	nf := func(recipient, messageID string) (string, error) {
+		return sendMailNotifyWithOp(targets[recipient], c.store, c.fake, "human", messageID)
+	}
+	mp := beadmail.New(beads.NewMemStore())
+	recipients := map[string]bool{"human": true, "worker": true, "builder": true}
+
+	var stdout, stderr bytes.Buffer
+	if code := doMailSendAllJSON(mp, events.Discard, recipients, "human", []string{"standup"}, nf, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("doMailSendAllJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if want := "Sent message gc-1 to builder\nSent message gc-2 to worker\n"; stdout.String() != want {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want no nudge failure", stderr.String())
+	}
+	lines := c.notifyLines()
+	if len(lines) != 2 {
+		t.Fatalf("gc mail notify lines = %q, want one per held recipient", lines)
+	}
+	for i, name := range []string{"builder", "worker"} {
+		if !strings.Contains(lines[i], "queued for "+name) || !strings.Contains(lines[i], "held by an operator") {
+			t.Fatalf("gc mail notify line %d = %q, want %s's hold reported", i, lines[i], name)
+		}
+	}
+
+	original, err := mp.Send("worker", "human", "question", "ping")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	c.warnings.Reset()
+	stdout.Reset()
+	if code := doMailReplyJSON(mp, events.Discard, original.ID, "human", "", "pong", nf, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("doMailReplyJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if n := strings.Count(stdout.String(), "\n"); n != 1 {
+		t.Fatalf("stdout = %q, want the single --json line", stdout.String())
+	}
+	var result mailActionResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal %q: %v", stdout.String(), err)
+	}
+	if !result.Notified {
+		t.Fatalf("notified = false, want true for a queued notice; stdout: %s", stdout.String())
+	}
+	if lines := c.notifyLines(); len(lines) != 1 || !strings.Contains(lines[0], "queued for worker") || !strings.Contains(lines[0], "held by an operator") {
+		t.Fatalf("gc mail notify lines = %q, want worker's hold reported once", lines)
+	}
+}
+
 func TestMailSendNotifyNudgeError(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
 	recipients := map[string]bool{"human": true, "mayor": true}
 
-	nf := func(_, _ string) error {
-		return fmt.Errorf("session not found")
+	nf := func(_, _ string) (string, error) {
+		return "", fmt.Errorf("session not found")
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -3605,9 +3866,9 @@ func TestMailSendNotifyToHuman(t *testing.T) {
 	recipients := map[string]bool{"human": true, "mayor": true}
 
 	nudgeCalled := false
-	nf := func(_, _ string) error {
+	nf := func(_, _ string) (string, error) {
 		nudgeCalled = true
-		return nil
+		return "", nil
 	}
 
 	var stdout bytes.Buffer

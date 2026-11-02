@@ -8,15 +8,24 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
+// actor is kind's Actor on the server's city: an operator for a user's
+// request, ActorBackground for a message that may not start a session here.
+func (s *Server) actor(kind session.ActorKind) session.Actor {
+	city, _ := session.NewCityDir(s.state.CityPath())
+	return session.Actor{Kind: kind, City: city}
+}
+
 func (s *Server) sessionManager(store beads.Store) *session.Manager {
 	cfg := s.state.Config()
 	if cfg == nil {
-		return session.NewManagerWithOptions(store, s.state.SessionProvider(), session.WithCityPath(s.state.CityPath()))
+		return session.NewManagerWithOptions(store, s.state.SessionProvider(), session.WithCityPath(s.state.CityPath()), session.WithDeferredSubmitQueue(s.state.NudgeQueue()))
 	}
 	return session.NewManagerWithOptions(
 		store,
 		s.state.SessionProvider(),
 		session.WithCityPath(s.state.CityPath()),
+		session.WithDeferredSubmitQueue(s.state.NudgeQueue()),
+		session.WithRuntimeLeaseTTL(session.RuntimeLeaseTTLFor(cfg)),
 		session.WithTransportPolicyResolver(func(template, provider string) (string, bool) {
 			return configuredSessionTransportResolution(cfg, template, provider)
 		}),

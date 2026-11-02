@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +26,17 @@ type killHookProvider struct {
 	runtime.Provider
 	beforeStop func()
 	afterStop  func()
+}
+
+// ObserveLivenessWithError and ObserveLivenessSince read the fixture's Fake,
+// whose sessions map is the runtime: every read is fresh, as tmux's is, so
+// the kill can confirm a runtime gone (runtime.FreshReadable).
+func (p *killHookProvider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	return runtime.FullFake{Fake: p.Provider.(*runtime.Fake)}.ObserveLivenessWithError(name, processNames)
+}
+
+func (p *killHookProvider) ObserveLivenessSince(name string, processNames []string, _ time.Time) (runtime.Liveness, error) {
+	return p.ObserveLivenessWithError(name, processNames)
 }
 
 func (p *killHookProvider) Stop(name string) error {
@@ -163,10 +175,10 @@ func TestCmdSessionKill_ReconcileBetweenIntentAndTeardownLeavesKilledRowAlone(t 
 					return
 				}
 				stateBefore := current.Metadata["state"]
-				reconcileSessionBeads(
-					context.Background(), []beads.Bead{current}, desiredState,
+				reconcileSessionBeadsAtPath(
+					context.Background(), t.TempDir(), []beads.Bead{current}, desiredState,
 					configuredSessionNames(cfg, "", store), cfg, inner, store,
-					nil, nil, nil, newDrainTracker(), map[string]int{identity: 1}, false, nil, "",
+					nil, nil, nil, nil, newDrainTracker(), map[string]int{identity: 1}, false, nil, "",
 					nil, clock.Real{}, events.Discard, 0, 0, &tickLog, &tickLog,
 					withStartStabilityWaiter(immediateStartStabilityWaiter),
 					withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
@@ -403,15 +415,15 @@ func TestSessionKillFence_ConditionalStoreLifecycle(t *testing.T) {
 	store := openConditionalKillFenceStore(t)
 	b := createKillFenceSessionBead(t, store)
 
-	fence, err := writeSessionKillFence(store, b.ID, time.Now().UTC())
+	fence, err := sessionpkg.WriteKillFence(store, b.ID, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("writeSessionKillFence: %v", err)
 	}
 	fenced := mustGetBead(t, store, b.ID)
-	if !fence.owns(fenced) {
+	if !fence.Owns(fenced) {
 		t.Fatalf("fence does not own the row it wrote: %#v", fenced.Metadata)
 	}
-	if err := fence.rollback(store); err != nil {
+	if err := fence.Rollback(store); err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
 	restored := mustGetBead(t, store, b.ID)
@@ -424,15 +436,15 @@ func TestSessionKillFence_ConditionalStoreLifecycle(t *testing.T) {
 	if got := restored.Metadata["last_woke_at"]; got != "2026-09-01T10:00:00Z" {
 		t.Errorf("restored last_woke_at = %q, want the pre-kill value", got)
 	}
-	if err := fence.clear(store); !errors.Is(err, errSessionKillFenceSuperseded) {
-		t.Fatalf("clear after rollback = %v, want errSessionKillFenceSuperseded", err)
+	if err := fence.Clear(store); !errors.Is(err, sessionpkg.ErrKillFenceSuperseded) {
+		t.Fatalf("clear after rollback = %v, want sessionpkg.ErrKillFenceSuperseded", err)
 	}
 
-	fence, err = writeSessionKillFence(store, b.ID, time.Now().UTC())
+	fence, err = sessionpkg.WriteKillFence(store, b.ID, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("second writeSessionKillFence: %v", err)
 	}
-	if err := fence.clear(store); err != nil {
+	if err := fence.Clear(store); err != nil {
 		t.Fatalf("clear: %v", err)
 	}
 	cleared := mustGetBead(t, store, b.ID)
@@ -453,7 +465,7 @@ func TestApplySessionKillFencePatch_RedecidesAfterConcurrentWrite(t *testing.T) 
 	b := createKillFenceSessionBead(t, store)
 
 	var observedStates []string
-	err := applySessionKillFencePatch(store, b.ID, func(cur beads.Bead) (map[string]string, bool) {
+	err := sessionpkg.ApplyKillFencePatch(store, b.ID, func(cur beads.Bead) (map[string]string, bool) {
 		observedStates = append(observedStates, cur.Metadata["state"])
 		if len(observedStates) == 1 {
 			// A concurrent writer lands after this observation.
@@ -471,5 +483,290 @@ func TestApplySessionKillFencePatch_RedecidesAfterConcurrentWrite(t *testing.T) 
 	}
 	if got := mustGetBead(t, store, b.ID).Metadata["sleep_reason"]; got != "observed-active" {
 		t.Errorf("sleep_reason = %q, want the decision made on the fresh row", got)
+	}
+}
+
+// pendingWake is a pending explicit wake request (CONTRACT v5.7 D7).
+var pendingWake = map[string]string{"wake_request": "explicit", "wake_requested_at": "2026-10-08T11:00:00Z"}
+
+// TestCmdSessionKill_ClearsPendingWake is D7 rule 3: the kill supersedes a
+// pending wake in its own write, through the kill fence or, for a runtime
+// already gone, the post-kill sync. A stale wake would keep a killed idle seat
+// wanted. Kills either write dropping the clear.
+func TestCmdSessionKill_ClearsPendingWake(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		stopped bool
+	}{{name: "fenced"}, {name: "runtime already gone", stopped: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			const sessionName = "s-gc-kill-wake"
+			store, bead, _ := newKillPokeSession(t, sessionName)
+			stubKillPoke(t)
+			setKillFixtureMetadata(t, store, bead.ID, pendingWake)
+			inner := wrapKillPokeProvider(t, &killHookProvider{})
+			if tc.stopped {
+				setKillFixtureMetadata(t, store, bead.ID, map[string]string{"state": string(sessionpkg.StateAsleep)})
+				if err := inner.Stop(sessionName); err != nil {
+					t.Fatalf("pre-stopping runtime: %v", err)
+				}
+			}
+
+			var stdout, stderr bytes.Buffer
+			if code := cmdSessionKill([]string{killPokeSessionIdentity}, &stdout, &stderr); code != 0 {
+				t.Fatalf("cmdSessionKill = %d, want 0; stderr=%s", code, stderr.String())
+			}
+			final := mustGetBead(t, store, bead.ID)
+			for key := range pendingWake {
+				if got := final.Metadata[key]; got != "" {
+					t.Errorf("after kill %s = %q, want cleared", key, got)
+				}
+			}
+		})
+	}
+}
+
+// TestCmdSessionKill_StopFailureRestoresPendingWake: the wake clear rides in
+// the kill-fence patch, so a failed kill's rollback restores the wake with
+// the rest of the row. Kills a separate clear write the rollback misses.
+func TestCmdSessionKill_StopFailureRestoresPendingWake(t *testing.T) {
+	const sessionName = "s-gc-kill-wake-restore"
+	store, bead, _ := newKillPokeSession(t, sessionName)
+	stubKillPoke(t)
+	setKillFixtureMetadata(t, store, bead.ID, pendingWake)
+	var atStop beads.Bead
+	hooks := &killHookProvider{}
+	hooks.beforeStop = func() { atStop = mustGetBead(t, store, bead.ID) }
+	fake := wrapKillPokeProvider(t, hooks).(*runtime.Fake)
+	fake.StopErrors[sessionName] = errors.New("tmux: kill-session refused")
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionKill([]string{killPokeSessionIdentity}, &stdout, &stderr); code != 1 {
+		t.Fatalf("cmdSessionKill = %d, want 1 when the runtime survives; stderr=%s", code, stderr.String())
+	}
+	final := mustGetBead(t, store, bead.ID)
+	for key, want := range pendingWake {
+		if got := atStop.Metadata[key]; got != "" {
+			t.Errorf("under the fence %s = %q, want cleared", key, got)
+		}
+		if got := final.Metadata[key]; got != want {
+			t.Errorf("after rollback %s = %q, want %q restored", key, got, want)
+		}
+	}
+}
+
+// TestCmdSessionSuspend_ManagedClearsPendingWake is D7 rule 3 for the
+// managed `gc session suspend`, which writes the hold and leaves the stop to
+// the controller. Kills the call site writing a patch without the clear.
+func TestCmdSessionSuspend_ManagedClearsPendingWake(t *testing.T) {
+	store, bead, _ := newKillPokeSession(t, "s-gc-suspend-wake")
+	setKillFixtureMetadata(t, store, bead.ID, pendingWake)
+	oldManaged, oldPoke, oldEnqueue := sessionSuspendManagedReconciler, sessionSuspendPokeController, sessionSuspendEnqueueController
+	sessionSuspendManagedReconciler = func(string) bool { return true }
+	sessionSuspendPokeController = func(string) error { return nil }
+	sessionSuspendEnqueueController = func(string, reconcilekey.Key) error { return nil }
+	t.Cleanup(func() {
+		sessionSuspendManagedReconciler, sessionSuspendPokeController, sessionSuspendEnqueueController = oldManaged, oldPoke, oldEnqueue
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionSuspend([]string{killPokeSessionIdentity}, "", &stdout, &stderr, false); code != 0 {
+		t.Fatalf("cmdSessionSuspend = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	final := mustGetBead(t, store, bead.ID)
+	if final.Metadata["state"] != "suspended" || final.Metadata["sleep_intent"] != "user-hold" || final.Metadata["held_until"] == "" {
+		t.Fatalf("managed suspend left %v, want the hold", final.Metadata)
+	}
+	for key := range pendingWake {
+		if got := final.Metadata[key]; got != "" {
+			t.Errorf("after managed suspend %s = %q, want cleared", key, got)
+		}
+	}
+}
+
+// TestCmdSessionKill_ClearsAUserHoldsTimer: a kill clears a user-hold
+// intent, and with it the operator's held_until, so no heartbeat-shaped hold
+// is left, whether the kill takes the fence or (its runtime already gone)
+// the plain asleep sync; a heartbeat hold (no intent) keeps its timer, and a
+// failed kill's rollback restores both.
+func TestCmdSessionKill_ClearsAUserHoldsTimer(t *testing.T) {
+	heldUntil := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	for name, tc := range map[string]struct {
+		intent   string
+		stopFail bool
+		gone     bool // a suspended row, its runtime already stopped: no fence
+		want     string
+	}{
+		"user hold":             {intent: "user-hold", want: ""},
+		"user hold, no fence":   {intent: "user-hold", gone: true, want: ""},
+		"heartbeat":             {want: heldUntil},
+		"user hold, stop fails": {intent: "user-hold", stopFail: true, want: heldUntil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sessionName := "s-gc-kill-hold"
+			store, bead, _ := newKillPokeSession(t, sessionName)
+			stubKillPoke(t)
+			setKillFixtureMetadata(t, store, bead.ID, map[string]string{"held_until": heldUntil, "sleep_intent": tc.intent})
+			fake := wrapKillPokeProvider(t, &killHookProvider{}).(*runtime.Fake)
+			if tc.stopFail {
+				fake.StopErrors[sessionName] = errors.New("tmux: kill-session refused")
+			}
+			if tc.gone { // a suspended row whose runtime is gone
+				setKillFixtureMetadata(t, store, bead.ID, map[string]string{"state": "suspended"})
+				if err := fake.Stop(sessionName); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var stdout, stderr bytes.Buffer
+			_ = cmdSessionKill([]string{killPokeSessionIdentity}, &stdout, &stderr)
+			final := mustGetBead(t, store, bead.ID)
+			if got := final.Metadata["held_until"]; got != tc.want {
+				t.Fatalf("held_until = %q, want %q; stderr=%s", got, tc.want, stderr.String())
+			}
+			if tc.stopFail && final.Metadata["sleep_intent"] != tc.intent {
+				t.Fatalf("rollback sleep_intent = %q, want %q", final.Metadata["sleep_intent"], tc.intent)
+			}
+		})
+	}
+}
+
+// TestSessionKillFenceRollbackKeepsWritesSince: a failed kill's rollback
+// restores only the keys the fence changed that still read as it wrote them:
+// a wait and a quarantine written after the fence stand, and the operator's
+// suspend the kill cleared comes back.
+func TestSessionKillFenceRollbackKeepsWritesSince(t *testing.T) {
+	store := openConditionalKillFenceStore(t)
+	b := createKillFenceSessionBead(t, store)
+	held := time.Now().Add(sessionpkg.IndefiniteHoldDuration).UTC().Format(time.RFC3339)
+	if err := store.SetMetadataBatch(b.ID, map[string]string{"sleep_intent": "user-hold", "held_until": held}); err != nil {
+		t.Fatal(err)
+	}
+	fence, err := sessionpkg.WriteKillFence(store, b.ID, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("writeSessionKillFence: %v", err)
+	}
+	if fenced := mustGetBead(t, store, b.ID); fenced.Metadata["sleep_intent"] != "" || fenced.Metadata["held_until"] != "" {
+		t.Fatalf("the kill left the suspend: %v", fenced.Metadata)
+	}
+	q := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	if err := store.SetMetadataBatch(b.ID, map[string]string{"quarantined_until": q, "wait_hold": "true"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fence.Rollback(store); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	got := mustGetBead(t, store, b.ID)
+	if got.Metadata["quarantined_until"] != q || got.Metadata["wait_hold"] != "true" {
+		t.Fatalf("the rollback reverted writes made after the fence: %v", got.Metadata)
+	}
+	if got.Metadata["sleep_intent"] != "user-hold" || got.Metadata["held_until"] != held || got.Metadata["state"] != string(sessionpkg.StateAwake) {
+		t.Fatalf("the rollback did not restore what the kill changed: %v", got.Metadata)
+	}
+}
+
+// TestSessionKillFenceRollbackLeavesAKeyRewrittenSince: a key the fence wrote
+// that another writer changed after it keeps that writer's value.
+func TestSessionKillFenceRollbackLeavesAKeyRewrittenSince(t *testing.T) {
+	store := openConditionalKillFenceStore(t)
+	b := createKillFenceSessionBead(t, store)
+	fence, err := sessionpkg.WriteKillFence(store, b.ID, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("writeSessionKillFence: %v", err)
+	}
+	if err := store.SetMetadataBatch(b.ID, map[string]string{"last_woke_at": "2026-10-11T00:00:00Z"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fence.Rollback(store); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if got := mustGetBead(t, store, b.ID).Metadata["last_woke_at"]; got != "2026-10-11T00:00:00Z" {
+		t.Fatalf("last_woke_at = %q after the rollback, want the write made since the fence", got)
+	}
+}
+
+// batchHookStore runs hook before the first SetMetadataBatch: a write that
+// lands between a blind writer's read and its write.
+type batchHookStore struct {
+	beads.Store
+	hook func()
+}
+
+func (s *batchHookStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if h := s.hook; h != nil {
+		s.hook = nil
+		h()
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// TestSessionKillFenceWithoutCASWritesOnlyWhatTheKillChanged: on a store
+// without conditional writes, the fence's blind write carries only the class
+// keys the kill changed, so a class key written between its read and its
+// write (here a suspend's stamp) stands.
+func TestSessionKillFenceWithoutCASWritesOnlyWhatTheKillChanged(t *testing.T) {
+	mem := beads.NewMemStore()
+	b := createKillFenceSessionBead(t, mem)
+	store := &batchHookStore{Store: mem, hook: func() {
+		_ = mem.SetMetadataBatch(b.ID, map[string]string{"suspended_at": "2026-10-11T00:00:00Z"})
+	}}
+	if _, err := sessionpkg.WriteKillFence(store, b.ID, time.Now().UTC()); err != nil {
+		t.Fatalf("writeSessionKillFence: %v", err)
+	}
+	if got := mustGetBead(t, mem, b.ID).Metadata["suspended_at"]; got != "2026-10-11T00:00:00Z" {
+		t.Fatalf("suspended_at = %q, want the stamp written during the fence's write", got)
+	}
+}
+
+// Kills a no-fence kill sync that writes hold keys the fence leaves (the
+// delta review's D22): over an operator suspend, a heartbeat, a wait's
+// intent and an idle stop, killSleepPatch writes exactly the disposition
+// keys writeSessionKillFence writes, so a wait or a heartbeat stays.
+func TestKillSleepPatchWritesTheFencesHoldKeys(t *testing.T) {
+	now := time.Now().UTC()
+	future := now.Add(time.Hour).Format(time.RFC3339)
+	classKeys := func(p map[string]string) map[string]string {
+		out := map[string]string{}
+		lifecycle := sessionpkg.LifecycleOnly(p)
+		for k, v := range p {
+			if _, ok := lifecycle[k]; !ok {
+				out[k] = v
+			}
+		}
+		return out
+	}
+	for name, meta := range map[string]map[string]string{
+		"operator suspend": {"state": "suspended", "sleep_intent": "user-hold", "held_until": future, "suspended_at": now.Format(time.RFC3339)},
+		"heartbeat":        {"state": "active", "held_until": future},
+		"wait intent":      {"state": "asleep", "sleep_intent": string(sessionpkg.SleepReasonWaitHold), "wait_hold": "true"},
+		"idle stop":        {"state": "active", "sleep_intent": "idle-stop-pending"},
+	} {
+		store := beads.NewMemStore()
+		b, err := store.Create(beads.Bead{Title: "s", Type: sessionpkg.BeadType, Labels: []string{sessionpkg.LabelSession}, Metadata: meta})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fence, err := sessionpkg.WriteKillFence(store, b.ID, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := classKeys(sessionpkg.KillSleepPatch(b.ID, meta, now)), classKeys(fence.Wrote()); !maps.Equal(got, want) {
+			t.Errorf("%s: killSleepPatch writes hold keys %v, the fence %v", name, got, want)
+		}
+	}
+}
+
+// TestSessionKillFenceUnmintsLostAttempts: a kill fence whose every CAS
+// attempt loses leaves no open disposition mint for its row, so a later
+// hand-built write of the same class content still fails the guard.
+func TestSessionKillFenceUnmintsLostAttempts(t *testing.T) {
+	m, id := stampedMem(t, gate.Require)
+	if err := m.SetMetadataBatch(id, map[string]string{"state": "active", "sleep_intent": "user-hold", "held_until": "2126-01-01T00:00:00Z"}); err != nil {
+		t.Fatal(err)
+	}
+	before := sessionpkg.OpenDispositionMints(id)
+	if _, err := sessionpkg.WriteKillFence(casLoser{m}, id, time.Now()); err == nil {
+		t.Fatal("a kill fence under a CAS that always loses landed")
+	}
+	if n := sessionpkg.OpenDispositionMints(id) - before; n != 0 {
+		t.Errorf("the lost fence left %d open mints", n)
 	}
 }

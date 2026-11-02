@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -187,7 +188,7 @@ func (cr *CityRuntime) runOrdersLanePass(ctx context.Context, cityRoot, reason s
 	}
 
 	phaseStart := time.Now()
-	cr.ensureManagedDoltPublishedForTick()
+	cr.ensureManagedDoltPublishedForTick(ctx)
 	if trace != nil {
 		trace.RecordControllerOperation(TraceSiteControllerTickPhase, TraceReasonRetained, TraceOutcomeComplete,
 			"managed_dolt_preflight", time.Since(phaseStart), nil)
@@ -287,6 +288,12 @@ func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string) {
 // and cfg come from orderPassConfig.
 func (cr *CityRuntime) dispatchOrdersLocked(ctx context.Context, cityRoot string, generation uint64, cfg *config.City) {
 	if ctx.Err() != nil {
+		return
+	}
+	// A suspended city gets no order pass at all: dispatch already skips it,
+	// and the tracking and mail watchdogs below would read every scope's
+	// store, restarting the proxies suspension retired.
+	if effectiveCitySuspended(cfg, loadSuspensionStateBestEffort(cr.cityPath)) {
 		return
 	}
 	now := time.Now()
@@ -390,7 +397,7 @@ func (cr *CityRuntime) orderRescanDue(now time.Time) bool {
 	lane := cr.ordersLaneOf()
 	lane.setMu.Lock()
 	defer lane.setMu.Unlock()
-	return cr.orderRescanLast.IsZero() || now.Sub(cr.orderRescanLast) >= orderRescanInterval
+	return cr.orderRescanLast.IsZero() || now.Sub(cr.orderRescanLast) >= clock.Backstop(orderRescanInterval)
 }
 
 // markOrderRescan records a rescan attempt so a failing scan is retried on the

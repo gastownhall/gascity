@@ -1,0 +1,315 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"maps"
+	"slices"
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/coordclass"
+)
+
+// The split-city judge of `gc bd create --graph <plan>`. bd applies the plan
+// in one transaction, minting one bead per node with that node's own type,
+// labels and metadata, plus the parent links and edges the plan names. The
+// judge reads the plan the way bd decodes it (the same Go types, so the same
+// case-insensitive field match, duplicate-key and merge behavior), classifies
+// every node, and holds every id-named endpoint to the cross-store edge rule.
+
+// bdGraphPlan is the subset of bd's graph-apply plan the judge needs, decoded
+// with bd's own field types.
+type bdGraphPlan struct {
+	Nodes []bdGraphNode `json:"nodes"`
+	Edges []bdGraphEdge `json:"edges"`
+}
+
+// bdGraphNode is the subset of bd's graph-apply node the judge reads.
+// Metadata is raw JSON per key, as bd decodes it: duplicate metadata objects
+// merge into one map, which a beads.StringMap decode would not reproduce.
+type bdGraphNode struct {
+	Key          string                     `json:"key"`
+	ID           string                     `json:"id"`
+	Type         string                     `json:"type"`
+	Labels       []string                   `json:"labels"`
+	Metadata     map[string]json.RawMessage `json:"metadata"`
+	MetadataRefs map[string]string          `json:"metadata_refs"`
+	Parent       string                     `json:"parent"`
+	ParentKey    string                     `json:"parent_key"`
+	ParentID     string                     `json:"parent_id"`
+	Deps         []bdGraphDep               `json:"deps"`
+}
+
+// bdGraphDep is the subset of a node's deps entry the judge reads.
+type bdGraphDep struct {
+	Target string `json:"target"`
+}
+
+// bdGraphEdge is the subset of bd's graph-apply edge the judge reads: its
+// id-named endpoints. bd prefers an _id over its _key, so a key-named
+// endpoint is plan-local only when the matching _id is empty.
+type bdGraphEdge struct {
+	FromID    string `json:"from_id"`
+	ToID      string `json:"to_id"`
+	SpawnerID string `json:"spawner_id"`
+	ThreadID  string `json:"thread_id"`
+}
+
+// bd's graph-apply plan schema: the json tags of its plan, node, edge and dep
+// types, identical in every pinned bd build. A field outside these is one gc
+// has not vetted, so a plan carrying it is refused.
+var (
+	bdGraphPlanFields = []string{"commit_message", "nodes", "edges"}
+	bdGraphNodeFields = []string{
+		"key", "id", "title", "type", "status", "description", "design",
+		"acceptance_criteria", "notes", "spec_id", "external_ref", "assignee",
+		"assign_after_create", "owner", "priority", "estimate",
+		"estimated_minutes", "due_at", "defer_until", "labels", "metadata",
+		"metadata_refs", "parent", "parent_key", "parent_id", "deps",
+		"ephemeral", "no_history", "storage_class", "wisp_type", "mol_type",
+		"pinned", "event_kind", "actor", "target", "payload",
+	}
+	bdGraphEdgeFields = []string{"from_key", "from_id", "to_key", "to_id", "type", "gate", "spawner_key", "spawner_id", "thread_id"}
+	bdGraphDepFields  = []string{"type", "target"}
+)
+
+// judgeBdCreateGraph judges `create --graph <planPath>` node by node and
+// admits the write when every node keeps its class and every edge stays inside
+// the work stores. The plan is read through readJudgedFile, so bd is handed a
+// private copy of exactly the plan judged.
+func judgeBdCreateGraph(in bdClassGuardInput, planPath string) bdClassGuard {
+	who := fmt.Sprintf("gc bd %s --graph %s", in.path, planPath)
+	data, err := in.readJudgedFile("--graph", "", planPath)
+	if err != nil {
+		return in.refuse("%s: refused on this split city: gc reads the plan to judge each bead it would mint, and could not (%v). Nothing was written.", who, err)
+	}
+	if problem := bdGraphPlanUnvettedField(data); problem != "" {
+		return in.refuse("%s: refused on this split city: %s. Nothing was written.", who, problem)
+	}
+	var plan bdGraphPlan
+	if err := json.Unmarshal(data, &plan); err != nil {
+		return in.refuse("%s: refused on this split city: the plan cannot be read as bd reads it (%v). Nothing was written.", who, err)
+	}
+	// A node of this plan is named by its key, or by its explicit id: bd
+	// mints the node under that id in this store in the same transaction, so
+	// an endpoint naming it exactly is that node, which this judge classifies
+	// and whose id mintIDRefusal vets, never a bead to read.
+	keys := map[string]bool{}
+	explicit := map[string]string{}
+	var ids []string
+	for _, n := range plan.Nodes {
+		keys[n.Key] = true
+		if n.ID != "" {
+			explicit[n.Key] = n.ID
+		}
+		ids = append(ids, n.ID)
+	}
+	var endpoints []string
+	idNamed := func(id string) {
+		if !slices.Contains(ids, id) {
+			endpoints = append(endpoints, id)
+		}
+	}
+	for _, n := range plan.Nodes {
+		node := fmt.Sprintf("%s node %q", who, n.Key)
+		readings, err := bdGraphNodeMetadata(n.Metadata)
+		if err != nil {
+			return in.refuse("%s: refused on this split city: its metadata cannot be read (%v). Nothing was written.", node, err)
+		}
+		// bd stores a node's type and labels as written (its type aliases are
+		// class-free), and gc's readers keep them as stored, so the raw
+		// spelling is the bead's class. The trimmed spelling is a conservative
+		// second reading. Each spelling, with every metadata bd could leave
+		// once it splices the node's metadata_refs, under every store's reading
+		// of the node's metadata, must keep the bead's class.
+		spellings := []beads.Bead{
+			{Type: n.Type, Labels: n.Labels},
+			{Type: strings.TrimSpace(n.Type), Labels: normalizeBdLabels(n.Labels)},
+		}
+		// The splice values depend on the refs and labels, not on the
+		// metadata, so splice j of every reading is the same write; a
+		// reading's refusal names what it reads differently from the bd
+		// CLI's splice j.
+		cli := bdGraphSplicedMetadata(readings[0], n.MetadataRefs, explicit, n.Labels)
+		for i, reading := range readings {
+			for j, m := range bdGraphSplicedMetadata(reading, n.MetadataRefs, explicit, n.Labels) {
+				for _, shape := range spellings {
+					shape.Metadata = m
+					if flip := coordclass.CheckFlip(beads.Bead{}, shape, in.holds); flip != nil {
+						return in.refuse("%s%s", classFlipRefusalText(node, flip), bdMetadataReadingsNote([]map[string]string{cli[j], m}, min(i, 1)))
+					}
+				}
+			}
+		}
+		// bd links a node to its parent key when it names one (parent_key,
+		// then the parent alias) and reads parent_id only otherwise.
+		if n.ParentKey == "" && n.Parent == "" {
+			idNamed(n.ParentID)
+		}
+		for _, d := range n.Deps {
+			// bd resolves a deps target as a plan key first, then as an id.
+			if !keys[d.Target] {
+				idNamed(d.Target)
+			}
+		}
+	}
+	for _, e := range plan.Edges {
+		for _, id := range []string{e.FromID, e.ToID, e.SpawnerID, e.ThreadID} {
+			idNamed(id)
+		}
+	}
+	// bd writes an id-named endpoint exactly as spelled, while
+	// checkEdgeEndpoints looks it up trimmed, so a padded endpoint would pass
+	// as the bead its trimmed spelling names and bd would write an edge to no
+	// bead.
+	if i := slices.IndexFunc(endpoints, func(id string) bool { return id != strings.TrimSpace(id) }); i >= 0 {
+		return in.refuse("%s: refused on this split city: the endpoint %q has leading or trailing whitespace, which bd keeps as part of the id, so the edge would name no bead. Name the bead by its exact id. Nothing was written.", who, endpoints[i])
+	}
+	// The node ids are judged after every node's static class checks, so a
+	// plan those refuse asks the binding nothing.
+	if why := in.mintIDRefusal(ids...); why != "" {
+		return in.refuse("%s: refused on this split city: a node's explicit id cannot be minted here: %s. Nothing was written.", who, why)
+	}
+	if refusal := in.checkEdgeEndpoints(endpoints...); refusal != "" {
+		return in.refuse("%s", refusal)
+	}
+	return in.pass()
+}
+
+// bdGraphMintedID stands in for an id bd mints while it applies the plan: a
+// fresh <prefix>-<suffix> id gc cannot know before bd runs.
+const bdGraphMintedID = "gc-plan-minted-id"
+
+// bdGraphSplicedMetadata returns the metadata bd leaves on a node once it
+// splices the node's metadata_refs, one map per value the judge must try. bd
+// writes, over each referring key and after every node exists, the id of the
+// node the ref names: that node's explicit id when it has one, else the id bd
+// mints for it. Classification cannot tell one minted id from another except
+// through a label that names it (the own-session-wait arm compares session_id
+// with a session:<id> label, and a counter-mode id is predictable), so a
+// minted value is tried as a fresh id and as each id a label of the node
+// names behind a classifier label prefix, raw and normalized.
+func bdGraphSplicedMetadata(meta map[string]string, refs, explicit map[string]string, labels []string) []map[string]string {
+	if len(refs) == 0 {
+		return []map[string]string{meta}
+	}
+	spliced := maps.Clone(meta)
+	if spliced == nil {
+		spliced = map[string]string{}
+	}
+	var minted []string
+	for k, ref := range refs {
+		if id := explicit[ref]; id != "" {
+			spliced[k] = id
+		} else {
+			minted = append(minted, k)
+		}
+	}
+	if len(minted) == 0 {
+		return []map[string]string{spliced}
+	}
+	values := []string{bdGraphMintedID}
+	for _, l := range append(slices.Clone(labels), normalizeBdLabels(labels)...) {
+		for _, prefix := range coordclass.ClassifierLabelPrefixes() {
+			if named, ok := strings.CutPrefix(l, prefix); ok {
+				values = append(values, named)
+			}
+		}
+	}
+	out := make([]map[string]string, 0, len(values))
+	for _, v := range values {
+		m := maps.Clone(spliced)
+		for _, k := range minted {
+			m[k] = v
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// bdGraphNodeMetadata returns each reading this city's stores give a node's
+// metadata once bd has stored it (beads.MetadataReadings): the bd CLI's first.
+func bdGraphNodeMetadata(raw map[string]json.RawMessage) ([]map[string]string, error) {
+	if len(raw) == 0 {
+		return []map[string]string{nil}, nil
+	}
+	body, err := json.Marshal(raw)
+	if err != nil {
+		return nil, err
+	}
+	return beads.MetadataReadings(body)
+}
+
+// bdGraphPlanUnvettedField returns a description of the first field of the
+// plan outside bd's pinned graph-plan schema, at plan, node, edge or dep
+// level, or "" when every field is known. Keys are matched as bd's own
+// unknown-field check matches them (lowercased), so a spelling that only
+// Unicode case folding maps onto a known tag is refused, not missed.
+func bdGraphPlanUnvettedField(data []byte) string {
+	top, problem := bdGraphObjectFields("the plan", data, bdGraphPlanFields)
+	if problem != "" {
+		return problem
+	}
+	for k, v := range top {
+		kind := strings.ToLower(k)
+		if kind != "nodes" && kind != "edges" {
+			continue
+		}
+		items, problem := bdGraphArray(fmt.Sprintf("the plan's %q", k), v)
+		if problem != "" {
+			return problem
+		}
+		for i, item := range items {
+			if kind == "edges" {
+				if _, problem := bdGraphObjectFields(fmt.Sprintf("edge %d", i), item, bdGraphEdgeFields); problem != "" {
+					return problem
+				}
+				continue
+			}
+			node, problem := bdGraphObjectFields(fmt.Sprintf("node %d", i), item, bdGraphNodeFields)
+			if problem != "" {
+				return problem
+			}
+			for nk, nv := range node {
+				if strings.ToLower(nk) != "deps" {
+					continue
+				}
+				deps, problem := bdGraphArray(fmt.Sprintf("node %d's %q", i, nk), nv)
+				if problem != "" {
+					return problem
+				}
+				for j, d := range deps {
+					if _, problem := bdGraphObjectFields(fmt.Sprintf("node %d dep %d", i, j), d, bdGraphDepFields); problem != "" {
+						return problem
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// bdGraphObjectFields decodes obj as a JSON object (null is no object, as bd
+// reads it) and checks each of its keys against known.
+func bdGraphObjectFields(where string, obj json.RawMessage, known []string) (map[string]json.RawMessage, string) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(obj, &m); err != nil {
+		return nil, fmt.Sprintf("%s is not a JSON object (%v)", where, err)
+	}
+	for k := range m {
+		if !slices.Contains(known, strings.ToLower(k)) {
+			return nil, fmt.Sprintf("%s has the field %q, which gc does not know how bd reads", where, k)
+		}
+	}
+	return m, ""
+}
+
+// bdGraphArray decodes v as a JSON array (null is an empty one).
+func bdGraphArray(where string, v json.RawMessage) ([]json.RawMessage, string) {
+	var items []json.RawMessage
+	if err := json.Unmarshal(v, &items); err != nil {
+		return nil, fmt.Sprintf("%s is not a JSON array (%v)", where, err)
+	}
+	return items, ""
+}

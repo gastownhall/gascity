@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -695,6 +696,36 @@ func recordSessionCircuitBreakerRestart(
 	return state, nil
 }
 
+// sessionCircuitBreakerEntrySnapshot is an identity's breaker entry before a
+// restart was recorded.
+type sessionCircuitBreakerEntrySnapshot struct {
+	entry   *circuitBreakerEntry
+	existed bool
+}
+
+// entrySnapshot captures identity's entry, to undo a restart that turned out
+// not to happen (restoreEntrySnapshot).
+func (b *sessionCircuitBreaker) entrySnapshot(identity string) sessionCircuitBreakerEntrySnapshot {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return sessionCircuitBreakerEntrySnapshot{entry: cloneCircuitBreakerEntry(b.entries[identity]), existed: b.entries[identity] != nil}
+}
+
+// restoreEntrySnapshot undoes a restart recorded for a start that never ran
+// (its PreWake was refused): identity's entry goes back to snap and the row's
+// breaker metadata follows. No identity is a no-op.
+func (b *sessionCircuitBreaker) restoreEntrySnapshot(sessFront *session.Store, id, identity string, snap sessionCircuitBreakerEntrySnapshot, now time.Time, stderr io.Writer) {
+	if b == nil || identity == "" {
+		return
+	}
+	b.mu.Lock()
+	b.restoreEntryLocked(identity, snap.entry, snap.existed)
+	b.mu.Unlock()
+	if err := persistSessionCircuitBreakerMetadata(sessFront, id, b, identity, now); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
+}
+
 func cloneCircuitBreakerEntry(e *circuitBreakerEntry) *circuitBreakerEntry {
 	if e == nil {
 		return nil
@@ -833,19 +864,21 @@ func defaultSessionCircuitBreaker() *sessionCircuitBreaker {
 	return sessionCircuitBreakerSingleton
 }
 
-// setSessionCircuitBreakerForTest swaps the singleton, returning a cleanup
-// function that restores the previous value. Tests call this to inject a
-// fake-clocked breaker without touching production wiring.
-func setSessionCircuitBreakerForTest(b *sessionCircuitBreaker) func() {
+// setSessionCircuitBreakerForTest swaps the singleton for t, and restores the
+// previous one when t ends. Tests call this to inject a fake-clocked breaker
+// without touching production wiring. It and defaultSessionCircuitBreaker's
+// lazy build are the only writes of the singleton (the testrelax analyzer).
+func setSessionCircuitBreakerForTest(t testing.TB, b *sessionCircuitBreaker) {
+	t.Helper()
 	sessionCircuitBreakerMu.Lock()
 	prev := sessionCircuitBreakerSingleton
 	sessionCircuitBreakerSingleton = b
 	sessionCircuitBreakerMu.Unlock()
-	return func() {
+	t.Cleanup(func() {
 		sessionCircuitBreakerMu.Lock()
 		sessionCircuitBreakerSingleton = prev
 		sessionCircuitBreakerMu.Unlock()
-	}
+	})
 }
 
 // computeNamedSessionProgressSignatures returns a signature per named

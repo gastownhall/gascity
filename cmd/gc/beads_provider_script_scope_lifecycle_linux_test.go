@@ -51,6 +51,7 @@ func providerOwnedScriptEnv(city, scope, bdBin string) []string {
 		"GC_CITY_PATH="+city,
 		"GC_BEADS_PROVIDER_OWNED=1",
 		"GC_BEADS_TRANSPORT=proxied",
+		"GC_BEADS_PROXIED_IDLE_TIMEOUT=0",
 		"GC_BEADS_TARGET=local",
 		"BEADS_DOLT_PROXIED_SERVER=1",
 		"GC_DOLT=",
@@ -299,6 +300,7 @@ func TestGcBeadsBdProviderOwnedInitAnchorsBeadsDirBeforeBdInit(t *testing.T) {
 				"GC_BEADS_PROVIDER_OWNED=1",
 				"GC_BEADS_TRANSPORT="+tt.transport,
 				"GC_BEADS_TARGET=local",
+				"GC_BEADS_PROXIED_IDLE_TIMEOUT=0",
 			)
 			out, err := runProviderOwnedScriptOp(t, env, "init", scopeDir, "anc", "hq")
 			if tt.bdExit == 0 && err != nil {
@@ -359,6 +361,9 @@ func TestGcBeadsBdProviderOwnedRealInitIgnoresAncestorBeadsWorkspace(t *testing.
 			if err := os.MkdirAll(home, 0o755); err != nil {
 				t.Fatal(err)
 			}
+			if err := testutil.SeedDoltGlobalConfig(home); err != nil {
+				t.Fatal(err)
+			}
 			testutil.RunGit(t, parent, "init", "-q")
 			// The ancestor workspace, in the on-disk shape of an ordinary
 			// embedded bd project (the pinned test bd is built without the
@@ -377,7 +382,13 @@ func TestGcBeadsBdProviderOwnedRealInitIgnoresAncestorBeadsWorkspace(t *testing.
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			env := sanitizedBaseEnv("HOME="+home, "DOLT_ROOT_PATH="+home, "GC_CITY_PATH="+dir, "BEADS_DIR="+filepath.Join(dir, ".beads"), "BD_BIN="+bdPath, "GC_BEADS_PROVIDER_OWNED=1", "GC_BEADS_TRANSPORT="+transport, "GC_BEADS_TARGET=local")
+			// Every HTTPS request the init makes goes to a normally unroutable
+			// proxy. The proxied init probes `dolt version`, whose update check is
+			// a network call unless the dolt config seeded above disables it; on a
+			// healthy network that call returns in 0.2 s and hides a missing
+			// config, so on most hosts the slow network is reproduced instead of
+			// waited for.
+			env := sanitizedBaseEnv(append([]string{"HOME=" + home, "DOLT_ROOT_PATH=" + home, "GC_CITY_PATH=" + dir, "BEADS_DIR=" + filepath.Join(dir, ".beads"), "BD_BIN=" + bdPath, "GC_BEADS_PROVIDER_OWNED=1", "GC_BEADS_TRANSPORT=" + transport, "GC_BEADS_TARGET=local", "GC_BEADS_PROXIED_IDLE_TIMEOUT=0"}, testutil.UnroutableHTTPSProxyEnv()...)...)
 			t.Cleanup(func() {
 				_, _ = runProviderOwnedScriptOp(t, env, "stop")
 				for _, root := range []string{dir, parent} {

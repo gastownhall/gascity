@@ -1689,3 +1689,15 @@ func TestApplyGraphRouteBinding_PoolRouted_DoesNotSetSessionName(t *testing.T) {
 		t.Errorf("gc.session_id = %q, want cleared for pool step", got)
 	}
 }
+
+func TestGraphWorkflowRouteVarsResolvesDefaultReferencingProvidedVar(t *testing.T) {
+	dflt := "{{binding_prefix}}reviewer"
+	r := &formula.Recipe{Vars: map[string]*formula.VarDef{"review_target": {Default: &dflt}}}
+	got := GraphWorkflowRouteVars(r, map[string]string{"binding_prefix": "ops."})
+	if got["review_target"] != "ops.reviewer" {
+		t.Fatalf("review_target = %q, want ops.reviewer", got["review_target"])
+	}
+	if got := GraphWorkflowRouteVars(nil, map[string]string{"x": "1"}); got["x"] != "1" {
+		t.Fatalf("GraphWorkflowRouteVars(nil) = %v, want copy of provided", got)
+	}
+}

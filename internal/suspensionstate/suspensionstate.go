@@ -75,7 +75,7 @@ type State struct {
 	// future binary can write the field without breaking older
 	// readers; not consumed by any code path today.
 	Agents map[string]Override `json:"agents,omitempty"`
-	// UpdatedAt is stamped by Save on every disk write.
+	// UpdatedAt is stamped by Save and Update on every disk write.
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
@@ -97,8 +97,47 @@ func Load(fs fsys.FS, cityPath string) (State, error) {
 	return st, nil
 }
 
-// Save writes the runtime suspension state to disk atomically.
+// Save writes the runtime suspension state to disk atomically. On the OS
+// filesystem it holds the suspension [Fence] for the write, so it waits for a
+// controller that is stopping a still-suspended scope's store. A caller that
+// changes a state it loaded uses [Update] instead, so that the read is fenced
+// too.
 func Save(fs fsys.FS, cityPath string, st State) error {
+	release, err := fenceFor(fs, cityPath)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return write(fs, cityPath, st)
+}
+
+// Update applies mutate to the current runtime suspension state and writes
+// the result atomically. On the OS filesystem it holds the suspension [Fence]
+// from the read through the write, so a writer that queued behind a
+// controller's stop reads the state only once the fence is its own, and two
+// queued writers apply their changes one after the other instead of the later
+// one replacing the earlier one with the state both read before the stop.
+// mutate reports whether it changed the state; when it did not, the file is
+// left untouched (preserving UpdatedAt and the mtime).
+func Update(fs fsys.FS, cityPath string, mutate func(*State) bool) error {
+	release, err := fenceFor(fs, cityPath)
+	if err != nil {
+		return err
+	}
+	defer release()
+	st, err := Load(fs, cityPath)
+	if err != nil {
+		return err
+	}
+	if !mutate(&st) {
+		return nil
+	}
+	return write(fs, cityPath, st)
+}
+
+// write stamps and atomically writes st. The caller holds the fence when fs
+// is the OS filesystem.
+func write(fs fsys.FS, cityPath string, st State) error {
 	p := citylayout.SuspensionStateFile(cityPath)
 	if err := fs.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
@@ -151,24 +190,22 @@ func SetCity(st *State, suspended *bool) {
 	st.City.Suspended = suspended
 }
 
-// SetCitySuspended is a convenience that loads state, records an
-// explicit city suspension preference, and saves. Returns without
-// rewriting the file when on-disk state already matches the
-// requested value (preserves UpdatedAt + mtime).
+// SetCitySuspended is a convenience that records an explicit city
+// suspension preference through [Update]. Returns without rewriting the
+// file when on-disk state already matches the requested value (preserves
+// UpdatedAt + mtime).
 func SetCitySuspended(fs fsys.FS, cityPath string, suspended *bool) error {
-	st, err := Load(fs, cityPath)
-	if err != nil {
-		return err
-	}
-	before, had := ExplicitCity(st)
-	switch {
-	case suspended == nil && !had:
-		return nil
-	case suspended != nil && had && before == *suspended:
-		return nil
-	}
-	SetCity(&st, suspended)
-	return Save(fs, cityPath, st)
+	return Update(fs, cityPath, func(st *State) bool {
+		before, had := ExplicitCity(*st)
+		switch {
+		case suspended == nil && !had:
+			return false
+		case suspended != nil && had && before == *suspended:
+			return false
+		}
+		SetCity(st, suspended)
+		return true
+	})
 }
 
 // ----- Rig helpers -----
@@ -220,24 +257,21 @@ func SetRig(st *State, name string, suspended *bool) {
 	st.Rigs[name] = r
 }
 
-// SetRigSuspended is a convenience that loads state, records an
-// explicit rig suspension preference, and saves. Returns without
-// rewriting the file when on-disk state already matches the
-// requested value.
+// SetRigSuspended is a convenience that records an explicit rig
+// suspension preference through [Update]. Returns without rewriting
+// the file when on-disk state already matches the requested value.
 func SetRigSuspended(fs fsys.FS, cityPath, name string, suspended *bool) error {
-	st, err := Load(fs, cityPath)
-	if err != nil {
-		return err
-	}
-	before, had := ExplicitRig(st, name)
-	switch {
-	case suspended == nil && !had:
-		return nil
-	case suspended != nil && had && before == *suspended:
-		return nil
-	}
-	SetRig(&st, name, suspended)
-	return Save(fs, cityPath, st)
+	return Update(fs, cityPath, func(st *State) bool {
+		before, had := ExplicitRig(*st, name)
+		switch {
+		case suspended == nil && !had:
+			return false
+		case suspended != nil && had && before == *suspended:
+			return false
+		}
+		SetRig(st, name, suspended)
+		return true
+	})
 }
 
 // SuspendedRigNames returns the set of rig names whose runtime state

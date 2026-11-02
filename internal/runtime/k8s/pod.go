@@ -87,6 +87,12 @@ func agentCommandB64(cfg runtime.Config) string {
 // the existing tmux "main" session (respawn-pane -k), reusing the warm pod. When
 // LINUX_USERNAME is set the entrypoint runs tmux under `su - <user>`, so the
 // respawn is wrapped in the same su to reach that user's tmux socket.
+//
+// The respawned agent's environment is the tmux server's, not this command's:
+// respawn-pane starts the pane from the server's global and session
+// environment. The server got the remote-stage variables when the entrypoint
+// started it (suRemoteStageExports for LINUX_USERNAME), and Relaunch writes the
+// on-disk record before respawning, which covers a pod created without them.
 func buildRespawnCommand(cfg runtime.Config) string {
 	cmdB64 := agentCommandB64(cfg)
 	if user := cfg.Env["LINUX_USERNAME"]; user != "" {
@@ -155,8 +161,13 @@ func projectControllerRuntimePathToPod(path, ctrlCity, ctrlRuntimeDir, podRuntim
 // target. Managed-local controller projections intentionally omit GC_DOLT_HOST
 // and use a host-local runtime port; pods translate that blank-host managed
 // shape to the provider-configured in-cluster alias at this adapter edge so
-// agents still consume one GC_DOLT_* connection contract. Explicit
-// GC_DOLT_HOST values are preserved as written.
+// agents still consume one GC_DOLT_* connection contract. A managed-local
+// projection whose port the controller withheld, so host-local bd follows the
+// scope's .beads/dolt-server.port mirror (gastownhall/gascity#1656), carries
+// no port either and says so with GC_DOLT_MANAGED_LOCAL=1; a pod cannot read
+// that mirror, so it gets the same alias. Without the marker, an empty host
+// and port means no Dolt target. Explicit GC_DOLT_HOST values are preserved
+// as written.
 // BEADS_DOLT_SERVER_HOST/PORT are compatibility mirrors derived from the GC
 // projection, not independent input authorities.
 func controllerLocalDoltHost(host string) bool {
@@ -182,7 +193,7 @@ func projectedPodDoltEnv(cfgEnv map[string]string, managedHost, managedPort stri
 	}
 
 	switch {
-	case host == "" && port == "":
+	case host == "" && port == "" && strings.TrimSpace(cfgEnv["GC_DOLT_MANAGED_LOCAL"]) != "1":
 		return map[string]string{}, nil
 	case host != "" && port == "":
 		return nil, fmt.Errorf("requires both GC_DOLT_HOST and GC_DOLT_PORT when GC_DOLT_HOST is set")
@@ -277,11 +288,15 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 		// Run tmux session as the dynamic user via su. userSetup already created
 		// and chowned podWorkDir as root; enterWorkDir is idempotent and is what
 		// puts pre_start in the right directory.
+		// su - is a login shell and clears the environment, so the
+		// remote-stage variables the pod spec sets would not reach the agent
+		// (nor the tmux server, whose environment every pane inherits). They
+		// are exported again inside the su command (suRemoteStageExports).
 		tmuxCmd = fmt.Sprintf(
 			"%s%s%s%s%sCMD=$(echo '%s' | base64 -d) && "+
-				`su - %s -c "cd %s && tmux new-session -d -s %s \"$CMD\" && sleep infinity"`,
+				`su - %s -c "%scd %s && tmux new-session -d -s %s \"$CMD\" && sleep infinity"`,
 			userSetup, credCopy, wsWait, enterWorkDir, preStartCmds, cmdB64,
-			linuxUsername, podWorkDir, tmuxSession,
+			linuxUsername, suRemoteStageExports(p.cityName, ctrlCity), podWorkDir, tmuxSession,
 		)
 	} else {
 		tmuxCmd = fmt.Sprintf(
@@ -295,6 +310,13 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	if err != nil {
 		return nil, err
 	}
+	// The pod's processes are a remote stage of the controller's city from
+	// the container's first instruction (S5-A): gc honors these from process
+	// start, so no gc command started from the pod's environment, the agent's
+	// first one included (also under LINUX_USERNAME, where su - clears the
+	// environment and the launch re-exports them), can run storage genesis
+	// before the on-disk record exists.
+	env = append(env, remoteStageEnv(p.cityName, controllerCityPath(cfg.Env))...)
 
 	// Build volume mounts for the main container.
 	// When prebaked, skip the ws EmptyDir — it would shadow baked image content.
@@ -444,6 +466,8 @@ func agentSecurityContext(linuxUsername string) *corev1.SecurityContext {
 func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, managedServicePort string) ([]corev1.EnvVar, error) {
 	// Start with cfg.Env, removing controller-only vars.
 	// Auth creds (GC_DOLT_USER, GC_DOLT_PASSWORD, BEADS_DOLT_*_USER/PASSWORD) intentionally pass through.
+	// GC_DOLT_MANAGED_LOCAL marks a controller-local target, which
+	// projectedPodDoltEnv rewrites to the in-cluster service.
 	skip := map[string]bool{
 		"GC_BEADS":               true,
 		"GC_SESSION":             true,
@@ -452,6 +476,7 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, manag
 		"GC_K8S_DOLT_PORT":       true,
 		"GC_DOLT_HOST":           true,
 		"GC_DOLT_PORT":           true,
+		"GC_DOLT_MANAGED_LOCAL":  true,
 		"BEADS_DOLT_SERVER_HOST": true,
 		"BEADS_DOLT_SERVER_PORT": true,
 	}
@@ -584,3 +609,22 @@ func buildResources(p *Provider) (corev1.ResourceRequirements, error) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// suRemoteStageExports re-exports the remote-stage environment inside a
+// `su - <user> -c "..."` command string, or returns "" without a controller
+// city. su - starts a login shell with a cleared environment, so without this
+// the agent run as LINUX_USERNAME (and its tmux server) would not carry the
+// variables that mark it a remote stage from its first instruction.
+//
+// The string is embedded inside the double-quoted -c argument of an outer sh,
+// so values are passed base64-encoded and decoded by the inner shell: the
+// outer shell sees only \$, \" and base64 characters, and the inner shell
+// gets each value verbatim whatever characters it contains.
+func suRemoteStageExports(cityName, ctrlCity string) string {
+	var out strings.Builder
+	for _, e := range remoteStageEnv(cityName, ctrlCity) {
+		b64 := base64.StdEncoding.EncodeToString([]byte(e.Value))
+		fmt.Fprintf(&out, `export %s=\"\$(echo '%s' | base64 -d)\"; `, e.Name, b64)
+	}
+	return out.String()
+}

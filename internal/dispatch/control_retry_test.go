@@ -119,6 +119,11 @@ func TestClassifyControllerErrorTiers(t *testing.T) {
 		{name: "dolt invalid connection timeout", err: errors.New("failed to check for dependency cycle: invalid connection: i/o timeout"), want: TierAvailability},
 		{name: "mysql lock timeout", err: errors.New("Error 1205 (HY000): lock wait timeout exceeded; try restarting transaction"), want: TierAvailability},
 		{name: "mysql deadlock", err: errors.New("Error 1213 (40001): Deadlock found when trying to get lock; try restarting transaction"), want: TierAvailability},
+		// Every live Dolt 1213/40001 message carries both serialization needles
+		// (doltSerializationFailureErr); one row per needle keeps each
+		// load-bearing on its own if Dolt rewords the other half.
+		{name: "dolt serialization envelope only", err: errors.New("Error 1213 (40001): serialization failure: write conflict on branch main, try restarting transaction"), want: TierAvailability},
+		{name: "dolt conflict detail only", err: errors.New("committing: this transaction conflicts with a committed transaction from another client"), want: TierAvailability},
 		{name: "sqlite locked", err: errors.New("listing sqlite ready beads: database is locked (5) (SQLITE_BUSY)"), want: TierAvailability},
 		{name: "sqlite table locked", err: errors.New("listing sqlite ready beads: database table is locked"), want: TierAvailability},
 		{name: "control work query sigterm", err: errors.New(`querying control work for fixture/core.control-dispatcher: running work query "bd ready": exit status 143: Terminated`), want: TierAvailability},
@@ -126,6 +131,12 @@ func TestClassifyControllerErrorTiers(t *testing.T) {
 		{name: "dolt server unreachable", err: errors.New("begin read tx: dolt server unreachable"), want: TierAvailability},
 		{name: "workflow root close blocked", err: closeBlockedErr("gsp-p68ch6", "gsp-yl7fpr"), want: TierSemantic},
 		{name: "scope body close blocked", err: closeBlockedErr("pl-pujtf", "pl-mmneh"), want: TierSemantic},
+		// A stop cuts a bd command short (bd cancels its root context only on
+		// signals): the store never answered, so it is Tier A like a timeout.
+		{name: "stop-canceled finalizer outcome read", err: errors.New("gc-1: resolving workflow outcome: bd list both tiers: bd query: bd query (wisps): exit status 1: search count wisps: context canceled"), want: TierAvailability},
+		{name: "wrapped context canceled", err: fmt.Errorf("gc-1: closing source bead chain: %w", context.Canceled), want: TierAvailability},
+		{name: "typed canceled without the text", err: canceledLockWaitErr{}, want: TierAvailability},
+		{name: "operator canceled is not a canceled read", err: errors.New("workflow gc-1 canceled by operator"), want: TierNone},
 		{name: "non work query sigterm", err: errors.New("starting provider: exit status 143: Terminated"), want: TierNone},
 		{name: "bad step spec", err: errors.New("deserializing step spec: invalid character 'n'"), want: TierNone},
 		// Availability dominates: a refusal read off a store that is also
@@ -147,6 +158,13 @@ func TestClassifyControllerErrorTiers(t *testing.T) {
 		})
 	}
 }
+
+// canceledLockWaitErr wraps context.Canceled behind text that does not say
+// "context canceled", so only the typed check can classify it.
+type canceledLockWaitErr struct{}
+
+func (canceledLockWaitErr) Error() string { return "source workflow lock abandoned" }
+func (canceledLockWaitErr) Unwrap() error { return context.Canceled }
 
 func newSemanticControlBead(t *testing.T, store beads.Store) beads.Bead {
 	t.Helper()
