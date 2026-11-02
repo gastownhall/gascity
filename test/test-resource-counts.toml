@@ -2264,7 +2264,7 @@ calls = 4
 [[count]]
 path = "internal/runtime/herdr/activity_live_test.go"
 resource = "subprocess"
-calls = 4
+calls = 2
 
 [[count]]
 path = "internal/runtime/herdr/activity_test.go"
