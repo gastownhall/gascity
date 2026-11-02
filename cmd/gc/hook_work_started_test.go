@@ -1230,3 +1230,27 @@ func TestLegacySelfDrainAckRefusesARecordedClaim(t *testing.T) {
 		}
 	}
 }
+
+// TestLegacyHookDrainAckFenceHoldsARecordedClaim (ga-6eefx8, #8313): on a
+// legacy city whose session store has no conditional writer, a seat whose
+// claim the hook recorded and whose work query then serves nothing answers a
+// --claim --drain-ack nudge with action=work, reason started_claim_held, and
+// acks nothing. Kills the empty cell the fence read as no started claim.
+func TestLegacyHookDrainAckFenceHoldsARecordedClaim(t *testing.T) {
+	row := newLegacyStartedRow(t)
+	l := &startedLog{}
+	var stderr bytes.Buffer
+	if code := doHookClaim("q", "/rig", legacyStartedOpts(), l.ops(startedRoutedWork, row, nil), &orderedWriter{l: l}, &stderr); code != 0 {
+		t.Fatalf("hand-over: code %d; stderr=%s", code, stderr.String())
+	}
+
+	l = &startedLog{}
+	ops := l.ops(`[]`, row, nil)
+	ops.ReadWorkStarted = func(string) (string, error) { return row.meta(t, session.WorkStartedKey), nil }
+	stdout := &orderedWriter{l: l}
+	doHookClaim("q", "/rig", legacyStartedOpts(), ops, stdout, &stderr)
+	got := decodeTurnBoundResult(t, stdout.buf.String())
+	if got.Action != "work" || got.Reason != hookClaimWorkReasonStartedClaimHeld || l.acked {
+		t.Fatalf("nudged hook: result %+v, acked %v; want action=work, started_claim_held and no ack; stderr=%s", got, l.acked, stderr.String())
+	}
+}
