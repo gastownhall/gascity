@@ -1,8 +1,17 @@
 package main
 
 import (
+	"encoding/json"
+	"slices"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // TestRecordSessionAttachedConfigDriftDeferral_SkipsWriteWithinRefreshInterval
@@ -232,5 +241,122 @@ func TestRecordSessionAttachedConfigDriftDeferral_SurvivesSkippedRefreshThenFlic
 			t.Fatalf("patrol=%s: deferral must read as valid at age refreshInterval+patrol "+
 				"(skipped refresh then flicker) or a still-attached session is drained", patrol)
 		}
+	}
+}
+
+// TestReconcileSessionBeads_ConfigDriftHeldWorkDeferralIsVisible kills the
+// invisible held-work deferral (#8345): an ordinary session holding assigned
+// work defers a real config-drift drain indefinitely — no age bound, no
+// signal. The first deferral now records a durable episode (the drift key and
+// time stamped on the session bead) and emits session.config_drift_deferred
+// naming the session, its drifted fields, the observed work bead and the
+// duration so far; a later tick observes the same episode without
+// re-stamping or re-emitting; once the work closes, the drift drain proceeds
+// exactly as before. The held work itself is never acted on.
+func TestReconcileSessionBeads_ConfigDriftHeldWorkDeferralIsVisible(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addRunningWorkerDesiredWithNewConfig()
+	session := env.createSessionBead("worker", "worker")
+	rec := &recordingRecorder{}
+	env.rec = rec
+
+	// The stored hash and breakdown are the desired config with Command alone
+	// drifted, so the episode's diagnostics name Command and nothing else.
+	tp := env.desiredState["worker"]
+	current := sessionCoreConfigForHashInfo(tp, env.sessionInfo(session.ID))
+	storedCfg := current
+	storedCfg.Command = "test-cmd"
+	breakdown, err := json.Marshal(runtime.CoreFingerprintBreakdown(storedCfg))
+	if err != nil {
+		t.Fatalf("marshal breakdown: %v", err)
+	}
+	startedHash, currentHash := runtime.CoreFingerprint(storedCfg), runtime.CoreFingerprint(current)
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": startedHash,
+		"core_hash_breakdown": string(breakdown),
+	})
+
+	// Hold the session with live in-progress work.
+	work, err := env.store.Create(beads.Bead{
+		Title:    "in-flight work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("held work must still defer the drain, got %+v; stderr=%s", ds, env.stderr.String())
+	}
+	stamped := env.sessionInfo(session.ID)
+	firstStamp := stamped.ConfigDriftDeferredAt
+	if stamped.ConfigDriftDeferredKey != startedHash+":"+currentHash || firstStamp == "" {
+		t.Fatalf("episode stamp = (%q, %q), want key %q at the first pass", stamped.ConfigDriftDeferredKey, firstStamp, startedHash+":"+currentHash)
+	}
+	firstAt, err := time.Parse(time.RFC3339, firstStamp)
+	if err != nil || !firstAt.Equal(env.clk.Now()) {
+		t.Fatalf("episode stamp %q, want the first pass's time %s", firstStamp, env.clk.Now())
+	}
+	evs := rec.ofType(events.SessionConfigDriftDeferred)
+	if len(evs) != 1 {
+		t.Fatalf("held-work deferral events = %d, want exactly the first observation; stderr=%s", len(evs), env.stderr.String())
+	}
+	ev := evs[0]
+	if ev.SessionID != session.ID || ev.Subject != session.ID {
+		t.Fatalf("event %+v, want it to name session %s", ev, session.ID)
+	}
+	if !strings.Contains(ev.Message, "Command") || !strings.Contains(ev.Message, work.ID) {
+		t.Fatalf("message %q, want it to name the drifted field and work bead %s", ev.Message, work.ID)
+	}
+	var p api.SessionConfigDriftDeferredPayload
+	if err := json.Unmarshal(ev.Payload, &p); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if p.SessionID != session.ID || p.SessionName != "worker" || p.Template != "worker" || p.WorkBeadID != work.ID || p.Escalated {
+		t.Fatalf("payload %+v, want session %s/worker/worker held by work bead %s, first observation", p, session.ID, work.ID)
+	}
+	if !slices.Equal(p.DriftedFields, []string{"Command"}) {
+		t.Fatalf("payload drifted_fields %v, want [Command]", p.DriftedFields)
+	}
+	if p.DeferredSince != firstStamp || p.PendingSeconds != 0 {
+		t.Fatalf("payload deferred_since %q pending %d, want the episode's own stamp with nothing pending yet", p.DeferredSince, p.PendingSeconds)
+	}
+
+	// A later tick observes the same episode: no re-stamp, no second event,
+	// and still no drain. The feed is re-read from the store, as the real
+	// pass's snapshot is seeded from the store's rows.
+	env.clk.Advance(time.Minute)
+	fresh, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	env.reconcile([]beads.Bead{fresh})
+	if again := env.sessionInfo(session.ID); again.ConfigDriftDeferredAt != firstStamp {
+		t.Fatalf("episode stamp re-stamped to %q, want unchanged %q", again.ConfigDriftDeferredAt, firstStamp)
+	}
+	if evs := rec.ofType(events.SessionConfigDriftDeferred); len(evs) != 1 {
+		t.Fatalf("held-work deferral events after the second tick = %d, want still 1", len(evs))
+	}
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("held work must keep deferring the drain, got %+v", ds)
+	}
+
+	// Once the work closes, the config-drift drain proceeds as before.
+	if err := env.store.Close(work.ID); err != nil {
+		t.Fatalf("Close(work): %v", err)
+	}
+	env.clk.Advance(time.Minute)
+	fresh, err = env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	env.reconcile([]beads.Bead{fresh})
+	if ds := env.dt.get(session.ID); ds == nil || ds.reason != "config-drift" {
+		t.Fatalf("drain = %+v, want the config-drift drain once the work closes; stderr=%s", ds, env.stderr.String())
 	}
 }

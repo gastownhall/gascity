@@ -1,20 +1,25 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
 // Kills A14 out of legacy's order or reaching past it (SESS-550..562, 565,
 // 566/568): an attached (or attach-unknown) drift stamps its deferral,
-// throttled; a recent attached deferral, a pending interaction and open work
-// wait; a pinned named row stamps and never restarts; another named row, a
+// throttled; a recent attached deferral and a pending interaction wait; open
+// work stamps its held-work deferral episode, a stamped episode waiting
+// (#8345); a pinned named row stamps and never restarts; another named row, a
 // launch-only drift a provider can relaunch, a live drift and an asleep
 // named drift are C7b2's, which A14 leaves alone; otherwise the drain
 // begins, once no stop request is active. A resolved drift clears its
@@ -74,9 +79,18 @@ func TestDecideRowConfigDrift(t *testing.T) {
 		{name: "a named row in use restarts, its effect deferring", meta: append([]string{"started_config_hash", stale}, named...), alive: true, pending: true, wantKind: intentDriftRestart, wantReason: decideDriftRestart},
 		{name: "a named launch-only drift relaunches", meta: slices.Concat([]string{"started_config_hash", stale}, launchOnly, named), alive: true, relaunch: true, wantKind: intentDriftRelaunch, wantReason: decideDriftRelaunch},
 		{name: "a pending interaction waits", meta: []string{"started_config_hash", stale}, alive: true, pending: true},
-		{name: "open work waits", meta: []string{"started_config_hash", stale}, alive: true, work: true},
+		// Open work's deferral is a durable, visible episode (#8345): the first
+		// observation stamps it and emits session.config_drift_deferred; a
+		// stamped episode waits — of any age, AC-2 escalates past the horizon
+		// — and a stamp keyed to another drift, malformed or in the future is
+		// a fresh first observation.
+		{name: "open work stamps its deferral", meta: []string{"started_config_hash", stale}, alive: true, work: true, wantKind: intentRowHeal, wantReason: decideDriftHeldWork},
+		{name: "a stamped held-work episode waits", meta: []string{"started_config_hash", stale, "config_drift_deferred_key", key, "config_drift_deferred_at", rowAt(-time.Minute)}, alive: true, work: true},
+		{name: "a changed drift re-stamps its episode", meta: []string{"started_config_hash", stale, "config_drift_deferred_key", "other:hash", "config_drift_deferred_at", rowAt(-time.Minute)}, alive: true, work: true, wantKind: intentRowHeal, wantReason: decideDriftHeldWork},
+		{name: "a malformed episode stamp re-stamps", meta: []string{"started_config_hash", stale, "config_drift_deferred_key", key, "config_drift_deferred_at", "not-a-time"}, alive: true, work: true, wantKind: intentRowHeal, wantReason: decideDriftHeldWork},
+		{name: "a future episode stamp re-stamps", meta: []string{"started_config_hash", stale, "config_drift_deferred_key", key, "config_drift_deferred_at", rowAt(time.Hour)}, alive: true, work: true, wantKind: intentRowHeal, wantReason: decideDriftHeldWork},
 		{name: "a launch-only drift relaunches", meta: append([]string{"started_config_hash", stale}, launchOnly...), alive: true, relaunch: true, wantKind: intentDriftRelaunch, wantReason: decideDriftRelaunch},
-		{name: "a launch-only drift with open work waits", meta: append([]string{"started_config_hash", stale}, launchOnly...), alive: true, relaunch: true, work: true},
+		{name: "a launch-only drift with open work stamps its deferral", meta: append([]string{"started_config_hash", stale}, launchOnly...), alive: true, relaunch: true, work: true, wantKind: intentRowHeal, wantReason: decideDriftHeldWork},
 		{name: "a provision hash without a launch hash drains", meta: []string{"started_config_hash", stale, "started_provision_hash", runtime.ProvisionFingerprint(cfg), "started_launch_hash", ""}, alive: true, relaunch: true, wantKind: intentDrainBegin, wantReason: decideDrainBegin + drainConfigDrift},
 		{name: "an active stop request holds a launch-only drift", meta: slices.Concat([]string{"started_config_hash", stale}, launchOnly, intentAt(drainIdle, "3")), alive: true, relaunch: true},
 		{name: "a launch-only drift no provider can relaunch drains", meta: append([]string{"started_config_hash", stale}, launchOnly...), alive: true, wantKind: intentDrainBegin, wantReason: decideDrainBegin + drainConfigDrift},
@@ -118,7 +132,7 @@ func TestDecideRowConfigDrift(t *testing.T) {
 				w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(info): {TP: tp}}}
 				w.Observed = map[rowKey]rowObservation{rowKeyOf("gc-1"): {Liveness: livenessAlive, Attached: tc.attached, Uncertain: tc.unsure}}
 			})
-			drift := slices.Contains([]string{decideDriftAttached, decideDriftPinned, decideDriftResolved, decideDrainBegin + drainConfigDrift, decideDriftRepair, decideLiveApply, decideDriftRestart, decideDriftRelaunch}, it.Reason)
+			drift := slices.Contains([]string{decideDriftAttached, decideDriftPinned, decideDriftHeldWork, decideDriftResolved, decideDrainBegin + drainConfigDrift, decideDriftRepair, decideLiveApply, decideDriftRestart, decideDriftRelaunch}, it.Reason)
 			if tc.wantKind == "" && drift || tc.wantKind != "" && (it.Kind != tc.wantKind || it.Reason != tc.wantReason) { // another arm may take a row A14 leaves
 				t.Fatalf("decideRow = (%q, %q) %v, want (%q, %q)", it.Kind, it.Reason, it.Patch, tc.wantKind, tc.wantReason)
 			}
@@ -130,6 +144,13 @@ func TestDecideRowConfigDrift(t *testing.T) {
 			case decideDriftPinned:
 				if it.Patch["config_drift_deferred_key"] != key {
 					t.Fatalf("stamp %v, want key %q", it.Patch, key)
+				}
+			case decideDriftHeldWork:
+				if it.Patch["config_drift_deferred_key"] != key || it.Patch["config_drift_deferred_at"] != gatherNow.UTC().Format(time.RFC3339) {
+					t.Fatalf("stamp %v, want key %q at the pass", it.Patch, key)
+				}
+				if it.Event == nil || it.Event.Type != events.SessionConfigDriftDeferred || !strings.Contains(string(it.Event.Payload), `"gw-1"`) {
+					t.Fatalf("event %+v, want session.config_drift_deferred naming work bead gw-1", it.Event)
 				}
 			case decideDriftResolved:
 				if len(it.Patch) != 4 {
@@ -314,5 +335,75 @@ func TestDriftRepairSkipsAClassifiedDeadRuntime(t *testing.T) {
 		if repaired := it.Reason == decideDriftRepair || it.Heal != nil && it.Heal.Reason == decideDriftRepair; repaired != gone {
 			t.Fatalf("gone %v: decideRow = (%q, %q), want the drift repair %v", gone, it.Kind, it.Reason, gone)
 		}
+	}
+}
+
+// TestHeldWorkDriftDeferredEvent kills an invisible held-work deferral
+// (#8345): the first observation's event must carry the session, its name and
+// template, the drifted fields — empty but never null when the stored
+// breakdown is unavailable, and the message says so rather than "no drift" —
+// the observed work bead, the episode's own start time and the duration it
+// has already been pending. AC-2 re-emits it escalated past the horizon.
+func TestHeldWorkDriftDeferredEvent(t *testing.T) {
+	withoutA7(t)
+	tp := TemplateParams{TemplateName: "worker", Command: "run"}
+	base := censusRowOf(t, drainRow()).Info
+	cfg := sessionCoreConfigForHashInfo(tp, base)
+	stale := runtime.FingerprintVersion + ":stale"
+	stored := runtime.CoreFingerprintBreakdown(cfg)
+	stored.Fields["Command"] = "other-hash" // only Command drifts
+	breakdown, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("marshal breakdown: %v", err)
+	}
+	for _, tc := range []struct {
+		name       string
+		meta       []string
+		wantFields []string
+		wantInMsg  string
+	}{
+		{"names the drifted fields", []string{"started_config_hash", stale, "core_hash_breakdown", string(breakdown)}, []string{"Command"}, "Command"},
+		{"an unreadable breakdown says so", []string{"started_config_hash", stale}, nil, "field details unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			it, _ := decideDrain(t, tc.meta, func(e *selectionEntry) {
+				e.InDesired, e.Desired, e.AssignedWork = true, desireKeep, &assignedWorkView{BeadID: "gw-1", Claimed: true}
+			}, func(w *World) {
+				info := w.Census.Rows[rowKeyOf("gc-1")].Info
+				w.Env = &reconcileEnv{Cfg: &config.City{Agents: []config.Agent{{Name: "worker"}}}, SP: runtime.NewFake()}
+				w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(info): {TP: tp}}}
+				w.Observed = map[rowKey]rowObservation{rowKeyOf("gc-1"): {Liveness: livenessAlive}}
+			})
+			if it.Kind != intentRowHeal || it.Reason != decideDriftHeldWork || it.Event == nil {
+				t.Fatalf("decideRow = (%q, %q) event %+v, want the held-work deferral stamp and its event", it.Kind, it.Reason, it.Event)
+			}
+			if it.Event.Type != events.SessionConfigDriftDeferred || it.Event.SessionID != "gc-1" || !it.Event.Ts.Equal(gatherNow) {
+				t.Fatalf("event %+v, want session.config_drift_deferred for gc-1 at the pass", it.Event)
+			}
+			if !strings.Contains(it.Event.Message, tc.wantInMsg) || !strings.Contains(it.Event.Message, "gw-1") {
+				t.Fatalf("message %q, want it to name %q and work bead gw-1", it.Event.Message, tc.wantInMsg)
+			}
+			var p api.SessionConfigDriftDeferredPayload
+			if err := json.Unmarshal(it.Event.Payload, &p); err != nil {
+				t.Fatalf("unmarshal payload: %v", err)
+			}
+			if p.SessionID != "gc-1" || p.SessionName != "s-gc-1" || p.Template != "worker" || p.WorkBeadID != "gw-1" || p.Escalated {
+				t.Fatalf("payload %+v, want gc-1/s-gc-1/worker held by gw-1, first observation", p)
+			}
+			if !slices.Equal(p.DriftedFields, tc.wantFields) {
+				t.Fatalf("payload drifted_fields %v, want %v", p.DriftedFields, tc.wantFields)
+			}
+			// The typed contract: an absent breakdown is an empty list, never null.
+			var raw struct {
+				DriftedFields json.RawMessage `json:"drifted_fields"`
+			}
+			if err := json.Unmarshal(it.Event.Payload, &raw); err != nil || len(raw.DriftedFields) == 0 || string(raw.DriftedFields) == "null" {
+				t.Fatalf("payload drifted_fields raw %s (err %v), want a non-null list", raw.DriftedFields, err)
+			}
+			since, err := time.Parse(time.RFC3339, p.DeferredSince)
+			if err != nil || !since.Equal(gatherNow) || p.PendingSeconds != 0 {
+				t.Fatalf("payload deferred_since %q pending %d, want the episode's first observation at the pass", p.DeferredSince, p.PendingSeconds)
+			}
+		})
 	}
 }

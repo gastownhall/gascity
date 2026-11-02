@@ -3540,6 +3540,9 @@
             "$ref": "#/components/schemas/RotatedPayload"
           },
           {
+            "$ref": "#/components/schemas/SessionConfigDriftDeferredPayload"
+          },
+          {
             "$ref": "#/components/schemas/SessionCreateSucceededPayload"
           },
           {
@@ -8946,6 +8949,58 @@
         },
         "required": [
           "status"
+        ],
+        "type": "object"
+      },
+      "SessionConfigDriftDeferredPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "deferred_since": {
+            "description": "RFC3339 timestamp the reconciler first recorded this deferral episode; the escalation clock counts from here.",
+            "type": "string"
+          },
+          "drifted_fields": {
+            "description": "Sorted drifted config field names. Empty means the stored per-field breakdown was unavailable, not that no drift exists.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "escalated": {
+            "description": "False on the first-observation emission; true once the episode has outlived [daemon] drift_deferral_escalate_after.",
+            "type": "boolean"
+          },
+          "pending_seconds": {
+            "description": "Seconds the deferral episode has been pending, from deferred_since to the emission.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "session_id": {
+            "description": "Canonical session bead ID of the session the config drift is deferred on (also the envelope Subject).",
+            "type": "string"
+          },
+          "session_name": {
+            "description": "Runtime session name from the session bead metadata, when set.",
+            "type": "string"
+          },
+          "template": {
+            "description": "The session's template name, when set.",
+            "type": "string"
+          },
+          "work_bead_id": {
+            "description": "One observed open work bead holding the session, named for correlation.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "drifted_fields",
+          "work_bead_id",
+          "pending_seconds",
+          "escalated"
         ],
         "type": "object"
       },
@@ -14862,6 +14917,7 @@
             "request.result.session.submit": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionSubmit",
             "rig.provision.progress": "#/components/schemas/TypedEventStreamEnvelopeRigProvisionProgress",
             "session.cold_start_timeout": "#/components/schemas/TypedEventStreamEnvelopeSessionColdStartTimeout",
+            "session.config_drift_deferred": "#/components/schemas/TypedEventStreamEnvelopeSessionConfigDriftDeferred",
             "session.conversation_reset": "#/components/schemas/TypedEventStreamEnvelopeSessionConversationReset",
             "session.crashed": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed",
             "session.demand_claim_divergence": "#/components/schemas/TypedEventStreamEnvelopeSessionDemandClaimDivergence",
@@ -15149,6 +15205,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionColdStartTimeout"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionConfigDriftDeferred"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionConversationReset"
@@ -16892,6 +16951,7 @@
                 "session.pool_slot_retired_at_drain_deadline",
                 "session.stranded_claims",
                 "session.unknown_state",
+                "session.config_drift_deferred",
                 "session.wake_refused",
                 "session.reset_stalled",
                 "session.work_query_failed",
@@ -19984,6 +20044,63 @@
         "title": "TypedEventStreamEnvelope session.cold_start_timeout",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionConfigDriftDeferred": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionConfigDriftDeferredPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.config_drift_deferred",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.config_drift_deferred",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionConversationReset": {
         "additionalProperties": false,
         "properties": {
@@ -22746,6 +22863,7 @@
             "request.result.session.submit": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit",
             "rig.provision.progress": "#/components/schemas/TypedTaggedEventStreamEnvelopeRigProvisionProgress",
             "session.cold_start_timeout": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionColdStartTimeout",
+            "session.config_drift_deferred": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred",
             "session.conversation_reset": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionConversationReset",
             "session.crashed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed",
             "session.demand_claim_divergence": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence",
@@ -23033,6 +23151,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionColdStartTimeout"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionConversationReset"
@@ -24887,6 +25008,7 @@
                 "session.pool_slot_retired_at_drain_deadline",
                 "session.stranded_claims",
                 "session.unknown_state",
+                "session.config_drift_deferred",
                 "session.wake_refused",
                 "session.reset_stalled",
                 "session.work_query_failed",
@@ -28186,6 +28308,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.cold_start_timeout",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionConfigDriftDeferredPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.config_drift_deferred",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.config_drift_deferred",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionConversationReset": {

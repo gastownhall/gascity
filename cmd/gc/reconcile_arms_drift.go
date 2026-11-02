@@ -23,13 +23,14 @@ import (
 
 // Drift decide reasons.
 const (
-	decideDriftResolved = "drift-resolved"          // SESS-562
-	decideDriftAttached = "drift-deferred:attached" // SESS-552/553
-	decideDriftPinned   = "drift-deferred:pinned"   // SESS-555
-	decideDriftRepair   = "drift-repair"            // SESS-566/568
-	decideLiveApply     = "live-apply"              // SESS-565
-	decideDriftRestart  = "drift-restart"           // SESS-557
-	decideDriftRelaunch = "drift-relaunch"          // SESS-556/560
+	decideDriftResolved = "drift-resolved"           // SESS-562
+	decideDriftAttached = "drift-deferred:attached"  // SESS-552/553
+	decideDriftPinned   = "drift-deferred:pinned"    // SESS-555
+	decideDriftHeldWork = "drift-deferred:held-work" // SESS-559, #8345
+	decideDriftRepair   = "drift-repair"             // SESS-566/568
+	decideLiveApply     = "live-apply"               // SESS-565
+	decideDriftRestart  = "drift-restart"            // SESS-557
+	decideDriftRelaunch = "drift-relaunch"           // SESS-556/560
 )
 
 // armConfigDrift is A14 on an alive desired row whose stored config hash
@@ -41,8 +42,12 @@ const (
 //     restart; another named row is restarted in place (SESS-557), or
 //     relaunched for a launch-only drift its provider can relaunch
 //     (SESS-556), each effect deferring on the row's use (SESS-555);
-//   - a pending interaction (SESS-558) or open assigned work (SESS-559):
-//     defer, A19's lenses canceling a cancelable drain;
+//   - a pending interaction (SESS-558): defer, A19's lenses canceling a
+//     cancelable drain;
+//   - open assigned work (SESS-559): the held-work deferral episode — first
+//     observation stamps it and emits session.config_drift_deferred, a
+//     stamped episode waits (#8345), so the deferral is durable and visible
+//     while the held work stays protected;
 //   - a launch-only drift its provider can relaunch is relaunched (SESS-560),
 //     falling back to the drain;
 //   - otherwise the config-drift drain (SESS-561), unless a stop request is
@@ -93,8 +98,10 @@ func armConfigDrift(r *rowFacts) (intent, bool) {
 		return r.heal(intentRowHeal, decideDriftPinned, driftStamp(namedSessionConfigDriftDeferredAtMetadata, namedSessionConfigDriftDeferredKeyMetadata, key, now))
 	case isNamedSessionInfo(info):
 		return r.driftRestart(launchOnly)
-	case containsWakeReason(e.WakeReasons, WakePending) || e.AssignedWork != nil || active || driftRequestStands(r.row):
+	case containsWakeReason(e.WakeReasons, WakePending) || active || driftRequestStands(r.row):
 		return intent{}, false
+	case e.AssignedWork != nil:
+		return r.driftHeldWork(cfg, key)
 	case launchOnly:
 		return r.driftRestart(true)
 	}
@@ -126,6 +133,26 @@ func (r *rowFacts) driftRestart(relaunch bool) (intent, bool) {
 		return r.heal(intentDriftRelaunch, decideDriftRelaunch, nil)
 	}
 	return r.heal(intentDriftRestart, decideDriftRestart, nil)
+}
+
+// driftHeldWork is SESS-559's held-work protection made a durable, visible
+// episode (#8345): an ordinary seat with assigned work never takes the
+// config-drift drain, and nothing dated or reported the deferral. The first
+// observation of a drift stamps its episode (the drift key and now) and emits
+// session.config_drift_deferred through the row write's Event, so the write
+// lands first and the notification never precedes it; an episode already
+// stamped for this drift decides nothing, so A16's execution-stalled handling
+// still runs behind it.
+func (r *rowFacts) driftHeldWork(cfg runtime.Config, key string) (intent, bool) {
+	e, info, now := r.entry, r.row.Info, r.w.Now
+	stamp, since := driftHeldWorkEpisode(info.ConfigDriftDeferredAt, info.ConfigDriftDeferredKey, key, now)
+	if !stamp {
+		return intent{}, false
+	}
+	it, ok := r.heal(intentRowHeal, decideDriftHeldWork, driftStamp(namedSessionConfigDriftDeferredAtMetadata, namedSessionConfigDriftDeferredKeyMetadata, key, now))
+	ev := configDriftDeferredEvent(info, runtime.CoreFingerprintDriftFieldsFromJSON(info.CoreHashBreakdown, cfg), e.AssignedWork.BeadID, since, now, false)
+	it.Event = &ev
+	return it, ok
 }
 
 // liveApply is SESS-565: a live hash of this binary's version, or a v6 one

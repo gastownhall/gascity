@@ -701,6 +701,53 @@ func SessionUnknownStatePayloadJSON(sessionID, sessionName, state string, firstS
 	return b
 }
 
+// SessionConfigDriftDeferredPayload carries the machine-readable context for a
+// session.config_drift_deferred event: a real config drift whose drain the
+// reconciler defers because the ordinary session holds assigned work
+// (SESS-559's protection). The reconciler records the deferral episode, keeps
+// the held work protected, and reports — first on observation, again with
+// Escalated=true once the episode has outlived
+// [daemon] drift_deferral_escalate_after — so an indefinite deferral is never
+// silent. The envelope Message renders the same facts as operator text.
+type SessionConfigDriftDeferredPayload struct {
+	SessionID      string   `json:"session_id" doc:"Canonical session bead ID of the session the config drift is deferred on (also the envelope Subject)."`
+	SessionName    string   `json:"session_name,omitempty" doc:"Runtime session name from the session bead metadata, when set."`
+	Template       string   `json:"template,omitempty" doc:"The session's template name, when set."`
+	DriftedFields  []string `json:"drifted_fields" doc:"Sorted drifted config field names. Empty means the stored per-field breakdown was unavailable, not that no drift exists."`
+	WorkBeadID     string   `json:"work_bead_id" doc:"One observed open work bead holding the session, named for correlation."`
+	DeferredSince  string   `json:"deferred_since,omitempty" doc:"RFC3339 timestamp the reconciler first recorded this deferral episode; the escalation clock counts from here."`
+	PendingSeconds int64    `json:"pending_seconds" doc:"Seconds the deferral episode has been pending, from deferred_since to the emission."`
+	Escalated      bool     `json:"escalated" doc:"False on the first-observation emission; true once the episode has outlived [daemon] drift_deferral_escalate_after."`
+}
+
+// IsEventPayload marks SessionConfigDriftDeferredPayload as an events.Payload variant.
+func (SessionConfigDriftDeferredPayload) IsEventPayload() {}
+
+// SessionConfigDriftDeferredPayloadJSON builds the JSON wire form for
+// attachment to an events.Event.Payload field. DriftedFields is never null:
+// an absent or unreadable per-field breakdown marshals as an empty list, since
+// the drift itself is established by the fingerprints. DeferredSince and
+// PendingSeconds are emitted only when since is set.
+func SessionConfigDriftDeferredPayloadJSON(sessionID, sessionName, template string, driftedFields []string, workBeadID string, since, now time.Time, escalated bool) json.RawMessage {
+	p := SessionConfigDriftDeferredPayload{
+		SessionID:     sessionID,
+		SessionName:   sessionName,
+		Template:      template,
+		DriftedFields: driftedFields,
+		WorkBeadID:    workBeadID,
+		Escalated:     escalated,
+	}
+	if p.DriftedFields == nil {
+		p.DriftedFields = []string{}
+	}
+	if !since.IsZero() {
+		p.DeferredSince = since.UTC().Format(time.RFC3339)
+		p.PendingSeconds = int64(now.Sub(since).Seconds())
+	}
+	b, _ := json.Marshal(p)
+	return b
+}
+
 // Reasons carried by SessionPendingClearedPayload.Reason.
 const (
 	// PendingClearedResolved: the session is still probed but no longer
@@ -814,6 +861,7 @@ func init() {
 	events.RegisterPayload(events.SessionPoolSlotRetiredAtDrainDeadline, SessionPoolSlotRetiredAtDrainDeadlinePayload{})
 	events.RegisterPayload(events.SessionStrandedClaims, SessionStrandedClaimsPayload{})
 	events.RegisterPayload(events.SessionUnknownState, SessionUnknownStatePayload{})
+	events.RegisterPayload(events.SessionConfigDriftDeferred, SessionConfigDriftDeferredPayload{})
 	events.RegisterPayload(events.SessionWakeRefused, SessionWakeRefusedPayload{})
 	events.RegisterPayload(events.SessionResetStalled, events.SessionResetStalledPayload{})
 	events.RegisterPayload(events.SessionWorkQueryFailed, SessionLifecyclePayload{})
