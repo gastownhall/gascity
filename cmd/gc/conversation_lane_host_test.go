@@ -52,7 +52,7 @@ func (e *laneHostEnvFake) setStore(store beads.Store) {
 	defer e.mu.Unlock()
 	e.store = store
 }
-func (e *laneHostEnvFake) SessionProvider() runtime.Provider { return e.f.sp }
+func (e *laneHostEnvFake) SessionProvider() runtime.Provider { return e.f.runtime() }
 func (e *laneHostEnvFake) Config() *config.City              { return e.f.cfg }
 func (e *laneHostEnvFake) CityPath() string                  { return e.f.dir }
 func (e *laneHostEnvFake) Enqueue(keys ...reconcilekey.Key) {

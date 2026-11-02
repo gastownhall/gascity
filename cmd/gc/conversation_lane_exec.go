@@ -537,11 +537,17 @@ func (e *conversationLaneExec) quiescenceDeadline(obs worker.LiveObservation) ti
 	return at
 }
 
-// caps are the runtime's capabilities for conv. Content is live for a
-// keystroke-mode runtime, and for a protocol-mode one whose turns, starts
-// included, its own protocol reports (its boundary: a turn whose start is not
-// recorded never reads as in progress), that the conversation's row does not
-// stamp as hosted elsewhere for its current generation (DES-BX D7). Dedup is
+// caps are the runtime's capabilities for conv. Content is live where the
+// producers' rule says the executor serves the runtime (laneServesLive: a
+// keystroke-mode runtime, or a protocol-mode one whose turns, starts
+// included, its own protocol reports, its boundary, since a turn whose start
+// is not recorded never reads as in progress) and the conversation's row
+// does not stamp it as hosted elsewhere for its current generation (DES-BX
+// D7). The traits term restates laneServesLive from the session's turn
+// handle, which reads the same provider traits, so the two agree in every
+// reachable state (TestLaneServesLiveMatchesExecutorCaps); it is not a
+// second gate, and the conjunct is kept so the executor calls the
+// producers' rule itself rather than a copy of it. Dedup is
 // the worker boundary's read of whether the routed runtime deduplicates
 // keyed deliveries. A live runtime steers where its steer mode and the
 // session row allow it (e.steerable; D-STEER), per laneSteerCap, and
@@ -551,7 +557,7 @@ func (e *conversationLaneExec) quiescenceDeadline(obs worker.LiveObservation) ti
 func (e *conversationLaneExec) caps(conv opjournal.ConversationView) (opjournal.Caps, error) {
 	name := e.target.sessionName
 	caps := opjournal.Caps{
-		Live:     !e.protocol || e.traits.protocol && e.traits.starts,
+		Live:     laneServesLive(e.deps.sp, name) && (!e.protocol || e.traits.protocol && e.traits.starts),
 		Dedup:    worker.DeliveryKeysDeduplicated(e.deps.sp, name),
 		Input:    laneFenceMode(runtime.InputFencingFor(e.deps.sp, name)),
 		Text:     opjournal.TextReminder,
@@ -591,9 +597,22 @@ func laneSteerCap(caps opjournal.Caps, steerable bool) bool {
 // the runtime named name: a keystroke-mode runtime, not a protocol-mode one
 // (runtime.TurnInterruptProtocol), whose turns no keystroke starts. The
 // executor's Caps.Live also takes a protocol-mode runtime whose own protocol
-// reports its turns, starts included, which only its turn-traits read tells.
+// records its turn starts (laneServesLive).
 func laneTypesLive(sp runtime.Provider, name string) bool {
 	return runtime.TurnInterruptModeFor(sp, name) != runtime.TurnInterruptProtocol
+}
+
+// laneServesLive reports whether the live executor serves the runtime named
+// name: a keystroke-mode one (laneTypesLive), or a protocol-mode one whose
+// own protocol records its turn starts, so it has a boundary to deliver at
+// and a delivery can be tied to the turn it started. It is a static read of
+// the provider's traits, with no I/O, so producers deciding whether to
+// propose a lane op and the executor deciding Caps.Live apply one rule.
+func laneServesLive(sp runtime.Provider, name string) bool {
+	if laneTypesLive(sp, name) {
+		return true
+	}
+	return runtime.TurnCapabilitiesFor(sp, name).Start == runtime.TurnStartRecorded
 }
 
 // hostedElsewhere reports whether stamp says another host serves message for
