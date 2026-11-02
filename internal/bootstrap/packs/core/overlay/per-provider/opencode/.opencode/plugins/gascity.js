@@ -27,9 +27,9 @@
 // including a developer's personal session started by hand. The plugin
 // therefore registers hooks only when gc's session identity is present in
 // the environment. Outside a gc session the injection commands have nothing
-// to return and gc handoff exits 1, so the hooks would only spawn gc on
-// every generation and log a failed handoff on every compaction, in a
-// session Gas City does not own.
+// to return and gc handoff exits 1, so the hooks would only spawn gc every
+// turn and log a failed handoff on every compaction, in a session Gas City
+// does not own.
 
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
