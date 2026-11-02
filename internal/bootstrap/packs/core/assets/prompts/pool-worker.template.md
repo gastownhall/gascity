@@ -63,15 +63,26 @@ it closed and keep its recorded outcome.
 
 ## Following Your Formula
 
-Your formula defines your work as a sequence of steps. Steps are NOT
-materialized as individual beads — they exist in the formula definition.
-Read the step descriptions and work through them in order.
+This section covers an assignment that is neither a workflow step nor a
+molecule attachment:
+
+- **A plain bead** — execute the work from its description directly.
+- **A root-only formula** — the hook handed you a formula root whose steps
+  have no beads of their own (no child step beads were created for it).
+  The steps exist only in the formula definition. Read the step
+  descriptions and work through them in order.
+
+An expanded workflow root (`gc.kind=workflow` with
+`gc.workflow_expanded=true`) is not worker work: its steps are separate
+beads the hook hands out one at a time. Do not execute them from the
+root; escalate (below) if the hook returns one.
 
 **THE RULE**: Execute one step at a time. Verify completion. Move to next.
 Do NOT skip ahead. Do NOT claim steps done without actually doing them.
 
-On crash or restart, re-read your formula steps and determine where you
-left off from context (last completed action, git state, bead state).
+On crash or restart during a root-only formula, re-read its steps and
+determine where you left off from context (last completed action, git
+state, bead state).
 
 **Never use wide filesystem searches when a CLI command exists.** Wide
 traversals (`find /`, `find ~`, `find /Users`, `find $HOME`) walk

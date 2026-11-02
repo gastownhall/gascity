@@ -1869,4 +1869,55 @@ func TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules(t *testing.T
 			"including a molecule step you reached through `gc bd mol current`",
 		)
 	})
+
+	t.Run("plain beads and root-only formulas keep direct execution", func(t *testing.T) {
+		if flat := strings.Join(strings.Fields(got), " "); strings.Contains(flat, "Steps are NOT materialized") {
+			t.Errorf("prompt still denies materialized step beads for every assignment:\n%s", got)
+		}
+		formula := promptSection(t, got, "## Following Your Formula")
+		assertSectionContains(t, "Following Your Formula section", formula,
+			"neither a workflow step nor a molecule attachment",
+			"**A plain bead**",
+			"execute the work from its description directly",
+			"**A root-only formula**",
+			"no child step beads were created for it",
+			"Read the step descriptions and work through them in order",
+			"`gc.workflow_expanded=true`",
+			"is not worker work",
+			"**THE RULE**",
+			formulaFilesystemSearchGuidance,
+			"`find $HOME`",
+			"`gc` introspection command",
+		)
+	})
+}
+
+// TestPoolWorkerPromptDoesNotDenyMaterializedGraphSteps pins that the
+// rendered pool-worker prompt does not tell a worker its formula steps are
+// never materialized as beads. Under graph.v2 the hook hands the worker one
+// materialized step bead (gc.root_bead_id set); a prompt denying that steers
+// the worker into navigating molecule siblings it never claimed. The legacy
+// Molecules section must survive alongside the graph guidance.
+func TestPoolWorkerPromptDoesNotDenyMaterializedGraphSteps(t *testing.T) {
+	chdirToRealPackageDir(t)
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("filepath.Abs(repo root): %v", err)
+	}
+	coreDir := filepath.Join(repoRoot, "internal", "bootstrap", "packs", "core")
+	promptPath := filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md")
+
+	var stderr strings.Builder
+	got := renderPrompt(fsys.OSFS{}, t.TempDir(), "", promptPath, PromptContext{AgentName: "claude"}, "", &stderr,
+		[]string{coreDir}, nil, nil)
+	if stderr.Len() != 0 {
+		t.Fatalf("renderPrompt(pool-worker) wrote to stderr: %s", stderr.String())
+	}
+	flat := strings.Join(strings.Fields(got), " ")
+	if strings.Contains(flat, "Steps are NOT materialized as individual beads") {
+		t.Errorf("pool-worker prompt denies materialized step beads, contradicting graph.v2 hook-claimed steps:\n%s", got)
+	}
+	if !strings.Contains(got, "## Molecules") {
+		t.Errorf("pool-worker prompt lost the legacy Molecules section:\n%s", got)
+	}
 }
