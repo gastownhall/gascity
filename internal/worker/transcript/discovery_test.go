@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -899,6 +900,27 @@ func TestHasExactKeyedLookup(t *testing.T) {
 	} {
 		if got := HasExactKeyedLookup(provider); got != want {
 			t.Errorf("HasExactKeyedLookup(%q) = %v, want %v", provider, got, want)
+		}
+	}
+}
+
+func TestKeyedProbeRoots(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", "")
+	defaults := sessionlog.DefaultSearchPaths()
+	for _, c := range []struct {
+		provider string
+		roots    []string
+		want     []string
+	}{
+		{"claude", []string{"/observed"}, []string{"/observed"}},
+		{"claude/tmux-cli", []string{"/observed"}, []string{"/observed"}},
+		{"claude", nil, defaults},
+		{"pi", []string{"/observed"}, defaults},
+		{"kimi", []string{"/observed"}, defaults},
+	} {
+		if got := KeyedProbeRoots(c.roots, c.provider); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("KeyedProbeRoots(%v, %q) = %v, want %v", c.roots, c.provider, got, c.want)
 		}
 	}
 }

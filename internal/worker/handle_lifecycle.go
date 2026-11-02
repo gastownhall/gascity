@@ -826,16 +826,27 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	if resumeCommand := strings.TrimSpace(h.session.Resume.ResumeCommand); resumeCommand != "" {
 		resumeInfo.ResumeCommand = resumeCommand
 	}
-	isClaude := strings.Contains(strings.ToLower(strings.TrimSpace(resumeInfo.Provider)), "claude")
-	probePaths := h.searchPaths
-	if len(probePaths) == 0 || !isClaude {
-		probePaths = DefaultSearchPaths()
+	// A restart handoff can mint a session key that never had a conversation:
+	// the row keeps a past creation_complete_at, so the first-start branch
+	// above does not fire, and resuming the fresh key exits at once, leaving
+	// a blank pane. Probe the keyed transcript the way the row's own
+	// discovery does — the roots the adapter searches, plus the projects root
+	// an absolute CLAUDE_CONFIG_DIR in the launch env names — and when the
+	// provider is probeable, the transcript is absent, and the provider can
+	// name a new conversation, start the stored key as a new session instead
+	// of resuming it.
+	hints := h.runtimeHints()
+	provider := h.historyProvider(info)
+	workDir := strings.TrimSpace(hints.WorkDir)
+	if workDir == "" {
+		workDir = info.WorkDir
 	}
-	if dir := strings.TrimSpace(h.session.Env["CLAUDE_CONFIG_DIR"]); isClaude && filepath.IsAbs(dir) {
-		probePaths = MergeSearchPaths(append(append([]string(nil), probePaths...), filepath.Join(dir, "projects")))
+	launchRoots := h.adapter.SearchPaths
+	if dir := strings.TrimSpace(hints.Env["CLAUDE_CONFIG_DIR"]); filepath.IsAbs(dir) {
+		launchRoots = MergeSearchPaths(append(append([]string(nil), launchRoots...), filepath.Join(dir, "projects")))
 	}
-	present, probeable := workertranscript.HasKeyedTranscript(probePaths, resumeInfo.Provider, resumeInfo.WorkDir, resumeInfo.SessionKey)
-	if probeable && !present && h.session.Resume.SessionIDFlag != "" {
+	present, probeable := workertranscript.HasKeyedTranscript(workertranscript.KeyedProbeRoots(launchRoots, provider), provider, workDir, info.SessionKey)
+	if h.session.Resume.SessionIDFlag != "" && strings.TrimSpace(info.SessionKey) != "" && probeable && !present {
 		return startCommandWithSessionID(resumeInfo, h.session)
 	}
 	return sessionpkg.BuildResumeCommand(resumeInfo), nil

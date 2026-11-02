@@ -16,7 +16,8 @@ import (
 // session bead its startCommand reads, so the equivalence tests can pin the
 // exact resume/first-start command string across the WI-6 W3 read swap
 // (Manager.GetWithBead -> session.Store.GetPersistedResponse + EnrichInfo).
-func newStartCommandHandle(t *testing.T, spec SessionSpec, resume sessionpkg.ProviderResume, command string) (*SessionHandle, *beads.MemStore, sessionpkg.Info) {
+// The bead persists provider, which the transcript probe classifies by.
+func newStartCommandHandle(t *testing.T, spec SessionSpec, resume sessionpkg.ProviderResume, command, provider string) (*SessionHandle, *beads.MemStore, sessionpkg.Info) {
 	t.Helper()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -28,7 +29,7 @@ func newStartCommandHandle(t *testing.T, spec SessionSpec, resume sessionpkg.Pro
 		Title:     "Probe",
 		Command:   command,
 		WorkDir:   t.TempDir(),
-		Provider:  "legacy-provider",
+		Provider:  provider,
 		Transport: "",
 		Resume:    resume,
 	})
@@ -63,6 +64,7 @@ func TestStartCommandFirstProviderSessionStart(t *testing.T) {
 		},
 		sessionpkg.ProviderResume{SessionIDFlag: "--session-id"},
 		"mycmd",
+		"legacy-provider",
 	)
 
 	got, err := handle.startCommand(info.ID)
@@ -92,6 +94,7 @@ func TestStartCommandFirstStartOffWithStartedConfigHash(t *testing.T) {
 		},
 		sessionpkg.ProviderResume{ResumeFlag: "--resume", SessionIDFlag: "--session-id"},
 		"mycmd",
+		"legacy-provider",
 	)
 	if err := store.SetMetadata(info.ID, "started_config_hash", "hash-abc"); err != nil {
 		t.Fatalf("SetMetadata(started_config_hash): %v", err)
@@ -121,6 +124,7 @@ func TestStartCommandFirstStartOffWithCreationComplete(t *testing.T) {
 		},
 		sessionpkg.ProviderResume{ResumeFlag: "--resume", SessionIDFlag: "--session-id"},
 		"mycmd",
+		"legacy-provider",
 	)
 	if err := store.SetMetadata(info.ID, "creation_complete_at", "2026-01-01T00:00:00Z"); err != nil {
 		t.Fatalf("SetMetadata(creation_complete_at): %v", err)
@@ -149,6 +153,7 @@ func TestStartCommandResumeUsesSpecOverrides(t *testing.T) {
 		},
 		sessionpkg.ProviderResume{ResumeFlag: "--resume", SessionIDFlag: "--session-id"},
 		"bead-cmd",
+		"legacy-provider",
 	)
 	if err := store.SetMetadata(info.ID, "started_config_hash", "hash-abc"); err != nil {
 		t.Fatalf("SetMetadata(started_config_hash): %v", err)
@@ -193,8 +198,9 @@ func TestStartCommandStaleResumeKey(t *testing.T) {
 				},
 				sessionpkg.ProviderResume{ResumeFlag: "--resume", SessionIDFlag: "--session-id"},
 				"mycmd",
+				tt.provider,
 			)
-			handle.searchPaths = []string{root}
+			handle.adapter.SearchPaths = []string{root}
 			if err := store.SetMetadata(info.ID, "started_config_hash", "hash-abc"); err != nil {
 				t.Fatalf("SetMetadata(started_config_hash): %v", err)
 			}
@@ -250,8 +256,9 @@ func TestStartCommandClaudeConfigDir(t *testing.T) {
 				},
 				sessionpkg.ProviderResume{ResumeFlag: "--resume", SessionIDFlag: "--session-id"},
 				"mycmd",
+				"claude",
 			)
-			handle.searchPaths = []string{t.TempDir()}
+			handle.adapter.SearchPaths = []string{t.TempDir()}
 			if err := store.SetMetadata(info.ID, "started_config_hash", "hash-abc"); err != nil {
 				t.Fatalf("SetMetadata(started_config_hash): %v", err)
 			}
