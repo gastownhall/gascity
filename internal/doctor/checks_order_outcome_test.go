@@ -988,3 +988,98 @@ func TestOrderOutcomeHealthyIncompleteOutcomeOrderScope(t *testing.T) {
 		})
 	}
 }
+
+// TestOrderOutcomeHealthyMixedOutcomeSummary pins the aggregate: each
+// unhealthy order counts once, any outstanding declaration switches the
+// message to one that covers incomplete work, and a failure-only log keeps
+// the existing message, details and hint exactly.
+func TestOrderOutcomeHealthyMixedOutcomeSummary(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	failures := func(subject string) []events.Event {
+		out := []events.Event{{Type: events.OrderCompleted, Ts: now.Add(-6 * time.Hour), Subject: subject}}
+		for i := 3; i >= 1; i-- {
+			out = append(out, events.Event{Type: events.OrderFailed, Ts: now.Add(-time.Duration(i) * time.Hour), Subject: subject, Message: "exit status 1"})
+		}
+		return out
+	}
+	declaration := func(subject string) events.Event {
+		return skippedEvent(subject, now.Add(-time.Minute), "partial", "store unreachable")
+	}
+	completion := func(subject string) events.Event {
+		return events.Event{Type: events.OrderCompleted, Ts: now.Add(-time.Hour), Subject: subject}
+	}
+
+	cases := []struct {
+		name        string
+		evts        []events.Event
+		wantMessage string
+		wantDetails []string
+		wantHint    string
+	}{
+		{
+			name:        "failure-only log keeps the existing output",
+			evts:        append(failures("alpha-sync"), failures("beta-sync")...),
+			wantMessage: "2 order(s) failing repeatedly",
+			wantDetails: []string{
+				`alpha-sync: 3 consecutive failures, last "exit status 1"`,
+				`beta-sync: 3 consecutive failures, last "exit status 1"`,
+			},
+			wantHint: "Inspect with: gc order check && gc order history alpha-sync",
+		},
+		{
+			name:        "declaration only",
+			evts:        []events.Event{completion("alpha-sync"), completion("beta-sync"), declaration("beta-sync")},
+			wantMessage: "1 order(s) have unhealthy outcomes",
+			wantDetails: []string{
+				"alpha-sync: last run succeeded",
+				"beta-sync: recorded incomplete work: partial: store unreachable",
+			},
+			wantHint: "Inspect with: gc order check && gc order history beta-sync",
+		},
+		{
+			name:        "one failing and one declaring order",
+			evts:        append(failures("alpha-sync"), completion("beta-sync"), declaration("beta-sync")),
+			wantMessage: "2 order(s) have unhealthy outcomes",
+			wantDetails: []string{
+				`alpha-sync: 3 consecutive failures, last "exit status 1"`,
+				"beta-sync: recorded incomplete work: partial: store unreachable",
+			},
+			wantHint: "Inspect with: gc order check && gc order history alpha-sync",
+		},
+		{
+			name:        "both signals on one order count once",
+			evts:        append(failures("alpha-sync"), declaration("alpha-sync"), completion("beta-sync")),
+			wantMessage: "1 order(s) have unhealthy outcomes",
+			wantDetails: []string{
+				`alpha-sync: 3 consecutive failures, last "exit status 1"`,
+				"alpha-sync: recorded incomplete work: partial: store unreachable",
+				"beta-sync: last run succeeded",
+			},
+			wantHint: "Inspect with: gc order check && gc order history alpha-sync",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, cfg := orderFiringTestCity(t)
+			writeOrderFiringTestOrder(t, cityPath, "alpha-sync", "cooldown", "1h")
+			writeOrderFiringTestOrder(t, cityPath, "beta-sync", "cron", "0 * * * *")
+			writeOrderFiringTestEvents(t, cityPath, tc.evts...)
+
+			result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
+
+			if result.Status != StatusWarning || result.Severity != SeverityAdvisory {
+				t.Fatalf("status/severity = %v/%v, want StatusWarning/SeverityAdvisory; details=%v", result.Status, result.Severity, result.Details)
+			}
+			if result.Message != tc.wantMessage {
+				t.Fatalf("message = %q, want %q", result.Message, tc.wantMessage)
+			}
+			got := slices.Sorted(slices.Values(result.Details))
+			if !slices.Equal(got, tc.wantDetails) {
+				t.Fatalf("details = %q, want %q", got, tc.wantDetails)
+			}
+			if result.FixHint != tc.wantHint {
+				t.Fatalf("FixHint = %q, want %q", result.FixHint, tc.wantHint)
+			}
+		})
+	}
+}

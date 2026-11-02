@@ -247,7 +247,8 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 
 	worst := StatusOK
 	monitored := 0
-	failing := 0
+	unhealthy := 0
+	incomplete := false
 	var firstFailingHint string
 	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg, cityPath)
 
@@ -268,6 +269,7 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 		streak, lastMessage, sawOutcome, skipped := consecutiveOrderFailures(outcomes, order.ScopedName(), log.starts, c.grace)
 		status, detail := classifyOrderOutcome(order, streak, c.threshold, lastMessage, sawOutcome, skipped)
 		if declaration, declared := latestIncompleteOrderOutcome(outcomes, order.ScopedName()); declared {
+			incomplete = true
 			status = worseStatus(status, StatusWarning)
 			// Trailing failures keep their own diagnosis next to the
 			// declaration; a success or no-outcome detail would contradict it.
@@ -279,7 +281,7 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 		worst = worseStatus(worst, status)
 		result.Details = append(result.Details, detail)
 		if status != StatusOK {
-			failing++
+			unhealthy++
 			if firstFailingHint == "" {
 				// gc order history takes a bare name positionally and filters
 				// on a.Name; the scoped form matches zero orders on the
@@ -298,10 +300,16 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	result.Status = worst
-	if worst == StatusOK {
+	switch {
+	case worst == StatusOK:
 		result.Message = "all scheduled orders succeeding"
-	} else {
-		result.Message = fmt.Sprintf("%d order(s) failing repeatedly", failing)
+	case incomplete:
+		// "failing repeatedly" would misdescribe an order that only declared
+		// incomplete work; unhealthy counts each such order once.
+		result.Message = fmt.Sprintf("%d order(s) have unhealthy outcomes", unhealthy)
+		result.FixHint = fmt.Sprintf(orderOutcomeInspectHintFmt, firstFailingHint)
+	default:
+		result.Message = fmt.Sprintf("%d order(s) failing repeatedly", unhealthy)
 		result.FixHint = fmt.Sprintf(orderOutcomeInspectHintFmt, firstFailingHint)
 	}
 	return result
