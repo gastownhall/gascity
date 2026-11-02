@@ -13,7 +13,7 @@ none requires per-city configuration.
 
 | Order | Trigger | What it does |
 | ----- | ------- | ------------ |
-| `gate-sweep` | cooldown 30s | Evaluate and close pending gates (timer, GitHub) |
+| `gate-sweep` | cooldown 30s | Evaluate and close pending gates (timer, GitHub) in the city store and every non-suspended rig store |
 | `orphan-sweep` | cooldown 5m | Reset beads assigned to dead agents back to the work pool |
 | `cross-rig-deps` | cooldown 5m | Convert satisfied cross-rig `blocks` deps to `related` |
 | `convoy-autoclose-backstop` | cooldown 1h | Close open, un-owned convoys whose members are all terminal (reconciles a missed autoclose) |
