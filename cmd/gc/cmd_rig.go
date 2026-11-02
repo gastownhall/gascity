@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -121,7 +124,9 @@ Use --start-suspended to add the rig in a suspended state (dormant-by-default).
 The rig's agents won't spawn until explicitly resumed with "gc rig resume".
 
 Use --adopt to register a directory that already has a fully initialized
-.beads/ directory (must include both metadata.json and config.yaml).
+.beads/ directory (must include metadata.json). The rig takes the store's own
+issue prefix, from .beads/config.yaml or, when that records none (as bd init
+leaves it), from the store; --prefix, if given, must match.
 For managed-Dolt rigs, runs an idempotent config sync (registers types.custom
 and other config into the DB, never destructively reinitializes). The git repo
 check remains informational.`,
@@ -233,7 +238,7 @@ check remains informational.`,
 	}
 	cmd.Flags().StringArrayVar(&includes, "include", nil, "pack to import into the rig: a source, a pack name, or <binding>=<source> (repeatable)")
 	cmd.Flags().StringVar(&nameFlag, "name", "", "rig name (default: directory basename, or git URL basename for --git-url)")
-	cmd.Flags().StringVar(&prefixFlag, "prefix", "", "bead ID prefix (default: derived from name)")
+	cmd.Flags().StringVar(&prefixFlag, "prefix", "", "bead ID prefix (default: derived from name; with --adopt, the store's)")
 	cmd.Flags().StringVar(&defaultBranchFlag, "default-branch", "", "mainline branch (default: auto-detect from a remote HEAD — origin preferred — or the current branch)")
 	cmd.Flags().BoolVar(&startSuspended, "start-suspended", false, "add rig in suspended state (dormant-by-default)")
 	cmd.Flags().BoolVar(&adoptFlag, "adopt", false, "adopt existing .beads/ directory (skip init)")
@@ -341,10 +346,6 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 	if name == "" {
 		name = filepath.Base(rigPath)
 	}
-	// Captured before Provision writes anything: a rig already in the
-	// config is a re-add, and a re-add never gets a clean record.
-	existingRigs := configuredRigIdentities(cityPath, cfg)
-
 	deps := rig.Deps{
 		FS:           fs,
 		CityPath:     cityPath,
@@ -361,7 +362,10 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		NormalizeScopes: func(cp string, c *config.City) error {
 			return normalizeCanonicalBdScopeFiles(cp, c, io.Discard)
 		},
-		PrepareAdopt:  prepareRigAdoptProviderState,
+		PrepareAdopt: prepareRigAdoptProviderState,
+		ReadStorePrefix: func(p string) (string, error) {
+			return rigAdoptStorePrefix(cityPath, p)
+		},
 		StoreContract: cityUsesBdStoreContract,
 		DoltSkip:      gcDoltSkip,
 		PostProvision: func(pc rig.ProvisionContext) error {
@@ -438,53 +442,26 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 	} else if !provisioned.Deferred {
 		// An adopted store may predate migration 0059's fix (beads#7037).
 		rigAddRepairBlockedFlags(cityPath, reloaded, r.Name, stderr)
-		recordNewRigClean(cityPath, reloaded, r, adopt || existingRigs.holds(cityPath, r), stderr)
+		recordNewRigClean(cityPath, reloaded, r, stderr)
 	} else {
-		recordNewRigClean(cityPath, reloaded, r, adopt || existingRigs.holds(cityPath, r), stderr)
+		recordNewRigClean(cityPath, reloaded, r, stderr)
 	}
 	return r, 0
 }
 
-// configuredRigs is the rigs a city config declared before an add: names
-// and resolved scope roots.
-type configuredRigs struct {
-	names map[string]bool
-	roots map[string]bool
-}
-
-func configuredRigIdentities(cityPath string, cfg *config.City) configuredRigs {
-	out := configuredRigs{names: map[string]bool{}, roots: map[string]bool{}}
-	if cfg == nil {
-		return out
-	}
-	for _, r := range cfg.Rigs {
-		out.names[r.Name] = true
-		if strings.TrimSpace(r.Path) != "" {
-			out.roots[filepath.Clean(resolveStoreScopeRoot(cityPath, r.Path))] = true
-		}
-	}
-	return out
-}
-
-// holds reports whether r was already a rig of the city before the add.
-func (c configuredRigs) holds(cityPath string, r config.Rig) bool {
-	if c.names[r.Name] {
-		return true
-	}
-	return strings.TrimSpace(r.Path) != "" && c.roots[filepath.Clean(resolveStoreScopeRoot(cityPath, r.Path))]
-}
-
 // recordNewRigClean writes the S4 clean record for a rig `gc rig add` just
-// created on a split city: its store is new and holds no graph row, so its
-// readers need no relic leg (rigGraphRelicFree). notNew is true for an
-// adopted store or a re-add of a rig the config already declared: either may
-// hold pre-split history, so it stays awaiting import until `gc storage
-// migrate --from-rigs` censuses it. Even for a new rig the store must list
-// empty (a pre-existing .gc store at the path may hold rows), and any error
-// reading it writes nothing. A single-store city, or one whose binding has
-// not converged, writes nothing.
-func recordNewRigClean(cityPath string, cfg *config.City, r config.Rig, notNew bool, stderr io.Writer) {
-	if notNew || cfg == nil || !rigNameIsFileSafe(r.Name) || strings.TrimSpace(r.Path) == "" {
+// added, adopted or re-added on a split city whose binding has converged,
+// when a census of its store finds no infrastructure row (recordCensusClean):
+// the record `gc storage migrate --from-rigs` writes for such a rig, so its
+// readers need no relic leg (rigGraphRelicFree) and it never holds the deploy
+// gate. A store that holds an infrastructure row (pre-split history, an
+// adopted store's rows) stays awaiting import. So, with a warning, does one
+// the census cannot read, one another registered city also uses or that
+// cannot be ruled out as one, and one whose record cannot be written. A
+// single-store city, or one whose binding has not converged, writes nothing:
+// the controller's boot census records a rig added before then.
+func recordNewRigClean(cityPath string, cfg *config.City, r config.Rig, stderr io.Writer) {
+	if cfg == nil || !rigNameIsFileSafe(r.Name) || strings.TrimSpace(r.Path) == "" {
 		return
 	}
 	target, ok, err := resolveInfraBindingTarget(cityPath, cfg)
@@ -496,15 +473,21 @@ func recordNewRigClean(cityPath string, cfg *config.City, r config.Rig, notNew b
 	if state, err := readInfraConvergenceState(target); err != nil || state != infraConvergenceMarked {
 		return
 	}
-	loc := newRigImportLocation(target, cityPath, r.Name)
-	if fileExists(loc.MarkerPath()) || fileExists(loc.CleanPath()) {
-		return
+	// A scope with no store on disk holds no row; opening it would only
+	// create (or start a server for) the store being asked about.
+	row := rigCensusRow{Rig: r.Name, State: rigCensusAwaiting}
+	if !rigScopeHasNoStore(cityPath, r) {
+		row = censusRig(cityPath, loadedCityName(cfg, cityPath), cfg, target, r, false)
 	}
-	if !rigStoreListsEmpty(cityPath, r) {
-		return
-	}
-	if err := loc.writeRecord(loc.CleanPath(), fmt.Sprintf("rig %s created empty by gc rig add %s", r.Name, time.Now().UTC().Format(time.RFC3339)), rigStoreRoot(cityPath, r)); err != nil {
+	if _, err := recordCensusClean(cityPath, target, r, &row, "gc rig add"); err != nil {
 		fmt.Fprintf(stderr, "gc rig add: warning: recording rig %s clean for the split store: %v (run `%s` to record it)\n", r.Name, err, rigImportInstruction(r.Name)) //nolint:errcheck // best-effort stderr
+		return
+	}
+	switch {
+	case row.Err != nil:
+		fmt.Fprintf(stderr, "gc rig add: warning: rig %s stays awaiting import: its store could not be censused (%v); the controller's next boot census tries again\n", r.Name, row.Err) //nolint:errcheck // best-effort stderr
+	case row.State == rigCensusAwaiting && row.Why != "":
+		fmt.Fprintf(stderr, "gc rig add: warning: rig %s stays awaiting import, not recorded clean: %s\n", r.Name, row.Why) //nolint:errcheck // best-effort stderr
 	}
 }
 
@@ -613,7 +596,15 @@ func waitForRigStoreAccessible(cityPath, rigPath string, timeout time.Duration) 
 	}
 }
 
+// prepareRigAdoptProviderState readies provider state for --adopt before store
+// init. A proxied store that is missing is refused first, whatever the journal
+// records: init would create an empty store and register the rig on it. The
+// prefix read refuses the same scope earlier, but it is skipped when
+// .beads/config.yaml records the prefix.
 func prepareRigAdoptProviderState(cityPath, rigPath string) error {
+	if err := validateProxiedScopeBindingHasStore(rigPath); err != nil {
+		return err
+	}
 	if rawBeadsProvider(cityPath) != "file" {
 		return nil
 	}
@@ -621,6 +612,67 @@ func prepareRigAdoptProviderState(cityPath, rigPath string) error {
 		return nil
 	}
 	return ensurePersistedScopeLocalFileStore(rigPath)
+}
+
+// rigAdoptStorePrefix is the --adopt store-prefix reader rig.Deps wires in.
+// It is a var so tests can stand in for bd.
+var rigAdoptStorePrefix = readAdoptedStoreIssuePrefix
+
+// readAdoptedStoreIssuePrefix asks bd for the issue_prefix the store at rigPath
+// records in its own config table. bd keeps a store's prefix there and leaves
+// .beads/config.yaml a commented template, so this is how --adopt learns the
+// prefix of a store bd created. Metadata that names no backend is not a bd
+// store this can ask, and reports ("", nil) without running bd.
+//
+// bd is aimed at the rig's store the same way gc registers types.custom on the
+// two kinds of scope: a proxied-server scope through the provider's projection
+// (bd refuses --readonly through its proxy), after refusing a scope whose store
+// is missing whatever the journal records, because any bd command there would
+// create an empty one; every other scope through doctor's store projection
+// with --readonly, so on those nothing is started, migrated or written before
+// adoption is decided. The proxied read is an ordinary bd command: it may
+// start the workspace's proxy and run bd's version-bump maintenance even when
+// the adopt is then refused.
+func readAdoptedStoreIssuePrefix(cityPath, rigPath string) (string, error) {
+	metaPath := filepath.Join(rigPath, ".beads", "metadata.json")
+	backend, ok, err := contract.ReadMetadataBackend(fsys.OSFS{}, metaPath)
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", metaPath, err)
+	}
+	if !ok {
+		return "", nil
+	}
+	mode, _, err := contract.ReadDoltMode(fsys.OSFS{}, metaPath)
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", metaPath, err)
+	}
+
+	var env map[string]string
+	args := []string{"--readonly", "config", "get", "--json", "issue_prefix"}
+	if contract.IsProxiedDoltMode(backend, mode) {
+		if err := validateProxiedScopeBindingHasStore(rigPath); err != nil {
+			return "", err
+		}
+		env, err = providerOwnedScopeCustomTypesEnv(cityPath, rigPath)
+		args = args[1:]
+	} else {
+		env, err = embeddedScopeCustomTypesEnv(cityPath, rigPath)
+	}
+	if err != nil {
+		return "", fmt.Errorf("preparing bd environment for %s: %w", rigPath, err)
+	}
+
+	out, err := beads.ExecCommandRunnerWithEnv(env)(rigPath, "bd", args...)
+	if err != nil {
+		return "", fmt.Errorf("bd config get issue_prefix in %s: %w", rigPath, err)
+	}
+	var row struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(out, &row); err != nil {
+		return "", fmt.Errorf("parsing bd config get issue_prefix output in %s: %w", rigPath, err)
+	}
+	return strings.TrimSpace(row.Value), nil
 }
 
 // findEnclosingRig returns the rig whose path is a prefix of dir. It does
@@ -674,12 +726,14 @@ var rigListAPIClient = func(cityPath string) (*api.Client, string) {
 }
 
 // rigListHQRunning reports whether the city's controller is running, for the
-// HQ row of the API-render rig list. Indirected through a var so tests pin both
-// outcomes without a live controller. controllerStatusForCity (not bare
-// controllerAlive) is supervisor-aware: on the supervisor sub-lane
-// controllerAlive==0 by construction while the city IS running.
+// HQ row of the rig list on both routes, so the two print the same value.
+// It pings the city's controller socket, which a standalone controller and
+// the supervisor (for each city it runs) both serve. It never calls the
+// supervisor HTTP API: the local route is the GC_NO_API=1 escape hatch.
+// Indirected through a var so tests pin both outcomes without a live
+// controller.
 var rigListHQRunning = func(cityPath string) bool {
-	return controllerStatusForCity(cityPath).Running
+	return controllerAlive(cityPath) != 0
 }
 
 // routeRigList dispatches the `rig list` read to the supervisor API when
@@ -700,9 +754,15 @@ func routeRigList(cityPath string, c *api.Client, nilReason string, jsonOutput b
 }
 
 // renderRigListFromAPI formats the API-sourced rig list to match doRigList
-// output. HQ info and per-rig beads status are derived locally (neither
-// lives on the API response); configured rigs come from the API with an
-// _cache_age_s envelope field (JSON) or staleness banner (human).
+// output. The rigs are the ones city.toml registers, listed as doRigList
+// lists them: the controller answers from the config it has published, which
+// reaches a rig gc rig add or gc rig remove just wrote only at its next config
+// reload. The API supplies each loaded rig's runtime state (running agents,
+// effective suspension); a rig the controller has not loaded yet has no
+// running agent and the on-disk suspension doRigList reads. HQ info and
+// per-rig beads status are derived locally (neither lives on the API
+// response); the output carries an _cache_age_s envelope field (JSON) or
+// staleness banner (human).
 func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.RigView], jsonOutput bool, stdout, stderr io.Writer) int {
 	// CLI-unification Move-1: mirror doRigList — suppress advisory config
 	// warnings (e.g. missing builtin-pack import) in --json mode so both the
@@ -720,16 +780,18 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 	hqPrefix := config.EffectiveHQPrefix(cfg)
 	cityName := cfg.EffectiveCityName()
 	resolveRigPaths(cityPath, cfg.Rigs)
-	rigsByName := make(map[string]config.Rig, len(cfg.Rigs))
-	for i := range cfg.Rigs {
-		rigsByName[cfg.Rigs[i].Name] = cfg.Rigs[i]
+	loaded := make(map[string]api.RigView, len(cr.Body))
+	for _, rig := range cr.Body {
+		loaded[rig.Name] = rig
 	}
+	suspState, _ := loadSuspensionState(fs, cityPath)
+	suspNames := buildEffectiveSuspendedRigNames(cfg, suspState)
 
-	// HQ running is derived from controllerStatusForCity (supervisor-aware),
-	// not a hardcoded true — it flips to false only if the controller actually
-	// died between the ListRigs fetch and this render. Computed for --json only:
-	// renderRigListText ignores Running and the probe costs a socket/supervisor
-	// dial (mirrors doRigList's guard). No wire field — rig list is not
+	// HQ running comes from rigListHQRunning, the same controller-socket ping
+	// the local route uses, not a hardcoded true — it flips to false only if
+	// the controller actually died between the ListRigs fetch and this render.
+	// Computed for --json only: renderRigListText ignores Running and the probe
+	// costs a socket dial (mirrors doRigList's guard). No wire field — rig list is not
 	// remote-wired, and "the server handling the request IS the controller".
 	hqRunning := true
 	if jsonOutput {
@@ -750,29 +812,22 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 			Beads:   rigBeadsStatus(fs, cityPath),
 		}},
 	}
-	for _, rig := range cr.Body {
-		path := rig.Path
-		prefix := rig.Prefix
-		defaultBranch := rig.DefaultBranch
-		defaultSlingTarget := ""
-		var defaultSlingTargets []string
-		if cfgRig, ok := rigsByName[rig.Name]; ok {
-			path = cfgRig.Path
-			prefix = cfgRig.EffectivePrefix()
-			defaultBranch = cfgRig.EffectiveDefaultBranch()
-			defaultSlingTarget = cfgRig.DefaultSlingTarget
-			defaultSlingTargets = cfgRig.DefaultSlingTargets
+	for i := range cfg.Rigs {
+		rig := cfg.Rigs[i]
+		suspended, running := suspNames[rig.Name], false
+		if view, ok := loaded[rig.Name]; ok {
+			suspended, running = view.Suspended, view.RunningCount > 0
 		}
 		result.Rigs = append(result.Rigs, RigListItem{
 			Name:                rig.Name,
-			Path:                path,
-			Prefix:              prefix,
-			DefaultBranch:       defaultBranch,
-			Suspended:           rig.Suspended,
-			Running:             rig.RunningCount > 0,
-			DefaultSlingTarget:  defaultSlingTarget,
-			DefaultSlingTargets: defaultSlingTargets,
-			Beads:               rigBeadsStatus(fs, path),
+			Path:                rig.Path,
+			Prefix:              rig.EffectivePrefix(),
+			DefaultBranch:       rig.EffectiveDefaultBranch(),
+			Suspended:           suspended,
+			Running:             running,
+			DefaultSlingTarget:  rig.DefaultSlingTarget,
+			DefaultSlingTargets: rig.DefaultSlingTargets,
+			Beads:               rigBeadsStatus(fs, rig.Path),
 		})
 	}
 
@@ -913,14 +968,14 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 		CityPath:      cityPath,
 		CityName:      cityName,
 	}
-	// Running-status detection (controllerAlive + the per-rig session provider)
+	// Running-status detection (rigListHQRunning + the per-rig session provider)
 	// is computed for --json ONLY: the session provider forks tmux probes and
 	// scales O(rigs), and the human table does not display running status
 	// (renderRigListText ignores the Running field). Guarding it here preserves
 	// the historical text-path fast path (~7x faster than --json for many rigs).
 	hqRunning := false
 	if jsonOutput {
-		hqRunning = controllerAlive(cityPath) != 0
+		hqRunning = rigListHQRunning(cityPath)
 	}
 	result.Rigs = append(result.Rigs, RigListItem{
 		Name:    cityName,

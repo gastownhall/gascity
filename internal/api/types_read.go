@@ -23,9 +23,10 @@ import (
 //   - cmd/gc/cmd_<domain>.go           — routes via apiClient(cityPath);
 //                                        logs route=... on every exit path.
 //
-// The CacheAge float64 returned from each wrapper is the supervisor's
-// CachingStore age in seconds at the time of the read, sourced from the
-// X-GC-Cache-Age-S response header (populated by handlers via the
+// The CacheAge float64 returned from each wrapper is the seconds since the
+// server's bead cache last took in fresh data from its store (the cache's
+// age, not each row's; 0 when the endpoint reports no age), sourced from
+// the X-GC-Cache-Age-S response header (populated by handlers via the
 // cacheAgeSeconds helper). CLI callers surface this as _cache_age_s on
 // the --json envelope and as a stale-read banner on human output when
 // the age crosses 30 s.
@@ -80,9 +81,12 @@ type StatusAgentView struct {
 	Running       bool
 	Suspended     bool
 	SessionName   string
-	GroupName     string
-	ScaleLabel    string
-	Expanded      bool
+	// SessionID is the bead ID of the row's session; empty when the server
+	// sent none.
+	SessionID  string
+	GroupName  string
+	ScaleLabel string
+	Expanded   bool
 }
 
 // StatusRigView is the CLI-facing per-rig row.

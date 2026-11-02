@@ -13,7 +13,7 @@ const NudgeLookupLimit = 20
 
 // WithdrawWaitNudges removes queued wait nudges that are still pending or
 // in-flight, then marks their snapshotted nudge beads as terminal wait-canceled.
-func WithdrawWaitNudges(store beads.Store, cityPath string, ids []string) error {
+func WithdrawWaitNudges(store beads.NudgesStore, cityPath string, ids []string) error {
 	unique := dedupeIDs(ids)
 	if len(unique) == 0 || cityPath == "" {
 		return nil
@@ -35,13 +35,13 @@ func dedupeIDs(ids []string) []string {
 	return out
 }
 
-func withdraw(cityPath string, ids []string, store beads.Store, now string) error {
+func withdraw(cityPath string, ids []string, store beads.NudgesStore, now string) error {
 	remove := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		remove[id] = true
 	}
 
-	if store == nil {
+	if store == (beads.NudgesStore{}) {
 		return removeWaitNudgeIDs(cityPath, remove)
 	}
 
@@ -149,7 +149,7 @@ func queuedWaitNudgeCandidates(state *State, want map[string]bool) map[string][]
 	return found
 }
 
-func terminalNudgeBeads(store beads.Store, nudgeID string) ([]beads.Bead, error) {
+func terminalNudgeBeads(store beads.NudgesStore, nudgeID string) ([]beads.Bead, error) {
 	if nudgeID == "" {
 		return nil, nil
 	}
@@ -167,7 +167,7 @@ func terminalNudgeBeads(store beads.Store, nudgeID string) ([]beads.Bead, error)
 	return items, nil
 }
 
-func markTerminalCandidates(store beads.Store, nudgeID string, candidates []withdrawCandidate, now string) error {
+func markTerminalCandidates(store beads.NudgesStore, nudgeID string, candidates []withdrawCandidate, now string) error {
 	legacyLookup := false
 	seen := make(map[string]bool, len(candidates))
 	for _, candidate := range candidates {
@@ -189,7 +189,7 @@ func markTerminalCandidates(store beads.Store, nudgeID string, candidates []with
 	return nil
 }
 
-func markTerminal(store beads.Store, nudgeID, now string) error {
+func markTerminal(store beads.NudgesStore, nudgeID, now string) error {
 	items, err := terminalNudgeBeads(store, nudgeID)
 	if err != nil {
 		return err
@@ -211,7 +211,7 @@ func markTerminal(store beads.Store, nudgeID, now string) error {
 	return nil
 }
 
-func markTerminalBeadByID(store beads.Store, beadID, now string) error {
+func markTerminalBeadByID(store beads.NudgesStore, beadID, now string) error {
 	if beadID == "" {
 		return nil
 	}
@@ -228,7 +228,7 @@ func markTerminalBeadByID(store beads.Store, beadID, now string) error {
 	return markTerminalBead(store, item, now)
 }
 
-func markTerminalBead(store beads.Store, item beads.Bead, now string) error {
+func markTerminalBead(store beads.NudgesStore, item beads.Bead, now string) error {
 	if err := store.SetMetadataBatch(item.ID, map[string]string{
 		"state":           "failed",
 		"terminal_reason": "wait-canceled",

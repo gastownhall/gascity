@@ -86,6 +86,9 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 		page[j] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
 		s.enrichSessionResponseWithKeyedPaths(&page[j], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0, keyedTranscriptPaths)
 	}
+	if input.WakeReasons {
+		s.setSessionListWakeReasons(page, pageSessions, listings)
+	}
 	return &ListOutput[sessionResponse]{
 		Index:     index,
 		CacheAgeS: cacheAgeSeconds(store.Store),
@@ -99,6 +102,30 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	}, nil
 }
 
+// setSessionListWakeReasons fills each page row's wake_reasons from the
+// State's SessionListWakeReasoner, asked once for the whole page. A State
+// without the capability leaves them unset.
+func (s *Server) setSessionListWakeReasons(page []sessionResponse, pageSessions []session.Info, listings []session.ListedSession) {
+	reasoner, ok := s.state.(SessionListWakeReasoner)
+	if !ok || len(pageSessions) == 0 {
+		return
+	}
+	onPage := make(map[string]bool, len(pageSessions))
+	for _, sess := range pageSessions {
+		onPage[sess.ID] = true
+	}
+	persisted := make(map[string]session.Info, len(pageSessions))
+	for _, listing := range listings {
+		if onPage[listing.Info.ID] {
+			persisted[listing.Info.ID] = listing.Info
+		}
+	}
+	reasons := reasoner.SessionListWakeReasons(pageSessions, persisted)
+	for j := range page {
+		page[j].WakeReasons = reasons[page[j].ID]
+	}
+}
+
 // --- Session Get ---
 
 // resolveSessionGetID picks the resolver for GET /session/{id}. With exact_id
@@ -108,27 +135,33 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 // ladder runs — configured name, live, path alias, closed — whose closed-
 // inclusive steps scan the closed session population by metadata; that is what a
 // caller holding a durable id (the dashboard's run detail, one read per retired
-// seat on every render) must never pay for a miss.
+// seat on every render) must never pay for a miss. With peek_strict the live-
+// session ladder runs instead, as for gc session peek's local path: a closed
+// session is found only by its exact bead id.
 func (s *Server) resolveSessionGetID(store beads.Store, input *SessionGetInput) (string, error) {
 	if input.ExactID {
 		return session.ResolveSessionIDByExactID(store, input.ID)
+	}
+	if input.PeekStrict {
+		return s.resolveSessionIDWithConfig(store, input.ID)
 	}
 	return s.resolveSessionIDAllowClosedWithConfig(store, input.ID)
 }
 
 // humaHandleSessionGet is the Huma-typed handler for GET /v0/session/{id}.
 
-func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput) (*IndexOutput[sessionResponse], error) {
+func (s *Server) humaHandleSessionGet(ctx context.Context, input *SessionGetInput) (*IndexOutput[sessionResponse], error) {
 	index := s.latestIndex()
 	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	raw := store.Store
+	if raw == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(raw)
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
 
-	id, err := s.resolveSessionGetID(store.Store, input)
+	id, err := s.resolveSessionGetID(raw, input)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -136,15 +169,29 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
-	wantPeek := input.Peek
+	var strictOutput string
+	if input.PeekStrict {
+		handle, handleErr := s.workerHandleForSession(raw, id)
+		if handleErr != nil {
+			return nil, humaSessionManagerError(fmt.Errorf("peeking session %s: %w", id, handleErr))
+		}
+		strictOutput, err = strictSessionPeek(ctx, handle, id, input.PeekLines)
+		if err != nil {
+			return nil, err
+		}
+	}
+	wantPeek := input.Peek && !input.PeekStrict
 	resp := sessionResponseWithReason(info, pr, cfg, s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	s.enrichSessionResponse(&resp, info, cfg, sp, wantPeek, true, true, input.PeekLines)
+	if input.PeekStrict {
+		resp.LastOutput = strictOutput
+	}
 	if len(s.conversationLaneKinds()) > 0 {
 		resp.Turn = s.observedSessionTurn(id, info.Generation)
 	}
 	return &IndexOutput[sessionResponse]{
 		Index:     index,
-		CacheAgeS: cacheAgeSeconds(store.Store),
+		CacheAgeS: cacheAgeSeconds(raw),
 		Body:      resp,
 	}, nil
 }
@@ -345,12 +392,13 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 // structuredTranscriptFallback builds the degraded structured transcript from
 // info when no structured history is available. index is the caller's
 // handler-entry capture, taken before info was read, so it never covers an
-// event the body does not reflect.
+// event the body does not reflect. A running session reports unknown
+// activity: pane output alone does not show whether the agent is mid-turn.
 func (s *Server) structuredTranscriptFallback(index uint64, info session.Info, includeThinking bool) (*IndexOutput[sessionTranscriptGetResponse], error) {
 	activity := string(worker.TailActivityIdle)
 	output := ""
 	if info.State == session.StateActive && s.state.SessionProvider().IsRunning(info.SessionName) {
-		activity = string(worker.TailActivityInTurn)
+		activity = string(worker.TailActivityUnknown)
 		peekOutput, peekErr := s.state.SessionProvider().Peek(info.SessionName, 100)
 		if peekErr != nil {
 			return nil, apierr.Internal.Msg("peeking session: " + peekErr.Error())

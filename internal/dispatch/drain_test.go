@@ -3802,3 +3802,220 @@ func TestProcessDrainReHoldsItsItemWhenAReleasedBlockerClosesBlocked(t *testing.
 		t.Fatalf("gates = %+v; want the one gate reopened as an ordinary open gate", gates)
 	}
 }
+
+func TestDrainItemRuntimeVarsResolvesDefaultsReferencingParentAndConvoyVars(t *testing.T) {
+	reviewDefault := "{{binding_prefix}}reviewer"
+	subjectDefault := "unit {{convoy_id}}"
+	recipe := &formula.Recipe{Vars: map[string]*formula.VarDef{
+		"review_target": {Default: &reviewDefault},
+		"subject":       {Default: &subjectDefault},
+	}}
+	vars := map[string]string{
+		"binding_prefix":    "ops.",
+		graphv2.ConvoyIDVar: "unit-1",
+	}
+	got := drainItemRuntimeVars(recipe, vars)
+	if got["review_target"] != "ops.reviewer" {
+		t.Fatalf("review_target = %q, want ops.reviewer", got["review_target"])
+	}
+	// subject derives from the unit's convoy: it stays out of the item root's
+	// key and persisted runtime vars, and instantiation derives it.
+	if subject, ok := got["subject"]; ok {
+		t.Fatalf("subject = %q, want the convoy-derived default left out", subject)
+	}
+	if subject := formula.ApplyVarDefaults(recipe.Vars, got)["subject"]; subject != "unit unit-1" {
+		t.Fatalf("subject derived from the runtime vars = %q, want %q", subject, "unit unit-1")
+	}
+	if got := drainItemRuntimeVars(nil, nil); got == nil || len(got) != 0 {
+		t.Fatalf("drainItemRuntimeVars(nil, nil) = %v, want empty non-nil map", got)
+	}
+}
+
+func TestProcessDrainItemDerivesConvoyDefaultFromItsUnitConvoy(t *testing.T) {
+	tests := []struct {
+		name       string
+		callerVars map[string]string
+		// wantSubject is the subject every item binds; empty means the
+		// item's own unit convoy.
+		wantSubject string
+	}{
+		{name: "parent default derived from its convoy is not inherited"},
+		{
+			name:        "caller-supplied parent value is inherited",
+			callerVars:  map[string]string{"subject": "manual"},
+			wantSubject: "manual",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			formulatest.EnableV2ForTest(t)
+			dir := t.TempDir()
+			writeConvoySubjectDrainFormulas(t, dir)
+			store, drain := seedDrainWorkflow(t)
+			root := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
+			parentConvoyID := root.Metadata["gc.input_convoy_id"]
+			// Persist the parent's runtime vars the way sling stamps them on
+			// the workflow root.
+			inv, err := graphv2.PrepareInvocation(context.Background(), store, "parent", []string{dir}, parentConvoyID, tt.callerVars)
+			if err != nil {
+				t.Fatalf("PrepareInvocation(parent): %v", err)
+			}
+			if raw := graphv2.RuntimeVarsMetadata(inv.Vars); raw != "" {
+				if err := store.SetMetadata(root.ID, graphv2.RuntimeVarsMetadataKey, raw); err != nil {
+					t.Fatalf("SetMetadata(runtime vars): %v", err)
+				}
+			}
+
+			if _, err := ProcessControl(store, drain, ProcessOptions{FormulaSearchPaths: []string{dir}}); err != nil {
+				t.Fatalf("ProcessControl(drain expand): %v", err)
+			}
+			manifest := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
+			if len(manifest.Rows) == 0 {
+				t.Fatal("drain expanded no rows")
+			}
+			for _, row := range manifest.Rows {
+				subject := tt.wantSubject
+				if subject == "" {
+					subject = row.UnitConvoyID
+				}
+				if got, want := mustFindDrainItemWorkStep(t, store, row.ItemRootID).Title, "Work on "+subject; got != want {
+					t.Fatalf("item work step title = %q, want %q (parent convoy %s)", got, want, parentConvoyID)
+				}
+				itemRoot := mustGetBead(t, store, row.ItemRootID)
+				itemVars, err := graphv2.ParseRuntimeVarsMetadata(itemRoot.Metadata[graphv2.RuntimeVarsMetadataKey])
+				if err != nil {
+					t.Fatalf("ParseRuntimeVarsMetadata(item root): %v", err)
+				}
+				if got, want := itemVars["subject"], tt.callerVars["subject"]; got != want {
+					t.Fatalf("item root runtime vars subject = %q, want %q", got, want)
+				}
+			}
+		})
+	}
+}
+
+func writeConvoySubjectDrainFormulas(t *testing.T, dir string) {
+	t.Helper()
+	files := map[string]string{
+		"parent.formula.toml": `
+formula = "parent"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[vars.subject]
+default = "{{convoy_id}}"
+
+[[steps]]
+id = "drain"
+title = "Drain {{subject}}"
+
+[steps.drain]
+context = "separate"
+formula = "drain-item"
+`,
+		"drain-item.formula.toml": `
+formula = "drain-item"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[vars.subject]
+default = "{{convoy_id}}"
+
+[[steps]]
+id = "work"
+title = "Work on {{subject}}"
+`,
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(strings.TrimSpace(content)+"\n"), 0o644); err != nil {
+			t.Fatalf("write formula %s: %v", name, err)
+		}
+	}
+}
+
+// TestProcessDrainItemRootsInheritRunInitiator pins that every item workflow a
+// drain instantiates carries the launching run's gc.initiator, in both the
+// separate and the shared drain contexts. Each item formula is a new
+// self-rooted workflow, so without the inherited stamp everything reached
+// through the item root reads as unattributed.
+func TestProcessDrainItemRootsInheritRunInitiator(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		metadata map[string]string
+	}{
+		{name: "separate"},
+		{name: "shared", metadata: map[string]string{
+			"gc.drain_context":       "shared",
+			"gc.drain_member_access": "exclusive",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			formulatest.EnableV2ForTest(t)
+			dir := t.TempDir()
+			writeDrainItemFormula(t, dir)
+			store, drain := seedDrainWorkflow(t)
+			if err := store.SetMetadata(drain.Metadata[beadmeta.RootBeadIDMetadataKey], beadmeta.InitiatorMetadataKey, "kid-alice"); err != nil {
+				t.Fatalf("SetMetadata(root initiator): %v", err)
+			}
+			if len(tc.metadata) > 0 {
+				if err := store.SetMetadataBatch(drain.ID, tc.metadata); err != nil {
+					t.Fatalf("SetMetadataBatch(drain): %v", err)
+				}
+			}
+
+			if _, err := ProcessControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}}); err != nil {
+				t.Fatalf("ProcessControl(drain expand): %v", err)
+			}
+			created := assertDrainItemRootsInitiator(t, store, drain.ID, "kid-alice")
+			if created == 0 {
+				t.Fatalf("drain %s materialized no item roots", drain.ID)
+			}
+		})
+	}
+}
+
+// TestProcessDrainItemRootsDoNotInventInitiator pins that a drain launched by
+// an unattributed run leaves its item roots unattributed: the stamp is only
+// ever inherited.
+func TestProcessDrainItemRootsDoNotInventInitiator(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain := seedDrainWorkflow(t)
+	if err := store.SetMetadata(drain.ID, beadmeta.InitiatorMetadataKey, "kid-control-only"); err != nil {
+		t.Fatalf("SetMetadata(control initiator): %v", err)
+	}
+
+	if _, err := ProcessControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}}); err != nil {
+		t.Fatalf("ProcessControl(drain expand): %v", err)
+	}
+	if created := assertDrainItemRootsInitiator(t, store, drain.ID, ""); created == 0 {
+		t.Fatalf("drain %s materialized no item roots", drain.ID)
+	}
+}
+
+func assertDrainItemRootsInitiator(t *testing.T, store beads.Store, drainID, want string) int {
+	t.Helper()
+	manifest := mustDrainManifest(t, mustGetBead(t, store, drainID))
+	created := 0
+	for _, row := range manifest.Rows {
+		if row.ItemRootID == "" {
+			continue
+		}
+		created++
+		itemRoot := mustGetBead(t, store, row.ItemRootID)
+		got, ok := itemRoot.Metadata[beadmeta.InitiatorMetadataKey]
+		if want == "" {
+			if ok {
+				t.Fatalf("item root %s gc.initiator = %q, want unset", itemRoot.ID, got)
+			}
+			continue
+		}
+		if got != want {
+			t.Fatalf("item root %s gc.initiator = %q, want %q", itemRoot.ID, got, want)
+		}
+	}
+	return created
+}

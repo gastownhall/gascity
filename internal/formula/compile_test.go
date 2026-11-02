@@ -2776,3 +2776,109 @@ func TestSessionStepMarksAreTheSessionPackages(t *testing.T) {
 		t.Fatalf("marks %q %q %q, want session's %q %q %q", sessionStepType, sessionStepLabel, startupHealthStepType, session.BeadType, session.LabelSession, session.StartupHealthEpisodeType)
 	}
 }
+
+func TestCompileConditionSeesDefaultBuiltFromProvidedVar(t *testing.T) {
+	dir := t.TempDir()
+	formulaContent := `
+formula = "conditional-ref"
+version = 1
+
+[vars.review_target]
+default = "{{binding_prefix}}reviewer"
+
+[[steps]]
+id = "always"
+title = "Always runs"
+
+[[steps]]
+id = "bound-only"
+title = "Only for the ops binding"
+condition = "{{review_target}} == ops.reviewer"
+`
+	if err := os.WriteFile(filepath.Join(dir, "conditional-ref.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recipe, err := Compile(context.Background(), "conditional-ref", []string{dir}, map[string]string{"binding_prefix": "ops."})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if len(recipe.Steps) != 3 {
+		t.Fatalf("len(Steps) = %d, want 3 (root, always, bound-only)", len(recipe.Steps))
+	}
+}
+
+func TestCompileComposeExpansionResolvesDefaultFromRuleVar(t *testing.T) {
+	dir := t.TempDir()
+	expansion := `
+formula = "review-expansion"
+type = "expansion"
+version = 1
+
+[vars.reviewer]
+default = "{{prefix}}reviewer"
+
+[[template]]
+id = "{target}.review"
+title = "Review by {reviewer}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "review-expansion.toml"), []byte(expansion), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	parent := `
+formula = "review-parent"
+version = 1
+
+[[steps]]
+id = "release"
+title = "Release"
+
+[[compose.expand]]
+target = "release"
+with = "review-expansion"
+vars = { prefix = "ops." }
+`
+	if err := os.WriteFile(filepath.Join(dir, "review-parent.toml"), []byte(parent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recipe, err := Compile(context.Background(), "review-parent", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	step := recipe.StepByID("review-parent.release.review")
+	if step == nil {
+		t.Fatalf("expanded review step missing; steps = %+v", recipe.Steps)
+	}
+	if step.Title != "Review by ops.reviewer" {
+		t.Fatalf("title = %q, want the expansion default resolved against the rule var", step.Title)
+	}
+}
+
+func TestCompileStandaloneExpansionResolvesDefaultFromProvidedVar(t *testing.T) {
+	dir := t.TempDir()
+	expansion := `
+formula = "standalone-review"
+type = "expansion"
+version = 1
+
+[vars.reviewer]
+default = "{{prefix}}reviewer"
+
+[[template]]
+id = "{target}.review"
+title = "Review by {reviewer}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "standalone-review.toml"), []byte(expansion), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recipe, err := Compile(context.Background(), "standalone-review", []string{dir}, map[string]string{"prefix": "ops."})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	step := recipe.StepByID("standalone-review.main.review")
+	if step == nil {
+		t.Fatalf("expanded review step missing; steps = %+v", recipe.Steps)
+	}
+	if step.Title != "Review by ops.reviewer" {
+		t.Fatalf("title = %q, want the expansion default resolved against the provided var", step.Title)
+	}
+}

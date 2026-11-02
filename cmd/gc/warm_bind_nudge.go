@@ -351,8 +351,14 @@ func warmBindNoticeEpisode(i int) string {
 // whether the nudge was delivered. On failure (a TUI race, a transient) the
 // marker stays unset so a later tick retries; the unclaimed gate keeps that
 // retry safe (a claimed bead stops matching), and manual re-nudge remains the
-// final escape hatch, as it was at the poller's give-up.
+// final escape hatch, as it was at the poller's give-up. A slot waiting on a
+// pending interaction (a permission prompt or a question, which the nudge
+// would answer) is skipped this tick before any wait: the prompt gives no
+// idle boundary, and a later tick nudges the slot once it is answered.
 func nudgeWarmBindSlot(ctx context.Context, sp runtime.Provider, name, triggerID, claimText string) bool {
+	if pendingInteractionBlocked(sp, name) {
+		return false
+	}
 	if waiter, ok := sp.(runtime.IdleWaitProvider); ok {
 		_ = waiter.WaitForIdle(ctx, name, warmBindNudgeIdleTimeout)
 	}

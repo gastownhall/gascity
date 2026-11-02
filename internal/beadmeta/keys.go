@@ -43,8 +43,24 @@ const Namespace = "gc."
 // cmd/. Keep this block sorted by identifier; the Go compiler rejects duplicate
 // identifiers, giving us a free compile-time uniqueness guarantee.
 const (
-	AttemptLogMetadataKey     = "gc.attempt_log"
-	AttemptMetadataKey        = "gc.attempt"
+	AttemptLogMetadataKey = "gc.attempt_log"
+	AttemptMetadataKey    = "gc.attempt"
+	// AwaitingHumanMetadataKey, on a claimed work bead, names the session
+	// (its ID) whose claim asked a person and is waiting on their decision:
+	// an approval asked by mail. While the key names the seat holding the
+	// claim (AwaitsHuman), the work ladder only nudges it, an hour after the
+	// ask and hourly after that: it never recycles or releases it, and raises
+	// none of the escalations its pacing would (started_recycled,
+	// started_unanswered, release_unfinished). A nudge the seat cannot take
+	// still counts toward nudge_refused, and a release already in flight that
+	// raced the claim's start still raises release_raced_start. The asking
+	// agent writes it with its request and clears it when it works the step
+	// again: the wait ends in a turn of the seat (or when the claim closes),
+	// and the hourly nudge is what takes up an answer whose turn died before
+	// it could clear the key. It names its seat, not the step: a claim
+	// released and taken by another seat is that seat's work, whatever the
+	// key still says, and no dispatch path reads it.
+	AwaitingHumanMetadataKey  = "gc.awaiting_human"
 	BondMetadataKey           = "gc.bond"
 	BondVarsMetadataKey       = "gc.bond_vars"
 	BoundStepIDMetadataKey    = "gc.bound_step_id"
@@ -215,6 +231,7 @@ const (
 	FormulaHashMetadataKey               = "gc.formula_hash"
 	FormulaNameMetadataKey               = "gc.formula_name"
 	FormulaSourceMetadataKey             = "gc.formula_source"
+	GateTypeMetadataKey                  = "gc.gate_type" // declared [steps.gate] type, stamped verbatim: gc stores have no gate-condition column
 	GCExemptMetadataKey                  = "gc.gc_exempt"
 	Graphv2RootKeyMetadataKey            = "gc.graphv2_root_key"
 	IdempotencyKeyMetadataKey            = "gc.idempotency_key"
@@ -348,7 +365,12 @@ const (
 	SyntheticMetadataKey          = "gc.synthetic"
 	TemplateMetadataKey           = "gc.template"
 	TerminalMetadataKey           = "gc.terminal"
-	TriggerBeadIDMetadataKey      = "gc.trigger_bead_id"
+	// TriggerBeadIDMetadataKey records, on a demand-spawned SESSION's bead, the
+	// id of the bead whose demand spawned it. It is controller demand
+	// bookkeeping only: it is never exported into the session's shell, which
+	// sees just GC_SPAWN_ORIGIN=demand, and a session names its own bead with
+	// `gc hook current --id-only` (CurrentClaimBeadIDMetadataKey).
+	TriggerBeadIDMetadataKey = "gc.trigger_bead_id"
 	// InfraMigratedFromMetadataKey stamps a bead the storage-class migration
 	// copied into a binding with the name of the binding it came from, so a
 	// resumed attempt can tell a row it wrote from content the destination
@@ -359,7 +381,10 @@ const (
 	// list of {dir, type, other, other_status_at_import, payload, action}. No
 	// cross-store edge is ever written, so this keeps the history readable;
 	// the rig's retained-source backup is authoritative for a reverse.
-	MigratedCrossEdgesMetadataKey  = "gc.migrated_cross_edges"
+	MigratedCrossEdgesMetadataKey = "gc.migrated_cross_edges"
+	// TriggerBeadStoreRefMetadataKey records the store ref of the bead named by
+	// TriggerBeadIDMetadataKey. Like that key it is controller demand
+	// bookkeeping and never reaches the session's shell.
 	TriggerBeadStoreRefMetadataKey = "gc.trigger_bead_store_ref"
 	TruncatedMetadataKey           = "gc.truncated"
 	WorkBranchMetadataKey          = "gc.work_branch"
@@ -386,6 +411,16 @@ const (
 	// workflowTopologyIsNonExecutable in cmd/gc (#5900).
 	WorkflowExpandedMetadataKey = "gc.workflow_expanded"
 )
+
+// InitiatorMetadataKey records who launched a piece of work: the key id (kid)
+// of the verified write grant on the API request that created a run root, a
+// routed bead or a generic bead. The kid names the key that signed the grant,
+// so it identifies a person only when each principal signs with a key of
+// their own, and the same launcher's work carries a new value after a key
+// rotation. It is server-owned. The generic bead API refuses a client-supplied
+// value, and nothing is stamped when the request carried no verified
+// principal.
+const InitiatorMetadataKey = "gc.initiator"
 
 // Work-record metadata keys (ADR-0009). These bind a work bead to its claim
 // and its outcome so observability/eval can answer "what work was done, by
@@ -456,11 +491,10 @@ const (
 	// `gc hook --claim`. It is the durable back-channel that makes the claimed
 	// step id readable from the step's own shell: GC_BEAD_ID exists only in the
 	// dispatch condition-script environment (internal/convergence/condition.go),
-	// and GC_TRIGGER_BEAD_ID — exported to demand-spawned pool seats as a
-	// pool-level spawn marker (cmd/gc/build_desired_state.go) — is absent on
-	// other seats and never drives claim selection, so without this stamp a
-	// formula step cannot reliably name the bead it is running and silently
-	// skips its own close. `gc hook current` reads it back.
+	// and no session shell carries a trigger bead id (see
+	// TriggerBeadIDMetadataKey), so without this stamp a formula step cannot
+	// name the bead it is running and silently skips its own close.
+	// `gc hook current` reads it back.
 	//
 	// It is deliberately distinct from internal/session.CurrentBeadIDKey
 	// ("currently_processing_bead_id"), which the session RECONCILER stamps when
@@ -545,6 +579,7 @@ const OptionMetadataPrefix = "opt_"
 var KnownMetadataKeys = []string{
 	AttemptLogMetadataKey,
 	AttemptMetadataKey,
+	AwaitingHumanMetadataKey,
 	BondMetadataKey,
 	BondVarsMetadataKey,
 	BoundStepIDMetadataKey,
@@ -627,9 +662,11 @@ var KnownMetadataKeys = []string{
 	FormulaHashMetadataKey,
 	FormulaNameMetadataKey,
 	FormulaSourceMetadataKey,
+	GateTypeMetadataKey,
 	GCExemptMetadataKey,
 	Graphv2RootKeyMetadataKey,
 	IdempotencyKeyMetadataKey,
+	InitiatorMetadataKey,
 	InputConvoyIDMetadataKey,
 	InstantiatingMetadataKey,
 	IterationMetadataKey,

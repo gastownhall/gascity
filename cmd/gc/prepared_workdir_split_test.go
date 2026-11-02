@@ -55,11 +55,11 @@ func drainItemFixture(t *testing.T, e splitEnv, source beads.Store) (startCandid
 	return newTriggerSessionCandidate(t, e.sessionsStore(), step.ID, nil, ""), sourceDir
 }
 
-// legacyTriggerResolver is the legacy start's residency trigger reader
-// (CityRuntime.newWarmClaimTriggerResolver) over e's topology.
+// legacyTriggerResolver is the legacy start's trigger reader over e's work
+// legs: the tick installs legsTriggerResolver over its pass's legs, as v2's
+// start effect reads through its own.
 func legacyTriggerResolver(e splitEnv) warmClaimTriggerResolver {
-	topo := residencyTopologyForCity(e.cityPath, e.cfg, e.work, e.rigStores)
-	return func(id string) (beads.Bead, error) { return byIDBeadForTopology(topo, id) }
+	return legsTriggerResolver(testWorkLegs(e.cityPath, e.cfg, e.work, e.rigStores))
 }
 
 // The legacy reconciler's start.

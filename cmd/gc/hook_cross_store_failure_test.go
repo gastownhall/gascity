@@ -75,7 +75,7 @@ func TestBestStoreWithWorkReportsAFailedSecondaryWhenNoStoreHasWork(t *testing.T
 func TestHookDiscoveryReportsAFailedSecondaryStore(t *testing.T) {
 	stores := twoStoreFanOut()
 	var stdout, stderr bytes.Buffer
-	runner := hookDiscoveryRunner(stores, primaryAnswersSecondaryFails(t, "[]"), func(string, error) {}, &stderr)
+	runner := hookDiscoveryRunner(stores, primaryAnswersSecondaryFails(t, "[]"), hookVisibility{}, func(string, error) {}, &stderr)
 	code := doHook("q", "", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != hookExitWorkQueryFailed {
 		t.Fatalf("gc hook over a failed secondary store = exit %d, want %d; stdout=%q stderr=%s", code, hookExitWorkQueryFailed, stdout.String(), stderr.String())
@@ -93,7 +93,7 @@ func TestHookDiscoveryReportsAFailedSecondaryStore(t *testing.T) {
 func TestHookDiscoveryServesWorkAndLogsAFailedSecondaryStore(t *testing.T) {
 	stores := twoStoreFanOut()
 	var stdout, stderr bytes.Buffer
-	runner := hookDiscoveryRunner(stores, primaryAnswersSecondaryFails(t, routedCityRow), func(string, error) {}, &stderr)
+	runner := hookDiscoveryRunner(stores, primaryAnswersSecondaryFails(t, routedCityRow), hookVisibility{}, func(string, error) {}, &stderr)
 	code := doHook("q", "", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Fatalf("gc hook with work in the primary = exit %d, want 0; stderr=%s", code, stderr.String())

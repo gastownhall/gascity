@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 213,
+  "next_id": 215,
   "permanent_ids": [
     {
       "name": "help",
@@ -2184,6 +2184,21 @@
       "exclusion": "hidden-private"
     },
     {
+      "path": "gc internal program-status-shadow-report",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": true,
+      "effective_hidden": true,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "classification": "excluded",
+      "notice_policy": "ineligible",
+      "recording_policy": "excluded",
+      "owner": "excluded",
+      "mode": "hidden-private",
+      "exclusion": "hidden-private"
+    },
+    {
       "path": "gc internal project-mcp",
       "aliases": [],
       "conditional_modes": [],
@@ -4129,6 +4144,52 @@
       "classification": "storage-recover-stranded",
       "owner": "immediate",
       "id": 201
+    },
+    {
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "path": "gc storage remote-stage",
+      "shape": "structural",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "help",
+      "canonical_target": "@help",
+      "owner": "structural",
+      "id": 1
+    },
+    {
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "path": "gc storage remote-stage mark",
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-remote-stage-mark",
+      "owner": "immediate",
+      "id": 213
+    },
+    {
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "path": "gc storage remote-stage unmark",
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-remote-stage-unmark",
+      "owner": "immediate",
+      "id": 214
     },
     {
       "path": "gc storage repair-sequence",

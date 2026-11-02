@@ -37,6 +37,10 @@ var dispatchControlSessionProvider = newSessionProvider
 
 const maxControlQuarantineReasonMetadata = 512
 
+// sourceWorkflowCommandContext is the source-workflow lock context of a
+// one-shot command: a Ctrl-C or SIGTERM abandons a lock wait instead of killing
+// the command. A long-lived process must not install it per item, because the
+// handler consumes the signal the process was meant to die of.
 func sourceWorkflowCommandContext() (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 }
@@ -151,6 +155,12 @@ func runControlDispatcher(beadID string, stdout, stderr io.Writer) error {
 	return runControlDispatcherWithStore(cityPath, storePath, store, beadID, stdout, stderr)
 }
 
+// errControlNotProcessed is what the serve-drain dispatch returns when
+// ProcessControl made no change: a nil error with Processed false, such as a
+// control bead that is no longer open. The drain counts it as a skip, neither
+// progress nor pending; the one-shot path translates it back to nil.
+var errControlNotProcessed = errors.New("control bead not processed")
+
 // openControlStoreForDispatch is the test seam for the scope-store open in
 // runControlDispatcherInStore, following the package's var-seam idiom (cf.
 // controlDispatcherServe, dispatch_runtime.go). Production always uses
@@ -159,7 +169,9 @@ var openControlStoreForDispatch = openControlStoreAtForCity
 
 // runControlDispatcherInStore dispatches one control bead for the serve drain.
 // When emits is non-nil, the execution-fact projection for a control that
-// created no steps is deferred to it; nil projects synchronously.
+// created no steps is deferred to it; nil projects synchronously. A nil return
+// means the control bead was processed; errControlNotProcessed means
+// ProcessControl made no change to it.
 func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, stderr io.Writer, emits *executionEmitDeferral) error {
 	if cityPath == "" {
 		var err error
@@ -213,13 +225,21 @@ func runControlDispatcherWithStore(cityPath, storePath string, store beads.Store
 // above resolve a SCOPE and hand it over; a bead value resolved alongside that
 // scope comes from an unrouted store, and gating on it while writing elsewhere
 // re-runs a control kind the graph store had already finished.
+//
+// A control ProcessControl made no change to returns nil here, as a processed
+// one does: the one-shot command reports only failures.
 func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store beads.Store, beadID string, cfg *config.City, stdout, stderr io.Writer) error {
-	return runControlDispatcherDeferringEmits(cityPath, storePath, store, beadID, cfg, stdout, stderr, nil)
+	err := runControlDispatcherDeferringEmits(cityPath, storePath, store, beadID, cfg, stdout, stderr, nil)
+	if errors.Is(err, errControlNotProcessed) {
+		return nil
+	}
+	return err
 }
 
 // runControlDispatcherDeferringEmits is runControlDispatcherWithStoreAndConfig
 // for the serve drain: a non-nil emits receives the execution-fact projection
-// of a control that created no steps instead of running it inline.
+// of a control that created no steps instead of running it inline. It returns
+// errControlNotProcessed when ProcessControl made no change.
 func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.Store, beadID string, cfg *config.City, stdout, stderr io.Writer, emits *executionEmitDeferral) error {
 	restoreTraceWarnings := useWorkflowTraceWarnings(stderr)
 	defer restoreTraceWarnings()
@@ -274,9 +294,13 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 		}
 		opts.ResolveStoreRef = makeStoreRefResolver(cityPath, cfg)
 		if bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
-			sourceWorkflowCtx, cancelSourceWorkflowCtx := sourceWorkflowCommandContext()
-			defer cancelSourceWorkflowCtx()
-			opts.SourceWorkflowLock = makeSourceWorkflowLocker(sourceWorkflowCtx, cityPath, cfg, storePath)
+			// No signal context: the serve loop runs this once per finalizer,
+			// and a handler installed here would catch a stop's SIGTERM, keep
+			// the process serving, and fail the lock wait with
+			// context.Canceled. Left at the default disposition, a stop ends
+			// the dispatcher as it does during every other control kind, and
+			// the open finalizer is the next dispatcher's retry handle.
+			opts.SourceWorkflowLock = makeSourceWorkflowLocker(context.Background(), cityPath, cfg, storePath)
 			opts.SourceWorkflowStores = makeSourceWorkflowStoresLister(cityPath, cfg)
 		}
 		switch bead.Metadata[beadmeta.KindMetadataKey] {
@@ -335,31 +359,32 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 	if err != nil {
 		return handleControlDispatchError(cityPath, storePath, graphStore, bead, beadID, err, stderr)
 	}
-	if result.Processed {
-		if rootID := controlRootID(bead.Metadata); rootID != "" {
-			switch {
-			case emits != nil && result.Created == 0:
-				// Nothing new to define: the serve drain projects this root
-				// once, after its last queued control (executionEmitDeferral).
-				emits.add(rootID, relicGraphLeg)
-			default:
-				if emits != nil {
-					emits.forget(rootID)
-				}
-				if err := emitExecutionFacts(cityPath, store, []executionEmitTarget{{rootID: rootID, graphStore: graphStore}}, stderr); err != nil {
-					fmt.Fprintf(stderr, "warning: control dispatch: projecting execution facts for %s: %v\n", rootID, err) //nolint:errcheck // successful control processing is preserved
-				}
+	if !result.Processed {
+		return errControlNotProcessed
+	}
+	if rootID := controlRootID(bead.Metadata); rootID != "" {
+		switch {
+		case emits != nil && result.Created == 0:
+			// Nothing new to define: the serve drain projects this root
+			// once, after its last queued control (executionEmitDeferral).
+			emits.add(rootID, relicGraphLeg)
+		default:
+			if emits != nil {
+				emits.forget(rootID)
+			}
+			if err := emitExecutionFacts(cityPath, store, []executionEmitTarget{{rootID: rootID, graphStore: graphStore}}, stderr); err != nil {
+				fmt.Fprintf(stderr, "warning: control dispatch: projecting execution facts for %s: %v\n", rootID, err) //nolint:errcheck // successful control processing is preserved
 			}
 		}
-		_, _ = fmt.Fprintf(stdout, "control dispatch: bead=%s action=%s", beadID, result.Action)
-		if result.Created > 0 {
-			_, _ = fmt.Fprintf(stdout, " created=%d", result.Created)
-		}
-		if result.Skipped > 0 {
-			_, _ = fmt.Fprintf(stdout, " skipped=%d", result.Skipped)
-		}
-		fmt.Fprintln(stdout) //nolint:errcheck
 	}
+	_, _ = fmt.Fprintf(stdout, "control dispatch: bead=%s action=%s", beadID, result.Action)
+	if result.Created > 0 {
+		_, _ = fmt.Fprintf(stdout, " created=%d", result.Created)
+	}
+	if result.Skipped > 0 {
+		_, _ = fmt.Fprintf(stdout, " skipped=%d", result.Skipped)
+	}
+	fmt.Fprintln(stdout) //nolint:errcheck
 	return nil
 }
 
@@ -2588,11 +2613,22 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		// overwrites the route, and one to the same target still re-runs
 		// finalize via resolveConvoyRecovery, which sees the just-deleted
 		// workflow rather than short-circuiting as idempotent.
-		nextRoute := strings.TrimSpace(currentSource.Metadata[beadmeta.RunTargetMetadataKey])
-		if nextRoute == "" {
-			nextRoute = strings.TrimSpace(currentSource.Metadata[beadmeta.RoutedToMetadataKey])
-		}
-		if err := write.owning.store.SetMetadata(currentSource.ID, beadmeta.RoutedToMetadataKey, nextRoute); err != nil {
+		//
+		// A bead a graph workflow took over carries neither key: the wrap
+		// moved its route to gc.execution_routed_to and cleared both
+		// (restampWorkBeadRouting). That route is the last fallback. Without
+		// it such a bead would reopen unrouted and nothing would route it
+		// again: route recovery has no gc.run_target to read, and the
+		// detached-orphan sweep needs a session back-reference.
+		nextRoute := reopenSourceRoute(currentSource)
+		// The bead is back in the pool, so the execution route a graph
+		// workflow stamped on it goes in the same write. The detached-orphan
+		// sweep reads that route as a workflow's takeover and would never
+		// recover a route the bead loses from here on.
+		if err := write.owning.store.SetMetadataBatch(currentSource.ID, map[string]string{
+			beadmeta.RoutedToMetadataKey:          nextRoute,
+			beadmeta.ExecutionRoutedToMetadataKey: "",
+		}); err != nil {
 			return err
 		}
 		if err := clearSessionAffinityMetadataOnBead(write.owning.store, currentSource.ID); err != nil {
@@ -2619,6 +2655,18 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		return 1
 	}
 	return resultCode
+}
+
+// reopenSourceRoute is the pool route reopen-source pre-routes b to: its
+// gc.run_target, else the gc.routed_to it already carries, else the
+// gc.execution_routed_to a graph workflow's wrap moved its route to.
+func reopenSourceRoute(b beads.Bead) string {
+	for _, key := range []string{beadmeta.RunTargetMetadataKey, beadmeta.RoutedToMetadataKey, beadmeta.ExecutionRoutedToMetadataKey} {
+		if route := strings.TrimSpace(b.Metadata[key]); route != "" {
+			return route
+		}
+	}
+	return ""
 }
 
 // reopenTrackingConvoysForReopenedSource is the mirror image of

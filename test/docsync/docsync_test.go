@@ -800,6 +800,12 @@ func TestNoKnownStaleDocReferences(t *testing.T) {
 		"session.Fake",
 		"agent.Fake",
 		"internal/dolt/",
+		// The [maintenance.dolt] loop is observe-only (no backup snapshot,
+		// no CALL DOLT_GC); the public reference must not claim otherwise
+		// (#7995). The second phrase is the old `gc maintenance` summary in
+		// docs/reference/cli.md.
+		"CALL DOLT_GC + backup snapshot",
+		"Dolt store maintenance (gc + snapshot)",
 	}
 
 	var hits []string

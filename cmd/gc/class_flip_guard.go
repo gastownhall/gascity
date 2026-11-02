@@ -383,7 +383,10 @@ func bdImportNonIssueLine(raw []byte) (bool, error) {
 // the rest by class. A row is kept when the target store HOLDS its class — on
 // a split city's work store that is work plus any class the city leaves on
 // work — not merely when it is work. Every line bd imports as an issue is
-// classified (bdImportNonIssueLine decides which those are).
+// classified (bdImportNonIssueLine decides which those are), under every
+// reading this city's stores give its metadata: a row the store holds under
+// every reading is kept, one it holds under none is counted as not held, and
+// one it holds under some readings only is a problem.
 func splitBdImportRows(data []byte, holds []coordclass.Class) (bdImportSplit, string) {
 	split := bdImportSplit{byClass: map[coordclass.Class]int{}}
 	scanner := bufio.NewScanner(bytes.NewReader(data))
@@ -405,11 +408,11 @@ func splitBdImportRows(data []byte, holds []coordclass.Class) (bdImportSplit, st
 			continue
 		}
 		var row struct {
-			ID           string           `json:"id"`
-			Type         string           `json:"issue_type"`
-			Labels       []string         `json:"labels"`
-			Metadata     *beads.StringMap `json:"metadata"`
-			Parent       string           `json:"parent"`
+			ID           string          `json:"id"`
+			Type         string          `json:"issue_type"`
+			Labels       []string        `json:"labels"`
+			Metadata     json.RawMessage `json:"metadata"`
+			Parent       string          `json:"parent"`
 			Dependencies []struct {
 				DependsOnID string `json:"depends_on_id"`
 			} `json:"dependencies"`
@@ -417,13 +420,42 @@ func splitBdImportRows(data []byte, holds []coordclass.Class) (bdImportSplit, st
 		if err := json.Unmarshal(raw, &row); err != nil {
 			return bdImportSplit{}, fmt.Sprintf("line %d is not a JSON object gc can classify (%v)", line, err)
 		}
-		b := beads.Bead{Type: row.Type, Labels: row.Labels}
-		if row.Metadata != nil {
-			b.Metadata = map[string]string(*row.Metadata)
+		// The row is classified under every reading this city's stores give
+		// its stored metadata (beads.MetadataReadings): the bd CLI reads a
+		// JSON null on gc.root_bead_id as "", a work row, and a native Dolt
+		// store as the text "null", a graph row.
+		readings := []map[string]string{nil}
+		if len(row.Metadata) > 0 && string(row.Metadata) != "null" {
+			var err error
+			if readings, err = beads.MetadataReadings(row.Metadata); err != nil {
+				return bdImportSplit{}, fmt.Sprintf("line %d is not a JSON object gc can classify (metadata: %v)", line, err)
+			}
 		}
-		if class := coordclass.Classify(b); !slices.Contains(holds, class) {
+		// classes[i] is reading i's class. A row this store holds under every
+		// reading is kept; one it holds under none is left out and counted
+		// under the bd CLI's reading, as any row of a class it does not hold.
+		// Held under some readings only, the row is refused: kept, it is
+		// stranded wherever a store reads it the other way, and left out, a
+		// row this store holds is dropped.
+		classes := make([]coordclass.Class, len(readings))
+		held, unheld := -1, -1
+		for i, metadata := range readings {
+			classes[i] = coordclass.Classify(beads.Bead{Type: row.Type, Labels: row.Labels, Metadata: metadata})
+			switch {
+			case !slices.Contains(holds, classes[i]):
+				if unheld < 0 {
+					unheld = i
+				}
+			case held < 0:
+				held = i
+			}
+		}
+		if unheld >= 0 {
+			if held >= 0 {
+				return bdImportSplit{}, fmt.Sprintf("line %d (%s) is %s class as the bd CLI reads its metadata back and %s class as a native Dolt store reads it, and this store holds the %s class but not the %s class, so gc can neither import the row nor leave it out.%s Edit the row and import again", line, row.ID, classes[0], classes[1], classes[held], classes[unheld], bdMetadataReadingsNote(readings, 1))
+			}
 			split.skipped++
-			split.byClass[class]++
+			split.byClass[classes[0]]++
 			continue
 		}
 		split.keep = append(split.keep, keepLine)
