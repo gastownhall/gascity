@@ -1,7 +1,7 @@
 # Copy of gastownhall/gascity-packs registry.toml at 33da48cd9ec44e1de75fe598f520b9b9333ee469 (2026-10-05),
 # plus the gastown 0.1.11 and 0.1.12 and gascity 0.1.7 releases verbatim from 427c2dedce37 (2026-10-29),
 # plus the gastown 0.1.13 release verbatim from gascity-packs #596.
-# Plus the RFC8191 candidate entry from b298b0000abfd7081b5218f42b85b7a216707fb1.
+# Plus the RFC8191 candidate entry from 7833d810917d55dc44c6613b9f20695745906462.
 # Refresh it when the registry publishes releases the import tests should cover.
 schema = 1
 
@@ -56,8 +56,8 @@ schema = 1
   [[pack.release]]
     version = "0.0.8191"
     ref = "feat/rfc-8191-gascity-only"
-    commit = "dd2cff200f18a64e8a010fe1d5b975b1f0493e14"
-    hash = "sha256:856faef129953bac7c544f42342c7d699713db419591be5a8c60666d06b752de"
+    commit = "02039579a40ae20aea47060d96027fc924333ef5"
+    hash = "sha256:c76f4d0c5ca60c859961e416c124a85226da93ec14620f9e4df8dffdf4a11de0"
     description = "RFC8191 qualification candidate on the original compatible module baseline; stable catalog selection is unchanged."
 
 [[pack]]

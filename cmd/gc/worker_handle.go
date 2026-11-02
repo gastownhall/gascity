@@ -7,6 +7,8 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -110,7 +112,7 @@ func workerFactoryWithAttribution(
 		Recorder:                cliFactoryEventsRecorder(cityPath, cfg),
 		UsageSink:               usageSinkForCity(cfg, cityPath),
 		ResolveTransport:        resolveTransport,
-		ResolveSessionRuntime:   workerSessionRuntimeResolverWithConfig(cityPath, cfg),
+		ResolveSessionRuntime:   workerSessionRuntimeResolverWithConfig(cityPath, sp, cfg),
 		StaleKeyDetectionWaiter: waiter,
 		Pricing:                 cfg.PricingRegistry(),
 		RuntimeLeaseTTL:         session.RuntimeLeaseTTLFor(cfg),
@@ -122,10 +124,12 @@ func workerFactoryWithAttribution(
 	})
 }
 
-func workerSessionRuntimeResolverWithConfig(cityPath string, cfg *config.City) worker.SessionRuntimeResolver {
+func workerSessionRuntimeResolverWithConfig(cityPath string, sp runtime.Provider, cfg *config.City) worker.SessionRuntimeResolver {
 	if cfg == nil {
 		return nil
 	}
+	capability, supportsReconcilerOwnership := sp.(runtime.ReconcilerOwnedMergeablePathProvider)
+	supportsReconcilerOwnership = supportsReconcilerOwnership && capability.SupportsReconcilerOwnedMergeablePaths()
 	return func(info session.Info, sessionKind string, metadata map[string]string) (*worker.ResolvedRuntime, error) {
 		runtimeCfg, err := resolvedWorkerRuntimeWithConfigAndMetadata(cityPath, cfg, info, sessionKind, metadata)
 		if err != nil {
@@ -133,6 +137,11 @@ func workerSessionRuntimeResolverWithConfig(cityPath string, cfg *config.City) w
 		}
 		if runtimeCfg == nil {
 			return nil, nil
+		}
+		if !supportsReconcilerOwnership {
+			ownedPaths := runtimeCfg.Hints.ReconcilerOwnedMergeablePaths
+			runtimeCfg.Hints.CopyFiles = replaceReconcilerOwnedCopyFilesForPaths(runtimeCfg.Hints.CopyFiles, ownedPaths, nil)
+			runtimeCfg.Hints.ReconcilerOwnedMergeablePaths = nil
 		}
 		normalized, err := worker.NormalizeResolvedRuntime(*runtimeCfg)
 		if err != nil {
@@ -167,39 +176,6 @@ func workerSessionCreateHints(resolved *config.ResolvedProvider) runtime.Config 
 	// above; closing the remaining create-vs-resume population gap is the
 	// internal/worker.Factory follow-up.
 	return hints.ToRuntimeConfig()
-}
-
-// applyWorkerOverlayHints populates the provider-overlay staging fields
-// (ProviderName/ProviderOverlayName/InstallAgentHooks/PackOverlayDirs) on a
-// worker create/resume runtime.Config, mirroring the canonical create-time
-// sourcing in cmd/gc/template_resolve.go (resolveTemplate). The worker.Factory
-// create and resume paths build runtime.Config directly and never route through
-// resolveTemplate, so without this they leave these fields empty:
-// OverlayProviderNames then falls back to ProviderName="" and the per-provider
-// overlay (e.g. core/overlay/per-provider/pi/.pi/extensions/gc-hooks.js for a
-// custom base="builtin:pi" provider) is never staged, the harness never signals
-// ready, and the controller churns into a fall-back-to-claude loop (gc-6bw8o).
-// Best-effort: a missing cfg/resolved (CLI direct-start fallback) leaves the
-// config untouched rather than failing the start.
-func applyWorkerOverlayHints(hints *runtime.Config, cfg *config.City, cityPath, template string, resolved *config.ResolvedProvider) {
-	if hints == nil || cfg == nil || resolved == nil {
-		return
-	}
-	// ProviderName is the launch family (BuiltinAncestor, e.g. "pi" for a
-	// base="builtin:pi" provider); ProviderOverlayName is the concrete provider
-	// name — identical to resolveTemplate's hint assignment.
-	hints.ProviderName = resolvedProviderLaunchFamily(resolved)
-	hints.ProviderOverlayName = strings.TrimSpace(resolved.Name)
-	agentCfg := findAgentByTemplate(cfg, template)
-	if agentCfg == nil {
-		// No agent config to resolve install-hooks/rig overlay scope against
-		// (e.g. a synthetic session). Still stage city pack overlays.
-		hints.PackOverlayDirs = effectiveOverlayDirs(cfg.PackOverlayDirs, cfg.RigOverlayDirs, "")
-		return
-	}
-	hints.InstallAgentHooks = config.ResolveInstallHooks(agentCfg, &cfg.Workspace)
-	rigName := sessionSetupContextForAgent(cityPath, cfg.EffectiveCityName(), firstNonEmptyGCString(agentCfg.QualifiedName(), template), agentCfg, cfg.Rigs).Rig
-	hints.PackOverlayDirs = effectiveOverlayDirs(cfg.PackOverlayDirs, cfg.RigOverlayDirs, rigName)
 }
 
 func resolvedRuntimeMCPServersWithConfig(
@@ -324,7 +300,55 @@ func newWorkerSessionHandleForResolvedRuntimeWithConfig(
 		return nil, err
 	}
 	applyWorkerCreateRuntimeInputs(&sessionCfg, cfg, cityPath, template, transport, resolved)
-	return factory.SessionForResolvedRuntime(sessionCfg)
+	capability, capable := sp.(runtime.ReconcilerOwnedMergeablePathProvider)
+	var ownedFiles map[string]string
+	if capable && capability.SupportsReconcilerOwnedMergeablePaths() {
+		ownedFiles = materialize.ResolveConfiguredCodexHookOwnership(cityPath, cfg, template, sessionCfg.Runtime.WorkDir, sessionCfg.Runtime.Hints, nil)
+		materialize.ApplyVerifiedMergeableOwnership(&sessionCfg.Runtime.Hints, ownedFiles)
+	}
+	handle, err := factory.SessionForResolvedRuntime(sessionCfg)
+	if err != nil || len(ownedFiles) == 0 {
+		return handle, err
+	}
+	return &configuredCodexCreateHandle{
+		Handle: handle,
+		prepare: func() (worker.Handle, error) {
+			fresh := sessionCfg
+			verified, err := materialize.ReconcileConfiguredCodexHooks(cityPath, cfg, template, fresh.Runtime.WorkDir, fresh.Runtime.Hints)
+			if err != nil {
+				return nil, fmt.Errorf("preparing configured Codex hooks: %w", err)
+			}
+			materialize.ApplyVerifiedMergeableOwnership(&fresh.Runtime.Hints, verified)
+			return factory.SessionForResolvedRuntime(fresh)
+		},
+	}, nil
+}
+
+// configuredCodexCreateHandle is local to the CLI create/attach flow. Prepare
+// only when the caller actually starts a new runtime, after its identity lock;
+// a deferred create and all pure runtime resolution remain write-free.
+type configuredCodexCreateHandle struct {
+	worker.Handle
+	prepare        func() (worker.Handle, error)
+	retainDelegate bool
+}
+
+func (h *configuredCodexCreateHandle) Create(ctx context.Context, mode worker.CreateMode) (session.Info, error) {
+	if !h.retainDelegate && mode == worker.CreateModeStarted {
+		prepared, err := h.prepare()
+		if err != nil {
+			return session.Info{}, err
+		}
+		// Keep the canonical delegate for retries and for Attach after
+		// successful Create; its own lifecycle owns the created bead ID.
+		h.Handle = prepared
+		h.retainDelegate = true
+	}
+	info, err := h.Handle.Create(ctx, mode)
+	if err == nil {
+		h.retainDelegate = true
+	}
+	return info, err
 }
 
 // applyWorkerCreateRuntimeInputs layers the city-config-derived inputs onto a
@@ -343,7 +367,7 @@ func applyWorkerCreateRuntimeInputs(sessionCfg *worker.ResolvedSessionConfig, cf
 	// reconciler create path does; resolvedWorkerSessionConfigWithConfig builds
 	// runtime.Config directly and never routes through resolveTemplate
 	// (gc-6bw8o).
-	applyWorkerOverlayHints(&sessionCfg.Runtime.Hints, cfg, cityPath, template, resolved)
+	materialize.ApplyConfiguredSessionOverlayHints(cityPath, cfg, template, resolved, &sessionCfg.Runtime.Hints)
 }
 
 func resolvedWorkerSessionConfigWithConfig(
@@ -775,8 +799,9 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	// Project the resolved hint subset through the single StartupHints →
 	// runtime.Config mapping (gc-0tna7), then layer the caller-owned
 	// WorkDir/Env/MCPServers. SessionLive is resolved above (ga-vtkhi) so
-	// resumed sessions re-theme; closing the remaining create-time field gap
-	// is the internal/worker.Factory population follow-up.
+	// resumed sessions re-theme. Verified reconciler-owned hook files are also
+	// projected below so remote providers receive the canonical document that
+	// their overlay staging is instructed to preserve.
 	runtimeHints := agent.StartupHints{
 		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
@@ -793,7 +818,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	// Stage provider-overlay hooks on resume the same way the reconciler create
 	// path does; this resume resolver builds runtime.Config directly and never
 	// routes through resolveTemplate (gc-6bw8o).
-	applyWorkerOverlayHints(&runtimeHints, cfg, cityPath, info.Template, resolved)
+	materialize.ApplyConfiguredSessionOverlayHints(cityPath, cfg, info.Template, resolved, &runtimeHints)
 	// Deliver the startup prompt the way the reconciler's resume does: this
 	// resolver builds runtime.Config directly, so without it a resumed launch
 	// leaves the SessionStart hook as the only carrier of the prompt (ga-4k4zfk).
@@ -801,6 +826,8 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	if err != nil {
 		return nil, err
 	}
+	ownedFiles := materialize.ResolveConfiguredCodexHookOwnership(cityPath, cfg, info.Template, workDir, runtimeHints, nil)
+	materialize.ApplyVerifiedMergeableOwnership(&runtimeHints, ownedFiles)
 	return &worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    workDir,
@@ -814,6 +841,37 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 			SessionIDFlag: resolved.SessionIDFlag,
 		},
 	}, nil
+}
+
+func replaceReconcilerOwnedCopyFilesForPaths(existing []runtime.CopyEntry, paths []string, owned []runtime.CopyEntry) []runtime.CopyEntry {
+	ownedDestinations := make(map[string]bool, len(paths))
+	for _, rel := range paths {
+		ownedDestinations[path.Clean(filepath.ToSlash(rel))] = true
+	}
+	ownedSources := make([]string, 0, len(owned))
+	for _, entry := range owned {
+		if strings.TrimSpace(entry.Src) != "" {
+			ownedSources = append(ownedSources, entry.Src)
+		}
+	}
+	result := make([]runtime.CopyEntry, 0, len(existing)+len(owned))
+	for _, entry := range existing {
+		if ownedDestinations[path.Clean(filepath.ToSlash(entry.RelDst))] {
+			continue
+		}
+		duplicateSource := false
+		for _, source := range ownedSources {
+			if samePath(entry.Src, source) {
+				duplicateSource = true
+				break
+			}
+		}
+		if duplicateSource {
+			continue
+		}
+		result = append(result, entry)
+	}
+	return append(result, owned...)
 }
 
 func resolvedWorkerRuntimeProviderLabel(resolved *config.ResolvedProvider, transport string, info session.Info) string {

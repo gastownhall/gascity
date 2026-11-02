@@ -33,7 +33,7 @@ next to that code; read the matching file before changing it.
 | CLI/API session creation or lifecycle | `internal/worker/AGENTS.md` |
 | `internal/cliauth/`, `gc login`, `gc whoami` | `internal/cliauth/AGENTS.md` |
 | Runtime | `internal/providerreadiness/AGENTS.md` |
-| `internal/hooks/` | `internal/hooks/AGENTS.md` |
+| Provider hooks | `internal/hooks/AGENTS.md` |
 | Gate processes | `internal/convergence/AGENTS.md` |
 | `scripts/`, test runners, or git hooks | `scripts/AGENTS.md` |
 | Any test | `TESTING.md` |

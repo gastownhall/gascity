@@ -3,6 +3,7 @@ package runtime
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/overlay"
 )
 
@@ -29,13 +31,23 @@ import (
 func HashHookSettingsContent(path, relPath string) string {
 	if overlay.IsMergeablePath(relPath) {
 		if data, err := os.ReadFile(path); err == nil {
-			if canon, cErr := overlay.CanonicalJSON(data); cErr == nil {
-				sum := sha256.Sum256(canon)
-				return fmt.Sprintf("%x", sum)
-			}
+			return hashHookSettingsData(data, relPath)
 		}
 	}
 	return HashPathContent(path)
+}
+
+// hashHookSettingsData is the byte-snapshot form of
+// HashHookSettingsContent. Mergeable JSON is canonicalized before hashing;
+// other data is hashed as-is.
+func hashHookSettingsData(data []byte, relPath string) string {
+	if overlay.IsMergeablePath(relPath) {
+		if canon, err := overlay.CanonicalJSON(data); err == nil {
+			data = canon
+		}
+	}
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("%x", sum)
 }
 
 // StageWorkDir applies a legacy overlay directory and CopyFiles staging before
@@ -59,20 +71,97 @@ func StageSessionWorkDir(cfg Config) error {
 // agent overlay, and CopyFiles staging before a provider starts the session
 // process. Nonfatal overlay preservation warnings are written to warnings.
 func StageSessionWorkDirWithWarnings(cfg Config, warnings io.Writer) error {
+	if err := ValidateReconcilerOwnedCopyFiles(cfg); err != nil {
+		return err
+	}
 	if cfg.WorkDir != "" {
-		overlayProviders := EffectiveOverlayProviderNames(cfg)
 		for _, od := range cfg.PackOverlayDirs {
-			if err := StageProviderOverlayDir(od, cfg.WorkDir, overlayProviders, warnings); err != nil {
+			if err := StageConfiguredProviderOverlayDir(od, cfg.WorkDir, cfg, warnings); err != nil {
 				return fmt.Errorf("pack overlay %q -> %q: %w", od, cfg.WorkDir, err)
 			}
 		}
 		if cfg.OverlayDir != "" {
-			if err := StageProviderOverlayDir(cfg.OverlayDir, cfg.WorkDir, overlayProviders, warnings); err != nil {
+			if err := StageConfiguredProviderOverlayDir(cfg.OverlayDir, cfg.WorkDir, cfg, warnings); err != nil {
 				return fmt.Errorf("overlay %q -> %q: %w", cfg.OverlayDir, cfg.WorkDir, err)
 			}
 		}
 	}
+	// Revalidate at the transport boundary. Overlay staging deliberately skips
+	// owned paths, but a concurrent external edit must still prevent the
+	// canonical self-copy/handoff from being treated as verified.
+	if err := ValidateReconcilerOwnedCopyFiles(cfg); err != nil {
+		return err
+	}
 	return stageCopyFiles(cfg.WorkDir, cfg.CopyFiles)
+}
+
+// ValidateReconcilerOwnedCopyFiles proves the fail-closed handoff between the
+// settings reconciler and a runtime carrier. Every owned path must have exactly
+// one probed CopyEntry sourced from the canonical regular file in WorkDir, and
+// its current canonical content hash must still match the reconciled snapshot.
+// Providers call this immediately before suppressing their normal overlay copy.
+func ValidateReconcilerOwnedCopyFiles(cfg Config) error {
+	if len(cfg.ReconcilerOwnedMergeablePaths) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(cfg.WorkDir) == "" {
+		return errors.New("reconciler-owned mergeable paths require a workdir")
+	}
+	for _, rawOwned := range cfg.ReconcilerOwnedMergeablePaths {
+		owned := filepath.Clean(filepath.FromSlash(rawOwned))
+		if owned == "." || filepath.IsAbs(owned) || owned == ".." || strings.HasPrefix(owned, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("invalid reconciler-owned mergeable path %q", rawOwned)
+		}
+		if !overlay.IsMergeablePath(owned) {
+			return fmt.Errorf("reconciler-owned path %q is not a recognized mergeable hook/settings file", rawOwned)
+		}
+		var matches []CopyEntry
+		for _, entry := range cfg.CopyFiles {
+			if filepath.Clean(filepath.FromSlash(entry.RelDst)) == owned {
+				matches = append(matches, entry)
+			}
+		}
+		if len(matches) != 1 {
+			return fmt.Errorf("reconciler-owned mergeable path %q requires exactly one copy_file, got %d", rawOwned, len(matches))
+		}
+		entry := matches[0]
+		if !entry.Probed || strings.TrimSpace(entry.ContentHash) == "" {
+			return fmt.Errorf("reconciler-owned copy_file %q requires a probed content hash", rawOwned)
+		}
+		wantSrc := filepath.Join(cfg.WorkDir, owned)
+		if !sameCleanPath(entry.Src, wantSrc) {
+			return fmt.Errorf("reconciler-owned copy_file %q source %q is not canonical workdir path %q", rawOwned, entry.Src, wantSrc)
+		}
+		data, _, err := fsys.ReadRegularFileStable(fsys.OSFS{}, entry.Src)
+		if err != nil {
+			return fmt.Errorf("reading reconciler-owned copy_file %q safely: %w", rawOwned, err)
+		}
+		if current := fmt.Sprintf("%x", sha256.Sum256(data)); current != entry.ContentHash {
+			return fmt.Errorf("reconciler-owned copy_file %q changed after reconciliation", rawOwned)
+		}
+	}
+	return nil
+}
+
+func sameCleanPath(a, b string) bool {
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	if errA == nil && errB == nil {
+		return filepath.Clean(absA) == filepath.Clean(absB)
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
+}
+
+// StageConfiguredProviderOverlayDir stages one provider-aware overlay source
+// according to cfg's provider slots and mergeable-settings ownership policy.
+// Reconciler-owned workdirs preserve mergeable settings installed before
+// startup; isolated workdirs keep the legacy full-staging behavior.
+func StageConfiguredProviderOverlayDir(srcDir, dstDir string, cfg Config, warnings io.Writer) error {
+	providers := EffectiveOverlayProviderNames(cfg)
+	if len(cfg.ReconcilerOwnedMergeablePaths) > 0 {
+		return StageProviderOverlayDirSkippingPaths(srcDir, dstDir, providers, cfg.ReconcilerOwnedMergeablePaths, warnings)
+	}
+	return StageProviderOverlayDir(srcDir, dstDir, providers, warnings)
 }
 
 // EffectiveOverlayProviderNames returns the provider overlay slots to stage for
@@ -192,6 +281,28 @@ func WithPreserve(preserve PreserveFunc) StageOption {
 func StageProviderOverlayDirSkippingMergeable(srcDir, dstDir string, providers []string, warnings io.Writer, opts ...StageOption) error {
 	skip := func(relPath string, isDir bool) bool {
 		return !isDir && overlay.IsMergeablePath(relPath)
+	}
+	return stageProviderOverlayDir(srcDir, dstDir, providers, skip, warnings, opts...)
+}
+
+// StageProviderOverlayDirSkippingPaths stages a provider-aware overlay while
+// preserving only the reconciler-owned mergeable files named by paths. Unknown
+// and non-mergeable paths are ignored so a runtime hint cannot suppress an
+// arbitrary overlay asset.
+func StageProviderOverlayDirSkippingPaths(srcDir, dstDir string, providers, paths []string, warnings io.Writer, opts ...StageOption) error {
+	owned := make(map[string]struct{}, len(paths))
+	for _, relPath := range paths {
+		relPath = filepath.Clean(relPath)
+		if overlay.IsMergeablePath(relPath) {
+			owned[relPath] = struct{}{}
+		}
+	}
+	skip := func(relPath string, isDir bool) bool {
+		if isDir {
+			return false
+		}
+		_, ok := owned[filepath.Clean(relPath)]
+		return ok
 	}
 	return stageProviderOverlayDir(srcDir, dstDir, providers, skip, warnings, opts...)
 }

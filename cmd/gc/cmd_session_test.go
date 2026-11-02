@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
@@ -2476,28 +2477,6 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 	}
 }
 
-func TestCmdSessionNew_AllowsReservedNamedAliasWithoutController(t *testing.T) {
-	t.Setenv("GC_BEADS", "file")
-	t.Setenv("GC_SESSION", "fake")
-
-	cityDir := t.TempDir()
-	t.Setenv("GC_CITY", cityDir)
-	writeNamedSessionCityTOML(t, cityDir)
-
-	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, false, 0, &stdout, &stderr); code != 0 {
-		t.Fatalf("cmdSessionNew(fallback) = %d, want 0; stderr=%s", code, stderr.String())
-	}
-
-	b := onlySessionBead(t, cityDir)
-	if got := b.Metadata["alias"]; got != "mayor" {
-		t.Fatalf("alias = %q, want mayor", got)
-	}
-	if got := b.Metadata["session_name"]; got == "" {
-		t.Fatal("session_name should be populated on fallback create")
-	}
-}
-
 func TestCmdSessionNew_IgnoresUnmanagedSupervisorSocket(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
@@ -4232,5 +4211,56 @@ func TestRouteSessionPeek_NoCacheAgeFooterWhenCacheStale(t *testing.T) {
 	}
 	if got := stdout.String(); got != "peeked\n" {
 		t.Errorf("routed peek stdout = %q, want only the live pane output %q", got, "peeked\n")
+	}
+}
+
+func TestCmdSessionNew_AllowsReservedNamedAliasWithoutController(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("user_hooks=%t", existing), func(t *testing.T) {
+			t.Setenv("GC_BEADS", "file")
+			t.Setenv("GC_SESSION", "fake")
+			cityDir := t.TempDir()
+			t.Setenv("GC_CITY", cityDir)
+			writeNamedSessionCityTOML(t, cityDir)
+			// Preserve Codex inheritance; an agent start_command would select
+			// the generic launcher escape hatch and bypass this contract.
+			writeCatalogFile(t, cityDir, "agents/mayor/agent.toml", "provider = \"codex-local\"\n")
+			cityConfig := filepath.Join(cityDir, "city.toml")
+			data, err := os.ReadFile(cityConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data = append(data, []byte("\n[providers.codex-local]\nbase = \"builtin:codex\"\ncommand = \"/bin/echo\"\npath_check = \"/bin/echo\"\nresume_command = \"/bin/echo resume {{.SessionKey}}\"\n")...)
+			if err := os.WriteFile(cityConfig, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			hookPath := filepath.Join(cityDir, ".codex", "hooks.json")
+			if existing {
+				if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(hookPath, []byte("{\"hooks\":{\"Stop\":[{\"command\":\"user-stop --keep\",\"type\":\"command\"}]}}"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var stdout, stderr bytes.Buffer
+			if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, false, 0, &stdout, &stderr); code != 0 {
+				t.Fatalf("direct configured creation: code=%d stderr=%s", code, stderr.String())
+			}
+			bead := onlySessionBead(t, cityDir)
+			if bead.Metadata["alias"] != "mayor" || bead.Metadata["session_name"] == "" {
+				t.Fatalf("direct named session lost alias/runtime identity: %+v", bead.Metadata)
+			}
+			data, err = os.ReadFile(hookPath)
+			if err != nil {
+				t.Fatalf("direct start did not prepare configured hooks: %v", err)
+			}
+			if !hooks.CodexHooksAreConvergedWithOverlays(data, cityDir, nil) {
+				t.Fatalf("direct configured start lacks canonical hooks: %s", data)
+			}
+			if existing && !bytes.Contains(data, []byte("user-stop --keep")) {
+				t.Fatalf("direct configured start discarded user hooks: %s", data)
+			}
+		})
 	}
 }

@@ -18,11 +18,12 @@ type seamBackedProvider struct {
 }
 
 var (
-	_ runtime.Provider                = (*seamBackedProvider)(nil)
-	_ runtime.SleepCapabilityProvider = (*seamBackedProvider)(nil)
-	_ runtime.RelaunchProvider        = (*seamBackedProvider)(nil)
-	_ runtime.ListingAttestation      = (*seamBackedProvider)(nil)
-	_ runtime.SharedListing           = (*seamBackedProvider)(nil)
+	_ runtime.Provider                             = (*seamBackedProvider)(nil)
+	_ runtime.SleepCapabilityProvider              = (*seamBackedProvider)(nil)
+	_ runtime.RelaunchProvider                     = (*seamBackedProvider)(nil)
+	_ runtime.ListingAttestation                   = (*seamBackedProvider)(nil)
+	_ runtime.SharedListing                        = (*seamBackedProvider)(nil)
+	_ runtime.ReconcilerOwnedMergeablePathProvider = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked constructs a k8s provider served through the seams.
@@ -67,4 +68,8 @@ type Option func(*Provider)
 // remote-stage record.
 func WithCityName(cityName string) Option {
 	return func(p *Provider) { p.cityName = cityName }
+}
+
+func (s *seamBackedProvider) SupportsReconcilerOwnedMergeablePaths() bool {
+	return s.raw.SupportsReconcilerOwnedMergeablePaths()
 }

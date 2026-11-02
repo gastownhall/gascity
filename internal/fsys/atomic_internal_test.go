@@ -1,10 +1,62 @@
 package fsys
 
 import (
+	"bytes"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestReadRegularFileStableSupportsFakeIdentity(t *testing.T) {
+	fs := NewFake()
+	fs.Files["/work/config.json"] = []byte(`{"ok":true}`)
+
+	data, info, err := ReadRegularFileStable(fs, "/work/config.json")
+	if err != nil {
+		t.Fatalf("ReadRegularFileStable: %v", err)
+	}
+	if !bytes.Equal(data, fs.Files["/work/config.json"]) {
+		t.Fatalf("ReadRegularFileStable data = %q, want %q", data, fs.Files["/work/config.json"])
+	}
+	if info == nil || !info.Mode().IsRegular() {
+		t.Fatalf("ReadRegularFileStable info = %#v, want regular file", info)
+	}
+}
+
+func TestSameFileIdentitySupportsFakeAndRejectsReplacement(t *testing.T) {
+	fs := NewFake()
+	fs.Files["/work/config.json"] = []byte(`{"ok":true}`)
+
+	before, err := fs.Lstat("/work/config.json")
+	if err != nil {
+		t.Fatalf("first Lstat: %v", err)
+	}
+	after, err := fs.Lstat("/work/config.json")
+	if err != nil {
+		t.Fatalf("second Lstat: %v", err)
+	}
+	if !SameFileIdentity(before, after) {
+		t.Fatal("stable fake file identity was not recognized")
+	}
+	replacement := fakeFileInfo{
+		name:  "config.json",
+		mode:  0o755,
+		id:    fileIdentity{dev: 1, ino: fakeIdentity("/replacement").ino},
+		hasID: true,
+	}
+	if SameFileIdentity(before, replacement) {
+		t.Fatal("replacement fake file identity was reported unchanged")
+	}
+}
+
+func TestReadRegularFileStableRejectsReplacementIdentity(t *testing.T) {
+	fs := &identityChangingFS{data: []byte(`{"ok":true}`), lstats: 1}
+
+	if _, _, err := ReadRegularFileStable(fs, "/config.toml"); err == nil {
+		t.Fatal("ReadRegularFileStable accepted a replacement file identity")
+	}
+}
 
 func TestWriteFileIfContentOrModeChangedAtomic_RewritesWhenIdentityChanges(t *testing.T) {
 	fs := &identityChangingFS{data: []byte("#!/bin/sh\n")}
@@ -126,7 +178,12 @@ func (f *identityChangingFS) Stat(string) (os.FileInfo, error) {
 	return identityFileInfo{mode: 0o755, id: fileIdentity{dev: 1, ino: 1}}, nil
 }
 
-func (f *identityChangingFS) Lstat(string) (os.FileInfo, error) {
+func (f *identityChangingFS) Lstat(name string) (os.FileInfo, error) {
+	if name == filepath.Dir("/config.toml") {
+		// Keep the immediate parent stable for ReadRegularFileStable; the file
+		// identity below is the replacement boundary under test.
+		return fakeFileInfo{name: filepath.Base(name), dir: true, mode: 0o755, id: fakeIdentity(name), hasID: true}, nil
+	}
 	f.lstats++
 	id := fileIdentity{dev: 1, ino: 1}
 	if f.lstats > 1 {

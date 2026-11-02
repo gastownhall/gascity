@@ -19,39 +19,53 @@ type Provider struct {
 }
 
 var (
-	_ runtime.Provider                        = (*Provider)(nil)
-	_ runtime.DeadRuntimeSessionChecker       = (*Provider)(nil)
-	_ runtime.InteractionProvider             = (*Provider)(nil)
-	_ runtime.IdleSnapshotProvider            = (*Provider)(nil)
-	_ runtime.InterruptBoundaryWaitProvider   = (*Provider)(nil)
-	_ runtime.TurnInterruptCapabilityProvider = (*Provider)(nil)
-	_ runtime.InterruptedTurnResetProvider    = (*Provider)(nil)
-	_ runtime.InputClearProvider              = (*Provider)(nil)
-	_ runtime.BackgroundWorkStopper           = (*Provider)(nil)
-	_ runtime.RelaunchProvider                = (*Provider)(nil)
-	_ runtime.LivenessObserver                = (*Provider)(nil)
-	_ runtime.UnattendedSessionStopper        = (*Provider)(nil)
-	_ runtime.LivenessObserverWithError       = (*Provider)(nil)
-	_ runtime.AttachmentObserverWithError     = (*Provider)(nil)
-	_ runtime.SessionEventProvider            = (*Provider)(nil)
-	_ runtime.BackendListingProvider          = (*Provider)(nil)
-	_ runtime.BackendsProvider                = (*Provider)(nil)
-	_ runtime.ListingAttestation              = (*Provider)(nil)
-	_ runtime.Router                          = (*Provider)(nil)
-	_ runtime.ServerDeathConfirmer            = (*Provider)(nil)
-	_ runtime.DialogProvider                  = (*Provider)(nil)
-	_ runtime.EnvironmentBatchProvider        = (*Provider)(nil)
-	_ runtime.ServerLifecycleProvider         = (*Provider)(nil)
-	_ runtime.SessionRosterProvider           = (*Provider)(nil)
-	_ runtime.SessionObjectKiller             = (*Provider)(nil)
-	_ runtime.TurnEventProvider               = (*Provider)(nil)
-	_ runtime.TurnFenceProvider               = (*Provider)(nil)
+	_ runtime.Provider                             = (*Provider)(nil)
+	_ runtime.DeadRuntimeSessionChecker            = (*Provider)(nil)
+	_ runtime.InteractionProvider                  = (*Provider)(nil)
+	_ runtime.IdleSnapshotProvider                 = (*Provider)(nil)
+	_ runtime.InterruptBoundaryWaitProvider        = (*Provider)(nil)
+	_ runtime.TurnInterruptCapabilityProvider      = (*Provider)(nil)
+	_ runtime.InterruptedTurnResetProvider         = (*Provider)(nil)
+	_ runtime.InputClearProvider                   = (*Provider)(nil)
+	_ runtime.BackgroundWorkStopper                = (*Provider)(nil)
+	_ runtime.RelaunchProvider                     = (*Provider)(nil)
+	_ runtime.LivenessObserver                     = (*Provider)(nil)
+	_ runtime.UnattendedSessionStopper             = (*Provider)(nil)
+	_ runtime.LivenessObserverWithError            = (*Provider)(nil)
+	_ runtime.AttachmentObserverWithError          = (*Provider)(nil)
+	_ runtime.SessionEventProvider                 = (*Provider)(nil)
+	_ runtime.BackendListingProvider               = (*Provider)(nil)
+	_ runtime.BackendsProvider                     = (*Provider)(nil)
+	_ runtime.ListingAttestation                   = (*Provider)(nil)
+	_ runtime.Router                               = (*Provider)(nil)
+	_ runtime.ServerDeathConfirmer                 = (*Provider)(nil)
+	_ runtime.DialogProvider                       = (*Provider)(nil)
+	_ runtime.EnvironmentBatchProvider             = (*Provider)(nil)
+	_ runtime.ServerLifecycleProvider              = (*Provider)(nil)
+	_ runtime.SessionRosterProvider                = (*Provider)(nil)
+	_ runtime.SessionObjectKiller                  = (*Provider)(nil)
+	_ runtime.TurnEventProvider                    = (*Provider)(nil)
+	_ runtime.TurnFenceProvider                    = (*Provider)(nil)
+	_ runtime.ReconcilerOwnedMergeablePathProvider = (*Provider)(nil)
 )
 
 // New creates a hybrid provider. isRemote returns true for sessions
 // that should be managed by the remote provider.
 func New(local, remote runtime.Provider, isRemote func(string) bool) *Provider {
 	return &Provider{local: local, remote: remote, isRemote: isRemote}
+}
+
+// SupportsReconcilerOwnedMergeablePaths reports whether every backend can
+// preserve reconciler ownership. Desired-state construction cannot know which
+// route a future session will take, so a missing capability fails closed.
+func (p *Provider) SupportsReconcilerOwnedMergeablePaths() bool {
+	for _, provider := range []runtime.Provider{p.local, p.remote} {
+		capability, ok := provider.(runtime.ReconcilerOwnedMergeablePathProvider)
+		if !ok || !capability.SupportsReconcilerOwnedMergeablePaths() {
+			return false
+		}
+	}
+	return true
 }
 
 // RouteFor implements [runtime.Router]. The route is a pure function of the

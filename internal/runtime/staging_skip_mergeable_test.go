@@ -26,27 +26,6 @@ func codexHooksOverlaySrc(t *testing.T) string {
 	return src
 }
 
-// TestStageProviderOverlayDirSkippingMergeableSkipsCodexHooks is the horizon
-// guard (invariant #3): the build_desired_state staging entry point
-// must skip reconciler-owned mergeable files while still staging non-mergeable
-// siblings, so hooks.Install remains the sole writer in the home dir.
-func TestStageProviderOverlayDirSkippingMergeableSkipsCodexHooks(t *testing.T) {
-	t.Parallel()
-
-	src := codexHooksOverlaySrc(t)
-	workDir := t.TempDir()
-
-	if err := StageProviderOverlayDirSkippingMergeable(src, workDir, []string{"codex"}, nil); err != nil {
-		t.Fatalf("StageProviderOverlayDirSkippingMergeable: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(workDir, ".codex", "hooks.json")); !os.IsNotExist(err) {
-		t.Fatalf(".codex/hooks.json staged by home-dir path (err=%v); must be skipped so hooks.Install is sole writer", err)
-	}
-	if _, err := os.Stat(filepath.Join(workDir, "AGENTS.codex.md")); err != nil {
-		t.Fatalf("non-mergeable sibling should still stage: %v", err)
-	}
-}
-
 // TestStageProviderOverlayDirStagesCodexHooks locks the no-regression contract
 // (invariant #3 / #2): the runtime task-worktree path (plain
 // StageProviderOverlayDir, used by StageSessionWorkDir) still writes the codex
@@ -67,8 +46,8 @@ func TestStageProviderOverlayDirStagesCodexHooks(t *testing.T) {
 
 // TestStageSessionWorkDirStagesFunctionalCodexHooks is the no-regression test
 // (invariant #2) at the session-staging boundary: StageSessionWorkDir, invoked
-// on every codex task-session Start, must still write a functional
-// .codex/hooks.json (SessionStart present). The fix must not touch this path.
+// on every codex task-session Start without an ownership hint, must still write
+// a functional .codex/hooks.json (SessionStart present).
 func TestStageSessionWorkDirStagesFunctionalCodexHooks(t *testing.T) {
 	t.Parallel()
 
@@ -88,5 +67,53 @@ func TestStageSessionWorkDirStagesFunctionalCodexHooks(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "SessionStart") {
 		t.Fatalf("staged codex hooks not functional, want SessionStart: %s", data)
+	}
+}
+
+func TestStageSessionWorkDirPreservesReconcilerOwnedCodexHooks(t *testing.T) {
+	t.Parallel()
+
+	src := codexHooksOverlaySrc(t)
+	geminiPath := filepath.Join(src, ".gemini", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(geminiPath), 0o755); err != nil {
+		t.Fatalf("mkdir unrelated gemini overlay: %v", err)
+	}
+	if err := os.WriteFile(geminiPath, []byte(`{"hooks":{"BeforeAgent":[]}}`), 0o644); err != nil {
+		t.Fatalf("write unrelated gemini overlay: %v", err)
+	}
+	workDir := t.TempDir()
+	hookPath := filepath.Join(workDir, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		t.Fatalf("mkdir canonical codex hooks: %v", err)
+	}
+	canonical := []byte(`{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"gc --city /city prime"}]}]}}`)
+	if err := os.WriteFile(hookPath, canonical, 0o644); err != nil {
+		t.Fatalf("write canonical codex hooks: %v", err)
+	}
+
+	if err := StageSessionWorkDir(Config{
+		WorkDir:                       workDir,
+		ProviderName:                  "codex",
+		PackOverlayDirs:               []string{src},
+		ReconcilerOwnedMergeablePaths: []string{filepath.Join(".codex", "hooks.json")},
+		CopyFiles: []CopyEntry{{
+			Src: hookPath, RelDst: filepath.Join(".codex", "hooks.json"), Probed: true,
+			ContentHash: HashPathContent(hookPath),
+		}},
+	}); err != nil {
+		t.Fatalf("StageSessionWorkDir: %v", err)
+	}
+	got, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("read canonical codex hooks: %v", err)
+	}
+	if string(got) != string(canonical) {
+		t.Fatalf("reconciler-owned hooks changed during runtime staging:\ngot:  %s\nwant: %s", got, canonical)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "AGENTS.codex.md")); err != nil {
+		t.Fatalf("non-mergeable sibling should still stage: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, ".gemini", "settings.json")); err != nil {
+		t.Fatalf("unowned mergeable sibling should still stage: %v", err)
 	}
 }

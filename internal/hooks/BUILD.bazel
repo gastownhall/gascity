@@ -15,6 +15,7 @@ go_library(
     deps = [
         "//internal/bootstrap/packs/core",
         "//internal/citylayout",
+        "//internal/codexhooks",
         "//internal/fsys",
         "//internal/overlay",
         "//internal/shellquote",
@@ -41,6 +42,7 @@ go_test(
     embed = [":hooks"],
     deps = [
         "//internal/bootstrap/packs/core",
+        "//internal/codexhooks",
         "//internal/config",
         "//internal/fsys",
         "//internal/overlay",

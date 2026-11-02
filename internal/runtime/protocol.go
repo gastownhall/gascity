@@ -67,6 +67,10 @@ const (
 	// exit 2 from a declared op read as a failure, never as the unknown-op
 	// no-op. With report-attachment it makes an exec runtime v2-ready.
 	ProtocolCapabilityObserveV1 = "observe.v1"
+	// ProtocolCapabilityReconcilerOwnedMergeablePaths declares that an exec
+	// adapter preserves every reconciler-owned overlay path and then stages its
+	// matching copy_file into the session workdir, failing on missing/copy errors.
+	ProtocolCapabilityReconcilerOwnedMergeablePaths = "staging.reconciler-owned-mergeable-paths"
 )
 
 // ProtocolLocalityLocal is the handshake locality of an executable whose

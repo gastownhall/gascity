@@ -901,3 +901,11 @@ func (f FullFake) record(method, name string) {
 	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, Call{Method: method, Name: name})
 }
+
+// SupportsReconcilerOwnedMergeablePaths mirrors each profiled backend's fixed
+// staging contract. The exec profile's legacy handshake omits this capability.
+func (tmuxProfile) SupportsReconcilerOwnedMergeablePaths() bool       { return true }
+func (acpProfile) SupportsReconcilerOwnedMergeablePaths() bool        { return true }
+func (subprocessProfile) SupportsReconcilerOwnedMergeablePaths() bool { return true }
+func (k8sProfile) SupportsReconcilerOwnedMergeablePaths() bool        { return true }
+func (execProfile) SupportsReconcilerOwnedMergeablePaths() bool       { return false }

@@ -44,17 +44,18 @@ func goldenFixtures() map[string]Config {
 				Args: []string{"--port", "0"}, Env: map[string]string{"K": "V"},
 				URL: "https://mcp", Headers: map[string]string{"H": "1"},
 			}},
-			FingerprintExtra:     map[string]string{"pool": "p1"},
-			PreStart:             []string{"mkdir -p x", "echo pre"},
-			SessionSetup:         []string{"setup-a", "setup-b"},
-			SessionSetupScript:   "/setup.sh",
-			SessionLive:          []string{"tmux-theme", "keybinds"},
-			OverlayDir:           "/overlay",
-			ProviderName:         "claude",
-			ProviderOverlayName:  "claude-code",
-			InstallAgentHooks:    []string{"hookA"},
-			AcceptStartupDialogs: &tru,
-			MouseOn:              true,
+			FingerprintExtra:              map[string]string{"pool": "p1"},
+			PreStart:                      []string{"mkdir -p x", "echo pre"},
+			SessionSetup:                  []string{"setup-a", "setup-b"},
+			SessionSetupScript:            "/setup.sh",
+			SessionLive:                   []string{"tmux-theme", "keybinds"},
+			OverlayDir:                    "/overlay",
+			ProviderName:                  "claude",
+			ProviderOverlayName:           "claude-code",
+			InstallAgentHooks:             []string{"hookA"},
+			ReconcilerOwnedMergeablePaths: []string{".codex/hooks.json"},
+			AcceptStartupDialogs:          &tru,
+			MouseOn:                       true,
 			CopyFiles: []CopyEntry{
 				{Src: "/src/a", RelDst: "a"},
 				{RelDst: "hooks/h", Probed: true, ContentHash: "abc123"},
@@ -100,14 +101,19 @@ func TestFingerprintGolden(t *testing.T) {
 	}
 
 	if os.Getenv("UPDATE_GOLDEN") == "1" {
-		if err := os.MkdirAll(filepath.Dir(goldenPath), 0o755); err != nil {
+		updatePath := goldenPath
+		// Bazel runs in runfiles; explicit opt-in regeneration targets the checkout.
+		if root := os.Getenv("GC_TEST_REPO_ROOT"); root != "" {
+			updatePath = filepath.Join(root, "internal/runtime", goldenPath)
+		}
+		if err := os.MkdirAll(filepath.Dir(updatePath), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		b, _ := json.MarshalIndent(got, "", "  ")
-		if err := os.WriteFile(goldenPath, append(b, '\n'), 0o644); err != nil {
+		if err := os.WriteFile(updatePath, append(b, '\n'), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		t.Logf("wrote %s (%d fixtures)", goldenPath, len(got))
+		t.Logf("wrote %s (%d fixtures)", updatePath, len(got))
 		return
 	}
 

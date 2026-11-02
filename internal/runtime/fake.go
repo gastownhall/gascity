@@ -166,7 +166,8 @@ var (
 	_ BackgroundWorkStopper     = (*Fake)(nil)
 	_ FencedInteractionProvider = (*Fake)(nil)
 
-	_ AttachmentObserverWithError = (*Fake)(nil)
+	_ AttachmentObserverWithError          = (*Fake)(nil)
+	_ ReconcilerOwnedMergeablePathProvider = (*Fake)(nil)
 )
 
 // Call records a single method invocation on [Fake].
@@ -291,6 +292,10 @@ func NewFailFake() *Fake {
 		broken:                  true,
 	}
 }
+
+// SupportsReconcilerOwnedMergeablePaths reports that the in-memory fake will
+// preserve pre-staged files; it performs no filesystem staging of its own.
+func (f *Fake) SupportsReconcilerOwnedMergeablePaths() bool { return true }
 
 // Start creates a fake session. Returns an error if the name is taken.
 // When broken, always returns an error.

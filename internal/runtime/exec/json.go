@@ -9,6 +9,8 @@ package exec
 
 import (
 	"encoding/json"
+	"path"
+	"path/filepath"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -16,8 +18,10 @@ import (
 
 // copyEntry is the JSON wire format for [runtime.CopyEntry].
 type copyEntry struct {
-	Src    string `json:"src"`
-	RelDst string `json:"rel_dst,omitempty"`
+	Src         string `json:"src"`
+	RelDst      string `json:"rel_dst,omitempty"`
+	Probed      bool   `json:"probed,omitempty"`
+	ContentHash string `json:"content_hash,omitempty"`
 }
 
 // startConfig is the JSON wire format sent to the script's stdin on Start.
@@ -47,32 +51,46 @@ type startConfig struct {
 	// FreshOnly asks an observe.v1 script to refuse a name any box holds,
 	// live or dead (exit 73), and never to recycle, kill or reuse one. Only
 	// startFresh sets it.
-	FreshOnly bool `json:"fresh_only,omitempty"`
+	FreshOnly                     bool     `json:"fresh_only,omitempty"`
+	ReconcilerOwnedMergeablePaths []string `json:"reconciler_owned_mergeable_paths,omitempty"`
 }
 
 // marshalStartConfig converts a [runtime.Config] to JSON for the exec script.
 func marshalStartConfig(cfg runtime.Config) ([]byte, error) {
+	owned := make(map[string]bool, len(cfg.ReconcilerOwnedMergeablePaths))
+	for _, rel := range cfg.ReconcilerOwnedMergeablePaths {
+		owned[path.Clean(filepath.ToSlash(rel))] = true
+	}
 	var cfs []copyEntry
 	for _, ce := range cfg.CopyFiles {
-		cfs = append(cfs, copyEntry{Src: ce.Src, RelDst: ce.RelDst})
+		wire := copyEntry{Src: ce.Src, RelDst: ce.RelDst}
+		// probed/content_hash were added with the reconciler-owned staging
+		// capability. Keep legacy payloads byte-compatible for strict custom
+		// adapters that do not opt into that contract.
+		if owned[path.Clean(filepath.ToSlash(ce.RelDst))] {
+			wire.Probed = ce.Probed
+			wire.ContentHash = ce.ContentHash
+		}
+		cfs = append(cfs, wire)
 	}
 	sc := startConfig{
-		WorkDir:            cfg.WorkDir,
-		Command:            cfg.Command,
-		Lifecycle:          cfg.Lifecycle,
-		Env:                cfg.Env,
-		ProcessNames:       cfg.ProcessNames,
-		Nudge:              cfg.Nudge,
-		ReadyPromptPrefix:  cfg.ReadyPromptPrefix,
-		ReadyDelayMs:       cfg.ReadyDelayMs,
-		PreStart:           cfg.PreStart,
-		SessionSetup:       cfg.SessionSetup,
-		SessionSetupScript: cfg.SessionSetupScript,
-		SessionLive:        cfg.SessionLive,
-		PackOverlayDirs:    cfg.PackOverlayDirs,
-		OverlayDir:         cfg.OverlayDir,
-		CopyFiles:          cfs,
-		FreshOnly:          cfg.FreshOnly,
+		WorkDir:                       cfg.WorkDir,
+		Command:                       cfg.Command,
+		Lifecycle:                     cfg.Lifecycle,
+		Env:                           cfg.Env,
+		ProcessNames:                  cfg.ProcessNames,
+		Nudge:                         cfg.Nudge,
+		ReadyPromptPrefix:             cfg.ReadyPromptPrefix,
+		ReadyDelayMs:                  cfg.ReadyDelayMs,
+		PreStart:                      cfg.PreStart,
+		SessionSetup:                  cfg.SessionSetup,
+		SessionSetupScript:            cfg.SessionSetupScript,
+		SessionLive:                   cfg.SessionLive,
+		PackOverlayDirs:               cfg.PackOverlayDirs,
+		OverlayDir:                    cfg.OverlayDir,
+		CopyFiles:                     cfs,
+		FreshOnly:                     cfg.FreshOnly,
+		ReconcilerOwnedMergeablePaths: cfg.ReconcilerOwnedMergeablePaths,
 	}
 	if cfg.WorkDir != "" {
 		sc.WorkDirExclude = citylayout.WorkDirExportExcludes()

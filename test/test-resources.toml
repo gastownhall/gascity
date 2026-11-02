@@ -316,6 +316,28 @@ migration_target = "P0.4b"
 expires = "2026-12-31"
 
 [[medium]]
+package_dir = "internal/hooks"
+package_name = "hooks"
+owner = "TestReconcileCodexHooksWaitsForCrossProcessHookSave"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "Codex hook cross-process path-lock regression is a checked Medium owner"
+resource_owner = "the test-binary helper subprocess is confined to TestReconcileCodexHooksWaitsForCrossProcessHookSave, signals readiness over stdout, and is released over stdin"
+migration_target = "P0.4b"
+expires = "2026-12-31"
+
+[[medium]]
+package_dir = "internal/runtime/exec"
+package_name = "exec"
+owner = "TestScreenSessionScriptOwnedPathContract"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "screen session-script reconciler-owned path contract is a checked Medium owner"
+resource_owner = "the adapter subprocess factory is confined to TestScreenSessionScriptOwnedPathContract and each child uses isolated temporary state"
+migration_target = "P0.4b"
+expires = "2026-12-31"
+
+[[medium]]
 package_dir = "internal/runtime/herdr"
 package_name = "herdr"
 owner = "TestServerAliveDetectsLiveServer"

@@ -18,3 +18,13 @@ its own invocation. Keep projections bounded and disposable: native transcripts
 and terminal state remain authoritative. Refuse stale, completed or ambiguous
 bindings and retain the ordinary-message accidental-answer guard. Qualification
 must include real request-bound choice/free-text replies through the supervisor.
+
+Codex reconciliation must reject managed-command or wrapper metadata it cannot
+migrate without changing its scope. Preserve both live and configured inputs on
+refusal; report the input, event and fields. User-only hooks and unrelated
+metadata remain untouched. Do not silently strip extra fields while rebuilding
+managed commands.
+
+Direct configured-home creation reconciles only at the actual started-create
+boundary inside its identity lock. Deferred creation and runtime observation
+stay read-only. Retain the canonical handle and created ID for retry and attach.

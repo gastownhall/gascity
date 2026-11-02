@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 )
@@ -64,7 +65,8 @@ func WrapsBareHooks(relPath string) bool {
 type MergeOption func(*mergeConfig)
 
 type mergeConfig struct {
-	wrapBareHooks bool
+	wrapBareHooks           bool
+	mergeMatchedHookContent bool
 }
 
 // WithWrapBareHooks normalizes bare/flat hook entries (e.g.
@@ -75,6 +77,16 @@ type mergeConfig struct {
 // hooks.json.
 func WithWrapBareHooks() MergeOption {
 	return func(c *mergeConfig) { c.wrapBareHooks = true }
+}
+
+// WithMergeMatchedHookContents preserves commands that share a wrapper
+// matcher. Instead of replacing the complete base wrapper when an overlay has
+// the same matcher, it shallow-merges the wrapper and unions its immediate
+// inner hooks by command/bash identity. Codex uses matcher:"" for several
+// independent commands, so replacing the wrapper would silently discard user
+// hooks co-located with Gas City-managed hooks.
+func WithMergeMatchedHookContents() MergeOption {
+	return func(c *mergeConfig) { c.mergeMatchedHookContent = true }
 }
 
 // MergeSettingsJSON performs a deep merge of base and overlay JSON documents.
@@ -145,7 +157,7 @@ func MergeSettingsJSON(base, overlay []byte, opts ...MergeOption) ([]byte, error
 		if k == "hooks" {
 			baseHooks := toMapStringAny(baseDoc["hooks"])
 			overHooks := toMapStringAny(v)
-			result["hooks"] = mergeHooksMap(baseHooks, overHooks, cfg.wrapBareHooks)
+			result["hooks"] = mergeHooksMap(baseHooks, overHooks, cfg)
 		} else {
 			// Non-hook keys: last writer wins.
 			result[k] = v
@@ -161,7 +173,16 @@ func MergeSettingsJSON(base, overlay []byte, opts ...MergeOption) ([]byte, error
 
 func parseSettingsObject(label string, data []byte, shapeErr error) (map[string]any, error) {
 	var doc any
-	if err := json.Unmarshal(data, &doc); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&doc); err != nil {
+		return nil, fmt.Errorf("merge: parsing %s: %w", label, err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = errors.New("multiple JSON values")
+		}
 		return nil, fmt.Errorf("merge: parsing %s: %w", label, err)
 	}
 	obj, ok := doc.(map[string]any)
@@ -198,7 +219,7 @@ func MarshalCanonicalJSON(doc any) ([]byte, error) {
 // mergeHooksMap unions hook categories from base and overlay.
 // Categories present in only one side are preserved as-is.
 // Categories present in both get entry-level merge.
-func mergeHooksMap(base, over map[string]any, wrapBareHooks bool) map[string]any {
+func mergeHooksMap(base, over map[string]any, cfg mergeConfig) map[string]any {
 	result := make(map[string]any, len(base)+len(over))
 	for k, v := range base {
 		result[k] = v
@@ -207,7 +228,7 @@ func mergeHooksMap(base, over map[string]any, wrapBareHooks bool) map[string]any
 		overArr, okOver := toSliceAny(v)
 		baseArr, okBase := toSliceAny(result[k])
 		if okOver && okBase {
-			result[k] = mergeHookArray(baseArr, overArr, wrapBareHooks)
+			result[k] = mergeHookArray(baseArr, overArr, cfg)
 		} else {
 			result[k] = v
 		}
@@ -228,10 +249,54 @@ func mergeHooksMap(base, over map[string]any, wrapBareHooks bool) map[string]any
 // replaceable; an overlay entry with that identity replaces it and leaves the
 // earlier one untouched. Bare pack hooks are kept out of the matcher-"" slot
 // precisely so the fix does not add traffic to that ambiguity.
-func mergeHookArray(base, over []any, wrapBareHooks bool) []any {
+func mergeHookArray(base, over []any, cfg mergeConfig) []any {
+	if cfg.mergeMatchedHookContent {
+		// Preserve every base wrapper, including duplicate matchers: two custom
+		// wrappers can carry distinct metadata or execution order. Overlay entries
+		// merge into the last matching base wrapper (the legacy identity index
+		// rule) without collapsing unrelated base entries.
+		result := append([]any(nil), base...)
+		index := make(map[string]int, len(base)+len(over))
+		for i, entry := range result {
+			m, ok := entry.(map[string]any)
+			if !ok {
+				continue
+			}
+			key, hasKey := hookEntryKey(m)
+			if hasKey {
+				index[key] = i
+			}
+		}
+		for _, entry := range over {
+			m, ok := entry.(map[string]any)
+			if !ok {
+				result = append(result, entry)
+				continue
+			}
+			key, hasKey := hookEntryKey(m)
+			if !hasKey {
+				result = append(result, entry)
+				continue
+			}
+			if idx, found := index[key]; found {
+				if baseEntry, ok := result[idx].(map[string]any); ok {
+					if merged, ok := mergeMatchedHookWrapper(baseEntry, m); ok {
+						result[idx] = merged
+						continue
+					}
+				}
+				result[idx] = entry
+				continue
+			}
+			index[key] = len(result)
+			result = append(result, entry)
+		}
+		return result
+	}
+
 	// Build ordered result starting from base entries.
 	var result []any
-	if wrapBareHooks {
+	if cfg.wrapBareHooks {
 		result = healBaseEntries(base)
 	} else {
 		result = make([]any, len(base))
@@ -394,6 +459,25 @@ func emptyMatcherTwin(result []any, innerKey string) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+func mergeMatchedHookWrapper(base, over map[string]any) (map[string]any, bool) {
+	baseMatcher, baseOK := base["matcher"].(string)
+	overMatcher, overOK := over["matcher"].(string)
+	baseHooks, baseHooksOK := base["hooks"].([]any)
+	overHooks, overHooksOK := over["hooks"].([]any)
+	if !baseOK || !overOK || baseMatcher != overMatcher || !baseHooksOK || !overHooksOK {
+		return nil, false
+	}
+	merged := make(map[string]any, len(base)+len(over))
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range over {
+		merged[key] = value
+	}
+	merged["hooks"] = mergeHookArray(baseHooks, overHooks, mergeConfig{})
+	return merged, true
 }
 
 // hookEntryKey extracts the identity key from a hook entry.

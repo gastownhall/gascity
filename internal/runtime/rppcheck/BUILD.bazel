@@ -20,6 +20,7 @@ go_test(
     embed = [":rppcheck"],
     deps = [
         "//internal/runtime/runtimecontract/reference",
+        "//internal/runtime",
         "//internal/testenv",
     ],
 )

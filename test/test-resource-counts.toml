@@ -2177,6 +2177,12 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "internal/hooks/hooks_test.go"
+resource = "subprocess"
+calls = 1
+medium = 1
+
+[[count]]
 path = "internal/hooks/plugin_node_test.go"
 resource = "subprocess"
 calls = 1
@@ -2349,6 +2355,12 @@ path = "internal/runtime/exec/exec_fence_integration_test.go"
 resource = "fixed_sleep"
 calls = 2
 tagged = true
+
+[[count]]
+path = "internal/runtime/exec/session_script_test.go"
+resource = "subprocess"
+calls = 1
+medium = 1
 
 [[count]]
 path = "internal/runtime/fake_test.go"

@@ -50,6 +50,10 @@ type Provider struct {
 	fenceChecked func(name string)
 }
 
+// SupportsReconcilerOwnedMergeablePaths reports that subprocess sessions use
+// the shared validated staging boundary.
+func (p *Provider) SupportsReconcilerOwnedMergeablePaths() bool { return true }
+
 type providerOps struct {
 	start  func(*exec.Cmd) error
 	listen func(network, addr string) (net.Listener, error)

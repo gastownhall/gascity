@@ -102,6 +102,10 @@ type Provider struct {
 	environFunc   func() []string                                                              // test seam: replaces execenv.Environ
 }
 
+// SupportsReconcilerOwnedMergeablePaths reports that ACP preserves and carries
+// reconciler-owned settings files through its staging boundary.
+func (p *Provider) SupportsReconcilerOwnedMergeablePaths() bool { return true }
+
 // Compile-time check.
 var (
 	_ runtime.Provider                    = (*Provider)(nil)

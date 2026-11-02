@@ -41,15 +41,16 @@ var (
 	_ runtime.AttachmentObserverWithError = (*seamBackedProvider)(nil)
 	_ runtime.IdleProbeBudgetProvider     = (*seamBackedProvider)(nil)
 
-	_ runtime.LivenessObserverWithError = (*seamBackedProvider)(nil)
-	_ runtime.FreshByConstruction       = (*seamBackedProvider)(nil)
-	_ runtime.IdentityObserver          = (*seamBackedProvider)(nil)
-	_ runtime.SessionObjectKiller       = (*seamBackedProvider)(nil)
-	_ runtime.V2ReadinessReporter       = (*seamBackedProvider)(nil)
-	_ runtime.InventoryProvider         = (*seamBackedProvider)(nil)
-	_ runtime.InventoryGate             = (*seamBackedProvider)(nil)
-	_ runtime.ListingAttestation        = (*seamBackedProvider)(nil)
-	_ runtime.InventoryLister           = (*seamBackedProvider)(nil)
+	_ runtime.LivenessObserverWithError            = (*seamBackedProvider)(nil)
+	_ runtime.FreshByConstruction                  = (*seamBackedProvider)(nil)
+	_ runtime.IdentityObserver                     = (*seamBackedProvider)(nil)
+	_ runtime.SessionObjectKiller                  = (*seamBackedProvider)(nil)
+	_ runtime.V2ReadinessReporter                  = (*seamBackedProvider)(nil)
+	_ runtime.InventoryProvider                    = (*seamBackedProvider)(nil)
+	_ runtime.InventoryGate                        = (*seamBackedProvider)(nil)
+	_ runtime.ListingAttestation                   = (*seamBackedProvider)(nil)
+	_ runtime.InventoryLister                      = (*seamBackedProvider)(nil)
+	_ runtime.ReconcilerOwnedMergeablePathProvider = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked wraps an exec provider for the given script so it is served
@@ -223,4 +224,8 @@ func (s *seamBackedProvider) SendKeysFenced(ctx context.Context, name string, fe
 // InterruptFenced passes through to the underlying provider's carrier guard.
 func (s *seamBackedProvider) InterruptFenced(ctx context.Context, name string, fence runtime.InputFence) error {
 	return s.raw.InterruptFenced(ctx, name, fence)
+}
+
+func (s *seamBackedProvider) SupportsReconcilerOwnedMergeablePaths() bool {
+	return s.raw.SupportsReconcilerOwnedMergeablePaths()
 }
