@@ -181,7 +181,7 @@ type wispGC interface {
 	//
 	// sessionLedger is the sessions-class store ONLY when the city has relocated
 	// that class off its work store onto a SQLite infra ledger (see
-	// relocatedSQLiteSessionLedger); otherwise its Store is nil and the closed
+	// isRelocatedSQLiteSessionLedger); otherwise its Store is nil and the closed
 	// session purge arm does nothing. Sessions on a work store belong to the
 	// reaper order's step 6, with its own pattern, backup and anomaly guards.
 	//
@@ -805,35 +805,34 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 	return reaped, errors.Join(collectErr, deleteErr)
 }
 
-// relocatedSQLiteSessionLedger returns sessionStore — the sessions-class store
-// as resolveSessionStore / sessionsBeadStore() resolved it — when, and only
-// when, the storage routes relocate the sessions class off the work store onto
-// a SQLite Beads ledger (the whole-split infra binding). Anything else — no
-// routes, sessions left on the work binding, a relocated binding served by
-// another engine (a Dolt workspace), or a refused binding — returns nil, which
-// is what keeps the closed session purge off every store the reaper order
-// already governs.
+// isRelocatedSQLiteSessionLedger reports whether sessionStore — the
+// sessions-class store as sessionsBeadStore() resolved it — is the SQLite Beads
+// ledger the storage routes relocated the sessions class onto, off the work
+// store (the whole-split infra binding). Anything else — no routes, sessions
+// left on the work binding, a relocated binding served by another engine (a
+// Dolt workspace), or a refused binding — answers false, which is what keeps
+// the closed session purge off every store the reaper order already governs.
 //
-// The engine is identified under the controller's cache (bindingEngine), and
-// the store handed back is sessionStore itself, so on the controller the purge
-// deletes through that cache: the cache drops the rows and the deletes emit
-// bead.deleted like every other controller write to the binding.
-func relocatedSQLiteSessionLedger(routes *storageRoutes, sessionStore, workStore beads.Store) beads.Store {
+// The engine is identified under the controller's cache (bindingEngine), so on
+// the controller the purge deletes through sessionStore, that cache: the cache
+// drops the rows and the deletes emit bead.deleted like every other controller
+// write to the binding.
+func isRelocatedSQLiteSessionLedger(routes *storageRoutes, sessionStore, workStore beads.Store) bool {
 	routed, relocated := routes.storeFor(coordclass.ClassSessions) // residency:allow — asks whether the sessions class is relocated, to gate a purge; resolves no bead
 	if !relocated || routed == nil || sessionStore == nil {
-		return nil
+		return false
 	}
 	ledger, ok := bindingEngine(sessionStore).(*beads.SQLiteStore)
 	if !ok || ledger == nil {
-		return nil
+		return false
 	}
 	if routedLedger, ok := bindingEngine(routed).(*beads.SQLiteStore); !ok || routedLedger != ledger {
-		return nil
+		return false
 	}
 	if work, ok := bindingEngine(workStore).(*beads.SQLiteStore); ok && work == ledger {
-		return nil
+		return false
 	}
-	return sessionStore
+	return true
 }
 
 // purgeClosedInfraSessions deletes closed session beads that have been idle
@@ -846,7 +845,7 @@ func purgeClosedInfraSessions(store beads.Store, now time.Time, age time.Duratio
 
 // purgeClosedInfraSessionsPage deletes closed session beads that have been
 // idle longer than age. The store must be the relocated SQLite sessions ledger
-// (relocatedSQLiteSessionLedger), where agent sessions are minted as
+// (isRelocatedSQLiteSessionLedger), where agent sessions are minted as
 // gcg-session-* or the older gcs-* prefix. The Dolt reaper only sees
 // issue_type=session in a Dolt `issues` table, so this arm is what keeps the
 // sqlite ledger from retaining every closed session forever.
