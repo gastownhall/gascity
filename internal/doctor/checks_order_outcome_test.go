@@ -1023,6 +1023,122 @@ func TestOrderOutcomeHealthyIncompleteOutcomeOrderScope(t *testing.T) {
 	})
 }
 
+// TestOrderOutcomeHealthyMixedOutcomeSummary pins the aggregate: each
+// unhealthy order counts once, a log with any outstanding declaration gets an
+// aggregate that covers incomplete work, and a failure-only log keeps the
+// exact existing output.
+func TestOrderOutcomeHealthyMixedOutcomeSummary(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	const declMsg = "partial: store unreachable; not run: rig:st (dolt not reachable)"
+
+	failed := func(subject string, ts time.Time) events.Event {
+		return events.Event{Type: events.OrderFailed, Ts: ts, Subject: subject, Actor: "controller", Message: "exit status 1"}
+	}
+	completed := func(subject string, ts time.Time) events.Event {
+		return events.Event{Type: events.OrderCompleted, Ts: ts, Subject: subject, Actor: "controller"}
+	}
+	declared := func(subject string, ts time.Time) events.Event {
+		return events.Event{Type: events.OrderSkipped, Ts: ts, Subject: subject, Actor: "controller", Message: declMsg}
+	}
+
+	t.Run("declaration-only order reports unhealthy, not failing repeatedly", func(t *testing.T) {
+		cityPath, cfg := orderFiringTestCity(t)
+		writeOrderFiringTestOrderInDir(t, filepath.Join(cityPath, "orders"), "export-sweep", "cooldown", "6h")
+		writeOrderFiringTestEvents(t, cityPath,
+			completed("export-sweep", now.Add(-2*time.Hour)),
+			declared("export-sweep", now.Add(-time.Hour)),
+		)
+
+		result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
+
+		if result.Status != StatusWarning {
+			t.Fatalf("status = %v, want StatusWarning", result.Status)
+		}
+		if result.Message != "1 order(s) have unhealthy outcomes" {
+			t.Fatalf("message = %q, want an aggregate covering incomplete work", result.Message)
+		}
+	})
+
+	t.Run("both signals on one order count once", func(t *testing.T) {
+		cityPath, cfg := orderFiringTestCity(t)
+		writeOrderFiringTestOrderInDir(t, filepath.Join(cityPath, "orders"), "export-sweep", "cooldown", "6h")
+		writeOrderFiringTestEvents(t, cityPath,
+			completed("export-sweep", now.Add(-4*time.Hour)),
+			declared("export-sweep", now.Add(-3*time.Hour)),
+			failed("export-sweep", now.Add(-2*time.Hour)),
+			failed("export-sweep", now.Add(-90*time.Minute)),
+			failed("export-sweep", now.Add(-time.Hour)),
+		)
+
+		result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
+
+		if result.Status != StatusWarning {
+			t.Fatalf("status = %v, want StatusWarning", result.Status)
+		}
+		if result.Message != "1 order(s) have unhealthy outcomes" {
+			t.Fatalf("message = %q, want the order counted exactly once", result.Message)
+		}
+		if len(result.Details) != 1 {
+			t.Fatalf("details = %v, want one composed line for the one order", result.Details)
+		}
+	})
+
+	t.Run("distinct orders each count once", func(t *testing.T) {
+		cityPath, cfg := orderFiringTestCity(t)
+		ordersDir := filepath.Join(cityPath, "orders")
+		writeOrderFiringTestOrderInDir(t, ordersDir, "dolt-health", "cooldown", "5m")
+		writeOrderFiringTestOrderInDir(t, ordersDir, "export-sweep", "cooldown", "6h")
+		writeOrderFiringTestEvents(t, cityPath,
+			failed("dolt-health", now.Add(-3*time.Hour)),
+			failed("dolt-health", now.Add(-2*time.Hour)),
+			failed("dolt-health", now.Add(-time.Hour)),
+			completed("export-sweep", now.Add(-2*time.Hour)),
+			declared("export-sweep", now.Add(-time.Hour)),
+		)
+
+		result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
+
+		if result.Status != StatusWarning {
+			t.Fatalf("status = %v, want StatusWarning", result.Status)
+		}
+		if result.Message != "2 order(s) have unhealthy outcomes" {
+			t.Fatalf("message = %q, want each unhealthy order counted once", result.Message)
+		}
+		joined := strings.Join(result.Details, "\n")
+		if !strings.Contains(joined, "dolt-health: 3 consecutive failures") {
+			t.Fatalf("details missing the failure streak:\n%s", joined)
+		}
+		if !strings.Contains(joined, declMsg) {
+			t.Fatalf("details missing the declaration:\n%s", joined)
+		}
+		if result.FixHint != "Inspect with: gc order check && gc order history dolt-health" {
+			t.Fatalf("FixHint = %q, want the first unhealthy order's target", result.FixHint)
+		}
+	})
+
+	t.Run("failure-only log keeps the existing aggregate", func(t *testing.T) {
+		cityPath, cfg := orderFiringTestCity(t)
+		writeOrderFiringTestOrderInDir(t, filepath.Join(cityPath, "orders"), "dolt-health", "cooldown", "5m")
+		writeOrderFiringTestEvents(t, cityPath,
+			failed("dolt-health", now.Add(-3*time.Hour)),
+			failed("dolt-health", now.Add(-2*time.Hour)),
+			failed("dolt-health", now.Add(-time.Hour)),
+		)
+
+		result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
+
+		if result.Status != StatusWarning {
+			t.Fatalf("status = %v, want StatusWarning", result.Status)
+		}
+		if result.Message != "1 order(s) failing repeatedly" {
+			t.Fatalf("message = %q, want the exact existing failure-only aggregate", result.Message)
+		}
+		if result.FixHint != "Inspect with: gc order check && gc order history dolt-health" {
+			t.Fatalf("FixHint = %q, want the existing hint", result.FixHint)
+		}
+	})
+}
+
 // orderOutcomeTestDetailNames extracts the order display name from each
 // detail line. Both checks' details begin with the order display name
 // followed by ": ".

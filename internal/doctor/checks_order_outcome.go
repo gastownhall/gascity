@@ -265,8 +265,11 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 
 	worst := StatusOK
 	monitored := 0
-	failing := 0
-	var firstFailingHint string
+	// unhealthy counts orders needing attention — failure-streaked or
+	// declaration-warned — one line per order, once per order.
+	unhealthy := 0
+	anyDecl := false
+	var firstUnhealthyHint string
 	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg, cityPath)
 
 	for _, order := range allOrders {
@@ -304,14 +307,15 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 		result.Details = append(result.Details, detail)
 		if status != StatusOK || hasDecl {
-			failing++
-			if firstFailingHint == "" {
+			unhealthy++
+			anyDecl = anyDecl || hasDecl
+			if firstUnhealthyHint == "" {
 				// gc order history takes a bare name positionally and filters
 				// on a.Name; the scoped form matches zero orders on the
 				// local-iterator path used when the supervisor API is
 				// unavailable — exactly when someone is debugging a broken
 				// city. orderHistoryHintTarget yields the --rig form instead.
-				firstFailingHint = orderHistoryHintTarget(order)
+				firstUnhealthyHint = orderHistoryHintTarget(order)
 			}
 		}
 	}
@@ -326,8 +330,15 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 	if worst == StatusOK {
 		result.Message = "all scheduled orders succeeding"
 	} else {
-		result.Message = fmt.Sprintf("%d order(s) failing repeatedly", failing)
-		result.FixHint = fmt.Sprintf(orderOutcomeInspectHintFmt, firstFailingHint)
+		if anyDecl {
+			// "Failing repeatedly" cannot be established for an order whose
+			// only defect is a partial declaration; name the unhealthy
+			// outcomes instead.
+			result.Message = fmt.Sprintf("%d order(s) have unhealthy outcomes", unhealthy)
+		} else {
+			result.Message = fmt.Sprintf("%d order(s) failing repeatedly", unhealthy)
+		}
+		result.FixHint = fmt.Sprintf(orderOutcomeInspectHintFmt, firstUnhealthyHint)
 	}
 	return result
 }
