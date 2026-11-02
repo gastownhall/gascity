@@ -10,9 +10,12 @@ package main
 // check counts and every later command refuses on (ga-99xhy, live-proven on a
 // throwaway split city as `stranded: 4` with `gc storage status` exiting 1).
 //
-// "The work ledger" is the CITY's. The relocation never moves a rig store, so a
-// rig-scoped graft is co-resident in the rig's own ledger and stays served —
-// TestFormulaCookAttachInRigScopeStaysServedOnASplitCity is that row.
+// "The work ledger" is a city's AND a rig's: under the S4 placement rule a
+// split city keeps every graph row in its binding and rig stores hold only work,
+// so a rig-scoped graft onto a rig work bead is refused too
+// (TestFormulaCookAttachOntoARigWorkBeadIsRefusedOnASplitCity), naming the
+// supported alternative. A single-store city's rig graft is unchanged
+// (TestFormulaCookAttachInRigScopeIsUnchangedOnASingleStoreCity).
 
 import (
 	"bytes"
@@ -25,7 +28,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -203,6 +205,15 @@ func TestFormulaCookLegacyAttachOnAWorkResidentBeadIsRefusedOnSplitCity(t *testi
 // requirement predates this bead and is not what is under test.
 func rigScopedSplitCookCity(t *testing.T) (rig, cityWork, graph beads.Store) {
 	t.Helper()
+	graph = newSplitEnvClassLeaf(t)
+	rig, cityWork = rigScopedCookCity(t, messagingSplitRoutes(graph))
+	return rig, cityWork, graph
+}
+
+// rigScopedCookCity is rigScopedSplitCookCity over any routes: nil is a city
+// that relocates nothing.
+func rigScopedCookCity(t *testing.T, routes *storageRoutes) (rig, cityWork beads.Store) {
+	t.Helper()
 	cityDir := oneShotCookCity(t)
 	rigDir := filepath.Join(cityDir, "wf")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
@@ -232,8 +243,7 @@ func rigScopedSplitCookCity(t *testing.T) (rig, cityWork, graph beads.Store) {
 		}
 	}
 
-	graph = splittest.NewClassStore(t, config.BeadClassGraph)
-	seedCLIStorageRoutes(t, cityDir, messagingSplitRoutes(graph))
+	seedCLIStorageRoutes(t, cityDir, routes)
 
 	// GC_RIG with no --rig is the shape under test: the persistent flag is the
 	// higher-priority tier, so a value another test left on the package global
@@ -252,37 +262,23 @@ func rigScopedSplitCookCity(t *testing.T) (rig, cityWork, graph beads.Store) {
 	if got := beadIDs(allBeads(t, cityWork)); len(got) != 0 {
 		t.Fatalf("the city work store already holds %v; the fixture's premise is that only the rig ledger does", got)
 	}
-	return rig, cityWork, graph
+	return rig, cityWork
 }
 
-// TestFormulaCookAttachInRigScopeStaysServedOnASplitCity is the scope half of
-// the class gate, and the reason the gate asks controlScopeTakesGraphClass
-// before it asks anything else.
+// TestFormulaCookAttachOntoARigWorkBeadIsRefusedOnASplitCity is the rig half
+// of the class gate under the S4 placement rule (owner decision D6).
 //
-// A relocation is a CITY-scope event. `gc storage migrate` copies only the city
-// work store (openInfraMigrationSource -> openStoreAtForCity(cityPath,
-// cityPath)), resolveClassStore holds one city-level store per class with no
-// per-rig binding to route to, and controlGraphStore hands a rig scope back the
-// very store it was given — the three facts controlScopeTakesGraphClass's own
-// doc comment states. So a rig's ledger holds BOTH ends of a graft, the city's
-// containment check never reads it, and nothing a rig-scoped cook writes can be
-// stranded. Refusing it would also hand the operator an inoperative remedy:
-// `gc storage recover-stranded --from-work` reads the city work store.
+// On a split city a rig store holds only work: every graph bead of every rig
+// lives in the city binding, with the rig recorded as gc.root_store_ref. A
+// graft is graph class whatever the formula version, so grafted beside a rig
+// work bead it would put graph rows in the rig's work store, and grafted into
+// the binding it would leave a `blocks` edge crossing stores. Both arms are
+// refused, the refusal names the supported alternative (`gc sling ... --on`),
+// and nothing is written to any of the three stores.
 //
-// GC_RIG is ambient on every controller-spawned agent, so a gate that asked the
-// city question and applied it to the rig store took `--attach` away from
-// essentially every agent on a split city with rigs.
-//
-// Red-before, with the scope gate removed — both rows:
-//
-//	gc formula cook legacy-work --attach gc-1 was refused in RIG scope on a
-//	split city: exit
-//	gc formula cook: --attach gc-1: gc-1 is work class and lives in a WORK
-//	store rather than in the graph binding, and the sub-DAG a graft
-//	materializes is graph class whatever the formula's version ...
-//	a rig store is never relocated, so both ends of the graft are co-resident
-//	in it and nothing it writes can be stranded
-func TestFormulaCookAttachInRigScopeStaysServedOnASplitCity(t *testing.T) {
+// GC_RIG is ambient on every controller-spawned agent, which is the entry the
+// fixture takes.
+func TestFormulaCookAttachOntoARigWorkBeadIsRefusedOnASplitCity(t *testing.T) {
 	for _, formulaName := range []string{"legacy-work", "graph-work"} {
 		t.Run(formulaName, func(t *testing.T) {
 			rig, cityWork, graph := rigScopedSplitCookCity(t)
@@ -291,17 +287,102 @@ func TestFormulaCookAttachInRigScopeStaysServedOnASplitCity(t *testing.T) {
 			if err != nil {
 				t.Fatalf("create attach bead: %v", err)
 			}
+			before := beadIDs(allBeads(t, rig))
 
 			out, err := cookFormulaErr(t, formulaName, "--attach", source.ID)
+			if err == nil {
+				t.Fatalf("gc formula cook %s --attach %s was served in RIG scope on a split city; a rig store holds only work, so the graft must be refused\n%s", formulaName, source.ID, out)
+			}
+			for _, want := range []string{source.ID, "rig store holds only work", "gc sling", "--on <formula>", "cross"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("refusal %q does not mention %q; it must say why and name the supported alternative", out, want)
+				}
+			}
+			assertRefusedGraftWroteNothing(t, rig, graph, source.ID, before)
+			if got := beadIDs(allBeads(t, cityWork)); len(got) != 0 {
+				t.Errorf("the city work store holds %v after a refused rig graft", got)
+			}
+		})
+	}
+}
+
+// TestFormulaCookAttachOntoAPreS4RigTreeFollowsResidence pins the one rig-store
+// graft a split city still serves: onto a GRAPH bead of a tree the rig minted
+// before S4, which stays in the rig store until the rig is imported. The v1 arm
+// extends that tree in place (R-S4.2), so its edge stays co-resident and the
+// binding gains nothing. The graph.v2 arm would start a NEW root, which the
+// placement rule puts in the binding, so its attach edge would cross stores:
+// refused, naming the v1 arm.
+func TestFormulaCookAttachOntoAPreS4RigTreeFollowsResidence(t *testing.T) {
+	newRelicStep := func(t *testing.T, rig beads.Store) beads.Bead {
+		t.Helper()
+		root, err := rig.Create(beads.Bead{Title: "pre-S4 workflow", Type: "task", Metadata: map[string]string{
+			beadmeta.KindMetadataKey: beadmeta.KindWorkflow,
+		}})
+		if err != nil {
+			t.Fatalf("create relic root: %v", err)
+		}
+		step, err := rig.Create(beads.Bead{Title: "pre-S4 step", Type: "task", Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: root.ID,
+		}})
+		if err != nil {
+			t.Fatalf("create relic step: %v", err)
+		}
+		if got := coordclass.Classify(step); got != coordclass.ClassGraph {
+			t.Fatalf("premise failed: the relic step classifies as %v, want graph", got)
+		}
+		return step
+	}
+
+	t.Run("legacy-work extends the tree where it lives", func(t *testing.T) {
+		rig, _, graph := rigScopedSplitCookCity(t)
+		step := newRelicStep(t, rig)
+		out, err := cookFormulaErr(t, "legacy-work", "--attach", step.ID)
+		if err != nil {
+			t.Fatalf("v1 graft onto a pre-S4 rig tree was refused: %v\n%s", err, out)
+		}
+		assertGraftIsCoResidentIn(t, rig, step.ID)
+		if got := allBeads(t, graph); len(got) != 0 {
+			t.Errorf("the binding holds %d bead(s) after a graft onto a rig-resident tree; the graft must follow residence", len(got))
+		}
+	})
+
+	t.Run("graph-work is refused", func(t *testing.T) {
+		rig, _, graph := rigScopedSplitCookCity(t)
+		step := newRelicStep(t, rig)
+		before := beadIDs(allBeads(t, rig))
+		out, err := cookFormulaErr(t, "graph-work", "--attach", step.ID)
+		if err == nil {
+			t.Fatalf("graph.v2 graft onto a pre-S4 rig tree was served; its new root would live in the binding and its attach edge would cross stores\n%s", out)
+		}
+		for _, want := range []string{step.ID, "v1 formula", "cross stores"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("refusal %q does not mention %q", out, want)
+			}
+		}
+		assertRefusedGraftWroteNothing(t, rig, graph, step.ID, before)
+	})
+}
+
+// TestFormulaCookAttachInRigScopeIsUnchangedOnASingleStoreCity is the
+// single-store control: a city that relocates nothing grafts in the rig's own
+// ledger exactly as it always has, on both arms.
+func TestFormulaCookAttachInRigScopeIsUnchangedOnASingleStoreCity(t *testing.T) {
+	for _, formulaName := range []string{"legacy-work", "graph-work"} {
+		t.Run(formulaName, func(t *testing.T) {
+			rig, cityWork := rigScopedCookCity(t, nil)
+
+			source, err := rig.Create(beads.Bead{Title: "attach target", Type: "task"})
 			if err != nil {
-				t.Fatalf("gc formula cook %s --attach %s was refused in RIG scope on a split city: %v\n%s\na rig store is never relocated, so both ends of the graft are co-resident in it and nothing it writes can be stranded", formulaName, source.ID, err, out)
+				t.Fatalf("create attach bead: %v", err)
+			}
+			out, err := cookFormulaErr(t, formulaName, "--attach", source.ID)
+			if err != nil {
+				t.Fatalf("gc formula cook %s --attach %s was refused in RIG scope on a single-store city: %v\n%s", formulaName, source.ID, err, out)
 			}
 			assertGraftIsCoResidentIn(t, rig, source.ID)
 			if got := beadIDs(allBeads(t, cityWork)); len(got) != 0 {
 				t.Errorf("the city work store holds %v after a rig-scoped graft; a rig scope writes to its own ledger", got)
-			}
-			if got := allBeads(t, graph); len(got) != 0 {
-				t.Errorf("the binding holds %d bead(s) after a rig-scoped graft: %+v", len(got), got)
 			}
 		})
 	}

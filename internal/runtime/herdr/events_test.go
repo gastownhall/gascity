@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -27,6 +28,15 @@ type fakeHerdrServer struct {
 
 	mu     sync.Mutex
 	agents []agentInfo // what agent.list returns
+	// rawAgents, when set, replaces agents with literal herdr JSON entries.
+	// agents round-trips gc's own struct tags, so only rawAgents can catch a
+	// decode that reads the wrong herdr key.
+	rawAgents []json.RawMessage
+	// onList, when set, runs before each agent.list answer with that call's
+	// 1-based ordinal, so a test can change the listing at an exact poll
+	// instead of after a wall-clock delay.
+	onList    func(call int)
+	listCalls int
 
 	// subscribes receives each events.subscribe call's decoded filter set.
 	subscribes chan []subscribeSub
@@ -92,6 +102,18 @@ func (f *fakeHerdrServer) setAgents(agents ...agentInfo) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.agents = append([]agentInfo(nil), agents...) // copy: callers keep mutating their slice
+	f.rawAgents = nil
+}
+
+// setRawAgents makes agent.list answer with entries verbatim, as herdr emits
+// them.
+func (f *fakeHerdrServer) setRawAgents(entries ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rawAgents = make([]json.RawMessage, 0, len(entries))
+	for _, e := range entries {
+		f.rawAgents = append(f.rawAgents, json.RawMessage(e))
+	}
 }
 
 func (f *fakeHerdrServer) serve(conn net.Conn) {
@@ -115,7 +137,17 @@ func (f *fakeHerdrServer) serve(conn net.Conn) {
 	switch req.Method {
 	case "agent.list":
 		f.mu.Lock()
-		agents := f.agents
+		f.listCalls++
+		call, onList := f.listCalls, f.onList
+		f.mu.Unlock()
+		if onList != nil {
+			onList(call)
+		}
+		f.mu.Lock()
+		var agents any = f.agents
+		if f.rawAgents != nil {
+			agents = f.rawAgents
+		}
 		f.mu.Unlock()
 		resp := map[string]any{"id": req.ID, "result": map[string]any{"type": "agent_list", "agents": agents}}
 		b, _ := json.Marshal(resp)
@@ -224,10 +256,39 @@ func TestSessionEventStreamStartupAndTranslation(t *testing.T) {
 	}
 
 	stream.push(t, `{"data":{"agent":"claude","agent_status":"idle","pane_id":"w2:p1","workspace_id":"w2"},"event":"pane.agent_status_changed"}`)
-	if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventAgentStatus || ev.Session != "beta" || ev.AgentStatus != "idle" {
-		t.Errorf("agent_status_changed => %+v, want agent_status/beta/idle", ev)
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventAgentIdle || ev.Session != "beta" {
+		t.Errorf("agent_status_changed idle => %+v, want agent_idle/beta", ev)
 	}
 
+	// The same state reported with different case or padding is the same state,
+	// and "the same" is decided by the normalizer the activity tracker also
+	// uses. That shared spelling is the point: a boundary that folded case its
+	// own way would classify a payload idle here and not-idle there, or the
+	// reverse, and neither site would show the disagreement. U+0130 is in the
+	// list because it is exactly where an independently-plausible choice
+	// diverges: strings.ToLower maps it to "i", strings.EqualFold does not.
+	for _, spelling := range []string{"IDLE", "Idle", " idle ", "\u0130dle"} {
+		stream.push(t, fmt.Sprintf(`{"data":{"agent":"claude","agent_status":%q,"pane_id":"w2:p1","workspace_id":"w2"},"event":"pane.agent_status_changed"}`, spelling))
+		if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventAgentIdle || ev.Session != "beta" {
+			t.Errorf("agent_status_changed %q => %+v, want agent_idle/beta", spelling, ev)
+		}
+	}
+
+	// A non-idle state crosses as the vocabulary-free kind, never as herdr's
+	// own spelling. It has to cross at all: the frame's arrival is what flushes
+	// an owed resync and what wakes the activity tracker, neither of which reads
+	// the kind. Those two effects are pinned by
+	// TestSessionEventStreamFlushesOwedResyncOnNonIdleFrame and
+	// TestActivityReconcileLoopPollsOnAnyEventKind respectively, not here.
+	stream.push(t, `{"data":{"agent":"claude","agent_status":"working","pane_id":"w2:p1","workspace_id":"w2"},"event":"pane.agent_status_changed"}`)
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventAgentStateChanged || ev.Session != "beta" {
+		t.Errorf("agent_status_changed working => %+v, want agent_state_changed/beta", ev)
+	}
+	// Ordering only: the detected frame must still arrive, attributed, after a
+	// status frame. The no-provider-vocabulary property is NOT asserted here,
+	// because this assertion would not notice a relayed status field being
+	// reintroduced; TestSessionEventCarriesNoProviderVocabulary in
+	// internal/runtime owns that, as a field-set guard on the struct itself.
 	stream.push(t, `{"data":{"agent":"claude","pane_id":"w1:p1","type":"pane_agent_detected","workspace_id":"w1"},"event":"pane_agent_detected"}`)
 	if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventAgentDetected || ev.Session != "alpha" {
 		t.Errorf("pane_agent_detected => %+v, want agent_detected/alpha", ev)
@@ -316,6 +377,84 @@ func TestSessionEventStreamAttachesWhenServerAppears(t *testing.T) {
 	}
 }
 
+// TestSessionEventStreamFlushesOwedResyncOnNonIdleFrame pins the side effect
+// that is easy to lose when a translation layer learns to filter. emit flushes
+// a resync the stream already owes its consumer before delivering anything, so
+// every accepted frame is a chance to discharge that debt. A boundary that
+// returned early for non-idle states would skip the flush, and the consumer
+// would sit on an undelivered loss notification until some other frame
+// happened to be accepted, a reconnect occurred, or a relist timer fired.
+//
+// Deliberately socket-free: the regression lives in handleFrame, and driving it
+// directly is what lets the test state the owed-resync precondition instead of
+// trying to provoke a full channel through a live stream.
+func TestSessionEventStreamFlushesOwedResyncOnNonIdleFrame(t *testing.T) {
+	for _, status := range []string{"working", "blocked", "done", "unknown", "a-state-herdr-has-not-shipped-yet"} {
+		t.Run(status, func(t *testing.T) {
+			s := &sessionEventStream{
+				ch:            make(chan runtime.SessionEvent, 1),
+				paneNames:     map[string]string{"w2:p1": "beta"},
+				pendingResync: true,
+			}
+			frame := fmt.Sprintf(`{"data":{"agent":"claude","agent_status":%q,"pane_id":"w2:p1","workspace_id":"w2"},"event":"pane.agent_status_changed"}`, status)
+			s.handleFrame([]byte(frame))
+			select {
+			case ev := <-s.ch:
+				if ev.Kind != runtime.SessionEventResync {
+					t.Fatalf("first delivered event = %v, want the owed resync", ev.Kind)
+				}
+			default:
+				t.Fatal("owed resync still undelivered after a non-idle status frame")
+			}
+		})
+	}
+}
+
+// TestSessionEventStreamTranslatesEveryAgentStateToOneOfTwoKinds states the
+// whole translation table in one place, including states herdr does not ship
+// today. The point of the semantic kinds is that an unrecognized provider state
+// is not a special case: it reports that something changed without claiming to
+// know what, which is the only honest reading of a state this package has never
+// seen.
+func TestSessionEventStreamTranslatesEveryAgentStateToOneOfTwoKinds(t *testing.T) {
+	cases := []struct {
+		status string
+		want   runtime.SessionEventKind
+	}{
+		{"idle", runtime.SessionEventAgentIdle},
+		{"IDLE", runtime.SessionEventAgentIdle},
+		{" idle\t", runtime.SessionEventAgentIdle},
+		{"\u0130dle", runtime.SessionEventAgentIdle},
+		{"working", runtime.SessionEventAgentStateChanged},
+		{"blocked", runtime.SessionEventAgentStateChanged},
+		{"done", runtime.SessionEventAgentStateChanged},
+		{"unknown", runtime.SessionEventAgentStateChanged},
+		{"", runtime.SessionEventAgentStateChanged},
+		{"idle-adjacent-but-not-idle", runtime.SessionEventAgentStateChanged},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("%q", tc.status), func(t *testing.T) {
+			s := &sessionEventStream{
+				ch:        make(chan runtime.SessionEvent, 1),
+				paneNames: map[string]string{"w2:p1": "beta"},
+			}
+			frame := fmt.Sprintf(`{"data":{"agent":"claude","agent_status":%q,"pane_id":"w2:p1","workspace_id":"w2"},"event":"pane.agent_status_changed"}`, tc.status)
+			s.handleFrame([]byte(frame))
+			select {
+			case ev := <-s.ch:
+				if ev.Kind != tc.want {
+					t.Errorf("status %q => kind %v, want %v", tc.status, ev.Kind, tc.want)
+				}
+				if ev.Session != "beta" {
+					t.Errorf("status %q => session %q, want beta", tc.status, ev.Session)
+				}
+			default:
+				t.Fatalf("status %q emitted nothing; every reported state must cross as one of the two kinds", tc.status)
+			}
+		})
+	}
+}
+
 // TestSessionEventStreamResubscribesForNewAgentPane pins dynamic filter
 // maintenance: a pane_created burst triggers a debounced re-list, and a newly
 // discovered agent pane forces an immediate resubscribe (new cycle) whose
@@ -357,8 +496,8 @@ func TestSessionEventStreamResubscribesForNewAgentPane(t *testing.T) {
 	}
 	stream = recvStream(t, f)
 	stream.push(t, `{"data":{"agent":"claude","agent_status":"idle","pane_id":"w3:p1","workspace_id":"w3"},"event":"pane.agent_status_changed"}`)
-	if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventAgentStatus || ev.Session != "gamma" {
-		t.Errorf("new pane agent_status => %+v, want agent_status/gamma", ev)
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventAgentIdle || ev.Session != "gamma" {
+		t.Errorf("new pane agent_status => %+v, want agent_idle/gamma", ev)
 	}
 }
 
@@ -490,5 +629,48 @@ func TestSessionEventStreamCtxCancelClosesChannel(t *testing.T) {
 		case <-deadline:
 			t.Fatal("channel not closed within 3s of ctx cancel")
 		}
+	}
+}
+
+// TestSessionEventsSkipUnnamedPanes pins the stream's pane map to registered
+// names: a pane herdr detected claude in but nobody named is no session's, so
+// it gets no per-pane subscription and its frames surface unattributed rather
+// than under the kind.
+func TestSessionEventsSkipUnnamedPanes(t *testing.T) {
+	f, sock := newFakeHerdrServer(t)
+	f.setRawAgents(
+		`{"agent":"claude","name":"alpha","pane_id":"w1:p1","agent_status":"working"}`,
+		unnamedClaudePane,
+	)
+	p := eventTestProvider(t, sock)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := p.SubscribeSessionEvents(ctx)
+	if err != nil {
+		t.Fatalf("SubscribeSessionEvents: %v", err)
+	}
+
+	statusPanes := map[string]bool{}
+	for _, s := range recvSubscribe(t, f, 2*time.Second) {
+		if s.Type == "pane.agent_status_changed" {
+			statusPanes[s.PaneID] = true
+		}
+	}
+	if len(statusPanes) != 1 || !statusPanes["w1:p1"] {
+		t.Errorf("per-pane agent-status subs = %v; want only alpha's w1:p1", statusPanes)
+	}
+
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventResync {
+		t.Fatalf("first event = %v, want resync", ev.Kind)
+	}
+	stream := recvStream(t, f)
+	stream.push(t, `{"data":{"agent":"claude","agent_status":"idle","pane_id":"w1:p3","workspace_id":"w1"},"event":"pane.agent_status_changed"}`)
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Session != "" || ev.Ref != "w1:p3" {
+		t.Errorf("unnamed pane frame => %+v; want unattributed (Session \"\") on w1:p3", ev)
+	}
+	stream.push(t, `{"data":{"agent":"claude","agent_status":"idle","pane_id":"w1:p1","workspace_id":"w1"},"event":"pane.agent_status_changed"}`)
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Session != "alpha" || ev.Ref != "w1:p1" {
+		t.Errorf("alpha pane frame => %+v; want attributed to alpha", ev)
 	}
 }

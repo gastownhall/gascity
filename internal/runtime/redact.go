@@ -12,9 +12,11 @@ const RedactedValue = "<redacted>"
 // substitutionFloor is the shortest value [RedactSecrets] will substitute.
 // Substitution is blind to word boundaries, so hiding a short value mangles
 // unrelated text: with "no" a secret, herdr's "agent not found" becomes
-// "agent <redacted>t found", and both the herdr client's isAgentNotFound and
-// [IsSessionGone] decide by matching that phrase — a redactor silently taking
-// over branches that turn a tolerated missing session into a hard failure.
+// "agent <redacted>t found", and [IsSessionGone] decides by matching that phrase
+// — a redactor silently taking over branches that turn a tolerated missing
+// session into a hard failure. (The herdr client used to decide the same way and
+// now gates on herdr's reported error code instead, for a related reason: the
+// rendered text it was matching also carried the argv it had passed in.)
 //
 // The floor buys that back because the two populations barely overlap: the
 // credentials that reach a session are long (the instance token is 32 hex
@@ -53,7 +55,16 @@ var envRedactionInert = map[string]bool{
 	"SHELL":   true,
 	"SHLVL":   true,
 	"TMPDIR":  true,
-	"USER":    true,
+	// Go toolchain temp root (CI gates set it beside TMPDIR); same class as
+	// TMPDIR — a path failing commands echo constantly, an authenticator of
+	// nothing.
+	"GOTMPDIR": true,
+	"USER":     true,
+	// Bazel's test runner exports TEST_TMPDIR and (in remote actions) points
+	// HOME at it. Redacting that value through this key scrubs every path in
+	// the diagnostic for bazel-executed controllers - the exact diagnostics
+	// outage this list exists to prevent; it authenticates nothing.
+	"TEST_TMPDIR": true,
 }
 
 // redactableEnvValue reports whether this key/value pair should be scrubbed out

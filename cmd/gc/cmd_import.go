@@ -34,6 +34,9 @@ var (
 	resolveImportVersion    = packman.ResolveVersion
 	defaultImportConstraint = packman.DefaultConstraint
 	resolveImportHeadCommit = defaultImportHeadCommit
+	// resolveImportRegistryRelease answers the default constraint of a
+	// `gc import add` without --version for a registry-published source.
+	resolveImportRegistryRelease = packman.ResolveRegistryRelease
 
 	// validateComposedConfigAfterInstall loads the composed city config after
 	// install, so `gc import install` fails on the same load errors gc
@@ -124,21 +127,29 @@ func newImportCmd(stdout, stderr io.Writer) *cobra.Command {
 	return cmd
 }
 
+// credentialHint returns the pack-credential remediation for err — the text
+// printCredentialHint prints after "hint: " — and whether err carries an auth
+// classification from a network git run.
+func credentialHint(err error) (string, bool) {
+	var authErr *gitcred.AuthError
+	if !errors.As(err, &authErr) {
+		return "", false
+	}
+	if authErr.Matched {
+		return fmt.Sprintf("credential rule from %s matched but the remote rejected it; check the token is valid and has contents:read on this repository (gc import credential list)", authErr.RuleOrigin), true
+	}
+	return "this source requires authentication; register a pack credential and retry:\n" +
+		fmt.Sprintf("  gc import credential add %s --helper 'gh auth token'\n", authErr.OrgPrefix) +
+		"  (--token-file, --token-env, and --ssh-key-file are the non-interactive alternatives; see gc import credential add --help)", true
+}
+
 // printCredentialHint appends the pack-credential remediation hint when err
 // carries an auth classification from a network git run. It is deliberately
 // separate from importAddErrorLine's framing (pinned by exact-match tests).
 func printCredentialHint(stderr io.Writer, err error) {
-	var authErr *gitcred.AuthError
-	if !errors.As(err, &authErr) {
-		return
+	if hint, ok := credentialHint(err); ok {
+		fmt.Fprintf(stderr, "hint: %s\n", hint) //nolint:errcheck
 	}
-	if authErr.Matched {
-		fmt.Fprintf(stderr, "hint: credential rule from %s matched but the remote rejected it; check the token is valid and has contents:read on this repository (gc import credential list)\n", authErr.RuleOrigin) //nolint:errcheck
-		return
-	}
-	fmt.Fprintf(stderr, "hint: this source requires authentication; register a pack credential and retry:\n")                                            //nolint:errcheck
-	fmt.Fprintf(stderr, "  gc import credential add %s --helper 'gh auth token'\n", authErr.OrgPrefix)                                                   //nolint:errcheck
-	fmt.Fprintf(stderr, "  (--token-file, --token-env, and --ssh-key-file are the non-interactive alternatives; see gc import credential add --help)\n") //nolint:errcheck
 }
 
 func newImportAddCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -155,7 +166,14 @@ entry using source plus optional version. Supported sources are:
 - local paths inside git worktrees at HEAD: promoted to a file:// repo source
   with the pack subpath and locked to the current commit
 - remote git repositories: cloned and locked; --version accepts a semver
-  constraint or sha:<commit>
+  constraint or sha:<commit>. Without --version, a source the city already
+  imports or locks keeps the constraint the city holds for it, so its
+  packs.lock entry does not move (a local path inside a git worktree is
+  still locked to its current commit)
+- packs published in a configured pack registry: a semver --version (or no
+  --version) resolves against the registry's release entries, not git tags;
+  the constraint is kept, the lock records the release version and commit,
+  and the fetched content must match the release's content hash
 - remote GitHub repository subpaths: use dereferenceable tree URLs such as
   https://github.com/org/repo/tree/main/packs/foo
 
@@ -644,19 +662,67 @@ func importSvcDeps() importsvc.Deps {
 		ResolveVersion:    resolveImportVersion,
 		DefaultConstraint: defaultImportConstraint,
 		ResolveHeadCommit: resolveImportHeadCommit,
+
+		ResolveRegistryRelease: resolveImportRegistryRelease,
 	}
 }
 
 //nolint:unparam // keep fs injectable for parity with the other import helpers and direct tests.
 func doImportAdd(fs fsys.FS, cityPath, source, nameOverride, versionFlag string, stdout, stderr io.Writer) int {
+	mcpBefore, mcpBeforeErr := loadMCPCapabilityReport(cityPath)
 	res, err := importsvc.AddImportWith(fs, cityPath, source, nameOverride, versionFlag, importSvcDeps())
 	if err != nil {
 		fmt.Fprintln(stderr, importAddErrorLine(source, nameOverride, err)) //nolint:errcheck
 		printCredentialHint(stderr, err)
 		return 1
 	}
+	if res.RegistryRelease != "" {
+		fmt.Fprintf(stdout, "Locked to registry release %s\n", res.RegistryRelease) //nolint:errcheck
+	}
 	fmt.Fprintf(stdout, "Added import %q from %s\n", res.Name, res.Source) //nolint:errcheck
+	warnImportMCPCapability(cityPath, mcpBefore, mcpBeforeErr, stderr)
 	return 0
+}
+
+// errImportRootNotCity marks an import root that is a pack, not a city: it
+// has no agents to check MCP servers against.
+var errImportRootNotCity = errors.New("import root is not a city")
+
+// loadMCPCapabilityReport checks the city's MCP servers against what its
+// agents' providers can receive (collectMCPCapabilityReport).
+func loadMCPCapabilityReport(cityPath string) (mcpCapabilityReport, error) {
+	if !citylayout.HasCityConfig(cityPath) {
+		return mcpCapabilityReport{}, errImportRootNotCity
+	}
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		return mcpCapabilityReport{}, err
+	}
+	return collectMCPCapabilityReport(cityPath, cfg), nil
+}
+
+// warnImportMCPCapability reports, right after gc import add, what the new
+// import changed for the city's agents: agents that will start without MCP
+// servers it provides because their provider cannot receive them, and agents
+// it keeps from starting. It compares the city before and after the add, so
+// whichever import a server is attributed to, only the new import's effect is
+// reported. It is advisory: the add has already succeeded.
+func warnImportMCPCapability(cityPath string, before mcpCapabilityReport, beforeErr error, stderr io.Writer) {
+	if errors.Is(beforeErr, errImportRootNotCity) {
+		return
+	}
+	after, err := loadMCPCapabilityReport(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc import add: note: could not check the city's MCP servers against its agents: %v\n", err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	if beforeErr != nil {
+		// No baseline: report everything the city's agents now miss.
+		before = mcpCapabilityReport{}
+	}
+	for _, line := range after.since(before).lines() {
+		fmt.Fprintf(stderr, "gc import add: warning: %s\n", line) //nolint:errcheck // best-effort stderr
+	}
 }
 
 // importAddErrorLine frames the `gc import add` exit-1 stderr line. The
@@ -701,10 +767,28 @@ func doImportRemove(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer)
 	return 0
 }
 
+// intoRepoCacheRoot is the success-line suffix naming the repo cache root a
+// `gc import install` or `gc import upgrade` wrote into. Both commands clone
+// through packman.EnsureRepoInCache into the root this process resolves from
+// GC_HOME, and the read side already names the directory it searched
+// ("locked but not cached at <dir>"), so the two lines together turn a
+// GC_HOME that differs between the shell that ran the write and the process
+// that resolves the config into a one-line diagnosis instead of a mystery.
+func intoRepoCacheRoot(root string) string {
+	return " into " + root
+}
+
 func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
 	allImports, err := collectAllImportsFS(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import install: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	// Resolve the repo cache root the clones below land in, so the success
+	// line can name it (see intoRepoCacheRoot).
+	cacheRoot, err := packman.RepoCacheRoot()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc import install: resolving repo cache root: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	lock, err := syncImports(cityPath, allImports, packman.InstallResolveIfNeeded)
@@ -744,7 +828,7 @@ func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "Installed %d remote import(s)\n", len(lock.Packs)) //nolint:errcheck
+	fmt.Fprintf(stdout, "Installed %d remote import(s)%s\n", len(lock.Packs), intoRepoCacheRoot(cacheRoot)) //nolint:errcheck
 	return 0
 }
 
@@ -801,13 +885,32 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Read the pre-upgrade lock so the summary below can report which pins
+	// actually moved, rather than just the size of the resolved closure. A
+	// sha-pinned import always resolves back to itself, so a raw entry count
+	// can't distinguish "moved" from "already at its pinned version".
+	prevLock, err := readImportLockfile(fsys.OSFS{}, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc import upgrade: %v\n", err) //nolint:errcheck
+		return 1
+	}
+
 	allImports, collectErr := collectAllImportsFS(cityPath)
 	if collectErr != nil {
 		fmt.Fprintf(stderr, "gc import upgrade: %v\n", collectErr) //nolint:errcheck
 		return 1
 	}
 
+	// Resolve the repo cache root the clones below land in, so the success
+	// line can name it (see intoRepoCacheRoot).
+	cacheRoot, err := packman.RepoCacheRoot()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc import upgrade: resolving repo cache root: %v\n", err) //nolint:errcheck
+		return 1
+	}
+
 	var lock *packman.Lockfile
+	var targetSource string
 	if target == "" {
 		lock, err = syncImports(cityPath, allImports, packman.InstallUpgrade)
 	} else {
@@ -825,6 +928,7 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "gc import upgrade: import %q is a path import and cannot be upgraded\n", target) //nolint:errcheck
 			return 1
 		}
+		targetSource = targetImp.Source
 		lock, err = syncImportsSelective(cityPath, allImports, map[string]struct{}{
 			targetImp.Source: {},
 		})
@@ -844,9 +948,27 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if target == "" {
-		fmt.Fprintf(stdout, "Upgraded %d remote import(s)\n", len(lock.Packs)) //nolint:errcheck
+		total := len(lock.Packs)
+		moved := 0
+		for source, pack := range lock.Packs {
+			if prev, ok := prevLock.Packs[source]; !ok || prev.Commit != pack.Commit {
+				moved++
+			}
+		}
+		if moved == 0 {
+			fmt.Fprintf(stdout, "No import moved; %d already up to date\n", total) //nolint:errcheck
+		} else {
+			fmt.Fprintf(stdout, "Upgraded %d of %d remote import(s)%s; %d already up to date\n", moved, total, intoRepoCacheRoot(cacheRoot), total-moved) //nolint:errcheck
+		}
 	} else {
-		fmt.Fprintf(stdout, "Upgraded import %q\n", target) //nolint:errcheck
+		pack, ok := lock.Packs[targetSource]
+		if !ok {
+			fmt.Fprintf(stdout, "Upgraded import %q%s\n", target, intoRepoCacheRoot(cacheRoot)) //nolint:errcheck
+		} else if prev, hadPrev := prevLock.Packs[targetSource]; hadPrev && prev.Commit == pack.Commit {
+			fmt.Fprintf(stdout, "Import %q already at %s\n", target, pack.Commit) //nolint:errcheck
+		} else {
+			fmt.Fprintf(stdout, "Upgraded import %q (%s)%s\n", target, pack.Commit, intoRepoCacheRoot(cacheRoot)) //nolint:errcheck
+		}
 	}
 	return 0
 }

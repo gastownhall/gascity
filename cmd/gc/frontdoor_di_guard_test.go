@@ -56,7 +56,7 @@ func TestFrontDoorStoreFreeFilesStayStoreFree(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	dir := filepath.Dir(currentFile)
+	dir := gcCallerDir(currentFile)
 	for _, name := range frontDoorStoreFreeFiles {
 		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)
@@ -120,7 +120,7 @@ func TestSnapshotInfoOnlyFilesStayOnInfoAccessors(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	dir := filepath.Dir(currentFile)
+	dir := gcCallerDir(currentFile)
 	for _, name := range snapshotInfoOnlyFiles {
 		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)
@@ -209,7 +209,7 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	dir := filepath.Dir(currentFile)
+	dir := gcCallerDir(currentFile)
 	for _, name := range metadataInfoOnlyFiles {
 		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)
@@ -305,7 +305,7 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 //
 // cmd_handoff.go routes its full SESSION arm — restartability
 // (sessionRestartableByController), restart-request clear (clearRestartRequest ->
-// sessionFrontDoor(sessStore).ApplyPatch), restart persist (sessionRestartPersister),
+// sessionFrontDoor(sessStore).ApplyPatch), restart record (sessionRestartRecorder),
 // the remote kill/observe/identity trio, resolveSessionID, sender-identity resolution
 // (resolveDefaultMailSenderForCommand), and beadmail's session addressing via
 // beadmail.NewWithStores(msgStore, sessStore) — through cliSessionStore. Its messaging
@@ -361,11 +361,12 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 // cmd_mail.go routes at its store-opening ROOTS rather than per-read, because every
 // store access in its identity/target resolver family is session-class: session-ID
 // resolution, the gc:session enumeration behind named-target matching, and mailbox
-// identity. The five roots — resolveMailTargetsForCommand,
-// resolveDefaultMailTargetsForCommand, resolveRawMailTargetForStorelessProvider,
-// cmdMailSendJSON, cmdMailReplyJSON — derive cliSessionStore(store, cfg, cityPath) and
-// hand it down; the whole resolver family therefore names its parameter sessStore and
-// does NO routing of its own, so a relocation is applied exactly once per command.
+// identity. The four roots — openMailTargetResolver (behind
+// resolveMailTargetsForCommand and resolveDefaultMailTargetsForCommand),
+// resolveRawMailTargetForStorelessProvider, cmdMailSendJSON, cmdMailReplyJSON —
+// derive cliSessionStore(store, cfg, cityPath) and hand it down; the whole resolver
+// family therefore names its parameter sessStore and does NO routing of its own, so
+// a relocation is applied exactly once per command.
 // Mail MESSAGES are a different coordination class and never travel through these
 // resolvers — they go through mail.Provider. The two out-of-file callers
 // (cmd_handoff.go, prime_auto_handoff_inject.go) already hold a routed sessStore.
@@ -404,6 +405,21 @@ var sessionRelocationRoutedFiles = []string{
 	// class and degrade to a silent no-op — a green result that reads as "no
 	// stranded work" when the check simply looked in the wrong store.
 	"doctor_pool_idle_routed_work_check.go",
+	// The startup-health-episodes doctor check enumerates session-class episode
+	// beads. Unrouted, it reports "no active startup-health episodes" under a
+	// relocated sessions class — a green result that reads as "no stuck
+	// sessions" when the check simply looked in the wrong store.
+	"doctor_startup_health.go",
+	// `gc agent is-foreign` vouches for a claimant through this city's session
+	// records. Unrouted, it finds none under a relocated sessions class, so every
+	// dead local claim the orphan-sweep order asks about reads as foreign and is
+	// kept forever.
+	"cmd_agent_is_foreign.go",
+	// The in-band lane pass of `gc nudge drain --inject` reads the session row
+	// and writes the conversation's op rows and the delivery stamp. Unrouted,
+	// it would find no open lane op under a relocated sessions class, and the
+	// hook would deliver no notice while the controller is down.
+	"conversation_lane_hook.go",
 }
 
 // sessionRelocationForbidden are the UNROUTED session-front-door constructions a
@@ -434,7 +450,7 @@ func TestSessionRelocationRootsRouteThroughSessionClassStore(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	dir := filepath.Dir(currentFile)
+	dir := gcCallerDir(currentFile)
 	for _, name := range sessionRelocationRoutedFiles {
 		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)
@@ -472,7 +488,7 @@ func TestGraphRelocationRootsRouteThroughGraphClassStore(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	dir := filepath.Dir(currentFile)
+	dir := gcCallerDir(currentFile)
 	for _, name := range graphRelocationRoutedFiles {
 		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -31,6 +32,22 @@ type casBackingStore struct {
 	// before they return to the cache — the window in which a concurrent
 	// scan's merge-back races writes that landed mid-scan.
 	onListOnce func()
+	// onGetOnce fires once after the wrapped Get reads its row and before it
+	// returns to the cache — the window in which a refetch races a newer
+	// write.
+	onGetOnce func()
+	// stripDepsFromGet drops dependency fields from Get results, the shape
+	// of a backing whose point read does not carry them.
+	stripDepsFromGet bool
+	// noopKeepsRevision makes a fenced write that changes nothing succeed
+	// without minting a revision, as bd does for discarded no-op updates.
+	noopKeepsRevision bool
+	// notFoundNextGet makes the next Get to finish report ErrNotFound. It is
+	// checked after onGetOnce, so a hook can arm it for the Get it runs in.
+	notFoundNextGet bool
+	// hideLabelsGuard withholds the wrapped store's label guard, the shape of
+	// a backing that would write labels outside its revision check.
+	hideLabelsGuard bool
 }
 
 type atomicConditionalCloseBacking struct {
@@ -39,6 +56,9 @@ type atomicConditionalCloseBacking struct {
 	getCalls   int
 	closeErr   error
 	afterClose func()
+	// mangleReturned alters the row the closer hands back, to model a closer
+	// whose returned row is not the committed one.
+	mangleReturned func(*Bead)
 }
 
 func (s *atomicConditionalCloseBacking) Get(id string) (Bead, error) {
@@ -58,6 +78,9 @@ func (s *atomicConditionalCloseBacking) CloseWithMetadataIfMatch(id string, expe
 	closed, err := closer.CloseWithMetadataIfMatch(id, expectedRevision, metadata)
 	if err == nil && s.afterClose != nil {
 		s.afterClose()
+	}
+	if err == nil && s.mangleReturned != nil {
+		s.mangleReturned(&closed)
 	}
 	return closed, err
 }
@@ -91,8 +114,19 @@ func (s *casBackingStore) Get(id string) (Bead, error) {
 		return stale, nil
 	}
 	b, err := s.Store.Get(id)
+	if hook := s.onGetOnce; hook != nil {
+		s.onGetOnce = nil
+		hook()
+	}
+	if s.notFoundNextGet {
+		s.notFoundNextGet = false
+		return Bead{}, ErrNotFound
+	}
 	if err == nil && s.hideClosedFromGet && b.Status == "closed" {
 		return Bead{}, ErrNotFound
+	}
+	if s.stripDepsFromGet {
+		b.Dependencies, b.Needs = nil, nil
 	}
 	return b, err
 }
@@ -101,10 +135,20 @@ func (s *casBackingStore) delegate() (ConditionalWriter, bool) {
 	return ConditionalWriterFor(s.Store)
 }
 
+// conditionalLabelsGuarded forwards the wrapped store's label guard, which
+// interface embedding does not promote.
+func (s *casBackingStore) conditionalLabelsGuarded() bool {
+	return !s.hideLabelsGuard && conditionalLabelsGuarded(s.Store)
+}
+
 func (s *casBackingStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
 	s.casCalls++
 	if s.errOverride != nil {
 		return s.errOverride
+	}
+	if current, err := s.Store.Get(id); s.noopKeepsRevision && err == nil &&
+		current.Revision == expectedRevision && updateReflected(current, opts) {
+		return nil
 	}
 	w, ok := s.delegate()
 	if !ok {
@@ -117,6 +161,10 @@ func (s *casBackingStore) CloseIfMatch(id string, expectedRevision int64) error 
 	s.casCalls++
 	if s.errOverride != nil {
 		return s.errOverride
+	}
+	if current, err := s.Store.Get(id); s.noopKeepsRevision && err == nil &&
+		current.Revision == expectedRevision && current.Status == "closed" {
+		return nil
 	}
 	w, ok := s.delegate()
 	if !ok {
@@ -427,20 +475,13 @@ func TestCachingStoreConditionalWriteSuccessRefreshesCache(t *testing.T) {
 	})
 }
 
-// TestCachingStoreConditionalWriteWritesThroughOnLaggedRefresh pins the
-// write-through rule: when the post-write refresh serves a lagged (pre-write)
-// row, the cache must still reflect exactly what the fenced verb proved
-// committed — the caller's opts, the closed status, or the swapped key. The
-// lagged revision is accepted (it self-heals: a fenced write against it
-// precondition-fails and evicts); a lagged field value would not self-heal
-// for plain readers.
 // TestCachingStoreConditionalWriteEvictsOnLaggedRefresh pins the
-// no-fabrication contract: a fenced write's post-write refresh cannot be
-// attributed to our commit (the backing may serve a LAGGED pre-write row, or
-// a LATER one), so the cache installs NOTHING — the entry is evicted and the
-// next read consults the backing, which by then serves the committed state.
-// The change notification fires with the verbatim refresh; consumers re-read
-// by id rather than trusting event payloads for point-in-time state.
+// no-fabrication contract: a fenced write's post-write refetch that serves a
+// LAGGED pre-write row does not reflect the commit, so the cache installs
+// nothing for it — the entry stays evicted and the next read consults the
+// backing, which by then serves the committed state. The change notification
+// fires with the verbatim refetch; consumers re-read by id rather than
+// trusting event payloads for point-in-time state.
 func TestCachingStoreConditionalWriteEvictsOnLaggedRefresh(t *testing.T) {
 	t.Parallel()
 
@@ -846,7 +887,14 @@ func TestAtomicConditionalCloserForCachingStoreResolvesBackingCapabilityHonestly
 		if len(notes) != 1 || notes[0].eventType != "bead.closed" {
 			t.Fatalf("handle notifications = %+v, want one bead.closed", notes)
 		}
-		assertConditionalEvicted(t, cache, created.ID)
+		// The returned committed row is installed clean behind the eviction.
+		cache.mu.RLock()
+		cached, inBeads := cache.beads[created.ID]
+		_, dirty := cache.dirty[created.ID]
+		cache.mu.RUnlock()
+		if !inBeads || dirty || cached.Status != "closed" || cached.Metadata["state"] != "drained" {
+			t.Fatalf("cached row = %+v (present=%v dirty=%v), want the returned closed row installed clean", cached, inBeads, dirty)
+		}
 	})
 
 	t.Run("unsupported cache does not claim a deferred failure", func(t *testing.T) {
@@ -1377,4 +1425,94 @@ func TestCachingStoreConditionalFollowsBackingResolveTarget(t *testing.T) {
 	if err := writer.UpdateIfMatch(created.ID, fresh.Revision, UpdateOpts{Title: &fenced}); err != nil {
 		t.Fatalf("UpdateIfMatch through the sandwich: %v", err)
 	}
+}
+
+// TestCachingStoreReflectsConditionalLabels pins that a fenced label write
+// never leaves the cache serving the pre-write label set. The refetched row is
+// installed only when it carries the label change; a lagged refetch that still
+// shows the old labels stays a miss, and the next read goes to the backing.
+func TestCachingStoreReflectsConditionalLabels(t *testing.T) {
+	t.Parallel()
+
+	setup := func(t *testing.T) (*casBackingStore, *CachingStore, Bead) {
+		t.Helper()
+		backing := &casBackingStore{Store: NewMemStore()}
+		cache := NewCachingStoreForTest(backing, nil)
+		if err := cache.Prime(context.Background()); err != nil {
+			t.Fatalf("Prime: %v", err)
+		}
+		b, err := cache.Create(Bead{Title: "labels", Labels: []string{"keep", "remove"}})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		got, err := cache.Get(b.ID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		return backing, cache, got
+	}
+	opts := UpdateOpts{Labels: []string{"added"}, RemoveLabels: []string{"remove"}}
+	wantCommitted := func(t *testing.T, b Bead) {
+		t.Helper()
+		if !slices.Contains(b.Labels, "keep") || !slices.Contains(b.Labels, "added") || slices.Contains(b.Labels, "remove") {
+			t.Fatalf("labels = %v, want the committed keep+added without remove", b.Labels)
+		}
+	}
+
+	t.Run("committed_labels_installed", func(t *testing.T) {
+		t.Parallel()
+		backing, cache, got := setup(t)
+		if err := cache.UpdateIfMatch(got.ID, got.Revision, opts); err != nil {
+			t.Fatalf("UpdateIfMatch: %v", err)
+		}
+		cache.mu.RLock()
+		row, installed := cache.beads[got.ID]
+		cache.mu.RUnlock()
+		if !installed {
+			t.Fatal("fenced label write left a miss although the refetch carried the committed labels")
+		}
+		wantCommitted(t, row)
+		fresh, err := backing.Store.Get(got.ID)
+		if err != nil {
+			t.Fatalf("backing Get: %v", err)
+		}
+		if row.Revision != fresh.Revision {
+			t.Fatalf("cached revision = %d, backing = %d", row.Revision, fresh.Revision)
+		}
+	})
+
+	t.Run("lagged_labels_stay_a_miss", func(t *testing.T) {
+		t.Parallel()
+		backing, cache, got := setup(t)
+		lagged := cloneBead(got)
+		backing.staleNextGet = &lagged
+		if err := cache.UpdateIfMatch(got.ID, got.Revision, opts); err != nil {
+			t.Fatalf("UpdateIfMatch: %v", err)
+		}
+		cache.mu.RLock()
+		_, installed := cache.beads[got.ID]
+		_, dirty := cache.dirty[got.ID]
+		cache.mu.RUnlock()
+		if installed || !dirty {
+			t.Fatalf("lagged refetch: installed=%v dirty=%v, want a dirty miss (the pre-write label set must not be cached)", installed, dirty)
+		}
+		after, err := cache.Get(got.ID)
+		if err != nil {
+			t.Fatalf("Get after fenced label write: %v", err)
+		}
+		wantCommitted(t, after)
+	})
+
+	t.Run("unguarded_backing_refused_before_forwarding", func(t *testing.T) {
+		t.Parallel()
+		backing, cache, got := setup(t)
+		backing.hideLabelsGuard = true
+		var unsupported *ConditionalUpdateFieldUnsupportedError
+		if err := cache.UpdateIfMatch(got.ID, got.Revision, opts); !errors.As(err, &unsupported) {
+			t.Fatalf("UpdateIfMatch over an unguarded backing = %v, want *ConditionalUpdateFieldUnsupportedError", err)
+		}
+		if backing.casCalls != 0 {
+			t.Fatalf("backing saw %d conditional writes, want 0: labels must not reach a backing that cannot guard them", backing.casCalls)
+		}
+	})
 }

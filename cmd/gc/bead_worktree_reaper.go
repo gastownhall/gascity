@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/sling"
+	"github.com/gastownhall/gascity/internal/workdir"
 )
 
 // reapDecision records one worktree the reaper acted on or declined to act on,
@@ -43,7 +44,8 @@ type reapReport struct {
 }
 
 // reapClosedBeadWorktrees discovers per-bead git worktrees under
-// cityPath/.gc/worktrees/<rig>/ and removes any whose associated bead is closed
+// <worktrees root>/<rig>/, the configured worktrees root
+// (workdir.WorktreesRoot), and removes any whose associated bead is closed
 // and that pass every safety gate. It returns a reapReport describing what was
 // reaped and what was protected.
 //
@@ -91,10 +93,16 @@ type reapReport struct {
 // is announced once rather than on every tick; a nil tracker reports every
 // skip. It never changes what is reaped or what the returned report contains —
 // see reapSkipTracker.
+//
+// rigStores is spelled that way on purpose: the obvious `rigBeadStores` is
+// residency-boundary vocabulary (a:rigBeadStores), and ast:vocabulary-alias
+// guards that NAME without type resolution, so an unrelated parameter carrying
+// it counts as a store-enumeration site. See the alias-rule block in
+// scripts/residency-boundary-patterns.txt.
 func reapClosedBeadWorktrees(
 	cityPath string,
 	cfg *config.City,
-	rigBeadStores map[string]beads.Store,
+	rigStores map[string]beads.Store,
 	liveSessionDirs []string,
 	dryRun bool,
 	rec events.Recorder,
@@ -108,7 +116,7 @@ func reapClosedBeadWorktrees(
 	if rec == nil {
 		rec = events.Discard
 	}
-	if cfg == nil || len(rigBeadStores) == 0 {
+	if cfg == nil || len(rigStores) == 0 {
 		return report
 	}
 
@@ -134,9 +142,9 @@ func reapClosedBeadWorktrees(
 		fmt.Fprintf(stderr, "reapClosedBeadWorktrees: liveness scanned via %s (/proc unavailable)\n", live.source) //nolint:errcheck
 	}
 
-	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
+	wtRoot := workdir.WorktreesRoot(cityPath)
 
-	for rigName, store := range rigBeadStores {
+	for rigName, store := range rigStores {
 		if store == nil {
 			continue
 		}

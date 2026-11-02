@@ -113,7 +113,7 @@ func TestInjectionSSHMatch(t *testing.T) {
 	if inj.CfgArgs != nil {
 		t.Fatalf("ssh match must have nil CfgArgs, got %#v", inj.CfgArgs)
 	}
-	want := "GIT_SSH_COMMAND=ssh -i '/keys/id ed' -o IdentitiesOnly=yes -o BatchMode=yes"
+	want := "GIT_SSH_COMMAND=ssh -i '/keys/id ed' -o IdentitiesOnly=yes -o BatchMode=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=90"
 	if len(inj.Env) != 1 || inj.Env[0] != want {
 		t.Fatalf("Env = %#v\nwant [%q]", inj.Env, want)
 	}

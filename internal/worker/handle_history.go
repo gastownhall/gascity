@@ -44,6 +44,16 @@ func (h *SessionHandle) Transcript(ctx context.Context, req TranscriptRequest) (
 	return h.adapter.ReadTranscript(readReq)
 }
 
+// TranscriptRecords returns the worker's raw transcript records in file order,
+// including records the active-branch walk prunes.
+func (h *SessionHandle) TranscriptRecords(ctx context.Context) ([]json.RawMessage, error) {
+	path, err := h.TranscriptPath(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return h.adapter.TranscriptRecords(path)
+}
+
 // AgentMappings returns subagent mappings discovered from the worker's
 // transcript stream.
 func (h *SessionHandle) AgentMappings(ctx context.Context) ([]AgentMapping, error) {
@@ -92,15 +102,20 @@ func (h *SessionHandle) historyWithRequest(req HistoryRequest) (*HistorySnapshot
 		return nil, ErrHistoryUnavailable
 	}
 
-	gcSessionID := strings.TrimSpace(info.SessionKey)
-	if gcSessionID == "" {
-		gcSessionID = info.ID
-	}
+	// The durable Gas City conversation is Info.LogicalConversationID: the
+	// bead's continuation epoch, scoped for a provider with a session-id flag
+	// by the key each new conversation runs under. A fresh reset, or such a
+	// provider's fresh start once its key is written, begins a new one, so a
+	// snapshot cached before it is not stitched in. The lookup can still
+	// return the abandoned conversation under the new identity, which is then
+	// stitched in (SESSION-HISTORY-CONVERSATION-EPOCH). A native key that a
+	// provider without a session-id flag reports later names the harness
+	// session and does not change the identity.
 	snapshot, err := h.adapter.LoadHistory(LoadRequest{
 		Provider:              h.historyProvider(info),
 		TranscriptPath:        path,
-		GCSessionID:           gcSessionID,
-		LogicalConversationID: strings.TrimSpace(req.LogicalID),
+		GCSessionID:           info.ID,
+		LogicalConversationID: firstNonEmpty(strings.TrimSpace(req.LogicalID), info.LogicalConversationID()),
 		TailCompactions:       req.TailCompactions,
 		BeforeEntryID:         req.BeforeEntryID,
 		AfterEntryID:          req.AfterEntryID,
@@ -121,6 +136,9 @@ func (h *SessionHandle) historyWithRequest(req HistoryRequest) (*HistorySnapshot
 	return h.mergeLoadedHistorySnapshot(snapshot), nil
 }
 
+// maybePersistDerivedSessionKey is a retained seam: derivedResumeSessionKey
+// derives no key, because the provider's hook persists it, so this writes
+// nothing.
 func (h *SessionHandle) maybePersistDerivedSessionKey(id string, info sessionpkg.Info, snapshot *HistorySnapshot) {
 	if snapshot == nil || strings.TrimSpace(info.SessionKey) != "" {
 		return
@@ -132,8 +150,6 @@ func (h *SessionHandle) maybePersistDerivedSessionKey(id string, info sessionpkg
 	if err := h.manager.PersistSessionKey(id, sessionKey); err != nil {
 		return
 	}
-	snapshot.GCSessionID = sessionKey
-	snapshot.LogicalConversationID = sessionKey
 }
 
 func (h *SessionHandle) mergeLoadedHistorySnapshot(current *HistorySnapshot) *HistorySnapshot {

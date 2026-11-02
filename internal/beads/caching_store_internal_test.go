@@ -92,6 +92,35 @@ func TestCachingStoreCreateWithStorageForwardsPolicyStorageAndCachesResult(t *te
 	}
 }
 
+func TestCachingStoreCreateWithStoragePreservesStorageForPlainBacking(t *testing.T) {
+	backing := NewMemStore()
+	cache := NewCachingStoreForTest(backing, nil)
+
+	created, err := cache.CreateWithStorage(Bead{Title: "session"}, StorageNoHistory)
+	if err != nil {
+		t.Fatalf("CreateWithStorage: %v", err)
+	}
+	if !created.NoHistory || created.Ephemeral {
+		t.Fatalf("created storage = ephemeral:%v no_history:%v, want no-history", created.Ephemeral, created.NoHistory)
+	}
+	persisted, err := backing.Get(created.ID)
+	if err != nil {
+		t.Fatalf("backing Get: %v", err)
+	}
+	if !persisted.NoHistory || persisted.Ephemeral {
+		t.Fatalf("persisted storage = ephemeral:%v no_history:%v, want no-history", persisted.Ephemeral, persisted.NoHistory)
+	}
+}
+
+func TestCachingStoreCreateWithStorageRejectsUnknownStorageForPlainBacking(t *testing.T) {
+	cache := NewCachingStoreForTest(NewMemStore(), nil)
+
+	_, err := cache.CreateWithStorage(Bead{Title: "session"}, StorageClass("unknown"))
+	if err == nil || !strings.Contains(err.Error(), "unknown storage class") {
+		t.Fatalf("CreateWithStorage error = %v, want unknown storage class", err)
+	}
+}
+
 func TestCachingStoreGraphApplyHandleForwardsStorageAndCachesResult(t *testing.T) {
 	backing := &storageGraphApplyRecordingStore{Store: NewMemStore()}
 	cache := NewCachingStoreForTest(backing, nil)
@@ -881,7 +910,12 @@ func TestCachingStoreListBothTiersUsesCachedWispsByDefault(t *testing.T) {
 	}
 }
 
-func TestCachingStoreApplyEventRecordsBackingVerificationErrorAndAppliesUpdate(t *testing.T) {
+// TestCachingStoreApplyEventRecordsBackingVerificationErrorAndRefetchesUpdate
+// pins that an event conflicting with a recent local write, whose backing
+// verification fails, is not installed as a clean row: the row is marked dirty
+// and the next read takes the backing's answer, so a real external update
+// still wins without trusting an unverified payload.
+func TestCachingStoreApplyEventRecordsBackingVerificationErrorAndRefetchesUpdate(t *testing.T) {
 	t.Parallel()
 
 	backing := &cacheEventVerificationFailStore{Store: NewMemStore()}
@@ -902,16 +936,31 @@ func TestCachingStoreApplyEventRecordsBackingVerificationErrorAndAppliesUpdate(t
 	cache.mu.Lock()
 	delete(cache.beadSeq, bead.ID)
 	cache.mu.Unlock()
+	externalTitle := "external"
+	if err := backing.Update(bead.ID, UpdateOpts{Title: &externalTitle}); err != nil {
+		t.Fatalf("external Update: %v", err)
+	}
 	backing.failNextGet = true
+	seqBefore := cacheMutationSeq(cache)
 
 	cache.ApplyEvent("bead.updated", json.RawMessage(`{"id":"`+bead.ID+`","title":"external"}`))
 
+	cache.mu.RLock()
+	cached := cache.beads[bead.ID]
+	_, dirty := cache.dirty[bead.ID]
+	cache.mu.RUnlock()
+	if !dirty || cached.Title != localTitle {
+		t.Fatalf("after unverifiable event: cached title %q dirty=%v, want the local row fenced dirty", cached.Title, dirty)
+	}
+	if cacheMutationSeq(cache) == seqBefore {
+		t.Fatal("dirty mark without a seq bump; an older scan could clear it")
+	}
 	got, err := cache.Get(bead.ID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.Title != "external" {
-		t.Fatalf("Title after verification error = %q, want external", got.Title)
+	if got.Title != externalTitle {
+		t.Fatalf("Title after verification error = %q, want the backing's external", got.Title)
 	}
 	stats := cache.Stats()
 	if stats.ProblemCount == 0 {
@@ -1581,8 +1630,8 @@ func TestCachingStoreSparseUpdatedEventFallsBackWhenCompleteCoverageIsMissingDep
 	if depsComplete {
 		t.Fatal("depsComplete = true, want incomplete coverage after missing deps invariant break")
 	}
-	if !strings.Contains(lastProblem, "missing deps for "+bead.ID) {
-		t.Fatalf("LastProblem = %q, want missing deps diagnostic for %s", lastProblem, bead.ID)
+	if !strings.Contains(lastProblem, "marked complete but missing deps") {
+		t.Fatalf("LastProblem = %q, want missing deps diagnostic", lastProblem)
 	}
 	if _, ok := cache.CachedReady(); ok {
 		t.Fatal("CachedReady answered from cache after dependency coverage became incomplete")
@@ -3098,6 +3147,8 @@ func TestCachingStoreApplyEventMergesProjectedIsBlocked(t *testing.T) {
 		t.Fatalf("CachedReady before event = %+v, ok=%v, want bd-event ready", ready, ok)
 	}
 
+	blocked := true
+	backing.beads[0].IsBlocked = &blocked
 	cache.ApplyEvent("bead.updated", []byte(`{"id":"bd-event","status":"open","is_blocked":true}`))
 
 	ready, ok = cache.CachedReady()
@@ -3879,6 +3930,270 @@ func TestCachingStoreBdPrimeProjectsIsBlockedForAllBDRowsBD105(t *testing.T) {
 	}
 }
 
+func TestCachingStoreBdPrimeExcludesIndefinitelyDeferredRowsFromReady(t *testing.T) {
+	t.Parallel()
+
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			t.Fatalf("command name = %q, want bd", name)
+		}
+		if len(args) == 0 {
+			t.Fatal("empty bd command")
+		}
+		switch args[0] {
+		case "version":
+			return []byte("bd version 1.0.5 (test)\n"), nil
+		case "sql":
+			return []byte(`[{"id":"bd-deferred","is_blocked":0}]`), nil
+		case "list":
+			return []byte(`[
+				{"id":"bd-deferred","title":"parked","status":"deferred","issue_type":"task","created_at":"2026-01-01T00:00:00Z","labels":["task"],"metadata":{}}
+			]`), nil
+		case "query":
+			return []byte(`[]`), nil
+		case "dep":
+			t.Fatalf("unexpected dep scan command: %v", args)
+		}
+		return []byte(`[]`), nil
+	}
+
+	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	got, err := cache.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("Ready() = %+v, want indefinite deferred row excluded", got)
+	}
+	cached, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	if len(cached) != 0 {
+		t.Fatalf("CachedReady() = %+v, want indefinite deferred row excluded", cached)
+	}
+
+	stored, err := cache.Get("bd-deferred")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if stored.Status != "open" {
+		t.Fatalf("Status = %q, want normalized open", stored.Status)
+	}
+	if stored.IsBlocked == nil || *stored.IsBlocked {
+		t.Fatalf("IsBlocked = %v, want independent false dependency projection", stored.IsBlocked)
+	}
+	if !IsDeferred(stored, time.Now()) {
+		t.Fatal("status-based indefinite deferral was not preserved")
+	}
+}
+
+// TestCachingStoreBdPrimeExcludesElapsedDatedDeferredRowsFromReady is the
+// elapsed-date sibling of TestCachingStoreBdPrimeExcludesIndefinitelyDeferredRowsFromReady.
+// bd records the row status=deferred with a defer_until that has already
+// elapsed (#6207): bd ready never serves it whatever its date, and the sweep
+// that would flip it back to open is advisory, so the read model must not
+// surface it as ready work until the store itself records the wake.
+func TestCachingStoreBdPrimeExcludesElapsedDatedDeferredRowsFromReady(t *testing.T) {
+	t.Parallel()
+
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			t.Fatalf("command name = %q, want bd", name)
+		}
+		if len(args) == 0 {
+			t.Fatal("empty bd command")
+		}
+		switch args[0] {
+		case "version":
+			return []byte("bd version 1.0.5 (test)\n"), nil
+		case "sql":
+			return []byte(`[{"id":"bd-deferred","is_blocked":0}]`), nil
+		case "list":
+			return []byte(`[
+				{"id":"bd-deferred","title":"parked","status":"deferred","defer_until":"2020-01-01T00:00:00Z","issue_type":"task","created_at":"2026-01-01T00:00:00Z","labels":["task"],"metadata":{}}
+			]`), nil
+		case "query":
+			return []byte(`[]`), nil
+		case "dep":
+			t.Fatalf("unexpected dep scan command: %v", args)
+		}
+		return []byte(`[]`), nil
+	}
+
+	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	got, err := cache.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("Ready() = %+v, want elapsed dated deferred row excluded", got)
+	}
+	cached, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	if len(cached) != 0 {
+		t.Fatalf("CachedReady() = %+v, want elapsed dated deferred row excluded", cached)
+	}
+
+	stored, err := cache.Get("bd-deferred")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if stored.Status != "open" {
+		t.Fatalf("Status = %q, want normalized open", stored.Status)
+	}
+	if !IsDeferred(stored, time.Now()) {
+		t.Fatal("elapsed dated deferral read as ready; bd still records status=deferred")
+	}
+}
+
+func TestCachingStoreStatusBasedDeferralCanReopen(t *testing.T) {
+	for _, reopen := range []string{"event", "local-update"} {
+		t.Run(reopen, func(t *testing.T) {
+			unblocked := false
+			backing := NewMemStore()
+			created, err := backing.Create(Bead{
+				Title:     "temporarily parked",
+				Type:      "task",
+				Status:    "open",
+				IsBlocked: &unblocked,
+			})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			cache := NewCachingStoreForTest(backing, nil)
+			if err := cache.Prime(context.Background()); err != nil {
+				t.Fatalf("Prime: %v", err)
+			}
+
+			backing.WriteRowForTest(created.ID, func(b *Bead) { b.IndefinitelyDeferred = true })
+			cache.ApplyEvent("bead.updated", json.RawMessage(
+				fmt.Sprintf(`{"id":%q,"status":"deferred"}`, created.ID),
+			))
+			deferred, err := cache.Get(created.ID)
+			if err != nil {
+				t.Fatalf("Get after defer event: %v", err)
+			}
+			if !IsDeferred(deferred, time.Now()) {
+				t.Fatal("defer event did not preserve status-based indefinite deferral")
+			}
+
+			switch reopen {
+			case "event":
+				backing.WriteRowForTest(created.ID, func(b *Bead) { b.IndefinitelyDeferred = false })
+				cache.ApplyEvent("bead.updated", json.RawMessage(
+					fmt.Sprintf(`{"id":%q,"status":"open"}`, created.ID),
+				))
+			case "local-update":
+				status := "open"
+				if err := cache.Update(created.ID, UpdateOpts{Status: &status}); err != nil {
+					t.Fatalf("Update(open): %v", err)
+				}
+			}
+
+			opened, err := cache.Get(created.ID)
+			if err != nil {
+				t.Fatalf("Get after reopen: %v", err)
+			}
+			if opened.IsBlocked == nil || *opened.IsBlocked {
+				t.Fatalf("reopened IsBlocked = %v, want authoritative false", opened.IsBlocked)
+			}
+			if IsDeferred(opened, time.Now()) {
+				t.Fatal("explicit reopen retained status-based indefinite deferral")
+			}
+			ready, ok := cache.CachedReady()
+			if !ok {
+				t.Fatal("CachedReady reported cache unavailable")
+			}
+			if len(ready) != 1 || ready[0].ID != created.ID {
+				t.Fatalf("CachedReady = %+v, want reopened bead %s", ready, created.ID)
+			}
+		})
+	}
+}
+
+func TestCachingStoreDependencyInvalidationPreservesStatusBasedDeferral(t *testing.T) {
+	blocked := true
+	backing := NewMemStore()
+	blocker, err := backing.Create(Bead{Title: "blocker", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create blocker: %v", err)
+	}
+	deferred, err := backing.Create(Bead{
+		Title:                "indefinitely parked",
+		Type:                 "task",
+		Status:               "open",
+		IsBlocked:            &blocked,
+		IndefinitelyDeferred: true,
+	})
+	if err != nil {
+		t.Fatalf("Create deferred: %v", err)
+	}
+	if err := backing.DepAdd(deferred.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := cache.Close(blocker.ID); err != nil {
+		t.Fatalf("Close blocker: %v", err)
+	}
+
+	stored, err := cache.Get(deferred.ID)
+	if err != nil {
+		t.Fatalf("Get deferred: %v", err)
+	}
+	if !IsDeferred(stored, time.Now()) {
+		t.Fatal("dependency invalidation dropped status-based indefinite deferral")
+	}
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	if len(ready) != 0 {
+		t.Fatalf("CachedReady = %+v, want deferred bead excluded after blocker closes", ready)
+	}
+}
+
+func TestCachingStoreNotificationPreservesStatusBasedDeferral(t *testing.T) {
+	var payload json.RawMessage
+	cache := NewCachingStore(NewMemStore(), func(_ ChangeSource, _, _, _, _, _ string, _ *[]string, got json.RawMessage) {
+		payload = append(payload[:0], got...)
+	})
+	cache.notifyChange(ChangeLocal, "bead.updated", Bead{
+		ID:                   "gc-deferred",
+		Status:               "open",
+		Type:                 "task",
+		IndefinitelyDeferred: true,
+	})
+
+	var wire struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(payload, &wire); err != nil {
+		t.Fatalf("Unmarshal notification: %v", err)
+	}
+	if wire.Status != "deferred" {
+		t.Fatalf("wire status = %q, want deferred", wire.Status)
+	}
+	decoded, ok := DecodeBeadEventPayload(payload)
+	if !ok || !IsDeferred(decoded, time.Now()) {
+		t.Fatalf("notification round trip = %+v, ok=%v; want indefinite deferral", decoded, ok)
+	}
+}
+
 func TestCachingStoreReadySkipsEphemeralOpenTasks(t *testing.T) {
 	t.Parallel()
 
@@ -4127,6 +4442,15 @@ func (s *completeEmbeddedDepsStore) List(query ListQuery) ([]Bead, error) {
 		items = append(items, cloneBead(b))
 	}
 	return ApplyListQuery(items, query), nil
+}
+
+func (s *completeEmbeddedDepsStore) Get(id string) (Bead, error) {
+	for _, b := range s.beads {
+		if b.ID == id {
+			return cloneBead(b), nil
+		}
+	}
+	return Bead{}, ErrNotFound
 }
 
 func (s *completeEmbeddedDepsStore) DepList(string, string) ([]Dep, error) {

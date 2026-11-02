@@ -1,9 +1,13 @@
 package sessionlog
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"slices"
 )
 
 // codexTokenUsage mirrors the token-usage object the codex CLI embeds in
@@ -26,9 +30,10 @@ type codexUsageInfo struct {
 // codexUsagePayload is the subset of an event_msg payload needed for usage
 // extraction. Info is null on rate-limit-only refreshes.
 type codexUsagePayload struct {
-	Type  string          `json:"type"`
-	Model string          `json:"model"` // turn_context payloads only
-	Info  *codexUsageInfo `json:"info"`
+	Type   string          `json:"type"`
+	TurnID string          `json:"turn_id"`
+	Model  string          `json:"model"` // turn_context payloads only
+	Info   *codexUsageInfo `json:"info"`
 }
 
 // ExtractCodexTailMeta reads model and context metadata from the tail of a
@@ -41,19 +46,232 @@ type codexUsagePayload struct {
 // a later distinct total can be paired only with an in-window turn_context.
 // When no attributable usage exists, the latest turn_context still supplies
 // model-only metadata. Codex input_tokens already includes cached_input_tokens,
-// so context occupancy uses input_tokens directly.
+// so context occupancy uses input_tokens directly. Activity comes only from
+// explicit task_started/task_complete/turn_aborted lifecycle events; assistant
+// text and token usage do not establish completion. Activity is unknown when the
+// latest turn start lies more than 16 MiB before the end of the rollout.
 func ExtractCodexTailMeta(path string) (*TailMeta, error) {
+	return extractCodexTailMeta(path, codexLifecycleScanBudget)
+}
+
+// extractCodexTailMeta is ExtractCodexTailMeta with the lifecycle scan budget
+// supplied by the caller, so tests can drive the budget edge without building a
+// multi-megabyte transcript.
+func extractCodexTailMeta(path string, lifecycleBudget int64) (*TailMeta, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close() //nolint:errcheck // best-effort close on read-only file
 
-	data, startsMidLine, truncated, err := readTailWindow(f, tailChunkSize)
+	info, err := f.Stat()
 	if err != nil {
 		return nil, err
 	}
-	return extractCodexTailMetaFromLines(splitLines(data), startsMidLine, truncated), nil
+	// Use one size snapshot for metadata and lifecycle reads while the writer appends.
+	snapshot := io.NewSectionReader(f, 0, info.Size())
+	data, startsMidLine, truncated, err := readTailWindow(snapshot, tailChunkSize)
+	if err != nil {
+		return nil, err
+	}
+	lines, err := splitLines(data)
+	if err != nil {
+		return nil, err
+	}
+	meta := extractCodexTailMetaFromLines(lines, startsMidLine, truncated)
+	activity, err := extractCodexLifecycleActivity(snapshot, info.Size(), lifecycleBudget)
+	if err != nil {
+		return nil, err
+	}
+	if meta == nil && activity != "" {
+		meta = &TailMeta{}
+	}
+	if meta != nil {
+		meta.Activity = activity
+	}
+	return meta, nil
+}
+
+// codexLifecycleScanBudget bounds how far back from the end of a rollout
+// extractCodexLifecycleActivity searches for the latest turn start. Every
+// activity poll repeats the search, and everything written since that start is
+// the current turn's output, so an unbounded search costs as much as the turn
+// is large. 16 MiB covers all but the largest turns; past it activity is
+// unknown rather than read from the whole turn on every poll.
+const codexLifecycleScanBudget = 16 << 20 // 16 MiB
+
+// codexLifecycleTypes are the event_msg payload types that decide activity,
+// quoted as they appear in a rollout line. A line naming none of them is
+// skipped without being parsed. The turn scan's line filter
+// (parseCodexTurnRecord) reuses them.
+var codexLifecycleTypes = [][]byte{
+	[]byte(`"task_started"`),
+	[]byte(`"task_complete"`),
+	[]byte(`"turn_aborted"`),
+}
+
+// extractCodexLifecycleActivity reports the activity of the latest turn start
+// within the last budget bytes of the size-byte rollout r: idle when a later
+// task_complete or turn_aborted names its turn, or either omits the turn ID;
+// otherwise in-turn. Tool output can be far larger than the metadata window,
+// so the search goes back to the start itself, and a delayed completion for an
+// older turn does not end the current one. Codex writes its <turn_aborted>
+// marker message immediately before the turn_aborted event, so the event alone
+// ends an aborted turn.
+//
+// A torn final record may be the next turn's start, so it turns idle into
+// unknown but leaves in-turn. A start beyond the budget leaves activity unknown
+// rather than failing, so the caller keeps its tail-window metadata; only a
+// read failure is an error.
+func extractCodexLifecycleActivity(r io.ReaderAt, size, budget int64) (string, error) {
+	scan := codexLifecycleScan{terminalIDs: make(map[string]bool)}
+	activity := ""
+	decided, err := eachLineBackward(r, size, budget, func(line []byte) bool {
+		var done bool
+		activity, done = scan.observe(line)
+		return done
+	})
+	switch {
+	case err != nil:
+		return "", fmt.Errorf("reading Codex lifecycle events: %w", err)
+	case decided:
+		return activity, nil
+	case size > budget:
+		return "", nil
+	default:
+		return scan.withoutStart(), nil
+	}
+}
+
+// codexLifecycleScan folds rollout records, newest first, until the latest
+// turn start.
+type codexLifecycleScan struct {
+	terminalIDs       map[string]bool
+	terminalWithoutID bool
+	sawTerminal       bool
+	sawRecord         bool
+	tornTail          bool
+}
+
+// observe folds one record. It reports the activity, and true, once the record
+// is the turn start that decides it.
+func (s *codexLifecycleScan) observe(line []byte) (string, bool) {
+	line = bytes.TrimSpace(line)
+	if len(line) == 0 {
+		return "", false
+	}
+	if !s.sawRecord {
+		s.sawRecord = true
+		s.tornTail = !json.Valid(line)
+	}
+	payload, ok := codexLifecyclePayload(line)
+	if !ok {
+		return "", false
+	}
+	switch payload.Type {
+	case "task_started":
+		return s.startActivity(payload.TurnID), true
+	case "task_complete", "turn_aborted":
+		s.sawTerminal = true
+		if payload.TurnID == "" {
+			s.terminalWithoutID = true
+		} else {
+			s.terminalIDs[payload.TurnID] = true
+		}
+	}
+	return "", false
+}
+
+// startActivity reports the activity of the turn started as turnID, given the
+// terminal events already folded from after that start.
+func (s *codexLifecycleScan) startActivity(turnID string) string {
+	if s.terminalWithoutID || s.terminalIDs[turnID] || (turnID == "" && s.sawTerminal) {
+		return s.idle()
+	}
+	return "in-turn"
+}
+
+// withoutStart reports the activity of a whole rollout with no turn start.
+// Legacy or retained fragments may hold a completion without its start.
+func (s *codexLifecycleScan) withoutStart() string {
+	if s.sawTerminal {
+		return s.idle()
+	}
+	return ""
+}
+
+// idle reports idle unless the newest record is torn and so may be the next
+// turn's start.
+func (s *codexLifecycleScan) idle() string {
+	if s.tornTail {
+		return ""
+	}
+	return "idle"
+}
+
+// codexLifecyclePayload parses line as an event_msg when it names a lifecycle
+// type. The name check is only a filter: tool output or another event's text
+// can contain the name too.
+func codexLifecyclePayload(line []byte) (codexUsagePayload, bool) {
+	if !slices.ContainsFunc(codexLifecycleTypes, func(name []byte) bool { return bytes.Contains(line, name) }) {
+		return codexUsagePayload{}, false
+	}
+	var entry codexRawEntry
+	if json.Unmarshal(line, &entry) != nil || entry.Type != "event_msg" {
+		return codexUsagePayload{}, false
+	}
+	var payload codexUsagePayload
+	if json.Unmarshal(entry.Payload, &payload) != nil {
+		return codexUsagePayload{}, false
+	}
+	return payload, true
+}
+
+// eachLineBackward calls visit with each line in the last budget bytes of the
+// size-byte r, newest first, until visit returns true, and reports whether it
+// did. A line is visited only when the newline before it was read too or it
+// starts r, so a line cut by the budget is never visited. Reads go backward in
+// tailChunkSize blocks, and a line spanning blocks is joined once, so the cost
+// stays linear in the bytes read.
+func eachLineBackward(r io.ReaderAt, size, budget int64, visit func(line []byte) bool) (bool, error) {
+	floor := max(size-budget, 0)
+	var carry [][]byte // pieces of a line that began before the current block, newest first
+	for end := size; end > floor; {
+		n := min(int64(tailChunkSize), end-floor)
+		end -= n
+		block := make([]byte, n)
+		if _, err := r.ReadAt(block, end); err != nil {
+			return false, fmt.Errorf("reading at offset %d: %w", end, err)
+		}
+		for i := bytes.LastIndexByte(block, '\n'); i >= 0; i = bytes.LastIndexByte(block, '\n') {
+			if visit(joinNewestFirst(block[i+1:], carry)) {
+				return true, nil
+			}
+			carry, block = nil, block[:i]
+		}
+		carry = append(carry, block)
+	}
+	if floor > 0 {
+		return false, nil
+	}
+	return visit(joinNewestFirst(nil, carry)), nil
+}
+
+// joinNewestFirst returns head followed by pieces in reverse order. It returns
+// head itself when there are no pieces.
+func joinNewestFirst(head []byte, pieces [][]byte) []byte {
+	if len(pieces) == 0 {
+		return head
+	}
+	n := len(head)
+	for _, piece := range pieces {
+		n += len(piece)
+	}
+	line := append(make([]byte, 0, n), head...)
+	for i := len(pieces) - 1; i >= 0; i-- {
+		line = append(line, pieces[i]...)
+	}
+	return line
 }
 
 // ExtractCodexTailMetaFromSearchPaths reads Codex tail metadata only after
@@ -238,18 +456,30 @@ func boundedContextPercentage(inputTokens, contextWindow int) int {
 //   - ReasoningTokens = last reasoning_output_tokens
 //   - CacheCreationTokens = 0 (codex reports no cache-write tokens)
 //
-// Model comes from the latest preceding turn_context payload.model — empty
-// when no turn_context falls inside the tail window (token_count itself
-// carries no model). MessageID is the cumulative-total identity
+// Model comes from the latest preceding turn_context payload.model; when no
+// turn_context falls inside the tail window it is recovered from the nearest
+// turn_context preceding that window by a bounded backward scan
+// (codexPrecedingModel). That nearest preceding announcement is the model in
+// effect for the tail, so it prices the tail — this keeps long-lived sessions,
+// whose turn_context has long scrolled past the tail window, from minting model
+// facts with an empty (and therefore unpriced) model, and it honors a
+// mid-rollout model switch wherever it happened. The recovered model is empty
+// when no turn_context is in reach of that scan or the scan cannot complete —
+// an unpriced model fact is a truer report than a stale one, and token_count
+// itself carries no model. MessageID is the cumulative-total identity
 // ("total:<total_tokens>") so the exact-duplicate token_count emissions the
 // CLI produces collapse to a single entry (the last observed wins, except a
 // first-observed non-empty Model is kept — a duplicate re-emitted after a
 // model-switching turn_context must not relabel the invocation), and
-// EntryUUID is the line timestamp. token_count lines with null info
-// (rate-limit-only refreshes) and all-zero per-call usage are skipped;
-// malformed lines are tolerated silently. The scan window is the last
-// tailChunkSize bytes, so usage that scrolled past the window is not
-// returned.
+// EntryUUID is the line timestamp, refreshed by the collapse to the last
+// duplicate's. Timestamp is that line timestamp parsed (RFC3339Nano, falling
+// back to RFC3339) — zero when unparseable — but it keeps the FIRST observed
+// line's time across a collapse: the re-emission replays a completed
+// invocation under the next turn_context, so the first line is when the
+// invocation actually ran. token_count lines with null info (rate-limit-only
+// refreshes) and all-zero per-call usage are skipped; malformed lines are
+// tolerated silently. The scan window is the last tailChunkSize bytes, so
+// usage that scrolled past the window is not returned.
 func ExtractCodexTailUsage(path string) ([]TailUsage, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -257,7 +487,29 @@ func ExtractCodexTailUsage(path string) ([]TailUsage, error) {
 	}
 	defer f.Close() //nolint:errcheck // best-effort close on read-only file
 
-	data, _, err := readTail(f, tailChunkSize)
+	// One size snapshot feeds both windows. The seed and the tail read are
+	// adjacent halves of the same file, so deriving them from separate SeekEnd
+	// calls would leave the bytes appended in between — these rollouts are
+	// appended to while they are read — inside neither.
+	size, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil, err
+	}
+
+	// Recover the model in effect for the tail before scanning it: in a
+	// long-lived session the turn_context has scrolled out of the tail window,
+	// so without this seed every recent invocation records an empty model.
+	seedModel, err := codexPrecedingModel(f, size-tailChunkSize)
+	if err != nil {
+		return nil, err
+	}
+
+	data, _, err := readTailAt(f, size, tailChunkSize)
+	if err != nil {
+		return nil, err
+	}
+
+	lines, err := splitLines(data)
 	if err != nil {
 		return nil, err
 	}
@@ -266,8 +518,8 @@ func ExtractCodexTailUsage(path string) ([]TailUsage, error) {
 	// byMessageID maps a cumulative-total identity to its index in usages so
 	// duplicate token_count emissions collapse to a single entry.
 	byMessageID := make(map[string]int)
-	var turnModel string
-	for _, line := range splitLines(data) {
+	turnModel := seedModel
+	for _, line := range lines {
 		var entry codexRawEntry
 		if err := json.Unmarshal(line, &entry); err != nil {
 			continue
@@ -282,29 +534,8 @@ func ExtractCodexTailUsage(path string) ([]TailUsage, error) {
 			}
 			continue
 		}
-		if entry.Type != "event_msg" || payload.Type != "token_count" || payload.Info == nil {
-			continue
-		}
-		last := payload.Info.LastTokenUsage
-		input := last.InputTokens - last.CachedInputTokens
-		if input < 0 {
-			input = 0
-		}
-		contextWindowTokens := 0
-		if payload.Info.ModelContextWindow != nil {
-			contextWindowTokens = *payload.Info.ModelContextWindow
-		}
-		u := TailUsage{
-			EntryUUID:           entry.Timestamp,
-			MessageID:           fmt.Sprintf("total:%d", payload.Info.TotalTokenUsage.TotalTokens),
-			Model:               turnModel,
-			InputTokens:         input,
-			OutputTokens:        last.OutputTokens,
-			ReasoningTokens:     last.ReasoningOutputTokens,
-			CacheReadTokens:     last.CachedInputTokens,
-			ContextWindowTokens: contextWindowTokens,
-		}
-		if u.InputTokens <= 0 && u.OutputTokens <= 0 && u.ReasoningTokens <= 0 && u.CacheReadTokens <= 0 {
+		u, ok := codexTokenCountUsage(entry, payload, turnModel)
+		if !ok {
 			continue
 		}
 		if i, seen := byMessageID[u.MessageID]; seen {
@@ -315,6 +546,13 @@ func ExtractCodexTailUsage(path string) ([]TailUsage, error) {
 			if usages[i].Model != "" {
 				u.Model = usages[i].Model
 			}
+			// The re-emission is the prior turn's snapshot replayed under the
+			// NEXT turn_context, so the first line's time is when the
+			// invocation actually completed. EntryUUID stays last-wins
+			// (pinned by TestExtractCodexTailUsageDuplicateKeepsFirstModel).
+			if !usages[i].Timestamp.IsZero() {
+				u.Timestamp = usages[i].Timestamp
+			}
 			usages[i] = u
 			continue
 		}
@@ -322,6 +560,171 @@ func ExtractCodexTailUsage(path string) ([]TailUsage, error) {
 		usages = append(usages, u)
 	}
 	return usages, nil
+}
+
+// codexTokenCountUsage converts a token_count entry into a TailUsage labeled
+// with model, the model in effect when the invocation ran. It reports false for
+// an entry that carries no usable per-call usage: a different entry type, a
+// rate-limit-only refresh (null info), or an all-zero per-call usage.
+func codexTokenCountUsage(entry codexRawEntry, payload codexUsagePayload, model string) (TailUsage, bool) {
+	if entry.Type != "event_msg" || payload.Type != "token_count" || payload.Info == nil {
+		return TailUsage{}, false
+	}
+	last := payload.Info.LastTokenUsage
+	input := last.InputTokens - last.CachedInputTokens
+	if input < 0 {
+		input = 0
+	}
+	contextWindowTokens := 0
+	if payload.Info.ModelContextWindow != nil {
+		contextWindowTokens = *payload.Info.ModelContextWindow
+	}
+	u := TailUsage{
+		EntryUUID:           entry.Timestamp,
+		MessageID:           fmt.Sprintf("total:%d", payload.Info.TotalTokenUsage.TotalTokens),
+		Model:               model,
+		InputTokens:         input,
+		OutputTokens:        last.OutputTokens,
+		ReasoningTokens:     last.ReasoningOutputTokens,
+		CacheReadTokens:     last.CachedInputTokens,
+		ContextWindowTokens: contextWindowTokens,
+		Timestamp:           parseCodexSessionTime(entry.Timestamp),
+	}
+	if u.InputTokens <= 0 && u.OutputTokens <= 0 && u.ReasoningTokens <= 0 && u.CacheReadTokens <= 0 {
+		return TailUsage{}, false
+	}
+	return u, true
+}
+
+// codexModelSeedScanBudget bounds how far back from the tail window
+// codexPrecedingModel scans for the model in effect there. Real rollouts
+// re-announce the model on every turn_context, so the nearest preceding one
+// normally sits within a few KiB of the window; 1 MiB is generous headroom
+// while keeping the backward scan bounded for multi-MB transcripts. A model not
+// found within the budget falls back to empty — no worse than before the seed
+// existed.
+const codexModelSeedScanBudget = 1 << 20 // 1 MiB
+
+// codexSeedScanLineMax bounds the longest JSONL line codexPrecedingModel can
+// read, matching the line budget splitLines uses for the tail window.
+const codexSeedScanLineMax = 256 * 1024
+
+// codexPrecedingModel returns the model named by the last turn_context starting
+// before windowStart, the offset the tail window begins at. That is the model in
+// effect for the tail when no turn_context falls inside the window itself. The
+// caller passes windowStart rather than letting this re-derive it, so the seed
+// and the tail read are two views of one size snapshot: on a rollout being
+// appended to, two independent snapshots leave the bytes written in between in
+// neither window.
+//
+// It returns "" when the tail window already covers the whole file (the
+// in-window scan then sees every turn_context and needs no seed), when no
+// turn_context appears within codexModelSeedScanBudget bytes before the window,
+// and when an over-long line truncates the scan mid-range.
+//
+// A seek or read failure is not degraded that way: it is returned as an error
+// and so fails the whole extraction. That is stricter than readTailWindowAt,
+// whose preceding-byte peek swallows the same two errors and defaults to false.
+// Which contract both should keep is tracked as ga-8gku9.
+//
+// Taking the NEAREST preceding announcement rather than the session's first
+// keeps a mid-rollout model switch honored: the tail is not labeled with a model
+// the session had already switched away from by the time the window starts.
+func codexPrecedingModel(r io.ReadSeeker, windowStart int64) (string, error) {
+	if windowStart <= 0 {
+		return "", nil
+	}
+	rangeStart := windowStart - codexModelSeedScanBudget
+	if rangeStart < 0 {
+		rangeStart = 0
+	}
+	// The budget cut can land either inside a line or exactly on a line start,
+	// so peek the preceding byte the way readTailWindow does instead of assuming
+	// a partial line whenever the range is truncated. Only the decision is
+	// shared: readTailWindow swallows a failed peek, this returns it (ga-8gku9).
+	skipPartialFirst, err := codexStartsMidLine(r, rangeStart)
+	if err != nil {
+		return "", err
+	}
+	if _, err := r.Seek(rangeStart, io.SeekStart); err != nil {
+		return "", err
+	}
+	// Read one max-line allowance past windowStart so the line straddling the
+	// boundary is consumed whole here. readTail starts at exactly windowStart
+	// with no line-boundary snapping, so the in-window scan sees only that
+	// line's suffix and cannot parse it. Lines that start at or after
+	// windowStart belong to the in-window scan and end this one.
+	scanner := bufio.NewScanner(io.LimitReader(r, windowStart-rangeStart+codexSeedScanLineMax))
+	scanner.Buffer(make([]byte, codexSeedScanLineMax), codexSeedScanLineMax)
+	consumed := int64(0)
+	scanner.Split(func(data []byte, atEOF bool) (int, []byte, error) {
+		advance, token, err := bufio.ScanLines(data, atEOF)
+		consumed += int64(advance)
+		return advance, token, err
+	})
+
+	model := ""
+	lineStart := int64(0)
+	for scanner.Scan() {
+		start := rangeStart + lineStart
+		lineStart = consumed
+		if start >= windowStart {
+			break
+		}
+		if skipPartialFirst {
+			skipPartialFirst = false
+			continue
+		}
+		if m := codexTurnContextModel(scanner.Bytes()); m != "" {
+			model = m
+		}
+	}
+	if scanner.Err() != nil {
+		// A line past codexSeedScanLineMax aborts the scan mid-range, so a
+		// switch announced after it is unseen. Reporting the model found before
+		// it would replace an honest unpriced $0 with a plausible wrong price
+		// that no later sweep corrects, so degrade to the empty seed instead.
+		return "", nil
+	}
+	return model, nil
+}
+
+// codexStartsMidLine reports whether offset falls inside a line rather than on a
+// line start, by peeking the byte before it.
+func codexStartsMidLine(r io.ReadSeeker, offset int64) (bool, error) {
+	if offset <= 0 {
+		return false, nil
+	}
+	if _, err := r.Seek(offset-1, io.SeekStart); err != nil {
+		return false, err
+	}
+	var prev [1]byte
+	if _, err := io.ReadFull(r, prev[:]); err != nil {
+		return false, err
+	}
+	return prev[0] != '\n', nil
+}
+
+// codexTurnContextModel returns the model a turn_context line announces, or ""
+// when the line is not a turn_context or names no model. Malformed lines are
+// tolerated silently: a scan bounded by byte offsets can begin or end inside a
+// line, matching splitLines.
+func codexTurnContextModel(line []byte) string {
+	if len(line) == 0 {
+		return ""
+	}
+	var entry codexRawEntry
+	if err := json.Unmarshal(line, &entry); err != nil {
+		return ""
+	}
+	if entry.Type != "turn_context" {
+		return ""
+	}
+	var payload codexUsagePayload
+	if err := json.Unmarshal(entry.Payload, &payload); err != nil {
+		return ""
+	}
+	return payload.Model
 }
 
 // ExtractCodexTailUsageFromSearchPaths reads codex tail usage only after
@@ -333,4 +736,36 @@ func ExtractCodexTailUsageFromSearchPaths(searchPaths []string, path string) ([]
 		return nil, err
 	}
 	return ExtractCodexTailUsage(safePath)
+}
+
+// codexHistoryUsage extracts per-invocation usage from every record the full
+// transcript parser read. The first observation of a cumulative total fixes the
+// invocation's timestamp and model: a later duplicate snapshot must not move
+// the usage onto a newer assistant message or relabel it with a newer model.
+func codexHistoryUsage(entries []codexEntry) []TailUsage {
+	var usages []TailUsage
+	seen := make(map[string]bool)
+	var model string
+	for _, entry := range entries {
+		if entry.raw.Type != "turn_context" && entry.raw.Type != "event_msg" {
+			continue
+		}
+		var payload codexUsagePayload
+		if json.Unmarshal(entry.raw.Payload, &payload) != nil {
+			continue
+		}
+		if entry.raw.Type == "turn_context" {
+			if payload.Model != "" {
+				model = payload.Model
+			}
+			continue
+		}
+		usage, ok := codexTokenCountUsage(entry.raw, payload, model)
+		if !ok || seen[usage.MessageID] {
+			continue
+		}
+		seen[usage.MessageID] = true
+		usages = append(usages, usage)
+	}
+	return usages
 }

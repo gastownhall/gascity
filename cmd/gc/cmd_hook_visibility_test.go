@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"testing"
+	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // --- hookRouteIdentitiesEqual ----------------------------------------------
@@ -23,6 +26,17 @@ func TestHookRouteIdentitiesEqual(t *testing.T) {
 		{"different rigs", "rig-a/planner", "rig-b/planner", false},
 		{"different agents, same rig", "gascity/builder", "gascity/reviewer", false},
 		{"empty vs non-empty", "", "gascity/builder", false},
+		// A legacy bound-template spelling ("dir/binding.name") is deliberately
+		// NOT collapsed onto its unbound form here - that migration is owned by
+		// canonicalizeLegacyBoundUnassignedRoutedWork, which rewrites the
+		// persisted route explicitly rather than treating the two spellings as
+		// always-already-equal at compare time.
+		{"legacy bound-template spelling is not collapsed", "gascity/gastown.builder", "gascity/builder", false},
+		// config accepts "builder" and "Builder" as two separate agents
+		// (ValidateAgents keys on a case-sensitive {dir, binding, name}), so
+		// treating them as equal here is a cross-agent work-visibility bug
+		// (ga-lmy6yj), not a convenience.
+		{"case-differing spellings are DISTINCT agents", "gascity/Builder", "gascity/builder", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -54,6 +68,124 @@ func TestHookClaimMatchesRouteToleratesSessionNameEncoding(t *testing.T) {
 	}
 }
 
+// TestHookClaimMatchesRouteWorkflowRunTargetFallback pins issue #5900: a
+// graph.v2 workflow root's gc.run_target fallback exists so a genuinely
+// root-only (#2763-shape) molecule is claimable as its own unit of work, but
+// the same fallback must not resurrect a fully-expanded root whose real
+// children have all closed and is only waiting on workflow-finalize.
+// gc.workflow_expanded distinguishes the two shapes.
+func TestHookClaimMatchesRouteWorkflowRunTargetFallback(t *testing.T) {
+	rootOnly := beads.Bead{
+		ID:     "wf-root-only",
+		Status: "open",
+		Metadata: beads.StringMap{
+			beadmeta.KindMetadataKey:      beadmeta.KindWorkflow,
+			beadmeta.RunTargetMetadataKey: "gascity/builder",
+		},
+	}
+	if !hookClaimMatchesRoute(rootOnly, []string{"gascity/builder"}) {
+		t.Fatal("a never-expanded (#2763-shape) workflow root must still fall back to gc.run_target")
+	}
+
+	expanded := beads.Bead{
+		ID:     "wf-root-expanded",
+		Status: "open",
+		Metadata: beads.StringMap{
+			beadmeta.KindMetadataKey:             beadmeta.KindWorkflow,
+			beadmeta.RunTargetMetadataKey:        "gascity/builder",
+			beadmeta.WorkflowExpandedMetadataKey: "true",
+		},
+	}
+	if hookClaimMatchesRoute(expanded, []string{"gascity/builder"}) {
+		t.Fatal("a fully-expanded workflow root (gc.workflow_expanded=true) must not fall back to gc.run_target; its child steps own executable work")
+	}
+
+	if got := hookClaimRoute(expanded); got != "" {
+		t.Fatalf("hookClaimRoute(expanded workflow root) = %q, want empty (never claimable/visible via run_target fallback)", got)
+	}
+	if got := hookClaimRoute(rootOnly); got != "gascity/builder" {
+		t.Fatalf("hookClaimRoute(root-only workflow root) = %q, want %q", got, "gascity/builder")
+	}
+}
+
+// A stale explicit route must not turn a graph latch into executable work or
+// capacity demand. Otherwise each drained worker is replaced by another one.
+func TestHookClaimAndDemandRejectRoutedTopology(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind, expanded string
+		want                 bool
+	}{
+		{"expanded workflow", beadmeta.KindWorkflow, "true", false},
+		{"scope", beadmeta.KindScope, "", false},
+		{"spec", beadmeta.KindSpec, "", false},
+		{"root-only workflow", beadmeta.KindWorkflow, "", true},
+		{"worker step", "", "", true},
+		{"control step", beadmeta.KindWorkflowFinalize, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := beads.Bead{
+				ID: "probe-step", Status: "open", Type: "task",
+				Metadata: beads.StringMap{
+					beadmeta.KindMetadataKey:             tc.kind,
+					beadmeta.WorkflowExpandedMetadataKey: tc.expanded,
+					beadmeta.RoutedToMetadataKey:         "rig/worker",
+				},
+			}
+			if got := hookCandidateClaimable(candidate, []string{"rig/worker"}, time.Now()); got != tc.want {
+				t.Errorf("fresh claim = %v, want %v", got, tc.want)
+			}
+			if got := len(controllerDemandRouteCandidates(candidate)) != 0; got != tc.want {
+				t.Errorf("worker demand = %v, want %v", got, tc.want)
+			}
+			candidate.Assignee = "stale-worker"
+			if got := hookCandidateReclaimEligible(candidate, []string{"rig/worker"}, time.Now()); got != tc.want {
+				t.Errorf("stale reclaim = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFilterUnreadyHookCandidatesPreservesOwnedWorkflowAnchor(t *testing.T) {
+	input := `[{"id":"fresh","status":"open","metadata":{"gc.kind":"workflow","gc.workflow_expanded":"true"}},{"id":"owned","status":"in_progress","assignee":"rig/worker","metadata":{"gc.kind":"workflow","gc.workflow_expanded":"true"}}]`
+	got := filterUnreadyHookCandidates(input, time.Now())
+	var candidates []beads.Bead
+	if err := json.Unmarshal([]byte(got), &candidates); err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].ID != "owned" {
+		t.Fatalf("candidates = %s, want only the owned continuation anchor", got)
+	}
+}
+
+// TestHookRouteIdentitiesEqualDotAxisRegression guards against a matcher that
+// only reverses the slash-encoding axis ("--" -> "/") of a session-name
+// identity while leaving the dot-encoding axis ("__" -> ".") untouched. A
+// route spelled with a literal dot (e.g. a bound-template identity like
+// "triager.triager") must still match a session-encoded identity for the
+// same agent (e.g. "triager__triager"), or the filter wrongly treats an
+// agent's own routed work as belonging to someone else and drops it (ga-4wwxl7).
+func TestHookRouteIdentitiesEqualDotAxisRegression(t *testing.T) {
+	tests := []struct {
+		name     string
+		route    string
+		identity string
+		want     bool
+	}{
+		{"dot template route vs dot-encoded session identity", "triager.triager", "triager__triager", true},
+		{"dir-qualified dot route vs session-encoded identity", "gastown.mayor", "gastown__mayor", true},
+		{"slash route vs session-encoded slash identity (pre-existing axis)", "gascity/builder", "gascity--builder", true},
+		{"combined slash+dot route vs fully session-encoded identity", "hello-world/gastown.polecat", "hello-world--gastown__polecat", true},
+		{"distinct identities must not match", "gascity/builder", "gascity--reviewer", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hookRouteIdentitiesEqual(tt.route, tt.identity); got != tt.want {
+				t.Errorf("hookRouteIdentitiesEqual(%q, %q) = %v, want %v", tt.route, tt.identity, got, tt.want)
+			}
+		})
+	}
+}
+
 // --- hookCandidateVisible ---------------------------------------------------
 
 func TestHookCandidateVisible(t *testing.T) {
@@ -76,6 +208,18 @@ func TestHookCandidateVisible(t *testing.T) {
 			assignee:   "reviewer-gm-wisp-b6tr3z",
 			identities: []string{"gascity/builder"},
 			want:       false,
+		},
+		{
+			// Tiers 1 and 2 of the default work query select on --assignee
+			// alone and never consult routed_to, so an owned crash-recovery
+			// bead may legitimately carry a stale or foreign route. The
+			// exemption is blanket: assignee match alone decides visibility,
+			// regardless of what routed_to says.
+			name:       "assigned to me, with a stale foreign route present",
+			assignee:   "gascity/builder",
+			routedTo:   "gascity/deployer",
+			identities: []string{"gascity/builder"},
+			want:       true,
 		},
 		{
 			name:     "assigned to someone else, no identity context at all",
@@ -320,5 +464,81 @@ func TestDoHookGa1xaqgoRegression(t *testing.T) {
 		if bytes.Contains([]byte(out), []byte(foreignID)) {
 			t.Errorf("stdout leaked foreign candidate %q: %s", foreignID, out)
 		}
+	}
+}
+
+// --- route-target call-site wiring ------------------------------------------
+
+// TestFilterForeignHookCandidatesPoolBaseRouteViaRoutedToIdentity pins that a
+// pool slot's own QualifiedName is slot-suffixed ("gascity/polecat-2"), but
+// the routed-pool tier matches on the BASE pool name (poolDemandTarget), so
+// demand work is written with the base route. hookClaimPrimaryRouteTarget
+// (agentutil.RoutedToIdentity) is what lets the slot recognize its own base
+// route; hookClaimRouteTargets is the same expansion the claim path uses.
+func TestFilterForeignHookCandidatesPoolBaseRouteViaRoutedToIdentity(t *testing.T) {
+	base := config.Agent{Dir: "gascity", Name: "polecat"}
+	slot := config.Agent{Dir: "gascity", Name: "polecat-2", PoolName: base.QualifiedName()}
+	candidates := []beads.Bead{
+		{ID: "ga-pool", Status: "open", Metadata: beads.StringMap{"gc.routed_to": base.QualifiedName()}},
+	}
+	raw, err := json.Marshal(candidates)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+
+	// The explicit-arg path blanks GC_TEMPLATE, so this is the full
+	// route-target set a slot agent gets.
+	routeTargets := hookClaimRouteTargets(hookClaimPrimaryRouteTarget(&slot), slot.QualifiedName(), "")
+	var kept []beads.Bead
+	if err := json.Unmarshal([]byte(filterForeignHookCandidates(string(raw), hookVisibility{RouteTargets: routeTargets})), &kept); err != nil {
+		t.Fatalf("unmarshal filtered output: %v", err)
+	}
+	if len(kept) != 1 {
+		t.Fatalf("dropped the pool slot's own base-route work: routeTargets=%v kept=%v", routeTargets, kept)
+	}
+
+	// Negative control: it is RoutedToIdentity doing the work, not the
+	// slot-suffixed qualified name, which must NOT match on its own. If this
+	// stops failing, the test above has gone vacuous.
+	var keptNarrow []beads.Bead
+	narrow := filterForeignHookCandidates(string(raw), hookVisibility{RouteTargets: []string{slot.QualifiedName()}})
+	if err := json.Unmarshal([]byte(narrow), &keptNarrow); err != nil {
+		t.Fatalf("unmarshal filtered output: %v", err)
+	}
+	if len(keptNarrow) != 0 {
+		t.Errorf("slot-suffixed name matched the base route on its own: kept %v", keptNarrow)
+	}
+}
+
+// TestFilterForeignHookCandidatesLegacyWorkflowControlAliasMatched pins that
+// buildWorkQuery actively probes the legacy "<rig>/workflow-control" spelling
+// (legacyWorkflowControlQualifiedName), so a bead can carry that route.
+// hookClaimIdentityCandidates is what expands a raw identity into that alias.
+func TestFilterForeignHookCandidatesLegacyWorkflowControlAliasMatched(t *testing.T) {
+	candidates := []beads.Bead{
+		{ID: "ga-legacy", Status: "open", Metadata: beads.StringMap{"gc.routed_to": "gascity/workflow-control"}},
+	}
+	raw, err := json.Marshal(candidates)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+
+	identities := hookClaimIdentityCandidates("gascity/control-dispatcher")
+	var kept []beads.Bead
+	if err := json.Unmarshal([]byte(filterForeignHookCandidates(string(raw), hookVisibility{RouteTargets: identities})), &kept); err != nil {
+		t.Fatalf("unmarshal filtered output: %v", err)
+	}
+	if len(kept) != 1 {
+		t.Fatalf("dropped legacy workflow-control work: identities=%v kept=%v", identities, kept)
+	}
+
+	// Negative control: the unexpanded name alone does not carry the alias.
+	var keptNarrow []beads.Bead
+	narrow := filterForeignHookCandidates(string(raw), hookVisibility{RouteTargets: []string{"gascity/control-dispatcher"}})
+	if err := json.Unmarshal([]byte(narrow), &keptNarrow); err != nil {
+		t.Fatalf("unmarshal filtered output: %v", err)
+	}
+	if len(keptNarrow) != 0 {
+		t.Errorf("unexpanded identity matched the legacy alias: kept %v", keptNarrow)
 	}
 }

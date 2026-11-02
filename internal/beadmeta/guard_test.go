@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 // keyShape matches a literal that is a whole bead-metadata key and nothing else:
@@ -39,6 +41,10 @@ var allowedNonMetadata = map[string]string{
 	"gc.dolt.cleanup.v1":       "dolt cleanup manifest schema version (cmd/gc/cmd_dolt_cleanup.go)",
 	"gc.healthz.v1":            "workspace healthz workflow contract (internal/workspacesvc)",
 	"gc.worker.conformance.v1": "worker conformance report schema version (internal/worker/workertest)",
+
+	// HMAC domain-separation tags (MAC input prefixes, never stored anywhere).
+	"gc.connect.bearer.v1":   "connect bearer HMAC domain tag (internal/connect/bearer.go)",
+	"gc.connect.sentinel.v1": "connect token-file sentinel HMAC domain tag (internal/connect/bearer.go)",
 
 	// Cobra command-tree annotations (not bead metadata).
 	"gc.docgen.skip":                "cobra annotation: skip CLI doc generation",
@@ -74,6 +80,8 @@ var excludedDirs = []string{
 	"internal/events",           // gc.* event-type names (events.KnownEventTypes)
 	"internal/telemetry",        // gc.* metric/counter names
 	"internal/runtime/t3bridge", // t3bridge UI thread-metadata namespace
+	"internal/opjournal",        // op journal gc.op.* / gc.fact.* namespace; its codec is the only reader and writer
+	"internal/eventfact",        // event-fact gc.ev.* and projector-checkpoint gc.evproj.* namespaces; its codec is the only reader and writer
 	"internal/api/genclient",    // generated client code
 }
 
@@ -162,6 +170,14 @@ func isExcludedDir(rel string) bool {
 // (the directory containing go.mod).
 func repoRoot(t *testing.T) string {
 	t.Helper()
+	// GC_TEST_REPO_ROOT lets `bazel test` point whole-repo scan guards at a
+	// real checkout; runfiles trees cannot stand in for the repository.
+	if root := bazeltest.OverrideRoot(); root != "" {
+		if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
+			t.Fatalf("GC_TEST_REPO_ROOT=%s has no go.mod: %v", root, err)
+		}
+		return root
+	}
 	dir, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
@@ -257,7 +273,9 @@ func trackedGoFiles(t *testing.T, root string, tops []string) []string {
 	t.Helper()
 	out, err := exec.Command("git", "-C", root, "ls-files", "-z", "--", "*.go").Output()
 	if err != nil {
-		t.Fatalf("git ls-files in %s: %v", root, err)
+		// Bazel runfiles trees carry no .git; fall back to walking the
+		// sources shipped as test data so the guard stays effective there.
+		return walkedGoFiles(t, root, tops)
 	}
 
 	var files []string
@@ -283,6 +301,49 @@ func trackedGoFiles(t *testing.T, root string, tops []string) []string {
 			continue
 		}
 		files = append(files, rel)
+	}
+	return files
+}
+
+// walkedGoFiles enumerates non-test .go files under tops when the git index is
+// unavailable (Bazel runfiles trees). It mirrors trackedGoFiles' filtering so
+// both entry points enforce the same vocabulary.
+func walkedGoFiles(t *testing.T, root string, tops []string) []string {
+	t.Helper()
+	var files []string
+	for _, top := range tops {
+		base := filepath.Join(root, top)
+		err := filepath.WalkDir(base, func(path string, d os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if d.IsDir() {
+				name := d.Name()
+				if name != "." && strings.HasPrefix(name, ".") {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			relSlash := filepath.ToSlash(rel)
+			if strings.Contains(relSlash, "/testdata/") || strings.HasPrefix(relSlash, "testdata/") {
+				return nil
+			}
+			if isExcludedDir(filepath.ToSlash(filepath.Dir(relSlash))) {
+				return nil
+			}
+			files = append(files, rel)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walking %s: %v", base, err)
+		}
 	}
 	return files
 }

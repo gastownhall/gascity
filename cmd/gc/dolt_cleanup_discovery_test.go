@@ -6,72 +6,88 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-func TestLoadRigDoltPorts_ReadsAllRigs(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/city/.beads/dolt-server.port"] = []byte("28231\n")
-	fs.Files["/rig-a/.beads/dolt-server.port"] = []byte("28232\n")
-	fs.Files["/rig-b/.beads/dolt-server.port"] = []byte("28233\n")
-
+func TestDoltProcRigOwner_MatchesDataDirUnderRigRoot(t *testing.T) {
 	rigs := []resolverRig{
 		{Name: "hq", Path: "/city", HQ: true},
 		{Name: "alpha", Path: "/rig-a"},
-		{Name: "beta", Path: "/rig-b"},
 	}
 
-	got := loadRigDoltPorts(rigs, fs)
-	want := map[int]string{
-		28231: "hq",
-		28232: "alpha",
-		28233: "beta",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("loadRigDoltPorts = %v, want %v", got, want)
+	proc := DoltProcInfo{Argv: []string{"dolt", "sql-server", "--data-dir", "/rig-a/.beads/dolt"}}
+	owner, ok := doltProcRigOwner(proc, rigs)
+	if !ok || owner != "alpha" {
+		t.Errorf("doltProcRigOwner = (%q, %v), want (alpha, true)", owner, ok)
 	}
 }
 
-func TestLoadRigDoltPorts_SkipsMissingAndMalformed(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/rig-a/.beads/dolt-server.port"] = []byte("28232\n")
-	fs.Files["/rig-b/.beads/dolt-server.port"] = []byte("not-a-port\n")
-	fs.Files["/rig-c/.beads/dolt-server.port"] = []byte("\n")
-	// /rig-d has no port file at all.
+func TestDoltProcRigOwner_MatchesConfigUnderRigRoot(t *testing.T) {
+	rigs := []resolverRig{{Name: "hq", Path: "/city", HQ: true}}
 
-	rigs := []resolverRig{
-		{Name: "alpha", Path: "/rig-a"},
-		{Name: "beta", Path: "/rig-b"},
-		{Name: "gamma", Path: "/rig-c"},
-		{Name: "delta", Path: "/rig-d"},
-	}
-
-	got := loadRigDoltPorts(rigs, fs)
-	want := map[int]string{
-		28232: "alpha",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("loadRigDoltPorts = %v, want %v", got, want)
+	proc := DoltProcInfo{Argv: []string{"dolt", "sql-server", "--config", "/city/.gc/runtime/packs/dolt/config.yaml"}}
+	owner, ok := doltProcRigOwner(proc, rigs)
+	if !ok || owner != "hq" {
+		t.Errorf("doltProcRigOwner = (%q, %v), want (hq, true)", owner, ok)
 	}
 }
 
-func TestLoadRigDoltPorts_DuplicatePortsLastWins(t *testing.T) {
-	// Pathological: two rigs claim the same port. Last write wins so the
-	// reaper still protects on port match (it just attributes to the
-	// later-listed rig). Acceptable behavior; documented in the function.
-	fs := fsys.NewFake()
-	fs.Files["/rig-a/.beads/dolt-server.port"] = []byte("28232\n")
-	fs.Files["/rig-b/.beads/dolt-server.port"] = []byte("28232\n")
-
+func TestDoltProcRigOwner_IgnoresForeignAndPathlessProcesses(t *testing.T) {
 	rigs := []resolverRig{
+		{Name: "hq", Path: "/city", HQ: true},
 		{Name: "alpha", Path: "/rig-a"},
-		{Name: "beta", Path: "/rig-b"},
 	}
 
-	got := loadRigDoltPorts(rigs, fs)
-	if got[28232] == "" {
-		t.Errorf("expected port 28232 to be in map, got %v", got)
+	for _, tc := range []struct {
+		name string
+		argv []string
+	}{
+		{"foreign data dir", []string{"dolt", "sql-server", "--data-dir", "/elsewhere/dolt"}},
+		{"foreign config", []string{"dolt", "sql-server", "--config", "/tmp/TestX/config.yaml"}},
+		{"no path flags", []string{"dolt", "sql-server"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if owner, ok := doltProcRigOwner(DoltProcInfo{Argv: tc.argv}, rigs); ok {
+				t.Errorf("doltProcRigOwner = (%q, true), want no owner", owner)
+			}
+		})
+	}
+}
+
+func TestDoltProcRigOwner_FirstListedRigWinsOnNestedRoots(t *testing.T) {
+	// Pathological: nested rig roots both contain the candidate path. The
+	// first-listed rig wins; the reaper is still safe because any match
+	// protects regardless of attribution.
+	rigs := []resolverRig{
+		{Name: "outer", Path: "/work"},
+		{Name: "inner", Path: "/work/rig-a"},
+	}
+
+	proc := DoltProcInfo{Argv: []string{"dolt", "sql-server", "--data-dir", "/work/rig-a/.beads/dolt"}}
+	owner, ok := doltProcRigOwner(proc, rigs)
+	if !ok || owner != "outer" {
+		t.Errorf("doltProcRigOwner = (%q, %v), want (outer, true)", owner, ok)
+	}
+}
+
+func TestPathUnderRoot(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		root string
+		want bool
+	}{
+		{"direct child", "/city/.beads/dolt", "/city", true},
+		{"equal", "/city", "/city", true},
+		{"sibling prefix is not containment", "/cityscape/.beads", "/city", false},
+		{"outside", "/elsewhere/dolt", "/city", false},
+		{"empty path", "", "/city", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := pathUnderRoot(tc.path, normalizePathForCompare(tc.root)); got != tc.want {
+				t.Errorf("pathUnderRoot(%q, %q) = %v, want %v", tc.path, tc.root, got, tc.want)
+			}
+		})
 	}
 }
 

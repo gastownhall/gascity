@@ -445,9 +445,21 @@ func TestEnsureManagedWorktreePersistsAndVerifiesProvenance(t *testing.T) {
 	if rep.Provenance == nil {
 		t.Fatal("Ensure report has nil provenance")
 	}
+	// Provenance.Path is contractually the *canonical* spec path:
+	// plannedProvenance runs it through canonicalPathAllowMissing so that
+	// identity comparison is not defeated by symlinks, exactly as
+	// canonicalCommonDir does for RepoIdentity. So the expectation has to be
+	// canonicalized by the same helper rather than compared to the raw temp
+	// path — on macOS t.TempDir() hands back the /var spelling of a directory
+	// whose canonical form is /private/var, and a raw compare reads that
+	// contract-honoring value as a mismatch.
+	wantPath, err := canonicalPathAllowMissing(wt)
+	if err != nil {
+		t.Fatalf("canonicalPathAllowMissing(%q): %v", wt, err)
+	}
 	if rep.Provenance.BeadID != spec.BeadID ||
 		rep.Provenance.StoreRef != spec.StoreRef ||
-		rep.Provenance.Path != wt ||
+		rep.Provenance.Path != wantPath ||
 		rep.Provenance.Branch != spec.Branch ||
 		rep.Provenance.BaseRef != base ||
 		rep.Provenance.BaseSHA == "" ||
@@ -966,5 +978,34 @@ func TestRollbackAfterFailedCreateKeepsWorktreeWithUnreadableProvenance(t *testi
 	}
 	if _, statErr := os.Stat(path); statErr != nil {
 		t.Errorf("rival worktree removed on inconclusive ownership: %v", statErr)
+	}
+}
+
+// ReadProvenanceAt reads the record Ensure published from the worktree's
+// private git directory, the one `git rev-parse --absolute-git-dir` names from
+// inside it, and reports a directory with no record as fs.ErrNotExist.
+func TestReadProvenanceAtReadsEnsureRecordFromGitDir(t *testing.T) {
+	repo, base := initTestRepo(t)
+	root := t.TempDir()
+	wt := filepath.Join(root, "gc-test")
+	rep, err := Ensure(managedSpec(repo, root, wt, "work/gc-test", base))
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	gitDir := strings.TrimSpace(runGit(t, wt, "rev-parse", "--absolute-git-dir"))
+	got, err := ReadProvenanceAt(gitDir)
+	if err != nil {
+		t.Fatalf("ReadProvenanceAt(%q): %v", gitDir, err)
+	}
+	if !provenanceEqual(got, *rep.Provenance) {
+		t.Fatalf("ReadProvenanceAt = %+v, want Ensure's record %+v", got, *rep.Provenance)
+	}
+	if got.BeadID != "gc-test" || got.AttemptID == "" {
+		t.Fatalf("ReadProvenanceAt = %+v, want bead gc-test with an attempt id", got)
+	}
+
+	mainGitDir := strings.TrimSpace(runGit(t, repo, "rev-parse", "--absolute-git-dir"))
+	if _, err := ReadProvenanceAt(mainGitDir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("ReadProvenanceAt(main checkout git dir) error = %v, want fs.ErrNotExist", err)
 	}
 }

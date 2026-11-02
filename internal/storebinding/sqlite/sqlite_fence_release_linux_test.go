@@ -436,8 +436,12 @@ func TestGraphFenceAcquireFailureRetainsPartialReservationCleanup(t *testing.T) 
 	if err := cleanup.RetryCleanup(context.Background()); err != nil {
 		t.Fatalf("retrying partial reservation cleanup: %v", err)
 	}
-	if closeCalls != 6 {
-		t.Fatalf("reservation close calls = %d, want 6", closeCalls)
+	// Three pinned descriptors (directory, database, graph.seqfloor — the
+	// source's first mint reserved an id block, so its floor sidecar exists)
+	// across the failed release at acquisition, the failed release at guard
+	// release, and the successful retry.
+	if closeCalls != 9 {
+		t.Fatalf("reservation close calls = %d, want 9", closeCalls)
 	}
 	if err := guard.Release(); err != nil {
 		t.Fatalf("releasing guard after partial reservation cleanup: %v", err)

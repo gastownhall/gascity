@@ -33,11 +33,11 @@ func NewInstanceToken() string {
 // runtime should receive from the controller/session manager.
 func RuntimeEnv(sessionID, sessionName string, generation, continuationEpoch int, instanceToken string) map[string]string {
 	env := map[string]string{
-		"GC_SESSION_ID":         sessionID,
-		"GC_SESSION_NAME":       sessionName,
-		"GC_RUNTIME_EPOCH":      strconv.Itoa(generation),
-		"GC_CONTINUATION_EPOCH": strconv.Itoa(continuationEpoch),
-		"GC_INSTANCE_TOKEN":     instanceToken,
+		"GC_SESSION_ID":              sessionID,
+		"GC_SESSION_NAME":            sessionName,
+		runtime.RuntimeEpochEnv:      strconv.Itoa(generation),
+		runtime.ContinuationEpochEnv: strconv.Itoa(continuationEpoch),
+		runtime.InstanceTokenEnv:     instanceToken,
 		// BEADS_HOLDER_TOKEN is the incarnation credential bd records on a claim
 		// (ownership-fencing DESIGN §2.4). It IS the instance token — deriving it
 		// here, the single authoritative wiring point, keeps the token a session

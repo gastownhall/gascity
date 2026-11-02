@@ -152,6 +152,11 @@ func ByName(name string) (Pack, bool) {
 // SourceLayout reports the bundled pack name and repository a source
 // addresses, normalizing source spellings (tree URLs, //subpath forms)
 // the same way IsSource does.
+//
+// A registered nested subpack (see bundledSubpacks) reports its OWN name,
+// never its parent's: callers that ask "is this the gascity pack?" must keep
+// answering no for gascity/roles. Callers that need the canonical pin a
+// subpack shares with its parent use PinnedWith.
 func SourceLayout(source string) (name, repository string, ok bool) {
 	normalizedRepo, subpath := splitSource(source)
 	for _, layout := range syntheticPackLayouts() {
@@ -159,18 +164,99 @@ func SourceLayout(source string) (name, repository string, ok bool) {
 			return layout.Pack.Name, layout.Repository, true
 		}
 	}
+	for _, layout := range subpackLayouts() {
+		if normalizedRepo == layout.Repository && subpath == layout.Subpath {
+			return layout.Name, layout.Repository, true
+		}
+	}
 	return "", "", false
 }
 
-// NameForSource reports the bundled pack addressed by source.
+// NameForSource reports the bundled pack addressed by source. A registered
+// nested subpack reports its own name (see SourceLayout).
 func NameForSource(source string) (string, bool) {
-	normalizedRepo, subpath := splitSource(source)
-	for _, layout := range syntheticPackLayouts() {
-		if normalizedRepo == layout.Repository && subpath == layout.Subpath {
-			return layout.Pack.Name, true
+	name, _, ok := SourceLayout(source)
+	return name, ok
+}
+
+// bundledSubpack is a pack that lives at a fixed nested path inside a bundled
+// pack's tree, such as gascity-packs//gascity/roles inside the gascity pack.
+//
+// It is recognized by source identity only. It is not a layout: its files are
+// already part of the parent's embedded tree, so the parent's materialization
+// writes them, the parent's manifest validates them and the parent's content
+// hash covers them. Recognizing it therefore adds no files, no cache
+// directory (RepoCacheKey strips the subpath, so it shares the parent's
+// synthetic cache) and no content-hash change. It is not a bundled pack name
+// either: All, ByName, Source and CanonicalImportSource do not know it, so a
+// bare "--include gc-roles" still does not resolve.
+//
+// Only an explicitly registered subpack is bundled. Other paths under a
+// bundled pack (gascity/formulas, gascity/roles/agents, ...) are not packs and
+// keep the ordinary remote-import path.
+type bundledSubpack struct {
+	// Name is the identity SourceLayout reports: the subpack's own
+	// [pack].name.
+	Name string
+	// Parent is the bundled pack whose embedded tree contains the subpack and
+	// whose canonical pin it shares.
+	Parent string
+	// Dir is the subpack's directory relative to the parent pack root.
+	Dir string
+}
+
+// bundledSubpacks lists the registered nested subpacks, in a fixed order.
+func bundledSubpacks() []bundledSubpack {
+	return []bundledSubpack{
+		// The providerless, rig-scoped role agents the gascity formulas route
+		// to (config.PublicGascityRolesPackSource): the gascity template's
+		// default rig import. Released, pinned and embedded with the gascity
+		// pack (ga-73eoo).
+		{Name: "gc-roles", Parent: "gascity", Dir: "roles"},
+	}
+}
+
+// subpackLayout is a bundledSubpack placed in one of its parent's
+// repositories.
+type subpackLayout struct {
+	Repository string
+	Subpath    string
+	Name       string
+	Parent     string
+}
+
+// subpackLayouts places every registered subpack under each of its parent's
+// synthetic layouts. A parent with several layouts (a legacy gascity.git
+// subpath and a public one) yields one entry per layout.
+func subpackLayouts() []subpackLayout {
+	var out []subpackLayout
+	for _, sub := range bundledSubpacks() {
+		for _, layout := range syntheticPackLayouts() {
+			if layout.Pack.Name != sub.Parent || layout.Subpath == "" {
+				continue
+			}
+			out = append(out, subpackLayout{
+				Repository: layout.Repository,
+				Subpath:    path.Join(layout.Subpath, sub.Dir),
+				Name:       sub.Name,
+				Parent:     sub.Parent,
+			})
 		}
 	}
-	return "", false
+	return out
+}
+
+// PinnedWith returns the bundled pack whose canonical pin a name reported by
+// SourceLayout follows: a registered nested subpack follows its parent, and
+// every other name itself. A subpack is released inside its parent's tree, so
+// its only embedded content is the parent's, at the parent's pin.
+func PinnedWith(name string) string {
+	for _, sub := range bundledSubpacks() {
+		if sub.Name == name {
+			return sub.Parent
+		}
+	}
+	return name
 }
 
 type syntheticPackLayout struct {
@@ -542,6 +628,28 @@ func materializeFS(src fs.FS, dst string) error {
 	return nil
 }
 
+// packContentValidationMemo memoizes successful pack content validation,
+// keyed by (dst, pack name) and guarded by a stat signature over the pack's
+// files. Verifying content costs an os.ReadFile of every file in the pack, and
+// a single config load runs the full ValidateSyntheticRepo repeatedly. The
+// materialized cache is immutable for a given binary unless something rewrites
+// it, and any rewrite changes a file's size or mtime, so an unchanged signature
+// means the content verified earlier in this process is still on disk.
+//
+// The signature is deliberately RECOMPUTED ON EVERY CALL rather than trusting
+// the memo outright, because the cache self-heal contract requires that a file
+// corrupted mid-process is still detected: cmd/gc's
+// TestEnsureBuiltinRuntimeAssetsRehydratesCorruptedCache overwrites a cached
+// file and revalidates IN THE SAME PROCESS. os.WriteFile changes both size and
+// mtime, so the signature differs and full content validation runs. Do not
+// "optimize" this into a plain memo lookup -- that is the same mistake as
+// swapping this gate for ValidateSyntheticRepoFast, which reads only the marker
+// and cannot see content corruption at all.
+//
+// The lstat that builds the signature is not extra work: validatePackFiles
+// already lstats every file to check its mode.
+var packContentValidationMemo sync.Map // dst + "\x00" + pack.Name -> signature string
+
 // validatePackFiles verifies a materialized pack against the embedded manifest:
 // every expected file present, with the expected mode and content.
 //
@@ -556,7 +664,15 @@ func validatePackFiles(pack Pack, dst string) error {
 	if err != nil {
 		return fmt.Errorf("reading bundled pack %q manifest: %w", pack.Name, err)
 	}
-	for rel, want := range manifest {
+	rels := make([]string, 0, len(manifest))
+	for rel := range manifest {
+		rels = append(rels, rel)
+	}
+	sort.Strings(rels)
+
+	var sig strings.Builder
+	for _, rel := range rels {
+		want := manifest[rel]
 		target := filepath.Join(dst, filepath.FromSlash(rel))
 		info, err := os.Lstat(target)
 		if err != nil {
@@ -565,14 +681,25 @@ func validatePackFiles(pack Pack, dst string) error {
 		if !info.Mode().IsRegular() || info.Mode().Perm() != want.perm.Perm() {
 			return fmt.Errorf("bundled pack cache %q file %s has mode %s, expected %s", pack.Name, rel, info.Mode().Perm(), want.perm.Perm())
 		}
-		got, err := os.ReadFile(target)
-		if err != nil {
-			return fmt.Errorf("reading bundled pack cache %q file %s: %w", pack.Name, rel, err)
-		}
-		if !bytes.Equal(got, want.data) {
-			return fmt.Errorf("bundled pack cache %q file %s content differs from current binary", pack.Name, rel)
+		fmt.Fprintf(&sig, "%s:%d:%d;", rel, info.Size(), info.ModTime().UnixNano())
+	}
+
+	memoKey := dst + "\x00" + pack.Name
+	signature := sig.String()
+	if memoized, ok := packContentValidationMemo.Load(memoKey); !ok || memoized.(string) != signature {
+		for _, rel := range rels {
+			want := manifest[rel]
+			target := filepath.Join(dst, filepath.FromSlash(rel))
+			got, err := os.ReadFile(target)
+			if err != nil {
+				return fmt.Errorf("reading bundled pack cache %q file %s: %w", pack.Name, rel, err)
+			}
+			if !bytes.Equal(got, want.data) {
+				return fmt.Errorf("bundled pack cache %q file %s content differs from current binary", pack.Name, rel)
+			}
 		}
 	}
+	packContentValidationMemo.Store(memoKey, signature)
 	return nil
 }
 

@@ -108,7 +108,7 @@ func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.S
 // backoff. Failures are logged once per streak, not per retry.
 func (p *Provider) runSessionEventStream(ctx context.Context, ch chan runtime.SessionEvent) {
 	defer close(ch)
-	s := &sessionEventStream{c: p.c, ch: ch}
+	s := &sessionEventStream{c: p.c, ch: ch, boundNames: p.boundSessionNames}
 	backoff := sessionEventMinBackoff
 	for {
 		if ctx.Err() != nil {
@@ -147,6 +147,10 @@ func (p *Provider) runSessionEventStream(ctx context.Context, ch chan runtime.Se
 type sessionEventStream struct {
 	c  *client
 	ch chan runtime.SessionEvent
+	// boundNames lists the exact gc names of bound sessions. herdr's registry
+	// holds only their herdrAgentName forms, so attribution reverse-maps
+	// through it. Nil means no bound sessions.
+	boundNames func() []string
 
 	// paneNames maps pane id → gc session name. Rebuilt at cycle start and
 	// merge-only within a cycle: entries are never deleted mid-cycle, so a
@@ -173,6 +177,7 @@ func (s *sessionEventStream) runCycle(ctx context.Context) (resubscribe bool, er
 	}
 	s.paneNames = make(map[string]string, len(agents))
 	s.subscribed = make(map[string]bool, len(agents))
+	gcNames := s.sessionNamesByRegistry()
 	subs := []subscribeSub{
 		{Type: "pane.created"},
 		{Type: "pane.closed"},
@@ -183,7 +188,7 @@ func (s *sessionEventStream) runCycle(ctx context.Context) (resubscribe bool, er
 		if a.PaneID == "" || a.Name == "" {
 			continue
 		}
-		s.paneNames[a.PaneID] = a.Name
+		s.paneNames[a.PaneID] = sessionNameFor(gcNames, a.Name)
 		if !s.subscribed[a.PaneID] {
 			s.subscribed[a.PaneID] = true
 			subs = append(subs, subscribeSub{Type: "pane.agent_status_changed", PaneID: a.PaneID})
@@ -265,11 +270,12 @@ func (s *sessionEventStream) runCycle(ctx context.Context) (resubscribe bool, er
 			if err != nil {
 				return false, err
 			}
+			gcNames := s.sessionNamesByRegistry()
 			for _, a := range agents {
 				if a.PaneID == "" || a.Name == "" {
 					continue
 				}
-				s.paneNames[a.PaneID] = a.Name
+				s.paneNames[a.PaneID] = sessionNameFor(gcNames, a.Name)
 				if !s.subscribed[a.PaneID] {
 					resubscribe = true
 				}
@@ -284,6 +290,15 @@ func (s *sessionEventStream) runCycle(ctx context.Context) (resubscribe bool, er
 			}
 		}
 	}
+}
+
+// sessionNamesByRegistry snapshots the bound sessions' reverse map
+// (registryToSessionNames) for one agent listing.
+func (s *sessionEventStream) sessionNamesByRegistry() map[string]string {
+	if s.boundNames == nil {
+		return nil
+	}
+	return registryToSessionNames(s.boundNames())
 }
 
 // handleFrame translates one wire frame into a SessionEvent. It reports
@@ -316,8 +331,25 @@ func (s *sessionEventStream) handleFrame(line []byte) (relistHint bool) {
 		ev.Kind = runtime.SessionEventAgentDetected
 		relistHint = true
 	case "pane.agent_status_changed":
-		ev.Kind = runtime.SessionEventAgentStatus
-		ev.AgentStatus = f.Data.AgentStatus
+		// Translate at the boundary: herdr's idle state is the one with a
+		// generic meaning, so it maps to the semantic kind, and every other
+		// state maps to the vocabulary-free change kind. agentStateIdle is
+		// herdr's own spelling and stays in this package; nothing downstream
+		// learns it.
+		//
+		// The frame is never swallowed. Its arrival carries two things besides
+		// a status: emit below flushes a resync this stream already owes the
+		// consumer, and the package's own activity tracker polls on any event
+		// without reading its kind. Dropping non-idle frames would cost both,
+		// turning 300ms event-driven reconciliation into a 30s ticker.
+		//
+		// normalizeAgentState is shared with the tracker so the two cannot
+		// classify the same payload differently.
+		if normalizeAgentState(f.Data.AgentStatus) == agentStateIdle {
+			ev.Kind = runtime.SessionEventAgentIdle
+		} else {
+			ev.Kind = runtime.SessionEventAgentStateChanged
+		}
 	case "pane_created":
 		// Filter-maintenance hint only (the payload nests the pane object and
 		// carries no agent mapping yet); consumers see the session once its
@@ -364,10 +396,29 @@ func resyncEvent() runtime.SessionEvent {
 
 // ── socket-native request helpers ────────────────────────────────────────────
 
-// dialSocket connects to this session server's unix socket.
+// dialSocket connects to this session server's unix socket under
+// sessionEventOpTimeout, which that constant's own comment already describes as
+// bounding the dial. The dial was the one op outside it: both callers set the
+// connection deadline only after DialContext returns, and subscribeCycle dials
+// under the stream context, which carries no deadline at all, so a connect that
+// never completed hung the stream loop the bound exists to protect.
 func (c *client) dialSocket(ctx context.Context) (net.Conn, error) {
+	// The bound only tightens. WithTimeout keeps the earlier of the two
+	// deadlines, so a caller that brought a sooner one keeps it, and the
+	// caller's cancellation still reaches the connect.
+	dctx, cancel := context.WithTimeout(ctx, sessionEventOpTimeout)
+	defer cancel()
+	return c.dialUnix(dctx, c.socketPath())
+}
+
+// dialUnix is the production connect, installed on every client by newClient and
+// reached through the field of the same name so a test can observe the context the
+// dial runs under. That context is the one thing no listener-free test can otherwise
+// see: a real unix connect completes or fails at once unless the listener backlog is
+// saturated, so a missing bound looks exactly like a present one.
+func dialUnix(ctx context.Context, path string) (net.Conn, error) {
 	var d net.Dialer
-	return d.DialContext(ctx, "unix", c.socketPath())
+	return d.DialContext(ctx, "unix", path)
 }
 
 // sockSend writes one request line. params must be non-nil — the server

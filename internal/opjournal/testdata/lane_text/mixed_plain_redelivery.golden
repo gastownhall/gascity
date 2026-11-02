@@ -1,0 +1,9 @@
+Deferred reminders:
+- [mail] You have 2 unread messages.
+- [planner] Wrap up: the session drains at 18:00.
+
+These were queued until the session went idle.
+
+Please rebase onto main and rerun the tests.
+
+(this message may repeat an earlier one)

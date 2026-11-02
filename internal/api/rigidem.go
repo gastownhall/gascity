@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -353,13 +354,21 @@ func createIdemRecord(store beads.Store, city, requestID, digest, cursor, rigNam
 			Title:  "idem: rig-create " + requestID,
 			Labels: []string{idemLabel, idemLabelRigCreate},
 			Metadata: beads.StringMap{
-				metaIdemKind:        idemKindRigCreate,
-				metaIdemCity:        city,
-				metaIdemRequestID:   requestID,
-				metaIdemDigest:      digest,
-				metaIdemState:       state,
-				metaIdemEventCursor: cursor,
-				metaIdemRigName:     rigName,
+				// A plain "task" bead with no gc.kind is the population the
+				// ADR-0009 work-record close gate covers (workrecord.Gated), but
+				// this record is a receipt for a request rather than a work unit
+				// a worker claims and reports an outcome for — it has no commit
+				// to point at. Stamp the kind so it is excluded by the same
+				// default a plain dispatch child gets in
+				// internal/dispatch/control.go.
+				beadmeta.KindMetadataKey: beadmeta.KindTask,
+				metaIdemKind:             idemKindRigCreate,
+				metaIdemCity:             city,
+				metaIdemRequestID:        requestID,
+				metaIdemDigest:           digest,
+				metaIdemState:            state,
+				metaIdemEventCursor:      cursor,
+				metaIdemRigName:          rigName,
 			},
 		})
 		if err != nil {
@@ -796,9 +805,10 @@ func admitByRequestID(
 //     re-clone pre-drop's os.RemoveAll would destroy the committed rig's working
 //     tree and .beads store. A rolled_back / incomplete-in_flight record never
 //     holds its OWN name in config (a failed provision's config write is rolled
-//     back atomically with mutateAndPoke, and the delete-then-re-add-own-rig path
-//     reaches here only with rigInConfig already false), so this never rejects a
-//     legitimate self-recovery.
+//     back atomically inside the controller's config transaction, which
+//     publishes through mutateAndPokeLocked, and the delete-then-re-add-own-rig
+//     path reaches here only with rigInConfig already false), so this never
+//     rejects a legitimate self-recovery.
 //
 // A brand-new admission (existingBeadID == "") already passed the name axis
 // (including rigInConfig) under the same lock, so both guards are no-ops for it;

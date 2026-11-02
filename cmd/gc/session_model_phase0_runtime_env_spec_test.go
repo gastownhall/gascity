@@ -43,8 +43,16 @@ func TestPhase0RuntimeEnv_TemplateResolutionSetsOriginAndPublicHandle(t *testing
 	if got := tp.Env["GC_SESSION_ORIGIN"]; got == "" {
 		t.Fatal("GC_SESSION_ORIGIN = empty, want explicit origin")
 	}
+	// The template layer's GC_AGENT == GC_SESSION_NAME stamp is PROVISIONAL, not
+	// the contract: GC_AGENT's contract is to mirror BEADS_ACTOR (the
+	// session.AssigneeIdentifier selector), and for an unaliased pool worker that
+	// is the session bead ID. This row is load-bearing only because spawn merges
+	// the session runtime projection AFTER the template env, which overwrites
+	// both keys with the selected identity. Assert the pre-merge stamp here, and
+	// see TestRuntimeEnvWithSessionContextAlignsAgentAndBeadsActor for the value
+	// a running session actually receives.
 	if got := tp.Env["GC_AGENT"]; got != tp.Env["GC_SESSION_NAME"] {
-		t.Fatalf("GC_AGENT = %q, want public-handle compatibility value %q", got, tp.Env["GC_SESSION_NAME"])
+		t.Fatalf("GC_AGENT = %q, want the provisional pre-projection stamp %q", got, tp.Env["GC_SESSION_NAME"])
 	}
 }
 

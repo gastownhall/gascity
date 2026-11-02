@@ -105,7 +105,7 @@ func TranscriptUsageResult(profile Profile, snapshot *Snapshot) Result {
 	}
 
 	adapter := worker.SessionLogAdapter{SearchPaths: []string{snapshot.FixtureRoot}}
-	usages, err := adapter.InvocationUsage(profile.Provider, snapshot.TranscriptPath)
+	usages, err := adapter.InvocationUsage(profile.Provider, snapshot.TranscriptPath, "")
 	if err != nil {
 		return Fail(profile.ID, RequirementTranscriptUsage,
 			fmt.Sprintf("extract %s invocation usage: %v", family, err)).WithEvidence(evidence)
@@ -166,7 +166,7 @@ func TranscriptUsageCostResult(profile Profile, snapshot *Snapshot) Result {
 	}
 
 	adapter := worker.SessionLogAdapter{SearchPaths: []string{snapshot.FixtureRoot}}
-	usages, err := adapter.InvocationUsage(profile.Provider, snapshot.TranscriptPath)
+	usages, err := adapter.InvocationUsage(profile.Provider, snapshot.TranscriptPath, "")
 	if err != nil {
 		return Fail(profile.ID, RequirementInvocationUsageCost,
 			fmt.Sprintf("extract %s invocation usage: %v", family, err)).WithEvidence(evidence)
@@ -491,13 +491,19 @@ func mergeEvidence(dst map[string]string, prefix string, values map[string]strin
 }
 
 func selectedProfiles() ([]Profile, error) {
+	return filterProfiles(Phase1Profiles())
+}
+
+// filterProfiles narrows profiles to the one the PROFILE environment
+// variable names by ID or provider, or returns them all when it is unset.
+func filterProfiles(profiles []Profile) ([]Profile, error) {
 	filter := strings.TrimSpace(os.Getenv("PROFILE"))
 	if filter == "" {
-		return Phase1Profiles(), nil
+		return profiles, nil
 	}
 
 	var selected []Profile
-	for _, profile := range Phase1Profiles() {
+	for _, profile := range profiles {
 		if string(profile.ID) == filter || profile.Provider == filter {
 			selected = append(selected, profile)
 		}

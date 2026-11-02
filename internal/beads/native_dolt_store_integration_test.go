@@ -5,12 +5,14 @@ package beads
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -122,6 +124,74 @@ func TestNativeDoltStoreEphemeralMailSend(t *testing.T) {
 	}
 }
 
+// TestNativeDoltStoreClaimsAnAssignedWispThroughTheUpdateOperation pins S24-G
+// on a real store. issueops.Claimer misses a wisp id, so Claim claims it
+// through the update operation: the assignee claims its own assigned wisp (the
+// hook claims a ready assignment with its assignee as the actor), a re-claim
+// by the same assignee succeeds again, and another actor's claim is a lost
+// claim that leaves the holder in place. Wisp-plane resolution and the
+// claim's compare-and-set on the wisp table live in beads; a drift there would
+// make every assigned wisp step a silent skip in the hook while every spy test
+// stays green.
+func TestNativeDoltStoreClaimsAnAssignedWispThroughTheUpdateOperation(t *testing.T) {
+	ctx := context.Background()
+	storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))
+	if err != nil {
+		t.Skipf("upstream native beads storage unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := storage.Close(); err != nil {
+			t.Fatalf("close upstream storage: %v", err)
+		}
+	})
+	if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+		t.Fatalf("set issue prefix: %v", err)
+	}
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, "wisp-claim", "gc")
+
+	wisp, err := store.Create(Bead{
+		Title:     "assigned wisp step",
+		Type:      "task",
+		Assignee:  "builder",
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create assigned wisp: %v", err)
+	}
+	if !wisp.Ephemeral {
+		t.Fatalf("Ephemeral = false on created bead %s, want a wisp", wisp.ID)
+	}
+
+	for _, attempt := range []string{"claim", "re-claim"} {
+		claimed, ok, err := store.Claim(wisp.ID, "builder")
+		if err != nil || !ok {
+			t.Fatalf("%s: Claim(%s, builder) = (%+v, %v, %v), want (bead, true, nil)", attempt, wisp.ID, claimed, ok, err)
+		}
+		if claimed.ID != wisp.ID || claimed.Status != "in_progress" || claimed.Assignee != "builder" {
+			t.Fatalf("%s: claimed = %+v, want %s in_progress for builder", attempt, claimed, wisp.ID)
+		}
+		got, err := store.Get(wisp.ID)
+		if err != nil {
+			t.Fatalf("%s: Get(%s): %v", attempt, wisp.ID, err)
+		}
+		if got.Status != "in_progress" || got.Assignee != "builder" || !got.Ephemeral {
+			t.Fatalf("%s: Get(%s) = %+v, want the claimed wisp", attempt, wisp.ID, got)
+		}
+	}
+
+	lost, ok, err := store.Claim(wisp.ID, "intruder")
+	if err != nil || ok || lost.ID != "" {
+		t.Fatalf("Claim(%s, intruder) = (%+v, %v, %v), want a lost claim (zero, false, nil)", wisp.ID, lost, ok, err)
+	}
+	got, err := store.Get(wisp.ID)
+	if err != nil {
+		t.Fatalf("Get(%s) after the lost claim: %v", wisp.ID, err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "builder" {
+		t.Fatalf("Get(%s) after the lost claim = %+v, want builder still holding it", wisp.ID, got)
+	}
+}
+
 // testRawDBGetter matches beadslib's internal storage.RawDBAccessor without
 // bringing that implementation detail into production code.
 type testRawDBGetter interface {
@@ -214,7 +284,7 @@ func assertNativeIDDefaultAbsent(t *testing.T, db *sql.DB, table string) {
 
 // startTestDoltServer launches a throwaway server for tests that need the raw
 // SQL accessor exposed by upstream's server-mode Dolt store.
-func startTestDoltServer(t *testing.T) int {
+func startTestDoltServer(t testing.TB) int {
 	t.Helper()
 	doltBin, err := exec.LookPath("dolt")
 	if err != nil {
@@ -260,6 +330,133 @@ func startTestDoltServer(t *testing.T) int {
 		t.Fatalf("create beads database: %v", err)
 	}
 	return port
+}
+
+// The weak-ParentID contract is a claim about what the UPSTREAM library does
+// with a dependency target it classifies as external, and the in-memory fixture
+// the conformance suite runs cannot tell "never resolved" from "refused": its
+// AddDependency validates nothing at all. This is the same claim on real Dolt,
+// where isCrossPrefixDep routes the target to depends_on_external and the
+// existence check is skipped.
+//
+// Both halves are here on purpose. A foreign parent is carried on Create and on
+// Update and reads back verbatim; a dangling id in the store's OWN namespace is
+// refused before anything is written, which is the line validateCreatedDependencies
+// says it holds so the library's post-commit refusal never turns into a create
+// plus a compensating delete.
+func TestNativeDoltStoreRealBackendCrossPrefixParent(t *testing.T) {
+	ctx := context.Background()
+	storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))
+	if err != nil {
+		t.Skipf("upstream native beads storage unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := storage.Close(); err != nil {
+			t.Fatalf("close upstream storage: %v", err)
+		}
+	})
+	if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+		t.Fatalf("set issue prefix: %v", err)
+	}
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, "native-integration", "gc")
+
+	// A graph-class molecule in another binding, named by a work-class step
+	// here. Nothing reconciles the two ledgers, and this store cannot see it.
+	foreign := "gcg-70b1e5f2-a"
+
+	control, err := store.Create(Bead{Title: "control, no parent"})
+	if err != nil {
+		t.Fatalf("Create control: %v", err)
+	}
+	child, err := store.Create(Bead{Title: "step whose molecule lives in another ledger", ParentID: foreign})
+	if err != nil {
+		t.Fatalf("Create with a cross-prefix parent was refused on real Dolt: %v — this breaks every cross-store molecule", err)
+	}
+	if got := beadIDPrefix(child.ID); got != beadIDPrefix(control.ID) {
+		t.Errorf("a child naming a %q parent was minted as %q, but this store mints %q-shaped ids; placement followed ParentID instead of class", foreign, child.ID, control.ID)
+	}
+	got, err := store.Get(child.ID)
+	if err != nil {
+		t.Fatalf("Get child: %v", err)
+	}
+	if got.ParentID != foreign {
+		t.Errorf("ParentID round-tripped as %q, want %q verbatim", got.ParentID, foreign)
+	}
+	children, err := store.Children(foreign)
+	if err != nil {
+		t.Fatalf("Children on a cross-prefix parent: %v", err)
+	}
+	if len(children) != 1 || children[0].ID != child.ID {
+		t.Errorf("Children(%q) returned %d beads, want the one child stored here; a molecule's steps would read as missing", foreign, len(children))
+	}
+
+	if err := store.Update(control.ID, UpdateOpts{ParentID: &foreign}); err != nil {
+		t.Fatalf("Update reparenting onto a cross-prefix parent was refused: %v — Create admitted the same value", err)
+	}
+	reparented, err := store.Get(control.ID)
+	if err != nil {
+		t.Fatalf("Get control after reparent: %v", err)
+	}
+	if reparented.ParentID != foreign {
+		t.Errorf("after reparenting, ParentID is %q, want %q verbatim", reparented.ParentID, foreign)
+	}
+
+	// The other half of the boundary: inside its own namespace this store can
+	// see the absence, and both arms refuse it. Whether that refusal arrived
+	// before the write or after a committed create plus a compensating delete is
+	// not observable through this interface on real Dolt — the library refuses
+	// the same value either way and this backend does not mint a readable
+	// sequence — so the timing is pinned on the in-memory fixture, whose
+	// AddDependency validates nothing and therefore only refuses when this store
+	// does. What is pinned HERE is the library half the fixture cannot model.
+	dangling := "gc-999999"
+	if _, err := store.Create(Bead{Title: "step naming a missing parent in this ledger", ParentID: dangling}); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Create(parent %q) = %v, want ErrNotFound", dangling, err)
+	}
+	if err := store.Update(control.ID, UpdateOpts{ParentID: &dangling}); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Update(parent %q) = %v, want ErrNotFound", dangling, err)
+	}
+	stillForeign, err := store.Get(control.ID)
+	if err != nil {
+		t.Fatalf("Get control after the refused reparent: %v", err)
+	}
+	if stillForeign.ParentID != foreign {
+		t.Errorf("ParentID after the refused reparent is %q, want the previous %q; the refusal has to come before the write", stillForeign.ParentID, foreign)
+	}
+
+	// Moving between two foreign parents rewrites an edge whose target lives in
+	// depends_on_external, in one transaction: the old edge has to come out by
+	// the same pair it went in under, or the bead reads two parents.
+	otherForeign := "gcg-70b1e5f2-b"
+	if err := store.Update(control.ID, UpdateOpts{ParentID: &otherForeign}); err != nil {
+		t.Fatalf("Update moving between foreign parents %q -> %q: %v", foreign, otherForeign, err)
+	}
+	if got := realBackendParentEdges(t, store, control.ID); len(got) != 1 || got[0] != otherForeign {
+		t.Errorf("parent edges after moving between foreign parents = %v, want only %q", got, otherForeign)
+	}
+	cleared := ""
+	if err := store.Update(control.ID, UpdateOpts{ParentID: &cleared}); err != nil {
+		t.Fatalf("Update clearing a foreign parent: %v", err)
+	}
+	if got := realBackendParentEdges(t, store, control.ID); len(got) != 0 {
+		t.Errorf("parent edges after clearing a foreign parent = %v, want none", got)
+	}
+}
+
+// realBackendParentEdges lists id's stored parent-child targets.
+func realBackendParentEdges(t *testing.T, store *NativeDoltStore, id string) []string {
+	t.Helper()
+	deps, err := store.DepList(id, "down")
+	if err != nil {
+		t.Fatalf("DepList(%q, down): %v", id, err)
+	}
+	var parents []string
+	for _, dep := range deps {
+		if dep.Type == string(beadslib.DepParentChild) {
+			parents = append(parents, dep.DependsOnID)
+		}
+	}
+	return parents
 }
 
 func TestNativeDoltStoreRealBackendRoundTrip(t *testing.T) {
@@ -314,5 +511,105 @@ func TestNativeDoltStoreRealBackendRoundTrip(t *testing.T) {
 	}
 	if _, err := store.Get("gc-missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Get missing error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestNativeDoltStoreDepMetadata pins the payload read a Dolt-backed source
+// needs to satisfy beadsGraphEdgeMetadataReader.
+//
+// The dependencies table has carried a metadata column all along; nothing in
+// Gas City could ask for it, which is what let the infra-class migration copy
+// edges and drop their payloads without noticing. The contract mirrors
+// SQLiteStore.DepMetadata exactly, including the two cases that are NOT errors:
+// an edge that does not exist and an edge whose payload is empty both answer
+// carried=false, because SQLite declines to persist an empty payload at all and
+// a reader that distinguished them here would report a difference the
+// destination cannot have.
+func TestNativeDoltStoreDepMetadata(t *testing.T) {
+	ctx := context.Background()
+	storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))
+	if err != nil {
+		t.Skipf("upstream native beads storage unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := storage.Close(); err != nil {
+			t.Fatalf("close upstream storage: %v", err)
+		}
+	})
+	if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+		t.Fatalf("set issue prefix: %v", err)
+	}
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, "dep-metadata", "gc")
+
+	source, err := store.Create(Bead{Title: "edge payload source"})
+	if err != nil {
+		t.Fatalf("Create source: %v", err)
+	}
+	target, err := store.Create(Bead{Title: "edge payload target"})
+	if err != nil {
+		t.Fatalf("Create target: %v", err)
+	}
+	bare, err := store.Create(Bead{Title: "bare edge source"})
+	if err != nil {
+		t.Fatalf("Create bare: %v", err)
+	}
+
+	const payload = `{"gate":"waits_for","threshold":3}`
+	if err := storage.AddDependency(ctx, &beadslib.Dependency{
+		IssueID:     source.ID,
+		DependsOnID: target.ID,
+		Type:        beadslib.DependencyType("blocks"),
+		Metadata:    payload,
+	}, "dep-metadata-test"); err != nil {
+		t.Fatalf("AddDependency with payload: %v", err)
+	}
+	if err := store.DepAdd(bare.ID, target.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd without payload: %v", err)
+	}
+
+	got, carried, err := store.DepMetadata(source.ID, target.ID)
+	if err != nil {
+		t.Fatalf("DepMetadata on a carrying edge: %v", err)
+	}
+	if !carried {
+		t.Fatalf("DepMetadata(%s, %s) carried = false, want true", source.ID, target.ID)
+	}
+	// Dolt types the metadata column as JSON and hands back its OWN rendering —
+	// today the payload above comes back re-spaced. The comparison is therefore
+	// by JSON value, not by bytes, and that is a standing constraint on any
+	// future carriage slice: it cannot verify a copy by diffing payload bytes
+	// across the two engines, because SQLite stores the string verbatim.
+	assertSameJSON(t, got, payload)
+
+	got, carried, err = store.DepMetadata(bare.ID, target.ID)
+	if err != nil {
+		t.Fatalf("DepMetadata on a bare edge: %v", err)
+	}
+	if carried || got != "" {
+		t.Fatalf("DepMetadata on a bare edge = (%q, %v), want (\"\", false)", got, carried)
+	}
+
+	got, carried, err = store.DepMetadata(target.ID, source.ID)
+	if err != nil {
+		t.Fatalf("DepMetadata on a nonexistent edge: %v", err)
+	}
+	if carried || got != "" {
+		t.Fatalf("DepMetadata on a nonexistent edge = (%q, %v), want (\"\", false)", got, carried)
+	}
+}
+
+// assertSameJSON fails unless got and want are the same JSON value, whatever
+// whitespace the engine that returned them chose.
+func assertSameJSON(t *testing.T, got, want string) {
+	t.Helper()
+	var gotValue, wantValue any
+	if err := json.Unmarshal([]byte(got), &gotValue); err != nil {
+		t.Fatalf("payload %q is not JSON: %v", got, err)
+	}
+	if err := json.Unmarshal([]byte(want), &wantValue); err != nil {
+		t.Fatalf("expected payload %q is not JSON: %v", want, err)
+	}
+	if !reflect.DeepEqual(gotValue, wantValue) {
+		t.Fatalf("payload = %q, want the JSON value of %q", got, want)
 	}
 }

@@ -14,7 +14,9 @@ package main
 //     cannot be changed by it, and is byte-identical whether it runs or not.
 //   - It reads the trigger bead by id SOLELY to classify. That id is demand
 //     bookkeeping, never an assignment: nothing on the claim path may consult it
-//     to decide what to claim, and nothing here feeds back into that path.
+//     to decide what to claim, and nothing here feeds back into that path. The
+//     id comes off the seat's own session row (gc.trigger_bead_id), never its
+//     shell: no session env carries a trigger id (gastownhall/gascity#5738).
 //   - It is scoped to seats the controller spawned on demand evidence
 //     (GC_SPAWN_ORIGIN=demand, presence only). A named session or a manual hook
 //     draining empty is not evidence about anything.
@@ -38,6 +40,10 @@ import (
 // seat it minted from counted demand (build_desired_state.go).
 const demandSpawnOriginValue = "demand"
 
+// demandTriggerUnreadable is the TriggerStatusAtDrain of a read that failed:
+// the seat's session row, or the trigger row its stamp names.
+const demandTriggerUnreadable = "unreadable"
+
 // hookRecordDemandClaimDivergence is the emitter seam, replaced in tests.
 var hookRecordDemandClaimDivergence = recordDemandClaimDivergence
 
@@ -58,8 +64,11 @@ func recordDemandClaimDivergence(reason, dir string, opts hookClaimOptions, ops 
 	if sessionID == "" {
 		return
 	}
-	triggerID := hookClaimEnvValue(opts.Env, "GC_TRIGGER_WORK_BEAD_ID")
-	status, classification := classifyDemandTrigger(triggerID, dir, opts, ops)
+	triggerID, readErr := demandSessionTrigger(sessionID, ops)
+	status, classification := demandTriggerUnreadable, events.DemandClaimUnknown
+	if readErr == nil {
+		status, classification = classifyDemandTrigger(triggerID, dir, opts, ops)
+	}
 	payload, err := json.Marshal(events.SessionDemandClaimDivergencePayload{
 		SessionID:            sessionID,
 		Template:             hookClaimEnvValue(opts.Env, "GC_TEMPLATE"),
@@ -91,6 +100,22 @@ func recordDemandClaimDivergence(reason, dir string, opts hookClaimOptions, ops 
 	}
 }
 
+// demandSessionTrigger is the trigger stamp on sessionID's row: "" when the
+// row carries none, an error when it cannot be read. The caller records a
+// failed read as demandTriggerUnreadable and unknown, never as the "no stamp"
+// an empty id means, so a failed read neither manufactures a verdict nor
+// passes for an unstamped seat.
+func demandSessionTrigger(sessionID string, ops hookClaimOps) (string, error) {
+	if ops.ReadSessionTrigger == nil {
+		return "", nil
+	}
+	triggerID, err := ops.ReadSessionTrigger(sessionID)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(triggerID), nil
+}
+
 // classifyDemandTrigger reads the trigger row and reports (status, verdict).
 //
 // A read that FAILS is never absence here either: it classifies as unknown
@@ -107,25 +132,93 @@ func classifyDemandTrigger(triggerID, dir string, opts hookClaimOptions, ops hoo
 	defer cancel()
 	bead, err := ops.ReadWorkMeta(ctx, dir, opts.Env, triggerID, opts.Assignee)
 	if err != nil {
-		return "unreadable", events.DemandClaimUnknown
+		return demandTriggerUnreadable, events.DemandClaimUnknown
 	}
 	status = strings.ToLower(strings.TrimSpace(bead.Status))
 	// The invariant is about a row that is STILL claimable by a worker for this
 	// template: open, unassigned, route-matching, and not excluded by the shared
-	// serving rules. Anything else means the row moved on — which is what a
-	// sibling claim looks like, and is correct pull.
-	if status == "open" && demandRowServable(bead) && hookClaimMatchesRoute(bead, opts.RouteTargets) {
-		return status, events.DemandClaimDivergence
+	// serving rules. Anything else — a row that moved on, a sibling claim — is
+	// correct pull.
+	if status != "open" || !demandRowServable(bead) || !hookClaimMatchesRoute(bead, opts.RouteTargets) {
+		return status, events.DemandClaimBenign
 	}
-	return status, events.DemandClaimBenign
+	switch classifyDemandRowClaimability(bead, ops.nowOrWallClock()) {
+	case demandRowClaimable:
+		// Open, servable, route-matching, and claimable right now — the agreement
+		// invariant breaking.
+		return status, events.DemandClaimDivergence
+	case demandRowBlockednessUnproven:
+		// bd's is_blocked signal is a DENORMALIZED projection that can lag a
+		// just-closed blocker, and production reads do not carry it at all — so
+		// neither reading may decide this on its own. Bucketing every
+		// no-projection row away from the counter would be worse than useless: it
+		// is the reading production always hands us, so the divergence metric
+		// would read zero forever and stop being the agreement signal it exists to
+		// be. Settle it instead, against the same live deps the drain-ack open arm
+		// settles on.
+		return status, classifyDemandTriggerBlockedness(triggerID, dir, opts, ops)
+	default:
+		// Deferred: gated by a future defer_until or bd's deferred status, fresh
+		// bead-local fields, so draining past it is correct pull. Held rows are
+		// already benign through demandRowServable above; demandRowHeld lands
+		// here for the same reason.
+		return status, events.DemandClaimBenign
+	}
+}
+
+// classifyDemandTriggerBlockedness settles a trigger row whose blockedness the
+// bead alone could not answer, by re-deriving it from live dependencies.
+//
+// A genuinely blocked row was never claimable, so it is not the agreement
+// invariant breaking — but it is not folded into benign either: it gets its own
+// bucket, because a routed row the controller keeps counting while no worker can
+// take it is its own thing worth seeing. A row whose blocking deps turn out to be
+// MET is claimable, so it counts as divergence exactly as if the projection had
+// said so — a stale-true flag must not bury a real divergence.
+//
+// Every failure — no confirm seam wired, or a dep read that errors — reports
+// unknown, never divergence and never blocked. Same discipline as the read above:
+// a flaky store must not be able to manufacture the metric this counter exists to
+// keep trustworthy.
+func classifyDemandTriggerBlockedness(triggerID, dir string, opts hookClaimOptions, ops hookClaimOps) string {
+	if ops.ConfirmBlocked == nil {
+		return events.DemandClaimUnknown
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+	defer cancel()
+	blocked, err := ops.ConfirmBlocked(ctx, dir, opts.Env, triggerID, opts.Assignee)
+	switch {
+	case err != nil:
+		return events.DemandClaimUnknown
+	case blocked:
+		return events.DemandClaimBlocked
+	default:
+		return events.DemandClaimDivergence
+	}
 }
 
 // demandDivergenceOpsForBead is a tiny adapter so the classification read can be
-// driven directly in tests without constructing a whole claim.
+// driven directly in tests without constructing a whole claim. The blockedness
+// settlement answers "not blocked", the shape a row with no unmet plain `blocks`
+// edge produces; demandDivergenceOpsForBlockedBead drives the other answers.
 func demandDivergenceOpsForBead(bead beads.Bead, err error) hookClaimOps {
+	return demandDivergenceOpsForBlockedBead(bead, err, false, nil)
+}
+
+// demandDivergenceOpsForBlockedBead is demandDivergenceOpsForBead with the
+// live-dep blockedness settlement stubbed too, so a test can drive a confirmed
+// blocker or a failed dependency read. The session row reads as stamped with
+// bead's id.
+func demandDivergenceOpsForBlockedBead(bead beads.Bead, readErr error, blocked bool, confirmErr error) hookClaimOps {
 	return hookClaimOps{
+		ReadSessionTrigger: func(string) (string, error) {
+			return bead.ID, nil
+		},
 		ReadWorkMeta: func(context.Context, string, []string, string, string) (beads.Bead, error) {
-			return bead, err
+			return bead, readErr
+		},
+		ConfirmBlocked: func(context.Context, string, []string, string, string) (bool, error) {
+			return blocked, confirmErr
 		},
 	}
 }

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -267,6 +269,91 @@ func TestBuildAwakeInputFromReconcilerCarriesResetPendingMetadata(t *testing.T) 
 	}
 	if !got.ContinuationResetPending {
 		t.Fatalf("ContinuationResetPending = false, want true")
+	}
+}
+
+func TestBuildAwakeInputFromReconcilerCarriesDrainedResetPendingCombination(t *testing.T) {
+	now := time.Now().UTC()
+	metadata := func(withMarker bool) map[string]string {
+		m := map[string]string{
+			"state":                      "drained",
+			"session_name":               "s-drained-reset",
+			"template":                   "build-agent",
+			"continuation_reset_pending": "true",
+		}
+		if withMarker {
+			m[session.ResetCommittedAtKey] = now.Format(time.RFC3339)
+		}
+		return m
+	}
+
+	// A stalled reset (marker committed, start never happened) followed by a
+	// drain-ack leaves drained + pending + marker. The bridge must surface
+	// that combination, or the Drained guard on the reset-pending awake arm
+	// can never observe the state it exists for.
+	input := buildAwakeInputFromReconciler(
+		&config.City{},
+		"", // cityPath: empty exercises zero suspension state
+		[]session.Info{sessiontest.SeedBead(t, beads.Bead{
+			ID:       "mc-session-1",
+			Status:   "open",
+			Type:     "session",
+			Metadata: metadata(true),
+		})},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		now,
+	)
+	if len(input.SessionBeads) != 1 {
+		t.Fatalf("SessionBeads length = %d, want 1", len(input.SessionBeads))
+	}
+	got := input.SessionBeads[0]
+	if !got.Drained {
+		t.Fatalf("Drained = false, want true")
+	}
+	if !got.ContinuationResetPending {
+		t.Fatalf("ContinuationResetPending = false, want true")
+	}
+
+	// A drain-ack alone stamps continuation_reset_pending without
+	// reset_committed_at; the bridge deliberately does not surface that
+	// shape as reset-pending.
+	input = buildAwakeInputFromReconciler(
+		&config.City{},
+		"", // cityPath: empty exercises zero suspension state
+		[]session.Info{sessiontest.SeedBead(t, beads.Bead{
+			ID:       "mc-session-2",
+			Status:   "open",
+			Type:     "session",
+			Metadata: metadata(false),
+		})},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		now,
+	)
+	if len(input.SessionBeads) != 1 {
+		t.Fatalf("SessionBeads length = %d, want 1", len(input.SessionBeads))
+	}
+	got = input.SessionBeads[0]
+	if !got.Drained {
+		t.Fatalf("Drained = false, want true")
+	}
+	if got.ContinuationResetPending {
+		t.Fatalf("ContinuationResetPending = true for drain-ack-only metadata, want false")
 	}
 }
 
@@ -750,9 +837,9 @@ func TestBuildAwakeInputFromReconcilerCarriesNamedSessionDemand(t *testing.T) {
 		[]session.Info{sessiontest.SeedBead(t, sessionBead)},
 		map[string]int{"worker": 1},
 		map[string]bool{"primary": true},
+		map[string]bool{"routed": true},
 		nil,
-		nil,
-		nil,
+		map[string]bool{"waiter": true},
 		nil,
 		nil,
 		nil,
@@ -762,6 +849,12 @@ func TestBuildAwakeInputFromReconcilerCarriesNamedSessionDemand(t *testing.T) {
 
 	if !input.NamedSessionDemand["primary"] {
 		t.Fatalf("NamedSessionDemand[primary] = false, want true")
+	}
+	if !input.NamedSessionRoutedDemand["routed"] {
+		t.Fatal("NamedSessionRoutedDemand[routed] = false, want true")
+	}
+	if !input.ReadyWaitSet["waiter"] {
+		t.Fatal("ReadyWaitSet[waiter] = false, want true")
 	}
 	decisions := ComputeAwakeSet(input)
 	got := decisions["primary"]
@@ -889,5 +982,73 @@ func TestBuildAwakeInputFromReconcilerNamedAlwaysPostChurnRewakes(t *testing.T) 
 	}
 	if got.Reason != "named-always" {
 		t.Errorf("wake reason = %q, want named-always", got.Reason)
+	}
+}
+
+func pendingProbeAwakeBead() beads.Bead {
+	return beads.Bead{
+		ID:     "mc-session-1",
+		Status: "open",
+		Type:   "session",
+		Metadata: map[string]string{
+			"state":        "asleep",
+			"session_name": "s-worker",
+			"template":     "worker",
+		},
+	}
+}
+
+// Only a live runtime can raise an interaction. Probing a dead target lets an
+// outage (a failing probe reads as "unknown", which counts as pending) turn an
+// asleep session into a wake candidate.
+func TestAwakeInputSkipsPendingProbeForNonAliveTargets(t *testing.T) {
+	sp := runtime.NewFake()
+	sp.PendingErrors["s-worker"] = fmt.Errorf("capture-pane timed out: %w", runtime.ErrRuntimeUnavailable)
+	sessionBead := pendingProbeAwakeBead()
+
+	input, observationErrors := buildAwakeInputFromReconcilerWithObservationErrors(
+		&config.City{Agents: []config.Agent{{Name: "worker"}}},
+		"",
+		[]session.Info{sessiontest.SeedBead(t, sessionBead)},
+		nil, nil, nil, nil, nil, nil, nil,
+		[]wakeTarget{{info: sessiontest.SeedBead(t, sessionBead), alive: false}},
+		sp,
+		time.Now().UTC(),
+	)
+
+	if input.PendingSessions["s-worker"] {
+		t.Fatal("PendingSessions[s-worker] = true for a dead target, want false")
+	}
+	if err, ok := observationErrors["s-worker"]; ok {
+		t.Fatalf("observationErrors[s-worker] = %v for a dead target, want none", err)
+	}
+	if n := sp.CountCalls("Pending", "s-worker"); n != 0 {
+		t.Fatalf("Pending probed %d times for a dead target, want 0", n)
+	}
+}
+
+// An unknown pending answer on a live target marks the session pending and
+// records an observation error, so its lifecycle is deferred this tick.
+func TestAwakeInputDefersLifecycleOnPendingUnknown(t *testing.T) {
+	sp := runtime.NewFake()
+	sp.PendingErrors["s-worker"] = errors.New("capture-pane: fork failed")
+	sessionBead := pendingProbeAwakeBead()
+	sessionBead.Metadata["state"] = "active"
+
+	input, observationErrors := buildAwakeInputFromReconcilerWithObservationErrors(
+		&config.City{Agents: []config.Agent{{Name: "worker"}}},
+		"",
+		[]session.Info{sessiontest.SeedBead(t, sessionBead)},
+		nil, nil, nil, nil, nil, nil, nil,
+		[]wakeTarget{{info: sessiontest.SeedBead(t, sessionBead), alive: true}},
+		sp,
+		time.Now().UTC(),
+	)
+
+	if !input.PendingSessions["s-worker"] {
+		t.Fatal("PendingSessions[s-worker] = false on an unknown pending answer, want true")
+	}
+	if err := observationErrors["s-worker"]; !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("observationErrors[s-worker] = %v, want an error wrapping ErrRuntimeUnavailable", err)
 	}
 }

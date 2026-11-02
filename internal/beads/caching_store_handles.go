@@ -122,6 +122,16 @@ func (r logicalLiveStoreReader) DepList(id, direction string) ([]Dep, error) {
 	return r.store.DepList(id, direction)
 }
 
+// GetExactBatch is the store's own exact batch read, or
+// ErrExactBatchGetUnsupported for a store without one.
+func (r logicalLiveStoreReader) GetExactBatch(ids []string) (map[string]Bead, []string, error) {
+	getter, ok := r.store.(ExactBatchGetter)
+	if !ok {
+		return nil, nil, ErrExactBatchGetUnsupported
+	}
+	return getter.GetExactBatch(ids)
+}
+
 type cachedStoreReader struct {
 	store *CachingStore
 }
@@ -148,7 +158,7 @@ func (r cachedStoreReader) Ready(query ...ReadyQuery) ([]Bead, error) {
 	if err := r.store.ensureFullPrime(context.Background()); err != nil {
 		return nil, err
 	}
-	return r.store.cachedReadyOnly(readyQueryFromArgs(query))
+	return r.store.cachedReadyOnly(r.store.readyTier(readyQueryFromArgs(query)))
 }
 
 func (r cachedStoreReader) DepList(id, direction string) ([]Dep, error) {
@@ -173,12 +183,32 @@ func (r liveStoreReader) List(query ListQuery) ([]Bead, error) {
 }
 
 func (r liveStoreReader) Ready(query ...ReadyQuery) ([]Bead, error) {
-	return r.store.backing.Ready(query...)
+	return r.store.backing.Ready(r.store.readyArgsTier(query)...)
 }
 
 func (r liveStoreReader) DepList(id, direction string) ([]Dep, error) {
 	return r.store.backing.DepList(id, direction)
 }
+
+// GetExactBatch is the backing store's exact batch read, or
+// ErrExactBatchGetUnsupported for a backing without one: a live read by id
+// never consults the cache. It belongs to the live handle, not to the
+// CachingStore, so a caller that reads by id through the cache itself
+// (PrefetchExact) keeps reading the cache.
+func (r liveStoreReader) GetExactBatch(ids []string) (map[string]Bead, []string, error) {
+	getter, ok := r.store.backing.(ExactBatchGetter)
+	if !ok {
+		return nil, nil, ErrExactBatchGetUnsupported
+	}
+	return getter.GetExactBatch(ids)
+}
+
+// Both live handles expose the exact batch read beads.GetMany reads by id
+// through, answering for the store they read.
+var (
+	_ ExactBatchGetter = liveStoreReader{}
+	_ ExactBatchGetter = logicalLiveStoreReader{}
+)
 
 func logicalCachedListQuery(query ListQuery) ListQuery {
 	query.Live = false
@@ -211,7 +241,7 @@ func (c *CachingStore) cachedListOnly(query ListQuery) ([]Bead, error) {
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	if (c.state != cacheLive && c.state != cachePartial) || c.primePartialErr != nil || len(c.dirty) > 0 {
+	if !c.cacheServableForListQueryLocked(query) || len(c.dirty) > 0 {
 		return nil, fmt.Errorf("listing beads from cache: %w", ErrCacheUnavailable)
 	}
 	rows := make([]Bead, 0, len(c.beads))
@@ -254,6 +284,7 @@ func (c *CachingStore) cachedReadyCompleteOnly(ctx context.Context, query ReadyQ
 	}
 
 	statusByID := make(map[string]string, len(c.beads))
+	workOutcomeByID := make(map[string]string, len(c.beads))
 	openBeads := make([]Bead, 0, len(c.beads))
 	now := time.Now().UTC()
 	for _, b := range c.beads {
@@ -262,6 +293,7 @@ func (c *CachingStore) cachedReadyCompleteOnly(ctx context.Context, query ReadyQ
 			return nil, err
 		}
 		statusByID[b.ID] = b.Status
+		workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
 		if !IsReadyCandidateForTier(b, now, query.TierMode) {
 			continue
 		}
@@ -286,7 +318,7 @@ func (c *CachingStore) cachedReadyCompleteOnly(ctx context.Context, query ReadyQ
 
 	// The maps above are a consistent snapshot, so sorting and dependency
 	// evaluation need not hold the cache lock or delay writers.
-	return cachedReadyRows(ctx, query, statusByID, openBeads, depsByID, true)
+	return cachedReadyRows(ctx, query, statusByID, workOutcomeByID, openBeads, depsByID, true, true)
 }
 
 func (c *CachingStore) cachedReadyLocked(query ReadyQuery) ([]Bead, error) {
@@ -296,10 +328,12 @@ func (c *CachingStore) cachedReadyLocked(query ReadyQuery) ([]Bead, error) {
 	}
 
 	statusByID := make(map[string]string, len(c.beads))
+	workOutcomeByID := make(map[string]string, len(c.beads))
 	openBeads := make([]Bead, 0, len(c.beads))
 	now := time.Now().UTC()
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
+		workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
 		if !IsReadyCandidateForTier(b, now, query.TierMode) {
 			continue
 		}
@@ -311,16 +345,20 @@ func (c *CachingStore) cachedReadyLocked(query ReadyQuery) ([]Bead, error) {
 		}
 		openBeads = append(openBeads, cloneBead(b))
 	}
-	return cachedReadyRows(context.Background(), query, statusByID, openBeads, c.deps, c.depsComplete)
+	return cachedReadyRows(
+		context.Background(), query, statusByID, workOutcomeByID, openBeads, c.deps, c.depsComplete, c.state == cacheLive,
+	)
 }
 
 func cachedReadyRows(
 	ctx context.Context,
 	query ReadyQuery,
 	statusByID map[string]string,
+	workOutcomeByID map[string]string,
 	openBeads []Bead,
 	depsByID map[string][]Dep,
 	depsComplete bool,
+	nonclosedStatusesComplete bool,
 ) ([]Bead, error) {
 	cancellable := ctx != nil && ctx.Done() != nil
 	// Sort candidates before the limit-bounded loop below: the cache source is
@@ -347,7 +385,10 @@ func cachedReadyRows(
 		default:
 			return nil, fmt.Errorf("reading ready deps from cache: %w", ErrCacheUnavailable)
 		}
-		if !cachedBeadReady(b, statusByID, deps) {
+		if !nonclosedStatusesComplete && !cachedReadyDependencyStatusesKnown(b, statusByID, deps) {
+			return nil, fmt.Errorf("reading ready dependency statuses from cache: %w", ErrCacheUnavailable)
+		}
+		if !cachedBeadReady(b, statusByID, workOutcomeByID, deps) {
 			continue
 		}
 		result = append(result, cloneBead(b))

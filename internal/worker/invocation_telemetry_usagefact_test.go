@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,7 +49,7 @@ func newUsageFactHandle(t *testing.T) (handle *SessionHandle, transcriptPath, si
 
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
 	h, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchBase},
@@ -66,7 +67,7 @@ func newUsageFactHandle(t *testing.T) (handle *SessionHandle, transcriptPath, si
 	if err != nil {
 		t.Fatalf("NewSessionHandle: %v", err)
 	}
-	if err := h.Start(context.Background()); err != nil {
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := manager.Get(h.sessionID)
@@ -91,7 +92,7 @@ func TestMessageEmitsModelUsageFactToSink(t *testing.T) {
 		usageEntry("u1", "claude-opus-4-7", 100, 50, 2000, 800),
 	})
 
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "hello"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
 
@@ -160,7 +161,7 @@ func TestMessageEmitsUnpricedModelFactForUnknownModel(t *testing.T) {
 		usageEntry("u1", "totally-unknown-model-xyz", 100, 50, 0, 0),
 	})
 
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "hello"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
 
@@ -211,9 +212,9 @@ func TestModelUsageFact(t *testing.T) {
 	}
 	// modelUsageFact resolves RunID from the run chain; StepID is intentionally
 	// left unset — model usage is attributed at run level, not per formula step.
-	bead := beads.Bead{ID: "b1", Metadata: map[string]string{"molecule_id": "mol-7"}}
+	bead := beads.Bead{ID: "b1", Metadata: map[string]string{"molecule_id": "mol-7", "gc.formula_name": "my-formula"}}
 
-	priced := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "myrig/polecat-1", "claude", 0.02, true, now)
+	priced := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "myrig/polecat-1", "claude", 0.02, true, now, bead.Metadata["gc.formula_name"])
 	if priced.Kind != usage.KindModel {
 		t.Fatalf("kind = %q", priced.Kind)
 	}
@@ -234,6 +235,9 @@ func TestModelUsageFact(t *testing.T) {
 	if priced.Worker != "myrig/polecat-1" || priced.Model != "claude-opus-4-7" || priced.Provider != "claude" {
 		t.Fatalf("identity wrong: %+v", priced)
 	}
+	if priced.FormulaName != "my-formula" {
+		t.Fatalf("FormulaName = %q, want my-formula (propagated from gc.formula_name metadata)", priced.FormulaName)
+	}
 	if priced.InputTokens != 100 || priced.OutputTokens != 50 || priced.CacheReadTokens != 10 || priced.CacheCreationTokens != 5 {
 		t.Fatalf("tokens wrong: %+v", priced)
 	}
@@ -253,9 +257,40 @@ func TestModelUsageFact(t *testing.T) {
 	}
 
 	// Unpriced collapses cost to zero regardless of the cost argument.
-	unp := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, false, now)
+	unp := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, false, now, "")
 	if !unp.Unpriced || unp.CostUSDEstimate != 0 {
 		t.Fatalf("unpriced fact must zero the cost and set the flag: %+v", unp)
+	}
+}
+
+// TestModelUsageFactPrefersEntryTimestampOverNow pins the At fallback
+// contract: when the extractor populated the transcript entry's own
+// Timestamp, At must use it instead of the wall-clock now the caller passed
+// in — that now is when the FOLLOWING prompt operation happened to observe
+// the completed invocation, not when the invocation itself ran.
+func TestModelUsageFactPrefersEntryTimestampOverNow(t *testing.T) {
+	now := time.Unix(1000, 0).UTC()
+	entryTime := time.Unix(1, 0).UTC()
+	u := sessionlog.TailUsage{
+		EntryUUID:   "entry-1",
+		Model:       "claude-opus-4-7",
+		InputTokens: 100,
+		Timestamp:   entryTime,
+	}
+	bead := beads.Bead{ID: "b1", Metadata: map[string]string{"molecule_id": "mol-7"}}
+
+	f := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, true, now, "")
+	if f.At != entryTime.UnixMilli() {
+		t.Fatalf("At = %d, want the entry's own timestamp %d, not now (%d)", f.At, entryTime.UnixMilli(), now.UnixMilli())
+	}
+
+	// A zero Timestamp (older transcript format, or a provider whose tail
+	// extraction doesn't populate it) must fall back to now unchanged.
+	uNoTimestamp := u
+	uNoTimestamp.Timestamp = time.Time{}
+	fallback := modelUsageFact(uNoTimestamp, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, true, now, "")
+	if fallback.At != now.UnixMilli() {
+		t.Fatalf("At = %d, want now (%d) when Timestamp is zero", fallback.At, now.UnixMilli())
 	}
 }
 
@@ -333,6 +368,7 @@ func TestFactorySweepSessionModelUsageClaude(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},
@@ -354,7 +390,7 @@ func TestFactorySweepSessionModelUsageClaude(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Session: %v", err)
 	}
-	if err := h.Start(context.Background()); err != nil {
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	id := h.sessionID
@@ -503,6 +539,7 @@ func TestFactorySweepSessionModelUsageRecordsMetrics(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},
@@ -524,7 +561,7 @@ func TestFactorySweepSessionModelUsageRecordsMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Session: %v", err)
 	}
-	if err := h.Start(context.Background()); err != nil {
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	id := h.sessionID
@@ -598,6 +635,7 @@ func TestFactorySweepSessionModelUsageRetriesAfterTransientSinkError(t *testing.
 	// Fail the first model-fact write, then recover.
 	flaky := &flakyModelSink{inner: usage.NewLocalSink(sinkPath), failModelWrites: 1}
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},
@@ -619,7 +657,7 @@ func TestFactorySweepSessionModelUsageRetriesAfterTransientSinkError(t *testing.
 	if err != nil {
 		t.Fatalf("Session: %v", err)
 	}
-	if err := h.Start(context.Background()); err != nil {
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	id := h.sessionID
@@ -696,7 +734,7 @@ func TestMessageRecordsWrappedCodexModelFactViaLadder(t *testing.T) {
 	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
 	h, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchBase},
@@ -714,7 +752,7 @@ func TestMessageRecordsWrappedCodexModelFactViaLadder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSessionHandle: %v", err)
 	}
-	if err := h.Start(context.Background()); err != nil {
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	id := h.sessionID
@@ -741,7 +779,7 @@ func TestMessageRecordsWrappedCodexModelFactViaLadder(t *testing.T) {
 		codexWorkerTurnContext(),
 		codexWorkerTokenCount("2026-06-12T10:00:05.000Z", 15917, 15562, 10624, 355),
 	})
-	if _, err := h.Message(context.Background(), MessageRequest{Text: "hello"}); err != nil {
+	if _, err := h.Message(context.Background(), handleActor(t, h, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
 
@@ -752,7 +790,7 @@ func TestMessageRecordsWrappedCodexModelFactViaLadder(t *testing.T) {
 		codexWorkerTokenCount("2026-06-12T10:00:05.000Z", 15917, 15562, 10624, 355),
 		codexWorkerTokenCount("2026-06-12T10:00:10.000Z", 34114, 17888, 15232, 309),
 	})
-	if _, err := h.Nudge(context.Background(), NudgeRequest{Text: "still there?"}); err != nil {
+	if _, err := h.Nudge(context.Background(), handleActor(t, h, sessionpkg.ActorAgent), NudgeRequest{Text: "still there?"}); err != nil {
 		t.Fatalf("Nudge: %v", err)
 	}
 
@@ -954,6 +992,7 @@ func TestFactorySweepSessionModelUsageKeylessClaudeAmbiguousSettles(t *testing.T
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},
@@ -963,26 +1002,49 @@ func TestFactorySweepSessionModelUsageKeylessClaudeAmbiguousSettles(t *testing.T
 		t.Fatalf("NewFactory: %v", err)
 	}
 
-	// Two open sessions, same workdir, no session_key → ambiguous workdir fallback.
-	for _, title := range []string{"one", "two"} {
-		h, err := factory.Session(SessionSpec{
-			Profile:  ProfileClaudeTmuxCLI,
-			Template: "probe",
-			Title:    title,
-			Command:  "claude",
-			WorkDir:  workDir,
-			Provider: "claude",
-		})
-		if err != nil {
-			t.Fatalf("Session(%s): %v", title, err)
-		}
-		if err := h.Start(context.Background()); err != nil {
-			t.Fatalf("Start(%s): %v", title, err)
-		}
-		// Clear any captured session_key so discovery is forced into workdir fallback.
-		if err := store.SetMetadata(h.sessionID, "session_key", ""); err != nil {
-			t.Fatal(err)
-		}
+	// One keyless session is created, started, and killed before a second is
+	// created sharing the same workdir. Kill (not Close) leaves its bead open
+	// so the ambiguity check below still counts it, while releasing the
+	// runtime so the second Start is not refused as a live cwd collision.
+	one, err := factory.Session(SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "one",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+	})
+	if err != nil {
+		t.Fatalf("Session(one): %v", err)
+	}
+	if err := one.Start(context.Background(), handleActor(t, one, sessionpkg.ActorAgent)); err != nil {
+		t.Fatalf("Start(one): %v", err)
+	}
+	// Clear any captured session_key so discovery is forced into workdir fallback.
+	if err := store.SetMetadata(one.sessionID, "session_key", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := one.Kill(context.Background(), handleActor(t, one, sessionpkg.ActorOperator)); err != nil {
+		t.Fatalf("Kill(one): %v", err)
+	}
+
+	two, err := factory.Session(SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "two",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+	})
+	if err != nil {
+		t.Fatalf("Session(two): %v", err)
+	}
+	if err := two.Start(context.Background(), handleActor(t, two, sessionpkg.ActorAgent)); err != nil {
+		t.Fatalf("Start(two): %v", err)
+	}
+	// Clear any captured session_key so discovery is forced into workdir fallback.
+	if err := store.SetMetadata(two.sessionID, "session_key", ""); err != nil {
+		t.Fatal(err)
 	}
 
 	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
@@ -1022,6 +1084,7 @@ func TestDiscoverSweepTranscriptKeylessClaudeAmbiguousSettles(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},
@@ -1031,25 +1094,47 @@ func TestDiscoverSweepTranscriptKeylessClaudeAmbiguousSettles(t *testing.T) {
 		t.Fatalf("NewFactory: %v", err)
 	}
 
-	// Two open sessions, same workdir, no session_key -> ambiguous workdir fallback.
-	for _, title := range []string{"one", "two"} {
-		h, err := factory.Session(SessionSpec{
-			Profile:  ProfileClaudeTmuxCLI,
-			Template: "probe",
-			Title:    title,
-			Command:  "claude",
-			WorkDir:  workDir,
-			Provider: "claude",
-		})
-		if err != nil {
-			t.Fatalf("Session(%s): %v", title, err)
-		}
-		if err := h.Start(context.Background()); err != nil {
-			t.Fatalf("Start(%s): %v", title, err)
-		}
-		if err := store.SetMetadata(h.sessionID, "session_key", ""); err != nil {
-			t.Fatal(err)
-		}
+	// One keyless session is created, started, and killed before a second is
+	// created sharing the same workdir. Kill (not Close) leaves its bead open
+	// so the ambiguity check below still counts it, while releasing the
+	// runtime so the second Start is not refused as a live cwd collision.
+	one, err := factory.Session(SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "one",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+	})
+	if err != nil {
+		t.Fatalf("Session(one): %v", err)
+	}
+	if err := one.Start(context.Background(), handleActor(t, one, sessionpkg.ActorAgent)); err != nil {
+		t.Fatalf("Start(one): %v", err)
+	}
+	if err := store.SetMetadata(one.sessionID, "session_key", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := one.Kill(context.Background(), handleActor(t, one, sessionpkg.ActorOperator)); err != nil {
+		t.Fatalf("Kill(one): %v", err)
+	}
+
+	two, err := factory.Session(SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "two",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+	})
+	if err != nil {
+		t.Fatalf("Session(two): %v", err)
+	}
+	if err := two.Start(context.Background(), handleActor(t, two, sessionpkg.ActorAgent)); err != nil {
+		t.Fatalf("Start(two): %v", err)
+	}
+	if err := store.SetMetadata(two.sessionID, "session_key", ""); err != nil {
+		t.Fatal(err)
 	}
 
 	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
@@ -1102,6 +1187,7 @@ func TestFactorySweepSessionModelUsageKeylessClaudeTranscriptErrorRetries(t *tes
 	store := &listErrStore{Store: beads.NewMemStore()}
 	sp := runtime.NewFake()
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},
@@ -1122,7 +1208,7 @@ func TestFactorySweepSessionModelUsageKeylessClaudeTranscriptErrorRetries(t *tes
 	if err != nil {
 		t.Fatalf("Session: %v", err)
 	}
-	if err := h.Start(context.Background()); err != nil {
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if err := store.SetMetadata(h.sessionID, "session_key", ""); err != nil {
@@ -1174,6 +1260,7 @@ func TestFactorySweepSessionModelUsageKeylessClaudeAbsentTranscriptRetries(t *te
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},
@@ -1195,7 +1282,7 @@ func TestFactorySweepSessionModelUsageKeylessClaudeAbsentTranscriptRetries(t *te
 	if err != nil {
 		t.Fatalf("Session: %v", err)
 	}
-	if err := h.Start(context.Background()); err != nil {
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if err := store.SetMetadata(h.sessionID, "session_key", ""); err != nil {
@@ -1431,5 +1518,325 @@ func TestFactorySweepSessionModelUsageKeylessCodexDirtySingletonRetries(t *testi
 	}
 	if facts[0].OutputTokens != 50 {
 		t.Fatalf("OutputTokens = %d, want 50 (proves the cwd==work_dir rollout recorded, not the sibling)", facts[0].OutputTokens)
+	}
+}
+
+// paddedUsageEntry returns a usage-bearing assistant entry inflated to roughly
+// padBytes so a modest number of entries exceeds the extractor's fixed tail
+// window, reproducing a real transcript's bytes-per-invocation.
+func paddedUsageEntry(uuid, messageID string, padBytes int) map[string]any {
+	entry := usageEntryWithMessageID(uuid, messageID, 100, 50, 0, 0)
+	entry["message"].(map[string]any)["content"] = strings.Repeat("x", padBytes)
+	return entry
+}
+
+// TestFactorySweepRecoversBacklogBeyondFixedTailWindow is the end-to-end guard
+// for the defect: when more than one tail window of transcript accumulates
+// between sweeps, every invocation past the window used to be dropped
+// permanently, because the persisted cursor is a message identity with no byte
+// offset to resume from. The sweep must now recover the whole backlog.
+func TestFactorySweepRecoversBacklogBeyondFixedTailWindow(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
+		Store:       store,
+		Provider:    sp,
+		SearchPaths: []string{searchBase},
+		UsageSink:   usage.NewLocalSink(sinkPath),
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	h, err := factory.Session(SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+		Metadata: map[string]string{"agent_name": "myrig/polecat-1"},
+	})
+	if err != nil {
+		t.Fatalf("Session: %v", err)
+	}
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	id := h.sessionID
+
+	info, err := h.manager.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", id, err)
+	}
+	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", slugDir, err)
+	}
+	transcriptPath := filepath.Join(slugDir, info.SessionKey+".jsonl")
+
+	// 40 entries at ~20KB each ≈ 800KB: over a dozen fixed windows.
+	const backlog = 40
+	rows := make([]map[string]any, 0, backlog+1)
+	rows = append(rows, usageEntryWithMessageID("u0", "msg-cursor", 1, 1, 0, 0))
+	for i := range backlog {
+		rows = append(rows, paddedUsageEntry(fmt.Sprintf("u%d", i+1), fmt.Sprintf("msg-%02d", i), 20*1024))
+	}
+	writeWorkerTestJSONL(t, transcriptPath, rows)
+
+	// The session was last recorded at the very first entry, so all 40 that
+	// follow are owed. Under the fixed window only the last handful are visible.
+	if err := store.SetMetadata(id, sessionpkg.MetadataKeyInvocationUsageCursor, "msg-cursor"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadata(id, "molecule_id", "run-Z"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Guard: the fixed window genuinely cannot reach the cursor, so this test
+	// keeps exercising the defect rather than quietly becoming a tautology.
+	fixed, err := sessionlog.ExtractTailUsage(transcriptPath)
+	if err != nil {
+		t.Fatalf("ExtractTailUsage: %v", err)
+	}
+	if len(fixed) >= backlog {
+		t.Fatalf("fixed tail window saw %d of %d entries; test no longer reproduces the backlog", len(fixed), backlog)
+	}
+
+	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), id, b.Metadata, time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatalf("SweepSessionModelUsage: %v", err)
+	}
+	if !settled {
+		t.Fatal("a fully-recorded sweep must report settled")
+	}
+	if emitted != backlog {
+		t.Fatalf("emitted = %d, want %d (the whole backlog past the fixed window)", emitted, backlog)
+	}
+
+	facts, warnings, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected sink warnings: %v", warnings)
+	}
+	if len(facts) != backlog {
+		t.Fatalf("sink holds %d facts, want %d", len(facts), backlog)
+	}
+}
+
+// TestFactorySweepWithoutCursorMatchesFixedTailWindow pins the other half of
+// the per-family coverage ceiling documented on SweepSessionModelUsage: growth
+// is cursor-bounded, so before a cursor exists there is no growth at all.
+// ExtractTailUsageSince short-circuits to one fixed 64KB read, and the sweep
+// therefore emits only what that window holds — the pre-change behavior, with
+// no cap log. The cursor the sweep then persists points at the newest entry,
+// which is the growth loop's stop condition, so no later sweep reaches back
+// across the gap. TestFactorySweepRecoversBacklogBeyondFixedTailWindow
+// pre-seeds a cursor and so cannot cover this branch.
+func TestFactorySweepWithoutCursorMatchesFixedTailWindow(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
+		Store:       store,
+		Provider:    sp,
+		SearchPaths: []string{searchBase},
+		UsageSink:   usage.NewLocalSink(sinkPath),
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	h, err := factory.Session(SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+		Metadata: map[string]string{"agent_name": "myrig/polecat-1"},
+	})
+	if err != nil {
+		t.Fatalf("Session: %v", err)
+	}
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	id := h.sessionID
+
+	info, err := h.manager.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", id, err)
+	}
+	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", slugDir, err)
+	}
+	transcriptPath := filepath.Join(slugDir, info.SessionKey+".jsonl")
+
+	// Same ~800KB backlog as the cursor-seeded test, so the only difference
+	// between the two is whether a cursor exists.
+	const backlog = 40
+	rows := make([]map[string]any, 0, backlog)
+	for i := range backlog {
+		rows = append(rows, paddedUsageEntry(fmt.Sprintf("u%d", i+1), fmt.Sprintf("msg-%02d", i), 20*1024))
+	}
+	writeWorkerTestJSONL(t, transcriptPath, rows)
+
+	// No MetadataKeyInvocationUsageCursor: this is a session's first sweep.
+	if err := store.SetMetadata(id, "molecule_id", "run-Z"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(b.Metadata[sessionpkg.MetadataKeyInvocationUsageCursor]); got != "" {
+		t.Fatalf("precondition: cursor = %q, want empty", got)
+	}
+
+	// The fixed window is what the sweep is expected to be limited to, and it
+	// must be genuinely narrower than the backlog or this asserts nothing.
+	fixed, err := sessionlog.ExtractTailUsage(transcriptPath)
+	if err != nil {
+		t.Fatalf("ExtractTailUsage: %v", err)
+	}
+	if len(fixed) == 0 || len(fixed) >= backlog {
+		t.Fatalf("fixed tail window saw %d of %d entries; test no longer isolates the empty-cursor branch", len(fixed), backlog)
+	}
+
+	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), id, b.Metadata, time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatalf("SweepSessionModelUsage: %v", err)
+	}
+	if !settled {
+		t.Fatal("a fully-recorded sweep must report settled")
+	}
+	if emitted != len(fixed) {
+		t.Fatalf("emitted = %d, want %d (the fixed window only, with no cursor to grow toward)", emitted, len(fixed))
+	}
+
+	facts, warnings, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected sink warnings: %v", warnings)
+	}
+	if len(facts) != len(fixed) {
+		t.Fatalf("sink holds %d facts, want %d", len(facts), len(fixed))
+	}
+
+	// The persisted cursor is the newest entry, not the oldest one the sweep
+	// missed: the gap below it is unreachable from every later sweep.
+	after, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCursor := fmt.Sprintf("msg-%02d", backlog-1)
+	if got := after.Metadata[sessionpkg.MetadataKeyInvocationUsageCursor]; got != wantCursor {
+		t.Fatalf("persisted cursor = %q, want %q (the newest entry)", got, wantCursor)
+	}
+}
+
+// TestFactorySweepClosedIntervalModelUsageClaudeReadsTheIntervalKey pins the
+// closed-interval sweep's claude discovery: the transcript resolves by the
+// interval's own session_key, not the newer one a reopened row runs under,
+// and never through the session List the manager's lookup falls back to on a
+// keyed miss (store.fail rejects every List). A keyed miss stays transient;
+// a keyless interval is a permanent miss.
+func TestFactorySweepClosedIntervalModelUsageClaudeReadsTheIntervalKey(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
+	store := &listErrStore{Store: beads.NewMemStore()}
+	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
+		Store:       store,
+		Provider:    runtime.NewFake(),
+		SearchPaths: []string{searchBase},
+		UsageSink:   usage.NewLocalSink(sinkPath),
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+	h, err := factory.Session(SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "one",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+	})
+	if err != nil {
+		t.Fatalf("Session: %v", err)
+	}
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	id := h.sessionID
+	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkerTestJSONL(t, filepath.Join(slugDir, "closed-key.jsonl"), []map[string]any{
+		usageEntryWithMessageID("u1", "msg-1", 100, 50, 0, 0),
+		usageEntryWithMessageID("u2", "msg-2", 200, 100, 0, 0),
+	})
+	writeWorkerTestJSONL(t, filepath.Join(slugDir, "newer-key.jsonl"), []map[string]any{
+		usageEntryWithMessageID("u3", "msg-3", 300, 150, 0, 0),
+	})
+	if err := store.SetMetadata(id, "session_key", "newer-key"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	interval := map[string]string{}
+	for k, v := range b.Metadata {
+		interval[k] = v
+	}
+	interval["session_key"] = "closed-key"
+	store.fail = true
+
+	emitted, settled, err := factory.SweepClosedIntervalModelUsage(context.Background(), id, interval, time.Unix(1, 0).UTC())
+	if err != nil || !settled || emitted != 2 {
+		t.Fatalf("closed-key sweep = %d, settled %t, %v; want 2 facts, settled", emitted, settled, err)
+	}
+	facts, _, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reqs []string
+	for _, f := range facts {
+		reqs = append(reqs, f.UpstreamReqID)
+	}
+	if got := strings.Join(reqs, ","); got != "msg-1,msg-2" {
+		t.Fatalf("swept invocations = %s, want msg-1,msg-2 from the closed interval's transcript", got)
+	}
+
+	interval["session_key"] = "absent-key"
+	if emitted, settled, err := factory.SweepClosedIntervalModelUsage(context.Background(), id, interval, time.Unix(2, 0).UTC()); err != nil || settled || emitted != 0 {
+		t.Fatalf("keyed miss = %d, settled %t, %v; want nothing recorded and unsettled", emitted, settled, err)
+	}
+	interval["session_key"] = ""
+	if emitted, settled, err := factory.SweepClosedIntervalModelUsage(context.Background(), id, interval, time.Unix(3, 0).UTC()); err != nil || !settled || emitted != 0 {
+		t.Fatalf("keyless interval = %d, settled %t, %v; want nothing recorded and settled", emitted, settled, err)
 	}
 }

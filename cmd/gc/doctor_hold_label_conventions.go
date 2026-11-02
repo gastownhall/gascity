@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -21,16 +22,16 @@ var retiredHoldLabels = []string{
 	"blocked-on-upstream",
 	"blocked-prereq",
 	"human-hold",
-	"human",
 	"on-hold",
 }
 
 // holdLabelConventionsFixHint mirrors ga-tug8ry.1's disposition table.
-// engdocs/contributors/hold-label-conventions.md does not exist on
-// origin/main yet, so the hint must stand on its own rather than point at it.
+// Bare "human" is not a hold label (it answers who executes, not what the
+// bead is waiting on) and is intentionally absent. The hint stands on its
+// own rather than pointing at hold-label-conventions.md.
 const holdLabelConventionsFixHint = "Retired hold/blocked label in use (ga-tug8ry.1 taxonomy): " +
 	"arch-hold and blocked-prereq retire with no migration; blocked retires in favor of the " +
-	"native status field; blocked-by-operator, blocked-on-upstream, human-hold, and human " +
+	"native status field; blocked-by-operator, blocked-on-upstream, and human-hold " +
 	"migrate to hold:mayor; blocked-on-external migrates to hold:external; on-hold retires as " +
 	"already-superseded. Set a sanctioned hold label with " +
 	"'bd set-state <id> hold=mayor|external --reason \"...\"'."
@@ -77,33 +78,33 @@ func (c *holdLabelConventionsCheck) Run(_ *doctor.CheckContext) *doctor.CheckRes
 		return res
 	}
 
+	// One listing of the store's non-closed beads, matched against the
+	// retired labels in memory, instead of one read per label (two bd forks
+	// each on a bd-backed store). The query is the one
+	// v2-routed-to-namespace lists, so within a doctor run the bd read memo
+	// answers it without another fork.
+	items, err := store.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		res.Status = doctor.StatusWarning
+		res.Message = fmt.Sprintf("hold-label conventions unknown for %s: listing beads: %v", c.label, err)
+		return res
+	}
 	var details []string
-	var queryErrs []string
-	for _, label := range retiredHoldLabels {
-		found, err := store.ListByLabel(label, 0)
-		if err != nil {
-			queryErrs = append(queryErrs, fmt.Sprintf("querying label %q: %v", label, err))
-			continue
-		}
-		for _, b := range found {
-			details = append(details, fmt.Sprintf("retired label %q on %s %q", label, b.ID, b.Title))
+	for _, b := range items {
+		for _, label := range retiredHoldLabels {
+			if slices.Contains(b.Labels, label) {
+				details = append(details, fmt.Sprintf("retired label %q on %s %q", label, b.ID, b.Title))
+			}
 		}
 	}
 	sort.Strings(details)
-	sort.Strings(queryErrs)
 
-	switch {
-	case len(details) > 0:
+	if len(details) > 0 {
 		res.Status = doctor.StatusError
 		res.Message = fmt.Sprintf("%d retired hold/blocked label use(s) found in %s", len(details), c.label)
-		details = append(details, queryErrs...)
 		res.Details = details
 		res.FixHint = holdLabelConventionsFixHint
-	case len(queryErrs) > 0:
-		res.Status = doctor.StatusWarning
-		res.Message = fmt.Sprintf("hold-label conventions check for %s hit %d label-query error(s)", c.label, len(queryErrs))
-		res.Details = queryErrs
-	default:
+	} else {
 		res.Status = doctor.StatusOK
 		res.Message = fmt.Sprintf("no retired hold/blocked labels found in %s", c.label)
 	}

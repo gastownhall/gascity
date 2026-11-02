@@ -1,0 +1,13 @@
+{
+  "backup": {
+    "last_dolt_commit": "",
+    "timestamp": "0001-01-01T00:00:00Z"
+  },
+  "database_size": {
+    "bytes": 2058960,
+    "human": "2.0 MB"
+  },
+  "dolt": {
+    "configured": false
+  }
+}

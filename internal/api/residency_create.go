@@ -43,6 +43,14 @@ func errRigRequired() error {
 // binding to route to — so the request names something that does not exist, and
 // both silent answers are lies: honoring the rig re-creates the stranded write,
 // ignoring it returns a bead that is not where the caller was told to look.
+//
+// Placement is by CLASS and by rig, and b.ParentID is deliberately not
+// consulted. Following it would be the intuitive rule and the wrong one: a
+// graph-class step whose parent is a work bead in a rig ledger would be minted
+// under the rig's prefix, in the store the city moved the graph class off, and
+// no later copy can change an id. ParentID stays a weak city-scoped reference
+// (see beads.Bead.ParentID) precisely so a cross-store parent is a normal
+// shape here rather than a placement input.
 func (s *Server) createStoreForBead(b beads.Bead, rig string) (beads.Store, error) {
 	class := coordclass.Classify(b)
 	if !class.IsInfrastructure() {

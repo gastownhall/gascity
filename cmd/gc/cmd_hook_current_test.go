@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -158,5 +159,32 @@ func TestHookCurrentIsWiredIntoTheHookCommandFamily(t *testing.T) {
 	}
 	if sub.Args == nil {
 		t.Error("gc hook current accepts arbitrary args; it is scoped to the calling session")
+	}
+}
+
+// TestHookCurrentDocIdiomPrefersClaimOverTriggerHint pins the documented close
+// idiom in the Long help text: it must resolve to the session's own claim
+// before ever consulting $GC_TRIGGER_BEAD_ID. That variable is frozen in the
+// process environment at exec and is frequently a foreign bead on named
+// singleton sessions (mayor, deacon) that also carry it — a step following
+// the old chain would close someone else's work. This guards the doc text
+// against silently regressing back to preferring the frozen hint.
+func TestHookCurrentDocIdiomPrefersClaimOverTriggerHint(t *testing.T) {
+	long := newHookCurrentCmd(io.Discard, io.Discard).Long
+	if !strings.Contains(long, `BEAD_ID="${GC_BEAD_ID:-$(gc hook current --id-only)}"`) {
+		t.Errorf("documented idiom does not prefer the authoritative claim; got:\n%s", long)
+	}
+	if strings.Contains(long, "${GC_TRIGGER_BEAD_ID:-$(gc hook current") {
+		t.Error("documented idiom still consults the frozen GC_TRIGGER_BEAD_ID hint before the claim")
+	}
+}
+
+// TestHookCurrentDocNamesNoTriggerEnv pins that the Long help text no longer
+// documents $GC_TRIGGER_BEAD_ID: no session shell carries a trigger id
+// (#5738), so the help must not describe one as present on any seat.
+func TestHookCurrentDocNamesNoTriggerEnv(t *testing.T) {
+	long := newHookCurrentCmd(io.Discard, io.Discard).Long
+	if strings.Contains(long, "GC_TRIGGER_") {
+		t.Errorf("help text still documents a GC_TRIGGER_* shell variable; got:\n%s", long)
 	}
 }

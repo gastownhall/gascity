@@ -242,7 +242,7 @@ Rig-scoped requirements are validated while loading the pack for a rig.
 Pack imports are named dependencies.
 
 ```toml
-[imports.gascity]
+[imports.gc]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 version = "^1"
 ```
@@ -473,10 +473,30 @@ protocol = 0
 |---|---|---|
 | `command` | Required. The runtime executable. A bare name (no path separator) is resolved on PATH at session start. A relative path (any other value containing a separator) is anchored at the declaring pack directory during load. An absolute path is used as written. | required |
 | `protocol` | The RPP version the executable speaks. `0` is the only version today; any other value fails composition. | current |
+| `prompt_delivery` | Opts this runtime into a non-default oversized-prompt delivery strategy. Unset (default) or `"nudge-fallback"`; any other value fails composition. | current |
 
 `<name>` must not contain `:`, `/`, or whitespace, since `:` is reserved for
 prefix-form selection names (`exec:...`) and `/` and whitespace keep selection
 names shell- and TOML-friendly.
+
+`prompt_delivery` controls what happens when a rendered startup prompt is too
+large for an OS `exec()` argv (see the argv-safety guard in
+`cmd/gc/prompt_delivery.go`). A runtime `gc` does not already classify as
+argv-safe or nudge-capable hard-fails on an oversized prompt by default —
+unset is that default. Declaring `prompt_delivery = "nudge-fallback"`
+asserts the executable has a working post-start Nudge path (the same RPP
+Nudge operation builtin nudge-fallback runtimes like `tmux` use) that an
+oversized prompt can reroute through instead of argv. Like `command`, this
+is a pack-composition-time assertion: `gc` accepts the declaration as
+written and does not verify it against the runtime executable, at compose
+time or via the `pack-runtimes` doctor check below. Pack authors can
+self-verify ahead of production: `gc runtime check <name>` resolves the
+declaration and smoke-tests it by invoking the runtime's `nudge` operation
+against a throwaway conformance session, failing the run (`required: nudge`)
+when nudge is absent or broken. That smoke-tests the operation, not that an
+oversized prompt reroutes end to end — a pack that never runs it and
+declares `nudge-fallback` falsely still will not fail until an oversized
+prompt actually reaches that runtime at session start.
 
 City composition registers declared runtimes into a city-wide selection
 registry (`City.Runtimes`), including runtimes declared by rig-imported packs.
@@ -598,6 +618,19 @@ An optional `command.toml` may override the default command words or script:
 | `command` | array of string | no | Command words. Defaults to the directory path under `commands/`. |
 | `description` | string | no | Short help text. |
 | `run` | string | no | Entrypoint path relative to the command directory. Defaults to `run.sh`. |
+
+A command runs with the invoking environment plus these variables:
+
+| Variable | Value |
+|---|---|
+| `GC_BIN` | The `gc` executable that invoked the command. Use it for recursive `gc` calls. |
+| `GC_CITY`, `GC_CITY_PATH` | The city root. |
+| `GC_CITY_NAME` | The city name. |
+| `GC_CITY_RUNTIME_DIR` | The city's runtime state directory. |
+| `GC_PACK_DIR` | The root of the pack that defines the command. |
+| `GC_PACK_NAME` | That pack's name. |
+| `GC_PACK_STATE_DIR` | The pack's state directory for this city. |
+| `GC_SUPERVISOR_URL` | Base URL of the supervisor API serving the city, such as `http://127.0.0.1:8372`. City routes are under `$GC_SUPERVISOR_URL/v0/city/<name>/`, where `<name>` is the name the city is registered under (normally `GC_CITY_NAME`). Set only when the city is registered with a supervisor whose API address is plain `http` on loopback, the address `gc` itself uses; otherwise unset. An inherited value is never passed through. |
 
 > **Compatibility:** Legacy `pack.toml` `[[commands]]` entries remain loader
 > compatibility for existing packs. New packs should use `commands/<path>/`.

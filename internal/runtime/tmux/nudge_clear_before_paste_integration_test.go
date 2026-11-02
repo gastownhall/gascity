@@ -68,3 +68,58 @@ func TestNudgeSessionClearsPendingInputBeforePaste(t *testing.T) {
 		t.Fatalf("expected an echoed line exactly matching %q (clean submit, leftover cleared), got:\n%s", "fresh-message", out)
 	}
 }
+
+// TestNudgeSessionSkipsClearWhenAttached is the regression test for the
+// safety guard #5192 requires alongside the clear-before-paste fix: NudgeSession
+// must NOT send the leading C-u when a client is attached to the session, since
+// an attached client may be a human mid-keystroke and silently wiping their
+// draft would be worse than the concatenation the clear otherwise prevents.
+// Attachment is simulated with a hidden headless tmux client (ensureHiddenAttachedClient)
+// so IsSessionAttached reports true without a real terminal.
+func TestNudgeSessionSkipsClearWhenAttached(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	tm := testTmux()
+	sessionName := fmt.Sprintf("gt-test-nudge-attached-%d", time.Now().UnixNano()%100000)
+
+	_ = tm.KillSession(sessionName)
+	// See TestNudgeSessionClearsPendingInputBeforePaste for why cat -v and
+	// GC_PROVIDER=opencode are used.
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, os.TempDir(), "cat -v", map[string]string{
+		"GC_PROVIDER": "opencode",
+	}); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+	time.Sleep(300 * time.Millisecond)
+
+	if err := tm.ensureHiddenAttachedClient(sessionName); err != nil {
+		t.Fatalf("ensureHiddenAttachedClient: %v", err)
+	}
+	defer tm.CloseHiddenAttachClient(sessionName)
+	if !tm.IsSessionAttached(sessionName) {
+		t.Fatal("session should report attached while hidden client is active")
+	}
+
+	// Simulate a human mid-keystroke: unterminated text already on the line.
+	if _, err := tm.run("send-keys", "-t", sessionName, "-l", "human-typing"); err != nil {
+		t.Fatalf("send-keys human-typing: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	if err := tm.NudgeSession(sessionName, "nudge-message"); err != nil {
+		t.Fatalf("NudgeSession: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	out, err := tm.CapturePaneAll(sessionName)
+	if err != nil {
+		t.Fatalf("CapturePaneAll: %v", err)
+	}
+	// The attached client's draft must survive uncleared — it concatenates
+	// with the nudge instead of being wiped, proving the C-u was skipped.
+	if !strings.Contains(out, "human-typingnudge-message") {
+		t.Fatalf("attached session's pending input was cleared; want it preserved (uncleared) and concatenated with the nudge:\n%s", out)
+	}
+}

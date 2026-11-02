@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionacp "github.com/gastownhall/gascity/internal/runtime/acp"
@@ -56,12 +57,11 @@ func buildRuntimeRegistry() *registry.Registry {
 		return sessionsubprocess.NewSeamBacked(), nil
 	}))
 	must(r.Register("acp", func(_ string, sc config.SessionConfig, _, cityPath string) (runtime.Provider, error) {
-		cfg := sessionacp.Config{
-			HandshakeTimeout:  sc.ACP.HandshakeTimeoutDuration(),
-			NudgeBusyTimeout:  sc.ACP.NudgeBusyTimeoutDuration(),
-			OutputBufferLines: sc.ACP.OutputBufferLinesOrDefault(),
-		}
+		cfg := acpProviderConfig(sc.ACP)
 		if cityPath != "" {
+			// Capture transcripts are city-rooted so they survive a
+			// supervisor restart; a city-less provider captures nothing.
+			cfg.TranscriptRoot = citylayout.ACPTranscriptsDir(cityPath)
 			return sessionacp.NewSeamBackedWithDir(providerStateDir("acp", cityPath), cfg), nil
 		}
 		return sessionacp.NewSeamBacked(cfg), nil
@@ -74,8 +74,8 @@ func buildRuntimeRegistry() *registry.Registry {
 	// resolves per city via runtimeRegistryForCity. A city without that pack
 	// that selects session = "cloudflare" falls through to the tmux fallback
 	// (RUNTIME-SEL-006) — the delivery-independence boundary (RUNTIME-PLAN-004).
-	must(r.Register("k8s", func(_ string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
-		return sessionk8s.NewSeamBacked()
+	must(r.Register("k8s", func(_ string, _ config.SessionConfig, cityName, _ string) (runtime.Provider, error) {
+		return sessionk8s.NewSeamBacked(sessionk8s.WithCityName(cityName))
 	}))
 	// herdr (https://herdr.dev): opt-in multiplexer backend. One shared herdr
 	// session-server per city; one workspace per rig/town, one tab per agent.
@@ -91,12 +91,12 @@ func buildRuntimeRegistry() *registry.Registry {
 	must(r.Register("hybrid", func(_ string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		return newHybridProvider(sc, cityName, cityPath)
 	}))
-	must(r.RegisterPrefix("exec:", func(name string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
+	must(r.RegisterPrefix("exec:", func(name string, _ config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		script := strings.TrimPrefix(name, "exec:")
 		if isLegacyT3BridgeExecScript(script) {
 			return sessiont3bridge.NewSeamBacked(), nil
 		}
-		return sessionexec.NewSeamBacked(script), nil
+		return sessionexec.NewSeamBackedForCity(script, cityName, cityPath), nil
 	}))
 	// "ssh:<[user@]host[:port]>" selects the SSH backend against a fixed
 	// endpoint (the anonymous form; the named, structured form with explicit
@@ -150,8 +150,8 @@ func runtimeRegistryForCity(cfg *config.City) (*registry.Registry, error) {
 	sort.Strings(names)
 	for _, name := range names {
 		rt := cfg.Runtimes[name]
-		if err := r.Register(name, func(_ string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
-			return sessionexec.NewSeamBacked(rt.Command), nil
+		if err := r.Register(name, func(_ string, _ config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+			return sessionexec.NewSeamBackedForCity(rt.Command, cityName, cityPath), nil
 		}); err != nil {
 			return nil, fmt.Errorf("pack %q: %w", rt.PackName, err)
 		}
@@ -176,4 +176,42 @@ func packRuntimeDeclarationChanged(oldCfg, newCfg *config.City, name string) boo
 		return true
 	}
 	return oldOK && (oldRT.Command != newRT.Command || oldRT.Protocol != newRT.Protocol)
+}
+
+// sessionTransportCompositionChanged reports whether a reload flips whether
+// the session provider backing a selection name needs the ACP auto
+// composition. resolveSessionTransportProvider decides the composition at
+// construction time, so a reload that adds the first ACP agent or provider
+// target (or removes the last) must rebuild the provider, as a cold start
+// with the new config would. An acp base never composes.
+func sessionTransportCompositionChanged(oldCfg, newCfg *config.City, name string) bool {
+	if oldCfg == nil || newCfg == nil || name == "acp" {
+		return false
+	}
+	return configWantsACPComposition(oldCfg) != configWantsACPComposition(newCfg)
+}
+
+// configWantsACPComposition is the config half of the needsACPWrapper
+// decision in resolveSessionTransportProvider: an agent that creates sessions
+// on the acp transport, or a provider whose sessions do. The other half, open
+// ACP session beads, is not what a reload changes.
+func configWantsACPComposition(cfg *config.City) bool {
+	for _, a := range cfg.Agents {
+		if agentSessionCreateTransport(cfg, a) == "acp" {
+			return true
+		}
+	}
+	return hasACPProviderTargets(cfg)
+}
+
+// acpProviderConfig maps the [session.acp] city settings onto the ACP
+// provider's resolved configuration.
+func acpProviderConfig(a config.ACPSessionConfig) sessionacp.Config {
+	return sessionacp.Config{
+		HandshakeTimeout:  a.HandshakeTimeoutDuration(),
+		NudgeBusyTimeout:  a.NudgeBusyTimeoutDuration(),
+		OutputBufferLines: a.OutputBufferLinesOrDefault(),
+		StopGrace:         a.StopGraceDuration(),
+		CancelTimeout:     a.CancelTimeoutDuration(),
+	}
 }

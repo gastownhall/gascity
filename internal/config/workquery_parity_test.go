@@ -32,15 +32,22 @@ func oldEffectiveWorkQuery(a *Agent, topo QueryTopology) string {
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
 		script := standardAssignedWorkQueryScript(topo) +
-			poolDemandOriginGateScript() +
+			poolDemandOriginGateScriptWithGraphAnchorFallback() +
 			poolDemandFirstRowFunctionScript(topo) +
+			assignedGraphWorkflowAnchorReadyFunctionScript(topo) +
+			`probe_assigned_graph_anchor_ready "$1"; ` +
+			graphWorkflowAnchorFallbackBeforeFreshPoolScript() +
 			`probe_pool_demand "$1"; ` +
 			`printf "[]"`
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
 	script := legacyControlAssignedWorkQueryScript(topo) +
-		poolDemandOriginGateScript() +
+		poolDemandOriginGateScriptWithGraphAnchorFallback() +
 		poolDemandFirstRowFunctionScript(topo) +
+		assignedGraphWorkflowAnchorReadyFunctionScript(topo) +
+		`probe_assigned_graph_anchor_ready "$1"; ` +
+		`probe_assigned_graph_anchor_ready "$2"; ` +
+		graphWorkflowAnchorFallbackBeforeFreshPoolScript() +
 		`probe_pool_demand "$1"; ` +
 		`probe_pool_demand "$2"; ` +
 		`printf "[]"`
@@ -98,7 +105,7 @@ func oldEffectiveOnDeath(a *Agent, topo QueryTopology) string {
 		route = a.PoolName
 	}
 	_ = topo
-	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+	ephemeralRead := bdQueryEphemeralInProgressQuietShell() + ` | ` +
 		`jq -r --arg assignee ` + shellquote.Quote(a.QualifiedName()) + ` '.[] | select((.assignee // "") == $assignee) | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' 2>/dev/null; `
 	return `{ ` +
 		`bd list --assignee=` + a.QualifiedName() +
@@ -124,7 +131,7 @@ func oldEffectiveOnBoot(a *Agent, topo QueryTopology) string {
 		template = a.PoolName
 	}
 	_ = topo
-	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+	ephemeralRead := bdQueryEphemeralInProgressQuietShell() + ` | ` +
 		`jq -r --arg template "$template" '.[] | select((.assignee // "") == "") | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == $template) or ((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.RunTargetMetadataKey) + ` == $template) and (` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `"))) | .id' 2>/dev/null; `
 	return `template=` + shellquote.Quote(template) + `; ` +
 		`{ ` +
@@ -375,15 +382,23 @@ func renormalizeFederatedCommand(federated string) string {
 	federated = replaceFragment(federated,
 		inProgressBlockedByEnrichmentScript(true, true),
 		inProgressBlockedByEnrichmentScript(false, true))
+	federated = replaceFragment(federated,
+		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(true, true),
+		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(false, true))
 	for _, shellVar := range []string{"id", "cand"} {
 		federated = replaceFragment(federated,
 			assignedInProgressTierCommand(shellVar, QueryTopology{FederatedReady: true}),
 			assignedInProgressTierCommand(shellVar, QueryTopology{}))
+		federated = replaceFragment(federated,
+			assignedInProgressCandidatesTierCommand(shellVar, QueryTopology{FederatedReady: true}),
+			assignedInProgressCandidatesTierCommand(shellVar, QueryTopology{}))
 	}
+	// Both topologies fail a read the same way; only the reader the failure
+	// clause names differs.
+	federated = replaceFragment(federated,
+		workQueryReadFailure(gcReadyCommand),
+		workQueryReadFailure(bdReadyCommand))
 	federated = strings.ReplaceAll(federated, gcReadyCommand, bdReadyCommand)
-	federated = strings.ReplaceAll(federated, `--json --limit=1) || exit $?`, `--json --limit=1 2>/dev/null)`)
-	federated = strings.ReplaceAll(federated, `--sort oldest --limit=20) || exit $?`, `--sort oldest --limit=20 2>/dev/null)`)
-	federated = strings.ReplaceAll(federated, `--sort oldest --limit=20 2>/dev/null) || exit $?`, `--sort oldest --limit=20 2>/dev/null)`)
 	return federated
 }
 

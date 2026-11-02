@@ -578,8 +578,8 @@ func TestOpenFailedCreateRetriesStableSlotOnlyAfterClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("retry after close: %v", err)
 	}
-	if slot != 1 || created.PoolSlot != "1" || created.SessionNameMetadata != "worker-1-pool" {
-		t.Fatalf("retry after close = slot %d info %+v, want same slot/name", slot, created)
+	if slot != 1 || created.PoolSlot != "1" || created.SessionNameMetadata != PoolSessionName("worker", created.ID) {
+		t.Fatalf("retry after close = slot %d info %+v, want same slot with a bead-scoped name", slot, created)
 	}
 }
 
@@ -623,8 +623,8 @@ func TestCrossStoreOpenFailedCreateBlocksStableSlotUntilClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cross-store retry after close: %v", err)
 	}
-	if slot != 1 || created.PoolSlot != "1" || created.SessionNameMetadata != "worker-1-pool" {
-		t.Fatalf("cross-store retry after close = slot %d info %+v, want same slot/name", slot, created)
+	if slot != 1 || created.PoolSlot != "1" || created.SessionNameMetadata != PoolSessionName("worker", created.ID) {
+		t.Fatalf("cross-store retry after close = slot %d info %+v, want same slot with a bead-scoped name", slot, created)
 	}
 	rows, err = store.ListByLabel(sessionBeadLabel, 0)
 	if err != nil || len(rows) != 1 || rows[0].ID != created.ID {

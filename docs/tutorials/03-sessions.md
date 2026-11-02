@@ -84,8 +84,6 @@ mc-8sfd  my-project/reviewer   creating  create  reviewer-a1b  reviewer  1s   -
 $ gc session peek mc-8sfd
 › [my-city] my-project/reviewer • 2026-04-07T11:56:59
 
-  Run `gc prime` to initialize your context.
-
   # Code Reviewer Agent
   You are an agent in a Gas City workspace. Claim available work and execute it.
 
