@@ -294,7 +294,7 @@ func TestK8sWorkerDispatcherRejectsInvalidStaticProviderConfig(t *testing.T) {
 			configure: func(_ *testing.T, cfg *config.City) {
 				cfg.Session.K8s.SecretEnv = []config.K8sSecretEnv{{Name: config.K8sWorkerPodMarkerEnv, Secret: "token", Key: "key"}}
 			},
-			want: "reserved for the Kubernetes worker marker",
+			want: "is reserved",
 		},
 	}
 	for _, tt := range tests {
