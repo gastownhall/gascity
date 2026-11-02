@@ -199,6 +199,11 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			want: "claude --resume " + rotatedKey,
 		},
 		{
+			name: "AC-4 provider the probe cannot read resumes",
+			opts: rotatedKeyOptions{provider: "legacy-provider"},
+			want: "claude --resume " + rotatedKey,
+		},
+		{
 			name: "switched start keeps the resume command precedence",
 			opts: rotatedKeyOptions{handleCommand: "claude --model opus"},
 			want: "claude --model opus --session-id " + rotatedKey,
