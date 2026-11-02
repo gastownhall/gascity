@@ -170,7 +170,13 @@ func (h *SessionHandle) Stop(ctx context.Context, by sessionpkg.Actor) (err erro
 // across every session bead with no state pre-filter. Only that sweep may use
 // it: it additionally tears down a DRAINING seat instead of rejecting it with an
 // illegal transition, because rejecting those made every restart skip them and
-// leave them alive holding their pool slot names (ga-rxhu2).
+// leave them alive holding their pool slot names (ga-rxhu2), and a CREATING
+// seat whose start brought the runtime up but has not committed it active,
+// because rejecting that made the stop error out and leave the live runtime
+// running past the shutdown (ga-fqdzdy). Neither writes the row: a creating
+// row keeps its in-flight marker for the next start to read. `gc rig restart`
+// sweeps a rig through this stop while the controller runs, so there the
+// teardown can land under a start still in flight (SESSION-START-026).
 //
 // Kept as a separate method rather than a flag on Stop so the latitude cannot
 // reach a targeted operator path by accident — that is exactly how it leaked
@@ -327,6 +333,10 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 		if err != nil {
 			return State{}, err
 		}
+		// Under the program-status shadow switch, the phase this view
+		// settles on is recorded beside the record (observation); the
+		// phase returned is this view's alone.
+		defer func() { h.manager.RecordObservationShadow(info, observationVerdict(state.Phase)) }()
 		if pending != nil {
 			state.Phase = PhaseBlocked
 			state.Pending = pending
@@ -907,5 +917,21 @@ func submitIntent(intent DeliveryIntent) sessionpkg.SubmitIntent {
 		return sessionpkg.SubmitIntentInterruptNow
 	default:
 		return sessionpkg.SubmitIntentDefault
+	}
+}
+
+// observationVerdict is the shadow observation token for a phase this view
+// settled on for a live session: Busy is busy, Blocked pending, and Ready
+// idle; any other phase reads indeterminate.
+func observationVerdict(phase Phase) runtime.ProgramVerdict {
+	switch phase {
+	case PhaseBusy:
+		return runtime.ProgramVerdictBusy
+	case PhaseBlocked:
+		return runtime.ProgramVerdictPending
+	case PhaseReady:
+		return runtime.ProgramVerdictIdle
+	default:
+		return runtime.ProgramVerdictIndeterminate
 	}
 }

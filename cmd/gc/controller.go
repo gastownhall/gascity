@@ -1482,6 +1482,7 @@ func runController(
 	eventProv events.Provider,
 	stdout, stderr io.Writer,
 ) int {
+	markProgramShadowLongLived()
 	if heldLock == nil {
 		lock, err := acquireControllerLock(cityPath)
 		if err != nil {

@@ -237,6 +237,9 @@ func waitInfoFromGen(g genclient.WaitView) session.WaitInfo {
 	if g.RegisteredEpoch != nil {
 		w.RegisteredEpoch = *g.RegisteredEpoch
 	}
+	if g.RegisteredResetPending != nil {
+		w.RegisteredResetPending = *g.RegisteredResetPending
+	}
 	if g.DeliveryAttempt != nil {
 		w.DeliveryAttempt = *g.DeliveryAttempt
 	}

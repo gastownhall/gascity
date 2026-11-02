@@ -18,6 +18,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fix. `gc doctor --fix` re-pins it, offline, to the release this build
   embeds.
 
+- **Session shells no longer receive a trigger bead id.** A session's
+  environment no longer carries `GC_TRIGGER_BEAD_ID`,
+  `GC_TRIGGER_WORK_BEAD_ID`, `GC_TRIGGER_BEAD_STORE_REF`, or
+  `GC_TRIGGER_WORK_STORE_REF` (#5738). The trigger id stays on the
+  session bead as controller bookkeeping. A script or prompt that read one of
+  these variables to name its own bead must use `gc hook current --id-only`
+  instead, for example `BEAD_ID="${GC_BEAD_ID:-$(gc hook current --id-only)}"`.
+  To tell whether a session was demand-spawned, check
+  `GC_SPAWN_ORIGIN=demand`, which names no bead. A session no longer
+  inherits these variables, or `GC_SPAWN_ORIGIN`, from the controller's own
+  environment either: a supervisor started from inside a session used to
+  pass that session's values on to the sessions it started.
 - **Stop a split city whose storage check refuses before you deploy, and
   repair it with the new `gc`: `gc hook` now stops claiming there.** Before
   `gc hook` claims work for a session, it reads that session's drain state
@@ -535,12 +547,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its next pass, so a script need not retry. An operator on the controller
   host can still restart any session with `gc session reset <session>`.
 
+- **gc no longer restarts the supervisor where it would lose its tmux
+  sessions, and may refuse the first `gc start` after the upgrade.** tmux
+  places its sockets under `TMUX_TMPDIR` (it never reads `TMPDIR`), and a
+  supervisor reaches its sessions' tmux servers only under its own. The
+  supervisor's systemd unit and launchd plist now always set
+  `TMUX_TMPDIR`, to the value the installing shell has (a relative one made
+  absolute from the shell's working directory) or to empty (which tmux
+  reads as unset), so a restart by the service manager (a crash
+  restart, `systemctl --user restart`, a reboot) keeps the directory the
+  file records instead of taking whatever the service manager's
+  environment holds. Before `gc start`, `gc supervisor start` or
+  `gc supervisor install` replaces or starts the supervisor, it compares
+  the socket directory the new one would use with where the sessions are:
+  the running supervisor's, or with none running, the installed
+  service's, while a tmux server there still answers. When they differ it
+  refuses, names both directories, and leaves the sessions alone. To keep
+  them where they are, run `gc supervisor install` with `TMUX_TMPDIR` set
+  as the refusal reports their supervisor has it (for one an earlier `gc`
+  installed, often unset: `env -u TMUX_TMPDIR gc supervisor install`),
+  then run `gc start` with that same `TMUX_TMPDIR`. The install writes the
+  value into the service file, which a restart onto the new `gc` then
+  keeps; running only `gc start` that way is not enough after the upgrade,
+  because its restart onto the new `gc` runs from the old service file,
+  which takes the service manager's `TMUX_TMPDIR`. To move the sessions
+  instead, run `gc supervisor stop --wait`, then `gc start`. Expect the
+  refusal after the upgrade when your shell or your desktop session's
+  service manager exports a `TMUX_TMPDIR` the running supervisor does not
+  have, and later from a shell (cron, an IDE task) whose `TMUX_TMPDIR`
+  differs from the one the service file records. Where `systemctl --user`
+  cannot reach the user manager (cron, `sudo -u`, `su`), `gc start` still
+  falls back to a supervisor outside the service, as before; for a unit an
+  earlier `gc` installed, which takes the manager's `TMUX_TMPDIR`, the
+  check then assumes the manager's default (unset). A relative
+  `TMUX_TMPDIR` is resolved in the working directory of the process whose
+  tmux reads it: the running supervisor's own, or the shell's for a
+  supervisor started from it; the check refuses one a service gives its
+  supervisor, whose directory it cannot tell.
+
 - **Delete any `[[orders.overrides]]` entry that names `wisp-compact`.** The
   core pack no longer ships that order (see Fixed). An override naming an
   order that no longer exists is a config error: `gc order` commands exit 1,
-  and the controller logs the error and skips every override after it.
+  and the controller logs the error and applies every other override.
   `[orders] skip` entries that name `wisp-compact` stay valid; the order
   scanner ignores names it does not find.
+
+- **Run `gc order list` on a city with `[[orders.overrides]]` before you
+  upgrade.** If it fails with `order "<name>" not found`, the controller has
+  been ignoring every override listed after that entry; this build applies
+  them (see Fixed). Correct or delete the entry, and check that the overrides
+  below it, such as an `enabled = false`, still say what you want.
 
 ### Added
 
@@ -639,6 +695,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The core orphan-sweep order records why it reset a claim in the bead's
+  `gc.orphan_sweep_reason` metadata instead of its notes.** On a
+  split-storage city a graph step is updated in process, where notes have no
+  representation and `--append-notes` is refused, so the sweep logged
+  `failed to record cause note` and recorded nothing. Every store serves the
+  metadata write. The text is unchanged; read it with `gc bd show <id>
+  --json`. A later reset overwrites it.
+
 - **Go toolchain 1.27.3.** The `go.mod` floor, the Bazel `go_sdk`, the nogo
   analyzers' module and the `contrib/k8s` Go build images move to Go 1.27.3,
   the toolchain Dolt 2.6.0 and beads `main` build with. Building from source
@@ -722,6 +786,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are, and it exits 1 instead of printing `skipped` when the store it resolves
   does not hold the bead.
 
+- **Formula human gates are now announced and re-nudged.** A `[steps.gate]`
+  with `type = "human"` used to create a gate bead with no machine-readable
+  type, so the core `notify-on-human-gate-creation` and
+  `renudge-stale-human-gates` orders, which selected only bd's `await_type`,
+  never mailed anyone about it. The declared gate type is now stamped on the
+  gate bead as `gc.gate_type`, and both orders select on it as well as on
+  `await_type`. On a split city the re-nudge sweep now finds these gates in
+  the class binding, and both orders' hint now reads `gc bd close <id>`,
+  which a split city serves for a binding-held gate (`gc bd gate resolve` is
+  refused there). A formula gate is created, and announced, when the formula
+  is instantiated, which can be before the gated step's `needs` finish. When
+  the re-nudge sweep cannot list formula gates (one store is unreadable), it
+  says so and records the run as partial (`order.skipped`) instead of reading
+  the failure as no gates. Gates created before this change carry no stamp and
+  stay unannounced; close or re-pour them.
+
 - **The core orphan-sweep order judges claims on graph steps in a
   split-storage city.** On a city whose `[storage.classes]` serves the graph
   class from a binding, `gc bd list` answers from a work store only, so the
@@ -768,6 +848,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the controller. Named, manual and session-less claimants and assigned work
   claim as before.
 
+- **The legacy session reconciler no longer re-points a running pool session
+  at work in another directory.** The legacy reconciler (the default when
+  the v2 allocator is unavailable, for example a single-store city on the
+  `bd` CLI store) reused a running pool session for new work and rewrote its
+  recorded `gc.work_dir` to the new bead's directory without restarting it.
+  `gc hook --claim` read that as the session's own directory, so a session
+  running inside one managed worktree claimed work bound to another worktree,
+  or to none, and ran it in the wrong checkout. Such work now gets a fresh
+  session in its own directory. When the pool is full, work bound to a
+  managed worktree waits while one idle session running elsewhere is
+  retired to free its slot, even at a `min_active_sessions` floor: the
+  controller drains it and closes its session bead, and the work then gets
+  its fresh session. Work bound to no worktree may still go to such a
+  session when no fresh session can start; it then keeps its directory, and
+  its claim decides whether it runs that work there. A session whose agent is
+  not alive (stopped, or a pane whose agent process died) moves as before,
+  and the v2 allocator is unchanged.
+
 - **Pool demand across stores names work in the order sessions claim it.**
   In a city whose routed work spans more than one bead store, the
   controller listed pool demand store by store, while `gc hook --claim`
@@ -792,6 +890,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wisp_gc_interval` and `wisp_ttl`) collects expired wisps, including on
   split-storage cities, where `gc bd` refuses the script's writes. (#4937)
 
+- **An `[[orders.overrides]]` entry that matches no order no longer cancels
+  the overrides listed after it.** The controller and the API's order views
+  applied overrides in config order and stopped at the first one naming an
+  order the scan did not find: a retired or renamed order, a typo, an order
+  its own file disables, or one `[orders] skip` removes. They logged that
+  error and ran with every later override ignored: an `enabled = false`
+  listed below such an entry no longer kept its order from running, and
+  disabling an order through the API, which appends its override, had no
+  effect. Every override that matches an order now applies. `gc order`
+  commands still exit 1 on a bad override, and now name every bad override at
+  once.
+
+- **The v2 reconciler alerts when it refuses a work item for unusable
+  worktree evidence.** A ready pool work item whose `gc.work_dir` /
+  `gc.worktree_*` metadata is incomplete or conflicting, or names another
+  bead or store, gets no session. Under v2, the default reconciler, the pool
+  refused it on every pass and reported nothing, so the item starved
+  silently while the legacy reconciler printed a skip line every tick. v2 now
+  alerts once per work item and cause while the refusal lasts: a
+  `v2 planner: alert worktree-refused: ...` line on controller stderr naming
+  the work bead, the pool and the problem, a `reconciler.alert` event whose
+  subject is the work bead, and a `worktree-refused` count in the
+  `reconcile.pass` record's `alerts`. A refusal while a failed worktree
+  verification backs off is not re-alerted; the create attempt already
+  logged it.
+
 - **Sessions no longer inherit a native store open's temporary environment.**
   While gc opens a native Dolt store it briefly rewrites its own process
   environment: it clears the `BEADS_*` and `BD_*` variables and sets the
@@ -803,6 +927,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   also lost `BD_BIN` and ran with `GIT_AUTHOR_NAME=gc`. These spawns now read
   the process environment under the same lock the open holds, so a session
   start waits for an in-flight open to restore the environment first.
+
+- **A pool seat waiting on a pre-assigned step that is still blocked is no
+  longer reported stranded, and the same seat resumes to run it.** A graph
+  claim pre-assigns its continuation group's later steps to the claiming
+  session. When that session finished its step and drained while such a step
+  was blocked, the controller emitted `session.stranded` and, 2 minutes later,
+  released the step and closed the seat, so the step ran in a fresh seat
+  without the conversation. The seat now stays parked (asleep, holding the
+  step) until the step is ready, then wakes in place and resumes its
+  conversation in the work dir it ran in, even when the step's binding would
+  derive another (a managed per-bead worktree, pack metadata, a changed
+  `work_dir`); a recorded dir that is gone or in another rig is re-derived,
+  and the seat starts fresh there. A parked seat takes no pool cap headroom; a
+  slot-bounded pool unparks its oldest seats while its slots are full (a seat
+  it unparks parks again, unrepaired, if a slot frees first); and a seat
+  parked for 24 hours falls back to the stranded repair. When the step turns
+  ready at a full rig or city cap, the seat competes with the other existing
+  seats by bead priority. If it loses while the controller keeps no other seat
+  of its agent, it is closed and the step returned to the pool, so the step
+  runs in a fresh seat as before; otherwise it still wakes, past the cap.
+  `session.stranded` now fires only for seats that do not park: a seat holding
+  started work, a crashed seat, a seat its idle timeout stopped, a fresh-wake
+  seat, a seat a full slot-bounded pool unparks, or a parked seat past its
+  bound. The core pack's `cascade-nudge-on-blocker-close` order no longer
+  nudges (and so wakes) the assignee of a dependent that another open blocker
+  still holds.
 
 - **`gc prime --strict` fails on a `prompt_template` that does not render.**
   A `.template.md` (or `.md.tmpl`) prompt_template that failed to parse or

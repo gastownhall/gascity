@@ -253,6 +253,9 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		ScopeKind: body.ScopeKind,
 		ScopeRef:  body.ScopeRef,
 	}
+	// Who launched this is server fact from the verified write grant, never
+	// a client field or var.
+	opts.Initiator, _ = VerifiedPrincipal(ctx)
 	mode := "direct"
 	switch {
 	case attachedBeadID != "":

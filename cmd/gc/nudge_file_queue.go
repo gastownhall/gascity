@@ -302,16 +302,6 @@ func claimDueQueuedNudges(cityPath string, now time.Time, match nudgeClaimMatch,
 // production. Tests that set it must stay serial.
 var nudgeClaimAfterDryRun func()
 
-// wouldClaimQueuedNudges reports, without the lock and without claiming,
-// whether claimDueQueuedNudges would claim anything at now.
-func wouldClaimQueuedNudges(cityPath string, now time.Time, match nudgeClaimMatch, readCensus func() (map[string]struct{}, bool), batchTarget *nudgeTarget) (bool, error) {
-	r := newNudgeClaimRun(cityPath, now, match, readCensus, batchTarget)
-	if _, err := r.dryRun(); err != nil {
-		return false, err
-	}
-	return len(r.claimed) > 0, nil
-}
-
 // claimQueuedNudges moves the due items match accepts from pending to in
 // flight and returns them: every one, pinning nothing, or, given a
 // batchTarget, that target's next delivery batch.
@@ -1235,8 +1225,20 @@ func (q *fileNudgeQueue) ClaimBatch(ct storebinding.ClaimTarget, now time.Time) 
 // census is asked only for a due candidate fenced to another session, as
 // ClaimBatch asks it.
 func (q *fileNudgeQueue) WouldClaimBatch(ct storebinding.ClaimTarget, now time.Time) (bool, error) {
+	batch, err := q.NextBatch(ct, now)
+	return len(batch) > 0, err
+}
+
+// NextBatch returns, from a lock-free snapshot, the items ClaimBatch for ct at
+// now would claim, in queue order. It claims nothing and writes nothing, and
+// asks ct's census as ClaimBatch asks it.
+func (q *fileNudgeQueue) NextBatch(ct storebinding.ClaimTarget, now time.Time) ([]nudgequeue.Item, error) {
 	target := fileClaimTarget(ct)
-	return wouldClaimQueuedNudges(q.cityPath, now, fileClaimMatcher(ct), ct.LiveFenceSessions, &target)
+	r := newNudgeClaimRun(q.cityPath, now, fileClaimMatcher(ct), ct.LiveFenceSessions, &target)
+	if _, err := r.dryRun(); err != nil {
+		return nil, err
+	}
+	return r.claimed, nil
 }
 
 // ListForAgent lists the items addressed to exactly agent. The empty agent
