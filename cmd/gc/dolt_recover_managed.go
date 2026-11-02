@@ -140,7 +140,11 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 			observePort = alternatePort
 		}
 		if ready := observeExistingManagedDoltForRecovery(cityPath, host, observePort, user, recoverManagedDoltExistingObserveTimeout(timeout), &report); ready && recoverManagedDoltShouldReuseExisting(report.Port, port) {
-			clearManagedDoltUnresponsiveSinceAt(managedDoltUnresponsiveSincePath(layout))
+			// An inconclusive wait learned nothing about the server, so only a
+			// measured observation ends the unresponsive streak.
+			if !report.ReadyInconclusive {
+				clearManagedDoltUnresponsiveSinceAt(managedDoltUnresponsiveSincePath(layout))
+			}
 			if err := ops.publish(cityPath); err != nil {
 				return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
 			}

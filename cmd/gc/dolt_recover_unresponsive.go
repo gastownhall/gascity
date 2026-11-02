@@ -184,6 +184,8 @@ func managedDoltRecoverUnresponsiveGate(cityPath, host, port string, layout mana
 		clearManagedDoltUnresponsiveSinceAt(sincePath)
 		return "probe-failed-not-live", 0, nil
 	}
+	report.HadPID = true
+	report.PID = pid
 	since, recorded := readManagedDoltTimestamp(sincePath)
 	if !recorded || since.After(now) {
 		since = now
@@ -199,8 +201,6 @@ func managedDoltRecoverUnresponsiveGate(cityPath, host, port string, layout mana
 		clearManagedDoltUnresponsiveSinceAt(sincePath)
 		return "unresponsive-window-elapsed", elapsed, nil
 	}
-	report.HadPID = true
-	report.PID = pid
 	logManagedDoltRecoverDecision(layout, "defer", "unresponsive-within-window", pid, port, probeErr, elapsed, now)
 	return "", elapsed, fmt.Errorf("managed dolt (pid %d) on port %s is listening but unresponsive (%w); not restarting until it has been unresponsive for %s (so far %s)",
 		pid, strings.TrimSpace(port), probeErr, ops.unresponsiveRestartAfter, elapsed.Round(time.Second))

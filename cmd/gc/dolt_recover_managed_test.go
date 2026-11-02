@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -969,6 +970,14 @@ func TestRecoverManagedDolt_StopsAfterUnresponsiveWindowElapsed(t *testing.T) {
 	if h.stopped != 1 || h.started != 1 {
 		t.Fatalf("stop=%d start=%d, want one stop-and-start after the window", h.stopped, h.started)
 	}
+	// The stop line names the server that was classified live and is being
+	// replaced, not pid=0.
+	logged := h.log(t)
+	for _, want := range []string{"reason=unresponsive-window-elapsed", "pid=4242"} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("dolt.log missing %q; got:\n%s", want, logged)
+		}
+	}
 }
 
 // A window of zero restores the pre-existing behavior: stop on any probe
@@ -1237,4 +1246,28 @@ func TestRecoverManagedDolt_ObservedWhileLockHeldClearsUnresponsiveState(t *test
 
 	report, err := recoverManagedDoltProcessWithOps(f.city, "127.0.0.1", fmt.Sprint(observedHealthyLivePort), "root", "warning", 3*time.Second, f.ops)
 	f.requireReusedLiveServer(t, report, err)
+}
+
+// A rebind observation whose dials never left this host is inconclusive: it
+// learned nothing about the server. Recover still keeps the live server, but
+// that observation must not end the unresponsive streak.
+func TestRecoverManagedDolt_InconclusiveRebindKeepsUnresponsiveState(t *testing.T) {
+	f := newObservedHealthyRecovery(t)
+	stubManagedDoltDial(t, func(string, string, time.Duration) (net.Conn, error) {
+		return nil, dialErrorFor("connect", syscall.EADDRNOTAVAIL)
+	})
+
+	report, err := recoverManagedDoltProcessWithOps(f.city, "127.0.0.1", fmt.Sprint(observedHealthyLivePort+1), "root", "warning", 3*time.Second, f.ops)
+	if err != nil {
+		t.Fatalf("recover error = %v, want the observed live server kept", err)
+	}
+	if !report.ReadyInconclusive || report.Ready || report.Healthy || report.Restarted || report.Port != observedHealthyLivePort {
+		t.Fatalf("report = %+v, want an inconclusive keep on port %d without a restart", report, observedHealthyLivePort)
+	}
+	if f.published != 1 {
+		t.Fatalf("publish ran %d times, want 1", f.published)
+	}
+	if _, statErr := os.Stat(managedDoltUnresponsiveSincePath(f.layout)); statErr != nil {
+		t.Fatalf("first-unresponsive record after an inconclusive rebind: stat error = %v, want it kept", statErr)
+	}
 }
