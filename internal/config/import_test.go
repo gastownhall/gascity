@@ -1018,7 +1018,7 @@ schema = 1
 name = "polecat"
 scope = "city"
 `)
-	if _, err := runRepoCacheGit(seedDir, "init"); err != nil {
+	if _, err := runRepoCacheGit(seedDir, "init", "-q"); err != nil {
 		t.Fatalf("git init: %v", err)
 	}
 	if _, err := runRepoCacheGit(seedDir, "add", "pack.toml"); err != nil {
@@ -2841,5 +2841,79 @@ func TestValidateLockedRemoteCacheDirtyErrorNamesEntries(t *testing.T) {
 		if err := validateLockedRemoteCache(source, cacheDir, commit); err != nil {
 			t.Fatalf("validateLockedRemoteCache rejected an excluded artifact: %v", err)
 		}
+	})
+}
+
+// fakeStatusGitOnPath puts a git stub first and alone on PATH. It answers
+// rev-parse with headCommit and status with the given stdout and stderr,
+// exiting zero. The script uses only shell builtins.
+func fakeStatusGitOnPath(t *testing.T, headCommit, statusStdout, statusStderr string) {
+	t.Helper()
+	binDir := t.TempDir()
+	script := fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+	case "$arg" in
+	rev-parse) printf '%%s\n' '%s'; exit 0 ;;
+	status) printf '%%s' '%s'; printf '%%s\n' '%s' >&2; exit 0 ;;
+	esac
+done
+exit 2
+`, headCommit, statusStdout, statusStderr)
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+}
+
+func TestValidateLockedRemoteCacheGitStderrFailsClosed(t *testing.T) {
+	const (
+		source     = "https://example.com/tools.git"
+		headCommit = "0123456789abcdef0123456789abcdef01234567"
+		diagnostic = "warning: could not open directory sub/: Permission denied"
+	)
+	requireStatusDiagnostic := func(t *testing.T, err error, diagnostic string) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("validateLockedRemoteCache accepted a status that wrote diagnostics")
+		}
+		msg := err.Error()
+		for _, want := range []string{"worktree status", "git status --porcelain", diagnostic} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("error = %q, want it to contain %q", msg, want)
+			}
+		}
+		if strings.Contains(msg, "local worktree changes") {
+			t.Errorf("error = %q, want stderr not reported as local worktree changes", msg)
+		}
+	}
+
+	t.Run("stderr with clean stdout", func(t *testing.T) {
+		fakeStatusGitOnPath(t, headCommit, "", diagnostic)
+		err := validateLockedRemoteCache(source, t.TempDir(), headCommit)
+		requireStatusDiagnostic(t, err, diagnostic)
+	})
+
+	t.Run("stderr with dirty stdout", func(t *testing.T) {
+		fakeStatusGitOnPath(t, headCommit, " M pack.toml\n", diagnostic)
+		err := validateLockedRemoteCache(source, t.TempDir(), headCommit)
+		requireStatusDiagnostic(t, err, diagnostic)
+	})
+
+	t.Run("real git unsearchable directory", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reads unsearchable directories; the stub subtests cover this criterion")
+		}
+		useNeutralGitTestEnv(t)
+		cacheDir := t.TempDir()
+		writeTestFile(t, cacheDir, "pack.toml", "[pack]\nname = \"tools\"\nschema = 1\n")
+		commit := seedRepoCacheGit(t, cacheDir)
+		locked := filepath.Join(cacheDir, "locked")
+		writeTestFile(t, locked, "f.txt", "x\n")
+		if err := os.Chmod(locked, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+		err := validateLockedRemoteCache(source, cacheDir, commit)
+		requireStatusDiagnostic(t, err, "could not open directory")
 	})
 }
