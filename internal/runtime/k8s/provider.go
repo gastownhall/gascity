@@ -412,7 +412,9 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	// The selected scope's hosted identity must be initialized and verified
-	// before the entrypoint can run pre_start or start tmux.
+	// before the entrypoint can run pre_start or start tmux. A prebaked pod
+	// with no rig has no entrypoint gate: a failed check removes the pod, but
+	// its agent may already have started.
 	podWorkDir := projectedPodWorkDir(cfg)
 	if err := initBeadsInPod(ctx, p.ops, podName, cfg, podWorkDir, p.managedServiceHost, p.managedServicePort); err != nil {
 		cleanup("scoped beads initialization failed")
