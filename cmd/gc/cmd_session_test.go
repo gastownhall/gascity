@@ -4178,7 +4178,11 @@ func TestRouteSessionPeek_SixRowMatrix(t *testing.T) {
 	}
 }
 
-func TestRouteSessionPeek_StaleBannerOver30s(t *testing.T) {
+// TestRouteSessionPeek_NoCacheAgeFooterWhenCacheStale pins that a stale
+// X-GC-Cache-Age-S header does not add a footer to routed human peek output:
+// the server reads pane output live, so the bead cache's age is unrelated to it
+// and the API route must print exactly what the local route prints (#8453).
+func TestRouteSessionPeek_NoCacheAgeFooterWhenCacheStale(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 	cityPath := writeSessionListTestCity(t)
 
@@ -4205,7 +4209,7 @@ func TestRouteSessionPeek_StaleBannerOver30s(t *testing.T) {
 	if code := routeSessionPeek(cityPath, "mayor", 50, c, "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "cache age: 45s") {
-		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
+	if got := stdout.String(); got != "peeked\n" {
+		t.Errorf("routed peek stdout = %q, want only the live pane output %q", got, "peeked\n")
 	}
 }
