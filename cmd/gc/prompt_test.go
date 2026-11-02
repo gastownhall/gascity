@@ -1797,4 +1797,39 @@ func TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules(t *testing.T
 			}
 		}
 	})
+
+	t.Run("AC-2: hook loop, bounded rechecks and drain semantics", func(t *testing.T) {
+		how := poolWorkerFlat(poolWorkerPromptSection(t, got, "How to Work"))
+		for _, want := range []string{
+			// subsequent assignments come only through the hook
+			"`gc hook --claim --json`",
+			"`gc hook --claim --drain-ack --json`",
+			// bounded polling, one invocation per tool call, no sleep loop
+			"at most three",
+			"one hook invocation per tool call",
+			"sleep/retry loop",
+			// explicit drain semantics
+			"`drain_pending`",
+			"`gc runtime drain-ack`",
+			// legacy and plain assignments keep their one-bead lifetime
+			"that one bead",
+			// an explicit session-ending step contract overrides polling
+			"one-step lane",
+		} {
+			if !strings.Contains(how, want) {
+				t.Errorf("How to Work missing %q:\n%s", want, how)
+			}
+		}
+
+		// After a restart, assigned graph work is recovered through the hook.
+		ce := poolWorkerFlat(poolWorkerPromptSection(t, got, "Context Exhaustion"))
+		for _, want := range []string{
+			"`gc hook --claim --drain-ack --json`",
+			"returns your assigned work",
+		} {
+			if !strings.Contains(ce, want) {
+				t.Errorf("Context Exhaustion missing %q:\n%s", want, ce)
+			}
+		}
+	})
 }

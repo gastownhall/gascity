@@ -111,22 +111,42 @@ the bead description directly.
 ## How to Work
 
 1. Find and claim work: `gc hook --claim --drain-ack --json`
-2. If the action is `drain`, exit. If the action is `work`, read `bead_id`.
-3. **Check for molecule:** `gc bd show <id>` — look for `molecule_id` in METADATA
-4. **If molecule exists:** `gc bd mol current <mol-id>` → work each step in order (show → do → close → repeat)
-5. **If no molecule:** execute the work directly from the bead description
-6. When all work is done, record the outcome and close the bead with a
+2. If the action is `drain`, follow the startup protocol's exit rules
+   above. If the action is `work`, read `bead_id`.
+3. **Classify the assignment** as "Classify Your Assignment" describes.
+4. Work it: a workflow step under "Graph Workflow Steps", a molecule
+   member under "Molecules", plain work straight from the bead
+   description.
+5. When the work is done, record the outcome and close the bead with a
    one-line summary (see "Closing a Bead"):
    `gc bd update <id> --set-metadata gc.outcome=pass`, then
    `gc bd close <id> --reason "<what you did>"`
-7. **MANDATORY — run this exact command as your final action:**
+6. Then, by assignment kind:
+   - **Workflow step** — check for more assigned work with
+     `gc hook --claim --json`. Work whatever it returns. While it answers
+     `drain`, re-check at most three times — one hook invocation per tool
+     call, never a claim wrapped in a sleep/retry loop — then end with
+     `gc hook --claim --drain-ack --json`: `work` means work it, `drain`
+     ends the session by the startup protocol's exit rules. A
+     `drain_pending` result means the controller is already draining your
+     session: run `gc runtime drain-ack`, then exit.
+   - **Molecule member or plain work** — your assignment's lifetime was
+     that one bead; you are done.
+
+   An explicit session-ending contract overrides this: when the step's or
+   lane's own instructions end the session — a one-step lane, or a step
+   that already ran the drain — follow them and exit.
+
+7. **MANDATORY unless a drain-aware claim already acknowledged your
+   drain — run this exact command as your final action:**
    ```bash
    gc runtime drain-ack
    ```
-   You MUST run `gc runtime drain-ack` after closing the bead. This is
-   not optional. Without it, you will block other work from being picked
-   up. Do NOT say "drained" without actually running the command. Do NOT
-   output any text after running it.
+   You MUST run `gc runtime drain-ack` after closing the bead when no
+   `gc hook --claim --drain-ack --json` has acknowledged the drain for
+   you. This is not optional. Without it, you will block other work from
+   being picked up. Do NOT say "drained" without actually running the
+   command. Do NOT output any text after running it.
 
 ## Closing a Bead
 
@@ -191,4 +211,7 @@ gc runtime request-restart
 ```
 
 This blocks until the controller restarts your session. The new session
-picks up where you left off — find your work bead and molecule position.
+picks up where you left off — claim again with
+`gc hook --claim --drain-ack --json` and it returns your assigned work,
+including a workflow step you had claimed; a legacy molecule position you
+recover with `gc bd mol current <molecule-id>`.
