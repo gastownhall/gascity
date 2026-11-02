@@ -85,7 +85,21 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 		return nil, err
 	}
 
-	stores := s.state.BeadStores()
+	// A rig suspended by effective state (cacheColdRigNames) is left cold, as
+	// /status leaves it: its store has no cache, so a read goes to bd and
+	// restarts the proxy and Dolt the controller stopped. A suspended rig whose
+	// store cannot be read therefore does not make the answer partial. Its name
+	// is dropped before sortedRigNames dedupes the stores, so a store it shares
+	// with the city or with a rig that is not suspended, as in legacy
+	// shared-file mode, is still read through that name. gc convoy list's
+	// direct read leaves the same rigs out.
+	cold := s.loadCacheColdRigs()
+	stores := make(map[string]beads.Store)
+	for name, store := range s.state.BeadStores() {
+		if !cold[name] {
+			stores[name] = store
+		}
+	}
 	rigNames := sortedRigNames(stores)
 	var convoys []beads.Bead
 	var pa partialAggregator
@@ -416,6 +430,10 @@ func rollbackConvoyMembershipRemoval(store beads.Store, convoyID string, applied
 }
 
 // humaHandleConvoyCheck is the Huma-typed handler for GET /v0/convoy/{id}/check.
+// It reads the stores /convoys lists from: a store only suspended rigs reach is
+// left cold, so a check of a listed convoy never touches a suspended rig, and a
+// suspended rig whose store cannot be read does not fail the check of a convoy
+// another store holds.
 func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInput) (*IndexOutput[convoyCheckResponse], error) {
 	index := s.latestIndex()
 	id := input.ID
@@ -425,7 +443,14 @@ func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInpu
 		return nil, err
 	}
 
-	stores := s.state.BeadStores()
+	// The suspension frame of humaHandleConvoyList.
+	cold := s.loadCacheColdRigs()
+	stores := make(map[string]beads.Store)
+	for name, store := range s.state.BeadStores() {
+		if !cold[name] {
+			stores[name] = store
+		}
+	}
 
 	for _, rigName := range sortedRigNames(stores) {
 		store := stores[rigName]
@@ -444,35 +469,34 @@ func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInpu
 		if err != nil {
 			return nil, apierr.Internal.Msg(err.Error())
 		}
-
-		total := len(children)
-		closed, dangling := 0, 0
-		childIDs := make([]string, 0, len(children))
-		for _, c := range children {
-			childIDs = append(childIDs, c.ID)
-			if convoycore.IsTerminalStatus(c.Status) {
-				closed++
-			}
-			if convoycore.IsUnresolvedTrackedItem(c) {
-				dangling++
-			}
-		}
-
-		complete := total > 0 && closed == total
 		return &IndexOutput[convoyCheckResponse]{
 			Index:     index,
 			CacheAgeS: cacheAgeSeconds(cityStore),
-			Body: convoyCheckResponse{
-				ConvoyID:       id,
-				Total:          total,
-				Closed:         closed,
-				Complete:       complete,
-				ChildIDs:       childIDs,
-				DanglingTracks: dangling,
-			},
+			Body:      convoyCheckFromMembers(id, children),
 		}, nil
 	}
 	return nil, apierr.ConvoyNotFound.Msg("convoy " + id + " not found")
+}
+
+// convoyCheckFromMembers is the /convoy/{id}/check answer for convoy id with
+// the given members (convoycore.Members, in membership order).
+func convoyCheckFromMembers(id string, members []beads.Bead) convoyCheckResponse {
+	check := convoyCheckResponse{
+		ConvoyID: id,
+		Total:    len(members),
+		ChildIDs: make([]string, 0, len(members)),
+	}
+	for _, m := range members {
+		check.ChildIDs = append(check.ChildIDs, m.ID)
+		if convoycore.IsTerminalStatus(m.Status) {
+			check.Closed++
+		}
+		if convoycore.IsUnresolvedTrackedItem(m) {
+			check.DanglingTracks++
+		}
+	}
+	check.Complete = check.Total > 0 && check.Closed == check.Total
+	return check
 }
 
 // humaHandleConvoyClose is the Huma-typed handler for POST /v0/convoy/{id}/close.

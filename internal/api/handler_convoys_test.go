@@ -2,13 +2,16 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 )
 
@@ -521,5 +524,86 @@ func TestConvoyCheckReportsChildIDsAndDanglingTracks(t *testing.T) {
 	}
 	if body := rec.Body.String(); strings.Contains(body, "child_ids") || strings.Contains(body, "dangling_tracks") {
 		t.Errorf("empty convoy check = %s, want child_ids and dangling_tracks left out", body)
+	}
+}
+
+// unreadableConvoyStore is a store no read reaches, as a dead rig's: every Get
+// and List fails. reads counts the attempts.
+type unreadableConvoyStore struct {
+	beads.Store
+	reads atomic.Int32
+}
+
+func (s *unreadableConvoyStore) Get(string) (beads.Bead, error) {
+	s.reads.Add(1)
+	return beads.Bead{}, errors.New("rig store unreadable")
+}
+
+func (s *unreadableConvoyStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	s.reads.Add(1)
+	return nil, errors.New("rig store unreadable")
+}
+
+// TestConvoyListAndCheckLeaveSuspendedRigsCold pins the suspension frame of
+// /convoys and /convoy/{id}/check: neither reads a store that only rigs
+// suspended by effective state reach. A suspended rig whose store cannot be
+// read therefore neither makes the list partial nor fails the check of a
+// convoy another store holds, though it sorts first. A store a suspended rig
+// shares with a rig that is not suspended is still read through that rig, and
+// the convoys it holds are listed and checked.
+func TestConvoyListAndCheckLeaveSuspendedRigsCold(t *testing.T) {
+	state := newFakeMutatorState(t)
+	h := newTestCityHandler(t, state)
+
+	served := state.stores["myrig"]
+	convoy, _ := served.Create(beads.Bead{Title: "served convoy", Type: "convoy"})
+	if _, err := served.Create(beads.Bead{Title: "child", ParentID: convoy.ID}); err != nil {
+		t.Fatal(err)
+	}
+	dead := &unreadableConvoyStore{Store: beads.NewMemStore()}
+	shared := beads.NewMemStore()
+	shared.IDPrefix = "sh"
+	sharedConvoy, _ := shared.Create(beads.Bead{Title: "shared convoy", Type: "convoy"})
+	state.cfg.Rigs = append(state.cfg.Rigs,
+		config.Rig{Name: "asleep", Path: "/tmp/asleep", Suspended: true},
+		config.Rig{Name: "dozing", Path: "/tmp/dozing", SuspendedOnStart: true},
+		config.Rig{Name: "zawake", Path: "/tmp/zawake"},
+	)
+	state.stores["asleep"] = dead
+	state.stores["dozing"] = shared
+	state.stores["zawake"] = shared
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/convoys"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	var list struct {
+		Items []struct {
+			Title string `json:"title"`
+		} `json:"items"`
+		Partial bool `json:"partial"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&list); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	var titles []string
+	for _, item := range list.Items {
+		titles = append(titles, item.Title)
+	}
+	slices.Sort(titles)
+	if list.Partial || !slices.Equal(titles, []string{"served convoy", "shared convoy"}) {
+		t.Errorf("list = %q, partial %v; want the served and shared convoys and no partial answer", titles, list.Partial)
+	}
+
+	for _, id := range []string{convoy.ID, sharedConvoy.ID} {
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/convoy/")+id+"/check", nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("check %s: status = %d, want 200; body = %s", id, rec.Code, rec.Body.String())
+		}
+	}
+	if n := dead.reads.Load(); n != 0 {
+		t.Errorf("the suspended rig's store was read %d times, want 0", n)
 	}
 }

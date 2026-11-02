@@ -1577,7 +1577,7 @@ calls = 6
 [[count]]
 path = "internal/api/client_test.go"
 resource = "http_test_server"
-calls = 70
+calls = 71
 
 [[count]]
 path = "internal/api/client_waits_test.go"

@@ -1020,8 +1020,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`gc convoy list` no longer stops at 100 convoys when the controller
   serves it.** The API lane read only the first page of `/convoys` and dropped
   the rest without a word; it now follows `next_cursor` to the end. The
-  commands that open every convoy store (`gc convoy list` and `stranded`,
-  `gc beads list` and `show` when served locally) or resolve a convoy by id
+  commands that open every convoy store (`gc convoy stranded`, `gc beads list`
+  and `show` when served locally) or resolve a convoy by id
   (`gc convoy status`, `add`, `close`, `target`, `land`) also stop reloading
   the whole city config once per bead store they open.
 

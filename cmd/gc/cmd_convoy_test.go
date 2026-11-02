@@ -4051,17 +4051,18 @@ func TestRouteConvoyListAPITextNotesHiddenSynthetic(t *testing.T) {
 	}
 }
 
-// TestConvoyListStoreOpensReuseTheLoadedConfig pins the local lane to the one
-// config load it already makes: each convoy store it opens (the city's and
-// every rig's) used to reload city.toml and every pack include inside the
-// open, one full load per store per invocation.
+// TestAllConvoyStoreOpensReuseTheLoadedConfig pins openAllConvoyStoresAt, the
+// opener of gc beads list and show and gc convoy stranded on the local lane,
+// to the one config load it already makes: each convoy store it opens (the
+// city's and every rig's) used to reload city.toml and every pack include
+// inside the open, one full load per store per invocation.
 //
 // Not parallel: loadCityConfigCalls is process-wide.
-func TestConvoyListStoreOpensReuseTheLoadedConfig(t *testing.T) {
+func TestAllConvoyStoreOpensReuseTheLoadedConfig(t *testing.T) {
 	cityDir := newReadyCityWithRigs(t)
 
 	before := loadCityConfigCalls.Load()
-	stores, code := openAllConvoyStoresAt(cityDir, io.Discard, "gc convoy list")
+	stores, code := openAllConvoyStoresAt(cityDir, io.Discard, "gc convoy stranded")
 	if code != 0 {
 		t.Fatalf("openAllConvoyStoresAt = %d, want 0", code)
 	}

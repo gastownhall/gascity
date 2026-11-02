@@ -380,15 +380,25 @@ var convoyListAPIClient = func(cityPath string) (*api.Client, string) {
 // local route. A local target whose server predates child_ids falls back to
 // the local read (reason convoy-check-predates-child-ids); a remote target,
 // which has no local read, prints without them (renderConvoyListFromAPI).
+//
+// Two stores' convoys under one ID are both listed, as the local route lists
+// them, but /convoy/{id}/check answers an ID from one store, so it cannot give
+// each its own progress. A local target then reads the stores directly
+// (reason convoy-id-in-several-stores), before any check; a remote target
+// prints the one answer for each and says so.
 func routeConvoyList(cityPath string, c *api.Client, nilReason string, opts convoyListOptions, stdout, stderr io.Writer) int {
 	var cr api.CachedRead[[]beads.Bead]
 	var hidden int
 	var progress []api.ConvoyCheckView
+	var sharedIDs []string
 	return routeRead(c, "convoy list", nilReason, stderr,
 		func() error {
 			var err error
 			if cr, err = c.ListConvoys(); err != nil {
 				return err
+			}
+			if sharedIDs = repeatedConvoyIDs(cr.Body); len(sharedIDs) > 0 && !c.IsRemote() {
+				return fallbackAfterFetch{Reason: "convoy-id-in-several-stores"}
 			}
 			beadOf := func(b beads.Bead) beads.Bead { return b }
 			cr.Body, hidden = withoutSyntheticConvoys(cr.Body, beadOf, opts.includeSynthetic)
@@ -401,9 +411,29 @@ func routeConvoyList(cityPath string, c *api.Client, nilReason string, opts conv
 			}
 			return nil
 		},
-		func() int { return renderConvoyListFromAPI(cr, progress, hidden, opts.jsonOut, stdout, stderr) },
+		func() int {
+			return renderConvoyListFromAPI(cr, progress, hidden, sharedIDs, opts.jsonOut, stdout, stderr)
+		},
 		func() int { return doConvoyListFallback(cityPath, opts, stdout, stderr) },
 	)
+}
+
+// repeatedConvoyIDs returns, sorted, each ID more than one of convoys carries.
+// ListConvoys returns an identical row once, so these are different convoys
+// that different stores hold under one ID.
+func repeatedConvoyIDs(convoys []beads.Bead) []string {
+	rows := make(map[string]int, len(convoys))
+	for _, convoy := range convoys {
+		rows[convoy.ID]++
+	}
+	var repeated []string
+	for id, n := range rows {
+		if n > 1 {
+			repeated = append(repeated, id)
+		}
+	}
+	sort.Strings(repeated)
+	return repeated
 }
 
 // convoyChecksLackChildIDs reports whether a /convoy/{id}/check answer came
@@ -438,11 +468,16 @@ func fetchConvoyProgress(c *api.Client, convoys []beads.Bead) ([]api.ConvoyCheck
 // same writer as the local route (writeConvoyList), so both print one schema
 // with one content. hidden is the number of synthetic convoys left out. A
 // non-empty human listing appends the stale-cache banner when the cache age
-// exceeds the threshold, and a server that predates child_ids (reached only
-// on a remote target, which has no local route) is named on stderr.
-func renderConvoyListFromAPI(cr api.CachedRead[[]beads.Bead], progress []api.ConvoyCheckView, hidden int, jsonOut bool, stdout, stderr io.Writer) int {
+// exceeds the threshold. Two cases reach it only on a remote target, which
+// has no local route, and each is named on stderr: a server that predates
+// child_ids, and sharedIDs, the IDs that more than one store's convoy carries,
+// whose rows all show the one store's progress /convoy/{id}/check reports.
+func renderConvoyListFromAPI(cr api.CachedRead[[]beads.Bead], progress []api.ConvoyCheckView, hidden int, sharedIDs []string, jsonOut bool, stdout, stderr io.Writer) int {
 	if convoyChecksLackChildIDs(progress) {
 		fmt.Fprintln(stderr, "gc convoy list: this city's API predates child_ids; child_ids and dangling-track counts are left out") //nolint:errcheck // best-effort stderr
+	}
+	for _, id := range sharedIDs {
+		fmt.Fprintf(stderr, "gc convoy list: more than one store holds a convoy %s; this city's API checks one of them, so every %s row shows that convoy's progress\n", id, id) //nolint:errcheck // best-effort stderr
 	}
 	rows := make([]convoySummaryJSON, 0, len(cr.Body))
 	for i, convoy := range cr.Body {
@@ -481,6 +516,8 @@ func convoyProgressFromAPI(check api.ConvoyCheckView) convoyProgressJSON {
 // cannot open or list fails the listing, naming the store: the supervisor
 // reports the same store as a partial answer, which the API route refuses, so
 // both routes fail rather than print part of the city's convoys as all of them.
+// A store only suspended rigs reach is left out, and its rigs named, on both
+// routes (openEveryConvoyStoreAt), so a suspended rig fails neither.
 func doConvoyListFallback(cityPath string, opts convoyListOptions, stdout, stderr io.Writer) int {
 	stores, code := openEveryConvoyStoreAt(cityPath, stderr, "gc convoy list")
 	if stores == nil {
@@ -1019,8 +1056,9 @@ func refuseBindingRigCollision(beadID string, cfg *config.City, cityPath string,
 
 // openAllConvoyStoresAt opens every convoy store for a pre-resolved cityPath,
 // used by routed callers that already resolved the city before dispatching
-// to the fallback path. A store it cannot open is skipped, so lookups by id
-// (status, show) and gc convoy stranded still read the healthy stores.
+// to the fallback path. A store it cannot open is skipped, so gc beads show's
+// lookup by id, gc beads list and gc convoy stranded still read the healthy
+// stores.
 func openAllConvoyStoresAt(cityPath string, stderr io.Writer, cmdName string) ([]convoyStoreView, int) {
 	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
@@ -1041,12 +1079,16 @@ func openAllConvoyStoresAt(cityPath string, stderr io.Writer, cmdName string) ([
 	return stores, 0
 }
 
-// openEveryConvoyStoreAt is openAllConvoyStoresAt for a listing that must not
-// come out short: any store it cannot open is named on stderr and fails the
-// command. A listing that silently left out a rig's convoys would read as the
-// city's complete answer, while the supervisor reports that same store as a
-// partial answer the API route refuses. It opens through openStoreForCity, the
-// opener gc beads list's direct read uses, so it adds no raw-store debt.
+// openEveryConvoyStoreAt is openAllConvoyStoresAt for gc convoy list, a
+// listing that must not come out short. A suspended rig's store is left
+// unopened and named on stderr, as gc convoy check leaves it
+// (convoyCheckStoreCandidates): suspension is quiescence, and the supervisor's
+// /convoys leaves the same stores out. Any other store it cannot open is named
+// on stderr and fails the command: a listing that silently left out a rig's
+// convoys would read as the city's complete answer, while the supervisor
+// reports that same store as a partial answer the API route refuses. It opens
+// through openStoreForCity, which adds no raw-store debt but loads the city
+// config again for each store it opens.
 func openEveryConvoyStoreAt(cityPath string, stderr io.Writer, cmdName string) ([]convoyStoreView, int) {
 	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
@@ -1054,7 +1096,10 @@ func openEveryConvoyStoreAt(cityPath string, stderr io.Writer, cmdName string) (
 		return nil, 1
 	}
 	emitLoadCityConfigWarnings(stderr, prov)
-	candidates := convoyStoreCandidates(cfg, cityPath, "") // residency:allow — openAllConvoyStoresAt's own enumeration, re-walked so a store that cannot open fails the listing instead of vanishing from it (the supervisor reports the same store as a partial answer)
+	candidates, suspended := convoyCheckStoreCandidates(cfg, cityPath)
+	for _, rig := range suspended {
+		fmt.Fprintf(stderr, "%s: rig %q is suspended; its convoys are listed once it resumes\n", cmdName, rig) //nolint:errcheck // best-effort stderr
+	}
 	failed := 0
 	stores := openConvoyStoreDirs(candidates, openStoreForCity(cityPath), func(dir string, err error) {
 		fmt.Fprintf(stderr, "%s: opening the convoy store at %s: %v\n", cmdName, dir, err) //nolint:errcheck // best-effort stderr
@@ -1073,7 +1118,7 @@ func openEveryConvoyStoreAt(cityPath string, stderr io.Writer, cmdName string) (
 // convoyCheckStoreCandidates is convoyStoreCandidates without the suspended
 // rigs' stores, which it names in skipped. A store the city or an awake rig
 // also reads stays in: suspension retires a rig, not a store something awake
-// reads from.
+// reads from. gc convoy check and gc convoy list both read this set.
 func convoyCheckStoreCandidates(cfg *config.City, cityPath string) (candidates, skipped []string) {
 	candidates = convoyStoreCandidates(cfg, cityPath, "") // residency:allow — the list openConvoyStores walks, minus suspended rigs; decides no binding, namespace or leg order
 	asleep := suspendedRigStoreRoots(cfg, cityPath)

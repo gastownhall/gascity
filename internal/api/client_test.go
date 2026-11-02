@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -1358,6 +1359,58 @@ func TestClientListConvoysRepeatedCursorErrors(t *testing.T) {
 	}
 }
 
+// TestClientListConvoysKeepsDistinctConvoysThatShareAnID pins which repeated
+// rows each drain drops. IDs are unique only within a store, so ListConvoys
+// returns every different convoy under one ID, on one page or a later one, and
+// drops only a row identical to one it returned: the second copy a server
+// serves when two of its stores read one ledger (legacy shared-file mode). The
+// identical copy carries a priority, labels, metadata and a non-UTC created_at,
+// so the rows compare equal through the whole wire decode. ListBeads keeps its
+// ID rule and returns the first row of each ID.
+func TestClientListConvoysKeepsDistinctConvoysThatShareAnID(t *testing.T) {
+	cityConvoy := map[string]any{"id": "gc-1", "title": "city convoy", "issue_type": "convoy", "status": "open", "created_at": "2026-04-23T10:00:00Z"}
+	rigConvoy := map[string]any{"id": "gc-1", "title": "rig convoy", "issue_type": "convoy", "status": "open", "created_at": "2026-04-23T09:00:00Z"}
+	sharedLedger := map[string]any{
+		"id": "gc-2", "title": "one ledger, two stores", "issue_type": "convoy", "status": "open",
+		"created_at": "2026-04-23T08:00:00+02:00", "priority": 2,
+		"labels": []string{"owned"}, "metadata": map[string]string{"target": "main"},
+	}
+	laterRigConvoy := map[string]any{"id": "gc-1", "title": "another rig's convoy", "issue_type": "convoy", "status": "open", "created_at": "2026-04-23T07:00:00Z"}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := map[string]any{"items": []map[string]any{cityConvoy, rigConvoy, sharedLedger, sharedLedger}, "next_cursor": "page-2"}
+		if r.URL.Query().Get("cursor") == "page-2" {
+			body = map[string]any{"items": []map[string]any{sharedLedger, laterRigConvoy}}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(body)
+	}))
+	defer ts.Close()
+	c := NewCityScopedClient(ts.URL, "alpha")
+
+	titles := func(rows []beads.Bead) []string {
+		out := make([]string, 0, len(rows))
+		for _, b := range rows {
+			out = append(out, b.Title)
+		}
+		return out
+	}
+	convoys, err := c.ListConvoys()
+	if err != nil {
+		t.Fatalf("ListConvoys: %v", err)
+	}
+	if got, want := titles(convoys.Body), []string{"city convoy", "rig convoy", "one ledger, two stores", "another rig's convoy"}; !slices.Equal(got, want) {
+		t.Errorf("ListConvoys titles = %q, want %q: every convoy under gc-1, and gc-2's identical copies once", got, want)
+	}
+
+	list, err := c.ListBeads(ListBeadsOpts{})
+	if err != nil {
+		t.Fatalf("ListBeads: %v", err)
+	}
+	if got, want := titles(list.Body), []string{"city convoy", "one ledger, two stores"}; !slices.Equal(got, want) {
+		t.Errorf("ListBeads titles = %q, want %q: the first row of each id", got, want)
+	}
+}
+
 func TestClientGetConvoy(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/city/alpha/convoy/gc-1" {
@@ -2019,7 +2072,7 @@ func TestDrainBeadPagesHardPageCap(t *testing.T) {
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
-	_, err := drainBeadPages(c.beadsPage(listBeadsParams(ListBeadsOpts{})), 0, 3)
+	_, err := drainBeadPages(c.beadsPage(listBeadsParams(ListBeadsOpts{})), 0, 3, sameBeadID)
 	if err == nil || !strings.Contains(err.Error(), "exceeded 3 pages") {
 		t.Fatalf("err = %v, want 'exceeded 3 pages'", err)
 	}

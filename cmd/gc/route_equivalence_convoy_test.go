@@ -382,6 +382,27 @@ func requireFailedConvoyList(t *testing.T, label string, run convoyRouteRun) {
 // the harness and omega's path.
 func newConvoyRigCity(t *testing.T) (*charHarness, string) {
 	t.Helper()
+	cityPath, alphaPath, omegaPath := writeConvoyRigCity(t)
+	for _, scope := range []string{cityPath, alphaPath, omegaPath} {
+		store, err := openScopeLocalFileStoreForCity(scope, cityPath)
+		if err != nil {
+			t.Fatalf("open seed store %s: %v", scope, err)
+		}
+		if _, err := store.Create(beads.Bead{Title: "convoy in " + filepath.Base(scope), Type: "convoy"}); err != nil {
+			t.Fatalf("seed convoy in %s: %v", scope, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(omegaPath, ".gc", "beads.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return convoyRigHarness(t, cityPath), omegaPath
+}
+
+// writeConvoyRigCity writes a file-backed city with rigs alpha (prefix al) and
+// omega (prefix om), each scope with its own empty ledger, and returns the
+// three scope roots.
+func writeConvoyRigCity(t *testing.T) (cityPath, alphaPath, omegaPath string) {
+	t.Helper()
 	clearGCEnv(t)
 	clearInheritedBeadsEnv(t)
 	t.Setenv("GC_BEADS", "file")
@@ -391,9 +412,9 @@ func newConvoyRigCity(t *testing.T) (*charHarness, string) {
 	t.Setenv("GC_DEBUG", "1")
 	t.Setenv("GC_NO_API", "")
 
-	cityPath := t.TempDir()
-	alphaPath := filepath.Join(t.TempDir(), "alpha")
-	omegaPath := filepath.Join(t.TempDir(), "omega")
+	cityPath = t.TempDir()
+	alphaPath = filepath.Join(t.TempDir(), "alpha")
+	omegaPath = filepath.Join(t.TempDir(), "omega")
 	if err := bootstrapScopedFileProviderCityFS(fsys.OSFS{}, cityPath); err != nil {
 		t.Fatal(err)
 	}
@@ -409,26 +430,19 @@ func newConvoyRigCity(t *testing.T) (*charHarness, string) {
 	siteToml := fmt.Sprintf("workspace_name = %q\nworkspace_prefix = \"hq\"\n\n[[rig]]\nname = \"alpha\"\npath = %q\n\n[[rig]]\nname = \"omega\"\npath = %q\n",
 		charCityName, alphaPath, omegaPath)
 	writeSchema2RigCity(t, cityPath, charCityName, cityToml, siteToml)
+	return cityPath, alphaPath, omegaPath
+}
 
-	for _, scope := range []string{cityPath, alphaPath, omegaPath} {
-		store, err := openScopeLocalFileStoreForCity(scope, cityPath)
-		if err != nil {
-			t.Fatalf("open seed store %s: %v", scope, err)
-		}
-		if _, err := store.Create(beads.Bead{Title: "convoy in " + filepath.Base(scope), Type: "convoy"}); err != nil {
-			t.Fatalf("seed convoy in %s: %v", scope, err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(omegaPath, ".gc", "beads.json"), []byte("{not json"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
+// convoyRigHarness serves the city at cityPath, as its stores stand on disk,
+// through a new controller state.
+func convoyRigHarness(t *testing.T, cityPath string) *charHarness {
+	t.Helper()
 	cfg, err := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		t.Fatalf("load cfg: %v", err)
 	}
 	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), charCityName, cityPath)
-	return &charHarness{cityPath: cityPath, cs: cs}, omegaPath
+	return &charHarness{cityPath: cityPath, cs: cs}
 }
 
 // TestConvoyListRouteEquivalenceWhenARigStoreCannotOpen pins that a rig store
@@ -458,6 +472,175 @@ func TestConvoyListRouteEquivalenceWhenARigStoreCannotOpen(t *testing.T) {
 			if !strings.Contains(got.stderr, wantNamed) {
 				t.Errorf("%s: stderr = %q, want the unopenable store named (%q)", label, got.stderr, wantNamed)
 			}
+		}
+	}
+}
+
+// TestConvoyListRouteEquivalenceSkipsASuspendedRigItCannotOpen pins the
+// suspension frame on every lane. Suspending a rig whose store cannot be
+// opened is the remedy for a dead rig, and suspension is quiescence: neither
+// the supervisor nor the direct read touches a suspended rig's store. Every
+// lane exits 0 and prints the other stores' convoys byte for byte, and the
+// direct read names the rig it left out.
+func TestConvoyListRouteEquivalenceSkipsASuspendedRigItCannotOpen(t *testing.T) {
+	h, _ := newConvoyRigCity(t)
+	if _, err := updateRigSuspension(fsys.OSFS{}, h.cityPath, "omega", suspendRigInState); err != nil {
+		t.Fatalf("suspend omega: %v", err)
+	}
+	local, apiLanes := splitConvoyLanes(t, h)
+	for _, jsonOut := range []bool{true, false} {
+		opts := convoyListOptions{jsonOut: jsonOut}
+		route := func(c *api.Client, nilReason string, stdout, stderr io.Writer) int {
+			return routeConvoyList(h.cityPath, c, nilReason, opts, stdout, stderr)
+		}
+		want := runConvoyRoute(local, route)
+		if want.exit != 0 {
+			t.Fatalf("json=%v: local exit %d, stderr %q", jsonOut, want.exit, want.stderr)
+		}
+		for _, title := range []string{"convoy in " + filepath.Base(h.cityPath), "convoy in alpha"} {
+			if !strings.Contains(want.stdout, title) {
+				t.Errorf("json=%v: local stdout = %q, want %q listed", jsonOut, want.stdout, title)
+			}
+		}
+		if !strings.Contains(want.stderr, `rig "omega" is suspended`) {
+			t.Errorf("json=%v: local stderr = %q, want the suspended rig named", jsonOut, want.stderr)
+		}
+		for _, lane := range apiLanes {
+			label := fmt.Sprintf("json=%v lane=%s", jsonOut, lane.name)
+			requireConvoyRouteEquivalent(t, label, want, runConvoyRoute(lane, route), jsonOut)
+		}
+	}
+}
+
+// TestConvoyListRouteEquivalenceKeepsDifferentConvoysUnderOneID pins the
+// routes for two stores that each hold a different convoy under one ID (IDs
+// are unique only within a store). The direct read lists both, each with its
+// own store's members. /convoy/{id}/check answers an ID from one store, so
+// the API route cannot give each its own progress: a local target reads the
+// stores directly and prints what the serverless lane prints, and a remote
+// target lists both rows with the one answer and names the ID on stderr.
+func TestConvoyListRouteEquivalenceKeepsDifferentConvoysUnderOneID(t *testing.T) {
+	cityPath, alphaPath, _ := writeConvoyRigCity(t)
+	city, err := openScopeLocalFileStoreForCity(cityPath, cityPath)
+	if err != nil {
+		t.Fatalf("open the city store: %v", err)
+	}
+	convoy, err := city.Create(beads.Bead{Title: "city convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("seed the city convoy: %v", err)
+	}
+	if _, err := city.Create(beads.Bead{Title: "city child", ParentID: convoy.ID}); err != nil {
+		t.Fatalf("seed the city child: %v", err)
+	}
+	alpha, err := openScopeLocalFileStoreForCity(alphaPath, cityPath)
+	if err != nil {
+		t.Fatalf("open alpha's store: %v", err)
+	}
+	alpha.HonorExplicitIDs = true
+	if _, err := alpha.Create(beads.Bead{ID: convoy.ID, Title: "alpha convoy", Type: "convoy"}); err != nil {
+		t.Fatalf("seed alpha's convoy under %s: %v", convoy.ID, err)
+	}
+	done, err := alpha.Create(beads.Bead{Title: "alpha child", ParentID: convoy.ID})
+	if err != nil {
+		t.Fatalf("seed alpha's child: %v", err)
+	}
+	if err := alpha.Close(done.ID); err != nil {
+		t.Fatalf("close alpha's child: %v", err)
+	}
+	h := convoyRigHarness(t, cityPath)
+	lanes := map[string]charLane{}
+	for _, lane := range h.lanes(t) {
+		lanes[lane.name] = lane
+	}
+	route := func(c *api.Client, nilReason string, stdout, stderr io.Writer) int {
+		return routeConvoyList(h.cityPath, c, nilReason, convoyListOptions{jsonOut: true}, stdout, stderr)
+	}
+
+	want := runConvoyRoute(lanes["serverless"], route)
+	if want.exit != 0 {
+		t.Fatalf("local exit %d, stderr %q", want.exit, want.stderr)
+	}
+	var doc struct {
+		Convoys []struct {
+			ID       string `json:"id"`
+			Title    string `json:"title"`
+			Progress struct {
+				Closed int `json:"closed"`
+				Total  int `json:"total"`
+			} `json:"progress"`
+		} `json:"convoys"`
+	}
+	if err := json.Unmarshal([]byte(want.stdout), &doc); err != nil {
+		t.Fatalf("decode the local list: %v", err)
+	}
+	var rows []string
+	for _, c := range doc.Convoys {
+		rows = append(rows, fmt.Sprintf("%s %s %d/%d", c.ID, c.Title, c.Progress.Closed, c.Progress.Total))
+	}
+	if wantRows := []string{convoy.ID + " alpha convoy 1/1", convoy.ID + " city convoy 0/1"}; !slices.Equal(rows, wantRows) {
+		t.Fatalf("local rows = %q, want %q: both convoys, each with its own store's members", rows, wantRows)
+	}
+
+	got := runConvoyRoute(lanes["alive"], route)
+	if got.exit != 0 || got.stdout != want.stdout {
+		t.Errorf("local target: exit %d stdout %q, want exit 0 and the local route's %q", got.exit, got.stdout, want.stdout)
+	}
+	if !strings.Contains(got.stderr, "route=fallback reason=convoy-id-in-several-stores") {
+		t.Errorf("local target: stderr = %q, want the convoy-id-in-several-stores fallback", got.stderr)
+	}
+
+	got = runConvoyRoute(lanes["remote"], route)
+	if got.exit != 0 {
+		t.Errorf("remote target: exit = %d, stderr %q", got.exit, got.stderr)
+	}
+	for _, needle := range []string{"route=api", "more than one store holds a convoy " + convoy.ID} {
+		if !strings.Contains(got.stderr, needle) {
+			t.Errorf("remote target: stderr = %q, want it to contain %q", got.stderr, needle)
+		}
+	}
+	for _, title := range []string{"alpha convoy", "city convoy"} {
+		if !strings.Contains(got.stdout, title) {
+			t.Errorf("remote target: stdout = %q, want %q listed", got.stdout, title)
+		}
+	}
+}
+
+// TestConvoyListRouteEquivalenceOnALegacySharedFileCity pins the API route on
+// a legacy shared-file city with a rig. The supervisor serves the city's one
+// ledger through two stores, the city's and the rig's shared one, so /convoys
+// carries every convoy twice, identical, and the client keeps one of each:
+// every lane prints what the direct read, which reads the ledger once, prints.
+func TestConvoyListRouteEquivalenceOnALegacySharedFileCity(t *testing.T) {
+	seed, _, _ := seedConvoyRouteCity(0)
+	cityToml := charCityBasic + fmt.Sprintf("\n[[rigs]]\nname = \"alpha\"\npath = %q\n", t.TempDir())
+	h := newCharCity(t, cityToml, seed)
+
+	stores := h.cs.BeadStores()
+	cityStore, rigStore := stores[charCityName], stores["alpha"]
+	if cityStore == nil || rigStore == nil || cityStore == rigStore {
+		t.Fatalf("stores = %v, want the city and rig alpha served through two stores", stores)
+	}
+	cityRows, cityErr := cityStore.List(beads.ListQuery{Type: "convoy"})
+	rigRows, rigErr := rigStore.List(beads.ListQuery{Type: "convoy"})
+	if cityErr != nil || rigErr != nil || len(cityRows) == 0 || len(rigRows) != len(cityRows) {
+		t.Fatalf("the city's store lists %d convoys (%v) and alpha's %d (%v); want the one ledger's convoys from both", len(cityRows), cityErr, len(rigRows), rigErr)
+	}
+
+	local, apiLanes := splitConvoyLanes(t, h)
+	for _, jsonOut := range []bool{true, false} {
+		route := func(c *api.Client, nilReason string, stdout, stderr io.Writer) int {
+			return routeConvoyList(h.cityPath, c, nilReason, convoyListOptions{jsonOut: jsonOut}, stdout, stderr)
+		}
+		want := runConvoyRoute(local, route)
+		if want.exit != 0 {
+			t.Fatalf("json=%v: local exit %d, stderr %q", jsonOut, want.exit, want.stderr)
+		}
+		if got := strings.Count(want.stdout, "Alpha convoy"); got != 1 {
+			t.Errorf("json=%v: local stdout lists Alpha convoy %d times, want once:\n%s", jsonOut, got, want.stdout)
+		}
+		for _, lane := range apiLanes {
+			label := fmt.Sprintf("json=%v lane=%s", jsonOut, lane.name)
+			requireConvoyRouteEquivalent(t, label, want, runConvoyRoute(lane, route), jsonOut)
 		}
 	}
 }
