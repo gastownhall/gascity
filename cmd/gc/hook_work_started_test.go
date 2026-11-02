@@ -1230,3 +1230,31 @@ func TestDrainAckPassRefusesALegacyRecordedClaim(t *testing.T) {
 		t.Fatalf("the refused ack released the unstarted claim (%s); want nothing released", status)
 	}
 }
+
+// TestHookDrainAckFenceHoldsALegacyRecordedClaim (AC-3, #8313): the hook's
+// --drain-ack fence answers started_claim_held for a claim recorded through
+// the legacy fallback — evidence the default topology's hook can now leave —
+// and acknowledges nothing.
+func TestHookDrainAckFenceHoldsALegacyRecordedClaim(t *testing.T) {
+	row := newStartedRowWithoutConditionalWrites(t)
+	res, err := recordWorkStarted(row.front, startedSessionID, hookStartedFence{Token: startedToken, Gen: 7, HasGen: true},
+		hookStartedKey{Store: startedStoreRef, Bead: "g-1"}, session.WorkStartedViaClaim, time.Date(2026, 10, 17, 20, 0, 0, 0, time.UTC), legacyStartedMode())
+	if err != nil || res != hookStartedRecorded {
+		t.Fatalf("recording the claim on a store without a conditional writer = (%v, %v); want (recorded, nil)", res, err)
+	}
+
+	l := &startedLog{}
+	ops := l.ops(`[]`, row, nil)
+	ops.ReadWorkStarted = func(string) (string, error) { return row.meta(t, session.WorkStartedKey), nil }
+	ops.ReadWorkMeta = func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, error) {
+		return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee}, nil
+	}
+	stdout := &orderedWriter{l: l}
+	var stderr bytes.Buffer
+	code := doHookClaim("q", "/rig", startedOpts(startedEnv(startedToken, "7")), ops, stdout, &stderr)
+
+	got := decodeTurnBoundResult(t, stdout.buf.String())
+	if code != 0 || got.Action != "work" || got.Reason != hookClaimWorkReasonStartedClaimHeld || got.BeadID != "g-1" || l.acked {
+		t.Fatalf("code %d, result %+v, acked %v; want work started_claim_held for g-1 and no ack", code, got, l.acked)
+	}
+}
