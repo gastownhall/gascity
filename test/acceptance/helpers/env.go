@@ -152,6 +152,7 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	// shared-server mode off there too; a test that exercises the user-level
 	// layer on purpose sets it to "".
 	e.vars[bdSharedServerConfigEnv] = "false"
+	e.vars[bdDisableMetricsEnv] = "1"
 
 	// Dolt reads its global config from $DOLT_ROOT_PATH/.dolt/config_global.json,
 	// falling back to $HOME. gc's init preflight (checkDoltAuthorIdentity) probes
@@ -260,6 +261,47 @@ func (e *Env) WithHostHome() *Env {
 		home = lu.HomeDir
 	}
 	e.vars["HOME"] = home
+	return e
+}
+
+// WithRealBD makes bdPath itself the bd gc runs, returning the Env for
+// chaining: BD_BIN names it, and a directory holding only a bd link to it
+// leads PATH, so every scope gc serves resolves it ahead of the tool-home
+// wrapper.
+//
+// A split-storage city needs it. gc bd there forwards only to bd's own Go
+// binary, which gc identifies by its Go build info (the bd trust policy in
+// docs/runbooks/split-storage-classes.md). The wrapper is a shell script and
+// has none, so gc refuses every forwarded command: the city's gate-sweep order
+// on every cycle, and any gc bd a test or worker runs on a work bead.
+//
+// The cost is the wrapper's re-homing: every bd gc forks then resolves
+// user-level state under gc's HOME instead of the tool home. That keeps the
+// operator's home out of reach only because NewEnv isolated gc's HOME and
+// pinned bd's shared-server mode and metrics off, so an Env whose gc has any
+// other HOME (WithHostHome) panics here. A failed bd init also no longer
+// prints its dolt logs (ParseBDInitDiagnostics).
+func (e *Env) WithRealBD(bdPath string) *Env {
+	if !filepath.IsAbs(bdPath) {
+		panic(fmt.Sprintf("acceptance: WithRealBD needs an absolute bd path, got %q (gc ignores a relative BD_BIN)", bdPath))
+	}
+	gcHome := e.vars["GC_HOME"]
+	if gcHome == "" || e.vars["HOME"] != IsolatedHome(gcHome) {
+		panic(fmt.Sprintf("acceptance: WithRealBD on an Env whose gc HOME %q is not NewEnv's isolated home: an unwrapped bd would resolve user-level state there", e.vars["HOME"]))
+	}
+	dir := filepath.Join(gcHome, "real-bd-bin")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		panic(fmt.Sprintf("acceptance: creating %s: %v", dir, err))
+	}
+	link := filepath.Join(dir, "bd")
+	if err := os.Remove(link); err != nil && !os.IsNotExist(err) {
+		panic(fmt.Sprintf("acceptance: replacing %s: %v", link, err))
+	}
+	if err := os.Symlink(bdPath, link); err != nil {
+		panic(fmt.Sprintf("acceptance: linking %s to %s: %v", link, bdPath, err))
+	}
+	e.vars["BD_BIN"] = bdPath
+	e.vars["PATH"] = dir + string(os.PathListSeparator) + e.vars["PATH"]
 	return e
 }
 
