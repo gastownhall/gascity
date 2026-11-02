@@ -36,8 +36,11 @@ const (
 // The check scans the city and all managed rig scope roots, because each bd
 // workspace root can maintain its own .beads/backup/ auto-backup directory.
 type BdBackupSizeCheck struct {
-	cityPath   string
-	measureDir func(string) (int64, bool, error)
+	cityPath string
+	// measureDir is injectable so tests can avoid shelling out to du.
+	// Production uses duDirBytes from checks.go, which sizes its du and
+	// Go-walk bounds from the check's runner budget (ctx.Deadline).
+	measureDir func(*CheckContext, string) (int64, bool, error)
 	scopeRoots []string
 }
 
@@ -62,7 +65,7 @@ func (c *BdBackupSizeCheck) Name() string { return "bd-backup-size" }
 
 // Run measures the bd auto-backup directories and compares them against
 // warning/error thresholds.
-func (c *BdBackupSizeCheck) Run(_ *CheckContext) *CheckResult {
+func (c *BdBackupSizeCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 
 	measure := c.measureDir
@@ -91,7 +94,7 @@ func (c *BdBackupSizeCheck) Run(_ *CheckContext) *CheckResult {
 			return r
 		}
 
-		bytes, exists, err := measure(target.BackupDir)
+		bytes, exists, err := measure(ctx, target.BackupDir)
 		if err != nil {
 			r.Status = StatusWarning
 			r.Message = fmt.Sprintf("measure bd backup dir for %s: %v", target.Label, err)

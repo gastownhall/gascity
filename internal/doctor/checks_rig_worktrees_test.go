@@ -12,7 +12,7 @@ import (
 
 // newRigWorktreesCheckWithMeasure builds the check with an injected
 // measurement so tests never shell out to du.
-func newRigWorktreesCheckWithMeasure(t *testing.T, rigPath string, cfg config.DoctorConfig, measure func(string) (int64, bool, error)) *RigWorktreesCheck {
+func newRigWorktreesCheckWithMeasure(t *testing.T, rigPath string, cfg config.DoctorConfig, measure func(*CheckContext, string) (int64, bool, error)) *RigWorktreesCheck {
 	t.Helper()
 	c := NewRigWorktreesCheck(config.Rig{Name: "testrig", Path: rigPath}, cfg)
 	c.measureDir = measure
@@ -21,8 +21,8 @@ func newRigWorktreesCheckWithMeasure(t *testing.T, rigPath string, cfg config.Do
 
 // fixedSize returns a measurement stub reporting n bytes for an
 // existing directory.
-func fixedSize(n int64) func(string) (int64, bool, error) {
-	return func(string) (int64, bool, error) { return n, true, nil }
+func fixedSize(n int64) func(*CheckContext, string) (int64, bool, error) {
+	return func(*CheckContext, string) (int64, bool, error) { return n, true, nil }
 }
 
 // makeWorktreeDirs creates <rigPath>/worktrees/<name> for each name and
@@ -165,7 +165,7 @@ func TestRigWorktreesCheck_FilesAreNotCountedAsWorktrees(t *testing.T) {
 // WorktreeDiskSizeCheck applies to measurement failure.
 func TestRigWorktreesCheck_MeasureFails_WarnsAndKeepsTheCount(t *testing.T) {
 	rigPath := makeWorktreeDirs(t, "tlp-aaa", "tlp-bbb")
-	c := newRigWorktreesCheckWithMeasure(t, rigPath, config.DoctorConfig{}, func(string) (int64, bool, error) {
+	c := newRigWorktreesCheckWithMeasure(t, rigPath, config.DoctorConfig{}, func(*CheckContext, string) (int64, bool, error) {
 		return 0, false, errors.New("du exploded")
 	})
 

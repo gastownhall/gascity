@@ -3094,7 +3094,7 @@ func writeFakeFile(t *testing.T, path string, size int64) {
 
 func newTestDoltNomsSizeCheck(cityPath string, skip bool) *DoltNomsSizeCheck {
 	c := NewDoltNomsSizeCheck(cityPath, skip)
-	c.measureDir = sumDirBytes
+	c.measureDir = func(_ *CheckContext, root string) (int64, bool, error) { return sumDirBytes(root) }
 	return c
 }
 
@@ -3240,7 +3240,7 @@ func TestDuDirBytes_NonSparseFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	total, exists, err := duDirBytes(dir)
+	total, exists, err := duDirBytes(nil, dir)
 	if err != nil {
 		t.Fatalf("duDirBytes: %v", err)
 	}
@@ -3336,7 +3336,7 @@ func TestDoltNomsSizeCheck_ConfigErrorScansManagedRigMetadata(t *testing.T) {
 	writeDoctorCanonicalMetadata(t, fs, rigDir, "de")
 
 	c := NewDoltNomsSizeCheckForConfig(dir, false, nil, os.ErrInvalid)
-	c.measureDir = func(path string) (int64, bool, error) {
+	c.measureDir = func(_ *CheckContext, path string) (int64, bool, error) {
 		if strings.Contains(path, string(filepath.Separator)+"de"+string(filepath.Separator)+".dolt") {
 			return 3 * 1024 * 1024 * 1024, true, nil
 		}
@@ -3431,7 +3431,7 @@ func TestDoltNomsSizeCheck_SkipsSystemDatabaseMetadata(t *testing.T) {
 	}
 
 	c := NewDoltNomsSizeCheck(dir, false)
-	c.measureDir = func(path string) (int64, bool, error) {
+	c.measureDir = func(_ *CheckContext, path string) (int64, bool, error) {
 		if strings.Contains(path, string(filepath.Separator)+"mysql"+string(filepath.Separator)) {
 			t.Fatalf("measureDir called for system database path %s", path)
 		}
@@ -3450,7 +3450,7 @@ func TestDoltNomsSizeCheck_SkipsInvalidDatabaseMetadata(t *testing.T) {
 	}
 
 	c := NewDoltNomsSizeCheck(dir, false)
-	c.measureDir = func(path string) (int64, bool, error) {
+	c.measureDir = func(_ *CheckContext, path string) (int64, bool, error) {
 		if strings.Contains(path, "outside") {
 			t.Fatalf("measureDir called for invalid database path %s", path)
 		}
@@ -3491,7 +3491,7 @@ func TestDoltNomsSizeCheck_IgnoresAmbientDataDirOverride(t *testing.T) {
 	t.Setenv("GC_DOLT_DATA_DIR", filepath.Join(t.TempDir(), "wrong-dolt-data"))
 
 	c := NewDoltNomsSizeCheck(dir, false)
-	c.measureDir = func(path string) (int64, bool, error) {
+	c.measureDir = func(_ *CheckContext, path string) (int64, bool, error) {
 		if strings.Contains(path, "wrong-dolt-data") {
 			t.Fatalf("measureDir used ambient data override path %s", path)
 		}
@@ -3517,7 +3517,7 @@ func TestDoltNomsSizeCheck_UsesPublishedRuntimeDataDir(t *testing.T) {
 	}
 
 	c := NewDoltNomsSizeCheck(dir, false)
-	c.measureDir = func(path string) (int64, bool, error) {
+	c.measureDir = func(_ *CheckContext, path string) (int64, bool, error) {
 		if strings.Contains(path, "relocated-dolt-data") {
 			return 3 * 1024 * 1024 * 1024, true, nil
 		}
@@ -3550,7 +3550,7 @@ func TestDoltNomsSizeCheck_IgnoresPublishedRuntimeDataDirWithUnreachablePort(t *
 	}
 
 	c := NewDoltNomsSizeCheck(dir, false)
-	c.measureDir = func(path string) (int64, bool, error) {
+	c.measureDir = func(_ *CheckContext, path string) (int64, bool, error) {
 		if strings.Contains(path, "unreachable-port-dolt-data") {
 			t.Fatalf("measureDir used stale running data dir %s", path)
 		}
@@ -3578,7 +3578,7 @@ func TestDoltNomsSizeCheck_UsesStoppedPublishedRuntimeDataDir(t *testing.T) {
 	}
 
 	c := NewDoltNomsSizeCheck(dir, false)
-	c.measureDir = func(path string) (int64, bool, error) {
+	c.measureDir = func(_ *CheckContext, path string) (int64, bool, error) {
 		if strings.Contains(path, "relocated-stopped-dolt-data") {
 			return 3 * 1024 * 1024 * 1024, true, nil
 		}
@@ -3603,7 +3603,7 @@ func TestDoltNomsSizeCheck_IgnoresStaleStoppedPublishedRuntimeDataDir(t *testing
 	}
 
 	c := NewDoltNomsSizeCheck(dir, false)
-	c.measureDir = func(path string) (int64, bool, error) {
+	c.measureDir = func(_ *CheckContext, path string) (int64, bool, error) {
 		if strings.Contains(path, "stale-stopped-dolt-data") {
 			t.Fatalf("measureDir used stale stopped data dir %s", path)
 		}
@@ -3625,7 +3625,7 @@ func TestDoltNomsSizeCheck_IgnoresMissingPublishedRuntimeDataDir(t *testing.T) {
 	}
 
 	c := NewDoltNomsSizeCheck(dir, false)
-	c.measureDir = func(path string) (int64, bool, error) {
+	c.measureDir = func(_ *CheckContext, path string) (int64, bool, error) {
 		if strings.Contains(path, "missing-relocated-dolt-data") {
 			t.Fatalf("measureDir used missing published data dir %s", path)
 		}
@@ -3650,7 +3650,7 @@ func TestDoltNomsSizeCheck_IgnoresStaleRunningPublishedRuntimeDataDir(t *testing
 	}
 
 	c := NewDoltNomsSizeCheck(dir, false)
-	c.measureDir = func(path string) (int64, bool, error) {
+	c.measureDir = func(_ *CheckContext, path string) (int64, bool, error) {
 		if strings.Contains(path, "stale-running-dolt-data") {
 			t.Fatalf("measureDir used stale running data dir %s", path)
 		}

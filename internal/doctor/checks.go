@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -2469,13 +2470,81 @@ func sumDirBytesWithContext(ctx context.Context, root string) (int64, bool, erro
 	return total, true, nil
 }
 
-func boundedSumDirBytes(root string) (int64, bool, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), doltDirMeasureTimeout)
+func boundedSumDirBytes(ctx *CheckContext, root string, bound time.Duration) (int64, bool, error) {
+	walkCtx, cancel := context.WithTimeoutCause(context.Background(), bound, errDirMeasureWalkBound(bound))
 	defer cancel()
-	return sumDirBytesWithContext(ctx, root)
+	stop := watchCheckDone(ctx, cancel)
+	defer stop()
+	return sumDirBytesWithContext(walkCtx, root)
 }
 
-func duDirBytes(root string) (int64, bool, error) {
+// doltDirWalkReserve is the budget held back from the du stage of a bounded
+// directory measurement so the Go-walk fallback always has a slice of the
+// check's runner budget left. When the budget can't cover both stages the
+// reserve is dropped and du gets everything that remains.
+const doltDirWalkReserve = 30 * time.Second
+
+// errDirMeasureAbandoned is the measure error returned when the runner has
+// already abandoned the owning check (CheckContext.Done closed): measurement
+// stops instead of issuing I/O whose result can no longer be delivered.
+var errDirMeasureAbandoned = errors.New("measure directory: check abandoned before du started")
+
+// errDirMeasureWalkBound builds the context cause a fallback walk fails with
+// when its stage bound expires.
+func errDirMeasureWalkBound(bound time.Duration) error {
+	return fmt.Errorf("fallback walk timed out after %s", bound)
+}
+
+// watchCheckDone cancels cancel when the owning check's runner abandons it
+// (ctx.Done closes), so staged measurement stops issuing I/O the moment its
+// result can no longer be delivered. Returns the watcher's stop function;
+// nil-safe. The stop function must be called exactly once (defer it) so the
+// watcher goroutine never outlives the measurement.
+func watchCheckDone(ctx *CheckContext, cancel context.CancelFunc) func() {
+	if ctx == nil || ctx.Done == nil {
+		return func() {}
+	}
+	done := ctx.Done
+	stop := make(chan struct{})
+	go func() {
+		select {
+		case <-done:
+			cancel()
+		case <-stop:
+		}
+	}()
+	var once sync.Once
+	return func() { once.Do(func() { close(stop) }) }
+}
+
+// measureStageBound returns the bound for the du stage of one directory
+// measurement under a runner deadline. Unbounded runs (zero deadline) get
+// the historical hard cap and report unbounded, so the fallback walk keeps
+// its own hard cap too. A bounded run gives du
+// min(doltDirMeasureTimeout, remaining − doltDirWalkReserve): never the
+// whole budget, so the Go-walk fallback always has the remainder to finish
+// the measurement du couldn't. When the remaining budget can't cover the
+// reserve the bound is the whole remainder — du is the fast path, and a
+// walk on the leftovers of a budget that small would finish nothing.
+func measureStageBound(deadline, now time.Time) (time.Duration, bool) {
+	if deadline.IsZero() {
+		return doltDirMeasureTimeout, false
+	}
+	remaining := deadline.Sub(now)
+	duBound := min(doltDirMeasureTimeout, remaining-doltDirWalkReserve)
+	if duBound <= 0 {
+		duBound = remaining
+	}
+	return duBound, true
+}
+
+// duDirBytes measures root with du -sk, falling back to a bounded Go walk
+// when du is missing or exceeds its stage bound. Bounds are derived from
+// the check's runner budget (ctx.Deadline, stamped by Doctor.boundedRun)
+// so a bounded run's measurement finishes inside the budget that bounds
+// the check itself; the fallback walk gets the remainder. Without a runner
+// budget both stages keep the historical hard 60-second caps.
+func duDirBytes(ctx *CheckContext, root string) (int64, bool, error) {
 	info, err := os.Stat(root)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -2486,22 +2555,46 @@ func duDirBytes(root string) (int64, bool, error) {
 	if !info.IsDir() {
 		return 0, false, fmt.Errorf("%s is not a directory", root)
 	}
+	if ctx.Canceled() {
+		return 0, true, errDirMeasureAbandoned
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), doltDirMeasureTimeout)
+	start := time.Now()
+	deadline := checkDeadlineOf(ctx)
+	if !deadline.IsZero() && time.Until(deadline) <= 0 {
+		return 0, true, fmt.Errorf("measure directory: check budget exhausted before du started")
+	}
+	duBound, bounded := measureStageBound(deadline, start)
+
+	measureCtx, cancel := context.WithTimeoutCause(context.Background(), duBound, fmt.Errorf("du -sk timed out after %s", duBound))
 	defer cancel()
+	stop := watchCheckDone(ctx, cancel)
+	defer stop()
 
-	cmd := exec.CommandContext(ctx, "du", "-sk", root)
+	cmd := exec.CommandContext(measureCtx, "du", "-sk", root)
 	out, err := cmd.Output()
-	if ctx.Err() == context.DeadlineExceeded {
-		total, exists, fallbackErr := boundedSumDirBytes(root)
-		if fallbackErr != nil {
-			return 0, true, fmt.Errorf("measure directory: du -sk timed out after %s; fallback walk: %w", doltDirMeasureTimeout, fallbackErr)
+	if ctx.Canceled() {
+		// The runner abandoned the check mid-measurement; do not start a
+		// fallback walk — nothing reads this result anymore.
+		return 0, true, errDirMeasureAbandoned
+	}
+	if measureCtx.Err() == context.DeadlineExceeded {
+		// du consumed its stage bound; walk the remainder of the budget.
+		total, exists, walkErr := walkDirBytesRemainder(ctx, root, start, bounded)
+		if walkErr != nil {
+			return 0, true, fmt.Errorf("measure directory: du -sk timed out after %s; fallback walk: %w", duBound, walkErr)
 		}
 		return total, exists, nil
 	}
 	if err != nil {
 		if errors.Is(err, exec.ErrNotFound) {
-			return boundedSumDirBytes(root)
+			// du not installed — walk instead, under the same budget rules
+			// as the timeout path.
+			total, exists, walkErr := walkDirBytesRemainder(ctx, root, start, bounded)
+			if walkErr != nil {
+				return 0, true, fmt.Errorf("measure directory: du unavailable; fallback walk: %w", walkErr)
+			}
+			return total, exists, nil
 		}
 		return 0, true, fmt.Errorf("measure directory with du -sk: %w", err)
 	}
@@ -2517,6 +2610,45 @@ func duDirBytes(root string) (int64, bool, error) {
 	return kb * 1024, true, nil
 }
 
+// checkDeadlineOf returns the runner-set measurement deadline for ctx,
+// zero when ctx is nil or the run is unbounded.
+func checkDeadlineOf(ctx *CheckContext) time.Time {
+	if ctx == nil {
+		return time.Time{}
+	}
+	return ctx.Deadline
+}
+
+// walkDirBytesRemainder runs the Go-walk fallback under the budget du left:
+// the remainder of the check's runner budget for bounded runs (measured
+// from the stage start so du's consumption is charged first), the hard cap
+// for unbounded ones. A bounded run whose budget du already exhausted
+// returns a budget error instead of starting a walk that cannot finish.
+func walkDirBytesRemainder(ctx *CheckContext, root string, stageStart time.Time, bounded bool) (int64, bool, error) {
+	walkBound := doltDirMeasureTimeout
+	if bounded {
+		if ctx.Canceled() {
+			return 0, true, errDirMeasureAbandoned
+		}
+		walkBound = time.Until(checkDeadlineOf(ctx))
+		if walkBound <= 0 {
+			return 0, true, fmt.Errorf("check budget exhausted after du stage (%s elapsed since stage start)", time.Since(stageStart).Round(time.Millisecond))
+		}
+	}
+	total, exists, err := boundedSumDirBytes(ctx, root, walkBound)
+	if err != nil && !ctx.Canceled() && isDeadline(err) {
+		// Say what the walk's own bound was, not just "context deadline
+		// exceeded" — the operator needs the number to size --check-timeout.
+		return 0, true, fmt.Errorf("walk timed out after %s (check budget; raise --check-timeout for artifact-heavy trees)", walkBound)
+	}
+	return total, exists, err
+}
+
+// isDeadline reports whether err is (or wraps) context.DeadlineExceeded.
+func isDeadline(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded)
+}
+
 func formatGB(bytes int64) string {
 	gb := float64(bytes) / (1024.0 * 1024.0 * 1024.0)
 	return fmt.Sprintf("%.2f GB", gb)
@@ -2525,9 +2657,12 @@ func formatGB(bytes int64) string {
 // DoltNomsSizeCheck warns when the managed Dolt database's on-disk footprint
 // is approaching or exceeds operator-set thresholds.
 type DoltNomsSizeCheck struct {
-	cityPath        string
-	skip            bool
-	measureDir      func(string) (int64, bool, error)
+	cityPath string
+	skip     bool
+	// measureDir is injectable so tests can avoid shelling out to du.
+	// Production uses duDirBytes from checks.go, which sizes its du and
+	// Go-walk bounds from the check's runner budget (ctx.Deadline).
+	measureDir      func(*CheckContext, string) (int64, bool, error)
 	applicableKnown bool
 	applicable      bool
 	scopeRoots      []string
@@ -2562,7 +2697,7 @@ func (c *DoltNomsSizeCheck) Name() string { return "dolt-noms-size" }
 
 // Run inspects the workspace's managed local Dolt databases and compares the
 // largest footprint to warning/error thresholds.
-func (c *DoltNomsSizeCheck) Run(_ *CheckContext) *CheckResult {
+func (c *DoltNomsSizeCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	if c.skip || !c.managedApplicable() {
 		r.Status = StatusOK
@@ -2597,7 +2732,7 @@ func (c *DoltNomsSizeCheck) Run(_ *CheckContext) *CheckResult {
 		measureDir = duDirBytes
 	}
 	for _, target := range targets {
-		total, exists, err := measureDir(target.ScanRoot)
+		total, exists, err := measureDir(ctx, target.ScanRoot)
 		if err != nil {
 			r.Status = StatusWarning
 			r.Message = fmt.Sprintf("scan dolt data dir: %v", err)

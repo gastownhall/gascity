@@ -386,8 +386,8 @@ func TestHumanSize(t *testing.T) {
 // fakeMeasure returns a deterministic byte count per directory path so
 // tests don't shell out to du. Returns sizes[path] when present; treats
 // missing keys as not-existent (mirrors duDirBytes signature).
-func fakeMeasure(sizes map[string]int64, errs map[string]error) func(string) (int64, bool, error) {
-	return func(path string) (int64, bool, error) {
+func fakeMeasure(sizes map[string]int64, errs map[string]error) func(*CheckContext, string) (int64, bool, error) {
+	return func(_ *CheckContext, path string) (int64, bool, error) {
 		if e, ok := errs[path]; ok {
 			return 0, true, e
 		}

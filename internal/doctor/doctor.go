@@ -176,6 +176,12 @@ func (d *Doctor) boundedRun(c Check, ctx *CheckContext) *CheckResult {
 	checkCtx := *ctx
 	checkCtx.Output = &buf
 	checkCtx.Done = abandoned
+	// Stamp the abandonment moment on the check's context so checks that
+	// stage their own internal bounds (directory measurement's du-then-walk)
+	// can size them to finish inside the budget instead of overrunning it.
+	// Set before the goroutine starts, so the check's own bounds fire no
+	// later than the runner's time.After below.
+	checkCtx.Deadline = time.Now().Add(d.CheckTimeout)
 	done := make(chan *CheckResult, 1)
 	d.inFlight.Add(1)
 	go func() {

@@ -30,8 +30,9 @@ type RigWorktreesCheck struct {
 	rig config.Rig
 	cfg config.DoctorConfig
 	// measureDir is injectable so tests can avoid shelling out to du.
-	// Production uses duDirBytes from checks.go.
-	measureDir func(string) (int64, bool, error)
+	// Production uses duDirBytes from checks.go, which sizes its du and
+	// Go-walk bounds from the check's runner budget (ctx.Deadline).
+	measureDir func(*CheckContext, string) (int64, bool, error)
 }
 
 // NewRigWorktreesCheck creates the per-rig worktree population check.
@@ -41,8 +42,8 @@ type RigWorktreesCheck struct {
 // question ("is a worktree population eating this disk?") is the same
 // one, and a second knob would be a second thing to keep in sync.
 func NewRigWorktreesCheck(rig config.Rig, cfg config.DoctorConfig) *RigWorktreesCheck {
-	measure := func(path string) (int64, bool, error) {
-		n, ok, err := duDirBytes(path)
+	measure := func(ctx *CheckContext, path string) (int64, bool, error) {
+		n, ok, err := duDirBytes(ctx, path)
 		if err != nil {
 			return n, ok, fmt.Errorf("measure rig worktree dir %q: %w", path, err)
 		}
@@ -56,7 +57,7 @@ func (c *RigWorktreesCheck) Name() string { return "rig:" + c.rig.Name + ":workt
 
 // Run counts the per-bead worktrees under <rig>/worktrees/ and measures
 // their aggregate footprint.
-func (c *RigWorktreesCheck) Run(_ *CheckContext) *CheckResult {
+func (c *RigWorktreesCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	root := filepath.Join(c.rig.Path, "worktrees")
 
@@ -93,7 +94,7 @@ func (c *RigWorktreesCheck) Run(_ *CheckContext) *CheckResult {
 	}
 	// One measurement of the root, not one per worktree: a rig can hold
 	// dozens, and this check runs on every doctor invocation.
-	bytes, exists, err := measure(root)
+	bytes, exists, err := measure(ctx, root)
 	if err != nil {
 		// "We can't tell" must not look like "we're fine". Matches
 		// WorktreeDiskSizeCheck's policy of escalating on measurement
