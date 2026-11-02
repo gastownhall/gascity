@@ -855,3 +855,80 @@ func TestCompactScriptLiveGateSkipsPushOnlyRetry(t *testing.T) {
 		t.Fatalf("a push-only retry must not rewrite anything:\n%s", logData)
 	}
 }
+
+// TestCompactScriptLiveGateKeepsGcOnlyRewriteFailureOrdinary pins that a
+// failed rewrite on a still-live database is an ordinary failure: the gate
+// probes pass, nothing is quarantined, and the run still reaches the next
+// selected database.
+func TestCompactScriptLiveGateKeepsGcOnlyRewriteFailureOrdinary(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	if err := os.MkdirAll(filepath.Join(fixture.dataDir, "zed", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir second db: %v", err)
+	}
+
+	out, err := fixture.runWithArgs(t, "gc_failure", []string{"--gc-only"},
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
+	if err == nil {
+		t.Fatalf("the GC's own failure must fail the run:\n%s", out)
+	}
+	if !strings.Contains(out, "DOLT_GC failed rc=45") {
+		t.Fatalf("the GC's own failure diagnostics must be preserved:\n%s", out)
+	}
+	if !strings.Contains(out, "2 database(s) failed gc-only reclaim") {
+		t.Fatalf("a failed rewrite on a live database must be an ordinary per-database failure:\n%s", out)
+	}
+	if _, statErr := os.Stat(liveGateMarkerPath(fixture)); !os.IsNotExist(statErr) {
+		t.Fatalf("a live database's failed rewrite must not quarantine; stat=%v:\n%s", statErr, out)
+	}
+	if !strings.Contains(out, "db=zed") {
+		t.Fatalf("the run must still reach the next database:\n%s", out)
+	}
+}
+
+// TestCompactScriptLiveGateKeepsFlattenFailureOrdinary pins the failed
+// flatten: the gate's probe passes on the still-live database, so the pass
+// keeps its restore attempt and ordinary failure report.
+func TestCompactScriptLiveGateKeepsFlattenFailureOrdinary(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "flatten_failure",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
+	if err == nil {
+		t.Fatalf("the flatten's own failure must fail the run:\n%s", out)
+	}
+	if !strings.Contains(out, "flatten failed rc=44") {
+		t.Fatalf("the flatten's own failure diagnostics must be preserved:\n%s", out)
+	}
+	if !strings.Contains(out, "restoring pre-flatten HEAD") {
+		t.Fatalf("the pre-flatten HEAD restore must still run:\n%s", out)
+	}
+	if !strings.Contains(out, "1 database(s) failed compaction") {
+		t.Fatalf("a failed flatten on a live database must be an ordinary failure:\n%s", out)
+	}
+	if _, statErr := os.Stat(liveGateMarkerPath(fixture)); !os.IsNotExist(statErr) {
+		t.Fatalf("a live database's failed flatten must not quarantine; stat=%v:\n%s", statErr, out)
+	}
+}
+
+// TestCompactScriptLiveGateKeepsPendingGCAfterFailedRewrite pins the
+// flatten-path GC failure: with the database still live, the pending-GC
+// marker must still be written so the next run retries the reclaim.
+func TestCompactScriptLiveGateKeepsPendingGCAfterFailedRewrite(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "gc_failure",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
+	if err == nil {
+		t.Fatalf("the GC's own failure must fail the run:\n%s", out)
+	}
+	if !strings.Contains(out, "DOLT_GC failed rc=45") {
+		t.Fatalf("the GC's own failure diagnostics must be preserved:\n%s", out)
+	}
+	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if reason := compactMarkerValue(t, pendingGC, "reason"); reason != "flatten succeeded but full GC failed" {
+		t.Fatalf("pending-GC marker reason = %q, want the ordinary deferred-reclaim reason:\n%s", reason, out)
+	}
+	if _, statErr := os.Stat(liveGateMarkerPath(fixture)); !os.IsNotExist(statErr) {
+		t.Fatalf("a live database's failed GC must not quarantine; stat=%v:\n%s", statErr, out)
+	}
+}
