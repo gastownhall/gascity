@@ -475,3 +475,210 @@ func TestCompactScriptLiveGateHealthyRunProbeCount(t *testing.T) {
 		t.Fatalf("healthy pass issued %d served-HEAD probes, want 2 (one per rewrite step):\n%s", got, out)
 	}
 }
+
+// TestCompactScriptLiveGateCoversGcOnlyReclaim pins that the --gc-only entry
+// path is gated: a full GC whose database stops being served afterwards must
+// quarantine at the gc-only step instead of reporting the reclaim as done.
+func TestCompactScriptLiveGateCoversGcOnlyReclaim(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.runWithArgs(t, "below_threshold", []string{"--gc-only"},
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0",
+		"GC_FAKE_DOLT_LIVE_PROBE_FAIL_AFTER_GC=1")
+	if err == nil {
+		t.Fatalf("gc-only reclaim must fail when the database stops being served after its full GC:\n%s", out)
+	}
+	assertCompactMarkerHasEvidence(t, liveGateMarkerPath(fixture),
+		"live_gate_steps=gc-only reclaim",
+		"live_gate_failed_step=gc-only reclaim",
+		"live_gate_probe_failure=served-HEAD probe failed rc=1 database not found: beads",
+	)
+	if strings.Contains(out, "gc-only reclaim duration=") {
+		t.Fatalf("a gate failure must not be reported as a successful reclaim:\n%s", out)
+	}
+	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if _, statErr := os.Stat(pendingGC); !os.IsNotExist(statErr) {
+		t.Fatalf("a gate failure must not leave a pending-GC marker; stat=%v:\n%s", statErr, out)
+	}
+}
+
+// TestCompactScriptLiveGateCoversBareGCMode pins that the bare-GC mode's
+// working-set GC is gated: a database that leaves the data dir after its bare
+// GC must quarantine at the bare-GC step, not report "— ok".
+func TestCompactScriptLiveGateCoversBareGCMode(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	installVanishDirShim(t, fixture)
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_COMPACT_BARE_GC=1",
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
+	if err == nil {
+		t.Fatalf("bare-GC compact must fail when the database leaves the data dir after its GC:\n%s", out)
+	}
+	if !strings.Contains(out, "live-database gate failed at step bare GC") {
+		t.Fatalf("output missing live-gate failure at the bare-GC step:\n%s", out)
+	}
+	assertCompactMarkerHasEvidence(t, liveGateMarkerPath(fixture),
+		"live_gate_steps=bare GC",
+		"live_gate_failed_step=bare GC",
+		"live_gate_data_dir_present_before=1",
+		"live_gate_data_dir_present_after=0",
+	)
+	if strings.Contains(out, "bare-gc duration=") {
+		t.Fatalf("a gate failure must not be reported as a successful bare GC:\n%s", out)
+	}
+}
+
+// TestCompactScriptLiveGateCoversSharedHistoryBareGC pins that the
+// shared-history path's bare GC (the no-flatten reclaim for a database with
+// a remote) is gated too.
+func TestCompactScriptLiveGateCoversSharedHistoryBareGC(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "remote_success",
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0",
+		"GC_FAKE_DOLT_LIVE_PROBE_FAIL_AFTER_GC=1")
+	if err == nil {
+		t.Fatalf("shared-history bare GC must fail when the database stops being served:\n%s", out)
+	}
+	if !strings.Contains(out, "live-database gate failed at step shared-history bare GC") {
+		t.Fatalf("output missing live-gate failure at the shared-history bare-GC step:\n%s", out)
+	}
+	assertCompactMarkerHasEvidence(t, liveGateMarkerPath(fixture),
+		"live_gate_steps=shared-history bare GC",
+		"live_gate_failed_step=shared-history bare GC",
+	)
+	logData, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(logData), "DOLT_RESET") {
+		t.Fatalf("the shared-history path must not have flattened:\n%s", logData)
+	}
+}
+
+// TestCompactScriptLiveGateCoversCriticalDiskHeldBareGC pins the
+// critical-disk fallback: when the disk floor holds the pending-GC full GC
+// and the database still gets its working-set GC, that bare GC is gated too,
+// and the held pending-GC marker survives the quarantine.
+func TestCompactScriptLiveGateCoversCriticalDiskHeldBareGC(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	marker := writeCompactPendingGCMarker(t, fixture, "beads")
+	_, outcomeEnv := newCompactOutcomeFile(t)
+
+	// A scheduled run (not --only-db recovery-only) takes the hold path:
+	// the full GC stays held below the disk floor and the database gets its
+	// working-set GC.
+	out, err := fixture.run(t, "remote_success",
+		"GC_FAKE_DF_MODE=df_critical",
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0",
+		"GC_FAKE_DOLT_LIVE_PROBE_FAIL_AFTER_GC=1",
+		outcomeEnv)
+	if err == nil {
+		t.Fatalf("the held working-set GC must fail when the database stops being served:\n%s", out)
+	}
+	if !strings.Contains(out, "skipping full GC under critical disk") {
+		t.Fatalf("the run should have taken the critical-disk hold path:\n%s", out)
+	}
+	if !strings.Contains(out, "live-database gate failed at step shared-history bare GC") {
+		t.Fatalf("output missing live-gate failure at the held bare-GC step:\n%s", out)
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("the held pending-GC marker must survive a gate quarantine: %v", statErr)
+	}
+}
+
+// TestCompactScriptLiveGateCoversSharedHistoryPendingGCRetry pins that the
+// shared-history pending-GC retry (a local DOLT_GC --full for a database the
+// guard protects) is gated, keeps the marker on failure, and never pushes.
+func TestCompactScriptLiveGateCoversSharedHistoryPendingGCRetry(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	marker := writeCompactPendingGCMarker(t, fixture, "beads")
+
+	out, err := fixture.runWithArgs(t, "remote_success", []string{"--only-db", "beads"},
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0",
+		"GC_FAKE_DOLT_LIVE_PROBE_FAIL_AFTER_GC=1")
+	if err == nil {
+		t.Fatalf("the shared-history pending-GC retry must fail when the database stops being served:\n%s", out)
+	}
+	if !strings.Contains(out, "live-database gate failed at step shared-history pending-GC retry") {
+		t.Fatalf("output missing live-gate failure at the shared-history retry step:\n%s", out)
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("a failed retry must keep the pending-GC marker: %v", statErr)
+	}
+	logData, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(logData), "DOLT_PUSH") {
+		t.Fatalf("a gated shared-history retry must not push:\n%s", logData)
+	}
+}
+
+// TestCompactScriptLiveGateCoversPendingGCRetry pins the ordinary pending-GC
+// retry in the flatten flow: gated, marker kept, no flatten, no push.
+func TestCompactScriptLiveGateCoversPendingGCRetry(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	marker := writeCompactPendingGCMarker(t, fixture, "beads")
+
+	out, err := fixture.run(t, "below_threshold",
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0",
+		"GC_FAKE_DOLT_LIVE_PROBE_FAIL_AFTER_GC=1")
+	if err == nil {
+		t.Fatalf("the pending-GC retry must fail when the database stops being served:\n%s", out)
+	}
+	if !strings.Contains(out, "live-database gate failed at step pending-GC retry") {
+		t.Fatalf("output missing live-gate failure at the pending-GC retry step:\n%s", out)
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("a failed retry must keep the pending-GC marker: %v", statErr)
+	}
+	logData, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	log := string(logData)
+	if strings.Contains(log, "DOLT_PUSH") {
+		t.Fatalf("a gated pending-GC retry must not push:\n%s", log)
+	}
+	if strings.Contains(log, "DOLT_RESET") {
+		t.Fatalf("a pending-GC retry must not flatten:\n%s", log)
+	}
+}
+
+// TestCompactScriptLiveGateBaselineUnavailableFailsPassBeforeRewrite pins the
+// GC-first baseline rule: when the gate cannot establish pre-compaction
+// service, the pass fails as an ordinary error before any rewrite — no
+// quarantine, no DOLT_GC — and the run moves on to the next database.
+func TestCompactScriptLiveGateBaselineUnavailableFailsPassBeforeRewrite(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	if err := os.MkdirAll(filepath.Join(fixture.dataDir, "zed", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir second db: %v", err)
+	}
+
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_COMPACT_BARE_GC=1",
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0",
+		"GC_FAKE_DOLT_LIVE_PROBE_UNSERVED=1")
+	if err == nil {
+		t.Fatalf("a pass whose baseline cannot be established must fail:\n%s", out)
+	}
+	if !strings.Contains(out, "cannot establish pre-compaction service for the live-database gate") {
+		t.Fatalf("output missing the baseline-failure diagnostic:\n%s", out)
+	}
+	if !strings.Contains(out, "2 database(s) failed bare GC") {
+		t.Fatalf("baseline failures must be reported as ordinary failures, one per database:\n%s", out)
+	}
+	if _, statErr := os.Stat(liveGateMarkerPath(fixture)); !os.IsNotExist(statErr) {
+		t.Fatalf("a baseline failure must not quarantine; stat=%v:\n%s", statErr, out)
+	}
+	logData, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	log := string(logData)
+	if strings.Contains(log, "DOLT_GC") {
+		t.Fatalf("a baseline failure must not rewrite anything:\n%s", log)
+	}
+	if !strings.Contains(log, "db=zed") {
+		t.Fatalf("the run must still attempt the next database's baseline:\n%s", log)
+	}
+}

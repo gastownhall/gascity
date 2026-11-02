@@ -3249,6 +3249,13 @@ resolve_compact_base() {
 # journal and working-set garbage without touching history.
 run_bare_gc() {
   db="$1"
+  gate_step="${2:-bare GC}"
+  # GC-first pass: the gate's pre-compaction baseline comes from the served
+  # probe itself; a baseline that cannot be established fails this pass as
+  # an ordinary error before any rewrite.
+  if ! arm_live_gate "$db" "$gate_step"; then
+    return 1
+  fi
   start=$(date +%s)
   gc_rc=0
   gc_err_tmp=$(mktemp)
@@ -3259,10 +3266,17 @@ run_bare_gc() {
       "$db" "$gc_rc" "$elapsed" >&2
     emit_error_file "$db" "$gc_err_tmp"
     rm -f "$gc_err_tmp"
+    check_live_gate "$gate_step" || return 1
     return 1
   fi
   rm -f "$gc_err_tmp"
   compact_gc_ran=1
+
+  # A working-set GC also rewrites storage under the running server; prove
+  # the database is still live before reporting success.
+  if ! check_live_gate "$gate_step"; then
+    return 1
+  fi
 
   printf 'compact: db=%s bare-gc duration=%ss — ok\n' "$db" "$elapsed"
   return 0
@@ -3346,7 +3360,7 @@ compact_shared_history_database() {
     printf 'compact: db=%s — dry-run (would bare GC)\n' "$db"
     return 0
   fi
-  run_bare_gc "$db"
+  run_bare_gc "$db" "shared-history bare GC"
 }
 
 flatten_database() {
@@ -4299,7 +4313,7 @@ bare_gc_database() {
     return 0
   fi
 
-  run_bare_gc "$db"
+  run_bare_gc "$db" "bare GC"
 }
 
 # gc_only_database — reclaim orphaned chunks on one database via a full
