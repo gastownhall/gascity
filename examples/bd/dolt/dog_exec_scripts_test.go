@@ -637,6 +637,29 @@ set_hash() {
   printf '%%s\n' "$1" > "$hash_state_file"
 }
 case "$query" in
+  *"SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))"*)
+    # Live-gate probe. A file live-unserved/<db> beside the log makes the
+    # server refuse the database: "forever", or a count of refusals left.
+    unserved="$(dirname "$log")/live-unserved/$db"
+    if [ -f "$unserved" ]; then
+      remaining="$(sed -n '1p' "$unserved")"
+      if [ "$remaining" = "forever" ]; then
+        printf 'database not found: %%s\n' "$db" >&2
+        exit 1
+      fi
+      if [ "$remaining" -gt 0 ]; then
+        printf '%%s\n' "$((remaining - 1))" > "$unserved"
+        printf 'database not found: %%s\n' "$db" >&2
+        exit 1
+      fi
+    fi
+    if [ -n "$state_file" ] && [ -f "$state_file" ]; then
+      print_cell "$db:$(sed -n '1p' "$state_file")"
+    else
+      print_cell "$db:headcommit"
+    fi
+    exit 0
+    ;;
   *"FROM dolt_log ORDER BY date DESC LIMIT 1"*)
     # Legacy date-ordered "HEAD" probe. A future-dated (clock-skewed) commit
     # sorts first, so this is NOT the branch HEAD; compact must resolve HEAD
