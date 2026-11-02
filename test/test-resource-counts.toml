@@ -3525,6 +3525,12 @@ calls = 1
 tagged = true
 
 [[count]]
+path = "test/integration/gate_validator_cleanup_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
 path = "test/integration/gc_live_contract_test.go"
 resource = "subprocess"
 calls = 1

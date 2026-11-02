@@ -25,7 +25,7 @@ next to that code; read the matching file before changing it.
 | When you touch | Read first |
 |---|---|
 | `internal/api/`, `internal/events/`, `internal/extmsg/`, CLI event/API calls, OpenAPI, or the dashboard | `internal/api/AGENTS.md` |
-| `internal/config/` (agent or rig config fields) | `internal/config/AGENTS.md` |
+| `internal/config/` | `internal/config/AGENTS.md` |
 | Rig registration, adoption or provisioning | `internal/rig/AGENTS.md` |
 | `internal/session/` | `internal/session/AGENTS.md` |
 | `internal/sessionlog/` | `internal/sessionlog/AGENTS.md` |
@@ -34,9 +34,10 @@ next to that code; read the matching file before changing it.
 | `internal/cliauth/`, `gc login`, `gc whoami` | `internal/cliauth/AGENTS.md` |
 | Runtime | `internal/providerreadiness/AGENTS.md` |
 | `internal/hooks/` | `internal/hooks/AGENTS.md` |
+| Gate processes | `internal/convergence/AGENTS.md` |
 | `scripts/`, test runners, or git hooks | `scripts/AGENTS.md` |
 | Any test | `TESTING.md` |
-| Anything under `docs/` | `.claude/skills/gascity-docs/SKILL.md` |
+| `docs/` | `.claude/skills/gascity-docs/SKILL.md` |
 | New SDK surface or a new primitive | `engdocs/contributors/primitive-test.md` |
 | A controller or session reconciler incident | `engdocs/contributors/reconciler-debugging.md` (use `gc trace`) |
 | Worktree isolation or worker cleanup | `engdocs/archive/backlogs/worktree-roadmap.md` (lifecycle analysis and cleanup-bug lessons) |

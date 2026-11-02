@@ -121,6 +121,7 @@ rest_smoke_tests=(
   TestGastown_ControllerStartStop
   TestGastown_PipelineHumanToWorker
   TestGraphWorkflowSuccessPath
+  TestGraphWorkflowGateCancellationCleansShippedValidator
   TestIntegrationEnvForIsolatesHome
   TestIsolatedEnvRootsKeepGCOffTheRealHome
   TestStandaloneBDEnvForDirIsolatesHome

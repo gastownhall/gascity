@@ -18,6 +18,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/doltauth"
+	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/gchome"
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
@@ -513,9 +514,11 @@ func runOnceNoPreExecRetry(ctx context.Context, scriptPath string, env Condition
 		cmd.Dir = env.WorkDir
 	}
 	cmd.Env = env.Environ()
-	// WaitDelay ensures cmd.Wait returns promptly after the context
-	// cancels and SIGKILL is sent, even if child I/O pipes are still open.
-	cmd.WaitDelay = time.Second
+	// A gate may own validator processes in a separate session. Give its
+	// termination handler time to stop those writers and retain diagnostics
+	// before forced termination. This cleanup allowance does not extend the
+	// condition deadline: cancellation still wins over a successful exit.
+	execgrace.Apply(cmd, 30*time.Second)
 
 	// Capture slightly more than MaxOutputBytes so that TruncateOutput
 	// can detect overflow and properly trim to a UTF-8 rune boundary.
@@ -542,6 +545,18 @@ func runOnceNoPreExecRetry(ctx context.Context, scriptPath string, env Condition
 			Stderr:    errStr,
 			Duration:  duration,
 			Truncated: truncated,
+		}
+	}
+
+	// An explicit configuration hold also applies during deadline cleanup.
+	// In particular, a gate that cannot confirm its writers stopped must not
+	// become an automatically retryable timeout against the same worktree.
+	var cleanupExit *exec.ExitError
+	if errors.As(err, &cleanupExit) && cleanupExit.ExitCode() == GateConfigExitCode {
+		code := GateConfigExitCode
+		return GateResult{
+			Outcome: GateFail, ExitCode: &code, Stdout: outStr, Stderr: errStr,
+			Duration: duration, Truncated: truncated,
 		}
 	}
 

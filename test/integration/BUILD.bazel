@@ -75,6 +75,7 @@ go_test(
         "gastown_shutdown_test.go",
         "gastown_sling_test.go",
         "gastown_witness_test.go",
+        "gate_validator_cleanup_test.go",
         "gc_bd_latency_test.go",
         "gc_live_contract_store_conflict_test.go",
         "gc_live_contract_test.go",
@@ -151,7 +152,69 @@ go_test(
         "@com_github_gastownhall_gascity_packs//:gascity-packs",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
-    ],
+    ] + select({
+        "@rules_go//go/platform:aix": [
+            "//internal/convergence",
+            "//internal/processgroup/processgrouptest",
+        ],
+        "@rules_go//go/platform:android": [
+            "//internal/convergence",
+            "//internal/processgroup/processgrouptest",
+        ],
+        "@rules_go//go/platform:darwin": [
+            "//internal/convergence",
+            "//internal/processgroup/processgrouptest",
+        ],
+        "@rules_go//go/platform:dragonfly": [
+            "//internal/convergence",
+            "//internal/processgroup/processgrouptest",
+        ],
+        "@rules_go//go/platform:freebsd": [
+            "//internal/convergence",
+            "//internal/processgroup/processgrouptest",
+        ],
+        "@rules_go//go/platform:illumos": [
+            "//internal/convergence",
+            "//internal/processgroup/processgrouptest",
+        ],
+        "@rules_go//go/platform:ios": [
+            "//internal/convergence",
+            "//internal/processgroup/processgrouptest",
+        ],
+        "@rules_go//go/platform:js": [
+            "//internal/convergence",
+            "//internal/processgroup/processgrouptest",
+        ],
+        "@rules_go//go/platform:linux": [
+            "//internal/convergence",
+            "//internal/processgroup/processgrouptest",
+        ],
+        "@rules_go//go/platform:netbsd": [
+            "//internal/convergence",
+            "//internal/processgroup/processgrouptest",
+        ],
+        "@rules_go//go/platform:openbsd": [
+            "//internal/convergence",
+            "//internal/processgroup/processgrouptest",
+        ],
+        "@rules_go//go/platform:osx": [
+            "//internal/convergence",
+            "//internal/processgroup/processgrouptest",
+        ],
+        "@rules_go//go/platform:plan9": [
+            "//internal/convergence",
+            "//internal/processgroup/processgrouptest",
+        ],
+        "@rules_go//go/platform:qnx": [
+            "//internal/convergence",
+            "//internal/processgroup/processgrouptest",
+        ],
+        "@rules_go//go/platform:solaris": [
+            "//internal/convergence",
+            "//internal/processgroup/processgrouptest",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # bazel.yml's gating integration-smoke lane (GA-1, item 5 ga-spec.md
@@ -166,7 +229,7 @@ go_test(
 # byte-identical to integration_test's own.
 go_variant_test(
     name = "integration_smoke_test",
-    args = ["-test.run=^(TestBdStoreConformance|TestBdStoreDeleteBatchOrphansExternalDependents|TestBdStoreMailWispInsert|TestPinnedBdStoreCommandRunnerReportsSilentFallback|TestPinnedBdStoreCommandRunnerUsesExactEnvironmentAndKeepsStdoutJSON|TestE2E_WorkspaceDefaults|TestE2E_Hook_WithWork|TestE2E_MultiAgent_PoolAndFixed|TestGastown_ControllerStartStop|TestGastown_PipelineHumanToWorker|TestGraphWorkflowSuccessPath|TestIntegrationEnvForIsolatesHome|TestIsolatedEnvRootsKeepGCOffTheRealHome|TestStandaloneBDEnvForDirIsolatesHome)$$"],
+    args = ["-test.run=^(TestBdStoreConformance|TestBdStoreDeleteBatchOrphansExternalDependents|TestBdStoreMailWispInsert|TestPinnedBdStoreCommandRunnerReportsSilentFallback|TestPinnedBdStoreCommandRunnerUsesExactEnvironmentAndKeepsStdoutJSON|TestE2E_WorkspaceDefaults|TestE2E_Hook_WithWork|TestE2E_MultiAgent_PoolAndFixed|TestGastown_ControllerStartStop|TestGastown_PipelineHumanToWorker|TestGraphWorkflowSuccessPath|TestGraphWorkflowGateCancellationCleansShippedValidator|TestIntegrationEnvForIsolatesHome|TestIsolatedEnvRootsKeepGCOffTheRealHome|TestStandaloneBDEnvForDirIsolatesHome)$$"],
     shard_count = 14,
     tags = ["manual"],
     test = ":integration_test",
