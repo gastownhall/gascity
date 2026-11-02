@@ -446,7 +446,7 @@
         },
         "store_health": {
           "type": "object",
-          "description": "Dolt bead store health. Present when a running controller serves the status or reports itself running; absent otherwise.",
+          "description": "Dolt bead store health. On output read from the city's API: present unless the city is suspended or the measurement failed (the failure is then listed in partial_errors). On locally built output: present when the controller reports itself running.",
           "additionalProperties": false,
           "required": [
             "path",

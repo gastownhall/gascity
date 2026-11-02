@@ -84,12 +84,17 @@ default_sling_targets = ["omega/rigbot", "alpha/rigbot"]
 
 // primeCityStatusRouteCaches fully primes every bead cache cs serves from.
 // Prime returns once the cache is live (it joins a prime already in flight).
+// It reads cs's own stores, not CityBeadStore and BeadStores: under
+// GC_TEST_SPLIT_STRICT=1 those return the gate's views, which read through
+// the store they wrap but are not caches themselves.
 func primeCityStatusRouteCaches(t *testing.T, cs *controllerState) {
 	t.Helper()
-	stores := []beads.Store{cs.CityBeadStore()}
-	for _, store := range cs.BeadStores() {
+	cs.mu.RLock()
+	stores := []beads.Store{cs.cityBeadStore}
+	for _, store := range cs.beadStores {
 		stores = append(stores, store)
 	}
+	cs.mu.RUnlock()
 	for _, store := range stores {
 		cache, ok := demandLabelKey(store).(*beads.CachingStore)
 		if !ok {
