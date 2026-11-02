@@ -406,6 +406,17 @@ func TestDesiredRowLaunchRefreshClearsMissingProviderFields(t *testing.T) {
 	if fam := session.ProviderFamilyFromMetadata(projection, ""); fam != "claude" {
 		t.Errorf("switch: ProviderFamilyFromMetadata = %q, want claude", fam)
 	}
+	// AC-2: a row whose provider name already matches but whose
+	// family/resume fields are stale repairs without a provider-name write.
+	corrupted := maps.Clone(codex)
+	corrupted["command"], corrupted["provider"] = "claude run", "claude"
+	wantSameName := session.MetadataPatch{
+		"provider_kind": "", "builtin_ancestor": "",
+		"resume_flag": "--resume", "resume_style": "flag", "resume_command": "", "session_id_flag": "",
+	}
+	if id := desiredRowIdentity(cfg, tp, seat, corrupted); !maps.Equal(id.Meta, wantSameName) {
+		t.Fatalf("same-name: meta %v, want %v with no provider entry", id.Meta, wantSameName)
+	}
 }
 
 // A successful switch from a wrapped codex provider to the builtin-named

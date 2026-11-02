@@ -5517,6 +5517,7 @@ func TestSyncSessionBeads_ProviderProjectionClearsMissingFields(t *testing.T) {
 	if len(b1) != 1 {
 		t.Fatalf("expected 1 bead after tick 1, got %d", len(b1))
 	}
+	id := b1[0].ID
 	if got := b1[0].Metadata["builtin_ancestor"]; got != "codex" {
 		t.Fatalf("tick 1: builtin_ancestor = %q, want codex (the stale source)", got)
 	}
@@ -5551,6 +5552,36 @@ func TestSyncSessionBeads_ProviderProjectionClearsMissingFields(t *testing.T) {
 	}
 	if fam := session.ProviderFamilyFromMetadata(meta, ""); fam != "claude" {
 		t.Errorf("tick 2: ProviderFamilyFromMetadata = %q, want claude (stale family keys must not survive the switch)", fam)
+	}
+
+	// Tick 3: a row already corrupted — the provider name matches the
+	// resolution but codex-era family/resume fields survived — repairs
+	// without a provider-name change. Name-change gating cannot repair this
+	// row; only the authoritative projection can.
+	for k, v := range map[string]string{
+		"provider_kind": "codex", "builtin_ancestor": "codex",
+		"resume_flag": "--codex-resume", "resume_style": "subcommand",
+		"resume_command": "codex resume {{.SessionKey}}", "session_id_flag": "--codex-session",
+	} {
+		if err := cs.SetMetadata(id, k, v); err != nil {
+			t.Fatalf("SetMetadata(%s): %v", k, err)
+		}
+	}
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	meta = allSessionBeads(t, cs)[0].Metadata
+	for _, c := range []struct{ key, want string }{
+		{"provider", "claude"},
+		{"provider_kind", ""},
+		{"builtin_ancestor", ""},
+		{"resume_flag", "--resume"},
+		{"resume_style", "flag"},
+		{"resume_command", ""},
+		{"session_id_flag", "--session-id"},
+	} {
+		if meta[c.key] != c.want {
+			t.Errorf("tick 3: same-name stale %s = %q, want %q (name-gated clearing cannot repair an already-updated row)", c.key, meta[c.key], c.want)
+		}
 	}
 
 	if stderr.Len() > 0 {
