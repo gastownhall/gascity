@@ -97,9 +97,26 @@ filesystem search. If no command exists for what you need, file a bead.
 
 ## Molecules — STOP, check BEFORE you start working
 
-**CRITICAL:** When you run `gc bd show` in step 4, look at the METADATA
-section. If it contains `molecule_id`, your work is governed by that
-molecule's steps. Do NOT just read the description and start coding.
+**CRITICAL:** When you read your claimed bead with `gc bd show`, look at
+the METADATA section. If it contains `molecule_id` and the bead does not
+carry `gc.root_bead_id`, your work may be governed by that molecule's
+steps. Do NOT just read the description and start coding — inspect the
+molecule root first:
+
+```bash
+gc bd show <molecule-id>
+```
+
+- If the root's metadata carries `gc.formula_contract=graph.v2` or
+  `gc.kind=workflow`, the attachment is a graph workflow. Do NOT navigate
+  it with `gc bd mol current` and do NOT close its beads — the controller
+  advances the graph; your assignment is only the bead you claimed. If
+  that leaves you no executable work, escalate (below).
+- If the root cannot be read — it is missing, or the read fails — that is
+  an error: escalate. Do not fall back to legacy navigation on a failed
+  read.
+- Otherwise the molecule is legacy: run `gc bd mol current
+  <molecule-id>` and work it as follows.
 
 Run `gc bd mol current <molecule-id>` to see your steps:
 
@@ -119,6 +136,11 @@ Run `gc bd mol current <molecule-id>` to see your steps:
 
 Do NOT read the parent bead description and do everything at once.
 Do NOT skip steps. Do NOT close steps you didn't execute.
+
+A `gc.root_bead_id` on a bead you reach through `gc bd mol current` is an
+ownership cue on hook-returned assignments, not a graph marker on legacy
+children: it does not change how this molecule is worked. Only the root
+inspection above decides that.
 
 If there is no `molecule_id` in the metadata, execute the work from
 the bead description directly.

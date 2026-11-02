@@ -1802,6 +1802,51 @@ func TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules(t *testing.T
 			}
 		}
 	})
+
+	t.Run("AC-3 molecule roots are inspected before legacy navigation", func(t *testing.T) {
+		got := renderPoolWorkerPrompt(t)
+		mol := flattenPromptText(renderedPromptSection(t, got, "Molecules"))
+
+		// Root inspection precedes mol current: the guard must come before
+		// the navigation it guards.
+		showIdx := strings.Index(mol, "gc bd show <molecule-id>")
+		currentIdx := strings.Index(mol, "gc bd mol current")
+		if showIdx < 0 || currentIdx < 0 {
+			t.Fatalf("molecules section lost the root inspection or mol current:\n%s", mol)
+		}
+		if showIdx > currentIdx {
+			t.Errorf("molecules section navigates (gc bd mol current) before inspecting the root (gc bd show <molecule-id>):\n%s", mol)
+		}
+
+		// Graph roots are rejected for navigation; a failed root read is
+		// an error, not a legacy fallback; the legacy flow itself remains.
+		for _, want := range []string{
+			"gc.formula_contract=graph.v2",
+			"gc.kind=workflow",
+			"NOT navigate",
+			"escalate",
+			"that is an error",
+			"Do not fall back to legacy navigation",
+			"[ready]",
+			"Work one step at a time",
+			"gc bd update <step-id> --set-metadata gc.outcome=pass",
+			"gc bd close <step-id>",
+			"check your position, repeat",
+		} {
+			if !strings.Contains(mol, want) {
+				t.Errorf("molecules section missing %q:\n%s", want, mol)
+			}
+		}
+
+		// The stale numbered cross-reference into How to Work is gone,
+		// and a legacy child's gc.root_bead_id does not flip the mode.
+		if strings.Contains(mol, "in step ") {
+			t.Errorf("molecules section still references a numbered How to Work step:\n%s", mol)
+		}
+		if !strings.Contains(mol, "ownership cue") {
+			t.Errorf("molecules section does not scope gc.root_bead_id to hook-returned assignments:\n%s", mol)
+		}
+	})
 }
 
 // TestRenderPromptCityRootFragmentsAbsentNoEffect is the regression-safety
