@@ -55,6 +55,10 @@ const (
 	causeScaleCheckStaleClaim = "scale-check-stale-vs-claim"
 )
 
+// allocTraceClaimedDemand prefixes the trace reason for the default-probe
+// rows a pass dropped as claims (decidePass.traceClaimedDemand).
+const allocTraceClaimedDemand = "claimed-demand:"
+
 // standInPrefix marks the ID of an in-flight create's stand-in row.
 const standInPrefix = "pending-create:"
 
@@ -105,6 +109,7 @@ func (p *decidePass) demand() {
 	for _, refused := range p.merged.NameRefusals {
 		p.refuseWork(refused.Template, "", rowKey{}, SessionRequest{WorkBeadID: refused.WorkBeadID}, refused.err())
 	}
+	p.traceClaimedDemand()
 	for template := range p.merged.PoolScaleCheckPartial {
 		for _, cause := range p.scaleCheckCauses(template) {
 			p.markTemplate(template, true, cause)
@@ -126,6 +131,19 @@ func (p *decidePass) demand() {
 	p.named = computeNamedSessionDemandOn(p.in.CityName, p.in.CityPath, p.cfg, func() []string { return refs }, canonical,
 		p.in.SuspendedRigPaths, p.in.Demand.NamedDefault, p.in.Demand.AssignedWork, p.in.Demand.AssignedStoreRefs,
 		p.in.Demand.ReadyAssigned, p.merged.ScaleCheckCounts, io.Discard)
+}
+
+// traceClaimedDemand records each template's default-probe rows gather
+// dropped as claims (demandView.ClaimedDemand), so a listed bead that did not
+// scale its pool is visible (C2.2). The rows go in the reason, never in
+// WorkBeadID: a record naming a work item is a worktree refusal.
+func (p *decidePass) traceClaimedDemand() {
+	for _, template := range slices.Sorted(maps.Keys(p.in.Demand.ClaimedDemand)) {
+		p.trace = append(p.trace, allocTraceRecord{
+			Template: template,
+			Reason:   allocTraceClaimedDemand + strings.Join(p.in.Demand.ClaimedDemand[template].WorkBeadIDs, ","),
+		})
+	}
 }
 
 // scaleCheckCauses are the causes of template's scale-check partial: an
