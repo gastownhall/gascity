@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"regexp"
@@ -525,6 +526,10 @@ type Tmux struct {
 	// at a pane's PID holds open, or "" (see heldCodexRollout). Nil selects
 	// heldCodexRollout; tests inject one so no live process table is read.
 	codexRolloutHeld func(panePID int) string
+
+	// snapshotFailures rate-limits the log of the one-shot pane probes'
+	// failed process-table snapshots (see readProcessSnapshot).
+	snapshotFailures processSnapshotFailureLog
 }
 
 // pokeInfo records a gc-initiated send-keys ("poke", e.g. a wake or nudge) to a
@@ -3959,7 +3964,7 @@ func (t *Tmux) targetLooksLikeAnyProvider(target string, providers ...string) bo
 	if len(names) == 0 {
 		return false
 	}
-	processes, err := readProcessSnapshot()
+	processes, err := t.readProcessSnapshot()
 	if err != nil {
 		return false
 	}
@@ -4313,21 +4318,31 @@ func (t *Tmux) agentInputTarget(session string) (string, error) {
 	if len(names) == 0 {
 		return first.target, nil
 	}
-	// One process-table snapshot judges every pane, as IsRuntimeRunning
-	// does: a direct pane_current_command match, the pane process itself
+	// Each pane is judged as IsRuntimeRunning judges it: a direct
+	// pane_current_command match, the pane process itself
 	// (version-as-argv[0], e.g. "2.1.30"), then its descendants (agents
 	// under shells or wrapper roots such as systemd-run or the gc-osc7501
-	// relay, which stay pane_current_command). Without a snapshot only the
-	// direct command match can pick a pane.
-	processes, err := readProcessSnapshot()
-	if err != nil {
-		processes = processSnapshot{}
-	}
+	// relay, which stay pane_current_command). One process-table snapshot,
+	// taken at the first pane without a direct match, serves every pane
+	// after it, so a direct match reads no process table. Without a
+	// snapshot (a failed read leaves it empty) only a direct match can pick
+	// a pane.
+	var (
+		processes processSnapshot
+		read      bool
+	)
 	for _, line := range lines {
 		_, fields, _ := strings.Cut(line, "\t")
 		r, ok := parse(fields)
 		if !ok {
 			continue
+		}
+		if _, direct := names[r.cmd]; direct {
+			return r.target, nil
+		}
+		if !read {
+			processes, _ = t.readProcessSnapshot()
+			read = true
 		}
 		if (paneRuntimeState{Command: r.cmd, PID: r.pid}).processAlive(names, processes) {
 			return r.target, nil
@@ -4821,10 +4836,57 @@ func (t *Tmux) CheckSessionHealth(session string, maxInactivity time.Duration) Z
 // against a single snapshot walked in memory rather than forking a ps per
 // descendant: under a wrapper root (the gc-osc7501 relay -> sudo -> bwrap ->
 // claude) that walk cost 17 full reads per look, seconds on a busy host.
-func readProcessSnapshot() (processSnapshot, error) {
+//
+// The bound can fail a read the per-process walk would have finished: under
+// fleet load the full-OS scan runs past fetchTimeout, and execenv.Environ
+// first waits out any native store open that holds the environment lock. A
+// failure is logged, rate-limited (processSnapshotFailureLog).
+func (t *Tmux) readProcessSnapshot() (processSnapshot, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 	defer cancel()
-	return fetchProcessSnapshot(ctx)
+	processes, err := fetchProcessSnapshot(ctx)
+	if err != nil {
+		t.snapshotFailures.note(err)
+	}
+	return processes, err
+}
+
+// processSnapshotFailureLogEvery bounds readProcessSnapshot's failure log to
+// one line per interval: a start's command wait looks every pollInterval, and
+// on a saturated host every look fails.
+const processSnapshotFailureLogEvery = time.Minute
+
+// processSnapshotFailureLog rate-limits readProcessSnapshot's failure log.
+type processSnapshotFailureLog struct {
+	mu         sync.Mutex
+	at         time.Time // last failure logged
+	suppressed int       // failures since at, not logged
+	// logf writes the log line. Nil selects log.Printf.
+	logf func(format string, args ...any)
+}
+
+// note logs a failed snapshot at most once per processSnapshotFailureLogEvery,
+// counting the failures it skips toward the next line.
+func (l *processSnapshotFailureLog) note(err error) {
+	l.mu.Lock()
+	now, since, suppressed := time.Now(), l.at, l.suppressed
+	if !since.IsZero() && now.Sub(since) < processSnapshotFailureLogEvery {
+		l.suppressed++
+		l.mu.Unlock()
+		return
+	}
+	l.at, l.suppressed = now, 0
+	logf := l.logf
+	l.mu.Unlock()
+
+	if logf == nil {
+		logf = log.Printf
+	}
+	var unlogged string
+	if suppressed > 0 {
+		unlogged = fmt.Sprintf(" (%d more failures since %s)", suppressed, since.Format(time.RFC3339))
+	}
+	logf("tmux: process snapshot failed; until one succeeds, pane probes cannot verify an agent that is not its pane's own command: %v%s", err, unlogged)
 }
 
 // FindSessionByWorkDir finds tmux sessions where the pane's current working directory
@@ -5111,18 +5173,30 @@ func (t *Tmux) IsAgentRunning(session string, expectedPaneCommands ...string) bo
 // IsRuntimeRunning checks if a runtime appears to be running in the session.
 // Checks both pane command and child processes (for agents started via shell).
 // This is the unified agent detection method for all agent types.
+//
+// When the process table cannot be read it reports true, as the state cache's
+// processAlive does: the agent is unverified, not dead, and a failed probe
+// must never get a live agent reaped. A caller that needs the agent seen, or
+// must tell the two apart, uses runtimeRunning.
 func (t *Tmux) IsRuntimeRunning(session string, processNames []string) bool {
+	running, err := t.runtimeRunning(session, processNames)
+	return running || err != nil
+}
+
+// runtimeRunning is IsRuntimeRunning reporting a process table it cannot read
+// as an error wrapping runtime.ErrRuntimeUnavailable rather than as an answer.
+func (t *Tmux) runtimeRunning(session string, processNames []string) (bool, error) {
 	if len(processNames) == 0 {
-		return false
+		return false, nil
 	}
 	cmd, err := t.GetPaneCommand(session)
 	if err != nil {
-		return false
+		return false, nil
 	}
 	// Check direct pane command match
 	for _, name := range processNames {
 		if cmd == name {
-			return true
+			return true, nil
 		}
 	}
 	// Check for child processes if pane command is a shell or unrecognized.
@@ -5131,22 +5205,23 @@ func (t *Tmux) IsRuntimeRunning(session string, processNames []string) bool {
 	// - Claude Code showing version as argv[0] (e.g., "2.1.29")
 	pid, err := t.GetPanePID(session)
 	if err != nil || pid == "" {
-		return false
+		return false, nil
 	}
 	// Judge the pane against one process-table snapshot, as the state cache
 	// does (paneRuntimeState.processAlive): a shell's descendants; otherwise
 	// the process itself, then its descendants.
-	processes, err := readProcessSnapshot()
+	processes, err := t.readProcessSnapshot()
 	if err != nil {
-		return false
+		return false, fmt.Errorf("%w: reading the process table: %w", runtime.ErrRuntimeUnavailable, err)
 	}
-	return paneRuntimeState{Command: cmd, PID: pid}.processAlive(proctable.ProcessNameSet(processNames), processes)
+	return paneRuntimeState{Command: cmd, PID: pid}.processAlive(proctable.ProcessNameSet(processNames), processes), nil
 }
 
 // IsAgentAlive checks if an agent is running in the session using agent-agnostic detection.
 // It reads GT_PROCESS_NAMES from the session environment for accurate process detection,
 // falling back to GT_AGENT-based lookup for legacy sessions.
-// This is the preferred method for zombie detection across all agent types.
+// This is the preferred method for zombie detection across all agent types: an
+// agent whose process table cannot be read is alive to it (see IsRuntimeRunning).
 func (t *Tmux) IsAgentAlive(session string) bool {
 	return t.IsRuntimeRunning(session, t.resolveSessionProcessNames(session))
 }
@@ -5179,7 +5254,9 @@ func (t *Tmux) resolveSessionProcessNames(session string) []string {
 // (e.g., "bash") or a wrapper root, the agent may be running as a descendant
 // process (e.g., "bash -c 'exec claude'", or systemd-run's scope child). In
 // these cases pane_current_command never changes, but IsAgentAlive detects
-// the descendant.
+// the descendant. Unlike IsAgentAlive, the fallback needs the agent seen: a
+// process table it cannot read shows no agent yet, and the next look reads
+// it again.
 func (t *Tmux) WaitForCommand(ctx context.Context, session string, excludeCommands []string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -5212,8 +5289,9 @@ func (t *Tmux) WaitForCommand(ctx context.Context, session string, excludeComman
 		}
 		// Fallback: the pane command is still a shell or a wrapper root;
 		// check whether the agent is running as a descendant (handles
-		// bash-wrapped agents and systemd-run scope children).
-		if t.IsAgentAlive(session) {
+		// bash-wrapped agents and systemd-run scope children). An unread
+		// process table (logged by readProcessSnapshot) is "not yet".
+		if alive, _ := t.runtimeRunning(session, t.resolveSessionProcessNames(session)); alive {
 			return nil
 		}
 		select {

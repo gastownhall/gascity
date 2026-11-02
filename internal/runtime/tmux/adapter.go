@@ -1461,7 +1461,7 @@ type startOps interface {
 	createSession(name, workDir, command string, env map[string]string) error
 	respawnAgent(name, workDir, command string, env map[string]string) error
 	isSessionRunning(name string) bool
-	isRuntimeRunning(name string, processNames []string) bool
+	isRuntimeRunning(name string, processNames []string) (bool, error)
 	killSession(name string) error
 	waitForCommand(ctx context.Context, name string, timeout time.Duration) error
 	acceptStartupDialogs(ctx context.Context, name string) error
@@ -1598,8 +1598,10 @@ func (o *tmuxStartOps) isSessionRunning(name string) bool {
 	return o.tm.IsSessionRunning(name)
 }
 
-func (o *tmuxStartOps) isRuntimeRunning(name string, processNames []string) bool {
-	return o.tm.IsRuntimeRunning(name, processNames)
+// isRuntimeRunning reports a process table it cannot read as an error
+// wrapping runtime.ErrRuntimeUnavailable, never as a dead agent.
+func (o *tmuxStartOps) isRuntimeRunning(name string, processNames []string) (bool, error) {
+	return o.tm.runtimeRunning(name, processNames)
 }
 
 func (o *tmuxStartOps) killSession(name string) error {
@@ -2512,7 +2514,8 @@ func runPreStart(ctx context.Context, ops startOps, _ string, cfg runtime.Config
 // Exceptions:
 //   - dead panes (remain-on-exit corpses) are recycled even without ProcessNames
 //   - if ProcessNames are configured and the agent is dead (zombie), the
-//     zombie session is killed and recreated
+//     zombie session is killed and recreated; an agent whose process table
+//     cannot be read is not dead, and its session is refused like a live one
 //
 // With cfg.FreshOnly there are no exceptions.
 //
@@ -2615,8 +2618,15 @@ func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
 		return cleanupPromptFileOnError(promptFile, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name))
 	}
 
-	// We have process names — check if the agent is alive.
-	if ops.isRuntimeRunning(name, cfg.ProcessNames) {
+	// We have process names — check if the agent is alive. A liveness read
+	// that fails proves nothing about the agent: the name is refused as for
+	// a live one, carrying the runtime.ErrRuntimeUnavailable cause, and
+	// nothing is killed, as refuseHeldName fails closed.
+	running, liveErr := ops.isRuntimeRunning(name, cfg.ProcessNames)
+	if liveErr != nil {
+		return cleanupPromptFileOnError(promptFile, fmt.Errorf("%w: session %q (agent liveness unknown): %w", runtime.ErrSessionExists, name, liveErr))
+	}
+	if running {
 		return cleanupPromptFileOnError(promptFile, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name))
 	}
 
