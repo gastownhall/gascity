@@ -1057,8 +1057,7 @@ func refuseBindingRigCollision(beadID string, cfg *config.City, cityPath string,
 // openAllConvoyStoresAt opens every convoy store for a pre-resolved cityPath,
 // used by routed callers that already resolved the city before dispatching
 // to the fallback path. A store it cannot open is skipped, so gc beads show's
-// lookup by id, gc beads list and gc convoy stranded still read the healthy
-// stores.
+// lookup by id and gc convoy stranded still read the healthy stores.
 func openAllConvoyStoresAt(cityPath string, stderr io.Writer, cmdName string) ([]convoyStoreView, int) {
 	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {

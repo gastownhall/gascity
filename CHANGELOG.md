@@ -26,7 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `_cache_age_s` on `gc session list`, `gc status` and `gc rig list` (and on
   the remote bead envelope below), and `running`, `reason`, `last_output`
   and `program_status` on API-served session rows; do not read a missing
-  `running` as false. `GC_NO_API=1`, `--city-url`, `--city-name`,
+  `running` as false. On the API route `gc mail peek` also prints
+  `message.rig`, the city name, which the local read leaves out.
+  `GC_NO_API=1`, `--city-url`, `--city-name`,
   `GC_CITY_URL` and contexts still choose the route, but no longer change
   the shape, except for the bead envelope below. A few known value
   differences remain between the routes; they are listed in
@@ -136,9 +138,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     included). A suspended or closed session, or a failed capture, exits 1
     as it does locally, instead of printing nothing with exit 0; a closed
     session resolves only by its bead ID; `--lines 0` asks for the full
-    capture; and `--lines` above 10000 is capped at 10000. The human output
-    is only the pane output on every route, with no cache-age footer: the
-    supervisor reads pane output live.
+    capture; and `--lines` above 10000 is capped at 10000.
   - **`gc status --json`.** Its schema now declares five keys the command
     already printed: `_cache_age_s` and `conditional_writes` (API route),
     `summary.store_health`, `rigs[].default_sling_targets` and
@@ -161,29 +161,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `schema_version` stays `"1"` for every command above: no key was
     removed or renamed, and the one widened value is `gc session list`'s
     `last_active`, which may now be `""`.
-  - **`_cache_age_s` now reports the server cache's real age.** It is the
-    seconds since the server's bead cache (the city cache, or the
-    sessions-class cache for sessions and waits) last took in fresh data
-    from its store, not each row's age; a rig-scoped read reports the city
-    cache's age. It climbs to the re-scan interval (30, 60 or 120 s) in a
-    healthy idle city and keeps climbing while the city is suspended, so a
-    script that gates on it must allow for those values. A read whose body
-    is not read from the cache reports no age (0): `gc rig list`,
-    `gc maintenance status`, and `gc status` and `gc rig status` on a
-    suspended city; a stale-while-revalidate `/status` serve still reports
-    how long ago its response was built. In 1.5.1 (and since 1.3.0) the
-    supervisor always reported 0, so the `(cache age: ...)` footers printed
-    on stdout after human output (over 15 s on `gc session list`, over 30 s
-    on other API-served reads) can now appear on an idle city, and on reads
-    a suspended city serves from its cache.
   - **Restart the supervisor after you install this build**
     (`gc supervisor stop --wait`, then `gc start`). A supervisor still
     running an earlier gc serves the old rows: it ignores
     `gc session peek`'s new request option and keeps the old best-effort
     preview, leaves out `session_id` on `gc rig status` rows and
     `agent_name`, `transport`, `worker_dir` and wake reasons on session
-    rows, does not report convoy member IDs, still reads suspended rigs'
-    convoy stores, and reports a cache age of 0. Until it restarts:
+    rows, does not report convoy member IDs, and still reads suspended
+    rigs' convoy stores. Until it restarts:
     a supervisor-hosted city's open-session listing reads the city's store
     directly (`route=fallback reason=session-list-predates-agent-name`
     under `GC_DEBUG`), without `running` or `_cache_age_s`; `gc convoy list`
@@ -1033,13 +1018,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A bead with `no_history` prints that field the same way on the API
   route as on the direct read** (#8453).
-
-- **`_cache_age_s` and `X-GC-Cache-Age-S` report the bead cache's real age
-  (#8453).** The supervisor wrapped its bead cache in a policy store that
-  hid the cache's age, so every API read reported 0. A read whose body
-  comes from the cache reports its real age now; `GET /rigs`,
-  `GET /maintenance/status` and a suspended city's `GET /status`, whose
-  bodies do not, report 0. See Upgrading Notes for the cache-age footers.
 
 - **A stop during a workflow finalizer now ends the control dispatcher.**
   `gc convoy control --serve` installed a signal handler for each

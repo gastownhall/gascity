@@ -105,6 +105,36 @@ func TestEveryRoutedReadHasARouteEquivalenceTest(t *testing.T) {
 	}
 }
 
+// TestScanRoutedReadsFindsPackageLevelFuncLiterals pins that the registry scan
+// collects a route-logging call inside a package-level function literal, the
+// cmd/gc seam idiom (var fooAPIClient = func(...)), as it does one inside a
+// function.
+func TestScanRoutedReadsFindsPackageLevelFuncLiterals(t *testing.T) {
+	dir := t.TempDir()
+	src := `package main
+
+import "io"
+
+var probeAPIClient = func(stderr io.Writer) {
+	const cmdName = "probe var"
+	logRoute(stderr, cmdName, "api", "")
+}
+
+func probeCmd(stderr io.Writer) {
+	logRoute(stderr, "probe func", "api", "")
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "probe.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	routed, _ := scanRoutedReads(t, dir)
+	for _, name := range []string{"probe var", "probe func"} {
+		if _, ok := routed[name]; !ok {
+			t.Errorf("scanRoutedReads missed %q; collected %q", name, routedRegistryKeys(routed))
+		}
+	}
+}
+
 // scanRoutedReads parses every .go file in dir. It returns the command names
 // non-test files pass to routeLogHelpers (with the file:line of each use) and
 // the names of the Test functions test files declare.
@@ -136,16 +166,21 @@ func scanRoutedReads(t *testing.T, dir string) (map[string][]string, map[string]
 			continue
 		}
 		for _, decl := range file.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
+			// A package-level declaration is scanned too: a var holding a
+			// function literal (the cmd/gc seam idiom) can route a read.
+			var scope ast.Node = decl
+			if fn, ok := decl.(*ast.FuncDecl); ok {
+				if fn.Body == nil {
+					continue
+				}
+				if _, helper := routeLogHelpers[fn.Name.Name]; helper {
+					// The helpers forward their own cmdName parameter.
+					continue
+				}
+				scope = fn.Body
 			}
-			if _, helper := routeLogHelpers[fn.Name.Name]; helper {
-				// The helpers forward their own cmdName parameter.
-				continue
-			}
-			consts := localStringConsts(fn.Body)
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
+			consts := localStringConsts(scope)
+			ast.Inspect(scope, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
 				if !ok {
 					return true
@@ -173,10 +208,10 @@ func scanRoutedReads(t *testing.T, dir string) (map[string][]string, map[string]
 	return routed, tests
 }
 
-// localStringConsts maps each string const declared in body to its value.
-func localStringConsts(body *ast.BlockStmt) map[string]string {
+// localStringConsts maps each string const declared in scope to its value.
+func localStringConsts(scope ast.Node) map[string]string {
 	out := map[string]string{}
-	ast.Inspect(body, func(n ast.Node) bool {
+	ast.Inspect(scope, func(n ast.Node) bool {
 		gen, ok := n.(*ast.GenDecl)
 		if !ok || gen.Tok != token.CONST {
 			return true
