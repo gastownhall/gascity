@@ -31,10 +31,11 @@ type MaintenanceStatusInput struct {
 	CityScope
 }
 
-// MaintenanceStatusOutput wraps the status body and carries the
-// X-GC-Cache-Age-S header so the read-path CLI can surface the banner.
+// MaintenanceStatusOutput wraps the status body. Its X-GC-Cache-Age-S header
+// is always 0, since the body is not read from the bead cache
+// (humaHandleMaintenanceStatus); it stays for the clients that read it.
 type MaintenanceStatusOutput struct {
-	CacheAgeHeader float64 `header:"X-GC-Cache-Age-S" doc:"Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. 0 when this response read no cached store."`
+	CacheAgeHeader float64 `header:"X-GC-Cache-Age-S" doc:"Always 0: the maintenance status is read from config and the supervisor's maintenance loop, not from the bead cache, so this endpoint reports no cache age."`
 	Body           MaintenanceStatusBody
 }
 

@@ -69,8 +69,8 @@ func cacheLiveOr503(store beads.Store) error {
 // row re-read it applied. It is the cache's age, not each row's, so it grows
 // between re-scans and while the city is suspended (re-scans pause). It is 0
 // when the store is nil, reports no cache stats, or has never been primed.
-// Handlers surface it through the X-GC-Cache-Age-S response header so CLI
-// consumers can flag stale reads.
+// Handlers whose body is read from the cache surface it through the
+// X-GC-Cache-Age-S response header so CLI consumers can flag stale reads.
 func cacheAgeSeconds(store beads.Store) float64 {
 	sr, ok := store.(cacheStatsReporter)
 	if !ok {
