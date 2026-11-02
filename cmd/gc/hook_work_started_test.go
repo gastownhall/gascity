@@ -507,20 +507,44 @@ func TestHookDiscoveryDrainAckFenceHoldsAStartedClaim(t *testing.T) {
 // TestUndeliveredClaimForgetsStartedBeforeRelease (T10): the F-C unwind of a
 // minted claim whose result could not be written (EPIPE) drops its
 // work_started entry before it gives the claim back, so a released claim never
-// reads as started. Kills no removal and the removal after the release.
+// reads as started, on a session store with a conditional writer and on a
+// legacy city's store with none (ga-6eefx8, #8313), where the entry the
+// unwind forgets is one the hand-over recorded. Kills no removal, the removal
+// after the release, and a legacy forget refused for want of a CAS.
 func TestUndeliveredClaimForgetsStartedBeforeRelease(t *testing.T) {
-	row := newStartedRow(t, nil)
-	l := &startedLog{}
-	stdout := &orderedWriter{l: l, err: syscall.EPIPE}
-	var stderr bytes.Buffer
-	code := doHookClaim("q", "/rig", startedOpts(startedEnv(startedToken, "7")), l.ops(startedRoutedWork, row, nil), stdout, &stderr)
+	for _, c := range []struct {
+		name string
+		row  func(t *testing.T) *startedRow
+		opts hookClaimOptions
+	}{
+		{"conditional writer", func(t *testing.T) *startedRow { return newStartedRow(t, nil) }, startedOpts(startedEnv(startedToken, "7"))},
+		{"legacy, no conditional writer", newLegacyStartedRow, legacyStartedOpts()},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			row := c.row(t)
+			l := &startedLog{}
+			ops := l.ops(startedRoutedWork, row, nil)
+			forget := ops.ForgetWorkStarted
+			recordedAtForget := false
+			ops.ForgetWorkStarted = func(sessionID string, key hookStartedKey, casOnly func() bool) error {
+				recordedAtForget = row.cell(t).Names(startedStoreRef, "work-1", 7)
+				return forget(sessionID, key, casOnly)
+			}
+			stdout := &orderedWriter{l: l, err: syscall.EPIPE}
+			var stderr bytes.Buffer
+			code := doHookClaim("q", "/rig", c.opts, ops, stdout, &stderr)
 
-	rec, forget, release := l.index("record:work-1"), l.index("forget:work-1"), l.index("release:work-1")
-	if code != 1 || rec < 0 || forget < 0 || release < 0 || rec >= forget || forget >= release {
-		t.Fatalf("code %d, effects %v; want record, then forget, then release", code, l.log)
-	}
-	if row.cell(t).Names(startedStoreRef, "work-1", 7) {
-		t.Fatalf("work_started %+v still names the released claim", row.cell(t))
+			rec, forgot, release := l.index("record:work-1"), l.index("forget:work-1"), l.index("release:work-1")
+			if code != 1 || rec < 0 || forgot < 0 || release < 0 || rec >= forgot || forgot >= release {
+				t.Fatalf("code %d, effects %v; want record, then forget, then release", code, l.log)
+			}
+			if !recordedAtForget {
+				t.Fatalf("the unwind forgot a claim the hand-over never recorded; stderr=%s", stderr.String())
+			}
+			if row.cell(t).Names(startedStoreRef, "work-1", 7) {
+				t.Fatalf("work_started %+v still names the released claim", row.cell(t))
+			}
+		})
 	}
 }
 
