@@ -83,9 +83,10 @@ supervisor's ACP connection. A queued nudge alone therefore cannot wake an idle
 ACP session in that mode. The remaining default-mode gap is tracked in
 [issue #6080](https://github.com/gastownhall/gascity/issues/6080).
 
-Each run processes at most 20 due beads and leaves the remainder pending. Each
-eligible routing receives its own notification request, even when targets are
-shared. The queue may combine requests into a single turn; the default message
+Each run processes at most 20 due beads, oldest due first, and leaves the
+remainder pending, so blocked work being rechecked cannot crowd out ready work.
+Each eligible routing receives its own notification request, even when targets
+are shared. The queue may combine requests into a single turn; the default message
 asks the worker to claim and execute work repeatedly until no work remains.
 
 Condition checks run on the controller's orders lane. Dispatch latency depends
@@ -95,10 +96,10 @@ five-second check deadline leaves it for the next pass to schedule exec recovery
 without another network probe. Exec clears the marker under its delivery lock
 and owns read-failure backoff. The marker is recovery intent, not a process lock.
 
-Repeated observations of the same route do not resend. A claim/release or a
-change to another route makes the work eligible again. A process crash after
-nudge acceptance but before saving success can cause a duplicate; this is
-at-least-once delivery, not an exactly-once promise.
+Repeated observations of the same route do not resend. A claim/release, a
+deferral, or a change to another route makes the work eligible again. A process
+crash after nudge acceptance but before saving success can cause a duplicate;
+this is at-least-once delivery, not an exactly-once promise.
 Event observations can lag the live ledger read used for delivery. Repeated
 stale observations do not repeat a newer live-route notification. An away/back
 reroute wholly inside that lag can coalesce with the already accepted notification.

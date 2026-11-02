@@ -34,13 +34,18 @@ if [ "$MODE" = exec ]; then
     rm -f "$CHECK_PENDING"
 fi
 
-# A state file holding only whitespace carries no state (jq 1.6 could leave
-# one, #8611). Read it as absent instead of failing every run.
-has_state() { [ -f "$1" ] && grep -q '[^[:space:]]' "$1"; }
+# A state file holding only whitespace carries no state (the previous script
+# could leave one under jq 1.6, #8611). Read it as absent instead of failing
+# every run. grep exits 1 only for that case; a read error (2) is not blank, so
+# the file still goes through the strict read below and fails there.
+has_state() {
+    [ -f "$1" ] || return 1
+    grep -q '[^[:space:]]' "$1" && return 0
+    [ "$?" -ne 1 ]
+}
 STATE='{"version":1,"cursor":0,"pending":{},"notified":{},"retry":{},"observed":{}}'
 if has_state "$STATE_FILE"; then
-    STATE="$(cat "$STATE_FILE")"
-    if ! printf '%s\n' "$STATE" | jq -e '
+    if ! STATE="$(cat "$STATE_FILE")" || ! printf '%s\n' "$STATE" | jq -e '
         .version == 1 and (.cursor | type == "number" and . >= 0)
         and (.pending | type == "object") and (.notified | type == "object")
         and (.retry | type == "object")
@@ -168,7 +173,8 @@ fi
 # separately: an observed transition invalidates an old success, but repeated
 # stale snapshots must not erase a newer live-route notification. A deferral
 # reaches the event log as status "deferred" while gc ready lists the bead as
-# open, so a deferred route waits like other blocked work.
+# open, so a deferred route waits like other blocked work. Like a claim and
+# release, a deferral ends an earlier notification.
 if ! NEXT="$(printf '%s\n%s\n' "$STATE" "$EVENTS" | jq -s '
     .[0] as $state | .[1:] | sort_by(.seq) | reduce .[] as $e ($state;
         .cursor = ([.cursor, $e.seq] | max)
@@ -182,7 +188,8 @@ if ! NEXT="$(printf '%s\n%s\n' "$STATE" "$EVENTS" | jq -s '
                    or ($b.assignee // "") != "" or $route == "" then
                   del(.pending[$id], .notified[$id], .retry[$id], .observed[$id])
               else
-                  (if .observed[$id] != $route and .notified[$id] != $route
+                  (if $b.status == "deferred" then del(.notified[$id]) else . end)
+                  | (if .observed[$id] != $route and .notified[$id] != $route
                    then del(.notified[$id]) else . end)
                   | .observed[$id] = $route
                   | if .notified[$id] != $route then
@@ -234,8 +241,11 @@ nudge_routed_target() {
     gc session nudge "$_target" "$NUDGE_MESSAGE"
 }
 
+# Oldest due first, never-tried work before retries, so routes that keep
+# rechecking as blocked cannot fill every run's 20 slots.
 IDS="$(printf '%s\n' "$STATE" | jq -r --argjson now "$NOW" '
-    . as $s | [.pending | keys[] | select(($s.retry[.].next_at // 0) <= $now)] | .[:20][]')"
+    . as $s | [.pending | keys[] | select(($s.retry[.].next_at // 0) <= $now)]
+    | sort_by($s.retry[.].next_at // 0) | .[:20][]')"
 [ -n "$IDS" ] || exit 0
 read_open || read_failed
 # Routed readiness: holds and exact "human" beads (#7366) wait as blocked work.
