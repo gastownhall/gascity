@@ -497,6 +497,79 @@ func TestSessionSuspendOpRecordsBothPaths(t *testing.T) {
 	}
 }
 
+// TestSessionSuspendManagedReportsPendingRuntimeStop pins #8408: a managed
+// suspend only records the operator hold, so its output says the runtime stop
+// is pending while the runtime still runs, and a wake sent before the drain
+// says it canceled that pending suspend.
+func TestSessionSuspendManagedReportsPendingRuntimeStop(t *testing.T) {
+	for _, asJSON := range []bool{true, false} {
+		name := "text"
+		if asJSON {
+			name = "json"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newCLIOpHarness(t, cliOpsOffEnv())
+			c := newCLIOpCity(t, h, nil)
+			stubSessionSuspendController(t, true)
+
+			var stdout, stderr bytes.Buffer
+			if code := cmdSessionSuspend([]string{c.bead.ID}, "", &stdout, &stderr, asJSON); code != 0 {
+				t.Fatalf("suspend = %d; stderr=%s", code, stderr.String())
+			}
+			if !c.sp.IsRunning(c.name) {
+				t.Fatal("the managed suspend stopped the runtime itself; the test needs the drain still pending")
+			}
+			if asJSON {
+				m := cliOpJSON(t, stdout.Bytes())
+				if m["mode"] != "managed" || m["runtime_stop"] != "pending" {
+					t.Fatalf("suspend JSON %v, want mode=managed runtime_stop=pending", m)
+				}
+				validateJSONAgainstResultSchema(t, []string{"session", "suspend"}, stdout.Bytes())
+			} else if got := stdout.String(); !strings.Contains(got, "the controller stops its runtime when it drains the hold") {
+				t.Fatalf("suspend text %q does not say the runtime stop is pending", got)
+			}
+
+			stdout.Reset()
+			stderr.Reset()
+			if code := cmdSessionWake([]string{c.bead.ID}, "", &stdout, &stderr, false); code != 0 {
+				t.Fatalf("wake = %d; stderr=%s", code, stderr.String())
+			}
+			if got := stderr.String(); !strings.Contains(got, "this wake canceled the pending suspend") {
+				t.Fatalf("wake stderr %q does not say it canceled the pending suspend", got)
+			}
+		})
+	}
+}
+
+// TestSessionSuspendDirectReportsRuntimeStopDone: without a controller the
+// suspend stops the runtime itself, so its JSON says the stop is done and a
+// later wake reports no canceled suspend.
+func TestSessionSuspendDirectReportsRuntimeStopDone(t *testing.T) {
+	h := newCLIOpHarness(t, cliOpsOffEnv())
+	c := newCLIOpCity(t, h, nil)
+	stubSessionSuspendController(t, false)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionSuspend([]string{c.bead.ID}, "", &stdout, &stderr, true); code != 0 {
+		t.Fatalf("suspend = %d; stderr=%s", code, stderr.String())
+	}
+	if c.sp.IsRunning(c.name) {
+		t.Fatal("the direct suspend left the runtime running")
+	}
+	m := cliOpJSON(t, stdout.Bytes())
+	if m["mode"] != "direct" || m["runtime_stop"] != "done" {
+		t.Fatalf("suspend JSON %v, want mode=direct runtime_stop=done", m)
+	}
+	validateJSONAgainstResultSchema(t, []string{"session", "suspend"}, stdout.Bytes())
+
+	stdout.Reset()
+	stderr.Reset()
+	cmdSessionWake([]string{c.bead.ID}, "", &stdout, &stderr, false)
+	if strings.Contains(stderr.String(), "canceled the pending suspend") {
+		t.Fatalf("wake after a direct suspend reported a canceled pending suspend: %q", stderr.String())
+	}
+}
+
 func TestSessionResetOpRecordsARestartFresh(t *testing.T) {
 	h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
 	c := newCLIOpCity(t, h, nil)
