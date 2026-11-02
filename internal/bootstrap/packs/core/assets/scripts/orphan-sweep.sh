@@ -13,6 +13,9 @@
 # vouch for -- another city's agent on a shared rig store, a person, an agent
 # whose config and session records are gone -- is never released; it is
 # counted, named, and declared as a partial outcome (gastownhall/gascity#5955).
+# A local claim left in place because its holder could not be verified dead,
+# or because it could not be re-read or released, is declared the same way,
+# one scope per claim.
 #
 # Does NOT do worktree salvage — cities that staff a work-health patrol role
 # (e.g. the gastown pack's witness) handle that separately.
@@ -299,16 +302,6 @@ session_bead_candidates() {
         printf 'mc-%s\n' "${assignee##*-mc-}"
     fi
 
-    # gc.session_name is intentionally NOT emitted here. For a bead-id-scoped
-    # runtime name (PoolSessionName: "{template-basename}-{beadID}") the
-    # canonical id is already a candidate, and unconditionally probing the
-    # name too used to count every such claim unverifiable forever when the
-    # show failed (gastownhall/gascity#7686). But a stamped name is not
-    # always that shape: agent.SessionNameFor returns just the sanitized
-    # agent name with no bead id, and a legacy pool seat's session bead id
-    # can BE the runtime name (ga-7p4aab). session_bead_shows_live_assignment
-    # therefore resolves the stamped name separately — and may still probe it
-    # as a record id — instead of treating it as a plain candidate here.
     printf '%s\n' "$work_json" | jq -r "$first_bead_jq | [
         .metadata[\"gc.session_id\"],
         .metadata[\"gc.session_bead_id\"],
@@ -316,113 +309,6 @@ session_bead_candidates() {
     ] | .[]? | select(. != null and . != \"\")" 2>/dev/null || true
 
     printf '%s\n' "$assignee" | grep -Eo '[[:alnum:]]+-wisp-[[:alnum:]][[:alnum:]-]*$' || true
-}
-
-# The session name stamped on a claim (metadata gc.session_name), or empty.
-stamped_session_name() {
-    local work_json="$1"
-    printf '%s\n' "$work_json" | jq -r "$first_bead_jq | .metadata[\"gc.session_name\"] // empty" 2>/dev/null || true
-}
-
-# Resolve a runtime session name to canonical session bead id(s) through the
-# session-list rows already fetched into $SESSION_TMP — the authoritative
-# name->id mapping for every session the CLI reports. Closed ephemeral
-# records are omitted from `gc session list`, so an empty result means only
-# "not reported", never "dead".
-resolve_session_name_to_session_ids() {
-    local name="$1"
-    [ -n "$name" ] || return 0
-    jq -r -s --arg name "$name" '
-        def pick($snake; $pascal; $default):
-          if has($snake) and .[$snake] != null then .[$snake]
-          elif has($pascal) and .[$pascal] != null then .[$pascal]
-          else $default end;
-        [ .[] | .sessions[]?
-          | select(
-              pick("session_name"; "SessionName"; "") == $name
-              or pick("name"; "Name"; "") == $name
-              or pick("alias"; "Alias"; "") == $name
-            )
-          | pick("id"; "ID"; "")
-          | select(. != null and . != "")
-        ] | unique | .[]
-    ' "$SESSION_TMP" 2>/dev/null || true
-}
-
-# A bead-id-scoped runtime session name (PoolSessionName) suffixes the
-# session bead id onto the sanitized template basename, so a stamped name
-# that equals a probe candidate or ends in "-<candidate>" names the same
-# canonical record the probe loop already covers and carries no evidence of
-# its own. Coverage only redirects WHERE the evidence is read; it does not
-# by itself establish liveness or death.
-session_name_covered_by_candidates() {
-    local name="$1"
-    local candidates="$2"
-    local candidate
-    while IFS= read -r candidate; do
-        [ -n "$candidate" ] || continue
-        if [ "$name" = "$candidate" ]; then
-            return 0
-        fi
-        case "$name" in
-            *-"$candidate") return 0 ;;
-        esac
-    done <<<"$candidates"
-    return 1
-}
-
-# True when a probed session bead reads back terminal (closed / orphaned /
-# failed-create) AND identifies as the record that was asked for. This is
-# canonical death evidence: the record was read through an identity the claim
-# itself names and answered under that same id — not inferred from
-# session-list absence, and never satisfied by an unrelated terminal record
-# standing in for the holder.
-session_record_reads_terminal() {
-    local session_json="$1"
-    local probed_id="$2"
-    local terminal_id
-    terminal_id=$(printf '%s\n' "$session_json" | jq -r --arg probe "$probed_id" "
-        $first_bead_jq
-        | select((.issue_type // \"\") == \"session\")
-        | select((.id // \"\") == \$probe)
-        | ((.metadata.state // \"\") | ascii_downcase) as \$state
-        | select(
-            (.status // \"\") == \"closed\"
-            or \$state == \"closed\" or \$state == \"orphaned\"
-            or \$state == \"failed-create\" or \$state == \"failed_create\"
-            or (((.metadata.closed // \"\") | tostring | ascii_downcase) == \"true\")
-          )
-        | .id // empty
-    " 2>/dev/null) || terminal_id=""
-    [ -n "$terminal_id" ]
-}
-
-# Decide whether a terminal session record read under $probed_id is death
-# evidence for THIS claim's CURRENT holder. The claim hook refreshes
-# gc.session_id/gc.session_name on every claim without clearing older
-# identity fields (legacy session_id / gc.session_bead_id), so when a
-# canonical gc.session_id is stamped, only a terminal read keyed to that
-# exact id identifies the current holder — a stale legacy record answering
-# terminal under its own old id must not substitute for a holder whose own
-# read fails (gastownhall/gascity#7686). Without a canonical id the legacy
-# hints are the only durable identity on record: a single unambiguous hint
-# keeps its existing fallback meaning, but conflicting hints cannot both
-# name the holder, so neither is accepted as death evidence (fail closed).
-terminal_read_identifies_holder() {
-    local probed_id="$1"
-    local canonical_id="$2"
-    local legacy_hints="$3"
-    local legacy_hints_conflict="$4"
-
-    if [ -n "$canonical_id" ]; then
-        [ "$probed_id" = "$canonical_id" ]
-        return
-    fi
-    if [ "$legacy_hints_conflict" -eq 1 ] \
-        && grep -Fxq -- "$probed_id" <<<"$legacy_hints"; then
-        return 1
-    fi
-    return 0
 }
 
 # A pool seat's runtime name comes from CONFIG, not from a session:
@@ -473,90 +359,39 @@ session_probe_failure_is_unverifiable() {
     return 1
 }
 
-session_bead_shows_live_assignment() {
-    local assignee="$1"
-    local work_json="$2"
-    local session_id
+# probe_session_candidate reads one session-bead candidate for an assignee.
+# It returns 0 when the candidate is a live session that answers to the
+# assignee, 2 when the read could not establish anything about it, and 1
+# otherwise. PROBED_SESSION_TERMINAL is 1 when the read returned the
+# candidate's own session bead in a terminal state.
+PROBED_SESSION_TERMINAL=0
+SESSION_PROBE_UNREADABLE=""
+probe_session_candidate() {
+    local session_id="$1"
+    local assignee="$2"
     local session_json
-    local live_match
-    local probe_failed=0
-    local candidates
-    local stamped_name
-    local resolved_ids
-    local unresolved_name=""
-    local holder_terminal_read=0
-    local canonical_id
-    local legacy_hints
-    local legacy_hint_count
-    local legacy_hints_conflict=0
-
-    candidates=$(session_bead_candidates "$assignee" "$work_json")
-
-    # The canonical current-holder identity, when stamped, and the legacy
-    # identity fields that can survive from an EARLIER holder of the same
-    # bead. Legacy ids stay probe candidates — a live read at any of them
-    # still protects — but which terminal reads count as death evidence for
-    # the current holder is decided by terminal_read_identifies_holder.
-    canonical_id=$(printf '%s\n' "$work_json" | jq -r "$first_bead_jq | .metadata[\"gc.session_id\"] // empty" 2>/dev/null) || canonical_id=""
-    legacy_hints=$(printf '%s\n' "$work_json" | jq -r "$first_bead_jq | [
-        .metadata[\"gc.session_bead_id\"],
-        .metadata[\"session_id\"]
-    ] | .[]? | select(. != null and . != \"\")" 2>/dev/null | sort -u) || legacy_hints=""
-    legacy_hint_count=$(printf '%s\n' "$legacy_hints" | grep -c .) || legacy_hint_count=0
-    if [ "$legacy_hint_count" -gt 1 ]; then
-        legacy_hints_conflict=1
-    fi
-
-    # Resolve the stamped runtime session name to its canonical record BEFORE
-    # probing (gastownhall/gascity#7686). A name the session list maps to an
-    # id joins the probe candidates; a name the probe loop already covers
-    # (equal to, or derived from, a candidate id) redirects its evidence to
-    # that candidate's read; anything else is probed directly as a possible
-    # legacy record id — a pool seat's session bead id can BE the runtime
-    # name (ga-7p4aab) — and is judged after the probes below.
-    stamped_name=$(stamped_session_name "$work_json")
-    if [ -n "$stamped_name" ] && ! session_name_covered_by_candidates "$stamped_name" "$candidates"; then
-        resolved_ids=$(resolve_session_name_to_session_ids "$stamped_name")
-        if [ -n "$resolved_ids" ]; then
-            candidates=$(printf '%s\n%s\n' "$candidates" "$resolved_ids")
-        else
-            unresolved_name="$stamped_name"
-            candidates=$(printf '%s\n%s\n' "$candidates" "$stamped_name")
+    local verdict
+    PROBED_SESSION_TERMINAL=0
+    if ! session_json=$(gc bd show "$session_id" --json 2>/dev/null); then
+        if session_probe_failure_is_unverifiable "$session_id" "$assignee"; then
+            note_unreadable_session_candidate "$session_id"
+            return 2
         fi
+        return 1
     fi
-
-    while IFS= read -r session_id; do
-        [ -n "$session_id" ] || continue
-        if ! session_json=$(gc bd show "$session_id" --json 2>/dev/null); then
-            # A failed read of the stamped runtime name proves nothing by
-            # itself: the modern name shape is never a bead id, so this
-            # failure is expected and must not veto canonical evidence the
-            # other candidates supply (gastownhall/gascity#7686). The same
-            # deferral applies when the stamped name IS the assignee (a
-            # rig-qualified runtime-name claim self-probes a name, not an
-            # id) — classifying that failed name-shaped probe as a dead end
-            # used to veto the matching canonical terminal read. Whether the
-            # holder stays protected is decided after the loop, from
-            # holder-keyed evidence only.
-            if [ -n "$stamped_name" ] && [ "$session_id" = "$stamped_name" ]; then
-                continue
-            fi
-            if session_probe_failure_is_unverifiable "$session_id" "$assignee"; then
-                probe_failed=1
-            fi
-            continue
-        fi
-        # Any live session bead at a probed candidate preserves the work. The
-        # CLI does not expose every Go-side identity field, so the fail-safe
-        # direction is to treat candidate liveness as sufficient.
-        if ! live_match=$(printf '%s\n' "$session_json" | jq -r --arg assignee "$assignee" --arg session_id "$session_id" "
-            $first_bead_jq
-            | select((.issue_type // \"\") == \"session\")
-            | select((.status // \"\") != \"closed\")
-            | ((.metadata.state // \"\") | ascii_downcase) as \$state
-            | select(\$state != \"closed\" and \$state != \"orphaned\" and \$state != \"failed-create\" and \$state != \"failed_create\")
-            | select(((.metadata.closed // \"\") | tostring | ascii_downcase) != \"true\")
-            | select(
+    # Any live session bead at a probed candidate preserves the work. The
+    # CLI does not expose every Go-side identity field, so the fail-safe
+    # direction is to treat candidate liveness as sufficient.
+    if ! verdict=$(printf '%s\n' "$session_json" | jq -r --arg assignee "$assignee" --arg session_id "$session_id" "
+        $first_bead_jq
+        | select((.issue_type // \"\") == \"session\")
+        | ((.metadata.state // \"\") | ascii_downcase) as \$state
+        | ((.status // \"\") != \"closed\"
+            and \$state != \"closed\" and \$state != \"orphaned\" and \$state != \"failed-create\" and \$state != \"failed_create\"
+            and ((.metadata.closed // \"\") | tostring | ascii_downcase) != \"true\") as \$open
+        | if \$open
+            and (.id // \"\") != \"\"
+            and (
                 (.id // \"\") == \$assignee
                 or (.id // \"\") == \$session_id
                 or (.metadata.session_name // \"\") == \$assignee
@@ -564,53 +399,90 @@ session_bead_shows_live_assignment() {
                 or (.metadata.agent_name // \"\") == \$assignee
                 or (\$assignee | contains(\$session_id))
             )
-            | .id // empty
-        " 2>/dev/null); then
-            probe_failed=1
-            continue
-        fi
-        if [ -n "$live_match" ]; then
-            return 0
-        fi
-        if session_record_reads_terminal "$session_json" "$session_id" \
-            && terminal_read_identifies_holder "$session_id" "$canonical_id" "$legacy_hints" "$legacy_hints_conflict"; then
-            holder_terminal_read=1
-        fi
-    done <<<"$candidates"
+          then \"live\"
+          elif (\$open | not) and (.id // \"\") == \$session_id then \"terminal\"
+          else empty end
+    " 2>/dev/null); then
+        note_unreadable_session_candidate "$session_id (unparseable)"
+        return 2
+    fi
+    case "$verdict" in
+        live) return 0 ;;
+        terminal) PROBED_SESSION_TERMINAL=1 ;;
+    esac
+    return 1
+}
 
-    # Releasing a name-stamped holder requires affirmative death evidence
-    # for the CURRENT holder: a session record that was actually read
-    # through an identity the claim itself names (a canonical id candidate,
-    # or the stamped name when it is itself the record id), answered
-    # terminal under that same id, and — when a canonical gc.session_id is
-    # stamped — was read under that canonical id specifically. A failed,
-    # empty, malformed, non-session, non-matching, non-terminal or
-    # stale-legacy read leaves the holder's state unknown — absence from
-    # the session list is not proof of death — so the claim stays protected.
-    if [ -n "$stamped_name" ] && [ "$holder_terminal_read" -eq 0 ]; then
-        if [ -n "$unresolved_name" ]; then
-            echo "orphan-sweep: cannot resolve session name '$unresolved_name' (assignee $assignee) to a session record; holder unverifiable" >&2
-        else
-            echo "orphan-sweep: no readable terminal session record for stamped holder (name '$stamped_name', assignee $assignee); holder unverifiable" >&2
-        fi
-        probe_failed=1
+# session_bead_shows_live_assignment returns 0 when a session bead shows the
+# assignee live, 2 when a candidate could not be read, and 1 when every
+# candidate was read and none is live. On 2, SESSION_PROBE_UNREADABLE names the
+# candidates that could not be read. It must be called directly, not in $(...),
+# so that survives.
+#
+# The stamped gc.session_name is a runtime name, not a bead id: an unaliased
+# pool session is named "<template>-<session bead id>" (PoolSessionName). It
+# is decided after the bead-id candidates. A name that is a candidate, or that
+# is the runtime name of a session bead read here as terminal, adds nothing
+# and is not probed. Any other name is probed: a legacy pool seat's session
+# bead id can be its runtime name, and an unresolvable name stays
+# unverifiable.
+session_bead_shows_live_assignment() {
+    local assignee="$1"
+    local work_json="$2"
+    local session_id
+    local probe_rc
+    local probed=""
+    local terminal_sessions=""
+    local stamped_name=""
+    local probe_failed=0
+    SESSION_PROBE_UNREADABLE=""
+
+    while IFS= read -r session_id; do
+        [ -n "$session_id" ] || continue
+        probed="${probed}${session_id}"$'\n'
+        probe_rc=0
+        probe_session_candidate "$session_id" "$assignee" || probe_rc=$?
+        case "$probe_rc" in
+            0) return 0 ;;
+            2) probe_failed=1 ;;
+            *)
+                if [ "$PROBED_SESSION_TERMINAL" -eq 1 ]; then
+                    terminal_sessions="${terminal_sessions}${session_id}"$'\n'
+                fi
+                ;;
+        esac
+    done < <(session_bead_candidates "$assignee" "$work_json")
+
+    stamped_name=$(printf '%s\n' "$work_json" | jq -r "$first_bead_jq | .metadata[\"gc.session_name\"] // empty" 2>/dev/null) || stamped_name=""
+    if [ -n "$stamped_name" ] && ! grep -Fxq -- "$stamped_name" <<<"$probed" \
+        && ! stamped_name_is_runtime_name_of "$stamped_name" "$terminal_sessions"; then
+        probe_rc=0
+        probe_session_candidate "$stamped_name" "$assignee" || probe_rc=$?
+        case "$probe_rc" in
+            0) return 0 ;;
+            2) probe_failed=1 ;;
+        esac
     fi
 
-    # Decided only after ALL candidates were scanned (a live read anywhere
-    # above already returned 0): a terminal record read through the claim's
-    # own current-holder identity establishes death even when some OTHER
-    # candidate's read failed. With a canonical gc.session_id stamped, only
-    # that exact id can have set holder_terminal_read, so an unreadable stale
-    # legacy session_id / gc.session_bead_id surviving from an earlier holder
-    # is not counter-evidence about the current holder — letting it veto left
-    # the dead holder's claim in_progress forever, the #7686 symptom
-    # (round-3 review). The reverse substitution stays rejected above: a
-    # stale record's terminal read never sets holder_terminal_read while the
-    # canonical holder itself is unreadable.
-    if [ "$holder_terminal_read" -eq 1 ]; then
-        return 1
-    fi
     [ "$probe_failed" -eq 0 ] || return 2
+    return 1
+}
+
+# note_unreadable_session_candidate adds a candidate to SESSION_PROBE_UNREADABLE.
+note_unreadable_session_candidate() {
+    SESSION_PROBE_UNREADABLE="${SESSION_PROBE_UNREADABLE:+$SESSION_PROBE_UNREADABLE, }$1"
+}
+
+# stamped_name_is_runtime_name_of reports whether name is "<template>-<id>"
+# for one of the newline-separated session bead ids.
+stamped_name_is_runtime_name_of() {
+    local name="$1"
+    local ids="$2"
+    local id
+    while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        [[ "$name" == *-"$id" ]] && return 0
+    done <<<"$ids"
     return 1
 }
 
@@ -894,18 +766,13 @@ while IFS=$'\t' read -r bead_id assignee; do
         record_protected_claim "$assignee" "$bead_id"
         continue
     fi
-    # A local claim this pass could not settle either way is skipped, and the
-    # skip is named per bead: an exit-0 run's output is logged nowhere, so the
-    # scope is the only place an operator can see which claim stayed held and
-    # why (gastownhall/gascity#7686).
     if work_bead_still_resettable "$bead_id" "$assignee"; then
         :
     else
         recheck_status=$?
         if [ "$recheck_status" != "2" ]; then
             UNVERIFIABLE=$((UNVERIFIABLE + 1))
-            echo "orphan-sweep: skipping $bead_id (assignee $assignee): could not re-read bead state" >&2
-            order_outcome_scope_skipped "$bead_id" "could not re-read bead state (assignee $assignee)"
+            order_outcome_scope_skipped "$bead_id" "kept: the work bead could not be re-read as still in_progress under $assignee"
         fi
         continue
     fi
@@ -915,8 +782,7 @@ while IFS=$'\t' read -r bead_id assignee; do
         session_status=$?
         if [ "$session_status" = "2" ]; then
             UNVERIFIABLE=$((UNVERIFIABLE + 1))
-            echo "orphan-sweep: skipping $bead_id (assignee $assignee): holder session unverifiable" >&2
-            order_outcome_scope_skipped "$bead_id" "holder session unverifiable (assignee $assignee)"
+            order_outcome_scope_skipped "$bead_id" "kept: holder $assignee is not verifiably dead; could not read ${SESSION_PROBE_UNREADABLE:-a session candidate}"
             continue
         fi
     fi
@@ -926,8 +792,7 @@ while IFS=$'\t' read -r bead_id assignee; do
         reset_status=$?
         if [ "$reset_status" != "2" ]; then
             UNVERIFIABLE=$((UNVERIFIABLE + 1))
-            echo "orphan-sweep: skipping $bead_id (assignee $assignee): release-if-current failed" >&2
-            order_outcome_scope_skipped "$bead_id" "release-if-current failed (assignee $assignee)"
+            order_outcome_scope_skipped "$bead_id" "kept: the conditional release under $assignee failed"
         fi
     fi
 done < <([ -z "$UNRECOGNIZED_ROWS" ] || printf '%s\n' "$UNRECOGNIZED_ROWS")
@@ -960,6 +825,13 @@ if [ "$PROTECTED" -gt 0 ]; then
         PROTECTED_DETAIL="$PROTECTED_DETAIL
 orphan-sweep: foreign-identity gate budget of ${GATE_BUDGET_SECONDS}s exhausted; $GATE_BUDGET_SKIPPED identities not asked this pass"
     fi
+fi
+
+# Local skips extend the declaration rather than replace it: the outcome stays
+# partial and the gate's reason, when there is one, leads. A later
+# order_outcome_set skipped would overwrite the gate's partial declaration.
+if [ "$UNVERIFIABLE" -gt 0 ]; then
+    order_outcome_set partial "${ORDER_OUTCOME_REASON:+$ORDER_OUTCOME_REASON; }left $UNVERIFIABLE local claim(s) in place because the holder could not be verified dead or the claim could not be re-read or released; each bead scope names the claim and why"
 fi
 
 if [ "$ORPHANED" -gt 0 ] || [ "$UNVERIFIABLE" -gt 0 ] || [ "$PROTECTED" -gt 0 ]; then
@@ -995,29 +867,10 @@ misidentified live session -- inspect via gc bd show <id> --json." \
     fi
 fi
 
-# Local claims skipped above (holder unverifiable, bead unreadable, or a
-# failed release) join the declaration. Each was already recorded as a scope
-# naming its bead. When the foreign-identity gate protected claims, its
-# "partial" declaration and reason stand and the local skip count is appended;
-# "skipped" would otherwise overwrite them. Without protected claims, a run
-# that reset nothing declares "skipped" and one that also reset some declares
-# "partial". A run with no skips adds nothing, so a fully successful sweep
-# reports no false skipped/partial outcome next to its order.completed.
-if [ "$UNVERIFIABLE" -gt 0 ]; then
-    if [ "$PROTECTED" -gt 0 ]; then
-        order_outcome_set partial "${ORDER_OUTCOME_REASON:-protected $PROTECTED claim(s)}; skipped $UNVERIFIABLE unverifiable"
-    elif [ "$ORPHANED" -gt 0 ]; then
-        order_outcome_set partial "reset $ORPHANED orphaned beads; skipped $UNVERIFIABLE unverifiable"
-    else
-        order_outcome_set skipped "skipped $UNVERIFIABLE unverifiable beads; nothing reset"
-    fi
-fi
-
-# Declare protected and skipped claims: the controller logs an exit-0 run's
-# output nowhere, but turns this declaration into a typed order.skipped event
-# naming each protected identity and skipped bead (order_outcome.sh). The
-# controller reads it only from an exit-0 run, so a failed mail delivery below
-# still reports order.failed. A no-op when nothing was protected or skipped, or
+# Declare protected and skipped claims as a partial outcome: the controller
+# logs an exit-0 run's output nowhere, but turns this declaration into a typed
+# order.skipped event naming each protected identity and each skipped local
+# claim (order_outcome.sh). A no-op when nothing was protected or skipped, or
 # when run by hand without GC_ORDER_OUTCOME_FILE.
 order_outcome_write
 
