@@ -73,6 +73,43 @@ func TestRuntimeEnvWithSessionContextAlignsAgentAndBeadsActor(t *testing.T) {
 	}
 }
 
+func TestRuntimeEnvWithSessionContextCarriesClaimedBead(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		claim   string
+		wantSet bool
+	}{
+		{name: "claimed bead is exported", claim: "city-33e", wantSet: true},
+		{name: "no claim leaves GC_BEAD_ID unset", claim: "", wantSet: false},
+		{name: "whitespace claim is not a bead", claim: "   ", wantSet: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info := Info{
+				ID:                  "session-id",
+				SessionName:         "rig--worker",
+				SessionNameMetadata: "rig--worker",
+				SessionOrigin:       "ephemeral",
+				CurrentClaimBeadID:  tc.claim,
+			}
+			env := RuntimeEnvWithSessionContext(info, DefaultGeneration, DefaultContinuationEpoch, "instance-token")
+
+			got, ok := env["GC_BEAD_ID"]
+			if !tc.wantSet {
+				if ok {
+					t.Fatalf("GC_BEAD_ID = %q, want the key unset for a session with no live claim", got)
+				}
+				return
+			}
+			if !ok {
+				t.Fatal("GC_BEAD_ID unset, want the session's claimed work bead")
+			}
+			if got != tc.claim {
+				t.Fatalf("GC_BEAD_ID = %q, want %q", got, tc.claim)
+			}
+		})
+	}
+}
+
 func TestSyncRuntimeAliasAlignsOwnershipMetadata(t *testing.T) {
 	sp := runtime.NewFake()
 	assertMeta := func(sessionName, key, want string) {
