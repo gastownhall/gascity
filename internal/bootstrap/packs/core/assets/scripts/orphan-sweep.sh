@@ -415,8 +415,14 @@ reset_orphan_if_current() {
     reset_state=$(printf '%s\n' "$reset_output" | awk 'NF { print $1; exit }')
     case "$reset_state" in
         released)
-            if ! gc bd update "$bead_id" --append-notes "orphan-sweep: reset from assignee $expected_assignee -- no live session matched" >/dev/null 2>&1; then
-                echo "orphan-sweep: failed to record cause note on $bead_id" >&2
+            # The cause rides metadata, not notes: a claim on a graph step of a
+            # city whose [storage.classes] serves the graph class from a binding
+            # is updated in process by gc bd, which refuses --notes and
+            # --append-notes whole (notes have no representation in the class
+            # store contract), while every store serves --set-metadata. The
+            # value is text, so bd and the class store both keep a string.
+            if ! gc bd update "$bead_id" --set-metadata "gc.orphan_sweep_reason=orphan-sweep: reset from assignee $expected_assignee -- no live session matched" >/dev/null 2>&1; then
+                echo "orphan-sweep: failed to record the reset cause on $bead_id" >&2
             fi
             return 0
             ;;
@@ -764,9 +770,9 @@ $PROTECTED_DETAIL}
 orphan-sweep resets in-progress beads whose assignee has no live session or
 known agent, and only once gc agent is-foreign vouches for the assignee as
 this city's own; claims it cannot vouch for are kept, and any kept this pass
-are listed above. Each reset bead now carries a one-line cause note (see its
-history). Repeated resets of the same bead may indicate a stuck or
-misidentified live session -- inspect via gc bd show <id> --json." \
+are listed above. Each reset bead records the cause in its
+gc.orphan_sweep_reason metadata. Repeated resets of the same bead may indicate
+a stuck or misidentified live session -- inspect via gc bd show <id> --json." \
             2>/dev/null; then
             # Do not swallow an undeliverable summary — a vanished escalation
             # is invisible. Surfacing it requires a non-zero exit (see below).

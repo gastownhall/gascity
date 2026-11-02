@@ -4230,18 +4230,13 @@ func TestRealizePoolDesiredSessionsBindsTriggerBeadToFreshSession(t *testing.T) 
 		t.Fatalf("desired sessions = %d, want 1", len(desired))
 	}
 	for _, tp := range desired {
-		if got := tp.Env["GC_TRIGGER_BEAD_ID"]; got != "gp-59q" {
-			t.Fatalf("GC_TRIGGER_BEAD_ID = %q, want gp-59q", got)
+		// The stamp stays controller-side demand bookkeeping: the seat's shell
+		// carries only the presence marker, never the id or its store ref
+		// (gastownhall/gascity#5738).
+		if got := tp.Env["GC_SPAWN_ORIGIN"]; got != "demand" {
+			t.Fatalf("GC_SPAWN_ORIGIN = %q, want demand", got)
 		}
-		if got := tp.Env["GC_TRIGGER_WORK_BEAD_ID"]; got != "gp-59q" {
-			t.Fatalf("GC_TRIGGER_WORK_BEAD_ID = %q, want gp-59q", got)
-		}
-		if got := tp.Env["GC_TRIGGER_BEAD_STORE_REF"]; got != "rig:gascity-packs" {
-			t.Fatalf("GC_TRIGGER_BEAD_STORE_REF = %q, want rig:gascity-packs", got)
-		}
-		if got := tp.Env["GC_TRIGGER_WORK_STORE_REF"]; got != "rig:gascity-packs" {
-			t.Fatalf("GC_TRIGGER_WORK_STORE_REF = %q, want rig:gascity-packs", got)
-		}
+		assertEnvWithholdsTriggerIDs(t, "seat env", tp.Env)
 		if got := tp.Env["GC_PACKER_PACK"]; got != "packer" {
 			t.Fatalf("GC_PACKER_PACK = %q, want packer", got)
 		}
@@ -14670,6 +14665,61 @@ func TestBuildDesiredState_APICreatedAgentSessionBeadStaysDesired(t *testing.T) 
 			if tp.ConfiguredNamedIdentity != "" {
 				t.Fatalf("desired[%q].ConfiguredNamedIdentity = %q, want empty — the ad-hoc bead must not adopt the named session identity",
 					sessionName, tp.ConfiguredNamedIdentity)
+			}
+		})
+	}
+}
+
+// TestRealizePoolDesiredSessionsSeatShellCarriesNoTriggerBeadID reproduces
+// gastownhall/gascity#5738: a demand-spawned pool seat's shell must carry only
+// the presence-only GC_SPAWN_ORIGIN marker, never an id-shaped trigger hint a
+// ${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-…}} close chain could mistake for the
+// bead the seat actually claimed (the pool is pull). That holds when the
+// controller's own environment carries a launching pane's GC_TRIGGER_* keys
+// too: the seat withholds them rather than inheriting a foreign id, and an
+// unstamped seat withholds the marker as well.
+func TestRealizePoolDesiredSessionsSeatShellCarriesNoTriggerBeadID(t *testing.T) {
+	for _, c := range []struct {
+		name, workBeadID, wantOrigin string
+	}{
+		{"stamped", "gp-a", demandSpawnOriginValue},
+		{"unstamped", "", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			setControllerDemandSpawnEnv(t)
+			store := beads.NewMemStore()
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents: []config.Agent{{
+					Name:              "worker",
+					StartCommand:      "true",
+					MinActiveSessions: intPtr(0),
+					MaxActiveSessions: intPtr(1),
+				}},
+			}
+			var stderr bytes.Buffer
+			bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+			bp.sessionBeads = &sessionBeadSnapshot{}
+			desired := map[string]TemplateParams{}
+
+			realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+				Template: "worker",
+				Requests: []SessionRequest{{
+					Template:     "worker",
+					Tier:         "new",
+					WorkBeadID:   c.workBeadID,
+					WorkStoreRef: "rig:gascity",
+				}},
+			}, desired, &stderr)
+
+			if len(desired) != 1 {
+				t.Fatalf("desired sessions = %d, want 1; stderr=%q", len(desired), stderr.String())
+			}
+			for _, tp := range desired {
+				assertEnvWithholdsTriggerIDs(t, "pool seat shell env", tp.Env)
+				if got, ok := tp.Env["GC_SPAWN_ORIGIN"]; !ok || got != c.wantOrigin {
+					t.Errorf("GC_SPAWN_ORIGIN = (%q, present=%v), want %q", got, ok, c.wantOrigin)
+				}
 			}
 		})
 	}
