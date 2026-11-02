@@ -3108,6 +3108,62 @@ func TestStartAcceptsCodex0156TrustDialogBeforeNudge(t *testing.T) {
 	}
 }
 
+func TestRelaunchAcceptsCodex0156TrustDialogBeforeNudge(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newStartupDialogTestProvider(fake)
+	addRunningPod(fake, "gc-test-agent", "gc-test-agent")
+	cfg := startupDialogTestConfig()
+	cfg.Nudge = "Check your assigned work."
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) > 1 && cmd[0] == "tmux" && cmd[1] == "capture-pane" {
+			return k8sCodex0156TrustDialog, nil
+		}
+		return "", nil
+	}
+
+	if err := p.Relaunch(context.Background(), "gc-test-agent", cfg); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+
+	calls := startupDialogTmuxCalls(fake)
+	enterIndex, nudgeIndex := -1, -1
+	for i, c := range calls {
+		if enterIndex < 0 && isStartupDialogSendKeys(c, "Enter") {
+			enterIndex = i
+		}
+		if len(c.cmd) > 4 && c.cmd[1] == "send-keys" && c.cmd[4] == "-l" && strings.Join(c.cmd[5:], " ") == cfg.Nudge {
+			nudgeIndex = i
+		}
+	}
+	if enterIndex < 0 || nudgeIndex < 0 || enterIndex >= nudgeIndex {
+		t.Fatalf("dialog Enter index = %d, nudge index = %d; want dialog confirmation before nudge; calls=%v", enterIndex, nudgeIndex, calls)
+	}
+}
+
+func TestRelaunchKeepsWarmPodWhenStartupDialogHandlingIsCanceled(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newStartupDialogTestProvider(fake)
+	addRunningPod(fake, "gc-test-agent", "gc-test-agent")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) > 1 && cmd[0] == "tmux" && cmd[1] == "capture-pane" {
+			cancel()
+		}
+		return "", nil
+	}
+
+	err := p.Relaunch(ctx, "gc-test-agent", startupDialogTestConfig())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Relaunch error = %v, want context.Canceled", err)
+	}
+	for _, c := range fake.calls {
+		if c.method == "deletePod" {
+			t.Fatal("Relaunch deleted the warm pod after cancellation")
+		}
+	}
+}
+
 func TestStartMovesCodex0156QuitSelectionBeforeEnter(t *testing.T) {
 	fake := newFakeK8sOps()
 	p := newStartupDialogTestProvider(fake)

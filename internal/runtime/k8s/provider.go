@@ -461,23 +461,9 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// Enable pane logging + run session setup (shared with the relaunch tail).
 	p.runPodPostLaunchSetup(ctx, podName, cfg)
 
-	if runtime.ShouldAcceptStartupDialogs(cfg) {
-		carrier := p.carrier()
-		err := runtime.AcceptStartupDialogsWithTimeout(ctx, p.startupDialogTimeout,
-			func(lines int) (string, error) {
-				return carrier.Peek(ctx, name, lines)
-			},
-			func(keys ...string) error {
-				return carrier.SendKeys(ctx, name, keys...)
-			},
-		)
-		if err != nil {
-			fmt.Fprintf(p.stderr, "gc: warning: accepting startup dialogs for %s: %v\n", podName, err) //nolint:errcheck
-			if ctx.Err() != nil {
-				cleanup("startup dialog handling canceled")
-				return fmt.Errorf("accepting startup dialogs for session %q: %w", name, ctx.Err())
-			}
-		}
+	if err := p.acceptPodStartupDialogs(ctx, name, podName, cfg); err != nil {
+		cleanup("startup dialog handling canceled")
+		return err
 	}
 
 	requiresPostStartLiveness := k8sRequiresPostStartLiveness(cfg)
@@ -618,6 +604,12 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 	// Re-run the post-launch setup tail (pipe-pane logging + session_setup[/script]).
 	p.runPodPostLaunchSetup(ctx, podName, cfg)
 
+	// A respawned agent can show a dialog too. Cancellation leaves the warm pod
+	// in place, as every other relaunch failure does.
+	if err := p.acceptPodStartupDialogs(ctx, name, podName, cfg); err != nil {
+		return err
+	}
+
 	// Post-relaunch liveness: detect an agent that dies immediately.
 	if k8sRequiresPostStartLiveness(cfg) {
 		if p.postStartSettle > 0 {
@@ -638,6 +630,32 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 
 	if cfg.Nudge != "" {
 		_ = p.Nudge(name, runtime.TextContent(cfg.Nudge))
+	}
+	return nil
+}
+
+// acceptPodStartupDialogs answers startup dialogs so the first nudge reaches the
+// agent rather than a dialog. A failed read only warns; the only error returned
+// is cancellation.
+func (p *Provider) acceptPodStartupDialogs(ctx context.Context, name, podName string, cfg runtime.Config) error {
+	if !runtime.ShouldAcceptStartupDialogs(cfg) {
+		return nil
+	}
+	carrier := p.carrier()
+	err := runtime.AcceptStartupDialogsWithTimeout(ctx, p.startupDialogTimeout,
+		func(lines int) (string, error) {
+			return carrier.Peek(ctx, name, lines)
+		},
+		func(keys ...string) error {
+			return carrier.SendKeys(ctx, name, keys...)
+		},
+	)
+	if err == nil {
+		return nil
+	}
+	fmt.Fprintf(p.stderr, "gc: warning: accepting startup dialogs for %s: %v\n", podName, err) //nolint:errcheck
+	if ctx.Err() != nil {
+		return fmt.Errorf("accepting startup dialogs for session %q: %w", name, ctx.Err())
 	}
 	return nil
 }
