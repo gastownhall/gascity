@@ -10,21 +10,22 @@ package api
 // carry omitempty so an unset value is absent rather than "" on the wire; the
 // client edge (waitInfoFromGen) reconstitutes the session.WaitInfo.
 type WaitView struct {
-	ID              string   `json:"id" doc:"Wait bead ID."`
-	SessionID       string   `json:"session_id" doc:"Session bead ID the wait is registered against."`
-	SessionName     string   `json:"session_name,omitempty" doc:"Runtime session name recorded at registration."`
-	Kind            string   `json:"kind" doc:"Wait kind, e.g. deps."`
-	State           string   `json:"state" doc:"Wait lifecycle state (pending/ready/closed/...)."`
-	DepIDs          []string `json:"dep_ids,omitempty" doc:"Dependency bead IDs the wait watches."`
-	DepMode         string   `json:"dep_mode,omitempty" doc:"all or any."`
-	RegisteredEpoch string   `json:"registered_epoch,omitempty" doc:"Session continuation epoch at registration."`
-	DeliveryAttempt string   `json:"delivery_attempt,omitempty" doc:"Current delivery attempt counter."`
-	NudgeID         string   `json:"nudge_id,omitempty" doc:"Shadow wait-nudge ID once dispatched."`
-	ExpiresAt       string   `json:"expires_at,omitempty" doc:"Raw RFC3339 expiry string, kept verbatim."`
-	Note            string   `json:"note,omitempty" doc:"Reminder text delivered when the wait is satisfied."`
-	Status          string   `json:"status" doc:"Persisted bead status (open/closed)."`
-	CreatedAt       string   `json:"created_at,omitempty" doc:"Bead creation time (RFC3339, UTC)."`
-	Labels          []string `json:"labels,omitempty" doc:"Bead labels."`
+	ID                     string   `json:"id" doc:"Wait bead ID."`
+	SessionID              string   `json:"session_id" doc:"Session bead ID the wait is registered against."`
+	SessionName            string   `json:"session_name,omitempty" doc:"Runtime session name recorded at registration."`
+	Kind                   string   `json:"kind" doc:"Wait kind, e.g. deps."`
+	State                  string   `json:"state" doc:"Wait lifecycle state (pending/ready/closed/...)."`
+	DepIDs                 []string `json:"dep_ids,omitempty" doc:"Dependency bead IDs the wait watches."`
+	DepMode                string   `json:"dep_mode,omitempty" doc:"all or any."`
+	RegisteredEpoch        string   `json:"registered_epoch,omitempty" doc:"Session continuation epoch at registration."`
+	RegisteredResetPending bool     `json:"registered_reset_pending,omitempty" doc:"True when the wait was registered while its session had a fresh restart pending: it belongs to the conversation that restart starts."`
+	DeliveryAttempt        string   `json:"delivery_attempt,omitempty" doc:"Current delivery attempt counter."`
+	NudgeID                string   `json:"nudge_id,omitempty" doc:"Shadow wait-nudge ID once dispatched."`
+	ExpiresAt              string   `json:"expires_at,omitempty" doc:"Raw RFC3339 expiry string, kept verbatim."`
+	Note                   string   `json:"note,omitempty" doc:"Reminder text delivered when the wait is satisfied."`
+	Status                 string   `json:"status" doc:"Persisted bead status (open/closed)."`
+	CreatedAt              string   `json:"created_at,omitempty" doc:"Bead creation time (RFC3339, UTC)."`
+	Labels                 []string `json:"labels,omitempty" doc:"Bead labels."`
 }
 
 // WaitListInput is the Huma input for GET /v0/city/{cityName}/waits.

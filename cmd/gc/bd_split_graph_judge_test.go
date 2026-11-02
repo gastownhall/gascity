@@ -181,6 +181,9 @@ func TestGcBdSplitCreateGraphJudgesEveryNode(t *testing.T) {
 					if c.refuse && (!strings.Contains(g.refusal, c.want) || !strings.Contains(g.refusal, "Nothing was written.")) {
 						t.Errorf("gc bd %s: refusal %q lacks %q or 'Nothing was written.'", strings.Join(argv, " "), g.refusal, c.want)
 					}
+					if n := strings.Count(g.refusal, "Nothing was written."); n > 1 {
+						t.Errorf("gc bd %s: refusal closes %d times: %q", strings.Join(argv, " "), n, g.refusal)
+					}
 					if single := bdClassFlipGuard(&config.City{}, scope, argv, graphJudgeDeps(inventory)); single.refusal != "" {
 						t.Errorf("gc bd %s on a single-store city refused: %q", strings.Join(argv, " "), single.refusal)
 					}

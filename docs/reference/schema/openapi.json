@@ -70,6 +70,45 @@
         ],
         "type": "object"
       },
+      "AgentClaimsPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "cause": {
+            "type": "string"
+          },
+          "episode": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "seats": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "since": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "template": {
+            "type": "string"
+          },
+          "until": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "template",
+          "provider",
+          "episode",
+          "since"
+        ],
+        "type": "object"
+      },
       "AgentCreateInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -3371,6 +3410,9 @@
         "oneOf": [
           {
             "$ref": "#/components/schemas/AdapterEventPayload"
+          },
+          {
+            "$ref": "#/components/schemas/AgentClaimsPayload"
           },
           {
             "$ref": "#/components/schemas/BackendCredentialResolvedPayload"
@@ -14713,6 +14755,8 @@
         "description": "Discriminated union of city event stream envelopes. Each variant constrains the envelope type and payload schema together.",
         "discriminator": {
           "mapping": {
+            "agent.claims_resumed": "#/components/schemas/TypedEventStreamEnvelopeAgentClaimsResumed",
+            "agent.claims_stalled": "#/components/schemas/TypedEventStreamEnvelopeAgentClaimsStalled",
             "backend.credential_resolved": "#/components/schemas/TypedEventStreamEnvelopeBackendCredentialResolved",
             "bead.claim_failed": "#/components/schemas/TypedEventStreamEnvelopeBeadClaimFailed",
             "bead.claim_loop_held": "#/components/schemas/TypedEventStreamEnvelopeBeadClaimLoopHeld",
@@ -14841,6 +14885,12 @@
           "propertyName": "type"
         },
         "oneOf": [
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeAgentClaimsResumed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeAgentClaimsStalled"
+          },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBackendCredentialResolved"
           },
@@ -15218,6 +15268,120 @@
           }
         ],
         "title": "Typed city event stream envelope"
+      },
+      "TypedEventStreamEnvelopeAgentClaimsResumed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/AgentClaimsPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "agent.claims_resumed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope agent.claims_resumed",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeAgentClaimsStalled": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/AgentClaimsPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "agent.claims_stalled",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope agent.claims_stalled",
+        "type": "object"
       },
       "TypedEventStreamEnvelopeBackendCredentialResolved": {
         "additionalProperties": false,
@@ -16721,6 +16885,8 @@
                 "bead.claim_released",
                 "bead.claim_failed",
                 "bead.claim_loop_held",
+                "agent.claims_stalled",
+                "agent.claims_resumed",
                 "hook.claim.reclaimed_stale",
                 "bead.dead_assignee_reopened",
                 "execution.work_associated",
@@ -22473,6 +22639,8 @@
         "description": "Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.",
         "discriminator": {
           "mapping": {
+            "agent.claims_resumed": "#/components/schemas/TypedTaggedEventStreamEnvelopeAgentClaimsResumed",
+            "agent.claims_stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeAgentClaimsStalled",
             "backend.credential_resolved": "#/components/schemas/TypedTaggedEventStreamEnvelopeBackendCredentialResolved",
             "bead.claim_failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClaimFailed",
             "bead.claim_loop_held": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClaimLoopHeld",
@@ -22601,6 +22769,12 @@
           "propertyName": "type"
         },
         "oneOf": [
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeAgentClaimsResumed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeAgentClaimsStalled"
+          },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBackendCredentialResolved"
           },
@@ -22978,6 +23152,128 @@
           }
         ],
         "title": "Typed supervisor event stream envelope"
+      },
+      "TypedTaggedEventStreamEnvelopeAgentClaimsResumed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/AgentClaimsPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "agent.claims_resumed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope agent.claims_resumed",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeAgentClaimsStalled": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/AgentClaimsPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "agent.claims_stalled",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope agent.claims_stalled",
+        "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeBackendCredentialResolved": {
         "additionalProperties": false,
@@ -24584,6 +24880,8 @@
                 "bead.claim_released",
                 "bead.claim_failed",
                 "bead.claim_loop_held",
+                "agent.claims_stalled",
+                "agent.claims_resumed",
                 "hook.claim.reclaimed_stale",
                 "bead.dead_assignee_reopened",
                 "execution.work_associated",
@@ -31037,6 +31335,10 @@
           "registered_epoch": {
             "description": "Session continuation epoch at registration.",
             "type": "string"
+          },
+          "registered_reset_pending": {
+            "description": "True when the wait was registered while its session had a fresh restart pending: it belongs to the conversation that restart starts.",
+            "type": "boolean"
           },
           "session_id": {
             "description": "Session bead ID the wait is registered against.",
@@ -44005,7 +44307,7 @@
     },
     "/v0/city/{cityName}/maintenance/dolt-gc": {
       "post": {
-        "description": "Trigger a one-off maintenance cycle (dolt backup + CALL DOLT_GC + smoke test). Default async (202); ?wait=true blocks until completion (200). Returns 409 when a run is already in flight.",
+        "description": "Trigger a one-off maintenance cycle. The loop is observe-only for now: the cycle runs the disk-space pre-flight and records run history and events, but takes no backup snapshot and runs no CALL DOLT_GC, so a completed run does not mean the store was compacted. Default async (202); ?wait=true blocks until completion (200). Returns 409 when a run is already in flight.",
         "operationId": "trigger-maintenance-dolt-gc",
         "parameters": [
           {
@@ -53448,7 +53750,7 @@
     },
     "/v0/city/{cityName}/session/{id}/reset": {
       "post": {
-        "description": "Requests a fresh restart of an existing session: the session bead is kept, and the controller restarts the runtime on the next continuation epoch, so the provider starts a new conversation instead of resuming the previous one. The call records the request and pokes the controller; it returns before the restart happens. A closed session returns 409. For a named session, the controller clears a tripped respawn circuit breaker when its next tick consumes the restart request through the restart path. Unlike `gc session reset`, this endpoint does not clear the breaker synchronously, so the clear does not happen if the controller never processes the request, and it also does not happen when a session drain-acks in the same window: the drain-ack path consumes the restart request without touching the breaker. Use `gc session reset` when clearing the breaker is itself the goal. This endpoint always requests an in-place restart. Unlike `gc session reset`, it never rolls back an unfinished create, so a session wedged mid-create is retried in place instead of being replaced; use `gc session reset` to roll one back.",
+        "description": "Requests a fresh restart of an existing session: the session bead is kept, and the controller restarts the runtime on the next continuation epoch, so the provider starts a new conversation instead of resuming the previous one. The call records the request and pokes the controller; it returns before the restart happens. A closed session returns 409. 409 session-conflict also refuses a session in a state the controller skips; the detail names the raw state and `gc session close`, the command that releases the row. For a named session, the controller clears a tripped respawn circuit breaker when its next tick consumes the restart request through the restart path. Unlike `gc session reset`, this endpoint does not clear the breaker synchronously, so the clear does not happen if the controller never processes the request, and it also does not happen when a session drain-acks in the same window: the drain-ack path consumes the restart request without touching the breaker. Use `gc session reset` when clearing the breaker is itself the goal. This endpoint always requests an in-place restart. Unlike `gc session reset`, it never rolls back an unfinished create, so a session wedged mid-create is retried in place instead of being replaced; use `gc session reset` to roll one back.",
         "operationId": "post-v0-city-by-city-name-session-by-id-reset",
         "parameters": [
           {
@@ -55229,7 +55531,7 @@
     },
     "/v0/city/{cityName}/session/{id}/wake": {
       "post": {
-        "description": "Records an explicit wake and asks the controller to start the session; the API never starts the runtime itself. 409 wake-will-not-start means the wake is recorded but the controller will not act on it (no runnable template, a dependency-only or drained pool session, a suspended city, rig or agent, a demand-only singleton, an abandoned create, an open circuit breaker, a startup-health quarantine, or an idle latch); the detail names the remedy. `gc session wake` applies the same rules.",
+        "description": "Records an explicit wake and asks the controller to start the session; the API never starts the runtime itself. 409 wake-will-not-start means the wake is recorded but the controller will not act on it (no runnable template, a dependency-only or drained pool session, a suspended city, rig or agent, a demand-only singleton, an abandoned create, an open circuit breaker, a startup-health quarantine, or an idle latch); the detail names the remedy. 409 session-conflict refuses a session in a state the controller skips before anything is written; the detail names the raw state and `gc session close`, the command that releases the row. `gc session wake` applies the same rules.",
         "operationId": "post-v0-city-by-city-name-session-by-id-wake",
         "parameters": [
           {

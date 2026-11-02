@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/herdr/herdrtest"
 )
 
 // TestActivityLive drives GetLastActivity against a real herdr binary in an
@@ -39,21 +40,18 @@ func TestActivityLive(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = p.Stop("act-a") })
 
-	// herdr does not list, and therefore cannot name, a pane until something
-	// reports an agent onto it (`pane report-agent`/`pane report-agent-session`).
-	// A bare integration-less pane sits in `pane list` with no name field at
-	// all, so name-keyed queries (agent.list/agent.get, and this tracker) have
-	// nothing to seed from until the first report. Resolve the pane id via
-	// `pane list` (name-independent) and report once to establish identity —
-	// this mirrors what any real herdr-integrated agent does on attach.
+	// herdr does not list a pane until something reports an agent onto it
+	// (`pane report-agent`/`pane report-agent-session`), and a report sets only
+	// the pane's agent label, which is a kind and never an identity. The
+	// registered name that name-keyed queries (agent.list/agent.get, and this
+	// tracker) read is set by `agent rename`, which herdr refuses on a pane with
+	// no label and clears when a later report changes the label. Resolve the
+	// pane id via `pane list` (name-independent), and on every report keep the
+	// label at act-a and re-register the name.
 	paneID := firstPaneID(t, session)
 	report := func(state string) {
 		t.Helper()
-		out, err := exec.Command("herdr", "--session", session, "pane", "report-agent", paneID,
-			"--source", "gctest", "--agent", "act-a", "--state", state).CombinedOutput()
-		if err != nil {
-			t.Fatalf("pane report-agent %s: %v: %s", state, err, out)
-		}
+		herdrtest.ReportAgent(t, session, "act-a", state, func() string { return paneID })
 	}
 	report("idle")
 
@@ -102,11 +100,7 @@ func TestActivityLive(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = p.Stop("act-b") })
 	bPaneID := firstPaneID(t, session, paneID)
-	out, err := exec.Command("herdr", "--session", session, "pane", "report-agent", bPaneID,
-		"--source", "gctest", "--agent", "act-b", "--state", agentStatusUnknown).CombinedOutput()
-	if err != nil {
-		t.Fatalf("pane report-agent unknown: %v: %s", err, out)
-	}
+	herdrtest.ReportAgent(t, session, "act-b", agentStatusUnknown, func() string { return bPaneID })
 	waitActivity(t, p, "act-b", 5*time.Second, func(got time.Time) bool {
 		return !got.IsZero()
 	})

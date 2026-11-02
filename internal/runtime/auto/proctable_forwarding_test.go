@@ -92,6 +92,61 @@ func TestFindRuntimesBySessionIDMergesByPIDAndORsTracking(t *testing.T) {
 	}
 }
 
+// A root one backend claims as its own live runtime that it does not list
+// (LiveUnlisted) stays claimed whichever backend reports it first: a backend
+// that merely does not know the root must not clear the claim, or the start
+// it guards would terminate a live runtime.
+func TestFindRuntimesBySessionIDKeepsAnyBackendsLiveUnlistedClaim(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		claimedByACP  bool
+		claimedByBoth bool
+	}{
+		{name: "default backend claims"},
+		{name: "acp backend claims", claimedByACP: true},
+		{name: "both claim", claimedByBoth: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			def, acp := runtime.NewFake(), runtime.NewFake()
+			plain := runtime.LiveRuntime{SessionID: "sid-u", PID: 555, PPID: 4200, ParentIsProviderInfrastructure: true}
+			claimed := plain
+			claimed.LiveUnlisted = true
+			def.ExtraRuntimes = []runtime.LiveRuntime{claimed}
+			acp.ExtraRuntimes = []runtime.LiveRuntime{plain}
+			if tc.claimedByACP {
+				def.ExtraRuntimes, acp.ExtraRuntimes = acp.ExtraRuntimes, def.ExtraRuntimes
+			}
+			if tc.claimedByBoth {
+				acp.ExtraRuntimes = []runtime.LiveRuntime{claimed}
+			}
+
+			found, err := New(def, acp).FindRuntimesBySessionID("sid-u")
+			if err != nil {
+				t.Fatalf("FindRuntimesBySessionID: %v", err)
+			}
+			if len(found) != 1 || found[0].IsTracked || !found[0].LiveUnlisted {
+				t.Fatalf("found = %+v, want the one untracked root still LiveUnlisted", found)
+			}
+		})
+	}
+}
+
+// A root another backend tracks is that backend's listed runtime, so a
+// LiveUnlisted claim from a backend that does not list it does not stick.
+func TestFindRuntimesBySessionIDTrackedRootIsNotLiveUnlisted(t *testing.T) {
+	def, acp := runtime.NewFake(), runtime.NewFake()
+	startWithSessionID(t, acp, "acp-sess", "sid-t")
+	def.ExtraRuntimes = []runtime.LiveRuntime{{SessionID: "sid-t", PID: 4242, LiveUnlisted: true}}
+
+	found, err := New(def, acp).FindRuntimesBySessionID("sid-t")
+	if err != nil {
+		t.Fatalf("FindRuntimesBySessionID: %v", err)
+	}
+	if len(found) != 1 || !found[0].IsTracked || found[0].LiveUnlisted {
+		t.Fatalf("found = %+v, want the root tracked by the ACP backend and not LiveUnlisted", found)
+	}
+}
+
 // The mixed-city regression: a tmux/subprocess-tracked session must stay
 // tracked even though the ACP backend, scanning the same /proc, does not know
 // it.

@@ -50,3 +50,30 @@ func parseLsofNamePaths(out string) []string {
 	}
 	return paths
 }
+
+// ProcessCwd returns pid's working directory: lsof's name for its cwd
+// descriptor, read as [OpenFiles] reads the others. A process that is gone
+// has none, and a name that is not one absolute path names none: an error
+// either way. It refuses the live process table under go test, as
+// [ScanBySessionID] does.
+func ProcessCwd(pid int) (string, error) {
+	if err := liveScanGuard(); err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), processSnapshotTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "lsof", "-w", "-a", "-p", strconv.Itoa(pid), "-d", "cwd", "-Fn").Output()
+	if err != nil {
+		return "", fmt.Errorf("running lsof for the working directory of pid %d: %w", pid, err)
+	}
+	return parseLsofCwd(pid, string(out))
+}
+
+// parseLsofCwd returns the working directory lsof field output for pid's cwd
+// descriptor names: its one absolute path.
+func parseLsofCwd(pid int, out string) (string, error) {
+	if paths := parseLsofNamePaths(out); len(paths) == 1 {
+		return paths[0], nil
+	}
+	return "", fmt.Errorf("lsof names no single working directory for pid %d: %q", pid, out)
+}

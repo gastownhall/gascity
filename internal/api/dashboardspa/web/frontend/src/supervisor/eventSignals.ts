@@ -3,6 +3,7 @@ import type { TypedEventStreamEnvelope } from 'gas-city-dashboard-shared/gc-supe
 export type SupervisorEventSignal = 'attention' | 'watch' | 'event';
 
 const ATTENTION_EVENT_TYPES = new Set<string>([
+  'agent.claims_stalled',
   'gc.store.maintenance.failed',
   'order.failed',
   'request.failed',
