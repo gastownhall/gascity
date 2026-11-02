@@ -713,7 +713,7 @@ type SessionConfigDriftDeferredPayload struct {
 	SessionID      string   `json:"session_id" doc:"Canonical session bead ID of the session the config drift is deferred on (also the envelope Subject)."`
 	SessionName    string   `json:"session_name,omitempty" doc:"Runtime session name from the session bead metadata, when set."`
 	Template       string   `json:"template,omitempty" doc:"The session's template name, when set."`
-	DriftedFields  []string `json:"drifted_fields" doc:"Sorted drifted config field names. Empty means the stored per-field breakdown was unavailable, not that no drift exists."`
+	DriftedFields  []string `json:"drifted_fields" nullable:"false" doc:"Sorted drifted config field names. Empty means the stored per-field breakdown was unavailable, not that no drift exists."`
 	WorkBeadID     string   `json:"work_bead_id" doc:"One observed open work bead holding the session, named for correlation."`
 	DeferredSince  string   `json:"deferred_since,omitempty" doc:"RFC3339 timestamp the reconciler first recorded this deferral episode; the escalation clock counts from here."`
 	PendingSeconds int64    `json:"pending_seconds" doc:"Seconds the deferral episode has been pending, from deferred_since to the emission."`

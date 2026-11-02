@@ -3851,7 +3851,7 @@ export type SessionConfigDriftDeferredPayload = {
     /**
      * Sorted drifted config field names. Empty means the stored per-field breakdown was unavailable, not that no drift exists.
      */
-    drifted_fields: Array<string> | null;
+    drifted_fields: Array<string>;
     /**
      * False on the first-observation emission; true once the episode has outlived [daemon] drift_deferral_escalate_after.
      */

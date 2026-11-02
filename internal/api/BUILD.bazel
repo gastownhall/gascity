@@ -328,6 +328,7 @@ go_test(
         "enqueue_keys_test.go",
         "event_payloads_1a_test.go",
         "event_payloads_1a_wiring_test.go",
+        "event_payloads_config_drift_deferred_test.go",
         "event_payloads_coverage_test.go",
         "event_payloads_overhead_test.go",
         "event_payloads_test.go",

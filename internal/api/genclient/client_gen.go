@@ -5415,7 +5415,7 @@ type SessionConfigDriftDeferredPayload struct {
 	DeferredSince *string `json:"deferred_since,omitempty"`
 
 	// DriftedFields Sorted drifted config field names. Empty means the stored per-field breakdown was unavailable, not that no drift exists.
-	DriftedFields *[]string `json:"drifted_fields"`
+	DriftedFields []string `json:"drifted_fields"`
 
 	// Escalated False on the first-observation emission; true once the episode has outlived [daemon] drift_deferral_escalate_after.
 	Escalated bool `json:"escalated"`

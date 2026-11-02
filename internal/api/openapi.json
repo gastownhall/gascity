@@ -8964,10 +8964,7 @@
             "items": {
               "type": "string"
             },
-            "type": [
-              "array",
-              "null"
-            ]
+            "type": "array"
           },
           "escalated": {
             "description": "False on the first-observation emission; true once the episode has outlived [daemon] drift_deferral_escalate_after.",

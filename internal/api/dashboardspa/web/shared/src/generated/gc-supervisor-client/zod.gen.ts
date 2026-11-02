@@ -2016,7 +2016,7 @@ export const zSessionCommandStatusBody = z.object({
 
 export const zSessionConfigDriftDeferredPayload = z.object({
     deferred_since: z.string().optional(),
-    drifted_fields: z.array(z.string()).nullable(),
+    drifted_fields: z.array(z.string()),
     escalated: z.boolean(),
     pending_seconds: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     session_id: z.string(),
