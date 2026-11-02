@@ -381,6 +381,7 @@ skip_fetch_input="${GC_DOLT_COMPACT_SKIP_FETCH:-}"
 allow_federated_input="${GC_DOLT_COMPACT_ALLOW_FEDERATED:-}"
 skip_fetch_dbs="${GC_DOLT_COMPACT_SKIP_FETCH_DBS:-}"
 compact_alert_to="${GC_DOLT_COMPACT_ALERT_TO:-mayor}"
+live_probe_attempts="${GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS:-3}"
 case "$bare_gc_input" in
   ''|0|false|FALSE|no|NO)
     bare_gc=0
@@ -443,6 +444,13 @@ case "$call_timeout" in
     exit 2
     ;;
 esac
+
+# The live-database probe gets at most 30s per attempt, never more than the
+# per-call timeout.
+live_probe_timeout=30
+if [ "$call_timeout" -lt "$live_probe_timeout" ]; then
+  live_probe_timeout="$call_timeout"
+fi
 
 case "$push_timeout" in
   ''|*[!0-9]*|0)
@@ -913,12 +921,20 @@ discover_database_names() {
 dolt_query() {
   db="$1"
   query="$2"
+  dolt_query_bounded "$call_timeout" "$db" "$query"
+}
+
+# dolt_query_bounded SECS DB QUERY — dolt_query with an explicit timeout.
+dolt_query_bounded() {
+  _dqb_timeout="$1"
+  _dqb_db="$2"
+  _dqb_query="$3"
   export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
-  run_bounded "$call_timeout" \
+  run_bounded "$_dqb_timeout" \
     dolt --host "$host" --port "$GC_DOLT_PORT" \
     --user "$GC_DOLT_USER" --no-tls \
-    --use-db "$db" \
-    sql -r tabular -q "$query"
+    --use-db "$_dqb_db" \
+    sql -r tabular -q "$_dqb_query"
 }
 
 emit_error_file() {
@@ -2516,6 +2532,73 @@ compact_live_gate_arm() {
   return 0
 }
 
+# compact_live_probe_once DB
+#   One bounded served-HEAD probe. Succeeds when the server answers for DB
+#   (case-insensitively) with a non-empty alphanumeric HEAD, which it leaves in
+#   compact_live_probe_head; otherwise leaves a one-line diagnostic in
+#   compact_live_probe_error and returns 1.
+compact_live_probe_once() {
+  _lpo_db="$1"
+  compact_live_probe_head=""
+  compact_live_probe_error=""
+  _lpo_out=$(mktemp)
+  _lpo_err=$(mktemp)
+  _lpo_rc=0
+  dolt_query_bounded "$live_probe_timeout" "$_lpo_db" \
+    "SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))" > "$_lpo_out" 2>"$_lpo_err" || _lpo_rc=$?
+  _lpo_cell=$(awk 'NR==4 {gsub(/[| ]/, ""); print; exit}' "$_lpo_out")
+  _lpo_stderr=$(tr '\r\n' '  ' < "$_lpo_err" | cut -c1-200)
+  rm -f "$_lpo_out" "$_lpo_err"
+  if [ "$_lpo_rc" -eq 124 ] || [ "$_lpo_rc" -eq 137 ]; then
+    compact_live_probe_error="probe timed out after ${live_probe_timeout}s"
+    return 1
+  fi
+  if [ "$_lpo_rc" -ne 0 ]; then
+    compact_live_probe_error="probe failed rc=$_lpo_rc: ${_lpo_stderr:-<no stderr>}"
+    return 1
+  fi
+  case "$_lpo_cell" in
+    *:*) ;;
+    *)
+      compact_live_probe_error="probe returned no database:HEAD value (got ${_lpo_cell:-<empty>})"
+      return 1
+      ;;
+  esac
+  _lpo_name=$(printf '%s' "${_lpo_cell%:*}" | tr '[:upper:]' '[:lower:]')
+  _lpo_want=$(printf '%s' "$_lpo_db" | tr '[:upper:]' '[:lower:]')
+  _lpo_head="${_lpo_cell##*:}"
+  if [ "$_lpo_name" != "$_lpo_want" ]; then
+    compact_live_probe_error="probe answered for database ${_lpo_cell%:*}, not $_lpo_db"
+    return 1
+  fi
+  case "$_lpo_head" in
+    ''|*[!A-Za-z0-9]*)
+      compact_live_probe_error="probe returned invalid HEAD ${_lpo_head:-<empty>}"
+      return 1
+      ;;
+  esac
+  compact_live_probe_head="$_lpo_head"
+  return 0
+}
+
+# compact_live_probe DB STEP
+#   Run compact_live_probe_once up to live_probe_attempts times; succeeds on
+#   the first answer.
+compact_live_probe() {
+  _lp_db="$1"
+  _lp_step="$2"
+  _lp_attempt=1
+  while :; do
+    if compact_live_probe_once "$_lp_db"; then
+      return 0
+    fi
+    if [ "$_lp_attempt" -ge "$live_probe_attempts" ]; then
+      return 1
+    fi
+    _lp_attempt=$((_lp_attempt + 1))
+  done
+}
+
 # compact_live_gate_check DB STEP
 #   Verify the database is still live after STEP. On failure, quarantine it
 #   (write_compact_marker raises the event and mail), set live_gate_failed,
@@ -2533,6 +2616,9 @@ compact_live_gate_check() {
   _lgc_probe_failure=""
   if [ "$live_gate_dir_before" = "present" ] && [ "$_lgc_dir_after" = "absent" ]; then
     _lgc_failure="data directory $live_gate_dir disappeared"
+  elif ! compact_live_probe "$_lgc_db" "$_lgc_step"; then
+    _lgc_probe_failure="$compact_live_probe_error"
+    _lgc_failure="database not served after $live_probe_attempts probe attempt(s): $compact_live_probe_error"
   else
     return 0
   fi

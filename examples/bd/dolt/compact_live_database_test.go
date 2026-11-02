@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -14,6 +15,8 @@ import (
 // data directory and still be served, or the run quarantines it and stops.
 
 const liveGateReason = "live database unavailable after compaction"
+
+const liveProbeQuery = "query=SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))"
 
 func liveGateEnv(extra ...string) []string {
 	return append([]string{
@@ -33,6 +36,10 @@ func addCompactDatabases(t *testing.T, fixture compactScriptFixture, names ...st
 
 func beadsMarker(fixture compactScriptFixture, kind string) string {
 	return compactStateMarkerPath(fixture, kind)
+}
+
+func beadsLiveProbes(log string) int {
+	return strings.Count(log, "db=beads "+liveProbeQuery)
 }
 
 // doltLogEntries splits the fake dolt log into one entry per query; a
@@ -179,6 +186,83 @@ func TestCompactScriptLiveGateQuarantinesVanishedDataDir(t *testing.T) {
 			if got := compactMarkerValue(t, marker, "reason"); got != liveGateReason {
 				t.Fatalf("rerun replaced the live-gate quarantine reason with %q", got)
 			}
+		})
+	}
+}
+
+// AC-2: a database that keeps its directory but stops being served is
+// quarantined whatever the rewrite's own exit status was.
+func TestCompactScriptLiveGateQuarantinesUnservedDatabase(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		mode     string
+		faultOn  string
+		step     string
+		attempts string
+	}{
+		{name: "full GC succeeded", mode: "success", faultOn: "DOLT_GC", step: "post-flatten full GC", attempts: "3"},
+		{name: "full GC failed", mode: "gc_failure", faultOn: "DOLT_GC", step: "post-flatten full GC", attempts: "2"},
+		{name: "flatten succeeded", mode: "success", faultOn: "DOLT_RESET", step: "flatten", attempts: "3"},
+		{name: "flatten failed", mode: "flatten_failure", faultOn: "DOLT_RESET", step: "flatten", attempts: "1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			out, err := fixture.run(t, tc.mode, liveGateEnv(
+				"GC_FAKE_DOLT_LIVE_FAULT=unserve",
+				"GC_FAKE_DOLT_LIVE_FAULT_ON="+tc.faultOn,
+				"GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS="+tc.attempts,
+			)...)
+			requireFailedRun(t, err, out)
+			marker := requireLiveGateQuarantine(t, fixture, out, tc.step)
+			if got := compactMarkerValue(t, marker, "live_gate_data_dir_after"); got != "present" {
+				t.Fatalf("live_gate_data_dir_after = %q, want present", got)
+			}
+			if got := compactMarkerValue(t, marker, "live_gate_probe_failure"); !strings.Contains(got, "database not found") {
+				t.Fatalf("live_gate_probe_failure = %q, want the probe error", got)
+			}
+			requireNoMarker(t, beadsMarker(fixture, "compact-pending-gc"))
+			after := beadsLogAfter(t, readCompactDoltLog(t, fixture), tc.faultOn)
+			if tc.mode == "flatten_failure" {
+				// The restore attempt still runs before the gate.
+				after = beadsLogAfter(t, after, "query=SELECT HASHOF('HEAD')")
+			}
+			var probes []string
+			for _, entry := range doltLogEntries(strings.TrimSpace(after)) {
+				if !strings.Contains(entry, liveProbeQuery) {
+					t.Fatalf("only live probes may follow an unserved database, got %q:\n%s", entry, after)
+				}
+				probes = append(probes, entry)
+			}
+			if want, _ := strconv.Atoi(tc.attempts); len(probes) != want {
+				t.Fatalf("live probes after the fault = %d, want %s:\n%s", len(probes), tc.attempts, after)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		reply string
+		fail  bool
+	}{
+		{reply: "wrong_db", fail: true},
+		{reply: "empty", fail: true},
+		{reply: "no_head", fail: true},
+		{reply: "upper_db", fail: false},
+	} {
+		t.Run("probe reply "+tc.reply, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			out, err := fixture.run(t, "success", liveGateEnv("GC_FAKE_DOLT_LIVE_PROBE_REPLY="+tc.reply)...)
+			if !tc.fail {
+				if err != nil {
+					t.Fatalf("case-insensitive database name must pass the gate: %v\n%s", err, out)
+				}
+				requireNoMarker(t, beadsMarker(fixture, "compact-quarantine"))
+				if beadsLiveProbes(readCompactDoltLog(t, fixture)) == 0 {
+					t.Fatalf("gate never probed the database")
+				}
+				return
+			}
+			requireFailedRun(t, err, out)
+			requireLiveGateQuarantine(t, fixture, out, "flatten")
 		})
 	}
 }
