@@ -1753,3 +1753,132 @@ func TestFactorySweepWithoutCursorMatchesFixedTailWindow(t *testing.T) {
 		t.Fatalf("persisted cursor = %q, want %q (the newest entry)", got, wantCursor)
 	}
 }
+
+// TestFactorySweepSessionModelUsageKeylessGrokCleanMissSettles pins the grok
+// settle rule: grok is keyless by construction and shares the keyless codex
+// (cwd, wake-window) route, so a CLEAN miss — no session directory for the
+// work dir inside the interval window — is permanent and settles the
+// interval, minting nothing, instead of retrying every tick.
+func TestFactorySweepSessionModelUsageKeylessGrokCleanMissSettles(t *testing.T) {
+	grokRoot := t.TempDir()
+	workDir := t.TempDir()
+	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	factory, err := NewFactory(FactoryConfig{
+		Store:       store,
+		Provider:    sp,
+		SearchPaths: []string{grokRoot},
+		UsageSink:   usage.NewLocalSink(sinkPath),
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	start := time.Date(2026, 10, 15, 10, 0, 0, 0, time.UTC)
+	slept := start.Add(90 * time.Second)
+	// A session directory for this cwd that is OUTSIDE the interval window:
+	// a clean zero, not this session's.
+	grokWorkerSessionDir(t, grokRoot, workDir, grokWorkerUUIDv7At(start.Add(-2*time.Hour), "c86d67f4a000"))
+
+	meta := map[string]string{
+		"provider":         "grok",
+		"work_dir":         workDir,
+		"awake_started_at": start.Format(time.RFC3339),
+		"slept_at":         slept.Format(time.RFC3339),
+		"session_name":     "grok-wisp-1",
+	}
+	now := slept.Add(time.Minute)
+	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), "gcg-grok-wisp-1", meta, now)
+	if err != nil {
+		t.Fatalf("SweepSessionModelUsage: %v", err)
+	}
+	if emitted != 0 {
+		t.Fatalf("emitted = %d, want 0 (no in-window session dir)", emitted)
+	}
+	if !settled {
+		t.Fatal("a clean keyless grok miss is permanent and must settle")
+	}
+	if path, settled := factory.DiscoverSweepTranscript("gcg-grok-wisp-1", meta, now); path != "" || !settled {
+		t.Fatalf("DiscoverSweepTranscript = (%q, %v), want (\"\", true)", path, settled)
+	}
+
+	// Grok is never resolved by key, so a session_key (one captured over
+	// another transport) must not turn the same clean miss into a retry.
+	meta["session_key"] = "grok-captured-key"
+	if _, settled, err := factory.SweepSessionModelUsage(context.Background(), "gcg-grok-wisp-1", meta, now); err != nil || !settled {
+		t.Fatalf("keyed grok clean miss: (settled, err) = (%v, %v), want (true, nil)", settled, err)
+	}
+	if path, settled := factory.DiscoverSweepTranscript("gcg-grok-wisp-1", meta, now); path != "" || !settled {
+		t.Fatalf("keyed grok DiscoverSweepTranscript = (%q, %v), want (\"\", true)", path, settled)
+	}
+}
+
+// TestFactorySweepSessionModelUsageKeylessGrokDiscoversByWorkdir is the
+// positive twin: the in-window session directory for the work dir is found,
+// and its sid's inferences in the shared log mint model facts with provider
+// grok.
+func TestFactorySweepSessionModelUsageKeylessGrokDiscoversByWorkdir(t *testing.T) {
+	grokRoot := t.TempDir()
+	workDir := t.TempDir()
+	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	factory, err := NewFactory(FactoryConfig{
+		Store:       store,
+		Provider:    sp,
+		SearchPaths: []string{grokRoot},
+		UsageSink:   usage.NewLocalSink(sinkPath),
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	start := time.Date(2026, 10, 15, 10, 0, 0, 0, time.UTC)
+	slept := start.Add(90 * time.Second)
+	sid := grokWorkerUUIDv7At(start.Add(3*time.Second), "c86d67f4a81b")
+	otherSID := grokWorkerUUIDv7At(start.Add(-2*time.Hour), "c86d67f4a000")
+	grokWorkerSessionDir(t, grokRoot, workDir, sid)
+	writeWorkerTestJSONL(t, grokWorkerUnifiedLogPath(t, grokRoot), []map[string]any{
+		grokWorkerModelChanged("2026-10-15T09:00:00.000Z", otherSID, "grok-3"),
+		grokWorkerInferenceDone("2026-10-15T09:00:10.000Z", otherSID, 9999, 0, 999, 0),
+		grokWorkerModelChanged("2026-10-15T10:00:03.000Z", sid, "grok-4.7"),
+		grokWorkerInferenceDone("2026-10-15T10:00:30.000Z", sid, 150, 100, 50, 10),
+	})
+
+	meta := map[string]string{
+		"provider":         "grok",
+		"work_dir":         workDir,
+		"awake_started_at": start.Format(time.RFC3339),
+		"slept_at":         slept.Format(time.RFC3339),
+		"session_name":     "grok-wisp-1",
+		"molecule_id":      "run-G",
+	}
+	now := slept.Add(time.Minute)
+	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), "gcg-grok-wisp-1", meta, now)
+	if err != nil {
+		t.Fatalf("SweepSessionModelUsage: %v", err)
+	}
+	if !settled || emitted != 1 {
+		t.Fatalf("(emitted, settled) = (%d, %v), want (1, true)", emitted, settled)
+	}
+	facts, warnings, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	if len(warnings) != 0 || len(facts) != 1 {
+		t.Fatalf("want 1 model fact and no warnings, got %d facts %v", len(facts), warnings)
+	}
+	f := facts[0]
+	if f.Provider != "grok" || f.Model != "grok-4.7" {
+		t.Fatalf("Provider/Model = %q/%q, want grok/grok-4.7", f.Provider, f.Model)
+	}
+	if f.InputTokens != 50 || f.OutputTokens != 50 || f.CacheReadTokens != 100 {
+		t.Fatalf("tokens = in %d out %d cache %d, want 50/50/100", f.InputTokens, f.OutputTokens, f.CacheReadTokens)
+	}
+	if f.RunID != "run-G" {
+		t.Fatalf("RunID = %q, want run-G", f.RunID)
+	}
+}

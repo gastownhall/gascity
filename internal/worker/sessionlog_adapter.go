@@ -168,6 +168,16 @@ func (a SessionLogAdapter) OpenCodeTailUsage(path, cursorID string) ([]sessionlo
 	return sessionlog.ExtractOpenCodeTailUsageFromSearchPaths(a.SearchPaths, path)
 }
 
+// GrokTailUsage reads per-invocation token usage for the grok session that
+// path (its ~/.grok/sessions/<escaped cwd>/<sid>/ directory) names, from the
+// shared ~/.grok/logs/unified.jsonl. Validation merges the grok default root
+// (~/.grok) on top of the configured search paths, as CodexTailUsage does for
+// codex. cursorID is honored: the scan window grows until the cursor (or the
+// session's start) is in view.
+func (a SessionLogAdapter) GrokTailUsage(path, cursorID string) ([]sessionlog.TailUsage, error) {
+	return sessionlog.ExtractGrokTailUsageFromSearchPaths(a.SearchPaths, path, cursorID)
+}
+
 // InvocationUsage reads per-invocation token usage from a discovered
 // transcript using the SAME extractor the prompt-op telemetry gate uses for
 // the provider's invocation-usage family (invocationUsageSpecs). It returns

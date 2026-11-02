@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -475,16 +474,10 @@ func codexBatchRootYears(entries []os.DirEntry) map[string]bool {
 // codexUUIDv7CreationTime decodes the 48-bit Unix millisecond timestamp from
 // a canonical-layout UUIDv7 prefix. Other UUID versions and malformed
 // timestamp prefixes do not authorize scans outside the lifecycle window.
+// It is the shared uuidV7CreationTime decoder (grok session directories are
+// named the same way).
 func codexUUIDv7CreationTime(sessionID string) (time.Time, bool) {
-	if len(sessionID) != 36 || sessionID[8] != '-' || sessionID[13] != '-' || sessionID[18] != '-' || sessionID[23] != '-' || sessionID[14] != '7' {
-		return time.Time{}, false
-	}
-	timestampHex := sessionID[:8] + sessionID[9:13]
-	millis, err := strconv.ParseUint(timestampHex, 16, 48)
-	if err != nil {
-		return time.Time{}, false
-	}
-	return time.UnixMilli(int64(millis)), true
+	return uuidV7CreationTime(sessionID)
 }
 
 // markCodexBatchRoot records a root by resolved physical identity while

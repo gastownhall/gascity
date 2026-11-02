@@ -443,7 +443,9 @@ type City struct {
 	// Pricing holds per-model cost rate overrides keyed by (provider, model).
 	// City-level entries override pack-level entries which override the
 	// defaults shipped with the pricing package. See internal/pricing for the
-	// estimation seam introduced by issue #1255 (1d).
+	// estimation seam introduced by issue #1255 (1d). The provider is the
+	// transcript family and the model the provider-facing id usage facts
+	// carry, e.g. [[pricing]] provider = "grok", model = "grok-4.7".
 	Pricing []pricing.ModelPricing `toml:"pricing,omitempty"`
 	// PackPricing preserves the pack-level pricing layer before Pricing is
 	// flattened for legacy callers. Runtime-only.

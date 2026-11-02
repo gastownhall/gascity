@@ -50,9 +50,10 @@ func (t Tier) IsZero() bool {
 // produce misleading cost estimates; consumers may emit warnings when
 // LastVerified is older than a configured threshold.
 type ModelPricing struct {
-	// Provider is the LLM provider label (e.g. "claude", "codex", "gemini").
+	// Provider is the LLM provider label (e.g. "claude", "codex", "grok").
 	Provider string `toml:"provider" json:"provider"`
-	// Model is the provider-specific model identifier (e.g. "claude-opus-4-8").
+	// Model is the provider-specific model identifier (e.g. "claude-opus-4-8",
+	// or "grok-4.7" with provider = "grok").
 	Model string `toml:"model" json:"model"`
 	// Tier holds the per-token-type rates.
 	Tier Tier `toml:"tier" json:"tier"`
