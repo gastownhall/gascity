@@ -246,3 +246,55 @@ func TestTerminateRuntimeBindsKillToScannedIdentity(t *testing.T) {
 		t.Fatalf("TerminateRuntime(recycled identity) = %v, want nil (the scanned process is gone)", err)
 	}
 }
+
+// A session with no scanned roots asks tmux nothing: the pre-start sweep
+// ends there instead of listing sessions it cannot act on (a wedged tmux
+// server then cannot delay the sweep, and no listing failure can be folded
+// into a scan that found nothing).
+func TestFindRuntimesBySessionIDWithNoRootsAsksTmuxNothing(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("drives the scanner against a procfs-shaped tree")
+	}
+	proctable.SetScanRootForTesting(t, t.TempDir()) // a proc table with no roots at all
+	p := NewProviderWithConfig(Config{SocketName: "x"})
+	exec := &fakeExecutor{}
+	p.tm.exec = exec
+
+	found, err := p.FindRuntimesBySessionID("gc-1")
+
+	if err != nil || len(found) != 0 {
+		t.Fatalf("FindRuntimesBySessionID = (%+v, %v), want no roots and no error", found, err)
+	}
+	if got := len(exec.calls); got != 0 {
+		t.Fatalf("tmux was asked %d times for a session with no scanned roots, want 0", got)
+	}
+}
+
+// No roots does not swallow the scan's own failure: an unreadable process
+// table is reported as the whole-scan error alone, without a tmux listing
+// error folded in (tmux is never asked).
+func TestFindRuntimesBySessionIDWithNoRootsStillReturnsScanError(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("drives the scanner against a procfs-shaped tree")
+	}
+	notADir := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	proctable.SetScanRootForTesting(t, notADir)
+	p := NewProviderWithConfig(Config{SocketName: "x"})
+	listErr := errors.New("tmux list timed out")
+	p.tm.exec = &fakeExecutor{errs: []error{listErr}}
+
+	found, err := p.FindRuntimesBySessionID("gc-1")
+
+	if len(found) != 0 {
+		t.Fatalf("found %+v, want no roots", found)
+	}
+	if err == nil || !proctable.HasWholeScanFailure(err) {
+		t.Fatalf("err = %v, want the scan's own whole-scan failure", err)
+	}
+	if errors.Is(err, listErr) {
+		t.Fatalf("err = %v, folds in the tmux listing failure, want the scan error alone: tmux is never asked for a scan with no roots", err)
+	}
+}
