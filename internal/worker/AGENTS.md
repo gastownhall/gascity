@@ -37,6 +37,15 @@ wait can hang on a wedged tmux subprocess or a stalled store, and nothing
 cancels it, so the wait is raced against the caller's context and abandoned
 when the context ends. Take the bound from the caller's own context.
 
+The machinery lives in `internal/runtime` (`runtime.CallBounded` /
+`runtime.CallShared`, `runtime.ErrBoundedCallOutstanding`); this package's
+`ObserveBounded` / `ObserveShared` / `ErrObservationOutstanding` are forwards
+of it, over one process-wide in-flight table per key. Other callers key the
+same table under their own namespaces — `internal/session`'s pre-start orphan
+scan keys its scans `orphan-scan\0<city>\0<session>` — so key observations
+within a caller namespace, never bare, or the one-in-flight limit no longer
+holds.
+
 - An abandoned wait is an error wrapping both `runtime.ErrRuntimeUnavailable`
   and the context error. It is never a confirmed absence: callers must treat it
   as "do not know" (`SESSION-RUNTIME-009`), not as `ErrSessionNotFound`.
