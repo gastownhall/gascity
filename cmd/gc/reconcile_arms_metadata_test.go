@@ -424,6 +424,27 @@ func providerProjectionCases(t *testing.T) []providerProjectionCase {
 			},
 			family: "codex",
 		},
+		{
+			name: "AC-2/same provider, stale keys its config dropped",
+			stored: map[string]string{
+				"provider": "my-claude", "provider_kind": "claude", "builtin_ancestor": "claude",
+				"resume_flag": "--resume", "resume_style": "flag", "resume_command": "codex resume {{.SessionKey}}", "session_id_flag": "--session-id",
+			},
+			resolved: &config.ResolvedProvider{Name: "my-claude", BuiltinAncestor: "claude", ResumeFlag: "--resume", ResumeStyle: "flag"},
+			want: map[string]string{
+				"provider": "my-claude", "provider_kind": "claude", "builtin_ancestor": "claude", "resume_flag": "--resume", "resume_style": "flag",
+			},
+			family: "claude",
+		},
+		{
+			name: "AC-2/a row whose name already switched but whose family did not",
+			stored: map[string]string{
+				"provider": "claude", "provider_kind": "codex", "builtin_ancestor": "codex", "resume_command": "codex resume {{.SessionKey}}",
+			},
+			resolved: &config.ResolvedProvider{Name: "claude", BuiltinAncestor: "claude", ResumeFlag: "--resume", ResumeStyle: "flag"},
+			want:     map[string]string{"provider": "claude", "resume_flag": "--resume", "resume_style": "flag"},
+			family:   "claude",
+		},
 	}
 }
 
