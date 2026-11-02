@@ -401,6 +401,37 @@ func TestNudgeStalledPoolClaims_DrainsAWedgedSlotAtCap(t *testing.T) {
 	}
 }
 
+// Kills a wedged-slot drain inside the last nudge's backoff (ga-uns4sw): a
+// quiet slot at the cap whose trigger is still open and unassigned gets the
+// full backoff after its last nudge to claim it, as every earlier nudge did,
+// and is drained once on the first pass after it.
+func TestNudgeStalledPoolClaims_WaitsOutTheLastBackoffBeforeDraining(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s := atCapSession(base, "tok-1")
+	store := beads.NewMemStoreFrom(0, []beads.Bead{s, {ID: "work-a", Status: "open"}}, nil)
+	open := []beads.Bead{{ID: "work-a", Status: "open"}}
+	drains := &drainRecorder{}
+	var out bytes.Buffer
+	sp := quietClaimFake(t, base)
+	run := func(at time.Time) {
+		sp.SetActivity("session-a", at.Add(-time.Hour))
+		nudgeStalledPoolClaims(sp, idleClaimTestCfg(), store, []beads.Bead{mustGetTestBead(t, store, s.ID)}, open, nil, at, liveClaimDrain(store, drains.request), &out)
+	}
+	for _, after := range []time.Duration{10 * time.Second, idleClaimNudgeBackoff - time.Second} {
+		run(base.Add(after))
+		got := mustGetTestBead(t, store, s.ID)
+		if len(drains.ids) != 0 || sp.CountCalls("Nudge", "session-a") != 0 || got.Metadata[idleClaimNudgeStalledKey] != "" {
+			t.Fatalf("%s after the last nudge: drains %v nudges %d latch %q, want none inside its backoff; log %q",
+				after, drains.ids, sp.CountCalls("Nudge", "session-a"), got.Metadata[idleClaimNudgeStalledKey], out.String())
+		}
+	}
+	run(base.Add(idleClaimNudgeBackoff))
+	if len(drains.ids) != 1 || drains.ids[0] != s.ID || sp.CountCalls("Nudge", "session-a") != 0 {
+		t.Fatalf("once the last backoff passed: drains %v nudges %d, want exactly one drain and no nudge; log %q",
+			drains.ids, sp.CountCalls("Nudge", "session-a"), out.String())
+	}
+}
+
 // Kills a re-woken incarnation drained on sight (#7752 review, probe P1): a
 // slot restarted at a new incarnation for the same trigger, its marker at the
 // cap and the old latch on it, gets its own grace and nudges before its own
