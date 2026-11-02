@@ -1048,6 +1048,7 @@ go_test(
         "bd_split_graph_judge_test.go",
         "bd_split_judged_files_test.go",
         "bd_split_judges_test.go",
+        "bd_subject_route_test.go",
         "bd_testscript_test.go",
         "bd_wisp_tier_test.go",
         "bead_event_relic_residence_test.go",

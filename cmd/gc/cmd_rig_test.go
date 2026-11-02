@@ -4108,8 +4108,13 @@ func TestDoRigAdd_AdoptBdInitStoreWithoutConfigYamlPrefix(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("doRigAdd --adopt returned %d, stderr: %s", code, stderr.String())
 	}
-	if len(asked) != 1 {
-		t.Errorf("store prefix asked %d times, want once: %v", len(asked), asked)
+	// city-fr3t: route registration reads each warm scope's issue prefix
+	// from its own store, so --adopt asks once for the adoption itself and
+	// once per scope collectRigRoutes registers — the city store first, then
+	// the adopted rig. The adoption ask must stay first: the announcement
+	// and the city.toml pin below come from it.
+	if !slices.Equal(asked, []string{rigPath, cityPath, rigPath}) {
+		t.Errorf("store prefix asked %v, want [adoption, city registration, rig registration]", asked)
 	}
 	if !strings.Contains(stdout.String(), "Prefix: hv") {
 		t.Errorf("output does not announce the store's prefix: %s", stdout.String())
