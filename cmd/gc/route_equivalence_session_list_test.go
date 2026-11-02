@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -485,5 +487,136 @@ func TestSessionListAPIRouteRefusesAPartialAnswer(t *testing.T) {
 				t.Errorf("stderr = %q, want route=api reason=error and the listing failure", got.stderr)
 			}
 		})
+	}
+}
+
+// sessionListOldServer wraps base as a supervisor that predates agent_name:
+// its GET /sessions rows carry none of the fields added since.
+func sessionListOldServer(base http.Handler) http.Handler {
+	return sessionListRewriteListBodies(base, func(body map[string]any) {
+		items, _ := body["items"].([]any)
+		for _, item := range items {
+			row, _ := item.(map[string]any)
+			for _, k := range []string{"agent_name", "transport", "worker_dir", "wake_reasons"} {
+				delete(row, k)
+			}
+		}
+	})
+}
+
+// sessionListTimeColumns are the text-table columns whose values depend on
+// when each route ran; only their "-" versus a value must match.
+var sessionListTimeColumns = map[string]bool{"AGE": true, "LAST ACTIVE": true, "LAST NUDGE": true}
+
+// sessionListTableCells splits a `gc session list` table into its header and
+// its rows keyed by ID. Columns are separated by two or more spaces.
+func sessionListTableCells(t *testing.T, table string) ([]string, map[string][]string, []string) {
+	t.Helper()
+	sep := regexp.MustCompile(`\s{2,}`)
+	lines := strings.Split(strings.TrimRight(table, "\n"), "\n")
+	if len(lines) == 0 || !strings.HasPrefix(lines[0], "ID ") {
+		t.Fatalf("not a session table:\n%s", table)
+	}
+	header := sep.Split(strings.TrimSpace(lines[0]), -1)
+	rows := map[string][]string{}
+	var order []string
+	for _, line := range lines[1:] {
+		cells := sep.Split(strings.TrimSpace(line), -1)
+		if len(cells) != len(header) {
+			t.Fatalf("row %q has %d cells, header has %d:\n%s", line, len(cells), len(header), table)
+		}
+		rows[cells[0]] = cells
+		order = append(order, cells[0])
+	}
+	return header, rows, order
+}
+
+// assertSessionListTablesMatch compares two `gc session list` tables cell by
+// cell: the header, the row order and every cell exactly, except the time
+// columns, where only "-" versus a value must match.
+func assertSessionListTablesMatch(t *testing.T, label, want, got string) {
+	t.Helper()
+	wantHeader, wantRows, wantOrder := sessionListTableCells(t, want)
+	gotHeader, gotRows, gotOrder := sessionListTableCells(t, got)
+	if strings.Join(wantHeader, "|") != strings.Join(gotHeader, "|") {
+		t.Fatalf("%s: header %q, want %q", label, gotHeader, wantHeader)
+	}
+	if strings.Join(wantOrder, ",") != strings.Join(gotOrder, ",") {
+		t.Errorf("%s: rows %v, want %v\nwant:\n%s\ngot:\n%s", label, gotOrder, wantOrder, want, got)
+		return
+	}
+	for _, id := range wantOrder {
+		for i, column := range wantHeader {
+			w, g := wantRows[id][i], gotRows[id][i]
+			if sessionListTimeColumns[column] {
+				if (w == "-") != (g == "-") {
+					t.Errorf("%s: row %s %s = %q, want %q (set versus unset)", label, id, column, g, w)
+				}
+				continue
+			}
+			if w != g {
+				t.Errorf("%s: row %s %s = %q, want %q", label, id, column, g, w)
+			}
+		}
+	}
+}
+
+// TestSessionListOnASupervisorThatPredatesAgentName pins the CLI's handling
+// of a supervisor still running a gc older than agent_name: a local target
+// reads the city directly, so it prints what GC_NO_API=1 prints; a remote
+// target, which has no local read, prints the server's rows and says what
+// they lack. A current server stays on the API route.
+func TestSessionListOnASupervisorThatPredatesAgentName(t *testing.T) {
+	clearInheritedCityRoutingEnv(t)
+	h := newCharCity(t, charCityBasic+"\n[session]\nprovider = \"fake\"\n", func(t *testing.T, store beads.Store) {
+		seedSessionListEquivalence(t, store)
+	})
+	oldHosted, oldRemote := sessionListLanesOver(t, h, sessionListOldServer)
+	currentHosted, _ := sessionListLanesOver(t, h, func(base http.Handler) http.Handler { return base })
+
+	for _, jsonOut := range []bool{true, false} {
+		args := []string{"--state", "all"}
+		if jsonOut {
+			args = append(args, "--json")
+		}
+		label := fmt.Sprintf("json=%v", jsonOut)
+		want, _ := runSessionListCLI(t, h.cityPath, true, args...)
+
+		sessionListHostedBy(t, oldHosted)
+		got, gotErr := runSessionListCLI(t, h.cityPath, false, args...)
+		if !strings.Contains(gotErr, "cmd=session list route=fallback reason=session-list-predates-agent-name") {
+			t.Errorf("%s old server, supervisor-hosted: stderr = %q, want the predates-agent-name fallback", label, gotErr)
+		}
+		if jsonOut {
+			if got != want {
+				t.Errorf("%s old server, supervisor-hosted: stdout = %s\nwant the local read's %s", label, got, want)
+			}
+		} else {
+			assertSessionListTablesMatch(t, label+" old server, supervisor-hosted", want, got)
+		}
+
+		var remoteOut, remoteErr bytes.Buffer
+		if code := routeSessionList("", "all", "", oldRemote, "", jsonOut, &remoteOut, &remoteErr); code != 0 {
+			t.Fatalf("%s old server, remote: exit %d; stderr %s", label, code, remoteErr.String())
+		}
+		if !strings.Contains(remoteErr.String(), "route=api") || !strings.Contains(remoteErr.String(), "predates agent_name") {
+			t.Errorf("%s old server, remote: stderr = %q, want route=api and a predates-agent_name notice", label, remoteErr.String())
+		}
+		if jsonOut {
+			doc := decodeSessionListDoc(t, remoteOut.String())
+			if rows := sessionListRows(t, doc); len(rows) == 0 {
+				t.Errorf("old server, remote: no rows")
+			}
+			for _, row := range sessionListRows(t, doc) {
+				if _, ok := row["agent_name"]; ok {
+					t.Errorf("old server, remote: row %v carries agent_name", row["id"])
+				}
+			}
+		}
+
+		sessionListHostedBy(t, currentHosted)
+		if _, curErr := runSessionListCLI(t, h.cityPath, false, args...); !strings.Contains(curErr, "cmd=session list route=api") {
+			t.Errorf("%s current server: stderr = %q, want route=api", label, curErr)
+		}
 	}
 }

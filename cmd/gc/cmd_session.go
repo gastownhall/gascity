@@ -809,8 +809,10 @@ var sessionListAPIClient = func(cityPath string) (*api.Client, string) {
 
 // routeSessionList dispatches `session list` to the API when
 // sessionListAPIClient resolved a client; otherwise falls back to the local
-// iterator. Emits exactly one route=... log line per exit path (gated on
-// GC_DEBUG).
+// iterator. A partial API answer fails as a partial local read does. A local
+// target whose supervisor predates agent_name falls back to the local read; a
+// remote target prints that server's rows and says what they lack. Emits
+// exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeSessionList(_ string, stateFilter, templateFilter string, c *api.Client, nilReason string, jsonOutput bool, stdout, stderr io.Writer) int {
 	var cr api.CachedRead[api.SessionList]
 	return routeRead(c, "session list", nilReason, stderr,
@@ -826,14 +828,29 @@ func routeSessionList(_ string, stateFilter, templateFilter string, c *api.Clien
 					return writeSessionListReadFailure(msg, jsonOutput, stdout, stderr)
 				}}
 			}
+			if cr.Body.AgentNameMissing && !c.IsRemote() {
+				return fallbackAfterFetch{Reason: sessionListPredatesAgentNameReason}
+			}
 			return nil
 		},
 		func() int {
+			if cr.Body.AgentNameMissing {
+				fmt.Fprintln(stderr, sessionListPredatesAgentNameNotice) //nolint:errcheck // best-effort stderr
+			}
 			return renderSessionListFromAPI(api.CachedRead[[]api.SessionListView]{Body: cr.Body.Sessions, AgeSeconds: cr.AgeSeconds}, stateFilter, templateFilter, jsonOutput, stdout, stderr)
 		},
 		func() int { return doSessionListFallback(stateFilter, templateFilter, jsonOutput, stdout, stderr) },
 	)
 }
+
+// sessionListPredatesAgentNameReason is the fallback reason for a local
+// target whose supervisor answered GET /sessions without agent_name: it runs
+// a gc older than this one, so the CLI reads the city directly instead.
+const sessionListPredatesAgentNameReason = "session-list-predates-agent-name"
+
+// sessionListPredatesAgentNameNotice tells the operator of a remote target,
+// which has no local read, what that older server's rows leave out.
+const sessionListPredatesAgentNameNotice = "gc session list: this city's API predates agent_name; agent_name, transport, worker_dir and the REASON column's wake reasons are left out (restart its supervisor)"
 
 // sessionListPartialMessage is the failure message for a partial API answer:
 // the local read's listing-failure message carrying the server's errors.

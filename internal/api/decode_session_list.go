@@ -12,10 +12,28 @@ import (
 // server's report of a partial read. Partial is true when any page said so
 // or named a failed read; PartialErrors keeps each message once, in
 // first-seen order, because every page re-reads every backend.
+// AgentNameMissing is true when some row came without the agent_name key: a
+// current server sends it on every session, so its absence marks a server
+// that predates agent_name, transport and worker_dir.
 type SessionList struct {
-	Sessions      []SessionListView
-	Partial       bool
-	PartialErrors []string
+	Sessions         []SessionListView
+	Partial          bool
+	PartialErrors    []string
+	AgentNameMissing bool
+}
+
+// sessionListPageLacksAgentName reports whether some row of one GET
+// /sessions page came without the agent_name key.
+func sessionListPageLacksAgentName(body *genclient.ListBodySessionResponse) bool {
+	if body == nil || body.Items == nil {
+		return false
+	}
+	for _, item := range *body.Items {
+		if item.AgentName == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // sessionListDegradation accumulates the partial report over the pages of

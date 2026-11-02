@@ -130,7 +130,7 @@ func TestRenderSessionListFromAPIPrintsLocalContract(t *testing.T) {
 				{
 					"id": "gc-2", "template": "worker", "state": "closed", "title": "",
 					"session_name": "worker", "provider": "", "created_at": "2026-10-27T10:00:00Z",
-					"attached": false, "running": false,
+					"attached": false, "running": false, "agent_name": "",
 				},
 			},
 		})

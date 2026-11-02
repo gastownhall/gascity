@@ -838,8 +838,9 @@ type ListSessionsOpts struct {
 // on --json output and a staleness banner on human output. Rows decode into
 // SessionListView; a malformed timestamp is a plain (non-fallback) error.
 // The body also carries the server's report of a partial read
-// (SessionList.Partial); the client reports it and leaves the judgment to
-// the caller.
+// (SessionList.Partial) and whether the server predates agent_name
+// (SessionList.AgentNameMissing); the client reports both and leaves the
+// judgment to the caller.
 func (c *Client) ListSessions(opts ListSessionsOpts) (CachedRead[SessionList], error) {
 	if err := c.requireCityScope(); err != nil {
 		return CachedRead[SessionList]{}, err
@@ -855,6 +856,7 @@ func (c *Client) ListSessions(opts ListSessionsOpts) (CachedRead[SessionList], e
 		ageSeconds float64
 		cursor     string
 		report     sessionListDegradation
+		noAgent    bool
 	)
 	for page := 0; ; page++ {
 		params := &genclient.GetV0CityByCityNameSessionsParams{Limit: &capLimit}
@@ -886,6 +888,7 @@ func (c *Client) ListSessions(opts ListSessionsOpts) (CachedRead[SessionList], e
 		}
 		all = append(all, views...)
 		report.add(resp.JSON200)
+		noAgent = noAgent || sessionListPageLacksAgentName(resp.JSON200)
 		if page == 0 {
 			ageSeconds = cacheAgeFromResponse(resp.HTTPResponse)
 		}
@@ -906,9 +909,10 @@ func (c *Client) ListSessions(opts ListSessionsOpts) (CachedRead[SessionList], e
 	}
 	return CachedRead[SessionList]{
 		Body: SessionList{
-			Sessions:      all,
-			Partial:       report.partial,
-			PartialErrors: report.errs,
+			Sessions:         all,
+			Partial:          report.partial,
+			PartialErrors:    report.errs,
+			AgentNameMissing: noAgent,
 		},
 		AgeSeconds: ageSeconds,
 	}, nil

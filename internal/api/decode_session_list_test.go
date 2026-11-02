@@ -163,7 +163,7 @@ func TestClientListSessionsDecodesListContract(t *testing.T) {
 				"items": []map[string]any{{
 					"id": "gc-2", "template": "worker", "state": "closed", "title": "",
 					"session_name": "worker", "provider": "", "created_at": "2026-10-27T10:00:00Z",
-					"attached": false, "running": false,
+					"attached": false, "running": false, "agent_name": "",
 				}},
 			})
 		default:
@@ -288,6 +288,45 @@ func TestClientListSessionsReportsPartialAcrossPages(t *testing.T) {
 			}
 			if strings.Join(cr.Body.PartialErrors, "|") != strings.Join(tc.wantErrs, "|") {
 				t.Errorf("PartialErrors = %q, want %q", cr.Body.PartialErrors, tc.wantErrs)
+			}
+		})
+	}
+}
+
+// TestClientListSessionsReportsAServerWithoutAgentName pins the capability
+// signal: a row that comes without the agent_name key, on any page, marks
+// the answer as one from a server that predates it; an empty agent_name is a
+// current server's answer for a session that records none.
+func TestClientListSessionsReportsAServerWithoutAgentName(t *testing.T) {
+	withoutKey := sessionListTestRow("gc-2")
+	delete(withoutKey, "agent_name")
+	emptyName := sessionListTestRow("gc-2")
+	emptyName["agent_name"] = ""
+	for name, tc := range map[string]struct {
+		second      map[string]any
+		wantMissing bool
+	}{
+		"key-missing-on-a-later-page": {second: withoutKey, wantMissing: true},
+		"empty-agent-name":            {second: emptyName},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Query().Get("cursor") == "page2" {
+					json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{tc.second}}) //nolint:errcheck
+					return
+				}
+				json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+					"items": []map[string]any{sessionListTestRow("gc-1")}, "next_cursor": "page2",
+				})
+			}))
+			defer ts.Close()
+			cr, err := NewCityScopedClient(ts.URL, "alpha").ListSessions(ListSessionsOpts{})
+			if err != nil {
+				t.Fatalf("ListSessions: %v", err)
+			}
+			if cr.Body.AgentNameMissing != tc.wantMissing {
+				t.Errorf("AgentNameMissing = %v, want %v", cr.Body.AgentNameMissing, tc.wantMissing)
 			}
 		})
 	}
