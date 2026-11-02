@@ -2748,3 +2748,80 @@ func TestRepoCacheGitEnvDropsOnlyTraceVariables(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateLockedRemoteCacheDirtyErrorNamesEntries(t *testing.T) {
+	const source = "https://example.com/tools.git"
+	seed := func(t *testing.T) (string, string) {
+		t.Helper()
+		useNeutralGitTestEnv(t)
+		cacheDir := t.TempDir()
+		writeTestFile(t, cacheDir, "pack.toml", "[pack]\nname = \"tools\"\nschema = 1\n")
+		writeTestFile(t, cacheDir, ".gitignore", "*.pyc\n")
+		return cacheDir, seedRepoCacheGit(t, cacheDir)
+	}
+	requireDirty := func(t *testing.T, err error, cacheDir string, entries ...string) string {
+		t.Helper()
+		if err == nil {
+			t.Fatal("validateLockedRemoteCache accepted a dirty cache")
+		}
+		msg := err.Error()
+		for _, want := range append([]string{"has local worktree changes", `run "gc import install"`, fmt.Sprintf("%q", cacheDir)}, entries...) {
+			if !strings.Contains(msg, want) {
+				t.Errorf("error = %q, want it to contain %q", msg, want)
+			}
+		}
+		return msg
+	}
+
+	t.Run("modified and untracked entries", func(t *testing.T) {
+		cacheDir, commit := seed(t)
+		writeTestFile(t, cacheDir, "pack.toml", "[pack]\r\nname = \"tools\"\r\nschema = 1\r\n")
+		writeTestFile(t, cacheDir, "extra.txt", "extra\n")
+		err := validateLockedRemoteCache(source, cacheDir, commit)
+		msg := requireDirty(t, err, cacheDir, `" M pack.toml"`, `"?? extra.txt"`)
+		if strings.Contains(msg, "more") {
+			t.Errorf("error = %q, want no omitted-entry count for two entries", msg)
+		}
+	})
+
+	t.Run("caps reported entries", func(t *testing.T) {
+		cacheDir, commit := seed(t)
+		for _, name := range []string{"a.txt", "b.txt", "c.txt", "d.txt", "e.txt"} {
+			writeTestFile(t, cacheDir, name, "x\n")
+		}
+		err := validateLockedRemoteCache(source, cacheDir, commit)
+		msg := requireDirty(t, err, cacheDir, `"?? a.txt"`, `"?? b.txt"`, `"?? c.txt"`, "and 2 more")
+		for _, omitted := range []string{"d.txt", "e.txt"} {
+			if strings.Contains(msg, omitted) {
+				t.Errorf("error = %q, want %s omitted", msg, omitted)
+			}
+		}
+	})
+
+	t.Run("mode-only change", func(t *testing.T) {
+		cacheDir, commit := seed(t)
+		if err := os.Chmod(filepath.Join(cacheDir, "pack.toml"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		err := validateLockedRemoteCache(source, cacheDir, commit)
+		requireDirty(t, err, cacheDir, `" M pack.toml"`)
+	})
+
+	t.Run("unusual pathname is quoted", func(t *testing.T) {
+		cacheDir, commit := seed(t)
+		writeTestFile(t, cacheDir, "line\nbreak.txt", "x\n")
+		err := validateLockedRemoteCache(source, cacheDir, commit)
+		msg := requireDirty(t, err, cacheDir, "line")
+		if strings.Contains(msg, "\n") {
+			t.Errorf("error = %q, want no raw newline", msg)
+		}
+	})
+
+	t.Run("ignored artifacts accepted", func(t *testing.T) {
+		cacheDir, commit := seed(t)
+		writeTestFile(t, cacheDir, "scripts/__pycache__/tool.pyc", "bytecode")
+		if err := validateLockedRemoteCache(source, cacheDir, commit); err != nil {
+			t.Fatalf("validateLockedRemoteCache rejected ignored artifacts: %v", err)
+		}
+	})
+}

@@ -584,10 +584,41 @@ func validateLockedRemoteCache(source, cacheDir, commit string) error {
 	if err != nil {
 		return fmt.Errorf("checking cached import %s worktree status: %w", source, err)
 	}
-	if strings.TrimSpace(status) != "" {
-		return fmt.Errorf("cached import %s has local worktree changes; run \"gc import install\"", source)
+	if entries := porcelainRecords(status); len(entries) > 0 {
+		return fmt.Errorf("cached import %s has local worktree changes at %q: %s; run \"gc import install\"", source, cacheDir, summarizeDirtyEntries(entries))
 	}
 	return nil
+}
+
+// maxReportedDirtyEntries bounds how many porcelain records a dirty-cache
+// error quotes before summarizing the rest as a count.
+const maxReportedDirtyEntries = 3
+
+// porcelainRecords splits `git status --porcelain` output into its nonempty
+// records, preserving each record's leading status columns.
+func porcelainRecords(status string) []string {
+	var records []string
+	for _, record := range strings.Split(status, "\n") {
+		if record = strings.TrimRight(record, "\r"); strings.TrimSpace(record) != "" {
+			records = append(records, record)
+		}
+	}
+	return records
+}
+
+// summarizeDirtyEntries quotes up to maxReportedDirtyEntries records and
+// counts the omitted remainder.
+func summarizeDirtyEntries(entries []string) string {
+	shown := entries[:min(len(entries), maxReportedDirtyEntries)]
+	quoted := make([]string, len(shown))
+	for i, entry := range shown {
+		quoted[i] = fmt.Sprintf("%q", entry)
+	}
+	summary := strings.Join(quoted, ", ")
+	if omitted := len(entries) - len(shown); omitted > 0 {
+		summary += fmt.Sprintf(" and %d more", omitted)
+	}
+	return summary
 }
 
 func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
@@ -603,7 +634,7 @@ func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
 	}
-	return strings.TrimSpace(string(out)), nil
+	return strings.TrimRight(string(out), "\r\n"), nil
 }
 
 // repoCacheGitEnv is gitutil.HermeticEnv without GIT_TRACE* variables. Trace
