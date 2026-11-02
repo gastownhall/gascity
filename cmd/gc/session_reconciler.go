@@ -4148,7 +4148,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// assigned work and drain naturally. The same shape
 							// of protection is already applied to the
 							// orphan/suspended drain at line 754.
-							hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForReachableStore(sw, infoByID[id])
+							heldBy, hasAssignedWork, assignedErr := firstOpenAssignedWorkBeadForReachableStore(sw, infoByID[id])
 							if assignedErr != nil {
 								fmt.Fprintf(stderr, "session reconciler: checking assigned work before config-drift drain for %s: %v\n", name, assignedErr) //nolint:errcheck
 								continue
@@ -4166,6 +4166,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 									}))
 								}
 								logDrainSkip(dt, stdout, id, fmt.Sprintf("Skipping config-drift drain for '%s': live assigned work found", name), clk.Now())
+								recordConfigDriftHeldWorkEpisode(infoByID[id], sessFront, tick, rec, driftKey, driftedFields, heldBy.ID, clk.Now(), stderr)
 								continue
 							}
 							if launchOnlyDrift {
@@ -5557,6 +5558,13 @@ func sessionHasOpenAssignedWorkForReachableStore(sw *SeatWork, info sessionpkg.I
 	return sw.has(seatWorkQuery{scope: releaseScope(info, sw.Legs().cfg), statuses: seatWorkStatuses})
 }
 
+// firstOpenAssignedWorkBeadForReachableStore is
+// sessionHasOpenAssignedWorkForReachableStore's query answering with the
+// first open or in-progress bead it finds.
+func firstOpenAssignedWorkBeadForReachableStore(sw *SeatWork, info sessionpkg.Info) (beads.Bead, bool, error) {
+	return sw.first(seatWorkQuery{scope: releaseScope(info, sw.Legs().cfg), statuses: seatWorkStatuses})
+}
+
 // sessionHasOpenAssignedWorkForReachableStoreForCloseGate is the drain-ack
 // close-gate form of sessionHasOpenAssignedWorkForReachableStore: the same
 // SeatWork and ReleaseScope, but the query additionally excludes the
@@ -6557,6 +6565,22 @@ func recordNamedSessionConfigDriftDeferredAt(info sessionpkg.Info, sessFront *se
 		namedSessionConfigDriftDeferredAtMetadata:  t.UTC().Format(time.RFC3339),
 		namedSessionConfigDriftDeferredKeyMetadata: driftKey,
 	})
+}
+
+// recordConfigDriftHeldWorkEpisode is legacy's held-work drift episode
+// (#8345): an observation that writes stamps info's episode, folds it into
+// the tick and records session.config_drift_deferred; a failed write is
+// logged and records nothing, for a later pass to retry.
+func recordConfigDriftHeldWorkEpisode(info sessionpkg.Info, sessFront *sessionpkg.Store, tick *reconcileTick, rec events.Recorder, driftKey string, fields []string, workBeadID string, now time.Time, stderr io.Writer) {
+	step := driftEpisode(info, driftKey, now)
+	if step.Patch == nil || sessFront == nil || info.ID == "" {
+		return
+	}
+	if err := sessFront.ApplyPatch(info.ID, step.Patch); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: recording config-drift deferral for %s: %v\n", info.ID, err) //nolint:errcheck
+		return
+	}
+	rec.Record(configDriftDeferredEvent(tick.apply(info.ID, step.Patch), fields, workBeadID, step.Since, now))
 }
 
 func clearSessionConfigDriftDeferral(info sessionpkg.Info, sessFront *sessionpkg.Store) error {
