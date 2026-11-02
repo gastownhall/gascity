@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -31,6 +32,10 @@ type SessionRequest struct {
 	WorkPack      string // pack route key from the work bead, when known
 	WorkWorkspace string // explicit pack workspace route key from the work bead, when known
 	WorkStoreRef  string // city or rig:<name> store reference for WorkBeadID when known
+	// WorkBindingResident reports that WorkBeadID was read from a relocated
+	// class binding: WorkStoreRef is then the city key the binding is grouped
+	// under, and the row's owner is its gc.root_store_ref.
+	WorkBindingResident bool
 	// WorktreeSpec is the single-owner evidence published by the provisioner.
 	// When present, the pool path verifies it before publishing work_dir on a
 	// session bead; a mismatch fails the whole atomic metadata update.
@@ -50,6 +55,18 @@ type SessionRequest struct {
 	// pool's floor spawn cannot be starved by a warm pool's large elastic
 	// demand (follow-up to #2893).
 	FloorGuarantee bool
+	// Parked marks a resume request for a seat parked on pre-assigned
+	// blocked work (parkedSeats): it keeps the seat selected, so it sleeps
+	// rather than draining as an orphan, but takes no cap headroom and is
+	// not pool demand (PoolDesiredCounts) until its pin is ready.
+	Parked bool
+	// ParkedContinuation marks a resume request of a parked seat, or of one
+	// waking from its park, for its pre-assigned work (parkVerdict.Continues):
+	// the wake resumes the seat's conversation, so its binding keeps the
+	// seat's recorded work dir, as a live continuation's does
+	// (computePoolTriggerBindingPatch), while that dir can host the resume
+	// (parkedWorkDirUsable).
+	ParkedContinuation bool
 }
 
 func beadPriority(b beads.Bead) int {
@@ -206,7 +223,15 @@ func PoolDesiredCounts(states []PoolDesiredState) map[string]int {
 	}
 	counts := make(map[string]int, len(states))
 	for _, state := range states {
-		counts[state.Template] = len(state.Requests)
+		n := 0
+		for _, request := range state.Requests {
+			if !request.Parked {
+				n++
+			}
+		}
+		if n > 0 {
+			counts[state.Template] = n
+		}
 	}
 	return counts
 }
@@ -276,20 +301,6 @@ func ComputePoolDesiredStatesWithDemandTraced(
 	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, trace)
 }
 
-// ComputePoolDesiredStatesWithDemandTracedAt computes traced pool demand at a
-// caller-supplied decision time while preserving per-work demand provenance.
-func ComputePoolDesiredStatesWithDemandTracedAt(
-	cfg *config.City,
-	assignedWorkBeads []beads.Bead,
-	sessionInfos []sessionpkg.Info,
-	scaleCheckCounts map[string]int,
-	scaleCheckDemand map[string]scaleCheckDemand,
-	decisionTime time.Time,
-	trace *sessionReconcilerTraceCycle,
-) []PoolDesiredState {
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, decisionTime, trace)
-}
-
 func computePoolDesiredStates(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
@@ -308,6 +319,24 @@ func computePoolDesiredStatesAt(
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
 	decisionTime time.Time,
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
+	return computePoolDesiredStatesParkedAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, decisionTime, nil, trace)
+}
+
+// computePoolDesiredStatesParkedAt is computePoolDesiredStatesAt with the
+// pass's parked seats (parkSeats): a parked seat's resume request is marked
+// Parked, accepted outside the nested caps (it takes no headroom from
+// anything, floors included) and left out of the pool's demand count. A seat
+// is parked here only when every request it makes is an open pin.
+func computePoolDesiredStatesParkedAt(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	scaleCheckDemand map[string]scaleCheckDemand,
+	decisionTime time.Time,
+	parked parkedSeats,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
 	// Build reverse lookup: any identifier → session bead ID.
@@ -356,6 +385,9 @@ func computePoolDesiredStatesAt(
 	// routing does not depend on the agent, so it is resolved once and the
 	// beads bucketed by the template they route to, in order (A3).
 	routedWork := make(map[string][]int)
+	// unparkable are the seats holding work that is not an open pin: never
+	// parked, whatever the verdict says.
+	unparkable := make(map[string]bool)
 	for i, wb := range assignedWorkBeads {
 		routedTo := routedToOrLegacyWorkflowTarget(wb)
 		if wb.Status != "in_progress" && wb.Status != "open" {
@@ -380,6 +412,9 @@ func computePoolDesiredStatesAt(
 			}
 		}
 		routedWork[routedTo] = append(routedWork[routedTo], i)
+		if wb.Status != "open" && sessionBeadID != "" {
+			unparkable[sessionBeadID] = true
+		}
 	}
 
 	for i := range cfg.Agents {
@@ -444,15 +479,17 @@ func computePoolDesiredStatesAt(
 					continue
 				}
 				resumeRequests = append(resumeRequests, SessionRequest{
-					Template:       template,
-					BeadPriority:   beadPriorityRank(beadPriority(wb)),
-					Tier:           "resume",
-					SessionBeadID:  sessionBeadID,
-					WorkBeadID:     wb.ID,
-					WorkBeadTitle:  strings.TrimSpace(wb.Title),
-					WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
-					WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
-					BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
+					Template:           template,
+					BeadPriority:       beadPriorityRank(beadPriority(wb)),
+					Tier:               "resume",
+					SessionBeadID:      sessionBeadID,
+					WorkBeadID:         wb.ID,
+					WorkBeadTitle:      strings.TrimSpace(wb.Title),
+					WorkPack:           strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
+					WorkWorkspace:      strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
+					BrainParentSID:     strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
+					Parked:             parked.parked(sessionBeadID) && !unparkable[sessionBeadID],
+					ParkedContinuation: parked.continues(sessionBeadID) && !unparkable[sessionBeadID],
 				})
 				continue
 			}
@@ -504,6 +541,9 @@ func computePoolDesiredStatesAt(
 			resumeSessionBeadIDs[req.SessionBeadID] = struct{}{}
 		}
 	}
+	// A parked seat's requests stand outside the caps: they are accepted
+	// after them, and count toward no limit or floor.
+	resumeRequests, parkedRequests := splitParkedRequests(resumeRequests)
 	protectedNewRequests, inFlightNewRequests := poolNewDemandRequests(cfg, sessionInfos, resumeSessionBeadIDs, decisionTime)
 	sessionInfoByID := make(map[string]sessionpkg.Info, len(sessionInfos))
 	for _, info := range sessionInfos {
@@ -646,12 +686,50 @@ func computePoolDesiredStatesAt(
 				WorktreeSpec:   worktreeSpec,
 				WorktreeError:  worktreeError,
 			}
+			req.WorkBindingResident = demand.BindingResident[workBeadID]
 			allRequests = append(allRequests, req)
 			usage.accept(req, limits)
 		}
 	}
 
-	return applyNestedCaps(cfg, allRequests, aliasHeldTemplates, trace)
+	return withParkedRequests(applyNestedCaps(cfg, allRequests, aliasHeldTemplates, trace), parkedRequests)
+}
+
+// splitParkedRequests separates a parked seat's requests from the counted
+// ones, keeping each side's order.
+func splitParkedRequests(requests []SessionRequest) (counted, parked []SessionRequest) {
+	for _, req := range requests {
+		if req.Parked {
+			parked = append(parked, req)
+		} else {
+			counted = append(counted, req)
+		}
+	}
+	return counted, parked
+}
+
+// withParkedRequests adds each parked seat's first request to its template's
+// accepted state, one per seat, after the caps: it selects the seat (the
+// realize binds it like a resume) without being counted by them.
+func withParkedRequests(states []PoolDesiredState, parked []SessionRequest) []PoolDesiredState {
+	if len(parked) == 0 {
+		return states
+	}
+	seen := make(map[string]bool, len(parked))
+	for _, req := range parked {
+		if seen[req.SessionBeadID] {
+			continue
+		}
+		seen[req.SessionBeadID] = true
+		i := slices.IndexFunc(states, func(s PoolDesiredState) bool { return s.Template == req.Template })
+		if i < 0 {
+			states = append(states, PoolDesiredState{Template: req.Template})
+			i = len(states) - 1
+		}
+		states[i].Requests = append(states[i].Requests, req)
+	}
+	sort.Slice(states, func(i, j int) bool { return states[i].Template < states[j].Template })
+	return states
 }
 
 func concreteNestedCapRequests(
@@ -727,6 +805,7 @@ func requestWithScaleDemandProvenance(request SessionRequest, demand scaleCheckD
 	request.WorkPack = strings.TrimSpace(demand.Packs[workBeadID])
 	request.WorkWorkspace = strings.TrimSpace(demand.Workspaces[workBeadID])
 	request.WorkStoreRef = strings.TrimSpace(demand.StoreRefs[workBeadID])
+	request.WorkBindingResident = demand.BindingResident[workBeadID]
 	request.BrainParentSID = strings.TrimSpace(demand.ParentSIDs[workBeadID])
 	// Worktree evidence is per-bead like every field above it. Carrying the
 	// previous bead's spec into a rebound request would hand the session a

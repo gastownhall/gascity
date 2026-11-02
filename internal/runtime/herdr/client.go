@@ -27,6 +27,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // client runs `herdr` CLI verbs against a named herdr session and decodes the
@@ -39,6 +41,9 @@ type client struct {
 	serverMu    sync.Mutex                                               // serializes startServer: serverAlive → removeStaleSocket → launch → readiness
 	sockPath    string                                                   // test override for socketPath (unit tests point it at a fake server)
 	dialUnix    func(ctx context.Context, path string) (net.Conn, error) // test override for the socket connect (unit tests observe the context the dial runs under)
+	// unixListening is serverConfirmedDead's kernel listener check, a test
+	// override; nil selects runtime.UnixPathListening.
+	unixListening func(path string) (bool, error)
 }
 
 func newClient(session, cityRoot string) *client {
@@ -276,11 +281,15 @@ func (c *client) runWithSecrets(ctx context.Context, declared []string, args ...
 	return env.Result, nil
 }
 
-// agentInfo mirrors herdr's agent object. herdr 0.7.3 emits the name under
-// the JSON key "agent"; 0.9.1 moved it to "name" and reuses "agent" for the
-// agent kind ("claude", "codex"), which UnmarshalJSON resolves.
+// agentInfo mirrors herdr's agent object (AgentInfo, src/api/schema/agents.rs).
+// Name is the registered agent name (`agent start <name>`, `agent rename`);
+// herdr omits it for a pane whose agent it detected or was told about but
+// nobody named. Kind is the effective agent label ("claude", "opencode", or a
+// reporting hook's --agent label): every pane running that kind shares it, so
+// it is never an identity.
 type agentInfo struct {
-	Name        string `json:"agent"`
+	Name        string `json:"name"`
+	Kind        string `json:"agent"`
 	PaneID      string `json:"pane_id"`
 	WorkspaceID string `json:"workspace_id"`
 	TabID       string `json:"tab_id"`
@@ -292,25 +301,6 @@ type agentInfo struct {
 	// Verified live on 0.7.3: it moves only while a client renders the pane;
 	// a headless server holds it at 0.
 	Revision uint64 `json:"revision"`
-}
-
-// UnmarshalJSON prefers "name" over "agent": on herdr 0.9.1 decoding "agent"
-// keyed every pane by its kind, so all Claude sessions collapsed into one
-// activity entry and none could ever read as idle for nudge delivery.
-func (a *agentInfo) UnmarshalJSON(b []byte) error {
-	type plain agentInfo
-	var v struct {
-		plain
-		Label string `json:"name"`
-	}
-	if err := json.Unmarshal(b, &v); err != nil {
-		return err
-	}
-	*a = agentInfo(v.plain)
-	if v.Label != "" {
-		a.Name = v.Label
-	}
-	return nil
 }
 
 // startupBootBudgetMS is the bound every wait that can land inside an agent's
@@ -586,9 +576,13 @@ var startupConfirmStates = []string{"working", "done", "blocked"}
 //     Enter would answer the dialog rather than do nothing. No keystroke —
 //     report it unconfirmed and let the caller record the strand.
 //
-// Unregistered panes (raw shells) keep the best-effort paste+settle+Enter
-// path. A non-nil error means the turn could not be confirmed submitted.
-func (c *client) deliverStartupTurn(ctx context.Context, paneID, text string) error {
+// A pane with no named agent keeps the best-effort paste+settle+Enter path
+// only when mode is bindModeShell: a raw or bare-shell launch registers no
+// agent. A kind launch (bindModeAgent) registers its agent, so its pane with
+// no named agent is one whose agent exited, and the shell that outlived the
+// agent would run the turn as commands. A non-nil error means the turn could
+// not be confirmed submitted.
+func (c *client) deliverStartupTurn(ctx context.Context, paneID, text, mode string) error {
 	args := []string{"agent", "prompt", paneID, text, "--wait"}
 	for _, s := range startupConfirmStates {
 		args = append(args, "--until", s)
@@ -599,6 +593,9 @@ func (c *client) deliverStartupTurn(ctx context.Context, paneID, text string) er
 		return nil
 	}
 	if c.targetHasNoNamedAgent(ctx, paneID, err) {
+		if mode != bindModeShell {
+			return fmt.Errorf("%w; the agent launched on pane %s is gone, and the turn is not typed into the shell it left", err, paneID)
+		}
 		return c.pasteAndSubmit(ctx, paneID, text)
 	}
 	// herdr reports both verdicts through a non-zero exit, which herdrErrorCode
@@ -732,14 +729,19 @@ func (c *client) closePane(ctx context.Context, paneID string) error {
 	return err
 }
 
-// getAgent fetches one agent by target — an agent name or the pane id hosting
-// it: (info, true, nil) if present, (zero, false, nil) if herdr reports it
-// absent, (_, false, err) on failure. Verified live on herdr 0.7.3: `agent
-// get <target>` only resolves a pane id — passing an agent name returns
-// agent_not_found even though `agent list` lists that same agent under that
-// name — so a name-shaped target that `agent get` rejects as not-found falls
-// back to a listAgents scan, which does resolve by name.
+// getAgent fetches one agent by target — a registered agent name or the pane
+// id hosting it: (info, true, nil) if present, (zero, false, nil) if herdr
+// reports it absent, (_, false, err) on failure. It asks `agent get` first;
+// when that answers not-found it scans `agent list` for an agent registered
+// under target, which is how a name-shaped target is confirmed when `agent get`
+// does not resolve it. The scan matches registered names only: an agent kind
+// is shared by every pane running it, and a pane nobody named has no name, so
+// neither is ever an identity. An empty target names nothing and resolves
+// nothing.
 func (c *client) getAgent(ctx context.Context, target string) (agentInfo, bool, error) {
+	if target == "" {
+		return agentInfo{}, false, nil
+	}
 	res, err := c.run(ctx, "agent", "get", target)
 	if err == nil {
 		var wrap struct {
@@ -758,7 +760,7 @@ func (c *client) getAgent(ctx context.Context, target string) (agentInfo, bool, 
 		return agentInfo{}, false, fmt.Errorf("herdr agent get %q: list fallback: %w", target, lerr)
 	}
 	for _, a := range agents {
-		if a.Name == target {
+		if a.Name != "" && a.Name == target {
 			return a, true, nil
 		}
 	}
@@ -978,12 +980,44 @@ func herdrConfigDir() string {
 // so the stale socket answers connects with ECONNREFUSED. Presence != liveness;
 // dial to find out for real.
 func (c *client) serverAlive() bool {
-	conn, err := net.DialTimeout("unix", c.socketPath(), 500*time.Millisecond)
+	conn, err := net.DialTimeout("unix", c.socketPath(), serverDialTimeout)
 	if err != nil {
 		return false
 	}
 	_ = conn.Close()
 	return true
+}
+
+// serverDialTimeout bounds one connect to the session server's socket when
+// checking whether the server is there.
+const serverDialTimeout = 500 * time.Millisecond
+
+// serverConfirmedDead reports whether this session's herdr server is
+// confirmed dead, the proof tmux's ServerConfirmedDead makes for its own
+// server: the socket is missing or refuses the connection, and the kernel
+// lists no listener bound to the socket path. The second check refuses a live
+// server whose socket file was unlinked, which the dial alone reads as dead.
+// Every other observation is false: a socket that accepts, a dial that cannot
+// tell (a timeout, EACCES), an unreadable listener table. A dead server hosts
+// no pane, since its panes die with it.
+func (c *client) serverConfirmedDead(ctx context.Context) bool {
+	sock := c.socketPath()
+	dctx, cancel := context.WithTimeout(ctx, serverDialTimeout)
+	defer cancel()
+	conn, err := c.dialUnix(dctx, sock)
+	if err == nil {
+		_ = conn.Close()
+		return false
+	}
+	if runtime.ClassifyControlSocketDial(err) != runtime.ControlSocketAbsent {
+		return false
+	}
+	listening := c.unixListening
+	if listening == nil {
+		listening = runtime.UnixPathListening
+	}
+	bound, err := listening(sock)
+	return err == nil && !bound
 }
 
 // removeStaleSocket unlinks the socket inode when it exists but nothing live is

@@ -199,10 +199,43 @@ func TestFenceTerminalNoReportUsesQuietWindowNotBoolAttach(t *testing.T) {
 		t.Fatalf("escalation class: %+v, want escalate, never proceed", v)
 	}
 
-	k8s, k8sFake := fakeProfile(runtime.ProfileK8s)
-	startRuntime(t, k8sFake, "rt_b", ours("b"))
-	if reason, _ := attachLeg(context.Background(), k8s, "rt_b", false, now); reason != fenceTerminalNotQuiet {
-		t.Fatalf("unhardened leaf with no activity: L3 %q, want terminal-no-report's defer", reason)
+	// k8s is unhardened; ssh is hardened (error-bearing liveness) and stays
+	// terminal-no-report because a human can attach to it (ssh -t).
+	for _, p := range []runtime.Profile{runtime.ProfileK8s, runtime.ProfileSSH} {
+		leaf, fake := fakeProfile(p)
+		startRuntime(t, fake, "rt_b", ours("b"))
+		if reason, escalate := attachLeg(context.Background(), leaf, "rt_b", false, now); reason != fenceTerminalNotQuiet || escalate {
+			t.Fatalf("%s leaf with no activity: L3 %q escalate=%v, want terminal-no-report's defer", p, reason, escalate)
+		}
+		if reason, escalate := attachLeg(context.Background(), leaf, "rt_b", true, now); reason != fenceTerminalNoReport || !escalate {
+			t.Fatalf("%s leaf, escalation class: L3 %q escalate=%v, want terminal-no-report's escalation", p, reason, escalate)
+		}
+	}
+}
+
+// Kills (PAR-EXEC F1, §13.5 8): attachLeg's no-terminal tier granted to a
+// leaf with an error-bearing read that does not read fresh: an exec pack
+// that is not v2-ready reports no attachment but may hold a terminal, so it
+// is terminal-no-report, never passed. A v2-ready exec pack is a reporter.
+func TestFenceExecAttachTier(t *testing.T) {
+	now := time.Now()
+	leaf, f := fakeProfile(runtime.ProfileExec)
+	startRuntime(t, f, "rt_a", ours("a"))
+	if _, ok := leaf.(runtime.LivenessObserverWithError); !ok {
+		t.Fatal("the exec profile has no error-bearing read; this test pins nothing")
+	}
+	if reason, _ := attachLeg(context.Background(), leaf, "rt_a", false, now); reason != fenceTerminalNotQuiet {
+		t.Fatalf("exec, not v2-ready: L3 %q, want terminal-no-report's defer", reason)
+	}
+	ready, rf := fakeProfile(runtime.ProfileExecV2)
+	startRuntime(t, rf, "rt_a", ours("a"))
+	rf.SetAttached("rt_a", true)
+	if reason, _ := attachLeg(context.Background(), ready, "rt_a", false, now); reason != fenceAttached {
+		t.Fatalf("exec v2, attached: L3 %q, want the reporter's hold", reason)
+	}
+	rf.SetAttached("rt_a", false)
+	if reason, _ := attachLeg(context.Background(), ready, "rt_a", false, now); reason != "" {
+		t.Fatalf("exec v2, detached: L3 %q, want pass", reason)
 	}
 }
 

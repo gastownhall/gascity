@@ -20,6 +20,10 @@ import (
 
 // StatusJSON is the JSON output format for gc status.
 type StatusJSON struct {
+	// CacheAgeS is set only on output read from the city's API: the age in
+	// seconds of the cached status the server answered from. Nil, and so
+	// absent, on locally built output.
+	CacheAgeS     *float64               `json:"_cache_age_s,omitempty"`
 	SchemaVersion string                 `json:"schema_version"`
 	OK            bool                   `json:"ok"`
 	CityName      string                 `json:"city_name"`
@@ -216,7 +220,7 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		return 1
 	}
 	dops := newDrainOps(sp)
-	return routeCityStatus(cityPath, dops, c, reason, jsonOutput, stdout, stderr, localFallback)
+	return routeCityStatus(cityPath, cfg, dops, c, reason, jsonOutput, stdout, stderr, localFallback)
 }
 
 // cmdCityStatusLocalFallback builds the direct-store status view only when no
@@ -272,6 +276,7 @@ var cityStatusAPIClient = supervisorFallthroughAPIClient
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeCityStatus(
 	cityPath string,
+	cfg *config.City,
 	dops drainOps,
 	c *api.Client,
 	nilReason string,
@@ -286,7 +291,7 @@ func routeCityStatus(
 			cr, err = c.GetStatus()
 			return err
 		},
-		func() int { return renderCityStatusFromAPI(cityPath, cr, dops, jsonOutput, stdout) },
+		func() int { return renderCityStatusFromAPI(cityPath, cfg, cr, dops, jsonOutput, stdout) },
 		fallback,
 	)
 }
@@ -294,13 +299,16 @@ func routeCityStatus(
 // renderCityStatusFromAPI renders the server's StatusView using the same
 // text and JSON formatters as the fallback path. The API path adds
 // _cache_age_s on --json output and a staleness banner on human output
-// when cache age > 30 s.
+// when cache age > 30 s. The wire rig rows lack the config-derived fields,
+// so they are filled from cfg (fillStatusRigConfigFields) to match the
+// local route's rows.
 //
 // Controller authority is not surfaced through the API response (the
 // server is the controller, so the CLI resolves that locally via
 // controllerStatusForCity — same call the fallback path makes).
-func renderCityStatusFromAPI(cityPath string, cr api.CachedRead[api.StatusView], dops drainOps, jsonOutput bool, stdout io.Writer) int {
+func renderCityStatusFromAPI(cityPath string, cfg *config.City, cr api.CachedRead[api.StatusView], dops drainOps, jsonOutput bool, stdout io.Writer) int {
 	snapshot := snapshotFromStatusView(cityPath, cr.Body)
+	fillStatusRigConfigFields(snapshot.Rigs, cfg)
 	if jsonOutput {
 		writeCityStatusJSONWithCache(snapshot, snapshot.Summary, cr.AgeSeconds, stdout)
 		return 0
@@ -388,9 +396,34 @@ func snapshotFromStatusView(cityPath string, v api.StatusView) cityStatusSnapsho
 	return snapshot
 }
 
-// writeCityStatusJSONWithCache writes the snapshot's JSON form with a
-// leading _cache_age_s field inserted at the envelope level. Mirrors the
-// envelope shape other routed read commands emit on the API path.
+// fillStatusRigConfigFields sets the config-derived rig fields the status API
+// does not carry (prefix, default_sling_target, default_sling_targets) from
+// the city's own config, matched by rig name, so `gc status --json` prints
+// the same rig rows on both routes. renderRigListFromAPI does the same for
+// `gc rig list` (#2490). A rig cfg does not name keeps its wire row.
+func fillStatusRigConfigFields(rigs []StatusRigJSON, cfg *config.City) {
+	if cfg == nil {
+		return
+	}
+	byName := make(map[string]*config.Rig, len(cfg.Rigs))
+	for i := range cfg.Rigs {
+		byName[cfg.Rigs[i].Name] = &cfg.Rigs[i]
+	}
+	for i := range rigs {
+		rig, ok := byName[rigs[i].Name]
+		if !ok {
+			continue
+		}
+		rigs[i].Prefix = rig.EffectivePrefix()
+		rigs[i].DefaultSlingTarget = rig.DefaultSlingTarget
+		rigs[i].DefaultSlingTargets = append([]string(nil), rig.DefaultSlingTargets...)
+	}
+}
+
+// writeCityStatusJSONWithCache writes the snapshot's JSON form for output
+// read from the city's API, setting StatusJSON.CacheAgeS so _cache_age_s
+// prints as the leading key (0 included). There is no envelope wrapper: the
+// payload is the same StatusJSON the local route prints, plus that field.
 func writeCityStatusJSONWithCache(
 	snapshot cityStatusSnapshot,
 	summary StatusSummaryJSON,
@@ -398,11 +431,8 @@ func writeCityStatusJSONWithCache(
 	stdout io.Writer,
 ) {
 	status := cityStatusJSONFromSnapshot(snapshot, summary)
-	envelope := struct {
-		CacheAgeS  float64 `json:"_cache_age_s"`
-		StatusJSON         // inline
-	}{CacheAgeS: ageSeconds, StatusJSON: status}
-	data, err := json.MarshalIndent(envelope, "", "  ")
+	status.CacheAgeS = &ageSeconds
+	data, err := json.MarshalIndent(status, "", "  ")
 	if err != nil {
 		fmt.Fprintf(stdout, "{\"error\": %q}\n", err.Error()) //nolint:errcheck // best-effort stdout
 		return

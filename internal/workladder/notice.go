@@ -57,10 +57,15 @@ func MarkNotice(r Record, key ClaimKey, m NoticeMark) (Record, bool) {
 // and, only within the episode the nudge was reserved in (the entry's Since
 // not after the mark's At), a counted nudge re-counted per fate. A paused
 // mark records nothing beyond the clear, and a delivered one's end of the
-// refusals. alert reports a refusal that raises the nudge_refused alert
-// (refusalAlerts: the third in a row, then periodically). ok is false when
-// no entry carries the mark.
-func SettleNotice(r Record, op string, fate NoticeFate) (out Record, alert, ok bool) {
+// refusals. A delivered fate, paused or not, also moves the seat's Delivered
+// to deliveredAt, the start of the attempt that delivered it, when that is
+// newer: a mark the cell carries is of the cell's generation, since a new
+// generation drops every mark. A zero deliveredAt (a caller that did not
+// read when) moves nothing, so no refusal can read as its answer; the other
+// fates never move it. alert reports a refusal that raises the
+// nudge_refused alert (refusalAlerts: the third in a row, then
+// periodically). ok is false when no entry carries the mark.
+func SettleNotice(r Record, op string, fate NoticeFate, deliveredAt time.Time) (out Record, alert, ok bool) {
 	if op == "" {
 		return r, false, false
 	}
@@ -72,6 +77,9 @@ func SettleNotice(r Record, op string, fate NoticeFate) (out Record, alert, ok b
 	e := &r.Entries[i]
 	m := e.Notice
 	e.Notice = NoticeMark{}
+	if fate == NoticeDelivered {
+		noteDelivered(&r, deliveredAt)
+	}
 	if e.Since.After(m.At) {
 		return r, false, true // a later episode: its counts are its own
 	}
@@ -105,4 +113,14 @@ func recountPaused(e *Entry, refused bool) bool {
 // anyMarked reports whether an entry of r carries a notice mark.
 func anyMarked(r Record) bool {
 	return slices.ContainsFunc(r.Entries, func(e Entry) bool { return !e.Notice.IsZero() })
+}
+
+// noteDelivered moves r's Delivered to at when at is newer; a zero at moves
+// nothing. It reports whether it moved.
+func noteDelivered(r *Record, at time.Time) bool {
+	if !at.After(r.Delivered) {
+		return false
+	}
+	r.Delivered = at
+	return true
 }

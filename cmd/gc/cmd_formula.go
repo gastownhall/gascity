@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/spf13/cobra"
+
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -21,7 +23,6 @@ import (
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
-	"github.com/spf13/cobra"
 )
 
 func newFormulaCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -54,9 +55,21 @@ func newFormulaListCmd(stdout, stderr io.Writer) *cobra.Command {
 Formulas are discovered from the well-known formulas/ directories of
 city and rig pack layers, the city's own formulas/ directory, and the
 rig-local formulas_dir directory. Later layers win for same-named
-formulas.`,
+formulas.
+
+With --rig, only that rig's scope is listed: the city layers beneath the
+rig's own, the same search paths "gc formula show --rig" compiles against
+and the supervisor's formulas route serves for scope_kind=rig. Without
+--rig, every city and rig layer is listed.
+
+Examples:
+  gc formula list
+  gc formula list --rig mo --json`,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			cityPath, paths, rows := listFormulaRows(stderr)
+			cityPath, paths, rows, err := listFormulaRows(stderr)
+			if err != nil {
+				return formulaCommandError(stderr, "gc formula list", jsonOutput, err)
+			}
 			if jsonOutput {
 				return writeCLIJSONLine(stdout, formulaListJSON{
 					SchemaVersion: "1",
@@ -398,19 +411,29 @@ type jsonContractWarning struct {
 	Message string `json:"message"`
 }
 
-func listFormulaRows(warningWriter ...io.Writer) (string, []string, []formulaListRowJSON) {
+// listFormulaRows lists every city and rig layer, or only the --rig scope
+// when one is named. A city that does not resolve or load lists nothing; an
+// explicit --rig the city does not bind is an error, never an empty list.
+func listFormulaRows(stderr io.Writer) (string, []string, []formulaListRowJSON, error) {
 	cityPath, err := resolveCity()
 	if err != nil {
-		return "", nil, nil
+		return "", nil, nil, nil
 	}
-	cfg, err := loadCityConfig(cityPath, warningWriter...)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		return cityPath, nil, nil
+		return cityPath, nil, nil, nil
 	}
 	paths := formulaSearchPathsForList(cfg)
+	if strings.TrimSpace(rigFlag) != "" {
+		scope, err := resolveFormulaScope(cfg, cityPath, stderr)
+		if err != nil {
+			return cityPath, nil, nil, err
+		}
+		paths = scope.searchPaths
+	}
 
 	rows := formulaRowsForSearchPaths(paths)
-	return cityPath, paths, rows
+	return cityPath, paths, rows, nil
 }
 
 func formulaRowsForSearchPaths(paths []string) []formulaListRowJSON {
@@ -741,13 +764,13 @@ city's work store, copy them into the binding with
 
 			cookVars := parseFormulaVars(vars)
 
-			// Parse --meta before any bead exists so a malformed flag refuses the
-			// cook write-free: before PrepareInvocation can mint a synthetic input
-			// convoy, and before any root, step or blocking dependency is written,
-			// on whichever arm runs below. The non-attach arms' class-must-not-flip
-			// guard (cookMetaClassFlip) also judges it against the recipe root
-			// before anything is cooked, so a refused stamp leaves no molecule
-			// behind.
+			// Parse --meta before any bead exists so a malformed flag, or a key the
+			// bead store would refuse, refuses the cook write-free: before
+			// PrepareInvocation can mint a synthetic input convoy, and before any
+			// root, step or blocking dependency is written, on whichever arm runs
+			// below. The non-attach arms' class-must-not-flip guard
+			// (cookMetaClassFlip) also judges it against the recipe root before
+			// anything is cooked, so a refused stamp leaves no molecule behind.
 			rootMeta, err := parseMetadataArgs(metadata)
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
@@ -1198,8 +1221,9 @@ func emitFormulaCookExecutionFacts(graphStore, workStore beads.Store, cityPath s
 	}
 }
 
-func emitAttachedFormulaCookExecutionFacts(store beads.Store, cfg *config.City, cityPath, workflowRootID string, stderr io.Writer) {
-	if err := executionevent.EmitCurrent(openCityRecorderAt(cityPath, stderr), beads.GraphStore{Store: resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)}, beads.WorkStore{Store: store}, workflowRootID, "formula-cook"); err != nil {
+func emitAttachedFormulaCookExecutionFacts(store beads.Store, _ *config.City, cityPath, workflowRootID string, stderr io.Writer) {
+	stores := cliStores(cityPath, store)
+	if err := executionevent.EmitCurrent(openCityRecorderAt(cityPath, stderr), stores.Graph(), stores.Work(), workflowRootID, "formula-cook"); err != nil {
 		fmt.Fprintf(stderr, "warning: gc formula cook: projecting execution facts for %s: %v\n", workflowRootID, err) //nolint:errcheck // successful attach is preserved
 	}
 }
@@ -1429,6 +1453,10 @@ func cookMetaFlipError(formulaName string, flip *coordclass.Flip) error {
 	return fmt.Errorf("%s", classFlipRefusalText(fmt.Sprintf("--meta on the root of %q", formulaName), flip))
 }
 
+// parseMetadataArgs parses --meta key=value pairs. It refuses a pair with no
+// "=" or an empty key, and a key the bead store would refuse
+// (beadmeta.ValidateKey): bd and native Dolt reject such a key on the stamp's
+// SetMetadataBatch, which runs only after the cook has written its beads.
 func parseMetadataArgs(items []string) (map[string]string, error) {
 	if len(items) == 0 {
 		return nil, nil
@@ -1438,6 +1466,9 @@ func parseMetadataArgs(items []string) (map[string]string, error) {
 		key, value, ok := strings.Cut(item, "=")
 		if !ok || key == "" {
 			return nil, fmt.Errorf("invalid metadata %q (want key=value)", item)
+		}
+		if err := beadmeta.ValidateKey(key); err != nil {
+			return nil, fmt.Errorf("invalid metadata %q: %w", item, err)
 		}
 		out[key] = value
 	}

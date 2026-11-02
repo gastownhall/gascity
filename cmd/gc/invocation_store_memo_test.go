@@ -178,7 +178,8 @@ func TestStoreOpensWithoutTheMemoStayOwned(t *testing.T) {
 }
 
 // TestInvocationStoreMemoCoversTheHookVerbs pins which commands run() opens the
-// memo for: every session-side hook verb, and no long-lived entry point.
+// memo for: every session-side hook verb and `gc mail count`, and no
+// long-lived entry point.
 func TestInvocationStoreMemoCoversTheHookVerbs(t *testing.T) {
 	root := newRootCmdWithOptions(io.Discard, io.Discard, rootCommandOptions{})
 	for _, tc := range []struct {
@@ -186,6 +187,7 @@ func TestInvocationStoreMemoCoversTheHookVerbs(t *testing.T) {
 		want bool
 	}{
 		{[]string{"mail", "check", "--inject"}, true},
+		{[]string{"mail", "count", "--json"}, true},
 		{[]string{"mail", "send", "human", "-s", "x"}, true},
 		{[]string{"nudge", "drain", "--inject"}, true},
 		{[]string{"prime", "--hook"}, true},

@@ -595,8 +595,8 @@ func recordBdVouchUsed(cityPath, bdPath, sum, inventory string) {
 }
 
 // bdSplitRefusalEvent is the gc_bd.refused event: one per split-city gc bd
-// refusal, so a refusal swallowed by a script's `|| true` (wisp-compact.sh,
-// the deacon's mol burn) still shows up in the city's event log, and so the
+// refusal, so a refusal swallowed by a script's `|| true` (for example
+// a pack script's mol burn) still shows up in the city's event log, and so the
 // allowlist's burn-in can see which commands callers actually need.
 const bdSplitRefusalEvent = "gc_bd.refused"
 

@@ -601,3 +601,81 @@ interval = "5m"
 		}
 	}
 }
+
+// TestOrderScanContractDispatcherHonorsOverridesAfterUnmatchedOne pins the
+// controller path: an override naming an order that no longer exists must
+// not re-enable an order a later override disables.
+func TestOrderScanContractDispatcherHonorsOverridesAfterUnmatchedOne(t *testing.T) {
+	cityPath, cityFormulasDir := contractCitySetup(t)
+	writeContractOrder(t, filepath.Join(cityPath, "orders"), "nightly", `[order]
+exec = "scripts/nightly.sh"
+trigger = "cooldown"
+interval = "1h"
+`)
+
+	disabled := false
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityFormulasDir},
+		},
+		Orders: config.OrdersConfig{
+			Overrides: []config.OrderOverride{
+				{Name: "retired-order", Enabled: &disabled},
+				{Name: "nightly", Enabled: &disabled},
+			},
+		},
+	}
+
+	var stderr bytes.Buffer
+	snapshot, err := scanOrderSetSnapshotFS(fsys.OSFS{}, cityPath, cfg, &stderr, "test")
+	if err != nil {
+		t.Fatalf("scanOrderSetSnapshotFS returned error: %v; stderr: %s", err, stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, `order "retired-order" not found`) {
+		t.Fatalf("stderr = %q, want the unmatched override reported", got)
+	}
+	if len(snapshot.Orders) != 1 || snapshot.Orders[0].IsEnabled() {
+		t.Fatalf("snapshot orders = %+v, want nightly disabled by its override", snapshot.Orders)
+	}
+	if ad := buildOrderDispatcherFromOrderSet(nil, cityPath, cfg, snapshot.Orders, events.Discard, &stderr); ad != nil {
+		t.Fatal("dispatcher built for an order its override disables")
+	}
+}
+
+// TestOrderScanContractLoadAllOrdersReportsEveryUnmatchedOverride pins the CLI
+// path: the refusal stays loud and names every unmatched override at once.
+func TestOrderScanContractLoadAllOrdersReportsEveryUnmatchedOverride(t *testing.T) {
+	cityPath, cityFormulasDir := contractCitySetup(t)
+	writeContractOrder(t, filepath.Join(cityPath, "orders"), "nightly", `[order]
+exec = "scripts/nightly.sh"
+trigger = "cooldown"
+interval = "1h"
+`)
+
+	disabled := false
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityFormulasDir},
+		},
+		Orders: config.OrdersConfig{
+			Overrides: []config.OrderOverride{
+				{Name: "retired-order", Enabled: &disabled},
+				{Name: "nightly", Enabled: &disabled},
+				{Name: "typo-order", Enabled: &disabled},
+			},
+		},
+	}
+
+	var stderr bytes.Buffer
+	if _, code := loadAllOrders(cityPath, cfg, &stderr, "gc order list"); code != 1 {
+		t.Fatalf("loadAllOrders code = %d, want 1; stderr: %s", code, stderr.String())
+	}
+	for _, want := range []string{
+		`orders.overrides[0]: order "retired-order" not found`,
+		`orders.overrides[2]: order "typo-order" not found`,
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+}

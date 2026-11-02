@@ -11,6 +11,9 @@ GOLANGCI_LINT := $(BIN_DIR)/golangci-lint
 OASDIFF := $(BIN_DIR)/oasdiff
 
 BINARY     := gc
+# COMPANION is gc's OSC 7501 capture companion. It is pure Go and is built,
+# installed and removed alongside gc, which looks it up next to itself.
+COMPANION  := gc-osc7501
 BUILD_DIR  := bin
 INSTALL_DIR := $(BIN_DIR)
 
@@ -133,11 +136,13 @@ BAZEL_TEST = $(BAZEL) test $(BAZEL_FLAGS) --keep_going
 bazel-tmpdir:
 	@mkdir -p /tmp/bt
 
-## build: compile gc binary with version metadata
+## build: compile gc and its gc-osc7501 companion with version metadata
 build:
 	go build -buildvcs=false -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/gc
+	CGO_ENABLED=0 go build -buildvcs=false -ldflags "-X main.version=$(VERSION)" -o $(BUILD_DIR)/$(COMPANION) ./cmd/gc-osc7501
 ifeq ($(shell uname),Darwin)
 	@scripts/sign-darwin-local.sh $(BUILD_DIR)/$(BINARY)
+	@GC_SIGN_IDENTIFIER=com.gascity.gc-osc7501 scripts/sign-darwin-local.sh $(BUILD_DIR)/$(COMPANION)
 endif
 
 ## check-self-contained: assert the built gc binary is self-contained (Linux/Nix ICU rpath).
@@ -168,27 +173,33 @@ ifneq ($(_NIX_ICU_DEV),)
 		echo "OK: $$bin self-contained (RUNPATH present + clean-env boot passes)"
 endif
 
-## install: build and install gc to GOPATH/bin (same location as go install)
+## install: build and install gc and gc-osc7501 to GOPATH/bin (same location as go install)
 install: check-self-contained
 	@mkdir -p $(INSTALL_DIR)
 	@set -e; \
-		tmp="$(INSTALL_DIR)/.$(BINARY).tmp.$$$$"; \
-		trap 'rm -f "$$tmp"' EXIT INT TERM HUP; \
-		cp -f "$(BUILD_DIR)/$(BINARY)" "$$tmp"; \
-		chmod 0755 "$$tmp"; \
-		mv -f "$$tmp" "$(INSTALL_DIR)/$(BINARY)"; \
-		trap - EXIT INT TERM HUP
-	@# Migrate from old install location: replace stale binary with symlink
+		for bin in $(BINARY) $(COMPANION); do \
+			tmp="$(INSTALL_DIR)/.$$bin.tmp.$$$$"; \
+			trap 'rm -f "$$tmp"' EXIT INT TERM HUP; \
+			cp -f "$(BUILD_DIR)/$$bin" "$$tmp"; \
+			chmod 0755 "$$tmp"; \
+			mv -f "$$tmp" "$(INSTALL_DIR)/$$bin"; \
+			trap - EXIT INT TERM HUP; \
+		done
+	@# Migrate from old install location: replace stale binary with symlink.
+	@# The companion is linked beside gc, because gc looks for it next to the
+	@# path it was started by.
 	@if [ "$(INSTALL_DIR)" != "$(HOME)/.local/bin" ]; then \
-		if [ -f "$(HOME)/.local/bin/$(BINARY)" ] || [ -L "$(HOME)/.local/bin/$(BINARY)" ]; then \
-			rm -f "$(HOME)/.local/bin/$(BINARY)"; \
-		fi; \
-		if [ -d "$(HOME)/.local/bin" ]; then \
-			ln -sf "$(INSTALL_DIR)/$(BINARY)" "$(HOME)/.local/bin/$(BINARY)"; \
-			echo "Symlinked $(HOME)/.local/bin/$(BINARY) -> $(INSTALL_DIR)/$(BINARY)"; \
-		fi; \
+		for bin in $(BINARY) $(COMPANION); do \
+			if [ -f "$(HOME)/.local/bin/$$bin" ] || [ -L "$(HOME)/.local/bin/$$bin" ]; then \
+				rm -f "$(HOME)/.local/bin/$$bin"; \
+			fi; \
+			if [ -d "$(HOME)/.local/bin" ]; then \
+				ln -sf "$(INSTALL_DIR)/$$bin" "$(HOME)/.local/bin/$$bin"; \
+				echo "Symlinked $(HOME)/.local/bin/$$bin -> $(INSTALL_DIR)/$$bin"; \
+			fi; \
+		done; \
 	fi
-	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY)"
+	@echo "Installed $(BINARY) and $(COMPANION) to $(INSTALL_DIR)"
 
 ## generate: regenerate JSON schemas and reference docs
 generate:
@@ -201,7 +212,7 @@ check-schema: generate
 
 ## clean: remove build artifacts
 clean:
-	rm -f $(BUILD_DIR)/$(BINARY)
+	rm -f $(BUILD_DIR)/$(BINARY) $(BUILD_DIR)/$(COMPANION)
 
 ## complexity: print an advisory cyclomatic complexity report for shipped Go
 complexity:

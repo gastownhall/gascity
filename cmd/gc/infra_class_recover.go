@@ -186,6 +186,13 @@ func newStorageRecoverCmd(surface storageCommandSurface, stdout, stderr io.Write
 		carriedIDs   []string
 		replaceIDs   []string
 		dropIDs      []string
+		purgeType    string
+		confirmPurge bool
+		expectCount  int
+		expectDigest string
+		abandonPurge bool
+		restorePurge string
+		forced       []string
 	)
 	cmd := &cobra.Command{
 		Use:          surface.Verb,
@@ -232,11 +239,49 @@ work-store row replaces the binding's) or --drop-work-row <id> (the
 work-store row is removed and the binding's stays). These are the only
 choices that remove a row, and each first backs up the row it removes, with
 every edge touching it, to infra.recover-choices.jsonl at the binding root.
---dry-run shows both rows of each such id.`,
+--dry-run shows both rows of each such id.
+
+--purge-type message is the other answer for stranded mail nobody will read:
+instead of copying, it backs up and then deletes every row the containment
+check calls stranded whose type is message and that classifies as messaging.
+It selects by that check, never by manifest id, because bd reuses short wisp
+ids. --dry-run lists the count, id range, dates and titles and writes
+nothing; the delete needs --fleet-stopped and --confirm-purge. Every row, with
+its metadata, labels and edges, is first written to a timestamped
+infra.purged-stranded-<time>.jsonl at the binding root and proven from disk;
+the run is recorded in infra.purged-stranded.jsonl, and a run interrupted
+after the backup resumes from it (--abandon-purge closes one whose rows and
+edges were put back by hand). The delete must also name what the dry run
+showed: --expect-count <n>, and --expect-digest <digest>. A row the binding
+holds as the same bead is never deleted, and stranded rows of other types or
+classes are left where they are: recover them once the mail is purged, or the
+copy carries the mail too. --restore-purge <backup> puts a purge's rows and
+edges back into the work store, where they are stranded again; an edge whose
+far end is gone, or is a different bead now, is left out and named. A restore
+that stops partway leaves its run interrupted. While a run is interrupted,
+--restore-purge restores only that run's backup, and the copy and the per-id
+answers above refuse until the run is finished, restored or closed.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !fromWork {
 				fmt.Fprintf(stderr, "gc %s %s: pass --%s. The source is stated explicitly rather than detected, exactly as the migration states it\n", //nolint:errcheck // best-effort stderr
 					surface.Namespace, surface.Verb, surface.Flag)
+				return errExit
+			}
+			purgeOpts := strandedPurgeOptions{
+				Type: purgeType, DryRun: dryRun, Confirm: confirmPurge,
+				ExpectCount: expectCount, ExpectDigest: expectDigest, Abandon: abandonPurge,
+			}
+			if err := validateStrandedPurgeFlags(purgeOpts, restorePurge, map[string]bool{
+				strandedMoveFlag: len(moveIDs) > 0, strandedRecordCarriedFlag: len(carriedIDs) > 0,
+				strandedReplaceBindingRowFlag: len(replaceIDs) > 0, strandedDropWorkRowFlag: len(dropIDs) > 0,
+				"dump": dumpPath != "",
+			}); err != nil {
+				fmt.Fprintf(stderr, "gc %s %s: %v\n", surface.Namespace, surface.Verb, err) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+			force, err := parseStorageForce(forced)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc %s %s: %v\n", surface.Namespace, surface.Verb, err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			request, err := resolveStorageOperatorRequest()
@@ -245,6 +290,13 @@ every edge touching it, to infra.recover-choices.jsonl at the binding root.
 				return errExit
 			}
 			request.FleetStopped = fleetStopped
+			request.Force = force
+			if restorePurge != "" {
+				return exitForCode(doStorageRestorePurge(cmd.Context(), request, restorePurge, dryRun, stdout, stderr))
+			}
+			if purgeType != "" {
+				return exitForCode(doStoragePurgeStranded(cmd.Context(), request, purgeOpts, stdout, stderr))
+			}
 			return exitForCode(doStorageRecoverStranded(cmd.Context(), request, strandedRecoveryOptions{
 				DryRun: dryRun, DumpPath: dumpPath,
 				Move: setOf(moveIDs), RecordCarried: setOf(carriedIDs),
@@ -256,6 +308,7 @@ every edge touching it, to infra.recover-choices.jsonl at the binding root.
 		"recover the stranded infrastructure beads out of this city's work store")
 	cmd.Flags().BoolVar(&fleetStopped, storageFleetStoppedFlag, false,
 		"attest that "+storageFleetStoppedAttestation)
+	addStorageForceFlag(cmd, &forced)
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"report the gap and write the dump without touching the binding or the manifest")
 	cmd.Flags().StringVar(&dumpPath, "dump", "",
@@ -266,6 +319,18 @@ every edge touching it, to infra.recover-choices.jsonl at the binding root.
 		"for a work-store row the manifest lists by id alone and the binding no longer holds: record it as the bead the copy carried, so the clear deletes its work-store row (the backup keeps it); accepted for closed rows too (repeatable, comma-separated)")
 	cmd.Flags().StringSliceVar(&replaceIDs, strandedReplaceBindingRowFlag, nil,
 		"for a work-store row whose id the binding holds for a different bead: back up and remove the binding's row, then copy the work-store row in under the id (repeatable, comma-separated)")
+	cmd.Flags().StringVar(&purgeType, strandedPurgeTypeFlag, "",
+		"instead of copying, back up and then DELETE every stranded work-store row of this type (only \"message\"): the rows the containment check calls stranded that are also message-class; --dry-run lists them")
+	cmd.Flags().BoolVar(&confirmPurge, strandedConfirmPurgeFlag, false,
+		"with --"+strandedPurgeTypeFlag+": confirm the delete (without it the run lists the rows and deletes nothing)")
+	cmd.Flags().IntVar(&expectCount, strandedExpectCountFlag, -1,
+		"with --"+strandedConfirmPurgeFlag+": the number of rows the dry run listed; the delete refuses when the count differs (required)")
+	cmd.Flags().StringVar(&expectDigest, strandedExpectDigestFlag, "",
+		"with --"+strandedConfirmPurgeFlag+": the selection digest the dry run printed; the delete refuses when the selection differs (required)")
+	cmd.Flags().BoolVar(&abandonPurge, strandedAbandonPurgeFlag, false,
+		"with --"+strandedPurgeTypeFlag+": close an interrupted purge whose rows and edges were all put back by hand (refused while any is missing)")
+	cmd.Flags().StringVar(&restorePurge, strandedRestorePurgeFlag, "",
+		"put the rows of this purge backup (infra.purged-stranded-<time>.jsonl) back into the work store with their edges; they are stranded again afterwards")
 	cmd.Flags().StringSliceVar(&dropIDs, strandedDropWorkRowFlag, nil,
 		"for a work-store row whose id the binding holds for a different bead: back up and remove the work-store row, keeping the binding's (repeatable, comma-separated)")
 	return cmd
@@ -794,7 +859,35 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 			logPrefix, target.Binding, target.MarkerPath(), storageMigrationCommand)
 		return 1
 	}
+	// A marker that names another work store holds here as it holds the boot
+	// (B15): the repair would copy this work store's rows into a binding
+	// converged from another one, and record them in its manifest.
+	if _, _, hold := markerWorkStoreIdentityHold(request.CityPath, target, logPrefix, stderr); hold != nil {
+		hold.Target = target
+		fmt.Fprintln(stderr, infraMigrationOperatorAdvice(*hold, logPrefix)) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
+	// A run that writes holds the controller lock throughout
+	// (storage_verb_exclusion.go), and under a shared-store attestation every
+	// co-tenant's lock too; a dry run writes neither store.
+	sharedAttested := false
+	if !opts.DryRun {
+		controllerLock, err := acquireStorageVerbExclusion(request, storageVerbScope{})
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		defer controllerLock.Close() //nolint:errcheck // released last, after the guard
+		shared, err := sharedWorkStoreRefusal(request.CityPath, request.Force)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		defer shared.Release()
+		sharedAttested = shared.Attested
+		recordStorageAttestation(request.CityPath, logPrefix, request.Force.acceptedHazards(shared), stderr)
+	}
 	if pid := infraMigrationForeignControllerPID(request.CityPath); pid != 0 {
 		fmt.Fprintf(stderr, "%s: controller PID %d is live on this city and is still writing infrastructure beads to the work store; a repair proven against a moving source proves nothing. Stop it (gc stop) and run this again\n", logPrefix, pid) //nolint:errcheck // best-effort stderr
 		return 1
@@ -840,6 +933,12 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 			logPrefix, target.Database, target.ManifestPath())
 		return 1
 	}
+	// The purge ledger, under the same lock: a purge run writes it holding the
+	// guard, and an interrupted one owns its rows until it is settled.
+	if refusal := infraPurgeUnsettledRefusal(target); refusal != "" {
+		fmt.Fprintf(stderr, "%s: %s\n", logPrefix, refusal) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	source, err := openInfraMigrationSource(request.CityPath)
 	if err != nil {
@@ -859,6 +958,15 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	// One order for every pass below, so two runs over the same city report the
 	// same thing in the same sequence.
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
+	// A shared work store holds rows other cities own, and nothing below
+	// asks whose a row is: under the attestation a row another city's scope
+	// names refuses, as it does for the migration, before anything is written.
+	if sharedAttested {
+		if err := foreignScopeRowRefusal(rows, request.CityPath, request.Cfg); err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 	infraIDs := make(map[string]bool, len(rows))
 	for _, b := range rows {
 		infraIDs[b.ID] = true

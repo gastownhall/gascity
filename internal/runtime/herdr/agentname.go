@@ -36,3 +36,29 @@ func herdrAgentName(name string) string {
 	}
 	return s
 }
+
+// registryToSessionNames reverse-maps herdr registry names to the bound gc
+// session names that own them. herdrAgentName is many-to-one ("Indigo--x" and
+// "indigo--x" share one registry name, and herdr's agent_name_taken lets only
+// one agent hold it), so on a collision the first bound name wins; bound is
+// enumerated in sidecar-directory order, which keeps the choice stable.
+func registryToSessionNames(bound []string) map[string]string {
+	m := make(map[string]string, len(bound))
+	for _, name := range bound {
+		hn := herdrAgentName(name)
+		if _, taken := m[hn]; !taken {
+			m[hn] = name
+		}
+	}
+	return m
+}
+
+// sessionNameFor resolves a herdr registry name to its gc session name, or
+// returns it unchanged for agents no bound session owns (foreign/manual
+// agents), matching how ListRunning surfaces them.
+func sessionNameFor(byRegistry map[string]string, registryName string) string {
+	if name, ok := byRegistry[registryName]; ok {
+		return name
+	}
+	return registryName
+}

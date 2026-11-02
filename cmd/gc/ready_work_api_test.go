@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -195,18 +196,60 @@ func TestControllerReadyWorkSkipsSuspendedRigs(t *testing.T) {
 	}
 }
 
-// TestControllerReadyWorkRefusesWhileAConfigReloadIsPending pins the leg-set
-// guard: a staged config change could add, remove or rebind a rig, so the
-// controller refuses rather than answer for a different set of stores than a
-// fresh read would.
-func TestControllerReadyWorkRefusesWhileAConfigReloadIsPending(t *testing.T) {
+// TestControllerReadyWorkAnswersWhileTheConfigWatcherHasFlaggedAChange pins
+// that the controller answers from the config it has published while a reload
+// is due, even though the config on disk has changed since.
+//
+// configDirty records that a reload is due. It says nothing about whether the
+// published config and the stores agree: controllerState.update publishes them
+// together. A refusal keyed on it turned the endpoint off on maintainer-city
+// (8d5: 0 of 60 requests answered); ga-wc5dmg tracks why the flag stayed set
+// there. The city.toml on disk here has dropped bravo, so a controller that
+// read the config from disk instead of the one it published would answer
+// without bravo's rows.
+func TestControllerReadyWorkAnswersWhileTheConfigWatcherHasFlaggedAChange(t *testing.T) {
 	f := newReadyWorkSplitFixture(t)
+	var cityToml strings.Builder
+	cityToml.WriteString("[workspace]\nname = " + strconv.Quote(f.cityName) + "\n")
+	for _, rig := range f.cfg.Rigs {
+		if rig.Name == "bravo" {
+			continue
+		}
+		cityToml.WriteString("\n[[rigs]]\nname = " + strconv.Quote(rig.Name) + "\npath = " + strconv.Quote(rig.Path) + "\nprefix = " + strconv.Quote(rig.Prefix) + "\n")
+		if rig.SuspendedOnStart {
+			cityToml.WriteString("suspended_on_start = true\n")
+		}
+	}
+	if err := os.WriteFile(filepath.Join(f.cityPath, "city.toml"), []byte(cityToml.String()), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	onDisk, err := loadCityConfig(f.cityPath, io.Discard)
+	if err != nil {
+		t.Fatalf("loading the edited city.toml: %v", err)
+	}
+	for _, rig := range onDisk.Rigs {
+		if rig.Name == "bravo" {
+			t.Fatalf("the city.toml on disk still declares bravo; the test needs a disk config that differs from the published one")
+		}
+	}
+
 	cs := f.controller()
 	var dirty atomic.Bool
 	dirty.Store(true)
 	cs.configDirty = &dirty
-	if _, err := cs.ReadyWork(context.Background(), readywork.Query{}); !errors.Is(err, api.ErrReadyWorkConfigNotCurrent) {
-		t.Fatalf("ReadyWork with a pending reload = %v, want api.ErrReadyWorkConfigNotCurrent", err)
+	got, err := cs.ReadyWork(context.Background(), readywork.Query{})
+	if err != nil {
+		t.Fatalf("ReadyWork with a reload due = %v; the controller must answer from its published config", err)
+	}
+	if want := f.inProcess(t, readywork.Query{}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ReadyWork with a reload due differs from the in-process answer over the published config and the same stores")
+	}
+	servedBravo := false
+	for _, row := range got {
+		servedBravo = servedBravo || strings.HasPrefix(row.ID, "rb-")
+	}
+	if !servedBravo {
+		t.Fatalf("ReadyWork served no row from bravo, which the published config serves; the controller must not read the config on disk")
 	}
 }
 
@@ -391,21 +434,24 @@ func TestControllerReadyWorkRefusesWhileAnAPIConfigWriteIsInFlight(t *testing.T)
 	if !f.dirty.Load() {
 		t.Fatal("the API write did not mark the reload pending")
 	}
-	f.requireRefuses(t, "while the API write's reload is pending")
+	// Once the write has ended, only the dirty flag marks its reload pending,
+	// and the read answers from the config the controller has published.
+	f.requireAnswers(t, "while the API write's reload is pending")
 	if got := f.tickReload(); got != reloadOutcomeApplied {
 		t.Fatalf("reload of the API write = %q, want %q", got, reloadOutcomeApplied)
 	}
 	f.requireAnswers(t, "once the API write's reload applied")
 }
 
-// TestControllerReadyWorkRefusesAfterAFailedAPIConfigWriteChangedDisk pins an
+// TestControllerReadyWorkAnswersFromThePublishedConfigAfterAFailedAPIConfigWriteChangedDisk pins an
 // API config write that fails after it changed the config files: one that
 // failed partway, as a rig rebind that rewrote .gc/site.toml and then failed to
 // persist its binding does, and one whose rollback failed. The controller still
 // holds the config it published before the write while disk holds another, and
 // the config watcher never sees .gc/, so the write marks the reload pending as
-// it ends; the controller refuses until that reload applies.
-func TestControllerReadyWorkRefusesAfterAFailedAPIConfigWriteChangedDisk(t *testing.T) {
+// it ends. The controller answers from the config it has published, as every
+// other read it serves does, and from the new one once that reload applies.
+func TestControllerReadyWorkAnswersFromThePublishedConfigAfterAFailedAPIConfigWriteChangedDisk(t *testing.T) {
 	errPartway := errors.New("persisting the rig binding failed")
 	for _, tc := range []struct {
 		name    string
@@ -450,7 +496,9 @@ func TestControllerReadyWorkRefusesAfterAFailedAPIConfigWriteChangedDisk(t *test
 			if !f.dirty.Load() {
 				t.Fatal("the failed API write that changed disk did not mark the reload pending")
 			}
-			f.requireRefuses(t, "after a failed API write changed disk")
+			// The write ended; only the dirty flag marks its reload pending, so
+			// the read answers from the config the controller has published.
+			f.requireAnswers(t, "after a failed API write changed disk")
 
 			if err := os.RemoveAll(sitePath); err != nil {
 				t.Fatalf("remove .gc/site.toml: %v", err)
@@ -546,8 +594,11 @@ func TestControllerReadyWorkRefusesWhenAConfigChangeOvertakesTheRead(t *testing.
 			cs.freshness.beginChange()
 			cs.freshness.endChange()
 		}},
-		// The config watcher marks an edit it saw pending without beginning a change.
-		{name: "a change was marked pending", change: func(cs *controllerState) { cs.configDirty.Store(true) }},
+		// The config watcher marks an edit it saw pending without beginning a
+		// change. The read answers from the published config regardless: the
+		// flag records only that a reload is due, and the config and stores the
+		// read holds are one generation whatever it reads.
+		{name: "a change was marked pending", change: func(cs *controllerState) { cs.configDirty.Store(true) }, answers: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cs := newReadyWorkSplitFixture(t).controller()
@@ -597,9 +648,9 @@ func writeFileMkdir(path, data string) error {
 	return os.WriteFile(path, []byte(data), 0o644)
 }
 
-// TestConfigFreshnessRead pins when a ready-work read may answer: nothing
-// pending, nothing in progress, the last reload applied or found no change, and
-// no change begun or marked pending while it answered.
+// TestConfigFreshnessRead pins when a controller read may answer: nothing in
+// progress, the last reload applied or found no change, and no change begun
+// while it answered.
 func TestConfigFreshnessRead(t *testing.T) {
 	reload := func(outcome reloadOutcome) func(*configFreshness) {
 		return func(f *configFreshness) {
@@ -612,15 +663,12 @@ func TestConfigFreshnessRead(t *testing.T) {
 		f.endChange()
 	}
 	for _, tc := range []struct {
-		name        string
-		dirty       bool
-		before      []func(*configFreshness)
-		during      func(*configFreshness)
-		dirtyDuring bool
-		want        bool
+		name   string
+		before []func(*configFreshness)
+		during func(*configFreshness)
+		want   bool
 	}{
 		{name: "current", want: true},
-		{name: "a change is pending", dirty: true},
 		{name: "a change is in progress", before: []func(*configFreshness){(*configFreshness).beginChange}},
 		{name: "the last reload applied", before: []func(*configFreshness){reload(reloadOutcomeApplied)}, want: true},
 		{name: "the last reload found no change", before: []func(*configFreshness){reload(reloadOutcomeNoChange)}, want: true},
@@ -632,24 +680,17 @@ func TestConfigFreshnessRead(t *testing.T) {
 		{name: "an API write does not clear a failed reload", before: []func(*configFreshness){reload(reloadOutcomeFailed), apiWrite}},
 		{name: "a change began during the answer", during: (*configFreshness).beginChange},
 		{name: "a change began and ended during the answer", during: apiWrite},
-		// The config watcher marks an edit it saw pending without beginning a change.
-		{name: "a change was marked pending during the answer", dirtyDuring: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var fresh configFreshness
 			for _, step := range tc.before {
 				step(&fresh)
 			}
-			var dirty atomic.Bool
-			dirty.Store(tc.dirty)
 			answers := 0
-			got := fresh.read(&dirty, func() {
+			got := fresh.read(func() {
 				answers++
 				if tc.during != nil {
 					tc.during(&fresh)
-				}
-				if tc.dirtyDuring {
-					dirty.Store(true)
 				}
 			})
 			if got != tc.want {
@@ -660,16 +701,6 @@ func TestConfigFreshnessRead(t *testing.T) {
 			}
 		})
 	}
-	t.Run("a state without a dirty flag reads on the marker alone", func(t *testing.T) {
-		var fresh configFreshness
-		if !fresh.read(nil, func() {}) {
-			t.Fatal("read with no dirty flag refused a current config")
-		}
-		fresh.beginChange()
-		if fresh.read(nil, func() {}) {
-			t.Fatal("read with no dirty flag answered while a change is in progress")
-		}
-	})
 	t.Run("a runtime without an API state keeps no marker", func(t *testing.T) {
 		fresh := (&CityRuntime{}).freshness()
 		if fresh != nil {
@@ -1043,16 +1074,14 @@ func TestReadyUntilUnblockedIsRefusedOffTheInProgressArm(t *testing.T) {
 }
 
 // TestReadyFallsBackToTheInProcessReadOnAnyControllerFailure pins the safe
-// route: a controller that refuses (here a pending config reload) is answered
-// by the in-process read, which on this city fails loud on its broken rig,
-// exactly as `gc ready` did before the endpoint existed.
+// route: a controller that refuses (here, a serving rig whose store it does
+// not hold) is answered by the in-process read, which on this city fails loud
+// on its broken rig, exactly as `gc ready` did before the endpoint existed.
 func TestReadyFallsBackToTheInProcessReadOnAnyControllerFailure(t *testing.T) {
 	newReadyCityWithBrokenRig(t)
 	f := newReadyWorkSplitFixture(t)
+	delete(f.rigs, "bravo")
 	cs := f.controller()
-	var dirty atomic.Bool
-	dirty.Store(true)
-	cs.configDirty = &dirty
 	client := readyWorkTestServer(t, cs)
 	prev := readyAPIClient
 	readyAPIClient = func(string) (*api.Client, string) { return client, "" }

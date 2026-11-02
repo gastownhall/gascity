@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"io"
+	"maps"
 	"reflect"
 	"strconv"
 	"strings"
@@ -3078,6 +3079,16 @@ func TestRequestWithScaleDemandProvenanceRebindsWorktreeEvidence(t *testing.T) {
 	if got.WorktreeError != "conflicting evidence" {
 		t.Errorf("WorktreeError = %q, want the trimmed error for gc-bad", got.WorktreeError)
 	}
+
+	demand.BindingResident = map[string]bool{"gc-new": true}
+	got = requestWithScaleDemandProvenance(SessionRequest{WorkBeadID: "gc-old"}, demand, "gc-new")
+	if !got.WorkBindingResident {
+		t.Errorf("WorkBindingResident = false for a binding-resident bead, want true")
+	}
+	got = requestWithScaleDemandProvenance(SessionRequest{WorkBeadID: "gc-new", WorkBindingResident: true}, demand, "gc-bad")
+	if got.WorkBindingResident {
+		t.Errorf("WorkBindingResident = true carried onto gc-bad, want it rebound to false")
+	}
 }
 
 // Unusable worktree ownership evidence must be distinguishable from an
@@ -3155,5 +3166,57 @@ func TestVerifiedPoolTriggerWorkDirAcceptsCanonicalStoreRefSpelling(t *testing.T
 	_, err = verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req)
 	if err == nil || !strings.Contains(err.Error(), mismatch) {
 		t.Errorf("rig:a vs rig:b err = %v, want a store mismatch", err)
+	}
+}
+
+// A row read from a relocated class binding is grouped under the city key,
+// but its owner is its own gc.root_store_ref, which the spec carries. The
+// store comparison yields to that owner for binding-resident rows only, and
+// never bypasses the bead check.
+func TestVerifiedPoolTriggerWorkDirBindingResidentDefersToRowOwner(t *testing.T) {
+	const mismatch = "does not match request store"
+
+	req := SessionRequest{
+		WorkBeadID:          "gc-a",
+		WorkStoreRef:        "city",
+		WorkBindingResident: true,
+		WorktreeSpec:        &worktree.Spec{BeadID: "gc-a", StoreRef: "rig:alpha"},
+	}
+	_, err := verifiedPoolTriggerWorkDir(nil, nil, "alpha/pool", req)
+	if err != nil && strings.Contains(err.Error(), mismatch) {
+		t.Errorf("binding-resident row owned by rig:alpha rejected as a store mismatch: %v", err)
+	}
+
+	req.WorkBindingResident = false
+	_, err = verifiedPoolTriggerWorkDir(nil, nil, "alpha/pool", req)
+	if err == nil || !strings.Contains(err.Error(), mismatch) {
+		t.Errorf("non-binding city row with rig:alpha evidence err = %v, want a store mismatch", err)
+	}
+
+	req.WorkBindingResident = true
+	req.WorktreeSpec = &worktree.Spec{BeadID: "gc-b", StoreRef: "rig:alpha"}
+	_, err = verifiedPoolTriggerWorkDir(nil, nil, "alpha/pool", req)
+	if err == nil || !strings.Contains(err.Error(), "does not match request bead") {
+		t.Errorf("binding-resident bead mismatch err = %v, want a bead mismatch", err)
+	}
+}
+
+// The demand merge keeps the binding-resident mark for each merged id, and
+// only for those ids.
+func TestMergeCollectedDemandKeepsBindingResident(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "pool", Dir: "alpha"}}}
+	in := collectedDemand{
+		DefaultProbed: true,
+		DefaultCounts: map[string]int{"alpha/pool": 2},
+		DefaultDemand: map[string]scaleCheckDemand{"alpha/pool": {
+			WorkBeadIDs:     []string{"gc-bind", "gc-rig", "gc-over"},
+			StoreRefs:       map[string]string{"gc-bind": "city", "gc-rig": "alpha", "gc-over": "city"},
+			BindingResident: map[string]bool{"gc-bind": true, "gc-over": true},
+		}},
+	}
+	got := mergeCollectedDemand(cfg, in).ScaleCheckDemand["alpha/pool"]
+	want := map[string]bool{"gc-bind": true}
+	if !maps.Equal(got.BindingResident, want) {
+		t.Errorf("merged BindingResident = %v, want %v", got.BindingResident, want)
 	}
 }
