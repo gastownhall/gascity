@@ -435,6 +435,36 @@ func TestDesiredRowLaunchRefreshClearsMissingProviderFields(t *testing.T) {
 	}
 }
 
+// TestDesiredRowLaunchRefreshClearsStaleFieldsWithoutNameChange is A7's
+// already-corrupted half of #8539: a row whose provider name already matches
+// the resolution but whose family/resume fields still hold the previous
+// provider's values must clear them — a refresh gated on the provider name
+// changing cannot repair that residue, and the provider key itself must not
+// be rewritten when the name did not change.
+func TestDesiredRowLaunchRefreshClearsStaleFieldsWithoutNameChange(t *testing.T) {
+	cfg := identityCity()
+	claude := &config.ResolvedProvider{Name: "claude", BuiltinAncestor: "claude", ResumeFlag: "--resume", ResumeStyle: "flag"}
+	tp := TemplateParams{TemplateName: "worker", InstanceName: "worker-2", PoolSlot: 2, WakeMode: "fresh", Command: "claude", ResolvedProvider: claude}
+	seat := session.Info{Template: "worker", SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "2", AgentName: "worker-2", Type: session.BeadType, MetadataState: "asleep"}
+	stale := rowRefreshKeys{
+		"wake_mode": "fresh", "continuation_epoch": "1", "session_key": "k-1",
+		"command": "claude", "provider": "claude", "provider_kind": "codex", "builtin_ancestor": "codex",
+		"resume_flag": "-c", "resume_style": "command", "resume_command": "codex resume {{.SessionKey}}", "session_id_flag": "--session-id",
+	}
+	id := desiredRowIdentity(cfg, tp, seat, stale)
+	want := session.MetadataPatch{
+		"provider_kind": "", "builtin_ancestor": "",
+		"resume_flag": "--resume", "resume_style": "flag",
+		"resume_command": "", "session_id_flag": "",
+	}
+	if !maps.Equal(id.Meta, want) {
+		t.Fatalf("same-name stale: meta %v, want %v with the stale fields cleared", id.Meta, want)
+	}
+	if _, ok := id.Meta["provider"]; ok {
+		t.Fatalf("provider rewritten without a name change: %v", id.Meta)
+	}
+}
+
 // Kills the census retry trigger reading other legs (the C7d-1 review's
 // G05): the live check reads the sessions store alone, so a row on a rig
 // leg carrying the alias does not hold it; one on the row's own leg does.

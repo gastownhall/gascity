@@ -5597,6 +5597,114 @@ func TestSyncSessionBeads_ProviderProjectionClearsMissingFields(t *testing.T) {
 	}
 }
 
+// TestSyncSessionBeads_ProviderProjectionClearsStaleFieldsWithoutNameChange
+// is #8539's already-corrupted half: a refresh gated on the provider name
+// changing cannot repair a bead whose provider name was already updated
+// while its sibling fields stayed pinned at the previous provider's values
+// (the residue a gc-rhp36-era pass left), nor a bead whose provider kept
+// its name while its config dropped fields. The clear follows the
+// resolution, not the name change.
+func TestSyncSessionBeads_ProviderProjectionClearsStaleFieldsWithoutNameChange(t *testing.T) {
+	// Scenario 1: the corrupted row — the provider name already reads the
+	// new provider, the family/resume fields still the old one's.
+	store := beads.NewMemStore()
+	cs := &countingStore{Store: store}
+	clk := &clock.Fake{Time: time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	_ = sp.Start(context.TODO(), "worker", runtime.Config{Command: "claude chat"})
+	ds := map[string]TemplateParams{
+		"worker": {
+			TemplateName: "worker",
+			Command:      "codex-wrap chat",
+			ResolvedProvider: &config.ResolvedProvider{
+				Name: "codex-wrap", BuiltinAncestor: "codex",
+				ResumeFlag: "-c", ResumeStyle: "command",
+				ResumeCommand: "codex-wrap resume {{.SessionKey}}", SessionIDFlag: "--session-id",
+			},
+		},
+	}
+	var stderr bytes.Buffer
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	b := allSessionBeads(t, cs)[0]
+	// A partial refresh updated the name and command alone.
+	for k, v := range map[string]string{"command": "claude chat", "provider": "claude"} {
+		if err := cs.SetMetadata(b.ID, k, v); err != nil {
+			t.Fatalf("SetMetadata(%s): %v", k, err)
+		}
+	}
+	ds["worker"] = TemplateParams{
+		TemplateName: "worker",
+		Command:      "claude chat",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name: "claude", BuiltinAncestor: "claude",
+			ResumeFlag: "--resume", ResumeStyle: "flag",
+		},
+	}
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	for _, c := range []struct{ key, want string }{
+		{"provider", "claude"},
+		{"provider_kind", ""},
+		{"builtin_ancestor", ""},
+		{"resume_flag", "--resume"},
+		{"resume_style", "flag"},
+		{"resume_command", ""},
+		{"session_id_flag", ""},
+	} {
+		if got := allSessionBeads(t, cs)[0].Metadata[c.key]; got != c.want {
+			t.Errorf("corrupted row: %s = %q, want %q (the clear must not be gated on a provider-name change)", c.key, got, c.want)
+		}
+	}
+
+	// Scenario 2: the provider keeps its name while its config drops the
+	// resume command and the session-id flag.
+	store2 := beads.NewMemStore()
+	cs2 := &countingStore{Store: store2}
+	clk2 := &clock.Fake{Time: time.Date(2026, 11, 2, 11, 0, 0, 0, time.UTC)}
+	sp2 := runtime.NewFake()
+	_ = sp2.Start(context.TODO(), "worker", runtime.Config{Command: "claude-max chat"})
+	ds2 := map[string]TemplateParams{
+		"worker": {
+			TemplateName: "worker",
+			Command:      "claude-max chat",
+			ResolvedProvider: &config.ResolvedProvider{
+				Name: "claude-max", BuiltinAncestor: "claude",
+				ResumeFlag: "--resume", ResumeStyle: "flag",
+				ResumeCommand: "claude-max --resume {{.SessionKey}}", SessionIDFlag: "--session-id",
+			},
+		},
+	}
+	var stderr2 bytes.Buffer
+	syncSessionBeads("", cs2, ds2, sp2, allConfiguredDS(ds2), nil, clk2, &stderr2, false)
+	ds2["worker"] = TemplateParams{
+		TemplateName: "worker",
+		Command:      "claude-max chat",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name: "claude-max", BuiltinAncestor: "claude",
+			ResumeFlag: "--resume", ResumeStyle: "flag",
+		},
+	}
+	clk2.Advance(time.Minute)
+	syncSessionBeads("", cs2, ds2, sp2, allConfiguredDS(ds2), nil, clk2, &stderr2, false)
+	for _, c := range []struct{ key, want string }{
+		{"provider", "claude-max"},
+		{"provider_kind", "claude"},
+		{"builtin_ancestor", "claude"},
+		{"resume_flag", "--resume"},
+		{"resume_style", "flag"},
+		{"resume_command", ""},
+		{"session_id_flag", ""},
+	} {
+		if got := allSessionBeads(t, cs2)[0].Metadata[c.key]; got != c.want {
+			t.Errorf("same-name removal: %s = %q, want %q (fields the config dropped clear without a name change)", c.key, got, c.want)
+		}
+	}
+
+	if stderr.Len() > 0 || stderr2.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s%s", stderr.String(), stderr2.String())
+	}
+}
+
 func TestSyncSessionBeadsWithSnapshot_RefreshesMissingNamedSessionFromStore(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
