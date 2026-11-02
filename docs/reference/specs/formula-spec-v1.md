@@ -323,6 +323,17 @@ routing-injected values > formula-level `default`s. Under v2 the `issue`
 injection is replaced by the reserved `{{convoy_id}}` derivation, and
 `issue` survives there only as a deprecated compat alias.
 
+A formula order (`[order] formula = ...`, fired by the orchestrator or by
+`gc order run`) gets the same invocation context, with the same
+precedence: its dispatch args (`gc order run --var`) win, then the
+`formula_vars` of the order's rig, then `rig_name` (the order's rig, empty
+for a city order) and `binding_name` / `binding_prefix` for the import
+binding of the pack that declared the order. The binding variables are set
+only when that pack has exactly one binding; a pack imported under two
+bindings is discovered as one order, so those names stay unset and a
+reference to them fails to resolve. These describe the order instance, not
+its pool, and they do not satisfy a declared `[order.params]` entry.
+
 ### 1.5. Conditions
 
 A step `condition` is a compile-time include/exclude filter evaluated
