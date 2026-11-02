@@ -67,7 +67,7 @@ func TestRouteNotificationDispatchToIdleNamedClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	if closer, ok := work.(interface{ CloseStore() error }); ok {
-		defer closer.CloseStore()
+		defer func() { _ = closer.CloseStore() }()
 	}
 	claimStore, ok := work.(interface {
 		Claim(string, string) (beads.Bead, bool, error)
