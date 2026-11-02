@@ -194,6 +194,33 @@ func TestValidateDurationsBadDaemonFields(t *testing.T) {
 	}
 }
 
+func TestValidateDurationsDriftDeferralEscalateAfter(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want string
+	}{
+		{"", ""},
+		{"2h", ""},
+		{"an hour", "[daemon] drift_deferral_escalate_after = \"an hour\" is not a valid duration"},
+		{"0s", "[daemon] drift_deferral_escalate_after = \"0s\" must be a positive duration"},
+		{"-1m", "[daemon] drift_deferral_escalate_after = \"-1m\" must be a positive duration"},
+	} {
+		t.Run(tc.raw, func(t *testing.T) {
+			cfg := &City{Daemon: DaemonConfig{DriftDeferralEscalateAfter: tc.raw}}
+			warnings := ValidateDurations(cfg, "city.toml")
+			if tc.want == "" {
+				if len(warnings) != 0 {
+					t.Fatalf("expected no warnings, got %v", warnings)
+				}
+				return
+			}
+			if len(warnings) != 1 || !strings.Contains(warnings[0], tc.want) {
+				t.Fatalf("warnings = %v, want one containing %q", warnings, tc.want)
+			}
+		})
+	}
+}
+
 func TestValidateDurationsBadBeadPolicyDuration(t *testing.T) {
 	cfg := &City{
 		Beads: BeadsConfig{
