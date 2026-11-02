@@ -851,19 +851,19 @@ func (e SessionPendingClearedPayloadReason) Valid() bool {
 
 // Defines values for SessionProgramStatusKind.
 const (
-	Auth       SessionProgramStatusKind = "auth"
-	Permission SessionProgramStatusKind = "permission"
-	Question   SessionProgramStatusKind = "question"
+	SessionProgramStatusKindAuth       SessionProgramStatusKind = "auth"
+	SessionProgramStatusKindPermission SessionProgramStatusKind = "permission"
+	SessionProgramStatusKindQuestion   SessionProgramStatusKind = "question"
 )
 
 // Valid indicates whether the value is a known member of the SessionProgramStatusKind enum.
 func (e SessionProgramStatusKind) Valid() bool {
 	switch e {
-	case Auth:
+	case SessionProgramStatusKindAuth:
 		return true
-	case Permission:
+	case SessionProgramStatusKindPermission:
 		return true
-	case Question:
+	case SessionProgramStatusKindQuestion:
 		return true
 	default:
 		return false
@@ -891,6 +891,261 @@ func (e SessionProgramStatusState) Valid() bool {
 	case SessionProgramStatusStateIdle:
 		return true
 	case SessionProgramStatusStateWorking:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionProgramStatusShadowPayloadKind.
+const (
+	SessionProgramStatusShadowPayloadKindAuth       SessionProgramStatusShadowPayloadKind = "auth"
+	SessionProgramStatusShadowPayloadKindPermission SessionProgramStatusShadowPayloadKind = "permission"
+	SessionProgramStatusShadowPayloadKindQuestion   SessionProgramStatusShadowPayloadKind = "question"
+)
+
+// Valid indicates whether the value is a known member of the SessionProgramStatusShadowPayloadKind enum.
+func (e SessionProgramStatusShadowPayloadKind) Valid() bool {
+	switch e {
+	case SessionProgramStatusShadowPayloadKindAuth:
+		return true
+	case SessionProgramStatusShadowPayloadKindPermission:
+		return true
+	case SessionProgramStatusShadowPayloadKindQuestion:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionProgramStatusShadowPayloadPoint.
+const (
+	ClaimNudgeHold    SessionProgramStatusShadowPayloadPoint = "claim_nudge_hold"
+	DrainReminder     SessionProgramStatusShadowPayloadPoint = "drain_reminder"
+	EscapeResend      SessionProgramStatusShadowPayloadPoint = "escape_resend"
+	ExecutionBackstop SessionProgramStatusShadowPayloadPoint = "execution_backstop"
+	InterruptSettle   SessionProgramStatusShadowPayloadPoint = "interrupt_settle"
+	Observation       SessionProgramStatusShadowPayloadPoint = "observation"
+	Pending           SessionProgramStatusShadowPayloadPoint = "pending"
+	ProvedIdle        SessionProgramStatusShadowPayloadPoint = "proved_idle"
+	QueuedDelivery    SessionProgramStatusShadowPayloadPoint = "queued_delivery"
+	Readiness         SessionProgramStatusShadowPayloadPoint = "readiness"
+	StartupLadder     SessionProgramStatusShadowPayloadPoint = "startup_ladder"
+	SubmitConfirm     SessionProgramStatusShadowPayloadPoint = "submit_confirm"
+	TypingGate        SessionProgramStatusShadowPayloadPoint = "typing_gate"
+	WaitForIdle       SessionProgramStatusShadowPayloadPoint = "wait_for_idle"
+	WaitIdlePreread   SessionProgramStatusShadowPayloadPoint = "wait_idle_preread"
+	WorkLadder        SessionProgramStatusShadowPayloadPoint = "work_ladder"
+)
+
+// Valid indicates whether the value is a known member of the SessionProgramStatusShadowPayloadPoint enum.
+func (e SessionProgramStatusShadowPayloadPoint) Valid() bool {
+	switch e {
+	case ClaimNudgeHold:
+		return true
+	case DrainReminder:
+		return true
+	case EscapeResend:
+		return true
+	case ExecutionBackstop:
+		return true
+	case InterruptSettle:
+		return true
+	case Observation:
+		return true
+	case Pending:
+		return true
+	case ProvedIdle:
+		return true
+	case QueuedDelivery:
+		return true
+	case Readiness:
+		return true
+	case StartupLadder:
+		return true
+	case SubmitConfirm:
+		return true
+	case TypingGate:
+		return true
+	case WaitForIdle:
+		return true
+	case WaitIdlePreread:
+		return true
+	case WorkLadder:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionProgramStatusShadowPayloadProgram.
+const (
+	SessionProgramStatusShadowPayloadProgramBusy          SessionProgramStatusShadowPayloadProgram = "busy"
+	SessionProgramStatusShadowPayloadProgramConfirmed     SessionProgramStatusShadowPayloadProgram = "confirmed"
+	SessionProgramStatusShadowPayloadProgramHold          SessionProgramStatusShadowPayloadProgram = "hold"
+	SessionProgramStatusShadowPayloadProgramIdle          SessionProgramStatusShadowPayloadProgram = "idle"
+	SessionProgramStatusShadowPayloadProgramIndeterminate SessionProgramStatusShadowPayloadProgram = "indeterminate"
+	SessionProgramStatusShadowPayloadProgramNoHold        SessionProgramStatusShadowPayloadProgram = "no_hold"
+	SessionProgramStatusShadowPayloadProgramNoResend      SessionProgramStatusShadowPayloadProgram = "no_resend"
+	SessionProgramStatusShadowPayloadProgramNone          SessionProgramStatusShadowPayloadProgram = "none"
+	SessionProgramStatusShadowPayloadProgramNotReady      SessionProgramStatusShadowPayloadProgram = "not_ready"
+	SessionProgramStatusShadowPayloadProgramPending       SessionProgramStatusShadowPayloadProgram = "pending"
+	SessionProgramStatusShadowPayloadProgramReady         SessionProgramStatusShadowPayloadProgram = "ready"
+	SessionProgramStatusShadowPayloadProgramResend        SessionProgramStatusShadowPayloadProgram = "resend"
+	SessionProgramStatusShadowPayloadProgramSettled       SessionProgramStatusShadowPayloadProgram = "settled"
+	SessionProgramStatusShadowPayloadProgramUnconfirmed   SessionProgramStatusShadowPayloadProgram = "unconfirmed"
+	SessionProgramStatusShadowPayloadProgramUnsettled     SessionProgramStatusShadowPayloadProgram = "unsettled"
+)
+
+// Valid indicates whether the value is a known member of the SessionProgramStatusShadowPayloadProgram enum.
+func (e SessionProgramStatusShadowPayloadProgram) Valid() bool {
+	switch e {
+	case SessionProgramStatusShadowPayloadProgramBusy:
+		return true
+	case SessionProgramStatusShadowPayloadProgramConfirmed:
+		return true
+	case SessionProgramStatusShadowPayloadProgramHold:
+		return true
+	case SessionProgramStatusShadowPayloadProgramIdle:
+		return true
+	case SessionProgramStatusShadowPayloadProgramIndeterminate:
+		return true
+	case SessionProgramStatusShadowPayloadProgramNoHold:
+		return true
+	case SessionProgramStatusShadowPayloadProgramNoResend:
+		return true
+	case SessionProgramStatusShadowPayloadProgramNone:
+		return true
+	case SessionProgramStatusShadowPayloadProgramNotReady:
+		return true
+	case SessionProgramStatusShadowPayloadProgramPending:
+		return true
+	case SessionProgramStatusShadowPayloadProgramReady:
+		return true
+	case SessionProgramStatusShadowPayloadProgramResend:
+		return true
+	case SessionProgramStatusShadowPayloadProgramSettled:
+		return true
+	case SessionProgramStatusShadowPayloadProgramUnconfirmed:
+		return true
+	case SessionProgramStatusShadowPayloadProgramUnsettled:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionProgramStatusShadowPayloadScrape.
+const (
+	SessionProgramStatusShadowPayloadScrapeBusy          SessionProgramStatusShadowPayloadScrape = "busy"
+	SessionProgramStatusShadowPayloadScrapeConfirmed     SessionProgramStatusShadowPayloadScrape = "confirmed"
+	SessionProgramStatusShadowPayloadScrapeHold          SessionProgramStatusShadowPayloadScrape = "hold"
+	SessionProgramStatusShadowPayloadScrapeIdle          SessionProgramStatusShadowPayloadScrape = "idle"
+	SessionProgramStatusShadowPayloadScrapeIndeterminate SessionProgramStatusShadowPayloadScrape = "indeterminate"
+	SessionProgramStatusShadowPayloadScrapeNoHold        SessionProgramStatusShadowPayloadScrape = "no_hold"
+	SessionProgramStatusShadowPayloadScrapeNoResend      SessionProgramStatusShadowPayloadScrape = "no_resend"
+	SessionProgramStatusShadowPayloadScrapeNone          SessionProgramStatusShadowPayloadScrape = "none"
+	SessionProgramStatusShadowPayloadScrapeNotReady      SessionProgramStatusShadowPayloadScrape = "not_ready"
+	SessionProgramStatusShadowPayloadScrapePending       SessionProgramStatusShadowPayloadScrape = "pending"
+	SessionProgramStatusShadowPayloadScrapeReady         SessionProgramStatusShadowPayloadScrape = "ready"
+	SessionProgramStatusShadowPayloadScrapeResend        SessionProgramStatusShadowPayloadScrape = "resend"
+	SessionProgramStatusShadowPayloadScrapeSettled       SessionProgramStatusShadowPayloadScrape = "settled"
+	SessionProgramStatusShadowPayloadScrapeUnconfirmed   SessionProgramStatusShadowPayloadScrape = "unconfirmed"
+	SessionProgramStatusShadowPayloadScrapeUnsettled     SessionProgramStatusShadowPayloadScrape = "unsettled"
+)
+
+// Valid indicates whether the value is a known member of the SessionProgramStatusShadowPayloadScrape enum.
+func (e SessionProgramStatusShadowPayloadScrape) Valid() bool {
+	switch e {
+	case SessionProgramStatusShadowPayloadScrapeBusy:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeConfirmed:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeHold:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeIdle:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeIndeterminate:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeNoHold:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeNoResend:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeNone:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeNotReady:
+		return true
+	case SessionProgramStatusShadowPayloadScrapePending:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeReady:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeResend:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeSettled:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeUnconfirmed:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeUnsettled:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionProgramStatusShadowPayloadState.
+const (
+	SessionProgramStatusShadowPayloadStateBlocked SessionProgramStatusShadowPayloadState = "blocked"
+	SessionProgramStatusShadowPayloadStateDone    SessionProgramStatusShadowPayloadState = "done"
+	SessionProgramStatusShadowPayloadStateError   SessionProgramStatusShadowPayloadState = "error"
+	SessionProgramStatusShadowPayloadStateIdle    SessionProgramStatusShadowPayloadState = "idle"
+	SessionProgramStatusShadowPayloadStateWorking SessionProgramStatusShadowPayloadState = "working"
+)
+
+// Valid indicates whether the value is a known member of the SessionProgramStatusShadowPayloadState enum.
+func (e SessionProgramStatusShadowPayloadState) Valid() bool {
+	switch e {
+	case SessionProgramStatusShadowPayloadStateBlocked:
+		return true
+	case SessionProgramStatusShadowPayloadStateDone:
+		return true
+	case SessionProgramStatusShadowPayloadStateError:
+		return true
+	case SessionProgramStatusShadowPayloadStateIdle:
+		return true
+	case SessionProgramStatusShadowPayloadStateWorking:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionProgramStatusShadowPayloadValidity.
+const (
+	Cleared    SessionProgramStatusShadowPayloadValidity = "cleared"
+	Exited     SessionProgramStatusShadowPayloadValidity = "exited"
+	NotArmed   SessionProgramStatusShadowPayloadValidity = "not_armed"
+	ReaderLost SessionProgramStatusShadowPayloadValidity = "reader_lost"
+	Silent     SessionProgramStatusShadowPayloadValidity = "silent"
+	Unread     SessionProgramStatusShadowPayloadValidity = "unread"
+	Valid      SessionProgramStatusShadowPayloadValidity = "valid"
+)
+
+// Valid indicates whether the value is a known member of the SessionProgramStatusShadowPayloadValidity enum.
+func (e SessionProgramStatusShadowPayloadValidity) Valid() bool {
+	switch e {
+	case Cleared:
+		return true
+	case Exited:
+		return true
+	case NotArmed:
+		return true
+	case ReaderLost:
+		return true
+	case Silent:
+		return true
+	case Unread:
+		return true
+	case Valid:
 		return true
 	default:
 		return false
@@ -1265,19 +1520,19 @@ func (e SessionTurnCapabilitiesLink) Valid() bool {
 
 // Defines values for SessionTurnCapabilitiesStart.
 const (
-	Boundary SessionTurnCapabilitiesStart = "boundary"
-	None     SessionTurnCapabilitiesStart = "none"
-	Recorded SessionTurnCapabilitiesStart = "recorded"
+	SessionTurnCapabilitiesStartBoundary SessionTurnCapabilitiesStart = "boundary"
+	SessionTurnCapabilitiesStartNone     SessionTurnCapabilitiesStart = "none"
+	SessionTurnCapabilitiesStartRecorded SessionTurnCapabilitiesStart = "recorded"
 )
 
 // Valid indicates whether the value is a known member of the SessionTurnCapabilitiesStart enum.
 func (e SessionTurnCapabilitiesStart) Valid() bool {
 	switch e {
-	case Boundary:
+	case SessionTurnCapabilitiesStartBoundary:
 		return true
-	case None:
+	case SessionTurnCapabilitiesStartNone:
 		return true
-	case Recorded:
+	case SessionTurnCapabilitiesStartRecorded:
 		return true
 	default:
 		return false
@@ -1850,6 +2105,18 @@ type AdapterCapabilities struct {
 type AdapterEventPayload struct {
 	AccountId string `json:"account_id"`
 	Provider  string `json:"provider"`
+}
+
+// AgentClaimsPayload defines model for AgentClaimsPayload.
+type AgentClaimsPayload struct {
+	Action   *string    `json:"action,omitempty"`
+	Cause    *string    `json:"cause,omitempty"`
+	Episode  string     `json:"episode"`
+	Provider string     `json:"provider"`
+	Seats    *int64     `json:"seats,omitempty"`
+	Since    time.Time  `json:"since"`
+	Template string     `json:"template"`
+	Until    *time.Time `json:"until,omitempty"`
 }
 
 // AgentCreateInputBody defines model for AgentCreateInputBody.
@@ -5380,6 +5647,72 @@ type SessionProgramStatusEvent struct {
 	ProgramStatus *SessionProgramStatus `json:"program_status,omitempty"`
 }
 
+// SessionProgramStatusShadowPayload defines model for SessionProgramStatusShadowPayload.
+type SessionProgramStatusShadowPayload struct {
+	// Agree Whether the two readings agree.
+	Agree bool `json:"agree"`
+
+	// Dropped Comparisons this process dropped since its last recorded one.
+	Dropped *int64 `json:"dropped,omitempty"`
+
+	// Family The session's provider family (resolved built-in ancestor).
+	Family *string `json:"family,omitempty"`
+
+	// HoldLive Whether a hold derived from the record is still within its bound.
+	HoldLive bool `json:"hold_live"`
+
+	// Kind The blocked state's kind.
+	Kind *SessionProgramStatusShadowPayloadKind `json:"kind,omitempty"`
+
+	// LatencyMs Program signal minus scrape signal, in milliseconds (timed points only).
+	LatencyMs *int64 `json:"latency_ms,omitempty"`
+
+	// Point The decision point.
+	Point SessionProgramStatusShadowPayloadPoint `json:"point"`
+
+	// Program What the program-status record would decide.
+	Program SessionProgramStatusShadowPayloadProgram `json:"program"`
+
+	// ReaderVerified Whether the process table confirmed the capture reader.
+	ReaderVerified bool `json:"reader_verified"`
+
+	// RecordAgeMs How long the record's root has been in its state, in milliseconds.
+	RecordAgeMs int64 `json:"record_age_ms"`
+
+	// Scrape Today's screen reading, which decided.
+	Scrape SessionProgramStatusShadowPayloadScrape `json:"scrape"`
+
+	// SessionId The session's bead id, when the decision point knows it.
+	SessionId *string `json:"session_id,omitempty"`
+
+	// State The record's root state (valid readings only).
+	State *SessionProgramStatusShadowPayloadState `json:"state,omitempty"`
+
+	// Timed Whether latency_ms was measured.
+	Timed *bool `json:"timed,omitempty"`
+
+	// Validity The record reading's validity.
+	Validity SessionProgramStatusShadowPayloadValidity `json:"validity"`
+}
+
+// SessionProgramStatusShadowPayloadKind The blocked state's kind.
+type SessionProgramStatusShadowPayloadKind string
+
+// SessionProgramStatusShadowPayloadPoint The decision point.
+type SessionProgramStatusShadowPayloadPoint string
+
+// SessionProgramStatusShadowPayloadProgram What the program-status record would decide.
+type SessionProgramStatusShadowPayloadProgram string
+
+// SessionProgramStatusShadowPayloadScrape Today's screen reading, which decided.
+type SessionProgramStatusShadowPayloadScrape string
+
+// SessionProgramStatusShadowPayloadState The record's root state (valid readings only).
+type SessionProgramStatusShadowPayloadState string
+
+// SessionProgramStatusShadowPayloadValidity The record reading's validity.
+type SessionProgramStatusShadowPayloadValidity string
+
 // SessionRawMessageFrame Provider-native transcript frame. Gas City forwards the exact JSON the provider wrote to its session log, so the shape is provider-specific and can be any JSON value. The producing provider is identified by the Provider field on the enclosing envelope; consumers dispatch per-provider frame parsing keyed by that identifier.
 type SessionRawMessageFrame = interface{}
 
@@ -7317,6 +7650,38 @@ type TypedEventStreamEnvelope struct {
 	union json.RawMessage
 }
 
+// TypedEventStreamEnvelopeAgentClaimsResumed defines model for TypedEventStreamEnvelopeAgentClaimsResumed.
+type TypedEventStreamEnvelopeAgentClaimsResumed struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          AgentClaimsPayload       `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeAgentClaimsStalled defines model for TypedEventStreamEnvelopeAgentClaimsStalled.
+type TypedEventStreamEnvelopeAgentClaimsStalled struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          AgentClaimsPayload       `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeBackendCredentialResolved defines model for TypedEventStreamEnvelopeBackendCredentialResolved.
 type TypedEventStreamEnvelopeBackendCredentialResolved struct {
 	Actor            string                           `json:"actor"`
@@ -8757,6 +9122,22 @@ type TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline struct {
 	Workflow         *WorkflowEventProjection                     `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionProgramStatusShadow defines model for TypedEventStreamEnvelopeSessionProgramStatusShadow.
+type TypedEventStreamEnvelopeSessionProgramStatusShadow struct {
+	Actor            string                            `json:"actor"`
+	DependsOnStepIds *[]string                         `json:"depends_on_step_ids,omitempty"`
+	Message          *string                           `json:"message,omitempty"`
+	Payload          SessionProgramStatusShadowPayload `json:"payload"`
+	RunId            *string                           `json:"run_id,omitempty"`
+	Seq              int64                             `json:"seq"`
+	SessionId        *string                           `json:"session_id,omitempty"`
+	StepId           *string                           `json:"step_id,omitempty"`
+	Subject          *string                           `json:"subject,omitempty"`
+	Ts               time.Time                         `json:"ts"`
+	Type             string                            `json:"type"`
+	Workflow         *WorkflowEventProjection          `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionQuarantined defines model for TypedEventStreamEnvelopeSessionQuarantined.
 type TypedEventStreamEnvelopeSessionQuarantined struct {
 	Actor            string                   `json:"actor"`
@@ -9304,6 +9685,40 @@ type TypedEventStreamEnvelopeWorkerOperation struct {
 // TypedTaggedEventStreamEnvelope Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.
 type TypedTaggedEventStreamEnvelope struct {
 	union json.RawMessage
+}
+
+// TypedTaggedEventStreamEnvelopeAgentClaimsResumed defines model for TypedTaggedEventStreamEnvelopeAgentClaimsResumed.
+type TypedTaggedEventStreamEnvelopeAgentClaimsResumed struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          AgentClaimsPayload       `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeAgentClaimsStalled defines model for TypedTaggedEventStreamEnvelopeAgentClaimsStalled.
+type TypedTaggedEventStreamEnvelopeAgentClaimsStalled struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          AgentClaimsPayload       `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeBackendCredentialResolved defines model for TypedTaggedEventStreamEnvelopeBackendCredentialResolved.
@@ -10836,6 +11251,23 @@ type TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline struct 
 	Workflow         *WorkflowEventProjection                     `json:"workflow,omitempty"`
 }
 
+// TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow defines model for TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow.
+type TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow struct {
+	Actor            string                            `json:"actor"`
+	City             string                            `json:"city"`
+	DependsOnStepIds *[]string                         `json:"depends_on_step_ids,omitempty"`
+	Message          *string                           `json:"message,omitempty"`
+	Payload          SessionProgramStatusShadowPayload `json:"payload"`
+	RunId            *string                           `json:"run_id,omitempty"`
+	Seq              int64                             `json:"seq"`
+	SessionId        *string                           `json:"session_id,omitempty"`
+	StepId           *string                           `json:"step_id,omitempty"`
+	Subject          *string                           `json:"subject,omitempty"`
+	Ts               time.Time                         `json:"ts"`
+	Type             string                            `json:"type"`
+	Workflow         *WorkflowEventProjection          `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelopeSessionQuarantined defines model for TypedTaggedEventStreamEnvelopeSessionQuarantined.
 type TypedTaggedEventStreamEnvelopeSessionQuarantined struct {
 	Actor            string                   `json:"actor"`
@@ -11562,6 +11994,9 @@ type WaitView struct {
 
 	// RegisteredEpoch Session continuation epoch at registration.
 	RegisteredEpoch *string `json:"registered_epoch,omitempty"`
+
+	// RegisteredResetPending True when the wait was registered while its session had a fresh restart pending: it belongs to the conversation that restart starts.
+	RegisteredResetPending *bool `json:"registered_reset_pending,omitempty"`
 
 	// SessionId Session bead ID the wait is registered against.
 	SessionId string `json:"session_id"`
@@ -13263,6 +13698,32 @@ func (t *EventPayload) MergeAdapterEventPayload(v AdapterEventPayload) error {
 	return err
 }
 
+// AsAgentClaimsPayload returns the union data inside the EventPayload as a AgentClaimsPayload
+func (t EventPayload) AsAgentClaimsPayload() (AgentClaimsPayload, error) {
+	var body AgentClaimsPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromAgentClaimsPayload overwrites any union data inside the EventPayload as the provided AgentClaimsPayload
+func (t *EventPayload) FromAgentClaimsPayload(v AgentClaimsPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeAgentClaimsPayload performs a merge with any union data inside the EventPayload, using the provided AgentClaimsPayload
+func (t *EventPayload) MergeAgentClaimsPayload(v AgentClaimsPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsBackendCredentialResolvedPayload returns the union data inside the EventPayload as a BackendCredentialResolvedPayload
 func (t EventPayload) AsBackendCredentialResolvedPayload() (BackendCredentialResolvedPayload, error) {
 	var body BackendCredentialResolvedPayload
@@ -14527,6 +14988,32 @@ func (t *EventPayload) FromSessionPoolSlotRetiredAtDrainDeadlinePayload(v Sessio
 
 // MergeSessionPoolSlotRetiredAtDrainDeadlinePayload performs a merge with any union data inside the EventPayload, using the provided SessionPoolSlotRetiredAtDrainDeadlinePayload
 func (t *EventPayload) MergeSessionPoolSlotRetiredAtDrainDeadlinePayload(v SessionPoolSlotRetiredAtDrainDeadlinePayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionProgramStatusShadowPayload returns the union data inside the EventPayload as a SessionProgramStatusShadowPayload
+func (t EventPayload) AsSessionProgramStatusShadowPayload() (SessionProgramStatusShadowPayload, error) {
+	var body SessionProgramStatusShadowPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionProgramStatusShadowPayload overwrites any union data inside the EventPayload as the provided SessionProgramStatusShadowPayload
+func (t *EventPayload) FromSessionProgramStatusShadowPayload(v SessionProgramStatusShadowPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionProgramStatusShadowPayload performs a merge with any union data inside the EventPayload, using the provided SessionProgramStatusShadowPayload
+func (t *EventPayload) MergeSessionProgramStatusShadowPayload(v SessionProgramStatusShadowPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -16807,6 +17294,62 @@ func (t SessionTranscriptGetResponse) MarshalJSON() ([]byte, error) {
 
 func (t *SessionTranscriptGetResponse) UnmarshalJSON(b []byte) error {
 	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsTypedEventStreamEnvelopeAgentClaimsResumed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeAgentClaimsResumed
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeAgentClaimsResumed() (TypedEventStreamEnvelopeAgentClaimsResumed, error) {
+	var body TypedEventStreamEnvelopeAgentClaimsResumed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeAgentClaimsResumed overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeAgentClaimsResumed
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeAgentClaimsResumed(v TypedEventStreamEnvelopeAgentClaimsResumed) error {
+	v.Type = "agent.claims_resumed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeAgentClaimsResumed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeAgentClaimsResumed
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeAgentClaimsResumed(v TypedEventStreamEnvelopeAgentClaimsResumed) error {
+	v.Type = "agent.claims_resumed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeAgentClaimsStalled returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeAgentClaimsStalled
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeAgentClaimsStalled() (TypedEventStreamEnvelopeAgentClaimsStalled, error) {
+	var body TypedEventStreamEnvelopeAgentClaimsStalled
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeAgentClaimsStalled overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeAgentClaimsStalled
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeAgentClaimsStalled(v TypedEventStreamEnvelopeAgentClaimsStalled) error {
+	v.Type = "agent.claims_stalled"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeAgentClaimsStalled performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeAgentClaimsStalled
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeAgentClaimsStalled(v TypedEventStreamEnvelopeAgentClaimsStalled) error {
+	v.Type = "agent.claims_stalled"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
 	return err
 }
 
@@ -19302,6 +19845,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionPoolSlotR
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionProgramStatusShadow returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionProgramStatusShadow
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionProgramStatusShadow() (TypedEventStreamEnvelopeSessionProgramStatusShadow, error) {
+	var body TypedEventStreamEnvelopeSessionProgramStatusShadow
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionProgramStatusShadow overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionProgramStatusShadow
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionProgramStatusShadow(v TypedEventStreamEnvelopeSessionProgramStatusShadow) error {
+	v.Type = "session.program_status_shadow"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionProgramStatusShadow performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionProgramStatusShadow
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionProgramStatusShadow(v TypedEventStreamEnvelopeSessionProgramStatusShadow) error {
+	v.Type = "session.program_status_shadow"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionQuarantined returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionQuarantined
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionQuarantined() (TypedEventStreamEnvelopeSessionQuarantined, error) {
 	var body TypedEventStreamEnvelopeSessionQuarantined
@@ -20298,6 +20869,10 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 	switch discriminator {
 	case "TypedEventStreamEnvelopeCustom":
 		return t.AsTypedEventStreamEnvelopeCustom()
+	case "agent.claims_resumed":
+		return t.AsTypedEventStreamEnvelopeAgentClaimsResumed()
+	case "agent.claims_stalled":
+		return t.AsTypedEventStreamEnvelopeAgentClaimsStalled()
 	case "backend.credential_resolved":
 		return t.AsTypedEventStreamEnvelopeBackendCredentialResolved()
 	case "bead.claim_failed":
@@ -20476,6 +21051,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionPendingCleared()
 	case "session.pool_slot_retired_at_drain_deadline":
 		return t.AsTypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline()
+	case "session.program_status_shadow":
+		return t.AsTypedEventStreamEnvelopeSessionProgramStatusShadow()
 	case "session.quarantined":
 		return t.AsTypedEventStreamEnvelopeSessionQuarantined()
 	case "session.reset_stalled":
@@ -20556,6 +21133,62 @@ func (t TypedEventStreamEnvelope) MarshalJSON() ([]byte, error) {
 
 func (t *TypedEventStreamEnvelope) UnmarshalJSON(b []byte) error {
 	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeAgentClaimsResumed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeAgentClaimsResumed
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeAgentClaimsResumed() (TypedTaggedEventStreamEnvelopeAgentClaimsResumed, error) {
+	var body TypedTaggedEventStreamEnvelopeAgentClaimsResumed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeAgentClaimsResumed overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeAgentClaimsResumed
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeAgentClaimsResumed(v TypedTaggedEventStreamEnvelopeAgentClaimsResumed) error {
+	v.Type = "agent.claims_resumed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeAgentClaimsResumed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeAgentClaimsResumed
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeAgentClaimsResumed(v TypedTaggedEventStreamEnvelopeAgentClaimsResumed) error {
+	v.Type = "agent.claims_resumed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeAgentClaimsStalled returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeAgentClaimsStalled
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeAgentClaimsStalled() (TypedTaggedEventStreamEnvelopeAgentClaimsStalled, error) {
+	var body TypedTaggedEventStreamEnvelopeAgentClaimsStalled
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeAgentClaimsStalled overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeAgentClaimsStalled
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeAgentClaimsStalled(v TypedTaggedEventStreamEnvelopeAgentClaimsStalled) error {
+	v.Type = "agent.claims_stalled"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeAgentClaimsStalled performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeAgentClaimsStalled
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeAgentClaimsStalled(v TypedTaggedEventStreamEnvelopeAgentClaimsStalled) error {
+	v.Type = "agent.claims_stalled"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
 	return err
 }
 
@@ -23051,6 +23684,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionProgramStatusShadow returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionProgramStatusShadow() (TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionProgramStatusShadow overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionProgramStatusShadow(v TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow) error {
+	v.Type = "session.program_status_shadow"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionProgramStatusShadow performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionProgramStatusShadow(v TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow) error {
+	v.Type = "session.program_status_shadow"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionQuarantined returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionQuarantined
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionQuarantined() (TypedTaggedEventStreamEnvelopeSessionQuarantined, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionQuarantined
@@ -24047,6 +24708,10 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 	switch discriminator {
 	case "TypedTaggedEventStreamEnvelopeCustom":
 		return t.AsTypedTaggedEventStreamEnvelopeCustom()
+	case "agent.claims_resumed":
+		return t.AsTypedTaggedEventStreamEnvelopeAgentClaimsResumed()
+	case "agent.claims_stalled":
+		return t.AsTypedTaggedEventStreamEnvelopeAgentClaimsStalled()
 	case "backend.credential_resolved":
 		return t.AsTypedTaggedEventStreamEnvelopeBackendCredentialResolved()
 	case "bead.claim_failed":
@@ -24225,6 +24890,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionPendingCleared()
 	case "session.pool_slot_retired_at_drain_deadline":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline()
+	case "session.program_status_shadow":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionProgramStatusShadow()
 	case "session.quarantined":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionQuarantined()
 	case "session.reset_stalled":

@@ -51,7 +51,11 @@ func mainExitCode(args []string, stdout, stderr io.Writer) int {
 	if handled, code := privateProductMetricsEntrypoint(args); handled {
 		return code
 	}
-	return run(args, stdout, stderr)
+	code := run(args, stdout, stderr)
+	// A process that recorded program-status shadow comparisons writes the
+	// ones still queued before it exits, bounded so exit never waits long.
+	flushProgramStatusShadow(programShadowFlushTimeout)
+	return code
 }
 
 // errExit is a sentinel error returned by cobra RunE functions to signal

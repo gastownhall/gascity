@@ -234,16 +234,42 @@ func ProgramCaptureHealerFor(p Provider, name string) (ProgramCaptureHealer, boo
 }
 
 // ProgramStatusComparison is one shadow-mode decision: today's reading beside
-// what the record would decide. Closed tokens only.
+// what the record would decide. Closed tokens only: no field carries program
+// text (title, msg) or prompt text.
 type ProgramStatusComparison struct {
-	Session   string
-	Family    string // provider family (resolved built-in ancestor); config data, not a role
-	Point     string // closed token, validated by the event payload enum
-	Scrape    string // closed token
-	Program   string // closed token
-	Status    ProgramStatus
-	LatencyMs int64 // program signal minus scrape signal; meaningful only when Timed
-	Timed     bool
+	Session   string             // the session's runtime name
+	SessionID string             // the session's bead id, when the point knows it
+	Family    string             // provider family (resolved built-in ancestor); config data, not a role
+	Point     ProgramStatusPoint // the decision point
+	Scrape    ProgramVerdict     // today's reading, which decided
+	Program   ProgramVerdict     // what the record-side rule would decide
+	Status    ProgramStatus      // the reading the record-side rule judged, at the decision
+	LatencyMs int64              // program signal minus scrape signal; meaningful only when Timed
+	Timed     bool               // a valid reading, Status or a later follow-up read, showed the program's signal
+	Dropped   int                // comparisons the emitter dropped, under pressure, since its last one
+	// HoldActivity is the runtime's last activity the rule judged hold
+	// liveness with ([ProgramStatus.HoldLive]); zero when it used none.
+	HoldActivity time.Time
+	// JudgedAt is when the rule judged; zero means when the comparison is
+	// recorded. With HoldActivity it makes the recorded hold liveness, and
+	// the record's recorded age, the rule's own.
+	JudgedAt time.Time
+}
+
+// JudgedTime is when the comparison's rule judged: JudgedAt, or recordedAt
+// when JudgedAt is zero.
+func (c ProgramStatusComparison) JudgedTime(recordedAt time.Time) time.Time {
+	if c.JudgedAt.IsZero() {
+		return recordedAt
+	}
+	return c.JudgedAt
+}
+
+// HoldLive is the hold liveness the comparison's rule judged with: the
+// reading's [ProgramStatus.HoldLive] under HoldActivity at
+// [ProgramStatusComparison.JudgedTime].
+func (c ProgramStatusComparison) HoldLive(recordedAt time.Time) bool {
+	return c.Status.HoldLive(c.HoldActivity, c.JudgedTime(recordedAt))
 }
 
 // ProgramStatusComparisonSink receives shadow comparisons. Implementations

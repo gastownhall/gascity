@@ -111,3 +111,45 @@ func TestSameSessionRestartDoesNotReachManagedDoltWatchdog(t *testing.T) {
 		t.Fatalf("started %v, want the resumed session %s", sp.started, info.ID)
 	}
 }
+
+// AC-7: a root whose parent is a tmux server is an orphan when its provider
+// does not claim it as a live runtime of its own (LiveUnlisted). An agent
+// that started a tmux server on a socket of its own leaves such a root
+// carrying the session's identity under any provider; this provider, like
+// subprocess and ACP, claims none of them. The restart terminates the root
+// and starts, and does not defer for as long as that tmux server lives.
+func TestSameSessionRestartTerminatesTmuxParentedRootItsProviderDoesNotClaim(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &procfsOrphanProvider{Fake: runtime.NewFake()}
+	city := t.TempDir()
+	mgr := newTestManager(t, store, sp, WithCityPath(city))
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	sp.terminated = nil
+	sp.started = nil
+
+	env := []string{"PATH=/usr/bin", "GC_SESSION_ID=" + info.ID, "GC_CITY_PATH=" + city}
+	root := t.TempDir()
+	const (
+		serverPID   = 4100
+		paneRootPID = 4101
+	)
+	writeFakeProcess(t, root, serverPID, 1, []string{"tmux: server"}, env)
+	writeFakeProcess(t, root, paneRootPID, serverPID, []string{"bash"}, append(env, "TMUX=/tmp/tmux-"+strconv.Itoa(os.Getuid())+"/agent-own,"+strconv.Itoa(serverPID)+",0"))
+	proctable.SetScanRootForTesting(t, root)
+
+	if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if len(sp.terminated) != 1 || sp.terminated[0] != paneRootPID {
+		t.Fatalf("pre-start orphan kill terminated %v, want the tmux-parented root %d (never its server %d)", sp.terminated, paneRootPID, serverPID)
+	}
+	if len(sp.started) != 1 || sp.started[0] != info.ID {
+		t.Fatalf("started %v, want the resumed session %s", sp.started, info.ID)
+	}
+}

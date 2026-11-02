@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 var (
@@ -2002,6 +2004,8 @@ func ProviderTerminalErrorReason(content string) string {
 		return "quota_exceeded"
 	case strings.Contains(lower, "quota exceeded") && !strings.Contains(lower, "disk quota"):
 		return "quota_exceeded"
+	case containsCreditBalanceStop(lower):
+		return "quota_exceeded"
 	default:
 		return ""
 	}
@@ -2029,6 +2033,89 @@ func ProviderResumeRefusalReason(content, sessionKey string) string {
 		}
 	}
 	return ""
+}
+
+// Claude Code's exhausted-credit stop phrases: the TUI's displayed stop and
+// the headless message.
+const (
+	creditBalanceStopPhrase         = "credit balance too low"
+	creditBalanceStopHeadlessPhrase = "credit balance is too low"
+)
+
+// The raw Anthropic API error for an exhausted credit balance, as Claude Code
+// renders it: an "API Error: 4xx" line whose JSON body carries the sentence
+// "Your credit balance is too low to access the Anthropic API". The sentence
+// starts about 90 columns in, so a narrow pane wraps it onto indented
+// continuation lines; it is matched with all whitespace removed so word and
+// mid-word wraps both join back up.
+const (
+	apiClientErrorPrefix      = "api error: 4"
+	apiCreditBalanceSentence  = "creditbalanceistoolowtoaccess"
+	apiErrorContinuationLines = 5
+)
+
+// containsCreditBalanceStop reports whether lowercased content shows Claude
+// Code's exhausted-credit stop as an error line of its own.
+//
+// The match is anchored rather than a bare substring because a terminal park
+// has no self-heal (it needs an explicit wake or an operator), so a false hit
+// on a session that merely quoted the phrase and then crashed is worse than a
+// miss, which degrades to ordinary crash counting.
+func containsCreditBalanceStop(lower string) bool {
+	lines := strings.Split(lower, "\n")
+	for i, line := range lines {
+		body := creditErrorBody(line)
+		if isCreditBalanceStopLine(body, creditBalanceStopPhrase) ||
+			isCreditBalanceStopLine(body, creditBalanceStopHeadlessPhrase) {
+			return true
+		}
+		if strings.HasPrefix(body, apiClientErrorPrefix) &&
+			strings.Contains(apiErrorBlock(lines[i:]), apiCreditBalanceSentence) {
+			return true
+		}
+	}
+	return false
+}
+
+// isCreditBalanceStopLine reports whether an error body is the stop phrase on
+// its own or followed only by Claude Code's " · " remedy separator (whatever
+// the remedy text, billing host, or clipping after it). Prose that wraps the
+// phrase to the start of a line continues with words and does not match.
+func isCreditBalanceStopLine(body, phrase string) bool {
+	rest, ok := strings.CutPrefix(body, phrase)
+	if !ok {
+		return false
+	}
+	rest = strings.TrimSpace(rest)
+	return rest == "" || strings.HasPrefix(rest, "·")
+}
+
+// apiErrorBlock joins an API error line (lines[0]) with its wrapped
+// continuation: up to apiErrorContinuationLines following lines that are
+// non-blank and indented, stopping at the first that is not. All whitespace is
+// dropped so a wrap at any column, even mid-word, rejoins the sentence, while
+// the bound keeps a later, unrelated line from completing the match.
+func apiErrorBlock(lines []string) string {
+	block := []string{lines[0]}
+	for _, line := range lines[1:] {
+		if len(block) > apiErrorContinuationLines || strings.TrimSpace(line) == "" {
+			break
+		}
+		if r, _ := utf8.DecodeRuneInString(line); !unicode.IsSpace(r) {
+			break
+		}
+		block = append(block, line)
+	}
+	return strings.Join(strings.Fields(strings.Join(block, "\n")), "")
+}
+
+// creditErrorBody returns line with its indentation and Claude Code's leading
+// "⎿" error marker trimmed. strings.TrimSpace trims Unicode space, so the
+// marker's no-break-space padding needs no special case.
+func creditErrorBody(line string) string {
+	body := strings.TrimSpace(line)
+	body = strings.TrimPrefix(body, "⎿")
+	return strings.TrimSpace(body)
 }
 
 // lineContainsAll reports whether any single line of content contains every
