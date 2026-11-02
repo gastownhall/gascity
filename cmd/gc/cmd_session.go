@@ -909,33 +909,33 @@ func renderSessionListFromAPI(cr api.CachedRead[[]SessionView], jsonOutput bool,
 	_ = w.Flush() //nolint:errcheck // best-effort stdout
 
 	if cr.AgeSeconds > sessionStateCacheAgeBannerThresholdSeconds {
-		fmt.Fprintln(stdout, sessionCacheAgeBanner(cr.AgeSeconds, "STATE")) //nolint:errcheck
+		fmt.Fprintln(stdout, sessionCacheAgeBanner(cr.AgeSeconds)) //nolint:errcheck
 	}
 	return 0
 }
 
 // sessionStateCacheAgeBannerThresholdSeconds is the cache-age cutoff for the
-// session list and peek cache-age banner. It is session-scoped (NOT the
-// shared cacheAgeBannerThresholdSeconds) and intentionally lower — 15s vs 30s —
-// because the session values it flags (the STATE column, the cached pane
-// output) most often lag inside the post-wake reconciler poll window (#3755).
-// Scoping the lower cutoff to just these two views keeps the generic
+// session list cache-age banner. It is session-scoped (NOT the shared
+// cacheAgeBannerThresholdSeconds) and intentionally lower — 15s vs 30s —
+// because the value it flags (the STATE column) most often lags inside the
+// post-wake reconciler poll window (#3755). Scoping the lower cutoff to this
+// view keeps the generic
 // "reconciler may be lagging" footer on every other command at 30s.
 const sessionStateCacheAgeBannerThresholdSeconds = 15.0
 
-// sessionCacheAgeBanner is the human-output footer for the session list and peek
-// views when the supervisor read-cache age exceeds
+// sessionCacheAgeBanner is the human-output footer for the session list view
+// when the supervisor read-cache age exceeds
 // sessionStateCacheAgeBannerThresholdSeconds. Unlike the generic cache-age
-// banner, it names the specific cached value most likely to lag a just-woken
-// session within the reconciler poll window and points operators at out-of-band
-// ground truth. subject identifies that value per view — the STATE column on the
-// session list, the cached pane output on peek — so the footer never names a
-// STATE column peek does not render. cr.AgeSeconds is a single whole-read value,
-// so this stays a low-noise footer rather than a per-row marker (true per-row
-// freshness needs a SessionView state_updated_at field — out of scope, follow-up
-// gco-cyt3).
-func sessionCacheAgeBanner(ageSeconds float64, subject string) string {
-	return fmt.Sprintf("(cache age: %.0fs — %s may lag the runtime; verify a just-woken session via transcript / bead state)", ageSeconds, subject)
+// banner, it names the STATE column, the cached value most likely to lag a
+// just-woken session within the reconciler poll window, and points operators
+// at out-of-band ground truth. cr.AgeSeconds is a single whole-read value, so
+// this stays a low-noise footer rather than a per-row marker (true per-row
+// freshness needs a SessionView state_updated_at field — out of scope,
+// follow-up gco-cyt3). session peek deliberately prints no footer: the server
+// reads pane output live from the runtime, so the bead cache's age says
+// nothing about it.
+func sessionCacheAgeBanner(ageSeconds float64) string {
+	return fmt.Sprintf("(cache age: %.0fs — STATE may lag the runtime; verify a just-woken session via transcript / bead state)", ageSeconds)
 }
 
 // sessionViewTarget mirrors sessionListTarget's fallback behavior, but
@@ -2413,10 +2413,10 @@ func routeSessionPeek(_, target string, lines int, c *api.Client, nilReason stri
 	return doSessionPeekFallback(target, lines, jsonOutput, stdout, stderr)
 }
 
-// renderSessionPeekFromAPI writes the API-sourced peek output to stdout,
-// appending a staleness banner on stderr-or-stdout when the supervisor
-// cache age crosses the threshold. Matches the fallback path's text output
-// semantics: trailing newline if the preview doesn't already end in one.
+// renderSessionPeekFromAPI writes the API-sourced peek output to stdout.
+// Matches the fallback path's text output semantics: trailing newline if the
+// preview doesn't already end in one. It prints no cache-age footer because
+// the server reads pane output live from the runtime, not from the bead cache.
 func renderSessionPeekFromAPI(cr api.CachedRead[api.SessionView], target string, lines int, jsonOutput bool, stdout, stderr io.Writer) int {
 	output := cr.Body.LastOutput
 	if jsonOutput {
@@ -2436,9 +2436,6 @@ func renderSessionPeekFromAPI(cr api.CachedRead[api.SessionView], target string,
 	fmt.Fprint(stdout, output) //nolint:errcheck // best-effort stdout
 	if !strings.HasSuffix(output, "\n") {
 		fmt.Fprintln(stdout) //nolint:errcheck // best-effort stdout
-	}
-	if cr.AgeSeconds > sessionStateCacheAgeBannerThresholdSeconds {
-		fmt.Fprintln(stdout, sessionCacheAgeBanner(cr.AgeSeconds, "cached pane output")) //nolint:errcheck
 	}
 	return 0
 }
