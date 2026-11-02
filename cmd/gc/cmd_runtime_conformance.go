@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/gastownhall/gascity/internal/runtime/runtimecapability"
@@ -73,6 +74,7 @@ any required requirement fails.`,
 				}
 				fmt.Fprintf(stdout, "\n%d requirements: %d passed, %d failed, %d skipped\n", //nolint:errcheck // best-effort stdout
 					len(report.Results), report.Summary.Passed, report.Summary.Failed, report.Summary.Skipped)
+				fmt.Fprintln(stdout, v2ReadyLine(report)) //nolint:errcheck // best-effort stdout
 			}
 
 			failed := report.Failed()
@@ -114,4 +116,13 @@ any required requirement fails.`,
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit a machine-readable JSON report")
 	cmd.Flags().BoolVar(&withEnv, "env", false, "also run the environment-plane capability suite (env.* guarantees)")
 	return cmd
+}
+
+// v2ReadyLine says whether the executable's handshake declares what
+// reconciler v2 needs from an exec runtime, and what it lacks.
+func v2ReadyLine(report runtimecontract.Report) string {
+	if report.V2Ready {
+		return "v2-ready: yes"
+	}
+	return fmt.Sprintf("v2-ready: no (missing %s)", strings.Join(report.V2Missing, ", "))
 }

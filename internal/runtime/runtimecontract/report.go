@@ -37,6 +37,10 @@ type Report struct {
 	// Protocol is the parsed handshake; zero value when the executable has
 	// no protocol op or the handshake failed.
 	Protocol runtime.ProtocolInfo `json:"protocol"`
+	// V2Ready says the handshake declares what reconciler v2 needs from an
+	// exec runtime (exec.V2ProfileGaps); V2Missing names what it lacks.
+	V2Ready   bool     `json:"v2_ready"`
+	V2Missing []string `json:"v2_missing,omitempty"`
 	// Results is one entry per catalog requirement, in catalog order.
 	Results []Result `json:"results"`
 	// Summary counts the result statuses.

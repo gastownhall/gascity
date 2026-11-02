@@ -88,3 +88,16 @@ case "$op" in
 esac
 `)
 }
+
+// Kills a conformance report that hides whether the executable is
+// v2-ready, or names the wrong gaps.
+func TestRuntimeConformanceCmd_ReportsV2Readiness(t *testing.T) {
+	for want, report := range map[string]runtimecontract.Report{
+		"v2-ready: yes": {V2Ready: true},
+		"v2-ready: no (missing observe.v1, report-attachment)": {V2Missing: []string{"observe.v1", "report-attachment"}},
+	} {
+		if got := v2ReadyLine(report); got != want {
+			t.Errorf("v2ReadyLine = %q, want %q", got, want)
+		}
+	}
+}

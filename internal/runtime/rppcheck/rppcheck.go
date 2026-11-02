@@ -200,7 +200,21 @@ func (c *checker) runOpTimeout(ctx context.Context, timeout time.Duration, stdin
 var knownCapabilities = map[string]string{
 	runtime.ProtocolCapabilityReportAttachment: "is-attached",
 	runtime.ProtocolCapabilityReportActivity:   "get-last-activity",
+	runtime.ProtocolCapabilityObserveV1:        "observe, inventory, kill-object",
+	"conformance-faults":                       "",
+	"city-scoped":                              "",
 }
+
+// The observe.v1 smoke checks (`gc runtime conformance` gates the profile
+// in full; see internal/runtime/runtimecontract).
+const (
+	observeCheck        = "capability observe.v1: observe"
+	inventoryCheck      = "capability observe.v1: inventory"
+	killObjectCheck     = "capability observe.v1: kill-object"
+	observeAbsentCheck  = "capability observe.v1: observe after stop"
+	observeBogusObject  = `{"object":{"id":"gc-rpp-check-none","created":"0"},"mode":"corpse"}`
+	observeAnswerFields = "state, object"
+)
 
 const handshakeCheck = "protocol handshake"
 
@@ -297,6 +311,9 @@ func (c *checker) checkLifecycle(ctx context.Context) {
 	}
 
 	c.checkRequiredBool(ctx, "lifecycle: is-running after stop", name, "false")
+	if c.result.Protocol.Has(runtime.ProtocolCapabilityObserveV1) {
+		c.checkObserve(ctx, observeAbsentCheck, name, "absent")
+	}
 
 	again := c.runOp(ctx, nil, "stop", name)
 	switch {
@@ -347,17 +364,22 @@ func (c *checker) remainingCheckNames() []string {
 			names = append(names, "optional: "+knownCapabilities[capability])
 		}
 	}
-	return append(names,
+	names = append(names,
 		"optional: process-alive",
 		c.nudgeCheckName(),
 		"optional: metadata round-trip",
 		"optional: peek",
 		"optional: list-running",
-		"lifecycle: stop",
-		"lifecycle: is-running after stop",
-		"lifecycle: stop idempotent",
-		"optional: interrupt",
 	)
+	observe := c.result.Protocol.Has(runtime.ProtocolCapabilityObserveV1)
+	if observe {
+		names = append(names, observeCheck, inventoryCheck, killObjectCheck)
+	}
+	names = append(names, "lifecycle: stop", "lifecycle: is-running after stop")
+	if observe {
+		names = append(names, observeAbsentCheck)
+	}
+	return append(names, "lifecycle: stop idempotent", "optional: interrupt")
 }
 
 func (c *checker) skipRemainingChecks(detail string) {
@@ -380,6 +402,91 @@ func (c *checker) checkSessionOps(ctx context.Context, name string) {
 	c.checkMetadataRoundTrip(ctx, name)
 	c.checkOptional(ctx, "optional: peek", nil, "peek", name, "10")
 	c.checkListRunning(ctx, name)
+	if c.result.Protocol.Has(runtime.ProtocolCapabilityObserveV1) {
+		c.checkObserve(ctx, observeCheck, name, "running")
+		c.checkInventory(ctx, name)
+		c.checkKillObjectBogus(ctx, name)
+	}
+}
+
+// checkObserve runs `observe <name>` and requires one well-formed answer
+// in state want, with the box's object when it is present.
+func (c *checker) checkObserve(ctx context.Context, check, name, want string) {
+	res := c.runOp(ctx, nil, "observe", name)
+	switch {
+	case res.unsupported:
+		c.record(check, StatusFail, "observe.v1 declared but observe not implemented (exit 2)")
+		return
+	case res.err != nil:
+		c.record(check, StatusFail, res.err.Error())
+		return
+	}
+	var a struct {
+		State  string `json:"state"`
+		Object *struct {
+			ID      string `json:"id"`
+			Created string `json:"created"`
+		} `json:"object"`
+	}
+	if err := json.Unmarshal([]byte(res.stdout), &a); err != nil {
+		c.record(check, StatusFail, fmt.Sprintf("observe answer is not one JSON object with %s: %v", observeAnswerFields, err))
+		return
+	}
+	switch {
+	case a.State != want:
+		c.record(check, StatusFail, fmt.Sprintf("observe state %q, want %q", a.State, want))
+	case want != "absent" && (a.Object == nil || a.Object.ID == "" || a.Object.Created == ""):
+		c.record(check, StatusFail, "observe answered a present box without its object id and created time")
+	default:
+		c.record(check, StatusPass, "")
+	}
+}
+
+// checkInventory runs `inventory` and requires a complete flag and the
+// running session listed.
+func (c *checker) checkInventory(ctx context.Context, name string) {
+	res := c.runOp(ctx, nil, "inventory")
+	switch {
+	case res.unsupported:
+		c.record(inventoryCheck, StatusFail, "observe.v1 declared but inventory not implemented (exit 2)")
+		return
+	case res.err != nil:
+		c.record(inventoryCheck, StatusFail, res.err.Error())
+		return
+	}
+	var inv struct {
+		Complete *bool `json:"complete"`
+		Sessions []struct {
+			Name string `json:"name"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal([]byte(res.stdout), &inv); err != nil || inv.Complete == nil {
+		c.record(inventoryCheck, StatusFail, fmt.Sprintf("inventory answer is not one JSON object with complete and sessions: %v", err))
+		return
+	}
+	for _, s := range inv.Sessions {
+		if s.Name == name {
+			c.record(inventoryCheck, StatusPass, "")
+			return
+		}
+	}
+	c.record(inventoryCheck, StatusFail, fmt.Sprintf("inventory does not list the running %s", name))
+}
+
+// checkKillObjectBogus runs `kill-object` for an object that names no box,
+// which must answer gone and kill nothing.
+func (c *checker) checkKillObjectBogus(ctx context.Context, name string) {
+	res := c.runOp(ctx, []byte(observeBogusObject), "kill-object", name)
+	switch {
+	case res.unsupported:
+		c.record(killObjectCheck, StatusFail, "observe.v1 declared but kill-object not implemented (exit 2)")
+	case res.err != nil:
+		c.record(killObjectCheck, StatusFail, res.err.Error())
+	case res.stdout != "gone":
+		c.record(killObjectCheck, StatusFail, fmt.Sprintf("kill-object for an object that names no box = %q, want gone", res.stdout))
+	default:
+		c.record(killObjectCheck, StatusPass, "")
+	}
 }
 
 // checkCapabilityOp runs the op a capability promises. Declared: exit 2

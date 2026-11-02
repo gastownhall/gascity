@@ -144,6 +144,9 @@ above: a canceled `exec` or `watch-startup` call is killed outright, with
 | `is-attached` | `script is-attached <name>` | — | `true` or `false` |
 | `exec` | `script exec <name>` | command | combined output (op exit == command exit) |
 | `provision` | `script provision <name>` | JSON config | — |
+| `observe` | `script observe <name>` | process names (1/line) | one JSON object (see [observe.v1](#observev1-reconciler-v2)) |
+| `inventory` | `script inventory` | — | one JSON object (see [observe.v1](#observev1-reconciler-v2)) |
+| `kill-object` | `script kill-object <name>` | JSON request | `killed`, `gone`, `renamed`, `live` or `changed` |
 
 **Box without agent (the un-weld).** `provision` is `start` MINUS the agent
 launch: it creates/prepares the box (PreStart, SessionSetup, SessionSetupScript,
@@ -178,8 +181,11 @@ The `protocol` operation declares which Runtime Provider Protocol version
 the script speaks and which optional capabilities it implements:
 
 ```json
-{"version": 0, "capabilities": ["report-attachment", "report-activity"]}
+{"version": 0, "capabilities": ["report-attachment", "report-activity"], "locality": "local"}
 ```
+
+`locality` is optional: `"local"` says the script's boxes run on gc's own
+host. Absent, or any other value, reads as remote.
 
 Scripts that do not implement `protocol` (exit 2) are treated as version 0
 with no optional capabilities — every pre-handshake script remains valid.
@@ -200,8 +206,13 @@ Capabilities:
 | `proc.provision` | The script implements the box-without-agent `provision` op (see Operations), so the controller provisions the box, then launches the agent over `exec` (the un-weld). Without it, `start` provisions and launches in one op. |
 | `proc.stream` | Reserved (connection-plane family, parallel to `env.*`): declares the persistent bidirectional `stream` connection op (ACP over a stream, tmux pipe-pane). Sets `CanStream`. The `stream` op and its capability-gated conformance entry land with the connection rewrite. |
 | `tty.attach` | Reserved: declares an interactive PTY `attach` connection op. Sets `CanAttachTTY`. |
+| `observe.v1` | The script keeps the observe.v1 profile reconciler v2 reads: the `observe`, `inventory` and `kill-object` ops, `fresh_only` starts and strict exits (see [observe.v1](#observev1-reconciler-v2)). With `report-attachment`, the script is v2-ready. |
+| `conformance-faults` | Conformance only: under `GC_RPP_FAULT=unavailable`, `observe`, `inventory` and `is-attached` act as if the backend were unreachable, so `gc runtime conformance` can check a fault reads unknown. |
+| `city-scoped` | Conformance only: the script scopes its boxes by `GC_EXEC_CITY_PATH`, which `gc runtime conformance` then checks. |
 
-The handshake runs once per provider instance and is cached.
+A successful handshake is cached for the provider's life. A failed one is
+cached for 30 seconds, then retried, so a transient failure does not leave
+the script on the no-capability floor until gc restarts.
 
 ### Idle sleep
 
@@ -630,6 +641,133 @@ then stays open in `creating` until `get-meta` answers, or until an operator
 runs `gc session close`. A script that runs its backend's CLI under
 `set -e` should catch the "no such session" case and print nothing.
 
+## observe.v1 (reconciler v2)
+
+Reconciler v2 starts, stops and recycles sessions only on fresh, exact
+answers: "this box is absent", "this is the box, and this is whose", "kill
+exactly that box". A script opts into giving them by declaring `observe.v1`
+in its handshake. A script that declares `observe.v1` **and**
+`report-attachment` is v2-ready; `gc runtime conformance` reports
+`v2-ready: yes` or the capabilities it lacks. A script that declares
+neither keeps today's behavior exactly. Declaring `observe.v1` obliges the
+script to:
+
+1. Implement `observe`, `inventory` and `kill-object` (below).
+2. Honor `fresh_only` on `start` (and `provision`, if declared).
+3. Treat exit 2 from every op it implements as a failure: `stop` exit 2 is
+   a stop that stopped nothing, a metadata op's exit 2 is a missing store,
+   and the observe.v1 ops' exit 2 is an unknown answer.
+4. Keep one identity: `get-meta <name> GC_SESSION_ID | GC_RUNTIME_EPOCH |
+   GC_INSTANCE_TOKEN | GT_PROCESS_NAMES` answers what the session started
+   with, or what `set-meta` set since, and `observe` and `inventory` report
+   the same values. For boxes started before the script declared
+   `observe.v1`, derive them from the box's own configuration.
+5. Seed identity before the box is visible: persist it before creating the
+   box (or create the box with it, atomically). Until it is readable, answer
+   `"identity": null`.
+6. Read the backend on every `observe`; never answer from a cache older than
+   the call.
+7. Answer `absent` (or omit a name from a complete `inventory`) only when the
+   backend proves nothing holds the name, live, dead, starting or stopping.
+   If the backend's view is partial or stale, answer `unknown` (or set
+   `complete: false`).
+8. Answer `is-attached` `true` when any interactive client is attached by any
+   means, not only through gc; exit non-zero when it cannot tell. Only
+   `true` or `false` is an answer.
+9. Serialize ops per name (for example with `flock`): `start`, `stop`,
+   `observe` and `kill-object` for one name may race. A `fresh_only` start
+   checks and creates under the lock.
+10. Never print `GC_INSTANCE_TOKEN` on stderr. gc never echoes `observe` or
+    `inventory` stdout into an error or a log.
+11. Answer `observe` and `is-attached` within 4 seconds: gc stops the call
+    there (`SIGTERM`, then `SIGKILL` 2 seconds later) and reads it unknown.
+12. With more than one city on one backend, scope boxes by
+    `GC_EXEC_CITY_PATH` / `GC_EXEC_CITY_NAME`, which gc sets on every op.
+
+### `observe <name>`
+
+Stdin carries zero or more agent process names, one per line. Stdout is
+exactly one JSON object:
+
+```json
+{"state":"running",
+ "object":{"id":"c0ffee12","created":"2026-10-30T01:02:03Z"},
+ "agent":"alive",
+ "agent_pid":"4242",
+ "identity":{"GC_SESSION_ID":"mc-abc","GC_RUNTIME_EPOCH":"7","GC_INSTANCE_TOKEN":"…","GT_PROCESS_NAMES":"claude,node"}}
+```
+
+| Field | Values | Rules |
+|---|---|---|
+| `state` | `running`, `dead`, `absent`, `unknown` | `dead`: the name is held but nothing runs in the box (an exited container, a kept pane). `absent`: rule 7. |
+| `object` | `{id, created}`, non-empty strings | Required for `running` and `dead`. Byte-identical across calls for one box; a new `id` for every new box under the name. |
+| `agent` | `alive`, `dead`, `unknown` | For `running` with process names on stdin. Omitted or `unknown` reads alive. A `dead` box with an `alive` agent is a contradiction, read as unknown. |
+| `agent_pid` | string, optional | The agent's pid, when the backend knows it. |
+| `identity` | object of the identity keys, or `null` | `{}` is a box with no gc identity (one an operator made); `null` is identity not yet readable (rule 5). |
+
+A non-zero exit, a timeout, malformed or oversized output (over 1 MiB),
+`unknown`, or a present state without its object all read as unknown, never
+as absent.
+
+### `inventory`
+
+No name and no stdin. Stdout is one JSON object of at most 8 MiB, listing
+every name the backend holds for this city, live or dead:
+
+```json
+{"complete":true,
+ "sessions":[{"name":"mc-mayor","state":"running",
+              "object":{"id":"…","created":"…"},
+              "agent":"alive","attached":false,
+              "last_activity":"2026-10-30T01:05:00Z",
+              "restart_requested":false,
+              "identity":{"GC_SESSION_ID":"…"}}]}
+```
+
+- `complete: false` lists names that are present and proves nothing else
+  absent. Any failure is a non-zero exit.
+- `attached`, `last_activity`, `restart_requested` and `identity` may be
+  `null` (not read). `attached` is not `null` for a script declaring
+  `report-attachment` unless it genuinely could not tell, and
+  `last_activity` is not `null` for a running session of a script declaring
+  `report-activity`.
+- An entry whose `name` cannot be read fails the whole answer; an entry with
+  a readable name and malformed attributes is listed with them unknown.
+- **Keep `inventory` cheap.** On a v2-ready script every listing call (gc's
+  inventory pass, `gc stop`, status and the API) runs `inventory`; gc does
+  not call `list-running` there. Answer from one backend query for the whole
+  city, with no per-box round trip. `list-running` stays for older gc.
+
+### `kill-object <name>`
+
+Stdin: `{"object":{"id":"…","created":"…"},"mode":"corpse"|"zombie","agent_pid":"…"}`.
+Re-check, then kill the exact object, as one backend operation where the
+backend allows it (`docker rm -f <id>`, a Kubernetes delete with a UID
+precondition, `screen -S <pid>.<name> -X quit`). Never kill by name.
+
+| `mode` | Kill only while | Otherwise answer |
+|---|---|---|
+| `corpse` | the object still holds the name, no client is attached, and nothing runs in it | `gone` (the id names no box, or one created at another time), or `live` (something runs, or a client is attached) |
+| `zombie` | the object still holds the name, no client is attached, the box runs, and its agent is still dead (and `agent_pid` is unchanged when given) | `changed` (the agent lives again, its pid changed, or a client is attached), or `gone` |
+
+Stdout is exactly one of `killed`, `gone`, `renamed`, `live` or `changed`.
+
+### `fresh_only` starts
+
+gc sends `"fresh_only": true` in the start config to a v2-ready script. If any
+box, live or dead, holds the name, exit **73** (or exit 1 with `already
+exists` / `already running` on stderr) and touch nothing; otherwise create a
+new box, never recycling, killing, reusing or respawning one. gc sets
+`GT_PROCESS_NAMES` and `GC_INSTANCE_TOKEN` in `env`, and after a failed start
+stops a box only when a fresh `observe` shows it carrying that start's token.
+
+### Conformance
+
+`gc runtime conformance <script>` gates every promise above as the `observe`
+group (`RPP-OBSERVE-001` to `RPP-OBSERVE-015`); `gc runtime check` runs a
+smoke check of the three ops. `contrib/session-scripts/gc-session-screen` is
+the reference implementation.
+
 ## Writing Your Own Script
 
 1. Start with `contrib/session-scripts/gc-session-screen` as a template.
@@ -662,6 +800,10 @@ Scripts can use `GC_EXEC_STATE_DIR` (if set) as a directory for sidecar
 state files (metadata, wrappers). If not set, scripts should use a
 reasonable default under `$TMPDIR` or `/tmp`.
 
+gc sets `GC_EXEC_CITY_NAME` and `GC_EXEC_CITY_PATH` on every operation to
+the city the provider serves. A script shared by several cities on one
+backend scopes its boxes and listings by them.
+
 A script runs with gc's own environment. The session's environment arrives
 in the start config's `env` (see [Session environment](#session-environment)).
 
@@ -669,5 +811,6 @@ in the start config's `env` (see [Session environment](#session-environment)).
 
 See `contrib/session-scripts/` for maintained implementations:
 
-- **gc-session-screen** — GNU screen backend. Dependencies: `screen`,
-  `jq`, `bash`.
+- **gc-session-screen** — GNU screen backend, v2-ready (`observe.v1`,
+  `report-attachment`, locality `local`). Dependencies: `screen`, `jq`,
+  `bash`, `flock`, `pgrep`, `ps`.

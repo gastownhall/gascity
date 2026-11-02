@@ -11,7 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 )
 
 // Options tune a conformance run. The zero value is CI-ready.
@@ -31,6 +33,10 @@ type Options struct {
 
 	// ownWorkDir is a fresh temp work dir Run created and must remove.
 	ownWorkDir string
+	// only, when set, runs only that requirement's probe and records every
+	// other requirement as skipped: the negative-gating test's way to run
+	// one mutant against the check it targets.
+	only Code
 }
 
 func (o *Options) applyDefaults() {
@@ -80,8 +86,14 @@ func Run(ctx context.Context, executable string, opts Options) (Report, error) {
 
 	// Resolve the handshake once; capability-gated probes consult it.
 	report.Protocol = r.handshake(ctx)
+	report.V2Missing = sessionexec.V2ProfileGaps(report.Protocol)
+	report.V2Ready = len(report.V2Missing) == 0
 
 	for _, req := range catalog {
+		if opts.only != "" && req.Code != opts.only {
+			report.record(req, StatusSkip, "not selected")
+			continue
+		}
 		probe, ok := probes[req.Code]
 		if !ok {
 			report.record(req, StatusFail, "no probe registered for this requirement (runtimecontract bug)")
@@ -124,10 +136,23 @@ func (r *runner) op(ctx context.Context, args ...string) outcome {
 }
 
 func (r *runner) opTimeout(ctx context.Context, timeout time.Duration, stdin []byte, args ...string) outcome {
+	return r.opEnv(ctx, timeout, nil, stdin, args...)
+}
+
+// opEnv is opTimeout with env added to the executable's environment
+// (GC_EXEC_CITY_PATH, GC_RPP_FAULT for the observe group).
+func (r *runner) opEnv(ctx context.Context, timeout time.Duration, env []string, stdin []byte, args ...string) outcome {
+	var cmdEnv []string
+	if env != nil {
+		// Read before the op's deadline: execenv.Environ waits out an
+		// in-flight native store open, and that wait is not the op's.
+		cmdEnv = append(execenv.Environ(), env...)
+	}
 	opCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(opCtx, r.path, args...)
+	cmd.Env = cmdEnv
 	// Force pipe closure shortly after the deadline even when grandchild
 	// processes hold them open: a conformance run reports a hang, not
 	// inherits it.

@@ -4,7 +4,12 @@
 # Implements the exec session provider protocol.
 # See docs/reference/exec-session-provider.md for the full protocol specification.
 #
-# Dependencies: screen, jq, bash
+# Dependencies: screen, jq, bash, flock, pgrep, ps
+#
+# Declares observe.v1 (the observe, inventory and kill-object ops, fresh_only
+# starts, strict exits) and report-attachment, so it is v2-ready, and
+# locality "local": its boxes run on gc's host. `gc runtime conformance
+# gc-session-screen` gates every observe.v1 requirement.
 #
 # Usage: GC_SESSION=exec:/path/to/gc-session-screen gc start <city>
 #
@@ -35,7 +40,6 @@
 #
 # NOT IMPLEMENTED — Session naming:
 #   - Name validation (alphanumeric + underscore/hyphen only)
-#   - Exact-match session lookup (screen -list grep is fuzzy)
 #
 # SUPPORTED by screen but not wired up:
 #   - Mouse mode (screen has limited mouse support)
@@ -47,11 +51,79 @@ set -euo pipefail
 op="${1:?missing operation}"
 name="${2:-}"
 
-# State directory for metadata sidecar files.
+# State directory for metadata sidecar files. A box's identity env is its
+# metadata (GC_SESSION_ID, GC_RUNTIME_EPOCH, GC_INSTANCE_TOKEN,
+# GT_PROCESS_NAMES); the identity marker says start seeded it, before the box
+# existed, so identity is readable from the first observe.
 STATE_DIR="${GC_EXEC_STATE_DIR:-${TMPDIR:-/tmp}/gc-session-screen}"
 mkdir -p "$STATE_DIR"
 
+IDENTITY_KEYS="GC_SESSION_ID GC_RUNTIME_EPOCH GC_INSTANCE_TOKEN GT_PROCESS_NAMES"
+
+# lock serializes ops on one name (start, stop, kill-object), so a fresh_only
+# start checks and creates atomically.
+lock() {
+  exec 9>"$STATE_DIR/$1.lock"
+  flock 9
+}
+
+# rows prints every screen session as "<pid>\t<name>\t<status>", parsing the
+# exact "\t<pid>.<name>\t(...)\t(<status>)" rows of screen -ls; a name is
+# everything after the pid's dot. An answer screen -ls does not give when it
+# lists (or has no sessions) fails, so no caller reads it as an empty fleet.
+rows() {
+  ls_out=$(screen -ls 2>&1) || true
+  case "$ls_out" in
+    *"No Sockets found"*) return 0 ;;
+    *"There is a screen on"* | *"There are screens on"*) ;;
+    *) echo "screen -ls: unrecognized answer" >&2; return 1 ;;
+  esac
+  printf '%s\n' "$ls_out" | tr -d '\r' | awk -F'\t' '$2 ~ /^[0-9]+\./ {
+    dot = index($2, "."); status = $NF; gsub(/[()]/, "", status)
+    print substr($2, 1, dot - 1) "\t" substr($2, dot + 1) "\t" status }'
+}
+
+# row prints the exact row of name, if any.
+row() {
+  rows | awk -F'\t' -v n="$1" '$2 == n'
+}
+
+# created prints a box's creation time (its screen process's start).
+created() {
+  ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//'
+}
+
+# agent_alive reports whether a box's agent runs: a child of its screen
+# process named in the process names (comma-separated) $2.
+agent_alive() {
+  for p in $(printf %s "$2" | tr ',' ' '); do
+    if pgrep -P "$1" -x "$p" >/dev/null 2>&1; then return 0; fi
+  done
+  return 1
+}
+
+# identity prints a box's identity JSON, or null while start has not seeded
+# it (or for a screen session gc did not start).
+identity() {
+  if [ ! -f "$STATE_DIR/$1.identity" ]; then printf 'null'; return; fi
+  printf '{'; sep=''
+  for k in $IDENTITY_KEYS; do
+    f="$STATE_DIR/$1.meta.$k"
+    if [ -f "$f" ]; then printf '%s"%s":%s' "$sep" "$k" "$(jq -Rs . < "$f")"; sep=','; fi
+  done
+  printf '}'
+}
+
+# faulted reports the conformance kit's injected backend fault.
+faulted() {
+  [ "${GC_RPP_FAULT:-}" = unavailable ]
+}
+
 case "$op" in
+  protocol)
+    echo '{"version":0,"capabilities":["observe.v1","report-attachment","conformance-faults"],"locality":"local"}'
+    ;;
+
   start)
     # Read JSON config from stdin.
     config=$(cat)
@@ -59,16 +131,34 @@ case "$op" in
     command=$(echo "$config" | jq -r '.command // empty')
     env_json=$(echo "$config" | jq -r '.env // {} | to_entries[] | "\(.key)=\(.value)"' 2>/dev/null || true)
 
+    fresh_only=$(echo "$config" | jq -r '.fresh_only // false')
+
     if [ -z "$name" ]; then
       echo "start: missing session name" >&2
       exit 1
     fi
 
-    # Check if session already exists.
-    if screen -list 2>/dev/null | grep -q "[[:space:]]${name}[[:space:]]"; then
+    lock "$name"
+    # A held name, live or dead, refuses the start. Under fresh_only that is
+    # exit 73, and nothing is touched.
+    if [ -n "$(row "$name")" ]; then
       echo "session \"$name\" already exists" >&2
+      if [ "$fresh_only" = true ]; then exit 73; fi
       exit 1
     fi
+
+    # Seed the identity before the box exists, so the first observe that
+    # sees the box reads it.
+    rm -f "$STATE_DIR/${name}".meta.* "$STATE_DIR/$name.identity"
+    for k in $IDENTITY_KEYS; do
+      v=$(echo "$config" | jq -r --arg k "$k" '.env[$k] // empty')
+      if [ -n "$v" ]; then printf %s "$v" > "$STATE_DIR/$name.meta.$k"; fi
+    done
+    if [ ! -f "$STATE_DIR/$name.meta.GT_PROCESS_NAMES" ]; then
+      names=$(echo "$config" | jq -r '.process_names // [] | join(",")')
+      if [ -n "$names" ]; then printf %s "$names" > "$STATE_DIR/$name.meta.GT_PROCESS_NAMES"; fi
+    fi
+    : > "$STATE_DIR/$name.identity"
 
     # Build a wrapper script that sets env vars, cd, and exec the command.
     wrapper="$STATE_DIR/${name}.wrapper.sh"
@@ -123,10 +213,13 @@ case "$op" in
       echo "stop: missing session name" >&2
       exit 1
     fi
-    # Idempotent: no error if session doesn't exist.
-    screen -S "$name" -X quit 2>/dev/null || true
-    # Clean up wrapper and metadata.
-    rm -f "$STATE_DIR/${name}.wrapper.sh"
+    lock "$name"
+    # Idempotent: no error if session doesn't exist. Quit every exact row of
+    # the name, then remove its state once the box is gone.
+    rows | awk -F'\t' -v n="$name" '$2 == n {print $1}' | while IFS= read -r pid; do
+      screen -S "$pid.$name" -X quit 2>/dev/null || true
+    done
+    rm -f "$STATE_DIR/${name}.wrapper.sh" "$STATE_DIR/$name.identity"
     rm -f "$STATE_DIR/${name}".meta.*
     ;;
 
@@ -141,11 +234,78 @@ case "$op" in
       echo "false"
       exit 0
     fi
-    if screen -list 2>/dev/null | grep -q "[[:space:]]${name}[[:space:]]"; then
+    r=$(row "$name")
+    if [ -n "$r" ] && [ "$(printf %s "$r" | cut -f3)" != "Dead ???" ]; then
       echo "true"
     else
       echo "false"
     fi
+    ;;
+
+  is-attached)
+    if faulted; then echo "is-attached: backend unavailable" >&2; exit 1; fi
+    if [ "$(row "$name" | cut -f3)" = "Attached" ]; then echo true; else echo false; fi
+    ;;
+
+  observe)
+    if faulted; then echo "observe: backend unavailable" >&2; exit 1; fi
+    names=$(cat | tr '\n' ',' | sed 's/,$//')
+    r=$(row "$name")
+    if [ -z "$r" ]; then echo '{"state":"absent"}'; exit 0; fi
+    pid=$(printf %s "$r" | cut -f1); status=$(printf %s "$r" | cut -f3)
+    state=running; [ "$status" = "Dead ???" ] && state=dead
+    printf '{"state":"%s","object":{"id":"%s","created":"%s"}' "$state" "$pid" "$(created "$pid")"
+    if [ "$state" = running ] && [ -n "$names" ]; then
+      if agent_alive "$pid" "$names"; then printf ',"agent":"alive"'; else printf ',"agent":"dead"'; fi
+    fi
+    printf ',"identity":'; identity "$name"; echo '}'
+    ;;
+
+  inventory)
+    if faulted; then echo "inventory: backend unavailable" >&2; exit 1; fi
+    out=$(rows) || { echo "inventory: screen -ls failed" >&2; exit 1; }
+    printf '{"complete":true,"sessions":['; sep=''
+    printf '%s\n' "$out" | while IFS="$(printf '\t')" read -r pid sname status; do
+      [ -n "$pid" ] || continue
+      state=running; [ "$status" = "Dead ???" ] && state=dead
+      attached=false; [ "$status" = "Attached" ] && attached=true
+      printf '%s{"name":%s,"state":"%s","object":{"id":"%s","created":"%s"},"attached":%s' \
+        "$sep" "$(printf %s "$sname" | jq -Rs .)" "$state" "$pid" "$(created "$pid")" "$attached"
+      procs=""; [ -f "$STATE_DIR/$sname.meta.GT_PROCESS_NAMES" ] && procs=$(cat "$STATE_DIR/$sname.meta.GT_PROCESS_NAMES")
+      if [ "$state" = running ] && [ -n "$procs" ]; then
+        if agent_alive "$pid" "$procs"; then printf ',"agent":"alive"'; else printf ',"agent":"dead"'; fi
+      fi
+      printf ',"identity":'; identity "$sname"; printf '}'; sep=','
+    done
+    echo ']}'
+    ;;
+
+  kill-object)
+    req=$(cat)
+    id=$(echo "$req" | jq -r '.object.id // empty')
+    want_created=$(echo "$req" | jq -r '.object.created // empty')
+    mode=$(echo "$req" | jq -r '.mode // empty')
+    lock "$name"
+    # Re-check, then kill the exact object: the pid and its creation time
+    # must still be the name's row; never kill by name.
+    r=$(row "$name")
+    pid=$(printf %s "$r" | cut -f1); status=$(printf %s "$r" | cut -f3)
+    if [ -z "$r" ] || [ "$pid" != "$id" ] || [ "$(created "$pid")" != "$want_created" ]; then echo gone; exit 0; fi
+    procs=""; [ -f "$STATE_DIR/$name.meta.GT_PROCESS_NAMES" ] && procs=$(cat "$STATE_DIR/$name.meta.GT_PROCESS_NAMES")
+    case "$mode" in
+      corpse)
+        if [ "$status" = "Dead ???" ]; then screen -wipe "$pid.$name" >/dev/null 2>&1 || true; echo killed; else echo live; fi
+        ;;
+      zombie)
+        if [ "$status" = Attached ] || [ "$status" = "Dead ???" ] || [ -z "$procs" ] || agent_alive "$pid" "$procs"; then echo changed; exit 0; fi
+        screen -S "$pid.$name" -X quit >/dev/null 2>&1 || true
+        rm -f "$STATE_DIR/${name}.wrapper.sh" "$STATE_DIR/$name.identity" "$STATE_DIR/${name}".meta.*
+        echo killed
+        ;;
+      *)
+        echo "kill-object: unknown mode \"$mode\"" >&2; exit 1
+        ;;
+    esac
     ;;
 
   attach)
@@ -171,7 +331,7 @@ case "$op" in
       exit 0
     fi
     # Find the screen session's PID and check its process tree.
-    screen_pid=$(screen -list 2>/dev/null | grep "[[:space:]]${name}[[:space:]]" | awk '{print $1}' | cut -d. -f1)
+    screen_pid=$(row "$name" | cut -f1)
     if [ -z "$screen_pid" ]; then
       echo "false"
       exit 0
@@ -232,8 +392,9 @@ case "$op" in
 
   list-running)
     prefix="${name:-}"
-    # Parse screen -list output, filter by prefix.
-    screen -list 2>/dev/null | grep -oP '\d+\.\K[^\t]+' | while IFS= read -r sess; do
+    # Parse screen -list output, filter by prefix. Older gc lists through this
+    # op; gc that reads observe.v1 lists through inventory.
+    rows | cut -f2 | while IFS= read -r sess; do
       if [ -z "$prefix" ] || [[ "$sess" == "$prefix"* ]]; then
         echo "$sess"
       fi
