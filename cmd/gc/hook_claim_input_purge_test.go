@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"path/filepath"
 	"slices"
@@ -13,8 +14,10 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // purgedInputWorkflow is a graph.v2 workflow root whose input convoy id names
@@ -167,11 +170,12 @@ prefix = "OP"
 	return cityDir, cfg
 }
 
-func openPurgeProofStore(t *testing.T, cityDir, rel string) beads.Store {
+// openPurgeProofStore opens the city store of a purgeProofCity.
+func openPurgeProofStore(t *testing.T, cityDir string) beads.Store {
 	t.Helper()
-	store, err := openScopeLocalFileStoreForCity(filepath.Join(cityDir, rel), cityDir)
+	store, err := openScopeLocalFileStoreForCity(cityDir, cityDir)
 	if err != nil {
-		t.Fatalf("opening %s store: %v", rel, err)
+		t.Fatalf("opening city store: %v", err)
 	}
 	return store
 }
@@ -204,6 +208,15 @@ func purgeClaimOps(t *testing.T, cityDir string, cfg *config.City, store beads.S
 		},
 		ProveInputAbsent: city.claimOps().ProveInputAbsent,
 		DrainAck:         func(io.Writer) error { return nil },
+		ListContinuation: func(_ context.Context, _ string, _ []string, _, _ string) ([]beads.Bead, error) {
+			return nil, nil
+		},
+		AssignContinuation: func(_ context.Context, _ string, _ []string, _, _ string) error { return nil },
+		ResolveWorkBranch:  func(hookClaimWorkTree) string { return "" },
+		StampWorkMeta: func(_ context.Context, _ string, _ []string, _, _ string, _ map[string]string) error {
+			return nil
+		},
+		PublishRunMap: func(_, _ string, _ ...string) error { return nil },
 	}
 	return ops, &claimed
 }
@@ -215,7 +228,7 @@ func purgeClaimOps(t *testing.T, cityDir string, cfg *config.City, store beads.S
 // step out again.
 func TestDoHookClaimRetiresWorkflowWhoseInputWasPurged(t *testing.T) {
 	cityDir, cfg := purgeProofCity(t, "")
-	store := openPurgeProofStore(t, cityDir, ".")
+	store := openPurgeProofStore(t, cityDir)
 	w := seedPurgedInputWorkflow(t, store, "OP-purged")
 	ops, claimed := purgeClaimOps(t, cityDir, cfg, store, []beads.Bead{w.open})
 
@@ -269,7 +282,7 @@ func runPurgeClaim(t *testing.T, cityDir string, cfg *config.City, store beads.S
 // disposition, naming each missing member.
 func TestWorkflowInputPurgedEveryTrackedMemberAbsent(t *testing.T) {
 	cityDir, cfg := purgeProofCity(t, "")
-	store := openPurgeProofStore(t, cityDir, ".")
+	store := openPurgeProofStore(t, cityDir)
 	input, err := store.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
 	if err != nil {
 		t.Fatalf("create convoy: %v", err)
@@ -290,5 +303,181 @@ func TestWorkflowInputPurgedEveryTrackedMemberAbsent(t *testing.T) {
 	assertFinishedOutcomeKept(t, store, w.finished.ID)
 	if !strings.Contains(stderr, "OP-gone1, OP-gone2") {
 		t.Fatalf("stderr = %q, want both missing members named", stderr)
+	}
+}
+
+// TestHookInputPurgeLeavesSuspendedRigUnreadAndUnproven: a suspended rig's
+// store is one the absence proof will not open — suspension is quiescence —
+// so input it could still hold is never proven absent: the workflow is not
+// retired and its step is claimed as before.
+func TestHookInputPurgeLeavesSuspendedRigUnreadAndUnproven(t *testing.T) {
+	cityDir, cfg := purgeProofCity(t, `
+[[rigs]]
+name = "dormant"
+path = "dormant"
+prefix = "DM"
+`, "dormant")
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityDir, "dormant", &suspended); err != nil {
+		t.Fatal(err)
+	}
+	store := openPurgeProofStore(t, cityDir)
+	w := seedPurgedInputWorkflow(t, store, "OP-purged")
+
+	claimed, _ := runPurgeClaim(t, cityDir, cfg, store, w.open)
+
+	if !slices.Equal(claimed, []string{w.open.ID}) {
+		t.Fatalf("claimed %v, want [%s]: a suspended rig's store was not read, so the input is not proven absent", claimed, w.open.ID)
+	}
+	for _, id := range []string{w.root.ID, w.open.ID} {
+		if got, err := store.Get(id); err != nil || convoy.IsTerminalStatus(got.Status) {
+			t.Fatalf("%s = %+v, %v; want it left open", id, got, err)
+		}
+	}
+}
+
+// Input the evaluator cannot settle never reads as purged: the verdict stays
+// pending, the prover is consulted only for input that misses everywhere it
+// can read, and a proof failure is returned as an error naming the input.
+func TestWorkflowInputVerdictWithoutCompleteAbsenceProofStaysPending(t *testing.T) {
+	proofErr := errors.New("store unreachable")
+	cases := []struct {
+		name      string
+		seed      func(t *testing.T, store beads.Store) string // returns the input convoy id
+		contract  string
+		prove     func(p *recordingProver) workflowInputAbsenceProver
+		wantCalls int
+		wantErr   string
+	}{{
+		name:     "nil prover",
+		seed:     func(*testing.T, beads.Store) string { return "gc-gone" },
+		contract: beadmeta.FormulaContractGraphV2,
+		prove:    func(*recordingProver) workflowInputAbsenceProver { return nil },
+	}, {
+		name:      "prover finds the convoy elsewhere",
+		seed:      func(*testing.T, beads.Store) string { return "gc-gone" },
+		contract:  beadmeta.FormulaContractGraphV2,
+		prove:     func(p *recordingProver) workflowInputAbsenceProver { p.absent = nil; return p.prove },
+		wantCalls: 1,
+	}, {
+		name:     "prover fails",
+		seed:     func(*testing.T, beads.Store) string { return "gc-gone" },
+		contract: beadmeta.FormulaContractGraphV2,
+		prove: func(p *recordingProver) workflowInputAbsenceProver {
+			return func(ctx context.Context, ids []string) (bool, error) {
+				_, _ = p.prove(ctx, ids)
+				return false, proofErr
+			}
+		},
+		wantCalls: 1,
+		wantErr:   "proving workflow input gc-gone absent: store unreachable",
+	}, {
+		name:  "not a graph.v2 workflow",
+		seed:  func(*testing.T, beads.Store) string { return "gc-gone" },
+		prove: func(p *recordingProver) workflowInputAbsenceProver { return p.prove },
+	}, {
+		name: "present convoy with no members",
+		seed: func(t *testing.T, store beads.Store) string {
+			input, err := store.Create(beads.Bead{Title: "input", Type: "convoy"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return input.ID
+		},
+		contract: beadmeta.FormulaContractGraphV2,
+		prove:    func(p *recordingProver) workflowInputAbsenceProver { return p.prove },
+	}, {
+		name: "one member resolved and closed, one missing",
+		seed: func(t *testing.T, store beads.Store) string {
+			input, err := store.Create(beads.Bead{Title: "input", Type: "convoy"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			done, err := store.Create(beads.Bead{Title: "done work"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(done.ID); err != nil {
+				t.Fatal(err)
+			}
+			for _, id := range []string{done.ID, "gc-gone"} {
+				if err := store.DepAdd(input.ID, id, "tracks"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			return input.ID
+		},
+		contract: beadmeta.FormulaContractGraphV2,
+		prove:    func(p *recordingProver) workflowInputAbsenceProver { return p.prove },
+	}}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			w := seedPurgedInputWorkflow(t, store, tc.seed(t, store))
+			if tc.contract == "" {
+				contract := ""
+				if err := store.Update(w.root.ID, beads.UpdateOpts{Metadata: map[string]string{beadmeta.FormulaContractMetadataKey: contract}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			prover := &recordingProver{absent: map[string]bool{"gc-gone": true}}
+
+			verdict, err := workflowInputDone(context.Background(), store, w.open, nil, tc.prove(prover))
+
+			if tc.wantErr != "" {
+				if err == nil || !errors.Is(err, proofErr) || err.Error() != tc.wantErr {
+					t.Fatalf("err = %v, want %q wrapping the proof failure", err, tc.wantErr)
+				}
+			} else if err != nil {
+				t.Fatalf("workflowInputDone: %v", err)
+			}
+			if verdict.State != workflowInputPending || verdict.RootID != w.root.ID {
+				t.Fatalf("verdict = %+v, want pending for root %s", verdict, w.root.ID)
+			}
+			if len(prover.calls) != tc.wantCalls {
+				t.Fatalf("prover calls = %v, want %d", prover.calls, tc.wantCalls)
+			}
+		})
+	}
+}
+
+// A proof failure is reported on stderr and keeps the candidate claimable.
+func TestDoHookClaimReportsInputProofFailureAndKeepsCandidate(t *testing.T) {
+	cityDir, cfg := purgeProofCity(t, "")
+	store := openPurgeProofStore(t, cityDir)
+	w := seedPurgedInputWorkflow(t, store, "OP-purged")
+	ops, claimed := purgeClaimOps(t, cityDir, cfg, store, []beads.Bead{w.open})
+	ops.ProveInputAbsent = func(context.Context, []string) (bool, error) {
+		return false, errors.New("store unreachable")
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("query", cityDir, hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}, ops, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookClaim = %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	if !slices.Equal(*claimed, []string{w.open.ID}) {
+		t.Fatalf("claimed %v, want [%s]", *claimed, w.open.ID)
+	}
+	want := "gc hook --claim: checking input convoy for " + w.open.ID + ": proving workflow input OP-purged absent: store unreachable"
+	if !strings.Contains(stderr.String(), want) {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
+// The city-wide proof stops at a canceled context instead of reading on.
+func TestProveInputAbsentAcrossCityHonorsCancellation(t *testing.T) {
+	cityDir, cfg := purgeProofCity(t, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	absent, err := proveInputAbsentAcrossCity(ctx, cityDir, cfg, []string{"OP-purged"})
+
+	if absent || !errors.Is(err, context.Canceled) {
+		t.Fatalf("proveInputAbsentAcrossCity = %v, %v; want not proven, context.Canceled", absent, err)
 	}
 }

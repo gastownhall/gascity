@@ -106,8 +106,10 @@ func unresolvedMemberIDs(members []beads.Bead) []string {
 
 // proveInputAbsentAcrossCity proves each of ids absent from every store of the
 // city at cityPath: no class binding owns it, and every store a by-id lookup
-// of it would read opens and answers not-found. A hit is "not proven"; a
-// binding, open or read failure is an error naming the id and the store.
+// of it would read opens and answers not-found. A hit is "not proven", and so
+// is a suspended rig's store, which the proof leaves unopened (as a by-id
+// probe does, byIDSuspendedStoreRoots) to keep it quiescent; a binding, open
+// or read failure is an error naming the id and the store.
 func proveInputAbsentAcrossCity(ctx context.Context, cityPath string, cfg *config.City, ids []string) (bool, error) {
 	if cfg == nil {
 		return false, nil
@@ -123,9 +125,13 @@ func proveInputAbsentAcrossCity(ctx context.Context, cityPath string, cfg *confi
 		if owned {
 			return false, nil
 		}
+		asleep := byIDSuspendedStoreRoots(cfg, cityPath, id)
 		for _, dir := range convoyStoreCandidates(cfg, cityPath, id) {
 			if err := ctx.Err(); err != nil {
 				return false, err
+			}
+			if len(asleep[normalizePathForCompare(dir)]) > 0 {
+				return false, nil
 			}
 			store, err := openStoreAtForCityWithConfig(dir, cityPath, cfg)
 			if err != nil {
