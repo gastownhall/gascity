@@ -66,9 +66,9 @@ the last observed route, and the last successfully notified route in
 the cursor together with pending work, before delivery. Failed reads retain the
 cursor; failed sends stay pending without requiring another event. Retry delays
 grow from one minute to a maximum of one hour. Blocked work is rechecked after
-one minute, or sooner when its bead changes. This includes held and deferred
-work. Successful requests to the nudge CLI include requests accepted
-by its durable queue; the supervisor owns subsequent runtime delivery.
+one minute, or sooner when its bead changes. This includes held, deferred and
+`human`-labelled work. Successful requests to the nudge CLI include requests
+accepted by its durable queue; the supervisor owns subsequent runtime delivery.
 ACP cities need the supervisor delivery owner enabled in `city.toml`:
 
 ```toml
@@ -114,9 +114,11 @@ triggers a maintenance run to keep later checks bounded. The order's own
 tracking events cannot continuously retrigger it.
 
 The previous success map is imported on upgrade, but its cursor is not trusted:
-the previous version could advance it past a failed delivery. Time-window and
-retention overrides (`GC_NUDGE_ON_ROUTE_WINDOW`, `GC_NUDGE_ON_ROUTE_LOOKBACK`,
-`GC_NUDGE_ON_ROUTE_RETENTION`) no longer govern correctness. The nudge text can
+the previous version could advance it past a failed delivery. A state file that
+holds only whitespace (jq 1.6 can leave one, #8611) is read as absent.
+Time-window and retention overrides (`GC_NUDGE_ON_ROUTE_WINDOW`,
+`GC_NUDGE_ON_ROUTE_LOOKBACK`, `GC_NUDGE_ON_ROUTE_RETENTION`) no longer govern
+correctness. The nudge text can
 still be overridden with `GC_NUDGE_ON_ROUTE_MESSAGE` through `[order.env]` or
 the controller environment. Its default asks the recipient to run
 `gc hook --claim --json`, execute the claimed work, and repeat until empty.

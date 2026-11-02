@@ -106,10 +106,9 @@ set_rig_args() {
 # resolves a single session and cannot target a pool base. So enumerate the
 # pool's active members by template and nudge each; a target with no members
 # (a single-session agent, or an explicit slot name) is nudged directly.
-# Returns 0 if at least one nudge succeeded, non-zero otherwise. Mirrors
-# nudge_routed_target in nudge-on-route.sh with a per-call message. No --rig:
+# Returns 0 if at least one nudge succeeded, non-zero otherwise. No --rig:
 # gc.routed_to is city-qualified and may name a rig other than the dependent
-# bead's, and the proven helper lists and nudges in default scope.
+# bead's, so members are listed and nudged in default scope.
 nudge_routed_target() {
     local target="$1"
     local message="$2"

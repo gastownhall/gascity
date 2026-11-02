@@ -34,8 +34,11 @@ if [ "$MODE" = exec ]; then
     rm -f "$CHECK_PENDING"
 fi
 
+# A state file holding only whitespace carries no state (jq 1.6 could leave
+# one, #8611). Read it as absent instead of failing every run.
+has_state() { [ -f "$1" ] && grep -q '[^[:space:]]' "$1"; }
 STATE='{"version":1,"cursor":0,"pending":{},"notified":{},"retry":{},"observed":{}}'
-if [ -f "$STATE_FILE" ]; then
+if has_state "$STATE_FILE"; then
     STATE="$(cat "$STATE_FILE")"
     if ! printf '%s\n' "$STATE" | jq -e '
         .version == 1 and (.cursor | type == "number" and . >= 0)
@@ -46,7 +49,7 @@ if [ -f "$STATE_FILE" ]; then
         echo "nudge-on-route: invalid delivery state: $STATE_FILE" >&2
         exit 1
     fi
-elif [ -f "$PACK_STATE_DIR/nudge-on-route-state.json" ]; then
+elif has_state "$PACK_STATE_DIR/nudge-on-route-state.json"; then
     # Import successes, never the old cursor: it could skip failed deliveries.
     if ! LEGACY="$(jq -ce 'to_entries | sort_by(.value) | reduce .[] as $e ({};
         ($e.key | split("|")) as $key | .[$key[0]] = $key[1])' \
@@ -83,7 +86,7 @@ if [ "$MODE" = --check ]; then
     printf '%s\n' "$STATE" | jq -e --argjson now "$NOW" '(.read_after // 0) <= $now' >/dev/null || exit 1
     printf '%s\n' "$STATE" | jq -e '(.read_failures // 0) > 0' >/dev/null && exit 0
     has_due_delivery "$STATE" && exit 0
-    [ -f "$STATE_FILE" ] || exit 0
+    has_state "$STATE_FILE" || exit 0
     # The controller treats a timed-out condition as not due. Leave a recovery
     # intent before network I/O so repeated slow probes cannot starve exec.
     # Exec has the longer deadline and persists normal read-failure backoff.
@@ -163,7 +166,9 @@ fi
 
 # Event observations can lag the live route used for delivery. Track them
 # separately: an observed transition invalidates an old success, but repeated
-# stale snapshots must not erase a newer live-route notification.
+# stale snapshots must not erase a newer live-route notification. A deferral
+# reaches the event log as status "deferred" while gc ready lists the bead as
+# open, so a deferred route waits like other blocked work.
 if ! NEXT="$(printf '%s\n%s\n' "$STATE" "$EVENTS" | jq -s '
     .[0] as $state | .[1:] | sort_by(.seq) | reduce .[] as $e ($state;
         .cursor = ([.cursor, $e.seq] | max)
@@ -172,7 +177,8 @@ if ! NEXT="$(printf '%s\n%s\n' "$STATE" "$EVENTS" | jq -s '
             | ($b.id // $e.subject) as $id
             | ($b.metadata."gc.routed_to" // "") as $route
             | if ($id | type) != "string" or $id == "" then .
-              elif $e.type == "bead.closed" or $e.type == "bead.deleted" or $b.status != "open"
+              elif $e.type == "bead.closed" or $e.type == "bead.deleted"
+                   or ($b.status != "open" and $b.status != "deferred")
                    or ($b.assignee // "") != "" or $route == "" then
                   del(.pending[$id], .notified[$id], .retry[$id], .observed[$id])
               else
@@ -234,8 +240,10 @@ IDS="$(printf '%s\n' "$STATE" | jq -r --argjson now "$NOW" '
     . as $s | [.pending | keys[] | select(($s.retry[.].next_at // 0) <= $now)] | .[:20][]')"
 [ -n "$IDS" ] || exit 0
 read_open || read_failed
+# Routed readiness: holds and exact "human" beads (#7366) wait as blocked work.
 READY="$(gc ready --unassigned --metadata-field gc.routed_to --include-ephemeral \
-    --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --json --limit=0)" || read_failed
+    --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external \
+    --exclude-label human --json --limit=0)" || read_failed
 printf '%s\n' "$READY" | jq -e 'type == "array"' >/dev/null || read_failed
 FAILED=0
 defer_delivery() {

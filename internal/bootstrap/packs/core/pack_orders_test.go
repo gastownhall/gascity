@@ -130,7 +130,7 @@ func TestCascadeNudgeRoutesCrossRig(t *testing.T) {
 // TestNudgeOnRouteDefersPoolMembersToIdleClaimBackstop guards against waking
 // every member of a routed pool. The controller binds pool demand to one
 // eligible slot and its bounded idle-claim backstop wakes that slot if the
-// normal claim does not land; the event order must not nudge busy siblings.
+// normal claim does not land; the order must not nudge busy siblings.
 // Direct named-session and explicit-slot routes still need the order's nudge.
 func TestNudgeOnRouteDefersPoolMembersToIdleClaimBackstop(t *testing.T) {
 	data, err := fs.ReadFile(PackFS, "assets/scripts/nudge-on-route.sh")
