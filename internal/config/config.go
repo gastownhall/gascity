@@ -3860,7 +3860,7 @@ type Agent struct {
 	// and auto-installation via install_agent_hooks is not desired. When true,
 	// the agent is treated as hook-enabled for startup behavior: no prime
 	// instruction in the beacon, and on providers whose hook supplies the role
-	// prompt to every generation, a resume delivers only the beacon and
+	// prompt to every generation, a resume delivers at most the beacon and
 	// configured nudge. Interacts with install_agent_hooks — set this instead
 	// when hooks are pre-installed. Agents on builtin opencode or mimocode
 	// (or a provider wrapped over them) are hook-enabled by default because

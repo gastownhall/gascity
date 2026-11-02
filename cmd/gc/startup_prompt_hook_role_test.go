@@ -126,9 +126,25 @@ var hookRoleResumeBuilders = []launchBuilder{
 	{name: "API worker resume", build: apiWorkerResumeLaunch},
 }
 
+// contractLaunchMode returns the contract launch mode with the given name, so
+// a test does not depend on the order of launchModes.
+func contractLaunchMode(t *testing.T, name string) launchMode {
+	t.Helper()
+	for _, mode := range launchModes {
+		if mode.name == name {
+			return mode
+		}
+	}
+	t.Fatalf("no contract launch mode %q", name)
+	return launchMode{}
+}
+
 // resumeWithKey is the contract's warm resume: a committed start and a key
 // whose conversation is still on disk.
-var resumeWithKey = launchModes[1]
+func resumeWithKey(t *testing.T) launchMode {
+	t.Helper()
+	return contractLaunchMode(t, "resume with key")
+}
 
 // TestStartupPromptContractHookSuppliedRoleIsNotReplayedOnResume is the
 // regression for gastownhall/gascity#6627. opencode and mimocode on the CLI
@@ -152,7 +168,7 @@ func TestStartupPromptContractHookSuppliedRoleIsNotReplayedOnResume(t *testing.T
 		city := newHookRoleContractCity(t, tc.provider, tc.session, nil)
 		for _, builder := range hookRoleResumeBuilders {
 			t.Run(tc.provider+"/"+builder.name, func(t *testing.T) {
-				cfg := builder.build(t, city, resumeWithKey, contractPromptBody)
+				cfg := builder.build(t, city, resumeWithKey(t), contractPromptBody)
 				if strings.Contains(cfg.Nudge, contractPromptBody) || carriedThroughArgv(cfg, contractPromptBody) {
 					t.Errorf("resume replayed the role the hook already supplies: Nudge=%q PromptSuffix=%q", abbreviate(cfg.Nudge), abbreviate(cfg.PromptSuffix))
 				}
@@ -177,8 +193,8 @@ func TestStartupPromptContractHookSuppliedRoleIsNotReplayedOnResume(t *testing.T
 // TestStartupPromptContractRoleStillReplayedOnResumeWithoutPerTurnHook guards
 // the other side: when no plugin carries the role into every generation, every
 // resume builder keeps replaying it in the nudge. That covers an operator's
-// hooks_installed = false, opencode's default ACP transport (ACP never loads
-// the CLI plugin), and a provider whose hook primes only at SessionStart.
+// hooks_installed = false and a provider whose hook primes only at
+// SessionStart. TestStartupPromptContractACPResumeStillReplaysRole covers ACP.
 func TestStartupPromptContractRoleStillReplayedOnResumeWithoutPerTurnHook(t *testing.T) {
 	no := false
 	for _, tc := range []struct {
@@ -188,18 +204,12 @@ func TestStartupPromptContractRoleStillReplayedOnResumeWithoutPerTurnHook(t *tes
 		hooksInstalled *bool
 	}{
 		{name: "opencode hooks_installed=false", provider: "opencode", session: config.SessionTransportTmux, hooksInstalled: &no},
-		{name: "opencode ACP", provider: "opencode"},
 		{name: "pi", provider: "pi"},
 	} {
 		city := newHookRoleContractCity(t, tc.provider, tc.session, tc.hooksInstalled)
 		for _, builder := range hookRoleResumeBuilders {
-			if tc.session == "" && tc.provider == "opencode" && builder.name != "reconciler" {
-				// The worker factories read the session's recorded transport,
-				// which the contract's bare session info does not carry.
-				continue
-			}
 			t.Run(tc.name+"/"+builder.name, func(t *testing.T) {
-				cfg := builder.build(t, city, resumeWithKey, contractPromptBody)
+				cfg := builder.build(t, city, resumeWithKey(t), contractPromptBody)
 				if !strings.Contains(cfg.Nudge, contractPromptBody) {
 					t.Errorf("resume without a per-turn role hook must replay the role in the nudge, got %q", abbreviate(cfg.Nudge))
 				}
@@ -211,13 +221,57 @@ func TestStartupPromptContractRoleStillReplayedOnResumeWithoutPerTurnHook(t *tes
 	}
 }
 
+// TestStartupPromptContractACPResumeStillReplaysRole pins that an ACP resume
+// of a hook-primed provider keeps the role in the nudge on every resume path:
+// ACP never loads the CLI plugin. opencode resolves ACP by default; each path
+// sees the transport the way production hands it over (the reconciler from
+// the resolved template, the CLI factory from the session's recorded
+// transport, the API factory from the transport its caller resolved).
+func TestStartupPromptContractACPResumeStillReplaysRole(t *testing.T) {
+	city := newHookRoleContractCity(t, "opencode", "", nil)
+	info := city.sessionInfo(resumeWithKey(t))
+	info.Transport = config.SessionTransportACP
+	for _, path := range []struct {
+		name  string
+		build func(t *testing.T) runtime.Config
+	}{
+		{name: "reconciler", build: func(t *testing.T) runtime.Config {
+			return resolvedReconcilerLaunch(t, city, resumeWithKey(t), contractPromptBody)
+		}},
+		{name: "CLI worker resume", build: func(t *testing.T) runtime.Config {
+			resolved, err := resolvedWorkerRuntimeWithConfig(city.path, city.cfg, info, "")
+			if err != nil || resolved == nil {
+				t.Fatalf("resolvedWorkerRuntimeWithConfig = %v, %v", resolved, err)
+			}
+			return resolved.Hints
+		}},
+		{name: "API worker resume", build: func(t *testing.T) runtime.Config {
+			got, err := city.controllerState().ApplyStartupPrompt(info, city.resolved, config.SessionTransportACP, runtime.Config{WorkDir: city.path})
+			if err != nil {
+				t.Fatalf("ApplyStartupPrompt: %v", err)
+			}
+			return got
+		}},
+	} {
+		t.Run(path.name, func(t *testing.T) {
+			cfg := path.build(t)
+			if !strings.Contains(cfg.Nudge, contractPromptBody) {
+				t.Errorf("an ACP resume must replay the role in the nudge, got %q", abbreviate(cfg.Nudge))
+			}
+			if cfg.Env[startupPromptDeliveredEnv] != "1" {
+				t.Errorf("%s = %q, want 1", startupPromptDeliveredEnv, cfg.Env[startupPromptDeliveredEnv])
+			}
+		})
+	}
+}
+
 // TestStartupPromptContractHookSuppliedRoleFreshStartKeepsLaunchPrompt pins
 // that the resume fix leaves fresh launches alone: a first start or a forced
 // fresh start of a hook-primed session still carries the role on the launch
 // path and marks it delivered.
 func TestStartupPromptContractHookSuppliedRoleFreshStartKeepsLaunchPrompt(t *testing.T) {
 	city := newHookRoleContractCity(t, "opencode", config.SessionTransportTmux, nil)
-	for _, mode := range []launchMode{launchModes[0], launchModes[2]} {
+	for _, mode := range []launchMode{contractLaunchMode(t, "first start"), contractLaunchMode(t, "forceFresh")} {
 		t.Run(mode.name, func(t *testing.T) {
 			cfg := resolvedReconcilerLaunch(t, city, mode, contractPromptBody)
 			if !carriedThroughArgv(cfg, contractPromptBody) || cfg.PromptFlag != "--prompt" {
@@ -252,12 +306,12 @@ func TestStartupPromptContractClientProviderChatResumeKeepsBeacon(t *testing.T) 
 		if tp.Prompt != beacon {
 			t.Fatalf("fixture must resolve to a client chat with the beacon alone, got Prompt=%q", abbreviate(tp.Prompt))
 		}
-		cfg := prepareHookRoleLaunch(t, tp, resumeWithKey)
+		cfg := prepareHookRoleLaunch(t, tp, resumeWithKey(t))
 		if cfg.Nudge != beacon || cfg.Env[startupPromptDeliveredEnv] != "1" {
 			t.Errorf("client chat resume = (Nudge=%q marker=%q), want the beacon and the marker", abbreviate(cfg.Nudge), cfg.Env[startupPromptDeliveredEnv])
 		}
 	})
-	info := city.sessionInfo(resumeWithKey)
+	info := city.sessionInfo(resumeWithKey(t))
 	info.SessionOrigin = "manual"
 	info.Alias = "my-chat"
 	for _, path := range []struct {

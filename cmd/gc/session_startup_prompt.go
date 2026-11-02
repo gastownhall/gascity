@@ -3,7 +3,6 @@ package main
 import (
 	"io"
 	"maps"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -26,9 +25,12 @@ type startupPromptCity struct {
 // so the SessionStart hook adds context without repeating a prompt it cannot
 // inline past the provider's size cap. When the provider hook supplies the role
 // to every generation instead (startupPromptSource.roleSuppliedByHook), the
-// nudge carries only the configured activation, so a resume does not add
-// another copy of the role to the conversation. It applies the reconciler's promptDelivery
-// policy and returns hints unchanged when nothing can or needs to be delivered:
+// resume sends no turn: these resolvers carry no configured nudge, and the
+// submit or attach that resumed the session supplies the next turn. That
+// relies on the plugin a previous launch staged in the session workdir, since
+// the API resolver does not restage provider overlays. It applies the
+// reconciler's promptDelivery policy and returns hints unchanged when nothing
+// can or needs to be delivered:
 // a closed session, a session with no agent config or prompt, a client's provider
 // chat (isClientProviderChat), and a runtime that
 // cannot be confirmed to carry a nudge (subprocess ignores cfg.Nudge, so marking
@@ -68,7 +70,6 @@ func (c startupPromptCity) applyTo(info session.Info, resolved *config.ResolvedP
 		SessionName:  info.SessionName,
 		InstanceName: info.AgentName,
 		Prompt:       prompt,
-		Beacon:       runtime.FormatBeaconAt(loadedCityName(c.cfg, c.path), firstNonEmptyGCString(info.AgentName, agent.QualifiedName()), false, time.Now()),
 		IsACP:        transport == config.SessionTransportACP,
 		// The reconciler reads this from the resolved template; these
 		// resolvers never resolve one, so they ask the same question here.

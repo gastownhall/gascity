@@ -522,8 +522,9 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	// renders empty, or it has none and no builtin worker prompt fits it.
 	// Both are supported config shapes, so the default prompt is the correct
 	// output even under --strict. A resolved agent still gets the skills
-	// appendix here: the launch path appends it to this same default prompt,
-	// and on resume the hook copy is the only one the session sees.
+	// appendix here: the launch path appends it to such an agent's
+	// beacon-only startup prompt too, and on resume the hook copy is the only
+	// one the session sees.
 	fallbackPrompt := defaultPrimePrompt
 	if fallbackAgent != nil {
 		fallbackPrompt = appendPrimeHookSkillsAppendix(fallbackPrompt, cityPath, cityName, cfg, fallbackAgent, hookMode && !suppressHookPrompt)

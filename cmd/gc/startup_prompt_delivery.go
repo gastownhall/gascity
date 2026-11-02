@@ -34,7 +34,8 @@ type startupPromptSource struct {
 	Prompt       string
 	// Beacon is the bare identity line (`[city] agent • ts`, no prime
 	// instruction) that opens a resume turn when the provider hook supplies
-	// the role (roleSuppliedByHook).
+	// the role (roleSuppliedByHook). The worker resolvers leave it empty: they
+	// carry no configured nudge, so that resume sends no turn at all.
 	Beacon string
 	IsACP  bool
 	// HookEnabled is config.AgentHasHooks for the launching agent: its
@@ -54,17 +55,17 @@ type startupPromptSource struct {
 // replay it as a user turn. The hook decorates generations but never starts
 // one; resumeNudge decides what, if anything, starts the turn.
 //
-// All three legs must hold: the resolved provider's builtin family stages a
-// per-turn role hook (config.ResolvedProvider.HookSuppliesRolePerTurn), that
-// hook is installed for this agent (HookEnabled: true by default for
-// opencode/mimocode, whose overlay is staged for every launch; an explicit
-// hooks_installed = false means no plugin, so the nudge stays the only
-// carrier), and the session is not ACP, whose transport never loads the CLI
-// plugin. Providers whose hooks prime once at SessionStart (pi, codex,
-// antigravity, claude via settings) are excluded by the family fact, not by
-// SupportsHooks, which is true for them as well. A client's provider chat
-// never qualifies: its hook writes no persona (primeHookClientChat), so it
-// keeps the beacon-only turns upstream gives it.
+// Every condition must hold. The resolved provider's builtin family stages a
+// per-turn role hook (config.ResolvedProvider.HookSuppliesRolePerTurn);
+// providers whose hooks prime once at SessionStart (pi, codex, antigravity,
+// claude via settings) are excluded by that family fact, not by
+// SupportsHooks, which is true for them as well. The hook is installed for
+// this agent (HookEnabled: true by default for opencode/mimocode, whose
+// overlay is staged for every launch; an explicit hooks_installed = false
+// means no plugin, so the nudge stays the only carrier). The session is not
+// ACP, whose transport never loads the CLI plugin. And the session is not a
+// client's provider chat: its hook writes no persona (primeHookClientChat),
+// so it keeps its beacon-only turns.
 func (s startupPromptSource) roleSuppliedByHook() bool {
 	return s.HookEnabled && !s.IsACP && !s.ClientProviderChat && s.ResolvedProvider.HookSuppliesRolePerTurn()
 }
