@@ -79,6 +79,20 @@ func NewStores(t Topology, opts StoresOptions) Stores {
 	})}
 }
 
+// SoleStores mints the handles for one physical store serving every class:
+// the single-store topology's Stores. It is NewStores over a topology whose
+// only leg is the scope store and which relocates nothing, so Place's identity
+// fast-paths answer every class with the scope store itself and every handle
+// wraps exactly the store the caller held — no binding, no refusal, no
+// projection, no re-route. It is the unrouted frame: a rig bd context, a test
+// store, any caller holding one opened scope store that has no city topology
+// to resolve classes against. A read or write through these handles reaches
+// the same store an untyped call would have, which is the contract the
+// unrouted seams are written against.
+func SoleStores(scope beads.Store) Stores {
+	return NewStores(Topology{Work: Leg{Store: scope}}, StoresOptions{})
+}
+
 // Place is the store class c lives in on t: the plane's refusal, else the
 // binding serving c (planClass's rule), else the work store seen through the
 // projection's class view. ClassWork is the work store through the work view.

@@ -64,7 +64,7 @@ func TestWorkflowInputPurgedDetectsPurgedConvoy(t *testing.T) {
 	}
 
 	for _, candidate := range []beads.Bead{root, step} {
-		rootID, purged, err := workflowInputPurged(store, store, candidate)
+		rootID, purged, err := workflowInputPurged(beads.GraphStore{Store: store}, beads.WorkStore{Store: store}, candidate)
 		if err != nil {
 			t.Fatalf("workflowInputPurged(%s): %v", candidate.ID, err)
 		}
@@ -84,7 +84,7 @@ func TestWorkflowInputPurgedDetectsAllMembersPurged(t *testing.T) {
 	// the member as an unresolved placeholder; every placeholder whose target
 	// is confirmed absent everywhere is a purge.
 	for _, candidate := range []beads.Bead{root, step} {
-		rootID, purged, err := workflowInputPurged(store, store, candidate)
+		rootID, purged, err := workflowInputPurged(beads.GraphStore{Store: store}, beads.WorkStore{Store: store}, candidate)
 		if err != nil {
 			t.Fatalf("workflowInputPurged(%s): %v", candidate.ID, err)
 		}
@@ -136,7 +136,7 @@ func TestWorkflowInputPurgedFalseForMemberResolvingInGraphStore(t *testing.T) {
 	_ = ghost
 
 	for _, candidate := range []beads.Bead{root, step} {
-		_, purged, err := workflowInputPurged(graphStore, workStore, candidate)
+		_, purged, err := workflowInputPurged(beads.GraphStore{Store: graphStore}, beads.WorkStore{Store: workStore}, candidate)
 		if err != nil {
 			t.Fatalf("workflowInputPurged(%s): %v", candidate.ID, err)
 		}
@@ -149,14 +149,14 @@ func TestWorkflowInputPurgedFalseForMemberResolvingInGraphStore(t *testing.T) {
 func TestWorkflowInputPurgedFalseForLiveOrTerminalMembers(t *testing.T) {
 	store, work, _, root, _, _ := seedPurgeWorkflow(t)
 	// Open member: live input.
-	if _, purged, err := workflowInputPurged(store, store, root); err != nil || purged {
+	if _, purged, err := workflowInputPurged(beads.GraphStore{Store: store}, beads.WorkStore{Store: store}, root); err != nil || purged {
 		t.Fatalf("open member: purged=%v err=%v, want false/nil", purged, err)
 	}
 	// Terminal member: the done-check's territory, and not a purge.
 	if err := store.Close(work.ID); err != nil {
 		t.Fatalf("close work: %v", err)
 	}
-	if _, purged, err := workflowInputPurged(store, store, root); err != nil || purged {
+	if _, purged, err := workflowInputPurged(beads.GraphStore{Store: store}, beads.WorkStore{Store: store}, root); err != nil || purged {
 		t.Fatalf("closed member: purged=%v err=%v, want false/nil", purged, err)
 	}
 }
@@ -168,7 +168,7 @@ func TestWorkflowInputPurgedFalseForConvoyWithoutMembers(t *testing.T) {
 	if err := store.DepRemove(root.Metadata[beadmeta.InputConvoyIDMetadataKey], work.ID); err != nil {
 		t.Fatalf("untrack: %v", err)
 	}
-	if _, purged, err := workflowInputPurged(store, store, root); err != nil || purged {
+	if _, purged, err := workflowInputPurged(beads.GraphStore{Store: store}, beads.WorkStore{Store: store}, root); err != nil || purged {
 		t.Fatalf("memberless convoy: purged=%v err=%v, want false/nil", purged, err)
 	}
 }
@@ -179,7 +179,7 @@ func TestWorkflowInputPurgedFailsOpenOnStoreError(t *testing.T) {
 	// ambiguous: workflowInputPurged returns the error for the caller to
 	// fail open on. The candidate must be a step so the root load happens.
 	broken := brokenGetStore{Store: store, err: errors.New("dolt is on fire")}
-	if _, _, err := workflowInputPurged(broken, store, step); err == nil {
+	if _, _, err := workflowInputPurged(beads.GraphStore{Store: broken}, beads.WorkStore{Store: store}, step); err == nil {
 		t.Fatal("workflowInputPurged on a failing root read: err=nil, want the read error")
 	}
 }
@@ -207,7 +207,7 @@ func TestCancelInputPurgedWorkflowStampsHardFailure(t *testing.T) {
 	}
 	closedID := closedStep.ID
 
-	if err := cancelInputPurgedWorkflow(store, root.ID); err != nil {
+	if err := cancelInputPurgedWorkflow(beads.GraphStore{Store: store}, root.ID); err != nil {
 		t.Fatalf("cancelInputPurgedWorkflow: %v", err)
 	}
 
@@ -250,14 +250,14 @@ func purgedRetireOps(store *beads.MemStore, cancels *int) hookClaimOps {
 			return workflowInputDone(store, candidate, ids)
 		},
 		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
-			return skipDoneWorkflow(store, rootID)
+			return skipDoneWorkflow(beads.GraphStore{Store: store}, rootID)
 		},
 		InputPurged: func(_ context.Context, _ string, _ []string, candidate beads.Bead, _ []string) (string, bool, error) {
-			return workflowInputPurged(store, store, candidate)
+			return workflowInputPurged(beads.GraphStore{Store: store}, beads.WorkStore{Store: store}, candidate)
 		},
 		CancelInputPurgedWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
 			*cancels++
-			return cancelInputPurgedWorkflow(store, rootID)
+			return cancelInputPurgedWorkflow(beads.GraphStore{Store: store}, rootID)
 		},
 	}
 }

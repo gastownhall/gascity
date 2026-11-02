@@ -103,7 +103,7 @@ func (f doneWorkflowSplitFixture) baseOps(t *testing.T) hookClaimOps {
 			return workflowInputDone(f.work, candidate, ids)
 		},
 		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
-			return skipDoneWorkflow(f.work, rootID)
+			return skipDoneWorkflow(beads.GraphStore{Store: f.work}, rootID)
 		},
 		ReadWorkMeta: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, error) {
 			return f.work.Get(beadID)

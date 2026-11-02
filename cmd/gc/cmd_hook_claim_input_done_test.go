@@ -254,7 +254,7 @@ func TestSkipDoneWorkflowClosesRootAndSteps(t *testing.T) {
 		t.Fatalf("update step: %v", err)
 	}
 
-	if err := skipDoneWorkflow(store, root.ID); err != nil {
+	if err := skipDoneWorkflow(beads.GraphStore{Store: store}, root.ID); err != nil {
 		t.Fatalf("skipDoneWorkflow: %v", err)
 	}
 	for _, id := range []string{root.ID, step.ID} {

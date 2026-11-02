@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/worktree"
 )
 
@@ -2456,7 +2457,7 @@ func workflowInputDoneAcross(graph, work beads.Store, candidate beads.Bead, iden
 // must never suppress real work. A convoy with no resolvable members is
 // ambiguous by the same standard (a degenerate convoy and a purged one are
 // indistinguishable at that layer), so it is not purged either.
-func workflowInputPurged(graph, work beads.Store, candidate beads.Bead) (string, bool, error) {
+func workflowInputPurged(graph beads.GraphStore, work beads.WorkStore, candidate beads.Bead) (string, bool, error) {
 	root := candidate
 	if strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey]) == "" {
 		rootID := workflowRootIDForInputCheck(candidate)
@@ -2502,7 +2503,7 @@ func workflowInputPurged(graph, work beads.Store, candidate beads.Bead) (string,
 // input can live in. A read error other than not-found leaves the question
 // open, and an open question is never a purge: the caller answers not-purged
 // and lets the done-check decide.
-func inputBeadGone(graph, work beads.Store, id string) bool {
+func inputBeadGone(graph beads.GraphStore, work beads.WorkStore, id string) bool {
 	for _, store := range []beads.Store{work, graph} {
 		if store == nil {
 			continue
@@ -2545,16 +2546,16 @@ func workflowStepAssignees(store beads.Store, rootID string) ([]string, error) {
 
 // skipDoneWorkflow closes rootID and every open/in_progress step under it
 // with gc.outcome=skipped so pool demand and continuation claims drop.
-func skipDoneWorkflow(store beads.Store, rootID string) error {
-	return closeWorkflowInstanceSkipped(store, rootID, hookSkipDoneWorkflowCloseReason)
+func skipDoneWorkflow(graph beads.GraphStore, rootID string) error {
+	return closeWorkflowInstanceSkipped(graph, rootID, hookSkipDoneWorkflowCloseReason)
 }
 
 // openWorkflowSteps lists the open/in_progress step beads of the workflow
 // rooted at rootID (the root itself excluded, deduplicated). Shared by the
 // claim-path and close-path instance retires, which differ only in why the
 // instance is moot and what outcome the close stamps.
-func openWorkflowSteps(store beads.Store, rootID string) ([]string, error) {
-	steps, err := store.List(beads.ListQuery{
+func openWorkflowSteps(graph beads.GraphStore, rootID string) ([]string, error) {
+	steps, err := graph.List(beads.ListQuery{
 		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
 		TierMode: beads.TierBoth,
 	})
@@ -2577,15 +2578,15 @@ func openWorkflowSteps(store beads.Store, rootID string) ([]string, error) {
 // gc.outcome=skipped and the given close_reason, leaving the root alone.
 // Used where the root's own close is handled by a fenced path that records
 // lifecycle events (the molecule autoclose chain).
-func closeWorkflowStepsSkipped(store beads.Store, rootID, reason string) error {
-	ids, err := openWorkflowSteps(store, rootID)
+func closeWorkflowStepsSkipped(graph beads.GraphStore, rootID, reason string) error {
+	ids, err := openWorkflowSteps(graph, rootID)
 	if err != nil {
 		return err
 	}
 	if len(ids) == 0 {
 		return nil
 	}
-	_, err = store.CloseAll(ids, map[string]string{
+	_, err = graph.CloseAll(ids, map[string]string{
 		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
 		"close_reason":              reason,
 	})
@@ -2597,13 +2598,13 @@ func closeWorkflowStepsSkipped(store beads.Store, rootID, reason string) error {
 // and continuation claims drop. Shared by the claim-path done-retire
 // (skipDoneWorkflow) and its callers, which differ only in why the instance
 // is moot. Closed members are left alone so a recorded outcome survives.
-func closeWorkflowInstanceSkipped(store beads.Store, rootID, reason string) error {
-	ids, err := openWorkflowSteps(store, rootID)
+func closeWorkflowInstanceSkipped(graph beads.GraphStore, rootID, reason string) error {
+	ids, err := openWorkflowSteps(graph, rootID)
 	if err != nil {
 		return err
 	}
 	ids = append(ids, rootID)
-	_, err = store.CloseAll(ids, map[string]string{
+	_, err = graph.CloseAll(ids, map[string]string{
 		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
 		"close_reason":              reason,
 	})
@@ -2629,13 +2630,13 @@ const hookCancelInputPurgedWorkflowCloseReason = "hook --claim: input convoy pur
 // write after burning a claim cycle proving the spec is gone — written once
 // here instead of once per burned seat. Closed steps are left as they are so
 // an already-recorded outcome survives.
-func cancelInputPurgedWorkflow(store beads.Store, rootID string) error {
-	ids, err := openWorkflowSteps(store, rootID)
+func cancelInputPurgedWorkflow(graph beads.GraphStore, rootID string) error {
+	ids, err := openWorkflowSteps(graph, rootID)
 	if err != nil {
 		return err
 	}
 	ids = append(ids, rootID)
-	_, err = store.CloseAll(ids, map[string]string{
+	_, err = graph.CloseAll(ids, map[string]string{
 		beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
 		beadmeta.FailureClassMetadataKey:  beadmeta.FailureClassHard,
 		beadmeta.FailureReasonMetadataKey: hookInputPurgedFailureReason,
@@ -2649,16 +2650,19 @@ func hookInputDoneWithBdStore(ctx context.Context, dir string, env []string, can
 }
 
 func hookSkipDoneWorkflowWithBdStore(ctx context.Context, dir string, env []string, rootID string) error {
-	return skipDoneWorkflow(hookClaimBdStoreContext(ctx, dir, env, ""), rootID)
+	store := hookClaimBdStoreContext(ctx, dir, env, "")
+	return skipDoneWorkflow(storeref.SoleStores(store).Graph(), rootID)
 }
 
-func hookInputPurgedWithBdStore(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
+func hookInputPurgedWithBdStore(ctx context.Context, dir string, env []string, candidate beads.Bead, _ []string) (string, bool, error) {
 	store := hookClaimBdStoreContext(ctx, dir, env, "")
-	return workflowInputPurged(store, store, candidate)
+	stores := storeref.SoleStores(store)
+	return workflowInputPurged(stores.Graph(), stores.Work(), candidate)
 }
 
 func hookCancelInputPurgedWorkflowWithBdStore(ctx context.Context, dir string, env []string, rootID string) error {
-	return cancelInputPurgedWorkflow(hookClaimBdStoreContext(ctx, dir, env, ""), rootID)
+	store := hookClaimBdStoreContext(ctx, dir, env, "")
+	return cancelInputPurgedWorkflow(storeref.SoleStores(store).Graph(), rootID)
 }
 
 func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {

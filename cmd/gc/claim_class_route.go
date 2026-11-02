@@ -851,7 +851,7 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			return err
 		}
 		if resident {
-			return skipDoneWorkflow(route.class, rootID)
+			return skipDoneWorkflow(storeref.SoleStores(route.class).Graph(), rootID)
 		}
 		return base.SkipDoneWorkflow(ctx, dir, env, rootID)
 	}
@@ -875,7 +875,7 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			return base.InputPurged(ctx, dir, env, candidate, identityCandidates)
 		}
 		work := base.WorkflowStore(ctx, dir, env, rootID, "")
-		return workflowInputPurged(route.class, work, candidate)
+		return workflowInputPurged(storeref.SoleStores(route.class).Graph(), storeref.SoleStores(work).Work(), candidate)
 	}
 
 	ops.CancelInputPurgedWorkflow = func(ctx context.Context, dir string, env []string, rootID string) error {
@@ -884,7 +884,7 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			return err
 		}
 		if resident {
-			return cancelInputPurgedWorkflow(route.class, rootID)
+			return cancelInputPurgedWorkflow(storeref.SoleStores(route.class).Graph(), rootID)
 		}
 		return base.CancelInputPurgedWorkflow(ctx, dir, env, rootID)
 	}

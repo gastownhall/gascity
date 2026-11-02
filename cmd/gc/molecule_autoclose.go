@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // moleculeAutocloseReason is the close_reason metadata value stamped on
@@ -166,7 +167,7 @@ func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Reco
 	// closed bead (the synthetic convoy is work class, beside the work it
 	// tracks) and the roots from the graph store, like the source-bead
 	// trigger above.
-	cancelInFlightForClosedInput(store, graphStore, rec, beadID, stdout, &run)
+	cancelInFlightForClosedInput(storeref.SoleStores(store).Work(), graphClassStore, rec, beadID, stdout, &run)
 
 	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if rootID == "" {
@@ -296,7 +297,7 @@ func autocloseRootsForSourceBead(store beads.Store, storeRef string, rec events.
 // alone: still instantiating, or the stepless-wisp shape the source-bead
 // trigger owns. Best-effort: store errors are swallowed so a misbehaving hook
 // never breaks the bd close path.
-func cancelInFlightForClosedInput(convoyStore, graphStore beads.Store, rec events.Recorder, beadID string, stdout io.Writer, run *autocloseRun) {
+func cancelInFlightForClosedInput(convoyStore beads.WorkStore, graphStore beads.GraphStore, rec events.Recorder, beadID string, stdout io.Writer, run *autocloseRun) {
 	convoys, err := convoycore.TrackingConvoysForItem(convoyStore, beadID)
 	if err != nil {
 		run.note(err)

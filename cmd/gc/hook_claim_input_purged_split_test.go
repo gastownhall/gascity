@@ -93,13 +93,13 @@ func (f purgedWorkflowSplitFixture) purgeOps() hookClaimOps {
 			return workflowInputDone(f.work, candidate, ids)
 		},
 		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
-			return skipDoneWorkflow(f.work, rootID)
+			return skipDoneWorkflow(beads.GraphStore{Store: f.work}, rootID)
 		},
 		InputPurged: func(_ context.Context, _ string, _ []string, candidate beads.Bead, _ []string) (string, bool, error) {
-			return workflowInputPurged(f.work, f.work, candidate)
+			return workflowInputPurged(beads.GraphStore{Store: f.work}, beads.WorkStore{Store: f.work}, candidate)
 		},
 		CancelInputPurgedWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
-			return cancelInputPurgedWorkflow(f.work, rootID)
+			return cancelInputPurgedWorkflow(beads.GraphStore{Store: f.work}, rootID)
 		},
 		ReadWorkMeta: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, error) {
 			return f.work.Get(beadID)
