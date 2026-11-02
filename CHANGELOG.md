@@ -1283,6 +1283,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   version 5; `gc` upgrades installed plugins below those or without the
   guard. (#5787)
 
+- **The OpenCode and MiMo Code plugins report failed `gc` calls and no longer
+  cache a failed or empty role prompt.** The per-turn
+  `gc nudge drain --inject` and `gc mail check --inject` ran one after the
+  other, and a failure of either was dropped without a log line, which is
+  what kept the stalls of #5562 out of sight. They now run at the same time,
+  and a failed call is logged with how long it ran against the 30-second
+  timeout, so a timeout can be told apart from a child ended for another
+  reason. `gc prime --hook` failures are logged too, and a failed or empty
+  prime is no longer cached: a refresh that fails keeps the previous prime,
+  and with none yet the next generation asks again, instead of the session
+  running without its role until the next compaction. (#5553)
+
 - **An attached session is no longer idle-slept.** Under a `[session_sleep]`
   policy or an agent's `sleep_after_idle`, interactive sessions on local tmux
   and on exec runtimes that declare `report-activity`, `report-attachment` and
