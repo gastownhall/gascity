@@ -526,3 +526,32 @@ func TestCompactScriptLiveGateSkipsProbingWithoutRewrite(t *testing.T) {
 // rewrite failure on a database that remains live keeps its existing
 // behavior — restoration diagnostics, a pending-GC marker for the deferred
 // full GC, no quarantine, no run abort — and later databases still run.
+// TestCompactScriptPreservesOrdinaryFailureBehaviorWhenDatabaseStaysLive: a
+// rewrite failure on a database that remains live keeps its existing
+// behavior — restoration diagnostics, a pending-GC marker for the deferred
+// full GC, no quarantine, no run abort — and later databases still run.
+func TestCompactScriptPreservesOrdinaryFailureBehaviorWhenDatabaseStaysLive(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	addCompactExtraDatabase(t, fixture, "zed")
+	out, err := fixture.run(t, "gc_failure",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
+	requireCompactExitCode(t, out, err, 1)
+	if !strings.Contains(out, "compact: 2 database(s) failed compaction") {
+		t.Fatalf("both databases must be reported as ordinary failures:\n%s", out)
+	}
+	if strings.Contains(out, "aborting the run") {
+		t.Fatalf("an ordinary GC failure must not abort the run:\n%s", out)
+	}
+	pendingBody := readCompactMarkerBody(t, compactStateMarkerPath(fixture, "compact-pending-gc"))
+	if !strings.Contains(pendingBody, "reason=flatten succeeded but full GC failed") {
+		t.Fatalf("a live database keeps its pending-GC marker:\n%s\noutput:\n%s", pendingBody, out)
+	}
+	if _, statErr := os.Stat(compactLiveGateMarkerPath(fixture)); !os.IsNotExist(statErr) {
+		t.Fatalf("a live database must not be quarantined:\n%s", out)
+	}
+	log := readCompactDoltLog(t, fixture)
+	if !strings.Contains(log, "db=zed query=") || !strings.Contains(log, "CALL DOLT_RESET") {
+		t.Fatalf("the run must continue to the next database:\n%s", log)
+	}
+}
