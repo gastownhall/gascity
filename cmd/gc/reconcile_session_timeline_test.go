@@ -577,9 +577,13 @@ const timelineUsageCloseMarker = "fix #6672 (ga-q8t65w): a close stamps the usag
 // timelineBreakdownOperatorEnvUpstream admits the OperatorEnv and Upstream
 // keys in legacy's core_hash_breakdown: each section moved by those two rows
 // alone, both the empty-input digest, as no fixture sets either field.
-// ga-pr6626 is the contributor's own record of the ruling; it is not in the
-// maintainers' ledger.
-const timelineBreakdownOperatorEnvUpstream = "fix #6626 (ga-pr6626): core_hash_breakdown names OperatorEnv and Upstream, the core fields it left out (#6624)"
+//
+// mc-xxxx is the merged-fix form's template, not a bead. The form requires
+// the fix's bead from the maintainers' ledger, though its check reads only
+// the id's shape, and none is visible for issue #6624 or this outside PR,
+// #6626. At merge, a maintainer replaces mc-xxxx with their bead for #6626,
+// or one they file, and drops this paragraph.
+const timelineBreakdownOperatorEnvUpstream = "fix #6626 (mc-xxxx): core_hash_breakdown names OperatorEnv and Upstream, the core fields it left out (#6624)"
 
 // timelineRulingRefs are the rulings a later entry may name: the owner's
 // O-rulings (O7 itself admits no change), CONTRACT §12.2 rows in the form
