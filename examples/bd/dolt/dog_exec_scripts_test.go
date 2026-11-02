@@ -79,6 +79,7 @@ func TestDogExecScriptsAreBashSyntaxValid(t *testing.T) {
 	root := repoRoot(t)
 	for _, scriptName := range []string{
 		"_notify.sh",
+		"runtime.sh",
 		"mol-dog-backup.sh",
 		"mol-dog-doctor.sh",
 		"mol-dog-phantom-db.sh",
