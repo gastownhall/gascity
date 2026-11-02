@@ -1285,16 +1285,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#5787)
 
 - **The OpenCode and MiMo Code plugins report failed `gc` calls and no longer
-  cache a failed or empty role prompt.** The per-turn
-  `gc nudge drain --inject` and `gc mail check --inject` ran one after the
-  other, and a failure of either was dropped without a log line, which is
-  what kept the stalls of #5562 out of sight. They now run at the same time,
-  and a failed call is logged with how long it ran against the 30-second
-  timeout, so a timeout can be told apart from a child ended for another
-  reason. `gc prime --hook` failures are logged too, and a failed or empty
-  prime is no longer cached: a refresh that fails keeps the previous prime,
-  and with none yet the next generation asks again, instead of the session
-  running without its role until the next compaction. (#5553)
+  cache a failed role prompt.** The per-turn `gc nudge drain --inject` and
+  `gc mail check --inject` ran one after the other, and a failure of either
+  was dropped without a log line, which is what kept the stalls of #5562 out
+  of sight. They now run at the same time, and a failed call is logged with
+  how long it ran against the 30-second timeout and what `gc` wrote to
+  stderr. A failed `gc prime --hook` is logged too and is no longer cached
+  as an empty prompt, which left the session without its role until the
+  next compaction: a refresh that fails keeps the previous prime, and with
+  none yet the prime is asked for again when the next turn opens. An empty
+  prime, which `gc` prints on purpose for a client's provider chat or a
+  suspended agent, is still kept. Installed plugins without these changes
+  are replaced. (#5553)
 
 - **An attached session is no longer idle-slept.** Under a `[session_sleep]`
   policy or an agent's `sleep_after_idle`, interactive sessions on local tmux

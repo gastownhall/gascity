@@ -813,17 +813,41 @@ for (const plugin of plugins) {
       return output.system[0];
     }
 
-    for (const [outcome, env] of [["failed", "GC_FAKE_PRIME_FAIL"], ["came back empty", "GC_FAKE_PRIME_EMPTY"]]) {
-      it(`asks for the prime again after a read that ${outcome}`, async () => {
-        const hooks = await gascityPlugin({ directory: tmp, client: {} });
-        process.env[env] = "1";
-        assert.equal(await stableSystem(hooks), HEADER);
-        delete process.env[env];
-        const next = await stableSystem(hooks);
-        assert.ok(next.startsWith(ROLE), `the next generation has no role: ${JSON.stringify(next)}`);
-        assert.equal(readPrimeLog(fake).length, 2);
-      });
-    }
+    it("asks for the prime again on the next turn after a failed read, not before", async () => {
+      const hooks = await gascityPlugin({ directory: tmp, client: {} });
+      await hooks.event(userMessageEvent("ses_prime", "msg_p1"));
+      process.env.GC_FAKE_PRIME_FAIL = "1";
+      assert.equal(await stableSystem(hooks), HEADER);
+      delete process.env.GC_FAKE_PRIME_FAIL;
+      // A later generation of the same turn does not ask again, so a gc that
+      // keeps failing or hangs costs one call per turn.
+      assert.equal(await stableSystem(hooks), HEADER);
+      assert.equal(readPrimeLog(fake).length, 1, "the failed turn asked for the prime again");
+      await hooks.event(userMessageEvent("ses_prime", "msg_p2"));
+      const next = await stableSystem(hooks);
+      assert.ok(next.startsWith(ROLE), `the next turn has no role: ${JSON.stringify(next)}`);
+      assert.equal(readPrimeLog(fake).length, 2);
+    });
+
+    it("keeps an empty prime, which gc prints on purpose for some sessions", async () => {
+      // A client's provider chat and a suspended agent get no prompt; asking
+      // again every generation would only repeat that answer's store work.
+      const hooks = await gascityPlugin({ directory: tmp, client: {} });
+      process.env.GC_FAKE_PRIME_EMPTY = "1";
+      assert.equal(await stableSystem(hooks), HEADER);
+      delete process.env.GC_FAKE_PRIME_EMPTY;
+      await hooks.event(userMessageEvent("ses_prime", "msg_e2"));
+      assert.equal(await stableSystem(hooks), HEADER);
+      assert.deepEqual({ reads: readPrimeLog(fake).length, warnings }, { reads: 1, warnings: [] });
+    });
+
+    it("shares one prime read between generations that ask at once", async () => {
+      const hooks = await gascityPlugin({ directory: tmp, client: {} });
+      const [first, second] = await Promise.all([stableSystem(hooks), stableSystem(hooks)]);
+      assert.ok(first.startsWith(ROLE), first);
+      assert.equal(second, first);
+      assert.equal(readPrimeLog(fake).length, 1);
+    });
 
     it("keeps the last prime when a refresh fails", async () => {
       const hooks = await gascityPlugin({ directory: tmp, client: {} });

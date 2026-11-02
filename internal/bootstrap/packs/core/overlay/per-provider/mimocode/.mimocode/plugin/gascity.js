@@ -53,8 +53,9 @@ const PATH_PREFIX =
 // to tell a new turn from a late update to an earlier message (see openTurn).
 const RECENT_USER_MESSAGES = 64;
 
+// runCommand returns gc's trimmed stdout, or null if the call failed.
 async function runCommand(directory, args, warnOnFailure, extraEnv = {}) {
-  const startedAt = Date.now();
+  const startedAt = performance.now();
   try {
     // execFile always gives the child a stdin pipe and never closes it, so a
     // gc subcommand that reads hook stdin waits for an EOF that never arrives
@@ -78,9 +79,9 @@ async function runCommand(directory, args, warnOnFailure, extraEnv = {}) {
     return stdout.trim();
   } catch (err) {
     if (warnOnFailure) {
-      logRunFailure(args, directory, err, Date.now() - startedAt);
+      logRunFailure(args, directory, err, performance.now() - startedAt);
     }
-    return "";
+    return null;
   }
 }
 
@@ -88,21 +89,22 @@ async function runWithWarning(directory, ...args) {
   return runCommand(directory, args, true);
 }
 
-// logRunFailure reports a failed gc call and how long it ran. Node sets
-// killed and SIGTERM both when the timeout fires and when something else ends
-// the child (a supervisor restart, say), so the error alone cannot tell them
-// apart; the elapsed time against COMMAND_TIMEOUT_MS can.
+// logRunFailure reports a failed gc call, how long it ran and what gc wrote to
+// stderr. A timeout ends the child with SIGTERM, as other terminations can,
+// so the elapsed time against COMMAND_TIMEOUT_MS is what tells it apart.
 function logRunFailure(args, directory, err, elapsedMs) {
   try {
     const detail =
       (err && (err.code || err.signal || err.message)) || "unknown error";
+    const stderr = String(err?.stderr || "").trim();
     console.warn(
       "gascity mimocode plugin:",
       `${GC_BIN} ${args.join(" ")}`,
       "cwd",
       directory,
-      `failed after ${elapsedMs}ms (timeout ${COMMAND_TIMEOUT_MS}ms):`,
+      `failed after ${Math.round(elapsedMs)}ms (timeout ${COMMAND_TIMEOUT_MS}ms):`,
       detail,
+      ...(stderr ? [stderr] : []),
     );
   } catch {
     return;
@@ -211,7 +213,13 @@ export default async function gascityPlugin({ directory, client }) {
   if (!managedSessionIdentityPresent()) {
     return {};
   }
-  let cachedPrime = "";
+  // cachedPrime is the last prompt `gc prime --hook` returned, an empty one
+  // included; null until a read succeeds. primeRead is the unforced read in
+  // flight, shared by generations that ask at once, and primeFailedTurn is
+  // the turn whose unforced read failed.
+  let cachedPrime = null;
+  let primeRead = null;
+  let primeFailedTurn = null;
 
   // experimental.chat.system.transform fires once per model generation, not
   // once per user turn, so every tool call in a turn rebuilds the prefix.
@@ -239,20 +247,47 @@ export default async function gascityPlugin({ directory, client }) {
   const childSessions = new Set();
 
   // readPrime returns the role prompt from `gc prime --hook`, read once and
-  // read again when forced. A read that fails or comes back empty is not
-  // cached: a forced refresh that fails keeps the last prime, and while there
-  // is none the next generation asks again, so one bad read does not leave
-  // the rest of the session without its role. Until gc answers, each
-  // generation pays for one failed call, the trade readTurnVolatile makes
-  // when it cannot tell turns apart.
-  async function readPrime(force = false, extraEnv = {}) {
-    if (force || !cachedPrime) {
+  // again when forced (session start, compaction). Whatever gc prints is kept,
+  // an empty prompt included: gc prints none on purpose for a client's
+  // provider chat or a suspended agent. A failed read is not kept, so it does
+  // not leave the session without its role. A forced refresh that fails keeps
+  // the last prime; with none yet, the prime is asked for again once another
+  // turn opens, so a gc that keeps failing or hangs costs one call per turn,
+  // not one per generation.
+  async function readPrime(force = false, extraEnv = {}, turn = "") {
+    if (force) {
       const prime = await runCommand(directory, ["prime", "--hook"], true, extraEnv);
-      if (prime) {
+      if (prime !== null) {
         cachedPrime = prime;
       }
+      return cachedPrime ?? "";
     }
-    return cachedPrime;
+    if (cachedPrime !== null) {
+      return cachedPrime;
+    }
+    if (!primeRead) {
+      if (turn === primeFailedTurn) {
+        return "";
+      }
+      primeRead = runCommand(directory, ["prime", "--hook"], true, extraEnv).then((prime) => {
+        primeRead = null;
+        if (prime === null) {
+          primeFailedTurn = turn;
+          return "";
+        }
+        cachedPrime = prime;
+        return prime;
+      });
+    }
+    return primeRead;
+  }
+
+  // turnKey names the turn a generation belongs to, or "" when its session or
+  // turn is unknown. It reads the turn state without creating it.
+  function turnKey(sessionID) {
+    sessionID = String(sessionID || "");
+    const state = sessionID ? turns.get(sessionID) : null;
+    return state && state.currentTurnID ? `${sessionID}/${state.currentTurnID}` : "";
   }
 
   function prependText(existing, prefix) {
@@ -440,7 +475,7 @@ export default async function gascityPlugin({ directory, client }) {
     // the split below. It is not needed to open the turn either;
     // message.updated precedes the first generation.
     "experimental.chat.system.transform": async (input, output) => {
-      const prime = await readPrime();
+      const prime = await readPrime(false, {}, turnKey(input?.sessionID));
       const volatile = await readTurnVolatile(input?.sessionID);
       prependStableSystem(output.system, prime);
       appendVolatileSystem(output.system, volatile);
