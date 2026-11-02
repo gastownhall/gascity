@@ -303,7 +303,7 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 			}
 		}
 		result.Details = append(result.Details, detail)
-		if status != StatusOK {
+		if status != StatusOK || hasDecl {
 			failing++
 			if firstFailingHint == "" {
 				// gc order history takes a bare name positionally and filters

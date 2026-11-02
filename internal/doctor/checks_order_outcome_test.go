@@ -881,6 +881,148 @@ func TestConsecutiveOrderFailuresIgnoresDeclarations(t *testing.T) {
 	}
 }
 
+// TestOrderOutcomeHealthyIncompleteOutcomeOrderScope pins the scope rules for
+// declaration warnings: only cron/cooldown orders of non-suspended rigs are
+// eligible, subjects match on the full scoped name (so a same-named order in
+// another rig neither warns nor clears another's declaration), and the
+// inspection hint keeps its existing rig-aware target form.
+func TestOrderOutcomeHealthyIncompleteOutcomeOrderScope(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	const declMsg = "partial: store unreachable; not run: rig:st (dolt not reachable)"
+
+	declared := func(subject string) events.Event {
+		return events.Event{
+			Type: events.OrderSkipped, Ts: now.Add(-time.Hour), Subject: subject, Actor: "controller", Message: declMsg,
+			Payload: events.OrderSkippedPayloadJSON(events.OrderSkippedPayload{
+				OrderName: subject, Outcome: "partial", Reason: "store unreachable",
+				Scopes: []events.OrderSkippedScope{{Scope: "rig:st", Reason: "dolt not reachable"}},
+			}),
+		}
+	}
+	completed := func(subject string, ts time.Time) events.Event {
+		return events.Event{Type: events.OrderCompleted, Ts: ts, Subject: subject, Actor: "controller"}
+	}
+
+	// rigOrder wires one order into rig rigName, mirroring how a rig-scoped
+	// order is discovered by the scan both checks share.
+	rigOrder := func(t *testing.T, cityPath string, cfg *config.City, rigName, name, trigger, timing string) {
+		t.Helper()
+		rigPath := filepath.Join(cityPath, "rigs", rigName)
+		rigOrders := filepath.Join(rigPath, "orders")
+		if err := os.MkdirAll(rigOrders, 0o755); err != nil {
+			t.Fatalf("creating rig orders dir: %v", err)
+		}
+		cfg.Rigs = append(cfg.Rigs, config.Rig{Name: rigName, Path: rigPath})
+		if cfg.FormulaLayers.Rigs == nil {
+			cfg.FormulaLayers.Rigs = make(map[string][]string)
+		}
+		cfg.FormulaLayers.Rigs[rigName] = append(cfg.FormulaLayers.Rigs[rigName], cfg.FormulaLayers.City[0], filepath.Join(rigPath, "formulas"))
+		writeOrderFiringTestOrderInDir(t, rigOrders, name, trigger, timing)
+	}
+
+	t.Run("rig-scoped order warns with rig-aware hint", func(t *testing.T) {
+		cityPath, cfg := orderFiringTestCity(t)
+		rigOrder(t, cityPath, cfg, "st", "export-sweep", "cooldown", "6h")
+		writeOrderFiringTestEvents(t, cityPath,
+			completed("export-sweep:rig:st", now.Add(-2*time.Hour)),
+			declared("export-sweep:rig:st"),
+		)
+
+		result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
+
+		if result.Status != StatusWarning {
+			t.Fatalf("status = %v, want StatusWarning; msg=%q details=%v", result.Status, result.Message, result.Details)
+		}
+		wantHint := "Inspect with: gc order check && gc order history export-sweep --rig st"
+		if result.FixHint != wantHint {
+			t.Fatalf("FixHint = %q, want %q — the hint must keep the rig-aware target form", result.FixHint, wantHint)
+		}
+		if joined := strings.Join(result.Details, "\n"); !strings.Contains(joined, declMsg) {
+			t.Fatalf("details = %v, want the declaration message for the scoped subject", result.Details)
+		}
+	})
+
+	t.Run("city-scope order hint stays bare", func(t *testing.T) {
+		cityPath, cfg := orderFiringTestCity(t)
+		writeOrderFiringTestOrderInDir(t, filepath.Join(cityPath, "orders"), "export-sweep", "cron", "*/5 * * * *")
+		writeOrderFiringTestEvents(t, cityPath,
+			completed("export-sweep", now.Add(-2*time.Hour)),
+			declared("export-sweep"),
+		)
+
+		result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
+
+		if result.Status != StatusWarning {
+			t.Fatalf("status = %v, want StatusWarning", result.Status)
+		}
+		wantHint := "Inspect with: gc order check && gc order history export-sweep"
+		if result.FixHint != wantHint {
+			t.Fatalf("FixHint = %q, want %q", result.FixHint, wantHint)
+		}
+	})
+
+	t.Run("other-scope completion does not clear the declaration", func(t *testing.T) {
+		cityPath, cfg := orderFiringTestCity(t)
+		rigOrder(t, cityPath, cfg, "st", "export-sweep", "cooldown", "6h")
+		rigOrder(t, cityPath, cfg, "other", "export-sweep", "cooldown", "6h")
+		writeOrderFiringTestEvents(t, cityPath,
+			completed("export-sweep:rig:st", now.Add(-3*time.Hour)),
+			declared("export-sweep:rig:st"),
+			// A completion for the same order name in another rig, recorded
+			// after the declaration: subjects are scoped, so it clears nothing.
+			completed("export-sweep:rig:other", now.Add(-time.Hour)),
+		)
+
+		result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
+
+		if result.Status != StatusWarning {
+			t.Fatalf("status = %v, want StatusWarning — an other-scope completion must not clear the declaration", result.Status)
+		}
+		if result.FixHint != "Inspect with: gc order check && gc order history export-sweep --rig st" {
+			t.Fatalf("FixHint = %q, want the declaring rig's hint", result.FixHint)
+		}
+	})
+
+	t.Run("manual and event orders stay excluded", func(t *testing.T) {
+		cityPath, cfg := orderFiringTestCity(t)
+		ordersDir := filepath.Join(cityPath, "orders")
+		writeOrderFiringTestOrderInDir(t, ordersDir, "ticket-intake", "manual", "")
+		writeOrderFiringTestOrderInDir(t, ordersDir, "on-event", "event", "bead.created")
+		writeOrderFiringTestEvents(t, cityPath,
+			declared("ticket-intake"),
+			declared("on-event"),
+		)
+
+		result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
+
+		if result.Status != StatusOK {
+			t.Fatalf("status = %v, want StatusOK — manual and event orders are out of scope by construction", result.Status)
+		}
+		if joined := strings.Join(result.Details, "\n"); strings.Contains(joined, declMsg) {
+			t.Fatalf("details must not carry declarations of excluded orders:\n%s", joined)
+		}
+	})
+
+	t.Run("suspended rig order stays excluded", func(t *testing.T) {
+		cityPath, cfg := orderFiringTestCity(t)
+		rigOrder(t, cityPath, cfg, "st", "export-sweep", "cooldown", "6h")
+		cfg.Rigs[len(cfg.Rigs)-1].SuspendedOnStart = true
+		writeOrderFiringTestEvents(t, cityPath,
+			completed("export-sweep:rig:st", now.Add(-2*time.Hour)),
+			declared("export-sweep:rig:st"),
+		)
+
+		result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
+
+		if result.Status != StatusOK {
+			t.Fatalf("status = %v, want StatusOK — a suspended rig's order is out of scope", result.Status)
+		}
+		if joined := strings.Join(result.Details, "\n"); strings.Contains(joined, declMsg) {
+			t.Fatalf("details must not carry declarations of suspended rigs:\n%s", joined)
+		}
+	})
+}
+
 // orderOutcomeTestDetailNames extracts the order display name from each
 // detail line. Both checks' details begin with the order display name
 // followed by ": ".
