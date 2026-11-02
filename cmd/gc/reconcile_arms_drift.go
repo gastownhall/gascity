@@ -80,6 +80,7 @@ func armConfigDrift(r *rowFacts) (intent, bool) {
 			return r.heal(intentRowHeal, decideDriftResolved, session.MetadataPatch{
 				namedSessionConfigDriftDeferredAtMetadata: "", namedSessionConfigDriftDeferredKeyMetadata: "",
 				sessionAttachedConfigDriftDeferredAtMetadata: "", sessionAttachedConfigDriftDeferredKeyMetadata: "",
+				configDriftEscalatedAtMetadata: "",
 			})
 		}
 		return r.liveApply(cfg)
@@ -231,6 +232,7 @@ func (r *rowFacts) driftRepair(cfg runtime.Config, stored, core string) (intent,
 	maps.Copy(patch, session.MetadataPatch{
 		namedSessionConfigDriftDeferredAtMetadata: "", namedSessionConfigDriftDeferredKeyMetadata: "",
 		sessionAttachedConfigDriftDeferredAtMetadata: "", sessionAttachedConfigDriftDeferredKeyMetadata: "",
+		configDriftEscalatedAtMetadata: "",
 	})
 	repair, _ := r.heal(intentDriftRepair, decideDriftRepair, patch) // its own kind: a fresh read that decides another heal refuses
 

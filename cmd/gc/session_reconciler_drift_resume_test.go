@@ -40,10 +40,11 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinua
 		priorStartedConfigHash = "5f9030d4d45048d150487fedef0be003d58f374e2d70f1cb4986f4a50f6e69e4"
 	)
 	env.setSessionMetadata(&session, map[string]string{
-		"session_key":         priorSessionKey,
-		"started_config_hash": priorStartedConfigHash,
-		"resume_flag":         "--resume",
-		"resume_style":        "flag",
+		"session_key":               priorSessionKey,
+		"started_config_hash":       priorStartedConfigHash,
+		"resume_flag":               "--resume",
+		"resume_style":              "flag",
+		"config_drift_escalated_at": "2026-05-13T16:23:25Z", // the reset ends the episode, its escalation marker with it (#8345)
 	})
 
 	tp := driftResumeSessionIDCapableTemplateParams()
@@ -59,6 +60,9 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinua
 	if got.Metadata["started_config_hash"] != priorStartedConfigHash {
 		t.Errorf("started_config_hash = %q, want preserved %q (forces --resume not --session-id)",
 			got.Metadata["started_config_hash"], priorStartedConfigHash)
+	}
+	if got.Metadata["config_drift_escalated_at"] != "" {
+		t.Errorf("config_drift_escalated_at = %q, want the reset to clear the episode's marker", got.Metadata["config_drift_escalated_at"])
 	}
 
 	cfg := &config.City{Agents: []config.Agent{{Name: "mayor"}}}

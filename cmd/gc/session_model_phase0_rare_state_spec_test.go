@@ -444,6 +444,11 @@ func TestShouldDeferNamedSessionConfigDriftBoundsUnknownActivity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get session bead after new drift: %v", err)
 	}
+	// The clear ends whatever episode the row carries, the held-work
+	// deferral's escalation marker with it (#8345).
+	if err := store.SetMetadataBatch(session.ID, map[string]string{configDriftEscalatedAtMetadata: "2026-03-08T13:00:00Z"}); err != nil {
+		t.Fatalf("SetMetadataBatch(escalation marker): %v", err)
+	}
 	if err := clearSessionConfigDriftDeferral(sessiontest.SeedBead(t, session), sessionFrontDoor(store)); err != nil {
 		t.Fatalf("clearSessionConfigDriftDeferral: %v", err)
 	}
@@ -456,6 +461,9 @@ func TestShouldDeferNamedSessionConfigDriftBoundsUnknownActivity(t *testing.T) {
 	}
 	if got := session.Metadata[namedSessionConfigDriftDeferredKeyMetadata]; got != "" {
 		t.Fatalf("deferred key after clear = %q, want empty", got)
+	}
+	if got := session.Metadata[configDriftEscalatedAtMetadata]; got != "" {
+		t.Fatalf("escalation marker after clear = %q, want empty", got)
 	}
 }
 

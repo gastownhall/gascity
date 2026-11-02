@@ -106,7 +106,7 @@ func TestDecideRowConfigDrift(t *testing.T) {
 		// not; the stop verb then waits out the attach (L3).
 		{name: "an acked drift is A11's", meta: append([]string{"started_config_hash", stale}, ackMeta("3")...), alive: true, wantKind: intentSignalAck, wantReason: decideDrainSignal},
 		{name: "an acked attached drift is A11's", meta: append([]string{"started_config_hash", stale}, ackMeta("3")...), alive: true, attached: true, wantKind: intentSignalAck, wantReason: decideDrainSignal},
-		{name: "a resolved drift clears its deferral keys", meta: []string{"started_config_hash", core, "started_live_hash", live, "attached_config_drift_deferred_key", key}, alive: true, wantKind: intentRowHeal, wantReason: decideDriftResolved},
+		{name: "a resolved drift clears its deferral keys", meta: []string{"started_config_hash", core, "started_live_hash", live, "attached_config_drift_deferred_key", key, "config_drift_escalated_at", rowAt(-time.Minute)}, alive: true, wantKind: intentRowHeal, wantReason: decideDriftResolved},
 		{name: "a converged row", meta: []string{"started_config_hash", core, "started_live_hash", live}, alive: true},
 		{name: "a live drift runs session_live again", meta: []string{"started_config_hash", core, "started_live_hash", runtime.FingerprintVersion + ":other"}, alive: true, wantKind: intentLiveApply, wantReason: decideLiveApply},
 		{name: "another version's live hash is A8's", meta: []string{"started_config_hash", core, "started_live_hash", "v5:other"}, alive: true},
@@ -183,8 +183,8 @@ func TestDecideRowConfigDrift(t *testing.T) {
 					t.Fatalf("payload deferred_since %q, want the episode's own start", p.DeferredSince)
 				}
 			case decideDriftResolved:
-				if len(it.Patch) != 4 {
-					t.Fatalf("clear %v, want the four deferral keys", it.Patch)
+				if len(it.Patch) != 5 || it.Patch[configDriftEscalatedAtMetadata] != "" {
+					t.Fatalf("clear %v, want the deferral keys with the episode's escalation marker", it.Patch)
 				}
 			case decideDrainBegin + drainConfigDrift:
 				if it.Patch[session.DrainIntentReasonKey] != drainConfigDrift || it.Event == nil || it.Event.Type != "session.draining" {

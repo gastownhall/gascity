@@ -6640,6 +6640,7 @@ func clearSessionConfigDriftDeferral(info sessionpkg.Info, sessFront *sessionpkg
 	}
 	if info.ConfigDriftDeferredAt == "" &&
 		info.ConfigDriftDeferredKey == "" &&
+		info.ConfigDriftEscalatedAt == "" &&
 		info.AttachedConfigDriftDeferredAt == "" &&
 		info.AttachedConfigDriftDeferredKey == "" {
 		return nil
@@ -6647,6 +6648,7 @@ func clearSessionConfigDriftDeferral(info sessionpkg.Info, sessFront *sessionpkg
 	return sessFront.ApplyPatch(info.ID, map[string]string{
 		namedSessionConfigDriftDeferredAtMetadata:     "",
 		namedSessionConfigDriftDeferredKeyMetadata:    "",
+		configDriftEscalatedAtMetadata:                "",
 		sessionAttachedConfigDriftDeferredAtMetadata:  "",
 		sessionAttachedConfigDriftDeferredKeyMetadata: "",
 	})
@@ -7079,6 +7081,7 @@ func resetConfiguredNamedSessionForConfigDriftInfo(
 	}
 	batch[namedSessionConfigDriftDeferredAtMetadata] = ""
 	batch[namedSessionConfigDriftDeferredKeyMetadata] = ""
+	batch[configDriftEscalatedAtMetadata] = ""
 	batch[sessionAttachedConfigDriftDeferredAtMetadata] = ""
 	batch[sessionAttachedConfigDriftDeferredKeyMetadata] = ""
 	if err := sessionFrontDoor(store).ApplyPatch(info.ID, batch); err != nil {
