@@ -1700,6 +1700,19 @@ func reassignStateAssignedToRetiredSessionBead(store beads.Store, oldSessionID, 
 	}
 }
 
+// retiredCleanupLegBudget bounds one leg of retired-session cleanup — wait
+// cancellation here, external-message teardown once it gets its own bound — so
+// a slow store stops the leg at its next cancellation checkpoint instead of
+// prolonging the cleanup indefinitely (SESSION-RUNTIME-035). The bound is
+// between store calls: a call already in flight finishes, so a leg can outlive
+// its budget by one call.
+const retiredCleanupLegBudget = 10 * time.Second
+
+// cancelStateAssignedToRetiredSessionBead tears down a retired session's
+// waits and external-message state: the waits leg runs under
+// retiredCleanupLegBudget, and the external-messaging leg always runs
+// afterwards. A cut-off leg reports its error on stderr; a nil stderr discards
+// it.
 func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string, now time.Time, stderr io.Writer) {
 	if store == nil || strings.TrimSpace(sessionID) == "" {
 		return
@@ -1708,7 +1721,9 @@ func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string
 		stderr = io.Discard
 	}
 	sessFront := sessionFrontDoor(store)
-	_, capped, err := sessFront.CancelWaits(context.Background(), sessionID, now)
+	waitsCtx, releaseWaitsBudget := context.WithTimeout(context.Background(), retiredCleanupLegBudget)
+	_, capped, err := sessFront.CancelWaits(waitsCtx, sessionID, now)
+	releaseWaitsBudget()
 	if capped {
 		stampWaitLookupCapDiagnostic(sessFront, sessionID, beads.LookupLimitError{
 			Kind:  "wait",
