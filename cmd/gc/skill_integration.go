@@ -364,16 +364,25 @@ func buildAssignedSkillsPromptFragment(
 	return b.String()
 }
 
-// writeSkillBullets renders a bullet list of skill entries. When
+// writeSkillBullets renders a bullet list of skill entries. When a
+// skill's SKILL.md frontmatter declares a usable name that differs
+// from its catalog name, the bullet annotates it as
+// " (SKILL.md name: `<name>`)" so providers that load skills by their
+// frontmatter name (opencode 1.x) can find the listed skill. When
 // originTag is non-empty, each bullet trails with " *(origin)*" so
 // shared entries can show whether they came from the city pack, an
-// import binding, or a compatibility bootstrap pack. Descriptions are included when the
-// SKILL.md frontmatter provided one.
+// import binding, or a compatibility bootstrap pack. Descriptions are
+// included when the SKILL.md frontmatter provided one.
 func writeSkillBullets(b *strings.Builder, entries []materialize.SkillEntry, originTag string) {
 	for _, e := range entries {
 		b.WriteString("- `")
 		b.WriteString(e.Name)
 		b.WriteString("`")
+		if fm := strings.TrimSpace(e.FrontmatterName); fm != "" && fm != e.Name {
+			b.WriteString(" (SKILL.md name: `")
+			b.WriteString(fm)
+			b.WriteString("`)")
+		}
 		if strings.TrimSpace(e.Description) != "" {
 			b.WriteString(" — ")
 			b.WriteString(strings.TrimSpace(e.Description))

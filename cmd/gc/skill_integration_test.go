@@ -519,6 +519,85 @@ func TestBuildAssignedSkillsPromptFragmentOmitsDescriptionWhenMissing(t *testing
 	}
 }
 
+// TestBuildAssignedSkillsPromptFragmentShowsFrontmatterName pins the
+// #8501 display fix at the fragment level: a skill whose SKILL.md
+// frontmatter name differs from its catalog name is annotated with the
+// declared name, in both the assigned and shared sections, with the
+// annotation ahead of description and origin.
+func TestBuildAssignedSkillsPromptFragmentShowsFrontmatterName(t *testing.T) {
+	t.Parallel()
+	city := &materialize.CityCatalog{
+		Entries: []materialize.SkillEntry{
+			{Name: "core.gc-work", Source: "/y", Origin: "core", Description: "Working with beads", FrontmatterName: "gc-work"},
+		},
+	}
+	agentCat := materialize.AgentCatalog{
+		Entries: []materialize.SkillEntry{
+			{Name: "tools.lint", Source: "/a", Origin: "agent", FrontmatterName: "lint"},
+			// No description: the annotation still renders.
+			{Name: "bare", Source: "/b", Origin: "agent", FrontmatterName: "bare-tool"},
+		},
+	}
+	a := &config.Agent{Name: "worker", Scope: "city"}
+	got := buildAssignedSkillsPromptFragment(a, city, agentCat)
+
+	for _, want := range []string{
+		"### Assigned to you",
+		"- `tools.lint` (SKILL.md name: `lint`)\n",
+		"- `bare` (SKILL.md name: `bare-tool`)\n",
+		"### Shared in this scope",
+		"- `core.gc-work` (SKILL.md name: `gc-work`) — Working with beads *(core)*\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("fragment missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestBuildAssignedSkillsPromptFragmentFrontmatterNameMatchesOrEmpty
+// pins the no-op side of #8501: entries without a differing usable
+// frontmatter name render byte-identical bullets — the annotation
+// appears only for a trimmed, nonempty name that differs from the
+// catalog name, and then with the trimmed value.
+func TestBuildAssignedSkillsPromptFragmentFrontmatterNameMatchesOrEmpty(t *testing.T) {
+	t.Parallel()
+	city := &materialize.CityCatalog{
+		Entries: []materialize.SkillEntry{
+			// Frontmatter name equals the catalog name.
+			{Name: "plan", Source: "/p", Origin: "city", Description: "d", FrontmatterName: "plan"},
+			// No frontmatter name at all.
+			{Name: "blank", Source: "/b", Origin: "city", Description: "d"},
+			// Whitespace-only frontmatter name.
+			{Name: "spaces", Source: "/s", Origin: "city", Description: "d", FrontmatterName: "   "},
+			// Differing name with surrounding whitespace: trimmed
+			// for both the comparison and the rendered value.
+			{Name: "padded", Source: "/x", Origin: "core", Description: "d", FrontmatterName: " gc-work "},
+		},
+	}
+	got := buildAssignedSkillsPromptFragment(&config.Agent{Name: "x", Scope: "city"}, city, materialize.AgentCatalog{})
+
+	for _, want := range []string{
+		"- `plan` — d *(city)*\n",
+		"- `blank` — d *(city)*\n",
+		"- `spaces` — d *(city)*\n",
+		"- `padded` (SKILL.md name: `gc-work`) — d *(core)*\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("fragment missing %q:\n%s", want, got)
+		}
+	}
+	for _, absent := range []string{
+		"(SKILL.md name: `plan`)",
+		"(SKILL.md name: `blank`)",
+		"(SKILL.md name: `spaces`)",
+		"(SKILL.md name: ` gc-work `)",
+	} {
+		if strings.Contains(got, absent) {
+			t.Errorf("fragment must not contain %q:\n%s", absent, got)
+		}
+	}
+}
+
 func TestAppendMaterializeSkillsPreStart(t *testing.T) {
 	t.Parallel()
 	existing := []string{"mkdir -p .cache", "./setup.sh"}

@@ -690,6 +690,96 @@ func TestResolveTemplateAppendsAssignedSkillsPrompt(t *testing.T) {
 	})
 }
 
+// TestResolveTemplateAppendixShowsImportedSkillFrontmatterName is the
+// behavioral regression for #8501: an imported skill is cataloged under
+// its binding-qualified name (core.gc-work) while its SKILL.md declares
+// name: gc-work, and the prompt appendix must surface the declared name
+// so a provider that loads skills by frontmatter name (opencode 1.x)
+// can find it. Skills whose declared name matches their catalog name
+// render exactly as before, and the fingerprint keys stay qualified.
+func TestResolveTemplateAppendixShowsImportedSkillFrontmatterName(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"),
+		[]byte("[pack]\nname = \"s\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	skillDir := filepath.Join(cityPath, "skills", "plan")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
+		[]byte("---\nname: plan\ndescription: Plan the work\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	importedPack := t.TempDir()
+	importedDir := filepath.Join(importedPack, "skills", "gc-work")
+	if err := os.MkdirAll(importedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(importedDir, "SKILL.md"),
+		[]byte("---\nname: gc-work\ndescription: Working with beads\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sharedCat, err := materialize.LoadCityCatalog(filepath.Join(cityPath, "skills"),
+		config.DiscoveredSkillCatalog{
+			SourceDir:   filepath.Join(importedPack, "skills"),
+			PackDir:     importedPack,
+			PackName:    "core",
+			BindingName: "core",
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	params := &agentBuildParams{
+		cityName:  "city",
+		cityPath:  cityPath,
+		workspace: &config.Workspace{Provider: "claude"},
+		providers: map[string]config.ProviderSpec{
+			"claude": {Command: "echo", PromptMode: "none"},
+		},
+		lookPath:        func(string) (string, error) { return "/bin/echo", nil },
+		fs:              fsys.OSFS{},
+		rigs:            []config.Rig{},
+		beaconTime:      time.Unix(0, 0),
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+		skillCatalog:    &sharedCat,
+		sessionProvider: "tmux",
+	}
+	a := &config.Agent{Name: "mayor", Scope: "city", Provider: "claude"}
+	tp, err := resolveTemplate(params, a, a.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	for _, needle := range []string{
+		// The imported skill shows both names, in the shared section
+		// with its origin tag.
+		"- `core.gc-work` (SKILL.md name: `gc-work`) — Working with beads *(core)*\n",
+		// The city skill's names agree, so its bullet is unchanged.
+		"- `plan` — Plan the work *(city)*\n",
+	} {
+		if !strings.Contains(tp.Prompt, needle) {
+			t.Errorf("prompt missing %q:\n%s", needle, tp.Prompt)
+		}
+	}
+	if strings.Contains(tp.Prompt, "(SKILL.md name: `plan`)") {
+		t.Errorf("skill whose frontmatter name matches its catalog name must render unannotated:\n%s", tp.Prompt)
+	}
+
+	// Catalog identity is untouched: fingerprint keys stay qualified.
+	if _, ok := tp.FPExtra["skills:core.gc-work"]; !ok {
+		t.Errorf("FPExtra = %+v, want a skills:core.gc-work entry", tp.FPExtra)
+	}
+	if _, ok := tp.FPExtra["skills:gc-work"]; ok {
+		t.Errorf("FPExtra = %+v, must not gain an unqualified skills:gc-work entry", tp.FPExtra)
+	}
+}
+
 // TestResolveTemplatePoolInstanceMaterializeUsesTemplateName is the
 // v0.15.1-rc1 → rc2 regression. Pool instances (especially namepool-
 // themed ones like polecat → furiosa) must route the stage-2 PreStart
