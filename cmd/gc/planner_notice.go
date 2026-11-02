@@ -3,7 +3,8 @@ package main
 // Planner notices as conversation-lane ops (DES-O1 §9, OJ-14).
 //
 // The controller's planner reminders (the claim, continuation and execution
-// backstops, the warm-bind claim nudge and the drain reminder) keep their pacing markers, but
+// backstops, the warm-bind claim nudge, the drain reminder and v2's work
+// ladder, work_ladder_notice.go) keep their pacing markers, but
 // when the controller's lane host executes message ops ([ops] authoritative
 // lists message) they stop typing into the runtime themselves: each reminder
 // becomes one message{notice, boundary, wake: live_only} op that the lane

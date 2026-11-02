@@ -39,6 +39,16 @@ ESCALATION_TARGET="${GC_ESCALATION_TARGET:-human}"
 # liveness can be determined.
 # `gc bd list` without --rig is HQ-scoped from the city cwd, so per-rig
 # beads are invisible to a bare query — walk every rig explicitly.
+# The scope walk keeps per-rig failure isolation and leaves single-store
+# behavior as it was, but `gc bd list` reads one work store and leaves out
+# the wisp plane, so the HQ scope also stages the federated read
+# (read_federated_claims): class-binding rows on a split city, and wisp-plane
+# rows everywhere. `gc session list` is city-wide and every row is judged
+# against all liveness reads this pass made, so a rig skipped for a failed
+# rig-context liveness read can still contribute rows through the federated
+# read, judged with the city's liveness bracket.
+# Every exit after collection writes the outcome, so a declared failed read is
+# not lost when no claim is left to judge.
 TMP=$(mktemp) || exit 0
 SESSION_TMP=$(mktemp) || {
     rm -f "$TMP"
@@ -79,20 +89,61 @@ append_session_list() {
     return 1
 }
 
+# read_federated_claims writes every in-progress bead the federated reader
+# returns to $1. `gc bd list` answers from one work store: on a city whose
+# [storage.classes] serves the graph class from a binding, molecule roots,
+# steps and control beads live in that binding and no gc bd scope lists them
+# (exit 0, empty), and bd also leaves wisp-plane rows out of a plain list.
+# gc ready --status in_progress reads the city store, every serving rig store
+# and every class binding across both storage tiers. It fails on a store it
+# cannot read rather than answer short; that failure sets FEDERATED_READ_ERROR
+# and is declared after the scope walk, never staged as "no claims".
+FEDERATED_READ_ERROR=""
+read_federated_claims() {
+    local out="$1"
+    local err_tmp
+    local rc=0
+    err_tmp=$(mktemp) || {
+        FEDERATED_READ_ERROR="gc ready --status in_progress was not run: mktemp failed"
+        return 1
+    }
+    gc ready --status in_progress --json >"$out" 2>"$err_tmp" || rc=$?
+    if [ "$rc" -eq 0 ] && jq -e 'type == "array"' "$out" >/dev/null 2>&1; then
+        rm -f "$err_tmp"
+        return 0
+    fi
+    local why=""
+    why=$(<"$err_tmp") || why=""
+    why="${why//$'\t'/ }"
+    FEDERATED_READ_ERROR="gc ready --status in_progress failed (exit $rc): ${why//$'\n'/ }"
+    rm -f "$err_tmp"
+    : >"$out"
+    return 1
+}
+
 append_hq_scope() {
     local bead_fetch_tmp
+    local federated_tmp
     bead_fetch_tmp=$(mktemp) || return 1
-    append_session_list gc session list --json || {
+    federated_tmp=$(mktemp) || {
         rm -f "$bead_fetch_tmp"
+        return 1
+    }
+    append_session_list gc session list --json || {
+        rm -f "$bead_fetch_tmp" "$federated_tmp"
         return 1
     }
     gc bd list --status=in_progress --json --limit=0 2>/dev/null >"$bead_fetch_tmp" || true
+    # The city's scope also stages the claims only the federated reader
+    # returns, between the same two liveness reads. Its rows overlap the scope
+    # reads' rows; the first row staged for an id wins (Step 1c).
+    read_federated_claims "$federated_tmp" || true
     append_session_list gc session list --json || {
-        rm -f "$bead_fetch_tmp"
+        rm -f "$bead_fetch_tmp" "$federated_tmp"
         return 1
     }
-    cat "$bead_fetch_tmp" >>"$TMP"
-    rm -f "$bead_fetch_tmp"
+    cat "$bead_fetch_tmp" "$federated_tmp" >>"$TMP"
+    rm -f "$bead_fetch_tmp" "$federated_tmp"
 }
 
 append_rig_scope() {
@@ -126,8 +177,19 @@ while IFS= read -r rig; do
     fi
 done <<<"$RIG_NAMES"
 
-IN_PROGRESS=$(jq -c -s 'add // []' "$TMP" 2>/dev/null) || IN_PROGRESS="[]"
+# Step 1c: a federated read that did not complete is declared: this pass
+# judged only the claims the gc bd scope reads returned, and on a split city
+# that leaves out every graph-class claim.
+if [ -n "$FEDERATED_READ_ERROR" ]; then
+    echo "orphan-sweep: $FEDERATED_READ_ERROR; this pass considered only the claims gc bd list returned scope by scope" >&2
+    order_outcome_scope_skipped "every store (gc ready)" "$FEDERATED_READ_ERROR; only the claims gc bd list returned scope by scope were considered"
+fi
+
+IN_PROGRESS=$(jq -c -s 'add // [] | reduce .[] as $b ({seen: {}, out: []};
+    ($b.id // "") as $id
+    | if $id != "" and .seen[$id] then . else .seen[$id] = true | .out += [$b] end) | .out' "$TMP" 2>/dev/null) || IN_PROGRESS="[]"
 if [ "$IN_PROGRESS" = "[]" ]; then
+    order_outcome_write
     exit 0
 fi
 
@@ -136,9 +198,13 @@ fi
 # and rig scope. Fall back to the older config-show parser for older binaries.
 AGENTS=$(gc config explain 2>/dev/null | awk '/^Agent: /{print $2}') || AGENTS=""
 if [ -z "$AGENTS" ]; then
-    AGENTS=$(gc config show 2>/dev/null | awk '/^\[\[agent\]\]/{a=1} a && /^[[:space:]]*name[[:space:]]*=/{print; a=0}' | sed 's/.*=[[:space:]]*"\(.*\)"/\1/') || exit 0
+    AGENTS=$(gc config show 2>/dev/null | awk '/^\[\[agent\]\]/{a=1} a && /^[[:space:]]*name[[:space:]]*=/{print; a=0}' | sed 's/.*=[[:space:]]*"\(.*\)"/\1/') || {
+        order_outcome_write
+        exit 0
+    }
 fi
 if [ -z "$AGENTS" ]; then
+    order_outcome_write
     exit 0
 fi
 
@@ -187,7 +253,10 @@ LIVE_SESSION_IDS=$(jq -r -s '
       | .[]
       | select(. != null and . != "")
     ] | unique | .[]
-' "$SESSION_TMP" 2>/dev/null) || exit 0
+' "$SESSION_TMP" 2>/dev/null) || {
+    order_outcome_write
+    exit 0
+}
 
 agent_exists() {
     local candidate="$1"

@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // isolateProviderDiscovery points provider transcript discovery at an empty,
@@ -730,6 +731,7 @@ func TestHandleSessionTranscriptStructuredGracefullyDowngradesAllBuiltinProvider
 			if len(resp.History.Diagnostics) == 0 || resp.History.Diagnostics[0].Code != structuredTranscriptUnavailableCode {
 				t.Fatalf("Diagnostics = %+v, want transcript_unavailable", resp.History.Diagnostics)
 			}
+			assertStructuredFallbackActivityUnknown(t, resp)
 			resume, ok := decodeStructuredResumeToken(resp.History.Cursor.ResumeToken)
 			if !ok || !resume.IncludeThinking {
 				t.Fatalf("fallback resume token = %+v, valid=%t; want include_thinking=true", resume, ok)
@@ -1097,6 +1099,7 @@ func TestHandleSessionStreamStructuredGracefullyDowngradesWithoutTranscript(t *t
 			if !strings.Contains(body, provider+" pane output") {
 				t.Fatalf("stream body missing text fallback: %s", body)
 			}
+			assertStructuredStreamFallbackActivityUnknown(t, body)
 			if !strings.Contains(body, `"role":"assistant"`) {
 				t.Fatalf("stream body fallback role is not assistant: %s", body)
 			}
@@ -1777,6 +1780,7 @@ func TestLegacySessionTranscriptStructuredGracefullyDowngrades(t *testing.T) {
 	if resp.History == nil || resp.History.Continuity.Status != "degraded" {
 		t.Fatalf("History = %+v, want degraded structured fallback", resp.History)
 	}
+	assertStructuredFallbackActivityUnknown(t, resp)
 	resume, ok := decodeStructuredResumeToken(resp.History.Cursor.ResumeToken)
 	if !ok || !resume.IncludeThinking {
 		t.Fatalf("legacy fallback resume token = %+v, valid=%t; want include_thinking=true", resume, ok)
@@ -1818,11 +1822,38 @@ func TestLegacySessionStreamStructuredGracefullyDowngrades(t *testing.T) {
 	if !strings.Contains(body, "cursor pane output") {
 		t.Fatalf("stream body missing text fallback: %s", body)
 	}
+	assertStructuredStreamFallbackActivityUnknown(t, body)
 	if !strings.Contains(body, `"role":"assistant"`) {
 		t.Fatalf("stream body fallback role is not assistant: %s", body)
 	}
 	cancel()
 	<-done
+}
+
+// assertStructuredFallbackActivityUnknown checks that a degraded structured
+// transcript for a running session with no transcript reports unknown
+// activity: pane output alone does not show whether the agent is mid-turn.
+func assertStructuredFallbackActivityUnknown(t *testing.T, resp sessionTranscriptGetResponse) {
+	t.Helper()
+	if resp.History == nil {
+		t.Fatal("History is nil, want degraded structured history")
+	}
+	if got, want := resp.History.TailState.Activity, string(worker.TailActivityUnknown); got != want {
+		t.Fatalf("fallback tail_state.activity = %q, want %q: nothing observed the turn state", got, want)
+	}
+}
+
+// assertStructuredStreamFallbackActivityUnknown is the SSE-body counterpart of
+// assertStructuredFallbackActivityUnknown.
+func assertStructuredStreamFallbackActivityUnknown(t *testing.T, body string) {
+	t.Helper()
+	want := `"activity":"` + string(worker.TailActivityUnknown) + `"`
+	if !strings.Contains(body, want) {
+		t.Fatalf("stream fallback missing %s: %s", want, body)
+	}
+	if inTurn := `"activity":"` + string(worker.TailActivityInTurn) + `"`; strings.Contains(body, inTurn) {
+		t.Fatalf("stream fallback claims %s without observing a turn: %s", inTurn, body)
+	}
 }
 
 func findStructuredToolPair(messages []SessionStructuredMessage, toolCallID string) (*SessionStructuredBlock, *SessionStructuredBlock) {

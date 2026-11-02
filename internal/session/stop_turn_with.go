@@ -42,9 +42,11 @@ type StopTurnOptions struct {
 	// runtime clears the input box for the message where the family leaves
 	// input in it (Claude, Gemini). Without it a stop only clears a draft
 	// Claude restores, best effort. A failed preparation is an error
-	// wrapping ErrReplacementNotPrepared, the interrupt already settled. As
-	// with Still, whether the runtime runs is a fresh liveness read's
-	// (StopTurnWith).
+	// wrapping ErrReplacementNotPrepared, the interrupt already settled; so
+	// is a pending interaction that holds the input once the turn settled,
+	// which gets none of the preparation's keys and is also wrapped
+	// (ErrPendingInteraction). As with Still, whether the runtime runs is a
+	// fresh liveness read's (StopTurnWith).
 	ForReplacement bool
 	// Restart, when set, replaces the runtime when the interrupt was sent
 	// and its turn was not seen to end: an interrupt op's on_failure:
@@ -61,8 +63,12 @@ type StopTurnOptions struct {
 	// turn it names left Current or the check could not tell, and whatever
 	// runs then may be another turn, which a restart would kill; and so does
 	// one whose Settle saw nothing showing the turn still running
-	// (TurnEndUnreadError), since that cannot tell either. A restart once
-	// decided runs apart from ctx, within stopTurnRestartBound. As with
+	// (TurnEndUnreadError), or, without Settle, whose own waits read nothing
+	// showing the session busy (runtime.ErrWaitUnobserved, or a runtime
+	// that could not answer), since that cannot tell either; and so does a
+	// caller whose ctx deadline leaves less than stopTurnRestartBound by
+	// then, since the restart could outlive it. A restart once decided runs
+	// apart from ctx, within stopTurnRestartBound. As with
 	// Still, whether the runtime runs is a fresh liveness read's
 	// (StopTurnWith).
 	Restart *StopTurnRestart
@@ -224,6 +230,12 @@ func (m *Manager) StopTurnWith(ctx context.Context, id string, opts StopTurnOpti
 		if opts.ForReplacement {
 			return m.prepareReplacementLocked(ctx, b, id, sessName, mode)
 		}
+		if stopSendsFollowOnKeys(b, mode) && m.inputHeldByPendingInteractionLocked(sessName, "follow-on keys") != nil {
+			// The stop succeeded; its follow-on keys (the input clear, the
+			// background-work stop) would land in the prompt, so none is
+			// sent.
+			return nil
+		}
 		if restoresInterruptedInput(b) && mode == runtime.TurnInterruptKeystroke {
 			// The stop already succeeded. A draft that will not clear is
 			// logged, not returned: the next submit clears the input box
@@ -242,15 +254,54 @@ func (m *Manager) StopTurnWith(ctx context.Context, id string, opts StopTurnOpti
 	return report, err
 }
 
+// stopSendsFollowOnKeys reports whether a settled plain stop of b's turn
+// (not one for a replacement, which prepareReplacementLocked decides), sent
+// as mode, goes on to type keys: the restored-input clear and the
+// background-work stop.
+func stopSendsFollowOnKeys(b beads.Bead, mode runtime.TurnInterruptMode) bool {
+	return restoresInterruptedInput(b) && mode == runtime.TurnInterruptKeystroke || stopsBackgroundWork(b)
+}
+
+// inputHeldByPendingInteractionLocked returns the pending interaction (a
+// permission prompt or a question) that holds sessName's input once its
+// turn was interrupted, as an error wrapping ErrPendingInteraction, logging
+// that the keys named by what are not sent: they would land in the prompt
+// and answer it. It is nil when none is pending, and when the look fails:
+// that holds nothing, so the keys go out as before.
+func (m *Manager) inputHeldByPendingInteractionLocked(sessName, what string) error {
+	err := m.pendingInteractionLocked(sessName)
+	if !errors.Is(err, ErrPendingInteraction) {
+		return nil
+	}
+	log.Printf("session: interrupted the turn of %q but sent no %s: %v", sessName, what, err)
+	return err
+}
+
 // waitForInterruptSettleLocked runs a stop's own waits after its interrupt
 // was sent: the family's idle wait (with the keystroke sequence's follow-up
 // interrupt) and its boundary wait. A wait that fails is an error wrapping
 // runtime.ErrTurnNotEnded: the interrupt was sent.
 func (m *Manager) waitForInterruptSettleLocked(ctx context.Context, b beads.Bead, sessName string, mode runtime.TurnInterruptMode, still func() error, since time.Time) error {
-	if err := m.waitForInterruptIdleLocked(ctx, b, sessName, mode, still); err != nil {
-		return fmt.Errorf("waiting for stopped session to become idle: %w: %w", runtime.ErrTurnNotEnded, err)
+	idleErr := m.waitForInterruptIdleLocked(ctx, b, sessName, mode, still)
+	if idleErr != nil {
+		idleErr = fmt.Errorf("waiting for stopped session to become idle: %w: %w", runtime.ErrTurnNotEnded, idleErr)
+		if !errors.Is(idleErr, runtime.ErrWaitUnobserved) {
+			return idleErr
+		}
 	}
-	if err := m.waitForInterruptBoundaryLocked(ctx, b, sessName, since); err != nil {
+	// An idle wait that read nothing showing the session busy
+	// (runtime.ErrWaitUnobserved: its pane showed neither its prompt nor a
+	// busy indicator) does not decide the turn, so the boundary wait, which
+	// reads the turn apart from the pane (Codex's rollout), still does: its
+	// pass is the turn's end, and a failure that read the turn (a timeout
+	// after reading it running) is the turn still running. A boundary wait
+	// that read nothing either (waitReadNothing), or none to wait for,
+	// leaves the idle wait's error.
+	waited, err := m.readInterruptBoundaryLocked(ctx, b, sessName, since)
+	switch {
+	case idleErr != nil && (!waited || waitReadNothing(err)):
+		return idleErr
+	case err != nil:
 		return fmt.Errorf("waiting for stopped session interrupt boundary: %w: %w", runtime.ErrTurnNotEnded, err)
 	}
 	return nil
@@ -260,27 +311,48 @@ func (m *Manager) waitForInterruptSettleLocked(ctx context.Context, b beads.Bead
 // on failure whose interrupted turn was not seen to end (waitErr) but which
 // must not restart, or nil when the restart runs; what names the operation,
 // as the caller's other errors do. Its caller gave up (ctx ended: a city
-// stop, its lease budget), which is no reason to stop the runtime; or the
+// stop, its lease budget), which is no reason to stop the runtime, or its
+// deadline leaves less than stopTurnRestartBound, so the restart, which runs
+// apart from ctx, could outlive the caller's lease and leave a runtime
+// stopped under a lease another host may take; or the
 // check refused the keystroke sequence's follow-up interrupt (refusal), so
 // the turn it names left Current, or the check could not tell, and whatever
 // runs now may be another turn, the ended one's successor, which a restart
-// would kill; or nothing showed the turn still running (waitErr is a
-// TurnEndUnreadError: no read of it answered), which cannot tell either.
-// Nothing more is sent, the runtime is left as it is, and whether the
-// interrupt ended the turn is unknown: the error wraps
+// would kill; or nothing showed the turn still running, which cannot tell
+// either: waitErr is a TurnEndUnreadError (no read of it answered), or, on
+// a session-scoped stop, which has no turn identity to read, the stop's own
+// waits read nothing showing the session busy (waitReadNothing) or its
+// follow-up interrupt failed to send with nothing before it that read the
+// session busy (errFollowUpNotSent). On the turn-scoped path Settle has
+// already replaced waitErr with a text-only error, so the latter rules
+// cannot fire there; there a follow-up goes only after the check read the
+// turn current. Nothing more is sent, the runtime is left as it is, and
+// whether the interrupt ended the turn is unknown: the error wraps
 // ErrInterruptOutcomeUnknown and runtime.ErrRuntimeUnavailable, not
 // runtime.ErrTurnNotEnded.
 func restartWithheld(ctx context.Context, what string, refusal, waitErr error) error {
 	if cerr := ctx.Err(); cerr != nil {
 		return fmt.Errorf("%s: the caller's context ended before its interrupted turn was seen to end, not restarting it: %w: %w: %w (%s)", what, ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable, cerr, waitErr.Error())
 	}
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < stopTurnRestartBound {
+		return fmt.Errorf("%s: the caller's deadline leaves less than the %s a restart may take, not restarting it: %w: %w (%s)", what, stopTurnRestartBound, ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable, waitErr.Error())
+	}
 	if refusal != nil {
 		return fmt.Errorf("%s: the check refused the follow-up interrupt (%s), so another turn may run now, not restarting it: %w: %w (%s)", what, refusal.Error(), ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable, waitErr.Error())
 	}
-	if errors.As(waitErr, new(*turnEndUnreadError)) {
+	if errors.As(waitErr, new(*turnEndUnreadError)) || waitReadNothing(waitErr) || errors.Is(waitErr, errFollowUpNotSent) {
 		return fmt.Errorf("%s: nothing showed its interrupted turn still running, not restarting it: %w: %w (%s)", what, ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable, waitErr.Error())
 	}
 	return nil
+}
+
+// waitReadNothing reports whether err, a stop's wait's, read nothing showing
+// the session busy: the wait timed out without such a reading
+// (runtime.ErrWaitUnobserved, RUNTIME-CONTRACT-016), or the runtime could not
+// answer (runtime.ErrRuntimeUnavailable). Such a failure is no evidence that
+// the interrupted turn still runs.
+func waitReadNothing(err error) bool {
+	return errors.Is(err, runtime.ErrWaitUnobserved) || errors.Is(err, runtime.ErrRuntimeUnavailable)
 }
 
 // restartAfterFailedInterruptLocked replaces the runtime whose interrupted
@@ -308,12 +380,22 @@ func (m *Manager) restartAfterFailedInterruptLocked(ctx context.Context, by Acto
 	return nil
 }
 
-// prepareReplacementLocked is StopTurnOptions.ForReplacement's preparation,
-// the steps interruptAndSubmitLocked runs between a settled interrupt and its
-// message.
-// A failure is an error wrapping ErrReplacementNotPrepared: the interrupt
-// was sent and its turn settled.
+// prepareReplacementLocked prepares b's session, its turn interrupted as
+// mode and settled, for the message that replaces that turn: the steps
+// interruptAndSubmitLocked runs between its interrupt and its message, and
+// StopTurnOptions.ForReplacement's preparation. A failure is an error
+// wrapping ErrReplacementNotPrepared: the interrupt was sent and its turn
+// settled. So is a pending interaction that holds the input by then (it
+// opened as the turn ended): none of the preparation's keys is sent, since
+// they would land in it, and the error also wraps ErrPendingInteraction.
+// The replacing message is then neither sent nor queued, as a queued
+// delivery would not prepare the session.
 func (m *Manager) prepareReplacementLocked(ctx context.Context, b beads.Bead, id, sessName string, mode runtime.TurnInterruptMode) error {
+	if replacementSendsKeys(b, mode) {
+		if err := m.inputHeldByPendingInteractionLocked(sessName, "replacement preparation keys"); err != nil {
+			return fmt.Errorf("session %s: %w: %w", id, ErrReplacementNotPrepared, err)
+		}
+	}
 	if err := m.resetInterruptedTurnLocked(ctx, b, sessName); err != nil {
 		return fmt.Errorf("session %s: %w: %w", id, ErrReplacementNotPrepared, err)
 	}
@@ -326,10 +408,13 @@ func (m *Manager) prepareReplacementLocked(ctx context.Context, b beads.Bead, id
 }
 
 // ErrReplacementNotPrepared reports a stop for a replacement
-// (StopTurnOptions.ForReplacement) whose interrupt was sent and whose turn
-// settled, but whose preparation for the replacing message failed. Whatever
-// else the error wraps (a fence miss on the input clear, say) is the
-// preparation's, not the interrupt's: the interrupt was not "nothing sent".
+// (StopTurnOptions.ForReplacement), or an interrupt_now submit, whose
+// interrupt was sent and whose turn settled, but whose preparation for the
+// replacing message failed, a pending interaction that holds the input
+// (ErrPendingInteraction) among the causes. Whatever else the error wraps
+// (a fence miss on the input clear, say) is the preparation's, not the
+// interrupt's: the interrupt was not "nothing sent". An interrupt_now
+// submit neither sends nor queues its message then.
 var ErrReplacementNotPrepared = errors.New("the interrupted turn settled but the session could not be prepared for its replacement")
 
 // ErrInterruptOutcomeUnknown reports an interrupt that was sent, or may have
@@ -388,6 +473,28 @@ func followUpRefusal(err error) error {
 		return refused.refusal
 	}
 	return nil
+}
+
+// errFollowUpNotSent marks a keystroke sequence's follow-up interrupt (a
+// soft-escape family's Ctrl-C fallback, Gemini's immediate confirm) whose
+// send failed with nothing before it that read the session busy: no wait ran
+// first (Gemini's confirm), the fallback wait read nothing
+// (waitReadNothing), or the send found another incarnation
+// (runtime.ErrFenceMismatch), of which a reading of the interrupted one says
+// nothing. The failed send read nothing either, so the stop has no evidence
+// the turn still runs (restartWithheld).
+var errFollowUpNotSent = errors.New("the follow-up interrupt was not sent")
+
+// followUpSendError is the error of a keystroke sequence's follow-up
+// interrupt, what, whose send failed with err; waited is the error of the
+// idle wait before it, nil when none ran. It wraps errFollowUpNotSent unless
+// that wait read the session busy and the send found no other incarnation:
+// nothing more was sent, so that reading stands as the stop's last.
+func followUpSendError(what string, waited, err error) error {
+	if waited != nil && !waitReadNothing(waited) && !errors.Is(err, runtime.ErrFenceMismatch) {
+		return fmt.Errorf("%s: %w", what, err)
+	}
+	return fmt.Errorf("%s: %w: %w", what, errFollowUpNotSent, err)
 }
 
 // stopTurnRestartBound bounds a restart after a failed interrupt

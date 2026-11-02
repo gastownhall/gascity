@@ -241,7 +241,10 @@ func sessionStartMailInjection(store beads.Store, live *session.Info, cityPath s
 		ordinaryMailProvider = newMailProviderNamedWithSessionStore(providerName, msgStore, sessStore, true)
 	}
 	startMail := sessionStartMail{ordinaryProvider: ordinaryMailProvider}
-	mp := beadmail.NewWithStores(msgStore, sessStore)
+	// The handoff archive below consumes what it injected, so with message
+	// listed it withdraws the handoffs' lane notices, as gc mail check
+	// --inject's archive does through openCityMailProvider.
+	mp := withBeadMailNoticeWithdrawal(beadmail.NewWithStores(msgStore, sessStore), sessStore, cfg, stderr)
 	sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
 	var (
 		target resolvedMailTarget

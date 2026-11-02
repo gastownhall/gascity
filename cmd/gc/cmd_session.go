@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/lanesubmit"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
@@ -101,9 +103,13 @@ according to the selected semantic intent.`,
 	}
 	cmd.Flags().StringVar(&intent, "intent", string(session.SubmitIntentDefault), "submit intent: default, follow_up, or interrupt_now")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output")
-	addOpKeyFlag(cmd, &key, "")
+	cmd.Flags().StringVar(&key, "key", "", sessionSubmitKeyUsage)
 	return cmd
 }
+
+// sessionSubmitKeyUsage is gc session submit's --key help: under lane
+// authority the key is recorded whatever the content gate says.
+const sessionSubmitKeyUsage = "idempotency key: while the op journal records this command (its [ops] content gate is auto or require, or [ops] authoritative lists message), rerunning with the same key reports the first run's outcome instead of sending again; ignored otherwise (default: a new key each run)"
 
 // newSessionNewCmd creates the "gc session new <template>" command.
 func newSessionNewCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -755,8 +761,23 @@ func newSessionListCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List chat sessions",
-		Long:  `List all chat sessions. By default shows active and suspended sessions.`,
-		Args:  cobra.NoArgs,
+		Long: `List all chat sessions. By default shows active and suspended sessions.
+
+With --json the output is one JSON document that validates against
+"gc session list --json-schema=result". It has one of two renderings, and
+the route a command takes decides which one it gets:
+
+  - Local rendering (a supervisor-hosted city, a city with no reachable
+    API, or GC_NO_API set for a local target; a remote target rejects
+    GC_NO_API): filters, sessions and summary. Each row carries closed, and
+    agent_name when the session has one, and no liveness.
+  - API rendering (a remote target such as --city-url, a standalone
+    controller's [api] port, or a supervisor serving a city that has no
+    controller): _cache_age_s and sessions. Each row carries running, and no
+    agent_name or closed.
+
+Both carry schema_version "1" and ok true, and an empty list renders as [].`,
+		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if cmdSessionList(stateFilter, templateFilter, jsonOutput, stdout, stderr) != 0 {
 				return errExit
@@ -771,19 +792,17 @@ func newSessionListCmd(stdout, stderr io.Writer) *cobra.Command {
 }
 
 // sessionListAPIClient returns (client, "") when the API path is available,
-// or (nil, reason) when the caller should fall back. Indirected through a
-// var so tests inject a client pointed at httptest.Server or force a
-// specific fallback reason without spinning up a real controller.
-var sessionListAPIClient = func(cityPath string) (*api.Client, string) {
-	if c := apiClient(cityPath); c != nil {
-		return c, ""
-	}
-	return nil, apiClientFallbackReason(cityPath)
-}
+// or (nil, reason) when the caller should fall back. A supervisor-hosted city
+// always falls back: the local listing is the session list contract
+// (localWhenSupervisorHostedAPIClient). Indirected through a var so tests
+// inject a client pointed at httptest.Server or force a specific fallback
+// reason without spinning up a real controller.
+var sessionListAPIClient = localWhenSupervisorHostedAPIClient
 
-// routeSessionList dispatches `session list` to the supervisor API when a
-// controller is up; otherwise falls back to the local iterator. Emits
-// exactly one route=... log line per exit path (gated on GC_DEBUG).
+// routeSessionList dispatches `session list` to the API when
+// sessionListAPIClient resolved a client; otherwise falls back to the local
+// iterator. Emits exactly one route=... log line per exit path (gated on
+// GC_DEBUG).
 func routeSessionList(_ string, stateFilter, templateFilter string, c *api.Client, nilReason string, jsonOutput bool, stdout, stderr io.Writer) int {
 	var cr api.CachedRead[[]api.SessionView]
 	return routeRead(c, "session list", nilReason, stderr,
@@ -802,8 +821,10 @@ func routeSessionList(_ string, stateFilter, templateFilter string, c *api.Clien
 // alongside at the envelope level — the shape documented in the
 // ga-h6w designer's D5 contract.
 type sessionListJSONEnvelope struct {
-	CacheAgeS float64       `json:"_cache_age_s"`
-	Sessions  []SessionView `json:"sessions"`
+	SchemaVersion string        `json:"schema_version"`
+	OK            bool          `json:"ok"`
+	CacheAgeS     float64       `json:"_cache_age_s"`
+	Sessions      []SessionView `json:"sessions"`
 }
 
 // SessionView mirrors api.SessionView for CLI JSON output. Defined as an
@@ -817,8 +838,10 @@ type SessionView = api.SessionView
 func renderSessionListFromAPI(cr api.CachedRead[[]SessionView], jsonOutput bool, stdout io.Writer) int {
 	if jsonOutput {
 		env := sessionListJSONEnvelope{
-			CacheAgeS: cr.AgeSeconds,
-			Sessions:  cr.Body,
+			SchemaVersion: "1",
+			OK:            true,
+			CacheAgeS:     cr.AgeSeconds,
+			Sessions:      cr.Body,
 		}
 		if env.Sessions == nil {
 			env.Sessions = []SessionView{}
@@ -834,8 +857,20 @@ func renderSessionListFromAPI(cr api.CachedRead[[]SessionView], jsonOutput bool,
 		return 0
 	}
 
+	// The STATUS column (the session program's own report) appears only when
+	// the API reports one for some session: with the city's program_status
+	// switch off the table is unchanged.
+	withStatus := false
+	for _, s := range cr.Body {
+		withStatus = withStatus || s.ProgramStatus != nil
+	}
+	header := []string{"ID", "TEMPLATE", "STATE", "REASON", "TARGET", "TITLE", "WORKDIR", "AGE", "LAST ACTIVE"}
+	if withStatus {
+		header = slices.Insert(header, 3, "STATUS")
+	}
 	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tTEMPLATE\tSTATE\tREASON\tTARGET\tTITLE\tWORKDIR\tAGE\tLAST ACTIVE") //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(w, strings.Join(header, "\t")) //nolint:errcheck // best-effort stdout
+	now := time.Now()
 	for _, s := range cr.Body {
 		state := s.State
 		if state == "" {
@@ -845,12 +880,11 @@ func renderSessionListFromAPI(cr api.CachedRead[[]SessionView], jsonOutput bool,
 		if reason == "" {
 			reason = "-"
 		}
-		target := sessionViewTarget(s)
-		title := sessionViewTitle(s)
-		workDir := sessionViewWorkDir(s)
-		age := sessionViewAge(s.CreatedAt)
-		lastActive := sessionViewLastActive(s.LastActive)
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Template, state, reason, target, title, workDir, age, lastActive) //nolint:errcheck // best-effort stdout
+		row := []string{s.ID, s.Template, state, reason, sessionViewTarget(s), sessionViewTitle(s), sessionViewWorkDir(s), sessionViewAge(s.CreatedAt), sessionViewLastActive(s.LastActive)}
+		if withStatus {
+			row = slices.Insert(row, 3, sessionViewProgramStatus(s.ProgramStatus, now))
+		}
+		fmt.Fprintln(w, strings.Join(row, "\t")) //nolint:errcheck // best-effort stdout
 	}
 	_ = w.Flush() //nolint:errcheck // best-effort stdout
 
@@ -940,9 +974,27 @@ func sessionViewLastActive(lastActive string) string {
 	return formatDuration(time.Since(t)) + " ago"
 }
 
+// sessionViewProgramStatus formats the STATUS column: the state the session
+// program reports, its blocked kind after a colon, and how long it has been
+// in that state ("working 3m", "blocked:permission 12s"). An absent status is
+// unknown and renders as "-", never as idle.
+func sessionViewProgramStatus(ps *api.SessionProgramStatus, now time.Time) string {
+	if ps == nil {
+		return "-"
+	}
+	status := ps.State
+	if ps.Kind != "" {
+		status += ":" + ps.Kind
+	}
+	if ps.Since.IsZero() {
+		return status
+	}
+	return status + " " + formatDuration(max(now.Sub(ps.Since), 0))
+}
+
 // cmdSessionList is the CLI entry point for "gc session list". It routes
-// through the supervisor API when a controller is up and falls back to the
-// local iterator otherwise.
+// through the API when sessionListAPIClient resolves a client and falls back
+// to the local iterator otherwise.
 func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
 	return routeReadCmd("session list", stderr, sessionListAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
 		return routeSessionList(cityPath, stateFilter, templateFilter, c, nilReason, jsonOutput, stdout, stderr)
@@ -2810,8 +2862,9 @@ type sessionSubmitJSON struct {
 }
 
 // sessionSubmitAcceptedOutcome is the JSON outcome of a submit whose local
-// fallback found its op open under the API: the API accepted the message
-// and delivers it.
+// legacy fallback found its op open under the API: the API accepted the
+// message and delivers it. The lane path (message listed) never reports it:
+// an open op there is queued, whoever wrote it.
 const sessionSubmitAcceptedOutcome = "accepted"
 
 // sessionSubmitOp names the op that backs a submit's success output.
@@ -2820,19 +2873,30 @@ type sessionSubmitOp struct {
 	replayed bool
 }
 
-// cmdSessionSubmit is the CLI entry point for "gc session submit", recorded
-// under the op key key as a message op under the operator principal on both
-// of its paths (DES-O0API §8.4). While ops.content records, the key (minted
-// when key is empty) goes to the API as its Idempotency-Key, and the API
-// records the op; a call that fails so the CLI falls back proposes the same
-// op id locally: absent, it delivers (legacy:cli); closed, it reports that
-// outcome; open under the API, it reports the API accepted the message and
-// exits 0. The gate is read from the city config before the API call, which
-// that config load reports only as the warning that its [ops] gates were not
-// read: the local path loads it again, as it always has, from the
-// invocation's config memo. Under require the local path checks that the op
-// journal can record before it resolves the target, which may materialize a
-// named session's row.
+// cmdSessionSubmit is the CLI entry point for "gc session submit". When the
+// city's config lists message in [ops] authoritative it accepts the message
+// as the API does, through lanesubmit.Accept (submitSessionLane,
+// conversation_lane_submit.go): the API first, under --key or a minted key
+// whatever ops.content says, then that acceptance locally under the same
+// key when the call falls back.
+//
+// Otherwise it takes the legacy path, recorded under the op key key as a
+// message op under the operator principal on both of its paths (DES-O0API
+// §8.4). While ops.content records, the key (minted when key is empty) goes
+// to the API as its Idempotency-Key, and the API records the op, or
+// proposes it as a lane op when its lane host still executes message (W2: a
+// rollback of [ops] authoritative before the controller restarts); a call
+// that fails so the CLI falls back proposes the same op id locally: absent,
+// it delivers (legacy:cli); closed, it reports that outcome; open under the
+// API or its lane host, it reports the API accepted the message and exits
+// 0, a lane op once the fallback has consumed the session's operator hold,
+// as the API's resume: true does (resumeForAcceptedLaneOp), and exits 1
+// when that resume fails. The gate is read from the city config before the
+// API call, which that config load reports only as the warning that its
+// [ops] gates were not read: the local path loads it again, as it always
+// has, from the invocation's config memo. Under require the local path
+// checks that the op journal can record before it resolves the target,
+// which may materialize a named session's row.
 func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, jsonOutput bool, stdout, stderr io.Writer) int {
 	defer beginInvocationConfigMemo()()
 	target := args[0]
@@ -2849,13 +2913,20 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, js
 	}
 
 	gateCfg, gateErr := loadCityConfig(cityPath, io.Discard)
+	if gateErr == nil && cliLaneExecutesMessage(gateCfg) {
+		return submitSessionLane(&sessionSubmitLane{
+			cityPath: cityPath, target: target, message: message, intent: intent, key: key,
+			asJSON: jsonOutput, stdout: stdout, stderr: stderr,
+		})
+	}
 	if gateErr != nil {
 		gateCfg = nil
 	}
+	lanePolicy := lanesubmit.Policy(intent)
 	op := newCLIOp(gateCfg, nil, cliOpRequest{
 		verb: "gc session submit", kind: opjournal.KindMessage, key: key,
-		payload: message, policy: api.MessageOpPolicy(intent),
-		asOperator: true, acceptsAPIOp: true, cfgErr: gateErr,
+		payload: message, policy: lanesubmit.LegacyPolicy(intent),
+		asOperator: true, acceptsAPIOp: true, lanePolicy: &lanePolicy, cfgErr: gateErr,
 		asJSON: jsonOutput, stdout: stdout, stderr: stderr,
 	})
 	if op.recording() && key == "" {
@@ -2873,27 +2944,8 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, js
 		if op.recording() {
 			apiKey = op.requestKey()
 		}
-		resp, err := c.SubmitSessionWithKey(target, message, intent, apiKey)
-		if err == nil {
-			recorded := sessionSubmitOp{id: resp.OpID, replayed: resp.Replayed}
-			if resp.OpID != "" {
-				recorded.key = apiKey
-			}
-			if resp.Replayed {
-				fmt.Fprintf(stderr, "gc session submit: replayed op %s; resume was not reapplied (outside the op's request)\n", resp.OpID) //nolint:errcheck // best-effort stderr
-			}
-			if key != "" && apiKey != "" && resp.OpID == "" && !resp.Replayed {
-				fmt.Fprintf(stderr, "gc session submit: warning: --key not recorded (the API ran the message without recording an op), so a rerun acts again\n") //nolint:errcheck // best-effort stderr
-			}
-			return emitSessionSubmitResult(stdout, stderr, target, intent, resp.Queued, jsonOutput, recorded)
-		}
-		if !api.ShouldFallback(c, err) {
-			if apiKey != "" {
-				fmt.Fprintf(stderr, "gc session submit: %v (key %s)\n", err, apiKey) //nolint:errcheck // best-effort stderr
-				return 1
-			}
-			fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
+		if code, fallBack := submitViaAPI(c, target, message, intent, key, apiKey, jsonOutput, stdout, stderr); !fallBack {
+			return code
 		}
 	}
 
@@ -2929,6 +2981,10 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, js
 		id, k, replayed := op.jsonFields()
 		return emitSessionSubmitResult(stdout, stderr, target, intent, op.replayedQueued(), jsonOutput, sessionSubmitOp{id: id, key: k, replayed: replayed})
 	case cliOpAcceptedByAPI:
+		if err := resumeForAcceptedLaneOp(sessStore, op.apiOp); err != nil {
+			fmt.Fprintf(stderr, "gc session submit: resuming %s for op %s: %v (key %s)\n", target, op.apiOp.ID, err, op.requestKey()) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		return emitSessionSubmitAccepted(stdout, stderr, target, intent, op.apiOp.ID, op.requestKey(), jsonOutput)
 	}
 	defer op.end()
@@ -2956,6 +3012,57 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, js
 	}
 	id, k, replayed := op.jsonFields()
 	return emitSessionSubmitResult(stdout, stderr, target, intent, outcome.Queued, jsonOutput, sessionSubmitOp{id: id, key: k, replayed: replayed})
+}
+
+// submitViaAPI submits message to target through the API client c under
+// apiKey ("" for none), key being --key, and reports the answer as gc session
+// submit does on both of its paths. fallBack is true, having printed
+// nothing, when the call failed so the command falls back to its local path
+// (api.ShouldFallback); any other failure is reported, naming the key.
+func submitViaAPI(c *api.Client, target, message string, intent session.SubmitIntent, key, apiKey string, jsonOutput bool, stdout, stderr io.Writer) (code int, fallBack bool) {
+	resp, err := c.SubmitSessionWithKey(target, message, intent, apiKey)
+	if err == nil {
+		recorded := sessionSubmitOp{id: resp.OpID, replayed: resp.Replayed}
+		if resp.OpID != "" {
+			recorded.key = apiKey
+		}
+		if resp.Replayed {
+			fmt.Fprintf(stderr, "gc session submit: replayed op %s; resume was not reapplied (outside the op's request)\n", resp.OpID) //nolint:errcheck // best-effort stderr
+		}
+		if key != "" && apiKey != "" && resp.OpID == "" && !resp.Replayed {
+			fmt.Fprintf(stderr, "gc session submit: warning: --key not recorded (the API ran the message without recording an op), so a rerun acts again\n") //nolint:errcheck // best-effort stderr
+		}
+		return emitSessionSubmitResult(stdout, stderr, target, intent, resp.Queued, jsonOutput, recorded), false
+	}
+	if api.ShouldFallback(c, err) {
+		return 0, true
+	}
+	if apiKey != "" {
+		fmt.Fprintf(stderr, "gc session submit: %v (key %s)\n", err, apiKey) //nolint:errcheck // best-effort stderr
+		return 1, false
+	}
+	fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
+	return 1, false
+}
+
+// resumeForAcceptedLaneOp is the resume: true that gc session submit sends
+// with every API call, run for a fallback that found its op, apiOp, open
+// under the API's lane host. The API consumes the session's operator hold
+// only once it has proposed the op (api.acceptMessageLane), so a request
+// that died between the two left the op waiting on the hold: the fallback
+// consumes it now, as the API's same-key retry would. Like that retry, it
+// consumes only a hold stamped by the op's proposal (its created_at):
+// session.Store.ResumeHeld writes nothing once that hold is gone, and a
+// hold the operator placed while the message waits stands. An op the API
+// recorded for its own delivery (legacy:api) resumes in that delivery, so
+// it is left alone. It runs only on the legacy path, in W2 (the CLI's config
+// no longer lists message while the controller's latched lane host still
+// executes it); with message listed lanesubmit.Accept resumes.
+func resumeForAcceptedLaneOp(sessStore beads.Store, apiOp opjournal.Op) error {
+	if apiOp.Executor != opjournal.ExecutorLane {
+		return nil
+	}
+	return sessionFrontDoor(sessStore).ResumeHeld(apiOp.Conversation, apiOp.CreatedAt, time.Now().UTC())
 }
 
 // emitSessionSubmitAccepted reports a submit whose local fallback found its

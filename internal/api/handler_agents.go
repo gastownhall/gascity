@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -63,7 +64,7 @@ type agentResponse struct {
 	// for city-native agents.
 	Pack string `json:"pack,omitempty"`
 
-	State string `json:"state"`
+	State string `json:"state" doc:"Agent state: suspended, quarantined, stopped, working, waiting, idle, blocked or error. blocked and error come only from the session program's own status report, under the city's program_status switch on."`
 
 	Available         bool   `json:"available"`
 	UnavailableReason string `json:"unavailable_reason,omitempty"`
@@ -72,6 +73,12 @@ type agentResponse struct {
 
 	// Activity indicates session turn state: "idle", "in-turn", or omitted.
 	Activity string `json:"activity,omitempty"`
+	// ActivitySource names where Activity came from. Set only while
+	// ProgramStatus is shown.
+	ActivitySource string `json:"activity_source,omitempty" enum:"program,transcript" doc:"Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report."`
+	// ProgramStatus is the agent session program's own status report;
+	// absent means unknown, never idle.
+	ProgramStatus *SessionProgramStatus `json:"program_status,omitempty" doc:"The agent session program's own status report (OSC 7501), present while the city's program_status switch is shadow or on and the reading is valid. Absent means the status is unknown, never idle."`
 
 	Model         string `json:"model,omitempty"`
 	ContextPct    *int   `json:"context_pct,omitempty"`
@@ -378,7 +385,8 @@ func rigTemplateInstance(cfg *config.City, name string) (template, rig string, o
 // findActiveBeadForAssignees returns the ID of the first in_progress bead
 // assigned to the given identities using the cached active snapshot. If rig is
 // non-empty, only that rig's store is searched; otherwise all stores are
-// searched. Returns "" if no match.
+// searched. A store only rigs suspended by effective state reach is never
+// searched (activeBeadSearchScope). Returns "" if no match.
 func (s *Server) findActiveBeadForAssignees(rig string, assignees ...string) string {
 	return s.findActiveBeadForAssigneesWithFreshness(rig, false, assignees...)
 }
@@ -386,6 +394,7 @@ func (s *Server) findActiveBeadForAssignees(rig string, assignees ...string) str
 // findLiveActiveBeadForAssignees returns the ID of the first in_progress bead
 // assigned to the given identities, bypassing the cache. Use this on
 // lower-frequency detail views where external reassignment freshness matters.
+// A store only rigs suspended by effective state reach is never searched.
 func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string) string {
 	return s.findActiveBeadForAssigneesWithFreshness(rig, true, assignees...)
 }
@@ -394,18 +403,10 @@ func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string)
 // highest-priority identity: identity order first, then store order, then
 // newest first within a store. Cached reads use a targeted ListQuery with
 // Limit=1 per identity and store, stopping at the first match; live reads go
-// through findLiveActiveBeadInStores.
+// through findLiveActiveBeadInStores. Both read only the stores
+// activeBeadSearchScope picks.
 func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, assignees ...string) string {
-	stores := s.state.BeadStores()
-	var rigNames []string
-	if rig != "" {
-		if _, ok := stores[rig]; ok {
-			rigNames = []string{rig}
-		}
-	}
-	if rigNames == nil {
-		rigNames = sortedRigNames(stores)
-	}
+	stores, rigNames := activeBeadSearchScope(s.state.BeadStores(), s.loadCacheColdRigs(), rig)
 	seen := make(map[string]bool, len(assignees))
 	var unique []string
 	for _, assignee := range assignees {
@@ -446,6 +447,43 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 		}
 	}
 	return ""
+}
+
+// activeBeadSearchScope returns the stores an active-bead lookup may read and
+// the names to read them through, in order. A rig suspended by effective
+// state (cold, cacheColdRigNames) has no cache, and a read of its store
+// restarts its retired proxy and Dolt, so its name is dropped before
+// sortedRigNames dedupes the stores; a store it shares with a rig that is not
+// suspended, as in legacy shared-file mode, stays reachable through that
+// alias. A lookup scoped to a rig reads that rig's store alone: a suspended
+// rig's through such an alias, or nothing when the store has none, never the
+// other rigs' stores. An unscoped lookup, or one scoped to a rig that is not
+// suspended and has no store, reads every remaining store once.
+//
+// residency:allow — filters the caller's own rig map by effective suspension
+// and names the rigs to read it through; it opens no store and consults no
+// binding, namespace or leg order.
+func activeBeadSearchScope(all map[string]beads.Store, cold map[string]bool, rig string) (map[string]beads.Store, []string) {
+	stores := make(map[string]beads.Store, len(all))
+	for name, store := range all {
+		if !cold[name] {
+			stores[name] = store
+		}
+	}
+	if rig != "" && cold[rig] {
+		if shared := all[rig]; shared != nil {
+			for _, name := range sortedRigNames(stores) {
+				if stores[name] == shared {
+					return stores, []string{name}
+				}
+			}
+		}
+		return stores, nil
+	}
+	if _, ok := stores[rig]; ok && rig != "" {
+		return stores, []string{rig}
+	}
+	return stores, sortedRigNames(stores)
 }
 
 // findLiveActiveBeadInStores makes one live List call per store for all
@@ -604,8 +642,12 @@ func agentProviderInfo(a *config.Agent, cfg *config.City) (provider, displayName
 	return resolveProviderInfo(provider, cfg)
 }
 
-// computeAgentState derives the state enum from existing agent data.
-func computeAgentState(suspended, quarantined, running bool, activeBead string, lastActivity *time.Time) string {
+// computeAgentState derives the state enum from existing agent data. A
+// running agent's program-status reading decides its state only when it
+// Decides (valid, city switch on): working is working, blocked is blocked,
+// error is error, and idle or done is waiting with an active bead and idle
+// without one. Any other reading leaves today's derivation.
+func computeAgentState(suspended, quarantined, running bool, activeBead string, lastActivity *time.Time, program runtime.ProgramStatus) string {
 	if suspended {
 		return "suspended"
 	}
@@ -614,6 +656,20 @@ func computeAgentState(suspended, quarantined, running bool, activeBead string, 
 	}
 	if !running {
 		return "stopped"
+	}
+	if program.Decides() {
+		switch program.State {
+		case runtime.ProgramWorking:
+			return "working"
+		case runtime.ProgramBlocked:
+			return "blocked"
+		case runtime.ProgramError:
+			return "error"
+		}
+		if activeBead != "" {
+			return "waiting"
+		}
+		return "idle"
 	}
 	if activeBead != "" {
 		if lastActivity != nil && time.Since(*lastActivity) < 10*time.Minute {

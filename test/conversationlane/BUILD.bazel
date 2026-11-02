@@ -46,7 +46,12 @@ INTEGRATION_SOLO_TESTS = {
     # and the incapable store start once the baselines are learned.
     "conversationlane_x12_test": "TestX12.*",  # 198-201 s
     "conversationlane_x2_cli_test": "TestX2CLIKillMatrix",  # 14 cells, 8 at a time: 121-142 s
-    "conversationlane_x8_test": "TestX8OrderAcrossLaneHostRestart",  # 143 s
+    # X8, and beside it the cells on real tmux: W5's work ladder on the lane
+    # (ladder_lane_test.go, which waits out the ladder's 90 s grace before
+    # its first notice) and boundary prompts held through a busy Claude turn
+    # (busy_turn_lane_test.go, a 60 s turn): all parallel, so they take X8's
+    # time and add no action to the integration-packages lane.
+    "conversationlane_x8_ladder_test": "TestX8OrderAcrossLaneHostRestart|TestWorkLadderLaneNoticeEndToEnd|TestBoundaryPromptsWaitOutABusyClaudeTurn",  # 143 s
 }
 
 # The X2 host matrix by store arm, eight cities each: the "" target runs the
@@ -62,11 +67,15 @@ go_test(
     name = "conversationlane_test",
     size = "large",
     srcs = [
+        "api_lane_test.go",
         "bddolt_gating_test.go",
+        "busy_turn_lane_test.go",
         "harness_bddolt_test.go",
         "harness_test.go",
         "inline_pass_test.go",
+        "ladder_lane_test.go",
         "main_test.go",
+        "submit_lane_test.go",
         "testenv_import_test.go",
         "x12_evidence_guard_test.go",
         "x12_harness_test.go",
@@ -87,6 +96,7 @@ go_test(
     data = select({
         "//:gotags_integration": [
             "//cmd/gc:gc_testhooks",
+            "//test/conversationlane/fakeclaude",
             "//test/conversationlane/fakeruntime",
             "@bd_bin_v1_3_2//:bd",
             "@dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt",
@@ -97,6 +107,7 @@ go_test(
         "//:gotags_integration": {
             "GC_LANE_BD_BIN": "$(rootpath @bd_bin_v1_3_2//:bd)",
             "GC_LANE_DOLT_BIN": "$(rootpath @dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt)",
+            "GC_LANE_FAKE_CLAUDE": "$(rootpath //test/conversationlane/fakeclaude)",
             "GC_LANE_FAKE_RUNTIME": "$(rootpath //test/conversationlane/fakeruntime)",
             "GC_LANE_GC_BIN": "$(rootpath //cmd/gc:gc_testhooks)",
         },
@@ -107,12 +118,15 @@ go_test(
         "//internal/bazeltest",
         "//internal/beads",
         "//internal/clock",
+        "//internal/events",
+        "//internal/fsys",
         "//internal/loopbackport",
         "//internal/opjournal",
         "//internal/pathutil",
         "//internal/storebinding/sqlite",
         "//internal/testenv",
         "//internal/testutil",
+        "//internal/workladder",
         "//test/toolhome",
         "@com_github_go_sql_driver_mysql//:mysql",
     ],

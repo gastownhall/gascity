@@ -63,7 +63,10 @@ type Fake struct {
 	DialogErrors            map[string]error
 	ResetTurnErrors         map[string]error
 	InterruptBoundaryErrors map[string]error
-	ClearInputErrors        map[string]error
+	// InterruptErrors fail Interrupt and InterruptFenced per session name,
+	// after the call is recorded.
+	InterruptErrors  map[string]error
+	ClearInputErrors map[string]error
 	// BackgroundWorkStopErrors configures Fake.StopBackgroundWork errors per
 	// session name; an absent entry stops successfully.
 	BackgroundWorkStopErrors map[string]error
@@ -114,6 +117,38 @@ type Fake struct {
 	// TurnHistoryErrors fail TurnHistory reads by session name, in order. A
 	// nil entry reads the script.
 	TurnHistoryErrors map[string][]error
+	// ProgramPanes are the agent-pane rows a FullFake's ProgramStatus judges
+	// with [JudgeProgramStatus], by session name; a running session without
+	// one reads Unread, as under the switch off. HealProgramCapture rewrites
+	// them. Use SetProgramPane and ProgramPane while other goroutines may
+	// read the fake.
+	ProgramPanes map[string]ProgramPaneRow
+	// ProgramStatusErrors fail a FullFake's ProgramStatus by session name.
+	ProgramStatusErrors map[string]error
+	// ProgramCaptureHealErrors fail a FullFake's HealProgramCapture by
+	// session name.
+	ProgramCaptureHealErrors map[string]error
+	// ProgramShadowSink is the comparison sink a FullFake hands out as a
+	// shadowing leaf ([ProgramStatusShadowProvider]); nil, as under a switch
+	// that is not shadow, records nothing.
+	ProgramShadowSink ProgramStatusComparisonSink
+	// programArms counts the captures HealProgramCapture armed, naming each
+	// one's nonce.
+	programArms int
+	// ScreenTurnRunning makes a FullFake's screen show a turn in progress by
+	// session name, as a pane whose busy indicator is drawn does: TurnRunning
+	// answers true and SnapshotIdle false. An absent entry shows no turn.
+	ScreenTurnRunning map[string]bool
+	// ScreenReadErrors fail a FullFake's TurnRunning by session name, as a
+	// screen that cannot be captured does.
+	ScreenReadErrors map[string]error
+	// PaneActivity is the activity a FullFake's FreshActivity reads by
+	// session name, the session's own clock where it has moved past the
+	// Activity that GetLastActivity serves, as a pane that drew after the
+	// tmux fleet snapshot was taken has. An absent entry reads Activity.
+	PaneActivity map[string]time.Time
+	// PaneActivityErrors fail a FullFake's FreshActivity by session name.
+	PaneActivityErrors map[string]error
 }
 
 var (
@@ -208,6 +243,7 @@ func NewFake() *Fake {
 		DialogErrors:            make(map[string]error),
 		ResetTurnErrors:         make(map[string]error),
 		InterruptBoundaryErrors: make(map[string]error),
+		InterruptErrors:         make(map[string]error),
 		ClearInputErrors:        make(map[string]error),
 		RemoveMetaErrors:        make(map[string]map[string]error),
 		GetMetaErrors:           make(map[string]map[string]error),
@@ -241,6 +277,7 @@ func NewFailFake() *Fake {
 		DialogErrors:            make(map[string]error),
 		ResetTurnErrors:         make(map[string]error),
 		InterruptBoundaryErrors: make(map[string]error),
+		InterruptErrors:         make(map[string]error),
 		ClearInputErrors:        make(map[string]error),
 		RemoveMetaErrors:        make(map[string]map[string]error),
 		WaitForIdleGates:        make(map[string]chan struct{}),
@@ -319,7 +356,7 @@ func (f *Fake) Interrupt(name string) error {
 	if f.broken {
 		return fmt.Errorf("session unavailable")
 	}
-	return nil
+	return f.InterruptErrors[name]
 }
 
 // DismissKnownDialogs records the call and returns the configured result.
@@ -1144,5 +1181,5 @@ func (f *Fake) InterruptFenced(_ context.Context, name string, fence InputFence)
 	if f.broken {
 		return fmt.Errorf("session unavailable")
 	}
-	return nil
+	return f.InterruptErrors[name]
 }

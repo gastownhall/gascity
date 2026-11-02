@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/poolplan"
+	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/session"
@@ -212,6 +213,10 @@ type defaultScaleCheckTarget struct {
 	storeKey string
 	store    beads.Store
 	err      error
+	// classBinding marks a relocated class binding read under the city key. It
+	// holds every scope's rows, so storeKey says where a row lives, not who
+	// owns it: the row's gc.root_store_ref does (rootStoreRefMatchesCandidate).
+	classBinding bool
 }
 
 type scaleCheckDemand struct {
@@ -223,6 +228,10 @@ type scaleCheckDemand struct {
 	StoreRefs      map[string]string
 	WorktreeSpecs  map[string]*worktree.Spec
 	WorktreeErrors map[string]string
+	// BindingResident marks the work beads read from a relocated class
+	// binding. Their StoreRefs entry is the city key the binding is grouped
+	// under, which says where the row lives, not who owns it.
+	BindingResident map[string]bool
 	// ParentSIDs maps work-bead id → gc.brain_parent_sid, carrying the fork
 	// parent through to the new pool session bead so the launch path can fork
 	// the warm arm off its pre-built brain.
@@ -625,7 +634,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 	// rewrites gc.routed_to on open ready work, so it uses its own cache; the
 	// scale-check and named-session probes read after those writes and share a
 	// second cache created below. See readyDemandCache.
-	assignedReadyCache := newTracedReadyDemandCache(pass, demandReadPointAssigned)
+	assignedReadyCache := newTracedReadyDemandCache(pass, demandReadPointAssigned).withCrossStoreGate(cityPath, cfg, store, rigStores, suspendedRigPaths)
 	if store != nil {
 		subPhaseStart = trace.demandNow()
 		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssigned, storePartial = collectAssignedWorkBeadsWithStores(cityPath, cfg, store, rigStores, suspendedRigPaths, sessionBeads, assignedReadyCache)
@@ -718,7 +727,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 		// pre-rewrite legacy routes and miss the canonical cold pool, because
 		// an explicit-handle CachingStore returns its memoized pre-write live
 		// snapshot as the authoritative demand read.
-		demandReadyCache := newTracedReadyDemandCache(pass, demandReadPointDemand)
+		demandReadyCache := newTracedReadyDemandCache(pass, demandReadPointDemand).withCrossStoreGate(cityPath, cfg, store, rigStores, suspendedRigPaths)
 		recordDemandSubPhase(trace, "demand_snapshot.collect_unassigned_routed", subPhaseStart, map[string]any{
 			"beads": len(unassignedRoutedBeads),
 		})
@@ -779,13 +788,17 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 		bp.assignedWorkBeads = poolWorkBeads
 		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
-		poolDesiredStates := ComputePoolDesiredStatesWithDemandTracedAt(
+		// A seat parked on pre-assigned blocked work stays desired but takes
+		// no cap headroom (ga-ylpbsy.16). A partial work read parks nothing.
+		parked := parkSeatsForDemand(cfg, [][]session.Info{sessionBeads.OpenInfos()}, assignedWorkBeads, assignedWorkStoreRefs, readyAssigned, storePartial, poolDecisionTime.UTC())
+		poolDesiredStates := computePoolDesiredStatesParkedAt(
 			cfg,
 			poolWorkBeads,
 			sessionBeads.OpenInfos(),
 			scaleCheckCounts,
 			scaleCheckDemandByTemplate,
 			poolDecisionTime,
+			parked,
 			trace,
 		)
 		bp.configurePoolSessionCreateFairShare(poolDesiredStates)
@@ -860,7 +873,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 	// canonical bead or direct assigned work.
 	subPhaseStart = trace.demandNow()
 	namedMaterialized := 0
-	named := computeNamedSessionDemand(cityName, cityPath, cfg, store, suspendedRigPaths, namedDefaultDemand, assignedWorkBeads, assignedWorkStoreRefs, readyAssigned, scaleCheckCounts, stderr)
+	named := computeNamedSessionDemand(cityName, cityPath, cfg, store, bp.sessionBeads, suspendedRigPaths, namedDefaultDemand, assignedWorkBeads, assignedWorkStoreRefs, readyAssigned, scaleCheckCounts, stderr)
 	for identity, spec := range named.specs {
 		canonicalInfo, hasCanonical := findCanonicalNamedSessionInfo(bp.sessionBeads, spec)
 		if !hasCanonical {
@@ -975,11 +988,13 @@ type namedSessionDemand struct {
 }
 
 // computeNamedSessionDemand derives named-session demand from the demand
-// pass's collected work and scale-check counts.
+// pass's collected work and scale-check counts. sessionBeads holds the open
+// rows a named session's canonical row is looked up in.
 func computeNamedSessionDemand(
 	cityName, cityPath string,
 	cfg *config.City,
 	store beads.Store,
+	sessionBeads *sessionBeadSnapshot,
 	suspendedRigPaths map[string]bool,
 	namedDefaultDemand map[string]bool,
 	assignedWorkBeads []beads.Bead,
@@ -989,17 +1004,22 @@ func computeNamedSessionDemand(
 	stderr io.Writer,
 ) namedSessionDemand {
 	claimRefs := func() []string { return assignedWorkRelocatedClaimRefs(cityPath, cfg, store) }
-	return computeNamedSessionDemandOn(cityName, cityPath, cfg, claimRefs, suspendedRigPaths, namedDefaultDemand, assignedWorkBeads, assignedWorkStoreRefs, readyAssigned, scaleCheckCounts, stderr)
+	canonical := func(spec namedSessionSpec) (session.Info, bool) {
+		return findCanonicalNamedSessionInfo(sessionBeads, spec)
+	}
+	return computeNamedSessionDemandOn(cityName, cityPath, cfg, claimRefs, canonical, suspendedRigPaths, namedDefaultDemand, assignedWorkBeads, assignedWorkStoreRefs, readyAssigned, scaleCheckCounts, stderr)
 }
 
 // computeNamedSessionDemandOn is computeNamedSessionDemand with the claim-ref
-// lookup supplied: claimRefs runs only when there is work to match and a named
-// spec to match it, as before. The v2 allocator passes refs it resolved
-// outside its pure pass.
+// and canonical-row lookups supplied: claimRefs runs only when there is work
+// to match and a named spec to match it, as before, and canonical only for a
+// claim under a requalified session's bare leaf (namedBareClaimOwner). The v2
+// allocator passes refs it resolved outside its pure pass and its own rows.
 func computeNamedSessionDemandOn(
 	cityName, cityPath string,
 	cfg *config.City,
 	claimRefs func() []string,
+	canonical func(namedSessionSpec) (session.Info, bool),
 	suspendedRigPaths map[string]bool,
 	namedDefaultDemand map[string]bool,
 	assignedWorkBeads []beads.Bead,
@@ -1054,6 +1074,7 @@ func computeNamedSessionDemandOn(
 		namedClaimRefs = claimRefs()
 	}
 	for identity, spec := range namedSpecs {
+		ownsBareClaim := namedBareClaimOwner(cfg, spec, canonical)
 		for i, wb := range assignedWorkBeads {
 			// in_progress work is always actionable; open work is direct named
 			// demand only when it passed the store's readiness/deps gate. Without
@@ -1074,7 +1095,7 @@ func computeNamedSessionDemandOn(
 				continue
 			}
 			assignee := strings.TrimSpace(wb.Assignee)
-			if !namedSessionAssigneeMatchesSpec(spec, identity, assignee) {
+			if !namedSessionAssigneeMatchesSpec(spec, identity, assignee) && !ownsBareClaim(assignee) {
 				continue
 			}
 			// ga-i1d0tr Candidate B: a bare-template Assignee used to be
@@ -1212,8 +1233,9 @@ func buildDemandTargets(
 	// rig pool can't see locally — e.g. work queued in the city store — still
 	// wakes it. Only consulted for the clamped cold-wake probe.
 	type activeStore struct {
-		store beads.Store
-		ref   string
+		store        beads.Store
+		ref          string
+		classBinding bool
 	}
 	// cityLegs is every store a city-scope route's default probe reads past the
 	// leading handle: on a split, the work ledger AND the binding in
@@ -1247,7 +1269,7 @@ func buildDemandTargets(
 		}
 		out := make([]defaultScaleCheckTarget, 0, len(cityLegs))
 		for _, leg := range cityLegs {
-			out = append(out, defaultScaleCheckTarget{template: template, store: leg.store, storeKey: "city"})
+			out = append(out, defaultScaleCheckTarget{template: template, store: leg.store, storeKey: "city", classBinding: storeref.IsClassRef(leg.ref)})
 		}
 		return out
 	}
@@ -1262,7 +1284,7 @@ func buildDemandTargets(
 	}
 	var activeStores []activeStore
 	for _, target := range cityTargets("") {
-		activeStores = append(activeStores, activeStore{store: target.store, ref: target.storeKey})
+		activeStores = append(activeStores, activeStore{store: target.store, ref: target.storeKey, classBinding: target.classBinding})
 	}
 	for _, rig := range cfg.Rigs {
 		if suspendedRigPaths[filepath.Clean(rig.Path)] {
@@ -1379,7 +1401,7 @@ func buildDemandTargets(
 			}
 			if store != nil && isCold && !storeScopedControlDispatcher {
 				for _, source := range activeStores {
-					target := defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref}
+					target := defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref, classBinding: source.classBinding}
 					// Mirror the generic-pool cold-wake probe below (vp-s37 /
 					// #3078): a custom scale_check that is cold and asleep
 					// cannot see routed demand, so probe every active store
@@ -1486,7 +1508,7 @@ func buildDemandTargets(
 		// it itself, or the pool will churn at the warm/cold boundary.
 		if store != nil && isCold && !storeScopedControlDispatcher {
 			for _, source := range activeStores {
-				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref})
+				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref, classBinding: source.classBinding})
 			}
 			coldWakeTemplates[template] = true
 		}
@@ -1960,7 +1982,11 @@ func collectAssignedWorkBeadsWithStores(
 	// suppress the Ready probe for a same-ID assignee in another store.
 	skipReadyAssignees := readyCapturedAssigneeSet(result, resultStoreRefs, readyAssigned)
 	expandSkipAssigneesWithSessionIdentities(skipReadyAssignees, sessionBeads)
-	assignees := readyAssignedWorkAssignees(cfg, cityStore, sessionBeads, skipReadyAssignees, pass, point, reads)
+	closedNamedStore := cityStore
+	if cache != nil && cache.sessions.Store != nil {
+		closedNamedStore = cache.sessions.Store
+	}
+	assignees := readyAssignedWorkAssignees(cfg, closedNamedStore, sessionBeads, skipReadyAssignees, pass, point, reads)
 	if len(skipReadyAssignees) > 0 && len(assignees) == 0 {
 		return result, resultStores, resultStoreRefs, readyAssigned, partial
 	}
@@ -2085,7 +2111,10 @@ func expandSkipAssigneesWithSessionIdentities(skip map[string]struct{}, sessionB
 	}
 }
 
-func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, sessionBeads *sessionBeadSnapshot, skip map[string]struct{}, pass *demandPassTrace, point string, reads demandReads) []string {
+// sessionsStore is the session-class store the closed named-session index is
+// built from (collectAssignedWorkBeadsWithStores: the pass's leading store,
+// or the one its cache names).
+func readyAssignedWorkAssignees(cfg *config.City, sessionsStore beads.Store, sessionBeads *sessionBeadSnapshot, skip map[string]struct{}, pass *demandPassTrace, point string, reads demandReads) []string {
 	seen := make(map[string]struct{})
 	var result []string
 	add := func(value string) {
@@ -2107,7 +2136,7 @@ func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, session
 			if info.Closed {
 				continue
 			}
-			for _, id := range sessionBeadAssigneeIdentitiesInfo(info) {
+			for _, id := range sessionBeadAssigneeIdentitiesForConfigInfo(info, cfg) {
 				add(id)
 			}
 		}
@@ -2135,8 +2164,8 @@ func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, session
 			// partial read keeps the rows it did get.
 			start := pass.now()
 			var idxErr error
-			closedIdx, idxErr = demandReadsOrLegacy(reads).ClosedNamedIndex(cityStore)
-			pass.read(demandStoreRead{point: point, leg: pass.storeLabel(cityStore, "city"), op: "closed_named_index", tier: demandReadTierCached}, start, -1, idxErr)
+			closedIdx, idxErr = demandReadsOrLegacy(reads).ClosedNamedIndex(sessionsStore)
+			pass.read(demandStoreRead{point: point, leg: pass.storeLabel(sessionsStore, "city"), op: "closed_named_index", tier: demandReadTierCached}, start, -1, idxErr)
 		}
 		for i := range cfg.NamedSessions {
 			if cfg.NamedSessions[i].Mode != "on_demand" {
@@ -2227,6 +2256,8 @@ func ownScaleCheckTarget(
 			template: agentCfg.QualifiedName(),
 			storeKey: "city",
 			store:    controlBinding,
+			// The binding serves every scope's control rows.
+			classBinding: true,
 		}
 	}
 	return defaultScaleCheckTargetForAgent(cityPath, cfg, agentCfg, cityStore, rigStores)
@@ -2285,9 +2316,10 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 	}
 
 	type scaleStoreGroup struct {
-		store     beads.Store
-		storeKey  string
-		templates map[string]struct{}
+		store        beads.Store
+		storeKey     string
+		classBinding bool
+		templates    map[string]struct{}
 		// byTemplate is the group's ready rows bucketed by the template each one
 		// is servable to, in the store's own order.
 		byTemplate map[string][]beads.Bead
@@ -2331,7 +2363,7 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 		gk := scaleStoreGroupKey{key: key, store: target.store}
 		group := groups[gk]
 		if group == nil {
-			group = &scaleStoreGroup{store: target.store, storeKey: key, templates: make(map[string]struct{})}
+			group = &scaleStoreGroup{store: target.store, storeKey: key, classBinding: target.classBinding, templates: make(map[string]struct{})}
 			groups[gk] = group
 			groupOrder = append(groupOrder, group)
 		}
@@ -2388,56 +2420,76 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 	}
 	for _, template := range templateOrder {
 		seen := make(map[string]struct{})
+		var rows []beads.Bead
+		rowStoreKeys := make(map[string]string)
+		rowBindingResident := make(map[string]bool)
 		for _, group := range templateGroups[template] {
 			for _, b := range group.byTemplate[template] {
 				if _, dup := seen[b.ID]; dup {
 					continue
 				}
 				seen[b.ID] = struct{}{}
-				counts[template]++
-				entry := demand[template]
-				entry.Count++
-				entry.WorkBeadIDs = append(entry.WorkBeadIDs, b.ID)
-				if entry.Titles == nil {
-					entry.Titles = make(map[string]string)
-				}
-				entry.Titles[b.ID] = b.Title
-				if pack := strings.TrimSpace(b.Metadata[beadmeta.PackMetadataKey]); pack != "" {
-					if entry.Packs == nil {
-						entry.Packs = make(map[string]string)
-					}
-					entry.Packs[b.ID] = pack
-				}
-				if workspace := strings.TrimSpace(b.Metadata[beadmeta.PackWorkspaceMetadataKey]); workspace != "" {
-					if entry.Workspaces == nil {
-						entry.Workspaces = make(map[string]string)
-					}
-					entry.Workspaces[b.ID] = workspace
-				}
-				if entry.StoreRefs == nil {
-					entry.StoreRefs = make(map[string]string)
-				}
-				entry.StoreRefs[b.ID] = group.storeKey
-				spec, specErr := worktreeSpecForBead(b, group.storeKey)
-				if specErr != nil {
-					if entry.WorktreeErrors == nil {
-						entry.WorktreeErrors = make(map[string]string)
-					}
-					entry.WorktreeErrors[b.ID] = specErr.Error()
-				} else if spec != nil {
-					if entry.WorktreeSpecs == nil {
-						entry.WorktreeSpecs = make(map[string]*worktree.Spec)
-					}
-					entry.WorktreeSpecs[b.ID] = spec
-				}
-				if parentSID := strings.TrimSpace(b.Metadata[beadmeta.BrainParentSIDMetadataKey]); parentSID != "" {
-					if entry.ParentSIDs == nil {
-						entry.ParentSIDs = make(map[string]string)
-					}
-					entry.ParentSIDs[b.ID] = parentSID
-				}
-				demand[template] = entry
+				rows = append(rows, b)
+				rowStoreKeys[b.ID] = group.storeKey
+				rowBindingResident[b.ID] = group.classBinding
 			}
+		}
+		// The claim reader merges these legs and serves them in the canonical
+		// ready order, bounded (routedReadyTierCommand); a concatenation of the
+		// legs is not that order. Name demand in the order the claim window
+		// serves it, so the seat placed for a bead finds it in its window.
+		beads.SortBeadsReadyOrder(rows)
+		for _, b := range rows {
+			storeKey := rowStoreKeys[b.ID]
+			counts[template]++
+			entry := demand[template]
+			entry.Count++
+			entry.WorkBeadIDs = append(entry.WorkBeadIDs, b.ID)
+			if entry.Titles == nil {
+				entry.Titles = make(map[string]string)
+			}
+			entry.Titles[b.ID] = b.Title
+			if pack := strings.TrimSpace(b.Metadata[beadmeta.PackMetadataKey]); pack != "" {
+				if entry.Packs == nil {
+					entry.Packs = make(map[string]string)
+				}
+				entry.Packs[b.ID] = pack
+			}
+			if workspace := strings.TrimSpace(b.Metadata[beadmeta.PackWorkspaceMetadataKey]); workspace != "" {
+				if entry.Workspaces == nil {
+					entry.Workspaces = make(map[string]string)
+				}
+				entry.Workspaces[b.ID] = workspace
+			}
+			if entry.StoreRefs == nil {
+				entry.StoreRefs = make(map[string]string)
+			}
+			entry.StoreRefs[b.ID] = storeKey
+			if rowBindingResident[b.ID] {
+				if entry.BindingResident == nil {
+					entry.BindingResident = make(map[string]bool)
+				}
+				entry.BindingResident[b.ID] = true
+			}
+			spec, specErr := worktreeSpecForBead(b, storeKey)
+			if specErr != nil {
+				if entry.WorktreeErrors == nil {
+					entry.WorktreeErrors = make(map[string]string)
+				}
+				entry.WorktreeErrors[b.ID] = specErr.Error()
+			} else if spec != nil {
+				if entry.WorktreeSpecs == nil {
+					entry.WorktreeSpecs = make(map[string]*worktree.Spec)
+				}
+				entry.WorktreeSpecs[b.ID] = spec
+			}
+			if parentSID := strings.TrimSpace(b.Metadata[beadmeta.BrainParentSIDMetadataKey]); parentSID != "" {
+				if entry.ParentSIDs == nil {
+					entry.ParentSIDs = make(map[string]string)
+				}
+				entry.ParentSIDs[b.ID] = parentSID
+			}
+			demand[template] = entry
 		}
 	}
 	return counts, demand, partialTemplates, errs
@@ -2578,6 +2630,9 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 	if existing.ParentSIDs == nil && len(incoming.ParentSIDs) > 0 {
 		existing.ParentSIDs = make(map[string]string, len(incoming.ParentSIDs))
 	}
+	if existing.BindingResident == nil && len(incoming.BindingResident) > 0 {
+		existing.BindingResident = make(map[string]bool, len(incoming.BindingResident))
+	}
 	if existing.WorktreeSpecs == nil && len(incoming.WorktreeSpecs) > 0 {
 		existing.WorktreeSpecs = make(map[string]*worktree.Spec, len(incoming.WorktreeSpecs))
 	}
@@ -2600,6 +2655,9 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 		}
 		if incoming.StoreRefs != nil {
 			existing.StoreRefs[id] = incoming.StoreRefs[id]
+		}
+		if incoming.BindingResident[id] {
+			existing.BindingResident[id] = true
 		}
 		if incoming.ParentSIDs != nil {
 			if sid := incoming.ParentSIDs[id]; sid != "" {
@@ -3015,6 +3073,71 @@ type readyDemandCache struct {
 	// serves (recordDemandStoreRead). A nil pass records nothing.
 	pass  *demandPassTrace
 	point string
+	// gateLegs are a split city's ready legs, set by withCrossStoreGate. When
+	// set, every ready snapshot is passed through the same cross-store rule
+	// `gc ready` applies (gate), so the demand the controller counts and the
+	// work a seat is served agree row for row. Nil on a city with no class
+	// binding, whose snapshots are the stores' own answer.
+	gateLegs []readywork.Leg
+	// gate is that rule over gateLegs for this cache's one read point. It
+	// keeps every blocker verdict, judged row and absent-blocker listing it
+	// reads, so a blocker is read once per read point rather than once per
+	// gated snapshot (a store's live and cached snapshots are both gated).
+	gate *readywork.LegGate
+	// sessions is the session-class store the closed named-session index is
+	// built from, set by withSessionsStore for a pass led by a WORK store
+	// (gc doctor's demand-migration sweep). Unset, the pass's leading store
+	// answers: every controller and gc start pass leads with the sessions
+	// store already.
+	sessions beads.SessionStore
+}
+
+// withSessionsStore names the session-class store the closed named-session
+// index reads, for a pass whose leading store is not it, and returns the
+// cache.
+func (c *readyDemandCache) withSessionsStore(sessions beads.SessionStore) *readyDemandCache {
+	if c == nil {
+		return c
+	}
+	c.sessions = sessions
+	return c
+}
+
+// withCrossStoreGate arms the cache with the city's ready legs when the city
+// is split (crossStoreGateLegs), and returns it. A city that relocates nothing
+// (or one whose topology cannot be planned, which its readers report
+// themselves) is left ungated. Only a pass that may read remotely arms it:
+// the v2 gather serves snapshots the external-reads lane already gated
+// (gatherDemand).
+func (c *readyDemandCache) withCrossStoreGate(cityPath string, cfg *config.City, cityStore beads.Store, rigStores map[string]beads.Store, suspendedRigPaths map[string]bool) *readyDemandCache {
+	if c == nil {
+		return c
+	}
+	return c.withGateLegs(crossStoreGateLegs(cityPath, cfg, cityStore, rigStores, suspendedRigPaths))
+}
+
+// withGateLegs arms the cache with legs, a split city's gate legs, and returns
+// it; nil legs leave it ungated.
+func (c *readyDemandCache) withGateLegs(legs []readywork.Leg) *readyDemandCache {
+	if c == nil || legs == nil {
+		return c
+	}
+	c.gateLegs = legs
+	c.gate = readywork.NewLegGate(legs, beads.ReadyQuery{TierMode: beads.TierBoth})
+	return c
+}
+
+// gateSnapshot applies the cross-store rule to one store's ready snapshot,
+// waiting at most crossStoreGateDeadline (gateReadyRows). A store that is not
+// one of the legs is left as read. A gate that cannot be evaluated in time
+// keeps the ungated rows and reports a partial result: demand must never be
+// under-counted from a read hiccup (see readyDemandCache).
+func (c *readyDemandCache) gateSnapshot(store beads.Store, rows []beads.Bead, err error) ([]beads.Bead, error) {
+	if c == nil || len(c.gateLegs) == 0 {
+		return rows, err
+	}
+	gated, gateErr := gateReadyRows(c.gate, crossStoreGateLeg(c.gateLegs, store), rows, err, crossStoreGateDeadline)
+	return gated, joinGateErr(err, gateErr)
 }
 
 type readyDemandEntry struct {
@@ -3081,6 +3204,7 @@ func (c *readyDemandCache) liveSnapshot(store beads.Store, leg string) ([]beads.
 		start := c.pass.now()
 		e.rows, e.err = c.demandReads().ReadyAll(store)
 		c.pass.read(demandStoreRead{point: c.point, leg: leg, op: "ready", tier: demandReadTierLive}, start, len(e.rows), e.err)
+		e.rows, e.err = c.gateSnapshot(store, e.rows, e.err)
 	})
 	return e.rows, e.err
 }
@@ -3094,6 +3218,7 @@ func (c *readyDemandCache) cachedSnapshot(store beads.Store, leg string) ([]bead
 		start := c.pass.now()
 		e.rows, e.err = c.demandReads().CachedReady(store)
 		c.pass.read(demandStoreRead{point: c.point, leg: leg, op: "ready", tier: demandReadTierCached}, start, len(e.rows), e.err)
+		e.rows, e.err = c.gateSnapshot(store, e.rows, e.err)
 	})
 	return e.rows, e.err
 }
@@ -4203,7 +4328,11 @@ func computePoolTriggerBindingPatch(info session.Info, request SessionRequest, w
 	// fresh, or otherwise reusable session that will start in a newly derived
 	// worktree. currently_processing_bead_id is deliberately not required here:
 	// that secondary marker can lag the live process and must not authorize a cwd
-	// metadata rewrite while the process is still running.
+	// metadata rewrite while the process is still running. A parked seat waking
+	// for its pre-assigned work (parkedResumeContinuation) is asleep, but it
+	// resumes its conversation, whose transcript is filed under the dir it ran
+	// in, so it keeps that dir too; where the binding applies, a recorded dir
+	// that cannot host the resume is re-derived (parkedWorkDirKept).
 	if workDir != "" {
 		targetWorkDir := workDir
 		existingWorkDir := strings.TrimSpace(info.WorkDirCanonical)
@@ -4215,7 +4344,7 @@ func computePoolTriggerBindingPatch(info session.Info, request SessionRequest, w
 			request.SessionBeadID == info.ID &&
 			info.State == session.StateActive &&
 			info.WakeMode != "fresh"
-		if existingWorkDir != "" && (oldWorkBeadID == workBeadID || liveResumeContinuation) {
+		if existingWorkDir != "" && (oldWorkBeadID == workBeadID || liveResumeContinuation || parkedResumeContinuation(info, request)) {
 			targetWorkDir = existingWorkDir
 		}
 		if strings.TrimSpace(info.WorkDirCanonical) != targetWorkDir {
@@ -4254,6 +4383,14 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 		return info, err
 	}
 	patch := computePoolTriggerBindingPatch(info, request, workDir)
+	if kept := parkedWorkDirKept(info, request, workDir); kept != "" && bp != nil && !bp.planOnly {
+		if err := parkedWorkDirUsable(bp.city, bp.cityPath, cfgAgent, kept, workDir); err != nil {
+			if bp.stderr != nil {
+				fmt.Fprintf(bp.stderr, "buildDesiredState: pool %q session %s: not resuming in its recorded work dir: %v; binding %s, where it starts fresh\n", qualifiedName, info.ID, err, workDir) //nolint:errcheck // best-effort stderr
+			}
+			patch = withRederivedWorkDir(patch, info, workDir)
+		}
+	}
 	if len(patch) == 0 {
 		return info, nil
 	}
@@ -4387,8 +4524,13 @@ func verifiedPoolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	if workID == "" || strings.TrimSpace(spec.BeadID) != workID {
 		return "", fmt.Errorf("%w: bead %q does not match request bead %q", errPoolTriggerWorktreeEvidence, spec.BeadID, workID)
 	}
+	// A row read from a relocated class binding is grouped under the city key,
+	// which says where it lives, not who owns it. Its owner is the row's own
+	// gc.root_store_ref, which the spec already carries (worktreeSpecForBead),
+	// so there is no second store to compare; worktree.Verify still proves the
+	// on-disk provenance names that bead and owner.
 	storeRef := strings.TrimSpace(request.WorkStoreRef)
-	if storeRef != "" && canonicalEvidenceStoreRef(spec.StoreRef) != canonicalEvidenceStoreRef(storeRef) {
+	if storeRef != "" && !request.WorkBindingResident && canonicalEvidenceStoreRef(spec.StoreRef) != canonicalEvidenceStoreRef(storeRef) {
 		return "", fmt.Errorf("%w: store %q does not match request store %q", errPoolTriggerWorktreeEvidence, spec.StoreRef, storeRef)
 	}
 	if bp != nil && bp.planOnly {
@@ -4461,6 +4603,15 @@ func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedN
 	if err != nil || strings.TrimSpace(base) == "" {
 		return ""
 	}
+	return poolWorkDirUnder(base, request)
+}
+
+// poolWorkDirUnder routes request's work under base, the pool session's
+// configured directory: a pack's work to the pack's directory beside base, and
+// an explicit workspace to its own subdirectory. `gc hook --claim` routes a
+// candidate the same way to tell whether the controller starts that work's
+// session in the claiming seat's directory (hookPoolSeat.unboundWorkDir).
+func poolWorkDirUnder(base string, request SessionRequest) string {
 	if pack := strings.TrimSpace(request.WorkPack); pack != "" {
 		packDir := filepath.Join(filepath.Dir(base), pack)
 		if workspace := packWorkspaceSlug(request); workspace != "" {

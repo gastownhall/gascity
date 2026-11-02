@@ -502,9 +502,11 @@ func seedQueuedWaitNudge(t *testing.T, fs *fakeState, wait beads.Bead, agentName
 		t.Fatalf("set wait nudge_id: %v", err)
 	}
 	if _, err := fs.cityBeadStore.Create(beads.Bead{
-		Type:   "nudge",
-		Title:  "nudge:" + nudgeID,
-		Labels: []string{"nudge:" + nudgeID},
+		Type:  "nudge",
+		Title: "nudge:" + nudgeID,
+		// gc:nudge is what every real shadow bead carries (cmd/gc
+		// nudge_beads.go), and what makes it nudges-class rather than work.
+		Labels: []string{"gc:nudge", "nudge:" + nudgeID},
 		Metadata: map[string]string{
 			"nudge_id": nudgeID,
 			"state":    "queued",
@@ -569,7 +571,7 @@ func createSessionCloseWaitOverflowWithQueuedNudges(t *testing.T, fs *fakeState,
 		if _, err := fs.cityBeadStore.Create(beads.Bead{
 			Type:   "nudge",
 			Title:  "nudge:" + nudgeID,
-			Labels: []string{"nudge:" + nudgeID},
+			Labels: []string{"gc:nudge", "nudge:" + nudgeID},
 			Metadata: map[string]string{
 				"nudge_id": nudgeID,
 				"state":    "queued",
@@ -8963,4 +8965,56 @@ func TestHumaSessionCloseRefusedWriteStillFails(t *testing.T) {
 		t.Fatalf("close status = %d, want %d; body: %s", w.Code, http.StatusInternalServerError, w.Body.String())
 	}
 	requireSessionStatus(t, store.Store, info.ID, "open")
+}
+
+// TestHandleSessionListActiveBeadSkipsSuspendedRig: the session list fills
+// active_bead without reading a suspended rig's store, whose every read goes
+// to bd and restarts the rig's retired proxy and Dolt (#8162).
+func TestHandleSessionListActiveBeadSkipsSuspendedRig(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Rigs = append(fs.cfg.Rigs,
+		config.Rig{Name: "alpha", Path: "/tmp/alpha"},
+		config.Rig{Name: "beta", Path: "/tmp/beta"},
+	)
+	alpha := &listCountingStore{Store: &beads.MemStore{IDPrefix: "alpha"}}
+	beta := &listCountingStore{Store: &beads.MemStore{IDPrefix: "beta"}}
+	fs.stores["alpha"] = alpha
+	fs.stores["beta"] = beta
+	suspendAlphaAtRuntime(t, fs)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "My Session")
+	addActiveWork(t, alpha.Store, info.ID)
+	betaWork := addActiveWork(t, beta.Store, info.ID)
+
+	req := httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp struct {
+		Items []sessionResponse `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if alpha.listCalls != 0 {
+		t.Errorf("suspended rig alpha List calls = %d, want 0", alpha.listCalls)
+	}
+	var found bool
+	for _, item := range resp.Items {
+		if item.ID != info.ID {
+			continue
+		}
+		found = true
+		if item.ActiveBead != betaWork {
+			t.Errorf("active_bead = %q, want beta's %q", item.ActiveBead, betaWork)
+		}
+	}
+	if !found {
+		t.Fatalf("session %s not listed in %+v", info.ID, resp.Items)
+	}
 }

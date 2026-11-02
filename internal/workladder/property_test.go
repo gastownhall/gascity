@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -25,7 +26,12 @@ func sequences() int {
 // workers, failing on the lowest failing seed.
 func forEachSequence(t *testing.T, check func(seed uint64) error) {
 	t.Helper()
-	n := sequences()
+	forEachN(t, sequences(), check)
+}
+
+// forEachN runs check on seeds 0..n-1 as forEachSequence does.
+func forEachN(t *testing.T, n int, check func(seed uint64) error) {
+	t.Helper()
 	workers := min(runtime.GOMAXPROCS(0), 8)
 	errs := make([]error, n)
 	var wg sync.WaitGroup
@@ -57,10 +63,24 @@ type sim struct {
 	agent    map[ClaimKey]bool // the agent cell
 	seeds    map[ClaimKey]StartSource
 	started  map[ClaimKey]bool // ever started while continuously outstanding as a claim
+	waiting  map[ClaimKey]bool // the seat asked a person about the claim and waits on the answer
 	obs      Observation
 	activity time.Time // the seat's last activity: it works now and then
 	lastStep time.Duration
 	churn    int // 0: a calm seat that only gains work; 1: everything flips
+	// marks: the caller hands some nudges to an asynchronous delivery
+	// (W5's notice mark) and settles each a pass or more later, with a
+	// random fate.
+	marks bool
+	ops   int
+	seed  uint64
+	// turns: the caller reads the seat's turns on some passes (a reading
+	// that may show the newest turn failed, service, or nothing).
+	turns bool
+	// served is when the seat's newest completed turn ended, and lastFailed
+	// whether its newest ended turn failed.
+	served     time.Time
+	lastFailed bool
 }
 
 var simKeys = []ClaimKey{key("a"), key("b"), key("c")}
@@ -69,8 +89,9 @@ const maxStep = 20 * time.Minute
 
 func newSim(seed uint64) *sim {
 	s := &sim{
-		rng: rand.New(rand.NewPCG(seed, 0x6c6164646572)), now: t0, gen: 1,
+		seed: seed, rng: rand.New(rand.NewPCG(seed, 0x6c6164646572)), now: t0, gen: 1,
 		kinds: map[ClaimKey]Kind{}, agent: map[ClaimKey]bool{}, seeds: map[ClaimKey]StartSource{}, started: map[ClaimKey]bool{},
+		waiting: map[ClaimKey]bool{},
 	}
 	s.obs = Observation{StartedRead: true, Runtime: TriTrue, Quiet: Quiet{State: Quiescent}}
 	if s.chance(70) {
@@ -89,6 +110,7 @@ func (s *sim) drop(k ClaimKey) {
 	delete(s.agent, k)
 	delete(s.seeds, k)
 	delete(s.started, k)
+	delete(s.waiting, k)
 }
 
 // step advances the world and builds the next observation.
@@ -117,6 +139,8 @@ func (s *sim) step() Observation {
 			}
 		case ok && kind == KindClaim && s.event(5):
 			s.agent[k] = true
+		case ok && kind == KindClaim && s.event(4): // the seat asks a person, or works the step again
+			s.waiting[k] = !s.waiting[k]
 		}
 	}
 	if s.event(3) {
@@ -138,6 +162,12 @@ func (s *sim) step() Observation {
 	s.obs.StartedRead = !s.event(3)
 	if s.event(4) { // the seat did some work
 		s.activity = s.now.Add(-time.Duration(s.rng.IntN(120)) * time.Second)
+		if s.turns { // its turn ended: the provider completed it, or failed it
+			s.lastFailed = s.chance(50)
+			if !s.lastFailed {
+				s.served = s.activity
+			}
+		}
 	}
 	s.obs.LastActivity = s.activity
 	s.obs.Hold = nil
@@ -152,13 +182,16 @@ func (s *sim) step() Observation {
 
 	o := s.obs
 	o.Now, o.Gen, o.Outstanding, o.Started = s.now, s.gen, nil, map[ClaimKey]StartSource{}
+	if s.turns {
+		o.Conv, o.Turns = 1, s.reading()
+	}
 	seeding := s.rec.V == 0 || s.rec.Gen != s.gen
 	for _, k := range simKeys {
 		kind, ok := s.kinds[k]
 		if !ok {
 			continue
 		}
-		o.Outstanding = append(o.Outstanding, Work{Key: k, Kind: kind})
+		o.Outstanding = append(o.Outstanding, Work{Key: k, Kind: kind, AwaitsHuman: s.waiting[k]})
 		if s.agent[k] {
 			o.Started[k] = SrcAgent
 		} else if src, ok := s.seeds[k]; ok && seeding {
@@ -169,6 +202,18 @@ func (s *sim) step() Observation {
 		}
 	}
 	return o
+}
+
+// reading is the caller's reading of the seat's turns: now and then none
+// (a read that failed), or one of another conversation (it moved since).
+func (s *sim) reading() TurnReading {
+	switch {
+	case s.chance(10):
+		return TurnReading{}
+	case s.chance(5):
+		return TurnReading{Read: true, Conv: 2, LastFailed: true}
+	}
+	return TurnReading{Read: true, Conv: 1, LastFailed: s.lastFailed, ServedAt: s.served}
 }
 
 func countNudges(d Decision) int {
@@ -194,8 +239,22 @@ func TestLadderInvariants(t *testing.T) {
 	forEachSequence(t, runSequence)
 }
 
-func runSequence(seed uint64) error {
-	s := newSim(seed)
+func runSequence(seed uint64) error { return newSim(seed).run() }
+
+// settleMarks settles, before a pass, the marks the caller's delivery has an
+// outcome for: most of them, and every one older than the caller's bound.
+func (s *sim) settleMarks() {
+	for _, e := range s.rec.Entries {
+		if e.Notice.IsZero() || (s.chance(30) && s.now.Sub(e.Notice.At) < 5*time.Minute) {
+			continue
+		}
+		if r, _, ok := SettleNotice(s.rec, e.Notice.Op, NoticeFate(1+s.rng.IntN(4)), time.Time{}); ok {
+			s.rec = r
+		}
+	}
+}
+
+func (s *sim) run() error {
 	var lastSeatNudge time.Time
 	lastNudge := map[ClaimKey]time.Time{}   // per entry life
 	lastTrigger := map[ClaimKey]time.Time{} // trigger recycles, per entry life
@@ -208,11 +267,15 @@ func runSequence(seed uint64) error {
 	}
 	lastCounted := map[ClaimKey]counted{}  // the entry's last counted nudge
 	unfinished := map[ClaimKey]time.Time{} // when the lane last reported a release kept
+	waitFrom := map[ClaimKey]time.Time{}   // a wait on a person's start, or its last nudge
 	for i := range 90 {
+		o := s.step()
+		if s.marks {
+			s.settleMarks()
+		}
 		prev := s.rec
 		prevCopy := prev
 		prevCopy.Entries = slices.Clone(prev.Entries)
-		o := s.step()
 		d := Decide(prev, o, p)
 		fail := func(format string, a ...any) error {
 			return fmt.Errorf("step %d at %v: %s\nprev %s\nobs %+v\nnext %s\nacts %+v", i, o.Now.Sub(t0), fmt.Sprintf(format, a...), EncodeLadder(prevCopy), o, EncodeLadder(d.Next), d.Actions)
@@ -226,7 +289,7 @@ func runSequence(seed uint64) error {
 			return fail("WL7: prev mutated")
 		}
 		// Changed is exactly "the stored text differs".
-		if seed%97 == 0 && (len(prev.Entries) > 0 || prev.Release != nil || len(d.Next.Entries) > 0 || d.Next.Release != nil) &&
+		if s.seed%97 == 0 && (len(prev.Entries) > 0 || prev.Release != nil || len(d.Next.Entries) > 0 || d.Next.Release != nil) &&
 			d.Changed != (EncodeLadder(prev) != EncodeLadder(d.Next)) {
 			return fail("Changed=%v disagrees with the cell text", d.Changed)
 		}
@@ -249,11 +312,62 @@ func runSequence(seed uint64) error {
 			}
 		}
 
+		// Progress: an entry's count restarts exactly on a pass that may
+		// act on it whose evidence (the newest completed turn when the
+		// newest ended turn failed, else the activity clock) is at least
+		// ProgressReset past its last nudge. A failed turn is never
+		// progress, and a pass that cannot act judges nothing. A wait on a
+		// person that begins or ends starts a new episode instead.
+		if prev.V != 0 && prev.Gen == o.Gen {
+			for _, e := range d.Next.Entries {
+				pe, ok := entryOf(prev, e.Key)
+				if !ok || pe.Kind != e.Kind || (e.Rung != pe.Rung && e.Rung != RungEscalated) || pe.AwaitsHuman != e.AwaitsHuman {
+					continue
+				}
+				acting := !o.Gate.Held && o.Runtime == TriTrue && o.Quiet.State == Quiescent && !o.Hold[e.Key]
+				evidence := o.LastActivity
+				if o.Turns.Read && o.Turns.Conv == o.Conv && o.Turns.LastFailed {
+					evidence = o.Turns.ServedAt
+				}
+				counted := !pe.Last.IsZero() && (pe.Attempts > 0 || pe.Paused > 0 || pe.Unreleased)
+				want := acting && counted && !evidence.Before(pe.Last.Add(DefaultProgressReset))
+				if got := !e.Since.Equal(pe.Since); got != want {
+					return fail("progress: %v reset %v, want %v (acting %v, evidence %v, last %v)", e.Key, got, want, acting, evidence.Sub(t0), pe.Last.Sub(t0))
+				}
+			}
+		}
+
+		// A wait on a person is paced from its start, or its last nudge,
+		// whatever else begins a new episode meanwhile.
+		waits := func(k ClaimKey) bool {
+			return slices.ContainsFunc(o.Outstanding, func(w Work) bool { return w.Key == k && w.AwaitsHuman })
+		}
+		for _, e := range d.Next.Entries {
+			pe, ok := entryOf(prev, e.Key)
+			switch {
+			case !e.AwaitsHuman:
+				delete(waitFrom, e.Key)
+			case !ok || !pe.AwaitsHuman:
+				waitFrom[e.Key] = o.Now
+			}
+		}
+
 		nudges := 0
 		for _, a := range d.Actions {
+			if _, ok := a.(Nudge); !ok && waits(actionKey(a)) {
+				if al, ok := a.(Alert); !ok || al.Reason != AlertReleaseRacedStart {
+					return fail("%T about %v, whose seat waits on a person: only a nudge", a, actionKey(a))
+				}
+			}
 			switch a := a.(type) {
 			case Nudge:
 				nudges++
+				if waits(a.Key) {
+					if from := waitFrom[a.Key]; o.Now.Sub(from) < DefaultCap {
+						return fail("a wait on a person nudged %v after its start or last nudge, want >= %v", o.Now.Sub(from), DefaultCap)
+					}
+					waitFrom[a.Key] = o.Now
+				}
 				// WL5: no nudge under a hold.
 				if o.Gate.Held || o.Hold[a.Key] {
 					return fail("WL5: nudge under a hold")
@@ -318,6 +432,11 @@ func runSequence(seed uint64) error {
 		if nudges > 1 {
 			return fail("WL3: %d nudges in one pass", nudges)
 		}
+		// WN1: no nudge while an entry is marked (a mark whose episode ended
+		// is dropped with it, and the caller withdraws its delivery).
+		if nudges > 0 && anyMarked(d.Next) {
+			return fail("WN1: a nudge while a notice is pending")
+		}
 		if o.Provider.Degraded {
 			if d.Next.Release != nil && (prev.Release == nil || *d.Next.Release != *prev.Release) {
 				return fail("WL4: a release decided while degraded")
@@ -331,12 +450,15 @@ func runSequence(seed uint64) error {
 
 		// WL1: every entry of a nudgeable seat hears from the ladder (a
 		// nudge or an alert) within Cap, give or take the passes it waits
-		// for the seat's nudge slot; a release, kept, never silences it.
+		// for the seat's nudge slot; a release, kept, never silences it,
+		// and neither does a wait on a person, whose start or end begins a
+		// new episode.
 		eligible := !o.Gate.Held && o.Runtime == TriTrue && o.Quiet.State == Quiescent
 		for _, e := range d.Next.Entries {
 			since, ok := lastHeard[e.Key]
+			pe, _ := entryOf(prev, e.Key)
 			switch {
-			case !eligible || !ok || o.Hold[e.Key] || prev.Gen != o.Gen || (d.Next.Release != nil && d.Next.Release.Key == e.Key):
+			case !eligible || !ok || o.Hold[e.Key] || prev.Gen != o.Gen || (d.Next.Release != nil && d.Next.Release.Key == e.Key) || pe.AwaitsHuman != e.AwaitsHuman:
 				lastHeard[e.Key] = o.Now
 			case o.Now.Sub(since) > DefaultCap+3*maxStep+2*DefaultBase:
 				return fail("WL1: %v of a quiet seat has not heard from the ladder for %v", e.Key, o.Now.Sub(since))
@@ -359,6 +481,13 @@ func runSequence(seed uint64) error {
 			s.rec = r
 		}
 		for _, a := range d.Actions {
+			if n, ok := a.(Nudge); ok && s.marks && s.chance(60) {
+				s.ops++
+				if r, ok := MarkNotice(s.rec, n.Key, NoticeMark{Op: fmt.Sprintf("op-%d", s.ops), At: o.Now, Paused: n.Paused}); ok {
+					s.rec = r
+				}
+				continue
+			}
 			if n, ok := a.(Nudge); ok && !n.Paused && s.event(10) { // only a counted nudge is refused (the lane's rule)
 				if r, _, ok := NudgeRefused(s.rec, n.Key, n.Attempt, o.Now); ok {
 					s.rec = r
@@ -388,8 +517,11 @@ func runSequence(seed uint64) error {
 }
 
 // WL8: whatever a row carried before the ladder first sees it (no cell, or
-// a cell for another generation with any counts), no recycle or release
-// lands within Grace + Base + 2·Base of continuous quiet.
+// a cell for another generation with any counts, or one an earlier build
+// wrote with its per-claim rate-limit flags), no recycle, release or fresh
+// restart lands within Grace + Base + 2·Base of continuous quiet, however
+// many refusals its transcript already holds (RL7): a refusal is an answer
+// only to a nudge delivered in this generation.
 func TestNoDrainWave(t *testing.T) {
 	window := DefaultGrace + DefaultBase + 2*DefaultBase
 	forEachSequence(t, func(seq uint64) error {
@@ -418,9 +550,21 @@ func TestNoDrainWave(t *testing.T) {
 				})
 			}
 		}
+		if prev.V != 0 && rng.IntN(2) == 0 { // written by a per-claim-flag build
+			text := strings.ReplaceAll(EncodeLadder(prev), `"recycle_at":`, `"rate_limit_alerted":true,"fresh_recycled":true,"fresh_served":false,"fresh_queued":true,"recycle_at":`)
+			var err error
+			if prev, err = DecodeLadder(text); err != nil {
+				return fmt.Errorf("an earlier build's cell: %w", err)
+			}
+		}
+		refusals := TurnReading{Read: true, Conv: 1}
+		if n := rng.IntN(5); n > 0 {
+			refusals = TurnReading{Read: true, Conv: 1, LastFailed: true, Refused: n, RefusedAt: t0.Add(-time.Duration(rng.IntN(600)) * time.Second)}
+		}
 		r := prev
 		for now := t0; now.Sub(t0) < window; now = now.Add(time.Duration(1+rng.IntN(60)) * time.Second) {
 			o := quiet(now, 42, work...)
+			o.Conv, o.Turns = 1, refusals
 			if r.V == 0 || r.Gen != 42 {
 				o.Started = started
 			} else {
@@ -434,8 +578,81 @@ func TestNoDrainWave(t *testing.T) {
 			d := Decide(r, o, p)
 			for _, a := range d.Actions {
 				switch a.(type) {
-				case Recycle, Release:
+				case Recycle, Release, FreshRestart, RateLimitMove:
 					return fmt.Errorf("%T at %v after deploy (prev %s)", a, now.Sub(t0), EncodeLadder(prev))
+				}
+			}
+			if d.Changed {
+				r = d.Next
+			}
+			for _, a := range d.Actions {
+				if n, ok := a.(Nudge); ok {
+					r, _ = NudgeDelivered(r, n.Key, 42, now)
+				}
+			}
+		}
+		return nil
+	})
+}
+
+// A wait on a person is only ever nudged, a Cap after it began and a Cap
+// apart after that, whatever the cell carried when it began (any rung, count
+// or recycle, an alert raised, a release that did not finish, a release in
+// flight) and whatever the seat or the provider does while it waits. Its
+// pace is tracked here from the actions alone, not from the cell.
+func TestPropertyAWaitIsOnlyNudged(t *testing.T) {
+	forEachSequence(t, func(seq uint64) error {
+		rng := rand.New(rand.NewPCG(seq, 0x6177616974))
+		prev := Record{V: 1, Gen: 1}
+		var work []Work
+		started := map[ClaimKey]StartSource{}
+		from := map[ClaimKey]time.Time{} // the wait's start, or its last nudge
+		for _, k := range simKeys {
+			work = append(work, Work{Key: k, Kind: KindClaim, AwaitsHuman: true})
+			rung := RungClaimed + Rung(rng.IntN(3))
+			if rung >= RungStarted {
+				started[k] = SrcAgent
+			}
+			e := Entry{
+				Key: k, Kind: KindClaim, Rung: rung, Since: t0.Add(-10 * time.Hour), Attempts: rng.IntN(12), Paused: rng.IntN(3),
+				Last: t0.Add(-time.Duration(rng.IntN(180)) * time.Minute), Recycles: rng.IntN(2), Escalated: rng.IntN(2) == 0,
+				Unreleased: rng.IntN(3) == 0, AwaitsHuman: rng.IntN(2) == 0,
+			}
+			if e.AwaitsHuman {
+				from[k] = e.Last
+			}
+			prev.Entries = append(prev.Entries, e)
+		}
+		if rng.IntN(2) == 0 {
+			prev.Release = &ReleaseMark{Key: simKeys[rng.IntN(len(simKeys))], Gen: 1, At: t0.Add(-time.Minute)}
+		}
+		r := prev
+		for now := t0; now.Sub(t0) < 12*time.Hour; now = now.Add(time.Duration(1+rng.IntN(20)) * time.Minute) {
+			o := quiet(now, 1, work...)
+			o.Started = started
+			o.Provider.Degraded = rng.IntN(10) == 0
+			if rng.IntN(10) == 0 { // the seat did something while it waits
+				o.LastActivity = now.Add(-time.Duration(rng.IntN(120)) * time.Second)
+			}
+			d := Decide(r, o, p)
+			for _, e := range d.Next.Entries {
+				if pe, ok := entryOf(r, e.Key); !ok || !pe.AwaitsHuman {
+					from[e.Key] = now
+				}
+			}
+			for _, a := range d.Actions {
+				switch a := a.(type) {
+				case Nudge:
+					if gap := now.Sub(from[a.Key]); gap < DefaultCap {
+						return fmt.Errorf("at %v: %v nudged %v after its wait began or its last nudge (prev %s)", now.Sub(t0), a.Key, gap, EncodeLadder(prev))
+					}
+					from[a.Key] = now
+				case Alert:
+					if a.Reason != AlertReleaseRacedStart {
+						return fmt.Errorf("at %v: alert %s about a wait on a person (prev %s)", now.Sub(t0), a.Reason, EncodeLadder(prev))
+					}
+				default:
+					return fmt.Errorf("at %v: %T about a wait on a person (prev %s)", now.Sub(t0), a, EncodeLadder(prev))
 				}
 			}
 			if d.Changed {
@@ -444,6 +661,21 @@ func TestNoDrainWave(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+// actionKey is the work a is about.
+func actionKey(a Action) ClaimKey {
+	switch a := a.(type) {
+	case Nudge:
+		return a.Key
+	case Recycle:
+		return a.Key
+	case Release:
+		return a.Key
+	case Alert:
+		return a.Key
+	}
+	return ClaimKey{}
 }
 
 func entryKind(r Record, k ClaimKey) Kind {

@@ -422,12 +422,12 @@ func TestSessionSubmitAndMessageRejectPendingInteractionWith409(t *testing.T) {
 	}
 }
 
-// TestSessionSubmitAndMessageAcceptWhatCannotBeSeenPending: the #2892 guard
-// refuses only a prompt it sees. A session that is not running has no prompt
-// to answer, so a submit or message to it is accepted (202) without looking,
-// even when its runtime cannot be reached. A look that cannot reach a running
-// session's runtime refuses nothing either: the delivery looks again under the
-// session lock. Kills an undeclared 500 from the accept-path look.
+// TestSessionSubmitAndMessageAcceptWhatCannotBeSeenPending: a session that
+// is not running has no prompt to answer, so a submit or message to it is
+// accepted (202) without looking, even when its runtime cannot be reached.
+// (A running session's look that cannot answer refuses the text:
+// TestSessionSubmitAndMessageRefuseALookThatCannotAnswer.) Kills an
+// undeclared 500 from the accept-path look.
 func TestSessionSubmitAndMessageAcceptWhatCannotBeSeenPending(t *testing.T) {
 	unreachable := fmt.Errorf("capturing pane: tmux server unreachable: %w", runtime.ErrRuntimeUnavailable)
 	for _, row := range []struct {
@@ -437,7 +437,6 @@ func TestSessionSubmitAndMessageAcceptWhatCannotBeSeenPending(t *testing.T) {
 	}{
 		{name: "suspended, runtime unreachable", suspended: true, lookErr: unreachable},
 		{name: "suspended, look fails", suspended: true, lookErr: errors.New("capturing pane: exit status 1")},
-		{name: "running, runtime unreachable", lookErr: unreachable},
 	} {
 		for _, tc := range []struct{ path, body string }{
 			{"/submit", `{"message":"hello?"}`},

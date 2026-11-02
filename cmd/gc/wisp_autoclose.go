@@ -99,16 +99,28 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 		run.note(err)
 		return run
 	}
-	attachments, err := collectAttachedBeads(parent, graphStore, beads.HandlesFor(graphStore).Live)
+	// An attachment lives where it was poured: a graph-class root (a wisp, a
+	// graph.v2 workflow) in the graph store, a v1 POURED molecule (work class,
+	// `gc formula cook --attach`) on the work ledger beside the bead it is
+	// attached to. Each one is read, checked and closed in the store that holds
+	// it. A DB-child attachment shares its parent's ledger, so children are
+	// listed through the parent's own store.
+	located, err := sling.CollectAttachments(parent, beads.HandlesFor(store).Live, graphStore, store)
 	run.note(err)
-	seen := make(map[string]bool, len(attachments))
-	for _, attached := range attachments {
-		seen[attached.ID] = true
+	seen := make(map[string]bool, len(located))
+	for _, a := range located {
+		seen[a.Bead.ID] = true
 	}
-	attachments = append(attachments, collectInputConvoyWorkflowRoots(store, graphStore, parent, seen)...)
-	if err == nil || len(attachments) > 0 {
-		for _, attached := range attachments {
-			parked, err := attachedMoleculeIsParked(graphStore, attached)
+	for _, root := range collectInputConvoyWorkflowRoots(store, graphStore, parent, seen) {
+		located = append(located, sling.AttachedBead{Bead: root, Store: graphStore})
+	}
+	if err == nil || len(located) > 0 {
+		for _, a := range located {
+			attached, attachedStore := a.Bead, a.Store
+			if attachedStore == nil {
+				attachedStore = graphStore
+			}
+			parked, err := attachedMoleculeIsParked(attachedStore, attached)
 			run.note(err)
 			if parked {
 				continue
@@ -125,14 +137,14 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 			if !parentStill {
 				continue
 			}
-			rootStill, err := autocloseStill(graphStore, attached.ID, func(b beads.Bead) bool {
+			rootStill, err := autocloseStill(attachedStore, attached.ID, func(b beads.Bead) bool {
 				return !convoycore.IsTerminalStatus(attached.Status) || convoycore.IsTerminalStatus(b.Status)
 			})
 			run.note(err)
 			if !rootStill {
 				continue
 			}
-			closed, err := closeAttachedWispSubtree(graphStore, attached)
+			closed, err := closeAttachedWispSubtree(attachedStore, attached)
 			if err != nil || closed == 0 {
 				continue
 			}
@@ -186,7 +198,7 @@ func attachedMoleculeIsParked(store beads.Store, attached beads.Bead) (bool, err
 // runs every formula step in one worker session, so it materializes no step
 // beads and no workflow-finalize control bead to close its root. sling also
 // clears gc.source_bead_id for graph workflows (internal/sling/sling.go), so
-// such a wisp carries no source-bead attachment for collectAttachedBeads to
+// such a wisp carries no source-bead attachment for sling.CollectAttachments to
 // follow. Its only durable link back to the work issue is gc.input_convoy_id ->
 // the tracking convoy whose member is the issue. Without reaping the root here,
 // it outlives its closed issue, re-routes to the pool, and churns a fresh worker
@@ -210,7 +222,14 @@ func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent b
 		return nil
 	}
 	if graphStore != workStore {
-		graphConvoys, gerr := convoycore.TrackingConvoysForItem(graphStore, parent.ID)
+		// The graph leg of the two-store probe above: a miss here is
+		// covered by the work leg.
+		var graphConvoys []beads.Bead
+		gerr := beads.FederatedRead(func() error {
+			var listErr error
+			graphConvoys, listErr = convoycore.TrackingConvoysForItem(graphStore, parent.ID)
+			return listErr
+		})
 		if gerr != nil {
 			// Fail closed, matching the workStore posture above: on a partial
 			// view we decline to force-close anything. Leaving the root for a

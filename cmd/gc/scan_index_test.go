@@ -79,9 +79,10 @@ func TestFindInfoByIDIndexInvalidatedByMutators(t *testing.T) {
 }
 
 // Kills: an awake work index that misses an identity sessionAssigneeMatches
-// accepts (bead ID, session name, alias, named identity, the configured
-// named fallback), keys untrimmed assignees, or loses work order (the
-// anchor is the first match).
+// accepts (bead ID, session name, alias, a requalified row's prior bare
+// identity and named runtime name, named identity, the configured named
+// fallback), keys untrimmed assignees, or loses work order (the anchor is the
+// first match).
 func TestAwakeSetIndexOracle(t *testing.T) {
 	byName := 0
 	for seed := int64(0); seed < 400; seed++ {
@@ -114,12 +115,15 @@ func TestAwakeSetIndexOracle(t *testing.T) {
 				b.NamedIdentity = pick("boss", "other")
 			case 2:
 				b.ConfiguredNamedSession = true
+			case 3:
+				b.NamedIdentity, b.ConfiguredNamedSession, b.RequalifiedFrom = "boss", true, pick("bare", "rq-"+b.ID)
+				b.RequalifiedRuntimeName = pick("", "s-boss", "rn-"+b.ID)
 			}
 			if rng.Intn(4) == 0 {
 				b.CurrentlyProcessingBeadID = fmt.Sprintf("w-%d", rng.Intn(30))
 			}
 			in.SessionBeads = append(in.SessionBeads, b)
-			identities = append(identities, b.ID, b.SessionName, b.Alias, "boss", "shared")
+			identities = append(identities, b.ID, b.SessionName, b.Alias, b.RequalifiedFrom, b.RequalifiedRuntimeName, "boss", "shared")
 		}
 		for i := 0; i < rng.Intn(30); i++ {
 			assignee := "nobody"

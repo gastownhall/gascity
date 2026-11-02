@@ -92,16 +92,30 @@ func tmuxConfigFromSession(sc config.SessionConfig, cityName, cityPath string) s
 	if cityPath != "" {
 		runtimeDir = citylayout.RuntimePath(cityPath)
 	}
+	// Every city's leaf gets the shadow sink; the leaf hands it out only
+	// while its live switch is shadow (a reload publishes the switch to a
+	// leaf it keeps), so off and on record nothing.
+	var comparisons runtime.ProgramStatusComparisonSink
+	var followUps func() bool
+	var work func() func()
+	if cityPath != "" {
+		comparisons = programStatusShadowSink(cityPath)
+		followUps, work = programShadowFollowUps, programShadowBeginWork
+	}
 	return sessiontmux.Config{
-		SetupTimeout:       sc.SetupTimeoutDuration(),
-		SetupMaxTimeout:    sc.SetupMaxTimeoutDuration(),
-		NudgeReadyTimeout:  sc.NudgeReadyTimeoutDuration(),
-		NudgeRetryInterval: sc.NudgeRetryIntervalDuration(),
-		NudgeLockTimeout:   sc.NudgeLockTimeoutDuration(),
-		DebounceMs:         sc.DebounceMsOrDefault(),
-		DisplayMs:          sc.DisplayMsOrDefault(),
-		SocketName:         socketName,
-		RuntimeDir:         runtimeDir,
+		ComparisonSink:      comparisons,
+		ComparisonFollowUps: followUps,
+		ComparisonWork:      work,
+		SetupTimeout:        sc.SetupTimeoutDuration(),
+		SetupMaxTimeout:     sc.SetupMaxTimeoutDuration(),
+		NudgeReadyTimeout:   sc.NudgeReadyTimeoutDuration(),
+		NudgeRetryInterval:  sc.NudgeRetryIntervalDuration(),
+		NudgeLockTimeout:    sc.NudgeLockTimeoutDuration(),
+		DebounceMs:          sc.DebounceMsOrDefault(),
+		DisplayMs:           sc.DisplayMsOrDefault(),
+		SocketName:          socketName,
+		RuntimeDir:          runtimeDir,
+		ProgramStatus:       sc.ProgramStatusMode(),
 	}
 }
 
@@ -344,7 +358,10 @@ func agentSessionCreateTransport(cfg *config.City, agentCfg config.Agent) string
 	// StartCommand is ResolveProvider's escape hatch (step 1): it bypasses
 	// provider-catalog resolution entirely, so a cache entry for
 	// agentCfg.Provider would not describe this agent's actual resolution.
-	if agentCfg.StartCommand == "" {
+	// Neither would it under workspace.start_command (step 4b), which
+	// replaces the provider args the entry records as omitted from its ACP
+	// launch.
+	if agentCfg.StartCommand == "" && cfg.Workspace.StartCommand == "" {
 		name := agentCfg.Provider
 		if name == "" {
 			name = cfg.Workspace.Provider
@@ -417,8 +434,12 @@ func resolveProviderForACPTransport(cfg *config.City, providerName string) *conf
 	if cfg == nil || strings.TrimSpace(providerName) == "" {
 		return nil
 	}
-	if resolved, ok := config.ResolvedProviderCached(cfg, providerName); ok {
-		return &resolved
+	// A cache entry resolves the provider alone; workspace.start_command
+	// replaces the args it records as omitted from its ACP launch.
+	if cfg.Workspace.StartCommand == "" {
+		if resolved, ok := config.ResolvedProviderCached(cfg, providerName); ok {
+			return &resolved
+		}
 	}
 	resolved, err := config.ResolveProvider(
 		&config.Agent{Provider: providerName},
@@ -516,18 +537,10 @@ func beadUsesACPTransport(bead beads.Bead, cfg *config.City) bool {
 }
 
 func infoUsesACPTransport(info session.Info, cfg *config.City) bool {
-	transport := strings.TrimSpace(info.Transport)
-	if transport != "" {
+	if transport, recorded := recordedSessionTransport(info); recorded {
 		return transport == "acp"
 	}
 	providerName := strings.TrimSpace(info.Provider)
-	if providerName == "acp" {
-		return true
-	}
-	if strings.TrimSpace(info.MCPIdentity) != "" ||
-		strings.TrimSpace(info.MCPServersSnapshot) != "" {
-		return true
-	}
 	templateName := strings.TrimSpace(info.Template)
 	if cfg != nil {
 		if agentCfg, ok := resolveAgentIdentity(cfg, templateName, currentRigContext(cfg)); ok {
@@ -935,14 +948,27 @@ func openCityMailProvider(stderr io.Writer, cmdName string) (mail.Provider, int)
 		return nil, code
 	}
 	// The no-refresh cfg loader matches the other hot CLI roots (cmd_prime,
-	// completion): loadCityConfig's builtin-pack refresh is inappropriate here. A
-	// failed load yields nil cfg, which the class resolvers treat as identity —
-	// where a relocated class is SERVED from does not depend on it, because the
-	// routes come from cliStorageRoutes, which reads the city's own [storage].
-	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	// completion): loadCityConfig's builtin-pack refresh is inappropriate here.
+	//
+	// A failed load REFUSES on any city that may relocate a class
+	// (split-default audit R1). It used to continue with a nil cfg, and with the
+	// routes read the same way that put a `gc mail send` into the work store of
+	// a split city — a stranded infrastructure row the next boot refuses the
+	// city over. Where messages live is exactly what the unreadable file says,
+	// so the provider does not guess. A provably single-store city keeps the
+	// old behavior: its messages have only ever lived in the work store.
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	if err != nil {
+		if refusal := cityConfigLoadRefusal(cityPath, err); refusal != nil {
+			_ = closeBeadStoreHandle(store)
+			fmt.Fprintf(stderr, "%s: %v\n", cmdName, refusal) //nolint:errcheck // best-effort stderr
+			return nil, 1
+		}
+		cfg = nil
+	}
 	msgStore := resolveMailMessagesStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
 	sessStore := cliSessionStore(store, cfg, cityPath)
-	return newMailProviderWithSessionStore(msgStore, sessStore), 0
+	return withMailNoticeWithdrawal(newMailProviderWithSessionStore(msgStore, sessStore), sessStore, cfg, stderr), 0
 }
 
 // eventsProviderName returns the events provider name.
@@ -1363,7 +1389,7 @@ func newHybridProvider(sc config.SessionConfig, cityName, cityPath string) (runt
 	// Cut-over: hybrid routes to the seam-backed tmux/k8s providers, so
 	// hybrid-routed sessions flow through the seams like every other path.
 	local := sessiontmux.NewSeamBackedWithConfig(tmuxConfigFromSession(sc, cityName, cityPath))
-	remote, err := sessionk8s.NewSeamBacked()
+	remote, err := sessionk8s.NewSeamBacked(sessionk8s.WithCityName(cityName))
 	if err != nil {
 		return nil, fmt.Errorf("hybrid: k8s backend: %w", err)
 	}

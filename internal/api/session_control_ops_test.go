@@ -194,7 +194,7 @@ func TestSessionControlOpsConcurrentSameKeyStopIsBusy(t *testing.T) {
 
 	firstDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() { firstDone <- e.post(t, "/session/"+info.ID+"/stop", "stop-1", "") }()
-	<-blocking.entered
+	requireProviderEntered(t, blocking.entered, firstDone)
 
 	e.rebuild(t)
 	busy := e.post(t, "/session/"+info.ID+"/stop", "stop-1", "")
@@ -1752,7 +1752,7 @@ func TestSessionControlOpsConcurrentRespondsAnswerOnlyTheirInteraction(t *testin
 
 	firstDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() { firstDone <- e.post(t, "/session/"+info.ID+"/respond", "click-1", `{"action":"approve"}`) }()
-	<-blocking.entered
+	requireProviderEntered(t, blocking.entered, firstDone)
 	recorded := make(chan struct{})
 	e.store.set(func(s *opsTestStore) { s.onOpCreate = func() { close(recorded) } })
 	secondDone := make(chan *httptest.ResponseRecorder, 1)
@@ -2059,6 +2059,50 @@ func TestSessionControlOpsRequireNamedStopRefusesAnInvalidKey(t *testing.T) {
 	}
 	if n := len(e.opRows(t)); n != 0 {
 		t.Fatalf("op rows = %d, want 0", n)
+	}
+}
+
+// A /reset Idempotency-Key in an in-session restart request's key namespace
+// (handoff:, request-restart:) is invalid: gc handoff and gc runtime
+// request-restart keep their keys there for the same restart{fresh} request,
+// so a reset key that spells one would name that request's op under the
+// operator principal and replay it, resetting nothing. require refuses it 422
+// invalid_idempotency_key with no effect; auto resets unrecorded, beside the
+// op the key spells.
+func TestSessionResetRefusesARestartRequestsKeyNamespace(t *testing.T) {
+	for _, key := range []string{legacyop.KeyNamespaceHandoff + "k1", legacyop.KeyNamespaceRequestRestart + "k1"} {
+		for _, mode := range []string{"require", "auto"} {
+			t.Run(key+"/"+mode, func(t *testing.T) {
+				e := newControlOpsEnv(t, "off", mode)
+				info := e.session(t, "Reserved key")
+				spelled := e.seedSyncOp(t, info.ID, opjournal.KindRestart, key, opjournal.Scope{}, resetSessionPolicy, "", legacyop.ExecutorCLI, time.Now())
+				done := opjournal.Outcome{Arm: opjournal.ArmSucceeded, Result: opjournal.Result{Via: legacyop.ViaLegacy}}
+				if _, err := e.opStore(t).Close(spelled.ID, done, string(legacyop.ExecutorCLI)); err != nil {
+					t.Fatal(err)
+				}
+				before := metadataOf(t, e.store, info.ID)
+				rec := e.post(t, "/session/"+info.ID+"/reset", key, "")
+				if mode == "require" {
+					if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "invalid_idempotency_key") {
+						t.Fatalf("status %d: %s, want 422 invalid_idempotency_key", rec.Code, rec.Body.String())
+					}
+					if after := metadataOf(t, e.store, info.ID); !maps.Equal(before, after) {
+						t.Fatalf("the refused reset changed the session row: %v -> %v", before, after)
+					}
+				} else {
+					wantStatus(t, "reset", rec, http.StatusOK)
+					if a := decodeCommandAnswer(t, rec); a.Replayed || a.Op != nil || a.IdempotencyKey != "" {
+						t.Fatalf("answer = %+v, want the reset run unrecorded", a)
+					}
+					if md := metadataOf(t, e.store, info.ID); md["restart_requested"] != "true" || md["continuation_reset_pending"] != "true" {
+						t.Fatalf("session row = %v, want the fresh restart requested", md)
+					}
+				}
+				if n := len(e.opRows(t)); n != 1 {
+					t.Fatalf("op rows = %d, want only the op the key spells", n)
+				}
+			})
+		}
 	}
 }
 

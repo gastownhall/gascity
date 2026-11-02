@@ -635,7 +635,16 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 		if route.knownResident(beadID) {
 			return route.claim(beadID, assignee)
 		}
-		claimed, ok, err := base.Claim(ctx, dir, env, beadID, assignee)
+		// The work-scope claim is the first leg of the escalation: a
+		// not-found here is the signal to probe the binding, so the call is
+		// marked federated.
+		var claimed beads.Bead
+		var ok bool
+		err := beads.FederatedRead(func() error {
+			var claimErr error
+			claimed, ok, claimErr = base.Claim(ctx, dir, env, beadID, assignee)
+			return claimErr
+		})
 		leg := hookStore{dir: dir, env: env}
 		if ok {
 			// The work store's CAS COMMITTED. Its error, if any, is the
@@ -662,7 +671,8 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 		if route.knownResident(beadID) {
 			return write()
 		}
-		err := base.StampWorkMeta(ctx, dir, env, beadID, assignee, patch)
+		// First leg of the escalation; a not-found sends the write to the binding.
+		err := beads.FederatedRead(func() error { return base.StampWorkMeta(ctx, dir, env, beadID, assignee, patch) })
 		routed, probeErr := route.routes(ctx, hookStore{dir: dir, env: env}, beadID, assignee, err)
 		switch {
 		case probeErr != nil:
@@ -678,7 +688,13 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 		if route.knownResident(beadID) {
 			return route.graph.Get(beadID)
 		}
-		bead, err := base.ReadWorkMeta(ctx, dir, env, beadID, assignee)
+		// First leg of the escalation; a not-found sends the read to the binding.
+		var bead beads.Bead
+		err := beads.FederatedRead(func() error {
+			var readErr error
+			bead, readErr = base.ReadWorkMeta(ctx, dir, env, beadID, assignee)
+			return readErr
+		})
 		routed, probeErr := route.routesRead(ctx, hookStore{dir: dir, env: env}, beadID, assignee, err)
 		switch {
 		case probeErr != nil:
@@ -709,7 +725,13 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 		if route.knownResident(rootID) {
 			return route.listContinuation(rootID, group)
 		}
-		siblings, err := base.ListContinuation(ctx, dir, env, rootID, group)
+		// First leg; an EMPTY answer sends the query to the binding.
+		var siblings []beads.Bead
+		err := beads.FederatedRead(func() error {
+			var listErr error
+			siblings, listErr = base.ListContinuation(ctx, dir, env, rootID, group)
+			return listErr
+		})
 		if err != nil || len(siblings) > 0 {
 			return siblings, err
 		}
@@ -729,7 +751,8 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 		if route.knownResident(beadID) {
 			return write()
 		}
-		err := base.AssignContinuation(ctx, dir, env, beadID, assignee)
+		// First leg of the escalation; a not-found sends the write to the binding.
+		err := beads.FederatedRead(func() error { return base.AssignContinuation(ctx, dir, env, beadID, assignee) })
 		routed, probeErr := route.routes(ctx, hookStore{dir: dir, env: env}, beadID, assignee, err)
 		switch {
 		case probeErr != nil:
@@ -798,5 +821,94 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 		return base.WorkflowStore(ctx, dir, env, beadID, actor)
 	}
 
+	// Done-workflow retirement (R6, the #6475 treadmill). A graph.v2 root and
+	// its steps live in the binding while the synthetic input convoy and the
+	// work it tracks stay in the work store, so the check reads ACROSS the
+	// two: the root and its step seats from the store that holds the root,
+	// the convoy and its members from the work leg. Residence of the root is
+	// decided by the same read the claim-time seams use — the work leg first,
+	// the binding only on a proven absence — so a work-resident workflow
+	// keeps the exact unrouted call.
+	ops.InputDone = func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
+		rootID := workflowRootIDForInputCheck(candidate)
+		if rootID == "" {
+			return base.InputDone(ctx, dir, env, candidate, identityCandidates)
+		}
+		resident, err := route.resolvesToBinding(ctx, base, dir, env, rootID)
+		if err != nil {
+			return rootID, false, err
+		}
+		if !resident {
+			return base.InputDone(ctx, dir, env, candidate, identityCandidates)
+		}
+		work := base.WorkflowStore(ctx, dir, env, rootID, "")
+		return workflowInputDoneAcross(route.class, work, candidate, identityCandidates)
+	}
+
+	ops.SkipDoneWorkflow = func(ctx context.Context, dir string, env []string, rootID string) error {
+		resident, err := route.resolvesToBinding(ctx, base, dir, env, rootID)
+		if err != nil {
+			return err
+		}
+		if resident {
+			return skipDoneWorkflow(route.class, rootID)
+		}
+		return base.SkipDoneWorkflow(ctx, dir, env, rootID)
+	}
+
+	// A stale-lease reclaim of a binding-resident bead belongs to the binding.
+	// Beads, not gc, is the authority on staleness (ga-7rj87d NFR3), so a
+	// binding whose engine exposes no stale-lease reclaim reclaims nothing:
+	// the candidate is left untouched (FR4), and gc's dead-assignee release is
+	// what recovers it, exactly as for every other binding-resident claim.
+	ops.ReclaimStale = func(ctx context.Context, dir string, env []string, beadID string) (bool, string, error) {
+		reclaim := func() (bool, string, error) {
+			reclaimer, ok := route.class.(interface {
+				ReclaimStale(id string) (bool, string, error)
+			})
+			if !ok {
+				return false, "", nil
+			}
+			return reclaimer.ReclaimStale(beadID)
+		}
+		if route.knownResident(beadID) {
+			return reclaim()
+		}
+		reclaimed, previousOwner, err := base.ReclaimStale(ctx, dir, env, beadID)
+		routed, probeErr := route.routes(ctx, hookStore{dir: dir, env: env}, beadID, "", err)
+		switch {
+		case probeErr != nil:
+			return false, "", probeErr
+		case routed:
+			return reclaim()
+		default:
+			return reclaimed, previousOwner, err
+		}
+	}
+
 	return ops
+}
+
+// resolvesToBinding reports whether id is resident in the binding rather than
+// in the work leg, by the claim-time read rule: a bead this invocation already
+// proved resident is the binding's; otherwise the work leg is read first, and
+// only its proven absence opens the binding probe. A work-leg read that finds
+// the bead keeps it the work store's.
+//
+// An id inside a reserved class namespace skips the work read: no work store
+// mints under those prefixes, so the read could only miss, and on the hook's
+// latency budget it is one bd subprocess per candidate for nothing. The
+// binding is the authority for those ids (holds surfaces its failures).
+func (r *hookClaimClassRoute) resolvesToBinding(ctx context.Context, base hookClaimOps, dir string, env []string, id string) (bool, error) {
+	if r.knownResident(id) {
+		return true, nil
+	}
+	if base.ReadWorkMeta == nil || bdIDIsClassReserved(id) { // residency:allow — skips a work read no work store can answer; the binding probe below still decides
+		return r.holds(id)
+	}
+	_, err := base.ReadWorkMeta(ctx, dir, env, id, "")
+	if err == nil {
+		return false, nil
+	}
+	return r.routesRead(ctx, hookStore{dir: dir, env: env}, id, "", err)
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -37,6 +38,7 @@ import (
 var (
 	errDemandRecordingMissing = errors.New("no external-reads recording for this leg")
 	errDemandRecordingStale   = errors.New("external-reads recording is stale")
+	errDemandRecordingUngated = errors.New("external-reads recording of this split-city leg's Ready was not gated")
 	errDemandLegUncached      = errors.New("leg has no cache to read")
 )
 
@@ -136,6 +138,10 @@ func demandLegCache(store beads.Store) (cache *beads.CachingStore, exact bool) {
 //     mark the leg's templates partial (retain, block create) instead of
 //     reading zero demand. A bd leg's cache folds blocked work into "open"
 //     (EB-42o8), so it is never read for these.
+//   - ReadyAll on a split city's gate leg (crossStoreGateLegs), exact or not:
+//     the recording's Ready as the lane gated it (legRecording.gatedReady),
+//     because judging a row's cross-store blockers reads other stores. One
+//     the lane did not gate is a PartialResultError with no rows.
 //   - Cached: the cache's List on an exact leg; the strict cached List on
 //     any other, with no live fallback.
 //   - CachedReady: unavailable, so ReadyAll is the whole Ready answer.
@@ -154,6 +160,9 @@ func demandLegCache(store beads.Store) (cache *beads.CachingStore, exact bool) {
 type v2DemandReads struct {
 	now time.Time
 	rec *externalReadsRecording
+	// gateLegs are a split city's cross-store gate legs, set by gatherDemand
+	// before the first read; nil on a city that relocates nothing.
+	gateLegs []readywork.Leg
 
 	mu   sync.Mutex
 	memo map[demandLegRead]*readyDemandEntry
@@ -208,6 +217,9 @@ func (r *v2DemandReads) Cached(store beads.Store, query beads.ListQuery) ([]bead
 }
 
 func (r *v2DemandReads) ReadyAll(store beads.Store) ([]beads.Bead, error) {
+	if crossStoreGateLeg(r.gateLegs, store) >= 0 {
+		return r.recorded(store, "ready", legRecording.gatedReady)
+	}
 	cache, exact := demandLegCache(store)
 	if !exact {
 		return r.recorded(store, "ready", func(l legRecording) ([]beads.Bead, error) { return l.ReadyAll, l.ReadyAllErr })

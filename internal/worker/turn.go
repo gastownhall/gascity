@@ -511,7 +511,7 @@ func (h *SessionHandle) transcriptTurnHistory(ctx context.Context, plan turnPlan
 		return runtime.TurnHistory{}, fmt.Errorf("turns of session %s: %w", plan.info.ID, err)
 	}
 	if plan.caps.End == runtime.TurnEndInferred && hist.Current.Active() {
-		if err := h.applyIdleOverlay(ctx, plan, timing, &hist, before, probe); err != nil {
+		if err := h.applyIdleOverlay(ctx, plan, timing, &hist, scan.Stopped, before, probe); err != nil {
 			return runtime.TurnHistory{}, err
 		}
 	}
@@ -530,19 +530,22 @@ func transcriptTurnsUnavailable(plan turnPlan, err error) error {
 // applyIdleOverlay infers the end of hist's open turn (X11 §5.2): once the
 // transcript has not grown for turnQuietWindow, two idle snapshots that both
 // read idle, with no transcript growth between them, end the turn with
-// Inferred set at the observer's clock. A busy reading, or growth, leaves the
-// turn open. So does a reading that is neither idle nor busy, unless the plan
-// is locked: the check under the session mutation lock takes only a busy
-// reading as the turn running, so for it such a reading, a ctx that ends
-// between the two, or a transcript it cannot stat again is the overlay's
-// error (idleUnknown). before is the transcript's state before the scan.
-func (h *SessionHandle) applyIdleOverlay(ctx context.Context, plan turnPlan, timing turnTiming, hist *runtime.TurnHistory, before os.FileInfo, probe bool) error {
+// Inferred set at the observer's clock, or, when the transcript shows the
+// turn stopped at a provider error (stopped, the scan's TurnScan.Stopped),
+// failed on that error at the error (endCurrentTurn). A busy reading, or
+// growth, leaves the turn open. So does a reading that is neither idle nor
+// busy, unless the plan is locked: the check under the session mutation lock
+// takes only a busy reading as the turn running, so for it such a reading, a
+// ctx that ends between the two, or a transcript it cannot stat again is the
+// overlay's error (idleUnknown). before is the transcript's state before the
+// scan.
+func (h *SessionHandle) applyIdleOverlay(ctx context.Context, plan turnPlan, timing turnTiming, hist *runtime.TurnHistory, stopped sessionlog.ScannedTurn, before os.FileInfo, probe bool) error {
 	turnID := hist.Current.TurnID
 	h.turns.mu.Lock()
 	memo := h.turns.inferred
 	h.turns.mu.Unlock()
 	if memo.path == plan.path && memo.turnID == turnID && sameTranscriptState(memo.info, before) {
-		endCurrentTurn(hist, memo.endedAt)
+		endCurrentTurn(hist, memo.endedAt, stopped)
 		return nil
 	}
 	if !probe || timing.now().Sub(before.ModTime()) < turnQuietWindow {
@@ -572,7 +575,7 @@ func (h *SessionHandle) applyIdleOverlay(ctx context.Context, plan turnPlan, tim
 	h.turns.mu.Lock()
 	h.turns.inferred = inferredTurnEnd{path: plan.path, turnID: turnID, info: after, endedAt: endedAt}
 	h.turns.mu.Unlock()
-	endCurrentTurn(hist, endedAt)
+	endCurrentTurn(hist, endedAt, stopped)
 	if hist.ObservedAt.Before(endedAt) {
 		hist.ObservedAt = endedAt
 	}
@@ -627,14 +630,22 @@ func sameTranscriptState(a, b os.FileInfo) bool {
 	return a != nil && b != nil && os.SameFile(a, b) && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime())
 }
 
-// endCurrentTurn moves hist's open turn to Recent as an inferred end.
-func endCurrentTurn(hist *runtime.TurnHistory, endedAt time.Time) {
+// endCurrentTurn moves hist's open turn to Recent as an inferred end at
+// endedAt. A turn its transcript shows stopped at a provider error (stopped,
+// failed) ends failed on that error, at the error as its source recorded it:
+// the end the transcript records once the next turn starts, the same on every
+// read of the unchanged transcript, so the error never reads as newer than it
+// is (a refusal answers only a nudge it followed).
+func endCurrentTurn(hist *runtime.TurnHistory, endedAt time.Time, stopped sessionlog.ScannedTurn) {
 	ended := runtime.EndedTurn{
 		TurnID:       hist.Current.TurnID,
 		StartedAt:    hist.CurrentStart,
 		EndedAt:      endedAt,
 		Inferred:     true,
 		DeliveryKeys: hist.CurrentKeys,
+	}
+	if stopped.Status == sessionlog.TurnStatusFailed {
+		ended.EndedAt, ended.Status, ended.Failure = turnMillis(stopped.EndedAt), runtime.TurnStatusFailed, runtimeTurnFailure(stopped.Failure)
 	}
 	hist.Recent = slices.Insert(hist.Recent, 0, ended)
 	if len(hist.Recent) > sessionlog.MaxRecentTurns {
@@ -695,9 +706,17 @@ func turnHistoryFromScan(scan sessionlog.TurnScan, observedAt time.Time) (runtim
 			StartedAt: turnMillis(t.StartedAt),
 			EndedAt:   turnMillis(t.EndedAt),
 			Status:    runtimeTurnStatus(t.Status),
+			Failure:   runtimeTurnFailure(t.Failure),
 		})
 	}
 	return hist, nil
+}
+
+// runtimeTurnFailure is a transcript's record of a turn's provider error, as
+// a runtime turn failure: the source's own class and status, and whether
+// the source classed it a rate limit, and a spent quota.
+func runtimeTurnFailure(f sessionlog.TurnFailure) runtime.TurnFailure {
+	return runtime.TurnFailure{Code: f.Code, HTTPStatus: f.Status, RateLimited: f.RateLimited, Quota: f.Quota, Message: f.Message}
 }
 
 // turnMillis keeps a source time at millisecond precision, the precision the
@@ -956,16 +975,21 @@ func turnInterruptResult(id string, err error) error {
 // its text. That is session.TurnNotEndedError once something showed the turn
 // still running, a read naming it current or a family wait that failed for a
 // cause other than a runtime that could not answer
-// (runtime.ErrRuntimeUnavailable), and session.TurnEndUnreadError otherwise,
-// which a restart on failure does not restart: whether the interrupt ended
-// the turn is unknown. A failed read is never taken as the end, nor as the
-// turn running. It runs under the session mutation lock (the stop's
-// Settle), so each read is a locked one (lockedCurrentTurn), as the check's
-// are: its session load and runtime probes are its own, started within the
-// read, so a shared read that began before the lock, holding the session as
-// it was then, never decides the end, nor keeps the settle, which holds the
-// lock, waiting on its answer. Each read is bounded by turnWatchReadBound,
-// as a watcher read's is.
+// (runtime.ErrRuntimeUnavailable) or a wait that read nothing showing the
+// session busy (runtime.ErrWaitUnobserved), and session.TurnEndUnreadError
+// otherwise. A failed follow-up interrupt send counts as running unless the
+// runtime could not answer it (runtime.ErrRuntimeUnavailable): the stop
+// sends it only after the check (Still) read the turn current past the
+// first key. A restart on failure does not restart on a
+// TurnEndUnreadError: whether the interrupt ended the turn is unknown. A
+// failed read is never taken as the end, nor as the turn running. It runs
+// under the session mutation lock (the stop's Settle), so each read is a
+// locked one (lockedCurrentTurn), as the check's are: its session load and
+// runtime probes are its own, started within the read, so a shared read that
+// began before the lock, holding the session as it was then, never decides
+// the end, nor keeps the settle, which holds the lock, waiting on its
+// answer. Each read is bounded by turnWatchReadBound, as a watcher read's
+// is.
 func (h *SessionHandle) awaitTurnEnd(ctx context.Context, name, turn string, deadline time.Time, timing turnTiming, cause error) error {
 	what := fmt.Sprintf("interrupted turn %q of %s", turn, name)
 	read := func() (runtime.TurnHistory, error) {
@@ -973,7 +997,7 @@ func (h *SessionHandle) awaitTurnEnd(ctx context.Context, name, turn string, dea
 		defer cancel()
 		return h.lockedCurrentTurn(readCtx)
 	}
-	running := cause != nil && !errors.Is(cause, runtime.ErrRuntimeUnavailable)
+	running := cause != nil && !errors.Is(cause, runtime.ErrRuntimeUnavailable) && !errors.Is(cause, runtime.ErrWaitUnobserved)
 	notEnded := func(last error) error {
 		if running {
 			return sessionpkg.TurnNotEndedError(what, last)

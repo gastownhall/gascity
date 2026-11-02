@@ -867,7 +867,8 @@ func TestProvider_InputPathsReachMarkedAgentPaneOverSameCLIHumanPane(t *testing.
 // human pane. A human prompt ("❯ ", which is Claude's ready prefix and a p10k
 // prompt line) on the active pane must not make a busy agent read idle, and a
 // real approval prompt on the agent's pane must be seen with the human pane
-// focused (#7657 review, mc-zndi7.101).
+// focused (#7657 review, mc-zndi7.101). The wait-idle pre-read
+// (runtime.IdleBoundaryNow) reads them the same way: busy, then pending.
 func TestProvider_IdleAndPendingReadAgentPaneNotFocusedHumanPrompt(t *testing.T) {
 	f := newAgentPaneFixture(t, "api", "1")
 	tm := f.p.tm
@@ -889,7 +890,8 @@ func TestProvider_IdleAndPendingReadAgentPaneNotFocusedHumanPrompt(t *testing.T)
 	}
 	captured(human, "❯")
 
-	// The agent is busy.
+	// The agent, a claude whose busy reading the leaf trusts, is busy.
+	f.mustRun(t, "set-environment", "-t", f.name, "GC_PROVIDER", "claude")
 	show(f.agent, "✻ Thinking… (12s · esc to interrupt)")
 	captured(f.agent, "esc to interrupt")
 	if idle, err := tm.SnapshotIdle(f.name); err != nil || idle {
@@ -898,12 +900,18 @@ func TestProvider_IdleAndPendingReadAgentPaneNotFocusedHumanPrompt(t *testing.T)
 	if err := tm.WaitForIdle(context.Background(), f.name, time.Second); !errors.Is(err, ErrIdleTimeout) {
 		t.Errorf("WaitForIdle = %v, want ErrIdleTimeout while the agent is busy", err)
 	}
+	if got := runtime.IdleBoundaryNow(f.p, f.name); got != runtime.IdleBoundaryBusy {
+		t.Errorf("IdleBoundaryNow = %v, want %v: the agent's pane shows its spinner", got, runtime.IdleBoundaryBusy)
+	}
 
 	// The agent waits on an approval prompt.
 	show(f.agent, "● Read(file_path: /tmp/test.txt)\n\n This command requires approval\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don't ask again for: Read:*\n   3. No")
 	captured(f.agent, "Do you want to proceed?")
 	if pending, err := tm.Pending(f.name); err != nil || pending == nil {
 		t.Errorf("Pending = (%v, %v), want the agent pane's approval prompt", pending, err)
+	}
+	if got := runtime.IdleBoundaryNow(f.p, f.name); got != runtime.IdleBoundaryPending {
+		t.Errorf("IdleBoundaryNow = %v, want %v: the approval prompt owns the agent's input", got, runtime.IdleBoundaryPending)
 	}
 }
 
@@ -1013,6 +1021,51 @@ func TestProvider_RecyclesDeadPaneWithoutProcessNames(t *testing.T) {
 	}
 	if !p.IsRunning(name) {
 		t.Fatal("session should be running after dead-pane recycle")
+	}
+}
+
+// A session whose agent has exited stays listed (remain-on-exit) with an empty
+// #{pane_pid} on tmux 3.8. Resolving its input pane and nudging it must not
+// fail with "no panes found" in a populated pane list.
+func TestProvider_NudgeResolvesDeadPane(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	cfg := DefaultConfig()
+	cfg.SocketName = testSocketName
+	// A dead pane never looks idle, so Nudge's best-effort idle wait would run
+	// its whole default window before sending.
+	cfg.NudgeIdleTimeout = time.Second
+	p := NewProviderWithConfig(cfg)
+	name := "gc-test-dead-pane-nudge"
+	_ = p.Stop(name)
+	defer func() { _ = p.Stop(name) }()
+
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command: "sleep 0.1",
+		WorkDir: t.TempDir(),
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	waitForValue(t, "session state", "dead", func() string {
+		has, err := p.Tmux().HasSession(name)
+		if err != nil {
+			t.Fatalf("HasSession: %v", err)
+		}
+		if has && !p.IsRunning(name) {
+			return "dead"
+		}
+		return "alive"
+	})
+
+	target, err := p.Tmux().agentInputTarget(name)
+	if err != nil || target == "" {
+		t.Fatalf("agentInputTarget = (%q, %v), want the dead agent pane", target, err)
+	}
+	if err := p.Nudge(name, runtime.TextContent("hello")); err != nil {
+		t.Fatalf("Nudge to a dead agent pane: %v", err)
 	}
 }
 

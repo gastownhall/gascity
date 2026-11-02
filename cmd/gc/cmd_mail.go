@@ -1534,8 +1534,8 @@ func callerOwnMailIdentityCached(cityPath string, cfg *config.City, store beads.
 // structured sender identity, so a live agent claiming either forges
 // authority exactly as claiming a coordinator's mailbox would. A caller
 // with no live-session env vars set at all (own identity resolves to
-// "human": an interactive terminal user, or an exec order, which runs with
-// the supervisor's environment) may claim any sender -- this keeps
+// "human": an interactive terminal user, or an exec order, whose inherited
+// session identity gc removes) may claim any sender -- this keeps
 // scripted "--from controller" automation such as
 // examples/bd/dolt/commands/compact/run.sh working. A caller whose own env
 // vars are set but don't resolve to any live session fails closed rather

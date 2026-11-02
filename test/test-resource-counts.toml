@@ -4,6 +4,38 @@
 version = 1
 
 [[count]]
+path = ".github/workflows/ci.yml"
+resource = "test_target"
+calls = 2
+
+[[count]]
+path = ".github/workflows/fork-verify.yml"
+resource = "test_target"
+calls = 5
+
+[[count]]
+path = ".github/workflows/nightly.yml"
+resource = "test_target"
+calls = 2
+
+[[count]]
+path = "Makefile"
+resource = "test_target"
+calls = 38
+
+[[count]]
+path = "cmd/gc-osc7501/e2e_test.go"
+resource = "subprocess"
+calls = 3
+tagged = true
+
+[[count]]
+path = "cmd/gc-osc7501/relay_e2e_test.go"
+resource = "subprocess"
+calls = 3
+tagged = true
+
+[[count]]
 path = "cmd/gc-write-mint/e2e_test.go"
 resource = "subprocess"
 calls = 1
@@ -641,6 +673,11 @@ resource = "slow_process_gate"
 calls = 2
 
 [[count]]
+path = "cmd/gc/conversation_lane_submit_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
 path = "cmd/gc/dolt_data_dir_lock_linux_test.go"
 resource = "subprocess"
 calls = 1
@@ -841,6 +878,11 @@ tagged = true
 path = "cmd/gc/hosted_beads_gateway_test.go"
 resource = "environment"
 calls = 3
+
+[[count]]
+path = "cmd/gc/infra_copy_manifest_test.go"
+resource = "fixed_sleep"
+calls = 1
 
 [[count]]
 path = "cmd/gc/init_provider_readiness_test.go"
@@ -1064,6 +1106,11 @@ resource = "environment"
 calls = 1
 
 [[count]]
+path = "cmd/gc/prompt_query_topology_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "cmd/gc/provider_factory_e2c1_test.go"
 resource = "subprocess"
 calls = 1
@@ -1089,6 +1136,11 @@ resource = "http_test_server"
 calls = 2
 
 [[count]]
+path = "cmd/gc/reaper_op_rows_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "cmd/gc/reconcile_effect_recycle_tmux_integration_test.go"
 resource = "subprocess"
 calls = 1
@@ -1102,6 +1154,11 @@ calls = 2
 [[count]]
 path = "cmd/gc/rig_anywhere_test.go"
 resource = "cwd"
+calls = 2
+
+[[count]]
+path = "cmd/gc/rig_import_fixtures_test.go"
+resource = "subprocess"
 calls = 2
 
 [[count]]
@@ -1326,6 +1383,11 @@ resource = "subprocess"
 calls = 20
 
 [[count]]
+path = "examples/bd/dolt/journal_recovery_runbook_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
 path = "examples/bd/dolt/logs_test.go"
 resource = "subprocess"
 calls = 1
@@ -1362,8 +1424,13 @@ calls = 1
 
 [[count]]
 path = "examples/bd/dolt/runtime_bounded_test.go"
+resource = "net_listen"
+calls = 6
+
+[[count]]
+path = "examples/bd/dolt/runtime_bounded_test.go"
 resource = "subprocess"
-calls = 1
+calls = 5
 
 [[count]]
 path = "examples/bd/dolt/sql_test.go"
@@ -1464,7 +1531,7 @@ tagged = true
 [[count]]
 path = "examples/gastown/maintenance_scripts_test.go"
 resource = "subprocess"
-calls = 93
+calls = 91
 
 [[count]]
 path = "examples/gastown/tmux_theme_script_test.go"
@@ -1500,12 +1567,12 @@ calls = 4
 [[count]]
 path = "internal/api/client_sling_test.go"
 resource = "http_test_server"
-calls = 3
+calls = 6
 
 [[count]]
 path = "internal/api/client_test.go"
 resource = "http_test_server"
-calls = 66
+calls = 67
 
 [[count]]
 path = "internal/api/client_waits_test.go"
@@ -1760,7 +1827,7 @@ calls = 2
 [[count]]
 path = "internal/bdflags/freshness_test.go"
 resource = "subprocess"
-calls = 1
+calls = 3
 tagged = true
 
 [[count]]
@@ -2309,6 +2376,11 @@ resource = "listener_helper"
 calls = 1
 
 [[count]]
+path = "internal/runtime/runtimetest/osc7501emitter/main_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "internal/runtime/ssh/process_alive_script_test.go"
 resource = "subprocess"
 calls = 1
@@ -2377,6 +2449,11 @@ resource = "subprocess"
 calls = 2
 
 [[count]]
+path = "internal/runtime/tmux/busy_trust_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "internal/runtime/tmux/dialog_feedback_survey_integration_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -2440,6 +2517,12 @@ tagged = true
 path = "internal/runtime/tmux/nudge_submit_key_sequence_integration_test.go"
 resource = "fixed_sleep"
 calls = 4
+tagged = true
+
+[[count]]
+path = "internal/runtime/tmux/program_capture_integration_test.go"
+resource = "subprocess"
+calls = 2
 tagged = true
 
 [[count]]
@@ -2760,6 +2843,12 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "scripts/rbe_worker_env_drift_test.go"
+resource = "subprocess"
+calls = 2
+medium = 2
+
+[[count]]
 path = "scripts/rbe_worker_env_grace_test.go"
 resource = "subprocess"
 calls = 2
@@ -2799,6 +2888,12 @@ calls = 1
 path = "scripts/test_slice_enroll_test.go"
 resource = "subprocess"
 calls = 1
+
+[[count]]
+path = "test/acceptance/beads_cli_contract_port_file_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
 
 [[count]]
 path = "test/acceptance/beads_proxied_default_test.go"
@@ -2854,11 +2949,6 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
-path = "test/acceptance/helpers/tool_home_test.go"
-resource = "subprocess"
-calls = 4
-
-[[count]]
 path = "test/acceptance/import_named_sessions_regression_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -2867,6 +2957,12 @@ tagged = true
 [[count]]
 path = "test/acceptance/init_lifecycle_test.go"
 resource = "listener_helper"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/acceptance/managed_session_dolt_port_move_test.go"
+resource = "subprocess"
 calls = 1
 tagged = true
 
@@ -3039,6 +3135,12 @@ calls = 1
 tagged = true
 
 [[count]]
+path = "test/conversationlane/busy_turn_lane_test.go"
+resource = "fixed_sleep"
+calls = 3
+tagged = true
+
+[[count]]
 path = "test/conversationlane/harness_bddolt_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -3060,6 +3162,18 @@ tagged = true
 path = "test/conversationlane/harness_test.go"
 resource = "subprocess"
 calls = 2
+tagged = true
+
+[[count]]
+path = "test/conversationlane/ladder_lane_test.go"
+resource = "fixed_sleep"
+calls = 4
+tagged = true
+
+[[count]]
+path = "test/conversationlane/ladder_lane_test.go"
+resource = "subprocess"
+calls = 1
 tagged = true
 
 [[count]]
@@ -3379,3 +3493,14 @@ calls = 1
 path = "test/workflows/needs_lifecycle_test.go"
 resource = "subprocess"
 calls = 1
+
+[[count]]
+path = "tools/nogo/analyzers/storeclass/cmd/storeclass-baseline/main_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "tools/nogo/nolinttest/storeclass_nolint_test.go"
+resource = "subprocess"
+calls = 1
+medium = 1

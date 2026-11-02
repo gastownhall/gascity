@@ -36,7 +36,10 @@ type CachingStore struct {
 	// eventPrefixes, when set, are the id namespaces whose bead events this
 	// cache applies, in place of idPrefix (WithEventIDPrefixes).
 	eventPrefixes []string
-	epoch         uint64 // names this instance in every CacheRevision it issues
+	// logicalReadTier, when set, answers a read left at the zero tier
+	// (TierIssues) across both tiers (WithLogicalReadTier).
+	logicalReadTier bool
+	epoch           uint64 // names this instance in every CacheRevision it issues
 	// reconcileGate, when set, is asked before each periodic reconcile; a
 	// false answer skips that cycle (WithReconcileGate).
 	reconcileGate func() bool
@@ -1702,7 +1705,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 		}
 		c.beads = nextBeads
 		c.deps = nextDeps
-		c.depsComplete = depsComplete && depErr == nil
+		c.setDepsCompleteLocked(depsComplete && depErr == nil, "prime: dependency read incomplete")
 		c.dirty = nextDirty
 		c.beadSeq = nextBeadSeq
 		c.localBeadAt = nextLocalBeadAt
@@ -1733,7 +1736,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 			}
 			c.absorbFreshLocked(id, b, now, opts)
 		}
-		c.depsComplete = false
+		c.markDepsIncompleteLocked("prime raced a write: rows kept from the cache")
 	}
 	c.state = cacheLive
 	c.syncFailures = 0

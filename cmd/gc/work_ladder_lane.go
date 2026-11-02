@@ -7,11 +7,17 @@ package main
 // backoff to an hourly nudge, forever (internal/workladder).
 //
 // Per seat and pass: observe (the planner's last allocation, the row, the
-// runtime, provider health), decide (workladder.Decide, pure), re-read live
-// the work a nudge or a recycle would act on, commit the work_ladder cell by
-// a CAS on the row that decides again on the fresh read (UpdateRowFenced),
-// and only then act: nudge through today's delivery call, post a recycle to
-// the planner's inbox (arm A16), or release an unstarted claim. Every write
+// runtime, provider health, and on a pass that may act on the seat its own
+// turns, work_ladder_turns.go: a turn its provider failed is not progress),
+// decide (workladder.Decide, pure), re-read live the work a nudge or a
+// recycle would act on, commit the work_ladder cell by a CAS on the row that
+// decides again on the fresh read (UpdateRowFenced), and only then act:
+// nudge (a conversation-lane notice when the lane host executes message,
+// W5's work_ladder_notice.go; else today's delivery call), post a recycle to
+// the planner's inbox (arm A16), or release an unstarted claim. A seat whose
+// provider refuses its turns with a rate limit is paced paused and restarted
+// fresh at most once per episode, its request landing in the cell's CAS
+// (work_ladder_ratelimit.go). Every write
 // of the cell is a CAS (WL6); the old pacing keys are neither read nor
 // written (§6.7), so a deploy starts every seat from a fresh grace and no
 // drain wave is possible.
@@ -31,6 +37,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -40,6 +47,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workladder"
@@ -73,7 +81,8 @@ type ladderTarget struct {
 	// gc.session_id, the hook's hand-over stamp (a seed).
 	claimSession bool
 	// recheck re-reads the work live before the ladder acts on it: clear
-	// when it is gone, hold when the read cannot tell.
+	// when it is gone, hold when the read cannot tell, or when it finds a
+	// claim's seat waiting on a person that work does not show yet.
 	recheck func() backstopResolution
 }
 
@@ -87,8 +96,28 @@ type ladderPass struct {
 	health *providerHealthSnapshot
 	// partial: the allocation's snapshot is incomplete, so work a seat's
 	// ladder holds but the snapshot lacks is carried, re-read live before
-	// anything is done about it.
+	// anything is done about it, and no seat is restarted fresh: the work
+	// the snapshot lacks may wait on a person (workladder.Observation.Partial).
 	partial bool
+	// notices is the lane the ladder's notices go to (nil: none executes
+	// message), looked up once per pass (noticesRead); ops is the op store
+	// opened over the sessions store when no lane does (opStore).
+	notices     plannerNoticeLane
+	noticesRead bool
+	ops         *opjournal.Store
+	opsErr      error
+	// ctx bounds the pass's reads; turnReader reads a seat's turns (nil:
+	// none).
+	ctx        context.Context
+	turnReader ladderTurnReader
+	// fresh is each provider's seats' last fresh restarts (the provider
+	// gap), read off the cells at the start of the pass.
+	fresh ladderFreshIndex
+	// humanWaits are the seats, by session ID, holding a claim that a live
+	// re-read found waiting on a person while the ladder's work does not
+	// show the wait yet (unlessAsked): such a seat is not restarted fresh,
+	// as one whose work shows the wait is not (seatAwaitsHuman).
+	humanWaits map[string]bool
 }
 
 // runWorkLadder is the step's body over the planner's last allocation s.
@@ -100,9 +129,14 @@ func (l *externalReadsLane) runWorkLadder(ctx context.Context, env externalReads
 	}
 	p := &ladderPass{
 		l: l, env: env, cfg: env.Cfg, now: l.now(), front: sessionFrontDoor(env.CityStore),
-		health: loadProviderHealthSnapshot(env.CityPath), partial: s.Partial,
+		health: loadProviderHealthSnapshot(env.CityPath), partial: s.Partial, ctx: ctx,
 	}
+	if l.turnReaderFor != nil {
+		p.turnReader = l.turnReaderFor(env)
+	}
+	p.fresh = buildLadderFreshIndex(raw)
 	work := p.outstanding(s, raw)
+	governed := make(map[string]bool)
 	for _, row := range raw {
 		if ctx.Err() != nil {
 			return
@@ -110,8 +144,10 @@ func (l *externalReadsLane) runWorkLadder(ctx context.Context, env externalReads
 		if !ladderGoverns(row) {
 			continue
 		}
+		governed[row.ID] = true
 		p.seat(row, work[row.ID])
 	}
+	l.ladderTurns.keep(governed)
 }
 
 // ladderGoverns is the seats the ladder paces: open pool-managed session
@@ -121,28 +157,50 @@ func ladderGoverns(row beads.Bead) bool {
 		strings.TrimSpace(row.Metadata["pool_managed"]) == "true" && strings.TrimSpace(row.Metadata["session_name"]) != ""
 }
 
-// clearLadderReleases drops the pending release from every governed row's
-// cell, by CAS, when the ladder is turned off: nothing will finish it, and
-// the hook refuses to hand out a claim a release names.
-func (l *externalReadsLane) clearLadderReleases(store beads.Store, raw []beads.Bead) {
-	front := sessionFrontDoor(store)
+// standDownLadder hands every governed seat back to the backstops when the
+// ladder is turned off. By one CAS on each cell it drops the pending release
+// (nothing will finish it, and the hook refuses to hand out a claim a
+// release names) and folds in its notices' fates (W5). Each notice still
+// pending is withdrawn first, as under a held gate, so the lane types no
+// ladder reminder beside the backstops' nudges; one in flight keeps the
+// cancel as a request, and its mark until a later pass reads its fate. The
+// cell's pacing is otherwise left as it was.
+func (l *externalReadsLane) standDownLadder(env externalReadsEnv, raw []beads.Bead) {
+	p := &ladderPass{l: l, env: env, cfg: env.Cfg, now: l.now(), front: sessionFrontDoor(env.CityStore)}
+	off := workladder.Gate{Held: true, Reason: "work_ladder_off"}
 	for _, row := range raw {
 		if !ladderGoverns(row) {
 			continue
 		}
-		if r, err := workladder.DecodeLadder(row.Metadata[session.WorkLadderKey]); err != nil || r.Release == nil {
+		r, err := workladder.DecodeLadder(row.Metadata[session.WorkLadderKey])
+		if err != nil {
 			continue
 		}
-		_, err := front.UpdateRowFenced(row.ID, workLadderCommitAttempts, func(_ session.Info, resp session.PersistedResponse) (session.RowPatch, bool) {
+		outs := p.noticeOutcomes(row, r, off)
+		if r.Release == nil && len(outs) == 0 {
+			continue
+		}
+		var settled []ladderSettled
+		wrote, err := p.front.UpdateRowFenced(row.ID, workLadderCommitAttempts, func(_ session.Info, resp session.PersistedResponse) (session.RowPatch, bool) {
 			r, err := workladder.DecodeLadder(resp.Metadata[session.WorkLadderKey])
-			if err != nil || r.Release == nil {
+			if err != nil {
+				return session.RowPatch{}, false
+			}
+			r, settled = foldLadderNotices(r, outs)
+			if r.Release == nil && len(settled) == 0 {
 				return session.RowPatch{}, false
 			}
 			r.Release = nil
 			return session.RowPatch{Metadata: session.MetadataPatch{session.WorkLadderKey: workladder.EncodeLadder(r)}}, true
 		})
 		if err != nil {
-			fmt.Fprintf(l.stderr, "work-ladder: clearing %s's pending release: %v\n", row.ID, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(l.stderr, "work-ladder: standing down %s's cell: %v\n", row.ID, err) //nolint:errcheck // best-effort stderr
+			continue
+		}
+		if wrote {
+			for _, s := range settled {
+				p.noticeSettled(row, s)
+			}
 		}
 	}
 }
@@ -152,7 +210,13 @@ func (l *externalReadsLane) clearLadderReleases(store beads.Store, raw []beads.B
 // continuation pinned to it; and the in_progress claims it holds under a
 // current identity. Work on a dispatch hold (hold:mayor, hold:external) is
 // not the ladder's (owner ruling 2026-10-18): it stays with its agent,
-// unnudged, until the hold lifts, and then the ladder takes it up afresh.
+// unnudged, until the hold lifts, and then the ladder takes it up afresh. A
+// claim whose seat asked a person and waits on their decision
+// (beadmeta.AwaitsHuman, read off the claim's own bead: the same bead ID can
+// exist in another store) is the ladder's only to nudge, an hour apart
+// (workladder.Work.AwaitsHuman): no nudge can hurry a person, and no recycle
+// or release may cut the wait short, but a turn that died after the answer
+// came must not leave the step silent for good.
 func (p *ladderPass) outstanding(s *allocSummary, raw []beads.Bead) map[string][]ladderTarget {
 	out := make(map[string][]ladderTarget)
 	held := make(map[string]bool)
@@ -191,23 +255,33 @@ func (p *ladderPass) outstanding(s *allocSummary, raw []beads.Bead) map[string][
 			})
 		}
 		for _, c := range claims.forIdentities(currentSessionAssigneeIdentities(row)) {
-			if held[c.BeadID] {
-				continue
+			if !held[c.BeadID] {
+				ts = append(ts, p.claimTarget(c, row.ID))
 			}
-			target := backstopTarget{ID: c.BeadID, Assignee: c.Assignee, Store: c.Store}
-			ts = append(ts, ladderTarget{
-				// c.StoreRef is claimStoreRef's: the claim's residence, as the
-				// hook's work_started entry and the backstop key it.
-				work:         workladder.Work{Key: workladder.ClaimKey{Store: c.StoreRef, Bead: c.BeadID}, Kind: workladder.KindClaim},
-				claimSession: c.SessionID != "" && c.SessionID == strings.TrimSpace(row.ID),
-				recheck:      func() backstopResolution { return unlessHeld(revalidateExecutionClaim(target)) },
-			})
 		}
 		if len(ts) > 0 {
 			out[row.ID] = ts
 		}
 	}
 	return out
+}
+
+// claimTarget is claim c of seat (its session ID) as ladder work, waiting on
+// a person when the planner's snapshot of it says so, re-read live before
+// the ladder acts on it.
+func (p *ladderPass) claimTarget(c executionClaim, seat string) ladderTarget {
+	target := backstopTarget{ID: c.BeadID, Assignee: c.Assignee, Store: c.Store}
+	waiting := beadmeta.AwaitsHuman(c.AwaitingHuman, seat)
+	return ladderTarget{
+		// c.StoreRef is claimStoreRef's: the claim's residence, as the
+		// hook's work_started entry and the backstop key it.
+		work:         workladder.Work{Key: workladder.ClaimKey{Store: c.StoreRef, Bead: c.BeadID}, Kind: workladder.KindClaim, AwaitsHuman: waiting},
+		claimSession: c.SessionID != "" && c.SessionID == strings.TrimSpace(seat),
+		recheck: func() backstopResolution {
+			res, b := revalidateExecutionClaim(target)
+			return p.unlessAsked(unlessHeld(res, b), b, seat, waiting)
+		},
+	}
 }
 
 // trigger is row's own trigger bead when the snapshot holds it open and
@@ -259,6 +333,27 @@ func unlessHeld(res backstopResolution, b beads.Bead) backstopResolution {
 	return res
 }
 
+// awaitsHuman reports whether claim b's seat (seat, its session ID) asked a
+// person and waits on their decision (gc.awaiting_human names it): the
+// ladder only nudges it, an hour apart, until the seat works the step again
+// and clears it.
+func awaitsHuman(b beads.Bead, seat string) bool {
+	return beadmeta.AwaitsHuman(b.Metadata[beadmeta.AwaitingHumanMetadataKey], seat)
+}
+
+// unlessAsked is res, a live re-read's verdict on a claim of seat (b, the
+// bead it found), except that a wait on a person the ladder's work does not
+// show (waiting false) holds the claim: whatever was due for it, nothing is
+// done until a read the ladder decides on shows the wait. Such a wait also
+// holds the seat's fresh restart (noteHumanWait), as one the work shows does.
+func (p *ladderPass) unlessAsked(res backstopResolution, b beads.Bead, seat string, waiting bool) backstopResolution {
+	if res == backstopResolutionOutstanding && !waiting && awaitsHuman(b, seat) {
+		p.noteHumanWait(seat)
+		return backstopResolutionHold
+	}
+	return res
+}
+
 // carriedRecheck re-reads, live through the store that owns it, work the
 // seat's ladder carries under an incomplete snapshot: still what its kind
 // says (a trigger open and unclaimed; a continuation open and pinned to the
@@ -282,6 +377,9 @@ func (p *ladderPass) carriedRecheck(row beads.Bead, w workladder.Work) func() ba
 		if !strings.EqualFold(strings.TrimSpace(b.Status), status) {
 			return backstopResolutionClear
 		}
+		if w.Kind == workladder.KindClaim {
+			return p.unlessAsked(backstopResolutionOutstanding, b, row.ID, w.AwaitsHuman)
+		}
 		return backstopResolutionOutstanding
 	}
 }
@@ -293,17 +391,36 @@ func (p *ladderPass) seat(row beads.Bead, targets []ladderTarget) {
 	if issue != nil {
 		fmt.Fprintf(p.l.stderr, "work-ladder: %s: %v; starting its ladder afresh\n", row.ID, issue) //nolint:errcheck // best-effort stderr
 	}
-	if len(targets) == 0 && len(prev.Entries) == 0 && prev.Release == nil {
+	if len(targets) == 0 && len(prev.Entries) == 0 && prev.Release == nil && prev.RateLimit.IsZero() {
 		return // nothing outstanding, nothing to settle: no reads, no write
 	}
 	if p.partial {
 		targets = p.carryLadderWork(row, targets, prev)
 	}
 	info, live := sessionInfoFromBead(row), p.observeRuntime(row)
+	gate, err := p.withdrawGate(row, prev, ladderGate(info, row.Metadata, p.now))
+	if err != nil {
+		// Its snapshot holds it, so no nudge or recycle was due this pass.
+		fmt.Fprintf(p.l.stderr, "work-ladder: %s: re-reading its gate before withdrawing its notice: %v; the seat waits for the next pass\n", row.ID, err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	// W5: the marks' fates, read live, folded in before deciding.
+	outs := p.noticeOutcomes(row, prev, gate)
+	folded, _ := foldLadderNotices(prev, outs)
+	read := p.turns(row, live, gate, targets, folded.Delivered)
+	live.turns, live.refusal = read.reading, read.refusal
+	live.providerFreshAt = p.fresh.others(ladderProvider(row), row.ID)
+	if workladder.RestartDue(folded, p.now, workladder.DefaultPolicy()) {
+		// Only a confirmed episode reads what holds its restart: the
+		// attach probe is not free. It is read even when the seat's work
+		// holds the restart: the pass's live re-read may find that work
+		// gone, and its hold with it.
+		live.restartDue, live.attached = true, p.probeAttached(row)
+	}
 	hold := map[workladder.ClaimKey]bool{}
 	var d workladder.Decision
-	for range len(targets) + 1 { // each round settles a re-read: work gone is dropped, work unreadable waits
-		d = decideWorkLadder(prev, p.observe(info, row.Metadata, prev, targets, hold, live))
+	for range len(targets) + 1 { // each round settles a re-read: work gone is dropped, work unreadable or newly asked about waits
+		d = decideWorkLadder(folded, p.observe(info, row.Metadata, folded, targets, hold, live))
 		gone, held := recheckActed(d, targets, hold)
 		if len(gone) == 0 && len(held) == 0 {
 			break
@@ -313,45 +430,66 @@ func (p *ladderPass) seat(row beads.Bead, targets []ladderTarget) {
 			hold[k] = true
 		}
 	}
-	if !d.Changed && len(d.Actions) == 0 {
+	if !d.Changed && len(d.Actions) == 0 && len(outs) == 0 {
 		return
 	}
-	landed, ok := p.commit(row.ID, targets, hold, live)
+	var route *ladderRoute
+	if _, nudges := ladderNudgeOf(d); nudges {
+		route = p.route(row)
+	}
+	landed, ok := p.commit(row, targets, hold, live, outs, route, freshRestartOf(d))
 	if !ok {
 		return
 	}
-	p.act(row, landed)
+	p.act(landed, route, live)
+}
+
+// ladderNudgeOf is d's nudge, if it has one (Decide emits at most one).
+func ladderNudgeOf(d workladder.Decision) (workladder.Nudge, bool) {
+	for _, a := range d.Actions {
+		if n, ok := a.(workladder.Nudge); ok {
+			return n, true
+		}
+	}
+	return workladder.Nudge{}, false
 }
 
 // carryLadderWork adds to targets, under an incomplete snapshot, every work
 // the seat's ladder holds that the snapshot lacks, so a store that did not
-// answer neither drops a ladder nor resets its count. Carried work is re-read
-// live (carriedRecheck) before any nudge or recycle about it.
+// answer neither drops a ladder nor resets its count. Carried work is what
+// the ladder last saw it as, a wait on a person included, and is re-read live
+// (carriedRecheck) before any nudge or recycle about it.
 func (p *ladderPass) carryLadderWork(row beads.Bead, targets []ladderTarget, prev workladder.Record) []ladderTarget {
 	for _, e := range prev.Entries {
 		if !slices.ContainsFunc(targets, func(t ladderTarget) bool { return t.work.Key == e.Key }) {
-			w := workladder.Work{Key: e.Key, Kind: e.Kind}
+			w := workladder.Work{Key: e.Key, Kind: e.Kind, AwaitsHuman: e.AwaitsHuman}
 			targets = append(targets, ladderTarget{work: w, recheck: p.carriedRecheck(row, w)})
 		}
 	}
 	return targets
 }
 
-// recheckActed re-reads live the work d nudges or recycles: the keys proved
-// gone, and those whose read could not tell (each waits, alone, this pass).
+// recheckActed re-reads live the work d nudges or recycles, and, before a
+// fresh restart (which drops every claim's conversation), all of the seat's
+// work: the keys proved gone, and those whose read could not tell (each
+// waits, alone, this pass; a held key also holds the restart).
 func recheckActed(d workladder.Decision, targets []ladderTarget, hold map[workladder.ClaimKey]bool) (gone, held map[workladder.ClaimKey]bool) {
+	var keys []workladder.ClaimKey
 	for _, a := range d.Actions {
-		var k workladder.ClaimKey
 		switch a := a.(type) {
 		case workladder.Nudge:
-			k = a.Key
+			keys = append(keys, a.Key)
 		case workladder.Recycle:
-			k = a.Key
-		default:
-			continue
+			keys = append(keys, a.Key)
+		case workladder.FreshRestart:
+			for _, t := range targets {
+				keys = append(keys, t.work.Key)
+			}
 		}
+	}
+	for _, k := range keys {
 		i := slices.IndexFunc(targets, func(t ladderTarget) bool { return t.work.Key == k })
-		if i < 0 || targets[i].recheck == nil || hold[k] {
+		if i < 0 || targets[i].recheck == nil || hold[k] || held[k] || gone[k] {
 			continue
 		}
 		switch targets[i].recheck() {
@@ -386,11 +524,24 @@ type ladderRuntime struct {
 	quiet    workladder.Quiet
 	activity time.Time
 	provider workladder.ProviderState
+	// turns is what the seat's turns said, on a pass that may act on it
+	// (turns); the zero value is no reading. refusal is the failure of its
+	// newest refused turn, for events and alerts only.
+	turns   workladder.TurnReading
+	refusal runtime.TurnFailure
+	// providerFreshAt is the newest fresh restart of another governed seat
+	// on the seat's provider (the provider gap).
+	providerFreshAt time.Time
+	// restartDue: the seat's episode stood confirmed as the pass read its
+	// cell (workladder.RestartDue), so the pass read what holds a restart:
+	// attached, a person attached to the seat (or a probe that could not
+	// tell).
+	restartDue, attached bool
 }
 
 // observeRuntime reads row's runtime: running, quiet (sessionQuietHold's
-// rule: activity older than the grace and, for a busy-readable provider, no
-// busy indicator; an unreadable clock is not quiet), and its provider's
+// rule: activity older than the grace and, off ACP, no busy snapshot reading;
+// an unreadable clock is not quiet), and its provider's
 // health. Quiet is read only for a running runtime.
 func (p *ladderPass) observeRuntime(row beads.Bead) ladderRuntime {
 	var rt ladderRuntime
@@ -423,17 +574,22 @@ func (p *ladderPass) observeRuntime(row beads.Bead) ladderRuntime {
 	} else {
 		rt.quiet = workladder.Quiet{State: workladder.NotQuiet, Reason: hold}
 	}
+	shadowHold(sp, name, row.ID, session.ProviderFamilyFromMetadata(row.Metadata, ""),
+		runtime.ProgramPointWorkLadder, hold != "", p.now, runtime.ProgramHoldVerdict)
 	return rt
 }
 
 // observe is the seat's observation from its row (info, and its metadata
-// meta), its cell prev, its work, the work waiting on a live read, and its
-// runtime.
+// meta), its cell prev, its work (and whether the pass's snapshot listed all
+// of it), the work waiting on a live read, and its runtime, with the pass's
+// reading of its turns: Decide discards a reading whose conversation is not
+// the row's (a reset landed since it was read).
 func (p *ladderPass) observe(info session.Info, meta map[string]string, prev workladder.Record, targets []ladderTarget, hold map[workladder.ClaimKey]bool, rt ladderRuntime) workladder.Observation {
 	gen := rowGeneration(meta)
 	obs := workladder.Observation{
 		Now: p.now, Gen: gen, Runtime: rt.running, Quiet: rt.quiet, LastActivity: rt.activity, Provider: rt.provider,
-		Gate: ladderGate(info, meta, p.now), Hold: hold,
+		Gate: ladderGate(info, meta, p.now), Hold: hold, Conv: rowConversation(meta), Turns: rt.turns,
+		ProviderFreshAt: rt.providerFreshAt, RestartHold: p.restartHold(info.ID, targets, rt), Partial: p.partial,
 	}
 	for _, t := range targets {
 		obs.Outstanding = append(obs.Outstanding, t.work)
@@ -489,8 +645,12 @@ func ladderSeed(meta map[string]string, t ladderTarget) (workladder.StartSource,
 
 // ladderGate is open, or held by what owns the seat for now: a stop request
 // (a drain, at the row's generation), a kill, a start in flight, a restart
-// request, an operator's content hold on the conversation, an operator's
-// suspend or an agent's wait, a quarantine, or an agent's heartbeat (WL5).
+// request, an operator's content hold on the conversation, an idle stop
+// pending, an operator's suspend or an agent's wait, a quarantine, or an
+// agent's heartbeat (WL5). The idle stop is the content gate's stop_pending:
+// a lane holds a notice to such a seat until it expires, so the ladder
+// proposes none there and reads none of that seat's holds as a refusal; the
+// direct path types into it no more either.
 // Every hold but the content hold is one the row clears when it ends, so
 // none can silence a seat for good. A content hold stands until a resume
 // clears it (SESSION-RUNTIME-027): meanwhile the ladder nudges, recycles and
@@ -513,6 +673,8 @@ func ladderGate(info session.Info, meta map[string]string, now time.Time) workla
 	}
 	d := session.DecodeDisposition(meta)
 	switch {
+	case d.IdleStop:
+		return held("stop_pending")
 	case d.HeartbeatHeld(now):
 		return held("heartbeat")
 	case d.Wait || d.WaitIntent:
@@ -531,55 +693,132 @@ func ladderGate(info session.Info, meta map[string]string, now time.Time) workla
 // row open, the agent cell readable and not naming the claim, and no seed
 // naming it; a seed that names it makes the claim started instead. It
 // returns the decision that landed (or, writing nothing, the fresh one).
-func (p *ladderPass) commit(id string, targets []ladderTarget, hold map[workladder.ClaimKey]bool, rt ladderRuntime) (workladder.Decision, bool) {
-	var landed workladder.Decision
+//
+// W5: the CAS folds the marks' settled fates (outs) into the fresh cell, and
+// a nudge that lands on the lane route is marked with the op it reserves. A
+// nudge lands only on a pass that resolved its route (route non-nil): on
+// another, its key is held and the decision taken again, and a release that
+// decision newly writes is re-proved like any other. A route that could not
+// be read lands its nudge unmarked, for act to report unsent.
+//
+// restarted is whether the pass's own decision restarted the seat fresh: only
+// then did the pass re-read every claim (recheckActed) and what holds a
+// restart (rt.restartDue). A decision on the fresh row that restarts the seat
+// when the pass's did not (an episode confirmed only on this revision, or a
+// block another write lifted) holds all its work for the pass, and the
+// restart with it: the next pass reads what it needs and decides again.
+func (p *ladderPass) commit(row beads.Bead, targets []ladderTarget, hold map[workladder.ClaimKey]bool, rt ladderRuntime, outs []ladderNoticeResult, route *ladderRoute, restarted bool) (ladderLanded, bool) {
+	id := row.ID
+	landed := ladderLanded{row: row}
 	wrote, err := p.front.UpdateRowFenced(id, workLadderCommitAttempts, func(fresh session.Info, resp session.PersistedResponse) (session.RowPatch, bool) {
-		landed = workladder.Decision{}
+		landed = ladderLanded{row: row}
 		if fresh.Closed {
 			return session.RowPatch{}, false
 		}
-		prev, _ := decodeLadderCell(resp.Metadata)
-		obs := p.observe(fresh, resp.Metadata, prev, targets, hold, rt)
-		d := decideWorkLadder(prev, obs)
-		for range len(targets) + 1 {
-			k, ok := newRelease(prev, d)
-			if !ok {
-				break
+		stored, _ := decodeLadderCell(resp.Metadata)
+		prev, settled := foldLadderNotices(stored, outs)
+		hold := maps.Clone(hold)
+		obs := p.observe(fresh, resp.Metadata, prev, targets, hold, rt) // obs.Hold is hold: a key held below is held there
+		decide := func() workladder.Decision {
+			d := decideWorkLadder(prev, obs)
+			if freshRestartOf(d) && !restarted {
+				for _, t := range targets {
+					hold[t.work.Key] = true
+				}
+				d = decideWorkLadder(prev, obs)
 			}
-			i := slices.IndexFunc(targets, func(t ladderTarget) bool { return t.work.Key == k })
-			if i < 0 {
-				break
-			}
-			// The seeds read off resp are this revision's, but claimSession
-			// (the bead's gc.session_id naming the seat) is the planner
-			// snapshot's: this CAS is on the session row and cannot re-read
-			// the bead. A release that lands here on a claim the hook stamped
-			// after the snapshot is caught by release(), which re-reads the
-			// bead live before any write to it and keeps a bead whose
-			// gc.session_id names the seat, its write fenced on that read.
-			// That live read is the last guard for such a claim: keep it.
-			src, seeded := ladderSeed(resp.Metadata, targets[i])
-			if !seeded {
-				break // the CAS proves it: unstarted on this revision
-			}
-			obs.Started[k] = src // started after all: decide it so
-			d = decideWorkLadder(prev, obs)
+			return d
 		}
-		landed = d
-		if !d.Changed {
+		d := decide()
+		freshRow := row
+		freshRow.Metadata = resp.Metadata
+		var mark workladder.NoticeMark
+		// Each pass of this loop re-proves one new release or settles the
+		// nudge; every re-decide (a seed proving a claim started, a nudge
+		// held) loops back through the re-proof, so a release first decided
+		// after a nudge hold is re-proved too. Each re-decide adds a started
+		// claim or a held key, so 2*len(targets)+2 passes bound it.
+		for range 2*len(targets) + 2 {
+			if k, ok := newRelease(prev, d); ok {
+				if i := slices.IndexFunc(targets, func(t ladderTarget) bool { return t.work.Key == k }); i >= 0 {
+					// The seeds read off resp are this revision's, but
+					// claimSession (the bead's gc.session_id naming the seat)
+					// is the planner snapshot's: this CAS is on the session
+					// row and cannot re-read the bead. A release that lands
+					// here on a claim the hook stamped after the snapshot is
+					// caught by release(), which re-reads the bead live
+					// before any write to it and keeps a bead whose
+					// gc.session_id names the seat, its write fenced on that
+					// read. That live read is the last guard for such a
+					// claim: keep it.
+					if src, seeded := ladderSeed(resp.Metadata, targets[i]); seeded {
+						obs.Started[k] = src // started after all: decide it so
+						d = decide()
+						continue
+					}
+				}
+			}
+			// The CAS proves any new release: unstarted on this revision.
+			n, nudges := ladderNudgeOf(d)
+			if !nudges || (route != nil && !route.viaLane()) {
+				break
+			}
+			if route != nil {
+				e := ladderEntry(d.Next, n.Key)
+				op, err := ladderNoticeOpID(route.st, freshRow, n.Key, e)
+				if err == nil {
+					mark = workladder.NoticeMark{Op: op, At: p.now, Paused: n.Paused}
+					d.Next, _ = workladder.MarkNotice(d.Next, n.Key, mark) // the landed nudge already changed the cell
+					break
+				}
+				fmt.Fprintf(p.l.stderr, "work-ladder: %s: deriving its notice about %s: %v\n", id, n.Key.Bead, err) //nolint:errcheck // best-effort stderr
+			}
+			hold[n.Key] = true // no route resolved for this row, or no op id for its notice: no nudge this pass
+			d = decide()
+		}
+		landed = ladderLanded{d: d, row: freshRow, settled: settled, dropped: droppedMarks(prev, d.Next), mark: mark, before: prev.RateLimit}
+		if !d.Changed && len(settled) == 0 {
 			return session.RowPatch{}, false
 		}
-		return session.RowPatch{Metadata: session.MetadataPatch{session.WorkLadderKey: workladder.EncodeLadder(d.Next)}}, true
+		patch := session.MetadataPatch{session.WorkLadderKey: workladder.EncodeLadder(d.Next)}
+		if freshRestartOf(d) {
+			// gc session reset's request (Manager.RequestFreshRestart's
+			// pair), at the generation and conversation this CAS proves: arm
+			// A13 restarts the seat in place on a new conversation.
+			patch["restart_requested"], patch["continuation_reset_pending"] = "true", "true"
+		}
+		return session.RowPatch{Metadata: patch}, true
 	})
 	switch {
 	case err != nil:
 		fmt.Fprintf(p.l.stderr, "work-ladder: committing %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
-		return workladder.Decision{}, false
-	case !wrote && landed.Changed:
+		return ladderLanded{}, false
+	case !wrote && (landed.d.Changed || len(landed.settled) > 0):
 		fmt.Fprintf(p.l.stderr, "work-ladder: committing %s: the row moved on every attempt\n", id) //nolint:errcheck // best-effort stderr
-		return workladder.Decision{}, false
+		return ladderLanded{}, false
 	}
 	return landed, true
+}
+
+// ladderLanded is what a commit landed: the decision, the row it landed on
+// (the fresh metadata), the notice fates it folded in, the marks it dropped,
+// the mark it stamped on its nudge (zero for a direct one), and the seat's
+// rate-limit episode as the commit found it.
+type ladderLanded struct {
+	d       workladder.Decision
+	row     beads.Bead
+	settled []ladderSettled
+	dropped []string
+	mark    workladder.NoticeMark
+	before  workladder.RateLimit
+}
+
+// ladderEntry is r's entry for key, zero when r holds none.
+func ladderEntry(r workladder.Record, key workladder.ClaimKey) workladder.Entry {
+	if i := slices.IndexFunc(r.Entries, func(e workladder.Entry) bool { return e.Key == key }); i >= 0 {
+		return r.Entries[i]
+	}
+	return workladder.Entry{}
 }
 
 // newRelease is the release d writes that prev did not hold.
@@ -591,11 +830,21 @@ func newRelease(prev workladder.Record, d workladder.Decision) (workladder.Claim
 	return r.Key, true
 }
 
-// act performs what landed: the releases first (a claim given back needs no
-// nudge), then the nudge, the recycle and the alerts.
-func (p *ladderPass) act(row beads.Bead, d workladder.Decision) {
+// act performs what landed: the settled notices' events and the dropped
+// marks' withdrawals, the releases (a claim given back needs no nudge), then
+// the nudge (a lane notice when its attempt landed marked, unsent when its
+// route could not be read, else direct), the recycle, the alerts, and the
+// rate-limit episode's moves. A fresh restart's request landed with the
+// cell: the pass records it in its provider gap and wakes the planner. rt is
+// the seat's runtime as the pass read it.
+func (p *ladderPass) act(l ladderLanded, route *ladderRoute, rt ladderRuntime) {
+	row, d := l.row, l.d
 	gen := d.Next.Gen
-	released := map[workladder.ClaimKey]bool{}
+	for _, s := range l.settled {
+		p.noticeSettled(row, s)
+	}
+	p.withdrawDropped(row, l.dropped)
+	released := map[workladder.ClaimKey]ladderReleaseOutcome{}
 	for _, a := range d.Actions {
 		if r, ok := a.(workladder.Release); ok {
 			at := gen // a release re-emitted from an earlier generation settles at its own
@@ -609,8 +858,23 @@ func (p *ladderPass) act(row beads.Bead, d workladder.Decision) {
 	for _, a := range d.Actions {
 		switch a := a.(type) {
 		case workladder.Nudge:
-			if !released[a.Key] {
-				p.nudge(row, a, gen, refusedOf(d.Next, a.Key))
+			e := ladderEntry(d.Next, a.Key)
+			switch {
+			case released[a.Key] == ladderReleaseReleased:
+				if !l.mark.IsZero() {
+					p.settleMark(row.ID, l.mark.Op, workladder.NoticeWithdrawn) // never proposed: the claim was given back
+				}
+			case released[a.Key] == ladderReleaseStarted && !l.mark.IsZero():
+				// Never proposed: the claim was found started, a new episode
+				// whose settle dropped the mark; one it could not drop is
+				// withdrawn here.
+				p.settleMark(row.ID, l.mark.Op, workladder.NoticeWithdrawn)
+			case !l.mark.IsZero():
+				p.proposeNotice(row, a, e, gen, l.mark, route)
+			case route.unreadable():
+				p.routeUnsent(row, a, gen, route.err)
+			default:
+				p.nudge(row, a, gen)
 			}
 		case workladder.Recycle:
 			p.event(events.WorkRecycleRequested, row, a.Key, gen, workLadderEventFields{Reason: recycleReason(a)})
@@ -619,18 +883,20 @@ func (p *ladderPass) act(row beads.Bead, d workladder.Decision) {
 				p.recycle(row, gen)
 			}
 		case workladder.Alert:
-			fmt.Fprintf(p.l.stderr, "work-ladder: %s: %s on %s\n", row.ID, a.Reason, a.Key.Bead) //nolint:errcheck // best-effort stderr
-			p.event(events.WorkEscalated, row, a.Key, gen, workLadderEventFields{Reason: a.Reason})
+			f := workLadderEventFields{Reason: a.Reason, Message: rateLimitAlertMessage(row, a.Reason, heldCause(d), rt)}
+			line := fmt.Sprintf("work-ladder: %s: %s on %s", row.ID, a.Reason, a.Key.Bead)
+			if f.Message != "" {
+				line += ": " + f.Message
+			}
+			fmt.Fprintln(p.l.stderr, line) //nolint:errcheck // best-effort stderr
+			p.event(events.WorkEscalated, row, a.Key, gen, f)
+		case workladder.FreshRestart:
+			p.fresh.record(ladderProvider(row), row.ID, d.Next.RateLimit.LastFresh)
+			p.l.onChange()
+		case workladder.RateLimitMove:
+			p.rateLimitMoved(l, a, rt)
 		}
 	}
-}
-
-// refusedOf is the refusals r records for key's entry.
-func refusedOf(r workladder.Record, key workladder.ClaimKey) int {
-	if i := slices.IndexFunc(r.Entries, func(e workladder.Entry) bool { return e.Key == key }); i >= 0 {
-		return r.Entries[i].Refused
-	}
-	return 0
 }
 
 func recycleReason(r workladder.Recycle) string {
@@ -644,13 +910,24 @@ func recycleReason(r workladder.Recycle) string {
 // (write-ahead). A delivery error counts the attempt, but one that says the
 // runtime is unavailable, or that the seat is at a prompt only a human can
 // answer (a permission prompt), is re-counted as paused: neither is the
-// agent ignoring its work.
-func (p *ladderPass) nudge(row beads.Bead, n workladder.Nudge, gen int64, refused int) {
+// agent ignoring its work. A delivery the runtime proved but whose turn it
+// never saw start (runtime.ErrNudgeDeliveredUnobserved) reached the seat,
+// as the conversation lane acks it: a provider that refuses the turn at once
+// is one cause, and that refusal answers this nudge.
+func (p *ladderPass) nudge(row beads.Bead, n workladder.Nudge, gen int64) {
 	text := p.nudgeText(row, n)
 	fields := workLadderEventFields{Kind: n.Kind.String(), Rung: n.Rung.String(), Attempt: n.Attempt, Paused: n.Paused}
+	// The delivery's time is its attempt's start, read before the call: a
+	// delivery returns only once the runtime confirms the submit (a tmux
+	// nudge, seconds), and a provider refuses within a second of the
+	// prompt, so a refusal answering this nudge can end before the call
+	// returns.
+	at := p.l.now()
 	err := ladderDeliver(p.env.SP, strings.TrimSpace(row.Metadata["session_name"]), text)
 	if err != nil {
 		fields.Reason = err.Error()
+	}
+	if err != nil && !errors.Is(err, runtime.ErrNudgeDeliveredUnobserved) {
 		fmt.Fprintf(p.l.stderr, "work-ladder: nudging %s about %s failed: %v\n", row.ID, n.Key.Bead, err) //nolint:errcheck // best-effort stderr
 		p.event(events.WorkNudgeFailed, row, n.Key, gen, fields)
 		if (errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrPendingInteraction)) && !n.Paused && p.refused(row.ID, n) {
@@ -659,14 +936,18 @@ func (p *ladderPass) nudge(row beads.Bead, n workladder.Nudge, gen int64, refuse
 		return
 	}
 	p.event(events.WorkNudged, row, n.Key, gen, fields)
-	if refused > 0 {
-		p.settle(row.ID, func(r workladder.Record) (workladder.Record, bool) { return workladder.NudgeTaken(r, n.Key) })
-	}
+	// The seat took it: its Delivered moves to the attempt's start (a
+	// refusal ending later answers it), and the entry's refusals end.
+	p.settle(row.ID, func(r workladder.Record) (workladder.Record, bool) {
+		return workladder.NudgeDelivered(r, n.Key, gen, at)
+	})
 }
 
-// ladderDeliver is the ladder's one delivery seam: today's nudge call
-// (runNudgeBackstop's), which builds 8d4 carries. W5 swaps it for an OJ
-// planner notice.
+// ladderDeliver is the ladder's direct delivery: today's nudge call
+// (runNudgeBackstop's), which builds 8d4 carries. It serves a seat no lane
+// serves (protocol mode with no host stamp), or every seat while no lane host
+// executes message; otherwise the nudge is a planner notice
+// (work_ladder_notice.go).
 func ladderDeliver(sp runtime.Provider, name, text string) error {
 	if sp == nil || name == "" {
 		return runtime.ErrRuntimeUnavailable
@@ -734,8 +1015,20 @@ func (p *ladderPass) recycle(row beads.Bead, gen int64) {
 	p.l.stalled(executionStalledRequest{ID: row.ID, Generation: strconv.FormatInt(gen, 10), At: p.now})
 }
 
+// ladderReleaseOutcome is how a release (§6.5) ended.
+type ladderReleaseOutcome string
+
+// Release outcomes.
+const (
+	ladderReleaseReleased ladderReleaseOutcome = "released" // the claim was given back
+	ladderReleaseGone     ladderReleaseOutcome = "gone"     // finished, moved or parked since the snapshot
+	ladderReleaseStarted  ladderReleaseOutcome = "started"  // the live read found it handed to the seat
+	ladderReleaseKept     ladderReleaseOutcome = "kept"     // no lane serves its route, or no single live hit
+	ladderReleaseFailed   ladderReleaseOutcome = "failed"
+)
+
 // release gives back an unstarted claim the cell's release names (§6.5 steps
-// 2 and 3) and reports whether it did. It reads the claim live on the
+// 2 and 3) and reports how that ended. It reads the claim live on the
 // seat's legs: a bead whose gc.session_id names the seat was handed to the
 // seat's turn, so it is started, not released. Otherwise it releases it
 // while still in_progress and assigned to the seat (ReleaseWorkBead fences
@@ -743,57 +1036,62 @@ func (p *ladderPass) recycle(row beads.Bead, gen int64) {
 // is cleared; kept (no lane serves its route, no single live hit) or failed,
 // the entry is marked so it is nudged at Cap, with an alert, and the release
 // retried at Cap; found started, the entry is started.
-func (p *ladderPass) release(row beads.Bead, key workladder.ClaimKey, gen int64) bool {
+func (p *ladderPass) release(row beads.Bead, key workladder.ClaimKey, gen int64) ladderReleaseOutcome {
 	info := sessionInfoFromBead(row)
 	scope := releaseScope(info, p.cfg)
 	hits, err := seatWorkFor(p.env.WorkLegs, scope).match(seatWorkQuery{scope: scope, statuses: startedOnly}, false)
 	hits = slices.DeleteFunc(hits, func(h seatWorkHit) bool { return h.bead.ID != key.Bead })
-	var outcome, why string
+	var (
+		outcome ladderReleaseOutcome
+		why     string
+	)
 	switch {
 	case err != nil:
-		outcome, why = "failed", err.Error()
+		outcome, why = ladderReleaseFailed, err.Error()
 	case len(hits) == 0 && p.claimGone(row, key.Bead):
-		outcome = "gone" // finished or moved since the snapshot: nothing to release, nothing to report
+		outcome = ladderReleaseGone // finished or moved since the snapshot: nothing to release, nothing to report
 	case len(hits) != 1:
-		outcome, why = "kept", fmt.Sprintf("%d live hits", len(hits))
+		outcome, why = ladderReleaseKept, fmt.Sprintf("%d live hits", len(hits))
 	case beadmeta.HasDispatchHold(hits[0].bead.Labels):
-		outcome = "gone" // parked on a hold since the snapshot: not the ladder's
+		outcome = ladderReleaseGone // parked on a hold since the snapshot: not the ladder's
+	case awaitsHuman(hits[0].bead, row.ID):
+		outcome = ladderReleaseGone // its seat asked a person since the snapshot: never released
 	case strings.TrimSpace(hits[0].bead.Metadata[beadmeta.SessionIDMetadataKey]) == strings.TrimSpace(row.ID):
 		// The live read of gc.session_id, which commit's CAS takes from the
 		// snapshot: the guard for a claim the hook stamped after it was read.
-		outcome = "started"
+		outcome = ladderReleaseStarted
 	default:
 		out := releaseListed(hits, releaseLadder, releaseSeatOfInfo(info), p.cfg, ReleaseOpts{})
 		logRelease(p.l.stderr, "work-ladder", row.ID, out, nil)
 		switch {
 		case len(out.Released) == 1:
-			outcome = "released"
+			outcome = ladderReleaseReleased
 		case len(out.Failed) > 0:
-			outcome, why = "failed", out.Why[key.Bead]
+			outcome, why = ladderReleaseFailed, out.Why[key.Bead]
 		default:
-			outcome, why = "kept", out.Why[key.Bead]
+			outcome, why = ladderReleaseKept, out.Why[key.Bead]
 		}
 	}
 	fields := workLadderEventFields{Kind: workladder.KindClaim.String(), Rung: workladder.RungClaimed.String(), Reason: why}
 	switch outcome {
-	case "released":
+	case ladderReleaseReleased:
 		p.event(events.WorkReleased, row, key, gen, fields)
-	case "kept", "failed":
-		fields.Reason = outcome + ": " + why
+	case ladderReleaseKept, ladderReleaseFailed:
+		fields.Reason = string(outcome) + ": " + why
 		fmt.Fprintf(p.l.stderr, "work-ladder: releasing %s's claim %s: %s\n", row.ID, key.Bead, fields.Reason) //nolint:errcheck // best-effort stderr
 		p.event(events.WorkReleaseUnfinished, row, key, gen, fields)
 	}
 	p.settle(row.ID, func(r workladder.Record) (workladder.Record, bool) {
 		switch outcome {
-		case "released", "gone":
+		case ladderReleaseReleased, ladderReleaseGone:
 			return workladder.ClearRelease(r, key, gen)
-		case "started":
+		case ladderReleaseStarted:
 			return workladder.ReleaseFoundStarted(r, key, gen, workladder.SrcClaimSession, p.now)
 		default:
 			return workladder.ReleaseUnfinished(r, key, gen, p.now)
 		}
 	})
-	return outcome == "released"
+	return outcome
 }
 
 // claimGone reports, from a live read, that bead is no longer an
@@ -812,26 +1110,39 @@ func (p *ladderPass) claimGone(row beads.Bead, bead string) bool {
 }
 
 // workLadderEventFields are the parts of a work.* event's payload beyond the
-// seat and the work.
+// seat and the work. Message is the event's text when it says more than
+// Reason.
 type workLadderEventFields struct {
-	Kind, Rung, Reason string
-	Attempt            int
-	Paused             bool
+	Kind, Rung, Reason, Message string
+	Attempt                     int
+	Paused                      bool
 }
 
 // event records one work.* event about key on row's seat at gen.
 func (p *ladderPass) event(typ string, row beads.Bead, key workladder.ClaimKey, gen int64, f workLadderEventFields) {
+	message := f.Reason
+	if f.Message != "" {
+		message = f.Message
+	}
+	p.recordEvent(typ, key.Bead, row.ID, message, events.WorkLadderPayload{
+		SessionID: row.ID, SessionName: strings.TrimSpace(row.Metadata["session_name"]), Template: strings.TrimSpace(row.Metadata["template"]),
+		Provider: ladderProvider(row),
+		BeadID:   key.Bead, StoreRef: key.Store, Generation: gen, Kind: f.Kind, Rung: f.Rung, Attempt: f.Attempt, Paused: f.Paused, Reason: f.Reason,
+	})
+}
+
+// recordEvent records one event of typ about subject on seat, carrying
+// payload.
+func (p *ladderPass) recordEvent(typ, subject, seat, message string, payload events.Payload) {
 	if p.l.events == nil {
 		return
 	}
-	payload, err := json.Marshal(events.WorkLadderPayload{
-		SessionID: row.ID, SessionName: strings.TrimSpace(row.Metadata["session_name"]), Template: strings.TrimSpace(row.Metadata["template"]),
-		BeadID: key.Bead, StoreRef: key.Store, Generation: gen, Kind: f.Kind, Rung: f.Rung, Attempt: f.Attempt, Paused: f.Paused, Reason: f.Reason,
-	})
+	raw, err := json.Marshal(payload)
 	if err != nil {
+		fmt.Fprintf(p.l.stderr, "work-ladder: %s: encoding %s: %v\n", seat, typ, err) //nolint:errcheck // best-effort stderr
 		return
 	}
 	p.l.events.Record(events.Event{
-		Type: typ, Actor: eventActor(), Subject: key.Bead, SessionID: row.ID, Message: f.Reason, Payload: payload,
+		Type: typ, Actor: eventActor(), Subject: subject, SessionID: seat, Message: message, Payload: raw,
 	})
 }

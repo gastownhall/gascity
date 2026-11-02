@@ -5212,10 +5212,10 @@ func TestCompactScriptBareGCBypassesThresholdAndSkipsFlatten(t *testing.T) {
 			t.Fatalf("bare-gc must not issue %s:\n%s", forbidden, log)
 		}
 	}
-	if !strings.Contains(log, "CALL DOLT_GC()") {
-		t.Fatalf("bare-gc must issue bare CALL DOLT_GC():\n%s", log)
+	if !strings.Contains(log, "CALL DOLT_GC('--archive-level=0')") {
+		t.Fatalf("bare-gc must issue CALL DOLT_GC('--archive-level=0'):\n%s", log)
 	}
-	if strings.Contains(log, "DOLT_GC('--full')") {
+	if strings.Contains(log, "DOLT_GC('--full'") {
 		t.Fatalf("bare-gc must NOT run --full:\n%s", log)
 	}
 }
@@ -5267,7 +5267,7 @@ func TestCompactScriptBareGCHonorsOnlyDBsAllowlist(t *testing.T) {
 	if strings.Contains(log, "db=cache query=") {
 		t.Fatalf("non-allowlisted database should not receive dolt queries:\n%s", log)
 	}
-	if !strings.Contains(log, "db=beads query=CALL DOLT_GC()") {
+	if !strings.Contains(log, "db=beads query=CALL DOLT_GC('--archive-level=0')") {
 		t.Fatalf("allowlisted database was not bare-GC'd:\n%s", log)
 	}
 }
@@ -5415,8 +5415,8 @@ func TestCompactScriptGCOnlyFlagReclaimsBelowThresholdWithFullGC(t *testing.T) {
 			t.Fatalf("gc-only must not issue %s:\n%s", forbidden, log)
 		}
 	}
-	if !strings.Contains(log, "CALL DOLT_GC('--full')") {
-		t.Fatalf("gc-only must issue full CALL DOLT_GC('--full'):\n%s", log)
+	if !strings.Contains(log, "CALL DOLT_GC('--full', '--archive-level=0')") {
+		t.Fatalf("gc-only must issue CALL DOLT_GC('--full', '--archive-level=0'):\n%s", log)
 	}
 }
 
@@ -5473,7 +5473,7 @@ func TestCompactScriptGCOnlyFlagHonorsOnlyDBFlag(t *testing.T) {
 	if strings.Contains(log, "db=cache query=") {
 		t.Fatalf("non-allowlisted database should not receive dolt queries:\n%s", log)
 	}
-	if !strings.Contains(log, "db=beads query=CALL DOLT_GC('--full')") {
+	if !strings.Contains(log, "db=beads query=CALL DOLT_GC('--full', '--archive-level=0')") {
 		t.Fatalf("allowlisted database was not reclaimed with full GC:\n%s", log)
 	}
 }
@@ -5997,6 +5997,62 @@ exit 0
 	}
 	if !strings.Contains(string(gcLog), "prod backup missing") {
 		t.Fatalf("doctor did not warn about prod (eligible: has prod-backup remote, no artifact); scope filter should not exclude it:\n%s", gcLog)
+	}
+}
+
+// TestDoctorTreatsBdDefaultBackupAsConfigured asserts mol-dog-doctor counts a
+// database whose only backup is bd's "default" (what mol-dog-backup registers
+// through `bd backup init`) as covered: no "backup remote missing" gap, and
+// the database reaches the manifest-freshness check.
+func TestDoctorTreatsBdDefaultBackupAsConfigured(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	artifactDir := filepath.Join(cityPath, ".dolt-backup")
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatalf("mkdir artifact dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dataDir, "prod", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir prod: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  backup)
+    if [ "$(basename "$PWD")" = "prod" ]; then
+      printf 'default\n'
+    fi
+    exit 0
+    ;;
+esac
+case "$*" in
+  *"COUNT(*) FROM information_schema.PROCESSLIST"*)
+    printf 'COUNT(*)\n1\n'
+    exit 0
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nprod\n'
+    exit 0
+    ;;
+esac
+exit 0
+`)
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, doctorBackupStaleEnv)
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("unexpected doctor output:\n%s", out)
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if strings.Contains(string(gcLog), "prod backup remote missing") {
+		t.Fatalf("doctor reported prod's bd default backup as a missing remote:\n%s", gcLog)
+	}
+	if !strings.Contains(string(gcLog), "prod backup missing") {
+		t.Fatalf("doctor did not apply the manifest-freshness check to prod (default backup registered, no artifact):\n%s", gcLog)
 	}
 }
 
@@ -7034,10 +7090,10 @@ func TestCompactScriptDiskPreflightHoldsSharedHistoryPendingGCWithoutSelection(t
 			if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 				t.Fatalf("read dolt log: %v", readErr)
 			}
-			if strings.Contains(string(logData), "DOLT_GC('--full')") || strings.Contains(string(logData), "DOLT_RESET") {
+			if strings.Contains(string(logData), "DOLT_GC('--full'") || strings.Contains(string(logData), "DOLT_RESET") {
 				t.Fatalf("unselected shared-history pending GC must not run full GC or flatten:\n%s", logData)
 			}
-			if !strings.Contains(string(logData), "db=beads query=CALL DOLT_GC()") {
+			if !strings.Contains(string(logData), "db=beads query=CALL DOLT_GC('--archive-level=0')") {
 				t.Fatalf("held shared-history database must still get its working-set GC:\n%s", logData)
 			}
 			if _, err := os.Stat(marker); err != nil {
@@ -7062,7 +7118,7 @@ func TestCompactScriptDiskPreflightAllowsSelectedSharedHistoryPendingGCRecovery(
 	if err != nil {
 		t.Fatalf("read dolt log: %v", err)
 	}
-	if !strings.Contains(string(logData), "DOLT_GC('--full')") {
+	if !strings.Contains(string(logData), "DOLT_GC('--full', '--archive-level=0')") {
 		t.Fatalf("selected shared-history pending-GC recovery did not run full GC:\n%s", logData)
 	}
 	if strings.Contains(string(logData), "DOLT_RESET") {
@@ -7149,7 +7205,7 @@ func TestCompactScriptDiskPreflightAllowsOnlySelectedPendingGCRecovery(t *testin
 			if err != nil {
 				t.Fatalf("read dolt log: %v", err)
 			}
-			if !strings.Contains(string(logData), "DOLT_GC('--full')") {
+			if !strings.Contains(string(logData), "DOLT_GC('--full', '--archive-level=0')") {
 				t.Fatalf("pending-GC recovery did not issue DOLT_GC --full:\n%s", logData)
 			}
 			if strings.Contains(string(logData), "DOLT_RESET") {
@@ -7219,10 +7275,10 @@ func TestCompactScriptDiskPreflightOnlyDBsEnvDoesNotGrantPendingGCRecovery(t *te
 			if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 				t.Fatalf("read dolt log: %v", readErr)
 			}
-			if strings.Contains(string(logData), "DOLT_GC('--full')") || strings.Contains(string(logData), "DOLT_RESET") {
+			if strings.Contains(string(logData), "DOLT_GC('--full'") || strings.Contains(string(logData), "DOLT_RESET") {
 				t.Fatalf("env scope must not run full GC or flatten under critical disk:\n%s", logData)
 			}
-			if got := strings.Contains(string(logData), "db=beads query=CALL DOLT_GC()"); got != tt.wantWorkSet {
+			if got := strings.Contains(string(logData), "db=beads query=CALL DOLT_GC('--archive-level=0')"); got != tt.wantWorkSet {
 				t.Fatalf("working-set GC issued = %v, want %v:\n%s", got, tt.wantWorkSet, logData)
 			}
 			if _, err := os.Stat(marker); err != nil {

@@ -2150,22 +2150,29 @@ func findOrder(aa []orders.Order, name, rig string) (orders.Order, bool) {
 const bdCursorRecentRunsLimit = 256
 
 func bdCursor(store beads.Store, orderName string) (uint64, error) {
-	beadList, err := store.List(beads.ListQuery{
-		// Keyed on the owned order-run:<name> label (coordclass.CoordinationOwned):
-		// only order dispatch writes it, so no plain bead can crowd the run
-		// records out of this bounded window (the #7766 review).
-		Label:         orders.RunLabel(orderName),
-		IncludeClosed: true,
-		Limit:         bdCursorRecentRunsLimit,
-		Sort:          beads.SortCreatedDesc,
-		TierMode:      beads.TierBoth,
-		// Deliberately NOT an AllowBackingCreatedLimit caller. This read reduces to
-		// MaxSeqFromLabels — a max over seq, a DIFFERENT column than the created_at
-		// sort key — so the backing's id-ASC created-desc limit could drop the newest
-		// largest-id row carrying the max seq when a same-second burst exceeds the
-		// cap, regressing the event cursor into replaying consumed events. Fetch the
-		// full candidate set and let ApplyListQuery cut the canonical
-		// (created_at DESC, id DESC) prefix, which keeps the max-seq run at the front.
+	// One leg of bdCursorAcrossStores: run records live in the orders binding
+	// and, for v1 poured order-run roots (work class), on the work legs, so a
+	// leg that holds none of them is expected to miss.
+	var beadList []beads.Bead
+	err := beads.FederatedRead(func() (err error) {
+		beadList, err = store.List(beads.ListQuery{
+			// Keyed on the owned order-run:<name> label (coordclass.CoordinationOwned):
+			// only order dispatch writes it, so no plain bead can crowd the run
+			// records out of this bounded window (the #7766 review).
+			Label:         orders.RunLabel(orderName),
+			IncludeClosed: true,
+			Limit:         bdCursorRecentRunsLimit,
+			Sort:          beads.SortCreatedDesc,
+			TierMode:      beads.TierBoth,
+			// Deliberately NOT an AllowBackingCreatedLimit caller. This read reduces to
+			// MaxSeqFromLabels — a max over seq, a DIFFERENT column than the created_at
+			// sort key — so the backing's id-ASC created-desc limit could drop the newest
+			// largest-id row carrying the max seq when a same-second burst exceeds the
+			// cap, regressing the event cursor into replaying consumed events. Fetch the
+			// full candidate set and let ApplyListQuery cut the canonical
+			// (created_at DESC, id DESC) prefix, which keeps the max-seq run at the front.
+		})
+		return err
 	})
 	if err != nil {
 		if len(beadList) == 0 {
