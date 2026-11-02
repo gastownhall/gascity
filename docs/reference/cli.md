@@ -516,8 +516,16 @@ GC_CITY_CONTEXT, or the context selected by gc context use) it prints
 &#123;"beads": [...], "_cache_age_s": N&#125;, where _cache_age_s is the age in
 seconds of the remote supervisor's bead cache.
 
-A bead store that cannot be opened or read fails the command (exit 1,
-naming the store) rather than being left out of the list.
+For a local city the array carries no cache age: when the supervisor
+API answers, the beads come from the supervisor's bead cache, which can
+lag the stores, so a bare array is not evidence of an uncached read. Set
+GC_NO_API=1 to read the stores directly, or name the city with
+--city-url and --city-name to get the envelope with its _cache_age_s.
+
+A city or rig bead store that cannot be opened or read fails the command
+(exit 1, naming the store) rather than being left out of the list. For
+a local city whose relocated class binding cannot be read, the command
+warns on stderr, lists the remaining stores and exits 0.
 
 The bare --json flag is reserved by the CLI's JSON-contract layer and is
 not wired for this command; use --format=json.
@@ -595,6 +603,12 @@ same on every route for a local city. For a remote city (--context,
 selected by gc context use) it prints &#123;"bead": &#123;...&#125;, "_cache_age_s": N&#125;,
 where _cache_age_s is the age in seconds of the remote supervisor's bead
 cache.
+
+For a local city the object carries no cache age: when the supervisor
+API answers, the bead comes from the supervisor's bead cache, which can
+lag the stores, so a bare object is not evidence of an uncached read.
+Set GC_NO_API=1 to read the stores directly, or name the city with
+--city-url and --city-name to get the envelope with its _cache_age_s.
 
 The bare --json flag is reserved by the CLI's JSON-contract layer and is
 not wired for this command; use --format=json.

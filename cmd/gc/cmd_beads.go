@@ -63,8 +63,16 @@ GC_CITY_CONTEXT, or the context selected by gc context use) it prints
 {"beads": [...], "_cache_age_s": N}, where _cache_age_s is the age in
 seconds of the remote supervisor's bead cache.
 
-A bead store that cannot be opened or read fails the command (exit 1,
-naming the store) rather than being left out of the list.
+For a local city the array carries no cache age: when the supervisor
+API answers, the beads come from the supervisor's bead cache, which can
+lag the stores, so a bare array is not evidence of an uncached read. Set
+GC_NO_API=1 to read the stores directly, or name the city with
+--city-url and --city-name to get the envelope with its _cache_age_s.
+
+A city or rig bead store that cannot be opened or read fails the command
+(exit 1, naming the store) rather than being left out of the list. For
+a local city whose relocated class binding cannot be read, the command
+warns on stderr, lists the remaining stores and exits 0.
 
 The bare --json flag is reserved by the CLI's JSON-contract layer and is
 not wired for this command; use --format=json.`,
@@ -101,6 +109,12 @@ same on every route for a local city. For a remote city (--context,
 selected by gc context use) it prints {"bead": {...}, "_cache_age_s": N},
 where _cache_age_s is the age in seconds of the remote supervisor's bead
 cache.
+
+For a local city the object carries no cache age: when the supervisor
+API answers, the bead comes from the supervisor's bead cache, which can
+lag the stores, so a bare object is not evidence of an uncached read.
+Set GC_NO_API=1 to read the stores directly, or name the city with
+--city-url and --city-name to get the envelope with its _cache_age_s.
 
 The bare --json flag is reserved by the CLI's JSON-contract layer and is
 not wired for this command; use --format=json.`,
@@ -169,7 +183,7 @@ func routeBeadsList(cityPath string, c *api.Client, nilReason, format string, fi
 				return err
 			}
 			if cr.Body.Partial {
-				return errorAfterFetch{Detail: beadsListPartialErrorDetail(cr.Body.PartialErrors)}
+				return errorAfterFetch{Detail: beadsListPartialErrorDetail(cr.Body.PartialErrors, c.IsRemote())}
 			}
 			return nil
 		},
@@ -181,12 +195,20 @@ func routeBeadsList(cityPath string, c *api.Client, nilReason, format string, fi
 }
 
 // beadsListPartialErrorDetail is the error gc beads list prints when the API
-// could build the list only from some of the city's stores.
-func beadsListPartialErrorDetail(errs []string) string {
-	if len(errs) == 0 {
-		return "incomplete bead list from the API, not printed: the server reported a failed bead store without naming it"
+// could build the list only from some of the city's stores. For a local target
+// it adds the remedy: the store itself may be broken (gc doctor finds it), or
+// only the supervisor's view of it may be stale (a store that failed to open
+// when the supervisor started stays failed there), and then GC_NO_API=1 reads
+// the stores directly. A remote target has neither remedy on this host.
+func beadsListPartialErrorDetail(errs []string, remote bool) string {
+	detail := "incomplete bead list from the API, not printed: the server reported a failed bead store without naming it"
+	if len(errs) > 0 {
+		detail = "incomplete bead list from the API, not printed: " + strings.Join(errs, "; ")
 	}
-	return "incomplete bead list from the API, not printed: " + strings.Join(errs, "; ")
+	if remote {
+		return detail
+	}
+	return detail + "\n" + `hint: run "gc doctor" to find the broken store; if it is healthy and only the supervisor's view of it is stale, GC_NO_API=1 gc beads list reads the stores directly`
 }
 
 // renderBeadsListFromAPI formats the API-sourced bead list using the same
@@ -220,9 +242,12 @@ func renderBeadsListFromAPI(bs []beads.Bead, cacheAgeS float64, format string, f
 // matching bead is returned. api.Client.ListBeads follows next_cursor to match
 // this coverage on the API/remote lanes (previously it truncated to page 1).
 //
-// A store that cannot be opened or read fails the listing, naming the store:
-// the supervisor reports the same store as a partial answer, which the API
-// route refuses, so both routes fail rather than print part of the city.
+// A city or rig store that cannot be opened or read fails the listing, naming
+// the store: the supervisor reports the same store as a partial answer, which
+// the API route refuses, so both routes fail rather than print part of the
+// city. An unreadable relocated class binding only warns
+// (convoyStoreViewsForRead), so reads keep working while a city's storage
+// configuration is mid-repair.
 func doBeadsListFallback(cityPath, format string, filters beadFilters, stdout, stderr io.Writer) int {
 	stores, code := openBeadsListStoresAt(cityPath, stderr)
 	if stores == nil {

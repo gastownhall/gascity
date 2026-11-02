@@ -553,6 +553,8 @@ func TestRouteBeadsShow_JSONEnvelopeOnlyForRemoteTargets(t *testing.T) {
 // TestRouteBeadsList_PartialAPIAnswerFailsTheListing proves a partial answer
 // (the server could not read a rig's store) is an error naming the failed
 // store, not a silently shortened list, for local and remote targets alike.
+// Only a local target gets the remedy hint (gc doctor, then GC_NO_API=1 for a
+// stale supervisor view): a remote target has neither remedy on this host.
 func TestRouteBeadsList_PartialAPIAnswerFailsTheListing(t *testing.T) {
 	t.Setenv("GC_DEBUG", "1")
 	cityPath := writeBeadsTestCity(t)
@@ -569,9 +571,10 @@ func TestRouteBeadsList_PartialAPIAnswerFailsTheListing(t *testing.T) {
 	clients := map[string]struct {
 		cityPath string
 		c        *api.Client
+		hint     bool
 	}{
-		"local-target": {cityPath, api.NewCityScopedClient(srv.URL, "test-city")},
-		"remote":       {"", beadsTestRemoteClient(t, srv)},
+		"local-target": {cityPath, api.NewCityScopedClient(srv.URL, "test-city"), true},
+		"remote":       {"", beadsTestRemoteClient(t, srv), false},
 	}
 	for name, tc := range clients {
 		for _, format := range []string{"text", "json"} {
@@ -586,6 +589,11 @@ func TestRouteBeadsList_PartialAPIAnswerFailsTheListing(t *testing.T) {
 				for _, want := range []string{"rig omega: ledger unreadable", "route=api reason=error"} {
 					if !strings.Contains(stderr.String(), want) {
 						t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), want)
+					}
+				}
+				for _, remedy := range []string{`hint: run "gc doctor" to find the broken store`, "GC_NO_API=1 gc beads list reads the stores directly"} {
+					if got := strings.Contains(stderr.String(), remedy); got != tc.hint {
+						t.Fatalf("stderr contains %q = %v, want %v; stderr=%q", remedy, got, tc.hint, stderr.String())
 					}
 				}
 			})
