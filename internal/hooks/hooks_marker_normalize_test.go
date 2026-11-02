@@ -69,6 +69,11 @@ func TestBundledPluginsSurviveFormatterRewrap(t *testing.T) {
 	turnMapRewrapped := "const turns =\n    new Map()"
 	unseenGate := "state.userMessageIDs.has(messageID)"
 	unseenGateRewrapped := "state.userMessageIDs.has(\n        messageID,\n      )"
+	concurrentReads := `const [nudges, mail] = await Promise.all([
+      runWithWarning(directory, "nudge", "drain", "--inject"),
+      runWithWarning(directory, "mail", "check", "--inject"),
+    ]);`
+	concurrentReadsRewrapped := `const [nudges, mail] = await Promise.all([runWithWarning(directory, "nudge", "drain", "--inject"), runWithWarning(directory, "mail", "check", "--inject")]);`
 
 	for _, tc := range []struct {
 		name      string
@@ -86,9 +91,11 @@ func TestBundledPluginsSurviveFormatterRewrap(t *testing.T) {
 		{"opencode stdin end", "opencode", stdinEnd, stdinEndRewrapped},
 		{"opencode turn map", "opencode", turnMap, turnMapRewrapped},
 		{"opencode unseen message gate", "opencode", unseenGate, unseenGateRewrapped},
+		{"opencode concurrent reads", "opencode", concurrentReads, concurrentReadsRewrapped},
 		{"mimocode stdin end", "mimocode", stdinEnd, stdinEndRewrapped},
 		{"mimocode turn map", "mimocode", turnMap, turnMapRewrapped},
 		{"mimocode unseen message gate", "mimocode", unseenGate, unseenGateRewrapped},
+		{"mimocode concurrent reads", "mimocode", concurrentReads, concurrentReadsRewrapped},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rel := plugins[tc.provider]

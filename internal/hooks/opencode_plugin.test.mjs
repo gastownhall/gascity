@@ -63,7 +63,10 @@ const plugins = [
 // command bakes the current time into its beacon, so a test can tell a
 // refreshed prime from the cached one. Every call of any kind appends its
 // arguments to the call log. `handoff --auto` fails outside a gc session the
-// way the real command does (cmd/gc/session_target.go).
+// way the real command does (cmd/gc/session_target.go). GC_FAKE_MAIL_FAIL
+// makes `mail check` fail. With GC_FAKE_RENDEZVOUS naming a directory,
+// `nudge drain` and `mail check` each wait up to 5s for the other to start
+// and fail if it never does, so calling them one after the other fails.
 function writeFakeGc(dir) {
   const counter = path.join(dir, "drain-count");
   const drainLog = path.join(dir, "drain-log");
@@ -71,6 +74,19 @@ function writeFakeGc(dir) {
   const callLog = path.join(dir, "call-log");
   const script = `#!/bin/sh
 printf '%s\\n' "$*" >> "${callLog}"
+rendezvous() {
+  [ -n "\${GC_FAKE_RENDEZVOUS:-}" ] || return 0
+  : > "\${GC_FAKE_RENDEZVOUS}/$1"
+  waited=0
+  while [ ! -e "\${GC_FAKE_RENDEZVOUS}/$2" ]; do
+    waited=$((waited + 1))
+    if [ "$waited" -gt 50 ]; then
+      printf '%s\\n' "$1 ran without $2" >&2
+      exit 3
+    fi
+    sleep 0.1
+  done
+}
 case "$1 $2" in
   "prime --hook")
     printf '%s\\n' "\${GC_PROVIDER_SESSION_ID:-<unset>}" >> "${primeLog}"
@@ -81,6 +97,7 @@ case "$1 $2" in
     # Read the hook input to EOF first, as the real command does: a plugin
     # that leaves the child's stdin open blocks here (#5562).
     while IFS= read -r line; do :; done
+    rendezvous nudge mail
     printf 'drain\\n' >> "${drainLog}"
     if [ "\${GC_INJECT_CLOCK:-}" = "0" ]; then exit 0; fi
     n=0
@@ -90,6 +107,8 @@ case "$1 $2" in
     printf '%s%s (epoch %s)' '${CLOCK_PREFIX}' "$n" "$n"
     ;;
   "mail check")
+    if [ -n "\${GC_FAKE_MAIL_FAIL:-}" ]; then exit 1; fi
+    rendezvous mail nudge
     if [ -n "\${GC_FAKE_MAIL:-}" ]; then printf '%s' "\${GC_FAKE_MAIL}"; fi
     ;;
   "handoff --auto")
@@ -699,6 +718,60 @@ for (const plugin of plugins) {
       // must not be withheld from what may be the agent's own session.
       await hooks.event(sessionEvent("session.compacted", "ses_unknown"));
       assert.deepEqual(readPrimeLog(fake), ["ses_unknown"]);
+    });
+  });
+
+  describe(`${plugin.name} plugin optional injection`, { timeout: SUITE_TIMEOUT_MS }, () => {
+    let hooks;
+    let warnings;
+    let savedWarn;
+
+    before(async () => {
+      const staged = stagePlugin(tmp, plugin);
+      const { default: gascityPlugin } = await import(pathToFileURL(staged).href);
+      hooks = await gascityPlugin({ directory: tmp, client: {} });
+    });
+
+    beforeEach(() => {
+      resetDrains(fake);
+      warnings = [];
+      savedWarn = console.warn;
+      console.warn = (...args) => warnings.push(args.join(" "));
+    });
+
+    afterEach(() => {
+      console.warn = savedWarn;
+      delete process.env.GC_FAKE_MAIL;
+      delete process.env.GC_FAKE_MAIL_FAIL;
+      delete process.env.GC_FAKE_RENDEZVOUS;
+    });
+
+    // With no session id the transform reads the per-turn text every time.
+    async function transform() {
+      const output = { system: [HEADER] };
+      await hooks["experimental.chat.system.transform"]({ model: {} }, output);
+      return output.system;
+    }
+
+    it("runs nudge drain and mail check at the same time", async () => {
+      process.env.GC_FAKE_RENDEZVOUS = fs.mkdtempSync(path.join(tmp, "rendezvous-"));
+      process.env.GC_FAKE_MAIL = MAIL;
+      const system = await transform();
+      assert.deepEqual(
+        { volatile: system[1], warnings },
+        { volatile: `${CLOCK_PREFIX}1 (epoch 1)\n\n${MAIL}`, warnings: [] },
+      );
+    });
+
+    it("reports a failed read and how long it ran against the timeout", async () => {
+      process.env.GC_FAKE_MAIL_FAIL = "1";
+      const system = await transform();
+      assert.equal(system[1], `${CLOCK_PREFIX}1 (epoch 1)`, "the drain must still land");
+      assert.equal(warnings.length, 1, `want one warning, got ${JSON.stringify(warnings)}`);
+      assert.match(
+        warnings[0],
+        new RegExp(`^gascity ${plugin.name} plugin: \\S+ mail check --inject cwd \\S+ failed after \\d+ms \\(timeout 30000ms\\): 1$`),
+      );
     });
   });
 

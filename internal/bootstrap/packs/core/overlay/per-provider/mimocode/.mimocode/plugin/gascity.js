@@ -41,6 +41,9 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const GC_MIMOCODE_HOOK_VERSION = 5;
 const GC_BIN = process.env.GC_BIN || "gc";
+// COMMAND_TIMEOUT_MS bounds every gc call the plugin makes. A failed call is
+// reported with how long it ran against it (see logRunFailure).
+const COMMAND_TIMEOUT_MS = 30000;
 // GC_BIN is the explicit override. The fallback order matches Pi hooks so
 // sibling providers resolve the same installed gc before developer-local bins.
 const PATH_PREFIX =
@@ -50,6 +53,7 @@ const PATH_PREFIX =
 const RECENT_USER_MESSAGES = 64;
 
 async function runCommand(directory, args, warnOnFailure, extraEnv = {}) {
+  const startedAt = Date.now();
   try {
     // execFile always gives the child a stdin pipe and never closes it, so a
     // gc subcommand that reads hook stdin waits for an EOF that never arrives
@@ -60,7 +64,7 @@ async function runCommand(directory, args, warnOnFailure, extraEnv = {}) {
     const pending = execFileAsync(GC_BIN, args, {
       cwd: directory,
       encoding: "utf-8",
-      timeout: 30000,
+      timeout: COMMAND_TIMEOUT_MS,
       env: {
         ...process.env,
         ...extraEnv,
@@ -73,21 +77,21 @@ async function runCommand(directory, args, warnOnFailure, extraEnv = {}) {
     return stdout.trim();
   } catch (err) {
     if (warnOnFailure) {
-      logRunFailure(args, directory, err);
+      logRunFailure(args, directory, err, Date.now() - startedAt);
     }
     return "";
   }
-}
-
-async function run(directory, ...args) {
-  return runCommand(directory, args, false);
 }
 
 async function runWithWarning(directory, ...args) {
   return runCommand(directory, args, true);
 }
 
-function logRunFailure(args, directory, err) {
+// logRunFailure reports a failed gc call and how long it ran. Node sets
+// killed and SIGTERM both when the timeout fires and when something else ends
+// the child (a supervisor restart, say), so the error alone cannot tell them
+// apart; the elapsed time against COMMAND_TIMEOUT_MS can.
+function logRunFailure(args, directory, err, elapsedMs) {
   try {
     const detail =
       (err && (err.code || err.signal || err.message)) || "unknown error";
@@ -96,7 +100,7 @@ function logRunFailure(args, directory, err) {
       `${GC_BIN} ${args.join(" ")}`,
       "cwd",
       directory,
-      "failed:",
+      `failed after ${elapsedMs}ms (timeout ${COMMAND_TIMEOUT_MS}ms):`,
       detail,
     );
   } catch {
@@ -246,9 +250,13 @@ export default async function gascityPlugin({ directory, client }) {
   // readVolatile returns the per-turn text: `gc nudge drain --inject` emits a
   // `Current time: ...` line on every call even with an empty queue, and
   // unread mail changes as it arrives. Neither may sit ahead of stable text.
+  // The two reads are independent, so they run at the same time, and a read
+  // that fails is reported instead of silently dropped.
   async function readVolatile() {
-    const nudges = await run(directory, "nudge", "drain", "--inject");
-    const mail = await run(directory, "mail", "check", "--inject");
+    const [nudges, mail] = await Promise.all([
+      runWithWarning(directory, "nudge", "drain", "--inject"),
+      runWithWarning(directory, "mail", "check", "--inject"),
+    ]);
     return [nudges, mail].filter(Boolean).join("\n\n");
   }
 

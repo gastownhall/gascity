@@ -523,8 +523,10 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 		// too; without the identity guard the plugin runs gc lifecycle
 		// commands in sessions gc does not manage.
 		!hookContains(src, "managedSessionIdentityPresent()") ||
-		// Optional injection must run concurrently (#5553).
-		!hookContains(src, "Promise.all([") {
+		// The per-turn nudge and mail reads run at the same time and report
+		// their failures (#5553). The marker spells out both reported reads:
+		// mirrorTranscript has a Promise.all([ of its own.
+		!hookContains(src, `Promise.all([runWithWarning(directory, "nudge", "drain", "--inject"), runWithWarning(directory, "mail", "check", "--inject")])`) {
 		return true
 	}
 	for _, marker := range []string{
@@ -576,7 +578,10 @@ func mimocodeHookNeedsUpgrade(existing []byte) bool {
 		// MiMo Code loads the workdir plugin for human-launched sessions
 		// too; without the identity guard the plugin runs gc lifecycle
 		// commands in sessions gc does not manage (same shape as OpenCode).
-		!hookContains(src, "managedSessionIdentityPresent()")
+		!hookContains(src, "managedSessionIdentityPresent()") ||
+		// The per-turn nudge and mail reads run at the same time and report
+		// their failures (#5553, same shape as OpenCode).
+		!hookContains(src, `Promise.all([runWithWarning(directory, "nudge", "drain", "--inject"), runWithWarning(directory, "mail", "check", "--inject")])`)
 }
 
 func mimocodeHookVersion(content string) int {

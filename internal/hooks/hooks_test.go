@@ -1911,7 +1911,8 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		"state.userMessageIDs.has(messageID)",
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
-		"Promise.all([",
+		`runWithWarning(directory, "nudge", "drain", "--inject")`,
+		`runWithWarning(directory, "mail", "check", "--inject")`,
 		`"experimental.session.compacting"`,
 		`runWithWarning(directory, "handoff", "--auto", "context cycle")`,
 		"output.context.push(handoff)",
@@ -1930,6 +1931,7 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		`run(directory, "handoff", "context cycle")`,
 		`"session", "reset"`,
 		`"session.deleted"`,
+		"async function run(",
 	} {
 		if strings.Contains(opencodeHooks, unwanted) {
 			t.Errorf("OpenCode plugin contains obsolete marker %q:\n%s", unwanted, opencodeHooks)
@@ -1956,10 +1958,15 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		"providerSessionEnv(sessionID)",
 		"GC_PROVIDER_SESSION_ID",
 		`GC_PROVIDER_SESSION_ID_REQUIRED: "mimocode"`,
+		`runWithWarning(directory, "nudge", "drain", "--inject")`,
+		`runWithWarning(directory, "mail", "check", "--inject")`,
 	} {
 		if !strings.Contains(mimocodeHooks, want) {
 			t.Errorf("MiMo Code plugin missing marker %q:\n%s", want, mimocodeHooks)
 		}
+	}
+	if strings.Contains(mimocodeHooks, "async function run(") {
+		t.Errorf("MiMo Code plugin still defines the silent run helper:\n%s", mimocodeHooks)
 	}
 	if strings.Contains(mimocodeHooks, "GC_OPENCODE_TRANSCRIPT_DIR") {
 		t.Errorf("MiMo Code plugin must not read the OpenCode transcript env var:\n%s", mimocodeHooks)
@@ -2439,7 +2446,11 @@ function appendVolatileSystem(system, volatile) {}
 const turns = new Map();
 if (state.userMessageIDs.has(messageID)) {}
 managedSessionIdentityPresent();
-Promise.all([]);
+const [infoResult, messagesResult] = await Promise.all([client.session.get(), client.session.messages()]);
+const [nudges, mail] = await Promise.all([
+  runWithWarning(directory, "nudge", "drain", "--inject"),
+  runWithWarning(directory, "mail", "check", "--inject"),
+]);
 `)
 	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 9"), []byte("GC_OPENCODE_HOOK_VERSION = 8"), 1)
 	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 9"), []byte("GC_OPENCODE_HOOK_VERSION = 10"), 1)
@@ -2449,7 +2460,9 @@ Promise.all([]);
 	sharedTurnState := bytes.Replace(current, []byte("const turns = new Map();\n"), []byte("let drainedTurnID = null;\n"), 1)
 	idOrderTurnGate := bytes.Replace(current, []byte("if (state.userMessageIDs.has(messageID)) {}\n"), []byte("if (messageID <= state.currentTurnID) {}\n"), 1)
 	unguarded := bytes.ReplaceAll(current, []byte("managedSessionIdentityPresent"), []byte("somethingElse"))
-	serialInjection := bytes.Replace(current, []byte("Promise.all([]);\n"), nil, 1)
+	concurrentReads := "const [nudges, mail] = await Promise.all([\n  runWithWarning(directory, \"nudge\", \"drain\", \"--inject\"),\n  runWithWarning(directory, \"mail\", \"check\", \"--inject\"),\n]);\n"
+	serialInjection := bytes.Replace(current, []byte(concurrentReads), []byte("const nudges = await run(directory, \"nudge\", \"drain\", \"--inject\");\nconst mail = await run(directory, \"mail\", \"check\", \"--inject\");\n"), 1)
+	silentInjection := bytes.Replace(current, []byte(concurrentReads), []byte(strings.ReplaceAll(concurrentReads, "runWithWarning(", "run(")), 1)
 
 	if !opencodeHookNeedsUpgrade(stale) {
 		t.Fatal("stale OpenCode hook version did not request upgrade")
@@ -2479,7 +2492,10 @@ Promise.all([]);
 		t.Fatal("OpenCode hook without the unmanaged-session guard did not request upgrade")
 	}
 	if !opencodeHookNeedsUpgrade(serialInjection) {
-		t.Fatal("OpenCode hook without concurrent optional injection did not request upgrade")
+		t.Fatal("OpenCode hook that reads nudges and mail one after the other did not request upgrade")
+	}
+	if !opencodeHookNeedsUpgrade(silentInjection) {
+		t.Fatal("OpenCode hook that drops nudge and mail read failures did not request upgrade")
 	}
 }
 
@@ -2510,6 +2526,11 @@ function appendVolatileSystem(system, volatile) {}
 const turns = new Map();
 if (state.userMessageIDs.has(messageID)) {}
 if (!managedSessionIdentityPresent()) {}
+const [infoResult, messagesResult] = await Promise.all([client.session.get(), client.session.messages()]);
+const [nudges, mail] = await Promise.all([
+  runWithWarning(directory, "nudge", "drain", "--inject"),
+  runWithWarning(directory, "mail", "check", "--inject"),
+]);
 `)
 	versionless := []byte(`// Gas City hooks for MiMo Code.
 const GC_BIN = process.env.GC_BIN || "gc";
@@ -2518,6 +2539,11 @@ function appendVolatileSystem(system, volatile) {}
 const turns = new Map();
 if (state.userMessageIDs.has(messageID)) {}
 if (!managedSessionIdentityPresent()) {}
+const [infoResult, messagesResult] = await Promise.all([client.session.get(), client.session.messages()]);
+const [nudges, mail] = await Promise.all([
+  runWithWarning(directory, "nudge", "drain", "--inject"),
+  runWithWarning(directory, "mail", "check", "--inject"),
+]);
 `)
 	stale := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 5"), []byte("GC_MIMOCODE_HOOK_VERSION = 4"), 1)
 	future := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 5"), []byte("GC_MIMOCODE_HOOK_VERSION = 6"), 1)
@@ -2526,6 +2552,9 @@ if (!managedSessionIdentityPresent()) {}
 	sharedTurnState := bytes.Replace(current, []byte("const turns = new Map();\n"), []byte("let drainedTurnID = null;\n"), 1)
 	idOrderTurnGate := bytes.Replace(current, []byte("if (state.userMessageIDs.has(messageID)) {}\n"), []byte("if (messageID <= state.currentTurnID) {}\n"), 1)
 	unguarded := bytes.Replace(current, []byte("if (!managedSessionIdentityPresent()) {}\n"), nil, 1)
+	concurrentReads := "const [nudges, mail] = await Promise.all([\n  runWithWarning(directory, \"nudge\", \"drain\", \"--inject\"),\n  runWithWarning(directory, \"mail\", \"check\", \"--inject\"),\n]);\n"
+	serialInjection := bytes.Replace(current, []byte(concurrentReads), []byte("const nudges = await run(directory, \"nudge\", \"drain\", \"--inject\");\nconst mail = await run(directory, \"mail\", \"check\", \"--inject\");\n"), 1)
+	silentInjection := bytes.Replace(current, []byte(concurrentReads), []byte(strings.ReplaceAll(concurrentReads, "runWithWarning(", "run(")), 1)
 
 	if !mimocodeHookNeedsUpgrade(versionless) {
 		t.Fatal("versionless managed MiMo Code hook did not request upgrade")
@@ -2553,6 +2582,12 @@ if (!managedSessionIdentityPresent()) {}
 	}
 	if !mimocodeHookNeedsUpgrade(unguarded) {
 		t.Fatal("MiMo Code hook without the unmanaged-session guard did not request upgrade")
+	}
+	if !mimocodeHookNeedsUpgrade(serialInjection) {
+		t.Fatal("MiMo Code hook that reads nudges and mail one after the other did not request upgrade")
+	}
+	if !mimocodeHookNeedsUpgrade(silentInjection) {
+		t.Fatal("MiMo Code hook that drops nudge and mail read failures did not request upgrade")
 	}
 }
 

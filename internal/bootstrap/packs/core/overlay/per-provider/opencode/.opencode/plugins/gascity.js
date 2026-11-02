@@ -39,11 +39,8 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const GC_OPENCODE_HOOK_VERSION = 9;
 const GC_BIN = process.env.GC_BIN || "gc";
-// Every gc call this plugin makes shares one timeout. Optional per-turn
-// injection used to carry a shorter budget of its own, but that was justified
-// only while it blocked the send acknowledgement; it no longer does, and the
-// stalls it was hedging against were an unclosed child stdin rather than slow
-// work.
+// COMMAND_TIMEOUT_MS bounds every gc call the plugin makes. A failed call is
+// reported with how long it ran against it (see logRunFailure).
 const COMMAND_TIMEOUT_MS = 30000;
 // GC_BIN is the explicit override. The fallback order matches Pi hooks so
 // sibling providers resolve the same installed gc before developer-local bins.
@@ -78,7 +75,7 @@ async function runCommand(directory, args, warnOnFailure, extraEnv = {}) {
     return stdout.trim();
   } catch (err) {
     if (warnOnFailure) {
-      logRunFailure(args, directory, err, Date.now() - startedAt, COMMAND_TIMEOUT_MS);
+      logRunFailure(args, directory, err, Date.now() - startedAt);
     }
     return "";
   }
@@ -88,25 +85,20 @@ async function runWithWarning(directory, ...args) {
   return runCommand(directory, args, true);
 }
 
-// Node reports killed=true and signal=SIGTERM both when our own timeout fires
-// and when something else terminates the child (a supervisor restart, say), so
-// the error alone cannot tell them apart. Report the elapsed time against the
-// budget that was in force: a failure at ~3000ms of a 3000ms budget is our
-// timeout, one at 200ms is not.
-function logRunFailure(args, directory, err, elapsedMs, timeoutMs) {
+// logRunFailure reports a failed gc call and how long it ran. Node sets
+// killed and SIGTERM both when the timeout fires and when something else ends
+// the child (a supervisor restart, say), so the error alone cannot tell them
+// apart; the elapsed time against COMMAND_TIMEOUT_MS can.
+function logRunFailure(args, directory, err, elapsedMs) {
   try {
     const detail =
       (err && (err.code || err.signal || err.message)) || "unknown error";
-    const timing =
-      Number.isFinite(elapsedMs) && Number.isFinite(timeoutMs)
-        ? ` after ${elapsedMs}ms (budget ${timeoutMs}ms)`
-        : "";
     console.warn(
       "gascity opencode plugin:",
       `${GC_BIN} ${args.join(" ")}`,
       "cwd",
       directory,
-      `failed${timing}:`,
+      `failed after ${elapsedMs}ms (timeout ${COMMAND_TIMEOUT_MS}ms):`,
       detail,
     );
   } catch {
@@ -246,6 +238,8 @@ export default async function gascityPlugin({ directory, client }) {
   // readVolatile returns the per-turn text: `gc nudge drain --inject` emits a
   // `Current time: ...` line on every call even with an empty queue, and
   // unread mail changes as it arrives. Neither may sit ahead of stable text.
+  // The two reads are independent, so they run at the same time, and a read
+  // that fails is reported instead of silently dropped.
   async function readVolatile() {
     const [nudges, mail] = await Promise.all([
       runWithWarning(directory, "nudge", "drain", "--inject"),
