@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -630,9 +631,22 @@ func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", cmdArgs...)
 	cmd.Dir = dir
 	cmd.Env = repoCacheGitEnv()
-	out, err := cmd.CombinedOutput()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	command := "git " + strings.Join(args, " ")
+	diagnostic := strings.TrimSpace(stderr.String())
 	if err != nil {
-		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
+		if diagnostic == "" {
+			return "", fmt.Errorf("%s: %w", command, err)
+		}
+		return "", fmt.Errorf("%s: %s: %w", command, diagnostic, err)
+	}
+	// Callers parse stdout as a commit hash or porcelain records, so a
+	// successful command that still wrote diagnostics (such as a directory it
+	// could not read) fails closed instead of passing an incomplete answer.
+	if diagnostic != "" {
+		return "", fmt.Errorf("%s: unexpected diagnostics: %s", command, diagnostic)
 	}
 	return strings.TrimRight(string(out), "\r\n"), nil
 }
