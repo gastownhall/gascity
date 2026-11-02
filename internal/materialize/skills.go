@@ -124,19 +124,28 @@ func SupportedVendors() []string {
 // that a sink symlink will target.
 type SkillEntry struct {
 	// Name is the skill name (sink leaf). Matches the source directory
-	// basename, e.g. "gc-work" or "plan".
+	// basename, e.g. "gc-work" or "plan"; imported pack entries are
+	// qualified as "<binding>.<directory>", e.g. "core.gc-work".
 	Name string
 	// Source is the absolute filesystem path of the source directory.
 	// The materialized symlink targets this path.
 	Source string
 	// Origin is a diagnostic label describing which catalog this entry
-	// came from. One of: "city", "<bootstrap-pack-name>", "agent".
+	// came from. One of: "city", "<bootstrap-pack-name>", "agent", or
+	// an imported pack's binding name.
 	Origin string
 	// Description is the one-line summary pulled from the SKILL.md YAML
 	// frontmatter `description:` field, or "" when the frontmatter is
 	// absent/malformed. Used by prompt-rendering surfaces that want to
 	// show each skill's purpose alongside its name.
 	Description string
+	// FrontmatterName is the display name declared in the SKILL.md YAML
+	// frontmatter `name:` field, or "" when the frontmatter is
+	// absent/malformed. Display metadata only, never an identity key:
+	// catalog identity, sink leaves, and fingerprints all use Name.
+	// Providers that load skills by their frontmatter name (opencode
+	// 1.x) need this surfaced alongside the qualified catalog name.
+	FrontmatterName string
 }
 
 // ShadowedEntry records a name that was provided by more than one source
@@ -813,36 +822,45 @@ func LegacyStubNames() []string {
 	return out
 }
 
-// readSkillDescription parses the SKILL.md YAML frontmatter and returns
-// the `description:` value. Returns "" when:
+// skillFrontmatter holds the SKILL.md frontmatter fields the catalog
+// surfaces: the skill's declared display name and one-line description.
+// The zero value means "absent or unreadable".
+type skillFrontmatter struct {
+	Name        string
+	Description string
+}
+
+// readSkillFrontmatter parses the SKILL.md YAML frontmatter and returns
+// the `name:` and `description:` values. Either is "" when:
 //   - the file is unreadable
 //   - the file has no `---` frontmatter delimiters
-//   - the frontmatter lacks a description key
+//   - the frontmatter lacks the key
 //
-// Only the first 64 lines of the file are scanned — description lives
-// in frontmatter near the top; this caps the I/O cost of rendering
-// every skill's description alongside the catalog without pulling
-// large skill bodies into memory.
+// Only the first 64 lines of the file are scanned — frontmatter lives
+// near the top; this caps the I/O cost of rendering every skill's
+// metadata alongside the catalog without pulling large skill bodies
+// into memory.
 //
 // This is a minimal YAML consumer rather than a real parser. It
-// recognizes `description: <value>` (single-line), strips optional
-// surrounding quotes, and stops at the closing `---` delimiter.
-// Multi-line block scalars (`description: >\n  ...`) are not
-// supported in v0.15.1 and return "" — same end state as a missing
-// description, which the caller handles gracefully.
-func readSkillDescription(path string) string {
+// recognizes `key: <value>` (single-line) for the two keys above,
+// strips optional surrounding quotes, and stops at the closing `---`
+// delimiter. A block-scalar indicator or inline comment is taken
+// literally (e.g. `description: >` yields ">" rather than a folded
+// scalar) — the bounded single-line form is what real pack frontmatter
+// uses; anything richer is out of scope for this consumer.
+func readSkillFrontmatter(path string) skillFrontmatter {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return ""
+		return skillFrontmatter{}
 	}
 	// Strip optional UTF-8 BOM before the frontmatter check. Editors
 	// on Windows and some export pipelines prepend EF BB BF; without
 	// this the prefix check would silently fail and every exported
-	// SKILL.md would surface with a blank description.
+	// SKILL.md would surface with blank metadata.
 	text := strings.TrimPrefix(string(data), "\ufeff")
 	// Require frontmatter to begin on the first line.
 	if !strings.HasPrefix(text, "---\n") && !strings.HasPrefix(text, "---\r\n") {
-		return ""
+		return skillFrontmatter{}
 	}
 	// Find the closing `---` on a line by itself.
 	lines := strings.Split(text, "\n")
@@ -851,27 +869,34 @@ func readSkillDescription(path string) string {
 	if end > maxScan {
 		end = maxScan
 	}
+	var fm skillFrontmatter
 	for i := 1; i < end; i++ {
 		line := strings.TrimRight(lines[i], "\r")
 		if line == "---" {
 			break
 		}
 		trimmed := strings.TrimLeft(line, " \t")
-		if !strings.HasPrefix(trimmed, "description:") {
-			continue
+		if fm.Name == "" && strings.HasPrefix(trimmed, "name:") {
+			fm.Name = stripFrontmatterQuotes(strings.TrimSpace(strings.TrimPrefix(trimmed, "name:")))
 		}
-		value := strings.TrimSpace(strings.TrimPrefix(trimmed, "description:"))
-		// Strip a matching pair of surrounding quotes; no escape handling
-		// needed for the typical single-line description.
-		if len(value) >= 2 {
-			first, last := value[0], value[len(value)-1]
-			if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
-				value = value[1 : len(value)-1]
-			}
+		if fm.Description == "" && strings.HasPrefix(trimmed, "description:") {
+			fm.Description = stripFrontmatterQuotes(strings.TrimSpace(strings.TrimPrefix(trimmed, "description:")))
 		}
-		return value
 	}
-	return ""
+	return fm
+}
+
+// stripFrontmatterQuotes removes one matching pair of surrounding
+// quotes; no escape handling is needed for the typical single-line
+// frontmatter value.
+func stripFrontmatterQuotes(value string) string {
+	if len(value) >= 2 {
+		first, last := value[0], value[len(value)-1]
+		if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+			return value[1 : len(value)-1]
+		}
+	}
+	return value
 }
 
 // readSkillDir enumerates skill subdirectories of root. A subdirectory
@@ -906,11 +931,13 @@ func readSkillDir(root, origin string) ([]SkillEntry, error) {
 		if _, statErr := os.Stat(skillMD); statErr != nil {
 			continue
 		}
+		fm := readSkillFrontmatter(skillMD)
 		out = append(out, SkillEntry{
-			Name:        e.Name(),
-			Source:      dir,
-			Origin:      origin,
-			Description: readSkillDescription(skillMD),
+			Name:            e.Name(),
+			Source:          dir,
+			Origin:          origin,
+			Description:     fm.Description,
+			FrontmatterName: fm.Name,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

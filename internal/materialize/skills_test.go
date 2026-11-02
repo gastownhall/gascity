@@ -30,25 +30,30 @@ func overrideBootstrapPacks(t *testing.T, names ...string) {
 	t.Cleanup(func() { bootstrap.BootstrapPacks = prev })
 }
 
-func TestReadSkillDescription(t *testing.T) {
+func TestReadSkillFrontmatter(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name string
-		body string
-		want string
+		name            string
+		body            string
+		wantName        string
+		wantDescription string
 	}{
-		{"plain", "---\nname: x\ndescription: A plan\n---\nbody\n", "A plan"},
-		{"quoted double", "---\nname: x\ndescription: \"A plan\"\n---\n", "A plan"},
-		{"quoted single", "---\nname: x\ndescription: 'A plan'\n---\n", "A plan"},
-		{"no frontmatter", "no dashes here\ndescription: ignored\n", ""},
-		{"missing description", "---\nname: x\n---\nbody\n", ""},
-		{"frontmatter trailing CRLF", "---\r\nname: x\r\ndescription: win\r\n---\r\n", "win"},
-		{"description after closing", "---\nname: x\n---\ndescription: outside\n", ""},
-		{"empty value", "---\ndescription:\n---\n", ""},
+		{"plain", "---\nname: x\ndescription: A plan\n---\nbody\n", "x", "A plan"},
+		{"quoted double", "---\nname: x\ndescription: \"A plan\"\n---\n", "x", "A plan"},
+		{"quoted single", "---\nname: x\ndescription: 'A plan'\n---\n", "x", "A plan"},
+		{"quoted name", "---\nname: \"quoted skill\"\ndescription: A plan\n---\n", "quoted skill", "A plan"},
+		{"no frontmatter", "no dashes here\nname: ignored\ndescription: ignored\n", "", ""},
+		{"missing description", "---\nname: x\n---\nbody\n", "x", ""},
+		{"missing name", "---\ndescription: A plan\n---\nbody\n", "", "A plan"},
+		{"frontmatter trailing CRLF", "---\r\nname: x\r\ndescription: win\r\n---\r\n", "x", "win"},
+		{"description after closing", "---\nname: x\n---\ndescription: outside\n", "x", ""},
+		{"name after closing", "---\ndescription: A plan\n---\nname: outside\n", "", "A plan"},
+		{"name after description", "---\ndescription: A plan\nname: x\n---\n", "x", "A plan"},
+		{"empty value", "---\ndescription:\n---\n", "", ""},
 		// Regression for pass-1 Claude review: UTF-8 BOM emitted by
 		// Windows editors / some export pipelines must not blind
 		// the frontmatter detector.
-		{"utf-8 bom", "\ufeff---\nname: x\ndescription: survived bom\n---\n", "survived bom"},
+		{"utf-8 bom", "\ufeff---\nname: x\ndescription: survived bom\n---\n", "x", "survived bom"},
 	}
 	for _, c := range cases {
 		c := c
@@ -58,14 +63,15 @@ func TestReadSkillDescription(t *testing.T) {
 			if err := os.WriteFile(path, []byte(c.body), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			got := readSkillDescription(path)
-			if got != c.want {
-				t.Fatalf("got %q, want %q", got, c.want)
+			got := readSkillFrontmatter(path)
+			if got.Name != c.wantName || got.Description != c.wantDescription {
+				t.Fatalf("got name %q description %q, want name %q description %q",
+					got.Name, got.Description, c.wantName, c.wantDescription)
 			}
 		})
 	}
-	if got := readSkillDescription(filepath.Join(t.TempDir(), "missing.md")); got != "" {
-		t.Errorf("missing file: got %q", got)
+	if got := readSkillFrontmatter(filepath.Join(t.TempDir(), "missing.md")); got != (skillFrontmatter{}) {
+		t.Errorf("missing file: got %+v", got)
 	}
 }
 
@@ -80,15 +86,41 @@ func TestReadSkillDirPopulatesDescription(t *testing.T) {
 		[]byte("---\nname: plan\ndescription: Plan the work\n---\nbody\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// A directory whose basename differs from its frontmatter name:
+	// both the directory name (the sink leaf / catalog key) and the
+	// declared display name must be captured.
+	aliasDir := filepath.Join(root, "core.gc-work")
+	if err := os.MkdirAll(aliasDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(aliasDir, "SKILL.md"),
+		[]byte("---\nname: gc-work\ndescription: Working with beads\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	entries, err := readSkillDir(root, "city")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("got %d entries, want 1", len(entries))
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(entries))
 	}
-	if entries[0].Description != "Plan the work" {
-		t.Errorf("Description = %q, want %q", entries[0].Description, "Plan the work")
+	byName := make(map[string]SkillEntry, len(entries))
+	for _, e := range entries {
+		byName[e.Name] = e
+	}
+	plan := byName["plan"]
+	if plan.Description != "Plan the work" {
+		t.Errorf("Description = %q, want %q", plan.Description, "Plan the work")
+	}
+	if plan.FrontmatterName != "plan" {
+		t.Errorf("FrontmatterName = %q, want %q", plan.FrontmatterName, "plan")
+	}
+	alias := byName["core.gc-work"]
+	if alias.FrontmatterName != "gc-work" {
+		t.Errorf("FrontmatterName = %q, want the frontmatter-declared %q", alias.FrontmatterName, "gc-work")
+	}
+	if alias.Description != "Working with beads" {
+		t.Errorf("Description = %q, want %q", alias.Description, "Working with beads")
 	}
 }
 
@@ -344,6 +376,40 @@ func TestLoadCityCatalogImportedPackSkills(t *testing.T) {
 
 	if len(cat.OwnedRoots) != 2 {
 		t.Fatalf("owned roots = %v, want 2 roots", cat.OwnedRoots)
+	}
+}
+
+// TestLoadCityCatalogImportedSkillKeepsFrontmatterName pins AC-1 of the
+// appendix-display fix (#8501): an imported skill is cataloged under its
+// binding-qualified name while its SKILL.md frontmatter declares its own
+// name, and the catalog entry must retain both — the qualified name as
+// identity, the frontmatter name as display metadata.
+func TestLoadCityCatalogImportedSkillKeepsFrontmatterName(t *testing.T) {
+	t.Setenv("GC_HOME", "")
+	importedPack := t.TempDir()
+	importedDir := filepath.Join(importedPack, "skills")
+	mkSkill(t, importedDir, "gc-work")
+
+	cat, err := LoadCityCatalog("", config.DiscoveredSkillCatalog{
+		SourceDir:   importedDir,
+		PackDir:     importedPack,
+		PackName:    "core",
+		BindingName: "core",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cat.Entries) != 1 {
+		t.Fatalf("got %d entries, want 1: %+v", len(cat.Entries), cat.Entries)
+	}
+	e := cat.Entries[0]
+	wantSource, absErr := filepath.Abs(filepath.Join(importedDir, "gc-work"))
+	if absErr != nil {
+		t.Fatal(absErr)
+	}
+	if e.Name != "core.gc-work" || e.Origin != "core" || e.Source != wantSource || e.FrontmatterName != "gc-work" {
+		t.Fatalf("entry = %+v, want Name %q, Origin %q, Source %q, FrontmatterName %q",
+			e, "core.gc-work", "core", wantSource, "gc-work")
 	}
 }
 
