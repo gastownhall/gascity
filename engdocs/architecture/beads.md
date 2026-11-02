@@ -154,7 +154,9 @@ enforced by the conformance suite in `internal/beads/beadstest/conformance.go`.
    reasonable window of the current time.
 
 5. **Get returns ErrNotFound for missing IDs.** The error must wrap
-   `beads.ErrNotFound` so callers can use `errors.Is`.
+   `beads.ErrNotFound` so callers can use `errors.Is`. ErrNotFound
+   asserts confirmed absence: a lookup that failed for infrastructure
+   reasons must surface the underlying error, not ErrNotFound.
 
 6. **Close is idempotent.** Closing an already-closed bead succeeds
    without error. The bead remains closed.
@@ -406,7 +408,9 @@ beads_rust (br) binary as a real external provider (build tag:
   CommandRunner plus real bd in integration tests.
 
 - **Ordering varies by implementation.** In-process stores (MemStore,
-  FileStore) guarantee creation order for List and Ready. BdStore
+  FileStore) guarantee creation order for List and Ready. SQLiteStore
+  returns Ready in the canonical (priority, created_at, id) order, the
+  order a CachingStore serves Ready in. BdStore
   returns bd's default sort order (which may differ for beads sharing
   the same second-precision timestamp). ListByLabel returns newest-first
   across all implementations.

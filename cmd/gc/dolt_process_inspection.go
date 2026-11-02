@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 const (
@@ -42,7 +44,7 @@ func inspectManagedDoltProcessWithLayout(layout managedDoltRuntimeLayout, port s
 	if info.ManagedPID > 0 {
 		info.ManagedOwned, info.ManagedDeletedInodes = inspectManagedDoltOwnership(info.ManagedPID, layout)
 	}
-	info.PortHolderPID = findPortHolderPID(port)
+	info.PortHolderPID = findPortHolderPID(port, info.ManagedPID)
 	if info.PortHolderPID > 0 {
 		info.PortHolderOwned, info.PortHolderDeletedInodes = inspectManagedDoltOwnership(info.PortHolderPID, layout)
 	}
@@ -84,12 +86,21 @@ func managedPIDFromPIDFileWithOptions(pidFile string, removeStale bool) int {
 	return pid
 }
 
-func findPortHolderPID(port string) int {
+// findPortHolderPID returns the PID listening on port. candidates are PIDs the
+// caller expects to own it (e.g. the PID recorded in runtime state); on Linux
+// they are checked first so the common "is it still ours" answer costs one
+// /proc/<pid>/fd read instead of a walk of every process. Hosts without
+// /proc/net (darwin) fall back to lsof.
+func findPortHolderPID(port string, candidates ...int) int {
 	port = strings.TrimSpace(port)
 	if port == "" {
 		return 0
 	}
-	if pid, checked := findPortHolderPIDFromProc(port); checked {
+	portNum, err := strconv.ParseUint(port, 10, 16)
+	if err != nil {
+		return 0
+	}
+	if pid, checked := pidutil.ListenerPID(int(portNum), candidates...); checked {
 		return pid
 	}
 	return findPortHolderPIDFromLsof(port)
@@ -384,82 +395,6 @@ func processHasDeletedDataInodesWithin(pid int, dataDir string, timeout time.Dur
 		}
 	}
 	return false
-}
-
-func findPortHolderPIDFromProc(port string) (int, bool) {
-	portNum, err := strconv.ParseUint(port, 10, 16)
-	if err != nil {
-		return 0, true
-	}
-	inodes, checked := listeningSocketInodesFromProc(uint16(portNum))
-	if !checked {
-		return 0, false
-	}
-	if len(inodes) == 0 {
-		return 0, true
-	}
-	return processWithSocketInodes(inodes), true
-}
-
-func listeningSocketInodesFromProc(port uint16) (map[string]struct{}, bool) {
-	inodes := map[string]struct{}{}
-	checked := false
-	for _, path := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		checked = true
-		scanner := bufio.NewScanner(strings.NewReader(string(data)))
-		for scanner.Scan() {
-			fields := strings.Fields(scanner.Text())
-			if len(fields) < 10 || fields[3] != "0A" {
-				continue
-			}
-			_, portHex, ok := strings.Cut(fields[1], ":")
-			if !ok {
-				continue
-			}
-			gotPort, err := strconv.ParseUint(portHex, 16, 16)
-			if err != nil || uint16(gotPort) != port {
-				continue
-			}
-			inodes[fields[9]] = struct{}{}
-		}
-	}
-	return inodes, checked
-}
-
-func processWithSocketInodes(inodes map[string]struct{}) int {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return 0
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || !pidAlive(pid) {
-			continue
-		}
-		fdDir := filepath.Join("/proc", entry.Name(), "fd")
-		fds, err := os.ReadDir(fdDir)
-		if err != nil {
-			continue
-		}
-		for _, fd := range fds {
-			target, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
-			if err != nil || !strings.HasPrefix(target, "socket:[") || !strings.HasSuffix(target, "]") {
-				continue
-			}
-			inode := strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]")
-			if _, ok := inodes[inode]; ok {
-				return pid
-			}
-		}
-	}
-	return 0
 }
 
 func managedPIDFromPSByConfig(configFile string) int {

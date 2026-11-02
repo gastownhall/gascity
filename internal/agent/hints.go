@@ -51,6 +51,10 @@ type StartupHints struct {
 	// CopyFiles lists files/directories to stage in the session's working
 	// directory before the agent command starts.
 	CopyFiles []runtime.CopyEntry
+	// ProgramStatus is the session's OSC 7501 capture declaration, derived
+	// once per session from the resolved provider's binding
+	// (config.ProgramStatusArmFor). The zero value declares nothing.
+	ProgramStatus runtime.ProgramStatusArm
 }
 
 // ToRuntimeConfig projects the startup hints onto a runtime.Config. It is the
@@ -81,5 +85,6 @@ func (h StartupHints) ToRuntimeConfig() runtime.Config {
 		PackOverlayDirs:        h.PackOverlayDirs,
 		OverlayDir:             h.OverlayDir,
 		CopyFiles:              h.CopyFiles,
+		ProgramStatus:          h.ProgramStatus,
 	}
 }

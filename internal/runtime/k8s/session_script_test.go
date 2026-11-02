@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,7 +12,10 @@ import (
 	"strings"
 	"testing"
 
+	gcruntime "github.com/gastownhall/gascity/internal/runtime"
+
 	"github.com/gastownhall/gascity/internal/bazeltest"
+	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
 )
 
 func TestSessionScriptStartProjectsManagedPayloadPortToPodAlias(t *testing.T) {
@@ -34,6 +38,51 @@ func TestSessionScriptStartProjectsManagedPayloadPortToPodAlias(t *testing.T) {
 	}
 	if got := result.manifestEnv["BEADS_DOLT_SERVER_PORT"]; got != podManagedDoltPort {
 		t.Fatalf("manifest BEADS_DOLT_SERVER_PORT = %q, want %q", got, podManagedDoltPort)
+	}
+}
+
+// TestSessionScriptStartProjectsWithheldManagedPortToPodAlias pins the exec
+// adapter's half of the gastownhall/gascity#1656 withhold: a session payload
+// whose managed-local port gc withheld carries no host or port, only
+// GC_DOLT_MANAGED_LOCAL=1, and must reach the in-cluster managed service like
+// the port-only payload does, without the controller-side marker.
+func TestSessionScriptStartProjectsWithheldManagedPortToPodAlias(t *testing.T) {
+	result := runSessionScriptStart(t, sessionScriptStartOptions{
+		PayloadEnv: runtimetest.WithheldManagedDoltEnv(),
+	})
+	if result.err != nil {
+		t.Fatalf("gc-session-k8s start error = %v\noutput:\n%s", result.err, result.output)
+	}
+	for key, want := range map[string]string{
+		"GC_DOLT_HOST":           podManagedDoltHost,
+		"GC_DOLT_PORT":           podManagedDoltPort,
+		"BEADS_DOLT_SERVER_HOST": podManagedDoltHost,
+		"BEADS_DOLT_SERVER_PORT": podManagedDoltPort,
+	} {
+		if got := result.manifestEnv[key]; got != want {
+			t.Fatalf("manifest %s = %q, want %q", key, got, want)
+		}
+	}
+	if got, ok := result.manifestEnv["GC_DOLT_MANAGED_LOCAL"]; ok {
+		t.Fatalf("manifest GC_DOLT_MANAGED_LOCAL = %q; the pod's target is the in-cluster service, not a controller-local server", got)
+	}
+}
+
+// TestSessionScriptStartOmitsDoltEnvForEmptyPayloadPortWithoutMarker guards the
+// other side of the marker: a payload whose Dolt keys are present but empty and
+// carry no GC_DOLT_MANAGED_LOCAL (a scope without Dolt, or a failed resolution)
+// must still omit pod Dolt env.
+func TestSessionScriptStartOmitsDoltEnvForEmptyPayloadPortWithoutMarker(t *testing.T) {
+	payload := runtimetest.WithheldManagedDoltEnv()
+	payload["GC_DOLT_MANAGED_LOCAL"] = ""
+	result := runSessionScriptStart(t, sessionScriptStartOptions{PayloadEnv: payload})
+	if result.err != nil {
+		t.Fatalf("gc-session-k8s start error = %v\noutput:\n%s", result.err, result.output)
+	}
+	for _, key := range []string{"GC_DOLT_HOST", "GC_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT"} {
+		if got, ok := result.manifestEnv[key]; ok {
+			t.Fatalf("manifest projected %s = %q for a payload without a Dolt target: %#v", key, got, result.manifestEnv)
+		}
 	}
 }
 
@@ -150,6 +199,8 @@ type sessionScriptStartOptions struct {
 	ProcessEnv map[string]string
 	PayloadEnv map[string]string
 	WorkDir    string
+	// FailStage makes the in-pod remote-stage write fail.
+	FailStage bool
 }
 
 type sessionScriptStartResult struct {
@@ -158,8 +209,10 @@ type sessionScriptStartResult struct {
 	containerWorkingDir string
 	containerArgs       string
 	callLog             string
-	output              string
-	err                 error
+	// stageRecord is what the script wrote to the pod's remote-stage record.
+	stageRecord string
+	output      string
+	err         error
 }
 
 func runSessionScriptStart(t *testing.T, opts sessionScriptStartOptions) sessionScriptStartResult {
@@ -168,6 +221,7 @@ func runSessionScriptStart(t *testing.T, opts sessionScriptStartOptions) session
 	tmpDir := t.TempDir()
 	manifestPath := filepath.Join(tmpDir, "manifest.json")
 	callLogPath := filepath.Join(tmpDir, "call.log")
+	stagePath := filepath.Join(tmpDir, "stage.toml")
 	binDir := filepath.Join(tmpDir, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatalf("mkdir bin dir: %v", err)
@@ -178,8 +232,18 @@ func runSessionScriptStart(t *testing.T, opts sessionScriptStartOptions) session
 set -euo pipefail
 manifest_out=%q
 call_log=%q
+stage_out=%q
+fail_stage=%q
 printf '%%s\n' "$*" >> "$call_log"
 joined=" $* "
+if [[ "$joined" == *" exec "*"remote-stage.toml"* ]]; then
+  if [[ "$fail_stage" == "true" ]]; then
+    cat >/dev/null
+    exit 1
+  fi
+  cat > "$stage_out"
+  exit 0
+fi
 if [[ "$joined" == *" get pods -l "* ]]; then
   exit 0
 fi
@@ -210,7 +274,7 @@ if [[ "$joined" == *" exec "* ]]; then
 fi
 printf 'unexpected kubectl call: %%s\n' "$*" >&2
 exit 1
-`, manifestPath, callLogPath)
+`, manifestPath, callLogPath, stagePath, fmt.Sprint(opts.FailStage))
 	if err := os.WriteFile(fakeKubectl, []byte(kubectlScript), 0o755); err != nil {
 		t.Fatalf("write fake kubectl: %v", err)
 	}
@@ -229,13 +293,11 @@ exit 1
 		t.Fatalf("marshal config: %v", err)
 	}
 
-	cmd := exec.Command(sessionScriptPath(t), "start", "mayor")
-	cmd.Stdin = bytes.NewReader(configJSON)
-	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"), "GC_K8S_IMAGE=gc-agent:latest")
+	env := append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"), "GC_K8S_IMAGE=gc-agent:latest")
 	for key, value := range opts.ProcessEnv {
-		cmd.Env = append(cmd.Env, key+"="+value)
+		env = append(env, key+"="+value)
 	}
-	out, err := cmd.CombinedOutput()
+	out, err := runScriptCommand(env, bytes.NewReader(configJSON), sessionScriptPath(t), "start", "mayor")
 
 	manifestEnv := map[string]string{}
 	manifestMounts := map[string]string{}
@@ -281,7 +343,12 @@ exit 1
 		t.Fatalf("read call log: %v", readCallErr)
 	}
 
+	stageBytes, readStageErr := os.ReadFile(stagePath)
+	if readStageErr != nil && !os.IsNotExist(readStageErr) {
+		t.Fatalf("read stage record: %v", readStageErr)
+	}
 	return sessionScriptStartResult{
+		stageRecord:         string(stageBytes),
 		manifestEnv:         manifestEnv,
 		manifestMounts:      manifestMounts,
 		containerWorkingDir: containerWorkingDir,
@@ -302,4 +369,158 @@ func sessionScriptPath(t *testing.T) string {
 		t.Fatal("runtime.Caller failed")
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "..", "contrib", "session-scripts", "gc-session-k8s"))
+}
+
+// TestSessionScriptStartRecordsTheRemoteStage (S5-A, owner decision D4): the
+// exec k8s script marks its pod as a remote stage exactly as the native
+// provider does, staged (a rig work dir) and unstaged (the city root) alike:
+// the pod spec carries the remote-stage environment from the first process,
+// the record is written by a direct in-pod write before the ready sentinel,
+// and it names the controller's city and path.
+func TestSessionScriptStartRecordsTheRemoteStage(t *testing.T) {
+	root := t.TempDir()
+	cityDir := filepath.Join(root, "city")
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"bright-lights\"\n\n[[agent]]\nname = \"mayor\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, workDir string }{{"staged rig work dir", rigDir}, {"city root", cityDir}} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := runSessionScriptStart(t, sessionScriptStartOptions{
+				PayloadEnv: map[string]string{"GC_CITY": cityDir, "GC_DIR": tc.workDir},
+				WorkDir:    tc.workDir,
+			})
+			if result.err != nil {
+				t.Fatalf("start: %v\n%s", result.err, result.output)
+			}
+			if got := result.manifestEnv["GC_REMOTE_STAGE_CONTROLLER"]; got != cityDir {
+				t.Errorf("pod env GC_REMOTE_STAGE_CONTROLLER = %q, want %q", got, cityDir)
+			}
+			if got := result.manifestEnv["GC_REMOTE_STAGE_CITY"]; got != "bright-lights" {
+				t.Errorf("pod env GC_REMOTE_STAGE_CITY = %q, want bright-lights", got)
+			}
+			for _, want := range []string{`controller_city = "bright-lights"`, fmt.Sprintf("controller_path = %q", cityDir), "staged_at = "} {
+				if !strings.Contains(result.stageRecord, want) {
+					t.Errorf("stage record %q lacks %q", result.stageRecord, want)
+				}
+			}
+			stageAt := strings.Index(result.callLog, "remote-stage.toml")
+			readyAt := strings.Index(result.callLog, ".gc-workspace-ready")
+			if stageAt < 0 || readyAt < 0 || stageAt > readyAt {
+				t.Errorf("the record must be written before the ready sentinel; call log:\n%s", result.callLog)
+			}
+		})
+	}
+}
+
+// TestSessionScriptStartFailsClosedWhenTheStageRecordFails: a pod that cannot
+// be marked is removed and the start fails, never run unmarked.
+func TestSessionScriptStartFailsClosedWhenTheStageRecordFails(t *testing.T) {
+	cityDir := filepath.Join(t.TempDir(), "city")
+	if err := os.MkdirAll(cityDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	result := runSessionScriptStart(t, sessionScriptStartOptions{
+		PayloadEnv: map[string]string{"GC_CITY": cityDir},
+		WorkDir:    cityDir,
+		FailStage:  true,
+	})
+	if result.err == nil {
+		t.Fatalf("start succeeded with an unwritable remote-stage record:\n%s", result.output)
+	}
+	if !strings.Contains(result.output, "remote stage") {
+		t.Errorf("output %q does not say why", result.output)
+	}
+	if strings.Contains(result.callLog, ".gc-workspace-ready") {
+		t.Error("the ready sentinel was touched on a pod that could not be marked")
+	}
+	if !strings.Contains(result.callLog, "delete pod") {
+		t.Error("the unmarked pod was not removed")
+	}
+}
+
+// runScriptCommand runs one shell-level command with exactly env, the one
+// subprocess call site these script tests share.
+func runScriptCommand(env []string, stdin io.Reader, name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Env = env
+	cmd.Stdin = stdin
+	return cmd.CombinedOutput()
+}
+
+// runUnderEnvClearingSu runs the su part of a pod command (from "CMD=$(") in
+// a shell whose environment carries the pod spec's variables, with fakes for
+// su (which, like `su -`, clears the environment), tmux (which records the
+// environment its server would start with) and sleep. It returns what tmux
+// saw.
+func runUnderEnvClearingSu(t *testing.T, command string, podEnv map[string]string) string {
+	t.Helper()
+	at := strings.Index(command, "CMD=$(")
+	if at < 0 {
+		t.Fatalf("no agent launch in %q", command)
+	}
+	dir := t.TempDir()
+	envOut := filepath.Join(dir, "tmux.env")
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// su - <user> -c <cmd>: a login shell with a cleared environment. cd is
+	// stubbed: the pod's /workspace does not exist on the test host.
+	write("su", "#!/bin/sh\nexec env -i PATH=\"$PATH\" /bin/sh -c \"cd() { :; }; $4\"\n")
+	write("tmux", "#!/bin/sh\nenv > "+envOut+"\n")
+	write("sleep", "#!/bin/sh\nexit 0\n")
+	env := []string{"PATH=" + dir + string(os.PathListSeparator) + os.Getenv("PATH")}
+	for k, v := range podEnv {
+		env = append(env, k+"="+v)
+	}
+	if out, err := runScriptCommand(env, nil, "/bin/sh", "-c", command[at:]); err != nil {
+		t.Fatalf("running the launch: %v\n%s", err, out)
+	}
+	got, err := os.ReadFile(envOut)
+	if err != nil {
+		t.Fatalf("tmux never ran: %v", err)
+	}
+	return string(got)
+}
+
+// TestLinuxUsernameAgentCarriesTheRemoteStageEnv: with LINUX_USERNAME the
+// agent's tmux starts through `su -`, a login shell that clears the
+// environment. The remote-stage variables must still reach it and its tmux
+// server, prebaked or not, whatever characters the values hold. A respawned
+// pane takes the server's environment, so the entrypoint is where they must
+// land; a relaunch writes the on-disk record instead
+// (TestRelaunchRecordsTheRemoteStageBeforeRespawning).
+func TestLinuxUsernameAgentCarriesTheRemoteStageEnv(t *testing.T) {
+	const ctrlCity = `/srv/my city/$HOME"x'`
+	p := newProviderWithOps(newFakeK8sOps())
+	p.cityName = `bright "lights"`
+	cfg := gcruntime.Config{
+		Command: "claude",
+		WorkDir: ctrlCity,
+		Env:     map[string]string{"GC_AGENT": "mayor", "GC_CITY": ctrlCity, "LINUX_USERNAME": "alice"},
+	}
+	want := func(t *testing.T, env string) {
+		t.Helper()
+		for _, line := range []string{remoteStageControllerEnv + "=" + ctrlCity, remoteStageCityEnv + "=" + p.cityName} {
+			if !strings.Contains(env, line+"\n") {
+				t.Errorf("the agent's environment lacks %q:\n%s", line, env)
+			}
+		}
+	}
+	podEnv := map[string]string{remoteStageControllerEnv: ctrlCity, remoteStageCityEnv: p.cityName}
+	for _, prebaked := range []bool{false, true} {
+		p.prebaked = prebaked
+		pod, err := buildPod("gc-test-agent", cfg, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Run("entrypoint", func(t *testing.T) {
+			want(t, runUnderEnvClearingSu(t, pod.Spec.Containers[0].Args[0], podEnv))
+		})
+	}
 }

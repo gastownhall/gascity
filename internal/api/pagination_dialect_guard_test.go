@@ -65,6 +65,11 @@ var grandfatheredDialects = map[string][]string{
 	"GET /v0/events/stream":                             {"after_cursor"},
 	"GET /v0/city/{cityName}/extmsg/transcript":         {"after_sequence", "limit"},
 	"GET /v0/city/{cityName}/orders/history":            {"before", "limit"},
+	// Async request outcome lookup: a point lookup, not a list walk.
+	// after_seq is the event_cursor of the request's 202, the value and the
+	// name the city event stream resumes from; it bounds the log read to the
+	// events after the request was accepted, and there is no page to turn.
+	"GET /v0/city/{cityName}/request/{requestId}": {"after_seq"},
 	// Session structured-transcript SSE stream. Owner sign-off 2026-07-18:
 	// this is a live Server-Sent-Events reconnection endpoint, not a keyset
 	// list walk. It resumes via the Last-Event-ID header, with after_cursor as
@@ -92,7 +97,12 @@ var boundedLimitOnlyFeeds = map[string]bool{
 	"GET /v0/city/{cityName}/formulas/{name}/runs": true,
 	"GET /v0/city/{cityName}/orders/feed":          true,
 	"GET /v0/city/{cityName}/runs":                 true,
-	"GET /v0/events":                               true,
+	// `gc ready --limit`: the top N of the ordered ready answer (2026-10-17,
+	// ga-ylpbsy.3, approved with the supervisor-served read design). It is
+	// not a page: the query is answered whole, and a walk past it would mean
+	// a cursor over a set that changes between requests.
+	"GET /v0/city/{cityName}/work/ready": true,
+	"GET /v0/events":                     true,
 }
 
 type specParam struct {

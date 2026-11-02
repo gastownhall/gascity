@@ -11,9 +11,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/storebinding"
+	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
 // errStorageTestSourceUnreadable stands in for whatever makes a work store
@@ -268,30 +270,53 @@ func TestPreflightSaysSoWhenNoControllerIsLive(t *testing.T) {
 // repaired by any command this binary carries — the operator has to move rows
 // by hand. Finding that out inside a stopped-city window is the worst possible
 // time, and it is exactly what this verb exists to move earlier.
-func TestPreflightBlocksOnRigResidueByName(t *testing.T) {
+func TestPreflightReportsRigHistoryWithoutBlocking(t *testing.T) {
+	rigPath := t.TempDir()
+	request, cfg, _ := preflightReadyCity(t, 1)
+	cfg.Rigs = []config.Rig{{Name: "alpha", Prefix: "ga", Path: rigPath, Suspended: true}}
+
+	rig := beads.NewMemStore()
+	rig.IDPrefix = "ga"
+	stray := mustCreateInfraBead(t, rig, beads.Bead{Title: "a closed session in a suspended rig", Type: "session"})
+	if err := rig.Close(stray.ID); err != nil {
+		t.Fatal(err)
+	}
+	mustCreateInfraBead(t, rig, beads.Bead{Title: "ordinary rig work", Type: "task"})
+	stubStorageScopeStore(t, rigPath, func() beads.Store { return rig })
+
+	var stdout, stderr bytes.Buffer
+	if code := doStoragePreflight(request, &stdout, &stderr); code != 0 {
+		t.Fatalf("preflight blocked over closed history in a suspended rig: %q", stdout.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "rig alpha") || !strings.Contains(out, "would import 1 bead(s) (0 open, 1 closed)") || !strings.Contains(out, "gc storage migrate --from-rigs --rig alpha --fleet-stopped") {
+		t.Errorf("preflight does not report the rig's importable rows and the command: %q", out)
+	}
+}
+
+// TestPreflightBlocksOnAnUncodableRigEdgeByName: what the rig import refuses,
+// preflight blocks on, naming both beads and the fix.
+func TestPreflightBlocksOnAnUncodableRigEdgeByName(t *testing.T) {
 	rigPath := t.TempDir()
 	request, cfg, _ := preflightReadyCity(t, 1)
 	cfg.Rigs = []config.Rig{{Name: "alpha", Prefix: "ga", Path: rigPath}}
 
 	rig := beads.NewMemStore()
-	stray := mustCreateInfraBead(t, rig, beads.Bead{Title: "a session in a rig", Type: "session"})
-	mustCreateInfraBead(t, rig, beads.Bead{Title: "ordinary rig work", Type: "task"})
-	prev := openStorageScopeStore
-	openStorageScopeStore = func(storePath, cityPath string) (beads.Store, error) {
-		if storePath == rigPath {
-			return rig, nil
-		}
-		return prev(storePath, cityPath)
+	rig.IDPrefix = "ga"
+	member := mustCreateInfraBead(t, rig, beads.Bead{Title: "an open drained step", Type: "task", Metadata: beads.StringMap{"gc.kind": "task", "gc.root_bead_id": "ga-root"}})
+	convoy := mustCreateInfraBead(t, rig, beads.Bead{Title: "an open work convoy", Type: "task"})
+	if err := rig.DepAdd(convoy.ID, member.ID, "tracks"); err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { openStorageScopeStore = prev })
+	stubStorageScopeStore(t, rigPath, func() beads.Store { return rig })
 
 	var stdout, stderr bytes.Buffer
 	if code := doStoragePreflight(request, &stdout, &stderr); code == 0 {
-		t.Fatal("preflight cleared a city whose migration would refuse by name")
+		t.Fatalf("preflight cleared a rig whose import would refuse: %q", stdout.String())
 	}
-	out := stdout.String() + stderr.String()
-	if !strings.Contains(out, stray.ID) || !strings.Contains(out, "rig alpha") {
-		t.Errorf("preflight blocks without naming the bead and its rig, so it says a migration would fail without saying what to move: %q", out)
+	out := stdout.String()
+	if !strings.Contains(out, member.ID) || !strings.Contains(out, convoy.ID) || !strings.Contains(out, "membership edge") || !strings.Contains(out, "rig alpha") {
+		t.Errorf("preflight blocks without naming both beads and the fix: %q", out)
 	}
 }
 
@@ -438,10 +463,23 @@ func TestStoragePreflightIsReachableFromTheCommandTree(t *testing.T) {
 // asserts a check that IS there. Only running both legs over the same city
 // catches a check that is not.
 //
+// The migration leg is the command's own body, doStorageMigrate, not the copy
+// machinery beneath it. The command refuses before it copies too — its
+// exclusion, the shared-store check, the attestations — and a leg that began
+// below those refusals let preflight clear a shared-store city and a k8s city
+// that the command then refused inside the window. Each fixture names the
+// refusal it is about, and both legs must print it: a fixture the two refused
+// for different reasons would pass on the wrong refusal.
+//
 // Each fixture is built twice, once per leg, because the migration leg writes
 // to the city it is handed. The migration leg is also the control: a fixture
 // that fails to make the migration refuse would make the preflight assertion
 // vacuous, so it fails the test rather than passing quietly.
+//
+// What the migration refuses because the city is live — its controller, its
+// registration, its running sessions, a co-tenant holding its controller lock
+// — is the window itself, which preflight reports instead
+// (TestPreflightReportsTheWindowWithoutBlocking).
 //
 // One migration refusal is deliberately absent from this table and cannot be
 // added to it: infraCopyDepEdge refuses a DESTINATION that cannot carry an edge
@@ -454,9 +492,14 @@ func TestStoragePreflightIsReachableFromTheCommandTree(t *testing.T) {
 // A destination that could reach an operator without one does not exist, so
 // there is no window this omission could cost.
 func TestPreflightRefusesEveryCityTheMigrationRefuses(t *testing.T) {
-	cases := map[string]func(t *testing.T) (storageOperatorRequest, *config.City){
-		"a served-binding note names another binding": func(t *testing.T) (storageOperatorRequest, *config.City) {
-			request, cfg, _ := preflightReadyCity(t, 1)
+	cases := []struct {
+		name string
+		// reason is what both legs must print.
+		reason string
+		build  func(t *testing.T) storageOperatorRequest
+	}{
+		{"a served-binding note names another binding", "elsewhere", func(t *testing.T) storageOperatorRequest {
+			request, _, _ := preflightReadyCity(t, 1)
 			if err := writeBornSplitServedNote(request.CityPath, bornSplitServedNote{
 				Binding:  "elsewhere",
 				Provider: config.StorageProviderSQLiteBeads,
@@ -464,28 +507,28 @@ func TestPreflightRefusesEveryCityTheMigrationRefuses(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("writing the served-binding note: %v", err)
 			}
-			return request, cfg
-		},
-		"the source cannot be asked about edge payloads at all": func(t *testing.T) (storageOperatorRequest, *config.City) {
-			request, cfg, _ := preflightReadyCity(t, 0)
+			return request
+		}},
+		{"the source cannot be asked about edge payloads at all", "cannot report whether its dependency edges carry payloads", func(t *testing.T) storageOperatorRequest {
+			request, _, _ := preflightReadyCity(t, 0)
 			backing, _, _, _ := seedInfraEdgeSource(t)
 			openInfraMigrationSource = func(string) (beads.Store, error) { return mutePayloadSource{Store: backing}, nil }
-			return request, cfg
-		},
+			return request
+		}},
 		// The source answers the type assertion and then FAILS the read. This
 		// is the fixture that makes infraSourceEdgePayloadRefusal's per-edge
 		// loop load-bearing: with only the mute case above, deleting the loop
 		// and keeping the assertion leaves every test in the tree green while
 		// preflight starts clearing a city the migration refuses — the single
 		// thing this table exists to prevent.
-		"the source's edge-payload read fails": func(t *testing.T) (storageOperatorRequest, *config.City) {
-			request, cfg, _ := preflightReadyCity(t, 0)
+		{"the source's edge-payload read fails", "the dependencies table is unreadable", func(t *testing.T) storageOperatorRequest {
+			request, _, _ := preflightReadyCity(t, 0)
 			backing, _, _, _ := seedInfraEdgeSource(t)
 			source := &payloadCarryingSource{Store: backing, readErr: errors.New("the dependencies table is unreadable")}
 			openInfraMigrationSource = func(string) (beads.Store, error) { return source, nil }
-			return request, cfg
-		},
-		"the destination already holds beads this migration did not write": func(t *testing.T) (storageOperatorRequest, *config.City) {
+			return request
+		}},
+		{"the destination already holds beads this migration did not write", "did not write", func(t *testing.T) storageOperatorRequest {
 			request, cfg, _ := preflightReadyCity(t, 1)
 			target := mustResolveInfraTarget(t, request.CityPath, cfg)
 			destination, err := openInfraDestination(target)
@@ -496,54 +539,270 @@ func TestPreflightRefusesEveryCityTheMigrationRefuses(t *testing.T) {
 			if err := closeBeadStoreHandle(destination); err != nil {
 				t.Fatalf("closing the populated destination: %v", err)
 			}
-			return request, cfg
-		},
+			return request
+		}},
+		{"a rig prefix in a reserved class namespace", `"gcg"`, func(t *testing.T) storageOperatorRequest {
+			request, cfg, _ := preflightReadyCity(t, 1)
+			cfg.Rigs = []config.Rig{{Name: "reserved", Prefix: "gcg", Path: t.TempDir()}}
+			return request
+		}},
+		{"a remote stage", "remote stage of city controller-city", func(t *testing.T) storageOperatorRequest {
+			request, _, _ := preflightReadyCity(t, 1)
+			if err := writeRemoteStage(request.CityPath, remoteStage{ControllerCity: "controller-city", ControllerPath: "/srv/controller-city"}); err != nil {
+				t.Fatalf("writing the remote-stage record: %v", err)
+			}
+			return request
+		}},
+		{"an unreadable supervisor registry", "reading the supervisor registry", func(t *testing.T) storageOperatorRequest {
+			request, _, _ := preflightReadyCity(t, 1)
+			home := t.TempDir()
+			t.Setenv("GC_HOME", home)
+			if err := os.WriteFile(filepath.Join(home, "cities.toml"), []byte("[[cities\nthis is not toml"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return request
+		}},
+		{"sessions on a remote runtime, unattested", `remote runtime ([session] provider "k8s")`, func(t *testing.T) storageOperatorRequest {
+			request, cfg, _ := preflightReadyCity(t, 1)
+			t.Setenv("GC_SESSION", "")
+			cfg.Session.Provider = "k8s"
+			stubSessionInventory(t, nil, true, nil)
+			return request
+		}},
+		{"a session inventory that is not complete, unattested", "could not list every session", func(t *testing.T) storageOperatorRequest {
+			request, _, _ := preflightReadyCity(t, 1)
+			stubSessionInventory(t, nil, false, nil)
+			return request
+		}},
+		{"a session runtime that cannot be listed, unattested", "the runtime is unreachable in this test", func(t *testing.T) storageOperatorRequest {
+			request, _, _ := preflightReadyCity(t, 1)
+			stubSessionInventory(t, nil, false, errors.New("the runtime is unreachable in this test"))
+			return request
+		}},
+		{"a work store another registered city uses, unattested", "--force=shared-store:" + sharedToken, func(t *testing.T) storageOperatorRequest {
+			request, _, _ := preflightReadyCity(t, 1)
+			sharedStoreCities(t, request)
+			return request
+		}},
+		{"a shared-store attestation that finds no registered co-tenant", "no other registered city", func(t *testing.T) storageOperatorRequest {
+			request, _, _ := preflightReadyCity(t, 1)
+			sharedStoreCities(t, request)
+			stubOtherCities(t)
+			request.Force = storageForce{SharedStores: []string{sharedToken}}
+			return request
+		}},
+		{"another city's row in an attested shared work store", "belong to another city's scope", func(t *testing.T) storageOperatorRequest {
+			request, _, _ := preflightReadyCity(t, 1)
+			sharedStoreCities(t, request)
+			request.Force = storageForce{SharedStores: []string{sharedToken}}
+			source, err := openInfraMigrationSource(request.CityPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mustCreateInfraBead(t, source, beads.Bead{Title: "their mail", Type: "message", Metadata: map[string]string{beadmeta.RootStoreRefMetadataKey: "city:other-city"}})
+			return request
+		}},
+		{"a registered city whose config cannot be read", "config cannot be read", func(t *testing.T) storageOperatorRequest {
+			request, _, _ := preflightReadyCity(t, 1)
+			stubOtherCities(t, t.TempDir())
+			return request
+		}},
+		// The two below read the cities' real metadata; nothing stubs their
+		// identities.
+		{"another registered city on this city's explicit Dolt endpoint, unattested", "--force=shared-store:hq@loopback:3307", func(t *testing.T) storageOperatorRequest {
+			request, _, _ := preflightReadyCity(t, 1)
+			other := newOtherCity(t)
+			writeExplicitDoltCity(t, request.CityPath, 3307)
+			writeExplicitDoltCity(t, other, 3307)
+			stubOtherCities(t, other)
+			return request
+		}},
+		{"another registered city pins the address this city's stopped managed Dolt records, unattested", "(served at loopback:3417)", func(t *testing.T) storageOperatorRequest {
+			request, _, _ := preflightReadyCity(t, 1)
+			other := newOtherCity(t)
+			writeManagedDoltCity(t, request.CityPath)
+			stopManagedDolt(t, request.CityPath, 3417)
+			writeExplicitDoltCity(t, other, 3417)
+			stubOtherCities(t, other)
+			return request
+		}},
 	}
 
-	for name, build := range cases {
-		t.Run(name, func(t *testing.T) {
-			migrateRequest, migrateCfg := build(t)
-			var said bytes.Buffer
-			report := migrateInfraClasses(t, migrateRequest.CityPath, migrateCfg, &said)
-			if report.Outcome == infraMigrationConverged {
-				t.Fatalf("this fixture does not make the migration refuse, so it proves nothing about preflight: %s", said.String())
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var migrateStdout, migrateStderr bytes.Buffer
+			if code := doStorageMigrate(context.Background(), tc.build(t), &migrateStdout, &migrateStderr); code == 0 {
+				t.Fatalf("this fixture does not make the migration refuse, so it proves nothing about preflight: %s", migrateStdout.String())
+			}
+			if !strings.Contains(migrateStderr.String(), tc.reason) {
+				t.Fatalf("the migration refused this fixture for another reason than %q, so it proves nothing about that refusal: %s", tc.reason, migrateStderr.String())
 			}
 
-			preflightRequest, _ := build(t)
 			var stdout, stderr bytes.Buffer
-			if code := doStoragePreflight(preflightRequest, &stdout, &stderr); code == 0 {
-				t.Fatalf("preflight cleared a city the migration refuses with %v, which is the one thing this verb must never do.\nmigration said: %s\npreflight said: %s",
-					report.Outcome, said.String(), stdout.String())
+			if code := doStoragePreflight(tc.build(t), &stdout, &stderr); code == 0 {
+				t.Fatalf("preflight cleared a city the migration refuses, which is the one thing this verb must never do.\nmigration said: %s\npreflight said: %s",
+					migrateStderr.String(), stdout.String())
+			}
+			if !strings.Contains(stdout.String(), tc.reason) {
+				t.Errorf("preflight blocked without naming the migration's refusal %q.\nmigration said: %s\npreflight said: %s", tc.reason, migrateStderr.String(), stdout.String())
 			}
 		})
 	}
 
-	// The control both directions of the loop above are worthless without: a
-	// preflight that blocked unconditionally would satisfy every case.
-	t.Run("control: a city the migration accepts", func(t *testing.T) {
-		migrateRequest, migrateCfg, _ := preflightReadyCity(t, 1)
-		var said bytes.Buffer
-		if report := migrateInfraClasses(t, migrateRequest.CityPath, migrateCfg, &said); report.Outcome != infraMigrationConverged {
-			t.Fatalf("the control city does not migrate (%v), so the refusal cases above prove nothing: %s", report.Outcome, said.String())
-		}
-		preflightRequest, _, _ := preflightReadyCity(t, 1)
-		var stdout, stderr bytes.Buffer
-		if code := doStoragePreflight(preflightRequest, &stdout, &stderr); code != 0 {
-			t.Fatalf("preflight refused a city the migration accepts:\n%s", stdout.String())
-		}
-	})
+	// The controls both directions of the loop above are worthless without: a
+	// preflight that blocked unconditionally would satisfy every case. The
+	// attested ones are the cities the attestations exist for, which a
+	// preflight that ignored --force would block. Each cleared preflight
+	// names the command to run, attestations included.
+	controls := []struct {
+		name  string
+		build func(t *testing.T) storageOperatorRequest
+	}{
+		{"a city the migration accepts", func(t *testing.T) storageOperatorRequest {
+			request, _, _ := preflightReadyCity(t, 1)
+			return request
+		}},
+		{"sessions on a remote runtime, attested", func(t *testing.T) storageOperatorRequest {
+			request, cfg, _ := preflightReadyCity(t, 1)
+			t.Setenv("GC_SESSION", "")
+			cfg.Session.Provider = "k8s"
+			stubSessionInventory(t, nil, true, nil)
+			request.Force = storageForce{RemoteRuntime: true}
+			return request
+		}},
+		{"a session inventory that is not complete, attested", func(t *testing.T) storageOperatorRequest {
+			request, _, _ := preflightReadyCity(t, 1)
+			stubSessionInventory(t, nil, false, nil)
+			request.Force = storageForce{RemoteRuntime: true}
+			return request
+		}},
+		{"a shared work store, attested, its co-tenant stopped and owning no row in it", func(t *testing.T) storageOperatorRequest {
+			request, _, _ := preflightReadyCity(t, 1)
+			sharedStoreCities(t, request)
+			request.Force = storageForce{SharedStores: []string{sharedToken}}
+			return request
+		}},
+	}
+	for _, tc := range controls {
+		t.Run("control: "+tc.name, func(t *testing.T) {
+			var migrateStdout, migrateStderr bytes.Buffer
+			if code := doStorageMigrate(context.Background(), tc.build(t), &migrateStdout, &migrateStderr); code != 0 {
+				t.Fatalf("the control city does not migrate, so the refusal cases above prove nothing: %s", migrateStderr.String())
+			}
+			request := tc.build(t)
+			var stdout, stderr bytes.Buffer
+			if code := doStoragePreflight(request, &stdout, &stderr); code != 0 {
+				t.Fatalf("preflight refused a city the migration accepts:\n%s", stdout.String())
+			}
+			want := strings.Join(append([]string{storageMigrationCommand, "--" + storageFleetStoppedFlag}, request.Force.flags()...), " ")
+			if !strings.Contains(stdout.String(), "run: "+want+"\n") {
+				t.Errorf("a cleared preflight does not name the command it cleared, %q:\n%s", want, stdout.String())
+			}
+		})
+	}
 }
 
-// TestPreflightCensusesRigScopesEvenOnAConvergedCity pins the one ordering that
-// matters, against the one city that hides it.
+// TestPreflightReportsTheWindowWithoutBlocking: what the migration refuses
+// because the city is live is the window itself — its registration with the
+// supervisor, its running sessions, and, under the shared-store attestation, a
+// co-tenant holding its controller lock. Preflight runs against a live city,
+// so it names each one with the command that ends it, and clears the city.
+// The migration leg is the control: each is a real refusal there. The
+// co-tenant case also shows that preflight takes no co-tenant's lock: it
+// clears while the co-tenant holds it.
+func TestPreflightReportsTheWindowWithoutBlocking(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// refusal is what the migration prints; report is what preflight
+		// prints instead, and command is how the report ends it.
+		refusal, report, command string
+		build                    func(t *testing.T) storageOperatorRequest
+	}{
+		{"the city is registered with the supervisor", "registered with the supervisor", "supervisor: this city is registered", "`" + storageStopCommand + "`", func(t *testing.T) storageOperatorRequest {
+			request, _, _ := preflightReadyCity(t, 1)
+			t.Setenv("GC_HOME", t.TempDir())
+			if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(request.CityPath, "registered-city"); err != nil {
+				t.Fatal(err)
+			}
+			return request
+		}},
+		{"sessions of the city are running", "lock-city--worker", "sessions: 1 session(s) of this city are running (lock-city--worker)", "`" + storageStopCommand + "`", func(t *testing.T) storageOperatorRequest {
+			request, _, _ := preflightReadyCity(t, 1)
+			stubSessionInventory(t, []string{"lock-city--worker"}, true, nil)
+			return request
+		}},
+		{"a co-tenant holds its controller lock, attested", "holds its controller lock", "co-tenants: ", "`" + storageCoTenantStopCommand + "`", func(t *testing.T) storageOperatorRequest {
+			request, _, _ := preflightReadyCity(t, 1)
+			other := sharedStoreCities(t, request)
+			held, err := acquireControllerLock(other)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { held.Close() }) //nolint:errcheck // test cleanup
+			request.Force = storageForce{SharedStores: []string{sharedToken}}
+			return request
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var migrateStdout, migrateStderr bytes.Buffer
+			if code := doStorageMigrate(context.Background(), tc.build(t), &migrateStdout, &migrateStderr); code == 0 || !strings.Contains(migrateStderr.String(), tc.refusal) {
+				t.Fatalf("the migration = %d, stderr %q; want a refusal naming %q, or this proves nothing", code, migrateStderr.String(), tc.refusal)
+			}
+
+			var stdout, stderr bytes.Buffer
+			if code := doStoragePreflight(tc.build(t), &stdout, &stderr); code != 0 {
+				t.Fatalf("preflight blocked on the window, so it can only be run from inside the window it exists to plan: exit %d\n%s", code, stdout.String())
+			}
+			out := stdout.String()
+			if !strings.Contains(out, tc.report) || !strings.Contains(out, tc.command) {
+				t.Errorf("preflight does not report %q with the command that ends it (%s):\n%s", tc.report, tc.command, out)
+			}
+			if strings.Contains(out, preflightBlockTag) {
+				t.Errorf("preflight cleared the city but printed a block:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestPreflightAndMigrateAgreeOnAManagedStoreAcrossTheStop: preflight runs on
+// the live city and the migration inside the window, after `gc stop` stopped
+// the city's managed Dolt. On gc's default topology, with another registered
+// city on its own managed server and both databases named hq, neither store is
+// the other's in either state: preflight clears with the server up, and the
+// migration accepts with it down. Both read the cities' real metadata.
+func TestPreflightAndMigrateAgreeOnAManagedStoreAcrossTheStop(t *testing.T) {
+	request, _, _ := preflightReadyCity(t, 1)
+	other := newOtherCity(t)
+	writeManagedDoltCity(t, request.CityPath)
+	writeManagedDoltCity(t, other)
+	stubOtherCities(t, other)
+	writeReachableManagedDoltState(t, other)
+	port := writeReachableManagedDoltState(t, request.CityPath)
+
+	var stdout, stderr bytes.Buffer
+	if code := doStoragePreflight(request, &stdout, &stderr); code != 0 {
+		t.Fatalf("preflight on the live city refused: exit %d\n%s", code, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "no other registered city uses this city's work store") {
+		t.Fatalf("preflight did not clear the shared-store check, so it proves nothing about the window:\n%s", stdout.String())
+	}
+
+	stopManagedDolt(t, request.CityPath, port)
+	if code, stderr := migrateFor(t, request); code != 0 {
+		t.Fatalf("preflight cleared the live city, and the migration refused it once its managed Dolt was stopped: exit %d: %s", code, stderr)
+	}
+}
+
+// TestPreflightNamesRigResidueOnAConvergedCityWithoutBlocking pins what the
+// census means on a city that already converged.
 //
-// A converged city's migration is a no-op, so preflight reports it and returns
-// early. But the rig census runs BEFORE the marker is read — in the migration it
-// runs before the migration body is entered at all — and a converged city can
-// still accumulate an infrastructure bead in a rig scope afterwards. Reading the
-// marker first would clear that city while `gc storage migrate` refuses it by
-// name, which is the exact divergence this verb exists to prevent.
-func TestPreflightCensusesRigScopesEvenOnAConvergedCity(t *testing.T) {
+// The migration's re-run there copies nothing: it re-checks containment and
+// clears the retained copies, so it does not census rig scopes
+// (doStorageMigrate), and a rig row is as unreachable after it as before.
+// Blocking here would tell the operator that a migration refuses when it does
+// not, over the one step that ends the retained copies boot refuses over. The
+// rows are still named, as a note.
+func TestPreflightNamesRigResidueOnAConvergedCityWithoutBlocking(t *testing.T) {
 	rigPath := t.TempDir()
 	request, cfg, _ := preflightReadyCity(t, 2)
 
@@ -556,6 +815,7 @@ func TestPreflightCensusesRigScopesEvenOnAConvergedCity(t *testing.T) {
 	// exist: the migration would have refused it otherwise.
 	cfg.Rigs = []config.Rig{{Name: "alpha", Prefix: "ga", Path: rigPath}}
 	rig := beads.NewMemStore()
+	rig.IDPrefix = "ga"
 	stray := mustCreateInfraBead(t, rig, beads.Bead{Title: "a session written after the cutover", Type: "session"})
 	prev := openStorageScopeStore
 	openStorageScopeStore = func(storePath, cityPath string) (beads.Store, error) {
@@ -567,11 +827,15 @@ func TestPreflightCensusesRigScopesEvenOnAConvergedCity(t *testing.T) {
 	t.Cleanup(func() { openStorageScopeStore = prev })
 
 	var stdout, stderr bytes.Buffer
-	if code := doStoragePreflight(request, &stdout, &stderr); code == 0 {
-		t.Fatalf("preflight cleared a converged city holding infrastructure residue in a rig scope, which the migration refuses by name: %q", stdout.String())
+	if code := doStoragePreflight(request, &stdout, &stderr); code != 0 {
+		t.Fatalf("preflight refused a converged city over rig residue the migration does not stop for: %q", stdout.String())
 	}
-	if out := stdout.String() + stderr.String(); !strings.Contains(out, stray.ID) {
-		t.Errorf("preflight blocks without naming the stray bead: %q", out)
+	out := stdout.String()
+	if !strings.Contains(out, stray.ID) || !strings.Contains(out, preflightNoteTag) {
+		t.Errorf("preflight does not name the stray bead in a note: %q", out)
+	}
+	if strings.Contains(out, preflightBlockTag) {
+		t.Errorf("preflight reports a block on a converged city: %q", out)
 	}
 }
 

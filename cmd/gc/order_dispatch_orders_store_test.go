@@ -285,7 +285,7 @@ func TestOrderDispatchGateReadsTheBindingAloneOnASplitCity(t *testing.T) {
 		t.Fatalf("ordersStoreFor = %T(%p), want the binding %p; the tracking bead's own store is not in the gate's reach", got, got, binding)
 	}
 
-	storesForGate, storeKeysForGate := m.gateStoresFor(cityPath, workStore, "city\x00"+cityPath, nil)
+	storesForGate, storeKeysForGate := m.gateStoresFor(cityPath, workStore, "city\x00"+cityPath, nil, nil)
 	if !storeListContains(storesForGate, beads.Store(binding)) {
 		t.Fatalf("gate store list = %+v, missing the binding the tracking bead lives in; the marker the dispatch just wrote is invisible and the order re-fires every tick", storesForGate)
 	}
@@ -318,7 +318,7 @@ func TestOrderDispatchGateStaysOnTheOneStoreOnSingleStoreCity(t *testing.T) {
 		dispatchCtx:    dispatchCtx,
 		dispatchCancel: cancel,
 	}
-	storesForGate, storeKeysForGate := m.gateStoresFor(cityPath, store, "city\x00"+cityPath, nil)
+	storesForGate, storeKeysForGate := m.gateStoresFor(cityPath, store, "city\x00"+cityPath, nil, nil)
 	if len(storesForGate) != 1 || storesForGate[0] != beads.Store(store) {
 		t.Fatalf("gate store list = %+v, want exactly the one store the city has", storesForGate)
 	}
@@ -437,12 +437,12 @@ func TestOrderTrackingWatchdogsReachTheOrdersBinding(t *testing.T) {
 		logPrefix:           "gc test",
 	}
 
-	if got := cr.relocatedOrdersStore(); got != beads.Store(binding) {
+	if got := cr.relocatedOrdersStore(cr.cfg); got != beads.Store(binding) {
 		t.Fatalf("relocatedOrdersStore = %T(%p), want the binding %p", got, got, binding)
 	}
 
 	now := stale.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter + time.Millisecond)
-	cr.runOrderTrackingSweepWatchdog(now)
+	cr.runOrderTrackingSweepWatchdog(cr.cfg, now)
 
 	closed, err := binding.Get(stale.ID)
 	if err != nil {
@@ -457,7 +457,7 @@ func TestOrderTrackingWatchdogsReachTheOrdersBinding(t *testing.T) {
 	// the resolver rather than by running the prune, because the prune's own
 	// gates (backup freshness, the retain-last floor) are policy this change
 	// does not touch.
-	stores, _, closeOpened, err := cr.orderTrackingSweepStores()
+	stores, _, closeOpened, err := cr.orderTrackingSweepStores(cr.cfg)
 	defer closeOpened()
 	if err != nil {
 		t.Fatalf("resolving the watchdog sweep stores: %v", err)

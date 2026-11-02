@@ -3374,6 +3374,53 @@ func TestInstantiateStampsFormulaHash(t *testing.T) {
 	}
 }
 
+// A root cooked from an extends-based formula must carry the same provenance
+// pair as any other root: the child file as gc.formula_source and that file's
+// hash as gc.formula_hash.
+func TestCookStampsFormulaHashForExtendsFormula(t *testing.T) {
+	dir := t.TempDir()
+	parentContent := []byte(`formula = "mol-hash-base"
+
+[[steps]]
+id = "build"
+title = "Build"
+type = "task"
+`)
+	childContent := []byte(`formula = "mol-hash-child"
+extends = ["mol-hash-base"]
+
+[[steps]]
+id = "ship"
+title = "Ship"
+type = "task"
+needs = ["build"]
+`)
+	if err := os.WriteFile(filepath.Join(dir, "mol-hash-base.toml"), parentContent, 0o644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+	childPath := filepath.Join(dir, "mol-hash-child.toml")
+	if err := os.WriteFile(childPath, childContent, 0o644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	result, err := Cook(context.Background(), store, "mol-hash-child", []string{dir}, Options{})
+	if err != nil {
+		t.Fatalf("Cook: %v", err)
+	}
+	root, err := store.Get(result.RootID)
+	if err != nil {
+		t.Fatalf("Get root: %v", err)
+	}
+
+	if got := root.Metadata[beadmeta.FormulaSourceMetadataKey]; got != childPath {
+		t.Errorf("%s = %q, want child path %q", beadmeta.FormulaSourceMetadataKey, got, childPath)
+	}
+	if got, want := root.Metadata[beadmeta.FormulaHashMetadataKey], formula.ContentHash(childContent); got != want {
+		t.Errorf("%s = %q, want child file hash %q", beadmeta.FormulaHashMetadataKey, got, want)
+	}
+}
+
 func TestInstantiateNoHashWhenEmpty(t *testing.T) {
 	store := beads.NewMemStore()
 	recipe := &formula.Recipe{
@@ -3814,5 +3861,349 @@ func TestInstantiate_DeferredStepsStayGate(t *testing.T) {
 	}
 	if b.Type != "gate" {
 		t.Errorf("deferred step.Type = %q, want %q", b.Type, "gate")
+	}
+}
+
+// TestInstantiateRefusesASessionStep (mc-okw9n): a step whose bead would be
+// a session row (type session, or the gc:session label a variable
+// substitutes in) is refused at instantiation, on the sequential path and
+// the graph-apply path, and nothing is created; compile refuses the
+// literal marks.
+func TestInstantiateRefusesASessionStep(t *testing.T) {
+	for _, graph := range []bool{false, true} {
+		gcSession := "gc:session"
+		for _, c := range []struct {
+			name string
+			step formula.RecipeStep
+			vars map[string]string          // runtime vars
+			defs map[string]*formula.VarDef // the formula's, with defaults
+			want string
+		}{
+			{"type session", formula.RecipeStep{ID: "f.s", Title: "S", Type: "session"}, nil, nil, "session row"},
+			{"a substituted gc:session label", formula.RecipeStep{ID: "f.s", Title: "S", Type: "task", Labels: []string{"{{lbl}}"}}, map[string]string{"lbl": "gc:session"}, nil, "session row"},
+			{"a gc:session label by a var's default (M05)", formula.RecipeStep{ID: "f.s", Title: "S", Type: "task", Labels: []string{"{{lbl}}"}}, nil, map[string]*formula.VarDef{"lbl": {Default: &gcSession}}, "session row"},
+			{"type startup-health-episode (mc-lp7zb)", formula.RecipeStep{ID: "f.s", Title: "S", Type: "startup-health-episode"}, nil, nil, "startup-health episode"},
+			{"type convergence (architecture B)", formula.RecipeStep{ID: "f.s", Title: "S", Type: "Convergence"}, nil, nil, "controller-owned"},
+			{"a ' GC:Session ' label (architecture B)", formula.RecipeStep{ID: "f.s", Title: "S", Type: "task", Labels: []string{" GC:Session "}}, nil, nil, "controller-owned"},
+			{"a forged order run root (the #7766 review)", formula.RecipeStep{ID: "f.s", Title: "S", Type: "task", Labels: []string{"order-run:digest"}, Metadata: map[string]string{"gc.kind": "wisp"}}, nil, nil, "coordination row"},
+			{"a substituted gc:wait label", formula.RecipeStep{ID: "f.s", Title: "S", Type: "task", Labels: []string{"{{lbl}}"}}, map[string]string{"lbl": "gc:wait"}, nil, "coordination row"},
+			{"type message", formula.RecipeStep{ID: "f.s", Title: "S", Type: "Message"}, nil, nil, "coordination row"},
+		} {
+			prev := IsGraphApplyEnabled()
+			SetGraphApplyEnabled(graph)
+			store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+			recipe := &formula.Recipe{
+				Name:  "f",
+				Steps: []formula.RecipeStep{{ID: "f", Title: "F", Type: "task", IsRoot: true}, c.step},
+				Deps:  []formula.RecipeDep{{StepID: "f.s", DependsOnID: "f", Type: "parent-child"}},
+				Vars:  c.defs,
+			}
+			_, err := Instantiate(context.Background(), store, recipe, Options{Vars: c.vars})
+			SetGraphApplyEnabled(prev)
+			all, _ := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+			if err == nil || !strings.Contains(err.Error(), c.want) || len(all) != 0 {
+				t.Fatalf("graph %v, %s: Instantiate = %v, beads %d; want refused (%s) with nothing created", graph, c.name, err, len(all), c.want)
+			}
+		}
+	}
+}
+
+// TestInstantiateFragmentRefusesASessionStep (mc-okw9n): a fragment whose
+// step would make a session row is refused before anything is written onto
+// its workflow.
+func TestInstantiateFragmentRefusesASessionStep(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{Title: "wf", Type: "task", Metadata: map[string]string{"gc.kind": "workflow"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipe := &formula.FragmentRecipe{Name: "frag", Steps: []formula.RecipeStep{{ID: "frag.s", Title: "S", Type: "task", Labels: []string{"gc:session"}}}, Entries: []string{"frag.s"}, Sinks: []string{"frag.s"}}
+	_, err = InstantiateFragment(context.Background(), store, recipe, FragmentOptions{RootID: root.ID})
+	all, _ := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err == nil || !strings.Contains(err.Error(), "session row") || len(all) != 1 {
+		t.Fatalf("InstantiateFragment = %v, beads %d; want refused with only the root", err, len(all))
+	}
+}
+
+// TestCookStampsDeclaredGateType pins that the type a formula declares on a
+// [steps.gate] reaches the synthesized gate bead as gc.gate_type metadata.
+// gc's stores have no gate-condition column, so without the stamp no reader
+// (such as the core human-gate notify and re-nudge orders) can tell a human
+// gate from a timer gate. The stamp must survive every instantiation path:
+// v1 and graph.v2 formulas, with graph-apply on and off.
+func TestCookStampsDeclaredGateType(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	const steps = `
+[[steps]]
+id = "approve"
+title = "Approve"
+[steps.gate]
+type = "human"
+id = "approval"
+
+[[steps]]
+id = "wait"
+title = "Wait"
+[steps.gate]
+type = "timer"
+timeout = "1h"
+
+[[steps]]
+id = "untyped"
+title = "Untyped"
+[steps.gate]
+id = "bare"
+
+[[steps]]
+id = "plain"
+title = "Plain"
+`
+	formulas := map[string]string{
+		"gate-type-v1": `
+formula = "gate-type-v1"
+`,
+		"gate-type-v2": `
+formula = "gate-type-v2"
+version = 2
+contract = "graph.v2"
+`,
+	}
+
+	for name, header := range formulas {
+		for _, graphApply := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/graphApply=%t", name, graphApply), func(t *testing.T) {
+				prev := IsGraphApplyEnabled()
+				SetGraphApplyEnabled(graphApply)
+				t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+
+				dir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(dir, name+".toml"), []byte(header+steps), 0o644); err != nil {
+					t.Fatalf("writing formula: %v", err)
+				}
+				// A plain MemStore lacks GraphApplyStore, so Instantiate would
+				// silently take the sequential path; the spy forces the
+				// graph-apply path and captures the plan it submits.
+				var store beads.Store = beads.NewMemStore()
+				spy := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+				if graphApply {
+					store = spy
+				}
+				result, err := Cook(context.Background(), store, name, []string{dir}, Options{})
+				if err != nil {
+					t.Fatalf("Cook: %v", err)
+				}
+				planMetadata := map[string]map[string]string{}
+				if graphApply {
+					if spy.calls != 1 || spy.plan == nil {
+						t.Fatalf("ApplyGraphPlan calls = %d, want 1 (graph-apply path not taken)", spy.calls)
+					}
+					for _, node := range spy.plan.Nodes {
+						planMetadata[node.Key] = node.Metadata
+					}
+				}
+
+				wantGateType := map[string]string{
+					name + ".gate-approve": "human",
+					name + ".gate-wait":    "timer",
+					name + ".gate-untyped": "",
+					name + ".approve":      "",
+					name + ".wait":         "",
+					name + ".plain":        "",
+				}
+				for stepID, want := range wantGateType {
+					beadID, ok := result.IDMapping[stepID]
+					if !ok {
+						t.Fatalf("IDMapping has no %q; mapping=%v", stepID, result.IDMapping)
+					}
+					var metadata map[string]string
+					if graphApply {
+						metadata, ok = planMetadata[stepID]
+						if !ok {
+							t.Fatalf("graph-apply plan has no node %q", stepID)
+						}
+					} else {
+						b, err := store.Get(beadID)
+						if err != nil {
+							t.Fatalf("Get %s (%s): %v", stepID, beadID, err)
+						}
+						metadata = b.Metadata
+					}
+					got, present := metadata[beadmeta.GateTypeMetadataKey]
+					if want == "" {
+						if present {
+							t.Errorf("%s: %s = %q, want no key", stepID, beadmeta.GateTypeMetadataKey, got)
+						}
+						continue
+					}
+					if got != want {
+						t.Errorf("%s: %s = %q, want %q", stepID, beadmeta.GateTypeMetadataKey, got, want)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestInstantiateResolvesDefaultReferencingSuppliedVar(t *testing.T) {
+	store := beads.NewMemStore()
+	def := "{{rig_name}}/reviewer"
+	recipe := &formula.Recipe{
+		Name: "nested-default",
+		Steps: []formula.RecipeStep{
+			{ID: "nested-default", Title: "Root", Type: "molecule", IsRoot: true},
+			{ID: "nested-default.step", Title: "Review by {{reviewer}}", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "nested-default.step", DependsOnID: "nested-default", Type: "parent-child"},
+		},
+		Vars: map[string]*formula.VarDef{
+			"reviewer": {Default: &def},
+		},
+	}
+	result, err := Instantiate(context.Background(), store, recipe, Options{Vars: map[string]string{"rig_name": "r1"}})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	step, err := store.Get(result.IDMapping["nested-default.step"])
+	if err != nil {
+		t.Fatalf("Get step: %v", err)
+	}
+	if step.Title != "Review by r1/reviewer" {
+		t.Fatalf("title = %q, want %q", step.Title, "Review by r1/reviewer")
+	}
+}
+
+const testRootMetaKey = "gc.test_root_meta"
+
+func rootMetadataRecipe(rootOnly bool) *formula.Recipe {
+	return &formula.Recipe{
+		Name:     "wf",
+		RootOnly: rootOnly,
+		Steps: []formula.RecipeStep{
+			{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}},
+			{ID: "wf.step", Title: "Work", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf.step", DependsOnID: "wf", Type: "parent-child"},
+		},
+	}
+}
+
+func withGraphApply(t *testing.T, enabled bool) {
+	t.Helper()
+	prev := IsGraphApplyEnabled()
+	SetGraphApplyEnabled(enabled)
+	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+}
+
+// RootMetadata lands on the root only, through the per-bead create path.
+func TestInstantiateRootMetadataStampsRootOnly(t *testing.T) {
+	withGraphApply(t, false)
+	store := beads.NewMemStore()
+	rootMeta := map[string]string{testRootMetaKey: "alice"}
+
+	result, err := Instantiate(context.Background(), store, rootMetadataRecipe(false), Options{RootMetadata: rootMeta})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	root, err := store.Get(result.RootID)
+	if err != nil {
+		t.Fatalf("get root: %v", err)
+	}
+	if got := root.Metadata[testRootMetaKey]; got != "alice" {
+		t.Fatalf("root %s = %q, want alice", testRootMetaKey, got)
+	}
+	step, err := store.Get(result.IDMapping["wf.step"])
+	if err != nil {
+		t.Fatalf("get step: %v", err)
+	}
+	if got, ok := step.Metadata[testRootMetaKey]; ok {
+		t.Fatalf("step carries root metadata %q; RootMetadata must stay on the root", got)
+	}
+	if len(rootMeta) != 1 {
+		t.Fatalf("Instantiate mutated the caller's RootMetadata: %v", rootMeta)
+	}
+}
+
+// The graph-apply batch path builds the root node on its own; RootMetadata
+// must reach it there too.
+func TestInstantiateRootMetadataStampsRootOnlyViaGraphApply(t *testing.T) {
+	withGraphApply(t, true)
+	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+
+	if _, err := Instantiate(context.Background(), store, rootMetadataRecipe(false), Options{
+		RootMetadata: map[string]string{testRootMetaKey: "alice"},
+	}); err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	if store.plan == nil {
+		t.Fatal("ApplyGraphPlan was not called")
+	}
+	for _, node := range store.plan.Nodes {
+		got, ok := node.Metadata[testRootMetaKey]
+		switch node.Key {
+		case "wf":
+			if got != "alice" {
+				t.Fatalf("root node %s = %q, want alice", testRootMetaKey, got)
+			}
+		default:
+			if ok {
+				t.Fatalf("node %s carries root metadata %q; RootMetadata must stay on the root", node.Key, got)
+			}
+		}
+	}
+}
+
+// An attached root-only wisp (sling --on) is created under its source bead;
+// its root is the one RootMetadata stamps, in either create path.
+func TestInstantiateRootMetadataStampsAttachedRootOnlyWisp(t *testing.T) {
+	for _, graphApply := range []bool{false, true} {
+		withGraphApply(t, graphApply)
+		store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+		source, err := store.Create(beads.Bead{Title: "Source", Type: "task"})
+		if err != nil {
+			t.Fatalf("create source: %v", err)
+		}
+		result, err := Instantiate(context.Background(), store, rootMetadataRecipe(true), Options{
+			ParentID:     source.ID,
+			RootMetadata: map[string]string{testRootMetaKey: "alice"},
+		})
+		if err != nil {
+			t.Fatalf("graphApply=%v Instantiate: %v", graphApply, err)
+		}
+		if graphApply {
+			if store.plan == nil || len(store.plan.Nodes) != 1 {
+				t.Fatalf("graphApply plan = %+v, want the single root node", store.plan)
+			}
+			if got := store.plan.Nodes[0].Metadata[testRootMetaKey]; got != "alice" {
+				t.Fatalf("graph-apply root %s = %q, want alice", testRootMetaKey, got)
+			}
+			continue
+		}
+		root, err := store.Get(result.RootID)
+		if err != nil {
+			t.Fatalf("get root: %v", err)
+		}
+		if got := root.Metadata[testRootMetaKey]; got != "alice" {
+			t.Fatalf("root %s = %q, want alice", testRootMetaKey, got)
+		}
+	}
+}
+
+// No RootMetadata leaves the root exactly as before.
+func TestInstantiateWithoutRootMetadataStampsNothing(t *testing.T) {
+	withGraphApply(t, false)
+	store := beads.NewMemStore()
+	result, err := Instantiate(context.Background(), store, rootMetadataRecipe(false), Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	root, err := store.Get(result.RootID)
+	if err != nil {
+		t.Fatalf("get root: %v", err)
+	}
+	if got, ok := root.Metadata[testRootMetaKey]; ok {
+		t.Fatalf("root carries %s=%q without RootMetadata", testRootMetaKey, got)
 	}
 }

@@ -248,3 +248,50 @@ func clearCityRigFlags(t *testing.T) {
 		rigFlag = prevRigFlag
 	})
 }
+
+// TestControllerStateOrdersHonorsOverridesAfterUnmatchedOne pins the API
+// path: an override naming a missing order must not re-enable an order a
+// later override disables.
+func TestControllerStateOrdersHonorsOverridesAfterUnmatchedOne(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityDir, cfg := newOrderEnabledFilterCity(t)
+	cfg.Orders.Overrides = append([]config.OrderOverride{{Name: "missing"}}, cfg.Orders.Overrides...)
+
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	var active []orders.Order
+	logs := captureCmdOrderLogs(t, func() {
+		active = cs.Orders()
+	})
+	requireOrderNames(t, active, "keep")
+	if !strings.Contains(logs, `order "missing" not found`) {
+		t.Fatalf("logs = %q, want the unmatched override reported", logs)
+	}
+}
+
+// TestControllerStateDisableOrderAfterUnmatchedOverride pins the order
+// disable round trip: DisableOrder appends its override, so a stale entry
+// earlier in city.toml must not hide it.
+func TestControllerStateDisableOrderAfterUnmatchedOverride(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityDir, cfg := newOrderEnabledFilterCity(t)
+	writeProviderAwareTestCity(t, cityDir, `[workspace]
+name = "test-city"
+
+[[orders.overrides]]
+name = "missing"
+enabled = false
+
+[[orders.overrides]]
+name = "drop"
+enabled = false
+`)
+	disabled := false
+	cfg.Orders.Overrides = append([]config.OrderOverride{{Name: "missing", Enabled: &disabled}}, cfg.Orders.Overrides...)
+
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	if err := cs.DisableOrder("keep", ""); err != nil {
+		t.Fatalf("DisableOrder: %v", err)
+	}
+	requireOrderAbsent(t, cs.Orders(), "keep")
+	requireOrderEnabledState(t, cs.OrdersAll(), "keep", false)
+}

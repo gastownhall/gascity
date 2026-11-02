@@ -57,21 +57,22 @@ func TestRouteMissingClassification(t *testing.T) {
 func TestWaitInfoWireRoundTrip(t *testing.T) {
 	cases := map[string]session.WaitInfo{
 		"full": {
-			ID:              "gc-wait-1",
-			SessionID:       "gc-sess-1",
-			SessionName:     "worker",
-			Kind:            "deps",
-			State:           "ready",
-			DepIDs:          []string{"gc-1", "gc-2"},
-			DepMode:         "all",
-			RegisteredEpoch: "3",
-			DeliveryAttempt: "2",
-			NudgeID:         "wait-gc-wait-1-3-2",
-			ExpiresAt:       "2026-05-16T09:30:00Z",
-			Note:            "Continue.",
-			Status:          "open",
-			CreatedAt:       time.Date(2026, 3, 2, 4, 5, 6, 0, time.UTC),
-			Labels:          []string{session.WaitBeadLabel, "session:gc-sess-1"},
+			ID:                     "gc-wait-1",
+			SessionID:              "gc-sess-1",
+			SessionName:            "worker",
+			Kind:                   "deps",
+			State:                  "ready",
+			DepIDs:                 []string{"gc-1", "gc-2"},
+			DepMode:                "all",
+			RegisteredEpoch:        "3",
+			RegisteredResetPending: true,
+			DeliveryAttempt:        "2",
+			NudgeID:                "wait-gc-wait-1-3-2",
+			ExpiresAt:              "2026-05-16T09:30:00Z",
+			Note:                   "Continue.",
+			Status:                 "open",
+			CreatedAt:              time.Date(2026, 3, 2, 4, 5, 6, 0, time.UTC),
+			Labels:                 []string{session.WaitBeadLabel, "session:gc-sess-1"},
 		},
 		"nil-deps-zero-created": {
 			ID:        "gc-wait-2",
@@ -172,5 +173,47 @@ func TestWaitList_TypedRungPreservesSubSecondOrder(t *testing.T) {
 	sort.SliceStable(got, func(i, j int) bool { return got[i].CreatedAt.Before(got[j].CreatedAt) })
 	if got[0].ID != "w-early" || got[1].ID != "w-late" {
 		t.Fatalf("post-sort order = [%s %s], want [w-early w-late]", got[0].ID, got[1].ID)
+	}
+}
+
+// TestWaitTypedRungCarriesRegisteredResetPending drives the real /v0/waits and
+// /v0/wait/{id} handlers through the typed client: a wait registered during a
+// pending reset reads back flagged on both, and an unflagged wait does not, as
+// the legacy /beads rung and the local store read them (WaitInfoFromBead).
+func TestWaitTypedRungCarriesRegisteredResetPending(t *testing.T) {
+	created := time.Date(2026, 3, 2, 4, 5, 6, 0, time.UTC)
+	flagged := subSecondWaitBead("w-flagged", created)
+	flagged.Metadata["registered_epoch"] = "2"
+	flagged.Metadata["registered_reset_pending"] = "true"
+	unflagged := subSecondWaitBead("w-unflagged", created.Add(time.Second))
+	unflagged.Metadata["registered_epoch"] = "2"
+
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStoreFrom(2, []beads.Bead{flagged, unflagged}, nil)
+	ts := httptest.NewServer(newTestCityHandler(t, state))
+	t.Cleanup(ts.Close)
+	c := NewCityScopedClient(ts.URL, state.CityName())
+
+	want := map[string]bool{"w-flagged": true, "w-unflagged": false}
+	list, err := c.ListWaits("", "")
+	if err != nil {
+		t.Fatalf("ListWaits: %v", err)
+	}
+	if len(list.Body.Waits) != len(want) {
+		t.Fatalf("wait count = %d, want %d", len(list.Body.Waits), len(want))
+	}
+	for _, w := range list.Body.Waits {
+		if w.RegisteredResetPending != want[w.ID] {
+			t.Errorf("ListWaits %s: RegisteredResetPending = %v, want %v", w.ID, w.RegisteredResetPending, want[w.ID])
+		}
+	}
+	for id, flag := range want {
+		got, err := c.GetWait(id)
+		if err != nil {
+			t.Fatalf("GetWait(%s): %v", id, err)
+		}
+		if got.Body.RegisteredResetPending != flag {
+			t.Errorf("GetWait %s: RegisteredResetPending = %v, want %v", id, got.Body.RegisteredResetPending, flag)
+		}
 	}
 }

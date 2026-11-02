@@ -1,5 +1,7 @@
 package api
 
+import "github.com/gastownhall/gascity/internal/beads"
+
 // isGraphConvoyID checks if the bead is a formula-compiled graph convoy
 // (workflow) by looking for the gc.kind=workflow marker. It consults the
 // dedicated graph store first (graph-first) so a relocated graph convoy id is
@@ -7,18 +9,34 @@ package api
 // default city the graph store equals the work store, so this leg is byte-identical.
 func isGraphConvoyID(s *Server, id string) bool {
 	if graphStore := s.state.GraphBeadStore().Store; graphStore != nil && graphStore != s.state.CityBeadStore() {
-		if b, err := graphStore.Get(id); err == nil {
+		// Graph-first leg: a plain (work) convoy id misses here and the rig
+		// legs below answer it.
+		if b, err := beads.FederatedGet(graphStore, id); err == nil {
 			return isGraphConvoyBead(b)
 		}
 	}
 	stores := s.state.BeadStores()
 	for _, rigName := range sortedRigNames(stores) {
+		// On a split city a rig's graph convoys live in the binding asked
+		// above (the S4 placement rule). A rig store is asked only while it
+		// may still hold pre-S4 graph rows; a relic-free rig holds only work,
+		// whose convoys are never graph convoys.
+		if rigGraphLegRetired(s.state, rigName) {
+			continue
+		}
 		store := stores[rigName]
-		b, err := store.Get(id)
+		b, err := rigLegConvoyGet(store, id)
 		if err != nil {
 			continue
 		}
 		return isGraphConvoyBead(b)
 	}
 	return false
+}
+
+// rigLegConvoyGet is isGraphConvoyID's rig leg: a relic read (S4 debt) of a
+// graph convoy a rig ledger holds only from before S4a, until the rig is
+// imported; a work convoy is that rig's own row.
+func rigLegConvoyGet(store beads.Store, id string) (beads.Bead, error) {
+	return beads.RelicGet(store, id)
 }

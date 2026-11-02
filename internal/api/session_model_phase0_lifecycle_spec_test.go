@@ -574,3 +574,44 @@ func phase0MaterializeCityScopedNamedWorker(t *testing.T, srv *Server, fs *fakeS
 	}
 	return id
 }
+
+// TestRetireContinuityIneligibleNamedSessionClearsItsHolds: the retire of a
+// continuity-ineligible named session frees its identifiers and its holds
+// (the disposition's Retire cell), so the reassigned identity inherits none.
+func TestRetireContinuityIneligibleNamedSessionClearsItsHolds(t *testing.T) {
+	fs := newSessionFakeState(t)
+	store := &noBroadAPISessionRetireStore{MemStore: beads.NewMemStore(), t: t}
+	fs.cityBeadStore = store
+	srv := New(fs)
+	held, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"state":                     "asleep",
+			"continuity_eligible":       "false",
+			"configured_named_session":  "true",
+			"configured_named_identity": "worker",
+			"alias":                     "worker",
+			"session_name":              "s-worker",
+			"sleep_intent":              "user-hold",
+			"held_until":                "2126-01-01T00:00:00Z",
+			"wait_hold":                 "true",
+			"quarantined_until":         "2126-01-01T00:00:00Z",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := srv.retireContinuityIneligibleNamedSessionIdentifiers(store, apiNamedSessionSpec{Identity: "worker"}); err != nil {
+		t.Fatalf("retireContinuityIneligibleNamedSessionIdentifiers: %v", err)
+	}
+	updated, err := store.Get(held.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"sleep_intent", "held_until", "wait_hold", "quarantined_until", "alias"} {
+		if updated.Metadata[k] != "" {
+			t.Errorf("%s = %q after the retire, want cleared", k, updated.Metadata[k])
+		}
+	}
+}

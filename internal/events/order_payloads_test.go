@@ -64,3 +64,83 @@ func TestOrderSuppressedPayloadRoundTrips(t *testing.T) {
 		}
 	}
 }
+
+func TestOrderSkippedIsAKnownEventTypeWithATypedPayload(t *testing.T) {
+	t.Parallel()
+
+	if !slices.Contains(KnownEventTypes, OrderSkipped) {
+		t.Fatalf("%q is missing from KnownEventTypes; the SSE projection would carry it untyped", OrderSkipped)
+	}
+	sample, ok := LookupPayload(OrderSkipped)
+	if !ok {
+		t.Fatalf("%q has no registered payload", OrderSkipped)
+	}
+	if _, ok := sample.(OrderSkippedPayload); !ok {
+		t.Fatalf("%q registered payload is %T, want OrderSkippedPayload", OrderSkipped, sample)
+	}
+}
+
+func TestOrderSkippedPayloadRoundTrips(t *testing.T) {
+	t.Parallel()
+
+	want := OrderSkippedPayload{
+		OrderName: "core.reaper",
+		Outcome:   "partial",
+		Reason:    "some scopes or steps did not run",
+		Scopes:    []OrderSkippedScope{{Scope: "rig:api", Reason: "bead store unreachable"}},
+	}
+	raw := OrderSkippedPayloadJSON(want)
+
+	decoded, typed, err := DecodePayload(OrderSkipped, raw)
+	if err != nil {
+		t.Fatalf("DecodePayload: %v", err)
+	}
+	if !typed {
+		t.Fatal("DecodePayload reported no registered type for order.skipped")
+	}
+	got, ok := decoded.(OrderSkippedPayload)
+	if !ok {
+		t.Fatalf("DecodePayload returned %T, want OrderSkippedPayload", decoded)
+	}
+	if got.OrderName != want.OrderName || got.Outcome != want.Outcome || got.Reason != want.Reason || !slices.Equal(got.Scopes, want.Scopes) {
+		t.Fatalf("round-trip = %+v, want %+v", got, want)
+	}
+}
+
+func TestOrderSkippedPayloadJSONAlwaysCarriesAScopesArray(t *testing.T) {
+	t.Parallel()
+
+	raw := OrderSkippedPayloadJSON(OrderSkippedPayload{OrderName: "core.jsonl-export", Outcome: "skipped", Reason: "no bead scope could be exported"})
+	var shape map[string]any
+	if err := json.Unmarshal(raw, &shape); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if _, ok := shape["scopes"].([]any); !ok {
+		t.Fatalf("scopes must be a JSON array, got %s", raw)
+	}
+}
+
+func TestOrderInapplicableIsAKnownEventTypeWithATypedPayload(t *testing.T) {
+	t.Parallel()
+
+	if !slices.Contains(KnownEventTypes, OrderInapplicable) {
+		t.Fatalf("%q is missing from KnownEventTypes; the SSE projection would carry it untyped", OrderInapplicable)
+	}
+	want := OrderInapplicablePayload{
+		OrderName:       "dolt-health",
+		Scope:           "city",
+		Backend:         "http",
+		RequiresBackend: []string{"dolt"},
+	}
+	decoded, typed, err := DecodePayload(OrderInapplicable, OrderInapplicablePayloadJSON(want))
+	if err != nil || !typed {
+		t.Fatalf("DecodePayload: typed=%v err=%v", typed, err)
+	}
+	got, ok := decoded.(OrderInapplicablePayload)
+	if !ok {
+		t.Fatalf("DecodePayload returned %T, want OrderInapplicablePayload", decoded)
+	}
+	if got.OrderName != want.OrderName || got.Scope != want.Scope || got.Backend != want.Backend || !slices.Equal(got.RequiresBackend, want.RequiresBackend) {
+		t.Fatalf("round-trip = %+v, want %+v", got, want)
+	}
+}

@@ -244,7 +244,7 @@ func TestRegisterProviderOwnedScopeCustomTypesMergesAnExistingList(t *testing.T)
 	if got == "" {
 		t.Fatalf("no `bd config set types.custom` was issued for a scope missing startup-health-episode")
 	}
-	want := strings.Join(append(append([]string{}, v142CustomTypes...), "ops-extra", "table-only", "startup-health-episode"), ",")
+	want := strings.Join(append(append([]string{}, v142CustomTypes...), "ops-extra", "table-only", "startup-health-episode", "op"), ",")
 	if got != want {
 		t.Fatalf("types.custom set to %q, want the row ∪ table ∪ required merge %q", got, want)
 	}

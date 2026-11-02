@@ -213,7 +213,7 @@ func prepareResumeRoleStart(t *testing.T, tp TemplateParams, resumeKey string) *
 // carries the full prompt on the launch path (gastownhall/gascity#5238).
 func TestResumeOnHookPrimedProviderNeverReplaysRolePrompt(t *testing.T) {
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(string, string, string) (present, probeable bool) { return true, true }
+	staleResumeKeyProbe = func([]string, string, string, string) (present, probeable bool) { return true, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	// No install_agent_hooks: this is the default opencode configuration, and
@@ -289,7 +289,7 @@ func TestResumeOnHookPrimedProviderNeverReplaysRolePrompt(t *testing.T) {
 // message, queued nudge, or reconcile-tick claim backstop starts a real turn.
 func TestResumeOnHookPrimedProviderWithBlankNudgeLandsIdle(t *testing.T) {
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(string, string, string) (present, probeable bool) { return true, true }
+	staleResumeKeyProbe = func([]string, string, string, string) (present, probeable bool) { return true, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	tp := resolveResumeRoleTemplateWithNudge(t, "opencode", builtinProviderAliasesForTest("opencode"), nil, config.SessionTransportTmux, nil, "")
@@ -319,7 +319,7 @@ func TestResumeOnHookPrimedProviderWithBlankNudgeLandsIdle(t *testing.T) {
 // SessionStart (pi) keeps the restart prompt in its resume nudge.
 func TestResumeWithoutPerTurnRoleHookStillReplaysRolePrompt(t *testing.T) {
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(string, string, string) (present, probeable bool) { return true, true }
+	staleResumeKeyProbe = func([]string, string, string, string) (present, probeable bool) { return true, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	no := false

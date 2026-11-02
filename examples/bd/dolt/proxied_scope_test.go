@@ -125,7 +125,8 @@ func assertScopeUnchanged(t *testing.T, before, after map[string]string) {
 // TestDoltPackOrderEntryPointsNoOpOnProxiedScope is the R4 front-door case:
 // the bd pack imports the dolt pack, whose orders fire on every fresh city.
 // Each entry point those orders reach must exit 0 with the typed message and
-// leave the scope untouched.
+// leave the scope untouched. mol-dog-backup is not listed: it drives
+// `gc bd backup` per scope, so bd decides what a proxied scope supports.
 func TestDoltPackOrderEntryPointsNoOpOnProxiedScope(t *testing.T) {
 	root := repoRoot(t)
 	cases := []struct {
@@ -138,7 +139,6 @@ func TestDoltPackOrderEntryPointsNoOpOnProxiedScope(t *testing.T) {
 		{"mol-dog-stale-db order: gc dolt cleanup", "commands/cleanup/run.sh", nil},
 		{"mol-dog-stale-db order: gc dolt cleanup --force", "commands/cleanup/run.sh", []string{"--force"}},
 		{"mol-dog-phantom-db order", "assets/scripts/mol-dog-phantom-db.sh", nil},
-		{"mol-dog-backup order", "assets/scripts/mol-dog-backup.sh", nil},
 		{"mol-dog-compactor order: gc dolt compact", "commands/compact/run.sh", nil},
 		{"dolt-remotes-patrol order: gc dolt sync", "commands/sync/run.sh", nil},
 	}

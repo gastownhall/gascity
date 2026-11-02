@@ -1,0 +1,50 @@
+› Write a 500-word essay about pipes. No tools.
+■ Conversation interrupted - use /feedback if something went wrong
+
+
+› Reply with exactly: ok a34c00
+
+
+• ok a34c00
+
+  Worked for 5s • 10:03
+
+
+› Use apply_patch to create a new file named approval-edit-b955b7.txt in the current directory containing the single line hello. Do not use the shell.
+
+
+• I’ll create the requested file with apply_patch.
+
+• Added approval-edit-b955b7.txt (+1 -0)
+    1 +hello
+    + Show details
+
+■ Conversation interrupted - use /feedback if something went wrong
+
+✘ Failed to apply patch
+  └ (error details unavailable)
+    + Show details
+
+
+› Run this shell command now: printf "%s\n" one two > /tmp/codex-approval-b955b7.txt
+
+
+• The environment is read-only, so writing to /tmp needs an escalation approval.
+
+◦ Running printf "%s\n" one two > /tmp/codex-approval-b955b7.txt
+
+
+  Would you like to run the following command?
+
+  Environment: local
+
+  Reason: May I write the requested two-line file to /tmp/codex-approval-b955b7.txt? The current environment is read-only.
+
+  $ printf "%s\n" one two > /tmp/codex-approval-b955b7.txt
+
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with `printf "%s\n" one two > /tmp/codex-approval-b955b7.txt` (p)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel

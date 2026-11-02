@@ -1,11 +1,14 @@
 package dispatch
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/convergence"
 )
@@ -408,5 +411,50 @@ func TestProcessRalphCheckSoftSubjectFailureStillRetries(t *testing.T) {
 	}
 	if !sawAttempt2 {
 		t.Fatalf("soft failure must clone attempt 2; none found under root %s", rootID)
+	}
+}
+
+// TestProcessRalphCheckFinishesInterruptedSettle pins the re-drive half of the
+// ga-up0tmv ordering: the check settles its logical bead before closing
+// itself, so an open check over a closed logical bead is a settle that was
+// interrupted between the two writes. Re-processing must close the check with
+// the logical bead's verdict and must not re-run the gate, which could
+// disagree with a verdict that is already durable.
+func TestProcessRalphCheckFinishesInterruptedSettle(t *testing.T) {
+	t.Parallel()
+
+	for _, outcome := range []string{beadmeta.OutcomePass, beadmeta.OutcomeFail} {
+		t.Run(outcome, func(t *testing.T) {
+			t.Parallel()
+
+			cityPath := t.TempDir()
+			marker := filepath.Join(cityPath, "gate-ran")
+			checkPath := writeCheckScript(t, cityPath, "check.sh", "#!/bin/bash\ntouch '"+marker+"'\nexit 0\n")
+			store, logical, run1, check1 := newSimpleRalphLoop(t, "implement", checkPath, 3)
+			if err := store.Close(run1.ID); err != nil {
+				t.Fatalf("close run1: %v", err)
+			}
+			if err := store.SetMetadata(logical.ID, beadmeta.OutcomeMetadataKey, outcome); err != nil {
+				t.Fatalf("stamp logical outcome: %v", err)
+			}
+			if err := store.Close(logical.ID); err != nil {
+				t.Fatalf("close logical: %v", err)
+			}
+
+			result, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+			if err != nil {
+				t.Fatalf("ProcessControl(check1): %v", err)
+			}
+			if !result.Processed || result.Action != "logical-settled" {
+				t.Fatalf("result = %+v, want processed logical-settled", result)
+			}
+			checkAfter := mustGetBead(t, store, check1.ID)
+			if checkAfter.Status != "closed" || checkAfter.Metadata[beadmeta.OutcomeMetadataKey] != outcome {
+				t.Fatalf("check = status %q outcome %q, want closed/%s", checkAfter.Status, checkAfter.Metadata[beadmeta.OutcomeMetadataKey], outcome)
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("gate ran for a check whose logical bead was already settled (stat err=%v)", err)
+			}
+		})
 	}
 }
