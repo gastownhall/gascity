@@ -98,6 +98,7 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 		name            string
 		provider        string
 		transcript      bool   // write key's transcript under the handle's search root
+		startedHash     string // bead started_config_hash after the handoff
 		state           string // bead state; empty keeps the handoff's asleep
 		workDirEmpty    bool   // blank the row's work_dir
 		noSessionIDFlag bool   // handle spec carries no session_id_flag
@@ -117,6 +118,12 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			provider:   "claude",
 			transcript: true,
 			want:       "mycmd --resume " + rotatedSessionKey,
+		},
+		{
+			name:        "committed config hash keeps the resume",
+			provider:    "claude",
+			startedHash: "hash-abc",
+			want:        "mycmd --resume " + rotatedSessionKey,
 		},
 		{
 			name:     "creating row with a stale creation marker starts a new session",
@@ -173,6 +180,11 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 				handoffKey = ""
 			}
 			applyRestartHandoff(t, store, info.ID, handoffKey)
+			if tt.startedHash != "" {
+				if err := store.SetMetadata(info.ID, "started_config_hash", tt.startedHash); err != nil {
+					t.Fatalf("SetMetadata(started_config_hash): %v", err)
+				}
+			}
 			if tt.state != "" {
 				if err := store.SetMetadata(info.ID, "state", tt.state); err != nil {
 					t.Fatalf("SetMetadata(state): %v", err)

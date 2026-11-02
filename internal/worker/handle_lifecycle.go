@@ -832,9 +832,14 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	// a blank pane. Probe the keyed transcript the way the row's own
 	// discovery does — the roots the adapter searches, plus the projects root
 	// an absolute CLAUDE_CONFIG_DIR in the launch env names — and when the
-	// provider is probeable, the transcript is absent, and the provider can
-	// name a new conversation, start the stored key as a new session instead
-	// of resuming it.
+	// row never committed a start (started_config_hash empty; every key
+	// rotation clears it), the provider is probeable, the transcript is
+	// absent, and the provider can name a new conversation, start the stored
+	// key as a new session instead of resuming it. A committed hash beside
+	// the key keeps the resume: the conversation started under that key, so
+	// an absent transcript means it lives outside the probe's roots, the
+	// same split the reconciler's stale-resume clear makes, and the resume
+	// backstop still catches a genuinely stale key.
 	hints := h.runtimeHints()
 	provider := h.historyProvider(info)
 	workDir := strings.TrimSpace(hints.WorkDir)
@@ -846,7 +851,10 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 		launchRoots = MergeSearchPaths(append(append([]string(nil), launchRoots...), filepath.Join(dir, "projects")))
 	}
 	present, probeable := workertranscript.HasKeyedTranscript(workertranscript.KeyedProbeRoots(launchRoots, provider), provider, workDir, info.SessionKey)
-	if h.session.Resume.SessionIDFlag != "" && strings.TrimSpace(info.SessionKey) != "" && probeable && !present {
+	if h.session.Resume.SessionIDFlag != "" &&
+		strings.TrimSpace(info.SessionKey) != "" &&
+		strings.TrimSpace(pr.Metadata["started_config_hash"]) == "" &&
+		probeable && !present {
 		return startCommandWithSessionID(resumeInfo, h.session)
 	}
 	return sessionpkg.BuildResumeCommand(resumeInfo), nil

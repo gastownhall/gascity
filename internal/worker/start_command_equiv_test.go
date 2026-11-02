@@ -201,8 +201,10 @@ func TestStartCommandStaleResumeKey(t *testing.T) {
 				tt.provider,
 			)
 			handle.adapter.SearchPaths = []string{root}
-			if err := store.SetMetadata(info.ID, "started_config_hash", "hash-abc"); err != nil {
-				t.Fatalf("SetMetadata(started_config_hash): %v", err)
+			// A past creation marker leaves first start without committing a
+			// start under the key: the row a restart handoff leaves.
+			if err := store.SetMetadata(info.ID, "creation_complete_at", "2026-10-01T00:00:00Z"); err != nil {
+				t.Fatalf("SetMetadata(creation_complete_at): %v", err)
 			}
 			if tt.transcript {
 				dir := filepath.Join(root, sessionlog.ProjectSlug(info.WorkDir))
@@ -259,8 +261,8 @@ func TestStartCommandClaudeConfigDir(t *testing.T) {
 				"claude",
 			)
 			handle.adapter.SearchPaths = []string{t.TempDir()}
-			if err := store.SetMetadata(info.ID, "started_config_hash", "hash-abc"); err != nil {
-				t.Fatalf("SetMetadata(started_config_hash): %v", err)
+			if err := store.SetMetadata(info.ID, "creation_complete_at", "2026-10-01T00:00:00Z"); err != nil {
+				t.Fatalf("SetMetadata(creation_complete_at): %v", err)
 			}
 			if tt.transcript {
 				dir := filepath.Join(configDir, "projects", sessionlog.ProjectSlug(info.WorkDir))
