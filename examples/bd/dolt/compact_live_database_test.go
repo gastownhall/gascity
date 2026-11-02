@@ -1,7 +1,9 @@
 package dolt_test
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -930,5 +932,76 @@ func TestCompactScriptLiveGateKeepsPendingGCAfterFailedRewrite(t *testing.T) {
 	}
 	if _, statErr := os.Stat(liveGateMarkerPath(fixture)); !os.IsNotExist(statErr) {
 		t.Fatalf("a live database's failed GC must not quarantine; stat=%v:\n%s", statErr, out)
+	}
+}
+
+// TestCompactScriptLiveGateValidatesProbeSettingsBeforeAnyWork pins the
+// gate-knob contract: an invalid attempts or delay value refuses the run with
+// exit 2 during validation — before the compaction lock and before any dolt
+// invocation — with all-zero attempts ("00") treated as zero and rejected
+// like "0".
+func TestCompactScriptLiveGateValidatesProbeSettingsBeforeAnyWork(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  string
+	}{
+		{name: "zero attempts", env: "GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=0"},
+		{name: "all-zero attempts", env: "GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=00"},
+		{name: "non-numeric attempts", env: "GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=abc"},
+		{name: "signed attempts", env: "GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=-3"},
+		{name: "non-numeric delay", env: "GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=abc"},
+		{name: "negative delay", env: "GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", tc.env)
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+				t.Fatalf("invalid probe setting must exit 2 before any work: got err=%v\nout=%s", err, out)
+			}
+			if !strings.Contains(out, "invalid GC_DOLT_COMPACT_LIVE_PROBE_") {
+				t.Fatalf("output missing the invalid-setting diagnostic:\n%s", out)
+			}
+			if strings.Contains(out, "flattening") || strings.Contains(out, "below_threshold=") {
+				t.Fatalf("an invalid setting must exit before any database work:\n%s", out)
+			}
+			// Validation exits before any dolt query, so the fake dolt log
+			// must not exist.
+			if logData, readErr := os.ReadFile(fixture.doltLog); readErr == nil {
+				t.Fatalf("an invalid setting must exit before any dolt invocation:\n%s", logData)
+			}
+		})
+	}
+}
+
+// TestCompactScriptLiveGateAcceptsLeadingZeroAndEmptySettings pins the
+// accepted forms: leading zeros normalize ("03" attempts, "00" delay), and
+// empty values fall back to the defaults instead of failing validation.
+func TestCompactScriptLiveGateAcceptsLeadingZeroAndEmptySettings(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  []string
+	}{
+		{name: "leading-zero attempts", env: []string{
+			"GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=03", "GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=00",
+		}},
+		{name: "empty values use defaults", env: []string{
+			"GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=", "GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			env := append([]string{"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500"}, tc.env...)
+			out, err := fixture.run(t, "success", env...)
+			if err != nil {
+				t.Fatalf("%s must not fail validation:\n%s", tc.name, out)
+			}
+			if strings.Contains(out, "invalid GC_DOLT_COMPACT_LIVE_PROBE") {
+				t.Fatalf("%s must not trip validation:\n%s", tc.name, out)
+			}
+			if !strings.Contains(out, "db=beads commits=600->600 duration=") {
+				t.Fatalf("%s: compaction should have completed:\n%s", tc.name, out)
+			}
+		})
 	}
 }

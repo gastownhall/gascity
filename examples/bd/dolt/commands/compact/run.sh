@@ -511,10 +511,15 @@ esac
 # GC_DOLT_COMPACT_* knobs above.
 live_probe_attempts="${GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS:-3}"
 live_probe_delay_secs="${GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS:-2}"
+# Normalize leading zeros so "03" is the valid 3 while "00" is still zero:
+# strip the zeros, then require a positive integer. Zero attempts would make
+# the gate prove nothing.
+live_probe_attempts_raw="$live_probe_attempts"
+live_probe_attempts="$(printf '%s' "$live_probe_attempts" | sed 's/^0*//')"
 case "$live_probe_attempts" in
-  ''|*[!0-9]*|0)
+  ''|*[!0-9]*)
     printf 'compact: invalid GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=%s (must be a positive integer)\n' \
-      "$live_probe_attempts" >&2
+      "$live_probe_attempts_raw" >&2
     exit 2
     ;;
 esac
