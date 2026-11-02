@@ -100,11 +100,11 @@ private_dir "$META"
 private_dir "$CITY_DIR/s"
 export SCREENDIR=$CITY_DIR/s
 
-# PROC is the process filesystem; GC_SESSION_SCREEN_PROC replaces it only in
-# the script's own tests. BOOT is this boot's id: a process start time read
-# from /proc counts from boot, so a record from another boot names no
-# process that runs now.
-PROC=${GC_SESSION_SCREEN_PROC:-/proc}
+# PROC is the process filesystem (the script's tests run a copy pointing it
+# at a fixture). BOOT is this boot's id: a process start time read from /proc
+# counts from boot, so a record from another boot names no process that runs
+# now.
+PROC=/proc
 BOOT=-
 if [ -r "$PROC/sys/kernel/random/boot_id" ]; then
   IFS= read -r BOOT < "$PROC/sys/kernel/random/boot_id" || BOOT=-
@@ -210,7 +210,8 @@ start_of() {
   local stat rest
   START=""
   if [ -r "$PROC/$1/stat" ]; then
-    IFS= read -r stat < "$PROC/$1/stat" || return 0
+    # A process that exits mid-read is simply gone.
+    { IFS= read -r stat < "$PROC/$1/stat"; } 2>/dev/null || return 0
     rest=${stat##*) }
     read -r -a fields <<< "$rest"
     START=${fields[19]:-}
@@ -277,13 +278,14 @@ kill_wait() {
 
 # is_stray succeeds when process $1 is name $2's own SCREEN: its exact argv
 # (read from /proc, never procps' rendering, which can be a path or "?" for
-# bytes the locale cannot show) is SCREEN -dmS <name> <its wrapper>, which is
-# unique to the city and name.
+# bytes the locale cannot show) is <screen> -dmS <name> <its wrapper>. The
+# wrapper path is unique to the city and name; argv[0] is whatever the screen
+# binary is called (SCREEN, a path, a wrapped binary's name).
 is_stray() {
   local -a argv=()
   [ -r "$PROC/$1/cmdline" ] || return 1
-  mapfile -d '' -t argv < "$PROC/$1/cmdline" 2>/dev/null || return 1
-  [ "${#argv[@]}" -eq 4 ] && [ "${argv[0]##*/}" = SCREEN ] && [ "${argv[1]}" = -dmS ] &&
+  { mapfile -d '' -t argv < "$PROC/$1/cmdline"; } 2>/dev/null || return 1
+  [ "${#argv[@]}" -eq 4 ] && [ "${argv[1]}" = -dmS ] &&
     [ "${argv[2]}" = "$2" ] && [ "${argv[3]}" = "$META/$2.wrapper.sh" ]
 }
 

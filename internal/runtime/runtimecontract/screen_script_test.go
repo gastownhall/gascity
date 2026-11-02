@@ -22,8 +22,8 @@ import (
 // ps.fail exists), cut to COLUMNS without -ww as procps cuts it even into a
 // pipe, and for -o lstart= a fixed start time (lstart.<pid> when it exists,
 // none for a pid in gone); kill logs to calls and adds the pid to gone unless
-// unkillable exists; uname -n prints host when it exists. The script reads
-// proc (see procFile) as its /proc.
+// unkillable exists; uname -n prints host when it exists. The script run is
+// a copy whose /proc is proc (see procFile).
 type fakeBackend struct {
 	t                  *testing.T
 	dir, script, state string
@@ -116,11 +116,24 @@ exec `+fmt.Sprintf("%q", uname)+` "$@"
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(state) })
-	return &fakeBackend{t: t, dir: dir, script: screenReferencePath(t), state: state, env: []string{
+	// A copy of the script reading the fixture's proc as its /proc.
+	src, err := os.ReadFile(screenReferencePath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const procLine = "\nPROC=/proc\n"
+	if strings.Count(string(src), procLine) != 1 {
+		t.Fatalf("the script has no single %q line", procLine)
+	}
+	script := filepath.Join(dir, "gc-session-screen")
+	patched := strings.Replace(string(src), procLine, "\nPROC="+fmt.Sprintf("%q", filepath.Join(dir, "proc"))+"\n", 1)
+	if err := os.WriteFile(script, []byte(patched), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return &fakeBackend{t: t, dir: dir, script: script, state: state, env: []string{
 		"PATH=" + bin + ":" + os.Getenv("PATH"),
 		"GC_EXEC_STATE_DIR=" + state,
 		"GC_EXEC_CITY_PATH=/fake-city",
-		"GC_SESSION_SCREEN_PROC=" + filepath.Join(dir, "proc"),
 	}}
 }
 
@@ -427,14 +440,13 @@ func TestScreenScriptStartNeedsTheBox(t *testing.T) {
 	// This start's own SCREEN (and its window) is ended under the lock, and
 	// only then is the identity removed. It is found by its exact argv, here
 	// screen run by path; another name's SCREEN, a SCREEN whose argv differs
-	// only in the name, another city's SCREEN of the same name, and another
-	// program with the same arguments, are untouched.
+	// only in the name, and another city's SCREEN of the same name are
+	// untouched.
 	wrapper := filepath.Join(f.metaDir(), "mc-n.wrapper.sh")
-	f.file("ps.procs", "4194990 1 screen x\n4194991 4194990 sh x\n4194992 1 screen x\n4194993 1 vim x\n4194995 1 screen x\n4194996 1 screen x\n")
+	f.file("ps.procs", "4194990 1 screen x\n4194991 4194990 sh x\n4194992 1 screen x\n4194995 1 screen x\n4194996 1 screen x\n")
 	f.cmdline("4194990", "/usr/bin/SCREEN", "-dmS", "mc-n", wrapper)
 	f.cmdline("4194991", "/bin/sh", wrapper)
 	f.cmdline("4194992", "SCREEN", "-dmS", "mc-nn", filepath.Join(f.metaDir(), "mc-nn.wrapper.sh"))
-	f.cmdline("4194993", "/usr/bin/vim", "-dmS", "mc-n", wrapper)
 	f.cmdline("4194995", "SCREEN", "-dmS", "mc-nx", wrapper)
 	f.cmdline("4194996", "SCREEN", "-dmS", "mc-n", "/other/city-1/meta/mc-n.wrapper.sh")
 	f.file("unkillable", "")
@@ -451,16 +463,17 @@ func TestScreenScriptStartNeedsTheBox(t *testing.T) {
 	if _, code := f.run(startN, "start", "mc-n"); code == 0 {
 		t.Fatal("start succeeded although screen started no session")
 	}
-	if calls := f.calls(); !strings.Contains(calls, "-- 4194990") || !strings.Contains(calls, "-- 4194991") || strings.Contains(calls, "4194992") || strings.Contains(calls, "4194993") || strings.Contains(calls, "4194995") || strings.Contains(calls, "4194996") {
+	if calls := f.calls(); !strings.Contains(calls, "-- 4194990") || !strings.Contains(calls, "-- 4194991") || strings.Contains(calls, "4194992") || strings.Contains(calls, "4194995") || strings.Contains(calls, "4194996") {
 		t.Fatalf("kills after a start timeout: %q, want mc-n's SCREEN and window only", calls)
 	}
 	if out, _ := f.run("", "get-meta", "mc-n", "GC_SESSION_ID"); out != "" {
 		t.Fatalf("identity of a start whose screen was ended = %q, want it removed", out)
 	}
-	// A name procps cannot render in the C locale is matched by its bytes.
+	// A name procps cannot render in the C locale is matched by its bytes,
+	// and a wrapped screen binary by its arguments, whatever its argv[0].
 	f.file("calls", "")
 	f.file("ps.procs", "4194994 1 screen SCREEN -dmS mc-?? x\n")
-	f.cmdline("4194994", "SCREEN", "-dmS", "mc-é", filepath.Join(f.metaDir(), "mc-é.wrapper.sh"))
+	f.cmdline("4194994", "/nix/store/x-screen/bin/.screen-wrapped", "-dmS", "mc-é", filepath.Join(f.metaDir(), "mc-é.wrapper.sh"))
 	f.env = append(f.env, "LC_ALL=C")
 	if _, code := f.run(`{"command":"sleep 300"}`, "start", "mc-é"); code == 0 || !strings.Contains(f.calls(), "-- 4194994") {
 		t.Fatalf("start timeout of a non-ASCII name: exit %d, calls %q; want its SCREEN ended", code, f.calls())
