@@ -36,15 +36,15 @@ source "$repo_root/scripts/lib/harness-reap.sh"
 # This shard owns its product run's process tree. Without these traps a
 # terminated runner leaves the test binary running under init, which is how
 # kit-k72d ended up paying ~1 core for 5h34m (gas-px0). The signal traps tear
-# the group down and then re-raise, so the runner's own exit status still
-# reports the signal to its caller.
+# down the run and its watchdog, then re-raise, so the runner's own exit
+# status still reports the signal to its caller.
 gc_shard_on_signal() {
   local sig="$1"
-  gc_harness_terminate_group "${gc_harness_supervised_pgid:-}"
+  gc_harness_terminate_supervised
   trap - "$sig"
   kill -"$sig" $$
 }
-trap 'gc_harness_terminate_group "${gc_harness_supervised_pgid:-}"' EXIT
+trap 'gc_harness_terminate_supervised' EXIT
 trap 'gc_shard_on_signal INT' INT
 trap 'gc_shard_on_signal TERM' TERM
 trap 'gc_shard_on_signal HUP' HUP
@@ -68,19 +68,22 @@ configure_cgo_platform_paths
 extra_env=()
 while IFS='=' read -r name _; do
   case "$name" in
-    ANTHROPIC_*|CLAUDE_CODE_*|GC_ACCEPTANCE_KEEP|GC_ACCEPTANCE_BD_BIN|GC_ACCEPTANCE_LEGACY_GC_BIN|GC_TIERC_FORCE|GC_TUTORIAL_GOLDENS_USE_CLAUDE_FOR_CODEX)
+    ANTHROPIC_*|CLAUDE_CODE_*|GC_ACCEPTANCE_KEEP|GC_ACCEPTANCE_BD_BIN|GC_ACCEPTANCE_LEGACY_GC_BIN|GC_ACCEPTANCE_SPLIT_RC1_GC_BIN|GC_REQUIRE_ACCEPTANCE_SPLIT_RC1_GC|GC_TIERC_FORCE|GC_TUTORIAL_GOLDENS_USE_CLAUDE_FOR_CODEX)
       extra_env+=("${name}=${!name}")
       ;;
   esac
 done < <(env)
 
 run_in_test_env() {
+  # The pane shell is pinned to /bin/sh, not forwarded from the caller: a test
+  # tmux or herdr pane running zsh under a fresh HOME opens the new-user wizard,
+  # which swallows the typed text (ga-yghhjf; mirrors Makefile TEST_ENV).
   local base_env=(
     PATH="${PATH}" \
     HOME="${HOME:-}" \
     USER="${USER:-}" \
     LOGNAME="${LOGNAME:-}" \
-    SHELL="${SHELL:-/bin/sh}" \
+    SHELL=/bin/sh \
     GIT_CONFIG_NOSYSTEM=1 \
     GIT_CONFIG_GLOBAL="$gc_test_gitconfig" \
     LANG="${LANG:-C.UTF-8}" \
@@ -151,8 +154,11 @@ fi
 if [[ -n "${GO_TEST_COUNT:-}" ]]; then
   go_test_args=(-count="$GO_TEST_COUNT" "${go_test_args[@]}")
 fi
-if [[ -n "${GO_TEST_COVERPROFILE:-}" ]]; then
-  go_test_args+=(-coverpkg=./... -coverprofile "$GO_TEST_COVERPROFILE")
+cover_profile="${GO_TEST_COVERPROFILE:-}"
+if [[ -n "$cover_profile" ]]; then
+  # Each product run names its own -coverprofile below: go test truncates that
+  # file when it starts, so the chunks of one shard cannot share it.
+  go_test_args+=(-coverpkg=./...)
 fi
 
 tests=()
@@ -233,7 +239,39 @@ join_regex() {
   printf '%s' "$*"
 }
 
-regex="^($(join_regex "${selected[@]}"))$"
+# The selected names travel to go test, and from go test to the test binary,
+# as a single -run argument. Linux caps one argv string at MAX_ARG_STRLEN
+# (128 KiB), and a cmd/gc shard's alternation alone exceeds it, failing the
+# exec with "Argument list too long" before any test runs (ga-f4ovjm.47). The
+# names are therefore packed in order into chunks whose anchored regex stays
+# within a byte budget, and each chunk is one go test invocation. A shard that
+# fits in one chunk runs exactly as before. The default budget, 120 KiB, stays
+# 8 KiB under the cap: go test hands the regex on as "-test.run=<regex>", and
+# ${#name} counts characters, which a non-ASCII name exceeds in bytes.
+run_regex_budget="${GO_TEST_RUN_REGEX_MAX_BYTES:-122880}"
+if ! [[ "$run_regex_budget" =~ ^[0-9]+$ ]] || (( run_regex_budget < 1 )); then
+  echo "GO_TEST_RUN_REGEX_MAX_BYTES must be a positive integer: ${run_regex_budget}" >&2
+  exit 1
+fi
+regex_chunks=()
+chunk_names=()
+chunk_bytes=0
+for name in "${selected[@]}"; do
+  # "^(" + ")$" is 4 bytes; each further name adds itself plus "|".
+  if (( ${#chunk_names[@]} > 0 && chunk_bytes + 1 + ${#name} > run_regex_budget )); then
+    regex_chunks+=("^($(join_regex "${chunk_names[@]}"))$")
+    chunk_names=()
+  fi
+  if (( ${#chunk_names[@]} == 0 )); then
+    chunk_bytes=$(( 4 + ${#name} ))
+  else
+    chunk_bytes=$(( chunk_bytes + 1 + ${#name} ))
+  fi
+  chunk_names+=("$name")
+done
+regex_chunks+=("^($(join_regex "${chunk_names[@]}"))$")
+chunk_total=${#regex_chunks[@]}
+
 echo "Running ${test_pkg} shard ${shard_index} of ${shard_total} (${#selected[@]} tests)"
 printf '  %s\n' "${selected[@]}"
 # External watchdog budget. `-timeout` bounds only the test binary, and only
@@ -256,10 +294,105 @@ if [[ "$watchdog_grace" != "off" ]]; then
 fi
 
 shard_label="${test_pkg#./} shard ${shard_index} of ${shard_total}"
-if [[ -n "${GO_TEST_TIMING_FILE:-}" ]]; then
-  gc_harness_run_supervised "$shard_label" "$watchdog_deadline" "$watchdog_quit_grace" -- \
-    run_observable_go_test "${go_test_args[@]}" "$test_pkg" -run "$regex"
-else
-  gc_harness_run_supervised "$shard_label" "$watchdog_deadline" "$watchdog_quit_grace" -- \
-    run_go_test "${go_test_args[@]}" "$test_pkg" -run "$regex"
+timing_file="${GO_TEST_TIMING_FILE:-}"
+chunk_timing_files=()
+chunk_cover_profiles=()
+
+# A chunked shard publishes the requested coverage profile and timing artifact
+# only by merging its chunks' files after the last chunk, so stale ones from an
+# earlier run are removed first, as go test and go-test-observable do before a
+# single run: a profile that cannot be removed stops the shard, as go test stops
+# when it cannot create one, while timing capture is only disabled.
+merge_chunk_timing=0
+if (( chunk_total > 1 )); then
+  if [[ -n "$cover_profile" ]]; then
+    rm -f "$cover_profile"
+  fi
+  if [[ -n "$timing_file" ]]; then
+    if rm -f "$timing_file"; then
+      merge_chunk_timing=1
+    else
+      echo "observable go test: warning: cannot remove stale timing artifact ${timing_file}; capture disabled" >&2
+      GO_TEST_TIMING_FILE=""
+    fi
+  fi
 fi
+
+# Each chunk is its own supervised run with the full watchdog budget, so the
+# per-run guarantee is unchanged. Every chunk runs even after one fails, as a
+# single invocation would have run every test; the shard exits with the first
+# failing chunk's status.
+shard_status=0
+for chunk_i in "${!regex_chunks[@]}"; do
+  chunk_label="$shard_label"
+  chunk_args=("${go_test_args[@]}")
+  chunk_cover_profile="$cover_profile"
+  if (( chunk_total > 1 )); then
+    chunk_label+=" chunk $(( chunk_i + 1 )) of ${chunk_total}"
+    echo "Running ${chunk_label}"
+    if [[ -n "$cover_profile" ]]; then
+      chunk_cover_profile="${cover_profile}.chunk-$(( chunk_i + 1 ))"
+      chunk_cover_profiles+=("$chunk_cover_profile")
+    fi
+    if (( merge_chunk_timing == 1 )); then
+      GO_TEST_TIMING_FILE="${timing_file}.chunk-$(( chunk_i + 1 ))"
+      chunk_timing_files+=("$GO_TEST_TIMING_FILE")
+    fi
+  fi
+  if [[ -n "$chunk_cover_profile" ]]; then
+    chunk_args+=(-coverprofile "$chunk_cover_profile")
+  fi
+  chunk_status=0
+  if [[ -n "$timing_file" ]]; then
+    gc_harness_run_supervised "$chunk_label" "$watchdog_deadline" "$watchdog_quit_grace" -- \
+      run_observable_go_test "${chunk_args[@]}" "$test_pkg" -run "${regex_chunks[$chunk_i]}" || chunk_status=$?
+  else
+    gc_harness_run_supervised "$chunk_label" "$watchdog_deadline" "$watchdog_quit_grace" -- \
+      run_go_test "${chunk_args[@]}" "$test_pkg" -run "${regex_chunks[$chunk_i]}" || chunk_status=$?
+  fi
+  if (( chunk_status != 0 )); then
+    echo "${chunk_label}: FAIL status=${chunk_status}" >&2
+    if (( shard_status == 0 )); then
+      shard_status=$chunk_status
+    fi
+  fi
+done
+
+# Chunked coverage is merged back into the one profile the caller asked for.
+# Coverage is what a cover run exists to produce, so unlike timing, chunk
+# profiles that cannot be merged fail the shard rather than leave it partial.
+if (( ${#chunk_cover_profiles[@]} > 0 )); then
+  if ! "$repo_root/scripts/merge-coverprofiles" "$cover_profile" "${chunk_cover_profiles[@]}"; then
+    rm -f "$cover_profile"
+    echo "${shard_label}: FAIL could not merge ${chunk_total} chunk coverage profiles into ${cover_profile}" >&2
+    if (( shard_status == 0 )); then
+      shard_status=1
+    fi
+  fi
+  rm -f "${chunk_cover_profiles[@]}"
+fi
+
+# Chunked timing is merged back into the one artifact the caller asked for, so
+# a chunked shard publishes the same file and shard identity as an unchunked
+# one. Like the per-run capture, this is advisory: it never changes the status.
+if (( ${#chunk_timing_files[@]} > 0 )); then
+  merged_timing=0
+  if command -v jq >/dev/null 2>&1 &&
+    timing_tmp="$(mktemp "${timing_file}.tmp.XXXXXX" 2>/dev/null)"; then
+    if jq -s -e '
+        .[0] + {units: ([.[].units[]] | sort_by([.unit_id, .kind, .outcome, .duration_seconds]))}
+      ' "${chunk_timing_files[@]}" >"$timing_tmp" 2>/dev/null &&
+      mv -f "$timing_tmp" "$timing_file"; then
+      merged_timing=1
+      echo "observable go test: timing=${timing_file} (merged ${chunk_total} chunks)" >&2
+    else
+      rm -f "$timing_tmp"
+    fi
+  fi
+  if (( merged_timing == 0 )); then
+    echo "observable go test: warning: could not merge ${chunk_total} chunk timing artifacts into ${timing_file}" >&2
+  fi
+  rm -f "${chunk_timing_files[@]}"
+fi
+
+exit "$shard_status"

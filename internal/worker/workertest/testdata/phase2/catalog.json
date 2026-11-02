@@ -52,7 +52,7 @@
     {
       "code": "WC-INPUT-006",
       "group": "input_delivery",
-      "description": "A resumed session whose installed provider hook supplies the rendered role prompt to every generation delivers the beacon plus the configured nudge as its restart turn and no restart turn when none is configured; every other profile keeps the rendered prompt in the restart turn.",
+      "description": "A session the reconciler resumes, whose installed provider hook supplies the rendered role prompt to every generation, delivers the beacon plus the configured nudge as its restart turn and no restart turn when none is configured; every other profile keeps the rendered prompt in the restart turn.",
       "scenario_id": "input-hook-primed-resume-role-omitted"
     },
     {

@@ -19,6 +19,13 @@ type componentInfo struct {
 
 type componentLstat func(string) (componentInfo, error)
 
+// overflowUID is how Linux user namespaces report an unmapped host owner.
+// Bazel's sandbox maps the real filesystem root this way while keeping the
+// test user mapped normally. Treat it as root ownership only for the lexical
+// filesystem root; accepting it anywhere below / would trust an arbitrary
+// unmapped owner.
+const overflowUID = uint32(65534)
+
 func inspectTrustedProductUsagePath(home, root string) (bool, error) {
 	return inspectTrustedProductUsagePathWith(home, root, uint32(os.Geteuid()), lstatComponent)
 }
@@ -60,7 +67,8 @@ func inspectTrustedProductUsagePathWith(home, root string, effectiveUID uint32, 
 		if !info.mode.IsDir() {
 			return false, fmt.Errorf("gchome: path component %q is not a directory", path)
 		}
-		if info.uid != 0 && info.uid != effectiveUID {
+		rootOwned := info.uid == 0 || (path == string(filepath.Separator) && info.uid == overflowUID)
+		if !rootOwned && info.uid != effectiveUID {
 			return false, fmt.Errorf("gchome: path component %q is owned by UID %d, want UID 0 or effective UID %d", path, info.uid, effectiveUID)
 		}
 
@@ -83,7 +91,7 @@ func inspectTrustedProductUsagePathWith(home, root string, effectiveUID uint32, 
 		if info.mode.Perm()&0o022 == 0 {
 			continue
 		}
-		if info.uid == 0 && info.mode&fs.ModeSticky != 0 {
+		if rootOwned && info.mode&fs.ModeSticky != 0 {
 			stickyAwaitingPrivateBoundary = path
 			continue
 		}

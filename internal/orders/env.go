@@ -53,6 +53,7 @@ func IsReservedExecEnvKey(key string) bool {
 		"GC_DOLT_PORT",
 		"GC_DOLT_STATE_FILE",
 		"GC_DOLT_USER",
+		ExecOutcomeFileEnv,
 		"GC_PACK_DIR",
 		"GC_PACK_NAME",
 		"GC_PACK_STATE_DIR",

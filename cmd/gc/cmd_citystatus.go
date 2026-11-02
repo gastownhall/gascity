@@ -20,6 +20,10 @@ import (
 
 // StatusJSON is the JSON output format for gc status.
 type StatusJSON struct {
+	// CacheAgeS is set only on output read from the city's API: the age in
+	// seconds of the cached status the server answered from. Nil, and so
+	// absent, on locally built output.
+	CacheAgeS     *float64               `json:"_cache_age_s,omitempty"`
 	SchemaVersion string                 `json:"schema_version"`
 	OK            bool                   `json:"ok"`
 	CityName      string                 `json:"city_name"`
@@ -173,6 +177,8 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		return 1
 	}
 
+	warnSupervisorBinaryMismatch("gc status", stderr)
+
 	configStderr := stderr
 	if jsonOutput {
 		configStderr = io.Discard
@@ -186,11 +192,46 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		return 1
 	}
 
+	// The local snapshot opens the bead/Dolt store. Keep it behind the API
+	// fallback: the supervisor serves a cached status view, so touching the
+	// contended local store first defeats the bounded control-plane route and
+	// can leave gc status with no output until an external timeout kills it.
+	localFallback := func() int {
+		return cmdCityStatusLocalFallback(cfg, cityPath, jsonOutput, stdout, stderr)
+	}
+	c, reason := cityStatusAPIClient(cityPath)
+	if c == nil {
+		logRoute(stderr, "status", "fallback", reason)
+		return localFallback()
+	}
+
+	// API rendering only needs the runtime provider for drain-state display;
+	// a nil session snapshot deliberately avoids a bead-store read here. ACP
+	// route registration then uses deterministic session names, so ACP agents
+	// with custom runtime session names may not show "(draining)" in
+	// API-rendered text.
+	sp, err := newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, nil)
+	if err != nil {
+		message := fmt.Sprintf("gc status: %v", err)
+		if jsonOutput {
+			return writeJSONError(stdout, stderr, "session_provider_failed", message, 1)
+		}
+		fmt.Fprintln(stderr, message) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	dops := newDrainOps(sp)
+	return routeCityStatus(cityPath, cfg, dops, c, reason, jsonOutput, stdout, stderr, localFallback)
+}
+
+// cmdCityStatusLocalFallback builds the direct-store status view only when no
+// supervisor API response is available. Its provider receives the loaded
+// session snapshot because ACP transport routing depends on that local state.
+func cmdCityStatusLocalFallback(cfg *config.City, cityPath string, jsonOutput bool, stdout, stderr io.Writer) int {
 	storeStderr := stderr
 	if jsonOutput {
 		storeStderr = io.Discard
 	}
-	store, _, code := openCityStatusStore(cityPath, storeStderr)
+	store, diagnostic, code := openCityStatusStore(cityPath, storeStderr)
 	if code != 0 {
 		if jsonOutput {
 			return writeJSONError(stdout, stderr, "store_open_failed", "gc status: opening bead store failed", code)
@@ -208,8 +249,10 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		return 1
 	}
 	dops := newDrainOps(sp)
-	c, reason := cityStatusAPIClient(cityPath)
-	return routeCityStatus(cityPath, cfg, sp, dops, c, reason, jsonOutput, stdout, stderr)
+	if jsonOutput {
+		return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, statusSnapshot, stdout, stderr)
+	}
+	return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, statusSnapshot, stdout, stderr)
 }
 
 // cityStatusAPIClient returns (client, "") when the API path is available,
@@ -234,12 +277,12 @@ var cityStatusAPIClient = supervisorFallthroughAPIClient
 func routeCityStatus(
 	cityPath string,
 	cfg *config.City,
-	sp runtime.Provider,
 	dops drainOps,
 	c *api.Client,
 	nilReason string,
 	jsonOutput bool,
 	stdout, stderr io.Writer,
+	fallback func() int,
 ) int {
 	var cr api.CachedRead[api.StatusView]
 	return routeRead(c, "status", nilReason, stderr,
@@ -248,31 +291,24 @@ func routeCityStatus(
 			cr, err = c.GetStatus()
 			return err
 		},
-		func() int { return renderCityStatusFromAPI(cityPath, cr, dops, jsonOutput, stdout) },
-		func() int {
-			store, diagnostic, code := openCityStatusStore(cityPath, stderr)
-			if code != 0 {
-				return code
-			}
-			statusSnapshot := loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr)
-			if jsonOutput {
-				return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, statusSnapshot, stdout, stderr)
-			}
-			return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, statusSnapshot, stdout, stderr)
-		},
+		func() int { return renderCityStatusFromAPI(cityPath, cfg, cr, dops, jsonOutput, stdout) },
+		fallback,
 	)
 }
 
 // renderCityStatusFromAPI renders the server's StatusView using the same
 // text and JSON formatters as the fallback path. The API path adds
 // _cache_age_s on --json output and a staleness banner on human output
-// when cache age > 30 s.
+// when cache age > 30 s. The wire rig rows lack the config-derived fields,
+// so they are filled from cfg (fillStatusRigConfigFields) to match the
+// local route's rows.
 //
 // Controller authority is not surfaced through the API response (the
 // server is the controller, so the CLI resolves that locally via
 // controllerStatusForCity — same call the fallback path makes).
-func renderCityStatusFromAPI(cityPath string, cr api.CachedRead[api.StatusView], dops drainOps, jsonOutput bool, stdout io.Writer) int {
+func renderCityStatusFromAPI(cityPath string, cfg *config.City, cr api.CachedRead[api.StatusView], dops drainOps, jsonOutput bool, stdout io.Writer) int {
 	snapshot := snapshotFromStatusView(cityPath, cr.Body)
+	fillStatusRigConfigFields(snapshot.Rigs, cfg)
 	if jsonOutput {
 		writeCityStatusJSONWithCache(snapshot, snapshot.Summary, cr.AgeSeconds, stdout)
 		return 0
@@ -360,9 +396,34 @@ func snapshotFromStatusView(cityPath string, v api.StatusView) cityStatusSnapsho
 	return snapshot
 }
 
-// writeCityStatusJSONWithCache writes the snapshot's JSON form with a
-// leading _cache_age_s field inserted at the envelope level. Mirrors the
-// envelope shape other routed read commands emit on the API path.
+// fillStatusRigConfigFields sets the config-derived rig fields the status API
+// does not carry (prefix, default_sling_target, default_sling_targets) from
+// the city's own config, matched by rig name, so `gc status --json` prints
+// the same rig rows on both routes. renderRigListFromAPI does the same for
+// `gc rig list` (#2490). A rig cfg does not name keeps its wire row.
+func fillStatusRigConfigFields(rigs []StatusRigJSON, cfg *config.City) {
+	if cfg == nil {
+		return
+	}
+	byName := make(map[string]*config.Rig, len(cfg.Rigs))
+	for i := range cfg.Rigs {
+		byName[cfg.Rigs[i].Name] = &cfg.Rigs[i]
+	}
+	for i := range rigs {
+		rig, ok := byName[rigs[i].Name]
+		if !ok {
+			continue
+		}
+		rigs[i].Prefix = rig.EffectivePrefix()
+		rigs[i].DefaultSlingTarget = rig.DefaultSlingTarget
+		rigs[i].DefaultSlingTargets = append([]string(nil), rig.DefaultSlingTargets...)
+	}
+}
+
+// writeCityStatusJSONWithCache writes the snapshot's JSON form for output
+// read from the city's API, setting StatusJSON.CacheAgeS so _cache_age_s
+// prints as the leading key (0 included). There is no envelope wrapper: the
+// payload is the same StatusJSON the local route prints, plus that field.
 func writeCityStatusJSONWithCache(
 	snapshot cityStatusSnapshot,
 	summary StatusSummaryJSON,
@@ -370,11 +431,8 @@ func writeCityStatusJSONWithCache(
 	stdout io.Writer,
 ) {
 	status := cityStatusJSONFromSnapshot(snapshot, summary)
-	envelope := struct {
-		CacheAgeS  float64 `json:"_cache_age_s"`
-		StatusJSON         // inline
-	}{CacheAgeS: ageSeconds, StatusJSON: status}
-	data, err := json.MarshalIndent(envelope, "", "  ")
+	status.CacheAgeS = &ageSeconds
+	data, err := json.MarshalIndent(status, "", "  ")
 	if err != nil {
 		fmt.Fprintf(stdout, "{\"error\": %q}\n", err.Error()) //nolint:errcheck // best-effort stdout
 		return
@@ -399,8 +457,11 @@ func observeSessionTargetWithWarning(
 		err         error
 	}
 	done := make(chan observeResult, 1)
+	// Read the seam before spawning: a timed-out goroutine can outlive the
+	// caller, and with it a test's restore of the package var.
+	observe := observeSessionTargetForStatus
 	go func() {
-		obs, err := observeSessionTargetForStatus(cityPath, nil, sp, cfg, target.runtimeSessionName)
+		obs, err := observe(cityPath, nil, sp, cfg, target.runtimeSessionName)
 		done <- observeResult{observation: obs, err: err}
 	}()
 

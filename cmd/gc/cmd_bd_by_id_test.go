@@ -118,10 +118,18 @@ config_ref = "infra"
 // engine provider, for the whole of one test.
 func registerConfigRefEngineProvider(t *testing.T) {
 	t.Helper()
+	registerSoleStorageProvider(t, configRefEngineProviderFactory{})
+}
+
+// registerSoleStorageProvider freezes a registry carrying only factory, for the
+// rest of one test. A row that re-registers over a city already seeded swaps
+// the provider its binding resolves to without touching the engine on disk.
+func registerSoleStorageProvider(t *testing.T, factory storebinding.ProviderFactory) {
+	t.Helper()
 	prev := newStorageRegistryForPlan
 	newStorageRegistryForPlan = func() (*storebinding.ProviderRegistry, error) {
 		registry := storebinding.NewProviderRegistry()
-		if err := registry.Register(configRefEngineProviderFactory{}); err != nil {
+		if err := registry.Register(factory); err != nil {
 			return nil, err
 		}
 		if err := registry.Freeze(); err != nil {
@@ -835,7 +843,7 @@ func TestBdByIDUnservedVerbReservedMissFallsThrough(t *testing.T) {
 //
 // The work-prefixed half of this arm is pinned by
 // TestBdUpdateUnservedWorkResidentFailsLoudOnClassProbeFault, and it reaches the
-// error branch only through mutationIDs. A reserved id reaches it through the
+// error branch only through the mutation scanner's subjects. A reserved id reaches it through the
 // OTHER candidate source, bdArgsAddressedClassIDs' — so without this row the
 // error arm can be made conditional on that flag and every existing pin stays
 // green, which is the shape the pre-change code (a namesClassBead-first branch
@@ -1245,6 +1253,10 @@ func TestBdByIDEntersTheFunnelOnlyForInvocationsThatCouldConcernAClassBead(t *te
 		"class close":                {[]string{"close", reserved}, true},
 		"class id in an id flag":     {[]string{"list", "--parent", reserved}, true},
 		"unserved dep tree spelling": {[]string{"dep", "tree", "--show-all-paths", "gc-123"}, false},
+		"unserved multi-id show":     {[]string{"show", "gc-123", "gc-124"}, true},
+		"unserved show flag":         {[]string{"show", "--long", "gc-123"}, true},
+		"show with an unknown flag":  {[]string{"show", "--bogus", "v", "gc-123"}, false},
+		"unserved multi-id dep list": {[]string{"dep", "list", "gc-123", "gc-124"}, true},
 		"served read on a work id":   {[]string{"show", "gc-123"}, true},
 		"served dep tree":            {[]string{"dep", "tree", "gc-123"}, true},
 		"served write on a work id":  {[]string{"update", "gc-123", "--status", "closed"}, true},
@@ -1293,8 +1305,15 @@ func TestBdByIDSurfaceServesAClosedVerbSet(t *testing.T) {
 		{"dep", "tree", "gcg-1", "--direction=up", "--max-depth", "3"},
 		{"update", "gcg-1", "--status", "closed"},
 		{"update", "gcg-1", "--set-metadata", "gc.outcome=pass", "--status=closed"},
+		{"update", "gcg-1", "--unset-metadata", "pr.followup_url"},
+		{"update", "gcg-1", "--unset-metadata=a", "--unset-metadata", "b", "--set-metadata", "c=1"},
 		{"close", "gcg-1"},
 		{"close", "gcg-1", "--json"},
+		{"close", "gcg-1", "--reason", "done"},
+		{"close", "--reason=done", "gcg-1"},
+		{"close", "gcg-1", "-r", "done", "--json"},
+		{"close", "gcg-1", "--reason", ""},
+		{"close", "gcg-1", "--reason", " "},
 		{"reopen", "gcg-1"},
 		{"reopen", "gcg-1", "--json"},
 	} {
@@ -1331,7 +1350,10 @@ func TestBdByIDSurfaceServesAClosedVerbSet(t *testing.T) {
 		{"dep", "tree", "gcg-1", "--max-depth", "0"},
 		{"close"},
 		{"close", "gcg-1", "gcg-2"},
-		{"close", "gcg-1", "--reason", "done"},
+		{"close", "gcg-1", "--reason"},
+		{"close", "gcg-1", "--reason", "one", "-r", "two"},
+		{"close", "gcg-1", "--reason", " ", "-r", "two"},
+		{"close", "gcg-1", "-m", "done"},
 		{"close", "gcg-1", "--force"},
 		{"reopen", "gcg-1", "-r", "wrong call"},
 		{"delete", "gcg-1"},
@@ -1377,7 +1399,7 @@ func TestBdByIDRefusesUnservedSpellingsOfAClassOwnedBead(t *testing.T) {
 		{"dep", "tree", bead.ID, "--direction=both"},
 		{"delete", bead.ID},
 		{"update", bead.ID, "--notes", "a note"},
-		{"close", bead.ID, "--reason", "done"},
+		{"close", bead.ID, "--suggest-next"},
 		// A root flag BEFORE the verb is bd's own spelling and gc forwards argv
 		// verbatim, so the served parsers — which key on argv[0] — do not
 		// recognize it. Ownership still does, which is the whole point of
@@ -1655,12 +1677,14 @@ func TestBdCloseReservedPrefixServedInProcess(t *testing.T) {
 
 // TestBdCloseUnrepresentableFlagStaysOffTheDoor pins the closed-contract floor.
 //
-// storebinding.GraphStore.Close takes an id and nothing else, so bd's
-// --reason/--reason-file/--session carry text the store has nowhere to put, and
-// --claim-next/--continue/--force/--no-auto/--suggest-next name workflow this
-// arm does not run. Serving any of them by dropping it would report a command
-// as executed after silently changing what it meant — the partial-write failure
-// this whole surface exists to remove.
+// The closed contract can record one close reason
+// (TestBdCloseWithReasonRecordsTheCloseReason) and nothing else about a close.
+// bd's
+// --reason-file/--session and its reason aliases carry text this arm does not
+// read, and --claim-next/--continue/--force/--no-auto/--suggest-next name
+// workflow it does not run. Serving any of them by dropping it would report a
+// command as executed after silently changing what it meant — the
+// partial-write failure this whole surface exists to remove.
 //
 // Unserved is not forwarded. Residency proves ownership for these too, so each
 // one is refused with the offending spelling named rather than handed to a
@@ -1673,14 +1697,18 @@ func TestBdCloseUnrepresentableFlagStaysOffTheDoor(t *testing.T) {
 		args []string
 		flag string
 	}{
-		{[]string{"close", "--reason", "done", relic.ID}, "--reason"},
 		{[]string{"close", relic.ID, "--reason-file", "/tmp/why"}, "--reason-file"},
+		{[]string{"close", relic.ID, "--session", "s-1"}, "--session"},
 		{[]string{"close", relic.ID, "--claim-next"}, "--claim-next"},
 		{[]string{"close", relic.ID, "--force"}, "--force"},
 		{[]string{"reopen", relic.ID, "-r", "wrong call"}, "-r"},
 		// A batch names no flag: the shape is what kept it off the surface, and
 		// naming an id there would read as a claim about that id.
 		{[]string{"close", relic.ID, "gc-relic2"}, ""},
+		// Two reasons for one id is bd's own refusal. The refusal names the
+		// second reason, which bd counts even when the first is blank.
+		{[]string{"close", "--reason", "one", relic.ID, "--reason", "two"}, "a second --reason"},
+		{[]string{"close", relic.ID, "-r", " ", "-r", "two"}, "a second -r"},
 	} {
 		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
 			if op, ok := parseBdByIDOp(tc.args); ok {
@@ -1764,6 +1792,161 @@ func TestBdCloseAlreadyClosedIsStoreContractNoOp(t *testing.T) {
 			t.Fatalf("status after close #%d = %q, want closed (no status regression)", i, after.Status)
 		}
 	}
+}
+
+// TestBdCloseWithReasonRecordsTheCloseReason pins the reasoned close on a class
+// resident. bd records `close --reason` in its close_reason column; the door
+// records it through the contract's CloseAll stamping metadata.close_reason,
+// which the store turns into the bead's close reason. While the door refused
+// the reason, nothing that closes a bead with one — the stale-db order closing
+// its wisp — had a spelling that kept the reason on both a single-store city
+// and a split one.
+func TestBdCloseWithReasonRecordsTheCloseReason(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	const reason = "Stale DB scan complete (orphans=1, applied=1, escalated=0)"
+
+	for _, tc := range []struct {
+		name string
+		args func(id string) []string
+	}{
+		{"long flag", func(id string) []string { return []string{"close", id, "--reason", reason} }},
+		{"inline long flag before the id", func(id string) []string { return []string{"close", "--reason=" + reason, id} }},
+		{"short flag with json", func(id string) []string { return []string{"close", id, "-r", reason, "--json"} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bead := mustCreateClassBead(t, classStore, beads.Bead{Title: "an order wisp", Type: "task"})
+
+			var stdout, stderr bytes.Buffer
+			code, handled := maybeRouteBdByID(cityPath, "", tc.args(bead.ID), &stdout, &stderr)
+			if !handled {
+				t.Fatalf("the reasoned close of %s fell through to the bd subprocess: %q", bead.ID, stderr.String())
+			}
+			if code != 0 {
+				t.Fatalf("closing %s with a reason exited %d: %s", bead.ID, code, stderr.String())
+			}
+			after, err := classStore.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("re-reading %s: %v", bead.ID, err)
+			}
+			if after.Status != "closed" {
+				t.Errorf("status = %q, want closed", after.Status)
+			}
+			if after.CloseReason != reason {
+				t.Errorf("CloseReason = %q, want %q", after.CloseReason, reason)
+			}
+			if got := after.Metadata["close_reason"]; got != reason {
+				t.Errorf("metadata.close_reason = %q, want %q", got, reason)
+			}
+			if !strings.Contains(stdout.String(), reason) {
+				t.Errorf("the rendered row does not carry the recorded reason: %q", stdout.String())
+			}
+		})
+	}
+}
+
+// TestBdCloseRecordsTheReasonTrimmed pins the door's reason to the one the
+// stores record. Every store records a close reason trimmed (recordCloseReason,
+// BdStore.CloseAll's --reason), so the door trims it too: a padded reason loses
+// its padding, and a blank one is a bare close rather than a stamped
+// metadata.close_reason the bead's CloseReason reads as empty.
+func TestBdCloseRecordsTheReasonTrimmed(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+
+	for _, tc := range []struct {
+		name   string
+		reason string
+		want   string
+	}{
+		{"padded reason", "  scan complete \n", "scan complete"},
+		{"blank reason", " \t ", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bead := mustCreateClassBead(t, classStore, beads.Bead{Title: "an order wisp", Type: "task"})
+
+			var stdout, stderr bytes.Buffer
+			code, handled := maybeRouteBdByID(cityPath, "", []string{"close", bead.ID, "--reason", tc.reason}, &stdout, &stderr)
+			if !handled || code != 0 {
+				t.Fatalf("closing %s with reason %q = (%d, %t): %s", bead.ID, tc.reason, code, handled, stderr.String())
+			}
+			after, err := classStore.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("re-reading %s: %v", bead.ID, err)
+			}
+			if after.Status != "closed" {
+				t.Errorf("status = %q, want closed", after.Status)
+			}
+			if after.CloseReason != tc.want {
+				t.Errorf("CloseReason = %q, want %q", after.CloseReason, tc.want)
+			}
+			stamped, ok := after.Metadata["close_reason"]
+			if tc.want == "" && ok {
+				t.Errorf("metadata.close_reason = %q; a blank reason must close bare", stamped)
+			}
+			if tc.want != "" && stamped != tc.want {
+				t.Errorf("metadata.close_reason = %q, want %q", stamped, tc.want)
+			}
+		})
+	}
+}
+
+// TestBdCloseWithReasonOfAClosedBeadChangesNothing pins the already-closed half
+// of the reasoned close. bd's close of a closed issue changes nothing, and the
+// door's bare close is the store's no-op, so a second close with a different
+// reason must not rewrite the reason the first close recorded. It holds on a
+// store whose CloseAll skips closed beads and on one whose CloseAll stamps the
+// metadata first, which beads.Store.CloseAll leaves to its caller to prevent.
+func TestBdCloseWithReasonOfAClosedBeadChangesNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		wrap func(beads.Store) beads.Store
+	}{
+		{"store that skips closed beads", nil},
+		{"store that stamps metadata before closing", func(s beads.Store) beads.Store { return metadataFirstCloseAllStore{Store: s} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, classStore := foreignProviderCity(t)
+			bead := mustCreateClassBead(t, classStore, beads.Bead{Title: "closed twice", Type: "task"})
+			if tc.wrap != nil {
+				stubClassBindingStore(t, cityPath, tc.wrap(classStore))
+			}
+
+			for i, reason := range []string{"the first close", "a second close"} {
+				var stdout, stderr bytes.Buffer
+				code, handled := maybeRouteBdByID(cityPath, "", []string{"close", bead.ID, "--reason", reason}, &stdout, &stderr)
+				if !handled || code != 0 {
+					t.Fatalf("close #%d of %s = (%d, %t): %s", i+1, bead.ID, code, handled, stderr.String())
+				}
+			}
+			after, err := classStore.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("re-reading %s: %v", bead.ID, err)
+			}
+			if after.Status != "closed" {
+				t.Errorf("status = %q, want closed", after.Status)
+			}
+			if after.CloseReason != "the first close" || after.Metadata["close_reason"] != "the first close" {
+				t.Errorf("close reason = %q (metadata %q), want the first close's, untouched by the second", after.CloseReason, after.Metadata["close_reason"])
+			}
+		})
+	}
+}
+
+// metadataFirstCloseAllStore is a class store whose CloseAll writes the
+// metadata and then closes, without reading each status first, as bd, exec and
+// the native Dolt store do: an already-closed bead stays closed but takes the
+// metadata.
+type metadataFirstCloseAllStore struct{ beads.Store }
+
+func (s metadataFirstCloseAllStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	for _, id := range ids {
+		if err := s.SetMetadataBatch(id, metadata); err != nil {
+			return 0, err
+		}
+		if err := s.Close(id); err != nil {
+			return 0, err
+		}
+	}
+	return len(ids), nil
 }
 
 // TestBdCloseDualResidentWritesServingCopy pins the multi-residency rule: a
@@ -2610,6 +2793,419 @@ func TestDoorUpdateAfterFoundSurfacesStoreErrorVerbatim(t *testing.T) {
 			}
 			if !strings.Contains(stderr.String(), relic.ID) {
 				t.Errorf("the failure does not name the bead: %q", stderr.String())
+			}
+		})
+	}
+}
+
+// TestBdByIDUnservedReadOfAMigratedBeadIsRefusedNotAnsweredFromTheRetainedCopy
+// is gastownhall/gascity#6015 on the city shape that produced it.
+//
+// `gc storage migrate` PRESERVES ids and RETAINS the work store's copy, so a
+// relocated workflow step keeps its work-shaped id and its pre-migration row
+// stays behind in the work ledger. The served read (`show <id>`) routes to the
+// binding; an unserved spelling of the same read (`show --long <id>`, a second
+// positional id) used to miss the served parser, skip the funnel entirely and
+// fall through to a bd subprocess pointed at the work store — which answered
+// from the retained copy, in bd's own shape, with no diagnostic.
+func TestBdByIDUnservedReadOfAMigratedBeadIsRefusedNotAnsweredFromTheRetainedCopy(t *testing.T) {
+	cityPath := oneShotCLICity(t, filepath.Join(t.TempDir(), "store"))
+	stubInfraControllerPing(t, 0)
+
+	work, err := openInfraMigrationSource(cityPath)
+	if err != nil {
+		t.Fatalf("opening the work store: %v", err)
+	}
+	root := mustCreateInfraBead(t, work, beads.Bead{Title: "wf root", Type: "task", Metadata: map[string]string{"gc.kind": "workflow"}})
+	step := mustCreateInfraBead(t, work, beads.Bead{Title: "wf step", Type: "task", Metadata: map[string]string{"gc.root_bead_id": root.ID}})
+	plain := mustCreateInfraBead(t, work, beads.Bead{Title: "ordinary work", Type: "task"})
+	if c := coordclass.Classify(step); c != coordclass.ClassGraph {
+		t.Fatalf("the seeded step classifies as %v, want graph", c)
+	}
+	if c := coordclass.Classify(plain); c != coordclass.ClassWork {
+		t.Fatalf("the seeded work bead classifies as %v, want work", c)
+	}
+	if err := closeBeadStoreHandle(work); err != nil {
+		t.Fatalf("closing the work store: %v", err)
+	}
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	if err != nil {
+		t.Fatalf("loading the split city config: %v", err)
+	}
+	var log bytes.Buffer
+	if report := migrateInfraClasses(t, cityPath, cfg, &log); report.Outcome != infraMigrationConverged {
+		t.Fatalf("the fixture city did not converge (%s): %s", report.Outcome, log.String())
+	}
+	resetCLIStorageRoutes(t)
+
+	binding, _, err := cliSoleClassBinding(cityPath)
+	if err != nil {
+		t.Fatalf("resolving the class binding: %v", err)
+	}
+	for name, tc := range map[string]struct {
+		args  []string
+		verb  string
+		shape string
+	}{
+		"an unimplemented show flag":      {[]string{"show", "--long", step.ID}, "show", "with --long"},
+		"a trailing unimplemented flag":   {[]string{"show", step.ID, "--include-comments"}, "show", "with --include-comments"},
+		"a second positional id":          {[]string{"show", step.ID, root.ID}, "show", "with more than one id"},
+		"the relocated id second":         {[]string{"show", plain.ID, step.ID}, "show", "with more than one id"},
+		"a flag and a second id":          {[]string{"show", "--json", plain.ID, "--long", step.ID}, "show", "with --long and more than one id"},
+		"a root flag before the verb":     {[]string{"--actor", "someone", "show", "--long", step.ID}, "show", "with --long"},
+		"only a root flag":                {[]string{"--actor", "someone", "show", step.ID}, "show", "with --actor"},
+		"the id behind --id":              {[]string{"show", "--id", step.ID, "--long"}, "show", "with --id"},
+		"a multi-subject dep list":        {[]string{"dep", "list", plain.ID, "--direction", "up", step.ID}, "dep list", "with more than one id"},
+		"a multi-subject dep tree":        {[]string{"dep", "tree", plain.ID, step.ID}, "dep tree", "with more than one id"},
+		"after the end-of-flags marker":   {[]string{"show", "--long", "--", step.ID}, "show", "with --long"},
+		"a value flag before the subject": {[]string{"show", "--as-of", "HEAD", step.ID}, "show", "with --as-of"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resetCLIStorageRoutes(t)
+			var stdout, stderr bytes.Buffer
+			code, handled := maybeRouteBdByID(cityPath, "", tc.args, &stdout, &stderr)
+			if !handled {
+				t.Fatalf("%v fell through to the bd subprocess, which answers from the retained work-store copy", tc.args)
+			}
+			if code != 1 {
+				t.Fatalf("%v exited %d; an unserved read of a relocated bead must refuse: %s", tc.args, code, stderr.String())
+			}
+			want := fmt.Sprintf("gc bd: %s is owned by the %s class binding, and `gc bd %s` %s is not served in process; refusing rather than running it against the work store, which does not hold the authoritative copy — read each id on its own: `gc bd %s <id>`\n", step.ID, binding.Name, tc.verb, tc.shape, tc.verb)
+			if got := stderr.String(); got != want {
+				t.Fatalf("refusal for %v:\n got %q\nwant %q", tc.args, got, want)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("%v printed %q to stdout; a refusal answers nothing", tc.args, stdout.String())
+			}
+		})
+	}
+
+	// The same spellings over a bead the migration left in the work store are
+	// bd's to answer, byte-identically.
+	for name, args := range map[string][]string{
+		"an unimplemented show flag": {"show", "--long", plain.ID},
+		"a second positional id":     {"show", plain.ID, "demo-notanywhere"},
+	} {
+		t.Run("work bead "+name, func(t *testing.T) {
+			resetCLIStorageRoutes(t)
+			var stdout, stderr bytes.Buffer
+			if code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr); handled {
+				t.Fatalf("%v was taken by the by-ID surface (exit %d, %q); bd is still the truth for work beads", args, code, stderr.String())
+			}
+		})
+	}
+}
+
+// TestBdByIDUnservedReadOfAClassResidentIsRefusedWithoutARetainedCopy is the
+// same rule on a binding whose resident has NO work-store copy behind it — the
+// shape a migration that deletes its source leaves. Residence alone decides:
+// the refusal must not depend on the work store happening to hold a stale row.
+func TestBdByIDUnservedReadOfAClassResidentIsRefusedWithoutARetainedCopy(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	relic, _ := classResidentWorkShapedBead(t, cityPath, "gc-relic1", "carried across by the migration")
+
+	for name, args := range map[string][]string{
+		"an unimplemented flag":  {"show", "--long", relic.ID},
+		"a second positional id": {"show", "demo-otherwork", relic.ID},
+		"a dep list pair":        {"dep", "list", relic.ID, "demo-otherwork", "--direction", "up"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resetCLIStorageRoutes(t)
+			var stdout, stderr bytes.Buffer
+			code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr)
+			if !handled || code != 1 {
+				t.Fatalf("%v = (exit %d, handled %t), want a refusal: %s", args, code, handled, stderr.String())
+			}
+			if got := stderr.String(); !strings.Contains(got, relic.ID) || !strings.Contains(got, "class binding") {
+				t.Fatalf("the refusal for %v does not name the bead and the binding: %q", args, got)
+			}
+		})
+	}
+}
+
+// TestBdByIDUnservedReadOfAWorkBeadKeepsThePassthrough is the other half of the
+// widening: entering the funnel is not the same as taking the command. An
+// unserved read whose subjects the binding does not hold must still reach bd,
+// byte-identically, or the widening breaks every `show --long` in the city.
+func TestBdByIDUnservedReadOfAWorkBeadKeepsThePassthrough(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+
+	for name, args := range map[string][]string{
+		"an unimplemented flag":  {"show", "--long", "demo-notresident"},
+		"a second positional id": {"show", "demo-notresident", "demo-alsonot"},
+		"a dep list pair":        {"dep", "list", "demo-notresident", "demo-alsonot"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resetCLIStorageRoutes(t)
+			var stdout, stderr bytes.Buffer
+			if code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr); handled {
+				t.Fatalf("%v was taken by the by-ID surface (exit %d, %q); bd is still the truth for work beads", args, code, stderr.String())
+			}
+		})
+	}
+}
+
+// TestBdByIDAmbiguousReadScanStaysOutside pins the fail-closed direction of the
+// read scanner: a flag it cannot classify might consume the next token, so the
+// scan yields no ids and the argv stays on its existing path without paying for
+// the funnel — even when the token that follows is a class resident.
+func TestBdByIDAmbiguousReadScanStaysOutside(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	relic, _ := classResidentWorkShapedBead(t, cityPath, "gc-relic1", "an orphaned patrol root")
+
+	for _, args := range [][]string{
+		{"show", "--bogus", relic.ID},
+		{"show", relic.ID, "--bogus", "demo-x"},
+		{"dep", "list", relic.ID, "demo-x", "--bogus"},
+		{"dep", "tree", relic.ID, "demo-x", "--status", "open"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			if ids := bdByIDReadSubjects(args); ids != nil {
+				t.Fatalf("bdByIDReadSubjects(%v) = %v, want nil for an ambiguous scan", args, ids)
+			}
+			resetCLIStorageRoutes(t)
+			registries := countStorageRegistryConstructions(t)
+			var stdout, stderr bytes.Buffer
+			if code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr); handled {
+				t.Errorf("%v was answered here (exit %d): %s%s", args, code, stdout.String(), stderr.String())
+			}
+			if *registries != 0 {
+				t.Errorf("%v constructed %d provider registr(ies); an ambiguous scan has no ids to probe", args, *registries)
+			}
+		})
+	}
+}
+
+// TestBdByIDReadSubjects pins what the read scanner treats as an addressed
+// subject: positional ids and the value of show's --id, for the by-ID read verbs
+// only. Selectors and mutations are not its business.
+func TestBdByIDReadSubjects(t *testing.T) {
+	for name, tc := range map[string]struct {
+		args []string
+		want []string
+	}{
+		"bare show":            {[]string{"show", "a-1"}, []string{"a-1"}},
+		"show with bool flags": {[]string{"show", "--long", "a-1", "--json", "a-2"}, []string{"a-1", "a-2"}},
+		"show --as-of value":   {[]string{"show", "--as-of", "HEAD", "a-1"}, []string{"a-1"}},
+		"show --id value":      {[]string{"show", "--id", "-weird", "--id=a-2"}, []string{"-weird", "a-2"}},
+		"global before verb":   {[]string{"--db", "x.db", "show", "a-1"}, []string{"a-1"}},
+		"end of flags":         {[]string{"show", "--", "--long"}, []string{"--long"}},
+		"dep list":             {[]string{"dep", "list", "a-1", "-t", "blocks", "a-2"}, []string{"a-1", "a-2"}},
+		"dep tree":             {[]string{"dep", "tree", "a-1", "--max-depth", "3", "--reverse"}, []string{"a-1"}},
+		"selector":             {[]string{"list", "--parent", "a-1"}, nil},
+		"search":               {[]string{"search", "a-1"}, nil},
+		"mutation":             {[]string{"close", "a-1"}, nil},
+		"dep add":              {[]string{"dep", "add", "a-1", "a-2"}, nil},
+		"no verb":              {[]string{"--json"}, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := bdByIDReadSubjects(tc.args); !slices.Equal(got, tc.want) {
+				t.Fatalf("bdByIDReadSubjects(%v) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBdByIDUnservedReadOnASingleStoreCityPaysNothing is the compatibility row
+// for the widened gate: a city that authors no [storage] routes nothing, so an
+// unserved by-ID read reaches the passthrough exactly as before and constructs
+// no provider registry on the way.
+func TestBdByIDUnservedReadOnASingleStoreCityPaysNothing(t *testing.T) {
+	cityPath := oneShotCLICity(t, "")
+	refuseInfraMigrationSource(t)
+	captureCLIStorageStderr(t)
+	registries := countStorageRegistryConstructions(t)
+
+	for _, args := range [][]string{
+		{"show", "--long", "gc-1"},
+		{"show", "gc-1", "gc-2"},
+		{"dep", "list", "gc-1", "gc-2"},
+		{"dep", "tree", "gc-1", "gc-2"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr); handled {
+			t.Errorf("an unrelocated city answered %v here (exit %d): %s%s", args, code, stdout.String(), stderr.String())
+		}
+	}
+	if *registries != 0 {
+		t.Errorf("an unrelocated city constructed %d provider registr(ies) for an unserved read; the bypass must short-circuit first", *registries)
+	}
+}
+
+// unsetMetadataSplitCity prepares a split city whose coordination classes live
+// in a real sqlite-beads binding (the production shape) and seeds one resident
+// carrying metadata, returning the resident and the binding's store.
+func unsetMetadataSplitCity(t *testing.T, metadata map[string]string) (capture string, resident beads.Bead, store beads.Store) {
+	t.Helper()
+	capture, cityDir := bdSQLRefusalCityDir(t, bdSQLRefusalSplitStorage)
+	resetCLIStorageRoutes(t)
+	captureCLIStorageStderr(t)
+	binding, relocated, err := cliSoleClassBinding(cityDir)
+	if err != nil || !relocated {
+		t.Fatalf("resolving the relocated class binding: relocated=%t err=%v", relocated, err)
+	}
+	resident, err = binding.Store.Create(beads.Bead{Title: "finalize step", Type: "task", Metadata: metadata})
+	if err != nil {
+		t.Fatalf("seeding the relocated class binding: %v", err)
+	}
+	if !bdIDIsClassReserved(resident.ID) {
+		t.Fatalf("the binding minted %q, outside every reserved class namespace", resident.ID)
+	}
+	return capture, resident, binding.Store
+}
+
+// TestGcBdUpdateUnsetMetadataIsServedInProcess is the finalize-handoff write
+// that a split city used to refuse: `gc bd update <graph-id> --unset-metadata
+// <key>`. It must be answered by the class binding with bd's semantics and
+// never reach bd, which does not hold the bead.
+func TestGcBdUpdateUnsetMetadataIsServedInProcess(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		args       []string
+		wantStatus string
+		wantSet    map[string]string
+		wantAbsent []string
+	}{
+		{
+			name:       "one key",
+			args:       []string{"--unset-metadata", "pr.followup_url"},
+			wantSet:    map[string]string{"pr.followup_number": "7", "keep": "yes"},
+			wantAbsent: []string{"pr.followup_url"},
+		},
+		{
+			name:       "repeated flag and inline spelling",
+			args:       []string{"--unset-metadata", "pr.followup_url", "--unset-metadata=pr.followup_number"},
+			wantSet:    map[string]string{"keep": "yes"},
+			wantAbsent: []string{"pr.followup_url", "pr.followup_number"},
+		},
+		{
+			name:       "absent key is a no-op",
+			args:       []string{"--unset-metadata", "never.set"},
+			wantSet:    map[string]string{"pr.followup_url": "u", "pr.followup_number": "7", "keep": "yes"},
+			wantAbsent: []string{"never.set"},
+		},
+		{
+			// bd applies every --set-metadata before every --unset-metadata,
+			// whatever their argv order, so the key named in both is absent.
+			name:       "combined with set and status, unset wins",
+			args:       []string{"--unset-metadata", "both", "--set-metadata", "gc.outcome=pass", "--set-metadata", "both=x", "--unset-metadata", "pr.followup_url", "--status", "closed"},
+			wantStatus: "closed",
+			wantSet:    map[string]string{"gc.outcome": "pass", "pr.followup_number": "7", "keep": "yes"},
+			wantAbsent: []string{"both", "pr.followup_url"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture, resident, store := unsetMetadataSplitCity(t, map[string]string{
+				"pr.followup_url": "u", "pr.followup_number": "7", "keep": "yes",
+			})
+			var stdout, stderr bytes.Buffer
+			args := append([]string{"update", resident.ID}, tc.args...)
+			if code := doBd(args, &stdout, &stderr); code != 0 {
+				t.Fatalf("doBd %v exited %d; stderr=%q", args, code, stderr.String())
+			}
+			if data, err := os.ReadFile(capture); err == nil && strings.Contains(string(data), "update "+resident.ID) {
+				t.Fatalf("the unset was forwarded to bd: %q", data)
+			}
+			if !strings.Contains(stdout.String(), resident.ID) {
+				t.Errorf("the answer does not render the updated bead; stdout=%q", stdout.String())
+			}
+			after, err := store.Get(resident.ID)
+			if err != nil {
+				t.Fatalf("re-reading: %v", err)
+			}
+			if tc.wantStatus != "" && after.Status != tc.wantStatus {
+				t.Errorf("status = %q, want %q", after.Status, tc.wantStatus)
+			}
+			for key, want := range tc.wantSet {
+				if after.Metadata[key] != want {
+					t.Errorf("metadata[%s] = %q, want %q (metadata=%v)", key, after.Metadata[key], want, after.Metadata)
+				}
+			}
+			for _, key := range tc.wantAbsent {
+				if _, present := after.Metadata[key]; present {
+					t.Errorf("metadata[%s] still present (as %q); an unset must remove the key, not blank it", key, after.Metadata[key])
+				}
+			}
+		})
+	}
+}
+
+// TestGcBdUpdateUnsetMetadataRejectsAnInvalidKeyLikeBd pins the failure half of
+// bd's contract. bd's --unset-metadata is a repeatable flag, never
+// comma-split, and bd validates every key before writing, so `a,b` is one
+// invalid key: the command exits non-zero and nothing — not even the other
+// edits in the same call — is applied.
+func TestGcBdUpdateUnsetMetadataRejectsAnInvalidKeyLikeBd(t *testing.T) {
+	for _, key := range []string{"pr.followup_url,keep", "", "9starts.with.digit"} {
+		t.Run(fmt.Sprintf("%q", key), func(t *testing.T) {
+			_, resident, store := unsetMetadataSplitCity(t, map[string]string{"pr.followup_url": "u", "keep": "yes"})
+			var stdout, stderr bytes.Buffer
+			args := []string{"update", resident.ID, "--set-metadata", "gc.outcome=pass", "--unset-metadata", key}
+			if code := doBd(args, &stdout, &stderr); code == 0 {
+				t.Fatalf("doBd %v exited 0; stdout=%q", args, stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "invalid metadata key") {
+				t.Errorf("stderr does not explain the invalid key: %q", stderr.String())
+			}
+			after, err := store.Get(resident.ID)
+			if err != nil {
+				t.Fatalf("re-reading: %v", err)
+			}
+			if after.Metadata["pr.followup_url"] != "u" || after.Metadata["keep"] != "yes" || after.Metadata["gc.outcome"] != "" {
+				t.Errorf("a rejected update wrote anyway: %v", after.Metadata)
+			}
+		})
+	}
+}
+
+// TestGcBdUpdateSetMetadataRejectsAnInvalidKeyLikeBd pins the same grammar on
+// the --set-metadata half: bd validates set keys before writing too, so an
+// invalid one fails the command and neither the other set nor the unset in the
+// same call is applied.
+func TestGcBdUpdateSetMetadataRejectsAnInvalidKeyLikeBd(t *testing.T) {
+	for _, key := range []string{"has-dash", "9starts.with.digit", "has space"} {
+		t.Run(fmt.Sprintf("%q", key), func(t *testing.T) {
+			_, resident, store := unsetMetadataSplitCity(t, map[string]string{"pr.followup_url": "u"})
+			var stdout, stderr bytes.Buffer
+			args := []string{"update", resident.ID, "--set-metadata", "gc.outcome=pass", "--set-metadata", key + "=v", "--unset-metadata", "pr.followup_url"}
+			if code := doBd(args, &stdout, &stderr); code == 0 {
+				t.Fatalf("doBd %v exited 0; stdout=%q", args, stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "invalid metadata key") {
+				t.Errorf("stderr does not explain the invalid key: %q", stderr.String())
+			}
+			after, err := store.Get(resident.ID)
+			if err != nil {
+				t.Fatalf("re-reading: %v", err)
+			}
+			if after.Metadata["pr.followup_url"] != "u" || after.Metadata["gc.outcome"] != "" || after.Metadata[key] != "" {
+				t.Errorf("a rejected update wrote anyway: %v", after.Metadata)
+			}
+		})
+	}
+}
+
+// TestGcBdUpdateNotesStaysRefusedBesideUnset pins that serving
+// --unset-metadata did not widen the door: --notes and --append-notes still
+// have no representation in the class store and are still refused whole.
+func TestGcBdUpdateNotesStaysRefusedBesideUnset(t *testing.T) {
+	for _, flag := range []string{"--notes", "--append-notes"} {
+		t.Run(flag, func(t *testing.T) {
+			_, resident, store := unsetMetadataSplitCity(t, map[string]string{"pr.followup_url": "u"})
+			var stdout, stderr bytes.Buffer
+			args := []string{"update", resident.ID, "--unset-metadata", "pr.followup_url", flag, "done"}
+			if code := doBd(args, &stdout, &stderr); code == 0 {
+				t.Fatalf("doBd %v exited 0; stdout=%q", args, stdout.String())
+			}
+			if !strings.Contains(stderr.String(), flag) {
+				t.Errorf("the refusal does not name %s: %q", flag, stderr.String())
+			}
+			after, err := store.Get(resident.ID)
+			if err != nil {
+				t.Fatalf("re-reading: %v", err)
+			}
+			if after.Metadata["pr.followup_url"] != "u" {
+				t.Errorf("the refused update applied its unset anyway: %v", after.Metadata)
 			}
 		})
 	}

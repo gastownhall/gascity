@@ -301,4 +301,7 @@ func TestWaitForIdleOutcomeMapping(t *testing.T) {
 	if got := p.waitForIdleOutcome(context.Background(), "gastown__witness", time.Second); got != idleWaitTimeout {
 		t.Fatalf("timed-out wait outcome = %q; want %q", got, idleWaitTimeout)
 	}
+	if calls := fakeCalls(t, state); !strings.Contains(calls, "--until idle --until done --timeout") {
+		t.Fatalf("idle wait must also accept a finished Claude turn (done):\n%s", calls)
+	}
 }

@@ -100,7 +100,7 @@ func (e *Editor) Edit(fn func(cfg *config.City) error) error {
 		return err
 	}
 
-	if err := validateCityForEdit(cfg); err != nil {
+	if err := e.validateForEdit(cfg); err != nil {
 		return err
 	}
 
@@ -136,7 +136,7 @@ func (e *Editor) EditExpanded(fn func(raw, expanded *config.City) error) error {
 		return err
 	}
 
-	if err := validateCityForEdit(raw); err != nil {
+	if err := e.validateForEdit(raw); err != nil {
 		return err
 	}
 
@@ -174,6 +174,19 @@ func validateCityForEdit(cfg *config.City) error {
 	}
 	if err := validateProviders(cfg.Providers); err != nil {
 		return fmt.Errorf("%w: providers: %w", ErrValidation, err)
+	}
+	return nil
+}
+
+// validateForEdit is validateCityForEdit for this editor's city, plus the
+// checks that need the city on disk: a reserved prefix introduced on a split
+// city is refused before the write (split-default R10).
+func (e *Editor) validateForEdit(cfg *config.City) error {
+	if err := validateCityForEdit(cfg); err != nil {
+		return err
+	}
+	if err := config.ReservedPrefixSplitRefusalForEdit(e.fs, e.tomlPath, cfg); err != nil {
+		return fmt.Errorf("%w: rigs: %w", ErrValidation, err)
 	}
 	return nil
 }
@@ -703,15 +716,8 @@ func removeLocalDiscoveredAgentConfig(fs fsys.FS, cityRoot string, agent config.
 // city.toml is no longer touched — `gc doctor` warns about it
 // separately.
 func (e *Editor) SuspendRig(name string) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	cfg, err := e.loadForEdit()
-	if err != nil {
+	if err := e.requireRig(name); err != nil {
 		return err
-	}
-	if !rigDeclared(cfg, name) {
-		return fmt.Errorf("%w: rig %q", ErrNotFound, name)
 	}
 	cityPath := filepath.Dir(e.tomlPath)
 	t := true
@@ -723,6 +729,24 @@ func (e *Editor) SuspendRig(name string) error {
 // even when the rig declares suspended_on_start = true, so users don't
 // have to edit city.toml to keep a committed-default rig running.
 func (e *Editor) ResumeRig(name string) error {
+	if err := e.requireRig(name); err != nil {
+		return err
+	}
+	cityPath := filepath.Dir(e.tomlPath)
+	f := false
+	return suspensionstate.SetRigSuspended(e.fs, cityPath, name, &f)
+}
+
+// requireRig checks, under the Editor's lock, that the config declares a rig
+// named name. SuspendRig and ResumeRig write the runtime state file only after
+// it returns: that write can wait on the suspension fence while a controller
+// stops a scope's store, and the wait must not hold up every other Editor
+// mutation. A caller that serializes its mutations above the Editor (the
+// controller API's publication lock) still holds them up for that wait; the
+// stall is accepted because the fence holder never waits on such a lock, so it
+// ends when the store stop does. The state write orders itself
+// (suspensionstate.Update).
+func (e *Editor) requireRig(name string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -733,9 +757,7 @@ func (e *Editor) ResumeRig(name string) error {
 	if !rigDeclared(cfg, name) {
 		return fmt.Errorf("%w: rig %q", ErrNotFound, name)
 	}
-	cityPath := filepath.Dir(e.tomlPath)
-	f := false
-	return suspensionstate.SetRigSuspended(e.fs, cityPath, name, &f)
+	return nil
 }
 
 // SuspendCity records an explicit "suspended" preference for the city
@@ -1097,7 +1119,7 @@ func (e *Editor) UpdateAgent(name string, patch AgentUpdate) error {
 		if !stripAgentPatchUpdate(raw, agent.QualifiedName(), patch) {
 			return writeLocalDiscoveredAgentUpdate(e.fs, cityRoot, updated, patch)
 		}
-		if err := validateCityForEdit(raw); err != nil {
+		if err := e.validateForEdit(raw); err != nil {
 			return err
 		}
 		return e.commitLocalDiscoveredAgentUpdate(cityRoot, agent, func() error {
@@ -1109,7 +1131,7 @@ func (e *Editor) UpdateAgent(name string, patch AgentUpdate) error {
 	for i := range raw.Agents {
 		if config.AgentMatchesIdentity(&raw.Agents[i], name) {
 			applyAgentUpdate(&raw.Agents[i], patch)
-			if err := validateCityForEdit(raw); err != nil {
+			if err := e.validateForEdit(raw); err != nil {
 				return err
 			}
 			return e.write(raw)
@@ -1156,7 +1178,7 @@ func (e *Editor) DeleteAgent(name string) error {
 				return removeLocalDiscoveredAgentConfig(e.fs, cityRoot, agent)
 			}, nil)
 		}
-		if err := validateCityForEdit(raw); err != nil {
+		if err := e.validateForEdit(raw); err != nil {
 			return err
 		}
 		return e.commitLocalDiscoveredAgentUpdate(cityRoot, agent, func() error {
@@ -1168,7 +1190,7 @@ func (e *Editor) DeleteAgent(name string) error {
 	for i := range raw.Agents {
 		if config.AgentMatchesIdentity(&raw.Agents[i], name) {
 			raw.Agents = append(raw.Agents[:i], raw.Agents[i+1:]...)
-			if err := validateCityForEdit(raw); err != nil {
+			if err := e.validateForEdit(raw); err != nil {
 				return err
 			}
 			return e.write(raw)
@@ -1257,7 +1279,7 @@ func (e *Editor) DeleteRig(name string) error {
 	}
 	cfg.Agents = kept
 
-	if err := validateCityForEdit(cfg); err != nil {
+	if err := e.validateForEdit(cfg); err != nil {
 		return err
 	}
 

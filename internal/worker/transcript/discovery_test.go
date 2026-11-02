@@ -846,3 +846,59 @@ func TestDiscoverScopedPathZCodeKeysBySeat(t *testing.T) {
 		t.Fatalf("DiscoverScopedPath(claude) = %q, want empty for a non-zcode family", got)
 	}
 }
+
+// Kills a keyed-lookup predicate that disagrees with DiscoverKeyedPath: a
+// family it resolves by key reported as keyless, or a keyless one as keyed.
+func TestHasKeyedLookupMatchesDiscoverKeyedPath(t *testing.T) {
+	for provider, want := range map[string]bool{
+		"claude": true, "claude/tmux-cli": true, "codex": true, "gemini": true, "kimi": true, "pi": true,
+		"zcode": true, "zcode/tmux-cli": true,
+		"opencode": true, "mimocode": false,
+	} {
+		if got := HasKeyedLookup(provider); got != want {
+			t.Errorf("HasKeyedLookup(%q) = %v, want %v", provider, got, want)
+		}
+	}
+	// A keyless family resolves nothing by key, however the key is spelled.
+	if got := DiscoverKeyedPath([]string{t.TempDir()}, "mimocode", t.TempDir(), "key"); got != "" {
+		t.Fatalf("DiscoverKeyedPath(mimocode) = %q, want none", got)
+	}
+}
+
+// Kills an OpenCode keyed lookup that returns the newest export in the root
+// instead of the one the session key names.
+func TestDiscoverKeyedPathOpenCodePrefersKeyOverNewest(t *testing.T) {
+	root := t.TempDir()
+	workDir := t.TempDir()
+	write := func(id string, mtime time.Time) string {
+		path := filepath.Join(root, id+".json")
+		body := `{"info":{"id":"` + id + `","directory":"` + filepath.ToSlash(workDir) + `"},"messages":[]}`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	now := time.Now()
+	want := write("ses_x", now.Add(-time.Hour))
+	write("ses_y", now)
+
+	if got := DiscoverKeyedPath([]string{root}, "opencode", workDir, "ses_x"); got != want {
+		t.Fatalf("DiscoverKeyedPath(opencode, ses_x) = %q, want %q", got, want)
+	}
+}
+
+// Kills an exact keyed-lookup predicate that admits a family whose by-key
+// lookup can return another conversation's file, or refuses an exact one.
+func TestHasExactKeyedLookup(t *testing.T) {
+	for provider, want := range map[string]bool{
+		"claude": true, "claude/tmux-cli": true, "codex": true, "kimi": true, "pi": true, "zcode": true,
+		"opencode": true, "gemini": false, "mimocode": false,
+	} {
+		if got := HasExactKeyedLookup(provider); got != want {
+			t.Errorf("HasExactKeyedLookup(%q) = %v, want %v", provider, got, want)
+		}
+	}
+}

@@ -253,6 +253,30 @@ func TestPruneAgentHomeWorktreeIfSafeInfo_HappyPath(t *testing.T) {
 	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
+func TestPruneAgentHomeWorktreeIfSafeInfo_UsesConfiguredWorktreesRoot(t *testing.T) {
+	fx := newPruneFixture(t)
+	configuredRoot := filepath.Join(fx.cityPath, "configured-worktrees")
+	configuredWorker := filepath.Join(configuredRoot, "demo", "polecats", "polecat-3")
+	t.Setenv("GC_WORKTREES_DIR", configuredRoot)
+	if err := os.MkdirAll(configuredWorker, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configuredWorker, ".git"), []byte("gitdir: /fake\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info := fx.sessionInfo()
+	info.WorkerDir = configuredWorker
+	fx.setProbe(configuredWorker, &fakeGitProbe{isRepo: true})
+	rigProbe := &fakeGitProbe{isRepo: true}
+	fx.setProbe(fx.rigRoot, rigProbe)
+
+	var stderr bytes.Buffer
+	pruneAgentHomeWorktreeIfSafeInfo(info, fx.cityPath, fx.cfg, &stderr)
+	if !rigProbe.removeInvoked || rigProbe.removedPath != configuredWorker {
+		t.Fatalf("WorktreeRemove path = %q, invoked=%v; stderr=%q", rigProbe.removedPath, rigProbe.removeInvoked, stderr.String())
+	}
+}
+
 func TestPruneAgentHomeWorktreeIfSafeInfo_NilConfig(t *testing.T) {
 	fx := newPruneFixture(t)
 	var stderr bytes.Buffer

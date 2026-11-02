@@ -8,7 +8,11 @@
     "command": { "const": "session reset" },
     "action": { "const": "reset" },
     "session_id": { "type": "string", "minLength": 1 },
-    "identity": { "type": "string" }
+    "mode": { "enum": ["restart", "rollback"] },
+    "identity": { "type": "string" },
+    "op_id": { "type": "string", "minLength": 1 },
+    "key": { "type": "string", "minLength": 1 },
+    "replayed": { "type": "boolean" }
   },
   "required": ["schema_version", "ok", "command", "action", "session_id"],
   "additionalProperties": true

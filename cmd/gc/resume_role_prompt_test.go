@@ -61,7 +61,7 @@ func resolveResumeRoleTemplateWithNudge(t *testing.T, providerName string, provi
 	return tp
 }
 
-func TestRolePromptSuppliedByHook(t *testing.T) {
+func TestStartupPromptSourceRoleSuppliedByHook(t *testing.T) {
 	no := false
 	wrappedBase := "builtin:opencode"
 	wrapped := map[string]config.ProviderSpec{"wrapped-opencode": {Base: &wrappedBase}}
@@ -155,15 +155,15 @@ func TestRolePromptSuppliedByHook(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			tp := resolveResumeRoleTemplate(t, tc.provider, tc.providers, tc.installHooks, tc.agentSession, tc.hooksInstalled)
-			if got := rolePromptSuppliedByHook(tp); got != tc.want {
-				t.Fatalf("rolePromptSuppliedByHook = %v, want %v (HookEnabled=%v IsACP=%v ancestor=%q)",
+			if got := tp.startupPromptSource().roleSuppliedByHook(); got != tc.want {
+				t.Fatalf("roleSuppliedByHook = %v, want %v (HookEnabled=%v IsACP=%v ancestor=%q)",
 					got, tc.want, tp.HookEnabled, tp.IsACP, tp.ResolvedProvider.BuiltinAncestor)
 			}
 		})
 	}
 
 	t.Run("nil resolved provider", func(t *testing.T) {
-		if rolePromptSuppliedByHook(TemplateParams{HookEnabled: true}) {
+		if (TemplateParams{HookEnabled: true}).startupPromptSource().roleSuppliedByHook() {
 			t.Fatal("a template with no resolved provider must not claim a per-turn role hook")
 		}
 	})
@@ -220,13 +220,13 @@ func prepareRoleStart(t *testing.T, tp TemplateParams, metadata map[string]strin
 // their initial message without persisting a second copy of the role either.
 func TestResumeOnHookPrimedProviderNeverReplaysRolePrompt(t *testing.T) {
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(string, string, string) (present, probeable bool) { return true, true }
+	staleResumeKeyProbe = func([]string, string, string, string) (present, probeable bool) { return true, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	// No install_agent_hooks: this is the default opencode configuration, and
 	// the overlay plugin is staged for it unconditionally.
 	tp := resolveResumeRoleTemplate(t, "opencode", builtinProviderAliasesForTest("opencode"), nil, config.SessionTransportTmux, nil)
-	if !rolePromptSuppliedByHook(tp) {
+	if !tp.startupPromptSource().roleSuppliedByHook() {
 		t.Fatal("fixture must resolve to a hook-primed opencode template")
 	}
 	if !strings.Contains(tp.Prompt, "Base worker prompt") {
@@ -335,7 +335,7 @@ func TestFreshHookPrimedStartActivation(t *testing.T) {
 
 func TestFreshHookPrimedStartRecovery(t *testing.T) {
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(string, string, string) (bool, bool) { return false, true }
+	staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return false, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 	for _, mode := range []string{"missing-key", "stale-key", "fresh"} {
 		t.Run(mode, func(t *testing.T) {
@@ -426,7 +426,7 @@ func TestFreshHookPrimedAutomaticKickoff(t *testing.T) {
 
 func TestFreshHookPrimedForceFreshWithValidKey(t *testing.T) {
 	prev := staleResumeKeyProbe
-	staleResumeKeyProbe = func(string, string, string) (bool, bool) { return true, true }
+	staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return true, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prev })
 	tp := resolveResumeRoleTemplateWithNudge(t, "opencode", builtinProviderAliasesForTest("opencode"), nil, config.SessionTransportTmux, nil, "")
 	prepared := prepareRoleStart(t, tp, map[string]string{
@@ -471,11 +471,11 @@ func TestFreshHookPrimedEmptyRoleDoesNotKickoff(t *testing.T) {
 // message, queued nudge, or reconcile-tick claim backstop starts a real turn.
 func TestResumeOnHookPrimedProviderWithBlankNudgeLandsIdle(t *testing.T) {
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(string, string, string) (present, probeable bool) { return true, true }
+	staleResumeKeyProbe = func([]string, string, string, string) (present, probeable bool) { return true, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	tp := resolveResumeRoleTemplateWithNudge(t, "opencode", builtinProviderAliasesForTest("opencode"), nil, config.SessionTransportTmux, nil, "")
-	if !rolePromptSuppliedByHook(tp) {
+	if !tp.startupPromptSource().roleSuppliedByHook() {
 		t.Fatal("fixture must resolve to a hook-primed opencode template")
 	}
 	if tp.Hints.Nudge != "" {
@@ -501,7 +501,7 @@ func TestResumeOnHookPrimedProviderWithBlankNudgeLandsIdle(t *testing.T) {
 // SessionStart (pi) keeps the restart prompt in its resume nudge.
 func TestResumeWithoutPerTurnRoleHookStillReplaysRolePrompt(t *testing.T) {
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(string, string, string) (present, probeable bool) { return true, true }
+	staleResumeKeyProbe = func([]string, string, string, string) (present, probeable bool) { return true, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	no := false
@@ -517,7 +517,7 @@ func TestResumeWithoutPerTurnRoleHookStillReplaysRolePrompt(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			tp := resolveResumeRoleTemplate(t, tc.provider, builtinProviderAliasesForTest(tc.provider), tc.installHooks, config.SessionTransportTmux, tc.hooksInstalled)
-			if rolePromptSuppliedByHook(tp) {
+			if tp.startupPromptSource().roleSuppliedByHook() {
 				t.Fatal("fixture must not resolve to a hook-primed template")
 			}
 			prepared := prepareResumeRoleStart(t, tp, "resume-key")

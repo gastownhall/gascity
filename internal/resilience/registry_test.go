@@ -1,6 +1,7 @@
 package resilience
 
 import (
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -123,7 +124,75 @@ func TestRegistryDefaultSettings(t *testing.T) {
 		OpenMax:             60 * time.Second,
 		HalfOpenInterval:    15 * time.Second,
 	}
-	if got != want {
+	// Settings holds a func (Now), so compare with DeepEqual; nil funcs are equal.
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("DefaultSettings() = %+v, want %+v", got, want)
+	}
+}
+
+func TestRegistry_StatusesReportsTripsCapAndDeadline(t *testing.T) {
+	clock := newTestClock()
+	settings := capacitySettings()
+	settings.Now = clock.Now
+	reg := NewRegistry(settings)
+	open := reg.Breaker("provider:a", OpClassSessionStart)
+	reg.Breaker("provider:b", OpClassSessionStart)
+	open.jitter = maxJitter
+
+	open.RecordFailure()
+	clock.Advance(5 * time.Second)
+	if !open.Allow() {
+		t.Fatal("Allow() = false past the deadline, want the probe")
+	}
+	probeAt := clock.Now()
+	open.RecordFailure()
+
+	statuses := reg.Statuses()
+	if len(statuses) != 2 {
+		t.Fatalf("Statuses() returned %d entries, want 2", len(statuses))
+	}
+	got := statuses[Key{Scope: "provider:a", OpClass: OpClassSessionStart}]
+	want := Status{
+		State:       StateOpen,
+		Failures:    1,
+		Trips:       2,
+		Deadline:    probeAt.Add(10 * time.Second),
+		BackoffCap:  10 * time.Second,
+		LastProbeAt: probeAt,
+	}
+	if got != want {
+		t.Fatalf("Statuses()[provider:a] = %+v, want %+v", got, want)
+	}
+	if closed := statuses[Key{Scope: "provider:b", OpClass: OpClassSessionStart}]; closed != (Status{State: StateClosed}) {
+		t.Fatalf("Statuses()[provider:b] = %+v, want a zero closed status", closed)
+	}
+}
+
+func TestRegistry_RemoveForgetsBreaker(t *testing.T) {
+	reg := NewRegistry(Settings{Enabled: true, ConsecutiveFailures: 1})
+	reg.Breaker("gone", OpClassSessionStart).RecordFailure()
+
+	reg.Remove("gone", OpClassSessionStart)
+
+	if len(reg.Statuses()) != 0 {
+		t.Fatalf("Statuses() = %v, want the removed breaker gone", reg.Statuses())
+	}
+	if got := reg.Breaker("gone", OpClassSessionStart).State(); got != StateClosed {
+		t.Fatalf("recreated breaker state = %v, want a fresh closed breaker", got)
+	}
+}
+
+func TestRegistry_SetJitterForTestPinsBackoff(t *testing.T) {
+	clock := newTestClock()
+	reg := NewRegistry(Settings{Enabled: true, ConsecutiveFailures: 1, OpenBase: time.Second, Now: clock.Now})
+	existing := reg.Breaker("existing", OpClassBd)
+	reg.SetJitterForTest(maxJitter)
+	created := reg.Breaker("created", OpClassBd)
+
+	for _, b := range []*Breaker{existing, created} {
+		b.RecordFailure()
+		if got, want := b.Status().Deadline, clock.Now().Add(time.Second); !got.Equal(want) {
+			t.Fatalf("deadline = %v, want %v with pinned jitter", got, want)
+		}
 	}
 }

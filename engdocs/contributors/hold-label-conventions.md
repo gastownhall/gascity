@@ -121,6 +121,16 @@ work — `ga-5736js`, `gas-kg6`), never when deciding which sessions still need
 to **exist** (pool demand and crash-recovery accounting stay hold-transparent,
 or a parked bead's owner goes invisible).
 
+Restoring a lost pool route is a **do** decision too. A pack that parks
+finished work on a hold usually clears its `gc.routed_to` at the same time,
+because the next actor is not the pool that worked it. The controller's
+route-restore lanes (the detached-orphan sweep and `gc.run_target` route
+recovery) leave a held bead's route empty. Once the hold lifts, the bead is
+recoverable again. These lanes know only the two canonical values. A pack
+that parks with a label of its own should also set a bd status (`blocked` or
+`deferred`) or a canonical hold, or the controller will treat the bead as
+detached and restore its route.
+
 ## See also
 
 - `bd show ga-tug8ry.1` — the architecture decision: full live census,

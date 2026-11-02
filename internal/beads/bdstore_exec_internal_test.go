@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
-	otellog "go.opentelemetry.io/otel/log"
+	"go.opentelemetry.io/otel/attribute"
 	otellogglobal "go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 )
@@ -207,6 +207,50 @@ printf '[]\n'
 	}
 }
 
+// TestBdReadsStandardOTELEnvReturnsWhenContextEnds pins that a caller whose
+// context ends stops waiting on the bd version probe, and that the probe it
+// abandoned still caches its answer for the next command. The fake blocks
+// its version probe on a FIFO until the test writes to it, so the probe is
+// still running when the canceled caller returns.
+func TestBdReadsStandardOTELEnvReturnsWhenContextEnds(t *testing.T) {
+	dir := t.TempDir()
+	release := filepath.Join(dir, "release")
+	if err := syscall.Mkfifo(release, 0o600); err != nil {
+		t.Fatalf("Mkfifo(%q) = %v", release, err)
+	}
+	probeLog := filepath.Join(dir, "version-probes")
+	bin := filepath.Join(dir, "bd")
+	writeExecutable(t, bin, "#!/bin/sh\necho probe >> '"+probeLog+"'\nread _ < '"+release+"'\necho 'bd version 1.3.1 (fake)'\n")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if bdReadsStandardOTELEnv(ctx, bin) {
+		t.Fatal("canceled caller reported the standard OTEL names before the probe answered")
+	}
+
+	go func() {
+		// Blocks until the probe opens the FIFO to read, then lets it answer.
+		if f, err := os.OpenFile(release, os.O_WRONLY, 0); err == nil {
+			_, _ = f.WriteString("\n")
+			_ = f.Close()
+		}
+	}()
+	t.Cleanup(func() {
+		// A probe that never reached the FIFO leaves the writer above
+		// blocked in open; a non-blocking read open completes that open so
+		// the goroutine can exit.
+		if f, err := os.OpenFile(release, os.O_RDONLY|syscall.O_NONBLOCK, 0); err == nil {
+			_ = f.Close()
+		}
+	})
+	if !bdReadsStandardOTELEnv(context.Background(), bin) {
+		t.Fatal("abandoned bd 1.3.1 probe did not answer the next caller")
+	}
+	if got := versionProbeCount(t, probeLog); got != 1 {
+		t.Fatalf("bd version probes = %d, want 1 (the next caller reuses the abandoned probe)", got)
+	}
+}
+
 // TestKillCommandTreeKillsProcessGroup verifies killCommandTree kills
 // the entire process group, not just the direct child. The script
 // backgrounds a `sleep 30`; without process-group cleanup, that sleep
@@ -366,16 +410,16 @@ func (e *beadsRecordingLogExporter) countByBody(body string) int {
 	return count
 }
 
-func beadsRecordAttrs(rec sdklog.Record) map[string]otellog.Value {
-	attrs := make(map[string]otellog.Value)
-	rec.WalkAttributes(func(kv otellog.KeyValue) bool {
-		attrs[kv.Key] = kv.Value
+func beadsRecordAttrs(rec sdklog.Record) map[string]attribute.Value {
+	attrs := make(map[string]attribute.Value)
+	rec.WalkAttributes(func(kv attribute.KeyValue) bool {
+		attrs[string(kv.Key)] = kv.Value
 		return true
 	})
 	return attrs
 }
 
-func beadsLogValueStringSlice(value otellog.Value) []string {
+func beadsLogValueStringSlice(value attribute.Value) []string {
 	values := value.AsSlice()
 	out := make([]string, 0, len(values))
 	for _, item := range values {

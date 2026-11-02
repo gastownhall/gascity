@@ -20,6 +20,9 @@ type SessionView struct {
 	Attached    bool   `json:"attached"`
 	Running     bool   `json:"running"`
 	LastOutput  string `json:"last_output"`
+	// ProgramStatus is the session program's own status report, as the API
+	// reports it; absent means unknown, never idle.
+	ProgramStatus *SessionProgramStatus `json:"program_status,omitempty"`
 }
 
 // sessionViewFromGen translates one genclient.SessionResponse into a
@@ -49,6 +52,32 @@ func sessionViewFromGen(g genclient.SessionResponse) SessionView {
 	}
 	if g.LastOutput != nil {
 		out.LastOutput = *g.LastOutput
+	}
+	out.ProgramStatus = programStatusFromGen(g.ProgramStatus)
+	return out
+}
+
+// programStatusFromGen translates the generated client's program status into
+// the wire type; nil stays nil (unknown).
+func programStatusFromGen(g *genclient.SessionProgramStatus) *SessionProgramStatus {
+	if g == nil {
+		return nil
+	}
+	out := &SessionProgramStatus{
+		State:           string(g.State),
+		Since:           g.Since,
+		QuietSince:      g.QuietSince,
+		WorkingChildren: int(g.WorkingChildren),
+	}
+	if g.Kind != nil {
+		out.Kind = string(*g.Kind)
+	}
+	if g.App != nil {
+		out.App = *g.App
+	}
+	if g.Progress != nil {
+		progress := int(*g.Progress)
+		out.Progress = &progress
 	}
 	return out
 }

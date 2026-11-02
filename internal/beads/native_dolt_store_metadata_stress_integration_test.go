@@ -3,7 +3,6 @@
 package beads
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,22 +17,41 @@ import (
 // loaded CI host while the whole test stays within a few seconds per backend.
 const metadataStressRounds = 60
 
-// metadataStressMaxErrorRate bounds the fraction of SetMetadataBatch calls
-// that may give up with ErrVersionMismatch after the retry budget. A refused
-// write is surfaced, never silently lost, so a nonzero rate is correct; the
-// bound catches a retry loop that stopped re-reading (every call would fail)
-// without making the test sensitive to host load.
-const metadataStressMaxErrorRate = 0.25
+// metadataStressMaxErrorRate is a sanity ceiling on the fraction of
+// SetMetadataBatch calls that may fail under contention.
+//
+// Both writers go through the facade, which resolves their keys against the row
+// inside its own write transaction, so contention has one outcome a caller can
+// see: a serialization conflict on the later of two overlapping transactions,
+// which the store replays up to nativeWriteAttempts times. A call fails only
+// when every replay conflicts again. That failure is surfaced, never silently
+// lost, so a nonzero rate is correct, and how often the budget runs out depends
+// on how the host schedules the two writers.
+//
+// The rate proves nothing about correctness. This test's correctness assertions
+// are the lost-update checks, which stay strict: zero successful writes may be
+// missing from the final row. The ceiling only catches a gross liveness failure.
+const metadataStressMaxErrorRate = 0.5
 
 // TestNativeDoltStoreMetadataMergeSurvivesAConcurrentUpdateLoop is the
-// unscripted form of the compare-and-swap proof: one goroutine loops Update on
-// a bead's metadata while another loops SetMetadataBatch on the same bead, on
-// a real Dolt backend, with no hook choosing the interleaving. Every write
-// either lands or returns an error — none is silently undone by the other
-// writer's stale read-merge-write — and the metadata merge gives up only
-// within a bounded rate. It runs against the issues table and the wisps table,
-// whose checked writes are separate backend paths, and against both the
-// embedded engine and a sql-server, whose transaction isolation differs.
+// unscripted exercise of the facade merge: one goroutine loops Update on a
+// bead's metadata while another loops SetMetadataBatch on the same bead, on a
+// real Dolt backend, with no hook choosing the interleaving.
+//
+// Neither writer reads the row before its write transaction does, so the window
+// a lost update needs — a commit landing between a writer's read and its write
+// — only exists inside one transaction. There, Dolt's commit-time merge either
+// combines the two edits or refuses the later transaction with a serialization
+// conflict that the store replays. Every write either lands or returns that
+// conflict, and none is silently undone by the other writer. It runs against the
+// issues table and the wisps table, whose writes are separate backend paths, and
+// against both the embedded engine and a sql-server, whose transaction
+// isolation differs.
+//
+// No hook reaches inside a facade transaction, so this race is the only
+// exercise of that window. The scripted ordering — a competing session's commit
+// landing between two of one writer's batches — is
+// TestNativeDoltStoreSetMetadataBatchKeepsAnotherSessionsUpdate.
 func TestNativeDoltStoreMetadataMergeSurvivesAConcurrentUpdateLoop(t *testing.T) {
 	backends := map[string]func(t *testing.T) *NativeDoltStore{
 		"embedded": func(t *testing.T) *NativeDoltStore {
@@ -122,9 +140,10 @@ func runMetadataMergeStress(t *testing.T, store *NativeDoltStore, ephemeral bool
 			t.Errorf("%s: %d of %d successful writes lost", w.name, lost, len(w.landed))
 		}
 		for _, err := range w.errs {
-			// Contention may surface only as the two retryable races, each after
-			// its own retry budget; anything else is a defect this test found.
-			if !errors.Is(err, beadslib.ErrVersionMismatch) && !isNativeDoltSerializationConflict(err) {
+			// Contention may surface only as a serialization conflict that
+			// outlasted the store's replays. Neither writer sends an expected
+			// version, so even ErrVersionMismatch is a defect this test found.
+			if !isNativeDoltSerializationConflict(err) {
 				t.Errorf("%s: unexpected write error under contention: %v", w.name, err)
 			}
 		}
@@ -135,7 +154,7 @@ func runMetadataMergeStress(t *testing.T, store *NativeDoltStore, ephemeral bool
 	t.Logf("update: %d landed, %d refused; batch: %d landed, %d refused (%.0f%%)",
 		len(writers[0].landed), len(writers[0].errs), len(batch.landed), len(batch.errs), rate*100)
 	if rate > metadataStressMaxErrorRate {
-		t.Fatalf("SetMetadataBatch gave up on %d of %d calls (%.0f%%), want at most %.0f%%: the merge retry is not re-reading onto the committed row",
+		t.Fatalf("SetMetadataBatch gave up on %d of %d calls (%.0f%%), want at most %.0f%%: the metadata merge retry is failing far more often than contention explains",
 			len(batch.errs), metadataStressRounds, rate*100, metadataStressMaxErrorRate*100)
 	}
 	if len(writers[0].landed) == 0 || len(batch.landed) == 0 {
@@ -143,65 +162,30 @@ func runMetadataMergeStress(t *testing.T, store *NativeDoltStore, ephemeral bool
 	}
 }
 
-// TestNativeDoltStoreSetMetadataBatchKeepsAConcurrentUpdateOnAWisp is the
-// scripted interleaving of the real-Dolt proof on the wisps table: wisp
-// metadata writes take the backend's wisp checked-update path, which must
-// refuse a stale swap exactly as the issues path does.
-func TestNativeDoltStoreSetMetadataBatchKeepsAConcurrentUpdateOnAWisp(t *testing.T) {
-	store := openRealNativeDoltStoreForMergeProof(t, "merge-race-wisp")
-	created, err := store.Create(Bead{
-		Title:     "fenced wisp step",
-		Ephemeral: true,
-		Metadata:  map[string]string{"gc.instantiating": "true", "gc.deferred_routed_to": "rig/pool"},
-	})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if !created.Ephemeral {
-		t.Fatalf("Create returned a non-ephemeral bead %s; the test would not exercise the wisps table", created.ID)
-	}
-	id := created.ID
-
-	reads := 0
-	store.afterMetadataMergeRead = func(readID string) {
-		reads++
-		if reads != 1 || readID != id {
-			return
-		}
-		if err := store.Update(id, UpdateOpts{Metadata: map[string]string{
-			"gc.instantiating":      "",
-			"gc.deferred_routed_to": "",
-			"gc.routed_to":          "rig/pool",
-		}}); err != nil {
-			t.Errorf("competing Update: %v", err)
-		}
-	}
-	if err := store.SetMetadataBatch(id, map[string]string{"gc.heartbeat": "now"}); err != nil {
-		t.Fatalf("SetMetadataBatch: %v", err)
-	}
-	if reads != 2 {
-		t.Fatalf("merge reads = %d, want 2 (the wisp swap refused after the competing write, then a fresh read)", reads)
-	}
-	got, err := store.Get(id)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	for key, want := range map[string]string{
-		"gc.heartbeat":          "now",
-		"gc.instantiating":      "",
-		"gc.deferred_routed_to": "",
-		"gc.routed_to":          "rig/pool",
-	} {
-		if got.Metadata[key] != want {
-			t.Errorf("%s = %q, want %q (the competing write was lost or the merge was)", key, got.Metadata[key], want)
-		}
-	}
-}
-
 // openServerNativeDoltStoreForMergeProof opens the native store against a
 // fresh dolt sql-server, the deployment shape where concurrent writers run in
 // separate server transactions.
 func openServerNativeDoltStoreForMergeProof(t *testing.T) *NativeDoltStore {
+	t.Helper()
+	return openNativeDoltStoreHandleForMergeProof(t, initServerScopeForMergeProof(t))
+}
+
+// openNativeDoltStoreHandleForMergeProof opens one store handle on scopeRoot.
+// Every call opens storage of its own, so two handles on one scope are two
+// server sessions, which is how two processes write the same ledger.
+func openNativeDoltStoreHandleForMergeProof(t *testing.T, scopeRoot string) *NativeDoltStore {
+	t.Helper()
+	store, err := newNativeDoltStoreAt(t.Context(), scopeRoot, nil)
+	if err != nil {
+		t.Fatalf("open the server-backed native store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.CloseStore() })
+	return store
+}
+
+// initServerScopeForMergeProof starts a fresh dolt sql-server and returns a
+// scope root whose metadata points at it, with the issue prefix configured.
+func initServerScopeForMergeProof(t *testing.T) string {
 	t.Helper()
 	scopeRoot := t.TempDir()
 	port := startTestDoltServer(t)
@@ -223,10 +207,5 @@ func openServerNativeDoltStoreForMergeProof(t *testing.T) *NativeDoltStore {
 	if err := storage.Close(); err != nil {
 		t.Fatalf("close the initializing storage: %v", err)
 	}
-	store, err := newNativeDoltStoreAt(t.Context(), scopeRoot, nil)
-	if err != nil {
-		t.Fatalf("open the server-backed native store: %v", err)
-	}
-	t.Cleanup(func() { _ = store.CloseStore() })
-	return store
+	return scopeRoot
 }

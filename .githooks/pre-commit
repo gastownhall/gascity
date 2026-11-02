@@ -21,8 +21,10 @@ if [ -n "$staged_go_files" ]; then
   printf '%s\n' "$staged_go_files" | scripts/precommit-format-staged-go
   printf '%s\n' "$staged_go_files" | xargs git add
 
-  make lint-changed LINT_CHANGED_SCOPE=staged LINT_FLAGS="--new-from-rev=HEAD --whole-files --fix" || exit 1
-  printf '%s\n' "$staged_go_files" | xargs git add
+  # Lint and vet: nogo (//tools/nogo) over the staged files' Bazel packages,
+  # the same analyzers bazel.yml gates on. Findings fail the commit; nogo
+  # prints a `patch -p1` command for the ones with suggested fixes.
+  make lint-changed LINT_CHANGED_SCOPE=staged || exit 1
 
   # Regenerate the OpenAPI spec from the live Huma API and stage both
   # canonical copies. Keeps the committed spec and the published
@@ -40,16 +42,65 @@ if [ -n "$staged_go_files" ]; then
   go run ./cmd/genschema
   git add docs/reference/schema/city-schema.json docs/reference/schema/city-schema.txt docs/reference/config.md docs/reference/cli.md
 
-  make vet
   # Heavy `go test` fan-out runs in .githooks/pre-push, not here (#3628).
   # Invoking `make test-fast-parallel` on every commit fired an
   # `xargs -P<nproc>` storm of ~2.8 GB test-binary compiles (~17 GB pressure,
-  # load >100 on constrained hosts such as WSL). Format, lint, vet, and codegen
-  # stay in pre-commit; the test suite gates at push time instead.
+  # load >100 on constrained hosts such as WSL). Format, lint/vet (nogo), and
+  # codegen stay in pre-commit; the test suite gates at push time instead.
 fi
 
+# make check-docs gates on the same Bazel docsync target CI runs. Where this
+# host cannot run Bazel (no bazel, or a loader that cannot resolve the pinned
+# ICU runtime, lib/local-runtime.sh), auto runs the go twin behind a banner
+# instead: it is not the Bazel gate, but a genuine docs failure still blocks
+# the commit. GC_PRECOMMIT_DOCS=auto|bazel|go picks the engine; the explicit
+# values are never replaced.
+announce_go_docs() {
+  {
+    echo "pre-commit: running make check-docs-go (go test ./test/docsync): NOT the Bazel docs gate CI enforces."
+    echo "pre-commit: why: $docs_why"
+    echo "pre-commit: CI runs bazel test //... (.github/workflows/bazel.yml), whose docsync target runs hermetically on its declared inputs."
+    echo "pre-commit: This ran the whole docsync suite on this host's files and ICU instead, so a commit that passes here can still fail there"
+    echo "pre-commit: (TestNestedAgentsFilesHaveClaudeSymlink, for one, is stricter under go)."
+    echo "pre-commit: fix: $docs_fix"
+  } >&2
+}
+
 if [ -n "$staged_docs" ]; then
-  make check-docs
+  docs_mode="${GC_PRECOMMIT_DOCS:-auto}"
+  docs_why="GC_PRECOMMIT_DOCS=go"
+  docs_fix="unset GC_PRECOMMIT_DOCS, or set GC_PRECOMMIT_DOCS=bazel, to run the Bazel docs gate"
+  case "$docs_mode" in
+  auto)
+    if ! command -v bazel >/dev/null 2>&1; then
+      docs_why="bazel is not installed"
+      docs_fix="install bazelisk (engdocs/bazel-quickstart.md); GC_PRECOMMIT_DOCS=bazel then runs make check-docs"
+      docs_mode=go
+    else
+      # shellcheck source=lib/local-runtime.sh
+      . "$repo_root/.githooks/lib/local-runtime.sh"
+      local_runtime_assess
+      if [ "$local_runtime_state" = ok ]; then
+        docs_mode=bazel
+      else
+        docs_why="$(local_runtime_why)"
+        docs_fix="use a remote executor (BAZEL_FLAGS=--config=remote-exec make check-docs), or $(local_runtime_resolve_hint); GC_PRECOMMIT_DOCS=bazel forces make check-docs regardless"
+        docs_mode=go
+      fi
+    fi
+    ;;
+  bazel | go) ;;
+  *)
+    echo "pre-commit: GC_PRECOMMIT_DOCS=$docs_mode is not one of auto, bazel, go" >&2
+    exit 2
+    ;;
+  esac
+  if [ "$docs_mode" = go ]; then
+    announce_go_docs
+    make check-docs-go
+  else
+    make check-docs
+  fi
 fi
 
 # Re-read the index rather than reusing the pre-hook staged_spec snapshot:

@@ -203,7 +203,7 @@ func initialMessageResumeResult(tc phase2ProviderCase, prepared *preparedStart) 
 		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageResume,
 			"prepared start = nil").WithEvidence(evidence)
 	}
-	hookSuppliesRole := rolePromptSuppliedByHook(prepared.candidate.tp)
+	hookSuppliesRole := prepared.candidate.tp.startupPromptSource().roleSuppliedByHook()
 	evidence["hook_supplies_role_per_turn"] = strconv.FormatBool(hookSuppliesRole)
 	switch {
 	case strings.TrimSpace(prepared.cfg.PromptSuffix) != "":
@@ -287,7 +287,7 @@ func resumeRestartPromptResult(tc phase2ProviderCase, prepared *preparedStart, r
 	}
 	hookSuppliesRole := false
 	if prepared != nil {
-		hookSuppliesRole = rolePromptSuppliedByHook(prepared.candidate.tp)
+		hookSuppliesRole = prepared.candidate.tp.startupPromptSource().roleSuppliedByHook()
 		evidence["cfg_prompt_suffix"] = prepared.cfg.PromptSuffix
 		evidence["cfg_prompt_flag"] = prepared.cfg.PromptFlag
 		evidence["cfg_nudge"] = prepared.cfg.Nudge
@@ -349,7 +349,7 @@ func hookPrimedResumeRoleResult(tc phase2ProviderCase, prepared *preparedStart) 
 			"prepared start = nil").WithEvidence(evidence)
 	}
 	wantHookSuppliesRole := phase2HookSuppliesRolePerTurnFamilies[tc.family]
-	gotHookSuppliesRole := rolePromptSuppliedByHook(prepared.candidate.tp)
+	gotHookSuppliesRole := prepared.candidate.tp.startupPromptSource().roleSuppliedByHook()
 	evidence["cfg_nudge"] = prepared.cfg.Nudge
 	evidence["want_hook_supplies_role_per_turn"] = strconv.FormatBool(wantHookSuppliesRole)
 	evidence["hook_supplies_role_per_turn"] = strconv.FormatBool(gotHookSuppliesRole)
@@ -359,7 +359,7 @@ func hookPrimedResumeRoleResult(tc phase2ProviderCase, prepared *preparedStart) 
 			"HookEnabled = false, want provider hooks installed for this scenario").WithEvidence(evidence)
 	case gotHookSuppliesRole != wantHookSuppliesRole:
 		return workertest.Fail(tc.profileID, workertest.RequirementInputHookPrimedResumeRoleOmitted,
-			fmt.Sprintf("rolePromptSuppliedByHook = %v, want %v for family %s", gotHookSuppliesRole, wantHookSuppliesRole, tc.family)).WithEvidence(evidence)
+			fmt.Sprintf("roleSuppliedByHook = %v, want %v for family %s", gotHookSuppliesRole, wantHookSuppliesRole, tc.family)).WithEvidence(evidence)
 	case strings.TrimSpace(prepared.cfg.PromptSuffix) != "" || strings.TrimSpace(prepared.cfg.PromptFlag) != "":
 		return workertest.Fail(tc.profileID, workertest.RequirementInputHookPrimedResumeRoleOmitted,
 			fmt.Sprintf("launch prompt = (%q, %q), want none on resume", prepared.cfg.PromptSuffix, prepared.cfg.PromptFlag)).WithEvidence(evidence)
