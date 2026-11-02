@@ -46,3 +46,28 @@ Six containers each running a city can exhaust the default per-user inotify
 instance limit (128); systemd in a container then fails to boot with "Too many
 open files" and the variant is graded `HARNESS-ERROR`. Raise it with
 `sudo sysctl -w fs.inotify.max_user_instances=1024`.
+
+## Tutorial walkthrough
+
+`run-tutorials.sh` checks that the user docs work with the latest Homebrew
+release, the way a reader follows them. In one fresh `gce2e-base` container it
+runs one headless Claude Code session per page, in reading order:
+Installation, Quickstart, then Tutorials 01 through 07. Each session follows its
+page literally, building on the machine state the earlier pages left, and logs
+every step to a JSONL report as `worked`, `failed`, `improvised` (it had to do
+something the page did not say), or `skipped` (an alternative install method,
+an optional step, or one that needs an interactive terminal).
+
+A page passes when it logged steps and none failed or were improvised. Run it
+whenever a page under `docs/getting-started/` or `docs/tutorials/` changes, or
+after a release:
+
+```bash
+./run-tutorials.sh 1 ../../docs           # results in ~/gce2e/results/t1/
+```
+
+A round takes 30 to 40 minutes. The results directory holds `harness.log` (the
+per-page verdicts and every step that did not work, with the agent's note on
+what the page should say), and per page `NN-<page>.jsonl` (the step report),
+`NN-<page>.transcript.jsonl`, and the prompt. The container is kept as
+`gce2e-t<round>` for inspection; delete it with `incus delete -f`.
