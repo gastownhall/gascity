@@ -11,8 +11,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -2617,6 +2619,101 @@ func TestQualifiedName_WithBindingName(t *testing.T) {
 			got := tt.agent.QualifiedName()
 			if got != tt.wantQN {
 				t.Errorf("QualifiedName() = %q, want %q", got, tt.wantQN)
+			}
+		})
+	}
+}
+
+// useNeutralGitTestEnv isolates real-git cache tests from the host's user
+// config and locale so seeding and diagnostics are deterministic.
+func useNeutralGitTestEnv(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("LC_ALL", "C")
+}
+
+// seedRepoCacheGit commits every file under dir into a fresh repository
+// through the real cache git runner and returns the HEAD commit.
+func seedRepoCacheGit(t *testing.T, dir string) string {
+	t.Helper()
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"add", "."},
+		{"-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "seed"},
+	} {
+		if _, err := defaultRunRepoCacheGit(dir, args...); err != nil {
+			t.Fatalf("seeding cache repo: %v", err)
+		}
+	}
+	commit, err := defaultRunRepoCacheGit(dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("git rev-parse: %v", err)
+	}
+	return commit
+}
+
+// recordRepoCacheGit delegates to the real cache git runner and returns a
+// pointer to the subcommand argument lists it was invoked with.
+func recordRepoCacheGit(t *testing.T) *[]string {
+	t.Helper()
+	var calls []string
+	prev := runRepoCacheGit
+	runRepoCacheGit = func(dir string, args ...string) (string, error) {
+		calls = append(calls, strings.Join(args, " "))
+		return defaultRunRepoCacheGit(dir, args...)
+	}
+	t.Cleanup(func() { runRepoCacheGit = prev })
+	return &calls
+}
+
+func TestValidateLockedRemoteCacheAcceptsContentIdenticalStatDirtyFiles(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, cacheDir string)
+	}{
+		{name: "writable index"},
+		{name: "held index lock", setup: func(t *testing.T, cacheDir string) {
+			writeTestFile(t, cacheDir, filepath.Join(".git", "index.lock"), "")
+		}},
+		{name: "optional locks disabled", setup: func(t *testing.T, _ string) {
+			t.Setenv("GIT_OPTIONAL_LOCKS", "0")
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			useNeutralGitTestEnv(t)
+			cacheDir := t.TempDir()
+			writeTestFile(t, cacheDir, "pack.toml", "[pack]\nname = \"tools\"\nschema = 1\n")
+			writeTestFile(t, cacheDir, "formulas/build.toml", "formula = \"build\"\n")
+			commit := seedRepoCacheGit(t, cacheDir)
+
+			// Re-render the formula with byte-identical content: new inode via
+			// temp+rename and a different mtime, as template tooling does.
+			formula := filepath.Join(cacheDir, "formulas", "build.toml")
+			tmp := formula + ".tmp"
+			if err := os.WriteFile(tmp, []byte("formula = \"build\"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(tmp, formula); err != nil {
+				t.Fatal(err)
+			}
+			future := time.Now().Add(time.Hour)
+			if err := os.Chtimes(formula, future, future); err != nil {
+				t.Fatal(err)
+			}
+			if tc.setup != nil {
+				tc.setup(t, cacheDir)
+			}
+
+			calls := recordRepoCacheGit(t)
+			if err := validateLockedRemoteCache("https://example.com/tools.git", cacheDir, commit); err != nil {
+				t.Fatalf("validateLockedRemoteCache rejected content-identical stat-dirty cache: %v", err)
+			}
+			want := []string{"rev-parse HEAD", "status --porcelain"}
+			if !slices.Equal(*calls, want) {
+				t.Fatalf("git calls = %q, want %q", *calls, want)
 			}
 		})
 	}
