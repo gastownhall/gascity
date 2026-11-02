@@ -60,15 +60,20 @@ const (
 // serves late lands up to one re-probe period after the boundary, by where
 // the stream ended within the cycle, which host speed moves. The bound lets
 // these notices wait one re-probe period, plus a second for that pass,
-// longer than the rest; with the rest at x6SteadyMax that allows up to 10 s.
+// longer than the rest. It is relative, so it scales with load; the
+// absolute cap on a drained notice is x6SteadyCeiling on a default run, and
+// x6SteadyMax + x6DrainOver (10 s) only where x6PerfEnv gates the SLO.
 const x6DrainOver = 2*time.Second + time.Second
 
 // x6SteadyCeiling bounds every steady notice's latency on every run, the
 // gating run included: about 2.7x the worst max a loaded rbe-west executor
-// produced in the 14 days of #8240's failures (11.2 s), and below the stall
-// classes the harness knows (the 60 s anti-entropy scan at production
-// timing, the 130 s controller lease recovery) and x6Check's 3 min wait. A
-// lane that stops serving boundaries fails here even where the SLO is not
+// produced in the 14 days of #8240's failures (11.2 s), and below
+// x6Check's 3 min wait. It catches whole-path stalls, which hold a notice for
+// a minute or more: the controller's lane lease recovery (130 s), the failed
+// pass backoff's cap (laneErrBackoffCap, 60 s) and the held-wake recheck
+// (laneWakeHeldRecheck, 60 s). It does not see a lost wake: this harness
+// runs the anti-entropy scan every 5 s (backstopSpeedup), so a lost wake
+// costs about 5 s. A notice that stalls fails here even where the SLO is not
 // gated.
 const x6SteadyCeiling = 30 * time.Second
 
@@ -80,10 +85,12 @@ const x6SteadyCeiling = 30 * time.Second
 // weeks after #8255 and #8308, each passing on a rerun), so the SLO measured
 // the executor (#8240). No CI job sets it, so no CI job enforces the
 // absolute SLO: the nightly lanes run on the same shared executors. It is a
-// manual measurement, for a host the run owns with nothing beside it (not a
-// shared executor or a shared development box):
+// manual measurement, run locally on a host the run owns with nothing
+// beside it (not a shared executor or a shared development box). Bazel
+// defaults to remote execution on the maintainers' hosts, so the command
+// keeps the test local:
 //
-//	bazel test --config=ci --config=integration \
+//	bazel test --config=ci --config=integration --strategy=TestRunner=local \
 //	  --test_env=GC_LANE_X6_PERF=1 --test_filter='^TestX6FanIn$/^steady$' \
 //	  //test/conversationlane:conversationlane_test
 //
@@ -121,7 +128,7 @@ func x6Assess(lat x6Latencies) x6Assessment {
 		allP99: percentile(all, 0.99),
 	}
 	if a.allMax > x6SteadyCeiling {
-		a.always = append(a.always, fmt.Sprintf("a notice waited %s, over the %s ceiling every run holds: the lane stopped serving boundaries", a.allMax, x6SteadyCeiling))
+		a.always = append(a.always, fmt.Sprintf("a notice waited %s, over the %s ceiling every run holds: a notice stalled", a.allMax, x6SteadyCeiling))
 	}
 	if len(drain) > 0 {
 		a.drainMax = drain[len(drain)-1]
@@ -452,8 +459,8 @@ func TestX6Assess(t *testing.T) {
 			slo:  []string{slo},
 		},
 		{
-			// A lane that stopped serving boundaries mid-stream, then a
-			// drain that waited on it: every bound fires, ceiling first.
+			// A notice stalled mid-stream, then a drain that waited on
+			// it: every bound fires, ceiling first.
 			name:   "a stall",
 			lat:    x6Latencies{steady: ramp(390, 100*time.Millisecond, 25*time.Second), drain: ramp(10, 20*time.Second, 31*time.Second)},
 			always: []string{ceiling, drain},
