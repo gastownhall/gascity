@@ -542,17 +542,17 @@ func mimocodeHookNeedsUpgrade(existing []byte) bool {
 	}
 	return mimocodeHookVersion(content) < managedMimoCodeHookVersion ||
 		// The child's stdin must be closed or gc blocks on it (#5562).
-		!strings.Contains(content, "pending.child.stdin?.end();") ||
+		!hookContains(content, "pending.child.stdin?.end();") ||
 		// Per-turn text must trail the stable system entries, not share
 		// system[0] with the prime (#5732). A version-only check would keep
 		// a same-numbered plugin with a different body.
-		!strings.Contains(content, "appendVolatileSystem") ||
+		!hookContains(content, "appendVolatileSystem") ||
 		// Turn state must be keyed by session; the plugin instance is shared
 		// by every session in the directory (same shape as OpenCode).
-		!strings.Contains(content, "const turns = new Map()") ||
+		!hookContains(content, "const turns = new Map()") ||
 		// A turn opens on an unseen user-message id, not a higher one
 		// (#6629, same shape as OpenCode).
-		!strings.Contains(content, "state.userMessageIDs.has(messageID)")
+		!hookContains(content, "state.userMessageIDs.has(messageID)")
 }
 
 func mimocodeHookVersion(content string) int {
