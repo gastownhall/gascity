@@ -598,12 +598,27 @@ func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
 	}, args...)
 	cmd := exec.Command("git", cmdArgs...)
 	cmd.Dir = dir
-	cmd.Env = gitutil.HermeticEnv()
+	cmd.Env = repoCacheGitEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// repoCacheGitEnv is gitutil.HermeticEnv without GIT_TRACE* variables. Trace
+// output is diagnostic noise to the cache runner, whose callers parse git's
+// output as a commit hash or porcelain records.
+func repoCacheGitEnv() []string {
+	env := gitutil.HermeticEnv()
+	kept := env[:0]
+	for _, e := range env {
+		if strings.HasPrefix(e, "GIT_TRACE") {
+			continue
+		}
+		kept = append(kept, e)
+	}
+	return kept
 }
 
 // RepoCacheKey computes the sha256 cache key for a remote source+commit pair.
