@@ -189,20 +189,15 @@ func render(a Action) string {
 	return fmt.Sprintf("%T", a)
 }
 
-// nextLook is when the table's entry is next due after this pass (observed
-// as o), from now: "-" when the pass leaves it due (it waits on a hold), and
-// "when its turns change" for a wait on a person that o's reading leaves
-// alone (the newest ended turn completed): it is due again only once a
-// reading shows something else.
+// nextLook is when the table's entry is next due after this pass, on a pass
+// that observes what o did, from now: "-" when the pass leaves it due (it
+// waits on a hold).
 func nextLook(d Decision, o Observation) string {
 	now := o.Now
 	if len(d.Next.Entries) == 0 || (d.Next.Release != nil && d.Next.Release.Key == d.Next.Entries[0].Key) {
 		return "-"
 	}
-	if d.Next.Entries[0].AwaitsHuman && quietWait(o) {
-		return "when its turns change"
-	}
-	at := p.dueAt(d.Next.Entries[0], o.Provider.Degraded)
+	at := p.dueOn(d.Next.Entries[0], o, o.Provider.Degraded)
 	if !at.After(now) {
 		return "now"
 	}

@@ -50,21 +50,23 @@ const (
 	// an approval asked by mail. While the key names the seat holding the
 	// claim (AwaitsHuman), the work ladder never recycles or releases it, and
 	// raises none of the escalations its pacing would (started_recycled,
-	// started_unanswered, release_unfinished). It leaves the claim alone,
-	// however long the person takes, while the seat's own turns show the
-	// newest ended turn completed. Any other reading (a turn open, the newest
-	// turn failed, canceled or ended with no status, no turn) or none keeps
-	// it nudged an hour after the ask or after its last nudge, at once when
-	// that is already past, so a turn the answer started that died is
+	// started_unanswered, release_unfinished). While the seat's own turns
+	// show the newest ended turn completed, it nudges the claim only a day
+	// after the ask or after its last nudge, however long the person takes:
+	// that takes up an answer that started no turn of the seat (a reply that
+	// asks for none, a wake that failed). Any other reading (a turn open, the
+	// newest turn failed, canceled or ended with no status, no turn) or none
+	// keeps it nudged an hour after the ask or after its last nudge, at once
+	// when that is already past, so a turn the answer started that died is
 	// redriven. A nudge the seat cannot take still counts toward
 	// nudge_refused, and a release already in flight that raced the claim's
-	// start still raises release_raced_start. The
-	// asking agent writes it with its request and clears it when it works
-	// the step again: the wait ends in a turn of the seat (or when the claim
-	// closes), and that nudge is what takes up an answer whose turn died
-	// before it could clear the key. It names its seat, not the step: a claim
-	// released and taken by another seat is that seat's work, whatever the
-	// key still says, and no dispatch path reads it.
+	// start still raises release_raced_start. The asking agent writes it with
+	// its request and clears it when it works the step again: the wait ends
+	// in a turn of the seat (or when the claim closes), and those nudges are
+	// what take up an answer whose turn died, or never started, before it
+	// could clear the key. It names its seat, not the step: a claim released
+	// and taken by another seat is that seat's work, whatever the key still
+	// says, and no dispatch path reads it.
 	AwaitingHumanMetadataKey  = "gc.awaiting_human"
 	BondMetadataKey           = "gc.bond"
 	BondVarsMetadataKey       = "gc.bond_vars"

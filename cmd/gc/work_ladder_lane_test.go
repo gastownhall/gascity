@@ -1524,15 +1524,16 @@ func TestWorkLadderPausedRefusalRecordsNothing(t *testing.T) {
 // seat asked a person and waits for the answer says so: gc.awaiting_human
 // names the seat (the adopt-pr human-approval step, once its approval mail
 // is out). While the key names the seat, the ladder never recycles or
-// releases the step and raises no alert about it. It nudges the step only
-// when the seat's own turns say the turn the answer started may have died
-// (ga-ylpbsy.65): here the seat's turns cannot be read (no turn source, as
-// for a family that records no turn outcomes), so it cannot tell, and
-// nudges an hour after the ask and hourly after that, however long the
-// person takes. Once the seat clears the key (the answer came, and it works
-// the step again), the ladder takes the step up on a fresh grace. Without
-// the rule, the step is nudged at +90s, +3 ... +48 minutes, recycled at
-// about 154 minutes, then nudged hourly for as long as the person takes.
+// releases the step and raises no alert about it. It nudges the step hourly
+// unless the seat's own turns show the newest turn completed, and then
+// daily (ga-ylpbsy.65): here the seat's turns cannot be read (no turn
+// source, as for a family that records no turn outcomes), so it cannot
+// tell, and nudges an hour after the ask and hourly after that, however
+// long the person takes. Once the seat clears the key (the answer came, and
+// it works the step again), the ladder takes the step up on a fresh grace.
+// Without the rule, the step is nudged at +90s, +3 ... +48 minutes,
+// recycled at about 154 minutes, then nudged hourly for as long as the
+// person takes.
 func TestWorkLadderNudgesAHumanWaitHourlyWhenItsTurnsCannotBeRead(t *testing.T) {
 	c := newLadderCity(t)
 	id := c.claim("Human review before merge")
@@ -1583,7 +1584,7 @@ func TestWorkLadderNudgesAHumanWaitHourlyWhenItsTurnsCannotBeRead(t *testing.T) 
 // or more ago, then a Cap apart while the turns still show the failure, with
 // no recycle, release or alert meanwhile. Before the answer, while the
 // seat's newest turn is the one that asked, completed, the wait gets no
-// nudge at all.
+// nudge for a day (WaitCap).
 func TestWorkLadderRedrivesAnAnswerWhoseTurnDied(t *testing.T) {
 	c := newLadderCity(t)
 	id := c.claim("Human review before merge")
@@ -1626,11 +1627,16 @@ func TestWorkLadderRedrivesAnAnswerWhoseTurnDied(t *testing.T) {
 }
 
 // A seat that waits on a person, whose turn source reports its newest turn
-// completed (the turn that asked), is left alone however long the person
-// takes: three days with no nudge, recycle, release or alert, and the claim
-// stays with its seat, which is never restarted. The wait costs no turn. When
-// the seat clears the key, the ladder takes the step up on a fresh grace.
-func TestWorkLadderLeavesAHumanWaitAloneWhileItsNewestTurnCompleted(t *testing.T) {
+// completed (the turn that asked), is nudged a day after the ask and a day
+// apart after that, however long the person takes: no recycle, release or
+// alert, and the claim stays with its seat, which is never restarted. The
+// wait costs a turn a day, not one an hour. That nudge is what takes up an
+// answer that started no turn of the seat (a mail reply that asks for no
+// turn, as the dashboard's Reply does, or one whose wake failed): the ask
+// stays the newest turn, completed, so no reading can show the answer came.
+// When the seat clears the key, the ladder takes the step up on a fresh
+// grace.
+func TestWorkLadderNudgesAHumanWaitDailyWhileItsNewestTurnCompleted(t *testing.T) {
 	c := newLadderCity(t)
 	id := c.claim("Human review before merge")
 	if err := c.work.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.SessionIDMetadataKey: c.seat}}); err != nil {
@@ -1646,15 +1652,19 @@ func TestWorkLadderLeavesAHumanWaitAloneWhileItsNewestTurnCompleted(t *testing.T
 	})
 	c.run(time.Minute, 30*time.Second, nil) // the step runs, then asks
 	c.awaitHuman(id, c.seat)
+	asked := c.now.Sub(c.start)
 	c.run(3*24*time.Hour, 5*time.Minute, nil)
 	if reads == 0 {
 		t.Fatal("the lane never read the waiting seat's turns")
 	}
-	if e := c.entry(id); !e.AwaitsHuman || e.Rung != workladder.RungStarted || e.Attempts != 0 || e.Paused != 0 {
-		t.Fatalf("entry %+v, want the started claim kept, waiting on a person, never nudged", e)
+	if want := []time.Duration{asked + workladder.DefaultWaitCap, asked + 2*workladder.DefaultWaitCap}; fmt.Sprint(c.nudgedAt) != fmt.Sprint(want) {
+		t.Fatalf("nudges %v, want %v: a day after the ask and a day apart while the seat's newest turn completed", c.nudgedAt, want)
 	}
-	if len(c.nudgedAt) != 0 || len(c.posted) != 0 || len(c.events(events.WorkReleased)) != 0 || len(escalations(c)) != 0 {
-		t.Fatalf("three days waiting on a person: nudges %v, recycles %+v, releases %d, escalations %v", c.nudgedAt, c.posted, len(c.events(events.WorkReleased)), escalations(c))
+	if e := c.entry(id); !e.AwaitsHuman || e.Rung != workladder.RungStarted {
+		t.Fatalf("entry %+v, want the started claim kept, waiting on a person", e)
+	}
+	if len(c.posted) != 0 || len(c.events(events.WorkReleased)) != 0 || len(escalations(c)) != 0 {
+		t.Fatalf("three days waiting on a person: recycles %+v, releases %d, escalations %v", c.posted, len(c.events(events.WorkReleased)), escalations(c))
 	}
 	if b, _ := c.work.Get(id); b.Status != "in_progress" || b.Assignee != c.seat {
 		t.Fatalf("the waiting step is %q %q, want it left with its agent", b.Status, b.Assignee)
@@ -1663,23 +1673,23 @@ func TestWorkLadderLeavesAHumanWaitAloneWhileItsNewestTurnCompleted(t *testing.T
 		t.Fatalf("restart_requested %q on a seat waiting on a person", v)
 	}
 	c.awaitHuman(id, "")
-	answered := c.now
+	answered, waited := c.now, len(c.nudgedAt)
 	c.run(5*time.Minute, 30*time.Second, nil)
-	if len(c.nudgedAt) == 0 || c.nudgedAt[0] != answered.Add(workladder.DefaultGrace).Sub(c.start) {
-		t.Fatalf("after the answer at %v: nudges %v, want the first a grace later", answered.Sub(c.start), c.nudgedAt)
+	if len(c.nudgedAt) == waited || c.nudgedAt[waited] != answered.Add(workladder.DefaultGrace).Sub(c.start) {
+		t.Fatalf("after the answer at %v: nudges %v, want the next a grace later", answered.Sub(c.start), c.nudgedAt[waited:])
 	}
 }
 
-// A wait is left alone only on positive evidence that its seat is fine: its
-// newest ended turn completed. Any other reading keeps the hourly nudge, since
-// the answer's turn may have died and a resumed seat's startup nudge is best
-// effort: the newest turn canceled, or ended with no status as the idle
-// overlay infers the end of a turn whose CLI died; no turn at all; and a turn
-// open. The ladder reads only a quiet seat's turns, so a turn open there is
-// one no read saw end: a turn whose CLI died before its rollout recorded the
-// end (a family that records its ends gets no idle overlay), or a Claude turn
-// stopped at a dialog the idle scan cannot read, which the overlay leaves
-// open.
+// A wait is left alone past the hourly nudge (to a daily one) only on
+// positive evidence that its seat is fine: its newest ended turn completed.
+// Any other reading keeps the hourly nudge, since the answer's turn may have
+// died and a resumed seat's startup nudge is best effort: the newest turn
+// canceled, or ended with no status as the idle overlay infers the end of a
+// turn whose CLI died; no turn at all; and a turn open. The ladder reads
+// only a quiet seat's turns, so a turn open there is one no read saw end: a
+// turn whose CLI died before its rollout recorded the end (a family that
+// records its ends gets no idle overlay), or a Claude turn stopped at a
+// dialog the idle scan cannot read, which the overlay leaves open.
 func TestWorkLadderNudgesAHumanWaitHourlyUnlessItsNewestTurnCompleted(t *testing.T) {
 	asked := runtime.EndedTurn{TurnID: "asked", StartedAt: stepsTestNow.Add(-2 * time.Hour), EndedAt: stepsTestNow.Add(-time.Hour), Status: runtime.TurnStatusCompleted}
 	answer := runtime.EndedTurn{TurnID: "answer", StartedAt: stepsTestNow.Add(-10 * time.Minute), EndedAt: stepsTestNow.Add(-5 * time.Minute)}

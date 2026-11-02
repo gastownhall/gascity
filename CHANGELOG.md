@@ -812,22 +812,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     new problem type `urn:gascity:error:session-inactive`, and a failed peek
     fails the request. `peek=true` without it keeps the best-effort preview.
 
-- **The work ladder leaves a step alone while its seat waits on a person,
-  unless the seat's turns say its answer's turn may have died.** With
-  `[daemon] work_ladder` on (the default), a claimed step whose metadata
-  `gc.awaiting_human` names the session holding it (the seat asked a person
-  and waits on their decision, such as an approval asked by mail) is never
-  recycled or released, however long the person takes, and raises none of the
-  `work.escalated` alerts its pacing would (`started_recycled`,
+- **The work ladder nudges a step only daily while its seat waits on a
+  person, and hourly when the seat's turns say its answer's turn may have
+  died.** With `[daemon] work_ladder` on (the default), a claimed step whose
+  metadata `gc.awaiting_human` names the session holding it (the seat asked a
+  person and waits on their decision, such as an approval asked by mail) is
+  never recycled or released, however long the person takes, and raises none
+  of the `work.escalated` alerts its pacing would (`started_recycled`,
   `started_unanswered`, `release_unfinished`). While the seat's own turns show
-  its newest turn completed, the step is not nudged either, so a wait costs no
-  turns. Any other reading (a turn open, the newest turn failed, was canceled
-  or ended with no status, no turn at all, turns that cannot be read) keeps an
-  hourly nudge: an hour after the ladder sees the wait or after its last nudge,
-  at once when that is already past. That nudge takes up an answer whose turn
-  died before the seat could clear the key, even one whose end was never
-  recorded: the ladder reads only a quiet seat's turns, so a turn open there
-  may have died with its CLI or stopped at a dialog the idle check cannot read.
+  its newest turn completed, the step is nudged only a day after the ladder
+  sees the wait or after its last nudge, so a wait costs a turn a day, not one
+  an hour. That daily nudge takes up an answer that started no turn of the
+  seat, which leaves the asking turn the newest: a reply from the dashboard's
+  Mail page or `POST /v0/city/{cityName}/mail/{id}/reply`, which requests no
+  recipient turn, or a `gc mail reply --notify` whose wake failed (the command
+  still exits 0). Any other reading (a turn open, the newest turn failed, was
+  canceled or ended with no status, no turn at all, turns that cannot be read)
+  keeps an hourly nudge: an hour after the ladder sees the wait or after its
+  last nudge, at once when that is already past. That nudge takes up an answer
+  whose turn died before the seat could clear the key, even one whose end was
+  never recorded: the ladder reads only a quiet seat's turns, so a turn open
+  there may have died with its CLI or stopped at a dialog the idle check
+  cannot read.
   A seat restarted while it waits gets its agent's startup prompt or hint nudge
   only when the agent has one, and that delivery is best effort. Nudges the
   seat cannot take still count toward `nudge_refused`, and a release already in

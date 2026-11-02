@@ -30,7 +30,8 @@ import (
 // release, so a workless seat's episode stands as it is until then. A
 // seat's claims may wait on a person, the wait beginning and ending at
 // random: such a seat's restart is held (awaiting a person), as the lane
-// holds it, and a waiting claim is nudged only a Cap apart.
+// holds it, and a waiting claim is nudged only a Cap apart, or a WaitCap
+// while its seat's newest turn completed.
 
 // rlPool is how the world's provider pool answers a turn.
 type rlPool uint8
@@ -616,8 +617,8 @@ func (w *rlWorld) pass(i, step int) error {
 		}
 	}
 	// WL1 holds: every entry of a nudgeable seat hears from the ladder. A
-	// wait on a person that begins is paced from its start, and is left
-	// alone while the seat's newest turn completed.
+	// wait on a person that begins is paced from its start, and is paced a
+	// WaitCap apart while the seat's newest turn completed.
 	eligible := acting
 	for _, e := range d.Next.Entries {
 		since, ok := s.lastHeard[e.Key]
@@ -633,7 +634,9 @@ func (w *rlWorld) pass(i, step int) error {
 		switch a := a.(type) {
 		case Nudge:
 			if entryOrZero(d.Next, a.Key).AwaitsHuman && quietWait(o) {
-				return fail("a wait on a person nudged on a reading that shows its newest turn completed")
+				if pe := entryOrZero(prev, a.Key); !pe.AwaitsHuman || o.Now.Sub(pe.Last) < DefaultWaitCap {
+					return fail("a wait on a person nudged on a reading that shows its newest turn completed, short of a WaitCap after its start or last nudge")
+				}
 			}
 			s.lastHeard[a.Key] = o.Now
 		case Alert:
@@ -759,8 +762,8 @@ func TestRateLimitInvariantsAcrossSeats(t *testing.T) {
 	// A seat refused again within SeatFreshGap of its own fresh restart
 	// (exhausted/again) is the one-seat sim's to reach: across seats the
 	// provider gap spaces the restarts, and the seats whose work waits on a
-	// person, nudged only while their newest turn did not complete, take few
-	// turns between episodes, so the move is too rare there to pin.
+	// person, nudged only a WaitCap apart while their newest turn completed,
+	// take few turns between episodes, so the move is too rare there to pin.
 	rlCovered(t, RateLimitMove{RateLimitTransitionExhausted, RateLimitCauseAgain})
 }
 
