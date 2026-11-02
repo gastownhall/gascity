@@ -2236,13 +2236,19 @@ const (
 // hookFreshActivation starts a fresh conversation without resubmitting its role.
 // Explicit activation always wins; otherwise a manual session acknowledges its
 // role while automated sessions begin work instead of waiting for a backstop.
+// A template that rendered no role gets no kickoff: a role-less session, pool
+// workers included, starts with the beacon alone and acts on the builtin or
+// default worker prompt the hook supplies.
 func hookFreshActivation(tp TemplateParams, info sessionpkg.Info, message string) string {
 	nudge := tp.startupPromptSource().hookNudge()
 	if message != "" {
 		return appendInitialMessageToStartupNudge(nudge, message)
 	}
-	if nudge != "" || strings.TrimSpace(tp.Prompt) == "" {
+	if nudge != "" {
 		return nudge
+	}
+	if !tp.RoleRendered {
+		return tp.Beacon
 	}
 	kickoff := automaticRoleKickoff
 	switch {

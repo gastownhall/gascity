@@ -386,10 +386,13 @@ func TestFreshRoleLaunchFallbacks(t *testing.T) {
 }
 
 func TestHookPrimedRoleDoesNotUseArgvBudget(t *testing.T) {
-	tp := resolveResumeRoleTemplate(t, "opencode", builtinProviderAliasesForTest("opencode"), nil, config.SessionTransportTmux, nil)
+	// A herdr city: herdr is a local runtime, so the hook carries the role.
+	tp := resolveResumeRoleTemplateWithNudge(t, "opencode", builtinProviderAliasesForTest("opencode"), nil, config.SessionTransportTmux, nil, "configured nudge", "herdr")
+	if !tp.startupPromptSource().roleSuppliedByHook() {
+		t.Fatal("fixture must resolve to a hook-primed template in a herdr city")
+	}
 	tp.Prompt = strings.Repeat("role ", maxPromptSuffixRawBytes)
 	// A hook-supplied role never enters argv or the oversized nudge fallback.
-	tp.EffectiveSessionProvider = "herdr"
 	_, delivery, err := templateParamsToConfigWithDelivery(tp)
 	if err != nil || delivery.OversizedFallback {
 		t.Fatalf("hook role used argv fallback: %+v, %v", delivery, err)
@@ -452,15 +455,6 @@ func TestHookRoleRequiresLocalStagingRuntime(t *testing.T) {
 				t.Fatalf("runtime=%q suffix=%q, hook eligible=%v", name, cfg.PromptSuffix, wantHook)
 			}
 		})
-	}
-}
-
-func TestFreshHookPrimedEmptyRoleDoesNotKickoff(t *testing.T) {
-	tp := resolveResumeRoleTemplateWithNudge(t, "opencode", builtinProviderAliasesForTest("opencode"), nil, config.SessionTransportTmux, nil, "")
-	tp.Prompt = ""
-	prepared := prepareRoleStart(t, tp, map[string]string{"session_name": "worker", "template": "worker", "session_origin": "manual"})
-	if prepared.cfg.Nudge != "" || prepared.cfg.PromptSuffix != "" || prepared.promptDelivered {
-		t.Fatal("empty role manufactured a kickoff or a priming selection")
 	}
 }
 

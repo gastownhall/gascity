@@ -168,9 +168,11 @@ type promptBudgetJSON struct {
 
 // reportPromptDeliveryBudget computes and reports (on stderr) the
 // promptDelivery budget decision for a --strict gc prime invocation
-// (ga-q8wgom.1.2). It reuses promptDelivery/promptDeliverySupportFor
-// (ga-q8wgom.1.1) rather than re-deriving delivery mode independently, so
-// the strict diagnostic can never disagree with what a real launch does.
+// (ga-q8wgom.1.2). It reuses the launch's delivery decision
+// (startupPromptSource.delivery: the hook carrier, else promptDelivery and
+// promptDeliverySupportFor, ga-q8wgom.1.1) rather than re-deriving delivery
+// mode independently, so the strict diagnostic can never disagree with what a
+// real launch does.
 //
 // The returned error is non-nil exactly when promptDelivery hard-fails (an
 // oversized prompt on a runtime with no confirmed post-start delivery

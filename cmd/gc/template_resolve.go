@@ -65,6 +65,12 @@ type TemplateParams struct {
 	// replaying the template when the provider hook already supplies it
 	// (startupPromptSource.resumeNudge).
 	Beacon string
+	// RoleRendered reports whether the agent's prompt template rendered text
+	// that Prompt carries under the beacon. It is false for an agent with no
+	// or an empty template, a suppressed startup prompt, and a client's
+	// provider chat. A hook-primed fresh start sends its role kickoff only
+	// when there is a rendered role (hookFreshActivation).
+	RoleRendered bool
 	// Env is the merged environment (passthrough + provider + agent + passthrough vars).
 	Env map[string]string
 	// OperatorEnv carries only the operator-authored environment layers —
@@ -501,6 +507,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	isACP := sessionTransport == config.SessionTransportACP
 	includePrimeInstruction := prompt == "" && (!hasHooks || isACP)
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, includePrimeInstruction, p.beaconTime)
+	roleRendered := prompt != "" && !suppressStartupPrompt
 	prompt = composeStartupPrompt(beacon, prompt, suppressStartupPrompt)
 
 	// Step 9b: Append the assigned-skills appendix when the runtime actually
@@ -812,6 +819,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		Command:          command,
 		Prompt:           prompt,
 		Beacon:           runtime.FormatBeaconAt(p.cityName, qualifiedName, false, p.beaconTime),
+		RoleRendered:     roleRendered,
 		Env:              env,
 		OperatorEnv:      operatorEnv,
 		Upstream:         cfgAgent.Upstream,

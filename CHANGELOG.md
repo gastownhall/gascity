@@ -14,10 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prompt on local tmux/Herdr runtimes. Configured startup nudges and initial
   messages take precedence. With neither, manual sessions get a short role
   confirmation request, pool workers get the existing claim instruction, and
-  other automated sessions get a short startup instruction. Resumes do not
-  repeat this kickoff. ACP, other runtimes, a client's provider chat, and
-  `hooks_installed = false` keep launch-time role delivery. `gc prime
-  --strict` and `gc doctor` report such a role as carried by the hook.
+  other automated sessions get a short startup instruction. An agent whose
+  template renders no role gets no kickoff and starts with the beacon alone.
+  Resumes do not repeat this kickoff. ACP, other runtimes and
+  `hooks_installed = false` keep launch-time role delivery, and a client's
+  provider chat keeps its beacon-only start. `gc prime --strict` reports a
+  hook-carried role as `effective_mode=hook`, and `gc doctor` no longer warns
+  that it falls back to a post-start nudge.
 - **Run `gc doctor --fix` in each existing gastown or gascity city after you
   install this build.** gc now pins gastown 0.1.12 and gascity 0.1.7 (see
   Changed) and serves only those pins from the packs it embeds. A city still
