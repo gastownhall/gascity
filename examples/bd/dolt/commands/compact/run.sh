@@ -4494,6 +4494,43 @@ acquire_lock() {
   exit 1
 }
 
+# compact_abort_after_live_gate_failure DB — the live gate for DB failed:
+# the database is quarantined and the server's state is unknown, so the run
+# stops here instead of rewriting anything else. Names the selected
+# databases after DB the run did not reach and exits 1.
+compact_abort_after_live_gate_failure() {
+  cabf_db="$1"
+  cabf_not_reached=$(awk -v seen_db="$cabf_db" '
+    $0 == seen_db { seen=1; next }
+    seen && NF { print }
+  ' "$_unique_db_tmp" | tr '\n' ' ')
+  printf 'compact: db=%s live gate failed — quarantined; aborting run, not reached: %s\n' \
+    "$cabf_db" "${cabf_not_reached:-none}" >&2
+  exit 1
+}
+
+# compact_each_database PASS_FN — run PASS_FN over each selected database
+# in discovery order, counting ordinary failures in driver_failed_count.
+# A failed live-database gate is not an ordinary failure: a pass that left
+# a database out of service means the server's state is unknown, so the
+# driver aborts the whole run at once through
+# compact_abort_after_live_gate_failure. Returns 0 when every pass
+# succeeded, nonzero otherwise.
+compact_each_database() {
+  ced_fn="$1"
+  driver_failed_count=0
+  while IFS= read -r db; do
+    [ -n "$db" ] || continue
+    if ! "$ced_fn" "$db"; then
+      driver_failed_count=$((driver_failed_count + 1))
+      if [ "$live_gate_failed" = "1" ]; then
+        compact_abort_after_live_gate_failure "$db"
+      fi
+    fi
+  done < "$_unique_db_tmp"
+  [ "$driver_failed_count" -eq 0 ]
+}
+
 main() {
   lock_cleanup=""
   flock_acquired=""
@@ -4533,43 +4570,25 @@ main() {
 
   failed_count=0
   if [ "$gc_only" = "1" ]; then
-    while IFS= read -r db; do
-      [ -n "$db" ] || continue
-      if ! gc_only_database "$db"; then
-        failed_count=$((failed_count + 1))
-      fi
-    done < "$_unique_db_tmp"
-
-    if [ "$failed_count" -gt 0 ]; then
-      printf 'compact: %s database(s) failed gc-only reclaim\n' "$failed_count" >&2
-      exit 1
+    if compact_each_database gc_only_database; then
+      exit 0
     fi
-    exit 0
+    failed_count="$driver_failed_count"
+    printf 'compact: %s database(s) failed gc-only reclaim\n' "$failed_count" >&2
+    exit 1
   fi
 
   if [ "$bare_gc" = "1" ]; then
-    while IFS= read -r db; do
-      [ -n "$db" ] || continue
-      if ! bare_gc_database "$db"; then
-        failed_count=$((failed_count + 1))
-      fi
-    done < "$_unique_db_tmp"
-
-    if [ "$failed_count" -gt 0 ]; then
-      printf 'compact: %s database(s) failed bare GC\n' "$failed_count" >&2
-      exit 1
+    if compact_each_database bare_gc_database; then
+      exit 0
     fi
-    exit 0
+    failed_count="$driver_failed_count"
+    printf 'compact: %s database(s) failed bare GC\n' "$failed_count" >&2
+    exit 1
   fi
 
-  while IFS= read -r db; do
-    [ -n "$db" ] || continue
-    if ! flatten_database "$db"; then
-      failed_count=$((failed_count + 1))
-    fi
-  done < "$_unique_db_tmp"
-
-  if [ "$failed_count" -gt 0 ]; then
+  if ! compact_each_database flatten_database; then
+    failed_count="$driver_failed_count"
     printf 'compact: %s database(s) failed compaction\n' "$failed_count" >&2
     exit 1
   fi

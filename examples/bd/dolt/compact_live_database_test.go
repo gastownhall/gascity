@@ -235,6 +235,38 @@ func TestCompactScriptLiveGateQuarantineAllowsFlattenRestoration(t *testing.T) {
 	assertNoPendingRemediationMarkers(t, fixture, out)
 }
 
+// TestCompactScriptLiveGateAbortsRunNamingNotReachedDatabases asserts a
+// failed live gate aborts the whole compaction run instead of going on to
+// the next database: the selected databases the run did not reach are
+// named on stderr and never touched.
+func TestCompactScriptLiveGateAbortsRunNamingNotReachedDatabases(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	if err := os.MkdirAll(filepath.Join(fixture.dataDir, "zed", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir second dolt db: %v", err)
+	}
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_FAKE_DOLT_LIVE_PROBE_FAIL_ALL=1")
+	if err == nil {
+		t.Fatalf("compact succeeded although beads was unserved after its flatten:\n%s", out)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("live-gate abort must exit 1, got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, "aborting run") || !strings.Contains(out, "not reached: zed") {
+		t.Fatalf("abort output missing the not-reached database naming:\n%s", out)
+	}
+	logData, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(logData), "db=zed") {
+		t.Fatalf("the aborted run must not touch the not-reached database:\n%s", logData)
+	}
+	assertCompactMarkerHasEvidence(t, compactQuarantineMarkerPath(fixture),
+		"reason=live database unavailable after compaction")
+}
+
 // installDoltShim wraps the fixture's fake dolt with a shell shim so a test
 // can mutate the data dir after a chosen rewrite command succeeds while the
 // server keeps answering SQL.
