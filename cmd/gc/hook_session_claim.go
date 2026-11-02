@@ -230,10 +230,15 @@ func hookClaimPoolSeatFor(cityPath, cityName string, rigs []config.Rig, info *se
 }
 
 // The started write (PHASE1-2 §6.4, W1). At hand-over, `gc hook --claim`
-// records the claim in its own session row's work_started cell, by a CAS on
-// the whole row (UpdateRowFenced), so it and the controller's release of an
-// unstarted claim (work_ladder.release, §6.5) are linearizable on the row's
-// revision: whichever lands first, the other's decide sees it and refuses.
+// records the claim in its own session row's work_started cell, by the
+// checked metadata write (UpdateMetadataChecked): a CAS on the whole row
+// wherever the session store resolves a conditional writer, so it and the
+// controller's release of an unstarted claim (work_ladder.release, §6.5) are
+// linearizable on the row's revision — whichever lands first, the other's
+// decide sees it and refuses — and, on a store that resolves none, a write
+// decided on a fresh read and taken unfenced right after it, admitted only
+// when the city is not one that records only by compare-and-swap
+// (StartedCASOnly; #8313).
 
 // hookStartedFence is the incarnation a started write must still be the
 // row's: the runtime's own instance token and, when it carries one, its
@@ -366,33 +371,35 @@ func decideWorkStarted(fresh session.Info, fence hookStartedFence, key hookStart
 }
 
 // hookRecordWorkStarted is the production RecordWorkStarted seam, through the
-// same routed session front door as the current-claim stamp.
-func hookRecordWorkStarted(sessionID string, fence hookStartedFence, key hookStartedKey, via string) (hookStartedResult, error) {
-	return recordWorkStartedVia(sessionCurrentClaimFrontDoor, sessionID, fence, key, via)
+// same routed session front door as the current-claim stamp. casOnly is the
+// checked write's mode predicate (hookClaimOptions.StartedCASOnly).
+func hookRecordWorkStarted(sessionID string, fence hookStartedFence, key hookStartedKey, via string, casOnly func() bool) (hookStartedResult, error) {
+	return recordWorkStartedVia(sessionCurrentClaimFrontDoor, sessionID, fence, key, via, casOnly)
 }
 
 // recordWorkStartedVia is hookRecordWorkStarted through front.
-func recordWorkStartedVia(front sessionFrontGetter, sessionID string, fence hookStartedFence, key hookStartedKey, via string) (hookStartedResult, error) {
+func recordWorkStartedVia(front sessionFrontGetter, sessionID string, fence hookStartedFence, key hookStartedKey, via string, casOnly func() bool) (hookStartedResult, error) {
 	sessFront, err := front()
 	if err != nil {
 		return hookStartedUnrecorded, err
 	}
-	return recordWorkStarted(sessFront, sessionID, fence, key, via, time.Now())
+	return recordWorkStarted(sessFront, sessionID, fence, key, via, time.Now(), casOnly)
 }
 
-// recordWorkStarted runs decideWorkStarted under UpdateRowFenced. A CAS lost
-// on every attempt is an error, as is a store that cannot fence: the caller
-// fails open. A write that replaced an unreadable cell returns Recorded with
-// an error naming the reset, which the caller reports as it reports a
-// failure: the claims the old cell held are no longer recorded.
-func recordWorkStarted(front *session.Store, sessionID string, fence hookStartedFence, key hookStartedKey, via string, now time.Time) (hookStartedResult, error) {
+// recordWorkStarted runs decideWorkStarted under UpdateMetadataChecked. A
+// write that never lands is an error, as is a store whose mode predicate
+// refuses the unfenced fallback (a v2 city's, or a caller that wired none):
+// the caller fails open. A write that replaced an unreadable cell returns
+// Recorded with an error naming the reset, which the caller reports as it
+// reports a failure: the claims the old cell held are no longer recorded.
+func recordWorkStarted(front *session.Store, sessionID string, fence hookStartedFence, key hookStartedKey, via string, now time.Time, casOnly func() bool) (hookStartedResult, error) {
 	var res hookStartedResult
 	var reset error
-	wrote, err := front.UpdateRowFenced(sessionID, hookStartedWriteAttempts, func(fresh session.Info, _ session.PersistedResponse) (session.RowPatch, bool) {
+	wrote, err := front.UpdateMetadataChecked(sessionID, hookStartedWriteAttempts, func(fresh session.Info, _ session.PersistedResponse) session.MetadataPatch {
 		var patch session.MetadataPatch
 		res, patch, reset = decideWorkStarted(fresh, fence, key, via, now)
-		return session.RowPatch{Metadata: patch}, len(patch) > 0
-	})
+		return patch
+	}, casOnly)
 	switch {
 	case err != nil && res == hookStartedAlreadyRecorded:
 		return res, fmt.Errorf("%w: %w", errWorkStartedRespell, err)
@@ -406,33 +413,34 @@ func recordWorkStarted(front *session.Store, sessionID string, fence hookStarted
 	return res, nil
 }
 
-// hookForgetWorkStarted is the production ForgetWorkStarted seam.
-func hookForgetWorkStarted(sessionID string, key hookStartedKey) error {
-	return forgetWorkStartedVia(sessionCurrentClaimFrontDoor, sessionID, key)
+// hookForgetWorkStarted is the production ForgetWorkStarted seam. casOnly is
+// the checked write's mode predicate (hookClaimOptions.StartedCASOnly).
+func hookForgetWorkStarted(sessionID string, key hookStartedKey, casOnly func() bool) error {
+	return forgetWorkStartedVia(sessionCurrentClaimFrontDoor, sessionID, key, casOnly)
 }
 
 // forgetWorkStartedVia is hookForgetWorkStarted through front.
-func forgetWorkStartedVia(front sessionFrontGetter, sessionID string, key hookStartedKey) error {
+func forgetWorkStartedVia(front sessionFrontGetter, sessionID string, key hookStartedKey, casOnly func() bool) error {
 	sessFront, err := front()
 	if err != nil {
 		return err
 	}
-	return forgetWorkStarted(sessFront, sessionID, key)
+	return forgetWorkStarted(sessFront, sessionID, key, casOnly)
 }
 
-// forgetWorkStarted drops key from the row's work_started cell by a CAS, for
-// an unwind that gives the claim back: a released claim must not read as
-// started. A closed row, a cell that does not name it, and a cell it cannot
-// read are left alone.
-func forgetWorkStarted(front *session.Store, sessionID string, key hookStartedKey) error {
-	_, err := front.UpdateRowFenced(sessionID, hookStartedWriteAttempts, func(fresh session.Info, _ session.PersistedResponse) (session.RowPatch, bool) {
+// forgetWorkStarted drops key from the row's work_started cell by the checked
+// write, for an unwind that gives the claim back: a released claim must not
+// read as started. A closed row, a cell that does not name it, and a cell it
+// cannot read are left alone.
+func forgetWorkStarted(front *session.Store, sessionID string, key hookStartedKey, casOnly func() bool) error {
+	_, err := front.UpdateMetadataChecked(sessionID, hookStartedWriteAttempts, func(fresh session.Info, _ session.PersistedResponse) session.MetadataPatch {
 		cell, err := session.DecodeWorkStarted(fresh.WorkStartedRaw)
 		gen, _ := strconv.ParseInt(strings.TrimSpace(fresh.Generation), 10, 64)
 		if fresh.Closed || err != nil || !cell.Names(key.Store, key.Bead, gen) {
-			return session.RowPatch{}, false
+			return nil
 		}
-		return session.RowPatch{Metadata: session.MetadataPatch{session.WorkStartedKey: session.EncodeWorkStarted(cell.Without(key.Store, key.Bead, gen))}}, true
-	})
+		return session.MetadataPatch{session.WorkStartedKey: session.EncodeWorkStarted(cell.Without(key.Store, key.Bead, gen))}
+	}, casOnly)
 	return err
 }
 

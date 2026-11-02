@@ -115,12 +115,21 @@ func TestDecodeWorkLadderRelease(t *testing.T) {
 
 // TestGuardSessionKeysRefusesBlindCASOnlyWrites (T11): a CASOnly key written
 // through no conditional verb fails the guard, a fixture's seed and a blind
-// set alike; the conditional verbs and UpdateRowFenced pass. Kills
-// registering the work cells without CASOnly, and a guard that ignores it.
+// set alike; the conditional verbs and UpdateRowFenced pass. work_started, the
+// one field marked CheckedWrite (#8313), is also admitted unfenced under
+// UpdateMetadataChecked — its casOnly-gated legacy arm — and nowhere else:
+// not under UpdateMetadataFenced's unfenced arm, and work_ladder, which did
+// not opt in, never unfenced at all. Kills registering the work cells without
+// CASOnly, a guard that ignores it, and a checked exception that admits the
+// ladder too.
 func TestGuardSessionKeysRefusesBlindCASOnlyWrites(t *testing.T) {
 	for _, key := range []string{WorkStartedKey, WorkLadderKey} {
-		if f, ok := LookupField(key); !ok || !f.CASOnly || f.Class != ClassWork || f.InPremise() || !f.NewKey {
+		f, ok := LookupField(key)
+		if !ok || !f.CASOnly || f.Class != ClassWork || f.InPremise() || !f.NewKey {
 			t.Fatalf("%s registered as %+v (found %v); want ClassWork, CASOnly, NewKey, outside the premise", key, f, ok)
+		}
+		if want := key == WorkStartedKey; f.CheckedWrite != want {
+			t.Fatalf("%s CheckedWrite = %v, want %v: only the started cell opts into the checked verb's unfenced arm", key, f.CheckedWrite, want)
 		}
 	}
 	var failed []string
@@ -173,6 +182,46 @@ func TestGuardSessionKeysRefusesBlindCASOnlyWrites(t *testing.T) {
 	}
 	if len(failed) != 0 {
 		t.Errorf("conditional writes failed the guard: %q", failed)
+	}
+
+	// The checked verb's frames, on a store that resolves no conditional
+	// writer (#8313): both verbs take their unfenced arms there.
+	bare := beads.NewMemStore() // unstamped: the default topology's shape
+	legacy := func() bool { return false }
+	ladder := MetadataPatch{WorkLadderKey: `{"v":1,"gen":7,"entries":[]}`}
+	bareRow, err := bare.Create(beads.Bead{Type: BeadType, Metadata: map[string]string{"state": "active"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed = nil
+	if _, err := NewStore(beads.SessionStore{Store: bare}).UpdateMetadataFenced(bareRow.ID, 1, func(Info, PersistedResponse) MetadataPatch {
+		return MetadataPatch{WorkStartedKey: raw}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(failed) != 1 || !strings.Contains(failed[0], WorkStartedKey) {
+		t.Errorf("work_started blind under UpdateMetadataFenced: guard reported %q, want one failure", failed)
+	}
+	failed = nil
+	if _, err := NewStore(beads.SessionStore{Store: bare}).UpdateMetadataChecked(bareRow.ID, 1, func(Info, PersistedResponse) MetadataPatch {
+		return ladder
+	}, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if len(failed) != 1 || !strings.Contains(failed[0], WorkLadderKey) {
+		t.Errorf("work_ladder unfenced under UpdateMetadataChecked: guard reported %q, want one failure", failed)
+	}
+	failed = nil
+	if _, err := NewStore(beads.SessionStore{Store: bare}).UpdateMetadataChecked(bareRow.ID, 1, func(Info, PersistedResponse) MetadataPatch {
+		return MetadataPatch{WorkStartedKey: raw}
+	}, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if len(failed) != 0 {
+		t.Errorf("work_started under UpdateMetadataChecked failed the guard: %q", failed)
+	}
+	if got, err := bare.Get(bareRow.ID); err != nil || got.Metadata[WorkStartedKey] == "" {
+		t.Errorf("the checked write of work_started was not admitted: %q (%v)", got.Metadata[WorkStartedKey], err)
 	}
 }
 

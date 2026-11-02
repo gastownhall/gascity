@@ -215,6 +215,7 @@ go_test(
         "store_close_test.go",
         "store_heal_lock_test.go",
         "store_lease_test.go",
+        "store_patch_checked_test.go",
         "store_patch_fence_test.go",
         "store_resolve_test.go",
         "store_rollback_pending_create_test.go",

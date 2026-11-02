@@ -207,6 +207,16 @@ type hookClaimOptions struct {
 	// built for subprocesses, and its inherited-secret filter drops
 	// GC_INSTANCE_TOKEN.
 	StartedFence hookStartedFence
+	// StartedCASOnly is the checked started write's mode predicate: whether
+	// the city records work_started only by compare-and-swap (a v2 city), so a
+	// session store that resolves no conditional writer refuses the write
+	// instead of taking the unfenced fallback. Asked lazily, only when the
+	// store resolves no conditional writer; a query can be slow (the
+	// controller socket), so the invocation shares one memoized answer with
+	// StrictDrainAck (cmd_hook.go). Nil refuses the fallback, so every
+	// production caller supplies it; only a test may pass an explicit legacy
+	// predicate or none.
+	StartedCASOnly func() bool
 	// PoolSeat is where the controller placed this pool seat, read off the
 	// session row the claim fence verified (hookClaimPoolSeatFor). It is the
 	// zero value for a named, manual or session-less claimant and whenever the
@@ -365,7 +375,8 @@ type hookClaimOps struct {
 	// caller learns someone else took the bead.
 	RestampAdopted hookClaimRestampFunc
 	// RecordWorkStarted records a claim handed to a turn in the session row's
-	// work_started cell, by a CAS on the row (PHASE1-2 §6.4). It refuses a
+	// work_started cell, by the checked write (a CAS on the row, or its
+	// casOnly-gated unfenced fallback; PHASE1-2 §6.4, #8313). It refuses a
 	// claim the controller is releasing and a stale incarnation's write.
 	RecordWorkStarted hookRecordWorkStartedFunc
 	// ForgetWorkStarted drops a claim from work_started before an unwind
@@ -426,8 +437,8 @@ type (
 	// hook-claim-continuation nudge, keyed by the claim assignee, for the
 	// workflow root it claimed; it warns on stderr of a nudge it refused.
 	hookEnqueueContinuationNudgeFunc func(assignee, rootID string, stderr io.Writer)
-	hookRecordWorkStartedFunc        func(sessionID string, fence hookStartedFence, key hookStartedKey, via string) (hookStartedResult, error)
-	hookForgetWorkStartedFunc        func(sessionID string, key hookStartedKey) error
+	hookRecordWorkStartedFunc        func(sessionID string, fence hookStartedFence, key hookStartedKey, via string, casOnly func() bool) (hookStartedResult, error)
+	hookForgetWorkStartedFunc        func(sessionID string, key hookStartedKey, casOnly func() bool) error
 	hookReadWorkStartedFunc          func(sessionID string) (string, error)
 	hookReadSessionTriggerFunc       func(sessionID string) (string, error)
 	// hookWorkflowStoreFunc (ctx, dir, env, beadID, actor) opens the store
@@ -1714,7 +1725,7 @@ func recordHookWorkStarted(bead beads.Bead, opts hookClaimOptions, ops hookClaim
 	if fence.Token == "" {
 		err = errors.New("no instance token to fence the write by")
 	} else {
-		res, err = ops.RecordWorkStarted(sessionID, fence, key, via)
+		res, err = ops.RecordWorkStarted(sessionID, fence, key, via, opts.StartedCASOnly)
 	}
 	switch {
 	case errors.Is(err, errWorkStartedRespell):
@@ -1849,7 +1860,7 @@ func unwindUndeliveredHookClaim(reason, cause string, bead beads.Bead, opts hook
 // copy of the id, which this unwind does not give back.
 func forgetHookWorkStarted(opts hookClaimOptions, ops hookClaimOps, key hookStartedKey) {
 	if sessionID := hookClaimSessionID(opts.Env); sessionID != "" && key.Bead != "" {
-		_ = ops.ForgetWorkStarted(sessionID, key)
+		_ = ops.ForgetWorkStarted(sessionID, key, opts.StartedCASOnly)
 	}
 }
 

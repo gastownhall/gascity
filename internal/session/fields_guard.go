@@ -33,8 +33,8 @@ func GuardSessionKeys(fail func(msg string)) {
 		switch {
 		case !ok:
 			msg = fmt.Sprintf("session row key %q is not in the session field registry (internal/session/fields.go)\n%s", key, debug.Stack())
-		case f.CASOnly && !conditionalWriteOnStack():
-			msg = fmt.Sprintf("session row key %q is CASOnly but was written blind: write it by a CAS on the row (UpdateRowFenced)\n%s", key, debug.Stack())
+		case f.CASOnly && !conditionalWriteOnStack() && (!f.CheckedWrite || !checkedWriteOnStack()):
+			msg = fmt.Sprintf("session row key %q is CASOnly but was written blind: write it by a CAS on the row (UpdateRowFenced), or, for a field marked CheckedWrite, under UpdateMetadataChecked\n%s", key, debug.Stack())
 		default:
 			return
 		}
@@ -49,6 +49,12 @@ func GuardSessionKeys(fail func(msg string)) {
 // the caller read: a write made under one of them is not blind.
 var conditionalVerbs = []string{".UpdateIfMatch", ".CompareAndSetMetadataKey", ".CloseWithMetadataIfMatch"}
 
+// checkedWriteVerbs are the store verbs an opted-in (CheckedWrite) key may be
+// written unfenced under, on a store that resolves no conditional writer. The
+// shared loop alone is not one: UpdateMetadataFenced's unfenced arm runs it
+// too, and it admits nothing.
+var checkedWriteVerbs = []string{".UpdateMetadataChecked"}
+
 // conditionalWriteOnStack reports whether the store write the hook is seeing
 // runs under a conditional verb, of any backend or wrapper.
 func conditionalWriteOnStack() bool {
@@ -57,6 +63,25 @@ func conditionalWriteOnStack() bool {
 	for {
 		fr, more := frames.Next()
 		for _, verb := range conditionalVerbs {
+			if strings.HasSuffix(fr.Function, verb) {
+				return true
+			}
+		}
+		if !more {
+			return false
+		}
+	}
+}
+
+// checkedWriteOnStack reports whether the store write the hook is seeing runs
+// under the checked verb, whose casOnly-gated unfenced arm is the one blind
+// write a CheckedWrite field admits.
+func checkedWriteOnStack() bool {
+	pcs := make([]uintptr, 64)
+	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
+	for {
+		fr, more := frames.Next()
+		for _, verb := range checkedWriteVerbs {
 			if strings.HasSuffix(fr.Function, verb) {
 				return true
 			}

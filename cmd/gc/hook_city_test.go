@@ -173,8 +173,8 @@ func TestHookCityWorkStartedSeamsShareTheFrontDoor(t *testing.T) {
 		t.Fatalf("ReadWorkStarted = %q, %v; want an empty cell", raw, err)
 	}
 	key := hookStartedKey{Store: ops.StoreRef(cityDir), Bead: "gc-claimed"}
-	_, _ = ops.RecordWorkStarted(sessionID, hookStartedFence{Token: "live-token"}, key, "claim") // the file store may not fence: either way, no second open
-	_ = ops.ForgetWorkStarted(sessionID, key)
+	_, _ = ops.RecordWorkStarted(sessionID, hookStartedFence{Token: "live-token"}, key, "claim", legacyStartedMode()) // the file store may not fence: either way, no second open
+	_ = ops.ForgetWorkStarted(sessionID, key, legacyStartedMode())
 	if got := opens.Load(); got != 1 {
 		t.Fatalf("the work_started seams opened the city store %d times, want 1", got)
 	}

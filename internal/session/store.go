@@ -300,6 +300,45 @@ func (s *Store) UpdateMetadataFenced(id string, attempts int, decide func(Info, 
 	if err != nil {
 		return false, fmt.Errorf("updating session %q: %w", id, err)
 	}
+	return s.updateMetadataDecided(id, attempts, decide, writer)
+}
+
+// UpdateMetadataChecked writes a patch decided from a fresh read of the row,
+// as UpdateMetadataFenced does, except on a store that resolves no
+// conditional writer: there the unfenced write is taken only when casOnly
+// explicitly reports false, and casOnly is asked before the deciding read,
+// so the row the caller decides is read after that (potentially slow) query,
+// with nothing written in between. A nil casOnly, or one reporting true
+// (a city that records only by compare-and-swap), returns
+// beads.ErrConditionalWriteUnsupported wrapped with the row and writes
+// nothing: missing wiring must refuse rather than silently weaken fencing.
+// A require-mode store that cannot fence returns its error, as
+// UpdateMetadataFenced's does. Where a writer resolves, the write is the
+// same revision CAS and the mode is never asked. A failed conditional write
+// is never retried unfenced within the call. decide returning an empty patch
+// writes nothing. It reports whether a patch was written.
+func (s *Store) UpdateMetadataChecked(id string, attempts int, decide func(Info, PersistedResponse) MetadataPatch, casOnly func() bool) (bool, error) {
+	writer, _, err := beads.ResolveConditionalWriter(s.store)
+	if err != nil {
+		return false, fmt.Errorf("updating session %q: %w", id, err)
+	}
+	if writer == nil {
+		if casOnly == nil || casOnly() {
+			return false, fmt.Errorf("updating session %q: %w", id, beads.ErrConditionalWriteUnsupported)
+		}
+	}
+	return s.updateMetadataDecided(id, attempts, decide, writer)
+}
+
+// updateMetadataDecided is the read/decide/write loop UpdateMetadataFenced
+// and UpdateMetadataChecked run: re-read the row, decide the patch from that
+// read, write it in one Update — fenced on the re-read revision where writer
+// resolves, unfenced right after the re-read where it does not, leaving only
+// that window. A lost fence re-reads and re-decides, up to attempts times,
+// after which nothing is written. A require-mode store that cannot fence
+// never reaches here (its caller returns the refusal). decide returning an
+// empty patch writes nothing. It reports whether a patch was written.
+func (s *Store) updateMetadataDecided(id string, attempts int, decide func(Info, PersistedResponse) MetadataPatch, writer beads.ConditionalWriter) (bool, error) {
 	for attempt := 0; attempt < attempts; attempt++ {
 		bead, err := s.validatedBead(id)
 		if err != nil {

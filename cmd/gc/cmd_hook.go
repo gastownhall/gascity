@@ -579,7 +579,11 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		collapsedIdentity,
 	)
 	routeTargets := hookClaimRouteTargets(hookClaimPrimaryRouteTarget(&a), resolvedAgentName, strings.TrimSpace(overrides["GC_TEMPLATE"]))
-	strictDrainAck := func() bool { return cityRunsV2(cityPath, cfg) }
+	// The city's reconciler mode, answered once per invocation and shared by
+	// the drain-ack hint and the checked started write's mode predicate: the
+	// query may probe the controller socket, and both consumers ask it lazily.
+	runsV2 := sync.OnceValue(func() bool { return cityRunsV2(cityPath, cfg) })
+	strictDrainAck := runsV2
 	if opts.Claim {
 		claimOpts := hookClaimOptions{
 			Assignee:           assignee,
@@ -590,7 +594,10 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			DrainAck:           opts.DrainAck,
 			JSON:               opts.JSON,
 			StrictDrainAck:     strictDrainAck,
-			RuntimeActor:       strings.TrimSpace(os.Getenv("BEADS_ACTOR")),
+			// The worker-site exemption is the write predicate's alone
+			// (cityRecordsOnlyByCAS); the drain-ack hint keeps its own.
+			StartedCASOnly: cityRecordsOnlyByCAS(cityPath, runsV2),
+			RuntimeActor:   strings.TrimSpace(os.Getenv("BEADS_ACTOR")),
 			// The process env, as the pre-claim fence reads the token:
 			// queryEnv has GC_INSTANCE_TOKEN filtered out.
 			StartedFence: hookStartedFenceOf(os.Environ()),

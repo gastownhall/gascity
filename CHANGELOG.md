@@ -1007,6 +1007,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The default bd topology records `work_started` again, so its started-claim
+  guards work (#8313).** Every city on the default fresh-init topology serves
+  sessions through `BdStore` over the pinned bd (v1.3.2, which lacks
+  `--if-revision`), so the session store resolved no conditional writer and
+  the hook's started write — CAS-only since the W1 guards landed — refused
+  every hand-over. No `work_started` entry was ever written, leaving the
+  self-drain-ack refusal, the hook's `--drain-ack` started-claim fence and the
+  execution backstop's started evidence inert there; the only sign was a
+  per-claim stderr warning and a `work.started_unrecorded` event. The started
+  write is now a checked write: where the session store resolves a conditional
+  writer it is the same revision CAS as before, and where it resolves none the
+  hook takes one unfenced write decided on a fresh read, admitted only when
+  the city does not record only by compare-and-swap (legacy reconcilers; a v2
+  runtime city still refuses, with the same warning and event, and its store
+  keeps its own gates). `work_started` is the one CAS-only key the session
+  field registry admits an unfenced write for, under
+  `Store.UpdateMetadataChecked` alone; the fallback is not atomic (a
+  concurrent write to the row can race it), which is the legacy topology's
+  standing posture. A capable store, or a reopened store after a pin upgrade,
+  records by CAS again.
+
 - **The supervisor API route printed different JSON from the local route
   for the commands supervisor-hosted cities read through it (#8453).**
   `gc session list` printed a different document and dropped

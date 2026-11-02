@@ -191,23 +191,25 @@ func sessionFencedReset(cityPath string, sessStore beads.Store, sp runtime.Provi
 		if !ok {
 			return fmt.Errorf("session %q has no session row to record the restart on", target)
 		}
-		return op(fenced, context.Background(), token, restartRecordsOnlyByCAS(cityPath, cfg))
+		return op(fenced, context.Background(), token, cityRecordsOnlyByCAS(cityPath, func() bool { return cityRunsV2(cityPath, cfg) }))
 	}
 }
 
-// restartRecordsOnlyByCAS is the fenced restart write's casOnly for the city
-// at cityPath: a v2 city records only by compare-and-swap and never takes the
-// checked write (the v2 owner's sign-off of 2026-10-27, Q1). The session
-// layer asks it only when a write is due on a store with no conditional
-// writer, so the controller is asked its latched mode (cityRunsV2) only then.
-// A worker site takes the checked write: no released bd fences, and its
-// remote controller is not reachable from the box to ask. Q1 still holds
-// there only because no v2 city has worker sites: v2 refuses the session
-// runtimes that place sessions on one (exec and pack runtimes, PAR-EXEC; ssh,
-// PAR-SSH; k8s and hybrid, PAR-K8S), explicit or by default. Lifting any of
-// them must revisit this exemption.
-func restartRecordsOnlyByCAS(cityPath string, cfg *config.City) func() bool {
+// cityRecordsOnlyByCAS is a checked write's casOnly for the city at cityPath,
+// whose v2 mode runsV2 answers (the controller's latched mode, or its
+// resolution): a v2 city records only by compare-and-swap and never takes the
+// checked write's unfenced fallback (the v2 owner's sign-off of 2026-10-27,
+// Q1). The session layer asks it only when a write is due on a store with no
+// conditional writer, so runsV2 is asked its slow question (the controller
+// socket) only then; the hook passes one memoized answer shared with its
+// drain-ack hint (cmd_hook.go). A worker site takes the checked write: no
+// released bd fences, and its remote controller is not reachable from the
+// box to ask. Q1 still holds there only because no v2 city has worker sites:
+// v2 refuses the session runtimes that place sessions on one (exec and pack
+// runtimes, PAR-EXEC; ssh, PAR-SSH; k8s and hybrid, PAR-K8S), explicit or by
+// default. Lifting any of them must revisit this exemption.
+func cityRecordsOnlyByCAS(cityPath string, runsV2 func() bool) func() bool {
 	return func() bool {
-		return !onWorkerSite(cityPath) && cityRunsV2(cityPath, cfg)
+		return !onWorkerSite(cityPath) && runsV2()
 	}
 }
