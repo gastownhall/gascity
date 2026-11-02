@@ -860,6 +860,11 @@ type InventoryEntry struct {
 	// Incarnation identifies this runtime instance of the session. A new
 	// runtime under the same name, or a respawn of the session's first pane,
 	// gets a different value. Empty when the provider cannot report one.
+	// A provider whose fresh reads name the session's object
+	// (Liveness.ObjectID and ObjectCreated) leads it with
+	// "<ObjectID>:<ObjectCreated>", as tmux's
+	// "#{session_id}:#{session_created}:#{pane_pid}" does, so a probe's
+	// answer can be matched to this incarnation.
 	//
 	// On tmux it can also change without a restart: swap-pane,
 	// split-window -b, rotate-window, or killing pane 0.0 moves a different

@@ -23,7 +23,10 @@ const (
 // Kills (§13.5 6, §13.1): an inventory that is not exactly one well-formed
 // object read as a listing; an entry whose name cannot be read listed
 // anyway (completeness is then unprovable); malformed attributes dropping
-// the name (it would read as gone); and any answer's bytes in an error.
+// the name (it would read as gone); an incarnation a probe of the same
+// object cannot match (cmd/gc probedIncarnation); a zero or epoch
+// last_activity (a Go adapter's zero time.Time) read as known activity,
+// which would idle-sleep a live box; and any answer's bytes in an error.
 func TestParseInventory(t *testing.T) {
 	at := time.Date(2026, 10, 30, 1, 5, 0, 0, time.UTC)
 	out := `{"complete":true,"sessions":[
@@ -37,17 +40,19 @@ func TestParseInventory(t *testing.T) {
 	  {"name":"mc-contradiction","state":"dead",` + invObject + `,"agent":"alive"},
 	  {"name":"mc-absent","state":"absent"},
 	  {"name":"mc-noid","state":"running","object":{"id":"","created":"t0"}},
-	  {"name":"mc-nocreated","state":"running","object":{"id":"c0ffee","created":" "}}
+	  {"name":"mc-nocreated","state":"running","object":{"id":"c0ffee","created":" "}},
+	  {"name":"mc-zerotime","state":"running",` + invObject + `,"last_activity":"0001-01-01T00:00:00Z"},
+	  {"name":"mc-epoch","state":"running",` + invObject + `,"last_activity":"1970-01-01T00:00:00Z"}
 	]}`
 	got, err := parseInventory([]byte(out))
 	if err != nil {
 		t.Fatalf("parseInventory: %v", err)
 	}
-	wantNames := []string{"mc-live", "mc-zombie", "mc-quiet", "mc-dead", "mc-oddattrs", "mc-oddstate", "mc-noobject", "mc-contradiction", "mc-absent", "mc-noid", "mc-nocreated"}
+	wantNames := []string{"mc-live", "mc-zombie", "mc-quiet", "mc-dead", "mc-oddattrs", "mc-oddstate", "mc-noobject", "mc-contradiction", "mc-absent", "mc-noid", "mc-nocreated", "mc-zerotime", "mc-epoch"}
 	if !got.complete || !slices.Equal(got.names, wantNames) {
 		t.Fatalf("complete=%v names=%v; want complete and every listed name, live, dead or malformed", got.complete, got.names)
 	}
-	running := runtime.InventoryEntry{Incarnation: "c0ffee@t0", DeadKnown: true}
+	running := runtime.InventoryEntry{Incarnation: "c0ffee:t0", DeadKnown: true}
 	want := map[string]runtime.InventoryEntry{}
 	e := running
 	e.ProcessKnown, e.ProcessAlive, e.AttachedKnown, e.Attached, e.ActivityKnown, e.LastActivity, e.RestartRequested = true, true, true, true, true, at, true
@@ -57,8 +62,10 @@ func TestParseInventory(t *testing.T) {
 	e.ProcessKnown, e.AttachedKnown, e.IdentityKnown, e.Identity = true, true, true, map[string]string{}
 	want["mc-zombie"] = e
 	want["mc-quiet"] = running
-	want["mc-dead"] = runtime.InventoryEntry{Incarnation: "c0ffee@t0", DeadKnown: true, AllPanesDead: true}
+	want["mc-dead"] = runtime.InventoryEntry{Incarnation: "c0ffee:t0", DeadKnown: true, AllPanesDead: true}
 	want["mc-oddattrs"] = running
+	want["mc-zerotime"] = running
+	want["mc-epoch"] = running
 	for name, w := range want {
 		if g, ok := got.entries[name]; !ok || !reflect.DeepEqual(g, w) {
 			t.Errorf("%s: entry %+v (present %v), want %+v", name, g, ok, w)
@@ -192,7 +199,7 @@ func TestRuntimeInventoryThroughTheSeam(t *testing.T) {
 		t.Fatal("InventoryFor(ready seam) offers no inventory")
 	}
 	entries, err := inv.RuntimeInventory(context.Background())
-	if err != nil || len(entries) != 4 || !entries["mc-dead"].AllPanesDead || entries["mc-live"].Incarnation != "c0ffee@t0" {
+	if err != nil || len(entries) != 4 || !entries["mc-dead"].AllPanesDead || entries["mc-live"].Incarnation != "c0ffee:t0" {
 		t.Fatalf("RuntimeInventory = %+v, %v", entries, err)
 	}
 
