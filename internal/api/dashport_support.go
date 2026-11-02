@@ -204,10 +204,12 @@ func newSeededState(deps SeededCityDeps) *seededState {
 		s.rigStores = map[string]beads.Store{}
 	}
 	if s.cityStore != nil {
-		// Unrouted on purpose: SeededCityDeps carries one store for every
-		// class, so there is no messaging binding to route to. See the
-		// CityBeadStore doc for what that means for a split-city case.
-		svc := extmsg.NewServices(s.cityStore)
+		// SeededCityDeps carries one store for every class, so there is no
+		// messaging binding to route to: the single-store Stores hand both
+		// classes the city store. See the CityBeadStore doc for what that
+		// means for a split-city case.
+		stores := s.classStores()
+		svc := extmsg.NewServices(stores.Mail(), stores.Sessions())
 		s.extmsgSvc = &svc
 	}
 	return s
@@ -271,7 +273,7 @@ func (s *seededState) NudgesBeadStore() beads.NudgesStore {
 
 // NudgeQueue is the city's state.json queue over the seeded city store.
 func (s *seededState) NudgeQueue() NudgeQueue {
-	return nudgequeue.StateFileQueue{CityPath: s.cityPath, Shadows: s.cityStore}
+	return nudgequeue.StateFileQueue{CityPath: s.cityPath, Shadows: s.NudgesBeadStore()}
 }
 
 func (s *seededState) SessionsBeadStore() beads.SessionStore {

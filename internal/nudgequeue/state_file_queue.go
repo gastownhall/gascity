@@ -9,9 +9,10 @@ import "github.com/gastownhall/gascity/internal/beads"
 type StateFileQueue struct {
 	// CityPath is the city whose queue this is.
 	CityPath string
-	// Shadows is the nudges-class store holding the queue's shadow beads; nil
-	// means the withdrawal removes queue entries and touches no shadow.
-	Shadows beads.Store
+	// Shadows is the nudges-class store holding the queue's shadow beads; the
+	// zero handle means the withdrawal removes queue entries and touches no
+	// shadow.
+	Shadows beads.NudgesStore
 }
 
 // EnqueueDeferred appends item to the pending bucket. It runs no maintenance,

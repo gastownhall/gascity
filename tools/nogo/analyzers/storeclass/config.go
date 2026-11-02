@@ -120,6 +120,12 @@ var Default = Config{
 	// Sealed packages have no baseline rows: a phase ends by adding its
 	// package here, and the list only grows (TestSealedOnlyGrows).
 	Sealed: []string{
+		"internal/executionevent",
+		"internal/extmsg",
+		"internal/mail",
+		"internal/mail/beadmail",
+		"internal/nudgequeue",
+		"internal/opjournal",
 		"internal/workladder",
 	},
 	LoadBaseline: LoadBaselineFromEnv,

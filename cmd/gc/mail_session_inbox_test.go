@@ -11,7 +11,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/mail"
-	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -41,7 +40,7 @@ func TestSelfReadsAgreeOnTheSessionInbox(t *testing.T) {
 func selfReadsAgreeOnTheSessionInbox(t *testing.T, wrap func(mail.Provider, beads.Store) mail.Provider) {
 	clearGCEnv(t)
 	store := beads.NewMemStore()
-	mp := wrap(beadmail.New(store), store)
+	mp := wrap(newTestBeadMail(store), store)
 	createSession := func(metadata map[string]string, closed bool) string {
 		t.Helper()
 		b, err := store.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: metadata})
