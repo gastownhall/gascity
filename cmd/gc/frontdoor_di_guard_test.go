@@ -361,11 +361,12 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 // cmd_mail.go routes at its store-opening ROOTS rather than per-read, because every
 // store access in its identity/target resolver family is session-class: session-ID
 // resolution, the gc:session enumeration behind named-target matching, and mailbox
-// identity. The five roots — resolveMailTargetsForCommand,
-// resolveDefaultMailTargetsForCommand, resolveRawMailTargetForStorelessProvider,
-// cmdMailSendJSON, cmdMailReplyJSON — derive cliSessionStore(store, cfg, cityPath) and
-// hand it down; the whole resolver family therefore names its parameter sessStore and
-// does NO routing of its own, so a relocation is applied exactly once per command.
+// identity. The four roots — openMailTargetResolver (behind
+// resolveMailTargetsForCommand and resolveDefaultMailTargetsForCommand),
+// resolveRawMailTargetForStorelessProvider, cmdMailSendJSON, cmdMailReplyJSON —
+// derive cliSessionStore(store, cfg, cityPath) and hand it down; the whole resolver
+// family therefore names its parameter sessStore and does NO routing of its own, so
+// a relocation is applied exactly once per command.
 // Mail MESSAGES are a different coordination class and never travel through these
 // resolvers — they go through mail.Provider. The two out-of-file callers
 // (cmd_handoff.go, prime_auto_handoff_inject.go) already hold a routed sessStore.

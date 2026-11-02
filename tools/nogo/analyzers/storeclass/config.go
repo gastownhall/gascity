@@ -8,8 +8,9 @@ import (
 )
 
 const (
-	gascity = "github.com/gastownhall/gascity/"
-	beads   = gascity + "internal/beads"
+	gascity  = "github.com/gastownhall/gascity/"
+	beads    = gascity + "internal/beads"
+	storeref = gascity + "internal/storeref"
 )
 
 // MainRepoDataEnv names the files rules_go hands a main-repository nogo
@@ -57,10 +58,25 @@ var Default = Config{
 	},
 	UnwrapMethods: []string{"Raw", "ConditionalWritesResolveTarget"},
 	AsFuncs:       []string{beads + ".As"},
-	// The mint lands with the router (T2): storeref.NewStores is its only
-	// production caller. Until then the handles are minted by literal, and
-	// every literal outside the allowlist is baselined.
-	MintFuncs: []string{beads + ".MintClassStores"},
+	// beads.MintClassStores is the mint; storeref.NewStores (T2) is its only
+	// production caller. NewStores and storeref.Place turn any topology into
+	// handles or class stores, so they are mints too: outside storeref only
+	// the router's cmd/gc file calls them (its Allow entry below); any other
+	// call is a baseline row.
+	MintFuncs: []string{beads + ".MintClassStores", storeref + ".NewStores", storeref + ".Place"},
+	// The storeref types that carry raw stores: the mint's inputs (a Leg or a
+	// Topology would otherwise launder any store into NewStores uncounted) and
+	// the plan executors' outputs (an Owner's or a plan leg's store).
+	RawCarriers: []string{
+		storeref + ".Leg",
+		storeref + ".Topology",
+		storeref + ".ClassBinding",
+		storeref + ".Projection",
+		storeref + ".StoresOptions",
+		storeref + ".Owner",
+		storeref + ".PlanLeg",
+		storeref + ".ResolvedPlan",
+	},
 	TestMintPackages: []string{
 		beads + "/beadstest",
 		beads + "/splittest",
@@ -93,6 +109,7 @@ var Default = Config{
 		{Package: "internal/storebinding/sqlite", Reason: storeBindings},
 		{Package: "internal/storebinding/storebindingtest", Reason: storeBindings},
 		{Package: "internal/storeref", Rules: AllRulesBut(CapAssert), Reason: "the residency resolver: the mint (T2) and the plan executors that run legs over physical stores. A capability assertion here still goes through beads.As"},
+		{Package: "cmd/gc", File: "city_stores.go", Rules: append([]Rule{Mint}, rawRules...), Reason: "the router's cmd/gc plane: builds each holder's topology from the opened routes and mints its storeref.Stores (T2); counted in allowed.txt"},
 		{Package: "cmd/gc", File: "storage_boot.go", Reason: "storage-class routing at boot: opens and holds the physical engines the router later wraps"},
 		{Package: "cmd/gc", File: "infra_class_migrate.go", Rules: rawRules, Reason: "the storage-class migration: copies a class's rows between physical stores, raw by nature (S5)"},
 		{Package: "cmd/gc", File: "infra_class_clear.go", Rules: rawRules, Reason: "the migration's clear: deletes migrated rows from the source physical store"},

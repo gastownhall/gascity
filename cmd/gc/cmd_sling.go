@@ -735,42 +735,51 @@ func canInferSlingDefaultTargetFromBead(cfg *config.City, beadOrFormula string) 
 }
 
 // populateSlingDepsCallbacks fills in the interface fields on SlingDeps.
-func populateSlingDepsCallbacks(deps *slingDeps) {
+// stderr receives the direct-session resolver's report of a named session it
+// materialized for the reconciler to start (cliDirectSessionResolver).
+func populateSlingDepsCallbacks(deps *slingDeps, stderr io.Writer) {
 	deps.Resolver = cliAgentResolver{}
 	deps.Branches = cliBranchResolver{}
 	deps.Notify = &cliNotifier{}
-	deps.DirectSessionResolver = cliDirectSessionResolver
+	deps.DirectSessionResolver = cliDirectSessionResolver(stderr)
 	deps.Router = cliBeadRouter{deps: deps}
 }
 
-func cliDirectSessionResolver(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error) {
-	if cfg == nil {
-		return "", false, nil
+// cliDirectSessionResolver returns the resolver that binds a direct graph
+// assignee naming a configured named session to that session's row,
+// materializing the row when it has none. stderr receives the materializer's
+// report of a start it left to the reconciler; nil discards it, for graph
+// routing that has no caller's stderr to report to.
+func cliDirectSessionResolver(stderr io.Writer) graphroute.DirectSessionResolver {
+	return func(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error) {
+		if cfg == nil {
+			return "", false, nil
+		}
+		target = strings.TrimSpace(target)
+		if target == "" {
+			return "", false, nil
+		}
+		if cityName == "" {
+			cityName = config.EffectiveCityName(cfg, filepath.Base(cityPath))
+		}
+		spec, ok, err := resolveNamedSessionSpecForConfigTarget(cfg, cityName, target, rigContext)
+		if err != nil {
+			return "", false, err
+		}
+		if !ok {
+			return "", false, nil
+		}
+		// A named session bead is session class. The caller's store is whatever
+		// scope the sling or drain runs in (a rig work store, for a rig scope), so
+		// on a split city resolve and materialize through the sessions binding
+		// instead: through the scope store the canonical bead is invisible and a
+		// duplicate is minted where nothing reads it (write-audit B6).
+		id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, cliRelocatedSessionStore(store, cfg, cityPath), spec.Identity, stderr)
+		if err != nil {
+			return "", false, err
+		}
+		return id, true, nil
 	}
-	target = strings.TrimSpace(target)
-	if target == "" {
-		return "", false, nil
-	}
-	if cityName == "" {
-		cityName = config.EffectiveCityName(cfg, filepath.Base(cityPath))
-	}
-	spec, ok, err := resolveNamedSessionSpecForConfigTarget(cfg, cityName, target, rigContext)
-	if err != nil {
-		return "", false, err
-	}
-	if !ok {
-		return "", false, nil
-	}
-	// A named session bead is session class. The caller's store is whatever
-	// scope the sling or drain runs in (a rig work store, for a rig scope), so
-	// on a split city resolve and materialize through the sessions binding
-	// instead: through the scope store the canonical bead is invisible and a
-	// duplicate is minted where nothing reads it (write-audit B6).
-	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, cliRelocatedSessionStore(store, cfg, cityPath), spec.Identity)
-	if err != nil {
-		return "", false, err
-	}
-	return id, true, nil
 }
 
 // cliAgentResolver implements sling.AgentResolver using the CLI's
@@ -839,6 +848,9 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 // printSlingWarnings prints only warnings from a SlingResult to stderr.
 // Called before error handling so warnings are visible even on failure.
 func printSlingWarnings(result sling.SlingResult, stderr io.Writer) {
+	if result.CitySuspended {
+		fmt.Fprintln(stderr, "warning: city is suspended — bead routed but no worker will spawn until 'gc resume'") //nolint:errcheck
+	}
 	if result.AgentSuspended {
 		fmt.Fprintf(stderr, "warning: agent %q is suspended — bead routed but may not be picked up\n", result.Target) //nolint:errcheck
 	}
@@ -973,7 +985,7 @@ func printBatchSlingResult(result sling.SlingResult, stdout, stderr io.Writer) {
 
 // doSling creates a Sling instance and dispatches to the right intent method.
 func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, stderr io.Writer) int {
-	populateSlingDepsCallbacks(&deps)
+	populateSlingDepsCallbacks(&deps, stderr)
 	sl, newErr := sling.New(deps)
 	if newErr != nil {
 		fmt.Fprintln(stderr, newErr) //nolint:errcheck
@@ -1027,7 +1039,7 @@ func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier, stdo
 }
 
 func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQuerier, jsonOutput bool, humanStdout, jsonStdout, stderr io.Writer) int {
-	populateSlingDepsCallbacks(&deps)
+	populateSlingDepsCallbacks(&deps, stderr)
 	sl, newErr := sling.New(deps)
 	if newErr != nil {
 		fmt.Fprintln(stderr, newErr) //nolint:errcheck
@@ -1198,6 +1210,9 @@ func slingJSONFromResult(result sling.SlingResult) slingJSONResult {
 
 func slingJSONWarnings(result sling.SlingResult) []string {
 	var warnings []string
+	if result.CitySuspended {
+		warnings = append(warnings, "city_suspended")
+	}
 	if result.AgentSuspended {
 		warnings = append(warnings, "agent_suspended")
 	}

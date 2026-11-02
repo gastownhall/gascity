@@ -57,7 +57,7 @@ gc [flags]
 | [gc login](#gc-login) | Log in to a hosted Gas City service |
 | [gc logout](#gc-logout) | Log out of a hosted Gas City service (revoke the session and forget the token) |
 | [gc mail](#gc-mail) | Send and receive messages between agents and humans |
-| [gc maintenance](#gc-maintenance) | Dolt store maintenance (gc + snapshot) |
+| [gc maintenance](#gc-maintenance) | Dolt store maintenance (observe-only: no gc or snapshot yet) |
 | [gc mcp](#gc-mcp) | Inspect projected MCP config |
 | [gc metrics](#gc-metrics) | Inspect or control Gas City command usage metrics |
 | [gc nudge](#gc-nudge) | Inspect and deliver deferred nudges |
@@ -509,10 +509,26 @@ List beads across all rigs, routed through the supervisor API when
 the controller is alive and falling back to a direct multi-store read
 otherwise.
 
-Supports --label, --status, --all, and --format. --format=json emits
-JSON (API-path JSON includes _cache_age_s; fallback-path JSON omits
-it). The bare --json flag is reserved by the CLI's JSON-contract layer
-and is not wired for this command; use --format=json.
+Supports --label, --status, --all, and --format. --format=json prints a
+JSON array of beads, the same on every route for a local city. For a
+remote city (--context, --city-url/--city-name, GC_CITY_URL,
+GC_CITY_CONTEXT, or the context selected by gc context use) it prints
+&#123;"beads": [...], "_cache_age_s": N&#125;, where _cache_age_s is the age in
+seconds of the remote supervisor's bead cache.
+
+For a local city the array carries no cache age: when the supervisor
+API answers, the beads come from the supervisor's bead cache, which can
+lag the stores, so a bare array is not evidence of an uncached read. Set
+GC_NO_API=1 to read the stores directly, or name the city with
+--city-url and --city-name to get the envelope with its _cache_age_s.
+
+A city or rig bead store that cannot be opened or read fails the command
+(exit 1, naming the store) rather than being left out of the list. For
+a local city whose relocated class binding cannot be read, the command
+warns on stderr, lists the remaining stores and exits 0.
+
+The bare --json flag is reserved by the CLI's JSON-contract layer and is
+not wired for this command; use --format=json.
 
 ```
 gc beads list [flags]
@@ -581,10 +597,21 @@ Show one bead by ID, routed through the supervisor API when the
 controller is alive and falling back to a direct multi-store lookup
 otherwise.
 
-Supports --format. --format=json emits JSON (API-path JSON includes
-_cache_age_s; fallback-path JSON omits it). The bare --json flag is
-reserved by the CLI's JSON-contract layer and is not wired for this
-command; use --format=json.
+Supports --format. --format=json prints the bead as a JSON object, the
+same on every route for a local city. For a remote city (--context,
+--city-url/--city-name, GC_CITY_URL, GC_CITY_CONTEXT, or the context
+selected by gc context use) it prints &#123;"bead": &#123;...&#125;, "_cache_age_s": N&#125;,
+where _cache_age_s is the age in seconds of the remote supervisor's bead
+cache.
+
+For a local city the object carries no cache age: when the supervisor
+API answers, the bead comes from the supervisor's bead cache, which can
+lag the stores, so a bare object is not evidence of an uncached read.
+Set GC_NO_API=1 to read the stores directly, or name the city with
+--city-url and --city-name to get the envelope with its _cache_age_s.
+
+The bare --json flag is reserved by the CLI's JSON-contract layer and is
+not wired for this command; use --format=json.
 
 ```
 gc beads show <bead-id> [flags]
@@ -1331,12 +1358,18 @@ List all open convoys with completion progress.
 Shows each convoy's ID, title, and the number of closed vs total
 child issues.
 
+Synthetic convoys (metadata gc.synthetic=true) are hidden by default:
+the system mints one per formula launch on a single bead and per
+drained work unit, so a busy city holds thousands of them. The output
+says how many were hidden; --include-synthetic lists them too.
+
 ```
 gc convoy list [flags]
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--include-synthetic` | bool |  | also list synthetic convoys (gc.synthetic=true), minted for formula launches and drained work units |
 | `--json` | bool |  | emit JSONL result |
 
 ## gc convoy reopen-source
@@ -2227,15 +2260,12 @@ gc hook [agent] [flags]
 Prints the work bead this session most recently claimed with gc hook --claim.
 
 The claim protocol stamps the claimed bead id onto the calling session's own
-bead, because the environment alone cannot reliably name it: $GC_BEAD_ID exists
-only in the controller's dispatch condition environment, never in a session
-shell, and $GC_TRIGGER_BEAD_ID — exported to demand-spawned pool seats as a
-pool-level spawn marker — is absent on other seats (e.g. a warm seat bound
-after start) and never decides what a session claims; the pool is pull. Named
-singleton sessions can carry a stale $GC_TRIGGER_BEAD_ID for their entire
-lifetime, pointing at a different bead than the one currently claimed, so it
-must never be consulted ahead of the claim. A formula step that must close
-the bead it is running reads the stamp back here:
+bead, because the environment cannot name it: $GC_BEAD_ID exists only in the
+controller's dispatch condition environment, never in a session shell, and no
+session shell carries the id of the bead that triggered its spawn. A
+demand-spawned session sees only $GC_SPAWN_ORIGIN=demand, a presence marker
+that names no bead; the pool is pull. A formula step that must close the bead
+it is running reads the stamp back here:
 
     BEAD_ID="$&#123;GC_BEAD_ID:-$(gc hook current --id-only)&#125;"
 
@@ -2871,10 +2901,14 @@ gc mail thread <id> [flags]
 
 ## gc maintenance
 
-Manage periodic Dolt store maintenance (see docs/adr/0002-dolt-store-maintenance-runbook.md).
+Manage periodic Dolt store maintenance (see engdocs/contributors/dolt-maintenance.md).
 
 The weekly loop runs inside the supervisor process when [maintenance.dolt] enabled=true
 in city.toml. 'status' shows loop state and recent runs; 'dolt-gc' triggers a manual run.
+
+The loop is observe-only for now: a run checks free disk space and records run history
+and events, but takes no backup snapshot and runs no CALL DOLT_GC, so a completed run
+does not mean the store was compacted.
 
 ```
 gc maintenance
@@ -4503,6 +4537,11 @@ If the session is active with a live tmux session, reattaches.
 If the session is suspended or the tmux session died, resumes
 using the provider's resume mechanism (if supported) or restarts.
 
+A session still waiting for the reconciler to start it, in a city
+registered with the supervisor while neither the supervisor nor the
+city's controller runs, is not started here: start the supervisor,
+then attach once the session runs.
+
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
 ```
@@ -4658,6 +4697,14 @@ and refined by the title model in the background.
 
 If the template config sets tmux_alias, it controls the runtime tmux
 session_name. --alias still sets the public command and mail alias.
+
+In a worker site, a city whose controller is running, or a city
+registered with the supervisor, the reconciler starts the session. That
+holds while the supervisor is stopped: the session starts once the
+supervisor runs again, provided that is within 10 minutes. The
+reconciler rolls back a session no controller has started 10 minutes
+after its creation; run gc session new again then. Only a city that is
+none of these starts the session directly in this process.
 
 ```
 gc session new <template> [flags]
@@ -5546,6 +5593,14 @@ Send a reload signal to the running supervisor, causing it to
 immediately re-read the registry and reconcile all cities. Use this
 after killing a child process to force the supervisor to detect the
 change and restart it without waiting for the next patrol tick.
+
+The reload also re-reads write_auth_verify_key from supervisor.toml and
+swaps the write-auth verifying keys in place, so a key can be enrolled,
+rotated, or revoked without a restart. The command prints the key ids
+the reload added, removed, or replaced, and exits 1 when the supervisor
+refused the new key list and kept the current keys. Other
+supervisor.toml settings, read_auth_verify_key included, take effect
+only when the supervisor restarts.
 
 ```
 gc supervisor reload [flags]

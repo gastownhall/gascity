@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "cmdline_darwin.go",
         "cmdline_other.go",
+        "environ_darwin.go",
         "listener.go",
         "pidutil.go",
         "procargs2.go",
@@ -27,6 +28,7 @@ go_test(
     name = "pidutil_test",
     srcs = [
         "cmdline_portable_test.go",
+        "environ_darwin_test.go",
         "listener_test.go",
         "pidutil_test.go",
         "procargs2_test.go",

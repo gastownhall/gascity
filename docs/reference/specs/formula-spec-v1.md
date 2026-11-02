@@ -323,6 +323,17 @@ routing-injected values > formula-level `default`s. Under v2 the `issue`
 injection is replaced by the reserved `{{convoy_id}}` derivation, and
 `issue` survives there only as a deprecated compat alias.
 
+A formula order (`[order] formula = ...`, fired by the orchestrator or by
+`gc order run`) gets the same invocation context, with the same
+precedence: its dispatch args (`gc order run --var`) win, then the
+`formula_vars` of the order's rig, then `rig_name` (the order's rig, empty
+for a city order) and `binding_name` / `binding_prefix` for the import
+binding of the pack that declared the order. The binding variables are set
+only when that pack has exactly one binding; a pack imported under two
+bindings is discovered as one order, so those names stay unset and a
+reference to them fails to resolve. These describe the order instance, not
+its pool, and they do not satisfy a declared `[order.params]` entry.
+
 ### 1.5. Conditions
 
 A step `condition` is a compile-time include/exclude filter evaluated
@@ -548,7 +559,12 @@ The v1 compiler must emit a molecule tree:
   (recipe ID `<formula>.gate-<step>`, type `gate`, title
   `Gate: <type> <id>`) that is a child of the step's container, plus a
   `blocks` edge from the gated step to it: the step stays blocked until
-  the gate bead is closed.
+  the gate bead is closed. The declared `type` is stamped verbatim on the
+  gate bead as `gc.gate_type` metadata. The core pack's human-gate orders
+  mail the addressee of a `human` gate when it is created and re-nudge it
+  while it stays open; close it with `gc bd close <id>`. The gate bead is
+  created with the rest of the recipe at instantiation, so the addressee
+  can be asked before the gated step's `needs` finish.
 - **Root.** The recipe root is type `molecule`, priority 2. Its title is
   the formula name, or the `{{title}}` placeholder when a `title` var is
   declared; its description is the formula description, or `{{desc}}` when
@@ -693,10 +709,12 @@ them; they are documented to prevent silent surprise.
   reads that label. An `until` loop therefore runs exactly one iteration.
 - **Gate `type` vocabulary.** `[steps.gate]` synthesizes a real gate bead
   that blocks its step until the gate bead is closed (manually or by an
-  external watcher), but the `type` values `gh:run`, `gh:pr`, `timer`,
-  `human`, and `mail` are doc-comment vocabulary in
-  `internal/formula/types.go` — the parser never validates them and no
-  bundled watcher acts on them. Zero bundled formulas use `gate`.
+  external watcher), and records the declared `type` as `gc.gate_type`
+  metadata. The values `gh:run`, `gh:pr`, `timer`, `human`, and `mail` are
+  doc-comment vocabulary in `internal/formula/types.go` — the parser never
+  validates them. Only `human` has a bundled consumer: the core pack's
+  human-gate orders announce and re-nudge it. No bundled watcher resolves any
+  gate type. Zero bundled formulas use `gate`.
 - **`waits_for` gate modes.** `waits_for` compiles to a readiness-blocking
   `waits-for` dependency edge plus a recorded gate mode, but no current
   component interprets the `all-children` / `any-children` distinction.
