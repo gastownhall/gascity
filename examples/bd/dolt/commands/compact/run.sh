@@ -133,6 +133,14 @@
 #                       notify-once-per-reason-forever (the marker never
 #                       re-mails on its own once a given reason has been
 #                       reported, even if left unresolved indefinitely).
+#   GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS
+#     (default: 3) — attempts for the served-HEAD probe that ends every
+#                     storage-rewriting pass (the live-database gate).
+#                     Must be a positive integer; leading zeros are fine.
+#   GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS
+#     (default: 2) — seconds between live-database gate probe attempts
+#                     (never after the last one). Must be a non-negative
+#                     integer; leading zeros are fine.
 #   GC_DOLT_COMPACT_REMOTE               (optional) — remote to fetch/push.
 #                                         Defaults to origin when present;
 #                                         ambiguous multi-remote stores fail.
@@ -381,6 +389,8 @@ skip_fetch_input="${GC_DOLT_COMPACT_SKIP_FETCH:-}"
 allow_federated_input="${GC_DOLT_COMPACT_ALLOW_FEDERATED:-}"
 skip_fetch_dbs="${GC_DOLT_COMPACT_SKIP_FETCH_DBS:-}"
 compact_alert_to="${GC_DOLT_COMPACT_ALERT_TO:-mayor}"
+live_probe_attempts_input="${GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS:-}"
+live_probe_delay_secs_input="${GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS:-}"
 case "$bare_gc_input" in
   ''|0|false|FALSE|no|NO)
     bare_gc=0
@@ -475,6 +485,54 @@ case "$compact_renotify_backstop_secs" in
     exit 2
     ;;
 esac
+
+# The live-database gate's probe settings. Validated with the other knobs —
+# before the compaction lock is taken and before any database is queried —
+# because a run that cannot even parse its settings must not start work.
+# Leading zeros are stripped so "007" reads as 7 (never octal bait); an
+# all-zero attempts value is empty after the strip and rejected because the
+# probe must run at least once. Empty means unset: the default applies.
+case "$live_probe_attempts_input" in
+  '')
+    live_probe_attempts=3
+    ;;
+  *[!0-9]*)
+    printf 'compact: invalid GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=%s (must be a positive integer)\n' \
+      "$live_probe_attempts_input" >&2
+    exit 2
+    ;;
+  *)
+    live_probe_attempts=$(printf '%s' "$live_probe_attempts_input" | sed 's/^0*//')
+    if [ -z "$live_probe_attempts" ]; then
+      printf 'compact: invalid GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=%s (must be a positive integer)\n' \
+        "$live_probe_attempts_input" >&2
+      exit 2
+    fi
+    ;;
+esac
+
+case "$live_probe_delay_secs_input" in
+  '')
+    live_probe_delay_secs=2
+    ;;
+  *[!0-9]*)
+    printf 'compact: invalid GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=%s (must be a non-negative integer)\n' \
+      "$live_probe_delay_secs_input" >&2
+    exit 2
+    ;;
+  *)
+    live_probe_delay_secs=$(printf '%s' "$live_probe_delay_secs_input" | sed 's/^0*//')
+    : "${live_probe_delay_secs:=0}"
+    ;;
+esac
+
+# The served-HEAD probe is a bounded health check, not bulk work: it never
+# needs the full call budget, and a hung server must not pin the gate for a
+# whole call_timeout.
+live_probe_timeout=30
+if [ "$call_timeout" -lt "$live_probe_timeout" ]; then
+  live_probe_timeout=$call_timeout
+fi
 
 case "$compact_remote" in
   ''|[A-Za-z0-9_.-]*)
