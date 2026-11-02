@@ -43,6 +43,24 @@ func TestOnFormulaNeedsAttachmentParkedBrakeVeto(t *testing.T) {
 			wantParked: true,
 		},
 		{
+			// gk-bx4v 2026-11-02T00:53Z: a blocked human-quarantine bead
+			// (merge_result=blocked, auto_push=false, NO halt stamp, NOT
+			// deferred) fell through the idempotency gate — which only
+			// proves "already routed here" — and got a pool-routed
+			// workflow minted around it. routed_to=human vetoes at any
+			// status.
+			name:       "gk-bx4v shape: blocked + routed_to=human, no halt stamp",
+			status:     "blocked",
+			metadata:   map[string]string{"gc.routed_to": "human"},
+			wantParked: true,
+		},
+		{
+			name:       "open + routed_to=human: terminal marker, not a repair target",
+			status:     "open",
+			metadata:   map[string]string{"gc.routed_to": "human"},
+			wantParked: true,
+		},
+		{
 			name:       "unassigned routed-raw, no brake: the footgun stays repaired",
 			status:     "open",
 			metadata:   map[string]string{"gc.routed_to": "worker"},

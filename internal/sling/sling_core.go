@@ -337,6 +337,17 @@ func parkedBrake(b *beads.Bead) (bool, string) {
 	if h := strings.TrimSpace(b.Metadata[beadmeta.HaltReasonMetadataKey]); h != "" {
 		return true, "halt_reason=" + h
 	}
+	// ci-9cb R1 amendment (gk-bx4v incident, 2026-11-02): gc.routed_to=human is
+	// terminal for pool machinery at EVERY status. The idempotency check that
+	// gates this call only proves "already routed where we are routing" — a
+	// human-routed bead read as NOT idempotent, fell through to the plain
+	// attach path, and a blocked human-quarantine bead (no halt stamp, not
+	// deferred) minted a pool-routed workflow around it (gk-pwmk/gk-xkisl,
+	// 00:53:21Z). The routed-raw repair above stays available for pool routes:
+	// only the human terminal marker vetoes here.
+	if r := strings.ToLower(strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey])); r == "human" {
+		return true, "routed_to=human"
+	}
 	return false, ""
 }
 
@@ -387,15 +398,18 @@ func onFormulaNeedsAttachment(opts SlingOpts, querier BeadQuerier, deps SlingDep
 	if !usesFormulaBackedRoute(opts) {
 		return attachmentDecision{}, nil
 	}
-	// ci-9cb: a bead PARKED by a brake — deferred, or carrying a non-blank
-	// halt_reason — is held on purpose. Neither the routed-raw override nor
-	// the burn-and-attach conflict path may fire on it: those are exactly the
-	// re-pour loop that re-wrapped halted roots in synthetic convoys and
-	// cleared their halt stamps during the mint window. The veto runs before
-	// the attachment probe so a parked bead with a live molecule is not
-	// burned either. Lifting the brake (undefer / clear halt_reason) restores
-	// the prior override behavior; gc.routed_to=human remains honored by the
-	// idempotency check upstream exactly as before.
+	// ci-9cb: a bead PARKED by a brake — deferred, carrying a non-blank
+	// halt_reason, or terminal-routed (gc.routed_to=human) — is held on
+	// purpose. Neither the routed-raw override nor the burn-and-attach conflict
+	// path may fire on it: those are exactly the re-pour loop that re-wrapped
+	// halted roots in synthetic convoys and cleared their halt stamps during
+	// the mint window. The veto runs before the attachment probe so a parked
+	// bead with a live molecule is not burned either. Lifting the brake
+	// (undefer / clear halt_reason / clear the human route) restores the prior
+	// override behavior. The routed_to=human marker is vetoed HERE, not left to
+	// the upstream idempotency check alone: that check proves "already routed
+	// where we are routing", so a human-routed bead reads as NOT idempotent and
+	// fell through into the plain attach path (gk-bx4v, 2026-11-02).
 	if bead, ok := BeadFromGetters(opts.BeadOrFormula, querier, deps.Store); ok {
 		if parked, why := parkedBrake(&bead); parked {
 			return attachmentDecision{Parked: why}, nil
