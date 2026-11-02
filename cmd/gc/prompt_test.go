@@ -1890,6 +1890,30 @@ func TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules(t *testing.T
 			"`gc` introspection command",
 		)
 	})
+
+	t.Run("startup fragment separates drain-aware calls from plain polls", func(t *testing.T) {
+		startup := promptSection(t, got, "## Startup Protocol")
+		if strings.Contains(startup, "the drain was acknowledged for you") {
+			t.Errorf("startup protocol says every drain is acknowledged, including plain polls:\n%s", startup)
+		}
+		assertSectionContains(t, "Startup Protocol section", startup,
+			"**A drain-aware call**",
+			"if the command exited 0, your session is done — exit",
+			"`drain_acknowledged: true`",
+			"tolerated",
+			"If the command exited non-zero, the acknowledgement failed: run `gc runtime drain-ack`, then exit",
+			"**A plain poll**",
+			"nothing was acknowledged",
+			"does not end your session by itself",
+			"is a fault, not a drain",
+		)
+		aware := strings.Index(startup, "**A drain-aware call**")
+		plain := strings.Index(startup, "**A plain poll**")
+		ackRun := strings.Index(startup, "run `gc runtime drain-ack`, then exit")
+		if aware < 0 || plain < 0 || ackRun < aware || ackRun > plain {
+			t.Errorf("the gc runtime drain-ack fallback must belong to the drain-aware case:\n%s", startup)
+		}
+	})
 }
 
 // TestPoolWorkerPromptDoesNotDenyMaterializedGraphSteps pins that the

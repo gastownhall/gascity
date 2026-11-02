@@ -11,8 +11,24 @@ gc hook --claim --drain-ack --json
 ```
 
 If the result action is `work`, read the returned `bead_id` with
-`gc bd show <id>`. If the result action is `drain`, the drain was
-acknowledged for you: your session is done — exit.
+`gc bd show <id>`.
+
+If the result action is `drain`, nothing is yours to run. What to do
+depends on the call that returned it:
+
+- **A drain-aware call** (with `--drain-ack`, like the one above): if the
+  command exited 0, your session is done — exit. `drain_acknowledged: true`
+  in the result confirms the acknowledgement; when the seat's drain-ack was
+  refused as tolerated, the field is absent and the command still exits 0,
+  so you still exit. If the command exited non-zero, the acknowledgement
+  failed: run `gc runtime drain-ack`, then exit.
+- **A plain poll** (`gc hook --claim --json`, without `--drain-ack`):
+  nothing was acknowledged, and the command exits non-zero by design. It
+  does not end your session by itself. If your instructions poll this way,
+  they say when to re-check and when to drain.
+
+A hook call that fails without printing a JSON result is a fault, not a
+drain: do not treat it as one.
 
 **Never look for your work with `gc bd list --assignee=<your alias>` or
 `gc bd ready`.** Pool work is invisible to those queries twice over: an
