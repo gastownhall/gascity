@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -45,22 +46,52 @@ func newHookRigGuard(cityPath string, cfg *config.City, sessions ownSessionResol
 	return &hookRigGuard{cityPath: cityPath, cfg: cfg, sessions: sessions}
 }
 
-// forLeg returns the guard bound to one leg of the claim's store fan-out:
-// the leg's rig when it names one (hookStore.rig), else the rig whose store
-// a bd command run in dir reads.
-func (g *hookRigGuard) forLeg(rigName, dir string) *hookRigGuard {
+// forLeg returns the guard bound to one leg of the claim's store fan-out.
+// The leg's store is named three ways: the leg's rig (hookStore.rig), the
+// BEADS_DIR its bd commands run with, and the directory they run in. Each
+// that names a guarded rig's store is a candidate; one guarded rig named by
+// every candidate binds the leg, and candidates that disagree (or a store
+// the shared helper refuses) admit nothing.
+func (g *hookRigGuard) forLeg(rigName, dir string, env ...string) *hookRigGuard {
 	if g == nil {
 		return nil
 	}
 	bound := *g
 	bound.legSet = true
-	bound.leg = nil
-	if _, _, known := rigNamespaceForRigName(g.cfg, strings.TrimSpace(rigName), g.sessions); known {
-		bound.leg = guardedRigNamespaceForRigName(g.cfg, g.cityPath, rigName, g.sessions)
-		return &bound
+	var candidates []*rigNamespace
+	add := func(ns *rigNamespace) {
+		if ns != nil {
+			candidates = append(candidates, ns)
+		}
 	}
-	bound.leg = guardedRigNamespaceForDir(g.cfg, g.cityPath, dir, g.sessions)
+	if _, _, known := rigNamespaceForRigName(g.cfg, strings.TrimSpace(rigName), g.sessions); known {
+		add(guardedRigNamespaceForRigName(g.cfg, g.cityPath, rigName, g.sessions))
+	}
+	if beadsDir := hookClaimEnvValue(env, "BEADS_DIR"); beadsDir != "" {
+		add(guardedRigNamespaceForDir(g.cfg, g.cityPath, filepath.Dir(filepath.Clean(beadsDir)), g.sessions))
+	}
+	add(guardedRigNamespaceForDir(g.cfg, g.cityPath, dir, g.sessions))
+	bound.leg = agreeingRigNamespace(candidates, g.sessions)
 	return &bound
+}
+
+// agreeingRigNamespace returns the one guarded namespace every candidate
+// names, nil for none, and a deny-all namespace when they disagree or one
+// of them is already deny-all (which keeps its reason).
+func agreeingRigNamespace(candidates []*rigNamespace, sessions ownSessionResolver) *rigNamespace {
+	if len(candidates) == 0 {
+		return nil
+	}
+	first := candidates[0]
+	for _, ns := range candidates {
+		if ns.namespace() == "" {
+			return ns
+		}
+		if ns.rigName() != first.rigName() {
+			return denyAllRigNamespaceBecause(sessions, fmt.Errorf("the leg's rig, BEADS_DIR and directory name different guarded rigs (%q, %q)", first.rigName(), ns.rigName()))
+		}
+	}
+	return first
 }
 
 // boundTo returns the guard bound to the leg at dir, keeping a binding
@@ -101,11 +132,15 @@ func (g *hookRigGuard) filterCandidates(candidates []beads.Bead, stderr io.Write
 			continue
 		}
 		owner := cls.Value
-		if cls.Err != nil {
-			fmt.Fprintf(stderr, "gc hook --claim: skipping %s: rig %q serves only %s (federation = \"rig\"); its owner %q could not be checked: %v\n", c.ID, rigNamespaceLabel(ns), rigNamespaceShown(ns), owner, cls.Err) //nolint:errcheck
+		if ns.namespace() == "" {
+			fmt.Fprintf(stderr, "gc hook --claim: skipping %s: rig %s (federation = \"rig\") admits no row in this scope\n", c.ID, rigNamespaceLabel(ns)) //nolint:errcheck
 			continue
 		}
-		fmt.Fprintf(stderr, "gc hook --claim: skipping %s: rig %q serves only %s (federation = \"rig\"); its owner %q is outside it\n", c.ID, rigNamespaceLabel(ns), rigNamespaceShown(ns), owner) //nolint:errcheck
+		if cls.Err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: skipping %s: rig %s serves only %s (federation = \"rig\"); its owner %q could not be checked: %v\n", c.ID, rigNamespaceLabel(ns), rigNamespaceShown(ns), owner, cls.Err) //nolint:errcheck
+			continue
+		}
+		fmt.Fprintf(stderr, "gc hook --claim: skipping %s: rig %s serves only %s (federation = \"rig\"); its owner %q is outside it\n", c.ID, rigNamespaceLabel(ns), rigNamespaceShown(ns), owner) //nolint:errcheck
 	}
 	return kept
 }
@@ -120,8 +155,11 @@ func (g *hookRigGuard) claimRefusal(bead beads.Bead, actors ...string) error {
 	if ns == nil {
 		return nil
 	}
+	if ns.namespace() == "" {
+		return newRigNamespacePathError("gc hook --claim: not claiming %s: rig %s (federation = \"rig\") admits no row in this scope", bead.ID, rigNamespaceLabel(ns))
+	}
 	if cls := ns.classifyRow(bead); cls.Class == rowForeign {
-		return newRigNamespacePathError("gc hook --claim: not claiming %s: rig %q (federation = \"rig\") serves only %s; its owner %q is outside it", bead.ID, rigNamespaceLabel(ns), rigNamespaceShown(ns), cls.Value)
+		return newRigNamespacePathError("gc hook --claim: not claiming %s: rig %s (federation = \"rig\") serves only %s; its owner %q is outside it", bead.ID, rigNamespaceLabel(ns), rigNamespaceShown(ns), cls.Value)
 	}
 	if len(actors) == 0 {
 		actors = []string{""}
@@ -130,7 +168,7 @@ func (g *hookRigGuard) claimRefusal(bead beads.Bead, actors ...string) error {
 		if rigNamespacePinAdmitted(ns, actor) {
 			continue
 		}
-		return newRigNamespacePathError("gc hook --claim: not claiming %s: rig %q (federation = \"rig\") serves only %s and this city's pool sessions; claim actor %q is outside it%s", bead.ID, rigNamespaceLabel(ns), rigNamespaceShown(ns), strings.TrimSpace(actor), rigNamespaceActorHint(ns, actor))
+		return newRigNamespacePathError("gc hook --claim: not claiming %s: rig %s (federation = \"rig\") serves only %s and this city's pool sessions; claim actor %q is outside it%s", bead.ID, rigNamespaceLabel(ns), rigNamespaceShown(ns), strings.TrimSpace(actor), rigNamespaceActorHint(ns, actor))
 	}
 	return nil
 }

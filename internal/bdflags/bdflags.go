@@ -64,6 +64,10 @@ var valueFlagsBySub = map[string]map[string]bool{
 		"-s": true, "--status": true, "--storage-class": true, "--title": true,
 		"-t": true, "--type": true, "--waits-for": true,
 		"--waits-for-gate": true, "--wisp-type": true,
+		// Hidden aliases bd accepts (`bd create "t" --label k=v`, --body,
+		// -m/--message for --description, --description-file).
+		"--label": true, "--body": true, "-m": true, "--message": true,
+		"--description-file": true,
 	},
 	"update": {
 		"--acceptance": true, "--add-label": true, "--append-notes": true,

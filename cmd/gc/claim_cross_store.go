@@ -42,7 +42,7 @@ func crossStoreClaimDir(cfg *config.City, agentCfg *config.Agent, beadID, actor,
 	// Rig paths are absolute here (agentScriptCrossStoreBeadEnv resolves
 	// them), so no city path is needed to find the runner's store.
 	if ns := agentScriptWriteNamespace(cfg, "", beadID, rigDir != "", runnerRig, sessions); ns != nil && !rigNamespacePinAdmitted(ns, actor) {
-		return "", false, newRigNamespacePathError("rig %q (federation = \"rig\") serves only %s; claim actor %q is outside it%s", rigNamespaceLabel(ns), rigNamespaceShown(ns), strings.TrimSpace(actor), rigNamespaceActorHint(ns, actor))
+		return "", false, newRigNamespacePathError("rig %s (federation = \"rig\") serves only %s; claim actor %q is outside it%s", rigNamespaceLabel(ns), rigNamespaceShown(ns), strings.TrimSpace(actor), rigNamespaceActorHint(ns, actor))
 	}
 	if rigDir == "" {
 		return "", false, nil

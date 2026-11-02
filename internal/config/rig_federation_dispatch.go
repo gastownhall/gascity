@@ -4,9 +4,10 @@ import "fmt"
 
 // GuardedRigDispatcherWarnings returns one warning per rig with federation =
 // "rig" that has no control dispatcher of its own. A graph workflow in a
-// guarded rig's store routes its control steps to the rig's dispatcher;
-// without one they would go to a dispatcher outside the rig's namespace,
-// which the rig refuses, so every graph launch into the rig fails.
+// rig's store needs the rig's own dispatcher for its control steps whether
+// or not the rig is guarded; on a guarded rig the missing dispatcher also
+// cannot be stood in for by one outside the rig, since a route outside the
+// namespace is refused, so every graph launch into the rig fails.
 func GuardedRigDispatcherWarnings(cfg *City) []string {
 	if cfg == nil {
 		return nil
@@ -21,7 +22,7 @@ func GuardedRigDispatcherWarnings(cfg *City) []string {
 			continue
 		}
 		warnings = append(warnings, fmt.Sprintf(
-			"rig %q sets %s = %q but has no control dispatcher of its own: graph workflows into its store would route control steps outside its namespace %q and are refused; give the rig its own %s",
+			"rig %q has no control dispatcher of its own, so graph workflows into its store cannot run their control steps; with %s = %q a dispatcher outside its namespace %q cannot stand in (the route is refused); give the rig its own %s",
 			r.Name, rigFederationKey, RigFederationRig, r.IdentityNamespace(), ControlDispatcherAgentName))
 	}
 	return warnings

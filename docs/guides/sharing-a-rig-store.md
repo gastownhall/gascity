@@ -129,6 +129,51 @@ store's internals, so the check cannot see the lane.
 Paths that do not go through the rig's store handles are not covered by this
 build yet; see the warning at the top of this page.
 
+## What the claim, routing and `gc bd` paths refuse
+
+The hook claim cycle, `gc sling`, graph routing, `gc agent-script` and `gc bd`
+write the rig's store without going through a guarded store, so they check
+the setting themselves. Every refusal happens before a `bd` process starts,
+and `--force` never overrides one.
+
+- **`gc hook --claim`** judges each candidate by the store it was read from,
+  not only by its id prefix, and skips rows the rig does not let this city
+  act on:
+
+  ```text
+  gc hook --claim: skipping be-12: rig "beta" serves only beta/ (federation = "rig"); its owner "crew.worker" is outside it
+  ```
+
+  It claims, adopts, re-stamps or pins only as an identity the rig admits.
+  An agent claiming under a short session id gets a hint to give it a rig
+  alias or run it as a pool of the rig. City-scoped agents do not search
+  guarded rigs at all.
+- **`gc sling` and formula graphs** refuse a route into the rig that is not
+  one of its own agents, including custom `sling_query` targets, batch
+  children and every graph step. A graph needs the rig's own control
+  dispatcher; `gc config show --validate` and `gc doctor` warn when the rig
+  has none.
+
+  ```text
+  gc sling: refusing route into rig "beta": target "mayor" is outside its namespace "beta/" (federation = "rig"); route to one of the rig's own agents. --force does not override this.
+  ```
+- **`gc agent-script`** checks `bd_claim` and `bd_update` the way `gc bd`
+  does, and never falls back to another store.
+- **`gc bd`** in the rig's scope runs only what it can check first. Reads
+  pass. Writes that name beads (`update`, `close`, `reopen`, `delete`,
+  `heartbeat`, `assign`, `unclaim`, `defer`, `dep add`, `link`, `label add`,
+  `comment` and similar) are refused when another city owns a row they name.
+  Claims need an identity the rig admits; claims of an unnamed row
+  (`ready --claim`, `close --claim-next`, `close --continue` without
+  `--no-auto`) are refused. A create is stamped as this city's. Anything
+  else is refused:
+
+  ```text
+  gc bd: refusing sql: rig "beta" (federation = "rig") lets gc bd run only the writes it can check first; use raw bd
+  ```
+
+  `relate` and `unrelate` pass: they record a link that blocks nothing.
+
 ## What it does not cover
 
 - `bd` run directly by people or agents, and any writer other than Gas City.

@@ -1058,6 +1058,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose store is the city's or another rig's is not opened, and neither is an
   unguarded rig whose store is a guarded rig's. Paths that bypass the rig's
   store handles are not covered yet, so the warnings above stay.
+- **A rig with `federation = "rig"` is enforced on the paths that write its
+  store without a guarded Go store: the hook claim cycle, sling and graph
+  routing, `gc agent-script` and `gc bd`.** Each refusal wraps one error
+  (`config.ErrRigNamespace`), runs before any `bd` process is spawned, and
+  is never retried.
+  - `gc hook --claim` judges every candidate by the store it was read from,
+    whatever its id prefix, and skips a row the rig does not let this city
+    act on (`gc hook --claim: skipping <id>: rig "beta" serves only beta/
+    ...; its owner "<id>" is outside it`). A claim, promotion, stale
+    reclaim, adoption re-stamp, workflow-stop close or continuation pin
+    needs an actor inside the namespace or one of this city's own pool
+    sessions of the rig (`gc hook --claim: not claiming <id>: ... claim actor
+    "<x>" is outside it`). City-scoped agents no longer read guarded rigs.
+  - `gc sling`, its batch and custom `sling_query` forms, and every graph
+    decoration refuse a route into a guarded rig that is not one of its own
+    agents (`gc sling: refusing route into rig "beta": target "<x>" is
+    outside its namespace "beta/" ... --force does not override this.`).
+  - `gc agent-script` refuses `bd_claim` and `bd_update` against a guarded
+    rig's row exactly as `gc bd` would, with no fallback store.
+  - `gc bd` on a guarded rig's scope runs an allowlist: reads pass; by-id
+    writes are checked against the row they name (refused when another
+    city owns it); claims need an admitted actor and `ready --claim`,
+    `close --claim-next` and `close --continue` (without `--no-auto`) are
+    refused; a create is stamped with the rig's namespace; and every other
+    verb is refused with "use raw bd". Raw `bd` is unchanged.
+  - `gc config show --validate` and `gc doctor` warn when a guarded rig has
+    no control dispatcher of its own, since graph workflows into it then
+    cannot run their control steps.
 - **`[beads] proxied_idle_timeout` sets how long a bd-owned proxied scope's
   proxy and Dolt child stay up with no connections.** bd retires the pair
   after that much quiet and the next bd command restarts it. The value is a Go

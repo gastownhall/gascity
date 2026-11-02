@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -26,11 +27,24 @@ func newRigNamespacePathError(format string, args ...any) error {
 
 // rigNamespaceLabel names a guarded rig in a refusal; a deny-all namespace
 // (an ambiguous guarded scope) has no rig name.
+// It is quoted, so formats print it with %s.
 func rigNamespaceLabel(ns *rigNamespace) string {
 	if name := ns.rigName(); name != "" {
-		return name
+		return strconv.Quote(name)
 	}
-	return "(ambiguous guarded scope)"
+	if ns != nil && ns.denyReason != "" {
+		return "(none: " + ns.denyReason + ")"
+	}
+	return "(none: an ambiguous guarded scope)"
+}
+
+// denyAllRigNamespaceBecause is a deny-all namespace that carries why.
+func denyAllRigNamespaceBecause(sessions ownSessionResolver, err error) *rigNamespace {
+	ns := denyAllRigNamespace(sessions)
+	if err != nil {
+		ns.denyReason = err.Error()
+	}
+	return ns
 }
 
 // rigNamespaceShown is the namespace as a refusal prints it.
@@ -48,7 +62,7 @@ func rigNamespaceActorHint(ns *rigNamespace, actor string) string {
 	if config.RigRouteQualified(actor) || config.IsPoolSessionBeadID(strings.TrimSpace(actor)) {
 		return ""
 	}
-	return fmt.Sprintf("; give the agent a rig alias (named session) or run it as a pool of rig %q", rigNamespaceLabel(ns))
+	return fmt.Sprintf("; give the agent a rig alias (named session) or run it as a pool of rig %s", rigNamespaceLabel(ns))
 }
 
 // rigNamespacePinAdmitted reports whether v may be written as an assignee
@@ -81,6 +95,9 @@ func rigNamespaceForLeg(leg *rigNamespace, cfg *config.City, beadID string, sess
 		}
 		return nil
 	}
+	if leg.namespace() == "" {
+		return leg // deny-all, with its reason
+	}
 	if prefixGuarded && prefix.rigName() != leg.rigName() {
 		return denyAllRigNamespace(sessions)
 	}
@@ -98,7 +115,7 @@ func rigNamespaceForScopeOrDeny(cfg *config.City, cityPath, scopeRoot string, se
 	}
 	ns, err := rigNamespaceForScope(cfg, cityPath, normalizePathForCompare(resolveStoreScopeRoot(cityPath, scopeRoot)), sessions)
 	if err != nil {
-		return denyAllRigNamespace(sessions)
+		return denyAllRigNamespaceBecause(sessions, err)
 	}
 	return ns
 }
@@ -130,7 +147,7 @@ func guardedRigNamespaceForRigName(cfg *config.City, cityPath, name string, sess
 		}
 		if guarded {
 			if err := checkGuardedRigStore(cfg, cityPath, r); err != nil {
-				return denyAllRigNamespace(sessions)
+				return denyAllRigNamespaceBecause(sessions, err)
 			}
 			return ns
 		}
