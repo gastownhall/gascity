@@ -32,6 +32,10 @@ const (
 	decideDriftRelaunch = "drift-relaunch"          // SESS-556/560
 )
 
+// decideDriftHeldWork is SESS-559's deferral over open work, its episode
+// stamped and signaled (#8345).
+const decideDriftHeldWork = "drift-deferred:held-work"
+
 // armConfigDrift is A14 on an alive desired row whose stored config hash
 // differs from this generation's (a missing one never drifts, #127):
 //   - attached, or its attach unknown (SESS-552/553): the attached
@@ -41,8 +45,10 @@ const (
 //     restart; another named row is restarted in place (SESS-557), or
 //     relaunched for a launch-only drift its provider can relaunch
 //     (SESS-556), each effect deferring on the row's use (SESS-555);
-//   - a pending interaction (SESS-558) or open assigned work (SESS-559):
-//     defer, A19's lenses canceling a cancelable drain;
+//   - a pending interaction (SESS-558): defer, A19's lenses canceling a
+//     cancelable drain;
+//   - open assigned work (SESS-559): defer the same way, the episode's
+//     first observation stamped and signaled (driftHeldWork, #8345);
 //   - a launch-only drift its provider can relaunch is relaunched (SESS-560),
 //     falling back to the drain;
 //   - otherwise the config-drift drain (SESS-561), unless a stop request is
@@ -93,8 +99,10 @@ func armConfigDrift(r *rowFacts) (intent, bool) {
 		return r.heal(intentRowHeal, decideDriftPinned, driftStamp(namedSessionConfigDriftDeferredAtMetadata, namedSessionConfigDriftDeferredKeyMetadata, key, now))
 	case isNamedSessionInfo(info):
 		return r.driftRestart(launchOnly)
-	case containsWakeReason(e.WakeReasons, WakePending) || e.AssignedWork != nil || active || driftRequestStands(r.row):
+	case containsWakeReason(e.WakeReasons, WakePending) || active || driftRequestStands(r.row):
 		return intent{}, false
+	case e.AssignedWork != nil:
+		return r.driftHeldWork(cfg, key, e.AssignedWork.BeadID)
 	case launchOnly:
 		return r.driftRestart(true)
 	}
@@ -103,6 +111,23 @@ func armConfigDrift(r *rowFacts) (intent, bool) {
 	}
 	res, _ := r.w.Templates.lookup(info)
 	return r.drainBegin(drainConfigDrift, &events.Event{Type: events.SessionDraining, Actor: "gc", Subject: res.TP.DisplayName(), Message: "config drift detected", SessionID: info.ID})
+}
+
+// driftHeldWork is SESS-559's deferral over open work bead workBeadID,
+// signaled (#8345): the episode's first observation is a row heal of its
+// stamp carrying session.config_drift_deferred, which the effect records
+// only once the write lands; a stamped episode waits with no intent, so the
+// arms after A14 still decide the row.
+func (r *rowFacts) driftHeldWork(cfg runtime.Config, key, workBeadID string) (intent, bool) {
+	info, now := r.row.Info, r.w.Now
+	step := driftEpisode(info, key, now)
+	if step.Patch == nil {
+		return intent{}, false
+	}
+	it, ok := r.heal(intentRowHeal, decideDriftHeldWork, step.Patch)
+	ev := configDriftDeferredEvent(info, runtime.CoreFingerprintDriftFieldsFromJSON(info.CoreHashBreakdown, cfg), workBeadID, step.Since, now)
+	it.Event = &ev
+	return it, ok
 }
 
 // driftRequestStands reports that the row already carries this

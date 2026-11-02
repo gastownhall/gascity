@@ -13,10 +13,11 @@ import (
 
 // Kills A14 out of legacy's order or reaching past it (SESS-550..562, 565,
 // 566/568): an attached (or attach-unknown) drift stamps its deferral,
-// throttled; a recent attached deferral, a pending interaction and open work
-// wait; a pinned named row stamps and never restarts; another named row, a
-// launch-only drift a provider can relaunch, a live drift and an asleep
-// named drift are C7b2's, which A14 leaves alone; otherwise the drain
+// throttled; a recent attached deferral and a pending interaction wait;
+// open work stamps its episode (#8345), then waits; a pinned named row
+// stamps and never restarts; another named row, a launch-only drift a
+// provider can relaunch, a live drift and an asleep named drift are
+// C7b2's, which A14 leaves alone; otherwise the drain
 // begins, once no stop request is active. A resolved drift clears its
 // deferral keys, and a missing stored hash or an undesired row never
 // drifts.
@@ -74,9 +75,10 @@ func TestDecideRowConfigDrift(t *testing.T) {
 		{name: "a named row in use restarts, its effect deferring", meta: append([]string{"started_config_hash", stale}, named...), alive: true, pending: true, wantKind: intentDriftRestart, wantReason: decideDriftRestart},
 		{name: "a named launch-only drift relaunches", meta: slices.Concat([]string{"started_config_hash", stale}, launchOnly, named), alive: true, relaunch: true, wantKind: intentDriftRelaunch, wantReason: decideDriftRelaunch},
 		{name: "a pending interaction waits", meta: []string{"started_config_hash", stale}, alive: true, pending: true},
-		{name: "open work waits", meta: []string{"started_config_hash", stale}, alive: true, work: true},
+		{name: "open work stamps its episode", meta: []string{"started_config_hash", stale}, alive: true, work: true, wantKind: intentRowHeal, wantReason: decideDriftHeldWork},
 		{name: "a launch-only drift relaunches", meta: append([]string{"started_config_hash", stale}, launchOnly...), alive: true, relaunch: true, wantKind: intentDriftRelaunch, wantReason: decideDriftRelaunch},
-		{name: "a launch-only drift with open work waits", meta: append([]string{"started_config_hash", stale}, launchOnly...), alive: true, relaunch: true, work: true},
+		{name: "a launch-only drift with open work stamps its episode", meta: append([]string{"started_config_hash", stale}, launchOnly...), alive: true, relaunch: true, work: true, wantKind: intentRowHeal, wantReason: decideDriftHeldWork},
+		{name: "a stamped held-work episode waits", meta: []string{"started_config_hash", stale, "config_drift_deferred_key", key, "config_drift_deferred_at", rowAt(-time.Minute)}, alive: true, work: true},
 		{name: "a provision hash without a launch hash drains", meta: []string{"started_config_hash", stale, "started_provision_hash", runtime.ProvisionFingerprint(cfg), "started_launch_hash", ""}, alive: true, relaunch: true, wantKind: intentDrainBegin, wantReason: decideDrainBegin + drainConfigDrift},
 		{name: "an active stop request holds a launch-only drift", meta: slices.Concat([]string{"started_config_hash", stale}, launchOnly, intentAt(drainIdle, "3")), alive: true, relaunch: true},
 		{name: "a launch-only drift no provider can relaunch drains", meta: append([]string{"started_config_hash", stale}, launchOnly...), alive: true, wantKind: intentDrainBegin, wantReason: decideDrainBegin + drainConfigDrift},
@@ -118,7 +120,7 @@ func TestDecideRowConfigDrift(t *testing.T) {
 				w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(info): {TP: tp}}}
 				w.Observed = map[rowKey]rowObservation{rowKeyOf("gc-1"): {Liveness: livenessAlive, Attached: tc.attached, Uncertain: tc.unsure}}
 			})
-			drift := slices.Contains([]string{decideDriftAttached, decideDriftPinned, decideDriftResolved, decideDrainBegin + drainConfigDrift, decideDriftRepair, decideLiveApply, decideDriftRestart, decideDriftRelaunch}, it.Reason)
+			drift := slices.Contains([]string{decideDriftAttached, decideDriftHeldWork, decideDriftPinned, decideDriftResolved, decideDrainBegin + drainConfigDrift, decideDriftRepair, decideLiveApply, decideDriftRestart, decideDriftRelaunch}, it.Reason)
 			if tc.wantKind == "" && drift || tc.wantKind != "" && (it.Kind != tc.wantKind || it.Reason != tc.wantReason) { // another arm may take a row A14 leaves
 				t.Fatalf("decideRow = (%q, %q) %v, want (%q, %q)", it.Kind, it.Reason, it.Patch, tc.wantKind, tc.wantReason)
 			}
@@ -127,7 +129,7 @@ func TestDecideRowConfigDrift(t *testing.T) {
 				if it.Patch["attached_config_drift_deferred_key"] != key || it.Patch["attached_config_drift_deferred_at"] != gatherNow.UTC().Format(time.RFC3339) {
 					t.Fatalf("stamp %v, want key %q at the pass", it.Patch, key)
 				}
-			case decideDriftPinned:
+			case decideDriftPinned, decideDriftHeldWork:
 				if it.Patch["config_drift_deferred_key"] != key {
 					t.Fatalf("stamp %v, want key %q", it.Patch, key)
 				}
