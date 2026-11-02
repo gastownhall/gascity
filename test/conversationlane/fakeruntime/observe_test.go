@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime/runtimecontract"
@@ -49,5 +50,24 @@ func TestObserveProfileIsConformant(t *testing.T) {
 		case res.Status == runtimecontract.StatusSkip && !skip[res.Code]:
 			t.Errorf("%s skipped: %s", res.Code, res.Detail)
 		}
+	}
+}
+
+// Kills a fresh_only refusal that exits 1: the profile's held-name refusal
+// is the contract's exit 73.
+func TestObserveProfileFreshOnlyExits73(t *testing.T) {
+	dir := t.TempDir()
+	start := func(cfg string) int {
+		var out, errb strings.Builder
+		return run([]string{"--state", dir, "--profile", "observe.v1", "start", "s"}, strings.NewReader(cfg), &out, &errb)
+	}
+	if code := start(`{"command":"sleep 1"}`); code != 0 {
+		t.Fatalf("first start exited %d", code)
+	}
+	if code := start(`{"command":"sleep 1","fresh_only":true}`); code != exitFreshCollision {
+		t.Fatalf("fresh_only start over a held name exited %d, want %d", code, exitFreshCollision)
+	}
+	if code := start(`{"command":"sleep 1"}`); code != 1 {
+		t.Fatalf("a plain start over a held name exited %d, want 1", code)
 	}
 }

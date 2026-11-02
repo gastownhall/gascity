@@ -33,10 +33,6 @@ type Options struct {
 
 	// ownWorkDir is a fresh temp work dir Run created and must remove.
 	ownWorkDir string
-	// only, when set, runs only that requirement's probe and records every
-	// other requirement as skipped: the negative-gating test's way to run
-	// one mutant against the check it targets.
-	only Code
 }
 
 func (o *Options) applyDefaults() {
@@ -73,6 +69,12 @@ func (o *Options) applyDefaults() {
 // Run emits exactly one [Result] per [Catalog] requirement, in catalog
 // order (enforced by TestRunCoversEveryCatalogRequirement).
 func Run(ctx context.Context, executable string, opts Options) (Report, error) {
+	return run(ctx, executable, opts, nil)
+}
+
+// run is Run, probing only the requirements selected reports true for
+// (every one when it is nil) and recording the rest as skipped.
+func run(ctx context.Context, executable string, opts Options, selected func(Code) bool) (Report, error) {
 	path, err := exec.LookPath(executable)
 	if err != nil {
 		return Report{}, fmt.Errorf("resolving executable %q: %w", executable, err)
@@ -87,10 +89,9 @@ func Run(ctx context.Context, executable string, opts Options) (Report, error) {
 	// Resolve the handshake once; capability-gated probes consult it.
 	report.Protocol = r.handshake(ctx)
 	report.V2Missing = sessionexec.V2ProfileGaps(report.Protocol)
-	report.V2Ready = len(report.V2Missing) == 0
 
 	for _, req := range catalog {
-		if opts.only != "" && req.Code != opts.only {
+		if selected != nil && !selected(req.Code) {
 			report.record(req, StatusSkip, "not selected")
 			continue
 		}
@@ -101,7 +102,11 @@ func Run(ctx context.Context, executable string, opts Options) (Report, error) {
 		}
 		status, detail := probe(ctx, r, report.Protocol)
 		report.record(req, status, detail)
+		if status == StatusFail {
+			report.V2Failed = append(report.V2Failed, req.Code)
+		}
 	}
+	report.V2Ready = len(report.V2Missing) == 0 && len(report.V2Failed) == 0
 	return report, nil
 }
 

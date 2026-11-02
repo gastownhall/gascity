@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 )
 
 // This file is the observe group: the observe.v1 profile reconciler v2
@@ -27,47 +27,15 @@ const observeAgentNotRunning = "gc-rpp-no-such-process"
 // identityKeys are the identity env keys observe.v1 reports.
 var identityKeys = []string{"GC_SESSION_ID", "GC_RUNTIME_EPOCH", "GC_INSTANCE_TOKEN", "GT_PROCESS_NAMES"}
 
-// observeObject is a box's object as observe and inventory report it.
+// observeObject is a box's object as a kill-object request names it.
 type observeObject struct {
 	ID      string `json:"id"`
 	Created string `json:"created"`
 }
 
-// observeAnswer is one observe answer, or one inventory entry.
-type observeAnswer struct {
-	Name         string          `json:"name"`
-	State        string          `json:"state"`
-	Object       *observeObject  `json:"object"`
-	Agent        string          `json:"agent"`
-	Identity     json.RawMessage `json:"identity"`
-	LastActivity *string         `json:"last_activity"`
-}
-
-// identity is the answer's identity, nil when it is null or absent.
-func (a observeAnswer) identity() map[string]string {
-	var id map[string]string
-	if len(a.Identity) > 0 {
-		_ = json.Unmarshal(a.Identity, &id)
-	}
-	return id
-}
-
-// inventoryAnswer is one inventory answer.
-type inventoryAnswer struct {
-	Complete *bool           `json:"complete"`
-	Sessions []observeAnswer `json:"sessions"`
-}
-
-// decodeOne decodes exactly one JSON value from out into v.
-func decodeOne(out string, v any) error {
-	dec := json.NewDecoder(strings.NewReader(out))
-	if err := dec.Decode(v); err != nil {
-		return fmt.Errorf("malformed answer: %w", err)
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		return fmt.Errorf("trailing bytes after the answer")
-	}
-	return nil
+// objectOf is an observation's object.
+func objectOf(o sessionexec.Observation) observeObject {
+	return observeObject{ID: o.ObjectID, Created: o.ObjectCreated}
 }
 
 // boxConfig is a start config the observe group sends.
@@ -110,31 +78,34 @@ func (r *runner) startBox(ctx context.Context, env []string, name string, proces
 	return r.opEnv(ctx, r.opts.StartTimeout, env, cfg, "start", name)
 }
 
-// observe runs observe for name under env with processNames on stdin.
-func (r *runner) observe(ctx context.Context, env []string, name string, processNames ...string) (observeAnswer, outcome) {
+// observe runs observe for name under env with processNames on stdin and
+// reads the answer as gc does (exec.ParseObserve): an answer gc would read
+// as unknown, state unknown included, is an error.
+func (r *runner) observe(ctx context.Context, env []string, name string, processNames ...string) (sessionexec.Observation, outcome) {
 	var stdin []byte
 	if len(processNames) > 0 {
 		stdin = []byte(strings.Join(processNames, "\n") + "\n")
 	}
 	res := r.opEnv(ctx, r.opts.OpTimeout, env, stdin, "observe", name)
-	var a observeAnswer
+	var o sessionexec.Observation
 	if res.ok() {
-		if err := decodeOne(res.stdout, &a); err != nil {
+		var err error
+		if o, err = sessionexec.ParseObserve([]byte(res.stdout)); err != nil {
 			res.err = fmt.Errorf("observe %s: %w", name, err)
 		}
 	}
-	return a, res
+	return o, res
 }
 
-// inventory runs inventory under env.
-func (r *runner) inventory(ctx context.Context, env []string) (inventoryAnswer, outcome) {
+// inventory runs inventory under env and reads it as gc does
+// (exec.ParseInventory).
+func (r *runner) inventory(ctx context.Context, env []string) (sessionexec.Inventory, outcome) {
 	res := r.opEnv(ctx, r.opts.OpTimeout, env, nil, "inventory")
-	var inv inventoryAnswer
+	var inv sessionexec.Inventory
 	if res.ok() {
-		if err := decodeOne(res.stdout, &inv); err != nil {
+		var err error
+		if inv, err = sessionexec.ParseInventory([]byte(res.stdout)); err != nil {
 			res.err = fmt.Errorf("inventory: %w", err)
-		} else if inv.Complete == nil {
-			res.err = fmt.Errorf("inventory: no complete flag")
 		}
 	}
 	return inv, res
@@ -157,23 +128,23 @@ func observeDeclared(hs runtime.ProtocolInfo) (Status, string, bool) {
 	return StatusPass, "", true
 }
 
-// presentObserve requires observe of name to answer state with an object.
-func presentObserve(ctx context.Context, r *runner, name, state string, processNames ...string) (observeAnswer, Status, string) {
-	a, res := r.observe(ctx, nil, name, processNames...)
+// presentObserve requires observe of name to answer state, with its object
+// when the box is present.
+func presentObserve(ctx context.Context, r *runner, name, state string, processNames ...string) (sessionexec.Observation, Status, string) {
+	o, res := r.observe(ctx, nil, name, processNames...)
 	switch {
 	case res.unsupported:
-		return a, StatusFail, "observe returned exit 2 although observe.v1 is declared"
+		return o, StatusFail, "observe returned exit 2 although observe.v1 is declared"
 	case res.err != nil:
-		return a, StatusFail, res.err.Error()
-	case a.State != state:
-		return a, StatusFail, fmt.Sprintf("observe %s = state %q, want %q", name, a.State, state)
-	case state != "absent" && (a.Object == nil || a.Object.ID == "" || a.Object.Created == ""):
-		return a, StatusFail, fmt.Sprintf("observe %s answered %s with no object id and created time", name, state)
+		return o, StatusFail, res.err.Error()
+	case o.State != state:
+		return o, StatusFail, fmt.Sprintf("observe %s = state %q, want %q", name, o.State, state)
 	}
-	return a, StatusPass, ""
+	return o, StatusPass, ""
 }
 
-// startOrFail starts name and returns a failing status if it cannot.
+// startOrFail starts name with processNames and returns a failing status if
+// it cannot.
 func startOrFail(ctx context.Context, r *runner, env []string, name string, processNames ...string) (Status, string) {
 	res := r.startBox(ctx, env, name, processNames, false)
 	switch {
@@ -183,6 +154,19 @@ func startOrFail(ctx context.Context, r *runner, env []string, name string, proc
 		return StatusFail, "start failed: " + res.err.Error()
 	}
 	return StatusPass, ""
+}
+
+// sameIdentity reports whether got carries exactly want's identity keys.
+func sameIdentity(got, want map[string]string) bool {
+	if got == nil || want == nil {
+		return got == nil && want == nil
+	}
+	for _, key := range identityKeys {
+		if got[key] != want[key] {
+			return false
+		}
+	}
+	return true
 }
 
 func probeObserveDeclaredOps(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
@@ -212,29 +196,57 @@ func probeObserveAbsentNeverStarted(ctx context.Context, r *runner, hs runtime.P
 	return StatusPass, "a never-started name is absent"
 }
 
+// observePollInterval paces the observes RPP-OBSERVE-003 takes while a
+// start runs.
+const observePollInterval = 20 * time.Millisecond
+
+// probeObserveRunningWithIdentity starts a box and observes it all the
+// while: any answer that shows the box present must carry the start env's
+// identity, or null while it is not yet readable, never an empty or partial
+// one (which gc would read as an ownerless box); the first observe after
+// start returns must carry it.
 func probeObserveRunningWithIdentity(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
 	if s, d, ok := observeDeclared(hs); !ok {
 		return s, d
 	}
 	name := r.nextName()
-	if s, d := startOrFail(ctx, r, nil, name, r.agentProcess()); s != StatusPass {
-		return s, d
-	}
+	want := r.identityFor(name, r.agentProcess())
+	started := make(chan outcome, 1)
+	go func() { started <- r.startBox(ctx, nil, name, []string{r.agentProcess()}, false) }()
 	defer r.stop(ctx, name)
-	a, s, d := presentObserve(ctx, r, name, "running")
+	tick := time.NewTicker(observePollInterval)
+	defer tick.Stop()
+	var gap string
+	var res outcome
+	for running := true; running; {
+		select {
+		case res = <-started:
+			running = false
+		case <-tick.C:
+		}
+		if o, ores := r.observe(ctx, nil, name); gap == "" && ores.ok() && (o.State == "running" || o.State == "dead") && o.Identity != nil && !sameIdentity(o.Identity, want) {
+			gap = fmt.Sprintf("an observe during start saw the box with identity %v, not the start env's: identity must be readable before the box is visible (or answer null)", o.Identity)
+		}
+	}
+	switch {
+	case res.unsupported:
+		return StatusFail, "start returned exit 2; start is a required op"
+	case res.err != nil:
+		return StatusFail, "start failed: " + res.err.Error()
+	case gap != "":
+		return StatusFail, gap
+	}
+	o, s, d := presentObserve(ctx, r, name, "running")
 	if s != StatusPass {
 		return s, d
 	}
-	got := a.identity()
-	if got == nil {
+	if o.Identity == nil {
 		return StatusFail, "the first observe after start answered identity null: identity must be readable before the box is visible"
 	}
-	for key, want := range r.identityFor(name, r.agentProcess()) {
-		if got[key] != want {
-			return StatusFail, fmt.Sprintf("observe identity %s = %q, want the start env's %q", key, got[key], want)
-		}
+	if !sameIdentity(o.Identity, want) {
+		return StatusFail, fmt.Sprintf("observe identity %v, want the start env's %v", o.Identity, want)
 	}
-	return StatusPass, "running, with its object and the start env's identity"
+	return StatusPass, "running, with its object and the start env's identity from the first answer"
 }
 
 func probeObserveAbsentAfterStop(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
@@ -272,8 +284,8 @@ func probeObserveObjectStable(ctx context.Context, r *runner, hs runtime.Protoco
 	if s != StatusPass {
 		return s, d
 	}
-	if *again.Object != *first.Object {
-		return StatusFail, fmt.Sprintf("the object changed between two observes of one box: %+v then %+v", *first.Object, *again.Object)
+	if objectOf(again) != objectOf(first) {
+		return StatusFail, fmt.Sprintf("the object changed between two observes of one box: %+v then %+v", objectOf(first), objectOf(again))
 	}
 	if s, d := startOrFail(ctx, r, nil, name); s != StatusPass {
 		return s, d
@@ -283,8 +295,8 @@ func probeObserveObjectStable(ctx context.Context, r *runner, hs runtime.Protoco
 	if s != StatusPass {
 		return s, d
 	}
-	if next.Object.ID == first.Object.ID {
-		return StatusFail, fmt.Sprintf("a new box under the name has the old object id %q", first.Object.ID)
+	if next.ObjectID == first.ObjectID {
+		return StatusFail, fmt.Sprintf("a new box under the name has the old object id %q", first.ObjectID)
 	}
 	return StatusPass, "stable for the box, new for a new box"
 }
@@ -309,7 +321,7 @@ func probeObserveAgentLiveness(ctx context.Context, r *runner, hs runtime.Protoc
 	if s != StatusPass {
 		return s, d
 	}
-	if bogus.Agent == "alive" || bogus.Agent == "" {
+	if bogus.Agent != "dead" && bogus.Agent != "unknown" {
 		return StatusFail, fmt.Sprintf("agent for a process the box does not run = %q, want dead or unknown", bogus.Agent)
 	}
 	return StatusPass, "alive for the real process, " + bogus.Agent + " for another"
@@ -328,13 +340,13 @@ func probeObserveInventoryComplete(ctx context.Context, r *runner, hs runtime.Pr
 		defer r.stop(ctx, name)
 	}
 	r.stop(ctx, stopped)
-	want := map[string]observeAnswer{}
+	want := map[string]sessionexec.Observation{}
 	for _, name := range listed {
-		a, s, d := presentObserve(ctx, r, name, "running")
+		o, s, d := presentObserve(ctx, r, name, "running")
 		if s != StatusPass {
 			return s, d
 		}
-		want[name] = a
+		want[name] = o
 	}
 	inv, res := r.inventory(ctx, nil)
 	switch {
@@ -342,40 +354,26 @@ func probeObserveInventoryComplete(ctx context.Context, r *runner, hs runtime.Pr
 		return StatusFail, "inventory returned exit 2 although observe.v1 is declared"
 	case res.err != nil:
 		return StatusFail, res.err.Error()
-	case !*inv.Complete:
+	case !inv.Complete:
 		return StatusFail, "inventory answered complete:false with every box readable"
 	}
-	got := map[string]observeAnswer{}
-	for _, e := range inv.Sessions {
-		got[e.Name] = e
+	for _, n := range inv.Names {
+		if n == stopped {
+			return StatusFail, fmt.Sprintf("inventory lists %s after it was stopped", stopped)
+		}
 	}
-	if _, ok := got[stopped]; ok {
-		return StatusFail, fmt.Sprintf("inventory lists %s after it was stopped", stopped)
-	}
-	for name, a := range want {
-		e, ok := got[name]
+	for name, o := range want {
+		e, ok := inv.Entries[name]
 		switch {
 		case !ok:
-			return StatusFail, fmt.Sprintf("a complete inventory omits the running %s", name)
-		case e.Object == nil || *e.Object != *a.Object:
-			return StatusFail, fmt.Sprintf("inventory object for %s = %+v, want observe's %+v", name, e.Object, *a.Object)
-		case !sameIdentity(e.identity(), a.identity()):
+			return StatusFail, fmt.Sprintf("a complete inventory omits the running %s, or lists it without its state and object", name)
+		case e.Incarnation != o.ObjectID+"@"+o.ObjectCreated:
+			return StatusFail, fmt.Sprintf("inventory object for %s = %q, want observe's %q", name, e.Incarnation, o.ObjectID+"@"+o.ObjectCreated)
+		case !e.IdentityKnown || !sameIdentity(e.Identity, o.Identity):
 			return StatusFail, fmt.Sprintf("inventory identity for %s differs from observe's", name)
 		}
 	}
 	return StatusPass, "lists every started box with observe's object and identity, and no stopped one"
-}
-
-func sameIdentity(a, b map[string]string) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	for _, key := range identityKeys {
-		if a[key] != b[key] {
-			return false
-		}
-	}
-	return true
 }
 
 func probeObserveMetaIsIdentity(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
@@ -387,18 +385,17 @@ func probeObserveMetaIsIdentity(ctx context.Context, r *runner, hs runtime.Proto
 		return s, d
 	}
 	defer r.stop(ctx, name)
-	a, s, d := presentObserve(ctx, r, name, "running")
+	o, s, d := presentObserve(ctx, r, name, "running")
 	if s != StatusPass {
 		return s, d
 	}
-	id := a.identity()
 	for _, key := range identityKeys {
 		res := r.op(ctx, "get-meta", name, key)
 		if !res.ok() {
 			return StatusFail, fmt.Sprintf("get-meta %s failed: %v (exit 2: %v)", key, res.err, res.unsupported)
 		}
-		if got := strings.TrimSpace(res.stdout); got != id[key] {
-			return StatusFail, fmt.Sprintf("get-meta %s = %q, observe identity says %q", key, got, id[key])
+		if got := strings.TrimSpace(res.stdout); got != o.Identity[key] {
+			return StatusFail, fmt.Sprintf("get-meta %s = %q, observe identity says %q", key, got, o.Identity[key])
 		}
 	}
 	const token = "gc-rpp-retoken"
@@ -409,7 +406,7 @@ func probeObserveMetaIsIdentity(ctx context.Context, r *runner, hs runtime.Proto
 	if s != StatusPass {
 		return s, d
 	}
-	if got := after.identity()["GC_INSTANCE_TOKEN"]; got != token {
+	if got := after.Identity["GC_INSTANCE_TOKEN"]; got != token {
 		return StatusFail, fmt.Sprintf("observe token after set-meta = %q, want %q", got, token)
 	}
 	return StatusPass, "get-meta and observe report one identity"
@@ -441,8 +438,8 @@ func probeObserveFreshOnly(ctx context.Context, r *runner, hs runtime.ProtocolIn
 	if s != StatusPass {
 		return s, d
 	}
-	if *after.Object != *before.Object {
-		return StatusFail, fmt.Sprintf("the refused fresh_only start replaced the box: object %+v then %+v", *before.Object, *after.Object)
+	if objectOf(after) != objectOf(before) {
+		return StatusFail, fmt.Sprintf("the refused fresh_only start replaced the box: object %+v then %+v", objectOf(before), objectOf(after))
 	}
 	return StatusPass, "refused, the box untouched"
 }
@@ -466,6 +463,12 @@ func probeObserveKillObject(ctx context.Context, r *runner, hs runtime.ProtocolI
 		}
 		return StatusPass, ""
 	}
+	held := func(name, after string) (Status, string) {
+		if _, s, d := presentObserve(ctx, r, name, "running"); s != StatusPass {
+			return StatusFail, after + " took the box: " + d
+		}
+		return StatusPass, ""
+	}
 	name := r.nextName()
 	if s, d := startOrFail(ctx, r, nil, name, r.agentProcess()); s != StatusPass {
 		return s, d
@@ -483,17 +486,22 @@ func probeObserveKillObject(ctx context.Context, r *runner, hs runtime.ProtocolI
 	if s != StatusPass {
 		return s, d
 	}
-	if s, d := kill(name, *old.Object, "corpse", "gone"); s != StatusPass {
-		return s, d
-	}
-	if _, s, d := presentObserve(ctx, r, name, "running"); s != StatusPass {
-		return StatusFail, "a stale object's kill took the new box: " + d
-	}
-	if s, d := kill(name, *cur.Object, "corpse", "live"); s != StatusPass {
-		return s, d
-	}
-	if s, d := kill(name, *cur.Object, "zombie", "changed"); s != StatusPass {
-		return s, d
+	for _, c := range []struct {
+		obj        observeObject
+		mode, want string
+		what       string
+	}{
+		{objectOf(old), "corpse", "gone", "a stale object's kill"},
+		{observeObject{ID: cur.ObjectID, Created: "gc-rpp-wrong-created"}, "zombie", "gone", "a kill of the current id created at another time"},
+		{objectOf(cur), "corpse", "live", "a corpse kill of a running box"},
+		{objectOf(cur), "zombie", "changed", "a zombie kill of a box whose agent lives"},
+	} {
+		if s, d := kill(name, c.obj, c.mode, c.want); s != StatusPass {
+			return s, c.what + ": " + d
+		}
+		if s, d := held(name, c.what); s != StatusPass {
+			return s, d
+		}
 	}
 	zombie := r.nextName()
 	if s, d := startOrFail(ctx, r, nil, zombie, observeAgentNotRunning); s != StatusPass {
@@ -504,7 +512,7 @@ func probeObserveKillObject(ctx context.Context, r *runner, hs runtime.ProtocolI
 	if s != StatusPass {
 		return s, d
 	}
-	if s, d := kill(zombie, *z.Object, "zombie", "killed"); s != StatusPass {
+	if s, d := kill(zombie, objectOf(z), "zombie", "killed"); s != StatusPass {
 		return s, d
 	}
 	if _, s, d := presentObserve(ctx, r, zombie, "absent"); s != StatusPass {
@@ -551,10 +559,10 @@ func probeObserveFaults(ctx context.Context, r *runner, hs runtime.ProtocolInfo)
 	}
 	defer r.stop(ctx, name)
 	fault := []string{"GC_RPP_FAULT=unavailable"}
-	if a, res := r.observe(ctx, fault, name); res.ok() && (a.State == "absent" || a.State == "running" || a.State == "dead") {
-		return StatusFail, fmt.Sprintf("observe under a backend fault answered %q, want unknown or a failure", a.State)
+	if o, res := r.observe(ctx, fault, name); res.ok() {
+		return StatusFail, fmt.Sprintf("observe under a backend fault answered %q, want unknown or a failure", o.State)
 	}
-	if inv, res := r.inventory(ctx, fault); res.ok() && *inv.Complete {
+	if inv, res := r.inventory(ctx, fault); res.ok() && inv.Complete {
 		return StatusFail, "inventory under a backend fault answered complete, want complete:false or a failure"
 	}
 	if hs.Has(runtime.ProtocolCapabilityReportAttachment) {
@@ -608,8 +616,8 @@ func probeObserveCityScoped(ctx context.Context, r *runner, hs runtime.ProtocolI
 	if !res.ok() {
 		return StatusFail, fmt.Sprintf("inventory under another city failed: %v (exit 2: %v)", res.err, res.unsupported)
 	}
-	for _, e := range inv.Sessions {
-		if e.Name == name {
+	for _, n := range inv.Names {
+		if n == name {
 			return StatusFail, fmt.Sprintf("%s, started under city A, is listed under city B", name)
 		}
 	}
@@ -617,8 +625,8 @@ func probeObserveCityScoped(ctx context.Context, r *runner, hs runtime.ProtocolI
 	if !res.ok() {
 		return StatusFail, fmt.Sprintf("inventory under its own city failed: %v", res.err)
 	}
-	for _, e := range mine.Sessions {
-		if e.Name == name {
+	for _, n := range mine.Names {
+		if n == name {
 			return StatusPass, "listed under its own city only"
 		}
 	}
@@ -641,17 +649,12 @@ func probeObserveInventoryActivity(ctx context.Context, r *runner, hs runtime.Pr
 	if !res.ok() {
 		return StatusFail, fmt.Sprintf("inventory failed: %v (exit 2: %v)", res.err, res.unsupported)
 	}
-	for _, e := range inv.Sessions {
-		if e.Name != name {
-			continue
-		}
-		if e.LastActivity == nil {
-			return StatusFail, "inventory last_activity is null for a running session although report-activity is declared"
-		}
-		if _, err := time.Parse(time.RFC3339, *e.LastActivity); err != nil {
-			return StatusFail, fmt.Sprintf("inventory last_activity %q is not RFC3339", *e.LastActivity)
-		}
-		return StatusPass, "last_activity on every running session"
+	e, ok := inv.Entries[name]
+	switch {
+	case !ok:
+		return StatusFail, fmt.Sprintf("inventory omits the running %s, or lists it without its state and object", name)
+	case !e.ActivityKnown:
+		return StatusFail, "inventory last_activity is null or not RFC3339 for a running session although report-activity is declared"
 	}
-	return StatusFail, fmt.Sprintf("inventory omits the running %s", name)
+	return StatusPass, "last_activity on every running session"
 }

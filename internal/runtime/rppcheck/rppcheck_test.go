@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/runtime/runtimecontract"
+	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/reference"
 )
 
 // writeScript creates an executable shell script in dir and returns its path.
@@ -671,12 +671,12 @@ func TestRun_RequireNudgeStartFailureSkipsWithRequiredName(t *testing.T) {
 // declares observe.v1, with bodies overriding its ops.
 func observeReference(t *testing.T, bodies map[string]string) string {
 	t.Helper()
-	all := runtimecontract.ReferenceBodies()
+	all := reference.Bodies()
 	for op, body := range bodies {
 		all[op] = body
 	}
 	path := filepath.Join(t.TempDir(), "golden")
-	if err := os.WriteFile(path, []byte(runtimecontract.ReferenceScript(t.TempDir(), all)), 0o755); err != nil {
+	if err := os.WriteFile(path, []byte(reference.Script(t.TempDir(), all)), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -698,16 +698,18 @@ func TestRun_ObserveV1Smoke(t *testing.T) {
 		}
 	}
 	for check, bodies := range map[string]map[string]string{
-		observeCheck:       {"observe": `exit 2`},
-		inventoryCheck:     {"inventory": `echo '{"complete":true,"sessions":[]}'`},
-		killObjectCheck:    {"kill-object": `cat >/dev/null; echo killed`},
-		observeAbsentCheck: {"stop": `if [ -d "$box" ]; then : > "$box/stopped"; fi`, "is-running": `if [ -d "$box" ] && [ ! -f "$box/stopped" ]; then echo true; else echo false; fi`},
+		observeCheck:                       {"observe": `exit 2`},
+		observeCheck + " (no object)":      {"observe": `cat >/dev/null; if [ -d "$box" ]; then echo '{"state":"running","identity":null}'; else echo '{"state":"absent"}'; fi`},
+		inventoryCheck + " (not complete)": {"inventory": `printf '{"complete":false,"sessions":[{"name":"%s","state":"running","object":{"id":"a","created":"b"}}]}' "$(basename "$B"/*)"`},
+		inventoryCheck:                     {"inventory": `echo '{"complete":true,"sessions":[]}'`},
+		killObjectCheck:                    {"kill-object": `cat >/dev/null; echo killed`},
+		observeAbsentCheck:                 {"stop": `if [ -d "$box" ]; then : > "$box/stopped"; fi`, "is-running": `if [ -d "$box" ] && [ ! -f "$box/stopped" ]; then echo true; else echo false; fi`},
 	} {
 		res, err := Run(context.Background(), observeReference(t, bodies), Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if c := findCheck(t, res, check); c.Status != StatusFail {
+		if c := findCheck(t, res, strings.SplitN(check, " (", 2)[0]); c.Status != StatusFail {
 			t.Errorf("mutant for %s: %s (%s), want FAIL", check, c.Status, c.Detail)
 		}
 	}

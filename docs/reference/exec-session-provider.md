@@ -207,7 +207,7 @@ Capabilities:
 | `proc.stream` | Reserved (connection-plane family, parallel to `env.*`): declares the persistent bidirectional `stream` connection op (ACP over a stream, tmux pipe-pane). Sets `CanStream`. The `stream` op and its capability-gated conformance entry land with the connection rewrite. |
 | `tty.attach` | Reserved: declares an interactive PTY `attach` connection op. Sets `CanAttachTTY`. |
 | `observe.v1` | The script keeps the observe.v1 profile reconciler v2 reads: the `observe`, `inventory` and `kill-object` ops, `fresh_only` starts and strict exits (see [observe.v1](#observev1-reconciler-v2)). With `report-attachment`, the script is v2-ready. |
-| `conformance-faults` | Conformance only: under `GC_RPP_FAULT=unavailable`, `observe`, `inventory` and `is-attached` act as if the backend were unreachable, so `gc runtime conformance` can check a fault reads unknown. |
+| `conformance-faults` | Conformance only: under `GC_RPP_FAULT=unavailable` the script's backend calls fail, so `observe`, `inventory` and `is-attached` take their real failure path and `gc runtime conformance` can check a fault reads unknown. Inject at the backend call (for example, shadow the backend's CLI with a shell function that fails), not with an early exit: an early exit hides an op that swallows a failed backend read. |
 | `city-scoped` | Conformance only: the script scopes its boxes by `GC_EXEC_CITY_PATH`, which `gc runtime conformance` then checks. |
 
 A successful handshake is cached for the provider's life. A failed one is
@@ -672,8 +672,9 @@ script to:
    If the backend's view is partial or stale, answer `unknown` (or set
    `complete: false`).
 8. Answer `is-attached` `true` when any interactive client is attached by any
-   means, not only through gc; exit non-zero when it cannot tell. Only
-   `true` or `false` is an answer.
+   means, not only through gc (screen's multiuser `Multi, attached`
+   included); exit non-zero when it cannot tell, including when the backend
+   cannot be read. Only `true` or `false` is an answer.
 9. Serialize ops per name (for example with `flock`): `start`, `stop`,
    `observe` and `kill-object` for one name may race. A `fresh_only` start
    checks and creates under the lock.
@@ -701,9 +702,29 @@ exactly one JSON object:
 |---|---|---|
 | `state` | `running`, `dead`, `absent`, `unknown` | `dead`: the name is held but nothing runs in the box (an exited container, a kept pane). `absent`: rule 7. |
 | `object` | `{id, created}`, non-empty strings | Required for `running` and `dead`. Byte-identical across calls for one box; a new `id` for every new box under the name. |
-| `agent` | `alive`, `dead`, `unknown` | For `running` with process names on stdin. Omitted or `unknown` reads alive. A `dead` box with an `alive` agent is a contradiction, read as unknown. |
+| `agent` | `alive`, `dead`, `unknown` | For `running` with process names on stdin; see [Agent liveness](#agent-liveness). Omitted or `unknown` reads alive. A `dead` box with an `alive` agent is a contradiction, read as unknown. |
 | `agent_pid` | string, optional | The agent's pid, when the backend knows it. |
 | `identity` | object of the identity keys, or `null` | `{}` is a box with no gc identity (one an operator made); `null` is identity not yet readable (rule 5). |
+
+#### Agent liveness
+
+`agent: dead` is a verdict gc acts on: a running box whose agent is dead is a
+zombie, and v2 recycles it with `kill-object`. Answer `dead` only when sure:
+
+- Look at every descendant of the box's root process, not only its direct
+  children: the agent often runs under a shell wrapper.
+- Match a process the way gc's own process table does: its command name's
+  base name, or argv[0]'s base name, is one of the names; or argv[0] is an
+  interpreter (`node`, `bun`, `npx`, `deno`) and the first argument that is
+  not a flag or a runner subcommand (`run`, `exec`, `x`) has one of the
+  names as its base name, with or without its extension. The command name
+  alone is not enough: the kernel truncates it to 15 characters, and Node 25
+  names its main thread `node-MainThread`.
+- Read one process snapshot (for example `ps -eo pid=,ppid=,args=` and
+  `ps -eo pid=,comm=`) for every box, not one probe per box.
+- When the snapshot cannot be read, or the box has no process names, omit
+  `agent` (unknown): gc then does not recycle the box, and `kill-object`'s
+  zombie mode re-checks the agent before it kills.
 
 A non-zero exit, a timeout, malformed or oversized output (over 1 MiB),
 `unknown`, or a present state without its object all read as unknown, never
@@ -733,10 +754,15 @@ every name the backend holds for this city, live or dead:
   `report-activity`.
 - An entry whose `name` cannot be read fails the whole answer; an entry with
   a readable name and malformed attributes is listed with them unknown.
-- **Keep `inventory` cheap.** On a v2-ready script every listing call (gc's
-  inventory pass, `gc stop`, status and the API) runs `inventory`; gc does
-  not call `list-running` there. Answer from one backend query for the whole
-  city, with no per-box round trip. `list-running` stays for older gc.
+- A name listed twice fails the whole answer: gc cannot tell which box is
+  the name's, so it cannot prove the listing complete.
+- **Keep `inventory` cheap.** On a v2-ready script every listing call runs
+  `inventory`: gc's inventory pass (every patrol interval, 15-30 seconds on
+  a typical city, and on every wake), `gc stop`, status and the API; gc does
+  not call `list-running` there. The inventory pass gives it at most 10
+  seconds, a listing call 30. Answer from one backend query and one process
+  snapshot for the whole city, with no per-box round trip. `list-running`
+  stays for older gc.
 
 ### `kill-object <name>`
 
@@ -812,5 +838,6 @@ in the start config's `env` (see [Session environment](#session-environment)).
 See `contrib/session-scripts/` for maintained implementations:
 
 - **gc-session-screen** — GNU screen backend, v2-ready (`observe.v1`,
-  `report-attachment`, locality `local`). Dependencies: `screen`, `jq`,
-  `bash`, `flock`, `pgrep`, `ps`.
+  `report-attachment`, `city-scoped`, locality `local`). Each city gets a
+  private screen socket directory under the script's state directory.
+  Dependencies: `bash`, `screen`, `jq`, `flock`, `ps`, `awk`, `cksum`.

@@ -6,7 +6,6 @@ go_library(
         "catalog.go",
         "observe.go",
         "probes.go",
-        "reference.go",
         "report.go",
         "runner.go",
     ],
@@ -25,6 +24,7 @@ go_test(
         "lockstep_test.go",
         "runner_test.go",
         "screen_reference_test.go",
+        "screen_script_test.go",
         "testenv_import_test.go",
     ],
     data = glob(
@@ -32,10 +32,15 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
+        "//contrib:all_files",
         "//internal/runtime/runtimetest:conformance.go",
     ],
     embed = [":runtimecontract"],
-    deps = ["//internal/testenv"],
+    deps = [
+        "//internal/bazeltest",
+        "//internal/runtime/runtimecontract/reference",
+        "//internal/testenv",
+    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

@@ -55,7 +55,7 @@ go_test(
         "//internal/citylayout",
         "//internal/execenv",
         "//internal/runtime",
-        "//internal/runtime/runtimecontract",
+        "//internal/runtime/runtimecontract/reference",
         "//internal/runtime/runtimetest",
         "//internal/testenv",
         "//internal/testutil",

@@ -85,6 +85,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	out, code, err := s.do(op, name, rest, stdin)
 	if err != nil {
 		fmt.Fprintf(stderr, "fakeruntime: %s %s: %v\n", op, name, err) //nolint:errcheck // best-effort stderr
+		if code != 0 {
+			return code // a contract exit code (73: a fresh_only start over a held name)
+		}
 		return 1
 	}
 	if out != "" {

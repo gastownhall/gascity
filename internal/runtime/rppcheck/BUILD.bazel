@@ -5,7 +5,10 @@ go_library(
     srcs = ["rppcheck.go"],
     importpath = "github.com/gastownhall/gascity/internal/runtime/rppcheck",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/runtime"],
+    deps = [
+        "//internal/runtime",
+        "//internal/runtime/exec",
+    ],
 )
 
 go_test(
@@ -16,7 +19,7 @@ go_test(
     ],
     embed = [":rppcheck"],
     deps = [
-        "//internal/runtime/runtimecontract",
+        "//internal/runtime/runtimecontract/reference",
         "//internal/testenv",
     ],
 )

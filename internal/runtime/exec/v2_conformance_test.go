@@ -9,12 +9,12 @@ import (
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
-	"github.com/gastownhall/gascity/internal/runtime/runtimecontract"
+	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/reference"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
 )
 
 // TestExecV2Conformance runs the in-tree provider contract against the
-// exec provider over the runtimecontract golden reference, which declares
+// exec provider over the runtimecontract golden reference (runtimecontract/reference), which declares
 // observe.v1: the same executable passes the wire catalog
 // (runtimecontract) and RunProviderTests, so the observe group's provider
 // cases (absent after stop, a refused FreshOnly start, the attested
@@ -22,7 +22,7 @@ import (
 func TestExecV2Conformance(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "golden")
-	if err := os.WriteFile(script, []byte(runtimecontract.ReferenceScript(filepath.Join(dir, "state"), runtimecontract.ReferenceBodies())), 0o755); err != nil {
+	if err := os.WriteFile(script, []byte(reference.Script(filepath.Join(dir, "state"), reference.Bodies())), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(filepath.Join(dir, "state"), 0o755); err != nil {

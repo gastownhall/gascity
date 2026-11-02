@@ -11,11 +11,22 @@ for the protocol specification.
 
 ### gc-session-screen
 
-GNU screen backend. Creates screen sessions, sends keystrokes for nudge
-and interrupt, captures output via `hardcopy`, and stores metadata in
-sidecar files.
+GNU screen backend and the reference observe.v1 implementation: it is
+v2-ready (`observe.v1`, `report-attachment`), `city-scoped` and `local`, and
+`gc runtime conformance gc-session-screen` passes. Creates screen sessions,
+sends keystrokes for nudge and interrupt to the exact `<pid>.<name>`
+session, captures output via `hardcopy`, and stores each box's identity and
+metadata in 0600 sidecar files. Each city gets its own private screen
+socket directory, so its listing holds only the boxes gc started for it.
 
-**Dependencies:** `screen`, `jq`, `bash`
+State lives in `GC_EXEC_STATE_DIR`, else `$XDG_RUNTIME_DIR/gc-session-screen`,
+else `${TMPDIR:-/tmp}/gc-session-screen-<uid>` (a 0700 directory the script
+refuses to use if it is a symlink or someone else's). Keep it short: a
+screen socket path must fit 107 bytes. Boxes started by an earlier version
+live in the user's default screen directory and are not listed: stop them
+before upgrading.
+
+**Dependencies:** `bash`, `screen`, `jq`, `flock`, `ps`, `awk`, `cksum`
 
 **Usage:**
 
@@ -24,10 +35,10 @@ export GC_SESSION=exec:/path/to/contrib/session-scripts/gc-session-screen
 gc start my-city
 ```
 
-**Parity with tmux provider:** The script implements the full 13-operation
-protocol but does not yet include Gas Town theming (status bar colors,
-role emoji, keybindings) or lifecycle features (remain-on-exit, auto-respawn,
-zombie detection). See comments in the script header for the full gap list.
+**Parity with tmux provider:** The script implements the protocol,
+including observe.v1, but does not include Gas Town theming (status bar
+colors, role emoji, keybindings) or remain-on-exit and auto-respawn. See the
+script header.
 
 ### gc-session-k8s (reference — prefer native provider)
 

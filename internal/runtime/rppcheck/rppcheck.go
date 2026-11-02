@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 )
 
 // Status is the outcome of a single conformance check.
@@ -196,7 +197,10 @@ func (c *checker) runOpTimeout(ctx context.Context, timeout time.Duration, stdin
 
 // knownCapabilities maps declared capability strings to the op each one
 // promises. Unknown declared strings are ignored (forward compatibility,
-// RUNTIME-RPP-008).
+// RUNTIME-RPP-008). The conformance-only tokens (conformance-faults,
+// city-scoped) promise no op of their own, so they map to "": they are
+// listed only so the handshake check does not report them as unknown, and
+// `gc runtime conformance` checks the behavior they claim.
 var knownCapabilities = map[string]string{
 	runtime.ProtocolCapabilityReportAttachment: "is-attached",
 	runtime.ProtocolCapabilityReportActivity:   "get-last-activity",
@@ -208,12 +212,11 @@ var knownCapabilities = map[string]string{
 // The observe.v1 smoke checks (`gc runtime conformance` gates the profile
 // in full; see internal/runtime/runtimecontract).
 const (
-	observeCheck        = "capability observe.v1: observe"
-	inventoryCheck      = "capability observe.v1: inventory"
-	killObjectCheck     = "capability observe.v1: kill-object"
-	observeAbsentCheck  = "capability observe.v1: observe after stop"
-	observeBogusObject  = `{"object":{"id":"gc-rpp-check-none","created":"0"},"mode":"corpse"}`
-	observeAnswerFields = "state, object"
+	observeCheck       = "capability observe.v1: observe"
+	inventoryCheck     = "capability observe.v1: inventory"
+	killObjectCheck    = "capability observe.v1: kill-object"
+	observeAbsentCheck = "capability observe.v1: observe after stop"
+	observeBogusObject = `{"object":{"id":"gc-rpp-check-none","created":"0"},"mode":"corpse"}`
 )
 
 const handshakeCheck = "protocol handshake"
@@ -409,8 +412,8 @@ func (c *checker) checkSessionOps(ctx context.Context, name string) {
 	}
 }
 
-// checkObserve runs `observe <name>` and requires one well-formed answer
-// in state want, with the box's object when it is present.
+// checkObserve runs `observe <name>` and requires the answer gc accepts
+// (exec.ParseObserve) in state want, with the box's object when present.
 func (c *checker) checkObserve(ctx context.Context, check, name, want string) {
 	res := c.runOp(ctx, nil, "observe", name)
 	switch {
@@ -421,29 +424,19 @@ func (c *checker) checkObserve(ctx context.Context, check, name, want string) {
 		c.record(check, StatusFail, res.err.Error())
 		return
 	}
-	var a struct {
-		State  string `json:"state"`
-		Object *struct {
-			ID      string `json:"id"`
-			Created string `json:"created"`
-		} `json:"object"`
-	}
-	if err := json.Unmarshal([]byte(res.stdout), &a); err != nil {
-		c.record(check, StatusFail, fmt.Sprintf("observe answer is not one JSON object with %s: %v", observeAnswerFields, err))
-		return
-	}
+	o, err := sessionexec.ParseObserve([]byte(res.stdout))
 	switch {
-	case a.State != want:
-		c.record(check, StatusFail, fmt.Sprintf("observe state %q, want %q", a.State, want))
-	case want != "absent" && (a.Object == nil || a.Object.ID == "" || a.Object.Created == ""):
-		c.record(check, StatusFail, "observe answered a present box without its object id and created time")
+	case err != nil:
+		c.record(check, StatusFail, fmt.Sprintf("observe answer gc would read as unknown: %v", err))
+	case o.State != want:
+		c.record(check, StatusFail, fmt.Sprintf("observe state %q, want %q", o.State, want))
 	default:
 		c.record(check, StatusPass, "")
 	}
 }
 
-// checkInventory runs `inventory` and requires a complete flag and the
-// running session listed.
+// checkInventory runs `inventory` and requires the answer gc accepts
+// (exec.ParseInventory), complete, listing the running session.
 func (c *checker) checkInventory(ctx context.Context, name string) {
 	res := c.runOp(ctx, nil, "inventory")
 	switch {
@@ -454,18 +447,17 @@ func (c *checker) checkInventory(ctx context.Context, name string) {
 		c.record(inventoryCheck, StatusFail, res.err.Error())
 		return
 	}
-	var inv struct {
-		Complete *bool `json:"complete"`
-		Sessions []struct {
-			Name string `json:"name"`
-		} `json:"sessions"`
-	}
-	if err := json.Unmarshal([]byte(res.stdout), &inv); err != nil || inv.Complete == nil {
-		c.record(inventoryCheck, StatusFail, fmt.Sprintf("inventory answer is not one JSON object with complete and sessions: %v", err))
+	inv, err := sessionexec.ParseInventory([]byte(res.stdout))
+	switch {
+	case err != nil:
+		c.record(inventoryCheck, StatusFail, fmt.Sprintf("inventory answer gc would refuse: %v", err))
+		return
+	case !inv.Complete:
+		c.record(inventoryCheck, StatusFail, "inventory answered complete:false with every box readable")
 		return
 	}
-	for _, s := range inv.Sessions {
-		if s.Name == name {
+	for _, n := range inv.Names {
+		if n == name {
 			c.record(inventoryCheck, StatusPass, "")
 			return
 		}

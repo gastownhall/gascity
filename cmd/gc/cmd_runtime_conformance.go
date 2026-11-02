@@ -118,11 +118,23 @@ any required requirement fails.`,
 	return cmd
 }
 
-// v2ReadyLine says whether the executable's handshake declares what
-// reconciler v2 needs from an exec runtime, and what it lacks.
+// v2ReadyLine says whether the executable is fit for reconciler v2, and
+// why not: the capabilities its handshake lacks, and the requirements it
+// failed.
 func v2ReadyLine(report runtimecontract.Report) string {
 	if report.V2Ready {
 		return "v2-ready: yes"
 	}
-	return fmt.Sprintf("v2-ready: no (missing %s)", strings.Join(report.V2Missing, ", "))
+	var why []string
+	if len(report.V2Missing) > 0 {
+		why = append(why, "missing "+strings.Join(report.V2Missing, ", "))
+	}
+	if len(report.V2Failed) > 0 {
+		failed := make([]string, len(report.V2Failed))
+		for i, c := range report.V2Failed {
+			failed[i] = string(c)
+		}
+		why = append(why, "failed "+strings.Join(failed, ", "))
+	}
+	return fmt.Sprintf("v2-ready: no (%s)", strings.Join(why, "; "))
 }
