@@ -230,8 +230,8 @@ func TestRowMetadataDefersAfterItsPersistentRefusal(t *testing.T) {
 
 // Kills the launch and close refresh drifting from legacy's (SESS-713..715,
 // SESS-701): wake_mode, command, the provider family and resume keys
-// follow the resolution, an empty resolved value never clobbers a stored
-// one; continuation_epoch and a session key the provider takes are
+// follow the resolution, an empty or absent resolution never clobbers a
+// stored one; continuation_epoch and a session key the provider takes are
 // backfilled, a stored key kept; a stale close clears; a typeless row is
 // repaired; and work_dir is backfilled, alias-guarded for a legacy
 // identity and never under its running session.
@@ -370,5 +370,71 @@ func TestAliasTakenReadsTheRowsLeg(t *testing.T) {
 				t.Fatalf("aliasTaken = %v, want %v", got, tc.taken)
 			}
 		})
+	}
+}
+
+// a7ProviderProjection is A7's launch refresh of a converged worker seat
+// whose provider-derived keys are stored, under resolved: it returns the
+// patch and the row's keys with it applied.
+func a7ProviderProjection(stored map[string]string, resolved *config.ResolvedProvider) (session.MetadataPatch, map[string]string) {
+	tp := TemplateParams{TemplateName: "worker", InstanceName: "worker-2", PoolSlot: 2, WakeMode: "fresh", Command: "run-worker", WorkDir: "/w", ResolvedProvider: resolved}
+	seat := session.Info{Template: "worker", SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "2", AgentName: "worker-2", Type: session.BeadType, MetadataState: "asleep"}
+	raw := rowRefreshKeys{"wake_mode": "fresh", "continuation_epoch": "1", "command": "run-worker", "session_key": "k-1", "work_dir": "/w"}
+	maps.Copy(raw, stored)
+	id := desiredRowIdentity(identityCity(), tp, seat, raw)
+	got := maps.Clone(map[string]string(raw))
+	maps.Copy(got, id.Meta)
+	return id.Meta, got
+}
+
+// Kills A7's launch refresh keeping a previous provider's family and
+// resume keys a successful resolution leaves empty (#8539): the row lands
+// on the same projection as legacy's sync, an explicit empty clearing
+// each stale key.
+func TestDesiredRowLaunchRefreshClearsMissingProviderFields(t *testing.T) {
+	for _, tc := range providerProjectionCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			patch, got := a7ProviderProjection(tc.stored, tc.resolved)
+			checkProviderProjection(t, tc, got)
+			for _, k := range providerProjectionKeys {
+				if v, ok := patch[k]; tc.stored[k] != tc.want[k] && (!ok || v != tc.want[k]) {
+					t.Errorf("patch[%s] = (%q, %v), want an explicit %q", k, v, ok, tc.want[k])
+				}
+			}
+		})
+	}
+}
+
+// A successful switch from a wrapped codex provider to the builtin-named
+// claude provider must clear the old provider's projection and resume keys,
+// not leave them pinned (#8539).
+func TestRefreshLaunchKeysProviderSwitchClearsStaleProjection(t *testing.T) {
+	raw := rowRefreshKeys{
+		"provider":         "codex-wrapped",
+		"provider_kind":    "codex",
+		"builtin_ancestor": "codex",
+		"resume_command":   "codex resume {{.SessionKey}}",
+		"command":          "codex",
+	}
+	tp := TemplateParams{
+		Command: "claude",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:            "claude",
+			BuiltinAncestor: "claude",
+			ResumeFlag:      "--resume",
+			ResumeStyle:     "flag",
+		},
+	}
+	m := session.MetadataPatch{}
+	refreshLaunchKeys(m, tp, raw)
+	got := maps.Clone(map[string]string(raw))
+	maps.Copy(got, m)
+	if got["provider"] != "claude" {
+		t.Fatalf("provider = %q, want claude", got["provider"])
+	}
+	for _, k := range []string{"provider_kind", "builtin_ancestor", "resume_command"} {
+		if got[k] == raw[k] {
+			t.Errorf("%s = %q after switch to claude, want it overwritten or cleared", k, got[k])
+		}
 	}
 }

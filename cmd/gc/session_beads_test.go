@@ -5480,6 +5480,143 @@ func TestSyncSessionBeads_ProjectsSessionIDFlag(t *testing.T) {
 	}
 }
 
+// providerProjectionKeys are the provider-derived keys a successful
+// resolution projects onto a session bead: the provider name and the six
+// family/resume fields.
+var providerProjectionKeys = []string{"provider", "provider_kind", "builtin_ancestor", "resume_flag", "resume_style", "resume_command", "session_id_flag"}
+
+// providerProjectionCase is one reconciliation of stored provider-derived
+// metadata against a resolution; want holds every providerProjectionKeys
+// value afterwards ("" for a cleared or absent key).
+type providerProjectionCase struct {
+	name     string
+	stored   map[string]string
+	resolved *config.ResolvedProvider
+	want     map[string]string
+	// family, when set, is the provider family the reconciled metadata reads.
+	family string
+}
+
+// codexWrappedMetadata is a session stamped by a codex-family wrapper.
+func codexWrappedMetadata() map[string]string {
+	return map[string]string{
+		"provider": "codex-wrapped", "provider_kind": "codex", "builtin_ancestor": "codex",
+		"resume_flag": "resume", "resume_style": "subcommand", "resume_command": "codex resume {{.SessionKey}}",
+	}
+}
+
+// providerProjectionCases are shared by the existing-session sync and the
+// A7 row-metadata reconciliation tests: both paths must land on the same
+// projection.
+func providerProjectionCases() []providerProjectionCase {
+	return []providerProjectionCase{
+		{
+			// AC-1: a codex-family wrapper switched to claude, whose family
+			// projection is empty because its ancestor is its own name.
+			name:   "codex wrapper to builtin-named claude",
+			stored: codexWrappedMetadata(),
+			resolved: &config.ResolvedProvider{
+				Name: "claude", BuiltinAncestor: "claude",
+				ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--session-id",
+			},
+			want: map[string]string{
+				"provider": "claude", "provider_kind": "", "builtin_ancestor": "",
+				"resume_flag": "--resume", "resume_style": "flag", "resume_command": "", "session_id_flag": "--session-id",
+			},
+			family: "claude",
+		},
+		{
+			// AC-1: a switch to a provider with no family or resume fields.
+			name: "switch to a provider without family or resume fields",
+			stored: map[string]string{
+				"provider": "my-claude", "provider_kind": "claude", "builtin_ancestor": "claude",
+				"resume_flag": "--resume", "resume_style": "flag", "resume_command": "claude --resume {{.SessionKey}}", "session_id_flag": "--session-id",
+			},
+			resolved: &config.ResolvedProvider{Name: "plain"},
+			want: map[string]string{
+				"provider": "plain", "provider_kind": "", "builtin_ancestor": "",
+				"resume_flag": "", "resume_style": "", "resume_command": "", "session_id_flag": "",
+			},
+		},
+		{
+			// AC-1: the reverse switch drops claude's session_id_flag.
+			name: "claude to codex wrapper drops session_id_flag",
+			stored: map[string]string{
+				"provider": "claude", "resume_flag": "--resume", "resume_style": "flag", "session_id_flag": "--session-id",
+			},
+			resolved: &config.ResolvedProvider{
+				Name: "codex-wrapped", BuiltinAncestor: "codex", ResumeCommand: "codex resume {{.SessionKey}}",
+			},
+			want: map[string]string{
+				"provider": "codex-wrapped", "provider_kind": "codex", "builtin_ancestor": "codex",
+				"resume_flag": "", "resume_style": "", "resume_command": "codex resume {{.SessionKey}}", "session_id_flag": "",
+			},
+			family: "codex",
+		},
+	}
+}
+
+// checkProviderProjection fails t unless meta holds tc's projection.
+func checkProviderProjection(t *testing.T, tc providerProjectionCase, meta map[string]string) {
+	t.Helper()
+	for _, k := range providerProjectionKeys {
+		if meta[k] != tc.want[k] {
+			t.Errorf("%s = %q, want %q", k, meta[k], tc.want[k])
+		}
+	}
+	if tc.family != "" {
+		if got := session.ProviderFamilyFromMetadata(meta, ""); got != tc.family {
+			t.Errorf("ProviderFamilyFromMetadata = %q, want %q", got, tc.family)
+		}
+	}
+}
+
+// syncProviderProjection creates a session bead, overwrites its
+// provider-derived keys with stored, and runs one existing-session sync
+// under resolved. It returns the bead's metadata and the sync's writes.
+func syncProviderProjection(t *testing.T, stored map[string]string, resolved *config.ResolvedProvider) (map[string]string, int) {
+	t.Helper()
+	cs := &countingStore{Store: beads.NewMemStore()}
+	clk := &clock.Fake{Time: time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	_ = sp.Start(context.TODO(), "worker", runtime.Config{Command: "run-worker"})
+	ds := map[string]TemplateParams{"worker": {TemplateName: "worker", Command: "run-worker"}}
+	var stderr bytes.Buffer
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	created := allSessionBeads(t, cs)
+	if len(created) != 1 {
+		t.Fatalf("expected 1 session bead, got %d", len(created))
+	}
+	seed := make(map[string]string, len(providerProjectionKeys))
+	for _, k := range providerProjectionKeys {
+		seed[k] = stored[k]
+	}
+	if err := cs.SetMetadataBatch(created[0].ID, seed); err != nil {
+		t.Fatalf("SetMetadataBatch(seed): %v", err)
+	}
+	ds["worker"] = TemplateParams{TemplateName: "worker", Command: "run-worker", ResolvedProvider: resolved}
+	writesBefore := cs.writes
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+	return allSessionBeads(t, cs)[0].Metadata, cs.writes - writesBefore
+}
+
+// TestSyncSessionBeads_ProviderProjectionClearsMissingFields is the #8539
+// guard: a successful resolution is authoritative for the family and resume
+// fields, so a field the resolved provider leaves empty clears the previous
+// provider's stale value instead of staying pinned to it.
+func TestSyncSessionBeads_ProviderProjectionClearsMissingFields(t *testing.T) {
+	for _, tc := range providerProjectionCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			meta, _ := syncProviderProjection(t, tc.stored, tc.resolved)
+			checkProviderProjection(t, tc, meta)
+		})
+	}
+}
+
 func TestSyncSessionBeadsWithSnapshot_RefreshesMissingNamedSessionFromStore(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
