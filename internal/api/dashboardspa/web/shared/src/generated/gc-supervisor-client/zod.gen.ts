@@ -595,9 +595,11 @@ export const zConvoyAddInputBody = z.object({
 });
 
 export const zConvoyCheckResponse = z.object({
+    child_ids: z.array(z.string()).nullish(),
     closed: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     complete: z.boolean(),
     convoy_id: z.string(),
+    dangling_tracks: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
     total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
@@ -3525,6 +3527,7 @@ export const zStatusAgentDetail = z.object({
     running: z.boolean(),
     scale_label: z.string().optional(),
     scope: z.string(),
+    session_id: z.string().optional(),
     session_name: z.string().optional(),
     suspended: z.boolean()
 });
@@ -11152,6 +11155,7 @@ export const zGetV0CityByCityNameSessionByIdPath = z.object({
 export const zGetV0CityByCityNameSessionByIdQuery = z.object({
     peek: z.boolean().optional(),
     peek_lines: z.coerce.bigint().gte(BigInt(0)).lte(BigInt(10000)).optional(),
+    peek_strict: z.boolean().optional(),
     exact_id: z.boolean().optional()
 });
 

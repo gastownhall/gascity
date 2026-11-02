@@ -199,7 +199,7 @@ calls = 4
 [[count]]
 path = "cmd/gc/cmd_beads_test.go"
 resource = "http_test_server"
-calls = 8
+calls = 10
 
 [[count]]
 path = "cmd/gc/cmd_citystatus_test.go"
@@ -239,7 +239,7 @@ calls = 1
 [[count]]
 path = "cmd/gc/cmd_convoy_test.go"
 resource = "http_test_server"
-calls = 8
+calls = 10
 
 [[count]]
 path = "cmd/gc/cmd_doctor_test.go"
@@ -1199,6 +1199,21 @@ resource = "cwd"
 calls = 6
 
 [[count]]
+path = "cmd/gc/route_equivalence_beads_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "cmd/gc/route_equivalence_convoy_test.go"
+resource = "http_test_server"
+calls = 2
+
+[[count]]
+path = "cmd/gc/route_equivalence_rigstatus_mail_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
 path = "cmd/gc/route_equivalence_session_list_test.go"
 resource = "http_test_server"
 calls = 2
@@ -1620,7 +1635,7 @@ calls = 6
 [[count]]
 path = "internal/api/client_test.go"
 resource = "http_test_server"
-calls = 67
+calls = 74
 
 [[count]]
 path = "internal/api/client_waits_test.go"

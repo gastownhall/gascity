@@ -1220,6 +1220,10 @@ export type ConvoyAddInputBody = {
 
 export type ConvoyCheckResponse = {
     /**
+     * IDs of the child beads counted in total, in membership order (created_at, then id); a dangling track appears as the id it names. Omitted when total is 0.
+     */
+    child_ids?: Array<string> | null;
+    /**
      * Closed child bead count.
      */
     closed: number;
@@ -1231,6 +1235,10 @@ export type ConvoyCheckResponse = {
      * Convoy ID.
      */
     convoy_id: string;
+    /**
+     * Child beads counted in total whose tracks dependency names a bead that cannot be resolved. Omitted when 0.
+     */
+    dangling_tracks?: number;
     /**
      * Total child bead count.
      */
@@ -5992,6 +6000,10 @@ export type StatusAgentDetail = {
      * city or rig.
      */
     scope: string;
+    /**
+     * Bead ID of the session the row's runtime session resolved to. Omitted when no open session bead records that runtime session (always while the city is suspended, when no bead store is read).
+     */
+    session_id?: string;
     /**
      * tmux session name CLI drain-ops key on.
      */
@@ -19798,13 +19810,17 @@ export type GetV0CityByCityNameSessionByIdData = {
     };
     query?: {
         /**
-         * Include last output preview.
+         * Include a best-effort last output preview of a running active session. See peek_strict for gc session peek's contract.
          */
         peek?: boolean;
         /**
-         * Number of lines to include in the last output preview when peek=true. Defaults to 5.
+         * Number of lines to include in the last output preview when peek=true. Defaults to 5. With peek_strict=true it is passed to the runtime as given, and 0 asks for the runtime's full capture.
          */
         peek_lines?: number;
+        /**
+         * Peek with gc session peek's contract instead of the best-effort preview; implies peek. {id} resolves as for a live-session command, so a closed session is found only by its exact bead id. Every open session that is not suspended is peeked whatever its runtime state, and peek_lines is passed to the runtime as given (0 asks for its full capture). A suspended or closed session is refused with 409 session-inactive, and a failed peek fails the request instead of omitting last_output.
+         */
+        peek_strict?: boolean;
         /**
          * Resolve {id} as an exact session bead id only: a single point read that also finds closed sessions and answers 404 when no bead has that id. Skips the alias, runtime session_name, configured-name and closed-session name lookups. For callers holding a durable id.
          */
