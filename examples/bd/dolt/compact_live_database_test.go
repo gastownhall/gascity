@@ -125,7 +125,7 @@ func assertNoPendingRemediationMarkers(t *testing.T, fixture compactScriptFixtur
 func TestCompactScriptLiveGateQuarantinesUnservedDatabaseAfterFlatten(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
-		"GC_FAKE_DOLT_LIVE_PROBE_FAIL_ALL=1")
+		"GC_FAKE_DOLT_LIVE_PROBE_FAIL_ALL=1", "GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
 	if err == nil {
 		t.Fatalf("compact succeeded although beads was unserved after its flatten:\n%s", out)
 	}
@@ -163,7 +163,7 @@ func TestCompactScriptLiveGateQuarantinesUnservedDatabaseAfterFlatten(t *testing
 func TestCompactScriptLiveGateQuarantinesUnservedDatabaseAfterSuccessfulGC(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
-		"GC_FAKE_DOLT_LIVE_PROBE_FAIL_AT=2")
+		"GC_FAKE_DOLT_LIVE_PROBE_FAIL_FROM=2", "GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
 	if err == nil {
 		t.Fatalf("compact succeeded although beads was unserved after its full GC:\n%s", out)
 	}
@@ -196,7 +196,7 @@ func TestCompactScriptLiveGateQuarantinesUnservedDatabaseAfterSuccessfulGC(t *te
 func TestCompactScriptLiveGateQuarantinesUnservedDatabaseAfterFailedGC(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "gc_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
-		"GC_FAKE_DOLT_LIVE_PROBE_FAIL_AT=2")
+		"GC_FAKE_DOLT_LIVE_PROBE_FAIL_FROM=2", "GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
 	if err == nil {
 		t.Fatalf("compact succeeded although beads was unserved after its failed GC:\n%s", out)
 	}
@@ -219,7 +219,7 @@ func TestCompactScriptLiveGateQuarantinesUnservedDatabaseAfterFailedGC(t *testin
 func TestCompactScriptLiveGateQuarantineAllowsFlattenRestoration(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "flatten_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
-		"GC_FAKE_DOLT_LIVE_PROBE_FAIL_ALL=1")
+		"GC_FAKE_DOLT_LIVE_PROBE_FAIL_ALL=1", "GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
 	if err == nil {
 		t.Fatalf("compact succeeded although beads' flatten failed and it was unserved:\n%s", out)
 	}
@@ -245,7 +245,7 @@ func TestCompactScriptLiveGateAbortsRunNamingNotReachedDatabases(t *testing.T) {
 		t.Fatalf("mkdir second dolt db: %v", err)
 	}
 	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
-		"GC_FAKE_DOLT_LIVE_PROBE_FAIL_ALL=1")
+		"GC_FAKE_DOLT_LIVE_PROBE_FAIL_ALL=1", "GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
 	if err == nil {
 		t.Fatalf("compact succeeded although beads was unserved after its flatten:\n%s", out)
 	}
@@ -265,6 +265,66 @@ func TestCompactScriptLiveGateAbortsRunNamingNotReachedDatabases(t *testing.T) {
 	}
 	assertCompactMarkerHasEvidence(t, compactQuarantineMarkerPath(fixture),
 		"reason=live database unavailable after compaction")
+}
+
+// TestCompactScriptLiveGateTransientProbeFailureRecovers asserts a
+// transient served-HEAD probe failure that recovers within the attempt
+// budget does not quarantine anything: the pass's original result stands.
+func TestCompactScriptLiveGateTransientProbeFailureRecovers(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_FAKE_DOLT_LIVE_PROBE_FAIL_AT=2", "GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
+	if err != nil {
+		t.Fatalf("compact failed although the transient probe failure recovered:\n%s", out)
+	}
+	if !strings.Contains(out, "live gate served-HEAD probe attempt 1/3 failed") {
+		t.Fatalf("output missing the failed probe attempt log:\n%s", out)
+	}
+	if !strings.Contains(out, "live gate served-HEAD probe recovered on attempt 2/3") {
+		t.Fatalf("output missing the probe recovery log:\n%s", out)
+	}
+	if _, statErr := os.Stat(compactQuarantineMarkerPath(fixture)); !os.IsNotExist(statErr) {
+		t.Fatalf("a recovered transient probe failure must not quarantine (stat err=%v):\n%s", statErr, out)
+	}
+	if !strings.Contains(out, "— ok") {
+		t.Fatalf("a recovered probe failure must let the pass report success:\n%s", out)
+	}
+	// Flatten check, failed post-GC attempt, recovering retry: three probes.
+	logData, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if got := strings.Count(string(logData), "SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))"); got != 3 {
+		t.Fatalf("expected exactly 3 served-HEAD probes, got %d:\n%s", got, logData)
+	}
+}
+
+// TestCompactScriptLiveGateAttemptsKnobBoundsRetries asserts the attempt
+// knob bounds the retry loop: with attempts=1 a single failed probe
+// quarantines with no retry.
+func TestCompactScriptLiveGateAttemptsKnobBoundsRetries(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_FAKE_DOLT_LIVE_PROBE_FAIL_AT=2", "GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=1",
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
+	if err == nil {
+		t.Fatalf("compact succeeded although the single allowed probe attempt failed:\n%s", out)
+	}
+	assertCompactMarkerHasEvidence(t, compactQuarantineMarkerPath(fixture),
+		"reason=live database unavailable after compaction",
+		"live_gate_failed_step=post-flatten full GC",
+	)
+	if strings.Contains(out, "recovered") {
+		t.Fatalf("attempts=1 must not retry the probe:\n%s", out)
+	}
+	// Flatten check, single failed post-GC attempt: two probes, no retry.
+	logData, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if got := strings.Count(string(logData), "SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))"); got != 2 {
+		t.Fatalf("expected exactly 2 served-HEAD probes, got %d:\n%s", got, logData)
+	}
 }
 
 // installDoltShim wraps the fixture's fake dolt with a shell shim so a test

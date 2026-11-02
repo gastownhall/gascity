@@ -2637,10 +2637,13 @@ live_gate_probe() {
 # STEP. The gate passes only when a data-dir entry that was present before
 # the first rewrite is still present (an initially absent entry — an
 # external-local endpoint — carries no directory invariant) AND the server
-# still serves DB with a resolvable HEAD. On failure the database is
-# quarantined with the recorded evidence and the check returns 1 regardless
-# of whether the marker itself could be persisted. Runs in the current
-# shell: gate state must survive the call.
+# still serves DB with a resolvable HEAD. The probe is retried
+# live_probe_attempts times, live_probe_delay_secs apart; a failure that
+# recovers within that budget is transient and does not quarantine
+# anything. When every attempt fails, the database is quarantined with the
+# recorded evidence and the check returns 1 regardless of whether the
+# marker itself could be persisted. Runs in the current shell: gate state
+# must survive the call.
 live_gate_check() {
   lg_db="$1"
   lg_step="$2"
@@ -2655,14 +2658,26 @@ live_gate_check() {
     live_gate_write_marker "$lg_db" "$lg_dir_after"
     return 1
   fi
-  if ! lg_probe_detail=$(live_gate_probe "$lg_db"); then
-    live_gate_failed=1
-    live_gate_failed_step="$lg_step"
-    live_gate_probe_failure="$lg_probe_detail"
-    live_gate_write_marker "$lg_db" "$lg_dir_after"
-    return 1
-  fi
-  return 0
+  lg_attempt=1
+  while :; do
+    if lg_probe_detail=$(live_gate_probe "$lg_db"); then
+      if [ "$lg_attempt" -gt 1 ]; then
+        printf 'compact: db=%s live gate served-HEAD probe recovered on attempt %s/%s\n' \
+          "$lg_db" "$lg_attempt" "$live_probe_attempts" >&2
+      fi
+      return 0
+    fi
+    printf 'compact: db=%s live gate served-HEAD probe attempt %s/%s failed: %s\n' \
+      "$lg_db" "$lg_attempt" "$live_probe_attempts" "$lg_probe_detail" >&2
+    [ "$lg_attempt" -lt "$live_probe_attempts" ] || break
+    lg_attempt=$((lg_attempt + 1))
+    sleep "$live_probe_delay_secs"
+  done
+  live_gate_failed=1
+  live_gate_failed_step="$lg_step"
+  live_gate_probe_failure="$lg_probe_detail"
+  live_gate_write_marker "$lg_db" "$lg_dir_after"
+  return 1
 }
 
 # live_gate_write_marker DB DIR_AFTER — quarantine DB after a failed

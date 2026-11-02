@@ -925,15 +925,18 @@ case "$query" in
   *"SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))"*)
     # The live-database gate's served-HEAD probe. Fault knobs (passed via a
     # test's extraEnv): FAIL_ALL fails every probe; FAIL_AT=N fails only
-    # probe call N, counted per fixture through the state file, so a test
-    # can let the flatten probe pass and fail a later one. The served HEAD
-    # is read straight from the state file — current_head() carries
-    # mode-specific call counting that the gate must not disturb.
+    # probe call N; FAIL_FROM=N fails every probe call from N on — with the
+    # gate's retry loop, FAIL_AT models a transient failure that recovers
+    # and FAIL_FROM a database that stays unserved. Calls are counted per
+    # fixture through the state file, so a test can let the flatten probe
+    # pass and fail a later one. The served HEAD is read straight from the
+    # state file — current_head() carries mode-specific call counting that
+    # the gate must not disturb.
     if [ "${GC_FAKE_DOLT_LIVE_PROBE_FAIL_ALL:-}" = "1" ]; then
       printf 'served head probe unavailable\n' >&2
       exit 61
     fi
-    if [ -n "${GC_FAKE_DOLT_LIVE_PROBE_FAIL_AT:-}" ]; then
+    if [ -n "${GC_FAKE_DOLT_LIVE_PROBE_FAIL_AT:-}" ] || [ -n "${GC_FAKE_DOLT_LIVE_PROBE_FAIL_FROM:-}" ]; then
       calls_file="$state_file.live-probe-calls"
       calls=0
       if [ -f "$calls_file" ]; then
@@ -941,8 +944,12 @@ case "$query" in
       fi
       calls=$((calls + 1))
       printf '%%s\n' "$calls" > "$calls_file"
-      if [ "$calls" = "${GC_FAKE_DOLT_LIVE_PROBE_FAIL_AT}" ]; then
+      if [ -n "${GC_FAKE_DOLT_LIVE_PROBE_FAIL_AT:-}" ] && [ "$calls" = "${GC_FAKE_DOLT_LIVE_PROBE_FAIL_AT}" ]; then
         printf 'served head probe flaked\n' >&2
+        exit 61
+      fi
+      if [ -n "${GC_FAKE_DOLT_LIVE_PROBE_FAIL_FROM:-}" ] && [ "$calls" -ge "${GC_FAKE_DOLT_LIVE_PROBE_FAIL_FROM}" ]; then
+        printf 'served head probe unavailable\n' >&2
         exit 61
       fi
     fi
