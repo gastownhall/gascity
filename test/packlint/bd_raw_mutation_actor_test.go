@@ -37,8 +37,10 @@ import (
 //
 // Fix a violation by adding one of, on the SAME line as the bd invocation:
 //
-//	--actor "${GC_ALIAS:-${GC_SESSION_ID:-${GC_SESSION_NAME:-}}}"   (preferred)
-//	--force                                                     (admin/reaper use)
+//	--actor "${GC_ALIAS:-${GC_SESSION_NAME:-$GC_SESSION_ID}}"   (preferred; files in
+//	                                                            bdActorOrderCheckFiles must
+//	                                                            use alias > ID > name instead)
+//	--force                                                    (admin/reaper use)
 //	# guard-ack:<slug>                                          (reviewed exception)
 //
 // Scope is deliberately runnable content only (.toml formula bodies, .sh
@@ -137,9 +139,7 @@ var rawBdMutationAllowlistFiles = map[string]bool{}
 // GC_ALIAS>GC_SESSION_ID>GC_SESSION_NAME for a formula shell script. A
 // formula that instead self-claims with a bare `bd update --claim` stamps
 // BEADS_ACTOR, which resolves to the session NAME (not ID) in an unaliased
-// pool session — e.g.
-// packs/actual/deployer/formulas/mol-deployer-gate.formula.toml:97 in
-// gc-management — so forcing ID-first there would turn a close that works
+// pool session — e.g. a deployer-gate formula that self-claims — so forcing ID-first there would turn a close that works
 // today into a guard failure. Extend this list only after confirming a new
 // file's claim path the way this ruling confirmed mol-dog-stale-db.toml's.
 var bdActorOrderCheckFiles = map[string]bool{
@@ -160,15 +160,49 @@ var actorFallbackTokenRE = regexp.MustCompile(`\$\{(GC_ALIAS|GC_SESSION_ID|GC_SE
 // the dynamic current-assignee shape noted on ga-gskond — out of scope
 // here; no gascity formula uses it today).
 func actorFallbackOrder(line string) []string {
-	idx := strings.Index(line, "--actor")
-	if idx < 0 {
+	value := actorFlagValue(line)
+	if value == "" {
 		return nil
 	}
 	var order []string
-	for _, m := range actorFallbackTokenRE.FindAllStringSubmatch(line[idx:], -1) {
+	for _, m := range actorFallbackTokenRE.FindAllStringSubmatch(value, -1) {
 		order = append(order, m[1])
 	}
 	return order
+}
+
+// actorFlagValue returns the argument value of the first --actor flag on
+// line, so that identity vars in later arguments or trailing comments are not
+// mistaken for part of the fallback chain. It skips one `=` or whitespace
+// separator after the flag; a value opening with `"` or `'` runs to the
+// matching closing quote (or end of line if unterminated), otherwise to the
+// next whitespace. It returns "" if line has no --actor flag.
+func actorFlagValue(line string) string {
+	idx := strings.Index(line, "--actor")
+	if idx < 0 {
+		return ""
+	}
+	rest := line[idx+len("--actor"):]
+	if rest == "" {
+		return ""
+	}
+	if rest[0] == '=' || rest[0] == ' ' || rest[0] == '\t' {
+		rest = rest[1:]
+	}
+	if rest == "" {
+		return ""
+	}
+	if q := rest[0]; q == '"' || q == '\'' {
+		rest = rest[1:]
+		if end := strings.IndexByte(rest, q); end >= 0 {
+			return rest[:end]
+		}
+		return rest
+	}
+	if end := strings.IndexAny(rest, " \t"); end >= 0 {
+		return rest[:end]
+	}
+	return rest
 }
 
 // actorFallbackOrderViolation reports a human-readable defect if order (as
@@ -209,6 +243,9 @@ func bdActorGuardExempt(rel, line string) bool {
 	if !bdActorGuardExemptRE.MatchString(line) {
 		return false
 	}
+	if bdForceOrAckRE.MatchString(line) {
+		return true
+	}
 	if !bdActorOrderCheckFiles[rel] {
 		return true
 	}
@@ -240,6 +277,10 @@ var bdUpdateStatusClosedRE = regexp.MustCompile(`(?:--status|-s)[= ]closed\b`)
 // [= ] separator (rather than \b) avoids a flag like a hypothetical
 // --actor-list or --force-all being mistaken for the real flag.
 var bdActorGuardExemptRE = regexp.MustCompile(`--actor[= ]|--force(?:\s|$)|#\s*guard-ack:\S+`)
+
+// bdForceOrAckRE matches the two exemptions (--force or a guard-ack) that
+// bdActorGuardExempt honors unconditionally, before any --actor order check.
+var bdForceOrAckRE = regexp.MustCompile(`--force(?:\s|$)|#\s*guard-ack:\S+`)
 
 // rawBdMutationVerb reports the guarded verb ("close", "unclaim",
 // "heartbeat", or "update") of the first raw (non-`gc`-prefixed) bd
@@ -301,8 +342,34 @@ func TestBdActorGuardExemptOrderCheck(t *testing.T) {
 		},
 		{
 			name: "unlisted file with the same wrong order is exempt on presence alone",
-			rel:  "packs/actual/deployer/formulas/mol-deployer-gate.formula.toml",
+			rel:  "examples/bd/dolt/formulas/unlisted-example.toml",
 			line: `bd close "$WORK_BEAD" --actor "${GC_ALIAS:-${GC_SESSION_NAME:-${GC_SESSION_ID:-}}}"`,
+			want: true,
+		},
+		{
+			name: "checked file with wrong order but --force is exempt",
+			rel:  checkedFile,
+			line: `bd close "$WORK_BEAD" --actor "${GC_ALIAS:-${GC_SESSION_NAME:-${GC_SESSION_ID:-}}}" --force`,
+			want: true,
+		},
+		{
+			name: "checked file with wrong order but guard-ack is exempt",
+			rel:  checkedFile,
+			line: `bd close "$WORK_BEAD" --actor "${GC_ALIAS:-${GC_SESSION_NAME:-${GC_SESSION_ID:-}}}" # guard-ack:test-slug`,
+			want: true,
+		},
+		{
+			name: "checked file ignores identity vars after the --actor value",
+			rel:  checkedFile,
+			line: `bd close "$WORK_BEAD" --actor "${GC_ALIAS:-${GC_SESSION_ID:-}}" --reason "${GC_SESSION_NAME}"`,
+			want: true,
+		},
+		{
+			// A whole-line scan would read NAME (in --actor) before ID (in
+			// --reason) and wrongly report a reversed chain.
+			name: "checked file does not count a later arg's GC_SESSION_ID as part of the chain",
+			rel:  checkedFile,
+			line: `bd close "$WORK_BEAD" --actor "${GC_ALIAS:-${GC_SESSION_NAME:-}}" --reason "${GC_SESSION_ID}"`,
 			want: true,
 		},
 	}
