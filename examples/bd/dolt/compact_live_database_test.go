@@ -8,11 +8,12 @@ import (
 )
 
 // installVanishDirShim wraps the fixture's fake dolt with a shim that removes
-// the named database's directory from the data dir after its successful GC,
-// while SQL keeps answering: the failure mode the live-database gate exists
-// to catch. The fake's SQL answers keep working because the shim only deletes
-// the directory; open handles and the fake's state are unaffected.
-func installVanishDirShim(t *testing.T, f compactScriptFixture, db string) {
+// the fixture's beads database directory from the data dir after its
+// successful GC, while SQL keeps answering: the failure mode the
+// live-database gate exists to catch. The fake's SQL answers keep working
+// because the shim only deletes the directory; open handles and the fake's
+// state are unaffected.
+func installVanishDirShim(t *testing.T, f compactScriptFixture) {
 	t.Helper()
 	realDolt := filepath.Join(f.binDir, "dolt.real")
 	if err := os.Rename(filepath.Join(f.binDir, "dolt"), realDolt); err != nil {
@@ -24,7 +25,7 @@ rc=$?
 case "$*" in
   *DOLT_GC*)
     if [ "$rc" -eq 0 ]; then
-      rm -rf -- "$GC_DOLT_DATA_DIR/` + db + `"
+      rm -rf -- "$GC_DOLT_DATA_DIR/beads"
     fi
     ;;
 esac
@@ -45,7 +46,7 @@ func TestCompactScriptLiveGateQuarantinesVanishedDataDir(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(fixture.dataDir, "zed", ".dolt"), 0o755); err != nil {
 		t.Fatalf("mkdir second db: %v", err)
 	}
-	installVanishDirShim(t, fixture, "beads")
+	installVanishDirShim(t, fixture)
 
 	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
 		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
@@ -266,4 +267,129 @@ func TestCompactScriptLiveGateValidatesProbeResponse(t *testing.T) {
 			t.Fatalf("the pass should have completed after the gate passed:\n%s", out)
 		}
 	})
+}
+
+// TestCompactScriptLiveGateAbortsBeforeTouchingFurtherDatabases pins the
+// run-level consequence of a gate failure: with more selected databases
+// waiting, the run must stop before issuing any statement for them, exit 1,
+// and name the databases it did not reach.
+func TestCompactScriptLiveGateAbortsBeforeTouchingFurtherDatabases(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	if err := os.MkdirAll(filepath.Join(fixture.dataDir, "zed", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir second db: %v", err)
+	}
+	installVanishDirShim(t, fixture)
+
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
+	if err == nil {
+		t.Fatalf("compact must fail when a database leaves the data dir mid-run:\n%s", out)
+	}
+	if !strings.Contains(out, "selected databases not reached: zed") {
+		t.Fatalf("the abort diagnostic must name the databases the run did not reach:\n%s", out)
+	}
+	logData, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(logData), "db=zed") {
+		t.Fatalf("no statement may be issued for a database after a live-gate failure:\n%s", logData)
+	}
+	if reason := compactMarkerValue(t, liveGateMarkerPath(fixture), "reason"); reason != "live database unavailable after compaction" {
+		t.Fatalf("quarantine reason = %q, want the live-database reason:\n%s", reason, out)
+	}
+}
+
+// TestCompactScriptLiveGateAbortSaysNoneWhenNothingElseSelected pins the
+// not-reached wording for a single-database selection: "none", not an empty
+// list.
+func TestCompactScriptLiveGateAbortSaysNoneWhenNothingElseSelected(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	installVanishDirShim(t, fixture)
+
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
+	if err == nil {
+		t.Fatalf("compact must fail when a database leaves the data dir mid-run:\n%s", out)
+	}
+	if !strings.Contains(out, "selected databases not reached: none") {
+		t.Fatalf("the abort diagnostic must say none when no further database was selected:\n%s", out)
+	}
+}
+
+// TestCompactScriptLiveGateAbortNotReachedHonorsOnlyDbs pins that the
+// not-reached list respects GC_DOLT_COMPACT_ONLY_DBS: a discovered database
+// the run would have skipped anyway is not claimed as unreached work, while a
+// selected database without a data-dir entry still is.
+func TestCompactScriptLiveGateAbortNotReachedHonorsOnlyDbs(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	if err := os.MkdirAll(filepath.Join(fixture.dataDir, "zed", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir second db: %v", err)
+	}
+	installVanishDirShim(t, fixture)
+
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0",
+		"GC_DOLT_COMPACT_ONLY_DBS=beads,other")
+	if err == nil {
+		t.Fatalf("compact must fail when a database leaves the data dir mid-run:\n%s", out)
+	}
+	if !strings.Contains(out, "selected databases not reached: other") {
+		t.Fatalf("the not-reached list must name the selected databases and skip unselected ones:\n%s", out)
+	}
+}
+
+// TestCompactScriptLiveGateAbortsEvenWhenMarkerCannotPersist pins that the
+// abort does not depend on the quarantine marker landing: when the marker
+// directory becomes unusable after the rewrite, the evidence goes to stderr
+// and the run still stops before any further database work.
+func TestCompactScriptLiveGateAbortsEvenWhenMarkerCannotPersist(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	if err := os.MkdirAll(filepath.Join(fixture.dataDir, "zed", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir second db: %v", err)
+	}
+	realDolt := filepath.Join(fixture.binDir, "dolt.real")
+	if err := os.Rename(filepath.Join(fixture.binDir, "dolt"), realDolt); err != nil {
+		t.Fatalf("move fake dolt aside: %v", err)
+	}
+	// After beads' successful GC: drop its data-dir entry and replace the
+	// quarantine directory with a plain file, so the gate's marker write
+	// fails although every writability probe before the flatten passed.
+	shim := `#!/bin/sh
+"` + realDolt + `" "$@"
+rc=$?
+case "$*" in
+  *DOLT_GC*)
+    if [ "$rc" -eq 0 ]; then
+      rm -rf -- "$GC_DOLT_DATA_DIR/beads"
+      qdir="$GC_CITY_PATH/.gc/runtime/packs/dolt/compact-quarantine"
+      rm -rf -- "$qdir"
+      printf 'blocked\n' > "$qdir"
+    fi
+    ;;
+esac
+exit "$rc"
+`
+	if err := os.WriteFile(filepath.Join(fixture.binDir, "dolt"), []byte(shim), 0o755); err != nil {
+		t.Fatalf("write dolt shim: %v", err)
+	}
+
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
+	if err == nil {
+		t.Fatalf("compact must fail even when the quarantine marker cannot be persisted:\n%s", out)
+	}
+	if !strings.Contains(out, "unable to persist the live-database quarantine marker") {
+		t.Fatalf("output missing the marker-persistence failure evidence:\n%s", out)
+	}
+	if !strings.Contains(out, "failed_step=post-flatten full GC") {
+		t.Fatalf("the fallback evidence must name the failed gate step:\n%s", out)
+	}
+	if !strings.Contains(out, "selected databases not reached: zed") {
+		t.Fatalf("the run must still abort before touching further databases:\n%s", out)
+	}
+	if strings.Contains(out, "db=beads commits=600->600 duration=") {
+		t.Fatalf("a gate failure must not be reported as a successful compaction:\n%s", out)
+	}
 }

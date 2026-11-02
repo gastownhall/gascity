@@ -4590,6 +4590,66 @@ acquire_lock() {
   exit 1
 }
 
+# report_live_gate_abort DB
+#   A pass failed the live-database gate for DB: stop the run and tell the
+#   operator exactly which selected databases were left untouched. The
+#   not-reached list names the selection entries after DB, honoring
+#   GC_DOLT_COMPACT_ONLY_DBS the same way the passes do, so a database the
+#   pass would have skipped is not claimed as unreached work.
+report_live_gate_abort() {
+  rab_db="$1"
+  rab_reached_current=""
+  rab_not_reached=""
+  while IFS= read -r rab_line; do
+    [ -n "$rab_line" ] || continue
+    if [ -z "$rab_reached_current" ]; then
+      if [ "$rab_line" = "$rab_db" ]; then
+        rab_reached_current=1
+      fi
+      continue
+    fi
+    if [ -n "$only_dbs" ]; then
+      case ",$only_dbs," in
+        *",$rab_line,"*) ;;
+        *) continue ;;
+      esac
+    fi
+    rab_not_reached="${rab_not_reached:+$rab_not_reached,}$rab_line"
+  done < "$_unique_db_tmp"
+
+  printf 'compact: db=%s live-database gate failed at step %s — aborting the run before any further database work; selected databases not reached: %s (restore the database, then see "Live-database gate" in docs/troubleshooting/dolt-bloat-recovery.md)\n' \
+    "$rab_db" "${live_gate_failed_step:-<unknown>}" "${rab_not_reached:-none}" >&2
+}
+
+# compact_each_database PASS_FN FAILURE_LABEL
+#   The single driver for every mode's per-database loop, so the
+#   live-database gate has one abort point: a pass that failed the gate stops
+#   the run before any further database statement or bookkeeping. Ordinary
+#   pass failures keep counting, so a run with one bad database still
+#   compacts the rest.
+compact_each_database() {
+  ced_pass_fn="$1"
+  ced_failure_label="$2"
+  ced_failed_count=0
+  while IFS= read -r ced_db; do
+    [ -n "$ced_db" ] || continue
+    reset_live_gate_state
+    if ! "$ced_pass_fn" "$ced_db"; then
+      if [ "$live_gate_failed" = "1" ]; then
+        report_live_gate_abort "$ced_db"
+        exit 1
+      fi
+      ced_failed_count=$((ced_failed_count + 1))
+    fi
+  done < "$_unique_db_tmp"
+
+  if [ "$ced_failed_count" -gt 0 ]; then
+    printf 'compact: %s database(s) failed %s\n' "$ced_failed_count" "$ced_failure_label" >&2
+    exit 1
+  fi
+  return 0
+}
+
 main() {
   lock_cleanup=""
   flock_acquired=""
@@ -4627,48 +4687,17 @@ main() {
     printf '%s\n' "$db" >> "$_unique_db_tmp"
   done < "$_db_tmp"
 
-  failed_count=0
   if [ "$gc_only" = "1" ]; then
-    while IFS= read -r db; do
-      [ -n "$db" ] || continue
-      if ! gc_only_database "$db"; then
-        failed_count=$((failed_count + 1))
-      fi
-    done < "$_unique_db_tmp"
-
-    if [ "$failed_count" -gt 0 ]; then
-      printf 'compact: %s database(s) failed gc-only reclaim\n' "$failed_count" >&2
-      exit 1
-    fi
+    compact_each_database gc_only_database "gc-only reclaim"
     exit 0
   fi
 
   if [ "$bare_gc" = "1" ]; then
-    while IFS= read -r db; do
-      [ -n "$db" ] || continue
-      if ! bare_gc_database "$db"; then
-        failed_count=$((failed_count + 1))
-      fi
-    done < "$_unique_db_tmp"
-
-    if [ "$failed_count" -gt 0 ]; then
-      printf 'compact: %s database(s) failed bare GC\n' "$failed_count" >&2
-      exit 1
-    fi
+    compact_each_database bare_gc_database "bare GC"
     exit 0
   fi
 
-  while IFS= read -r db; do
-    [ -n "$db" ] || continue
-    if ! flatten_database "$db"; then
-      failed_count=$((failed_count + 1))
-    fi
-  done < "$_unique_db_tmp"
-
-  if [ "$failed_count" -gt 0 ]; then
-    printf 'compact: %s database(s) failed compaction\n' "$failed_count" >&2
-    exit 1
-  fi
+  compact_each_database flatten_database "compaction"
   write_order_outcome || exit 1
   exit 0
 }
