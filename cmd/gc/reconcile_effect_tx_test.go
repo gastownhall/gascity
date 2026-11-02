@@ -510,6 +510,44 @@ func TestTxRetriesALostCASOnAFreshRead(t *testing.T) {
 	}
 }
 
+// Kills an uncommitted notification surviving a lost CAS (#8345's
+// write-first-then-event): a step whose write carries the held-work
+// deferral's session.config_drift_deferred — the notification is the
+// write's own fact, merged only past the write — settles refused cas with no
+// event when every attempt loses the CAS to a racing writer, and a later
+// eligible pass that lands records it once.
+func TestTxALostCASRecordsNoDeferredEvent(t *testing.T) {
+	step := func(race func()) func(txView) txStep {
+		return func(txView) txStep {
+			if race != nil {
+				race()
+			}
+			return txStep{
+				Write: session.MetadataPatch{txKeyA: "1"},
+				Facts: effectFacts{Events: []events.Event{{Type: events.SessionConfigDriftDeferred, Actor: "gc", Message: "config drift deferred over held work"}}},
+			}
+		}
+	}
+	k := newTxKit(t)
+	decided := 0
+	s := k.run(context.Background(), effectSpec{needs: needs{Attempts: 2}, sections: []section{{Decide: step(func() {
+		decided++
+		k.outside(txKeyNote, string(rune('a'+decided))) // a writer lands inside every attempt's CAS window
+	})}}})
+	if s.Outcome != settledRefused || s.Cause != causeCAS || len(s.Facts.Events) != 0 {
+		t.Fatalf("settlement %+v facts %+v, want refused cas with no recorded event", s, s.Facts)
+	}
+	if k.meta(txKeyA) == "1" {
+		t.Fatal("the raced write landed")
+	}
+	// A later eligible pass retries the same write and lands: the event the
+	// write carries records once, only now.
+	s = k.run(context.Background(), effectSpec{needs: needs{Attempts: 2}, sections: []section{{Decide: step(nil)}}})
+	if s.Outcome != settledLanded || k.meta(txKeyA) != "1" || len(s.Facts.Events) != 1 || s.Facts.Events[0].Type != events.SessionConfigDriftDeferred {
+		t.Fatalf("settlement %+v facts %+v a=%q, want the write landed recording its one event", s, s.Facts, k.meta(txKeyA))
+	}
+}
+
 // Kills a decision on the cached row: a write behind the cache (its event
 // not yet delivered) is what Decide sees, on its first attempt.
 func TestTxDecidesOnTheBackingRow(t *testing.T) {

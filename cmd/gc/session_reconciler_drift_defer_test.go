@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -487,5 +488,132 @@ func reconcileHeldWorkDriftEpisodeBounded(t *testing.T) {
 	env.reconcile([]beads.Bead{fresh})
 	if ds := env.dt.get(session.ID); ds == nil || ds.reason != "config-drift" {
 		t.Fatalf("drain = %+v, want the config-drift drain once the work closes; stderr=%s", ds, env.stderr.String())
+	}
+}
+
+// driftEpisodeFailStore fails the held-work deferral episode's own writes —
+// the stamp and the escalation marker, nothing else — while its flag is set,
+// so a tick's other writes pass through.
+type driftEpisodeFailStore struct {
+	beads.Store
+	fail *bool
+}
+
+func (s driftEpisodeFailStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if *s.fail && (kvs[namedSessionConfigDriftDeferredAtMetadata] != "" || kvs[namedSessionConfigDriftDeferredKeyMetadata] != "" || kvs[configDriftEscalatedAtMetadata] != "") {
+		return errors.New("deferral write failed")
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// TestReconcileSessionBeads_ConfigDriftHeldWorkDeferralWriteFailureRetries
+// kills an uncommitted notification surviving a failed write (#8345's
+// write-first-then-event): a first observation whose stamp write fails
+// records nothing — no event, no stamp, no drain — and a later eligible pass
+// retries it; an escalation whose marker write fails likewise records
+// nothing and retries, so the episode escalates exactly once the write
+// lands. With the writes healthy the notifications are the same events the
+// v2 row write carries (configDriftDeferredEvent, asserted field for field
+// by the decides and this file's escalation regression).
+func TestReconcileSessionBeads_ConfigDriftHeldWorkDeferralWriteFailureRetries(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addRunningWorkerDesiredWithNewConfig()
+	session := env.createSessionBead("worker", "worker")
+	rec := &recordingRecorder{}
+	env.rec = rec
+	horizon := env.cfg.Daemon.DriftDeferralEscalateAfterDuration()
+
+	tp := env.desiredState["worker"]
+	current := sessionCoreConfigForHashInfo(tp, env.sessionInfo(session.ID))
+	storedCfg := current
+	storedCfg.Command = "test-cmd"
+	breakdown, err := json.Marshal(runtime.CoreFingerprintBreakdown(storedCfg))
+	if err != nil {
+		t.Fatalf("marshal breakdown: %v", err)
+	}
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(storedCfg),
+		"core_hash_breakdown": string(breakdown),
+	})
+	work, err := env.store.Create(beads.Bead{
+		Title:    "in-flight work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+
+	fail := true
+	env.store = driftEpisodeFailStore{Store: env.store, fail: &fail}
+	tick := func() {
+		fresh, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("store.Get(%s): %v", session.ID, err)
+		}
+		env.reconcile([]beads.Bead{fresh})
+	}
+
+	// The first observation's stamp write fails: no stamp, no event, no drain.
+	tick()
+	if got := env.sessionInfo(session.ID); got.ConfigDriftDeferredAt != "" || got.ConfigDriftDeferredKey != "" || got.ConfigDriftEscalatedAt != "" {
+		t.Fatalf("episode state %+v after a failed stamp write, want nothing recorded", got)
+	}
+	if evs := rec.ofType(events.SessionConfigDriftDeferred); len(evs) != 0 {
+		t.Fatalf("held-work deferral events = %d after a failed write, want none; stderr=%s", len(evs), env.stderr.String())
+	}
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("held work must still defer the drain, got %+v", ds)
+	}
+
+	// A later eligible pass retries: the stamp and its event land exactly once.
+	fail = false
+	tick()
+	stamped := env.sessionInfo(session.ID)
+	if stamped.ConfigDriftDeferredAt == "" || stamped.ConfigDriftDeferredKey == "" {
+		t.Fatalf("episode stamp = (%q, %q) on the retry, want it recorded; stderr=%s", stamped.ConfigDriftDeferredAt, stamped.ConfigDriftDeferredKey, env.stderr.String())
+	}
+	evs := rec.ofType(events.SessionConfigDriftDeferred)
+	if len(evs) != 1 || evs[0].SessionID != session.ID {
+		t.Fatalf("held-work deferral events = %+v on the retry, want exactly the one first observation naming the session", evs)
+	}
+
+	// The horizon elapses and the escalation's marker write fails: the
+	// episode keeps its stamp, the marker stays unset, nothing is recorded.
+	env.clk.Advance(horizon)
+	fail = true
+	tick()
+	if got := env.sessionInfo(session.ID); got.ConfigDriftEscalatedAt != "" || got.ConfigDriftDeferredAt != stamped.ConfigDriftDeferredAt {
+		t.Fatalf("episode state %+v after a failed marker write, want the stamp kept and no marker", got)
+	}
+	if evs := rec.ofType(events.SessionConfigDriftDeferred); len(evs) != 1 {
+		t.Fatalf("held-work deferral events = %d after a failed marker write, want still the one first observation", len(evs))
+	}
+
+	// The later eligible pass escalates exactly once, its event reporting the
+	// episode's own start and age, and the deferral still holds.
+	fail = false
+	tick()
+	escalated := env.sessionInfo(session.ID)
+	if marker := escalated.ConfigDriftEscalatedAt; marker == "" {
+		t.Fatalf("the retried escalation must set its marker; stderr=%s", env.stderr.String())
+	} else if at, err := time.Parse(time.RFC3339, marker); err != nil || !at.Equal(env.clk.Now()) {
+		t.Fatalf("marker %q, want the escalation pass's time %s", marker, env.clk.Now())
+	}
+	evs = rec.ofType(events.SessionConfigDriftDeferred)
+	if len(evs) != 2 {
+		t.Fatalf("held-work deferral events = %d after the retried escalation, want the first observation and the one escalation; stderr=%s", len(evs), env.stderr.String())
+	}
+	var p api.SessionConfigDriftDeferredPayload
+	if err := json.Unmarshal(evs[1].Payload, &p); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if p.DeferredSince != stamped.ConfigDriftDeferredAt || !p.Escalated || p.WorkBeadID != work.ID {
+		t.Fatalf("payload %+v, want the episode's own start, escalated, naming work bead %s", p, work.ID)
+	}
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("the escalated episode must still defer the drain, got %+v", ds)
 	}
 }
