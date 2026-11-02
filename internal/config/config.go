@@ -2926,6 +2926,13 @@ type DaemonConfig struct {
 	// within this window, the controller force-kills and restarts it.
 	// Duration string (e.g., "2m", "5m"). Defaults to "2m".
 	DriftDrainTimeout string `toml:"drift_drain_timeout,omitempty" jsonschema:"default=2m"`
+	// DriftDeferralEscalateAfter bounds how long a config-drift restart may be
+	// deferred over held work before the reconciler escalates: it stamps the
+	// deferral on first observation, emits a session.config_drift_deferred
+	// event, and after this horizon emits an escalated event so the silent
+	// deferral becomes a visible signal. Duration string (e.g., "1h").
+	// Defaults to "1h"; non-positive values fall back to the default.
+	DriftDeferralEscalateAfter string `toml:"drift_deferral_escalate_after,omitempty" jsonschema:"default=1h"`
 	// ObservePaths lists extra directories to search for Claude JSONL session
 	// files (e.g., aimux session paths). The default search path
 	// (~/.claude/projects/) is always included.
@@ -3357,6 +3364,16 @@ func (d *DaemonConfig) MaxWakesPerTickOrDefault() int {
 // Defaults to 2m if empty or unparseable.
 func (d *DaemonConfig) DriftDrainTimeoutDuration() time.Duration {
 	return durationOr(d.DriftDrainTimeout, 2*time.Minute)
+}
+
+// DriftDeferralEscalateAfterDuration returns the config-drift deferral
+// escalation horizon as a time.Duration. Defaults to 1h if empty, unparseable,
+// or non-positive.
+func (d *DaemonConfig) DriftDeferralEscalateAfterDuration() time.Duration {
+	if dur, err := time.ParseDuration(d.DriftDeferralEscalateAfter); err == nil && dur > 0 {
+		return dur
+	}
+	return time.Hour
 }
 
 // DefaultStartReadyTimeout is the default wall-clock budget `gc start` and

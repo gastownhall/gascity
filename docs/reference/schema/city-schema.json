@@ -1455,6 +1455,11 @@
           "description": "DriftDrainTimeout is the maximum time to wait for an agent to acknowledge\na drain signal during a config-drift restart. If the agent doesn't ack\nwithin this window, the controller force-kills and restarts it.\nDuration string (e.g., \"2m\", \"5m\"). Defaults to \"2m\".",
           "default": "2m"
         },
+        "drift_deferral_escalate_after": {
+          "type": "string",
+          "description": "DriftDeferralEscalateAfter bounds how long a config-drift restart may be\ndeferred over held work before the reconciler escalates: it stamps the\ndeferral on first observation, emits a session.config_drift_deferred\nevent, and after this horizon emits an escalated event so the silent\ndeferral becomes a visible signal. Duration string (e.g., \"1h\").\nDefaults to \"1h\"; non-positive values fall back to the default.",
+          "default": "1h"
+        },
         "observe_paths": {
           "items": {
             "type": "string"

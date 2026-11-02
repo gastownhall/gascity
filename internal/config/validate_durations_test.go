@@ -444,6 +444,34 @@ func TestValidateDurationsMaintenanceDoltValidOK(t *testing.T) {
 	}
 }
 
+func TestValidateDurationsDriftDeferralEscalateAfter(t *testing.T) {
+	// A non-positive horizon parses cleanly but silently reverts to the 1h
+	// default at runtime, so it must warn like other footgun durations.
+	cfg := &City{
+		Daemon: DaemonConfig{DriftDeferralEscalateAfter: "0s"},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "drift_deferral_escalate_after") {
+		t.Errorf("warning should mention field name: %s", warnings[0])
+	}
+	if !strings.Contains(warnings[0], "must be a positive duration") {
+		t.Errorf("warning should flag non-positive duration: %s", warnings[0])
+	}
+}
+
+func TestValidateDurationsValidDriftDeferralEscalateAfterOK(t *testing.T) {
+	cfg := &City{
+		Daemon: DaemonConfig{DriftDeferralEscalateAfter: "30m"},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 0 {
+		t.Errorf("expected no warnings for valid drift_deferral_escalate_after, got: %v", warnings)
+	}
+}
+
 func TestValidateDurationsIncludesSource(t *testing.T) {
 	cfg := &City{
 		Session: SessionConfig{SetupTimeout: "invalid"},

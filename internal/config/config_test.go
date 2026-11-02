@@ -4517,6 +4517,69 @@ name = "mayor"
 	}
 }
 
+// --- DriftDeferralEscalateAfter tests ---
+
+func TestDaemonDriftDeferralEscalateAfterDefault(t *testing.T) {
+	d := DaemonConfig{}
+	got := d.DriftDeferralEscalateAfterDuration()
+	if got != time.Hour {
+		t.Errorf("DriftDeferralEscalateAfterDuration() = %v, want 1h", got)
+	}
+}
+
+func TestDaemonDriftDeferralEscalateAfterCustom(t *testing.T) {
+	d := DaemonConfig{DriftDeferralEscalateAfter: "30m"}
+	got := d.DriftDeferralEscalateAfterDuration()
+	if got != 30*time.Minute {
+		t.Errorf("DriftDeferralEscalateAfterDuration() = %v, want 30m", got)
+	}
+}
+
+func TestDaemonDriftDeferralEscalateAfterInvalid(t *testing.T) {
+	d := DaemonConfig{DriftDeferralEscalateAfter: "not-a-duration"}
+	got := d.DriftDeferralEscalateAfterDuration()
+	if got != time.Hour {
+		t.Errorf("DriftDeferralEscalateAfterDuration() = %v, want 1h (default for invalid)", got)
+	}
+}
+
+func TestDaemonDriftDeferralEscalateAfterNonPositiveFallsBackToDefault(t *testing.T) {
+	// A zero or negative horizon would either escalate immediately or wait
+	// forever; both silently corrupt the escalation policy, so the accessor
+	// treats non-positive values like unparseable ones and returns the default.
+	for _, value := range []string{"0s", "-1h"} {
+		d := DaemonConfig{DriftDeferralEscalateAfter: value}
+		got := d.DriftDeferralEscalateAfterDuration()
+		if got != time.Hour {
+			t.Errorf("DriftDeferralEscalateAfterDuration() with %q = %v, want 1h", value, got)
+		}
+	}
+}
+
+func TestParseDriftDeferralEscalateAfter(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+drift_deferral_escalate_after = "45m"
+
+[[agent]]
+name = "mayor"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.DriftDeferralEscalateAfter != "45m" {
+		t.Errorf("Daemon.DriftDeferralEscalateAfter = %q, want %q", cfg.Daemon.DriftDeferralEscalateAfter, "45m")
+	}
+	got := cfg.Daemon.DriftDeferralEscalateAfterDuration()
+	if got != 45*time.Minute {
+		t.Errorf("DriftDeferralEscalateAfterDuration() = %v, want 45m", got)
+	}
+}
+
 // --- StartReadyTimeout tests ---
 
 func TestDaemonStartReadyTimeoutDefault(t *testing.T) {
