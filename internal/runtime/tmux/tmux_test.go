@@ -1362,27 +1362,27 @@ func TestHasDescendantWithNames(t *testing.T) {
 	}
 
 	// Test with a definitely nonexistent PID
-	got := hasDescendantWithNames("999999999", []string{"node", "claude"}, 0)
+	got := snapshotHasDescendant("999999999", "node", "claude")
 	if got {
 		t.Error("hasDescendantWithNames should return false for nonexistent PID")
 	}
 
-	// Test with empty names slice - should always return false
-	got = hasDescendantWithNames("1", []string{}, 0)
+	// Test with no names - should always return false
+	got = snapshotHasDescendant("1")
 	if got {
-		t.Error("hasDescendantWithNames should return false for empty names slice")
+		t.Error("hasDescendantWithNames should return false for no names")
 	}
 
-	// Test with nil names slice - should always return false
-	got = hasDescendantWithNames("1", nil, 0)
+	// Test with only a blank name - should always return false
+	got = snapshotHasDescendant("1", "")
 	if got {
-		t.Error("hasDescendantWithNames should return false for nil names slice")
+		t.Error("hasDescendantWithNames should return false for a blank name")
 	}
 
 	// Exercise a real process-tree edge without recursively scanning every
 	// process on the host. The helper is a direct child of this test binary.
 	helper := startDescendantTestProcess(t)
-	if !hasDescendantWithNames(strconv.Itoa(os.Getpid()), []string{filepath.Base(os.Args[0])}, 0) {
+	if !snapshotHasDescendant(strconv.Itoa(os.Getpid()), filepath.Base(os.Args[0])) {
 		t.Fatalf("hasDescendantWithNames did not find controlled child pid %d", helper.Process.Pid)
 	}
 }
