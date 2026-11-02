@@ -2059,6 +2059,104 @@ func TestStartRefusesManagedSessionWithoutResolvedStoreRoot(t *testing.T) {
 	}
 }
 
+func TestBuildPodHoldsPrebakedEntrypointOnFreshMarker(t *testing.T) {
+	p := newProviderWithOps(newFakeK8sOps())
+	p.prebaked = true
+	cfg := runtime.Config{Command: "agent", PreStart: []string{"echo prepared"}}
+
+	first, err := buildPod("s", cfg, p)
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+	second, err := buildPod("s", cfg, p)
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+	marker := first.Annotations[storeReadyMarkerAnnotation]
+	if !strings.HasPrefix(marker, "/tmp/gc-store-ready-") {
+		t.Fatalf("marker = %q, want a launch-specific /tmp path", marker)
+	}
+	if marker == second.Annotations[storeReadyMarkerAnnotation] {
+		t.Fatalf("two launches share marker %q; an image could bake it", marker)
+	}
+	script := strings.Join(first.Spec.Containers[0].Args, " ")
+	wait := strings.Index(script, marker)
+	preStart := strings.Index(script, base64.StdEncoding.EncodeToString([]byte("echo prepared")))
+	launch := strings.Index(script, "new-session")
+	if wait < 0 || preStart < 0 || launch < 0 || wait > preStart || wait > launch {
+		t.Fatalf("wait at %d, pre_start at %d, tmux at %d; the wait must come first:\n%s", wait, preStart, launch, script)
+	}
+}
+
+func TestStartReleasesPrebakedEntrypointOnlyAfterStoreCheck(t *testing.T) {
+	cfg := runtime.Config{
+		Command: "agent",
+		WorkDir: "/city/rig",
+		Env: map[string]string{
+			"GC_AGENT":            "rig/polecat",
+			"GC_CITY":             "/city",
+			"GC_STORE_ROOT":       "/city/custom-scope",
+			"GC_BEADS_PROJECT_ID": "project-cs",
+			"GC_BEADS_PREFIX":     "cs",
+			"GC_DOLT_DATABASE":    "bd_project_cs",
+			"GC_DOLT_PORT":        "31364",
+		},
+	}
+	isStoreCheck := func(cmd []string) bool {
+		return len(cmd) >= 3 && cmd[0] == "sh" && strings.Contains(cmd[2], "hosted Dolt scoped beads files are incomplete")
+	}
+	isRelease := func(cmd []string) bool {
+		return len(cmd) == 2 && cmd[0] == "touch" && strings.HasPrefix(cmd[1], "/tmp/gc-store-ready-")
+	}
+
+	t.Run("passing check", func(t *testing.T) {
+		fake := newFakeK8sOps()
+		p := newProviderWithOps(fake)
+		p.prebaked = true
+		p.postStartSettle = 0
+		fake.setExecResult("gc-test-agent", []string{"tmux", "has-session", "-t", "main"}, "", nil)
+		if err := p.Start(context.Background(), "gc-test-agent", cfg); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		check, release := -1, -1
+		for i, c := range fake.calls {
+			if c.method != "execInPod" {
+				continue
+			}
+			if check < 0 && isStoreCheck(c.cmd) {
+				check = i
+			}
+			if release < 0 && isRelease(c.cmd) {
+				release = i
+			}
+		}
+		if check < 0 || release < 0 || release < check {
+			t.Fatalf("store check at %d, release at %d; want the check first", check, release)
+		}
+	})
+
+	t.Run("failing check", func(t *testing.T) {
+		fake := newFakeK8sOps()
+		p := newProviderWithOps(fake)
+		p.prebaked = true
+		p.postStartSettle = 0
+		fake.execFunc = func(_ string, cmd []string) (string, error) {
+			if isStoreCheck(cmd) {
+				return "", errors.New("hosted Dolt scoped beads files are incomplete")
+			}
+			return "", nil
+		}
+		if err := p.Start(context.Background(), "gc-test-agent", cfg); err == nil {
+			t.Fatal("Start succeeded with a failing store check")
+		}
+		for _, c := range fake.calls {
+			if c.method == "execInPod" && isRelease(c.cmd) {
+				t.Fatalf("entrypoint released despite the failed store check: %v", c.cmd)
+			}
+		}
+	})
+}
+
 func TestStartFailsClosedWhenHostedBeadsFilesAreMissing(t *testing.T) {
 	fake := newFakeK8sOps()
 	p := newProviderWithOps(fake)
