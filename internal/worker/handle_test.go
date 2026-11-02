@@ -2659,7 +2659,7 @@ func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *tes
 	if err != nil {
 		t.Fatalf("Get(%q): %v", handle.sessionID, err)
 	}
-	handle.searchPaths = []string{searchBase}
+	handle.adapter.SearchPaths = []string{searchBase}
 	transcriptDir := filepath.Join(searchBase, sessionlog.ProjectSlug(info.WorkDir))
 	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)

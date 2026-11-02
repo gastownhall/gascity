@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -900,5 +901,54 @@ func TestHasExactKeyedLookup(t *testing.T) {
 		if got := HasExactKeyedLookup(provider); got != want {
 			t.Errorf("HasExactKeyedLookup(%q) = %v, want %v", provider, got, want)
 		}
+	}
+}
+
+func TestKeyedProbeRoots(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", "")
+	defaults := sessionlog.DefaultSearchPaths()
+	roots := []string{"/observed"}
+	for _, c := range []struct {
+		provider string
+		roots    []string
+		want     []string
+	}{
+		{"claude", roots, roots},
+		{"claude-max", roots, roots},
+		{"claude", nil, defaults},
+		{"pi", roots, defaults},
+		{"kimi", roots, defaults},
+	} {
+		if got := KeyedProbeRoots(c.roots, c.provider); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("KeyedProbeRoots(%v, %q) = %v, want %v", c.roots, c.provider, got, c.want)
+		}
+	}
+}
+
+func TestClaudeConfigProjectsRoot(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		dir  string
+		want string
+		ok   bool
+	}{
+		{"absolute dir", "/cfg/claude", "/cfg/claude/projects", true},
+		{"whitespace-padded absolute dir", "  /cfg/claude  ", "/cfg/claude/projects", true},
+		{"empty", "", "", false},
+		{"blank", "  ", "", false},
+		{"relative dir", "cfg/claude", "", false},
+		{"home-relative dir", "~/.claude-alt", "", false},
+		{"bare tilde", "~", "", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := ClaudeConfigProjectsRoot(map[string]string{"CLAUDE_CONFIG_DIR": c.dir})
+			if ok != c.ok || got != c.want {
+				t.Errorf("ClaudeConfigProjectsRoot(%q) = (%q, %v), want (%q, %v)", c.dir, got, ok, c.want, c.ok)
+			}
+		})
+	}
+	if _, ok := ClaudeConfigProjectsRoot(nil); ok {
+		t.Error("ClaudeConfigProjectsRoot(nil env) reports a root; want none")
 	}
 }
