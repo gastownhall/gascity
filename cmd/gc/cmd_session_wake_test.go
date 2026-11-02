@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -815,7 +816,14 @@ func TestCmdSessionWake_RejectsArchivedHistoricalSessionID(t *testing.T) {
 	}
 }
 
-func TestCmdSessionWake_RequestsStartForContinuityEligibleArchivedSessionID(t *testing.T) {
+// TestCmdSessionWake_RefusesContinuityEligibleArchivedSessionID: a
+// continuity-eligible archived row passes the wake's conflict check, but
+// archived is a state the controller skips, so the wake is refused before it
+// writes anything, naming the close that releases the row: the archive stamp,
+// the continuity flag and the wake blockers stay as they were, and no wake is
+// recorded. Kills a "wake requested" success for a row no reconciler ever
+// starts, and a refusal that clears the row's archive stamp or blockers first.
+func TestCmdSessionWake_RefusesContinuityEligibleArchivedSessionID(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
 
@@ -851,16 +859,29 @@ func TestCmdSessionWake_RequestsStartForContinuityEligibleArchivedSessionID(t *t
 		"state":               "archived",
 		"continuity_eligible": "true",
 		"archived_at":         time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+		"wake_attempts":       "3",
+		"churn_count":         "2",
 	}); err != nil {
 		t.Fatalf("SetMetadataBatch(%s): %v", sessionID, err)
 	}
+	archived, err := store.Get(sessionID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", sessionID, err)
+	}
+	before := maps.Clone(archived.Metadata)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionWake([]string{sessionID}, "", &stdout, &stderr, false); code != 0 {
-		t.Fatalf("cmdSessionWake() = %d, want success; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	if code := cmdSessionWake([]string{sessionID}, "", &stdout, &stderr, false); code != 1 {
+		t.Fatalf("cmdSessionWake() = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "wake requested") {
-		t.Fatalf("stdout = %q, want wake requested message", stdout.String())
+	for _, want := range []string{
+		"gc session wake: session " + sessionID + " cannot be woken: ",
+		`"archived"`,
+		"gc session close " + sessionID,
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+		}
 	}
 
 	freshStore, err := openCityStoreAt(cityDir)
@@ -871,14 +892,69 @@ func TestCmdSessionWake_RequestsStartForContinuityEligibleArchivedSessionID(t *t
 	if err != nil {
 		t.Fatalf("Get(%s): %v", sessionID, err)
 	}
-	if got := updated.Metadata["state"]; got != "archived" {
-		t.Fatalf("state = %q, want archived", got)
+	if !maps.Equal(updated.Metadata, before) {
+		t.Fatalf("metadata = %v, want it unchanged: %v", updated.Metadata, before)
 	}
-	if got := updated.Metadata["pending_create_claim"]; got != "" {
-		t.Fatalf("pending_create_claim = %q, want empty", got)
+}
+
+// TestDoSessionWake_RefusesUnknownStateRow: a wake of a row in a state the
+// controller skips exits 1 naming the raw state and the close that releases
+// it, before anything is written: the row is left exactly as it was, no op
+// is recorded, no queued nudge is withdrawn and the controller is not poked.
+// A wake of a row it manages, under the same op gate, records its op. Kills a
+// wake that reports success for a row the reconciler never starts, and one
+// that records the wake (or clears its blockers) before refusing it.
+func TestDoSessionWake_RefusesUnknownStateRow(t *testing.T) {
+	h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
+	h.opStore = &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{Title: "worker", Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+		"template": "worker", "session_name": "worker-1", "state": "future-state", "wake_attempts": "3", "churn_count": "2",
+	}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := updated.Metadata["wake_request"]; got != "explicit" {
-		t.Fatalf("wake_request = %q, want explicit", got)
+	before := maps.Clone(b.Metadata)
+	withdrawn, pokes := 0, 0
+	deps := sessionWakeDeps{
+		store: store, cfg: &config.City{Agents: []config.Agent{{Name: "worker"}}}, cityPath: t.TempDir(), cityResolved: true, now: time.Now,
+		withdrawQueuedWaitNudges:  func(string, []string) error { withdrawn++; return nil },
+		cityUsesManagedReconciler: func(string) bool { return true },
+		pokeController:            func(string, reconcilekey.Key) error { pokes++; return nil },
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doSessionWake(b.ID, &stdout, &stderr, false, deps); code != 1 {
+		t.Fatalf("doSessionWake() = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{
+		"gc session wake: session " + b.ID + " cannot be woken: ",
+		`"future-state"`,
+		"gc session close " + b.ID,
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+		}
+	}
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !maps.Equal(got.Metadata, before) {
+		t.Fatalf("metadata = %v, want it unchanged: %v", got.Metadata, before)
+	}
+	if ops := cliOpRows(t, h.opStore); len(ops) != 0 || withdrawn != 0 || pokes != 0 {
+		t.Fatalf("op rows = %+v, withdrawals = %d, pokes = %d; want none", ops, withdrawn, pokes)
+	}
+
+	managed, err := store.Create(beads.Bead{Title: "worker", Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+		"template": "worker", "session_name": "worker-2", "state": "asleep",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doSessionWake(managed.ID, &bytes.Buffer{}, &bytes.Buffer{}, false, deps)
+	if ops := cliOpRows(t, h.opStore); len(ops) != 1 {
+		t.Fatalf("op rows after a managed row's wake = %+v, want its op", ops)
 	}
 }
 
