@@ -124,19 +124,27 @@ func SupportedVendors() []string {
 // that a sink symlink will target.
 type SkillEntry struct {
 	// Name is the skill name (sink leaf). Matches the source directory
-	// basename, e.g. "gc-work" or "plan".
+	// basename, e.g. "gc-work" or "plan", qualified as
+	// "<binding>.<basename>" (e.g. "core.gc-work") for a skill imported
+	// under a pack binding.
 	Name string
 	// Source is the absolute filesystem path of the source directory.
 	// The materialized symlink targets this path.
 	Source string
 	// Origin is a diagnostic label describing which catalog this entry
-	// came from. One of: "city", "<bootstrap-pack-name>", "agent".
+	// came from. One of: "city", "<binding-name>" for an imported pack,
+	// "<bootstrap-pack-name>", "agent".
 	Origin string
 	// Description is the one-line summary pulled from the SKILL.md YAML
 	// frontmatter `description:` field, or "" when the frontmatter is
 	// absent/malformed. Used by prompt-rendering surfaces that want to
 	// show each skill's purpose alongside its name.
 	Description string
+	// FrontmatterName is the SKILL.md YAML frontmatter `name:` value, or
+	// "" when unavailable. It is display metadata only — a provider that
+	// registers skills by frontmatter name loads the skill under it — and
+	// never an identity key: Name keys the sink, manifest and fingerprints.
+	FrontmatterName string
 }
 
 // ShadowedEntry records a name that was provided by more than one source
@@ -927,11 +935,13 @@ func readSkillDir(root, origin string) ([]SkillEntry, error) {
 		if _, statErr := os.Stat(skillMD); statErr != nil {
 			continue
 		}
+		fm := readSkillFrontmatter(skillMD)
 		out = append(out, SkillEntry{
-			Name:        e.Name(),
-			Source:      dir,
-			Origin:      origin,
-			Description: readSkillFrontmatter(skillMD).Description,
+			Name:            e.Name(),
+			Source:          dir,
+			Origin:          origin,
+			Description:     fm.Description,
+			FrontmatterName: fm.Name,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

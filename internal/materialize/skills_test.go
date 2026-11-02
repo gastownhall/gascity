@@ -122,6 +122,31 @@ func TestReadSkillDirPopulatesDescription(t *testing.T) {
 	if entries[0].Description != "Plan the work" {
 		t.Errorf("Description = %q, want %q", entries[0].Description, "Plan the work")
 	}
+	if entries[0].FrontmatterName != "plan" {
+		t.Errorf("FrontmatterName = %q, want %q", entries[0].FrontmatterName, "plan")
+	}
+
+	// A directory basename that differs from the frontmatter name keeps
+	// the basename as Name and reports the frontmatter name separately.
+	renamedRoot := t.TempDir()
+	renamedDir := filepath.Join(renamedRoot, "work-dir")
+	if err := os.MkdirAll(renamedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(renamedDir, "SKILL.md"),
+		[]byte("---\nname: gc-work\ndescription: Working with beads\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	renamed, err := readSkillDir(renamedRoot, "city")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(renamed) != 1 || renamed[0].Name != "work-dir" || renamed[0].FrontmatterName != "gc-work" {
+		t.Fatalf("entries = %+v, want one entry Name=work-dir FrontmatterName=gc-work", renamed)
+	}
+	if renamed[0].Description != "Working with beads" {
+		t.Errorf("Description = %q, want %q", renamed[0].Description, "Working with beads")
+	}
 }
 
 func TestVendorSink(t *testing.T) {
@@ -376,6 +401,43 @@ func TestLoadCityCatalogImportedPackSkills(t *testing.T) {
 
 	if len(cat.OwnedRoots) != 2 {
 		t.Fatalf("owned roots = %v, want 2 roots", cat.OwnedRoots)
+	}
+}
+
+// TestLoadCityCatalogImportedSkillKeepsFrontmatterName pins that binding
+// qualification renames only the catalog entry: the imported skill's
+// SKILL.md `name:` survives as FrontmatterName for prompt rendering.
+func TestLoadCityCatalogImportedSkillKeepsFrontmatterName(t *testing.T) {
+	t.Setenv("GC_HOME", "")
+	importedPack := t.TempDir()
+	importedDir := filepath.Join(importedPack, "skills")
+	mkSkill(t, importedDir, "gc-work")
+
+	cat, err := LoadCityCatalog("", config.DiscoveredSkillCatalog{
+		SourceDir:   importedDir,
+		PackDir:     importedPack,
+		PackName:    "core",
+		BindingName: "core",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cat.Entries) != 1 {
+		t.Fatalf("entries = %+v, want 1", cat.Entries)
+	}
+	wantSource, err := filepath.Abs(filepath.Join(importedDir, "gc-work"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := SkillEntry{
+		Name:            "core.gc-work",
+		Source:          wantSource,
+		Origin:          "core",
+		Description:     "test skill",
+		FrontmatterName: "gc-work",
+	}
+	if got := cat.Entries[0]; got != want {
+		t.Fatalf("entry = %+v, want %+v", got, want)
 	}
 }
 
