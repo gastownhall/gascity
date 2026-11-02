@@ -20,9 +20,10 @@ func compactQuarantineMarkerPath(fixture compactScriptFixture, db string) string
 }
 
 // installCompactLiveFault wraps the fake dolt so that, after a statement
-// against db whose text contains trigger returns (whatever its exit status),
-// the shell action runs. The statement's own exit status is preserved.
-func installCompactLiveFault(t *testing.T, fixture compactScriptFixture, db, trigger, action string) {
+// against the beads database whose text contains trigger returns (whatever its
+// exit status), the shell action runs. The statement's own exit status is
+// preserved.
+func installCompactLiveFault(t *testing.T, fixture compactScriptFixture, trigger, action string) {
 	t.Helper()
 	doltPath := filepath.Join(fixture.binDir, "dolt")
 	realPath := filepath.Join(fixture.binDir, "dolt.real")
@@ -49,7 +50,7 @@ if [ "$target" = %s ]; then
   esac
 fi
 exit "$rc"
-`, shellQuote(realPath), shellQuote(db), shellQuote(trigger), action))
+`, shellQuote(realPath), shellQuote("beads"), shellQuote(trigger), action))
 }
 
 // compactLiveRemoveDirAction removes db's directory from the data dir.
@@ -171,7 +172,7 @@ func TestCompactScriptAcceptsLiveProbeSettings(t *testing.T) {
 // quarantined even though SQL still answers for it.
 func TestCompactScriptQuarantinesWhenFlattenRemovesDatabaseDirectory(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
-	installCompactLiveFault(t, fixture, "beads", "DOLT_RESET", compactLiveRemoveDirAction(fixture, "beads"))
+	installCompactLiveFault(t, fixture, "DOLT_RESET", compactLiveRemoveDirAction(fixture, "beads"))
 
 	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", compactLiveFastProbe)
 	if err == nil {
@@ -193,7 +194,7 @@ func TestCompactScriptQuarantinesWhenFlattenRemovesDatabaseDirectory(t *testing.
 // quarantined and the run fails.
 func TestCompactScriptAbortsWhenDatabaseLeavesDataDirAfterGC(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
-	installCompactLiveFault(t, fixture, "beads", "DOLT_GC", compactLiveRemoveDirAction(fixture, "beads"))
+	installCompactLiveFault(t, fixture, "DOLT_GC", compactLiveRemoveDirAction(fixture, "beads"))
 
 	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 	if err == nil {
@@ -224,7 +225,7 @@ func TestCompactScriptQuarantinesWhenRewriteLeavesDatabaseUnserved(t *testing.T)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fixture := newCompactScriptFixture(t)
-			installCompactLiveFault(t, fixture, "beads", tt.trigger, compactLiveUnserveAction(fixture, "beads", "forever"))
+			installCompactLiveFault(t, fixture, tt.trigger, compactLiveUnserveAction(fixture, "beads", "forever"))
 
 			out, err := fixture.run(t, tt.mode, "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
 				"GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=2", compactLiveFastProbe)
@@ -235,6 +236,50 @@ func TestCompactScriptQuarantinesWhenRewriteLeavesDatabaseUnserved(t *testing.T)
 			marker := compactQuarantineMarkerPath(fixture, "beads")
 			if got := compactMarkerValue(t, marker, "live_gate_probe_failure"); !strings.Contains(got, "database not found: beads") {
 				t.Fatalf("marker live_gate_probe_failure = %q, want the server's refusal", got)
+			}
+		})
+	}
+}
+
+// TestCompactScriptLiveProbeRecoversWithinConfiguredAttempts asserts that a
+// served-HEAD probe that fails transiently and recovers within the configured
+// attempts writes no liveness quarantine, leaving the rewrite's own result to
+// decide the outcome.
+func TestCompactScriptLiveProbeRecoversWithinConfiguredAttempts(t *testing.T) {
+	tests := []struct {
+		name    string
+		mode    string
+		trigger string
+		wantErr bool
+	}{
+		{name: "flatten and GC succeed", mode: "success", trigger: "DOLT_GC", wantErr: false},
+		{name: "full GC fails", mode: "gc_failure", trigger: "DOLT_GC", wantErr: true},
+		{name: "flatten fails", mode: "flatten_failure", trigger: "DOLT_RESET", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			installCompactLiveFault(t, fixture, tt.trigger, compactLiveUnserveAction(fixture, "beads", "2"))
+
+			out, err := fixture.run(t, tt.mode, "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+				"GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=3", compactLiveFastProbe)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("compact err = %v, want error %v: the rewrite result must decide\n%s", err, tt.wantErr, out)
+			}
+			if _, statErr := os.Stat(compactQuarantineMarkerPath(fixture, "beads")); !os.IsNotExist(statErr) {
+				t.Fatalf("a probe that recovers must not quarantine (stat err=%v):\n%s", statErr, out)
+			}
+			if strings.Contains(out, compactLiveReason) {
+				t.Fatalf("a probe that recovers must not report a live-gate failure:\n%s", out)
+			}
+			probes := 0
+			for _, line := range compactDoltLogLines(t, fixture) {
+				if strings.Contains(line, "SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))") {
+					probes++
+				}
+			}
+			if probes < 3 {
+				t.Fatalf("the gate must retry the probe until it recovers, saw %d probes", probes)
 			}
 		})
 	}

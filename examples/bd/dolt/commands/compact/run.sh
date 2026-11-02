@@ -1058,6 +1058,30 @@ live_probe_once() {
   return 0
 }
 
+# live_gate_probe DB — live_probe_once up to GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS
+# times, sleeping GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS between attempts. Each
+# failed attempt is logged; live_probe_error keeps the last failure.
+live_gate_probe() {
+  _lg_db="$1"
+  _lg_attempt=1
+  while :; do
+    if live_probe_once "$_lg_db"; then
+      if [ "$_lg_attempt" -gt 1 ]; then
+        printf 'compact: db=%s live probe recovered on attempt %s/%s\n' \
+          "$_lg_db" "$_lg_attempt" "$live_probe_attempts" >&2
+      fi
+      return 0
+    fi
+    printf 'compact: db=%s live probe attempt %s/%s failed: %s\n' \
+      "$_lg_db" "$_lg_attempt" "$live_probe_attempts" "$live_probe_error" >&2
+    if [ "$_lg_attempt" -ge "$live_probe_attempts" ]; then
+      return 1
+    fi
+    _lg_attempt=$((_lg_attempt + 1))
+    sleep "$live_probe_delay_secs"
+  done
+}
+
 # live_gate_arm DB STEP [PRE_HEAD] — arm the gate before a rewrite. The first
 # arm for a database records the baseline: PRE_HEAD when the caller already
 # holds it, else a served-HEAD probe, plus whether <data-dir>/<db>/.dolt
@@ -1069,7 +1093,7 @@ live_gate_arm() {
   _la_head="${3:-}"
   if [ "$live_gate_armed" != "1" ]; then
     if [ -z "$_la_head" ]; then
-      if ! live_probe_once "$_la_db"; then
+      if ! live_gate_probe "$_la_db"; then
         printf 'compact: db=%s live-gate baseline before %s failed: %s — not rewriting\n' \
           "$_la_db" "$_la_step" "$live_probe_error" >&2
         return 1
@@ -1100,7 +1124,7 @@ live_gate_check() {
   fi
   _lc_probe_ok=1
   live_gate_probe_failure=""
-  if ! live_probe_once "$_lc_db"; then
+  if ! live_gate_probe "$_lc_db"; then
     _lc_probe_ok=0
     live_gate_probe_failure=$live_probe_error
   fi
