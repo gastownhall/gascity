@@ -378,7 +378,7 @@ func drainCancelPendingStart(cityPath string, cfg *config.City, target sessionRu
 	defer release()
 	now := time.Now()
 	if info.PendingCreateClaim {
-		if _, ok := rollbackPendingCreateClears(info, sessionFrontDoor(store), now,
+		if _, ok := rollbackPendingCreateClears(info, cliSessionFrontDoor(store, cfg, cityPath), now,
 			"gc runtime drain: cancel pending start of "+info.ID, nil, stderr); !ok {
 			// Superseded or already retired: nothing was written; the row the
 			// probe saw is not the row that reads now.
