@@ -208,3 +208,87 @@ func TestExecutionBackstopAnAnswerToTheLastNudgeIsNotDrained(t *testing.T) {
 		t.Fatalf("hold breadcrumb long after the last nudge = %q, want %s", got, executionHoldExecuting)
 	}
 }
+
+// TestExecutionBackstopHoldsALegacyRecordedClaim (ga-6eefx8, #8313): on a
+// legacy city whose session store has no conditional writer, the seat's hook
+// records its claim in work_started (recordWorkStarted, the city's legacy
+// answer), and that entry is the backstop's started evidence for a claim no
+// step_started can name: a plain claim and a formula v1 step. A seat with a
+// nudge keeps its ordinary held-claim nudges and, once they are spent, is
+// held as executing; a seat with nothing to send (no nudge configured, its
+// stamp never persisted) is held at once. Neither is drained or reported
+// stalled. Kills the CAS-only record that left the cell empty there, so
+// such a seat drained at 0/3.
+func TestExecutionBackstopHoldsALegacyRecordedClaim(t *testing.T) {
+	const token = "incarnation-2"
+	for _, shape := range []struct {
+		name  string
+		strip []string // the claim's stamps that make it no lifecycle candidate
+	}{
+		{"plain claim", []string{beadmeta.RootBeadIDMetadataKey, beadmeta.StepIDMetadataKey, beadmeta.SessionIDMetadataKey, beadmeta.SessionNameMetadataKey}},
+		{"v1 step", []string{beadmeta.SessionIDMetadataKey, beadmeta.SessionNameMetadataKey}},
+	} {
+		for _, nudge := range []struct {
+			name      string
+			noContent bool
+		}{
+			{"nudges exhausted", false},
+			{"no nudge content", true},
+		} {
+			t.Run(shape.name+", "+nudge.name, func(t *testing.T) {
+				f := newExecutionBackstopFixture(t)
+				f.workStoreRef = "gascity"
+				if nudge.noContent {
+					f.cfg.Agents[0].Nudge = ""
+					f.sessionStore = stampRefusingStore{Store: f.store}
+				}
+				strip := map[string]string{}
+				for _, k := range shape.strip {
+					strip[k] = ""
+				}
+				if err := f.store.SetMetadataBatch(f.work.ID, strip); err != nil {
+					t.Fatalf("stripping the claim's stamps: %v", err)
+				}
+				f.setSessionMeta(t, map[string]string{
+					"instance_token": token,
+					"generation":     "2",
+					"last_woke_at":   f.now.Add(-20 * time.Minute).Format(time.RFC3339),
+				})
+				front := sessionpkg.NewStore(beads.SessionStore{Store: f.store})
+				if w, _, err := beads.ResolveConditionalWriter(beads.SessionStore{Store: f.store}); err != nil || w != nil {
+					t.Fatalf("fixture resolves writer %v, err %v; want none", w, err)
+				}
+				if res, err := recordWorkStarted(front, f.session.ID, hookStartedFence{Token: token, Gen: 2, HasGen: true},
+					hookStartedKey{Store: "rig:gascity", Bead: f.work.ID}, sessionpkg.WorkStartedViaClaim, f.now, legacyRecords); err != nil || res != hookStartedRecorded {
+					t.Errorf("the hook's record = %v, %v; want recorded", res, err)
+				}
+
+				f.tickStale(t)
+
+				if len(f.drained) != 0 || f.stalledEvents() != 0 {
+					t.Fatalf("drains %v, step_stalled %d; want neither for a seat whose hook recorded its claim; stdout=%s",
+						f.drained, f.stalledEvents(), f.stdout.String())
+				}
+				if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, executionHoldExecuting) {
+					t.Fatalf("hold breadcrumb = %q, want %s", got, executionHoldExecuting)
+				}
+				want := fmt.Sprintf(defaultHeldClaimNudge, f.work.ID)
+				got := f.nudgesDelivered()
+				if nudge.noContent {
+					if len(got) != 0 {
+						t.Fatalf("nudges delivered = %q, want none: there is nothing to send", got)
+					}
+					return
+				}
+				if len(got) != idleClaimNudgeMaxAttempts {
+					t.Fatalf("nudges delivered = %q, want the %d ordinary held-claim nudges", got, idleClaimNudgeMaxAttempts)
+				}
+				for _, n := range got {
+					if n != want {
+						t.Fatalf("nudges delivered = %q, want each the held-claim nudge %q", got, want)
+					}
+				}
+			})
+		}
+	}
+}
