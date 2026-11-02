@@ -4,6 +4,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -963,6 +965,63 @@ func TestResolveTemplateAppendixShowsImportedSkillFrontmatterName(t *testing.T) 
 			tp := resolveSkillAppendixTemplate(t, cityPath, &cat, c.agent)
 			if !strings.Contains(tp.Prompt, want) {
 				t.Errorf("prompt missing %q:\n%s", want, tp.Prompt)
+			}
+		})
+	}
+}
+
+// TestResolveTemplateFrontmatterNameAnnotationKeepsFingerprints pins that
+// the SKILL.md name annotation changes only the rendered prompt: the
+// qualified skill fingerprint keys, PreStart commands and runtime core,
+// provision and launch hashes match a catalog without display names.
+func TestResolveTemplateFrontmatterNameAnnotationKeepsFingerprints(t *testing.T) {
+	cityPath, cat := importedFrontmatterSkillFixture(t)
+	cleared := cat
+	cleared.Entries = append([]materialize.SkillEntry(nil), cat.Entries...)
+	for i := range cleared.Entries {
+		cleared.Entries[i].FrontmatterName = ""
+	}
+	for _, c := range skillAppendixAgents {
+		t.Run(c.name, func(t *testing.T) {
+			annotated := resolveSkillAppendixTemplate(t, cityPath, &cat, c.agent)
+			plain := resolveSkillAppendixTemplate(t, cityPath, &cleared, c.agent)
+
+			if !strings.Contains(annotated.Prompt, "(SKILL.md name: `gc-work`)") {
+				t.Fatalf("prompt missing the SKILL.md name annotation:\n%s", annotated.Prompt)
+			}
+			if strings.Contains(plain.Prompt, "SKILL.md name") {
+				t.Fatalf("catalog without display names still annotated:\n%s", plain.Prompt)
+			}
+			if annotated.FPExtra["skills:core.gc-work"] == "" {
+				t.Errorf("FPExtra = %+v, want a skills:core.gc-work entry", annotated.FPExtra)
+			}
+			if _, ok := annotated.FPExtra["skills:gc-work"]; ok {
+				t.Errorf("FPExtra = %+v keys the skill by its SKILL.md name", annotated.FPExtra)
+			}
+			if !reflect.DeepEqual(annotated.FPExtra, plain.FPExtra) {
+				t.Errorf("FPExtra annotated = %+v, plain = %+v", annotated.FPExtra, plain.FPExtra)
+			}
+			hasPreStart := slices.ContainsFunc(annotated.Hints.PreStart, func(entry string) bool {
+				return strings.Contains(entry, "internal materialize-skills")
+			})
+			if hasPreStart != c.wantPreStart {
+				t.Errorf("materialize-skills PreStart = %v, want %v: %v", hasPreStart, c.wantPreStart, annotated.Hints.PreStart)
+			}
+			if !slices.Equal(annotated.Hints.PreStart, plain.Hints.PreStart) {
+				t.Errorf("PreStart annotated = %v, plain = %v", annotated.Hints.PreStart, plain.Hints.PreStart)
+			}
+			annotatedCfg, plainCfg := templateParamsToConfig(annotated), templateParamsToConfig(plain)
+			for _, h := range []struct {
+				name string
+				fn   func(runtime.Config) string
+			}{
+				{"core", runtime.CoreFingerprint},
+				{"provision", runtime.ProvisionFingerprint},
+				{"launch", runtime.LaunchFingerprint},
+			} {
+				if got, want := h.fn(annotatedCfg), h.fn(plainCfg); got != want {
+					t.Errorf("%s fingerprint annotated = %s, plain = %s", h.name, got, want)
+				}
 			}
 		})
 	}
