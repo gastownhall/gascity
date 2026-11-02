@@ -249,13 +249,13 @@ func validateProjectedHostedStoreIdentity(cfgEnv map[string]string, prefix, mana
 	return projected, nil
 }
 
-// buildPod creates a pod manifest compatible with gc-session-k8s.
-// Same labels, annotations, container names, volumes, and tmux-inside-pod
-// pattern so mixed-mode migration works.
 // storeReadyMarkerAnnotation names the path that releases a prebaked pod's
 // entrypoint once the controller has verified its store.
 const storeReadyMarkerAnnotation = "gc-store-ready-marker"
 
+// buildPod creates a pod manifest compatible with gc-session-k8s.
+// Same labels, annotations, container names, volumes, and tmux-inside-pod
+// pattern so mixed-mode migration works.
 func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error) {
 	podName := SanitizeName(name)
 	label := SanitizeLabel(name)
