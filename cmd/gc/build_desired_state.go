@@ -6253,7 +6253,7 @@ func stampRunSessionIdentity(cfg *config.City, workBeads []beads.Bead, workStore
 			patch[beadmeta.SessionNameMetadataKey] = sessionName
 		}
 		if workDir != "" && strings.TrimSpace(wb.Metadata[beadmeta.WorkDirMetadataKey]) != workDir &&
-			(!sbInfo.PoolManaged || workDirStampHasOwnershipEvidence(wb.Metadata, workDir)) &&
+			(!isPoolManagedSessionInfo(sbInfo) || workDirStampHasOwnershipEvidence(wb.Metadata, workDir)) &&
 			!workDirStampWouldClobberEvidence(cfg, wb.Metadata, workDir) {
 			patch[beadmeta.WorkDirMetadataKey] = workDir
 		}
@@ -6267,7 +6267,7 @@ func stampRunSessionIdentity(cfg *config.City, workBeads []beads.Bead, workStore
 		// workBeads and route-time stamping skips it for pool agents. The
 		// dashboard's root-only snapshot reads the root's own metadata, so a
 		// worked step back-fills its root via gc.root_bead_id. (#2843)
-		stampRunRootFromStep(cfg, store, wb, sessionName, workDir, !sbInfo.PoolManaged, stampedRoots, stderr)
+		stampRunRootFromStep(cfg, store, wb, sessionName, workDir, !isPoolManagedSessionInfo(sbInfo), stampedRoots, stderr)
 	}
 }
 
