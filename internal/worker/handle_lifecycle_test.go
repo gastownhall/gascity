@@ -15,13 +15,19 @@ import (
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
+// The command and rotated key every rotated-key case launches and stores.
+const (
+	rotatedKeyCommand = "claude --dangerously-skip-permissions"
+	rotatedKey        = "k-rotated-2"
+)
+
 // newRotatedKeyHandle builds a handle over a session bead left by a restart
 // handoff: RestartRequestPatch rotated the session key to key, the row is
 // asleep with a past creation_complete_at and an empty started_config_hash.
 // The handle probes probeRoot for the rotated key's transcript, so one exists
 // only when the case writes it there. The handle's spec command is
-// specCommand, or the stored command when empty.
-func newRotatedKeyHandle(t *testing.T, probeRoot, key, command, specCommand, provider string, resume sessionpkg.ProviderResume) (*SessionHandle, *beads.MemStore, sessionpkg.Info) {
+// specCommand, or the stored command when empty, and its spec env is specEnv.
+func newRotatedKeyHandle(t *testing.T, probeRoot, specCommand, provider string, specEnv map[string]string, resume sessionpkg.ProviderResume) (*SessionHandle, *beads.MemStore, sessionpkg.Info) {
 	t.Helper()
 
 	store := beads.NewMemStore()
@@ -32,7 +38,7 @@ func newRotatedKeyHandle(t *testing.T, probeRoot, key, command, specCommand, pro
 		BeadOnly: true,
 		Template: "worker",
 		Title:    "Probe",
-		Command:  command,
+		Command:  rotatedKeyCommand,
 		WorkDir:  t.TempDir(),
 		Provider: provider,
 		Resume:   resume,
@@ -41,7 +47,7 @@ func newRotatedKeyHandle(t *testing.T, probeRoot, key, command, specCommand, pro
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	patch := sessionpkg.RestartRequestPatch(key, time.Now())
+	patch := sessionpkg.RestartRequestPatch(rotatedKey, time.Now())
 	patch["state"] = string(sessionpkg.StateAsleep)
 	patch["creation_complete_at"] = "2026-01-01T00:00:00Z"
 	if err := store.SetMetadataBatch(created.ID, patch); err != nil {
@@ -49,7 +55,7 @@ func newRotatedKeyHandle(t *testing.T, probeRoot, key, command, specCommand, pro
 	}
 
 	if specCommand == "" {
-		specCommand = command
+		specCommand = rotatedKeyCommand
 	}
 	handle, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
@@ -61,6 +67,7 @@ func newRotatedKeyHandle(t *testing.T, probeRoot, key, command, specCommand, pro
 			Command:  specCommand,
 			WorkDir:  created.WorkDir,
 			Provider: provider,
+			Env:      specEnv,
 			Resume:   resume,
 		},
 	})
@@ -82,10 +89,7 @@ func newRotatedKeyHandle(t *testing.T, probeRoot, key, command, specCommand, pro
 // transcript a resume would reattach to is probeable and present. The bead is
 // never written: the key stays stored with its metadata unchanged.
 func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
-	const (
-		command = "claude --dangerously-skip-permissions"
-		key     = "k-rotated-2"
-	)
+	command, key := rotatedKeyCommand, rotatedKey
 
 	for _, tt := range []struct {
 		name          string
@@ -164,7 +168,7 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			}
 
 			root := t.TempDir()
-			handle, store, info := newRotatedKeyHandle(t, root, key, command, tt.specCommand, provider, resume)
+			handle, store, info := newRotatedKeyHandle(t, root, tt.specCommand, provider, nil, resume)
 			if len(tt.meta) > 0 {
 				if err := store.SetMetadataBatch(info.ID, tt.meta); err != nil {
 					t.Fatalf("SetMetadataBatch(%v): %v", tt.meta, err)
@@ -274,4 +278,90 @@ func TestSessionHandleAttachAfterRestartHandoffStartsWithSessionID(t *testing.T)
 	if !strings.Contains(secondStart.Config.Command, "--session-id "+rotated) {
 		t.Fatalf("second start command = %q, want --session-id %s", secondStart.Config.Command, rotated)
 	}
+}
+
+// assertRotatedStart runs startCommand for the rotated-key row and pins both
+// the built command and the row being untouched.
+func assertRotatedStart(t *testing.T, handle *SessionHandle, store *beads.MemStore, info sessionpkg.Info, want string) {
+	t.Helper()
+	before, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get before: %v", err)
+	}
+	got, err := handle.startCommand(info.ID)
+	if err != nil {
+		t.Fatalf("startCommand: %v", err)
+	}
+	if got != want {
+		t.Fatalf("startCommand() = %q, want %q", got, want)
+	}
+	after, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get after: %v", err)
+	}
+	if !reflect.DeepEqual(before.Metadata, after.Metadata) {
+		t.Fatalf("metadata changed:\nbefore: %v\nafter:  %v", before.Metadata, after.Metadata)
+	}
+}
+
+// TestStartCommandRotatedKeyClaudeConfigDir pins the rotated-key probe's roots
+// when the launch env names a CLAUDE_CONFIG_DIR: an absolute dir's projects
+// root joins the handle's search paths, so a transcript that exists only under
+// it reads present and keeps the resume, while a relative or ~ value adds no
+// root — the provider resolves those against its own working dir and home,
+// which the probe cannot reproduce — so a transcript only under them reads
+// absent and the start switches to the session-id flag.
+func TestStartCommandRotatedKeyClaudeConfigDir(t *testing.T) {
+	command, key := rotatedKeyCommand, rotatedKey
+	resume := sessionpkg.ProviderResume{ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--session-id"}
+	writeKeyed := func(dir string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q): %v", dir, err)
+		}
+		writeWorkerTestJSONL(t, filepath.Join(dir, key+".jsonl"), []map[string]any{{"type": "user"}})
+	}
+
+	t.Run("an absolute dir with the transcript keeps the resume", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("USERPROFILE", "")
+		root := t.TempDir()
+		configDir := filepath.Join(t.TempDir(), "claude-cfg")
+		handle, store, info := newRotatedKeyHandle(t, root, "", "claude",
+			map[string]string{"CLAUDE_CONFIG_DIR": "  " + configDir + "  "}, resume)
+		writeKeyed(filepath.Join(configDir, "projects", sessionlog.ProjectSlug(info.WorkDir)))
+		assertRotatedStart(t, handle, store, info, command+" --resume "+key)
+	})
+
+	t.Run("an absolute dir without the transcript starts with the session-id flag", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("USERPROFILE", "")
+		root := t.TempDir()
+		configDir := filepath.Join(t.TempDir(), "claude-cfg")
+		handle, store, info := newRotatedKeyHandle(t, root, "", "claude",
+			map[string]string{"CLAUDE_CONFIG_DIR": configDir}, resume)
+		assertRotatedStart(t, handle, store, info, command+" --session-id "+key)
+	})
+
+	t.Run("a relative dir adds no root, so its transcript reads absent", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("USERPROFILE", "")
+		root := t.TempDir()
+		handle, store, info := newRotatedKeyHandle(t, root, "", "claude",
+			map[string]string{"CLAUDE_CONFIG_DIR": "relcfg"}, resume)
+		writeKeyed(filepath.Join("relcfg", "projects", sessionlog.ProjectSlug(info.WorkDir)))
+		assertRotatedStart(t, handle, store, info, command+" --session-id "+key)
+	})
+
+	t.Run("a home-relative dir adds no root, so its transcript reads absent", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("USERPROFILE", "")
+		root := t.TempDir()
+		handle, store, info := newRotatedKeyHandle(t, root, "", "claude",
+			map[string]string{"CLAUDE_CONFIG_DIR": "~/.claude-alt"}, resume)
+		writeKeyed(filepath.Join(home, ".claude-alt", "projects", sessionlog.ProjectSlug(info.WorkDir)))
+		assertRotatedStart(t, handle, store, info, command+" --session-id "+key)
+	})
 }
