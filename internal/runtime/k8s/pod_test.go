@@ -152,6 +152,7 @@ func TestBuildPodRejectsMalformedSecretProjection(t *testing.T) {
 	}{
 		{"blank env name", &Provider{secretEnv: []runtime.K8sSecretEnv{{Secret: "s", Key: "k"}}}, "name"},
 		{"invalid env name", &Provider{secretEnv: []runtime.K8sSecretEnv{{Name: "bad-name", Secret: "s", Key: "k"}}}, "environment variable"},
+		{"reserved worker marker", &Provider{secretEnv: []runtime.K8sSecretEnv{{Name: "GC_K8S_WORKER_POD", Secret: "s", Key: "k"}}}, "reserved for the Kubernetes worker marker"},
 		{"duplicate env name", &Provider{secretEnv: []runtime.K8sSecretEnv{{Name: "TOKEN", Secret: "s", Key: "k"}, {Name: "TOKEN", Secret: "s2", Key: "k"}}}, "duplicated"},
 		{"blank mount secret", &Provider{secretMounts: []runtime.K8sSecretMount{{MountPath: "/secret"}}}, "secret"},
 		{"relative mount path", &Provider{secretMounts: []runtime.K8sSecretMount{{Secret: "s", MountPath: "secret"}}}, "absolute"},
