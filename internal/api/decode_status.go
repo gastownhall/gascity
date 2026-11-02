@@ -176,6 +176,9 @@ func statusAgentViewFromGen(g genclient.StatusAgentDetail) StatusAgentView {
 	if g.SessionName != nil {
 		out.SessionName = *g.SessionName
 	}
+	if g.SessionId != nil {
+		out.SessionID = *g.SessionId
+	}
 	if g.GroupName != nil {
 		out.GroupName = *g.GroupName
 	}

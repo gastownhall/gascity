@@ -2052,9 +2052,9 @@ func TestCmdSessionListJSONNoSessionsReturnsEmptyEnvelope(t *testing.T) {
 
 func TestRenderSessionListFromAPIJSONUsesSnakeCaseSessionFields(t *testing.T) {
 	var stdout bytes.Buffer
-	code := renderSessionListFromAPI(api.CachedRead[[]SessionView]{
+	code := renderSessionListFromAPI(api.CachedRead[[]api.SessionListView]{
 		AgeSeconds: 1.25,
-		Body: []SessionView{
+		Body: []api.SessionListView{
 			{
 				ID:          "gc-abc",
 				Template:    "worker",
@@ -2064,19 +2064,19 @@ func TestRenderSessionListFromAPIJSONUsesSnakeCaseSessionFields(t *testing.T) {
 				Alias:       "worker-1",
 				SessionName: "worker-gc-abc",
 				WorkDir:     "/tmp/gc/workspaces/worker",
-				CreatedAt:   "2026-04-23T10:00:00Z",
-				LastActive:  "2026-04-23T12:00:00Z",
+				CreatedAt:   time.Date(2026, 4, 23, 10, 0, 0, 0, time.UTC),
+				LastActive:  time.Date(2026, 4, 23, 12, 0, 0, 0, time.UTC),
 				Attached:    true,
 				Running:     true,
 				LastOutput:  "ready",
 			},
 		},
-	}, true, &stdout)
+	}, "", "", true, &stdout, &bytes.Buffer{})
 	if code != 0 {
 		t.Fatalf("renderSessionListFromAPI(--json) = %d, want 0", code)
 	}
 	out := stdout.String()
-	for _, want := range []string{`"id"`, `"session_name"`, `"work_dir"`, `"created_at"`, `"last_active"`, `"last_output"`} {
+	for _, want := range []string{`"id"`, `"session_name"`, `"work_dir"`, `"created_at"`, `"last_active"`, `"last_output"`, `"filters"`, `"summary"`, `"closed"`, `"name"`} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("API JSON output missing %s:\n%s", want, out)
 		}
@@ -2106,8 +2106,8 @@ func TestRenderSessionListFromAPIJSONUsesSnakeCaseSessionFields(t *testing.T) {
 
 func TestRenderSessionListFromAPIHumanIncludesTitleAndWorkDir(t *testing.T) {
 	var stdout bytes.Buffer
-	code := renderSessionListFromAPI(api.CachedRead[[]SessionView]{
-		Body: []SessionView{
+	code := renderSessionListFromAPI(api.CachedRead[[]api.SessionListView]{
+		Body: []api.SessionListView{
 			{
 				ID:          "gc-abc",
 				Template:    "gascity-packs/packer.packsmith",
@@ -2117,16 +2117,16 @@ func TestRenderSessionListFromAPIHumanIncludesTitleAndWorkDir(t *testing.T) {
 				Alias:       "worker-1",
 				SessionName: "worker-gc-abc",
 				WorkDir:     "/tmp/gc/.gc/workspaces/gascity-packs/packs/jjw",
-				CreatedAt:   "2026-04-23T10:00:00Z",
-				LastActive:  "2026-04-23T12:00:00Z",
+				CreatedAt:   time.Date(2026, 4, 23, 10, 0, 0, 0, time.UTC),
+				LastActive:  time.Date(2026, 4, 23, 12, 0, 0, 0, time.UTC),
 			},
 		},
-	}, false, &stdout)
+	}, "", "", false, &stdout, &bytes.Buffer{})
 	if code != 0 {
 		t.Fatalf("renderSessionListFromAPI() = %d, want 0", code)
 	}
 	out := stdout.String()
-	for _, want := range []string{"TITLE", "WORKDIR", "jjw: update workspace docs", "/tmp/gc/.gc/workspaces/gascity-packs/packs/jjw"} {
+	for _, want := range []string{"TITLE", "WORKDIR", "LAST NUDGE", "jjw: update workspace docs", "/tmp/gc/.gc/workspaces/gascity-packs/packs/jjw"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("API human output missing %q:\n%s", want, out)
 		}
@@ -3833,6 +3833,7 @@ func okSessionsHandler(_ *testing.T) http.Handler {
 					"reason":       "config",
 					"title":        "Overseer",
 					"alias":        "mayor",
+					"agent_name":   "mayor",
 					"session_name": "mayor",
 					"provider":     "claude",
 					"created_at":   "2026-04-23T10:00:00Z",
@@ -3980,18 +3981,40 @@ func TestRouteSessionList_APIJSONIncludesCacheAge(t *testing.T) {
 	if len(arr) != 1 {
 		t.Errorf("sessions len = %d, want 1:\n%s", len(arr), stdout.String())
 	}
+	for _, key := range []string{"filters", "summary"} {
+		if _, ok := out[key]; !ok {
+			t.Errorf("%s missing from API --json:\n%s", key, stdout.String())
+		}
+	}
+	for _, row := range arr {
+		if _, ok := row.(map[string]any)["running"].(bool); !ok {
+			t.Errorf("API row lacks a boolean running:\n%s", stdout.String())
+		}
+	}
 
-	// Fallback path must omit _cache_age_s: it renders the local result
-	// (schema_version, ok, filters, sessions, summary), not the API envelope.
+	// The fallback path prints the same document without the API-only
+	// _cache_age_s and running.
 	stdout.Reset()
 	stderr.Reset()
 	if code := routeSessionList(cityPath, "", "", nil, "controller-down", true, &stdout, &stderr); code != 0 {
 		t.Fatalf("fallback exit = %d, stderr=%q", code, stderr.String())
 	}
 	out = nil
-	if err := json.Unmarshal(stdout.Bytes(), &out); err == nil {
-		if _, ok := out["_cache_age_s"]; ok {
-			t.Errorf("_cache_age_s must be absent on fallback:\n%s", stdout.String())
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal fallback stdout: %v\n%s", err, stdout.String())
+	}
+	if _, ok := out["_cache_age_s"]; ok {
+		t.Errorf("_cache_age_s must be absent on fallback:\n%s", stdout.String())
+	}
+	for _, key := range []string{"filters", "summary"} {
+		if _, ok := out[key]; !ok {
+			t.Errorf("%s missing from fallback --json:\n%s", key, stdout.String())
+		}
+	}
+	rows, _ := out["sessions"].([]any)
+	for _, row := range rows {
+		if _, ok := row.(map[string]any)["running"]; ok {
+			t.Errorf("fallback row carries running:\n%s", stdout.String())
 		}
 	}
 }
@@ -4010,6 +4033,7 @@ func TestRouteSessionList_StaleBannerOver30s(t *testing.T) {
 					"template":     "mayor",
 					"state":        "active",
 					"title":        "x",
+					"agent_name":   "mayor",
 					"session_name": "mayor",
 					"provider":     "claude",
 					"created_at":   "2026-04-23T10:00:00Z",

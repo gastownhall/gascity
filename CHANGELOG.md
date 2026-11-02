@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Upgrading Notes
 
 - **Run `gc doctor --fix` in each existing gastown or gascity city after you
-  install this build.** gc now pins gastown 0.1.12 and gascity 0.1.7 (see
+  install this build.** gc now pins gastown 0.1.13 and gascity 0.1.7 (see
   Changed) and serves only those pins from the packs it embeds. A city still
   pinned to an earlier release, which is every city gc 1.3.0 through 1.5.1
   made from the `gastown` or `gascity` template, does not load its config
@@ -712,17 +712,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   breaks the pre-commit formatter. Rebuild it with Go 1.27.3:
   `rm "$(go env GOPATH)/bin/golangci-lint" && make install-tools`.
 
-- **`gc init` pins the gastown pack to registry release 0.1.12 and the
+- **`gc init` pins the gastown pack to registry release 0.1.13 and the
   gascity pack to 0.1.7.** Their role prompts, workflow pages and check
   scripts run bead commands through `gc bd` instead of raw `bd`
   (gascity-packs `9b4df3e`, backported to gastown 0.1.12), so on a split
   city they resolve graph steps in the city binding rather than the work
-  store. Fresh cities, `examples/gastown`, and the pinned-import examples in
-  the docs now use gastown `sha:cb6a612882b8402569c495c90ab75bb257a51bdc`
+  store. Gastown 0.1.13 also keeps the witness patrol's liveness map from
+  letting a closed session row displace a live owner, now that
+  `gc session list --state=all` returns closed rows on every route (#8453).
+  Fresh cities, `examples/gastown`, and the pinned-import examples in
+  the docs now use gastown `sha:66897e7132c9d1160509ee47dd1b935bbd3b9664`
   and gascity `sha:5bf643ca55bd20f080994cc31414ee4596015a0c`. The gastown
-  0.1.11 and 0.1.10 pins (`sha:66c672b5ed00`, `sha:33d3a430a67d`) and the
-  gascity 0.1.6 pin (`sha:3b3b89f2011e`) are recorded as superseded, so
+  0.1.12, 0.1.11 and 0.1.10 pins (`sha:cb6a612882b8`, `sha:66c672b5ed00`,
+  `sha:33d3a430a67d`) and the gascity 0.1.6 pin (`sha:3b3b89f2011e`) are
+  recorded as superseded, so
   `gc doctor --fix` migrates cities still pinned to them.
+
+- **`gc convoy list` hides synthetic convoys by default.** The convoys gc
+  mints for a formula launch on a single bead and for each drained work unit
+  (metadata `gc.synthetic=true`) are left out of the table and of `--json`
+  output, which a busy city filled with thousands of them. The output says how
+  many were hidden (`summary.hidden_synthetic` in `--json`);
+  `--include-synthetic` lists them again. Convoys you create and the
+  auto-convoy `gc sling` wraps a bead in are listed as before.
 
 - **A suspended rig or city is left cold.** gc no longer touches the bead
   store of a suspended rig, or of any scope of a suspended city. That covers
@@ -775,6 +787,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same way. Pass `--version` to choose another constraint.
 
 ### Fixed
+
+- **A stop during a workflow finalizer now ends the control dispatcher.**
+  `gc convoy control --serve` installed a signal handler for each
+  workflow-finalize control, so a SIGTERM or Ctrl-C that landed while the
+  finalizer waited on the source-workflow lock was caught instead of ending
+  the process: the dispatcher kept serving until the stop's grace ran out, and
+  the canceled lock wait quarantined the finalizer and left its source bead
+  open. The dispatcher now keeps the default signal disposition, as it does
+  for every other control kind: a stop ends it at once and leaves the
+  finalizer open for the next dispatcher to retry. The one-shot
+  `gc convoy control <id>` behaves the same way.
 
 - **Formula human gates are now announced and re-nudged.** A `[steps.gate]`
   with `type = "human"` used to create a gate bead with no machine-readable
@@ -1118,6 +1141,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   records it once. Deletes made outside the controller, such as a script's
   `bd purge` or `gc bd delete`, are not covered, and runs stranded before this
   fix stay listed (#5934).
+
+- **`gc convoy list` no longer stops at 100 convoys when the controller
+  serves it.** The API lane read only the first page of `/convoys` and dropped
+  the rest without a word; it now follows `next_cursor` to the end. The
+  commands that open every convoy store (`gc convoy stranded`, `gc beads list`
+  and `show` when served locally) or resolve a convoy by id
+  (`gc convoy status`, `add`, `close`, `target`, `land`) also stop reloading
+  the whole city config once per bead store they open.
 
 - **A config reload no longer creates or rebinds a city's bead store.** When a
   city's `.beads/metadata.json` went missing (for example, a `git` checkout

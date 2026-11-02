@@ -2959,6 +2959,16 @@
       "ConvoyCheckResponse": {
         "additionalProperties": false,
         "properties": {
+          "child_ids": {
+            "description": "IDs of the child beads counted in total, in membership order (created_at, then id); a dangling track appears as the id it names. Omitted when total is 0.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "closed": {
             "description": "Closed child bead count.",
             "format": "int64",
@@ -2971,6 +2981,11 @@
           "convoy_id": {
             "description": "Convoy ID.",
             "type": "string"
+          },
+          "dangling_tracks": {
+            "description": "Child beads counted in total whose tracks dependency names a bead that cannot be resolved. Omitted when 0.",
+            "format": "int64",
+            "type": "integer"
           },
           "total": {
             "description": "Total child bead count.",
@@ -3272,6 +3287,7 @@
               "urn:gascity:error:service-not-found",
               "urn:gascity:error:service-unavailable",
               "urn:gascity:error:session-conflict",
+              "urn:gascity:error:session-inactive",
               "urn:gascity:error:session-not-found",
               "urn:gascity:error:sling-cross-rig",
               "urn:gascity:error:sling-cross-store-route",
@@ -3330,6 +3346,7 @@
               "urn:gascity:error:service-not-found",
               "urn:gascity:error:service-unavailable",
               "urn:gascity:error:session-conflict",
+              "urn:gascity:error:session-inactive",
               "urn:gascity:error:session-not-found",
               "urn:gascity:error:sling-cross-rig",
               "urn:gascity:error:sling-cross-store-route",
@@ -9682,6 +9699,10 @@
           "agent_kind": {
             "type": "string"
           },
+          "agent_name": {
+            "description": "The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Sent on every session by Gas City 1.6 and later servers, empty when the session records none; older servers omit it.",
+            "type": "string"
+          },
           "alias": {
             "type": "string"
           },
@@ -9770,11 +9791,29 @@
           "title": {
             "type": "string"
           },
+          "transport": {
+            "description": "How gc drives the session runtime, for example tmux or acp. Empty when unknown.",
+            "type": "string"
+          },
           "turn": {
             "$ref": "#/components/schemas/SessionTurn",
             "description": "The turn the session's conversation lane last observed, with the runtime's turn capabilities. Set on a single-session read while the city's conversation lane host runs with a kind of [ops] authoritative, once its observer has recorded the session's runtime row."
           },
+          "wake_reasons": {
+            "description": "Why the controller keeps this open session awake (for example session, config, create, attached, keep-warm, wait, pending, pin), as gc session list's REASON column shows them when no lifecycle reason applies. Sent only on GET /sessions?wake_reasons=true, by servers that compute them.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "work_dir": {
+            "type": "string"
+          },
+          "worker_dir": {
+            "description": "The agent process's canonical working directory (a per-bead worktree when it has one), which work_dir may not be.",
             "type": "string"
           }
         },
@@ -13656,6 +13695,10 @@
           },
           "scope": {
             "description": "city or rig.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Bead ID of the session the row's runtime session resolved to. Omitted when no open session bead records that runtime session (always while the city is suspended, when no bead store is read).",
             "type": "string"
           },
           "session_name": {
@@ -51125,26 +51168,36 @@
             }
           },
           {
-            "description": "Include last output preview.",
+            "description": "Include a best-effort last output preview of a running active session. See peek_strict for gc session peek's contract.",
             "explode": false,
             "in": "query",
             "name": "peek",
             "schema": {
-              "description": "Include last output preview.",
+              "description": "Include a best-effort last output preview of a running active session. See peek_strict for gc session peek's contract.",
               "type": "boolean"
             }
           },
           {
-            "description": "Number of lines to include in the last output preview when peek=true. Defaults to 5.",
+            "description": "Number of lines to include in the last output preview when peek=true. Defaults to 5. With peek_strict=true it is passed to the runtime as given, and 0 asks for the runtime's full capture.",
             "explode": false,
             "in": "query",
             "name": "peek_lines",
             "schema": {
-              "description": "Number of lines to include in the last output preview when peek=true. Defaults to 5.",
+              "description": "Number of lines to include in the last output preview when peek=true. Defaults to 5. With peek_strict=true it is passed to the runtime as given, and 0 asks for the runtime's full capture.",
               "format": "int64",
               "maximum": 10000,
               "minimum": 0,
               "type": "integer"
+            }
+          },
+          {
+            "description": "Peek with gc session peek's contract instead of the best-effort preview; implies peek. {id} resolves as for a live-session command, so a closed session is found only by its exact bead id. Every open session that is not suspended is peeked whatever its runtime state, and peek_lines is passed to the runtime as given (0 asks for its full capture). A suspended or closed session is refused with 409 session-inactive, and a failed peek fails the request instead of omitting last_output.",
+            "explode": false,
+            "in": "query",
+            "name": "peek_strict",
+            "schema": {
+              "description": "Peek with gc session peek's contract instead of the best-effort preview; implies peek. {id} resolves as for a live-session command, so a closed session is found only by its exact bead id. Every open session that is not suspended is peeked whatever its runtime state, and peek_lines is passed to the runtime as given (0 asks for its full capture). A suspended or closed session is refused with 409 session-inactive, and a failed peek fails the request instead of omitting last_output.",
+              "type": "boolean"
             }
           },
           {
@@ -55771,6 +55824,16 @@
             "name": "peek",
             "schema": {
               "description": "Include last output preview.",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Include wake_reasons on each open session: why the controller keeps it awake, as gc session list's REASON column shows them. Costs runtime probes per session.",
+            "explode": false,
+            "in": "query",
+            "name": "wake_reasons",
+            "schema": {
+              "description": "Include wake_reasons on each open session: why the controller keeps it awake, as gc session list's REASON column shows them. Costs runtime probes per session.",
               "type": "boolean"
             }
           }

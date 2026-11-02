@@ -3184,6 +3184,9 @@ type ConvoyAddInputBody struct {
 
 // ConvoyCheckResponse defines model for ConvoyCheckResponse.
 type ConvoyCheckResponse struct {
+	// ChildIds IDs of the child beads counted in total, in membership order (created_at, then id); a dangling track appears as the id it names. Omitted when total is 0.
+	ChildIds *[]string `json:"child_ids,omitempty"`
+
 	// Closed Closed child bead count.
 	Closed int64 `json:"closed"`
 
@@ -3192,6 +3195,9 @@ type ConvoyCheckResponse struct {
 
 	// ConvoyId Convoy ID.
 	ConvoyId string `json:"convoy_id"`
+
+	// DanglingTracks Child beads counted in total whose tracks dependency names a bead that cannot be resolved. Omitted when 0.
+	DanglingTracks *int64 `json:"dangling_tracks,omitempty"`
 
 	// Total Total child bead count.
 	Total int64 `json:"total"`
@@ -5767,28 +5773,31 @@ type SessionResponse struct {
 	Activity   *string `json:"activity,omitempty"`
 
 	// ActivitySource Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.
-	ActivitySource         *SessionResponseActivitySource `json:"activity_source,omitempty"`
-	AgentKind              *string                        `json:"agent_kind,omitempty"`
-	Alias                  *string                        `json:"alias,omitempty"`
-	Attached               bool                           `json:"attached"`
-	ConfiguredNamedSession *bool                          `json:"configured_named_session,omitempty"`
-	ContextPct             *int64                         `json:"context_pct,omitempty"`
-	ContextWindow          *int64                         `json:"context_window,omitempty"`
-	CreatedAt              string                         `json:"created_at"`
-	DisplayName            *string                        `json:"display_name,omitempty"`
-	Id                     string                         `json:"id"`
-	Kind                   *string                        `json:"kind,omitempty"`
-	LastActive             *string                        `json:"last_active,omitempty"`
-	LastNudgeDeliveredAt   *string                        `json:"last_nudge_delivered_at,omitempty"`
-	LastOutput             *string                        `json:"last_output,omitempty"`
-	Metadata               *map[string]string             `json:"metadata,omitempty"`
-	Model                  *string                        `json:"model,omitempty"`
-	Options                *map[string]string             `json:"options,omitempty"`
-	Pool                   *string                        `json:"pool,omitempty"`
-	ProgramStatus          *SessionProgramStatus          `json:"program_status,omitempty"`
-	Provider               string                         `json:"provider"`
-	Reason                 *string                        `json:"reason,omitempty"`
-	Rig                    *string                        `json:"rig,omitempty"`
+	ActivitySource *SessionResponseActivitySource `json:"activity_source,omitempty"`
+	AgentKind      *string                        `json:"agent_kind,omitempty"`
+
+	// AgentName The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Sent on every session by Gas City 1.6 and later servers, empty when the session records none; older servers omit it.
+	AgentName              *string               `json:"agent_name,omitempty"`
+	Alias                  *string               `json:"alias,omitempty"`
+	Attached               bool                  `json:"attached"`
+	ConfiguredNamedSession *bool                 `json:"configured_named_session,omitempty"`
+	ContextPct             *int64                `json:"context_pct,omitempty"`
+	ContextWindow          *int64                `json:"context_window,omitempty"`
+	CreatedAt              string                `json:"created_at"`
+	DisplayName            *string               `json:"display_name,omitempty"`
+	Id                     string                `json:"id"`
+	Kind                   *string               `json:"kind,omitempty"`
+	LastActive             *string               `json:"last_active,omitempty"`
+	LastNudgeDeliveredAt   *string               `json:"last_nudge_delivered_at,omitempty"`
+	LastOutput             *string               `json:"last_output,omitempty"`
+	Metadata               *map[string]string    `json:"metadata,omitempty"`
+	Model                  *string               `json:"model,omitempty"`
+	Options                *map[string]string    `json:"options,omitempty"`
+	Pool                   *string               `json:"pool,omitempty"`
+	ProgramStatus          *SessionProgramStatus `json:"program_status,omitempty"`
+	Provider               string                `json:"provider"`
+	Reason                 *string               `json:"reason,omitempty"`
+	Rig                    *string               `json:"rig,omitempty"`
 
 	// Running Whether the session's runtime was live when this response was built, in any open state. It observes the runtime, not the agent: on tmux it is true while the session has a pane whose process has not exited, so a pane still running a launch wrapper or shell before the agent starts reads true, and a pane kept by remain-on-exit after its process exited reads false. GET /session/{id} and GET /sessions read the same probe, which tmux serves from a fleet snapshot refreshed at most every 2 s. Point-in-time: a session in a transitional state (creating, start-pending, draining) can start or stop its process right after; a client confirming quiescence should re-read after its last transition settles.
 	Running                bool                    `json:"running"`
@@ -5797,8 +5806,17 @@ type SessionResponse struct {
 	SubmissionCapabilities *SubmissionCapabilities `json:"submission_capabilities,omitempty"`
 	Template               string                  `json:"template"`
 	Title                  string                  `json:"title"`
-	Turn                   *SessionTurn            `json:"turn,omitempty"`
-	WorkDir                *string                 `json:"work_dir,omitempty"`
+
+	// Transport How gc drives the session runtime, for example tmux or acp. Empty when unknown.
+	Transport *string      `json:"transport,omitempty"`
+	Turn      *SessionTurn `json:"turn,omitempty"`
+
+	// WakeReasons Why the controller keeps this open session awake (for example session, config, create, attached, keep-warm, wait, pending, pin), as gc session list's REASON column shows them when no lifecycle reason applies. Sent only on GET /sessions?wake_reasons=true, by servers that compute them.
+	WakeReasons *[]string `json:"wake_reasons,omitempty"`
+	WorkDir     *string   `json:"work_dir,omitempty"`
+
+	// WorkerDir The agent process's canonical working directory (a per-bead worktree when it has one), which work_dir may not be.
+	WorkerDir *string `json:"worker_dir,omitempty"`
 }
 
 // SessionResponseActivitySource Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.
@@ -7169,6 +7187,9 @@ type StatusAgentDetail struct {
 
 	// Scope city or rig.
 	Scope string `json:"scope"`
+
+	// SessionId Bead ID of the session the row's runtime session resolved to. Omitted when no open session bead records that runtime session (always while the city is suspended, when no bead store is read).
+	SessionId *string `json:"session_id,omitempty"`
 
 	// SessionName tmux session name CLI drain-ops key on.
 	SessionName *string `json:"session_name,omitempty"`
@@ -13108,11 +13129,14 @@ type PostV0CityByCityNameServiceByNameRestartParams struct {
 
 // GetV0CityByCityNameSessionByIdParams defines parameters for GetV0CityByCityNameSessionById.
 type GetV0CityByCityNameSessionByIdParams struct {
-	// Peek Include last output preview.
+	// Peek Include a best-effort last output preview of a running active session. See peek_strict for gc session peek's contract.
 	Peek *bool `form:"peek,omitempty" json:"peek,omitempty"`
 
-	// PeekLines Number of lines to include in the last output preview when peek=true. Defaults to 5.
+	// PeekLines Number of lines to include in the last output preview when peek=true. Defaults to 5. With peek_strict=true it is passed to the runtime as given, and 0 asks for the runtime's full capture.
 	PeekLines *int64 `form:"peek_lines,omitempty" json:"peek_lines,omitempty"`
+
+	// PeekStrict Peek with gc session peek's contract instead of the best-effort preview; implies peek. {id} resolves as for a live-session command, so a closed session is found only by its exact bead id. Every open session that is not suspended is peeked whatever its runtime state, and peek_lines is passed to the runtime as given (0 asks for its full capture). A suspended or closed session is refused with 409 session-inactive, and a failed peek fails the request instead of omitting last_output.
+	PeekStrict *bool `form:"peek_strict,omitempty" json:"peek_strict,omitempty"`
 
 	// ExactId Resolve {id} as an exact session bead id only: a single point read that also finds closed sessions and answers 404 when no bead has that id. Skips the alias, runtime session_name, configured-name and closed-session name lookups. For callers holding a durable id.
 	ExactId *bool `form:"exact_id,omitempty" json:"exact_id,omitempty"`
@@ -13305,6 +13329,9 @@ type GetV0CityByCityNameSessionsParams struct {
 
 	// Peek Include last output preview.
 	Peek *bool `form:"peek,omitempty" json:"peek,omitempty"`
+
+	// WakeReasons Include wake_reasons on each open session: why the controller keeps it awake, as gc session list's REASON column shows them. Costs runtime probes per session.
+	WakeReasons *bool `form:"wake_reasons,omitempty" json:"wake_reasons,omitempty"`
 }
 
 // CreateSessionParams defines parameters for CreateSession.
@@ -36738,6 +36765,22 @@ func NewGetV0CityByCityNameSessionByIdRequest(server string, cityName string, id
 
 		}
 
+		if params.PeekStrict != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "peek_strict", *params.PeekStrict, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		if params.ExactId != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "exact_id", *params.ExactId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
@@ -38500,6 +38543,22 @@ func NewGetV0CityByCityNameSessionsRequest(server string, cityName string, param
 		if params.Peek != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "peek", *params.Peek, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.WakeReasons != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "wake_reasons", *params.WakeReasons, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
