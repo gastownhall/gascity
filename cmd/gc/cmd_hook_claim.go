@@ -2412,9 +2412,10 @@ func workflowRootIDForInputCheck(candidate beads.Bead) string {
 // closes work as failed, so a not-found that some unread store could refute
 // must never reach it. The convoy's existence is checked before any member
 // shortcut, because a deleted convoy can retain live-member edges; a present
-// convoy whose members include any unresolved placeholder stays pending —
-// erased edges cannot prove former members absent, and a completed sibling
-// does not establish a missing sibling's former status.
+// convoy with unresolved placeholder members is purged only when every member
+// id is proven absent, and a memberless or mixed resolved/unresolved convoy
+// stays pending — erased edges cannot prove former members absent, and a
+// completed sibling does not establish a missing sibling's former status.
 func workflowInputDoneAcross(graph, work beads.Store, candidate beads.Bead, identityCandidates []string, prove proveAbsentFn) (workflowInputEvaluation, error) {
 	root := candidate
 	if strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey]) == "" {
@@ -2487,10 +2488,26 @@ func workflowInputDoneAcross(graph, work beads.Store, candidate beads.Bead, iden
 	if unresolved == 0 {
 		return workflowInputEvaluation{RootID: root.ID, Verdict: inputVerdictDone}, nil
 	}
-	// Membership with any unresolved placeholder stays pending: erased edges
-	// cannot prove a former member absent, and a completed sibling does not
-	// establish a missing sibling's former status.
-	return workflowInputEvaluation{RootID: root.ID}, nil
+	if unresolved != len(members) {
+		// Mixed resolved/unresolved membership: a completed sibling does not
+		// establish a missing sibling's former status.
+		return workflowInputEvaluation{RootID: root.ID}, nil
+	}
+	if !workflowInputPurgeSupported(root, prove) {
+		return workflowInputEvaluation{RootID: root.ID}, nil
+	}
+	missing := make([]string, 0, len(members))
+	for _, m := range members {
+		missing = append(missing, m.ID)
+	}
+	proven, err := prove(missing)
+	if err != nil {
+		return workflowInputEvaluation{RootID: root.ID}, fmt.Errorf("proving input convoy %s members absent: %w", convoyID, err)
+	}
+	if !proven {
+		return workflowInputEvaluation{RootID: root.ID}, nil
+	}
+	return workflowInputEvaluation{RootID: root.ID, Verdict: inputVerdictPurged, MissingIDs: missing}, nil
 }
 
 // workflowInputPurgeSupported reports whether a purged verdict may be

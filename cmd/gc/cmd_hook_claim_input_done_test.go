@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"sort"
 	"strings"
 	"testing"
 
@@ -515,6 +516,190 @@ func TestDoHookClaimRetiresWorkflowWhoseInputWasPurged(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), `"reason":"no_work"`) {
 		t.Fatalf("stdout = %q, want no_work drain", stdout.String())
+	}
+}
+
+// seedPurgedMembershipWorkflow builds a store holding a live graph.v2 workflow
+// whose input convoy is still present but every bead it tracks was purged:
+// each dangling tracks edge resolves to an unresolved placeholder in the
+// membership listing, the shape the done-check read as live work forever
+// (#8729). The finished step pins that a retirement preserves terminal
+// outcomes.
+func seedPurgedMembershipWorkflow(t *testing.T) (*beads.MemStore, beads.Bead, beads.Bead, beads.Bead) {
+	t.Helper()
+	store := beads.NewMemStore()
+	conv, err := store.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	for _, id := range []string{"gc-vanished-a", "gc-vanished-b"} {
+		if err := store.DepAdd(conv.ID, id, convoy.TrackingDepType); err != nil {
+			t.Fatalf("track %s: %v", id, err)
+		}
+	}
+	root, err := store.Create(beads.Bead{Title: "mol", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+		beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+		beadmeta.InputConvoyIDMetadataKey:   conv.ID,
+		beadmeta.RoutedToMetadataKey:        "worker",
+	}})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	step, err := store.Create(beads.Bead{Title: "Load context", Status: "in_progress", Assignee: "worker-dead", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.RoutedToMetadataKey:   "worker",
+	}})
+	if err != nil {
+		t.Fatalf("create step: %v", err)
+	}
+	finished, err := store.Create(beads.Bead{Title: "done step", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+	}})
+	if err != nil {
+		t.Fatalf("create finished step: %v", err)
+	}
+	if err := store.Close(finished.ID); err != nil {
+		t.Fatalf("close finished step: %v", err)
+	}
+	if err := store.SetMetadata(finished.ID, beadmeta.OutcomeMetadataKey, beadmeta.OutcomePass); err != nil {
+		t.Fatalf("stamp finished step outcome: %v", err)
+	}
+	return store, root, step, finished
+}
+
+// TestWorkflowInputPurgedEveryTrackedMemberAbsent is the second #8729
+// regression: the input convoy survives, but every bead it tracks was purged,
+// so the membership listing is all unresolved placeholders. Once every member
+// id is proven absent the retirement fires with the purge disposition — at
+// base the placeholders blocked the done-check forever and the workflow looped
+// in the ready pool, so the candidate is claimed instead of retired.
+func TestWorkflowInputPurgedEveryTrackedMemberAbsent(t *testing.T) {
+	store, root, step, finished := seedPurgedMembershipWorkflow(t)
+	proveCalls := 0
+	ops := hookClaimOps{
+		Runner: func(string, string) (string, error) {
+			output, err := json.Marshal([]beads.Bead{root})
+			if err != nil {
+				return "", err
+			}
+			return string(output), nil
+		},
+		Claim: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
+			t.Errorf("claimed %s; a workflow whose tracked input was purged must retire, not be claimed", beadID)
+			return beads.Bead{}, false, nil
+		},
+		InputDone: func(_ context.Context, _ string, _ []string, candidate beads.Bead, ids []string) (workflowInputEvaluation, error) {
+			return workflowInputDone(store, candidate, ids, func(missing []string) (bool, error) {
+				proveCalls++
+				sort.Strings(missing)
+				if len(missing) != 2 || missing[0] != "gc-vanished-a" || missing[1] != "gc-vanished-b" {
+					t.Errorf("absence proof asked for %v, want [gc-vanished-a gc-vanished-b]", missing)
+				}
+				return true, nil
+			})
+		},
+		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
+			t.Errorf("skipped %s; a purged input retires as a hard failure, not as skipped", rootID)
+			return nil
+		},
+		CancelPurgedWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
+			return cancelPurgedWorkflow(store, rootID)
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", "/rig", hookClaimOptions{
+		Assignee:     "worker-1",
+		RouteTargets: []string{"worker"},
+		DrainAck:     true,
+		JSON:         true,
+	}, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim = %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	if proveCalls != 1 {
+		t.Fatalf("absence proof calls = %d, want 1", proveCalls)
+	}
+	for _, id := range []string{root.ID, step.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if got.Status != "closed" {
+			t.Errorf("%s status = %q, want closed", id, got.Status)
+		}
+		if got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+			t.Errorf("%s gc.outcome = %q, want fail", id, got.Metadata[beadmeta.OutcomeMetadataKey])
+		}
+		if got.Metadata[beadmeta.FailureClassMetadataKey] != beadmeta.FailureClassHard {
+			t.Errorf("%s gc.failure_class = %q, want hard", id, got.Metadata[beadmeta.FailureClassMetadataKey])
+		}
+		if got.Metadata[beadmeta.FailureReasonMetadataKey] != "input_purged" {
+			t.Errorf("%s gc.failure_reason = %q, want input_purged", id, got.Metadata[beadmeta.FailureReasonMetadataKey])
+		}
+		if got.Metadata["close_reason"] != sourceworkflow.HookPurgedInputWorkflowCloseReason {
+			t.Errorf("%s close_reason = %q, want %q", id, got.Metadata["close_reason"], sourceworkflow.HookPurgedInputWorkflowCloseReason)
+		}
+	}
+	done, err := store.Get(finished.ID)
+	if err != nil {
+		t.Fatalf("get finished step: %v", err)
+	}
+	if done.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+		t.Errorf("finished step gc.outcome = %q, want pass preserved by the retirement", done.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	if !strings.Contains(stderr.String(), root.ID) || !strings.Contains(stderr.String(), "gc-vanished-a") {
+		t.Errorf("stderr = %q, want the retirement to log the root and a missing member id", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"reason":"no_work"`) {
+		t.Fatalf("stdout = %q, want no_work drain", stdout.String())
+	}
+}
+
+// TestWorkflowInputPendingWhenMixedResolvedAndMissingMembers pins the Q3
+// policy: a convoy that still resolves one member stays pending even when
+// every missing member id would be provably absent — a completed sibling does
+// not establish a missing sibling's former status, so no absence scan runs.
+func TestWorkflowInputPendingWhenMixedResolvedAndMissingMembers(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{Title: "the surviving work"})
+	if err != nil {
+		t.Fatalf("create work: %v", err)
+	}
+	if err := store.Close(work.ID); err != nil {
+		t.Fatalf("close work: %v", err)
+	}
+	conv, err := store.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	if err := convoy.TrackItem(store, conv.ID, work.ID); err != nil {
+		t.Fatalf("track surviving work: %v", err)
+	}
+	if err := store.DepAdd(conv.ID, "gc-vanished-a", convoy.TrackingDepType); err != nil {
+		t.Fatalf("track vanished work: %v", err)
+	}
+	root, err := store.Create(beads.Bead{Title: "mol", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+		beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+		beadmeta.InputConvoyIDMetadataKey:   conv.ID,
+		beadmeta.RoutedToMetadataKey:        "worker",
+	}})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+
+	eval, err := workflowInputDone(store, root, nil, func(missing []string) (bool, error) {
+		t.Errorf("absence proof asked for %v; a mixed membership must stay pending without a scan", missing)
+		return true, nil
+	})
+	if err != nil {
+		t.Fatalf("workflowInputDone: %v", err)
+	}
+	if eval.Verdict != inputVerdictPending {
+		t.Fatalf("verdict = %d for a mixed resolved/missing membership, want pending", eval.Verdict)
 	}
 }
 
