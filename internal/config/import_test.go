@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -2620,4 +2621,91 @@ func TestQualifiedName_WithBindingName(t *testing.T) {
 			}
 		})
 	}
+}
+
+// seedRepoCacheFixture creates a real git repository at dir containing a
+// committed pack.toml and formulas/build.toml, and returns the HEAD commit
+// to pin validation to.
+func seedRepoCacheFixture(t *testing.T, dir string) string {
+	t.Helper()
+	writeTestFile(t, dir, "pack.toml", "[pack]\nname = \"tools\"\nschema = 1\n")
+	writeTestFile(t, dir, "formulas/build.toml", "formula = \"build\"\n")
+	if _, err := runRepoCacheGit(dir, "init", "-q"); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	if _, err := runRepoCacheGit(dir, "add", "."); err != nil {
+		t.Fatalf("git add: %v", err)
+	}
+	if _, err := runRepoCacheGit(dir, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "seed"); err != nil {
+		t.Fatalf("git commit: %v", err)
+	}
+	commit, err := runRepoCacheGit(dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("git rev-parse: %v", err)
+	}
+	return commit
+}
+
+// rewriteByteIdentical rewrites path with its current content via
+// temp+rename and a one-hour-newer mtime, the way template tooling
+// re-renders a pack file it decides to rewrite.
+func rewriteByteIdentical(t *testing.T, path string) {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestValidateLockedRemoteCacheAcceptsContentIdenticalStatDirtyFiles covers
+// a pack-cache file re-rendered byte-identically with a changed mtime: the
+// worktree matches the pinned commit byte-for-byte, so validation must
+// accept it using only `rev-parse HEAD` and `status --porcelain`, even when
+// git cannot or may not write the refreshed stat data back to the index.
+func TestValidateLockedRemoteCacheAcceptsContentIdenticalStatDirtyFiles(t *testing.T) {
+	const source = "https://example.com/tools.git"
+	validate := func(t *testing.T, cacheDir, commit string) {
+		t.Helper()
+		if err := validateLockedRemoteCache(source, cacheDir, commit); err != nil {
+			t.Fatalf("validateLockedRemoteCache rejected content-identical stat-dirty cache: %v", err)
+		}
+	}
+
+	t.Run("byte-identical rerender", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		commit := seedRepoCacheFixture(t, cacheDir)
+		rewriteByteIdentical(t, filepath.Join(cacheDir, "formulas", "build.toml"))
+		validate(t, cacheDir, commit)
+	})
+
+	t.Run("held index lock", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		commit := seedRepoCacheFixture(t, cacheDir)
+		rewriteByteIdentical(t, filepath.Join(cacheDir, "formulas", "build.toml"))
+		// A concurrent git process holding the index lock must not turn the
+		// opportunistic in-core stat refresh into a validation failure.
+		if err := os.WriteFile(filepath.Join(cacheDir, ".git", "index.lock"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		validate(t, cacheDir, commit)
+	})
+
+	t.Run("GIT_OPTIONAL_LOCKS=0", func(t *testing.T) {
+		t.Setenv("GIT_OPTIONAL_LOCKS", "0")
+		cacheDir := t.TempDir()
+		commit := seedRepoCacheFixture(t, cacheDir)
+		rewriteByteIdentical(t, filepath.Join(cacheDir, "formulas", "build.toml"))
+		validate(t, cacheDir, commit)
+	})
 }
