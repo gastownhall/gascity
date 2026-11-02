@@ -418,6 +418,7 @@ go_library(
         "graph_placement.go",
         "hook_city.go",
         "hook_claim_bead_events.go",
+        "hook_claim_input_purged.go",
         "hook_cross_store.go",
         "hook_deadline.go",
         "hook_identity.go",

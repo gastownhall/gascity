@@ -99,8 +99,8 @@ func newDoneWorkflowSplitFixture(t *testing.T, sourceClosed bool) doneWorkflowSp
 func (f doneWorkflowSplitFixture) baseOps(t *testing.T) hookClaimOps {
 	t.Helper()
 	return hookClaimOps{
-		InputDone: func(_ context.Context, _ string, _ []string, candidate beads.Bead, ids []string) (string, bool, error) {
-			return workflowInputDone(f.work, candidate, ids)
+		InputDone: func(_ context.Context, _ string, _ []string, candidate beads.Bead, ids []string) (workflowInputEvaluation, error) {
+			return workflowInputDone(f.work, candidate, ids, nil)
 		},
 		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
 			return skipDoneWorkflow(f.work, rootID)

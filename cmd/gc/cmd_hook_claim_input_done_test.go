@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 // seedDoneWorkflow builds a store holding a workflow root whose input convoy
@@ -62,31 +63,31 @@ func seedDoneWorkflow(t *testing.T, memberStatus string) (*beads.MemStore, beads
 func TestWorkflowInputDoneDetectsTerminalConvoyMember(t *testing.T) {
 	store, root, step := seedDoneWorkflow(t, "closed")
 
-	rootID, done, err := workflowInputDone(store, root, nil)
+	eval, err := workflowInputDone(store, root, nil, nil)
 	if err != nil {
 		t.Fatalf("workflowInputDone(root): %v", err)
 	}
-	if !done || rootID != root.ID {
-		t.Fatalf("root: done=%v rootID=%q, want done=true rootID=%q", done, rootID, root.ID)
+	if eval.Verdict != inputVerdictDone || eval.RootID != root.ID {
+		t.Fatalf("root: verdict=%d rootID=%q, want done rootID=%q", eval.Verdict, eval.RootID, root.ID)
 	}
 
-	rootID, done, err = workflowInputDone(store, step, nil)
+	eval, err = workflowInputDone(store, step, nil, nil)
 	if err != nil {
 		t.Fatalf("workflowInputDone(step): %v", err)
 	}
-	if !done || rootID != root.ID {
-		t.Fatalf("step: done=%v rootID=%q, want done=true rootID=%q", done, rootID, root.ID)
+	if eval.Verdict != inputVerdictDone || eval.RootID != root.ID {
+		t.Fatalf("step: verdict=%d rootID=%q, want done rootID=%q", eval.Verdict, eval.RootID, root.ID)
 	}
 }
 
 func TestWorkflowInputDoneFalseWhileMemberOpen(t *testing.T) {
 	store, root, _ := seedDoneWorkflow(t, "open")
-	_, done, err := workflowInputDone(store, root, nil)
+	eval, err := workflowInputDone(store, root, nil, nil)
 	if err != nil {
 		t.Fatalf("workflowInputDone: %v", err)
 	}
-	if done {
-		t.Fatal("done = true for an open convoy member, want false")
+	if eval.Verdict != inputVerdictPending {
+		t.Fatalf("verdict = %d for an open convoy member, want pending", eval.Verdict)
 	}
 }
 
@@ -98,23 +99,23 @@ func TestWorkflowInputDoneFalseWithoutInputConvoy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	_, done, err := workflowInputDone(store, root, nil)
+	eval, err := workflowInputDone(store, root, nil, nil)
 	if err != nil {
 		t.Fatalf("workflowInputDone: %v", err)
 	}
-	if done {
-		t.Fatal("done = true with no input convoy, want false")
+	if eval.Verdict != inputVerdictPending {
+		t.Fatal("verdict = with no input convoy, want false")
 	}
 }
 
 func TestWorkflowInputDoneTrueWhenMemberHandedOffToOtherLane(t *testing.T) {
 	store, root, _ := seedDoneWorkflow(t, "handed_off")
-	_, done, err := workflowInputDone(store, root, []string{"gastown__polecat-gc-xxxx"})
+	eval, err := workflowInputDone(store, root, []string{"gastown__polecat-gc-xxxx"}, nil)
 	if err != nil {
 		t.Fatalf("workflowInputDone: %v", err)
 	}
-	if !done {
-		t.Fatal("done = false for a member handed off to another lane, want true")
+	if eval.Verdict != inputVerdictDone {
+		t.Fatalf("verdict = %d for a member handed off to another lane, want done", eval.Verdict)
 	}
 }
 
@@ -144,12 +145,12 @@ func TestWorkflowInputDoneFalseWhenMemberHeldBySiblingSeatOfSameWorkflow(t *test
 		t.Fatalf("update work: %v", err)
 	}
 
-	_, done, err := workflowInputDone(store, step, []string{"homeops__homeops-luna-gc-9b2b0a"})
+	eval, err := workflowInputDone(store, step, []string{"homeops__homeops-luna-gc-9b2b0a"}, nil)
 	if err != nil {
 		t.Fatalf("workflowInputDone: %v", err)
 	}
-	if done {
-		t.Fatal("done = true for a member held by a sibling seat of the same workflow, want false")
+	if eval.Verdict != inputVerdictPending {
+		t.Fatalf("verdict = %d for a member held by a sibling seat of the same workflow, want pending", eval.Verdict)
 	}
 }
 
@@ -176,12 +177,12 @@ func TestWorkflowInputDoneFalseWhenMemberHeldBySiblingSeatWhoseStepWasReopened(t
 		t.Fatalf("update work: %v", err)
 	}
 
-	_, done, err := workflowInputDone(store, step, []string{"homeops__homeops-luna-gc-9b2b0a"})
+	eval, err := workflowInputDone(store, step, []string{"homeops__homeops-luna-gc-9b2b0a"}, nil)
 	if err != nil {
 		t.Fatalf("workflowInputDone: %v", err)
 	}
-	if done {
-		t.Fatal("done = true for a member held by a sibling seat whose step was reopened, want false")
+	if eval.Verdict != inputVerdictPending {
+		t.Fatalf("verdict = %d for a member held by a sibling seat whose step was reopened, want pending", eval.Verdict)
 	}
 }
 
@@ -206,12 +207,12 @@ func TestWorkflowInputDoneFalseWhenMemberHeldBySessionIDOnlyProvenance(t *testin
 		t.Fatalf("update work: %v", err)
 	}
 
-	_, done, err := workflowInputDone(store, step, []string{"homeops__homeops-luna-gc-9b2b0a"})
+	eval, err := workflowInputDone(store, step, []string{"homeops__homeops-luna-gc-9b2b0a"}, nil)
 	if err != nil {
 		t.Fatalf("workflowInputDone: %v", err)
 	}
-	if done {
-		t.Fatal("done = true for a member held by a seat named only by gc.session_id provenance, want false")
+	if eval.Verdict != inputVerdictPending {
+		t.Fatalf("verdict = %d for a member held by a seat named only by gc.session_id provenance, want pending", eval.Verdict)
 	}
 }
 
@@ -228,23 +229,23 @@ func TestWorkflowInputDoneFalseWhenMemberAssignedToIdentityCandidate(t *testing.
 	if err := store.Update(members[0].ID, beads.UpdateOpts{Assignee: strPtr("gastown__polecat-gc-xxxx")}); err != nil {
 		t.Fatalf("update work: %v", err)
 	}
-	_, done, err := workflowInputDone(store, root, []string{"gastown__polecat-gc-xxxx"})
+	eval, err := workflowInputDone(store, root, []string{"gastown__polecat-gc-xxxx"}, nil)
 	if err != nil {
 		t.Fatalf("workflowInputDone: %v", err)
 	}
-	if done {
-		t.Fatal("done = true for a member assigned to one of identityCandidates, want false")
+	if eval.Verdict != inputVerdictPending {
+		t.Fatalf("verdict = %d for a member assigned to one of identityCandidates, want pending", eval.Verdict)
 	}
 }
 
 func TestWorkflowInputDoneFalseWhenMemberUnassignedOpen(t *testing.T) {
 	store, root, _ := seedDoneWorkflow(t, "open")
-	_, done, err := workflowInputDone(store, root, []string{"gastown__polecat-gc-xxxx"})
+	eval, err := workflowInputDone(store, root, []string{"gastown__polecat-gc-xxxx"}, nil)
 	if err != nil {
 		t.Fatalf("workflowInputDone: %v", err)
 	}
-	if done {
-		t.Fatal("done = true for an unassigned open member, want false")
+	if eval.Verdict != inputVerdictPending {
+		t.Fatalf("verdict = %d for an unassigned open member, want pending", eval.Verdict)
 	}
 }
 
@@ -294,8 +295,8 @@ func TestDoHookClaimSkipsWorkflowWhoseInputIsDone(t *testing.T) {
 			claimed = true
 			return beads.Bead{ID: beadID, Assignee: assignee}, true, nil
 		},
-		InputDone: func(_ context.Context, _ string, _ []string, _ beads.Bead, _ []string) (string, bool, error) {
-			return "root-1", true, nil
+		InputDone: func(_ context.Context, _ string, _ []string, _ beads.Bead, _ []string) (workflowInputEvaluation, error) {
+			return workflowInputEvaluation{RootID: "root-1", Verdict: inputVerdictDone}, nil
 		},
 		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
 			skipped = rootID
@@ -357,8 +358,8 @@ func TestDoHookClaimSkipsExistingAssignmentWhoseInputIsDone(t *testing.T) {
 			t.Fatalf("unexpected claim of %s", beadID)
 			return beads.Bead{}, false, nil
 		},
-		InputDone: func(_ context.Context, _ string, _ []string, _ beads.Bead, _ []string) (string, bool, error) {
-			return "root-1", true, nil
+		InputDone: func(_ context.Context, _ string, _ []string, _ beads.Bead, _ []string) (workflowInputEvaluation, error) {
+			return workflowInputEvaluation{RootID: "root-1", Verdict: inputVerdictDone}, nil
 		},
 		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
 			skipped = rootID
@@ -389,6 +390,134 @@ func TestDoHookClaimSkipsExistingAssignmentWhoseInputIsDone(t *testing.T) {
 	}
 }
 
+// seedPurgedInputWorkflow builds a store holding a live graph.v2 workflow
+// whose root references an input convoy that no longer exists: the convoy was
+// purged, and its open steps otherwise loop in the ready pool forever because
+// the done-check reads a missing convoy as "nothing to wait on". The finished
+// step pins that a retirement preserves terminal outcomes.
+func seedPurgedInputWorkflow(t *testing.T) (*beads.MemStore, beads.Bead, beads.Bead, beads.Bead) {
+	t.Helper()
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{Title: "mol", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+		beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+		beadmeta.InputConvoyIDMetadataKey:   "gc-purged-convoy",
+		beadmeta.RoutedToMetadataKey:        "worker",
+	}})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	step, err := store.Create(beads.Bead{Title: "Load context", Status: "in_progress", Assignee: "worker-dead", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.RoutedToMetadataKey:   "worker",
+	}})
+	if err != nil {
+		t.Fatalf("create step: %v", err)
+	}
+	finished, err := store.Create(beads.Bead{Title: "done step", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+	}})
+	if err != nil {
+		t.Fatalf("create finished step: %v", err)
+	}
+	if err := store.Close(finished.ID); err != nil {
+		t.Fatalf("close finished step: %v", err)
+	}
+	if err := store.SetMetadata(finished.ID, beadmeta.OutcomeMetadataKey, beadmeta.OutcomePass); err != nil {
+		t.Fatalf("stamp finished step outcome: %v", err)
+	}
+	return store, root, step, finished
+}
+
+// TestDoHookClaimRetiresWorkflowWhoseInputWasPurged is the #8729 regression:
+// a graph.v2 candidate whose input convoy is proven absent from the supported
+// topology retires at claim time — root and open steps close as a hard
+// input_purged failure — instead of being served to a seat that burns a claim
+// cycle discovering the spec no longer exists. Terminal steps keep their
+// recorded outcome, no claim runs, and the retirement names the missing ids.
+func TestDoHookClaimRetiresWorkflowWhoseInputWasPurged(t *testing.T) {
+	store, root, step, finished := seedPurgedInputWorkflow(t)
+	proveCalls := 0
+	ops := hookClaimOps{
+		Runner: func(string, string) (string, error) {
+			output, err := json.Marshal([]beads.Bead{root})
+			if err != nil {
+				return "", err
+			}
+			return string(output), nil
+		},
+		Claim: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
+			t.Errorf("claimed %s; a workflow whose input was purged must retire, not be claimed", beadID)
+			return beads.Bead{}, false, nil
+		},
+		InputDone: func(_ context.Context, _ string, _ []string, candidate beads.Bead, ids []string) (workflowInputEvaluation, error) {
+			return workflowInputDone(store, candidate, ids, func(missing []string) (bool, error) {
+				proveCalls++
+				if len(missing) != 1 || missing[0] != "gc-purged-convoy" {
+					t.Errorf("absence proof asked for %v, want [gc-purged-convoy]", missing)
+				}
+				return true, nil
+			})
+		},
+		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
+			t.Errorf("skipped %s; a purged input retires as a hard failure, not as skipped", rootID)
+			return nil
+		},
+		CancelPurgedWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
+			return cancelPurgedWorkflow(store, rootID)
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", "/rig", hookClaimOptions{
+		Assignee:     "worker-1",
+		RouteTargets: []string{"worker"},
+		DrainAck:     true,
+		JSON:         true,
+	}, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim = %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	if proveCalls != 1 {
+		t.Fatalf("absence proof calls = %d, want 1", proveCalls)
+	}
+	for _, id := range []string{root.ID, step.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if got.Status != "closed" {
+			t.Errorf("%s status = %q, want closed", id, got.Status)
+		}
+		if got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+			t.Errorf("%s gc.outcome = %q, want fail", id, got.Metadata[beadmeta.OutcomeMetadataKey])
+		}
+		if got.Metadata[beadmeta.FailureClassMetadataKey] != beadmeta.FailureClassHard {
+			t.Errorf("%s gc.failure_class = %q, want hard", id, got.Metadata[beadmeta.FailureClassMetadataKey])
+		}
+		if got.Metadata[beadmeta.FailureReasonMetadataKey] != "input_purged" {
+			t.Errorf("%s gc.failure_reason = %q, want input_purged", id, got.Metadata[beadmeta.FailureReasonMetadataKey])
+		}
+		if got.Metadata["close_reason"] != sourceworkflow.HookPurgedInputWorkflowCloseReason {
+			t.Errorf("%s close_reason = %q, want %q", id, got.Metadata["close_reason"], sourceworkflow.HookPurgedInputWorkflowCloseReason)
+		}
+	}
+	done, err := store.Get(finished.ID)
+	if err != nil {
+		t.Fatalf("get finished step: %v", err)
+	}
+	if done.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+		t.Errorf("finished step gc.outcome = %q, want pass preserved by the retirement", done.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	if !strings.Contains(stderr.String(), root.ID) || !strings.Contains(stderr.String(), "gc-purged-convoy") {
+		t.Errorf("stderr = %q, want the retirement to log the root and the missing convoy id", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"reason":"no_work"`) {
+		t.Fatalf("stdout = %q, want no_work drain", stdout.String())
+	}
+}
+
 func TestDoHookClaimStillClaimsWhenInputNotDone(t *testing.T) {
 	candidates := []beads.Bead{{
 		ID:     "root-1",
@@ -410,8 +539,8 @@ func TestDoHookClaimStillClaimsWhenInputNotDone(t *testing.T) {
 			claimedID = beadID
 			return beads.Bead{ID: beadID, Assignee: assignee, Status: "in_progress"}, true, nil
 		},
-		InputDone: func(_ context.Context, _ string, _ []string, _ beads.Bead, _ []string) (string, bool, error) {
-			return "root-1", false, nil
+		InputDone: func(_ context.Context, _ string, _ []string, _ beads.Bead, _ []string) (workflowInputEvaluation, error) {
+			return workflowInputEvaluation{RootID: "root-1"}, nil
 		},
 		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
 			t.Fatalf("unexpected skip of %s", rootID)
