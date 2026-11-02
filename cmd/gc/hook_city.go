@@ -128,5 +128,9 @@ func (h *hookCity) claimOps() hookClaimOps {
 	ops.EmitWorkStartedUnrecorded = func(sessionID, template, beadID string, cause error) {
 		emitWorkStartedUnrecordedTo(h.recorder(), sessionID, template, beadID, cause)
 	}
+	// The claim-time purge verdict is authorized by an absence proof spanning
+	// the whole city topology (#8729): the city the invocation resolved owns
+	// it, however deep in a rig the claim runs.
+	ops.ProveAbsent = hookProveAbsentAt(h.path, h.cfg)
 	return ops
 }

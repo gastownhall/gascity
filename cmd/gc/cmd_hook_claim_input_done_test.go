@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"sort"
 	"strings"
@@ -700,6 +701,116 @@ func TestWorkflowInputPendingWhenMixedResolvedAndMissingMembers(t *testing.T) {
 	}
 	if eval.Verdict != inputVerdictPending {
 		t.Fatalf("verdict = %d for a mixed resolved/missing membership, want pending", eval.Verdict)
+	}
+}
+
+// TestDoHookClaimKeepsCandidateWhenAbsenceProofInconclusive pins the fail-open
+// half of the purge verdict: a prover that cannot confirm the absence — one
+// store unread, another still holding a copy, whatever the reason — answers
+// not-proven, and the evaluation stays pending, so the candidate is served as
+// it always was instead of being closed on a guess.
+func TestDoHookClaimKeepsCandidateWhenAbsenceProofInconclusive(t *testing.T) {
+	store, root, _, _ := seedPurgedInputWorkflow(t)
+	claimedID := ""
+	ops := hookClaimOps{
+		Runner: func(string, string) (string, error) {
+			output, err := json.Marshal([]beads.Bead{root})
+			if err != nil {
+				return "", err
+			}
+			return string(output), nil
+		},
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			claimedID = beadID
+			return beads.Bead{ID: beadID, Assignee: assignee, Status: "in_progress"}, true, nil
+		},
+		InputDone: func(_ context.Context, _ string, _ []string, candidate beads.Bead, ids []string) (workflowInputEvaluation, error) {
+			return workflowInputDone(store, candidate, ids, func([]string) (bool, error) {
+				return false, nil
+			})
+		},
+		CancelPurgedWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
+			t.Errorf("canceled workflow %s; an unproven absence must never retire", rootID)
+			return nil
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", "/rig", hookClaimOptions{
+		Assignee:     "worker-1",
+		RouteTargets: []string{"worker"},
+		DrainAck:     true,
+		JSON:         true,
+	}, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim = %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	if claimedID != root.ID {
+		t.Fatalf("claimed %q, want %q: an inconclusive proof keeps the candidate in the pool", claimedID, root.ID)
+	}
+	got, err := store.Get(root.ID)
+	if err != nil {
+		t.Fatalf("get root: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatal("root was closed on an inconclusive absence proof; the workflow must stay alive")
+	}
+}
+
+// TestDoHookClaimKeepsCandidateWhenAbsenceProofFails pins the error-reporting
+// half: an operational fault in the proof — a store that will not open or
+// read — is logged with the candidate named and treated as pending, never
+// swallowed into a purge.
+func TestDoHookClaimKeepsCandidateWhenAbsenceProofFails(t *testing.T) {
+	store, root, _, _ := seedPurgedInputWorkflow(t)
+	claimedID := ""
+	ops := hookClaimOps{
+		Runner: func(string, string) (string, error) {
+			output, err := json.Marshal([]beads.Bead{root})
+			if err != nil {
+				return "", err
+			}
+			return string(output), nil
+		},
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			claimedID = beadID
+			return beads.Bead{ID: beadID, Assignee: assignee, Status: "in_progress"}, true, nil
+		},
+		InputDone: func(_ context.Context, _ string, _ []string, candidate beads.Bead, ids []string) (workflowInputEvaluation, error) {
+			return workflowInputDone(store, candidate, ids, func([]string) (bool, error) {
+				return false, errors.New("store offline")
+			})
+		},
+		CancelPurgedWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
+			t.Errorf("canceled workflow %s; a faulted absence proof must never retire", rootID)
+			return nil
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", "/rig", hookClaimOptions{
+		Assignee:     "worker-1",
+		RouteTargets: []string{"worker"},
+		DrainAck:     true,
+		JSON:         true,
+	}, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim = %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	if claimedID != root.ID {
+		t.Fatalf("claimed %q, want %q: a faulted proof keeps the candidate in the pool", claimedID, root.ID)
+	}
+	if !strings.Contains(stderr.String(), root.ID) || !strings.Contains(stderr.String(), "store offline") {
+		t.Errorf("stderr = %q, want the operational fault logged with the candidate and the cause", stderr.String())
+	}
+	got, err := store.Get(root.ID)
+	if err != nil {
+		t.Fatalf("get root: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatal("root was closed on a faulted absence proof; the workflow must stay alive")
 	}
 }
 
