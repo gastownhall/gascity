@@ -306,27 +306,49 @@ func stampResolvedProviderSessionMetadata(meta map[string]string, resolved *conf
 }
 
 // queueChangedResolvedProviderSessionMetadata queues the resolved-provider
-// projection fields (provider, provider_kind, builtin_ancestor) whenever the
-// freshly resolved value differs from what is stored, mirroring the command
-// refresh so a provider switch in agent.toml is reflected on the session bead
-// (gc-rhp36). It is diff-gated (no write when unchanged, honoring the
-// write-if-changed reconcile contract) and never clobbers a stored value with
-// an empty resolved one — a transient resolution failure must not wipe good
-// metadata.
+// projection fields (provider, provider_kind, builtin_ancestor, resume_flag,
+// resume_style, resume_command, session_id_flag) whenever the freshly
+// resolved value differs from what is stored, mirroring the command refresh
+// so a provider switch in agent.toml is reflected on the session bead
+// (gc-rhp36). A successful resolution is authoritative for the six
+// family/resume fields INCLUDING empty values: a switch to a provider that
+// projects no distinct builtin ancestor or no resume command clears the
+// previous provider's values instead of pinning them (#8539) — resume
+// fallbacks (resolvedWorkerRuntimeWithConfigAndMetadata) and family selection
+// (session.ProviderFamilyFromMetadata) read these keys, so a stale one
+// survives the switch as live behavior. The write is diff-gated (no write
+// when unchanged, honoring the write-if-changed reconcile contract). Two
+// guards remain: the provider name queues only when the resolution names a
+// provider — a successful unnamed start-command resolution keeps the stored
+// name — and a nil resolution (a transient failure with no trustworthy
+// projection) queues nothing, so it cannot wipe good metadata.
+// session_id_flag is a peer projection field of resume_flag: the reactive
+// startup-death strip (stripSessionIDFlag via retryFreshStartAfterStaleKey)
+// reads it from persisted bead metadata, so it projects (and clears) with
+// the rest.
 func queueChangedResolvedProviderSessionMetadata(existing map[string]string, queue func(string, string), resolved *config.ResolvedProvider) {
 	if queue == nil || resolved == nil {
 		return
+	}
+	diff := func(k, v string) {
+		if existing[k] != v {
+			queue(k, v)
+		}
 	}
 	name := strings.TrimSpace(resolved.Name)
 	if name != "" && existing["provider"] != name {
 		queue("provider", name)
 	}
-	if family := resolvedProviderFamilyMetadata(resolved); family != "" && existing["provider_kind"] != family {
-		queue("provider_kind", family)
+	diff("provider_kind", resolvedProviderFamilyMetadata(resolved))
+	ancestor := ""
+	if a := strings.TrimSpace(resolved.BuiltinAncestor); a != "" && a != name {
+		ancestor = a
 	}
-	if ancestor := strings.TrimSpace(resolved.BuiltinAncestor); ancestor != "" && ancestor != name && existing["builtin_ancestor"] != ancestor {
-		queue("builtin_ancestor", ancestor)
-	}
+	diff("builtin_ancestor", ancestor)
+	diff("resume_flag", resolved.ResumeFlag)
+	diff("resume_style", resolved.ResumeStyle)
+	diff("resume_command", resolved.ResumeCommand)
+	diff("session_id_flag", resolved.SessionIDFlag)
 }
 
 func canRebindConfiguredNamedSession(b beads.Bead, identity, sessionName, backingTemplate string) bool {
@@ -2385,37 +2407,17 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		// the authoritative command source for respawn. If agent config changes
 		// (e.g., adding `[option_defaults] model = "opus"`, or switching the
 		// agent's provider), the freshly resolved values differ from the stored
-		// ones; sync here so the bead matches the current config. Empty resolved
-		// values are ignored to avoid clobbering stored values when resolution
-		// fails transiently. The provider/resume projection fields follow the
-		// same diff-gated, clobber-safe refresh as command (gc-rhp36); without
-		// it they freeze at their creation-time provider after an agent.toml
-		// provider switch while command alone follows.
+		// ones; sync here so the bead matches the current config. An absent
+		// resolution keeps every stored provider/resume field — a transient
+		// resolution failure must not wipe good metadata — while a successful
+		// resolution is authoritative for those projection fields including
+		// empty ones, so a provider switch clears the fields the new provider
+		// does not carry instead of pinning the old provider's (#8539). The
+		// provider name keeps its own non-empty guard, like command.
 		if tp.Command != "" && b.Metadata["command"] != tp.Command {
 			queueMeta("command", tp.Command)
 		}
-		if tp.ResolvedProvider != nil {
-			queueChangedResolvedProviderSessionMetadata(b.Metadata, queueMeta, tp.ResolvedProvider)
-			if tp.ResolvedProvider.ResumeFlag != "" && b.Metadata["resume_flag"] != tp.ResolvedProvider.ResumeFlag {
-				queueMeta("resume_flag", tp.ResolvedProvider.ResumeFlag)
-			}
-			if tp.ResolvedProvider.ResumeStyle != "" && b.Metadata["resume_style"] != tp.ResolvedProvider.ResumeStyle {
-				queueMeta("resume_style", tp.ResolvedProvider.ResumeStyle)
-			}
-			if tp.ResolvedProvider.ResumeCommand != "" && b.Metadata["resume_command"] != tp.ResolvedProvider.ResumeCommand {
-				queueMeta("resume_command", tp.ResolvedProvider.ResumeCommand)
-			}
-			// session_id_flag is a peer projection field of resume_flag: the
-			// reactive startup-death strip (stripSessionIDFlag via
-			// retryFreshStartAfterStaleKey) reads it from persisted bead
-			// metadata, so a legacy bead backfilled with session_key (above)
-			// but no session_id_flag would replay a rejected first-start
-			// `--session-id <key>` command. Project it diff-gated so upgraded
-			// beads gain the flag in the same tick the key is backfilled.
-			if tp.ResolvedProvider.SessionIDFlag != "" && b.Metadata["session_id_flag"] != tp.ResolvedProvider.SessionIDFlag {
-				queueMeta("session_id_flag", tp.ResolvedProvider.SessionIDFlag)
-			}
-		}
+		queueChangedResolvedProviderSessionMetadata(b.Metadata, queueMeta, tp.ResolvedProvider)
 
 		// Update existing bead metadata.
 		// live_hash is NOT updated here — it records what config the

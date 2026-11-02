@@ -230,8 +230,10 @@ func TestRowMetadataDefersAfterItsPersistentRefusal(t *testing.T) {
 
 // Kills the launch and close refresh drifting from legacy's (SESS-713..715,
 // SESS-701): wake_mode, command, the provider family and resume keys
-// follow the resolution, an empty resolved value never clobbers a stored
-// one; continuation_epoch and a session key the provider takes are
+// follow the resolution — a successful resolution is authoritative for the
+// provider/resume keys including empty values (#8539), while an absent
+// resolution keeps the stored values and an empty command never clobbers a
+// stored one; continuation_epoch and a session key the provider takes are
 // backfilled, a stored key kept; a stale close clears; a typeless row is
 // repaired; and work_dir is backfilled, alias-guarded for a legacy
 // identity and never under its running session.
@@ -370,5 +372,72 @@ func TestAliasTakenReadsTheRowsLeg(t *testing.T) {
 				t.Fatalf("aliasTaken = %v, want %v", got, tc.taken)
 			}
 		})
+	}
+}
+
+// TestDesiredRowLaunchRefreshClearsMissingProviderFields extends A7's launch
+// refresh to EMPTY projections (#8539): a successful resolution is
+// authoritative for the six family/resume fields (provider_kind,
+// builtin_ancestor, resume_flag, resume_style, resume_command,
+// session_id_flag) including empty values — the patch carries explicit empty
+// entries for the fields a provider switch drops.
+func TestDesiredRowLaunchRefreshClearsMissingProviderFields(t *testing.T) {
+	cfg := identityCity()
+	seat := session.Info{Template: "worker", SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "2", AgentName: "worker-2", Type: session.BeadType, MetadataState: "asleep"}
+	claude := &config.ResolvedProvider{Name: "claude", BuiltinAncestor: "claude", ResumeFlag: "--resume", ResumeStyle: "flag"}
+	tp := TemplateParams{TemplateName: "worker", InstanceName: "worker-2", PoolSlot: 2, Command: "claude run", ResolvedProvider: claude}
+	// A codex-era row: every family/resume field populated.
+	codex := rowRefreshKeys{
+		"command": "codex-wrapped", "provider": "codex-wrapped", "provider_kind": "codex", "builtin_ancestor": "codex",
+		"resume_flag": "--codex-resume", "resume_style": "subcommand", "resume_command": "codex resume {{.SessionKey}}",
+		"session_id_flag": "--codex-session", "session_key": "k-1", "continuation_epoch": "1",
+	}
+	// AC-1: the switch's patch carries explicit empty entries for every
+	// dropped field and the applied patch equals the new projection.
+	want := session.MetadataPatch{
+		"command": "claude run", "provider": "claude", "provider_kind": "", "builtin_ancestor": "",
+		"resume_flag": "--resume", "resume_style": "flag", "resume_command": "", "session_id_flag": "",
+	}
+	if id := desiredRowIdentity(cfg, tp, seat, codex); !maps.Equal(id.Meta, want) {
+		t.Fatalf("switch: meta %v, want %v (the empty entries are the clears)", id.Meta, want)
+	}
+	projection := maps.Clone(map[string]string(codex))
+	maps.Copy(projection, want)
+	if fam := session.ProviderFamilyFromMetadata(projection, ""); fam != "claude" {
+		t.Errorf("switch: ProviderFamilyFromMetadata = %q, want claude", fam)
+	}
+}
+
+// A successful switch from a wrapped codex provider to the builtin-named
+// claude provider must clear the old provider's projection and resume keys,
+// not leave them pinned (#8539).
+func TestRefreshLaunchKeysProviderSwitchClearsStaleProjection(t *testing.T) {
+	raw := rowRefreshKeys{
+		"provider":         "codex-wrapped",
+		"provider_kind":    "codex",
+		"builtin_ancestor": "codex",
+		"resume_command":   "codex resume {{.SessionKey}}",
+		"command":          "codex",
+	}
+	tp := TemplateParams{
+		Command: "claude",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:            "claude",
+			BuiltinAncestor: "claude",
+			ResumeFlag:      "--resume",
+			ResumeStyle:     "flag",
+		},
+	}
+	m := session.MetadataPatch{}
+	refreshLaunchKeys(m, tp, raw)
+	got := maps.Clone(map[string]string(raw))
+	maps.Copy(got, m)
+	if got["provider"] != "claude" {
+		t.Fatalf("provider = %q, want claude", got["provider"])
+	}
+	for _, k := range []string{"provider_kind", "builtin_ancestor", "resume_command"} {
+		if got[k] == raw[k] {
+			t.Errorf("%s = %q after switch to claude, want it overwritten or cleared", k, got[k])
+		}
 	}
 }

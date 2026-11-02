@@ -206,29 +206,23 @@ func desiredRowIdentity(cfg *config.City, tp TemplateParams, info session.Info, 
 }
 
 // refreshLaunchKeys sets on m legacy's launch and close refresh (SESS-714/
-// 715): wake_mode, a continuation_epoch backfill, and the command, provider
-// and resume keys from the resolution, where an empty resolved value never
-// clobbers a stored one; a stale close_reason or closed_at clears.
+// 715): wake_mode, a continuation_epoch backfill, the command when the
+// resolution carries one, and the provider family and resume keys from the
+// resolution — a successful resolution is authoritative for those, including
+// empty values, so a provider switch clears the keys the new provider drops
+// (#8539); an absent resolution keeps every stored key, and an empty command
+// never clobbers a stored one. A stale close_reason or closed_at clears.
 func refreshLaunchKeys(m session.MetadataPatch, tp TemplateParams, raw rowRefreshKeys) {
-	diff := func(k, v string) {
-		if v != "" && raw[k] != v {
-			m[k] = v
-		}
-	}
 	if raw["wake_mode"] != tp.WakeMode {
 		m["wake_mode"] = tp.WakeMode
 	}
 	if raw["continuation_epoch"] == "" {
 		m["continuation_epoch"] = strconv.Itoa(session.DefaultContinuationEpoch)
 	}
-	diff("command", tp.Command)
-	if p := tp.ResolvedProvider; p != nil {
-		queueChangedResolvedProviderSessionMetadata(raw, func(k, v string) { m[k] = v }, p)
-		diff("resume_flag", p.ResumeFlag)
-		diff("resume_style", p.ResumeStyle)
-		diff("resume_command", p.ResumeCommand)
-		diff("session_id_flag", p.SessionIDFlag)
+	if tp.Command != "" && raw["command"] != tp.Command {
+		m["command"] = tp.Command
 	}
+	queueChangedResolvedProviderSessionMetadata(raw, func(k, v string) { m[k] = v }, tp.ResolvedProvider)
 	if raw["close_reason"] != "" || raw["closed_at"] != "" {
 		m["close_reason"], m["closed_at"] = "", ""
 	}
