@@ -41,6 +41,11 @@ func addCompactExtraDatabase(t *testing.T, fixture compactScriptFixture, name st
 	}
 }
 
+// countLiveProbesForDB counts the served-HEAD probes the gate issued for db.
+func countLiveProbesForDB(log, db string) int {
+	return strings.Count(log, "db="+db+" query=SELECT CONCAT")
+}
+
 // readCompactMarkerBody reads a marker file compact wrote.
 func readCompactMarkerBody(t *testing.T, path string) string {
 	t.Helper()
@@ -274,6 +279,72 @@ func TestCompactScriptLiveGateAbortsRunAndNamesDatabasesNotReached(t *testing.T)
 		requireCompactExitCode(t, out, err, 1)
 		if !strings.Contains(out, "not reached after the abort: none") {
 			t.Fatalf("abort diagnostic must say no databases were left unreached:\n%s", out)
+		}
+	})
+}
+
+// TestCompactScriptLiveGateRetriesTransientProbeFailures: a probe failure
+// that recovers within the configured attempts while the directory invariant
+// holds is not a quarantine — the rewrite's own result decides the outcome —
+// and healthy passes probe a bounded, predictable number of times.
+func TestCompactScriptLiveGateRetriesTransientProbeFailures(t *testing.T) {
+	t.Run("recovers within attempts", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		addCompactExtraDatabase(t, fixture, "zed")
+		out, err := fixture.run(t, "live_probe_transient_once",
+			"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+			"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
+		if err != nil {
+			t.Fatalf("a transient probe failure must not fail the run: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "live-database probe recovered on attempt=2/3") {
+			t.Fatalf("output must log the probe recovery:\n%s", out)
+		}
+		if !strings.Contains(out, "commits=600->600") || !strings.Contains(out, "— ok") {
+			t.Fatalf("the rewrite result must stand:\n%s", out)
+		}
+		if _, statErr := os.Stat(compactLiveGateMarkerPath(fixture)); !os.IsNotExist(statErr) {
+			t.Fatalf("a recovered probe failure must not quarantine:\n%s", out)
+		}
+		log := readCompactDoltLog(t, fixture)
+		for _, db := range []string{"beads", "zed"} {
+			if got := countLiveProbesForDB(log, db); got != 3 {
+				t.Fatalf("db=%s live probes = %d, want 3 (flatten check + failed then recovered post-GC probe):\n%s", db, got, log)
+			}
+		}
+	})
+
+	t.Run("healthy flatten probes twice per database", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+		if err != nil {
+			t.Fatalf("compact failed: %v\n%s", err, out)
+		}
+		if got := countLiveProbesForDB(readCompactDoltLog(t, fixture), "beads"); got != 2 {
+			t.Fatalf("live probes = %d, want 2 (post-flatten check + post-GC check)", got)
+		}
+	})
+
+	t.Run("healthy gc-only probes twice per database", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		out, err := fixture.runWithArgs(t, "success", []string{"--gc-only"})
+		if err != nil {
+			t.Fatalf("compact failed: %v\n%s", err, out)
+		}
+		if got := countLiveProbesForDB(readCompactDoltLog(t, fixture), "beads"); got != 2 {
+			t.Fatalf("live probes = %d, want 2 (baseline + post-GC check)", got)
+		}
+	})
+
+	t.Run("attempts 1 does not retry", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		out, err := fixture.run(t, "live_probe_transient_once",
+			"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+			"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0",
+			"GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=1")
+		requireCompactExitCode(t, out, err, 1)
+		if _, statErr := os.Stat(compactLiveGateMarkerPath(fixture)); statErr != nil {
+			t.Fatalf("an unrecovered probe failure must quarantine (stat err=%v):\n%s", statErr, out)
 		}
 	})
 }
