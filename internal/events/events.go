@@ -334,6 +334,13 @@ const (
 	// the start path (legacy prepare, v2 PreWake); the envelope's Subject is
 	// the agent and SessionID the session bead.
 	SessionConversationReset = "session.conversation_reset"
+	// SessionStartupKickoffGivenUp fires once when the named/direct startup
+	// backstop spends its bounded re-nudges on a session whose bound work step
+	// never advanced, and latches startup_kickoff_state=given_up. Subject
+	// carries the bound step, SessionID the session bead; the payload is
+	// SessionStartupKickoffGivenUpPayload. It is a controller LIVENESS fact:
+	// the controller stops nudging, it does not recycle the session.
+	SessionStartupKickoffGivenUp = "session.startup_kickoff_given_up"
 	// SessionPending fires when a session gains a pending interaction (an
 	// approval prompt or question the session is blocked on) and
 	// SessionPendingCleared fires when that interaction goes away — answered,
@@ -667,6 +674,7 @@ var KnownEventTypes = []string{
 	SessionProgramStatusShadow,
 	SessionColdStartTimeout,
 	SessionConversationReset,
+	SessionStartupKickoffGivenUp,
 	SessionPending, SessionPendingCleared,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,

@@ -3570,6 +3570,9 @@
             "$ref": "#/components/schemas/SessionResetStalledPayload"
           },
           {
+            "$ref": "#/components/schemas/SessionStartupKickoffGivenUpPayload"
+          },
+          {
             "$ref": "#/components/schemas/SessionStrandedClaimsPayload"
           },
           {
@@ -9830,6 +9833,27 @@
         ],
         "type": "object"
       },
+      "SessionStartupKickoffGivenUpPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "attempts": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "bound_step_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "bound_step_id",
+          "attempts"
+        ],
+        "type": "object"
+      },
       "SessionStopBody": {
         "additionalProperties": true,
         "properties": {
@@ -14877,6 +14901,7 @@
             "session.program_status_shadow": "#/components/schemas/TypedEventStreamEnvelopeSessionProgramStatusShadow",
             "session.quarantined": "#/components/schemas/TypedEventStreamEnvelopeSessionQuarantined",
             "session.reset_stalled": "#/components/schemas/TypedEventStreamEnvelopeSessionResetStalled",
+            "session.startup_kickoff_given_up": "#/components/schemas/TypedEventStreamEnvelopeSessionStartupKickoffGivenUp",
             "session.stopped": "#/components/schemas/TypedEventStreamEnvelopeSessionStopped",
             "session.stranded": "#/components/schemas/TypedEventStreamEnvelopeSessionStranded",
             "session.stranded_claims": "#/components/schemas/TypedEventStreamEnvelopeSessionStrandedClaims",
@@ -15194,6 +15219,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionResetStalled"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionStartupKickoffGivenUp"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionStopped"
@@ -16901,6 +16929,7 @@
                 "session.program_status_shadow",
                 "session.cold_start_timeout",
                 "session.conversation_reset",
+                "session.startup_kickoff_given_up",
                 "session.pending",
                 "session.pending_cleared",
                 "bead.created",
@@ -20839,6 +20868,63 @@
         "title": "TypedEventStreamEnvelope session.reset_stalled",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionStartupKickoffGivenUp": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionStartupKickoffGivenUpPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.startup_kickoff_given_up",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.startup_kickoff_given_up",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionStopped": {
         "additionalProperties": false,
         "properties": {
@@ -22761,6 +22847,7 @@
             "session.program_status_shadow": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow",
             "session.quarantined": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionQuarantined",
             "session.reset_stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionResetStalled",
+            "session.startup_kickoff_given_up": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStartupKickoffGivenUp",
             "session.stopped": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStopped",
             "session.stranded": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStranded",
             "session.stranded_claims": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStrandedClaims",
@@ -23078,6 +23165,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionResetStalled"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStartupKickoffGivenUp"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStopped"
@@ -24896,6 +24986,7 @@
                 "session.program_status_shadow",
                 "session.cold_start_timeout",
                 "session.conversation_reset",
+                "session.startup_kickoff_given_up",
                 "session.pending",
                 "session.pending_cleared",
                 "bead.created",
@@ -29101,6 +29192,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.reset_stalled",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionStartupKickoffGivenUp": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionStartupKickoffGivenUpPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.startup_kickoff_given_up",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.startup_kickoff_given_up",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionStopped": {

@@ -1549,6 +1549,11 @@ cmd/gc/split_strict_seam.go	splitStrictWorkView	raw-param	1
 cmd/gc/split_strict_seam.go	splitStrictWorkView	raw-result	1
 cmd/gc/split_strict_seam.go	splitStrictWorkViews	raw-param	1
 cmd/gc/split_strict_seam.go	splitStrictWorkViews	raw-result	1
+cmd/gc/startup_kickoff_nudge.go	namedDirectStartupBackstop.clear	raw-param	1
+cmd/gc/startup_kickoff_nudge.go	namedDirectStartupBackstop.exhausted	raw-param	1
+cmd/gc/startup_kickoff_nudge.go	namedDirectStartupBackstop.observe	raw-param	1
+cmd/gc/startup_kickoff_nudge.go	namedDirectStartupBackstop.reserve	raw-param	1
+cmd/gc/startup_kickoff_nudge.go	nudgeOutstandingStartupKickoffs	raw-param	1
 cmd/gc/store_health.go	collectStoreHealth	raw-param	1
 cmd/gc/store_health.go	listBeadsWithTimeout	raw-param	1
 cmd/gc/store_health.go	liveRowCount	cap-assert	1
