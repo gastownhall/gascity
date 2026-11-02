@@ -1883,6 +1883,60 @@ func TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules(t *testing.T
 			t.Errorf("rendered pool-worker prompt still denies materialized step beads:\n%s", got)
 		}
 	})
+
+	t.Run("AC-5 startup drain semantics are explicit and synchronized", func(t *testing.T) {
+		got := renderPoolWorkerPrompt(t)
+		startup := flattenPromptText(renderedPromptSection(t, got, "Startup Protocol"))
+
+		// Drain-aware calls are distinguished from plain polls, each with
+		// its exit semantics; tolerated refusal can exit 0 without the ack
+		// field, and failed calls stay faults.
+		for _, want := range []string{
+			"gc hook --claim --drain-ack --json",
+			"Exit status 0",
+			"drain_acknowledged=true",
+			"tolerated refusal",
+			"Exit status 1",
+			"gc runtime drain-ack",
+			"drain_pending",
+			"acknowledges nothing",
+			"gc hook --claim --json",
+			"no JSON line",
+			"fault",
+		} {
+			if !strings.Contains(startup, want) {
+				t.Errorf("startup protocol missing %q:\n%s", want, startup)
+			}
+		}
+
+		// The Dolt dog prompt carries the identical fragment body: its
+		// pack cannot import core, so a sync check is what keeps the two
+		// copies together (examples/bd/dolt/dog_prompt_test.go enforces
+		// the same from its side).
+		chdirToRealPackageDir(t)
+		repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+		if err != nil {
+			t.Fatalf("filepath.Abs(repo root): %v", err)
+		}
+		fragmentPath := filepath.Join(repoRoot, "internal", "bootstrap", "packs", "core",
+			"template-fragments", "claim-protocol.template.md")
+		fragmentData, err := os.ReadFile(fragmentPath)
+		if err != nil {
+			t.Fatalf("os.ReadFile(claim-protocol fragment): %v", err)
+		}
+		lines := strings.Split(strings.TrimSpace(string(fragmentData)), "\n")
+		if len(lines) < 3 || !strings.Contains(lines[0], `{{ define "claim-protocol"`) || !strings.Contains(lines[len(lines)-1], "end }}") {
+			t.Fatalf("claim-protocol fragment no longer has the define/end wrapper shape:\n%s", fragmentData)
+		}
+		body := strings.TrimSpace(strings.Join(lines[1:len(lines)-1], "\n"))
+		dogData, err := os.ReadFile(filepath.Join(repoRoot, "examples", "bd", "dolt", "agents", "dog", "prompt.template.md"))
+		if err != nil {
+			t.Fatalf("os.ReadFile(dog prompt): %v", err)
+		}
+		if !strings.Contains(string(dogData), body) {
+			t.Errorf("dolt dog prompt drifted from the core claim-protocol fragment; update both together\n--- fragment body ---\n%s", body)
+		}
+	})
 }
 
 // TestPoolWorkerPromptDoesNotDenyMaterializedGraphSteps pins that the
