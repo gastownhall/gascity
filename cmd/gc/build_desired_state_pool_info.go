@@ -230,8 +230,15 @@ func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, templ
 		// exit and remints the identity in place. Persistent pools keep
 		// today's behavior (a genuine crash gets a fresh identity rather than
 		// resuming a possibly-corrupt conversation); their freeable rows are
-		// closed by the reconciler's pool-slot close instead.
-		if cfgAgent.Lifecycle != config.AgentLifecycleOneShot || !isPoolSessionSlotFreeableInfo(info, bp.now()) {
+		// closed by the reconciler's pool-slot close instead. A committed
+		// restart handoff (restartHandedOffInfo) is neither a crash nor a
+		// sleep: the reset is already committed, so the row's reset-pending
+		// wake starts a fresh conversation rather than resuming — reusing the
+		// row keeps the identity without resuming anything, and the floor
+		// takes the pool back on the next tick instead of stalling on the
+		// row's own runtime name until the session sweep retires it.
+		if !restartHandedOffInfo(info) &&
+			(cfgAgent.Lifecycle != config.AgentLifecycleOneShot || !isPoolSessionSlotFreeableInfo(info, bp.now())) {
 			return false
 		}
 		// A one_shot exit that still holds an open/in-progress assigned work
@@ -263,6 +270,19 @@ func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, templ
 		return false
 	}
 	return resolvedSessionTemplateInfo(info, reuseTemplateConfig(bp)) == template
+}
+
+// restartHandedOffInfo reports whether info is a restart handoff still
+// waiting for its fresh start: RestartRequestPatch committed the reset (it is
+// the only writer of reset_committed_at, which CommitStartedPatch clears on
+// the start) and no sleep reason has been stamped since. It reads the
+// committed marker through resetPendingCommittedAtInfo, the reconciler's own
+// parse-strict reader, so there is one definition of "committed reset".
+func restartHandedOffInfo(info session.Info) bool {
+	if _, _, ok := resetPendingCommittedAtInfo(info); !ok {
+		return false
+	}
+	return strings.TrimSpace(info.SleepReason) == ""
 }
 
 // reusablePoolSessionInfos is the session.Info sibling of reusablePoolSessionBeads.

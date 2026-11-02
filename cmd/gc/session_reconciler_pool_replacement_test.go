@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -404,6 +405,64 @@ func TestReusablePoolSessionInfo_OneShotAsleepFreeableWithOpenAssignedWorkNotReu
 			"want false — an asleep one_shot exit that still holds in-progress assigned work must fall "+
 			"through to fresh-identity creation, not be wake-reused (session %s)",
 			asleepFreeableWithWork.ID)
+	}
+}
+
+// TestReusablePoolSessionInfo_PersistentRestartHandoffIsReusable is the
+// regression guard for the restart-handoff pool outage (ga-7jmssd): a restart
+// request that kills a live runtime hands the row off (restartHandoff ->
+// RestartRequestPatch: state=asleep, continuation_reset_pending=true,
+// reset_committed_at=now, no sleep_reason, no slept_at), and the row then
+// holds the pool identity's runtime session_name while every asleep row of a
+// persistent pool was blanket-excluded from reuse. The min floor could not
+// take the row back, the fresh create collided with the very name the row
+// still holds (claimFreshPoolSlotInfo -> "canonical pool template ... is held
+// by session ..."), and neither freeable predicate retires it (no sleep
+// reason, no slept_at) — only the session sweep closed it, ~13 minutes of no
+// running session per pool after every supervisor restart.
+//
+// A committed restart handoff is not a crash and not a sleep: the reset is
+// already committed, so its reset-pending wake starts a FRESH conversation
+// (the rule that a crashed persistent row gets a fresh identity still holds —
+// nothing resumes). Reusing the row lets the floor take the identity back on
+// the very next tick instead of stalling until the sweep.
+func TestReusablePoolSessionInfo_PersistentRestartHandoffIsReusable(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 30, 5, 0, 0, 0, time.UTC)
+	template := "rig/worker-persistent"
+	awake := session.Info{
+		ID:                  "session-restart-handed-off",
+		Template:            template,
+		SessionNameMetadata: "rig--worker-persistent-1-pool",
+		PoolManaged:         true,
+		PoolSlot:            "1",
+		MetadataState:       "awake",
+	}
+	// Build the row from the real handoff, not a hand-rolled shape, so drift
+	// in restartHandoff shows up here as a fixture failure rather than a
+	// predicate failure.
+	handedOff := awake.ApplyPatch(restartHandoff("", true, finalizeFacts{Now: now}))
+	if handedOff.MetadataState != string(session.StateAsleep) {
+		t.Fatalf("fixture: restartHandoff state = %q, want asleep", handedOff.MetadataState)
+	}
+	if strings.TrimSpace(handedOff.ContinuationResetPending) != "true" {
+		t.Fatalf("fixture: restartHandoff continuation_reset_pending = %q, want true", handedOff.ContinuationResetPending)
+	}
+	if _, _, ok := resetPendingCommittedAtInfo(handedOff); !ok {
+		t.Fatalf("fixture: restartHandoff did not leave a parseable reset_committed_at: %q", handedOff.ResetCommittedAt)
+	}
+	if strings.TrimSpace(handedOff.SleepReason) != "" {
+		t.Fatalf("fixture: restartHandoff sleep_reason = %q, want empty (the restart is no sleep)", handedOff.SleepReason)
+	}
+
+	persistentAgent := &config.Agent{Name: "worker-persistent", Dir: "rig"}
+	bp := &agentBuildParams{}
+	if got := reusablePoolSessionInfo(bp, persistentAgent, template, handedOff, nil); !got {
+		t.Fatalf("reusablePoolSessionInfo(persistent, asleep, restart handoff with committed reset and no sleep reason) = false; "+
+			"want true — a committed restart handoff must be reusable so the min floor takes the identity "+
+			"back on the next tick instead of stalling on the row's own runtime name (session %s)",
+			handedOff.ID)
 	}
 }
 
