@@ -5657,6 +5657,50 @@ func TestSyncSessionBeads_ProviderProjectionClearsMissingFields(t *testing.T) {
 	}
 }
 
+// TestSyncSessionBeads_ProviderProjectionPreservesAndConverges guards the
+// limits of the #8539 refresh: a nil resolution (a failed one) keeps every
+// stored provider-derived value, and a row already on its successful
+// resolution's projection, whether its empty fields are stored empty or
+// absent, is not rewritten (#1205).
+func TestSyncSessionBeads_ProviderProjectionPreservesAndConverges(t *testing.T) {
+	stored := codexWrappedMetadata()
+	stored["session_id_flag"] = "--session-id"
+	meta, writes := syncProviderProjection(t, stored, nil)
+	for _, k := range providerProjectionKeys {
+		if meta[k] != stored[k] {
+			t.Errorf("nil resolution: %s = %q, want the stored %q kept", k, meta[k], stored[k])
+		}
+	}
+	if writes != 0 {
+		t.Errorf("nil resolution wrote metadata %d times, want none", writes)
+	}
+	for _, tc := range providerProjectionCases() {
+		t.Run("stored empty/"+tc.name, func(t *testing.T) {
+			if _, writes := syncProviderProjection(t, tc.want, tc.resolved); writes != 0 {
+				t.Errorf("converged sync wrote metadata %d times, want none", writes)
+			}
+		})
+		t.Run("absent/"+tc.name, func(t *testing.T) {
+			cs := &countingStore{Store: beads.NewMemStore()}
+			clk := &clock.Fake{Time: time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)}
+			sp := runtime.NewFake()
+			_ = sp.Start(context.TODO(), "worker", runtime.Config{Command: "run-worker"})
+			ds := map[string]TemplateParams{"worker": {TemplateName: "worker", Command: "run-worker", ResolvedProvider: tc.resolved}}
+			var stderr bytes.Buffer
+			syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+			writesBefore := cs.writes
+			clk.Advance(time.Minute)
+			syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+			if cs.writes != writesBefore {
+				t.Errorf("converged sync of a created bead wrote metadata (%d -> %d writes), want none", writesBefore, cs.writes)
+			}
+			if stderr.Len() > 0 {
+				t.Fatalf("unexpected stderr: %s", stderr.String())
+			}
+		})
+	}
+}
+
 func TestSyncSessionBeadsWithSnapshot_RefreshesMissingNamedSessionFromStore(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

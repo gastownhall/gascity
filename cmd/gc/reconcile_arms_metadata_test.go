@@ -441,3 +441,30 @@ func TestRefreshLaunchKeysProviderSwitchClearsStaleProjection(t *testing.T) {
 		}
 	}
 }
+
+// Kills A7's provider refresh writing without a trustworthy or a changed
+// resolution: a nil resolution keeps every stored provider-derived key, a
+// row on its resolution's projection (empty fields stored empty or absent)
+// writes nothing, and an empty resolved command keeps the stored one.
+func TestDesiredRowLaunchRefreshProviderProjectionPreservesAndConverges(t *testing.T) {
+	stored := codexWrappedMetadata()
+	stored["session_id_flag"] = "--session-id"
+	if patch, _ := a7ProviderProjection(stored, nil); len(patch) != 0 {
+		t.Errorf("nil resolution: patch %v, want the stored keys kept", patch)
+	}
+	for _, tc := range providerProjectionCases() {
+		absent := maps.Clone(tc.want)
+		maps.DeleteFunc(absent, func(_, v string) bool { return v == "" })
+		for label, raw := range map[string]map[string]string{"stored empty": tc.want, "absent": absent} {
+			if patch, _ := a7ProviderProjection(raw, tc.resolved); len(patch) != 0 {
+				t.Errorf("%s, empty fields %s: converged row patched %v, want nothing", tc.name, label, patch)
+			}
+		}
+	}
+	tp := TemplateParams{TemplateName: "worker", InstanceName: "worker-2", PoolSlot: 2, WakeMode: "fresh", WorkDir: "/w", ResolvedProvider: &config.ResolvedProvider{Name: "plain"}}
+	seat := session.Info{Template: "worker", SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "2", AgentName: "worker-2", Type: session.BeadType, MetadataState: "asleep"}
+	raw := rowRefreshKeys{"wake_mode": "fresh", "continuation_epoch": "1", "command": "run-worker", "session_key": "k-1", "work_dir": "/w", "provider": "plain"}
+	if id := desiredRowIdentity(identityCity(), tp, seat, raw); len(id.Meta) != 0 {
+		t.Errorf("an empty resolved command: patch %v, want the stored command kept", id.Meta)
+	}
+}
