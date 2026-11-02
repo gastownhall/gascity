@@ -1007,6 +1007,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc bd list`/`ready`/`search` answered rig-scoped selector queries from
+  the city store, reporting a confident empty result.** A selector's
+  store-naming filter values — `--id` (and comma lists), `--parent`,
+  `--filter-parent`, `--mol`, `--spec`, `--assignee`/`-a` — never
+  participated in store routing, so `gc bd list --status=open
+  --assignee=gk/gastown.refinery` read `0` assigned for every rig agent
+  while the beads sat open in the rig's own store (the deacon
+  queue-starvation scan was blind for as long as it ran), and a warrant
+  dedup check could miss a cross-store twin. When every such value in one
+  invocation resolves to the same single bound store, the read now routes
+  there, with the same `gc bd: answering from ...` disclosure as by-id
+  reads; values that name no store (unprefixed identities, labels, free
+  text) leave the store to the usual chain, so every other answer is
+  byte-identical. `bd search` also gained a flag manifest (it had none,
+  so its argv could not be scanned at all).
+
 - **The supervisor API route printed different JSON from the local route
   for the commands supervisor-hosted cities read through it (#8453).**
   `gc session list` printed a different document and dropped

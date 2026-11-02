@@ -323,6 +323,122 @@ func TestResolveBdScopeTarget(t *testing.T) {
 				Prefix:    "ga",
 			},
 		},
+		{
+			// A selector read's store-naming filter values name the store the
+			// matched rows live in. A rig-qualified assignee ("wren/…",
+			// Agent.QualifiedName's shape) routes to that rig's store instead
+			// of answering [] from the city's — the failure that made the
+			// queue-starvation scan read 0 assigned for every rig agent.
+			name: "list routes rig-qualified assignee to the rig",
+			args: []string{"list", "--status=open", "--assignee", "wren/gastown.refinery"},
+			want: execStoreTarget{
+				ScopeRoot: filepath.Join(cityDir, "rigs", "wren"),
+				ScopeKind: "rig",
+				Prefix:    "projectwrenunity",
+				RigName:   "wren",
+			},
+		},
+		{
+			// The identity's left side falls through to the prefix walk, so
+			// a city whose rig routes beads under a prefix distinct from the
+			// rig's name still routes on it.
+			name: "list routes assignee by rig prefix when the name differs",
+			args: []string{"list", "--assignee=projectwrenunity/gastown.refinery"},
+			want: execStoreTarget{
+				ScopeRoot: filepath.Join(cityDir, "rigs", "wren"),
+				ScopeKind: "rig",
+				Prefix:    "projectwrenunity",
+				RigName:   "wren",
+			},
+		},
+		{
+			name: "ready routes rig-qualified assignee",
+			args: []string{"ready", "--assignee", "wren/gastown.refinery"},
+			want: execStoreTarget{
+				ScopeRoot: filepath.Join(cityDir, "rigs", "wren"),
+				ScopeKind: "rig",
+				Prefix:    "projectwrenunity",
+				RigName:   "wren",
+			},
+		},
+		{
+			name: "search routes rig-qualified assignee",
+			args: []string{"search", "--assignee", "wren/gastown.refinery"},
+			want: execStoreTarget{
+				ScopeRoot: filepath.Join(cityDir, "rigs", "wren"),
+				ScopeKind: "rig",
+				Prefix:    "projectwrenunity",
+				RigName:   "wren",
+			},
+		},
+		{
+			// A comma id list routes by its shared prefix and never by
+			// existence: neither id is one the bdBeadExists stub answers
+			// for, so only the deterministic route can pick the rig.
+			name: "list routes comma id list sharing one prefix",
+			args: []string{"list", "--id", "projectwrenunity-7k2f,projectwrenunity-9xq"},
+			want: execStoreTarget{
+				ScopeRoot: filepath.Join(cityDir, "rigs", "wren"),
+				ScopeKind: "rig",
+				Prefix:    "projectwrenunity",
+				RigName:   "wren",
+			},
+		},
+		{
+			name: "list keeps an unprefixed assignee at the city",
+			args: []string{"list", "--assignee", "gastown.mayor"},
+			want: execStoreTarget{
+				ScopeRoot: cityDir,
+				ScopeKind: "city",
+				Prefix:    "ga",
+			},
+		},
+		{
+			// Filters that describe rows rather than name them never route:
+			// a label whose value merely begins with a rig prefix is prose.
+			name: "list keeps a label filter at the city",
+			args: []string{"list", "--label", "projectwrenunity-open"},
+			want: execStoreTarget{
+				ScopeRoot: cityDir,
+				ScopeKind: "city",
+				Prefix:    "ga",
+			},
+		},
+		{
+			// Filter values owned by different stores leave the choice to the
+			// existing chain: one bd passthrough cannot serve both.
+			name: "list keeps mixed-owner filters at the city",
+			args: []string{"list", "--assignee", "wren/gastown.refinery", "--id", "ga-mixed1"},
+			want: execStoreTarget{
+				ScopeRoot: cityDir,
+				ScopeKind: "city",
+				Prefix:    "ga",
+			},
+		},
+		{
+			// A flag outside the verb's manifest may or may not consume the
+			// next token as its value, so the scan fails closed and the
+			// existing chain answers.
+			name: "list fails closed on an unknown flag",
+			args: []string{"list", "--future-flag", "projectwrenunity-7k2f"},
+			want: execStoreTarget{
+				ScopeRoot: cityDir,
+				ScopeKind: "city",
+				Prefix:    "ga",
+			},
+		},
+		{
+			// An explicit --city pins the city store over a selector's
+			// prefix, symmetric with the by-id reads (#3410).
+			name:         "explicit city pins city over selector prefix",
+			cityExplicit: true,
+			args:         []string{"list", "--assignee", "wren/gastown.refinery"},
+			want: execStoreTarget{
+				ScopeRoot: cityDir,
+				ScopeKind: "city",
+				Prefix:    "ga",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1059,6 +1175,148 @@ set -eu
 	}
 	if !samePath(got["BEADS_DIR"], filepath.Join(cityDir, ".beads")) {
 		t.Fatalf("BEADS_DIR = %q, want %q", got["BEADS_DIR"], filepath.Join(cityDir, ".beads"))
+	}
+}
+
+// TestGcBdRoutesSelectorFilterToTheRigStore is the selector counterpart of
+// TestGcBdDoesNotAutoRouteHyphenatedFlagValue: a selector read whose
+// store-naming filter values all name one rig must reach bd pointed at that
+// rig's store, and the same filters that describe rows without naming one
+// must stay at the city. The failing shape this pins is the queue-starvation
+// scan's `gc bd list --status=open --assignee=gk/…`, which answered [] from
+// the city store for rows the rig held, with exit 0 and — before the store
+// disclosure — no word of which store had been asked.
+func TestGcBdRoutesSelectorFilterToTheRigStore(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	defer func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	}()
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "repo")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[[rigs]]
+name = "repo"
+path = "repo"
+prefix = "repo"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// See TestResolveBdScopeTarget for rationale: isolate cwd so any
+	// `.beads/redirect` in the ambient working tree doesn't surface here.
+	setCwd(t, cityDir)
+
+	binDir := t.TempDir()
+	capture := filepath.Join(t.TempDir(), "gc-bd-selector-env.txt")
+	script := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(script, []byte(`#!/bin/sh
+set -eu
+{
+  printf 'args=%s\n' "$*"
+  printf 'GC_STORE_ROOT=%s\n' "${GC_STORE_ROOT:-}"
+  printf 'GC_STORE_SCOPE=%s\n' "${GC_STORE_SCOPE:-}"
+  printf 'BEADS_DIR=%s\n' "${BEADS_DIR:-}"
+} > "${CAPTURE_PATH}"
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath)
+	t.Setenv("CAPTURE_PATH", capture)
+	t.Setenv("GC_CITY_PATH", cityDir)
+
+	tests := []struct {
+		name       string
+		args       []string
+		wantScope  string
+		wantRoot   string
+		wantStderr string
+	}{
+		{
+			name:       "rig-qualified assignee",
+			args:       []string{"list", "--status=open", "--assignee", "repo/gastown.refinery"},
+			wantScope:  "rig",
+			wantRoot:   rigDir,
+			wantStderr: `gc bd: answering from the rig "repo" store`,
+		},
+		{
+			// Deterministic: neither id exists in the empty fixture stores,
+			// so only the prefix route — not the existence probe — can pick
+			// the rig.
+			name:      "comma id list sharing the rig prefix",
+			args:      []string{"list", "--id", "repo-abc123,repo-def456"},
+			wantScope: "rig",
+			wantRoot:  rigDir,
+		},
+		{
+			name:      "ready with a rig-qualified assignee",
+			args:      []string{"ready", "--assignee", "repo/gastown.refinery", "--json"},
+			wantScope: "rig",
+			wantRoot:  rigDir,
+		},
+		{
+			name:       "unprefixed assignee stays at the city",
+			args:       []string{"list", "--status=open", "--assignee", "gastown.mayor"},
+			wantScope:  "city",
+			wantRoot:   cityDir,
+			wantStderr: "gc bd: answering from the city store",
+		},
+		{
+			name:      "a label filter is prose and stays at the city",
+			args:      []string{"list", "--label", "repo-open"},
+			wantScope: "city",
+			wantRoot:  cityDir,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if got := doBd(tt.args, &stdout, &stderr); got != 0 {
+				t.Fatalf("doBd(%q) = %d, want 0; stderr=%q", tt.args, got, stderr.String())
+			}
+			if tt.wantStderr != "" && !strings.Contains(stderr.String(), tt.wantStderr) {
+				t.Fatalf("stderr = %q, want it to name %q", stderr.String(), tt.wantStderr)
+			}
+			data, err := os.ReadFile(capture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := make(map[string]string)
+			for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+				key, value, ok := strings.Cut(line, "=")
+				if ok {
+					got[key] = value
+				}
+			}
+			wantArgs := strings.Join(tt.args, " ")
+			if got["args"] != wantArgs {
+				t.Fatalf("args = %q, want %q", got["args"], wantArgs)
+			}
+			if got["GC_STORE_SCOPE"] != tt.wantScope {
+				t.Fatalf("GC_STORE_SCOPE = %q, want %q (stderr=%q)", got["GC_STORE_SCOPE"], tt.wantScope, stderr.String())
+			}
+			if !samePath(got["GC_STORE_ROOT"], tt.wantRoot) {
+				t.Fatalf("GC_STORE_ROOT = %q, want %q", got["GC_STORE_ROOT"], tt.wantRoot)
+			}
+			if !samePath(got["BEADS_DIR"], filepath.Join(tt.wantRoot, ".beads")) {
+				t.Fatalf("BEADS_DIR = %q, want %q", got["BEADS_DIR"], filepath.Join(tt.wantRoot, ".beads"))
+			}
+		})
 	}
 }
 
