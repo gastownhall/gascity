@@ -427,6 +427,26 @@ func TestDesiredRowLaunchRefreshClearsMissingProviderFields(t *testing.T) {
 	if id := desiredRowIdentity(cfg, tp, seat, rowRefreshKeys(projection)); len(id.Meta) != 0 {
 		t.Fatalf("converged: meta %v, want no write", id.Meta)
 	}
+	// AC-4: a successful unnamed start-command resolution keeps the stored
+	// provider name while clearing the fields it does not carry and
+	// projecting its explicit ResumeCommand.
+	unnamed := &config.ResolvedProvider{Command: "custom-agent run", ResumeCommand: "custom-agent resume {{.SessionKey}}"}
+	tpUnnamed := TemplateParams{TemplateName: "worker", InstanceName: "worker-2", PoolSlot: 2, Command: "custom-agent run", ResolvedProvider: unnamed}
+	wantUnnamed := session.MetadataPatch{
+		"command": "custom-agent run", "provider_kind": "", "builtin_ancestor": "",
+		"resume_flag": "", "resume_style": "", "resume_command": "custom-agent resume {{.SessionKey}}", "session_id_flag": "",
+	}
+	if id := desiredRowIdentity(cfg, tpUnnamed, seat, corrupted); !maps.Equal(id.Meta, wantUnnamed) {
+		t.Fatalf("unnamed: meta %v, want %v with no provider entry", id.Meta, wantUnnamed)
+	}
+	// Command keeps its own non-empty guard: an empty resolved command never
+	// clears a stored launch command.
+	quiet := tp
+	quiet.Command = ""
+	quietID := desiredRowIdentity(cfg, quiet, seat, codex)
+	if _, ok := quietID.Meta["command"]; ok {
+		t.Fatalf("empty resolved command queued %q, want the stored command kept", quietID.Meta["command"])
+	}
 }
 
 // A successful switch from a wrapped codex provider to the builtin-named

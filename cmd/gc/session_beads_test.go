@@ -5614,6 +5614,33 @@ func TestSyncSessionBeads_ProviderProjectionClearsMissingFields(t *testing.T) {
 		}
 	}
 
+	// Tick 6 (unnamed resolution): a successful start-command resolution
+	// with no provider name keeps the stored provider name while projecting
+	// its explicit ResumeCommand and clearing the fields it does not carry.
+	ds["worker"] = TemplateParams{
+		TemplateName: "worker",
+		Command:      "custom-agent run",
+		ResolvedProvider: &config.ResolvedProvider{
+			Command: "custom-agent run", ResumeCommand: "custom-agent resume {{.SessionKey}}",
+		},
+	}
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	meta = allSessionBeads(t, cs)[0].Metadata
+	for _, c := range []struct{ key, want string }{
+		{"provider", "claude"},
+		{"provider_kind", ""},
+		{"builtin_ancestor", ""},
+		{"resume_flag", ""},
+		{"resume_style", ""},
+		{"resume_command", "custom-agent resume {{.SessionKey}}"},
+		{"session_id_flag", ""},
+	} {
+		if meta[c.key] != c.want {
+			t.Errorf("tick 6: unnamed resolution: %s = %q, want %q", c.key, meta[c.key], c.want)
+		}
+	}
+
 	if stderr.Len() > 0 {
 		t.Fatalf("unexpected stderr: %s", stderr.String())
 	}
