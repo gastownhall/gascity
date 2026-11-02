@@ -117,7 +117,10 @@ func (p *decidePass) demand() {
 		}
 	}
 	refs := p.in.Demand.RelocatedClaimRefs
-	p.named = computeNamedSessionDemandOn(p.in.CityName, p.in.CityPath, p.cfg, func() []string { return refs },
+	canonical := func(spec namedSessionSpec) (session.Info, bool) {
+		return session.FindCanonicalNamedSessionInfo(p.namedCandidates(), spec)
+	}
+	p.named = computeNamedSessionDemandOn(p.in.CityName, p.in.CityPath, p.cfg, func() []string { return refs }, canonical,
 		p.in.SuspendedRigPaths, p.in.Demand.NamedDefault, p.in.Demand.AssignedWork, p.in.Demand.AssignedStoreRefs,
 		p.in.Demand.ReadyAssigned, p.merged.ScaleCheckCounts, io.Discard)
 }
@@ -234,7 +237,8 @@ func withoutSuppressedRoutes(c collectedDemand, projected []beads.Bead) (map[str
 // in-flight demand is census ∪ the in-flight map).
 func (p *decidePass) computePoolDesired() {
 	rows := p.decidable
-	if standIns := p.inFlightStandIns(); len(standIns) > 0 {
+	standIns := p.inFlightStandIns()
+	if len(standIns) > 0 {
 		rows = append(slices.Clip(p.decidable), standIns...)
 	}
 	p.poolWork = filterAssignedWorkBeadsForPoolDemandAt(p.cfg, p.in.CityPath, p.in.Demand.RelocatedClaimRefs,
@@ -250,7 +254,8 @@ func (p *decidePass) computePoolDesired() {
 		}
 		poolCfg = &clone
 	}
-	p.poolStates = computePoolDesiredStatesAt(poolCfg, p.poolWork, rows, p.merged.ScaleCheckCounts, p.merged.ScaleCheckDemand, p.in.Now, nil)
+	p.parked = p.parkSeats(standIns)
+	p.poolStates = computePoolDesiredStatesParkedAt(poolCfg, p.poolWork, rows, p.merged.ScaleCheckCounts, p.merged.ScaleCheckDemand, p.in.Now, p.parked, nil)
 	p.poolDesired = retainScaleCheckPartialPoolDesired(p.cfg, PoolDesiredCounts(p.poolStates),
 		p.decidableSnapshot(), p.merged.PoolPartialRetention)
 	if p.poolDesired == nil {
@@ -258,6 +263,16 @@ func (p *decidePass) computePoolDesired() {
 	}
 	mergeNamedSessionDemand(p.poolDesired, p.named.workReady, p.cfg)
 	p.snap.PoolDesired = p.poolDesired
+}
+
+// parkSeats is the pass's park verdicts (parkSeats) over the rows that hold
+// a slot: occupancy, and the in-flight creates' stand-ins, from the demand's
+// assigned work and its store-scoped readiness. A partial work read parks
+// nothing: it cannot tell blocked from ready.
+func (p *decidePass) parkSeats(standIns []session.Info) parkedSeats {
+	d := p.in.Demand
+	return parkSeatsForDemand(p.cfg, [][]session.Info{p.occupancy, standIns}, d.AssignedWork, d.AssignedStoreRefs, d.ReadyAssigned,
+		d.StorePartial || len(p.snap.Partial.Global) > 0, p.in.Now)
 }
 
 // decidableSnapshot is the decidable rows' snapshot, built on first use.
@@ -457,6 +472,8 @@ func (p *decidePass) realizePools() {
 func (p *decidePass) realizeRequest(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, prefer *session.Info, request SessionRequest, used map[string]bool, usedSlots map[int]bool) {
 	info, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, qualifiedName, prefer, request, p.in.Now, used, usedSlots)
 	switch {
+	case errors.Is(err, errPoolTriggerWorktreeEvidence):
+		p.refuseWork(qualifiedName, "", rowKey{}, request, err)
 	case err != nil:
 		p.refuse(qualifiedName, "", rowKey{}, planErrorCause(err))
 	case plan != nil:
@@ -500,19 +517,23 @@ func (p *decidePass) selectPoolRow(cfgAgent *config.Agent, info session.Info, sl
 	// moves to the session key that applies it). Unusable evidence leaves a
 	// start candidate out of desired, as legacy skips the item; refused
 	// evidence (#34) is unusable while its verdict stands. A live row, or one
-	// whose liveness is unknown, keeps its selection and gets no binding.
+	// whose liveness is unknown, keeps its selection and gets no binding. A
+	// parked seat's resume keeps its recorded work dir (KeptWorkDir), which
+	// the PreWake verifies as it verifies a worktree.
 	if p.snap.Entries[k].Liveness.startCandidate() {
 		workDir, err := verifiedPoolTriggerWorkDir(p.bp, cfgAgent, ref.QualifiedInstance, request)
-		if err == nil && p.worktreeRefused(request) {
-			err = errPoolTriggerWorktreeEvidence
-		}
-		if err != nil {
+		switch {
+		case err != nil:
+			p.refuseWork(cfgAgent.QualifiedName(), ref.QualifiedInstance, k, request, err)
+			return
+		case p.worktreeRefused(request):
 			p.refuse(cfgAgent.QualifiedName(), ref.QualifiedInstance, k, gateWorktreeRefused)
 			return
 		}
-		if patch := computePoolTriggerBindingPatch(info, request, workDir); len(patch) > 0 {
+		patch := computePoolTriggerBindingPatch(info, request, workDir)
+		if kept := parkedWorkDirKept(info, request, workDir); len(patch) > 0 || kept != "" {
 			sel.binding = bindingOf(request, workDir)
-			sel.binding.Patch = patch
+			sel.binding.Patch, sel.binding.KeptWorkDir = patch, kept
 		}
 	}
 	p.selected[k] = sel
@@ -605,17 +626,7 @@ func (p *decidePass) planIdentifiers(cfgAgent *config.Agent, template string, pl
 // so a named row on any leg counts as canonical; legacy checks only the
 // sessions store.
 func (p *decidePass) planNamed() {
-	// Identity duplicates never stand for their identity: the canonical
-	// lookup takes the first claimant in census order.
-	candidates := p.occupancy
-	if slices.Contains(slices.Collect(maps.Values(p.none)), reasonIdentityDuplicate) {
-		candidates = make([]session.Info, 0, len(p.occupancy))
-		for _, info := range p.occupancy {
-			if k, ok := p.byID[info.ID]; !ok || p.none[k] != reasonIdentityDuplicate {
-				candidates = append(candidates, info)
-			}
-		}
-	}
+	candidates := p.namedCandidates()
 	for _, identity := range slices.Sorted(maps.Keys(p.named.specs)) {
 		spec := p.named.specs[identity]
 		template := namedSessionBackingTemplate(spec)
@@ -656,6 +667,23 @@ func (p *decidePass) planNamed() {
 			Alias: identity, ConfiguredNamedIdentity: identity,
 		}
 	}
+}
+
+// namedCandidates are the rows a configured named session's canonical row is
+// looked up in: the occupancy without its identity duplicates, which never
+// stand for their identity, so the lookup takes the first claimant in census
+// order.
+func (p *decidePass) namedCandidates() []session.Info {
+	if !slices.Contains(slices.Collect(maps.Values(p.none)), reasonIdentityDuplicate) {
+		return p.occupancy
+	}
+	candidates := make([]session.Info, 0, len(p.occupancy))
+	for _, info := range p.occupancy {
+		if k, ok := p.byID[info.ID]; !ok || p.none[k] != reasonIdentityDuplicate {
+			candidates = append(candidates, info)
+		}
+	}
+	return candidates
 }
 
 // namedGate returns why a named plan is refused, or "". It sets the plan's
@@ -818,6 +846,18 @@ func (p *decidePass) bindings() {
 // refuse traces a refused plan or skipped selection; it consumes nothing.
 func (p *decidePass) refuse(template, instance string, k rowKey, cause string) {
 	p.trace = append(p.trace, allocTraceRecord{Template: template, Instance: instance, Key: k, Reason: "ineligible:" + cause})
+}
+
+// refuseWork traces a request refused because the pass found its worktree
+// evidence unusable (incomplete or conflicting, or naming another bead or
+// store), with its work item and err. Such a request never reaches a create
+// effect, whose verification failures log themselves, so the record is all
+// that reports it; a request refused while a failed verification's backoff
+// is live is traced by refuse alone.
+func (p *decidePass) refuseWork(template, instance string, k rowKey, request SessionRequest, err error) {
+	p.refuse(template, instance, k, gateWorktreeRefused)
+	r := &p.trace[len(p.trace)-1]
+	r.WorkBeadID, r.Detail = strings.TrimSpace(request.WorkBeadID), err.Error()
 }
 
 // createRefused returns the cause of a create backoff live at Now for the

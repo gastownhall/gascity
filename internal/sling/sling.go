@@ -70,6 +70,21 @@ type SlingOpts struct {
 	InlineText bool
 	ScopeKind  string
 	ScopeRef   string
+	// Initiator names who launched this sling: the verified principal of the
+	// API request (a write-grant key id). When set, sling records it as
+	// gc.initiator on every root it instantiates and on the bead it routes,
+	// before routing, so the stamp is present before any worker can claim
+	// the work. Empty stamps nothing.
+	Initiator string
+}
+
+// rootMetadata is the metadata sling asks molecule to write on every root it
+// instantiates for these options.
+func (o SlingOpts) rootMetadata() map[string]string {
+	if o.Initiator == "" {
+		return nil
+	}
+	return map[string]string{beadmeta.InitiatorMetadataKey: o.Initiator}
 }
 
 // AgentResolver resolves an agent name to a config.Agent.
@@ -229,6 +244,7 @@ type SlingResult struct {
 
 	// Structured warnings (callers decide how to display).
 	AgentSuspended bool     // target agent is suspended
+	CitySuspended  bool     // the city is effectively suspended
 	SuspendedRig   string   // non-empty: name of the target's rig, which is suspended
 	PoolEmpty      bool     // pool max=0
 	AutoBurned     []string // IDs of auto-burned stale molecules
@@ -300,6 +316,9 @@ type RouteOpts struct {
 	// target agent has one configured. Without this field, ExpandConvoy
 	// cannot propagate --no-formula through DoSlingBatch.
 	NoFormula bool
+	// Initiator mirrors SlingOpts.Initiator. Without it the plain-route hop
+	// from Dispatch through ExpandConvoy would drop the verified principal.
+	Initiator string
 }
 
 // FormulaOpts holds options for formula-based operations.
@@ -326,6 +345,8 @@ type FormulaOpts struct {
 	SkipPoke  bool
 	ScopeKind string
 	ScopeRef  string
+	// Initiator mirrors SlingOpts.Initiator.
+	Initiator string
 }
 
 // RouteBead routes a plain bead to an agent.
@@ -343,6 +364,7 @@ func (s *Sling) RouteBead(_ context.Context, beadID string, target config.Agent,
 		DryRun:        opts.DryRun,
 		InlineText:    opts.InlineText,
 		NoFormula:     opts.NoFormula,
+		Initiator:     opts.Initiator,
 	}, s.deps, s.deps.Store)
 }
 
@@ -364,6 +386,7 @@ func (s *Sling) LaunchFormula(_ context.Context, formulaName string, target conf
 		DryRun:        opts.DryRun,
 		ScopeKind:     opts.ScopeKind,
 		ScopeRef:      opts.ScopeRef,
+		Initiator:     opts.Initiator,
 	}, s.deps, s.deps.Store)
 }
 
@@ -385,6 +408,7 @@ func (s *Sling) AttachFormula(_ context.Context, formulaName, beadID string, tar
 		DryRun:        opts.DryRun,
 		ScopeKind:     opts.ScopeKind,
 		ScopeRef:      opts.ScopeRef,
+		Initiator:     opts.Initiator,
 	}, s.deps, s.deps.Store)
 }
 
@@ -414,6 +438,7 @@ func (s *Sling) Dispatch(ctx context.Context, opts SlingOpts, querier BeadChildQ
 		DryRun:     opts.DryRun,
 		InlineText: opts.InlineText,
 		NoFormula:  opts.NoFormula,
+		Initiator:  opts.Initiator,
 	}, querier)
 }
 
@@ -432,6 +457,7 @@ func (s *Sling) ExpandConvoy(_ context.Context, convoyID string, target config.A
 		DryRun:        opts.DryRun,
 		InlineText:    opts.InlineText,
 		NoFormula:     opts.NoFormula,
+		Initiator:     opts.Initiator,
 	}, s.deps, querier)
 }
 

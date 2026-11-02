@@ -75,15 +75,26 @@ func (in bdClassGuardInput) checkIDs(ids []string, variants ...coordclass.Mutati
 // readRefusal is the refusal for a pre-read that did not find exactly the
 // bead id names, or "".
 func (in bdClassGuardInput) readRefusal(id string, result bdReadResult) string {
+	problem := bdReadProblem(id, result)
+	if problem == "" {
+		return ""
+	}
+	return fmt.Sprintf("gc bd %s %s: refused on this split city: %s. Nothing was written.", in.path, id, problem)
+}
+
+// bdReadProblem says why a pre-read that did not find exactly the bead id
+// names leaves a write unjudged, or "" when it found it. It is the cause
+// clause of readRefusal and of an edge endpoint's refusal.
+func bdReadProblem(id string, result bdReadResult) string {
 	switch result {
 	case bdReadFound:
 		return ""
 	case bdReadCollision:
-		return fmt.Sprintf("gc bd %s %s: refused on this split city: bd resolves %q to a different bead (a short or partial id), so the write would land on a bead gc did not judge. Name the bead by its full id. Nothing was written.", in.path, id, id)
+		return fmt.Sprintf("bd resolves %q to a different bead (a short or partial id), so the write would land on a bead gc did not judge. Name the bead by its full id", id)
 	case bdReadNotFound:
-		return fmt.Sprintf("gc bd %s %s: refused on this split city: no bead %q in this store, so gc cannot judge what the write would do. Nothing was written.", in.path, id, id)
+		return fmt.Sprintf("no bead %q in this store, so gc cannot judge what the write would do", id)
 	default:
-		return fmt.Sprintf("gc bd %s %s: refused on this split city: gc could not read the bead to check the write. Retry once the store answers. Nothing was written.", in.path, id)
+		return "gc could not read the bead to check the write. Retry once the store answers"
 	}
 }
 
@@ -121,7 +132,7 @@ func (in bdClassGuardInput) checkEdgeEndpoints(ids ...string) string {
 			result = bdReadFailed
 		}
 		if result != bdReadFound {
-			return fmt.Sprintf("gc bd %s: refused on this split city: an edge endpoint must be a bead of this city's work stores, and %s. A dependency edge across stores is never written. Nothing was written.", in.path, strings.TrimPrefix(in.readRefusal(id, result), fmt.Sprintf("gc bd %s %s: refused on this split city: ", in.path, id)))
+			return fmt.Sprintf("gc bd %s: refused on this split city: an edge endpoint must be a bead of this city's work stores: %s. A dependency edge across stores is never written. Nothing was written.", in.path, bdReadProblem(id, result))
 		}
 	}
 	if in.held == nil {
@@ -615,7 +626,8 @@ func judgeBdBatch(in bdClassGuardInput) bdClassGuard {
 // --skip-infra (gc's own flag), which imports a copy holding only the rows this
 // store holds and counts the rest. A dry run writes nothing, so it is reported.
 // A kept row's dependency must name a kept row of the file or a bead of this
-// work store no binding holds (the cross-store edge rule).
+// work store no binding holds (the cross-store edge rule), and a kept row's own
+// id must not be one a class binding holds (checkImportHeldIDs).
 func judgeBdImport(in bdClassGuardInput) bdClassGuard {
 	args, skipInfra := in.bdArgs, in.gcFlag
 	sources := append(slices.Clone(in.args.positionals), in.args.Values("--input")...)
@@ -647,6 +659,9 @@ func judgeBdImport(in bdClassGuardInput) bdClassGuard {
 			source, split.skipped, formatClassCounts(split.byClass), bdImportSkipInfraFlag, len(split.keep))
 	}
 	if !dryRun {
+		if refusal := in.checkImportHeldIDs(source, split); refusal != "" {
+			return in.refuse("%s", refusal)
+		}
 		if refusal := in.checkImportEdges(split); refusal != "" {
 			return in.refuse("%s", refusal)
 		}
@@ -678,7 +693,16 @@ func judgeBdImport(in bdClassGuardInput) bdClassGuard {
 	if err != nil {
 		return in.refuse("gc bd import: refused: could not write the judged copy of %s: %v. Nothing was written.", source, err)
 	}
-	redirected, ok := bdImportRedirect(args, source, copyPath)
+	// The source is --input's last value or the one positional (bd refuses
+	// both). Either way the repointed argv is re-resolved under the pinned
+	// inventory and must differ from argv only in the source bd reads.
+	var redirected []string
+	var ok bool
+	if len(in.args.positionals) == 0 {
+		redirected, ok = bdRepointFlag(in.inv, args, "--input", copyPath)
+	} else {
+		redirected, ok = bdRepointPositional(in.inv, args, source, copyPath)
+	}
 	if !ok {
 		remove()
 		return in.refuse("gc bd import: refused on this split city: gc could not point bd at the judged copy of %s (spell the source as a plain argument or --input <file>). Nothing was written.", source)
@@ -686,6 +710,43 @@ func judgeBdImport(in bdClassGuardInput) bdClassGuard {
 	out.args = redirected
 	out.cleanup = remove
 	return out
+}
+
+// checkImportHeldIDs refuses kept rows whose id a class binding holds, as
+// create --id does (mintIDRefusal): gc storage migrate moves a bead with its id
+// and clears the work store's copy, so bd would write that id into the work
+// store again while every by-id gc command answers from the binding's bead.
+// The binding is asked once for every kept row's id; a binding gc cannot ask
+// is a refusal.
+func (in bdClassGuardInput) checkImportHeldIDs(source string, split bdImportSplit) string {
+	var ids []string
+	seen := map[string]bool{}
+	for _, id := range split.keptIDs {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return ""
+	}
+	if in.held == nil {
+		return fmt.Sprintf("gc bd import: refused on this split city: gc cannot check whether the class binding holds the ids of the %d row(s) %s would write. Nothing was written.", len(ids), source)
+	}
+	held, err := in.held(ids)
+	if err != nil {
+		return fmt.Sprintf("gc bd import: refused on this split city: gc could not check whether the class binding holds the ids of the %d row(s) %s would write (%v). Retry once the binding answers. Nothing was written.", len(ids), source, err)
+	}
+	var hit []string
+	for _, id := range ids {
+		if held[id] {
+			hit = append(hit, id)
+		}
+	}
+	if len(hit) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("gc bd import: refused on this split city: the class binding holds a bead with the id of %d row(s) of %s (%s). gc storage migrate keeps a moved bead's id, so every by-id gc command would answer from the binding's bead and never reach the imported row. Leave those rows out of the file (the binding already holds the beads with those ids) and import again. Nothing was written.", len(hit), source, bdTruncateUTF8(strings.Join(hit, ", "), 200))
 }
 
 // checkImportEdges applies the cross-store edge rule to the kept rows'
@@ -707,70 +768,6 @@ func (in bdClassGuardInput) checkImportEdges(split bdImportSplit) string {
 		}
 	}
 	return ""
-}
-
-// bdImportRedirect points the token of argv that names source (the
-// positional, `-i x`, `-ix`, `-i=x`, `--input x`, `--input=x`) at path,
-// re-reading argv with import's flags so a flag value that happens to equal
-// source is never rewritten. --input is a string flag, whose last value pflag
-// keeps, so when it is given more than once the last one is the one bd reads
-// and the one pointed at path.
-func bdImportRedirect(argv []string, source, path string) ([]string, bool) {
-	out := slices.Clone(argv)
-	verbSeen := false
-	at, spelling := -1, ""
-	for i := 0; i < len(out); i++ {
-		tok := out[i]
-		if !strings.HasPrefix(tok, "-") || tok == "-" {
-			if !verbSeen {
-				verbSeen = tok == "import"
-				continue
-			}
-			if tok == source {
-				out[i] = path
-				return out, true
-			}
-			continue
-		}
-		name, _, inline := strings.Cut(tok, "=")
-		switch {
-		case name == "--input" || name == "-i":
-			switch {
-			case inline:
-				at, spelling = i, name+"="
-			case i+1 < len(out):
-				i++
-				at, spelling = i, ""
-			default:
-				return nil, false
-			}
-			continue
-		case strings.HasPrefix(tok, "-i") && !strings.HasPrefix(tok, "--"):
-			at, spelling = i, "-i"
-			continue
-		}
-		// Import's other flags are bools or globals; a global value flag
-		// consumes the next token.
-		if !inline && bdImportGlobalTakesValue(name) {
-			i++
-		}
-	}
-	if at < 0 {
-		return nil, false
-	}
-	out[at] = spelling + path
-	return out, true
-}
-
-// bdImportGlobalTakesValue reports whether a global flag consumes the next
-// token.
-func bdImportGlobalTakesValue(name string) bool {
-	for _, g := range bdflags.GlobalFlagSpecs() {
-		if g.Long == name || (g.Short != "" && g.Short == name) {
-			return g.TakesValue
-		}
-	}
-	return false
 }
 
 // judgeBdDelete judges `gc bd delete`. Every id (positional or from
