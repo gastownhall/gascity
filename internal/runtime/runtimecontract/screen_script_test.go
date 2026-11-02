@@ -20,8 +20,9 @@ import (
 // prints the file ls (or fails when ls.fail exists) and logs every other
 // invocation to calls; ps prints ps.procs as its snapshot (or fails it when
 // ps.fail exists), cut to COLUMNS without -ww as procps cuts it even into a
-// pipe, and a fixed start time for -o lstart=; uname -n prints host when it
-// exists.
+// pipe, and for -o lstart= a fixed start time (lstart.<pid> when it exists,
+// none for a pid in gone); kill logs to calls and adds the pid to gone unless
+// unkillable exists; uname -n prints host when it exists.
 type fakeBackend struct {
 	t                  *testing.T
 	dir, script, state string
@@ -81,17 +82,28 @@ esac
 `)
 	// The snapshot is ps.procs, one "<pid> <ppid> <comm> <args...>" per
 	// line, printed in the fixed columns the script asks for.
-	write("ps", `case "$*" in
-  *lstart*) echo "Mon Nov  2 00:00:00 2026" ;;
-  *args=*)
+	write("ps", `for last; do :; done
+case "$*" in
+  *lstart*)
+    grep -qx "$last" "$F/gone" 2>/dev/null && exit 1
+    if [ -f "$F/lstart.$last" ]; then cat "$F/lstart.$last"; else echo "Mon Nov  2 00:00:00 2026"; fi ;;
+  *)
     [ -f "$F/ps.fail" ] && exit 1
     [ -f "$F/ps.procs" ] || exit 0
     cut=cat
     case " $* " in *" -ww "*) ;; *) [ -n "${COLUMNS:-}" ] && cut="cut -c1-$COLUMNS" ;; esac
     while read -r pid ppid comm args; do
-      printf '%10s %10s %-16.16s %s\n' "$pid" "$ppid" "$(printf %s "$comm" | tr '+' ' ')" "$args"
+      case "$*" in
+        *comm*) printf '%10s %10s %-16.16s %s\n' "$pid" "$ppid" "$(printf %s "$comm" | tr '+' ' ')" "$args" ;;
+        *args=*) printf '%10s %10s %s\n' "$pid" "$ppid" "$args" ;;
+        *) printf '%s %s\n' "$pid" "$ppid" ;;
+      esac
     done < "$F/ps.procs" | $cut ;;
 esac
+`)
+	write("kill", `printf 'kill %s\n' "$*" >> "$F/calls"
+for last; do :; done
+[ -f "$F/unkillable" ] || echo "$last" >> "$F/gone"
 `)
 	write("uname", `if [ "$1" = -n ] && [ -f "$F/host" ]; then cat "$F/host"; exit 0; fi
 exec `+fmt.Sprintf("%q", uname)+` "$@"
@@ -382,12 +394,43 @@ func TestScreenScriptStartNeedsTheBox(t *testing.T) {
 		t.Fatalf("start ran screen for a socket path whose bytes cannot fit: %q", f.calls())
 	}
 	f.file("nobox", "")
-	if _, code := f.run(`{"command":"sleep 300","env":{"GC_SESSION_ID":"sid-n"}}`, "start", "mc-n"); code == 0 {
+	startN := `{"command":"sleep 300","env":{"GC_SESSION_ID":"sid-n"}}`
+	// An unreadable process table cannot show this start's SCREEN gone: the
+	// session may yet appear, so its identity stays.
+	f.file("ps.fail", "")
+	if _, code := f.run(startN, "start", "mc-n"); code == 0 {
 		t.Fatal("start succeeded although screen started no session")
 	}
-	// Ambiguous: the session may yet appear, so its identity stays.
 	if out, _ := f.run("", "get-meta", "mc-n", "GC_SESSION_ID"); out != "sid-n" {
-		t.Fatalf("identity of a start whose box did not appear in time = %q, want it kept", out)
+		t.Fatalf("identity of a start whose screen could not be checked = %q, want it kept", out)
+	}
+	if err := os.Remove(filepath.Join(f.dir, "ps.fail")); err != nil {
+		t.Fatal(err)
+	}
+	// This start's own SCREEN (and its window) is ended under the lock, and
+	// only then is the identity removed; another name's SCREEN is untouched.
+	wrapper := filepath.Join(f.metaDir(), "mc-n.wrapper.sh")
+	f.file("ps.procs", "4194990 1 screen SCREEN -dmS mc-n "+wrapper+"\n4194991 4194990 sh /bin/sh "+wrapper+"\n"+
+		"4194992 1 screen SCREEN -dmS mc-nn "+filepath.Join(f.metaDir(), "mc-nn.wrapper.sh")+"\n")
+	f.file("unkillable", "")
+	if _, code := f.run(startN, "start", "mc-n"); code == 0 {
+		t.Fatal("start succeeded although screen started no session")
+	}
+	if out, _ := f.run("", "get-meta", "mc-n", "GC_SESSION_ID"); out != "sid-n" {
+		t.Fatalf("identity of a start whose screen survived its kill = %q, want it kept", out)
+	}
+	if err := os.Remove(filepath.Join(f.dir, "unkillable")); err != nil {
+		t.Fatal(err)
+	}
+	f.file("calls", "")
+	if _, code := f.run(startN, "start", "mc-n"); code == 0 {
+		t.Fatal("start succeeded although screen started no session")
+	}
+	if calls := f.calls(); !strings.Contains(calls, "-- 4194990") || !strings.Contains(calls, "-- 4194991") || strings.Contains(calls, "4194992") {
+		t.Fatalf("kills after a start timeout: %q, want mc-n's SCREEN and window only", calls)
+	}
+	if out, _ := f.run("", "get-meta", "mc-n", "GC_SESSION_ID"); out != "" {
+		t.Fatalf("identity of a start whose screen was ended = %q, want it removed", out)
 	}
 	if err := os.Remove(filepath.Join(f.dir, "nobox")); err != nil {
 		t.Fatal(err)
@@ -601,5 +644,48 @@ func TestScreenScriptStartsOverADeadBox(t *testing.T) {
 	}
 	if strings.Contains(f.calls(), "mc-l") {
 		t.Fatalf("a refused start touched mc-l: %q", f.calls())
+	}
+}
+
+// Kills (round 4 SHOULD) a dead box read free while its agent runs: an agent
+// that ignores the hangup outlives its SCREEN. The window process recorded
+// at start (pid and start time) keeps the box unknown to observe and
+// inventory, a corpse kill answers live, a legacy start refuses, and stop
+// ends the agent; a reused pid with another start time does not count.
+func TestScreenScriptDeadBoxWithALiveAgent(t *testing.T) {
+	f := newFakeBackend(t)
+	f.file("ps.procs", "4194998 4194999 claude /usr/bin/claude\n")
+	if _, code := f.run(`{"command":"claude"}`, "start", "mc-o"); code != 0 {
+		t.Fatal("start failed")
+	}
+	f.rows("4194999.mc-o\tDead ???")
+	if out, _ := f.run("", "observe", "mc-o"); !strings.Contains(out, `"unknown"`) {
+		t.Errorf("observe of a dead box whose agent runs = %q, want unknown", out)
+	}
+	if out, _ := f.run("", "inventory"); !strings.Contains(out, `{"name":"mc-o","state":"unknown"}`) {
+		t.Errorf("inventory with a dead box whose agent runs = %q, want it unknown", out)
+	}
+	req := `{"object":{"id":"4194999","created":"Mon Nov 2 00:00:00 2026"},"mode":"corpse"}`
+	if out, code := f.run(req, "kill-object", "mc-o"); code != 0 || out != "live" {
+		t.Errorf("corpse kill of a dead box whose agent runs = %q (%d), want live", out, code)
+	}
+	if _, code := f.run(`{"command":"claude"}`, "start", "mc-o"); code == 0 {
+		t.Error("legacy start over a dead box whose agent runs succeeded")
+	}
+	if calls := f.calls(); strings.Contains(calls, "-wipe") || strings.Count(calls, "-dmS") != 1 {
+		t.Fatalf("a dead box whose agent runs was wiped or started over: %q", calls)
+	}
+
+	// The same pid started at another time is another process.
+	f.file("lstart.4194998", "Tue Nov  3 00:00:00 2026\n")
+	if out, _ := f.run("", "observe", "mc-o"); !strings.Contains(out, `"dead"`) {
+		t.Errorf("observe of a dead box whose pid was reused = %q, want dead", out)
+	}
+	if err := os.Remove(filepath.Join(f.dir, "lstart.4194998")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, code := f.run("", "stop", "mc-o"); code != 0 || !strings.Contains(f.calls(), "kill -s TERM -- 4194998") {
+		t.Fatalf("stop of a dead box whose agent runs: exit %d, calls %q; want the agent ended", code, f.calls())
 	}
 }

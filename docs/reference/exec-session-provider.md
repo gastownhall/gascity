@@ -852,5 +852,5 @@ See `contrib/session-scripts/` for maintained implementations:
 - **gc-session-screen** — GNU screen backend, v2-ready (`observe.v1`,
   `report-attachment`, `city-scoped`, locality `local`). Each city gets a
   private screen socket directory under the script's state directory.
-  Dependencies: `bash`, `screen`, `jq`, `flock`, `ps`, `awk`, `cksum`,
-  `uname`.
+  Dependencies: `bash`, `screen`, `jq`, `flock`, procps `ps` and `kill`,
+  `awk`, `cksum`, `uname`.

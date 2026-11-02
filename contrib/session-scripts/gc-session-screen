@@ -5,8 +5,8 @@
 # profile reconciler v2 reads. See docs/reference/exec-session-provider.md
 # for the full protocol specification.
 #
-# Dependencies: bash, screen, jq, flock, procps ps, awk, cksum, uname
-# (Linux: /proc).
+# Dependencies: bash, screen, jq, flock, procps ps and kill, awk, cksum,
+# uname (Linux: /proc).
 #
 # Declares observe.v1 and report-attachment, so it is v2-ready; city-scoped
 # (each city gets its own private screen socket directory, so its listing
@@ -193,25 +193,81 @@ classify() {
   esac
 }
 
+# start_of sets START to process $1's start time (from /proc, or ps where
+# there is none); empty when no such process runs.
+start_of() {
+  local stat rest
+  START=""
+  if [ -r "/proc/$1/stat" ]; then
+    IFS= read -r stat < "/proc/$1/stat" || return 0
+    rest=${stat##*) }
+    read -r -a fields <<< "$rest"
+    START=${fields[19]:-}
+  else
+    START=$(ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//') || START=""
+  fi
+}
+
 # created_of sets CREATED to a box's creation time: its screen process's
-# start (from /proc, or ps where there is none), or for a dead box the start
-# recorded when it was created. Empty when neither is known.
+# start, or for a dead box the start recorded when it was created. Empty when
+# neither is known.
 created_of() {
-  local pid=$1 boxname=$2 state=$3 stat rest
+  local pid=$1 boxname=$2 state=$3
   CREATED=""
-  read_into "$META/$boxname.boxpid"
   if [ "$state" = dead ]; then
+    read_into "$META/$boxname.boxpid"
     if [ "${REPLY%% *}" = "$pid" ]; then CREATED=${REPLY#* }; fi
     return 0
   fi
-  if [ -r "/proc/$pid/stat" ]; then
-    IFS= read -r stat < "/proc/$pid/stat" || return 0
-    rest=${stat##*) }
-    read -r -a fields <<< "$rest"
-    CREATED=${fields[19]:-}
-  else
-    CREATED=$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//') || CREATED=""
-  fi
+  start_of "$pid"
+  CREATED=$START
+}
+
+# window_alive succeeds while the window process recorded at name $1's start
+# (its pid and start time) still runs. A box screen lists dead whose agent
+# ignored the hangup still has its agent: it is not dead, and not free.
+window_alive() {
+  read_into "$META/$1.window"
+  [ -n "$REPLY" ] || return 1
+  start_of "${REPLY%% *}"
+  [ -n "$START" ] && [ "$START" = "${REPLY#* }" ]
+}
+
+# kill_wait ends process $1, if it still started at $2: TERM, then KILL
+# after 2s. It succeeds once that process is gone.
+kill_wait() {
+  local pid=$1 want=$2 i sig
+  start_of "$pid"
+  [ -n "$START" ] && [ "$START" = "$want" ] || return 0
+  for sig in TERM KILL; do
+    env kill -s "$sig" -- "$pid" 2>/dev/null || true
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+      start_of "$pid"
+      [ "$START" = "$want" ] || return 0
+      sleep 0.1
+    done
+  done
+  return 1
+}
+
+# stray_kill ends name $1's own SCREEN process and its window when its start
+# timed out: screen -dmS has returned, so that SCREEN runs unless it died,
+# and its command line is unique to the city and name. It fails when the
+# process table cannot be read or a process survives.
+stray_kill() {
+  local snap pid want
+  snap=$(ps -ww -e -o pid:10= -o ppid:10= -o args=) || return 1
+  while read -r pid; do
+    [ -n "$pid" ] || continue
+    start_of "$pid"
+    want=$START
+    [ -n "$want" ] || continue
+    kill_wait "$pid" "$want" || return 1
+  done <<< "$(printf '%s\n' "$snap" | STRAY="SCREEN -dmS $1 $META/$1.wrapper.sh" awk '
+    { pid = substr($0, 1, 10) + 0; ppid = substr($0, 12, 10) + 0; a = substr($0, 23)
+      sub(/^ +/, "", a); kids[ppid] = kids[ppid] " " pid
+      if (a == ENVIRON["STRAY"]) s[pid] }
+    END { for (p in s) { n = split(kids[p], k, " "); for (i = 1; i <= n; i++) print k[i]; print p } }')"
 }
 
 # agent_states reads one process snapshot and, for each "<root pid> <names>
@@ -310,7 +366,7 @@ procs_of() {
 
 # forget removes a box's metadata (not its lock).
 forget() {
-  rm -f "$META/$1.identity" "$META/$1.wrapper.sh" "$META/$1.boxpid" "$META/$1".meta.*
+  rm -f "$META/$1.identity" "$META/$1.wrapper.sh" "$META/$1.boxpid" "$META/$1.window" "$META/$1".meta.*
 }
 
 # gone_after waits (up to 2s) for name $1 to hold no row.
@@ -367,6 +423,9 @@ case "$op" in
       fi
       if printf '%s\n' "$held" | awk -F'\t' '$3 != "Dead ???" { live = 1 } END { exit !live }'; then
         die "session \"$name\" already exists"
+      fi
+      if window_alive "$name"; then
+        die "session \"$name\" is dead, but its agent still runs"
       fi
       while IFS=$'\t' read -r pid _ _; do
         screen -wipe "$pid.$name" >/dev/null 2>&1 || true
@@ -437,12 +496,24 @@ case "$op" in
       sleep 0.1
     done
     if [ -z "$up" ]; then
-      # Ambiguous: the session may still appear, so its identity stays. Its
-      # SCREEN process is not known here, so it is not killed: a retry that
-      # lists the session by then is refused (73 under fresh_only), but one
-      # that runs before screen creates the socket can start a second box.
+      # Still under the lock, end this start's own SCREEN, so no box can
+      # appear after the failure. Only once it is gone is the identity
+      # removed; otherwise the outcome is ambiguous and the identity stays.
+      stray_kill "$name" || die "start: screen started no session $name within 2s, and its screen could not be ended"
+      forget "$name"
       die "start: screen started no session $name within 2s"
     fi
+    # Record the window process (the wrapper, which execs the agent), so a
+    # box screen later lists dead is not read free while its agent runs.
+    for i in 1 2 3 4 5; do
+      wpid=$(ps -e -o pid= -o ppid= | awk -v p="$PID" '$2 == p { print $1; exit }') || wpid=""
+      if [ -n "$wpid" ]; then
+        start_of "$wpid"
+        if [ -n "$START" ]; then write_file "$META/$name.window" "$wpid $START"; fi
+        break
+      fi
+      sleep 0.1
+    done
     ;;
 
   stop)
@@ -461,6 +532,11 @@ case "$op" in
       fi
     done <<< "$(rows_of "$name")"
     gone_after "$name" || die "stop: $name is still held"
+    # An agent that ignored the hangup (or outlived a dead box) is ended too.
+    read_into "$META/$name.window"
+    if [ -n "$REPLY" ]; then
+      kill_wait "${REPLY%% *}" "${REPLY#* }" || die "stop: the agent of $name survived its kill"
+    fi
     forget "$name"
     ;;
 
@@ -510,6 +586,10 @@ case "$op" in
     classify "$STATUS"
     created_of "$PID" "$name" "$STATE"
     if [ "$STATE" = unknown ] || [ -z "$CREATED" ]; then echo '{"state":"unknown"}'; exit 0; fi
+    if [ "$STATE" = dead ] && window_alive "$name"; then
+      echo '{"state":"unknown","reason":"dead box with a live agent"}'
+      exit 0
+    fi
     out="{\"state\":\"$STATE\",\"object\":{\"id\":\"$PID\",\"created\":$(json_str "$CREATED")}"
     if [ "$STATE" = running ] && [ -n "$names" ]; then
       procs_of "$name"
@@ -546,6 +626,7 @@ case "$op" in
       [ -n "$pid" ] || continue
       classify "$status"
       created_of "$pid" "$sname" "$STATE"
+      if [ "$STATE" = dead ] && window_alive "$sname"; then STATE=unknown; fi
       if [ "$STATE" = unknown ] || [ -z "$CREATED" ]; then
         out+="$sep{\"name\":$(json_str "$sname"),\"state\":\"unknown\"}"; sep=","
         continue
@@ -580,7 +661,7 @@ case "$op" in
     if [ "$PID" != "$id" ] || [ "$CREATED" != "$want_created" ]; then echo gone; exit 0; fi
     case "$mode" in
       corpse)
-        if [ "$STATE" != dead ]; then echo live; exit 0; fi
+        if [ "$STATE" != dead ] || window_alive "$name"; then echo live; exit 0; fi
         screen -wipe "$PID.$name" >/dev/null 2>&1 || true
         gone_after "$name" || die "kill-object: the dead box $PID.$name is still listed"
         forget "$name"
