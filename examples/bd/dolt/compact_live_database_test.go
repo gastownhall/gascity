@@ -393,3 +393,85 @@ exit "$rc"
 		t.Fatalf("a gate failure must not be reported as a successful compaction:\n%s", out)
 	}
 }
+
+// countFakeDoltQueries returns how many invocations in the fake dolt log
+// contain the given SQL fragment.
+func countFakeDoltQueries(t *testing.T, fixture compactScriptFixture, fragment string) int {
+	t.Helper()
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	return strings.Count(string(logData), fragment)
+}
+
+// TestCompactScriptLiveGateRecoversAfterTransientProbeFailure pins the
+// transient leg: a probe that fails once and then answers must not quarantine
+// anything. The retry recovers within the configured attempts, says so, and
+// the run finishes as if the gate had passed on the first try.
+func TestCompactScriptLiveGateRecoversAfterTransientProbeFailure(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0",
+		"GC_FAKE_DOLT_LIVE_PROBE_FAIL_FIRST=1")
+	if err != nil {
+		t.Fatalf("a transient probe failure must not fail the run:\n%s", out)
+	}
+	if !strings.Contains(out, "live-database probe recovered on attempt 2/3") {
+		t.Fatalf("the retry must say it recovered on the second attempt:\n%s", out)
+	}
+	if !strings.Contains(out, "db=beads commits=600->600 duration=") {
+		t.Fatalf("the pass should have completed after the probe recovered:\n%s", out)
+	}
+	if _, statErr := os.Stat(liveGateMarkerPath(fixture)); !os.IsNotExist(statErr) {
+		t.Fatalf("a recovered probe must not leave a quarantine marker; stat=%v:\n%s", statErr, out)
+	}
+}
+
+// TestCompactScriptLiveGateRecoveryKeepsOrdinaryFailureOutcome pins that a
+// recovered probe never masks the rewrite's own result: with the full GC
+// failing and the probe recovering, the run keeps the ordinary pending-GC
+// failure path — no quarantine, pending-GC marker as before.
+func TestCompactScriptLiveGateRecoveryKeepsOrdinaryFailureOutcome(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+
+	out, err := fixture.run(t, "gc_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0",
+		"GC_FAKE_DOLT_LIVE_PROBE_FAIL_FIRST=1")
+	if err == nil {
+		t.Fatalf("the GC's own failure must still fail the run:\n%s", out)
+	}
+	if !strings.Contains(out, "live-database probe recovered on attempt 2/3") {
+		t.Fatalf("the probe retry should have recovered before the gate check:\n%s", out)
+	}
+	if !strings.Contains(out, "DOLT_GC failed rc=45") {
+		t.Fatalf("the GC's own failure diagnostics must be preserved:\n%s", out)
+	}
+	if !strings.Contains(out, "1 database(s) failed compaction") {
+		t.Fatalf("the failure must be reported as an ordinary compaction failure:\n%s", out)
+	}
+	if _, statErr := os.Stat(liveGateMarkerPath(fixture)); !os.IsNotExist(statErr) {
+		t.Fatalf("a recovered probe must not turn an ordinary failure into a quarantine; stat=%v:\n%s", statErr, out)
+	}
+	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if _, statErr := os.Stat(pendingGC); statErr != nil {
+		t.Fatalf("a recovered probe must leave the pending-GC marker path intact (stat err=%v):\n%s", statErr, out)
+	}
+}
+
+// TestCompactScriptLiveGateHealthyRunProbeCount pins the gate's probe budget
+// on a healthy pass: exactly one probe per armed step (the flatten check and
+// the post-full-GC check), so retries only happen on real failure.
+func TestCompactScriptLiveGateHealthyRunProbeCount(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
+	if err != nil {
+		t.Fatalf("healthy compaction must succeed:\n%s", out)
+	}
+	if got := countFakeDoltQueries(t, fixture, "CONCAT(DATABASE(), ':', HASHOF('HEAD'))"); got != 2 {
+		t.Fatalf("healthy pass issued %d served-HEAD probes, want 2 (one per rewrite step):\n%s", got, out)
+	}
+}
