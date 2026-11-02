@@ -114,11 +114,17 @@ lessons = []
 def wait_delivery(name, source, root, pause=False):
     began = time.monotonic()
     paused = False
+    observed_progress = False
     last = ""
     while time.monotonic()-began < 1200:
         s = bead(name+"-source", source)
         w = bead(name+"-workflow", root)
         record = json.loads(w.get("metadata",{}).get("gc.delivery.record","{}"))
+        if not observed_progress and s["status"] != "closed":
+            status_text = cmd(name+"-live-tutorial-status",["gc","tutorial","status","--lesson",name])
+            assert "Source task: "+source+";" in status_text,status_text
+            assert "Workflow: "+root in status_text or "Verified local integration:" in status_text,status_text
+            observed_progress = True
         state = (s["status"],w["status"],record.get("review_status"),record.get("output_sha"),record.get("cleanup_complete"))
         if str(state) != last or int(time.monotonic()-began)%30 < 6:
             print(name+" elapsed="+str(int(time.monotonic()-began))+"s state="+str(state),flush=True)
