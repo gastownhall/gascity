@@ -530,24 +530,37 @@ func TestOrderOutcomeHealthyRecordedIncompleteOutcomes(t *testing.T) {
 	cases := []struct {
 		name       string
 		evts       []events.Event
+		wantStatus CheckStatus
 		wantDetail []string
 		notDetail  []string
 	}{
 		{
 			name:       "completion then declaration warns",
 			evts:       []events.Event{completed(now.Add(-time.Hour)), declared(now.Add(-time.Hour), declMsg)},
+			wantStatus: StatusWarning,
 			wantDetail: []string{"recorded incomplete work", declMsg},
 			notDetail:  []string{"last run succeeded"},
 		},
 		{
-			name:       "newest of repeated declarations wins",
-			evts:       []events.Event{completed(now.Add(-3 * time.Hour)), declared(now.Add(-2*time.Hour), olderMsg), declared(now.Add(-time.Hour), declMsg)},
+			// Two overlapping completions, then two declarations: the newest
+			// declaration is the recorded evidence. No execution is paired or
+			// counted — the sequence alone cannot attribute either declaration
+			// to a specific run.
+			name: "newest of repeated declarations wins without counting executions",
+			evts: []events.Event{
+				completed(now.Add(-4 * time.Hour)),
+				completed(now.Add(-3 * time.Hour)),
+				declared(now.Add(-2*time.Hour), olderMsg),
+				declared(now.Add(-time.Hour), declMsg),
+			},
+			wantStatus: StatusWarning,
 			wantDetail: []string{"recorded incomplete work", declMsg},
 			notDetail:  []string{olderMsg},
 		},
 		{
 			name:       "declaration without any completion warns",
 			evts:       []events.Event{declared(now.Add(-time.Hour), declMsg)},
+			wantStatus: StatusWarning,
 			wantDetail: []string{"recorded incomplete work", declMsg},
 			notDetail:  []string{"no completed runs yet", "last run succeeded"},
 		},
@@ -556,6 +569,7 @@ func TestOrderOutcomeHealthyRecordedIncompleteOutcomes(t *testing.T) {
 			// detail must not grow a dangling ": " artifact.
 			name:       "blank declaration message still warns generically",
 			evts:       []events.Event{completed(now.Add(-time.Hour)), declared(now.Add(-time.Hour), "")},
+			wantStatus: StatusWarning,
 			wantDetail: []string{"recorded incomplete work"},
 			notDetail:  []string{"last run succeeded", "recorded incomplete work: "},
 		},
@@ -564,6 +578,7 @@ func TestOrderOutcomeHealthyRecordedIncompleteOutcomes(t *testing.T) {
 			// decode error in the message; that text must reach the operator.
 			name:       "unreadable declaration keeps its error text",
 			evts:       []events.Event{completed(now.Add(-time.Hour)), declared(now.Add(-time.Hour), unreadableMsg)},
+			wantStatus: StatusWarning,
 			wantDetail: []string{"recorded incomplete work", unreadableMsg},
 			notDetail:  []string{"last run succeeded"},
 		},
@@ -572,8 +587,37 @@ func TestOrderOutcomeHealthyRecordedIncompleteOutcomes(t *testing.T) {
 			// completion warns even when its timestamp is older.
 			name:       "declaration with older timestamp but newer seq warns",
 			evts:       []events.Event{completed(now), declared(now.Add(-2*time.Hour), declMsg)},
+			wantStatus: StatusWarning,
 			wantDetail: []string{"recorded incomplete work", declMsg},
 			notDetail:  []string{"last run succeeded"},
+		},
+		{
+			// A completion recorded after the declaration clears the warning
+			// and the existing success detail returns.
+			name:       "declaration cleared by later completion",
+			evts:       []events.Event{completed(now.Add(-3 * time.Hour)), declared(now.Add(-2*time.Hour), declMsg), completed(now.Add(-time.Hour))},
+			wantStatus: StatusOK,
+			wantDetail: []string{"last run succeeded"},
+			notDetail:  []string{"recorded incomplete work"},
+		},
+		{
+			// [C1,S1,C2]: the clearing completion need not be the companion of
+			// the declaring run; any later completion clears without either
+			// execution being attributed.
+			name:       "declaration cleared by any later completion",
+			evts:       []events.Event{completed(now.Add(-3 * time.Hour)), declared(now.Add(-2*time.Hour), declMsg), completed(now.Add(-time.Hour)), completed(now.Add(-30 * time.Minute))},
+			wantStatus: StatusOK,
+			wantDetail: []string{"last run succeeded"},
+			notDetail:  []string{"recorded incomplete work"},
+		},
+		{
+			// Seq, not Ts, governs clearing too: a completion with an older
+			// timestamp but newer Seq clears the declaration.
+			name:       "completion with older timestamp but newer seq clears",
+			evts:       []events.Event{declared(now, declMsg), completed(now.Add(-2 * time.Hour))},
+			wantStatus: StatusOK,
+			wantDetail: []string{"last run succeeded"},
+			notDetail:  []string{"recorded incomplete work"},
 		},
 	}
 
@@ -585,8 +629,8 @@ func TestOrderOutcomeHealthyRecordedIncompleteOutcomes(t *testing.T) {
 
 			result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
 
-			if result.Status != StatusWarning {
-				t.Fatalf("status = %v, want StatusWarning for a recorded incomplete outcome; msg=%q details=%v", result.Status, result.Message, result.Details)
+			if result.Status != tc.wantStatus {
+				t.Fatalf("status = %v, want %v; msg=%q details=%v", result.Status, tc.wantStatus, result.Message, result.Details)
 			}
 			if result.Severity != SeverityAdvisory {
 				t.Fatalf("severity = %v, want SeverityAdvisory", result.Severity)
@@ -608,7 +652,8 @@ func TestOrderOutcomeHealthyRecordedIncompleteOutcomes(t *testing.T) {
 
 // TestLatestIncompleteOrderOutcome pins the declaration walk directly: it
 // returns the newest order.skipped for the subject, ignoring other subjects'
-// events entirely.
+// events, stopping without a declaration at a completion, and walking across
+// failures (a failure is not the clearing event).
 func TestLatestIncompleteOrderOutcome(t *testing.T) {
 	base := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
 	outcomes := []events.Event{
@@ -631,6 +676,38 @@ func TestLatestIncompleteOrderOutcome(t *testing.T) {
 	}
 	if _, ok := latestIncompleteOrderOutcome(nil, "export-sweep"); ok {
 		t.Fatal("ok = true for an empty stream, want false")
+	}
+
+	// A completion recorded after the declaration clears it.
+	cleared := []events.Event{
+		outcomeEvent(1, "export-sweep", events.OrderCompleted, base, ""),
+		outcomeEvent(2, "export-sweep", events.OrderSkipped, base.Add(time.Hour), "partial"),
+		outcomeEvent(3, "export-sweep", events.OrderCompleted, base.Add(2*time.Hour), ""),
+	}
+	if _, ok := latestIncompleteOrderOutcome(cleared, "export-sweep"); ok {
+		t.Fatal("ok = true for a declaration followed by a completion, want false — the completion clears it")
+	}
+
+	// Failures after the declaration are transparent: the declaration stays
+	// outstanding, and the walk crosses the failures to reach it.
+	acrossFailures := []events.Event{
+		outcomeEvent(1, "export-sweep", events.OrderCompleted, base, ""),
+		outcomeEvent(2, "export-sweep", events.OrderSkipped, base.Add(time.Hour), "partial: rig asleep"),
+		outcomeEvent(3, "export-sweep", events.OrderFailed, base.Add(2*time.Hour), "exit status 1"),
+		outcomeEvent(4, "export-sweep", events.OrderFailed, base.Add(3*time.Hour), "exit status 1"),
+	}
+	decl, ok = latestIncompleteOrderOutcome(acrossFailures, "export-sweep")
+	if !ok || decl.Message != "partial: rig asleep" {
+		t.Fatalf("decl/ok = %q/%v, want the declaration kept across later failures", decl.Message, ok)
+	}
+
+	// An empty-message declaration still reports ok=true: work did not run.
+	blank := []events.Event{
+		outcomeEvent(1, "export-sweep", events.OrderCompleted, base, ""),
+		outcomeEvent(2, "export-sweep", events.OrderSkipped, base.Add(time.Hour), ""),
+	}
+	if decl, ok = latestIncompleteOrderOutcome(blank, "export-sweep"); !ok || decl.Message != "" {
+		t.Fatalf("decl/ok = %q/%v, want an empty-message declaration with ok=true", decl.Message, ok)
 	}
 }
 

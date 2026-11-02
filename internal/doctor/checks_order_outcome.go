@@ -108,9 +108,11 @@ func consecutiveOrderFailures(outcomes []events.Event, subject string, starts []
 }
 
 // latestIncompleteOrderOutcome returns the newest order.skipped declaration
-// for one order. outcomes must be ordered by Seq ascending; the walk runs
-// newest-first and stops at the first declaration for the subject, ignoring
-// other subjects' events.
+// for one order that no later order.completed has cleared. outcomes must be
+// ordered by Seq ascending; the walk runs newest-first, treats order.failed as
+// transparent (a failure is not the clearing event), stops without a
+// declaration at the first order.completed, and ignores other subjects'
+// events.
 //
 // The boolean distinguishes a declaration whose Message is empty from no
 // declaration at all: both carry evidence that work did not run, and the
@@ -121,8 +123,14 @@ func latestIncompleteOrderOutcome(outcomes []events.Event, subject string) (even
 		if event.Subject != subject {
 			continue
 		}
-		if event.Type == events.OrderSkipped {
+		switch event.Type {
+		case events.OrderSkipped:
 			return event, true
+		case events.OrderCompleted:
+			// A completion recorded after the declaration clears it: a later
+			// run finished all its work. Overlapping executions cannot be
+			// attributed from the sequence — and do not need to be.
+			return events.Event{}, false
 		}
 	}
 	return events.Event{}, false
