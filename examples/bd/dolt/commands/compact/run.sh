@@ -55,6 +55,15 @@
 #   5. Run CALL DOLT_GC('--full', '--archive-level=0') to reclaim chunks orphaned
 #      by the flatten.
 #
+# Live-database gate. After every history rewrite (flatten, every full GC, every
+# bare GC) the database must still own its data directory and still be served:
+# a bounded SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD')) must answer for it
+# within GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS tries. Otherwise the database is
+# quarantined with reason "live database unavailable after compaction" and the
+# run aborts at once (exit 1), naming the selected databases it never reached.
+# GC-first passes probe a baseline before GC; a failed baseline fails the pass
+# ordinarily. Dry runs and passes skipped before a rewrite never probe.
+#
 # Remote push failures are recorded in compact-pending-push markers and do not
 # fail local compaction. Later runs retry those markers before threshold skips,
 # and unverified remote heads must become ancestry-verifiable before push.
@@ -174,6 +183,13 @@
 #                                         NOT write pending-GC /
 #                                         pending-push markers (those are
 #                                         flatten-remediation state).
+#   GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS
+#     (default: 3) — positive integer: live-database probes after each
+#                   rewrite before the database is quarantined. Each probe
+#                   is bounded by min(30s, GC_DOLT_COMPACT_CALL_TIMEOUT_SECS).
+#   GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS
+#     (default: 2) — non-negative integer: seconds between live-database
+#                   probe attempts.
 set -eu
 
 : "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
@@ -445,6 +461,32 @@ case "$call_timeout" in
     exit 2
     ;;
 esac
+
+# live_probe_setting NAME VALUE MIN — validate a live-probe knob as a decimal
+# integer of at most 9 digits (leading zeros allowed) no smaller than MIN, and
+# leave it without leading zeros in live_probe_setting_value; exit 2 otherwise.
+live_probe_setting() {
+  _lps_name="$1"
+  _lps_value="$2"
+  _lps_min="$3"
+  case "$_lps_value" in
+    ''|*[!0-9]*)
+      printf 'compact: invalid %s=%s (must be an integer >= %s)\n' "$_lps_name" "$_lps_value" "$_lps_min" >&2
+      exit 2
+      ;;
+  esac
+  live_probe_setting_value=$(printf '%s' "$_lps_value" | sed 's/^0*//')
+  live_probe_setting_value="${live_probe_setting_value:-0}"
+  if [ "${#live_probe_setting_value}" -gt 9 ] || [ "$live_probe_setting_value" -lt "$_lps_min" ]; then
+    printf 'compact: invalid %s=%s (must be an integer >= %s, at most 9 digits)\n' "$_lps_name" "$_lps_value" "$_lps_min" >&2
+    exit 2
+  fi
+}
+
+live_probe_setting GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS "$live_probe_attempts" 1
+live_probe_attempts="$live_probe_setting_value"
+live_probe_setting GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS "$live_probe_delay" 0
+live_probe_delay="$live_probe_setting_value"
 
 # The live-database probe gets at most 30s per attempt, never more than the
 # per-call timeout.

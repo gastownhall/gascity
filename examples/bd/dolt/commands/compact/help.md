@@ -102,6 +102,40 @@ author: every commit after the watermark is squashed, whichever city wrote it.
     only if no other city, clone, or client outside this city has ever written
     to this database, including before this city started using it.
 
+## Live-database gate
+
+Every rewrite can lose the database it rewrites: the flatten, every full GC
+(post-flatten, pending-GC retry, `--gc-only`), and every bare GC. So right
+after each one, compact checks that the database still has its data
+directory and that the server still serves it, by asking for
+`CONCAT(DATABASE(), ':', HASHOF('HEAD'))`. The answer must name the database
+and carry a HEAD. Each probe gets at most 30 seconds (less when
+`GC_DOLT_COMPACT_CALL_TIMEOUT_SECS` is lower). Compact tries
+`GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS` times (default `3`), waiting
+`GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS` seconds between tries (default `2`).
+A probe that recovers on a later try is logged, and the rewrite's own result
+decides the outcome.
+
+When the directory is gone, or every probe fails, compact:
+
+- quarantines the database with reason
+  `live database unavailable after compaction`, records the failed step, the
+  probe error, and the data directory before and after in the marker, and
+  raises the usual quarantine event and mail;
+- stops the run at once with exit 1, without pushing, clearing a pending
+  marker, or touching another database, and names the selected databases it
+  never reached.
+
+A pass that starts with a GC (`--gc-only`, bare GC, a pending-GC retry) first
+probes the database to record its pre-compaction HEAD. If that probe fails,
+the GC does not run, the database counts as an ordinary failure, and the run
+goes on. A dry run, or a pass skipped before any rewrite, probes nothing.
+
+Both settings must be whole numbers of at most 9 digits; attempts must be at
+least 1. An invalid value exits 2 before compact takes its lock or queries
+anything. To restore a quarantined database, see "Compact Quarantine Reasons"
+in `docs/troubleshooting/dolt-bloat-recovery.md`.
+
 ## Flags
 
 - `--gc-only` — Reclaim orphaned chunks via

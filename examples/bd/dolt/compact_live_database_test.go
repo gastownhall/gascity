@@ -556,3 +556,46 @@ func TestCompactScriptLiveGateKeepsOrdinaryRewriteFailures(t *testing.T) {
 		})
 	}
 }
+
+// AC-8: invalid live-probe settings exit 2 before the lock or any query.
+func TestCompactScriptRejectsInvalidLiveProbeSettings(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		env   string
+		valid bool
+	}{
+		{name: "attempts zero", env: "GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=0"},
+		{name: "attempts all zeros", env: "GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=00"},
+		{name: "attempts negative", env: "GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=-1"},
+		{name: "attempts word", env: "GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=abc"},
+		{name: "attempts fraction", env: "GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=1.5"},
+		{name: "attempts overflow", env: "GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=99999999999999999999"},
+		{name: "delay negative", env: "GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=-1"},
+		{name: "delay word", env: "GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=x"},
+		{name: "delay overflow", env: "GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=99999999999999999999"},
+		{name: "attempts empty", env: "GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=", valid: true},
+		{name: "attempts leading zeros", env: "GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=009", valid: true},
+		{name: "delay leading zeros", env: "GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=00", valid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", tc.env)
+			if tc.valid {
+				if err != nil {
+					t.Fatalf("valid setting %s rejected: %v\n%s", tc.env, err, out)
+				}
+				return
+			}
+			if code := compactExitCode(t, err, out); code != 2 {
+				t.Fatalf("compact exit = %d, want 2\n%s", code, out)
+			}
+			name := strings.SplitN(tc.env, "=", 2)[0]
+			if !strings.Contains(out, "compact: invalid "+name+"=") {
+				t.Fatalf("output missing validation diagnostic for %s:\n%s", name, out)
+			}
+			if log := readCompactDoltLog(t, fixture); log != "" {
+				t.Fatalf("invalid setting must be rejected before any query:\n%s", log)
+			}
+		})
+	}
+}

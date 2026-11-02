@@ -562,6 +562,7 @@ should treat these strings as the current vocabulary:
 | `post-flatten value hash probe returned empty value` | The database hash query returned an empty value after flatten. |
 | `post-flatten value hash changed with row-count increase` | The database hash changed after at least one stable-table row-count gain. *(auto-clearable — see below)* |
 | `post-flatten value hash changed without row-count increase` | The database hash changed without a row-count gain. *(auto-clearable — see below)* |
+| `live database unavailable after compaction` | After a flatten or GC, the database lost its data directory or the server stopped serving it. Restore it from backup before clearing; see [Live database unavailable after compaction](#live-database-unavailable-after-compaction). |
 
 Four of these reasons are known writer-race false positives and are
 **auto-clearable**. On its next scheduled run, `gc dolt compact`'s flatten
@@ -611,6 +612,42 @@ path also refuses, except for the four auto-clearable reasons above, which it
 may clear on its own after proving content preservation. The refusal output
 repeats the marker path, reason, key evidence fields, and the clear/retry
 command so operators have the next action without opening this runbook first.
+
+### Live database unavailable after compaction
+
+After every flatten, full GC, and bare GC, `gc dolt compact` checks that the
+database still has its data directory and that the server still answers
+`SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))` for it. It tries
+`GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS` times (default `3`),
+`GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS` seconds apart (default `2`). When the
+directory is gone or every try fails, compact writes this reason, alerts, and
+stops the run with exit 1. The run's last line names the selected databases
+it never reached; they compact on the next run.
+
+The marker records the evidence: `live_gate_failed_step` (the rewrite that
+lost the database), `live_gate_probe_failure`,
+`live_gate_data_dir` with `live_gate_data_dir_before` and
+`live_gate_data_dir_after`, and `live_gate_pre_compaction_head`. This reason
+never clears itself, and `gc dolt compact` refuses the database until you
+remove the marker. Restore first:
+
+1. Stop the city so nothing writes to the store: `gc stop <cityPath>`.
+2. If `live_gate_data_dir` still exists, move it aside rather than deleting
+   it, so the evidence survives:
+   `mv <live_gate_data_dir> <live_gate_data_dir>.damaged-$(date +%Y%m%d-%H%M%S)`.
+3. Restore the database from its latest verified backup, such as the
+   `.dolt.bak-*` safety copy from the [Recovery Procedure](#recovery-procedure):
+   `cp -a <backup> <live_gate_data_dir>`.
+4. Start the city and confirm the database is served at the HEAD you expect
+   (compare `live_gate_pre_compaction_head`):
+   `gc dolt sql --db <database> -q "SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))"`.
+5. Confirm bead queries are healthy, for example
+   `gc bd list --rig <rig> --limit 1`.
+6. Remove only that database's marker:
+   `rm .gc/runtime/packs/dolt/compact-quarantine/<database>`.
+
+If no verified backup exists, keep the marker and escalate with its contents
+and the compactor output.
 
 ## When to Escalate
 
