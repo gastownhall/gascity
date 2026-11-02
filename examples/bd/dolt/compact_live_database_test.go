@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // installVanishDirShim wraps the fixture's fake dolt with a shim that removes
@@ -1003,5 +1004,106 @@ func TestCompactScriptLiveGateAcceptsLeadingZeroAndEmptySettings(t *testing.T) {
 				t.Fatalf("%s: compaction should have completed:\n%s", tc.name, out)
 			}
 		})
+	}
+}
+
+// TestCompactScriptLiveGateAbsentDataDirEntryReliesOnProbe pins the
+// SQL-alone leg: a database this server serves without holding its directory
+// in the data dir never fails the gate on directory absence — the served
+// probe is the whole proof.
+func TestCompactScriptLiveGateAbsentDataDirEntryReliesOnProbe(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	if err := os.RemoveAll(filepath.Join(fixture.dataDir, "beads")); err != nil {
+		t.Fatalf("remove data-dir entry: %v", err)
+	}
+
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
+	if err != nil {
+		t.Fatalf("a served database without a data-dir entry must compact fine:\n%s", out)
+	}
+	if !strings.Contains(out, "db=beads commits=600->600 duration=") {
+		t.Fatalf("the pass should have completed on the probe's word alone:\n%s", out)
+	}
+	if _, statErr := os.Stat(liveGateMarkerPath(fixture)); !os.IsNotExist(statErr) {
+		t.Fatalf("a passing gate must not leave a quarantine marker; stat=%v:\n%s", statErr, out)
+	}
+}
+
+// TestCompactScriptLiveGateAcceptsChangedHead pins that the gate proves
+// liveness, not history equality: a served HEAD that differs from the
+// pre-compaction baseline still passes the gate, because a healthy rewrite
+// routinely produces a new HEAD.
+func TestCompactScriptLiveGateAcceptsChangedHead(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0",
+		"GC_FAKE_DOLT_LIVE_PROBE_CELL=beads:newhead123")
+	if err != nil {
+		t.Fatalf("a served database with a changed HEAD must pass the gate:\n%s", out)
+	}
+	if !strings.Contains(out, "db=beads commits=600->600 duration=") {
+		t.Fatalf("the pass should have completed although HEAD changed:\n%s", out)
+	}
+	if _, statErr := os.Stat(liveGateMarkerPath(fixture)); !os.IsNotExist(statErr) {
+		t.Fatalf("a passing gate must not leave a quarantine marker; stat=%v:\n%s", statErr, out)
+	}
+}
+
+// TestCompactScriptLiveGateExhaustedRetriesDoNotSleep pins the retry budget's
+// tail: with one attempt configured, a failing probe must not sleep the retry
+// delay after the last attempt — the run fails promptly.
+func TestCompactScriptLiveGateExhaustedRetriesDoNotSleep(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	start := time.Now()
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=1",
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=60",
+		"GC_FAKE_DOLT_LIVE_PROBE_UNSERVED=1")
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatalf("an exhausted probe must fail the gate:\n%s", out)
+	}
+	if !strings.Contains(out, "live-database gate failed") {
+		t.Fatalf("output missing live-gate failure:\n%s", out)
+	}
+	if elapsed >= 30*time.Second {
+		t.Fatalf("the run slept %s after its last attempt; retries must not sleep past the final try:\n%s", elapsed, out)
+	}
+}
+
+// TestCompactScriptLiveGateNextRunRefusesQuarantinedDatabase pins the
+// morning-after: the run after a live-gate quarantine refuses the quarantined
+// database through the existing marker machinery and still compacts its
+// healthy peer.
+func TestCompactScriptLiveGateNextRunRefusesQuarantinedDatabase(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	if err := os.MkdirAll(filepath.Join(fixture.dataDir, "zed", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir second db: %v", err)
+	}
+	installVanishDirShim(t, fixture)
+	firstOut, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
+	if err == nil {
+		t.Fatalf("the first run must fail at the gate:\n%s", firstOut)
+	}
+	// Restore the pristine fake dolt for the second run.
+	if err := os.Remove(filepath.Join(fixture.binDir, "dolt")); err != nil {
+		t.Fatalf("remove shim: %v", err)
+	}
+	if err := os.Rename(filepath.Join(fixture.binDir, "dolt.real"), filepath.Join(fixture.binDir, "dolt")); err != nil {
+		t.Fatalf("restore fake dolt: %v", err)
+	}
+
+	secondOut, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
+	if err == nil {
+		t.Fatalf("the next run must still fail while the quarantine marker stands:\n%s", secondOut)
+	}
+	if !strings.Contains(secondOut, "quarantine marker exists") {
+		t.Fatalf("the next run must refuse the quarantined database:\n%s", secondOut)
+	}
+	if !strings.Contains(secondOut, "db=zed") {
+		t.Fatalf("the refusal must not block the healthy peer:\n%s", secondOut)
 	}
 }
