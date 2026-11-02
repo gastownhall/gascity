@@ -28,8 +28,8 @@
 // including a developer's personal session started by hand. The plugin
 // therefore registers hooks only when gc's session identity is present in
 // the environment. Outside a gc session the injection commands have nothing
-// to return and gc handoff exits 1, so the hooks would only spawn gc on
-// every generation, log a failed handoff on every compaction, and mirror the
+// to return and gc handoff exits 1, so the hooks would only spawn gc every
+// turn, log a failed handoff on every compaction, and mirror the
 // transcript into the directory gc reads its own sessions' transcripts from,
 // for a session Gas City does not own.
 

@@ -1269,19 +1269,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hook version 4; `gc` upgrades installed plugins below those or without the
   new transform and turn handling. (#5552, #5732, #6629)
 
-- **The OpenCode and MiMo Code plugins register no hooks in a session gc did
-  not start.** Both providers load the plugin for every launch in its work
+- **The OpenCode and MiMo Code plugins register no hooks outside a gc
+  session.** Both providers load the plugin for every launch in its work
   directory, so a session a person started by hand in a city or rig
-  directory ran `gc prime --hook`, `gc nudge drain --inject` and
-  `gc mail check --inject` on every turn and `gc handoff --auto` on every
-  compaction. Outside a gc session handoff exits 1, so every compaction
-  logged a failed handoff, and MiMo Code also mirrored the session's
-  transcript into the directory gc reads its own sessions' transcripts
-  from. The plugins now register hooks only when one of `GC_SESSION_ID`,
-  `GC_SESSION_NAME`, `GC_ALIAS`, `GC_AGENT` or `GC_TEMPLATE` is set, as it
-  is in every session gc starts. OpenCode hook version 9, MiMo Code hook
-  version 5; `gc` upgrades installed plugins below those or without the
-  guard. (#5787)
+  directory ran `gc prime --hook` at start and after each compaction,
+  `gc nudge drain --inject` and `gc mail check --inject` every turn, and
+  `gc handoff --auto` on every compaction. Outside a gc session handoff
+  exits 1, so every compaction logged a failed handoff, and MiMo Code also
+  mirrored the session's transcript into the directory gc reads its own
+  sessions' transcripts from. The plugins now register hooks only when one
+  of `GC_SESSION_ID`, `GC_SESSION_NAME`, `GC_ALIAS`, `GC_AGENT` or
+  `GC_TEMPLATE` is set, as it is in every session gc starts and in any
+  process started from one. OpenCode hook version 9, MiMo Code hook version
+  5; `gc` upgrades installed plugins below those or without the guard.
+  (#5787)
 
 - **An attached session is no longer idle-slept.** Under a `[session_sleep]`
   policy or an agent's `sleep_after_idle`, interactive sessions on local tmux
