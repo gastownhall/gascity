@@ -562,6 +562,7 @@ cmd/gc/cmd_hook_claim.go	hookClaimBdStore	raw-result	1
 cmd/gc/cmd_hook_claim.go	hookClaimBdStoreContext	raw-result	1
 cmd/gc/cmd_hook_claim.go	hookWorkflowStoreFunc	raw-type	1
 cmd/gc/cmd_hook_claim.go	hookWorkflowStoreWithBdStore	raw-result	1
+cmd/gc/cmd_hook_claim.go	skipDoneWorkflow	raw-param	1
 cmd/gc/cmd_hook_claim.go	workflowInputDone	raw-param	1
 cmd/gc/cmd_hook_claim.go	workflowInputDoneAcross	raw-param	2
 cmd/gc/cmd_hook_claim.go	workflowStepAssignees	raw-param	1
