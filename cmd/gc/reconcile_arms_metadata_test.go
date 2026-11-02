@@ -465,6 +465,46 @@ func TestDesiredRowLaunchRefreshClearsStaleFieldsWithoutNameChange(t *testing.T)
 	}
 }
 
+// TestDesiredRowLaunchRefreshPreservesProviderFieldsWithoutResolution guards
+// #8539's fix from overreach on A7: a converged row under an unchanged
+// successful resolution queues nothing (write-if-changed), a stored key
+// absent from the row compares equal to an empty projection, and an absent
+// (nil) resolution preserves the stored projection — no trustworthy
+// projection exists to clear with.
+func TestDesiredRowLaunchRefreshPreservesProviderFieldsWithoutResolution(t *testing.T) {
+	cfg := identityCity()
+	provider := &config.ResolvedProvider{Name: "my-claude", BuiltinAncestor: "claude", ResumeFlag: "--resume", ResumeStyle: "flag", ResumeCommand: "resume {{.SessionKey}}", SessionIDFlag: "--session-id"}
+	tp := TemplateParams{TemplateName: "worker", InstanceName: "worker-2", PoolSlot: 2, WakeMode: "fresh", Command: "run-worker", ResolvedProvider: provider}
+	seat := session.Info{Template: "worker", SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "2", AgentName: "worker-2", Type: session.BeadType, MetadataState: "asleep"}
+	converged := rowRefreshKeys{
+		"wake_mode": "fresh", "continuation_epoch": "1", "session_key": "k-1",
+		"command": "run-worker", "provider": "my-claude", "provider_kind": "claude", "builtin_ancestor": "claude",
+		"resume_flag": "--resume", "resume_style": "flag", "resume_command": "resume {{.SessionKey}}", "session_id_flag": "--session-id",
+	}
+	if id := desiredRowIdentity(cfg, tp, seat, converged); len(id.Meta) != 0 {
+		t.Fatalf("converged: meta %v, want no writes", id.Meta)
+	}
+	// A stored key the row never wrote compares equal to an empty
+	// projection: a provider that projects nothing for a field writes
+	// nothing for a row that never stored it.
+	bareProjection := &config.ResolvedProvider{Name: "claude", BuiltinAncestor: "claude", ResumeFlag: "--resume", ResumeStyle: "flag"}
+	tpBare := tp
+	tpBare.ResolvedProvider = bareProjection
+	neverStored := rowRefreshKeys{
+		"wake_mode": "fresh", "continuation_epoch": "1", "session_key": "k-1",
+		"command": "run-worker", "provider": "claude",
+		"resume_flag": "--resume", "resume_style": "flag",
+	}
+	if id := desiredRowIdentity(cfg, tpBare, seat, neverStored); len(id.Meta) != 0 {
+		t.Fatalf("never-stored keys: meta %v, want no writes (absent and empty compare equally)", id.Meta)
+	}
+	bare := tp
+	bare.Command, bare.ResolvedProvider = "", nil
+	if id := desiredRowIdentity(cfg, bare, seat, converged); len(id.Meta) != 0 {
+		t.Fatalf("absent resolution: meta %v, want the stored values kept", id.Meta)
+	}
+}
+
 // Kills the census retry trigger reading other legs (the C7d-1 review's
 // G05): the live check reads the sessions store alone, so a row on a rig
 // leg carrying the alias does not hold it; one on the row's own leg does.

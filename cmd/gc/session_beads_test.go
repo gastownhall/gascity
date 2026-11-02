@@ -5705,6 +5705,69 @@ func TestSyncSessionBeads_ProviderProjectionClearsStaleFieldsWithoutNameChange(t
 	}
 }
 
+// TestSyncSessionBeads_ProviderProjectionNilResolutionPreservesAndNoChurn
+// guards #8539's fix from overreach: an absent (nil) resolution — a
+// transient resolution failure — must preserve all seven provider-derived
+// fields, because no trustworthy projection exists to write, and a converged
+// row under an unchanged successful resolution must queue nothing (the
+// write-if-changed contract, #1205).
+func TestSyncSessionBeads_ProviderProjectionNilResolutionPreservesAndNoChurn(t *testing.T) {
+	store := beads.NewMemStore()
+	cs := &countingStore{Store: store}
+	clk := &clock.Fake{Time: time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	_ = sp.Start(context.TODO(), "worker", runtime.Config{Command: "codex-wrap chat"})
+	codexCmd := "codex-wrap chat"
+	ds := map[string]TemplateParams{
+		"worker": {
+			TemplateName: "worker",
+			Command:      codexCmd,
+			ResolvedProvider: &config.ResolvedProvider{
+				Name: "codex-wrap", BuiltinAncestor: "codex",
+				ResumeFlag: "-c", ResumeStyle: "command",
+				ResumeCommand: "codex-wrap resume {{.SessionKey}}", SessionIDFlag: "--session-id",
+			},
+		},
+	}
+	var stderr bytes.Buffer
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	stored := map[string]string{
+		"provider": "codex-wrap", "provider_kind": "codex", "builtin_ancestor": "codex",
+		"resume_flag": "-c", "resume_style": "command",
+		"resume_command": "codex-wrap resume {{.SessionKey}}", "session_id_flag": "--session-id",
+	}
+	for k, want := range stored {
+		if got := allSessionBeads(t, cs)[0].Metadata[k]; got != want {
+			t.Fatalf("create: %s = %q, want %q", k, got, want)
+		}
+	}
+
+	// An unchanged successful resolution is converged: no metadata writes.
+	writesBefore := cs.writes
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if cs.writes != writesBefore {
+		t.Errorf("unchanged resolution wrote metadata (%d -> %d writes); the refresh is diff-gated (#1205)", writesBefore, cs.writes)
+	}
+
+	// A nil resolution preserves all seven provider-derived fields.
+	ds["worker"] = TemplateParams{TemplateName: "worker", Command: codexCmd, ResolvedProvider: nil}
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	for k, want := range stored {
+		if got := allSessionBeads(t, cs)[0].Metadata[k]; got != want {
+			t.Errorf("nil resolution: %s = %q, want %q (an absent resolution must not wipe provider metadata)", k, got, want)
+		}
+	}
+
+	// A nil queue callback is a no-op guard, not a panic.
+	queueChangedResolvedProviderSessionMetadata(map[string]string{"provider": "x"}, nil, &config.ResolvedProvider{Name: "y", ResumeCommand: "r"})
+
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+}
+
 func TestSyncSessionBeadsWithSnapshot_RefreshesMissingNamedSessionFromStore(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
