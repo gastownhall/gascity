@@ -2514,7 +2514,10 @@ compact_live_gate_reset() {
 # compact_live_gate_arm DB STEP [PRE_COMPACTION_HEAD]
 #   Record STEP and, on the pass's first rewrite, whether the data directory
 #   exists and the HEAD the database had before compaction. Later arms keep
-#   that first evidence.
+#   that first evidence. A first rewrite with no known HEAD (a GC-first pass)
+#   takes its baseline from a live probe; when that fails the database was not
+#   live before the rewrite, so this returns 1 without arming and the caller
+#   fails the pass ordinarily, before any GC.
 compact_live_gate_arm() {
   _lga_db="$1"
   _lga_step="$2"
@@ -2522,6 +2525,14 @@ compact_live_gate_arm() {
   live_gate_steps="${live_gate_steps:+$live_gate_steps,}$_lga_step"
   if [ "$live_gate_armed" = "1" ]; then
     return 0
+  fi
+  if [ -z "$_lga_head" ]; then
+    if ! compact_live_probe "$_lga_db" "before $_lga_step"; then
+      printf 'compact: db=%s live baseline probe before %s failed: %s — skipping %s\n' \
+        "$_lga_db" "$_lga_step" "$compact_live_probe_error" "$_lga_step" >&2
+      return 1
+    fi
+    _lga_head="$compact_live_probe_head"
   fi
   live_gate_dir="$DOLT_DATA_DIR/$_lga_db/.dolt"
   live_gate_dir_before=absent
@@ -2582,23 +2593,24 @@ compact_live_probe_once() {
   return 0
 }
 
-# compact_live_probe DB STEP
+# compact_live_probe DB PHASE
 #   Run compact_live_probe_once up to live_probe_attempts times, sleeping
 #   live_probe_delay seconds between attempts; succeeds on the first answer.
+#   PHASE ("before STEP" or "after STEP") labels the attempt logs.
 compact_live_probe() {
   _lp_db="$1"
-  _lp_step="$2"
+  _lp_phase="$2"
   _lp_attempt=1
   while :; do
     if compact_live_probe_once "$_lp_db"; then
       if [ "$_lp_attempt" -gt 1 ]; then
-        printf 'compact: db=%s live probe recovered on attempt %s/%s after %s\n' \
-          "$_lp_db" "$_lp_attempt" "$live_probe_attempts" "$_lp_step"
+        printf 'compact: db=%s live probe recovered on attempt %s/%s %s\n' \
+          "$_lp_db" "$_lp_attempt" "$live_probe_attempts" "$_lp_phase"
       fi
       return 0
     fi
-    printf 'compact: db=%s live probe attempt %s/%s after %s failed: %s\n' \
-      "$_lp_db" "$_lp_attempt" "$live_probe_attempts" "$_lp_step" "$compact_live_probe_error" >&2
+    printf 'compact: db=%s live probe attempt %s/%s %s failed: %s\n' \
+      "$_lp_db" "$_lp_attempt" "$live_probe_attempts" "$_lp_phase" "$compact_live_probe_error" >&2
     if [ "$_lp_attempt" -ge "$live_probe_attempts" ]; then
       return 1
     fi
@@ -2624,7 +2636,7 @@ compact_live_gate_check() {
   _lgc_probe_failure=""
   if [ "$live_gate_dir_before" = "present" ] && [ "$_lgc_dir_after" = "absent" ]; then
     _lgc_failure="data directory $live_gate_dir disappeared"
-  elif ! compact_live_probe "$_lgc_db" "$_lgc_step"; then
+  elif ! compact_live_probe "$_lgc_db" "after $_lgc_step"; then
     _lgc_probe_failure="$compact_live_probe_error"
     _lgc_failure="database not served after $live_probe_attempts probe attempt(s): $compact_live_probe_error"
   else
@@ -2665,7 +2677,7 @@ run_full_gc() {
   start="$4"
   gc_step="$5"
 
-  compact_live_gate_arm "$db" "$gc_step"
+  compact_live_gate_arm "$db" "$gc_step" || return 1
   printf "compact: db=%s — running DOLT_GC('--full', '--archive-level=0')...\n" "$db"
   gc_rc=0
   gc_err_tmp=$(mktemp)
@@ -3107,10 +3119,13 @@ resolve_compact_base() {
   return 0
 }
 
-# run_bare_gc runs a working-set CALL DOLT_GC('--archive-level=0'): it reclaims
-# journal and working-set garbage without touching history.
+# run_bare_gc DB STEP runs a working-set CALL DOLT_GC('--archive-level=0'): it
+# reclaims journal and working-set garbage without touching history. STEP
+# labels the rewrite for the live-database gate.
 run_bare_gc() {
   db="$1"
+  bare_gc_step="$2"
+  compact_live_gate_arm "$db" "$bare_gc_step" || return 1
   start=$(date +%s)
   gc_rc=0
   gc_err_tmp=$(mktemp)
@@ -3121,10 +3136,12 @@ run_bare_gc() {
       "$db" "$gc_rc" "$elapsed" >&2
     emit_error_file "$db" "$gc_err_tmp"
     rm -f "$gc_err_tmp"
+    compact_live_gate_check "$db" "$bare_gc_step" || return 1
     return 1
   fi
   rm -f "$gc_err_tmp"
   compact_gc_ran=1
+  compact_live_gate_check "$db" "$bare_gc_step" || return 1
 
   printf 'compact: db=%s bare-gc duration=%ss — ok\n' "$db" "$elapsed"
   return 0
@@ -3208,7 +3225,7 @@ compact_shared_history_database() {
     printf 'compact: db=%s — dry-run (would bare GC)\n' "$db"
     return 0
   fi
-  run_bare_gc "$db"
+  run_bare_gc "$db" "shared-history bare GC"
 }
 
 flatten_database() {
@@ -4150,7 +4167,7 @@ bare_gc_database() {
     return 0
   fi
 
-  run_bare_gc "$db"
+  run_bare_gc "$db" "bare GC"
 }
 
 # gc_only_database — reclaim orphaned chunks on one database via a full

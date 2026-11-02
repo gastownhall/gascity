@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Fake-Dolt coverage for the compactor's live-database gate: after every
@@ -368,6 +369,91 @@ func TestCompactScriptLiveGateRetriesTransientProbeFailure(t *testing.T) {
 		}
 		if !strings.Contains(out, "compact: 2 database(s) failed compaction") {
 			t.Fatalf("ordinary failures must still be counted for every database:\n%s", out)
+		}
+	})
+}
+
+// AC-5: every full-GC and bare-GC entry path gets the same gate and abort,
+// before any caller-side push or marker clearing.
+func TestCompactScriptLiveGateCoversEveryRewriteMode(t *testing.T) {
+	pendingGC := func(t *testing.T, fixture compactScriptFixture) string {
+		return writeCompactStateMarker(t, fixture, "compact-pending-gc",
+			"db=beads\nreason=flatten succeeded but full GC failed\ncreated_at="+time.Now().UTC().Format("2006-01-02T15:04:05Z")+
+				"\nremote=origin\nexpected_remote_head=headcommit\nexpected_remote_head_verified=1\ncompacted_from_head=headcommit\nlocal_branch=main\nremote_branch=main\n")
+	}
+	for _, tc := range []struct {
+		name      string
+		mode      string
+		args      []string
+		env       []string
+		setup     func(t *testing.T, fixture compactScriptFixture) string
+		step      string
+		gcQuery   string
+		baseline  bool
+		markerKey string
+	}{
+		{name: "gc-only", mode: "success", args: []string{"--gc-only"}, step: "gc-only reclaim", gcQuery: "DOLT_GC('--full'", baseline: true},
+		{name: "bare GC", mode: "success", env: []string{"GC_DOLT_COMPACT_BARE_GC=1"}, step: "bare GC", gcQuery: "DOLT_GC('--archive-level=0')", baseline: true},
+		{
+			name: "shared-history bare GC", mode: "remote_success", step: "shared-history bare GC",
+			gcQuery: "DOLT_GC('--archive-level=0')", baseline: true,
+			setup: func(t *testing.T, fixture compactScriptFixture) string {
+				setCompactWatermark(t, fixture, "")
+				return ""
+			},
+		},
+		{name: "shared-history pending-GC retry", mode: "remote_success", step: "shared-history pending-GC retry", gcQuery: "DOLT_GC('--full'", baseline: true, setup: pendingGC},
+		{name: "pending-GC retry", mode: "remote_success", env: []string{"GC_DOLT_COMPACT_ALLOW_FEDERATED=1"}, step: "pending-GC retry", gcQuery: "DOLT_GC('--full'", baseline: true, setup: pendingGC},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			addCompactDatabases(t, fixture, "zed")
+			pendingMarker := ""
+			if tc.setup != nil {
+				pendingMarker = tc.setup(t, fixture)
+			}
+			env := append(liveGateEnv("GC_FAKE_DOLT_LIVE_FAULT=unserve"), tc.env...)
+			out, err := fixture.runWithArgs(t, tc.mode, tc.args, env...)
+			requireFailedRun(t, err, out)
+			marker := requireLiveGateQuarantine(t, fixture, out, tc.step)
+			requireNotReached(t, out, tc.step, "zed")
+			if got := compactMarkerValue(t, marker, "live_gate_pre_compaction_head"); got != "headcommit" {
+				t.Fatalf("live_gate_pre_compaction_head = %q, want the probed baseline", got)
+			}
+			log := readCompactDoltLog(t, fixture)
+			before := strings.SplitN(log, tc.gcQuery, 2)[0]
+			if tc.baseline && beadsLiveProbes(before) != 1 {
+				t.Fatalf("GC-first pass must probe a baseline once before GC:\n%s", log)
+			}
+			after := beadsLogAfter(t, log, tc.gcQuery)
+			for _, forbidden := range []string{"DOLT_PUSH", "db=zed "} {
+				if strings.Contains(after, forbidden) {
+					t.Fatalf("live-gate failure reached %s:\n%s", forbidden, after)
+				}
+			}
+			if pendingMarker != "" {
+				if _, err := os.Stat(pendingMarker); err != nil {
+					t.Fatalf("pending-GC marker must be kept after a live-gate failure: %v", err)
+				}
+			}
+		})
+	}
+
+	t.Run("baseline unavailable", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		addCompactDatabases(t, fixture, "zed")
+		out, err := fixture.runWithArgs(t, "success", []string{"--gc-only"}, liveGateEnv("GC_FAKE_DOLT_LIVE_PROBE_REPLY=empty")...)
+		requireFailedRun(t, err, out)
+		requireNoMarker(t, beadsMarker(fixture, "compact-quarantine"))
+		log := readCompactDoltLog(t, fixture)
+		if strings.Contains(log, "db=beads query=CALL DOLT_GC") {
+			t.Fatalf("GC must not run without a live baseline:\n%s", log)
+		}
+		if !strings.Contains(log, "db=zed query=CALL DOLT_GC('--full'") {
+			t.Fatalf("baseline failure is ordinary; the run must go on to zed:\n%s", log)
+		}
+		if !strings.Contains(out, "compact: 1 database(s) failed gc-only reclaim") {
+			t.Fatalf("baseline failure must be counted as an ordinary failure:\n%s", out)
 		}
 	})
 }
