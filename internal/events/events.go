@@ -327,6 +327,15 @@ const (
 	// Emitted by the session reconciler's start-result commit path; the
 	// envelope's Subject carries the session name.
 	SessionColdStartTimeout = "session.cold_start_timeout"
+	// SessionAsyncStartDiscarded fires when the session reconciler discards a
+	// finished async start because the session bead's persisted command changed
+	// during startup (the async-start command-drift gate,
+	// asyncStartPreparedCommandStaleInfo). The runtime that start spawned is
+	// stopped and the start retries next tick. The envelope's Subject carries
+	// the session name. One emission per discard: a repeat for the same Subject
+	// means the persisted command keeps changing under the starts, so a pack
+	// subscriber should count repeats and escalate.
+	SessionAsyncStartDiscarded = "session.async_start_discarded"
 	// SessionConversationReset fires when the reconciler resets a committed
 	// manual conversation, so that its next start is a fresh conversation
 	// rather than a resume. The payload's reason names the cause: stale-key,

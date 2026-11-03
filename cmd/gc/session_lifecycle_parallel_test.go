@@ -4530,8 +4530,19 @@ func TestCommitAsyncStartResult_IgnoresCommandChangedDuringStartup(t *testing.T)
 		finished: clk.Now(),
 	}
 
-	if commitAsyncStartResultWithContext(context.Background(), result, sp, store, clk, events.Discard, 0, ioDiscard{}, ioDiscard{}, nil) {
+	rec := events.NewFake()
+	if commitAsyncStartResultWithContext(context.Background(), result, sp, store, clk, rec, 0, ioDiscard{}, ioDiscard{}, nil) {
 		t.Fatal("async start with stale command should not commit")
+	}
+	// The discard must be observable off-pane: exactly one typed event per
+	// discard, so a pack subscriber can count repeats for one session.
+	if len(rec.Events) != 1 {
+		t.Fatalf("recorded %d events, want exactly 1 session.async_start_discarded: %+v", len(rec.Events), rec.Events)
+	}
+	if ev := rec.Events[0]; ev.Type != events.SessionAsyncStartDiscarded || ev.Actor != "controller" || ev.Subject != "drifter" ||
+		!strings.Contains(ev.Message, "desired command changed during startup") {
+		t.Fatalf("event = %+v, want type %q actor controller subject drifter message containing %q",
+			ev, events.SessionAsyncStartDiscarded, "desired command changed during startup")
 	}
 	updated, err := store.Get(session.ID)
 	if err != nil {
@@ -4601,8 +4612,16 @@ func TestCommitAsyncStartResult_PreservesRuntimeWhenRefreshFails(t *testing.T) {
 		finished: clk.Now(),
 	}
 
-	if commitAsyncStartResultWithContext(context.Background(), result, sp, store, clk, events.Discard, 0, ioDiscard{}, ioDiscard{}, nil) {
+	rec := events.NewFake()
+	if commitAsyncStartResultWithContext(context.Background(), result, sp, store, clk, rec, 0, ioDiscard{}, ioDiscard{}, nil) {
 		t.Fatal("async result should not commit when refresh fails")
+	}
+	// Only the command-drift branch reports a discard; a store refresh error
+	// proves nothing about the command and must stay silent.
+	for _, ev := range rec.Events {
+		if ev.Type == events.SessionAsyncStartDiscarded {
+			t.Fatalf("refresh failure emitted %q: %+v", events.SessionAsyncStartDiscarded, ev)
+		}
 	}
 	if !sp.IsRunning("worker") {
 		t.Fatal("refresh failure should not stop a runtime without proving staleness")
