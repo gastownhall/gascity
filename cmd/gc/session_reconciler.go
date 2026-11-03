@@ -5014,7 +5014,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if terminal, err := freshAnchorBeadTerminal(topo, decision.AssignedWorkBeadID); err == nil && terminal {
 						continue
 					}
-					if ran, fold := cycleAliveSessionForFreshReassign(cityPath, infoByID[target.info.ID], target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, clk.Now(), stdout, stderr, trace); ran {
+					if ran, fold := cycleAliveSessionForFreshReassign(cityPath, rec, infoByID[target.info.ID], target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, clk.Now(), stdout, stderr, trace); ran {
 						if fold != nil {
 							tick.apply(target.info.ID, fold)
 						}

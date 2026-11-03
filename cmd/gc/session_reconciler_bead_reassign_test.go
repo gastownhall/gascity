@@ -973,3 +973,43 @@ func TestReconcileSessionBeads_FreshCycleEmitsNoEvent_WhenNoKill(t *testing.T) {
 		})
 	}
 }
+
+// TestCycleAliveSessionForFreshReassign_EarlyReturnsEmitNoEvent pins the
+// failure half of ga-uci1jl at the function level: each early return before
+// the cycle completes leaves the event stream silent and reports not-ran.
+func TestCycleAliveSessionForFreshReassign_EarlyReturnsEmitNoEvent(t *testing.T) {
+	cases := []struct {
+		name      string
+		nilStore  bool
+		newBeadID string
+	}{
+		{"nil store", true, "wb-new"},
+		{"empty new bead id", false, "  "},
+		// The session row is absent from the store, so the kill cannot
+		// resolve it and fails.
+		{"kill fails", false, "wb-new"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := events.NewFake()
+			var store beads.Store
+			if !tc.nilStore {
+				store = beads.NewMemStore()
+			}
+			info := sessionpkg.Info{ID: "gm-missing", CurrentlyProcessingBeadID: "wb-prev"}
+			var stderr strings.Builder
+			ran, fold := cycleAliveSessionForFreshReassign("", fake, info, TemplateParams{TemplateName: "witness"},
+				runtime.NewFake(), store, &config.City{}, nil, "witness", tc.newBeadID, time.Now(), nil, &stderr, nil)
+			if ran || fold != nil {
+				t.Fatalf("ran = %v, fold = %v, want false, nil", ran, fold)
+			}
+			evs, err := fake.List(events.Filter{})
+			if err != nil {
+				t.Fatalf("listing events: %v", err)
+			}
+			if len(evs) != 0 {
+				t.Fatalf("events = %+v, want none on an early return", evs)
+			}
+		})
+	}
+}

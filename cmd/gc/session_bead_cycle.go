@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
@@ -186,8 +187,15 @@ func freshAnchorBeadTerminal(topo storeref.Topology, anchorID string) (bool, err
 // the next wake observes firstStart=true and uses the fresh-wake
 // conversation reset. We also update currently_processing_bead_id to the
 // new anchor so the divergence check does not refire on the next tick.
+//
+// A cycle that ran records a session.draining event on rec naming the session
+// and carrying the previous and new bead ids, so the kill is attributable from
+// `gc events` without reading the supervisor log. Every early return (no store,
+// no new bead, failed kill, failed breaker reset, failed handoff write) records
+// nothing. A nil rec is allowed and records nothing.
 func cycleAliveSessionForFreshReassign(
 	cityPath string,
+	rec events.Recorder,
 	info sessionpkg.Info,
 	tp TemplateParams,
 	sp runtime.Provider,
@@ -256,6 +264,15 @@ func cycleAliveSessionForFreshReassign(
 			continue
 		}
 		fold[key] = value
+	}
+	if rec != nil {
+		rec.Record(events.Event{
+			Type:      events.SessionDraining,
+			Actor:     "gc",
+			Subject:   tp.DisplayName(),
+			Message:   fmt.Sprintf("fresh-mode bead reassign: cycled session %s, bead %s -> %s", name, prevBeadID, newBeadID),
+			SessionID: info.ID,
+		})
 	}
 	if stdout != nil {
 		fmt.Fprintf(stdout, "Cycled fresh-mode session '%s' for bead reassign: %s → %s\n", name, prevBeadID, newBeadID) //nolint:errcheck
