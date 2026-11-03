@@ -33,10 +33,18 @@ this scope, consistent with ruling D4. The closed schema at
 If the operator instead requires machine-readable Orders here, record that
 choice explicitly. It requires an optional declared addition on both routes,
 schema and compatibility checks, and reconciliation of existing
-`ga-k6ofaz.3` and `ga-kbwrop.1`; it must not become a third duplicate JSON
-task. The architect owns resolution of the older JSON requirements against
-D4. An optional field on the HTTP status response alone does not authorize a
+work. The architect has closed `ga-k6ofaz.3` as abandoned under D4; its
+older implementation spec must stay retired. `ga-kbwrop.1` remains an open
+builder vehicle and needs reconciliation against that ruling before any
+JSON implementation. A newly approved C1 JSON extension would need a named
+child against the current schema, with parity coverage for both routes.
+An optional field on the HTTP status response alone does not authorize a
 new key in CLI `StatusJSON`.
+
+Scripts can already use `gc doctor --json --check order-firing-current
+--check order-outcome-healthy`. Child A adds typed non-OK findings and child
+B adds the bounded mode. This addresses the standing machine-readable
+health request while the operator decides the status command's scope.
 
 ## Existing prerequisites and sequencing
 
@@ -95,7 +103,10 @@ Mayor receives the committed brief and decision record `ga-ozm0c17`, asking
 for the route choice, whether an interim is authorized, and JSON scope.
 Only an actual operator selection, or a mayor relay quoting its source,
 clears that record. PM keeps `ga-io9q5wh` open behind that dependency and
-releases its claim while waiting. After the decision, PM updates this plan,
+releases its claim while waiting. Mayor acknowledged the request in
+`gm-wisp-ky7gf1`, added it to the morning operator message, and will record
+the actual answer with its source; no choice has been accepted. After the
+decision, PM updates this plan,
 reconciles architectural details and existing JSON scopes, creates the chosen
 work packages, verifies their handoffs, and closes planning only after the
 artifact is committed and clean.
