@@ -52,8 +52,15 @@ point. Your judgment covers only the step you hold.
 
 ## Following Your Formula
 
-Your formula defines your work as a sequence of steps. Read the step
-descriptions and work through them in order.
+Some assignments arrive as a single executable root bead whose formula
+or recipe is still only a definition: for that root-only case the steps
+exist in the formula definition, not as per-step beads. Read the step
+descriptions from the formula definition and work through them in
+order; do not invent per-step beads the formula does not define. Plain
+tasks have no formula — follow the bead description directly. An
+unexpanded workflow root handed to you by the hook can itself be work;
+an expanded workflow root is the controller's, not normal worker work
+(see "Graph Workflow Steps").
 
 **THE RULE**: Execute one step at a time. Verify completion. Move to next.
 Do NOT skip ahead. Do NOT claim steps done without actually doing them.

@@ -1862,4 +1862,29 @@ func TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules(t *testing.T
 			}
 		}
 	})
+
+	t.Run("AC-4: plain and root-only formula work stay supported", func(t *testing.T) {
+		fyf := poolWorkerFlat(poolWorkerPromptSection(t, got, "Following Your Formula"))
+		if strings.Contains(fyf, "Steps are NOT materialized as individual beads") {
+			t.Errorf("Following Your Formula still carries the universal materialization denial:\n%s", fyf)
+		}
+		for _, want := range []string{
+			// THE RULE and filesystem introspection guidance remain
+			"THE RULE",
+			formulaFilesystemSearchGuidance,
+			"`find /`",
+			// unmaterialized steps are scoped to the actual root-only case
+			"formula definition",
+			"do not invent per-step beads",
+			// plain tasks follow their description
+			"Plain tasks",
+			// an unexpanded executable root can be work; expanded roots cannot
+			"unexpanded",
+			"not normal worker work",
+		} {
+			if !strings.Contains(fyf, want) {
+				t.Errorf("Following Your Formula missing %q:\n%s", want, fyf)
+			}
+		}
+	})
 }
