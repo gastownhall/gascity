@@ -576,22 +576,6 @@ jobs:
             echo 'common --loading_phase_threads=64'
           } >> .bazelrc.local
 
-      # zstd transfers with the anonymous read-only cache (rbe-cache, :8443),
-      # only while it advertises zstd: cache-zstd-probe.sh asks its
-      # GetCapabilities, and any failure means no flag (never a failed step).
-      # A probe, not a repository variable: fork pull_request runs see no
-      # vars. Never for remote execution: rbe-west's trusted schedulers and
-      # the fork edge advertise no compressor, and Bazel then refuses the
-      # remote. Transport only (the line's config is fork-cache, which only
-      # setup-bazel's rc selects), so action keys are unchanged. .bazelrc
-      # try-imports the gitignored .bazelrc.local.
-      - name: Fork cache zstd transfers
-        if: needs.rbe.outputs.mode == 'cache' || steps.bazel-fallback.outcome == 'success'
-        run: |
-          if bash tools/rbe/cache-zstd-probe.sh; then
-            echo 'build:fork-cache --remote_cache_compression' >> .bazelrc.local
-          fi
-
       # The remote repo contents cache, read-only, for the lanes that use
       # fork-cache (engdocs/design/bazel-remote-repo-contents-cache.md):
       # external repositories come from the trees rrc-seed wrote on main

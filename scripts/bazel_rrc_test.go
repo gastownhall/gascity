@@ -43,7 +43,7 @@ const (
 // bazelRRCVar gates it.
 const (
 	bazelForkRRCReadStep   = "Fork cache remote repo contents cache (read)"
-	bazelForkRRCReadStepIf = bazelCacheZstdStepIf
+	bazelForkRRCReadStepIf = "needs.rbe.outputs.mode == 'cache' || steps.bazel-fallback.outcome == 'success'"
 	bazelCacheRRCProbe     = "tools/rbe/cache-rrc-probe.sh"
 	bazelCacheRRCProbeGate = "if why=$(bash " + bazelCacheRRCProbe + " 2>&1); then"
 	bazelCacheRRCKillLine  = "fork_rrc_read=on"
@@ -136,7 +136,7 @@ func TestBazelRRCReadStep(t *testing.T) {
 			}
 		}
 	}
-	lines, _ := runBazelRCLocalStep(t, step.Run, nil)
+	lines := runBazelRCLocalStep(t, step.Run, nil)
 	if !slices.Equal(lines, bazelRRCReadLines) {
 		t.Errorf("%q writes %q, want %q", step.Name, lines, bazelRRCReadLines)
 	}

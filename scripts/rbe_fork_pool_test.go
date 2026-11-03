@@ -380,7 +380,7 @@ echo "error=$(grep -o 'mint refused (HTTP [0-9]*)' out.txt || true)" >>.bazelrc.
 			t.Fatal(err)
 		}
 		mintLog := filepath.Join(t.TempDir(), "mint.log")
-		got, _ := runBazelRCLocalStep(t, step, map[string]string{
+		got := runBazelRCLocalStep(t, step, map[string]string{
 			"PATH":                bin + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"GITHUB_OUTPUT":       ".bazelrc.local",
 			"RBE_TEST_SCRIPT":     filepath.Join(repoRoot(t), rbeForkCredential),

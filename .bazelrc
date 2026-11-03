@@ -115,6 +115,15 @@ build:fork-cache --nobuild_event_binary_file_path_conversion
 # The farm admits 16 connections per source IP, and Blacksmith runners share
 # egress IPs, so several concurrent fork jobs split that budget.
 build:fork-cache --remote_max_connections=4
+# zstd transfers (REAPI compressed-blobs) with rbe-cache, which advertises
+# zstd (infra anon.json: capabilities remote_cache_compression). Without it
+# contributors read identity: on 2026-11-03 every rbe-cache read was identity,
+# about 0.5 TB that day, mostly Go archives, which zstd-3 shrinks to 0.16.
+# Transport only: action keys are unchanged (bazel_key_parity_test.go). If
+# rbe-cache stops advertising zstd, Bazel refuses the remote and the two
+# fallback flags above make the build local, as when the endpoint is closed
+# (tools/rbe/cache-zstd-probe.sh checks); revert this line then.
+build:fork-cache --remote_cache_compression
 
 # --config=ci: what bazel.yml's lanes pass. Like remote-exec and fork-cache
 # it may not change an action key (bazel_key_parity_test.go): the pinned test
@@ -199,7 +208,3 @@ test:integration-packages --config=integration
 # filter equal to.
 test:integration-review-formulas --config=integration
 test:integration-review-formulas --test_filter=^(TestAdoptPRFormulaCompileAndRun|TestPersonalWorkFormulaCompileAndRun|TestAdoptPRFormulaRetriesTransientReviewerStep|TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries|TestReviewLoopApprovesInIterationTwoWithBodyRetry|TestRetryManagedPooledWorkerRecoversClaimedAttemptAfterCrash)$
-
-# No --remote_cache_compression here: bazel.yml's lanes add it for fork-cache
-# while rbe-cache advertises zstd (tools/rbe/cache-zstd-probe.sh), so the
-# server decides and rollback needs no change here.
