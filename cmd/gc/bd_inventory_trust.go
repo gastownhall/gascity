@@ -741,7 +741,7 @@ func bdBindingDependents(cityPath string, ids []string) (map[string][]string, er
 				out[id] = append(out[id], d.IssueID)
 			}
 		}
-		gates, err := dispatch.OpenCrossStoreGatesNaming(binding.Store, id)
+		gates, err := dispatch.OpenCrossStoreGatesNaming(beads.GraphStore{Store: binding.Store}, id)
 		if err != nil {
 			return nil, fmt.Errorf("listing the binding's open gates waiting on %s: %w", id, err)
 		}

@@ -268,7 +268,8 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 		return err
 	}
 
-	opts := dispatch.ProcessOptions{CityPath: cityPath, StorePath: storePath}
+	kind := bead.Metadata[beadmeta.KindMetadataKey]
+	opts := controlDispatchOptions(cityPath, storePath, store, graphStore, kind == "drain" || kind == "retry-eval" || kind == "retry" || kind == "ralph")
 	opts.Tracef = workflowTracef
 	loadCfg := false
 	// This is a per-kind capability switch (does this control kind need city
@@ -330,9 +331,6 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 			if err := assertDrainRootScopeMatchesDispatch(bead, workflowStoreRefForDir(storePath, cityPath, loadedCityName(cfg, cityPath), cfg)); err != nil {
 				return err
 			}
-			if graphStore != store {
-				opts.MemberStores = []beads.Store{store}
-			}
 		case "retry-eval":
 			// A retry-eval validating a required artifact resolves the
 			// artifact worktree through the workflow's source bead or input
@@ -340,22 +338,16 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 			// supply the work leg as the member tail so that read crosses the
 			// class boundary. Route-gated exactly like the drain: on every
 			// other city graphStore IS store and the tail stays empty.
-			if graphStore != store {
-				opts.MemberStores = []beads.Store{store} // residency:allow route-gated work-leg tail for the retry lane's cross-store required-artifact source read; same shape as the drain arm above
-			}
 			opts.RecycleSession = recycleDispatchSubjectSession(cityPath, store, cfg)
 		case "retry", "ralph":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
 			// Same cross-store required-artifact source resolution as
 			// retry-eval above.
-			if graphStore != store {
-				opts.MemberStores = []beads.Store{store} // residency:allow route-gated work-leg tail for the retry lane's cross-store required-artifact source read; same shape as the drain arm above
-			}
 			opts.RecycleSession = recycleDispatchSubjectSession(cityPath, store, cfg)
 		}
 	}
 
-	result, err := dispatch.ProcessControl(graphStore, bead, opts)
+	result, err := dispatch.ProcessControl(beads.GraphStore{Store: graphStore}, bead, opts)
 	if err != nil {
 		return handleControlDispatchError(cityPath, storePath, graphStore, bead, beadID, err, stderr)
 	}
@@ -386,6 +378,38 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 	}
 	fmt.Fprintln(stdout) //nolint:errcheck
 	return nil
+}
+
+// controlDispatchOptions is the store half of a control dispatch's options.
+// store is the scope store the control was dispatched from and graphStore the
+// ledger that holds the control.
+//
+// Work is the scope store: it owns every convoy and the work members a drain
+// expands over, and it is the store dispatch's work-class reads took before
+// the work handle was named (the member tail when the graph class relocated,
+// else the control's own store, which is then this same store).
+//
+// Sessions is the graph store: attempt routing has always resolved session
+// targets through the control's own store, which on a split city is the
+// binding that holds the sessions class too (typed-store T9: the city's
+// sessions handle).
+//
+// With memberTail, a control kind that reads beads it did not create also gets
+// the scope store as its work-class member tail when the graph class
+// relocated, so membership and member reads cross the class boundary; on any
+// other city the tail stays empty and each read stays on the single store the
+// control runs in.
+func controlDispatchOptions(cityPath, storePath string, store, graphStore beads.Store, memberTail bool) dispatch.ProcessOptions {
+	opts := dispatch.ProcessOptions{
+		CityPath:  cityPath,
+		StorePath: storePath,
+		Work:      beads.WorkStore{Store: store},
+		Sessions:  beads.SessionStore{Store: graphStore},
+	}
+	if memberTail && graphStore != store { // residency:allow route-gated work-leg tail: the drain's membership and the retry lane's cross-store required-artifact source read
+		opts.MemberStores = []beads.WorkStore{opts.Work}
+	}
+	return opts
 }
 
 // validateDispatchSessionProviderConfig checks, once when a control
@@ -460,7 +484,7 @@ func handleControlDispatchError(cityPath, storePath string, graphStore beads.Sto
 		return cause
 	case dispatch.TierSemantic:
 		retry, recordErr := dispatch.RecordSemanticControlRetry(
-			graphStore, beadID, cause, workflowTraceNow().UTC(), semanticControlRetryBudget())
+			beads.GraphStore{Store: graphStore}, beadID, cause, workflowTraceNow().UTC(), semanticControlRetryBudget())
 		if recordErr != nil {
 			// Losing the budget write is itself a store problem: keep the
 			// pre-tier behavior (retry) rather than escalating on it.
@@ -541,7 +565,7 @@ func handleControlDriftRefusal(cityPath, storePath string, graphStore beads.Stor
 		return dispatch.MarkQuietControllerRetry(cause)
 	}
 	pending, recordErr := dispatch.RecordPendingControlRetry(
-		graphStore, beadID, cause, workflowTraceNow().UTC(), semanticControlRetryBudget())
+		beads.GraphStore{Store: graphStore}, beadID, cause, workflowTraceNow().UTC(), semanticControlRetryBudget())
 	if recordErr != nil {
 		// Losing the budget write must not change the disposition: pending is
 		// still pending, and escalating on a failed bookkeeping write would
@@ -764,7 +788,7 @@ func quarantineControlFailureBead(store beads.Store, bead beads.Bead, cause erro
 	}); err != nil {
 		return nil, err
 	}
-	_, _ = dispatch.ReconcileClosedScopeMember(store, beadID)
+	_, _ = dispatch.ReconcileClosedScopeMember(beads.GraphStore{Store: store}, beadID)
 
 	if strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflowFinalize {
 		// Best-effort, like the ReconcileClosedScopeMember call above: the
@@ -863,7 +887,7 @@ func settleRootForQuarantinedFinalizer(store beads.Store, finalizer beads.Bead) 
 	}); err != nil {
 		return err
 	}
-	_, _ = dispatch.ReconcileClosedScopeMember(store, rootID)
+	_, _ = dispatch.ReconcileClosedScopeMember(beads.GraphStore{Store: store}, rootID)
 	return nil
 }
 

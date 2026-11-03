@@ -674,7 +674,7 @@ func TestWorkflowFinalizeRetriesWhenSourceWorkflowStoreScanSkipsLiveRoot(t *test
 		}
 	}
 
-	_, err = dispatch.ProcessControl(rigStore, finalizer, dispatch.ProcessOptions{
+	_, err = dispatch.ProcessControl(beadstest.Graph(rigStore), finalizer, dispatch.ProcessOptions{
 		ResolveStoreRef:      resolver,
 		SourceWorkflowStores: makeSourceWorkflowStoresListerWithOpenStore(cityPath, cfg, openStore),
 		SourceWorkflowLock:   func(_ string, _ string, fn func() error) error { return fn() },
@@ -868,7 +868,7 @@ func TestWorkflowFinalizeRetriesWhenEverySourceWorkflowStoreFailsToOpen(t *testi
 				return nil, fmt.Errorf("unknown ref %s", ref)
 			}
 
-			_, err = dispatch.ProcessControl(rigStore, finalizer, dispatch.ProcessOptions{
+			_, err = dispatch.ProcessControl(beadstest.Graph(rigStore), finalizer, dispatch.ProcessOptions{
 				ResolveStoreRef:      resolver,
 				SourceWorkflowStores: makeSourceWorkflowStoresListerWithOpenStore(cityPath, tc.cfg, openStore),
 				SourceWorkflowLock:   func(_ string, _ string, fn func() error) error { return fn() },
@@ -4386,7 +4386,7 @@ func TestQuarantinedWorkflowRootStaysFailedAfterFinalizer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get finalizer: %v", err)
 	}
-	result, err := dispatch.ProcessControl(store, finalizer, dispatch.ProcessOptions{})
+	result, err := dispatch.ProcessControl(beadstest.Graph(store), finalizer, dispatch.ProcessOptions{})
 	if err != nil {
 		t.Fatalf("ProcessControl(finalizer): %v", err)
 	}

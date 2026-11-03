@@ -4,9 +4,9 @@
 # growth fails. The generator only ever lowers a row; raising one is a
 # coordinator decision, made by hand, and visible in review.
 cmd/gc	cap-assert	107
-cmd/gc	mint	159
+cmd/gc	mint	170
 cmd/gc	raw-field	178
-cmd/gc	raw-param	1098
+cmd/gc	raw-param	1100
 cmd/gc	raw-result	269
 cmd/gc	raw-type	4
 cmd/gc	raw-var	38
@@ -20,12 +20,11 @@ internal/api	raw-param	135
 internal/api	raw-result	24
 internal/api	read-marker	20
 internal/api	unwrap	173
-internal/dispatch	cap-assert	2
-internal/dispatch	mint	15
-internal/dispatch	raw-field	5
-internal/dispatch	raw-param	200
-internal/dispatch	raw-result	7
-internal/dispatch	raw-type	1
+internal/dispatch	mint	5
+internal/dispatch	raw-field	2
+internal/dispatch	raw-param	14
+internal/dispatch	raw-result	6
+internal/dispatch	unwrap	10
 internal/doctor	raw-field	1
 internal/doctor	raw-param	2
 internal/orders	raw-param	2

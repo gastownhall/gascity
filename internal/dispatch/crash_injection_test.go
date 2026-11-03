@@ -530,7 +530,12 @@ func processControlUnderFault(fx crashFixture, bead beads.Bead, inj *writeFaultI
 			crashed = true
 		}
 	}()
-	result, err = ProcessControl(fx.dispatch, bead, fx.opts)
+	opts := fx.opts
+	if opts.Work == (beads.WorkStore{}) {
+		// A single-store fixture: its one store serves the work class too.
+		opts.Work = beadstest.Work(fx.dispatch)
+	}
+	result, err = ProcessControl(beadstest.Graph(fx.dispatch), bead, opts)
 	return result, false, err
 }
 

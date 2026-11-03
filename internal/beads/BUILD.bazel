@@ -184,6 +184,7 @@ go_test(
         "guarded_batch_test.go",
         "hangbudget_linux_test.go",
         "hangbudget_test.go",
+        "helpers_through_handles_test.go",
         "list_revision_fidelity_test.go",
         "live_ready_test.go",
         "local_sidecar_test.go",
