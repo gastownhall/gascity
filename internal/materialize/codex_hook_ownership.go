@@ -97,7 +97,7 @@ func ResolveConfiguredCodexHookOwnership(
 		return result
 	}
 
-	layers, err := configuredCodexHookOverlayLayers(hints)
+	layers, err := ReadConfiguredCodexHookOverlayLayers(hints)
 	if err != nil {
 		return result
 	}
@@ -122,7 +122,7 @@ func ReconcileConfiguredCodexHooks(cityPath string, cfg *config.City, template, 
 	if ResolveConfiguredCodexHookOwnership(cityPath, cfg, template, workDir, hints, nil) == nil {
 		return nil, nil
 	}
-	layers, err := configuredCodexHookOverlayLayers(hints)
+	layers, err := ReadConfiguredCodexHookOverlayLayers(hints)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +136,9 @@ func ReconcileConfiguredCodexHooks(cityPath string, cfg *config.City, template, 
 	return map[string]string{CodexManagedMergeablePath: digest}, nil
 }
 
-func configuredCodexHookOverlayLayers(hints runtime.Config) ([][]byte, error) {
+// ReadConfiguredCodexHookOverlayLayers reads the same ordered overlay inputs
+// for registration, direct creation and configured-home ownership verification.
+func ReadConfiguredCodexHookOverlayLayers(hints runtime.Config) ([][]byte, error) {
 	providers := runtime.EffectiveOverlayProviderNames(hints)
 	var layers [][]byte
 	overlayDirs := append([]string(nil), hints.PackOverlayDirs...)

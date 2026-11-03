@@ -58,6 +58,10 @@ func TestRigAddLocalAndAPIProduceIdenticalArtifacts(t *testing.T) {
 		assertRigAddArtifactsIdentical(t, cityToml, true, "")
 	})
 
+	t.Run("codex provider hooks before startup", func(t *testing.T) {
+		assertRigAddArtifactsIdentical(t, "[workspace]\nname = \"parity-city\"\nprovider = \"codex\"\n\n[providers.codex]\nbase = \"builtin:codex\"\ncommand = \"/bin/echo\"\npath_check = \"/bin/echo\"\nresume_command = \"/bin/echo resume {{.SessionKey}}\"\n", false, "", "repo/.codex/hooks.json")
+	})
+
 	t.Run("git rig probes default branch", func(t *testing.T) {
 		// A git-inited rig drives the ProbeBranch leg on both paths, so the
 		// persisted default_branch in city.toml is included in the byte-identical
@@ -73,7 +77,7 @@ func TestRigAddLocalAndAPIProduceIdenticalArtifacts(t *testing.T) {
 // silently regressing to mutual absence). When gitBranch is non-empty the rig is
 // git-inited with that branch as origin/HEAD so the ProbeBranch leg runs and the
 // persisted default_branch is compared.
-func assertRigAddArtifactsIdentical(t *testing.T, cityToml string, wantPacksLock bool, gitBranch string) {
+func assertRigAddArtifactsIdentical(t *testing.T, cityToml string, wantPacksLock bool, gitBranch string, wantFiles ...string) {
 	t.Helper()
 	// The exact env the existing controller CreateRig tests run under: file
 	// provider (no managed-Dolt lifecycle) + GC_DOLT=skip guarding the
@@ -118,6 +122,11 @@ func assertRigAddArtifactsIdentical(t *testing.T, cityToml string, wantPacksLock
 	manifestA := cityArtifactManifest(t, cityA)
 	manifestB := cityArtifactManifest(t, cityB)
 	assertManifestsEqual(t, manifestA, manifestB)
+	for _, file := range wantFiles {
+		if !manifestContains(manifestA, file) || !manifestContains(manifestB, file) {
+			t.Fatalf("expected registration artifact %s is absent", file)
+		}
+	}
 
 	if wantPacksLock && !manifestContains(manifestA, "packs.lock") {
 		t.Fatalf("packs.lock absent from provisioned tree; ComposePacks leg did not run\nmanifest: %v", manifestA)

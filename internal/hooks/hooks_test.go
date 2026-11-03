@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -3505,5 +3506,51 @@ func TestReconcileCodexHooksRefusesManagedEnvironmentLoss(t *testing.T) {
 				t.Fatal("configured input changed")
 			}
 		})
+	}
+}
+
+func TestReconcileCodexHookProfilesRefusesConflictsBeforePublication(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		t.Run(fmt.Sprint(existing), func(t *testing.T) {
+			fs := fsys.NewFake()
+			original := []byte("{\"operator_number\":9007199254740993,\"hooks\":{\"Stop\":[{\"type\":\"command\",\"command\":\"user-hook --keep\"}]}}")
+			if existing {
+				fs.Files["/work/.codex/hooks.json"] = original
+			}
+			a := []byte("{\"operator_metadata\":\"A\"}")
+			b := []byte("{\"operator_metadata\":\"B\"}")
+			digest, err := ReconcileCodexHookProfiles(fs, "/city", "/work", [][][]byte{{a}, {b}})
+			if err == nil || digest != "" {
+				t.Fatalf("conflicting startup profiles admitted: digest=%q err=%v", digest, err)
+			}
+			if !strings.Contains(err.Error(), "profile") {
+				t.Fatalf("unhelpful conflict error: %v", err)
+			}
+			after, exists := fs.Files["/work/.codex/hooks.json"]
+			if exists != existing || (existing && !bytes.Equal(after, original)) {
+				t.Fatal("conflict changed the live hook document")
+			}
+		})
+	}
+}
+
+func TestReconcileCodexHookProfilesComposesCompatibleCallbacks(t *testing.T) {
+	fs := fsys.NewFake()
+	a := []byte("{\"hooks\":{\"Stop\":[{\"type\":\"command\",\"command\":\"user-A --keep\"}]}}")
+	b := []byte("{\"hooks\":{\"Stop\":[{\"type\":\"command\",\"command\":\"user-B --keep\"}]}}")
+	profiles := [][][]byte{{a}, {b}}
+	digest, err := ReconcileCodexHookProfiles(fs, "/city", "/work", profiles)
+	if err != nil || digest == "" {
+		t.Fatalf("compatible callbacks refused: digest=%q err=%v", digest, err)
+	}
+	before := append([]byte(nil), fs.Files["/work/.codex/hooks.json"]...)
+	for _, profile := range profiles {
+		if !CodexHooksAreConvergedWithOverlays(before, "/city", profile) {
+			t.Fatal("published document is not stable for each startup profile")
+		}
+	}
+	again, err := ReconcileCodexHookProfiles(fs, "/city", "/work", profiles)
+	if err != nil || again != digest || !bytes.Equal(before, fs.Files["/work/.codex/hooks.json"]) {
+		t.Fatalf("profile reconciliation changed on retry: digest=%q err=%v", again, err)
 	}
 }

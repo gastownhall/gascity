@@ -945,6 +945,18 @@ var errCodexHooksConcurrentChange = errors.New("codex hooks changed during recon
 // city-bound fixed point. Callers must compare that hash again at the named-
 // session ownership boundary before suppressing normal overlay staging.
 func ReconcileCodexHooks(fs fsys.FS, cityDir, workDir string, configuredLayers [][]byte) (string, error) {
+	return ReconcileCodexHookProfiles(fs, cityDir, workDir, [][][]byte{configuredLayers})
+}
+
+// ReconcileCodexHookProfiles prepares a document shared by multiple configured
+// agents. Before publishing under the writer lock, it verifies the candidate is
+// a fixed point for every profile. Conflicting inputs preserve the live file.
+func ReconcileCodexHookProfiles(fs fsys.FS, cityDir, workDir string, profiles [][][]byte) (string, error) {
+	var configuredLayers [][]byte
+	for _, layers := range profiles {
+		configuredLayers = append(configuredLayers, layers...)
+	}
+
 	if fs == nil || strings.TrimSpace(workDir) == "" {
 		return "", nil
 	}
@@ -955,13 +967,13 @@ func ReconcileCodexHooks(fs fsys.FS, cityDir, workDir string, configuredLayers [
 	var digest string
 	err := codexhooks.WithPathLock(fs, dst, func() error {
 		var err error
-		digest, err = reconcileCodexHooksLocked(fs, cityDir, dst, configuredLayers)
+		digest, err = reconcileCodexHooksLocked(fs, cityDir, dst, configuredLayers, profiles)
 		return err
 	})
 	return digest, err
 }
 
-func reconcileCodexHooksLocked(fs fsys.FS, cityDir, dst string, configuredLayers [][]byte) (string, error) {
+func reconcileCodexHooksLocked(fs fsys.FS, cityDir, dst string, configuredLayers [][]byte, profiles [][][]byte) (string, error) {
 	for attempt := 0; attempt < 3; attempt++ {
 		snapshot, err := readRegularCodexHooks(fs, dst)
 		if err != nil {
@@ -970,6 +982,11 @@ func reconcileCodexHooksLocked(fs fsys.FS, cityDir, dst string, configuredLayers
 		candidate, verified, err := reconcileCodexHookData(snapshot.data, cityDir, configuredLayers)
 		if err != nil || !verified {
 			return "", err
+		}
+		for index, layers := range profiles {
+			if !CodexHooksAreConvergedWithOverlays(candidate, cityDir, layers) {
+				return "", fmt.Errorf("conflicting codex hook profile %d at %s: shared document would change at startup", index, dst)
+			}
 		}
 		if !bytes.Equal(candidate, snapshot.data) || !snapshot.exists {
 			if err := writeCodexHooksIfSnapshotUnchanged(fs, dst, snapshot, candidate); err != nil {

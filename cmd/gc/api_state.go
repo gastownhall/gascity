@@ -31,7 +31,6 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
-	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
@@ -3312,13 +3311,17 @@ func (cs *controllerState) rigPostProvisionLocal(rigName string, pc rig.Provisio
 	if err := ensureGitignoreEntries(fsys.OSFS{}, pc.RigPath, rigGitignoreEntries); err != nil {
 		log.Printf("api: rig create: writing .gitignore: %v", err)
 	}
-	if ih := pc.Cfg.Workspace.InstallAgentHooks; len(ih) > 0 {
-		resolver := func(name string) string { return config.BuiltinFamily(name, pc.Cfg.Providers) }
-		if err := hooks.InstallWithResolver(fsys.OSFS{}, cs.cityPath, pc.RigPath, ih, resolver); err != nil {
+	reloadedCfg, _, loadErr := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cs.cityPath, "city.toml"))
+	if loadErr != nil {
+		if err := installRigNonCodexHooks(fsys.OSFS{}, cs.cityPath, pc.RigPath, pc.Cfg); err != nil {
 			log.Printf("api: rig create: installing agent hooks: %v", err)
 		}
+		if rigNeedsCodexHookPreparation(pc.Cfg) {
+			log.Printf("api: rig create: loading agent hook config: %v", loadErr)
+		}
+	} else if err := installRigAgentHooks(fsys.OSFS{}, cs.cityPath, rigName, pc.RigPath, reloadedCfg); err != nil {
+		log.Printf("api: rig create: installing agent hooks: %v", err)
 	}
-	reloadedCfg, _, _ := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cs.cityPath, "city.toml"))
 	if reloadedCfg != nil {
 		layers, ok := reloadedCfg.FormulaLayers.Rigs[rigName]
 		if !ok || len(layers) == 0 {

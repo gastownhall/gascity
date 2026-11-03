@@ -28,3 +28,9 @@ managed commands.
 Direct configured-home creation reconciles only at the actual started-create
 boundary inside its identity lock. Deferred creation and runtime observation
 stay read-only. Retain the canonical handle and created ID for retry and attach.
+
+Prepare configured project hooks during rig registration, before setup review
+and input pinning. Use composed config and canonical agent lookup; classify
+homes without creating unrelated directories. A shared document must be a fixed
+point for every selected profile. Refuse conflicts before publication, preserve
+operator inputs, and keep install_agent_hooks settings unchanged.
