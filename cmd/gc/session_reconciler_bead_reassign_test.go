@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -854,5 +856,120 @@ func TestReconcileSessionBeads_FreshCycleWakesReliablyNextTick(t *testing.T) {
 	// minted key survives intact up to the point the session goes asleep).
 	if woke.Metadata["session_key"] != "" {
 		t.Fatalf("session_key after wake = %q, want empty (preWakeCommit's fresh-wake reset fires unconditionally for wake_mode=fresh, independent of this fix)", woke.Metadata["session_key"])
+	}
+}
+
+// newFreshCycleEventEnv builds an alive wake_mode=fresh named session "witness"
+// whose current bead is wb-prev, with a Fake event recorder wired in, for the
+// tests that pin what the fresh-mode bead-reassign cycle puts on the gc event
+// stream (ga-uci1jl). The caller reassigns it to a new bead by passing that
+// bead to reconcileSessionBeadsWithAssignedWork.
+func newFreshCycleEventEnv(t *testing.T) (*restartRequestTestEnv, beads.Bead, string, *events.Fake) {
+	t.Helper()
+	env := newRestartRequestTestEnv(t)
+	fake := events.NewFake()
+	env.rec = fake
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "witness", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "witness", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "witness")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "true",
+		SessionName:  sessionName,
+		TemplateName: "witness",
+		ResolvedProvider: &config.ResolvedProvider{
+			SessionIDFlag: "--session-id",
+		},
+	}
+	session := env.createSessionBead(sessionName)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "witness",
+		namedSessionModeMetadata:     "on_demand",
+		"template":                   "witness",
+		"state":                      "active",
+		"wake_mode":                  "fresh",
+		"session_key":                "conversation-A",
+		sessionpkg.CurrentBeadIDKey:  "wb-prev",
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	return env, session, sessionName, fake
+}
+
+// TestReconcileSessionBeads_FreshCycleEmitsEventNamingSessionAndBeads pins
+// ga-uci1jl: the fresh-mode bead-reassign cycle kills a live session, so the
+// kill must be attributable on the gc event stream. It must name the session
+// (Subject, SessionID) and carry the previous and the new bead id, instead of
+// leaving the death to a stdout line in supervisor.log.
+func TestReconcileSessionBeads_FreshCycleEmitsEventNamingSessionAndBeads(t *testing.T) {
+	env, session, _, fake := newFreshCycleEventEnv(t)
+	// wb-prev is not in the store, so its lookup proves nothing and the cycle
+	// fires (the fail-toward-cycle rule), as in
+	// TestReconcileSessionBeads_AliveFreshModeReassignCyclesConversation.
+	workBead := beads.Bead{ID: "wb-new", Title: "next witness wisp", Type: "task", Status: "in_progress", Assignee: "witness"}
+
+	reconcileSessionBeadsWithAssignedWork(env, []beads.Bead{session}, []beads.Bead{workBead})
+
+	got, _ := env.store.Get(session.ID)
+	if got.Metadata[sessionpkg.CurrentBeadIDKey] != "wb-new" {
+		t.Fatalf("%s = %q, want wb-new: the cycle did not run, so this test proves nothing", sessionpkg.CurrentBeadIDKey, got.Metadata[sessionpkg.CurrentBeadIDKey])
+	}
+	evs, err := fake.List(events.Filter{Type: events.SessionDraining})
+	if err != nil {
+		t.Fatalf("listing events: %v", err)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("session.draining events = %d (%+v), want exactly 1 naming the fresh-cycle kill", len(evs), evs)
+	}
+	ev := evs[0]
+	if ev.Actor != "gc" || ev.Subject != "witness" || ev.SessionID != session.ID {
+		t.Fatalf("event = actor %q subject %q session %q, want actor gc, subject witness, session %q", ev.Actor, ev.Subject, ev.SessionID, session.ID)
+	}
+	for _, want := range []string{"wb-prev", "wb-new"} {
+		if !strings.Contains(ev.Message, want) {
+			t.Fatalf("event message %q does not carry bead id %q", ev.Message, want)
+		}
+	}
+}
+
+// TestReconcileSessionBeads_FreshCycleEmitsNoEvent_WhenNoKill pins the other
+// half of ga-uci1jl: only a cycle that actually killed the session records an
+// event. A cycle deferred because the previous bead is still open must leave
+// the stream silent. The function-level early-return branches (nil store, empty
+// bead id, failed kill) are covered by direct calls alongside the fix.
+func TestReconcileSessionBeads_FreshCycleEmitsNoEvent_WhenNoKill(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(env *restartRequestTestEnv, sessionName string)
+	}{
+		{"previous bead still open", func(env *restartRequestTestEnv, _ string) { createPrevBead(t, env, nil) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env, session, sessionName, fake := newFreshCycleEventEnv(t)
+			tc.setup(env, sessionName)
+			workBead := beads.Bead{ID: "wb-new", Title: "next witness wisp", Type: "task", Status: "in_progress", Assignee: "witness"}
+
+			reconcileSessionBeadsWithAssignedWork(env, []beads.Bead{session}, []beads.Bead{workBead})
+
+			got, _ := env.store.Get(session.ID)
+			if got.Metadata[sessionpkg.CurrentBeadIDKey] == "wb-new" {
+				t.Fatalf("%s advanced to wb-new: the cycle ran, so the no-event premise is wrong", sessionpkg.CurrentBeadIDKey)
+			}
+			evs, err := fake.List(events.Filter{Type: events.SessionDraining})
+			if err != nil {
+				t.Fatalf("listing events: %v", err)
+			}
+			if len(evs) != 0 {
+				t.Fatalf("session.draining events = %+v, want none when no session was cycled", evs)
+			}
+		})
 	}
 }
