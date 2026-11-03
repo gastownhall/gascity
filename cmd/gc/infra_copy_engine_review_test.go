@@ -193,7 +193,7 @@ func TestVerifyInfraCopyRefusesAPayloadOnlyTheBindingCarries(t *testing.T) {
 	}
 	_ = closeBeadStoreHandle(binding)
 	restored := newMCShapedInfraCity(t, 60).source()
-	_, err = verifyInfraCopy(func() (beads.Store, error) { return openInfraDestination(city.target) }, restored)
+	_, err = verifyInfraCopy(func() (beads.Store, error) { return openInfraDestination(city.target) }, restored, nil)
 	if err == nil || !strings.Contains(err.Error(), edge[0]) || !strings.Contains(err.Error(), "invented") {
 		t.Fatalf("verifyInfraCopy = %v, want a refusal naming the payload only the binding carries on %s -> %s", err, edge[0], edge[1])
 	}

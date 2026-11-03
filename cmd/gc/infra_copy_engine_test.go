@@ -643,7 +643,7 @@ func TestVerifyInfraCopyNamesARowTheCopyInvented(t *testing.T) {
 	_ = closeBeadStoreHandle(binding)
 	// The work store as it was before the clear: the fixture is deterministic.
 	restored := newMCShapedInfraCity(t, 60).source()
-	_, err = verifyInfraCopy(func() (beads.Store, error) { return openInfraDestination(city.target) }, restored)
+	_, err = verifyInfraCopy(func() (beads.Store, error) { return openInfraDestination(city.target) }, restored, nil)
 	if err == nil || !strings.Contains(err.Error(), "mc-invented") {
 		t.Fatalf("verifyInfraCopy = %v, want a refusal naming mc-invented", err)
 	}

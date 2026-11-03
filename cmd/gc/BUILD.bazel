@@ -433,6 +433,7 @@ go_library(
         "idle_tracker.go",
         "import_state_doctor_check.go",
         "infra_class_clear.go",
+        "infra_class_holds.go",
         "infra_class_migrate.go",
         "infra_class_purge.go",
         "infra_class_purge_restore.go",

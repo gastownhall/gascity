@@ -890,7 +890,8 @@ func verifyInfraRetainedBackupAt(path string, want []infraBackupEntry) error {
 }
 
 // infraBackupSourceStore serves a retained-source backup as a migration
-// source: the rows and their within-backup edges in a MemStore, plus the edge
+// source: the rows, their within-backup edges and their blocking edges onto
+// work in a MemStore, plus the edge
 // payloads the backup recorded, so the copy carries them exactly as it would
 // from the work store.
 type infraBackupSourceStore struct {
@@ -923,7 +924,10 @@ func openInfraBackupSource(target infraBindingTarget) (beads.Store, error) {
 	for _, e := range entries {
 		rows = append(rows, e.Bead)
 		for _, edge := range e.Deps {
-			if !held[edge.DependsOnID] {
+			// An edge onto a bead outside the backup is a hold on work the copy
+			// carries as a cross-store gate (infra_class_holds.go); the rest
+			// stay out, as the copy leaves them.
+			if !held[edge.DependsOnID] && !beads.IsReadyBlockingDependencyType(edge.Type) {
 				continue
 			}
 			deps = append(deps, edge.dep())
