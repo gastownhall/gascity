@@ -5,10 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
@@ -58,14 +61,16 @@ func TestKillExistingOrphansThroughAutoTerminatesOnlyUntrackedSameCityRoots(t *t
 	}
 }
 
-// scanErrorFake is a Fake whose process-table scan fails with err.
+// scanErrorFake is a Fake whose process-table scan reports roots and fails
+// with err.
 type scanErrorFake struct {
 	*runtime.Fake
-	err error
+	roots []runtime.LiveRuntime
+	err   error
 }
 
 func (f *scanErrorFake) FindRuntimesBySessionID(string) ([]runtime.LiveRuntime, error) {
-	return nil, f.err
+	return slices.Clone(f.roots), f.err
 }
 
 // Every session start runs the pre-start orphan scan, and a scan that cannot
@@ -94,5 +99,57 @@ func TestKillExistingOrphansSummarizesScanError(t *testing.T) {
 	want := `session: scanning for orphaned runtimes for sid-scan (failing closed): 70 unreadable process entries in 1 classes: 70 like "reading environ for pid 1000: permission denied" (pids 1000, 1001, 1002, ...)` + "\n"
 	if logged != want {
 		t.Fatalf("logged %q, want one summary line %q", logged, want)
+	}
+}
+
+// entryScanError is a scan error of one unreadable entry per pid, each
+// failing as format (with %d for its pid) describes.
+func entryScanError(format string, pids ...int) error {
+	var err error
+	for _, pid := range pids {
+		err = errors.Join(err, &proctable.EntryError{PID: pid, Err: fmt.Errorf(format, pid)})
+	}
+	return err
+}
+
+const scanErrorLine = "session: scanning for orphaned runtimes for "
+
+// TestKillExistingOrphansPacesScanErrors (ga-zpcphq): every start builds a
+// new Manager, and an unreadable host helper fails every pre-start scan the
+// same way. The scan line is logged per city the first time a shape of entry
+// errors is seen, again when the shape changes or ten minutes later, and not
+// for unchanged repeats in between.
+func TestKillExistingOrphansPacesScanErrors(t *testing.T) {
+	logged := captureLog(t)
+	city, otherCity := t.TempDir(), t.TempDir()
+	t0 := time.Date(2026, 11, 3, 9, 0, 0, 0, time.UTC)
+	perm := "reading environ for pid %d: permission denied"
+	owner := "reading owner for pid %d: no such device"
+	for _, step := range []struct {
+		name string
+		city string
+		err  error
+		at   time.Duration
+		want bool
+	}{
+		{"first", city, entryScanError(perm, 11, 12), 0, true},
+		{"same shape, other pids and count", city, entryScanError(perm, 13, 14, 15), time.Minute, false},
+		{"another city", otherCity, entryScanError(perm, 11), time.Minute, true},
+		{"a new kind", city, entryScanError(owner, 16), 2 * time.Minute, true},
+		{"the new kind again", city, entryScanError(owner, 17), 3 * time.Minute, false},
+		{"just inside ten minutes", city, entryScanError(owner, 18), 12*time.Minute - time.Nanosecond, false},
+		{"ten minutes on", city, entryScanError(owner, 19), 12 * time.Minute, true},
+		{"another city's kind again", otherCity, entryScanError(perm, 12), 2 * time.Minute, false},
+	} {
+		before := logged.Len()
+		sp := &scanErrorFake{Fake: runtime.NewFake(), err: step.err}
+		mgr := newTestManager(t, beads.NewMemStore(), sp, WithCityPath(step.city), WithClock(&clock.Fake{Time: t0.Add(step.at)}))
+		if err := mgr.killExistingOrphans(context.Background(), "sid-paced"); err != nil {
+			t.Fatalf("%s: killExistingOrphans: %v", step.name, err)
+		}
+		line := logged.String()[before:]
+		if got := strings.Contains(line, scanErrorLine); got != step.want {
+			t.Fatalf("%s: logged %q; scan line logged = %t, want %t", step.name, line, got, step.want)
+		}
 	}
 }
